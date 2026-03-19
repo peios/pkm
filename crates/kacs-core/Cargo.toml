@@ -1,0 +1,12 @@
+[package]
+name = "kacs-core"
+version = "0.1.0"
+edition = "2021"
+description = "KACS access control engine — AccessCheck, SDs, tokens, SIDs"
+
+[features]
+default = []
+# Kernel build uses kbuild, not cargo. This feature gates kernel-specific
+# code paths (RCU primitives, printk) that only compile in kernel context.
+# Userspace tests run without this feature and use standard sync primitives.
+kernel = []
