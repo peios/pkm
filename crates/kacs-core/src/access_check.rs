@@ -8,7 +8,9 @@
 // maps to a named function in the proposal. Comments reference the
 // specific proposal steps.
 
+use alloc::vec::Vec;
 use crate::ace;
+use crate::cap::{CentralAccessPolicy, CentralAccessRule};
 use crate::group::GroupEntry;
 use crate::mask::{self, GenericMapping};
 use crate::sd::{SecurityDescriptor, SE_DACL_PRESENT};
@@ -582,7 +584,8 @@ fn pre_sacl_walk(
     granted: &mut u32,
     privilege_granted: &mut u32,
     mandatory_decided: &mut u32,
-    resource_attributes: &mut alloc::vec::Vec<crate::token::ClaimEntry>,
+    resource_attributes: &mut Vec<crate::token::ClaimEntry>,
+    policy_sids: &mut Vec<Sid>,
 ) {
     let mut mic_ace: Option<&crate::ace::Ace> = None;
     let mut mic_found = false;
@@ -606,7 +609,12 @@ fn pre_sacl_walk(
                 // Resource attribute ACEs → collect for conditional expression evaluation
                 // TODO: parse CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 from application_data
                 // For now, resource attributes are passed in externally.
-                // TODO: SYSTEM_SCOPED_POLICY_ID_ACE_TYPE → policy_sids
+
+                if a.ace_type == ace::SYSTEM_SCOPED_POLICY_ID_ACE_TYPE {
+                    if a.flags & ace::INHERIT_ONLY_ACE == 0 {
+                        policy_sids.push(a.sid.clone());
+                    }
+                }
             }
         }
     }
@@ -830,6 +838,7 @@ pub fn access_check(
     mut object_tree: Option<&mut [ObjectTypeNode]>,
     self_sid: Option<&Sid>,
     local_claims: &[crate::token::ClaimEntry],
+    policies: &[CentralAccessPolicy],
     privilege_intent: u32,
 ) -> Result<AccessCheckResult, AccessCheckError> {
     // Step 0: Impersonation level gate (§12.1)
@@ -897,7 +906,8 @@ pub fn access_check(
 
     // Step 4: Pre-SACL walk — MIC, PIP, resource attributes, policy SIDs
     let mut mandatory_decided: u32 = 0;
-    let mut resource_attributes: alloc::vec::Vec<crate::token::ClaimEntry> = alloc::vec::Vec::new();
+    let mut resource_attributes: Vec<crate::token::ClaimEntry> = Vec::new();
+    let mut policy_sids: Vec<Sid> = Vec::new();
     pre_sacl_walk(
         sd,
         token,
@@ -908,6 +918,7 @@ pub fn access_check(
         &mut privilege_granted,
         &mut mandatory_decided,
         &mut resource_attributes,
+        &mut policy_sids,
     );
 
     // Step 5: Virtual group injection
@@ -1055,9 +1066,81 @@ pub fn access_check(
         granted &= c_granted;
     }
 
-    // Step 9: Central Access Policy — TODO
-    // Step 9b: Privilege-use auditing — TODO
-    // Step 10: Audit emission — TODO
+    // Step 9: Central Access Policy (§11.16)
+    if !policy_sids.is_empty() {
+        let mut cap_effective = granted;
+
+        for cap_sid in &policy_sids {
+            let policy = policies.iter().find(|p| p.policy_sid == *cap_sid);
+
+            let rules: &[CentralAccessRule] = match policy {
+                Some(p) => &p.rules,
+                None => {
+                    // Recovery policy: GENERIC_ALL to admins, SYSTEM, owner rights.
+                    // Since CAP is an AND intersection, recovery policy means
+                    // "no further restriction from this missing policy."
+                    // We skip evaluation — the recovery policy ACL contains
+                    // GENERIC_ALL with OWNER RIGHTS, which after mapping and
+                    // evaluation would not restrict anything the DACL granted.
+                    continue;
+                }
+            };
+
+            for rule in rules {
+                // applies_to condition evaluation
+                if let Some(ref condition) = rule.applies_to {
+                    let result = crate::conditional::evaluate(
+                        condition,
+                        token,
+                        &resource_attributes,
+                        local_claims,
+                        false, // deny polarity for applies_to (§11.17)
+                    );
+                    if result != crate::conditional::TriValue::True {
+                        continue; // rule doesn't apply to this object
+                    }
+                }
+
+                // Build synthetic SD with rule's effective DACL
+                let eff_sd = SecurityDescriptor {
+                    control: crate::sd::SE_DACL_PRESENT | crate::sd::SE_SELF_RELATIVE,
+                    owner: sd.owner.clone(),
+                    group: sd.group.clone(),
+                    dacl: Some(rule.effective_dacl.clone()),
+                    sacl: None,
+                };
+
+                // Evaluate the rule's DACL through the normal pipeline.
+                // No backup/restore intent for policy rules (§11.17).
+                // No recursive CAP evaluation (policy_sids from this SD is empty).
+                let eff_result = evaluate_rule_dacl(
+                    &eff_sd,
+                    token,
+                    mapping,
+                    mapped_desired,
+                    max_allowed_mode,
+                    self_sid,
+                    &resource_attributes,
+                    local_claims,
+                );
+
+                match eff_result {
+                    Ok(eff_granted) => {
+                        cap_effective &= eff_granted;
+                    }
+                    Err(_) => {
+                        // Fail-closed with privilege escape hatch (§11.16)
+                        cap_effective &= privilege_granted;
+                    }
+                }
+            }
+        }
+
+        granted = cap_effective;
+    }
+
+    // Step 9b: Privilege-use auditing — TODO (observational, not security-critical)
+    // Step 10: Audit emission — TODO (observational, not security-critical)
 
     // Step 15: Result computation
     // When a tree is present, root.granted reflects the whole object (§11.17).
@@ -1082,6 +1165,85 @@ pub fn access_check(
         allowed,
         continuous_audit_mask: 0, // TODO: audit
     })
+}
+
+/// Evaluate a CAP rule's DACL through the normal pipeline.
+/// No backup/restore intent. No recursive CAP evaluation.
+fn evaluate_rule_dacl(
+    sd: &SecurityDescriptor,
+    token: &Token,
+    mapping: &GenericMapping,
+    desired: u32,
+    max_allowed_mode: bool,
+    self_sid: Option<&Sid>,
+    resource_attributes: &[crate::token::ClaimEntry],
+    local_claims: &[crate::token::ClaimEntry],
+) -> Result<u32, AccessCheckError> {
+    // Step 0: impersonation gate
+    if token.token_type == TokenType::Impersonation
+        && token.impersonation_level == ImpersonationLevel::Identification
+    {
+        return Err(AccessCheckError::IdentificationLevel);
+    }
+
+    if sd.owner.is_none() || sd.group.is_none() {
+        return Err(AccessCheckError::InvalidSecurityDescriptor);
+    }
+
+    let mut decided: u32 = 0;
+    let mut granted: u32 = 0;
+
+    // No privilege grants for CAP rule evaluation (§11.17: privilege_intent=0)
+    // Non-intent-gated privileges (SeSecurityPrivilege, SeTakeOwnershipPrivilege)
+    // are still active because they're checked by the normal pipeline.
+    let effective_privs = token.privileges.enabled
+        & !crate::privilege::bits::SE_BACKUP
+        & !crate::privilege::bits::SE_RESTORE;
+
+    // ACCESS_SYSTEM_SECURITY always decided
+    decided |= mask::ACCESS_SYSTEM_SECURITY;
+    if effective_privs & crate::privilege::bits::SE_SECURITY != 0 {
+        granted |= mask::ACCESS_SYSTEM_SECURITY;
+    }
+
+    // MIC from the ORIGINAL SD's SACL (not the synthetic one)
+    // Actually per §11.17, the synthetic SD has no SACL, so MIC
+    // uses the default (Medium, NO_WRITE_UP). This is correct —
+    // each rule evaluation is independent.
+
+    let owner = sd.owner.as_ref().unwrap();
+    let enriched = enrich_token(token, owner, self_sid);
+
+    let sid_match = |sid: &Sid, for_allow: bool| -> bool {
+        enriched_sid_matches(sid, &enriched, for_allow)
+    };
+
+    evaluate_dacl(
+        sd,
+        token,
+        mapping,
+        None,
+        &sid_match,
+        desired,
+        max_allowed_mode,
+        resource_attributes,
+        local_claims,
+        true,
+        false,
+        &mut decided,
+        &mut granted,
+    );
+
+    // Post-DACL SeTakeOwnershipPrivilege
+    if desired & mask::WRITE_OWNER != 0 || max_allowed_mode {
+        if effective_privs & crate::privilege::bits::SE_TAKE_OWNERSHIP != 0 {
+            if granted & mask::WRITE_OWNER == 0 {
+                granted |= mask::WRITE_OWNER;
+            }
+        }
+    }
+
+    Ok(granted)
 }
 
 /// Privilege intent flags for AccessCheck.
@@ -1171,7 +1333,7 @@ mod tests {
         token: &Token,
         desired: u32,
     ) -> AccessCheckResult {
-        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, None, &[], 0).unwrap()
+        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0).unwrap()
     }
 
     fn check_with_intent(
@@ -1180,7 +1342,7 @@ mod tests {
         desired: u32,
         intent: u32,
     ) -> AccessCheckResult {
-        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, None, &[], intent).unwrap()
+        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, None, &[], &[], intent).unwrap()
     }
 
     // -----------------------------------------------------------------------
@@ -1678,7 +1840,7 @@ mod tests {
         token.token_type = TokenType::Impersonation;
         token.impersonation_level = ImpersonationLevel::Identification;
         let result = access_check(
-            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], 0,
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0,
         );
         assert_eq!(result, Err(AccessCheckError::IdentificationLevel));
     }
@@ -1744,7 +1906,7 @@ mod tests {
         };
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], 0,
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0,
         );
         assert_eq!(result, Err(AccessCheckError::InvalidSecurityDescriptor));
     }
@@ -1760,7 +1922,7 @@ mod tests {
         };
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], 0,
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0,
         );
         assert_eq!(result, Err(AccessCheckError::InvalidSecurityDescriptor));
     }
@@ -1843,7 +2005,7 @@ mod tests {
         ]);
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, KEY_QUERY_VALUE, &KEY_GENERIC_MAPPING, None, None, &[], 0,
+            &sd, &token, KEY_QUERY_VALUE, &KEY_GENERIC_MAPPING, None, None, &[], &[], 0,
         ).unwrap();
         assert!(result.allowed); // GENERIC_READ maps to KEY_QUERY_VALUE for registry
     }
@@ -1862,19 +2024,19 @@ mod tests {
         // Owner (alice) gets everything
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, None, &[], 0,
+            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, None, &[], &[], 0,
         ).unwrap();
         assert!(result.allowed);
 
         // Random user gets only PROCESS_QUERY_LIMITED
         let token = test_token(&bob(), &[&well_known::everyone()], 0);
         let result = access_check(
-            &sd, &token, PROCESS_QUERY_LIMITED, &PROCESS_GENERIC_MAPPING, None, None, &[], 0,
+            &sd, &token, PROCESS_QUERY_LIMITED, &PROCESS_GENERIC_MAPPING, None, None, &[], &[], 0,
         ).unwrap();
         assert!(result.allowed);
 
         let result = access_check(
-            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, None, &[], 0,
+            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, None, &[], &[], 0,
         ).unwrap();
         assert!(!result.allowed);
     }
@@ -2818,7 +2980,7 @@ mod tests {
         desired: u32,
         tree: &mut [ObjectTypeNode],
     ) -> AccessCheckResult {
-        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, Some(tree), None, &[], 0).unwrap()
+        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, Some(tree), None, &[], &[], 0).unwrap()
     }
 
     #[test]
@@ -3044,5 +3206,202 @@ mod tests {
         assert!(tree[1].granted & DS_READ_PROP != 0);
         // Root: propset is the only child at level 1 → aggregates up
         assert!(tree[0].granted & DS_READ_PROP != 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Central Access Policy (§11.16)
+    // -----------------------------------------------------------------------
+
+    fn make_cap(policy_sid: &Sid, rules: Vec<CentralAccessRule>) -> CentralAccessPolicy {
+        CentralAccessPolicy {
+            policy_sid: policy_sid.clone(),
+            rules,
+        }
+    }
+
+    fn cap_rule(dacl_aces: Vec<Ace>) -> CentralAccessRule {
+        CentralAccessRule {
+            applies_to: None,
+            effective_dacl: Acl { revision: ACL_REVISION, aces: dacl_aces },
+            staged_dacl: None,
+        }
+    }
+
+    fn policy_sid_1() -> Sid { Sid::new(5, &[21, 100, 200, 300, 9001]) }
+
+    fn cap_ace(policy_sid: &Sid) -> Ace {
+        Ace {
+            ace_type: ace::SYSTEM_SCOPED_POLICY_ID_ACE_TYPE,
+            flags: 0,
+            mask: 0,
+            sid: policy_sid.clone(),
+            object_type: None, inherited_object_type: None,
+            condition: None, application_data: None,
+        }
+    }
+
+    fn sd_with_cap(owner: &Sid, dacl_aces: Vec<Ace>, cap_sid: &Sid) -> SecurityDescriptor {
+        let sacl = Acl {
+            revision: ACL_REVISION,
+            aces: alloc::vec![cap_ace(cap_sid)],
+        };
+        SecurityDescriptor::with_sacl(
+            owner.clone(),
+            well_known::users(),
+            Acl { revision: ACL_REVISION, aces: dacl_aces },
+            sacl,
+        )
+    }
+
+    #[test]
+    fn cap_restricts_access() {
+        // DACL grants read+write. CAP rule only allows read.
+        // Result should be read only.
+        let sd = sd_with_cap(
+            &alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)],
+            &policy_sid_1(),
+        );
+        let policy = make_cap(
+            &policy_sid_1(),
+            alloc::vec![cap_rule(alloc::vec![allow(&alice(), FILE_READ_DATA)])],
+        );
+        let policies = alloc::vec![policy];
+        let token = medium_token(&alice(), &[], 0);
+        let result = access_check(
+            &sd, &token, FILE_READ_DATA | FILE_WRITE_DATA,
+            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0,
+        ).unwrap();
+        assert!(!result.allowed); // write denied by CAP
+        assert!(result.granted & FILE_READ_DATA != 0);
+        assert!(result.granted & FILE_WRITE_DATA == 0);
+    }
+
+    #[test]
+    fn cap_cannot_expand_access() {
+        // DACL grants read only. CAP rule allows read+write.
+        // Result should still be read only (AND intersection).
+        let sd = sd_with_cap(
+            &alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            &policy_sid_1(),
+        );
+        let policy = make_cap(
+            &policy_sid_1(),
+            alloc::vec![cap_rule(alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)])],
+        );
+        let policies = alloc::vec![policy];
+        let token = medium_token(&alice(), &[], 0);
+        let result = access_check(
+            &sd, &token, FILE_WRITE_DATA,
+            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0,
+        ).unwrap();
+        assert!(!result.allowed); // DACL doesn't grant write
+    }
+
+    #[test]
+    fn cap_missing_policy_uses_recovery() {
+        // Policy SID not found → recovery (no further restriction)
+        let sd = sd_with_cap(
+            &alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)],
+            &policy_sid_1(),
+        );
+        let token = medium_token(&alice(), &[], 0);
+        // Lookup returns None → recovery policy
+        let result = access_check(
+            &sd, &token, FILE_READ_DATA | FILE_WRITE_DATA,
+            &FILE_GENERIC_MAPPING, None, None, &[], &[], 0,
+        ).unwrap();
+        assert!(result.allowed); // recovery = no restriction
+    }
+
+    #[test]
+    fn cap_no_policy_sid_in_sacl() {
+        // No SYSTEM_SCOPED_POLICY_ID_ACE → CAP evaluation skipped
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn cap_applies_to_filters() {
+        // Rule's applies_to condition doesn't match → rule skipped
+        use crate::conditional::bytecode;
+        let never_true = bytecode::build(&[
+            bytecode::int64_literal(0),
+            bytecode::int64_literal(1),
+            bytecode::op_eq(), // 0 == 1 → FALSE
+        ]);
+        let rule = CentralAccessRule {
+            applies_to: Some(never_true),
+            effective_dacl: Acl { revision: ACL_REVISION, aces: alloc::vec![] }, // empty = deny all
+            staged_dacl: None,
+        };
+        let sd = sd_with_cap(
+            &alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            &policy_sid_1(),
+        );
+        let policy = CentralAccessPolicy {
+            policy_sid: policy_sid_1(),
+            rules: alloc::vec![rule],
+        };
+        let policies = alloc::vec![policy];
+        let token = medium_token(&alice(), &[], 0);
+        let result = access_check(
+            &sd, &token, FILE_READ_DATA,
+            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0,
+        ).unwrap();
+        assert!(result.allowed); // rule skipped, no restriction
+    }
+
+    #[test]
+    fn cap_multiple_rules_intersect() {
+        // Two rules: one allows read+write, other allows read only.
+        // Result: read only (each rule further restricts).
+        let sd = sd_with_cap(
+            &alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)],
+            &policy_sid_1(),
+        );
+        let policy = make_cap(
+            &policy_sid_1(),
+            alloc::vec![
+                cap_rule(alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)]),
+                cap_rule(alloc::vec![allow(&alice(), FILE_READ_DATA)]),
+            ],
+        );
+        let policies = alloc::vec![policy];
+        let token = medium_token(&alice(), &[], 0);
+        let result = access_check(
+            &sd, &token, FILE_WRITE_DATA,
+            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0,
+        ).unwrap();
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn cap_empty_rule_dacl_denies_all() {
+        // CAP rule with empty DACL → grants nothing → intersection strips everything
+        let sd = sd_with_cap(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &policy_sid_1(),
+        );
+        let policy = make_cap(
+            &policy_sid_1(),
+            alloc::vec![cap_rule(alloc::vec![])], // empty DACL
+        );
+        let policies = alloc::vec![policy];
+        let token = medium_token(&alice(), &[], 0);
+        let result = access_check(
+            &sd, &token, FILE_READ_DATA,
+            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0,
+        ).unwrap();
+        assert!(!result.allowed);
     }
 }
