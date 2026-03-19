@@ -310,6 +310,233 @@ fn evaluate_dacl<F>(
 }
 
 // ---------------------------------------------------------------------------
+// PreSACLWalk — extract mandatory labels, PIP, resource attrs (§11.17)
+// ---------------------------------------------------------------------------
+
+/// §11.17 PreSACLWalk: extract integrity labels, PIP trust labels,
+/// resource attributes, and scoped policy IDs from the SACL.
+/// Enforces MIC and PIP.
+fn pre_sacl_walk(
+    sd: &SecurityDescriptor,
+    token: &Token,
+    mapping: &GenericMapping,
+    effective_privs: &u64,
+    decided: &mut u32,
+    granted: &mut u32,
+    privilege_granted: &mut u32,
+    mandatory_decided: &mut u32,
+) {
+    let mut mic_ace: Option<&crate::ace::Ace> = None;
+    let mut mic_found = false;
+    let mut pip_ace: Option<&crate::ace::Ace> = None;
+    let mut pip_found = false;
+
+    if sd.control & crate::sd::SE_SACL_PRESENT != 0 {
+        if let Some(ref sacl) = sd.sacl {
+            for a in &sacl.aces {
+                if a.ace_type == ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE && !mic_found {
+                    mic_found = true;
+                    if a.flags & ace::INHERIT_ONLY_ACE == 0 {
+                        mic_ace = Some(a);
+                    }
+                } else if a.ace_type == ace::SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE && !pip_found {
+                    pip_found = true;
+                    if a.flags & ace::INHERIT_ONLY_ACE == 0 {
+                        pip_ace = Some(a);
+                    }
+                }
+                // TODO: SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE → resource_attributes
+                // TODO: SYSTEM_SCOPED_POLICY_ID_ACE_TYPE → policy_sids
+            }
+        }
+    }
+
+    // MIC: use found label or default (§11.13)
+    let pre_mic = *decided;
+    if let Some(a) = mic_ace {
+        enforce_mic(a, token, mapping, effective_privs, decided);
+    } else {
+        // Default: Medium integrity, NO_WRITE_UP
+        enforce_mic_default(token, mapping, effective_privs, decided);
+    }
+    *mandatory_decided |= *decided & !pre_mic;
+
+    // PIP: only if trust label present. No default (§11.15).
+    let pre_pip = *decided;
+    if let Some(a) = pip_ace {
+        enforce_pip(a, token, mapping, decided, granted, privilege_granted);
+    }
+    *mandatory_decided |= *decided & !pre_pip;
+}
+
+// ---------------------------------------------------------------------------
+// EnforceMIC (§11.17)
+// ---------------------------------------------------------------------------
+
+/// §11.17 EnforceMIC: enforce mandatory integrity control.
+///
+/// Follows the pseudocode exactly:
+/// - If token doesn't have NO_WRITE_UP policy, return (MIC disabled)
+/// - If token dominates (integrity >= object label), return (no restriction)
+/// - Non-dominant: start with read+execute allowed, strip based on ACE flags
+/// - SeRelabelPrivilege: allow WRITE_OWNER through MIC
+fn enforce_mic(
+    ace_data: &crate::ace::Ace,
+    token: &Token,
+    mapping: &GenericMapping,
+    effective_privs: &u64,
+    decided: &mut u32,
+) {
+    use crate::token::mandatory_policy;
+
+    // Check token policy flag
+    if token.mandatory_policy & mandatory_policy::NO_WRITE_UP == 0 {
+        return;
+    }
+
+    // Extract integrity level from the label ACE's SID
+    let object_level = integrity_level_from_label_sid(&ace_data.sid);
+
+    // Dominant caller: bypass MIC entirely (§11.13)
+    if token.integrity_level >= object_level {
+        return;
+    }
+
+    // Non-dominant: start with R+E, strip based on ACE flags
+    let mut allowed = map_generic_bits(mask::GENERIC_READ, mapping)
+        | map_generic_bits(mask::GENERIC_EXECUTE, mapping);
+
+    if ace_data.mask & mask::SYSTEM_MANDATORY_LABEL_NO_READ_UP != 0 {
+        allowed &= !map_generic_bits(mask::GENERIC_READ, mapping);
+    }
+    if ace_data.mask & mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP != 0 {
+        allowed &= !map_generic_bits(mask::GENERIC_WRITE, mapping);
+    }
+    if ace_data.mask & mask::SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP != 0 {
+        allowed &= !map_generic_bits(mask::GENERIC_EXECUTE, mapping);
+    }
+
+    // SeRelabelPrivilege: allow DACL to grant WRITE_OWNER even
+    // for non-dominant callers (§11.13)
+    if *effective_privs & crate::privilege::bits::SE_RELABEL != 0 {
+        allowed |= mask::WRITE_OWNER;
+    }
+
+    let all_bits = map_generic_bits(mask::GENERIC_ALL, mapping);
+    *decided |= all_bits & !allowed;
+}
+
+/// Default MIC enforcement when no label ACE exists: Medium, NO_WRITE_UP.
+fn enforce_mic_default(
+    token: &Token,
+    mapping: &GenericMapping,
+    effective_privs: &u64,
+    decided: &mut u32,
+) {
+    use crate::token::{IntegrityLevel, mandatory_policy};
+
+    if token.mandatory_policy & mandatory_policy::NO_WRITE_UP == 0 {
+        return;
+    }
+
+    // Default label: Medium
+    if token.integrity_level >= IntegrityLevel::Medium {
+        return; // dominant
+    }
+
+    // Non-dominant against Medium default: read+execute allowed, write blocked
+    let mut allowed = map_generic_bits(mask::GENERIC_READ, mapping)
+        | map_generic_bits(mask::GENERIC_EXECUTE, mapping);
+
+    // Default is NO_WRITE_UP only (no read-up or execute-up restrictions)
+    allowed &= !map_generic_bits(mask::GENERIC_WRITE, mapping);
+
+    if *effective_privs & crate::privilege::bits::SE_RELABEL != 0 {
+        allowed |= mask::WRITE_OWNER;
+    }
+
+    let all_bits = map_generic_bits(mask::GENERIC_ALL, mapping);
+    *decided |= all_bits & !allowed;
+}
+
+/// Extract an IntegrityLevel from a mandatory label SID (S-1-16-{rid}).
+fn integrity_level_from_label_sid(sid: &Sid) -> crate::token::IntegrityLevel {
+    use crate::token::IntegrityLevel;
+    if sid.authority == [0, 0, 0, 0, 0, 16] && !sid.sub_authorities.is_empty() {
+        IntegrityLevel::from_rid(sid.sub_authorities[0])
+            .unwrap_or(IntegrityLevel::Medium)
+    } else {
+        IntegrityLevel::Medium // fallback
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EnforcePIP (§11.17)
+// ---------------------------------------------------------------------------
+
+/// §11.17 EnforcePIP: enforce process integrity protection.
+///
+/// pip_type and pip_trust come from the process's PSB (§8), not the token.
+/// For now, they're passed via the token's fields as a simplification
+/// until the PSB is a separate structure.
+///
+/// Follows the pseudocode exactly:
+/// - Extract type and trust from the trust label ACE's SID
+/// - If caller dominates, return (no restriction)
+/// - Non-dominant: ACE mask IS the allowed set
+/// - Revoke privilege-granted rights outside the allowed set
+fn enforce_pip(
+    ace_data: &crate::ace::Ace,
+    token: &Token,
+    mapping: &GenericMapping,
+    decided: &mut u32,
+    granted: &mut u32,
+    privilege_granted: &mut u32,
+) {
+    // Extract PIP type and trust from the trust label SID (S-1-19-type-trust)
+    let (ace_type, ace_trust) = pip_from_trust_label_sid(&ace_data.sid);
+
+    // Caller's PIP identity — in the full implementation this comes from
+    // the PSB, not the token. For now we use placeholder values.
+    // TODO: take pip_type and pip_trust as parameters when PSB is modeled.
+    let caller_type = crate::well_known::PIP_TYPE_NONE;
+    let caller_trust: u32 = 0;
+
+    // Dominance check: both dimensions must be >=
+    let caller_dominates = caller_type >= ace_type && caller_trust >= ace_trust;
+
+    if caller_dominates {
+        return;
+    }
+
+    // Non-dominant: the ACE mask IS the allowed set
+    let allowed = map_generic_bits(ace_data.mask, mapping);
+
+    // Compute denied set: everything not explicitly allowed.
+    // ACCESS_SYSTEM_SECURITY included — without this, a non-PIP admin
+    // with SeSecurityPrivilege could read/write the SACL of PIP-protected
+    // objects, including removing the trust label itself.
+    let all_bits = map_generic_bits(mask::GENERIC_ALL, mapping)
+        | mask::ACCESS_SYSTEM_SECURITY;
+    let pip_denied = all_bits & !allowed;
+
+    *decided |= pip_denied;
+
+    // Revoke privilege-granted rights (§11.15)
+    *granted &= !pip_denied;
+    *privilege_granted &= !pip_denied;
+}
+
+/// Extract PIP type and trust from a trust label SID (S-1-19-{type}-{trust}).
+fn pip_from_trust_label_sid(sid: &Sid) -> (u32, u32) {
+    if sid.authority == [0, 0, 0, 0, 0, 19] && sid.sub_authorities.len() >= 2 {
+        (sid.sub_authorities[0], sid.sub_authorities[1])
+    } else {
+        (0, 0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AccessCheck — single-result wrapper (§11.17)
 // ---------------------------------------------------------------------------
 
@@ -407,8 +634,17 @@ pub fn access_check(
     // WRITE_OWNER is NOT decided here — deferred to step 7a
 
     // Step 4: Pre-SACL walk — MIC, PIP, resource attributes, policy SIDs
-    // TODO: MIC (Phase 3.7), PIP (Phase 3.8)
-    // For now, no mandatory constraints are applied.
+    let mut mandatory_decided: u32 = 0;
+    pre_sacl_walk(
+        sd,
+        token,
+        mapping,
+        &effective_privs,
+        &mut decided,
+        &mut granted,
+        &mut privilege_granted,
+        &mut mandatory_decided,
+    );
 
     // Step 5: Virtual group injection
     let owner = sd.owner.as_ref().unwrap();
@@ -436,8 +672,6 @@ pub fn access_check(
     // SeTakeOwnershipPrivilege grants WRITE_OWNER if the DACL did not.
     // Deny-proof: overrides DACL deny ACEs for WRITE_OWNER.
     // BUT: respects mandatory decisions (MIC/PIP) via mandatory_decided.
-    // (mandatory_decided is 0 until MIC/PIP are implemented)
-    let mandatory_decided: u32 = 0; // TODO: populated by PreSACLWalk
     if mapped_desired & mask::WRITE_OWNER != 0 || max_allowed_mode {
         if effective_privs & crate::privilege::bits::SE_TAKE_OWNERSHIP != 0 {
             if mandatory_decided & mask::WRITE_OWNER == 0
@@ -1276,6 +1510,506 @@ mod tests {
         );
         let token = Token::system_token();
         let result = check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT);
+        assert!(result.allowed);
+    }
+
+    // -----------------------------------------------------------------------
+    // MIC — Mandatory Integrity Control (§11.13)
+    // -----------------------------------------------------------------------
+
+    fn sd_with_label(owner: &Sid, aces: Vec<Ace>, label_sid: &Sid, label_mask: u32) -> SecurityDescriptor {
+        let sacl = Acl {
+            revision: ACL_REVISION,
+            aces: alloc::vec![Ace {
+                ace_type: SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                flags: 0,
+                mask: label_mask,
+                sid: label_sid.clone(),
+                object_type: None, inherited_object_type: None,
+                condition: None, application_data: None,
+            }],
+        };
+        SecurityDescriptor::with_sacl(
+            owner.clone(),
+            well_known::users(),
+            Acl { revision: ACL_REVISION, aces },
+            sacl,
+        )
+    }
+
+    fn medium_token(user: &Sid, groups: &[&Sid], privs: u64) -> Token {
+        let mut t = test_token(user, groups, privs);
+        t.integrity_level = IntegrityLevel::Medium;
+        t.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+        t
+    }
+
+    fn low_token(user: &Sid) -> Token {
+        let mut t = test_token(user, &[], 0);
+        t.integrity_level = IntegrityLevel::Low;
+        t.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+        t
+    }
+
+    fn high_token(user: &Sid) -> Token {
+        let mut t = test_token(user, &[], 0);
+        t.integrity_level = IntegrityLevel::High;
+        t.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+        t
+    }
+
+    #[test]
+    fn mic_dominant_caller_passes() {
+        // Medium caller accessing Medium-labeled object → dominant, no restriction
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn mic_dominant_high_accessing_medium() {
+        // High caller accessing Medium-labeled object → dominant
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), FILE_WRITE_DATA)],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let token = high_token(&alice());
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn mic_no_write_up_blocks_low_writing_medium() {
+        // Low caller writing to Medium-labeled object → blocked by NO_WRITE_UP
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let token = low_token(&alice());
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn mic_no_write_up_allows_low_reading_medium() {
+        // Low caller reading Medium-labeled object → NO_WRITE_UP allows read
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let token = low_token(&alice());
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn mic_no_read_up_blocks_low_reading_medium() {
+        // Low caller reading Medium-labeled object with NO_READ_UP → blocked
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | mask::SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+        );
+        let token = low_token(&alice());
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn mic_no_execute_up_blocks_low_executing_medium() {
+        // Low caller executing Medium-labeled object with NO_EXECUTE_UP → blocked
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | mask::SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+        );
+        let token = low_token(&alice());
+        let result = check(&sd, &token, FILE_EXECUTE);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn mic_no_execute_up_allows_low_reading() {
+        // NO_EXECUTE_UP doesn't block reads
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | mask::SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+        );
+        let token = low_token(&alice());
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn mic_all_three_flags_blocks_everything_for_low() {
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP
+                | mask::SYSTEM_MANDATORY_LABEL_NO_READ_UP
+                | mask::SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+        );
+        let token = low_token(&alice());
+
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+        assert!(!check(&sd, &token, FILE_EXECUTE).allowed);
+    }
+
+    #[test]
+    fn mic_default_medium_label_when_no_sacl() {
+        // No SACL → default Medium, NO_WRITE_UP
+        // Low token should be blocked from writing
+        let sd = SecurityDescriptor::new(
+            alice(),
+            well_known::users(),
+            Acl {
+                revision: ACL_REVISION,
+                aces: alloc::vec![allow(&alice(), GENERIC_ALL)],
+            },
+        );
+        let token = low_token(&alice());
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(!result.allowed);
+
+        // But reading should work
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn mic_no_policy_flag_disables_mic() {
+        // Token without NO_WRITE_UP → MIC disabled
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &well_known::integrity_high(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let mut token = low_token(&alice());
+        token.mandatory_policy = 0; // disable MIC
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(result.allowed); // MIC disabled, DACL allows
+    }
+
+    #[test]
+    fn mic_se_relabel_allows_write_owner_through_mic() {
+        // Low caller with SeRelabelPrivilege can get WRITE_OWNER
+        // even on a Medium object (§11.13 SeRelabelPrivilege carve-out)
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), WRITE_OWNER)],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let token = low_token(&alice());
+        // Without privilege: WRITE_OWNER is write-category, blocked by MIC
+        let result = check(&sd, &token, WRITE_OWNER);
+        assert!(!result.allowed);
+
+        // With SeRelabelPrivilege: WRITE_OWNER punches through MIC
+        let mut token_priv = low_token(&alice());
+        token_priv.privileges = privilege::Privileges::new_all_enabled(
+            privilege::bits::SE_RELABEL,
+        );
+        let result = check(&sd, &token_priv, WRITE_OWNER);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn mic_does_not_constrain_privileges() {
+        // §11.13: MIC does NOT constrain privilege-granted bits
+        // SeBackupPrivilege grants read BEFORE MIC runs
+        let sd = sd_with_label(
+            &bob(),
+            alloc::vec![], // empty DACL
+            &well_known::integrity_high(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | mask::SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+        );
+        let mut token = low_token(&alice());
+        token.privileges = privilege::Privileges::new_all_enabled(
+            privilege::bits::SE_BACKUP,
+        );
+        // Backup privilege grants read even though MIC has no-read-up
+        // (privileges are resolved in step 3, MIC in step 4)
+        let result = check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn mic_system_integrity_blocks_high() {
+        // High caller cannot write to System-labeled object
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &well_known::integrity_system(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let token = high_token(&alice());
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(!result.allowed);
+
+        // But reading is fine (only no-write-up)
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn mic_same_level_is_dominant() {
+        // Same level = dominant, no restriction
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), FILE_WRITE_DATA)],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn mic_untrusted_blocked_from_low() {
+        // Untrusted caller cannot write to Low-labeled object
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &well_known::integrity_low(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let mut token = test_token(&alice(), &[], 0);
+        token.integrity_level = IntegrityLevel::Untrusted;
+        token.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn mic_inherit_only_label_ignored() {
+        // A mandatory label with INHERIT_ONLY should be ignored for this object
+        // → falls back to default Medium
+        let sacl = Acl {
+            revision: ACL_REVISION,
+            aces: alloc::vec![Ace {
+                ace_type: SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                flags: INHERIT_ONLY_ACE, // inherit-only!
+                mask: mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP
+                    | mask::SYSTEM_MANDATORY_LABEL_NO_READ_UP
+                    | mask::SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
+                sid: well_known::integrity_untrusted(), // would block everything
+                object_type: None, inherited_object_type: None,
+                condition: None, application_data: None,
+            }],
+        };
+        let sd = SecurityDescriptor::with_sacl(
+            alice(),
+            well_known::users(),
+            Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), GENERIC_ALL)] },
+            sacl,
+        );
+        // Medium token: default label is Medium, should be dominant
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(result.allowed); // inherit-only label ignored, default Medium used
+    }
+
+    #[test]
+    fn mic_only_first_label_used() {
+        // §11.13: only the first mandatory label ACE matters
+        let sacl = Acl {
+            revision: ACL_REVISION,
+            aces: alloc::vec![
+                // First label: Medium (Low can't write)
+                Ace {
+                    ace_type: SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                    flags: 0,
+                    mask: mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+                    sid: well_known::integrity_medium(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                },
+                // Second label: Untrusted (would block everything) — IGNORED
+                Ace {
+                    ace_type: SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                    flags: 0,
+                    mask: mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP
+                        | mask::SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+                    sid: well_known::integrity_untrusted(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                },
+            ],
+        };
+        let sd = SecurityDescriptor::with_sacl(
+            alice(),
+            well_known::users(),
+            Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), GENERIC_ALL)] },
+            sacl,
+        );
+        // Low token can read (first label is Medium, no-read-up not set)
+        let token = low_token(&alice());
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn mic_take_ownership_respects_mandatory_decided() {
+        // SeTakeOwnershipPrivilege is deny-proof for DACL denies,
+        // but respects mandatory_decided from MIC.
+        // Low caller on Medium object: MIC blocks write-category,
+        // WRITE_OWNER is write-category, so mandatory_decided has it.
+        let sd = sd_with_label(
+            &bob(),
+            alloc::vec![], // empty DACL
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let mut token = low_token(&alice());
+        token.privileges = privilege::Privileges::new_all_enabled(
+            privilege::bits::SE_TAKE_OWNERSHIP,
+        );
+        let result = check(&sd, &token, WRITE_OWNER);
+        // MIC blocks WRITE_OWNER for non-dominant, and TakeOwnership
+        // respects mandatory_decided
+        assert!(!result.allowed);
+    }
+
+    // -----------------------------------------------------------------------
+    // PIP — Process Integrity Protection (§11.15)
+    // -----------------------------------------------------------------------
+
+    fn sd_with_pip(
+        owner: &Sid,
+        aces: Vec<Ace>,
+        pip_type: u32,
+        pip_trust: u32,
+        pip_allowed_mask: u32,
+    ) -> SecurityDescriptor {
+        let sacl = Acl {
+            revision: ACL_REVISION,
+            aces: alloc::vec![Ace {
+                ace_type: SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+                flags: 0,
+                mask: pip_allowed_mask,
+                sid: well_known::trust_label(pip_type, pip_trust),
+                object_type: None, inherited_object_type: None,
+                condition: None, application_data: None,
+            }],
+        };
+        SecurityDescriptor::with_sacl(
+            owner.clone(),
+            well_known::users(),
+            Acl { revision: ACL_REVISION, aces },
+            sacl,
+        )
+    }
+
+    #[test]
+    fn pip_non_dominant_restricted() {
+        // Object labeled Protected/Peios, caller is None/0 (default)
+        // Non-dominant: only the ACE mask's rights are allowed
+        let sd = sd_with_pip(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            well_known::PIP_TYPE_PROTECTED,
+            well_known::PIP_TRUST_PEIOS,
+            READ_CONTROL | TOKEN_QUERY, // only these allowed for non-dominant
+        );
+        let token = medium_token(&alice(), &[], 0);
+
+        // READ_CONTROL is in the PIP allowed mask → should succeed
+        let result = check(&sd, &token, READ_CONTROL);
+        assert!(result.allowed);
+
+        // FILE_READ_DATA is NOT in the PIP allowed mask → denied
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn pip_revokes_privilege_granted_bits() {
+        // §11.15: PIP revokes privilege-granted rights
+        // Even SeBackupPrivilege can't read PIP-protected objects
+        let sd = sd_with_pip(
+            &bob(),
+            alloc::vec![], // empty DACL
+            well_known::PIP_TYPE_PROTECTED,
+            well_known::PIP_TRUST_PEIOS,
+            0, // PIP allows NOTHING for non-dominant
+        );
+        let mut token = medium_token(&alice(), &[], privilege::bits::SE_BACKUP);
+        token.privileges = privilege::Privileges::new_all_enabled(
+            privilege::bits::SE_BACKUP,
+        );
+        let result = check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT);
+        // Backup privilege grants read, but PIP revokes it
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn pip_revokes_se_security() {
+        // PIP revokes ACCESS_SYSTEM_SECURITY even with SeSecurityPrivilege
+        let sd = sd_with_pip(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            well_known::PIP_TYPE_PROTECTED,
+            well_known::PIP_TRUST_PEIOS,
+            0, // allow nothing
+        );
+        let token = medium_token(&alice(), &[], privilege::bits::SE_SECURITY);
+        let result = check(&sd, &token, ACCESS_SYSTEM_SECURITY);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn pip_zero_mask_total_lockout() {
+        // PIP mask of 0 = total lockout for non-dominant callers
+        let sd = sd_with_pip(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            well_known::PIP_TYPE_ISOLATED,
+            well_known::PIP_TRUST_PEIOS_TCB,
+            0,
+        );
+        let token = medium_token(&alice(), &[], privilege::bits::SE_SECURITY
+            | privilege::bits::SE_BACKUP | privilege::bits::SE_RESTORE
+            | privilege::bits::SE_TAKE_OWNERSHIP);
+
+        // Everything denied
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+        assert!(!check(&sd, &token, WRITE_OWNER).allowed);
+        assert!(!check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT).allowed);
+    }
+
+    #[test]
+    fn pip_no_label_no_restriction() {
+        // §11.15: no default PIP. Objects without trust labels are unrestricted.
+        let sd = SecurityDescriptor::new(
+            alice(),
+            well_known::users(),
+            Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA)] },
+        );
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
         assert!(result.allowed);
     }
 }
