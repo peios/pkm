@@ -1,0 +1,43 @@
+Module                  Size  Used by
+vfat                   28672  1
+fat                   114688  1 vfat
+snd_hda_intel          73728  0
+snd_hda_codec         217088  1 snd_hda_intel
+snd_hda_core          151552  2 snd_hda_intel,snd_hda_codec
+snd_intel_dspcfg       49152  1 snd_hda_intel
+snd_intel_sdw_acpi     16384  1 snd_intel_dspcfg
+snd_hwdep              24576  1 snd_hda_codec
+snd_pcm               217088  3 snd_hda_intel,snd_hda_codec,snd_hda_core
+i2c_i801               40960  0
+snd_timer              57344  1 snd_pcm
+aesni_intel           102400  0
+i2c_smbus              20480  1 i2c_i801
+iTCO_wdt               16384  1
+intel_pmc_bxt          16384  1 iTCO_wdt
+snd                   155648  5 snd_hwdep,snd_hda_intel,snd_hda_codec,snd_timer,snd_pcm
+iTCO_vendor_support    12288  1 iTCO_wdt
+pcspkr                 12288  0
+i2c_mux                20480  1 i2c_i801
+psmouse               245760  0
+soundcore              16384  1 snd
+joydev                 28672  0
+mousedev               28672  0
+mac_hid                12288  0
+cfg80211             1470464  0
+rfkill                 45056  2 cfg80211
+nfnetlink              20480  2
+vsock_loopback         12288  0
+vmw_vsock_virtio_transport_common    57344  1 vsock_loopback
+vmw_vsock_vmci_transport    49152  0
+vsock                  69632  3 vmw_vsock_virtio_transport_common,vsock_loopback,vmw_vsock_vmci_transport
+vmw_vmci              110592  1 vmw_vsock_vmci_transport
+qemu_fw_cfg            20480  0
+virtio_net            126976  0
+net_failover           24576  1 virtio_net
+lpc_ich                28672  0
+failover               16384  1 net_failover
+virtio_balloon         32768  0
+intel_agp              24576  0
+bochs                  28672  0
+intel_gtt              28672  1 intel_agp
+serio_raw              20480  0
