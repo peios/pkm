@@ -22,6 +22,7 @@ pub mod audit;
 pub mod cap;
 pub mod conditional;
 pub mod group;
+pub mod inherit;
 pub mod guid;
 pub mod luid;
 pub mod mask;
