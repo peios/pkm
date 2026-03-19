@@ -6,7 +6,6 @@
 //
 // SIDs are byte-compatible with the Windows binary format (MS-DTYP §2.4.2).
 
-use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::fmt;
 
