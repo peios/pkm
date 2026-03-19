@@ -75,6 +75,33 @@ RUN scripts/config \
 COPY lsmod.txt /build/linux/lsmod.txt
 RUN LSMOD=/build/linux/lsmod.txt make LLVM=1 localmodconfig
 
+# Provium requirements: initramfs, 9p, vsock, virtio
+# These may be stripped by localmodconfig since the build host
+# doesn't necessarily have them loaded.
+# Use --set-val y to force built-in (not =m modules), so initramfs
+# boots work without needing module loading infrastructure.
+RUN scripts/config \
+        --set-val BLK_DEV_INITRD y \
+        --set-val RD_GZIP y \
+        --set-val NET_9P y \
+        --set-val NET_9P_VIRTIO y \
+        --set-val 9P_FS y \
+        --set-val 9P_FS_POSIX_ACL y \
+        --set-val VSOCKETS y \
+        --set-val VIRTIO_VSOCKETS y \
+        --set-val VHOST y \
+        --set-val VHOST_VSOCK y \
+        --set-val VIRTIO y \
+        --set-val VIRTIO_PCI y \
+        --set-val VIRTIO_MMIO y \
+        --set-val VIRTIO_BLK y \
+        --set-val VIRTIO_CONSOLE y \
+        --set-val VIRTIO_NET y \
+        --set-val DEVTMPFS y \
+        --set-val DEVTMPFS_MOUNT y \
+        --set-val TMPFS y && \
+    make LLVM=1 olddefconfig
+
 # ccache: persistent cache via volume mount at /ccache
 ENV CCACHE_DIR=/ccache
 ENV CCACHE_MAXSIZE=10G
