@@ -230,4 +230,41 @@ mod tests {
         let b = Sid::from_bytes(&a.to_bytes()).unwrap();
         assert_eq!(a, b);
     }
+
+    #[test]
+    fn new_zero_sub_authorities() {
+        let sid = Sid::new(5, &[]);
+        assert_eq!(sid.to_string(), "S-1-5");
+        assert_eq!(sid.sub_authorities.len(), 0);
+        assert_eq!(sid.byte_len(), 8);
+        let parsed = Sid::from_bytes(&sid.to_bytes()).unwrap();
+        assert_eq!(sid, parsed);
+    }
+
+    #[test]
+    fn new_max_sub_authorities() {
+        let sas: Vec<u32> = (1..=15).collect();
+        let sid = Sid::new(5, &sas);
+        assert_eq!(sid.sub_authorities.len(), 15);
+        let parsed = Sid::from_bytes(&sid.to_bytes()).unwrap();
+        assert_eq!(sid, parsed);
+    }
+
+    #[test]
+    fn from_bytes_with_trailing_data() {
+        // Extra bytes after a valid SID should not prevent parsing
+        let mut data = alloc::vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+        data.extend_from_slice(&[0xFF; 20]); // trailing garbage
+        let sid = Sid::from_bytes(&data).unwrap();
+        assert_eq!(sid.to_string(), "S-1-5-18");
+    }
+
+    #[test]
+    fn zero_sub_authority_count_valid() {
+        // A SID with 0 sub-authorities is valid (just authority, no RIDs)
+        let bytes = [1, 0, 0, 0, 0, 0, 0, 5]; // revision=1, count=0, authority=5
+        let sid = Sid::from_bytes(&bytes).unwrap();
+        assert_eq!(sid.sub_authorities.len(), 0);
+        assert_eq!(sid.to_string(), "S-1-5");
+    }
 }

@@ -26,3 +26,49 @@ impl Luid {
         self.0.to_le_bytes()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_luid() {
+        assert_eq!(Luid::ZERO.0, 0);
+        assert_eq!(Luid::ZERO.to_bytes(), [0u8; 8]);
+    }
+
+    #[test]
+    fn round_trip() {
+        let luid = Luid(0xDEADBEEFCAFEBABE);
+        let bytes = luid.to_bytes();
+        let parsed = Luid::from_bytes(&bytes).unwrap();
+        assert_eq!(luid, parsed);
+    }
+
+    #[test]
+    fn from_bytes_max() {
+        let luid = Luid(u64::MAX);
+        let bytes = luid.to_bytes();
+        let parsed = Luid::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.0, u64::MAX);
+    }
+
+    #[test]
+    fn reject_truncated() {
+        assert!(Luid::from_bytes(&[0u8; 7]).is_none());
+    }
+
+    #[test]
+    fn from_bytes_with_trailing_data() {
+        let mut data = [0u8; 16];
+        data[..8].copy_from_slice(&42u64.to_le_bytes());
+        let luid = Luid::from_bytes(&data).unwrap();
+        assert_eq!(luid.0, 42);
+    }
+
+    #[test]
+    fn equality() {
+        assert_eq!(Luid(1), Luid(1));
+        assert_ne!(Luid(1), Luid(2));
+    }
+}

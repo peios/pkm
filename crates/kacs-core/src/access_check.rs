@@ -290,7 +290,6 @@ fn evaluate_dacl<F>(
     max_allowed_mode: bool,
     resource_attributes: &[crate::token::ClaimEntry],
     local_claims: &[crate::token::ClaimEntry],
-    for_allow_context: bool,
     skip_owner_implicit: bool,
     decided: &mut u32,
     granted: &mut u32,
@@ -403,9 +402,10 @@ fn evaluate_dacl<F>(
             ace::ACCESS_ALLOWED_CALLBACK_ACE_TYPE => {
                 if sid_match(&a.sid, true) {
                     // Condition gate: allow requires TRUE. No condition → UNKNOWN → skip.
+                    // for_allow=true: USE_FOR_DENY_ONLY claims invisible (§11.12)
                     let cond_result = match &a.condition {
                         Some(cond) => crate::conditional::evaluate(
-                            cond, token, resource_attributes, local_claims, for_allow_context,
+                            cond, token, resource_attributes, local_claims, true,
                         ),
                         None => crate::conditional::TriValue::Unknown,
                     };
@@ -428,9 +428,10 @@ fn evaluate_dacl<F>(
             ace::ACCESS_DENIED_CALLBACK_ACE_TYPE => {
                 if sid_match(&a.sid, false) {
                     // Condition gate: deny applies on TRUE or UNKNOWN. FALSE → skip.
+                    // for_allow=false: USE_FOR_DENY_ONLY claims VISIBLE (§11.12)
                     let cond_result = match &a.condition {
                         Some(cond) => crate::conditional::evaluate(
-                            cond, token, resource_attributes, local_claims, for_allow_context,
+                            cond, token, resource_attributes, local_claims, false,
                         ),
                         None => crate::conditional::TriValue::Unknown,
                     };
@@ -453,10 +454,11 @@ fn evaluate_dacl<F>(
             | ace::ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE => {
                 if sid_match(&a.sid, true) {
                     // Condition gate for callback variants
+                    // for_allow=true for allow ACEs (§11.12)
                     if ace::is_callback_type(a.ace_type) {
                         let cond_result = match &a.condition {
                             Some(cond) => crate::conditional::evaluate(
-                                cond, token, resource_attributes, local_claims, for_allow_context,
+                                cond, token, resource_attributes, local_claims, true,
                             ),
                             None => crate::conditional::TriValue::Unknown,
                         };
@@ -506,10 +508,11 @@ fn evaluate_dacl<F>(
             | ace::ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE => {
                 if sid_match(&a.sid, false) {
                     // Condition gate for callback variants
+                    // for_allow=false for deny ACEs (§11.12)
                     if ace::is_callback_type(a.ace_type) {
                         let cond_result = match &a.condition {
                             Some(cond) => crate::conditional::evaluate(
-                                cond, token, resource_attributes, local_claims, for_allow_context,
+                                cond, token, resource_attributes, local_claims, false,
                             ),
                             None => crate::conditional::TriValue::Unknown,
                         };
@@ -947,7 +950,6 @@ pub fn access_check(
         max_allowed_mode,
         &resource_attributes,
         local_claims,
-        true, // for_allow_context (normal pass uses allow polarity for claims)
         false, // don't skip owner implicit
         &mut decided,
         &mut granted,
@@ -1003,7 +1005,6 @@ pub fn access_check(
             max_allowed_mode,
             &resource_attributes,
             local_claims,
-            true,
             false, // owner implicit rights evaluated in restricted pass too
             &mut r_decided,
             &mut r_granted,
@@ -1056,7 +1057,6 @@ pub fn access_check(
             max_allowed_mode,
             &resource_attributes,
             local_claims,
-            true,
             true, // skip owner implicit rights in confinement pass
             &mut c_decided,
             &mut c_granted,
@@ -1228,7 +1228,6 @@ fn evaluate_rule_dacl(
         max_allowed_mode,
         resource_attributes,
         local_claims,
-        true,
         false,
         &mut decided,
         &mut granted,
@@ -3544,6 +3543,230 @@ mod tests {
         let result = check_tree(&sd, &token, DS_READ_PROP, &mut tree);
         assert!(result.allowed);
         assert!(tree[0].granted & DS_READ_PROP != 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // SD parsing edge cases
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Callback ACE integration through AccessCheck
+    // -----------------------------------------------------------------------
+
+    fn callback_allow_ace(sid: &Sid, mask: u32, condition: Vec<u8>) -> Ace {
+        Ace {
+            ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            flags: 0,
+            mask,
+            sid: sid.clone(),
+            object_type: None, inherited_object_type: None,
+            condition: Some(condition),
+            application_data: None,
+        }
+    }
+
+    fn callback_deny_ace(sid: &Sid, mask: u32, condition: Vec<u8>) -> Ace {
+        Ace {
+            ace_type: ACCESS_DENIED_CALLBACK_ACE_TYPE,
+            flags: 0,
+            mask,
+            sid: sid.clone(),
+            object_type: None, inherited_object_type: None,
+            condition: Some(condition),
+            application_data: None,
+        }
+    }
+
+    fn condition_true() -> Vec<u8> {
+        use crate::conditional::bytecode;
+        bytecode::build(&[
+            bytecode::int64_literal(1),
+            bytecode::int64_literal(1),
+            bytecode::op_eq(),
+        ])
+    }
+
+    fn condition_false() -> Vec<u8> {
+        use crate::conditional::bytecode;
+        bytecode::build(&[
+            bytecode::int64_literal(0),
+            bytecode::int64_literal(1),
+            bytecode::op_eq(),
+        ])
+    }
+
+    fn condition_unknown() -> Vec<u8> {
+        use crate::conditional::bytecode;
+        // Missing attribute → UNKNOWN
+        bytecode::build(&[
+            bytecode::user_attr("nonexistent"),
+            bytecode::int64_literal(1),
+            bytecode::op_eq(),
+        ])
+    }
+
+    #[test]
+    fn callback_allow_condition_true_grants() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_allow_ace(&alice(), FILE_READ_DATA, condition_true()),
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn callback_allow_condition_false_skips() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_allow_ace(&alice(), FILE_READ_DATA, condition_false()),
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed); // condition FALSE → skip → not granted
+    }
+
+    #[test]
+    fn callback_allow_condition_unknown_skips() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_allow_ace(&alice(), FILE_READ_DATA, condition_unknown()),
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed); // UNKNOWN → skip for allow
+    }
+
+    #[test]
+    fn callback_allow_no_condition_skips() {
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: alice(),
+            object_type: None, inherited_object_type: None,
+            condition: None, // no condition data
+            application_data: None,
+        };
+        let sd = sd_with_dacl(&alice(), alloc::vec![ace]);
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed); // None → UNKNOWN → skip
+    }
+
+    #[test]
+    fn callback_deny_condition_true_denies() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_deny_ace(&alice(), FILE_READ_DATA, condition_true()),
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed); // deny fires (TRUE), first-writer-wins
+    }
+
+    #[test]
+    fn callback_deny_condition_false_skips() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_deny_ace(&alice(), FILE_READ_DATA, condition_false()),
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed); // deny skipped (FALSE), allow grants
+    }
+
+    #[test]
+    fn callback_deny_condition_unknown_denies() {
+        // UNKNOWN on deny → deny fires (fail-safe, §11.12)
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_deny_ace(&alice(), FILE_READ_DATA, condition_unknown()),
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed); // UNKNOWN → deny fires
+    }
+
+    #[test]
+    fn callback_deny_no_condition_denies() {
+        let ace = Ace {
+            ace_type: ACCESS_DENIED_CALLBACK_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: alice(),
+            object_type: None, inherited_object_type: None,
+            condition: None,
+            application_data: None,
+        };
+        let sd = sd_with_dacl(&alice(), alloc::vec![ace, allow(&alice(), FILE_READ_DATA)]);
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed); // None → UNKNOWN → deny fires
+    }
+
+    #[test]
+    fn callback_deny_for_allow_false_makes_deny_only_claims_visible() {
+        // This tests the bug fix: deny callback ACEs must use for_allow=false
+        // so USE_FOR_DENY_ONLY claims are visible to the condition.
+        use crate::conditional::bytecode;
+        use crate::token::{ClaimEntry, ClaimType, ClaimValues, claim_flags};
+
+        // Condition: @User.restricted == 1
+        let cond = bytecode::build(&[
+            bytecode::user_attr("restricted"),
+            bytecode::int64_literal(1),
+            bytecode::op_eq(),
+        ]);
+
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_deny_ace(&alice(), FILE_READ_DATA, cond),
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+
+        // Token with a USE_FOR_DENY_ONLY claim
+        let mut token = medium_token(&alice(), &[], 0);
+        token.user_claims = alloc::vec![ClaimEntry {
+            name: alloc::string::String::from("restricted"),
+            claim_type: ClaimType::Int64,
+            flags: claim_flags::USE_FOR_DENY_ONLY,
+            values: ClaimValues::Int64(alloc::vec![1]),
+        }];
+
+        let result = check(&sd, &token, FILE_READ_DATA);
+        // The deny-only claim IS visible to the deny condition (for_allow=false),
+        // so the condition evaluates to TRUE, and the deny fires.
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn callback_allow_for_allow_true_hides_deny_only_claims() {
+        // Complementary test: allow callback ACEs use for_allow=true,
+        // so USE_FOR_DENY_ONLY claims are invisible.
+        use crate::conditional::bytecode;
+        use crate::token::{ClaimEntry, ClaimType, ClaimValues, claim_flags};
+
+        let cond = bytecode::build(&[
+            bytecode::user_attr("restricted"),
+            bytecode::int64_literal(1),
+            bytecode::op_eq(),
+        ]);
+
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_allow_ace(&alice(), FILE_READ_DATA, cond),
+        ]);
+
+        let mut token = medium_token(&alice(), &[], 0);
+        token.user_claims = alloc::vec![ClaimEntry {
+            name: alloc::string::String::from("restricted"),
+            claim_type: ClaimType::Int64,
+            flags: claim_flags::USE_FOR_DENY_ONLY,
+            values: ClaimValues::Int64(alloc::vec![1]),
+        }];
+
+        let result = check(&sd, &token, FILE_READ_DATA);
+        // The deny-only claim is INVISIBLE to the allow condition (for_allow=true),
+        // so the condition evaluates to UNKNOWN (attribute appears NULL),
+        // and the allow ACE is skipped.
+        assert!(!result.allowed);
     }
 
     // -----------------------------------------------------------------------

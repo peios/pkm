@@ -1029,4 +1029,49 @@ mod tests {
         let (parsed, _) = Ace::from_bytes(&bytes).unwrap();
         assert_eq!(parsed.sid.sub_authorities.len(), 15);
     }
+
+    #[test]
+    fn resource_attribute_ace_round_trip() {
+        let app_data = alloc::vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        let ace = Ace {
+            ace_type: SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
+            flags: 0,
+            mask: 0,
+            sid: well_known::everyone(),
+            object_type: None,
+            inherited_object_type: None,
+            condition: None,
+            application_data: Some(app_data.clone()),
+        };
+        let bytes = ace.to_bytes();
+        let (parsed, _) = Ace::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.ace_type, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE);
+        let parsed_data = parsed.application_data.unwrap();
+        // Application data may include padding bytes from 4-byte alignment
+        assert!(parsed_data.starts_with(&app_data));
+    }
+
+    #[test]
+    fn unknown_ace_type_preserved() {
+        // ACE type 0xFF is unknown — should be parseable and preserved
+        let sid = well_known::system();
+        let sid_bytes = sid.to_bytes();
+        let ace_body_len = 4 + sid_bytes.len(); // mask + SID
+        let ace_size = 4 + ace_body_len; // header + body
+        // Pad to 4-byte alignment
+        let ace_size = (ace_size + 3) & !3;
+        let mut data = alloc::vec![0u8; ace_size];
+        data[0] = 0xFF; // unknown type
+        data[1] = 0x00; // flags
+        data[2] = ace_size as u8;
+        data[3] = 0;
+        data[4..8].copy_from_slice(&42u32.to_le_bytes()); // mask
+        data[8..8 + sid_bytes.len()].copy_from_slice(&sid_bytes);
+
+        let (parsed, consumed) = Ace::from_bytes(&data).unwrap();
+        assert_eq!(consumed, ace_size);
+        assert_eq!(parsed.ace_type, 0xFF);
+        assert_eq!(parsed.mask, 42);
+        assert_eq!(parsed.sid, sid);
+    }
 }
