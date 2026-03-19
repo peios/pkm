@@ -1,6 +1,6 @@
 FROM archlinux:latest
 
-# Kernel build dependencies (C + Rust + LLVM)
+# Kernel build dependencies (C + LLVM, no Arch rust package)
 RUN pacman -Syu --noconfirm && \
     pacman -S --noconfirm \
         base-devel \
@@ -14,17 +14,11 @@ RUN pacman -Syu --noconfirm && \
         perl \
         python \
         xmlto \
-        rust \
-        rust-src \
         clang \
         llvm \
         lld \
         ccache \
     && pacman -Scc --noconfirm
-
-# The kernel requires a specific bindgen version
-RUN cargo install --locked --version 0.69.5 bindgen-cli
-ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Pinned kernel version — bump deliberately, not accidentally
 ARG KERNEL_VERSION=v6.19.6
@@ -33,6 +27,25 @@ ARG KERNEL_VERSION=v6.19.6
 RUN git clone --depth 1 --branch ${KERNEL_VERSION} \
     https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
     /build/linux
+
+# Install rustup and the exact Rust version the kernel requires.
+# The kernel's scripts/min-tool-version.sh tells us the minimum;
+# we read it from the source tree so the toolchain stays in sync
+# with the pinned kernel version.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain none
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Read the required Rust version from the kernel source and install it
+RUN RUST_VERSION=$(/build/linux/scripts/min-tool-version.sh rustc) && \
+    echo "Kernel requires rustc >= ${RUST_VERSION}" && \
+    rustup toolchain install ${RUST_VERSION} --component rust-src && \
+    rustup default ${RUST_VERSION}
+
+# Install the exact bindgen version the kernel requires
+RUN BINDGEN_VERSION=$(/build/linux/scripts/min-tool-version.sh bindgen) && \
+    echo "Kernel requires bindgen >= ${BINDGEN_VERSION}" && \
+    cargo install --locked --version ${BINDGEN_VERSION} bindgen-cli
 
 # Start from Arch's kernel config
 ADD https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config.x86_64 \
