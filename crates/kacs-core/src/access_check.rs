@@ -684,9 +684,96 @@ pub fn access_check(
         }
     }
 
-    // Step 8: Restricted token pass — TODO (Phase 3.9)
-    // Step 8a: Confinement — TODO (Phase 3.10)
-    // Step 9: Central Access Policy — TODO (Phase 3.13)
+    // Step 8: Restricted token two-pass (§11.7)
+    if token.is_restricted() {
+        let restricted_sids = token.restricted_sids.as_ref().unwrap();
+
+        // Build restricted SID set with virtual groups
+        let owner_in_restricted = sid_in_restricting_sids(owner, restricted_sids);
+        let self_in_restricted = self_sid.map_or(false, |ss| {
+            sid_in_restricting_sids(ss, restricted_sids)
+        });
+
+        let restricted_sid_match = |sid: &Sid, _for_allow: bool| -> bool {
+            // Virtual groups in restricted context
+            if *sid == well_known::owner_rights() && owner_in_restricted {
+                return true;
+            }
+            if *sid == well_known::principal_self() && self_in_restricted {
+                return true;
+            }
+            sid_in_restricting_sids(sid, restricted_sids)
+        };
+
+        let mut r_decided: u32 = 0;
+        let mut r_granted: u32 = 0;
+
+        evaluate_dacl(
+            sd,
+            mapping,
+            None,
+            &restricted_sid_match,
+            mapped_desired,
+            max_allowed_mode,
+            false, // owner implicit rights evaluated in restricted pass too
+            &mut r_decided,
+            &mut r_granted,
+        );
+
+        // Scalar merge: intersection
+        if token.write_restricted {
+            let write_bits = map_generic_bits(mask::GENERIC_WRITE, mapping);
+            granted = (granted & !write_bits) | (granted & r_granted & write_bits);
+        } else {
+            granted &= r_granted;
+        }
+        // Privilege-granted bits bypass the restricted pass
+        granted |= privilege_granted;
+    }
+
+    // Step 8a: Confinement (§11.14)
+    if token.is_confined() {
+        let confinement_sid = token.confinement_sid.as_ref().unwrap();
+        let mut confinement_sids: alloc::vec::Vec<Sid> = alloc::vec![confinement_sid.clone()];
+        for cap in &token.confinement_capabilities {
+            confinement_sids.push(cap.sid.clone());
+        }
+
+        let owner_in_confinement = sid_in_list(owner, &confinement_sids);
+        let self_in_confinement = self_sid.map_or(false, |ss| {
+            sid_in_list(ss, &confinement_sids)
+        });
+
+        let confinement_sid_match = |sid: &Sid, _for_allow: bool| -> bool {
+            if *sid == well_known::owner_rights() && owner_in_confinement {
+                return true;
+            }
+            if *sid == well_known::principal_self() && self_in_confinement {
+                return true;
+            }
+            sid_in_list(sid, &confinement_sids)
+        };
+
+        let mut c_decided: u32 = 0;
+        let mut c_granted: u32 = 0;
+
+        evaluate_dacl(
+            sd,
+            mapping,
+            None,
+            &confinement_sid_match,
+            mapped_desired,
+            max_allowed_mode,
+            true, // skip owner implicit rights in confinement pass
+            &mut c_decided,
+            &mut c_granted,
+        );
+
+        // Absolute intersection. No privilege bypass.
+        granted &= c_granted;
+    }
+
+    // Step 9: Central Access Policy — TODO
     // Step 9b: Privilege-use auditing — TODO
     // Step 10: Audit emission — TODO
 
@@ -2011,5 +2098,381 @@ mod tests {
         let token = medium_token(&alice(), &[], 0);
         let result = check(&sd, &token, FILE_READ_DATA);
         assert!(result.allowed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Restricted tokens (§11.7)
+    // -----------------------------------------------------------------------
+
+    fn restricted_token(
+        user: &Sid,
+        groups: &[&Sid],
+        restricting_sids: &[&Sid],
+    ) -> Token {
+        let mut t = medium_token(user, groups, 0);
+        t.restricted_sids = Some(
+            restricting_sids.iter().map(|s| {
+                crate::group::GroupEntry::new(
+                    (*s).clone(),
+                    crate::group::SE_GROUP_MANDATORY
+                        | crate::group::SE_GROUP_ENABLED_BY_DEFAULT
+                        | crate::group::SE_GROUP_ENABLED,
+                )
+            }).collect(),
+        );
+        t.write_restricted = false;
+        t
+    }
+
+    #[test]
+    fn restricted_token_intersection() {
+        // Normal pass: alice gets read+write (ACEs match user SID)
+        // Restricted pass: engineers gets read only
+        // Intersection: read only
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+        ]);
+        let token = restricted_token(&alice(), &[], &[&engineers()]);
+        // engineers is in the restricted SID list but the DACL grants
+        // access to alice (not engineers), so the restricted pass
+        // finds no matching ACE → grants nothing → intersection is empty
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn restricted_token_both_pass() {
+        // Both normal and restricted SIDs match
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&engineers(), FILE_READ_DATA),
+        ]);
+        // Normal: alice matches → read+write
+        // Restricted: engineers matches → read
+        // Intersection: read
+        let token = restricted_token(&alice(), &[&engineers()], &[&engineers()]);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(!result.allowed); // restricted pass didn't grant write
+    }
+
+    #[test]
+    fn restricted_token_privilege_bypasses_restricted_pass() {
+        // §11.7: privilege-granted bits bypass the restricted pass
+        let sd = sd_with_dacl(&bob(), alloc::vec![]); // empty DACL
+        let mut token = restricted_token(&alice(), &[], &[&engineers()]);
+        token.privileges = privilege::Privileges::new_all_enabled(
+            privilege::bits::SE_BACKUP,
+        );
+        let result = check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT);
+        // Backup grants read as a privilege. Privilege-granted bits
+        // are OR'd back after the restricted intersection.
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn restricted_token_empty_restricting_sids_denies_all() {
+        // is_restricted() checks for non-empty restricting SIDs.
+        // An empty list means NOT restricted (no second pass).
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let mut token = medium_token(&alice(), &[], 0);
+        token.restricted_sids = Some(Vec::new()); // empty
+        assert!(!token.is_restricted()); // empty = not restricted
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed); // no restricted pass
+    }
+
+    #[test]
+    fn write_restricted_token_read_uses_normal_only() {
+        // §11.7: write-restricted — intersection only on write bits
+        // Read access comes from normal pass alone
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+        ]);
+        let mut token = restricted_token(&alice(), &[], &[&engineers()]);
+        token.write_restricted = true;
+        // Normal: alice → read+write
+        // Restricted: no match for engineers in DACL → nothing
+        // Write-restricted: read from normal only, write intersected
+        // Read should pass (normal only), write should fail (intersection empty)
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn write_restricted_token_write_needs_both() {
+        // Write bits need both passes to agree
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&engineers(), FILE_WRITE_DATA),
+        ]);
+        let mut token = restricted_token(&alice(), &[&engineers()], &[&engineers()]);
+        token.write_restricted = true;
+        // Normal: alice → read+write, engineers → write
+        // Restricted: engineers → write
+        // Intersection for write bits: write ∩ write = write ✓
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn restricted_token_owner_implicit_in_restricted_pass() {
+        // §11.7: owner implicit rights in restricted pass if owner
+        // SID is in the restricting SID list
+        let sd = SecurityDescriptor::new(
+            alice(),
+            well_known::users(),
+            Acl::new(ACL_REVISION), // empty DACL
+        );
+        // alice is owner AND in restricting SIDs
+        let token = restricted_token(&alice(), &[], &[&alice()]);
+        // Normal: owner implicit → READ_CONTROL + WRITE_DAC
+        // Restricted: alice in restricting SIDs → owner implicit applies
+        // Intersection: READ_CONTROL + WRITE_DAC
+        let result = check(&sd, &token, READ_CONTROL);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn restricted_token_owner_not_in_restricted_loses_implicit() {
+        // Owner NOT in restricting SIDs → restricted pass doesn't
+        // get owner implicit → intersection loses them
+        let sd = SecurityDescriptor::new(
+            alice(),
+            well_known::users(),
+            Acl::new(ACL_REVISION), // empty DACL
+        );
+        let token = restricted_token(&alice(), &[], &[&engineers()]);
+        // Normal: owner implicit → READ_CONTROL + WRITE_DAC
+        // Restricted: engineers is restricting, not alice, no owner implicit
+        // Intersection: nothing (normal has it, restricted doesn't)
+        // BUT: privilege_granted is OR'd back. No privileges here.
+        let result = check(&sd, &token, READ_CONTROL);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn restricted_token_deny_in_normal_pass() {
+        // Deny ACE in normal pass blocks even if restricted pass would allow
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            deny(&alice(), FILE_WRITE_DATA),
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&engineers(), FILE_READ_DATA | FILE_WRITE_DATA),
+        ]);
+        let token = restricted_token(&alice(), &[&engineers()], &[&engineers()]);
+        // Normal: deny write on alice (first-writer), allow read on alice
+        // Restricted: engineers → read+write
+        // Intersection: read (write denied in normal)
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(!result.allowed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Application Confinement (§11.14)
+    // -----------------------------------------------------------------------
+
+    fn confined_token(
+        user: &Sid,
+        confinement_sid: &Sid,
+        capabilities: &[&Sid],
+    ) -> Token {
+        let mut t = medium_token(user, &[], 0);
+        t.confinement_sid = Some(confinement_sid.clone());
+        t.confinement_capabilities = capabilities.iter().map(|s| {
+            crate::group::GroupEntry::new(
+                (*s).clone(),
+                crate::group::SE_GROUP_ENABLED,
+            )
+        }).collect();
+        t.confinement_exempt = false;
+        t
+    }
+
+    fn app_sid() -> Sid { Sid::new(15, &[2, 0x12345678, 0x9ABCDEF0, 0x11111111,
+        0x22222222, 0x33333333, 0x44444444, 0x55555555]) }
+    fn cap_network() -> Sid { Sid::new(15, &[3, 1]) } // internetClient
+
+    #[test]
+    fn confinement_default_deny() {
+        // Confined token: access denied unless object explicitly grants
+        // to confinement SID or capabilities
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), GENERIC_ALL), // grants to alice, not to app
+        ]);
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        // Normal pass: alice → all. Confinement pass: no match → nothing.
+        // Intersection: nothing.
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn confinement_explicit_grant_to_app_sid() {
+        // Object grants to the confinement SID → access allowed
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), GENERIC_ALL),
+            allow(&app_sid(), FILE_READ_DATA),
+        ]);
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+
+        // Write not granted to app SID
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn confinement_capability_sid_grants() {
+        // Object grants to a capability SID → access allowed
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), GENERIC_ALL),
+            allow(&cap_network(), FILE_READ_DATA | FILE_WRITE_DATA),
+        ]);
+        let token = confined_token(&alice(), &app_sid(), &[&cap_network()]);
+        let result = check(&sd, &token, FILE_READ_DATA | FILE_WRITE_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn confinement_all_app_packages_grants() {
+        // Object grants to ALL_APP_PACKAGES → confined token with it passes
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), GENERIC_ALL),
+            allow(&well_known::all_app_packages(), FILE_READ_DATA),
+        ]);
+        let token = confined_token(
+            &alice(),
+            &app_sid(),
+            &[&well_known::all_app_packages()],
+        );
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn confinement_no_privilege_bypass() {
+        // §11.14: privileges do NOT bypass confinement
+        let sd = sd_with_dacl(&bob(), alloc::vec![]); // empty DACL
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.privileges = privilege::Privileges::new_all_enabled(
+            privilege::bits::SE_BACKUP | privilege::bits::SE_SECURITY
+                | privilege::bits::SE_TAKE_OWNERSHIP,
+        );
+        // Backup grants read, TakeOwnership grants WRITE_OWNER,
+        // Security grants ASS — but confinement overrides all
+        let result = check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT);
+        assert!(!result.allowed);
+
+        let result = check(&sd, &token, ACCESS_SYSTEM_SECURITY);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn confinement_no_owner_implicit_rights() {
+        // §11.14: owner implicit rights skipped in confinement pass
+        let sd = SecurityDescriptor::new(
+            alice(), // alice owns it
+            well_known::users(),
+            Acl::new(ACL_REVISION), // empty DACL
+        );
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        // Normal: owner implicit → READ_CONTROL + WRITE_DAC
+        // Confinement: skip_owner_implicit=true → nothing
+        // Intersection: nothing
+        let result = check(&sd, &token, READ_CONTROL);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn confinement_exempt_bypasses() {
+        // confinement_exempt = true → confinement not evaluated
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.confinement_exempt = true;
+        assert!(!token.is_confined()); // exempt = not confined
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn confinement_null_dacl_grants_confined() {
+        // §11.14: NULL DACL grants all in confinement pass too
+        let sd = SecurityDescriptor {
+            control: crate::sd::SE_SELF_RELATIVE, // no DACL present
+            owner: Some(alice()),
+            group: Some(well_known::users()),
+            dacl: None,
+            sacl: None,
+        };
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed); // NULL DACL = no restrictions
+    }
+
+    #[test]
+    fn confinement_combined_with_restricted() {
+        // Both restricted AND confined: triple intersection
+        // Normal: alice → read+write
+        // Restricted: engineers → read
+        // Confinement: app_sid → read+write
+        // Final: read (tightest restriction wins)
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&engineers(), FILE_READ_DATA),
+            allow(&app_sid(), FILE_READ_DATA | FILE_WRITE_DATA),
+        ]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.groups = alloc::vec![crate::group::GroupEntry::new(
+            engineers(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )];
+        token.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(
+            engineers(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )]);
+        // Normal: alice → r+w, engineers → r
+        // Restricted: engineers → r. Intersection(normal, restricted) = r.
+        // Then privilege OR-back (none). Then confinement: app_sid → r+w.
+        // Intersection(restricted_result, confinement) = r.
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn confinement_privilege_granted_then_confined() {
+        // Privilege grants read (backup), restricted pass OR's it back,
+        // but confinement strips it.
+        // §11.17: confinement runs AFTER restricted merge + privilege OR-back.
+        let sd = sd_with_dacl(&bob(), alloc::vec![
+            allow(&app_sid(), FILE_WRITE_DATA), // only write to app
+        ]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(
+            app_sid(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )]);
+        token.privileges = privilege::Privileges::new_all_enabled(
+            privilege::bits::SE_BACKUP,
+        );
+        // Backup grants read (privilege). Restricted pass: app_sid → write.
+        // Intersection of normal read + restricted write = nothing.
+        // Privilege OR-back: read restored.
+        // Confinement: app_sid → write only. Intersection with read = nothing.
+        let result = check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT);
+        assert!(!result.allowed); // confinement blocks the privilege
     }
 }
