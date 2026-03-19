@@ -18,6 +18,7 @@ extern crate alloc;
 pub mod access_check;
 pub mod ace;
 pub mod acl;
+pub mod audit;
 pub mod cap;
 pub mod conditional;
 pub mod group;
