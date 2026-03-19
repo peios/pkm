@@ -24,6 +24,27 @@ pub struct Sid {
 }
 
 impl Sid {
+    /// Construct a SID from an authority value and sub-authorities.
+    ///
+    /// The authority is a 48-bit value stored big-endian in 6 bytes.
+    /// Most well-known authorities fit in the low byte (1, 5, 15, 16, 19).
+    pub fn new(authority: u64, sub_authorities: &[u32]) -> Self {
+        debug_assert!(authority <= 0xFFFF_FFFF_FFFF);
+        debug_assert!(sub_authorities.len() <= SID_MAX_SUB_AUTHORITIES);
+        Sid {
+            revision: 1,
+            authority: [
+                (authority >> 40) as u8,
+                (authority >> 32) as u8,
+                (authority >> 24) as u8,
+                (authority >> 16) as u8,
+                (authority >> 8) as u8,
+                authority as u8,
+            ],
+            sub_authorities: sub_authorities.into(),
+        }
+    }
+
     /// Parse a SID from its binary representation (MS-DTYP §2.4.2.1).
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < 8 {

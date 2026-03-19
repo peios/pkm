@@ -1,0 +1,3236 @@
+docker build -t pkm-kernel-builder .
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.03kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/archlinux:latest
+#2 DONE 0.9s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 DONE 0.0s
+
+#5 [ 1/13] FROM docker.io/library/archlinux:latest@sha256:70aace0bf67d14280ca54bc2c7ee15c5fff62684131b34ab38f99f730b643733
+#5 DONE 0.0s
+
+#6 [ 5/13] ADD https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config.x86_64     /build/linux/.config
+#6 DONE 0.4s
+
+#4 [internal] load build context
+#4 transferring context: 31B done
+#4 DONE 0.0s
+
+#7 [12/13] COPY lsmod.txt /build/linux/lsmod.txt
+#7 CACHED
+
+#8 [ 3/13] RUN cargo install --locked --version 0.69.5 bindgen-cli
+#8 CACHED
+
+#9 [ 8/13] RUN make LLVM=1 rustavailable
+#9 CACHED
+
+#10 [ 2/13] RUN pacman -Syu --noconfirm &&     pacman -S --noconfirm         base-devel         bc         cpio         git         inetutils         kmod         libelf         pahole         perl         python         xmlto         rust         rust-src         clang         llvm         lld         ccache     && pacman -Scc --noconfirm
+#10 CACHED
+
+#11 [ 9/13] RUN scripts/config --enable RUST
+#11 CACHED
+
+#12 [11/13] RUN scripts/config         --disable SECURITY_SELINUX         --disable SECURITY_APPARMOR         --disable SECURITY_TOMOYO         --disable SECURITY_SMACK         --disable BPF_LSM         --set-str LSM "landlock,lockdown,yama,integrity" &&     make LLVM=1 olddefconfig
+#12 CACHED
+
+#13 [ 4/13] RUN git clone --depth 1 --branch v6.19.6     https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git     /build/linux
+#13 CACHED
+
+#14 [ 5/13] ADD https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config.x86_64     /build/linux/.config
+#14 CACHED
+
+#15 [ 7/13] RUN make olddefconfig
+#15 CACHED
+
+#16 [10/13] RUN make LLVM=1 olddefconfig
+#16 CACHED
+
+#17 [ 6/13] WORKDIR /build/linux
+#17 CACHED
+
+#18 [13/13] RUN LSMOD=/build/linux/lsmod.txt make LLVM=1 localmodconfig
+#18 CACHED
+
+#19 exporting to image
+#19 exporting layers done
+#19 writing image sha256:ec19621ca1005b2d02aebf0fbc4b35bc1cf605577681e6dbae64b59818927a09 done
+#19 naming to docker.io/library/pkm-kernel-builder done
+#19 DONE 0.0s
+mkdir -p /home/jack/projects/peios/pkm/kernel/out
+docker run --rm \
+	-v /home/jack/projects/peios/pkm/kernel/out:/out \
+	-v pkm-kernel-ccache:/ccache \
+	pkm-kernel-builder \
+	bash -c 'make LLVM=1 CC="ccache clang" -j$(nproc) && cp arch/x86/boot/bzImage /out/ && make LLVM=1 modules_install INSTALL_MOD_PATH=/out'
+  SYNC    include/config/auto.conf
+  GEN     arch/x86/include/generated/asm/orc_hash.h
+  WRAP    arch/x86/include/generated/uapi/asm/bpf_perf_event.h
+  WRAP    arch/x86/include/generated/uapi/asm/errno.h
+  WRAP    arch/x86/include/generated/uapi/asm/fcntl.h
+  WRAP    arch/x86/include/generated/uapi/asm/ioctl.h
+  WRAP    arch/x86/include/generated/uapi/asm/ioctls.h
+  WRAP    arch/x86/include/generated/uapi/asm/param.h
+  WRAP    arch/x86/include/generated/uapi/asm/resource.h
+  WRAP    arch/x86/include/generated/uapi/asm/ipcbuf.h
+  WRAP    arch/x86/include/generated/uapi/asm/poll.h
+  WRAP    arch/x86/include/generated/uapi/asm/sockios.h
+  WRAP    arch/x86/include/generated/uapi/asm/socket.h
+  UPD     include/generated/uapi/linux/version.h
+  WRAP    arch/x86/include/generated/uapi/asm/termbits.h
+  WRAP    arch/x86/include/generated/uapi/asm/termios.h
+  WRAP    arch/x86/include/generated/uapi/asm/types.h
+  SYSHDR  arch/x86/include/generated/uapi/asm/unistd_32.h
+  SYSHDR  arch/x86/include/generated/uapi/asm/unistd_64.h
+  SYSHDR  arch/x86/include/generated/uapi/asm/unistd_x32.h
+  SYSTBL  arch/x86/include/generated/asm/syscalls_32.h
+  SYSHDR  arch/x86/include/generated/asm/unistd_64_x32.h
+  SYSHDR  arch/x86/include/generated/asm/unistd_32_ia32.h
+  SYSTBL  arch/x86/include/generated/asm/syscalls_64.h
+  HYPERCALLS arch/x86/include/generated/asm/xen-hypercalls.h
+  WRAP    arch/x86/include/generated/asm/fprobe.h
+  WRAP    arch/x86/include/generated/asm/early_ioremap.h
+  WRAP    arch/x86/include/generated/asm/mmzone.h
+  WRAP    arch/x86/include/generated/asm/irq_regs.h
+  WRAP    arch/x86/include/generated/asm/mcs_spinlock.h
+  HOSTCC  arch/x86/tools/relocs_32.o
+  UPD     arch/x86/include/generated/asm/cpufeaturemasks.h
+  WRAP    arch/x86/include/generated/asm/local64.h
+  WRAP    arch/x86/include/generated/asm/module.lds.h
+  WRAP    arch/x86/include/generated/asm/mmiowb.h
+  WRAP    arch/x86/include/generated/asm/kmap_size.h
+  WRAP    arch/x86/include/generated/asm/rwonce.h
+  HOSTCC  arch/x86/tools/relocs_64.o
+  HOSTCC  arch/x86/tools/relocs_common.o
+  HOSTRUSTC scripts/generate_rust_target
+  HOSTCC  scripts/kallsyms
+  HOSTCC  scripts/sorttable.o
+  HOSTCC  scripts/elf-parse.o
+  UPD     include/generated/compile.h
+  HOSTCC  scripts/asn1_compiler
+  HOSTCC  scripts/ipe/polgen/polgen
+  DESCEND objtool
+  DESCEND bpf/resolve_btfids
+  HOSTCC  scripts/sign-file
+  HOSTCC  scripts/tracepoint-update.o
+  MKDIR     /build/linux/tools/bpf/resolve_btfids/libbpf/
+  MKDIR     /build/linux/tools/bpf/resolve_btfids//libsubcmd
+  HOSTLD  scripts/tracepoint-update
+  GEN     /build/linux/tools/bpf/resolve_btfids/libbpf/bpf_helper_defs.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/bpf.h
+  HOSTLD  arch/x86/tools/relocs
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/libbpf.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/btf.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/libbpf_legacy.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/libbpf_common.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/bpf_tracing.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/bpf_helpers.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/bpf_endian.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/bpf_core_read.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/libbpf_version.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/skel_internal.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/usdt.bpf.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libbpf//include/bpf/bpf_helper_defs.h
+  INSTALL libbpf_headers
+  HOSTLD  scripts/sorttable
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libsubcmd//include/subcmd/pager.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libsubcmd//include/subcmd/parse-options.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libsubcmd//include/subcmd/exec-cmd.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libsubcmd//include/subcmd/run-command.h
+  INSTALL /build/linux/tools/bpf/resolve_btfids/libsubcmd//include/subcmd/help.h
+  INSTALL libsubcmd_headers
+  UPD     scripts/target.json
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/btf.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/libbpf.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/bpf.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/nlattr.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/netlink.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/libbpf_utils.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/libbpf_probes.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/bpf_prog_linfo.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/hashmap.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/btf_dump.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/ringbuf.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/strset.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/linker.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/gen_loader.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/zip.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/usdt.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/relo_core.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/elf.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libsubcmd/exec-cmd.o
+  INSTALL /build/linux/tools/objtool/libsubcmd/include/subcmd/help.h
+  INSTALL /build/linux/tools/objtool/libsubcmd/include/subcmd/exec-cmd.h
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/features.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/btf_iter.o
+  INSTALL /build/linux/tools/objtool/libsubcmd/include/subcmd/pager.h
+  CC      /build/linux/tools/bpf/resolve_btfids/libsubcmd/help.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/btf_relocate.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libsubcmd/pager.o
+  INSTALL /build/linux/tools/objtool/libsubcmd/include/subcmd/parse-options.h
+  INSTALL /build/linux/tools/objtool/libsubcmd/include/subcmd/run-command.h
+  CC      /build/linux/tools/bpf/resolve_btfids/libsubcmd/parse-options.o
+  INSTALL libsubcmd_headers
+  CC      /build/linux/tools/bpf/resolve_btfids/libsubcmd/run-command.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libsubcmd/sigchain.o
+  CC      /build/linux/tools/bpf/resolve_btfids/libsubcmd/subcmd-config.o
+  CC      /build/linux/tools/objtool/libsubcmd/help.o
+  CC      /build/linux/tools/objtool/libsubcmd/exec-cmd.o
+  CC      /build/linux/tools/objtool/libsubcmd/parse-options.o
+  CC      /build/linux/tools/objtool/libsubcmd/pager.o
+  CC      /build/linux/tools/objtool/libsubcmd/run-command.o
+  CC      /build/linux/tools/objtool/libsubcmd/sigchain.o
+  CC      /build/linux/tools/objtool/libsubcmd/subcmd-config.o
+  LD      /build/linux/tools/bpf/resolve_btfids/libsubcmd/libsubcmd-in.o
+  AR      /build/linux/tools/bpf/resolve_btfids/libsubcmd/libsubcmd.a
+  LD      /build/linux/tools/objtool/libsubcmd/libsubcmd-in.o
+  AR      /build/linux/tools/objtool/libsubcmd/libsubcmd.a
+  UPD     include/config/kernel.release
+  UPD     include/generated/utsrelease.h
+  CC      /build/linux/tools/objtool/weak.o
+  CC      scripts/mod/empty.o
+  CC      /build/linux/tools/objtool/check.o
+  HOSTCC  scripts/mod/mk_elfconfig
+  CC      /build/linux/tools/objtool/builtin-check.o
+  CC      /build/linux/tools/objtool/special.o
+  CC      /build/linux/tools/objtool/elf.o
+  CC      /build/linux/tools/objtool/objtool.o
+  CC      /build/linux/tools/objtool/disas.o
+  MKDIR   /build/linux/tools/objtool/arch/x86/lib/
+  CC      /build/linux/tools/objtool/trace.o
+  MKDIR   /build/linux/tools/objtool/arch/x86/lib/
+  CC      scripts/mod/devicetable-offsets.s
+  CC      /build/linux/tools/objtool/orc_gen.o
+  CC      /build/linux/tools/objtool/orc_dump.o
+  CC      /build/linux/tools/objtool/arch/x86/orc.o
+  GEN     /build/linux/tools/objtool/arch/x86/lib/cpu-feature-names.c
+  GEN     /build/linux/tools/objtool/arch/x86/lib/inat-tables.c
+  CC      /build/linux/tools/objtool/builtin-klp.o
+  CC      /build/linux/tools/objtool/klp-diff.o
+  CC      /build/linux/tools/objtool/arch/x86/special.o
+  CC      /build/linux/tools/objtool/arch/x86/decode.o
+  CC      /build/linux/tools/objtool/klp-post-link.o
+  CC      /build/linux/tools/objtool/libstring.o
+  MKELF   scripts/mod/elfconfig.h
+  CC      /build/linux/tools/objtool/libctype.o
+  HOSTCC  scripts/mod/modpost.o
+  HOSTCC  scripts/mod/sumversion.o
+  CC      /build/linux/tools/objtool/str_error_r.o
+  CC      /build/linux/tools/objtool/librbtree.o
+  CC      /build/linux/tools/objtool/signal.o
+  HOSTCC  scripts/mod/symsearch.o
+  UPD     scripts/mod/devicetable-offsets.h
+  HOSTCC  scripts/mod/file2alias.o
+  LD      /build/linux/tools/objtool/arch/x86/objtool-in.o
+  HOSTLD  scripts/mod/modpost
+  CC      kernel/bounds.s
+  CHKSHA1 include/linux/atomic/atomic-long.h
+  CHKSHA1 include/linux/atomic/atomic-arch-fallback.h
+  CHKSHA1 include/linux/atomic/atomic-instrumented.h
+  UPD     include/generated/timeconst.h
+  UPD     include/generated/bounds.h
+  CC      arch/x86/kernel/asm-offsets.s
+  LD      /build/linux/tools/objtool/objtool-in.o
+  UPD     include/generated/asm-offsets.h
+  LINK    /build/linux/tools/objtool/objtool
+  CC      kernel/sched/rq-offsets.s
+  LD      /build/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/libbpf-in.o
+  LINK    /build/linux/tools/bpf/resolve_btfids/libbpf/libbpf.a
+  HOSTCC  /build/linux/tools/bpf/resolve_btfids/main.o
+  HOSTCC  /build/linux/tools/bpf/resolve_btfids/rbtree.o
+  HOSTCC  /build/linux/tools/bpf/resolve_btfids/ctype.o
+  HOSTCC  /build/linux/tools/bpf/resolve_btfids/zalloc.o
+  HOSTCC  /build/linux/tools/bpf/resolve_btfids/str_error_r.o
+  HOSTCC  /build/linux/tools/bpf/resolve_btfids/string.o
+  HOSTLD  /build/linux/tools/bpf/resolve_btfids/resolve_btfids-in.o
+  LINK     resolve_btfids
+  UPD     include/generated/rq-offsets.h
+  CALL    scripts/checksyscalls.sh
+  GEN     scripts/gdb/linux/constants.py
+  RUSTC L rust/core.o
+  BINDGEN rust/bindings/bindings_generated.rs
+  BINDGEN rust/bindings/bindings_helpers_generated.rs
+  RUSTC P rust/libpin_init_internal.so
+  CC      rust/helpers/helpers.o
+  RUSTC PL rust/libproc_macro2.rlib
+  RSCPP     rust/kernel/generated_arch_static_branch_asm.rs
+  BINDGEN rust/uapi/uapi_generated.rs
+  RSCPP     rust/kernel/generated_arch_warn_asm.rs
+  RSCPP     rust/kernel/generated_arch_reachable_asm.rs
+  EXPORTS rust/exports_helpers_generated.h
+  RUSTC PL rust/libquote.rlib
+  RUSTC PL rust/libsyn.rlib
+  RUSTC P rust/libmacros.so
+  EXPORTS rust/exports_core_generated.h
+  RUSTC L rust/compiler_builtins.o
+  RUSTC L rust/ffi.o
+  RUSTC L rust/pin_init.o
+  RUSTC L rust/build_error.o
+  RUSTC L rust/bindings.o
+  RUSTC L rust/uapi.o
+  EXPORTS rust/exports_bindings_generated.h
+  RUSTC L rust/kernel.o
+error[E0560]: struct `blk_mq_tag_set` has no field named `ops`
+  --> rust/kernel/block/mq/tag_set.rs:48:21
+   |
+48 |                     ops: OperationsVTable::<T>::build(),
+   |                     ^^^ `blk_mq_tag_set` does not have this field
+   |
+   = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_tag_set` has no field named `nr_hw_queues`
+  --> rust/kernel/block/mq/tag_set.rs:49:21
+   |
+49 |                     nr_hw_queues,
+   |                     ^^^^^^^^^^^^ `blk_mq_tag_set` does not have this field
+   |
+   = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_tag_set` has no field named `timeout`
+  --> rust/kernel/block/mq/tag_set.rs:50:21
+   |
+50 |                     timeout: 0, // 0 means default which is 30Hz in C
+   |                     ^^^^^^^ `blk_mq_tag_set` does not have this field
+   |
+   = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_tag_set` has no field named `numa_node`
+  --> rust/kernel/block/mq/tag_set.rs:51:21
+   |
+51 |                     numa_node: bindings::NUMA_NO_NODE,
+   |                     ^^^^^^^^^ `blk_mq_tag_set` does not have this field
+   |
+   = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_tag_set` has no field named `queue_depth`
+  --> rust/kernel/block/mq/tag_set.rs:52:21
+   |
+52 |                     queue_depth: num_tags,
+   |                     ^^^^^^^^^^^ `blk_mq_tag_set` does not have this field
+   |
+   = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_tag_set` has no field named `cmd_size`
+  --> rust/kernel/block/mq/tag_set.rs:53:21
+   |
+53 |                     cmd_size,
+   |                     ^^^^^^^^ `blk_mq_tag_set` does not have this field
+   |
+   = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_tag_set` has no field named `flags`
+  --> rust/kernel/block/mq/tag_set.rs:54:21
+   |
+54 |                     flags: 0,
+   |                     ^^^^^ `blk_mq_tag_set` does not have this field
+   |
+   = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_tag_set` has no field named `driver_data`
+  --> rust/kernel/block/mq/tag_set.rs:55:21
+   |
+55 |                     driver_data: core::ptr::null_mut::<crate::ffi::c_void>(),
+   |                     ^^^^^^^^^^^ `blk_mq_tag_set` does not have this field
+   |
+   = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_tag_set` has no field named `nr_maps`
+  --> rust/kernel/block/mq/tag_set.rs:56:21
+   |
+56 |                     nr_maps: num_maps,
+   |                     ^^^^^^^ `blk_mq_tag_set` does not have this field
+   |
+   = note: available fields are: `_address`
+
+error[E0282]: type annotations needed
+  --> rust/kernel/block/mq/tag_set.rs:61:23
+   |
+61 |             .map_err(|e| e.into());
+   |                       ^  - type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+61 |             .map_err(|e: /* Type */| e.into());
+   |                        ++++++++++++
+
+error[E0609]: no field `su_group` on type `configfs_subsystem`
+   --> rust/kernel/configfs.rs:159:49
+    |
+159 | ...                   &mut (*place.get()).su_group,
+    |                                           ^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `su_mutex` on type `configfs_subsystem`
+   --> rust/kernel/configfs.rs:168:49
+    |
+168 | ...                   &mut (*place.get()).su_mutex,
+    |                                           ^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver_data` on type `acpi_device_id`
+  --> rust/kernel/acpi.rs:27:87
+   |
+27 |     const DRIVER_DATA_OFFSET: usize = core::mem::offset_of!(bindings::acpi_device_id, driver_data);
+   |                                                                                       ^^^^^^^^^^^
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `driver_data` on type `acpi_device_id`
+  --> rust/kernel/acpi.rs:30:16
+   |
+30 |         self.0.driver_data
+   |                ^^^^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `id` on type `acpi_device_id`
+  --> rust/kernel/acpi.rs:45:18
+   |
+45 |             acpi.id[i] = src[i];
+   |                  ^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `logical_block_size` on type `bindings::queue_limits`
+   --> rust/kernel/block/mq/gen_disk.rs:113:13
+    |
+113 |         lim.logical_block_size = self.logical_block_size;
+    |             ^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `physical_block_size` on type `bindings::queue_limits`
+   --> rust/kernel/block/mq/gen_disk.rs:114:13
+    |
+114 |         lim.physical_block_size = self.physical_block_size;
+    |             ^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `features` on type `bindings::queue_limits`
+   --> rust/kernel/block/mq/gen_disk.rs:116:17
+    |
+116 |             lim.features = bindings::BLK_FEAT_ROTATIONAL;
+    |                 ^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `fops` on type `gendisk`
+   --> rust/kernel/block/mq/gen_disk.rs:154:29
+    |
+154 |         unsafe { (*gendisk).fops = &TABLE };
+    |                             ^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `disk_name` on type `gendisk`
+   --> rust/kernel/block/mq/gen_disk.rs:160:38
+    |
+160 |             unsafe { &mut (*gendisk).disk_name },
+    |                                      ^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `submit_bio`
+   --> rust/kernel/block/mq/gen_disk.rs:130:13
+    |
+130 |             submit_bio: None,
+    |             ^^^^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `open`
+   --> rust/kernel/block/mq/gen_disk.rs:131:13
+    |
+131 |             open: None,
+    |             ^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `release`
+   --> rust/kernel/block/mq/gen_disk.rs:132:13
+    |
+132 |             release: None,
+    |             ^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `ioctl`
+   --> rust/kernel/block/mq/gen_disk.rs:133:13
+    |
+133 |             ioctl: None,
+    |             ^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `compat_ioctl`
+   --> rust/kernel/block/mq/gen_disk.rs:134:13
+    |
+134 |             compat_ioctl: None,
+    |             ^^^^^^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `check_events`
+   --> rust/kernel/block/mq/gen_disk.rs:135:13
+    |
+135 |             check_events: None,
+    |             ^^^^^^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `unlock_native_capacity`
+   --> rust/kernel/block/mq/gen_disk.rs:136:13
+    |
+136 |             unlock_native_capacity: None,
+    |             ^^^^^^^^^^^^^^^^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `getgeo`
+   --> rust/kernel/block/mq/gen_disk.rs:137:13
+    |
+137 |             getgeo: None,
+    |             ^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `set_read_only`
+   --> rust/kernel/block/mq/gen_disk.rs:138:13
+    |
+138 |             set_read_only: None,
+    |             ^^^^^^^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `swap_slot_free_notify`
+   --> rust/kernel/block/mq/gen_disk.rs:139:13
+    |
+139 |             swap_slot_free_notify: None,
+    |             ^^^^^^^^^^^^^^^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `report_zones`
+   --> rust/kernel/block/mq/gen_disk.rs:140:13
+    |
+140 |             report_zones: None,
+    |             ^^^^^^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `devnode`
+   --> rust/kernel/block/mq/gen_disk.rs:141:13
+    |
+141 |             devnode: None,
+    |             ^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `alternative_gpt_sector`
+   --> rust/kernel/block/mq/gen_disk.rs:142:13
+    |
+142 |             alternative_gpt_sector: None,
+    |             ^^^^^^^^^^^^^^^^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `get_unique_id`
+   --> rust/kernel/block/mq/gen_disk.rs:143:13
+    |
+143 |             get_unique_id: None,
+    |             ^^^^^^^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `owner`
+   --> rust/kernel/block/mq/gen_disk.rs:147:13
+    |
+147 |             owner: core::ptr::null_mut(),
+    |             ^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `pr_ops`
+   --> rust/kernel/block/mq/gen_disk.rs:148:13
+    |
+148 |             pr_ops: core::ptr::null_mut(),
+    |             ^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `free_disk`
+   --> rust/kernel/block/mq/gen_disk.rs:149:13
+    |
+149 |             free_disk: None,
+    |             ^^^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `block_device_operations` has no field named `poll_bio`
+   --> rust/kernel/block/mq/gen_disk.rs:150:13
+    |
+150 |             poll_bio: None,
+    |             ^^^^^^^^ `block_device_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0609]: no field `queue` on type `gendisk`
+   --> rust/kernel/block/mq/gen_disk.rs:214:53
+    |
+214 |         let queue_data = unsafe { (*(*self.gendisk).queue).queuedata };
+    |                                                     ^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `queue` on type `blk_mq_hw_ctx`
+   --> rust/kernel/block/mq/operations.rs:105:45
+    |
+105 |         let queue_data = unsafe { (*(*hctx).queue).queuedata };
+    |                                             ^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `queue` on type `blk_mq_hw_ctx`
+   --> rust/kernel/block/mq/operations.rs:140:45
+    |
+140 |         let queue_data = unsafe { (*(*hctx).queue).queuedata };
+    |                                             ^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `queue_rq`
+   --> rust/kernel/block/mq/operations.rs:258:9
+    |
+258 |         queue_rq: Some(Self::queue_rq_callback),
+    |         ^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `queue_rqs`
+   --> rust/kernel/block/mq/operations.rs:259:9
+    |
+259 |         queue_rqs: None,
+    |         ^^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `commit_rqs`
+   --> rust/kernel/block/mq/operations.rs:260:9
+    |
+260 |         commit_rqs: Some(Self::commit_rqs_callback),
+    |         ^^^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `get_budget`
+   --> rust/kernel/block/mq/operations.rs:261:9
+    |
+261 |         get_budget: None,
+    |         ^^^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `put_budget`
+   --> rust/kernel/block/mq/operations.rs:262:9
+    |
+262 |         put_budget: None,
+    |         ^^^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `set_rq_budget_token`
+   --> rust/kernel/block/mq/operations.rs:263:9
+    |
+263 |         set_rq_budget_token: None,
+    |         ^^^^^^^^^^^^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `get_rq_budget_token`
+   --> rust/kernel/block/mq/operations.rs:264:9
+    |
+264 |         get_rq_budget_token: None,
+    |         ^^^^^^^^^^^^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `timeout`
+   --> rust/kernel/block/mq/operations.rs:265:9
+    |
+265 |         timeout: None,
+    |         ^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `poll`
+   --> rust/kernel/block/mq/operations.rs:266:9
+    |
+266 |         poll: if T::HAS_POLL {
+    |         ^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `complete`
+   --> rust/kernel/block/mq/operations.rs:271:9
+    |
+271 |         complete: Some(Self::complete_callback),
+    |         ^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `init_hctx`
+   --> rust/kernel/block/mq/operations.rs:272:9
+    |
+272 |         init_hctx: Some(Self::init_hctx_callback),
+    |         ^^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `exit_hctx`
+   --> rust/kernel/block/mq/operations.rs:273:9
+    |
+273 |         exit_hctx: Some(Self::exit_hctx_callback),
+    |         ^^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `init_request`
+   --> rust/kernel/block/mq/operations.rs:274:9
+    |
+274 |         init_request: Some(Self::init_request_callback),
+    |         ^^^^^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `exit_request`
+   --> rust/kernel/block/mq/operations.rs:275:9
+    |
+275 |         exit_request: Some(Self::exit_request_callback),
+    |         ^^^^^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `cleanup_rq`
+   --> rust/kernel/block/mq/operations.rs:276:9
+    |
+276 |         cleanup_rq: None,
+    |         ^^^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `busy`
+   --> rust/kernel/block/mq/operations.rs:277:9
+    |
+277 |         busy: None,
+    |         ^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `map_queues`
+   --> rust/kernel/block/mq/operations.rs:278:9
+    |
+278 |         map_queues: None,
+    |         ^^^^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `blk_mq_ops` has no field named `show_rq`
+   --> rust/kernel/block/mq/operations.rs:280:9
+    |
+280 |         show_rq: None,
+    |         ^^^^^^^ `blk_mq_ops` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0609]: no field `su_mutex` on type `configfs_subsystem`
+   --> rust/kernel/configfs.rs:193:75
+    |
+193 |         unsafe { bindings::mutex_destroy(&raw mut (*self.subsystem.get()).su_mutex) };
+    |                                                                           ^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `su_group` on type `configfs_subsystem`
+   --> rust/kernel/configfs.rs:228:56
+    |
+228 |         unsafe { &raw const (*(*this).subsystem.get()).su_group }
+    |                                                        ^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `su_group` on type `configfs_subsystem`
+   --> rust/kernel/configfs.rs:233:88
+    |
+233 |         let c_subsys_ptr = unsafe { container_of!(group, bindings::configfs_subsystem, su_group) };
+    |                                                                                        ^^^^^^^^
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `su_group` on type `configfs_subsystem`
+   --> rust/kernel/configfs.rs:233:88
+    |
+233 |         let c_subsys_ptr = unsafe { container_of!(group, bindings::configfs_subsystem, su_group) };
+    |                                                                                        ^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `cg_subsys` on type `config_group`
+   --> rust/kernel/configfs.rs:310:36
+    |
+310 |     let is_root = unsafe { (*this).cg_subsys.is_null() };
+    |                                    ^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `cg_item` on type `config_group`
+   --> rust/kernel/configfs.rs:400:86
+    |
+400 |         let c_child_group_ptr = unsafe { container_of!(item, bindings::config_group, cg_item) };
+    |                                                                                      ^^^^^^^
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `cg_item` on type `config_group`
+   --> rust/kernel/configfs.rs:400:86
+    |
+400 |         let c_child_group_ptr = unsafe { container_of!(item, bindings::config_group, cg_item) };
+    |                                                                                      ^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `configfs_group_operations` has no field named `make_item`
+   --> rust/kernel/configfs.rs:420:9
+    |
+420 |         make_item: None,
+    |         ^^^^^^^^^ `configfs_group_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_group_operations` has no field named `make_group`
+   --> rust/kernel/configfs.rs:421:9
+    |
+421 |         make_group: Some(Self::make_group),
+    |         ^^^^^^^^^^ `configfs_group_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_group_operations` has no field named `disconnect_notify`
+   --> rust/kernel/configfs.rs:422:9
+    |
+422 |         disconnect_notify: None,
+    |         ^^^^^^^^^^^^^^^^^ `configfs_group_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_group_operations` has no field named `drop_item`
+   --> rust/kernel/configfs.rs:423:9
+    |
+423 |         drop_item: Some(Self::drop_item),
+    |         ^^^^^^^^^ `configfs_group_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_group_operations` has no field named `is_visible`
+   --> rust/kernel/configfs.rs:424:9
+    |
+424 |         is_visible: None,
+    |         ^^^^^^^^^^ `configfs_group_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_group_operations` has no field named `is_bin_visible`
+   --> rust/kernel/configfs.rs:425:9
+    |
+425 |         is_bin_visible: None,
+    |         ^^^^^^^^^^^^^^ `configfs_group_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0609]: no field `cg_item` on type `config_group`
+   --> rust/kernel/configfs.rs:449:88
+    |
+449 |         let c_group_ptr = unsafe { kernel::container_of!(this, bindings::config_group, cg_item) };
+    |                                                                                        ^^^^^^^
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `cg_item` on type `config_group`
+   --> rust/kernel/configfs.rs:449:88
+    |
+449 |         let c_group_ptr = unsafe { kernel::container_of!(this, bindings::config_group, cg_item) };
+    |                                                                                        ^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `configfs_item_operations` has no field named `release`
+   --> rust/kernel/configfs.rs:461:9
+    |
+461 |         release: Some(Self::release),
+    |         ^^^^^^^ `configfs_item_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_item_operations` has no field named `allow_link`
+   --> rust/kernel/configfs.rs:462:9
+    |
+462 |         allow_link: None,
+    |         ^^^^^^^^^^ `configfs_item_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_item_operations` has no field named `drop_link`
+   --> rust/kernel/configfs.rs:463:9
+    |
+463 |         drop_link: None,
+    |         ^^^^^^^^^ `configfs_item_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_item_operations` has no field named `release`
+   --> rust/kernel/configfs.rs:473:9
+    |
+473 |         release: None,
+    |         ^^^^^^^ `configfs_item_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_item_operations` has no field named `allow_link`
+   --> rust/kernel/configfs.rs:474:9
+    |
+474 |         allow_link: None,
+    |         ^^^^^^^^^^ `configfs_item_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_item_operations` has no field named `drop_link`
+   --> rust/kernel/configfs.rs:475:9
+    |
+475 |         drop_link: None,
+    |         ^^^^^^^^^ `configfs_item_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0609]: no field `cg_item` on type `config_group`
+   --> rust/kernel/configfs.rs:557:66
+    |
+557 |             unsafe { container_of!(item, bindings::config_group, cg_item) };
+    |                                                                  ^^^^^^^
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `cg_item` on type `config_group`
+   --> rust/kernel/configfs.rs:557:66
+    |
+557 |             unsafe { container_of!(item, bindings::config_group, cg_item) };
+    |                                                                  ^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `cg_item` on type `config_group`
+   --> rust/kernel/configfs.rs:591:66
+    |
+591 |             unsafe { container_of!(item, bindings::config_group, cg_item) };
+    |                                                                  ^^^^^^^
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `cg_item` on type `config_group`
+   --> rust/kernel/configfs.rs:591:66
+    |
+591 |             unsafe { container_of!(item, bindings::config_group, cg_item) };
+    |                                                                  ^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `configfs_attribute` has no field named `ca_name`
+   --> rust/kernel/configfs.rs:616:17
+    |
+616 |                 ca_name: crate::str::as_char_ptr_in_const_context(name),
+    |                 ^^^^^^^ `configfs_attribute` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_attribute` has no field named `ca_owner`
+   --> rust/kernel/configfs.rs:617:17
+    |
+617 |                 ca_owner: core::ptr::null_mut(),
+    |                 ^^^^^^^^ `configfs_attribute` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_attribute` has no field named `ca_mode`
+   --> rust/kernel/configfs.rs:618:17
+    |
+618 |                 ca_mode: 0o660,
+    |                 ^^^^^^^ `configfs_attribute` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_attribute` has no field named `show`
+   --> rust/kernel/configfs.rs:619:17
+    |
+619 |                 show: Some(Self::show),
+    |                 ^^^^ `configfs_attribute` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `configfs_attribute` has no field named `store`
+   --> rust/kernel/configfs.rs:620:17
+    |
+620 |                 store: if O::HAS_STORE {
+    |                 ^^^^^ `configfs_attribute` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `config_item_type` has no field named `ct_owner`
+   --> rust/kernel/configfs.rs:757:25
+    |
+757 |                         ct_owner: owner.as_ptr(),
+    |                         ^^^^^^^^ `config_item_type` does not have this field
+...
+787 | impl_item_type!(Subsystem<Data>);
+    | -------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_group_ops`
+   --> rust/kernel/configfs.rs:758:25
+    |
+758 |                         ct_group_ops: GroupOperationsVTable::<Data, Child>::vtable_ptr().cast_mut(),
+    |                         ^^^^^^^^^^^^ `config_item_type` does not have this field
+...
+787 | impl_item_type!(Subsystem<Data>);
+    | -------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_item_ops`
+   --> rust/kernel/configfs.rs:759:25
+    |
+759 |                         ct_item_ops: ItemOperationsVTable::<$tpe, Data>::vtable_ptr().cast_mut(),
+    |                         ^^^^^^^^^^^ `config_item_type` does not have this field
+...
+787 | impl_item_type!(Subsystem<Data>);
+    | -------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_attrs`
+   --> rust/kernel/configfs.rs:760:25
+    |
+760 |                         ct_attrs: core::ptr::from_ref(attributes).cast_mut().cast(),
+    |                         ^^^^^^^^ `config_item_type` does not have this field
+...
+787 | impl_item_type!(Subsystem<Data>);
+    | -------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_bin_attrs`
+   --> rust/kernel/configfs.rs:761:25
+    |
+761 |                         ct_bin_attrs: core::ptr::null_mut(),
+    |                         ^^^^^^^^^^^^ `config_item_type` does not have this field
+...
+787 | impl_item_type!(Subsystem<Data>);
+    | -------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_owner`
+   --> rust/kernel/configfs.rs:774:25
+    |
+774 |                         ct_owner: owner.as_ptr(),
+    |                         ^^^^^^^^ `config_item_type` does not have this field
+...
+787 | impl_item_type!(Subsystem<Data>);
+    | -------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_group_ops`
+   --> rust/kernel/configfs.rs:775:25
+    |
+775 |                         ct_group_ops: core::ptr::null_mut(),
+    |                         ^^^^^^^^^^^^ `config_item_type` does not have this field
+...
+787 | impl_item_type!(Subsystem<Data>);
+    | -------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_item_ops`
+   --> rust/kernel/configfs.rs:776:25
+    |
+776 |                         ct_item_ops: ItemOperationsVTable::<$tpe, Data>::vtable_ptr().cast_mut(),
+    |                         ^^^^^^^^^^^ `config_item_type` does not have this field
+...
+787 | impl_item_type!(Subsystem<Data>);
+    | -------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_attrs`
+   --> rust/kernel/configfs.rs:777:25
+    |
+777 |                         ct_attrs: core::ptr::from_ref(attributes).cast_mut().cast(),
+    |                         ^^^^^^^^ `config_item_type` does not have this field
+...
+787 | impl_item_type!(Subsystem<Data>);
+    | -------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_bin_attrs`
+   --> rust/kernel/configfs.rs:778:25
+    |
+778 |                         ct_bin_attrs: core::ptr::null_mut(),
+    |                         ^^^^^^^^^^^^ `config_item_type` does not have this field
+...
+787 | impl_item_type!(Subsystem<Data>);
+    | -------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_owner`
+   --> rust/kernel/configfs.rs:757:25
+    |
+757 |                         ct_owner: owner.as_ptr(),
+    |                         ^^^^^^^^ `config_item_type` does not have this field
+...
+788 | impl_item_type!(Group<Data>);
+    | ---------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_group_ops`
+   --> rust/kernel/configfs.rs:758:25
+    |
+758 |                         ct_group_ops: GroupOperationsVTable::<Data, Child>::vtable_ptr().cast_mut(),
+    |                         ^^^^^^^^^^^^ `config_item_type` does not have this field
+...
+788 | impl_item_type!(Group<Data>);
+    | ---------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_item_ops`
+   --> rust/kernel/configfs.rs:759:25
+    |
+759 |                         ct_item_ops: ItemOperationsVTable::<$tpe, Data>::vtable_ptr().cast_mut(),
+    |                         ^^^^^^^^^^^ `config_item_type` does not have this field
+...
+788 | impl_item_type!(Group<Data>);
+    | ---------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_attrs`
+   --> rust/kernel/configfs.rs:760:25
+    |
+760 |                         ct_attrs: core::ptr::from_ref(attributes).cast_mut().cast(),
+    |                         ^^^^^^^^ `config_item_type` does not have this field
+...
+788 | impl_item_type!(Group<Data>);
+    | ---------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_bin_attrs`
+   --> rust/kernel/configfs.rs:761:25
+    |
+761 |                         ct_bin_attrs: core::ptr::null_mut(),
+    |                         ^^^^^^^^^^^^ `config_item_type` does not have this field
+...
+788 | impl_item_type!(Group<Data>);
+    | ---------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_owner`
+   --> rust/kernel/configfs.rs:774:25
+    |
+774 |                         ct_owner: owner.as_ptr(),
+    |                         ^^^^^^^^ `config_item_type` does not have this field
+...
+788 | impl_item_type!(Group<Data>);
+    | ---------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_group_ops`
+   --> rust/kernel/configfs.rs:775:25
+    |
+775 |                         ct_group_ops: core::ptr::null_mut(),
+    |                         ^^^^^^^^^^^^ `config_item_type` does not have this field
+...
+788 | impl_item_type!(Group<Data>);
+    | ---------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_item_ops`
+   --> rust/kernel/configfs.rs:776:25
+    |
+776 |                         ct_item_ops: ItemOperationsVTable::<$tpe, Data>::vtable_ptr().cast_mut(),
+    |                         ^^^^^^^^^^^ `config_item_type` does not have this field
+...
+788 | impl_item_type!(Group<Data>);
+    | ---------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_attrs`
+   --> rust/kernel/configfs.rs:777:25
+    |
+777 |                         ct_attrs: core::ptr::from_ref(attributes).cast_mut().cast(),
+    |                         ^^^^^^^^ `config_item_type` does not have this field
+...
+788 | impl_item_type!(Group<Data>);
+    | ---------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `config_item_type` has no field named `ct_bin_attrs`
+   --> rust/kernel/configfs.rs:778:25
+    |
+778 |                         ct_bin_attrs: core::ptr::null_mut(),
+    |                         ^^^^^^^^^^^^ `config_item_type` does not have this field
+...
+788 | impl_item_type!(Group<Data>);
+    | ---------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `impl_item_type` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0609]: no field `frequency` on type `cpufreq_frequency_table`
+   --> rust/kernel/cpufreq.rs:255:48
+    |
+255 |             (*self.as_raw().add(index.into())).frequency.try_into()?
+    |                                                ^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `flags` on type `cpufreq_frequency_table`
+   --> rust/kernel/cpufreq.rs:264:53
+    |
+264 |         unsafe { (*self.as_raw().add(index.into())).flags }
+    |                                                     ^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver_data` on type `cpufreq_frequency_table`
+   --> rust/kernel/cpufreq.rs:272:53
+    |
+272 |         unsafe { (*self.as_raw().add(index.into())).driver_data }
+    |                                                     ^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `cpufreq_frequency_table` has no field named `flags`
+   --> rust/kernel/cpufreq.rs:369:17
+    |
+369 |                 flags,
+    |                 ^^^^^ `cpufreq_frequency_table` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `cpufreq_frequency_table` has no field named `driver_data`
+   --> rust/kernel/cpufreq.rs:370:17
+    |
+370 |                 driver_data,
+    |                 ^^^^^^^^^^^ `cpufreq_frequency_table` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `cpufreq_frequency_table` has no field named `frequency`
+   --> rust/kernel/cpufreq.rs:371:17
+    |
+371 |                 frequency: freq.as_khz() as u32,
+    |                 ^^^^^^^^^ `cpufreq_frequency_table` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0609]: no field `cpu` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:470:58
+    |
+470 |         unsafe { CpuId::from_u32_unchecked(self.as_ref().cpu) }
+    |                                                          ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `min` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:476:39
+    |
+476 |         Hertz::from_khz(self.as_ref().min as usize)
+    |                                       ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `min` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:482:27
+    |
+482 |         self.as_mut_ref().min = min.as_khz() as u32;
+    |                           ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `max` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:489:39
+    |
+489 |         Hertz::from_khz(self.as_ref().max as usize)
+    |                                       ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `max` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:495:27
+    |
+495 |         self.as_mut_ref().max = max.as_khz() as u32;
+    |                           ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `cur` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:502:39
+    |
+502 |         Hertz::from_khz(self.as_ref().cur as usize)
+    |                                       ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `suspend_freq` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:508:39
+    |
+508 |         Hertz::from_khz(self.as_ref().suspend_freq as usize)
+    |                                       ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `suspend_freq` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:514:27
+    |
+514 |         self.as_mut_ref().suspend_freq = freq.as_khz() as u32;
+    |                           ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `cpus` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:545:75
+    |
+545 |         unsafe { cpumask::CpumaskVar::from_raw_mut(&mut self.as_mut_ref().cpus) }
+    |                                                                           ^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `clk` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:557:27
+    |
+557 |         self.as_mut_ref().clk = clk.as_raw();
+    |                           ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dvfs_possible_from_any_cpu` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:564:27
+    |
+564 |         self.as_mut_ref().dvfs_possible_from_any_cpu = val;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `fast_switch_possible` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:571:23
+    |
+571 |         self.as_ref().fast_switch_possible
+    |                       ^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `fast_switch_possible` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:577:27
+    |
+577 |         self.as_mut_ref().fast_switch_possible = val;
+    |                           ^^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `cpuinfo` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:584:27
+    |
+584 |         self.as_mut_ref().cpuinfo.transition_latency = latency_ns;
+    |                           ^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `cpuinfo` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:591:27
+    |
+591 |         self.as_mut_ref().cpuinfo.min_freq = min_freq.as_khz() as u32;
+    |                           ^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `cpuinfo` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:598:27
+    |
+598 |         self.as_mut_ref().cpuinfo.max_freq = max_freq.as_khz() as u32;
+    |                           ^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `transition_delay_us` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:606:27
+    |
+606 |         self.as_mut_ref().transition_delay_us = transition_delay_us;
+    |                           ^^^^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `freq_table` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:612:26
+    |
+612 |         if self.as_ref().freq_table.is_null() {
+    |                          ^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `freq_table` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:618:51
+    |
+618 |         Ok(unsafe { Table::from_raw(self.as_ref().freq_table) })
+    |                                                   ^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `freq_table` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:629:27
+    |
+629 |         self.as_mut_ref().freq_table = table.as_raw();
+    |                           ^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver_data` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:635:26
+    |
+635 |         if self.as_ref().driver_data.is_null() {
+    |                          ^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver_data` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:639:51
+    |
+639 |             Some(unsafe { T::borrow(self.as_ref().driver_data.cast()) })
+    |                                                   ^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver_data` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:649:26
+    |
+649 |         if self.as_ref().driver_data.is_null() {
+    |                          ^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver_data` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:651:31
+    |
+651 |             self.as_mut_ref().driver_data = <T as ForeignOwnable>::into_foreign(data).cast();
+    |                               ^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver_data` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:660:26
+    |
+660 |         if self.as_ref().driver_data.is_null() {
+    |                          ^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver_data` on type `&bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:666:76
+    |
+666 |                 unsafe { <T as ForeignOwnable>::from_foreign(self.as_ref().driver_data.cast()) },
+    |                                                                            ^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver_data` on type `&mut bindings::cpufreq_policy`
+   --> rust/kernel/cpufreq.rs:668:31
+    |
+668 |             self.as_mut_ref().driver_data = ptr::null_mut();
+    |                               ^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `euid` on type `bindings::cred`
+  --> rust/kernel/cred.rs:74:49
+   |
+74 |         Kuid::from_raw(unsafe { (*self.0.get()).euid })
+   |                                                 ^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `i_private` on type `bindings::inode`
+  --> rust/kernel/debugfs/file_ops.rs:87:34
+   |
+87 |     let data = unsafe { (*inode).i_private };
+   |                                  ^^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `private` on type `bindings::seq_file`
+   --> rust/kernel/debugfs/file_ops.rs:109:35
+    |
+109 |     let data = unsafe { &*((*seq).private.cast::<T>()) };
+    |                                   ^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `read`
+   --> rust/kernel/debugfs/file_ops.rs:125:13
+    |
+125 |             read: Some(bindings::seq_read),
+    |             ^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `llseek`
+   --> rust/kernel/debugfs/file_ops.rs:126:13
+    |
+126 |             llseek: Some(bindings::seq_lseek),
+    |             ^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `release`
+   --> rust/kernel/debugfs/file_ops.rs:127:13
+    |
+127 |             release: Some(bindings::single_release),
+    |             ^^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `open`
+   --> rust/kernel/debugfs/file_ops.rs:128:13
+    |
+128 |             open: Some(writer_open::<Self>),
+    |             ^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0609]: no field `private_data` on type `bindings::file`
+   --> rust/kernel/debugfs/file_ops.rs:163:39
+    |
+163 |     let seq = unsafe { &mut *((*file).private_data.cast::<bindings::seq_file>()) };
+    |                                       ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `open`
+   --> rust/kernel/debugfs/file_ops.rs:177:13
+    |
+177 |             open: Some(writer_open::<T>),
+    |             ^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `read`
+   --> rust/kernel/debugfs/file_ops.rs:178:13
+    |
+178 |             read: Some(bindings::seq_read),
+    |             ^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `write`
+   --> rust/kernel/debugfs/file_ops.rs:179:13
+    |
+179 |             write: Some(write::<T>),
+    |             ^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `llseek`
+   --> rust/kernel/debugfs/file_ops.rs:180:13
+    |
+180 |             llseek: Some(bindings::seq_lseek),
+    |             ^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `release`
+   --> rust/kernel/debugfs/file_ops.rs:181:13
+    |
+181 |             release: Some(bindings::single_release),
+    |             ^^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0609]: no field `private_data` on type `bindings::file`
+   --> rust/kernel/debugfs/file_ops.rs:206:22
+    |
+206 |     unsafe { (*file).private_data = (*inode).i_private };
+    |                      ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `i_private` on type `bindings::inode`
+   --> rust/kernel/debugfs/file_ops.rs:206:46
+    |
+206 |     unsafe { (*file).private_data = (*inode).i_private };
+    |                                              ^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `private_data` on type `bindings::file`
+   --> rust/kernel/debugfs/file_ops.rs:224:36
+    |
+224 |     let data = unsafe { &*((*file).private_data as *const T) };
+    |                                    ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `open`
+   --> rust/kernel/debugfs/file_ops.rs:235:13
+    |
+235 |             open: Some(write_only_open),
+    |             ^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `write`
+   --> rust/kernel/debugfs/file_ops.rs:236:13
+    |
+236 |             write: Some(write_only_write::<T>),
+    |             ^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `llseek`
+   --> rust/kernel/debugfs/file_ops.rs:237:13
+    |
+237 |             llseek: Some(bindings::noop_llseek),
+    |             ^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0609]: no field `private_data` on type `bindings::file`
+   --> rust/kernel/debugfs/file_ops.rs:259:36
+    |
+259 |     let this = unsafe { &*((*file).private_data.cast::<T>()) };
+    |                                    ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `read`
+   --> rust/kernel/debugfs/file_ops.rs:288:13
+    |
+288 |             read: Some(blob_read::<T>),
+    |             ^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `llseek`
+   --> rust/kernel/debugfs/file_ops.rs:289:13
+    |
+289 |             llseek: Some(bindings::default_llseek),
+    |             ^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `open`
+   --> rust/kernel/debugfs/file_ops.rs:290:13
+    |
+290 |             open: Some(bindings::simple_open),
+    |             ^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0609]: no field `private_data` on type `bindings::file`
+   --> rust/kernel/debugfs/file_ops.rs:314:36
+    |
+314 |     let this = unsafe { &*((*file).private_data.cast::<T>()) };
+    |                                    ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `write`
+   --> rust/kernel/debugfs/file_ops.rs:343:13
+    |
+343 |             write: Some(blob_write::<T>),
+    |             ^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `llseek`
+   --> rust/kernel/debugfs/file_ops.rs:344:13
+    |
+344 |             llseek: Some(bindings::default_llseek),
+    |             ^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `open`
+   --> rust/kernel/debugfs/file_ops.rs:345:13
+    |
+345 |             open: Some(bindings::simple_open),
+    |             ^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `read`
+   --> rust/kernel/debugfs/file_ops.rs:368:13
+    |
+368 |             read: Some(blob_read::<T>),
+    |             ^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `write`
+   --> rust/kernel/debugfs/file_ops.rs:369:13
+    |
+369 |             write: Some(blob_write::<T>),
+    |             ^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `llseek`
+   --> rust/kernel/debugfs/file_ops.rs:370:13
+    |
+370 |             llseek: Some(bindings::default_llseek),
+    |             ^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `open`
+   --> rust/kernel/debugfs/file_ops.rs:371:13
+    |
+371 |             open: Some(bindings::simple_open),
+    |             ^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0609]: no field `p` on type `bindings::device`
+   --> rust/kernel/device.rs:214:49
+    |
+214 |         let private = unsafe { (*self.as_raw()).p };
+    |                                                 ^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `p` on type `bindings::device`
+   --> rust/kernel/device.rs:301:49
+    |
+301 |         let private = unsafe { (*self.as_raw()).p };
+    |                                                 ^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `parent` on type `bindings::device`
+   --> rust/kernel/device.rs:351:48
+    |
+351 |         let parent = unsafe { (*self.as_raw()).parent };
+    |                                                ^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `p_cb` on type `bindings::device_driver`
+   --> rust/kernel/driver.rs:214:26
+    |
+214 |         unsafe { (*base).p_cb.post_unbind_rust = Some(Self::post_unbind_callback) };
+    |                          ^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `drm_driver` has no field named `load`
+  --> rust/kernel/drm/device.rs:65:9
+   |
+65 |         load: None,
+   |         ^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `open`
+  --> rust/kernel/drm/device.rs:66:9
+   |
+66 |         open: Some(drm::File::<T::File>::open_callback),
+   |         ^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `postclose`
+  --> rust/kernel/drm/device.rs:67:9
+   |
+67 |         postclose: Some(drm::File::<T::File>::postclose_callback),
+   |         ^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `unload`
+  --> rust/kernel/drm/device.rs:68:9
+   |
+68 |         unload: None,
+   |         ^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `release`
+  --> rust/kernel/drm/device.rs:69:9
+   |
+69 |         release: Some(Self::release),
+   |         ^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `master_set`
+  --> rust/kernel/drm/device.rs:70:9
+   |
+70 |         master_set: None,
+   |         ^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `master_drop`
+  --> rust/kernel/drm/device.rs:71:9
+   |
+71 |         master_drop: None,
+   |         ^^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `debugfs_init`
+  --> rust/kernel/drm/device.rs:72:9
+   |
+72 |         debugfs_init: None,
+   |         ^^^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `gem_create_object`
+  --> rust/kernel/drm/device.rs:73:9
+   |
+73 |         gem_create_object: T::Object::ALLOC_OPS.gem_create_object,
+   |         ^^^^^^^^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `prime_handle_to_fd`
+  --> rust/kernel/drm/device.rs:74:9
+   |
+74 |         prime_handle_to_fd: T::Object::ALLOC_OPS.prime_handle_to_fd,
+   |         ^^^^^^^^^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `prime_fd_to_handle`
+  --> rust/kernel/drm/device.rs:75:9
+   |
+75 |         prime_fd_to_handle: T::Object::ALLOC_OPS.prime_fd_to_handle,
+   |         ^^^^^^^^^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `gem_prime_import`
+  --> rust/kernel/drm/device.rs:76:9
+   |
+76 |         gem_prime_import: T::Object::ALLOC_OPS.gem_prime_import,
+   |         ^^^^^^^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `gem_prime_import_sg_table`
+  --> rust/kernel/drm/device.rs:77:9
+   |
+77 |         gem_prime_import_sg_table: T::Object::ALLOC_OPS.gem_prime_import_sg_table,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `dumb_create`
+  --> rust/kernel/drm/device.rs:78:9
+   |
+78 |         dumb_create: T::Object::ALLOC_OPS.dumb_create,
+   |         ^^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `dumb_map_offset`
+  --> rust/kernel/drm/device.rs:79:9
+   |
+79 |         dumb_map_offset: T::Object::ALLOC_OPS.dumb_map_offset,
+   |         ^^^^^^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `show_fdinfo`
+  --> rust/kernel/drm/device.rs:80:9
+   |
+80 |         show_fdinfo: None,
+   |         ^^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `fbdev_probe`
+  --> rust/kernel/drm/device.rs:81:9
+   |
+81 |         fbdev_probe: None,
+   |         ^^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `major`
+  --> rust/kernel/drm/device.rs:83:9
+   |
+83 |         major: T::INFO.major,
+   |         ^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `minor`
+  --> rust/kernel/drm/device.rs:84:9
+   |
+84 |         minor: T::INFO.minor,
+   |         ^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `patchlevel`
+  --> rust/kernel/drm/device.rs:85:9
+   |
+85 |         patchlevel: T::INFO.patchlevel,
+   |         ^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `name`
+  --> rust/kernel/drm/device.rs:86:9
+   |
+86 |         name: crate::str::as_char_ptr_in_const_context(T::INFO.name).cast_mut(),
+   |         ^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `desc`
+  --> rust/kernel/drm/device.rs:87:9
+   |
+87 |         desc: crate::str::as_char_ptr_in_const_context(T::INFO.desc).cast_mut(),
+   |         ^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `driver_features`
+  --> rust/kernel/drm/device.rs:89:9
+   |
+89 |         driver_features: drm::driver::FEAT_GEM,
+   |         ^^^^^^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `ioctls`
+  --> rust/kernel/drm/device.rs:90:9
+   |
+90 |         ioctls: T::IOCTLS.as_ptr(),
+   |         ^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `num_ioctls`
+  --> rust/kernel/drm/device.rs:91:9
+   |
+91 |         num_ioctls: T::IOCTLS.len() as i32,
+   |         ^^^^^^^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0560]: struct `drm_driver` has no field named `fops`
+  --> rust/kernel/drm/device.rs:92:9
+   |
+92 |         fops: &Self::GEM_FOPS,
+   |         ^^^^ `drm_driver` does not have this field
+   |
+   = note: all struct fields are already assigned
+
+error[E0609]: no field `dev` on type `drm_device`
+   --> rust/kernel/drm/device.rs:220:60
+    |
+220 |         unsafe { device::Device::from_raw((*self.as_raw()).dev) }
+    |                                                            ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver_priv` on type `drm_file`
+  --> rust/kernel/drm/file.rs:46:35
+   |
+46 |         unsafe { (*self.as_raw()).driver_priv }.cast()
+   |                                   ^^^^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `driver_priv` on type `drm_file`
+  --> rust/kernel/drm/file.rs:81:35
+   |
+81 |         unsafe { (*file.as_raw()).driver_priv = driver_priv.cast() };
+   |                                   ^^^^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `size` on type `drm_gem_object`
+   --> rust/kernel/drm/gem/mod.rs:106:35
+    |
+106 |         unsafe { (*self.as_raw()).size }
+    |                                   ^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `vma_node` on type `drm_gem_object`
+   --> rust/kernel/drm/gem/mod.rs:159:82
+    |
+159 |         Ok(unsafe { bindings::drm_vma_node_offset_addr(&raw mut (*self.as_raw()).vma_node) })
+    |                                                                                  ^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `funcs` on type `drm_gem_object`
+   --> rust/kernel/drm/gem/mod.rs:208:34
+    |
+208 |         unsafe { (*obj.as_raw()).funcs = &Self::OBJECT_FUNCS };
+    |                                  ^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `drm_gem_object`
+   --> rust/kernel/drm/gem/mod.rs:231:57
+    |
+231 |         unsafe { drm::Device::from_raw((*self.as_raw()).dev) }
+    |                                                         ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `owner` on type `bindings::file_operations`
+   --> rust/kernel/drm/gem/mod.rs:300:10
+    |
+300 |     fops.owner = core::ptr::null_mut();
+    |          ^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `open` on type `bindings::file_operations`
+   --> rust/kernel/drm/gem/mod.rs:301:10
+    |
+301 |     fops.open = Some(bindings::drm_open);
+    |          ^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `release` on type `bindings::file_operations`
+   --> rust/kernel/drm/gem/mod.rs:302:10
+    |
+302 |     fops.release = Some(bindings::drm_release);
+    |          ^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `unlocked_ioctl` on type `bindings::file_operations`
+   --> rust/kernel/drm/gem/mod.rs:303:10
+    |
+303 |     fops.unlocked_ioctl = Some(bindings::drm_ioctl);
+    |          ^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `compat_ioctl` on type `bindings::file_operations`
+   --> rust/kernel/drm/gem/mod.rs:306:14
+    |
+306 |         fops.compat_ioctl = Some(bindings::drm_compat_ioctl);
+    |              ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `poll` on type `bindings::file_operations`
+   --> rust/kernel/drm/gem/mod.rs:308:10
+    |
+308 |     fops.poll = Some(bindings::drm_poll);
+    |          ^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `read` on type `bindings::file_operations`
+   --> rust/kernel/drm/gem/mod.rs:309:10
+    |
+309 |     fops.read = Some(bindings::drm_read);
+    |          ^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `llseek` on type `bindings::file_operations`
+   --> rust/kernel/drm/gem/mod.rs:310:10
+    |
+310 |     fops.llseek = Some(bindings::noop_llseek);
+    |          ^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `mmap` on type `bindings::file_operations`
+   --> rust/kernel/drm/gem/mod.rs:311:10
+    |
+311 |     fops.mmap = Some(bindings::drm_gem_mmap);
+    |          ^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `fop_flags` on type `bindings::file_operations`
+   --> rust/kernel/drm/gem/mod.rs:312:10
+    |
+312 |     fops.fop_flags = bindings::FOP_UNSIGNED_OFFSET;
+    |          ^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `f_cred` on type `bindings::file`
+   --> rust/kernel/fs/file.rs:325:45
+    |
+325 |         let ptr = unsafe { (*self.as_ptr()).f_cred };
+    |                                             ^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `f_flags` on type `bindings::file`
+   --> rust/kernel/fs/file.rs:343:55
+    |
+343 |         unsafe { core::ptr::addr_of!((*self.as_ptr()).f_flags).read_volatile() }
+    |                                                       ^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `ki_filp` on type `bindings::kiocb`
+  --> rust/kernel/fs/kiocb.rs:52:51
+   |
+52 |         let private = unsafe { (*(*self.as_raw()).ki_filp).private_data };
+   |                                                   ^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `ki_pos` on type `bindings::kiocb`
+  --> rust/kernel/fs/kiocb.rs:60:35
+   |
+60 |         unsafe { (*self.as_raw()).ki_pos }
+   |                                   ^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `ki_pos` on type `bindings::kiocb`
+  --> rust/kernel/fs/kiocb.rs:66:40
+   |
+66 |         unsafe { &mut (*self.as_raw()).ki_pos }
+   |                                        ^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `driver` on type `i2c_driver`
+   --> rust/kernel/i2c.rs:103:81
+    |
+103 |     const DEVICE_DRIVER_OFFSET: usize = core::mem::offset_of!(Self::DriverType, driver);
+    |                                                                                 ^^^^^^
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver` on type `i2c_driver`
+   --> rust/kernel/i2c.rs:136:27
+    |
+136 |             (*idrv.get()).driver.name = name.as_char_ptr();
+    |                           ^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `probe` on type `i2c_driver`
+   --> rust/kernel/i2c.rs:137:27
+    |
+137 |             (*idrv.get()).probe = Some(Self::probe_callback);
+    |                           ^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `remove` on type `i2c_driver`
+   --> rust/kernel/i2c.rs:138:27
+    |
+138 |             (*idrv.get()).remove = Some(Self::remove_callback);
+    |                           ^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `shutdown` on type `i2c_driver`
+   --> rust/kernel/i2c.rs:139:27
+    |
+139 |             (*idrv.get()).shutdown = Some(Self::shutdown_callback);
+    |                           ^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `id_table` on type `i2c_driver`
+   --> rust/kernel/i2c.rs:140:27
+    |
+140 |             (*idrv.get()).id_table = i2c_table;
+    |                           ^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver` on type `i2c_driver`
+   --> rust/kernel/i2c.rs:141:27
+    |
+141 |             (*idrv.get()).driver.of_match_table = of_table;
+    |                           ^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver` on type `i2c_driver`
+   --> rust/kernel/i2c.rs:142:27
+    |
+142 |             (*idrv.get()).driver.acpi_match_table = acpi_table;
+    |                           ^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `nr` on type `i2c_adapter`
+   --> rust/kernel/i2c.rs:397:35
+    |
+397 |         unsafe { (*self.as_raw()).nr }
+    |                                   ^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `type_` on type `i2c_board_info`
+   --> rust/kernel/i2c.rs:448:28
+    |
+448 |             i2c_board_info.type_[i] = src[i];
+    |                            ^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `addr` on type `i2c_board_info`
+   --> rust/kernel/i2c.rs:452:24
+    |
+452 |         i2c_board_info.addr = addr;
+    |                        ^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `i2c_client`
+   --> rust/kernel/i2c.rs:486:60
+    |
+486 |     const OFFSET: usize = offset_of!(bindings::i2c_client, dev);
+    |                                                            ^^^
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `i2c_client`
+   --> rust/kernel/i2c.rs:503:73
+    |
+503 |         unsafe { bindings::put_device(&raw mut (*obj.as_ref().as_raw()).dev) }
+    |                                                                         ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `i2c_client`
+   --> rust/kernel/i2c.rs:512:44
+    |
+512 |         let dev = unsafe { &raw mut (*raw).dev };
+    |                                            ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `i2c_client`
+   --> rust/kernel/i2c.rs:532:79
+    |
+532 |         let idev = unsafe { container_of!(dev.as_raw(), bindings::i2c_client, dev) };
+    |                                                                               ^^^
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `i2c_client`
+   --> rust/kernel/i2c.rs:532:79
+    |
+532 |         let idev = unsafe { container_of!(dev.as_raw(), bindings::i2c_client, dev) };
+    |                                                                               ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `private_data` on type `bindings::file`
+   --> rust/kernel/miscdevice.rs:212:45
+    |
+212 |         let misc_ptr = unsafe { (*raw_file).private_data };
+    |                                             ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `private_data` on type `bindings::file`
+   --> rust/kernel/miscdevice.rs:236:30
+    |
+236 |         unsafe { (*raw_file).private_data = ptr.into_foreign() };
+    |                              ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `private_data` on type `bindings::file`
+   --> rust/kernel/miscdevice.rs:247:40
+    |
+247 |         let private = unsafe { (*file).private_data };
+    |                                        ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `private_data` on type `bindings::file`
+   --> rust/kernel/miscdevice.rs:308:40
+    |
+308 |         let private = unsafe { (*file).private_data };
+    |                                        ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `private_data` on type `bindings::file`
+   --> rust/kernel/miscdevice.rs:331:40
+    |
+331 |         let private = unsafe { (*file).private_data };
+    |                                        ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `private_data` on type `bindings::file`
+   --> rust/kernel/miscdevice.rs:356:40
+    |
+356 |         let private = unsafe { (*file).private_data };
+    |                                        ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `private_data` on type `bindings::file`
+   --> rust/kernel/miscdevice.rs:377:40
+    |
+377 |         let private = unsafe { (*file).private_data };
+    |                                        ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `open`
+   --> rust/kernel/miscdevice.rs:392:9
+    |
+392 |         open: Some(Self::open),
+    |         ^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `release`
+   --> rust/kernel/miscdevice.rs:393:9
+    |
+393 |         release: Some(Self::release),
+    |         ^^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `mmap`
+   --> rust/kernel/miscdevice.rs:394:9
+    |
+394 |         mmap: if T::HAS_MMAP { Some(Self::mmap) } else { None },
+    |         ^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `read_iter`
+   --> rust/kernel/miscdevice.rs:395:9
+    |
+395 |         read_iter: if T::HAS_READ_ITER {
+    |         ^^^^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `write_iter`
+   --> rust/kernel/miscdevice.rs:400:9
+    |
+400 |         write_iter: if T::HAS_WRITE_ITER {
+    |         ^^^^^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `unlocked_ioctl`
+   --> rust/kernel/miscdevice.rs:405:9
+    |
+405 |         unlocked_ioctl: if T::HAS_IOCTL {
+    |         ^^^^^^^^^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `compat_ioctl`
+   --> rust/kernel/miscdevice.rs:411:9
+    |
+411 |         compat_ioctl: if T::HAS_COMPAT_IOCTL {
+    |         ^^^^^^^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0560]: struct `bindings::file_operations` has no field named `show_fdinfo`
+   --> rust/kernel/miscdevice.rs:418:9
+    |
+418 |         show_fdinfo: if T::HAS_SHOW_FDINFO {
+    |         ^^^^^^^^^^^ `bindings::file_operations` does not have this field
+    |
+    = note: available fields are: `_address`
+
+error[E0609]: no field `vm_mm` on type `bindings::vm_area_struct`
+  --> rust/kernel/mm/virt.rs:66:56
+   |
+66 |         unsafe { MmWithUser::from_raw((*self.as_ptr()).vm_mm) }
+   |                                                        ^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `__bindgen_anon_2` on type `bindings::vm_area_struct`
+  --> rust/kernel/mm/virt.rs:76:35
+   |
+76 |         unsafe { (*self.as_ptr()).__bindgen_anon_2.vm_flags }
+   |                                   ^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `__bindgen_anon_1` on type `bindings::vm_area_struct`
+  --> rust/kernel/mm/virt.rs:84:35
+   |
+84 |         unsafe { (*self.as_ptr()).__bindgen_anon_1.__bindgen_anon_1.vm_start }
+   |                                   ^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `__bindgen_anon_1` on type `bindings::vm_area_struct`
+  --> rust/kernel/mm/virt.rs:92:35
+   |
+92 |         unsafe { (*self.as_ptr()).__bindgen_anon_1.__bindgen_anon_1.vm_end }
+   |                                   ^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `__bindgen_anon_2` on type `bindings::vm_area_struct`
+   --> rust/kernel/mm/virt.rs:253:35
+    |
+253 |         unsafe { (*self.as_ptr()).__bindgen_anon_2.vm_flags = flags };
+    |                                   ^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `__bindgen_anon_1` on type `bindings::kernel_param`
+  --> rust/kernel/module_param.rs:79:46
+   |
+79 |         let container = unsafe { &*((*param).__bindgen_anon_1.arg.cast::<SetOnce<T>>()) };
+   |                                              ^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `flags`
+   --> rust/kernel/module_param.rs:165:13
+    |
+165 |             flags: 0,
+    |             ^^^^^ `bindings::kernel_param_ops` does not have this field
+...
+173 | make_param_ops!(PARAM_OPS_I8, i8);
+    | --------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `set`
+   --> rust/kernel/module_param.rs:166:13
+    |
+166 |             set: Some(set_param::<$ty>),
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+173 | make_param_ops!(PARAM_OPS_I8, i8);
+    | --------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `get`
+   --> rust/kernel/module_param.rs:167:13
+    |
+167 |             get: None,
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+173 | make_param_ops!(PARAM_OPS_I8, i8);
+    | --------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `free`
+   --> rust/kernel/module_param.rs:168:13
+    |
+168 |             free: None,
+    |             ^^^^ `bindings::kernel_param_ops` does not have this field
+...
+173 | make_param_ops!(PARAM_OPS_I8, i8);
+    | --------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `flags`
+   --> rust/kernel/module_param.rs:165:13
+    |
+165 |             flags: 0,
+    |             ^^^^^ `bindings::kernel_param_ops` does not have this field
+...
+174 | make_param_ops!(PARAM_OPS_U8, u8);
+    | --------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `set`
+   --> rust/kernel/module_param.rs:166:13
+    |
+166 |             set: Some(set_param::<$ty>),
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+174 | make_param_ops!(PARAM_OPS_U8, u8);
+    | --------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `get`
+   --> rust/kernel/module_param.rs:167:13
+    |
+167 |             get: None,
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+174 | make_param_ops!(PARAM_OPS_U8, u8);
+    | --------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `free`
+   --> rust/kernel/module_param.rs:168:13
+    |
+168 |             free: None,
+    |             ^^^^ `bindings::kernel_param_ops` does not have this field
+...
+174 | make_param_ops!(PARAM_OPS_U8, u8);
+    | --------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `flags`
+   --> rust/kernel/module_param.rs:165:13
+    |
+165 |             flags: 0,
+    |             ^^^^^ `bindings::kernel_param_ops` does not have this field
+...
+175 | make_param_ops!(PARAM_OPS_I16, i16);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `set`
+   --> rust/kernel/module_param.rs:166:13
+    |
+166 |             set: Some(set_param::<$ty>),
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+175 | make_param_ops!(PARAM_OPS_I16, i16);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `get`
+   --> rust/kernel/module_param.rs:167:13
+    |
+167 |             get: None,
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+175 | make_param_ops!(PARAM_OPS_I16, i16);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `free`
+   --> rust/kernel/module_param.rs:168:13
+    |
+168 |             free: None,
+    |             ^^^^ `bindings::kernel_param_ops` does not have this field
+...
+175 | make_param_ops!(PARAM_OPS_I16, i16);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `flags`
+   --> rust/kernel/module_param.rs:165:13
+    |
+165 |             flags: 0,
+    |             ^^^^^ `bindings::kernel_param_ops` does not have this field
+...
+176 | make_param_ops!(PARAM_OPS_U16, u16);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `set`
+   --> rust/kernel/module_param.rs:166:13
+    |
+166 |             set: Some(set_param::<$ty>),
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+176 | make_param_ops!(PARAM_OPS_U16, u16);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `get`
+   --> rust/kernel/module_param.rs:167:13
+    |
+167 |             get: None,
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+176 | make_param_ops!(PARAM_OPS_U16, u16);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `free`
+   --> rust/kernel/module_param.rs:168:13
+    |
+168 |             free: None,
+    |             ^^^^ `bindings::kernel_param_ops` does not have this field
+...
+176 | make_param_ops!(PARAM_OPS_U16, u16);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `flags`
+   --> rust/kernel/module_param.rs:165:13
+    |
+165 |             flags: 0,
+    |             ^^^^^ `bindings::kernel_param_ops` does not have this field
+...
+177 | make_param_ops!(PARAM_OPS_I32, i32);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `set`
+   --> rust/kernel/module_param.rs:166:13
+    |
+166 |             set: Some(set_param::<$ty>),
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+177 | make_param_ops!(PARAM_OPS_I32, i32);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `get`
+   --> rust/kernel/module_param.rs:167:13
+    |
+167 |             get: None,
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+177 | make_param_ops!(PARAM_OPS_I32, i32);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `free`
+   --> rust/kernel/module_param.rs:168:13
+    |
+168 |             free: None,
+    |             ^^^^ `bindings::kernel_param_ops` does not have this field
+...
+177 | make_param_ops!(PARAM_OPS_I32, i32);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `flags`
+   --> rust/kernel/module_param.rs:165:13
+    |
+165 |             flags: 0,
+    |             ^^^^^ `bindings::kernel_param_ops` does not have this field
+...
+178 | make_param_ops!(PARAM_OPS_U32, u32);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `set`
+   --> rust/kernel/module_param.rs:166:13
+    |
+166 |             set: Some(set_param::<$ty>),
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+178 | make_param_ops!(PARAM_OPS_U32, u32);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `get`
+   --> rust/kernel/module_param.rs:167:13
+    |
+167 |             get: None,
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+178 | make_param_ops!(PARAM_OPS_U32, u32);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `free`
+   --> rust/kernel/module_param.rs:168:13
+    |
+168 |             free: None,
+    |             ^^^^ `bindings::kernel_param_ops` does not have this field
+...
+178 | make_param_ops!(PARAM_OPS_U32, u32);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `flags`
+   --> rust/kernel/module_param.rs:165:13
+    |
+165 |             flags: 0,
+    |             ^^^^^ `bindings::kernel_param_ops` does not have this field
+...
+179 | make_param_ops!(PARAM_OPS_I64, i64);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `set`
+   --> rust/kernel/module_param.rs:166:13
+    |
+166 |             set: Some(set_param::<$ty>),
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+179 | make_param_ops!(PARAM_OPS_I64, i64);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `get`
+   --> rust/kernel/module_param.rs:167:13
+    |
+167 |             get: None,
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+179 | make_param_ops!(PARAM_OPS_I64, i64);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `free`
+   --> rust/kernel/module_param.rs:168:13
+    |
+168 |             free: None,
+    |             ^^^^ `bindings::kernel_param_ops` does not have this field
+...
+179 | make_param_ops!(PARAM_OPS_I64, i64);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `flags`
+   --> rust/kernel/module_param.rs:165:13
+    |
+165 |             flags: 0,
+    |             ^^^^^ `bindings::kernel_param_ops` does not have this field
+...
+180 | make_param_ops!(PARAM_OPS_U64, u64);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `set`
+   --> rust/kernel/module_param.rs:166:13
+    |
+166 |             set: Some(set_param::<$ty>),
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+180 | make_param_ops!(PARAM_OPS_U64, u64);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `get`
+   --> rust/kernel/module_param.rs:167:13
+    |
+167 |             get: None,
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+180 | make_param_ops!(PARAM_OPS_U64, u64);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `free`
+   --> rust/kernel/module_param.rs:168:13
+    |
+168 |             free: None,
+    |             ^^^^ `bindings::kernel_param_ops` does not have this field
+...
+180 | make_param_ops!(PARAM_OPS_U64, u64);
+    | ----------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `flags`
+   --> rust/kernel/module_param.rs:165:13
+    |
+165 |             flags: 0,
+    |             ^^^^^ `bindings::kernel_param_ops` does not have this field
+...
+181 | make_param_ops!(PARAM_OPS_ISIZE, isize);
+    | --------------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `set`
+   --> rust/kernel/module_param.rs:166:13
+    |
+166 |             set: Some(set_param::<$ty>),
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+181 | make_param_ops!(PARAM_OPS_ISIZE, isize);
+    | --------------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `get`
+   --> rust/kernel/module_param.rs:167:13
+    |
+167 |             get: None,
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+181 | make_param_ops!(PARAM_OPS_ISIZE, isize);
+    | --------------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `free`
+   --> rust/kernel/module_param.rs:168:13
+    |
+168 |             free: None,
+    |             ^^^^ `bindings::kernel_param_ops` does not have this field
+...
+181 | make_param_ops!(PARAM_OPS_ISIZE, isize);
+    | --------------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `flags`
+   --> rust/kernel/module_param.rs:165:13
+    |
+165 |             flags: 0,
+    |             ^^^^^ `bindings::kernel_param_ops` does not have this field
+...
+182 | make_param_ops!(PARAM_OPS_USIZE, usize);
+    | --------------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `set`
+   --> rust/kernel/module_param.rs:166:13
+    |
+166 |             set: Some(set_param::<$ty>),
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+182 | make_param_ops!(PARAM_OPS_USIZE, usize);
+    | --------------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `get`
+   --> rust/kernel/module_param.rs:167:13
+    |
+167 |             get: None,
+    |             ^^^ `bindings::kernel_param_ops` does not have this field
+...
+182 | make_param_ops!(PARAM_OPS_USIZE, usize);
+    | --------------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0560]: struct `bindings::kernel_param_ops` has no field named `free`
+   --> rust/kernel/module_param.rs:168:13
+    |
+168 |             free: None,
+    |             ^^^^ `bindings::kernel_param_ops` does not have this field
+...
+182 | make_param_ops!(PARAM_OPS_USIZE, usize);
+    | --------------------------------------- in this macro invocation
+    |
+    = note: all struct fields are already assigned
+    = note: this error originates in the macro `make_param_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0609]: no field `data` on type `of_device_id`
+  --> rust/kernel/of.rs:27:85
+   |
+27 |     const DRIVER_DATA_OFFSET: usize = core::mem::offset_of!(bindings::of_device_id, data);
+   |                                                                                     ^^^^
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `data` on type `of_device_id`
+  --> rust/kernel/of.rs:30:16
+   |
+30 |         self.0.data as usize
+   |                ^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `compatible` on type `of_device_id`
+  --> rust/kernel/of.rs:45:16
+   |
+45 |             of.compatible[i] = src[i];
+   |                ^^^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `driver` on type `pci_driver`
+  --> rust/kernel/pci.rs:61:81
+   |
+61 |     const DEVICE_DRIVER_OFFSET: usize = core::mem::offset_of!(Self::DriverType, driver);
+   |                                                                                 ^^^^^^
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `name` on type `pci_driver`
+  --> rust/kernel/pci.rs:74:27
+   |
+74 |             (*pdrv.get()).name = name.as_char_ptr();
+   |                           ^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `probe` on type `pci_driver`
+  --> rust/kernel/pci.rs:75:27
+   |
+75 |             (*pdrv.get()).probe = Some(Self::probe_callback);
+   |                           ^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `remove` on type `pci_driver`
+  --> rust/kernel/pci.rs:76:27
+   |
+76 |             (*pdrv.get()).remove = Some(Self::remove_callback);
+   |                           ^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `id_table` on type `pci_driver`
+  --> rust/kernel/pci.rs:77:27
+   |
+77 |             (*pdrv.get()).id_table = T::ID_TABLE.as_ptr();
+   |                           ^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `vendor` on type `bindings::pci_dev`
+   --> rust/kernel/pci.rs:365:51
+    |
+365 |         let vendor_id = unsafe { (*self.as_raw()).vendor };
+    |                                                   ^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `device` on type `bindings::pci_dev`
+   --> rust/kernel/pci.rs:374:35
+    |
+374 |         unsafe { (*self.as_raw()).device }
+    |                                   ^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `revision` on type `bindings::pci_dev`
+   --> rust/kernel/pci.rs:382:35
+    |
+382 |         unsafe { (*self.as_raw()).revision }
+    |                                   ^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `subsystem_vendor` on type `bindings::pci_dev`
+   --> rust/kernel/pci.rs:398:35
+    |
+398 |         unsafe { (*self.as_raw()).subsystem_vendor }
+    |                                   ^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `subsystem_device` on type `bindings::pci_dev`
+   --> rust/kernel/pci.rs:406:35
+    |
+406 |         unsafe { (*self.as_raw()).subsystem_device }
+    |                                   ^^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `class` on type `bindings::pci_dev`
+   --> rust/kernel/pci.rs:437:51
+    |
+437 |         Class::from_raw(unsafe { (*self.as_raw()).class })
+    |                                                   ^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `bindings::pci_dev`
+   --> rust/kernel/pci.rs:459:57
+    |
+459 |     const OFFSET: usize = offset_of!(bindings::pci_dev, dev);
+    |                                                         ^^^
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `bindings::pci_dev`
+   --> rust/kernel/pci.rs:486:58
+    |
+486 |         let dev = unsafe { addr_of_mut!((*self.as_raw()).dev) };
+    |                                                          ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `bindings::pci_dev`
+   --> rust/kernel/pci.rs:506:76
+    |
+506 |         let pdev = unsafe { container_of!(dev.as_raw(), bindings::pci_dev, dev) };
+    |                                                                            ^^^
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `bindings::pci_dev`
+   --> rust/kernel/pci.rs:506:76
+    |
+506 |         let pdev = unsafe { container_of!(dev.as_raw(), bindings::pci_dev, dev) };
+    |                                                                            ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `name` on type `bindings::device_driver`
+  --> rust/kernel/platform.rs:60:34
+   |
+60 |             (*pdrv.get()).driver.name = name.as_char_ptr();
+   |                                  ^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `of_match_table` on type `bindings::device_driver`
+  --> rust/kernel/platform.rs:63:34
+   |
+63 |             (*pdrv.get()).driver.of_match_table = of_table;
+   |                                  ^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `acpi_match_table` on type `bindings::device_driver`
+  --> rust/kernel/platform.rs:64:34
+   |
+64 |             (*pdrv.get()).driver.acpi_match_table = acpi_table;
+   |                                  ^^^^^^^^^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `platform_device`
+   --> rust/kernel/platform.rs:303:65
+    |
+303 |     const OFFSET: usize = offset_of!(bindings::platform_device, dev);
+    |                                                                 ^^^
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `platform_device`
+   --> rust/kernel/platform.rs:509:58
+    |
+509 |         let dev = unsafe { addr_of_mut!((*self.as_raw()).dev) };
+    |                                                          ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `platform_device`
+   --> rust/kernel/platform.rs:529:84
+    |
+529 |         let pdev = unsafe { container_of!(dev.as_raw(), bindings::platform_device, dev) };
+    |                                                                                    ^^^
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `platform_device`
+   --> rust/kernel/platform.rs:529:84
+    |
+529 |         let pdev = unsafe { container_of!(dev.as_raw(), bindings::platform_device, dev) };
+    |                                                                                    ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `nents` on type `bindings::sg_table`
+   --> rust/kernel/scatterlist.rs:158:47
+    |
+158 |         let nents = unsafe { (*self.as_raw()).nents };
+    |                                               ^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `sgl` on type `bindings::sg_table`
+   --> rust/kernel/scatterlist.rs:162:49
+    |
+162 |             let ptr = unsafe { (*self.as_raw()).sgl };
+    |                                                 ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `pid` on type `bindings::task_struct`
+   --> rust/kernel/task.rs:211:50
+    |
+211 |         unsafe { *ptr::addr_of!((*self.as_ptr()).pid) }
+    |                                                  ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `mm` on type `bindings::task_struct`
+   --> rust/kernel/task.rs:282:44
+    |
+282 |         let mm = unsafe { (*self.as_ptr()).mm };
+    |                                            ^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `group_leader` on type `bindings::task_struct`
+   --> rust/kernel/task.rs:341:45
+    |
+341 |         let ptr = unsafe { (*self.as_ptr()).group_leader };
+    |                                             ^^^^^^^^^^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error[E0609]: no field `driver` on type `usb_driver`
+  --> rust/kernel/usb.rs:38:81
+   |
+38 |     const DEVICE_DRIVER_OFFSET: usize = core::mem::offset_of!(Self::DriverType, driver);
+   |                                                                                 ^^^^^^
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `name` on type `usb_driver`
+  --> rust/kernel/usb.rs:51:27
+   |
+51 |             (*udrv.get()).name = name.as_char_ptr();
+   |                           ^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `probe` on type `usb_driver`
+  --> rust/kernel/usb.rs:52:27
+   |
+52 |             (*udrv.get()).probe = Some(Self::probe_callback);
+   |                           ^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `disconnect` on type `usb_driver`
+  --> rust/kernel/usb.rs:53:27
+   |
+53 |             (*udrv.get()).disconnect = Some(Self::disconnect_callback);
+   |                           ^^^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `id_table` on type `usb_driver`
+  --> rust/kernel/usb.rs:54:27
+   |
+54 |             (*udrv.get()).id_table = T::ID_TABLE.as_ptr();
+   |                           ^^^^^^^^ unknown field
+   |
+   = note: available field is: `_address`
+
+error[E0609]: no field `dev` on type `usb_device`
+   --> rust/kernel/usb.rs:446:55
+    |
+446 |         let dev = unsafe { &raw mut ((*self.as_raw()).dev) };
+    |                                                       ^^^ unknown field
+    |
+    = note: available field is: `_address`
+
+error: aborting due to 338 previous errors
+
+Some errors have detailed explanations: E0282, E0560, E0609.
+For more information about an error, try `rustc --explain E0282`.
+make[2]: *** [rust/Makefile:687: rust/kernel.o] Error 1
+make[1]: *** [/build/linux/Makefile:1320: prepare] Error 2
+make: *** [Makefile:248: __sub-make] Error 2
+make: *** [Makefile:14: kernel] Error 2
