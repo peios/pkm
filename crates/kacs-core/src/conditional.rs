@@ -1814,4 +1814,369 @@ mod tests {
         let expr = build(&[local_attr("mfa"), int64_literal(1), op_eq()]);
         assert_eq!(evaluate(&expr, &token, &[], &local, true), TriValue::True);
     }
+
+    // -----------------------------------------------------------------------
+    // INT64↔UINT64 promotion (Peios divergence)
+    // -----------------------------------------------------------------------
+
+    fn uint_claim(name: &str, value: u64) -> ClaimEntry {
+        ClaimEntry {
+            name: String::from(name),
+            claim_type: crate::token::ClaimType::Uint64,
+            flags: 0,
+            values: ClaimValues::Uint64(alloc::vec![value]),
+        }
+    }
+
+    #[test]
+    fn int64_uint64_equal_positive() {
+        let token = token_with_claims(alloc::vec![uint_claim("x", 42)]);
+        let expr = build(&[user_attr("x"), int64_literal(42), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn int64_uint64_equal_negative_always_false() {
+        // Negative INT64 can never equal a UINT64
+        let token = token_with_claims(alloc::vec![uint_claim("x", 5)]);
+        let expr = build(&[user_attr("x"), int64_literal(-5), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn negative_int64_less_than_any_uint64() {
+        let token = token_with_claims(alloc::vec![uint_claim("x", 0)]);
+        let expr = build(&[int64_literal(-1), user_attr("x"), op_lt()]);
+        // Need to reverse: we push literal first, then attr, then op_lt
+        // This evaluates: -1 < x (where x=0) → true
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn uint64_greater_than_negative_int64() {
+        let token = token_with_claims(alloc::vec![uint_claim("x", 0)]);
+        let expr = build(&[user_attr("x"), int64_literal(-100), op_gt()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn int64_uint64_not_equal_different_values() {
+        let token = token_with_claims(alloc::vec![uint_claim("x", 100)]);
+        let expr = build(&[user_attr("x"), int64_literal(99), op_ne()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn int64_uint64_ordering_equal_values() {
+        let token = token_with_claims(alloc::vec![uint_claim("x", 50)]);
+        let expr = build(&[user_attr("x"), int64_literal(50), op_le()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+        let expr2 = build(&[user_attr("x"), int64_literal(50), op_ge()]);
+        assert_eq!(eval(&expr2, &token), TriValue::True);
+        let expr3 = build(&[user_attr("x"), int64_literal(50), op_lt()]);
+        assert_eq!(eval(&expr3, &token), TriValue::False);
+    }
+
+    // -----------------------------------------------------------------------
+    // Boolean↔Int cross-type equality
+    // -----------------------------------------------------------------------
+
+    fn bool_claim(name: &str, value: bool) -> ClaimEntry {
+        ClaimEntry {
+            name: String::from(name),
+            claim_type: crate::token::ClaimType::Boolean,
+            flags: 0,
+            values: ClaimValues::Boolean(alloc::vec![value]),
+        }
+    }
+
+    #[test]
+    fn bool_true_equals_int_1() {
+        let token = token_with_claims(alloc::vec![bool_claim("active", true)]);
+        let expr = build(&[user_attr("active"), int64_literal(1), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn bool_false_equals_int_0() {
+        let token = token_with_claims(alloc::vec![bool_claim("active", false)]);
+        let expr = build(&[user_attr("active"), int64_literal(0), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn bool_true_not_equals_int_0() {
+        let token = token_with_claims(alloc::vec![bool_claim("active", true)]);
+        let expr = build(&[user_attr("active"), int64_literal(0), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn bool_ordering_is_unknown() {
+        // Boolean is not orderable
+        let token = token_with_claims(alloc::vec![bool_claim("active", true)]);
+        let expr = build(&[user_attr("active"), int64_literal(1), op_lt()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // -----------------------------------------------------------------------
+    // Composite equality
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn composite_equal_same_elements() {
+        let token = token_with_claims(alloc::vec![ClaimEntry {
+            name: String::from("roles"),
+            claim_type: crate::token::ClaimType::Int64,
+            flags: 0,
+            values: ClaimValues::Int64(alloc::vec![1, 2, 3]),
+        }]);
+        // Build composite literal {1, 2, 3}
+        let mut comp = Vec::new();
+        comp.extend_from_slice(&int64_literal(1));
+        comp.extend_from_slice(&int64_literal(2));
+        comp.extend_from_slice(&int64_literal(3));
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("roles"));
+        expr.push(0x50);
+        expr.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&comp);
+        expr.extend_from_slice(&op_eq());
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn composite_equal_different_order() {
+        let token = token_with_claims(alloc::vec![ClaimEntry {
+            name: String::from("roles"),
+            claim_type: crate::token::ClaimType::Int64,
+            flags: 0,
+            values: ClaimValues::Int64(alloc::vec![1, 2, 3]),
+        }]);
+        // Composite {3, 2, 1} — different order → FALSE (element-wise)
+        let mut comp = Vec::new();
+        comp.extend_from_slice(&int64_literal(3));
+        comp.extend_from_slice(&int64_literal(2));
+        comp.extend_from_slice(&int64_literal(1));
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("roles"));
+        expr.push(0x50);
+        expr.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&comp);
+        expr.extend_from_slice(&op_eq());
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn composite_equal_different_length() {
+        let token = token_with_claims(alloc::vec![ClaimEntry {
+            name: String::from("roles"),
+            claim_type: crate::token::ClaimType::Int64,
+            flags: 0,
+            values: ClaimValues::Int64(alloc::vec![1, 2]),
+        }]);
+        let mut comp = Vec::new();
+        comp.extend_from_slice(&int64_literal(1));
+        comp.extend_from_slice(&int64_literal(2));
+        comp.extend_from_slice(&int64_literal(3));
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("roles"));
+        expr.push(0x50);
+        expr.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&comp);
+        expr.extend_from_slice(&op_eq());
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn scalar_vs_composite_is_unknown() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 1)]);
+        let mut comp = Vec::new();
+        comp.extend_from_slice(&int64_literal(1));
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("x"));
+        expr.push(0x50);
+        expr.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&comp);
+        expr.extend_from_slice(&op_eq());
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // -----------------------------------------------------------------------
+    // Octet string comparison
+    // -----------------------------------------------------------------------
+
+    fn octet_claim(name: &str, data: &[u8]) -> ClaimEntry {
+        ClaimEntry {
+            name: String::from(name),
+            claim_type: crate::token::ClaimType::Octet,
+            flags: 0,
+            values: ClaimValues::Octet(alloc::vec![data.to_vec()]),
+        }
+    }
+
+    #[test]
+    fn octet_equal() {
+        let token = token_with_claims(alloc::vec![octet_claim("hash", &[0xDE, 0xAD])]);
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("hash"));
+        expr.push(0x18); // octet literal
+        let data = [0xDE, 0xAD];
+        expr.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&data);
+        expr.extend_from_slice(&op_eq());
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn octet_not_equal() {
+        let token = token_with_claims(alloc::vec![octet_claim("hash", &[0xDE, 0xAD])]);
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("hash"));
+        expr.push(0x18);
+        let data = [0xBE, 0xEF];
+        expr.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&data);
+        expr.extend_from_slice(&op_eq());
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    // -----------------------------------------------------------------------
+    // SID comparison via == operator
+    // -----------------------------------------------------------------------
+
+    fn sid_claim(name: &str, sid: &crate::sid::Sid) -> ClaimEntry {
+        ClaimEntry {
+            name: String::from(name),
+            claim_type: crate::token::ClaimType::Sid,
+            flags: 0,
+            values: ClaimValues::Sid(alloc::vec![sid.clone()]),
+        }
+    }
+
+    #[test]
+    fn sid_equal_via_operator() {
+        let sid = well_known::administrators();
+        let token = token_with_claims(alloc::vec![sid_claim("group", &sid)]);
+        let expr = build(&[user_attr("group"), sid_literal(&sid), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn sid_not_equal_via_operator() {
+        let token = token_with_claims(alloc::vec![
+            sid_claim("group", &well_known::administrators()),
+        ]);
+        let expr = build(&[
+            user_attr("group"),
+            sid_literal(&well_known::users()),
+            op_eq(),
+        ]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    // -----------------------------------------------------------------------
+    // Device claims
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn device_member_of_with_device_groups() {
+        let mut token = empty_token();
+        let managed = crate::sid::Sid::new(5, &[21, 100, 200, 300, 5001]);
+        token.device_groups = Some(alloc::vec![
+            crate::group::GroupEntry::new(
+                managed.clone(),
+                crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+            ),
+        ]);
+        let expr = build(&[sid_literal(&managed), bytecode::op_member_of_any()]);
+        // Device_Member_of_Any should check device groups — but op 0x8b is Member_of_Any (user groups)
+        // We need 0x8c for Device_Member_of_Any
+        let mut expr2 = header();
+        expr2.extend_from_slice(&sid_literal(&managed));
+        expr2.push(0x8c); // Device_Member_of_Any
+        assert_eq!(eval(&expr2, &token), TriValue::True);
+    }
+
+    #[test]
+    fn device_member_of_no_device_groups_is_unknown() {
+        let token = empty_token(); // device_groups = None
+        let sid = crate::sid::Sid::new(5, &[21, 999, 999, 999]);
+        let mut expr = header();
+        expr.extend_from_slice(&sid_literal(&sid));
+        expr.push(0x8a); // Device_Member_of
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    #[test]
+    fn device_member_of_non_matching() {
+        let mut token = empty_token();
+        let managed = crate::sid::Sid::new(5, &[21, 100, 200, 300, 5001]);
+        token.device_groups = Some(alloc::vec![
+            crate::group::GroupEntry::new(
+                managed.clone(),
+                crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+            ),
+        ]);
+        let other = crate::sid::Sid::new(5, &[21, 999, 999, 999]);
+        let mut expr = header();
+        expr.extend_from_slice(&sid_literal(&other));
+        expr.push(0x8a); // Device_Member_of
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    // -----------------------------------------------------------------------
+    // Empty attribute → NULL (vacuous truth prevention)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn empty_claim_values_resolve_null() {
+        let claim = ClaimEntry {
+            name: String::from("tags"),
+            claim_type: crate::token::ClaimType::String,
+            flags: 0,
+            values: ClaimValues::String(alloc::vec![]),
+        };
+        let token = token_with_claims(alloc::vec![claim]);
+        let expr = build(&[user_attr("tags"), op_exists()]);
+        assert_eq!(eval(&expr, &token), TriValue::False); // empty → NULL → not exists
+    }
+
+    // -----------------------------------------------------------------------
+    // Padding edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trailing_padding_ignored() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 1)]);
+        let mut expr = build(&[user_attr("x"), int64_literal(1), op_eq()]);
+        expr.push(0x00); expr.push(0x00); // trailing padding
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multiple attribute sources in one expression
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn user_and_device_and_resource_combined() {
+        let mut token = token_with_claims(alloc::vec![int_claim("clearance", 5)]);
+        let managed = crate::sid::Sid::new(5, &[21, 100, 200, 300, 5001]);
+        token.device_groups = Some(alloc::vec![
+            crate::group::GroupEntry::new(
+                managed.clone(),
+                crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+            ),
+        ]);
+        let resource = alloc::vec![int_claim("confidentiality", 3)];
+        // @User.clearance >= @Resource.confidentiality AND Device_Member_of({managed})
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("clearance"));
+        expr.extend_from_slice(&resource_attr("confidentiality"));
+        expr.extend_from_slice(&op_ge());
+        expr.extend_from_slice(&sid_literal(&managed));
+        expr.push(0x8a); // Device_Member_of
+        expr.extend_from_slice(&op_and());
+        assert_eq!(evaluate(&expr, &token, &resource, &[], true), TriValue::True);
+    }
 }

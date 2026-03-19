@@ -3404,4 +3404,175 @@ mod tests {
         ).unwrap();
         assert!(!result.allowed);
     }
+
+    // -----------------------------------------------------------------------
+    // Cross-feature interactions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn restricted_token_with_mic() {
+        // Low integrity + restricted token: MIC blocks write, restricted blocks too
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![
+                allow(&alice(), GENERIC_ALL),
+                allow(&engineers(), FILE_READ_DATA),
+            ],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let mut token = restricted_token(&alice(), &[&engineers()], &[&engineers()]);
+        token.integrity_level = crate::token::IntegrityLevel::Low;
+        token.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+
+        // MIC blocks write (low < medium)
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(!result.allowed);
+
+        // Read: MIC allows, normal pass has it, restricted pass has it (engineers)
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn confinement_with_mic() {
+        // Low integrity + confined: both must pass
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![
+                allow(&alice(), GENERIC_ALL),
+                allow(&app_sid(), FILE_READ_DATA | FILE_WRITE_DATA),
+            ],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.integrity_level = crate::token::IntegrityLevel::Low;
+        token.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+
+        // Write: MIC blocks (low < medium), confinement would allow
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(!result.allowed);
+
+        // Read: MIC allows, confinement allows (app_sid in DACL)
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn all_pipeline_stages_compound() {
+        // DACL allows alice read+write
+        // MIC blocks write (low integrity)
+        // Restricted pass: engineers only gets read
+        // Result: read only
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![
+                allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+                allow(&engineers(), FILE_READ_DATA),
+            ],
+            &well_known::integrity_medium(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let mut token = restricted_token(&alice(), &[&engineers()], &[&engineers()]);
+        token.integrity_level = crate::token::IntegrityLevel::Low;
+        token.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+
+        let result = check(&sd, &token, FILE_READ_DATA | FILE_WRITE_DATA);
+        assert!(!result.allowed);
+        assert!(result.granted & FILE_READ_DATA != 0);
+        assert!(result.granted & FILE_WRITE_DATA == 0);
+    }
+
+    #[test]
+    fn pip_dominant_caller_passes() {
+        // PIP with a dominant caller should pass (currently caller is always None/0).
+        // This test documents the behavior — when PSB is modeled, the dominant
+        // path needs real testing with non-zero caller PIP.
+        let sd = sd_with_pip(
+            &alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            well_known::PIP_TYPE_NONE, // object protection = None
+            0,
+            0, // allowed mask irrelevant for None type
+        );
+        let token = medium_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        // None/0 object → caller (also None/0) dominates → no PIP restriction
+        assert!(result.allowed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Object ACE additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn object_ace_same_node_deny_then_allow() {
+        // Deny on child first, then allow on same child — deny wins
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_deny(&alice(), DS_WRITE_PROP, 1),
+            obj_allow(&alice(), DS_WRITE_PROP, 1),
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let _result = check_tree(&sd, &token, DS_WRITE_PROP, &mut tree);
+        assert!(tree[1].granted & DS_WRITE_PROP == 0); // deny first
+    }
+
+    #[test]
+    fn object_ace_multiple_aces_same_node_accumulate() {
+        // Two allows on same node, different bits
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 1),
+            obj_allow(&alice(), DS_WRITE_PROP, 1),
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let _result = check_tree(&sd, &token, DS_READ_PROP | DS_WRITE_PROP, &mut tree);
+        assert!(tree[1].granted & DS_READ_PROP != 0);
+        assert!(tree[1].granted & DS_WRITE_PROP != 0);
+    }
+
+    #[test]
+    fn object_ace_single_node_tree() {
+        // Tree with only root node
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 0),
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0)]);
+        let result = check_tree(&sd, &token, DS_READ_PROP, &mut tree);
+        assert!(result.allowed);
+        assert!(tree[0].granted & DS_READ_PROP != 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // SD parsing edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sd_components_survive_any_offset_order() {
+        // Build an SD manually with non-standard offset ordering
+        // (group before owner). Our parser uses offsets, not sequential reading.
+        let owner = well_known::system();
+        let group = well_known::administrators();
+        let owner_bytes = owner.to_bytes();
+        let group_bytes = group.to_bytes();
+
+        let mut buf = alloc::vec![0u8; 20]; // header
+        buf[0] = 1; // revision
+        // Put group FIRST in the buffer, then owner
+        let group_offset = 20u32;
+        let owner_offset = (20 + group_bytes.len()) as u32;
+        buf[2..4].copy_from_slice(&(SE_SELF_RELATIVE).to_le_bytes());
+        buf[4..8].copy_from_slice(&owner_offset.to_le_bytes());
+        buf[8..12].copy_from_slice(&group_offset.to_le_bytes());
+        // sacl and dacl offsets = 0 (not present)
+        buf.extend_from_slice(&group_bytes);
+        buf.extend_from_slice(&owner_bytes);
+
+        let sd = SecurityDescriptor::from_bytes(&buf).unwrap();
+        assert_eq!(sd.owner.unwrap(), owner);
+        assert_eq!(sd.group.unwrap(), group);
+    }
 }
