@@ -156,11 +156,15 @@ fn enriched_sid_matches(
 /// parameterized by the SID matching closure.
 fn evaluate_dacl<F>(
     sd: &SecurityDescriptor,
+    token: &Token,
     mapping: &GenericMapping,
     mut object_tree: Option<&mut [ObjectTypeNode]>,
     sid_match: &F,
     desired: u32,
     max_allowed_mode: bool,
+    resource_attributes: &[crate::token::ClaimEntry],
+    local_claims: &[crate::token::ClaimEntry],
+    for_allow_context: bool,
     skip_owner_implicit: bool,
     decided: &mut u32,
     granted: &mut u32,
@@ -269,27 +273,52 @@ fn evaluate_dacl<F>(
                 }
             }
 
-            // --- Callback allow (conditional) ---
+            // --- Callback allow (conditional, §11.12) ---
             ace::ACCESS_ALLOWED_CALLBACK_ACE_TYPE => {
                 if sid_match(&a.sid, true) {
-                    // TODO: conditional expression evaluation (Phase 3.11)
-                    // For now, skip callback ACEs — they require the
-                    // expression evaluator. A callback ACE with no condition
-                    // evaluates as UNKNOWN → skip for allow.
-                    // This is safe: skipping an allow ACE never grants access.
+                    // Condition gate: allow requires TRUE. No condition → UNKNOWN → skip.
+                    let cond_result = match &a.condition {
+                        Some(cond) => crate::conditional::evaluate(
+                            cond, token, resource_attributes, local_claims, for_allow_context,
+                        ),
+                        None => crate::conditional::TriValue::Unknown,
+                    };
+                    if cond_result == crate::conditional::TriValue::True {
+                        let new_bits = ace_mask & !*decided;
+                        *decided |= new_bits;
+                        *granted |= new_bits;
+                        if let Some(ref mut tree) = object_tree {
+                            for node in tree.iter_mut() {
+                                let n = ace_mask & !node.decided;
+                                node.decided |= n;
+                                node.granted |= n;
+                            }
+                        }
+                    }
                 }
             }
 
-            // --- Callback deny (conditional) ---
+            // --- Callback deny (conditional, §11.12) ---
             ace::ACCESS_DENIED_CALLBACK_ACE_TYPE => {
                 if sid_match(&a.sid, false) {
-                    // TODO: conditional expression evaluation (Phase 3.11)
-                    // A callback deny with no condition evaluates as UNKNOWN
-                    // → deny fires (fail-safe). But without the evaluator
-                    // we can't distinguish "no condition" from "condition
-                    // present but unevaluated". Skip for now — this is
-                    // temporarily unsafe for conditional deny ACEs.
-                    // Will be fixed when the expression evaluator lands.
+                    // Condition gate: deny applies on TRUE or UNKNOWN. FALSE → skip.
+                    let cond_result = match &a.condition {
+                        Some(cond) => crate::conditional::evaluate(
+                            cond, token, resource_attributes, local_claims, for_allow_context,
+                        ),
+                        None => crate::conditional::TriValue::Unknown,
+                    };
+                    if cond_result != crate::conditional::TriValue::False {
+                        let new_bits = ace_mask & !*decided;
+                        *decided |= new_bits;
+                        // NOT added to granted — decided but denied
+                        if let Some(ref mut tree) = object_tree {
+                            for node in tree.iter_mut() {
+                                let n = ace_mask & !node.decided;
+                                node.decided |= n;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -325,6 +354,7 @@ fn pre_sacl_walk(
     granted: &mut u32,
     privilege_granted: &mut u32,
     mandatory_decided: &mut u32,
+    resource_attributes: &mut alloc::vec::Vec<crate::token::ClaimEntry>,
 ) {
     let mut mic_ace: Option<&crate::ace::Ace> = None;
     let mut mic_found = false;
@@ -345,7 +375,9 @@ fn pre_sacl_walk(
                         pip_ace = Some(a);
                     }
                 }
-                // TODO: SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE → resource_attributes
+                // Resource attribute ACEs → collect for conditional expression evaluation
+                // TODO: parse CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 from application_data
+                // For now, resource attributes are passed in externally.
                 // TODO: SYSTEM_SCOPED_POLICY_ID_ACE_TYPE → policy_sids
             }
         }
@@ -568,6 +600,7 @@ pub fn access_check(
     desired: u32,
     mapping: &GenericMapping,
     self_sid: Option<&Sid>,
+    local_claims: &[crate::token::ClaimEntry],
     privilege_intent: u32,
 ) -> Result<AccessCheckResult, AccessCheckError> {
     // Step 0: Impersonation level gate (§12.1)
@@ -635,6 +668,7 @@ pub fn access_check(
 
     // Step 4: Pre-SACL walk — MIC, PIP, resource attributes, policy SIDs
     let mut mandatory_decided: u32 = 0;
+    let mut resource_attributes: alloc::vec::Vec<crate::token::ClaimEntry> = alloc::vec::Vec::new();
     pre_sacl_walk(
         sd,
         token,
@@ -644,6 +678,7 @@ pub fn access_check(
         &mut granted,
         &mut privilege_granted,
         &mut mandatory_decided,
+        &mut resource_attributes,
     );
 
     // Step 5: Virtual group injection
@@ -658,11 +693,15 @@ pub fn access_check(
     };
     evaluate_dacl(
         sd,
+        token,
         mapping,
         None, // no object tree yet
         &sid_match,
         mapped_desired,
         max_allowed_mode,
+        &resource_attributes,
+        local_claims,
+        true, // for_allow_context (normal pass uses allow polarity for claims)
         false, // don't skip owner implicit
         &mut decided,
         &mut granted,
@@ -710,11 +749,15 @@ pub fn access_check(
 
         evaluate_dacl(
             sd,
+            token,
             mapping,
             None,
             &restricted_sid_match,
             mapped_desired,
             max_allowed_mode,
+            &resource_attributes,
+            local_claims,
+            true,
             false, // owner implicit rights evaluated in restricted pass too
             &mut r_decided,
             &mut r_granted,
@@ -759,11 +802,15 @@ pub fn access_check(
 
         evaluate_dacl(
             sd,
+            token,
             mapping,
             None,
             &confinement_sid_match,
             mapped_desired,
             max_allowed_mode,
+            &resource_attributes,
+            local_claims,
+            true,
             true, // skip owner implicit rights in confinement pass
             &mut c_decided,
             &mut c_granted,
@@ -878,7 +925,7 @@ mod tests {
         token: &Token,
         desired: u32,
     ) -> AccessCheckResult {
-        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, 0).unwrap()
+        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, &[], 0).unwrap()
     }
 
     fn check_with_intent(
@@ -887,7 +934,7 @@ mod tests {
         desired: u32,
         intent: u32,
     ) -> AccessCheckResult {
-        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, intent).unwrap()
+        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, &[], intent).unwrap()
     }
 
     // -----------------------------------------------------------------------
@@ -1385,7 +1432,7 @@ mod tests {
         token.token_type = TokenType::Impersonation;
         token.impersonation_level = ImpersonationLevel::Identification;
         let result = access_check(
-            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, 0,
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, &[], 0,
         );
         assert_eq!(result, Err(AccessCheckError::IdentificationLevel));
     }
@@ -1451,7 +1498,7 @@ mod tests {
         };
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, 0,
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, &[], 0,
         );
         assert_eq!(result, Err(AccessCheckError::InvalidSecurityDescriptor));
     }
@@ -1467,7 +1514,7 @@ mod tests {
         };
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, 0,
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, &[], 0,
         );
         assert_eq!(result, Err(AccessCheckError::InvalidSecurityDescriptor));
     }
@@ -1550,7 +1597,7 @@ mod tests {
         ]);
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, KEY_QUERY_VALUE, &KEY_GENERIC_MAPPING, None, 0,
+            &sd, &token, KEY_QUERY_VALUE, &KEY_GENERIC_MAPPING, None, &[], 0,
         ).unwrap();
         assert!(result.allowed); // GENERIC_READ maps to KEY_QUERY_VALUE for registry
     }
@@ -1569,19 +1616,19 @@ mod tests {
         // Owner (alice) gets everything
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, 0,
+            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, &[], 0,
         ).unwrap();
         assert!(result.allowed);
 
         // Random user gets only PROCESS_QUERY_LIMITED
         let token = test_token(&bob(), &[&well_known::everyone()], 0);
         let result = access_check(
-            &sd, &token, PROCESS_QUERY_LIMITED, &PROCESS_GENERIC_MAPPING, None, 0,
+            &sd, &token, PROCESS_QUERY_LIMITED, &PROCESS_GENERIC_MAPPING, None, &[], 0,
         ).unwrap();
         assert!(result.allowed);
 
         let result = access_check(
-            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, 0,
+            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, &[], 0,
         ).unwrap();
         assert!(!result.allowed);
     }
