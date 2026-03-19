@@ -147,6 +147,130 @@ fn enriched_sid_matches(
 }
 
 // ---------------------------------------------------------------------------
+// Object type tree helpers (§11.8, §11.17)
+// ---------------------------------------------------------------------------
+
+/// Find a node in the tree by GUID. Returns index or None.
+fn find_node(tree: &[ObjectTypeNode], guid: &crate::guid::Guid) -> Option<usize> {
+    tree.iter().position(|n| n.guid == *guid)
+}
+
+/// Return indices of all descendants of tree[idx].
+fn descendant_indices(tree: &[ObjectTypeNode], idx: usize) -> alloc::vec::Vec<usize> {
+    let parent_level = tree[idx].level;
+    let mut result = alloc::vec::Vec::new();
+    for i in (idx + 1)..tree.len() {
+        if tree[i].level <= parent_level {
+            break;
+        }
+        result.push(i);
+    }
+    result
+}
+
+/// Return indices of direct children of tree[idx].
+fn child_indices(tree: &[ObjectTypeNode], idx: usize) -> alloc::vec::Vec<usize> {
+    let child_level = tree[idx].level + 1;
+    let mut result = alloc::vec::Vec::new();
+    for i in (idx + 1)..tree.len() {
+        if tree[i].level <= tree[idx].level {
+            break;
+        }
+        if tree[i].level == child_level {
+            result.push(i);
+        }
+    }
+    result
+}
+
+/// Return indices of siblings of tree[idx] (same level, same parent).
+fn sibling_indices(tree: &[ObjectTypeNode], idx: usize) -> alloc::vec::Vec<usize> {
+    if tree[idx].level == 0 {
+        return alloc::vec::Vec::new();
+    }
+    // Find parent
+    let parent_idx = parent_index(tree, idx);
+    if parent_idx.is_none() {
+        return alloc::vec::Vec::new();
+    }
+    let parent_idx = parent_idx.unwrap();
+    // All children of parent at the same level, excluding self
+    let child_level = tree[idx].level;
+    let mut result = alloc::vec::Vec::new();
+    for i in (parent_idx + 1)..tree.len() {
+        if tree[i].level <= tree[parent_idx].level {
+            break;
+        }
+        if tree[i].level == child_level && i != idx {
+            result.push(i);
+        }
+    }
+    result
+}
+
+/// Return the index of the parent of tree[idx].
+fn parent_index(tree: &[ObjectTypeNode], idx: usize) -> Option<usize> {
+    if idx == 0 || tree[idx].level == 0 {
+        return None;
+    }
+    let target_level = tree[idx].level - 1;
+    for i in (0..idx).rev() {
+        if tree[i].level == target_level {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Return indices of all ancestors, from immediate parent to root.
+fn ancestor_indices(tree: &[ObjectTypeNode], idx: usize) -> alloc::vec::Vec<usize> {
+    let mut result = alloc::vec::Vec::new();
+    let mut current = idx;
+    loop {
+        match parent_index(tree, current) {
+            Some(p) => {
+                result.push(p);
+                current = p;
+            }
+            None => break,
+        }
+    }
+    result
+}
+
+/// §11.8: Upward aggregation after a grant. When ALL siblings share a
+/// right, propagate up to the parent. Repeat until root or no common bits.
+fn upward_aggregate_grants(tree: &mut [ObjectTypeNode], start_idx: usize, _ace_mask: u32) {
+    let mut v_idx = start_idx;
+    while tree[v_idx].level > 0 {
+        // Compute common granted bits across self + all siblings
+        let siblings = sibling_indices(tree, v_idx);
+        let mut common = tree[v_idx].granted;
+        for s_idx in &siblings {
+            common &= tree[*s_idx].granted;
+            if common == 0 {
+                break;
+            }
+        }
+        if common == 0 {
+            break;
+        }
+        // Propagate to parent
+        let p_idx = match parent_index(tree, v_idx) {
+            Some(p) => p,
+            None => break,
+        };
+        let p_new = common & !tree[p_idx].decided;
+        if p_new == 0 {
+            break;
+        }
+        tree[p_idx].decided |= p_new;
+        tree[p_idx].granted |= p_new;
+        v_idx = p_idx;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // EvaluateDACL (§11.17)
 // ---------------------------------------------------------------------------
 
@@ -322,7 +446,111 @@ fn evaluate_dacl<F>(
                 }
             }
 
-            // Object ACEs, callback object ACEs — deferred to Phase 3.12
+            // --- Object allow ACEs (§11.8) ---
+            ace::ACCESS_ALLOWED_OBJECT_ACE_TYPE
+            | ace::ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE => {
+                if sid_match(&a.sid, true) {
+                    // Condition gate for callback variants
+                    if ace::is_callback_type(a.ace_type) {
+                        let cond_result = match &a.condition {
+                            Some(cond) => crate::conditional::evaluate(
+                                cond, token, resource_attributes, local_claims, for_allow_context,
+                            ),
+                            None => crate::conditional::TriValue::Unknown,
+                        };
+                        if cond_result != crate::conditional::TriValue::True {
+                            continue;
+                        }
+                    }
+
+                    if !a.has_object_type() || object_tree.is_none() {
+                        // No GUID or no tree — treat as basic allow
+                        let new_bits = ace_mask & !*decided;
+                        *decided |= new_bits;
+                        *granted |= new_bits;
+                        if let Some(ref mut tree) = object_tree {
+                            for node in tree.iter_mut() {
+                                let n = ace_mask & !node.decided;
+                                node.decided |= n;
+                                node.granted |= n;
+                            }
+                        }
+                    } else if let Some(ref mut tree) = object_tree {
+                        let guid = a.object_type.as_ref().unwrap();
+                        if let Some(target_idx) = find_node(tree, guid) {
+                            // Grant target node
+                            let node_new = ace_mask & !tree[target_idx].decided;
+                            tree[target_idx].decided |= node_new;
+                            tree[target_idx].granted |= node_new;
+
+                            // Downward grant to descendants (§11.8)
+                            let descendants = descendant_indices(tree, target_idx);
+                            for d_idx in &descendants {
+                                let d_new = ace_mask & !tree[*d_idx].decided;
+                                tree[*d_idx].decided |= d_new;
+                                tree[*d_idx].granted |= d_new;
+                            }
+
+                            // Upward aggregation (§11.8): when ALL siblings
+                            // share a right, propagate up. Per-bit intersection.
+                            upward_aggregate_grants(tree, target_idx, ace_mask);
+                        }
+                    }
+                }
+            }
+
+            // --- Object deny ACEs (§11.8) ---
+            ace::ACCESS_DENIED_OBJECT_ACE_TYPE
+            | ace::ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE => {
+                if sid_match(&a.sid, false) {
+                    // Condition gate for callback variants
+                    if ace::is_callback_type(a.ace_type) {
+                        let cond_result = match &a.condition {
+                            Some(cond) => crate::conditional::evaluate(
+                                cond, token, resource_attributes, local_claims, for_allow_context,
+                            ),
+                            None => crate::conditional::TriValue::Unknown,
+                        };
+                        if cond_result == crate::conditional::TriValue::False {
+                            continue;
+                        }
+                    }
+
+                    if !a.has_object_type() || object_tree.is_none() {
+                        // No GUID or no tree — treat as basic deny
+                        let new_bits = ace_mask & !*decided;
+                        *decided |= new_bits;
+                        if let Some(ref mut tree) = object_tree {
+                            for node in tree.iter_mut() {
+                                let n = ace_mask & !node.decided;
+                                node.decided |= n;
+                            }
+                        }
+                    } else if let Some(ref mut tree) = object_tree {
+                        let guid = a.object_type.as_ref().unwrap();
+                        if let Some(target_idx) = find_node(tree, guid) {
+                            // Deny target node
+                            let node_new = ace_mask & !tree[target_idx].decided;
+                            tree[target_idx].decided |= node_new;
+
+                            // Downward deny to descendants (§11.8)
+                            let descendants = descendant_indices(tree, target_idx);
+                            for d_idx in &descendants {
+                                let d_new = ace_mask & !tree[*d_idx].decided;
+                                tree[*d_idx].decided |= d_new;
+                            }
+
+                            // Upward denial: unconditional (§11.8)
+                            // Prevents future grants at higher levels
+                            let ancestors = ancestor_indices(tree, target_idx);
+                            for a_idx in &ancestors {
+                                tree[*a_idx].decided |= ace_mask;
+                            }
+                        }
+                    }
+                }
+            }
+
             // Audit/alarm ACEs — handled separately in the SACL walk
             _ => {}
         }
@@ -599,6 +827,7 @@ pub fn access_check(
     token: &Token,
     desired: u32,
     mapping: &GenericMapping,
+    mut object_tree: Option<&mut [ObjectTypeNode]>,
     self_sid: Option<&Sid>,
     local_claims: &[crate::token::ClaimEntry],
     privilege_intent: u32,
@@ -685,7 +914,13 @@ pub fn access_check(
     let owner = sd.owner.as_ref().unwrap();
     let enriched = enrich_token(token, owner, self_sid);
 
-    // Step 6: Tree initialization — deferred (Phase 3.12)
+    // Step 6: Tree initialization (§11.8)
+    if let Some(ref mut tree) = object_tree {
+        for node in tree.iter_mut() {
+            node.decided = decided;
+            node.granted = granted;
+        }
+    }
 
     // Step 7: Normal DACL evaluation (§11.3, §11.4)
     let sid_match = |sid: &Sid, for_allow: bool| -> bool {
@@ -695,7 +930,7 @@ pub fn access_check(
         sd,
         token,
         mapping,
-        None, // no object tree yet
+        object_tree.as_deref_mut(),
         &sid_match,
         mapped_desired,
         max_allowed_mode,
@@ -825,14 +1060,25 @@ pub fn access_check(
     // Step 10: Audit emission — TODO
 
     // Step 15: Result computation
+    // When a tree is present, root.granted reflects the whole object (§11.17).
+    let final_granted = if let Some(ref tree) = object_tree {
+        if !tree.is_empty() {
+            tree[0].granted
+        } else {
+            granted
+        }
+    } else {
+        granted
+    };
+
     let allowed = if mapped_desired == 0 {
         true
     } else {
-        (granted & mapped_desired) == mapped_desired
+        (final_granted & mapped_desired) == mapped_desired
     };
 
     Ok(AccessCheckResult {
-        granted,
+        granted: final_granted,
         allowed,
         continuous_audit_mask: 0, // TODO: audit
     })
@@ -925,7 +1171,7 @@ mod tests {
         token: &Token,
         desired: u32,
     ) -> AccessCheckResult {
-        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, &[], 0).unwrap()
+        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, None, &[], 0).unwrap()
     }
 
     fn check_with_intent(
@@ -934,7 +1180,7 @@ mod tests {
         desired: u32,
         intent: u32,
     ) -> AccessCheckResult {
-        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, &[], intent).unwrap()
+        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, None, &[], intent).unwrap()
     }
 
     // -----------------------------------------------------------------------
@@ -1432,7 +1678,7 @@ mod tests {
         token.token_type = TokenType::Impersonation;
         token.impersonation_level = ImpersonationLevel::Identification;
         let result = access_check(
-            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, &[], 0,
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], 0,
         );
         assert_eq!(result, Err(AccessCheckError::IdentificationLevel));
     }
@@ -1498,7 +1744,7 @@ mod tests {
         };
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, &[], 0,
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], 0,
         );
         assert_eq!(result, Err(AccessCheckError::InvalidSecurityDescriptor));
     }
@@ -1514,7 +1760,7 @@ mod tests {
         };
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, &[], 0,
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], 0,
         );
         assert_eq!(result, Err(AccessCheckError::InvalidSecurityDescriptor));
     }
@@ -1597,7 +1843,7 @@ mod tests {
         ]);
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, KEY_QUERY_VALUE, &KEY_GENERIC_MAPPING, None, &[], 0,
+            &sd, &token, KEY_QUERY_VALUE, &KEY_GENERIC_MAPPING, None, None, &[], 0,
         ).unwrap();
         assert!(result.allowed); // GENERIC_READ maps to KEY_QUERY_VALUE for registry
     }
@@ -1616,19 +1862,19 @@ mod tests {
         // Owner (alice) gets everything
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, &[], 0,
+            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, None, &[], 0,
         ).unwrap();
         assert!(result.allowed);
 
         // Random user gets only PROCESS_QUERY_LIMITED
         let token = test_token(&bob(), &[&well_known::everyone()], 0);
         let result = access_check(
-            &sd, &token, PROCESS_QUERY_LIMITED, &PROCESS_GENERIC_MAPPING, None, &[], 0,
+            &sd, &token, PROCESS_QUERY_LIMITED, &PROCESS_GENERIC_MAPPING, None, None, &[], 0,
         ).unwrap();
         assert!(result.allowed);
 
         let result = access_check(
-            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, &[], 0,
+            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, None, &[], 0,
         ).unwrap();
         assert!(!result.allowed);
     }
@@ -2521,5 +2767,282 @@ mod tests {
         // Confinement: app_sid → write only. Intersection with read = nothing.
         let result = check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT);
         assert!(!result.allowed); // confinement blocks the privilege
+    }
+
+    // -----------------------------------------------------------------------
+    // Object ACEs and property trees (§11.8)
+    // -----------------------------------------------------------------------
+
+    fn guid(n: u32) -> crate::guid::Guid {
+        crate::guid::Guid { data1: n, data2: 0, data3: 0, data4: [0; 8] }
+    }
+
+    fn make_tree(levels: &[(u16, u32)]) -> Vec<ObjectTypeNode> {
+        levels.iter().map(|(level, id)| ObjectTypeNode {
+            level: *level,
+            guid: guid(*id),
+            decided: 0,
+            granted: 0,
+        }).collect()
+    }
+
+    fn obj_allow(sid: &Sid, mask: u32, obj_guid: u32) -> Ace {
+        Ace {
+            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+            flags: 0,
+            mask,
+            sid: sid.clone(),
+            object_type: Some(guid(obj_guid)),
+            inherited_object_type: None,
+            condition: None,
+            application_data: None,
+        }
+    }
+
+    fn obj_deny(sid: &Sid, mask: u32, obj_guid: u32) -> Ace {
+        Ace {
+            ace_type: ACCESS_DENIED_OBJECT_ACE_TYPE,
+            flags: 0,
+            mask,
+            sid: sid.clone(),
+            object_type: Some(guid(obj_guid)),
+            inherited_object_type: None,
+            condition: None,
+            application_data: None,
+        }
+    }
+
+    fn check_tree(
+        sd: &SecurityDescriptor,
+        token: &Token,
+        desired: u32,
+        tree: &mut [ObjectTypeNode],
+    ) -> AccessCheckResult {
+        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, Some(tree), None, &[], 0).unwrap()
+    }
+
+    #[test]
+    fn object_ace_grant_specific_node() {
+        // Tree: root(0) → child_a(1), child_b(2)
+        // ACE grants DS_READ_PROP to child_a only
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 1), // child_a
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let _result = check_tree(&sd, &token, DS_READ_PROP, &mut tree);
+
+        // child_a should have the grant
+        assert!(tree[1].granted & DS_READ_PROP != 0);
+        // child_b should NOT
+        assert!(tree[2].granted & DS_READ_PROP == 0);
+    }
+
+    #[test]
+    fn object_ace_downward_propagation() {
+        // Tree: root(0) → parent(1) → child(2)
+        // ACE grants to parent → should flow down to child
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 1), // parent node
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (2, 2)]);
+        let _result = check_tree(&sd, &token, DS_READ_PROP, &mut tree);
+
+        assert!(tree[1].granted & DS_READ_PROP != 0); // parent
+        assert!(tree[2].granted & DS_READ_PROP != 0); // child (propagated down)
+    }
+
+    #[test]
+    fn object_ace_upward_aggregation() {
+        // Tree: root(0) → child_a(1), child_b(2)
+        // Both children get the same right → should propagate up to root
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 1), // child_a
+            obj_allow(&alice(), DS_READ_PROP, 2), // child_b
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let _result = check_tree(&sd, &token, DS_READ_PROP, &mut tree);
+
+        assert!(tree[0].granted & DS_READ_PROP != 0); // root (aggregated up)
+        assert!(tree[1].granted & DS_READ_PROP != 0); // child_a
+        assert!(tree[2].granted & DS_READ_PROP != 0); // child_b
+    }
+
+    #[test]
+    fn object_ace_no_upward_if_partial() {
+        // Tree: root(0) → child_a(1), child_b(2)
+        // Only child_a gets the right → root should NOT get it
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 1), // child_a only
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let _result = check_tree(&sd, &token, DS_READ_PROP, &mut tree);
+
+        assert!(tree[0].granted & DS_READ_PROP == 0); // root NOT aggregated
+        assert!(tree[1].granted & DS_READ_PROP != 0); // child_a yes
+    }
+
+    #[test]
+    fn object_ace_deny_upward_unconditional() {
+        // Tree: root(0) → child_a(1), child_b(2)
+        // Deny on child_a → unconditional propagation UP to root
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_deny(&alice(), DS_WRITE_PROP, 1), // deny child_a
+            obj_allow(&alice(), DS_WRITE_PROP, 2), // allow child_b
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let _result = check_tree(&sd, &token, DS_WRITE_PROP, &mut tree);
+
+        // child_a denied
+        assert!(tree[1].granted & DS_WRITE_PROP == 0);
+        // child_b granted
+        assert!(tree[2].granted & DS_WRITE_PROP != 0);
+        // root: deny propagated up unconditionally, preventing future grants
+        assert!(tree[0].decided & DS_WRITE_PROP != 0);
+        assert!(tree[0].granted & DS_WRITE_PROP == 0);
+    }
+
+    #[test]
+    fn object_ace_deny_downward() {
+        // Tree: root(0) → parent(1) → child(2)
+        // Deny on parent → flows down to child
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_deny(&alice(), DS_WRITE_PROP, 1), // deny parent
+            obj_allow(&alice(), DS_WRITE_PROP, 2), // allow child (too late?)
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (2, 2)]);
+        let _result = check_tree(&sd, &token, DS_WRITE_PROP, &mut tree);
+
+        // parent denied
+        assert!(tree[1].granted & DS_WRITE_PROP == 0);
+        // child: deny from parent propagated down, first-writer-wins
+        // so the allow ACE can't override it
+        assert!(tree[2].granted & DS_WRITE_PROP == 0);
+    }
+
+    #[test]
+    fn object_ace_first_writer_wins_per_node() {
+        // Tree: root(0) → child(1)
+        // Allow on child first, then deny on child — allow wins
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_WRITE_PROP, 1), // allow first
+            obj_deny(&alice(), DS_WRITE_PROP, 1),  // deny second
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let _result = check_tree(&sd, &token, DS_WRITE_PROP, &mut tree);
+
+        assert!(tree[1].granted & DS_WRITE_PROP != 0); // allow won
+    }
+
+    #[test]
+    fn object_ace_no_guid_treated_as_basic() {
+        // Object ACE without ObjectType GUID → applies to all nodes
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+            flags: 0,
+            mask: DS_READ_PROP,
+            sid: alice(),
+            object_type: None, // no GUID
+            inherited_object_type: None,
+            condition: None,
+            application_data: None,
+        };
+        let sd = sd_with_dacl(&alice(), alloc::vec![ace]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let _result = check_tree(&sd, &token, DS_READ_PROP, &mut tree);
+
+        // All nodes should have the grant (treated as basic ACE)
+        assert!(tree[0].granted & DS_READ_PROP != 0);
+        assert!(tree[1].granted & DS_READ_PROP != 0);
+        assert!(tree[2].granted & DS_READ_PROP != 0);
+    }
+
+    #[test]
+    fn object_ace_no_tree_treated_as_basic() {
+        // Object ACE with GUID but no tree → applies globally
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), FILE_READ_DATA, 999),
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        // No tree (None) — obj ACE with GUID applies globally
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn object_ace_guid_not_in_tree_ignored() {
+        // Object ACE with GUID that doesn't exist in the tree → ignored
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 999), // GUID 999 not in tree
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let _result = check_tree(&sd, &token, DS_READ_PROP, &mut tree);
+
+        assert!(tree[0].granted & DS_READ_PROP == 0); // nothing granted
+        assert!(tree[1].granted & DS_READ_PROP == 0);
+    }
+
+    #[test]
+    fn object_ace_deep_tree() {
+        // Tree: root(0) → l1(1) → l2(2) → l3(3)
+        // Grant at root → flows all the way down
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 0), // root
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (2, 2), (3, 3)]);
+        let _result = check_tree(&sd, &token, DS_READ_PROP, &mut tree);
+
+        for node in &tree {
+            assert!(node.granted & DS_READ_PROP != 0);
+        }
+    }
+
+    #[test]
+    fn object_ace_mixed_with_basic() {
+        // Basic ACE + object ACE in the same DACL
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            deny(&alice(), DELETE), // basic deny: all nodes
+            obj_allow(&alice(), DS_READ_PROP, 1), // object allow: child_a
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let _result = check_tree(&sd, &token, DS_READ_PROP | DELETE, &mut tree);
+
+        // DELETE denied on all nodes (basic ACE)
+        assert!(tree[0].granted & DELETE == 0);
+        assert!(tree[1].granted & DELETE == 0);
+        // DS_READ_PROP on child_a only
+        assert!(tree[1].granted & DS_READ_PROP != 0);
+        assert!(tree[2].granted & DS_READ_PROP == 0);
+    }
+
+    #[test]
+    fn object_ace_upward_multi_level() {
+        // Tree: root(0) → propset(1) → attr_a(2), attr_b(3)
+        // Grant both attrs → propagates to propset → propagates to root
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 2), // attr_a
+            obj_allow(&alice(), DS_READ_PROP, 3), // attr_b
+        ]);
+        let token = medium_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (2, 2), (2, 3)]);
+        let _result = check_tree(&sd, &token, DS_READ_PROP, &mut tree);
+
+        // Both attrs granted
+        assert!(tree[2].granted & DS_READ_PROP != 0);
+        assert!(tree[3].granted & DS_READ_PROP != 0);
+        // Propset: both children agree → aggregated up
+        assert!(tree[1].granted & DS_READ_PROP != 0);
+        // Root: propset is the only child at level 1 → aggregates up
+        assert!(tree[0].granted & DS_READ_PROP != 0);
     }
 }
