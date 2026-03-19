@@ -16,11 +16,13 @@ extern crate alloc;
 // gated behind #[cfg(feature = "kernel")].
 
 pub mod ace;
+pub mod acl;
 pub mod group;
 pub mod guid;
 pub mod luid;
 pub mod mask;
 pub mod privilege;
+pub mod sd;
 pub mod sid;
 pub mod token;
 pub mod well_known;
