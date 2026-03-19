@@ -15,6 +15,7 @@ extern crate alloc;
 // The crate is no_std + alloc. Kernel-specific code (RCU, printk) is
 // gated behind #[cfg(feature = "kernel")].
 
+pub mod ace;
 pub mod group;
 pub mod guid;
 pub mod luid;
