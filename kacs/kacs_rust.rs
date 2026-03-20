@@ -224,6 +224,73 @@ pub extern "C" fn kacs_token_query(
     data.len() as i32
 }
 
+// ── AccessCheck syscall ───────────────────────────────────────────────────
+
+/// Evaluate a Security Descriptor against a token.
+///
+/// Called from the kacs_access_check syscall (nr 1023). Parses the SD
+/// from binary, runs the full AccessCheck pipeline, returns the granted
+/// access mask (>= 0) or negative errno.
+///
+/// This is the core of KACS — the 11-stage pipeline from §11 of the
+/// proposal, running in kernel context against the calling thread's token.
+#[no_mangle]
+pub extern "C" fn kacs_access_check_sd(
+    token_ptr: *const (),
+    sd_data: *const u8,
+    sd_len: usize,
+    desired: u32,
+    generic_read: u32,
+    generic_write: u32,
+    generic_execute: u32,
+    generic_all: u32,
+) -> i64 {
+    if token_ptr.is_null() || sd_data.is_null() {
+        return -22; // -EINVAL
+    }
+
+    let kt = unsafe { KacsToken::from_ptr(token_ptr) };
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_data, sd_len) };
+
+    // Parse the binary SD.
+    let sd = match kacs_core::sd::SecurityDescriptor::from_bytes(sd_bytes) {
+        Ok(Some(sd)) => sd,
+        Ok(None) => return -22,  // -EINVAL: malformed SD
+        Err(_) => return -12,    // -ENOMEM: allocation failed during parse
+    };
+
+    let mapping = kacs_core::mask::GenericMapping {
+        read: generic_read,
+        write: generic_write,
+        execute: generic_execute,
+        all: generic_all,
+    };
+
+    // Run the full AccessCheck pipeline.
+    match kacs_core::access_check::access_check(
+        &sd,
+        &kt.token,
+        desired,
+        &mapping,
+        None,           // no object type tree
+        None,           // no PRINCIPAL_SELF SID
+        &[],            // no local claims
+        &[],            // no central access policies
+        0,              // no privilege intent (backup/restore)
+    ) {
+        Ok(result) => {
+            if result.allowed {
+                result.granted as i64
+            } else {
+                0 // denied — no bits granted
+            }
+        }
+        Err(kacs_core::access_check::AccessCheckError::IdentificationLevel) => -1,  // -EPERM
+        Err(kacs_core::access_check::AccessCheckError::InvalidSecurityDescriptor) => -22, // -EINVAL
+        Err(kacs_core::access_check::AccessCheckError::AllocationFailed) => -12, // -ENOMEM
+    }
+}
+
 /// Called from C during LSM initialization.
 #[no_mangle]
 pub extern "C" fn kacs_rust_init() -> c_int {

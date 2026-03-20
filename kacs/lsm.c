@@ -25,6 +25,11 @@ extern const void *kacs_token_clone(const void *ptr);
 extern void kacs_token_drop(const void *ptr);
 extern long long kacs_token_format(const void *ptr, char *buf, size_t len);
 extern int kacs_token_query(const void *ptr, u32 class, void *buf, u32 buf_len);
+extern long long kacs_access_check_sd(const void *token_ptr,
+				      const void *sd_data, size_t sd_len,
+				      u32 desired, u32 generic_read,
+				      u32 generic_write, u32 generic_execute,
+				      u32 generic_all);
 
 /* ── Constants ─────────────────────────────────────────────────────────── */
 
@@ -304,6 +309,56 @@ SYSCALL_DEFINE2(kacs_open_self_token, unsigned int, flags, u32, access_mask)
 
 	token = kacs_token_clone(sec->token);
 	return kacs_token_to_fd(token, access_mask);
+}
+
+/* ── Syscall: kacs_access_check (1023) ─────────────────────────────────── */
+
+/*
+ * Evaluate a Security Descriptor against the calling thread's token.
+ * Used by userspace daemons (registryd, lpsd, eventd) that manage
+ * their own objects and need the kernel's AccessCheck engine.
+ *
+ * sd_buf/sd_len: self-relative SD in Windows binary format.
+ * desired: requested access mask (e.g., KEY_QUERY_VALUE | READ_CONTROL).
+ * generic_*: GenericMapping for the object type (0 = no generic expansion).
+ *
+ * Returns the granted access mask (>= 0) or negative errno.
+ * If any requested right is denied, returns 0 (no bits granted).
+ */
+SYSCALL_DEFINE6(kacs_access_check,
+		const void __user *, sd_buf, size_t, sd_len,
+		u32, desired, u32, generic_read,
+		u32, generic_write, u32, generic_execute)
+{
+	const struct kacs_cred_security *sec;
+	void *ksd;
+	long long ret;
+
+	/* SD size bounds: min 20 (header), max 64 KiB. */
+	if (sd_len < 20 || sd_len > 65536)
+		return -EINVAL;
+
+	if (!desired)
+		return -EINVAL;
+
+	ksd = kmalloc(sd_len, GFP_KERNEL);
+	if (!ksd)
+		return -ENOMEM;
+
+	if (copy_from_user(ksd, sd_buf, sd_len)) {
+		kfree(ksd);
+		return -EFAULT;
+	}
+
+	sec = kacs_cred(current_cred());
+	ret = kacs_access_check_sd(sec->token, ksd, sd_len,
+				   desired, generic_read, generic_write,
+				   generic_execute,
+				   /* generic_all = read|write|execute|standard */
+				   generic_read | generic_write |
+				   generic_execute | 0x001F0000);
+	kfree(ksd);
+	return ret;
 }
 
 /* ── securityfs: /sys/kernel/security/kacs/self ────────────────────────── */
