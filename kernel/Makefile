@@ -7,7 +7,7 @@ CCACHE := pkm-kernel-ccache
 all: kernel
 
 image:
-	docker build -t $(IMAGE) .
+	docker build -t $(IMAGE) -f $(CURDIR)/Dockerfile $(CURDIR)/..
 
 kernel: image
 	mkdir -p $(OUT)

@@ -1,6 +1,6 @@
 FROM archlinux:latest
 
-# Kernel build dependencies (C + LLVM, no Arch rust package)
+# Kernel build dependencies (C only — Rust via rustup, LLVM 18 pinned)
 RUN pacman -Syu --noconfirm && \
     pacman -S --noconfirm \
         base-devel \
@@ -14,11 +14,14 @@ RUN pacman -Syu --noconfirm && \
         perl \
         python \
         xmlto \
-        clang \
-        llvm \
-        lld \
+        clang18 \
+        llvm18 \
+        lld18 \
         ccache \
     && pacman -Scc --noconfirm
+
+# LLVM 18 tools live in /usr/lib/llvm18/bin/ on Arch
+ENV PATH="/usr/lib/llvm18/bin:/root/.cargo/bin:${PATH}"
 
 # Pinned kernel version — bump deliberately, not accidentally
 ARG KERNEL_VERSION=v6.19.6
@@ -28,24 +31,20 @@ RUN git clone --depth 1 --branch ${KERNEL_VERSION} \
     https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
     /build/linux
 
-# Install rustup and the exact Rust version the kernel requires.
-# The kernel's scripts/min-tool-version.sh tells us the minimum;
-# we read it from the source tree so the toolchain stays in sync
-# with the pinned kernel version.
+# Install Rust via rustup. Use 1.83.0: satisfies CALL_PADDING (>= 1.81),
+# close enough to kernel 6.19's expected range, avoids bleeding-edge issues.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain none
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Read the required Rust version from the kernel source and install it
-RUN RUST_VERSION=$(/build/linux/scripts/min-tool-version.sh rustc) && \
-    echo "Kernel requires rustc >= ${RUST_VERSION}" && \
-    rustup toolchain install ${RUST_VERSION} --component rust-src && \
-    rustup default ${RUST_VERSION}
+    sh -s -- -y --default-toolchain none && \
+    rustup toolchain install 1.83.0 --component rust-src && \
+    rustup default 1.83.0
 
 # Install the exact bindgen version the kernel requires
 RUN BINDGEN_VERSION=$(/build/linux/scripts/min-tool-version.sh bindgen) && \
     echo "Kernel requires bindgen >= ${BINDGEN_VERSION}" && \
     cargo install --locked --version ${BINDGEN_VERSION} bindgen-cli
+
+# Point bindgen at LLVM 18's libclang (not the system default)
+ENV LIBCLANG_PATH="/usr/lib/llvm18/lib"
 
 # Start from Arch's kernel config
 ADD https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config.x86_64 \
@@ -54,7 +53,7 @@ ADD https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/c
 WORKDIR /build/linux
 
 # Resolve new/removed config options against this kernel version
-RUN make olddefconfig
+RUN make LLVM=1 olddefconfig
 
 # Enable Rust support and verify the toolchain works
 RUN make LLVM=1 rustavailable
@@ -72,14 +71,13 @@ RUN scripts/config \
     make LLVM=1 olddefconfig
 
 # Strip to only modules a QEMU VM needs (fast builds)
-COPY lsmod.txt /build/linux/lsmod.txt
+COPY kernel/lsmod.txt /build/linux/lsmod.txt
 RUN LSMOD=/build/linux/lsmod.txt make LLVM=1 localmodconfig
 
-# Provium requirements: initramfs, 9p, vsock, virtio
-# These may be stripped by localmodconfig since the build host
-# doesn't necessarily have them loaded.
-# Use --set-val y to force built-in (not =m modules), so initramfs
-# boots work without needing module loading infrastructure.
+# Re-enable Rust (localmodconfig strips it since no stock module uses Rust)
+RUN scripts/config --enable RUST && make LLVM=1 olddefconfig
+
+# Provium requirements: force built-in (not =m modules)
 RUN scripts/config \
         --set-val BLK_DEV_INITRD y \
         --set-val RD_GZIP y \
@@ -100,6 +98,18 @@ RUN scripts/config \
         --set-val DEVTMPFS y \
         --set-val DEVTMPFS_MOUNT y \
         --set-val TMPFS y && \
+    make LLVM=1 olddefconfig
+
+# KACS syscalls: register in x86_64 syscall table
+RUN printf '1000\tcommon\tkacs_open_self_token\t\tsys_kacs_open_self_token\n' \
+    >> arch/x86/entry/syscalls/syscall_64.tbl
+
+# KACS: copy module source into kernel tree and wire into kbuild
+COPY kacs/ /build/linux/security/kacs/
+RUN echo 'obj-$(CONFIG_SECURITY_KACS) += kacs/' >> security/Makefile && \
+    sed -i '/endmenu/i source "security/kacs/Kconfig"' security/Kconfig && \
+    scripts/config --enable SECURITY_KACS && \
+    scripts/config --set-str LSM "landlock,lockdown,yama,integrity,kacs" && \
     make LLVM=1 olddefconfig
 
 # ccache: persistent cache via volume mount at /ccache
