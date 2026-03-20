@@ -19,8 +19,8 @@ pub use kacs_core::*;
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use kacs_core::compat::{self, AllocError};
-use kacs_core::token::{Token, TokenType, IntegrityLevel};
+use kacs_core::compat::{self, AllocError, TryClone};
+use kacs_core::token::{Token, TokenType, ImpersonationLevel, IntegrityLevel};
 
 // ── Heap-allocated refcounted token ───────────────────────────────────────
 
@@ -167,8 +167,12 @@ pub extern "C" fn kacs_token_format(
 // ── Token query (KACS_IOC_QUERY) ──────────────────────────────────────────
 
 const TOKEN_CLASS_USER: u32 = 1;
+const TOKEN_CLASS_GROUPS: u32 = 2;
+const TOKEN_CLASS_PRIVILEGES: u32 = 3;
 const TOKEN_CLASS_TYPE: u32 = 4;
 const TOKEN_CLASS_INTEGRITY_LEVEL: u32 = 5;
+const TOKEN_CLASS_ELEVATION_TYPE: u32 = 13;
+const TOKEN_CLASS_MANDATORY_POLICY: u32 = 17;
 
 /// Query token information by class.
 /// If buf is NULL, returns the required buffer size.
@@ -192,6 +196,21 @@ pub extern "C" fn kacs_token_query(
     let mut out = FormatBuf::new();
     match class {
         TOKEN_CLASS_USER => format_sid(&mut out, &token.user_sid),
+        TOKEN_CLASS_GROUPS => {
+            out.usize(token.groups.len());
+            for g in token.groups.iter() {
+                out.byte(b'\n');
+                format_sid(&mut out, &g.sid);
+                out.str(" attrs=0x");
+                out.hex64(g.attributes as u64);
+            }
+        }
+        TOKEN_CLASS_PRIVILEGES => {
+            out.str("present=0x");
+            out.hex64(token.privileges.present);
+            out.str("\nenabled=0x");
+            out.hex64(token.privileges.enabled);
+        }
         TOKEN_CLASS_TYPE => out.str(match token.token_type {
             TokenType::Primary => "Primary",
             TokenType::Impersonation => "Impersonation",
@@ -203,6 +222,15 @@ pub extern "C" fn kacs_token_query(
             IntegrityLevel::High => "High",
             IntegrityLevel::System => "System",
         }),
+        TOKEN_CLASS_ELEVATION_TYPE => out.str(match token.elevation_type {
+            kacs_core::token::ElevationType::Default => "Default",
+            kacs_core::token::ElevationType::Full => "Full",
+            kacs_core::token::ElevationType::Limited => "Limited",
+        }),
+        TOKEN_CLASS_MANDATORY_POLICY => {
+            out.str("0x");
+            out.hex64(token.mandatory_policy as u64);
+        }
         _ => return -22, // -EINVAL: unsupported class
     };
 
@@ -288,6 +316,104 @@ pub extern "C" fn kacs_access_check_sd(
         Err(kacs_core::access_check::AccessCheckError::IdentificationLevel) => -1,  // -EPERM
         Err(kacs_core::access_check::AccessCheckError::InvalidSecurityDescriptor) => -22, // -EINVAL
         Err(kacs_core::access_check::AccessCheckError::AllocationFailed) => -12, // -ENOMEM
+    }
+}
+
+// ── Privilege adjustment ──────────────────────────────────────────────────
+
+/// Adjust privileges on a token: enable, disable, or permanently remove.
+/// Returns 0 on success, negative errno on error.
+#[no_mangle]
+pub extern "C" fn kacs_token_adjust_privs(
+    ptr: *const (),
+    enable_mask: u64,
+    disable_mask: u64,
+    remove_mask: u64,
+) -> c_int {
+    if ptr.is_null() {
+        return -22; // -EINVAL
+    }
+    // Safety: privilege adjustment needs &mut. In the kernel, the real
+    // implementation will use interior atomics on the Privileges fields.
+    // For now, we use unsafe mutable access — safe because privilege
+    // adjustment is serialized by the ioctl path (one caller at a time).
+    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
+    let privs = &mut kt.token.privileges;
+
+    // Remove first (irreversible)
+    if remove_mask != 0 {
+        let mut mask = remove_mask;
+        while mask != 0 {
+            let bit = 1u64 << mask.trailing_zeros();
+            privs.remove(bit);
+            mask &= !bit;
+        }
+    }
+
+    // Disable
+    if disable_mask != 0 {
+        let mut mask = disable_mask;
+        while mask != 0 {
+            let bit = 1u64 << mask.trailing_zeros();
+            privs.disable(bit);
+            mask &= !bit;
+        }
+    }
+
+    // Enable (can't enable removed privileges — enable() checks present)
+    if enable_mask != 0 {
+        let mut mask = enable_mask;
+        while mask != 0 {
+            let bit = 1u64 << mask.trailing_zeros();
+            if !privs.enable(bit) {
+                return -22; // -EINVAL: privilege not present
+            }
+            mask &= !bit;
+        }
+    }
+
+    0
+}
+
+// ── Token duplication ────────────────────────────────────────────────────
+
+/// Deep-clone a token with a new type and impersonation level.
+/// Returns a new opaque pointer (caller owns one reference), or null on failure.
+#[no_mangle]
+pub extern "C" fn kacs_token_deep_clone(
+    ptr: *const (),
+    new_type: c_int,
+    new_level: c_int,
+) -> *const () {
+    if ptr.is_null() {
+        return core::ptr::null();
+    }
+    let kt = unsafe { KacsToken::from_ptr(ptr) };
+
+    let mut cloned = match kt.token.try_clone() {
+        Ok(t) => t,
+        Err(_) => return core::ptr::null(),
+    };
+
+    // Apply new type if specified
+    match new_type {
+        1 => cloned.token_type = TokenType::Primary,
+        2 => cloned.token_type = TokenType::Impersonation,
+        _ => {} // -1 or other = keep original
+    }
+
+    // Apply new impersonation level if specified
+    match new_level {
+        0 => cloned.impersonation_level = ImpersonationLevel::Anonymous,
+        1 => cloned.impersonation_level = ImpersonationLevel::Identification,
+        2 => cloned.impersonation_level = ImpersonationLevel::Impersonation,
+        3 => cloned.impersonation_level = ImpersonationLevel::Delegation,
+        _ => {} // -1 or other = keep original
+    }
+
+    match KacsToken::new(cloned) {
+        Ok(ptr) => ptr,
+        Err(_) => core::ptr::null(),
     }
 }
 

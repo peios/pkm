@@ -25,6 +25,10 @@ extern const void *kacs_token_clone(const void *ptr);
 extern void kacs_token_drop(const void *ptr);
 extern long long kacs_token_format(const void *ptr, char *buf, size_t len);
 extern int kacs_token_query(const void *ptr, u32 class, void *buf, u32 buf_len);
+extern int kacs_token_adjust_privs(const void *ptr, u64 enable_mask,
+				   u64 disable_mask, u64 remove_mask);
+extern const void *kacs_token_deep_clone(const void *ptr,
+					 int new_type, int new_level);
 extern long long kacs_access_check_sd(const void *token_ptr,
 				      const void *sd_data, size_t sd_len,
 				      u32 desired, u32 generic_read,
@@ -48,7 +52,9 @@ extern long long kacs_access_check_sd(const void *token_ptr,
 
 /* ioctl definitions */
 #define KACS_IOC_MAGIC 'K'
-#define KACS_IOC_QUERY _IOWR(KACS_IOC_MAGIC, 0, struct kacs_query_args)
+#define KACS_IOC_QUERY         _IOWR(KACS_IOC_MAGIC, 0, struct kacs_query_args)
+#define KACS_IOC_ADJUST_PRIVS  _IOW(KACS_IOC_MAGIC, 1, struct kacs_adjust_privs_args)
+#define KACS_IOC_DUPLICATE     _IOWR(KACS_IOC_MAGIC, 2, struct kacs_duplicate_args)
 
 /* Token query classes (§15.2) */
 #define TOKEN_CLASS_USER              1
@@ -76,6 +82,19 @@ struct kacs_query_args {
 	u32 token_class;	/* TOKEN_CLASS_* */
 	u32 buf_len;		/* in: buffer size, out: required size */
 	u64 buf_ptr;		/* userspace pointer to output buffer */
+};
+
+struct kacs_adjust_privs_args {
+	u64 enable_mask;	/* privileges to enable */
+	u64 disable_mask;	/* privileges to disable */
+	u64 remove_mask;	/* privileges to permanently remove */
+};
+
+struct kacs_duplicate_args {
+	u32 access_mask;	/* access rights for the new handle */
+	u32 token_type;		/* 1=Primary, 2=Impersonation */
+	u32 impersonation_level;/* 0-3 */
+	s32 result_fd;		/* out: fd for the new token */
 };
 
 /* ── Credential blob ───────────────────────────────────────────────────── */
@@ -221,6 +240,52 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 		kfree(kbuf);
 		qa.buf_len = ret;
 		if (copy_to_user((void __user *)arg, &qa, sizeof(qa)))
+			return -EFAULT;
+		return 0;
+	}
+	case KACS_IOC_ADJUST_PRIVS: {
+		struct kacs_adjust_privs_args pa;
+
+		if (!(tf->access_mask & KACS_TOKEN_ADJUST_PRIVS))
+			return -EACCES;
+
+		if (copy_from_user(&pa, (void __user *)arg, sizeof(pa)))
+			return -EFAULT;
+
+		return kacs_token_adjust_privs(tf->token, pa.enable_mask,
+					       pa.disable_mask,
+					       pa.remove_mask);
+	}
+	case KACS_IOC_DUPLICATE: {
+		struct kacs_duplicate_args da;
+		const void *new_token;
+		int fd;
+
+		if (!(tf->access_mask & KACS_TOKEN_DUPLICATE))
+			return -EACCES;
+
+		if (copy_from_user(&da, (void __user *)arg, sizeof(da)))
+			return -EFAULT;
+
+		if (da.token_type != 1 && da.token_type != 2)
+			return -EINVAL;
+		if (da.impersonation_level > 3)
+			return -EINVAL;
+		if (!da.access_mask)
+			return -EINVAL;
+
+		new_token = kacs_token_deep_clone(tf->token,
+						  (int)da.token_type,
+						  (int)da.impersonation_level);
+		if (!new_token)
+			return -ENOMEM;
+
+		fd = kacs_token_to_fd(new_token, da.access_mask);
+		if (fd < 0)
+			return fd;
+
+		da.result_fd = fd;
+		if (copy_to_user((void __user *)arg, &da, sizeof(da)))
 			return -EFAULT;
 		return 0;
 	}
