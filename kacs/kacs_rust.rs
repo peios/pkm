@@ -355,6 +355,72 @@ pub extern "C" fn kacs_token_get_type(ptr: *const ()) -> c_int {
     }
 }
 
+/// Returns the impersonation level: 0=Anonymous, 1=Identification,
+/// 2=Impersonation, 3=Delegation.
+#[no_mangle]
+pub extern "C" fn kacs_token_get_impersonation_level(ptr: *const ()) -> c_int {
+    if ptr.is_null() {
+        return 0;
+    }
+    let kt = unsafe { KacsToken::from_ptr(ptr) };
+    kt.token.impersonation_level as c_int
+}
+
+/// Set the impersonation level on a token (for capping during connect/impersonate).
+///
+/// # Safety
+/// Caller must ensure exclusive access. In practice this is called on
+/// freshly-cloned tokens before they're shared.
+#[no_mangle]
+pub extern "C" fn kacs_token_set_impersonation_level(ptr: *const (), level: c_int) {
+    if ptr.is_null() {
+        return;
+    }
+    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
+    kt.token.impersonation_level = match level {
+        0 => ImpersonationLevel::Anonymous,
+        1 => ImpersonationLevel::Identification,
+        2 => ImpersonationLevel::Impersonation,
+        3 => ImpersonationLevel::Delegation,
+        _ => return,
+    };
+}
+
+/// Check if a privilege is present AND enabled on a token.
+/// Returns 1 if the privilege is active, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn kacs_token_check_privilege(ptr: *const (), priv_mask: u64) -> c_int {
+    if ptr.is_null() {
+        return 0;
+    }
+    let kt = unsafe { KacsToken::from_ptr(ptr) };
+    if kt.token.privileges.check(priv_mask) { 1 } else { 0 }
+}
+
+/// Returns the integrity level as a RID (0, 4096, 8192, 12288, 16384).
+/// Used by the integrity ceiling check in the two-gate model.
+#[no_mangle]
+pub extern "C" fn kacs_token_get_integrity(ptr: *const ()) -> c_int {
+    if ptr.is_null() {
+        return 0;
+    }
+    let kt = unsafe { KacsToken::from_ptr(ptr) };
+    kt.token.integrity_level.rid() as c_int
+}
+
+/// Check if two tokens have the same user SID.
+/// Used by the identity gate fallback in the two-gate model.
+/// Returns 1 if same user, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn kacs_token_same_user(a: *const (), b: *const ()) -> c_int {
+    if a.is_null() || b.is_null() {
+        return 0;
+    }
+    let ka = unsafe { KacsToken::from_ptr(a) };
+    let kb = unsafe { KacsToken::from_ptr(b) };
+    if ka.token.user_sid == kb.token.user_sid { 1 } else { 0 }
+}
+
 // ── Privilege adjustment ──────────────────────────────────────────────────
 
 /// Adjust privileges on a token: enable, disable, or permanently remove.

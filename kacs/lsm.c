@@ -16,6 +16,8 @@
 #include <linux/syscalls.h>
 #include <linux/anon_inodes.h>
 #include <linux/file.h>
+#include <linux/net.h>
+#include <net/sock.h>
 
 /* ── Rust FFI declarations ─────────────────────────────────────────────── */
 
@@ -30,6 +32,11 @@ extern int kacs_token_adjust_privs(const void *ptr, u64 enable_mask,
 extern const void *kacs_token_deep_clone(const void *ptr,
 					 int new_type, int new_level);
 extern int kacs_token_get_type(const void *ptr);
+extern int kacs_token_get_impersonation_level(const void *ptr);
+extern int kacs_token_check_privilege(const void *ptr, u64 priv_mask);
+extern int kacs_token_get_integrity(const void *ptr);
+extern int kacs_token_same_user(const void *a, const void *b);
+extern void kacs_token_set_impersonation_level(const void *ptr, int level);
 extern const void *kacs_token_from_spec(const void *data, size_t len);
 extern long long kacs_access_check_sd(const void *token_ptr,
 				      const void *sd_data, size_t sd_len,
@@ -100,19 +107,44 @@ struct kacs_duplicate_args {
 	s32 result_fd;		/* out: fd for the new token */
 };
 
+/* Privilege bitmasks (must match kacs-core privilege::bits) */
+#define KACS_PRIV_CREATE_TOKEN         (1ULL << 2)
+#define KACS_PRIV_ASSIGN_PRIMARY_TOKEN (1ULL << 3)
+#define KACS_PRIV_TCB                  (1ULL << 7)
+#define KACS_PRIV_IMPERSONATE          (1ULL << 29)
+
+/* Impersonation levels */
+#define KACS_LEVEL_ANONYMOUS       0
+#define KACS_LEVEL_IDENTIFICATION  1
+#define KACS_LEVEL_IMPERSONATION   2
+#define KACS_LEVEL_DELEGATION      3
+
 /* ── Credential blob ───────────────────────────────────────────────────── */
 
 struct kacs_cred_security {
 	const void *token;	/* opaque pointer to Rust-managed token */
 };
 
+/* ── Socket blob ──────────────────────────────────────────────────────── */
+
+struct kacs_sock_security {
+	const void *peer_token;		/* server side: peer's token snapshot */
+	u32 max_impersonation;		/* client side: max level (default=Impersonation) */
+};
+
 static struct lsm_blob_sizes kacs_blob_sizes __ro_after_init = {
 	.lbs_cred = sizeof(struct kacs_cred_security),
+	.lbs_sock = sizeof(struct kacs_sock_security),
 };
 
 static inline struct kacs_cred_security *kacs_cred(const struct cred *cred)
 {
 	return cred->security + kacs_blob_sizes.lbs_cred;
+}
+
+static inline struct kacs_sock_security *kacs_sock(const struct sock *sk)
+{
+	return sk->sk_security + kacs_blob_sizes.lbs_sock;
 }
 
 /* ── C helpers for Rust ────────────────────────────────────────────────── */
@@ -274,6 +306,12 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 		if (!(tf->access_mask & KACS_TOKEN_ASSIGN_PRIMARY))
 			return -EACCES;
 
+		/* Requires SeAssignPrimaryTokenPrivilege on caller's real token. */
+		if (!kacs_token_check_privilege(
+				kacs_cred(current_real_cred())->token,
+				KACS_PRIV_ASSIGN_PRIMARY_TOKEN))
+			return -EPERM;
+
 		/* Only Primary tokens can be installed. */
 		if (kacs_token_get_type(tf->token) != 1)
 			return -EINVAL;
@@ -305,6 +343,14 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 			return -EINVAL;
 		if (!da.access_mask)
 			return -EINVAL;
+
+		/* Impersonation → Primary requires SeTcbPrivilege (§15.2). */
+		if (kacs_token_get_type(tf->token) == 2 && da.token_type == 1) {
+			if (!kacs_token_check_privilege(
+					kacs_cred(current_real_cred())->token,
+					KACS_PRIV_TCB))
+				return -EPERM;
+		}
 
 		new_token = kacs_token_deep_clone(tf->token,
 						  (int)da.token_type,
@@ -371,6 +417,75 @@ static void kacs_cred_free(struct cred *cred)
 		kacs_token_drop(sec->token);
 }
 
+/* ── Socket hooks ──────────────────────────────────────────────────────── */
+
+static int kacs_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
+{
+	struct kacs_sock_security *ssec = kacs_sock(sk);
+
+	ssec->peer_token = NULL;
+	ssec->max_impersonation = KACS_LEVEL_IMPERSONATION; /* default per §12 */
+	return 0;
+}
+
+static void kacs_sk_free_security(struct sock *sk)
+{
+	struct kacs_sock_security *ssec = kacs_sock(sk);
+
+	if (ssec->peer_token)
+		kacs_token_drop(ssec->peer_token);
+}
+
+/*
+ * Capture the connecting peer's identity into the server-side socket blob.
+ * The peer's effective token (or primary if not impersonating) is cloned
+ * as a snapshot — subsequent token changes on the peer are not reflected.
+ */
+static int kacs_unix_stream_connect(struct sock *sock,
+				    struct sock *other,
+				    struct sock *newsk)
+{
+	struct kacs_sock_security *nsec = kacs_sock(newsk);
+	const struct kacs_cred_security *cred_sec;
+
+	/*
+	 * If the client is impersonating and level >= Delegation,
+	 * capture the impersonated identity. Otherwise capture the
+	 * primary (real) identity.
+	 */
+	{
+		struct kacs_sock_security *csec = kacs_sock(sock);
+		int max_level = (int)csec->max_impersonation;
+
+		if (current->cred != current->real_cred) {
+			cred_sec = kacs_cred(current->cred);
+			int level = kacs_token_get_impersonation_level(
+				cred_sec->token);
+			int effective = level < max_level ? level : max_level;
+			if (effective >= KACS_LEVEL_IMPERSONATION)
+				nsec->peer_token = kacs_token_clone(
+					cred_sec->token);
+			else
+				nsec->peer_token = kacs_token_clone(
+					kacs_cred(current->real_cred)->token);
+		} else {
+			cred_sec = kacs_cred(current->cred);
+			nsec->peer_token = kacs_token_clone(cred_sec->token);
+		}
+
+		/* Cap the stored token's level to the connection max. */
+		if (nsec->peer_token) {
+			int stored = kacs_token_get_impersonation_level(
+				nsec->peer_token);
+			if (stored > max_level)
+				kacs_token_set_impersonation_level(
+					nsec->peer_token, max_level);
+		}
+	}
+
+	return 0;
+}
+
 /* ── Hook table ────────────────────────────────────────────────────────── */
 
 static struct security_hook_list kacs_hooks[] __ro_after_init = {
@@ -378,6 +493,9 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(cred_transfer, kacs_cred_transfer),
 	LSM_HOOK_INIT(cred_alloc_blank, kacs_cred_alloc_blank),
 	LSM_HOOK_INIT(cred_free, kacs_cred_free),
+	LSM_HOOK_INIT(sk_alloc_security, kacs_sk_alloc_security),
+	LSM_HOOK_INIT(sk_free_security, kacs_sk_free_security),
+	LSM_HOOK_INIT(unix_stream_connect, kacs_unix_stream_connect),
 };
 
 /* ── Syscall: kacs_open_self_token (1000) ──────────────────────────────── */
@@ -416,8 +534,15 @@ SYSCALL_DEFINE2(kacs_open_self_token, unsigned int, flags, u32, access_mask)
  */
 SYSCALL_DEFINE2(kacs_create_token, const void __user *, spec, size_t, len)
 {
+	const struct kacs_cred_security *caller;
 	const void *new_token;
 	void *kbuf;
+
+	/* Requires SeCreateTokenPrivilege — only TCB components (authd). */
+	caller = kacs_cred(current_real_cred());
+	if (!kacs_token_check_privilege(caller->token,
+					KACS_PRIV_CREATE_TOKEN))
+		return -EPERM;
 
 	/* Size bounds: min header (56), max PAGE_SIZE. */
 	if (len < 56 || len > PAGE_SIZE)
@@ -439,6 +564,151 @@ SYSCALL_DEFINE2(kacs_create_token, const void __user *, spec, size_t, len)
 		return -EINVAL;
 
 	return kacs_token_to_fd(new_token, KACS_TOKEN_ALL_ACCESS);
+}
+
+/* ── Syscall: kacs_open_peer_token (1010) ───────────────────────────────── */
+
+/*
+ * Extract the peer's identity from a connected Unix stream socket.
+ * Returns a token fd. Does not impersonate — just gives a handle.
+ */
+SYSCALL_DEFINE1(kacs_open_peer_token, int, conn_fd)
+{
+	struct kacs_sock_security *ssec;
+	struct socket *sock;
+	const void *token;
+	int err;
+
+	sock = sockfd_lookup(conn_fd, &err);
+	if (!sock)
+		return err;
+
+	ssec = kacs_sock(sock->sk);
+	if (!ssec->peer_token) {
+		sockfd_put(sock);
+		return -EINVAL;
+	}
+
+	token = kacs_token_clone(ssec->peer_token);
+	sockfd_put(sock);
+	return kacs_token_to_fd(token, KACS_TOKEN_ALL_ACCESS);
+}
+
+/* ── Syscall: kacs_impersonate_peer (1011) ─────────────────────────────── */
+
+/*
+ * Impersonate the peer identity from a connected Unix stream socket.
+ *
+ * Two-gate model (§12.2):
+ *   Gate 1 (identity): SeImpersonatePrivilege on server's real token,
+ *     OR same user SID between server and peer.
+ *   Gate 2 (integrity ceiling): peer integrity <= server integrity.
+ *
+ * If either gate fails, the token is capped to Identification level
+ * (not rejected). The server enters an impersonated state but
+ * AccessCheck step 0 denies all resource access.
+ */
+SYSCALL_DEFINE1(kacs_impersonate_peer, int, conn_fd)
+{
+	struct kacs_cred_security *sec;
+	struct kacs_sock_security *ssec;
+	struct socket *sock;
+	struct cred *new_cred;
+	const void *server_token;
+	const void *peer_token;
+	int err;
+	int cap_to_identification = 0;
+
+	sock = sockfd_lookup(conn_fd, &err);
+	if (!sock)
+		return err;
+
+	ssec = kacs_sock(sock->sk);
+	if (!ssec->peer_token) {
+		sockfd_put(sock);
+		return -EINVAL;
+	}
+
+	peer_token = ssec->peer_token;
+	server_token = kacs_cred(current_real_cred())->token;
+
+	/* Gate 1: identity gate.
+	 * SeImpersonatePrivilege OR same user SID. */
+	if (!kacs_token_check_privilege(server_token, KACS_PRIV_IMPERSONATE)) {
+		if (!kacs_token_same_user(server_token, peer_token))
+			cap_to_identification = 1;
+	}
+
+	/* Gate 2: integrity ceiling.
+	 * Peer integrity must be <= server integrity. */
+	if (kacs_token_get_integrity(peer_token) >
+	    kacs_token_get_integrity(server_token))
+		cap_to_identification = 1;
+
+	/* If already impersonating, revert first. */
+	if (current_cred() != current_real_cred())
+		revert_creds(current_real_cred());
+
+	new_cred = prepare_creds();
+	if (!new_cred) {
+		sockfd_put(sock);
+		return -ENOMEM;
+	}
+
+	sec = kacs_cred(new_cred);
+	kacs_token_drop(sec->token);
+	sec->token = kacs_token_clone(peer_token);
+
+	/* Cap to Identification if either gate failed. */
+	if (cap_to_identification)
+		kacs_token_set_impersonation_level(sec->token,
+						   KACS_LEVEL_IDENTIFICATION);
+
+	override_creds(new_cred);
+
+	sockfd_put(sock);
+	return 0;
+}
+
+/* ── Syscall: kacs_revert (1012) ───────────────────────────────────────── */
+
+/*
+ * Revert impersonation, restoring the thread's primary token.
+ * No-op if not impersonating.
+ */
+SYSCALL_DEFINE0(kacs_revert)
+{
+	if (current_cred() == current_real_cred())
+		return 0;
+
+	revert_creds(current_real_cred());
+	return 0;
+}
+
+/* ── Syscall: kacs_set_impersonation_level (1013) ──────────────────────── */
+
+/*
+ * Set the max impersonation level on a socket before connect().
+ * The server cannot impersonate beyond this level.
+ * Default is Impersonation (matching Windows).
+ */
+SYSCALL_DEFINE2(kacs_set_impersonation_level, int, sock_fd, u32, level)
+{
+	struct kacs_sock_security *ssec;
+	struct socket *sock;
+	int err;
+
+	if (level > KACS_LEVEL_DELEGATION)
+		return -EINVAL;
+
+	sock = sockfd_lookup(sock_fd, &err);
+	if (!sock)
+		return err;
+
+	ssec = kacs_sock(sock->sk);
+	ssec->max_impersonation = level;
+	sockfd_put(sock);
+	return 0;
 }
 
 /* ── Syscall: kacs_access_check (1023) ─────────────────────────────────── */
