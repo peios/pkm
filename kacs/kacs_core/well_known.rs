@@ -9,21 +9,13 @@ use crate::sid::Sid;
 // --- Authorities ---
 // The identifier authority is the 6-byte field after the revision.
 
-/// Null authority (0). Used for the NULL SID (S-1-0-0).
 pub const AUTHORITY_NULL: u64 = 0;
-/// World authority (1). Used for the Everyone SID (S-1-1-0).
 pub const AUTHORITY_WORLD: u64 = 1;
-/// Local authority (2). Used for the Local SID (S-1-2-0).
 pub const AUTHORITY_LOCAL: u64 = 2;
-/// Creator authority (3). Used for Creator Owner/Group SIDs.
 pub const AUTHORITY_CREATOR: u64 = 3;
-/// NT authority (5). Used for most built-in SIDs.
 pub const AUTHORITY_NT: u64 = 5;
-/// App package authority (15). Used for confinement SIDs (S-1-15-*).
 pub const AUTHORITY_APP_PACKAGE: u64 = 15;
-/// Mandatory label authority (16). Used for integrity levels (S-1-16-*).
 pub const AUTHORITY_MANDATORY_LABEL: u64 = 16;
-/// Process trust authority (19). Used for PIP trust labels (S-1-19-*).
 pub const AUTHORITY_PROCESS_TRUST: u64 = 19;
 
 // --- Universal well-known SIDs ---
@@ -176,27 +168,16 @@ pub fn trust_label(pip_type: u32, pip_trust: u32) -> Result<Sid, AllocError> {
 }
 
 // PIP type values (§11.15)
-
-/// PIP type: none / unprotected (0).
 pub const PIP_TYPE_NONE: u32 = 0;
-/// PIP type: protected process (512).
 pub const PIP_TYPE_PROTECTED: u32 = 512;
-/// PIP type: isolated process (1024).
 pub const PIP_TYPE_ISOLATED: u32 = 1024;
 
 // PIP trust values (§11.15)
-
-/// PIP trust: none (0).
 pub const PIP_TRUST_NONE: u32 = 0;
-/// PIP trust: Authenticode-signed (1024).
 pub const PIP_TRUST_AUTHENTICODE: u32 = 1024;
-/// PIP trust: anti-malware vendor (1536).
 pub const PIP_TRUST_ANTIMALWARE: u32 = 1536;
-/// PIP trust: first-party application (2048).
 pub const PIP_TRUST_APP: u32 = 2048;
-/// PIP trust: Peios core component (4096).
 pub const PIP_TRUST_PEIOS: u32 = 4096;
-/// PIP trust: Peios trusted computing base (8192).
 pub const PIP_TRUST_PEIOS_TCB: u32 = 8192;
 
 // --- Application confinement (S-1-15-2-*, S-1-15-3-*) §11.14 ---

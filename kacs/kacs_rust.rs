@@ -2,11 +2,18 @@
 
 //! KACS kernel module — Rust implementation.
 //!
-//! Phase 1: minimal token object with SYSTEM identity, reference counting,
-//! and text formatting. No heap allocation — the SYSTEM token is a static.
-//! kacs-core integration comes in Phase 3 when we need AccessCheck.
+//! Contains the kacs-core evaluation engine as a submodule and the
+//! kernel-specific FFI exports called from lsm.c.
 
 #![no_std]
+#![allow(elided_lifetimes_in_paths)]
+
+mod kacs_core;
+
+// Re-export kacs_core modules at crate root so that `use crate::sid::Sid`
+// works inside kacs_core files (they were written as a standalone crate
+// where `crate::` pointed to their own root).
+pub use kacs_core::*;
 
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicUsize, Ordering};

@@ -20,9 +20,7 @@ use crate::well_known;
 /// or a non-container (file, value).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObjectClass {
-    /// Directory, registry key, or other namespace node.
     Container,
-    /// File, value, or other leaf object.
     NonContainer,
 }
 

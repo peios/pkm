@@ -8,7 +8,6 @@
 pub struct Luid(pub u64);
 
 impl Luid {
-    /// The zero LUID, used as a sentinel/default value.
     pub const ZERO: Luid = Luid(0);
 
     /// Parse from 8-byte little-endian representation.

@@ -22,37 +22,26 @@ use crate::sid::Sid;
 /// Token type: primary (process baseline) or impersonation (per-thread override).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenType {
-    /// Process-level baseline token.
     Primary = 1,
-    /// Per-thread identity override.
     Impersonation = 2,
 }
 
 /// How far an impersonation token's identity can travel (§12.1).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum ImpersonationLevel {
-    /// No identity information available.
     Anonymous = 0,
-    /// Can identify but not act as the client.
     Identification = 1,
-    /// Can act as the client locally.
     Impersonation = 2,
-    /// Can act as the client across machine boundaries.
     Delegation = 3,
 }
 
 /// Integrity level — vertical trust hierarchy for MIC (§11.13).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum IntegrityLevel {
-    /// RID 0 — sandboxed / untrusted code.
     Untrusted = 0,
-    /// RID 4096 — browser tabs, low-privilege services.
     Low = 4096,
-    /// RID 8192 — default for normal user processes.
     Medium = 8192,
-    /// RID 12288 — elevated / admin processes.
     High = 12288,
-    /// RID 16384 — kernel and core OS services.
     System = 16384,
 }
 
@@ -78,19 +67,14 @@ impl IntegrityLevel {
 /// Elevation type for linked token pairs (§7.7).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ElevationType {
-    /// Not part of a linked pair (UAC not applicable).
     Default = 1,
-    /// Full (elevated) token of a linked pair.
     Full = 2,
-    /// Filtered (non-elevated) token of a linked pair.
     Limited = 3,
 }
 
 /// Mandatory integrity policy flags on the token (§7.3, §11.13).
 pub mod mandatory_policy {
-    /// Enforce NO_WRITE_UP integrity policy.
     pub const NO_WRITE_UP: u32 = 0x0001;
-    /// New child processes inherit the minimum of parent and token integrity.
     pub const NEW_PROCESS_MIN: u32 = 0x0002;
 }
 
@@ -107,30 +91,20 @@ pub struct TokenSource {
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug)]
 pub struct ClaimEntry {
-    /// The claim attribute name (e.g., "Department").
     pub name: crate::compat::String,
-    /// The value type discriminator.
     pub claim_type: ClaimType,
-    /// Attribute flags (CASE_SENSITIVE, USE_FOR_DENY_ONLY, DISABLED).
     pub flags: u16,
-    /// The claim's value(s).
     pub values: ClaimValues,
 }
 
 /// Claim value type (MS-DTYP §2.4.10.1).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaimType {
-    /// Signed 64-bit integer.
     Int64 = 0x0001,
-    /// Unsigned 64-bit integer.
     Uint64 = 0x0002,
-    /// Unicode string.
     String = 0x0003,
-    /// Security identifier.
     Sid = 0x0005,
-    /// Boolean (true/false).
     Boolean = 0x0006,
-    /// Opaque byte sequence.
     Octet = 0x0010,
 }
 
@@ -138,27 +112,18 @@ pub enum ClaimType {
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug)]
 pub enum ClaimValues {
-    /// One or more signed 64-bit integers.
     Int64(Vec<i64>),
-    /// One or more unsigned 64-bit integers.
     Uint64(Vec<u64>),
-    /// One or more Unicode strings.
     String(Vec<crate::compat::String>),
-    /// One or more SIDs.
     Sid(Vec<Sid>),
-    /// One or more booleans.
     Boolean(Vec<bool>),
-    /// One or more opaque byte sequences.
     Octet(Vec<Vec<u8>>),
 }
 
 /// Claim attribute flags.
 pub mod claim_flags {
-    /// String comparisons are case-sensitive for this claim.
     pub const CASE_SENSITIVE: u16 = 0x0002;
-    /// Claim participates in deny ACEs only; invisible to allow ACEs.
     pub const USE_FOR_DENY_ONLY: u16 = 0x0004;
-    /// Claim is disabled and resolves to NULL.
     pub const DISABLED: u16 = 0x0010;
 }
 
@@ -183,26 +148,22 @@ pub struct Token {
 
     // --- Token type (immutable) ---
 
-    /// Primary or impersonation.
     pub token_type: TokenType,
     /// Meaningful only for impersonation tokens.
     pub impersonation_level: ImpersonationLevel,
 
     // --- Integrity (immutable) ---
 
-    /// The token's integrity level for MIC enforcement.
     pub integrity_level: IntegrityLevel,
     /// NO_WRITE_UP, NEW_PROCESS_MIN. Immutable after creation.
     pub mandatory_policy: u32,
 
     // --- Privileges (mutable via AdjustPrivileges) ---
 
-    /// Privilege bitmap (enabled and available sets).
     pub privileges: Privileges,
 
     // --- Elevation (immutable) ---
 
-    /// Whether this token is part of a linked elevation pair.
     pub elevation_type: ElevationType,
     // linked_token is a weak ref in the kernel — not modeled here.
     // The kernel wrapper holds the Arc.
@@ -228,21 +189,16 @@ pub struct Token {
 
     // --- Session (mutable, requires SeTcbPrivilege) ---
 
-    /// Interactive session ID (desktop/console).
     pub interactive_session_id: u32,
 
     // --- Claims (immutable) ---
 
-    /// User identity claims for conditional ACE evaluation.
     pub user_claims: Vec<ClaimEntry>,
-    /// Device identity claims for conditional ACE evaluation.
     pub device_claims: Vec<ClaimEntry>,
 
     // --- Device identity (immutable) ---
 
-    /// Device group memberships. None = no device identity.
     pub device_groups: Option<Vec<GroupEntry>>,
-    /// Restricted device groups for compound identity. None = unrestricted.
     pub restricted_device_groups: Option<Vec<GroupEntry>>,
 
     // --- Confinement (immutable) ---
@@ -258,11 +214,8 @@ pub struct Token {
 
     // --- Credential projection (immutable) ---
 
-    /// POSIX UID projected from the token's identity.
     pub projected_uid: u32,
-    /// POSIX primary GID projected from the token's identity.
     pub projected_gid: u32,
-    /// POSIX supplementary GIDs projected from group memberships.
     pub projected_supplementary_gids: Vec<u32>,
 
     // --- Audit (mutable) ---

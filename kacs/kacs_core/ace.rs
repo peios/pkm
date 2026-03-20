@@ -14,83 +14,54 @@ use crate::sid::Sid;
 // --- ACE types (§9.3) ---
 
 // DACL ACE types
-/// Access allowed ACE (type 0x00).
 pub const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
-/// Access denied ACE (type 0x01).
 pub const ACCESS_DENIED_ACE_TYPE: u8 = 0x01;
 
 // SACL ACE types
-/// System audit ACE (type 0x02).
 pub const SYSTEM_AUDIT_ACE_TYPE: u8 = 0x02;
-/// System alarm ACE for continuous auditing (type 0x03).
 pub const SYSTEM_ALARM_ACE_TYPE: u8 = 0x03;
 
 // Compound (reserved, never implemented)
 // pub const ACCESS_ALLOWED_COMPOUND_ACE_TYPE: u8 = 0x04;
 
 // Object ACE types (DS rights, property-level)
-/// Access allowed object ACE with optional GUIDs (type 0x05).
 pub const ACCESS_ALLOWED_OBJECT_ACE_TYPE: u8 = 0x05;
-/// Access denied object ACE with optional GUIDs (type 0x06).
 pub const ACCESS_DENIED_OBJECT_ACE_TYPE: u8 = 0x06;
-/// System audit object ACE with optional GUIDs (type 0x07).
 pub const SYSTEM_AUDIT_OBJECT_ACE_TYPE: u8 = 0x07;
-/// System alarm object ACE with optional GUIDs (type 0x08).
 pub const SYSTEM_ALARM_OBJECT_ACE_TYPE: u8 = 0x08;
 
 // Callback ACE types (conditional expressions)
-/// Access allowed callback ACE with conditional expression (type 0x09).
 pub const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 0x09;
-/// Access denied callback ACE with conditional expression (type 0x0A).
 pub const ACCESS_DENIED_CALLBACK_ACE_TYPE: u8 = 0x0A;
-/// Access allowed callback object ACE (type 0x0B).
 pub const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0B;
-/// Access denied callback object ACE (type 0x0C).
 pub const ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0C;
-/// System audit callback ACE with conditional expression (type 0x0D).
 pub const SYSTEM_AUDIT_CALLBACK_ACE_TYPE: u8 = 0x0D;
-/// System alarm callback ACE with conditional expression (type 0x0E).
 pub const SYSTEM_ALARM_CALLBACK_ACE_TYPE: u8 = 0x0E;
-/// System audit callback object ACE (type 0x0F).
 pub const SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0F;
-/// System alarm callback object ACE (type 0x10).
 pub const SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x10;
 
 // Special SACL ACE types
-/// Mandatory integrity label ACE (type 0x11).
 pub const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
-/// Resource attribute ACE carrying claim data (type 0x12).
 pub const SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE: u8 = 0x12;
-/// Scoped policy ID ACE referencing a central access policy (type 0x13).
 pub const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
-/// Process trust label ACE (type 0x14).
 pub const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
 
 // --- ACE flags (§9.5) ---
 
 // Inheritance flags
-/// Inherit to child objects (non-containers).
 pub const OBJECT_INHERIT_ACE: u8 = 0x01;
-/// Inherit to child containers.
 pub const CONTAINER_INHERIT_ACE: u8 = 0x02;
-/// Do not propagate inheritance beyond the first child.
 pub const NO_PROPAGATE_INHERIT_ACE: u8 = 0x04;
-/// ACE does not apply to the object itself, only inherited.
 pub const INHERIT_ONLY_ACE: u8 = 0x08;
-/// ACE was created through inheritance.
 pub const INHERITED_ACE: u8 = 0x10;
 
 // Audit flags (SACL only)
-/// Generate audit on successful access.
 pub const SUCCESSFUL_ACCESS_ACE_FLAG: u8 = 0x40;
-/// Generate audit on failed access.
 pub const FAILED_ACCESS_ACE_FLAG: u8 = 0x80;
 
 // --- Object ACE flags ---
 
-/// Object type GUID is present in this object ACE.
 pub const ACE_OBJECT_TYPE_PRESENT: u32 = 0x01;
-/// Inherited object type GUID is present in this object ACE.
 pub const ACE_INHERITED_OBJECT_TYPE_PRESENT: u32 = 0x02;
 
 /// Returns true if this ACE type is an allow type.
@@ -176,13 +147,9 @@ pub fn is_alarm_type(ace_type: u8) -> bool {
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug)]
 pub struct Ace {
-    /// ACE type code (e.g., `ACCESS_ALLOWED_ACE_TYPE`).
     pub ace_type: u8,
-    /// ACE flags (inheritance and audit flags).
     pub flags: u8,
-    /// Access mask specifying the rights this ACE controls.
     pub mask: u32,
-    /// Principal SID this ACE applies to.
     pub sid: Sid,
     /// Object type GUID (object ACEs only). Present if ACE_OBJECT_TYPE_PRESENT.
     pub object_type: Option<Guid>,

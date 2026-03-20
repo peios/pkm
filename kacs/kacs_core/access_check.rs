@@ -32,22 +32,16 @@ pub struct AccessCheckResult {
 /// Per-node result for AccessCheckResultList.
 #[derive(Clone, Debug)]
 pub struct NodeResult {
-    /// The access rights granted for this tree node.
     pub granted: u32,
-    /// Whether the requested access was allowed for this node.
     pub allowed: bool,
 }
 
 /// Internal state for per-property object type tree nodes (§11.8).
 #[derive(Clone, Debug)]
 pub struct ObjectTypeNode {
-    /// Depth in the object type tree (0 = root).
     pub level: u16,
-    /// The GUID identifying this property set or property.
     pub guid: crate::guid::Guid,
-    /// Bitmask of access rights already decided (allow or deny).
     pub decided: u32,
-    /// Bitmask of access rights granted to this node.
     pub granted: u32,
 }
 
@@ -91,7 +85,6 @@ fn sid_in_list(sid: &Sid, sids: &[Sid]) -> bool {
 // MapGenericBits (§11.2) — re-export from mask module
 // ---------------------------------------------------------------------------
 
-/// Map GENERIC_{READ,WRITE,EXECUTE,ALL} to object-specific bits (§11.2).
 pub use crate::mask::map_generic_bits;
 
 // ---------------------------------------------------------------------------
@@ -102,7 +95,6 @@ pub use crate::mask::map_generic_bits;
 /// The original token is not modified.
 #[derive(Clone, Debug)]
 pub struct EnrichedToken<'a> {
-    /// Reference to the underlying token.
     pub token: &'a Token,
     /// S-1-3-4 (OWNER RIGHTS) — present if caller is the owner.
     pub has_owner_rights: bool,
@@ -1258,9 +1250,8 @@ fn evaluate_rule_dacl(
     Ok(granted)
 }
 
-/// Privilege intent flag: activate SeBackupPrivilege in AccessCheck.
+/// Privilege intent flags for AccessCheck.
 pub const BACKUP_INTENT: u32 = 0x01;
-/// Privilege intent flag: activate SeRestorePrivilege in AccessCheck.
 pub const RESTORE_INTENT: u32 = 0x02;
 
 /// Errors from AccessCheck.
