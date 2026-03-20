@@ -252,6 +252,27 @@ pub extern "C" fn kacs_token_query(
     data.len() as i32
 }
 
+// ── Token creation from wire format ───────────────────────────────────────
+
+/// Parse a binary token spec and return a new heap-allocated token.
+/// Returns a valid pointer on success, null on failure (bad format or OOM).
+#[no_mangle]
+pub extern "C" fn kacs_token_from_spec(data: *const u8, len: usize) -> *const () {
+    if data.is_null() || len < 56 {
+        return core::ptr::null();
+    }
+
+    let spec = unsafe { core::slice::from_raw_parts(data, len) };
+
+    match kacs_core::token_spec::parse_token_spec(spec) {
+        Ok(Some(token)) => match KacsToken::new(token) {
+            Ok(ptr) => ptr,
+            Err(_) => core::ptr::null(),
+        },
+        _ => core::ptr::null(),
+    }
+}
+
 // ── AccessCheck syscall ───────────────────────────────────────────────────
 
 /// Evaluate a Security Descriptor against a token.

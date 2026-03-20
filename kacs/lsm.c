@@ -29,6 +29,7 @@ extern int kacs_token_adjust_privs(const void *ptr, u64 enable_mask,
 				   u64 disable_mask, u64 remove_mask);
 extern const void *kacs_token_deep_clone(const void *ptr,
 					 int new_type, int new_level);
+extern const void *kacs_token_from_spec(const void *data, size_t len);
 extern long long kacs_access_check_sd(const void *token_ptr,
 				      const void *sd_data, size_t sd_len,
 				      u32 desired, u32 generic_read,
@@ -374,6 +375,39 @@ SYSCALL_DEFINE2(kacs_open_self_token, unsigned int, flags, u32, access_mask)
 
 	token = kacs_token_clone(sec->token);
 	return kacs_token_to_fd(token, access_mask);
+}
+
+/* ── Syscall: kacs_create_token (1002) ──────────────────────────────────── */
+
+/*
+ * Parse a binary token spec from userspace and return a token fd.
+ * The caller gets a handle with full access.
+ */
+SYSCALL_DEFINE2(kacs_create_token, const void __user *, spec, size_t, len)
+{
+	const void *new_token;
+	void *kbuf;
+
+	/* Size bounds: min header (56), max PAGE_SIZE. */
+	if (len < 56 || len > PAGE_SIZE)
+		return -EINVAL;
+
+	kbuf = kmalloc(len, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	if (copy_from_user(kbuf, spec, len)) {
+		kfree(kbuf);
+		return -EFAULT;
+	}
+
+	new_token = kacs_token_from_spec(kbuf, len);
+	kfree(kbuf);
+
+	if (!new_token)
+		return -EINVAL;
+
+	return kacs_token_to_fd(new_token, KACS_TOKEN_ALL_ACCESS);
 }
 
 /* ── Syscall: kacs_access_check (1023) ─────────────────────────────────── */

@@ -102,6 +102,7 @@ RUN scripts/config \
 
 # KACS syscalls: register in x86_64 syscall table
 RUN printf '1000\tcommon\tkacs_open_self_token\t\tsys_kacs_open_self_token\n\
+1002\tcommon\tkacs_create_token\t\tsys_kacs_create_token\n\
 1023\tcommon\tkacs_access_check\t\tsys_kacs_access_check\n' \
     >> arch/x86/entry/syscalls/syscall_64.tbl
 

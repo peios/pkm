@@ -48,3 +48,5 @@ pub mod sid;
 pub mod token;
 /// Well-known SID constructors (SYSTEM, Administrators, Everyone, etc.).
 pub mod well_known;
+/// Token specification wire format for kacs_create_token.
+pub mod token_spec;
