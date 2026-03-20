@@ -1062,7 +1062,12 @@ fn decode_utf16le(data: &[u8]) -> String {
     while i + 1 < data.len() {
         let code_unit = u16::from_le_bytes([data[i], data[i + 1]]);
         if let Some(c) = char::from_u32(code_unit as u32) {
+            // In kernel mode push() can fail on OOM. Truncated string
+            // is safe — it just won't match any claim name.
+            #[cfg(not(feature = "kernel"))]
             result.push(c);
+            #[cfg(feature = "kernel")]
+            if result.push(c).is_err() { break; }
         }
         i += 2;
     }

@@ -15,13 +15,18 @@ use core::fmt;
 ///   data4: [u8; 8] (big-endian / raw bytes)
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub struct Guid {
+    /// First 32-bit component (little-endian in binary).
     pub data1: u32,
+    /// Second 16-bit component (little-endian in binary).
     pub data2: u16,
+    /// Third 16-bit component (little-endian in binary).
     pub data3: u16,
+    /// Final 8 bytes (raw byte order in binary).
     pub data4: [u8; 8],
 }
 
 impl Guid {
+    /// The all-zeros GUID (00000000-0000-0000-0000-000000000000).
     pub const ZERO: Guid = Guid {
         data1: 0,
         data2: 0,

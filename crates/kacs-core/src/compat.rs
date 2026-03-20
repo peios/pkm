@@ -215,6 +215,15 @@ mod vec_inner {
         pub fn truncate(&mut self, len: usize) {
             self.0.truncate(len)
         }
+
+        /// Reconstruct a Vec from a raw pointer, length, and capacity.
+        ///
+        /// # Safety
+        /// Same contract as `KVec::from_raw_parts` — ptr must have been
+        /// allocated by KVec with the given capacity.
+        pub unsafe fn from_raw_parts(ptr: *mut T, length: usize, capacity: usize) -> Self {
+            Vec(unsafe { kernel::alloc::KVec::from_raw_parts(ptr, length, capacity) })
+        }
     }
 
     /// Allow `for x in &vec { ... }` loops.

@@ -16,21 +16,37 @@ pub const SD_REVISION: u8 = 1;
 
 // --- Control flags (§9.10) ---
 
+/// Owner was set by a defaulting mechanism.
 pub const SE_OWNER_DEFAULTED: u16 = 0x0001;
+/// Group was set by a defaulting mechanism.
 pub const SE_GROUP_DEFAULTED: u16 = 0x0002;
+/// DACL is present.
 pub const SE_DACL_PRESENT: u16 = 0x0004;
+/// DACL was set by a defaulting mechanism.
 pub const SE_DACL_DEFAULTED: u16 = 0x0008;
+/// SACL is present.
 pub const SE_SACL_PRESENT: u16 = 0x0010;
+/// SACL was set by a defaulting mechanism.
 pub const SE_SACL_DEFAULTED: u16 = 0x0020;
+/// DACL is trusted (set by a trusted source).
 pub const SE_DACL_TRUSTED: u16 = 0x0040;
+/// Server security descriptor (server ACL semantics).
 pub const SE_SERVER_SECURITY: u16 = 0x0080;
+/// DACL should be auto-inherited from parent.
 pub const SE_DACL_AUTO_INHERIT_REQ: u16 = 0x0100;
+/// SACL should be auto-inherited from parent.
 pub const SE_SACL_AUTO_INHERIT_REQ: u16 = 0x0200;
+/// DACL was auto-inherited.
 pub const SE_DACL_AUTO_INHERITED: u16 = 0x0400;
+/// SACL was auto-inherited.
 pub const SE_SACL_AUTO_INHERITED: u16 = 0x0800;
+/// DACL is protected from inheritance propagation.
 pub const SE_DACL_PROTECTED: u16 = 0x1000;
+/// SACL is protected from inheritance propagation.
 pub const SE_SACL_PROTECTED: u16 = 0x2000;
+/// Resource manager control is valid.
 pub const SE_RM_CONTROL_VALID: u16 = 0x4000;
+/// Descriptor is in self-relative format.
 pub const SE_SELF_RELATIVE: u16 = 0x8000;
 
 /// Self-relative header size.
@@ -40,10 +56,15 @@ const SD_HEADER_SIZE: usize = 20;
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug)]
 pub struct SecurityDescriptor {
+    /// Control flags (SE_* bitmask).
     pub control: u16,
+    /// Owner SID.
     pub owner: Option<Sid>,
+    /// Primary group SID.
     pub group: Option<Sid>,
+    /// Discretionary Access Control List.
     pub dacl: Option<Acl>,
+    /// System Access Control List (audit, integrity, policy).
     pub sacl: Option<Acl>,
 }
 

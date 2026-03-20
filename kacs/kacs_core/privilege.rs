@@ -12,51 +12,93 @@
 /// and work downward.
 pub mod bits {
     // --- Identity and token management ---
+
+    /// Create a primary token (bit 2).
     pub const SE_CREATE_TOKEN: u64 = 1 << 2;
+    /// Assign a primary token to a process (bit 3).
     pub const SE_ASSIGN_PRIMARY_TOKEN: u64 = 1 << 3;
+    /// Impersonate a client via token (bit 29).
     pub const SE_IMPERSONATE: u64 = 1 << 29;
 
     // --- Access control (evaluated inside AccessCheck §11.6) ---
+
+    /// Read/write the SACL in a security descriptor (bit 8).
     pub const SE_SECURITY: u64 = 1 << 8;
+    /// Take ownership of objects without being granted access (bit 9).
     pub const SE_TAKE_OWNERSHIP: u64 = 1 << 9;
+    /// Bypass access checks for read operations (backup intent, bit 17).
     pub const SE_BACKUP: u64 = 1 << 17;
+    /// Bypass access checks for write/delete operations (restore intent, bit 18).
     pub const SE_RESTORE: u64 = 1 << 18;
+    /// Modify an object's integrity label (bit 25).
     pub const SE_RELABEL: u64 = 1 << 25; // SeRelabelPrivilege
 
     // --- System operations ---
+
+    /// Act as part of the operating system / trusted computing base (bit 7).
     pub const SE_TCB: u64 = 1 << 7;
+    /// Shut down the local system (bit 19).
     pub const SE_SHUTDOWN: u64 = 1 << 19;
+    /// Shut down a remote system (bit 24).
     pub const SE_REMOTE_SHUTDOWN: u64 = 1 << 24;
+    /// Load and unload kernel modules (bit 10).
     pub const SE_LOAD_DRIVER: u64 = 1 << 10;
+    /// Debug processes (bit 20).
     pub const SE_DEBUG: u64 = 1 << 20;
+    /// Change the system time (bit 12).
     pub const SE_SYSTEMTIME: u64 = 1 << 12;
+    /// Increase scheduling priority (bit 14).
     pub const SE_INCREASE_BASE_PRIORITY: u64 = 1 << 14;
+    /// Increase process memory quota (bit 5).
     pub const SE_INCREASE_QUOTA: u64 = 1 << 5;
+    /// Lock physical pages in memory (bit 4).
     pub const SE_LOCK_MEMORY: u64 = 1 << 4;
+    /// Generate security audit log entries (bit 21).
     pub const SE_AUDIT: u64 = 1 << 21;
+    /// Profile a single process (bit 13).
     pub const SE_PROFILE_SINGLE_PROCESS: u64 = 1 << 13;
+    /// Bypass traverse checking (bit 23).
     pub const SE_CHANGE_NOTIFY: u64 = 1 << 23;
+    /// Create symbolic links (bit 35).
     pub const SE_CREATE_SYMBOLIC_LINK: u64 = 1 << 35;
 
     // --- Directory and domain ---
+
+    /// Synchronize directory data (bit 26).
     pub const SE_SYNC_AGENT: u64 = 1 << 26;
+    /// Enable delegation trust (bit 27).
     pub const SE_ENABLE_DELEGATION: u64 = 1 << 27;
+    /// Create machine accounts in the domain (bit 6).
     pub const SE_MACHINE_ACCOUNT: u64 = 1 << 6;
 
     // --- Reserved (Windows parity, no enforcement in v1) ---
+
+    /// Create global objects in a terminal-services session (bit 30, reserved).
     pub const SE_CREATE_GLOBAL: u64 = 1 << 30;
+    /// Create a pagefile (bit 15, reserved).
     pub const SE_CREATE_PAGEFILE: u64 = 1 << 15;
+    /// Create permanent shared objects (bit 16, reserved).
     pub const SE_CREATE_PERMANENT: u64 = 1 << 16;
+    /// Increase process working set (bit 33, reserved).
     pub const SE_INCREASE_WORKING_SET: u64 = 1 << 33;
+    /// Manage volume-level operations (bit 28, reserved).
     pub const SE_MANAGE_VOLUME: u64 = 1 << 28;
+    /// Access credential manager as a trusted caller (bit 31, reserved).
     pub const SE_TRUSTED_CRED_MAN_ACCESS: u64 = 1 << 31;
+    /// Modify firmware environment variables (bit 22, reserved).
     pub const SE_SYSTEM_ENVIRONMENT: u64 = 1 << 22;
+    /// Profile system performance (bit 11, reserved).
     pub const SE_SYSTEM_PROFILE: u64 = 1 << 11;
+    /// Change the time zone (bit 34, reserved).
     pub const SE_TIMEZONE: u64 = 1 << 34;
+    /// Undock a laptop (bit 32, reserved).
     pub const SE_UNDOCK: u64 = 1 << 32;
 
     // --- Peios custom privileges (bit 63 downward) ---
+
+    /// Bind to privileged ports (Peios custom, bit 63).
     pub const SE_BIND_PRIVILEGED_PORT: u64 = 1 << 63;
+    /// Create job objects (Peios custom, bit 62).
     pub const SE_CREATE_JOB: u64 = 1 << 62;
 
     /// All privileges that the SYSTEM token should have.

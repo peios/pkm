@@ -42,14 +42,19 @@ fn cmp_ascii_case_insensitive(a: &[u8], b: &[u8]) -> i8 {
 // Three-value result
 // ---------------------------------------------------------------------------
 
+/// Three-value logic result: True, False, or Unknown.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TriValue {
+    /// Condition evaluated to true.
     True,
+    /// Condition evaluated to false.
     False,
+    /// Condition could not be determined (missing data, type mismatch).
     Unknown,
 }
 
 impl TriValue {
+    /// Negate: True becomes False, False becomes True, Unknown stays Unknown.
     pub fn negate(self) -> Self {
         match self {
             TriValue::True => TriValue::False,
@@ -67,15 +72,22 @@ impl TriValue {
 /// in logical operators and existence tests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Origin {
+    /// Hard-coded value in the expression bytecode.
     Literal,
+    /// Resolved from @User. token claims.
     UserAttr,
+    /// Resolved from @Device. token claims.
     DeviceAttr,
+    /// Resolved from @Resource. object attributes.
     ResourceAttr,
+    /// Resolved from @Local. per-call context.
     LocalAttr,
+    /// Computed result of a sub-expression.
     Result,
 }
 
 impl Origin {
+    /// Returns true if this origin is an attribute source (not a literal or result).
     pub fn is_attribute(self) -> bool {
         matches!(self, Origin::UserAttr | Origin::DeviceAttr | Origin::ResourceAttr | Origin::LocalAttr)
     }
@@ -85,22 +97,33 @@ impl Origin {
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug)]
 pub struct Value {
+    /// The typed payload.
     pub vtype: ValueType,
+    /// Where this value came from.
     pub origin: Origin,
     /// Flags from the source claim (CASE_SENSITIVE, USE_FOR_DENY_ONLY, DISABLED).
     pub flags: u16,
 }
 
+/// Typed payload for a conditional expression value.
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug)]
 pub enum ValueType {
+    /// Absent or unresolvable value.
     Null,
+    /// Signed 64-bit integer.
     Int64(i64),
+    /// Unsigned 64-bit integer.
     Uint64(u64),
+    /// Boolean.
     Boolean(bool),
+    /// Unicode string.
     String(String),
+    /// Security identifier.
     Sid(Sid),
+    /// Opaque byte sequence.
     Octet(Vec<u8>),
+    /// Multi-valued set of elements.
     Composite(Vec<Value>),
 }
 
@@ -1039,7 +1062,12 @@ fn decode_utf16le(data: &[u8]) -> String {
     while i + 1 < data.len() {
         let code_unit = u16::from_le_bytes([data[i], data[i + 1]]);
         if let Some(c) = char::from_u32(code_unit as u32) {
+            // In kernel mode push() can fail on OOM. Truncated string
+            // is safe — it just won't match any claim name.
+            #[cfg(not(feature = "kernel"))]
             result.push(c);
+            #[cfg(feature = "kernel")]
+            if result.push(c).is_err() { break; }
         }
         i += 2;
     }

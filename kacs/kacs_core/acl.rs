@@ -10,14 +10,18 @@ use crate::compat::{self, AllocError, Vec};
 use crate::ace::Ace;
 
 // ACL revisions (§9.9)
+/// Standard ACL revision for basic ACE types.
 pub const ACL_REVISION: u8 = 0x02;
+/// Directory Services ACL revision for object and callback ACE types.
 pub const ACL_REVISION_DS: u8 = 0x04;
 
 /// A parsed Access Control List.
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug)]
 pub struct Acl {
+    /// ACL revision (`ACL_REVISION` or `ACL_REVISION_DS`).
     pub revision: u8,
+    /// Ordered list of Access Control Entries.
     pub aces: Vec<Ace>,
 }
 

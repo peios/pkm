@@ -33,11 +33,14 @@ pub const SE_GROUP_RESOURCE: u32 = 0x2000_0000;
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug)]
 pub struct GroupEntry {
+    /// The security identifier for this group.
     pub sid: Sid,
+    /// Bitfield of `SE_GROUP_*` attribute flags.
     pub attributes: u32,
 }
 
 impl GroupEntry {
+    /// Create a group entry with the given SID and attribute flags.
     pub fn new(sid: Sid, attributes: u32) -> Self {
         GroupEntry { sid, attributes }
     }

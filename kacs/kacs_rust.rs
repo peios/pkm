@@ -3,7 +3,8 @@
 //! KACS kernel module — Rust implementation.
 //!
 //! Contains the kacs-core evaluation engine as a submodule and the
-//! kernel-specific FFI exports called from lsm.c.
+//! kernel-specific FFI exports called from lsm.c. All token lifecycle,
+//! AccessCheck evaluation, and query logic lives here.
 
 #![no_std]
 #![allow(elided_lifetimes_in_paths)]
@@ -18,36 +19,81 @@ pub use kacs_core::*;
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-// ── Token object ──────────────────────────────────────────────────────────
+use kacs_core::compat::{self, AllocError};
+use kacs_core::token::{Token, TokenType, IntegrityLevel};
 
-/// Minimal kernel token. Replaced by kacs-core Token in Phase 3.
+// ── Heap-allocated refcounted token ───────────────────────────────────────
+
+/// A kernel token object: the kacs-core Token + a reference count.
+/// Allocated on the heap, passed through FFI as `*const ()`.
+///
+/// Refcounting follows Arc semantics:
+/// - clone: fetch_add(1, Relaxed)
+/// - drop: fetch_sub(1, Release) + acquire fence + free on zero
 struct KacsToken {
-    user_sid: &'static str,
-    integrity: &'static str,
-    token_type: u8,
+    token: Token,
     refcount: AtomicUsize,
 }
 
-/// The SYSTEM token. Lives for the lifetime of the kernel.
-/// Refcount starts at 1 (owned by init_cred).
-static SYSTEM_TOKEN: KacsToken = KacsToken {
-    user_sid: "S-1-5-18",
-    integrity: "System",
-    token_type: 1, // Primary
-    refcount: AtomicUsize::new(0), // set to 1 on first use
-};
+impl KacsToken {
+    /// Allocate a new token on the heap with refcount 1.
+    fn new(token: Token) -> Result<*const (), AllocError> {
+        // Use kernel's allocator via compat::Vec trick — allocate a
+        // Vec<KacsToken> of capacity 1, push, then leak the pointer.
+        // This is the simplest way to heap-allocate without alloc::boxed::Box.
+        let mut v = compat::vec_with_capacity::<KacsToken>(1)?;
+        compat::vec_push(&mut v, KacsToken {
+            token,
+            refcount: AtomicUsize::new(1),
+        })?;
+        let ptr = v.as_ptr();
+        core::mem::forget(v); // leak — we manage lifetime via refcount
+        Ok(ptr as *const ())
+    }
 
-/// Fixed text output for the SYSTEM token.
-const SYSTEM_TOKEN_INFO: &[u8] = b"User:      S-1-5-18\nType:      Primary\nIntegrity: System\n";
+    /// Get a reference from an opaque pointer.
+    ///
+    /// # Safety
+    /// `ptr` must be a valid pointer returned by `KacsToken::new`.
+    unsafe fn from_ptr<'a>(ptr: *const ()) -> &'a Self {
+        unsafe { &*(ptr as *const KacsToken) }
+    }
+
+    /// Increment refcount.
+    fn clone_ref(ptr: *const ()) -> *const () {
+        let token = unsafe { Self::from_ptr(ptr) };
+        token.refcount.fetch_add(1, Ordering::Relaxed);
+        ptr
+    }
+
+    /// Decrement refcount. Frees if it reaches zero.
+    ///
+    /// # Safety
+    /// `ptr` must be a valid pointer returned by `KacsToken::new`.
+    unsafe fn drop_ref(ptr: *const ()) {
+        let token = unsafe { Self::from_ptr(ptr) };
+        if token.refcount.fetch_sub(1, Ordering::Release) == 1 {
+            core::sync::atomic::fence(Ordering::Acquire);
+            let ptr_mut = ptr as *mut KacsToken;
+            drop(unsafe { compat::Vec::from_raw_parts(ptr_mut, 1, 1) });
+        }
+    }
+}
 
 // ── FFI exports (called from lsm.c) ──────────────────────────────────────
 
-/// Create the SYSTEM token. Returns a pointer to the static token.
-/// Caller owns one reference.
+/// Create the SYSTEM token (S-1-5-18, all privileges, System integrity).
+/// Returns an opaque pointer. Caller owns one reference.
+/// Returns null on allocation failure.
 #[no_mangle]
 pub extern "C" fn kacs_token_create_system() -> *const () {
-    SYSTEM_TOKEN.refcount.store(1, Ordering::Relaxed);
-    &SYSTEM_TOKEN as *const KacsToken as *const ()
+    match Token::system_token() {
+        Ok(token) => match KacsToken::new(token) {
+            Ok(ptr) => ptr,
+            Err(_) => core::ptr::null(),
+        },
+        Err(_) => core::ptr::null(),
+    }
 }
 
 /// Clone a token (increment refcount). Returns the same pointer.
@@ -56,21 +102,16 @@ pub extern "C" fn kacs_token_clone(ptr: *const ()) -> *const () {
     if ptr.is_null() {
         return core::ptr::null();
     }
-    let token = unsafe { &*(ptr as *const KacsToken) };
-    token.refcount.fetch_add(1, Ordering::Relaxed);
-    ptr
+    KacsToken::clone_ref(ptr)
 }
 
-/// Drop a token reference.
-/// For the static SYSTEM token, refcount just decrements (never freed).
-/// Dynamic tokens (Phase 3+) will actually free on zero.
+/// Drop a token reference. Frees when refcount reaches zero.
 #[no_mangle]
 pub extern "C" fn kacs_token_drop(ptr: *const ()) {
     if ptr.is_null() {
         return;
     }
-    let token = unsafe { &*(ptr as *const KacsToken) };
-    token.refcount.fetch_sub(1, Ordering::Release);
+    unsafe { KacsToken::drop_ref(ptr) }
 }
 
 /// Format token info into a caller-provided buffer.
@@ -85,21 +126,46 @@ pub extern "C" fn kacs_token_format(
         return -22; // -EINVAL
     }
 
-    // Phase 1: all tokens are the SYSTEM token
-    let info = SYSTEM_TOKEN_INFO;
-    if info.len() > buf_len {
+    let kt = unsafe { KacsToken::from_ptr(ptr) };
+    let token = &kt.token;
+
+    // Build text representation into a stack buffer.
+    // Format: "User: S-1-5-18\nType: Primary\nIntegrity: System\n..."
+    let mut out = FormatBuf::new();
+    out.str("User:      ");
+    format_sid(&mut out, &token.user_sid);
+    out.str("\nType:      ");
+    out.str(match token.token_type {
+        TokenType::Primary => "Primary",
+        TokenType::Impersonation => "Impersonation",
+    });
+    out.str("\nIntegrity: ");
+    out.str(match token.integrity_level {
+        IntegrityLevel::Untrusted => "Untrusted",
+        IntegrityLevel::Low => "Low",
+        IntegrityLevel::Medium => "Medium",
+        IntegrityLevel::High => "High",
+        IntegrityLevel::System => "System",
+    });
+    out.str("\nGroups:    ");
+    out.usize(token.groups.len());
+    out.str("\nPrivs:     0x");
+    out.hex64(token.privileges.enabled);
+    out.byte(b'\n');
+
+    let data = out.as_bytes();
+    if data.len() > buf_len {
         return -34; // -ERANGE
     }
 
     unsafe {
-        core::ptr::copy_nonoverlapping(info.as_ptr(), buf, info.len());
+        core::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
     }
-    info.len() as i64
+    data.len() as i64
 }
 
 // ── Token query (KACS_IOC_QUERY) ──────────────────────────────────────────
 
-// Query class constants (must match lsm.c)
 const TOKEN_CLASS_USER: u32 = 1;
 const TOKEN_CLASS_TYPE: u32 = 4;
 const TOKEN_CLASS_INTEGRITY_LEVEL: u32 = 5;
@@ -119,31 +185,39 @@ pub extern "C" fn kacs_token_query(
         return -22; // -EINVAL
     }
 
-    let token = unsafe { &*(ptr as *const KacsToken) };
+    let kt = unsafe { KacsToken::from_ptr(ptr) };
+    let token = &kt.token;
 
-    // Get the response bytes for this query class
-    let data: &[u8] = match class {
-        TOKEN_CLASS_USER => token.user_sid.as_bytes(),
-        TOKEN_CLASS_TYPE => match token.token_type {
-            1 => b"Primary",
-            2 => b"Impersonation",
-            _ => b"Unknown",
-        },
-        TOKEN_CLASS_INTEGRITY_LEVEL => token.integrity.as_bytes(),
+    // Format the response for this query class into a stack buffer.
+    let mut out = FormatBuf::new();
+    match class {
+        TOKEN_CLASS_USER => format_sid(&mut out, &token.user_sid),
+        TOKEN_CLASS_TYPE => out.str(match token.token_type {
+            TokenType::Primary => "Primary",
+            TokenType::Impersonation => "Impersonation",
+        }),
+        TOKEN_CLASS_INTEGRITY_LEVEL => out.str(match token.integrity_level {
+            IntegrityLevel::Untrusted => "Untrusted",
+            IntegrityLevel::Low => "Low",
+            IntegrityLevel::Medium => "Medium",
+            IntegrityLevel::High => "High",
+            IntegrityLevel::System => "System",
+        }),
         _ => return -22, // -EINVAL: unsupported class
     };
+
+    let data = out.as_bytes();
 
     // Size query
     if buf.is_null() {
         return data.len() as i32;
     }
 
-    // Buffer too small — return required size
+    // Buffer too small
     if (buf_len as usize) < data.len() {
         return data.len() as i32;
     }
 
-    // Write data
     unsafe {
         core::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
     }
@@ -154,4 +228,123 @@ pub extern "C" fn kacs_token_query(
 #[no_mangle]
 pub extern "C" fn kacs_rust_init() -> c_int {
     0
+}
+
+// ── Stack-based formatting (no allocation) ────────────────────────────────
+//
+// We can't use format!() or alloc::string::String in kernel context for
+// simple text output. This tiny buffer handles the formatting needs of
+// token display and query responses without any heap allocation.
+
+/// Fixed-size buffer for formatting token info without allocation.
+struct FormatBuf {
+    data: [u8; 512],
+    pos: usize,
+}
+
+impl FormatBuf {
+    fn new() -> Self {
+        FormatBuf {
+            data: [0u8; 512],
+            pos: 0,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.data[..self.pos]
+    }
+
+    fn byte(&mut self, b: u8) {
+        if self.pos < self.data.len() {
+            self.data[self.pos] = b;
+            self.pos += 1;
+        }
+    }
+
+    fn str(&mut self, s: &str) {
+        for &b in s.as_bytes() {
+            self.byte(b);
+        }
+    }
+
+    fn usize(&mut self, mut n: usize) {
+        if n == 0 {
+            self.byte(b'0');
+            return;
+        }
+        let mut digits = [0u8; 20];
+        let mut i = 0;
+        while n > 0 {
+            digits[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+            i += 1;
+        }
+        while i > 0 {
+            i -= 1;
+            self.byte(digits[i]);
+        }
+    }
+
+    fn u32(&mut self, n: u32) {
+        self.usize(n as usize);
+    }
+
+    fn u64(&mut self, n: u64) {
+        // For large numbers, format directly
+        if n == 0 {
+            self.byte(b'0');
+            return;
+        }
+        let mut digits = [0u8; 20];
+        let mut val = n;
+        let mut i = 0;
+        while val > 0 {
+            digits[i] = b'0' + (val % 10) as u8;
+            val /= 10;
+            i += 1;
+        }
+        while i > 0 {
+            i -= 1;
+            self.byte(digits[i]);
+        }
+    }
+
+    fn hex64(&mut self, n: u64) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        if n == 0 {
+            self.byte(b'0');
+            return;
+        }
+        let mut started = false;
+        for shift in (0..16).rev() {
+            let nibble = ((n >> (shift * 4)) & 0xF) as usize;
+            if nibble != 0 || started {
+                self.byte(HEX[nibble]);
+                started = true;
+            }
+        }
+    }
+}
+
+/// Format a SID as "S-1-{authority}-{sub1}-{sub2}-..." into the buffer.
+fn format_sid(out: &mut FormatBuf, sid: &kacs_core::sid::Sid) {
+    out.str("S-1-");
+    // Authority is a 6-byte big-endian value. If high bytes are zero,
+    // print as decimal (common case). Otherwise print as hex.
+    let auth = (sid.authority[0] as u64) << 40
+        | (sid.authority[1] as u64) << 32
+        | (sid.authority[2] as u64) << 24
+        | (sid.authority[3] as u64) << 16
+        | (sid.authority[4] as u64) << 8
+        | (sid.authority[5] as u64);
+    if auth <= 0xFFFF_FFFF {
+        out.u64(auth);
+    } else {
+        out.str("0x");
+        out.hex64(auth);
+    }
+    for &sa in sid.sub_authorities.iter() {
+        out.byte(b'-');
+        out.u32(sa);
+    }
 }
