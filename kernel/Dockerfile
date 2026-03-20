@@ -103,6 +103,7 @@ RUN scripts/config \
 # KACS syscalls: register in x86_64 syscall table
 RUN printf '1000\tcommon\tkacs_open_self_token\t\tsys_kacs_open_self_token\n\
 1002\tcommon\tkacs_create_token\t\tsys_kacs_create_token\n\
+1003\tcommon\tkacs_create_session\t\tsys_kacs_create_session\n\
 1010\tcommon\tkacs_open_peer_token\t\tsys_kacs_open_peer_token\n\
 1011\tcommon\tkacs_impersonate_peer\t\tsys_kacs_impersonate_peer\n\
 1012\tcommon\tkacs_revert\t\tsys_kacs_revert\n\

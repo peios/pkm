@@ -519,6 +519,57 @@ pub extern "C" fn kacs_token_deep_clone(
     }
 }
 
+// ── Session management ────────────────────────────────────────────────────
+
+/// Global session table. Initialized at boot.
+/// Safety: accessed from syscall context (serialized by kernel locks).
+static mut SESSION_TABLE: Option<kacs_core::session::SessionTable> = None;
+
+/// Initialize the session table and create the SYSTEM session (session 0).
+/// Called once from kacs_init.
+#[no_mangle]
+pub extern "C" fn kacs_init_session_table(system_token: *const ()) {
+    let mut table = kacs_core::session::SessionTable::new();
+
+    if !system_token.is_null() {
+        let kt = unsafe { KacsToken::from_ptr(system_token) };
+        let _ = table.create_system_session(kt.token.user_sid.try_clone().unwrap_or_else(|_| {
+            // Fallback: if clone fails at boot, system is dying
+            kacs_core::sid::Sid::new(5, &[18]).unwrap()
+        }));
+    }
+
+    unsafe { SESSION_TABLE = Some(table); }
+}
+
+/// Create a new logon session from a wire-format spec.
+/// Returns session ID (>= 0) or negative errno.
+#[no_mangle]
+pub extern "C" fn kacs_create_session_impl(data: *const u8, len: usize) -> i64 {
+    if data.is_null() {
+        return -22; // -EINVAL
+    }
+
+    let spec = unsafe { core::slice::from_raw_parts(data, len) };
+
+    let (logon_type, user_sid) = match kacs_core::session::parse_session_spec(spec) {
+        Some(result) => result,
+        None => return -22, // -EINVAL
+    };
+
+    let table = unsafe {
+        match SESSION_TABLE.as_mut() {
+            Some(t) => t,
+            None => return -22,
+        }
+    };
+
+    match table.create(logon_type, user_sid) {
+        Ok(id) => id as i64,
+        Err(_) => -12, // -ENOMEM
+    }
+}
+
 /// Called from C during LSM initialization.
 #[no_mangle]
 pub extern "C" fn kacs_rust_init() -> c_int {

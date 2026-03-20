@@ -37,6 +37,8 @@ extern int kacs_token_check_privilege(const void *ptr, u64 priv_mask);
 extern int kacs_token_get_integrity(const void *ptr);
 extern int kacs_token_same_user(const void *a, const void *b);
 extern void kacs_token_set_impersonation_level(const void *ptr, int level);
+extern long long kacs_create_session_impl(const void *data, size_t len);
+extern void kacs_init_session_table(const void *system_token);
 extern const void *kacs_token_from_spec(const void *data, size_t len);
 extern long long kacs_access_check_sd(const void *token_ptr,
 				      const void *sd_data, size_t sd_len,
@@ -566,6 +568,41 @@ SYSCALL_DEFINE2(kacs_create_token, const void __user *, spec, size_t, len)
 	return kacs_token_to_fd(new_token, KACS_TOKEN_ALL_ACCESS);
 }
 
+/* ── Syscall: kacs_create_session (1003) ────────────────────────────────── */
+
+/*
+ * Create a new logon session. Returns the session ID (u64).
+ * The logon SID is S-1-5-5-{id>>32}-{id&0xFFFFFFFF}.
+ * Requires SeTcbPrivilege — only authd creates sessions.
+ */
+SYSCALL_DEFINE2(kacs_create_session,
+		const void __user *, spec, size_t, len)
+{
+	const struct kacs_cred_security *caller;
+	void *kspec;
+	long long ret;
+
+	caller = kacs_cred(current_real_cred());
+	if (!kacs_token_check_privilege(caller->token, KACS_PRIV_TCB))
+		return -EPERM;
+
+	if (len < 5 || len > 4096)
+		return -EINVAL;
+
+	kspec = kmalloc(len, GFP_KERNEL);
+	if (!kspec)
+		return -ENOMEM;
+
+	if (copy_from_user(kspec, spec, len)) {
+		kfree(kspec);
+		return -EFAULT;
+	}
+
+	ret = kacs_create_session_impl(kspec, len);
+	kfree(kspec);
+	return ret;
+}
+
 /* ── Syscall: kacs_open_peer_token (1010) ───────────────────────────────── */
 
 /*
@@ -837,7 +874,10 @@ static int __init kacs_init(void)
 	sec = kacs_cred(current_cred());
 	sec->token = kacs_token_create_system();
 
-	pr_info("kacs: initialized (SYSTEM token on init)\n");
+	/* Create session table + SYSTEM session (session 0). */
+	kacs_init_session_table(sec->token);
+
+	pr_info("kacs: initialized (SYSTEM token + session 0 on init)\n");
 	return 0;
 }
 
