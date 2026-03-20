@@ -340,6 +340,21 @@ pub extern "C" fn kacs_access_check_sd(
     }
 }
 
+// ── Token type query ──────────────────────────────────────────────────────
+
+/// Returns the token type: 1 = Primary, 2 = Impersonation.
+#[no_mangle]
+pub extern "C" fn kacs_token_get_type(ptr: *const ()) -> c_int {
+    if ptr.is_null() {
+        return 0;
+    }
+    let kt = unsafe { KacsToken::from_ptr(ptr) };
+    match kt.token.token_type {
+        TokenType::Primary => 1,
+        TokenType::Impersonation => 2,
+    }
+}
+
 // ── Privilege adjustment ──────────────────────────────────────────────────
 
 /// Adjust privileges on a token: enable, disable, or permanently remove.

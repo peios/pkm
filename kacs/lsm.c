@@ -29,6 +29,7 @@ extern int kacs_token_adjust_privs(const void *ptr, u64 enable_mask,
 				   u64 disable_mask, u64 remove_mask);
 extern const void *kacs_token_deep_clone(const void *ptr,
 					 int new_type, int new_level);
+extern int kacs_token_get_type(const void *ptr);
 extern const void *kacs_token_from_spec(const void *data, size_t len);
 extern long long kacs_access_check_sd(const void *token_ptr,
 				      const void *sd_data, size_t sd_len,
@@ -56,6 +57,7 @@ extern long long kacs_access_check_sd(const void *token_ptr,
 #define KACS_IOC_QUERY         _IOWR(KACS_IOC_MAGIC, 0, struct kacs_query_args)
 #define KACS_IOC_ADJUST_PRIVS  _IOW(KACS_IOC_MAGIC, 1, struct kacs_adjust_privs_args)
 #define KACS_IOC_DUPLICATE     _IOWR(KACS_IOC_MAGIC, 2, struct kacs_duplicate_args)
+#define KACS_IOC_INSTALL       _IO(KACS_IOC_MAGIC, 3)
 
 /* Token query classes (§15.2) */
 #define TOKEN_CLASS_USER              1
@@ -256,6 +258,35 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 		return kacs_token_adjust_privs(tf->token, pa.enable_mask,
 					       pa.disable_mask,
 					       pa.remove_mask);
+	}
+	case KACS_IOC_INSTALL: {
+		/*
+		 * Install this token as the calling process's primary token.
+		 * The token must be a Primary token. After install, all new
+		 * operations by this process use the new identity.
+		 *
+		 * This is how authd assigns identity to services: fork,
+		 * child calls INSTALL with the service token, then exec.
+		 */
+		struct kacs_cred_security *sec;
+		struct cred *new_cred;
+
+		if (!(tf->access_mask & KACS_TOKEN_ASSIGN_PRIMARY))
+			return -EACCES;
+
+		/* Only Primary tokens can be installed. */
+		if (kacs_token_get_type(tf->token) != 1)
+			return -EINVAL;
+
+		new_cred = prepare_creds();
+		if (!new_cred)
+			return -ENOMEM;
+
+		sec = kacs_cred(new_cred);
+		kacs_token_drop(sec->token);
+		sec->token = kacs_token_clone(tf->token);
+		commit_creds(new_cred);
+		return 0;
 	}
 	case KACS_IOC_DUPLICATE: {
 		struct kacs_duplicate_args da;
