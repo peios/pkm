@@ -26,6 +26,7 @@
 
 extern int kacs_rust_init(void);
 extern const void *kacs_token_create_system(void);
+extern const void *kacs_token_create_anonymous(void);
 extern const void *kacs_token_clone(const void *ptr);
 extern void kacs_token_drop(const void *ptr);
 extern long long kacs_token_format(const void *ptr, char *buf, size_t len);
@@ -143,6 +144,7 @@ struct kacs_duplicate_args {
 #define KACS_PRIV_CREATE_TOKEN         (1ULL << 2)
 #define KACS_PRIV_ASSIGN_PRIMARY_TOKEN (1ULL << 3)
 #define KACS_PRIV_TCB                  (1ULL << 7)
+#define KACS_PRIV_DEBUG                (1ULL << 20)
 #define KACS_PRIV_IMPERSONATE          (1ULL << 29)
 
 /* Impersonation levels */
@@ -537,7 +539,7 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 		if (!new_token)
 			return -EINVAL;
 
-		fd = kacs_token_to_fd(new_token, KACS_TOKEN_ALL_ACCESS);
+		fd = kacs_token_to_fd(new_token, tf->access_mask);
 		if (fd < 0) {
 			kacs_token_drop(new_token);
 			return fd;
@@ -849,12 +851,15 @@ static int kacs_ptrace_access_check(struct task_struct *child,
 		return 0;
 
 	/* AccessCheck against target's process SD.
+	 * SeDebugPrivilege bypasses the SD check (§13.2) but NOT PIP.
 	 * Map ptrace mode to process SD access rights:
 	 * - PTRACE_MODE_GETFD (pidfd_getfd) → PROCESS_DUP_HANDLE (0x0040)
 	 * - PTRACE_MODE_READ → PROCESS_VM_READ (0x0010)
 	 * - PTRACE_MODE_ATTACH → PROCESS_VM_WRITE (0x0020)
 	 */
-	if (target_tsec->proc_sd) {
+	caller_cred = kacs_cred(current_cred());
+	if (target_tsec->proc_sd &&
+	    !kacs_token_check_privilege(caller_cred->token, KACS_PRIV_DEBUG)) {
 		if (mode & 0x20) /* PTRACE_MODE_GETFD */
 			desired = 0x0040;  /* PROCESS_DUP_HANDLE */
 		else if (mode & PTRACE_MODE_READ)
@@ -862,7 +867,6 @@ static int kacs_ptrace_access_check(struct task_struct *child,
 		else
 			desired = 0x0020;  /* PROCESS_VM_WRITE */
 
-		caller_cred = kacs_cred(current_cred());
 		if (!kacs_check_proc_sd(caller_cred->token,
 					target_tsec->proc_sd, desired))
 			return -EACCES;
@@ -999,12 +1003,13 @@ static int kacs_unix_stream_connect(struct sock *sock,
 	{
 		struct kacs_sock_security *csec = kacs_sock(sock);
 		int max_level = (int)csec->max_impersonation;
+		int effective = max_level;
 
 		if (current->cred != current->real_cred) {
 			cred_sec = kacs_cred(current->cred);
 			int level = kacs_token_get_impersonation_level(
 				cred_sec->token);
-			int effective = level < max_level ? level : max_level;
+			effective = level < max_level ? level : max_level;
 			if (effective >= KACS_LEVEL_IMPERSONATION)
 				nsec->peer_token = kacs_token_clone(
 					cred_sec->token);
@@ -1016,8 +1021,14 @@ static int kacs_unix_stream_connect(struct sock *sock,
 			nsec->peer_token = kacs_token_clone(cred_sec->token);
 		}
 
-		/* Cap the stored token's level to the connection max. */
-		if (nsec->peer_token) {
+		/* Anonymous level: suppress real identity entirely (§12.3).
+		 * Replace with a token containing only S-1-5-7. */
+		if (effective == KACS_LEVEL_ANONYMOUS) {
+			if (nsec->peer_token)
+				kacs_token_drop(nsec->peer_token);
+			nsec->peer_token = kacs_token_create_anonymous();
+		} else if (nsec->peer_token) {
+			/* Cap the stored token's level to the connection max. */
 			int stored = kacs_token_get_impersonation_level(
 				nsec->peer_token);
 			if (stored > max_level)

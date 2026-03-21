@@ -116,6 +116,55 @@ pub extern "C" fn kacs_token_create_system() -> *const () {
     }
 }
 
+/// Create an Anonymous impersonation token (S-1-5-7 only, §12.3).
+/// No real identity, no privileges, no groups. Medium integrity.
+/// Returns an opaque pointer. Caller owns one reference.
+#[no_mangle]
+pub extern "C" fn kacs_token_create_anonymous() -> *const () {
+    let anon_sid = match kacs_core::well_known::anonymous() {
+        Ok(sid) => sid,
+        Err(_) => return core::ptr::null(),
+    };
+    let token = Token {
+        user_sid: anon_sid,
+        groups: compat::Vec::new(),
+        privileges: kacs_core::privilege::Privileges::new_all_enabled(0),
+        token_type: kacs_core::token::TokenType::Impersonation,
+        impersonation_level: kacs_core::token::ImpersonationLevel::Anonymous,
+        integrity_level: kacs_core::token::IntegrityLevel::Medium,
+        mandatory_policy: kacs_core::token::mandatory_policy::NO_WRITE_UP,
+        elevation_type: kacs_core::token::ElevationType::Default,
+        token_source: kacs_core::token::TokenSource {
+            name: *b"AnonTkn\0",
+            source_id: kacs_core::token::Luid(0),
+        },
+        auth_id: kacs_core::token::Luid(0),
+        token_id: kacs_core::token::Luid(0),
+        modified_id: kacs_core::token::Luid(0),
+        logon_sid: match kacs_core::well_known::anonymous() {
+            Ok(sid) => sid,
+            Err(_) => return core::ptr::null(),
+        },
+        owner_sid_index: 0,
+        primary_group_sid_index: 0,
+        restricted_sids: None,
+        write_restricted: false,
+        confinement_sid: None,
+        confinement_capabilities: compat::Vec::new(),
+        confinement_exempt: false,
+        user_claims: compat::Vec::new(),
+        device_claims: compat::Vec::new(),
+        device_groups: None,
+        security_descriptor: None,
+        projected_uid: 65534, // nobody
+        projected_gid: 65534,
+    };
+    match KacsToken::new(token) {
+        Ok(ptr) => ptr,
+        Err(_) => core::ptr::null(),
+    }
+}
+
 /// Clone a token (increment refcount). Returns the same pointer.
 #[no_mangle]
 pub extern "C" fn kacs_token_clone(ptr: *const ()) -> *const () {
