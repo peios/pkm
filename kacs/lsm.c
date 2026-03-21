@@ -26,6 +26,9 @@
 #include <linux/xattr.h>
 #include <net/sock.h>
 
+/* ── Event subsystem (from events.c) ──────────────────────────────────── */
+extern int peios_event_emit_kernel(const void *body, u32 body_len);
+
 /* ── current_fsuid() projection support (§14.1 derooting, patch 14) ──── */
 
 #include <linux/jump_label.h>
@@ -1647,8 +1650,24 @@ static const void *kacs_inode_get_sd(struct inode *inode)
 			 * access (§14.2 corrupt SD handling). */
 			old = cmpxchg(&isec->sd_cache, NULL,
 				      KACS_SD_CORRUPT);
-			/* TODO: emit audit event with parse failure reason.
-			 * For now, fail-closed. */
+
+			/* Emit corrupt SD audit event (§14.2).
+			 * TODO: refine payload format when eventd is designed.
+			 * Current format: simple kernel event with inode
+			 * number and xattr size. Will need structured
+			 * msgpack payload with parse failure reason, mount
+			 * path, and file path when eventd consumes these. */
+			{
+				struct {
+					u64 inode_num;
+					u32 xattr_size;
+				} __packed evt = {
+					.inode_num = inode->i_ino,
+					.xattr_size = (u32)len,
+				};
+				peios_event_emit_kernel(&evt, sizeof(evt));
+			}
+
 			return NULL;
 		}
 	}
