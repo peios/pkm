@@ -15,6 +15,8 @@ Updated 2026-03-21. Only items NOT YET DONE.
 - [ ] 16 kernel patches (do_dentry_open, current_fsuid, etc.)
 - [ ] Derooting (current_fsuid patch, capability switchboard)
 - [ ] Wire peios_event_emit_kernel into SACL audit results
+- [ ] SeChangeNotifyPrivilege enforcement (traverse checking in path walks)
+- [ ] unix_may_send hook (datagram socket gating — needs file SD)
 
 ## Deferred to v2
 
@@ -22,7 +24,6 @@ Updated 2026-03-21. Only items NOT YET DONE.
 - [ ] /proc metadata hiding via security_inode_permission (non-trivial
   inode-to-task extraction from procfs internals)
 - [ ] InheritedObjectType GUID filtering in SD inheritance
-- [ ] CAP staged DACL comparison (audit-only)
 - [ ] Per-token audit policy override bitmask
 - [ ] Resource attribute parsing from SYSTEM_RESOURCE_ATTRIBUTE_ACE
 - [ ] Windows cross-validation test corpus
