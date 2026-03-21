@@ -844,7 +844,7 @@ fn build_default_proc_sd(
 /// Build the default token SD (§7.9) — controls who can open this token.
 ///
 /// DACL:
-/// - Token user → TOKEN_ALL_ACCESS (0x00EF)
+/// - Token user → TOKEN_SELF_ACCESS (non-escalating rights only)
 /// - Administrators (S-1-5-32-544) → TOKEN_ALL_ACCESS
 /// - SYSTEM (S-1-5-18) → TOKEN_ALL_ACCESS
 fn build_default_token_sd(
@@ -855,6 +855,8 @@ fn build_default_token_sd(
     use kacs_core::sd::SecurityDescriptor;
 
     const TOKEN_ALL_ACCESS: u32 = 0x00EF;
+    // Self-access: query + adjust, but NOT duplicate/impersonate/assign (§7.9).
+    const TOKEN_SELF_ACCESS: u32 = 0x00E8; // QUERY | ADJUST_PRIVS | ADJUST_GROUPS | ADJUST_DEFAULT
 
     let owner = token.user_sid.try_clone()?;
     let group = token.user_sid.try_clone()?;
@@ -862,11 +864,11 @@ fn build_default_token_sd(
     // Build DACL with 3 ACEs
     let mut aces = compat::vec_with_capacity::<Ace>(3)?;
 
-    // Token user → TOKEN_ALL_ACCESS
+    // Token user → limited self-access (non-escalating rights, §7.9)
     compat::vec_push(&mut aces, Ace {
         ace_type: ace::ACCESS_ALLOWED_ACE_TYPE,
         flags: 0,
-        mask: TOKEN_ALL_ACCESS,
+        mask: TOKEN_SELF_ACCESS,
         sid: token.user_sid.try_clone()?,
         object_type: None,
         inherited_object_type: None,
@@ -954,10 +956,10 @@ pub extern "C" fn kacs_check_token_sd(
     let target_kt = unsafe { KacsToken::from_ptr(token_ptr) };
     let caller_kt = unsafe { KacsToken::from_ptr(caller_token_ptr) };
 
-    // If the target token has no SD, access is unrestricted.
+    // If the target token has no SD (OOM at creation), fail-secure: deny.
     let sd = match target_kt.token.security_descriptor.as_ref() {
         Some(sd) => sd,
-        None => return 1,
+        None => return 0,
     };
 
     match kacs_core::access_check::access_check(
@@ -1054,6 +1056,9 @@ pub extern "C" fn kacs_token_restrict(
                 return core::ptr::null();
             }
             let sub_count = var_data[pos + 1] as usize;
+            if sub_count > 15 {
+                return core::ptr::null(); // SID_MAX_SUB_AUTHORITIES
+            }
             let sid_len = 8 + sub_count * 4;
             if pos + sid_len > var_data.len() {
                 return core::ptr::null();

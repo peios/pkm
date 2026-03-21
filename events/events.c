@@ -270,7 +270,7 @@ SYSCALL_DEFINE2(event_emit, const void __user *, body, u32, body_len)
 	hdr.timestamp_ns = ktime_get_ns();
 	hdr.emitter_pid = current->tgid;
 	hdr.emitter_tid = current->pid;
-	hdr.emitter_uid = 0; /* TODO: projected UID from token */
+	hdr.emitter_uid = from_kuid(&init_user_ns, current_fsuid());
 	hdr.payload_len = (u16)body_len;
 	hdr.source = EVENT_SOURCE_USERSPACE;
 	hdr._pad = 0;
@@ -430,7 +430,7 @@ static int __init peios_events_init(void)
 	if (IS_ERR(peios_dir))
 		return PTR_ERR(peios_dir);
 
-	events_file = securityfs_create_file("events", 0644, peios_dir,
+	events_file = securityfs_create_file("events", 0600, peios_dir,
 					     NULL, &events_fops);
 	if (IS_ERR(events_file)) {
 		securityfs_remove(peios_dir);

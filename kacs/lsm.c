@@ -475,7 +475,7 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 			return -EINVAL;
 		if (da.impersonation_level > 3)
 			return -EINVAL;
-		if (!da.access_mask)
+		if (!da.access_mask || (da.access_mask & ~KACS_TOKEN_ALL_ACCESS))
 			return -EINVAL;
 
 		/* Impersonation → Primary requires SeTcbPrivilege (§15.2). */

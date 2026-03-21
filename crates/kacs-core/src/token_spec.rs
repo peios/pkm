@@ -87,6 +87,11 @@ pub fn parse_token_spec(data: &[u8]) -> Result<Option<Token>, AllocError> {
 
     // ── Groups ────────────────────────────────────────────────────────
 
+    // Cap groups_count to prevent excessive allocation before validation.
+    // 64KB spec / 12-byte minimum group entry ≈ 5000 max; 16384 is generous.
+    if groups_count > 16384 {
+        return Ok(None);
+    }
     let mut groups = compat::vec_with_capacity(groups_count)?;
     let mut pos = groups_offset;
     for _ in 0..groups_count {
