@@ -153,7 +153,7 @@ pub extern "C" fn kacs_token_format(
     out.str("\nGroups:    ");
     out.usize(token.groups.len());
     out.str("\nPrivs:     0x");
-    out.hex64(token.privileges.enabled.load(Ordering::Relaxed));
+    out.hex64(token.privileges.enabled.load(Ordering::SeqCst));
     out.byte(b'\n');
 
     let data = out.as_bytes();
@@ -169,18 +169,14 @@ pub extern "C" fn kacs_token_format(
 
 // ── Token query (KACS_IOC_QUERY) ──────────────────────────────────────────
 
-const TOKEN_CLASS_USER: u32 = 1;
-const TOKEN_CLASS_GROUPS: u32 = 2;
-const TOKEN_CLASS_PRIVILEGES: u32 = 3;
-const TOKEN_CLASS_TYPE: u32 = 4;
-const TOKEN_CLASS_INTEGRITY_LEVEL: u32 = 5;
-const TOKEN_CLASS_ELEVATION_TYPE: u32 = 13;
-const TOKEN_CLASS_MANDATORY_POLICY: u32 = 17;
-
-/// Query token information by class.
+/// Query token information by class. Returns binary data.
+///
 /// If buf is NULL, returns the required buffer size.
-/// If buf is non-NULL, writes data and returns bytes written.
+/// If buf is non-NULL, writes binary data and returns bytes written.
 /// Returns negative errno on error.
+///
+/// All 19 query classes from §15.2. Output is binary structures
+/// (SID bytes, u32/u64 values in little-endian) for programmatic use.
 #[no_mangle]
 pub extern "C" fn kacs_token_query(
     ptr: *const (),
@@ -195,56 +191,150 @@ pub extern "C" fn kacs_token_query(
     let kt = unsafe { KacsToken::from_ptr(ptr) };
     let token = &kt.token;
 
-    // Format the response for this query class into a stack buffer.
     let mut out = FormatBuf::new();
     match class {
-        TOKEN_CLASS_USER => format_sid(&mut out, &token.user_sid),
-        TOKEN_CLASS_GROUPS => {
-            out.usize(token.groups.len());
-            for g in token.groups.iter() {
-                out.byte(b'\n');
-                format_sid(&mut out, &g.sid);
-                out.str(" attrs=0x");
-                out.hex64(g.attributes as u64);
+        1 => { // TokenUser — binary SID
+            if let Ok(bytes) = token.user_sid.to_bytes() {
+                for &b in bytes.iter() { out.byte(b); }
             }
         }
-        TOKEN_CLASS_PRIVILEGES => {
-            out.str("present=0x");
-            out.hex64(token.privileges.present.load(Ordering::Relaxed));
-            out.str("\nenabled=0x");
-            out.hex64(token.privileges.enabled.load(Ordering::Relaxed));
+        2 => { // TokenGroups — [count:u32le][{sid_len:u32le, sid_bytes, attrs:u32le}...]
+            let count = token.groups.len() as u32;
+            for &b in &count.to_le_bytes() { out.byte(b); }
+            for g in token.groups.iter() {
+                if let Ok(sid_bytes) = g.sid.to_bytes() {
+                    let len = sid_bytes.len() as u32;
+                    for &b in &len.to_le_bytes() { out.byte(b); }
+                    for &b in sid_bytes.iter() { out.byte(b); }
+                }
+                for &b in &g.attributes.to_le_bytes() { out.byte(b); }
+            }
         }
-        TOKEN_CLASS_TYPE => out.str(match token.token_type {
-            TokenType::Primary => "Primary",
-            TokenType::Impersonation => "Impersonation",
-        }),
-        TOKEN_CLASS_INTEGRITY_LEVEL => out.str(match token.integrity_level {
-            IntegrityLevel::Untrusted => "Untrusted",
-            IntegrityLevel::Low => "Low",
-            IntegrityLevel::Medium => "Medium",
-            IntegrityLevel::High => "High",
-            IntegrityLevel::System => "System",
-        }),
-        TOKEN_CLASS_ELEVATION_TYPE => out.str(match token.elevation_type {
-            kacs_core::token::ElevationType::Default => "Default",
-            kacs_core::token::ElevationType::Full => "Full",
-            kacs_core::token::ElevationType::Limited => "Limited",
-        }),
-        TOKEN_CLASS_MANDATORY_POLICY => {
-            out.str("0x");
-            out.hex64(token.mandatory_policy as u64);
+        3 => { // TokenPrivileges — [present:u64le, enabled:u64le, default:u64le, used:u64le]
+            for &b in &token.privileges.present.load(Ordering::SeqCst).to_le_bytes() { out.byte(b); }
+            for &b in &token.privileges.enabled.load(Ordering::SeqCst).to_le_bytes() { out.byte(b); }
+            for &b in &token.privileges.enabled_by_default.load(Ordering::SeqCst).to_le_bytes() { out.byte(b); }
+            for &b in &token.privileges.used.load(Ordering::SeqCst).to_le_bytes() { out.byte(b); }
         }
-        _ => return -22, // -EINVAL: unsupported class
+        4 => { // TokenType — [type:u32le] (1=Primary, 2=Impersonation)
+            let t = match token.token_type { TokenType::Primary => 1u32, TokenType::Impersonation => 2u32 };
+            for &b in &t.to_le_bytes() { out.byte(b); }
+        }
+        5 => { // TokenIntegrityLevel — binary integrity SID
+            let rid = token.integrity_level.rid();
+            if let Ok(sid) = kacs_core::sid::Sid::new(16, &[rid]) {
+                if let Ok(bytes) = sid.to_bytes() {
+                    for &b in bytes.iter() { out.byte(b); }
+                }
+            }
+        }
+        6 => { // TokenOwner — binary SID (user_sid as default owner)
+            if let Ok(bytes) = token.user_sid.to_bytes() {
+                for &b in bytes.iter() { out.byte(b); }
+            }
+        }
+        7 => { // TokenPrimaryGroup — binary SID (first group or user_sid)
+            let sid = if !token.groups.is_empty() {
+                &token.groups[0].sid
+            } else {
+                &token.user_sid
+            };
+            if let Ok(bytes) = sid.to_bytes() {
+                for &b in bytes.iter() { out.byte(b); }
+            }
+        }
+        8 => { // TokenSessionId — [session_id:u64le] (from auth_id)
+            for &b in &token.auth_id.0.to_le_bytes() { out.byte(b); }
+        }
+        9 => { // TokenRestrictedSids — same format as groups
+            if let Some(ref rsids) = token.restricted_sids {
+                let count = rsids.len() as u32;
+                for &b in &count.to_le_bytes() { out.byte(b); }
+                for g in rsids.iter() {
+                    if let Ok(sid_bytes) = g.sid.to_bytes() {
+                        let len = sid_bytes.len() as u32;
+                        for &b in &len.to_le_bytes() { out.byte(b); }
+                        for &b in sid_bytes.iter() { out.byte(b); }
+                    }
+                    for &b in &g.attributes.to_le_bytes() { out.byte(b); }
+                }
+            } else {
+                for &b in &0u32.to_le_bytes() { out.byte(b); }
+            }
+        }
+        10 => { // TokenSource — [name:8bytes, source_id:u64le]
+            for &b in &token.source.name { out.byte(b); }
+            for &b in &token.source.source_id.0.to_le_bytes() { out.byte(b); }
+        }
+        11 => { // TokenStatistics — [token_id:u64, auth_id:u64, modified_id:u64, type:u32]
+            for &b in &token.token_id.0.to_le_bytes() { out.byte(b); }
+            for &b in &token.auth_id.0.to_le_bytes() { out.byte(b); }
+            for &b in &token.modified_id.to_le_bytes() { out.byte(b); }
+            let t = match token.token_type { TokenType::Primary => 1u32, TokenType::Impersonation => 2u32 };
+            for &b in &t.to_le_bytes() { out.byte(b); }
+        }
+        12 => { // TokenOrigin — [origin:u64le]
+            for &b in &token.origin.0.to_le_bytes() { out.byte(b); }
+        }
+        13 => { // TokenElevationType — [type:u32le]
+            let t = match token.elevation_type {
+                kacs_core::token::ElevationType::Default => 1u32,
+                kacs_core::token::ElevationType::Full => 2u32,
+                kacs_core::token::ElevationType::Limited => 3u32,
+            };
+            for &b in &t.to_le_bytes() { out.byte(b); }
+        }
+        14 => { // TokenDeviceGroups — same format as groups
+            if let Some(ref dgroups) = token.device_groups {
+                let count = dgroups.len() as u32;
+                for &b in &count.to_le_bytes() { out.byte(b); }
+                for g in dgroups.iter() {
+                    if let Ok(sid_bytes) = g.sid.to_bytes() {
+                        let len = sid_bytes.len() as u32;
+                        for &b in &len.to_le_bytes() { out.byte(b); }
+                        for &b in sid_bytes.iter() { out.byte(b); }
+                    }
+                    for &b in &g.attributes.to_le_bytes() { out.byte(b); }
+                }
+            } else {
+                for &b in &0u32.to_le_bytes() { out.byte(b); }
+            }
+        }
+        15 => { // TokenAppContainerSid — not implemented, return empty
+            // AppContainer SID is part of confinement model
+        }
+        16 => { // TokenCapabilities — confinement capabilities
+            let count = token.confinement_capabilities.len() as u32;
+            for &b in &count.to_le_bytes() { out.byte(b); }
+            for g in token.confinement_capabilities.iter() {
+                if let Ok(sid_bytes) = g.sid.to_bytes() {
+                    let len = sid_bytes.len() as u32;
+                    for &b in &len.to_le_bytes() { out.byte(b); }
+                    for &b in sid_bytes.iter() { out.byte(b); }
+                }
+                for &b in &g.attributes.to_le_bytes() { out.byte(b); }
+            }
+        }
+        17 => { // TokenMandatoryPolicy — [policy:u32le]
+            for &b in &token.mandatory_policy.to_le_bytes() { out.byte(b); }
+        }
+        18 => { // TokenLogonType — need session lookup, return 0 for now
+            for &b in &0u32.to_le_bytes() { out.byte(b); }
+        }
+        19 => { // TokenLogonSid — binary SID
+            if let Ok(bytes) = token.logon_sid.to_bytes() {
+                for &b in bytes.iter() { out.byte(b); }
+            }
+        }
+        _ => return -22, // -EINVAL
     };
 
     let data = out.as_bytes();
 
-    // Size query
     if buf.is_null() {
         return data.len() as i32;
     }
 
-    // Buffer too small
     if (buf_len as usize) < data.len() {
         return data.len() as i32;
     }
@@ -268,10 +358,24 @@ pub extern "C" fn kacs_token_from_spec(data: *const u8, len: usize) -> *const ()
     let spec = unsafe { core::slice::from_raw_parts(data, len) };
 
     match kacs_core::token_spec::parse_token_spec(spec) {
-        Ok(Some(token)) => match KacsToken::new(token) {
-            Ok(ptr) => ptr,
-            Err(_) => core::ptr::null(),
-        },
+        Ok(Some(mut token)) => {
+            // Inject the logon SID into the groups with SE_GROUP_LOGON_ID.
+            let logon_sid_entry = kacs_core::group::GroupEntry::new(
+                token.logon_sid.try_clone().unwrap_or_else(|_| {
+                    kacs_core::sid::Sid::new(5, &[5, 0, 0]).unwrap()
+                }),
+                kacs_core::group::SE_GROUP_MANDATORY
+                    | kacs_core::group::SE_GROUP_ENABLED_BY_DEFAULT
+                    | kacs_core::group::SE_GROUP_ENABLED
+                    | kacs_core::group::SE_GROUP_LOGON_ID,
+            );
+            let _ = compat::vec_push(&mut token.groups, logon_sid_entry);
+
+            match KacsToken::new(token) {
+                Ok(ptr) => ptr,
+                Err(_) => core::ptr::null(),
+            }
+        }
         _ => core::ptr::null(),
     }
 }
@@ -455,6 +559,8 @@ pub extern "C" fn kacs_token_adjust_group(
         }
         group.attributes &= !kacs_core::group::SE_GROUP_ENABLED;
     }
+    // Bump modified_id (§15.2)
+    kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
     0
 }
 
@@ -483,7 +589,8 @@ pub extern "C" fn kacs_token_adjust_privs(
     if ptr.is_null() {
         return -22; // -EINVAL
     }
-    let kt = unsafe { KacsToken::from_ptr(ptr) };
+    // Need mutable access for modified_id bump
+    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
     let privs = &kt.token.privileges;
 
     // Remove first (irreversible)
@@ -517,6 +624,9 @@ pub extern "C" fn kacs_token_adjust_privs(
             mask &= !bit;
         }
     }
+
+    // Bump modified_id (§15.2)
+    kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
 
     0
 }
@@ -939,15 +1049,29 @@ pub extern "C" fn kacs_session_link_tokens(
     }
 
     // Verify the session exists
-    {
+    let expected_logon_sid = {
         let guard = SESSION_TABLE.lock();
         let table = match guard.as_ref() {
             Some(t) => t,
             None => return -22,
         };
-        if table.get(session_id).is_none() {
-            return -22;
+        let session = match table.get(session_id) {
+            Some(s) => s,
+            None => return -22,
+        };
+        match session.logon_sid() {
+            Ok(sid) => sid,
+            Err(_) => return -12,
         }
+    };
+
+    // Verify both tokens belong to this session (§15.2).
+    let e_kt = unsafe { KacsToken::from_ptr(elevated) };
+    let f_kt = unsafe { KacsToken::from_ptr(filtered) };
+    if e_kt.token.logon_sid != expected_logon_sid
+        || f_kt.token.logon_sid != expected_logon_sid
+    {
+        return -22; // -EINVAL: tokens don't belong to this session
     }
 
     let mut guard = LINKED_TOKENS.lock();

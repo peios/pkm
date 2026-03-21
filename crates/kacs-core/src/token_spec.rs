@@ -138,7 +138,7 @@ pub fn parse_token_spec(data: &[u8]) -> Result<Option<Token>, AllocError> {
         primary_group_index: 0,
 
         token_id: Luid(0), // kernel assigns real IDs
-        auth_id: Luid(0),
+        auth_id: Luid(session_id), // links token to its auth session
         source: TokenSource {
             name: *b"authd\0\0\0",
             source_id: Luid(0),
