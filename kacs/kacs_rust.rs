@@ -955,6 +955,182 @@ pub extern "C" fn kacs_create_inherited_sd(
     ptr as *const ()
 }
 
+/// Extract SD components per security_info mask and serialize.
+/// Returns the serialized SD (only requested components) as bytes.
+/// If buf is null, returns the required size.
+/// security_info: OWNER=0x01, GROUP=0x02, DACL=0x04, SACL=0x08, LABEL=0x10
+#[no_mangle]
+pub extern "C" fn kacs_sd_get_components(
+    sd_ptr: *const (),
+    security_info: u32,
+    buf: *mut u8,
+    buf_len: c_int,
+) -> c_int {
+    if sd_ptr.is_null() {
+        return -22; // -EINVAL
+    }
+    let sd = unsafe { &*(sd_ptr as *const kacs_core::sd::SecurityDescriptor) };
+
+    // Build a filtered SD containing only the requested components.
+    let mut filtered = kacs_core::sd::SecurityDescriptor {
+        control: kacs_core::sd::SE_SELF_RELATIVE,
+        owner: None,
+        group: None,
+        dacl: None,
+        sacl: None,
+    };
+
+    if security_info & 0x01 != 0 { // OWNER
+        filtered.owner = sd.owner.as_ref().and_then(|s| s.try_clone().ok());
+    }
+    if security_info & 0x02 != 0 { // GROUP
+        filtered.group = sd.group.as_ref().and_then(|s| s.try_clone().ok());
+    }
+    if security_info & 0x04 != 0 { // DACL
+        filtered.dacl = sd.dacl.as_ref().and_then(|d| d.try_clone().ok());
+        filtered.control |= sd.control & (kacs_core::sd::SE_DACL_PRESENT
+            | kacs_core::sd::SE_DACL_PROTECTED
+            | kacs_core::sd::SE_DACL_AUTO_INHERITED);
+    }
+    if security_info & 0x08 != 0 { // SACL (full)
+        filtered.sacl = sd.sacl.as_ref().and_then(|s| s.try_clone().ok());
+        filtered.control |= sd.control & (kacs_core::sd::SE_SACL_PRESENT
+            | kacs_core::sd::SE_SACL_PROTECTED
+            | kacs_core::sd::SE_SACL_AUTO_INHERITED);
+    } else if security_info & 0x10 != 0 { // LABEL only (from SACL)
+        // Extract only mandatory label ACEs from the SACL.
+        if let Some(ref sacl) = sd.sacl {
+            let mut label_aces = compat::Vec::new();
+            for ace in sacl.aces.iter() {
+                if ace.ace_type == kacs_core::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+                    if let Ok(a) = ace.try_clone() {
+                        let _ = compat::vec_push(&mut label_aces, a);
+                    }
+                }
+            }
+            if !label_aces.is_empty() {
+                filtered.sacl = Some(kacs_core::acl::Acl {
+                    revision: kacs_core::acl::ACL_REVISION,
+                    aces: label_aces,
+                });
+                filtered.control |= kacs_core::sd::SE_SACL_PRESENT;
+            }
+        }
+    }
+
+    let bytes = match filtered.to_bytes() {
+        Ok(b) => b,
+        Err(_) => return -12,
+    };
+
+    if buf.is_null() || buf_len <= 0 {
+        return bytes.len() as c_int;
+    }
+    if (buf_len as usize) < bytes.len() {
+        return bytes.len() as c_int; // caller checks and uses -ERANGE
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+    }
+    bytes.len() as c_int
+}
+
+/// Merge SD components from a new SD into an existing SD per security_info.
+/// Returns a new heap-allocated merged SD, or null on failure.
+#[no_mangle]
+pub extern "C" fn kacs_sd_merge_components(
+    existing_sd_ptr: *const (),
+    new_sd_data: *const u8,
+    new_sd_len: usize,
+    security_info: u32,
+) -> *const () {
+    if existing_sd_ptr.is_null() || new_sd_data.is_null() || new_sd_len == 0 {
+        return core::ptr::null();
+    }
+    let existing = unsafe { &*(existing_sd_ptr as *const kacs_core::sd::SecurityDescriptor) };
+    let new_bytes = unsafe { core::slice::from_raw_parts(new_sd_data, new_sd_len) };
+
+    let new_sd = match kacs_core::sd::SecurityDescriptor::from_bytes(new_bytes) {
+        Ok(Some(sd)) => sd,
+        _ => return core::ptr::null(),
+    };
+
+    // Start with a clone of the existing SD.
+    let mut merged = match existing.try_clone() {
+        Ok(sd) => sd,
+        Err(_) => return core::ptr::null(),
+    };
+
+    // Merge only the indicated components.
+    if security_info & 0x01 != 0 { // OWNER
+        merged.owner = new_sd.owner;
+    }
+    if security_info & 0x02 != 0 { // GROUP
+        merged.group = new_sd.group;
+    }
+    if security_info & 0x04 != 0 { // DACL
+        merged.dacl = new_sd.dacl;
+        // Transfer DACL control flags from new SD.
+        merged.control &= !(kacs_core::sd::SE_DACL_PRESENT
+            | kacs_core::sd::SE_DACL_PROTECTED
+            | kacs_core::sd::SE_DACL_AUTO_INHERITED);
+        merged.control |= new_sd.control & (kacs_core::sd::SE_DACL_PRESENT
+            | kacs_core::sd::SE_DACL_PROTECTED
+            | kacs_core::sd::SE_DACL_AUTO_INHERITED);
+    }
+    if security_info & 0x08 != 0 { // SACL
+        merged.sacl = new_sd.sacl;
+        merged.control &= !(kacs_core::sd::SE_SACL_PRESENT
+            | kacs_core::sd::SE_SACL_PROTECTED
+            | kacs_core::sd::SE_SACL_AUTO_INHERITED);
+        merged.control |= new_sd.control & (kacs_core::sd::SE_SACL_PRESENT
+            | kacs_core::sd::SE_SACL_PROTECTED
+            | kacs_core::sd::SE_SACL_AUTO_INHERITED);
+    }
+    if security_info & 0x10 != 0 { // LABEL
+        // Replace mandatory label ACEs in existing SACL with new ones.
+        // Keep other SACL ACEs (audit, trust labels, etc.).
+        if let Some(ref new_sacl) = new_sd.sacl {
+            let mut aces = compat::Vec::new();
+            // Keep non-label ACEs from existing SACL.
+            if let Some(ref existing_sacl) = merged.sacl {
+                for ace in existing_sacl.aces.iter() {
+                    if ace.ace_type != kacs_core::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+                        if let Ok(a) = ace.try_clone() {
+                            let _ = compat::vec_push(&mut aces, a);
+                        }
+                    }
+                }
+            }
+            // Add label ACEs from new SACL.
+            for ace in new_sacl.aces.iter() {
+                if ace.ace_type == kacs_core::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+                    if let Ok(a) = ace.try_clone() {
+                        let _ = compat::vec_push(&mut aces, a);
+                    }
+                }
+            }
+            merged.sacl = Some(kacs_core::acl::Acl {
+                revision: kacs_core::acl::ACL_REVISION,
+                aces,
+            });
+            merged.control |= kacs_core::sd::SE_SACL_PRESENT;
+        }
+    }
+
+    // Heap-allocate.
+    let mut v = match compat::vec_with_capacity::<kacs_core::sd::SecurityDescriptor>(1) {
+        Ok(v) => v,
+        Err(_) => return core::ptr::null(),
+    };
+    if compat::vec_push(&mut v, merged).is_err() {
+        return core::ptr::null();
+    }
+    let ptr = v.as_ptr();
+    core::mem::forget(v);
+    ptr as *const ()
+}
+
 /// Build the default process SD from the creator's token.
 fn build_default_proc_sd(
     token: &Token,

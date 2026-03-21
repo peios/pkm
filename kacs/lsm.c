@@ -73,6 +73,12 @@ extern const void *kacs_create_inherited_sd(const void *token_ptr,
 extern long long kacs_file_access_check(const void *token_ptr,
 					const void *sd_ptr,
 					u32 desired);
+extern int kacs_sd_get_components(const void *sd_ptr, u32 security_info,
+				  void *buf, int buf_len);
+extern const void *kacs_sd_merge_components(const void *existing_sd_ptr,
+					    const void *new_sd_data,
+					    size_t new_sd_len,
+					    u32 security_info);
 extern long long kacs_dir_access_check(const void *token_ptr,
 				       const void *sd_ptr,
 				       u32 desired);
@@ -1237,6 +1243,47 @@ static int kacs_unix_stream_connect(struct sock *sock,
 #define STD_WRITE_DAC           0x00040000
 #define STD_WRITE_OWNER         0x00080000
 #define STD_SYNCHRONIZE         0x00100000
+
+/* ── SECURITY_INFORMATION flags (§14.4) ────────────────────────────────── */
+
+#define OWNER_SECURITY_INFORMATION	0x01
+#define GROUP_SECURITY_INFORMATION	0x02
+#define DACL_SECURITY_INFORMATION	0x04
+#define SACL_SECURITY_INFORMATION	0x08
+#define LABEL_SECURITY_INFORMATION	0x10
+
+#define ACCESS_SYSTEM_SECURITY		0x01000000
+
+/*
+ * Compute the required access rights for a given security_info mask.
+ * Returns the access mask that must be checked before the operation.
+ */
+static u32 sd_rights_for_get(u32 security_info)
+{
+	u32 rights = 0;
+	if (security_info & (OWNER_SECURITY_INFORMATION |
+			     GROUP_SECURITY_INFORMATION |
+			     DACL_SECURITY_INFORMATION |
+			     LABEL_SECURITY_INFORMATION))
+		rights |= STD_READ_CONTROL;
+	if (security_info & SACL_SECURITY_INFORMATION)
+		rights |= ACCESS_SYSTEM_SECURITY;
+	return rights;
+}
+
+static u32 sd_rights_for_set(u32 security_info)
+{
+	u32 rights = 0;
+	if (security_info & (OWNER_SECURITY_INFORMATION |
+			     GROUP_SECURITY_INFORMATION |
+			     LABEL_SECURITY_INFORMATION))
+		rights |= STD_WRITE_OWNER;
+	if (security_info & DACL_SECURITY_INFORMATION)
+		rights |= STD_WRITE_DAC;
+	if (security_info & SACL_SECURITY_INFORMATION)
+		rights |= ACCESS_SYSTEM_SECURITY;
+	return rights;
+}
 
 /* ── SD xattr names ───────────────────────────────────────────────────── */
 
@@ -3515,6 +3562,385 @@ static int __init kacs_securityfs_init(void)
 	return 0;
 }
 late_initcall(kacs_securityfs_init);
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * FACS Phase F — KACS SD syscalls (§14.4)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Resolve a (dirfd, path, flags) to an inode. Handles AT_EMPTY_PATH.
+ * Caller must path_put() the result on success.
+ * Returns 0 on success, negative errno on failure.
+ */
+static int resolve_target(int dirfd, const char __user *pathname,
+			  u32 flags, struct path *target)
+{
+	unsigned int lookup_flags = LOOKUP_FOLLOW;
+
+	if (flags & AT_SYMLINK_NOFOLLOW)
+		lookup_flags &= ~LOOKUP_FOLLOW;
+	if (flags & AT_EMPTY_PATH)
+		lookup_flags |= LOOKUP_EMPTY;
+
+	return user_path_at(dirfd, pathname, lookup_flags, target);
+}
+
+/* ── Syscall: kacs_get_sd (1021) ──────────────────────────────────────── */
+
+SYSCALL_DEFINE7(kacs_get_sd, int, dirfd, const char __user *, path,
+		u32, security_info, void __user *, buf, u32, buf_len,
+		u32 __user *, len_needed, u32, flags)
+{
+	struct path target;
+	struct inode *inode;
+	const void *sd;
+	const struct kacs_cred_security *ccred;
+	u32 required;
+	long long ac_ret;
+	void *kbuf = NULL;
+	int sd_len;
+	int ret;
+
+	if (!security_info)
+		return -EINVAL;
+
+	ret = resolve_target(dirfd, path, flags, &target);
+	if (ret)
+		return ret;
+
+	inode = d_inode(target.dentry);
+
+	/* Get the SD from cache. */
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(inode);
+	if (!sd) {
+		rcu_read_unlock();
+		path_put(&target);
+		return -EACCES; /* no SD — deny */
+	}
+
+	/* Access check: does the caller have the required rights? */
+	required = sd_rights_for_get(security_info);
+	ccred = kacs_cred(current_cred());
+	ac_ret = kacs_file_access_check(ccred->token, sd, required);
+	if (ac_ret < 0 || ((u32)ac_ret & required) != required) {
+		rcu_read_unlock();
+		path_put(&target);
+		return -EACCES;
+	}
+
+	/* Extract the requested components. Size query first. */
+	sd_len = kacs_sd_get_components(sd, security_info, NULL, 0);
+	rcu_read_unlock();
+	path_put(&target);
+
+	if (sd_len <= 0)
+		return -EINVAL;
+
+	/* Return needed size. */
+	if (len_needed) {
+		if (put_user((u32)sd_len, len_needed))
+			return -EFAULT;
+	}
+
+	if (!buf || buf_len == 0)
+		return 0; /* size query only */
+
+	if (buf_len < (u32)sd_len)
+		return -ERANGE; /* buffer too small */
+
+	/* Allocate kernel buffer and extract. */
+	kbuf = kmalloc(sd_len, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	/* Re-read SD (may have changed — but we already did access check).
+	 * In practice the SD is cached and this is fast. */
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(inode);
+	if (!sd) {
+		rcu_read_unlock();
+		kfree(kbuf);
+		return -EACCES;
+	}
+	kacs_sd_get_components(sd, security_info, kbuf, sd_len);
+	rcu_read_unlock();
+
+	if (copy_to_user(buf, kbuf, sd_len)) {
+		kfree(kbuf);
+		return -EFAULT;
+	}
+
+	kfree(kbuf);
+	return 0;
+}
+
+/* ── Syscall: kacs_set_sd (1022) ──────────────────────────────────────── */
+
+SYSCALL_DEFINE6(kacs_set_sd, int, dirfd, const char __user *, path,
+		u32, security_info, const void __user *, sd_buf,
+		u32, sd_len, u32, flags)
+{
+	struct path target;
+	struct inode *inode;
+	struct kacs_inode_security *isec;
+	const void *existing_sd;
+	const void *merged_sd;
+	const struct kacs_cred_security *ccred;
+	u32 required;
+	long long ac_ret;
+	void *ksd = NULL;
+	void *merged_bytes = NULL;
+	int merged_len;
+	int ret;
+
+	if (!security_info || !sd_buf || sd_len == 0 || sd_len > 65536)
+		return -EINVAL;
+
+	ret = resolve_target(dirfd, path, flags, &target);
+	if (ret)
+		return ret;
+
+	inode = d_inode(target.dentry);
+
+	/* Copy the new SD from userspace. */
+	ksd = kmalloc(sd_len, GFP_KERNEL);
+	if (!ksd) {
+		path_put(&target);
+		return -ENOMEM;
+	}
+	if (copy_from_user(ksd, sd_buf, sd_len)) {
+		kfree(ksd);
+		path_put(&target);
+		return -EFAULT;
+	}
+
+	/* Access check against the existing SD.
+	 * SeRestorePrivilege bypasses this (handled inside AccessCheck
+	 * via privilege grants — WRITE_DAC/WRITE_OWNER/ASS all granted). */
+	rcu_read_lock();
+	existing_sd = kacs_inode_get_sd(inode);
+	if (!existing_sd) {
+		rcu_read_unlock();
+		/* No existing SD — only SeRestorePrivilege can stamp.
+		 * Check if caller has it. */
+		ccred = kacs_cred(current_cred());
+		if (!ccred->token ||
+		    !kacs_token_check_privilege(ccred->token,
+			(1ULL << 18) /* SE_RESTORE */)) {
+			kfree(ksd);
+			path_put(&target);
+			return -EACCES;
+		}
+		/* Create a fresh SD from the provided buffer. */
+		merged_sd = kacs_sd_from_bytes(ksd, sd_len);
+		kfree(ksd);
+		if (!merged_sd) {
+			path_put(&target);
+			return -EINVAL; /* malformed SD */
+		}
+	} else {
+		required = sd_rights_for_set(security_info);
+		ccred = kacs_cred(current_cred());
+		ac_ret = kacs_file_access_check(ccred->token,
+						existing_sd, required);
+		if (ac_ret < 0 || ((u32)ac_ret & required) != required) {
+			rcu_read_unlock();
+			kfree(ksd);
+			path_put(&target);
+			return -EACCES;
+		}
+
+		/* Merge components from new SD into existing. */
+		merged_sd = kacs_sd_merge_components(
+			existing_sd, ksd, sd_len, security_info);
+		rcu_read_unlock();
+		kfree(ksd);
+
+		if (!merged_sd) {
+			path_put(&target);
+			return -EINVAL;
+		}
+	}
+
+	/* Serialize the merged SD for xattr write. */
+	merged_len = kacs_sd_to_bytes(merged_sd, NULL, 0);
+	if (merged_len <= 0) {
+		kacs_proc_sd_drop(merged_sd);
+		path_put(&target);
+		return -ENOMEM;
+	}
+
+	merged_bytes = kmalloc(merged_len, GFP_KERNEL);
+	if (!merged_bytes) {
+		kacs_proc_sd_drop(merged_sd);
+		path_put(&target);
+		return -ENOMEM;
+	}
+	kacs_sd_to_bytes(merged_sd, merged_bytes, merged_len);
+
+	/* Write the xattr via internal path (bypasses security_inode_setxattr).
+	 * The set-security syscall IS the authorized write path. */
+	inode_lock(inode);
+	ret = __vfs_setxattr_noperm(
+		mnt_idmap(target.mnt), target.dentry,
+		KACS_SD_XATTR, merged_bytes, merged_len, 0);
+	if (!ret) {
+		/* Update the in-memory SD cache atomically. */
+		isec = kacs_inode(inode);
+		{
+			const void *old = rcu_dereference_protected(
+				isec->sd_cache,
+				lockdep_is_held(&inode->i_rwsem));
+			rcu_assign_pointer(isec->sd_cache, merged_sd);
+			if (old && old != KACS_SD_CORRUPT)
+				kfree_rcu_mightsleep((void *)old);
+		}
+	} else {
+		kacs_proc_sd_drop(merged_sd);
+	}
+	inode_unlock(inode);
+
+	kfree(merged_bytes);
+	path_put(&target);
+	return ret;
+}
+
+/* ── Syscall: kacs_open (1020) ─────────────────────────────────────────── */
+
+/* Create dispositions (§14.4 kacs_open) */
+#define KACS_FILE_SUPERSEDE	0
+#define KACS_FILE_OPEN		1
+#define KACS_FILE_CREATE	2
+#define KACS_FILE_OPEN_IF	3
+#define KACS_FILE_OVERWRITE	4
+#define KACS_FILE_OVERWRITE_IF	5
+
+/*
+ * Map create disposition to Linux open flags.
+ * Returns open flags, or negative errno.
+ * *status_out is set to 1 (created) or 0 (opened existing).
+ */
+static int disposition_to_flags(u32 disposition, u32 desired,
+				bool file_exists, int *o_flags)
+{
+	switch (disposition) {
+	case KACS_FILE_OPEN:
+		/* Open existing, fail if not found. */
+		*o_flags = 0;
+		return file_exists ? 0 : -ENOENT;
+	case KACS_FILE_CREATE:
+		/* Create new, fail if exists. */
+		*o_flags = O_CREAT | O_EXCL;
+		return file_exists ? -EEXIST : 0;
+	case KACS_FILE_OPEN_IF:
+		/* Open if exists, create if not. */
+		*o_flags = O_CREAT;
+		return 0;
+	case KACS_FILE_OVERWRITE:
+		/* Truncate existing, fail if not found. */
+		*o_flags = O_TRUNC;
+		return file_exists ? 0 : -ENOENT;
+	case KACS_FILE_OVERWRITE_IF:
+		/* Truncate if exists, create if not. */
+		*o_flags = O_CREAT | O_TRUNC;
+		return 0;
+	case KACS_FILE_SUPERSEDE:
+		/* Delete existing + create new. Complex — requires DELETE
+		 * on existing + FILE_ADD_FILE on parent. Handled specially. */
+		*o_flags = O_CREAT;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+SYSCALL_DEFINE9(kacs_open, int, dirfd, const char __user *, path,
+		u32, desired_access, u32, create_disposition,
+		u32, create_options, const void __user *, sd_buf,
+		u32, sd_len, u32 __user *, status_out, u32, flags)
+{
+	struct open_how how = {};
+	int o_flags = 0;
+	int ret;
+	long fd;
+	fmode_t f_mode = 0;
+
+	if (!desired_access)
+		return -EINVAL;
+
+	/* The desired_access must include at least one data right or
+	 * FILE_EXECUTE for a valid f_mode (§14 KACS-native open). */
+	if (!(desired_access & (FILE_READ_DATA | FILE_WRITE_DATA
+				| FILE_APPEND_DATA | FILE_EXECUTE)))
+		return -EINVAL;
+
+	if (create_disposition > KACS_FILE_OVERWRITE_IF)
+		return -EINVAL;
+
+	/* Map desired access to f_mode. */
+	if (desired_access & FILE_READ_DATA)
+		f_mode |= FMODE_READ;
+	if (desired_access & (FILE_WRITE_DATA | FILE_APPEND_DATA))
+		f_mode |= FMODE_WRITE;
+
+	/* Compute open flags from disposition. */
+	/* FILE_SUPERSEDE is handled specially — for now, map to create. */
+	ret = disposition_to_flags(create_disposition, desired_access,
+				   true /* pessimistic */, &o_flags);
+	/* Ignore the exists/not-exists error here — VFS handles it. */
+	if (ret == -EINVAL)
+		return ret;
+
+	/* Build the open_how. */
+	how.flags = o_flags;
+	if (f_mode & FMODE_READ)
+		how.flags |= (f_mode & FMODE_WRITE) ? O_RDWR : O_RDONLY;
+	else if (f_mode & FMODE_WRITE)
+		how.flags |= O_WRONLY;
+
+	if (flags & AT_SYMLINK_NOFOLLOW)
+		how.flags |= O_NOFOLLOW;
+
+	/* Use do_sys_openat2 which handles all the VFS path resolution. */
+	how.mode = 0666; /* for O_CREAT — umask will apply */
+	fd = do_sys_openat2(dirfd, path, &how);
+	if (fd < 0)
+		return fd;
+
+	/* The security_file_open hook already fired during do_sys_openat2.
+	 * It evaluated the LEGACY core+compat mapping. For kacs_open,
+	 * we need STRICT mode: the granted mask must include ALL bits
+	 * from desired_access, not just core.
+	 *
+	 * Re-check: verify the granted mask covers the full desired_access.
+	 * If not, close the fd and return -EACCES. */
+	{
+		CLASS(fd, f)((unsigned int)fd);
+		struct kacs_file_security *fsec;
+
+		if (fd_empty(f))
+			return -EBADF;
+
+		fsec = kacs_file(fd_file(f));
+		if ((fsec->granted & desired_access) != desired_access) {
+			/* Close and fail. */
+			ksys_close((unsigned int)fd);
+			return -EACCES;
+		}
+	}
+
+	/* Set creation status for caller. */
+	if (status_out) {
+		u32 status = (how.flags & O_CREAT) ? 1 : 0;
+		if (put_user(status, status_out)) {
+			ksys_close((unsigned int)fd);
+			return -EFAULT;
+		}
+	}
+
+	return fd;
+}
 
 /* ── LSM registration ──────────────────────────────────────────────────── */
 

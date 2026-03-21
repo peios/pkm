@@ -111,6 +111,9 @@ RUN printf '1000\tcommon\tkacs_open_self_token\t\tsys_kacs_open_self_token\n\
 1011\tcommon\tkacs_impersonate_peer\t\tsys_kacs_impersonate_peer\n\
 1012\tcommon\tkacs_revert\t\tsys_kacs_revert\n\
 1013\tcommon\tkacs_set_impersonation_level\t\tsys_kacs_set_impersonation_level\n\
+1020\tcommon\tkacs_open\t\tsys_kacs_open\n\
+1021\tcommon\tkacs_get_sd\t\tsys_kacs_get_sd\n\
+1022\tcommon\tkacs_set_sd\t\tsys_kacs_set_sd\n\
 1023\tcommon\tkacs_access_check\t\tsys_kacs_access_check\n\
 1050\tcommon\tevent_emit\t\tsys_event_emit\n' \
     >> arch/x86/entry/syscalls/syscall_64.tbl
