@@ -29,6 +29,8 @@ pub struct AccessCheckResult {
     pub allowed: bool,
     /// Continuous audit mask for the opened handle (from alarm ACEs).
     pub continuous_audit_mask: u32,
+    /// Audit events from SACL evaluation (§11.10).
+    pub audit_events: Vec<crate::audit::AuditEvent>,
     /// True if a CAP staged DACL produced a different result than the
     /// effective DACL (§11.16). Signals that a pending policy change
     /// would alter access decisions.
@@ -1216,9 +1218,6 @@ pub fn access_check(
         granted = cap_effective;
     }
 
-    // Step 9b: Privilege-use auditing — TODO (observational, not security-critical)
-    // Step 10: Audit emission — TODO (observational, not security-critical)
-
     // Step 15: Result computation
     // When a tree is present, root.granted reflects the whole object (§11.17).
     let final_granted = if let Some(ref tree) = object_tree {
@@ -1237,10 +1236,17 @@ pub fn access_check(
         (final_granted & mapped_desired) == mapped_desired
     };
 
+    // Step 10: SACL audit evaluation (§11.10)
+    let audit_result = crate::audit::evaluate_sacl(
+        sd, token, mapping, mapped_desired, final_granted,
+        allowed, &resource_attributes, local_claims,
+    )?;
+
     Ok(AccessCheckResult {
         granted: final_granted,
         allowed,
-        continuous_audit_mask: 0, // TODO: audit
+        continuous_audit_mask: audit_result.continuous_audit_mask,
+        audit_events: audit_result.events,
         staging_mismatch,
     })
 }

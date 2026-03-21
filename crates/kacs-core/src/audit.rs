@@ -14,7 +14,7 @@ use crate::token::Token;
 
 /// An audit event produced during AccessCheck evaluation.
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct AuditEvent {
     /// Which ACE triggered this event.
     pub ace_type: u8,
