@@ -217,6 +217,10 @@ pub struct Token {
     /// explicit SD is provided. Used by SD inheritance (§9.5).
     pub default_dacl: Option<crate::acl::Acl>,
 
+    /// The token's own SD (§7.9). Controls who can query/adjust/duplicate
+    /// this token. Checked when a token fd is obtained.
+    pub security_descriptor: Option<crate::sd::SecurityDescriptor>,
+
     // --- Metadata (immutable) ---
 
     /// Unique identifier for this token instance.
@@ -326,6 +330,7 @@ impl Token {
             owner_sid_index: 0, // user_sid
             primary_group_index: 0,
             default_dacl: None, // SYSTEM uses inherited DACLs
+            security_descriptor: None, // SYSTEM token is unrestricted
 
             token_id: Luid(1),
             auth_id: Luid(0), // Session 0

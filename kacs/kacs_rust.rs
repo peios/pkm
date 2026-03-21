@@ -44,6 +44,13 @@ impl KacsToken {
         // Assign a unique token ID.
         token.token_id = kacs_core::luid::Luid(NEXT_TOKEN_ID.fetch_add(1, Ordering::Relaxed));
 
+        // Generate a default token SD (§7.9) if one wasn't set.
+        if token.security_descriptor.is_none() {
+            if let Ok(sd) = build_default_token_sd(&token) {
+                token.security_descriptor = Some(sd);
+            }
+        }
+
         let mut v = compat::vec_with_capacity::<KacsToken>(1)?;
         compat::vec_push(&mut v, KacsToken {
             token,
@@ -792,6 +799,71 @@ fn build_default_proc_sd(
     Ok(SecurityDescriptor::new(owner, group, dacl))
 }
 
+/// Build the default token SD (§7.9) — controls who can open this token.
+///
+/// DACL:
+/// - Token user → TOKEN_ALL_ACCESS (0x00EF)
+/// - Administrators (S-1-5-32-544) → TOKEN_ALL_ACCESS
+/// - SYSTEM (S-1-5-18) → TOKEN_ALL_ACCESS
+fn build_default_token_sd(
+    token: &Token,
+) -> Result<kacs_core::sd::SecurityDescriptor, AllocError> {
+    use kacs_core::ace::{self, Ace};
+    use kacs_core::acl::Acl;
+    use kacs_core::sd::SecurityDescriptor;
+
+    const TOKEN_ALL_ACCESS: u32 = 0x00EF;
+
+    let owner = token.user_sid.try_clone()?;
+    let group = token.user_sid.try_clone()?;
+
+    // Build DACL with 3 ACEs
+    let mut aces = compat::vec_with_capacity::<Ace>(3)?;
+
+    // Token user → TOKEN_ALL_ACCESS
+    compat::vec_push(&mut aces, Ace {
+        ace_type: ace::ACCESS_ALLOWED_ACE_TYPE,
+        flags: 0,
+        mask: TOKEN_ALL_ACCESS,
+        sid: token.user_sid.try_clone()?,
+        object_type: None,
+        inherited_object_type: None,
+        condition: None,
+        application_data: None,
+    })?;
+
+    // Administrators → TOKEN_ALL_ACCESS
+    compat::vec_push(&mut aces, Ace {
+        ace_type: ace::ACCESS_ALLOWED_ACE_TYPE,
+        flags: 0,
+        mask: TOKEN_ALL_ACCESS,
+        sid: kacs_core::well_known::administrators()?,
+        object_type: None,
+        inherited_object_type: None,
+        condition: None,
+        application_data: None,
+    })?;
+
+    // SYSTEM → TOKEN_ALL_ACCESS
+    compat::vec_push(&mut aces, Ace {
+        ace_type: ace::ACCESS_ALLOWED_ACE_TYPE,
+        flags: 0,
+        mask: TOKEN_ALL_ACCESS,
+        sid: kacs_core::well_known::system()?,
+        object_type: None,
+        inherited_object_type: None,
+        condition: None,
+        application_data: None,
+    })?;
+
+    let dacl = Acl {
+        revision: kacs_core::acl::ACL_REVISION,
+        aces,
+    };
+
+    Ok(SecurityDescriptor::new(owner, group, dacl))
+}
+
 /// Check a process SD against a token for a desired access mask.
 /// Returns 1 if access is granted, 0 if denied.
 #[no_mangle]
@@ -812,6 +884,45 @@ pub extern "C" fn kacs_check_proc_sd(
         &kt.token,
         desired,
         &kacs_core::mask::PROCESS_GENERIC_MAPPING,
+        None,
+        None,
+        &[],
+        &[],
+        0,
+    ) {
+        Ok(result) => if result.allowed { 1 } else { 0 },
+        Err(_) => 0,
+    }
+}
+
+/// Check a token's own SD against a caller's token for a desired access mask.
+///
+/// Returns 1 if access is granted, 0 if denied.
+/// If the target token has no SD, access is granted (unrestricted).
+#[no_mangle]
+pub extern "C" fn kacs_check_token_sd(
+    token_ptr: *const (),
+    caller_token_ptr: *const (),
+    desired: u32,
+) -> c_int {
+    if token_ptr.is_null() || caller_token_ptr.is_null() || desired == 0 {
+        return 0;
+    }
+
+    let target_kt = unsafe { KacsToken::from_ptr(token_ptr) };
+    let caller_kt = unsafe { KacsToken::from_ptr(caller_token_ptr) };
+
+    // If the target token has no SD, access is unrestricted.
+    let sd = match target_kt.token.security_descriptor.as_ref() {
+        Some(sd) => sd,
+        None => return 1,
+    };
+
+    match kacs_core::access_check::access_check(
+        sd,
+        &caller_kt.token,
+        desired,
+        &kacs_core::mask::TOKEN_GENERIC_MAPPING,
         None,
         None,
         &[],

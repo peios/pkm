@@ -63,6 +63,8 @@ extern long long kacs_access_check_sd(const void *token_ptr,
 				      u32 desired, u32 generic_read,
 				      u32 generic_write, u32 generic_execute,
 				      u32 generic_all);
+extern int kacs_check_token_sd(const void *token_ptr,
+			       const void *caller_token_ptr, u32 desired);
 
 /* ── Constants ─────────────────────────────────────────────────────────── */
 
@@ -699,6 +701,24 @@ static void kacs_cred_free(struct cred *cred)
 /* ── Task hooks (Process SDs + PIP) ────────────────────────────────────── */
 
 /*
+ * NOTE: /proc metadata hiding via security_inode_permission is deferred.
+ *
+ * A security_inode_permission hook could hide /proc/<pid>/* entries from
+ * processes that don't dominate the target's PIP level. However, extracting
+ * the target task from a procfs inode is non-trivial: it requires checking
+ * if the inode's superblock is procfs (sb->s_magic == PROC_SUPER_MAGIC),
+ * then extracting the PID via PROC_I(inode)->pid — which depends on
+ * internal procfs structures not exported to LSMs.
+ *
+ * For v1, this is unnecessary: the ptrace_access_check hook gates
+ * /proc/<pid>/mem and /proc/<pid>/maps, and the kacs_proc_token_show
+ * handler gates /proc/<pid>/token. The remaining ungated entries
+ * (cmdline, status, stat, environ) leak minimal information. Full procfs
+ * hiding can be added in v2 if needed, potentially via a dedicated
+ * proc_pid_permission LSM hook or by patching fs/proc/base.c directly.
+ */
+
+/*
  * task_alloc: called on fork/clone. Create a default process SD and
  * inherit PIP level from the parent.
  */
@@ -1007,6 +1027,11 @@ SYSCALL_DEFINE2(kacs_open_self_token, unsigned int, flags, u32, access_mask)
 	else
 		sec = kacs_cred(current_cred());
 
+	/* Check token SD — self-access: caller is both caller and target.
+	 * Owner always gets full access so this should always pass. */
+	if (!kacs_check_token_sd(sec->token, sec->token, access_mask))
+		return -EACCES;
+
 	token = kacs_token_clone(sec->token);
 	return kacs_token_to_fd(token, access_mask);
 }
@@ -1067,6 +1092,19 @@ SYSCALL_DEFINE2(kacs_open_process_token, int, pidfd, u32, access_mask)
 
 	/* Get the target's primary token from real_cred. */
 	target_cred = kacs_cred(task->real_cred);
+
+	/* Check the token's own SD against the caller's token. */
+	{
+		const struct kacs_cred_security *ccred =
+			kacs_cred(current_cred());
+		if (!kacs_check_token_sd(target_cred->token,
+					 ccred->token, access_mask)) {
+			rcu_read_unlock();
+			put_pid(pid);
+			return -EACCES;
+		}
+	}
+
 	token = kacs_token_clone(target_cred->token);
 	rcu_read_unlock();
 	put_pid(pid);
@@ -1171,6 +1209,18 @@ SYSCALL_DEFINE1(kacs_open_peer_token, int, conn_fd)
 	if (!ssec->peer_token) {
 		sockfd_put(sock);
 		return -EINVAL;
+	}
+
+	/* Check the peer token's own SD against the caller's token. */
+	{
+		const struct kacs_cred_security *ccred =
+			kacs_cred(current_cred());
+		if (!kacs_check_token_sd(ssec->peer_token,
+					 ccred->token,
+					 KACS_TOKEN_ALL_ACCESS)) {
+			sockfd_put(sock);
+			return -EACCES;
+		}
 	}
 
 	token = kacs_token_clone(ssec->peer_token);
@@ -1503,9 +1553,22 @@ static int __init kacs_init(void)
 	struct kacs_cred_security *sec;
 	int ret;
 
-	/* Verify no conflicting MAC LSMs are present (§15.7 step 1). */
-	/* Note: CONFIG already disables them; this is belt + suspenders. */
-
+	/*
+	 * LSM stack verification (§15.7 step 1).
+	 *
+	 * KACS must be the sole MAC LSM. Conflicting LSMs (SELinux,
+	 * AppArmor, SMACK, TOMOYO) are excluded at build time via the
+	 * kernel Kconfig: CONFIG_SECURITY_SELINUX, CONFIG_SECURITY_APPARMOR,
+	 * CONFIG_SECURITY_SMACK, and CONFIG_SECURITY_TOMOYO are all
+	 * forced off in the PKM kernel Dockerfile. Runtime detection from
+	 * within an LSM init function is not practical — there is no
+	 * exported API to enumerate loaded LSMs at this point. The Kconfig
+	 * enforcement is the authoritative gate; if someone modifies the
+	 * defconfig to enable a conflicting LSM, the build will include it
+	 * and KACS hook ordering becomes unpredictable. A build-time
+	 * static_assert or Kconfig dependency (depends on !SECURITY_SELINUX)
+	 * could be added to the PKM Kconfig for defense in depth.
+	 */
 	security_add_hooks(kacs_hooks, ARRAY_SIZE(kacs_hooks), &kacs_lsmid);
 
 	ret = kacs_rust_init();

@@ -228,9 +228,35 @@ SYSCALL_DEFINE2(event_emit, const void __user *, body, u32, body_len)
 		return -EFAULT;
 	}
 
-	/* TODO: namespace reservation check — reject userspace calls
-	 * with "kacs.*" or "kernel.*" event ID prefixes. Requires
-	 * reading the first msgpack string from the body. */
+	/*
+	 * Namespace reservation: reject userspace events that use
+	 * reserved prefixes. The event body is msgpack and the first
+	 * element is the event type string. Rather than fully parsing
+	 * msgpack, do a raw byte scan of the first 64 bytes for the
+	 * reserved prefixes. This is imprecise but catches obvious
+	 * attempts to forge kernel-namespace events.
+	 */
+	{
+		u32 check_len = body_len < 64 ? body_len : 64;
+		const u8 *p = kbody;
+		u32 i;
+
+		for (i = 0; i + 5 <= check_len; i++) {
+			if (p[i] == 'k' && p[i+1] == 'a' && p[i+2] == 'c' &&
+			    p[i+3] == 's' && p[i+4] == '.') {
+				kfree(kbody);
+				return -EPERM;
+			}
+		}
+		for (i = 0; i + 7 <= check_len; i++) {
+			if (p[i] == 'k' && p[i+1] == 'e' && p[i+2] == 'r' &&
+			    p[i+3] == 'n' && p[i+4] == 'e' && p[i+5] == 'l' &&
+			    p[i+6] == '.') {
+				kfree(kbody);
+				return -EPERM;
+			}
+		}
+	}
 
 	hdr.timestamp_ns = ktime_get_ns();
 	hdr.emitter_pid = current->tgid;
@@ -278,8 +304,45 @@ static ssize_t events_read(struct file *file, char __user *buf,
 	return simple_read_from_buffer(buf, count, ppos, kbuf, len);
 }
 
+/*
+ * eventfd registration: eventd writes an fd number (as ASCII decimal)
+ * to this file. The kernel calls eventfd_ctx_fdget() on that fd and
+ * stores the context in ring.notify. Subsequent ring_write() calls
+ * signal the eventfd, waking eventd without polling.
+ */
+static ssize_t events_write(struct file *file, const char __user *buf,
+			     size_t count, loff_t *ppos)
+{
+	char kbuf[16];
+	struct eventfd_ctx *ctx;
+	int fd;
+
+	if (count > 15)
+		return -EINVAL;
+	if (copy_from_user(kbuf, buf, count))
+		return -EFAULT;
+	kbuf[count] = '\0';
+
+	if (kstrtoint(kbuf, 10, &fd))
+		return -EINVAL;
+
+	/* Release previous eventfd context if any. */
+	if (ring.notify)
+		eventfd_ctx_put(ring.notify);
+
+	ctx = eventfd_ctx_fdget(fd);
+	if (IS_ERR(ctx)) {
+		ring.notify = NULL;
+		return PTR_ERR(ctx);
+	}
+
+	ring.notify = ctx;
+	return count;
+}
+
 static const struct file_operations events_fops = {
 	.read = events_read,
+	.write = events_write,
 	.llseek = generic_file_llseek,
 	/* TODO: .mmap = events_mmap for zero-copy drain */
 };
@@ -299,7 +362,7 @@ static int __init peios_events_init(void)
 	if (IS_ERR(peios_dir))
 		return PTR_ERR(peios_dir);
 
-	events_file = securityfs_create_file("events", 0444, peios_dir,
+	events_file = securityfs_create_file("events", 0644, peios_dir,
 					     NULL, &events_fops);
 	if (IS_ERR(events_file)) {
 		securityfs_remove(peios_dir);

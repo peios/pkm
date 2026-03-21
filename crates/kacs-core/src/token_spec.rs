@@ -137,6 +137,7 @@ pub fn parse_token_spec(data: &[u8]) -> Result<Option<Token>, AllocError> {
         owner_sid_index: 0,
         primary_group_index: 0,
         default_dacl: None, // authd can set via future spec v2 field
+        security_descriptor: None, // kernel generates after creation
 
         token_id: Luid(0), // kernel assigns real IDs
         auth_id: Luid(session_id), // links token to its auth session
