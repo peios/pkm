@@ -1,0 +1,40 @@
+From: Peios <kernel@peios.org>
+Subject: FACS patch 11: security_file_setxattr for fsetxattr/fremovexattr
+
+Add security_file_setxattr(file, name) called in the fsetxattr()
+and fremovexattr() paths while struct file * is available. KACS
+checks:
+- SD xattrs: unconditional deny (must use kacs_set_sd)
+- POSIX ACL xattrs: unconditional deny
+- Other xattrs: FILE_WRITE_EA in granted mask
+
+--- a/include/linux/lsm_hook_defs.h
++++ b/include/linux/lsm_hook_defs.h
+@@ -212,6 +212,7 @@
+ LSM_HOOK(int, 0, file_truncate, struct file *file)
++LSM_HOOK(int, 0, file_setxattr, struct file *file, const char *name)
+--- a/include/linux/security.h
++++ b/include/linux/security.h
+@@ -570,6 +570,7 @@
+ int security_file_truncate(struct file *file);
++int security_file_setxattr(struct file *file, const char *name);
+--- a/security/security.c
++++ b/security/security.c
+@@ -3200,6 +3200,11 @@
+ }
+
++int security_file_setxattr(struct file *file, const char *name)
++{
++	return call_int_hook(file_setxattr, file, name);
++}
++
+--- a/fs/xattr.c
++++ b/fs/xattr.c
+@@ -fsetxattr path @@
++	ret = security_file_setxattr(f, name);
++	if (ret)
++		return ret;
+@@ -fremovexattr path @@
++	ret = security_file_setxattr(f, name);
++	if (ret)
++		return ret;

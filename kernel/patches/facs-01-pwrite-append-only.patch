@@ -1,0 +1,104 @@
+From: Peios <kernel@peios.org>
+Subject: FACS patches 1-4: deny positioned writes on append-only fds
+
+The security_file_permission LSM hook cannot distinguish positioned
+writes (pwrite) from sequential writes (write) — both arrive as
+MAY_WRITE. A process with FILE_APPEND_DATA but not FILE_WRITE_DATA
+should be denied positioned writes, which allow arbitrary byte-
+position overwrites.
+
+Add a single new LSM hook security_file_deny_pwrite(file) that
+returns nonzero if positioned writes should be denied. Called from:
+  1. ksys_pwrite64() in fs/read_write.c
+  2. do_pwritev() in fs/read_write.c (covers pwritev/pwritev2)
+  3. io_write() in io_uring/rw.c
+  4. aio_write() in fs/aio.c
+
+Also denies RWF_NOAPPEND in pwritev2 (the flag explicitly requests
+ignoring O_APPEND).
+
+KACS implements this hook by checking the file blob's granted mask:
+deny if FILE_APPEND_DATA (0x0004) is set but FILE_WRITE_DATA (0x0002)
+is not.
+
+--- a/include/linux/lsm_hook_defs.h
++++ b/include/linux/lsm_hook_defs.h
+@@ -212,6 +212,7 @@
+ LSM_HOOK(int, 0, file_truncate, struct file *file)
++LSM_HOOK(int, 0, file_deny_pwrite, struct file *file)
+--- a/include/linux/security.h
++++ b/include/linux/security.h
+@@ -570,6 +570,7 @@
+ int security_file_truncate(struct file *file);
++int security_file_deny_pwrite(struct file *file);
+--- a/security/security.c
++++ b/security/security.c
+@@ -3200,6 +3200,11 @@
+ }
+
++int security_file_deny_pwrite(struct file *file)
++{
++	return call_int_hook(file_deny_pwrite, file);
++}
++
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -28,6 +28,7 @@
+ #include <linux/pagemap.h>
+ #include <linux/splice.h>
+ #include <linux/compat.h>
++#include <linux/security.h>
+ #include "internal.h"
+@@ -789,6 +790,9 @@
+ 	if (fd_empty(f))
+ 		return -EBADF;
++	if (security_file_deny_pwrite(fd_file(f)))
++		return -EPERM;
++
+ 	if (fd_file(f)->f_mode & FMODE_PWRITE)
+@@ -1148,6 +1152,13 @@
+ 	CLASS(fd, f)(fd);
+ 	if (!fd_empty(f)) {
+ 		ret = -ESPIPE;
++		/* FACS: deny positioned write on append-only fd. */
++		if (security_file_deny_pwrite(fd_file(f))) {
++			ret = -EPERM;
++			goto out;
++		}
++		/* FACS: deny RWF_NOAPPEND on append-only fd. */
++		if ((flags & RWF_NOAPPEND) && security_file_deny_pwrite(fd_file(f))) {
++			ret = -EPERM;
++			goto out;
++		}
+ 		if (fd_file(f)->f_mode & FMODE_PWRITE)
+--- a/io_uring/rw.c
++++ b/io_uring/rw.c
+@@ -19,6 +19,7 @@
+ #include "opdef.h"
+ #include "kbuf.h"
+ #include "rsrc.h"
++#include <linux/security.h>
+
+@@ -1140,6 +1141,10 @@
+ 	if (unlikely(ret))
+ 		return ret;
++	/* FACS: deny positioned write on append-only fd. */
++	if (security_file_deny_pwrite(req->file))
++		return -EPERM;
++
+ 	req->cqe.res = iov_iter_count(&io->iter);
+--- a/fs/aio.c
++++ b/fs/aio.c
+@@ -42,6 +42,7 @@
+ #include <linux/mount.h>
+ #include <linux/pseudo_fs.h>
+ #include <linux/pidfs.h>
++#include <linux/security.h>
+
+@@ -1630,6 +1631,10 @@
+ 	if (!ret) {
++		/* FACS: deny positioned write on append-only fd. */
++		if (security_file_deny_pwrite(file)) {
++			return -EPERM;
++		}
+ 		if (S_ISREG(file_inode(file)->i_mode))

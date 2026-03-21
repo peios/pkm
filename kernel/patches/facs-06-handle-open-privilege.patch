@@ -1,0 +1,51 @@
+From: Peios <kernel@peios.org>
+Subject: FACS patch 6: gate open_by_handle_at behind SeChangeNotifyPrivilege
+
+open_by_handle_at() reopens a file by opaque handle without path
+traversal — bypassing all directory-level access boundaries. FACS
+grants CAP_DAC_READ_SEARCH universally, removing the existing gate.
+
+Fix: add a new LSM hook security_file_handle_open() that fires
+before handle-based opens. KACS checks SeChangeNotifyPrivilege
+(the privilege that controls traverse bypass). A caller without
+it must be checked on every directory — allowing handle-based
+opens would violate that invariant.
+
+--- a/include/linux/lsm_hook_defs.h
++++ b/include/linux/lsm_hook_defs.h
+@@ -212,6 +212,7 @@
+ LSM_HOOK(int, 0, file_truncate, struct file *file)
++LSM_HOOK(int, 0, file_handle_open, void)
+--- a/include/linux/security.h
++++ b/include/linux/security.h
+@@ -570,6 +570,7 @@
+ int security_file_truncate(struct file *file);
++int security_file_handle_open(void);
+--- a/security/security.c
++++ b/security/security.c
+@@ -3200,6 +3200,11 @@
+ }
+
++int security_file_handle_open(void)
++{
++	return call_int_hook(file_handle_open);
++}
++
+--- a/fs/fhandle.c
++++ b/fs/fhandle.c
+@@ -13,6 +13,7 @@
+ #include <linux/personality.h>
+ #include <linux/uaccess.h>
+ #include <linux/compat.h>
++#include <linux/security.h>
+
+@@ -421,6 +422,10 @@
+ {
+ 	long retval;
+ 	struct path path __free(path_put) = {};
++
++	retval = security_file_handle_open();
++	if (retval)
++		return retval;
+
+ 	retval = handle_to_path(mountdirfd, ufh, &path, open_flag);

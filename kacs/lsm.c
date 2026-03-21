@@ -1584,6 +1584,98 @@ static const void *kacs_inode_get_sd(struct inode *inode)
 	return new_sd;
 }
 
+/* ── Dentry-based hook coordination (§14.3) ───────────────────────────── */
+
+/*
+ * Check if the task-local coordination marker matches this inode
+ * and operation class. If so, the file-based hook already decided —
+ * consume the marker and return true (skip re-evaluation).
+ */
+static inline bool kacs_consume_file_decision(struct inode *inode, u8 op)
+{
+	struct kacs_task_security *tsec = kacs_task(current);
+	if (tsec->file_decision_inode == inode &&
+	    tsec->file_decision_op == op) {
+		tsec->file_decision_inode = NULL;
+		tsec->file_decision_op = KACS_OP_NONE;
+		return true;
+	}
+	/* Clear unconditionally (one-shot per syscall). */
+	tsec->file_decision_inode = NULL;
+	tsec->file_decision_op = KACS_OP_NONE;
+	return false;
+}
+
+/* security_inode_setattr — path-based chmod/chown/utimensat/truncate (§14.3) */
+static int kacs_inode_setattr(struct mnt_idmap *idmap,
+			      struct dentry *dentry,
+			      struct iattr *attr)
+{
+	const void *sd;
+	const struct kacs_cred_security *ccred;
+	u32 desired = 0;
+	long long ret;
+
+	/* If the file-based hook already decided, skip. */
+	if (kacs_consume_file_decision(d_inode(dentry), KACS_OP_SETATTR))
+		return 0;
+
+	/* Path-based: run AccessCheck against the file's SD. */
+	if (attr->ia_valid & ATTR_MODE)
+		desired |= STD_WRITE_DAC;
+	if (attr->ia_valid & (ATTR_UID | ATTR_GID))
+		desired |= STD_WRITE_OWNER;
+	if (attr->ia_valid & ATTR_SIZE)
+		desired |= FILE_WRITE_DATA;
+	if (attr->ia_valid & (ATTR_ATIME | ATTR_MTIME))
+		desired |= FILE_WRITE_ATTRIBUTES;
+
+	if (!desired)
+		return 0;
+
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(d_inode(dentry));
+	if (!sd) {
+		rcu_read_unlock();
+		return -EACCES;
+	}
+	ccred = kacs_cred(current_cred());
+	ret = kacs_file_access_check(ccred->token, sd, desired);
+	rcu_read_unlock();
+
+	if (ret < 0 || ((u32)ret & desired) != desired)
+		return -EACCES;
+	return 0;
+}
+
+/* security_inode_getattr — path-based stat/lstat (§14.3) */
+static int kacs_inode_getattr(const struct path *path)
+{
+	const void *sd;
+	const struct kacs_cred_security *ccred;
+	long long ret;
+
+	/* If the file-based hook already decided, skip. */
+	if (kacs_consume_file_decision(d_inode(path->dentry), KACS_OP_GETATTR))
+		return 0;
+
+	/* Path-based: AccessCheck for FILE_READ_ATTRIBUTES. */
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(d_inode(path->dentry));
+	if (!sd) {
+		rcu_read_unlock();
+		return -EACCES;
+	}
+	ccred = kacs_cred(current_cred());
+	ret = kacs_file_access_check(ccred->token, sd,
+				     FILE_READ_ATTRIBUTES);
+	rcu_read_unlock();
+
+	if (ret < 0 || !((u32)ret & FILE_READ_ATTRIBUTES))
+		return -EACCES;
+	return 0;
+}
+
 /* ── inode_xattr_skipcap: skip kernel cap check for SD xattrs ─────────── */
 
 static int kacs_inode_xattr_skipcap(const char *name)
@@ -1604,6 +1696,7 @@ static int kacs_inode_setxattr(struct mnt_idmap *idmap,
 {
 	const void *sd;
 	const struct kacs_cred_security *ccred;
+	long long r;
 
 	/* Block raw writes to SD xattrs — must use kacs_set_sd. */
 	if (is_sd_xattr(name))
@@ -1613,18 +1706,19 @@ static int kacs_inode_setxattr(struct mnt_idmap *idmap,
 	if (is_posix_acl_xattr(name))
 		return -EACCES;
 
-	/* Other xattrs: AccessCheck for FILE_WRITE_EA (0x0010). */
+	/* If the file-based hook (patch 11) already decided, skip. */
+	if (kacs_consume_file_decision(d_inode(dentry), KACS_OP_SETXATTR))
+		return 0;
+
+	/* Path-based: AccessCheck for FILE_WRITE_EA. */
 	rcu_read_lock();
 	sd = kacs_inode_get_sd(d_inode(dentry));
 	if (sd) {
 		ccred = kacs_cred(current_cred());
-		{
-			long long r = kacs_file_access_check(
-				ccred->token, sd, FILE_WRITE_EA);
-			if (r < 0 || !((u32)r & FILE_WRITE_EA)) {
-				rcu_read_unlock();
-				return -EACCES;
-			}
+		r = kacs_file_access_check(ccred->token, sd, FILE_WRITE_EA);
+		if (r < 0 || !((u32)r & FILE_WRITE_EA)) {
+			rcu_read_unlock();
+			return -EACCES;
 		}
 	}
 	rcu_read_unlock();
@@ -1635,23 +1729,25 @@ static int kacs_inode_getxattr(struct dentry *dentry, const char *name)
 {
 	const void *sd;
 	const struct kacs_cred_security *ccred;
+	long long r;
 
 	/* Block raw reads of SD xattrs — must use kacs_get_sd. */
 	if (is_sd_xattr(name))
 		return -EACCES;
 
-	/* Other xattrs: AccessCheck for FILE_READ_EA (0x0008). */
+	/* If the file-based hook (patch 10) already decided, skip. */
+	if (kacs_consume_file_decision(d_inode(dentry), KACS_OP_GETXATTR))
+		return 0;
+
+	/* Path-based: AccessCheck for FILE_READ_EA. */
 	rcu_read_lock();
 	sd = kacs_inode_get_sd(d_inode(dentry));
 	if (sd) {
 		ccred = kacs_cred(current_cred());
-		{
-			long long r = kacs_file_access_check(
-				ccred->token, sd, FILE_READ_EA);
-			if (r < 0 || !((u32)r & FILE_READ_EA)) {
-				rcu_read_unlock();
-				return -EACCES;
-			}
+		r = kacs_file_access_check(ccred->token, sd, FILE_READ_EA);
+		if (r < 0 || !((u32)r & FILE_READ_EA)) {
+			rcu_read_unlock();
+			return -EACCES;
 		}
 	}
 	rcu_read_unlock();
@@ -1673,21 +1769,28 @@ static int kacs_inode_removexattr(struct mnt_idmap *idmap,
 	if (is_posix_acl_xattr(name))
 		return -EACCES;
 
-	/* Other xattrs: AccessCheck for FILE_WRITE_EA (0x0010). */
-	rcu_read_lock();
-	sd = kacs_inode_get_sd(d_inode(dentry));
-	if (sd) {
-		ccred = kacs_cred(current_cred());
-		{
-			long long r = kacs_file_access_check(
-				ccred->token, sd, FILE_WRITE_EA);
+	/* If the file-based hook (patch 11) already decided, skip. */
+	if (kacs_consume_file_decision(d_inode(dentry), KACS_OP_SETXATTR))
+		return 0;
+
+	/* Path-based: AccessCheck for FILE_WRITE_EA. */
+	{
+		const void *sd;
+		const struct kacs_cred_security *ccred;
+		long long r;
+		rcu_read_lock();
+		sd = kacs_inode_get_sd(d_inode(dentry));
+		if (sd) {
+			ccred = kacs_cred(current_cred());
+			r = kacs_file_access_check(ccred->token, sd,
+						   FILE_WRITE_EA);
 			if (r < 0 || !((u32)r & FILE_WRITE_EA)) {
 				rcu_read_unlock();
 				return -EACCES;
 			}
 		}
+		rcu_read_unlock();
 	}
-	rcu_read_unlock();
 	return 0;
 }
 
@@ -2159,6 +2262,155 @@ static int kacs_file_ioctl_compat(struct file *file, unsigned int cmd,
 	return kacs_file_ioctl(file, cmd, arg);
 }
 
+/* security_file_getattr — fd-based fstat/statx (§14.3 patch 9) */
+static int kacs_file_getattr(struct file *file)
+{
+	struct kacs_file_security *fsec = kacs_file(file);
+	struct kacs_task_security *tsec;
+
+	/* O_PATH fds: unconditionally allowed (§14.3). */
+	if (file->f_flags & O_PATH)
+		return 0;
+
+	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+		return 0;
+
+	if (!(fsec->granted & FILE_READ_ATTRIBUTES))
+		return -EACCES;
+
+	/* Set coordination marker for inode_getattr no-op. */
+	tsec = kacs_task(current);
+	tsec->file_decision_inode = file_inode(file);
+	tsec->file_decision_op = KACS_OP_GETATTR;
+	return 0;
+}
+
+/* security_file_getxattr — fd-based fgetxattr (§14.3 patch 10) */
+static int kacs_file_getxattr(struct file *file, const char *name)
+{
+	struct kacs_file_security *fsec = kacs_file(file);
+	struct kacs_task_security *tsec;
+
+	/* SD xattrs: unconditional deny (use kacs_get_sd). */
+	if (is_sd_xattr(name))
+		return -EACCES;
+
+	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+		return 0;
+
+	/* Other xattrs: FILE_READ_EA in granted mask. */
+	if (!(fsec->granted & FILE_READ_EA))
+		return -EACCES;
+
+	/* Set coordination marker for inode_getxattr no-op. */
+	tsec = kacs_task(current);
+	tsec->file_decision_inode = file_inode(file);
+	tsec->file_decision_op = KACS_OP_GETXATTR;
+	return 0;
+}
+
+/* security_file_setxattr — fd-based fsetxattr/fremovexattr (§14.3 patch 11) */
+static int kacs_file_setxattr_hook(struct file *file, const char *name)
+{
+	struct kacs_file_security *fsec = kacs_file(file);
+	struct kacs_task_security *tsec;
+
+	/* SD xattrs: unconditional deny. */
+	if (is_sd_xattr(name))
+		return -EACCES;
+
+	/* POSIX ACLs: unconditional deny. */
+	if (is_posix_acl_xattr(name))
+		return -EACCES;
+
+	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+		return 0;
+
+	/* Other xattrs: FILE_WRITE_EA in granted mask. */
+	if (!(fsec->granted & FILE_WRITE_EA))
+		return -EACCES;
+
+	/* Set coordination marker for inode_setxattr no-op. */
+	tsec = kacs_task(current);
+	tsec->file_decision_inode = file_inode(file);
+	tsec->file_decision_op = KACS_OP_SETXATTR;
+	return 0;
+}
+
+/* security_file_setattr — fd-based metadata ops (§14.3 patch 7) */
+static int kacs_file_setattr(struct file *file, struct iattr *attr)
+{
+	struct kacs_file_security *fsec = kacs_file(file);
+	struct kacs_task_security *tsec = kacs_task(current);
+
+	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+		return 0;
+
+	/* Map the iattr flags to KACS rights. */
+	if (attr->ia_valid & ATTR_MODE) {
+		/* fchmod → WRITE_DAC */
+		if (!(fsec->granted & STD_WRITE_DAC))
+			return -EACCES;
+	}
+	if (attr->ia_valid & (ATTR_UID | ATTR_GID)) {
+		/* fchown → WRITE_OWNER */
+		if (!(fsec->granted & STD_WRITE_OWNER))
+			return -EACCES;
+	}
+	if (attr->ia_valid & (ATTR_ATIME | ATTR_MTIME)) {
+		/* futimens → FILE_WRITE_ATTRIBUTES */
+		if (!(fsec->granted & FILE_WRITE_ATTRIBUTES))
+			return -EACCES;
+	}
+
+	/* Set the coordination marker so the subsequent
+	 * security_inode_setattr is a no-op for this inode. */
+	tsec->file_decision_inode = file_inode(file);
+	tsec->file_decision_op = KACS_OP_SETATTR;
+
+	return 0;
+}
+
+/* security_file_handle_open — gate open_by_handle_at (§14.3 patch 6) */
+static int kacs_file_handle_open(void)
+{
+	/* Require SeChangeNotifyPrivilege. A caller without traverse-bypass
+	 * privilege must be checked on every directory; handle-based opens
+	 * skip ALL directories, which would violate that invariant. */
+	const struct kacs_cred_security *sec =
+		kacs_cred(current_cred());
+	if (!sec->token)
+		return -EPERM;
+#define KACS_PRIV_CHANGE_NOTIFY (1ULL << 23)
+	if (!kacs_token_check_privilege(sec->token,
+					KACS_PRIV_CHANGE_NOTIFY))
+		return -EPERM;
+	return 0;
+}
+
+/* security_access_use_effective — skip credential swap in access() (§14.3 patch 5) */
+static int kacs_access_use_effective(void)
+{
+	/* KACS: always use effective token. Setuid does not exist on Peios.
+	 * access() answers "can the current effective identity access this?"
+	 * not "can the real identity access this?" */
+	return 1;
+}
+
+/* security_file_deny_pwrite — append-only enforcement (§14.3 patches 1-4) */
+static int kacs_file_deny_pwrite(struct file *file)
+{
+	struct kacs_file_security *fsec = kacs_file(file);
+	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+		return 0;
+	/* Deny if fd has FILE_APPEND_DATA but not FILE_WRITE_DATA.
+	 * This fd can only append, not overwrite at arbitrary positions. */
+	if ((fsec->granted & FILE_APPEND_DATA) &&
+	    !(fsec->granted & FILE_WRITE_DATA))
+		return -EPERM;
+	return 0;
+}
+
 /* security_file_receive — fd transfer (§14.3) */
 static int kacs_file_receive(struct file *file)
 {
@@ -2328,11 +2580,17 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(capset, kacs_capset),
 	LSM_HOOK_INIT(task_prctl, kacs_task_prctl),
 	LSM_HOOK_INIT(bprm_creds_from_file, kacs_bprm_creds_from_file),
+	LSM_HOOK_INIT(inode_setattr, kacs_inode_setattr),
+	LSM_HOOK_INIT(inode_getattr, kacs_inode_getattr),
 	LSM_HOOK_INIT(inode_xattr_skipcap, kacs_inode_xattr_skipcap),
 	LSM_HOOK_INIT(inode_setxattr, kacs_inode_setxattr),
 	LSM_HOOK_INIT(inode_getxattr, kacs_inode_getxattr),
 	LSM_HOOK_INIT(inode_removexattr, kacs_inode_removexattr),
 	LSM_HOOK_INIT(inode_set_acl, kacs_inode_set_acl),
+	LSM_HOOK_INIT(file_setattr, kacs_file_setattr),
+	LSM_HOOK_INIT(file_getattr, kacs_file_getattr),
+	LSM_HOOK_INIT(file_getxattr, kacs_file_getxattr),
+	LSM_HOOK_INIT(file_setxattr, kacs_file_setxattr_hook),
 	LSM_HOOK_INIT(inode_free_security_rcu, kacs_inode_free_security_rcu),
 	LSM_HOOK_INIT(inode_create, kacs_inode_create),
 	LSM_HOOK_INIT(inode_mkdir, kacs_inode_mkdir),
@@ -2348,6 +2606,9 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(file_fcntl, kacs_file_fcntl),
 	LSM_HOOK_INIT(file_ioctl, kacs_file_ioctl),
 	LSM_HOOK_INIT(file_ioctl_compat, kacs_file_ioctl_compat),
+	LSM_HOOK_INIT(file_handle_open, kacs_file_handle_open),
+	LSM_HOOK_INIT(access_use_effective, kacs_access_use_effective),
+	LSM_HOOK_INIT(file_deny_pwrite, kacs_file_deny_pwrite),
 	LSM_HOOK_INIT(file_receive, kacs_file_receive),
 	LSM_HOOK_INIT(file_free_security, kacs_file_free_security),
 };
