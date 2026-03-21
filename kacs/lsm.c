@@ -2005,11 +2005,24 @@ static int kacs_file_mprotect(struct vm_area_struct *vma,
 	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
 		return 0;
 
-	/* Prevents escalation: a PROT_READ mapping cannot be upgraded
-	 * to writable unless FILE_WRITE_DATA is in the granted mask. */
-	if ((prot & PROT_WRITE) && (vma->vm_flags & VM_SHARED)) {
-		if (!(fsec->granted & FILE_WRITE_DATA))
+	/* Same checks as mmap_file for the new protection flags.
+	 * Prevents escalation: PROT_NONE → PROT_READ/WRITE/EXEC
+	 * still requires the corresponding right in the granted mask. */
+	if (prot & PROT_READ) {
+		if (!(fsec->granted & FILE_READ_DATA))
 			return -EACCES;
+	}
+
+	if (prot & PROT_WRITE) {
+		if (vma->vm_flags & VM_SHARED) {
+			/* Shared writable — arbitrary byte writes. */
+			if (!(fsec->granted & FILE_WRITE_DATA))
+				return -EACCES;
+		} else {
+			/* Private writable (COW) — needs read access. */
+			if (!(fsec->granted & FILE_READ_DATA))
+				return -EACCES;
+		}
 	}
 
 	if (prot & PROT_EXEC) {
@@ -2130,10 +2143,19 @@ static int kacs_file_ioctl(struct file *file, unsigned int cmd,
 	return -EACCES;
 }
 
-/* security_file_ioctl_compat — same policy as file_ioctl */
+/* security_file_ioctl_compat — same policy, but handle 32-bit ioctl numbers */
 static int kacs_file_ioctl_compat(struct file *file, unsigned int cmd,
 				  unsigned long arg)
 {
+	/* Map compat ioctl numbers to their native equivalents. */
+	switch (cmd) {
+	case FS_IOC32_GETFLAGS:
+		cmd = FS_IOC_GETFLAGS;
+		break;
+	case FS_IOC32_SETFLAGS:
+		cmd = FS_IOC_SETFLAGS;
+		break;
+	}
 	return kacs_file_ioctl(file, cmd, arg);
 }
 
