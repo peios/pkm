@@ -637,6 +637,22 @@ pub extern "C" fn kacs_token_check_privilege(ptr: *const (), priv_mask: u64) -> 
     if kt.token.privileges.check(priv_mask) { 1 } else { 0 }
 }
 
+/// Returns the projected UID from the token.
+#[no_mangle]
+pub extern "C" fn kacs_token_get_projected_uid(ptr: *const ()) -> u32 {
+    if ptr.is_null() { return 65534; } // nobody
+    let kt = unsafe { KacsToken::from_ptr(ptr) };
+    kt.token.projected_uid
+}
+
+/// Returns the projected GID from the token.
+#[no_mangle]
+pub extern "C" fn kacs_token_get_projected_gid(ptr: *const ()) -> u32 {
+    if ptr.is_null() { return 65534; }
+    let kt = unsafe { KacsToken::from_ptr(ptr) };
+    kt.token.projected_gid
+}
+
 /// Returns the integrity level as a RID (0, 4096, 8192, 12288, 16384).
 /// Used by the integrity ceiling check in the two-gate model.
 #[no_mangle]

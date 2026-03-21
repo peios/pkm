@@ -26,6 +26,17 @@
 #include <linux/xattr.h>
 #include <net/sock.h>
 
+/* ── current_fsuid() projection support (§14.1 derooting, patch 14) ──── */
+
+#include <linux/jump_label.h>
+DEFINE_STATIC_KEY_FALSE(kacs_active_key);
+EXPORT_SYMBOL(kacs_active_key);
+
+/* Blob offset for the KACS cred blob — set at init, read by
+ * the patched current_fsuid()/current_fsgid() in cred.h. */
+unsigned int kacs_cred_blob_offset;
+EXPORT_SYMBOL(kacs_cred_blob_offset);
+
 /* ── Rust FFI declarations ─────────────────────────────────────────────── */
 
 extern int kacs_rust_init(void);
@@ -42,6 +53,8 @@ extern const void *kacs_token_deep_clone(const void *ptr,
 extern int kacs_token_get_type(const void *ptr);
 extern int kacs_token_get_impersonation_level(const void *ptr);
 extern int kacs_token_check_privilege(const void *ptr, u64 priv_mask);
+extern u32 kacs_token_get_projected_uid(const void *ptr);
+extern u32 kacs_token_get_projected_gid(const void *ptr);
 extern int kacs_token_get_integrity(const void *ptr);
 extern int kacs_token_same_user(const void *a, const void *b);
 extern void kacs_token_set_impersonation_level(const void *ptr, int level);
@@ -263,6 +276,8 @@ struct kacs_access_check_args {
 
 struct kacs_cred_security {
 	const void *token;	/* opaque pointer to Rust-managed token */
+	u32 projected_uid;	/* filesystem identity — used by current_fsuid() patch */
+	u32 projected_gid;	/* filesystem identity — used by current_fsgid() patch */
 };
 
 /* ── Socket blob ──────────────────────────────────────────────────────── */
@@ -361,6 +376,21 @@ static inline struct kacs_inode_security *kacs_inode(const struct inode *inode)
 static inline struct kacs_sock_security *kacs_sock(const struct sock *sk)
 {
 	return sk->sk_security + kacs_blob_sizes.lbs_sock;
+}
+
+/*
+ * Stamp projected UID/GID on the cred blob from the token.
+ * Called whenever a token is set on a credential.
+ */
+static void stamp_projected_ids(struct kacs_cred_security *sec)
+{
+	if (sec->token) {
+		sec->projected_uid = kacs_token_get_projected_uid(sec->token);
+		sec->projected_gid = kacs_token_get_projected_gid(sec->token);
+	} else {
+		sec->projected_uid = 65534; /* nobody */
+		sec->projected_gid = 65534;
+	}
 }
 
 /* ── C helpers for Rust (called from kacs_rust.rs via FFI) ─────────────── */
@@ -583,6 +613,7 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 		sec = kacs_cred(new_cred);
 		kacs_token_drop(sec->token);
 		sec->token = kacs_token_clone(tf->token);
+		stamp_projected_ids(sec);
 		commit_creds(new_cred);
 
 		/* Regenerate process SD if user SID changed (§15.2). */
@@ -742,6 +773,7 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 		sec = kacs_cred(new_cred);
 		kacs_token_drop(sec->token);
 		sec->token = kacs_token_clone(tf->token);
+		stamp_projected_ids(sec);
 
 		if (cap_to_id)
 			kacs_token_set_impersonation_level(sec->token,
@@ -844,6 +876,7 @@ static int kacs_cred_prepare(struct cred *new, const struct cred *old,
 		new_sec->token = kacs_token_clone(old_sec->token);
 	else
 		new_sec->token = NULL;
+	stamp_projected_ids(new_sec);
 
 	/* Compute capabilities from the token's privileges (§5.2.1). */
 	{
@@ -867,6 +900,7 @@ static void kacs_cred_transfer(struct cred *new, const struct cred *old)
 		new_sec->token = kacs_token_clone(old_sec->token);
 	else
 		new_sec->token = NULL;
+	stamp_projected_ids(new_sec);
 }
 
 static int kacs_cred_alloc_blank(struct cred *cred, gfp_t gfp)
@@ -1066,6 +1100,7 @@ static int kacs_bprm_creds_for_exec(struct linux_binprm *bprm)
 	if (sec->token != real_sec->token) {
 		kacs_token_drop(sec->token);
 		sec->token = kacs_token_clone(real_sec->token);
+		stamp_projected_ids(sec);
 	}
 
 	/* Compute full capability set from the primary token's privileges
@@ -3258,6 +3293,7 @@ SYSCALL_DEFINE1(kacs_impersonate_peer, int, conn_fd)
 	sec = kacs_cred(new_cred);
 	kacs_token_drop(sec->token);
 	sec->token = kacs_token_clone(peer_token);
+	stamp_projected_ids(sec);
 
 	/* Cap to Identification if either gate failed. */
 	if (cap_to_identification)
@@ -3980,6 +4016,7 @@ static int __init kacs_init(void)
 
 	sec = kacs_cred(current_cred());
 	sec->token = kacs_token_create_system();
+	stamp_projected_ids(sec);
 
 	/* Create session table + SYSTEM session (session 0). */
 	kacs_init_session_table(sec->token);
@@ -3997,7 +4034,11 @@ static int __init kacs_init(void)
 		cap_clear(init->cap_ambient);
 	}
 
-	pr_info("pkm: initialized (SYSTEM token + session 0 + DAC bypass caps)\n");
+	/* Enable the current_fsuid() projection (patch 14). */
+	kacs_cred_blob_offset = kacs_blob_sizes.lbs_cred;
+	static_branch_enable(&kacs_active_key);
+
+	pr_info("pkm: initialized (SYSTEM token + session 0 + DAC bypass + fsuid projection)\n");
 	return 0;
 }
 

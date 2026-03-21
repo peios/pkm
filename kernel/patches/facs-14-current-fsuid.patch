@@ -1,0 +1,51 @@
+From: Peios <kernel@peios.org>
+Subject: FACS patch 14: current_fsuid/fsgid projection from KACS token
+
+Replace current_fsuid() and current_fsgid() with versions that
+return the KACS projected UID/GID when CONFIG_SECURITY_PKM is
+enabled. The projected values live in the KACS credential blob,
+stamped when a token is installed. This makes filesystem identity
+(file ownership, quotas, user limits) follow the KACS token rather
+than the Linux credential's fsuid.
+
+The cosmetic uid/euid/suid fields remain fully user-controllable
+(CAP_SETUID is granted universally). getuid() returns whatever the
+process set. Only current_fsuid()/current_fsgid() return the
+projected values.
+
+Uses a static_key for zero overhead when KACS is not active.
+
+--- a/include/linux/cred.h
++++ b/include/linux/cred.h
+@@ -385,8 +385,32 @@
+ #define current_fsuid() 	(current_cred_xxx(fsuid))
+ #define current_fsgid() 	(current_cred_xxx(fsgid))
++
++#ifdef CONFIG_SECURITY_PKM
++#include <linux/jump_label.h>
++
++DECLARE_STATIC_KEY_FALSE(kacs_active_key);
++
++/* KACS projected UID/GID — stored in the KACS cred blob.
++ * The blob layout: [token_ptr:8][projected_uid:u32][projected_gid:u32].
++ * Blob offset is stored in a global set at KACS init. */
++extern unsigned int kacs_cred_blob_offset;
++
++static inline kuid_t kacs_current_fsuid(void)
++{
++	const void *blob = current_cred()->security + kacs_cred_blob_offset;
++	u32 uid = *(const u32 *)(blob + sizeof(void *));
++	return make_kuid(&init_user_ns, uid);
++}
++static inline kgid_t kacs_current_fsgid(void)
++{
++	const void *blob = current_cred()->security + kacs_cred_blob_offset;
++	u32 gid = *(const u32 *)(blob + sizeof(void *) + sizeof(u32));
++	return make_kgid(&init_user_ns, gid);
++}
++
++#undef current_fsuid
++#undef current_fsgid
++#define current_fsuid()	(static_branch_unlikely(&kacs_active_key) ? kacs_current_fsuid() : current_cred_xxx(fsuid))
++#define current_fsgid()	(static_branch_unlikely(&kacs_active_key) ? kacs_current_fsgid() : current_cred_xxx(fsgid))
++#endif /* CONFIG_SECURITY_PKM */
