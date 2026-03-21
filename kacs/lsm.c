@@ -37,6 +37,11 @@ extern int kacs_token_check_privilege(const void *ptr, u64 priv_mask);
 extern int kacs_token_get_integrity(const void *ptr);
 extern int kacs_token_same_user(const void *a, const void *b);
 extern void kacs_token_set_impersonation_level(const void *ptr, int level);
+extern const void *kacs_token_restrict(const void *ptr,
+				       u64 privs_to_delete,
+				       const void *data, u32 data_len,
+				       u32 num_deny_indices,
+				       u32 num_restrict_sids);
 extern long long kacs_create_session_impl(const void *data, size_t len);
 extern void kacs_init_session_table(const void *system_token);
 extern const void *kacs_token_from_spec(const void *data, size_t len);
@@ -67,6 +72,7 @@ extern long long kacs_access_check_sd(const void *token_ptr,
 #define KACS_IOC_ADJUST_PRIVS  _IOW(KACS_IOC_MAGIC, 1, struct kacs_adjust_privs_args)
 #define KACS_IOC_DUPLICATE     _IOWR(KACS_IOC_MAGIC, 2, struct kacs_duplicate_args)
 #define KACS_IOC_INSTALL       _IO(KACS_IOC_MAGIC, 3)
+#define KACS_IOC_RESTRICT      _IOWR(KACS_IOC_MAGIC, 4, struct kacs_restrict_args)
 
 /* Token query classes (§15.2) */
 #define TOKEN_CLASS_USER              1
@@ -120,6 +126,16 @@ struct kacs_duplicate_args {
 #define KACS_LEVEL_IDENTIFICATION  1
 #define KACS_LEVEL_IMPERSONATION   2
 #define KACS_LEVEL_DELEGATION      3
+
+struct kacs_restrict_args {
+	u64 privs_to_delete;	/* bitmask of privileges to permanently remove */
+	u32 num_deny_indices;	/* count of group indices to flip to deny-only */
+	u32 num_restrict_sids;	/* count of restricting SIDs to add */
+	u32 data_len;		/* total length of variable data */
+	u32 _pad;
+	u64 data_ptr;		/* userspace: u32[] deny indices, then binary SIDs */
+	s32 result_fd;		/* out: new token fd */
+};
 
 /* ── Credential blob ───────────────────────────────────────────────────── */
 
@@ -366,6 +382,51 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 
 		da.result_fd = fd;
 		if (copy_to_user((void __user *)arg, &da, sizeof(da)))
+			return -EFAULT;
+		return 0;
+	}
+	case KACS_IOC_RESTRICT: {
+		struct kacs_restrict_args ra;
+		const void *new_token;
+		void *data = NULL;
+		int fd;
+
+		if (!(tf->access_mask & KACS_TOKEN_DUPLICATE))
+			return -EACCES;
+
+		if (copy_from_user(&ra, (void __user *)arg, sizeof(ra)))
+			return -EFAULT;
+
+		if (ra.data_len > PAGE_SIZE)
+			return -EINVAL;
+
+		if (ra.data_len > 0 && ra.data_ptr) {
+			data = kmalloc(ra.data_len, GFP_KERNEL);
+			if (!data)
+				return -ENOMEM;
+			if (copy_from_user(data, (void __user *)ra.data_ptr,
+					   ra.data_len)) {
+				kfree(data);
+				return -EFAULT;
+			}
+		}
+
+		new_token = kacs_token_restrict(tf->token,
+						ra.privs_to_delete,
+						data, ra.data_len,
+						ra.num_deny_indices,
+						ra.num_restrict_sids);
+		kfree(data);
+
+		if (!new_token)
+			return -EINVAL;
+
+		fd = kacs_token_to_fd(new_token, KACS_TOKEN_ALL_ACCESS);
+		if (fd < 0)
+			return fd;
+
+		ra.result_fd = fd;
+		if (copy_to_user((void __user *)arg, &ra, sizeof(ra)))
 			return -EFAULT;
 		return 0;
 	}

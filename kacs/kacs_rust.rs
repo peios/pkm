@@ -519,6 +519,112 @@ pub extern "C" fn kacs_token_deep_clone(
     }
 }
 
+// ── Token restriction ─────────────────────────────────────────────────────
+
+/// Create a restricted (sandboxed) copy of a token.
+///
+/// data layout: [deny_indices: u32 × num_deny] [restrict_sids: binary SIDs]
+/// Each binary SID is self-describing (revision + sub_authority_count → length).
+///
+/// Returns a new token pointer or null on failure.
+#[no_mangle]
+pub extern "C" fn kacs_token_restrict(
+    ptr: *const (),
+    privs_to_delete: u64,
+    data: *const u8,
+    data_len: u32,
+    num_deny_indices: u32,
+    num_restrict_sids: u32,
+) -> *const () {
+    if ptr.is_null() {
+        return core::ptr::null();
+    }
+
+    let kt = unsafe { KacsToken::from_ptr(ptr) };
+    let mut token = match kt.token.try_clone() {
+        Ok(t) => t,
+        Err(_) => return core::ptr::null(),
+    };
+
+    // 1. Remove privileges
+    if privs_to_delete != 0 {
+        let mut mask = privs_to_delete;
+        while mask != 0 {
+            let bit = 1u64 << mask.trailing_zeros();
+            token.privileges.remove(bit);
+            mask &= !bit;
+        }
+    }
+
+    // Parse the variable data
+    let var_data = if !data.is_null() && data_len > 0 {
+        unsafe { core::slice::from_raw_parts(data, data_len as usize) }
+    } else {
+        &[]
+    };
+
+    // 2. Flip groups to deny-only
+    let deny_end = (num_deny_indices as usize) * 4;
+    if deny_end > var_data.len() {
+        return core::ptr::null();
+    }
+    for i in 0..num_deny_indices as usize {
+        let offset = i * 4;
+        let idx = u32::from_le_bytes([
+            var_data[offset], var_data[offset + 1],
+            var_data[offset + 2], var_data[offset + 3],
+        ]) as usize;
+        if idx >= token.groups.len() {
+            return core::ptr::null();
+        }
+        // Clear ENABLED, set USE_FOR_DENY_ONLY
+        token.groups[idx].attributes &= !kacs_core::group::SE_GROUP_ENABLED;
+        token.groups[idx].attributes |= kacs_core::group::SE_GROUP_USE_FOR_DENY_ONLY;
+    }
+
+    // 3. Parse and add restricting SIDs
+    if num_restrict_sids > 0 {
+        let mut sids = match compat::vec_with_capacity::<kacs_core::group::GroupEntry>(
+            num_restrict_sids as usize,
+        ) {
+            Ok(v) => v,
+            Err(_) => return core::ptr::null(),
+        };
+
+        let mut pos = deny_end;
+        for _ in 0..num_restrict_sids {
+            if pos + 8 > var_data.len() {
+                return core::ptr::null();
+            }
+            let sub_count = var_data[pos + 1] as usize;
+            let sid_len = 8 + sub_count * 4;
+            if pos + sid_len > var_data.len() {
+                return core::ptr::null();
+            }
+            let sid = match kacs_core::sid::Sid::from_bytes(&var_data[pos..pos + sid_len]) {
+                Some(s) => s,
+                None => return core::ptr::null(),
+            };
+            if compat::vec_push(&mut sids, kacs_core::group::GroupEntry::new(
+                sid,
+                kacs_core::group::SE_GROUP_MANDATORY
+                    | kacs_core::group::SE_GROUP_ENABLED_BY_DEFAULT
+                    | kacs_core::group::SE_GROUP_ENABLED,
+            )).is_err() {
+                return core::ptr::null();
+            }
+            pos += sid_len;
+        }
+
+        token.restricted_sids = Some(sids);
+    }
+
+    match KacsToken::new(token) {
+        Ok(ptr) => ptr,
+        Err(_) => core::ptr::null(),
+    }
+}
+
 // ── Session management ────────────────────────────────────────────────────
 
 /// Global session table. Initialized at boot.
