@@ -1606,6 +1606,28 @@ static inline bool kacs_consume_file_decision(struct inode *inode, u8 op)
 	return false;
 }
 
+/* security_inode_readlink — readlink on symlink's own SD (§14.3) */
+static int kacs_inode_readlink(struct dentry *dentry)
+{
+	const void *sd;
+	const struct kacs_cred_security *ccred;
+	long long r;
+
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(d_inode(dentry));
+	if (!sd) {
+		rcu_read_unlock();
+		return -EACCES;
+	}
+	ccred = kacs_cred(current_cred());
+	r = kacs_file_access_check(ccred->token, sd, FILE_READ_DATA);
+	rcu_read_unlock();
+
+	if (r < 0 || !((u32)r & FILE_READ_DATA))
+		return -EACCES;
+	return 0;
+}
+
 /* security_inode_setattr — path-based chmod/chown/utimensat/truncate (§14.3) */
 static int kacs_inode_setattr(struct mnt_idmap *idmap,
 			      struct dentry *dentry,
@@ -2580,6 +2602,7 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(capset, kacs_capset),
 	LSM_HOOK_INIT(task_prctl, kacs_task_prctl),
 	LSM_HOOK_INIT(bprm_creds_from_file, kacs_bprm_creds_from_file),
+	LSM_HOOK_INIT(inode_readlink, kacs_inode_readlink),
 	LSM_HOOK_INIT(inode_setattr, kacs_inode_setattr),
 	LSM_HOOK_INIT(inode_getattr, kacs_inode_getattr),
 	LSM_HOOK_INIT(inode_xattr_skipcap, kacs_inode_xattr_skipcap),

@@ -1,26 +1,25 @@
 From: Peios <kernel@peios.org>
 Subject: FACS patch 11: security_file_setxattr for fsetxattr/fremovexattr
 
-Add security_file_setxattr(file, name) called in the fsetxattr()
-and fremovexattr() paths while struct file * is available. KACS
-checks:
-- SD xattrs: unconditional deny (must use kacs_set_sd)
-- POSIX ACL xattrs: unconditional deny
-- Other xattrs: FILE_WRITE_EA in granted mask
+Add security_file_setxattr(file, name) hook called in
+file_setxattr() and file_removexattr() before the dentry-based
+path. KACS checks: SD xattrs → deny. POSIX ACLs → deny.
+Others → FILE_WRITE_EA in granted.
 
 --- a/include/linux/lsm_hook_defs.h
 +++ b/include/linux/lsm_hook_defs.h
 @@ -212,6 +212,7 @@
  LSM_HOOK(int, 0, file_truncate, struct file *file)
 +LSM_HOOK(int, 0, file_setxattr, struct file *file, const char *name)
+ LSM_HOOK(int, 0, task_alloc, struct task_struct *task,
 --- a/include/linux/security.h
 +++ b/include/linux/security.h
-@@ -570,6 +570,7 @@
+@@ -490,6 +490,7 @@
  int security_file_truncate(struct file *file);
 +int security_file_setxattr(struct file *file, const char *name);
 --- a/security/security.c
 +++ b/security/security.c
-@@ -3200,6 +3200,11 @@
+@@ -2670,6 +2670,11 @@
  }
 
 +int security_file_setxattr(struct file *file, const char *name)
@@ -30,11 +29,21 @@ checks:
 +
 --- a/fs/xattr.c
 +++ b/fs/xattr.c
-@@ -fsetxattr path @@
-+	ret = security_file_setxattr(f, name);
-+	if (ret)
-+		return ret;
-@@ -fremovexattr path @@
-+	ret = security_file_setxattr(f, name);
-+	if (ret)
-+		return ret;
+@@ -640,6 +640,9 @@
+ int file_setxattr(struct file *f, struct kernel_xattr_ctx *ctx)
+ {
++	int serr = security_file_setxattr(f, ctx->kname->name);
++	if (serr)
++		return serr;
+ 	int error = mnt_want_write_file(f);
+
+ 	if (!error) {
+@@ -1026,6 +1029,9 @@
+ static int file_removexattr(struct file *f, struct xattr_name *kname)
+ {
++	int serr = security_file_setxattr(f, kname->name);
++	if (serr)
++		return serr;
+ 	int error = mnt_want_write_file(f);
+
+ 	if (!error) {

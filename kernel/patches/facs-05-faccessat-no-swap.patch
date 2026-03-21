@@ -1,28 +1,25 @@
 From: Peios <kernel@peios.org>
 Subject: FACS patch 5: skip credential swap in do_faccessat
 
-On Peios, setuid does not exist. Identity is token-based. The
-credential swap in access()/faccessat() causes FACS to evaluate
-the primary token instead of the effective token, inverting the
-intent when a service is impersonating a client.
-
-Fix: add a new LSM hook security_access_use_effective() that
-returns nonzero if access() should use the effective token
-(skip the credential swap). KACS always returns true.
+On Peios, setuid does not exist. The credential swap in access()
+evaluates the primary token instead of the effective token. Add
+security_access_use_effective() hook — returns nonzero to skip
+the swap. KACS always returns true.
 
 --- a/include/linux/lsm_hook_defs.h
 +++ b/include/linux/lsm_hook_defs.h
 @@ -212,6 +212,7 @@
  LSM_HOOK(int, 0, file_truncate, struct file *file)
 +LSM_HOOK(int, 0, access_use_effective, void)
+ LSM_HOOK(int, 0, task_alloc, struct task_struct *task,
 --- a/include/linux/security.h
 +++ b/include/linux/security.h
-@@ -570,6 +570,7 @@
+@@ -490,6 +490,7 @@
  int security_file_truncate(struct file *file);
 +int security_access_use_effective(void);
 --- a/security/security.c
 +++ b/security/security.c
-@@ -3200,6 +3200,11 @@
+@@ -2670,6 +2670,11 @@
  }
 
 +int security_access_use_effective(void)
@@ -32,11 +29,9 @@ returns nonzero if access() should use the effective token
 +
 --- a/fs/open.c
 +++ b/fs/open.c
-@@ -389,6 +389,10 @@
- {
+@@ -391,6 +391,9 @@
  	const struct cred *cred;
 
-+	/* KACS: always use effective token (§14.3 patch 5). */
 +	if (security_access_use_effective())
 +		return false;
 +

@@ -1,25 +1,24 @@
 From: Peios <kernel@peios.org>
 Subject: FACS patch 9: security_file_getattr for fstat/statx
 
-Add security_file_getattr(file) called in the fstat() and
-statx(AT_EMPTY_PATH) paths while struct file * is available.
-KACS checks FILE_READ_ATTRIBUTES in the granted mask.
-O_PATH fds are unconditionally allowed (fstat on O_PATH is
-permitted per FACS §14.3).
+Add security_file_getattr(file) hook called in vfs_fstat() before
+resolving to vfs_getattr. KACS checks FILE_READ_ATTRIBUTES in the
+granted mask. O_PATH fds are unconditionally allowed.
 
 --- a/include/linux/lsm_hook_defs.h
 +++ b/include/linux/lsm_hook_defs.h
 @@ -212,6 +212,7 @@
  LSM_HOOK(int, 0, file_truncate, struct file *file)
 +LSM_HOOK(int, 0, file_getattr, struct file *file)
+ LSM_HOOK(int, 0, task_alloc, struct task_struct *task,
 --- a/include/linux/security.h
 +++ b/include/linux/security.h
-@@ -570,6 +570,7 @@
+@@ -490,6 +490,7 @@
  int security_file_truncate(struct file *file);
 +int security_file_getattr(struct file *file);
 --- a/security/security.c
 +++ b/security/security.c
-@@ -3200,6 +3200,11 @@
+@@ -2670,6 +2670,11 @@
  }
 
 +int security_file_getattr(struct file *file)
@@ -29,7 +28,12 @@ permitted per FACS §14.3).
 +
 --- a/fs/stat.c
 +++ b/fs/stat.c
-@@ -vfs_fstat/vfs_statx_fd @@
-+	ret = security_file_getattr(f);
+@@ -278,6 +278,9 @@
+ 	CLASS(fd_raw, f)(fd);
+ 	if (fd_empty(f))
+ 		return -EBADF;
++	ret = security_file_getattr(fd_file(f));
 +	if (ret)
 +		return ret;
+ 	return vfs_getattr(&fd_file(f)->f_path, stat, STATX_BASIC_STATS, 0);
+ }

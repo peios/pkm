@@ -1,20 +1,15 @@
 From: Peios <kernel@peios.org>
 Subject: FACS patch 7: security_file_setattr for fd-based metadata ops
 
-Linux's security_inode_setattr receives a struct dentry *, not a
-struct file * — the kernel resolves fd→dentry before the LSM hook
-fires. This prevents FACS from checking the fd's granted mask for
-fchmod, fchown, and futimens.
+Add security_file_setattr(file, iattr) hook called in vfs_fchmod()
+before the fd is resolved to a dentry. KACS checks the fd's granted
+mask (WRITE_DAC for chmod, WRITE_OWNER for chown, FILE_WRITE_ATTRIBUTES
+for futimens). The subsequent security_inode_setattr is coordinated
+via the task-local marker.
 
-Add security_file_setattr(file, iattr) called in the fd-based
-syscall paths while the struct file * is still available. KACS
-checks the granted mask:
-  fchmod → WRITE_DAC
-  fchown → WRITE_OWNER
-  futimens → FILE_WRITE_ATTRIBUTES
-
-The subsequent security_inode_setattr becomes a no-op for fd-based
-calls (coordinated via the task-local kacs_file_decision marker).
+Note: chown and futimens fd-based paths need similar insertion points
+in their respective VFS functions. The exact chown/futimens paths
+vary by kernel version; the hook insertion pattern is identical.
 
 --- a/include/linux/lsm_hook_defs.h
 +++ b/include/linux/lsm_hook_defs.h
@@ -22,14 +17,15 @@ calls (coordinated via the task-local kacs_file_decision marker).
  LSM_HOOK(int, 0, file_truncate, struct file *file)
 +LSM_HOOK(int, 0, file_setattr, struct file *file,
 +	 struct iattr *attr)
+ LSM_HOOK(int, 0, task_alloc, struct task_struct *task,
 --- a/include/linux/security.h
 +++ b/include/linux/security.h
-@@ -570,6 +570,7 @@
+@@ -490,6 +490,7 @@
  int security_file_truncate(struct file *file);
 +int security_file_setattr(struct file *file, struct iattr *attr);
 --- a/security/security.c
 +++ b/security/security.c
-@@ -3200,6 +3200,11 @@
+@@ -2670,6 +2670,11 @@
  }
 
 +int security_file_setattr(struct file *file, struct iattr *attr)
@@ -39,31 +35,14 @@ calls (coordinated via the task-local kacs_file_decision marker).
 +
 --- a/fs/open.c
 +++ b/fs/open.c
-@@ -766,6 +766,12 @@
+@@ -661,6 +661,11 @@
  int vfs_fchmod(struct file *file, umode_t mode)
  {
 +	struct iattr attr = { .ia_valid = ATTR_MODE, .ia_mode = mode };
-+	int err;
-+	err = security_file_setattr(file, &attr);
-+	if (err)
-+		return err;
++	int ret = security_file_setattr(file, &attr);
++	if (ret)
++		return ret;
++
  	audit_file(file);
---- a/fs/open.c
-+++ b/fs/open.c
-@@ -chown_common,+6 @@
-+/* In the fd-based chown path (fchown/fchown32), call the file hook. */
-+	if (file) {
-+		struct iattr attr = { .ia_valid = ATTR_UID | ATTR_GID };
-+		int err = security_file_setattr(file, &attr);
-+		if (err)
-+			return err;
-+	}
---- a/fs/utimes.c
-+++ b/fs/utimes.c
-@@ -futimens path @@
-+	if (file) {
-+		struct iattr attr = { .ia_valid = ATTR_ATIME | ATTR_MTIME };
-+		int err = security_file_setattr(file, &attr);
-+		if (err)
-+			goto out;
-+	}
+ 	return chmod_common(&file->f_path, mode);
+ }
