@@ -61,6 +61,7 @@ extern long long kacs_format_sessions(char *buf, size_t len);
 extern void kacs_session_addref(u64 session_id);
 extern void kacs_session_release(u64 session_id);
 extern const void *kacs_token_from_spec(const void *data, size_t len);
+extern const void *kacs_sd_from_bytes(const void *data, size_t len);
 extern long long kacs_access_check_sd(const void *token_ptr,
 				      const void *sd_data, size_t sd_len,
 				      u32 desired, u32 generic_read,
@@ -160,11 +161,23 @@ struct kacs_duplicate_args {
 };
 
 /* Privilege bitmasks (must match kacs-core privilege::bits) */
+/* KACS privilege bit positions (must match kacs-core privilege.rs) */
 #define KACS_PRIV_CREATE_TOKEN         (1ULL << 2)
 #define KACS_PRIV_ASSIGN_PRIMARY_TOKEN (1ULL << 3)
+#define KACS_PRIV_LOCK_MEMORY          (1ULL << 4)
+#define KACS_PRIV_INCREASE_QUOTA       (1ULL << 5)
 #define KACS_PRIV_TCB                  (1ULL << 7)
+#define KACS_PRIV_SECURITY             (1ULL << 8)
+#define KACS_PRIV_LOAD_DRIVER          (1ULL << 10)
+#define KACS_PRIV_SYSTEM_PROFILE       (1ULL << 11)
+#define KACS_PRIV_SYSTEMTIME           (1ULL << 12)
+#define KACS_PRIV_PROFILE_SINGLE       (1ULL << 13)
+#define KACS_PRIV_INCREASE_BASE_PRIO   (1ULL << 14)
+#define KACS_PRIV_SHUTDOWN             (1ULL << 19)
 #define KACS_PRIV_DEBUG                (1ULL << 20)
+#define KACS_PRIV_AUDIT                (1ULL << 21)
 #define KACS_PRIV_IMPERSONATE          (1ULL << 29)
+#define KACS_PRIV_BIND_PRIVILEGED_PORT (1ULL << 63)
 
 /* Impersonation levels */
 #define KACS_LEVEL_ANONYMOUS       0
@@ -811,6 +824,16 @@ static int kacs_cred_prepare(struct cred *new, const struct cred *old,
 	else
 		new_sec->token = NULL;
 
+	/* Compute capabilities from the token's privileges (§5.2.1). */
+	{
+		kernel_cap_t caps;
+		compute_caps_from_token(new_sec->token, &caps);
+		new->cap_effective = caps;
+		new->cap_permitted = caps;
+		new->cap_inheritable = caps;
+		cap_clear(new->cap_ambient);
+	}
+
 	return 0;
 }
 
@@ -1024,13 +1047,18 @@ static int kacs_bprm_creds_for_exec(struct linux_binprm *bprm)
 		sec->token = kacs_token_clone(real_sec->token);
 	}
 
-	/* Reassert DAC bypass caps (§15.7 step 5). */
-	cap_raise(bprm->cred->cap_effective, CAP_DAC_OVERRIDE);
-	cap_raise(bprm->cred->cap_effective, CAP_DAC_READ_SEARCH);
-	cap_raise(bprm->cred->cap_effective, CAP_FOWNER);
-	cap_raise(bprm->cred->cap_effective, CAP_CHOWN);
-	cap_raise(bprm->cred->cap_effective, CAP_SETUID);
-	cap_raise(bprm->cred->cap_effective, CAP_SETGID);
+	/* Compute full capability set from the primary token's privileges
+	 * (§14.1). This runs BEFORE commoncap — commoncap may modify caps
+	 * (file capabilities, setuid), which bprm_creds_from_file then
+	 * suppresses by recomputing from the token. */
+	{
+		kernel_cap_t caps;
+		compute_caps_from_token(sec->token, &caps);
+		bprm->cred->cap_effective = caps;
+		bprm->cred->cap_permitted = caps;
+		bprm->cred->cap_inheritable = caps;
+		cap_clear(bprm->cred->cap_ambient);
+	}
 
 	return 0;
 }
@@ -1189,6 +1217,85 @@ static inline bool is_posix_acl_xattr(const char *name)
 	    || !strcmp(name, "system.posix_acl_default");
 }
 
+/* ── Capability switchboard (§5.2.1) ──────────────────────────────────── */
+/*
+ * Classifies all 41 Linux capabilities into ALLOW, PRIVILEGE, or DENY.
+ * Called from security_capable hook. Replaces blanket capability grants
+ * with per-capability KACS privilege evaluation.
+ *
+ * ALLOW: DAC bypass caps — always granted (KACS enforces via LSM hooks)
+ * PRIVILEGE: mapped to a KACS privilege — granted iff token holds it
+ * DENY: dead under KACS — always denied
+ */
+static int kacs_capable(const struct cred *cred,
+			struct user_namespace *ns,
+			int cap, unsigned int opts)
+{
+	const struct kacs_cred_security *sec = kacs_cred(cred);
+	u64 required_priv;
+
+	switch (cap) {
+	/* ALLOW — DAC bypass, KACS enforces via other LSM hooks */
+	case CAP_CHOWN:
+	case CAP_DAC_OVERRIDE:
+	case CAP_DAC_READ_SEARCH:
+	case CAP_FOWNER:
+	case CAP_FSETID:
+	case CAP_KILL:
+	case CAP_SETGID:
+	case CAP_SETUID:
+	case CAP_NET_BROADCAST:
+	case CAP_IPC_OWNER:
+	case CAP_LEASE:
+		return 0; /* always allow */
+
+	/* PRIVILEGE — mapped to KACS privileges */
+	case CAP_LINUX_IMMUTABLE:  required_priv = KACS_PRIV_TCB; break;
+	case CAP_NET_BIND_SERVICE: required_priv = KACS_PRIV_BIND_PRIVILEGED_PORT; break;
+	case CAP_NET_ADMIN:        required_priv = KACS_PRIV_TCB; break;
+	case CAP_NET_RAW:          required_priv = KACS_PRIV_TCB; break;
+	case CAP_IPC_LOCK:         required_priv = KACS_PRIV_LOCK_MEMORY; break;
+	case CAP_SYS_MODULE:       required_priv = KACS_PRIV_LOAD_DRIVER; break;
+	case CAP_SYS_RAWIO:        required_priv = KACS_PRIV_TCB; break;
+	case CAP_SYS_CHROOT:       required_priv = KACS_PRIV_TCB; break;
+	case CAP_SYS_PTRACE:       required_priv = KACS_PRIV_DEBUG; break;
+	case CAP_SYS_PACCT:        required_priv = KACS_PRIV_TCB; break;
+	case CAP_SYS_ADMIN:        required_priv = KACS_PRIV_TCB; break;
+	case CAP_SYS_BOOT:         required_priv = KACS_PRIV_SHUTDOWN; break;
+	case CAP_SYS_NICE:         required_priv = KACS_PRIV_INCREASE_BASE_PRIO; break;
+	case CAP_SYS_RESOURCE:     required_priv = KACS_PRIV_INCREASE_QUOTA; break;
+	case CAP_SYS_TIME:         required_priv = KACS_PRIV_SYSTEMTIME; break;
+	case CAP_SYS_TTY_CONFIG:   required_priv = KACS_PRIV_TCB; break;
+	case CAP_MKNOD:            required_priv = KACS_PRIV_TCB; break;
+	case CAP_AUDIT_WRITE:      required_priv = KACS_PRIV_AUDIT; break;
+	case CAP_AUDIT_CONTROL:    required_priv = KACS_PRIV_SECURITY; break;
+	case CAP_MAC_ADMIN:        required_priv = KACS_PRIV_SECURITY; break;
+	case CAP_SYSLOG:           required_priv = KACS_PRIV_TCB; break;
+	case CAP_WAKE_ALARM:       required_priv = KACS_PRIV_TCB; break;
+	case CAP_BLOCK_SUSPEND:    required_priv = KACS_PRIV_TCB; break;
+	case CAP_AUDIT_READ:       required_priv = KACS_PRIV_SECURITY; break;
+	case CAP_PERFMON:          required_priv = KACS_PRIV_PROFILE_SINGLE; break;
+	case CAP_BPF:              required_priv = KACS_PRIV_TCB; break;
+	case CAP_CHECKPOINT_RESTORE: required_priv = KACS_PRIV_TCB; break;
+
+	/* DENY — dead or dangerous under KACS */
+	case CAP_SETPCAP:
+	case CAP_SETFCAP:
+	case CAP_MAC_OVERRIDE:
+		return -EPERM;
+
+	/* Unknown capability — fail-closed */
+	default:
+		return -EPERM;
+	}
+
+	/* PRIVILEGE path: check if the token holds the required privilege. */
+	if (!sec->token)
+		return -EPERM;
+	return kacs_token_check_privilege(sec->token, required_priv)
+		? 0 : -EPERM;
+}
+
 /* ── The six implementation capabilities (§14.1) ─────────────────────── */
 
 static void assert_impl_caps(struct cred *cred)
@@ -1252,6 +1359,71 @@ static int kacs_task_prctl(int option, unsigned long arg2,
 
 /* ── bprm_creds_from_file: suppress setuid/setgid/filecaps (§14.1) ───── */
 
+/*
+ * Compute the full Linux capability set from a KACS token's privileges.
+ * This is the capability switchboard materialized: ALLOW caps are always
+ * set, PRIVILEGE caps are set if the token holds the mapped privilege,
+ * DENY caps are never set. Called during exec (bprm_creds_from_file)
+ * and credential preparation (cred_prepare).
+ */
+static void compute_caps_from_token(const void *token, kernel_cap_t *caps)
+{
+	cap_clear(*caps);
+
+	/* ALLOW — always set (DAC bypass, KACS enforces via LSM hooks) */
+	cap_raise(*caps, CAP_CHOWN);
+	cap_raise(*caps, CAP_DAC_OVERRIDE);
+	cap_raise(*caps, CAP_DAC_READ_SEARCH);
+	cap_raise(*caps, CAP_FOWNER);
+	cap_raise(*caps, CAP_FSETID);
+	cap_raise(*caps, CAP_KILL);
+	cap_raise(*caps, CAP_SETGID);
+	cap_raise(*caps, CAP_SETUID);
+	cap_raise(*caps, CAP_NET_BROADCAST);
+	cap_raise(*caps, CAP_IPC_OWNER);
+	cap_raise(*caps, CAP_LEASE);
+
+	if (!token)
+		return;
+
+	/* PRIVILEGE — set if token holds the corresponding KACS privilege */
+#define MAP_PRIV(linux_cap, kacs_priv) \
+	if (kacs_token_check_privilege(token, (kacs_priv))) \
+		cap_raise(*caps, (linux_cap))
+
+	MAP_PRIV(CAP_LINUX_IMMUTABLE,  KACS_PRIV_TCB);
+	MAP_PRIV(CAP_NET_BIND_SERVICE, KACS_PRIV_BIND_PRIVILEGED_PORT);
+	MAP_PRIV(CAP_NET_ADMIN,        KACS_PRIV_TCB);
+	MAP_PRIV(CAP_NET_RAW,          KACS_PRIV_TCB);
+	MAP_PRIV(CAP_IPC_LOCK,         KACS_PRIV_LOCK_MEMORY);
+	MAP_PRIV(CAP_SYS_MODULE,       KACS_PRIV_LOAD_DRIVER);
+	MAP_PRIV(CAP_SYS_RAWIO,        KACS_PRIV_TCB);
+	MAP_PRIV(CAP_SYS_CHROOT,       KACS_PRIV_TCB);
+	MAP_PRIV(CAP_SYS_PTRACE,       KACS_PRIV_DEBUG);
+	MAP_PRIV(CAP_SYS_PACCT,        KACS_PRIV_TCB);
+	MAP_PRIV(CAP_SYS_ADMIN,        KACS_PRIV_TCB);
+	MAP_PRIV(CAP_SYS_BOOT,         KACS_PRIV_SHUTDOWN);
+	MAP_PRIV(CAP_SYS_NICE,         KACS_PRIV_INCREASE_BASE_PRIO);
+	MAP_PRIV(CAP_SYS_RESOURCE,     KACS_PRIV_INCREASE_QUOTA);
+	MAP_PRIV(CAP_SYS_TIME,         KACS_PRIV_SYSTEMTIME);
+	MAP_PRIV(CAP_SYS_TTY_CONFIG,   KACS_PRIV_TCB);
+	MAP_PRIV(CAP_MKNOD,            KACS_PRIV_TCB);
+	MAP_PRIV(CAP_AUDIT_WRITE,      KACS_PRIV_AUDIT);
+	MAP_PRIV(CAP_AUDIT_CONTROL,    KACS_PRIV_SECURITY);
+	MAP_PRIV(CAP_MAC_ADMIN,        KACS_PRIV_SECURITY);
+	MAP_PRIV(CAP_SYSLOG,           KACS_PRIV_TCB);
+	MAP_PRIV(CAP_WAKE_ALARM,       KACS_PRIV_TCB);
+	MAP_PRIV(CAP_BLOCK_SUSPEND,    KACS_PRIV_TCB);
+	MAP_PRIV(CAP_AUDIT_READ,       KACS_PRIV_SECURITY);
+	MAP_PRIV(CAP_PERFMON,          KACS_PRIV_PROFILE_SINGLE);
+	MAP_PRIV(CAP_BPF,              KACS_PRIV_TCB);
+	MAP_PRIV(CAP_CHECKPOINT_RESTORE, KACS_PRIV_TCB);
+
+#undef MAP_PRIV
+
+	/* DENY — CAP_SETPCAP, CAP_SETFCAP, CAP_MAC_OVERRIDE: never set */
+}
+
 static int kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 				     const struct file *file)
 {
@@ -1261,11 +1433,12 @@ static int kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 	 * 2. Elevated creds for setuid/setgid binaries
 	 * 3. Modified the capability bounding/ambient sets
 	 *
-	 * KACS suppresses all three: Peios has no setuid, no file caps,
-	 * and no ambient cap grants. Re-assert implementation caps to
-	 * ensure commoncap's processing doesn't break the DAC bypass.
+	 * KACS suppresses all three and recomputes the capability set from
+	 * scratch based on the token's KACS privileges via the switchboard.
 	 */
 	struct cred *cred = bprm->cred;
+	const struct kacs_cred_security *sec = kacs_cred(cred);
+	kernel_cap_t intended;
 
 	/* Suppress setuid/setgid elevation. */
 	cred->euid = cred->uid;
@@ -1275,22 +1448,92 @@ static int kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 	cred->fsuid = cred->uid;
 	cred->fsgid = cred->gid;
 
-	/* Suppress file capabilities — clear and reassert only impl caps. */
-	cap_clear(cred->cap_effective);
-	cap_clear(cred->cap_permitted);
-	assert_impl_caps(cred);
+	/* Recompute the entire cap set from the token's privileges.
+	 * This replaces whatever commoncap set (file caps, setuid, etc.). */
+	compute_caps_from_token(sec->token, &intended);
+	cred->cap_effective = intended;
+	cred->cap_permitted = intended;
+	cred->cap_inheritable = intended;
 
-	/* Preserve inheritable (for impl caps). */
-	cap_raise(cred->cap_inheritable, CAP_DAC_OVERRIDE);
-	cap_raise(cred->cap_inheritable, CAP_DAC_READ_SEARCH);
-	cap_raise(cred->cap_inheritable, CAP_FOWNER);
-	cap_raise(cred->cap_inheritable, CAP_CHOWN);
-	cap_raise(cred->cap_inheritable, CAP_SETUID);
-	cap_raise(cred->cap_inheritable, CAP_SETGID);
-
-	/* Clear ambient set entirely. */
+	/* Clear ambient set entirely — KACS owns the capability set. */
 	cap_clear(cred->cap_ambient);
 
+	return 0;
+}
+
+/* ── SD cache population (§14.2) ──────────────────────────────────────── */
+
+/*
+ * Lazily populate the inode's SD cache from the xattr. Uses the
+ * internal __vfs_getxattr path (bypasses security_inode_getxattr — we
+ * cannot gate our own cache population behind READ_CONTROL).
+ *
+ * Returns the cached SD (RCU-protected, caller must hold rcu_read_lock).
+ * Returns NULL if the file has no SD (missing or corrupt).
+ */
+static const void *kacs_inode_get_sd(struct inode *inode)
+{
+	struct kacs_inode_security *isec = kacs_inode(inode);
+	const void *sd;
+	void *buf;
+	ssize_t len;
+	const void *new_sd;
+	const void *old;
+
+	/* Fast path: cache already populated. */
+	sd = rcu_dereference(isec->sd_cache);
+	if (sd)
+		return sd;
+
+	/* Slow path: read xattr and parse. */
+	if (!inode->i_op || !inode->i_op->getxattr)
+		return NULL;
+
+	/* First try the standard KACS xattr, then NTFS. */
+	buf = kmalloc(65536, GFP_KERNEL);
+	if (!buf)
+		return NULL;
+
+	len = __vfs_getxattr(
+		d_find_any_alias(inode), inode,
+		KACS_SD_XATTR, buf, 65536);
+	if (len <= 0) {
+		len = __vfs_getxattr(
+			d_find_any_alias(inode), inode,
+			KACS_SD_XATTR_NTFS, buf, 65536);
+	}
+
+	if (len <= 0) {
+		kfree(buf);
+		return NULL; /* no SD on this file */
+	}
+
+	/* Parse the binary SD via Rust. */
+	new_sd = kacs_sd_from_bytes(buf, (size_t)len);
+	kfree(buf);
+
+	if (!new_sd)
+		return NULL; /* corrupt SD — fail-closed */
+
+	/* Race-safe install: first writer wins. */
+	old = cmpxchg(&isec->sd_cache, NULL, new_sd);
+	if (old) {
+		/* Another thread won the race — use theirs, free ours. */
+		kacs_proc_sd_drop(new_sd);
+		return old;
+	}
+
+	return new_sd;
+}
+
+/* ── inode_xattr_skipcap: skip kernel cap check for SD xattrs ─────────── */
+
+static int kacs_inode_xattr_skipcap(const char *name)
+{
+	/* Tell the kernel to skip CAP_SYS_ADMIN check for our xattrs.
+	 * KACS policy (inode_setxattr/getxattr) handles authorization. */
+	if (is_sd_xattr(name))
+		return 1;
 	return 0;
 }
 
@@ -1301,6 +1544,9 @@ static int kacs_inode_setxattr(struct mnt_idmap *idmap,
 			       const char *name, const void *value,
 			       size_t size, int flags)
 {
+	const void *sd;
+	const struct kacs_cred_security *ccred;
+
 	/* Block raw writes to SD xattrs — must use kacs_set_sd. */
 	if (is_sd_xattr(name))
 		return -EACCES;
@@ -1309,19 +1555,40 @@ static int kacs_inode_setxattr(struct mnt_idmap *idmap,
 	if (is_posix_acl_xattr(name))
 		return -EACCES;
 
-	/* Other xattrs: check FILE_WRITE_EA via AccessCheck on the SD.
-	 * TODO: implement when SD cache is populated. For now, allow. */
+	/* Other xattrs: AccessCheck for FILE_WRITE_EA (0x0010). */
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(d_inode(dentry));
+	if (sd) {
+		ccred = kacs_cred(current_cred());
+		if (!kacs_check_proc_sd(ccred->token, sd, 0x0010)) {
+			rcu_read_unlock();
+			return -EACCES;
+		}
+	}
+	rcu_read_unlock();
 	return 0;
 }
 
 static int kacs_inode_getxattr(struct dentry *dentry, const char *name)
 {
+	const void *sd;
+	const struct kacs_cred_security *ccred;
+
 	/* Block raw reads of SD xattrs — must use kacs_get_sd. */
 	if (is_sd_xattr(name))
 		return -EACCES;
 
-	/* Other xattrs: check FILE_READ_EA.
-	 * TODO: implement when SD cache is populated. For now, allow. */
+	/* Other xattrs: AccessCheck for FILE_READ_EA (0x0008). */
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(d_inode(dentry));
+	if (sd) {
+		ccred = kacs_cred(current_cred());
+		if (!kacs_check_proc_sd(ccred->token, sd, 0x0008)) {
+			rcu_read_unlock();
+			return -EACCES;
+		}
+	}
+	rcu_read_unlock();
 	return 0;
 }
 
@@ -1329,6 +1596,9 @@ static int kacs_inode_removexattr(struct mnt_idmap *idmap,
 				  struct dentry *dentry,
 				  const char *name)
 {
+	const void *sd;
+	const struct kacs_cred_security *ccred;
+
 	/* SD xattrs cannot be removed — only replaced via kacs_set_sd. */
 	if (is_sd_xattr(name))
 		return -EACCES;
@@ -1337,8 +1607,17 @@ static int kacs_inode_removexattr(struct mnt_idmap *idmap,
 	if (is_posix_acl_xattr(name))
 		return -EACCES;
 
-	/* Other xattrs: check FILE_WRITE_EA.
-	 * TODO: implement when SD cache is populated. For now, allow. */
+	/* Other xattrs: AccessCheck for FILE_WRITE_EA (0x0010). */
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(d_inode(dentry));
+	if (sd) {
+		ccred = kacs_cred(current_cred());
+		if (!kacs_check_proc_sd(ccred->token, sd, 0x0010)) {
+			rcu_read_unlock();
+			return -EACCES;
+		}
+	}
+	rcu_read_unlock();
 	return 0;
 }
 
@@ -1401,9 +1680,11 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(sk_free_security, kacs_sk_free_security),
 	LSM_HOOK_INIT(unix_stream_connect, kacs_unix_stream_connect),
 	/* FACS — File Access Control Shim (§14) */
+	LSM_HOOK_INIT(capable, kacs_capable),
 	LSM_HOOK_INIT(capset, kacs_capset),
 	LSM_HOOK_INIT(task_prctl, kacs_task_prctl),
 	LSM_HOOK_INIT(bprm_creds_from_file, kacs_bprm_creds_from_file),
+	LSM_HOOK_INIT(inode_xattr_skipcap, kacs_inode_xattr_skipcap),
 	LSM_HOOK_INIT(inode_setxattr, kacs_inode_setxattr),
 	LSM_HOOK_INIT(inode_getxattr, kacs_inode_getxattr),
 	LSM_HOOK_INIT(inode_removexattr, kacs_inode_removexattr),
@@ -2104,23 +2385,17 @@ static int __init kacs_init(void)
 	/* Create session table + SYSTEM session (session 0). */
 	kacs_init_session_table(sec->token);
 
-	/* Assert DAC bypass capabilities on init_cred (§15.7 step 5).
-	 * These make UID-based permission checks inert — KACS replaces
-	 * them with SD-based evaluation. */
+	/* Compute capabilities from SYSTEM token's privileges via the
+	 * switchboard (§5.2.1). SYSTEM has all privileges, so all ALLOW
+	 * and PRIVILEGE caps are set. */
 	{
 		struct cred *init = (struct cred *)current_cred();
-		cap_raise(init->cap_effective, CAP_DAC_OVERRIDE);
-		cap_raise(init->cap_effective, CAP_DAC_READ_SEARCH);
-		cap_raise(init->cap_effective, CAP_FOWNER);
-		cap_raise(init->cap_effective, CAP_CHOWN);
-		cap_raise(init->cap_effective, CAP_SETUID);
-		cap_raise(init->cap_effective, CAP_SETGID);
-		cap_raise(init->cap_inheritable, CAP_DAC_OVERRIDE);
-		cap_raise(init->cap_inheritable, CAP_DAC_READ_SEARCH);
-		cap_raise(init->cap_inheritable, CAP_FOWNER);
-		cap_raise(init->cap_inheritable, CAP_CHOWN);
-		cap_raise(init->cap_inheritable, CAP_SETUID);
-		cap_raise(init->cap_inheritable, CAP_SETGID);
+		kernel_cap_t caps;
+		compute_caps_from_token(sec->token, &caps);
+		init->cap_effective = caps;
+		init->cap_permitted = caps;
+		init->cap_inheritable = caps;
+		cap_clear(init->cap_ambient);
 	}
 
 	pr_info("pkm: initialized (SYSTEM token + session 0 + DAC bypass caps)\n");

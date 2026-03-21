@@ -854,6 +854,32 @@ pub extern "C" fn kacs_proc_sd_drop(ptr: *const ()) {
     drop(unsafe { compat::Vec::from_raw_parts(ptr_mut, 1, 1) });
 }
 
+/// Parse a binary SD (self-relative format) and return a heap-allocated
+/// parsed SecurityDescriptor. Used by the inode SD cache.
+/// Returns an opaque pointer on success, null on parse failure or OOM.
+#[no_mangle]
+pub extern "C" fn kacs_sd_from_bytes(data: *const u8, len: usize) -> *const () {
+    if data.is_null() || len == 0 || len > 65536 {
+        return core::ptr::null();
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(data, len) };
+    let sd = match kacs_core::sd::SecurityDescriptor::from_bytes(bytes) {
+        Ok(Some(sd)) => sd,
+        _ => return core::ptr::null(),
+    };
+    // Heap-allocate via Vec trick
+    let mut v = match compat::vec_with_capacity::<kacs_core::sd::SecurityDescriptor>(1) {
+        Ok(v) => v,
+        Err(_) => return core::ptr::null(),
+    };
+    if compat::vec_push(&mut v, sd).is_err() {
+        return core::ptr::null();
+    }
+    let ptr = v.as_ptr();
+    core::mem::forget(v);
+    ptr as *const ()
+}
+
 /// Build the default process SD from the creator's token.
 fn build_default_proc_sd(
     token: &Token,
