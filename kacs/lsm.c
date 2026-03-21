@@ -62,6 +62,13 @@ extern void kacs_session_addref(u64 session_id);
 extern void kacs_session_release(u64 session_id);
 extern const void *kacs_token_from_spec(const void *data, size_t len);
 extern const void *kacs_sd_from_bytes(const void *data, size_t len);
+extern int kacs_sd_to_bytes(const void *sd_ptr, void *buf, int buf_len);
+extern const void *kacs_create_inherited_sd(const void *token_ptr,
+					    const void *parent_sd_ptr,
+					    int is_container);
+extern long long kacs_file_access_check(const void *token_ptr,
+					const void *sd_ptr,
+					u32 desired);
 extern long long kacs_access_check_sd(const void *token_ptr,
 				      const void *sd_data, size_t sd_len,
 				      u32 desired, u32 generic_read,
@@ -1200,6 +1207,29 @@ static int kacs_unix_stream_connect(struct sock *sock,
  * FACS — File Access Control Shim (§14)
  * ══════════════════════════════════════════════════════════════════════════ */
 
+/* ── File access right constants (§9.2) ────────────────────────────────── */
+
+#define FILE_READ_DATA          0x0001
+#define FILE_LIST_DIRECTORY     0x0001  /* alias for directories */
+#define FILE_WRITE_DATA         0x0002
+#define FILE_ADD_FILE           0x0002  /* alias for directories */
+#define FILE_APPEND_DATA        0x0004
+#define FILE_ADD_SUBDIRECTORY   0x0004  /* alias for directories */
+#define FILE_READ_EA            0x0008
+#define FILE_WRITE_EA           0x0010
+#define FILE_EXECUTE            0x0020
+#define FILE_TRAVERSE           0x0020  /* alias for directories */
+#define FILE_DELETE_CHILD       0x0040
+#define FILE_READ_ATTRIBUTES    0x0080
+#define FILE_WRITE_ATTRIBUTES   0x0100
+
+/* Standard rights */
+#define STD_DELETE              0x00010000
+#define STD_READ_CONTROL        0x00020000
+#define STD_WRITE_DAC           0x00040000
+#define STD_WRITE_OWNER         0x00080000
+#define STD_SYNCHRONIZE         0x00100000
+
 /* ── SD xattr names ───────────────────────────────────────────────────── */
 
 #define KACS_SD_XATTR		"security.peios.sd"
@@ -1560,9 +1590,13 @@ static int kacs_inode_setxattr(struct mnt_idmap *idmap,
 	sd = kacs_inode_get_sd(d_inode(dentry));
 	if (sd) {
 		ccred = kacs_cred(current_cred());
-		if (!kacs_check_proc_sd(ccred->token, sd, 0x0010)) {
-			rcu_read_unlock();
-			return -EACCES;
+		{
+			long long r = kacs_file_access_check(
+				ccred->token, sd, FILE_WRITE_EA);
+			if (r < 0 || !((u32)r & FILE_WRITE_EA)) {
+				rcu_read_unlock();
+				return -EACCES;
+			}
 		}
 	}
 	rcu_read_unlock();
@@ -1583,9 +1617,13 @@ static int kacs_inode_getxattr(struct dentry *dentry, const char *name)
 	sd = kacs_inode_get_sd(d_inode(dentry));
 	if (sd) {
 		ccred = kacs_cred(current_cred());
-		if (!kacs_check_proc_sd(ccred->token, sd, 0x0008)) {
-			rcu_read_unlock();
-			return -EACCES;
+		{
+			long long r = kacs_file_access_check(
+				ccred->token, sd, FILE_READ_EA);
+			if (r < 0 || !((u32)r & FILE_READ_EA)) {
+				rcu_read_unlock();
+				return -EACCES;
+			}
 		}
 	}
 	rcu_read_unlock();
@@ -1612,9 +1650,13 @@ static int kacs_inode_removexattr(struct mnt_idmap *idmap,
 	sd = kacs_inode_get_sd(d_inode(dentry));
 	if (sd) {
 		ccred = kacs_cred(current_cred());
-		if (!kacs_check_proc_sd(ccred->token, sd, 0x0010)) {
-			rcu_read_unlock();
-			return -EACCES;
+		{
+			long long r = kacs_file_access_check(
+				ccred->token, sd, FILE_WRITE_EA);
+			if (r < 0 || !((u32)r & FILE_WRITE_EA)) {
+				rcu_read_unlock();
+				return -EACCES;
+			}
 		}
 	}
 	rcu_read_unlock();
@@ -1659,6 +1701,302 @@ static void kacs_file_free_security(struct file *file)
 	/* No dynamic allocation — blob is zeroed by LSM framework. */
 }
 
+/* ── Legacy open compatibility mapping (§14) ──────────────────────────── */
+
+/*
+ * Compute core and compat rights for a legacy open() from its flags.
+ * Returns 0 on success with *core and *compat populated.
+ * Returns negative errno on invalid flag combinations.
+ */
+static int legacy_open_rights(struct file *file, u32 *core, u32 *compat)
+{
+	unsigned int flags = file->f_flags;
+	int mode = flags & O_ACCMODE;
+	bool is_dir = S_ISDIR(file_inode(file)->i_mode);
+	bool is_special = S_ISCHR(file_inode(file)->i_mode)
+			|| S_ISBLK(file_inode(file)->i_mode)
+			|| S_ISFIFO(file_inode(file)->i_mode)
+			|| S_ISSOCK(file_inode(file)->i_mode);
+
+	*core = FILE_READ_ATTRIBUTES; /* always core */
+	*compat = 0;
+
+	if (is_dir) {
+		/* Linux rejects opening directories for writing (EISDIR).
+		 * Only O_RDONLY is valid for legacy directory opens.
+		 * The VFS already enforces this, but we check for safety. */
+		if (mode != O_RDONLY)
+			return -EISDIR;
+		if (flags & (O_APPEND | O_TRUNC))
+			return -EISDIR;
+
+		*core |= FILE_TRAVERSE;
+
+		/* Directory compat */
+		*compat = FILE_LIST_DIRECTORY /* readdir */
+			| FILE_READ_EA
+			| STD_READ_CONTROL
+			| FILE_WRITE_ATTRIBUTES
+			| FILE_WRITE_EA
+			| STD_WRITE_DAC
+			| STD_WRITE_OWNER
+			| STD_SYNCHRONIZE;
+
+		return 0;
+	}
+
+	/* Regular files, devices, FIFOs, sockets */
+	if (mode == O_RDONLY) {
+		*core |= FILE_READ_DATA;
+	} else if (mode == O_WRONLY) {
+		*core |= FILE_WRITE_DATA;
+	} else if (mode == O_RDWR) {
+		*core |= FILE_READ_DATA | FILE_WRITE_DATA;
+	} else if (mode == 3) {
+		/* ioctl-only mode (nonstandard) — only valid on special files */
+		if (!is_special)
+			return -EINVAL;
+		/* No data rights in core — set IOCTL_ONLY flag later */
+		*core = FILE_READ_ATTRIBUTES;
+		*compat = STD_READ_CONTROL | STD_SYNCHRONIZE;
+		return 0;
+	}
+
+	/* O_APPEND modifier */
+	if (flags & O_APPEND) {
+		*core &= ~FILE_WRITE_DATA;
+		*core |= FILE_APPEND_DATA;
+	}
+
+	/* O_TRUNC modifier — truncation is overwrite */
+	if (flags & O_TRUNC)
+		*core |= FILE_WRITE_DATA;
+
+	/* Non-directory compat */
+	*compat = FILE_READ_EA
+		| STD_READ_CONTROL
+		| FILE_WRITE_ATTRIBUTES
+		| FILE_WRITE_EA
+		| STD_WRITE_DAC
+		| STD_WRITE_OWNER
+		| STD_SYNCHRONIZE;
+
+	/* O_APPEND compat: include FILE_WRITE_DATA so ftruncate() works
+	 * if the SD grants it (§14 O_APPEND and ftruncate note). */
+	if (flags & O_APPEND)
+		*compat |= FILE_WRITE_DATA;
+
+	/* FILE_EXECUTE in compat for regular files — enables fexecve()
+	 * (patch 15 checks this in granted mask). */
+	if (S_ISREG(file_inode(file)->i_mode))
+		*compat |= FILE_EXECUTE;
+
+	return 0;
+}
+
+/* ── security_file_open — open-time AccessCheck (§14.3) ───────────────── */
+
+static int kacs_file_open(struct file *file)
+{
+	struct kacs_file_security *fsec = kacs_file(file);
+	struct kacs_inode_security *isec = kacs_inode(file_inode(file));
+	const struct kacs_cred_security *ccred;
+	const void *sd;
+	u32 core, compat, requested, granted;
+	int ret;
+	long long ac_ret;
+
+	/* O_PATH fds: VFS handles them before this hook fires — we never
+	 * see them here. But guard defensively. */
+	if (file->f_flags & O_PATH)
+		return 0;
+
+	/* Get the inode's SD from cache. */
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(file_inode(file));
+	if (!sd) {
+		rcu_read_unlock();
+		/* No SD — deny mode: deny access.
+		 * TODO: synthesize mode for foreign mounts (Phase G). */
+		return -EACCES;
+	}
+
+	/* Compute core + compat from open flags. */
+	ret = legacy_open_rights(file, &core, &compat);
+	if (ret) {
+		rcu_read_unlock();
+		return ret;
+	}
+
+	/* Construct the full requested mask. */
+	requested = core | compat;
+
+	/* Run AccessCheck against the cached SD. Returns the granted mask
+	 * (subset of requested that the SD allows). Uses MAXIMUM_ALLOWED
+	 * internally to get the full grantable set. */
+	ccred = kacs_cred(current_cred());
+	ac_ret = kacs_file_access_check(ccred->token, sd, requested);
+	rcu_read_unlock();
+
+	if (ac_ret < 0)
+		return -EACCES;
+
+	granted = (u32)ac_ret;
+
+	/* Subset mode: core must be fully present. */
+	if ((granted & core) != core)
+		return -EACCES;
+
+	/* O_NOATIME requires FILE_WRITE_ATTRIBUTES (§14.3). */
+	if ((file->f_flags & O_NOATIME) &&
+	    !(granted & FILE_WRITE_ATTRIBUTES))
+		return -EACCES;
+
+	/* Stamp the granted mask on the file blob. */
+	fsec->granted = granted;
+	fsec->flags = KACS_FILE_FACS_MANAGED;
+
+	/* Access mode 3 on special files: set ioctl-only flag. */
+	if ((file->f_flags & O_ACCMODE) == 3)
+		fsec->flags |= KACS_FILE_IOCTL_ONLY;
+
+	return 0;
+}
+
+/* ── Inode creation hooks — parent directory rights (§14.3) ───────────── */
+
+/*
+ * Check an access right against a parent directory's SD.
+ * Used by inode_create, inode_mkdir, inode_mknod, inode_symlink.
+ */
+/*
+ * Check an access right against a directory's SD using the
+ * DIRECTORY_GENERIC_MAPPING. Returns 0 on success, -EACCES on deny.
+ */
+static int check_parent_sd(struct inode *dir, u32 right)
+{
+	const void *sd;
+	const struct kacs_cred_security *ccred;
+	long long ret;
+
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(dir);
+	if (!sd) {
+		rcu_read_unlock();
+		return -EACCES; /* deny mode: no SD on parent */
+	}
+	ccred = kacs_cred(current_cred());
+	ret = kacs_file_access_check(ccred->token, sd, right);
+	rcu_read_unlock();
+
+	if (ret < 0)
+		return -EACCES;
+	if (((u32)ret & right) != right)
+		return -EACCES;
+	return 0;
+}
+
+static int kacs_inode_create(struct inode *dir, struct dentry *dentry,
+			     umode_t mode)
+{
+	return check_parent_sd(dir, FILE_ADD_FILE);
+}
+
+static int kacs_inode_mkdir(struct inode *dir, struct dentry *dentry,
+			    umode_t mode)
+{
+	return check_parent_sd(dir, FILE_ADD_SUBDIRECTORY);
+}
+
+static int kacs_inode_mknod(struct inode *dir, struct dentry *dentry,
+			    umode_t mode, dev_t dev)
+{
+	return check_parent_sd(dir, FILE_ADD_FILE);
+}
+
+static int kacs_inode_symlink(struct inode *dir, struct dentry *dentry,
+			      const char *old_name)
+{
+	return check_parent_sd(dir, FILE_ADD_FILE);
+}
+
+/* ── SD inheritance on file creation (§9.5, §14.3) ────────────────────── */
+
+/*
+ * inode_init_security: compute inherited SD for a newly created inode.
+ * Returns the SD xattr to be written atomically by the VFS.
+ */
+static int kacs_inode_init_security(struct inode *inode,
+				    struct inode *dir,
+				    const struct qstr *qstr,
+				    struct xattr *xattrs,
+				    int *xattr_count)
+{
+	const void *parent_sd;
+	const struct kacs_cred_security *ccred;
+	const void *inherited_sd;
+	const void *sd_bytes;
+	int sd_len;
+
+	if (!xattrs) {
+		/* Caller just wants count. */
+		if (xattr_count)
+			*xattr_count = 1;
+		return 0;
+	}
+
+	/* Get parent directory's SD for inheritance. */
+	rcu_read_lock();
+	parent_sd = kacs_inode_get_sd(dir);
+	rcu_read_unlock();
+
+	/* Compute inherited SD via Rust (§9.5 algorithm).
+	 * Uses parent SD + creator's token. */
+	ccred = kacs_cred(current_cred());
+	inherited_sd = kacs_create_inherited_sd(ccred->token, parent_sd,
+						S_ISDIR(inode->i_mode));
+
+	if (!inherited_sd) {
+		/* Inheritance failed — no SD for this file.
+		 * In deny mode, this file will be inaccessible. */
+		if (xattr_count)
+			*xattr_count = 0;
+		return -ENOMEM;
+	}
+
+	/* Serialize the inherited SD to binary for the xattr. */
+	sd_len = kacs_sd_to_bytes(inherited_sd, NULL, 0);
+	if (sd_len <= 0) {
+		kacs_proc_sd_drop(inherited_sd);
+		if (xattr_count)
+			*xattr_count = 0;
+		return -ENOMEM;
+	}
+
+	xattrs[0].value = kmalloc(sd_len, GFP_KERNEL);
+	if (!xattrs[0].value) {
+		kacs_proc_sd_drop(inherited_sd);
+		if (xattr_count)
+			*xattr_count = 0;
+		return -ENOMEM;
+	}
+
+	kacs_sd_to_bytes(inherited_sd, xattrs[0].value, sd_len);
+	xattrs[0].name = KACS_SD_XATTR;
+	xattrs[0].value_len = sd_len;
+
+	/* Also install the parsed SD in the inode cache immediately. */
+	{
+		struct kacs_inode_security *isec = kacs_inode(inode);
+		rcu_assign_pointer(isec->sd_cache, inherited_sd);
+		/* inherited_sd is now owned by the cache — don't free. */
+	}
+
+	if (xattr_count)
+		*xattr_count = 1;
+	return 0;
+}
+
 /* ── Hook table ────────────────────────────────────────────────────────── */
 
 static struct security_hook_list kacs_hooks[] __ro_after_init = {
@@ -1690,6 +2028,12 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_removexattr, kacs_inode_removexattr),
 	LSM_HOOK_INIT(inode_set_acl, kacs_inode_set_acl),
 	LSM_HOOK_INIT(inode_free_security_rcu, kacs_inode_free_security_rcu),
+	LSM_HOOK_INIT(inode_create, kacs_inode_create),
+	LSM_HOOK_INIT(inode_mkdir, kacs_inode_mkdir),
+	LSM_HOOK_INIT(inode_mknod, kacs_inode_mknod),
+	LSM_HOOK_INIT(inode_symlink, kacs_inode_symlink),
+	LSM_HOOK_INIT(inode_init_security, kacs_inode_init_security),
+	LSM_HOOK_INIT(file_open, kacs_file_open),
 	LSM_HOOK_INIT(file_free_security, kacs_file_free_security),
 };
 

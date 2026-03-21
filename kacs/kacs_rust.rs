@@ -880,6 +880,81 @@ pub extern "C" fn kacs_sd_from_bytes(data: *const u8, len: usize) -> *const () {
     ptr as *const ()
 }
 
+/// Serialize a parsed SD back to self-relative binary format.
+/// If buf is null, returns the required size.
+/// Otherwise writes to buf (up to buf_len) and returns bytes written.
+/// Returns negative on error.
+#[no_mangle]
+pub extern "C" fn kacs_sd_to_bytes(sd_ptr: *const (), buf: *mut u8, buf_len: c_int) -> c_int {
+    if sd_ptr.is_null() {
+        return -22; // -EINVAL
+    }
+    let sd = unsafe { &*(sd_ptr as *const kacs_core::sd::SecurityDescriptor) };
+    let bytes = match sd.to_bytes() {
+        Ok(b) => b,
+        Err(_) => return -12, // -ENOMEM
+    };
+    if buf.is_null() || buf_len <= 0 {
+        return bytes.len() as c_int;
+    }
+    let copy_len = core::cmp::min(bytes.len(), buf_len as usize);
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, copy_len);
+    }
+    copy_len as c_int
+}
+
+/// Compute an inherited SD for a newly created inode (§9.5).
+/// parent_sd_ptr may be null (no parent SD to inherit from).
+/// Returns a heap-allocated parsed SD, or null on failure.
+#[no_mangle]
+pub extern "C" fn kacs_create_inherited_sd(
+    token_ptr: *const (),
+    parent_sd_ptr: *const (),
+    is_container: c_int,
+) -> *const () {
+    if token_ptr.is_null() {
+        return core::ptr::null();
+    }
+    let kt = unsafe { KacsToken::from_ptr(token_ptr) };
+
+    let parent_sd = if parent_sd_ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { &*(parent_sd_ptr as *const kacs_core::sd::SecurityDescriptor) })
+    };
+
+    let object_class = if is_container != 0 {
+        kacs_core::inherit::ObjectClass::Container
+    } else {
+        kacs_core::inherit::ObjectClass::NonContainer
+    };
+
+    let sd = match kacs_core::inherit::compute_inherited_sd(
+        parent_sd,
+        None, // no creator-supplied SD
+        &kt.token,
+        object_class,
+        &kacs_core::mask::FILE_GENERIC_MAPPING,
+        None, // no child type GUID (files are untyped)
+    ) {
+        Ok(sd) => sd,
+        Err(_) => return core::ptr::null(),
+    };
+
+    // Heap-allocate via Vec trick
+    let mut v = match compat::vec_with_capacity::<kacs_core::sd::SecurityDescriptor>(1) {
+        Ok(v) => v,
+        Err(_) => return core::ptr::null(),
+    };
+    if compat::vec_push(&mut v, sd).is_err() {
+        return core::ptr::null();
+    }
+    let ptr = v.as_ptr();
+    core::mem::forget(v);
+    ptr as *const ()
+}
+
 /// Build the default process SD from the creator's token.
 fn build_default_proc_sd(
     token: &Token,
@@ -1046,6 +1121,41 @@ pub extern "C" fn kacs_check_proc_sd(
     ) {
         Ok(result) => if result.allowed { 1 } else { 0 },
         Err(_) => 0,
+    }
+}
+
+/// Run AccessCheck on a parsed file SD. Returns the GRANTED MASK (not
+/// boolean). Used by security_file_open for legacy subset mode.
+/// Returns -1 on error (e.g., Identification-level token).
+#[no_mangle]
+pub extern "C" fn kacs_file_access_check(
+    token_ptr: *const (),
+    sd_ptr: *const (),
+    desired: u32,
+) -> i64 {
+    if token_ptr.is_null() || sd_ptr.is_null() {
+        return -1;
+    }
+
+    let kt = unsafe { KacsToken::from_ptr(token_ptr) };
+    let sd = unsafe { &*(sd_ptr as *const kacs_core::sd::SecurityDescriptor) };
+
+    // Use MAXIMUM_ALLOWED to get the full granted mask for subset mode.
+    let check_desired = desired | kacs_core::mask::MAXIMUM_ALLOWED;
+
+    match kacs_core::access_check::access_check(
+        sd,
+        &kt.token,
+        check_desired,
+        &kacs_core::mask::FILE_GENERIC_MAPPING,
+        None,
+        None,
+        &[],
+        &[],
+        0, 0, 0,
+    ) {
+        Ok(result) => (result.granted & desired) as i64,
+        Err(_) => -1,
     }
 }
 
