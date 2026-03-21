@@ -2577,6 +2577,188 @@ static int kacs_inode_init_security(struct inode *inode,
 	return 0;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * FACS Phase E — Directory traversal + link operations (§14.3)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Helper: check DELETE on inode OR FILE_DELETE_CHILD on parent dir.
+ * Either right is sufficient (§14.3 unlink/rmdir/rename semantics).
+ */
+static int check_delete_or_parent(struct inode *target,
+				  struct inode *parent_dir)
+{
+	const void *sd;
+	const struct kacs_cred_security *ccred;
+	long long r;
+
+	ccred = kacs_cred(current_cred());
+
+	/* Try DELETE on the target itself. */
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(target);
+	if (sd) {
+		r = kacs_file_access_check(ccred->token, sd, STD_DELETE);
+		if (r >= 0 && ((u32)r & STD_DELETE)) {
+			rcu_read_unlock();
+			return 0; /* DELETE on target granted */
+		}
+	}
+	rcu_read_unlock();
+
+	/* Try FILE_DELETE_CHILD on parent directory. */
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(parent_dir);
+	if (sd) {
+		r = kacs_dir_access_check(ccred->token, sd,
+					  FILE_DELETE_CHILD);
+		if (r >= 0 && ((u32)r & FILE_DELETE_CHILD)) {
+			rcu_read_unlock();
+			return 0; /* DELETE_CHILD on parent granted */
+		}
+	}
+	rcu_read_unlock();
+
+	return -EACCES; /* neither right granted */
+}
+
+/* security_inode_permission — traverse + deferred open (§14.3) */
+static int kacs_inode_permission(struct inode *inode, int mask)
+{
+	const void *sd;
+	const struct kacs_cred_security *ccred;
+	long long r;
+
+	/* Non-directory: defer to security_file_open. KACS returns 0
+	 * to avoid double-authorization (§14.3). */
+	if (!S_ISDIR(inode->i_mode))
+		return 0;
+
+	/* Directory with MAY_EXEC: traverse check.
+	 * Bypassed by SeChangeNotifyPrivilege (granted to all by default). */
+	if (mask & MAY_EXEC) {
+		ccred = kacs_cred(current_cred());
+		if (ccred->token &&
+		    kacs_token_check_privilege(ccred->token,
+					      KACS_PRIV_CHANGE_NOTIFY))
+			return 0; /* traverse bypass */
+
+		/* No privilege: check FILE_TRAVERSE on directory SD. */
+		rcu_read_lock();
+		sd = kacs_inode_get_sd(inode);
+		if (!sd) {
+			rcu_read_unlock();
+			/* No SD on directory — in deny mode, but
+			 * SeChangeNotifyPrivilege (if held) bypasses
+			 * traverse on missing-SD dirs too. Since we already
+			 * checked the privilege above and it wasn't held,
+			 * this is a genuine missing-SD deny. */
+			return -EACCES;
+		}
+		r = kacs_dir_access_check(ccred->token, sd, FILE_TRAVERSE);
+		rcu_read_unlock();
+		if (r < 0 || !((u32)r & FILE_TRAVERSE))
+			return -EACCES;
+	}
+
+	return 0;
+}
+
+/* security_inode_link — hardlink creation (§14.3) */
+static int kacs_inode_link(struct dentry *old_dentry, struct inode *dir,
+			   struct dentry *new_dentry)
+{
+	int ret;
+
+	/* FILE_ADD_FILE on destination directory. */
+	ret = check_parent_sd(dir, FILE_ADD_FILE);
+	if (ret)
+		return ret;
+
+	/* FILE_WRITE_ATTRIBUTES on source inode. */
+	{
+		const void *sd;
+		const struct kacs_cred_security *ccred;
+		long long r;
+
+		rcu_read_lock();
+		sd = kacs_inode_get_sd(d_inode(old_dentry));
+		if (sd) {
+			ccred = kacs_cred(current_cred());
+			r = kacs_file_access_check(ccred->token, sd,
+						   FILE_WRITE_ATTRIBUTES);
+			if (r < 0 || !((u32)r & FILE_WRITE_ATTRIBUTES)) {
+				rcu_read_unlock();
+				return -EACCES;
+			}
+		}
+		rcu_read_unlock();
+	}
+
+	return 0;
+}
+
+/* security_inode_unlink — file deletion (§14.3) */
+static int kacs_inode_unlink(struct inode *dir, struct dentry *dentry)
+{
+	return check_delete_or_parent(d_inode(dentry), dir);
+}
+
+/* security_inode_rmdir — directory deletion (§14.3) */
+static int kacs_inode_rmdir(struct inode *dir, struct dentry *dentry)
+{
+	return check_delete_or_parent(d_inode(dentry), dir);
+}
+
+/* security_inode_rename — rename/move (§14.3) */
+static int kacs_inode_rename(struct inode *old_dir,
+			     struct dentry *old_dentry,
+			     struct inode *new_dir,
+			     struct dentry *new_dentry)
+{
+	int ret;
+
+	/* Source side: DELETE on source OR FILE_DELETE_CHILD on old parent. */
+	ret = check_delete_or_parent(d_inode(old_dentry), old_dir);
+	if (ret)
+		return ret;
+
+	/* Destination side: FILE_ADD_FILE on new parent (or
+	 * FILE_ADD_SUBDIRECTORY if source is a directory). */
+	if (S_ISDIR(d_inode(old_dentry)->i_mode))
+		ret = check_parent_sd(new_dir, FILE_ADD_SUBDIRECTORY);
+	else
+		ret = check_parent_sd(new_dir, FILE_ADD_FILE);
+	if (ret)
+		return ret;
+
+	/* Overwrite: if dest exists, need DELETE on existing dest
+	 * OR FILE_DELETE_CHILD on dest parent.
+	 * Note: for RENAME_EXCHANGE, the kernel calls this hook twice
+	 * (swapping source/dest), so both sides get this check.
+	 *
+	 * RENAME_WHITEOUT: spec requires FILE_ADD_FILE on source parent
+	 * for the whiteout creation, but the LSM hook does not receive
+	 * rename flags. This would need a kernel patch to pass flags
+	 * to the hook. Since RENAME_WHITEOUT is overlayfs-specific and
+	 * the whiteout is created by the kernel (not userspace), this
+	 * gap is accepted for v1. */
+	if (d_is_positive(new_dentry)) {
+		ret = check_delete_or_parent(d_inode(new_dentry), new_dir);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+/* security_inode_follow_link — unconditional allow (§14.3) */
+static int kacs_inode_follow_link(struct dentry *dentry,
+				  struct inode *inode, bool rcu)
+{
+	return 0;
+}
+
 /* ── Hook table ────────────────────────────────────────────────────────── */
 
 static struct security_hook_list kacs_hooks[] __ro_after_init = {
@@ -2602,7 +2784,13 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(capset, kacs_capset),
 	LSM_HOOK_INIT(task_prctl, kacs_task_prctl),
 	LSM_HOOK_INIT(bprm_creds_from_file, kacs_bprm_creds_from_file),
+	LSM_HOOK_INIT(inode_permission, kacs_inode_permission),
+	LSM_HOOK_INIT(inode_link, kacs_inode_link),
+	LSM_HOOK_INIT(inode_unlink, kacs_inode_unlink),
+	LSM_HOOK_INIT(inode_rmdir, kacs_inode_rmdir),
+	LSM_HOOK_INIT(inode_rename, kacs_inode_rename),
 	LSM_HOOK_INIT(inode_readlink, kacs_inode_readlink),
+	LSM_HOOK_INIT(inode_follow_link, kacs_inode_follow_link),
 	LSM_HOOK_INIT(inode_setattr, kacs_inode_setattr),
 	LSM_HOOK_INIT(inode_getattr, kacs_inode_getattr),
 	LSM_HOOK_INIT(inode_xattr_skipcap, kacs_inode_xattr_skipcap),
