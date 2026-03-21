@@ -1,0 +1,20 @@
+From: Peios <kernel@peios.org>
+Subject: FACS patch 15: execveat(AT_EMPTY_PATH) granted mask check
+
+For fd-based exec, check FILE_EXECUTE in the original fd's granted
+mask rather than re-opening the file. This makes exec part of the
+handle model: an fd opened with FILE_EXECUTE carries SD
+authorization for execution. SD changes after open do not affect
+the granted mask.
+
+STATUS: DEFERRED for v1. The current implementation uses a live
+AccessCheck via the kernel's re-opened file in do_open_execat().
+FILE_EXECUTE is in the legacy open compat set for regular files,
+so the re-opened file gets FILE_EXECUTE if the SD allows it.
+The functional difference is snapshot (patch 15) vs live (current):
+SD changes between original open and exec would affect the live
+check but not the snapshot. This is acceptable for v1.
+
+Full implementation requires carrying the original struct file
+reference through linux_binprm and checking it in bprm_check
+before falling through to the re-opened file.

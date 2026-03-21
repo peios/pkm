@@ -2129,15 +2129,21 @@ static int kacs_file_permission(struct file *file, int mask)
 	}
 
 	if (mask & MAY_WRITE) {
-		/* Write: need FILE_WRITE_DATA or FILE_APPEND_DATA.
-		 * Positioned writes (pwrite) are handled by kernel patches
-		 * 1-4 which deny on append-only fds. This hook sees both
-		 * sequential and positioned writes as MAY_WRITE.
-		 * FILE_WRITE_DATA is a superset of FILE_APPEND_DATA for
-		 * sequential writes. */
+		/* Write: need FILE_WRITE_DATA or FILE_APPEND_DATA. */
 		if (!(fsec->granted &
 		      (FILE_WRITE_DATA | FILE_APPEND_DATA)))
 			return -EACCES;
+	}
+
+	if (mask & MAY_EXEC) {
+		/* fchdir on directory fds: requires FILE_TRAVERSE (§14.3
+		 * patch 16). NOT bypassed by SeChangeNotifyPrivilege —
+		 * this is a handle-model check, not a traversal check.
+		 * FILE_TRAVERSE = FILE_EXECUTE (0x0020, aliased). */
+		if (S_ISDIR(file_inode(file)->i_mode)) {
+			if (!(fsec->granted & FILE_TRAVERSE))
+				return -EACCES;
+		}
 	}
 
 	return 0;
