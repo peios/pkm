@@ -127,10 +127,29 @@ struct kacs_query_args {
 	u64 buf_ptr;		/* userspace pointer to output buffer */
 };
 
+/*
+ * ADJUST_PRIVS wire format: array of LUID_AND_ATTRIBUTES pairs.
+ * Matches Windows AdjustTokenPrivileges for Samba compatibility.
+ *
+ * Each entry: [luid:u32 (bit position)][attributes:u32]
+ *   SE_PRIVILEGE_ENABLED  (0x02): enable the privilege
+ *   SE_PRIVILEGE_REMOVED  (0x04): permanently remove
+ *   Neither flag set:             disable the privilege
+ *
+ * Header is fixed-size for the ioctl; entries follow in data_ptr.
+ */
+#define SE_PRIVILEGE_ENABLED  0x00000002
+#define SE_PRIVILEGE_REMOVED  0x00000004
+
 struct kacs_adjust_privs_args {
-	u64 enable_mask;	/* privileges to enable */
-	u64 disable_mask;	/* privileges to disable */
-	u64 remove_mask;	/* privileges to permanently remove */
+	u32 count;		/* number of LUID_AND_ATTRIBUTES entries */
+	u32 _pad;
+	u64 data_ptr;		/* userspace pointer to entries array */
+};
+
+struct kacs_priv_entry {
+	u32 luid;		/* privilege bit position (0-63) */
+	u32 attributes;		/* SE_PRIVILEGE_ENABLED / REMOVED / 0 (disable) */
 };
 
 struct kacs_duplicate_args {
@@ -407,6 +426,9 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 	}
 	case KACS_IOC_ADJUST_PRIVS: {
 		struct kacs_adjust_privs_args pa;
+		struct kacs_priv_entry *entries;
+		u64 enable_mask = 0, disable_mask = 0, remove_mask = 0;
+		u32 i;
 
 		if (!(tf->access_mask & KACS_TOKEN_ADJUST_PRIVS))
 			return -EACCES;
@@ -414,9 +436,44 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 		if (copy_from_user(&pa, (void __user *)arg, sizeof(pa)))
 			return -EFAULT;
 
-		return kacs_token_adjust_privs(tf->token, pa.enable_mask,
-					       pa.disable_mask,
-					       pa.remove_mask);
+		if (pa.count == 0)
+			return 0; /* no-op */
+		if (pa.count > 64)
+			return -EINVAL;
+
+		entries = kmalloc_array(pa.count, sizeof(*entries),
+					GFP_KERNEL);
+		if (!entries)
+			return -ENOMEM;
+
+		if (copy_from_user(entries, (void __user *)pa.data_ptr,
+				   pa.count * sizeof(*entries))) {
+			kfree(entries);
+			return -EFAULT;
+		}
+
+		/* Convert LUID_AND_ATTRIBUTES to bitmasks */
+		for (i = 0; i < pa.count; i++) {
+			u32 luid = entries[i].luid;
+			u32 attr = entries[i].attributes;
+
+			if (luid > 63) {
+				kfree(entries);
+				return -EINVAL;
+			}
+
+			if (attr & SE_PRIVILEGE_REMOVED)
+				remove_mask |= (1ULL << luid);
+			else if (attr & SE_PRIVILEGE_ENABLED)
+				enable_mask |= (1ULL << luid);
+			else
+				disable_mask |= (1ULL << luid);
+		}
+
+		kfree(entries);
+		return kacs_token_adjust_privs(tf->token, enable_mask,
+					       disable_mask,
+					       remove_mask);
 	}
 	case KACS_IOC_INSTALL: {
 		/*
