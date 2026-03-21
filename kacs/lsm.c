@@ -239,12 +239,42 @@ struct kacs_sock_security {
 	u32 max_impersonation;		/* client side: max level (default=Impersonation) */
 };
 
+/* ── File blob (granted mask from open-time AccessCheck) ──────────────── */
+
+struct kacs_file_security {
+	u32 granted;			/* immutable after open */
+	u8  flags;			/* KACS_FILE_* flags */
+};
+
+#define KACS_FILE_IOCTL_ONLY	0x01	/* mode-3 ioctl-only open on device */
+#define KACS_FILE_FACS_MANAGED	0x02	/* set if open went through FACS */
+
+/* ── Inode blob (cached SD from xattr) ────────────────────────────────── */
+
+struct kacs_inode_security {
+	const void __rcu *sd_cache;	/* Rust-managed parsed SD, RCU-protected */
+};
+
 /* ── Task blob (Process Security Block) ───────────────────────────────── */
+
+/*
+ * kacs_file_decision: coordination marker between file-based and
+ * dentry-based hooks (§14.3). Set by file-based hook (patches 7,9-11),
+ * consumed by dentry-based hook on the same inode + op_class.
+ */
+#define KACS_OP_NONE		0
+#define KACS_OP_SETATTR		1
+#define KACS_OP_GETATTR		2
+#define KACS_OP_SETXATTR	3
+#define KACS_OP_GETXATTR	4
 
 struct kacs_task_security {
 	const void *proc_sd;		/* Rust-managed process SD (opaque) */
 	u32 pip_type;			/* PIP_TYPE_NONE/PROTECTED/ISOLATED */
 	u32 pip_trust;			/* trust level within pip_type */
+	/* File/dentry hook coordination (§14.3) */
+	struct inode *file_decision_inode;
+	u8 file_decision_op;
 };
 
 /* PIP type constants (§13) */
@@ -254,6 +284,8 @@ struct kacs_task_security {
 
 static struct lsm_blob_sizes kacs_blob_sizes __ro_after_init = {
 	.lbs_cred = sizeof(struct kacs_cred_security),
+	.lbs_file = sizeof(struct kacs_file_security),
+	.lbs_inode = sizeof(struct kacs_inode_security),
 	.lbs_sock = sizeof(struct kacs_sock_security),
 	.lbs_task = sizeof(struct kacs_task_security),
 };
@@ -280,6 +312,16 @@ static inline bool pip_dominates(struct kacs_task_security *caller,
 		return true;
 	return caller->pip_type >= target->pip_type
 	    && caller->pip_trust >= target->pip_trust;
+}
+
+static inline struct kacs_file_security *kacs_file(const struct file *file)
+{
+	return file->f_security + kacs_blob_sizes.lbs_file;
+}
+
+static inline struct kacs_inode_security *kacs_inode(const struct inode *inode)
+{
+	return inode->i_security + kacs_blob_sizes.lbs_inode;
 }
 
 static inline struct kacs_sock_security *kacs_sock(const struct sock *sk)
@@ -1126,6 +1168,218 @@ static int kacs_unix_stream_connect(struct sock *sock,
 	return 0;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * FACS — File Access Control Shim (§14)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── SD xattr names ───────────────────────────────────────────────────── */
+
+#define KACS_SD_XATTR		"security.peios.sd"
+#define KACS_SD_XATTR_NTFS	"system.ntfs_security"
+
+static inline bool is_sd_xattr(const char *name)
+{
+	return !strcmp(name, KACS_SD_XATTR)
+	    || !strcmp(name, KACS_SD_XATTR_NTFS);
+}
+
+static inline bool is_posix_acl_xattr(const char *name)
+{
+	return !strcmp(name, "system.posix_acl_access")
+	    || !strcmp(name, "system.posix_acl_default");
+}
+
+/* ── The six implementation capabilities (§14.1) ─────────────────────── */
+
+static void assert_impl_caps(struct cred *cred)
+{
+	cap_raise(cred->cap_effective, CAP_DAC_OVERRIDE);
+	cap_raise(cred->cap_effective, CAP_DAC_READ_SEARCH);
+	cap_raise(cred->cap_effective, CAP_FOWNER);
+	cap_raise(cred->cap_effective, CAP_CHOWN);
+	cap_raise(cred->cap_effective, CAP_SETUID);
+	cap_raise(cred->cap_effective, CAP_SETGID);
+	cap_raise(cred->cap_permitted, CAP_DAC_OVERRIDE);
+	cap_raise(cred->cap_permitted, CAP_DAC_READ_SEARCH);
+	cap_raise(cred->cap_permitted, CAP_FOWNER);
+	cap_raise(cred->cap_permitted, CAP_CHOWN);
+	cap_raise(cred->cap_permitted, CAP_SETUID);
+	cap_raise(cred->cap_permitted, CAP_SETGID);
+}
+
+static inline bool is_impl_cap(int cap)
+{
+	return cap == CAP_DAC_OVERRIDE || cap == CAP_DAC_READ_SEARCH
+	    || cap == CAP_FOWNER || cap == CAP_CHOWN
+	    || cap == CAP_SETUID || cap == CAP_SETGID;
+}
+
+/* ── capset: block clearing implementation caps (§14.1) ───────────────── */
+
+static int kacs_capset(struct cred *new, const struct cred *old,
+		       const kernel_cap_t *effective,
+		       const kernel_cap_t *inheritable,
+		       const kernel_cap_t *permitted)
+{
+	/* Deny if any implementation cap would be cleared. */
+	if (!cap_raised(*effective, CAP_DAC_OVERRIDE) ||
+	    !cap_raised(*effective, CAP_DAC_READ_SEARCH) ||
+	    !cap_raised(*effective, CAP_FOWNER) ||
+	    !cap_raised(*effective, CAP_CHOWN) ||
+	    !cap_raised(*effective, CAP_SETUID) ||
+	    !cap_raised(*effective, CAP_SETGID))
+		return -EPERM;
+	return 0;
+}
+
+/* ── task_prctl: block ambient raises + bounding set drops (§14.1) ────── */
+
+static int kacs_task_prctl(int option, unsigned long arg2,
+			   unsigned long arg3, unsigned long arg4,
+			   unsigned long arg5)
+{
+	/* Deny ambient capability manipulation entirely. */
+	if (option == PR_CAP_AMBIENT)
+		return -EPERM;
+
+	/* Deny bounding set drops of implementation caps. */
+	if (option == PR_CAPBSET_DROP && is_impl_cap((int)arg2))
+		return -EPERM;
+
+	/* Other prctl options: pass through (return -ENOSYS → not handled). */
+	return -ENOSYS;
+}
+
+/* ── bprm_creds_from_file: suppress setuid/setgid/filecaps (§14.1) ───── */
+
+static int kacs_bprm_creds_from_file(struct linux_binprm *bprm,
+				     const struct file *file)
+{
+	/*
+	 * Runs AFTER commoncap in the LSM hook chain. commoncap may have:
+	 * 1. Applied file capabilities (security.capability xattr)
+	 * 2. Elevated creds for setuid/setgid binaries
+	 * 3. Modified the capability bounding/ambient sets
+	 *
+	 * KACS suppresses all three: Peios has no setuid, no file caps,
+	 * and no ambient cap grants. Re-assert implementation caps to
+	 * ensure commoncap's processing doesn't break the DAC bypass.
+	 */
+	struct cred *cred = bprm->cred;
+
+	/* Suppress setuid/setgid elevation. */
+	cred->euid = cred->uid;
+	cred->egid = cred->gid;
+	cred->suid = cred->uid;
+	cred->sgid = cred->gid;
+	cred->fsuid = cred->uid;
+	cred->fsgid = cred->gid;
+
+	/* Suppress file capabilities — clear and reassert only impl caps. */
+	cap_clear(cred->cap_effective);
+	cap_clear(cred->cap_permitted);
+	assert_impl_caps(cred);
+
+	/* Preserve inheritable (for impl caps). */
+	cap_raise(cred->cap_inheritable, CAP_DAC_OVERRIDE);
+	cap_raise(cred->cap_inheritable, CAP_DAC_READ_SEARCH);
+	cap_raise(cred->cap_inheritable, CAP_FOWNER);
+	cap_raise(cred->cap_inheritable, CAP_CHOWN);
+	cap_raise(cred->cap_inheritable, CAP_SETUID);
+	cap_raise(cred->cap_inheritable, CAP_SETGID);
+
+	/* Clear ambient set entirely. */
+	cap_clear(cred->cap_ambient);
+
+	return 0;
+}
+
+/* ── SD xattr protection (§14.2) ─────────────────────────────────────── */
+
+static int kacs_inode_setxattr(struct mnt_idmap *idmap,
+			       struct dentry *dentry,
+			       const char *name, const void *value,
+			       size_t size, int flags)
+{
+	/* Block raw writes to SD xattrs — must use kacs_set_sd. */
+	if (is_sd_xattr(name))
+		return -EACCES;
+
+	/* Block POSIX ACL writes — FACS replaces POSIX ACLs. */
+	if (is_posix_acl_xattr(name))
+		return -EACCES;
+
+	/* Other xattrs: check FILE_WRITE_EA via AccessCheck on the SD.
+	 * TODO: implement when SD cache is populated. For now, allow. */
+	return 0;
+}
+
+static int kacs_inode_getxattr(struct dentry *dentry, const char *name)
+{
+	/* Block raw reads of SD xattrs — must use kacs_get_sd. */
+	if (is_sd_xattr(name))
+		return -EACCES;
+
+	/* Other xattrs: check FILE_READ_EA.
+	 * TODO: implement when SD cache is populated. For now, allow. */
+	return 0;
+}
+
+static int kacs_inode_removexattr(struct mnt_idmap *idmap,
+				  struct dentry *dentry,
+				  const char *name)
+{
+	/* SD xattrs cannot be removed — only replaced via kacs_set_sd. */
+	if (is_sd_xattr(name))
+		return -EACCES;
+
+	/* POSIX ACLs: also deny removal. */
+	if (is_posix_acl_xattr(name))
+		return -EACCES;
+
+	/* Other xattrs: check FILE_WRITE_EA.
+	 * TODO: implement when SD cache is populated. For now, allow. */
+	return 0;
+}
+
+static int kacs_inode_set_acl(struct mnt_idmap *idmap,
+			      struct dentry *dentry,
+			      const char *acl_name,
+			      struct posix_acl *kacl)
+{
+	/* POSIX ACLs are inert under FACS. Deny all writes. */
+	return -EACCES;
+}
+
+/* ── SD cache: inode cleanup ──────────────────────────────────────────── */
+
+/*
+ * Free the cached SD after RCU grace period. Uses inode_free_security_rcu
+ * (not inode_free_security) because inode_permission() may still fire
+ * during or after inode_free_security.
+ */
+static void kacs_inode_free_security_rcu(void *inode_security)
+{
+	struct kacs_inode_security *isec;
+
+	if (!inode_security)
+		return;
+
+	isec = inode_security + kacs_blob_sizes.lbs_inode;
+	if (isec->sd_cache) {
+		/* sd_cache is a Rust-managed object — call Rust free.
+		 * RCU grace period has elapsed, safe to free. */
+		kacs_proc_sd_drop((void *)isec->sd_cache);
+	}
+}
+
+/* ── File lifecycle ───────────────────────────────────────────────────── */
+
+static void kacs_file_free_security(struct file *file)
+{
+	/* No dynamic allocation — blob is zeroed by LSM framework. */
+}
+
 /* ── Hook table ────────────────────────────────────────────────────────── */
 
 static struct security_hook_list kacs_hooks[] __ro_after_init = {
@@ -1146,6 +1400,16 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(sk_alloc_security, kacs_sk_alloc_security),
 	LSM_HOOK_INIT(sk_free_security, kacs_sk_free_security),
 	LSM_HOOK_INIT(unix_stream_connect, kacs_unix_stream_connect),
+	/* FACS — File Access Control Shim (§14) */
+	LSM_HOOK_INIT(capset, kacs_capset),
+	LSM_HOOK_INIT(task_prctl, kacs_task_prctl),
+	LSM_HOOK_INIT(bprm_creds_from_file, kacs_bprm_creds_from_file),
+	LSM_HOOK_INIT(inode_setxattr, kacs_inode_setxattr),
+	LSM_HOOK_INIT(inode_getxattr, kacs_inode_getxattr),
+	LSM_HOOK_INIT(inode_removexattr, kacs_inode_removexattr),
+	LSM_HOOK_INIT(inode_set_acl, kacs_inode_set_acl),
+	LSM_HOOK_INIT(inode_free_security_rcu, kacs_inode_free_security_rcu),
+	LSM_HOOK_INIT(file_free_security, kacs_file_free_security),
 };
 
 /* ── Syscall: kacs_open_self_token (1000) ──────────────────────────────── */
