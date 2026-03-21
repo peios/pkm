@@ -1093,7 +1093,8 @@ SYSCALL_DEFINE2(kacs_create_token, const void __user *, spec, size_t, len)
 		return -EPERM;
 
 	/* Size bounds: min header (56), max PAGE_SIZE. */
-	if (len < 64 || len > PAGE_SIZE)
+	/* Max 64 KB — matches SD size limit. Supports 2000+ groups. */
+	if (len < 64 || len > 65536)
 		return -EINVAL;
 
 	kbuf = kmalloc(len, GFP_KERNEL);

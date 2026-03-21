@@ -213,7 +213,9 @@ pub struct Token {
     pub owner_sid_index: u16,
     /// Index into [user_sid] ++ groups for the default group of new objects.
     pub primary_group_index: u16,
-    // default_dacl omitted for now — requires SD/ACL types (Phase 3.2/3.3)
+    /// Default DACL applied to objects created by this token when no
+    /// explicit SD is provided. Used by SD inheritance (§9.5).
+    pub default_dacl: Option<crate::acl::Acl>,
 
     // --- Metadata (immutable) ---
 
@@ -323,6 +325,7 @@ impl Token {
 
             owner_sid_index: 0, // user_sid
             primary_group_index: 0,
+            default_dacl: None, // SYSTEM uses inherited DACLs
 
             token_id: Luid(1),
             auth_id: Luid(0), // Session 0

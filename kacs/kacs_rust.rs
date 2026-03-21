@@ -351,7 +351,7 @@ pub extern "C" fn kacs_token_query(
 /// Returns a valid pointer on success, null on failure (bad format or OOM).
 #[no_mangle]
 pub extern "C" fn kacs_token_from_spec(data: *const u8, len: usize) -> *const () {
-    if data.is_null() || len < 64 {
+    if data.is_null() || len < 64 || len > 65536 {
         return core::ptr::null();
     }
 
