@@ -841,11 +841,19 @@ static int kacs_ptrace_access_check(struct task_struct *child,
 	if (child == current)
 		return 0;
 
-	/* AccessCheck against target's process SD. */
+	/* AccessCheck against target's process SD.
+	 * Map ptrace mode to process SD access rights:
+	 * - PTRACE_MODE_GETFD (pidfd_getfd) → PROCESS_DUP_HANDLE (0x0040)
+	 * - PTRACE_MODE_READ → PROCESS_VM_READ (0x0010)
+	 * - PTRACE_MODE_ATTACH → PROCESS_VM_WRITE (0x0020)
+	 */
 	if (target_tsec->proc_sd) {
-		desired = (mode & PTRACE_MODE_READ)
-			? 0x0010   /* PROCESS_VM_READ */
-			: 0x0020;  /* PROCESS_VM_WRITE */
+		if (mode & 0x20) /* PTRACE_MODE_GETFD */
+			desired = 0x0040;  /* PROCESS_DUP_HANDLE */
+		else if (mode & PTRACE_MODE_READ)
+			desired = 0x0010;  /* PROCESS_VM_READ */
+		else
+			desired = 0x0020;  /* PROCESS_VM_WRITE */
 
 		caller_cred = kacs_cred(current_cred());
 		if (!kacs_check_proc_sd(caller_cred->token,
