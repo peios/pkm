@@ -17,7 +17,10 @@ mod kacs_core;
 pub use kacs_core::*;
 
 use core::ffi::c_int;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+/// Global token ID counter. Each token gets a unique ID.
+static NEXT_TOKEN_ID: AtomicU64 = AtomicU64::new(1);
 
 use kacs_core::compat::{self, AllocError, TryClone};
 use kacs_core::token::{Token, TokenType, ImpersonationLevel, IntegrityLevel};
@@ -37,10 +40,10 @@ struct KacsToken {
 
 impl KacsToken {
     /// Allocate a new token on the heap with refcount 1.
-    fn new(token: Token) -> Result<*const (), AllocError> {
-        // Use kernel's allocator via compat::Vec trick — allocate a
-        // Vec<KacsToken> of capacity 1, push, then leak the pointer.
-        // This is the simplest way to heap-allocate without alloc::boxed::Box.
+    fn new(mut token: Token) -> Result<*const (), AllocError> {
+        // Assign a unique token ID.
+        token.token_id = kacs_core::luid::Luid(NEXT_TOKEN_ID.fetch_add(1, Ordering::Relaxed));
+
         let mut v = compat::vec_with_capacity::<KacsToken>(1)?;
         compat::vec_push(&mut v, KacsToken {
             token,
@@ -888,6 +891,61 @@ pub extern "C" fn kacs_session_get_linked_token(token_ptr: *const ()) -> *const 
     }
 
     core::ptr::null()
+}
+
+/// Format all active sessions into a caller-provided buffer.
+/// Returns bytes written or negative errno.
+#[no_mangle]
+pub extern "C" fn kacs_format_sessions(buf: *mut u8, buf_len: usize) -> i64 {
+    if buf.is_null() {
+        return -22; // -EINVAL
+    }
+
+    let table = unsafe {
+        match SESSION_TABLE.as_ref() {
+            Some(t) => t,
+            None => return -22,
+        }
+    };
+
+    let mut out = FormatBuf::new();
+    out.str("Sessions: ");
+    out.usize(table.len());
+    out.byte(b'\n');
+
+    for i in 0..table.len() {
+        // Linear scan since we don't have index access
+        let mut idx = 0;
+        for session in table.iter_sessions() {
+            if idx == i {
+                out.str("  ");
+                out.u64(session.session_id);
+                out.str(": ");
+                format_sid(&mut out, &session.user_sid);
+                out.str(" (");
+                out.str(match session.logon_type {
+                    kacs_core::session::LogonType::Interactive => "Interactive",
+                    kacs_core::session::LogonType::Network => "Network",
+                    kacs_core::session::LogonType::Batch => "Batch",
+                    kacs_core::session::LogonType::Service => "Service",
+                    kacs_core::session::LogonType::NetworkCleartext => "NetworkCleartext",
+                    kacs_core::session::LogonType::NewCredentials => "NewCredentials",
+                });
+                out.str(")\n");
+                break;
+            }
+            idx += 1;
+        }
+    }
+
+    let data = out.as_bytes();
+    if data.len() > buf_len {
+        return -34; // -ERANGE
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
+    }
+    data.len() as i64
 }
 
 /// Called from C during LSM initialization.

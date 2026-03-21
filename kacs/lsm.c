@@ -17,6 +17,8 @@
 #include <linux/anon_inodes.h>
 #include <linux/file.h>
 #include <linux/net.h>
+#include <linux/pid.h>
+#include <linux/pidfd.h>
 #include <net/sock.h>
 
 /* ── Rust FFI declarations ─────────────────────────────────────────────── */
@@ -49,6 +51,7 @@ extern const void *kacs_token_restrict(const void *ptr,
 				       u32 num_restrict_sids);
 extern long long kacs_create_session_impl(const void *data, size_t len);
 extern void kacs_init_session_table(const void *system_token);
+extern long long kacs_format_sessions(char *buf, size_t len);
 extern const void *kacs_token_from_spec(const void *data, size_t len);
 extern long long kacs_access_check_sd(const void *token_ptr,
 				      const void *sd_data, size_t sd_len,
@@ -80,6 +83,7 @@ extern long long kacs_access_check_sd(const void *token_ptr,
 #define KACS_IOC_RESTRICT          _IOWR(KACS_IOC_MAGIC, 4, struct kacs_restrict_args)
 #define KACS_IOC_LINK_TOKENS       _IOW(KACS_IOC_MAGIC, 5, struct kacs_link_tokens_args)
 #define KACS_IOC_GET_LINKED_TOKEN  _IOWR(KACS_IOC_MAGIC, 6, struct kacs_get_linked_token_args)
+#define KACS_IOC_IMPERSONATE       _IO(KACS_IOC_MAGIC, 7)
 
 /* Token query classes (§15.2) */
 #define TOKEN_CLASS_USER              1
@@ -480,6 +484,56 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 			return -EFAULT;
 		return 0;
 	}
+	case KACS_IOC_IMPERSONATE: {
+		/*
+		 * Impersonate this token on the calling thread.
+		 * Same two-gate model as kacs_impersonate_peer.
+		 */
+		struct kacs_cred_security *sec;
+		struct cred *new_cred;
+		const void *server_token;
+		int cap_to_id = 0;
+
+		if (!(tf->access_mask & KACS_TOKEN_IMPERSONATE))
+			return -EACCES;
+
+		/* Only Impersonation tokens can be impersonated. */
+		if (kacs_token_get_type(tf->token) != 2)
+			return -EINVAL;
+
+		server_token = kacs_cred(current_real_cred())->token;
+
+		/* Gate 1: identity. */
+		if (!kacs_token_check_privilege(server_token,
+						KACS_PRIV_IMPERSONATE)) {
+			if (!kacs_token_same_user(server_token, tf->token))
+				cap_to_id = 1;
+		}
+
+		/* Gate 2: integrity ceiling. */
+		if (kacs_token_get_integrity(tf->token) >
+		    kacs_token_get_integrity(server_token))
+			cap_to_id = 1;
+
+		/* If already impersonating, revert first. */
+		if (current_cred() != current_real_cred())
+			revert_creds(current_real_cred());
+
+		new_cred = prepare_creds();
+		if (!new_cred)
+			return -ENOMEM;
+
+		sec = kacs_cred(new_cred);
+		kacs_token_drop(sec->token);
+		sec->token = kacs_token_clone(tf->token);
+
+		if (cap_to_id)
+			kacs_token_set_impersonation_level(sec->token,
+				KACS_LEVEL_IDENTIFICATION);
+
+		override_creds(new_cred);
+		return 0;
+	}
 	case KACS_IOC_LINK_TOKENS: {
 		struct kacs_link_tokens_args la;
 		struct kacs_token_file *etf, *ftf;
@@ -790,6 +844,56 @@ SYSCALL_DEFINE2(kacs_open_self_token, unsigned int, flags, u32, access_mask)
 	return kacs_token_to_fd(token, access_mask);
 }
 
+/* ── Syscall: kacs_open_process_token (1001) ────────────────────────────── */
+
+/*
+ * Open the primary token of another process via pidfd.
+ * Checks PROCESS_QUERY_INFORMATION against the target's process SD
+ * (via PIP dominance for now; full SD check is a TODO).
+ */
+SYSCALL_DEFINE2(kacs_open_process_token, int, pidfd, u32, access_mask)
+{
+	struct kacs_task_security *caller_tsec, *target_tsec;
+	const struct kacs_cred_security *target_cred;
+	struct pid *pid;
+	struct task_struct *task;
+	const void *token;
+
+	if (access_mask & ~KACS_TOKEN_ALL_ACCESS)
+		return -EINVAL;
+	if (!access_mask)
+		return -EINVAL;
+
+	pid = pidfd_get_pid(pidfd, NULL);
+	if (IS_ERR(pid))
+		return PTR_ERR(pid);
+
+	rcu_read_lock();
+	task = pid_task(pid, PIDTYPE_PID);
+	if (!task) {
+		rcu_read_unlock();
+		put_pid(pid);
+		return -ESRCH;
+	}
+
+	/* PIP dominance check. */
+	caller_tsec = kacs_task(current);
+	target_tsec = kacs_task(task);
+	if (!pip_dominates(caller_tsec, target_tsec)) {
+		rcu_read_unlock();
+		put_pid(pid);
+		return -EACCES;
+	}
+
+	/* Get the target's primary token from real_cred. */
+	target_cred = kacs_cred(task->real_cred);
+	token = kacs_token_clone(target_cred->token);
+	rcu_read_unlock();
+	put_pid(pid);
+
+	return kacs_token_to_fd(token, access_mask);
+}
+
 /* ── Syscall: kacs_create_token (1002) ──────────────────────────────────── */
 
 /*
@@ -1094,9 +1198,39 @@ static const struct file_operations kacs_self_fops = {
 	.llseek = generic_file_llseek,
 };
 
+static ssize_t kacs_sessions_show(struct file *file, char __user *buf,
+				  size_t count, loff_t *ppos)
+{
+	char *kbuf;
+	long long len;
+	ssize_t ret;
+
+	if (*ppos != 0)
+		return 0;
+
+	kbuf = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	len = kacs_format_sessions(kbuf, PAGE_SIZE);
+	if (len < 0) {
+		kfree(kbuf);
+		return (ssize_t)len;
+	}
+
+	ret = simple_read_from_buffer(buf, count, ppos, kbuf, len);
+	kfree(kbuf);
+	return ret;
+}
+
+static const struct file_operations kacs_sessions_fops = {
+	.read = kacs_sessions_show,
+	.llseek = generic_file_llseek,
+};
+
 static int __init kacs_securityfs_init(void)
 {
-	struct dentry *dir, *self_file;
+	struct dentry *dir, *self_file, *sessions_file;
 
 	dir = securityfs_create_dir("kacs", NULL);
 	if (IS_ERR(dir))
@@ -1107,6 +1241,14 @@ static int __init kacs_securityfs_init(void)
 	if (IS_ERR(self_file)) {
 		securityfs_remove(dir);
 		return PTR_ERR(self_file);
+	}
+
+	sessions_file = securityfs_create_file("sessions", 0444, dir, NULL,
+					       &kacs_sessions_fops);
+	if (IS_ERR(sessions_file)) {
+		securityfs_remove(self_file);
+		securityfs_remove(dir);
+		return PTR_ERR(sessions_file);
 	}
 
 	return 0;

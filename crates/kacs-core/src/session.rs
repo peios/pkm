@@ -125,6 +125,11 @@ impl SessionTable {
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
     }
+
+    /// Iterate over all sessions.
+    pub fn iter_sessions(&self) -> impl Iterator<Item = &LogonSession> {
+        self.sessions.iter()
+    }
 }
 
 /// Session spec wire format for kacs_create_session.
