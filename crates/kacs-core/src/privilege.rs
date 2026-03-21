@@ -311,4 +311,29 @@ mod tests {
         privs.mark_used(SE_BACKUP);
         assert_eq!(privs.used.load(Ordering::SeqCst), SE_BACKUP);
     }
+
+    #[test]
+    fn reset_respects_removal() {
+        let privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
+        privs.remove(SE_BACKUP);
+        privs.reset_to_defaults();
+        // Backup was removed — reset can't bring it back
+        assert!(!privs.check(SE_BACKUP));
+        assert!(privs.check(SE_RESTORE));
+    }
+
+    #[test]
+    fn system_token_has_all_privileges() {
+        let privs = Privileges::new_all_enabled(ALL_PRIVILEGES);
+        assert!(privs.check(SE_CREATE_TOKEN));
+        assert!(privs.check(SE_ASSIGN_PRIMARY_TOKEN));
+        assert!(privs.check(SE_TCB));
+        assert!(privs.check(SE_SECURITY));
+        assert!(privs.check(SE_BACKUP));
+        assert!(privs.check(SE_RESTORE));
+        assert!(privs.check(SE_DEBUG));
+        assert!(privs.check(SE_IMPERSONATE));
+        assert!(privs.check(SE_BIND_PRIVILEGED_PORT));
+        assert!(privs.check(SE_CREATE_JOB));
+    }
 }
