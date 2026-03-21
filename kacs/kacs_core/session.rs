@@ -5,7 +5,7 @@
 //! from the session ID. Tokens reference their session, and the logon
 //! SID is injected into the token's group list.
 
-use crate::compat::{self, AllocError, Vec};
+use crate::compat::{self, AllocError, TryClone, Vec};
 use crate::sid::Sid;
 
 /// Logon type — how the user authenticated. Matches Windows values.
@@ -49,9 +49,8 @@ pub struct LogonSession {
     pub logon_type: LogonType,
     /// Who authenticated.
     pub user_sid: Sid,
-    // Linked token pair (UAC model) — stored as opaque pointers
-    // because the token type lives in kacs_rust.rs, not kacs-core.
-    // These are managed by the kernel FFI layer.
+    /// Reference count from tokens. Session is removed when this hits zero.
+    pub refcount: core::sync::atomic::AtomicU32,
 }
 
 impl LogonSession {
@@ -106,9 +105,61 @@ impl SessionTable {
             session_id: id,
             logon_type,
             user_sid,
+            refcount: core::sync::atomic::AtomicU32::new(0),
         })?;
 
         Ok(id)
+    }
+
+    /// Increment a session's refcount (called when a token is created).
+    pub fn addref(&self, session_id: u64) {
+        if let Some(s) = self.sessions.iter().find(|s| s.session_id == session_id) {
+            s.refcount.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Decrement a session's refcount. Returns true if refcount hit zero.
+    pub fn release(&self, session_id: u64) -> bool {
+        if let Some(s) = self.sessions.iter().find(|s| s.session_id == session_id) {
+            s.refcount.fetch_sub(1, core::sync::atomic::Ordering::SeqCst) == 1
+        } else {
+            false
+        }
+    }
+
+    /// Remove a session by ID. Returns true if found and removed.
+    /// Remove a session by ID. Returns true if found and removed.
+    /// Uses linear scan + shift — fine for small tables (O(hundreds)).
+    pub fn remove(&mut self, session_id: u64) -> bool {
+        let len = self.sessions.len();
+        let mut found = false;
+        let mut write = 0;
+        for read in 0..len {
+            if self.sessions[read].session_id == session_id && !found {
+                found = true;
+                continue; // skip this element
+            }
+            if write != read {
+                // Shift element left — we can't move AtomicU32, so
+                // reconstruct the entry. Session removal is rare.
+                let s = &self.sessions[read];
+                self.sessions[write] = LogonSession {
+                    session_id: s.session_id,
+                    logon_type: s.logon_type,
+                    user_sid: s.user_sid.try_clone().unwrap_or_else(|_| {
+                        crate::sid::Sid::new(0, &[]).unwrap()
+                    }),
+                    refcount: core::sync::atomic::AtomicU32::new(
+                        s.refcount.load(core::sync::atomic::Ordering::SeqCst)
+                    ),
+                };
+            }
+            write += 1;
+        }
+        if found {
+            self.sessions.truncate(write);
+        }
+        found
     }
 
     /// Look up a session by ID.

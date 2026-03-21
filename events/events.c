@@ -8,6 +8,15 @@
  *
  * Not part of KACS — separate PKM subsystem. KACS emits events into
  * the ring buffer, but the buffer and syscall are independent.
+ *
+ * v2 scalability: the current design uses a single spinlock for all
+ * event writes across all CPUs. Under heavy audit load (thousands of
+ * events/sec from many CPUs), this becomes a contention bottleneck.
+ * The v2 architecture should use per-CPU ring buffers that are merged
+ * during drain (similar to perf_event). This requires: per-CPU
+ * allocation, CPU-local write paths (no spinlock), a merge step in
+ * eventd that reads from all CPU buffers in sequence-number order,
+ * and per-CPU mmap regions or a kernel-side merge buffer.
  */
 
 #include <linux/kernel.h>
