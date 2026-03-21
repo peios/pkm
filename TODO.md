@@ -18,27 +18,15 @@ Updated 2026-03-21. Only items NOT YET DONE.
 - [ ] SeChangeNotifyPrivilege enforcement (traverse checking in path walks)
 - [ ] unix_may_send hook (datagram socket gating — needs file SD)
 
-## Deferred to v2
+## Deferred
 
-- [ ] Per-CPU event buffers (scalability for high audit load)
-- [ ] /proc metadata hiding via security_inode_permission (non-trivial
-  inode-to-task extraction from procfs internals)
-- [ ] InheritedObjectType GUID filtering in SD inheritance
-- [ ] Per-token audit policy override bitmask
-- [ ] Resource attribute parsing from SYSTEM_RESOURCE_ATTRIBUTE_ACE
-- [ ] Windows cross-validation test corpus
-- [ ] Token spec v2 wire format (default_dacl, restricted_sids,
-  device_groups, confinement fields, full token_source)
+- [ ] Per-CPU event buffers (no load to optimize for yet)
+- [ ] /proc metadata hiding (non-trivial inode-to-task extraction)
+- [ ] Per-token audit policy override bitmask (audit categories not designed)
+- [ ] Windows cross-validation test corpus (needs Windows VM + generator script)
+- [ ] Vec-as-Box allocation pattern (blocked on kernel Rust KBox stabilization)
 
 ## Polish (non-blocking)
 
-- [ ] ADJUST_PRIVS wire format: proposal says array-of-pairs, we use
-  bitmasks. Functionally equivalent. Decide if worth changing.
-- [ ] kacs_token_set_impersonation_level: unsafe mutable cast on
-  pre-sharing clones. Safe in practice but technically UB.
-- [ ] Vec-as-Box allocation pattern — fragile. Use proper KBox when
-  kernel Rust stabilizes it.
 - [ ] Remaining unreachable pub warnings on compat items (structural,
   can't fix without changing dual-target design)
-- [ ] kacs_access_check test: needs multi-buffer syscall_buf to test
-  positive case with new 4-arg struct
