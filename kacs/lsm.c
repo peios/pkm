@@ -2140,18 +2140,21 @@ static inline int facs_check_granted(struct file *file, u32 right)
 static int kacs_file_permission(struct file *file, int mask)
 {
 	struct kacs_file_security *fsec = kacs_file(file);
+	bool facs_managed = !!(fsec->flags & KACS_FILE_FACS_MANAGED);
 
-	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+	/* For non-FACS-managed fds, skip data checks but still handle
+	 * O_PATH fchdir (MAY_EXEC on directory — see below). */
+	if (!facs_managed && !(mask & MAY_EXEC))
 		return 0;
 
-	if (mask & MAY_READ) {
+	if (facs_managed && (mask & MAY_READ)) {
 		/* FILE_READ_DATA for files, FILE_LIST_DIRECTORY for dirs.
 		 * Both are bit 0x0001 (aliased). */
 		if (!(fsec->granted & FILE_READ_DATA))
 			return -EACCES;
 	}
 
-	if (mask & MAY_WRITE) {
+	if (facs_managed && (mask & MAY_WRITE)) {
 		/* Write: need FILE_WRITE_DATA or FILE_APPEND_DATA. */
 		if (!(fsec->granted &
 		      (FILE_WRITE_DATA | FILE_APPEND_DATA)))
@@ -2164,8 +2167,29 @@ static int kacs_file_permission(struct file *file, int mask)
 		 * this is a handle-model check, not a traversal check.
 		 * FILE_TRAVERSE = FILE_EXECUTE (0x0020, aliased). */
 		if (S_ISDIR(file_inode(file)->i_mode)) {
-			if (!(fsec->granted & FILE_TRAVERSE))
-				return -EACCES;
+			if (fsec->flags & KACS_FILE_FACS_MANAGED) {
+				/* Normal fd: check granted mask. */
+				if (!(fsec->granted & FILE_TRAVERSE))
+					return -EACCES;
+			} else if (file->f_flags & O_PATH) {
+				/* O_PATH fd: live AccessCheck (§14.3). */
+				const void *sd;
+				const struct kacs_cred_security *ccred;
+				long long r;
+
+				rcu_read_lock();
+				sd = kacs_inode_get_sd(file_inode(file));
+				if (!sd) {
+					rcu_read_unlock();
+					return -EACCES;
+				}
+				ccred = kacs_cred(current_cred());
+				r = kacs_dir_access_check(ccred->token,
+							  sd, FILE_TRAVERSE);
+				rcu_read_unlock();
+				if (r < 0 || !((u32)r & FILE_TRAVERSE))
+					return -EACCES;
+			}
 		}
 	}
 
