@@ -51,13 +51,20 @@ impl KacsToken {
             }
         }
 
+        // Increment session refcount
+        let session_id = token.auth_id.0;
+
         let mut v = compat::vec_with_capacity::<KacsToken>(1)?;
         compat::vec_push(&mut v, KacsToken {
             token,
             refcount: AtomicUsize::new(1),
         })?;
         let ptr = v.as_ptr();
-        core::mem::forget(v); // leak — we manage lifetime via refcount
+        core::mem::forget(v);
+
+        // Addref AFTER successful allocation
+        kacs_session_addref(session_id);
+
         Ok(ptr as *const ())
     }
 
@@ -84,8 +91,11 @@ impl KacsToken {
         let token = unsafe { Self::from_ptr(ptr) };
         if token.refcount.fetch_sub(1, Ordering::Release) == 1 {
             core::sync::atomic::fence(Ordering::Acquire);
+            // Release session refcount before freeing
+            let session_id = token.token.auth_id.0;
             let ptr_mut = ptr as *mut KacsToken;
             drop(unsafe { compat::Vec::from_raw_parts(ptr_mut, 1, 1) });
+            kacs_session_release(session_id);
         }
     }
 }
@@ -1330,6 +1340,60 @@ pub extern "C" fn kacs_format_sessions(buf: *mut u8, buf_len: usize) -> i64 {
         core::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
     }
     data.len() as i64
+}
+
+/// Increment session refcount when a token is created.
+#[no_mangle]
+pub extern "C" fn kacs_session_addref(session_id: u64) {
+    let guard = SESSION_TABLE.lock();
+    if let Some(table) = guard.as_ref() {
+        table.addref(session_id);
+    }
+}
+
+/// Decrement session refcount. If it hits zero, remove the session
+/// and clean up linked tokens.
+#[no_mangle]
+pub extern "C" fn kacs_session_release(session_id: u64) {
+    let should_remove = {
+        let guard = SESSION_TABLE.lock();
+        match guard.as_ref() {
+            Some(table) => table.release(session_id),
+            None => false,
+        }
+    };
+
+    if should_remove {
+        // Remove linked tokens for this session
+        {
+            let mut guard = LINKED_TOKENS.lock();
+            if let Some(links) = guard.as_mut() {
+                let mut i = 0;
+                while i < links.len() {
+                    if links[i].0 == session_id {
+                        let entry = links[i];
+                        unsafe {
+                            KacsToken::drop_ref(entry.1.0);
+                            KacsToken::drop_ref(entry.2.0);
+                        }
+                        let last = links.len() - 1;
+                        if i < last {
+                            links[i] = links[last];
+                        }
+                        links.truncate(last);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        }
+
+        // Remove session from table
+        let mut guard = SESSION_TABLE.lock();
+        if let Some(table) = guard.as_mut() {
+            table.remove(session_id);
+        }
+    }
 }
 
 /// Called from C during LSM initialization.

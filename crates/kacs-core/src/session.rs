@@ -49,9 +49,8 @@ pub struct LogonSession {
     pub logon_type: LogonType,
     /// Who authenticated.
     pub user_sid: Sid,
-    // Linked token pair (UAC model) — stored as opaque pointers
-    // because the token type lives in kacs_rust.rs, not kacs-core.
-    // These are managed by the kernel FFI layer.
+    /// Reference count from tokens. Session is removed when this hits zero.
+    pub refcount: core::sync::atomic::AtomicU32,
 }
 
 impl LogonSession {
@@ -106,9 +105,48 @@ impl SessionTable {
             session_id: id,
             logon_type,
             user_sid,
+            refcount: core::sync::atomic::AtomicU32::new(0),
         })?;
 
         Ok(id)
+    }
+
+    /// Increment a session's refcount (called when a token is created).
+    pub fn addref(&self, session_id: u64) {
+        if let Some(s) = self.sessions.iter().find(|s| s.session_id == session_id) {
+            s.refcount.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Decrement a session's refcount. Returns true if refcount hit zero.
+    pub fn release(&self, session_id: u64) -> bool {
+        if let Some(s) = self.sessions.iter().find(|s| s.session_id == session_id) {
+            s.refcount.fetch_sub(1, core::sync::atomic::Ordering::SeqCst) == 1
+        } else {
+            false
+        }
+    }
+
+    /// Remove a session by ID. Returns true if found and removed.
+    pub fn remove(&mut self, session_id: u64) -> bool {
+        if let Some(idx) = self.sessions.iter().position(|s| s.session_id == session_id) {
+            // Swap-remove: move last to this position, truncate
+            let last = self.sessions.len() - 1;
+            if idx < last {
+                self.sessions[idx] = LogonSession {
+                    session_id: self.sessions[last].session_id,
+                    logon_type: self.sessions[last].logon_type,
+                    user_sid: self.sessions[last].user_sid.clone(),
+                    refcount: core::sync::atomic::AtomicU32::new(
+                        self.sessions[last].refcount.load(core::sync::atomic::Ordering::SeqCst)
+                    ),
+                };
+            }
+            self.sessions.truncate(last);
+            true
+        } else {
+            false
+        }
     }
 
     /// Look up a session by ID.

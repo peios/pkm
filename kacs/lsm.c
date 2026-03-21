@@ -57,6 +57,8 @@ extern const void *kacs_token_restrict(const void *ptr,
 extern long long kacs_create_session_impl(const void *data, size_t len);
 extern void kacs_init_session_table(const void *system_token);
 extern long long kacs_format_sessions(char *buf, size_t len);
+extern void kacs_session_addref(u64 session_id);
+extern void kacs_session_release(u64 session_id);
 extern const void *kacs_token_from_spec(const void *data, size_t len);
 extern long long kacs_access_check_sd(const void *token_ptr,
 				      const void *sd_data, size_t sd_len,
@@ -1150,6 +1152,52 @@ SYSCALL_DEFINE2(kacs_open_process_token, int, pidfd, u32, access_mask)
 	put_pid(pid);
 
 	return kacs_token_to_fd(token, access_mask);
+}
+
+/* ── Syscall: kacs_set_psb (1004) ───────────────────────────────────────── */
+
+/*
+ * Set the PIP type and trust level on a process via pidfd.
+ * Requires SeTcbPrivilege — only peinit sets PIP on services.
+ * No self-targeting for now.
+ */
+SYSCALL_DEFINE3(kacs_set_psb, int, pidfd, u32, pip_type, u32, pip_trust)
+{
+	const struct kacs_cred_security *caller;
+	struct kacs_task_security *target_tsec;
+	struct pid *pid;
+	struct task_struct *task;
+
+	/* Requires SeTcbPrivilege. */
+	caller = kacs_cred(current_real_cred());
+	if (!kacs_token_check_privilege(caller->token, KACS_PRIV_TCB))
+		return -EPERM;
+
+	/* Validate PIP values. */
+	if (pip_type != PIP_TYPE_NONE &&
+	    pip_type != PIP_TYPE_PROTECTED &&
+	    pip_type != PIP_TYPE_ISOLATED)
+		return -EINVAL;
+
+	pid = pidfd_get_pid(pidfd, NULL);
+	if (IS_ERR(pid))
+		return PTR_ERR(pid);
+
+	rcu_read_lock();
+	task = pid_task(pid, PIDTYPE_PID);
+	if (!task) {
+		rcu_read_unlock();
+		put_pid(pid);
+		return -ESRCH;
+	}
+
+	target_tsec = kacs_task(task);
+	target_tsec->pip_type = pip_type;
+	target_tsec->pip_trust = pip_trust;
+
+	rcu_read_unlock();
+	put_pid(pid);
+	return 0;
 }
 
 /* ── Syscall: kacs_create_token (1002) ──────────────────────────────────── */
