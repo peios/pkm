@@ -97,7 +97,8 @@ RUN scripts/config \
         --set-val VIRTIO_NET y \
         --set-val DEVTMPFS y \
         --set-val DEVTMPFS_MOUNT y \
-        --set-val TMPFS y && \
+        --set-val TMPFS y \
+        --set-val STRICT_DEVMEM y && \
     make LLVM=1 olddefconfig
 
 # PKM syscalls: register in x86_64 syscall table

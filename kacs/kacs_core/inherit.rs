@@ -131,7 +131,7 @@ fn compute_acl(
     creator_acl: Option<&Acl>,
     creator_protected: bool,
     creator_present: bool,
-    token: &Token,
+    _token: &Token,
     owner: &Sid,
     group: &Sid,
     object_class: ObjectClass,

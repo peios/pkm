@@ -20,6 +20,8 @@
 #include <linux/eventfd.h>
 #include <linux/ktime.h>
 #include <linux/spinlock.h>
+#include <linux/uidgid.h>
+#include <linux/cred.h>
 
 /* ── Event header (stamped by kernel, unforgeable) ─────────────────────── */
 
@@ -190,7 +192,7 @@ int peios_event_emit_kernel(const void *body, u32 body_len)
 	hdr.timestamp_ns = ktime_get_ns();
 	hdr.emitter_pid = current->tgid;
 	hdr.emitter_tid = current->pid;
-	hdr.emitter_uid = 0; /* TODO: read projected UID from token */
+	hdr.emitter_uid = from_kuid(&init_user_ns, current_fsuid());
 	hdr.payload_len = (u16)body_len;
 	hdr.source = EVENT_SOURCE_KERNEL;
 	hdr._pad = 0;

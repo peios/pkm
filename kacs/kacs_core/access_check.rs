@@ -181,6 +181,7 @@ fn descendant_indices(tree: &[ObjectTypeNode], idx: usize) -> Result<Vec<usize>,
 }
 
 /// Return indices of direct children of tree[idx].
+#[allow(dead_code)] // Used when full object tree evaluation is wired up
 fn child_indices(tree: &[ObjectTypeNode], idx: usize) -> Result<Vec<usize>, AllocError> {
     let child_level = tree[idx].level + 1;
     let mut result = Vec::new();
@@ -600,7 +601,7 @@ fn pre_sacl_walk(
     granted: &mut u32,
     privilege_granted: &mut u32,
     mandatory_decided: &mut u32,
-    resource_attributes: &mut Vec<crate::token::ClaimEntry>,
+    _resource_attributes: &mut Vec<crate::token::ClaimEntry>,
     policy_sids: &mut Vec<Sid>,
 ) -> Result<(), AllocError> {
     let mut mic_ace: Option<&crate::ace::Ace> = None;
@@ -772,7 +773,7 @@ fn integrity_level_from_label_sid(sid: &Sid) -> crate::token::IntegrityLevel {
 /// - Revoke privilege-granted rights outside the allowed set
 fn enforce_pip(
     ace_data: &crate::ace::Ace,
-    token: &Token,
+    _token: &Token,
     mapping: &GenericMapping,
     decided: &mut u32,
     granted: &mut u32,

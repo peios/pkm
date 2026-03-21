@@ -17,7 +17,7 @@ mod kacs_core;
 pub use kacs_core::*;
 
 use core::ffi::c_int;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Global token ID counter. Each token gets a unique ID.
 static NEXT_TOKEN_ID: AtomicU64 = AtomicU64::new(1);
@@ -424,6 +424,51 @@ pub extern "C" fn kacs_token_same_user(a: *const (), b: *const ()) -> c_int {
     if ka.token.user_sid == kb.token.user_sid { 1 } else { 0 }
 }
 
+// ── Group adjustment ──────────────────────────────────────────────────────
+
+/// Enable or disable a group entry by index.
+/// Mandatory groups (SE_GROUP_MANDATORY) cannot be disabled.
+/// Returns 0 on success, -EINVAL on bad index or mandatory violation.
+#[no_mangle]
+pub extern "C" fn kacs_token_adjust_group(
+    ptr: *const (),
+    index: u32,
+    enable: c_int,
+) -> c_int {
+    if ptr.is_null() {
+        return -22;
+    }
+    // Need mutable access for group attributes
+    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
+    let idx = index as usize;
+    if idx >= kt.token.groups.len() {
+        return -22; // -EINVAL
+    }
+
+    let group = &mut kt.token.groups[idx];
+    if enable != 0 {
+        group.attributes |= kacs_core::group::SE_GROUP_ENABLED;
+    } else {
+        // Mandatory groups cannot be disabled
+        if group.attributes & kacs_core::group::SE_GROUP_MANDATORY != 0 {
+            return -22; // -EINVAL
+        }
+        group.attributes &= !kacs_core::group::SE_GROUP_ENABLED;
+    }
+    0
+}
+
+/// Check if a token has restricting SIDs (is a restricted token).
+/// Returns 1 if restricted, 0 if not.
+#[no_mangle]
+pub extern "C" fn kacs_token_is_restricted(ptr: *const ()) -> c_int {
+    if ptr.is_null() {
+        return 0;
+    }
+    let kt = unsafe { KacsToken::from_ptr(ptr) };
+    if kt.token.restricted_sids.is_some() { 1 } else { 0 }
+}
+
 // ── Privilege adjustment ──────────────────────────────────────────────────
 
 /// Adjust privileges on a token: enable, disable, or permanently remove.
@@ -572,7 +617,6 @@ fn build_default_proc_sd(
 ) -> Result<kacs_core::sd::SecurityDescriptor, AllocError> {
     use kacs_core::ace::{self, Ace};
     use kacs_core::acl::Acl;
-    use kacs_core::group;
     use kacs_core::mask;
     use kacs_core::sd::SecurityDescriptor;
 
@@ -1033,29 +1077,25 @@ pub extern "C" fn kacs_rust_init() -> c_int {
 // simple text output. This tiny buffer handles the formatting needs of
 // token display and query responses without any heap allocation.
 
-/// Fixed-size buffer for formatting token info without allocation.
+/// Dynamically-growing format buffer for token display.
+/// Uses compat::Vec<u8> — allocates in kernel via KVec.
 struct FormatBuf {
-    data: [u8; 512],
-    pos: usize,
+    data: compat::Vec<u8>,
 }
 
 impl FormatBuf {
     fn new() -> Self {
         FormatBuf {
-            data: [0u8; 512],
-            pos: 0,
+            data: compat::Vec::new(),
         }
     }
 
     fn as_bytes(&self) -> &[u8] {
-        &self.data[..self.pos]
+        &self.data
     }
 
     fn byte(&mut self, b: u8) {
-        if self.pos < self.data.len() {
-            self.data[self.pos] = b;
-            self.pos += 1;
-        }
+        let _ = compat::vec_push(&mut self.data, b);
     }
 
     fn str(&mut self, s: &str) {

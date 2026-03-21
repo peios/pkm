@@ -173,7 +173,7 @@ pub fn resolve_claim(
     name: &str,
     for_allow: bool,
 ) -> Result<Value, AllocError> {
-    use crate::token::{ClaimType, ClaimValues, claim_flags};
+    use crate::token::{ClaimValues, claim_flags};
 
     for attr in claims {
         if attr.name.eq_ignore_ascii_case(name) {

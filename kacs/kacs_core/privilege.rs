@@ -171,15 +171,15 @@ impl Privileges {
     /// Check if a privilege is present AND enabled.
     #[inline]
     pub fn check(&self, privilege: u64) -> bool {
-        let p = self.present.load(Ordering::Relaxed);
-        let e = self.enabled.load(Ordering::Relaxed);
+        let p = self.present.load(Ordering::SeqCst);
+        let e = self.enabled.load(Ordering::SeqCst);
         (p & e & privilege) == privilege
     }
 
     /// Check if a privilege is present (regardless of enabled state).
     #[inline]
     pub fn is_present(&self, privilege: u64) -> bool {
-        (self.present.load(Ordering::Relaxed) & privilege) == privilege
+        (self.present.load(Ordering::SeqCst) & privilege) == privilege
     }
 
     /// Enable a privilege. Returns false if the privilege is not present.
@@ -187,7 +187,7 @@ impl Privileges {
         if !self.is_present(privilege) {
             return false;
         }
-        self.enabled.fetch_or(privilege, Ordering::Relaxed);
+        self.enabled.fetch_or(privilege, Ordering::SeqCst);
         true
     }
 
@@ -196,28 +196,28 @@ impl Privileges {
         if !self.is_present(privilege) {
             return false;
         }
-        self.enabled.fetch_and(!privilege, Ordering::Relaxed);
+        self.enabled.fetch_and(!privilege, Ordering::SeqCst);
         true
     }
 
     /// Permanently remove a privilege. Clears from all bitmasks. Irreversible.
     pub fn remove(&self, privilege: u64) {
-        self.present.fetch_and(!privilege, Ordering::Relaxed);
-        self.enabled.fetch_and(!privilege, Ordering::Relaxed);
-        self.enabled_by_default.fetch_and(!privilege, Ordering::Relaxed);
+        self.present.fetch_and(!privilege, Ordering::SeqCst);
+        self.enabled.fetch_and(!privilege, Ordering::SeqCst);
+        self.enabled_by_default.fetch_and(!privilege, Ordering::SeqCst);
     }
 
     /// Reset all privileges to their default enabled/disabled state.
     pub fn reset_to_defaults(&self) {
-        let defaults = self.enabled_by_default.load(Ordering::Relaxed)
-            & self.present.load(Ordering::Relaxed);
-        self.enabled.store(defaults, Ordering::Relaxed);
+        let defaults = self.enabled_by_default.load(Ordering::SeqCst)
+            & self.present.load(Ordering::SeqCst);
+        self.enabled.store(defaults, Ordering::SeqCst);
     }
 
     /// Record that a privilege was exercised (for audit).
     #[inline]
     pub fn mark_used(&self, privilege: u64) {
-        self.used.fetch_or(privilege, Ordering::Relaxed);
+        self.used.fetch_or(privilege, Ordering::SeqCst);
     }
 }
 
@@ -226,10 +226,10 @@ impl Privileges {
 impl Clone for Privileges {
     fn clone(&self) -> Self {
         Privileges {
-            present: AtomicU64::new(self.present.load(Ordering::Relaxed)),
-            enabled: AtomicU64::new(self.enabled.load(Ordering::Relaxed)),
-            enabled_by_default: AtomicU64::new(self.enabled_by_default.load(Ordering::Relaxed)),
-            used: AtomicU64::new(self.used.load(Ordering::Relaxed)),
+            present: AtomicU64::new(self.present.load(Ordering::SeqCst)),
+            enabled: AtomicU64::new(self.enabled.load(Ordering::SeqCst)),
+            enabled_by_default: AtomicU64::new(self.enabled_by_default.load(Ordering::SeqCst)),
+            used: AtomicU64::new(self.used.load(Ordering::SeqCst)),
         }
     }
 }
@@ -237,10 +237,10 @@ impl Clone for Privileges {
 impl core::fmt::Debug for Privileges {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Privileges")
-            .field("present", &self.present.load(Ordering::Relaxed))
-            .field("enabled", &self.enabled.load(Ordering::Relaxed))
-            .field("enabled_by_default", &self.enabled_by_default.load(Ordering::Relaxed))
-            .field("used", &self.used.load(Ordering::Relaxed))
+            .field("present", &self.present.load(Ordering::SeqCst))
+            .field("enabled", &self.enabled.load(Ordering::SeqCst))
+            .field("enabled_by_default", &self.enabled_by_default.load(Ordering::SeqCst))
+            .field("used", &self.used.load(Ordering::SeqCst))
             .finish()
     }
 }
@@ -307,8 +307,8 @@ mod tests {
     #[test]
     fn mark_used() {
         let privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
-        assert_eq!(privs.used.load(Ordering::Relaxed), 0);
+        assert_eq!(privs.used.load(Ordering::SeqCst), 0);
         privs.mark_used(SE_BACKUP);
-        assert_eq!(privs.used.load(Ordering::Relaxed), SE_BACKUP);
+        assert_eq!(privs.used.load(Ordering::SeqCst), SE_BACKUP);
     }
 }
