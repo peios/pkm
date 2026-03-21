@@ -538,8 +538,10 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 			return -EINVAL;
 
 		fd = kacs_token_to_fd(new_token, KACS_TOKEN_ALL_ACCESS);
-		if (fd < 0)
+		if (fd < 0) {
+			kacs_token_drop(new_token);
 			return fd;
+		}
 
 		ra.result_fd = fd;
 		if (copy_to_user((void __user *)arg, &ra, sizeof(ra)))
