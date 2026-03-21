@@ -37,6 +37,9 @@ extern int kacs_token_check_privilege(const void *ptr, u64 priv_mask);
 extern int kacs_token_get_integrity(const void *ptr);
 extern int kacs_token_same_user(const void *a, const void *b);
 extern void kacs_token_set_impersonation_level(const void *ptr, int level);
+extern int kacs_session_link_tokens(u64 session_id,
+				    const void *elevated, const void *filtered);
+extern const void *kacs_session_get_linked_token(const void *token_ptr);
 extern const void *kacs_token_restrict(const void *ptr,
 				       u64 privs_to_delete,
 				       const void *data, u32 data_len,
@@ -72,7 +75,9 @@ extern long long kacs_access_check_sd(const void *token_ptr,
 #define KACS_IOC_ADJUST_PRIVS  _IOW(KACS_IOC_MAGIC, 1, struct kacs_adjust_privs_args)
 #define KACS_IOC_DUPLICATE     _IOWR(KACS_IOC_MAGIC, 2, struct kacs_duplicate_args)
 #define KACS_IOC_INSTALL       _IO(KACS_IOC_MAGIC, 3)
-#define KACS_IOC_RESTRICT      _IOWR(KACS_IOC_MAGIC, 4, struct kacs_restrict_args)
+#define KACS_IOC_RESTRICT          _IOWR(KACS_IOC_MAGIC, 4, struct kacs_restrict_args)
+#define KACS_IOC_LINK_TOKENS       _IOW(KACS_IOC_MAGIC, 5, struct kacs_link_tokens_args)
+#define KACS_IOC_GET_LINKED_TOKEN  _IOWR(KACS_IOC_MAGIC, 6, struct kacs_get_linked_token_args)
 
 /* Token query classes (§15.2) */
 #define TOKEN_CLASS_USER              1
@@ -135,6 +140,16 @@ struct kacs_restrict_args {
 	u32 _pad;
 	u64 data_ptr;		/* userspace: u32[] deny indices, then binary SIDs */
 	s32 result_fd;		/* out: new token fd */
+};
+
+struct kacs_link_tokens_args {
+	s32 elevated_fd;	/* fd to the elevated/full token */
+	s32 filtered_fd;	/* fd to the filtered/limited token */
+	u64 session_id;		/* logon session to link them on */
+};
+
+struct kacs_get_linked_token_args {
+	s32 result_fd;		/* out: fd to the partner token */
 };
 
 /* ── Credential blob ───────────────────────────────────────────────────── */
@@ -427,6 +442,78 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 
 		ra.result_fd = fd;
 		if (copy_to_user((void __user *)arg, &ra, sizeof(ra)))
+			return -EFAULT;
+		return 0;
+	}
+	case KACS_IOC_LINK_TOKENS: {
+		struct kacs_link_tokens_args la;
+		struct kacs_token_file *etf, *ftf;
+		struct fd efd, ffd;
+		int ret;
+
+		if (copy_from_user(&la, (void __user *)arg, sizeof(la)))
+			return -EFAULT;
+
+		/* Requires SeTcbPrivilege. */
+		if (!kacs_token_check_privilege(
+				kacs_cred(current_real_cred())->token,
+				KACS_PRIV_TCB))
+			return -EPERM;
+
+		efd = fdget(la.elevated_fd);
+		if (!fd_file(efd))
+			return -EBADF;
+		if (fd_file(efd)->f_op != &kacs_token_fops) {
+			fdput(efd);
+			return -EINVAL;
+		}
+		etf = fd_file(efd)->private_data;
+
+		ffd = fdget(la.filtered_fd);
+		if (!fd_file(ffd)) {
+			fdput(efd);
+			return -EBADF;
+		}
+		if (fd_file(ffd)->f_op != &kacs_token_fops) {
+			fdput(ffd);
+			fdput(efd);
+			return -EINVAL;
+		}
+		ftf = fd_file(ffd)->private_data;
+
+		ret = kacs_session_link_tokens(la.session_id,
+					       etf->token, ftf->token);
+		fdput(ffd);
+		fdput(efd);
+		return ret;
+	}
+	case KACS_IOC_GET_LINKED_TOKEN: {
+		struct kacs_get_linked_token_args ga;
+		const void *partner;
+		const void *clone;
+		int fd;
+
+		if (!(tf->access_mask & KACS_TOKEN_QUERY))
+			return -EACCES;
+
+		partner = kacs_session_get_linked_token(tf->token);
+		if (!partner)
+			return -ENOENT;
+
+		/* Return a deep clone at Identification level —
+		 * can inspect but not impersonate. */
+		clone = kacs_token_deep_clone(partner, 2,
+					      KACS_LEVEL_IDENTIFICATION);
+		kacs_token_drop(partner);
+		if (!clone)
+			return -ENOMEM;
+
+		fd = kacs_token_to_fd(clone, KACS_TOKEN_QUERY);
+		if (fd < 0)
+			return fd;
+
+		ga.result_fd = fd;
+		if (copy_to_user((void __user *)arg, &ga, sizeof(ga)))
 			return -EFAULT;
 		return 0;
 	}

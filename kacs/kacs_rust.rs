@@ -631,6 +631,11 @@ pub extern "C" fn kacs_token_restrict(
 /// Safety: accessed from syscall context (serialized by kernel locks).
 static mut SESSION_TABLE: Option<kacs_core::session::SessionTable> = None;
 
+/// Linked token pairs, indexed by session ID.
+/// Each entry: (session_id, elevated_ptr, filtered_ptr).
+/// Stored separately from SessionTable because KacsToken is local to this file.
+static mut LINKED_TOKENS: Option<compat::Vec<(u64, *const (), *const ())>> = None;
+
 /// Initialize the session table and create the SYSTEM session (session 0).
 /// Called once from kacs_init.
 #[no_mangle]
@@ -645,7 +650,10 @@ pub extern "C" fn kacs_init_session_table(system_token: *const ()) {
         }));
     }
 
-    unsafe { SESSION_TABLE = Some(table); }
+    unsafe {
+        SESSION_TABLE = Some(table);
+        LINKED_TOKENS = Some(compat::Vec::new());
+    }
 }
 
 /// Create a new logon session from a wire-format spec.
@@ -674,6 +682,92 @@ pub extern "C" fn kacs_create_session_impl(data: *const u8, len: usize) -> i64 {
         Ok(id) => id as i64,
         Err(_) => -12, // -ENOMEM
     }
+}
+
+/// Link an elevated/filtered token pair on a logon session.
+/// Returns 0 on success, negative errno on failure.
+#[no_mangle]
+pub extern "C" fn kacs_session_link_tokens(
+    session_id: u64,
+    elevated: *const (),
+    filtered: *const (),
+) -> c_int {
+    if elevated.is_null() || filtered.is_null() {
+        return -22; // -EINVAL
+    }
+
+    // Verify the session exists
+    let table = unsafe {
+        match SESSION_TABLE.as_ref() {
+            Some(t) => t,
+            None => return -22,
+        }
+    };
+    if table.get(session_id).is_none() {
+        return -22; // -EINVAL: no such session
+    }
+
+    let links = unsafe {
+        match LINKED_TOKENS.as_mut() {
+            Some(l) => l,
+            None => return -22,
+        }
+    };
+
+    // Clone both tokens (bump refcount)
+    let e = kacs_token_clone(elevated);
+    let f = kacs_token_clone(filtered);
+
+    // Replace existing link for this session, or add new
+    for entry in links.iter_mut() {
+        if entry.0 == session_id {
+            // Drop old refs
+            unsafe {
+                KacsToken::drop_ref(entry.1);
+                KacsToken::drop_ref(entry.2);
+            }
+            entry.1 = e;
+            entry.2 = f;
+            return 0;
+        }
+    }
+
+    // New link
+    if compat::vec_push(links, (session_id, e, f)).is_err() {
+        kacs_token_drop(e);
+        kacs_token_drop(f);
+        return -12; // -ENOMEM
+    }
+    0
+}
+
+/// Get the linked partner token for a given token.
+/// If the token is the elevated half, returns the filtered half (and vice versa).
+/// Returns a cloned token pointer (caller owns one ref), or null if not linked.
+#[no_mangle]
+pub extern "C" fn kacs_session_get_linked_token(token_ptr: *const ()) -> *const () {
+    if token_ptr.is_null() {
+        return core::ptr::null();
+    }
+
+    let links = unsafe {
+        match LINKED_TOKENS.as_ref() {
+            Some(l) => l,
+            None => return core::ptr::null(),
+        }
+    };
+
+    // Find which side this token is on
+    for &(_, elevated, filtered) in links.iter() {
+        if core::ptr::eq(token_ptr as *const u8, elevated as *const u8) {
+            return kacs_token_clone(filtered);
+        }
+        if core::ptr::eq(token_ptr as *const u8, filtered as *const u8) {
+            return kacs_token_clone(elevated);
+        }
+    }
+
+    core::ptr::null()
 }
 
 /// Called from C during LSM initialization.
