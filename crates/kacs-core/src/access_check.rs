@@ -29,6 +29,10 @@ pub struct AccessCheckResult {
     pub allowed: bool,
     /// Continuous audit mask for the opened handle (from alarm ACEs).
     pub continuous_audit_mask: u32,
+    /// True if a CAP staged DACL produced a different result than the
+    /// effective DACL (§11.16). Signals that a pending policy change
+    /// would alter access decisions.
+    pub staging_mismatch: bool,
 }
 
 /// Per-node result for AccessCheckResultList.
@@ -892,6 +896,7 @@ pub fn access_check(
     let mut decided: u32 = 0;
     let mut granted: u32 = 0;
     let mut privilege_granted: u32 = 0;
+    let mut staging_mismatch = false;
 
     // ACCESS_SYSTEM_SECURITY: always decided, no DACL ACE can grant it.
     decided |= mask::ACCESS_SYSTEM_SECURITY;
@@ -1108,12 +1113,7 @@ pub fn access_check(
             let rules: &[CentralAccessRule] = match policy {
                 Some(p) => &p.rules,
                 None => {
-                    // Recovery policy: GENERIC_ALL to admins, SYSTEM, owner rights.
-                    // Since CAP is an AND intersection, recovery policy means
-                    // "no further restriction from this missing policy."
-                    // We skip evaluation — the recovery policy ACL contains
-                    // GENERIC_ALL with OWNER RIGHTS, which after mapping and
-                    // evaluation would not restrict anything the DACL granted.
+                    // Recovery policy: no further restriction.
                     continue;
                 }
             };
@@ -1142,9 +1142,14 @@ pub fn access_check(
                     sacl: None,
                 };
 
-                // Evaluate the rule's DACL through the normal pipeline.
-                // No backup/restore intent for policy rules (§11.17).
-                // No recursive CAP evaluation (policy_sids from this SD is empty).
+                // Clone the object tree for this rule's evaluation (§11.17).
+                let mut rule_tree: Option<Vec<ObjectTypeNode>> =
+                    if let Some(ref tree) = object_tree {
+                        Some(tree.to_vec())
+                    } else {
+                        None
+                    };
+
                 let eff_result = evaluate_rule_dacl(
                     &eff_sd,
                     token,
@@ -1154,15 +1159,61 @@ pub fn access_check(
                     self_sid,
                     &resource_attributes,
                     local_claims,
+                    rule_tree.as_deref_mut(),
                 );
 
                 match eff_result {
                     Ok(eff_granted) => {
                         cap_effective &= eff_granted;
+                        // Per-node intersection (§11.17)
+                        if let (Some(ref mut tree), Some(ref rtree)) =
+                            (&mut object_tree, &rule_tree)
+                        {
+                            for (node, rnode) in tree.iter_mut().zip(rtree.iter()) {
+                                node.granted &= rnode.granted;
+                            }
+                        }
                     }
                     Err(_) => {
                         // Fail-closed with privilege escape hatch (§11.16)
                         cap_effective &= privilege_granted;
+                        if let Some(ref mut tree) = object_tree {
+                            for node in tree.iter_mut() {
+                                node.granted &= privilege_granted;
+                            }
+                        }
+                    }
+                }
+
+                // Staged DACL: evaluate proposed policy, log diff (§11.16)
+                if let Some(ref staged_dacl) = rule.staged_dacl {
+                    let stg_sd = SecurityDescriptor {
+                        control: crate::sd::SE_DACL_PRESENT | crate::sd::SE_SELF_RELATIVE,
+                        owner: sd.owner.try_clone()?,
+                        group: sd.group.try_clone()?,
+                        dacl: Some(staged_dacl.try_clone()?),
+                        sacl: None,
+                    };
+                    let mut stg_tree: Option<Vec<ObjectTypeNode>> =
+                        if let Some(ref tree) = object_tree {
+                            Some(tree.to_vec())
+                        } else {
+                            None
+                        };
+                    let stg_result = evaluate_rule_dacl(
+                        &stg_sd,
+                        token,
+                        mapping,
+                        mapped_desired,
+                        max_allowed_mode,
+                        self_sid,
+                        &resource_attributes,
+                        local_claims,
+                        stg_tree.as_deref_mut(),
+                    );
+                    let stg_granted = stg_result.unwrap_or(0);
+                    if stg_granted != cap_effective {
+                        staging_mismatch = true;
                     }
                 }
             }
@@ -1196,11 +1247,67 @@ pub fn access_check(
         granted: final_granted,
         allowed,
         continuous_audit_mask: 0, // TODO: audit
+        staging_mismatch,
     })
+}
+
+/// AccessCheckResultList (§11.1): per-node result variant.
+///
+/// Same pipeline as access_check, but returns a separate verdict for
+/// each node in the object type list. A denial on one property fails
+/// that property only, not the whole request. Requires a tree.
+pub fn access_check_result_list(
+    sd: &SecurityDescriptor,
+    token: &Token,
+    desired: u32,
+    mapping: &GenericMapping,
+    object_tree: &mut [ObjectTypeNode],
+    self_sid: Option<&Sid>,
+    local_claims: &[crate::token::ClaimEntry],
+    policies: &[CentralAccessPolicy],
+    privilege_intent: u32,
+) -> Result<(Vec<NodeResult>, bool), AccessCheckError> {
+    if object_tree.is_empty() {
+        return Err(AccessCheckError::InvalidSecurityDescriptor);
+    }
+
+    // Run the same core pipeline with the tree.
+    let result = access_check(
+        sd, token, desired, mapping,
+        Some(object_tree), self_sid,
+        local_claims, policies, privilege_intent,
+    )?;
+
+    let mapped_desired = map_generic_bits(desired, mapping) & !mask::MAXIMUM_ALLOWED;
+    let max_allowed_mode = desired & mask::MAXIMUM_ALLOWED != 0;
+
+    // Collect per-node results (§11.17 AccessCheckResultList).
+    let mut node_results = compat::vec_with_capacity::<NodeResult>(object_tree.len())?;
+    for node in object_tree.iter() {
+        let node_allowed = if mapped_desired == 0 {
+            true
+        } else {
+            (node.granted & mapped_desired) == mapped_desired
+        };
+        let node_granted = if max_allowed_mode {
+            node.granted
+        } else if node_allowed {
+            mapped_desired
+        } else {
+            0
+        };
+        compat::vec_push(&mut node_results, NodeResult {
+            granted: node_granted,
+            allowed: node_allowed,
+        })?;
+    }
+
+    Ok((node_results, result.staging_mismatch))
 }
 
 /// Evaluate a CAP rule's DACL through the normal pipeline.
 /// No backup/restore intent. No recursive CAP evaluation.
+/// When object_tree is provided, per-node state is evaluated.
 fn evaluate_rule_dacl(
     sd: &SecurityDescriptor,
     token: &Token,
@@ -1210,6 +1317,7 @@ fn evaluate_rule_dacl(
     self_sid: Option<&Sid>,
     resource_attributes: &[crate::token::ClaimEntry],
     local_claims: &[crate::token::ClaimEntry],
+    mut object_tree: Option<&mut [ObjectTypeNode]>,
 ) -> Result<u32, AccessCheckError> {
     // Step 0: impersonation gate
     if token.token_type == TokenType::Impersonation
@@ -1254,7 +1362,7 @@ fn evaluate_rule_dacl(
         sd,
         &enriched,
         mapping,
-        None,
+        object_tree.as_deref_mut(),
         &sid_match,
         desired,
         max_allowed_mode,

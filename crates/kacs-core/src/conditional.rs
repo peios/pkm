@@ -1298,7 +1298,7 @@ mod tests {
         }
     }
 
-    fn bare(token: &Token) -> EnrichedToken {
+    fn bare<'a>(token: &'a Token) -> EnrichedToken<'a> {
         EnrichedToken {
             token,
             has_owner_rights: false,
