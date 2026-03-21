@@ -20,6 +20,10 @@
 #include <linux/net.h>
 #include <linux/pid.h>
 #include <linux/pidfd.h>
+#include <linux/fs.h>
+#include <linux/mman.h>
+#include <linux/dcache.h>
+#include <linux/xattr.h>
 #include <net/sock.h>
 
 /* ── Rust FFI declarations ─────────────────────────────────────────────── */
@@ -266,6 +270,7 @@ struct kacs_sock_security {
 
 struct kacs_file_security {
 	u32 granted;			/* immutable after open */
+	u32 continuous_audit_mask;	/* from SACL alarm ACEs at open time */
 	u8  flags;			/* KACS_FILE_* flags */
 };
 
@@ -1886,6 +1891,262 @@ static int kacs_file_open(struct file *file)
 	return 0;
 }
 
+/* ── Use-time enforcement — granted mask checks (§14.3) ───────────────── */
+
+/*
+ * Helper: check that a FACS-managed fd has a required right.
+ * Returns 0 on success, -EACCES if the right is missing.
+ * Returns 0 for non-FACS-managed fds (allow through).
+ */
+static inline int facs_check_granted(struct file *file, u32 right)
+{
+	struct kacs_file_security *fsec = kacs_file(file);
+	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+		return 0;
+	return (fsec->granted & right) == right ? 0 : -EACCES;
+}
+
+/* security_file_permission — read/write/readdir (§14.3) */
+static int kacs_file_permission(struct file *file, int mask)
+{
+	struct kacs_file_security *fsec = kacs_file(file);
+
+	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+		return 0;
+
+	if (mask & MAY_READ) {
+		/* FILE_READ_DATA for files, FILE_LIST_DIRECTORY for dirs.
+		 * Both are bit 0x0001 (aliased). */
+		if (!(fsec->granted & FILE_READ_DATA))
+			return -EACCES;
+	}
+
+	if (mask & MAY_WRITE) {
+		/* Write: need FILE_WRITE_DATA or FILE_APPEND_DATA.
+		 * Positioned writes (pwrite) are handled by kernel patches
+		 * 1-4 which deny on append-only fds. This hook sees both
+		 * sequential and positioned writes as MAY_WRITE.
+		 * FILE_WRITE_DATA is a superset of FILE_APPEND_DATA for
+		 * sequential writes. */
+		if (!(fsec->granted &
+		      (FILE_WRITE_DATA | FILE_APPEND_DATA)))
+			return -EACCES;
+	}
+
+	return 0;
+}
+
+/* security_file_truncate — ftruncate (§14.3) */
+static int kacs_file_truncate(struct file *file)
+{
+	/* Truncation mutates existing byte positions — needs
+	 * FILE_WRITE_DATA, not just FILE_APPEND_DATA. */
+	return facs_check_granted(file, FILE_WRITE_DATA);
+}
+
+/* security_mmap_file — mmap (§14.3) */
+static int kacs_mmap_file(struct file *file, unsigned long reqprot,
+			  unsigned long prot, unsigned long flags)
+{
+	struct kacs_file_security *fsec;
+
+	if (!file)
+		return 0; /* anonymous mapping */
+
+	fsec = kacs_file(file);
+	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+		return 0;
+
+	if (prot & PROT_READ) {
+		if (!(fsec->granted & FILE_READ_DATA))
+			return -EACCES;
+	}
+
+	if ((prot & PROT_WRITE) && (flags & MAP_SHARED)) {
+		/* Shared writable mapping allows arbitrary byte-position
+		 * writes — needs FILE_WRITE_DATA, not FILE_APPEND_DATA. */
+		if (!(fsec->granted & FILE_WRITE_DATA))
+			return -EACCES;
+	}
+
+	if ((prot & PROT_WRITE) && !(flags & MAP_SHARED)) {
+		/* Private writable mapping (copy-on-write) — no write to
+		 * file, but needs read access to populate the pages. */
+		if (!(fsec->granted & FILE_READ_DATA))
+			return -EACCES;
+	}
+
+	if (prot & PROT_EXEC) {
+		if (!(fsec->granted & FILE_EXECUTE))
+			return -EACCES;
+	}
+
+	/* Continuous audit mask bit 25: per-SID no-mmap flag.
+	 * Set when an alarm ACE matching the opener's SID has bit 25.
+	 * Denies mmap regardless of granted rights (§14.3). */
+#define KACS_AUDIT_NO_MMAP	0x02000000
+	if (fsec->continuous_audit_mask & KACS_AUDIT_NO_MMAP)
+		return -EACCES;
+
+	return 0;
+}
+
+/* security_file_mprotect — mprotect (§14.3) */
+static int kacs_file_mprotect(struct vm_area_struct *vma,
+			      unsigned long reqprot, unsigned long prot)
+{
+	struct file *file = vma->vm_file;
+	struct kacs_file_security *fsec;
+
+	if (!file)
+		return 0; /* anonymous mapping */
+
+	fsec = kacs_file(file);
+	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+		return 0;
+
+	/* Prevents escalation: a PROT_READ mapping cannot be upgraded
+	 * to writable unless FILE_WRITE_DATA is in the granted mask. */
+	if ((prot & PROT_WRITE) && (vma->vm_flags & VM_SHARED)) {
+		if (!(fsec->granted & FILE_WRITE_DATA))
+			return -EACCES;
+	}
+
+	if (prot & PROT_EXEC) {
+		if (!(fsec->granted & FILE_EXECUTE))
+			return -EACCES;
+	}
+
+	return 0;
+}
+
+/* security_file_lock — flock/fcntl locking (§14.3) */
+static int kacs_file_lock(struct file *file, unsigned int cmd)
+{
+	struct kacs_file_security *fsec = kacs_file(file);
+
+	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+		return 0;
+
+	/* cmd is LOCK_SH(1)/LOCK_EX(2) from flock, or
+	 * F_RDLCK(0)/F_WRLCK(1) from fcntl locking. */
+	if (cmd == LOCK_SH || cmd == F_RDLCK) {
+		if (!(fsec->granted & FILE_READ_DATA))
+			return -EACCES;
+	} else if (cmd == LOCK_EX || cmd == F_WRLCK) {
+		if (!(fsec->granted &
+		      (FILE_WRITE_DATA | FILE_APPEND_DATA)))
+			return -EACCES;
+	}
+
+	return 0;
+}
+
+/* security_file_fcntl — F_SETFL enforcement (§14.3) */
+static int kacs_file_fcntl(struct file *file, unsigned int cmd,
+			   unsigned long arg)
+{
+	struct kacs_file_security *fsec = kacs_file(file);
+
+	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+		return 0;
+
+	if (cmd == F_SETFL) {
+		unsigned long changed = arg ^ file->f_flags;
+
+		/* Adding O_NOATIME: requires FILE_WRITE_ATTRIBUTES. */
+		if ((changed & O_NOATIME) && (arg & O_NOATIME)) {
+			if (!(fsec->granted & FILE_WRITE_ATTRIBUTES))
+				return -EACCES;
+		}
+
+		/* Clearing O_APPEND: denied if fd has FILE_APPEND_DATA
+		 * but not FILE_WRITE_DATA. Removing append-only mode
+		 * would allow arbitrary overwrites through an fd that
+		 * was only granted append rights. */
+		if ((changed & O_APPEND) && !(arg & O_APPEND)) {
+			if ((fsec->granted & FILE_APPEND_DATA) &&
+			    !(fsec->granted & FILE_WRITE_DATA))
+				return -EPERM;
+		}
+
+		/* Setting O_APPEND: always allowed (privilege reduction). */
+	}
+
+	return 0;
+}
+
+/* security_file_ioctl — classified allowlist for regular files (§14.3) */
+static int kacs_file_ioctl(struct file *file, unsigned int cmd,
+			   unsigned long arg)
+{
+	struct kacs_file_security *fsec = kacs_file(file);
+	struct inode *inode = file_inode(file);
+
+	if (!(fsec->flags & KACS_FILE_FACS_MANAGED))
+		return 0;
+
+	if (S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode)) {
+		/* Regular files and directories: classified allowlist.
+		 * Known ioctls mapped to specific rights; unknown denied. */
+		switch (cmd) {
+		case FS_IOC_GETFLAGS:
+		case FS_IOC_FSGETXATTR:
+			return facs_check_granted(file, FILE_READ_ATTRIBUTES);
+
+		case FS_IOC_SETFLAGS:
+		case FS_IOC_FSSETXATTR:
+			return facs_check_granted(file, FILE_WRITE_ATTRIBUTES);
+
+		case FICLONE:
+		case FICLONERANGE:
+			return facs_check_granted(file, FILE_WRITE_DATA);
+
+		case FS_IOC_FIEMAP:
+			return facs_check_granted(file, FILE_READ_DATA);
+
+		case FITRIM:
+			return facs_check_granted(file, FILE_WRITE_DATA);
+
+		default:
+			/* Unclassified ioctl on regular file/dir — deny.
+			 * The set of filesystem ioctls is small and
+			 * enumerable; unknown ioctls represent an
+			 * unaudited mutation surface. */
+			return -EACCES;
+		}
+	}
+
+	/* Device nodes, pipes, sockets, other special files:
+	 * device ioctl authority is primarily gated at open time
+	 * by the device node's SD. Ioctls are allowed if the fd
+	 * has at least one data right OR the IOCTL_ONLY flag. */
+	if (fsec->flags & KACS_FILE_IOCTL_ONLY)
+		return 0;
+	if (fsec->granted & (FILE_READ_DATA | FILE_WRITE_DATA
+			     | FILE_APPEND_DATA | FILE_EXECUTE))
+		return 0;
+
+	return -EACCES;
+}
+
+/* security_file_ioctl_compat — same policy as file_ioctl */
+static int kacs_file_ioctl_compat(struct file *file, unsigned int cmd,
+				  unsigned long arg)
+{
+	return kacs_file_ioctl(file, cmd, arg);
+}
+
+/* security_file_receive — fd transfer (§14.3) */
+static int kacs_file_receive(struct file *file)
+{
+	/* Unconditional allow. The fd is a capability token —
+	 * possession is authorization. The granted mask was decided
+	 * at open time against the opener's identity. Controlling
+	 * who may pass fds is an IPC concern, not a file concern. */
+	return 0;
+}
+
 /* ── Inode creation hooks — parent directory rights (§14.3) ───────────── */
 
 /*
@@ -2057,6 +2318,15 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_symlink, kacs_inode_symlink),
 	LSM_HOOK_INIT(inode_init_security, kacs_inode_init_security),
 	LSM_HOOK_INIT(file_open, kacs_file_open),
+	LSM_HOOK_INIT(file_permission, kacs_file_permission),
+	LSM_HOOK_INIT(file_truncate, kacs_file_truncate),
+	LSM_HOOK_INIT(mmap_file, kacs_mmap_file),
+	LSM_HOOK_INIT(file_mprotect, kacs_file_mprotect),
+	LSM_HOOK_INIT(file_lock, kacs_file_lock),
+	LSM_HOOK_INIT(file_fcntl, kacs_file_fcntl),
+	LSM_HOOK_INIT(file_ioctl, kacs_file_ioctl),
+	LSM_HOOK_INIT(file_ioctl_compat, kacs_file_ioctl_compat),
+	LSM_HOOK_INIT(file_receive, kacs_file_receive),
 	LSM_HOOK_INIT(file_free_security, kacs_file_free_security),
 };
 
