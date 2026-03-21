@@ -246,21 +246,28 @@ SYSCALL_DEFINE2(event_emit, const void __user *, body, u32, body_len)
 	 * attempts to forge kernel-namespace events.
 	 */
 	{
-		u32 check_len = body_len < 64 ? body_len : 64;
+		u32 check_len = body_len < 128 ? body_len : 128;
 		const u8 *p = kbody;
 		u32 i;
 
 		for (i = 0; i + 5 <= check_len; i++) {
-			if (p[i] == 'k' && p[i+1] == 'a' && p[i+2] == 'c' &&
-			    p[i+3] == 's' && p[i+4] == '.') {
+			if ((p[i]   == 'k' || p[i]   == 'K') &&
+			    (p[i+1] == 'a' || p[i+1] == 'A') &&
+			    (p[i+2] == 'c' || p[i+2] == 'C') &&
+			    (p[i+3] == 's' || p[i+3] == 'S') &&
+			     p[i+4] == '.') {
 				kfree(kbody);
 				return -EPERM;
 			}
 		}
 		for (i = 0; i + 7 <= check_len; i++) {
-			if (p[i] == 'k' && p[i+1] == 'e' && p[i+2] == 'r' &&
-			    p[i+3] == 'n' && p[i+4] == 'e' && p[i+5] == 'l' &&
-			    p[i+6] == '.') {
+			if ((p[i]   == 'k' || p[i]   == 'K') &&
+			    (p[i+1] == 'e' || p[i+1] == 'E') &&
+			    (p[i+2] == 'r' || p[i+2] == 'R') &&
+			    (p[i+3] == 'n' || p[i+3] == 'N') &&
+			    (p[i+4] == 'e' || p[i+4] == 'E') &&
+			    (p[i+5] == 'l' || p[i+5] == 'L') &&
+			     p[i+6] == '.') {
 				kfree(kbody);
 				return -EPERM;
 			}

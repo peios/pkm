@@ -366,8 +366,12 @@ pub extern "C" fn kacs_token_query(
                 for &b in &0u32.to_le_bytes() { out.byte(b); }
             }
         }
-        15 => { // TokenAppContainerSid — not implemented, return empty
-            // AppContainer SID is part of confinement model
+        15 => { // TokenAppContainerSid — confinement SID (§11.14)
+            if let Some(ref csid) = token.confinement_sid {
+                if let Ok(bytes) = csid.to_bytes() {
+                    for &b in bytes.iter() { out.byte(b); }
+                }
+            }
         }
         16 => { // TokenCapabilities — confinement capabilities
             let count = token.confinement_capabilities.len() as u32;
@@ -391,6 +395,22 @@ pub extern "C" fn kacs_token_query(
             if let Ok(bytes) = token.logon_sid.to_bytes() {
                 for &b in bytes.iter() { out.byte(b); }
             }
+        }
+        20 => { // TokenDefaultDacl — self-relative binary SD fragment
+            if let Some(ref dacl) = token.default_dacl {
+                if let Ok(bytes) = dacl.to_bytes() {
+                    for &b in bytes.iter() { out.byte(b); }
+                }
+            }
+        }
+        21 => { // TokenImpersonationLevel — [level:u32le]
+            let level = match token.impersonation_level {
+                kacs_core::token::ImpersonationLevel::Anonymous => 0u32,
+                kacs_core::token::ImpersonationLevel::Identification => 1u32,
+                kacs_core::token::ImpersonationLevel::Impersonation => 2u32,
+                kacs_core::token::ImpersonationLevel::Delegation => 3u32,
+            };
+            for &b in &level.to_le_bytes() { out.byte(b); }
         }
         _ => return -22, // -EINVAL
     };
