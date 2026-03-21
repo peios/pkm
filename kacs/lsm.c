@@ -4041,6 +4041,86 @@ SYSCALL_DEFINE9(kacs_open, int, dirfd, const char __user *, path,
 		}
 	}
 
+	/* If a creator SD was provided and a file was created, stamp it
+	 * over the inherited SD. Two-step: create inherited first (via
+	 * inode_init_security in VFS path), then replace with the
+	 * merged creator+inherited SD. The window is microseconds and
+	 * the inherited SD is safe (grants creator access). */
+	if (sd_buf && sd_len > 0 && (how.flags & O_CREAT)) {
+		CLASS(fd, cf)((unsigned int)fd);
+		if (!fd_empty(cf)) {
+			struct inode *ci = file_inode(fd_file(cf));
+			struct kacs_inode_security *cisec = kacs_inode(ci);
+			const void *existing;
+			const void *merged;
+			void *ksd_creator;
+			void *merged_bytes;
+			int merged_len;
+
+			ksd_creator = kmalloc(sd_len, GFP_KERNEL);
+			if (!ksd_creator) {
+				ksys_close((unsigned int)fd);
+				return -ENOMEM;
+			}
+			if (copy_from_user(ksd_creator, sd_buf, sd_len)) {
+				kfree(ksd_creator);
+				ksys_close((unsigned int)fd);
+				return -EFAULT;
+			}
+
+			/* Merge creator SD with existing inherited SD. */
+			rcu_read_lock();
+			existing = rcu_dereference(cisec->sd_cache);
+			if (existing && existing != KACS_SD_CORRUPT) {
+				/* Merge all components from creator into existing. */
+				merged = kacs_sd_merge_components(
+					existing, ksd_creator, sd_len,
+					OWNER_SECURITY_INFORMATION
+					| GROUP_SECURITY_INFORMATION
+					| DACL_SECURITY_INFORMATION
+					| SACL_SECURITY_INFORMATION);
+			} else {
+				/* No existing SD — use creator SD directly. */
+				merged = kacs_sd_from_bytes(ksd_creator, sd_len);
+			}
+			rcu_read_unlock();
+			kfree(ksd_creator);
+
+			if (merged) {
+				/* Write merged SD to xattr + update cache. */
+				merged_len = kacs_sd_to_bytes(merged, NULL, 0);
+				if (merged_len > 0) {
+					merged_bytes = kmalloc(merged_len, GFP_KERNEL);
+					if (merged_bytes) {
+						kacs_sd_to_bytes(merged, merged_bytes, merged_len);
+						inode_lock(ci);
+						__vfs_setxattr_noperm(
+							file_mnt_idmap(fd_file(cf)),
+							fd_file(cf)->f_path.dentry,
+							KACS_SD_XATTR,
+							merged_bytes, merged_len, 0);
+						{
+							const void *old_cached =
+								rcu_dereference_protected(
+									cisec->sd_cache,
+									lockdep_is_held(&ci->i_rwsem));
+							rcu_assign_pointer(cisec->sd_cache, merged);
+							if (old_cached && old_cached != KACS_SD_CORRUPT)
+								kfree_rcu_mightsleep((void *)old_cached);
+						}
+						inode_unlock(ci);
+						kfree(merged_bytes);
+						/* merged is now owned by cache */
+					} else {
+						kacs_proc_sd_drop(merged);
+					}
+				} else {
+					kacs_proc_sd_drop(merged);
+				}
+			}
+		}
+	}
+
 	/* Set creation status for caller. */
 	if (status_out) {
 		u32 status = (how.flags & O_CREAT) ? 1 : 0;
