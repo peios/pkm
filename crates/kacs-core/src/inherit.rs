@@ -33,12 +33,17 @@ pub enum ObjectClass {
 /// `token`: the creating thread's effective token.
 /// `object_class`: Container or NonContainer.
 /// `mapping`: GenericMapping for the new object's type.
+/// `child_type_guid`: the new object's schema class GUID (for
+///   InheritedObjectType filtering). Files pass None. Registry/directory
+///   objects pass the GUID from the schema. ACEs with an inherited_object_type
+///   that doesn't match are skipped during inheritance.
 pub fn compute_inherited_sd(
     parent_sd: Option<&SecurityDescriptor>,
     creator_sd: Option<&SecurityDescriptor>,
     token: &Token,
     object_class: ObjectClass,
     mapping: &GenericMapping,
+    child_type_guid: Option<&crate::guid::Guid>,
 ) -> Result<SecurityDescriptor, AllocError> {
     // --- Owner ---
     let owner = match creator_sd.and_then(|csd| csd.owner.as_ref()) {
@@ -64,6 +69,7 @@ pub fn compute_inherited_sd(
         object_class,
         mapping,
         true, // is_dacl
+        child_type_guid,
     )?;
 
     // --- SACL ---
@@ -78,6 +84,7 @@ pub fn compute_inherited_sd(
         object_class,
         mapping,
         false, // not dacl
+        child_type_guid,
     )?;
 
     let mut control = SE_SELF_RELATIVE;
@@ -145,6 +152,7 @@ fn compute_acl(
     object_class: ObjectClass,
     mapping: &GenericMapping,
     is_dacl: bool,
+    child_type_guid: Option<&crate::guid::Guid>,
 ) -> Result<Option<Acl>, AllocError> {
     if creator_present && creator_protected {
         // Creator supplied a protected ACL — use it as-is, no parent inheritance
@@ -172,7 +180,7 @@ fn compute_acl(
 
         // Inheritable ACEs from parent
         if let Some(pacl) = parent_acl {
-            let inherited = inherit_aces_from_parent(pacl, owner, group, object_class, mapping)?;
+            let inherited = inherit_aces_from_parent(pacl, owner, group, object_class, mapping, child_type_guid)?;
             compat::vec_extend(&mut aces, &inherited)?;
         }
 
@@ -185,7 +193,7 @@ fn compute_acl(
 
     // No creator ACL supplied
     if let Some(pacl) = parent_acl {
-        let inherited = inherit_aces_from_parent(pacl, owner, group, object_class, mapping)?;
+        let inherited = inherit_aces_from_parent(pacl, owner, group, object_class, mapping, child_type_guid)?;
         if !inherited.is_empty() {
             return Ok(Some(Acl::with_aces(inherited)));
         }
@@ -211,6 +219,7 @@ fn inherit_aces_from_parent(
     group: &Sid,
     object_class: ObjectClass,
     mapping: &GenericMapping,
+    child_type_guid: Option<&crate::guid::Guid>,
 ) -> Result<Vec<Ace>, AllocError> {
     let mut result = Vec::new();
     let is_container = object_class == ObjectClass::Container;
@@ -220,6 +229,17 @@ fn inherit_aces_from_parent(
         let oi = parent_ace.flags & ace::OBJECT_INHERIT_ACE != 0;
         let np = parent_ace.flags & ace::NO_PROPAGATE_INHERIT_ACE != 0;
         let io = parent_ace.flags & ace::INHERIT_ONLY_ACE != 0;
+
+        // InheritedObjectType filtering: if the ACE specifies a type
+        // that this child must be, skip it if the child doesn't match.
+        // Files pass None (untyped) — all ACEs apply.
+        if let Some(ref inherited_ot) = parent_ace.inherited_object_type {
+            match child_type_guid {
+                Some(child_guid) if child_guid == inherited_ot => { /* match, continue */ }
+                Some(_) => continue, // child is a different type, skip
+                None => { /* untyped child, apply all ACEs */ }
+            }
+        }
 
         // Determine if this ACE is inherited by this object type.
         // Containers inherit CI ACEs directly and OI ACEs as inherit-only
@@ -362,7 +382,7 @@ mod tests {
         ]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 1);
@@ -379,7 +399,7 @@ mod tests {
         ]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 0); // CI doesn't apply to files
@@ -392,7 +412,7 @@ mod tests {
         ]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::Container, &FILE_GENERIC_MAPPING,
+            ObjectClass::Container, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 1);
@@ -408,7 +428,7 @@ mod tests {
         ]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::Container, &FILE_GENERIC_MAPPING,
+            ObjectClass::Container, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 1);
@@ -426,7 +446,7 @@ mod tests {
         ]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 1);
@@ -451,7 +471,7 @@ mod tests {
         let parent = parent_sd(alloc::vec![ace]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::Container, &FILE_GENERIC_MAPPING,
+            ObjectClass::Container, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 1);
@@ -474,7 +494,7 @@ mod tests {
         ]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::Container, &FILE_GENERIC_MAPPING,
+            ObjectClass::Container, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 1);
@@ -492,7 +512,7 @@ mod tests {
         ]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 1);
@@ -507,7 +527,7 @@ mod tests {
         ]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 1);
@@ -544,7 +564,7 @@ mod tests {
         };
         let child = compute_inherited_sd(
             Some(&parent), Some(&creator), &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         // Only the creator's explicit ACE, no parent inheritance
@@ -560,7 +580,7 @@ mod tests {
     fn no_parent_uses_default() {
         let child = compute_inherited_sd(
             None, None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         assert!(child.dacl.is_some()); // gets default (empty for now)
         assert!(child.owner.is_some());
@@ -575,7 +595,7 @@ mod tests {
     fn owner_from_token_default() {
         let child = compute_inherited_sd(
             None, None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         // SYSTEM token's owner is user_sid (S-1-5-18)
         assert_eq!(child.owner.unwrap(), well_known::system().unwrap());
@@ -593,7 +613,7 @@ mod tests {
         };
         let child = compute_inherited_sd(
             None, Some(&creator), &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         assert_eq!(child.owner.unwrap(), alice);
     }
@@ -609,7 +629,7 @@ mod tests {
         ]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 1);
@@ -631,7 +651,7 @@ mod tests {
         }]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::Container, &FILE_GENERIC_MAPPING,
+            ObjectClass::Container, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 1);
@@ -660,7 +680,7 @@ mod tests {
         ]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 3);
@@ -686,7 +706,7 @@ mod tests {
         ]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 1); // only the CI|OI one
@@ -722,7 +742,7 @@ mod tests {
         };
         let child = compute_inherited_sd(
             Some(&parent), Some(&creator), &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 2);
@@ -759,7 +779,7 @@ mod tests {
         );
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         assert!(child.sacl.is_some());
         let sacl = child.sacl.unwrap();
@@ -788,7 +808,7 @@ mod tests {
         );
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         // No SACL inheritance (no CI/OI on parent ACE)
         assert!(child.sacl.is_none());
@@ -808,7 +828,7 @@ mod tests {
         // First generation: child directory
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::Container, &FILE_GENERIC_MAPPING,
+            ObjectClass::Container, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let child_dacl = child.dacl.as_ref().unwrap();
         assert_eq!(child_dacl.aces.len(), 1);
@@ -819,7 +839,7 @@ mod tests {
         // Second generation: grandchild file
         let grandchild = compute_inherited_sd(
             Some(&child), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let gc_dacl = grandchild.dacl.as_ref().unwrap();
         assert_eq!(gc_dacl.aces.len(), 1);
@@ -842,7 +862,7 @@ mod tests {
 
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::Container, &FILE_GENERIC_MAPPING,
+            ObjectClass::Container, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let child_dacl = child.dacl.as_ref().unwrap();
         assert_eq!(child_dacl.aces.len(), 1);
@@ -853,7 +873,7 @@ mod tests {
         // Grandchild: nothing inherited (child's ACE has no inheritance flags)
         let grandchild = compute_inherited_sd(
             Some(&child), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let gc_dacl = grandchild.dacl.as_ref().unwrap();
         assert_eq!(gc_dacl.aces.len(), 0); // nothing to inherit
@@ -897,7 +917,7 @@ mod tests {
         };
         let child = compute_inherited_sd(
             None, Some(&creator), &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         // Only the explicit ACE should be present
@@ -922,7 +942,7 @@ mod tests {
         }]);
         let child = compute_inherited_sd(
             Some(&parent), None, &test_token(),
-            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING,
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
         ).unwrap();
         let dacl = child.dacl.unwrap();
         assert_eq!(dacl.aces.len(), 1);
