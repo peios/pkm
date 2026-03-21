@@ -592,6 +592,195 @@ fn evaluate_dacl<F>(
 }
 
 // ---------------------------------------------------------------------------
+// Resource attribute parsing (CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1)
+// ---------------------------------------------------------------------------
+
+/// Parse a SYSTEM_RESOURCE_ATTRIBUTE_ACE's application_data into a ClaimEntry.
+///
+/// Wire format (MS-DTYP §2.4.10.1):
+///   name_offset: u32     (offset to UTF-16LE null-terminated string)
+///   value_type:  u16     (0x0001=Int64, 0x0002=Uint64, 0x0003=String, 0x0005=SID, 0x0006=Boolean, 0x0010=Octet)
+///   reserved:    u16
+///   flags:       u32
+///   value_count: u32
+///   values:      [u32; value_count] (offsets to values from struct start)
+///   ... followed by name string and value data at the specified offsets
+fn parse_resource_attribute(data: &[u8]) -> Option<crate::token::ClaimEntry> {
+    use crate::token::{ClaimEntry, ClaimType, ClaimValues};
+
+    if data.len() < 16 {
+        return None;
+    }
+
+    let name_offset = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let value_type = u16::from_le_bytes([data[4], data[5]]);
+    // reserved at [6..8]
+    let flags = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+    let value_count = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
+
+    if value_count > 4096 {
+        return None; // sanity cap
+    }
+
+    let offsets_start = 16;
+    let offsets_end = offsets_start + value_count * 4;
+    if offsets_end > data.len() {
+        return None;
+    }
+
+    // Parse value offsets
+    let mut value_offsets = compat::vec_with_capacity::<usize>(value_count).ok()?;
+    for i in 0..value_count {
+        let off = u32::from_le_bytes([
+            data[offsets_start + i * 4],
+            data[offsets_start + i * 4 + 1],
+            data[offsets_start + i * 4 + 2],
+            data[offsets_start + i * 4 + 3],
+        ]) as usize;
+        compat::vec_push(&mut value_offsets, off).ok()?;
+    }
+
+    // Parse name (UTF-16LE null-terminated at name_offset)
+    let name = if name_offset < data.len() {
+        let name_data = &data[name_offset..];
+        let mut s = crate::compat::String::new();
+        let mut i = 0;
+        while i + 1 < name_data.len() {
+            let ch = u16::from_le_bytes([name_data[i], name_data[i + 1]]);
+            if ch == 0 { break; }
+            if let Some(c) = char::from_u32(ch as u32) {
+                #[cfg(not(feature = "kernel"))]
+                s.push(c);
+                #[cfg(feature = "kernel")]
+                { let _ = s.push(c); }
+            }
+            i += 2;
+        }
+        s
+    } else {
+        return None;
+    };
+
+    // Parse claim type
+    let claim_type = match value_type {
+        0x0001 => ClaimType::Int64,
+        0x0002 => ClaimType::Uint64,
+        0x0003 => ClaimType::String,
+        0x0005 => ClaimType::Sid,
+        0x0006 => ClaimType::Boolean,
+        0x0010 => ClaimType::Octet,
+        _ => return None,
+    };
+
+    // Parse values
+    let values = match claim_type {
+        ClaimType::Int64 => {
+            let mut vals = compat::vec_with_capacity::<i64>(value_count).ok()?;
+            for off in value_offsets.iter().copied() {
+                if off + 8 > data.len() { return None; }
+                let v = i64::from_le_bytes([
+                    data[off], data[off+1], data[off+2], data[off+3],
+                    data[off+4], data[off+5], data[off+6], data[off+7],
+                ]);
+                compat::vec_push(&mut vals, v).ok()?;
+            }
+            ClaimValues::Int64(vals)
+        }
+        ClaimType::Uint64 => {
+            let mut vals = compat::vec_with_capacity::<u64>(value_count).ok()?;
+            for off in value_offsets.iter().copied() {
+                if off + 8 > data.len() { return None; }
+                let v = u64::from_le_bytes([
+                    data[off], data[off+1], data[off+2], data[off+3],
+                    data[off+4], data[off+5], data[off+6], data[off+7],
+                ]);
+                compat::vec_push(&mut vals, v).ok()?;
+            }
+            ClaimValues::Uint64(vals)
+        }
+        ClaimType::Boolean => {
+            let mut vals = compat::vec_with_capacity::<bool>(value_count).ok()?;
+            for off in value_offsets.iter().copied() {
+                if off + 8 > data.len() { return None; }
+                let v = u64::from_le_bytes([
+                    data[off], data[off+1], data[off+2], data[off+3],
+                    data[off+4], data[off+5], data[off+6], data[off+7],
+                ]);
+                compat::vec_push(&mut vals, v != 0).ok()?;
+            }
+            ClaimValues::Boolean(vals)
+        }
+        ClaimType::String => {
+            let mut vals = compat::vec_with_capacity::<crate::compat::String>(value_count).ok()?;
+            for off in value_offsets.iter().copied() {
+                // Offset points to a u32 offset to the actual string
+                if off + 4 > data.len() { return None; }
+                let str_off = u32::from_le_bytes([
+                    data[off], data[off+1], data[off+2], data[off+3],
+                ]) as usize;
+                if str_off >= data.len() { return None; }
+                let str_data = &data[str_off..];
+                let mut s = crate::compat::String::new();
+                let mut i = 0;
+                while i + 1 < str_data.len() {
+                    let ch = u16::from_le_bytes([str_data[i], str_data[i + 1]]);
+                    if ch == 0 { break; }
+                    if let Some(c) = char::from_u32(ch as u32) {
+                        #[cfg(not(feature = "kernel"))]
+                        s.push(c);
+                        #[cfg(feature = "kernel")]
+                        { let _ = s.push(c); }
+                    }
+                    i += 2;
+                }
+                compat::vec_push(&mut vals, s).ok()?;
+            }
+            ClaimValues::String(vals)
+        }
+        ClaimType::Sid => {
+            let mut vals = compat::vec_with_capacity::<Sid>(value_count).ok()?;
+            for off in value_offsets.iter().copied() {
+                // Offset points to a u32 offset to the SID
+                if off + 4 > data.len() { return None; }
+                let sid_off = u32::from_le_bytes([
+                    data[off], data[off+1], data[off+2], data[off+3],
+                ]) as usize;
+                if sid_off >= data.len() { return None; }
+                let sid = Sid::from_bytes(&data[sid_off..])?;
+                compat::vec_push(&mut vals, sid).ok()?;
+            }
+            ClaimValues::Sid(vals)
+        }
+        ClaimType::Octet => {
+            let mut vals = compat::vec_with_capacity::<Vec<u8>>(value_count).ok()?;
+            for off in value_offsets.iter().copied() {
+                // Offset points to {length:u32, data...}
+                if off + 4 > data.len() { return None; }
+                let octet_off = u32::from_le_bytes([
+                    data[off], data[off+1], data[off+2], data[off+3],
+                ]) as usize;
+                if octet_off + 4 > data.len() { return None; }
+                let octet_len = u32::from_le_bytes([
+                    data[octet_off], data[octet_off+1],
+                    data[octet_off+2], data[octet_off+3],
+                ]) as usize;
+                if octet_off + 4 + octet_len > data.len() { return None; }
+                let bytes = compat::slice_to_vec(&data[octet_off+4..octet_off+4+octet_len]).ok()?;
+                compat::vec_push(&mut vals, bytes).ok()?;
+            }
+            ClaimValues::Octet(vals)
+        }
+    };
+
+    Some(ClaimEntry {
+        name,
+        claim_type,
+        flags: (flags & 0xFFFF) as u16,
+        values,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // PreSACLWalk — extract mandatory labels, PIP, resource attrs (§11.17)
 // ---------------------------------------------------------------------------
 
@@ -631,9 +820,16 @@ fn pre_sacl_walk(
                         pip_ace = Some(a);
                     }
                 }
-                // Resource attribute ACEs → collect for conditional expression evaluation
-                // TODO: parse CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 from application_data
-                // For now, resource attributes are passed in externally.
+                // Resource attribute ACEs → parse and collect for conditional expressions
+                if a.ace_type == ace::SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE {
+                    if a.flags & ace::INHERIT_ONLY_ACE == 0 {
+                        if let Some(ref app_data) = a.application_data {
+                            if let Some(claim) = parse_resource_attribute(app_data) {
+                                compat::vec_push(_resource_attributes, claim)?;
+                            }
+                        }
+                    }
+                }
 
                 if a.ace_type == ace::SYSTEM_SCOPED_POLICY_ID_ACE_TYPE {
                     if a.flags & ace::INHERIT_ONLY_ACE == 0 {
