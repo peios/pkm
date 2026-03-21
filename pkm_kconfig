@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config SECURITY_PKM
+	bool "PKM — Peios Kernel Module"
+	depends on SECURITY
+	depends on RUST
+	default n
+	help
+	  PKM is the Peios Kernel Module, containing:
+	  - KACS: Kernel-based Access Control System (tokens, SDs, AccessCheck)
+	  - Event subsystem: ring buffer for structured audit events
+
+	  If unsure, say N.

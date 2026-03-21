@@ -100,7 +100,7 @@ RUN scripts/config \
         --set-val TMPFS y && \
     make LLVM=1 olddefconfig
 
-# KACS syscalls: register in x86_64 syscall table
+# PKM syscalls: register in x86_64 syscall table
 RUN printf '1000\tcommon\tkacs_open_self_token\t\tsys_kacs_open_self_token\n\
 1001\tcommon\tkacs_open_process_token\t\tsys_kacs_open_process_token\n\
 1002\tcommon\tkacs_create_token\t\tsys_kacs_create_token\n\
@@ -109,22 +109,28 @@ RUN printf '1000\tcommon\tkacs_open_self_token\t\tsys_kacs_open_self_token\n\
 1011\tcommon\tkacs_impersonate_peer\t\tsys_kacs_impersonate_peer\n\
 1012\tcommon\tkacs_revert\t\tsys_kacs_revert\n\
 1013\tcommon\tkacs_set_impersonation_level\t\tsys_kacs_set_impersonation_level\n\
-1023\tcommon\tkacs_access_check\t\tsys_kacs_access_check\n' \
+1023\tcommon\tkacs_access_check\t\tsys_kacs_access_check\n\
+1050\tcommon\tevent_emit\t\tsys_event_emit\n' \
     >> arch/x86/entry/syscalls/syscall_64.tbl
 
-# KACS: kernel patches
-COPY kernel/patches/ /build/linux/kacs-patches/
-RUN for p in kacs-patches/*.patch; do \
+# PKM: kernel patches
+COPY kernel/patches/ /build/linux/pkm-patches/
+RUN for p in pkm-patches/*.patch; do \
         [ -f "$p" ] && patch -p1 < "$p"; \
     done; \
-    rm -rf kacs-patches
+    rm -rf pkm-patches
 
-# KACS: copy module source into kernel tree and wire into kbuild
-COPY kacs/ /build/linux/security/kacs/
-RUN echo 'obj-$(CONFIG_SECURITY_KACS) += kacs/' >> security/Makefile && \
-    sed -i '/endmenu/i source "security/kacs/Kconfig"' security/Kconfig && \
-    scripts/config --enable SECURITY_KACS && \
-    scripts/config --set-str LSM "landlock,lockdown,yama,integrity,kacs" && \
+# PKM: copy module source into kernel tree
+# Structure: security/pkm/{kacs/,events/,Kconfig,Makefile}
+RUN mkdir -p security/pkm
+COPY kacs/ /build/linux/security/pkm/kacs/
+COPY events/ /build/linux/security/pkm/events/
+COPY pkm_kconfig /build/linux/security/pkm/Kconfig
+COPY pkm_makefile /build/linux/security/pkm/Makefile
+RUN echo 'obj-$(CONFIG_SECURITY_PKM) += pkm/' >> security/Makefile && \
+    sed -i '/endmenu/i source "security/pkm/Kconfig"' security/Kconfig && \
+    scripts/config --enable SECURITY_PKM && \
+    scripts/config --set-str LSM "landlock,lockdown,yama,integrity,pkm" && \
     make LLVM=1 olddefconfig
 
 # ccache: persistent cache via volume mount at /ccache

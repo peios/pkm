@@ -1330,7 +1330,7 @@ late_initcall(kacs_securityfs_init);
 /* ── LSM registration ──────────────────────────────────────────────────── */
 
 static const struct lsm_id kacs_lsmid = {
-	.name = "kacs",
+	.name = "pkm",
 	.id = 1000,
 };
 
