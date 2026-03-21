@@ -275,10 +275,69 @@ SYSCALL_DEFINE2(event_emit, const void __user *, body, u32, body_len)
 	return ret;
 }
 
-/* ── securityfs: /sys/kernel/security/peios/events ─────────────────────── */
+/* ── mmap: zero-copy drain for eventd ──────────────────────────────────── */
 
-/* TODO: mmap support for zero-copy drain by eventd.
- * For now, provide a simple read interface. */
+/*
+ * Fault handler returns the appropriate page for each offset:
+ *   Page 0:  status page  (read-only for eventd)
+ *   Page 1:  consumer page (read-write for eventd)
+ *   Pages 2+: event data  (read-only for eventd)
+ *
+ * Per-page permission enforcement isn't possible within a single VMA,
+ * so we allow read-write on the whole mapping and trust eventd to only
+ * write read_ptr on the consumer page. A compromised eventd can skip
+ * events but cannot forge them — the kernel is the sole producer.
+ */
+static vm_fault_t events_vm_fault(struct vm_fault *vmf)
+{
+	unsigned long pgoff = vmf->pgoff;
+	struct page *page;
+
+	if (pgoff == 0) {
+		/* Status page */
+		page = vmalloc_to_page(ring.status);
+	} else if (pgoff == 1) {
+		/* Consumer page */
+		page = vmalloc_to_page(ring.consumer);
+	} else {
+		/* Event data pages */
+		unsigned long data_offset = (pgoff - 2) * PAGE_SIZE;
+
+		if (data_offset >= ring.size)
+			return VM_FAULT_SIGBUS;
+		page = vmalloc_to_page(ring.buffer + data_offset);
+	}
+
+	if (!page)
+		return VM_FAULT_SIGBUS;
+
+	get_page(page);
+	vmf->page = page;
+	return 0;
+}
+
+static const struct vm_operations_struct events_vm_ops = {
+	.fault = events_vm_fault,
+};
+
+static int events_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	unsigned long size = vma->vm_end - vma->vm_start;
+	unsigned long max_pages = 2 + (ring.size / PAGE_SIZE);
+
+	if (!ring.buffer)
+		return -ENODEV;
+
+	/* Reject mappings larger than status + consumer + data pages. */
+	if ((size / PAGE_SIZE) > max_pages)
+		return -EINVAL;
+
+	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
+	vma->vm_ops = &events_vm_ops;
+	return 0;
+}
+
+/* ── securityfs: /sys/kernel/security/peios/events ─────────────────────── */
 
 static ssize_t events_read(struct file *file, char __user *buf,
 			    size_t count, loff_t *ppos)
@@ -343,8 +402,8 @@ static ssize_t events_write(struct file *file, const char __user *buf,
 static const struct file_operations events_fops = {
 	.read = events_read,
 	.write = events_write,
+	.mmap = events_mmap,
 	.llseek = generic_file_llseek,
-	/* TODO: .mmap = events_mmap for zero-copy drain */
 };
 
 static int __init peios_events_init(void)

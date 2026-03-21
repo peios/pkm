@@ -397,6 +397,11 @@ pub extern "C" fn kacs_token_from_spec(data: *const u8, len: usize) -> *const ()
 ///
 /// This is the core of KACS — the 11-stage pipeline from §11 of the
 /// proposal, running in kernel context against the calling thread's token.
+///
+/// Parameters added in the §15.1 expansion:
+/// - self_sid/self_sid_len: optional PRINCIPAL_SELF substitution SID
+/// - privilege_intent: KACS_BACKUP_INTENT | KACS_RESTORE_INTENT
+/// - granted_out: always written with the granted mask (even on denial)
 #[no_mangle]
 pub extern "C" fn kacs_access_check_sd(
     token_ptr: *const (),
@@ -407,6 +412,10 @@ pub extern "C" fn kacs_access_check_sd(
     generic_write: u32,
     generic_execute: u32,
     generic_all: u32,
+    self_sid_ptr: *const u8,
+    self_sid_len: u32,
+    privilege_intent: u32,
+    granted_out: *mut u32,
 ) -> i64 {
     if token_ptr.is_null() || sd_data.is_null() {
         return -22; // -EINVAL
@@ -429,21 +438,33 @@ pub extern "C" fn kacs_access_check_sd(
         all: generic_all,
     };
 
+    // Parse the PRINCIPAL_SELF substitution SID if provided.
+    let self_sid = if !self_sid_ptr.is_null() && self_sid_len > 0 {
+        let self_sid_bytes = unsafe {
+            core::slice::from_raw_parts(self_sid_ptr, self_sid_len as usize)
+        };
+        kacs_core::sid::Sid::from_bytes(self_sid_bytes)
+    } else {
+        None
+    };
+
     // Run the full AccessCheck pipeline.
-    match kacs_core::access_check::access_check(
+    let result = kacs_core::access_check::access_check(
         &sd,
         &kt.token,
         desired,
         &mapping,
-        None,           // no object type tree
-        None,           // no PRINCIPAL_SELF SID
-        &[],            // no local claims
-        &[],            // no central access policies
-        0,              // no privilege intent (backup/restore)
-    ) {
-        Ok(result) => {
-            if result.allowed {
-                result.granted as i64
+        None,                       // object tree (v2 — accepted but ignored)
+        self_sid.as_ref(),          // PRINCIPAL_SELF substitution
+        &[],                        // local claims (v2 — accepted but ignored)
+        &[],                        // no central access policies
+        privilege_intent,           // backup/restore intent
+    );
+
+    let ret = match result {
+        Ok(ref r) => {
+            if r.allowed {
+                r.granted as i64
             } else {
                 0 // denied — no bits granted
             }
@@ -451,7 +472,18 @@ pub extern "C" fn kacs_access_check_sd(
         Err(kacs_core::access_check::AccessCheckError::IdentificationLevel) => -1,  // -EPERM
         Err(kacs_core::access_check::AccessCheckError::InvalidSecurityDescriptor) => -22, // -EINVAL
         Err(kacs_core::access_check::AccessCheckError::AllocationFailed) => -12, // -ENOMEM
+    };
+
+    // Always write the granted mask to granted_out (even on denial/error).
+    if !granted_out.is_null() {
+        let granted = match result {
+            Ok(ref r) if r.allowed => r.granted,
+            _ => 0,
+        };
+        unsafe { *granted_out = granted; }
     }
+
+    ret
 }
 
 // ── Token type query ──────────────────────────────────────────────────────

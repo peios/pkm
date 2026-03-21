@@ -62,7 +62,10 @@ extern long long kacs_access_check_sd(const void *token_ptr,
 				      const void *sd_data, size_t sd_len,
 				      u32 desired, u32 generic_read,
 				      u32 generic_write, u32 generic_execute,
-				      u32 generic_all);
+				      u32 generic_all,
+				      const void *self_sid, u32 self_sid_len,
+				      u32 privilege_intent,
+				      u32 *granted_out);
 extern int kacs_check_token_sd(const void *token_ptr,
 			       const void *caller_token_ptr, u32 desired);
 
@@ -170,6 +173,35 @@ struct kacs_link_tokens_args {
 struct kacs_get_linked_token_args {
 	s32 result_fd;		/* out: fd to the partner token */
 };
+
+/* ── AccessCheck args struct (§15.1) ────────────────────────────────────── */
+
+struct kacs_access_check_args {
+	u32 size;		/* struct size (for versioning) */
+	u32 desired;
+	u32 generic_read;
+	u32 generic_write;
+	u32 generic_execute;
+	u32 generic_all;
+	u64 self_sid_ptr;	/* PRINCIPAL_SELF substitution (0 = none) */
+	u32 self_sid_len;
+	u32 privilege_intent;	/* KACS_BACKUP_INTENT | KACS_RESTORE_INTENT */
+	u64 object_tree_ptr;	/* OBJECT_TYPE_LIST array (0 = none) */
+	u32 object_tree_count;
+	u32 _pad0;
+	u64 local_claims_ptr;	/* conditional ACE claims (0 = none) */
+	u32 local_claims_len;
+	u32 _pad1;
+	u64 granted_out_ptr;	/* output: granted mask (always populated) */
+};
+
+/* Minimum struct size: the first versioned minimum includes through
+ * generic_all (6 × u32 = 24 bytes). */
+#define KACS_ACCESS_CHECK_ARGS_V1_SIZE	24
+
+/* Privilege intent flags (§11 stage 2) */
+#define KACS_BACKUP_INTENT	0x01
+#define KACS_RESTORE_INTENT	0x02
 
 /* ── Credential blob ───────────────────────────────────────────────────── */
 
@@ -1358,44 +1390,105 @@ SYSCALL_DEFINE2(kacs_set_impersonation_level, int, sock_fd, u32, level)
  * their own objects and need the kernel's AccessCheck engine.
  *
  * sd_buf/sd_len: self-relative SD in Windows binary format.
- * desired: requested access mask (e.g., KEY_QUERY_VALUE | READ_CONTROL).
- * generic_*: GenericMapping for the object type (0 = no generic expansion).
+ * args/args_len: pointer and size of struct kacs_access_check_args.
+ *
+ * The args struct is versioned via its `size` field — old callers with
+ * smaller structs still work. Fields beyond what the caller provides
+ * are zero-initialized.
  *
  * Returns the granted access mask (>= 0) or negative errno.
  * If any requested right is denied, returns 0 (no bits granted).
+ * If granted_out_ptr is set, the granted mask is also written there
+ * (even on denial, where it will be 0).
  */
-SYSCALL_DEFINE6(kacs_access_check,
+SYSCALL_DEFINE4(kacs_access_check,
 		const void __user *, sd_buf, size_t, sd_len,
-		u32, desired, u32, generic_read,
-		u32, generic_write, u32, generic_execute)
+		const void __user *, uargs, size_t, args_len)
 {
+	struct kacs_access_check_args args;
 	const struct kacs_cred_security *sec;
-	void *ksd;
+	void *ksd = NULL;
+	void *self_sid = NULL;
+	u32 copy_len;
+	u32 granted;
 	long long ret;
+
+	/* args_len must cover at least the minimum V1 fields. */
+	if (args_len < KACS_ACCESS_CHECK_ARGS_V1_SIZE)
+		return -EINVAL;
 
 	/* SD size bounds: min 20 (header), max 64 KiB. */
 	if (sd_len < 20 || sd_len > 65536)
 		return -EINVAL;
 
-	if (!desired)
+	/* Zero-initialize, then copy what the caller provided. */
+	memset(&args, 0, sizeof(args));
+	copy_len = args_len < sizeof(args) ? args_len : sizeof(args);
+	if (copy_from_user(&args, uargs, copy_len))
+		return -EFAULT;
+
+	/* Validate the struct's own size field for forward compat. */
+	if (args.size < KACS_ACCESS_CHECK_ARGS_V1_SIZE)
 		return -EINVAL;
 
+	if (!args.desired)
+		return -EINVAL;
+
+	/* Copy the SD from userspace. */
 	ksd = kmalloc(sd_len, GFP_KERNEL);
 	if (!ksd)
 		return -ENOMEM;
 
 	if (copy_from_user(ksd, sd_buf, sd_len)) {
-		kfree(ksd);
-		return -EFAULT;
+		ret = -EFAULT;
+		goto out;
+	}
+
+	/* Copy the self SID if provided (for PRINCIPAL_SELF substitution). */
+	if (args.self_sid_ptr && args.self_sid_len > 0) {
+		if (args.self_sid_len > 1024) {
+			ret = -EINVAL;
+			goto out;
+		}
+		self_sid = kmalloc(args.self_sid_len, GFP_KERNEL);
+		if (!self_sid) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		if (copy_from_user(self_sid,
+				   (void __user *)args.self_sid_ptr,
+				   args.self_sid_len)) {
+			ret = -EFAULT;
+			goto out;
+		}
 	}
 
 	sec = kacs_cred(current_cred());
 	ret = kacs_access_check_sd(sec->token, ksd, sd_len,
-				   desired, generic_read, generic_write,
-				   generic_execute,
-				   /* generic_all = read|write|execute|standard */
-				   generic_read | generic_write |
-				   generic_execute | 0x001F0000);
+				   args.desired,
+				   args.generic_read,
+				   args.generic_write,
+				   args.generic_execute,
+				   args.generic_all,
+				   self_sid, args.self_sid_len,
+				   args.privilege_intent,
+				   &granted);
+
+	/* Write the granted mask back to userspace if requested. */
+	if (args.granted_out_ptr) {
+		if (ret >= 0)
+			granted = (u32)ret;
+		else
+			granted = 0;
+		if (put_user(granted,
+			     (u32 __user *)args.granted_out_ptr)) {
+			ret = -EFAULT;
+			goto out;
+		}
+	}
+
+out:
+	kfree(self_sid);
 	kfree(ksd);
 	return ret;
 }

@@ -634,6 +634,8 @@ mod kernel_try_clone {
                 elevation_type: self.elevation_type,
                 owner_sid_index: self.owner_sid_index,
                 primary_group_index: self.primary_group_index,
+                default_dacl: self.default_dacl.try_clone()?,
+                security_descriptor: self.security_descriptor.try_clone()?,
                 token_id: self.token_id,
                 auth_id: self.auth_id,
                 source: self.source.try_clone()?,
