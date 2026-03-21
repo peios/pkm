@@ -2577,6 +2577,47 @@ static int kacs_inode_init_security(struct inode *inode,
 	return 0;
 }
 
+/* ── Exec enforcement — bprm_check_security (§14.3) ──────────────────── */
+
+static int kacs_bprm_check_security(struct linux_binprm *bprm)
+{
+	struct kacs_file_security *fsec;
+	const void *sd;
+	const struct kacs_cred_security *ccred;
+	long long r;
+
+	if (!bprm->file)
+		return 0;
+
+	fsec = kacs_file(bprm->file);
+
+	/* If the file has a FACS granted mask, use the handle model:
+	 * check FILE_EXECUTE in the granted mask. */
+	if (fsec->flags & KACS_FILE_FACS_MANAGED) {
+		if (!(fsec->granted & FILE_EXECUTE))
+			return -EACCES;
+		return 0;
+	}
+
+	/* No granted mask (O_PATH fd, non-FACS-managed, or interpreter
+	 * opened by the kernel during binfmt chain). Fall back to live
+	 * AccessCheck for FILE_EXECUTE on the file's SD. */
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(file_inode(bprm->file));
+	if (!sd) {
+		rcu_read_unlock();
+		return -EACCES; /* no SD — deny */
+	}
+	ccred = kacs_cred(current_cred());
+	r = kacs_file_access_check(ccred->token, sd, FILE_EXECUTE);
+	rcu_read_unlock();
+
+	if (r < 0 || !((u32)r & FILE_EXECUTE))
+		return -EACCES;
+
+	return 0;
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
  * FACS Phase E — Directory traversal + link operations (§14.3)
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -2783,6 +2824,7 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(capable, kacs_capable),
 	LSM_HOOK_INIT(capset, kacs_capset),
 	LSM_HOOK_INIT(task_prctl, kacs_task_prctl),
+	LSM_HOOK_INIT(bprm_check_security, kacs_bprm_check_security),
 	LSM_HOOK_INIT(bprm_creds_from_file, kacs_bprm_creds_from_file),
 	LSM_HOOK_INIT(inode_permission, kacs_inode_permission),
 	LSM_HOOK_INIT(inode_link, kacs_inode_link),
