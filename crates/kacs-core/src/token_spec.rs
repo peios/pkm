@@ -17,7 +17,8 @@ use crate::token::*;
 pub const TOKEN_SPEC_VERSION: u32 = 1;
 
 /// Minimum spec size (header only, no variable data).
-const HEADER_SIZE: usize = 56;
+/// v1 header: 64 bytes (56 original + 8 byte session_id).
+const HEADER_SIZE: usize = 64;
 
 /// Parse a token specification from its binary representation.
 ///
@@ -70,6 +71,7 @@ pub fn parse_token_spec(data: &[u8]) -> Result<Option<Token>, AllocError> {
     let user_sid_offset = u32_at(data, 44) as usize;
     let groups_offset = u32_at(data, 48) as usize;
     let groups_count = u32_at(data, 52) as usize;
+    let session_id = u64_at(data, 56);
 
     // ── User SID ──────────────────────────────────────────────────────
 
@@ -113,7 +115,7 @@ pub fn parse_token_spec(data: &[u8]) -> Result<Option<Token>, AllocError> {
         user_sid,
         user_deny_only: false,
         groups,
-        logon_sid: Sid::new(5, &[5, 0, 0])?, // placeholder logon SID
+        logon_sid: crate::session::logon_sid_from_id(session_id)?,
         restricted_sids: None,
         write_restricted: false,
 
@@ -233,6 +235,9 @@ mod tests {
         spec.extend_from_slice(&(groups_offset as u32).to_le_bytes());
         spec.extend_from_slice(&(groups.len() as u32).to_le_bytes());
 
+        // session_id(8) — session 0 = SYSTEM
+        spec.extend_from_slice(&0u64.to_le_bytes());
+
         // Variable sections
         spec.extend_from_slice(&user_bytes);
         spec.extend_from_slice(&groups_section);
@@ -261,7 +266,7 @@ mod tests {
 
     #[test]
     fn reject_bad_version() {
-        let mut spec = alloc::vec![0u8; 56];
+        let mut spec = alloc::vec![0u8; 64];
         spec[0] = 99; // bad version
         assert!(parse_token_spec(&spec).unwrap().is_none());
     }

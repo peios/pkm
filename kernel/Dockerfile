@@ -112,6 +112,13 @@ RUN printf '1000\tcommon\tkacs_open_self_token\t\tsys_kacs_open_self_token\n\
 1023\tcommon\tkacs_access_check\t\tsys_kacs_access_check\n' \
     >> arch/x86/entry/syscalls/syscall_64.tbl
 
+# KACS: kernel patches
+COPY kernel/patches/ /build/linux/kacs-patches/
+RUN for p in kacs-patches/*.patch; do \
+        [ -f "$p" ] && patch -p1 < "$p"; \
+    done; \
+    rm -rf kacs-patches
+
 # KACS: copy module source into kernel tree and wire into kbuild
 COPY kacs/ /build/linux/security/kacs/
 RUN echo 'obj-$(CONFIG_SECURITY_KACS) += kacs/' >> security/Makefile && \

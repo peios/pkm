@@ -952,7 +952,7 @@ SYSCALL_DEFINE2(kacs_create_token, const void __user *, spec, size_t, len)
 		return -EPERM;
 
 	/* Size bounds: min header (56), max PAGE_SIZE. */
-	if (len < 56 || len > PAGE_SIZE)
+	if (len < 64 || len > PAGE_SIZE)
 		return -EINVAL;
 
 	kbuf = kmalloc(len, GFP_KERNEL);
@@ -1201,6 +1201,39 @@ SYSCALL_DEFINE6(kacs_access_check,
 				   generic_execute | 0x001F0000);
 	kfree(ksd);
 	return ret;
+}
+
+/* ── /proc/<pid>/token ─────────────────────────────────────────────────── */
+
+/*
+ * Called by fs/proc/base.c via ONE("token", ...) entries.
+ * Shows the target task's primary token.
+ */
+int kacs_proc_token_show(struct seq_file *m, struct pid_namespace *ns,
+			 struct pid *pid, struct task_struct *task)
+{
+	const struct cred *cred;
+	const struct kacs_cred_security *sec;
+	char *buf;
+	long long len;
+
+	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	cred = get_task_cred(task);
+	sec = kacs_cred(cred);
+	len = kacs_token_format(sec->token, buf, PAGE_SIZE);
+	put_cred(cred);
+
+	if (len < 0) {
+		kfree(buf);
+		return -EINVAL;
+	}
+
+	seq_write(m, buf, len);
+	kfree(buf);
+	return 0;
 }
 
 /* ── securityfs: /sys/kernel/security/kacs/self ────────────────────────── */
