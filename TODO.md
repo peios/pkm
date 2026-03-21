@@ -4,25 +4,21 @@ Updated 2026-03-21. Only items NOT YET DONE.
 
 ---
 
-## FACS — remaining
+## FACS — deferred items
 
-- [ ] Kernel patches 13-16: current_fsuid projection (derooting),
-  execveat AT_EMPTY_PATH FILE_EXECUTE (patch 15), fchdir
-  FILE_TRAVERSE (patch 16). Patch 13 (pidfd_getfd) already done.
-- [ ] FILE_SUPERSEDE disposition in kacs_open — requires atomic
-  unlink + create under inode_lock (complex VFS integration)
-- [ ] Synthesize mode for foreign mounts (per-mount policy)
-- [ ] Corrupt SD audit event emission
-- [ ] O_PATH edge case refinements (fchdir live check)
-- [ ] kacs_open with creator-supplied SD (sd_buf parameter)
-- [ ] Ownership constraints in kacs_set_sd (SE_GROUP_OWNER check)
+- [ ] FILE_SUPERSEDE disposition in kacs_open (complex VFS integration —
+  atomic unlink + create under inode_lock, deferred to post-v1)
+- [ ] Synthesize mode for foreign mounts (per-mount policy for USB/FAT/NFS,
+  deferred until foreign media mounting is needed)
+- [ ] Kernel patch 15: execveat(AT_EMPTY_PATH) snapshot FILE_EXECUTE
+  (currently uses live AccessCheck via kernel re-open — functionally
+  correct, deferred handle-model purity refinement)
 
-## Blocked on FACS completion
+## Blocked on other subsystems
 
 - [ ] NEW_PROCESS_MIN — needs executable integrity label from file SD
 - [ ] Event crash recovery — flush ring buffer to file before reboot
 - [ ] Event audit_required overflow — expand buffer, signal peinit
-- [ ] Derooting — current_fsuid projection patch
 - [ ] Wire peios_event_emit_kernel into SACL audit results
 - [ ] unix_may_send hook (datagram socket — needs file SD on socket)
 
@@ -38,3 +34,5 @@ Updated 2026-03-21. Only items NOT YET DONE.
 ## Polish (non-blocking)
 
 - [ ] Remaining unreachable pub warnings on compat items
+- [ ] Corrupt SD audit event payload format (TODO comment in code —
+  refine when eventd is designed)
