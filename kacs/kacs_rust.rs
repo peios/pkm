@@ -604,22 +604,26 @@ pub extern "C" fn kacs_token_get_impersonation_level(ptr: *const ()) -> c_int {
 
 /// Set the impersonation level on a token (for capping during connect/impersonate).
 ///
-/// # Safety
-/// Caller must ensure exclusive access. In practice this is called on
-/// freshly-cloned tokens before they're shared.
+/// Uses raw pointer write to avoid creating &mut (which would be UB if any
+/// shared references exist). In practice this is called on freshly-cloned
+/// tokens before they're shared, but the raw write is safe regardless.
 #[no_mangle]
 pub extern "C" fn kacs_token_set_impersonation_level(ptr: *const (), level: c_int) {
     if ptr.is_null() {
         return;
     }
-    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
-    kt.token.impersonation_level = match level {
+    let new_level = match level {
         0 => ImpersonationLevel::Anonymous,
         1 => ImpersonationLevel::Identification,
         2 => ImpersonationLevel::Impersonation,
         3 => ImpersonationLevel::Delegation,
         _ => return,
     };
+    let kt = ptr as *mut KacsToken;
+    unsafe {
+        let field = core::ptr::addr_of_mut!((*kt).token.impersonation_level);
+        core::ptr::write(field, new_level);
+    }
 }
 
 /// Check if a privilege is present AND enabled on a token.
