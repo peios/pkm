@@ -642,6 +642,37 @@ fn build_default_proc_sd(
     Ok(SecurityDescriptor::new(owner, group, dacl))
 }
 
+/// Check a process SD against a token for a desired access mask.
+/// Returns 1 if access is granted, 0 if denied.
+#[no_mangle]
+pub extern "C" fn kacs_check_proc_sd(
+    token_ptr: *const (),
+    sd_ptr: *const (),
+    desired: u32,
+) -> c_int {
+    if token_ptr.is_null() || sd_ptr.is_null() || desired == 0 {
+        return 0;
+    }
+
+    let kt = unsafe { KacsToken::from_ptr(token_ptr) };
+    let sd = unsafe { &*(sd_ptr as *const kacs_core::sd::SecurityDescriptor) };
+
+    match kacs_core::access_check::access_check(
+        sd,
+        &kt.token,
+        desired,
+        &kacs_core::mask::PROCESS_GENERIC_MAPPING,
+        None,
+        None,
+        &[],
+        &[],
+        0,
+    ) {
+        Ok(result) => if result.allowed { 1 } else { 0 },
+        Err(_) => 0,
+    }
+}
+
 // ── Token restriction ─────────────────────────────────────────────────────
 
 /// Create a restricted (sandboxed) copy of a token.

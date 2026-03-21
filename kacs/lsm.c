@@ -41,6 +41,8 @@ extern int kacs_token_same_user(const void *a, const void *b);
 extern void kacs_token_set_impersonation_level(const void *ptr, int level);
 extern const void *kacs_create_default_proc_sd(const void *token_ptr);
 extern void kacs_proc_sd_drop(const void *sd_ptr);
+extern int kacs_check_proc_sd(const void *token_ptr, const void *sd_ptr,
+			      u32 desired);
 extern int kacs_session_link_tokens(u64 session_id,
 				    const void *elevated, const void *filtered);
 extern const void *kacs_session_get_linked_token(const void *token_ptr);
@@ -688,11 +690,12 @@ static void kacs_task_free(struct task_struct *task)
 }
 
 /*
- * Signal delivery: check PROCESS_TERMINATE (lethal) or PROCESS_SIGNAL
- * (non-lethal) against the target's process SD, then PIP dominance.
+ * Signal delivery: AccessCheck against target's process SD, then PIP.
  *
- * PIP is checked AFTER the SD — even if the SD grants access, PIP
- * can deny. SeDebugPrivilege doesn't bypass PIP (§13.2).
+ * Lethal signals (SIGKILL, SIGTERM, etc.) require PROCESS_TERMINATE.
+ * Non-lethal signals require PROCESS_SIGNAL.
+ * PIP is checked AFTER — even if the SD grants, PIP can deny.
+ * SeDebugPrivilege doesn't bypass PIP (§13.2).
  */
 static int kacs_task_kill(struct task_struct *target,
 			  struct kernel_siginfo *info, int sig,
@@ -700,20 +703,40 @@ static int kacs_task_kill(struct task_struct *target,
 {
 	struct kacs_task_security *caller_tsec = kacs_task(current);
 	struct kacs_task_security *target_tsec = kacs_task(target);
+	const struct kacs_cred_security *caller_cred;
+	u32 desired;
+
+	/* Self-signal always allowed. */
+	if (target == current)
+		return 0;
+
+	/* AccessCheck against target's process SD. */
+	if (target_tsec->proc_sd) {
+		/* Lethal signals: PROCESS_TERMINATE (0x0001).
+		 * Non-lethal: PROCESS_SIGNAL (0x0002). */
+		desired = (sig == SIGKILL || sig == SIGTERM || sig == SIGABRT
+			   || sig == SIGQUIT || sig == SIGSEGV)
+			? 0x0001   /* PROCESS_TERMINATE */
+			: 0x0002;  /* PROCESS_SIGNAL */
+
+		caller_cred = kacs_cred(cred ? cred : current_cred());
+		if (!kacs_check_proc_sd(caller_cred->token,
+					target_tsec->proc_sd, desired))
+			return -EACCES;
+	}
 
 	/* PIP dominance check. */
 	if (!pip_dominates(caller_tsec, target_tsec))
 		return -EACCES;
 
-	/* TODO: AccessCheck for PROCESS_TERMINATE/PROCESS_SIGNAL
-	 * against target's process SD. For now, PIP is the only gate.
-	 * Full SD check comes with kacs_set_sd on pidfds. */
-
 	return 0;
 }
 
 /*
- * ptrace: full control over target. PIP dominance required.
+ * ptrace: AccessCheck against target's process SD, then PIP.
+ *
+ * PTRACE_MODE_READ → PROCESS_VM_READ (0x0010)
+ * PTRACE_MODE_ATTACH → PROCESS_VM_WRITE (0x0020)
  * SeDebugPrivilege doesn't bypass PIP (§13.2).
  */
 static int kacs_ptrace_access_check(struct task_struct *child,
@@ -721,12 +744,28 @@ static int kacs_ptrace_access_check(struct task_struct *child,
 {
 	struct kacs_task_security *caller_tsec = kacs_task(current);
 	struct kacs_task_security *target_tsec = kacs_task(child);
+	const struct kacs_cred_security *caller_cred;
+	u32 desired;
 
+	/* Self-ptrace always allowed. */
+	if (child == current)
+		return 0;
+
+	/* AccessCheck against target's process SD. */
+	if (target_tsec->proc_sd) {
+		desired = (mode & PTRACE_MODE_READ)
+			? 0x0010   /* PROCESS_VM_READ */
+			: 0x0020;  /* PROCESS_VM_WRITE */
+
+		caller_cred = kacs_cred(current_cred());
+		if (!kacs_check_proc_sd(caller_cred->token,
+					target_tsec->proc_sd, desired))
+			return -EACCES;
+	}
+
+	/* PIP dominance check. */
 	if (!pip_dominates(caller_tsec, target_tsec))
 		return -EACCES;
-
-	/* TODO: AccessCheck for PROCESS_VM_READ/WRITE against
-	 * target's process SD. */
 
 	return 0;
 }
