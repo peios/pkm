@@ -8,6 +8,8 @@
 // maps to a named function in the proposal. Comments reference the
 // specific proposal steps.
 
+use core::sync::atomic::Ordering;
+
 use crate::compat::{self, AllocError, TryClone, Vec};
 use crate::ace;
 use crate::cap::{CentralAccessPolicy, CentralAccessRule};
@@ -877,7 +879,7 @@ pub fn access_check(
 
     // Step 2b: Effective privileges (§11.6)
     // Intent-gated: backup/restore only active with corresponding flag.
-    let mut effective_privs = token.privileges.enabled;
+    let mut effective_privs = token.privileges.enabled.load(Ordering::Relaxed);
     if privilege_intent & BACKUP_INTENT == 0 {
         effective_privs &= !crate::privilege::bits::SE_BACKUP;
     }
@@ -1209,7 +1211,7 @@ fn evaluate_rule_dacl(
     // No privilege grants for CAP rule evaluation (§11.17: privilege_intent=0)
     // Non-intent-gated privileges (SeSecurityPrivilege, SeTakeOwnershipPrivilege)
     // are still active because they're checked by the normal pipeline.
-    let effective_privs = token.privileges.enabled
+    let effective_privs = token.privileges.enabled.load(Ordering::Relaxed)
         & !crate::privilege::bits::SE_BACKUP
         & !crate::privilege::bits::SE_RESTORE;
 

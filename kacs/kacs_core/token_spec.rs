@@ -6,6 +6,8 @@
 //!
 //! This is the format authd sends to the kernel to mint a new token.
 
+use core::sync::atomic::AtomicU64;
+
 use crate::compat::{self, AllocError, Vec};
 use crate::group::GroupEntry;
 use crate::luid::Luid;
@@ -125,10 +127,10 @@ pub fn parse_token_spec(data: &[u8]) -> Result<Option<Token>, AllocError> {
         mandatory_policy,
 
         privileges: Privileges {
-            present: privs_present,
-            enabled: privs_enabled,
-            enabled_by_default: privs_enabled,
-            used: 0,
+            present: AtomicU64::new(privs_present),
+            enabled: AtomicU64::new(privs_enabled),
+            enabled_by_default: AtomicU64::new(privs_enabled),
+            used: AtomicU64::new(0),
         },
 
         elevation_type,

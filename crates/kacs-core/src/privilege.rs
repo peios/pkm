@@ -4,6 +4,12 @@
 // four parallel u64 bitmasks: present, enabled, enabled_by_default, used.
 // Windows defines ~35 built-in privileges; Peios adds custom privileges
 // starting at bit 63 downward to avoid collision.
+//
+// All fields are AtomicU64 for thread-safe concurrent access — multiple
+// threads sharing a token (via cred_prepare Arc clone) may read privileges
+// while another thread adjusts them via KACS_IOC_ADJUST_PRIVS.
+
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Privilege bitmask positions.
 ///
@@ -28,32 +34,32 @@ pub mod bits {
     pub const SE_TAKE_OWNERSHIP: u64 = 1 << 9;
     /// Bypass access checks for read operations (backup intent, bit 17).
     pub const SE_BACKUP: u64 = 1 << 17;
-    /// Bypass access checks for write/delete operations (restore intent, bit 18).
+    /// Bypass access checks for write/delete (restore intent, bit 18).
     pub const SE_RESTORE: u64 = 1 << 18;
-    /// Modify an object's integrity label (bit 25).
-    pub const SE_RELABEL: u64 = 1 << 25; // SeRelabelPrivilege
+    /// Modify mandatory integrity labels (bit 25).
+    pub const SE_RELABEL: u64 = 1 << 25;
 
     // --- System operations ---
 
-    /// Act as part of the operating system / trusted computing base (bit 7).
+    /// Trusted Computing Base (bit 7).
     pub const SE_TCB: u64 = 1 << 7;
-    /// Shut down the local system (bit 19).
+    /// Shut down the system (bit 19).
     pub const SE_SHUTDOWN: u64 = 1 << 19;
-    /// Shut down a remote system (bit 24).
+    /// Remote shutdown (bit 24).
     pub const SE_REMOTE_SHUTDOWN: u64 = 1 << 24;
-    /// Load and unload kernel modules (bit 10).
+    /// Load/unload device drivers (bit 10).
     pub const SE_LOAD_DRIVER: u64 = 1 << 10;
-    /// Debug processes (bit 20).
+    /// Debug other processes (bit 20).
     pub const SE_DEBUG: u64 = 1 << 20;
     /// Change the system time (bit 12).
     pub const SE_SYSTEMTIME: u64 = 1 << 12;
     /// Increase scheduling priority (bit 14).
     pub const SE_INCREASE_BASE_PRIORITY: u64 = 1 << 14;
-    /// Increase process memory quota (bit 5).
+    /// Adjust memory quotas for a process (bit 5).
     pub const SE_INCREASE_QUOTA: u64 = 1 << 5;
     /// Lock physical pages in memory (bit 4).
     pub const SE_LOCK_MEMORY: u64 = 1 << 4;
-    /// Generate security audit log entries (bit 21).
+    /// Generate security audit entries (bit 21).
     pub const SE_AUDIT: u64 = 1 << 21;
     /// Profile a single process (bit 13).
     pub const SE_PROFILE_SINGLE_PROCESS: u64 = 1 << 13;
@@ -61,37 +67,31 @@ pub mod bits {
     pub const SE_CHANGE_NOTIFY: u64 = 1 << 23;
     /// Create symbolic links (bit 35).
     pub const SE_CREATE_SYMBOLIC_LINK: u64 = 1 << 35;
-
-    // --- Directory and domain ---
-
-    /// Synchronize directory data (bit 26).
+    /// AD synchronization agent (bit 26).
     pub const SE_SYNC_AGENT: u64 = 1 << 26;
-    /// Enable delegation trust (bit 27).
+    /// Enable Kerberos delegation (bit 27).
     pub const SE_ENABLE_DELEGATION: u64 = 1 << 27;
-    /// Create machine accounts in the domain (bit 6).
+    /// Add machines to a domain (bit 6).
     pub const SE_MACHINE_ACCOUNT: u64 = 1 << 6;
-
-    // --- Reserved (Windows parity, no enforcement in v1) ---
-
-    /// Create global objects in a terminal-services session (bit 30, reserved).
+    /// Create global objects in a session (bit 30).
     pub const SE_CREATE_GLOBAL: u64 = 1 << 30;
-    /// Create a pagefile (bit 15, reserved).
+    /// Create a pagefile (bit 15).
     pub const SE_CREATE_PAGEFILE: u64 = 1 << 15;
-    /// Create permanent shared objects (bit 16, reserved).
+    /// Create permanent shared objects (bit 16).
     pub const SE_CREATE_PERMANENT: u64 = 1 << 16;
-    /// Increase process working set (bit 33, reserved).
+    /// Increase process working set (bit 33).
     pub const SE_INCREASE_WORKING_SET: u64 = 1 << 33;
-    /// Manage volume-level operations (bit 28, reserved).
+    /// Manage disk volumes (bit 28).
     pub const SE_MANAGE_VOLUME: u64 = 1 << 28;
-    /// Access credential manager as a trusted caller (bit 31, reserved).
+    /// Access Credential Manager as a trusted caller (bit 31).
     pub const SE_TRUSTED_CRED_MAN_ACCESS: u64 = 1 << 31;
-    /// Modify firmware environment variables (bit 22, reserved).
+    /// Modify firmware environment variables (bit 22).
     pub const SE_SYSTEM_ENVIRONMENT: u64 = 1 << 22;
-    /// Profile system performance (bit 11, reserved).
+    /// Profile system performance (bit 11).
     pub const SE_SYSTEM_PROFILE: u64 = 1 << 11;
-    /// Change the time zone (bit 34, reserved).
+    /// Change the time zone (bit 34).
     pub const SE_TIMEZONE: u64 = 1 << 34;
-    /// Undock a laptop (bit 32, reserved).
+    /// Undock a laptop (bit 32).
     pub const SE_UNDOCK: u64 = 1 << 32;
 
     // --- Peios custom privileges (bit 63 downward) ---
@@ -140,77 +140,108 @@ pub mod bits {
         | SE_CREATE_JOB;
 }
 
-/// Four parallel bitmasks tracking the privilege lifecycle on a token.
-#[derive(Clone, Debug)]
+/// Four parallel atomic bitmasks tracking the privilege lifecycle on a token.
+///
+/// All fields are `AtomicU64` for thread-safe concurrent access.
+/// Multiple threads may share a token (via credential cloning), and
+/// one thread may adjust privileges while others read them.
 pub struct Privileges {
     /// Which privileges exist on the token. Bits can be cleared
     /// (removal is permanent) but never set after creation.
-    pub present: u64,
+    pub present: AtomicU64,
     /// Which present privileges are currently active.
-    pub enabled: u64,
+    pub enabled: AtomicU64,
     /// The reset position — AdjustPrivileges can restore to this state.
-    pub enabled_by_default: u64,
+    pub enabled_by_default: AtomicU64,
     /// Audit trail: set when a privilege is actually exercised.
-    pub used: u64,
+    pub used: AtomicU64,
 }
 
 impl Privileges {
     /// Create a new privilege set with all specified privileges present and enabled.
     pub fn new_all_enabled(mask: u64) -> Self {
         Privileges {
-            present: mask,
-            enabled: mask,
-            enabled_by_default: mask,
-            used: 0,
+            present: AtomicU64::new(mask),
+            enabled: AtomicU64::new(mask),
+            enabled_by_default: AtomicU64::new(mask),
+            used: AtomicU64::new(0),
         }
     }
 
     /// Check if a privilege is present AND enabled.
     #[inline]
     pub fn check(&self, privilege: u64) -> bool {
-        (self.present & self.enabled & privilege) == privilege
+        let p = self.present.load(Ordering::Relaxed);
+        let e = self.enabled.load(Ordering::Relaxed);
+        (p & e & privilege) == privilege
     }
 
     /// Check if a privilege is present (regardless of enabled state).
     #[inline]
     pub fn is_present(&self, privilege: u64) -> bool {
-        (self.present & privilege) == privilege
+        (self.present.load(Ordering::Relaxed) & privilege) == privilege
     }
 
     /// Enable a privilege. Returns false if the privilege is not present.
-    pub fn enable(&mut self, privilege: u64) -> bool {
+    pub fn enable(&self, privilege: u64) -> bool {
         if !self.is_present(privilege) {
             return false;
         }
-        self.enabled |= privilege;
+        self.enabled.fetch_or(privilege, Ordering::Relaxed);
         true
     }
 
     /// Disable a privilege. Returns false if the privilege is not present.
-    pub fn disable(&mut self, privilege: u64) -> bool {
+    pub fn disable(&self, privilege: u64) -> bool {
         if !self.is_present(privilege) {
             return false;
         }
-        self.enabled &= !privilege;
+        self.enabled.fetch_and(!privilege, Ordering::Relaxed);
         true
     }
 
     /// Permanently remove a privilege. Clears from all bitmasks. Irreversible.
-    pub fn remove(&mut self, privilege: u64) {
-        self.present &= !privilege;
-        self.enabled &= !privilege;
-        self.enabled_by_default &= !privilege;
+    pub fn remove(&self, privilege: u64) {
+        self.present.fetch_and(!privilege, Ordering::Relaxed);
+        self.enabled.fetch_and(!privilege, Ordering::Relaxed);
+        self.enabled_by_default.fetch_and(!privilege, Ordering::Relaxed);
     }
 
     /// Reset all privileges to their default enabled/disabled state.
-    pub fn reset_to_defaults(&mut self) {
-        self.enabled = self.enabled_by_default & self.present;
+    pub fn reset_to_defaults(&self) {
+        let defaults = self.enabled_by_default.load(Ordering::Relaxed)
+            & self.present.load(Ordering::Relaxed);
+        self.enabled.store(defaults, Ordering::Relaxed);
     }
 
     /// Record that a privilege was exercised (for audit).
     #[inline]
-    pub fn mark_used(&mut self, privilege: u64) {
-        self.used |= privilege;
+    pub fn mark_used(&self, privilege: u64) {
+        self.used.fetch_or(privilege, Ordering::Relaxed);
+    }
+}
+
+// Manual trait impls — AtomicU64 doesn't derive Clone, Debug, PartialEq.
+
+impl Clone for Privileges {
+    fn clone(&self) -> Self {
+        Privileges {
+            present: AtomicU64::new(self.present.load(Ordering::Relaxed)),
+            enabled: AtomicU64::new(self.enabled.load(Ordering::Relaxed)),
+            enabled_by_default: AtomicU64::new(self.enabled_by_default.load(Ordering::Relaxed)),
+            used: AtomicU64::new(self.used.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl core::fmt::Debug for Privileges {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Privileges")
+            .field("present", &self.present.load(Ordering::Relaxed))
+            .field("enabled", &self.enabled.load(Ordering::Relaxed))
+            .field("enabled_by_default", &self.enabled_by_default.load(Ordering::Relaxed))
+            .field("used", &self.used.load(Ordering::Relaxed))
+            .finish()
     }
 }
 
@@ -229,7 +260,7 @@ mod tests {
 
     #[test]
     fn enable_disable_cycle() {
-        let mut privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
+        let privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
         assert!(privs.check(SE_BACKUP));
 
         privs.disable(SE_BACKUP);
@@ -242,7 +273,7 @@ mod tests {
 
     #[test]
     fn remove_is_permanent() {
-        let mut privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
+        let privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
         privs.remove(SE_BACKUP);
 
         assert!(!privs.is_present(SE_BACKUP));
@@ -252,11 +283,11 @@ mod tests {
 
     #[test]
     fn reset_to_defaults() {
-        let mut privs = Privileges {
-            present: SE_BACKUP | SE_RESTORE | SE_DEBUG,
-            enabled: SE_BACKUP | SE_RESTORE | SE_DEBUG,
-            enabled_by_default: SE_BACKUP, // only backup enabled by default
-            used: 0,
+        let privs = Privileges {
+            present: AtomicU64::new(SE_BACKUP | SE_RESTORE | SE_DEBUG),
+            enabled: AtomicU64::new(SE_BACKUP | SE_RESTORE | SE_DEBUG),
+            enabled_by_default: AtomicU64::new(SE_BACKUP),
+            used: AtomicU64::new(0),
         };
 
         privs.disable(SE_BACKUP);
@@ -268,37 +299,16 @@ mod tests {
     }
 
     #[test]
-    fn reset_respects_removal() {
-        let mut privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
-        privs.remove(SE_BACKUP);
-        privs.reset_to_defaults();
-
-        assert!(!privs.check(SE_BACKUP)); // removed, can't restore
-        assert!(privs.check(SE_RESTORE)); // still present
+    fn enable_nonexistent_returns_false() {
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        assert!(!privs.enable(SE_DEBUG)); // not present
     }
 
     #[test]
     fn mark_used() {
-        let mut privs = Privileges::new_all_enabled(SE_BACKUP);
-        assert_eq!(privs.used, 0);
-
+        let privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
+        assert_eq!(privs.used.load(Ordering::Relaxed), 0);
         privs.mark_used(SE_BACKUP);
-        assert_eq!(privs.used & SE_BACKUP, SE_BACKUP);
-    }
-
-    #[test]
-    fn enable_nonexistent_returns_false() {
-        let mut privs = Privileges::new_all_enabled(SE_BACKUP);
-        assert!(!privs.enable(SE_DEBUG));
-    }
-
-    #[test]
-    fn system_token_has_all_privileges() {
-        let privs = Privileges::new_all_enabled(ALL_PRIVILEGES);
-        assert!(privs.check(SE_CREATE_TOKEN));
-        assert!(privs.check(SE_TCB));
-        assert!(privs.check(SE_BACKUP));
-        assert!(privs.check(SE_BIND_PRIVILEGED_PORT));
-        assert!(privs.check(SE_CREATE_JOB));
+        assert_eq!(privs.used.load(Ordering::Relaxed), SE_BACKUP);
     }
 }

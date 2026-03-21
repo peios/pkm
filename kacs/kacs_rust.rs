@@ -17,7 +17,7 @@ mod kacs_core;
 pub use kacs_core::*;
 
 use core::ffi::c_int;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// Global token ID counter. Each token gets a unique ID.
 static NEXT_TOKEN_ID: AtomicU64 = AtomicU64::new(1);
@@ -153,7 +153,7 @@ pub extern "C" fn kacs_token_format(
     out.str("\nGroups:    ");
     out.usize(token.groups.len());
     out.str("\nPrivs:     0x");
-    out.hex64(token.privileges.enabled);
+    out.hex64(token.privileges.enabled.load(Ordering::Relaxed));
     out.byte(b'\n');
 
     let data = out.as_bytes();
@@ -210,9 +210,9 @@ pub extern "C" fn kacs_token_query(
         }
         TOKEN_CLASS_PRIVILEGES => {
             out.str("present=0x");
-            out.hex64(token.privileges.present);
+            out.hex64(token.privileges.present.load(Ordering::Relaxed));
             out.str("\nenabled=0x");
-            out.hex64(token.privileges.enabled);
+            out.hex64(token.privileges.enabled.load(Ordering::Relaxed));
         }
         TOKEN_CLASS_TYPE => out.str(match token.token_type {
             TokenType::Primary => "Primary",
@@ -438,12 +438,8 @@ pub extern "C" fn kacs_token_adjust_privs(
     if ptr.is_null() {
         return -22; // -EINVAL
     }
-    // Safety: privilege adjustment needs &mut. In the kernel, the real
-    // implementation will use interior atomics on the Privileges fields.
-    // For now, we use unsafe mutable access — safe because privilege
-    // adjustment is serialized by the ioctl path (one caller at a time).
-    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
-    let privs = &mut kt.token.privileges;
+    let kt = unsafe { KacsToken::from_ptr(ptr) };
+    let privs = &kt.token.privileges;
 
     // Remove first (irreversible)
     if remove_mask != 0 {
@@ -781,14 +777,66 @@ pub extern "C" fn kacs_token_restrict(
 
 // ── Session management ────────────────────────────────────────────────────
 
-/// Global session table. Initialized at boot.
-/// Safety: accessed from syscall context (serialized by kernel locks).
-static mut SESSION_TABLE: Option<kacs_core::session::SessionTable> = None;
+/// Simple spinlock for global state. Uses AtomicBool with test-and-set.
+struct SpinLock<T> {
+    locked: core::sync::atomic::AtomicBool,
+    data: core::cell::UnsafeCell<T>,
+}
 
-/// Linked token pairs, indexed by session ID.
-/// Each entry: (session_id, elevated_ptr, filtered_ptr).
-/// Stored separately from SessionTable because KacsToken is local to this file.
-static mut LINKED_TOKENS: Option<compat::Vec<(u64, *const (), *const ())>> = None;
+unsafe impl<T: Send> Sync for SpinLock<T> {}
+unsafe impl<T: Send> Send for SpinLock<T> {}
+
+impl<T> SpinLock<T> {
+    const fn new(data: T) -> Self {
+        SpinLock {
+            locked: core::sync::atomic::AtomicBool::new(false),
+            data: core::cell::UnsafeCell::new(data),
+        }
+    }
+
+    fn lock(&self) -> SpinLockGuard<'_, T> {
+        while self.locked.swap(true, Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+        SpinLockGuard { lock: self }
+    }
+}
+
+struct SpinLockGuard<'a, T> {
+    lock: &'a SpinLock<T>,
+}
+
+impl<T> core::ops::Deref for SpinLockGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl<T> core::ops::DerefMut for SpinLockGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.lock.data.get() }
+    }
+}
+
+impl<T> Drop for SpinLockGuard<'_, T> {
+    fn drop(&mut self) {
+        self.lock.locked.store(false, Ordering::Release);
+    }
+}
+
+/// Global session table, protected by spinlock.
+static SESSION_TABLE: SpinLock<Option<kacs_core::session::SessionTable>> =
+    SpinLock::new(None);
+
+/// Wrapper to make *const () Send (we manage lifetime manually via refcounting).
+#[derive(Clone, Copy)]
+struct SendPtr(*const ());
+unsafe impl Send for SendPtr {}
+
+/// Linked token pairs, protected by spinlock.
+static LINKED_TOKENS: SpinLock<Option<compat::Vec<(u64, SendPtr, SendPtr)>>> =
+    SpinLock::new(None);
 
 /// Initialize the session table and create the SYSTEM session (session 0).
 /// Called once from kacs_init.
@@ -799,15 +847,12 @@ pub extern "C" fn kacs_init_session_table(system_token: *const ()) {
     if !system_token.is_null() {
         let kt = unsafe { KacsToken::from_ptr(system_token) };
         let _ = table.create_system_session(kt.token.user_sid.try_clone().unwrap_or_else(|_| {
-            // Fallback: if clone fails at boot, system is dying
             kacs_core::sid::Sid::new(5, &[18]).unwrap()
         }));
     }
 
-    unsafe {
-        SESSION_TABLE = Some(table);
-        LINKED_TOKENS = Some(compat::Vec::new());
-    }
+    *SESSION_TABLE.lock() = Some(table);
+    *LINKED_TOKENS.lock() = Some(compat::Vec::new());
 }
 
 /// Create a new logon session from a wire-format spec.
@@ -825,11 +870,10 @@ pub extern "C" fn kacs_create_session_impl(data: *const u8, len: usize) -> i64 {
         None => return -22, // -EINVAL
     };
 
-    let table = unsafe {
-        match SESSION_TABLE.as_mut() {
-            Some(t) => t,
-            None => return -22,
-        }
+    let mut guard = SESSION_TABLE.lock();
+    let table = match guard.as_mut() {
+        Some(t) => t,
+        None => return -22,
     };
 
     match table.create(logon_type, user_sid) {
@@ -851,21 +895,21 @@ pub extern "C" fn kacs_session_link_tokens(
     }
 
     // Verify the session exists
-    let table = unsafe {
-        match SESSION_TABLE.as_ref() {
+    {
+        let guard = SESSION_TABLE.lock();
+        let table = match guard.as_ref() {
             Some(t) => t,
             None => return -22,
+        };
+        if table.get(session_id).is_none() {
+            return -22;
         }
-    };
-    if table.get(session_id).is_none() {
-        return -22; // -EINVAL: no such session
     }
 
-    let links = unsafe {
-        match LINKED_TOKENS.as_mut() {
-            Some(l) => l,
-            None => return -22,
-        }
+    let mut guard = LINKED_TOKENS.lock();
+    let links = match guard.as_mut() {
+        Some(l) => l,
+        None => return -22,
     };
 
     // Clone both tokens (bump refcount)
@@ -877,17 +921,17 @@ pub extern "C" fn kacs_session_link_tokens(
         if entry.0 == session_id {
             // Drop old refs
             unsafe {
-                KacsToken::drop_ref(entry.1);
-                KacsToken::drop_ref(entry.2);
+                KacsToken::drop_ref(entry.1.0);
+                KacsToken::drop_ref(entry.2.0);
             }
-            entry.1 = e;
-            entry.2 = f;
+            entry.1 = SendPtr(e);
+            entry.2 = SendPtr(f);
             return 0;
         }
     }
 
     // New link
-    if compat::vec_push(links, (session_id, e, f)).is_err() {
+    if compat::vec_push(links, (session_id, SendPtr(e), SendPtr(f))).is_err() {
         kacs_token_drop(e);
         kacs_token_drop(f);
         return -12; // -ENOMEM
@@ -904,20 +948,19 @@ pub extern "C" fn kacs_session_get_linked_token(token_ptr: *const ()) -> *const 
         return core::ptr::null();
     }
 
-    let links = unsafe {
-        match LINKED_TOKENS.as_ref() {
-            Some(l) => l,
-            None => return core::ptr::null(),
-        }
+    let guard = LINKED_TOKENS.lock();
+    let links = match guard.as_ref() {
+        Some(l) => l,
+        None => return core::ptr::null(),
     };
 
     // Find which side this token is on
     for &(_, elevated, filtered) in links.iter() {
-        if core::ptr::eq(token_ptr as *const u8, elevated as *const u8) {
-            return kacs_token_clone(filtered);
+        if core::ptr::eq(token_ptr as *const u8, elevated.0 as *const u8) {
+            return kacs_token_clone(filtered.0);
         }
-        if core::ptr::eq(token_ptr as *const u8, filtered as *const u8) {
-            return kacs_token_clone(elevated);
+        if core::ptr::eq(token_ptr as *const u8, filtered.0 as *const u8) {
+            return kacs_token_clone(elevated.0);
         }
     }
 
@@ -932,11 +975,10 @@ pub extern "C" fn kacs_format_sessions(buf: *mut u8, buf_len: usize) -> i64 {
         return -22; // -EINVAL
     }
 
-    let table = unsafe {
-        match SESSION_TABLE.as_ref() {
-            Some(t) => t,
-            None => return -22,
-        }
+    let guard = SESSION_TABLE.lock();
+    let table = match guard.as_ref() {
+        Some(t) => t,
+        None => return -22,
     };
 
     let mut out = FormatBuf::new();

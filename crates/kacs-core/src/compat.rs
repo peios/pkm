@@ -566,14 +566,15 @@ mod kernel_try_clone {
         }
     }
 
-    /// Privileges: 4x u64 bitmasks, pure Copy.
+    /// Privileges: 4x AtomicU64 bitmasks. Load each and wrap in new AtomicU64.
     impl TryClone for crate::privilege::Privileges {
         fn try_clone(&self) -> Result<Self, AllocError> {
+            use core::sync::atomic::{AtomicU64, Ordering};
             Ok(crate::privilege::Privileges {
-                present: self.present,
-                enabled: self.enabled,
-                enabled_by_default: self.enabled_by_default,
-                used: self.used,
+                present: AtomicU64::new(self.present.load(Ordering::Relaxed)),
+                enabled: AtomicU64::new(self.enabled.load(Ordering::Relaxed)),
+                enabled_by_default: AtomicU64::new(self.enabled_by_default.load(Ordering::Relaxed)),
+                used: AtomicU64::new(self.used.load(Ordering::Relaxed)),
             })
         }
     }
