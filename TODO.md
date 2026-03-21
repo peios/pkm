@@ -4,40 +4,36 @@ Updated 2026-03-21. Only items NOT YET DONE.
 
 ---
 
-## FACS — remaining implementation
+## FACS — remaining
 
-- [ ] kacs_get_sd syscall (1021) — per-component SD read with
-  READ_CONTROL/ACCESS_SYSTEM_SECURITY gating
-- [ ] kacs_set_sd syscall (1022) — component merge, ownership
-  constraints, SeRestorePrivilege bypass, xattr write, cache update
-- [ ] kacs_open syscall (1020) — native open with explicit desired
-  access mask, create dispositions, f_mode mapping
-- [ ] Kernel patch 12: do_dentry_open integration for kacs_open
-- [ ] Kernel patches 13-16: pidfd_getfd mode (done), current_fsuid
-  projection, execveat AT_EMPTY_PATH FILE_EXECUTE, fchdir FILE_TRAVERSE
+- [ ] Kernel patches 13-16: current_fsuid projection (derooting),
+  execveat AT_EMPTY_PATH FILE_EXECUTE (patch 15), fchdir
+  FILE_TRAVERSE (patch 16). Patch 13 (pidfd_getfd) already done.
+- [ ] FILE_SUPERSEDE disposition in kacs_open — requires atomic
+  unlink + create under inode_lock (complex VFS integration)
 - [ ] Synthesize mode for foreign mounts (per-mount policy)
-- [ ] Corrupt SD audit events
-- [ ] Syscall registration in Dockerfile for 1020-1022
+- [ ] Corrupt SD audit event emission
+- [ ] O_PATH edge case refinements (fchdir live check)
+- [ ] kacs_open with creator-supplied SD (sd_buf parameter)
+- [ ] Ownership constraints in kacs_set_sd (SE_GROUP_OWNER check)
 
-## FACS-dependent (blocked until above)
+## Blocked on FACS completion
 
-- [ ] NEW_PROCESS_MIN — needs executable's integrity label from file SD
+- [ ] NEW_PROCESS_MIN — needs executable integrity label from file SD
 - [ ] Event crash recovery — flush ring buffer to file before reboot
 - [ ] Event audit_required overflow — expand buffer, signal peinit
-- [ ] Inode SD caching from xattr — DONE (Phase A)
-- [ ] Legacy open() compatibility mapping — DONE (Phase B)
-- [ ] Derooting (current_fsuid patch, capability switchboard) — switchboard DONE, fsuid patch pending
+- [ ] Derooting — current_fsuid projection patch
 - [ ] Wire peios_event_emit_kernel into SACL audit results
-- [ ] SeChangeNotifyPrivilege enforcement — DONE (Phase E, inode_permission)
-- [ ] unix_may_send hook (datagram socket gating — needs file SD on socket)
+- [ ] unix_may_send hook (datagram socket — needs file SD on socket)
 
 ## Deferred
 
-- [ ] Per-CPU event buffers (no load to optimize for yet)
+- [ ] Per-CPU event buffers (no load to optimize for)
 - [ ] /proc metadata hiding (non-trivial inode-to-task extraction)
 - [ ] Per-token audit policy override bitmask (audit categories not designed)
 - [ ] Windows cross-validation test corpus (needs Windows VM)
 - [ ] Vec-as-Box allocation pattern (blocked on kernel Rust KBox)
+- [ ] RENAME_WHITEOUT FILE_ADD_FILE check (needs flags in LSM hook)
 
 ## Polish (non-blocking)
 
