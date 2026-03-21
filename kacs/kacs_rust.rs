@@ -388,8 +388,18 @@ pub extern "C" fn kacs_token_query(
         17 => { // TokenMandatoryPolicy — [policy:u32le]
             for &b in &token.mandatory_policy.to_le_bytes() { out.byte(b); }
         }
-        18 => { // TokenLogonType — need session lookup, return 0 for now
-            for &b in &0u32.to_le_bytes() { out.byte(b); }
+        18 => { // TokenLogonType — look up from session table
+            let logon_type: u32 = {
+                let guard = SESSION_TABLE.lock();
+                match guard.as_ref() {
+                    Some(table) => match table.get(token.auth_id.0) {
+                        Some(session) => session.logon_type as u32,
+                        None => 0,
+                    },
+                    None => 0,
+                }
+            };
+            for &b in &logon_type.to_le_bytes() { out.byte(b); }
         }
         19 => { // TokenLogonSid — binary SID
             if let Ok(bytes) = token.logon_sid.to_bytes() {

@@ -832,26 +832,14 @@ fn pip_from_trust_label_sid(sid: &Sid) -> (u32, u32) {
 
 /// The main AccessCheck entry point (§11.17 AccessCheck wrapper).
 ///
-/// This is the initial implementation covering:
-/// - Generic mapping (§11.2)
-/// - MAXIMUM_ALLOWED (§11.5)
-/// - Impersonation level gate (§11.17 step 0)
-/// - Privilege grants: SeSecurityPrivilege, SeBackupPrivilege,
-///   SeRestorePrivilege (§11.6)
-/// - Owner implicit rights with OWNER RIGHTS pre-scan (§11.4)
-/// - DACL walk with basic allow/deny ACEs (§11.3)
-/// - Post-DACL SeTakeOwnershipPrivilege (§11.6)
-/// - NULL DACL / empty DACL semantics (§11.3)
+/// Complete pipeline: generic mapping, MAXIMUM_ALLOWED, impersonation
+/// gate, privilege grants, MIC, PIP, owner implicit rights, DACL walk
+/// (basic + conditional + object ACEs), SeTakeOwnershipPrivilege,
+/// restricted token two-pass, confinement, Central Access Policy
+/// (with per-node tree intersection and staged DACL comparison).
 ///
-/// NOT YET IMPLEMENTED (will be added incrementally):
-/// - MIC (§11.13)
-/// - PIP (§11.15)
-/// - Restricted tokens (§11.7)
-/// - Confinement (§11.14)
-/// - Conditional ACEs (§11.12)
-/// - Object ACEs (§11.8)
-/// - Central Access Policy (§11.16)
-/// - Auditing (§11.10)
+/// NOT YET IMPLEMENTED:
+/// - SACL audit emission (§11.10) — observational, not security-critical
 pub fn access_check(
     sd: &SecurityDescriptor,
     token: &Token,
@@ -903,6 +891,7 @@ pub fn access_check(
     if effective_privs & crate::privilege::bits::SE_SECURITY != 0 {
         granted |= mask::ACCESS_SYSTEM_SECURITY;
         privilege_granted |= mask::ACCESS_SYSTEM_SECURITY;
+        token.privileges.mark_used(crate::privilege::bits::SE_SECURITY);
     }
 
     // Backup: all read-mapped bits
@@ -911,6 +900,7 @@ pub fn access_check(
         decided |= backup_bits;
         granted |= backup_bits;
         privilege_granted |= backup_bits;
+        token.privileges.mark_used(crate::privilege::bits::SE_BACKUP);
     }
 
     // Restore: all write-mapped bits + WRITE_DAC + WRITE_OWNER + DELETE + ASS
@@ -923,6 +913,7 @@ pub fn access_check(
         decided |= restore_bits;
         granted |= restore_bits;
         privilege_granted |= restore_bits;
+        token.privileges.mark_used(crate::privilege::bits::SE_RESTORE);
     }
 
     // WRITE_OWNER is NOT decided here — deferred to step 7a
@@ -987,6 +978,7 @@ pub fn access_check(
                 decided |= mask::WRITE_OWNER;
                 granted |= mask::WRITE_OWNER;
                 privilege_granted |= mask::WRITE_OWNER;
+                token.privileges.mark_used(crate::privilege::bits::SE_TAKE_OWNERSHIP);
             }
         }
     }

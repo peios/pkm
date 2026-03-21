@@ -1129,7 +1129,7 @@ SYSCALL_DEFINE2(kacs_open_self_token, unsigned int, flags, u32, access_mask)
 /*
  * Open the primary token of another process via pidfd.
  * Checks PROCESS_QUERY_INFORMATION against the target's process SD
- * (via PIP dominance for now; full SD check is a TODO).
+ * and PIP dominance.
  */
 SYSCALL_DEFINE2(kacs_open_process_token, int, pidfd, u32, access_mask)
 {
