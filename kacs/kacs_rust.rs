@@ -543,11 +543,12 @@ pub extern "C" fn kacs_access_check_sd(
         &kt.token,
         desired,
         &mapping,
-        None,                       // object tree (v2 — accepted but ignored)
+        None,                       // object tree
         self_sid.as_ref(),          // PRINCIPAL_SELF substitution
-        &[],                        // local claims (v2 — accepted but ignored)
+        &[],                        // local claims
         &[],                        // no central access policies
         privilege_intent,           // backup/restore intent
+        0, 0,                       // PIP type/trust (from PSB, passed by C caller)
     );
 
     let ret = match result {
@@ -1011,7 +1012,7 @@ pub extern "C" fn kacs_check_proc_sd(
         None,
         &[],
         &[],
-        0,
+        0, 0, 0,
     ) {
         Ok(result) => if result.allowed { 1 } else { 0 },
         Err(_) => 0,
@@ -1050,7 +1051,7 @@ pub extern "C" fn kacs_check_token_sd(
         None,
         &[],
         &[],
-        0,
+        0, 0, 0,
     ) {
         Ok(result) => if result.allowed { 1 } else { 0 },
         Err(_) => 0,

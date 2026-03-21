@@ -607,6 +607,8 @@ fn pre_sacl_walk(
     mandatory_decided: &mut u32,
     _resource_attributes: &mut Vec<crate::token::ClaimEntry>,
     policy_sids: &mut Vec<Sid>,
+    pip_type: u32,
+    pip_trust: u32,
 ) -> Result<(), AllocError> {
     let mut mic_ace: Option<&crate::ace::Ace> = None;
     let mut mic_found = false;
@@ -653,7 +655,7 @@ fn pre_sacl_walk(
     // PIP: only if trust label present. No default (§11.15).
     let pre_pip = *decided;
     if let Some(a) = pip_ace {
-        enforce_pip(a, token, mapping, decided, granted, privilege_granted);
+        enforce_pip(a, token, mapping, decided, granted, privilege_granted, pip_type, pip_trust);
     }
     *mandatory_decided |= *decided & !pre_pip;
     Ok(())
@@ -782,18 +784,14 @@ fn enforce_pip(
     decided: &mut u32,
     granted: &mut u32,
     privilege_granted: &mut u32,
+    pip_type: u32,
+    pip_trust: u32,
 ) {
     // Extract PIP type and trust from the trust label SID (S-1-19-type-trust)
     let (ace_type, ace_trust) = pip_from_trust_label_sid(&ace_data.sid);
 
-    // Caller's PIP identity — in the full implementation this comes from
-    // the PSB, not the token. For now we use placeholder values.
-    // TODO: take pip_type and pip_trust as parameters when PSB is modeled.
-    let caller_type = crate::well_known::PIP_TYPE_NONE;
-    let caller_trust: u32 = 0;
-
     // Dominance check: both dimensions must be >=
-    let caller_dominates = caller_type >= ace_type && caller_trust >= ace_trust;
+    let caller_dominates = pip_type >= ace_type && pip_trust >= ace_trust;
 
     if caller_dominates {
         return;
@@ -850,6 +848,8 @@ pub fn access_check(
     local_claims: &[crate::token::ClaimEntry],
     policies: &[CentralAccessPolicy],
     privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
 ) -> Result<AccessCheckResult, AccessCheckError> {
     // Step 0: Impersonation level gate (§12.1)
     if token.token_type == TokenType::Impersonation
@@ -933,6 +933,8 @@ pub fn access_check(
         &mut mandatory_decided,
         &mut resource_attributes,
         &mut policy_sids,
+        pip_type,
+        pip_trust,
     )?;
 
     // Step 5: Virtual group injection
@@ -1258,6 +1260,8 @@ pub fn access_check_result_list(
     local_claims: &[crate::token::ClaimEntry],
     policies: &[CentralAccessPolicy],
     privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
 ) -> Result<(Vec<NodeResult>, bool), AccessCheckError> {
     if object_tree.is_empty() {
         return Err(AccessCheckError::InvalidSecurityDescriptor);
@@ -1268,6 +1272,7 @@ pub fn access_check_result_list(
         sd, token, desired, mapping,
         Some(object_tree), self_sid,
         local_claims, policies, privilege_intent,
+        pip_type, pip_trust,
     )?;
 
     let mapped_desired = map_generic_bits(desired, mapping) & !mask::MAXIMUM_ALLOWED;
@@ -1473,7 +1478,7 @@ mod tests {
         token: &Token,
         desired: u32,
     ) -> AccessCheckResult {
-        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0).unwrap()
+        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0).unwrap()
     }
 
     fn check_with_intent(
@@ -1482,7 +1487,7 @@ mod tests {
         desired: u32,
         intent: u32,
     ) -> AccessCheckResult {
-        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, None, &[], &[], intent).unwrap()
+        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, None, None, &[], &[], intent, 0, 0).unwrap()
     }
 
     // -----------------------------------------------------------------------
@@ -1980,7 +1985,7 @@ mod tests {
         token.token_type = TokenType::Impersonation;
         token.impersonation_level = ImpersonationLevel::Identification;
         let result = access_check(
-            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0,
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0,
         );
         assert_eq!(result, Err(AccessCheckError::IdentificationLevel));
     }
@@ -2046,7 +2051,7 @@ mod tests {
         };
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0,
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0,
         );
         assert_eq!(result, Err(AccessCheckError::InvalidSecurityDescriptor));
     }
@@ -2062,7 +2067,7 @@ mod tests {
         };
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0,
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0,
         );
         assert_eq!(result, Err(AccessCheckError::InvalidSecurityDescriptor));
     }
@@ -2145,7 +2150,7 @@ mod tests {
         ]);
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, KEY_QUERY_VALUE, &KEY_GENERIC_MAPPING, None, None, &[], &[], 0,
+            &sd, &token, KEY_QUERY_VALUE, &KEY_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0,
         ).unwrap();
         assert!(result.allowed); // GENERIC_READ maps to KEY_QUERY_VALUE for registry
     }
@@ -2164,19 +2169,19 @@ mod tests {
         // Owner (alice) gets everything
         let token = test_token(&alice(), &[], 0);
         let result = access_check(
-            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, None, &[], &[], 0,
+            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0,
         ).unwrap();
         assert!(result.allowed);
 
         // Random user gets only PROCESS_QUERY_LIMITED
         let token = test_token(&bob(), &[&well_known::everyone().unwrap()], 0);
         let result = access_check(
-            &sd, &token, PROCESS_QUERY_LIMITED, &PROCESS_GENERIC_MAPPING, None, None, &[], &[], 0,
+            &sd, &token, PROCESS_QUERY_LIMITED, &PROCESS_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0,
         ).unwrap();
         assert!(result.allowed);
 
         let result = access_check(
-            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, None, &[], &[], 0,
+            &sd, &token, PROCESS_TERMINATE, &PROCESS_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0,
         ).unwrap();
         assert!(!result.allowed);
     }
@@ -3120,7 +3125,7 @@ mod tests {
         desired: u32,
         tree: &mut [ObjectTypeNode],
     ) -> AccessCheckResult {
-        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, Some(tree), None, &[], &[], 0).unwrap()
+        access_check(sd, token, desired, &FILE_GENERIC_MAPPING, Some(tree), None, &[], &[], 0, 0, 0).unwrap()
     }
 
     #[test]
@@ -3410,7 +3415,7 @@ mod tests {
         let token = medium_token(&alice(), &[], 0);
         let result = access_check(
             &sd, &token, FILE_READ_DATA | FILE_WRITE_DATA,
-            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0,
+            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0, 0, 0,
         ).unwrap();
         assert!(!result.allowed); // write denied by CAP
         assert!(result.granted & FILE_READ_DATA != 0);
@@ -3434,7 +3439,7 @@ mod tests {
         let token = medium_token(&alice(), &[], 0);
         let result = access_check(
             &sd, &token, FILE_WRITE_DATA,
-            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0,
+            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0, 0, 0,
         ).unwrap();
         assert!(!result.allowed); // DACL doesn't grant write
     }
@@ -3451,7 +3456,7 @@ mod tests {
         // Lookup returns None → recovery policy
         let result = access_check(
             &sd, &token, FILE_READ_DATA | FILE_WRITE_DATA,
-            &FILE_GENERIC_MAPPING, None, None, &[], &[], 0,
+            &FILE_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0,
         ).unwrap();
         assert!(result.allowed); // recovery = no restriction
     }
@@ -3494,7 +3499,7 @@ mod tests {
         let token = medium_token(&alice(), &[], 0);
         let result = access_check(
             &sd, &token, FILE_READ_DATA,
-            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0,
+            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0, 0, 0,
         ).unwrap();
         assert!(result.allowed); // rule skipped, no restriction
     }
@@ -3519,7 +3524,7 @@ mod tests {
         let token = medium_token(&alice(), &[], 0);
         let result = access_check(
             &sd, &token, FILE_WRITE_DATA,
-            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0,
+            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0, 0, 0,
         ).unwrap();
         assert!(!result.allowed);
     }
@@ -3540,7 +3545,7 @@ mod tests {
         let token = medium_token(&alice(), &[], 0);
         let result = access_check(
             &sd, &token, FILE_READ_DATA,
-            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0,
+            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0, 0, 0,
         ).unwrap();
         assert!(!result.allowed);
     }
