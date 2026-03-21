@@ -139,7 +139,7 @@ fn compute_acl(
     creator_acl: Option<&Acl>,
     creator_protected: bool,
     creator_present: bool,
-    _token: &Token,
+    token: &Token,
     owner: &Sid,
     group: &Sid,
     object_class: ObjectClass,
@@ -193,9 +193,11 @@ fn compute_acl(
 
     // No parent inheritance — use token's default DACL
     if is_dacl {
-        // Token's default_dacl would go here. For now, return an empty DACL.
-        // TODO: use token.default_dacl when it's modeled
-        Ok(Some(Acl::new(ACL_REVISION)))
+        if let Some(ref default_dacl) = token.default_dacl {
+            Ok(Some(default_dacl.try_clone()?))
+        } else {
+            Ok(Some(Acl::new(ACL_REVISION)))
+        }
     } else {
         // No default SACL
         Ok(None)
