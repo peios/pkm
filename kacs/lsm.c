@@ -37,6 +37,8 @@ extern int kacs_token_check_privilege(const void *ptr, u64 priv_mask);
 extern int kacs_token_get_integrity(const void *ptr);
 extern int kacs_token_same_user(const void *a, const void *b);
 extern void kacs_token_set_impersonation_level(const void *ptr, int level);
+extern const void *kacs_create_default_proc_sd(const void *token_ptr);
+extern void kacs_proc_sd_drop(const void *sd_ptr);
 extern int kacs_session_link_tokens(u64 session_id,
 				    const void *elevated, const void *filtered);
 extern const void *kacs_session_get_linked_token(const void *token_ptr);
@@ -165,14 +167,47 @@ struct kacs_sock_security {
 	u32 max_impersonation;		/* client side: max level (default=Impersonation) */
 };
 
+/* ── Task blob (Process Security Block) ───────────────────────────────── */
+
+struct kacs_task_security {
+	const void *proc_sd;		/* Rust-managed process SD (opaque) */
+	u32 pip_type;			/* PIP_TYPE_NONE/PROTECTED/ISOLATED */
+	u32 pip_trust;			/* trust level within pip_type */
+};
+
+/* PIP type constants (§13) */
+#define PIP_TYPE_NONE        0
+#define PIP_TYPE_PROTECTED   512
+#define PIP_TYPE_ISOLATED    1024
+
 static struct lsm_blob_sizes kacs_blob_sizes __ro_after_init = {
 	.lbs_cred = sizeof(struct kacs_cred_security),
 	.lbs_sock = sizeof(struct kacs_sock_security),
+	.lbs_task = sizeof(struct kacs_task_security),
 };
 
 static inline struct kacs_cred_security *kacs_cred(const struct cred *cred)
 {
 	return cred->security + kacs_blob_sizes.lbs_cred;
+}
+
+static inline struct kacs_task_security *kacs_task(struct task_struct *task)
+{
+	return task->security + kacs_blob_sizes.lbs_task;
+}
+
+/*
+ * PIP dominance check (§13.1). Binary: caller dominates target iff
+ * caller.pip_type >= target.pip_type AND caller.pip_trust >= target.pip_trust.
+ * If target has pip_type == NONE, dominance is trivially true.
+ */
+static inline bool pip_dominates(struct kacs_task_security *caller,
+				 struct kacs_task_security *target)
+{
+	if (target->pip_type == PIP_TYPE_NONE)
+		return true;
+	return caller->pip_type >= target->pip_type
+	    && caller->pip_trust >= target->pip_trust;
 }
 
 static inline struct kacs_sock_security *kacs_sock(const struct sock *sk)
@@ -567,6 +602,81 @@ static void kacs_cred_free(struct cred *cred)
 		kacs_token_drop(sec->token);
 }
 
+/* ── Task hooks (Process SDs + PIP) ────────────────────────────────────── */
+
+/*
+ * task_alloc: called on fork/clone. Create a default process SD and
+ * inherit PIP level from the parent.
+ */
+static int kacs_task_alloc(struct task_struct *task, u64 clone_flags)
+{
+	struct kacs_task_security *tsec = kacs_task(task);
+	struct kacs_task_security *parent_tsec = kacs_task(current);
+	const struct kacs_cred_security *cred_sec;
+
+	/* Create default process SD from the creator's token. */
+	cred_sec = kacs_cred(current_cred());
+	tsec->proc_sd = kacs_create_default_proc_sd(cred_sec->token);
+
+	/* Inherit PIP from parent. */
+	tsec->pip_type = parent_tsec->pip_type;
+	tsec->pip_trust = parent_tsec->pip_trust;
+
+	return 0;
+}
+
+static void kacs_task_free(struct task_struct *task)
+{
+	struct kacs_task_security *tsec = kacs_task(task);
+
+	if (tsec->proc_sd)
+		kacs_proc_sd_drop(tsec->proc_sd);
+}
+
+/*
+ * Signal delivery: check PROCESS_TERMINATE (lethal) or PROCESS_SIGNAL
+ * (non-lethal) against the target's process SD, then PIP dominance.
+ *
+ * PIP is checked AFTER the SD — even if the SD grants access, PIP
+ * can deny. SeDebugPrivilege doesn't bypass PIP (§13.2).
+ */
+static int kacs_task_kill(struct task_struct *target,
+			  struct kernel_siginfo *info, int sig,
+			  const struct cred *cred)
+{
+	struct kacs_task_security *caller_tsec = kacs_task(current);
+	struct kacs_task_security *target_tsec = kacs_task(target);
+
+	/* PIP dominance check. */
+	if (!pip_dominates(caller_tsec, target_tsec))
+		return -EACCES;
+
+	/* TODO: AccessCheck for PROCESS_TERMINATE/PROCESS_SIGNAL
+	 * against target's process SD. For now, PIP is the only gate.
+	 * Full SD check comes with kacs_set_sd on pidfds. */
+
+	return 0;
+}
+
+/*
+ * ptrace: full control over target. PIP dominance required.
+ * SeDebugPrivilege doesn't bypass PIP (§13.2).
+ */
+static int kacs_ptrace_access_check(struct task_struct *child,
+				    unsigned int mode)
+{
+	struct kacs_task_security *caller_tsec = kacs_task(current);
+	struct kacs_task_security *target_tsec = kacs_task(child);
+
+	if (!pip_dominates(caller_tsec, target_tsec))
+		return -EACCES;
+
+	/* TODO: AccessCheck for PROCESS_VM_READ/WRITE against
+	 * target's process SD. */
+
+	return 0;
+}
+
 /* ── Socket hooks ──────────────────────────────────────────────────────── */
 
 static int kacs_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
@@ -643,6 +753,10 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(cred_transfer, kacs_cred_transfer),
 	LSM_HOOK_INIT(cred_alloc_blank, kacs_cred_alloc_blank),
 	LSM_HOOK_INIT(cred_free, kacs_cred_free),
+	LSM_HOOK_INIT(task_alloc, kacs_task_alloc),
+	LSM_HOOK_INIT(task_free, kacs_task_free),
+	LSM_HOOK_INIT(task_kill, kacs_task_kill),
+	LSM_HOOK_INIT(ptrace_access_check, kacs_ptrace_access_check),
 	LSM_HOOK_INIT(sk_alloc_security, kacs_sk_alloc_security),
 	LSM_HOOK_INIT(sk_free_security, kacs_sk_free_security),
 	LSM_HOOK_INIT(unix_stream_connect, kacs_unix_stream_connect),

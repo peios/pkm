@@ -519,6 +519,126 @@ pub extern "C" fn kacs_token_deep_clone(
     }
 }
 
+// ── Process Security Descriptors ──────────────────────────────────────────
+
+/// Create a default process SD for a newly forked process.
+///
+/// Default DACL (§8.4):
+/// - Creator's user SID → GENERIC_ALL
+/// - Administrators → GENERIC_ALL
+/// - SYSTEM → GENERIC_ALL
+/// - Everyone → PROCESS_QUERY_LIMITED (0x1000)
+///
+/// Returns an opaque pointer to the SD, or null on failure.
+/// Caller is responsible for freeing via kacs_proc_sd_drop.
+#[no_mangle]
+pub extern "C" fn kacs_create_default_proc_sd(token_ptr: *const ()) -> *const () {
+    if token_ptr.is_null() {
+        return core::ptr::null();
+    }
+
+    let kt = unsafe { KacsToken::from_ptr(token_ptr) };
+
+    let sd = match build_default_proc_sd(&kt.token) {
+        Ok(sd) => sd,
+        Err(_) => return core::ptr::null(),
+    };
+
+    // Box it via Vec trick (same as KacsToken)
+    let mut v = match compat::vec_with_capacity::<kacs_core::sd::SecurityDescriptor>(1) {
+        Ok(v) => v,
+        Err(_) => return core::ptr::null(),
+    };
+    if compat::vec_push(&mut v, sd).is_err() {
+        return core::ptr::null();
+    }
+    let ptr = v.as_ptr();
+    core::mem::forget(v);
+    ptr as *const ()
+}
+
+/// Free a process SD.
+#[no_mangle]
+pub extern "C" fn kacs_proc_sd_drop(ptr: *const ()) {
+    if ptr.is_null() {
+        return;
+    }
+    let ptr_mut = ptr as *mut kacs_core::sd::SecurityDescriptor;
+    drop(unsafe { compat::Vec::from_raw_parts(ptr_mut, 1, 1) });
+}
+
+/// Build the default process SD from the creator's token.
+fn build_default_proc_sd(
+    token: &Token,
+) -> Result<kacs_core::sd::SecurityDescriptor, AllocError> {
+    use kacs_core::ace::{self, Ace};
+    use kacs_core::acl::Acl;
+    use kacs_core::group;
+    use kacs_core::mask;
+    use kacs_core::sd::SecurityDescriptor;
+
+    let owner = token.user_sid.try_clone()?;
+    let group = token.user_sid.try_clone()?;
+
+    // Build DACL with 4 ACEs
+    let mut aces = compat::vec_with_capacity::<Ace>(4)?;
+
+    // Creator → GENERIC_ALL (mapped to PROCESS_ALL_ACCESS)
+    compat::vec_push(&mut aces, Ace {
+        ace_type: ace::ACCESS_ALLOWED_ACE_TYPE,
+        flags: 0,
+        mask: mask::GENERIC_ALL,
+        sid: token.user_sid.try_clone()?,
+        object_type: None,
+        inherited_object_type: None,
+        condition: None,
+        application_data: None,
+    })?;
+
+    // Administrators → GENERIC_ALL
+    compat::vec_push(&mut aces, Ace {
+        ace_type: ace::ACCESS_ALLOWED_ACE_TYPE,
+        flags: 0,
+        mask: mask::GENERIC_ALL,
+        sid: kacs_core::well_known::administrators()?,
+        object_type: None,
+        inherited_object_type: None,
+        condition: None,
+        application_data: None,
+    })?;
+
+    // SYSTEM → GENERIC_ALL
+    compat::vec_push(&mut aces, Ace {
+        ace_type: ace::ACCESS_ALLOWED_ACE_TYPE,
+        flags: 0,
+        mask: mask::GENERIC_ALL,
+        sid: kacs_core::well_known::system()?,
+        object_type: None,
+        inherited_object_type: None,
+        condition: None,
+        application_data: None,
+    })?;
+
+    // Everyone → PROCESS_QUERY_LIMITED
+    compat::vec_push(&mut aces, Ace {
+        ace_type: ace::ACCESS_ALLOWED_ACE_TYPE,
+        flags: 0,
+        mask: mask::PROCESS_QUERY_LIMITED,
+        sid: kacs_core::well_known::everyone()?,
+        object_type: None,
+        inherited_object_type: None,
+        condition: None,
+        application_data: None,
+    })?;
+
+    let dacl = Acl {
+        revision: kacs_core::acl::ACL_REVISION,
+        aces,
+    };
+
+    Ok(SecurityDescriptor::new(owner, group, dacl))
+}
+
 // ── Token restriction ─────────────────────────────────────────────────────
 
 /// Create a restricted (sandboxed) copy of a token.
