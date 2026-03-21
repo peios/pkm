@@ -955,12 +955,41 @@ static int kacs_task_prlimit(const struct cred *cred,
 			     const struct cred *tcred,
 			     unsigned int flags)
 {
-	/* prlimit: if modifying another process's limits, check access. */
-	if (cred != tcred) {
-		/* We don't have the task_struct here, only creds.
-		 * PIP check requires task_struct. For now, allow
-		 * if the credentials match (same process). */
+	/* Kept for LSM stacking compat — real check is in
+	 * kacs_task_prlimit_target which has the task_struct. */
+	return 0;
+}
+
+/*
+ * prlimit with target task_struct — process SD + PIP check.
+ * Uses the same pattern as task_kill / ptrace_access_check.
+ */
+static int kacs_task_prlimit_target(struct task_struct *target,
+				    unsigned int flags)
+{
+	struct kacs_task_security *caller_tsec = kacs_task(current);
+	struct kacs_task_security *target_tsec = kacs_task(target);
+	const struct kacs_cred_security *caller_cred;
+
+	if (target == current)
+		return 0;
+
+	/* Process SD: PROCESS_SET_INFORMATION for write, PROCESS_QUERY for read. */
+	if (target_tsec->proc_sd) {
+		/* LSM_PRLIMIT_WRITE = 2 (include/linux/security.h) */
+		u32 desired = (flags & 2)
+			? 0x0200    /* PROCESS_SET_INFORMATION */
+			: 0x0400;   /* PROCESS_QUERY_INFORMATION */
+		caller_cred = kacs_cred(current_cred());
+		if (!kacs_check_proc_sd(caller_cred->token,
+					target_tsec->proc_sd, desired))
+			return -EACCES;
 	}
+
+	/* PIP dominance. */
+	if (!pip_dominates(caller_tsec, target_tsec))
+		return -EACCES;
+
 	return 0;
 }
 
@@ -1056,6 +1085,7 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(task_setscheduler, kacs_task_setscheduler),
 	LSM_HOOK_INIT(task_setioprio, kacs_task_setioprio),
 	LSM_HOOK_INIT(task_prlimit, kacs_task_prlimit),
+	LSM_HOOK_INIT(task_prlimit_target, kacs_task_prlimit_target),
 	LSM_HOOK_INIT(sk_alloc_security, kacs_sk_alloc_security),
 	LSM_HOOK_INIT(sk_free_security, kacs_sk_free_security),
 	LSM_HOOK_INIT(unix_stream_connect, kacs_unix_stream_connect),
