@@ -89,6 +89,10 @@ extern const void *kacs_create_inherited_sd(const void *token_ptr,
 extern long long kacs_file_access_check(const void *token_ptr,
 					const void *sd_ptr,
 					u32 desired);
+extern int kacs_token_can_own(const void *token_ptr,
+			      const void *sid_data, size_t sid_len);
+extern int kacs_sd_get_owner_sid(const void *sd_data, size_t sd_len,
+				 void *out_sid, size_t out_max);
 extern int kacs_sd_get_components(const void *sd_ptr, u32 security_info,
 				  void *buf, int buf_len);
 extern const void *kacs_sd_merge_components(const void *existing_sd_ptr,
@@ -3810,6 +3814,28 @@ SYSCALL_DEFINE6(kacs_set_sd, int, dirfd, const char __user *, path,
 			kfree(ksd);
 			path_put(&target);
 			return -EACCES;
+		}
+
+		/* Ownership constraints (§14.2): new owner must be
+		 * caller's own SID or a group with SE_GROUP_OWNER.
+		 * SeRestorePrivilege bypasses this constraint. */
+		if (security_info & OWNER_SECURITY_INFORMATION) {
+			if (!kacs_token_check_privilege(ccred->token,
+					(1ULL << 18) /* SE_RESTORE */)) {
+				u8 owner_buf[68]; /* max SID: 8 + 15*4 = 68 */
+				int owner_len;
+
+				owner_len = kacs_sd_get_owner_sid(
+					ksd, sd_len, owner_buf, sizeof(owner_buf));
+				if (owner_len > 0 &&
+				    !kacs_token_can_own(ccred->token,
+						       owner_buf, owner_len)) {
+					rcu_read_unlock();
+					kfree(ksd);
+					path_put(&target);
+					return -EPERM;
+				}
+			}
 		}
 
 		/* Merge components from new SD into existing. */

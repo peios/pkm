@@ -653,6 +653,70 @@ pub extern "C" fn kacs_token_get_projected_gid(ptr: *const ()) -> u32 {
     kt.token.projected_gid
 }
 
+/// Extract the owner SID from a raw SD blob. Returns the SID bytes and
+/// length, or 0 if no owner.
+#[no_mangle]
+pub extern "C" fn kacs_sd_get_owner_sid(
+    sd_data: *const u8, sd_len: usize,
+    out_sid: *mut u8, out_max: usize,
+) -> c_int {
+    if sd_data.is_null() || sd_len == 0 {
+        return 0;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(sd_data, sd_len) };
+    let sd = match kacs_core::sd::SecurityDescriptor::from_bytes(bytes) {
+        Ok(Some(sd)) => sd,
+        _ => return 0,
+    };
+    let owner = match sd.owner {
+        Some(ref s) => s,
+        None => return 0,
+    };
+    let sid_bytes = match owner.to_bytes() {
+        Ok(b) => b,
+        Err(_) => return 0,
+    };
+    if out_sid.is_null() || out_max < sid_bytes.len() {
+        return sid_bytes.len() as c_int; // size query
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(sid_bytes.as_ptr(), out_sid, sid_bytes.len());
+    }
+    sid_bytes.len() as c_int
+}
+
+/// Check if a SID is the token's user_sid or a group with SE_GROUP_OWNER.
+/// Used for ownership constraints in kacs_set_sd (§14.2).
+/// Returns 1 if allowed, 0 if not.
+#[no_mangle]
+pub extern "C" fn kacs_token_can_own(token_ptr: *const (), sid_data: *const u8, sid_len: usize) -> c_int {
+    if token_ptr.is_null() || sid_data.is_null() || sid_len == 0 {
+        return 0;
+    }
+    let kt = unsafe { KacsToken::from_ptr(token_ptr) };
+    let sid_bytes = unsafe { core::slice::from_raw_parts(sid_data, sid_len) };
+    let target_sid = match kacs_core::sid::Sid::from_bytes(sid_bytes) {
+        Some(s) => s,
+        None => return 0,
+    };
+
+    // Caller's own SID.
+    if kt.token.user_sid == target_sid {
+        return 1;
+    }
+
+    // A group with SE_GROUP_OWNER.
+    for group in kt.token.groups.iter() {
+        if group.sid == target_sid
+            && (group.attributes & kacs_core::group::SE_GROUP_OWNER) != 0
+        {
+            return 1;
+        }
+    }
+
+    0
+}
+
 /// Returns the integrity level as a RID (0, 4096, 8192, 12288, 16384).
 /// Used by the integrity ceiling check in the two-gate model.
 #[no_mangle]
