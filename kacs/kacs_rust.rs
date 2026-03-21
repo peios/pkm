@@ -1159,6 +1159,38 @@ pub extern "C" fn kacs_file_access_check(
     }
 }
 
+/// Same as kacs_file_access_check but uses DIRECTORY_GENERIC_MAPPING.
+#[no_mangle]
+pub extern "C" fn kacs_dir_access_check(
+    token_ptr: *const (),
+    sd_ptr: *const (),
+    desired: u32,
+) -> i64 {
+    if token_ptr.is_null() || sd_ptr.is_null() {
+        return -1;
+    }
+
+    let kt = unsafe { KacsToken::from_ptr(token_ptr) };
+    let sd = unsafe { &*(sd_ptr as *const kacs_core::sd::SecurityDescriptor) };
+
+    let check_desired = desired | kacs_core::mask::MAXIMUM_ALLOWED;
+
+    match kacs_core::access_check::access_check(
+        sd,
+        &kt.token,
+        check_desired,
+        &kacs_core::mask::DIRECTORY_GENERIC_MAPPING,
+        None,
+        None,
+        &[],
+        &[],
+        0, 0, 0,
+    ) {
+        Ok(result) => (result.granted & desired) as i64,
+        Err(_) => -1,
+    }
+}
+
 /// Check a token's own SD against a caller's token for a desired access mask.
 ///
 /// Returns 1 if access is granted, 0 if denied.

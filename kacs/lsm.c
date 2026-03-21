@@ -69,6 +69,9 @@ extern const void *kacs_create_inherited_sd(const void *token_ptr,
 extern long long kacs_file_access_check(const void *token_ptr,
 					const void *sd_ptr,
 					u32 desired);
+extern long long kacs_dir_access_check(const void *token_ptr,
+				       const void *sd_ptr,
+				       u32 desired);
 extern long long kacs_access_check_sd(const void *token_ptr,
 				      const void *sd_data, size_t sd_len,
 				      u32 desired, u32 generic_read,
@@ -1491,6 +1494,10 @@ static int kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 	return 0;
 }
 
+/* Sentinel value for corrupt SD in inode cache. Not a valid pointer —
+ * distinguishes "corrupt SD cached" from "not yet populated" (NULL). */
+#define KACS_SD_CORRUPT	((const void *)1UL)
+
 /* ── SD cache population (§14.2) ──────────────────────────────────────── */
 
 /*
@@ -1512,44 +1519,60 @@ static const void *kacs_inode_get_sd(struct inode *inode)
 
 	/* Fast path: cache already populated. */
 	sd = rcu_dereference(isec->sd_cache);
+	if (sd == KACS_SD_CORRUPT)
+		return NULL; /* corrupt SD — cached sentinel, fail-closed */
 	if (sd)
 		return sd;
 
 	/* Slow path: read xattr and parse. */
-	if (!inode->i_op || !inode->i_op->getxattr)
-		return NULL;
+	{
+		struct dentry *alias = d_find_any_alias(inode);
+		if (!alias)
+			return NULL;
 
-	/* First try the standard KACS xattr, then NTFS. */
-	buf = kmalloc(65536, GFP_KERNEL);
-	if (!buf)
-		return NULL;
+		buf = kmalloc(65536, GFP_KERNEL);
+		if (!buf) {
+			dput(alias);
+			return NULL;
+		}
 
-	len = __vfs_getxattr(
-		d_find_any_alias(inode), inode,
-		KACS_SD_XATTR, buf, 65536);
-	if (len <= 0) {
-		len = __vfs_getxattr(
-			d_find_any_alias(inode), inode,
-			KACS_SD_XATTR_NTFS, buf, 65536);
-	}
+		/* First try the standard KACS xattr, then NTFS. */
+		len = __vfs_getxattr(alias, inode,
+				     KACS_SD_XATTR, buf, 65536);
+		if (len <= 0)
+			len = __vfs_getxattr(alias, inode,
+					     KACS_SD_XATTR_NTFS, buf, 65536);
 
-	if (len <= 0) {
+		dput(alias);
+
+		if (len <= 0) {
+			kfree(buf);
+			return NULL; /* no SD on this file */
+		}
+
+		/* Parse the binary SD via Rust. */
+		new_sd = kacs_sd_from_bytes(buf, (size_t)len);
 		kfree(buf);
-		return NULL; /* no SD on this file */
+
+		if (!new_sd) {
+			/* Corrupt SD — cache a sentinel (KACS_SD_CORRUPT)
+			 * to avoid re-reading and re-parsing on every
+			 * access (§14.2 corrupt SD handling). */
+			old = cmpxchg(&isec->sd_cache, NULL,
+				      KACS_SD_CORRUPT);
+			/* TODO: emit audit event with parse failure reason.
+			 * For now, fail-closed. */
+			return NULL;
+		}
 	}
-
-	/* Parse the binary SD via Rust. */
-	new_sd = kacs_sd_from_bytes(buf, (size_t)len);
-	kfree(buf);
-
-	if (!new_sd)
-		return NULL; /* corrupt SD — fail-closed */
 
 	/* Race-safe install: first writer wins. */
 	old = cmpxchg(&isec->sd_cache, NULL, new_sd);
 	if (old) {
 		/* Another thread won the race — use theirs, free ours. */
 		kacs_proc_sd_drop(new_sd);
+		if (old == KACS_SD_CORRUPT)
+			return NULL;
 		return old;
 	}
 
@@ -1687,7 +1710,7 @@ static void kacs_inode_free_security_rcu(void *inode_security)
 		return;
 
 	isec = inode_security + kacs_blob_sizes.lbs_inode;
-	if (isec->sd_cache) {
+	if (isec->sd_cache && isec->sd_cache != KACS_SD_CORRUPT) {
 		/* sd_cache is a Rust-managed object — call Rust free.
 		 * RCU grace period has elapsed, safe to free. */
 		kacs_proc_sd_drop((void *)isec->sd_cache);
@@ -1886,7 +1909,7 @@ static int check_parent_sd(struct inode *dir, u32 right)
 		return -EACCES; /* deny mode: no SD on parent */
 	}
 	ccred = kacs_cred(current_cred());
-	ret = kacs_file_access_check(ccred->token, sd, right);
+	ret = kacs_dir_access_check(ccred->token, sd, right);
 	rcu_read_unlock();
 
 	if (ret < 0)
