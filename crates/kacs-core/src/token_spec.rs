@@ -1,8 +1,8 @@
 //! Token specification wire format for `kacs_create_token`.
 //!
-//! Binary layout: fixed 56-byte header + variable-length sections for
-//! the user SID and group memberships. Offsets in the header point to
-//! the variable sections.
+//! Binary layout: fixed 96-byte header + variable-length sections for
+//! the user SID, group memberships, and optional default DACL.
+//! Offsets in the header point to the variable sections.
 //!
 //! This is the format authd sends to the kernel to mint a new token.
 
@@ -19,8 +19,8 @@ use crate::token::*;
 pub const TOKEN_SPEC_VERSION: u32 = 1;
 
 /// Minimum spec size (header only, no variable data).
-/// v1 header: 64 bytes (56 original + 8 byte session_id).
-const HEADER_SIZE: usize = 64;
+/// Header: 96 bytes.
+const HEADER_SIZE: usize = 96;
 
 /// Parse a token specification from its binary representation.
 ///
@@ -74,6 +74,13 @@ pub fn parse_token_spec(data: &[u8]) -> Result<Option<Token>, AllocError> {
     let groups_offset = u32_at(data, 48) as usize;
     let groups_count = u32_at(data, 52) as usize;
     let session_id = u64_at(data, 56);
+    let owner_sid_index = u32_at(data, 64) as u16;
+    let primary_group_index = u32_at(data, 68) as u16;
+    let default_dacl_offset = u32_at(data, 72) as usize;
+    let default_dacl_len = u32_at(data, 76) as usize;
+    let mut source_name = [0u8; 8];
+    source_name.copy_from_slice(&data[80..88]);
+    let source_id = u64_at(data, 88);
 
     // ── User SID ──────────────────────────────────────────────────────
 
@@ -116,6 +123,20 @@ pub fn parse_token_spec(data: &[u8]) -> Result<Option<Token>, AllocError> {
         compat::vec_push(&mut groups, GroupEntry::new(sid, attrs))?;
     }
 
+    // ── Default DACL (optional) ───────────────────────────────────────
+
+    let default_dacl = if default_dacl_offset != 0 && default_dacl_len != 0 {
+        if default_dacl_offset + default_dacl_len > data.len() {
+            return Ok(None);
+        }
+        match crate::acl::Acl::from_bytes(&data[default_dacl_offset..default_dacl_offset + default_dacl_len]) {
+            Ok(Some(acl)) => Some(acl),
+            _ => return Ok(None),
+        }
+    } else {
+        None
+    };
+
     // ── Build token ───────────────────────────────────────────────────
 
     Ok(Some(Token {
@@ -139,16 +160,16 @@ pub fn parse_token_spec(data: &[u8]) -> Result<Option<Token>, AllocError> {
         },
 
         elevation_type,
-        owner_sid_index: 0,
-        primary_group_index: 0,
-        default_dacl: None, // authd can set via future spec v2 field
+        owner_sid_index,
+        primary_group_index,
+        default_dacl,
         security_descriptor: None, // kernel generates after creation
 
         token_id: Luid(0), // kernel assigns real IDs
         auth_id: Luid(session_id), // links token to its auth session
         source: TokenSource {
-            name: *b"authd\0\0\0",
-            source_id: Luid(0),
+            name: source_name,
+            source_id: Luid(source_id),
         },
         origin: Luid(0),
         interactive_session_id: 0,
@@ -247,6 +268,18 @@ mod tests {
         // session_id(8) — session 0 = SYSTEM
         spec.extend_from_slice(&0u64.to_le_bytes());
 
+        // owner_sid_index(4) + primary_group_sid_index(4)
+        spec.extend_from_slice(&0u32.to_le_bytes()); // 0 = user_sid is owner
+        spec.extend_from_slice(&0u32.to_le_bytes()); // 0 = first group
+
+        // default_dacl_offset(4) + default_dacl_len(4)
+        spec.extend_from_slice(&0u32.to_le_bytes()); // 0 = no default DACL
+        spec.extend_from_slice(&0u32.to_le_bytes());
+
+        // source_name(8) + source_id(8)
+        spec.extend_from_slice(b"authd\0\0\0");
+        spec.extend_from_slice(&0u64.to_le_bytes());
+
         // Variable sections
         spec.extend_from_slice(&user_bytes);
         spec.extend_from_slice(&groups_section);
@@ -275,7 +308,7 @@ mod tests {
 
     #[test]
     fn reject_bad_version() {
-        let mut spec = alloc::vec![0u8; 64];
+        let mut spec = alloc::vec![0u8; HEADER_SIZE];
         spec[0] = 99; // bad version
         assert!(parse_token_spec(&spec).unwrap().is_none());
     }
