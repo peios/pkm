@@ -139,7 +139,7 @@ fn enrich_token<'a>(token: &'a Token, owner: &Sid, self_sid: Option<&Sid>) -> En
 }
 
 /// Extended SID matching that includes virtual groups.
-fn enriched_sid_matches(
+pub fn enriched_sid_matches(
     sid: &Sid,
     enriched: &EnrichedToken,
     for_allow: bool,
@@ -294,7 +294,7 @@ fn upward_aggregate_grants(tree: &mut [ObjectTypeNode], start_idx: usize, _ace_m
 /// parameterized by the SID matching closure.
 fn evaluate_dacl<F>(
     sd: &SecurityDescriptor,
-    token: &Token,
+    enriched: &EnrichedToken,
     mapping: &GenericMapping,
     mut object_tree: Option<&mut [ObjectTypeNode]>,
     sid_match: &F,
@@ -418,7 +418,7 @@ fn evaluate_dacl<F>(
                     // for_allow=true: USE_FOR_DENY_ONLY claims invisible (§11.12)
                     let cond_result = match &a.condition {
                         Some(cond) => crate::conditional::evaluate(
-                            cond, token, resource_attributes, local_claims, true,
+                            cond, enriched, resource_attributes, local_claims, true,
                         )?,
                         None => crate::conditional::TriValue::Unknown,
                     };
@@ -444,7 +444,7 @@ fn evaluate_dacl<F>(
                     // for_allow=false: USE_FOR_DENY_ONLY claims VISIBLE (§11.12)
                     let cond_result = match &a.condition {
                         Some(cond) => crate::conditional::evaluate(
-                            cond, token, resource_attributes, local_claims, false,
+                            cond, enriched, resource_attributes, local_claims, false,
                         )?,
                         None => crate::conditional::TriValue::Unknown,
                     };
@@ -471,7 +471,7 @@ fn evaluate_dacl<F>(
                     if ace::is_callback_type(a.ace_type) {
                         let cond_result = match &a.condition {
                             Some(cond) => crate::conditional::evaluate(
-                                cond, token, resource_attributes, local_claims, true,
+                                cond, enriched, resource_attributes, local_claims, true,
                             )?,
                             None => crate::conditional::TriValue::Unknown,
                         };
@@ -525,7 +525,7 @@ fn evaluate_dacl<F>(
                     if ace::is_callback_type(a.ace_type) {
                         let cond_result = match &a.condition {
                             Some(cond) => crate::conditional::evaluate(
-                                cond, token, resource_attributes, local_claims, false,
+                                cond, enriched, resource_attributes, local_claims, false,
                             )?,
                             None => crate::conditional::TriValue::Unknown,
                         };
@@ -957,7 +957,7 @@ pub fn access_check(
     };
     evaluate_dacl(
         sd,
-        token,
+        &enriched,
         mapping,
         object_tree.as_deref_mut(),
         &sid_match,
@@ -1010,9 +1010,18 @@ pub fn access_check(
         let mut r_decided: u32 = 0;
         let mut r_granted: u32 = 0;
 
+        // Enriched token for restricted pass: virtual groups visible
+        // only if the corresponding SID is in the restricting SID list.
+        let restricted_enriched = EnrichedToken {
+            token,
+            has_owner_rights: owner_in_restricted,
+            has_principal_self: self_in_restricted,
+            principal_self_deny_only: false,
+        };
+
         evaluate_dacl(
             sd,
-            token,
+            &restricted_enriched,
             mapping,
             None,
             &restricted_sid_match,
@@ -1063,9 +1072,16 @@ pub fn access_check(
         let mut c_decided: u32 = 0;
         let mut c_granted: u32 = 0;
 
+        let confinement_enriched = EnrichedToken {
+            token,
+            has_owner_rights: owner_in_confinement,
+            has_principal_self: self_in_confinement,
+            principal_self_deny_only: false,
+        };
+
         evaluate_dacl(
             sd,
-            token,
+            &confinement_enriched,
             mapping,
             None,
             &confinement_sid_match,
@@ -1107,7 +1123,7 @@ pub fn access_check(
                 if let Some(ref condition) = rule.applies_to {
                     let result = crate::conditional::evaluate(
                         condition,
-                        token,
+                        &enriched,
                         &resource_attributes,
                         local_claims,
                         false, // deny polarity for applies_to (§11.17)
@@ -1236,7 +1252,7 @@ fn evaluate_rule_dacl(
 
     evaluate_dacl(
         sd,
-        token,
+        &enriched,
         mapping,
         None,
         &sid_match,

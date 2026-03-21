@@ -9,6 +9,7 @@ use crate::ace;
 use crate::mask::GenericMapping;
 use crate::sd::SecurityDescriptor;
 use crate::sid::Sid;
+use crate::access_check::EnrichedToken;
 use crate::token::Token;
 
 /// An audit event produced during AccessCheck evaluation.
@@ -67,6 +68,15 @@ pub fn evaluate_sacl(
 ) -> Result<AuditResult, AllocError> {
     let mut result = AuditResult::default();
 
+    // Audit uses a bare enriched token (no virtual groups — audit is
+    // observational and uses deny-polarity SID matching directly).
+    let bare_enriched = EnrichedToken {
+        token,
+        has_owner_rights: false,
+        has_principal_self: false,
+        principal_self_deny_only: false,
+    };
+
     if sd.control & crate::sd::SE_SACL_PRESENT == 0 {
         return Ok(result);
     }
@@ -108,7 +118,7 @@ pub fn evaluate_sacl(
                 if a.ace_type == ace::SYSTEM_AUDIT_CALLBACK_ACE_TYPE {
                     if let Some(ref cond) = a.condition {
                         let cond_result = crate::conditional::evaluate(
-                            cond, token, resource_attributes, local_claims, false,
+                            cond, &bare_enriched, resource_attributes, local_claims, false,
                         )?;
                         if cond_result == crate::conditional::TriValue::False {
                             continue;
@@ -154,7 +164,7 @@ pub fn evaluate_sacl(
                 if a.ace_type == ace::SYSTEM_ALARM_CALLBACK_ACE_TYPE {
                     if let Some(ref cond) = a.condition {
                         let cond_result = crate::conditional::evaluate(
-                            cond, token, resource_attributes, local_claims, false,
+                            cond, &bare_enriched, resource_attributes, local_claims, false,
                         )?;
                         if cond_result == crate::conditional::TriValue::False {
                             continue;

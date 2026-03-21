@@ -583,7 +583,10 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 				cap_to_id = 1;
 			else if (kacs_token_is_restricted(server_token) !=
 				 kacs_token_is_restricted(tf->token))
-				cap_to_id = 1;
+				/* Sandbox escape: restricted cannot
+				 * impersonate unrestricted of same user
+				 * (§12.2). Hard deny, not cap. */
+				return -EPERM;
 		}
 
 		/* Gate 2: integrity ceiling. */
@@ -1362,8 +1365,13 @@ SYSCALL_DEFINE1(kacs_impersonate_peer, int, conn_fd)
 		if (!kacs_token_same_user(server_token, peer_token))
 			cap_to_identification = 1;
 		else if (kacs_token_is_restricted(server_token) !=
-			 kacs_token_is_restricted(peer_token))
-			cap_to_identification = 1;
+			 kacs_token_is_restricted(peer_token)) {
+			/* Sandbox escape: a restricted token cannot
+			 * impersonate an unrestricted token of the same
+			 * user (§12.2). Hard deny, not cap. */
+			sockfd_put(sock);
+			return -EPERM;
+		}
 	}
 
 	/* Gate 2: integrity ceiling.

@@ -18,6 +18,7 @@
 
 use crate::compat::{self, AllocError, String, TryClone, Vec};
 use crate::sid::Sid;
+use crate::access_check::EnrichedToken;
 use crate::token::Token;
 
 // ---------------------------------------------------------------------------
@@ -458,13 +459,20 @@ fn set_any_of(lhs: &Value, rhs: &Value) -> Result<TriValue, AllocError> {
 // SID membership helpers
 // ---------------------------------------------------------------------------
 
-/// Check if ALL SIDs in needles match the token (user or groups).
-fn all_sids_match_token(needles: &[Sid], token: &Token, for_allow: bool) -> bool {
-    needles.iter().all(|sid| crate::access_check::sid_matches_token(sid, token, for_allow))
+/// Check if ALL SIDs in needles match the enriched token (user, groups,
+/// or virtual groups S-1-3-4 / S-1-5-10 per §11.12).
+fn all_sids_match_enriched(needles: &[Sid], enriched: &EnrichedToken, for_allow: bool) -> bool {
+    needles.iter().all(|sid| {
+        crate::access_check::enriched_sid_matches(sid, enriched, for_allow)
+            .unwrap_or(false)
+    })
 }
 
-fn any_sid_matches_token(needles: &[Sid], token: &Token, for_allow: bool) -> bool {
-    needles.iter().any(|sid| crate::access_check::sid_matches_token(sid, token, for_allow))
+fn any_sid_matches_enriched(needles: &[Sid], enriched: &EnrichedToken, for_allow: bool) -> bool {
+    needles.iter().any(|sid| {
+        crate::access_check::enriched_sid_matches(sid, enriched, for_allow)
+            .unwrap_or(false)
+    })
 }
 
 fn all_sids_match_device(needles: &[Sid], token: &Token, for_allow: bool) -> bool {
@@ -520,18 +528,18 @@ const ARTX_HEADER: [u8; 4] = [0x61, 0x72, 0x74, 0x78];
 /// Evaluate a conditional expression from a callback ACE.
 ///
 /// `condition`: the raw bytes from the ACE (after mask + SID).
-/// `token`: the calling thread's token.
-/// `user_claims`, `device_claims`: from the token.
+/// `enriched`: the calling thread's enriched token (with virtual groups).
 /// `resource_attributes`: from the object's SACL.
 /// `local_claims`: per-call context provided by the caller.
 /// `for_allow`: whether this is an allow ACE (affects claim resolution).
 pub fn evaluate(
     condition: &[u8],
-    token: &Token,
+    enriched: &EnrichedToken,
     resource_attributes: &[crate::token::ClaimEntry],
     local_claims: &[crate::token::ClaimEntry],
     for_allow: bool,
 ) -> Result<TriValue, AllocError> {
+    let token = enriched.token;
     if condition.len() < 4 || condition[0..4] != ARTX_HEADER {
         return Ok(TriValue::Unknown);
     }
@@ -829,7 +837,7 @@ pub fn evaluate(
                     Some(s) => s,
                     None => { compat::vec_push(&mut stack, Value::from_bool_result(TriValue::Unknown))?; continue; }
                 };
-                let result = if all_sids_match_token(&sids, token, for_allow) {
+                let result = if all_sids_match_enriched(&sids, enriched, for_allow) {
                     TriValue::True
                 } else {
                     TriValue::False
@@ -845,7 +853,7 @@ pub fn evaluate(
                     Some(s) => s,
                     None => { compat::vec_push(&mut stack, Value::from_bool_result(TriValue::Unknown))?; continue; }
                 };
-                let result = if any_sid_matches_token(&sids, token, for_allow) {
+                let result = if any_sid_matches_enriched(&sids, enriched, for_allow) {
                     TriValue::True
                 } else {
                     TriValue::False
@@ -901,7 +909,7 @@ pub fn evaluate(
                     Some(s) => s,
                     None => { compat::vec_push(&mut stack, Value::from_bool_result(TriValue::Unknown))?; continue; }
                 };
-                let result = if all_sids_match_token(&sids, token, for_allow) {
+                let result = if all_sids_match_enriched(&sids, enriched, for_allow) {
                     TriValue::False
                 } else {
                     TriValue::True
@@ -917,7 +925,7 @@ pub fn evaluate(
                     Some(s) => s,
                     None => { compat::vec_push(&mut stack, Value::from_bool_result(TriValue::Unknown))?; continue; }
                 };
-                let result = if any_sid_matches_token(&sids, token, for_allow) {
+                let result = if any_sid_matches_enriched(&sids, enriched, for_allow) {
                     TriValue::False
                 } else {
                     TriValue::True
@@ -1290,16 +1298,25 @@ mod tests {
         }
     }
 
+    fn bare(token: &Token) -> EnrichedToken {
+        EnrichedToken {
+            token,
+            has_owner_rights: false,
+            has_principal_self: false,
+            principal_self_deny_only: false,
+        }
+    }
+
     fn eval(expr: &[u8], token: &Token) -> TriValue {
-        evaluate(expr, token, &[], &[], true).unwrap()
+        evaluate(expr, &bare(token), &[], &[], true).unwrap()
     }
 
     fn eval_with_resource(expr: &[u8], token: &Token, resource: &[ClaimEntry]) -> TriValue {
-        evaluate(expr, token, resource, &[], true).unwrap()
+        evaluate(expr, &bare(token), resource, &[], true).unwrap()
     }
 
     fn eval_deny(expr: &[u8], token: &Token) -> TriValue {
-        evaluate(expr, token, &[], &[], false).unwrap()
+        evaluate(expr, &bare(token), &[], &[], false).unwrap()
     }
 
     // -----------------------------------------------------------------------
@@ -1894,7 +1911,7 @@ mod tests {
         let token = empty_token();
         let local = alloc::vec![int_claim("mfa", 1)];
         let expr = build(&[local_attr("mfa"), int64_literal(1), op_eq()]);
-        assert_eq!(evaluate(&expr, &token, &[], &local, true).unwrap(), TriValue::True);
+        assert_eq!(evaluate(&expr, &bare(&token), &[], &local, true).unwrap(), TriValue::True);
     }
 
     // -----------------------------------------------------------------------
@@ -2259,6 +2276,6 @@ mod tests {
         expr.extend_from_slice(&sid_literal(&managed));
         expr.push(0x8a); // Device_Member_of
         expr.extend_from_slice(&op_and());
-        assert_eq!(evaluate(&expr, &token, &resource, &[], true).unwrap(), TriValue::True);
+        assert_eq!(evaluate(&expr, &bare(&token), &resource, &[], true).unwrap(), TriValue::True);
     }
 }
