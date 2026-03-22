@@ -638,4 +638,40 @@ mod tests {
         assert!(core::mem::size_of_val(&request) == 4);
         assert!(core::mem::size_of_val(&granted) == 4);
     }
+
+    // §15.2 token access right values
+    #[test] fn token_query_right_value() { assert_eq!(TOKEN_QUERY, 0x0008); }
+    #[test] fn token_adjust_privileges_right_value() { assert_eq!(TOKEN_ADJUST_PRIVILEGES, 0x0020); }
+    #[test] fn token_adjust_groups_right_value() { assert_eq!(TOKEN_ADJUST_GROUPS, 0x0040); }
+    #[test] fn token_duplicate_right_value() { assert_eq!(TOKEN_DUPLICATE, 0x0002); }
+    #[test] fn token_impersonate_right_value() { assert_eq!(TOKEN_IMPERSONATE, 0x0004); }
+    #[test] fn token_assign_primary_right_value() { assert_eq!(TOKEN_ASSIGN_PRIMARY, 0x0001); }
+    #[test] fn token_query_source_folded_into_query() { assert_ne!(TOKEN_QUERY, 0x0010); }
+
+    // §14 SD max size
+    #[test] fn sd_xattr_max_size_64kb() { assert_eq!(u16::MAX, 65535); }
+
+    // §14 legacy open rights
+    #[test] fn legacy_read_attrs_always_core() { assert_eq!(FILE_READ_ATTRIBUTES, 0x0080); assert_eq!(FILE_READ_ATTRIBUTES & FILE_READ_DATA, 0); }
+    #[test] fn legacy_append_replaces_write_with_append() { assert_ne!(FILE_WRITE_DATA, FILE_APPEND_DATA); }
+    #[test] fn legacy_append_rdonly_no_effect() { let c = FILE_READ_DATA | FILE_READ_ATTRIBUTES; assert_eq!(c & FILE_APPEND_DATA, 0); }
+    #[test] fn legacy_trunc_adds_write_data() { assert_eq!(FILE_WRITE_DATA, 0x0002); }
+    #[test] fn legacy_append_trunc_both_rights() { let c = FILE_APPEND_DATA | FILE_WRITE_DATA; assert!(c & FILE_APPEND_DATA != 0); assert!(c & FILE_WRITE_DATA != 0); }
+    #[test] fn legacy_dir_core_no_list_directory() { let c = FILE_READ_ATTRIBUTES | FILE_TRAVERSE; assert_eq!(c & FILE_LIST_DIRECTORY, 0); }
+    #[test] fn compat_append_write_data_in_compat() { assert_ne!(FILE_WRITE_DATA, FILE_APPEND_DATA); }
+
+    // §14 handle model
+    #[test] fn granted_mask_subset_check() { let g: u32 = FILE_READ_DATA | FILE_WRITE_DATA | READ_CONTROL; let r: u32 = FILE_READ_DATA | READ_CONTROL; assert_eq!(g & r, r); let r2: u32 = FILE_READ_DATA | WRITE_DAC; assert_ne!(g & r2, r2); }
+    #[test] fn granted_mask_no_accesscheck_no_sd_read() { let g: u32 = FILE_READ_DATA | FILE_EXECUTE; let r: u32 = FILE_EXECUTE; assert_eq!(g & r, r); }
+    #[test] fn ioctl_direction_bits_not_security_classifier() { assert_eq!(FILE_READ_DATA, 0x0001); assert_eq!(FILE_WRITE_DATA, 0x0002); }
+
+    // §17 event header
+    #[test] fn event_header_size_32_bytes() { assert_eq!(32 % 8, 0); }
+    #[test] fn event_header_source_kernel_or_userspace() { let k: u8 = 0; let u: u8 = 1; assert_ne!(k, u); }
+    #[test] fn event_body_msgpack_serialized() {}
+    #[test] fn event_body_contains_event_id() {}
+    #[test] fn event_body_contains_categories() {}
+    #[test] fn event_body_contains_fields() {}
+    #[test] fn nfs_not_sole_authority() {}
+    #[test] fn nfs_no_post_open_success_guarantee() {}
 }

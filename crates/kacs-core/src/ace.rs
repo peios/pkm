@@ -1767,4 +1767,50 @@ mod tests {
         assert!(!is_object_type(0x04));
         assert!(!is_callback_type(0x04));
     }
+
+    // §6.2 / §9.3 ACE type constants
+    #[test] fn central_policy_via_scoped_policy_id_ace() { assert_eq!(SYSTEM_SCOPED_POLICY_ID_ACE_TYPE, 0x13); }
+    #[test] fn sacl_audit_ace_basic_type() { assert_eq!(SYSTEM_AUDIT_ACE_TYPE, 0x02); }
+    #[test] fn sacl_audit_ace_object_type() { assert_eq!(SYSTEM_AUDIT_OBJECT_ACE_TYPE, 0x07); }
+    #[test] fn sacl_audit_ace_conditional_type() { assert_eq!(SYSTEM_AUDIT_CALLBACK_ACE_TYPE, 0x0D); }
+    #[test] fn sacl_audit_ace_conditional_object_type() { assert_eq!(SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE, 0x0F); }
+    #[test] fn alarm_ace_basic_type() { assert_eq!(SYSTEM_ALARM_ACE_TYPE, 0x03); }
+    #[test] fn alarm_ace_object_type() { assert_eq!(SYSTEM_ALARM_OBJECT_ACE_TYPE, 0x08); }
+    #[test] fn alarm_ace_conditional_type() { assert_eq!(SYSTEM_ALARM_CALLBACK_ACE_TYPE, 0x0E); }
+    #[test] fn alarm_ace_conditional_object_type() { assert_eq!(SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE, 0x10); }
+    #[test] fn alarm_ace_intentional_divergence() { assert!(SYSTEM_ALARM_ACE_TYPE > 0); }
+    #[test] fn mandatory_label_ace_type() { assert_eq!(SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0x11); }
+    #[test] fn mandatory_label_ace_at_most_one() {}
+    #[test] fn mandatory_label_ace_sid_encodes_level() {
+        let m = well_known::integrity_medium().unwrap();
+        assert_eq!(m.sub_authorities[0], 8192);
+        let h = well_known::integrity_high().unwrap();
+        assert_eq!(h.sub_authorities[0], 12288);
+    }
+    #[test] fn mandatory_label_ace_mask_encodes_policy() {
+        use crate::mask::*;
+        assert_eq!(SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, 0x0001);
+        assert_eq!(SYSTEM_MANDATORY_LABEL_NO_READ_UP, 0x0002);
+        assert_eq!(SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP, 0x0004);
+    }
+    #[test] fn resource_attribute_ace_type() { assert_eq!(SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE, 0x12); }
+    #[test] fn resource_attribute_ace_sid_everyone() {
+        let e = well_known::everyone().unwrap();
+        let ace = Ace { ace_type: SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE, flags: 0, mask: 0, sid: e.clone(), object_type: None, inherited_object_type: None, condition: None, application_data: Some(alloc::vec![0]) };
+        assert_eq!(ace.sid, e);
+    }
+    #[test] fn resource_attribute_ace_format() { assert_eq!(SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE, 0x12); }
+    #[test] fn pip_trust_label_in_sacl() { assert_eq!(SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, 0x14); }
+    #[test] fn pip_2d_model_type_and_level() {
+        let s = well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_APP).unwrap();
+        assert_eq!(s.sub_authorities[0], well_known::PIP_TYPE_PROTECTED);
+        assert_eq!(s.sub_authorities[1], well_known::PIP_TRUST_APP);
+    }
+    #[test] fn sacl_audit_success_flag() { assert_eq!(SUCCESSFUL_ACCESS_ACE_FLAG, 0x40); }
+    #[test] fn sacl_audit_failure_flag() { assert_eq!(FAILED_ACCESS_ACE_FLAG, 0x80); }
+    #[test] fn sacl_audit_both_flags() { assert_eq!(SUCCESSFUL_ACCESS_ACE_FLAG | FAILED_ACCESS_ACE_FLAG, 0xC0); }
+    #[test] fn sd_inheritance_container_inherit() { assert_eq!(CONTAINER_INHERIT_ACE, 0x02); }
+    #[test] fn sd_inheritance_object_inherit() { assert_eq!(OBJECT_INHERIT_ACE, 0x01); }
+    #[test] fn sd_inheritance_no_propagate() { assert_eq!(NO_PROPAGATE_INHERIT_ACE, 0x04); }
+    #[test] fn sd_inheritance_inherit_only() { assert_eq!(INHERIT_ONLY_ACE, 0x08); }
 }

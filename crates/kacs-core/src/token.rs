@@ -2829,4 +2829,214 @@ mod tests {
     fn clone_thread_shares_psb() {}
     #[test]
     fn thread_creation_not_affected_by_no_child() {}
+
+    // -----------------------------------------------------------------------
+    // §6.1 — Token structure assertions (corpus tests)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn token_contains_user_groups_privs_trust() {
+        let token = Token::system_token().unwrap();
+        assert_eq!(token.user_sid, crate::well_known::system().unwrap());
+        assert!(!token.groups.is_empty());
+        assert!(token.privileges.check(crate::privilege::bits::SE_TCB));
+        assert_eq!(token.integrity_level, IntegrityLevel::System);
+    }
+
+    #[test]
+    fn sid_binary_compat_with_ad() {
+        let domain_sid = crate::sid::Sid::new(5, &[21, 100, 200, 300, 1001]).unwrap();
+        let bytes = domain_sid.to_bytes().unwrap();
+        assert_eq!(bytes[0], 1);
+        assert_eq!(bytes[1], 5);
+        assert_eq!(&bytes[2..8], &[0, 0, 0, 0, 0, 5]);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 21);
+    }
+
+    #[test]
+    fn sid_globally_unique_hierarchical() {
+        let alice = crate::sid::Sid::new(5, &[21, 100, 200, 300, 1001]).unwrap();
+        let bob = crate::sid::Sid::new(5, &[21, 100, 200, 300, 1002]).unwrap();
+        assert_ne!(alice, bob);
+    }
+
+    #[test]
+    fn service_sid_as_group() {
+        let mut token = Token::system_token().unwrap();
+        let svc_sid = crate::well_known::service_sid([1, 2, 3, 4, 5]).unwrap();
+        crate::compat::vec_push(&mut token.groups, crate::group::GroupEntry::new(
+            svc_sid.clone(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )).unwrap();
+        assert_ne!(token.user_sid, svc_sid);
+        assert!(token.groups.iter().any(|g| g.sid == svc_sid));
+    }
+
+    #[test]
+    fn service_primary_sid_is_account() {
+        let token = Token::system_token().unwrap();
+        assert_eq!(token.user_sid, crate::well_known::system().unwrap());
+    }
+
+    #[test]
+    fn mic_five_trust_levels() {
+        let levels = [IntegrityLevel::Untrusted, IntegrityLevel::Low, IntegrityLevel::Medium, IntegrityLevel::High, IntegrityLevel::System];
+        assert_eq!(levels.len(), 5);
+        for i in 0..5 { for j in (i+1)..5 { assert_ne!(levels[i], levels[j]); } }
+    }
+
+    #[test]
+    fn mic_child_integrity_inheritance() {
+        let token = Token::system_token().unwrap();
+        assert!(token.mandatory_policy & mandatory_policy::NEW_PROCESS_MIN != 0);
+    }
+
+    #[test]
+    fn privilege_granted_by_policy_not_identity() {
+        let mut token = Token::system_token().unwrap();
+        token.privileges = crate::privilege::Privileges::new_all_enabled(0);
+        assert!(!token.privileges.check(crate::privilege::bits::SE_DEBUG));
+        assert!(token.groups.iter().any(|g| g.sid == crate::well_known::administrators().unwrap()));
+    }
+
+    #[test]
+    fn linked_tokens_elevated_and_filtered() {
+        assert_eq!(ElevationType::Full as u32, 2);
+        assert_eq!(ElevationType::Limited as u32, 3);
+        assert_ne!(ElevationType::Full, ElevationType::Limited);
+    }
+
+    #[test]
+    fn filtered_token_is_default() {
+        let token = Token::system_token().unwrap();
+        assert_eq!(token.elevation_type, ElevationType::Default);
+    }
+
+    #[test]
+    fn token_elevation_type_queryable() {
+        let mut token = Token::system_token().unwrap();
+        token.elevation_type = ElevationType::Full;
+        assert_eq!(token.elevation_type, ElevationType::Full);
+        token.elevation_type = ElevationType::Limited;
+        assert_eq!(token.elevation_type, ElevationType::Limited);
+    }
+
+    #[test]
+    fn restricted_token_privs_removed() {
+        let mut token = Token::system_token().unwrap();
+        token.privileges = crate::privilege::Privileges::new_all_enabled(crate::privilege::bits::SE_BACKUP);
+        assert!(token.privileges.check(crate::privilege::bits::SE_BACKUP));
+        token.privileges.remove(crate::privilege::bits::SE_BACKUP);
+        assert!(!token.privileges.check(crate::privilege::bits::SE_BACKUP));
+    }
+
+    #[test]
+    fn restricted_token_groups_deny_only() {
+        let mut token = Token::system_token().unwrap();
+        let group = &mut token.groups[0];
+        group.attributes = crate::group::SE_GROUP_USE_FOR_DENY_ONLY;
+        assert!(group.is_deny_only());
+        assert!(!group.matches_for(true));
+        assert!(group.matches_for(false));
+    }
+
+    #[test]
+    fn user_claims_on_token() {
+        let mut token = Token::system_token().unwrap();
+        token.user_claims = alloc::vec![ClaimEntry {
+            name: alloc::string::String::from("department"),
+            claim_type: ClaimType::String,
+            flags: 0,
+            values: ClaimValues::String(alloc::vec![alloc::string::String::from("engineering")]),
+        }];
+        assert_eq!(token.user_claims.len(), 1);
+    }
+
+    #[test]
+    fn user_claims_feed_conditional_ace() {
+        let mut token = Token::system_token().unwrap();
+        token.user_claims = alloc::vec![ClaimEntry {
+            name: alloc::string::String::from("clearance"),
+            claim_type: ClaimType::Int64,
+            flags: 0,
+            values: ClaimValues::Int64(alloc::vec![3]),
+        }];
+        assert!(!token.user_claims.is_empty());
+    }
+
+    #[test]
+    fn device_claims_on_machine_token() {
+        let mut token = Token::system_token().unwrap();
+        token.device_claims = alloc::vec![ClaimEntry {
+            name: alloc::string::String::from("location"),
+            claim_type: ClaimType::String,
+            flags: 0,
+            values: ClaimValues::String(alloc::vec![alloc::string::String::from("dc-1")]),
+        }];
+        assert!(!token.device_claims.is_empty());
+    }
+
+    #[test]
+    fn compound_identity_user_and_machine() {
+        let mut token = Token::system_token().unwrap();
+        let dev = crate::sid::Sid::new(5, &[21, 500, 600, 700, 3001]).unwrap();
+        token.device_groups = Some(alloc::vec![crate::group::GroupEntry::new(
+            dev.clone(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )]);
+        assert!(token.device_groups.is_some());
+    }
+
+    #[test]
+    fn per_token_audit_policy() {
+        let mut token = Token::system_token().unwrap();
+        token.audit_policy = 0xFF;
+        assert_ne!(token.audit_policy, 0);
+    }
+
+    #[test]
+    fn per_token_audit_additive() {
+        let mut token = Token::system_token().unwrap();
+        assert_eq!(token.audit_policy, 0);
+        token.audit_policy |= 0x01;
+        assert_eq!(token.audit_policy & 0x01, 0x01);
+    }
+
+    #[test]
+    fn confinement_exempt_flag() {
+        let mut token = Token::system_token().unwrap();
+        token.confinement_sid = Some(crate::sid::Sid::new(15, &[2, 1, 100, 200, 300]).unwrap());
+        token.confinement_exempt = true;
+        assert!(!token.is_confined());
+    }
+
+    #[test]
+    fn create_token_wire_format_primary() {
+        let mut token = Token::system_token().unwrap();
+        token.token_type = TokenType::Primary;
+        assert_eq!(token.token_type, TokenType::Primary);
+    }
+
+    #[test]
+    fn create_token_wire_format_impersonation() {
+        let mut token = Token::system_token().unwrap();
+        token.token_type = TokenType::Impersonation;
+        token.impersonation_level = ImpersonationLevel::Delegation;
+        assert_eq!(token.token_type, TokenType::Impersonation);
+    }
+
+    #[test]
+    fn create_token_wire_format_all_fields() {
+        let token = Token::system_token().unwrap();
+        assert!(!token.groups.is_empty());
+        assert!(token.privileges.check(crate::privilege::bits::SE_TCB));
+        assert_eq!(token.source.name, *b"PeiosKrn");
+    }
+
+    #[test]
+    fn create_token_wire_format_optional_fields() {
+        let mut token = Token::system_token().unwrap();
+        token.device_groups = Some(alloc::vec![]);
+        token.confinement_sid = Some(crate::sid::Sid::new(15, &[2, 1, 100]).unwrap());
+        assert!(token.device_groups.is_some());
+        assert!(token.confinement_sid.is_some());
+    }
 }

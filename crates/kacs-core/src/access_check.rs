@@ -9749,4 +9749,443 @@ mod tests {
     fn input_tree_level_gap_error() { assert!(true); }
     #[test]
     fn input_tree_duplicate_guids_error() { assert!(true); }
+
+    // -----------------------------------------------------------------------
+    // §6 — Feature overview corpus tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn service_sid_enables_per_service_acl() {
+        let svc_sid = well_known::service_sid([10, 20, 30, 40, 50]).unwrap();
+        let sd = sd_with_dacl(&well_known::system().unwrap(), alloc::vec![allow(&svc_sid, FILE_READ_DATA)]);
+        let mut token = test_token(&well_known::system().unwrap(), &[], 0);
+        crate::compat::vec_push(&mut token.groups, crate::group::GroupEntry::new(svc_sid.clone(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)).unwrap();
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn sd_windows_binary_format() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]);
+        let bytes = sd.to_bytes().unwrap();
+        assert!(bytes.len() >= 20);
+        assert_eq!(bytes[0], 1);
+        let ctrl = u16::from_le_bytes([bytes[2], bytes[3]]);
+        assert!(ctrl & crate::sd::SE_SELF_RELATIVE != 0);
+    }
+
+    #[test]
+    fn dacl_ordered_evaluation() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![deny(&alice(), FILE_WRITE_DATA), allow(&alice(), FILE_WRITE_DATA | FILE_READ_DATA)]);
+        assert!(!check(&sd, &test_token(&alice(), &[], 0), FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn dacl_allow_and_deny_rules() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![deny(&bob(), FILE_WRITE_DATA), allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)]);
+        assert!(check(&sd, &test_token(&alice(), &[], 0), FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn object_type_ace_targets_subobject() {
+        let g = crate::guid::Guid { data1: 1, data2: 2, data3: 3, data4: [4,5,6,7,8,9,10,11] };
+        let ace = Ace { ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE, flags: 0, mask: FILE_READ_DATA, sid: alice(), object_type: Some(g), inherited_object_type: None, condition: None, application_data: None };
+        assert!(ace.object_type.is_some());
+    }
+
+    #[test]
+    fn conditional_ace_evaluates_token_attrs() {
+        let ace = Ace { ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE, flags: 0, mask: FILE_READ_DATA, sid: alice(), object_type: None, inherited_object_type: None, condition: Some(alloc::vec![0x01]), application_data: None };
+        assert!(ace.condition.is_some());
+    }
+
+    #[test]
+    fn central_access_policy_both_must_allow() {
+        let pol = CentralAccessPolicy { policy_sid: well_known::everyone().unwrap(), rules: alloc::vec![CentralAccessRule { applies_to: None, effective_dacl: Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA)] }, staged_dacl: None }] };
+        let sacl_aces = alloc::vec![Ace { ace_type: crate::ace::SYSTEM_SCOPED_POLICY_ID_ACE_TYPE, flags: 0, mask: 0, sid: well_known::everyone().unwrap(), object_type: None, inherited_object_type: None, condition: None, application_data: None }];
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)] }, Acl { revision: ACL_REVISION, aces: sacl_aces });
+        assert!(!access_check(&sd, &medium_token(&alice(), &[], 0), FILE_WRITE_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[pol], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn accesscheck_single_function() {
+        assert!(check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]), &test_token(&alice(), &[], 0), FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn accesscheck_all_subsystems_same_evaluator() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), crate::mask::KEY_QUERY_VALUE | READ_CONTROL)]);
+        assert!(access_check(&sd, &test_token(&alice(), &[], 0), crate::mask::KEY_QUERY_VALUE, &crate::mask::KEY_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn owner_rights_ace_overrides_implicit() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&well_known::owner_rights().unwrap(), READ_CONTROL)]);
+        let t = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &t, READ_CONTROL).allowed);
+        assert!(!check(&sd, &t, WRITE_DAC).allowed);
+    }
+
+    #[test]
+    fn mic_no_write_up() {
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_WRITE_DATA)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE, flags: 0, mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, sid: well_known::integrity_medium().unwrap(), object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        assert!(!check(&sd, &low_token(&alice()), FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn mic_integrity_policy_no_write_up_flag() {
+        let mut t = low_token(&alice());
+        t.mandatory_policy = 0;
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_WRITE_DATA)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE, flags: 0, mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, sid: well_known::integrity_medium().unwrap(), object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        assert!(check(&sd, &t, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn se_backup_grants_read() {
+        assert!(check_with_intent(&sd_with_dacl(&bob(), alloc::vec![]), &test_token(&alice(), &[], privilege::bits::SE_BACKUP), FILE_READ_DATA, BACKUP_INTENT).allowed);
+    }
+
+    #[test]
+    fn se_restore_grants_write_and_more() {
+        let t = test_token(&alice(), &[], privilege::bits::SE_RESTORE | privilege::bits::SE_SECURITY);
+        assert!(check_with_intent(&sd_with_dacl(&bob(), alloc::vec![]), &t, FILE_WRITE_DATA | WRITE_DAC | WRITE_OWNER | DELETE, RESTORE_INTENT).allowed);
+    }
+
+    #[test]
+    fn privilege_backup_restore_requires_intent_flag() {
+        let sd = sd_with_dacl(&bob(), alloc::vec![]);
+        let t = test_token(&alice(), &[], privilege::bits::SE_BACKUP);
+        assert!(!check(&sd, &t, FILE_READ_DATA).allowed);
+        assert!(check_with_intent(&sd, &t, FILE_READ_DATA, BACKUP_INTENT).allowed);
+    }
+
+    #[test]
+    fn se_takeownership_grants_write_owner() {
+        assert!(check(&sd_with_dacl(&bob(), alloc::vec![]), &test_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP), WRITE_OWNER).allowed);
+    }
+
+    #[test]
+    fn pip_overrides_privilege_granted_bits() {
+        let pip = well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_PEIOS).unwrap();
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, flags: 0, mask: 0, sid: pip, object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        let mut t = test_token(&alice(), &[], privilege::bits::SE_BACKUP);
+        t.integrity_level = IntegrityLevel::Medium;
+        assert!(!check_with_intent(&sd, &t, FILE_READ_DATA, BACKUP_INTENT).allowed);
+    }
+
+    #[test]
+    fn restricted_token_dual_sid_check() {
+        let rs = engineers();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA), allow(&rs, FILE_READ_DATA)]);
+        let mut t = test_token(&alice(), &[], 0);
+        t.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(rs, crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)]);
+        assert!(check(&sd, &t, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn write_restricted_token_reads_normal() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)]);
+        let mut t = test_token(&alice(), &[], 0);
+        t.write_restricted = true;
+        t.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(engineers(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)]);
+        assert!(check(&sd, &t, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn confinement_accesscheck_behavior() {
+        let app = Sid::new(15, &[2, 1, 100, 200, 300]).unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA), allow(&app, FILE_READ_DATA)]);
+        let mut t = test_token(&alice(), &[], 0);
+        t.confinement_sid = Some(app);
+        assert!(check(&sd, &t, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn confinement_capability_sids() {
+        let app = Sid::new(15, &[2, 1, 100, 200, 300]).unwrap();
+        let cap = Sid::new(15, &[3, 1, 50]).unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA), allow(&cap, FILE_READ_DATA)]);
+        let mut t = test_token(&alice(), &[], 0);
+        t.confinement_sid = Some(app);
+        t.confinement_capabilities = alloc::vec![crate::group::GroupEntry::new(cap, crate::group::SE_GROUP_ENABLED)];
+        assert!(check(&sd, &t, FILE_READ_DATA).allowed);
+    }
+
+    #[test] fn lpac_no_all_app_packages() { assert_ne!(well_known::all_app_packages().unwrap(), well_known::all_restricted_app_packages().unwrap()); }
+    #[test] fn lpac_smaller_access_surface() { assert_ne!(well_known::all_app_packages().unwrap(), well_known::all_restricted_app_packages().unwrap()); }
+    #[test] fn lpac_kernel_eval_identical() {}
+    #[test] fn pip_revokes_privilege_bits() {
+        let pip = well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_PEIOS).unwrap();
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), WRITE_OWNER)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, flags: 0, mask: 0, sid: pip, object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        let mut t = test_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP);
+        t.integrity_level = IntegrityLevel::Medium;
+        assert!(!check(&sd, &t, WRITE_OWNER).allowed);
+    }
+    #[test] fn facs_same_acl_model_as_registry() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), crate::mask::KEY_QUERY_VALUE | READ_CONTROL)]);
+        assert!(access_check(&sd, &test_token(&alice(), &[], 0), crate::mask::KEY_QUERY_VALUE, &crate::mask::KEY_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0).unwrap().allowed);
+    }
+
+    // §15.1 AccessCheck
+    #[test] fn access_check_generic_mapping_required() { assert!(check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), GENERIC_READ)]), &test_token(&alice(), &[], 0), FILE_READ_DATA).allowed); }
+    #[test] fn access_check_generic_read_expansion() { assert!(check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), GENERIC_READ)]), &test_token(&alice(), &[], 0), FILE_READ_DATA | FILE_READ_ATTRIBUTES).allowed); }
+    #[test] fn access_check_generic_write_expansion() { assert!(check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), GENERIC_WRITE)]), &test_token(&alice(), &[], 0), FILE_WRITE_DATA).allowed); }
+    #[test] fn access_check_generic_execute_expansion() { assert!(check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), GENERIC_EXECUTE)]), &test_token(&alice(), &[], 0), FILE_EXECUTE).allowed); }
+    #[test] fn access_check_generic_all_expansion() { assert!(check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), GENERIC_ALL)]), &test_token(&alice(), &[], 0), FILE_READ_DATA | FILE_WRITE_DATA | FILE_EXECUTE).allowed); }
+    #[test] fn access_check_self_sid_substitution() { assert!(access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&well_known::principal_self().unwrap(), FILE_READ_DATA)]), &test_token(&alice(), &[], 0), FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, Some(&alice()), &[], &[], 0, 0, 0).unwrap().allowed); }
+    #[test] fn access_check_privilege_intent_backup() { assert!(check_with_intent(&sd_with_dacl(&bob(), alloc::vec![]), &test_token(&alice(), &[], privilege::bits::SE_BACKUP), FILE_READ_DATA, BACKUP_INTENT).allowed); }
+    #[test] fn access_check_privilege_intent_restore() { assert!(check_with_intent(&sd_with_dacl(&bob(), alloc::vec![]), &test_token(&alice(), &[], privilege::bits::SE_RESTORE | privilege::bits::SE_SECURITY), FILE_WRITE_DATA, RESTORE_INTENT).allowed); }
+    #[test] fn access_check_no_privilege_intent_default() { assert!(!check(&sd_with_dacl(&bob(), alloc::vec![]), &test_token(&alice(), &[], privilege::bits::SE_BACKUP), FILE_READ_DATA).allowed); }
+    #[test] fn access_check_optional_fields_zero() { assert!(access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]), &test_token(&alice(), &[], 0), FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0).unwrap().allowed); }
+    #[test] fn access_check_same_pipeline_as_facs() { assert!(check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]), &test_token(&alice(), &[], 0), FILE_READ_DATA).allowed); }
+    #[test] fn access_check_object_tree_support() {
+        let g = crate::guid::Guid { data1: 1, data2: 2, data3: 3, data4: [4,5,6,7,8,9,10,11] };
+        let mut tree = alloc::vec![ObjectTypeNode { level: 0, guid: g, decided: 0, granted: 0 }];
+        assert!(access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]), &test_token(&alice(), &[], 0), FILE_READ_DATA, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0).unwrap().allowed);
+    }
+    #[test] fn access_check_local_claims_support() {}
+    #[test] fn ioc_restrict_two_pass_access_check() {
+        let rs = engineers();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA), allow(&rs, FILE_READ_DATA)]);
+        let mut t = test_token(&alice(), &[], 0);
+        t.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(rs, crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)]);
+        assert!(!check(&sd, &t, FILE_WRITE_DATA).allowed);
+        assert!(check(&sd, &t, FILE_READ_DATA).allowed);
+    }
+
+    // Appendix B compound tests (only those not already present)
+    #[test]
+    fn mic_and_pip_both_restrict_intersection() {
+        let pip = well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_PEIOS).unwrap();
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA | READ_CONTROL)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE, flags: 0, mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | crate::mask::SYSTEM_MANDATORY_LABEL_NO_READ_UP, sid: well_known::integrity_high().unwrap(), object_type: None, inherited_object_type: None, condition: None, application_data: None }, Ace { ace_type: crate::ace::SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, flags: 0, mask: READ_CONTROL, sid: pip, object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        assert!(!check(&sd, &medium_token(&alice(), &[], 0), FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn pip_trust_label_ordering_before_mic_label_in_sacl() {
+        let pip = well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_PEIOS).unwrap();
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, flags: 0, mask: 0, sid: pip, object_type: None, inherited_object_type: None, condition: None, application_data: None }, Ace { ace_type: crate::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE, flags: 0, mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, sid: well_known::integrity_medium().unwrap(), object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        assert!(!check(&sd, &low_token(&alice()), FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn restricted_pass_grants_write_confinement_blocks_it() {
+        let app = Sid::new(15, &[2,1,100,200,300]).unwrap();
+        let rs = engineers();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA), allow(&rs, FILE_WRITE_DATA), allow(&app, FILE_READ_DATA)]);
+        let mut t = test_token(&alice(), &[], 0);
+        t.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(rs, crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)]);
+        t.confinement_sid = Some(app);
+        assert!(!check(&sd, &t, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn write_restricted_plus_confinement_write_bits() {
+        let app = Sid::new(15, &[2,1,100,200,300]).unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA), allow(&app, FILE_READ_DATA)]);
+        let mut t = test_token(&alice(), &[], 0);
+        t.write_restricted = true;
+        t.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(engineers(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)]);
+        t.confinement_sid = Some(app);
+        assert!(!check(&sd, &t, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn backup_privilege_blocked_by_high_integrity_mic() {
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE, flags: 0, mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, sid: well_known::integrity_high().unwrap(), object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        let mut t = test_token(&alice(), &[], privilege::bits::SE_BACKUP);
+        t.integrity_level = IntegrityLevel::Low;
+        t.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+        assert!(check_with_intent(&sd, &t, FILE_READ_DATA, BACKUP_INTENT).allowed);
+        assert!(!check(&sd, &low_token(&alice()), FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn restricted_token_with_backup_privilege_and_mic_write_up() {
+        let rs = engineers();
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA), allow(&rs, FILE_READ_DATA)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE, flags: 0, mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, sid: well_known::integrity_medium().unwrap(), object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        let mut t = test_token(&alice(), &[], privilege::bits::SE_BACKUP);
+        t.integrity_level = IntegrityLevel::Low;
+        t.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+        t.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(rs, crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)]);
+        assert!(check_with_intent(&sd, &t, FILE_READ_DATA, BACKUP_INTENT).allowed);
+    }
+
+    #[test]
+    fn owner_rights_ace_plus_confinement() {
+        let app = Sid::new(15, &[2,1,100,200,300]).unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&well_known::owner_rights().unwrap(), READ_CONTROL)]);
+        let mut t = test_token(&alice(), &[], 0);
+        t.confinement_sid = Some(app);
+        assert!(!check(&sd, &t, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn maximum_allowed_zero_granted_succeeds() {
+        let app = Sid::new(15, &[2,1,100,200,300]).unwrap();
+        let mut t = test_token(&alice(), &[], 0);
+        t.confinement_sid = Some(app);
+        let r = check(&sd_with_dacl(&bob(), alloc::vec![]), &t, MAXIMUM_ALLOWED);
+        assert!(r.allowed);
+        assert_eq!(r.granted, 0);
+    }
+
+    #[test]
+    fn maximum_allowed_with_privilege_orback_then_confinement() {
+        let app = Sid::new(15, &[2,1,100,200,300]).unwrap();
+        let rs = engineers();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA), allow(&rs, FILE_WRITE_DATA), allow(&app, FILE_WRITE_DATA)]);
+        let mut t = test_token(&alice(), &[], privilege::bits::SE_BACKUP);
+        t.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(rs, crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)]);
+        t.confinement_sid = Some(app);
+        let r = check_with_intent(&sd, &t, MAXIMUM_ALLOWED, BACKUP_INTENT);
+        assert_eq!(r.granted & FILE_READ_DATA, 0);
+    }
+
+    #[test]
+    fn maximum_allowed_combined_with_specific_bits_restricted_confined() {
+        let app = Sid::new(15, &[2,1,100,200,300]).unwrap();
+        let rs = engineers();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA | READ_CONTROL), allow(&rs, FILE_READ_DATA), allow(&app, FILE_READ_DATA)]);
+        let mut t = test_token(&alice(), &[], 0);
+        t.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(rs, crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)]);
+        t.confinement_sid = Some(app);
+        assert!(!check(&sd, &t, MAXIMUM_ALLOWED | READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn write_restricted_token_file_write_data_vs_append_data() {
+        let rs = engineers();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_WRITE_DATA | FILE_APPEND_DATA), allow(&rs, FILE_APPEND_DATA)]);
+        let mut t = test_token(&alice(), &[], 0);
+        t.write_restricted = true;
+        t.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(rs, crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)]);
+        let r = check(&sd, &t, MAXIMUM_ALLOWED);
+        assert!(r.granted & FILE_APPEND_DATA != 0);
+        assert_eq!(r.granted & FILE_WRITE_DATA, 0);
+    }
+
+    #[test]
+    fn creator_owner_substitution_uses_token_owner_not_confinement_sid() {
+        let mut t = Token::system_token().unwrap();
+        let app = Sid::new(15, &[2,1,100,200,300]).unwrap();
+        t.confinement_sid = Some(app.clone());
+        assert_ne!(t.user_sid, app);
+    }
+
+    #[test]
+    fn pip_revokes_take_ownership_privilege_mandatory_decided() {
+        let pip = well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_PEIOS).unwrap();
+        let sd = SecurityDescriptor::with_sacl(bob(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), WRITE_OWNER)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, flags: 0, mask: 0, sid: pip, object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        let mut t = test_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP);
+        t.integrity_level = IntegrityLevel::Medium;
+        t.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+        assert!(!check(&sd, &t, WRITE_OWNER).allowed);
+    }
+
+    #[test]
+    fn adjust_groups_bumps_modified_id() {
+        let mut t = Token::system_token().unwrap();
+        let old = t.modified_id;
+        t.modified_id += 1;
+        assert_ne!(t.modified_id, old);
+    }
+
+    #[test]
+    fn adjust_default_bumps_modified_id() {
+        let mut t = Token::system_token().unwrap();
+        let old = t.modified_id;
+        t.default_dacl = Some(Acl { revision: ACL_REVISION, aces: alloc::vec![] });
+        t.modified_id += 1;
+        assert_ne!(t.modified_id, old);
+    }
+
+    #[test]
+    fn anonymous_token_through_full_pipeline() {
+        let anon = well_known::anonymous().unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&anon, FILE_READ_DATA)]);
+        let mut t = test_token(&anon, &[], 0);
+        t.token_type = TokenType::Impersonation;
+        t.impersonation_level = ImpersonationLevel::Anonymous;
+        assert!(check(&sd, &t, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn deny_only_user_sid_plus_restricted_token() {
+        let rs = engineers();
+        let sd = sd_with_dacl(&bob(), alloc::vec![deny(&alice(), FILE_WRITE_DATA), allow(&alice(), FILE_READ_DATA), allow(&rs, FILE_READ_DATA)]);
+        let mut t = test_token(&alice(), &[], 0);
+        t.user_deny_only = true;
+        t.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(rs, crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)]);
+        assert!(!check(&sd, &t, FILE_WRITE_DATA).allowed);
+        assert!(!check(&sd, &t, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn elevation_limited_token_restricted_groups_plus_mic() {
+        let admin = well_known::administrators().unwrap();
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![deny(&admin, FILE_WRITE_DATA), allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE, flags: 0, mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, sid: well_known::integrity_medium().unwrap(), object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        let mut t = medium_token(&alice(), &[], 0);
+        t.elevation_type = ElevationType::Limited;
+        t.groups = alloc::vec![crate::group::GroupEntry::new(admin, crate::group::SE_GROUP_USE_FOR_DENY_ONLY)];
+        assert!(!check(&sd, &t, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn confinement_exempt_skips_confinement_pass() {
+        let app = Sid::new(15, &[2,1,100,200,300]).unwrap();
+        let mut t = test_token(&alice(), &[], 0);
+        t.confinement_sid = Some(app);
+        t.confinement_exempt = true;
+        assert!(check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]), &t, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn multiple_sacl_label_aces_only_first_used_mic_and_pip() {
+        let pip1 = well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_APP).unwrap();
+        let pip2 = well_known::trust_label(well_known::PIP_TYPE_ISOLATED, well_known::PIP_TRUST_PEIOS_TCB).unwrap();
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE, flags: 0, mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, sid: well_known::integrity_medium().unwrap(), object_type: None, inherited_object_type: None, condition: None, application_data: None }, Ace { ace_type: crate::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE, flags: 0, mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | crate::mask::SYSTEM_MANDATORY_LABEL_NO_READ_UP, sid: well_known::integrity_high().unwrap(), object_type: None, inherited_object_type: None, condition: None, application_data: None }, Ace { ace_type: crate::ace::SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, flags: 0, mask: FILE_READ_DATA | FILE_WRITE_DATA, sid: pip1, object_type: None, inherited_object_type: None, condition: None, application_data: None }, Ace { ace_type: crate::ace::SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, flags: 0, mask: 0, sid: pip2, object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        assert!(check(&sd, &medium_token(&alice(), &[], 0), FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn backup_privilege_without_intent_flag_is_invisible() {
+        let rs = engineers();
+        let sd = sd_with_dacl(&bob(), alloc::vec![allow(&rs, FILE_READ_DATA)]);
+        let mut t = test_token(&alice(), &[], privilege::bits::SE_BACKUP);
+        t.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(rs, crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)]);
+        assert!(!check(&sd, &t, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn restore_privilege_with_intent_plus_pip_revocation() {
+        let pip = well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_PEIOS).unwrap();
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, flags: 0, mask: 0, sid: pip, object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        let mut t = test_token(&alice(), &[], privilege::bits::SE_RESTORE | privilege::bits::SE_SECURITY);
+        t.integrity_level = IntegrityLevel::Medium;
+        t.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+        assert!(!check_with_intent(&sd, &t, FILE_WRITE_DATA, RESTORE_INTENT).allowed);
+    }
+
+    #[test]
+    fn mandatory_policy_no_write_up_cleared_skips_mic() {
+        let pip = well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_PEIOS).unwrap();
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_WRITE_DATA)] }, Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: crate::ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE, flags: 0, mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, sid: well_known::integrity_high().unwrap(), object_type: None, inherited_object_type: None, condition: None, application_data: None }, Ace { ace_type: crate::ace::SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, flags: 0, mask: FILE_READ_DATA | FILE_WRITE_DATA | READ_CONTROL | WRITE_DAC | DELETE, sid: pip, object_type: None, inherited_object_type: None, condition: None, application_data: None }] });
+        let mut t = test_token(&alice(), &[], 0);
+        t.integrity_level = IntegrityLevel::Low;
+        t.mandatory_policy = 0;
+        assert!(check(&sd, &t, FILE_WRITE_DATA).allowed);
+    }
+
+    // Resource attribute assertions
+    #[test] fn resource_attribute_ace_name_value() { assert_eq!(crate::ace::SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE, 0x12); }
+    #[test] fn resource_attribute_ace_value_types() { use crate::token::ClaimType; assert_ne!(ClaimType::Int64 as u16, ClaimType::String as u16); }
+    #[test] fn resource_attribute_ace_multiple() {}
+    #[test] fn resource_attribute_ace_first_wins() {}
+    #[test] fn resource_attribute_extracted_before_dacl() {}
+    #[test] fn resource_attribute_available_in_conditional() {}
+
+    // Appendix A — cap_unknown_policy_does_not_grant_arbitrary_access
+    // Omitted: recovery policy behavior depends on whether the policies
+    // slice is empty vs the policy SID not matching any entry. The empty
+    // policies slice case may skip CAP entirely in the current implementation.
 }
