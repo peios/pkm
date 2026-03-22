@@ -4,5 +4,9 @@ obj-$(CONFIG_SECURITY_PKM) += pkm.o
 
 pkm-y := kacs/lsm.o kacs/kacs_rust.o events/events.o
 
+# kacs_open uses do_sys_openat2 (fs-internal). Include fs/internal.h
+# directly so the compiler catches signature changes on kernel rebases.
+ccflags-y += -I$(srctree)/fs
+
 # Tell kacs-core it's compiling for the kernel (switches alloc compat layer)
 rustflags-y += --cfg 'feature="kernel"'

@@ -10,7 +10,7 @@ compatibility.
 
 --- a/include/linux/lsm_hook_defs.h
 +++ b/include/linux/lsm_hook_defs.h
-@@ -250,6 +250,7 @@
+@@ -250,4 +250,5 @@
  LSM_HOOK(int, 0, task_prlimit, const struct cred *cred,
  	 const struct cred *tcred, unsigned int flags)
 +LSM_HOOK(int, 0, task_prlimit_target, struct task_struct *target, unsigned int flags)
@@ -18,7 +18,7 @@ compatibility.
  	 struct rlimit *new_rlim)
 --- a/include/linux/security.h
 +++ b/include/linux/security.h
-@@ -523,6 +523,7 @@
+@@ -523,4 +523,5 @@
  int security_task_prlimit(const struct cred *cred, const struct cred *tcred,
  			  unsigned int flags);
 +int security_task_prlimit_target(struct task_struct *target, unsigned int flags);
@@ -26,7 +26,7 @@ compatibility.
  			    struct rlimit *new_rlim);
 --- a/security/security.c
 +++ b/security/security.c
-@@ -3119,6 +3119,19 @@
+@@ -3119,4 +3119,17 @@
  }
 
  /**
@@ -46,7 +46,7 @@ compatibility.
   * security_task_setrlimit() - Check if setting a new rlimit value is allowed
 --- a/kernel/sys.c
 +++ b/kernel/sys.c
-@@ -1759,6 +1759,11 @@
+@@ -1759,5 +1759,10 @@
  		rcu_read_unlock();
  		return ret;
  	}

@@ -17,7 +17,7 @@ Uses a static_key for zero overhead when KACS is not active.
 
 --- a/include/linux/cred.h
 +++ b/include/linux/cred.h
-@@ -385,8 +385,32 @@
+@@ -385,2 +385,31 @@
  #define current_fsuid() 	(current_cred_xxx(fsuid))
  #define current_fsgid() 	(current_cred_xxx(fsgid))
 +

@@ -13,33 +13,9 @@ Called from five sites:
   4. aio_write() in fs/aio.c — positioned write via legacy AIO
   8. vfs_fallocate() — PUNCH_HOLE/ZERO_RANGE/COLLAPSE/INSERT modes
 
---- a/include/linux/lsm_hook_defs.h
-+++ b/include/linux/lsm_hook_defs.h
-@@ -212,6 +212,7 @@
- LSM_HOOK(int, 0, file_truncate, struct file *file)
-+LSM_HOOK(int, 0, file_deny_pwrite, struct file *file)
- LSM_HOOK(int, 0, task_alloc, struct task_struct *task,
---- a/include/linux/security.h
-+++ b/include/linux/security.h
-@@ -490,6 +490,7 @@
- int security_file_truncate(struct file *file);
-+int security_file_deny_pwrite(struct file *file);
- int security_task_alloc(struct task_struct *task, u64 clone_flags);
---- a/security/security.c
-+++ b/security/security.c
-@@ -2670,6 +2670,11 @@
- }
-
-+int security_file_deny_pwrite(struct file *file)
-+{
-+	return call_int_hook(file_deny_pwrite, file);
-+}
-+
- /**
-  * security_task_alloc() - Allocate a task's LSM blob
 --- a/fs/read_write.c
 +++ b/fs/read_write.c
-@@ -790,6 +790,9 @@
+@@ -790,5 +790,8 @@
  	if (fd_empty(f))
  		return -EBADF;
 
@@ -48,7 +24,7 @@ Called from five sites:
 +
  	if (fd_file(f)->f_mode & FMODE_PWRITE)
  		return vfs_write(fd_file(f), buf, count, &pos);
-@@ -1150,6 +1153,12 @@
+@@ -1150,4 +1153,10 @@
  	if (!fd_empty(f)) {
  		ret = -ESPIPE;
 +		if (security_file_deny_pwrite(fd_file(f))) {
@@ -61,12 +37,12 @@ Called from five sites:
  			ret = vfs_writev(fd_file(f), vec, vlen, &pos, flags);
 --- a/io_uring/rw.c
 +++ b/io_uring/rw.c
-@@ -16,6 +16,7 @@
+@@ -16,3 +16,4 @@
  #include <linux/nospec.h>
 +#include <linux/security.h>
 
  #include <uapi/linux/io_uring.h>
-@@ -1143,6 +1144,10 @@
+@@ -1143,3 +1144,7 @@
  	if (unlikely(ret))
  		return ret;
 +
@@ -76,7 +52,7 @@ Called from five sites:
  	req->cqe.res = iov_iter_count(&io->iter);
 --- a/fs/aio.c
 +++ b/fs/aio.c
-@@ -1629,6 +1629,9 @@
+@@ -1629,4 +1629,8 @@
  	ret = rw_verify_area(WRITE, file, &req->ki_pos, iov_iter_count(&iter));
  	if (!ret) {
 +		if (security_file_deny_pwrite(file))
@@ -87,7 +63,7 @@ Called from five sites:
  			kiocb_start_write(req);
 --- a/fs/open.c
 +++ b/fs/open.c
-@@ -290,6 +290,14 @@
+@@ -290,5 +290,12 @@
  	if (!(file->f_mode & FMODE_WRITE))
  		return -EBADF;
 

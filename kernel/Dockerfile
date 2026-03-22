@@ -125,6 +125,11 @@ RUN for p in pkm-patches/*.patch; do \
     done; \
     rm -rf pkm-patches
 
+# Cache-bust: everything below here rebuilds when source changes.
+# The Makefile passes --build-arg CACHE_BUST=$(checksum) to invalidate
+# Docker's layer cache when any PKM source file changes.
+ARG CACHE_BUST=0
+
 # PKM: copy module source into kernel tree
 # Structure: security/pkm/{kacs/,events/,Kconfig,Makefile}
 #
@@ -140,10 +145,12 @@ RUN for f in /tmp/kacs-core-src/*.rs; do \
         base=$(basename "$f"); \
         if [ "$base" = "lib.rs" ]; then \
             sed '/^#!\[no_std\]/d; /^extern crate alloc;/d' "$f" \
-                | sed '/^#\[cfg(test)\]/,/^}$/d' \
+                | sed '/^mod tests {/,$d' \
+                | sed '${ /^#\[cfg(test)\]$/d; }' \
                 > security/pkm/kacs/kacs_core/mod.rs; \
         else \
-            sed '/^#\[cfg(test)\]/,/^}$/d' "$f" \
+            sed '/^mod tests {/,$d' "$f" \
+                | sed '${ /^#\[cfg(test)\]$/d; }' \
                 > security/pkm/kacs/kacs_core/$base; \
         fi; \
     done && rm -rf /tmp/kacs-core-src

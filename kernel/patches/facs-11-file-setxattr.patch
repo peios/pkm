@@ -6,30 +6,9 @@ file_setxattr() and file_removexattr() before the dentry-based
 path. KACS checks: SD xattrs → deny. POSIX ACLs → deny.
 Others → FILE_WRITE_EA in granted.
 
---- a/include/linux/lsm_hook_defs.h
-+++ b/include/linux/lsm_hook_defs.h
-@@ -212,6 +212,7 @@
- LSM_HOOK(int, 0, file_truncate, struct file *file)
-+LSM_HOOK(int, 0, file_setxattr, struct file *file, const char *name)
- LSM_HOOK(int, 0, task_alloc, struct task_struct *task,
---- a/include/linux/security.h
-+++ b/include/linux/security.h
-@@ -490,6 +490,7 @@
- int security_file_truncate(struct file *file);
-+int security_file_setxattr(struct file *file, const char *name);
---- a/security/security.c
-+++ b/security/security.c
-@@ -2670,6 +2670,11 @@
- }
-
-+int security_file_setxattr(struct file *file, const char *name)
-+{
-+	return call_int_hook(file_setxattr, file, name);
-+}
-+
 --- a/fs/xattr.c
 +++ b/fs/xattr.c
-@@ -640,6 +640,9 @@
+@@ -640,5 +640,8 @@
  int file_setxattr(struct file *f, struct kernel_xattr_ctx *ctx)
  {
 +	int serr = security_file_setxattr(f, ctx->kname->name);
@@ -38,7 +17,7 @@ Others → FILE_WRITE_EA in granted.
  	int error = mnt_want_write_file(f);
 
  	if (!error) {
-@@ -1026,6 +1029,9 @@
+@@ -1026,5 +1029,8 @@
  static int file_removexattr(struct file *f, struct xattr_name *kname)
  {
 +	int serr = security_file_setxattr(f, kname->name);

@@ -5,30 +5,9 @@ Add security_file_getxattr(file, name) hook called in
 file_getxattr() before resolving to do_getxattr. KACS checks:
 SD xattrs → unconditional deny. Others → FILE_READ_EA in granted.
 
---- a/include/linux/lsm_hook_defs.h
-+++ b/include/linux/lsm_hook_defs.h
-@@ -212,6 +212,7 @@
- LSM_HOOK(int, 0, file_truncate, struct file *file)
-+LSM_HOOK(int, 0, file_getxattr, struct file *file, const char *name)
- LSM_HOOK(int, 0, task_alloc, struct task_struct *task,
---- a/include/linux/security.h
-+++ b/include/linux/security.h
-@@ -490,6 +490,7 @@
- int security_file_truncate(struct file *file);
-+int security_file_getxattr(struct file *file, const char *name);
---- a/security/security.c
-+++ b/security/security.c
-@@ -2670,6 +2670,11 @@
- }
-
-+int security_file_getxattr(struct file *file, const char *name)
-+{
-+	return call_int_hook(file_getxattr, file, name);
-+}
-+
 --- a/fs/xattr.c
 +++ b/fs/xattr.c
-@@ -801,6 +801,9 @@
+@@ -801,5 +801,8 @@
  ssize_t file_getxattr(struct file *f, struct kernel_xattr_ctx *ctx)
  {
 +	int err = security_file_getxattr(f, ctx->kname->name);

@@ -11,31 +11,9 @@ Note: chown and futimens fd-based paths need similar insertion points
 in their respective VFS functions. The exact chown/futimens paths
 vary by kernel version; the hook insertion pattern is identical.
 
---- a/include/linux/lsm_hook_defs.h
-+++ b/include/linux/lsm_hook_defs.h
-@@ -212,6 +212,8 @@
- LSM_HOOK(int, 0, file_truncate, struct file *file)
-+LSM_HOOK(int, 0, file_setattr, struct file *file,
-+	 struct iattr *attr)
- LSM_HOOK(int, 0, task_alloc, struct task_struct *task,
---- a/include/linux/security.h
-+++ b/include/linux/security.h
-@@ -490,6 +490,7 @@
- int security_file_truncate(struct file *file);
-+int security_file_setattr(struct file *file, struct iattr *attr);
---- a/security/security.c
-+++ b/security/security.c
-@@ -2670,6 +2670,11 @@
- }
-
-+int security_file_setattr(struct file *file, struct iattr *attr)
-+{
-+	return call_int_hook(file_setattr, file, attr);
-+}
-+
 --- a/fs/open.c
 +++ b/fs/open.c
-@@ -661,6 +661,11 @@
+@@ -661,5 +661,10 @@
  int vfs_fchmod(struct file *file, umode_t mode)
  {
 +	struct iattr attr = { .ia_valid = ATTR_MODE, .ia_mode = mode };

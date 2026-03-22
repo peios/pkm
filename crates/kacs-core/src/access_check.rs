@@ -21,7 +21,8 @@ use crate::token::{Token, TokenType, ImpersonationLevel};
 use crate::well_known;
 
 /// Result of an AccessCheck evaluation.
-#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, PartialEq)]
 pub struct AccessCheckResult {
     /// The access rights granted by the pipeline.
     pub granted: u32,
@@ -47,7 +48,7 @@ pub struct NodeResult {
 }
 
 /// Internal state for per-property object type tree nodes (§11.8).
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ObjectTypeNode {
     /// Depth in the object type tree (0 = root).
     pub level: u16,
@@ -57,6 +58,13 @@ pub struct ObjectTypeNode {
     pub decided: u32,
     /// Bitmask of access rights granted to this node.
     pub granted: u32,
+}
+
+#[cfg(feature = "kernel")]
+impl crate::compat::TryClone for ObjectTypeNode {
+    fn try_clone(&self) -> Result<Self, crate::compat::AllocError> {
+        Ok(*self)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1337,7 +1345,7 @@ pub fn access_check(
                 // Clone the object tree for this rule's evaluation (§11.17).
                 let mut rule_tree: Option<Vec<ObjectTypeNode>> =
                     if let Some(ref tree) = object_tree {
-                        Some(tree.to_vec())
+                        Some(compat::slice_to_vec(tree)?)
                     } else {
                         None
                     };
@@ -1388,7 +1396,7 @@ pub fn access_check(
                     };
                     let mut stg_tree: Option<Vec<ObjectTypeNode>> =
                         if let Some(ref tree) = object_tree {
-                            Some(tree.to_vec())
+                            Some(compat::slice_to_vec(tree)?)
                         } else {
                             None
                         };

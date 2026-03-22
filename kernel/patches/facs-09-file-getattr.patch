@@ -5,30 +5,12 @@ Add security_file_getattr(file) hook called in vfs_fstat() before
 resolving to vfs_getattr. KACS checks FILE_READ_ATTRIBUTES in the
 granted mask. O_PATH fds are unconditionally allowed.
 
---- a/include/linux/lsm_hook_defs.h
-+++ b/include/linux/lsm_hook_defs.h
-@@ -212,6 +212,7 @@
- LSM_HOOK(int, 0, file_truncate, struct file *file)
-+LSM_HOOK(int, 0, file_getattr, struct file *file)
- LSM_HOOK(int, 0, task_alloc, struct task_struct *task,
---- a/include/linux/security.h
-+++ b/include/linux/security.h
-@@ -490,6 +490,7 @@
- int security_file_truncate(struct file *file);
-+int security_file_getattr(struct file *file);
---- a/security/security.c
-+++ b/security/security.c
-@@ -2670,6 +2670,11 @@
- }
-
-+int security_file_getattr(struct file *file)
-+{
-+	return call_int_hook(file_getattr, file);
-+}
-+
 --- a/fs/stat.c
 +++ b/fs/stat.c
-@@ -278,6 +278,9 @@
+@@ -276,7 +276,11 @@
+ int vfs_fstat(int fd, struct kstat *stat)
+ {
++	int ret;
  	CLASS(fd_raw, f)(fd);
  	if (fd_empty(f))
  		return -EBADF;

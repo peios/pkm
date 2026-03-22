@@ -6,35 +6,14 @@ CAP_DAC_READ_SEARCH universally, removing the existing gate.
 Add security_file_handle_open() hook called before handle-based
 opens. KACS checks SeChangeNotifyPrivilege.
 
---- a/include/linux/lsm_hook_defs.h
-+++ b/include/linux/lsm_hook_defs.h
-@@ -212,6 +212,7 @@
- LSM_HOOK(int, 0, file_truncate, struct file *file)
-+LSM_HOOK(int, 0, file_handle_open, void)
- LSM_HOOK(int, 0, task_alloc, struct task_struct *task,
---- a/include/linux/security.h
-+++ b/include/linux/security.h
-@@ -490,6 +490,7 @@
- int security_file_truncate(struct file *file);
-+int security_file_handle_open(void);
---- a/security/security.c
-+++ b/security/security.c
-@@ -2670,6 +2670,11 @@
- }
-
-+int security_file_handle_open(void)
-+{
-+	return call_int_hook(file_handle_open);
-+}
-+
 --- a/fs/fhandle.c
 +++ b/fs/fhandle.c
-@@ -13,6 +13,7 @@
+@@ -13,3 +13,4 @@
  #include <linux/personality.h>
 +#include <linux/security.h>
 
  #include <linux/uaccess.h>
-@@ -420,6 +421,10 @@
+@@ -420,5 +421,9 @@
  {
  	long retval;
  	struct path path __free(path_put) = {};
