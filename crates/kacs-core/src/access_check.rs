@@ -5056,4 +5056,430 @@ mod tests {
         assert!(result.allowed);
         assert!(result.granted & FILE_READ_DATA != 0);
     }
+
+    // ===================================================================
+    // §11.7 Restricted Tokens — Detailed (Second Half)
+    // ===================================================================
+
+    #[test]
+    fn restricted_write_restricted_formula() {
+        // §11.7: granted = (normal & !write_bits) | (normal & restricted & write_bits)
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA | FILE_EXECUTE),
+            allow(&engineers(), FILE_WRITE_DATA), // restricted only gets write
+        ]);
+        let mut token = restricted_token(&alice(), &[&engineers()], &[&engineers()]);
+        token.write_restricted = true;
+        // write_bits for FILE = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA |
+        //   FILE_WRITE_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE (from GENERIC_WRITE mapping)
+        // Non-write bits (READ_DATA, EXECUTE): from normal only → pass
+        // Write bits (WRITE_DATA): normal has it, restricted has it → pass
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+        assert!(check(&sd, &token, FILE_EXECUTE).allowed);
+        assert!(check(&sd, &token, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn restricted_no_privilege_or_back_without_privileges() {
+        // §11.7: when privilege_granted=0, OR-back adds nothing
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let token = restricted_token(&alice(), &[], &[&engineers()]);
+        // Normal: read. Restricted: nothing. Intersection: nothing.
+        // No privileges → OR-back adds nothing.
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn restricted_privilege_or_back_after_intersection() {
+        // §11.7: OR-back happens AFTER intersection
+        let sd = sd_with_dacl(&bob(), alloc::vec![]);
+        let mut token = restricted_token(&alice(), &[], &[&engineers()]);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_BACKUP);
+        // Normal: nothing (empty DACL, not owner). Restricted: nothing.
+        // Intersection: nothing. Privilege OR-back: read restored.
+        assert!(check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT).allowed);
+    }
+
+    // ===================================================================
+    // §11.15 PIP — Detailed
+    // ===================================================================
+
+    #[test]
+    fn pip_dominance_requires_both_dimensions() {
+        // §11.15: need pip_type >= ace_type AND pip_trust >= ace_trust
+        // Object: Protected/Peios. Caller default (None/0) = not dominant.
+        let sd = sd_with_pip(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            well_known::PIP_TYPE_PROTECTED,
+            well_known::PIP_TRUST_PEIOS,
+            FILE_READ_DATA, // allow only read for non-dominant
+        );
+        let token = medium_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn pip_no_default_label() {
+        // §11.15: no trust label ACE → no PIP restrictions
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn pip_only_first_trust_label() {
+        // §11.15: multiple trust labels → only first used
+        let sacl = Acl {
+            revision: ACL_REVISION,
+            aces: alloc::vec![
+                // First: Protected/Peios, allow read only
+                Ace {
+                    ace_type: SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+                    flags: 0,
+                    mask: FILE_READ_DATA,
+                    sid: well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_PEIOS).unwrap(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                },
+                // Second: Isolated/TCB, allow nothing — IGNORED
+                Ace {
+                    ace_type: SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+                    flags: 0,
+                    mask: 0,
+                    sid: well_known::trust_label(well_known::PIP_TYPE_ISOLATED, well_known::PIP_TRUST_PEIOS_TCB).unwrap(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                },
+            ],
+        };
+        let sd = SecurityDescriptor::with_sacl(
+            alice(),
+            well_known::users().unwrap(),
+            Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), GENERIC_ALL)] },
+            sacl,
+        );
+        let token = medium_token(&alice(), &[], 0);
+        // First label allows read → should succeed
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn pip_inherit_only_trust_label_skipped() {
+        // §11.15: trust label with INHERIT_ONLY is skipped
+        let sacl = Acl {
+            revision: ACL_REVISION,
+            aces: alloc::vec![Ace {
+                ace_type: SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+                flags: INHERIT_ONLY_ACE,
+                mask: 0, // would block everything
+                sid: well_known::trust_label(well_known::PIP_TYPE_ISOLATED, well_known::PIP_TRUST_PEIOS_TCB).unwrap(),
+                object_type: None, inherited_object_type: None,
+                condition: None, application_data: None,
+            }],
+        };
+        let sd = SecurityDescriptor::with_sacl(
+            alice(),
+            well_known::users().unwrap(),
+            Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA)] },
+            sacl,
+        );
+        let token = medium_token(&alice(), &[], 0);
+        // Inherit-only label skipped → no PIP restriction
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn pip_revokes_backup_privilege() {
+        // §11.15: PIP strips backup-granted read
+        let sd = sd_with_pip(
+            &bob(),
+            alloc::vec![],
+            well_known::PIP_TYPE_PROTECTED,
+            well_known::PIP_TRUST_PEIOS,
+            0, // allow nothing
+        );
+        let mut token = medium_token(&alice(), &[], privilege::bits::SE_BACKUP);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_BACKUP);
+        assert!(!check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT).allowed);
+    }
+
+    #[test]
+    fn pip_revokes_take_ownership_privilege() {
+        let sd = sd_with_pip(
+            &bob(),
+            alloc::vec![],
+            well_known::PIP_TYPE_PROTECTED,
+            well_known::PIP_TRUST_PEIOS,
+            0,
+        );
+        let token = medium_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP);
+        assert!(!check(&sd, &token, WRITE_OWNER).allowed);
+    }
+
+    #[test]
+    fn pip_type_total_order() {
+        // §11.15: Isolated > Protected > None
+        assert!(well_known::PIP_TYPE_ISOLATED > well_known::PIP_TYPE_PROTECTED);
+        assert!(well_known::PIP_TYPE_PROTECTED > well_known::PIP_TYPE_NONE);
+    }
+
+    #[test]
+    fn pip_trust_total_order() {
+        // §11.15: PeiosTcb > Peios > App > AntiMalware > Authenticode > None
+        assert!(well_known::PIP_TRUST_PEIOS_TCB > well_known::PIP_TRUST_PEIOS);
+        assert!(well_known::PIP_TRUST_PEIOS > well_known::PIP_TRUST_APP);
+        assert!(well_known::PIP_TRUST_APP > well_known::PIP_TRUST_ANTIMALWARE);
+        assert!(well_known::PIP_TRUST_ANTIMALWARE > well_known::PIP_TRUST_AUTHENTICODE);
+        assert!(well_known::PIP_TRUST_AUTHENTICODE > well_known::PIP_TRUST_NONE);
+    }
+
+    // ===================================================================
+    // §11.17 Pipeline Integration
+    // ===================================================================
+
+    #[test]
+    fn pipeline_order_privilege_before_mic() {
+        // §11.17: privileges (step 3) before MIC (step 4)
+        // SeBackupPrivilege grants read even with MIC no-read-up
+        let sd = sd_with_label(
+            &bob(),
+            alloc::vec![],
+            &well_known::integrity_high().unwrap(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | mask::SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+        );
+        let mut token = low_token(&alice());
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_BACKUP);
+        assert!(check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT).allowed);
+    }
+
+    #[test]
+    fn pipeline_order_mic_before_dacl() {
+        // §11.17: MIC (step 4) before DACL (step 7)
+        // MIC blocks write, even though DACL would allow
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &well_known::integrity_high().unwrap(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let token = medium_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn pipeline_order_owner_implicit_before_walk() {
+        // §11.17: owner implicit (step 6) before ACE walk (step 7)
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            deny(&alice(), READ_CONTROL | WRITE_DAC),
+        ]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn pipeline_order_restricted_after_normal_dacl() {
+        // §11.17: restricted (step 8) after normal DACL (step 7)
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&engineers(), FILE_READ_DATA),
+        ]);
+        let token = restricted_token(&alice(), &[&engineers()], &[&engineers()]);
+        // Normal grants r+w, restricted grants r → result is r
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn pipeline_order_confinement_after_restricted() {
+        // §11.17: confinement (step 8a) after restricted merge (step 8)
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&engineers(), FILE_READ_DATA),
+            allow(&app_sid(), FILE_READ_DATA),
+        ]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.groups = alloc::vec![crate::group::GroupEntry::new(
+            engineers(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )];
+        token.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(
+            engineers(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )]);
+        // Normal: r+w. Restricted: r. Merge: r. Confinement: r (app_sid). Final: r.
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn anonymous_token_proceeds_through_pipeline() {
+        // §11.17: Anonymous not blocked
+        let anon = well_known::anonymous().unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&anon, FILE_READ_DATA),
+        ]);
+        let mut token = test_token(&anon, &[], 0);
+        token.token_type = TokenType::Impersonation;
+        token.impersonation_level = ImpersonationLevel::Anonymous;
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn sd_without_owner_rejected() {
+        let sd = SecurityDescriptor {
+            control: SE_DACL_PRESENT | SE_SELF_RELATIVE,
+            owner: None,
+            group: Some(well_known::users().unwrap()),
+            dacl: Some(Acl::new(ACL_REVISION)),
+            sacl: None,
+        };
+        let token = test_token(&alice(), &[], 0);
+        let result = access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sd_without_group_rejected() {
+        let sd = SecurityDescriptor {
+            control: SE_DACL_PRESENT | SE_SELF_RELATIVE,
+            owner: Some(alice()),
+            group: None,
+            dacl: Some(Acl::new(ACL_REVISION)),
+            sacl: None,
+        };
+        let token = test_token(&alice(), &[], 0);
+        let result = access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0);
+        assert!(result.is_err());
+    }
+
+    // ===================================================================
+    // §11.17 Helper Functions
+    // ===================================================================
+
+    #[test]
+    fn sid_matches_token_user_sid() {
+        let token = test_token(&alice(), &[&engineers()], 0);
+        assert!(super::sid_matches_token(&alice(), &token, true));
+        assert!(super::sid_matches_token(&alice(), &token, false));
+    }
+
+    #[test]
+    fn sid_matches_token_enabled_group() {
+        let token = test_token(&alice(), &[&engineers()], 0);
+        assert!(super::sid_matches_token(&engineers(), &token, true));
+        assert!(super::sid_matches_token(&engineers(), &token, false));
+    }
+
+    #[test]
+    fn sid_matches_token_deny_only_group_allow() {
+        let mut token = test_token(&alice(), &[&engineers()], 0);
+        token.groups[0].attributes = crate::group::SE_GROUP_USE_FOR_DENY_ONLY;
+        assert!(!super::sid_matches_token(&engineers(), &token, true));
+    }
+
+    #[test]
+    fn sid_matches_token_deny_only_group_deny() {
+        let mut token = test_token(&alice(), &[&engineers()], 0);
+        token.groups[0].attributes = crate::group::SE_GROUP_USE_FOR_DENY_ONLY;
+        assert!(super::sid_matches_token(&engineers(), &token, false));
+    }
+
+    #[test]
+    fn sid_matches_token_disabled_group_skipped() {
+        let mut token = test_token(&alice(), &[&engineers()], 0);
+        token.groups[0].attributes = 0; // neither enabled nor deny-only
+        assert!(!super::sid_matches_token(&engineers(), &token, true));
+        assert!(!super::sid_matches_token(&engineers(), &token, false));
+    }
+
+    #[test]
+    fn sid_matches_token_no_match() {
+        let token = test_token(&alice(), &[], 0);
+        assert!(!super::sid_matches_token(&bob(), &token, true));
+        assert!(!super::sid_matches_token(&bob(), &token, false));
+    }
+
+    // ===================================================================
+    // §11.10 Auditing — Additional
+    // ===================================================================
+
+    #[test]
+    fn audit_ace_does_not_affect_access_decision() {
+        // §11.10: audit ACEs are purely observational
+        let sacl = Acl {
+            revision: ACL_REVISION,
+            aces: alloc::vec![Ace {
+                ace_type: ace::SYSTEM_AUDIT_ACE_TYPE,
+                flags: ace::SUCCESSFUL_ACCESS_ACE_FLAG | ace::FAILED_ACCESS_ACE_FLAG,
+                mask: GENERIC_ALL,
+                sid: well_known::everyone().unwrap(),
+                object_type: None, inherited_object_type: None,
+                condition: None, application_data: None,
+            }],
+        };
+        let sd = SecurityDescriptor::with_sacl(
+            alice(),
+            well_known::users().unwrap(),
+            Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA)] },
+            sacl,
+        );
+        let token = medium_token(&alice(), &[], 0);
+        // Audit ACE should not block or grant
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+    }
+
+    // ===================================================================
+    // §11.16 CAP — Additional
+    // ===================================================================
+
+    #[test]
+    fn cap_can_only_restrict_never_expand() {
+        // §11.16: CAP cannot expand beyond DACL result
+        let sd = sd_with_cap(
+            &alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)], // DACL grants read only
+            &policy_sid_1(),
+        );
+        let policy = make_cap(
+            &policy_sid_1(),
+            alloc::vec![cap_rule(alloc::vec![allow(&alice(), GENERIC_ALL)])], // CAP grants all
+        );
+        let policies = alloc::vec![policy];
+        let token = medium_token(&alice(), &[], 0);
+        let result = access_check(
+            &sd, &token, FILE_WRITE_DATA,
+            &FILE_GENERIC_MAPPING, None, None, &[], &policies, 0, 0, 0,
+        ).unwrap();
+        assert!(!result.allowed); // DACL only grants read
+    }
+
+    #[test]
+    fn cap_no_backup_restore_intent() {
+        // §11.16: CAP rule evaluation passes privilege_intent=0
+        let sd = sd_with_cap(
+            &bob(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &policy_sid_1(),
+        );
+        // CAP rule with empty DACL → denies everything
+        let policy = make_cap(
+            &policy_sid_1(),
+            alloc::vec![cap_rule(alloc::vec![])],
+        );
+        let policies = alloc::vec![policy];
+        let mut token = medium_token(&alice(), &[], privilege::bits::SE_BACKUP);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_BACKUP);
+        // Backup with intent grants read in normal eval, but CAP rule has no intent
+        let result = access_check(
+            &sd, &token, FILE_READ_DATA,
+            &FILE_GENERIC_MAPPING, None, None, &[], &policies, BACKUP_INTENT, 0, 0,
+        ).unwrap();
+        // CAP denies because its internal eval has no backup intent
+        assert!(!result.allowed);
+    }
 }
