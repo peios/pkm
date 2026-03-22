@@ -312,4 +312,115 @@ mod tests {
         spec[0] = 99; // bad version
         assert!(parse_token_spec(&spec).unwrap().is_none());
     }
+
+    // --- §7.5 Token Creation corpus tests ---
+
+    #[test]
+    fn create_token_wire_format_version() {
+        assert_eq!(TOKEN_SPEC_VERSION, 1);
+    }
+
+    #[test]
+    fn create_token_wire_format_header_size() {
+        assert_eq!(HEADER_SIZE, 96);
+    }
+
+    #[test]
+    fn parse_token_preserves_all_fields() {
+        let system = well_known::system().unwrap();
+        let admins = well_known::administrators().unwrap();
+        let spec = build_spec(&system, &[(admins.clone(), 0x07)],
+                              bits::SE_BACKUP | bits::SE_RESTORE, 8192);
+        let token = parse_token_spec(&spec).unwrap().unwrap();
+        assert_eq!(token.user_sid, system);
+        assert_eq!(token.token_type, TokenType::Primary);
+        assert_eq!(token.integrity_level, IntegrityLevel::Medium);
+        assert_eq!(token.groups.len(), 1);
+        assert_eq!(token.groups[0].sid, admins);
+        assert!(token.privileges.check(bits::SE_BACKUP));
+        assert!(token.privileges.check(bits::SE_RESTORE));
+        assert!(!token.privileges.check(bits::SE_DEBUG));
+        assert_eq!(token.elevation_type, ElevationType::Default);
+        assert_eq!(token.projected_uid, 1000);
+        assert_eq!(token.projected_gid, 1000);
+        assert_eq!(&token.source.name, b"authd\0\0\0");
+    }
+
+    #[test]
+    fn reject_bad_token_type() {
+        let system = well_known::system().unwrap();
+        let mut spec = build_spec(&system, &[], 0, 8192);
+        spec[4] = 99; // invalid token type
+        assert!(parse_token_spec(&spec).unwrap().is_none());
+    }
+
+    #[test]
+    fn reject_bad_impersonation_level() {
+        let system = well_known::system().unwrap();
+        let mut spec = build_spec(&system, &[], 0, 8192);
+        spec[5] = 99; // invalid impersonation level
+        assert!(parse_token_spec(&spec).unwrap().is_none());
+    }
+
+    #[test]
+    fn reject_bad_integrity_level() {
+        let system = well_known::system().unwrap();
+        let spec = build_spec(&system, &[], 0, 9999); // invalid RID
+        assert!(parse_token_spec(&spec).unwrap().is_none());
+    }
+
+    #[test]
+    fn reject_bad_elevation_type() {
+        let system = well_known::system().unwrap();
+        let mut spec = build_spec(&system, &[], 0, 8192);
+        // elevation_type is at offset 32
+        spec[32] = 99;
+        spec[33] = 0;
+        spec[34] = 0;
+        spec[35] = 0;
+        assert!(parse_token_spec(&spec).unwrap().is_none());
+    }
+
+    #[test]
+    fn reject_user_sid_offset_out_of_bounds() {
+        let system = well_known::system().unwrap();
+        let mut spec = build_spec(&system, &[], 0, 8192);
+        // user_sid_offset at bytes 44-47, set to very large value
+        spec[44] = 0xFF;
+        spec[45] = 0xFF;
+        spec[46] = 0xFF;
+        spec[47] = 0x7F;
+        assert!(parse_token_spec(&spec).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_with_multiple_groups() {
+        let alice = crate::sid::Sid::new(5, &[21, 100, 200, 300, 1001]).unwrap();
+        let eng = crate::sid::Sid::new(5, &[21, 100, 200, 300, 2001]).unwrap();
+        let mgrs = crate::sid::Sid::new(5, &[21, 100, 200, 300, 2002]).unwrap();
+        let spec = build_spec(&alice, &[
+            (eng, crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED),
+            (mgrs, crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED),
+        ], bits::SE_CHANGE_NOTIFY, 8192);
+        let token = parse_token_spec(&spec).unwrap().unwrap();
+        assert_eq!(token.groups.len(), 2);
+        assert!(token.groups[0].is_enabled());
+        assert!(token.groups[1].is_enabled());
+    }
+
+    #[test]
+    fn parse_all_integrity_levels() {
+        let system = well_known::system().unwrap();
+        for &(rid, expected) in &[
+            (0, IntegrityLevel::Untrusted),
+            (4096, IntegrityLevel::Low),
+            (8192, IntegrityLevel::Medium),
+            (12288, IntegrityLevel::High),
+            (16384, IntegrityLevel::System),
+        ] {
+            let spec = build_spec(&system, &[], 0, rid);
+            let token = parse_token_spec(&spec).unwrap().unwrap();
+            assert_eq!(token.integrity_level, expected);
+        }
+    }
 }
