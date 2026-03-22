@@ -584,4 +584,100 @@ mod tests {
         assert_eq!(IntegrityLevel::High.rid(), 12288);
         assert_eq!(IntegrityLevel::System.rid(), 16384);
     }
+
+    // --- §7.3 Token Object Model corpus tests ---
+
+    #[test]
+    fn token_type_primary_or_impersonation() {
+        assert_eq!(TokenType::Primary as u32, 1);
+        assert_eq!(TokenType::Impersonation as u32, 2);
+    }
+
+    #[test]
+    fn elevation_type_enum_values() {
+        assert_eq!(ElevationType::Default as u32, 1);
+        assert_eq!(ElevationType::Full as u32, 2);
+        assert_eq!(ElevationType::Limited as u32, 3);
+    }
+
+    #[test]
+    fn mandatory_policy_flags() {
+        assert_eq!(mandatory_policy::NO_WRITE_UP, 0x0001);
+        assert_eq!(mandatory_policy::NEW_PROCESS_MIN, 0x0002);
+    }
+
+    #[test]
+    fn system_token_source() {
+        let token = Token::system_token().unwrap();
+        assert_eq!(&token.source.name, b"PeiosKrn");
+    }
+
+    #[test]
+    fn system_token_elevation_default() {
+        let token = Token::system_token().unwrap();
+        assert_eq!(token.elevation_type, ElevationType::Default);
+    }
+
+    #[test]
+    fn system_token_type_primary() {
+        let token = Token::system_token().unwrap();
+        assert_eq!(token.token_type, TokenType::Primary);
+    }
+
+    #[test]
+    fn system_token_system_integrity() {
+        let token = Token::system_token().unwrap();
+        assert_eq!(token.integrity_level, IntegrityLevel::System);
+    }
+
+    #[test]
+    fn system_token_user_sid_is_system() {
+        let token = Token::system_token().unwrap();
+        assert_eq!(token.user_sid, crate::well_known::system().unwrap());
+    }
+
+    #[test]
+    fn token_not_confined_by_default() {
+        let token = Token::system_token().unwrap();
+        assert!(!token.is_confined());
+        assert!(token.confinement_sid.is_none());
+    }
+
+    #[test]
+    fn token_not_restricted_by_default() {
+        let token = Token::system_token().unwrap();
+        assert!(!token.is_restricted());
+        assert!(token.restricted_sids.is_none());
+    }
+
+    #[test]
+    fn confinement_exempt_bypasses_restrictions() {
+        let mut token = Token::system_token().unwrap();
+        token.confinement_sid = Some(crate::well_known::all_app_packages().unwrap());
+        token.confinement_exempt = true;
+        assert!(!token.is_confined()); // exempt = not confined
+    }
+
+    // --- §7.9 Token Access Right constants ---
+
+    #[test]
+    fn token_access_right_values() {
+        use crate::mask::*;
+        assert_eq!(TOKEN_ASSIGN_PRIMARY, 0x0001);
+        assert_eq!(TOKEN_DUPLICATE, 0x0002);
+        assert_eq!(TOKEN_IMPERSONATE, 0x0004);
+        assert_eq!(TOKEN_QUERY, 0x0008);
+        assert_eq!(TOKEN_ADJUST_PRIVILEGES, 0x0020);
+        assert_eq!(TOKEN_ADJUST_GROUPS, 0x0040);
+        assert_eq!(TOKEN_ADJUST_DEFAULT, 0x0080);
+        assert_eq!(TOKEN_ADJUST_SESSIONID, 0x0100);
+    }
+
+    // --- §7.4 Token Lifecycle ---
+
+    #[test]
+    fn new_process_min_flags() {
+        let token = Token::system_token().unwrap();
+        assert_ne!(token.mandatory_policy & mandatory_policy::NEW_PROCESS_MIN, 0);
+    }
 }

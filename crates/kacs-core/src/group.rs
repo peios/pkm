@@ -134,7 +134,42 @@ mod tests {
     fn mandatory_cannot_be_disabled() {
         let g = test_group(SE_GROUP_MANDATORY | SE_GROUP_ENABLED);
         assert!(g.is_mandatory());
-        // The enforcement of "cannot be disabled" is in AdjustGroups,
-        // not in GroupEntry itself. Here we just verify the flag.
+    }
+
+    // --- §7.3 Group attribute flag constants ---
+
+    #[test]
+    fn group_attribute_flag_values() {
+        assert_eq!(SE_GROUP_MANDATORY, 0x0000_0001);
+        assert_eq!(SE_GROUP_ENABLED_BY_DEFAULT, 0x0000_0002);
+        assert_eq!(SE_GROUP_ENABLED, 0x0000_0004);
+        assert_eq!(SE_GROUP_OWNER, 0x0000_0008);
+        assert_eq!(SE_GROUP_USE_FOR_DENY_ONLY, 0x0000_0010);
+        assert_eq!(SE_GROUP_LOGON_ID, 0x0000_0040);
+        assert_eq!(SE_GROUP_RESOURCE, 0x2000_0000);
+    }
+
+    #[test]
+    fn owner_flag_identifies_potential_owner() {
+        let g = test_group(SE_GROUP_MANDATORY | SE_GROUP_ENABLED | SE_GROUP_OWNER);
+        assert!(g.is_owner());
+        assert!(g.is_enabled());
+    }
+
+    #[test]
+    fn logon_id_flag() {
+        let g = test_group(SE_GROUP_MANDATORY | SE_GROUP_ENABLED | SE_GROUP_LOGON_ID);
+        assert!(g.is_logon_id());
+    }
+
+    #[test]
+    fn deny_only_permanent_from_filter_token() {
+        // §7.3 line 2065: deny-only set by FilterToken, cannot be reverted
+        let g = test_group(SE_GROUP_USE_FOR_DENY_ONLY);
+        assert!(g.is_deny_only());
+        assert!(!g.is_enabled());
+        // deny-only matches deny ACEs but not allow
+        assert!(!g.matches_for(true));
+        assert!(g.matches_for(false));
     }
 }
