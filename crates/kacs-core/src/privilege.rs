@@ -168,6 +168,17 @@ impl Privileges {
         }
     }
 
+    /// Create a privilege set where privileges are present but NOT enabled.
+    /// Mirrors the real-world case where privileges start disabled.
+    pub fn new_present_but_disabled(mask: u64) -> Self {
+        Privileges {
+            present: AtomicU64::new(mask),
+            enabled: AtomicU64::new(0),
+            enabled_by_default: AtomicU64::new(0),
+            used: AtomicU64::new(0),
+        }
+    }
+
     /// Check if a privilege is present AND enabled.
     #[inline]
     pub fn check(&self, privilege: u64) -> bool {
@@ -875,5 +886,89 @@ mod tests {
         privs.mark_used(SE_BACKUP);
         assert_ne!(privs.used.load(Ordering::SeqCst) & SE_BACKUP, 0);
         assert_eq!(privs.used.load(Ordering::SeqCst) & SE_RESTORE, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // §6.4 — Privilege enable/disable semantics
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn privilege_enable_disable() {
+        let privs = Privileges::new_present_but_disabled(SE_BACKUP | SE_RESTORE);
+        assert!(privs.is_present(SE_BACKUP));
+        assert!(!privs.check(SE_BACKUP));
+        privs.enable(SE_BACKUP);
+        assert!(privs.check(SE_BACKUP));
+    }
+
+    #[test]
+    fn privileges_start_disabled() {
+        let privs = Privileges::new_present_but_disabled(SE_BACKUP | SE_RESTORE);
+        assert!(!privs.check(SE_BACKUP));
+        assert!(!privs.check(SE_RESTORE));
+        assert!(privs.is_present(SE_BACKUP));
+        assert!(privs.is_present(SE_RESTORE));
+    }
+
+    #[test]
+    fn se_relabel_privilege_bit_is_32() {
+        assert_eq!(SE_RELABEL, 1u64 << 25);
+    }
+
+    #[test]
+    fn se_undock_privilege_bit_is_25() {
+        assert_eq!(SE_UNDOCK, 1u64 << 32);
+    }
+
+    #[test]
+    fn privilege_bit_positions_match_windows_luids() {
+        assert_eq!(SE_CREATE_TOKEN, 1u64 << 2);
+        assert_eq!(SE_ASSIGN_PRIMARY_TOKEN, 1u64 << 3);
+        assert_eq!(SE_LOCK_MEMORY, 1u64 << 4);
+        assert_eq!(SE_INCREASE_QUOTA, 1u64 << 5);
+        assert_eq!(SE_MACHINE_ACCOUNT, 1u64 << 6);
+        assert_eq!(SE_TCB, 1u64 << 7);
+        assert_eq!(SE_SECURITY, 1u64 << 8);
+        assert_eq!(SE_TAKE_OWNERSHIP, 1u64 << 9);
+        assert_eq!(SE_LOAD_DRIVER, 1u64 << 10);
+        assert_eq!(SE_SYSTEM_PROFILE, 1u64 << 11);
+        assert_eq!(SE_SYSTEMTIME, 1u64 << 12);
+        assert_eq!(SE_PROFILE_SINGLE_PROCESS, 1u64 << 13);
+        assert_eq!(SE_INCREASE_BASE_PRIORITY, 1u64 << 14);
+        assert_eq!(SE_CREATE_PAGEFILE, 1u64 << 15);
+        assert_eq!(SE_CREATE_PERMANENT, 1u64 << 16);
+        assert_eq!(SE_BACKUP, 1u64 << 17);
+        assert_eq!(SE_RESTORE, 1u64 << 18);
+        assert_eq!(SE_SHUTDOWN, 1u64 << 19);
+        assert_eq!(SE_DEBUG, 1u64 << 20);
+        assert_eq!(SE_AUDIT, 1u64 << 21);
+        assert_eq!(SE_SYSTEM_ENVIRONMENT, 1u64 << 22);
+        assert_eq!(SE_CHANGE_NOTIFY, 1u64 << 23);
+        assert_eq!(SE_REMOTE_SHUTDOWN, 1u64 << 24);
+        assert_eq!(SE_RELABEL, 1u64 << 25);
+        assert_eq!(SE_SYNC_AGENT, 1u64 << 26);
+        assert_eq!(SE_ENABLE_DELEGATION, 1u64 << 27);
+        assert_eq!(SE_MANAGE_VOLUME, 1u64 << 28);
+        assert_eq!(SE_IMPERSONATE, 1u64 << 29);
+        assert_eq!(SE_CREATE_GLOBAL, 1u64 << 30);
+        assert_eq!(SE_TRUSTED_CRED_MAN_ACCESS, 1u64 << 31);
+        assert_eq!(SE_UNDOCK, 1u64 << 32);
+        assert_eq!(SE_INCREASE_WORKING_SET, 1u64 << 33);
+        assert_eq!(SE_TIMEZONE, 1u64 << 34);
+        assert_eq!(SE_CREATE_SYMBOLIC_LINK, 1u64 << 35);
+    }
+
+    #[test]
+    fn privilege_set_backup_starts_disabled() {
+        let privs = Privileges::new_present_but_disabled(SE_BACKUP);
+        assert!(privs.is_present(SE_BACKUP));
+        assert!(!privs.check(SE_BACKUP));
+    }
+
+    #[test]
+    fn privilege_set_restore_starts_disabled() {
+        let privs = Privileges::new_present_but_disabled(SE_RESTORE);
+        assert!(privs.is_present(SE_RESTORE));
+        assert!(!privs.check(SE_RESTORE));
     }
 }

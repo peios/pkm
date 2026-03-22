@@ -26,6 +26,12 @@ pub const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x0000_0010;
 /// Group is the logon SID for this token's authentication session.
 pub const SE_GROUP_LOGON_ID: u32 = 0x0000_0040;
 
+/// Group carries the integrity SID for this token (MS-DTYP §2.4.4.1).
+pub const SE_GROUP_INTEGRITY: u32 = 0x0000_0020;
+
+/// Group's integrity SID is enabled (MS-DTYP §2.4.4.1).
+pub const SE_GROUP_INTEGRITY_ENABLED: u32 = 0x0000_0040;
+
 /// Group was added by a resource attribute (not from directory).
 pub const SE_GROUP_RESOURCE: u32 = 0x2000_0000;
 
@@ -278,5 +284,15 @@ mod tests {
         assert!(!g.is_enabled());
         assert!(!g.matches_for(true));
         assert!(g.matches_for(false));
+    }
+
+    #[test]
+    fn se_group_integrity_value_is_0x20() {
+        assert_eq!(SE_GROUP_INTEGRITY, 0x0000_0020);
+    }
+
+    #[test]
+    fn se_group_integrity_enabled_value_is_0x40() {
+        assert_eq!(SE_GROUP_INTEGRITY_ENABLED, 0x0000_0040);
     }
 }
