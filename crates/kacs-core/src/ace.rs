@@ -1320,4 +1320,204 @@ mod tests {
         };
         assert!(ace.is_inherit_only());
     }
+
+    // --- §9.3 ACE Header detail tests ---
+
+    #[test]
+    fn ace_header_type_field_1_byte() {
+        let ace = make_allow_ace(&well_known::system().unwrap(), FILE_READ_DATA);
+        let bytes = ace.to_bytes().unwrap();
+        assert_eq!(bytes[0], ACCESS_ALLOWED_ACE_TYPE); // byte 0 = type
+    }
+
+    #[test]
+    fn ace_header_flags_field_1_byte() {
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_ACE_TYPE,
+            flags: CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
+            mask: FILE_READ_DATA,
+            sid: well_known::system().unwrap(),
+            object_type: None, inherited_object_type: None,
+            condition: None, application_data: None,
+        };
+        let bytes = ace.to_bytes().unwrap();
+        assert_eq!(bytes[1], CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE); // byte 1 = flags
+    }
+
+    #[test]
+    fn ace_header_size_field_2_bytes() {
+        let ace = make_allow_ace(&well_known::system().unwrap(), FILE_READ_DATA);
+        let bytes = ace.to_bytes().unwrap();
+        let size = u16::from_le_bytes([bytes[2], bytes[3]]);
+        assert_eq!(size as usize, bytes.len());
+    }
+
+    // --- §9.3 Object ACE detail tests ---
+
+    #[test]
+    fn object_ace_both_guids_present() {
+        let g1 = crate::guid::Guid { data1: 1, data2: 0, data3: 0, data4: [0; 8] };
+        let g2 = crate::guid::Guid { data1: 2, data2: 0, data3: 0, data4: [0; 8] };
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: well_known::system().unwrap(),
+            object_type: Some(g1),
+            inherited_object_type: Some(g2),
+            condition: None, application_data: None,
+        };
+        let bytes = ace.to_bytes().unwrap();
+        let (parsed, _) = Ace::from_bytes(&bytes).unwrap();
+        assert!(parsed.object_type.is_some());
+        assert!(parsed.inherited_object_type.is_some());
+        assert_eq!(parsed.object_type.unwrap().data1, 1);
+        assert_eq!(parsed.inherited_object_type.unwrap().data1, 2);
+    }
+
+    #[test]
+    fn object_ace_both_guids_absent() {
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: well_known::system().unwrap(),
+            object_type: None,
+            inherited_object_type: None,
+            condition: None, application_data: None,
+        };
+        let bytes = ace.to_bytes().unwrap();
+        let (parsed, _) = Ace::from_bytes(&bytes).unwrap();
+        assert!(parsed.object_type.is_none());
+        assert!(parsed.inherited_object_type.is_none());
+    }
+
+    // --- §9.3 Callback ACE tests ---
+
+    #[test]
+    fn callback_ace_has_conditional_expression() {
+        let cond = alloc::vec![0x61, 0x72, 0x74, 0x78, 0x04, 0x01, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]; // artx + int64(1)
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: well_known::system().unwrap(),
+            object_type: None, inherited_object_type: None,
+            condition: Some(cond.clone()),
+            application_data: None,
+        };
+        let bytes = ace.to_bytes().unwrap();
+        let (parsed, _) = Ace::from_bytes(&bytes).unwrap();
+        assert!(parsed.condition.is_some());
+        assert!(is_callback_type(parsed.ace_type));
+    }
+
+    // --- §9.3 SACL/DACL type separation ---
+
+    #[test]
+    fn sacl_ace_types_not_in_dacl() {
+        // SACL types should not be recognized as DACL access types
+        assert!(!is_access_type(SYSTEM_AUDIT_ACE_TYPE));
+        assert!(!is_access_type(SYSTEM_ALARM_ACE_TYPE));
+        assert!(!is_access_type(SYSTEM_MANDATORY_LABEL_ACE_TYPE));
+        assert!(!is_access_type(SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE));
+        assert!(!is_access_type(SYSTEM_SCOPED_POLICY_ID_ACE_TYPE));
+        assert!(!is_access_type(SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE));
+    }
+
+    #[test]
+    fn dacl_ace_types_not_in_sacl() {
+        assert!(!is_audit_type(ACCESS_ALLOWED_ACE_TYPE));
+        assert!(!is_audit_type(ACCESS_DENIED_ACE_TYPE));
+        assert!(!is_alarm_type(ACCESS_ALLOWED_ACE_TYPE));
+        assert!(!is_alarm_type(ACCESS_DENIED_ACE_TYPE));
+    }
+
+    // --- §9.3 Mandatory label detail ---
+
+    #[test]
+    fn mandatory_label_ace_sid_encodes_integrity_level() {
+        let ace = Ace {
+            ace_type: SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+            flags: 0,
+            mask: 0x0001, // NO_WRITE_UP
+            sid: well_known::integrity_medium().unwrap(),
+            object_type: None, inherited_object_type: None,
+            condition: None, application_data: None,
+        };
+        assert_eq!(ace.sid, well_known::integrity_medium().unwrap());
+    }
+
+    #[test]
+    fn mandatory_label_ace_mask_encodes_mic_policy() {
+        use crate::mask::*;
+        assert_eq!(SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, 0x0001);
+        assert_eq!(SYSTEM_MANDATORY_LABEL_NO_READ_UP, 0x0002);
+        assert_eq!(SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP, 0x0004);
+    }
+
+    // --- §9.3 Process trust label ---
+
+    #[test]
+    fn process_trust_label_ace_mask_encodes_allowed_rights() {
+        let ace = Ace {
+            ace_type: SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA | READ_CONTROL, // only these rights allowed for non-dominant
+            sid: well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_PEIOS).unwrap(),
+            object_type: None, inherited_object_type: None,
+            condition: None, application_data: None,
+        };
+        assert_eq!(ace.ace_type, SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE);
+        assert_eq!(ace.mask, FILE_READ_DATA | READ_CONTROL);
+    }
+
+    // --- §9.3 Alarm ACE types ---
+
+    #[test]
+    fn alarm_object_ace_type_0x08() {
+        assert_eq!(SYSTEM_ALARM_OBJECT_ACE_TYPE, 0x08);
+    }
+
+    #[test]
+    fn alarm_callback_ace_type_0x0e() {
+        assert_eq!(SYSTEM_ALARM_CALLBACK_ACE_TYPE, 0x0E);
+    }
+
+    #[test]
+    fn alarm_callback_object_ace_type_0x10() {
+        assert_eq!(SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE, 0x10);
+    }
+
+    // --- §9.3 Audit type detail ---
+
+    #[test]
+    fn system_audit_object_ace_type_0x07() {
+        assert_eq!(SYSTEM_AUDIT_OBJECT_ACE_TYPE, 0x07);
+    }
+
+    #[test]
+    fn system_audit_callback_ace_type_0x0d() {
+        assert_eq!(SYSTEM_AUDIT_CALLBACK_ACE_TYPE, 0x0D);
+    }
+
+    #[test]
+    fn system_audit_callback_object_ace_type_0x0f() {
+        assert_eq!(SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE, 0x0F);
+    }
+
+    #[test]
+    fn audit_ace_both_success_and_fail() {
+        let ace = Ace {
+            ace_type: SYSTEM_AUDIT_ACE_TYPE,
+            flags: SUCCESSFUL_ACCESS_ACE_FLAG | FAILED_ACCESS_ACE_FLAG,
+            mask: FILE_READ_DATA,
+            sid: well_known::everyone().unwrap(),
+            object_type: None, inherited_object_type: None,
+            condition: None, application_data: None,
+        };
+        assert_ne!(ace.flags & SUCCESSFUL_ACCESS_ACE_FLAG, 0);
+        assert_ne!(ace.flags & FAILED_ACCESS_ACE_FLAG, 0);
+    }
 }

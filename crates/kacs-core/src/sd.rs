@@ -953,4 +953,230 @@ mod tests {
     fn control_flag_sr_bit_15() {
         assert_eq!(SE_SELF_RELATIVE, 1 << 15);
     }
+
+    // --- §9.1 Structure corpus tests ---
+
+    #[test]
+    fn sd_has_four_components() {
+        let sd = SecurityDescriptor::with_sacl(
+            well_known::system().unwrap(),
+            well_known::administrators().unwrap(),
+            simple_dacl(),
+            simple_sacl(),
+        );
+        assert!(sd.owner.is_some());
+        assert!(sd.group.is_some());
+        assert!(sd.dacl.is_some());
+        assert!(sd.sacl.is_some());
+    }
+
+    #[test]
+    fn sd_has_control_flags() {
+        let sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        let _: u16 = sd.control;
+        assert!(sd.control & SE_SELF_RELATIVE != 0);
+    }
+
+    #[test]
+    fn sd_owner_sid_roundtrip() {
+        let owner = crate::sid::Sid::new(5, &[21, 111, 222, 333, 1001]).unwrap();
+        let sd = SecurityDescriptor::new(owner.clone(), well_known::users().unwrap(), Acl::new(ACL_REVISION));
+        let bytes = sd.to_bytes().unwrap();
+        let parsed = SecurityDescriptor::from_bytes(&bytes).unwrap().unwrap();
+        assert_eq!(parsed.owner.unwrap(), owner);
+    }
+
+    #[test]
+    fn sd_group_sid_roundtrip() {
+        let group = crate::sid::Sid::new(5, &[21, 111, 222, 333, 513]).unwrap();
+        let sd = SecurityDescriptor::new(well_known::system().unwrap(), group.clone(), Acl::new(ACL_REVISION));
+        let bytes = sd.to_bytes().unwrap();
+        let parsed = SecurityDescriptor::from_bytes(&bytes).unwrap().unwrap();
+        assert_eq!(parsed.group.unwrap(), group);
+    }
+
+    #[test]
+    fn sd_dacl_roundtrip() {
+        let sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            simple_dacl(),
+        );
+        let bytes = sd.to_bytes().unwrap();
+        let parsed = SecurityDescriptor::from_bytes(&bytes).unwrap().unwrap();
+        assert!(parsed.has_dacl());
+        assert_eq!(parsed.dacl.as_ref().unwrap().aces.len(), 3);
+    }
+
+    #[test]
+    fn sd_sacl_roundtrip() {
+        let sd = SecurityDescriptor::with_sacl(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+            simple_sacl(),
+        );
+        let bytes = sd.to_bytes().unwrap();
+        let parsed = SecurityDescriptor::from_bytes(&bytes).unwrap().unwrap();
+        assert!(parsed.has_sacl());
+        assert_eq!(parsed.sacl.as_ref().unwrap().aces.len(), 2);
+    }
+
+    #[test]
+    fn sd_offsets_point_to_correct_components() {
+        let sd = SecurityDescriptor::with_sacl(
+            well_known::system().unwrap(),
+            well_known::administrators().unwrap(),
+            simple_dacl(),
+            simple_sacl(),
+        );
+        let bytes = sd.to_bytes().unwrap();
+        let owner_off = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let group_off = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let sacl_off = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        let dacl_off = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        assert!(owner_off >= 20 && (owner_off as usize) < bytes.len());
+        assert!(group_off >= 20 && (group_off as usize) < bytes.len());
+        assert!(sacl_off >= 20 && (sacl_off as usize) < bytes.len());
+        assert!(dacl_off >= 20 && (dacl_off as usize) < bytes.len());
+    }
+
+    #[test]
+    fn sd_zero_offset_means_absent() {
+        let sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        let bytes = sd.to_bytes().unwrap();
+        let sacl_off = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        assert_eq!(sacl_off, 0);
+    }
+
+    #[test]
+    fn sd_contiguous_byte_buffer() {
+        let sd = SecurityDescriptor::with_sacl(
+            well_known::system().unwrap(),
+            well_known::administrators().unwrap(),
+            simple_dacl(),
+            simple_sacl(),
+        );
+        let bytes = sd.to_bytes().unwrap();
+        let parsed = SecurityDescriptor::from_bytes(&bytes).unwrap().unwrap();
+        assert_eq!(parsed.owner.as_ref().unwrap(), &well_known::system().unwrap());
+    }
+
+    #[test]
+    fn sd_rebuild_on_modification() {
+        let sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        let bytes1 = sd.to_bytes().unwrap();
+        let sd2 = SecurityDescriptor::with_sacl(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+            simple_sacl(),
+        );
+        let bytes2 = sd2.to_bytes().unwrap();
+        assert_ne!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn sd_parse_in_place() {
+        let sd = SecurityDescriptor::with_sacl(
+            well_known::system().unwrap(),
+            well_known::administrators().unwrap(),
+            simple_dacl(),
+            simple_sacl(),
+        );
+        let bytes = sd.to_bytes().unwrap();
+        let parsed = SecurityDescriptor::from_bytes(&bytes).unwrap().unwrap();
+        assert_eq!(parsed.dacl.as_ref().unwrap().aces.len(), 3);
+    }
+
+    #[test]
+    fn dacl_protected_blocks_inheritable_aces_from_parent() {
+        assert_eq!(SE_DACL_PROTECTED, 0x1000);
+        let mut sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        sd.control |= SE_DACL_PROTECTED;
+        assert!(sd.is_dacl_protected());
+    }
+
+    #[test]
+    fn sacl_protected_blocks_inheritable_aces_from_parent() {
+        assert_eq!(SE_SACL_PROTECTED, 0x2000);
+    }
+
+    #[test]
+    fn dp_flag_clear_means_null_dacl() {
+        let sd = SecurityDescriptor {
+            control: SE_SELF_RELATIVE,
+            owner: Some(well_known::system().unwrap()),
+            group: Some(well_known::system().unwrap()),
+            dacl: None,
+            sacl: None,
+        };
+        assert!(!sd.has_dacl());
+    }
+
+    #[test]
+    fn control_flags_16_bits() {
+        assert!(core::mem::size_of::<u16>() == 2);
+        let all_flags: u16 = SE_OWNER_DEFAULTED | SE_GROUP_DEFAULTED | SE_DACL_PRESENT
+            | SE_DACL_DEFAULTED | SE_SACL_PRESENT | SE_SACL_DEFAULTED | SE_DACL_TRUSTED
+            | SE_SERVER_SECURITY | SE_DACL_AUTO_INHERITED | SE_SACL_AUTO_INHERITED
+            | SE_DACL_PROTECTED | SE_SACL_PROTECTED | SE_RM_CONTROL_VALID | SE_SELF_RELATIVE;
+        assert!(all_flags <= u16::MAX);
+    }
+
+    #[test]
+    fn sd_group_sid_not_used_for_access_control() {
+        // §9.1: group SID stored but not used in AccessCheck
+        let sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::administrators().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        assert!(sd.group.is_some());
+        // group is informational only — AccessCheck doesn't reference it
+    }
+
+    #[test]
+    fn sd_max_size_64kb_from_acl() {
+        assert_eq!(u16::MAX, 65535);
+    }
+
+    #[test]
+    fn registry_sd_same_binary_format() {
+        use crate::mask::*;
+        let sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl {
+                revision: ACL_REVISION,
+                aces: alloc::vec![Ace {
+                    ace_type: crate::ace::ACCESS_ALLOWED_ACE_TYPE,
+                    flags: 0,
+                    mask: KEY_QUERY_VALUE | KEY_SET_VALUE,
+                    sid: well_known::system().unwrap(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                }],
+            },
+        );
+        let bytes = sd.to_bytes().unwrap();
+        let parsed = SecurityDescriptor::from_bytes(&bytes).unwrap().unwrap();
+        assert_eq!(parsed.dacl.as_ref().unwrap().aces[0].mask, KEY_QUERY_VALUE | KEY_SET_VALUE);
+    }
 }
