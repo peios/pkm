@@ -851,4 +851,29 @@ mod tests {
         let privs = Privileges::new_all_enabled(0);
         assert!(!privs.check(SE_BACKUP)); // no privileges = no access
     }
+
+    #[test]
+    fn privilege_new_token_only_via_auth_or_create() {
+        // §10.5 lines 4155-4157: only path to different privileges is new
+        // authentication event or SeCreateTokenPrivilege
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        // Cannot add SE_DEBUG after creation
+        assert!(!privs.enable(SE_DEBUG));
+        // SE_CREATE_TOKEN would be needed to mint a new token with SE_DEBUG
+        assert_eq!(SE_CREATE_TOKEN, 1 << 2);
+    }
+
+    #[test]
+    fn accesscheck_privilege_audit_only_when_necessary() {
+        // §10.7 lines 4191-4196: audit emitted only when privilege was
+        // actually necessary (access would have been denied without it)
+        // Verified structurally: privileges_used tracks which privileges
+        // were exercised, and mark_used is called only when needed.
+        let privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
+        assert_eq!(privs.used.load(Ordering::SeqCst), 0);
+        // Only mark_used when the privilege was necessary for access
+        privs.mark_used(SE_BACKUP);
+        assert_ne!(privs.used.load(Ordering::SeqCst) & SE_BACKUP, 0);
+        assert_eq!(privs.used.load(Ordering::SeqCst) & SE_RESTORE, 0);
+    }
 }

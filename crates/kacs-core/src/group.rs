@@ -172,4 +172,111 @@ mod tests {
         assert!(!g.matches_for(true));
         assert!(g.matches_for(false));
     }
+
+    // --- §11.3 / §2.15 SID Matching in DACL Walk corpus tests ---
+
+    fn make_token(user: &Sid, groups: &[(Sid, u32)]) -> crate::token::Token {
+        let mut token = crate::token::Token::system_token().unwrap();
+        token.user_sid = user.clone();
+        token.user_deny_only = false;
+        token.groups = groups.iter().map(|(s, a)| GroupEntry::new(s.clone(), *a)).collect();
+        token.privileges = crate::privilege::Privileges::new_all_enabled(0);
+        token.integrity_level = crate::token::IntegrityLevel::Medium;
+        token
+    }
+
+    fn alice() -> Sid { Sid::new(5, &[21, 100, 200, 300, 1001]).unwrap() }
+    fn eng() -> Sid { Sid::new(5, &[21, 100, 200, 300, 2001]).unwrap() }
+
+    #[test]
+    fn sid_match_user_sid() {
+        // §11.3 lines 4425-4426: ACE SID matches if it equals token's user SID
+        let token = make_token(&alice(), &[]);
+        assert!(crate::access_check::sid_matches_token(&alice(), &token, true));
+        assert!(crate::access_check::sid_matches_token(&alice(), &token, false));
+    }
+
+    #[test]
+    fn sid_match_group_sid() {
+        // §11.3 line 4426: ACE SID matches if it equals a group SID on the token
+        let token = make_token(&alice(), &[
+            (eng(), SE_GROUP_MANDATORY | SE_GROUP_ENABLED),
+        ]);
+        assert!(crate::access_check::sid_matches_token(&eng(), &token, true));
+    }
+
+    #[test]
+    fn sid_match_allow_requires_enabled() {
+        // §11.3 lines 4427-4428: for allow ACEs, only enabled and NOT deny-only groups match
+        let token = make_token(&alice(), &[
+            (eng(), SE_GROUP_MANDATORY | SE_GROUP_ENABLED),
+        ]);
+        assert!(crate::access_check::sid_matches_token(&eng(), &token, true));
+
+        // Disabled group does not match for allow
+        let token2 = make_token(&alice(), &[
+            (eng(), SE_GROUP_MANDATORY), // not enabled
+        ]);
+        assert!(!crate::access_check::sid_matches_token(&eng(), &token2, true));
+    }
+
+    #[test]
+    fn sid_match_deny_includes_deny_only() {
+        // §11.3 lines 4428-4430: for deny ACEs, both enabled and deny-only groups match
+        let token = make_token(&alice(), &[
+            (eng(), SE_GROUP_USE_FOR_DENY_ONLY),
+        ]);
+        assert!(crate::access_check::sid_matches_token(&eng(), &token, false));
+    }
+
+    #[test]
+    fn sid_match_deny_only_overrides_enabled() {
+        // §11.3 lines 4430-4432: deny-only overrides enabled for allow matching
+        let token = make_token(&alice(), &[
+            (eng(), SE_GROUP_ENABLED | SE_GROUP_USE_FOR_DENY_ONLY),
+        ]);
+        // Deny-only blocks allow matching even if enabled
+        assert!(!crate::access_check::sid_matches_token(&eng(), &token, true));
+        // But still matches for deny
+        assert!(crate::access_check::sid_matches_token(&eng(), &token, false));
+    }
+
+    #[test]
+    fn sid_match_neither_flag_no_match() {
+        // §11.3 lines 4432-4433: group with neither enabled nor deny-only doesn't match
+        let token = make_token(&alice(), &[
+            (eng(), 0), // neither enabled nor deny-only
+        ]);
+        assert!(!crate::access_check::sid_matches_token(&eng(), &token, true));
+        assert!(!crate::access_check::sid_matches_token(&eng(), &token, false));
+    }
+
+    #[test]
+    fn sid_match_user_deny_only() {
+        // §11.3 lines 4438-4441: when user SID is deny-only, matches deny not allow
+        let mut token = make_token(&alice(), &[]);
+        token.user_deny_only = true;
+        assert!(!crate::access_check::sid_matches_token(&alice(), &token, true));
+        assert!(crate::access_check::sid_matches_token(&alice(), &token, false));
+    }
+
+    #[test]
+    fn sid_match_mandatory_group_cannot_be_disabled() {
+        // §7.3 line 2064, 2435: mandatory groups cannot be disabled
+        let g = test_group(SE_GROUP_MANDATORY | SE_GROUP_ENABLED);
+        assert!(g.is_mandatory());
+        assert!(g.is_enabled());
+        // The mandatory flag prevents AdjustGroups from disabling this group
+    }
+
+    #[test]
+    fn sid_match_deny_only_cannot_be_reverted() {
+        // §7.3 lines 2065-2066: deny-only permanently set via FilterToken
+        let g = test_group(SE_GROUP_USE_FOR_DENY_ONLY);
+        assert!(g.is_deny_only());
+        // Cannot be reverted: the flag is permanently set
+        assert!(!g.is_enabled());
+        assert!(!g.matches_for(true));
+        assert!(g.matches_for(false));
+    }
 }

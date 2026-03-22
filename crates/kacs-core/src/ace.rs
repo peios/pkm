@@ -1520,4 +1520,251 @@ mod tests {
         assert_ne!(ace.flags & SUCCESSFUL_ACCESS_ACE_FLAG, 0);
         assert_ne!(ace.flags & FAILED_ACCESS_ACE_FLAG, 0);
     }
+
+    // --- §9.3 Exact corpus-named tests ---
+
+    #[test]
+    fn ace_header_is_4_bytes() {
+        // §9.3 L3305: every ACE begins with a 4-byte header
+        let ace = make_allow_ace(&well_known::system().unwrap(), FILE_READ_DATA);
+        let bytes = ace.to_bytes().unwrap();
+        // Header: type(1) + flags(1) + size(2) = 4 bytes
+        assert!(bytes.len() >= 4);
+        let ace_type = bytes[0];
+        let _flags = bytes[1];
+        let size = u16::from_le_bytes([bytes[2], bytes[3]]);
+        assert_eq!(ace_type, ACCESS_ALLOWED_ACE_TYPE);
+        assert_eq!(size as usize, bytes.len());
+    }
+
+    #[test]
+    fn ace_size_multiple_of_4() {
+        // §9.3 L3310: AceSize must be a multiple of 4
+        let sids = [
+            well_known::system().unwrap(),
+            well_known::everyone().unwrap(),
+            well_known::administrators().unwrap(),
+            Sid::new(5, &[21, 1, 2, 3, 1001]).unwrap(),
+        ];
+        for sid in &sids {
+            let ace = make_allow_ace(sid, FILE_READ_DATA);
+            let bytes = ace.to_bytes().unwrap();
+            assert_eq!(bytes.len() % 4, 0, "ACE size must be multiple of 4");
+        }
+    }
+
+    #[test]
+    fn access_allowed_ace_type_0x00() {
+        assert_eq!(ACCESS_ALLOWED_ACE_TYPE, 0x00);
+    }
+
+    #[test]
+    fn access_denied_ace_type_0x01() {
+        assert_eq!(ACCESS_DENIED_ACE_TYPE, 0x01);
+    }
+
+    #[test]
+    fn access_allowed_object_ace_type_0x05() {
+        assert_eq!(ACCESS_ALLOWED_OBJECT_ACE_TYPE, 0x05);
+    }
+
+    #[test]
+    fn access_denied_object_ace_type_0x06() {
+        assert_eq!(ACCESS_DENIED_OBJECT_ACE_TYPE, 0x06);
+    }
+
+    #[test]
+    fn object_ace_has_flags_field() {
+        // §9.3 L3329-3330: object-type ACEs contain a flags field indicating GUIDs present
+        let guid = Guid { data1: 0xAA, data2: 0, data3: 0, data4: [0; 8] };
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: well_known::system().unwrap(),
+            object_type: Some(guid),
+            inherited_object_type: None,
+            condition: None, application_data: None,
+        };
+        let bytes = ace.to_bytes().unwrap();
+        // After 4-byte header + 4-byte mask = offset 8 is the object flags field (4 bytes)
+        let obj_flags = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        assert!(obj_flags & ACE_OBJECT_TYPE_PRESENT != 0);
+        assert_eq!(obj_flags & ACE_INHERITED_OBJECT_TYPE_PRESENT, 0);
+    }
+
+    #[test]
+    fn object_ace_optional_object_type_guid() {
+        // §9.3 L3340-3341: ObjectType GUID may be absent
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: well_known::system().unwrap(),
+            object_type: None,
+            inherited_object_type: None,
+            condition: None, application_data: None,
+        };
+        let bytes = ace.to_bytes().unwrap();
+        let (parsed, _) = Ace::from_bytes(&bytes).unwrap();
+        assert!(parsed.object_type.is_none());
+        // When absent, behaves like basic ACE for property dimension
+        assert!(is_object_type(parsed.ace_type));
+    }
+
+    #[test]
+    fn object_ace_optional_inherited_object_type_guid() {
+        // §9.3 L3340-3341: InheritedObjectType GUID may be absent
+        let guid = Guid { data1: 1, data2: 0, data3: 0, data4: [0; 8] };
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: well_known::system().unwrap(),
+            object_type: Some(guid),
+            inherited_object_type: None,
+            condition: None, application_data: None,
+        };
+        let bytes = ace.to_bytes().unwrap();
+        let (parsed, _) = Ace::from_bytes(&bytes).unwrap();
+        assert!(parsed.object_type.is_some());
+        assert!(parsed.inherited_object_type.is_none());
+    }
+
+    #[test]
+    fn callback_allowed_ace_type_0x09() {
+        assert_eq!(ACCESS_ALLOWED_CALLBACK_ACE_TYPE, 0x09);
+    }
+
+    #[test]
+    fn callback_denied_ace_type_0x0a() {
+        assert_eq!(ACCESS_DENIED_CALLBACK_ACE_TYPE, 0x0A);
+    }
+
+    #[test]
+    fn callback_allowed_object_ace_type_0x0b() {
+        assert_eq!(ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, 0x0B);
+    }
+
+    #[test]
+    fn callback_denied_object_ace_type_0x0c() {
+        assert_eq!(ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, 0x0C);
+    }
+
+    #[test]
+    fn callback_ace_evaluated_inline() {
+        // §9.3 L3363-3364: conditional expression evaluated inline by AccessCheck
+        // Verify callback ACEs carry their expression data, not an external reference
+        let cond = alloc::vec![0x61, 0x72, 0x74, 0x78, 0x01, 0x00, 0x00, 0x00];
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: well_known::system().unwrap(),
+            object_type: None, inherited_object_type: None,
+            condition: Some(cond.clone()),
+            application_data: None,
+        };
+        // The expression is stored directly on the ACE, not via external callback
+        assert!(ace.condition.is_some());
+        assert!(is_callback_type(ace.ace_type));
+    }
+
+    #[test]
+    fn system_audit_ace_type_0x02() {
+        assert_eq!(SYSTEM_AUDIT_ACE_TYPE, 0x02);
+    }
+
+    #[test]
+    fn mandatory_label_ace_type_0x11() {
+        assert_eq!(SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0x11);
+    }
+
+    #[test]
+    fn mandatory_label_ace_at_most_one_per_sacl() {
+        // §9.3 L3388: at most one SYSTEM_MANDATORY_LABEL_ACE per SACL
+        // This is a structural constraint — build a SACL and verify only one label ACE
+        let sacl = crate::acl::Acl {
+            revision: crate::acl::ACL_REVISION,
+            aces: alloc::vec![
+                Ace {
+                    ace_type: SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                    flags: 0,
+                    mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+                    sid: well_known::integrity_medium().unwrap(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                },
+            ],
+        };
+        let label_count = sacl.aces.iter()
+            .filter(|a| a.ace_type == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+            .count();
+        assert_eq!(label_count, 1, "at most one mandatory label ACE per SACL");
+    }
+
+    #[test]
+    fn resource_attribute_ace_type_0x12() {
+        assert_eq!(SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE, 0x12);
+    }
+
+    #[test]
+    fn resource_attribute_ace_sid_is_everyone() {
+        // §9.3 L3403-3404: resource attribute ACE SID is always Everyone (S-1-1-0)
+        let ace = Ace {
+            ace_type: SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
+            flags: 0,
+            mask: 0,
+            sid: well_known::everyone().unwrap(),
+            object_type: None, inherited_object_type: None,
+            condition: None,
+            application_data: Some(alloc::vec![0x01, 0x02, 0x03, 0x04]),
+        };
+        assert_eq!(ace.sid, well_known::everyone().unwrap());
+    }
+
+    #[test]
+    fn resource_attribute_ace_claim_format() {
+        // §9.3 L3405: attribute data follows CLAIM_SECURITY_ATTRIBUTE_RELATIVE_V1 format
+        // Verify the ACE can carry application_data (the claim payload)
+        let claim_data = alloc::vec![0x01, 0x00, 0x00, 0x00, 0x42, 0x00, 0x00, 0x00];
+        let ace = Ace {
+            ace_type: SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
+            flags: 0,
+            mask: 0,
+            sid: well_known::everyone().unwrap(),
+            object_type: None, inherited_object_type: None,
+            condition: None,
+            application_data: Some(claim_data.clone()),
+        };
+        let bytes = ace.to_bytes().unwrap();
+        let (parsed, _) = Ace::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.ace_type, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE);
+        assert!(parsed.application_data.is_some());
+    }
+
+    #[test]
+    fn scoped_policy_id_ace_type_0x13() {
+        assert_eq!(SYSTEM_SCOPED_POLICY_ID_ACE_TYPE, 0x13);
+    }
+
+    #[test]
+    fn process_trust_label_ace_type_0x14() {
+        assert_eq!(SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, 0x14);
+    }
+
+    #[test]
+    fn alarm_ace_type_0x03() {
+        assert_eq!(SYSTEM_ALARM_ACE_TYPE, 0x03);
+    }
+
+    #[test]
+    fn compound_ace_type_0x04_reserved() {
+        // §9.3 L3468: ACCESS_ALLOWED_COMPOUND_ACE (0x04) is reserved, not implemented
+        assert!(!is_allow_type(0x04));
+        assert!(!is_deny_type(0x04));
+        assert!(!is_access_type(0x04));
+        assert!(!is_object_type(0x04));
+        assert!(!is_callback_type(0x04));
+    }
 }

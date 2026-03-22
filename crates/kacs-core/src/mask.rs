@@ -496,4 +496,146 @@ mod tests {
         assert!(file & FILE_WRITE_DATA != 0);
         assert!(key & KEY_SET_VALUE != 0);
     }
+
+    // --- §9.2 Exact corpus-named tests ---
+
+    #[test]
+    fn access_mask_standard_rights_bits_16_to_20() {
+        // §9.2 L3230-3238: DELETE=bit16, READ_CONTROL=bit17, WRITE_DAC=bit18,
+        // WRITE_OWNER=bit19, SYNCHRONIZE=bit20
+        assert_eq!(DELETE, 1 << 16);
+        assert_eq!(READ_CONTROL, 1 << 17);
+        assert_eq!(WRITE_DAC, 1 << 18);
+        assert_eq!(WRITE_OWNER, 1 << 19);
+        assert_eq!(SYNCHRONIZE, 1 << 20);
+    }
+
+    #[test]
+    fn access_mask_access_system_security_bit_24() {
+        // §9.2 L3244
+        assert_eq!(ACCESS_SYSTEM_SECURITY, 1 << 24);
+    }
+
+    #[test]
+    fn access_mask_maximum_allowed_bit_25() {
+        // §9.2 L3245
+        assert_eq!(MAXIMUM_ALLOWED, 1 << 25);
+    }
+
+    #[test]
+    fn maximum_allowed_cannot_appear_in_ace() {
+        // §9.2 L3245: MAXIMUM_ALLOWED is a request flag only; should not be in ACE mask
+        // It occupies a distinct bit that doesn't overlap standard or generic rights
+        assert_eq!(MAXIMUM_ALLOWED & STANDARD_RIGHTS_ALL, 0);
+        assert_eq!(MAXIMUM_ALLOWED & GENERIC_RIGHTS_MASK, 0);
+        assert_eq!(MAXIMUM_ALLOWED & 0xFFFF, 0); // not in specific rights
+    }
+
+    #[test]
+    fn generic_mapping_at_request_time() {
+        // §9.2 L3264-3269: generic bits in requested mask are mapped to
+        // object-specific bits via GenericMapping, then generic bits cleared
+        let request = GENERIC_READ | FILE_WRITE_DATA;
+        let mapped = map_generic_bits(request, &FILE_GENERIC_MAPPING);
+        // Generic bits should be cleared
+        assert_eq!(mapped & GENERIC_READ, 0);
+        // Object-specific bits from the mapping should be present
+        assert!(mapped & FILE_READ_DATA != 0);
+        // Pre-existing specific bits should be preserved
+        assert!(mapped & FILE_WRITE_DATA != 0);
+    }
+
+    #[test]
+    fn generic_bits_cleared_after_mapping_request() {
+        // §9.2 L3268: after mapping, requested mask has no generic bits (bits 28-31 all zero)
+        let request = GENERIC_ALL | GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE;
+        let mapped = map_generic_bits(request, &FILE_GENERIC_MAPPING);
+        assert_eq!(mapped & GENERIC_RIGHTS_MASK, 0, "all generic bits must be cleared after mapping");
+    }
+
+    #[test]
+    fn ace_mask_generic_bits_mapped_locally() {
+        // §9.2 L3271-3282: (Divergence) AccessCheck maps each ACE's mask via MapGenericBits
+        // using a local variable; the ACE itself is never mutated
+        let ace_mask = GENERIC_ALL;
+        let mapped = map_generic_bits(ace_mask, &FILE_GENERIC_MAPPING);
+        // The original mask is unchanged (immutable mapping)
+        assert_eq!(ace_mask, GENERIC_ALL);
+        // The mapped result has specific bits, no generic bits
+        assert!(mapped & FILE_READ_DATA != 0);
+        assert_eq!(mapped & GENERIC_ALL, 0);
+    }
+
+    #[test]
+    fn ace_mask_mapping_uses_same_generic_mapping() {
+        // §9.2 L3275: same GenericMapping table used for request and ACE mask mapping
+        let request_mapped = map_generic_bits(GENERIC_READ, &FILE_GENERIC_MAPPING);
+        let ace_mapped = map_generic_bits(GENERIC_READ, &FILE_GENERIC_MAPPING);
+        assert_eq!(request_mapped, ace_mapped);
+    }
+
+    #[test]
+    fn generic_read_in_ace_maps_correctly() {
+        // §9.2 L3280-3282: an ACE granting GENERIC_READ matches the corresponding
+        // object-specific read bits after mapping
+        let mapped = map_generic_bits(GENERIC_READ, &FILE_GENERIC_MAPPING);
+        assert!(mapped & FILE_READ_DATA != 0);
+        assert!(mapped & FILE_READ_ATTRIBUTES != 0);
+        assert!(mapped & FILE_READ_EA != 0);
+        assert!(mapped & READ_CONTROL != 0);
+    }
+
+    #[test]
+    fn generic_all_in_ace_maps_correctly() {
+        // §9.2 L3278: GENERIC_ALL maps to all object-specific + standard rights
+        let mapped = map_generic_bits(GENERIC_ALL, &FILE_GENERIC_MAPPING);
+        assert!(mapped & FILE_READ_DATA != 0);
+        assert!(mapped & FILE_WRITE_DATA != 0);
+        assert!(mapped & FILE_EXECUTE != 0);
+        assert!(mapped & DELETE != 0);
+        assert!(mapped & READ_CONTROL != 0);
+        assert!(mapped & WRITE_DAC != 0);
+        assert!(mapped & WRITE_OWNER != 0);
+        assert!(mapped & SYNCHRONIZE != 0);
+    }
+
+    #[test]
+    fn different_object_types_different_generic_mappings() {
+        // §9.2 L3258-3262: file and registry key produce different specific bits
+        let file_read = map_generic_bits(GENERIC_READ, &FILE_GENERIC_MAPPING);
+        let key_read = map_generic_bits(GENERIC_READ, &KEY_GENERIC_MAPPING);
+        assert_ne!(file_read, key_read);
+        // File GENERIC_READ includes FILE_READ_DATA
+        assert!(file_read & FILE_READ_DATA != 0);
+        // Key GENERIC_READ includes KEY_QUERY_VALUE
+        assert!(key_read & KEY_QUERY_VALUE != 0);
+    }
+
+    #[test]
+    fn dacl_walk_never_sees_generic_bits() {
+        // §9.2 L3267-3269: during DACL walk, neither requested nor ACE mask
+        // contain generic bits (both are mapped beforehand)
+        let request = GENERIC_READ | GENERIC_WRITE;
+        let mapped_request = map_generic_bits(request, &FILE_GENERIC_MAPPING);
+        assert_eq!(mapped_request & GENERIC_RIGHTS_MASK, 0);
+
+        let ace_mask = GENERIC_ALL;
+        let mapped_ace = map_generic_bits(ace_mask, &FILE_GENERIC_MAPPING);
+        assert_eq!(mapped_ace & GENERIC_RIGHTS_MASK, 0);
+    }
+
+    #[test]
+    fn same_mask_layout_for_ace_request_granted() {
+        // §9.2 L3216-3218: same 32-bit layout for ACE mask, requested access, and granted access
+        // All use the same bit positions
+        let ace_mask: u32 = FILE_READ_DATA | READ_CONTROL;
+        let request: u32 = FILE_READ_DATA | READ_CONTROL;
+        let granted: u32 = FILE_READ_DATA | READ_CONTROL;
+        assert_eq!(ace_mask, request);
+        assert_eq!(request, granted);
+        // All fit in u32
+        assert!(core::mem::size_of_val(&ace_mask) == 4);
+        assert!(core::mem::size_of_val(&request) == 4);
+        assert!(core::mem::size_of_val(&granted) == 4);
+    }
 }

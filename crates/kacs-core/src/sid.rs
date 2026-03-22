@@ -407,4 +407,19 @@ mod tests {
             assert_eq!(reparsed.to_string(), *expected);
         }
     }
+
+    #[test]
+    fn sid_structurally_wellformed_validation() {
+        // §7.5 line 2341: CreateToken validates all SIDs are structurally well-formed
+        // Valid SIDs parse successfully
+        let valid = Sid::new(5, &[18]).unwrap();
+        assert!(Sid::from_bytes(&valid.to_bytes().unwrap()).is_some());
+
+        // Revision != 1 is rejected
+        assert!(Sid::from_bytes(&[2, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0]).is_none());
+        // Sub-authority count > 15 is rejected
+        assert!(Sid::from_bytes(&[1, 16, 0, 0, 0, 0, 0, 5]).is_none());
+        // Truncated data is rejected
+        assert!(Sid::from_bytes(&[1, 1, 0, 0, 0, 0, 0, 5]).is_none());
+    }
 }

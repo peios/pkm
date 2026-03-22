@@ -1247,9 +1247,56 @@ pub mod bytecode {
     pub fn op_not_any_of() -> Vec<u8> { alloc::vec![0x8f] }
     pub fn op_not_member_of() -> Vec<u8> { alloc::vec![0x90] }
     pub fn op_not_member_of_any() -> Vec<u8> { alloc::vec![0x92] }
+    pub fn op_device_member_of() -> Vec<u8> { alloc::vec![0x8a] }
+    pub fn op_device_member_of_any() -> Vec<u8> { alloc::vec![0x8c] }
+    pub fn op_not_device_member_of() -> Vec<u8> { alloc::vec![0x91] }
+    pub fn op_not_device_member_of_any() -> Vec<u8> { alloc::vec![0x93] }
     pub fn op_and() -> Vec<u8> { alloc::vec![0xa0] }
     pub fn op_or() -> Vec<u8> { alloc::vec![0xa1] }
     pub fn op_not() -> Vec<u8> { alloc::vec![0xa2] }
+
+    pub fn device_attr(name: &str) -> Vec<u8> {
+        let encoded = encode_utf16le(name);
+        let mut buf = Vec::new();
+        buf.push(0xfb); // @Device.
+        buf.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&encoded);
+        buf
+    }
+
+    pub fn uint64_literal(value: u64) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(0x04); // same opcode, positive sign
+        buf.extend_from_slice(&value.to_le_bytes());
+        buf.push(0x01); // positive sign
+        buf.push(0x00); // base
+        buf
+    }
+
+    pub fn octet_literal(data: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(0x18);
+        buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        buf.extend_from_slice(data);
+        buf
+    }
+
+    pub fn boolean_literal(val: bool) -> Vec<u8> {
+        // Booleans use int64 encoding: 1 or 0
+        int64_literal(if val { 1 } else { 0 })
+    }
+
+    pub fn composite_literal(parts: &[Vec<u8>]) -> Vec<u8> {
+        let mut inner = Vec::new();
+        for p in parts {
+            inner.extend_from_slice(p);
+        }
+        let mut buf = Vec::new();
+        buf.push(0x50);
+        buf.extend_from_slice(&(inner.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&inner);
+        buf
+    }
 
     pub fn build(parts: &[Vec<u8>]) -> Vec<u8> {
         let mut result = header();
