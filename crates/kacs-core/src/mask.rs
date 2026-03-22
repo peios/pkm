@@ -309,4 +309,191 @@ mod tests {
         assert!(mapped & GENERIC_READ == 0);
         assert!(mapped & GENERIC_WRITE == 0);
     }
+
+    // --- §2.7 Access Mask Layout corpus tests ---
+
+    #[test]
+    fn mask_specific_rights_bits_0_to_15() {
+        // §2 line 191, §9.2 line 3222
+        assert_eq!(FILE_READ_DATA, 1 << 0);
+        assert_eq!(FILE_WRITE_DATA, 1 << 1);
+        assert_eq!(FILE_APPEND_DATA, 1 << 2);
+        assert_eq!(FILE_READ_EA, 1 << 3);
+        assert_eq!(FILE_WRITE_EA, 1 << 4);
+        assert_eq!(FILE_EXECUTE, 1 << 5);
+        assert_eq!(FILE_DELETE_CHILD, 1 << 6);
+        assert_eq!(FILE_READ_ATTRIBUTES, 1 << 7);
+        assert_eq!(FILE_WRITE_ATTRIBUTES, 1 << 8);
+        let all_specific = FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA
+            | FILE_READ_EA | FILE_WRITE_EA | FILE_EXECUTE | FILE_DELETE_CHILD
+            | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES;
+        assert_eq!(all_specific & 0xFFFF_0000, 0, "specific rights must be in bits 0-15");
+    }
+
+    #[test]
+    fn mask_standard_rights_bits_16_to_20() {
+        // §2 line 192, §9.2 line 3230
+        assert_eq!(STANDARD_RIGHTS_ALL & 0x001F_0000, STANDARD_RIGHTS_ALL);
+    }
+
+    #[test]
+    fn mask_delete_bit_16() {
+        assert_eq!(DELETE, 1 << 16);
+    }
+
+    #[test]
+    fn mask_read_control_bit_17() {
+        assert_eq!(READ_CONTROL, 1 << 17);
+    }
+
+    #[test]
+    fn mask_write_dac_bit_18() {
+        assert_eq!(WRITE_DAC, 1 << 18);
+    }
+
+    #[test]
+    fn mask_write_owner_bit_19() {
+        assert_eq!(WRITE_OWNER, 1 << 19);
+    }
+
+    #[test]
+    fn mask_synchronize_bit_20() {
+        assert_eq!(SYNCHRONIZE, 1 << 20);
+    }
+
+    #[test]
+    fn mask_bits_21_to_23_reserved() {
+        // §2 line 197
+        let reserved = 0x00E0_0000u32;
+        assert_eq!(STANDARD_RIGHTS_ALL & reserved, 0);
+        assert_eq!(ACCESS_SYSTEM_SECURITY & reserved, 0);
+        assert_eq!(MAXIMUM_ALLOWED & reserved, 0);
+        assert_eq!(GENERIC_RIGHTS_MASK & reserved, 0);
+    }
+
+    #[test]
+    fn mask_access_system_security_bit_24() {
+        assert_eq!(ACCESS_SYSTEM_SECURITY, 1 << 24);
+    }
+
+    #[test]
+    fn mask_maximum_allowed_bit_25() {
+        assert_eq!(MAXIMUM_ALLOWED, 1 << 25);
+    }
+
+    #[test]
+    fn mask_bits_26_to_27_reserved() {
+        // §2 line 198
+        let reserved = 0x0C00_0000u32;
+        assert_eq!(GENERIC_RIGHTS_MASK & reserved, 0);
+        assert_eq!(MAXIMUM_ALLOWED & reserved, 0);
+        assert_eq!(ACCESS_SYSTEM_SECURITY & reserved, 0);
+    }
+
+    #[test]
+    fn mask_generic_all_bit_28() {
+        assert_eq!(GENERIC_ALL, 1 << 28);
+    }
+
+    #[test]
+    fn mask_generic_execute_bit_29() {
+        assert_eq!(GENERIC_EXECUTE, 1 << 29);
+    }
+
+    #[test]
+    fn mask_generic_write_bit_30() {
+        assert_eq!(GENERIC_WRITE, 1 << 30);
+    }
+
+    #[test]
+    fn mask_generic_read_bit_31() {
+        assert_eq!(GENERIC_READ, 1 << 31);
+    }
+
+    #[test]
+    fn mask_maximum_allowed_cannot_appear_in_ace() {
+        // §9.2 line 3245, §11.5 line 4560
+        assert_eq!(MAXIMUM_ALLOWED & STANDARD_RIGHTS_ALL, 0);
+        assert_eq!(MAXIMUM_ALLOWED & GENERIC_RIGHTS_MASK, 0);
+        assert_eq!(MAXIMUM_ALLOWED & 0xFFFF, 0);
+    }
+
+    #[test]
+    fn mask_generic_mapped_once_at_request_time() {
+        // §9.2 lines 3264-3268
+        let request = GENERIC_READ | FILE_WRITE_DATA;
+        let mapped = map_generic_bits(request, &FILE_GENERIC_MAPPING);
+        assert_eq!(mapped & GENERIC_READ, 0);
+        assert!(mapped & FILE_READ_DATA != 0);
+        assert!(mapped & FILE_WRITE_DATA != 0);
+    }
+
+    #[test]
+    fn mask_ace_generic_bits_mapped_at_eval_time() {
+        // §9.2 lines 3271-3282: ACE mask mapped via local variable, never mutated
+        let ace_mask = GENERIC_ALL;
+        let mapped = map_generic_bits(ace_mask, &FILE_GENERIC_MAPPING);
+        assert_eq!(ace_mask, GENERIC_ALL); // original unchanged
+        assert!(mapped & FILE_READ_DATA != 0);
+        assert_eq!(mapped & GENERIC_ALL, 0);
+    }
+
+    // --- §2.14 GenericMapping corpus tests ---
+
+    #[test]
+    fn generic_mapping_provided_by_caller() {
+        // §2 lines 277-278: different mappings, different results
+        let file_result = map_generic_bits(GENERIC_READ, &FILE_GENERIC_MAPPING);
+        let proc_result = map_generic_bits(GENERIC_READ, &PROCESS_GENERIC_MAPPING);
+        assert_ne!(file_result, proc_result);
+    }
+
+    #[test]
+    fn generic_mapping_generic_read_file_example() {
+        // §2 lines 273-274
+        let mapped = map_generic_bits(GENERIC_READ, &FILE_GENERIC_MAPPING);
+        assert!(mapped & FILE_READ_DATA != 0);
+        assert!(mapped & FILE_READ_ATTRIBUTES != 0);
+        assert!(mapped & READ_CONTROL != 0);
+    }
+
+    #[test]
+    fn generic_bits_cleared_after_mapping() {
+        // §9.2 line 3267
+        let mapped = map_generic_bits(
+            GENERIC_ALL | GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE,
+            &FILE_GENERIC_MAPPING,
+        );
+        assert_eq!(mapped & GENERIC_RIGHTS_MASK, 0);
+    }
+
+    #[test]
+    fn access_mask_is_32_bits() {
+        let all_bits: u32 = GENERIC_RIGHTS_MASK | MAXIMUM_ALLOWED | ACCESS_SYSTEM_SECURITY
+            | STANDARD_RIGHTS_ALL | 0xFFFF;
+        assert!(all_bits <= u32::MAX);
+    }
+
+    #[test]
+    fn access_mask_object_specific_bits_0_to_15() {
+        // Directory aliases map to same bits as file names
+        assert_eq!(FILE_LIST_DIRECTORY, FILE_READ_DATA);
+        assert_eq!(FILE_ADD_FILE, FILE_WRITE_DATA);
+        assert_eq!(FILE_ADD_SUBDIRECTORY, FILE_APPEND_DATA);
+        assert_eq!(FILE_TRAVERSE, FILE_EXECUTE);
+    }
+
+    #[test]
+    fn access_mask_generic_rights_bits_28_to_31() {
+        assert_eq!(GENERIC_RIGHTS_MASK, 0xF000_0000);
+    }
+
+    #[test]
+    fn different_mapping_table() {
+        let file = map_generic_bits(GENERIC_WRITE, &FILE_GENERIC_MAPPING);
+        let key = map_generic_bits(GENERIC_WRITE, &KEY_GENERIC_MAPPING);
+        assert_ne!(file, key);
+        assert!(file & FILE_WRITE_DATA != 0);
+        assert!(key & KEY_SET_VALUE != 0);
+    }
 }

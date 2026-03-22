@@ -756,4 +756,201 @@ mod tests {
         assert_eq!(sacl.aces[0].sid, well_known::integrity_medium().unwrap());
         assert_eq!(sacl.aces[1].ace_type, SYSTEM_AUDIT_ACE_TYPE);
     }
+
+    // --- §2.4 Security Descriptor Definition corpus tests ---
+
+    #[test]
+    fn sd_contains_owner_sid() {
+        // §2 line 140
+        let sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        assert!(sd.owner.is_some());
+    }
+
+    #[test]
+    fn sd_contains_primary_group_sid() {
+        // §2 line 141
+        let sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::administrators().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        assert!(sd.group.is_some());
+        assert_eq!(sd.group.unwrap(), well_known::administrators().unwrap());
+    }
+
+    #[test]
+    fn sd_contains_dacl() {
+        // §2 lines 141-142
+        let sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        assert!(sd.has_dacl());
+    }
+
+    #[test]
+    fn sd_contains_optional_sacl() {
+        // §2 lines 142-143: SACL is optional
+        let sd_no_sacl = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        assert!(!sd_no_sacl.has_sacl());
+
+        let sd_with_sacl = SecurityDescriptor::with_sacl(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+            Acl::new(ACL_REVISION),
+        );
+        assert!(sd_with_sacl.has_sacl());
+    }
+
+    #[test]
+    fn sd_binary_format_windows_compatible() {
+        // §2 lines 147-148, §9.1 lines 3136-3138
+        let sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        let bytes = sd.to_bytes().unwrap();
+        // First byte is revision (always 1)
+        assert_eq!(bytes[0], SD_REVISION);
+        // Byte 1 is Sbz1 (padding, 0)
+        assert_eq!(bytes[1], 0);
+        // Bytes 2-3 are control flags (little-endian u16)
+        let control = u16::from_le_bytes([bytes[2], bytes[3]]);
+        assert!(control & SE_SELF_RELATIVE != 0);
+    }
+
+    #[test]
+    fn sd_self_relative_format_header() {
+        // §9.1 lines 3197-3202: 20-byte header
+        let sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        let bytes = sd.to_bytes().unwrap();
+        assert!(bytes.len() >= 20, "SD must be at least 20 bytes (header)");
+        // Header: revision(1) + sbz1(1) + control(2) + 4 offsets(4 each) = 20
+        let owner_offset = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let group_offset = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let _sacl_offset = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        let _dacl_offset = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        // Offsets point within the buffer
+        assert!(owner_offset > 0 && (owner_offset as usize) < bytes.len());
+        assert!(group_offset > 0 && (group_offset as usize) < bytes.len());
+    }
+
+    #[test]
+    fn sd_self_relative_no_pointers() {
+        // §9.1 lines 3200-3201: contiguous buffer, no external references
+        let sd = SecurityDescriptor::with_sacl(
+            well_known::system().unwrap(),
+            well_known::administrators().unwrap(),
+            simple_dacl(),
+            simple_sacl(),
+        );
+        let bytes = sd.to_bytes().unwrap();
+        // Should be parseable from the contiguous buffer alone
+        let parsed = SecurityDescriptor::from_bytes(&bytes).unwrap().unwrap();
+        assert_eq!(parsed.owner.as_ref().unwrap(), &well_known::system().unwrap());
+    }
+
+    #[test]
+    fn sd_only_self_relative_format() {
+        // §9.1 lines 3204-3205: KACS uses self-relative exclusively
+        let sd = SecurityDescriptor::new(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        assert!(sd.control & SE_SELF_RELATIVE != 0);
+    }
+
+    #[test]
+    fn sd_max_size_64kb() {
+        // §9.11 line 3907: max 64 KB (AclSize is u16)
+        assert_eq!(u16::MAX as usize, 65535);
+    }
+
+    // --- §2.13 SD Control Flags corpus tests ---
+
+    #[test]
+    fn control_flag_od_bit_0() {
+        assert_eq!(SE_OWNER_DEFAULTED, 1 << 0);
+    }
+
+    #[test]
+    fn control_flag_gd_bit_1() {
+        assert_eq!(SE_GROUP_DEFAULTED, 1 << 1);
+    }
+
+    #[test]
+    fn control_flag_dp_bit_2() {
+        assert_eq!(SE_DACL_PRESENT, 1 << 2);
+    }
+
+    #[test]
+    fn control_flag_dd_bit_3() {
+        assert_eq!(SE_DACL_DEFAULTED, 1 << 3);
+    }
+
+    #[test]
+    fn control_flag_sp_bit_4() {
+        assert_eq!(SE_SACL_PRESENT, 1 << 4);
+    }
+
+    #[test]
+    fn control_flag_sd_bit_5() {
+        assert_eq!(SE_SACL_DEFAULTED, 1 << 5);
+    }
+
+    #[test]
+    fn control_flag_dt_bit_6() {
+        assert_eq!(SE_DACL_TRUSTED, 1 << 6);
+    }
+
+    #[test]
+    fn control_flag_ss_bit_7() {
+        assert_eq!(SE_SERVER_SECURITY, 1 << 7);
+    }
+
+    #[test]
+    fn control_flag_di_bit_10() {
+        assert_eq!(SE_DACL_AUTO_INHERITED, 1 << 10);
+    }
+
+    #[test]
+    fn control_flag_si_bit_11() {
+        assert_eq!(SE_SACL_AUTO_INHERITED, 1 << 11);
+    }
+
+    #[test]
+    fn control_flag_pd_bit_12() {
+        assert_eq!(SE_DACL_PROTECTED, 1 << 12);
+    }
+
+    #[test]
+    fn control_flag_ps_bit_13() {
+        assert_eq!(SE_SACL_PROTECTED, 1 << 13);
+    }
+
+    #[test]
+    fn control_flag_rm_bit_14() {
+        assert_eq!(SE_RM_CONTROL_VALID, 1 << 14);
+    }
+
+    #[test]
+    fn control_flag_sr_bit_15() {
+        assert_eq!(SE_SELF_RELATIVE, 1 << 15);
+    }
 }

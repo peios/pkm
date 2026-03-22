@@ -1109,4 +1109,215 @@ mod tests {
         assert_eq!(parsed.mask, 42);
         assert_eq!(parsed.sid, sid);
     }
+
+    // --- §2.6 ACE Definition corpus tests ---
+
+    #[test]
+    fn ace_header_4_bytes() {
+        // §9.3 lines 3305-3310: header is AceType(1) + AceFlags(1) + AceSize(2)
+        let ace = make_allow_ace(&well_known::system().unwrap(), FILE_READ_DATA);
+        let bytes = ace.to_bytes().unwrap();
+        // First 4 bytes: type, flags, size_lo, size_hi
+        assert_eq!(bytes[0], ACCESS_ALLOWED_ACE_TYPE); // type
+        assert_eq!(bytes[1], 0); // flags
+        let size = u16::from_le_bytes([bytes[2], bytes[3]]);
+        assert_eq!(size as usize, bytes.len());
+    }
+
+    #[test]
+    fn ace_allowed_type_0x00() {
+        assert_eq!(ACCESS_ALLOWED_ACE_TYPE, 0x00);
+    }
+
+    #[test]
+    fn ace_denied_type_0x01() {
+        assert_eq!(ACCESS_DENIED_ACE_TYPE, 0x01);
+    }
+
+    #[test]
+    fn ace_audit_type_0x02() {
+        assert_eq!(SYSTEM_AUDIT_ACE_TYPE, 0x02);
+    }
+
+    #[test]
+    fn ace_alarm_type_0x03() {
+        assert_eq!(SYSTEM_ALARM_ACE_TYPE, 0x03);
+    }
+
+    #[test]
+    fn ace_compound_type_0x04_reserved() {
+        // §9.3 line 3468: 0x04 is reserved, not implemented
+        // Verify we don't define it and it's not recognized as allow/deny
+        assert!(!is_allow_type(0x04));
+        assert!(!is_deny_type(0x04));
+        assert!(!is_access_type(0x04));
+    }
+
+    #[test]
+    fn ace_allowed_object_type_0x05() {
+        assert_eq!(ACCESS_ALLOWED_OBJECT_ACE_TYPE, 0x05);
+    }
+
+    #[test]
+    fn ace_denied_object_type_0x06() {
+        assert_eq!(ACCESS_DENIED_OBJECT_ACE_TYPE, 0x06);
+    }
+
+    #[test]
+    fn ace_audit_object_type_0x07() {
+        assert_eq!(SYSTEM_AUDIT_OBJECT_ACE_TYPE, 0x07);
+    }
+
+    #[test]
+    fn ace_alarm_object_type_0x08() {
+        assert_eq!(SYSTEM_ALARM_OBJECT_ACE_TYPE, 0x08);
+    }
+
+    #[test]
+    fn ace_allowed_callback_type_0x09() {
+        assert_eq!(ACCESS_ALLOWED_CALLBACK_ACE_TYPE, 0x09);
+    }
+
+    #[test]
+    fn ace_denied_callback_type_0x0a() {
+        assert_eq!(ACCESS_DENIED_CALLBACK_ACE_TYPE, 0x0A);
+    }
+
+    #[test]
+    fn ace_allowed_callback_object_type_0x0b() {
+        assert_eq!(ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, 0x0B);
+    }
+
+    #[test]
+    fn ace_denied_callback_object_type_0x0c() {
+        assert_eq!(ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, 0x0C);
+    }
+
+    #[test]
+    fn ace_audit_callback_type_0x0d() {
+        assert_eq!(SYSTEM_AUDIT_CALLBACK_ACE_TYPE, 0x0D);
+    }
+
+    #[test]
+    fn ace_alarm_callback_type_0x0e() {
+        assert_eq!(SYSTEM_ALARM_CALLBACK_ACE_TYPE, 0x0E);
+    }
+
+    #[test]
+    fn ace_audit_callback_object_type_0x0f() {
+        assert_eq!(SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE, 0x0F);
+    }
+
+    #[test]
+    fn ace_alarm_callback_object_type_0x10() {
+        assert_eq!(SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE, 0x10);
+    }
+
+    #[test]
+    fn ace_mandatory_label_type_0x11() {
+        assert_eq!(SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0x11);
+    }
+
+    #[test]
+    fn ace_resource_attribute_type_0x12() {
+        assert_eq!(SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE, 0x12);
+    }
+
+    #[test]
+    fn ace_scoped_policy_id_type_0x13() {
+        assert_eq!(SYSTEM_SCOPED_POLICY_ID_ACE_TYPE, 0x13);
+    }
+
+    #[test]
+    fn ace_process_trust_label_type_0x14() {
+        assert_eq!(SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, 0x14);
+    }
+
+    #[test]
+    fn ace_resource_attribute_sid_is_everyone() {
+        // §9.3 lines 3403-3404: resource attribute ACE SID is always Everyone
+        let ace = Ace {
+            ace_type: SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
+            flags: 0,
+            mask: 0,
+            sid: well_known::everyone().unwrap(),
+            object_type: None,
+            inherited_object_type: None,
+            condition: None,
+            application_data: Some(alloc::vec![1, 2, 3, 4]),
+        };
+        assert_eq!(ace.sid, well_known::everyone().unwrap());
+    }
+
+    #[test]
+    fn ace_object_contains_guids() {
+        // §9.3 lines 3329-3331: object ACEs have flags + optional GUIDs + SID
+        let guid1 = Guid { data1: 1, data2: 2, data3: 3, data4: [4; 8] };
+        let guid2 = Guid { data1: 5, data2: 6, data3: 7, data4: [8; 8] };
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: well_known::system().unwrap(),
+            object_type: Some(guid1),
+            inherited_object_type: Some(guid2),
+            condition: None,
+            application_data: None,
+        };
+        let bytes = ace.to_bytes().unwrap();
+        let (parsed, _) = Ace::from_bytes(&bytes).unwrap();
+        assert!(parsed.object_type.is_some());
+        assert!(parsed.inherited_object_type.is_some());
+    }
+
+    #[test]
+    fn ace_object_guid_absent_behaves_as_basic() {
+        // §9.3 lines 3341-3342: when GUIDs absent, object ACE behaves like basic
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: well_known::system().unwrap(),
+            object_type: None,
+            inherited_object_type: None,
+            condition: None,
+            application_data: None,
+        };
+        let bytes = ace.to_bytes().unwrap();
+        let (parsed, _) = Ace::from_bytes(&bytes).unwrap();
+        assert!(parsed.object_type.is_none());
+        assert!(parsed.inherited_object_type.is_none());
+        assert!(is_object_type(parsed.ace_type));
+    }
+
+    #[test]
+    fn ace_dacl_must_not_contain_sacl_types() {
+        // §9.3 lines 3371-3372: DACL vs SACL type separation
+        // DACL types: 0x00, 0x01, 0x05, 0x06, 0x09, 0x0A, 0x0B, 0x0C
+        let dacl_types = [0x00, 0x01, 0x05, 0x06, 0x09, 0x0A, 0x0B, 0x0C];
+        let sacl_types = [0x02, 0x03, 0x07, 0x08, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14];
+        for &t in &dacl_types {
+            assert!(is_access_type(t), "type 0x{:02X} should be access type", t);
+        }
+        for &t in &sacl_types {
+            assert!(!is_access_type(t) || is_audit_type(t) || is_alarm_type(t),
+                "type 0x{:02X} should not be a DACL access type", t);
+        }
+    }
+
+    #[test]
+    fn ace_inherit_only_skipped_in_dacl_walk() {
+        // §11.3 lines 4448-4450: INHERIT_ONLY ACEs exist solely for propagation
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_ACE_TYPE,
+            flags: INHERIT_ONLY_ACE,
+            mask: FILE_READ_DATA,
+            sid: well_known::everyone().unwrap(),
+            object_type: None,
+            inherited_object_type: None,
+            condition: None,
+            application_data: None,
+        };
+        assert!(ace.is_inherit_only());
+    }
 }

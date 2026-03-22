@@ -268,4 +268,143 @@ mod tests {
         assert_eq!(sid.sub_authorities.len(), 0);
         assert_eq!(sid.to_string(), "S-1-5");
     }
+
+    // --- §2.1 SID Format corpus tests ---
+
+    #[test]
+    fn sid_format_prefix_s1() {
+        // §2 line 130: SID string format starts with S-1-
+        let sid = Sid::new(5, &[18]).unwrap();
+        let s = sid.to_string();
+        assert!(s.starts_with("S-1-"), "SID string must start with S-1-, got: {}", s);
+    }
+
+    #[test]
+    fn sid_binary_compatible_with_windows() {
+        // §2 lines 135-136: binary representation is byte-for-byte compatible with Windows.
+        let sid = Sid::new(5, &[21, 1, 2, 1000]).unwrap();
+        let bytes = sid.to_bytes().unwrap();
+        assert_eq!(bytes[0], 1); // revision
+        assert_eq!(bytes[1], 4); // sub_authority_count
+        assert_eq!(&bytes[2..8], &[0, 0, 0, 0, 0, 5]); // authority big-endian
+        // Sub-authorities are little-endian u32
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 21);
+        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(bytes[20..24].try_into().unwrap()), 1000);
+    }
+
+    #[test]
+    fn sid_system_is_s1_5_18() {
+        // §2 line 131
+        let sid = Sid::new(5, &[18]).unwrap();
+        assert_eq!(sid.to_string(), "S-1-5-18");
+    }
+
+    #[test]
+    fn sid_administrators_is_s1_5_32_544() {
+        // §2 line 131
+        let sid = Sid::new(5, &[32, 544]).unwrap();
+        assert_eq!(sid.to_string(), "S-1-5-32-544");
+    }
+
+    #[test]
+    fn sid_domain_user_format() {
+        // §2 lines 131-132: S-1-5-21-{domain sub-authorities}-{RID}
+        let sid = Sid::new(5, &[21, 111, 222, 333, 1001]).unwrap();
+        let s = sid.to_string();
+        assert!(s.starts_with("S-1-5-21-"), "domain user SID: {}", s);
+        assert!(s.ends_with("-1001"), "must end with RID: {}", s);
+    }
+
+    #[test]
+    fn sid_logon_format_s1_5_5_x_y() {
+        // §2 line 242: LogonSession SID is S-1-5-5-{high}-{low}
+        let sid = Sid::new(5, &[5, 42, 99]).unwrap();
+        assert_eq!(sid.to_string(), "S-1-5-5-42-99");
+    }
+
+    #[test]
+    fn sid_creator_owner_is_s1_3_0() {
+        // §9.5 line 3584
+        let sid = Sid::new(3, &[0]).unwrap();
+        assert_eq!(sid.to_string(), "S-1-3-0");
+    }
+
+    #[test]
+    fn sid_creator_group_is_s1_3_1() {
+        // §9.5 line 3591
+        let sid = Sid::new(3, &[1]).unwrap();
+        assert_eq!(sid.to_string(), "S-1-3-1");
+    }
+
+    #[test]
+    fn sid_owner_rights_is_s1_3_4() {
+        // §2 line 151, §9.7 line 3778
+        let sid = Sid::new(3, &[4]).unwrap();
+        assert_eq!(sid.to_string(), "S-1-3-4");
+    }
+
+    #[test]
+    fn sid_everyone_is_s1_1_0() {
+        // §9.3 line 3404
+        let sid = Sid::new(1, &[0]).unwrap();
+        assert_eq!(sid.to_string(), "S-1-1-0");
+    }
+
+    #[test]
+    fn sid_integrity_medium_is_s1_16_8192() {
+        // §9.3 line 3389
+        let sid = Sid::new(16, &[8192]).unwrap();
+        assert_eq!(sid.to_string(), "S-1-16-8192");
+    }
+
+    #[test]
+    fn sid_integrity_high_is_s1_16_12288() {
+        // §9.3 line 3389
+        let sid = Sid::new(16, &[12288]).unwrap();
+        assert_eq!(sid.to_string(), "S-1-16-12288");
+    }
+
+    #[test]
+    fn sid_integrity_system_is_s1_16_16384() {
+        // §11 line 11683
+        let sid = Sid::new(16, &[16384]).unwrap();
+        assert_eq!(sid.to_string(), "S-1-16-16384");
+    }
+
+    #[test]
+    fn sid_comparison_is_byte_equality() {
+        // §2 line 136: SID comparison is byte-for-byte equality
+        let a = Sid::new(5, &[21, 100, 200, 1001]).unwrap();
+        let b = Sid::new(5, &[21, 100, 200, 1001]).unwrap();
+        let c = Sid::new(5, &[21, 100, 200, 1002]).unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.to_bytes().unwrap(), b.to_bytes().unwrap());
+        assert_ne!(a.to_bytes().unwrap(), c.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn sid_parse_roundtrip() {
+        // §2 lines 130-136: string->binary->string roundtrip
+        let sids = [
+            "S-1-5-18",
+            "S-1-5-32-544",
+            "S-1-1-0",
+            "S-1-16-8192",
+            "S-1-5-21-1234567890-987654321-42-1001",
+        ];
+        for expected in &sids {
+            let parts: alloc::vec::Vec<&str> = expected.split('-').collect();
+            let authority: u64 = parts[2].parse().unwrap();
+            let sub_auths: alloc::vec::Vec<u32> =
+                parts[3..].iter().map(|s| s.parse().unwrap()).collect();
+            let sid = Sid::new(authority, &sub_auths).unwrap();
+            assert_eq!(sid.to_string(), *expected);
+            let bytes = sid.to_bytes().unwrap();
+            let reparsed = Sid::from_bytes(&bytes).unwrap();
+            assert_eq!(reparsed.to_string(), *expected);
+        }
+    }
 }

@@ -392,4 +392,140 @@ mod tests {
         let parsed = Acl::from_bytes(&bytes).unwrap().unwrap();
         assert_eq!(parsed.revision, ACL_REVISION_DS);
     }
+
+    // --- §9.9 ACL Revision corpus tests ---
+
+    #[test]
+    fn acl_revision_0x02_basic_types() {
+        // §9.9 lines 3846-3849
+        assert_eq!(ACL_REVISION, 0x02);
+    }
+
+    #[test]
+    fn acl_revision_ds_0x04_permits_object_and_callback() {
+        // §9.9 lines 3850-3853
+        assert_eq!(ACL_REVISION_DS, 0x04);
+    }
+
+    #[test]
+    fn kacs_accepts_both_revisions() {
+        // §9.9 line 3855
+        let basic = Acl::new(ACL_REVISION).to_bytes().unwrap();
+        let ds = Acl::new(ACL_REVISION_DS).to_bytes().unwrap();
+        assert!(Acl::from_bytes(&basic).unwrap().is_some());
+        assert!(Acl::from_bytes(&ds).unwrap().is_some());
+    }
+
+    #[test]
+    fn new_acl_minimum_revision() {
+        // §9.9 lines 3855-3858: auto-select minimum required revision
+        // Basic ACEs only → ACL_REVISION
+        let basic_aces = alloc::vec![
+            allow_ace(&well_known::everyone().unwrap(), FILE_READ_DATA),
+        ];
+        let acl = Acl::with_aces(basic_aces);
+        assert_eq!(acl.revision, ACL_REVISION);
+    }
+
+    #[test]
+    fn object_or_callback_aces_get_revision_ds() {
+        // §9.9 lines 3857-3858
+        let obj_ace = Ace {
+            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: well_known::everyone().unwrap(),
+            object_type: None,
+            inherited_object_type: None,
+            condition: None,
+            application_data: None,
+        };
+        let acl = Acl::with_aces(alloc::vec![obj_ace]);
+        assert_eq!(acl.revision, ACL_REVISION_DS);
+    }
+
+    #[test]
+    fn callback_aces_get_revision_ds() {
+        let cb_ace = Ace {
+            ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            flags: 0,
+            mask: FILE_READ_DATA,
+            sid: well_known::everyone().unwrap(),
+            object_type: None,
+            inherited_object_type: None,
+            condition: Some(alloc::vec![0x61, 0x72, 0x74, 0x78, 0x00, 0x00, 0x00, 0x00]),
+            application_data: None,
+        };
+        let acl = Acl::with_aces(alloc::vec![cb_ace]);
+        assert_eq!(acl.revision, ACL_REVISION_DS);
+    }
+
+    // --- §9.5 Inheritance flag corpus tests ---
+
+    #[test]
+    fn object_inherit_flag_0x01() {
+        assert_eq!(OBJECT_INHERIT_ACE, 0x01);
+    }
+
+    #[test]
+    fn container_inherit_flag_0x02() {
+        assert_eq!(CONTAINER_INHERIT_ACE, 0x02);
+    }
+
+    #[test]
+    fn no_propagate_inherit_flag_0x04() {
+        assert_eq!(NO_PROPAGATE_INHERIT_ACE, 0x04);
+    }
+
+    #[test]
+    fn inherit_only_flag_0x08() {
+        assert_eq!(INHERIT_ONLY_ACE, 0x08);
+    }
+
+    #[test]
+    fn inherited_ace_flag_0x10() {
+        assert_eq!(INHERITED_ACE, 0x10);
+    }
+
+    #[test]
+    fn audit_ace_successful_access_flag_0x40() {
+        assert_eq!(SUCCESSFUL_ACCESS_ACE_FLAG, 0x40);
+    }
+
+    #[test]
+    fn audit_ace_failed_access_flag_0x80() {
+        assert_eq!(FAILED_ACCESS_ACE_FLAG, 0x80);
+    }
+
+    // --- §9.4 ACE Ordering corpus tests ---
+
+    #[test]
+    fn non_canonical_dacl_accepted() {
+        // §9.4 lines 3481-3482: KACS does not reject non-canonical DACLs
+        // Allow before deny (non-canonical) should parse fine
+        let acl = Acl {
+            revision: ACL_REVISION,
+            aces: alloc::vec![
+                allow_ace(&well_known::everyone().unwrap(), FILE_READ_DATA),
+                deny_ace(&well_known::guests().unwrap(), FILE_WRITE_DATA),
+            ],
+        };
+        let bytes = acl.to_bytes().unwrap();
+        let parsed = Acl::from_bytes(&bytes).unwrap().unwrap();
+        assert_eq!(parsed.aces.len(), 2);
+        assert_eq!(parsed.aces[0].ace_type, ACCESS_ALLOWED_ACE_TYPE);
+        assert_eq!(parsed.aces[1].ace_type, ACCESS_DENIED_ACE_TYPE);
+    }
+
+    // --- §9.1 SD structure corpus tests (via ACL) ---
+
+    #[test]
+    fn ace_size_includes_header() {
+        // §9.3 line 3309: AceSize is total including the 4-byte header
+        let ace = allow_ace(&well_known::system().unwrap(), FILE_READ_DATA);
+        let bytes = ace.to_bytes().unwrap();
+        let size = u16::from_le_bytes([bytes[2], bytes[3]]) as usize;
+        assert_eq!(size, bytes.len());
+        assert!(size >= 4, "AceSize must include at least the 4-byte header");
+    }
 }

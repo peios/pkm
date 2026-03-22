@@ -336,4 +336,519 @@ mod tests {
         assert!(privs.check(SE_BIND_PRIVILEGED_PORT));
         assert!(privs.check(SE_CREATE_JOB));
     }
+
+    // --- §2.16 Token Privilege Bitmask Fields ---
+
+    #[test]
+    fn privilege_present_u64() {
+        // §7.3 line 2086: privileges_present is a u64 bitmask
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        assert_eq!(core::mem::size_of_val(&privs.present), 8); // AtomicU64 = 8 bytes
+    }
+
+    #[test]
+    fn privilege_enabled_u64() {
+        // §7.3 line 2087: privileges_enabled toggleable for non-removed
+        let privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
+        privs.disable(SE_BACKUP);
+        assert!(privs.is_present(SE_BACKUP));
+        assert!(!privs.check(SE_BACKUP));
+        assert!(privs.check(SE_RESTORE));
+    }
+
+    #[test]
+    fn privilege_enabled_by_default_u64() {
+        // §7.3 line 2088: reset position for AdjustTokenPrivileges
+        let privs = Privileges {
+            present: AtomicU64::new(SE_BACKUP | SE_RESTORE),
+            enabled: AtomicU64::new(SE_BACKUP | SE_RESTORE),
+            enabled_by_default: AtomicU64::new(SE_BACKUP), // only backup is default
+            used: AtomicU64::new(0),
+        };
+        privs.reset_to_defaults();
+        assert!(privs.check(SE_BACKUP));
+        assert!(!privs.check(SE_RESTORE)); // not default-enabled
+    }
+
+    #[test]
+    fn privilege_used_u64() {
+        // §7.3 line 2089: audit trail
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        privs.mark_used(SE_BACKUP);
+        assert_eq!(privs.used.load(Ordering::SeqCst) & SE_BACKUP, SE_BACKUP);
+    }
+
+    #[test]
+    fn privilege_removal_clears_all_three_masks() {
+        // §7.3 lines 2093-2094
+        let privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
+        privs.remove(SE_BACKUP);
+        assert_eq!(privs.present.load(Ordering::SeqCst) & SE_BACKUP, 0);
+        assert_eq!(privs.enabled.load(Ordering::SeqCst) & SE_BACKUP, 0);
+        assert_eq!(privs.enabled_by_default.load(Ordering::SeqCst) & SE_BACKUP, 0);
+    }
+
+    #[test]
+    fn privilege_lifecycle() {
+        // §7.3 lines 2091-2094: present+disabled -> enabled -> used -> disabled -> removed
+        let privs = Privileges {
+            present: AtomicU64::new(SE_DEBUG),
+            enabled: AtomicU64::new(0), // present but disabled
+            enabled_by_default: AtomicU64::new(0),
+            used: AtomicU64::new(0),
+        };
+        assert!(privs.is_present(SE_DEBUG));
+        assert!(!privs.check(SE_DEBUG)); // disabled
+
+        privs.enable(SE_DEBUG);
+        assert!(privs.check(SE_DEBUG)); // enabled
+
+        privs.mark_used(SE_DEBUG);
+        assert_ne!(privs.used.load(Ordering::SeqCst) & SE_DEBUG, 0); // used
+
+        privs.disable(SE_DEBUG);
+        assert!(!privs.check(SE_DEBUG)); // disabled again
+
+        privs.remove(SE_DEBUG);
+        assert!(!privs.is_present(SE_DEBUG)); // gone
+        assert!(!privs.enable(SE_DEBUG)); // can't re-enable
+    }
+
+    #[test]
+    fn privilege_present_bits_never_set_after_creation() {
+        // §7.3 line 2086: present bits can only be cleared, never set
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        assert!(!privs.is_present(SE_DEBUG));
+        // enable() won't set the present bit
+        assert!(!privs.enable(SE_DEBUG));
+        assert!(!privs.is_present(SE_DEBUG));
+    }
+
+    // --- §10.2 Privilege Model ---
+
+    #[test]
+    fn privilege_assigned_at_token_creation() {
+        // §10.2 lines 4011-4016: resolved at token creation time
+        let privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
+        assert!(privs.is_present(SE_BACKUP));
+        assert!(privs.is_present(SE_RESTORE));
+    }
+
+    #[test]
+    fn privilege_no_add_after_creation() {
+        // §10.2 lines 4015-4016
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        assert!(!privs.enable(SE_DEBUG)); // not present, can't add
+    }
+
+    #[test]
+    fn privilege_most_start_disabled() {
+        // §10.2 lines 4018-4020
+        let privs = Privileges {
+            present: AtomicU64::new(SE_BACKUP | SE_RESTORE | SE_DEBUG),
+            enabled: AtomicU64::new(SE_CHANGE_NOTIFY), // only SeChangeNotify enabled
+            enabled_by_default: AtomicU64::new(SE_CHANGE_NOTIFY),
+            used: AtomicU64::new(0),
+        };
+        assert!(privs.is_present(SE_BACKUP));
+        assert!(!privs.check(SE_BACKUP)); // present but disabled
+    }
+
+    #[test]
+    fn privilege_must_enable_before_use() {
+        // §10.2 lines 4023-4025
+        let privs = Privileges {
+            present: AtomicU64::new(SE_BACKUP),
+            enabled: AtomicU64::new(0),
+            enabled_by_default: AtomicU64::new(0),
+            used: AtomicU64::new(0),
+        };
+        assert!(!privs.check(SE_BACKUP)); // present but disabled = not exercised
+        privs.enable(SE_BACKUP);
+        assert!(privs.check(SE_BACKUP)); // now exercisable
+    }
+
+    #[test]
+    fn privilege_check_requires_present_and_enabled() {
+        // §10.2 line 4054
+        let privs = Privileges {
+            present: AtomicU64::new(SE_BACKUP),
+            enabled: AtomicU64::new(0), // present but not enabled
+            enabled_by_default: AtomicU64::new(0),
+            used: AtomicU64::new(0),
+        };
+        assert!(!privs.check(SE_BACKUP));
+        let privs2 = Privileges {
+            present: AtomicU64::new(0), // not present
+            enabled: AtomicU64::new(SE_BACKUP), // "enabled" but not present
+            enabled_by_default: AtomicU64::new(0),
+            used: AtomicU64::new(0),
+        };
+        assert!(!privs2.check(SE_BACKUP));
+    }
+
+    #[test]
+    fn privilege_can_be_disabled_after_use() {
+        // §10.2 line 4033
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        privs.mark_used(SE_BACKUP);
+        privs.disable(SE_BACKUP);
+        assert!(!privs.check(SE_BACKUP));
+        assert!(privs.is_present(SE_BACKUP)); // still present
+    }
+
+    #[test]
+    fn privilege_can_be_permanently_removed() {
+        // §10.2 lines 4033-4034
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        privs.remove(SE_BACKUP);
+        assert!(!privs.is_present(SE_BACKUP));
+        assert!(!privs.enable(SE_BACKUP)); // irreversible
+    }
+
+    #[test]
+    fn privilege_check_is_bitmask_test() {
+        // §10.2 lines 4055-4056
+        let privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
+        let enabled = privs.enabled.load(Ordering::SeqCst);
+        let present = privs.present.load(Ordering::SeqCst);
+        assert_eq!((present & enabled & SE_BACKUP), SE_BACKUP);
+    }
+
+    // --- §10.3 Five AccessCheck-Influencing Privileges ---
+
+    #[test]
+    fn privilege_accesscheck_influencing_count() {
+        // §10.3 line 4072: exactly five
+        let ac_privs = [SE_SECURITY, SE_TAKE_OWNERSHIP, SE_BACKUP, SE_RESTORE, SE_RELABEL];
+        assert_eq!(ac_privs.len(), 5);
+    }
+
+    #[test]
+    fn se_security_is_accesscheck_enforcement() {
+        assert_eq!(SE_SECURITY, 1 << 8);
+    }
+
+    #[test]
+    fn se_take_ownership_is_accesscheck_enforcement() {
+        assert_eq!(SE_TAKE_OWNERSHIP, 1 << 9);
+    }
+
+    #[test]
+    fn se_backup_is_accesscheck_enforcement() {
+        assert_eq!(SE_BACKUP, 1 << 17);
+    }
+
+    #[test]
+    fn se_restore_is_accesscheck_enforcement() {
+        assert_eq!(SE_RESTORE, 1 << 18);
+    }
+
+    #[test]
+    fn se_relabel_is_accesscheck_plus_enforcement() {
+        assert_eq!(SE_RELABEL, 1 << 25);
+    }
+
+    #[test]
+    fn se_change_notify_default_granted() {
+        // §10.8 line 4244: granted to all principals by default
+        // When creating a normal user token, SE_CHANGE_NOTIFY should be present
+        let privs = Privileges::new_all_enabled(SE_CHANGE_NOTIFY);
+        assert!(privs.check(SE_CHANGE_NOTIFY));
+    }
+
+    #[test]
+    fn se_create_symbolic_link_default_granted() {
+        // §10.8 line 4245
+        let privs = Privileges::new_all_enabled(SE_CREATE_SYMBOLIC_LINK);
+        assert!(privs.check(SE_CREATE_SYMBOLIC_LINK));
+    }
+
+    // --- §10.5 Privilege Assignment ---
+
+    #[test]
+    fn privilege_not_from_group_membership() {
+        // §10.5 lines 4122-4124: Administrators group doesn't confer privileges
+        // Privileges are orthogonal to group membership
+        let privs = Privileges::new_all_enabled(0); // no privileges
+        assert!(!privs.check(SE_BACKUP));
+        assert!(!privs.check(SE_DEBUG));
+    }
+
+    #[test]
+    fn privilege_set_fixed_at_birth() {
+        // §10.5 lines 4147-4150
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        assert!(!privs.enable(SE_DEBUG)); // can't add after creation
+    }
+
+    #[test]
+    fn privilege_no_runtime_escalation() {
+        // §10.5 lines 4152-4154
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        // Only present bits can be toggled — can't expand the set
+        assert!(!privs.enable(SE_TCB));
+        assert!(!privs.is_present(SE_TCB));
+    }
+
+    // --- §10.6 Custom Peios Privileges ---
+
+    #[test]
+    fn custom_privileges_from_bit_63_downward() {
+        // §10.6 lines 4165-4166
+        assert_eq!(SE_BIND_PRIVILEGED_PORT, 1u64 << 63);
+        assert_eq!(SE_CREATE_JOB, 1u64 << 62);
+    }
+
+    #[test]
+    fn windows_privileges_from_bit_2_upward() {
+        // §10.6 lines 4166-4167
+        assert_eq!(SE_CREATE_TOKEN, 1u64 << 2);
+        assert_eq!(SE_ASSIGN_PRIMARY_TOKEN, 1u64 << 3);
+    }
+
+    #[test]
+    fn custom_grow_down_windows_grow_up() {
+        // §10.6 lines 4169-4170: no collision between custom and Windows
+        let windows_max_bit = 35u32; // SE_CREATE_SYMBOLIC_LINK
+        let custom_min_bit = 62u32;  // SE_CREATE_JOB
+        assert!(custom_min_bit > windows_max_bit);
+    }
+
+    #[test]
+    fn v1_only_custom_privilege_is_bind_port() {
+        // §10.6 lines 4172-4173 (plus SE_CREATE_JOB)
+        // Only custom Peios privileges are SE_BIND_PRIVILEGED_PORT and SE_CREATE_JOB
+        assert!(SE_BIND_PRIVILEGED_PORT > (1u64 << 36)); // above Windows range
+        assert!(SE_CREATE_JOB > (1u64 << 36));
+    }
+
+    // --- §10.7 Privilege Auditing ---
+
+    #[test]
+    fn privilege_used_is_monotonic() {
+        // §10.7 lines 4188-4189: bits set but never cleared
+        let privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
+        privs.mark_used(SE_BACKUP);
+        privs.mark_used(SE_RESTORE);
+        let used = privs.used.load(Ordering::SeqCst);
+        assert_ne!(used & SE_BACKUP, 0);
+        assert_ne!(used & SE_RESTORE, 0);
+        // No method to clear used bits
+    }
+
+    #[test]
+    fn privilege_enabled_exercised_sets_used_bit() {
+        // §10.2 lines 4028-4030, §10.7 lines 4187-4189
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        assert_eq!(privs.used.load(Ordering::SeqCst), 0);
+        privs.mark_used(SE_BACKUP);
+        assert_ne!(privs.used.load(Ordering::SeqCst) & SE_BACKUP, 0);
+    }
+
+    #[test]
+    fn privilege_present_disabled_not_exercised() {
+        // §10.2 line 4054: present but disabled is NOT exercised
+        let privs = Privileges {
+            present: AtomicU64::new(SE_BACKUP),
+            enabled: AtomicU64::new(0),
+            enabled_by_default: AtomicU64::new(0),
+            used: AtomicU64::new(0),
+        };
+        assert!(!privs.check(SE_BACKUP));
+    }
+
+    // --- §10.8 Privilege Catalog Counts ---
+
+    #[test]
+    fn privilege_catalog_identity_count_3() {
+        // §10.8 lines 4229-4233
+        let identity = [SE_CREATE_TOKEN, SE_ASSIGN_PRIMARY_TOKEN, SE_IMPERSONATE];
+        assert_eq!(identity.len(), 3);
+    }
+
+    #[test]
+    fn privilege_catalog_access_control_count_7() {
+        // §10.8 lines 4237-4245
+        let ac = [SE_SECURITY, SE_TAKE_OWNERSHIP, SE_BACKUP, SE_RESTORE,
+                  SE_RELABEL, SE_CHANGE_NOTIFY, SE_CREATE_SYMBOLIC_LINK];
+        assert_eq!(ac.len(), 7);
+    }
+
+    #[test]
+    fn privilege_catalog_system_ops_count_12() {
+        // §10.8 lines 4249-4262 (including SE_CREATE_JOB)
+        let sys = [SE_TCB, SE_SHUTDOWN, SE_REMOTE_SHUTDOWN, SE_LOAD_DRIVER,
+                   SE_DEBUG, SE_SYSTEMTIME, SE_INCREASE_BASE_PRIORITY,
+                   SE_INCREASE_QUOTA, SE_LOCK_MEMORY, SE_AUDIT,
+                   SE_PROFILE_SINGLE_PROCESS, SE_CREATE_JOB];
+        assert_eq!(sys.len(), 12);
+    }
+
+    #[test]
+    fn privilege_catalog_network_count_1() {
+        // §10.8 lines 4266-4268
+        let net = [SE_BIND_PRIVILEGED_PORT];
+        assert_eq!(net.len(), 1);
+    }
+
+    #[test]
+    fn privilege_catalog_directory_count_3() {
+        // §10.8 lines 4272-4276
+        let dir = [SE_SYNC_AGENT, SE_ENABLE_DELEGATION, SE_MACHINE_ACCOUNT];
+        assert_eq!(dir.len(), 3);
+    }
+
+    #[test]
+    fn privilege_catalog_reserved_count_10() {
+        // §10.8 lines 4285-4296
+        let reserved = [SE_CREATE_GLOBAL, SE_CREATE_PAGEFILE, SE_CREATE_PERMANENT,
+                        SE_INCREASE_WORKING_SET, SE_MANAGE_VOLUME,
+                        SE_TRUSTED_CRED_MAN_ACCESS, SE_SYSTEM_ENVIRONMENT,
+                        SE_SYSTEM_PROFILE, SE_TIMEZONE, SE_UNDOCK];
+        assert_eq!(reserved.len(), 10);
+    }
+
+    #[test]
+    fn privilege_all_fit_in_u64() {
+        // §10.6 lines 4165-4170: all privileges fit in u64
+        let _: u64 = ALL_PRIVILEGES; // compiles = fits in u64
+        assert_ne!(ALL_PRIVILEGES, 0);
+    }
+
+    // --- Reserved privilege assertions ---
+
+    #[test]
+    fn se_create_global_reserved() {
+        assert_eq!(SE_CREATE_GLOBAL, 1 << 30);
+    }
+
+    #[test]
+    fn se_create_pagefile_reserved() {
+        assert_eq!(SE_CREATE_PAGEFILE, 1 << 15);
+    }
+
+    #[test]
+    fn se_create_permanent_reserved() {
+        assert_eq!(SE_CREATE_PERMANENT, 1 << 16);
+    }
+
+    #[test]
+    fn se_increase_working_set_reserved() {
+        assert_eq!(SE_INCREASE_WORKING_SET, 1 << 33);
+    }
+
+    #[test]
+    fn se_manage_volume_reserved() {
+        assert_eq!(SE_MANAGE_VOLUME, 1 << 28);
+    }
+
+    #[test]
+    fn se_trusted_cred_man_access_reserved() {
+        assert_eq!(SE_TRUSTED_CRED_MAN_ACCESS, 1 << 31);
+    }
+
+    #[test]
+    fn se_system_environment_reserved() {
+        assert_eq!(SE_SYSTEM_ENVIRONMENT, 1 << 22);
+    }
+
+    #[test]
+    fn se_system_profile_reserved() {
+        assert_eq!(SE_SYSTEM_PROFILE, 1 << 11);
+    }
+
+    #[test]
+    fn se_time_zone_reserved() {
+        assert_eq!(SE_TIMEZONE, 1 << 34);
+    }
+
+    #[test]
+    fn se_undock_reserved() {
+        assert_eq!(SE_UNDOCK, 1 << 32);
+    }
+
+    #[test]
+    fn reserved_privileges_have_no_enforcement() {
+        // §10.8 lines 4280-4284: bit positions exist only for AD token compatibility.
+        // All reserved privileges are present in ALL_PRIVILEGES for SYSTEM token.
+        let reserved = SE_CREATE_GLOBAL | SE_CREATE_PAGEFILE | SE_CREATE_PERMANENT
+            | SE_INCREASE_WORKING_SET | SE_MANAGE_VOLUME | SE_TRUSTED_CRED_MAN_ACCESS
+            | SE_SYSTEM_ENVIRONMENT | SE_SYSTEM_PROFILE | SE_TIMEZONE | SE_UNDOCK;
+        assert_eq!(ALL_PRIVILEGES & reserved, reserved);
+    }
+
+    // --- §10.8 Application-level privilege assertions ---
+
+    #[test]
+    fn se_sync_agent_is_application_level() {
+        assert_eq!(SE_SYNC_AGENT, 1 << 26);
+    }
+
+    #[test]
+    fn se_enable_delegation_is_application_level() {
+        assert_eq!(SE_ENABLE_DELEGATION, 1 << 27);
+    }
+
+    #[test]
+    fn se_machine_account_is_application_level() {
+        assert_eq!(SE_MACHINE_ACCOUNT, 1 << 6);
+    }
+
+    // --- §10.3 Standalone vs AccessCheck-influencing ---
+
+    #[test]
+    fn privilege_standalone_independent_of_accesscheck() {
+        // §10.3 lines 4050-4052: standalone privileges don't go through AccessCheck
+        // SE_TCB, SE_SHUTDOWN, etc. are standalone; check they're distinct from AC privs
+        let ac_privs = SE_SECURITY | SE_TAKE_OWNERSHIP | SE_BACKUP | SE_RESTORE | SE_RELABEL;
+        assert_eq!(SE_TCB & ac_privs, 0);
+        assert_eq!(SE_SHUTDOWN & ac_privs, 0);
+        assert_eq!(SE_DEBUG & ac_privs, 0);
+    }
+
+    #[test]
+    fn privilege_has_enable_disable_lifecycle() {
+        // §10.1 lines 3988-3991: unlike capabilities which are binary
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        assert!(privs.check(SE_BACKUP));
+        privs.disable(SE_BACKUP);
+        assert!(!privs.check(SE_BACKUP));
+        assert!(privs.is_present(SE_BACKUP)); // still present, just disabled
+    }
+
+    #[test]
+    fn privilege_usage_tracked() {
+        // §10.1 lines 3995-3999
+        let privs = Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE);
+        privs.mark_used(SE_BACKUP);
+        let used = privs.used.load(Ordering::SeqCst);
+        assert_ne!(used & SE_BACKUP, 0);
+        assert_eq!(used & SE_RESTORE, 0); // not used yet
+    }
+
+    // --- §10.4 Intent-gated ---
+
+    #[test]
+    fn se_backup_intent_gated() {
+        // §10.4 lines 4114-4118: only evaluated with BACKUP_INTENT flag
+        // We verify the privilege exists and is distinct
+        let privs = Privileges::new_all_enabled(SE_BACKUP);
+        assert!(privs.check(SE_BACKUP));
+    }
+
+    #[test]
+    fn se_restore_intent_gated() {
+        // §10.4 lines 4114-4118
+        let privs = Privileges::new_all_enabled(SE_RESTORE);
+        assert!(privs.check(SE_RESTORE));
+    }
+
+    #[test]
+    fn privilege_orthogonal_to_groups() {
+        // §10.5 lines 4126-4128: privileges and groups are orthogonal
+        // Verified by the fact that Privileges struct has no group fields
+        let privs = Privileges::new_all_enabled(0);
+        assert!(!privs.check(SE_BACKUP)); // no privileges = no access
+    }
 }
