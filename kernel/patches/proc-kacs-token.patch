@@ -9,7 +9,7 @@ tables, backed by kacs_proc_token_show() in the KACS LSM.
 @@ -98,2 +98,8 @@
  #include <linux/security.h>
 +
-+#ifdef CONFIG_SECURITY_KACS
++#ifdef CONFIG_SECURITY_PKM
 +extern int kacs_proc_token_show(struct seq_file *, struct pid_namespace *,
 +				struct pid *, struct task_struct *);
 +#endif
@@ -17,13 +17,13 @@ tables, backed by kacs_proc_token_show() in the KACS LSM.
  #include <linux/string.h>
 @@ -3300,2 +3306,5 @@
  static const struct pid_entry tgid_base_stuff[] = {
-+#ifdef CONFIG_SECURITY_KACS
++#ifdef CONFIG_SECURITY_PKM
 +	ONE("token", S_IRUGO, kacs_proc_token_show),
 +#endif
  	DIR("task",       S_IRUGO|S_IXUGO, proc_task_inode_operations, proc_task_operations),
 @@ -3650,2 +3660,5 @@
  static const struct pid_entry tid_base_stuff[] = {
-+#ifdef CONFIG_SECURITY_KACS
++#ifdef CONFIG_SECURITY_PKM
 +	ONE("token", S_IRUGO, kacs_proc_token_show),
 +#endif
  	DIR("fd",         S_IRUSR|S_IXUSR, proc_fd_inode_operations, proc_fd_operations),
