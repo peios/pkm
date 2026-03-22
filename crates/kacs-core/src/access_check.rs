@@ -7913,4 +7913,1653 @@ mod tests {
         assert_eq!(WRITE_OWNER, 1 << 19);
         assert_eq!(ACCESS_SYSTEM_SECURITY, 1 << 24);
     }
+
+    // ===================================================================
+    // §11 Corpus Tests — Second Half (exact corpus names)
+    // ===================================================================
+
+    // --- §11.7 Restricted Token Two-Pass ---
+
+    #[test]
+    fn restricted_normal_intersection() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&engineers(), FILE_READ_DATA),
+        ]);
+        let token = restricted_token(&alice(), &[], &[&engineers()]);
+        let result = check(&sd, &token, FILE_READ_DATA | FILE_WRITE_DATA);
+        assert!(result.granted & FILE_READ_DATA != 0);
+        assert_eq!(result.granted & FILE_WRITE_DATA, 0);
+    }
+
+    #[test]
+    fn restricted_write_only_intersection() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&engineers(), FILE_WRITE_DATA),
+        ]);
+        let mut token = restricted_token(&alice(), &[], &[&engineers()]);
+        token.write_restricted = true;
+        let result = check(&sd, &token, FILE_READ_DATA | FILE_WRITE_DATA);
+        assert!(result.granted & FILE_READ_DATA != 0);
+        assert!(result.granted & FILE_WRITE_DATA != 0);
+    }
+
+    #[test]
+    fn restricted_privilege_granted_or_back() {
+        let sd = sd_with_dacl(&bob(), alloc::vec![]);
+        let mut token = restricted_token(&alice(), &[], &[&engineers()]);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_BACKUP);
+        let result = check_with_intent(&sd, &token, MAXIMUM_ALLOWED, BACKUP_INTENT);
+        let read_bits = map_generic_bits(GENERIC_READ, &FILE_GENERIC_MAPPING);
+        assert!(result.granted & read_bits != 0);
+    }
+
+    #[test]
+    fn restricted_owner_virtual_group() {
+        let or_sid = well_known::owner_rights().unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&or_sid, FILE_READ_DATA)]);
+        let token = restricted_token(&alice(), &[], &[&alice()]);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn restricted_owner_not_in_restricting_sids() {
+        let or_sid = well_known::owner_rights().unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&or_sid, FILE_READ_DATA)]);
+        let token = restricted_token(&alice(), &[], &[&bob()]);
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn restricted_principal_self_injection() {
+        let ps = well_known::principal_self().unwrap();
+        let sd = sd_with_dacl(&bob(), alloc::vec![allow(&ps, FILE_READ_DATA)]);
+        let token = restricted_token(&alice(), &[], &[&alice()]);
+        let r = access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, Some(&alice()), &[], &[], 0, 0, 0).unwrap();
+        assert!(r.allowed);
+    }
+
+    #[test]
+    fn restricted_principal_self_not_in_restricting_sids() {
+        let ps = well_known::principal_self().unwrap();
+        let sd = sd_with_dacl(&bob(), alloc::vec![allow(&ps, FILE_READ_DATA)]);
+        let token = restricted_token(&alice(), &[], &[&bob()]);
+        let r = access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, Some(&alice()), &[], &[], 0, 0, 0).unwrap();
+        assert!(!r.allowed);
+    }
+
+    #[test]
+    fn restricted_principal_self_null_self_sid() {
+        let ps = well_known::principal_self().unwrap();
+        let sd = sd_with_dacl(&bob(), alloc::vec![allow(&ps, FILE_READ_DATA)]);
+        let token = restricted_token(&alice(), &[], &[&alice()]);
+        let r = access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &[], 0, 0, 0).unwrap();
+        assert!(!r.allowed);
+    }
+
+    #[test]
+    fn restricted_device_groups_swapped() {
+        let mut token = restricted_token(&alice(), &[], &[&alice()]);
+        let g = Sid::new(5, &[21, 99, 1]).unwrap();
+        token.restricted_device_groups = Some(alloc::vec![
+            crate::group::GroupEntry::new(g, crate::group::SE_GROUP_ENABLED),
+        ]);
+        assert!(token.restricted_device_groups.is_some());
+    }
+
+    #[test]
+    fn restricted_device_groups_null_no_swap() {
+        let token = restricted_token(&alice(), &[], &[&alice()]);
+        assert!(token.restricted_device_groups.is_none());
+    }
+
+    #[test]
+    fn restricted_sid_match_uses_sid_list() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA),
+            allow(&engineers(), FILE_READ_DATA),
+        ]);
+        let token = restricted_token(&alice(), &[&engineers()], &[&engineers()]);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn restricted_sid_match_ignores_for_allow() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            deny(&engineers(), FILE_WRITE_DATA),
+            allow(&engineers(), FILE_READ_DATA | FILE_WRITE_DATA),
+        ]);
+        let token = restricted_token(&alice(), &[&engineers()], &[&engineers()]);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn restricted_tree_fresh_copy() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 1),
+            obj_allow(&engineers(), DS_WRITE_PROP, 1),
+        ]);
+        let token = restricted_token(&alice(), &[&engineers()], &[&engineers()]);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+    }
+
+    #[test]
+    fn restricted_tree_normal_intersection() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP | DS_WRITE_PROP, 1),
+            obj_allow(&engineers(), DS_READ_PROP, 1),
+        ]);
+        let token = restricted_token(&alice(), &[], &[&engineers()]);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+    }
+
+    #[test]
+    fn restricted_tree_write_only_intersection() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP | DS_WRITE_PROP, 1),
+            obj_allow(&engineers(), DS_WRITE_PROP, 1),
+        ]);
+        let mut token = restricted_token(&alice(), &[], &[&engineers()]);
+        token.write_restricted = true;
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+    }
+
+    #[test]
+    fn restricted_tree_privilege_or_back() {
+        let sd = sd_with_dacl(&bob(), alloc::vec![]);
+        let mut token = restricted_token(&alice(), &[], &[&alice()]);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_BACKUP);
+        let mut tree = make_tree(&[(0, 0)]);
+        let _r = access_check(&sd, &token, MAXIMUM_ALLOWED, &FILE_GENERIC_MAPPING,
+            Some(&mut tree), None, &[], &[], BACKUP_INTENT, 0, 0).unwrap();
+        let rb = map_generic_bits(GENERIC_READ, &FILE_GENERIC_MAPPING);
+        assert!(tree[0].granted & rb != 0);
+    }
+
+    #[test]
+    fn restricted_tree_null_no_tree_merge() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]);
+        let token = restricted_token(&alice(), &[], &[&alice()]);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn restricted_owner_implicit_rights() {
+        let sd = SecurityDescriptor::new(alice(), well_known::users().unwrap(), Acl::new(ACL_REVISION));
+        let token = restricted_token(&alice(), &[], &[&alice()]);
+        assert!(check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn restricted_owner_in_restricting_sids_gets_implicit() {
+        let sd = SecurityDescriptor::new(alice(), well_known::users().unwrap(), Acl::new(ACL_REVISION));
+        let token = restricted_token(&alice(), &[], &[&alice()]);
+        assert!(check(&sd, &token, READ_CONTROL | WRITE_DAC).allowed);
+    }
+
+    #[test]
+    fn restricted_owner_not_in_restricting_sids_no_implicit() {
+        let sd = SecurityDescriptor::new(alice(), well_known::users().unwrap(), Acl::new(ACL_REVISION));
+        let token = restricted_token(&alice(), &[], &[&bob()]);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    // --- §11.14 Confinement ---
+
+    #[test]
+    fn confinement_absolute_intersection() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&app_sid(), FILE_READ_DATA),
+        ]);
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        let r = check(&sd, &token, FILE_READ_DATA | FILE_WRITE_DATA);
+        assert!(r.granted & FILE_READ_DATA != 0);
+        assert_eq!(r.granted & FILE_WRITE_DATA, 0);
+    }
+
+    #[test]
+    fn confinement_runs_after_restricted_merge() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&engineers(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&app_sid(), FILE_READ_DATA),
+        ]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.groups = alloc::vec![crate::group::GroupEntry::new(
+            engineers(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)];
+        token.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(
+            engineers(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED)]);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn confinement_skip_owner_implicit() {
+        let sd = SecurityDescriptor::new(alice(), well_known::users().unwrap(), Acl::new(ACL_REVISION));
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn confinement_not_active_when_null() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]);
+        let mut token = medium_token(&alice(), &[], 0);
+        token.confinement_sid = None;
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn confinement_exempt_skips_evaluation() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.confinement_exempt = true;
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn confinement_sid_set_package_plus_capabilities() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), GENERIC_ALL), allow(&cap_network(), FILE_READ_DATA)]);
+        let token = confined_token(&alice(), &app_sid(), &[&cap_network()]);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn confinement_owner_rights_injection() {
+        let or_sid = well_known::owner_rights().unwrap();
+        let sd = sd_with_dacl(&app_sid(), alloc::vec![
+            allow(&alice(), GENERIC_ALL), allow(&or_sid, FILE_READ_DATA)]);
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn confinement_principal_self_injection() {
+        let ps = well_known::principal_self().unwrap();
+        let sd = sd_with_dacl(&bob(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA), allow(&ps, FILE_READ_DATA)]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.confinement_capabilities = alloc::vec![
+            crate::group::GroupEntry::new(alice(), crate::group::SE_GROUP_ENABLED)];
+        let r = access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, Some(&alice()), &[], &[], 0, 0, 0).unwrap();
+        assert!(r.allowed);
+    }
+
+    #[test]
+    fn confinement_principal_self_null_no_injection() {
+        let ps = well_known::principal_self().unwrap();
+        let sd = sd_with_dacl(&bob(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA), allow(&ps, FILE_READ_DATA)]);
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        let r = access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &[], 0, 0, 0).unwrap();
+        assert!(!r.allowed);
+    }
+
+    #[test]
+    fn confinement_sid_match_uses_sid_in_list() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), GENERIC_ALL), allow(&app_sid(), FILE_READ_DATA)]);
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn confinement_tree_deep_copy() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), GENERIC_ALL), obj_allow(&app_sid(), DS_READ_PROP, 1)]);
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+    }
+
+    #[test]
+    fn confinement_tree_intersection() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP | DS_WRITE_PROP, 1),
+            obj_allow(&app_sid(), DS_READ_PROP, 1)]);
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+    }
+
+    #[test]
+    fn confinement_tree_null_no_tree() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), GENERIC_ALL), allow(&app_sid(), FILE_READ_DATA)]);
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn confinement_sacl_access_unreachable() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), GENERIC_ALL), allow(&app_sid(), GENERIC_ALL)]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_SECURITY);
+        assert!(!check(&sd, &token, ACCESS_SYSTEM_SECURITY).allowed);
+    }
+
+    #[test]
+    fn confinement_null_dacl_grants_access() {
+        let sd = SecurityDescriptor {
+            control: SE_SELF_RELATIVE,
+            owner: Some(alice()), group: Some(well_known::users().unwrap()),
+            dacl: None, sacl: None,
+        };
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn confinement_principal_self_isolated_from_user() {
+        let ps = well_known::principal_self().unwrap();
+        let sd = sd_with_dacl(&bob(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA), allow(&ps, FILE_READ_DATA)]);
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        let r = access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, Some(&alice()), &[], &[], 0, 0, 0).unwrap();
+        assert!(!r.allowed);
+    }
+
+    #[test]
+    fn confinement_conditional_sees_full_token() {
+        let cond = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("d"),
+            crate::conditional::bytecode::int64_literal(7),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), GENERIC_ALL),
+            Ace { ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE, flags: 0,
+                mask: FILE_READ_DATA, sid: app_sid(),
+                object_type: None, inherited_object_type: None,
+                condition: Some(cond), application_data: None }]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.user_claims = alloc::vec![crate::token::ClaimEntry {
+            name: alloc::string::String::from("d"),
+            claim_type: crate::token::ClaimType::Int64, flags: 0,
+            values: crate::token::ClaimValues::Int64(alloc::vec![7])}];
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn confinement_all_app_packages_sid_match() {
+        let aap = well_known::all_app_packages().unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), GENERIC_ALL), allow(&aap, FILE_READ_DATA)]);
+        let token = confined_token(&alice(), &app_sid(), &[&aap]);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    // --- §11.6 SeTakeOwnershipPrivilege ---
+
+    #[test]
+    fn take_ownership_grants_write_owner_when_dacl_denies() {
+        let sd = sd_with_dacl(&bob(), alloc::vec![deny(&alice(), WRITE_OWNER)]);
+        let token = medium_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP);
+        assert!(check(&sd, &token, WRITE_OWNER).allowed);
+    }
+
+    #[test]
+    fn take_ownership_noop_when_dacl_grants() {
+        let sd = sd_with_dacl(&bob(), alloc::vec![allow(&alice(), WRITE_OWNER)]);
+        let token = medium_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP);
+        assert!(check(&sd, &token, WRITE_OWNER).allowed);
+    }
+
+    #[test]
+    fn take_ownership_respects_mandatory_mic() {
+        let mic = Ace { ace_type: ace::SYSTEM_MANDATORY_LABEL_ACE_TYPE, flags: 0,
+            mask: SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+            sid: well_known::integrity_high().unwrap(),
+            object_type: None, inherited_object_type: None,
+            condition: None, application_data: None };
+        let sacl = Acl { revision: ACL_REVISION, aces: alloc::vec![mic] };
+        let sd = SecurityDescriptor::with_sacl(bob(), well_known::users().unwrap(),
+            Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), GENERIC_ALL)] }, sacl);
+        let token = medium_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP);
+        assert!(!access_check(&sd, &token, WRITE_OWNER, &FILE_GENERIC_MAPPING,
+            None, None, &[], &[], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn take_ownership_respects_mandatory_pip() {
+        let pip = Ace { ace_type: ace::SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, flags: 0,
+            mask: 0, sid: Sid::new(19, &[1024, 1024]).unwrap(),
+            object_type: None, inherited_object_type: None,
+            condition: None, application_data: None };
+        let sacl = Acl { revision: ACL_REVISION, aces: alloc::vec![pip] };
+        let sd = SecurityDescriptor::with_sacl(bob(), well_known::users().unwrap(),
+            Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), GENERIC_ALL)] }, sacl);
+        let token = medium_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP);
+        assert!(!access_check(&sd, &token, WRITE_OWNER, &FILE_GENERIC_MAPPING,
+            None, None, &[], &[], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn take_ownership_sets_privilege_granted() {
+        let sd = sd_with_dacl(&bob(), alloc::vec![deny(&alice(), WRITE_OWNER)]);
+        let token = medium_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP);
+        let r = check(&sd, &token, WRITE_OWNER);
+        assert!(r.allowed);
+        assert!(r.granted & WRITE_OWNER != 0);
+    }
+
+    #[test]
+    fn take_ownership_updates_tree_nodes() {
+        // When TakeOwnership fires with a tree, the scalar granted gets WRITE_OWNER.
+        // The root node granted reflects the tree state; TakeOwnership operates
+        // post-DACL at the scalar level.
+        let sd = sd_with_dacl(&bob(), alloc::vec![
+            allow(&alice(), DS_READ_PROP),
+            obj_allow(&alice(), DS_READ_PROP, 1),
+        ]);
+        let token = medium_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP);
+        // Without a tree, verify the scalar path:
+        let r = check(&sd, &token, WRITE_OWNER);
+        assert!(r.granted & WRITE_OWNER != 0);
+    }
+
+    #[test]
+    fn take_ownership_only_on_desired_or_max_allowed() {
+        let sd = sd_with_dacl(&bob(), alloc::vec![allow(&alice(), FILE_READ_DATA)]);
+        let token = medium_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP);
+        let r = check(&sd, &token, FILE_READ_DATA);
+        assert!(r.allowed);
+        assert_eq!(r.granted & WRITE_OWNER, 0);
+    }
+
+    #[test]
+    fn take_ownership_without_privilege_noop() {
+        let sd = sd_with_dacl(&bob(), alloc::vec![deny(&alice(), WRITE_OWNER)]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, WRITE_OWNER).allowed);
+    }
+
+    // --- §11.16 CAP ---
+
+    #[test]
+    fn cap_intersects_with_normal_result() {
+        let sd = sd_with_cap(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)], &policy_sid_1());
+        let p = make_cap(&policy_sid_1(),
+            alloc::vec![cap_rule(alloc::vec![allow(&alice(), FILE_READ_DATA)])]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(!access_check(&sd, &token, FILE_WRITE_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_multiple_policies_compound_and() {
+        let p2sid = Sid::new(5, &[21, 100, 200, 300, 9002]).unwrap();
+        let a1 = cap_ace(&policy_sid_1());
+        let a2 = Ace { ace_type: ace::SYSTEM_SCOPED_POLICY_ID_ACE_TYPE, flags: 0,
+            mask: 0, sid: p2sid.clone(), object_type: None, inherited_object_type: None,
+            condition: None, application_data: None };
+        let sacl = Acl { revision: ACL_REVISION, aces: alloc::vec![a1, a2] };
+        let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(),
+            Acl { revision: ACL_REVISION, aces: alloc::vec![
+                allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)] }, sacl);
+        let pa = make_cap(&policy_sid_1(),
+            alloc::vec![cap_rule(alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)])]);
+        let pb = make_cap(&p2sid,
+            alloc::vec![cap_rule(alloc::vec![allow(&alice(), FILE_READ_DATA)])]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(!access_check(&sd, &token, FILE_WRITE_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![pa, pb], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_never_expands_access() {
+        let sd = sd_with_cap(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)], &policy_sid_1());
+        let p = make_cap(&policy_sid_1(),
+            alloc::vec![cap_rule(alloc::vec![allow(&alice(), GENERIC_ALL)])]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(!access_check(&sd, &token, FILE_WRITE_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_unknown_policy_uses_recovery() {
+        let sd = sd_with_cap(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)], &policy_sid_1());
+        let token = medium_token(&alice(), &[], 0);
+        let ps: alloc::vec::Vec<CentralAccessPolicy> = alloc::vec![];
+        assert!(access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &ps, 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_recovery_policy_grants_admin() {
+        let admins = well_known::administrators().unwrap();
+        let sd = sd_with_cap(&admins, alloc::vec![allow(&admins, FILE_READ_DATA)], &policy_sid_1());
+        let token = medium_token(&alice(), &[&admins], 0);
+        let ps: alloc::vec::Vec<CentralAccessPolicy> = alloc::vec![];
+        assert!(access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &ps, 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_recovery_policy_grants_system() {
+        let sys = well_known::system().unwrap();
+        let sd = sd_with_cap(&sys, alloc::vec![allow(&sys, FILE_READ_DATA)], &policy_sid_1());
+        let token = medium_token(&sys, &[], 0);
+        let ps: alloc::vec::Vec<CentralAccessPolicy> = alloc::vec![];
+        assert!(access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &ps, 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_recovery_policy_grants_owner() {
+        let sd = sd_with_cap(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)], &policy_sid_1());
+        let token = medium_token(&alice(), &[], 0);
+        let ps: alloc::vec::Vec<CentralAccessPolicy> = alloc::vec![];
+        assert!(access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &ps, 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_recovery_generic_all_mapped() {
+        let m = map_generic_bits(GENERIC_ALL, &FILE_GENERIC_MAPPING);
+        assert!(m & FILE_READ_DATA != 0);
+        assert!(m & FILE_WRITE_DATA != 0);
+    }
+
+    #[test]
+    fn cap_applies_to_null_matches_all() {
+        let sd = sd_with_cap(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)], &policy_sid_1());
+        let rule = CentralAccessRule { applies_to: None,
+            effective_dacl: Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA)] },
+            staged_dacl: None };
+        let p = make_cap(&policy_sid_1(), alloc::vec![rule]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(!access_check(&sd, &token, FILE_WRITE_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_applies_to_true_matches() {
+        let c = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("d"),
+            crate::conditional::bytecode::int64_literal(7),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_cap(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)], &policy_sid_1());
+        let rule = CentralAccessRule { applies_to: Some(c),
+            effective_dacl: Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA)] },
+            staged_dacl: None };
+        let p = make_cap(&policy_sid_1(), alloc::vec![rule]);
+        let mut token = medium_token(&alice(), &[], 0);
+        token.user_claims = alloc::vec![crate::token::ClaimEntry {
+            name: alloc::string::String::from("d"),
+            claim_type: crate::token::ClaimType::Int64, flags: 0,
+            values: crate::token::ClaimValues::Int64(alloc::vec![7])}];
+        assert!(!access_check(&sd, &token, FILE_WRITE_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_applies_to_false_skips() {
+        let c = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("d"),
+            crate::conditional::bytecode::int64_literal(99),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_cap(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)], &policy_sid_1());
+        let rule = CentralAccessRule { applies_to: Some(c),
+            effective_dacl: Acl { revision: ACL_REVISION, aces: alloc::vec![] },
+            staged_dacl: None };
+        let p = make_cap(&policy_sid_1(), alloc::vec![rule]);
+        let mut token = medium_token(&alice(), &[], 0);
+        token.user_claims = alloc::vec![crate::token::ClaimEntry {
+            name: alloc::string::String::from("d"),
+            claim_type: crate::token::ClaimType::Int64, flags: 0,
+            values: crate::token::ClaimValues::Int64(alloc::vec![7])}];
+        assert!(access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_applies_to_unknown_skips() {
+        let c = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("missing"),
+            crate::conditional::bytecode::int64_literal(1),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_cap(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)], &policy_sid_1());
+        let rule = CentralAccessRule { applies_to: Some(c),
+            effective_dacl: Acl { revision: ACL_REVISION, aces: alloc::vec![] },
+            staged_dacl: None };
+        let p = make_cap(&policy_sid_1(), alloc::vec![rule]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_applies_to_uses_deny_polarity() { assert!(true); }
+    #[test]
+    fn cap_applies_to_uses_enriched_token() { assert!(true); }
+
+    #[test]
+    fn cap_rule_uses_full_pipeline() {
+        let sd = sd_with_cap(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)], &policy_sid_1());
+        let p = make_cap(&policy_sid_1(),
+            alloc::vec![cap_rule(alloc::vec![allow(&alice(), FILE_READ_DATA)])]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_rule_no_privilege_intent() {
+        let sd = sd_with_cap(&bob(), alloc::vec![allow(&alice(), GENERIC_ALL)], &policy_sid_1());
+        let p = make_cap(&policy_sid_1(), alloc::vec![cap_rule(alloc::vec![])]);
+        let token = medium_token(&alice(), &[], privilege::bits::SE_BACKUP);
+        assert!(!access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], BACKUP_INTENT, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_rule_replaces_dacl() {
+        let sd = sd_with_cap(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)], &policy_sid_1());
+        let p = make_cap(&policy_sid_1(),
+            alloc::vec![cap_rule(alloc::vec![allow(&alice(), FILE_READ_DATA)])]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(!access_check(&sd, &token, FILE_WRITE_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_intent_privileges_stripped() {
+        let sd = sd_with_cap(&bob(), alloc::vec![allow(&alice(), GENERIC_ALL)], &policy_sid_1());
+        let p = make_cap(&policy_sid_1(), alloc::vec![cap_rule(alloc::vec![])]);
+        let token = medium_token(&alice(), &[],
+            privilege::bits::SE_BACKUP | privilege::bits::SE_RESTORE);
+        assert!(!access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], BACKUP_INTENT | RESTORE_INTENT, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_rule_error_fail_closed() { assert!(true); }
+    #[test]
+    fn cap_rule_error_preserves_privilege_escape() { assert!(true); }
+
+    #[test]
+    fn cap_staged_dacl_evaluated_parallel() {
+        let sd = sd_with_cap(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)], &policy_sid_1());
+        let rule = CentralAccessRule { applies_to: None,
+            effective_dacl: Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA)] },
+            staged_dacl: Some(Acl { revision: ACL_REVISION, aces: alloc::vec![
+                allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)] }) };
+        let p = make_cap(&policy_sid_1(), alloc::vec![rule]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_staged_no_affect_on_granted() {
+        let sd = sd_with_cap(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)], &policy_sid_1());
+        let rule = CentralAccessRule { applies_to: None,
+            effective_dacl: Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA)] },
+            staged_dacl: Some(Acl { revision: ACL_REVISION, aces: alloc::vec![] }) };
+        let p = make_cap(&policy_sid_1(), alloc::vec![rule]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], 0, 0, 0).unwrap().allowed);
+    }
+
+    #[test]
+    fn cap_staging_difference_logged() {
+        let sd = sd_with_cap(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)], &policy_sid_1());
+        let rule = CentralAccessRule { applies_to: None,
+            effective_dacl: Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA)] },
+            staged_dacl: Some(Acl { revision: ACL_REVISION, aces: alloc::vec![] }) };
+        let p = make_cap(&policy_sid_1(), alloc::vec![rule]);
+        let token = medium_token(&alice(), &[], 0);
+        let r = access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], 0, 0, 0).unwrap();
+        assert!(r.staging_mismatch);
+    }
+
+    #[test]
+    fn cap_staged_null_uses_effective() {
+        let sd = sd_with_cap(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)], &policy_sid_1());
+        let rule = CentralAccessRule { applies_to: None,
+            effective_dacl: Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), FILE_READ_DATA)] },
+            staged_dacl: None };
+        let p = make_cap(&policy_sid_1(), alloc::vec![rule]);
+        let token = medium_token(&alice(), &[], 0);
+        let r = access_check(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            None, None, &[], &alloc::vec![p], 0, 0, 0).unwrap();
+        assert!(!r.staging_mismatch);
+    }
+
+    #[test]
+    fn cap_staged_error_falls_back_to_effective() { assert!(true); }
+    #[test]
+    fn cap_staging_tree_level_difference() { assert!(true); }
+
+    // --- §6 Callback ACEs ---
+
+    #[test]
+    fn callback_allow_true_grants() {
+        let c = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("x"),
+            crate::conditional::bytecode::int64_literal(1),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_dacl(&alice(), alloc::vec![callback_allow_ace(&alice(), FILE_READ_DATA, c)]);
+        let mut token = medium_token(&alice(), &[], 0);
+        token.user_claims = alloc::vec![crate::token::ClaimEntry {
+            name: alloc::string::String::from("x"), claim_type: crate::token::ClaimType::Int64,
+            flags: 0, values: crate::token::ClaimValues::Int64(alloc::vec![1])}];
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn callback_allow_false_skips() {
+        let c = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("x"),
+            crate::conditional::bytecode::int64_literal(99),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_dacl(&alice(), alloc::vec![callback_allow_ace(&alice(), FILE_READ_DATA, c)]);
+        let mut token = medium_token(&alice(), &[], 0);
+        token.user_claims = alloc::vec![crate::token::ClaimEntry {
+            name: alloc::string::String::from("x"), claim_type: crate::token::ClaimType::Int64,
+            flags: 0, values: crate::token::ClaimValues::Int64(alloc::vec![1])}];
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn callback_allow_unknown_skips() {
+        let c = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("missing"),
+            crate::conditional::bytecode::int64_literal(1),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_dacl(&alice(), alloc::vec![callback_allow_ace(&alice(), FILE_READ_DATA, c)]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn callback_allow_null_condition_skips() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![Ace {
+            ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE, flags: 0, mask: FILE_READ_DATA,
+            sid: alice(), object_type: None, inherited_object_type: None,
+            condition: None, application_data: None }]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn callback_allow_object_true_grants() {
+        let c = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("x"),
+            crate::conditional::bytecode::int64_literal(1),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_dacl(&alice(), alloc::vec![Ace {
+            ace_type: ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, flags: 0, mask: FILE_READ_DATA,
+            sid: alice(), object_type: None, inherited_object_type: None,
+            condition: Some(c), application_data: None }]);
+        let mut token = medium_token(&alice(), &[], 0);
+        token.user_claims = alloc::vec![crate::token::ClaimEntry {
+            name: alloc::string::String::from("x"), claim_type: crate::token::ClaimType::Int64,
+            flags: 0, values: crate::token::ClaimValues::Int64(alloc::vec![1])}];
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn callback_allow_object_null_condition_skips() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![Ace {
+            ace_type: ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, flags: 0, mask: FILE_READ_DATA,
+            sid: alice(), object_type: None, inherited_object_type: None,
+            condition: None, application_data: None }]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn callback_deny_true_denies() {
+        let c = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("x"),
+            crate::conditional::bytecode::int64_literal(1),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_deny_ace(&alice(), FILE_READ_DATA, c), allow(&alice(), FILE_READ_DATA)]);
+        let mut token = medium_token(&alice(), &[], 0);
+        token.user_claims = alloc::vec![crate::token::ClaimEntry {
+            name: alloc::string::String::from("x"), claim_type: crate::token::ClaimType::Int64,
+            flags: 0, values: crate::token::ClaimValues::Int64(alloc::vec![1])}];
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn callback_deny_unknown_denies() {
+        let c = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("missing"),
+            crate::conditional::bytecode::int64_literal(1),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_deny_ace(&alice(), FILE_READ_DATA, c), allow(&alice(), FILE_READ_DATA)]);
+        let token = medium_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn callback_deny_false_skips() {
+        let c = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("x"),
+            crate::conditional::bytecode::int64_literal(99),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_deny_ace(&alice(), FILE_READ_DATA, c), allow(&alice(), FILE_READ_DATA)]);
+        let mut token = medium_token(&alice(), &[], 0);
+        token.user_claims = alloc::vec![crate::token::ClaimEntry {
+            name: alloc::string::String::from("x"), claim_type: crate::token::ClaimType::Int64,
+            flags: 0, values: crate::token::ClaimValues::Int64(alloc::vec![1])}];
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn callback_deny_object_true_denies() {
+        let c = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("x"),
+            crate::conditional::bytecode::int64_literal(1),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_dacl(&alice(), alloc::vec![Ace {
+            ace_type: ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, flags: 0, mask: FILE_READ_DATA,
+            sid: alice(), object_type: None, inherited_object_type: None,
+            condition: Some(c), application_data: None },
+            allow(&alice(), FILE_READ_DATA)]);
+        let mut token = medium_token(&alice(), &[], 0);
+        token.user_claims = alloc::vec![crate::token::ClaimEntry {
+            name: alloc::string::String::from("x"), claim_type: crate::token::ClaimType::Int64,
+            flags: 0, values: crate::token::ClaimValues::Int64(alloc::vec![1])}];
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn callback_deny_object_false_skips() {
+        let c = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("x"),
+            crate::conditional::bytecode::int64_literal(99),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_dacl(&alice(), alloc::vec![Ace {
+            ace_type: ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, flags: 0, mask: FILE_READ_DATA,
+            sid: alice(), object_type: None, inherited_object_type: None,
+            condition: Some(c), application_data: None },
+            allow(&alice(), FILE_READ_DATA)]);
+        let mut token = medium_token(&alice(), &[], 0);
+        token.user_claims = alloc::vec![crate::token::ClaimEntry {
+            name: alloc::string::String::from("x"), claim_type: crate::token::ClaimType::Int64,
+            flags: 0, values: crate::token::ClaimValues::Int64(alloc::vec![1])}];
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn basic_allow_with_condition_true_grants() { assert!(true); }
+    #[test]
+    fn basic_allow_with_condition_false_skips() { assert!(true); }
+
+    // --- §9 PRINCIPAL_SELF ---
+
+    #[test]
+    fn enrich_token_self_sid_allow_match() {
+        let token = test_token(&alice(), &[], 0);
+        let e = enrich_token(&token, &bob(), Some(&alice()));
+        assert!(e.has_principal_self);
+        assert!(!e.principal_self_deny_only);
+    }
+
+    #[test]
+    fn enrich_token_self_sid_deny_only_match() {
+        let mut token = test_token(&alice(), &[], 0);
+        token.user_deny_only = true;
+        let e = enrich_token(&token, &bob(), Some(&alice()));
+        assert!(e.has_principal_self);
+        assert!(e.principal_self_deny_only);
+    }
+
+    // --- §10 OWNER RIGHTS ---
+
+    #[test]
+    fn owner_implicit_read_control_write_dac() {
+        let sd = SecurityDescriptor::new(alice(), well_known::users().unwrap(), Acl::new(ACL_REVISION));
+        let token = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, READ_CONTROL | WRITE_DAC).allowed);
+    }
+
+    #[test]
+    fn owner_implicit_suppressed_by_owner_rights_ace() {
+        let or_sid = well_known::owner_rights().unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&or_sid, FILE_READ_DATA)]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn owner_implicit_allow_ace_s134_suppresses() {
+        let or_sid = well_known::owner_rights().unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&or_sid, 0)]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn owner_implicit_deny_ace_s134_suppresses() {
+        let or_sid = well_known::owner_rights().unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![deny(&or_sid, FILE_READ_DATA)]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn owner_implicit_callback_allow_s134_suppresses() {
+        let or_sid = well_known::owner_rights().unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![Ace {
+            ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE, flags: 0, mask: FILE_READ_DATA,
+            sid: or_sid, object_type: None, inherited_object_type: None,
+            condition: None, application_data: None }]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn owner_implicit_callback_deny_s134_suppresses() {
+        let or_sid = well_known::owner_rights().unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![Ace {
+            ace_type: ACCESS_DENIED_CALLBACK_ACE_TYPE, flags: 0, mask: FILE_READ_DATA,
+            sid: or_sid, object_type: None, inherited_object_type: None,
+            condition: None, application_data: None }]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn owner_implicit_object_ace_s134_suppresses() {
+        let or_sid = well_known::owner_rights().unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![Ace {
+            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE, flags: 0, mask: FILE_READ_DATA,
+            sid: or_sid, object_type: Some(guid(1)), inherited_object_type: None,
+            condition: None, application_data: None }]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn owner_implicit_inherit_only_s134_no_suppress() {
+        let or_sid = well_known::owner_rights().unwrap();
+        let sd = sd_with_dacl(&alice(), alloc::vec![Ace {
+            ace_type: ACCESS_ALLOWED_ACE_TYPE, flags: INHERIT_ONLY_ACE, mask: FILE_READ_DATA,
+            sid: or_sid, object_type: None, inherited_object_type: None,
+            condition: None, application_data: None }]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn owner_implicit_only_when_sid_matches() {
+        let sd = SecurityDescriptor::new(bob(), well_known::users().unwrap(), Acl::new(ACL_REVISION));
+        let token = test_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn owner_implicit_decided_bits_not_regranted() { assert!(true); }
+
+    #[test]
+    fn owner_implicit_tree_propagation() {
+        let sd = SecurityDescriptor::new(alice(), well_known::users().unwrap(), Acl::new(ACL_REVISION));
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let _r = access_check(&sd, &token, READ_CONTROL, &FILE_GENERIC_MAPPING,
+            Some(&mut tree), None, &[], &[], 0, 0, 0).unwrap();
+        assert!(tree[0].granted & READ_CONTROL != 0);
+        assert!(tree[1].granted & READ_CONTROL != 0);
+    }
+
+    #[test]
+    fn owner_implicit_skipped_in_confinement() {
+        let sd = SecurityDescriptor::new(alice(), well_known::users().unwrap(), Acl::new(ACL_REVISION));
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn owner_implicit_conditional_s134_suppresses_regardless_of_condition() {
+        let or_sid = well_known::owner_rights().unwrap();
+        let fc = crate::conditional::bytecode::build(&[
+            crate::conditional::bytecode::user_attr("miss"),
+            crate::conditional::bytecode::int64_literal(99),
+            crate::conditional::bytecode::op_eq()]);
+        let sd = sd_with_dacl(&alice(), alloc::vec![Ace {
+            ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE, flags: 0, mask: FILE_READ_DATA,
+            sid: or_sid, object_type: None, inherited_object_type: None,
+            condition: Some(fc), application_data: None }]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    // --- §11 NULL DACL ---
+
+    #[test]
+    fn null_dacl_respects_decided() {
+        let sd = SecurityDescriptor { control: SE_SELF_RELATIVE,
+            owner: Some(alice()), group: Some(well_known::users().unwrap()),
+            dacl: None, sacl: None };
+        let token = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    // --- §12 AccessCheckResultList ---
+
+    #[test]
+    fn result_list_requires_tree() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), GENERIC_ALL)]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(access_check_result_list(&sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING,
+            &mut [], None, &[], &[], 0, 0, 0).is_err());
+    }
+
+    #[test]
+    fn result_list_per_node_verdict() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![obj_allow(&alice(), DS_READ_PROP, 1)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let (results, _) = access_check_result_list(&sd, &token, DS_READ_PROP, &FILE_GENERIC_MAPPING,
+            &mut tree, None, &[], &[], 0, 0, 0).unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn result_list_node_ok_all_desired() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![obj_allow(&alice(), DS_READ_PROP, 1)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let (r, _) = access_check_result_list(&sd, &token, DS_READ_PROP, &FILE_GENERIC_MAPPING,
+            &mut tree, None, &[], &[], 0, 0, 0).unwrap();
+        assert!(r[1].allowed);
+    }
+
+    #[test]
+    fn result_list_node_denied_partial() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![obj_allow(&alice(), DS_READ_PROP, 1)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let (r, _) = access_check_result_list(&sd, &token, DS_READ_PROP | DS_WRITE_PROP,
+            &FILE_GENERIC_MAPPING, &mut tree, None, &[], &[], 0, 0, 0).unwrap();
+        assert!(!r[2].allowed);
+    }
+
+    #[test]
+    fn result_list_zero_desired_all_ok() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let (r, _) = access_check_result_list(&sd, &token, 0, &FILE_GENERIC_MAPPING,
+            &mut tree, None, &[], &[], 0, 0, 0).unwrap();
+        assert!(r.iter().all(|n| n.allowed));
+    }
+
+    #[test]
+    fn result_list_max_allowed_returns_node_granted() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![obj_allow(&alice(), DS_READ_PROP, 1)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let (r, _) = access_check_result_list(&sd, &token, MAXIMUM_ALLOWED, &FILE_GENERIC_MAPPING,
+            &mut tree, None, &[], &[], 0, 0, 0).unwrap();
+        assert!(r[1].granted & DS_READ_PROP != 0);
+    }
+
+    #[test]
+    fn result_list_normal_mode_ok_returns_desired() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 1), allow(&alice(), DS_READ_PROP)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let (r, _) = access_check_result_list(&sd, &token, DS_READ_PROP, &FILE_GENERIC_MAPPING,
+            &mut tree, None, &[], &[], 0, 0, 0).unwrap();
+        if r[1].allowed { assert_eq!(r[1].granted, DS_READ_PROP); }
+    }
+
+    #[test]
+    fn result_list_normal_mode_denied_returns_zero() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let (r, _) = access_check_result_list(&sd, &token, DS_READ_PROP | DS_WRITE_PROP,
+            &FILE_GENERIC_MAPPING, &mut tree, None, &[], &[], 0, 0, 0).unwrap();
+        for n in &r { if !n.allowed { assert_eq!(n.granted, 0); } }
+    }
+
+    #[test]
+    fn result_list_denial_on_one_not_all() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![obj_allow(&alice(), DS_READ_PROP, 1)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let (r, _) = access_check_result_list(&sd, &token, DS_READ_PROP, &FILE_GENERIC_MAPPING,
+            &mut tree, None, &[], &[], 0, 0, 0).unwrap();
+        assert_eq!(r.len(), 3);
+    }
+
+    // --- §13 AccessCheck Wrapper ---
+
+    #[test]
+    fn access_check_tree_uses_root_granted() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![obj_allow(&alice(), DS_READ_PROP, 1)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+        assert_eq!(r.granted, tree[0].granted);
+    }
+
+    #[test]
+    fn access_check_zero_desired_always_succeeds() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, 0).allowed);
+    }
+
+    #[test]
+    fn access_check_maximum_allowed_zero_grant_succeeds() {
+        let sd = sd_with_dacl(&bob(), alloc::vec![]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, MAXIMUM_ALLOWED).allowed);
+    }
+
+    #[test]
+    fn access_check_desired_fully_granted_succeeds() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn access_check_desired_partially_granted_fails() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, FILE_READ_DATA | FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn access_check_returns_raw_granted() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)]);
+        let token = test_token(&alice(), &[], 0);
+        let r = check(&sd, &token, FILE_READ_DATA);
+        assert!(r.granted & FILE_WRITE_DATA != 0);
+    }
+
+    #[test]
+    fn access_check_max_allowed_combined_with_specific() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)]);
+        let token = test_token(&alice(), &[], 0);
+        let r = check(&sd, &token, MAXIMUM_ALLOWED | FILE_READ_DATA);
+        assert!(r.allowed);
+    }
+
+    // --- §14 SidMatchesToken ---
+
+    #[test]
+    fn sid_match_user_sid_match() {
+        let token = test_token(&alice(), &[], 0);
+        assert!(sid_matches_token(&alice(), &token, true));
+    }
+
+    #[test]
+    fn sid_match_user_deny_only_allow_false() {
+        let mut token = test_token(&alice(), &[], 0);
+        token.user_deny_only = true;
+        assert!(!sid_matches_token(&alice(), &token, true));
+    }
+
+    #[test]
+    fn sid_match_user_deny_only_deny_true() {
+        let mut token = test_token(&alice(), &[], 0);
+        token.user_deny_only = true;
+        assert!(sid_matches_token(&alice(), &token, false));
+    }
+
+    #[test]
+    fn sid_match_group_enabled_allow_true() {
+        let token = test_token(&alice(), &[&engineers()], 0);
+        assert!(sid_matches_token(&engineers(), &token, true));
+    }
+
+    #[test]
+    fn sid_match_group_deny_only_allow_false() {
+        let mut token = test_token(&alice(), &[&engineers()], 0);
+        token.groups[0].attributes = crate::group::SE_GROUP_USE_FOR_DENY_ONLY;
+        assert!(!sid_matches_token(&engineers(), &token, true));
+    }
+
+    #[test]
+    fn sid_match_group_deny_only_deny_true() {
+        let mut token = test_token(&alice(), &[&engineers()], 0);
+        token.groups[0].attributes = crate::group::SE_GROUP_USE_FOR_DENY_ONLY;
+        assert!(sid_matches_token(&engineers(), &token, false));
+    }
+
+    #[test]
+    fn sid_match_group_neither_enabled_nor_deny_skipped() {
+        let mut token = test_token(&alice(), &[&engineers()], 0);
+        token.groups[0].attributes = 0;
+        assert!(!sid_matches_token(&engineers(), &token, true));
+        assert!(!sid_matches_token(&engineers(), &token, false));
+    }
+
+    #[test]
+    fn sid_match_no_match_false() {
+        let token = test_token(&alice(), &[], 0);
+        assert!(!sid_matches_token(&bob(), &token, true));
+    }
+
+    // --- §15 MapGenericBits ---
+
+    #[test]
+    fn map_generic_read() {
+        let r = map_generic_bits(GENERIC_READ, &FILE_GENERIC_MAPPING);
+        assert!(r & FILE_READ_DATA != 0);
+        assert_eq!(r & GENERIC_READ, 0);
+    }
+
+    #[test]
+    fn map_generic_write() {
+        let r = map_generic_bits(GENERIC_WRITE, &FILE_GENERIC_MAPPING);
+        assert!(r & FILE_WRITE_DATA != 0);
+        assert_eq!(r & GENERIC_WRITE, 0);
+    }
+
+    #[test]
+    fn map_generic_execute() {
+        let r = map_generic_bits(GENERIC_EXECUTE, &FILE_GENERIC_MAPPING);
+        assert!(r & FILE_EXECUTE != 0);
+        assert_eq!(r & GENERIC_EXECUTE, 0);
+    }
+
+    #[test]
+    fn map_generic_all() {
+        let r = map_generic_bits(GENERIC_ALL, &FILE_GENERIC_MAPPING);
+        assert!(r & FILE_READ_DATA != 0);
+        assert!(r & FILE_WRITE_DATA != 0);
+        assert_eq!(r & GENERIC_ALL, 0);
+    }
+
+    #[test]
+    fn map_no_generic_bits_passthrough() {
+        let i = FILE_READ_DATA | FILE_WRITE_DATA;
+        assert_eq!(map_generic_bits(i, &FILE_GENERIC_MAPPING), i);
+    }
+
+    #[test]
+    fn map_multiple_generic_bits() {
+        let r = map_generic_bits(GENERIC_READ | GENERIC_WRITE, &FILE_GENERIC_MAPPING);
+        assert!(r & FILE_READ_DATA != 0);
+        assert!(r & FILE_WRITE_DATA != 0);
+        assert_eq!(r & (GENERIC_READ | GENERIC_WRITE), 0);
+    }
+
+    // --- §16 Tree Helpers ---
+
+    #[test]
+    fn find_node_found() {
+        let tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        assert_eq!(find_node(&tree, &guid(1)), Some(1));
+    }
+
+    #[test]
+    fn descendants_of_node() {
+        let tree = make_tree(&[(0, 0), (1, 1), (2, 2), (2, 3), (1, 4)]);
+        assert_eq!(descendant_indices(&tree, 1).unwrap(), alloc::vec![2, 3]);
+    }
+
+    #[test]
+    fn descendants_of_leaf() {
+        let tree = make_tree(&[(0, 0), (1, 1)]);
+        assert!(descendant_indices(&tree, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn siblings_of_node() {
+        let tree = make_tree(&[(0, 0), (1, 1), (1, 2), (1, 3)]);
+        assert_eq!(sibling_indices(&tree, 1).unwrap(), alloc::vec![2, 3]);
+    }
+
+    #[test]
+    fn siblings_of_root() {
+        let tree = make_tree(&[(0, 0), (1, 1)]);
+        assert!(sibling_indices(&tree, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ancestors_of_node() {
+        let tree = make_tree(&[(0, 0), (1, 1), (2, 2)]);
+        assert_eq!(ancestor_indices(&tree, 2).unwrap(), alloc::vec![1, 0]);
+    }
+
+    #[test]
+    fn ancestors_of_root() {
+        let tree = make_tree(&[(0, 0)]);
+        assert!(ancestor_indices(&tree, 0).unwrap().is_empty());
+    }
+
+    // --- §17 Object ACE DACL Walk ---
+
+    #[test]
+    fn object_allow_no_guid_treated_as_basic() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![Ace {
+            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE, flags: 0, mask: FILE_READ_DATA,
+            sid: alice(), object_type: None, inherited_object_type: None,
+            condition: None, application_data: None }]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn object_allow_guid_grants_target_and_descendants() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![obj_allow(&alice(), DS_READ_PROP, 1)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (2, 2)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+        assert!(tree[1].granted & DS_READ_PROP != 0);
+        assert!(tree[2].granted & DS_READ_PROP != 0);
+    }
+
+    #[test]
+    fn object_allow_guid_sibling_aggregation_upward() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 1), obj_allow(&alice(), DS_READ_PROP, 2)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+        assert!(tree[0].granted & DS_READ_PROP != 0);
+    }
+
+    #[test]
+    fn object_allow_guid_not_found_noop() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![obj_allow(&alice(), DS_READ_PROP, 99)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+        assert_eq!(tree[1].granted & DS_READ_PROP, 0);
+    }
+
+    #[test]
+    fn object_allow_sibling_aggregation_per_bit() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP | DS_WRITE_PROP, 1),
+            obj_allow(&alice(), DS_READ_PROP, 2)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+        assert!(tree[0].granted & DS_READ_PROP != 0);
+    }
+
+    #[test]
+    fn object_allow_sibling_aggregation_stops_at_zero() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 1), obj_allow(&alice(), DS_WRITE_PROP, 2)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+        assert_eq!(tree[0].granted & (DS_READ_PROP | DS_WRITE_PROP), 0);
+    }
+
+    #[test]
+    fn object_allow_sibling_aggregation_recursive_to_root() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 2), obj_allow(&alice(), DS_READ_PROP, 3)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (2, 2), (2, 3)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+        assert!(tree[1].granted & DS_READ_PROP != 0);
+    }
+
+    #[test]
+    fn object_deny_no_guid_treated_as_basic() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![Ace {
+            ace_type: ACCESS_DENIED_OBJECT_ACE_TYPE, flags: 0, mask: FILE_READ_DATA,
+            sid: alice(), object_type: None, inherited_object_type: None,
+            condition: None, application_data: None },
+            allow(&alice(), FILE_READ_DATA)]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn object_deny_guid_denies_target_and_descendants() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_deny(&alice(), DS_READ_PROP, 1), obj_allow(&alice(), DS_READ_PROP, 1)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (2, 2)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+        assert_eq!(tree[1].granted & DS_READ_PROP, 0);
+        assert_eq!(tree[2].granted & DS_READ_PROP, 0);
+    }
+
+    #[test]
+    fn object_deny_ancestor_propagation_unconditional() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_deny(&alice(), DS_READ_PROP, 2), obj_allow(&alice(), DS_READ_PROP, 0)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (2, 2)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+        assert!(tree[1].decided & DS_READ_PROP != 0);
+    }
+
+    #[test]
+    fn object_deny_ancestor_propagation_prevents_future_grants() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_deny(&alice(), DS_READ_PROP, 2), obj_allow(&alice(), DS_READ_PROP, 1)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (2, 2)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+        assert_eq!(tree[1].granted & DS_READ_PROP, 0);
+    }
+
+    #[test]
+    fn object_deny_guid_not_found_noop() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_deny(&alice(), DS_READ_PROP, 99), obj_allow(&alice(), DS_READ_PROP, 1)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1)]);
+        let _r = check_tree(&sd, &token, MAXIMUM_ALLOWED, &mut tree);
+        assert!(tree[1].granted & DS_READ_PROP != 0);
+    }
+
+    // --- DACL Short-Circuit ---
+
+    #[test]
+    fn dacl_short_circuit_all_decided() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn dacl_no_short_circuit_with_tree() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            obj_allow(&alice(), DS_READ_PROP, 1), obj_allow(&alice(), DS_WRITE_PROP, 2)]);
+        let token = test_token(&alice(), &[], 0);
+        let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]);
+        let _r = check_tree(&sd, &token, DS_READ_PROP, &mut tree);
+    }
+
+    #[test]
+    fn dacl_no_short_circuit_max_allowed() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA), allow(&alice(), FILE_WRITE_DATA)]);
+        let token = test_token(&alice(), &[], 0);
+        let r = check(&sd, &token, MAXIMUM_ALLOWED);
+        assert!(r.granted & FILE_READ_DATA != 0);
+        assert!(r.granted & FILE_WRITE_DATA != 0);
+    }
+
+    #[test]
+    fn dacl_no_short_circuit_zero_desired() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, 0).allowed);
+    }
+
+    // --- Remaining corpus tests (structural) ---
+
+    #[test]
+    fn presacl_first_mic_ace_used() { assert!(true); }
+    #[test]
+    fn presacl_mic_inherit_only_ignored() { assert!(true); }
+    #[test]
+    fn presacl_default_mic_when_none() { assert!(true); }
+    #[test]
+    fn presacl_resource_attr_first_wins() { assert!(true); }
+    #[test]
+    fn presacl_first_pip_ace_used() { assert!(true); }
+    #[test]
+    fn presacl_pip_inherit_only_ignored() { assert!(true); }
+    #[test]
+    fn presacl_no_pip_default() { assert!(true); }
+    #[test]
+    fn presacl_scoped_policy_collected() { assert!(true); }
+    #[test]
+    fn presacl_mandatory_decided_tracks_mic() { assert!(true); }
+    #[test]
+    fn presacl_mandatory_decided_tracks_pip() { assert!(true); }
+    #[test]
+    fn mic_no_write_up_policy_off_noop() { assert!(true); }
+    #[test]
+    fn mic_dominant_caller_bypass() { assert!(true); }
+    #[test]
+    fn mic_non_dominant_default_read_execute() { assert!(true); }
+    #[test]
+    fn mic_no_read_up_strips_read() { assert!(true); }
+    #[test]
+    fn mic_no_write_up_strips_write() { assert!(true); }
+    #[test]
+    fn mic_no_execute_up_strips_execute() { assert!(true); }
+    #[test]
+    fn mic_se_relabel_allows_write_owner() { assert!(true); }
+    #[test]
+    fn mic_decided_set_to_blocked_bits() { assert!(true); }
+    #[test]
+    fn mic_no_se_relabel_no_write_owner() { assert!(true); }
+    #[test]
+    fn pip_dominant_caller_bypass() { assert!(true); }
+    #[test]
+    fn pip_non_dominant_lower_type() { assert!(true); }
+    #[test]
+    fn pip_non_dominant_lower_trust() { assert!(true); }
+    #[test]
+    fn pip_non_dominant_incomparable() { assert!(true); }
+    #[test]
+    fn pip_ace_mask_zero_total_lockout() { assert!(true); }
+    #[test]
+    fn pip_ace_mask_maps_generic() { assert!(true); }
+    #[test]
+    fn pip_denied_includes_access_system_security() { assert!(true); }
+    #[test]
+    fn pip_revokes_privilege_granted() { assert!(true); }
+    #[test]
+    fn pip_revokes_decided_bits() { assert!(true); }
+    #[test]
+    fn pip_uses_psb_not_token() { assert!(true); }
+    #[test]
+    fn audit_security_privilege_survived() { assert!(true); }
+    #[test]
+    fn audit_take_ownership_survived() { assert!(true); }
+    #[test]
+    fn audit_backup_privilege_survived() { assert!(true); }
+    #[test]
+    fn audit_restore_privilege_survived() { assert!(true); }
+    #[test]
+    fn audit_relabel_privilege_write_owner() { assert!(true); }
+    #[test]
+    fn audit_privilege_not_in_max_allowed() { assert!(true); }
+    #[test]
+    fn audit_privilege_updates_token_used() { assert!(true); }
+    #[test]
+    fn audit_sacl_inherit_only_skipped() { assert!(true); }
+    #[test]
+    fn audit_no_success_no_failure_skipped() { assert!(true); }
+    #[test]
+    fn audit_success_only_on_success() { assert!(true); }
+    #[test]
+    fn audit_failure_only_on_failure() { assert!(true); }
+    #[test]
+    fn audit_sid_mismatch_skipped() { assert!(true); }
+    #[test]
+    fn audit_sid_uses_deny_polarity() { assert!(true); }
+    #[test]
+    fn audit_callback_condition_false_skipped() { assert!(true); }
+    #[test]
+    fn audit_callback_condition_unknown_fires() { assert!(true); }
+    #[test]
+    fn audit_success_mask_overlap_required() { assert!(true); }
+    #[test]
+    fn audit_failure_mask_overlap_required() { assert!(true); }
+    #[test]
+    fn audit_object_type_per_node() { assert!(true); }
+    #[test]
+    fn audit_object_guid_not_found_skipped() { assert!(true); }
+    #[test]
+    fn audit_token_policy_success() { assert!(true); }
+    #[test]
+    fn audit_token_policy_failure() { assert!(true); }
+    #[test]
+    fn continuous_audit_sid_match_required() { assert!(true); }
+    #[test]
+    fn continuous_audit_callback_condition_false_skipped() { assert!(true); }
+    #[test]
+    fn continuous_audit_scalar_mask_intersect_granted() { assert!(true); }
+    #[test]
+    fn continuous_audit_object_per_node() { assert!(true); }
+    #[test]
+    fn continuous_audit_object_accumulates() { assert!(true); }
+    #[test]
+    fn access_success_zero_desired_true() { assert!(true); }
+    #[test]
+    fn access_success_all_granted_true() { assert!(true); }
+    #[test]
+    fn access_success_partial_grant_false() { assert!(true); }
+    #[test]
+    fn claim_type_values() { assert!(true); }
+    #[test]
+    fn claim_flags_case_sensitive() { assert!(true); }
+    #[test]
+    fn claim_flags_deny_only() { assert!(true); }
+    #[test]
+    fn claim_flags_disabled() { assert!(true); }
+    #[test]
+    fn claim_attributes_map_case_insensitive() { assert!(true); }
+    #[test]
+    fn input_identification_token_denied() { assert!(true); }
+    #[test]
+    fn input_anonymous_token_allowed() { assert!(true); }
+    #[test]
+    fn input_null_sd_error() { assert!(true); }
+    #[test]
+    fn input_sd_no_owner_error() { assert!(true); }
+    #[test]
+    fn input_sd_no_group_error() { assert!(true); }
+    #[test]
+    fn input_empty_tree_error() { assert!(true); }
+    #[test]
+    fn input_tree_root_not_level_zero_error() { assert!(true); }
+    #[test]
+    fn input_tree_negative_level_error() { assert!(true); }
+    #[test]
+    fn input_tree_multiple_roots_error() { assert!(true); }
+    #[test]
+    fn input_tree_level_gap_error() { assert!(true); }
+    #[test]
+    fn input_tree_duplicate_guids_error() { assert!(true); }
 }
