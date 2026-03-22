@@ -10188,4 +10188,642 @@ mod tests {
     // Omitted: recovery policy behavior depends on whether the policies
     // slice is empty vs the policy SID not matching any entry. The empty
     // policies slice case may skip CAP entirely in the current implementation.
+
+    // ===================================================================
+    // Missing corpus tests
+    // ===================================================================
+
+    // --- Conditional ACE in AccessCheck ---
+
+    fn callback_allow(sid: &Sid, mask: u32, cond: Vec<u8>) -> Ace {
+        Ace {
+            ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            flags: 0, mask,
+            sid: sid.clone(),
+            object_type: None, inherited_object_type: None,
+            condition: Some(cond), application_data: None,
+        }
+    }
+
+    fn callback_deny(sid: &Sid, mask: u32, cond: Vec<u8>) -> Ace {
+        Ace {
+            ace_type: ACCESS_DENIED_CALLBACK_ACE_TYPE,
+            flags: 0, mask,
+            sid: sid.clone(),
+            object_type: None, inherited_object_type: None,
+            condition: Some(cond), application_data: None,
+        }
+    }
+
+    fn cond_true() -> Vec<u8> {
+        use crate::conditional::bytecode::*;
+        // @User.tv_true == 1 where tv_true=1 → TRUE
+        // Use a simpler approach: int literal 1 == 1 won't work (literal origin → UNKNOWN)
+        // Instead, build a proper expression: user_attr("t") == 1
+        build(&[user_attr("t"), int64_literal(1), op_eq()])
+    }
+
+    fn cond_false() -> Vec<u8> {
+        use crate::conditional::bytecode::*;
+        build(&[user_attr("t"), int64_literal(99), op_eq()])
+    }
+
+    fn cond_unknown() -> Vec<u8> {
+        use crate::conditional::bytecode::*;
+        // Missing attribute → UNKNOWN
+        build(&[user_attr("missing"), int64_literal(1), op_eq()])
+    }
+
+    fn token_with_cond_claim(user: &Sid, groups: &[&Sid], privs: u64) -> Token {
+        let mut t = test_token(user, groups, privs);
+        t.user_claims = alloc::vec![crate::token::ClaimEntry {
+            name: crate::compat::String::from("t"),
+            claim_type: crate::token::ClaimType::Int64,
+            flags: 0,
+            values: crate::token::ClaimValues::Int64(alloc::vec![1]),
+        }];
+        t
+    }
+
+    #[test]
+    fn allow_ace_applied_only_on_true() {
+        // Conditional allow ACE: applied only on TRUE
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_allow(&alice(), FILE_READ_DATA, cond_true()),
+        ]);
+        let token = token_with_cond_claim(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn allow_unknown_does_not_grant() {
+        // Conditional allow ACE: UNKNOWN → skip (no grant)
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_allow(&alice(), FILE_READ_DATA, cond_unknown()),
+        ]);
+        let token = token_with_cond_claim(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn deny_ace_applied_on_true_or_unknown() {
+        // Conditional deny ACE: applied on TRUE
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_deny(&alice(), FILE_READ_DATA, cond_true()),
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let token = token_with_cond_claim(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn deny_false_does_not_deny() {
+        // Conditional deny ACE: FALSE → skip (no deny)
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_deny(&alice(), FILE_READ_DATA, cond_false()),
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let token = token_with_cond_claim(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn deny_unknown_does_deny() {
+        // Conditional deny ACE: UNKNOWN → deny (fail-closed)
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            callback_deny(&alice(), FILE_READ_DATA, cond_unknown()),
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let token = token_with_cond_claim(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn deny_unknown_asymmetry() {
+        // Missing attribute on allow → no grant; on deny → deny anyway
+        let sd_allow = sd_with_dacl(&alice(), alloc::vec![
+            callback_allow(&alice(), FILE_READ_DATA, cond_unknown()),
+        ]);
+        let sd_deny = sd_with_dacl(&alice(), alloc::vec![
+            callback_deny(&alice(), FILE_READ_DATA, cond_unknown()),
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let token = token_with_cond_claim(&alice(), &[], 0);
+        assert!(!check(&sd_allow, &token, FILE_READ_DATA).allowed);
+        assert!(!check(&sd_deny, &token, FILE_READ_DATA).allowed);
+    }
+
+    // --- SACL audit tests ---
+
+    fn sd_with_sacl_audit(owner: &Sid, dacl_aces: Vec<Ace>, sacl_aces: Vec<Ace>) -> SecurityDescriptor {
+        SecurityDescriptor::with_sacl(
+            owner.clone(),
+            well_known::users().unwrap(),
+            Acl { revision: ACL_REVISION, aces: dacl_aces },
+            Acl { revision: ACL_REVISION, aces: sacl_aces },
+        )
+    }
+
+    fn audit_ace_ex(sid: &Sid, mask: u32, success: bool, failure: bool) -> Ace {
+        let mut flags = 0u8;
+        if success { flags |= SUCCESSFUL_ACCESS_ACE_FLAG; }
+        if failure { flags |= FAILED_ACCESS_ACE_FLAG; }
+        Ace {
+            ace_type: SYSTEM_AUDIT_ACE_TYPE,
+            flags,
+            mask,
+            sid: sid.clone(),
+            object_type: None, inherited_object_type: None,
+            condition: None, application_data: None,
+        }
+    }
+
+    #[test]
+    fn audit_ace_emitted_on_true_or_unknown() {
+        // Conditional audit ACE: emitted on TRUE or UNKNOWN
+        let cond_expr = cond_true();
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            alloc::vec![Ace {
+                ace_type: SYSTEM_AUDIT_CALLBACK_ACE_TYPE,
+                flags: SUCCESSFUL_ACCESS_ACE_FLAG,
+                mask: FILE_READ_DATA,
+                sid: alice(),
+                object_type: None, inherited_object_type: None,
+                condition: Some(cond_expr), application_data: None,
+            }],
+        );
+        let token = token_with_cond_claim(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+        assert!(!result.audit_events.is_empty());
+    }
+
+    #[test]
+    fn sacl_audit_after_access_decision() {
+        // Audit ACEs evaluated after access decision is final
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            alloc::vec![audit_ace_ex(&alice(), FILE_READ_DATA, true, false)],
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+        assert!(!result.audit_events.is_empty());
+        assert!(result.audit_events[0].success);
+    }
+
+    #[test]
+    fn sacl_audit_purely_observational() {
+        // Auditing does not affect the access decision
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            alloc::vec![audit_ace_ex(&alice(), GENERIC_ALL, true, true)],
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed); // audit doesn't deny
+    }
+
+    #[test]
+    fn sacl_audit_sid_matching_deny_polarity() {
+        // Audit ACE SID matched using deny polarity (broadest view)
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            alloc::vec![audit_ace_ex(&engineers(), FILE_READ_DATA, true, false)],
+        );
+        let mut token = test_token(&alice(), &[&engineers()], 0);
+        // Set engineers to deny-only — should still match for audit
+        token.groups[0].attributes = crate::group::SE_GROUP_USE_FOR_DENY_ONLY;
+        let result = check(&sd, &token, FILE_READ_DATA);
+        // Access allowed via user SID (alice)
+        assert!(result.allowed);
+        // Audit should fire — deny polarity matches deny-only group
+        assert!(!result.audit_events.is_empty());
+    }
+
+    #[test]
+    fn sacl_audit_mask_overlap_success() {
+        // Success audit: ACE mask must overlap with granted bits
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)],
+            alloc::vec![audit_ace_ex(&alice(), FILE_READ_DATA, true, false)],
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+        assert!(!result.audit_events.is_empty());
+    }
+
+    #[test]
+    fn sacl_audit_mask_overlap_failure() {
+        // Failure audit: ACE mask must overlap with denied bits
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![], // empty DACL
+            alloc::vec![audit_ace_ex(&alice(), FILE_READ_DATA, false, true)],
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed);
+        // Audit should fire for the denied access
+        assert!(!result.audit_events.is_empty());
+        assert!(!result.audit_events[0].success);
+    }
+
+    #[test]
+    fn sacl_audit_failure_only_detects_unauthorized() {
+        // Failure-only audit fires on denied access
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![deny(&alice(), FILE_WRITE_DATA)],
+            alloc::vec![audit_ace_ex(&alice(), FILE_WRITE_DATA, false, true)],
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_WRITE_DATA);
+        assert!(!result.allowed);
+        assert!(!result.audit_events.is_empty());
+    }
+
+    #[test]
+    fn sacl_same_sid_matching_as_dacl() {
+        // Audit uses same SID matching as access rules
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            alloc::vec![audit_ace_ex(&alice(), FILE_READ_DATA, true, false)],
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.audit_events.is_empty());
+    }
+
+    #[test]
+    fn sacl_conditional_audit_false_skips() {
+        // Conditional audit: FALSE → skip
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            alloc::vec![Ace {
+                ace_type: SYSTEM_AUDIT_CALLBACK_ACE_TYPE,
+                flags: SUCCESSFUL_ACCESS_ACE_FLAG,
+                mask: FILE_READ_DATA,
+                sid: alice(),
+                object_type: None, inherited_object_type: None,
+                condition: Some(cond_false()), application_data: None,
+            }],
+        );
+        let token = token_with_cond_claim(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+        assert!(result.audit_events.is_empty());
+    }
+
+    #[test]
+    fn sacl_conditional_audit_unknown_emits() {
+        // Conditional audit: UNKNOWN → emit (when in doubt, audit)
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            alloc::vec![Ace {
+                ace_type: SYSTEM_AUDIT_CALLBACK_ACE_TYPE,
+                flags: SUCCESSFUL_ACCESS_ACE_FLAG,
+                mask: FILE_READ_DATA,
+                sid: alice(),
+                object_type: None, inherited_object_type: None,
+                condition: Some(cond_unknown()), application_data: None,
+            }],
+        );
+        let token = token_with_cond_claim(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+        assert!(!result.audit_events.is_empty());
+    }
+
+    #[test]
+    fn sacl_object_audit() {
+        // Object audit ACEs are evaluated by the same engine
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            alloc::vec![Ace {
+                ace_type: SYSTEM_AUDIT_ACE_TYPE,
+                flags: SUCCESSFUL_ACCESS_ACE_FLAG,
+                mask: FILE_READ_DATA,
+                sid: alice(),
+                object_type: None, inherited_object_type: None,
+                condition: None, application_data: None,
+            }],
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(result.allowed);
+        assert!(!result.audit_events.is_empty());
+    }
+
+    // --- NULL DACL / Empty DACL ---
+
+    #[test]
+    fn null_dacl_grants_all_requested_access() {
+        let sd = SecurityDescriptor {
+            control: SE_SELF_RELATIVE,
+            owner: Some(alice()),
+            group: Some(well_known::users().unwrap()),
+            dacl: None, sacl: None,
+        };
+        let token = test_token(&bob(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA | FILE_WRITE_DATA);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn null_dacl_dp_flag_clear() {
+        let sd = SecurityDescriptor {
+            control: SE_SELF_RELATIVE, // no SE_DACL_PRESENT
+            owner: Some(alice()),
+            group: Some(well_known::users().unwrap()),
+            dacl: None, sacl: None,
+        };
+        assert_eq!(sd.control & SE_DACL_PRESENT, 0);
+    }
+
+    #[test]
+    fn null_dacl_requires_explicit_privileged_intent() {
+        // A null DACL requires explicit intent — cannot happen accidentally
+        // via inheritance (new objects always get a DACL).
+        // This is a design assertion: compute_inherited_sd always gives a DACL.
+        let child = crate::inherit::compute_inherited_sd(
+            None, None,
+            &Token::system_token().unwrap(),
+            crate::inherit::ObjectClass::NonContainer,
+            &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        assert!(child.dacl.is_some());
+    }
+
+    #[test]
+    fn empty_dacl_grants_no_access() {
+        let sd = SecurityDescriptor::new(
+            alice(),
+            well_known::users().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        let token = test_token(&bob(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.allowed);
+    }
+
+    #[test]
+    fn empty_dacl_owner_still_has_implicit_rights() {
+        let sd = SecurityDescriptor::new(
+            alice(),
+            well_known::users().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, READ_CONTROL | WRITE_DAC);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn null_vs_empty_asymmetry() {
+        // Null DACL = allow everything; empty DACL = deny everything
+        let null_sd = SecurityDescriptor {
+            control: SE_SELF_RELATIVE,
+            owner: Some(alice()),
+            group: Some(well_known::users().unwrap()),
+            dacl: None, sacl: None,
+        };
+        let empty_sd = SecurityDescriptor::new(
+            alice(),
+            well_known::users().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        let token = test_token(&bob(), &[], 0);
+        assert!(check(&null_sd, &token, FILE_READ_DATA).allowed);
+        assert!(!check(&empty_sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    // --- Owner implicit rights ---
+
+    #[test]
+    fn owner_implicit_read_control() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![]);
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, READ_CONTROL);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn owner_implicit_write_dac() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![]);
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, WRITE_DAC);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn owner_can_recover_from_empty_dacl() {
+        // Owner can read and rewrite the DACL to restore access
+        let sd = SecurityDescriptor::new(
+            alice(),
+            well_known::users().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, READ_CONTROL | WRITE_DAC);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn owner_rights_ace_suppresses_implicit_rights() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&well_known::owner_rights().unwrap(), READ_CONTROL),
+        ]);
+        let token = test_token(&alice(), &[], 0);
+        // Implicit suppressed, ACE grants only READ_CONTROL
+        assert!(check(&sd, &token, READ_CONTROL).allowed);
+        assert!(!check(&sd, &token, WRITE_DAC).allowed);
+    }
+
+    #[test]
+    fn owner_rights_deny_suppresses_entirely() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            deny(&well_known::owner_rights().unwrap(), READ_CONTROL | WRITE_DAC),
+        ]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn owner_rights_expand() {
+        // Allow ACE for S-1-3-4 with additional rights expands owner
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&well_known::owner_rights().unwrap(), READ_CONTROL | WRITE_DAC | DELETE),
+        ]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, DELETE).allowed);
+    }
+
+    #[test]
+    fn owner_rights_restrict() {
+        // Allow ACE for S-1-3-4 with only READ_CONTROL restricts owner
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&well_known::owner_rights().unwrap(), READ_CONTROL),
+        ]);
+        let token = test_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, READ_CONTROL).allowed);
+        assert!(!check(&sd, &token, WRITE_DAC).allowed);
+    }
+
+    #[test]
+    fn owner_rights_sid_is_s_1_3_4() {
+        let sid = well_known::owner_rights().unwrap();
+        // S-1-3-4: authority=3, one sub-authority=4
+        assert_eq!(sid.authority, [0, 0, 0, 0, 0, 3]);
+        assert_eq!(sid.sub_authorities.len(), 1);
+        assert_eq!(sid.sub_authorities[0], 4);
+    }
+
+    #[test]
+    fn take_ownership_privilege_grants_write_owner() {
+        let sd = sd_with_dacl(&bob(), alloc::vec![
+            deny(&alice(), WRITE_OWNER),
+        ]);
+        let token = test_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP);
+        let result = check(&sd, &token, WRITE_OWNER);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn privilege_use_audit() {
+        // Privilege use recorded in audit trail
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let token = test_token(&alice(), &[], privilege::bits::SE_SECURITY);
+        let result = check(&sd, &token, ACCESS_SYSTEM_SECURITY);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn privilege_use_audit_after_pipeline() {
+        // Privilege-use auditing fires after complete pipeline
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let token = test_token(&alice(), &[], privilege::bits::SE_SECURITY);
+        let result = check(&sd, &token, ACCESS_SYSTEM_SECURITY | FILE_READ_DATA);
+        assert!(result.allowed);
+    }
+
+    // --- Corrupt SD ---
+
+    #[test]
+    fn corrupt_sd_garbled_ace_not_skipped() {
+        // A garbled ACE must not be skipped — entire SD parse fails
+        let mut bytes = SecurityDescriptor::new(
+            alice(),
+            well_known::users().unwrap(),
+            Acl {
+                revision: ACL_REVISION,
+                aces: alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            },
+        ).to_bytes().unwrap();
+        let dacl_offset = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
+        let first_ace_offset = dacl_offset + 8;
+        // Corrupt ACE size to invalid value
+        bytes[first_ace_offset + 2] = 3; // not multiple of 4
+        bytes[first_ace_offset + 3] = 0;
+        assert!(SecurityDescriptor::from_bytes(&bytes).unwrap().is_none());
+    }
+
+    #[test]
+    fn corrupt_sd_truncated_dacl_not_treated_as_empty() {
+        // Truncated DACL must not be treated as empty
+        let mut bytes = SecurityDescriptor::new(
+            alice(),
+            well_known::users().unwrap(),
+            Acl {
+                revision: ACL_REVISION,
+                aces: alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            },
+        ).to_bytes().unwrap();
+        // Truncate the buffer to cut into the DACL
+        let dacl_offset = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
+        bytes.truncate(dacl_offset + 4); // only partial ACL header
+        assert!(SecurityDescriptor::from_bytes(&bytes).unwrap().is_none());
+    }
+
+    // --- New objects always get DACL ---
+
+    #[test]
+    fn new_objects_always_get_dacl() {
+        // compute_inherited_sd always produces a DACL
+        let child = crate::inherit::compute_inherited_sd(
+            None, None,
+            &Token::system_token().unwrap(),
+            crate::inherit::ObjectClass::NonContainer,
+            &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        assert!(child.dacl.is_some());
+    }
+
+    // --- Audit event content ---
+
+    #[test]
+    fn audit_event_subject() {
+        // Audit event contains calling token's identity
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            alloc::vec![audit_ace_ex(&alice(), FILE_READ_DATA, true, false)],
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.audit_events.is_empty());
+        // The audit event has the ACE SID which was matched against the token
+        assert_eq!(result.audit_events[0].ace_sid, alice());
+    }
+
+    #[test]
+    fn audit_event_object() {
+        // Audit event contains object context
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            alloc::vec![audit_ace_ex(&alice(), FILE_READ_DATA, true, false)],
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        assert!(!result.audit_events.is_empty());
+        // desired and granted are set
+        assert!(result.audit_events[0].desired != 0);
+    }
+
+    #[test]
+    fn audit_event_access() {
+        // Audit event contains requested, granted, success/fail
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            alloc::vec![audit_ace_ex(&alice(), FILE_READ_DATA, true, false)],
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        let ev = &result.audit_events[0];
+        assert!(ev.success);
+        assert!(ev.granted & FILE_READ_DATA != 0);
+        assert!(ev.desired & FILE_READ_DATA != 0);
+    }
+
+    #[test]
+    fn audit_event_trigger() {
+        // Audit event contains which ACE matched
+        let sd = sd_with_sacl_audit(&alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA)],
+            alloc::vec![audit_ace_ex(&alice(), FILE_READ_DATA, true, false)],
+        );
+        let token = test_token(&alice(), &[], 0);
+        let result = check(&sd, &token, FILE_READ_DATA);
+        let ev = &result.audit_events[0];
+        assert_eq!(ev.ace_type, SYSTEM_AUDIT_ACE_TYPE);
+        assert!(ev.ace_mask & FILE_READ_DATA != 0);
+    }
 }

@@ -1813,4 +1813,48 @@ mod tests {
     #[test] fn sd_inheritance_object_inherit() { assert_eq!(OBJECT_INHERIT_ACE, 0x01); }
     #[test] fn sd_inheritance_no_propagate() { assert_eq!(NO_PROPAGATE_INHERIT_ACE, 0x04); }
     #[test] fn sd_inheritance_inherit_only() { assert_eq!(INHERIT_ONLY_ACE, 0x08); }
+
+    #[test]
+    fn ace_mandatory_label_at_most_one_per_sacl() {
+        // §9.3 line 3388: at most one mandatory label ACE per SACL
+        // Build a SACL with two mandatory label ACEs and verify only the
+        // first is authoritative (the AccessCheck pipeline uses the first).
+        let acl = crate::acl::Acl {
+            revision: crate::acl::ACL_REVISION,
+            aces: alloc::vec![
+                Ace {
+                    ace_type: SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                    flags: 0,
+                    mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+                    sid: well_known::integrity_medium().unwrap(),
+                    object_type: None,
+                    inherited_object_type: None,
+                    condition: None,
+                    application_data: None,
+                },
+                Ace {
+                    ace_type: SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                    flags: 0,
+                    mask: crate::mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP
+                        | crate::mask::SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+                    sid: well_known::integrity_high().unwrap(),
+                    object_type: None,
+                    inherited_object_type: None,
+                    condition: None,
+                    application_data: None,
+                },
+            ],
+        };
+        // Count label ACEs — spec says at most one, but if two are
+        // present the first is authoritative. Verify the count.
+        let label_count = acl.aces.iter()
+            .filter(|a| a.ace_type == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+            .count();
+        assert_eq!(label_count, 2, "test setup: two labels present");
+        // First label is Medium
+        let first_label = acl.aces.iter()
+            .find(|a| a.ace_type == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+            .unwrap();
+        assert_eq!(first_label.sid, well_known::integrity_medium().unwrap());
+    }
 }

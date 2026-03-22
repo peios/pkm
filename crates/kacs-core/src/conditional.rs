@@ -4663,4 +4663,558 @@ mod tests {
     // cond_coerce_sid_unknown — already exists
     // cond_coerce_octet_unknown — already exists
     // cond_coerce_composite_unknown — already exists
+
+    // ===================================================================
+    // Missing corpus tests
+    // ===================================================================
+
+    // --- Three-value logic (Kleene) using attribute-backed values ---
+
+    #[test]
+    fn cond_and_true_false_is_false() {
+        let token = tv_token_true_false();
+        let expr = build(&[user_attr("tv_true"), user_attr("tv_false"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn cond_and_true_unknown_is_unknown() {
+        let token = tv_token_true_false();
+        let expr = build(&[user_attr("tv_true"), user_attr("missing"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    #[test]
+    fn cond_and_false_false_is_false() {
+        let token = tv_token_true_false();
+        let expr = build(&[user_attr("tv_false"), user_attr("tv_false"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn cond_and_false_unknown_is_false() {
+        let token = tv_token_true_false();
+        let expr = build(&[user_attr("tv_false"), user_attr("missing"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn cond_and_unknown_unknown_is_unknown() {
+        let token = empty_token();
+        let expr = build(&[user_attr("a"), user_attr("b"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    #[test]
+    fn cond_or_true_true_is_true() {
+        let token = tv_token_true_false();
+        let expr = build(&[user_attr("tv_true"), user_attr("tv_true"), op_or()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_or_true_unknown_is_true() {
+        let token = tv_token_true_false();
+        let expr = build(&[user_attr("tv_true"), user_attr("missing"), op_or()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_or_unknown_unknown_is_unknown() {
+        let token = empty_token();
+        let expr = build(&[user_attr("a"), user_attr("b"), op_or()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- Existence operators ---
+
+    #[test]
+    fn cond_exists_present_true() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 1)]);
+        let expr = build(&[user_attr("x"), op_exists()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_exists_absent_false() {
+        let expr = build(&[user_attr("missing"), op_exists()]);
+        assert_eq!(eval(&expr, &empty_token()), TriValue::False);
+    }
+
+    #[test]
+    fn cond_exists_non_attr_origin_unknown() {
+        // Exists on literal origin → UNKNOWN
+        let expr = build(&[int64_literal(42), op_exists()]);
+        assert_eq!(eval(&expr, &empty_token()), TriValue::Unknown);
+    }
+
+    #[test]
+    fn cond_not_exists_present_false() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 1)]);
+        let expr = build(&[user_attr("x"), op_not_exists()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn cond_not_exists_absent_true() {
+        let expr = build(&[user_attr("missing"), op_not_exists()]);
+        assert_eq!(eval(&expr, &empty_token()), TriValue::True);
+    }
+
+    // --- INT64/UINT64 promotion ---
+
+    #[test]
+    fn cond_int64_uint64_promotion() {
+        // Negative INT64 < any UINT64
+        let token = token_with_claims(alloc::vec![uint_claim("x", 0)]);
+        let expr = build(&[int64_literal(-1), user_attr("x"), op_lt()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- Set operators ---
+
+    #[test]
+    fn cond_contains_op() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 5)]);
+        let expr = build(&[user_attr("x"), int64_literal(5), op_contains()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_any_of_op() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 5)]);
+        let mut comp = Vec::new();
+        comp.extend_from_slice(&int64_literal(3));
+        comp.extend_from_slice(&int64_literal(5));
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("x"));
+        expr.push(0x50);
+        expr.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&comp);
+        expr.extend_from_slice(&op_any_of());
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_contains_empty_rhs_unknown() {
+        // Contains with empty rhs returns UNKNOWN (vacuous truth prevention)
+        let token = token_with_claims(alloc::vec![int_claim("x", 5)]);
+        // Empty composite as RHS
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("x"));
+        expr.push(0x50); // composite
+        expr.extend_from_slice(&0u32.to_le_bytes()); // 0-length composite
+        expr.extend_from_slice(&op_contains());
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    #[test]
+    fn cond_any_of_empty_lhs_unknown() {
+        // Any_of with empty LHS returns UNKNOWN
+        // Create claim with empty values (resolves to NULL)
+        let claim = ClaimEntry {
+            name: String::from("tags"),
+            claim_type: crate::token::ClaimType::Int64,
+            flags: 0,
+            values: ClaimValues::Int64(alloc::vec![]),
+        };
+        let token = token_with_claims(alloc::vec![claim]);
+        let expr = build(&[user_attr("tags"), int64_literal(1), op_any_of()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    #[test]
+    fn cond_any_of_empty_rhs_unknown() {
+        // Any_of with empty RHS returns UNKNOWN
+        let token = token_with_claims(alloc::vec![int_claim("x", 5)]);
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("x"));
+        expr.push(0x50);
+        expr.extend_from_slice(&0u32.to_le_bytes());
+        expr.extend_from_slice(&op_any_of());
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- Device membership ---
+
+    #[test]
+    fn cond_device_member_of_null_device_unknown() {
+        // Device_Member_of with null device_groups returns UNKNOWN
+        let token = empty_token(); // device_groups = None
+        let sid = crate::sid::Sid::new(5, &[21, 999, 999, 999]).unwrap();
+        let mut expr = header();
+        expr.extend_from_slice(&sid_literal(&sid));
+        expr.push(0x8a); // Device_Member_of
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- Attribute references ---
+
+    #[test]
+    fn cond_user_attr_reference() {
+        let token = token_with_claims(alloc::vec![int_claim("clearance", 5)]);
+        let expr = build(&[user_attr("clearance"), int64_literal(5), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_resource_attr_reference() {
+        let token = empty_token();
+        let resource = alloc::vec![int_claim("level", 3)];
+        let expr = build(&[resource_attr("level"), int64_literal(3), op_eq()]);
+        assert_eq!(eval_with_resource(&expr, &token, &resource), TriValue::True);
+    }
+
+    // --- Padding ---
+
+    #[test]
+    fn cond_padding_interior_zero_should_return_unknown() {
+        // Interior 0x00 between operand and operator should be treated as
+        // skip. A 0x00 between two operators that leaves the stack in an
+        // unexpected state yields UNKNOWN per implementation SHOULD.
+        // We test that a standalone 0x00 padding doesn't break evaluation.
+        let token = token_with_claims(alloc::vec![int_claim("x", 1)]);
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("x"));
+        expr.extend_from_slice(&int64_literal(1));
+        expr.push(0x00); // interior padding
+        expr.extend_from_slice(&op_eq());
+        // Should still evaluate correctly since 0x00 is skip
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- Expression format ---
+
+    #[test]
+    fn conditional_ace_appends_expression_after_sid() {
+        use crate::ace::*;
+        // Conditional ACE structure: header + mask + SID + expression
+        let cond = alloc::vec![0x61, 0x72, 0x74, 0x78, 0x00, 0x00, 0x00, 0x00];
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            flags: 0,
+            mask: crate::mask::FILE_READ_DATA,
+            sid: well_known::administrators().unwrap(),
+            object_type: None,
+            inherited_object_type: None,
+            condition: Some(cond.clone()),
+            application_data: None,
+        };
+        let bytes = ace.to_bytes().unwrap();
+        let (parsed, _) = Ace::from_bytes(&bytes).unwrap();
+        assert!(parsed.condition.is_some());
+        assert_eq!(&parsed.condition.unwrap()[..4], &[0x61, 0x72, 0x74, 0x78]);
+    }
+
+    #[test]
+    fn conditional_expression_binary_format() {
+        // Expression stored in binary format per MS-DTYP §2.4.4.17
+        // Verify the artx header is the magic signature
+        let expr = build(&[int64_literal(1)]);
+        assert_eq!(&expr[..4], &[0x61, 0x72, 0x74, 0x78]);
+    }
+
+    #[test]
+    fn expression_binary_format_windows_compatible() {
+        // Byte-compatible with Windows (MS-DTYP §2.4.4.17.4)
+        let expr = build(&[int64_literal(42), int64_literal(42), op_eq()]);
+        // artx magic header
+        assert_eq!(&expr[..4], b"artx");
+    }
+
+    #[test]
+    fn expression_binary_representation_rpn() {
+        // Binary representation is RPN (operands before operator)
+        let expr = build(&[int64_literal(1), int64_literal(2), op_eq()]);
+        // First 4 bytes: artx header
+        // Then two int64 literals, then eq operator
+        assert_eq!(expr[4], 0x04); // Int64 opcode
+        // The last byte should be 0x80 (eq)
+        assert_eq!(*expr.last().unwrap(), 0x80);
+    }
+
+    #[test]
+    fn expression_evaluator_three_valued_logic() {
+        // Evaluator supports three-valued logic
+        let token = token_with_claims(alloc::vec![int_claim("x", 1)]);
+        assert_eq!(eval(&build(&[user_attr("x"), int64_literal(1), op_eq()]), &token), TriValue::True);
+        assert_eq!(eval(&build(&[user_attr("x"), int64_literal(2), op_eq()]), &token), TriValue::False);
+        assert_eq!(eval(&build(&[user_attr("missing"), int64_literal(1), op_eq()]), &token), TriValue::Unknown);
+    }
+
+    #[test]
+    fn expression_user_claims_prefix() {
+        // @User. prefix queries user claims
+        let token = token_with_claims(alloc::vec![int_claim("dept", 42)]);
+        let expr = build(&[user_attr("dept"), int64_literal(42), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_device_claims_prefix() {
+        // @Device. prefix queries device claims
+        let mut token = empty_token();
+        token.device_claims = alloc::vec![int_claim("managed", 1)];
+        let expr = build(&[device_attr("managed"), int64_literal(1), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_resource_attribute_prefix() {
+        // @Resource. prefix queries resource attributes
+        let token = empty_token();
+        let resource = alloc::vec![int_claim("confidentiality", 3)];
+        let expr = build(&[resource_attr("confidentiality"), int64_literal(3), op_eq()]);
+        assert_eq!(eval_with_resource(&expr, &token, &resource), TriValue::True);
+    }
+
+    #[test]
+    fn expression_relational_operators() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 5)]);
+        assert_eq!(eval(&build(&[user_attr("x"), int64_literal(5), op_eq()]), &token), TriValue::True);
+        assert_eq!(eval(&build(&[user_attr("x"), int64_literal(4), op_ne()]), &token), TriValue::True);
+        assert_eq!(eval(&build(&[user_attr("x"), int64_literal(6), op_lt()]), &token), TriValue::True);
+        assert_eq!(eval(&build(&[user_attr("x"), int64_literal(5), op_le()]), &token), TriValue::True);
+        assert_eq!(eval(&build(&[user_attr("x"), int64_literal(4), op_gt()]), &token), TriValue::True);
+        assert_eq!(eval(&build(&[user_attr("x"), int64_literal(5), op_ge()]), &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_set_operators_contains() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 5)]);
+        let expr = build(&[user_attr("x"), int64_literal(5), op_contains()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_set_operators_any_of() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 5)]);
+        let mut comp = Vec::new();
+        comp.extend_from_slice(&int64_literal(3));
+        comp.extend_from_slice(&int64_literal(5));
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("x"));
+        expr.push(0x50);
+        expr.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&comp);
+        expr.extend_from_slice(&op_any_of());
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_member_of() {
+        let token = empty_token(); // system token has Administrators
+        let expr = build(&[sid_literal(&well_known::administrators().unwrap()), op_member_of()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_member_of_any() {
+        let token = empty_token();
+        let admins = well_known::administrators().unwrap();
+        let random = crate::sid::Sid::new(5, &[21, 1, 2, 3, 999]).unwrap();
+        let mut comp = Vec::new();
+        comp.extend_from_slice(&sid_literal(&random));
+        comp.extend_from_slice(&sid_literal(&admins));
+        let mut expr = header();
+        expr.push(0x50);
+        expr.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&comp);
+        expr.extend_from_slice(&op_member_of_any());
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_not_member_of() {
+        let token = empty_token();
+        let random = crate::sid::Sid::new(5, &[21, 999, 999, 999]).unwrap();
+        let expr = build(&[sid_literal(&random), op_not_member_of()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_not_member_of_any() {
+        let token = empty_token();
+        let r1 = crate::sid::Sid::new(5, &[21, 999, 999, 1]).unwrap();
+        let r2 = crate::sid::Sid::new(5, &[21, 999, 999, 2]).unwrap();
+        let mut comp = Vec::new();
+        comp.extend_from_slice(&sid_literal(&r1));
+        comp.extend_from_slice(&sid_literal(&r2));
+        let mut expr = header();
+        expr.push(0x50);
+        expr.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&comp);
+        expr.extend_from_slice(&op_not_member_of_any());
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_device_member_of() {
+        let mut token = empty_token();
+        let managed = crate::sid::Sid::new(5, &[21, 100, 200, 300, 5001]).unwrap();
+        token.device_groups = Some(alloc::vec![
+            crate::group::GroupEntry::new(managed.clone(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED),
+        ]);
+        let mut expr = header();
+        expr.extend_from_slice(&sid_literal(&managed));
+        expr.push(0x8a); // Device_Member_of
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_device_member_of_any() {
+        let mut token = empty_token();
+        let managed = crate::sid::Sid::new(5, &[21, 100, 200, 300, 5001]).unwrap();
+        token.device_groups = Some(alloc::vec![
+            crate::group::GroupEntry::new(managed.clone(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED),
+        ]);
+        let mut expr = header();
+        expr.extend_from_slice(&sid_literal(&managed));
+        expr.push(0x8c); // Device_Member_of_Any
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_not_device_member_of() {
+        let mut token = empty_token();
+        let managed = crate::sid::Sid::new(5, &[21, 100, 200, 300, 5001]).unwrap();
+        token.device_groups = Some(alloc::vec![
+            crate::group::GroupEntry::new(managed.clone(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED),
+        ]);
+        let other = crate::sid::Sid::new(5, &[21, 999, 999, 999]).unwrap();
+        let mut expr = header();
+        expr.extend_from_slice(&sid_literal(&other));
+        expr.push(0x91); // Not_Device_Member_of
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_not_device_member_of_any() {
+        let mut token = empty_token();
+        let managed = crate::sid::Sid::new(5, &[21, 100, 200, 300, 5001]).unwrap();
+        token.device_groups = Some(alloc::vec![
+            crate::group::GroupEntry::new(managed.clone(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED),
+        ]);
+        let r1 = crate::sid::Sid::new(5, &[21, 999, 999, 1]).unwrap();
+        let r2 = crate::sid::Sid::new(5, &[21, 999, 999, 2]).unwrap();
+        let mut comp = Vec::new();
+        comp.extend_from_slice(&sid_literal(&r1));
+        comp.extend_from_slice(&sid_literal(&r2));
+        let mut expr = header();
+        expr.push(0x50);
+        expr.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&comp);
+        expr.push(0x93); // Not_Device_Member_of_Any
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_logical_and() {
+        let token = token_with_claims(alloc::vec![int_claim("a", 1), int_claim("b", 1)]);
+        let expr = build(&[
+            user_attr("a"), int64_literal(1), op_eq(),
+            user_attr("b"), int64_literal(1), op_eq(),
+            op_and(),
+        ]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_logical_or() {
+        let token = token_with_claims(alloc::vec![int_claim("a", 1), int_claim("b", 2)]);
+        let expr = build(&[
+            user_attr("a"), int64_literal(1), op_eq(),
+            user_attr("b"), int64_literal(1), op_eq(),
+            op_or(),
+        ]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_logical_not() {
+        let token = token_with_claims(alloc::vec![int_claim("a", 2)]);
+        let expr = build(&[user_attr("a"), int64_literal(1), op_eq(), op_not()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_exists_operator() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 1)]);
+        assert_eq!(eval(&build(&[user_attr("x"), op_exists()]), &token), TriValue::True);
+    }
+
+    #[test]
+    fn expression_not_exists_operator() {
+        assert_eq!(eval(&build(&[user_attr("missing"), op_not_exists()]), &empty_token()), TriValue::True);
+    }
+
+    #[test]
+    fn expression_literal_integers() {
+        let expr = build(&[int64_literal(42)]);
+        // Literal alone on stack → UNKNOWN (no operator)
+        assert_eq!(eval(&expr, &empty_token()), TriValue::Unknown);
+    }
+
+    #[test]
+    fn expression_literal_strings() {
+        let expr = build(&[string_literal("hello")]);
+        assert_eq!(eval(&expr, &empty_token()), TriValue::Unknown);
+    }
+
+    #[test]
+    fn expression_literal_sids() {
+        let expr = build(&[sid_literal(&well_known::system().unwrap())]);
+        assert_eq!(eval(&expr, &empty_token()), TriValue::Unknown);
+    }
+
+    #[test]
+    fn expression_literal_octet_strings() {
+        let expr = build(&[octet_literal(&[0xDE, 0xAD])]);
+        assert_eq!(eval(&expr, &empty_token()), TriValue::Unknown);
+    }
+
+    #[test]
+    fn expression_literal_composites() {
+        let expr = build(&[composite_literal(&[int64_literal(1), int64_literal(2)])]);
+        assert_eq!(eval(&expr, &empty_token()), TriValue::Unknown);
+    }
+
+    #[test]
+    fn expression_stack_based_evaluation() {
+        // Stack-based bytecode program in RPN
+        let token = token_with_claims(alloc::vec![int_claim("x", 5)]);
+        // Push x, push 5, eq → TRUE
+        let expr = build(&[user_attr("x"), int64_literal(5), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn member_of_checks_token_groups() {
+        // Member_of evaluates by checking token's groups
+        let token = empty_token(); // system token has Administrators group
+        let expr = build(&[sid_literal(&well_known::administrators().unwrap()), op_member_of()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+
+        let random = crate::sid::Sid::new(5, &[21, 999, 999, 999]).unwrap();
+        let expr2 = build(&[sid_literal(&random), op_member_of()]);
+        assert_eq!(eval(&expr2, &token), TriValue::False);
+    }
+
+    #[test]
+    fn member_of_combinable_with_conditions() {
+        // Member_of{SID} && @User.clearance >= 3
+        let mut token = token_with_claims(alloc::vec![int_claim("clearance", 5)]);
+        let eng = crate::sid::Sid::new(5, &[21, 100, 200, 300, 2001]).unwrap();
+        token.groups = alloc::vec![
+            crate::group::GroupEntry::new(eng.clone(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED),
+        ];
+        let mut expr = header();
+        expr.extend_from_slice(&sid_literal(&eng));
+        expr.extend_from_slice(&op_member_of());
+        expr.extend_from_slice(&user_attr("clearance"));
+        expr.extend_from_slice(&int64_literal(3));
+        expr.extend_from_slice(&op_ge());
+        expr.extend_from_slice(&op_and());
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
 }

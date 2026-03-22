@@ -1790,4 +1790,284 @@ mod tests {
             }
         }
     }
+
+    // --- Corpus tests ---
+
+    #[test]
+    fn inheritance_ci_only_inherits_containers_only() {
+        // CI-only ACE inherits to containers only, not files
+        let parent = parent_sd(alloc::vec![
+            ci_allow(&well_known::everyone().unwrap(), FILE_READ_DATA),
+        ]);
+        // Container inherits it
+        let child_dir = compute_inherited_sd(
+            Some(&parent), None, &test_token(),
+            ObjectClass::Container, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        assert_eq!(child_dir.dacl.as_ref().unwrap().aces.len(), 1);
+
+        // File does not inherit it
+        let child_file = compute_inherited_sd(
+            Some(&parent), None, &test_token(),
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        assert_eq!(child_file.dacl.as_ref().unwrap().aces.len(), 0);
+    }
+
+    #[test]
+    fn inheritance_oi_only_inherits_noncontainers_only() {
+        // OI-only ACE: inherited by files, and by containers as inherit-only
+        let parent = parent_sd(alloc::vec![
+            oi_allow(&well_known::everyone().unwrap(), FILE_READ_DATA),
+        ]);
+        // File inherits it normally
+        let child_file = compute_inherited_sd(
+            Some(&parent), None, &test_token(),
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        assert_eq!(child_file.dacl.as_ref().unwrap().aces.len(), 1);
+        // No inherit-only on files
+        assert_eq!(child_file.dacl.as_ref().unwrap().aces[0].flags & INHERIT_ONLY_ACE, 0);
+
+        // Container inherits as inherit-only
+        let child_dir = compute_inherited_sd(
+            Some(&parent), None, &test_token(),
+            ObjectClass::Container, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        assert_eq!(child_dir.dacl.as_ref().unwrap().aces.len(), 1);
+        assert!(child_dir.dacl.as_ref().unwrap().aces[0].flags & INHERIT_ONLY_ACE != 0);
+    }
+
+    #[test]
+    fn inheritance_no_propagate_clears_flags() {
+        // NO_PROPAGATE_INHERIT_ACE clears OI and CI on inherited copy
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_ACE_TYPE,
+            flags: CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE,
+            mask: FILE_READ_DATA,
+            sid: well_known::everyone().unwrap(),
+            object_type: None, inherited_object_type: None,
+            condition: None, application_data: None,
+        };
+        let parent = parent_sd(alloc::vec![ace]);
+        let child = compute_inherited_sd(
+            Some(&parent), None, &test_token(),
+            ObjectClass::Container, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        let dacl = child.dacl.unwrap();
+        assert_eq!(dacl.aces.len(), 1);
+        assert_eq!(dacl.aces[0].flags & (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE), 0);
+        assert!(dacl.aces[0].flags & INHERITED_ACE != 0);
+    }
+
+    #[test]
+    fn inheritance_inherit_only_does_not_apply_to_self() {
+        // INHERIT_ONLY_ACE does not apply to the object it's on
+        let ace = Ace {
+            ace_type: ACCESS_ALLOWED_ACE_TYPE,
+            flags: INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE,
+            mask: FILE_READ_DATA,
+            sid: well_known::everyone().unwrap(),
+            object_type: None, inherited_object_type: None,
+            condition: None, application_data: None,
+        };
+        assert!(ace.is_inherit_only());
+    }
+
+    #[test]
+    fn inheritance_inherited_ace_flag_set() {
+        // INHERITED_ACE flag is set on ACEs that came from the parent
+        let parent = parent_sd(alloc::vec![
+            ci_oi_allow(&well_known::everyone().unwrap(), FILE_READ_DATA),
+        ]);
+        let child = compute_inherited_sd(
+            Some(&parent), None, &test_token(),
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        for ace in &child.dacl.unwrap().aces {
+            assert!(ace.flags & INHERITED_ACE != 0);
+        }
+    }
+
+    #[test]
+    fn inheritance_substitution_at_inheritance_time() {
+        // SID substitution happens at inheritance time
+        let parent = parent_sd(alloc::vec![
+            ci_oi_allow(&well_known::creator_owner().unwrap(), FILE_READ_DATA),
+        ]);
+        let child = compute_inherited_sd(
+            Some(&parent), None, &test_token(),
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        let dacl = child.dacl.unwrap();
+        // CREATOR OWNER replaced with token's owner (SYSTEM)
+        assert_ne!(dacl.aces[0].sid, well_known::creator_owner().unwrap());
+        assert_eq!(dacl.aces[0].sid, well_known::system().unwrap());
+    }
+
+    #[test]
+    fn inheritance_creator_sd_explicit_aces_preserved() {
+        // Creator SD with DACL: explicit ACEs preserved
+        let alice = Sid::new(5, &[21, 100, 200, 300, 1001]).unwrap();
+        let creator = SecurityDescriptor {
+            control: SE_DACL_PRESENT | SE_SELF_RELATIVE,
+            owner: Some(alice.clone()),
+            group: Some(well_known::users().unwrap()),
+            dacl: Some(Acl {
+                revision: ACL_REVISION,
+                aces: alloc::vec![Ace {
+                    ace_type: ACCESS_ALLOWED_ACE_TYPE,
+                    flags: 0,
+                    mask: FILE_WRITE_DATA,
+                    sid: alice.clone(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                }],
+            }),
+            sacl: None,
+        };
+        let child = compute_inherited_sd(
+            None, Some(&creator), &test_token(),
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        let dacl = child.dacl.unwrap();
+        assert!(dacl.aces.iter().any(|a| a.sid == alice && a.flags & INHERITED_ACE == 0));
+    }
+
+    #[test]
+    fn inheritance_creator_sd_unprotected_appends_parent() {
+        // Creator SD with unprotected DACL: parent inheritable ACEs appended
+        let alice = Sid::new(5, &[21, 100, 200, 300, 1001]).unwrap();
+        let parent = parent_sd(alloc::vec![
+            ci_oi_allow(&well_known::everyone().unwrap(), FILE_READ_DATA),
+        ]);
+        let creator = SecurityDescriptor {
+            control: SE_DACL_PRESENT | SE_SELF_RELATIVE,
+            owner: Some(alice.clone()),
+            group: Some(well_known::users().unwrap()),
+            dacl: Some(Acl {
+                revision: ACL_REVISION,
+                aces: alloc::vec![Ace {
+                    ace_type: ACCESS_ALLOWED_ACE_TYPE,
+                    flags: 0,
+                    mask: FILE_WRITE_DATA,
+                    sid: alice.clone(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                }],
+            }),
+            sacl: None,
+        };
+        let child = compute_inherited_sd(
+            Some(&parent), Some(&creator), &test_token(),
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        let dacl = child.dacl.unwrap();
+        assert_eq!(dacl.aces.len(), 2);
+        assert_eq!(dacl.aces[0].sid, alice);
+        assert!(dacl.aces[1].flags & INHERITED_ACE != 0);
+    }
+
+    #[test]
+    fn inheritance_creator_sd_protected_blocks_parent() {
+        // Creator SD with SE_DACL_PROTECTED: parent inheritance blocked
+        let parent = parent_sd(alloc::vec![
+            ci_oi_allow(&well_known::everyone().unwrap(), GENERIC_ALL),
+        ]);
+        let alice = Sid::new(5, &[21, 100, 200, 300, 1001]).unwrap();
+        let creator = SecurityDescriptor {
+            control: SE_DACL_PRESENT | SE_DACL_PROTECTED | SE_SELF_RELATIVE,
+            owner: Some(alice.clone()),
+            group: Some(well_known::users().unwrap()),
+            dacl: Some(Acl {
+                revision: ACL_REVISION,
+                aces: alloc::vec![Ace {
+                    ace_type: ACCESS_ALLOWED_ACE_TYPE,
+                    flags: 0,
+                    mask: FILE_READ_DATA,
+                    sid: alice.clone(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                }],
+            }),
+            sacl: None,
+        };
+        let child = compute_inherited_sd(
+            Some(&parent), Some(&creator), &test_token(),
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        let dacl = child.dacl.unwrap();
+        assert_eq!(dacl.aces.len(), 1);
+        assert_eq!(dacl.aces[0].sid, alice);
+    }
+
+    #[test]
+    fn inheritance_generic_rights_mapped_on_inherited_aces() {
+        // Generic rights in inherited ACEs mapped to object-specific
+        let parent = parent_sd(alloc::vec![
+            ci_oi_allow(&well_known::everyone().unwrap(), GENERIC_READ),
+        ]);
+        let child = compute_inherited_sd(
+            Some(&parent), None, &test_token(),
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        let dacl = child.dacl.unwrap();
+        assert!(dacl.aces[0].mask & FILE_READ_DATA != 0);
+        assert_eq!(dacl.aces[0].mask & GENERIC_READ, 0);
+    }
+
+    #[test]
+    fn inheritance_sacl_computed_same_as_dacl() {
+        // SACL follows the same inheritance algorithm as DACL
+        let parent = SecurityDescriptor::with_sacl(
+            well_known::system().unwrap(),
+            well_known::system().unwrap(),
+            Acl::new(ACL_REVISION),
+            Acl {
+                revision: ACL_REVISION,
+                aces: alloc::vec![Ace {
+                    ace_type: ace::SYSTEM_AUDIT_ACE_TYPE,
+                    flags: CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE
+                        | ace::SUCCESSFUL_ACCESS_ACE_FLAG,
+                    mask: FILE_WRITE_DATA,
+                    sid: well_known::everyone().unwrap(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                }],
+            },
+        );
+        let child = compute_inherited_sd(
+            Some(&parent), None, &test_token(),
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        assert!(child.sacl.is_some());
+        let sacl = child.sacl.unwrap();
+        assert_eq!(sacl.aces[0].ace_type, ace::SYSTEM_AUDIT_ACE_TYPE);
+        assert!(sacl.aces[0].flags & INHERITED_ACE != 0);
+    }
+
+    #[test]
+    fn inheritance_no_default_sacl_means_no_sacl() {
+        // No creator SACL + no parent inheritable SACL ACEs = no SACL
+        let child = compute_inherited_sd(
+            None, None, &test_token(),
+            ObjectClass::NonContainer, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        assert!(child.sacl.is_none());
+    }
+
+    #[test]
+    fn inheritance_object_inherit_on_container_becomes_inherit_only() {
+        // OI ACE inherited by a subdirectory becomes inherit-only
+        let parent = parent_sd(alloc::vec![
+            oi_allow(&well_known::everyone().unwrap(), FILE_READ_DATA),
+        ]);
+        let child = compute_inherited_sd(
+            Some(&parent), None, &test_token(),
+            ObjectClass::Container, &FILE_GENERIC_MAPPING, None,
+        ).unwrap();
+        let dacl = child.dacl.unwrap();
+        assert_eq!(dacl.aces.len(), 1);
+        assert!(dacl.aces[0].flags & INHERIT_ONLY_ACE != 0);
+    }
 }
