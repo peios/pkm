@@ -18,13 +18,22 @@
 #include <linux/file.h>
 #include <linux/binfmts.h>
 #include <linux/net.h>
+#include <linux/prctl.h>
+#include <linux/fiemap.h>
 #include <linux/pid.h>
 #include <linux/pidfd.h>
 #include <linux/fs.h>
 #include <linux/mman.h>
+#include <linux/fdtable.h>
 #include <linux/dcache.h>
 #include <linux/xattr.h>
+#include <linux/namei.h>
 #include <net/sock.h>
+
+/* fs/internal.h: do_sys_openat2 declaration (kacs_open syscall).
+ * Included via ccflags-y += -I$(srctree)/fs in the PKM Makefile
+ * so the compiler catches signature changes on kernel rebases. */
+#include "internal.h"
 
 /* ── Event subsystem (from events.c) ──────────────────────────────────── */
 extern int peios_event_emit_kernel(const void *body, u32 body_len);
@@ -44,6 +53,7 @@ EXPORT_SYMBOL(kacs_cred_blob_offset);
 
 extern int kacs_rust_init(void);
 extern const void *kacs_token_create_system(void);
+extern const void *kacs_create_root_sd(void);
 extern const void *kacs_token_create_anonymous(void);
 extern const void *kacs_token_clone(const void *ptr);
 extern void kacs_token_drop(const void *ptr);
@@ -112,6 +122,10 @@ extern long long kacs_access_check_sd(const void *token_ptr,
 				      u32 *granted_out);
 extern int kacs_check_token_sd(const void *token_ptr,
 			       const void *caller_token_ptr, u32 desired);
+
+/* ── Forward declarations ──────────────────────────────────────────────── */
+
+static void compute_caps_from_token(const void *token, kernel_cap_t *caps);
 
 /* ── Constants ─────────────────────────────────────────────────────────── */
 
@@ -344,6 +358,7 @@ static struct lsm_blob_sizes kacs_blob_sizes __ro_after_init = {
 	.lbs_inode = sizeof(struct kacs_inode_security),
 	.lbs_sock = sizeof(struct kacs_sock_security),
 	.lbs_task = sizeof(struct kacs_task_security),
+	.lbs_xattr_count = 1,
 };
 
 static inline struct kacs_cred_security *kacs_cred(const struct cred *cred)
@@ -1338,11 +1353,7 @@ static inline bool is_sd_xattr(const char *name)
 	    || !strcmp(name, KACS_SD_XATTR_NTFS);
 }
 
-static inline bool is_posix_acl_xattr(const char *name)
-{
-	return !strcmp(name, "system.posix_acl_access")
-	    || !strcmp(name, "system.posix_acl_default");
-}
+/* is_posix_acl_xattr() provided by <linux/xattr.h> since 6.19 */
 
 /* ── Capability switchboard (§5.2.1) ──────────────────────────────────── */
 /*
@@ -1602,6 +1613,8 @@ static int kacs_bprm_creds_from_file(struct linux_binprm *bprm,
  * Returns the cached SD (RCU-protected, caller must hold rcu_read_lock).
  * Returns NULL if the file has no SD (missing or corrupt).
  */
+static void stamp_root_if_needed(struct inode *dir);
+
 static const void *kacs_inode_get_sd(struct inode *inode)
 {
 	struct kacs_inode_security *isec = kacs_inode(inode);
@@ -1641,7 +1654,11 @@ static const void *kacs_inode_get_sd(struct inode *inode)
 
 		if (len <= 0) {
 			kfree(buf);
-			return NULL; /* no SD on this file */
+			/* No xattr SD — try synthesize mode (§14.2).
+			 * Inherit from parent directory if it has an SD.
+			 * TODO: per-mount policy to choose deny vs synthesize.
+			 * Currently synthesize is always attempted. */
+			goto try_synthesize;
 		}
 
 		/* Parse the binary SD via Rust. */
@@ -1687,6 +1704,62 @@ static const void *kacs_inode_get_sd(struct inode *inode)
 	}
 
 	return new_sd;
+
+try_synthesize:
+	/*
+	 * Synthesize mode (§14.2): no SD on disk — try inheriting from
+	 * the parent directory. This makes foreign filesystems (9p, FAT,
+	 * USB) accessible without a full SD stamping pass.
+	 *
+	 * TODO: gate on per-mount policy (deny vs synthesize).
+	 * Currently always attempts synthesis; falls back to NULL (deny)
+	 * if no parent SD is available.
+	 */
+	{
+		struct dentry *alias = d_find_any_alias(inode);
+		struct inode *parent_inode = NULL;
+		const void *parent_sd;
+		const struct kacs_cred_security *ccred;
+
+		if (!alias)
+			return NULL;
+
+		/* Walk up to parent directory. */
+		if (alias->d_parent && alias->d_parent != alias)
+			parent_inode = d_inode(alias->d_parent);
+		dput(alias);
+
+		if (!parent_inode) {
+			/* No parent — filesystem root. Lazy-stamp it. */
+			stamp_root_if_needed(inode);
+			sd = rcu_dereference(isec->sd_cache);
+			return (sd == KACS_SD_CORRUPT) ? NULL : sd;
+		}
+
+		/* Get parent's SD (may recurse — parent might also need
+		 * synthesis, bottoming out at the lazy-stamped root). */
+		parent_sd = kacs_inode_get_sd(parent_inode);
+		if (!parent_sd)
+			return NULL;
+
+		/* Compute inherited SD from parent. */
+		ccred = kacs_cred(current_cred());
+		new_sd = kacs_create_inherited_sd(ccred->token, parent_sd,
+						  S_ISDIR(inode->i_mode));
+		if (!new_sd)
+			return NULL;
+
+		/* Cache it (persist_synthesized=false: in-memory only). */
+		old = cmpxchg(&isec->sd_cache, NULL, new_sd);
+		if (old) {
+			kacs_proc_sd_drop(new_sd);
+			if (old == KACS_SD_CORRUPT)
+				return NULL;
+			return old;
+		}
+
+		return new_sd;
+	}
 }
 
 /* ── Dentry-based hook coordination (§14.3) ───────────────────────────── */
@@ -2067,6 +2140,12 @@ static int kacs_file_open(struct file *file)
 	/* O_PATH fds: VFS handles them before this hook fires — we never
 	 * see them here. But guard defensively. */
 	if (file->f_flags & O_PATH)
+		return 0;
+
+	/* Private/internal inodes (anon_inode, pidns, etc.) have no
+	 * filesystem context for SD resolution. Security is enforced
+	 * by the syscall that creates the handle, not the fd. */
+	if (IS_PRIVATE(file_inode(file)))
 		return 0;
 
 	/* Get the inode's SD from cache. */
@@ -2588,6 +2667,41 @@ static int kacs_file_receive(struct file *file)
  * Check an access right against a directory's SD using the
  * DIRECTORY_GENERIC_MAPPING. Returns 0 on success, -EACCES on deny.
  */
+/*
+ * Lazily stamp a bootstrap SD on a filesystem root inode.
+ * Called when check_parent_sd encounters a root directory with no SD.
+ * The SD grants SYSTEM GENERIC_ALL with full inheritance so
+ * kacs_inode_init_security can cascade to all children.
+ */
+static void stamp_root_if_needed(struct inode *dir)
+{
+	struct kacs_inode_security *isec;
+	const void *root_sd;
+	const void *old;
+
+	/* Only stamp filesystem root inodes (root of their superblock). */
+	if (!dir->i_sb->s_root ||
+	    dir != dir->i_sb->s_root->d_inode)
+		return;
+
+	isec = kacs_inode(dir);
+
+	/* Already has an SD (or corrupt sentinel) — nothing to do. */
+	if (rcu_access_pointer(isec->sd_cache))
+		return;
+
+	root_sd = kacs_create_root_sd();
+	if (!root_sd)
+		return;
+
+	/* Race-safe: first writer wins. */
+	old = cmpxchg(&isec->sd_cache, NULL, root_sd);
+	if (old) {
+		/* Another thread stamped it first. */
+		kacs_proc_sd_drop(root_sd);
+	}
+}
+
 static int check_parent_sd(struct inode *dir, u32 right)
 {
 	const void *sd;
@@ -2598,7 +2712,15 @@ static int check_parent_sd(struct inode *dir, u32 right)
 	sd = kacs_inode_get_sd(dir);
 	if (!sd) {
 		rcu_read_unlock();
-		return -EACCES; /* deny mode: no SD on parent */
+		/* Filesystem root with no SD — stamp it lazily. */
+		stamp_root_if_needed(dir);
+		/* Retry after stamping. */
+		rcu_read_lock();
+		sd = kacs_inode_get_sd(dir);
+		if (!sd) {
+			rcu_read_unlock();
+			return -EACCES;
+		}
 	}
 	ccred = kacs_cred(current_cred());
 	ret = kacs_dir_access_check(ccred->token, sd, right);
@@ -2653,13 +2775,6 @@ static int kacs_inode_init_security(struct inode *inode,
 	const void *sd_bytes;
 	int sd_len;
 
-	if (!xattrs) {
-		/* Caller just wants count. */
-		if (xattr_count)
-			*xattr_count = 1;
-		return 0;
-	}
-
 	/* Get parent directory's SD for inheritance. */
 	rcu_read_lock();
 	parent_sd = kacs_inode_get_sd(dir);
@@ -2672,17 +2787,29 @@ static int kacs_inode_init_security(struct inode *inode,
 						S_ISDIR(inode->i_mode));
 
 	if (!inherited_sd) {
-		/* Inheritance failed — no SD for this file.
-		 * In deny mode, this file will be inaccessible. */
 		if (xattr_count)
 			*xattr_count = 0;
 		return -ENOMEM;
 	}
 
+	/* Always install the parsed SD in the inode cache. */
+	{
+		struct kacs_inode_security *isec = kacs_inode(inode);
+		rcu_assign_pointer(isec->sd_cache, inherited_sd);
+		/* inherited_sd is now owned by the cache — don't free. */
+	}
+
+	if (!xattrs) {
+		/* Caller doesn't want xattr data (e.g. ramfs).
+		 * SD is cached above — that's sufficient. */
+		if (xattr_count)
+			*xattr_count = 0;
+		return 0;
+	}
+
 	/* Serialize the inherited SD to binary for the xattr. */
 	sd_len = kacs_sd_to_bytes(inherited_sd, NULL, 0);
 	if (sd_len <= 0) {
-		kacs_proc_sd_drop(inherited_sd);
 		if (xattr_count)
 			*xattr_count = 0;
 		return -ENOMEM;
@@ -2690,7 +2817,6 @@ static int kacs_inode_init_security(struct inode *inode,
 
 	xattrs[0].value = kmalloc(sd_len, GFP_KERNEL);
 	if (!xattrs[0].value) {
-		kacs_proc_sd_drop(inherited_sd);
 		if (xattr_count)
 			*xattr_count = 0;
 		return -ENOMEM;
@@ -2699,13 +2825,6 @@ static int kacs_inode_init_security(struct inode *inode,
 	kacs_sd_to_bytes(inherited_sd, xattrs[0].value, sd_len);
 	xattrs[0].name = KACS_SD_XATTR;
 	xattrs[0].value_len = sd_len;
-
-	/* Also install the parsed SD in the inode cache immediately. */
-	{
-		struct kacs_inode_security *isec = kacs_inode(inode);
-		rcu_assign_pointer(isec->sd_cache, inherited_sd);
-		/* inherited_sd is now owned by the cache — don't free. */
-	}
 
 	if (xattr_count)
 		*xattr_count = 1;
@@ -2824,7 +2943,7 @@ static int kacs_inode_permission(struct inode *inode, int mask)
 		sd = kacs_inode_get_sd(inode);
 		if (!sd) {
 			rcu_read_unlock();
-			/* No SD on directory — in deny mode, but
+			/* No SD on directory — deny traverse.
 			 * SeChangeNotifyPrivilege (if held) bypasses
 			 * traverse on missing-SD dirs too. Since we already
 			 * checked the privilege above and it wasn't held,
@@ -3678,9 +3797,14 @@ static int resolve_target(int dirfd, const char __user *pathname,
 
 /* ── Syscall: kacs_get_sd (1021) ──────────────────────────────────────── */
 
-SYSCALL_DEFINE7(kacs_get_sd, int, dirfd, const char __user *, path,
+/*
+ * Returns SD size on success (positive), -errno on failure.
+ * Size-query pattern: call with buf=NULL/buf_len=0, returns needed size.
+ * Like getxattr(): return value IS the size.
+ */
+SYSCALL_DEFINE6(kacs_get_sd, int, dirfd, const char __user *, path,
 		u32, security_info, void __user *, buf, u32, buf_len,
-		u32 __user *, len_needed, u32, flags)
+		u32, flags)
 {
 	struct path target;
 	struct inode *inode;
@@ -3728,17 +3852,11 @@ SYSCALL_DEFINE7(kacs_get_sd, int, dirfd, const char __user *, path,
 	if (sd_len <= 0)
 		return -EINVAL;
 
-	/* Return needed size. */
-	if (len_needed) {
-		if (put_user((u32)sd_len, len_needed))
-			return -EFAULT;
-	}
-
 	if (!buf || buf_len == 0)
-		return 0; /* size query only */
+		return sd_len; /* size query */
 
 	if (buf_len < (u32)sd_len)
-		return -ERANGE; /* buffer too small */
+		return -ERANGE;
 
 	/* Allocate kernel buffer and extract. */
 	kbuf = kmalloc(sd_len, GFP_KERNEL);
@@ -3763,7 +3881,7 @@ SYSCALL_DEFINE7(kacs_get_sd, int, dirfd, const char __user *, path,
 	}
 
 	kfree(kbuf);
-	return 0;
+	return sd_len;
 }
 
 /* ── Syscall: kacs_set_sd (1022) ──────────────────────────────────────── */
@@ -3930,6 +4048,21 @@ SYSCALL_DEFINE6(kacs_set_sd, int, dirfd, const char __user *, path,
 #define KACS_FILE_OVERWRITE_IF	5
 
 /*
+ * kacs_open parameters, passed by pointer (like openat2's open_how).
+ * Extensible via the howsize parameter — new fields can be appended
+ * in future versions without burning a new syscall number.
+ */
+struct kacs_open_how {
+	__u32 desired_access;
+	__u32 create_disposition;
+	__u32 create_options;
+	__u32 flags;		/* AT_SYMLINK_NOFOLLOW etc. */
+	__aligned_u64 sd_ptr;	/* user pointer to creator SD, or 0 */
+	__u32 sd_len;
+	__u32 __pad;
+};
+
+/*
  * Map create disposition to Linux open flags.
  * Returns open flags, or negative errno.
  * *status_out is set to 1 (created) or 0 (opened existing).
@@ -3968,38 +4101,46 @@ static int disposition_to_flags(u32 disposition, u32 desired,
 	}
 }
 
-SYSCALL_DEFINE9(kacs_open, int, dirfd, const char __user *, path,
-		u32, desired_access, u32, create_disposition,
-		u32, create_options, const void __user *, sd_buf,
-		u32, sd_len, u32 __user *, status_out, u32, flags)
+SYSCALL_DEFINE5(kacs_open, int, dirfd, const char __user *, path,
+		struct kacs_open_how __user *, uhow, size_t, howsize,
+		u32 __user *, status_out)
 {
+	struct kacs_open_how khow = {};
 	struct open_how how = {};
+	const void __user *sd_buf;
 	int o_flags = 0;
 	int ret;
 	long fd;
 	fmode_t f_mode = 0;
 
-	if (!desired_access)
+	if (howsize < sizeof(struct kacs_open_how))
+		return -EINVAL;
+	if (copy_from_user(&khow, uhow, sizeof(khow)))
+		return -EFAULT;
+	if (khow.__pad)
+		return -EINVAL;
+
+	if (!khow.desired_access)
 		return -EINVAL;
 
 	/* The desired_access must include at least one data right or
 	 * FILE_EXECUTE for a valid f_mode (§14 KACS-native open). */
-	if (!(desired_access & (FILE_READ_DATA | FILE_WRITE_DATA
+	if (!(khow.desired_access & (FILE_READ_DATA | FILE_WRITE_DATA
 				| FILE_APPEND_DATA | FILE_EXECUTE)))
 		return -EINVAL;
 
-	if (create_disposition > KACS_FILE_OVERWRITE_IF)
+	if (khow.create_disposition > KACS_FILE_OVERWRITE_IF)
 		return -EINVAL;
 
 	/* Map desired access to f_mode. */
-	if (desired_access & FILE_READ_DATA)
+	if (khow.desired_access & FILE_READ_DATA)
 		f_mode |= FMODE_READ;
-	if (desired_access & (FILE_WRITE_DATA | FILE_APPEND_DATA))
+	if (khow.desired_access & (FILE_WRITE_DATA | FILE_APPEND_DATA))
 		f_mode |= FMODE_WRITE;
 
 	/* Compute open flags from disposition. */
 	/* FILE_SUPERSEDE is handled specially — for now, map to create. */
-	ret = disposition_to_flags(create_disposition, desired_access,
+	ret = disposition_to_flags(khow.create_disposition, khow.desired_access,
 				   true /* pessimistic */, &o_flags);
 	/* Ignore the exists/not-exists error here — VFS handles it. */
 	if (ret == -EINVAL)
@@ -4012,7 +4153,7 @@ SYSCALL_DEFINE9(kacs_open, int, dirfd, const char __user *, path,
 	else if (f_mode & FMODE_WRITE)
 		how.flags |= O_WRONLY;
 
-	if (flags & AT_SYMLINK_NOFOLLOW)
+	if (khow.flags & AT_SYMLINK_NOFOLLOW)
 		how.flags |= O_NOFOLLOW;
 
 	/* Use do_sys_openat2 which handles all the VFS path resolution. */
@@ -4036,9 +4177,8 @@ SYSCALL_DEFINE9(kacs_open, int, dirfd, const char __user *, path,
 			return -EBADF;
 
 		fsec = kacs_file(fd_file(f));
-		if ((fsec->granted & desired_access) != desired_access) {
-			/* Close and fail. */
-			ksys_close((unsigned int)fd);
+		if ((fsec->granted & khow.desired_access) != khow.desired_access) {
+			close_fd((unsigned int)fd);
 			return -EACCES;
 		}
 	}
@@ -4048,7 +4188,8 @@ SYSCALL_DEFINE9(kacs_open, int, dirfd, const char __user *, path,
 	 * inode_init_security in VFS path), then replace with the
 	 * merged creator+inherited SD. The window is microseconds and
 	 * the inherited SD is safe (grants creator access). */
-	if (sd_buf && sd_len > 0 && (how.flags & O_CREAT)) {
+	sd_buf = (const void __user *)(unsigned long)khow.sd_ptr;
+	if (sd_buf && khow.sd_len > 0 && (how.flags & O_CREAT)) {
 		CLASS(fd, cf)((unsigned int)fd);
 		if (!fd_empty(cf)) {
 			struct inode *ci = file_inode(fd_file(cf));
@@ -4059,14 +4200,14 @@ SYSCALL_DEFINE9(kacs_open, int, dirfd, const char __user *, path,
 			void *merged_bytes;
 			int merged_len;
 
-			ksd_creator = kmalloc(sd_len, GFP_KERNEL);
+			ksd_creator = kmalloc(khow.sd_len, GFP_KERNEL);
 			if (!ksd_creator) {
-				ksys_close((unsigned int)fd);
+				close_fd((unsigned int)fd);
 				return -ENOMEM;
 			}
-			if (copy_from_user(ksd_creator, sd_buf, sd_len)) {
+			if (copy_from_user(ksd_creator, sd_buf, khow.sd_len)) {
 				kfree(ksd_creator);
-				ksys_close((unsigned int)fd);
+				close_fd((unsigned int)fd);
 				return -EFAULT;
 			}
 
@@ -4076,14 +4217,14 @@ SYSCALL_DEFINE9(kacs_open, int, dirfd, const char __user *, path,
 			if (existing && existing != KACS_SD_CORRUPT) {
 				/* Merge all components from creator into existing. */
 				merged = kacs_sd_merge_components(
-					existing, ksd_creator, sd_len,
+					existing, ksd_creator, khow.sd_len,
 					OWNER_SECURITY_INFORMATION
 					| GROUP_SECURITY_INFORMATION
 					| DACL_SECURITY_INFORMATION
 					| SACL_SECURITY_INFORMATION);
 			} else {
 				/* No existing SD — use creator SD directly. */
-				merged = kacs_sd_from_bytes(ksd_creator, sd_len);
+				merged = kacs_sd_from_bytes(ksd_creator, khow.sd_len);
 			}
 			rcu_read_unlock();
 			kfree(ksd_creator);
@@ -4127,7 +4268,7 @@ SYSCALL_DEFINE9(kacs_open, int, dirfd, const char __user *, path,
 	if (status_out) {
 		u32 status = (how.flags & O_CREAT) ? 1 : 0;
 		if (put_user(status, status_out)) {
-			ksys_close((unsigned int)fd);
+			close_fd((unsigned int)fd);
 			return -EFAULT;
 		}
 	}
@@ -4204,3 +4345,4 @@ DEFINE_LSM(kacs) = {
 	.init = kacs_init,
 	.blobs = &kacs_blob_sizes,
 };
+

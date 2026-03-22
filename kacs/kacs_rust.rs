@@ -116,6 +116,68 @@ pub extern "C" fn kacs_token_create_system() -> *const () {
     }
 }
 
+/// Create a bootstrap SD for the rootfs root inode.
+/// Owner/group = SYSTEM, DACL = Allow SYSTEM GENERIC_ALL with full
+/// inheritance (CONTAINER_INHERIT | OBJECT_INHERIT) so every child
+/// created during initramfs extraction inherits an SD.
+/// Returns an opaque parsed SD pointer, or null on failure.
+#[no_mangle]
+pub extern "C" fn kacs_create_root_sd() -> *const () {
+    use kacs_core::ace::*;
+    use kacs_core::acl::*;
+    use kacs_core::mask::GENERIC_ALL;
+    use kacs_core::sd::*;
+
+    let system_sid = match kacs_core::well_known::system() {
+        Ok(s) => s,
+        Err(_) => return core::ptr::null(),
+    };
+
+    let mut aces = compat::Vec::new();
+    if compat::vec_push(&mut aces, Ace {
+        ace_type: ACCESS_ALLOWED_ACE_TYPE,
+        flags: CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
+        mask: GENERIC_ALL,
+        sid: match system_sid.try_clone() {
+            Ok(s) => s,
+            Err(_) => return core::ptr::null(),
+        },
+        object_type: None,
+        inherited_object_type: None,
+        condition: None,
+        application_data: None,
+    }).is_err() {
+        return core::ptr::null();
+    }
+
+    let dacl = Acl {
+        revision: ACL_REVISION,
+        aces,
+    };
+
+    let sd = SecurityDescriptor {
+        control: SE_DACL_PRESENT | SE_SELF_RELATIVE,
+        owner: Some(match system_sid.try_clone() {
+            Ok(s) => s,
+            Err(_) => return core::ptr::null(),
+        }),
+        group: Some(system_sid),
+        dacl: Some(dacl),
+        sacl: None,
+    };
+
+    let mut v = match compat::vec_with_capacity::<SecurityDescriptor>(1) {
+        Ok(v) => v,
+        Err(_) => return core::ptr::null(),
+    };
+    if compat::vec_push(&mut v, sd).is_err() {
+        return core::ptr::null();
+    }
+    let ptr = v.as_ptr();
+    core::mem::forget(v);
+    ptr as *const ()
+}
+
 /// Create an Anonymous impersonation token (S-1-5-7 only, §12.3).
 /// No real identity, no privileges, no groups. Medium integrity.
 /// Returns an opaque pointer. Caller owns one reference.
@@ -134,19 +196,19 @@ pub extern "C" fn kacs_token_create_anonymous() -> *const () {
         integrity_level: kacs_core::token::IntegrityLevel::Medium,
         mandatory_policy: kacs_core::token::mandatory_policy::NO_WRITE_UP,
         elevation_type: kacs_core::token::ElevationType::Default,
-        token_source: kacs_core::token::TokenSource {
+        source: kacs_core::token::TokenSource {
             name: *b"AnonTkn\0",
-            source_id: kacs_core::token::Luid(0),
+            source_id: kacs_core::luid::Luid(0),
         },
-        auth_id: kacs_core::token::Luid(0),
-        token_id: kacs_core::token::Luid(0),
-        modified_id: kacs_core::token::Luid(0),
+        auth_id: kacs_core::luid::Luid(0),
+        token_id: kacs_core::luid::Luid(0),
+        modified_id: 0,
         logon_sid: match kacs_core::well_known::anonymous() {
             Ok(sid) => sid,
             Err(_) => return core::ptr::null(),
         },
         owner_sid_index: 0,
-        primary_group_sid_index: 0,
+        primary_group_index: 0,
         restricted_sids: None,
         write_restricted: false,
         confinement_sid: None,
@@ -155,9 +217,17 @@ pub extern "C" fn kacs_token_create_anonymous() -> *const () {
         user_claims: compat::Vec::new(),
         device_claims: compat::Vec::new(),
         device_groups: None,
+        restricted_device_groups: None,
         security_descriptor: None,
+        default_dacl: None,
         projected_uid: 65534, // nobody
         projected_gid: 65534,
+        projected_supplementary_gids: compat::Vec::new(),
+        audit_policy: 0,
+        interactive_session_id: 0,
+        isolation_boundary: false,
+        origin: kacs_core::luid::Luid(0),
+        user_deny_only: false,
     };
     match KacsToken::new(token) {
         Ok(ptr) => ptr,
@@ -556,7 +626,7 @@ pub extern "C" fn kacs_access_check_sd(
             if r.allowed {
                 r.granted as i64
             } else {
-                0 // denied — no bits granted
+                -13 // -EACCES: access denied
             }
         }
         Err(kacs_core::access_check::AccessCheckError::IdentificationLevel) => -1,  // -EPERM
@@ -1158,7 +1228,7 @@ pub extern "C" fn kacs_sd_merge_components(
             | kacs_core::sd::SE_DACL_PROTECTED
             | kacs_core::sd::SE_DACL_AUTO_INHERITED);
     }
-    if security_info & 0x08 != 0 { // SACL
+    if security_info & 0x08 != 0 { // SACL — full replacement
         merged.sacl = new_sd.sacl;
         merged.control &= !(kacs_core::sd::SE_SACL_PRESENT
             | kacs_core::sd::SE_SACL_PROTECTED
@@ -1166,8 +1236,7 @@ pub extern "C" fn kacs_sd_merge_components(
         merged.control |= new_sd.control & (kacs_core::sd::SE_SACL_PRESENT
             | kacs_core::sd::SE_SACL_PROTECTED
             | kacs_core::sd::SE_SACL_AUTO_INHERITED);
-    }
-    if security_info & 0x10 != 0 { // LABEL
+    } else if security_info & 0x10 != 0 { // LABEL only — merge labels
         // Replace mandatory label ACEs in existing SACL with new ones.
         // Keep other SACL ACEs (audit, trust labels, etc.).
         if let Some(ref new_sacl) = new_sd.sacl {
