@@ -2278,4 +2278,304 @@ mod tests {
         expr.extend_from_slice(&op_and());
         assert_eq!(evaluate(&expr, &bare(&token), &resource, &[], true).unwrap(), TriValue::True);
     }
+
+    // ===================================================================
+    // §11.12 Corpus: Three-Value Logic Full Truth Table
+    // ===================================================================
+
+    fn tv_token_true_false() -> Token {
+        token_with_claims(alloc::vec![
+            int_claim("tv_true", 1),
+            int_claim("tv_false", 0),
+        ])
+    }
+
+    #[test]
+    fn three_value_and_false_false() {
+        let token = tv_token_true_false();
+        let expr = build(&[user_attr("tv_false"), user_attr("tv_false"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn three_value_and_false_unknown() {
+        // AND(FALSE, UNKNOWN) = FALSE
+        let token = tv_token_true_false();
+        let expr = build(&[user_attr("tv_false"), user_attr("missing"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn three_value_and_unknown_unknown() {
+        let token = empty_token();
+        let expr = build(&[user_attr("a"), user_attr("b"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    #[test]
+    fn three_value_or_true_true() {
+        let token = tv_token_true_false();
+        let expr = build(&[user_attr("tv_true"), user_attr("tv_true"), op_or()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn three_value_or_true_unknown() {
+        // OR(TRUE, UNKNOWN) = TRUE
+        let token = tv_token_true_false();
+        let expr = build(&[user_attr("tv_true"), user_attr("missing"), op_or()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn three_value_or_unknown_unknown() {
+        let token = empty_token();
+        let expr = build(&[user_attr("a"), user_attr("b"), op_or()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // ===================================================================
+    // §11.12 Corpus: Boolean Coercion
+    // ===================================================================
+
+    #[test]
+    fn cond_coerce_int64_nonzero_true() {
+        // Attribute-backed int 42 coerces to TRUE in AND
+        let token = token_with_claims(alloc::vec![int_claim("x", 42)]);
+        let expr = build(&[user_attr("x"), user_attr("x"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_coerce_int64_zero_false() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 0)]);
+        let expr = build(&[user_attr("x"), user_attr("x"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn cond_coerce_string_nonempty_true() {
+        let token = token_with_claims(alloc::vec![string_claim("s", "hello")]);
+        let expr = build(&[user_attr("s"), user_attr("s"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_coerce_string_empty_false() {
+        let token = token_with_claims(alloc::vec![string_claim("s", "")]);
+        let expr = build(&[user_attr("s"), user_attr("s"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn cond_coerce_null_unknown() {
+        // Missing attribute → NULL → UNKNOWN in logical context
+        let token = empty_token();
+        let expr = build(&[user_attr("missing"), user_attr("missing"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // ===================================================================
+    // §11.12 Corpus: Expression Envelope
+    // ===================================================================
+
+    #[test]
+    fn cond_expression_valid_magic_proceeds() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 1)]);
+        let expr = build(&[user_attr("x"), int64_literal(1), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_expression_too_short_returns_unknown() {
+        let token = empty_token();
+        // Only 3 bytes — not enough for magic
+        let expr = alloc::vec![0x61, 0x72, 0x74];
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // ===================================================================
+    // §11.12 Corpus: Membership Operators
+    // ===================================================================
+
+    #[test]
+    fn cond_member_of_all_match_true() {
+        let mut token = empty_token();
+        let g = crate::sid::Sid::new(5, &[21, 1, 2, 3, 4001]).unwrap();
+        token.groups = alloc::vec![
+            crate::group::GroupEntry::new(g.clone(), crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED),
+        ];
+        let expr = build(&[sid_literal(&g), bytecode::op_member_of()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_member_of_one_missing_false() {
+        let token = empty_token(); // no groups
+        let g = crate::sid::Sid::new(5, &[21, 1, 2, 3, 4001]).unwrap();
+        let expr = build(&[sid_literal(&g), bytecode::op_member_of()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn cond_not_member_of_one_missing_true() {
+        let token = empty_token();
+        let g = crate::sid::Sid::new(5, &[21, 1, 2, 3, 4001]).unwrap();
+        let mut expr = header();
+        expr.extend_from_slice(&sid_literal(&g));
+        expr.push(0x90); // Not_Member_of
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_not_member_of_any_none_match_true() {
+        let token = empty_token();
+        let g = crate::sid::Sid::new(5, &[21, 1, 2, 3, 4001]).unwrap();
+        let mut expr = header();
+        expr.extend_from_slice(&sid_literal(&g));
+        expr.push(0x92); // Not_Member_of_Any
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // ===================================================================
+    // §11.12 Corpus: Attribute Resolution
+    // ===================================================================
+
+    #[test]
+    fn cond_user_attr_resolves_from_token() {
+        let token = token_with_claims(alloc::vec![int_claim("dept", 42)]);
+        let expr = build(&[user_attr("dept"), int64_literal(42), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_device_attr_resolves_from_token() {
+        let mut token = empty_token();
+        token.device_claims = alloc::vec![int_claim("loc", 7)];
+        let mut expr = header();
+        {
+            let encoded = encode_utf16le("loc");
+            expr.push(0xfb); // @Device.
+            expr.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            expr.extend_from_slice(&encoded);
+        }
+        expr.extend_from_slice(&int64_literal(7));
+        expr.extend_from_slice(&op_eq());
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_resource_attr_resolves_from_sacl() {
+        let token = empty_token();
+        let resource = alloc::vec![int_claim("level", 5)];
+        let mut expr = header();
+        expr.extend_from_slice(&resource_attr("level"));
+        expr.extend_from_slice(&int64_literal(5));
+        expr.extend_from_slice(&op_eq());
+        assert_eq!(evaluate(&expr, &bare(&token), &resource, &[], true).unwrap(), TriValue::True);
+    }
+
+    #[test]
+    fn cond_missing_attr_returns_null() {
+        let token = empty_token();
+        let expr = build(&[user_attr("nonexistent"), op_exists()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn cond_missing_device_claims_resolve_absent() {
+        let token = empty_token(); // no device_claims
+        let mut expr = header();
+        {
+            let encoded = encode_utf16le("anything");
+            expr.push(0xfb); // @Device.
+            expr.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            expr.extend_from_slice(&encoded);
+        }
+        expr.extend_from_slice(&op_exists());
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    // ===================================================================
+    // §11.12 Corpus: Claim Flags
+    // ===================================================================
+
+    #[test]
+    fn cond_disabled_claim_invisible() {
+        let claim = ClaimEntry {
+            name: String::from("secret"),
+            claim_type: crate::token::ClaimType::Int64,
+            flags: crate::token::claim_flags::DISABLED,
+            values: ClaimValues::Int64(alloc::vec![42]),
+        };
+        let token = token_with_claims(alloc::vec![claim]);
+        let expr = build(&[user_attr("secret"), op_exists()]);
+        assert_eq!(eval(&expr, &token), TriValue::False); // disabled → NULL → not exists
+    }
+
+    #[test]
+    fn cond_exists_false_for_empty_attr() {
+        let claim = ClaimEntry {
+            name: String::from("tags"),
+            claim_type: crate::token::ClaimType::String,
+            flags: 0,
+            values: ClaimValues::String(alloc::vec![]),
+        };
+        let token = token_with_claims(alloc::vec![claim]);
+        let expr = build(&[user_attr("tags"), op_exists()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    // ===================================================================
+    // §11.12 Corpus: Relational Operators
+    // ===================================================================
+
+    #[test]
+    fn cond_less_than_op() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 3)]);
+        let expr = build(&[user_attr("x"), int64_literal(5), op_lt()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_less_equal_op() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 5)]);
+        let expr = build(&[user_attr("x"), int64_literal(5), op_le()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_greater_than_op() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 7)]);
+        let expr = build(&[user_attr("x"), int64_literal(5), op_gt()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_greater_equal_op() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 5)]);
+        let expr = build(&[user_attr("x"), int64_literal(5), op_ge()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_equal_op() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 5)]);
+        let expr = build(&[user_attr("x"), int64_literal(5), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_not_equal_op() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 5)]);
+        let expr = build(&[user_attr("x"), int64_literal(6), op_ne()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_relational_null_lhs_unknown() {
+        let token = empty_token();
+        let expr = build(&[user_attr("missing"), int64_literal(5), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
 }
