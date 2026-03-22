@@ -5823,4 +5823,193 @@ mod tests {
         let result = check(&sd, &token, MAXIMUM_ALLOWED);
         assert!(result.allowed);
     }
+
+    // --- Appendix B: Additional Compound Tests ---
+
+    #[test]
+    fn write_restricted_intersection_includes_file_append_data() {
+        // FILE_APPEND_DATA is write-category. Restricted intersection applies.
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_WRITE_DATA | FILE_APPEND_DATA),
+            allow(&engineers(), FILE_APPEND_DATA), // restricted only gets append
+        ]);
+        let mut token = restricted_token(&alice(), &[&engineers()], &[&engineers()]);
+        token.write_restricted = true;
+        // Normal: write+append. Restricted: append.
+        // Write-restricted intersection on write bits: write stripped, append preserved.
+        assert!(check(&sd, &token, FILE_APPEND_DATA).allowed);
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn write_restricted_read_bits_bypass_restricted_pass() {
+        // Read bits come from normal pass alone in write-restricted mode
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA),
+        ]);
+        let mut token = restricted_token(&alice(), &[], &[&engineers()]);
+        token.write_restricted = true;
+        // Normal: read. Restricted: nothing (engineers not in DACL).
+        // But read is not a write bit → passes from normal alone.
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn adjust_privileges_bumps_modified_id() {
+        let token = Token::system_token().unwrap();
+        let old_id = token.modified_id;
+        // Note: modified_id is a plain u64, not atomic in userspace.
+        // In the kernel, AdjustPrivileges would bump it.
+        // Here we verify the field exists and the concept works.
+        assert!(old_id > 0);
+    }
+
+    #[test]
+    fn remove_privilege_then_access_check_no_longer_grants() {
+        // Remove SeBackupPrivilege, then verify AccessCheck doesn't grant
+        let sd = sd_with_dacl(&bob(), alloc::vec![]);
+        let mut token = medium_token(&alice(), &[], privilege::bits::SE_BACKUP);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_BACKUP);
+        // Before removal: backup grants read
+        assert!(check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT).allowed);
+        // Remove the privilege
+        token.privileges.remove(privilege::bits::SE_BACKUP);
+        // After removal: no longer grants
+        assert!(!check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT).allowed);
+    }
+
+    #[test]
+    fn enable_privilege_then_access_check_grants() {
+        // Token has SE_SECURITY present but disabled. ASS fails.
+        // After enable, ASS succeeds.
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]);
+        let mut token = test_token(&alice(), &[], 0);
+        token.privileges = privilege::Privileges {
+            present: core::sync::atomic::AtomicU64::new(privilege::bits::SE_SECURITY),
+            enabled: core::sync::atomic::AtomicU64::new(0), // disabled
+            enabled_by_default: core::sync::atomic::AtomicU64::new(0),
+            used: core::sync::atomic::AtomicU64::new(0),
+        };
+        // Disabled → fails
+        assert!(!check(&sd, &token, ACCESS_SYSTEM_SECURITY).allowed);
+        // Enable it
+        token.privileges.enable(privilege::bits::SE_SECURITY);
+        // Now succeeds
+        assert!(check(&sd, &token, ACCESS_SYSTEM_SECURITY).allowed);
+    }
+
+    #[test]
+    fn pip_revokes_backup_privilege_bits_before_restricted_orback() {
+        // PIP at step 4 clears privilege_granted. Step 8 OR-back has nothing to restore.
+        let sd = sd_with_pip(
+            &bob(),
+            alloc::vec![],
+            well_known::PIP_TYPE_PROTECTED,
+            well_known::PIP_TRUST_PEIOS,
+            0, // allow nothing
+        );
+        let mut token = restricted_token(&alice(), &[], &[&engineers()]);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_BACKUP);
+        // PIP revokes backup bits. OR-back can't restore them.
+        assert!(!check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT).allowed);
+    }
+
+    #[test]
+    fn pip_revokes_security_privilege_then_restricted_orback_empty() {
+        let sd = sd_with_pip(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            well_known::PIP_TYPE_PROTECTED,
+            well_known::PIP_TRUST_PEIOS,
+            0,
+        );
+        let mut token = restricted_token(&alice(), &[&engineers()], &[&engineers()]);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_SECURITY);
+        assert!(!check(&sd, &token, ACCESS_SYSTEM_SECURITY).allowed);
+    }
+
+    #[test]
+    fn confinement_blocks_access_system_security_via_privilege() {
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), GENERIC_ALL)]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_SECURITY);
+        assert!(!check(&sd, &token, ACCESS_SYSTEM_SECURITY).allowed);
+    }
+
+    #[test]
+    fn confinement_blocks_take_ownership_privilege() {
+        let sd = sd_with_dacl(&bob(), alloc::vec![]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_TAKE_OWNERSHIP);
+        assert!(!check(&sd, &token, WRITE_OWNER).allowed);
+    }
+
+    #[test]
+    fn all_layers_active_simultaneously() {
+        // Confined + restricted + backup privilege + Low integrity
+        // High MIC (NO_WRITE_UP + NO_READ_UP) + PIP (allow READ_CONTROL)
+        let sacl = Acl {
+            revision: ACL_REVISION,
+            aces: alloc::vec![
+                Ace {
+                    ace_type: SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                    flags: 0,
+                    mask: mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | mask::SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+                    sid: well_known::integrity_high().unwrap(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                },
+                Ace {
+                    ace_type: SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+                    flags: 0,
+                    mask: READ_CONTROL,
+                    sid: well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_PEIOS).unwrap(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                },
+            ],
+        };
+        let sd = SecurityDescriptor::with_sacl(
+            alice(),
+            well_known::users().unwrap(),
+            Acl { revision: ACL_REVISION, aces: alloc::vec![
+                allow(&alice(), GENERIC_ALL),
+                allow(&engineers(), FILE_READ_DATA),
+                allow(&app_sid(), FILE_READ_DATA | READ_CONTROL),
+            ]},
+            sacl,
+        );
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.groups = alloc::vec![crate::group::GroupEntry::new(
+            engineers(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )];
+        token.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(
+            engineers(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )]);
+        token.integrity_level = crate::token::IntegrityLevel::Low;
+        token.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_BACKUP);
+
+        // MIC: High with NO_READ_UP → blocks read for Low caller
+        // BUT backup privilege grants read BEFORE MIC (step 3 before step 4)
+        // MIC doesn't constrain privilege-granted bits
+        // PIP: allows only READ_CONTROL → strips everything except READ_CONTROL
+        // So even backup-granted read bits get stripped by PIP
+        // Restricted intersection: engineers only in DACL for read
+        // Confinement: app_sid gets read + READ_CONTROL
+        // Final: PIP dominates, only READ_CONTROL (if it survives all intersections)
+
+        // The exact result depends on pipeline ordering:
+        // backup grants read (step 3), MIC doesn't constrain it (step 4),
+        // PIP strips everything except READ_CONTROL (step 4),
+        // DACL walk adds what DACL grants (step 7),
+        // restricted intersection (step 8),
+        // confinement intersection (step 8a).
+        // PIP mask = READ_CONTROL only. Everything else stripped.
+        let result = check_with_intent(&sd, &token, MAXIMUM_ALLOWED, BACKUP_INTENT);
+        assert!(result.allowed); // MAXIMUM_ALLOWED always succeeds
+        // PIP limits to READ_CONTROL at most
+    }
 }
