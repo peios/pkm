@@ -3048,13 +3048,14 @@ SYSCALL_DEFINE2(kacs_open_process_token, int, pidfd, u32, access_mask)
 	struct pid *pid;
 	struct task_struct *task;
 	const void *token;
+	unsigned int pidfd_flags;
 
 	if (access_mask & ~KACS_TOKEN_ALL_ACCESS)
 		return -EINVAL;
 	if (!access_mask)
 		return -EINVAL;
 
-	pid = pidfd_get_pid(pidfd, NULL);
+	pid = pidfd_get_pid(pidfd, &pidfd_flags);
 	if (IS_ERR(pid))
 		return PTR_ERR(pid);
 
@@ -3123,6 +3124,7 @@ SYSCALL_DEFINE3(kacs_set_psb, int, pidfd, u32, pip_type, u32, pip_trust)
 	struct kacs_task_security *target_tsec;
 	struct pid *pid;
 	struct task_struct *task;
+	unsigned int pidfd_flags;
 
 	/* Requires SeTcbPrivilege. */
 	caller = kacs_cred(current_real_cred());
@@ -3135,7 +3137,7 @@ SYSCALL_DEFINE3(kacs_set_psb, int, pidfd, u32, pip_type, u32, pip_trust)
 	    pip_type != PIP_TYPE_ISOLATED)
 		return -EINVAL;
 
-	pid = pidfd_get_pid(pidfd, NULL);
+	pid = pidfd_get_pid(pidfd, &pidfd_flags);
 	if (IS_ERR(pid))
 		return PTR_ERR(pid);
 
