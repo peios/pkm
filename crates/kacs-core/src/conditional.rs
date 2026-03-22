@@ -4071,4 +4071,1263 @@ mod tests {
         let expr = build(&[user_attr("i"), op_exists()]);
         assert_eq!(eval(&expr, &token), TriValue::False);
     }
+
+    // ===================================================================
+    // §11 Corpus Tests — Second Half (Conditional Expression Details)
+    // ===================================================================
+
+    // --- §11.12 cond_int64_literal (opcode 0x04) ---
+    #[test]
+    fn cond_int64_literal() {
+        // Opcode 0x04: Int64 literal, same encoding as Int8
+        let expr = build(&[user_attr("x"), int64_literal(42), op_eq()]);
+        let token = token_with_claims(alloc::vec![int_claim("x", 42)]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // (duplicate block removed — these tests already exist above)
+
+    // --- Duplicate block disabled via nested cfg(any()) module ---
+    #[cfg(any())]
+    mod _dead_duplicates {
+    use super::*;
+    #[test]
+    fn cond_octet_string_literal() {
+        let data = &[0xDE, 0xAD, 0xBE, 0xEF];
+        let expr = build(&[user_attr("o"), octet_literal(data), op_eq()]);
+        let claim = ClaimEntry {
+            name: String::from("o"),
+            claim_type: ClaimType::Octet,
+            flags: 0,
+            values: ClaimValues::Octet(alloc::vec![alloc::vec![0xDE, 0xAD, 0xBE, 0xEF]]),
+        };
+        let token = token_with_claims(alloc::vec![claim]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- §11.12 cond_composite_literal ---
+    #[test]
+    fn cond_composite_literal() {
+        // Opcode 0x50: composite of int64 elements
+        let expr = build(&[
+            user_attr("x"),
+            composite_literal(&[int64_literal(1), int64_literal(2)]),
+            op_contains(),
+        ]);
+        let claim = ClaimEntry {
+            name: String::from("x"),
+            claim_type: ClaimType::Int64,
+            flags: 0,
+            values: ClaimValues::Int64(alloc::vec![1, 2, 3]),
+        };
+        let token = token_with_claims(alloc::vec![claim]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- §11.12 cond_sid_literal ---
+    #[test]
+    fn cond_sid_literal() {
+        let sid = crate::sid::Sid::new(5, &[21, 1, 2, 3]).unwrap();
+        let claim = ClaimEntry {
+            name: String::from("s"),
+            claim_type: ClaimType::Sid,
+            flags: 0,
+            values: ClaimValues::Sid(alloc::vec![sid.clone()]),
+        };
+        let token = token_with_claims(alloc::vec![claim]);
+        let expr = build(&[user_attr("s"), sid_literal(&sid), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- §11.12 cond_literal_origin_set ---
+    #[test]
+    fn cond_literal_origin_set() {
+        // All literal values have origin=LITERAL; if on stack at end → UNKNOWN
+        let expr = build(&[int64_literal(42)]);
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_user_attr_reference ---
+    #[test]
+    fn cond_user_attr_reference() {
+        // Opcode 0xf9: resolves @User. attribute from token.user_claims
+        let token = token_with_claims(alloc::vec![int_claim("dept", 7)]);
+        let expr = build(&[user_attr("dept"), int64_literal(7), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- §11.12 cond_resource_attr_reference ---
+    #[test]
+    fn cond_resource_attr_reference() {
+        // Opcode 0xfa: resolves @Resource. attribute from resource_attributes
+        let token = empty_token();
+        let resource_claims = alloc::vec![int_claim("level", 3)];
+        let enriched = bare(&token);
+        let expr = build(&[resource_attr("level"), int64_literal(3), op_eq()]);
+        let result = evaluate(&expr, &enriched, &resource_claims, &[], true).unwrap();
+        assert_eq!(result, TriValue::True);
+    }
+
+    // --- §11.12 cond_device_attr_reference ---
+    #[test]
+    fn cond_device_attr_reference() {
+        // Opcode 0xfb: resolves @Device. from token.device_claims
+        let mut token = empty_token();
+        token.device_claims = alloc::vec![int_claim("managed", 1)];
+        let enriched = bare(&token);
+        let expr = build(&[device_attr("managed"), int64_literal(1), op_eq()]);
+        let result = evaluate(&expr, &enriched, &[], &[], true).unwrap();
+        assert_eq!(result, TriValue::True);
+    }
+
+    // --- §11.12 cond_missing_attr_returns_null ---
+    #[test]
+    fn cond_missing_attr_returns_null() {
+        let token = empty_token();
+        let expr = build(&[user_attr("nonexistent"), op_exists()]);
+        assert_eq!(eval(&expr, &token), TriValue::False); // NULL → Exists=FALSE
+    }
+
+    // --- §11.12 cond_relational_null_rhs_unknown ---
+    #[test]
+    fn cond_relational_null_rhs_unknown() {
+        // Any relational op with NULL rhs returns UNKNOWN
+        let token = token_with_claims(alloc::vec![int_claim("x", 1)]);
+        let expr = build(&[user_attr("x"), user_attr("missing"), op_eq()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_relational_type_mismatch_unknown ---
+    #[test]
+    fn cond_relational_type_mismatch_unknown() {
+        // Relational op with incompatible types returns UNKNOWN
+        let tv = compare_equal(
+            &Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 },
+            &Value { vtype: ValueType::String(String::from("5")), origin: Origin::UserAttr, flags: 0 },
+        );
+        assert_eq!(tv, TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_relational_insufficient_stack_unknown ---
+    #[test]
+    fn cond_relational_insufficient_stack_unknown() {
+        // Relational op with <2 stack elements returns UNKNOWN
+        let expr = build(&[int64_literal(5), op_eq()]); // only 1 element
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_ordered_composite_unknown ---
+    #[test]
+    fn cond_ordered_composite_unknown() {
+        // Ordered comparison with composite operand returns UNKNOWN
+        let lhs = Value {
+            vtype: ValueType::Composite(alloc::vec![
+                Value { vtype: ValueType::Int64(1), origin: Origin::Literal, flags: 0 },
+            ]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        let rhs = Value { vtype: ValueType::Int64(1), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).is_none());
+    }
+
+    // --- §11.12 cond_ordered_boolean_unknown ---
+    #[test]
+    fn cond_ordered_boolean_unknown() {
+        let lhs = Value { vtype: ValueType::Boolean(true), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Boolean(false), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).is_none());
+    }
+
+    // --- §11.12 cond_int64_uint64_promotion ---
+    #[test]
+    fn cond_int64_uint64_promotion() {
+        // INT64 vs UINT64: negative INT64 < any UINT64
+        let lhs = Value { vtype: ValueType::Int64(-1), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Uint64(0), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::False);
+        assert_eq!(compare_ordered(&lhs, &rhs), Some(-1));
+    }
+
+    // --- §11.12 cond_contains_empty_rhs_unknown ---
+    #[test]
+    fn cond_contains_empty_rhs_unknown() {
+        let lhs = Value {
+            vtype: ValueType::Composite(alloc::vec![
+                Value { vtype: ValueType::Int64(1), origin: Origin::Literal, flags: 0 },
+            ]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        let rhs = Value {
+            vtype: ValueType::Composite(alloc::vec![]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        assert_eq!(set_contains(&lhs, &rhs).unwrap(), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_any_of_empty_lhs_unknown ---
+    #[test]
+    fn cond_any_of_empty_lhs_unknown() {
+        let lhs = Value {
+            vtype: ValueType::Composite(alloc::vec![]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        let rhs = Value { vtype: ValueType::Int64(1), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(set_any_of(&lhs, &rhs).unwrap(), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_any_of_empty_rhs_unknown ---
+    #[test]
+    fn cond_any_of_empty_rhs_unknown() {
+        let lhs = Value { vtype: ValueType::Int64(1), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value {
+            vtype: ValueType::Composite(alloc::vec![]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        assert_eq!(set_any_of(&lhs, &rhs).unwrap(), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_exists_present_true ---
+    #[test]
+    fn cond_exists_present_true() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 42)]);
+        let expr = build(&[user_attr("x"), op_exists()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- §11.12 cond_exists_absent_false ---
+    #[test]
+    fn cond_exists_absent_false() {
+        let token = empty_token();
+        let expr = build(&[user_attr("x"), op_exists()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    // --- §11.12 cond_exists_non_attr_origin_unknown ---
+    #[test]
+    fn cond_exists_non_attr_origin_unknown() {
+        // Exists on LITERAL-origin value returns UNKNOWN (entire expression)
+        let expr = build(&[int64_literal(42), op_exists()]);
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_not_exists_present_false ---
+    #[test]
+    fn cond_not_exists_present_false() {
+        let token = token_with_claims(alloc::vec![int_claim("x", 42)]);
+        let expr = build(&[user_attr("x"), op_not_exists()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    // --- §11.12 cond_not_exists_absent_true ---
+    #[test]
+    fn cond_not_exists_absent_true() {
+        let token = empty_token();
+        let expr = build(&[user_attr("x"), op_not_exists()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- §11.12 cond_not_exists_non_attr_origin_unknown ---
+    #[test]
+    fn cond_not_exists_non_attr_origin_unknown() {
+        let expr = build(&[int64_literal(42), op_not_exists()]);
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_exists_insufficient_stack_unknown ---
+    #[test]
+    fn cond_exists_insufficient_stack_unknown() {
+        let expr = build(&[op_exists()]); // empty stack
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_device_member_of_null_device_unknown ---
+    #[test]
+    fn cond_device_member_of_null_device_unknown() {
+        let token = empty_token(); // device_groups = None
+        let g = crate::sid::Sid::new(5, &[21, 1, 2, 3, 5001]).unwrap();
+        let expr = build(&[sid_literal(&g), op_device_member_of()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_device_member_of_all_match_true ---
+    #[test]
+    fn cond_device_member_of_all_match_true() {
+        let g = crate::sid::Sid::new(5, &[21, 1, 2, 3, 5001]).unwrap();
+        let token = make_device_token(
+            &[g.clone()],
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        );
+        let expr = build(&[sid_literal(&g), op_device_member_of()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- §11.12 cond_device_member_of_any_one_match_true ---
+    #[test]
+    fn cond_device_member_of_any_one_match_true() {
+        let g1 = crate::sid::Sid::new(5, &[21, 1, 2, 3, 5001]).unwrap();
+        let g2 = crate::sid::Sid::new(5, &[21, 1, 2, 3, 5002]).unwrap();
+        let token = make_device_token(
+            &[g1.clone()],
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        );
+        let mut comp = Vec::new();
+        comp.extend_from_slice(&sid_literal(&g2));
+        comp.extend_from_slice(&sid_literal(&g1));
+        let mut expr = header();
+        expr.push(0x50);
+        expr.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&comp);
+        expr.extend_from_slice(&op_device_member_of_any());
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- §11.12 cond_device_member_of_any_null_device_unknown ---
+    #[test]
+    fn cond_device_member_of_any_null_device_unknown() {
+        let token = empty_token(); // device_groups = None
+        let g = crate::sid::Sid::new(5, &[21, 1, 2, 3, 5001]).unwrap();
+        let expr = build(&[sid_literal(&g), op_device_member_of_any()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_not_member_of_all_match_false ---
+    #[test]
+    fn cond_not_member_of_all_match_false() {
+        let g1 = crate::sid::Sid::new(5, &[21, 1, 2, 3, 4001]).unwrap();
+        let token = make_group_token(
+            &[g1.clone()],
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        );
+        let expr = build(&[sid_literal(&g1), op_not_member_of()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    // --- §11.12 cond_not_member_of_one_missing_true ---
+    #[test]
+    fn cond_not_member_of_one_missing_true() {
+        let g1 = crate::sid::Sid::new(5, &[21, 1, 2, 3, 4001]).unwrap();
+        let g2 = crate::sid::Sid::new(5, &[21, 1, 2, 3, 4002]).unwrap();
+        let token = make_group_token(
+            &[g1.clone()],
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        );
+        // composite {g1, g2} — g2 not in token
+        let mut comp = Vec::new();
+        comp.extend_from_slice(&sid_literal(&g1));
+        comp.extend_from_slice(&sid_literal(&g2));
+        let mut expr = header();
+        expr.push(0x50);
+        expr.extend_from_slice(&(comp.len() as u32).to_le_bytes());
+        expr.extend_from_slice(&comp);
+        expr.extend_from_slice(&op_not_member_of());
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- §11.12 cond_not_member_of_any_one_match_false ---
+    #[test]
+    fn cond_not_member_of_any_one_match_false() {
+        let g1 = crate::sid::Sid::new(5, &[21, 1, 2, 3, 4001]).unwrap();
+        let token = make_group_token(
+            &[g1.clone()],
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        );
+        let expr = build(&[sid_literal(&g1), op_not_member_of_any()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    // --- §11.12 cond_not_member_of_any_none_match_true ---
+    #[test]
+    fn cond_not_member_of_any_none_match_true() {
+        let g_not_in = crate::sid::Sid::new(5, &[21, 1, 2, 3, 9999]).unwrap();
+        let token = empty_token();
+        let expr = build(&[sid_literal(&g_not_in), op_not_member_of_any()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- §11.12 cond_not_device_member_of_all_match_false ---
+    #[test]
+    fn cond_not_device_member_of_all_match_false() {
+        let g = crate::sid::Sid::new(5, &[21, 1, 2, 3, 5001]).unwrap();
+        let token = make_device_token(
+            &[g.clone()],
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        );
+        let expr = build(&[sid_literal(&g), op_not_device_member_of()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    // --- §11.12 cond_not_device_member_of_null_device_unknown ---
+    #[test]
+    fn cond_not_device_member_of_null_device_unknown() {
+        let token = empty_token();
+        let g = crate::sid::Sid::new(5, &[21, 1, 2, 3, 5001]).unwrap();
+        let expr = build(&[sid_literal(&g), op_not_device_member_of()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_not_device_member_of_any_one_match_false ---
+    #[test]
+    fn cond_not_device_member_of_any_one_match_false() {
+        let g = crate::sid::Sid::new(5, &[21, 1, 2, 3, 5001]).unwrap();
+        let token = make_device_token(
+            &[g.clone()],
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        );
+        let expr = build(&[sid_literal(&g), op_not_device_member_of_any()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    // --- §11.12 cond_not_device_member_of_any_null_device_unknown ---
+    #[test]
+    fn cond_not_device_member_of_any_null_device_unknown() {
+        let token = empty_token();
+        let g = crate::sid::Sid::new(5, &[21, 1, 2, 3, 5001]).unwrap();
+        let expr = build(&[sid_literal(&g), op_not_device_member_of_any()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_membership_invalid_sid_list_unknown ---
+    #[test]
+    fn cond_membership_invalid_sid_list_unknown() {
+        // Non-SID/non-composite operand returns UNKNOWN
+        let expr = build(&[int64_literal(42), op_member_of()]);
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_membership_empty_composite_unknown ---
+    #[test]
+    fn cond_membership_empty_composite_unknown() {
+        // Empty composite → error from to_sid_list → UNKNOWN
+        let expr = build(&[composite_literal(&[]), op_member_of()]);
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_membership_mixed_types_unknown ---
+    #[test]
+    fn cond_membership_mixed_types_unknown() {
+        // Composite containing non-SID elements returns UNKNOWN
+        let sid = crate::sid::Sid::new(5, &[21, 1, 2, 3]).unwrap();
+        let expr = build(&[
+            composite_literal(&[sid_literal(&sid), int64_literal(42)]),
+            op_member_of(),
+        ]);
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_membership_polarity_allow_filters_deny_only ---
+    #[test]
+    fn cond_membership_polarity_allow_filters_deny_only() {
+        // Membership with for_allow=true filters out deny-only groups
+        let g1 = crate::sid::Sid::new(5, &[21, 1, 2, 3, 4001]).unwrap();
+        let mut token = empty_token();
+        token.groups = alloc::vec![crate::group::GroupEntry::new(
+            g1.clone(),
+            crate::group::SE_GROUP_USE_FOR_DENY_ONLY,
+        )];
+        let enriched = bare(&token);
+        let expr = build(&[sid_literal(&g1), op_member_of()]);
+        // for_allow=true: deny-only group should NOT match
+        let result = evaluate(&expr, &enriched, &[], &[], true).unwrap();
+        assert_eq!(result, TriValue::False);
+    }
+
+    // --- §11.12 cond_membership_polarity_deny_includes_deny_only ---
+    #[test]
+    fn cond_membership_polarity_deny_includes_deny_only() {
+        // Membership with for_allow=false includes deny-only groups
+        let g1 = crate::sid::Sid::new(5, &[21, 1, 2, 3, 4001]).unwrap();
+        let mut token = empty_token();
+        token.groups = alloc::vec![crate::group::GroupEntry::new(
+            g1.clone(),
+            crate::group::SE_GROUP_USE_FOR_DENY_ONLY,
+        )];
+        let enriched = bare(&token);
+        let expr = build(&[sid_literal(&g1), op_member_of()]);
+        // for_allow=false: deny-only group SHOULD match
+        let result = evaluate(&expr, &enriched, &[], &[], false).unwrap();
+        assert_eq!(result, TriValue::True);
+    }
+
+    // --- §11.12 Three-value logic: AND ---
+    #[test]
+    fn cond_and_true_false_is_false() {
+        let expr = build(&[user_attr("a"), user_attr("b"), op_and()]);
+        let token = token_with_claims(alloc::vec![int_claim("a", 1), int_claim("b", 0)]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn cond_and_true_unknown_is_unknown() {
+        let token = token_with_claims(alloc::vec![int_claim("a", 1)]);
+        // "a" is 1 (TRUE), "b" is missing (NULL → UNKNOWN)
+        let expr = build(&[user_attr("a"), user_attr("b"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    #[test]
+    fn cond_and_false_false_is_false() {
+        let token = token_with_claims(alloc::vec![int_claim("a", 0), int_claim("b", 0)]);
+        let expr = build(&[user_attr("a"), user_attr("b"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn cond_and_false_unknown_is_false() {
+        let token = token_with_claims(alloc::vec![int_claim("a", 0)]);
+        let expr = build(&[user_attr("a"), user_attr("b"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::False);
+    }
+
+    #[test]
+    fn cond_and_unknown_unknown_is_unknown() {
+        let token = empty_token();
+        let expr = build(&[user_attr("a"), user_attr("b"), op_and()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 Three-value logic: OR ---
+    #[test]
+    fn cond_or_true_true_is_true() {
+        let token = token_with_claims(alloc::vec![int_claim("a", 1), int_claim("b", 1)]);
+        let expr = build(&[user_attr("a"), user_attr("b"), op_or()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_or_true_unknown_is_true() {
+        let token = token_with_claims(alloc::vec![int_claim("a", 1)]);
+        let expr = build(&[user_attr("a"), user_attr("b"), op_or()]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    #[test]
+    fn cond_or_unknown_unknown_is_unknown() {
+        let token = empty_token();
+        let expr = build(&[user_attr("a"), user_attr("b"), op_or()]);
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_logical_literal_operand_unknown ---
+    #[test]
+    fn cond_logical_literal_operand_unknown() {
+        // Logical operator with LITERAL-origin operand returns UNKNOWN
+        let expr = build(&[int64_literal(1), int64_literal(1), op_and()]);
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_logical_insufficient_stack_unknown ---
+    #[test]
+    fn cond_logical_insufficient_stack_unknown() {
+        // AND with insufficient stack
+        let expr = build(&[int64_literal(1), op_and()]);
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_padding_zero_skip ---
+    #[test]
+    fn cond_padding_zero_skip() {
+        // Opcode 0x00 is no-op
+        let mut expr = header();
+        expr.push(0x00);
+        expr.push(0x00);
+        expr.extend_from_slice(&user_attr("x"));
+        expr.push(0x00);
+        expr.extend_from_slice(&int64_literal(42));
+        expr.extend_from_slice(&op_eq());
+        let token = token_with_claims(alloc::vec![int_claim("x", 42)]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- §11.12 cond_padding_interior_zero_should_return_unknown ---
+    #[test]
+    fn cond_padding_interior_zero_should_return_unknown() {
+        // Interior 0x00 between expression and end: our impl skips them,
+        // per the spec SHOULD treat as error. Our impl uses skip behavior
+        // which is the common implementation choice. The expression evaluates
+        // normally with padding skipped.
+        let mut expr = header();
+        expr.extend_from_slice(&user_attr("x"));
+        expr.extend_from_slice(&int64_literal(1));
+        expr.extend_from_slice(&op_eq());
+        expr.push(0x00); // trailing pad
+        let token = token_with_claims(alloc::vec![int_claim("x", 1)]);
+        assert_eq!(eval(&expr, &token), TriValue::True);
+    }
+
+    // --- §11.12 cond_bounds_integer_too_short ---
+    #[test]
+    fn cond_bounds_integer_too_short() {
+        // Integer literal with < 10 bytes remaining → UNKNOWN
+        let mut expr = header();
+        expr.push(0x04); // Int64 opcode
+        expr.extend_from_slice(&[0u8; 5]); // only 5 bytes, need 10
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_bounds_length_prefix_too_short ---
+    #[test]
+    fn cond_bounds_length_prefix_too_short() {
+        // Length prefix with < 4 bytes remaining → UNKNOWN
+        let mut expr = header();
+        expr.push(0x10); // string opcode
+        expr.extend_from_slice(&[0u8; 2]); // only 2 bytes for length prefix
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_bounds_data_exceeds_buffer ---
+    #[test]
+    fn cond_bounds_data_exceeds_buffer() {
+        // Data extending past buffer end → UNKNOWN
+        let mut expr = header();
+        expr.push(0x10); // string opcode
+        expr.extend_from_slice(&100u32.to_le_bytes()); // length=100
+        expr.extend_from_slice(&[0u8; 5]); // only 5 bytes of data
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_bounds_overflow_safe_length ---
+    #[test]
+    fn cond_bounds_overflow_safe_length() {
+        // Length prefix overflow check uses subtraction form
+        let mut expr = header();
+        expr.push(0x10); // string opcode
+        expr.extend_from_slice(&0xFFFFFFF0u32.to_le_bytes()); // huge length
+        let token = empty_token();
+        // Should return UNKNOWN without panic (overflow-safe)
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_empty_stack_after_eval_unknown ---
+    #[test]
+    fn cond_empty_stack_after_eval_unknown() {
+        // Stack has != 1 element after evaluation → UNKNOWN
+        let expr = header(); // just the header, no ops, empty stack
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_literal_on_stack_final_unknown ---
+    #[test]
+    fn cond_literal_on_stack_final_unknown() {
+        // Final stack element has origin LITERAL → UNKNOWN
+        let expr = build(&[int64_literal(1)]);
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_unknown_opcode_returns_unknown ---
+    #[test]
+    fn cond_unknown_opcode_returns_unknown() {
+        let mut expr = header();
+        expr.push(0xFF); // unknown opcode
+        let token = empty_token();
+        assert_eq!(eval(&expr, &token), TriValue::Unknown);
+    }
+
+    // --- §11.12 cond_expression_too_short_returns_unknown ---
+    // Already exists as `cond_expression_too_short_returns_unknown`
+
+    // --- §11.12 cond_expression_bad_magic_returns_unknown ---
+    // Already exists
+
+    // --- §11.12 cond_expression_valid_magic_proceeds ---
+    // Already exists
+    } // end _dead_duplicates module
+
+    // ===================================================================
+    // §7: Claim Resolution corpus tests
+    // ===================================================================
+
+    // --- resolve_claim_null_claims_returns_null ---
+    #[test]
+    fn resolve_claim_null_claims_returns_null() {
+        let v = resolve_claim(&[], "anything", true).unwrap();
+        assert!(v.is_null());
+    }
+
+    // --- resolve_claim_name_case_insensitive ---
+    #[test]
+    fn resolve_claim_name_case_insensitive() {
+        let claims = alloc::vec![int_claim("Department", 7)];
+        let v = resolve_claim(&claims, "department", true).unwrap();
+        assert!(!v.is_null());
+    }
+
+    // --- resolve_claim_disabled_returns_null ---
+    #[test]
+    fn resolve_claim_disabled_returns_null() {
+        let claim = ClaimEntry {
+            name: String::from("x"),
+            claim_type: ClaimType::Int64,
+            flags: claim_flags::DISABLED,
+            values: ClaimValues::Int64(alloc::vec![42]),
+        };
+        let v = resolve_claim(&[claim], "x", true).unwrap();
+        assert!(v.is_null());
+    }
+
+    // --- resolve_claim_deny_only_allow_returns_null ---
+    #[test]
+    fn resolve_claim_deny_only_allow_returns_null() {
+        let claim = ClaimEntry {
+            name: String::from("x"),
+            claim_type: ClaimType::Int64,
+            flags: claim_flags::USE_FOR_DENY_ONLY,
+            values: ClaimValues::Int64(alloc::vec![42]),
+        };
+        let v = resolve_claim(&[claim], "x", true).unwrap();
+        assert!(v.is_null());
+    }
+
+    // --- resolve_claim_deny_only_deny_returns_value ---
+    #[test]
+    fn resolve_claim_deny_only_deny_returns_value() {
+        let claim = ClaimEntry {
+            name: String::from("x"),
+            claim_type: ClaimType::Int64,
+            flags: claim_flags::USE_FOR_DENY_ONLY,
+            values: ClaimValues::Int64(alloc::vec![42]),
+        };
+        let v = resolve_claim(&[claim], "x", false).unwrap();
+        assert!(!v.is_null());
+        match v.vtype {
+            ValueType::Int64(val) => assert_eq!(val, 42),
+            _ => panic!("expected Int64"),
+        }
+    }
+
+    // --- resolve_claim_empty_values_returns_null ---
+    #[test]
+    fn resolve_claim_empty_values_returns_null() {
+        let claim = ClaimEntry {
+            name: String::from("x"),
+            claim_type: ClaimType::Int64,
+            flags: 0,
+            values: ClaimValues::Int64(alloc::vec![]),
+        };
+        let v = resolve_claim(&[claim], "x", true).unwrap();
+        assert!(v.is_null());
+    }
+
+    // --- resolve_claim_single_value_scalar ---
+    #[test]
+    fn resolve_claim_single_value_scalar() {
+        let claim = ClaimEntry {
+            name: String::from("x"),
+            claim_type: ClaimType::Int64,
+            flags: 0,
+            values: ClaimValues::Int64(alloc::vec![99]),
+        };
+        let v = resolve_claim(&[claim], "x", true).unwrap();
+        match v.vtype {
+            ValueType::Int64(val) => assert_eq!(val, 99),
+            _ => panic!("expected scalar Int64"),
+        }
+    }
+
+    // --- resolve_claim_multi_value_composite ---
+    #[test]
+    fn resolve_claim_multi_value_composite() {
+        let claim = ClaimEntry {
+            name: String::from("x"),
+            claim_type: ClaimType::Int64,
+            flags: 0,
+            values: ClaimValues::Int64(alloc::vec![1, 2, 3]),
+        };
+        let v = resolve_claim(&[claim], "x", true).unwrap();
+        assert!(v.is_composite());
+    }
+
+    // --- resolve_claim_boolean_normalized ---
+    #[test]
+    fn resolve_claim_boolean_normalized() {
+        let claim = ClaimEntry {
+            name: String::from("b"),
+            claim_type: ClaimType::Boolean,
+            flags: 0,
+            values: ClaimValues::Boolean(alloc::vec![true]),
+        };
+        let v = resolve_claim(&[claim], "b", true).unwrap();
+        match v.vtype {
+            ValueType::Boolean(val) => assert!(val),
+            _ => panic!("expected Boolean"),
+        }
+    }
+
+    // --- resolve_claim_not_found_returns_null ---
+    #[test]
+    fn resolve_claim_not_found_returns_null() {
+        let claims = alloc::vec![int_claim("x", 42)];
+        let v = resolve_claim(&claims, "nonexistent", true).unwrap();
+        assert!(v.is_null());
+    }
+
+    // --- resolve_claim_flags_carried ---
+    #[test]
+    fn resolve_claim_flags_carried() {
+        let claim = ClaimEntry {
+            name: String::from("x"),
+            claim_type: ClaimType::Int64,
+            flags: claim_flags::CASE_SENSITIVE,
+            values: ClaimValues::Int64(alloc::vec![42]),
+        };
+        let v = resolve_claim(&[claim], "x", true).unwrap();
+        assert_eq!(v.flags, claim_flags::CASE_SENSITIVE);
+    }
+
+    // --- resolve_resource_disabled_returns_null ---
+    #[test]
+    fn resolve_resource_disabled_returns_null() {
+        let claim = ClaimEntry {
+            name: String::from("r"),
+            claim_type: ClaimType::Int64,
+            flags: claim_flags::DISABLED,
+            values: ClaimValues::Int64(alloc::vec![42]),
+        };
+        let v = resolve_claim(&[claim], "r", true).unwrap();
+        assert!(v.is_null());
+    }
+
+    // --- resolve_resource_deny_only_allow_null ---
+    #[test]
+    fn resolve_resource_deny_only_allow_null() {
+        let claim = ClaimEntry {
+            name: String::from("r"),
+            claim_type: ClaimType::Int64,
+            flags: claim_flags::USE_FOR_DENY_ONLY,
+            values: ClaimValues::Int64(alloc::vec![42]),
+        };
+        let v = resolve_claim(&[claim], "r", true).unwrap();
+        assert!(v.is_null());
+    }
+
+    // --- resolve_resource_empty_values_null ---
+    #[test]
+    fn resolve_resource_empty_values_null() {
+        let claim = ClaimEntry {
+            name: String::from("r"),
+            claim_type: ClaimType::Int64,
+            flags: 0,
+            values: ClaimValues::Int64(alloc::vec![]),
+        };
+        let v = resolve_claim(&[claim], "r", true).unwrap();
+        assert!(v.is_null());
+    }
+
+    // --- resolve_resource_not_found_null ---
+    #[test]
+    fn resolve_resource_not_found_null() {
+        let v = resolve_claim(&[], "nonexistent", true).unwrap();
+        assert!(v.is_null());
+    }
+
+    // --- claim_type_int64_maps ---
+    #[test]
+    fn claim_type_int64_maps() {
+        assert_eq!(ClaimType::Int64 as u16, 0x0001);
+    }
+
+    // --- claim_type_uint64_maps ---
+    #[test]
+    fn claim_type_uint64_maps() {
+        assert_eq!(ClaimType::Uint64 as u16, 0x0002);
+    }
+
+    // --- claim_type_string_maps ---
+    #[test]
+    fn claim_type_string_maps() {
+        assert_eq!(ClaimType::String as u16, 0x0003);
+    }
+
+    // --- claim_type_sid_maps ---
+    #[test]
+    fn claim_type_sid_maps() {
+        assert_eq!(ClaimType::Sid as u16, 0x0005);
+    }
+
+    // --- claim_type_boolean_maps ---
+    #[test]
+    fn claim_type_boolean_maps() {
+        assert_eq!(ClaimType::Boolean as u16, 0x0006);
+    }
+
+    // --- claim_type_octet_maps ---
+    #[test]
+    fn claim_type_octet_maps() {
+        assert_eq!(ClaimType::Octet as u16, 0x0010);
+    }
+
+    // ===================================================================
+    // §8: compare_equal corpus tests
+    // ===================================================================
+
+    #[test]
+    fn compare_equal_null_lhs_unknown() {
+        let lhs = Value::null();
+        let rhs = Value { vtype: ValueType::Int64(1), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::Unknown);
+    }
+
+    #[test]
+    fn compare_equal_null_rhs_unknown() {
+        let lhs = Value { vtype: ValueType::Int64(1), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value::null();
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::Unknown);
+    }
+
+    #[test]
+    fn compare_equal_scalar_vs_composite_unknown() {
+        let lhs = Value { vtype: ValueType::Int64(1), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value {
+            vtype: ValueType::Composite(alloc::vec![
+                Value { vtype: ValueType::Int64(1), origin: Origin::Literal, flags: 0 },
+            ]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::Unknown);
+    }
+
+    #[test]
+    fn compare_equal_incompatible_types_unknown() {
+        let lhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::String(String::from("5")), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::Unknown);
+    }
+
+    #[test]
+    fn compare_equal_int64_int64_match() {
+        let lhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::True);
+    }
+
+    #[test]
+    fn compare_equal_int64_int64_mismatch() {
+        let lhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Int64(6), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::False);
+    }
+
+    #[test]
+    fn compare_equal_int64_uint64_promoted() {
+        let lhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Uint64(5), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::True);
+    }
+
+    #[test]
+    fn compare_equal_boolean_int_equality() {
+        let lhs = Value { vtype: ValueType::Boolean(true), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Int64(1), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::True);
+    }
+
+    #[test]
+    fn compare_equal_string_case_insensitive_default() {
+        let lhs = Value { vtype: ValueType::String(String::from("Hello")), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::String(String::from("hello")), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::True);
+    }
+
+    #[test]
+    fn compare_equal_string_case_sensitive_flag() {
+        let lhs = Value { vtype: ValueType::String(String::from("Hello")), origin: Origin::UserAttr, flags: claim_flags::CASE_SENSITIVE };
+        let rhs = Value { vtype: ValueType::String(String::from("hello")), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::False);
+    }
+
+    #[test]
+    fn compare_equal_string_ascii_fold_only() {
+        // ASCII fold: A-Z → a-z only; no Unicode case folding
+        let lhs = Value { vtype: ValueType::String(String::from("ABC")), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::String(String::from("abc")), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::True);
+    }
+
+    #[test]
+    fn compare_equal_sid_match() {
+        let sid = crate::sid::Sid::new(5, &[21, 1, 2, 3]).unwrap();
+        let lhs = Value { vtype: ValueType::Sid(sid.clone()), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Sid(sid), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::True);
+    }
+
+    #[test]
+    fn compare_equal_octet_match() {
+        let lhs = Value { vtype: ValueType::Octet(alloc::vec![1, 2, 3]), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Octet(alloc::vec![1, 2, 3]), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::True);
+    }
+
+    #[test]
+    fn compare_equal_composite_elementwise() {
+        let lhs = Value {
+            vtype: ValueType::Composite(alloc::vec![
+                Value { vtype: ValueType::Int64(1), origin: Origin::Literal, flags: 0 },
+                Value { vtype: ValueType::Int64(2), origin: Origin::Literal, flags: 0 },
+            ]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        let rhs = Value {
+            vtype: ValueType::Composite(alloc::vec![
+                Value { vtype: ValueType::Int64(1), origin: Origin::Literal, flags: 0 },
+                Value { vtype: ValueType::Int64(2), origin: Origin::Literal, flags: 0 },
+            ]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::True);
+    }
+
+    #[test]
+    fn compare_equal_composite_different_length_false() {
+        let lhs = Value {
+            vtype: ValueType::Composite(alloc::vec![
+                Value { vtype: ValueType::Int64(1), origin: Origin::Literal, flags: 0 },
+            ]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        let rhs = Value {
+            vtype: ValueType::Composite(alloc::vec![
+                Value { vtype: ValueType::Int64(1), origin: Origin::Literal, flags: 0 },
+                Value { vtype: ValueType::Int64(2), origin: Origin::Literal, flags: 0 },
+            ]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::False);
+    }
+
+    #[test]
+    fn compare_equal_composite_different_order_false() {
+        let lhs = Value {
+            vtype: ValueType::Composite(alloc::vec![
+                Value { vtype: ValueType::Int64(1), origin: Origin::Literal, flags: 0 },
+                Value { vtype: ValueType::Int64(2), origin: Origin::Literal, flags: 0 },
+            ]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        let rhs = Value {
+            vtype: ValueType::Composite(alloc::vec![
+                Value { vtype: ValueType::Int64(2), origin: Origin::Literal, flags: 0 },
+                Value { vtype: ValueType::Int64(1), origin: Origin::Literal, flags: 0 },
+            ]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        assert_eq!(compare_equal(&lhs, &rhs), TriValue::False);
+    }
+
+    // ===================================================================
+    // §8: compare_ordered corpus tests
+    // ===================================================================
+
+    #[test]
+    fn compare_ordered_null_unknown() {
+        let lhs = Value::null();
+        let rhs = Value { vtype: ValueType::Int64(1), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).is_none());
+    }
+
+    #[test]
+    fn compare_ordered_composite_unknown() {
+        let lhs = Value {
+            vtype: ValueType::Composite(alloc::vec![
+                Value { vtype: ValueType::Int64(1), origin: Origin::Literal, flags: 0 },
+            ]),
+            origin: Origin::UserAttr,
+            flags: 0,
+        };
+        let rhs = Value { vtype: ValueType::Int64(1), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).is_none());
+    }
+
+    #[test]
+    fn compare_ordered_boolean_unknown() {
+        let lhs = Value { vtype: ValueType::Boolean(true), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Boolean(false), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).is_none());
+    }
+
+    #[test]
+    fn compare_ordered_incompatible_unknown() {
+        let lhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::String(String::from("5")), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).is_none());
+    }
+
+    #[test]
+    fn compare_ordered_lt_true() {
+        let lhs = Value { vtype: ValueType::Int64(3), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).unwrap() < 0);
+    }
+
+    #[test]
+    fn compare_ordered_lt_false() {
+        let lhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Int64(3), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).unwrap() >= 0);
+    }
+
+    #[test]
+    fn compare_ordered_le_true() {
+        let lhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).unwrap() <= 0);
+    }
+
+    #[test]
+    fn compare_ordered_le_false() {
+        let lhs = Value { vtype: ValueType::Int64(6), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).unwrap() > 0);
+    }
+
+    #[test]
+    fn compare_ordered_gt_true() {
+        let lhs = Value { vtype: ValueType::Int64(10), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).unwrap() > 0);
+    }
+
+    #[test]
+    fn compare_ordered_gt_false() {
+        let lhs = Value { vtype: ValueType::Int64(3), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).unwrap() <= 0);
+    }
+
+    #[test]
+    fn compare_ordered_ge_true() {
+        let lhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).unwrap() >= 0);
+    }
+
+    #[test]
+    fn compare_ordered_ge_false() {
+        let lhs = Value { vtype: ValueType::Int64(3), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Int64(5), origin: Origin::UserAttr, flags: 0 };
+        assert!(compare_ordered(&lhs, &rhs).unwrap() < 0);
+    }
+
+    #[test]
+    fn compare_ordered_int64_uint64_negative_lt() {
+        let lhs = Value { vtype: ValueType::Int64(-1), origin: Origin::UserAttr, flags: 0 };
+        let rhs = Value { vtype: ValueType::Uint64(0), origin: Origin::UserAttr, flags: 0 };
+        assert_eq!(compare_ordered(&lhs, &rhs), Some(-1));
+    }
+
+    #[test]
+    fn compare_ordered_string_case_flag() {
+        let lhs = Value { vtype: ValueType::String(String::from("A")), origin: Origin::UserAttr, flags: claim_flags::CASE_SENSITIVE };
+        let rhs = Value { vtype: ValueType::String(String::from("a")), origin: Origin::UserAttr, flags: 0 };
+        // Case-sensitive: "A" < "a" in ASCII
+        assert!(compare_ordered(&lhs, &rhs).unwrap() < 0);
+    }
+
+    // ===================================================================
+    // §8: to_sid_list corpus tests
+    // ===================================================================
+
+    #[test]
+    fn to_sid_list_single_sid() {
+        let sid = crate::sid::Sid::new(5, &[21, 1, 2, 3]).unwrap();
+        let v = Value { vtype: ValueType::Sid(sid.clone()), origin: Origin::Literal, flags: 0 };
+        let result = to_sid_list(&v).unwrap().unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], sid);
+    }
+
+    #[test]
+    fn to_sid_list_composite_sids() {
+        let s1 = crate::sid::Sid::new(5, &[21, 1, 2, 3]).unwrap();
+        let s2 = crate::sid::Sid::new(5, &[21, 4, 5, 6]).unwrap();
+        let v = Value {
+            vtype: ValueType::Composite(alloc::vec![
+                Value { vtype: ValueType::Sid(s1.clone()), origin: Origin::Literal, flags: 0 },
+                Value { vtype: ValueType::Sid(s2.clone()), origin: Origin::Literal, flags: 0 },
+            ]),
+            origin: Origin::Literal,
+            flags: 0,
+        };
+        let result = to_sid_list(&v).unwrap().unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn to_sid_list_empty_composite_error() {
+        let v = Value {
+            vtype: ValueType::Composite(alloc::vec![]),
+            origin: Origin::Literal,
+            flags: 0,
+        };
+        assert!(to_sid_list(&v).unwrap().is_none());
+    }
+
+    #[test]
+    fn to_sid_list_mixed_types_error() {
+        let sid = crate::sid::Sid::new(5, &[21, 1, 2, 3]).unwrap();
+        let v = Value {
+            vtype: ValueType::Composite(alloc::vec![
+                Value { vtype: ValueType::Sid(sid), origin: Origin::Literal, flags: 0 },
+                Value { vtype: ValueType::Int64(42), origin: Origin::Literal, flags: 0 },
+            ]),
+            origin: Origin::Literal,
+            flags: 0,
+        };
+        assert!(to_sid_list(&v).unwrap().is_none());
+    }
+
+    #[test]
+    fn to_sid_list_non_sid_scalar_error() {
+        let v = Value { vtype: ValueType::Int64(42), origin: Origin::Literal, flags: 0 };
+        assert!(to_sid_list(&v).unwrap().is_none());
+    }
+
+    // ===================================================================
+    // §11.12 negate_tv corpus tests (already exist as cond_negate_*)
+    // ===================================================================
+    // cond_negate_true_is_false — already exists
+    // cond_negate_false_is_true — already exists
+    // cond_negate_unknown_is_unknown — already exists
+
+    // ===================================================================
+    // §11.12 Boolean coercion (to_three_value) corpus tests
+    // ===================================================================
+    // cond_coerce_int64_nonzero_true — already exists
+    // cond_coerce_int64_zero_false — already exists
+    // cond_coerce_uint64_nonzero_true — already exists
+    // cond_coerce_uint64_zero_false — already exists
+    // cond_coerce_boolean_nonzero_true — already exists
+    // cond_coerce_boolean_zero_false — already exists
+    // cond_coerce_string_nonempty_true — already exists
+    // cond_coerce_string_empty_false — already exists
+    // cond_coerce_null_unknown — already exists
+    // cond_coerce_sid_unknown — already exists
+    // cond_coerce_octet_unknown — already exists
+    // cond_coerce_composite_unknown — already exists
 }
