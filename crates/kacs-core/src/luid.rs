@@ -72,4 +72,32 @@ mod tests {
         assert_eq!(Luid(1), Luid(1));
         assert_ne!(Luid(1), Luid(2));
     }
+
+    #[test]
+    fn luid_is_64_bits() {
+        // §7.3: LUID is a 64-bit value
+        assert_eq!(core::mem::size_of::<Luid>(), 8);
+    }
+
+    #[test]
+    fn luid_little_endian_wire_format() {
+        let luid = Luid(0x0102030405060708);
+        let bytes = luid.to_bytes();
+        assert_eq!(bytes[0], 0x08); // least significant byte first
+        assert_eq!(bytes[7], 0x01); // most significant byte last
+    }
+
+    #[test]
+    fn luid_clone_produces_equal() {
+        let a = Luid(42);
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn luid_copy_semantics() {
+        let a = Luid(42);
+        let b = a; // Copy
+        assert_eq!(a, b); // both still valid
+    }
 }
