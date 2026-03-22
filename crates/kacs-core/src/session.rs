@@ -252,4 +252,93 @@ mod tests {
         assert_eq!(logon_type, LogonType::Service);
         assert_eq!(user_sid, system);
     }
+
+    // --- §7.8 Logon Session corpus tests ---
+
+    #[test]
+    fn logon_type_enum_values() {
+        assert_eq!(LogonType::Interactive as u8, 2);
+        assert_eq!(LogonType::Network as u8, 3);
+        assert_eq!(LogonType::Batch as u8, 4);
+        assert_eq!(LogonType::Service as u8, 5);
+        assert_eq!(LogonType::NetworkCleartext as u8, 8);
+        assert_eq!(LogonType::NewCredentials as u8, 9);
+    }
+
+    #[test]
+    fn logon_type_parse_roundtrip() {
+        for &v in &[2u8, 3, 4, 5, 8, 9] {
+            assert!(LogonType::from_u8(v).is_some());
+        }
+        assert!(LogonType::from_u8(0).is_none());
+        assert!(LogonType::from_u8(1).is_none());
+        assert!(LogonType::from_u8(6).is_none());
+    }
+
+    #[test]
+    fn session_identified_by_luid() {
+        // §7.8: session identified by a LUID (session_id)
+        let mut table = SessionTable::new();
+        let id = table.create_system_session(well_known::system().unwrap()).unwrap();
+        let session = table.get(id).unwrap();
+        assert_eq!(session.session_id, id);
+    }
+
+    #[test]
+    fn multiple_sessions() {
+        let mut table = SessionTable::new();
+        let _ = table.create_system_session(well_known::system().unwrap()).unwrap();
+        let user1 = Sid::new(5, &[21, 100, 200, 300, 1001]).unwrap();
+        let user2 = Sid::new(5, &[21, 100, 200, 300, 1002]).unwrap();
+        let id1 = table.create(LogonType::Interactive, user1).unwrap();
+        let id2 = table.create(LogonType::Network, user2).unwrap();
+        assert_ne!(id1, id2);
+        assert_eq!(table.len(), 3); // system + user1 + user2
+    }
+
+    #[test]
+    fn session_refcount() {
+        let mut table = SessionTable::new();
+        let id = table.create_system_session(well_known::system().unwrap()).unwrap();
+        table.addref(id);
+        table.addref(id);
+        let session = table.get(id).unwrap();
+        assert_eq!(session.refcount.load(core::sync::atomic::Ordering::SeqCst), 2);
+        let zero = table.release(id);
+        assert!(!zero);
+        let zero = table.release(id);
+        assert!(zero); // refcount hit zero
+    }
+
+    #[test]
+    fn session_removal() {
+        let mut table = SessionTable::new();
+        let id = table.create_system_session(well_known::system().unwrap()).unwrap();
+        assert_eq!(table.len(), 1);
+        assert!(table.remove(id));
+        assert_eq!(table.len(), 0);
+        assert!(table.get(id).is_none());
+    }
+
+    #[test]
+    fn logon_sid_from_session_id() {
+        // §7.8: logon SID is S-1-5-5-{high}-{low}
+        let sid = logon_sid_from_id(0x0000_0001_0000_0002).unwrap();
+        assert_eq!(sid, Sid::new(5, &[5, 1, 2]).unwrap());
+    }
+
+    #[test]
+    fn parse_spec_invalid_logon_type() {
+        let system = well_known::system().unwrap();
+        let sid_bytes = system.to_bytes().unwrap();
+        let mut spec = alloc::vec![0u8]; // invalid logon type
+        spec.extend_from_slice(&(sid_bytes.len() as u32).to_le_bytes());
+        spec.extend_from_slice(&sid_bytes);
+        assert!(parse_session_spec(&spec).is_none());
+    }
+
+    #[test]
+    fn parse_spec_truncated() {
+        assert!(parse_session_spec(&[5, 0, 0, 0]).is_none()); // too short
+    }
 }
