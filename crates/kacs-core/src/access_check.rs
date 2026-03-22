@@ -5482,4 +5482,345 @@ mod tests {
         // CAP denies because its internal eval has no backup intent
         assert!(!result.allowed);
     }
+
+    // ===================================================================
+    // Appendix B: Compound Interaction Tests
+    // ===================================================================
+
+    // --- Category 1: MIC + PIP Combined ---
+
+    #[test]
+    fn mic_and_pip_both_present_dominant_on_both() {
+        // Dominant on MIC + dominant on PIP → DACL alone determines
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA)],
+            &well_known::integrity_medium().unwrap(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        // No PIP label → no PIP restriction. Medium token → dominant on Medium label.
+        let token = medium_token(&alice(), &[], 0);
+        assert!(check(&sd, &token, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn mic_blocks_write_pip_allows_all_nondominated() {
+        // Low caller, Medium MIC (no-write-up), no PIP → MIC blocks write
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &well_known::integrity_medium().unwrap(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let token = low_token(&alice());
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn pip_revokes_bits_mic_would_allow() {
+        // Medium caller, Low MIC label → dominant on MIC. PIP mask=0 → total lockout.
+        let sacl = Acl {
+            revision: ACL_REVISION,
+            aces: alloc::vec![
+                Ace {
+                    ace_type: SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                    flags: 0,
+                    mask: mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+                    sid: well_known::integrity_low().unwrap(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                },
+                Ace {
+                    ace_type: SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+                    flags: 0,
+                    mask: 0, // allow nothing
+                    sid: well_known::trust_label(well_known::PIP_TYPE_PROTECTED, well_known::PIP_TRUST_PEIOS).unwrap(),
+                    object_type: None, inherited_object_type: None,
+                    condition: None, application_data: None,
+                },
+            ],
+        };
+        let sd = SecurityDescriptor::with_sacl(
+            alice(),
+            well_known::users().unwrap(),
+            Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), GENERIC_ALL)] },
+            sacl,
+        );
+        let token = medium_token(&alice(), &[], 0);
+        // Dominant on MIC (Medium >= Low), but PIP mask=0 → nothing allowed
+        assert!(!check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn mic_default_medium_plus_explicit_pip_label() {
+        // No MIC label (defaults to Medium/NO_WRITE_UP), explicit PIP allowing all.
+        // Low caller still blocked by default MIC.
+        let sacl = Acl {
+            revision: ACL_REVISION,
+            aces: alloc::vec![Ace {
+                ace_type: SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+                flags: 0,
+                mask: GENERIC_ALL, // PIP allows everything
+                sid: well_known::trust_label(well_known::PIP_TYPE_NONE, 0).unwrap(),
+                object_type: None, inherited_object_type: None,
+                condition: None, application_data: None,
+            }],
+        };
+        let sd = SecurityDescriptor::with_sacl(
+            alice(),
+            well_known::users().unwrap(),
+            Acl { revision: ACL_REVISION, aces: alloc::vec![allow(&alice(), GENERIC_ALL)] },
+            sacl,
+        );
+        let token = low_token(&alice());
+        // Default MIC = Medium, Low < Medium → write blocked
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+    }
+
+    // --- Category 2: Restricted Token + Confinement ---
+
+    #[test]
+    fn restricted_and_confined_both_intersect() {
+        // Three-way intersection: normal=R+W, restricted=R, confinement=R → R
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&engineers(), FILE_READ_DATA),
+            allow(&app_sid(), FILE_READ_DATA),
+        ]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.groups = alloc::vec![crate::group::GroupEntry::new(
+            engineers(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )];
+        token.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(
+            engineers(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )]);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn privilege_orback_after_restricted_then_stripped_by_confinement() {
+        // Backup granted, OR'd back after restricted, then stripped by confinement
+        let sd = sd_with_dacl(&bob(), alloc::vec![]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(
+            app_sid(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )]);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_BACKUP);
+        // Backup grants read → OR'd back after restricted → confinement blocks
+        assert!(!check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT).allowed);
+    }
+
+    #[test]
+    fn restricted_and_confined_null_dacl() {
+        // NULL DACL → all three passes grant all → all granted
+        let sd = SecurityDescriptor {
+            control: SE_SELF_RELATIVE,
+            owner: Some(alice()),
+            group: Some(well_known::users().unwrap()),
+            dacl: None,
+            sacl: None,
+        };
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(
+            engineers(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )]);
+        assert!(check(&sd, &token, FILE_READ_DATA | FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn restricted_and_confined_empty_dacl() {
+        // Empty DACL + owner + restricted + confined
+        // Normal: owner implicit. Restricted: owner in restricting? Confinement: skip_owner_implicit.
+        let sd = SecurityDescriptor::new(
+            alice(),
+            well_known::users().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(
+            alice(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )]);
+        // Normal: READ_CONTROL+WRITE_DAC (owner implicit)
+        // Restricted: alice in restricting → owner implicit → READ_CONTROL+WRITE_DAC
+        // Confinement: skip_owner_implicit → 0. Intersection → 0.
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    // --- Category 3: Restricted + MIC + Privilege ---
+
+    #[test]
+    fn backup_privilege_survives_mic_and_restricted_intersection() {
+        // Medium token, Medium MIC → dominant. Backup grants read.
+        // Restricted intersection, then OR-back. Read survives.
+        let sd = sd_with_label(
+            &bob(),
+            alloc::vec![],
+            &well_known::integrity_medium().unwrap(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let mut token = restricted_token(&alice(), &[], &[&engineers()]);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_BACKUP);
+        let result = check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT);
+        assert!(result.allowed); // privilege OR-back restores read
+    }
+
+    #[test]
+    fn backup_privilege_blocked_by_high_integrity_mic_read_survives() {
+        // MIC does NOT constrain privilege-granted bits.
+        // Low token, High MIC (no-write-up only). Backup grants read before MIC.
+        // MIC blocks write, but read is already decided by privilege.
+        let sd = sd_with_label(
+            &bob(),
+            alloc::vec![],
+            &well_known::integrity_high().unwrap(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let mut token = low_token(&alice());
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_BACKUP);
+        // Read via backup privilege survives MIC (privileges before MIC)
+        assert!(check_with_intent(&sd, &token, FILE_READ_DATA, BACKUP_INTENT).allowed);
+        // Write blocked by MIC
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+    }
+
+    #[test]
+    fn take_ownership_privilege_blocked_by_mic_mandatory_decided() {
+        // MIC blocks WRITE_OWNER, TakeOwnership respects mandatory_decided
+        let sd = sd_with_label(
+            &bob(),
+            alloc::vec![],
+            &well_known::integrity_high().unwrap(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let mut token = medium_token(&alice(), &[], privilege::bits::SE_TAKE_OWNERSHIP);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_TAKE_OWNERSHIP);
+        // MIC blocks write-category (including WRITE_OWNER) for Medium < High
+        assert!(!check(&sd, &token, WRITE_OWNER).allowed);
+    }
+
+    #[test]
+    fn relabel_privilege_punches_through_mic_for_write_owner() {
+        // SeRelabelPrivilege loosens MIC for WRITE_OWNER, DACL must still grant it
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), WRITE_OWNER)],
+            &well_known::integrity_high().unwrap(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let mut token = medium_token(&alice(), &[], privilege::bits::SE_RELABEL);
+        token.privileges = privilege::Privileges::new_all_enabled(privilege::bits::SE_RELABEL);
+        // Without relabel: WRITE_OWNER blocked by MIC (Medium < High, write-category)
+        let no_relabel = medium_token(&alice(), &[], 0);
+        assert!(!check(&sd, &no_relabel, WRITE_OWNER).allowed);
+        // With relabel: WRITE_OWNER punches through MIC
+        assert!(check(&sd, &token, WRITE_OWNER).allowed);
+    }
+
+    // --- Category 5: Impersonation + MIC ---
+
+    #[test]
+    fn impersonation_mic_uses_effective_token_integrity() {
+        // High-integrity service impersonating Low-integrity client
+        // MIC reads Low from effective token → blocks write on Medium object
+        let sd = sd_with_label(
+            &alice(),
+            alloc::vec![allow(&alice(), GENERIC_ALL)],
+            &well_known::integrity_medium().unwrap(),
+            mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        );
+        let mut token = test_token(&alice(), &[], 0);
+        token.token_type = TokenType::Impersonation;
+        token.impersonation_level = ImpersonationLevel::Impersonation;
+        token.integrity_level = crate::token::IntegrityLevel::Low;
+        token.mandatory_policy = crate::token::mandatory_policy::NO_WRITE_UP;
+        assert!(!check(&sd, &token, FILE_WRITE_DATA).allowed);
+        assert!(check(&sd, &token, FILE_READ_DATA).allowed);
+    }
+
+    #[test]
+    fn identification_level_denied_regardless_of_pip_or_mic() {
+        // Identification denied at step 0, before anything else
+        let sd = sd_with_dacl(&alice(), alloc::vec![allow(&alice(), GENERIC_ALL)]);
+        let mut token = test_token(&alice(), &[], 0);
+        token.token_type = TokenType::Impersonation;
+        token.impersonation_level = ImpersonationLevel::Identification;
+        token.integrity_level = crate::token::IntegrityLevel::System;
+        let result = access_check(
+            &sd, &token, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, None, &[], &[], 0, 0, 0,
+        );
+        assert!(result.is_err());
+    }
+
+    // --- Category 7: Owner Implicit + Confinement ---
+
+    #[test]
+    fn owner_implicit_rights_skipped_in_confinement_pass() {
+        // Confined owner: normal=implicit, confinement=skip_implicit → blocked
+        let sd = SecurityDescriptor::new(
+            alice(),
+            well_known::users().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        assert!(!check(&sd, &token, READ_CONTROL).allowed);
+    }
+
+    #[test]
+    fn owner_with_confinement_ace_granting_write_dac() {
+        // Confinement ACE grants WRITE_DAC to confinement SID
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&app_sid(), WRITE_DAC),
+        ]);
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        // Normal: owner implicit WRITE_DAC + DACL for app_sid
+        // Confinement: app_sid matches → WRITE_DAC
+        assert!(check(&sd, &token, WRITE_DAC).allowed);
+    }
+
+    // --- Category 8: MAXIMUM_ALLOWED + Restricted + Confinement ---
+
+    #[test]
+    fn maximum_allowed_restricted_confinement_intersection() {
+        // Three-way intersection with MAXIMUM_ALLOWED
+        let sd = sd_with_dacl(&alice(), alloc::vec![
+            allow(&alice(), FILE_READ_DATA | FILE_WRITE_DATA | FILE_EXECUTE),
+            allow(&engineers(), FILE_READ_DATA | FILE_WRITE_DATA),
+            allow(&app_sid(), FILE_READ_DATA),
+        ]);
+        let mut token = confined_token(&alice(), &app_sid(), &[]);
+        token.groups = alloc::vec![crate::group::GroupEntry::new(
+            engineers(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )];
+        token.restricted_sids = Some(alloc::vec![crate::group::GroupEntry::new(
+            engineers(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )]);
+        let result = check(&sd, &token, MAXIMUM_ALLOWED);
+        assert!(result.allowed);
+        // Normal: R+W+X. Restricted: R+W (engineers). Confinement: R (app_sid).
+        assert!(result.granted & FILE_READ_DATA != 0);
+        assert_eq!(result.granted & FILE_WRITE_DATA, 0);
+        assert_eq!(result.granted & FILE_EXECUTE, 0);
+    }
+
+    #[test]
+    fn maximum_allowed_zero_granted_confined_succeeds() {
+        // MAXIMUM_ALLOWED on confined token with empty DACL → granted=0, allowed=true
+        let sd = SecurityDescriptor::new(
+            bob(),
+            well_known::users().unwrap(),
+            Acl::new(ACL_REVISION),
+        );
+        let token = confined_token(&alice(), &app_sid(), &[]);
+        let result = check(&sd, &token, MAXIMUM_ALLOWED);
+        assert!(result.allowed);
+    }
 }
