@@ -27,6 +27,7 @@
 #include <linux/fdtable.h>
 #include <linux/dcache.h>
 #include <linux/sched/coredump.h>
+#include <linux/mutex.h>
 #include <linux/xattr.h>
 #include <linux/namei.h>
 #include <net/sock.h>
@@ -131,6 +132,18 @@ extern long long kacs_access_check_sd(const void *token_ptr,
 				      u32 *granted_out);
 extern int kacs_check_token_sd(const void *token_ptr,
 			       const void *caller_token_ptr, u32 desired);
+
+/* ── Sleeping mutexes for Rust session/linked-token tables ─────────────
+ * Rust code calls back into these via FFI instead of using a hand-rolled
+ * spinlock. Required because the protected paths allocate (vec_push)
+ * which may sleep with GFP_KERNEL. */
+static DEFINE_MUTEX(kacs_session_mutex);
+static DEFINE_MUTEX(kacs_linked_mutex);
+
+void kacs_mutex_lock_session(void)   { mutex_lock(&kacs_session_mutex); }
+void kacs_mutex_unlock_session(void) { mutex_unlock(&kacs_session_mutex); }
+void kacs_mutex_lock_linked(void)    { mutex_lock(&kacs_linked_mutex); }
+void kacs_mutex_unlock_linked(void)  { mutex_unlock(&kacs_linked_mutex); }
 
 /* ── Forward declarations ──────────────────────────────────────────────── */
 

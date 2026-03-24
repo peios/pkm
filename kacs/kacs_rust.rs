@@ -1841,66 +1841,84 @@ pub extern "C" fn kacs_token_restrict(
 
 // ── Session management ────────────────────────────────────────────────────
 
-/// Simple spinlock for global state. Uses AtomicBool with test-and-set.
-struct SpinLock<T> {
-    locked: core::sync::atomic::AtomicBool,
+// ── Kernel mutex via FFI ──────────────────────────────────────────────────
+//
+// The session table and linked-token list are protected by kernel struct
+// mutexes declared in lsm.c. Mutexes (not spinlocks) because the protected
+// paths allocate memory (vec_push → GFP_KERNEL → may sleep).
+
+extern "C" {
+    fn kacs_mutex_lock_session();
+    fn kacs_mutex_unlock_session();
+    fn kacs_mutex_lock_linked();
+    fn kacs_mutex_unlock_linked();
+}
+
+/// Sleeping mutex backed by a kernel `struct mutex` in lsm.c.
+/// Each instance wraps an UnsafeCell and calls a specific C lock/unlock pair.
+struct KernelMutex<T> {
     data: core::cell::UnsafeCell<T>,
+    lock_fn: unsafe extern "C" fn(),
+    unlock_fn: unsafe extern "C" fn(),
 }
 
-unsafe impl<T: Send> Sync for SpinLock<T> {}
-unsafe impl<T: Send> Send for SpinLock<T> {}
+unsafe impl<T: Send> Sync for KernelMutex<T> {}
+unsafe impl<T: Send> Send for KernelMutex<T> {}
 
-impl<T> SpinLock<T> {
-    const fn new(data: T) -> Self {
-        SpinLock {
-            locked: core::sync::atomic::AtomicBool::new(false),
+impl<T> KernelMutex<T> {
+    const fn new(
+        data: T,
+        lock_fn: unsafe extern "C" fn(),
+        unlock_fn: unsafe extern "C" fn(),
+    ) -> Self {
+        KernelMutex {
             data: core::cell::UnsafeCell::new(data),
+            lock_fn,
+            unlock_fn,
         }
     }
 
-    fn lock(&self) -> SpinLockGuard<'_, T> {
-        while self.locked.swap(true, Ordering::Acquire) {
-            core::hint::spin_loop();
-        }
-        SpinLockGuard { lock: self }
+    fn lock(&self) -> KernelMutexGuard<'_, T> {
+        unsafe { (self.lock_fn)(); }
+        KernelMutexGuard { mutex: self }
     }
 }
 
-struct SpinLockGuard<'a, T> {
-    lock: &'a SpinLock<T>,
+struct KernelMutexGuard<'a, T> {
+    mutex: &'a KernelMutex<T>,
 }
 
-impl<T> core::ops::Deref for SpinLockGuard<'_, T> {
+impl<T> core::ops::Deref for KernelMutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        unsafe { &*self.lock.data.get() }
+        unsafe { &*self.mutex.data.get() }
     }
 }
 
-impl<T> core::ops::DerefMut for SpinLockGuard<'_, T> {
+impl<T> core::ops::DerefMut for KernelMutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.lock.data.get() }
+        unsafe { &mut *self.mutex.data.get() }
     }
 }
 
-impl<T> Drop for SpinLockGuard<'_, T> {
+impl<T> Drop for KernelMutexGuard<'_, T> {
     fn drop(&mut self) {
-        self.lock.locked.store(false, Ordering::Release);
+        unsafe { (self.mutex.unlock_fn)(); }
     }
 }
 
-/// Global session table, protected by spinlock.
-static SESSION_TABLE: SpinLock<Option<kacs_core::session::SessionTable>> =
-    SpinLock::new(None);
+/// Global session table, protected by kernel mutex.
+static SESSION_TABLE: KernelMutex<Option<kacs_core::session::SessionTable>> =
+    KernelMutex::new(None, kacs_mutex_lock_session, kacs_mutex_unlock_session);
 
 /// Wrapper to make *const () Send (we manage lifetime manually via refcounting).
 #[derive(Clone, Copy)]
 struct SendPtr(*const ());
 unsafe impl Send for SendPtr {}
 
-/// Linked token pairs, protected by spinlock.
-static LINKED_TOKENS: SpinLock<Option<compat::Vec<(u64, SendPtr, SendPtr)>>> =
-    SpinLock::new(None);
+/// Linked token pairs, protected by kernel mutex.
+static LINKED_TOKENS: KernelMutex<Option<compat::Vec<(u64, SendPtr, SendPtr)>>> =
+    KernelMutex::new(None, kacs_mutex_lock_linked, kacs_mutex_unlock_linked);
 
 /// Initialize the session table and create the SYSTEM session (session 0).
 /// Called once from kacs_init.

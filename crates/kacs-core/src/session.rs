@@ -146,7 +146,13 @@ impl SessionTable {
     /// Uses swap-remove — O(1), no allocation, no OOM risk.
     pub fn remove(&mut self, session_id: u64) -> bool {
         if let Some(idx) = self.sessions.iter().position(|s| s.session_id == session_id) {
-            self.sessions.swap_remove(idx);
+            // Manual swap-remove: swap with last element, then pop.
+            // Can't use Vec::swap_remove because the kernel Vec doesn't have it.
+            let last = self.sessions.len() - 1;
+            if idx != last {
+                self.sessions.swap(idx, last);
+            }
+            self.sessions.pop();
             true
         } else {
             false
