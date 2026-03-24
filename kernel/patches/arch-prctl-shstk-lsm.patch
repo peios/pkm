@@ -1,0 +1,34 @@
+From: Peios <kernel@peios.org>
+Subject: x86: route ARCH_SHSTK operations through security_task_prctl
+
+arch_prctl(ARCH_SHSTK_DISABLE, ...) bypasses security_task_prctl,
+allowing userspace to disable CET shadow stack without LSM oversight.
+The prctl(PR_SET_SHADOW_STACK_STATUS) path does call the LSM hook,
+but both paths reach the same shstk_prctl() function.
+
+Route ARCH_SHSTK_{ENABLE,DISABLE,LOCK,UNLOCK} through
+security_task_prctl so LSMs can enforce CFI policies (e.g. KACS
+blocks shadow stack disable when the process has CFIB set).
+
+ARCH_SHSTK_STATUS (read-only query) is not gated.
+
+--- a/arch/x86/kernel/process_64.c
++++ b/arch/x86/kernel/process_64.c
+@@ -968,6 +968,17 @@
+ 	case ARCH_SHSTK_LOCK:
+ 	case ARCH_SHSTK_UNLOCK:
+ 	case ARCH_SHSTK_STATUS:
++	{
++		/* Let LSMs veto shadow stack state changes.
++		 * STATUS is read-only and always allowed. */
++		if (option != ARCH_SHSTK_STATUS) {
++			int lsm_ret = security_task_prctl(option, arg2,
++							  0, 0, 0);
++			if (lsm_ret != -ENOSYS)
++				return lsm_ret;
++		}
+ 		return shstk_prctl(task, option, arg2);
++	}
+ 	default:
+ 		ret = -EINVAL;
+ 		break;

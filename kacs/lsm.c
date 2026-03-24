@@ -28,6 +28,7 @@
 #include <linux/dcache.h>
 #include <linux/sched/coredump.h>
 #include <linux/mutex.h>
+#include <asm/cpufeatures.h>
 #include <linux/xattr.h>
 #include <linux/namei.h>
 #include <net/sock.h>
@@ -397,7 +398,6 @@ struct kacs_task_security {
 	u8 wxp;			/* Write-XOR-Execute (§8.1) */
 	u8 tlp;			/* Trusted Library Paths (§8.1) */
 	u8 lsv;			/* Library Signature Verification (§8.1) */
-	u8 cfi;			/* Control Flow Integrity (§8.1) */
 	u8 ui_access;		/* UI interaction (§8.1, reserved) */
 	u8 no_child_process;	/* Cannot fork (§8.1, one-way) */
 	u8 cfif;		/* Forward-edge CFI — IBT locked on */
@@ -1218,7 +1218,6 @@ static int kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 	tsec->wxp = parent_tsec->wxp;
 	tsec->tlp = parent_tsec->tlp;
 	tsec->lsv = parent_tsec->lsv;
-	tsec->cfi = parent_tsec->cfi;
 	tsec->ui_access = parent_tsec->ui_access;
 	tsec->no_child_process = parent_tsec->no_child_process;
 	tsec->cfif = parent_tsec->cfif;
@@ -1757,6 +1756,33 @@ static int kacs_task_prctl(int option, unsigned long arg2,
 	    kacs_task(current)->sml &&
 	    (arg3 & PR_SPEC_ENABLE))
 		return -EPERM;
+
+	/* CFIB (§8.1): backward-edge CFI — shadow stack locked on.
+	 * Block shadow stack disable via both prctl and arch_prctl paths.
+	 * ARCH_SHSTK_DISABLE (0x5002) arrives here from our kernel patch
+	 * that routes arch_prctl SHSTK ops through security_task_prctl. */
+#define ARCH_SHSTK_DISABLE	0x5002
+#define ARCH_SHSTK_UNLOCK	0x5004
+	if (kacs_task(current)->cfib) {
+		/* prctl(PR_SET_SHADOW_STACK_STATUS) clearing ENABLE bit */
+		if (option == PR_SET_SHADOW_STACK_STATUS &&
+		    !(arg2 & PR_SHADOW_STACK_ENABLE))
+			return -EPERM;
+		/* arch_prctl(ARCH_SHSTK_DISABLE) */
+		if (option == ARCH_SHSTK_DISABLE)
+			return -EPERM;
+		/* arch_prctl(ARCH_SHSTK_UNLOCK) — prevent unlocking
+		 * what we've locked */
+		if (option == ARCH_SHSTK_UNLOCK)
+			return -EPERM;
+	}
+
+	/* CFIF (§8.1): forward-edge CFI — IBT.
+	 * Userspace IBT on x86 is managed by the kernel based on ELF
+	 * headers, not via prctl. No disable path to block in 6.19.
+	 * When userspace IBT control is added, gate it here.
+	 * For now, cfif is enforced at exec time (refuse to exec
+	 * non-IBT binaries when cfif is set) — TODO. */
 
 	/* Other prctl options: pass through (return -ENOSYS → not handled). */
 	return -ENOSYS;
@@ -3814,6 +3840,18 @@ SYSCALL_DEFINE4(kacs_set_psb, int, pidfd, u32, pip_type,
 	    pip_type != PIP_TYPE_ISOLATED)
 		return -EINVAL;
 
+	/* CFI: check CPU support before setting mitigation flags.
+	 * Return -ENODEV if the CPU lacks the required feature —
+	 * caller gets a clean error rather than false confidence. */
+	if (mitigations & (KACS_MIT_CFI | KACS_MIT_CFIB)) {
+		if (!cpu_feature_enabled(X86_FEATURE_SHSTK))
+			return -ENODEV;
+	}
+	if (mitigations & (KACS_MIT_CFI | KACS_MIT_CFIF)) {
+		if (!cpu_feature_enabled(X86_FEATURE_IBT))
+			return -ENODEV;
+	}
+
 	/* Resolve target. */
 	if (pidfd == -1) {
 		task = current;
@@ -3847,8 +3885,7 @@ SYSCALL_DEFINE4(kacs_set_psb, int, pidfd, u32, pip_type,
 	if (mitigations & KACS_MIT_LSV)
 		target_tsec->lsv = 1;
 	if (mitigations & KACS_MIT_CFI) {
-		/* Legacy: sets both forward and backward edge. */
-		target_tsec->cfi = 1;
+		/* Convenience: sets both forward and backward edge. */
 		target_tsec->cfif = 1;
 		target_tsec->cfib = 1;
 	}
