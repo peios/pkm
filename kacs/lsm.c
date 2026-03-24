@@ -140,6 +140,12 @@ extern int kacs_check_token_sd(const void *token_ptr,
 static DEFINE_MUTEX(kacs_session_mutex);
 static DEFINE_MUTEX(kacs_linked_mutex);
 
+/* Prototypes — called from Rust via FFI */
+void kacs_mutex_lock_session(void);
+void kacs_mutex_unlock_session(void);
+void kacs_mutex_lock_linked(void);
+void kacs_mutex_unlock_linked(void);
+
 void kacs_mutex_lock_session(void)   { mutex_lock(&kacs_session_mutex); }
 void kacs_mutex_unlock_session(void) { mutex_unlock(&kacs_session_mutex); }
 void kacs_mutex_lock_linked(void)    { mutex_lock(&kacs_linked_mutex); }
@@ -4949,21 +4955,23 @@ static int __init kacs_init(void)
 	int ret;
 
 	/*
-	 * LSM stack verification (§15.7 step 1).
+	 * LSM stack verification (§15.5).
 	 *
-	 * KACS must be the sole MAC LSM. Conflicting LSMs (SELinux,
-	 * AppArmor, SMACK, TOMOYO) are excluded at build time via the
-	 * kernel Kconfig: CONFIG_SECURITY_SELINUX, CONFIG_SECURITY_APPARMOR,
-	 * CONFIG_SECURITY_SMACK, and CONFIG_SECURITY_TOMOYO are all
-	 * forced off in the PKM kernel Dockerfile. Runtime detection from
-	 * within an LSM init function is not practical — there is no
-	 * exported API to enumerate loaded LSMs at this point. The Kconfig
-	 * enforcement is the authoritative gate; if someone modifies the
-	 * defconfig to enable a conflicting LSM, the build will include it
-	 * and KACS hook ordering becomes unpredictable. A build-time
-	 * static_assert or Kconfig dependency (depends on !SECURITY_SELINUX)
-	 * could be added to the PKM Kconfig for defense in depth.
+	 * KACS must be the sole MAC LSM. Conflicting LSMs are rejected at
+	 * two levels:
+	 *   1. Kconfig: depends on !SECURITY_SELINUX etc. (authoritative gate)
+	 *   2. Runtime: IS_ENABLED() checks below (defense-in-depth against
+	 *      forced configs or manual .config edits)
+	 * Non-MAC LSMs (landlock, lockdown, yama, integrity) are accepted.
 	 */
+	if (IS_ENABLED(CONFIG_SECURITY_SELINUX) ||
+	    IS_ENABLED(CONFIG_SECURITY_APPARMOR) ||
+	    IS_ENABLED(CONFIG_SECURITY_SMACK) ||
+	    IS_ENABLED(CONFIG_SECURITY_TOMOYO)) {
+		pr_err("pkm: conflicting MAC LSM detected — KACS requires sole MAC authority\n");
+		return -EINVAL;
+	}
+
 	security_add_hooks(kacs_hooks, ARRAY_SIZE(kacs_hooks), &kacs_lsmid);
 
 	ret = kacs_rust_init();

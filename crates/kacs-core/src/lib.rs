@@ -11,6 +11,10 @@
 //! `no_std + alloc`. Kernel-specific allocation handled by [`compat`].
 
 #![no_std]
+// In the kernel build, kacs_core is a submodule of the kernel crate,
+// so `pub` items are unreachable from outside. They must remain `pub`
+// for the userspace build where kacs_core is the crate root.
+#![allow(unreachable_pub)]
 
 extern crate alloc;
 

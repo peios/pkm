@@ -4,10 +4,17 @@ config SECURITY_PKM
 	bool "PKM — Peios Kernel Module"
 	depends on SECURITY
 	depends on RUST
-	default n
+	depends on !SECURITY_SELINUX
+	depends on !SECURITY_APPARMOR
+	depends on !SECURITY_SMACK
+	depends on !SECURITY_TOMOYO
 	help
 	  PKM is the Peios Kernel Module, containing:
 	  - KACS: Kernel-based Access Control System (tokens, SDs, AccessCheck)
 	  - Event subsystem: ring buffer for structured audit events
+
+	  KACS must be the sole MAC LSM. Conflicting MAC LSMs (SELinux,
+	  AppArmor, SMACK, TOMOYO) are rejected at Kconfig level.
+	  Non-MAC LSMs (landlock, lockdown, yama, integrity) are accepted.
 
 	  If unsure, say N.

@@ -19,7 +19,6 @@
 use crate::compat::{self, AllocError, String, TryClone, Vec};
 use crate::sid::Sid;
 use crate::access_check::EnrichedToken;
-use crate::token::Token;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -129,6 +128,7 @@ pub enum ValueType {
 }
 
 impl Value {
+    #[cfg(test)]
     fn null() -> Self {
         Value { vtype: ValueType::Null, origin: Origin::Literal, flags: 0 }
     }

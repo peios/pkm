@@ -14,6 +14,7 @@ mod kacs_core;
 // Re-export kacs_core modules at crate root so that `use crate::sid::Sid`
 // works inside kacs_core files (they were written as a standalone crate
 // where `crate::` pointed to their own root).
+#[allow(hidden_glob_reexports)]
 pub use kacs_core::*;
 
 use core::ffi::c_int;
@@ -22,7 +23,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 /// Global token ID counter. Each token gets a unique ID.
 static NEXT_TOKEN_ID: AtomicU64 = AtomicU64::new(1);
 
-use kacs_core::compat::{self, AllocError, TryClone};
+pub use kacs_core::compat::{self, AllocError, TryClone};
 use kacs_core::token::{Token, TokenType, ImpersonationLevel, IntegrityLevel};
 
 // ── Heap-allocated refcounted token ───────────────────────────────────────
