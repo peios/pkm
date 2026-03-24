@@ -1,0 +1,59 @@
+From: Peios <kernel@peios.org>
+Subject: pidfd_open: gate behind ptrace_may_access for LSM process SD checks
+
+pidfd_open() creates a file descriptor referring to a process but
+performs no security check beyond basic PID lookup. Any process can
+obtain a pidfd for any other process it can see in its PID namespace.
+
+Add PTRACE_MODE_PIDFD_OPEN (0x40) so LSMs can distinguish pidfd_open
+from memory-read ptrace operations and apply the appropriate access
+right. KACS maps this to PROCESS_QUERY_LIMITED — the minimum right
+needed to hold a handle on a process.
+
+The check is in pidfd_open() (explicit user request to reference an
+existing process), NOT in pidfd_create() (also called by clone3 for
+CLONE_PIDFD, where the parent should always get a pidfd for its child).
+
+--- a/include/linux/ptrace.h
++++ b/include/linux/ptrace.h
+@@ -65,6 +65,7 @@
+ #define PTRACE_MODE_FSCREDS	0x08
+ #define PTRACE_MODE_REALCREDS	0x10
+ #define PTRACE_MODE_GETFD	0x20
++#define PTRACE_MODE_PIDFD_OPEN	0x40
+
+ /* shorthands for READ/ATTACH and FSCREDS/REALCREDS: */
+ #define PTRACE_MODE_READ_FSCREDS (PTRACE_MODE_READ | PTRACE_MODE_FSCREDS)
+--- a/kernel/pid.c
++++ b/kernel/pid.c
+@@ -646,6 +646,7 @@
+ SYSCALL_DEFINE2(pidfd_open, pid_t, pid, unsigned int, flags)
+ {
+ 	int fd;
++	struct task_struct *task;
+ 	struct pid *p;
+
+ 	if (flags & ~(PIDFD_NONBLOCK | PIDFD_THREAD))
+@@ -657,6 +658,19 @@
+ 	if (!p)
+ 		return -ESRCH;
+
++	/* LSM process access check: allows security modules to gate
++	 * pidfd creation against the target's process security descriptor.
++	 * PTRACE_MODE_PIDFD_OPEN distinguishes this from memory-read
++	 * ptrace operations so the LSM can apply a lighter access right. */
++	task = get_pid_task(p, PIDTYPE_PID);
++	if (!task) {
++		put_pid(p);
++		return -ESRCH;
++	}
++	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_PIDFD_OPEN)) {
++		put_task_struct(task);
++		put_pid(p);
++		return -EACCES;
++	}
++	put_task_struct(task);
++
+ 	fd = pidfd_create(p, flags);
+
+ 	put_pid(p);

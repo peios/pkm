@@ -1302,14 +1302,18 @@ static int kacs_ptrace_access_check(struct task_struct *child,
 	/* AccessCheck against target's process SD.
 	 * SeDebugPrivilege bypasses the SD check (§13.2) but NOT PIP.
 	 * Map ptrace mode to process SD access rights:
+	 * - PTRACE_MODE_PIDFD_OPEN (pidfd_open) → PROCESS_QUERY_LIMITED (0x1000)
 	 * - PTRACE_MODE_GETFD (pidfd_getfd) → PROCESS_DUP_HANDLE (0x0040)
 	 * - PTRACE_MODE_READ → PROCESS_VM_READ (0x0010)
 	 * - PTRACE_MODE_ATTACH → PROCESS_VM_WRITE (0x0020)
 	 */
+#define PTRACE_MODE_PIDFD_OPEN	0x40	/* also in include/linux/ptrace.h (patch) */
 	caller_cred = kacs_cred(current_cred());
 	if (target_tsec->proc_sd &&
 	    !kacs_token_check_privilege(caller_cred->token, KACS_PRIV_DEBUG)) {
-		if (mode & 0x20) /* PTRACE_MODE_GETFD */
+		if (mode & PTRACE_MODE_PIDFD_OPEN)
+			desired = 0x1000;  /* PROCESS_QUERY_LIMITED */
+		else if (mode & 0x20) /* PTRACE_MODE_GETFD */
 			desired = 0x0040;  /* PROCESS_DUP_HANDLE */
 		else if (mode & PTRACE_MODE_READ)
 			desired = 0x0010;  /* PROCESS_VM_READ */
