@@ -1,0 +1,20 @@
+From: Peios <kernel@peios.org>
+Subject: FACS patch 7b: security_file_setattr for fchown
+
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -863,6 +863,15 @@
+ int vfs_fchown(struct file *file, uid_t user, gid_t group)
+ {
+ 	int error;
++#ifdef CONFIG_SECURITY_PKM
++	{
++		extern int security_file_setattr(struct file *, struct iattr *);
++		struct iattr fsa = { .ia_valid = ATTR_UID | ATTR_GID };
++		error = security_file_setattr(file, &fsa);
++		if (error)
++			return error;
++	}
++#endif
+
+ 	error = mnt_want_write_file(file);

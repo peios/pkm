@@ -1,0 +1,20 @@
+From: Peios <kernel@peios.org>
+Subject: FACS patch 9b: security_file_getattr for statx fd path
+
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -320,6 +320,14 @@
+ static int vfs_statx_fd(int fd, int flags, struct kstat *stat,
+ 			  u32 request_mask)
+ {
++#ifdef CONFIG_SECURITY_PKM
++	{
++		extern int security_file_getattr(struct file *file);
++		CLASS(fd_raw, g)(fd);
++		if (!fd_empty(g) && security_file_getattr(fd_file(g)))
++			return -EACCES;
++	}
++#endif
+ 	CLASS(fd_raw, f)(fd);
+ 	if (fd_empty(f))
+ 		return -EBADF;
