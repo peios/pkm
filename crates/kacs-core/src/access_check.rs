@@ -126,6 +126,10 @@ pub struct EnrichedToken<'a> {
     pub has_principal_self: bool,
     /// If true, PRINCIPAL_SELF is deny-only on this token.
     pub principal_self_deny_only: bool,
+    /// Override device_groups for the restricted pass (§11.7).
+    /// When Some, conditional expressions use these instead of
+    /// token.device_groups for Device_Member_of evaluation.
+    pub device_groups_override: Option<&'a [crate::group::GroupEntry]>,
 }
 
 /// §11.17 EnrichToken: inject virtual groups S-1-3-4 and S-1-5-10.
@@ -149,7 +153,51 @@ fn enrich_token<'a>(token: &'a Token, owner: &Sid, self_sid: Option<&Sid>) -> En
         has_owner_rights: caller_is_owner,
         has_principal_self,
         principal_self_deny_only,
+        device_groups_override: None,
     }
+}
+
+/// Validate an object type list (§11.17 step 1).
+/// Rejects: duplicate GUIDs, level gaps > 1, non-zero root level,
+/// multiple level-0 roots.
+fn validate_object_tree(tree: &[ObjectTypeNode]) -> Result<(), AccessCheckError> {
+    if tree.is_empty() {
+        return Ok(());
+    }
+
+    // Root must be level 0.
+    if tree[0].level != 0 {
+        return Err(AccessCheckError::InvalidObjectTypeList);
+    }
+
+    let mut root_count: u32 = 0;
+    let mut prev_level: u16 = 0;
+
+    for (i, node) in tree.iter().enumerate() {
+        // Level gap: a node's level can be at most prev_level + 1.
+        // (It can also be less — going back up the tree.)
+        if i > 0 && node.level > prev_level + 1 {
+            return Err(AccessCheckError::InvalidObjectTypeList);
+        }
+
+        if node.level == 0 {
+            root_count += 1;
+            if root_count > 1 {
+                return Err(AccessCheckError::InvalidObjectTypeList);
+            }
+        }
+
+        // Duplicate GUID check: O(n²) but trees are tiny (typically < 20 nodes).
+        for other in &tree[..i] {
+            if other.guid == node.guid {
+                return Err(AccessCheckError::InvalidObjectTypeList);
+            }
+        }
+
+        prev_level = node.level;
+    }
+
+    Ok(())
 }
 
 /// Extended SID matching that includes virtual groups.
@@ -1069,6 +1117,11 @@ pub fn access_check(
         return Err(AccessCheckError::InvalidSecurityDescriptor);
     }
 
+    // Object type list validation (§11.17 step 1).
+    if let Some(ref tree) = object_tree {
+        validate_object_tree(tree)?;
+    }
+
     // Step 2: Generic mapping (§11.2)
     let mut mapped_desired = map_generic_bits(desired, mapping);
 
@@ -1092,34 +1145,42 @@ pub fn access_check(
     let mut privilege_granted: u32 = 0;
     let mut staging_mismatch = false;
 
+    // Per-privilege provenance masks (§11.17 step 9b).
+    // Track which bits each privilege granted so we can accurately
+    // attribute bits after the full pipeline completes.
+    let mut security_granted: u32 = 0;
+    let mut backup_granted: u32 = 0;
+    let mut restore_granted: u32 = 0;
+    let mut take_ownership_granted: u32 = 0;
+
     // ACCESS_SYSTEM_SECURITY: always decided, no DACL ACE can grant it.
     decided |= mask::ACCESS_SYSTEM_SECURITY;
     if effective_privs & crate::privilege::bits::SE_SECURITY != 0 {
         granted |= mask::ACCESS_SYSTEM_SECURITY;
         privilege_granted |= mask::ACCESS_SYSTEM_SECURITY;
-        token.privileges.mark_used(crate::privilege::bits::SE_SECURITY);
+        security_granted = mask::ACCESS_SYSTEM_SECURITY;
     }
 
     // Backup: all read-mapped bits
     if effective_privs & crate::privilege::bits::SE_BACKUP != 0 {
-        let backup_bits = map_generic_bits(mask::GENERIC_READ, mapping);
-        decided |= backup_bits;
-        granted |= backup_bits;
-        privilege_granted |= backup_bits;
-        token.privileges.mark_used(crate::privilege::bits::SE_BACKUP);
+        let bits = map_generic_bits(mask::GENERIC_READ, mapping);
+        decided |= bits;
+        granted |= bits;
+        privilege_granted |= bits;
+        backup_granted = bits;
     }
 
     // Restore: all write-mapped bits + WRITE_DAC + WRITE_OWNER + DELETE + ASS
     if effective_privs & crate::privilege::bits::SE_RESTORE != 0 {
-        let restore_bits = map_generic_bits(mask::GENERIC_WRITE, mapping)
+        let bits = map_generic_bits(mask::GENERIC_WRITE, mapping)
             | mask::WRITE_DAC
             | mask::WRITE_OWNER
             | mask::DELETE
             | mask::ACCESS_SYSTEM_SECURITY;
-        decided |= restore_bits;
-        granted |= restore_bits;
-        privilege_granted |= restore_bits;
-        token.privileges.mark_used(crate::privilege::bits::SE_RESTORE);
+        decided |= bits;
+        granted |= bits;
+        privilege_granted |= bits;
+        restore_granted = bits;
     }
 
     // WRITE_OWNER is NOT decided here — deferred to step 7a
@@ -1186,7 +1247,7 @@ pub fn access_check(
                 decided |= mask::WRITE_OWNER;
                 granted |= mask::WRITE_OWNER;
                 privilege_granted |= mask::WRITE_OWNER;
-                token.privileges.mark_used(crate::privilege::bits::SE_TAKE_OWNERSHIP);
+                take_ownership_granted = mask::WRITE_OWNER;
             }
         }
     }
@@ -1222,13 +1283,24 @@ pub fn access_check(
             has_owner_rights: owner_in_restricted,
             has_principal_self: self_in_restricted,
             principal_self_deny_only: false,
+            // Swap device groups for restricted pass (§11.7):
+            // Device_Member_of evaluates against restricted_device_groups.
+            device_groups_override: token.restricted_device_groups.as_deref(),
         };
+
+        // Deep-copy the object tree for the restricted pass (§11.17 step 8).
+        let mut r_tree: Option<Vec<ObjectTypeNode>> =
+            if let Some(ref tree) = object_tree {
+                Some(compat::slice_to_vec(tree)?)
+            } else {
+                None
+            };
 
         evaluate_dacl(
             sd,
             &restricted_enriched,
             mapping,
-            None,
+            r_tree.as_deref_mut(),
             &restricted_sid_match,
             mapped_desired,
             max_allowed_mode,
@@ -1246,8 +1318,25 @@ pub fn access_check(
         } else {
             granted &= r_granted;
         }
+        // Per-node intersection (§11.17 step 8)
+        if let (Some(ref mut tree), Some(ref rtree)) = (&mut object_tree, &r_tree) {
+            for (node, rnode) in tree.iter_mut().zip(rtree.iter()) {
+                if token.write_restricted {
+                    let write_bits = map_generic_bits(mask::GENERIC_WRITE, mapping);
+                    node.granted = (node.granted & !write_bits)
+                        | (node.granted & rnode.granted & write_bits);
+                } else {
+                    node.granted &= rnode.granted;
+                }
+            }
+        }
         // Privilege-granted bits bypass the restricted pass
         granted |= privilege_granted;
+        if let Some(ref mut tree) = object_tree {
+            for node in tree.iter_mut() {
+                node.granted |= privilege_granted;
+            }
+        }
     }
 
     // Step 8a: Confinement (§11.14)
@@ -1282,13 +1371,22 @@ pub fn access_check(
             has_owner_rights: owner_in_confinement,
             has_principal_self: self_in_confinement,
             principal_self_deny_only: false,
+            device_groups_override: None, // confinement doesn't swap device groups
         };
+
+        // Deep-copy the object tree for the confinement pass (§11.17).
+        let mut c_tree: Option<Vec<ObjectTypeNode>> =
+            if let Some(ref tree) = object_tree {
+                Some(compat::slice_to_vec(tree)?)
+            } else {
+                None
+            };
 
         evaluate_dacl(
             sd,
             &confinement_enriched,
             mapping,
-            None,
+            c_tree.as_deref_mut(),
             &confinement_sid_match,
             mapped_desired,
             max_allowed_mode,
@@ -1301,6 +1399,11 @@ pub fn access_check(
 
         // Absolute intersection. No privilege bypass.
         granted &= c_granted;
+        if let (Some(ref mut tree), Some(ref ctree)) = (&mut object_tree, &c_tree) {
+            for (node, cnode) in tree.iter_mut().zip(ctree.iter()) {
+                node.granted &= cnode.granted;
+            }
+        }
     }
 
     // Step 9: Central Access Policy (§11.16)
@@ -1310,11 +1413,23 @@ pub fn access_check(
         for cap_sid in &policy_sids {
             let policy = policies.iter().find(|p| p.policy_sid == *cap_sid);
 
+            // If the policy SID is not in the cache, use the hardcoded
+            // recovery policy (§11.16): GENERIC_ALL to owner, Admins, SYSTEM.
+            // Safe because CAP is an AND — recovery is no worse than no CAP.
+            let recovery_dacl;
+            let recovery_rule;
+            let recovery_rules;
             let rules: &[CentralAccessRule] = match policy {
                 Some(p) => &p.rules,
                 None => {
-                    // Recovery policy: no further restriction.
-                    continue;
+                    recovery_dacl = crate::cap::recovery_policy()?;
+                    recovery_rule = CentralAccessRule {
+                        applies_to: None,
+                        effective_dacl: recovery_dacl,
+                        staged_dacl: None,
+                    };
+                    recovery_rules = [recovery_rule];
+                    &recovery_rules
                 }
             };
 
@@ -1415,11 +1530,45 @@ pub fn access_check(
                     if stg_granted != cap_effective {
                         staging_mismatch = true;
                     }
+                    // Per-node staged comparison (§11.16)
+                    if !staging_mismatch {
+                        if let (Some(ref tree), Some(ref stree)) =
+                            (&object_tree, &stg_tree)
+                        {
+                            for (node, snode) in tree.iter().zip(stree.iter()) {
+                                if node.granted != snode.granted {
+                                    staging_mismatch = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
         granted = cap_effective;
+    }
+
+    // Step 9b: Privilege-use auditing (§11.17).
+    // Fires ONCE after the full pipeline (DACL, restricted, confinement, CAP).
+    // Only marks a privilege as used if its contributed bits survived to the
+    // final granted mask AND were part of the explicit request.
+    // Pure MAXIMUM_ALLOWED (mapped_desired == 0) is a probe — no audit.
+    // Mixed (MAXIMUM_ALLOWED | explicit bits): only audit the explicit bits.
+    if mapped_desired != 0 {
+        if security_granted & granted & mapped_desired != 0 {
+            token.privileges.mark_used(crate::privilege::bits::SE_SECURITY);
+        }
+        if backup_granted & granted & mapped_desired != 0 {
+            token.privileges.mark_used(crate::privilege::bits::SE_BACKUP);
+        }
+        if restore_granted & granted & mapped_desired != 0 {
+            token.privileges.mark_used(crate::privilege::bits::SE_RESTORE);
+        }
+        if take_ownership_granted & granted & mapped_desired != 0 {
+            token.privileges.mark_used(crate::privilege::bits::SE_TAKE_OWNERSHIP);
+        }
     }
 
     // Step 15: Result computation
@@ -1441,10 +1590,40 @@ pub fn access_check(
     };
 
     // Step 10: SACL audit evaluation (§11.10)
-    let audit_result = crate::audit::evaluate_sacl(
+    let mut audit_result = crate::audit::evaluate_sacl(
         sd, token, mapping, mapped_desired, final_granted,
         allowed, &resource_attributes, local_claims,
+        object_tree.as_deref(),
     )?;
+
+    // Per-token audit policy (§7.3, §11.17 step 10b).
+    // Unconditional audit based on token flags — additive with SACL.
+    {
+        const APS: u64 = crate::token::audit_policy_flags::OBJECT_ACCESS_SUCCESS;
+        const APF: u64 = crate::token::audit_policy_flags::OBJECT_ACCESS_FAILURE;
+        if allowed && token.audit_policy & APS != 0 {
+            compat::vec_push(&mut audit_result.events, crate::audit::AuditEvent {
+                ace_type: 0xFF, // synthetic: token audit policy, not a SACL ACE
+                ace_sid: token.user_sid.try_clone()?,
+                ace_mask: mapped_desired,
+                success: true,
+                desired: mapped_desired,
+                granted: final_granted,
+                object_type: None,
+            })?;
+        }
+        if !allowed && token.audit_policy & APF != 0 {
+            compat::vec_push(&mut audit_result.events, crate::audit::AuditEvent {
+                ace_type: 0xFF, // synthetic: token audit policy
+                ace_sid: token.user_sid.try_clone()?,
+                ace_mask: mapped_desired,
+                success: false,
+                desired: mapped_desired,
+                granted: final_granted,
+                object_type: None,
+            })?;
+        }
+    }
 
     Ok(AccessCheckResult {
         granted: final_granted,
@@ -1604,6 +1783,9 @@ pub enum AccessCheckError {
     IdentificationLevel,
     /// The SD is structurally invalid (missing owner or group).
     InvalidSecurityDescriptor,
+    /// The object type list is malformed (duplicate GUIDs, level gaps,
+    /// multiple roots, or root not at level 0).
+    InvalidObjectTypeList,
     /// An allocation failed during the access check.
     AllocationFailed,
 }
@@ -7927,8 +8109,8 @@ mod tests {
     // ===================================================================
 
     #[test] fn access_check_tree_granted_is_intersection() { let sd = sd_with_dacl(&alice(), alloc::vec![obj_allow(&alice(), DS_READ_PROP, 1), obj_allow(&alice(), DS_READ_PROP, 2)]); let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]); let r = check_tree(&sd, &medium_token(&alice(), &[], 0), DS_READ_PROP, &mut tree); assert!(r.allowed); assert!(tree[0].granted & DS_READ_PROP != 0); }
-    #[test] fn duplicate_guids_in_tree_rejected() { let mut tree = make_tree(&[(0, 0), (1, 1), (1, 1)]); let r = access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0); assert!(r.is_ok()); /* validation TBD */ }
-    #[test] fn level_gap_in_tree_rejected() { let mut tree = make_tree(&[(0, 0), (1, 1), (3, 2)]); let r = access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0); assert!(r.is_ok()); /* validation TBD */ }
+    #[test] fn duplicate_guids_in_tree_rejected() { let mut tree = make_tree(&[(0, 0), (1, 1), (1, 1)]); let r = access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0); assert_eq!(r, Err(AccessCheckError::InvalidObjectTypeList)); }
+    #[test] fn level_gap_in_tree_rejected() { let mut tree = make_tree(&[(0, 0), (1, 1), (3, 2)]); let r = access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0); assert_eq!(r, Err(AccessCheckError::InvalidObjectTypeList)); }
     #[test] fn owner_gets_read_control_write_dac() { assert!(check(&sd_with_dacl(&alice(), alloc::vec![]), &medium_token(&alice(), &[], 0), READ_CONTROL | WRITE_DAC).allowed); }
     #[test] fn owner_rights_sid_suppresses_implicit() { assert!(!check(&sd_with_dacl(&alice(), alloc::vec![allow(&well_known::owner_rights().unwrap(), FILE_READ_DATA)]), &medium_token(&alice(), &[], 0), WRITE_DAC).allowed); }
     #[test] fn owner_rights_deny_ace_suppresses_implicit() { assert!(!check(&sd_with_dacl(&alice(), alloc::vec![deny(&well_known::owner_rights().unwrap(), FILE_READ_DATA)]), &medium_token(&alice(), &[], 0), WRITE_DAC).allowed); }
@@ -7971,9 +8153,9 @@ mod tests {
     #[test] fn principal_self_inject_via_enrich_token() { assert!(access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&well_known::principal_self().unwrap(), FILE_READ_DATA)]), &medium_token(&alice(), &[], 0), FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, Some(&alice()), &[], &[], 0, 0, 0).unwrap().allowed); }
     #[test] fn principal_self_deny_only_virtual_group() { let mut t = medium_token(&alice(), &[&engineers()], 0); t.groups[0].attributes = crate::group::SE_GROUP_USE_FOR_DENY_ONLY; assert!(!access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&well_known::principal_self().unwrap(), FILE_READ_DATA)]), &t, FILE_READ_DATA, &FILE_GENERIC_MAPPING, None, Some(&engineers()), &[], &[], 0, 0, 0).unwrap().allowed); }
     #[test] fn tree_empty_rejected() { let mut tree: Vec<ObjectTypeNode> = alloc::vec![]; assert!(access_check_result_list(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &FILE_GENERIC_MAPPING, &mut tree, None, &[], &[], 0, 0, 0).is_err()); }
-    #[test] fn tree_root_not_level_zero_rejected() { let mut tree = make_tree(&[(1, 0)]); let _ = access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0); assert!(true); }
+    #[test] fn tree_root_not_level_zero_rejected() { let mut tree = make_tree(&[(1, 0)]); let r = access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0); assert_eq!(r, Err(AccessCheckError::InvalidObjectTypeList)); }
     #[test] fn tree_negative_level_rejected() { let mut tree = make_tree(&[(0, 0)]); assert!(check_tree(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &mut tree).allowed); }
-    #[test] fn tree_multiple_level_zero_rejected() { let mut tree = make_tree(&[(0, 0), (0, 1)]); let _ = access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0); assert!(true); }
+    #[test] fn tree_multiple_level_zero_rejected() { let mut tree = make_tree(&[(0, 0), (0, 1)]); let r = access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0); assert_eq!(r, Err(AccessCheckError::InvalidObjectTypeList)); }
     #[test] fn tree_level_gap_rejected() { let mut tree = make_tree(&[(0, 0), (1, 1), (3, 2)]); let _ = access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0); assert!(true); }
     #[test] fn tree_duplicate_guids_rejected() { let mut tree = make_tree(&[(0, 0), (1, 1), (1, 1)]); let _ = access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0); assert!(true); }
     #[test] fn tree_initialization_copies_scalar_state() { let mut tree = make_tree(&[(0, 0), (1, 1)]); let _ = access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], privilege::bits::SE_SECURITY), DS_READ_PROP | ACCESS_SYSTEM_SECURITY, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0).unwrap(); assert!(tree[0].granted & ACCESS_SYSTEM_SECURITY != 0); assert!(tree[1].granted & ACCESS_SYSTEM_SECURITY != 0); }
@@ -7995,8 +8177,8 @@ mod tests {
     #[test] fn resource_attr_does_not_grant_deny() { let sacl = Acl { revision: ACL_REVISION, aces: alloc::vec![Ace { ace_type: ace::SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE, flags: 0, mask: FILE_READ_DATA, sid: well_known::everyone().unwrap(), object_type: None, inherited_object_type: None, condition: None, application_data: Some(alloc::vec![]) }] }; let sd = SecurityDescriptor::with_sacl(alice(), well_known::users().unwrap(), Acl { revision: ACL_REVISION, aces: alloc::vec![] }, sacl); assert!(!check(&sd, &medium_token(&bob(), &[], 0), FILE_READ_DATA).allowed); }
     #[test] fn resource_attr_available_to_conditional_dacl() { assert!(check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]), &medium_token(&alice(), &[], 0), FILE_READ_DATA).allowed); }
     #[test] fn resource_attr_available_to_conditional_audit() { assert!(check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), FILE_READ_DATA)]), &medium_token(&alice(), &[], 0), FILE_READ_DATA).allowed); }
-    fn eval_enriched_s11(expr: &[u8]) -> crate::conditional::TriValue { let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; crate::conditional::evaluate(expr, &e, &[], &[], true).unwrap() }
-    fn eval_s11_with_claims(expr: &[u8], claims: alloc::vec::Vec<crate::token::ClaimEntry>) -> crate::conditional::TriValue { let mut t = medium_token(&alice(), &[], 0); t.user_claims = claims; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; crate::conditional::evaluate(expr, &e, &[], &[], true).unwrap() }
+    fn eval_enriched_s11(expr: &[u8]) -> crate::conditional::TriValue { let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; crate::conditional::evaluate(expr, &e, &[], &[], true).unwrap() }
+    fn eval_s11_with_claims(expr: &[u8], claims: alloc::vec::Vec<crate::token::ClaimEntry>) -> crate::conditional::TriValue { let mut t = medium_token(&alice(), &[], 0); t.user_claims = claims; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; crate::conditional::evaluate(expr, &e, &[], &[], true).unwrap() }
     fn s11_true_expr() -> alloc::vec::Vec<u8> { use crate::conditional::bytecode; bytecode::build(&[bytecode::user_attr("a"), bytecode::int64_literal(1), bytecode::op_eq()]) }
     fn s11_false_expr() -> alloc::vec::Vec<u8> { use crate::conditional::bytecode; bytecode::build(&[bytecode::user_attr("b"), bytecode::int64_literal(1), bytecode::op_eq()]) }
     fn s11_claims_tf() -> alloc::vec::Vec<crate::token::ClaimEntry> { use crate::token::*; alloc::vec![ClaimEntry { name: crate::compat::String::from("a"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![1]) }, ClaimEntry { name: crate::compat::String::from("b"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![2]) }] }
@@ -8024,55 +8206,55 @@ mod tests {
     #[test] fn bool_coerce_octet_unknown() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::octet_literal(&[1,2,3]), bytecode::int64_literal(1), bytecode::op_and()])), TriValue::Unknown); }
     #[test] fn bool_coerce_composite_unknown() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::composite_literal(&[bytecode::int64_literal(1)]), bytecode::int64_literal(1), bytecode::op_and()])), TriValue::Unknown); }
     #[test] fn literal_in_logical_context_unknown() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::sid_literal(&alice()), bytecode::op_not()])), TriValue::Unknown); }
-    #[test] fn user_attr_resolves_from_token() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let expr = bytecode::build(&[bytecode::user_attr("L"), bytecode::int64_literal(5), bytecode::op_eq()]); let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("L"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![5]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&expr, &e, &[], &[], true).unwrap(), TriValue::True); }
-    #[test] fn device_attr_resolves_from_token() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let expr = bytecode::build(&[bytecode::device_attr("H"), bytecode::int64_literal(1), bytecode::op_eq()]); let mut t = medium_token(&alice(), &[], 0); t.device_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("H"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![1]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&expr, &e, &[], &[], true).unwrap(), TriValue::True); }
-    #[test] fn resource_attr_resolves_from_sacl() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let res = alloc::vec![ClaimEntry { name: crate::compat::String::from("S"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![3]) }]; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::resource_attr("S"), bytecode::int64_literal(3), bytecode::op_eq()]), &e, &res, &[], true).unwrap(), TriValue::True); }
-    #[test] fn local_attr_resolves_from_parameter() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let l = alloc::vec![ClaimEntry { name: crate::compat::String::from("C"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![7]) }]; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::local_attr("C"), bytecode::int64_literal(7), bytecode::op_eq()]), &e, &[], &l, true).unwrap(), TriValue::True); }
+    #[test] fn user_attr_resolves_from_token() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let expr = bytecode::build(&[bytecode::user_attr("L"), bytecode::int64_literal(5), bytecode::op_eq()]); let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("L"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![5]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&expr, &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn device_attr_resolves_from_token() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let expr = bytecode::build(&[bytecode::device_attr("H"), bytecode::int64_literal(1), bytecode::op_eq()]); let mut t = medium_token(&alice(), &[], 0); t.device_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("H"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![1]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&expr, &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn resource_attr_resolves_from_sacl() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let res = alloc::vec![ClaimEntry { name: crate::compat::String::from("S"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![3]) }]; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::resource_attr("S"), bytecode::int64_literal(3), bytecode::op_eq()]), &e, &res, &[], true).unwrap(), TriValue::True); }
+    #[test] fn local_attr_resolves_from_parameter() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let l = alloc::vec![ClaimEntry { name: crate::compat::String::from("C"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![7]) }]; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::local_attr("C"), bytecode::int64_literal(7), bytecode::op_eq()]), &e, &[], &l, true).unwrap(), TriValue::True); }
     #[test] fn missing_device_claims_resolve_absent() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::device_attr("X"), bytecode::int64_literal(1), bytecode::op_eq()])), TriValue::Unknown); }
-    #[test] fn disabled_claim_invisible() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("D"), claim_type: ClaimType::Int64, flags: claim_flags::DISABLED, values: ClaimValues::Int64(alloc::vec![1]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("D"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::Unknown); }
-    #[test] fn deny_only_claim_invisible_to_allow() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("D"), claim_type: ClaimType::Int64, flags: claim_flags::USE_FOR_DENY_ONLY, values: ClaimValues::Int64(alloc::vec![1]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("D"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::Unknown); }
-    #[test] fn deny_only_claim_visible_to_deny() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("D"), claim_type: ClaimType::Int64, flags: claim_flags::USE_FOR_DENY_ONLY, values: ClaimValues::Int64(alloc::vec![1]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("D"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &[], &[], false).unwrap(), TriValue::True); }
-    #[test] fn deny_only_resource_attr_invisible_to_allow() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let res = alloc::vec![ClaimEntry { name: crate::compat::String::from("T"), claim_type: ClaimType::Int64, flags: claim_flags::USE_FOR_DENY_ONLY, values: ClaimValues::Int64(alloc::vec![1]) }]; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::resource_attr("T"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &res, &[], true).unwrap(), TriValue::Unknown); }
-    #[test] fn empty_attr_normalized_to_null() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("E"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("E"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::Unknown); }
-    #[test] fn exists_false_for_empty_attr() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("E"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("E"), bytecode::op_exists()]), &e, &[], &[], true).unwrap(), TriValue::False); }
+    #[test] fn disabled_claim_invisible() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("D"), claim_type: ClaimType::Int64, flags: claim_flags::DISABLED, values: ClaimValues::Int64(alloc::vec![1]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("D"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::Unknown); }
+    #[test] fn deny_only_claim_invisible_to_allow() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("D"), claim_type: ClaimType::Int64, flags: claim_flags::USE_FOR_DENY_ONLY, values: ClaimValues::Int64(alloc::vec![1]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("D"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::Unknown); }
+    #[test] fn deny_only_claim_visible_to_deny() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("D"), claim_type: ClaimType::Int64, flags: claim_flags::USE_FOR_DENY_ONLY, values: ClaimValues::Int64(alloc::vec![1]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("D"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &[], &[], false).unwrap(), TriValue::True); }
+    #[test] fn deny_only_resource_attr_invisible_to_allow() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let res = alloc::vec![ClaimEntry { name: crate::compat::String::from("T"), claim_type: ClaimType::Int64, flags: claim_flags::USE_FOR_DENY_ONLY, values: ClaimValues::Int64(alloc::vec![1]) }]; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::resource_attr("T"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &res, &[], true).unwrap(), TriValue::Unknown); }
+    #[test] fn empty_attr_normalized_to_null() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("E"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("E"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::Unknown); }
+    #[test] fn exists_false_for_empty_attr() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("E"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("E"), bytecode::op_exists()]), &e, &[], &[], true).unwrap(), TriValue::False); }
     #[test] fn empty_attr_deny_unknown_fires() { use crate::conditional::bytecode; let sd = sd_with_dacl(&alice(), alloc::vec![callback_deny_ace(&alice(), FILE_READ_DATA, bytecode::build(&[bytecode::user_attr("E"), bytecode::int64_literal(1), bytecode::op_eq()])), allow(&alice(), FILE_READ_DATA)]); let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![crate::token::ClaimEntry { name: crate::compat::String::from("E"), claim_type: crate::token::ClaimType::Int64, flags: 0, values: crate::token::ClaimValues::Int64(alloc::vec![]) }]; assert!(!check(&sd, &t, FILE_READ_DATA).allowed); }
     #[test] fn conditional_owner_rights_suppresses_even_if_false() { assert!(!check(&sd_with_dacl(&alice(), alloc::vec![callback_allow_ace(&well_known::owner_rights().unwrap(), FILE_READ_DATA, condition_false())]), &medium_token(&alice(), &[], 0), WRITE_DAC).allowed); }
     #[test] fn conditional_owner_rights_lockout_scenario() { let sd = sd_with_dacl(&alice(), alloc::vec![callback_allow_ace(&well_known::owner_rights().unwrap(), READ_CONTROL | WRITE_DAC, condition_false())]); let t = medium_token(&alice(), &[], 0); assert!(!check(&sd, &t, READ_CONTROL).allowed); assert!(!check(&sd, &t, WRITE_DAC).allowed); }
-    #[test] fn member_of_owner_rights_true_for_owner() { use crate::conditional::{bytecode, TriValue}; let s = well_known::owner_rights().unwrap(); let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: true, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&s)]), bytecode::op_member_of()]), &e, &[], &[], true).unwrap(), TriValue::True); }
-    #[test] fn member_of_principal_self_true_for_self() { use crate::conditional::{bytecode, TriValue}; let s = well_known::principal_self().unwrap(); let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: true, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&s)]), bytecode::op_member_of()]), &e, &[], &[], true).unwrap(), TriValue::True); }
-    #[test] fn virtual_groups_visible_to_expressions() { use crate::conditional::{bytecode, TriValue}; let s = well_known::owner_rights().unwrap(); let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: true, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&s)]), bytecode::op_member_of()]), &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn member_of_owner_rights_true_for_owner() { use crate::conditional::{bytecode, TriValue}; let s = well_known::owner_rights().unwrap(); let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: true, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&s)]), bytecode::op_member_of()]), &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn member_of_principal_self_true_for_self() { use crate::conditional::{bytecode, TriValue}; let s = well_known::principal_self().unwrap(); let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: true, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&s)]), bytecode::op_member_of()]), &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn virtual_groups_visible_to_expressions() { use crate::conditional::{bytecode, TriValue}; let s = well_known::owner_rights().unwrap(); let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: true, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&s)]), bytecode::op_member_of()]), &e, &[], &[], true).unwrap(), TriValue::True); }
     #[test] fn sid_match_before_condition_eval() { assert!(check(&sd_with_dacl(&alice(), alloc::vec![callback_allow_ace(&bob(), FILE_READ_DATA, condition_true()), allow(&alice(), FILE_READ_DATA)]), &medium_token(&alice(), &[], 0), FILE_READ_DATA).allowed); }
     #[test] fn conditional_object_ace_combines_condition_and_guid() { let sd = sd_with_dacl(&alice(), alloc::vec![Ace { ace_type: ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, flags: 0, mask: DS_READ_PROP, sid: alice(), object_type: Some(guid(1)), inherited_object_type: None, condition: Some(condition_true()), application_data: None }]); let mut tree = make_tree(&[(0, 0), (1, 1), (1, 2)]); check_tree(&sd, &medium_token(&alice(), &[], 0), DS_READ_PROP, &mut tree); assert!(tree[1].granted & DS_READ_PROP != 0); }
     #[test] fn callback_ace_no_condition_data_returns_unknown() { assert!(!check(&sd_with_dacl(&alice(), alloc::vec![Ace { ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE, flags: 0, mask: FILE_READ_DATA, sid: alice(), object_type: None, inherited_object_type: None, condition: None, application_data: None }]), &medium_token(&alice(), &[], 0), FILE_READ_DATA).allowed); }
     #[test] fn callback_ace_means_conditional() { assert!(check(&sd_with_dacl(&alice(), alloc::vec![callback_allow_ace(&alice(), FILE_READ_DATA, condition_true())]), &medium_token(&alice(), &[], 0), FILE_READ_DATA).allowed); }
     #[test] fn int64_uint64_promotion() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::int64_literal(-1), bytecode::uint64_literal(0), bytecode::op_lt()])), TriValue::True); }
-    #[test] fn member_of_polarity_aware() { use crate::conditional::{bytecode, TriValue}; let expr = bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&engineers())]), bytecode::op_member_of()]); let mut t = medium_token(&alice(), &[&engineers()], 0); t.groups[0].attributes = crate::group::SE_GROUP_USE_FOR_DENY_ONLY; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_ne!(crate::conditional::evaluate(&expr, &e, &[], &[], true).unwrap(), TriValue::True); assert_eq!(crate::conditional::evaluate(&expr, &e, &[], &[], false).unwrap(), TriValue::True); }
-    #[test] fn exists_extended_to_all_namespaces() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("X"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![1]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("X"), bytecode::op_exists()]), &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn member_of_polarity_aware() { use crate::conditional::{bytecode, TriValue}; let expr = bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&engineers())]), bytecode::op_member_of()]); let mut t = medium_token(&alice(), &[&engineers()], 0); t.groups[0].attributes = crate::group::SE_GROUP_USE_FOR_DENY_ONLY; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_ne!(crate::conditional::evaluate(&expr, &e, &[], &[], true).unwrap(), TriValue::True); assert_eq!(crate::conditional::evaluate(&expr, &e, &[], &[], false).unwrap(), TriValue::True); }
+    #[test] fn exists_extended_to_all_namespaces() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("X"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![1]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("X"), bytecode::op_exists()]), &e, &[], &[], true).unwrap(), TriValue::True); }
     #[test] fn composite_equality_element_wise() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::composite_literal(&[bytecode::int64_literal(1), bytecode::int64_literal(2)]), bytecode::composite_literal(&[bytecode::int64_literal(1), bytecode::int64_literal(2)]), bytecode::op_eq()])), TriValue::True); }
-    #[test] fn expression_magic_header_required() { use crate::conditional::TriValue; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&[0u8, 0, 0, 0], &e, &[], &[], true).unwrap(), TriValue::Unknown); }
+    #[test] fn expression_magic_header_required() { use crate::conditional::TriValue; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&[0u8, 0, 0, 0], &e, &[], &[], true).unwrap(), TriValue::Unknown); }
     #[test] fn expression_stack_not_one_at_end_unknown() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::int64_literal(1), bytecode::int64_literal(2)])), TriValue::Unknown); }
     #[test] fn expression_final_literal_returns_unknown() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::int64_literal(1)])), TriValue::Unknown); }
-    #[test] fn expression_bounds_violation_unknown() { use crate::conditional::TriValue; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&[0x61, 0x72, 0x74, 0x78, 0x04], &e, &[], &[], true).unwrap(), TriValue::Unknown); }
-    #[test] fn expression_unknown_opcode_unknown() { use crate::conditional::TriValue; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&[0x61, 0x72, 0x74, 0x78, 0xFF], &e, &[], &[], true).unwrap(), TriValue::Unknown); }
+    #[test] fn expression_bounds_violation_unknown() { use crate::conditional::TriValue; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&[0x61, 0x72, 0x74, 0x78, 0x04], &e, &[], &[], true).unwrap(), TriValue::Unknown); }
+    #[test] fn expression_unknown_opcode_unknown() { use crate::conditional::TriValue; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&[0x61, 0x72, 0x74, 0x78, 0xFF], &e, &[], &[], true).unwrap(), TriValue::Unknown); }
     #[test] fn expression_insufficient_stack_unknown() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::op_eq()])), TriValue::Unknown); }
     #[test] fn exists_requires_attr_origin() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::int64_literal(1), bytecode::op_exists()])), TriValue::Unknown); }
-    #[test] fn member_of_all_sids_required() { use crate::conditional::{bytecode, TriValue}; let t = medium_token(&alice(), &[&engineers()], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&alice()), bytecode::sid_literal(&engineers())]), bytecode::op_member_of()]), &e, &[], &[], true).unwrap(), TriValue::True); }
-    #[test] fn member_of_any_any_sid_sufficient() { use crate::conditional::{bytecode, TriValue}; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&bob()), bytecode::sid_literal(&alice())]), bytecode::op_member_of_any()]), &e, &[], &[], true).unwrap(), TriValue::True); }
-    #[test] fn device_member_of_null_device_groups_unknown() { use crate::conditional::{bytecode, TriValue}; let mut t = medium_token(&alice(), &[], 0); t.device_groups = None; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&alice())]), bytecode::op_device_member_of()]), &e, &[], &[], true).unwrap(), TriValue::Unknown); }
-    #[test] fn not_member_of_negates_member_of() { use crate::conditional::{bytecode, TriValue}; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&bob())]), bytecode::op_not_member_of()]), &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn member_of_all_sids_required() { use crate::conditional::{bytecode, TriValue}; let t = medium_token(&alice(), &[&engineers()], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&alice()), bytecode::sid_literal(&engineers())]), bytecode::op_member_of()]), &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn member_of_any_any_sid_sufficient() { use crate::conditional::{bytecode, TriValue}; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&bob()), bytecode::sid_literal(&alice())]), bytecode::op_member_of_any()]), &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn device_member_of_null_device_groups_unknown() { use crate::conditional::{bytecode, TriValue}; let mut t = medium_token(&alice(), &[], 0); t.device_groups = None; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&alice())]), bytecode::op_device_member_of()]), &e, &[], &[], true).unwrap(), TriValue::Unknown); }
+    #[test] fn not_member_of_negates_member_of() { use crate::conditional::{bytecode, TriValue}; let t = medium_token(&alice(), &[], 0); let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::composite_literal(&[bytecode::sid_literal(&bob())]), bytecode::op_not_member_of()]), &e, &[], &[], true).unwrap(), TriValue::True); }
     #[test] fn to_sid_list_empty_composite_error() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::composite_literal(&[]), bytecode::op_member_of()])), TriValue::Unknown); }
     #[test] fn to_sid_list_non_sid_element_error() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::composite_literal(&[bytecode::int64_literal(1)]), bytecode::op_member_of()])), TriValue::Unknown); }
     #[test] fn compare_equal_null_unknown() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::user_attr("m"), bytecode::int64_literal(1), bytecode::op_eq()])), TriValue::Unknown); }
     #[test] fn compare_equal_scalar_vs_composite_unknown() { use crate::conditional::{bytecode, TriValue}; let r = eval_enriched_s11(&bytecode::build(&[bytecode::int64_literal(1), bytecode::composite_literal(&[bytecode::int64_literal(1)]), bytecode::op_eq()])); assert!(r == TriValue::True || r == TriValue::Unknown); }
     #[test] fn compare_equal_type_mismatch_unknown() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::int64_literal(1), bytecode::string_literal("hi"), bytecode::op_eq()])), TriValue::Unknown); }
     #[test] fn string_compare_case_insensitive_default() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::string_literal("Hello"), bytecode::string_literal("hello"), bytecode::op_eq()])), TriValue::True); }
-    #[test] fn string_compare_case_sensitive_flag() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("N"), claim_type: ClaimType::String, flags: claim_flags::CASE_SENSITIVE, values: ClaimValues::String(alloc::vec![crate::compat::String::from("Hello")]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_ne!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("N"), bytecode::string_literal("hello"), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::True); }
-    #[test] fn boolean_normalized_on_resolution() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("F"), claim_type: ClaimType::Boolean, flags: 0, values: ClaimValues::Boolean(alloc::vec![true]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; let r = crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("F"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &[], &[], true).unwrap(); assert!(r == TriValue::True || r == TriValue::Unknown); }
-    #[test] fn resolve_claim_case_insensitive_lookup() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("Dept"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![5]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("dept"), bytecode::int64_literal(5), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn string_compare_case_sensitive_flag() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("N"), claim_type: ClaimType::String, flags: claim_flags::CASE_SENSITIVE, values: ClaimValues::String(alloc::vec![crate::compat::String::from("Hello")]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_ne!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("N"), bytecode::string_literal("hello"), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn boolean_normalized_on_resolution() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("F"), claim_type: ClaimType::Boolean, flags: 0, values: ClaimValues::Boolean(alloc::vec![true]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; let r = crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("F"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &[], &[], true).unwrap(); assert!(r == TriValue::True || r == TriValue::Unknown); }
+    #[test] fn resolve_claim_case_insensitive_lookup() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("Dept"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![5]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("dept"), bytecode::int64_literal(5), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::True); }
     #[test] fn resolve_claim_null_claims_returns_null() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::user_attr("x"), bytecode::int64_literal(1), bytecode::op_eq()])), TriValue::Unknown); }
-    #[test] fn resolve_claim_name_not_found_returns_null() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("Y"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![1]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("x"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::Unknown); }
-    #[test] fn multi_valued_claim_returns_composite() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("T"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![1, 2, 3]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("T"), bytecode::int64_literal(1), bytecode::op_contains()]), &e, &[], &[], true).unwrap(), TriValue::True); }
-    #[test] fn single_valued_claim_returns_scalar() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("V"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![5]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("V"), bytecode::int64_literal(5), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn resolve_claim_name_not_found_returns_null() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("Y"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![1]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("x"), bytecode::int64_literal(1), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::Unknown); }
+    #[test] fn multi_valued_claim_returns_composite() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("T"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![1, 2, 3]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("T"), bytecode::int64_literal(1), bytecode::op_contains()]), &e, &[], &[], true).unwrap(), TriValue::True); }
+    #[test] fn single_valued_claim_returns_scalar() { use crate::conditional::{bytecode, TriValue}; use crate::token::*; let mut t = medium_token(&alice(), &[], 0); t.user_claims = alloc::vec![ClaimEntry { name: crate::compat::String::from("V"), claim_type: ClaimType::Int64, flags: 0, values: ClaimValues::Int64(alloc::vec![5]) }]; let e = EnrichedToken { token: &t, has_owner_rights: false, has_principal_self: false, principal_self_deny_only: false, device_groups_override: None }; assert_eq!(crate::conditional::evaluate(&bytecode::build(&[bytecode::user_attr("V"), bytecode::int64_literal(5), bytecode::op_eq()]), &e, &[], &[], true).unwrap(), TriValue::True); }
     #[test] fn integer_literal_sign_byte_determines_signedness() { use crate::conditional::{bytecode, TriValue}; assert_eq!(eval_enriched_s11(&bytecode::build(&[bytecode::int64_literal(-5), bytecode::int64_literal(0), bytecode::op_lt()])), TriValue::True); }
     #[test] fn mic_non_dominant_blocks_writes() { assert!(!check(&sd_with_label(&alice(), alloc::vec![allow(&alice(), GENERIC_ALL)], &well_known::integrity_high().unwrap(), mask::SYSTEM_MANDATORY_LABEL_NO_WRITE_UP), &medium_token(&alice(), &[], 0), FILE_WRITE_DATA).allowed); }
     #[test] fn mic_no_read_up_flag() { assert!(!check(&sd_with_label(&alice(), alloc::vec![allow(&alice(), GENERIC_ALL)], &well_known::integrity_high().unwrap(), mask::SYSTEM_MANDATORY_LABEL_NO_READ_UP), &medium_token(&alice(), &[], 0), FILE_READ_DATA).allowed); }
@@ -9748,7 +9930,7 @@ mod tests {
     #[test]
     fn input_empty_tree_error() { assert!(true); }
     #[test]
-    fn input_tree_root_not_level_zero_error() { assert!(true); }
+    fn input_tree_root_not_level_zero_error() { let mut tree = make_tree(&[(2, 0)]); let r = access_check(&sd_with_dacl(&alice(), alloc::vec![allow(&alice(), DS_READ_PROP)]), &medium_token(&alice(), &[], 0), DS_READ_PROP, &FILE_GENERIC_MAPPING, Some(&mut tree), None, &[], &[], 0, 0, 0); assert_eq!(r, Err(AccessCheckError::InvalidObjectTypeList)); }
     #[test]
     fn input_tree_negative_level_error() { assert!(true); }
     #[test]

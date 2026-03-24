@@ -228,7 +228,6 @@ fn inherit_aces_from_parent(
         let ci = parent_ace.flags & ace::CONTAINER_INHERIT_ACE != 0;
         let oi = parent_ace.flags & ace::OBJECT_INHERIT_ACE != 0;
         let np = parent_ace.flags & ace::NO_PROPAGATE_INHERIT_ACE != 0;
-        let io = parent_ace.flags & ace::INHERIT_ONLY_ACE != 0;
 
         // InheritedObjectType filtering: if the ACE specifies a type
         // that this child must be, skip it if the child doesn't match.
@@ -273,7 +272,7 @@ fn inherit_aces_from_parent(
                 // non-container children)
                 if oi && !ci {
                     new_ace.flags |= ace::INHERIT_ONLY_ACE;
-                } else if !io {
+                } else {
                     // Remove IO if it was set — the ACE applies to this container
                     new_ace.flags &= !ace::INHERIT_ONLY_ACE;
                 }

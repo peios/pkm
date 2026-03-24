@@ -94,6 +94,18 @@ pub mod mandatory_policy {
     pub const NEW_PROCESS_MIN: u32 = 0x0002;
 }
 
+/// Per-token audit policy category bits (§7.3, §11.10).
+/// Each category has success and failure flags. Additive with SACL.
+pub mod audit_policy_flags {
+    /// Emit object-access audit event on successful access, regardless of SACL.
+    pub const OBJECT_ACCESS_SUCCESS: u64 = 0x01;
+    /// Emit object-access audit event on failed access, regardless of SACL.
+    pub const OBJECT_ACCESS_FAILURE: u64 = 0x02;
+    /// Emit privilege-use audit event, regardless of SACL.
+    pub const PRIVILEGE_USE_SUCCESS: u64 = 0x04;
+    // Future categories (syscall audit, logon audit, etc.) use higher bits.
+}
+
 /// Who minted this token (§7.3).
 #[derive(Clone, Debug)]
 pub struct TokenSource {
@@ -231,6 +243,11 @@ pub struct Token {
     pub source: TokenSource,
     /// Originating logon session for derived tokens.
     pub origin: Luid,
+    /// When the token was created (nanoseconds since boot).
+    pub created_at: u64,
+    /// When the token becomes invalid (nanoseconds since boot, 0 = never).
+    /// Not enforced in v1 — field exists for data model completeness.
+    pub expiration: u64,
 
     // --- Session (mutable, requires SeTcbPrivilege) ---
 
@@ -273,7 +290,9 @@ pub struct Token {
 
     // --- Audit (mutable) ---
 
-    /// Per-token audit overrides. Additive — forces audit events.
+    /// Per-token audit overrides (§7.3). Additive — forces audit events
+    /// that system-wide policy would not generate. Cannot suppress events
+    /// that SACL audit ACEs require. Per-category success/failure bits.
     pub audit_policy: u64,
 
     // --- Mutation tracking ---
@@ -339,6 +358,8 @@ impl Token {
                 source_id: Luid(0),
             },
             origin: Luid(0),
+            created_at: 0, // kernel sets real value via FFI
+            expiration: 0, // never expires
 
             interactive_session_id: 0,
 

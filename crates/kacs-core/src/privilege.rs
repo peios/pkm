@@ -36,8 +36,8 @@ pub mod bits {
     pub const SE_BACKUP: u64 = 1 << 17;
     /// Bypass access checks for write/delete (restore intent, bit 18).
     pub const SE_RESTORE: u64 = 1 << 18;
-    /// Modify mandatory integrity labels (bit 25).
-    pub const SE_RELABEL: u64 = 1 << 25;
+    /// Modify mandatory integrity labels (bit 32).
+    pub const SE_RELABEL: u64 = 1 << 32;
 
     // --- System operations ---
 
@@ -91,8 +91,8 @@ pub mod bits {
     pub const SE_SYSTEM_PROFILE: u64 = 1 << 11;
     /// Change the time zone (bit 34).
     pub const SE_TIMEZONE: u64 = 1 << 34;
-    /// Undock a laptop (bit 32).
-    pub const SE_UNDOCK: u64 = 1 << 32;
+    /// Undock a laptop (bit 25).
+    pub const SE_UNDOCK: u64 = 1 << 25;
 
     // --- Peios custom privileges (bit 63 downward) ---
 
@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn se_relabel_is_accesscheck_plus_enforcement() {
-        assert_eq!(SE_RELABEL, 1 << 25);
+        assert_eq!(SE_RELABEL, 1 << 32);
     }
 
     #[test]
@@ -776,7 +776,7 @@ mod tests {
 
     #[test]
     fn se_undock_reserved() {
-        assert_eq!(SE_UNDOCK, 1 << 32);
+        assert_eq!(SE_UNDOCK, 1 << 25);
     }
 
     #[test]
@@ -912,12 +912,12 @@ mod tests {
 
     #[test]
     fn se_relabel_privilege_bit_is_32() {
-        assert_eq!(SE_RELABEL, 1u64 << 25);
+        assert_eq!(SE_RELABEL, 1u64 << 32);
     }
 
     #[test]
     fn se_undock_privilege_bit_is_25() {
-        assert_eq!(SE_UNDOCK, 1u64 << 32);
+        assert_eq!(SE_UNDOCK, 1u64 << 25);
     }
 
     #[test]
@@ -945,14 +945,14 @@ mod tests {
         assert_eq!(SE_SYSTEM_ENVIRONMENT, 1u64 << 22);
         assert_eq!(SE_CHANGE_NOTIFY, 1u64 << 23);
         assert_eq!(SE_REMOTE_SHUTDOWN, 1u64 << 24);
-        assert_eq!(SE_RELABEL, 1u64 << 25);
+        assert_eq!(SE_UNDOCK, 1u64 << 25);
         assert_eq!(SE_SYNC_AGENT, 1u64 << 26);
         assert_eq!(SE_ENABLE_DELEGATION, 1u64 << 27);
         assert_eq!(SE_MANAGE_VOLUME, 1u64 << 28);
         assert_eq!(SE_IMPERSONATE, 1u64 << 29);
         assert_eq!(SE_CREATE_GLOBAL, 1u64 << 30);
         assert_eq!(SE_TRUSTED_CRED_MAN_ACCESS, 1u64 << 31);
-        assert_eq!(SE_UNDOCK, 1u64 << 32);
+        assert_eq!(SE_RELABEL, 1u64 << 32);
         assert_eq!(SE_INCREASE_WORKING_SET, 1u64 << 33);
         assert_eq!(SE_TIMEZONE, 1u64 << 34);
         assert_eq!(SE_CREATE_SYMBOLIC_LINK, 1u64 << 35);

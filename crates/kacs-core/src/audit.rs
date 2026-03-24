@@ -28,6 +28,8 @@ pub struct AuditEvent {
     pub desired: u32,
     /// The access mask that was granted.
     pub granted: u32,
+    /// For object-scoped ACEs: the property GUID that was audited.
+    pub object_type: Option<crate::guid::Guid>,
 }
 
 /// A privilege-use audit event.
@@ -65,6 +67,7 @@ pub fn evaluate_sacl(
     access_success: bool,
     resource_attributes: &[crate::token::ClaimEntry],
     local_claims: &[crate::token::ClaimEntry],
+    object_tree: Option<&[crate::access_check::ObjectTypeNode]>,
 ) -> Result<AuditResult, AllocError> {
     let mut result = AuditResult::default();
 
@@ -75,6 +78,7 @@ pub fn evaluate_sacl(
         has_owner_rights: false,
         has_principal_self: false,
         principal_self_deny_only: false,
+        device_groups_override: None,
     };
 
     if sd.control & crate::sd::SE_SACL_PRESENT == 0 {
@@ -145,6 +149,71 @@ pub fn evaluate_sacl(
                     success: access_success,
                     desired,
                     granted,
+                    object_type: None,
+                })?;
+            }
+
+            // --- Object-scoped Access Auditing (§11.10) ---
+            ace::SYSTEM_AUDIT_OBJECT_ACE_TYPE
+            | ace::SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE => {
+                let audit_on_success = a.flags & ace::SUCCESSFUL_ACCESS_ACE_FLAG != 0;
+                let audit_on_failure = a.flags & ace::FAILED_ACCESS_ACE_FLAG != 0;
+
+                if !audit_on_success && !audit_on_failure {
+                    continue;
+                }
+                if access_success && !audit_on_success {
+                    continue;
+                }
+                if !access_success && !audit_on_failure {
+                    continue;
+                }
+
+                // GUID matching: if the ACE has an object_type, check
+                // it against the tree. No tree = apply globally.
+                if let Some(ref ace_guid) = a.object_type {
+                    if let Some(tree) = object_tree {
+                        if !tree.iter().any(|n| n.guid == *ace_guid) {
+                            continue; // GUID not in tree, skip
+                        }
+                    }
+                    // No tree: apply globally (GUID ignored)
+                }
+
+                if !crate::access_check::sid_matches_token(&a.sid, token, false) {
+                    continue;
+                }
+
+                // Condition gate for callback object types
+                if a.ace_type == ace::SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE {
+                    if let Some(ref cond) = a.condition {
+                        let cond_result = crate::conditional::evaluate(
+                            cond, &bare_enriched, resource_attributes, local_claims, false,
+                        )?;
+                        if cond_result == crate::conditional::TriValue::False {
+                            continue;
+                        }
+                    }
+                }
+
+                if access_success {
+                    if granted & ace_mask == 0 {
+                        continue;
+                    }
+                } else {
+                    if ace_mask & desired & !granted == 0 {
+                        continue;
+                    }
+                }
+
+                compat::vec_push(&mut result.events, AuditEvent {
+                    ace_type: a.ace_type,
+                    ace_sid: a.sid.try_clone()?,
+                    ace_mask,
+                    success: access_success,
+                    desired,
+                    granted,
+                    object_type: a.object_type.clone(),
                 })?;
             }
 
@@ -174,6 +243,40 @@ pub fn evaluate_sacl(
 
                 // Intersect with granted — only audit operations the
                 // handle actually has rights for
+                result.continuous_audit_mask |= ace_mask & granted;
+            }
+
+            // --- Object-scoped Continuous Auditing (§11.10) ---
+            ace::SYSTEM_ALARM_OBJECT_ACE_TYPE
+            | ace::SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE => {
+                if !access_success {
+                    continue;
+                }
+
+                // GUID matching
+                if let Some(ref ace_guid) = a.object_type {
+                    if let Some(tree) = object_tree {
+                        if !tree.iter().any(|n| n.guid == *ace_guid) {
+                            continue;
+                        }
+                    }
+                }
+
+                if !crate::access_check::sid_matches_token(&a.sid, token, false) {
+                    continue;
+                }
+
+                if a.ace_type == ace::SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE {
+                    if let Some(ref cond) = a.condition {
+                        let cond_result = crate::conditional::evaluate(
+                            cond, &bare_enriched, resource_attributes, local_claims, false,
+                        )?;
+                        if cond_result == crate::conditional::TriValue::False {
+                            continue;
+                        }
+                    }
+                }
+
                 result.continuous_audit_mask |= ace_mask & granted;
             }
 
@@ -250,7 +353,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[],
+            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 1);
         assert!(result.events[0].success);
@@ -264,7 +367,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, 0, false, &[], &[],
+            FILE_READ_DATA, 0, false, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 0);
     }
@@ -277,7 +380,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, 0, false, &[], &[],
+            FILE_READ_DATA, 0, false, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 1);
         assert!(!result.events[0].success);
@@ -293,14 +396,14 @@ mod tests {
         // Success
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[],
+            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 1);
 
         // Failure
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, 0, false, &[], &[],
+            FILE_READ_DATA, 0, false, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 1);
     }
@@ -313,7 +416,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[],
+            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 0);
     }
@@ -327,7 +430,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[],
+            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 0); // SID doesn't match
     }
@@ -341,7 +444,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[],
+            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 0); // no overlap
     }
@@ -355,7 +458,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_WRITE_DATA, 0, false, &[], &[],
+            FILE_WRITE_DATA, 0, false, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 1); // write was denied, matches
     }
@@ -375,7 +478,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[],
+            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 0);
     }
@@ -389,7 +492,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[],
+            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[], None,
         ).unwrap();
         // Both match (SYSTEM is in token, Everyone is in token groups)
         assert_eq!(result.events.len(), 2);
@@ -404,7 +507,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[],
+            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 1); // GENERIC_READ maps to include FILE_READ_DATA
     }
@@ -421,7 +524,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[],
+            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 0);
         assert_eq!(result.continuous_audit_mask, 0);
@@ -442,7 +545,7 @@ mod tests {
             &sd, &token, &FILE_GENERIC_MAPPING,
             FILE_READ_DATA | FILE_WRITE_DATA,
             FILE_READ_DATA | FILE_WRITE_DATA,
-            true, &[], &[],
+            true, &[], &[], None,
         ).unwrap();
         assert!(result.continuous_audit_mask & FILE_READ_DATA != 0);
         assert!(result.continuous_audit_mask & FILE_WRITE_DATA != 0);
@@ -457,7 +560,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[],
+            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[], None,
         ).unwrap();
         assert!(result.continuous_audit_mask & FILE_READ_DATA != 0);
         assert!(result.continuous_audit_mask & FILE_WRITE_DATA == 0); // not granted
@@ -471,7 +574,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, 0, false, &[], &[],
+            FILE_READ_DATA, 0, false, &[], &[], None,
         ).unwrap();
         assert_eq!(result.continuous_audit_mask, 0); // access failed
     }
@@ -485,7 +588,7 @@ mod tests {
         let token = system_token();
         let result = evaluate_sacl(
             &sd, &token, &FILE_GENERIC_MAPPING,
-            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[],
+            FILE_READ_DATA, FILE_READ_DATA, true, &[], &[], None,
         ).unwrap();
         assert_eq!(result.continuous_audit_mask, 0);
     }
@@ -501,7 +604,7 @@ mod tests {
             &sd, &token, &FILE_GENERIC_MAPPING,
             FILE_READ_DATA | FILE_WRITE_DATA,
             FILE_READ_DATA | FILE_WRITE_DATA,
-            true, &[], &[],
+            true, &[], &[], None,
         ).unwrap();
         assert!(result.continuous_audit_mask & FILE_READ_DATA != 0);
         assert!(result.continuous_audit_mask & FILE_WRITE_DATA != 0);
@@ -518,7 +621,7 @@ mod tests {
             &sd, &token, &FILE_GENERIC_MAPPING,
             FILE_READ_DATA | FILE_WRITE_DATA,
             FILE_READ_DATA | FILE_WRITE_DATA,
-            true, &[], &[],
+            true, &[], &[], None,
         ).unwrap();
         assert_eq!(result.events.len(), 1); // audit event for read
         assert!(result.continuous_audit_mask & FILE_WRITE_DATA != 0); // alarm for write

@@ -227,6 +227,8 @@ pub extern "C" fn kacs_token_create_anonymous() -> *const () {
         interactive_session_id: 0,
         isolation_boundary: false,
         origin: kacs_core::luid::Luid(0),
+        created_at: 0,
+        expiration: 0,
         user_deny_only: false,
     };
     match KacsToken::new(token) {
@@ -631,6 +633,7 @@ pub extern "C" fn kacs_access_check_sd(
         }
         Err(kacs_core::access_check::AccessCheckError::IdentificationLevel) => -1,  // -EPERM
         Err(kacs_core::access_check::AccessCheckError::InvalidSecurityDescriptor) => -22, // -EINVAL
+        Err(kacs_core::access_check::AccessCheckError::InvalidObjectTypeList) => -22, // -EINVAL
         Err(kacs_core::access_check::AccessCheckError::AllocationFailed) => -12, // -ENOMEM
     };
 
@@ -821,11 +824,11 @@ pub extern "C" fn kacs_token_adjust_group(
     ptr: *const (),
     index: u32,
     enable: c_int,
+    prev_attrs_out: *mut u32,
 ) -> c_int {
     if ptr.is_null() {
         return -22;
     }
-    // Need mutable access for group attributes
     let kt = unsafe { &mut *(ptr as *mut KacsToken) };
     let idx = index as usize;
     if idx >= kt.token.groups.len() {
@@ -833,6 +836,12 @@ pub extern "C" fn kacs_token_adjust_group(
     }
 
     let group = &mut kt.token.groups[idx];
+
+    // Capture previous state.
+    if !prev_attrs_out.is_null() {
+        unsafe { *prev_attrs_out = group.attributes; }
+    }
+
     if enable != 0 {
         group.attributes |= kacs_core::group::SE_GROUP_ENABLED;
     } else {
@@ -843,6 +852,128 @@ pub extern "C" fn kacs_token_adjust_group(
         group.attributes &= !kacs_core::group::SE_GROUP_ENABLED;
     }
     // Bump modified_id (§15.2)
+    kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
+    0
+}
+
+// ── Default adjustment (§7.6 AdjustDefault) ──────────────────────────────
+
+/// Set the default DACL on a token from binary ACL data.
+/// Returns 0 on success, -EINVAL on malformed ACL, -ENOMEM on OOM.
+#[no_mangle]
+pub extern "C" fn kacs_token_set_default_dacl(
+    ptr: *const (),
+    acl_data: *const u8,
+    acl_len: u32,
+) -> c_int {
+    if ptr.is_null() || acl_data.is_null() || acl_len == 0 {
+        return -22; // -EINVAL
+    }
+    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
+    let data = unsafe { core::slice::from_raw_parts(acl_data, acl_len as usize) };
+    match kacs_core::acl::Acl::from_bytes(data) {
+        Ok(Some(acl)) => {
+            kt.token.default_dacl = Some(acl);
+            kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
+            0
+        }
+        Ok(None) => -22, // -EINVAL: malformed ACL
+        Err(_) => -12,   // -ENOMEM
+    }
+}
+
+/// Clear the default DACL (set to None).
+/// Returns 0.
+#[no_mangle]
+pub extern "C" fn kacs_token_clear_default_dacl(ptr: *const ()) -> c_int {
+    if ptr.is_null() {
+        return -22;
+    }
+    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
+    kt.token.default_dacl = None;
+    kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
+    0
+}
+
+/// Set the owner SID index. Must be 0 (user SID) or index+1 into groups
+/// where that group has SE_GROUP_OWNER.
+/// Returns 0 on success, -EINVAL on bad index or non-owner group.
+#[no_mangle]
+pub extern "C" fn kacs_token_set_owner_index(
+    ptr: *const (),
+    index: u16,
+) -> c_int {
+    if ptr.is_null() {
+        return -22;
+    }
+    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
+    // Index 0 = user SID (always valid as owner).
+    if index == 0 {
+        kt.token.owner_sid_index = 0;
+        kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
+        return 0;
+    }
+    // Index 1..N = groups[0..N-1]. Must have SE_GROUP_OWNER.
+    let group_idx = (index - 1) as usize;
+    if group_idx >= kt.token.groups.len() {
+        return -22; // -EINVAL: out of bounds
+    }
+    if kt.token.groups[group_idx].attributes & kacs_core::group::SE_GROUP_OWNER == 0 {
+        return -22; // -EINVAL: not an owner group
+    }
+    kt.token.owner_sid_index = index;
+    kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
+    0
+}
+
+/// Set the primary group SID index. Must be 0 (user SID) or index+1
+/// into groups (any group is valid as primary group).
+/// Returns 0 on success, -EINVAL on bad index.
+#[no_mangle]
+pub extern "C" fn kacs_token_set_primary_group_index(
+    ptr: *const (),
+    index: u16,
+) -> c_int {
+    if ptr.is_null() {
+        return -22;
+    }
+    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
+    if index == 0 {
+        kt.token.primary_group_index = 0;
+        kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
+        return 0;
+    }
+    let group_idx = (index - 1) as usize;
+    if group_idx >= kt.token.groups.len() {
+        return -22;
+    }
+    kt.token.primary_group_index = index;
+    kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
+    0
+}
+
+/// Reset all groups to their creation-time enabled/disabled state.
+/// SE_GROUP_USE_FOR_DENY_ONLY groups are skipped (cannot be re-enabled).
+/// Returns 0 on success.
+#[no_mangle]
+pub extern "C" fn kacs_token_reset_groups(ptr: *const ()) -> c_int {
+    if ptr.is_null() {
+        return -22;
+    }
+    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
+
+    for group in kt.token.groups.iter_mut() {
+        // Deny-only groups cannot be re-enabled (§7.6).
+        if group.attributes & kacs_core::group::SE_GROUP_USE_FOR_DENY_ONLY != 0 {
+            continue;
+        }
+        if group.attributes & kacs_core::group::SE_GROUP_ENABLED_BY_DEFAULT != 0 {
+            group.attributes |= kacs_core::group::SE_GROUP_ENABLED;
+        } else {
+            group.attributes &= !kacs_core::group::SE_GROUP_ENABLED;
+        }
+    }
+
     kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
     0
 }
@@ -861,6 +992,7 @@ pub extern "C" fn kacs_token_is_restricted(ptr: *const ()) -> c_int {
 // ── Privilege adjustment ──────────────────────────────────────────────────
 
 /// Adjust privileges on a token: enable, disable, or permanently remove.
+/// Writes the previous enabled mask to *prev_out (if non-null).
 /// Returns 0 on success, negative errno on error.
 #[no_mangle]
 pub extern "C" fn kacs_token_adjust_privs(
@@ -868,13 +1000,19 @@ pub extern "C" fn kacs_token_adjust_privs(
     enable_mask: u64,
     disable_mask: u64,
     remove_mask: u64,
+    prev_out: *mut u64,
 ) -> c_int {
     if ptr.is_null() {
         return -22; // -EINVAL
     }
-    // Need mutable access for modified_id bump
     let kt = unsafe { &mut *(ptr as *mut KacsToken) };
     let privs = &kt.token.privileges;
+
+    // Capture previous state before any changes.
+    let previous = privs.enabled.load(core::sync::atomic::Ordering::Relaxed);
+    if !prev_out.is_null() {
+        unsafe { *prev_out = previous; }
+    }
 
     // Remove first (irreversible)
     if remove_mask != 0 {

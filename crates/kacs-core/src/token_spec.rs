@@ -172,6 +172,8 @@ pub fn parse_token_spec(data: &[u8]) -> Result<Option<Token>, AllocError> {
             source_id: Luid(source_id),
         },
         origin: Luid(0),
+        created_at: 0, // kernel stamps real value after construction
+        expiration: 0, // default: never expires
         interactive_session_id: 0,
 
         user_claims: Vec::new(),

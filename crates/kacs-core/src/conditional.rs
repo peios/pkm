@@ -475,8 +475,17 @@ fn any_sid_matches_enriched(needles: &[Sid], enriched: &EnrichedToken, for_allow
     })
 }
 
-fn all_sids_match_device(needles: &[Sid], token: &Token, for_allow: bool) -> bool {
-    let dg = match &token.device_groups {
+/// Get the effective device groups — override (restricted pass) or token's own.
+fn effective_device_groups<'a>(enriched: &'a EnrichedToken) -> Option<&'a [crate::group::GroupEntry]> {
+    if let Some(ovr) = enriched.device_groups_override {
+        Some(ovr)
+    } else {
+        enriched.token.device_groups.as_deref()
+    }
+}
+
+fn all_sids_match_device(needles: &[Sid], enriched: &EnrichedToken, for_allow: bool) -> bool {
+    let dg = match effective_device_groups(enriched) {
         Some(groups) => groups,
         None => return false,
     };
@@ -485,8 +494,8 @@ fn all_sids_match_device(needles: &[Sid], token: &Token, for_allow: bool) -> boo
     })
 }
 
-fn any_sid_matches_device(needles: &[Sid], token: &Token, for_allow: bool) -> bool {
-    let dg = match &token.device_groups {
+fn any_sid_matches_device(needles: &[Sid], enriched: &EnrichedToken, for_allow: bool) -> bool {
+    let dg = match effective_device_groups(enriched) {
         Some(groups) => groups,
         None => return false,
     };
@@ -869,11 +878,11 @@ pub fn evaluate(
                     Some(s) => s,
                     None => { compat::vec_push(&mut stack, Value::from_bool_result(TriValue::Unknown))?; continue; }
                 };
-                if token.device_groups.is_none() {
+                if effective_device_groups(enriched).is_none() {
                     compat::vec_push(&mut stack, Value::from_bool_result(TriValue::Unknown))?;
                     continue;
                 }
-                let result = if all_sids_match_device(&sids, token, for_allow) {
+                let result = if all_sids_match_device(&sids, enriched, for_allow) {
                     TriValue::True
                 } else {
                     TriValue::False
@@ -889,11 +898,11 @@ pub fn evaluate(
                     Some(s) => s,
                     None => { compat::vec_push(&mut stack, Value::from_bool_result(TriValue::Unknown))?; continue; }
                 };
-                if token.device_groups.is_none() {
+                if effective_device_groups(enriched).is_none() {
                     compat::vec_push(&mut stack, Value::from_bool_result(TriValue::Unknown))?;
                     continue;
                 }
-                let result = if any_sid_matches_device(&sids, token, for_allow) {
+                let result = if any_sid_matches_device(&sids, enriched, for_allow) {
                     TriValue::True
                 } else {
                     TriValue::False
@@ -941,11 +950,11 @@ pub fn evaluate(
                     Some(s) => s,
                     None => { compat::vec_push(&mut stack, Value::from_bool_result(TriValue::Unknown))?; continue; }
                 };
-                if token.device_groups.is_none() {
+                if effective_device_groups(enriched).is_none() {
                     compat::vec_push(&mut stack, Value::from_bool_result(TriValue::Unknown))?;
                     continue;
                 }
-                let result = if all_sids_match_device(&sids, token, for_allow) {
+                let result = if all_sids_match_device(&sids, enriched, for_allow) {
                     TriValue::False
                 } else {
                     TriValue::True
@@ -961,11 +970,11 @@ pub fn evaluate(
                     Some(s) => s,
                     None => { compat::vec_push(&mut stack, Value::from_bool_result(TriValue::Unknown))?; continue; }
                 };
-                if token.device_groups.is_none() {
+                if effective_device_groups(enriched).is_none() {
                     compat::vec_push(&mut stack, Value::from_bool_result(TriValue::Unknown))?;
                     continue;
                 }
-                let result = if any_sid_matches_device(&sids, token, for_allow) {
+                let result = if any_sid_matches_device(&sids, enriched, for_allow) {
                     TriValue::False
                 } else {
                     TriValue::True
@@ -1351,6 +1360,7 @@ mod tests {
             has_owner_rights: false,
             has_principal_self: false,
             principal_self_deny_only: false,
+            device_groups_override: None,
         }
     }
 

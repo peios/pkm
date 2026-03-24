@@ -640,6 +640,8 @@ mod kernel_try_clone {
                 auth_id: self.auth_id,
                 source: self.source.try_clone()?,
                 origin: self.origin,
+                created_at: self.created_at,
+                expiration: self.expiration,
                 interactive_session_id: self.interactive_session_id,
                 user_claims: self.user_claims.try_clone()?,
                 device_claims: self.device_claims.try_clone()?,
@@ -668,6 +670,7 @@ mod kernel_try_clone {
                 success: self.success,
                 desired: self.desired,
                 granted: self.granted,
+                object_type: self.object_type.clone(),
             })
         }
     }

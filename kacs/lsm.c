@@ -26,6 +26,7 @@
 #include <linux/mman.h>
 #include <linux/fdtable.h>
 #include <linux/dcache.h>
+#include <linux/sched/coredump.h>
 #include <linux/xattr.h>
 #include <linux/namei.h>
 #include <net/sock.h>
@@ -60,7 +61,8 @@ extern void kacs_token_drop(const void *ptr);
 extern long long kacs_token_format(const void *ptr, char *buf, size_t len);
 extern int kacs_token_query(const void *ptr, u32 class, void *buf, u32 buf_len);
 extern int kacs_token_adjust_privs(const void *ptr, u64 enable_mask,
-				   u64 disable_mask, u64 remove_mask);
+				   u64 disable_mask, u64 remove_mask,
+				   u64 *prev_enabled_out);
 extern const void *kacs_token_deep_clone(const void *ptr,
 					 int new_type, int new_level);
 extern int kacs_token_get_type(const void *ptr);
@@ -71,8 +73,15 @@ extern u32 kacs_token_get_projected_gid(const void *ptr);
 extern int kacs_token_get_integrity(const void *ptr);
 extern int kacs_token_same_user(const void *a, const void *b);
 extern void kacs_token_set_impersonation_level(const void *ptr, int level);
-extern int kacs_token_adjust_group(const void *ptr, u32 index, int enable);
+extern int kacs_token_adjust_group(const void *ptr, u32 index, int enable,
+				   u32 *prev_attrs_out);
+extern int kacs_token_reset_groups(const void *ptr);
 extern int kacs_token_is_restricted(const void *ptr);
+extern int kacs_token_set_default_dacl(const void *ptr,
+				       const void *acl_data, u32 acl_len);
+extern int kacs_token_clear_default_dacl(const void *ptr);
+extern int kacs_token_set_owner_index(const void *ptr, u16 index);
+extern int kacs_token_set_primary_group_index(const void *ptr, u16 index);
 extern const void *kacs_create_default_proc_sd(const void *token_ptr);
 extern void kacs_proc_sd_drop(const void *sd_ptr);
 extern int kacs_check_proc_sd(const void *token_ptr, const void *sd_ptr,
@@ -151,8 +160,9 @@ static void compute_caps_from_token(const void *token, kernel_cap_t *caps);
 #define KACS_IOC_RESTRICT          _IOWR(KACS_IOC_MAGIC, 4, struct kacs_restrict_args)
 #define KACS_IOC_LINK_TOKENS       _IOW(KACS_IOC_MAGIC, 5, struct kacs_link_tokens_args)
 #define KACS_IOC_GET_LINKED_TOKEN  _IOWR(KACS_IOC_MAGIC, 6, struct kacs_get_linked_token_args)
-#define KACS_IOC_ADJUST_GROUPS _IOW(KACS_IOC_MAGIC, 7, struct kacs_adjust_groups_args)
-#define KACS_IOC_IMPERSONATE   _IO(KACS_IOC_MAGIC, 8)
+#define KACS_IOC_ADJUST_GROUPS   _IOW(KACS_IOC_MAGIC, 7, struct kacs_adjust_groups_args)
+#define KACS_IOC_IMPERSONATE     _IO(KACS_IOC_MAGIC, 8)
+#define KACS_IOC_ADJUST_DEFAULT  _IOW(KACS_IOC_MAGIC, 9, struct kacs_adjust_default_args)
 
 /* Token query classes (§15.2) */
 #define TOKEN_CLASS_USER              1
@@ -200,6 +210,7 @@ struct kacs_adjust_privs_args {
 	u32 count;		/* number of LUID_AND_ATTRIBUTES entries */
 	u32 _pad;
 	u64 data_ptr;		/* userspace pointer to entries array */
+	u64 previous_enabled;	/* out: enabled mask before adjustment */
 };
 
 struct kacs_priv_entry {
@@ -252,6 +263,8 @@ struct kacs_restrict_args {
 struct kacs_adjust_groups_args {
 	u32 index;		/* group index */
 	u32 enable;		/* 1=enable, 0=disable */
+	u32 previous_attributes; /* out: group attributes before adjustment */
+	u32 _pad;
 };
 
 struct kacs_link_tokens_args {
@@ -264,30 +277,41 @@ struct kacs_get_linked_token_args {
 	s32 result_fd;		/* out: fd to the partner token */
 };
 
+struct kacs_adjust_default_args {
+	u64 dacl_ptr;		/* user pointer to binary ACL (0 = don't change) */
+	u32 dacl_len;		/* ACL length in bytes */
+	u16 owner_index;	/* new owner SID index (0xFFFF = don't change) */
+	u16 group_index;	/* new primary group index (0xFFFF = don't change) */
+};
+
 /* ── AccessCheck args struct (§15.1) ────────────────────────────────────── */
 
 struct kacs_access_check_args {
-	u32 size;		/* struct size (for versioning) */
-	u32 desired;
-	u32 generic_read;
-	u32 generic_write;
-	u32 generic_execute;
-	u32 generic_all;
-	u64 self_sid_ptr;	/* PRINCIPAL_SELF substitution (0 = none) */
-	u32 self_sid_len;
-	u32 privilege_intent;	/* KACS_BACKUP_INTENT | KACS_RESTORE_INTENT */
-	u64 object_tree_ptr;	/* OBJECT_TYPE_LIST array (0 = none) */
-	u32 object_tree_count;
-	u32 _pad0;
-	u64 local_claims_ptr;	/* conditional ACE claims (0 = none) */
-	u32 local_claims_len;
-	u32 _pad1;
-	u64 granted_out_ptr;	/* output: granted mask (always populated) */
+	u32 size;		/*  0: sizeof(struct), for versioning */
+	s32 token_fd;		/*  4: token to evaluate (-1 = self) */
+	u64 sd_ptr;		/*  8: pointer to self-relative SD */
+	u32 sd_len;		/* 16 */
+	u32 desired_access;	/* 20: requested rights */
+	u32 generic_read;	/* 24: object-specific GenericMapping */
+	u32 generic_write;	/* 28 */
+	u32 generic_execute;	/* 32 */
+	u32 generic_all;	/* 36 */
+	u64 self_sid_ptr;	/* 40: PRINCIPAL_SELF substitution (0 = none) */
+	u32 self_sid_len;	/* 48 */
+	u32 privilege_intent;	/* 52: KACS_BACKUP_INTENT | KACS_RESTORE_INTENT */
+	u64 object_tree_ptr;	/* 56: OBJECT_TYPE_LIST array (0 = none) */
+	u32 object_tree_count;	/* 64 */
+	u32 _pad0;		/* 68: align next u64 */
+	u64 local_claims_ptr;	/* 72: conditional ACE claims (0 = none) */
+	u32 local_claims_len;	/* 80 */
+	u32 _pad1;		/* 84: align next u64 */
+	u64 granted_out_ptr;	/* 88: output: granted mask (always populated) */
 };
+/* sizeof = 96 */
 
-/* Minimum struct size: the first versioned minimum includes through
- * generic_all (6 × u32 = 24 bytes). */
-#define KACS_ACCESS_CHECK_ARGS_V1_SIZE	24
+/* Minimum struct size: through generic_all (size + token_fd + sd_ptr +
+ * sd_len + desired_access + generic_mapping = 40 bytes). */
+#define KACS_ACCESS_CHECK_ARGS_V1_SIZE	40
 
 /* Privilege intent flags (§11 stage 2) */
 #define KACS_BACKUP_INTENT	0x01
@@ -345,6 +369,22 @@ struct kacs_task_security {
 	/* File/dentry hook coordination (§14.3) */
 	struct inode *file_decision_inode;
 	u8 file_decision_op;
+	/* kacs_open: desired_access for f_mode fixup (patch 12, §14.3).
+	 * Nonzero signals a KACS-native open is in progress. */
+	u32 kacs_open_desired;
+	/* Process mitigations (§8.1). Set at exec or between fork+exec.
+	 * Default off (0). Immutable once set (except no_child_process
+	 * which is one-way: can be set at runtime, never cleared). */
+	u8 wxp;			/* Write-XOR-Execute (§8.1) */
+	u8 tlp;			/* Trusted Library Paths (§8.1) */
+	u8 lsv;			/* Library Signature Verification (§8.1) */
+	u8 cfi;			/* Control Flow Integrity (§8.1) */
+	u8 ui_access;		/* UI interaction (§8.1, reserved) */
+	u8 no_child_process;	/* Cannot fork (§8.1, one-way) */
+	u8 cfif;		/* Forward-edge CFI — IBT locked on */
+	u8 cfib;		/* Backward-edge CFI — shadow stack locked on */
+	u8 pie;			/* Reject non-PIE binaries at exec */
+	u8 sml;			/* Speculation Mitigation Lock */
 };
 
 /* PIP type constants (§13) */
@@ -401,6 +441,29 @@ static inline struct kacs_sock_security *kacs_sock(const struct sock *sk)
 }
 
 /*
+ * Defense-in-depth guard (§7.1): detect hooks firing without a
+ * meaningful user context. Authorization must happen synchronously
+ * in the requesting thread's context. Interrupt context or raw
+ * kernel threads (without override_creds) should never reach
+ * subject-based hooks. If they do, hard-deny.
+ */
+static inline bool kacs_no_user_context(void)
+{
+	if (in_interrupt())
+		return true;
+	/* PF_KTHREAD with cred == real_cred and no KACS token means
+	 * a raw kernel thread without meaningful identity. The init
+	 * thread and kthreads forked after kacs_init have a valid
+	 * SYSTEM token — they pass. io_uring workers use
+	 * override_creds(), so cred != real_cred and also pass. */
+	if ((current->flags & PF_KTHREAD) &&
+	    current->cred == current->real_cred &&
+	    !kacs_cred(current_cred())->token)
+		return true;
+	return false;
+}
+
+/*
  * Stamp projected UID/GID on the cred blob from the token.
  * Called whenever a token is set on a credential.
  */
@@ -436,6 +499,64 @@ const struct cred *kacs_helper_current_real_cred(void)
 const void *kacs_helper_cred_token(const struct cred *cred)
 {
 	return kacs_cred(cred)->token;
+}
+
+/* ── f_mode fixup for KACS-native open (patch 12, §14.3) ───────────────── */
+
+/*
+ * Called from do_dentry_open() after security_file_open(). When a
+ * KACS-native open is in progress (kacs_open_desired != 0), override
+ * f_mode from the granted mask instead of VFS open flags.
+ *
+ * Mapping (§14.4):
+ *   FILE_READ_DATA                 → FMODE_READ
+ *   FILE_WRITE_DATA/FILE_APPEND   → FMODE_WRITE
+ *   FILE_EXECUTE (alone)           → FMODE_EXEC (without FMODE_READ)
+ */
+void kacs_fixup_open_fmode(struct file *f)
+{
+	/* Access mask constants (defined in full later with FACS,
+	 * duplicated here because this function precedes them). */
+	const u32 kacs_read = 0x0001;    /* FILE_READ_DATA */
+	const u32 kacs_write = 0x0002;   /* FILE_WRITE_DATA */
+	const u32 kacs_append = 0x0004;  /* FILE_APPEND_DATA */
+	const u32 kacs_execute = 0x0020; /* FILE_EXECUTE */
+
+	struct kacs_task_security *tsec = kacs_task(current);
+	struct kacs_file_security *fsec;
+	fmode_t new_mode;
+
+	if (!tsec->kacs_open_desired)
+		return;
+
+	fsec = kacs_file(f);
+	new_mode = 0;
+	if (fsec->granted & kacs_read)
+		new_mode |= FMODE_READ;
+	if (fsec->granted & (kacs_write | kacs_append))
+		new_mode |= FMODE_WRITE;
+	if (fsec->granted & kacs_execute)
+		new_mode |= FMODE_EXEC;
+
+	/* Only adjust if there's a difference in the R/W/X bits.
+	 * The common case (read, write, read+write) won't change. */
+	if ((f->f_mode & (FMODE_READ | FMODE_WRITE | FMODE_EXEC)) ==
+	    (new_mode & (FMODE_READ | FMODE_WRITE | FMODE_EXEC)))
+		return;
+
+	/* Execute-only: opened as O_RDONLY (FMODE_READ) because there's
+	 * no O_EXEC, but the granted mask says execute-only. Remove
+	 * FMODE_READ and its i_readcount, add FMODE_EXEC. */
+	if (!(new_mode & FMODE_READ) && (f->f_mode & FMODE_READ)) {
+		struct inode *inode = file_inode(f);
+
+		if ((f->f_mode & (FMODE_READ | FMODE_WRITE)) == FMODE_READ)
+			i_readcount_dec(inode);
+		f->f_mode &= ~(FMODE_READ | FMODE_CAN_READ);
+	}
+
+	if (new_mode & FMODE_EXEC)
+		f->f_mode |= FMODE_EXEC;
 }
 
 /* ── Token fd infrastructure ───────────────────────────────────────────── */
@@ -599,9 +720,20 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 		}
 
 		kfree(entries);
-		return kacs_token_adjust_privs(tf->token, enable_mask,
-					       disable_mask,
-					       remove_mask);
+		{
+			int ret;
+			u64 prev = 0;
+
+			ret = kacs_token_adjust_privs(tf->token, enable_mask,
+						       disable_mask,
+						       remove_mask, &prev);
+			if (ret)
+				return ret;
+			pa.previous_enabled = prev;
+			if (copy_to_user((void __user *)arg, &pa, sizeof(pa)))
+				return -EFAULT;
+			return 0;
+		}
 	}
 	case KACS_IOC_INSTALL: {
 		/*
@@ -663,6 +795,12 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 			return -EINVAL;
 		if (da.impersonation_level > 3)
 			return -EINVAL;
+		/* Impersonation level cannot exceed source token's level (§7.5).
+		 * Only applies when creating an impersonation token. */
+		if (da.token_type == 2 &&
+		    (int)da.impersonation_level >
+		    kacs_token_get_impersonation_level(tf->token))
+			return -EPERM;
 		if (!da.access_mask || (da.access_mask & ~KACS_TOKEN_ALL_ACCESS))
 			return -EINVAL;
 
@@ -738,6 +876,8 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 	}
 	case KACS_IOC_ADJUST_GROUPS: {
 		struct kacs_adjust_groups_args ga;
+		u32 prev_attrs = 0;
+		int ret;
 
 		if (!(tf->access_mask & KACS_TOKEN_ADJUST_GROUPS))
 			return -EACCES;
@@ -745,7 +885,25 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 		if (copy_from_user(&ga, (void __user *)arg, sizeof(ga)))
 			return -EFAULT;
 
-		return kacs_token_adjust_group(tf->token, ga.index, ga.enable);
+		/* index == 0xFFFFFFFF: reset all groups to defaults (§7.6). */
+		if (ga.index == 0xFFFFFFFF) {
+			ret = kacs_token_reset_groups(tf->token);
+			if (ret)
+				return ret;
+			ga.previous_attributes = 0;
+			if (copy_to_user((void __user *)arg, &ga, sizeof(ga)))
+				return -EFAULT;
+			return 0;
+		}
+
+		ret = kacs_token_adjust_group(tf->token, ga.index,
+					      ga.enable, &prev_attrs);
+		if (ret)
+			return ret;
+		ga.previous_attributes = prev_attrs;
+		if (copy_to_user((void __user *)arg, &ga, sizeof(ga)))
+			return -EFAULT;
+		return 0;
 	}
 	case KACS_IOC_IMPERSONATE: {
 		/*
@@ -802,6 +960,60 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 				KACS_LEVEL_IDENTIFICATION);
 
 		override_creds(new_cred);
+		return 0;
+	}
+	case KACS_IOC_ADJUST_DEFAULT: {
+		struct kacs_adjust_default_args da;
+		int ret;
+
+		if (!(tf->access_mask & KACS_TOKEN_ADJUST_DEFAULT))
+			return -EACCES;
+
+		if (copy_from_user(&da, (void __user *)arg, sizeof(da)))
+			return -EFAULT;
+
+		/* Default DACL: replace or clear. */
+		if (da.dacl_ptr && da.dacl_len > 0) {
+			void *kacl;
+
+			if (da.dacl_len > 65536)
+				return -EINVAL;
+			kacl = kmalloc(da.dacl_len, GFP_KERNEL);
+			if (!kacl)
+				return -ENOMEM;
+			if (copy_from_user(kacl, (void __user *)da.dacl_ptr,
+					   da.dacl_len)) {
+				kfree(kacl);
+				return -EFAULT;
+			}
+			ret = kacs_token_set_default_dacl(tf->token,
+							  kacl, da.dacl_len);
+			kfree(kacl);
+			if (ret)
+				return ret;
+		} else if (da.dacl_ptr == 0 && da.dacl_len == 0) {
+			/* Explicit clear request (ptr=0, len=0 together). */
+		} else if (da.dacl_len == 0 && da.dacl_ptr != 0) {
+			/* Clear the default DACL. */
+			kacs_token_clear_default_dacl(tf->token);
+		}
+
+		/* Owner SID index: 0xFFFF = don't change. */
+		if (da.owner_index != 0xFFFF) {
+			ret = kacs_token_set_owner_index(tf->token,
+							 da.owner_index);
+			if (ret)
+				return ret;
+		}
+
+		/* Primary group index: 0xFFFF = don't change. */
+		if (da.group_index != 0xFFFF) {
+			ret = kacs_token_set_primary_group_index(
+				tf->token, da.group_index);
+			if (ret)
+				return ret;
+		}
+
 		return 0;
 	}
 	case KACS_IOC_LINK_TOKENS: {
@@ -968,6 +1180,11 @@ static int kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 	struct kacs_task_security *parent_tsec = kacs_task(current);
 	const struct kacs_cred_security *cred_sec;
 
+	/* no_child_process: block fork when set (§8.1).
+	 * CLONE_THREAD (new thread) is not affected — only new processes. */
+	if (!(clone_flags & CLONE_THREAD) && parent_tsec->no_child_process)
+		return -EACCES;
+
 	/* Create default process SD from the creator's token. */
 	cred_sec = kacs_cred(current_cred());
 	tsec->proc_sd = kacs_create_default_proc_sd(cred_sec->token);
@@ -975,6 +1192,20 @@ static int kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 	/* Inherit PIP from parent. */
 	tsec->pip_type = parent_tsec->pip_type;
 	tsec->pip_trust = parent_tsec->pip_trust;
+
+	/* Inherit process mitigations (§8.2). All propagate across fork.
+	 * no_child_process persists across exec (§8.2); the others are
+	 * reset at exec based on binary metadata (future). */
+	tsec->wxp = parent_tsec->wxp;
+	tsec->tlp = parent_tsec->tlp;
+	tsec->lsv = parent_tsec->lsv;
+	tsec->cfi = parent_tsec->cfi;
+	tsec->ui_access = parent_tsec->ui_access;
+	tsec->no_child_process = parent_tsec->no_child_process;
+	tsec->cfif = parent_tsec->cfif;
+	tsec->cfib = parent_tsec->cfib;
+	tsec->pie = parent_tsec->pie;
+	tsec->sml = parent_tsec->sml;
 
 	return 0;
 }
@@ -1137,6 +1368,11 @@ static int kacs_bprm_creds_for_exec(struct linux_binprm *bprm)
 		bprm->cred->cap_inheritable = caps;
 		cap_clear(bprm->cred->cap_ambient);
 	}
+
+	/* PIP coredump protection (§13.5 Option A): disable core dumps
+	 * for PIP-protected processes to prevent secret leakage. */
+	if (current->mm && kacs_task(current)->pip_type > PIP_TYPE_NONE)
+		set_dumpable(current->mm, SUID_DUMP_DISABLE);
 
 	return 0;
 }
@@ -1491,6 +1727,14 @@ static int kacs_task_prctl(int option, unsigned long arg2,
 	if (option == PR_CAPBSET_DROP && is_impl_cap((int)arg2))
 		return -EPERM;
 
+	/* SML (§8.1): prevent weakening speculation mitigations.
+	 * PR_SPEC_ENABLE turns off a mitigation — blocked when SML is set.
+	 * PR_SPEC_DISABLE / PR_SPEC_FORCE_DISABLE are fine (strengthening). */
+	if (option == PR_SET_SPECULATION_CTRL &&
+	    kacs_task(current)->sml &&
+	    (arg3 & PR_SPEC_ENABLE))
+		return -EPERM;
+
 	/* Other prctl options: pass through (return -ENOSYS → not handled). */
 	return -ENOSYS;
 }
@@ -1787,6 +2031,8 @@ static inline bool kacs_consume_file_decision(struct inode *inode, u8 op)
 /* security_inode_readlink — readlink on symlink's own SD (§14.3) */
 static int kacs_inode_readlink(struct dentry *dentry)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	const void *sd;
 	const struct kacs_cred_security *ccred;
 	long long r;
@@ -1811,6 +2057,8 @@ static int kacs_inode_setattr(struct mnt_idmap *idmap,
 			      struct dentry *dentry,
 			      struct iattr *attr)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	const void *sd;
 	const struct kacs_cred_security *ccred;
 	u32 desired = 0;
@@ -1851,6 +2099,8 @@ static int kacs_inode_setattr(struct mnt_idmap *idmap,
 /* security_inode_getattr — path-based stat/lstat (§14.3) */
 static int kacs_inode_getattr(const struct path *path)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	const void *sd;
 	const struct kacs_cred_security *ccred;
 	long long ret;
@@ -1894,6 +2144,8 @@ static int kacs_inode_setxattr(struct mnt_idmap *idmap,
 			       const char *name, const void *value,
 			       size_t size, int flags)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	const void *sd;
 	const struct kacs_cred_security *ccred;
 	long long r;
@@ -1927,6 +2179,8 @@ static int kacs_inode_setxattr(struct mnt_idmap *idmap,
 
 static int kacs_inode_getxattr(struct dentry *dentry, const char *name)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	const void *sd;
 	const struct kacs_cred_security *ccred;
 	long long r;
@@ -1958,6 +2212,8 @@ static int kacs_inode_removexattr(struct mnt_idmap *idmap,
 				  struct dentry *dentry,
 				  const char *name)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	const void *sd;
 	const struct kacs_cred_security *ccred;
 
@@ -2023,6 +2279,58 @@ static void kacs_inode_free_security_rcu(void *inode_security)
 		 * RCU grace period has elapsed, safe to free. */
 		kacs_proc_sd_drop((void *)isec->sd_cache);
 	}
+}
+
+/*
+ * inode_getsecurity — return SD data from cache for kernel-internal reads
+ * (§14.3). Called by NFS server, CIFS, etc. to export security labels.
+ * name is the suffix after "security." — we match "peios.sd".
+ */
+static int kacs_inode_getsecurity(struct mnt_idmap *idmap,
+				  struct inode *inode, const char *name,
+				  void **buffer, bool alloc)
+{
+	const void *sd;
+	int sd_len;
+	void *buf;
+
+	if (strcmp(name, "peios.sd") != 0)
+		return -EOPNOTSUPP;
+
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(inode);
+	if (!sd) {
+		rcu_read_unlock();
+		return -EOPNOTSUPP;
+	}
+
+	/* Get the serialized size. */
+	sd_len = kacs_sd_to_bytes(sd, NULL, 0);
+	rcu_read_unlock();
+
+	if (sd_len <= 0)
+		return -EOPNOTSUPP;
+
+	if (!alloc)
+		return sd_len; /* size query only */
+
+	buf = kmalloc(sd_len, GFP_NOFS);
+	if (!buf)
+		return -ENOMEM;
+
+	/* Re-read under RCU and serialize. */
+	rcu_read_lock();
+	sd = kacs_inode_get_sd(inode);
+	if (!sd) {
+		rcu_read_unlock();
+		kfree(buf);
+		return -EOPNOTSUPP;
+	}
+	kacs_sd_to_bytes(sd, buf, sd_len);
+	rcu_read_unlock();
+
+	*buffer = buf;
+	return sd_len;
 }
 
 /* ── File lifecycle ───────────────────────────────────────────────────── */
@@ -2129,6 +2437,8 @@ static int legacy_open_rights(struct file *file, u32 *core, u32 *compat)
 
 static int kacs_file_open(struct file *file)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	struct kacs_file_security *fsec = kacs_file(file);
 	struct kacs_inode_security *isec = kacs_inode(file_inode(file));
 	const struct kacs_cred_security *ccred;
@@ -2289,6 +2599,48 @@ static int kacs_mmap_file(struct file *file, unsigned long reqprot,
 {
 	struct kacs_file_security *fsec;
 
+	/* WXP (§8.1): reject simultaneous W+X on any mapping.
+	 * Applies to both file-backed and anonymous mappings. */
+	if (kacs_task(current)->wxp &&
+	    (prot & PROT_WRITE) && (prot & PROT_EXEC))
+		return -EACCES;
+
+	/* TLP (§8.1): executable file mappings must be from approved paths.
+	 * Only applies to file-backed mappings with PROT_EXEC. */
+	if (file && (prot & PROT_EXEC) && kacs_task(current)->tlp) {
+		/* Check file path is under a trusted prefix.
+		 * Approved: /usr/lib, /lib, /usr/libexec.
+		 * Uses dentry name walk — not allocating a full path string. */
+		struct dentry *dentry = file->f_path.dentry;
+		struct dentry *parent;
+		bool trusted = false;
+
+		/* Walk up to check if the file is under /usr/lib, /lib,
+		 * or /usr/libexec. Simple prefix check via dentry names. */
+		parent = dentry->d_parent;
+		while (parent != parent->d_parent) {
+			const char *name = parent->d_name.name;
+
+			if (parent->d_parent == parent->d_parent->d_parent) {
+				/* parent's parent is root — parent is top-level */
+				if (!strcmp(name, "lib"))
+					trusted = true;
+			}
+			/* Check for /usr/lib or /usr/libexec */
+			if (!strcmp(name, "lib") || !strcmp(name, "libexec")) {
+				struct dentry *grandparent = parent->d_parent;
+
+				if (grandparent->d_parent ==
+				    grandparent->d_parent->d_parent &&
+				    !strcmp(grandparent->d_name.name, "usr"))
+					trusted = true;
+			}
+			parent = parent->d_parent;
+		}
+		if (!trusted)
+			return -EACCES;
+	}
+
 	if (!file)
 		return 0; /* anonymous mapping */
 
@@ -2336,6 +2688,21 @@ static int kacs_file_mprotect(struct vm_area_struct *vma,
 {
 	struct file *file = vma->vm_file;
 	struct kacs_file_security *fsec;
+
+	/* WXP (§8.1): reject W+X and transitions between W and X.
+	 * A page that was writable cannot become executable (blocks
+	 * shellcode write-then-execute). A page that was executable
+	 * cannot become writable (blocks code patching). */
+	if (kacs_task(current)->wxp) {
+		if ((prot & PROT_WRITE) && (prot & PROT_EXEC))
+			return -EACCES;
+		/* Was writable, now requesting exec? */
+		if ((vma->vm_flags & VM_WRITE) && (prot & PROT_EXEC))
+			return -EACCES;
+		/* Was executable, now requesting write? */
+		if ((vma->vm_flags & VM_EXEC) && (prot & PROT_WRITE))
+			return -EACCES;
+	}
 
 	if (!file)
 		return 0; /* anonymous mapping */
@@ -2704,6 +3071,8 @@ static void stamp_root_if_needed(struct inode *dir)
 
 static int check_parent_sd(struct inode *dir, u32 right)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	const void *sd;
 	const struct kacs_cred_security *ccred;
 	long long ret;
@@ -2769,6 +3138,8 @@ static int kacs_inode_init_security(struct inode *inode,
 				    struct xattr *xattrs,
 				    int *xattr_count)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	const void *parent_sd;
 	const struct kacs_cred_security *ccred;
 	const void *inherited_sd;
@@ -2835,6 +3206,8 @@ static int kacs_inode_init_security(struct inode *inode,
 
 static int kacs_bprm_check_security(struct linux_binprm *bprm)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	struct kacs_file_security *fsec;
 	const void *sd;
 	const struct kacs_cred_security *ccred;
@@ -2842,6 +3215,24 @@ static int kacs_bprm_check_security(struct linux_binprm *bprm)
 
 	if (!bprm->file)
 		return 0;
+
+	/* PIE enforcement (§8.1): reject non-position-independent binaries.
+	 * Check ELF e_type in bprm->buf (first 256 bytes of the file).
+	 * ET_DYN (3) = PIE. ET_EXEC (2) = fixed address, rejected. */
+	if (kacs_task(current)->pie) {
+		unsigned char *buf = (unsigned char *)bprm->buf;
+
+		/* Verify ELF magic before reading e_type. */
+		if (buf[0] == 0x7f && buf[1] == 'E' &&
+		    buf[2] == 'L' && buf[3] == 'F') {
+			u16 e_type = buf[16] | (buf[17] << 8); /* little-endian */
+
+			if (e_type == ET_EXEC)
+				return -EACCES;
+		}
+		/* Non-ELF binaries (scripts, etc.) are allowed — the
+		 * interpreter will be checked separately. */
+	}
 
 	fsec = kacs_file(bprm->file);
 
@@ -2883,6 +3274,8 @@ static int kacs_bprm_check_security(struct linux_binprm *bprm)
 static int check_delete_or_parent(struct inode *target,
 				  struct inode *parent_dir)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	const void *sd;
 	const struct kacs_cred_security *ccred;
 	long long r;
@@ -2920,6 +3313,8 @@ static int check_delete_or_parent(struct inode *target,
 /* security_inode_permission — traverse + deferred open (§14.3) */
 static int kacs_inode_permission(struct inode *inode, int mask)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	const void *sd;
 	const struct kacs_cred_security *ccred;
 	long long r;
@@ -2963,6 +3358,8 @@ static int kacs_inode_permission(struct inode *inode, int mask)
 static int kacs_inode_link(struct dentry *old_dentry, struct inode *dir,
 			   struct dentry *new_dentry)
 {
+	if (unlikely(kacs_no_user_context()))
+		return -EACCES;
 	int ret;
 
 	/* FILE_ADD_FILE on destination directory. */
@@ -3099,6 +3496,7 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(file_getxattr, kacs_file_getxattr),
 	LSM_HOOK_INIT(file_setxattr, kacs_file_setxattr_hook),
 	LSM_HOOK_INIT(inode_free_security_rcu, kacs_inode_free_security_rcu),
+	LSM_HOOK_INIT(inode_getsecurity, kacs_inode_getsecurity),
 	LSM_HOOK_INIT(inode_create, kacs_inode_create),
 	LSM_HOOK_INIT(inode_mkdir, kacs_inode_mkdir),
 	LSM_HOOK_INIT(inode_mknod, kacs_inode_mknod),
@@ -3230,30 +3628,30 @@ SYSCALL_DEFINE2(kacs_open_process_token, int, pidfd, u32, access_mask)
 	return kacs_token_to_fd(token, access_mask);
 }
 
-/* ── Syscall: kacs_set_psb (1004) ───────────────────────────────────────── */
+/* ── Syscall: kacs_open_thread_token (1002) ─────────────────────────────── */
 
 /*
- * Set the PIP type and trust level on a process via pidfd.
- * Requires SeTcbPrivilege — only peinit sets PIP on services.
- * No self-targeting for now.
+ * Open the impersonation token of a specific thread via pidfd + TID.
+ * The pidfd identifies the process, the TID identifies the thread within it.
+ * Returns -ENOENT if the thread is not impersonating.
+ *
+ * Same access checks as kacs_open_process_token: PROCESS_QUERY_INFORMATION
+ * on the target process SD + PIP dominance.
  */
-SYSCALL_DEFINE3(kacs_set_psb, int, pidfd, u32, pip_type, u32, pip_trust)
+SYSCALL_DEFINE3(kacs_open_thread_token, int, pidfd, int, tid, u32, access_mask)
 {
-	const struct kacs_cred_security *caller;
-	struct kacs_task_security *target_tsec;
+	struct kacs_task_security *caller_tsec, *target_tsec;
+	const struct kacs_cred_security *target_cred;
+	const struct kacs_cred_security *ccred;
 	struct pid *pid;
-	struct task_struct *task;
+	struct task_struct *task, *thread;
+	const void *token;
 	unsigned int pidfd_flags;
+	bool found = false;
 
-	/* Requires SeTcbPrivilege. */
-	caller = kacs_cred(current_real_cred());
-	if (!kacs_token_check_privilege(caller->token, KACS_PRIV_TCB))
-		return -EPERM;
-
-	/* Validate PIP values. */
-	if (pip_type != PIP_TYPE_NONE &&
-	    pip_type != PIP_TYPE_PROTECTED &&
-	    pip_type != PIP_TYPE_ISOLATED)
+	if (access_mask & ~KACS_TOKEN_ALL_ACCESS)
+		return -EINVAL;
+	if (!access_mask)
 		return -EINVAL;
 
 	pid = pidfd_get_pid(pidfd, &pidfd_flags);
@@ -3268,16 +3666,185 @@ SYSCALL_DEFINE3(kacs_set_psb, int, pidfd, u32, pip_type, u32, pip_trust)
 		return -ESRCH;
 	}
 
+	/* Process-level access checks (same as kacs_open_process_token). */
+	caller_tsec = kacs_task(current);
 	target_tsec = kacs_task(task);
-	target_tsec->pip_type = pip_type;
-	target_tsec->pip_trust = pip_trust;
 
+	if (target_tsec->proc_sd) {
+		ccred = kacs_cred(current_cred());
+		if (!kacs_check_proc_sd(ccred->token,
+					target_tsec->proc_sd, 0x0400)) {
+			rcu_read_unlock();
+			put_pid(pid);
+			return -EACCES;
+		}
+	}
+
+	if (!pip_dominates(caller_tsec, target_tsec)) {
+		rcu_read_unlock();
+		put_pid(pid);
+		return -EACCES;
+	}
+
+	/* Find the thread by TID within this process's thread group. */
+	for_each_thread(task, thread) {
+		if (task_pid_vnr(thread) == tid) {
+			found = true;
+			break;
+		}
+	}
+
+	if (!found) {
+		rcu_read_unlock();
+		put_pid(pid);
+		return -ESRCH;
+	}
+
+	/* Check if the thread is impersonating (cred != real_cred). */
+	if (thread->cred == thread->real_cred) {
+		rcu_read_unlock();
+		put_pid(pid);
+		return -ENOENT; /* not impersonating */
+	}
+
+	target_cred = kacs_cred(thread->cred);
+
+	/* AccessCheck on the impersonation token's SD. */
+	if (target_cred->token) {
+		ccred = kacs_cred(current_cred());
+		if (!kacs_check_token_sd(target_cred->token,
+					 ccred->token, access_mask)) {
+			rcu_read_unlock();
+			put_pid(pid);
+			return -EACCES;
+		}
+	}
+
+	token = kacs_token_clone(target_cred->token);
 	rcu_read_unlock();
 	put_pid(pid);
+
+	return kacs_token_to_fd(token, access_mask);
+}
+
+/* ── Syscall: kacs_set_psb (1005) ───────────────────────────────────────── */
+
+/* Mitigation bitmask for kacs_set_psb (§8.1) */
+#define KACS_MIT_WXP		0x001
+#define KACS_MIT_TLP		0x002
+#define KACS_MIT_LSV		0x004
+#define KACS_MIT_CFI		0x008  /* legacy — sets both CFIF + CFIB */
+#define KACS_MIT_UI_ACCESS	0x010
+#define KACS_MIT_NO_CHILD	0x020
+#define KACS_MIT_CFIF		0x040  /* forward-edge CFI (IBT) */
+#define KACS_MIT_CFIB		0x080  /* backward-edge CFI (shadow stack) */
+#define KACS_MIT_PIE		0x100  /* reject non-PIE binaries */
+#define KACS_MIT_SML		0x200  /* speculation mitigation lock */
+#define KACS_MIT_ALL		0x3FF
+
+/*
+ * Set PSB fields on a process via pidfd.
+ *
+ * pip_type/pip_trust: PIP level. Requires SeTcbPrivilege.
+ * mitigations: bitmask of KACS_MIT_* flags to enable.
+ *   - With SeTcbPrivilege: can set any mitigation on any process.
+ *   - Without SeTcbPrivilege: can only set KACS_MIT_NO_CHILD on self
+ *     (pidfd must be -1). One-way: bits set, never cleared.
+ *
+ * pidfd == -1: target is the calling process itself.
+ */
+SYSCALL_DEFINE4(kacs_set_psb, int, pidfd, u32, pip_type,
+		u32, pip_trust, u32, mitigations)
+{
+	const struct kacs_cred_security *caller;
+	struct kacs_task_security *target_tsec;
+	struct pid *pid = NULL;
+	struct task_struct *task;
+	unsigned int pidfd_flags;
+	int has_tcb;
+
+	caller = kacs_cred(current_real_cred());
+	has_tcb = kacs_token_check_privilege(caller->token, KACS_PRIV_TCB);
+
+	/* Validate mitigations bitmask. */
+	if (mitigations & ~KACS_MIT_ALL)
+		return -EINVAL;
+
+	/* Without SeTcbPrivilege: only self + no_child_process. */
+	if (!has_tcb) {
+		if (pidfd != -1)
+			return -EPERM;
+		if (pip_type != 0 || pip_trust != 0)
+			return -EPERM;
+		if (mitigations & ~KACS_MIT_NO_CHILD)
+			return -EPERM;
+	}
+
+	/* Validate PIP values. */
+	if (pip_type != PIP_TYPE_NONE &&
+	    pip_type != PIP_TYPE_PROTECTED &&
+	    pip_type != PIP_TYPE_ISOLATED)
+		return -EINVAL;
+
+	/* Resolve target. */
+	if (pidfd == -1) {
+		task = current;
+	} else {
+		pid = pidfd_get_pid(pidfd, &pidfd_flags);
+		if (IS_ERR(pid))
+			return PTR_ERR(pid);
+
+		rcu_read_lock();
+		task = pid_task(pid, PIDTYPE_PID);
+		if (!task) {
+			rcu_read_unlock();
+			put_pid(pid);
+			return -ESRCH;
+		}
+	}
+
+	target_tsec = kacs_task(task);
+
+	/* PIP: set (requires SeTcbPrivilege, validated above). */
+	if (has_tcb && (pip_type || pip_trust)) {
+		target_tsec->pip_type = pip_type;
+		target_tsec->pip_trust = pip_trust;
+	}
+
+	/* Mitigations: one-way set (bits can only be turned on). */
+	if (mitigations & KACS_MIT_WXP)
+		target_tsec->wxp = 1;
+	if (mitigations & KACS_MIT_TLP)
+		target_tsec->tlp = 1;
+	if (mitigations & KACS_MIT_LSV)
+		target_tsec->lsv = 1;
+	if (mitigations & KACS_MIT_CFI) {
+		/* Legacy: sets both forward and backward edge. */
+		target_tsec->cfi = 1;
+		target_tsec->cfif = 1;
+		target_tsec->cfib = 1;
+	}
+	if (mitigations & KACS_MIT_UI_ACCESS)
+		target_tsec->ui_access = 1;
+	if (mitigations & KACS_MIT_NO_CHILD)
+		target_tsec->no_child_process = 1;
+	if (mitigations & KACS_MIT_CFIF)
+		target_tsec->cfif = 1;
+	if (mitigations & KACS_MIT_CFIB)
+		target_tsec->cfib = 1;
+	if (mitigations & KACS_MIT_PIE)
+		target_tsec->pie = 1;
+	if (mitigations & KACS_MIT_SML)
+		target_tsec->sml = 1;
+
+	if (pid) {
+		rcu_read_unlock();
+		put_pid(pid);
+	}
 	return 0;
 }
 
-/* ── Syscall: kacs_create_token (1002) ──────────────────────────────────── */
+/* ── Syscall: kacs_create_token (1003) ──────────────────────────────────── */
 
 /*
  * Parse a binary token spec from userspace and return a token fd.
@@ -3318,7 +3885,7 @@ SYSCALL_DEFINE2(kacs_create_token, const void __user *, spec, size_t, len)
 	return kacs_token_to_fd(new_token, KACS_TOKEN_ALL_ACCESS);
 }
 
-/* ── Syscall: kacs_create_session (1003) ────────────────────────────────── */
+/* ── Syscall: kacs_create_session (1004) ────────────────────────────────── */
 
 /*
  * Create a new logon session. Returns the session ID (u64).
@@ -3524,63 +4091,103 @@ SYSCALL_DEFINE2(kacs_set_impersonation_level, int, sock_fd, u32, level)
 /* ── Syscall: kacs_access_check (1023) ─────────────────────────────────── */
 
 /*
- * Evaluate a Security Descriptor against the calling thread's token.
- * Used by userspace daemons (registryd, lpsd, eventd) that manage
- * their own objects and need the kernel's AccessCheck engine.
+ * Evaluate AccessCheck for a userspace object manager (§15.1).
  *
- * sd_buf/sd_len: self-relative SD in Windows binary format.
- * args/args_len: pointer and size of struct kacs_access_check_args.
+ * Takes a single pointer to a versioned struct kacs_access_check_args.
+ * The struct contains the token fd, SD pointer, desired access, generic
+ * mapping, and optional fields (self SID, object tree, local claims).
  *
- * The args struct is versioned via its `size` field — old callers with
- * smaller structs still work. Fields beyond what the caller provides
- * are zero-initialized.
+ * token_fd identifies the token to evaluate against. Requires
+ * TOKEN_QUERY on the fd. token_fd == -1 means "use the calling
+ * thread's effective token" (convenience for self-checks).
  *
  * Returns the granted access mask (>= 0) or negative errno.
- * If any requested right is denied, returns 0 (no bits granted).
- * If granted_out_ptr is set, the granted mask is also written there
- * (even on denial, where it will be 0).
+ * If granted_out_ptr is set, the granted mask is written there
+ * (even on denial).
  */
-SYSCALL_DEFINE4(kacs_access_check,
-		const void __user *, sd_buf, size_t, sd_len,
-		const void __user *, uargs, size_t, args_len)
+SYSCALL_DEFINE1(kacs_access_check,
+		struct kacs_access_check_args __user *, uargs)
 {
 	struct kacs_access_check_args args;
-	const struct kacs_cred_security *sec;
+	const void *token;
+	struct fd tfd = {};
 	void *ksd = NULL;
 	void *self_sid = NULL;
 	u32 copy_len;
 	u32 granted;
 	long long ret;
+	int have_tfd = 0;
 
-	/* args_len must cover at least the minimum V1 fields. */
-	if (args_len < KACS_ACCESS_CHECK_ARGS_V1_SIZE)
+	/* Read the size field first to know how much to copy. */
+	{
+		u32 usize;
+
+		if (copy_from_user(&usize, &uargs->size, sizeof(u32)))
+			return -EFAULT;
+		if (usize < KACS_ACCESS_CHECK_ARGS_V1_SIZE)
+			return -EINVAL;
+
+		/* Zero-initialize, then copy what the caller provided. */
+		memset(&args, 0, sizeof(args));
+		copy_len = usize < sizeof(args) ? usize : sizeof(args);
+		if (copy_from_user(&args, uargs, copy_len))
+			return -EFAULT;
+	}
+
+	if (!args.desired_access)
 		return -EINVAL;
+
+	/* Resolve the token to evaluate against. */
+	if (args.token_fd == -1) {
+		/* Self-check: use the calling thread's effective token. */
+		token = kacs_cred(current_cred())->token;
+	} else {
+		struct kacs_token_file *tf;
+
+		tfd = fdget(args.token_fd);
+		if (!fd_file(tfd))
+			return -EBADF;
+		if (fd_file(tfd)->f_op != &kacs_token_fops) {
+			fdput(tfd);
+			return -EINVAL;
+		}
+		tf = fd_file(tfd)->private_data;
+		if (!(tf->access_mask & KACS_TOKEN_QUERY)) {
+			fdput(tfd);
+			return -EACCES;
+		}
+		token = tf->token;
+		have_tfd = 1;
+	}
 
 	/* SD size bounds: min 20 (header), max 64 KiB. */
-	if (sd_len < 20 || sd_len > 65536)
-		return -EINVAL;
-
-	/* Zero-initialize, then copy what the caller provided. */
-	memset(&args, 0, sizeof(args));
-	copy_len = args_len < sizeof(args) ? args_len : sizeof(args);
-	if (copy_from_user(&args, uargs, copy_len))
-		return -EFAULT;
-
-	/* Validate the struct's own size field for forward compat. */
-	if (args.size < KACS_ACCESS_CHECK_ARGS_V1_SIZE)
-		return -EINVAL;
-
-	if (!args.desired)
-		return -EINVAL;
-
-	/* Copy the SD from userspace. */
-	ksd = kmalloc(sd_len, GFP_KERNEL);
-	if (!ksd)
-		return -ENOMEM;
-
-	if (copy_from_user(ksd, sd_buf, sd_len)) {
-		ret = -EFAULT;
+	if (args.sd_len < 20 || args.sd_len > 65536) {
+		ret = -EINVAL;
 		goto out;
+	}
+
+	/* Copy the SD from userspace.
+	 * sd_ptr == 0 with sd_len > 0: SD is inline immediately after
+	 * the struct at uargs + args.size (single-allocation convenience).
+	 * sd_ptr != 0: absolute user pointer to SD data. */
+	ksd = kmalloc(args.sd_len, GFP_KERNEL);
+	if (!ksd) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	{
+		const void __user *sd_src;
+
+		if (args.sd_ptr)
+			sd_src = (const void __user *)args.sd_ptr;
+		else
+			sd_src = (const void __user *)uargs + args.size;
+
+		if (copy_from_user(ksd, sd_src, args.sd_len)) {
+			ret = -EFAULT;
+			goto out;
+		}
 	}
 
 	/* Copy the self SID if provided (for PRINCIPAL_SELF substitution). */
@@ -3602,9 +4209,8 @@ SYSCALL_DEFINE4(kacs_access_check,
 		}
 	}
 
-	sec = kacs_cred(current_cred());
-	ret = kacs_access_check_sd(sec->token, ksd, sd_len,
-				   args.desired,
+	ret = kacs_access_check_sd(token, ksd, args.sd_len,
+				   args.desired_access,
 				   args.generic_read,
 				   args.generic_write,
 				   args.generic_execute,
@@ -3629,6 +4235,8 @@ SYSCALL_DEFINE4(kacs_access_check,
 out:
 	kfree(self_sid);
 	kfree(ksd);
+	if (have_tfd)
+		fdput(tfd);
 	return ret;
 }
 
@@ -3722,6 +4330,13 @@ static ssize_t kacs_sessions_show(struct file *file, char __user *buf,
 	char *kbuf;
 	long long len;
 	ssize_t ret;
+
+	/* Access gate (§15.4): requires SeSecurityPrivilege.
+	 * SYSTEM and Administrators have this; unprivileged users don't. */
+	if (!kacs_token_check_privilege(
+			kacs_cred(current_cred())->token,
+			(1ULL << 8) /* SE_SECURITY */))
+		return -EACCES;
 
 	if (*ppos != 0)
 		return 0;
@@ -4152,13 +4767,26 @@ SYSCALL_DEFINE5(kacs_open, int, dirfd, const char __user *, path,
 		how.flags |= (f_mode & FMODE_WRITE) ? O_RDWR : O_RDONLY;
 	else if (f_mode & FMODE_WRITE)
 		how.flags |= O_WRONLY;
+	else
+		/* Execute-only: no FMODE_READ or FMODE_WRITE. Use O_RDONLY
+		 * to satisfy VFS; kacs_fixup_open_fmode (patch 12) will
+		 * strip FMODE_READ and set FMODE_EXEC after security_file_open. */
+		how.flags |= O_RDONLY;
 
 	if (khow.flags & AT_SYMLINK_NOFOLLOW)
 		how.flags |= O_NOFOLLOW;
 
+	/* Signal that a KACS-native open is in progress so do_dentry_open
+	 * can fix f_mode after security_file_open (patch 12, §14.3). */
+	kacs_task(current)->kacs_open_desired = khow.desired_access;
+
 	/* Use do_sys_openat2 which handles all the VFS path resolution. */
 	how.mode = 0666; /* for O_CREAT — umask will apply */
 	fd = do_sys_openat2(dirfd, path, &how);
+
+	/* Clear the signal regardless of success/failure. */
+	kacs_task(current)->kacs_open_desired = 0;
+
 	if (fd < 0)
 		return fd;
 
@@ -4264,9 +4892,23 @@ SYSCALL_DEFINE5(kacs_open, int, dirfd, const char __user *, path,
 		}
 	}
 
-	/* Set creation status for caller. */
+	/* Set creation status for caller (§14.4). */
+#define KACS_STATUS_OPENED	0
+#define KACS_STATUS_CREATED	1
+#define KACS_STATUS_OVERWRITTEN	2
+#define KACS_STATUS_SUPERSEDED	3 /* reserved for FILE_SUPERSEDE */
 	if (status_out) {
-		u32 status = (how.flags & O_CREAT) ? 1 : 0;
+		u32 status;
+		CLASS(fd, sf)((unsigned int)fd);
+
+		if (!fd_empty(sf) &&
+		    (fd_file(sf)->f_mode & FMODE_CREATED))
+			status = KACS_STATUS_CREATED;
+		else if (how.flags & O_TRUNC)
+			status = KACS_STATUS_OVERWRITTEN;
+		else
+			status = KACS_STATUS_OPENED;
+
 		if (put_user(status, status_out)) {
 			close_fd((unsigned int)fd);
 			return -EFAULT;

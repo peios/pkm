@@ -24,7 +24,7 @@ pub const SE_GROUP_OWNER: u32 = 0x0000_0008;
 pub const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x0000_0010;
 
 /// Group is the logon SID for this token's authentication session.
-pub const SE_GROUP_LOGON_ID: u32 = 0x0000_0040;
+pub const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
 
 /// Group carries the integrity SID for this token (MS-DTYP §2.4.4.1).
 pub const SE_GROUP_INTEGRITY: u32 = 0x0000_0020;
@@ -151,7 +151,7 @@ mod tests {
         assert_eq!(SE_GROUP_ENABLED, 0x0000_0004);
         assert_eq!(SE_GROUP_OWNER, 0x0000_0008);
         assert_eq!(SE_GROUP_USE_FOR_DENY_ONLY, 0x0000_0010);
-        assert_eq!(SE_GROUP_LOGON_ID, 0x0000_0040);
+        assert_eq!(SE_GROUP_LOGON_ID, 0xC000_0000);
         assert_eq!(SE_GROUP_RESOURCE, 0x2000_0000);
     }
 
