@@ -112,14 +112,30 @@ impl SecurityDescriptor {
     }
 
     /// Parse from self-relative binary format (MS-DTYP §2.4.6).
+    ///
+    /// # Return value
+    ///
+    /// Returns `Ok(None)` on malformed input. Note: this conflates multiple
+    /// distinct failure modes (too short, bad revision, missing SE_SELF_RELATIVE,
+    /// invalid offsets, unparseable components) into a single `None`. A richer
+    /// error type would allow callers to distinguish parse failures from
+    /// absent/empty SDs, but changing the signature would ripple through many
+    /// call sites. Tracked for future improvement.
     pub fn from_bytes(data: &[u8]) -> Result<Option<Self>, AllocError> {
         if data.len() < SD_HEADER_SIZE {
+            return Ok(None); // too short for header
+        }
+
+        // Maximum SD size — matches practical xattr limits. Rejects
+        // adversarial inputs before any real parsing work.
+        const MAX_SD_SIZE: usize = 65536; // 64KB
+        if data.len() > MAX_SD_SIZE {
             return Ok(None);
         }
 
         let revision = data[0];
         if revision != SD_REVISION {
-            return Ok(None);
+            return Ok(None); // bad revision (only rev 1 supported)
         }
 
         // data[1] is Sbz1 (resource manager control, usually 0)
@@ -128,7 +144,7 @@ impl SecurityDescriptor {
 
         // Reject absolute-format SDs — we only parse self-relative.
         if control & SE_SELF_RELATIVE == 0 {
-            return Ok(None);
+            return Ok(None); // not self-relative
         }
 
         // Self-relative format: four 32-bit offsets
@@ -136,6 +152,21 @@ impl SecurityDescriptor {
         let group_offset = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
         let sacl_offset = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
         let dacl_offset = u32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
+
+        // Reject overlapping regions: two non-zero offsets pointing to the
+        // same location means the SD is malformed (components would alias).
+        {
+            let offsets = [owner_offset, group_offset, sacl_offset, dacl_offset];
+            for i in 0..offsets.len() {
+                if offsets[i] == 0 { continue; }
+                for j in (i + 1)..offsets.len() {
+                    if offsets[j] == 0 { continue; }
+                    if offsets[i] == offsets[j] {
+                        return Ok(None); // malformed: duplicate offset
+                    }
+                }
+            }
+        }
 
         let owner = if owner_offset != 0 {
             if owner_offset >= data.len() {

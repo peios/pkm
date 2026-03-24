@@ -41,7 +41,10 @@ struct KacsToken {
 impl KacsToken {
     /// Allocate a new token on the heap with refcount 1.
     fn new(mut token: Token) -> Result<*const (), AllocError> {
-        // Assign a unique token ID.
+        // Assign a unique token ID. Relaxed ordering is correct: we only
+        // need uniqueness (monotonic counter), not happens-before relationships.
+        // Overflow after 2^64 operations is physically unreachable (would take
+        // ~584 years at 1 billion tokens/second).
         token.token_id = kacs_core::luid::Luid(NEXT_TOKEN_ID.fetch_add(1, Ordering::Relaxed));
 
         // Generate a default token SD (§7.9) if one wasn't set.
@@ -294,6 +297,7 @@ pub extern "C" fn kacs_token_format(
     out.hex64(token.privileges.enabled.load(Ordering::SeqCst));
     out.byte(b'\n');
 
+    out.finalize();
     let data = out.as_bytes();
     if data.len() > buf_len {
         return -34; // -ERANGE
@@ -497,6 +501,7 @@ pub extern "C" fn kacs_token_query(
         _ => return -22, // -EINVAL
     };
 
+    out.finalize();
     let data = out.as_bytes();
 
     if buf.is_null() {
@@ -2163,6 +2168,7 @@ pub extern "C" fn kacs_format_sessions(buf: *mut u8, buf_len: usize) -> i64 {
         }
     }
 
+    out.finalize();
     let data = out.as_bytes();
     if data.len() > buf_len {
         return -34; // -ERANGE
@@ -2259,14 +2265,18 @@ pub extern "C" fn kacs_rust_init() -> c_int {
 
 /// Dynamically-growing format buffer for token display.
 /// Uses compat::Vec<u8> — allocates in kernel via KVec.
+/// Tracks truncation: if any write fails (OOM), `truncated` is set
+/// so the caller can append a truncation indicator.
 struct FormatBuf {
     data: compat::Vec<u8>,
+    truncated: bool,
 }
 
 impl FormatBuf {
     fn new() -> Self {
         FormatBuf {
             data: compat::Vec::new(),
+            truncated: false,
         }
     }
 
@@ -2274,12 +2284,29 @@ impl FormatBuf {
         &self.data
     }
 
+    /// Finalize the buffer: if content was truncated, try to append
+    /// a "[...]" indicator so the consumer knows output is incomplete.
+    fn finalize(&mut self) {
+        if self.truncated {
+            const INDICATOR: &[u8] = b"[...]";
+            for &b in INDICATOR {
+                // Best-effort: if even the indicator fails, stop.
+                if compat::vec_push(&mut self.data, b).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
     fn byte(&mut self, b: u8) {
-        let _ = compat::vec_push(&mut self.data, b);
+        if compat::vec_push(&mut self.data, b).is_err() {
+            self.truncated = true;
+        }
     }
 
     fn str(&mut self, s: &str) {
         for &b in s.as_bytes() {
+            if self.truncated { return; }
             self.byte(b);
         }
     }

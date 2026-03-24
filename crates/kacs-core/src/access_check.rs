@@ -1244,6 +1244,10 @@ pub fn access_check(
             if mandatory_decided & mask::WRITE_OWNER == 0
                 && granted & mask::WRITE_OWNER == 0
             {
+                // Note: decided is not read after this point in the scalar
+                // path (restricted/confinement/CAP passes use their own
+                // decided variables). We still update it for consistency
+                // with the decided/granted pairing throughout the pipeline.
                 decided |= mask::WRITE_OWNER;
                 granted |= mask::WRITE_OWNER;
                 privilege_granted |= mask::WRITE_OWNER;
@@ -1251,6 +1255,11 @@ pub fn access_check(
             }
         }
     }
+    // Suppress dead-value warning: decided is intentionally maintained above
+    // for correctness of the decided/granted pattern, even though the scalar
+    // decided is not read after step 7a (restricted/confinement/CAP passes
+    // create their own decided variables).
+    let _ = decided;
 
     // Step 8: Restricted token two-pass (§11.7)
     if token.is_restricted() {

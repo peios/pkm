@@ -123,6 +123,15 @@ pub fn parse_token_spec(data: &[u8]) -> Result<Option<Token>, AllocError> {
         compat::vec_push(&mut groups, GroupEntry::new(sid, attrs))?;
     }
 
+    // ── Index validation ───────────────────────────────────────────────
+    // owner_sid_index: 0 = user SID, 1..=groups_count = group SID.
+    // primary_group_index: same range.
+    // Values beyond the group array are invalid.
+    let max_index = groups_count as u16;
+    if owner_sid_index > max_index || primary_group_index > max_index {
+        return Ok(None);
+    }
+
     // ── Default DACL (optional) ───────────────────────────────────────
 
     let default_dacl = if default_dacl_offset != 0 && default_dacl_len != 0 {

@@ -524,8 +524,20 @@ fn parse_resource_attribute_ace(ace_type: u8, flags: u8, data: &[u8]) -> Option<
     if sid_end > data.len() {
         return None;
     }
-    let application_data = if sid_end < data.len() {
-        Some(compat::slice_to_vec(&data[sid_end..]).ok()?)
+    // Strip trailing padding bytes. ACEs are padded to 4-byte alignment
+    // during serialization; those padding zeros are part of the ACE
+    // envelope, not the application data content. Strip up to 3 trailing
+    // zero bytes to undo the DWORD alignment padding.
+    let mut app_end = data.len();
+    for _ in 0..3 {
+        if app_end > sid_end && data[app_end - 1] == 0 {
+            app_end -= 1;
+        } else {
+            break;
+        }
+    }
+    let application_data = if sid_end < app_end {
+        Some(compat::slice_to_vec(&data[sid_end..app_end]).ok()?)
     } else {
         None
     };

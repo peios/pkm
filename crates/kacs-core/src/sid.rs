@@ -30,8 +30,15 @@ impl Sid {
     /// The authority is a 48-bit value stored big-endian in 6 bytes.
     /// Most well-known authorities fit in the low byte (1, 5, 15, 16, 19).
     pub fn new(authority: u64, sub_authorities: &[u32]) -> Result<Self, AllocError> {
-        debug_assert!(authority <= 0xFFFF_FFFF_FFFF);
-        debug_assert!(sub_authorities.len() <= SID_MAX_SUB_AUTHORITIES);
+        // Validate in release builds too — not just debug_assert.
+        // Authority is a 48-bit value; sub-authorities capped at 15 (Windows limit).
+        if authority > 0xFFFF_FFFF_FFFF
+            || sub_authorities.len() > SID_MAX_SUB_AUTHORITIES
+        {
+            // Return AllocError as a sentinel — Sid::new cannot return Option
+            // without changing its signature (used throughout the codebase).
+            return Err(AllocError);
+        }
         Ok(Sid {
             revision: 1,
             authority: [

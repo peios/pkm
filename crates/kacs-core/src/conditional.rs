@@ -554,6 +554,22 @@ pub fn evaluate(
         return Ok(TriValue::Unknown);
     }
 
+    /// Maximum evaluation stack depth. Prevents adversarial expressions from
+    /// consuming unbounded memory. 1024 is generous for any real expression.
+    const MAX_STACK_DEPTH: usize = 1024;
+
+    /// Push a value onto the stack with depth checking. Returns
+    /// `Ok(true)` on success, `Ok(false)` if the stack would exceed
+    /// MAX_STACK_DEPTH (caller should return Unknown).
+    #[inline]
+    fn stack_push(stack: &mut Vec<Value>, val: Value) -> Result<bool, AllocError> {
+        if stack.len() >= MAX_STACK_DEPTH {
+            return Ok(false);
+        }
+        compat::vec_push(stack, val)?;
+        Ok(true)
+    }
+
     let mut stack: Vec<Value> = Vec::new();
     let mut pos: usize = 4;
 
@@ -562,7 +578,8 @@ pub fn evaluate(
         pos += 1;
 
         match op {
-            // Padding
+            // Padding (0x00 only). Non-zero bytes in padding positions
+            // fall through to the unknown-opcode handler and return Unknown.
             0x00 => continue,
 
             // --- Literal values ---
@@ -577,16 +594,26 @@ pub fn evaluate(
                 let sign = condition[pos + 8];
                 pos += 10;
                 let value = if sign == 0x02 {
-                    // Negative: interpret as negative int64
-                    -(magnitude as i64)
+                    // Negative: interpret as negative int64.
+                    // Guard against magnitude > i64::MAX (would wrap on cast).
+                    if magnitude > i64::MAX as u64 + 1 {
+                        return Ok(TriValue::Unknown);
+                    } else if magnitude == i64::MAX as u64 + 1 {
+                        i64::MIN // exactly -2^63
+                    } else {
+                        -(magnitude as i64)
+                    }
                 } else {
+                    if magnitude > i64::MAX as u64 {
+                        return Ok(TriValue::Unknown);
+                    }
                     magnitude as i64
                 };
-                compat::vec_push(&mut stack, Value {
+                if !stack_push(&mut stack, Value {
                     vtype: ValueType::Int64(value),
                     origin: Origin::Literal,
                     flags: 0,
-                })?;
+                })? { return Ok(TriValue::Unknown); }
             }
 
             // Unicode string: length (4 LE) + UTF-16LE data
@@ -599,11 +626,11 @@ pub fn evaluate(
                 if length > condition.len() - pos { return Ok(TriValue::Unknown); }
                 let s = decode_utf16le(&condition[pos..pos+length]);
                 pos += length;
-                compat::vec_push(&mut stack, Value {
+                if !stack_push(&mut stack, Value {
                     vtype: ValueType::String(s),
                     origin: Origin::Literal,
                     flags: 0,
-                })?;
+                })? { return Ok(TriValue::Unknown); }
             }
 
             // Octet string: length (4 LE) + raw bytes
@@ -616,11 +643,11 @@ pub fn evaluate(
                 if length > condition.len() - pos { return Ok(TriValue::Unknown); }
                 let data = compat::slice_to_vec(&condition[pos..pos+length])?;
                 pos += length;
-                compat::vec_push(&mut stack, Value {
+                if !stack_push(&mut stack, Value {
                     vtype: ValueType::Octet(data),
                     origin: Origin::Literal,
                     flags: 0,
-                })?;
+                })? { return Ok(TriValue::Unknown); }
             }
 
             // Composite: length (4 LE) + nested elements
@@ -635,11 +662,11 @@ pub fn evaluate(
                 let elements = parse_composite_elements(&condition[pos..pos+length])?;
                 pos += length;
                 match elements {
-                    Some(elems) => compat::vec_push(&mut stack, Value {
+                    Some(elems) => if !stack_push(&mut stack, Value {
                         vtype: ValueType::Composite(elems),
                         origin: Origin::Literal,
                         flags: 0,
-                    })?,
+                    })? { return Ok(TriValue::Unknown); },
                     None => return Ok(TriValue::Unknown),
                 }
             }
@@ -655,11 +682,11 @@ pub fn evaluate(
                 match Sid::from_bytes(&condition[pos..pos+length]) {
                     Some(sid) => {
                         pos += length;
-                        compat::vec_push(&mut stack, Value {
+                        if !stack_push(&mut stack, Value {
                             vtype: ValueType::Sid(sid),
                             origin: Origin::Literal,
                             flags: 0,
-                        })?;
+                        })? { return Ok(TriValue::Unknown); }
                     }
                     None => return Ok(TriValue::Unknown),
                 }
@@ -675,7 +702,7 @@ pub fn evaluate(
                 };
                 pos = new_pos;
                 let v = resolve_claim(local_claims, &name, for_allow, Origin::LocalAttr)?;
-                compat::vec_push(&mut stack, v)?;
+                if !stack_push(&mut stack, v)? { return Ok(TriValue::Unknown); }
             }
 
             // @User.
@@ -686,7 +713,7 @@ pub fn evaluate(
                 };
                 pos = new_pos;
                 let v = resolve_claim(&token.user_claims, &name, for_allow, Origin::UserAttr)?;
-                compat::vec_push(&mut stack, v)?;
+                if !stack_push(&mut stack, v)? { return Ok(TriValue::Unknown); }
             }
 
             // @Resource.
@@ -697,7 +724,7 @@ pub fn evaluate(
                 };
                 pos = new_pos;
                 let v = resolve_claim(resource_attributes, &name, for_allow, Origin::ResourceAttr)?;
-                compat::vec_push(&mut stack, v)?;
+                if !stack_push(&mut stack, v)? { return Ok(TriValue::Unknown); }
             }
 
             // @Device.
@@ -708,7 +735,7 @@ pub fn evaluate(
                 };
                 pos = new_pos;
                 let v = resolve_claim(&token.device_claims, &name, for_allow, Origin::DeviceAttr)?;
-                compat::vec_push(&mut stack, v)?;
+                if !stack_push(&mut stack, v)? { return Ok(TriValue::Unknown); }
             }
 
             // --- Relational operators ---
@@ -1070,11 +1097,45 @@ fn read_attr_name(condition: &[u8], pos: usize) -> Option<(String, usize)> {
 }
 
 /// Decode UTF-16LE bytes to a Rust String.
+///
+/// Handles surrogate pairs: a high surrogate (0xD800..=0xDBFF) followed
+/// by a low surrogate (0xDC00..=0xDFFF) is combined into a single
+/// supplementary-plane character. Lone surrogates are skipped.
 fn decode_utf16le(data: &[u8]) -> String {
     let mut result = String::new();
     let mut i = 0;
     while i + 1 < data.len() {
         let code_unit = u16::from_le_bytes([data[i], data[i + 1]]);
+        i += 2;
+
+        // High surrogate: look for a following low surrogate.
+        if (0xD800..=0xDBFF).contains(&code_unit) {
+            if i + 1 < data.len() {
+                let next = u16::from_le_bytes([data[i], data[i + 1]]);
+                if (0xDC00..=0xDFFF).contains(&next) {
+                    // Valid surrogate pair — decode to supplementary char.
+                    let cp = 0x10000
+                        + ((code_unit as u32 - 0xD800) << 10)
+                        + (next as u32 - 0xDC00);
+                    i += 2;
+                    if let Some(c) = char::from_u32(cp) {
+                        #[cfg(not(feature = "kernel"))]
+                        result.push(c);
+                        #[cfg(feature = "kernel")]
+                        if result.push(c).is_err() { break; }
+                    }
+                    continue;
+                }
+            }
+            // Lone high surrogate — skip it.
+            continue;
+        }
+
+        // Lone low surrogate — skip it.
+        if (0xDC00..=0xDFFF).contains(&code_unit) {
+            continue;
+        }
+
         if let Some(c) = char::from_u32(code_unit as u32) {
             // In kernel mode push() can fail on OOM. Truncated string
             // is safe — it just won't match any claim name.
@@ -1083,18 +1144,29 @@ fn decode_utf16le(data: &[u8]) -> String {
             #[cfg(feature = "kernel")]
             if result.push(c).is_err() { break; }
         }
-        i += 2;
     }
     result
 }
 
 /// Encode a Rust String to UTF-16LE bytes.
+///
+/// Characters in the supplementary plane (> U+FFFF) are encoded as
+/// surrogate pairs, matching the decode_utf16le behavior.
 #[cfg(test)]
 fn encode_utf16le(s: &str) -> Vec<u8> {
     let mut result = Vec::new();
     for c in s.chars() {
-        let code = c as u16;
-        result.extend_from_slice(&code.to_le_bytes());
+        let cp = c as u32;
+        if cp > 0xFFFF {
+            // Supplementary plane: encode as surrogate pair.
+            let adjusted = cp - 0x10000;
+            let high = (0xD800 + (adjusted >> 10)) as u16;
+            let low = (0xDC00 + (adjusted & 0x3FF)) as u16;
+            result.extend_from_slice(&high.to_le_bytes());
+            result.extend_from_slice(&low.to_le_bytes());
+        } else {
+            result.extend_from_slice(&(cp as u16).to_le_bytes());
+        }
     }
     result
 }
@@ -1117,8 +1189,18 @@ fn parse_composite_elements(data: &[u8]) -> Result<Option<Vec<Value>>, AllocErro
                 let sign = data[pos + 8];
                 pos += 10;
                 let value = if sign == 0x02 {
-                    -(magnitude as i64)
+                    // Guard against magnitude > i64::MAX (would wrap on cast).
+                    if magnitude > i64::MAX as u64 + 1 {
+                        return Ok(None);
+                    } else if magnitude == i64::MAX as u64 + 1 {
+                        i64::MIN
+                    } else {
+                        -(magnitude as i64)
+                    }
                 } else {
+                    if magnitude > i64::MAX as u64 {
+                        return Ok(None);
+                    }
                     magnitude as i64
                 };
                 compat::vec_push(&mut elements, Value {
