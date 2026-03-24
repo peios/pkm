@@ -415,6 +415,47 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Property-based round-trip tests
+    // -----------------------------------------------------------------------
+
+    proptest::proptest! {
+        #[test]
+        fn prop_round_trip(
+            authority_val in 0u64..=0xFFFF_FFFF_FFFFu64,
+            sub_count in 0usize..=15,
+            sub_values in proptest::collection::vec(proptest::num::u32::ANY, 0..=15),
+        ) {
+            let subs: alloc::vec::Vec<u32> = sub_values.into_iter().take(sub_count).collect();
+            let sid = Sid::new(authority_val, &subs).unwrap();
+            let bytes = sid.to_bytes().unwrap();
+            let parsed = Sid::from_bytes(&bytes).unwrap();
+            proptest::prop_assert_eq!(&sid, &parsed);
+        }
+
+        #[test]
+        fn prop_byte_len_matches_serialized(
+            authority_val in 0u64..=0xFFFF_FFFF_FFFFu64,
+            sub_count in 0usize..=15,
+            sub_values in proptest::collection::vec(proptest::num::u32::ANY, 0..=15),
+        ) {
+            let subs: alloc::vec::Vec<u32> = sub_values.into_iter().take(sub_count).collect();
+            let sid = Sid::new(authority_val, &subs).unwrap();
+            let bytes = sid.to_bytes().unwrap();
+            proptest::prop_assert_eq!(sid.byte_len(), bytes.len());
+        }
+
+        #[test]
+        fn prop_string_starts_with_s1(
+            authority_val in 0u64..=0xFFFF_FFFF_FFFFu64,
+            sub_values in proptest::collection::vec(proptest::num::u32::ANY, 0..=15),
+        ) {
+            let sid = Sid::new(authority_val, &sub_values).unwrap();
+            let s = alloc::string::ToString::to_string(&sid);
+            proptest::prop_assert!(s.starts_with("S-1-"));
+        }
+    }
+
     #[test]
     fn sid_structurally_wellformed_validation() {
         // §7.5 line 2341: CreateToken validates all SIDs are structurally well-formed

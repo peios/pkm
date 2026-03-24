@@ -1575,4 +1575,109 @@ mod tests {
         ];
         assert!(crate::sid::Sid::from_bytes(&bad_sid_bytes).is_none());
     }
+
+    // -----------------------------------------------------------------------
+    // Property-based round-trip tests
+    // -----------------------------------------------------------------------
+
+    fn arb_sid() -> impl proptest::strategy::Strategy<Value = crate::sid::Sid> {
+        use proptest::prelude::*;
+        (
+            proptest::collection::vec(any::<u32>(), 1..=4),
+            prop_oneof![Just(1u64), Just(5), Just(16)],
+        )
+            .prop_map(|(subs, auth)| crate::sid::Sid::new(auth, &subs).unwrap())
+    }
+
+    fn arb_basic_ace() -> impl proptest::strategy::Strategy<Value = crate::ace::Ace> {
+        use proptest::prelude::*;
+        use crate::ace::*;
+        (
+            prop_oneof![
+                Just(ACCESS_ALLOWED_ACE_TYPE),
+                Just(ACCESS_DENIED_ACE_TYPE),
+            ],
+            any::<u8>(),
+            any::<u32>(),
+            arb_sid(),
+        )
+            .prop_map(|(ace_type, flags, mask, sid)| Ace {
+                ace_type,
+                flags,
+                mask,
+                sid,
+                object_type: None,
+                inherited_object_type: None,
+                condition: None,
+                application_data: None,
+            })
+    }
+
+    fn arb_acl() -> impl proptest::strategy::Strategy<Value = Acl> {
+        use proptest::prelude::*;
+        proptest::collection::vec(arb_basic_ace(), 0..=4)
+            .prop_map(|aces| Acl { revision: crate::acl::ACL_REVISION, aces })
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_sd_bytes_round_trip(
+            owner in arb_sid(),
+            group in arb_sid(),
+            dacl in arb_acl(),
+        ) {
+            let sd = SecurityDescriptor::new(owner, group, dacl);
+            let bytes = sd.to_bytes().unwrap();
+            let parsed = SecurityDescriptor::from_bytes(&bytes).unwrap().unwrap();
+            let bytes2 = parsed.to_bytes().unwrap();
+            proptest::prop_assert_eq!(&bytes, &bytes2);
+        }
+
+        #[test]
+        fn prop_sd_with_sacl_round_trip(
+            owner in arb_sid(),
+            group in arb_sid(),
+            dacl in arb_acl(),
+            sacl in arb_acl(),
+        ) {
+            let sd = SecurityDescriptor::with_sacl(owner, group, dacl, sacl);
+            let bytes = sd.to_bytes().unwrap();
+            let parsed = SecurityDescriptor::from_bytes(&bytes).unwrap().unwrap();
+            let bytes2 = parsed.to_bytes().unwrap();
+            proptest::prop_assert_eq!(&bytes, &bytes2);
+        }
+
+        #[test]
+        fn prop_sd_self_relative_flag(
+            owner in arb_sid(),
+            group in arb_sid(),
+            dacl in arb_acl(),
+        ) {
+            let sd = SecurityDescriptor::new(owner, group, dacl);
+            proptest::prop_assert!(sd.control & SE_SELF_RELATIVE != 0);
+            let bytes = sd.to_bytes().unwrap();
+            let parsed = SecurityDescriptor::from_bytes(&bytes).unwrap().unwrap();
+            proptest::prop_assert!(parsed.control & SE_SELF_RELATIVE != 0);
+        }
+
+        #[test]
+        fn prop_sd_control_flags_preserved(
+            owner in arb_sid(),
+            group in arb_sid(),
+            dacl in arb_acl(),
+            extra_flags in proptest::bits::u16::masked(
+                SE_DACL_PROTECTED | SE_SACL_PROTECTED
+                    | SE_DACL_AUTO_INHERITED | SE_SACL_AUTO_INHERITED
+                    | SE_OWNER_DEFAULTED | SE_GROUP_DEFAULTED
+                    | SE_DACL_DEFAULTED
+            ),
+        ) {
+            let mut sd = SecurityDescriptor::new(owner, group, dacl);
+            sd.control |= extra_flags;
+            let bytes = sd.to_bytes().unwrap();
+            let parsed = SecurityDescriptor::from_bytes(&bytes).unwrap().unwrap();
+            // All flags we set must survive (parser preserves control from header)
+            proptest::prop_assert_eq!(sd.control, parsed.control);
+        }
+    }
 }

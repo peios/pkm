@@ -1065,4 +1065,76 @@ mod tests {
         assert_eq!(parsed.aces[0].ace_type, ACCESS_ALLOWED_ACE_TYPE);
         assert_eq!(parsed.aces[1].ace_type, ACCESS_DENIED_ACE_TYPE);
     }
+
+    // -----------------------------------------------------------------------
+    // Property-based round-trip tests
+    // -----------------------------------------------------------------------
+
+    fn arb_sid() -> impl proptest::strategy::Strategy<Value = crate::sid::Sid> {
+        use proptest::prelude::*;
+        (
+            proptest::collection::vec(any::<u32>(), 1..=4),
+            prop_oneof![Just(1u64), Just(5), Just(16)],
+        )
+            .prop_map(|(subs, auth)| crate::sid::Sid::new(auth, &subs).unwrap())
+    }
+
+    fn arb_basic_ace() -> impl proptest::strategy::Strategy<Value = Ace> {
+        use proptest::prelude::*;
+        (
+            prop_oneof![
+                Just(ACCESS_ALLOWED_ACE_TYPE),
+                Just(ACCESS_DENIED_ACE_TYPE),
+            ],
+            any::<u8>(),
+            any::<u32>(),
+            arb_sid(),
+        )
+            .prop_map(|(ace_type, flags, mask, sid)| Ace {
+                ace_type,
+                flags,
+                mask,
+                sid,
+                object_type: None,
+                inherited_object_type: None,
+                condition: None,
+                application_data: None,
+            })
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_acl_bytes_round_trip(
+            ace_count in 0usize..=8,
+            aces in proptest::collection::vec(arb_basic_ace(), 0..=8),
+        ) {
+            let aces: alloc::vec::Vec<Ace> = aces.into_iter().take(ace_count).collect();
+            let acl = Acl { revision: ACL_REVISION, aces };
+            let bytes = acl.to_bytes().unwrap();
+            let parsed = Acl::from_bytes(&bytes).unwrap().unwrap();
+            let bytes2 = parsed.to_bytes().unwrap();
+            proptest::prop_assert_eq!(&bytes, &bytes2);
+        }
+
+        #[test]
+        fn prop_acl_ace_count_preserved(
+            aces in proptest::collection::vec(arb_basic_ace(), 0..=6),
+        ) {
+            let n = aces.len();
+            let acl = Acl { revision: ACL_REVISION, aces };
+            let bytes = acl.to_bytes().unwrap();
+            let parsed = Acl::from_bytes(&bytes).unwrap().unwrap();
+            proptest::prop_assert_eq!(parsed.aces.len(), n);
+        }
+
+        #[test]
+        fn prop_acl_byte_len_matches(
+            aces in proptest::collection::vec(arb_basic_ace(), 0..=6),
+        ) {
+            let acl = Acl { revision: ACL_REVISION, aces };
+            let bytes = acl.to_bytes().unwrap();
+            let computed = acl.byte_len().unwrap();
+            proptest::prop_assert_eq!(computed, bytes.len());
+        }
+    }
 }

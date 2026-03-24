@@ -10,3 +10,6 @@ default = []
 # code paths (RCU primitives, printk) that only compile in kernel context.
 # Userspace tests run without this feature and use standard sync primitives.
 kernel = []
+
+[dev-dependencies]
+proptest = "1"

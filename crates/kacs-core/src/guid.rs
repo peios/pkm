@@ -115,4 +115,25 @@ mod tests {
     fn reject_truncated() {
         assert!(Guid::from_bytes(&[0u8; 15]).is_none());
     }
+
+    // -----------------------------------------------------------------------
+    // Property-based round-trip tests
+    // -----------------------------------------------------------------------
+
+    proptest::proptest! {
+        #[test]
+        fn prop_round_trip(
+            d1 in proptest::num::u32::ANY,
+            d2 in proptest::num::u16::ANY,
+            d3 in proptest::num::u16::ANY,
+            d4 in proptest::collection::vec(proptest::num::u8::ANY, 8..=8),
+        ) {
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&d4);
+            let guid = Guid { data1: d1, data2: d2, data3: d3, data4: arr };
+            let bytes = guid.to_bytes();
+            let parsed = Guid::from_bytes(&bytes).unwrap();
+            proptest::prop_assert_eq!(guid, parsed);
+        }
+    }
 }

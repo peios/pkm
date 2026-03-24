@@ -1870,4 +1870,104 @@ mod tests {
             .unwrap();
         assert_eq!(first_label.sid, well_known::integrity_medium().unwrap());
     }
+
+    // -----------------------------------------------------------------------
+    // Property-based round-trip tests
+    // -----------------------------------------------------------------------
+
+    fn arb_sid() -> impl proptest::strategy::Strategy<Value = crate::sid::Sid> {
+        use proptest::prelude::*;
+        (
+            proptest::collection::vec(any::<u32>(), 1..=4),
+            prop_oneof![Just(1u64), Just(3), Just(5), Just(15), Just(16)],
+        )
+            .prop_map(|(subs, auth)| crate::sid::Sid::new(auth, &subs).unwrap())
+    }
+
+    fn arb_guid() -> impl proptest::strategy::Strategy<Value = Guid> {
+        use proptest::prelude::*;
+        (any::<u32>(), any::<u16>(), any::<u16>(), proptest::collection::vec(any::<u8>(), 8..=8))
+            .prop_map(|(d1, d2, d3, d4)| {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&d4);
+                Guid { data1: d1, data2: d2, data3: d3, data4: arr }
+            })
+    }
+
+    fn arb_basic_ace() -> impl proptest::strategy::Strategy<Value = Ace> {
+        use proptest::prelude::*;
+        (
+            prop_oneof![
+                Just(ACCESS_ALLOWED_ACE_TYPE),
+                Just(ACCESS_DENIED_ACE_TYPE),
+                Just(SYSTEM_AUDIT_ACE_TYPE),
+                Just(SYSTEM_MANDATORY_LABEL_ACE_TYPE),
+            ],
+            any::<u8>(),
+            any::<u32>(),
+            arb_sid(),
+        )
+            .prop_map(|(ace_type, flags, mask, sid)| Ace {
+                ace_type,
+                flags,
+                mask,
+                sid,
+                object_type: None,
+                inherited_object_type: None,
+                condition: None,
+                application_data: None,
+            })
+    }
+
+    fn arb_object_ace() -> impl proptest::strategy::Strategy<Value = Ace> {
+        use proptest::prelude::*;
+        (
+            prop_oneof![
+                Just(ACCESS_ALLOWED_OBJECT_ACE_TYPE),
+                Just(ACCESS_DENIED_OBJECT_ACE_TYPE),
+            ],
+            any::<u8>(),
+            any::<u32>(),
+            arb_sid(),
+            proptest::option::of(arb_guid()),
+            proptest::option::of(arb_guid()),
+        )
+            .prop_map(|(ace_type, flags, mask, sid, ot, iot)| Ace {
+                ace_type,
+                flags,
+                mask,
+                sid,
+                object_type: ot,
+                inherited_object_type: iot,
+                condition: None,
+                application_data: None,
+            })
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_basic_ace_bytes_round_trip(ace in arb_basic_ace()) {
+            let bytes = ace.to_bytes().unwrap();
+            let (parsed, consumed) = Ace::from_bytes(&bytes).unwrap();
+            proptest::prop_assert_eq!(consumed, bytes.len());
+            // Re-serialize and compare bytes (Ace doesn't impl PartialEq)
+            let bytes2 = parsed.to_bytes().unwrap();
+            proptest::prop_assert_eq!(&bytes, &bytes2);
+        }
+
+        #[test]
+        fn prop_object_ace_bytes_round_trip(ace in arb_object_ace()) {
+            let bytes = ace.to_bytes().unwrap();
+            let (parsed, consumed) = Ace::from_bytes(&bytes).unwrap();
+            proptest::prop_assert_eq!(consumed, bytes.len());
+            let bytes2 = parsed.to_bytes().unwrap();
+            proptest::prop_assert_eq!(&bytes, &bytes2);
+        }
+
+        #[test]
+        fn prop_ace_size_4byte_aligned(ace in arb_basic_ace()) {
+            let bytes = ace.to_bytes().unwrap();
+            proptest::prop_assert_eq!(bytes.len() % 4, 0);
+        }
+    }
 }
