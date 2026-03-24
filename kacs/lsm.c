@@ -28,6 +28,7 @@
 #include <linux/dcache.h>
 #include <linux/sched/coredump.h>
 #include <linux/mutex.h>
+#include <linux/un.h>
 #include <asm/cpufeatures.h>
 #include <linux/xattr.h>
 #include <linux/namei.h>
@@ -349,6 +350,7 @@ struct kacs_cred_security {
 
 struct kacs_sock_security {
 	const void *peer_token;		/* server side: peer's token snapshot */
+	const void *socket_sd;		/* abstract sockets: Rust-managed SD (NULL for pathname/socketpair) */
 	u32 max_impersonation;		/* client side: max level (default=Impersonation) */
 };
 
@@ -1463,6 +1465,7 @@ static int kacs_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
 	struct kacs_sock_security *ssec = kacs_sock(sk);
 
 	ssec->peer_token = NULL;
+	ssec->socket_sd = NULL;
 	ssec->max_impersonation = KACS_LEVEL_IMPERSONATION; /* default per §12 */
 	return 0;
 }
@@ -1473,6 +1476,8 @@ static void kacs_sk_free_security(struct sock *sk)
 
 	if (ssec->peer_token)
 		kacs_token_drop(ssec->peer_token);
+	if (ssec->socket_sd)
+		kacs_proc_sd_drop(ssec->socket_sd);
 }
 
 /*
@@ -1485,7 +1490,19 @@ static int kacs_unix_stream_connect(struct sock *sock,
 				    struct sock *newsk)
 {
 	struct kacs_sock_security *nsec = kacs_sock(newsk);
+	struct kacs_sock_security *osec = kacs_sock(other);
 	const struct kacs_cred_security *cred_sec;
+
+	/* Abstract socket SD check (§14.3): FILE_WRITE_DATA on the
+	 * listening socket's SD. Pathname sockets are gated via the
+	 * inode SD in the normal FACS file permission path. */
+	if (osec->socket_sd) {
+		const struct kacs_cred_security *ccred =
+			kacs_cred(current_cred());
+		if (!kacs_check_proc_sd(ccred->token, osec->socket_sd,
+					0x0002 /* FILE_WRITE_DATA */))
+			return -EACCES;
+	}
 
 	/*
 	 * If the client is impersonating and level >= Delegation,
@@ -1528,6 +1545,62 @@ static int kacs_unix_stream_connect(struct sock *sock,
 					nsec->peer_token, max_level);
 		}
 	}
+
+	return 0;
+}
+
+/* ── socket_bind: stamp SD on abstract sockets (§14.3) ────────────────── */
+
+static int kacs_socket_bind(struct socket *sock, struct sockaddr *address,
+			    int addrlen)
+{
+	struct kacs_sock_security *ssec;
+	const struct kacs_cred_security *ccred;
+	struct sockaddr_un *sunaddr;
+
+	if (sock->sk->sk_family != AF_UNIX)
+		return 0; /* only Unix sockets get SDs */
+
+	if (addrlen <= (int)sizeof(sa_family_t))
+		return 0; /* no path data */
+
+	sunaddr = (struct sockaddr_un *)address;
+
+	/* Abstract socket: sun_path[0] == '\0', name follows.
+	 * Pathname sockets get their SD from the filesystem inode. */
+	if (sunaddr->sun_path[0] != '\0')
+		return 0; /* pathname socket — FACS handles via inode SD */
+
+	ssec = kacs_sock(sock->sk);
+	if (ssec->socket_sd)
+		return 0; /* already stamped (rebind) */
+
+	/* Stamp a default SD: creator GENERIC_ALL, Admins/SYSTEM GENERIC_ALL. */
+	ccred = kacs_cred(current_cred());
+	ssec->socket_sd = kacs_create_default_proc_sd(ccred->token);
+	/* OOM: ssec->socket_sd stays NULL → socket is ungated (fail-open).
+	 * Acceptable: abstract sockets are local IPC, and the default
+	 * process SD template is small. */
+
+	return 0;
+}
+
+/* ── unix_may_send: dgram SD check (§14.3) ────────────────────────────── */
+
+static int kacs_unix_may_send(struct socket *sock, struct socket *other)
+{
+	struct kacs_sock_security *target_ssec;
+	const struct kacs_cred_security *ccred;
+
+	target_ssec = kacs_sock(other->sk);
+	if (!target_ssec->socket_sd)
+		return 0; /* no SD → allow (pathname sockets gated via inode) */
+
+	/* Check FILE_WRITE_DATA against the target socket's SD. */
+	ccred = kacs_cred(current_cred());
+	if (!kacs_check_proc_sd(ccred->token, target_ssec->socket_sd,
+				0x0002 /* FILE_WRITE_DATA */))
+		return -EACCES;
 
 	return 0;
 }
@@ -3525,6 +3598,8 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(sk_alloc_security, kacs_sk_alloc_security),
 	LSM_HOOK_INIT(sk_free_security, kacs_sk_free_security),
 	LSM_HOOK_INIT(unix_stream_connect, kacs_unix_stream_connect),
+	LSM_HOOK_INIT(unix_may_send, kacs_unix_may_send),
+	LSM_HOOK_INIT(socket_bind, kacs_socket_bind),
 	/* FACS — File Access Control Shim (§14) */
 	LSM_HOOK_INIT(capable, kacs_capable),
 	LSM_HOOK_INIT(capset, kacs_capset),
