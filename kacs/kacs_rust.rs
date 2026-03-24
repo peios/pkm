@@ -829,30 +829,37 @@ pub extern "C" fn kacs_token_adjust_group(
     if ptr.is_null() {
         return -22;
     }
-    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
-    let idx = index as usize;
-    if idx >= kt.token.groups.len() {
-        return -22; // -EINVAL
-    }
-
-    let group = &mut kt.token.groups[idx];
-
-    // Capture previous state.
-    if !prev_attrs_out.is_null() {
-        unsafe { *prev_attrs_out = group.attributes; }
-    }
-
-    if enable != 0 {
-        group.attributes |= kacs_core::group::SE_GROUP_ENABLED;
-    } else {
-        // Mandatory groups cannot be disabled
-        if group.attributes & kacs_core::group::SE_GROUP_MANDATORY != 0 {
+    // Safety: use raw pointers throughout to avoid &mut aliasing UB.
+    // The C side holds a mutex, but multiple fds may alias this token.
+    let kt = ptr as *mut KacsToken;
+    unsafe {
+        let groups_ptr = core::ptr::addr_of_mut!((*kt).token.groups);
+        let idx = index as usize;
+        if idx >= (*groups_ptr).len() {
             return -22; // -EINVAL
         }
-        group.attributes &= !kacs_core::group::SE_GROUP_ENABLED;
+
+        let attrs_ptr = core::ptr::addr_of_mut!((*groups_ptr)[idx].attributes);
+        let attrs = core::ptr::read(attrs_ptr);
+
+        // Capture previous state.
+        if !prev_attrs_out.is_null() {
+            *prev_attrs_out = attrs;
+        }
+
+        if enable != 0 {
+            core::ptr::write(attrs_ptr, attrs | kacs_core::group::SE_GROUP_ENABLED);
+        } else {
+            // Mandatory groups cannot be disabled
+            if attrs & kacs_core::group::SE_GROUP_MANDATORY != 0 {
+                return -22; // -EINVAL
+            }
+            core::ptr::write(attrs_ptr, attrs & !kacs_core::group::SE_GROUP_ENABLED);
+        }
+        // Bump modified_id (§15.2)
+        let mid = core::ptr::addr_of_mut!((*kt).token.modified_id);
+        core::ptr::write(mid, core::ptr::read(mid).wrapping_add(1));
     }
-    // Bump modified_id (§15.2)
-    kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
     0
 }
 
@@ -869,14 +876,16 @@ pub extern "C" fn kacs_token_set_default_dacl(
     if ptr.is_null() || acl_data.is_null() || acl_len == 0 {
         return -22; // -EINVAL
     }
-    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
+    let kt = ptr as *mut KacsToken;
     let data = unsafe { core::slice::from_raw_parts(acl_data, acl_len as usize) };
     match kacs_core::acl::Acl::from_bytes(data) {
-        Ok(Some(acl)) => {
-            kt.token.default_dacl = Some(acl);
-            kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
+        Ok(Some(acl)) => unsafe {
+            let dacl = core::ptr::addr_of_mut!((*kt).token.default_dacl);
+            core::ptr::write(dacl, Some(acl));
+            let mid = core::ptr::addr_of_mut!((*kt).token.modified_id);
+            core::ptr::write(mid, core::ptr::read(mid).wrapping_add(1));
             0
-        }
+        },
         Ok(None) => -22, // -EINVAL: malformed ACL
         Err(_) => -12,   // -ENOMEM
     }
@@ -889,9 +898,13 @@ pub extern "C" fn kacs_token_clear_default_dacl(ptr: *const ()) -> c_int {
     if ptr.is_null() {
         return -22;
     }
-    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
-    kt.token.default_dacl = None;
-    kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
+    let kt = ptr as *mut KacsToken;
+    unsafe {
+        let dacl = core::ptr::addr_of_mut!((*kt).token.default_dacl);
+        core::ptr::write(dacl, None);
+        let mid = core::ptr::addr_of_mut!((*kt).token.modified_id);
+        core::ptr::write(mid, core::ptr::read(mid).wrapping_add(1));
+    }
     0
 }
 
@@ -906,23 +919,31 @@ pub extern "C" fn kacs_token_set_owner_index(
     if ptr.is_null() {
         return -22;
     }
-    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
-    // Index 0 = user SID (always valid as owner).
-    if index == 0 {
-        kt.token.owner_sid_index = 0;
-        kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
-        return 0;
+    let kt = ptr as *mut KacsToken;
+    unsafe {
+        // Index 0 = user SID (always valid as owner).
+        if index == 0 {
+            let field = core::ptr::addr_of_mut!((*kt).token.owner_sid_index);
+            core::ptr::write(field, 0);
+            let mid = core::ptr::addr_of_mut!((*kt).token.modified_id);
+            core::ptr::write(mid, core::ptr::read(mid).wrapping_add(1));
+            return 0;
+        }
+        // Index 1..N = groups[0..N-1]. Must have SE_GROUP_OWNER.
+        let groups_ptr = core::ptr::addr_of!((*kt).token.groups);
+        let group_idx = (index - 1) as usize;
+        if group_idx >= (*groups_ptr).len() {
+            return -22; // -EINVAL: out of bounds
+        }
+        let attrs = core::ptr::read(core::ptr::addr_of!((*groups_ptr)[group_idx].attributes));
+        if attrs & kacs_core::group::SE_GROUP_OWNER == 0 {
+            return -22; // -EINVAL: not an owner group
+        }
+        let field = core::ptr::addr_of_mut!((*kt).token.owner_sid_index);
+        core::ptr::write(field, index);
+        let mid = core::ptr::addr_of_mut!((*kt).token.modified_id);
+        core::ptr::write(mid, core::ptr::read(mid).wrapping_add(1));
     }
-    // Index 1..N = groups[0..N-1]. Must have SE_GROUP_OWNER.
-    let group_idx = (index - 1) as usize;
-    if group_idx >= kt.token.groups.len() {
-        return -22; // -EINVAL: out of bounds
-    }
-    if kt.token.groups[group_idx].attributes & kacs_core::group::SE_GROUP_OWNER == 0 {
-        return -22; // -EINVAL: not an owner group
-    }
-    kt.token.owner_sid_index = index;
-    kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
     0
 }
 
@@ -937,18 +958,25 @@ pub extern "C" fn kacs_token_set_primary_group_index(
     if ptr.is_null() {
         return -22;
     }
-    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
-    if index == 0 {
-        kt.token.primary_group_index = 0;
-        kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
-        return 0;
+    let kt = ptr as *mut KacsToken;
+    unsafe {
+        if index == 0 {
+            let field = core::ptr::addr_of_mut!((*kt).token.primary_group_index);
+            core::ptr::write(field, 0);
+            let mid = core::ptr::addr_of_mut!((*kt).token.modified_id);
+            core::ptr::write(mid, core::ptr::read(mid).wrapping_add(1));
+            return 0;
+        }
+        let groups_ptr = core::ptr::addr_of!((*kt).token.groups);
+        let group_idx = (index - 1) as usize;
+        if group_idx >= (*groups_ptr).len() {
+            return -22;
+        }
+        let field = core::ptr::addr_of_mut!((*kt).token.primary_group_index);
+        core::ptr::write(field, index);
+        let mid = core::ptr::addr_of_mut!((*kt).token.modified_id);
+        core::ptr::write(mid, core::ptr::read(mid).wrapping_add(1));
     }
-    let group_idx = (index - 1) as usize;
-    if group_idx >= kt.token.groups.len() {
-        return -22;
-    }
-    kt.token.primary_group_index = index;
-    kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
     0
 }
 
@@ -960,21 +988,25 @@ pub extern "C" fn kacs_token_reset_groups(ptr: *const ()) -> c_int {
     if ptr.is_null() {
         return -22;
     }
-    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
-
-    for group in kt.token.groups.iter_mut() {
-        // Deny-only groups cannot be re-enabled (§7.6).
-        if group.attributes & kacs_core::group::SE_GROUP_USE_FOR_DENY_ONLY != 0 {
-            continue;
+    let kt = ptr as *mut KacsToken;
+    unsafe {
+        let groups_ptr = core::ptr::addr_of_mut!((*kt).token.groups);
+        for i in 0..(*groups_ptr).len() {
+            let attrs_ptr = core::ptr::addr_of_mut!((*groups_ptr)[i].attributes);
+            let attrs = core::ptr::read(attrs_ptr);
+            // Deny-only groups cannot be re-enabled (§7.6).
+            if attrs & kacs_core::group::SE_GROUP_USE_FOR_DENY_ONLY != 0 {
+                continue;
+            }
+            if attrs & kacs_core::group::SE_GROUP_ENABLED_BY_DEFAULT != 0 {
+                core::ptr::write(attrs_ptr, attrs | kacs_core::group::SE_GROUP_ENABLED);
+            } else {
+                core::ptr::write(attrs_ptr, attrs & !kacs_core::group::SE_GROUP_ENABLED);
+            }
         }
-        if group.attributes & kacs_core::group::SE_GROUP_ENABLED_BY_DEFAULT != 0 {
-            group.attributes |= kacs_core::group::SE_GROUP_ENABLED;
-        } else {
-            group.attributes &= !kacs_core::group::SE_GROUP_ENABLED;
-        }
+        let mid = core::ptr::addr_of_mut!((*kt).token.modified_id);
+        core::ptr::write(mid, core::ptr::read(mid).wrapping_add(1));
     }
-
-    kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
     0
 }
 
@@ -1005,8 +1037,10 @@ pub extern "C" fn kacs_token_adjust_privs(
     if ptr.is_null() {
         return -22; // -EINVAL
     }
-    let kt = unsafe { &mut *(ptr as *mut KacsToken) };
-    let privs = &kt.token.privileges;
+    // Safety: privileges use AtomicU64 so concurrent reads are safe.
+    // We only need raw pointers for modified_id (non-atomic).
+    let kt = ptr as *mut KacsToken;
+    let privs = unsafe { &(*kt).token.privileges };
 
     // Capture previous state before any changes.
     let previous = privs.enabled.load(core::sync::atomic::Ordering::Relaxed);
@@ -1047,7 +1081,10 @@ pub extern "C" fn kacs_token_adjust_privs(
     }
 
     // Bump modified_id (§15.2)
-    kt.token.modified_id = kt.token.modified_id.wrapping_add(1);
+    unsafe {
+        let mid = core::ptr::addr_of_mut!((*kt).token.modified_id);
+        core::ptr::write(mid, core::ptr::read(mid).wrapping_add(1));
+    }
 
     0
 }

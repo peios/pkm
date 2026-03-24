@@ -119,9 +119,24 @@ impl SessionTable {
     }
 
     /// Decrement a session's refcount. Returns true if refcount hit zero.
+    /// Refuses to decrement below zero (prevents underflow wrap to u32::MAX).
     pub fn release(&self, session_id: u64) -> bool {
         if let Some(s) = self.sessions.iter().find(|s| s.session_id == session_id) {
-            s.refcount.fetch_sub(1, core::sync::atomic::Ordering::SeqCst) == 1
+            loop {
+                let current = s.refcount.load(core::sync::atomic::Ordering::SeqCst);
+                if current == 0 {
+                    return false; // Already zero — refuse to underflow.
+                }
+                match s.refcount.compare_exchange(
+                    current,
+                    current - 1,
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                ) {
+                    Ok(prev) => return prev == 1, // Was 1, now 0 → hit zero.
+                    Err(_) => continue,           // Raced, retry.
+                }
+            }
         } else {
             false
         }

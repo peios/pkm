@@ -133,7 +133,7 @@ pub struct EnrichedToken<'a> {
 }
 
 /// §11.17 EnrichToken: inject virtual groups S-1-3-4 and S-1-5-10.
-fn enrich_token<'a>(token: &'a Token, owner: &Sid, self_sid: Option<&Sid>) -> EnrichedToken<'a> {
+pub(crate) fn enrich_token<'a>(token: &'a Token, owner: &Sid, self_sid: Option<&Sid>) -> EnrichedToken<'a> {
     let caller_is_owner = sid_matches_token(owner, token, true);
     let (has_principal_self, principal_self_deny_only) = if let Some(ss) = self_sid {
         if sid_matches_token(ss, token, true) {

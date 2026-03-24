@@ -9,7 +9,6 @@ use crate::ace;
 use crate::mask::GenericMapping;
 use crate::sd::SecurityDescriptor;
 use crate::sid::Sid;
-use crate::access_check::EnrichedToken;
 use crate::token::Token;
 
 /// An audit event produced during AccessCheck evaluation.
@@ -71,15 +70,14 @@ pub fn evaluate_sacl(
 ) -> Result<AuditResult, AllocError> {
     let mut result = AuditResult::default();
 
-    // Audit uses a bare enriched token (no virtual groups — audit is
-    // observational and uses deny-polarity SID matching directly).
-    let bare_enriched = EnrichedToken {
-        token,
-        has_owner_rights: false,
-        has_principal_self: false,
-        principal_self_deny_only: false,
-        device_groups_override: None,
+    // Enrich the token with virtual groups (OWNER_RIGHTS, PRINCIPAL_SELF)
+    // so that audit ACEs targeting these SIDs fire correctly.
+    // Use deny polarity: "the broadest identity view" (§11.10).
+    let owner = match &sd.owner {
+        Some(o) => o,
+        None => return Ok(result), // No owner → no meaningful audit context.
     };
+    let enriched = crate::access_check::enrich_token(token, owner, None);
 
     if sd.control & crate::sd::SE_SACL_PRESENT == 0 {
         return Ok(result);
@@ -122,7 +120,7 @@ pub fn evaluate_sacl(
                 if a.ace_type == ace::SYSTEM_AUDIT_CALLBACK_ACE_TYPE {
                     if let Some(ref cond) = a.condition {
                         let cond_result = crate::conditional::evaluate(
-                            cond, &bare_enriched, resource_attributes, local_claims, false,
+                            cond, &enriched, resource_attributes, local_claims, false,
                         )?;
                         if cond_result == crate::conditional::TriValue::False {
                             continue;
@@ -188,7 +186,7 @@ pub fn evaluate_sacl(
                 if a.ace_type == ace::SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE {
                     if let Some(ref cond) = a.condition {
                         let cond_result = crate::conditional::evaluate(
-                            cond, &bare_enriched, resource_attributes, local_claims, false,
+                            cond, &enriched, resource_attributes, local_claims, false,
                         )?;
                         if cond_result == crate::conditional::TriValue::False {
                             continue;
@@ -233,7 +231,7 @@ pub fn evaluate_sacl(
                 if a.ace_type == ace::SYSTEM_ALARM_CALLBACK_ACE_TYPE {
                     if let Some(ref cond) = a.condition {
                         let cond_result = crate::conditional::evaluate(
-                            cond, &bare_enriched, resource_attributes, local_claims, false,
+                            cond, &enriched, resource_attributes, local_claims, false,
                         )?;
                         if cond_result == crate::conditional::TriValue::False {
                             continue;
@@ -269,7 +267,7 @@ pub fn evaluate_sacl(
                 if a.ace_type == ace::SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE {
                     if let Some(ref cond) = a.condition {
                         let cond_result = crate::conditional::evaluate(
-                            cond, &bare_enriched, resource_attributes, local_claims, false,
+                            cond, &enriched, resource_attributes, local_claims, false,
                         )?;
                         if cond_result == crate::conditional::TriValue::False {
                             continue;

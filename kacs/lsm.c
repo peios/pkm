@@ -1868,8 +1868,12 @@ static const void *kacs_inode_get_sd(struct inode *inode)
 	const void *new_sd;
 	const void *old;
 
-	/* Fast path: cache already populated. */
-	sd = rcu_dereference(isec->sd_cache);
+	/* Fast path: cache already populated.
+	 * Accept either RCU read section OR i_rwsem held (callers in
+	 * VFS create/rename paths hold i_rwsem but cannot hold RCU
+	 * through allocating Rust calls). */
+	sd = rcu_dereference_check(isec->sd_cache,
+				   lockdep_is_held(&inode->i_rwsem));
 	if (sd == KACS_SD_CORRUPT)
 		return NULL; /* corrupt SD — cached sentinel, fail-closed */
 	if (sd)
@@ -3146,10 +3150,11 @@ static int kacs_inode_init_security(struct inode *inode,
 	const void *sd_bytes;
 	int sd_len;
 
-	/* Get parent directory's SD for inheritance. */
-	rcu_read_lock();
+	/* Get parent directory's SD for inheritance.
+	 * VFS holds dir->i_rwsem during create — prevents SD replacement.
+	 * No RCU section needed (kacs_inode_get_sd accepts i_rwsem via
+	 * rcu_dereference_check, and kacs_create_inherited_sd allocates). */
 	parent_sd = kacs_inode_get_sd(dir);
-	rcu_read_unlock();
 
 	/* Compute inherited SD via Rust (§9.5 algorithm).
 	 * Uses parent SD + creator's token. */
