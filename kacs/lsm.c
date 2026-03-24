@@ -2594,15 +2594,20 @@ static int kacs_file_open(struct file *file)
 		return -EACCES;
 	}
 
-	/* Compute core + compat from open flags. */
-	ret = legacy_open_rights(file, &core, &compat);
-	if (ret) {
-		rcu_read_unlock();
-		return ret;
+	/* For kacs_open: use the caller's desired_access directly (strict mode).
+	 * For legacy open: compute core + compat from open flags (subset mode). */
+	if (kacs_task(current)->kacs_open_desired) {
+		requested = kacs_task(current)->kacs_open_desired;
+		core = requested; /* strict: all bits are "core" */
+		compat = 0;
+	} else {
+		ret = legacy_open_rights(file, &core, &compat);
+		if (ret) {
+			rcu_read_unlock();
+			return ret;
+		}
+		requested = core | compat;
 	}
-
-	/* Construct the full requested mask. */
-	requested = core | compat;
 
 	/* Run AccessCheck against the cached SD. Returns the granted mask
 	 * (subset of requested that the SD allows). Uses MAXIMUM_ALLOWED
@@ -4887,6 +4892,13 @@ SYSCALL_DEFINE5(kacs_open, int, dirfd, const char __user *, path,
 	if (khow.create_disposition > KACS_FILE_OVERWRITE_IF)
 		return -EINVAL;
 
+	/* OVERWRITE and OVERWRITE_IF truncate the file — require write access
+	 * in the desired mask (§14.4 line 11123). */
+	if ((khow.create_disposition == KACS_FILE_OVERWRITE ||
+	     khow.create_disposition == KACS_FILE_OVERWRITE_IF) &&
+	    !(khow.desired_access & (FILE_WRITE_DATA | FILE_APPEND_DATA)))
+		return -EINVAL;
+
 	/* Map desired access to f_mode. */
 	if (khow.desired_access & FILE_READ_DATA)
 		f_mode |= FMODE_READ;
@@ -4926,6 +4938,16 @@ SYSCALL_DEFINE5(kacs_open, int, dirfd, const char __user *, path,
 	if (o_flags & O_CREAT)
 		how.mode = 0666; /* umask will apply */
 	fd = do_sys_openat2(dirfd, path, &how);
+
+	/* Directory write retry: VFS rejects O_WRONLY/O_RDWR on directories
+	 * with -EISDIR. For KACS, directory "write" rights (FILE_ADD_FILE,
+	 * FILE_DELETE_CHILD) are carried in the granted mask, not f_mode.
+	 * Retry as O_RDONLY — the AccessCheck already validated the rights
+	 * and the granted mask on the fd blob will reflect them. */
+	if (fd == -EISDIR && (how.flags & O_ACCMODE) != O_RDONLY) {
+		how.flags = (how.flags & ~O_ACCMODE) | O_RDONLY;
+		fd = do_sys_openat2(dirfd, path, &how);
+	}
 
 	/* Clear the signal regardless of success/failure. */
 	kacs_task(current)->kacs_open_desired = 0;
