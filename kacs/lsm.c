@@ -4920,8 +4920,11 @@ SYSCALL_DEFINE5(kacs_open, int, dirfd, const char __user *, path,
 	 * can fix f_mode after security_file_open (patch 12, §14.3). */
 	kacs_task(current)->kacs_open_desired = khow.desired_access;
 
-	/* Use do_sys_openat2 which handles all the VFS path resolution. */
-	how.mode = 0666; /* for O_CREAT — umask will apply */
+	/* Use do_sys_openat2 which handles all the VFS path resolution.
+	 * openat2 rejects non-zero mode when O_CREAT is absent, so only
+	 * set it for create dispositions. */
+	if (o_flags & O_CREAT)
+		how.mode = 0666; /* umask will apply */
 	fd = do_sys_openat2(dirfd, path, &how);
 
 	/* Clear the signal regardless of success/failure. */
