@@ -670,6 +670,26 @@ pub extern "C" fn kacs_token_get_type(ptr: *const ()) -> c_int {
     }
 }
 
+/// Set the token type: 1 = Primary, 2 = Impersonation.
+///
+/// Uses raw pointer write (same pattern as set_impersonation_level)
+/// to avoid &mut UB on potentially-shared tokens.
+#[no_mangle]
+pub extern "C" fn kacs_token_set_type(ptr: *const (), token_type: c_int) {
+    if ptr.is_null() {
+        return;
+    }
+    let new_type = match token_type {
+        1 => TokenType::Primary,
+        _ => TokenType::Impersonation,
+    };
+    let kt = ptr as *mut KacsToken;
+    unsafe {
+        let field = core::ptr::addr_of_mut!((*kt).token.token_type);
+        core::ptr::write(field, new_type);
+    }
+}
+
 /// Returns the impersonation level: 0=Anonymous, 1=Identification,
 /// 2=Impersonation, 3=Delegation.
 #[no_mangle]

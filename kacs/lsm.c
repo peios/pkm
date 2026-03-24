@@ -69,6 +69,7 @@ extern int kacs_token_adjust_privs(const void *ptr, u64 enable_mask,
 extern const void *kacs_token_deep_clone(const void *ptr,
 					 int new_type, int new_level);
 extern int kacs_token_get_type(const void *ptr);
+extern void kacs_token_set_type(const void *ptr, int token_type);
 extern int kacs_token_get_impersonation_level(const void *ptr);
 extern int kacs_token_check_privilege(const void *ptr, u64 priv_mask);
 extern u32 kacs_token_get_projected_uid(const void *ptr);
@@ -1537,12 +1538,13 @@ static int kacs_unix_stream_connect(struct sock *sock,
 				kacs_token_drop(nsec->peer_token);
 			nsec->peer_token = kacs_token_create_anonymous();
 		} else if (nsec->peer_token) {
-			/* Cap the stored token's level to the connection max. */
-			int stored = kacs_token_get_impersonation_level(
-				nsec->peer_token);
-			if (stored > max_level)
-				kacs_token_set_impersonation_level(
-					nsec->peer_token, max_level);
+			/* The stored token must be an Impersonation token
+			 * at the connection's effective level. The cloned
+			 * token may be Primary (if the client wasn't
+			 * impersonating) — convert it. */
+			kacs_token_set_type(nsec->peer_token, 2);
+			kacs_token_set_impersonation_level(
+				nsec->peer_token, effective);
 		}
 	}
 
@@ -4088,20 +4090,11 @@ SYSCALL_DEFINE1(kacs_open_peer_token, int, conn_fd)
 		return -EINVAL;
 	}
 
-	/* Check the peer token's own SD against the caller's token. */
-	{
-		const struct kacs_cred_security *ccred =
-			kacs_cred(current_cred());
-		if (!kacs_check_token_sd(ssec->peer_token,
-					 ccred->token,
-					 KACS_TOKEN_ALL_ACCESS)) {
-			sockfd_put(sock);
-			return -EACCES;
-		}
-	}
-
 	token = kacs_token_clone(ssec->peer_token);
 	sockfd_put(sock);
+	/* The returned fd gets full access — the caller already proved
+	 * they own the connection socket. No SD check on the token itself
+	 * is needed (§15.1: no privilege required). */
 	return kacs_token_to_fd(token, KACS_TOKEN_ALL_ACCESS);
 }
 
@@ -4226,6 +4219,13 @@ SYSCALL_DEFINE2(kacs_set_impersonation_level, int, sock_fd, u32, level)
 	sock = sockfd_lookup(sock_fd, &err);
 	if (!sock)
 		return err;
+
+	/* Must be set before connect(). After connect the level is
+	 * already captured on the connection and cannot change. */
+	if (sock->sk->sk_state == TCP_ESTABLISHED) {
+		sockfd_put(sock);
+		return -EISCONN;
+	}
 
 	ssec = kacs_sock(sock->sk);
 	ssec->max_impersonation = level;
