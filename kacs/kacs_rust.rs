@@ -848,10 +848,26 @@ pub extern "C" fn kacs_token_adjust_group(
         }
 
         if enable != 0 {
+            // Deny-only groups cannot be re-enabled (§7.3: permanently set by FilterToken)
+            if attrs & kacs_core::group::SE_GROUP_USE_FOR_DENY_ONLY != 0 {
+                return -22; // -EINVAL
+            }
             core::ptr::write(attrs_ptr, attrs | kacs_core::group::SE_GROUP_ENABLED);
         } else {
             // Mandatory groups cannot be disabled
             if attrs & kacs_core::group::SE_GROUP_MANDATORY != 0 {
+                return -22; // -EINVAL
+            }
+            // Read the group SID via raw pointer to avoid creating &mut
+            let group_sid_ptr = core::ptr::addr_of!((*groups_ptr)[idx].sid);
+            // Logon SID protection: cannot disable the logon SID group
+            let logon_sid_ptr = core::ptr::addr_of!((*kt).token.logon_sid);
+            if *group_sid_ptr == *logon_sid_ptr {
+                return -22; // -EINVAL
+            }
+            // User SID protection: cannot disable the user SID group
+            let user_sid_ptr = core::ptr::addr_of!((*kt).token.user_sid);
+            if *group_sid_ptr == *user_sid_ptr {
                 return -22; // -EINVAL
             }
             core::ptr::write(attrs_ptr, attrs & !kacs_core::group::SE_GROUP_ENABLED);
@@ -1079,6 +1095,30 @@ pub extern "C" fn kacs_token_adjust_privs(
             mask &= !bit;
         }
     }
+
+    // Bump modified_id (§15.2)
+    unsafe {
+        let mid = core::ptr::addr_of_mut!((*kt).token.modified_id);
+        core::ptr::write(mid, core::ptr::read(mid).wrapping_add(1));
+    }
+
+    0
+}
+
+/// Reset enabled privileges to the enabled_by_default mask (§7.5 AdjustPrivileges).
+/// This is the "reset to defaults" path — restores the privilege state to
+/// what it was at token creation.
+/// Returns 0 on success, -EINVAL on null pointer.
+#[no_mangle]
+pub extern "C" fn kacs_token_reset_privileges(ptr: *const ()) -> c_int {
+    if ptr.is_null() {
+        return -22; // -EINVAL
+    }
+    // Safety: privileges use AtomicU64, so reset_to_defaults is safe
+    // without &mut. We only need raw pointers for modified_id (non-atomic).
+    let kt = ptr as *mut KacsToken;
+    let privs = unsafe { &(*kt).token.privileges };
+    privs.reset_to_defaults();
 
     // Bump modified_id (§15.2)
     unsafe {

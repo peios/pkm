@@ -174,6 +174,21 @@ pub mod claim_flags {
     pub const DISABLED: u16 = 0x0010;
 }
 
+/// Error type for Token::duplicate().
+#[derive(Debug, Eq, PartialEq)]
+pub enum DuplicateError {
+    /// A heap allocation failed during deep clone.
+    AllocationFailed,
+    /// The requested impersonation level exceeds the source token's level.
+    ImpersonationLevelEscalation,
+}
+
+impl From<AllocError> for DuplicateError {
+    fn from(_: AllocError) -> Self {
+        DuplicateError::AllocationFailed
+    }
+}
+
 /// The complete token structure (§7.3).
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug)]
@@ -390,6 +405,122 @@ impl Token {
     /// Check if this token has restricting SIDs (§11.7).
     pub fn is_restricted(&self) -> bool {
         self.restricted_sids.as_ref().map_or(false, |s| !s.is_empty())
+    }
+
+    /// Create an independent deep copy with allowed overrides (§7.4 DuplicateToken).
+    ///
+    /// Rules:
+    /// - Impersonation tokens cannot escalate: new_impersonation_level must be
+    ///   <= self.impersonation_level when new_type is Impersonation.
+    /// - Primary tokens get impersonation_level set to Anonymous (meaningless
+    ///   for primary tokens, but the field needs a value).
+    /// - Deep clones all identity, privilege, group, claim, and metadata fields.
+    /// - Overrides: token_type, impersonation_level, security_descriptor.
+    /// - Resets: elevation_type = Default, modified_id = 0.
+    /// - token_id is set to Luid(0) — the FFI layer assigns the real ID.
+    pub fn duplicate(
+        &self,
+        new_type: TokenType,
+        new_impersonation_level: ImpersonationLevel,
+        new_sd: Option<crate::sd::SecurityDescriptor>,
+    ) -> Result<Self, DuplicateError> {
+        // Escalation check: impersonation tokens cannot gain a higher level.
+        if new_type == TokenType::Impersonation
+            && new_impersonation_level > self.impersonation_level
+        {
+            return Err(DuplicateError::ImpersonationLevelEscalation);
+        }
+
+        let mut result = self.try_clone()?;
+
+        // Override type and level.
+        result.token_type = new_type;
+        result.impersonation_level = match new_type {
+            TokenType::Primary => ImpersonationLevel::Anonymous,
+            TokenType::Impersonation => new_impersonation_level,
+        };
+
+        // Override security descriptor.
+        result.security_descriptor = new_sd;
+
+        // Reset fields that don't carry over to duplicates.
+        result.elevation_type = ElevationType::Default;
+        result.modified_id = 0;
+        result.token_id = Luid(0); // FFI layer assigns from NEXT_TOKEN_ID
+
+        Ok(result)
+    }
+
+    /// Create a restricted copy of this token (§7.4 FilterToken).
+    ///
+    /// Restrictions can only be added, never removed:
+    /// - Privileges in `privileges_to_remove` are permanently removed.
+    /// - Groups matching `deny_only_sids` become deny-only (SE_GROUP_USE_FOR_DENY_ONLY).
+    /// - Restricted SIDs are set or intersected (never expanded).
+    /// - write_restricted is sticky — once set, cannot be cleared.
+    pub fn filter(
+        &self,
+        privileges_to_remove: u64,
+        deny_only_sids: &[crate::sid::Sid],
+        restricted_sids: Option<Vec<GroupEntry>>,
+        write_restricted: bool,
+    ) -> Result<Self, AllocError> {
+        let mut result = self.try_clone()?;
+
+        // Remove specified privileges (permanent).
+        if privileges_to_remove != 0 {
+            let mut mask = privileges_to_remove;
+            while mask != 0 {
+                let bit = 1u64 << mask.trailing_zeros();
+                result.privileges.remove(bit);
+                mask &= !bit;
+            }
+        }
+
+        // Mark matching groups as deny-only.
+        for deny_sid in deny_only_sids {
+            for group in result.groups.iter_mut() {
+                if group.sid == *deny_sid {
+                    group.attributes |= crate::group::SE_GROUP_USE_FOR_DENY_ONLY;
+                    group.attributes &= !crate::group::SE_GROUP_ENABLED;
+                }
+            }
+        }
+
+        // Restricted SIDs handling: can only reduce, never expand.
+        match (&self.restricted_sids, restricted_sids) {
+            // Source unrestricted, caller provides restricted SIDs → set them.
+            (None, Some(new_sids)) => {
+                result.restricted_sids = Some(new_sids);
+            }
+            // Source unrestricted, caller provides None → stay unrestricted.
+            (None, None) => {}
+            // Source already restricted, caller provides new list → intersect.
+            (Some(existing), Some(new_sids)) => {
+                let mut intersected = Vec::new();
+                for entry in existing.iter() {
+                    if new_sids.iter().any(|n| n.sid == entry.sid) {
+                        compat::vec_push(&mut intersected, GroupEntry::new(
+                            entry.sid.try_clone()?,
+                            entry.attributes,
+                        ))?;
+                    }
+                }
+                result.restricted_sids = Some(intersected);
+            }
+            // Source already restricted, caller provides None → keep existing.
+            (Some(_), None) => {}
+        }
+
+        // write_restricted is sticky.
+        result.write_restricted = write_restricted || self.write_restricted;
+
+        // Reset fields that don't carry over to filtered tokens.
+        result.elevation_type = ElevationType::Default;
+        result.modified_id = 0;
+        result.token_id = Luid(0); // FFI layer assigns from NEXT_TOKEN_ID
+
+        Ok(result)
     }
 }
 
@@ -3149,5 +3280,180 @@ mod tests {
         assert_eq!(token.projected_gid, snap_projected_gid, "projected_gid mutated");
         assert_eq!(token.projected_supplementary_gids, snap_projected_supp,
                    "projected_supplementary_gids mutated");
+    }
+
+    // ===================================================================
+    // §7.4 DuplicateToken tests
+    // ===================================================================
+
+    /// Helper: build a test token with a non-system user, custom groups,
+    /// and an Impersonation type at a given level.
+    fn make_impersonation_token(level: ImpersonationLevel) -> Token {
+        let mut token = Token::system_token().unwrap();
+        token.user_sid = crate::sid::Sid::new(5, &[21, 100, 200, 300, 1001]).unwrap();
+        token.logon_sid = crate::well_known::logon_sid(99, 88).unwrap();
+        token.token_type = TokenType::Impersonation;
+        token.impersonation_level = level;
+        token.elevation_type = ElevationType::Full;
+        token.modified_id = 42;
+        token
+    }
+
+    #[test]
+    fn duplicate_preserves_identity() {
+        let source = make_impersonation_token(ImpersonationLevel::Impersonation);
+        let dup = source.duplicate(
+            TokenType::Impersonation,
+            ImpersonationLevel::Identification,
+            None,
+        ).unwrap();
+
+        // Identity fields must be preserved.
+        assert_eq!(dup.user_sid, source.user_sid);
+        assert_eq!(dup.logon_sid, source.logon_sid);
+        assert_eq!(dup.groups.len(), source.groups.len());
+        for (a, b) in dup.groups.iter().zip(source.groups.iter()) {
+            assert_eq!(a.sid, b.sid);
+            assert_eq!(a.attributes, b.attributes);
+        }
+        assert_eq!(dup.auth_id, source.auth_id);
+        assert_eq!(dup.integrity_level, source.integrity_level);
+    }
+
+    #[test]
+    fn duplicate_rejects_impersonation_escalation() {
+        let source = make_impersonation_token(ImpersonationLevel::Identification);
+        let result = source.duplicate(
+            TokenType::Impersonation,
+            ImpersonationLevel::Impersonation, // higher than source
+            None,
+        );
+        assert_eq!(result.unwrap_err(), DuplicateError::ImpersonationLevelEscalation);
+    }
+
+    #[test]
+    fn duplicate_allows_impersonation_reduction() {
+        let source = make_impersonation_token(ImpersonationLevel::Impersonation);
+        let dup = source.duplicate(
+            TokenType::Impersonation,
+            ImpersonationLevel::Identification, // lower than source
+            None,
+        ).unwrap();
+        assert_eq!(dup.token_type, TokenType::Impersonation);
+        assert_eq!(dup.impersonation_level, ImpersonationLevel::Identification);
+    }
+
+    #[test]
+    fn duplicate_resets_elevation() {
+        let source = make_impersonation_token(ImpersonationLevel::Impersonation);
+        assert_eq!(source.elevation_type, ElevationType::Full);
+        let dup = source.duplicate(
+            TokenType::Primary,
+            ImpersonationLevel::Anonymous, // ignored for Primary
+            None,
+        ).unwrap();
+        assert_eq!(dup.elevation_type, ElevationType::Default);
+        assert_eq!(dup.modified_id, 0);
+        assert_eq!(dup.token_id, Luid(0));
+    }
+
+    // ===================================================================
+    // §7.4 FilterToken tests
+    // ===================================================================
+
+    #[test]
+    fn filter_removes_privileges() {
+        use crate::privilege::bits::*;
+        let source = Token::system_token().unwrap();
+        assert!(source.privileges.check(SE_BACKUP));
+        assert!(source.privileges.check(SE_RESTORE));
+
+        let filtered = source.filter(
+            SE_BACKUP | SE_RESTORE,
+            &[],
+            None,
+            false,
+        ).unwrap();
+
+        assert!(!filtered.privileges.is_present(SE_BACKUP));
+        assert!(!filtered.privileges.is_present(SE_RESTORE));
+        // Other privileges still present.
+        assert!(filtered.privileges.check(SE_TCB));
+    }
+
+    #[test]
+    fn filter_marks_groups_deny_only() {
+        let source = Token::system_token().unwrap();
+        let admin_sid = crate::well_known::administrators().unwrap();
+        // Verify the admin group starts enabled.
+        assert!(source.groups.iter().any(|g| g.sid == admin_sid && g.is_enabled()));
+
+        let filtered = source.filter(0, &[admin_sid.clone()], None, false).unwrap();
+
+        let admin_group = filtered.groups.iter().find(|g| g.sid == admin_sid).unwrap();
+        assert!(admin_group.is_deny_only());
+        assert!(!admin_group.is_enabled());
+    }
+
+    #[test]
+    fn filter_adds_restricted_sids() {
+        let source = Token::system_token().unwrap();
+        assert!(source.restricted_sids.is_none());
+
+        let restrict_sid = crate::sid::Sid::new(5, &[21, 1, 2, 3, 999]).unwrap();
+        let restricted = alloc::vec![crate::group::GroupEntry::new(
+            restrict_sid.clone(),
+            crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED,
+        )];
+
+        let filtered = source.filter(0, &[], Some(restricted), false).unwrap();
+
+        assert!(filtered.restricted_sids.is_some());
+        let rsids = filtered.restricted_sids.as_ref().unwrap();
+        assert_eq!(rsids.len(), 1);
+        assert_eq!(rsids[0].sid, restrict_sid);
+    }
+
+    #[test]
+    fn filter_intersects_restricted_sids() {
+        let mut source = Token::system_token().unwrap();
+        let sid_a = crate::sid::Sid::new(5, &[21, 1, 2, 3, 100]).unwrap();
+        let sid_b = crate::sid::Sid::new(5, &[21, 1, 2, 3, 200]).unwrap();
+        let sid_c = crate::sid::Sid::new(5, &[21, 1, 2, 3, 300]).unwrap();
+
+        // Source is already restricted with {A, B}.
+        let attrs = crate::group::SE_GROUP_MANDATORY | crate::group::SE_GROUP_ENABLED;
+        source.restricted_sids = Some(alloc::vec![
+            crate::group::GroupEntry::new(sid_a.clone(), attrs),
+            crate::group::GroupEntry::new(sid_b.clone(), attrs),
+        ]);
+
+        // Filter with {B, C} → intersection should be {B}.
+        let new_restricted = alloc::vec![
+            crate::group::GroupEntry::new(sid_b.clone(), attrs),
+            crate::group::GroupEntry::new(sid_c.clone(), attrs),
+        ];
+
+        let filtered = source.filter(0, &[], Some(new_restricted), false).unwrap();
+
+        let rsids = filtered.restricted_sids.as_ref().unwrap();
+        assert_eq!(rsids.len(), 1);
+        assert_eq!(rsids[0].sid, sid_b);
+    }
+
+    #[test]
+    fn filter_write_restricted_sticky() {
+        let mut source = Token::system_token().unwrap();
+        source.write_restricted = true;
+
+        // Even when caller passes false, write_restricted stays true.
+        let filtered = source.filter(0, &[], None, false).unwrap();
+        assert!(filtered.write_restricted);
+
+        // And setting to true from a non-write-restricted source works.
+        let source2 = Token::system_token().unwrap();
+        assert!(!source2.write_restricted);
+        let filtered2 = source2.filter(0, &[], None, true).unwrap();
+        assert!(filtered2.write_restricted);
     }
 }
