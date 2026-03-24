@@ -1388,6 +1388,56 @@ static int kacs_check_process_set_info(struct task_struct *target)
  * (§7.4). The new program always starts with the primary token.
  * Also reassert DAC bypass capabilities.
  */
+/*
+ * task_fix_setuid: intercept setuid/setresuid/setreuid/setfsuid (§5.3).
+ *
+ * Without SeAssignPrimaryTokenPrivilege: make it a no-op by copying
+ * old values back into new. Returns 0 (success) — the syscall returns
+ * success but nothing changed.
+ *
+ * With SeAssignPrimaryTokenPrivilege: allow the UID change (for the
+ * seccomp-based authd token swap path in the future).
+ */
+static int kacs_task_fix_setuid(struct cred *new, const struct cred *old,
+				int flags)
+{
+	const struct kacs_cred_security *sec = kacs_cred(old);
+
+	if (!kacs_token_check_privilege(sec->token,
+					KACS_PRIV_ASSIGN_PRIMARY_TOKEN)) {
+		/* No-op: restore old values (§5.3). */
+		new->uid = old->uid;
+		new->euid = old->euid;
+		new->suid = old->suid;
+		new->fsuid = old->fsuid;
+		return 0;
+	}
+
+	/* Privileged path: allow the change. */
+	return 0;
+}
+
+/*
+ * task_fix_setgid: intercept setgid/setresgid/setregid/setfsgid.
+ * Same no-op/allow model as task_fix_setuid.
+ */
+static int kacs_task_fix_setgid(struct cred *new, const struct cred *old,
+				int flags)
+{
+	const struct kacs_cred_security *sec = kacs_cred(old);
+
+	if (!kacs_token_check_privilege(sec->token,
+					KACS_PRIV_ASSIGN_PRIMARY_TOKEN)) {
+		new->gid = old->gid;
+		new->egid = old->egid;
+		new->sgid = old->sgid;
+		new->fsgid = old->fsgid;
+		return 0;
+	}
+
+	return 0;
+}
+
 static int kacs_bprm_creds_for_exec(struct linux_binprm *bprm)
 {
 	struct kacs_cred_security *sec = kacs_cred(bprm->cred);
@@ -3614,6 +3664,8 @@ static struct security_hook_list kacs_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(cred_free, kacs_cred_free),
 	LSM_HOOK_INIT(task_alloc, kacs_task_alloc),
 	LSM_HOOK_INIT(task_free, kacs_task_free),
+	LSM_HOOK_INIT(task_fix_setuid, kacs_task_fix_setuid),
+	LSM_HOOK_INIT(task_fix_setgid, kacs_task_fix_setgid),
 	LSM_HOOK_INIT(task_kill, kacs_task_kill),
 	LSM_HOOK_INIT(ptrace_access_check, kacs_ptrace_access_check),
 	LSM_HOOK_INIT(bprm_creds_for_exec, kacs_bprm_creds_for_exec),
