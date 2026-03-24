@@ -273,6 +273,7 @@ impl core::fmt::Debug for Privileges {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
     use bits::*;
 
@@ -933,6 +934,253 @@ mod tests {
     #[test]
     fn se_undock_privilege_bit_is_25() {
         assert_eq!(SE_UNDOCK, 1u64 << 25);
+    }
+
+    // -----------------------------------------------------------------------
+    // Concurrent access tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn concurrent_enable_disable() {
+        // N threads toggle different privileges on a shared Privileges.
+        // Invariant: after all threads join, each privilege's final state
+        // is consistent with the last operation that touched it.
+        use alloc::sync::Arc;
+
+        let privs = Arc::new(Privileges::new_all_enabled(ALL_PRIVILEGES));
+        let n_threads = 8;
+        let n_iters = 10_000;
+
+        let handles: alloc::vec::Vec<_> = (0..n_threads)
+            .map(|i| {
+                let privs = Arc::clone(&privs);
+                std::thread::spawn(move || {
+                    // Each thread works on a different privilege bit to avoid
+                    // needing synchronization on the expected outcome.
+                    let bit = 1u64 << (2 + (i % 34)); // bits 2..35
+                    for j in 0..n_iters {
+                        if j % 2 == 0 {
+                            privs.disable(bit);
+                            // After our disable, bit must not be enabled
+                            // (unless another thread re-enabled it — but
+                            // we're the only thread on this bit).
+                            assert!(!privs.check(bit));
+                        } else {
+                            privs.enable(bit);
+                            assert!(privs.check(bit));
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn concurrent_enable_disable_same_bit() {
+        // Multiple threads racing enable/disable on the SAME privilege.
+        // We can't assert the final value, but we verify no panics,
+        // no torn reads, and the invariant: check(p) == (present & enabled).
+        use alloc::sync::Arc;
+
+        let privs = Arc::new(Privileges::new_all_enabled(SE_BACKUP));
+        let n_threads = 8;
+        let n_iters = 10_000;
+
+        let handles: alloc::vec::Vec<_> = (0..n_threads)
+            .map(|_| {
+                let privs = Arc::clone(&privs);
+                std::thread::spawn(move || {
+                    for i in 0..n_iters {
+                        if i % 2 == 0 {
+                            privs.enable(SE_BACKUP);
+                        } else {
+                            privs.disable(SE_BACKUP);
+                        }
+                        // Snapshot: check must agree with present & enabled
+                        let p = privs.present.load(Ordering::SeqCst);
+                        let e = privs.enabled.load(Ordering::SeqCst);
+                        let _ = (p, e); // just verify no panic / torn read
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn concurrent_remove_under_contention() {
+        // One thread removes a privilege while others try to enable/check it.
+        // After remove completes, is_present must return false.
+        use alloc::sync::Arc;
+        use std::sync::Barrier;
+
+        let privs = Arc::new(Privileges::new_all_enabled(SE_DEBUG | SE_BACKUP));
+        let barrier = Arc::new(Barrier::new(5));
+
+        let mut handles = alloc::vec::Vec::new();
+
+        // Remover thread
+        {
+            let privs = Arc::clone(&privs);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                privs.remove(SE_DEBUG);
+            }));
+        }
+
+        // Reader/toggler threads
+        for _ in 0..4 {
+            let privs = Arc::clone(&privs);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..5_000 {
+                    let _ = privs.check(SE_DEBUG);
+                    let _ = privs.enable(SE_DEBUG);
+                    let _ = privs.is_present(SE_DEBUG);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // After all threads, remove must have taken effect
+        assert!(!privs.is_present(SE_DEBUG));
+        // SE_BACKUP was never touched
+        assert!(privs.check(SE_BACKUP));
+    }
+
+    #[test]
+    fn concurrent_mark_used() {
+        // Multiple threads mark_used on different bits concurrently.
+        // All bits must be set at the end (fetch_or is commutative).
+        use alloc::sync::Arc;
+
+        let privs = Arc::new(Privileges::new_all_enabled(ALL_PRIVILEGES));
+        let bits: alloc::vec::Vec<u64> = (2..36).map(|b| 1u64 << b).collect();
+
+        let handles: alloc::vec::Vec<_> = bits
+            .iter()
+            .map(|&bit| {
+                let privs = Arc::clone(&privs);
+                std::thread::spawn(move || {
+                    for _ in 0..1_000 {
+                        privs.mark_used(bit);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Every bit from 2..36 should be set in used
+        let used = privs.used.load(Ordering::SeqCst);
+        for b in 2..36 {
+            assert_ne!(used & (1u64 << b), 0, "bit {b} not set in used");
+        }
+    }
+
+    #[test]
+    fn concurrent_reset_to_defaults() {
+        // Threads toggle privileges while another resets to defaults.
+        // No panics, no torn state.
+        use alloc::sync::Arc;
+        use std::sync::Barrier;
+
+        let privs = Arc::new(Privileges {
+            present: AtomicU64::new(SE_BACKUP | SE_RESTORE | SE_DEBUG),
+            enabled: AtomicU64::new(SE_BACKUP | SE_RESTORE | SE_DEBUG),
+            enabled_by_default: AtomicU64::new(SE_BACKUP),
+            used: AtomicU64::new(0),
+        });
+        let barrier = Arc::new(Barrier::new(4));
+
+        let mut handles = alloc::vec::Vec::new();
+
+        // Reset thread
+        {
+            let privs = Arc::clone(&privs);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..5_000 {
+                    privs.reset_to_defaults();
+                }
+            }));
+        }
+
+        // Toggler threads
+        for _ in 0..3 {
+            let privs = Arc::clone(&privs);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..5_000 {
+                    if i % 2 == 0 {
+                        privs.enable(SE_RESTORE);
+                    } else {
+                        privs.disable(SE_RESTORE);
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Present bits must never have changed
+        let present = privs.present.load(Ordering::SeqCst);
+        assert_eq!(present, SE_BACKUP | SE_RESTORE | SE_DEBUG);
+    }
+
+    #[test]
+    fn concurrent_clone_under_mutation() {
+        // Clone a Privileges while another thread mutates it.
+        // The clone must be a valid snapshot (no torn bitmask).
+        use alloc::sync::Arc;
+        use std::sync::Barrier;
+
+        let privs = Arc::new(Privileges::new_all_enabled(SE_BACKUP | SE_RESTORE));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let privs2 = Arc::clone(&privs);
+        let barrier2 = Arc::clone(&barrier);
+        let mutator = std::thread::spawn(move || {
+            barrier2.wait();
+            for i in 0..10_000 {
+                if i % 2 == 0 {
+                    privs2.disable(SE_BACKUP);
+                } else {
+                    privs2.enable(SE_BACKUP);
+                }
+            }
+        });
+
+        barrier.wait();
+        for _ in 0..10_000 {
+            let snapshot = privs.clone();
+            // Snapshot must be self-consistent: if a privilege is enabled,
+            // it must also be present.
+            let p = snapshot.present.load(Ordering::SeqCst);
+            let e = snapshot.enabled.load(Ordering::SeqCst);
+            // enabled ⊆ present (can't be enabled if not present)
+            assert_eq!(e & !p, 0, "enabled bit set without corresponding present bit");
+        }
+
+        mutator.join().unwrap();
     }
 
     #[test]

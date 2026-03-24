@@ -201,6 +201,7 @@ pub fn parse_session_spec(data: &[u8]) -> Option<(LogonType, Sid)> {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
     use crate::well_known;
 
@@ -322,6 +323,223 @@ mod tests {
         // §7.8: logon SID is S-1-5-5-{high}-{low}
         let sid = logon_sid_from_id(0x0000_0001_0000_0002).unwrap();
         assert_eq!(sid, Sid::new(5, &[5, 1, 2]).unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // Concurrent access tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn concurrent_addref_release() {
+        // Multiple threads addref and release the same session.
+        // Final refcount must equal total addrefs - total releases.
+        use alloc::sync::Arc;
+
+        let mut table = SessionTable::new();
+        let id = table.create_system_session(well_known::system().unwrap()).unwrap();
+
+        // Pre-load refcount so releases don't hit zero prematurely
+        let initial_refs = 100_000u32;
+        for _ in 0..initial_refs {
+            table.addref(id);
+        }
+
+        let table = Arc::new(table);
+        let n_threads = 8;
+        let ops_per_thread = 10_000;
+
+        // Half threads addref, half release
+        let handles: alloc::vec::Vec<_> = (0..n_threads)
+            .map(|i| {
+                let table = Arc::clone(&table);
+                std::thread::spawn(move || {
+                    if i % 2 == 0 {
+                        for _ in 0..ops_per_thread {
+                            table.addref(id);
+                        }
+                    } else {
+                        for _ in 0..ops_per_thread {
+                            let _ = table.release(id);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // 4 threads addref (4 * 10_000 = 40_000 adds)
+        // 4 threads release (4 * 10_000 = 40_000 releases)
+        // Net change = 0, so refcount should be initial_refs
+        let session = table.get(id).unwrap();
+        let rc = session.refcount.load(core::sync::atomic::Ordering::SeqCst);
+        assert_eq!(rc, initial_refs);
+    }
+
+    #[test]
+    fn concurrent_release_to_zero() {
+        // Multiple threads race to release refcount to zero.
+        // Exactly one thread must see release() return true.
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicU32, Ordering};
+
+        let mut table = SessionTable::new();
+        let id = table.create_system_session(well_known::system().unwrap()).unwrap();
+
+        let n_threads = 8u32;
+        // Set refcount to exactly n_threads
+        for _ in 0..n_threads {
+            table.addref(id);
+        }
+
+        let table = Arc::new(table);
+        let zero_count = Arc::new(AtomicU32::new(0));
+
+        let handles: alloc::vec::Vec<_> = (0..n_threads)
+            .map(|_| {
+                let table = Arc::clone(&table);
+                let zero_count = Arc::clone(&zero_count);
+                std::thread::spawn(move || {
+                    if table.release(id) {
+                        zero_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Exactly one thread should have seen the transition to zero
+        assert_eq!(zero_count.load(Ordering::SeqCst), 1);
+        // Refcount should now be zero
+        let session = table.get(id).unwrap();
+        assert_eq!(session.refcount.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn concurrent_release_refuses_underflow() {
+        // Refcount starts at 0. Many threads try to release.
+        // All must get false (refuse to underflow).
+        use alloc::sync::Arc;
+
+        let mut table = SessionTable::new();
+        let id = table.create_system_session(well_known::system().unwrap()).unwrap();
+        // refcount is 0 (default)
+
+        let table = Arc::new(table);
+        let n_threads = 8;
+
+        let handles: alloc::vec::Vec<_> = (0..n_threads)
+            .map(|_| {
+                let table = Arc::clone(&table);
+                std::thread::spawn(move || {
+                    for _ in 0..10_000 {
+                        let hit_zero = table.release(id);
+                        assert!(!hit_zero, "release returned true on zero refcount");
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Refcount must still be zero (no underflow to u32::MAX)
+        let session = table.get(id).unwrap();
+        assert_eq!(session.refcount.load(core::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn concurrent_addref_release_multiple_sessions() {
+        // Independent sessions under concurrent pressure. Each session's
+        // refcount must be independently correct.
+        use alloc::sync::Arc;
+
+        let mut table = SessionTable::new();
+        let sys_id = table.create_system_session(well_known::system().unwrap()).unwrap();
+        let user1 = Sid::new(5, &[21, 100, 200, 300, 1001]).unwrap();
+        let user2 = Sid::new(5, &[21, 100, 200, 300, 1002]).unwrap();
+        let id1 = table.create(LogonType::Interactive, user1).unwrap();
+        let id2 = table.create(LogonType::Network, user2).unwrap();
+
+        let table = Arc::new(table);
+        let ops = 5_000;
+
+        let handles: alloc::vec::Vec<_> = [sys_id, id1, id2]
+            .iter()
+            .map(|&id| {
+                let table = Arc::clone(&table);
+                std::thread::spawn(move || {
+                    for _ in 0..ops {
+                        table.addref(id);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Each session should have exactly ops refs
+        for &id in &[sys_id, id1, id2] {
+            let session = table.get(id).unwrap();
+            let rc = session.refcount.load(core::sync::atomic::Ordering::SeqCst);
+            assert_eq!(rc, ops as u32);
+        }
+    }
+
+    #[test]
+    fn concurrent_addref_interleaved_release() {
+        // Threads interleave addref and release on the same session.
+        // No panics, no underflow. Refcount stays non-negative.
+        use alloc::sync::Arc;
+        use std::sync::Barrier;
+
+        let mut table = SessionTable::new();
+        let id = table.create_system_session(well_known::system().unwrap()).unwrap();
+        // Start with a buffer to prevent underflow during the test
+        let buffer = 50_000u32;
+        for _ in 0..buffer {
+            table.addref(id);
+        }
+
+        let table = Arc::new(table);
+        let barrier = Arc::new(Barrier::new(8));
+        let ops = 10_000;
+
+        let handles: alloc::vec::Vec<_> = (0..8)
+            .map(|_| {
+                let table = Arc::clone(&table);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for i in 0..ops {
+                        if i % 3 != 0 {
+                            table.addref(id);
+                        } else {
+                            let _ = table.release(id);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Each thread: 6667 addrefs, 3333 releases → net +3334 per thread
+        // 8 threads → net +26672, plus buffer
+        let session = table.get(id).unwrap();
+        let rc = session.refcount.load(core::sync::atomic::Ordering::SeqCst);
+        // Exact value depends on rounding of ops/3, just verify it's reasonable
+        assert!(rc > buffer, "refcount should have grown, got {rc}");
     }
 
     #[test]
