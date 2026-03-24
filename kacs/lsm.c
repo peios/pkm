@@ -790,6 +790,26 @@ static long kacs_token_ioctl(struct file *file, unsigned int cmd,
 		kacs_token_drop(sec->token);
 		sec->token = kacs_token_clone(tf->token);
 		stamp_projected_ids(sec);
+
+		/* Project the token's UID/GID onto the Linux credential.
+		 * These are the initial values — setuid() can change
+		 * uid/euid/suid later (cosmetic, §5.3), but fsuid is
+		 * overridden by the current_fsuid() patch (§16.2). */
+		{
+			kuid_t kuid = make_kuid(&init_user_ns,
+						sec->projected_uid);
+			kgid_t kgid = make_kgid(&init_user_ns,
+						sec->projected_gid);
+			new_cred->uid = kuid;
+			new_cred->euid = kuid;
+			new_cred->suid = kuid;
+			new_cred->fsuid = kuid;
+			new_cred->gid = kgid;
+			new_cred->egid = kgid;
+			new_cred->sgid = kgid;
+			new_cred->fsgid = kgid;
+		}
+
 		commit_creds(new_cred);
 
 		/* Regenerate process SD if user SID changed (§15.2). */
