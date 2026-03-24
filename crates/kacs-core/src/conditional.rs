@@ -173,102 +173,103 @@ pub fn resolve_claim(
     claims: &[crate::token::ClaimEntry],
     name: &str,
     for_allow: bool,
+    origin: Origin,
 ) -> Result<Value, AllocError> {
     use crate::token::{ClaimValues, claim_flags};
 
     for attr in claims {
         if attr.name.eq_ignore_ascii_case(name) {
             if attr.flags & claim_flags::DISABLED != 0 {
-                return Ok(Value::null());
+                return Ok(Value { vtype: ValueType::Null, origin, flags: 0 });
             }
             if (attr.flags & claim_flags::USE_FOR_DENY_ONLY != 0) && for_allow {
-                return Ok(Value::null());
+                return Ok(Value { vtype: ValueType::Null, origin, flags: 0 });
             }
 
             let flags = attr.flags;
             match &attr.values {
                 ClaimValues::Int64(vals) => {
-                    if vals.is_empty() { return Ok(Value::null()); }
+                    if vals.is_empty() { return Ok(Value { vtype: ValueType::Null, origin, flags: 0 }); }
                     if vals.len() == 1 {
-                        return Ok(Value { vtype: ValueType::Int64(vals[0]), origin: Origin::UserAttr, flags });
+                        return Ok(Value { vtype: ValueType::Int64(vals[0]), origin, flags });
                     }
                     let mut elements = Vec::new();
                     for v in vals {
                         compat::vec_push(&mut elements, Value {
-                            vtype: ValueType::Int64(*v), origin: Origin::UserAttr, flags,
+                            vtype: ValueType::Int64(*v), origin, flags,
                         })?;
                     }
-                    return Ok(Value { vtype: ValueType::Composite(elements), origin: Origin::UserAttr, flags });
+                    return Ok(Value { vtype: ValueType::Composite(elements), origin, flags });
                 }
                 ClaimValues::Uint64(vals) => {
-                    if vals.is_empty() { return Ok(Value::null()); }
+                    if vals.is_empty() { return Ok(Value { vtype: ValueType::Null, origin, flags: 0 }); }
                     if vals.len() == 1 {
-                        return Ok(Value { vtype: ValueType::Uint64(vals[0]), origin: Origin::UserAttr, flags });
+                        return Ok(Value { vtype: ValueType::Uint64(vals[0]), origin, flags });
                     }
                     let mut elements = Vec::new();
                     for v in vals {
                         compat::vec_push(&mut elements, Value {
-                            vtype: ValueType::Uint64(*v), origin: Origin::UserAttr, flags,
+                            vtype: ValueType::Uint64(*v), origin, flags,
                         })?;
                     }
-                    return Ok(Value { vtype: ValueType::Composite(elements), origin: Origin::UserAttr, flags });
+                    return Ok(Value { vtype: ValueType::Composite(elements), origin, flags });
                 }
                 ClaimValues::String(vals) => {
-                    if vals.is_empty() { return Ok(Value::null()); }
+                    if vals.is_empty() { return Ok(Value { vtype: ValueType::Null, origin, flags: 0 }); }
                     if vals.len() == 1 {
-                        return Ok(Value { vtype: ValueType::String(vals[0].try_clone()?), origin: Origin::UserAttr, flags });
+                        return Ok(Value { vtype: ValueType::String(vals[0].try_clone()?), origin, flags });
                     }
                     let mut elements = Vec::new();
                     for v in vals {
                         compat::vec_push(&mut elements, Value {
-                            vtype: ValueType::String(v.try_clone()?), origin: Origin::UserAttr, flags,
+                            vtype: ValueType::String(v.try_clone()?), origin, flags,
                         })?;
                     }
-                    return Ok(Value { vtype: ValueType::Composite(elements), origin: Origin::UserAttr, flags });
+                    return Ok(Value { vtype: ValueType::Composite(elements), origin, flags });
                 }
                 ClaimValues::Boolean(vals) => {
-                    if vals.is_empty() { return Ok(Value::null()); }
+                    if vals.is_empty() { return Ok(Value { vtype: ValueType::Null, origin, flags: 0 }); }
                     if vals.len() == 1 {
-                        return Ok(Value { vtype: ValueType::Boolean(vals[0]), origin: Origin::UserAttr, flags });
+                        return Ok(Value { vtype: ValueType::Boolean(vals[0]), origin, flags });
                     }
                     let mut elements = Vec::new();
                     for v in vals {
                         compat::vec_push(&mut elements, Value {
-                            vtype: ValueType::Boolean(*v), origin: Origin::UserAttr, flags,
+                            vtype: ValueType::Boolean(*v), origin, flags,
                         })?;
                     }
-                    return Ok(Value { vtype: ValueType::Composite(elements), origin: Origin::UserAttr, flags });
+                    return Ok(Value { vtype: ValueType::Composite(elements), origin, flags });
                 }
                 ClaimValues::Sid(vals) => {
-                    if vals.is_empty() { return Ok(Value::null()); }
+                    if vals.is_empty() { return Ok(Value { vtype: ValueType::Null, origin, flags: 0 }); }
                     if vals.len() == 1 {
-                        return Ok(Value { vtype: ValueType::Sid(vals[0].try_clone()?), origin: Origin::UserAttr, flags });
+                        return Ok(Value { vtype: ValueType::Sid(vals[0].try_clone()?), origin, flags });
                     }
                     let mut elements = Vec::new();
                     for v in vals {
                         compat::vec_push(&mut elements, Value {
-                            vtype: ValueType::Sid(v.try_clone()?), origin: Origin::UserAttr, flags,
+                            vtype: ValueType::Sid(v.try_clone()?), origin, flags,
                         })?;
                     }
-                    return Ok(Value { vtype: ValueType::Composite(elements), origin: Origin::UserAttr, flags });
+                    return Ok(Value { vtype: ValueType::Composite(elements), origin, flags });
                 }
                 ClaimValues::Octet(vals) => {
-                    if vals.is_empty() { return Ok(Value::null()); }
+                    if vals.is_empty() { return Ok(Value { vtype: ValueType::Null, origin, flags: 0 }); }
                     if vals.len() == 1 {
-                        return Ok(Value { vtype: ValueType::Octet(vals[0].try_clone()?), origin: Origin::UserAttr, flags });
+                        return Ok(Value { vtype: ValueType::Octet(vals[0].try_clone()?), origin, flags });
                     }
                     let mut elements = Vec::new();
                     for v in vals {
                         compat::vec_push(&mut elements, Value {
-                            vtype: ValueType::Octet(v.try_clone()?), origin: Origin::UserAttr, flags,
+                            vtype: ValueType::Octet(v.try_clone()?), origin, flags,
                         })?;
                     }
-                    return Ok(Value { vtype: ValueType::Composite(elements), origin: Origin::UserAttr, flags });
+                    return Ok(Value { vtype: ValueType::Composite(elements), origin, flags });
                 }
             }
         }
     }
-    Ok(Value::null())
+    Ok(Value { vtype: ValueType::Null, origin, flags: 0 })
 }
 
 // ---------------------------------------------------------------------------
@@ -673,8 +674,7 @@ pub fn evaluate(
                     None => return Ok(TriValue::Unknown),
                 };
                 pos = new_pos;
-                let mut v = resolve_claim(local_claims, &name, for_allow)?;
-                v.origin = Origin::LocalAttr;
+                let v = resolve_claim(local_claims, &name, for_allow, Origin::LocalAttr)?;
                 compat::vec_push(&mut stack, v)?;
             }
 
@@ -685,8 +685,7 @@ pub fn evaluate(
                     None => return Ok(TriValue::Unknown),
                 };
                 pos = new_pos;
-                let mut v = resolve_claim(&token.user_claims, &name, for_allow)?;
-                v.origin = Origin::UserAttr;
+                let v = resolve_claim(&token.user_claims, &name, for_allow, Origin::UserAttr)?;
                 compat::vec_push(&mut stack, v)?;
             }
 
@@ -697,8 +696,7 @@ pub fn evaluate(
                     None => return Ok(TriValue::Unknown),
                 };
                 pos = new_pos;
-                let mut v = resolve_claim(resource_attributes, &name, for_allow)?;
-                v.origin = Origin::ResourceAttr;
+                let v = resolve_claim(resource_attributes, &name, for_allow, Origin::ResourceAttr)?;
                 compat::vec_push(&mut stack, v)?;
             }
 
@@ -709,8 +707,7 @@ pub fn evaluate(
                     None => return Ok(TriValue::Unknown),
                 };
                 pos = new_pos;
-                let mut v = resolve_claim(&token.device_claims, &name, for_allow)?;
-                v.origin = Origin::DeviceAttr;
+                let v = resolve_claim(&token.device_claims, &name, for_allow, Origin::DeviceAttr)?;
                 compat::vec_push(&mut stack, v)?;
             }
 
@@ -4102,7 +4099,7 @@ mod tests {
     // --- resolve_claim_null_claims_returns_null ---
     #[test]
     fn resolve_claim_null_claims_returns_null() {
-        let v = resolve_claim(&[], "anything", true).unwrap();
+        let v = resolve_claim(&[], "anything", true, Origin::UserAttr).unwrap();
         assert!(v.is_null());
     }
 
@@ -4110,7 +4107,7 @@ mod tests {
     #[test]
     fn resolve_claim_name_case_insensitive() {
         let claims = alloc::vec![int_claim("Department", 7)];
-        let v = resolve_claim(&claims, "department", true).unwrap();
+        let v = resolve_claim(&claims, "department", true, Origin::UserAttr).unwrap();
         assert!(!v.is_null());
     }
 
@@ -4123,7 +4120,7 @@ mod tests {
             flags: claim_flags::DISABLED,
             values: ClaimValues::Int64(alloc::vec![42]),
         };
-        let v = resolve_claim(&[claim], "x", true).unwrap();
+        let v = resolve_claim(&[claim], "x", true, Origin::UserAttr).unwrap();
         assert!(v.is_null());
     }
 
@@ -4136,7 +4133,7 @@ mod tests {
             flags: claim_flags::USE_FOR_DENY_ONLY,
             values: ClaimValues::Int64(alloc::vec![42]),
         };
-        let v = resolve_claim(&[claim], "x", true).unwrap();
+        let v = resolve_claim(&[claim], "x", true, Origin::UserAttr).unwrap();
         assert!(v.is_null());
     }
 
@@ -4149,7 +4146,7 @@ mod tests {
             flags: claim_flags::USE_FOR_DENY_ONLY,
             values: ClaimValues::Int64(alloc::vec![42]),
         };
-        let v = resolve_claim(&[claim], "x", false).unwrap();
+        let v = resolve_claim(&[claim], "x", false, Origin::UserAttr).unwrap();
         assert!(!v.is_null());
         match v.vtype {
             ValueType::Int64(val) => assert_eq!(val, 42),
@@ -4166,7 +4163,7 @@ mod tests {
             flags: 0,
             values: ClaimValues::Int64(alloc::vec![]),
         };
-        let v = resolve_claim(&[claim], "x", true).unwrap();
+        let v = resolve_claim(&[claim], "x", true, Origin::UserAttr).unwrap();
         assert!(v.is_null());
     }
 
@@ -4179,7 +4176,7 @@ mod tests {
             flags: 0,
             values: ClaimValues::Int64(alloc::vec![99]),
         };
-        let v = resolve_claim(&[claim], "x", true).unwrap();
+        let v = resolve_claim(&[claim], "x", true, Origin::UserAttr).unwrap();
         match v.vtype {
             ValueType::Int64(val) => assert_eq!(val, 99),
             _ => panic!("expected scalar Int64"),
@@ -4195,7 +4192,7 @@ mod tests {
             flags: 0,
             values: ClaimValues::Int64(alloc::vec![1, 2, 3]),
         };
-        let v = resolve_claim(&[claim], "x", true).unwrap();
+        let v = resolve_claim(&[claim], "x", true, Origin::UserAttr).unwrap();
         assert!(v.is_composite());
     }
 
@@ -4208,7 +4205,7 @@ mod tests {
             flags: 0,
             values: ClaimValues::Boolean(alloc::vec![true]),
         };
-        let v = resolve_claim(&[claim], "b", true).unwrap();
+        let v = resolve_claim(&[claim], "b", true, Origin::UserAttr).unwrap();
         match v.vtype {
             ValueType::Boolean(val) => assert!(val),
             _ => panic!("expected Boolean"),
@@ -4219,7 +4216,7 @@ mod tests {
     #[test]
     fn resolve_claim_not_found_returns_null() {
         let claims = alloc::vec![int_claim("x", 42)];
-        let v = resolve_claim(&claims, "nonexistent", true).unwrap();
+        let v = resolve_claim(&claims, "nonexistent", true, Origin::UserAttr).unwrap();
         assert!(v.is_null());
     }
 
@@ -4232,7 +4229,7 @@ mod tests {
             flags: claim_flags::CASE_SENSITIVE,
             values: ClaimValues::Int64(alloc::vec![42]),
         };
-        let v = resolve_claim(&[claim], "x", true).unwrap();
+        let v = resolve_claim(&[claim], "x", true, Origin::UserAttr).unwrap();
         assert_eq!(v.flags, claim_flags::CASE_SENSITIVE);
     }
 
@@ -4245,7 +4242,7 @@ mod tests {
             flags: claim_flags::DISABLED,
             values: ClaimValues::Int64(alloc::vec![42]),
         };
-        let v = resolve_claim(&[claim], "r", true).unwrap();
+        let v = resolve_claim(&[claim], "r", true, Origin::UserAttr).unwrap();
         assert!(v.is_null());
     }
 
@@ -4258,7 +4255,7 @@ mod tests {
             flags: claim_flags::USE_FOR_DENY_ONLY,
             values: ClaimValues::Int64(alloc::vec![42]),
         };
-        let v = resolve_claim(&[claim], "r", true).unwrap();
+        let v = resolve_claim(&[claim], "r", true, Origin::UserAttr).unwrap();
         assert!(v.is_null());
     }
 
@@ -4271,14 +4268,14 @@ mod tests {
             flags: 0,
             values: ClaimValues::Int64(alloc::vec![]),
         };
-        let v = resolve_claim(&[claim], "r", true).unwrap();
+        let v = resolve_claim(&[claim], "r", true, Origin::UserAttr).unwrap();
         assert!(v.is_null());
     }
 
     // --- resolve_resource_not_found_null ---
     #[test]
     fn resolve_resource_not_found_null() {
-        let v = resolve_claim(&[], "nonexistent", true).unwrap();
+        let v = resolve_claim(&[], "nonexistent", true, Origin::UserAttr).unwrap();
         assert!(v.is_null());
     }
 
