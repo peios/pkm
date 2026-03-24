@@ -4279,8 +4279,10 @@ SYSCALL_DEFINE1(kacs_access_check,
 			return -EFAULT;
 	}
 
+	/* desired_access == 0 is valid (§11.1): returns success with granted=0.
+	 * Short-circuit: no SD or token lookup needed. */
 	if (!args.desired_access)
-		return -EINVAL;
+		return 0;
 
 	/* Resolve the token to evaluate against. */
 	if (args.token_fd == -1) {
