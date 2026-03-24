@@ -3060,4 +3060,94 @@ mod tests {
         assert!(token.device_groups.is_some());
         assert!(token.confinement_sid.is_some());
     }
+
+    // --- Identity immutability invariant (§7.3) ---
+    //
+    // Token identity fields must not change through any mutation path.
+    // This test snapshots all identity fields, exercises every mutation
+    // operation (privileges, group attributes, default object security,
+    // impersonation level, audit policy, session ID), then asserts
+    // identity fields are unchanged.
+
+    #[test]
+    fn mutation_paths_preserve_identity() {
+        let mut token = Token::system_token().unwrap();
+
+        // Snapshot identity fields.
+        let snap_user_sid = token.user_sid.clone();
+        let snap_user_deny_only = token.user_deny_only;
+        let snap_logon_sid = token.logon_sid.clone();
+        let snap_group_sids: alloc::vec::Vec<_> =
+            token.groups.iter().map(|g| g.sid.clone()).collect();
+        let snap_token_type = token.token_type;
+        let snap_integrity = token.integrity_level;
+        let snap_mandatory_policy = token.mandatory_policy;
+        let snap_elevation = token.elevation_type;
+        let snap_token_id = token.token_id;
+        let snap_auth_id = token.auth_id;
+        let snap_origin = token.origin;
+        let snap_created_at = token.created_at;
+        let snap_expiration = token.expiration;
+        let snap_write_restricted = token.write_restricted;
+        let snap_projected_uid = token.projected_uid;
+        let snap_projected_gid = token.projected_gid;
+        let snap_projected_supp = token.projected_supplementary_gids.clone();
+
+        // --- Mutate everything that's allowed to change ---
+
+        // Privileges: enable, disable, remove.
+        use crate::privilege::bits::*;
+        token.privileges.disable(SE_BACKUP);
+        token.privileges.enable(SE_BACKUP);
+        token.privileges.remove(SE_CREATE_PAGEFILE);
+
+        // Group attributes: toggle enabled.
+        if token.groups.len() > 1 {
+            let g = &mut token.groups[1];
+            if g.attributes & crate::group::SE_GROUP_MANDATORY == 0 {
+                g.attributes &= !crate::group::SE_GROUP_ENABLED;
+                g.attributes |= crate::group::SE_GROUP_ENABLED;
+            }
+        }
+
+        // Default object security.
+        token.owner_sid_index = 1;
+        token.primary_group_index = 1;
+        token.default_dacl = None;
+
+        // Impersonation level.
+        token.impersonation_level = ImpersonationLevel::Delegation;
+
+        // Audit policy.
+        token.audit_policy = 0xFF;
+
+        // Session ID.
+        token.interactive_session_id = 42;
+
+        // Modified ID (mutation tracker).
+        token.modified_id = token.modified_id.wrapping_add(100);
+
+        // --- Assert identity fields are unchanged ---
+
+        assert_eq!(token.user_sid, snap_user_sid, "user_sid mutated");
+        assert_eq!(token.user_deny_only, snap_user_deny_only, "user_deny_only mutated");
+        assert_eq!(token.logon_sid, snap_logon_sid, "logon_sid mutated");
+        for (i, g) in token.groups.iter().enumerate() {
+            assert_eq!(g.sid, snap_group_sids[i], "group[{}].sid mutated", i);
+        }
+        assert_eq!(token.token_type, snap_token_type, "token_type mutated");
+        assert_eq!(token.integrity_level, snap_integrity, "integrity_level mutated");
+        assert_eq!(token.mandatory_policy, snap_mandatory_policy, "mandatory_policy mutated");
+        assert_eq!(token.elevation_type, snap_elevation, "elevation_type mutated");
+        assert_eq!(token.token_id, snap_token_id, "token_id mutated");
+        assert_eq!(token.auth_id, snap_auth_id, "auth_id mutated");
+        assert_eq!(token.origin, snap_origin, "origin mutated");
+        assert_eq!(token.created_at, snap_created_at, "created_at mutated");
+        assert_eq!(token.expiration, snap_expiration, "expiration mutated");
+        assert_eq!(token.write_restricted, snap_write_restricted, "write_restricted mutated");
+        assert_eq!(token.projected_uid, snap_projected_uid, "projected_uid mutated");
+        assert_eq!(token.projected_gid, snap_projected_gid, "projected_gid mutated");
+        assert_eq!(token.projected_supplementary_gids, snap_projected_supp,
+                   "projected_supplementary_gids mutated");
+    }
 }

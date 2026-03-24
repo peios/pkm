@@ -1984,37 +1984,53 @@ pub extern "C" fn kacs_session_link_tokens(
         return -22; // -EINVAL: tokens don't belong to this session
     }
 
-    let mut guard = LINKED_TOKENS.lock();
-    let links = match guard.as_mut() {
-        Some(l) => l,
-        None => return -22,
-    };
-
     // Clone both tokens (bump refcount)
     let e = kacs_token_clone(elevated);
     let f = kacs_token_clone(filtered);
 
-    // Replace existing link for this session, or add new
-    for entry in links.iter_mut() {
-        if entry.0 == session_id {
-            // Drop old refs
-            unsafe {
-                KacsToken::drop_ref(entry.1.0);
-                KacsToken::drop_ref(entry.2.0);
-            }
-            entry.1 = SendPtr(e);
-            entry.2 = SendPtr(f);
-            return 0;
-        }
-    }
+    // Stash old pointers to drop AFTER releasing the lock — drop_ref
+    // calls session_release which re-acquires LINKED_TOKENS.
+    let mut deferred_drop: Option<(SendPtr, SendPtr)> = None;
 
-    // New link
-    if compat::vec_push(links, (session_id, SendPtr(e), SendPtr(f))).is_err() {
+    let ret = {
+        let mut guard = LINKED_TOKENS.lock();
+        let links = match guard.as_mut() {
+            Some(l) => l,
+            None => return -22,
+        };
+
+        // Replace existing link for this session, or add new
+        let mut replaced = false;
+        for entry in links.iter_mut() {
+            if entry.0 == session_id {
+                deferred_drop = Some((entry.1, entry.2));
+                entry.1 = SendPtr(e);
+                entry.2 = SendPtr(f);
+                replaced = true;
+                break;
+            }
+        }
+
+        if replaced {
+            0
+        } else if compat::vec_push(links, (session_id, SendPtr(e), SendPtr(f))).is_err() {
+            -12 // -ENOMEM (tokens dropped below)
+        } else {
+            0
+        }
+    }; // guard dropped — LINKED_TOKENS released
+
+    if ret == -12 {
         kacs_token_drop(e);
         kacs_token_drop(f);
-        return -12; // -ENOMEM
     }
-    0
+    if let Some((old_e, old_f)) = deferred_drop {
+        unsafe {
+            KacsToken::drop_ref(old_e.0);
+            KacsToken::drop_ref(old_f.0);
+        }
+    }
+    ret
 }
 
 /// Get the linked partner token for a given token.
@@ -2121,6 +2137,16 @@ pub extern "C" fn kacs_session_release(session_id: u64) {
     };
 
     if should_remove {
+        // Collect token refs to drop AFTER releasing LINKED_TOKENS —
+        // drop_ref calls session_release which re-acquires the lock.
+        // Fixed-size array: sessions have exactly 1 linked pair in practice.
+        // If a session somehow had >4 pairs, extras would be removed from
+        // the list but their refs would leak. Acceptable: the real invariant
+        // is 1 pair per session.
+        let mut deferred_drops: [(SendPtr, SendPtr); 4] =
+            [(SendPtr(core::ptr::null()), SendPtr(core::ptr::null())); 4];
+        let mut drop_count = 0usize;
+
         // Remove linked tokens for this session
         {
             let mut guard = LINKED_TOKENS.lock();
@@ -2129,9 +2155,9 @@ pub extern "C" fn kacs_session_release(session_id: u64) {
                 while i < links.len() {
                     if links[i].0 == session_id {
                         let entry = links[i];
-                        unsafe {
-                            KacsToken::drop_ref(entry.1.0);
-                            KacsToken::drop_ref(entry.2.0);
+                        if drop_count < deferred_drops.len() {
+                            deferred_drops[drop_count] = (entry.1, entry.2);
+                            drop_count += 1;
                         }
                         let last = links.len() - 1;
                         if i < last {
@@ -2142,6 +2168,14 @@ pub extern "C" fn kacs_session_release(session_id: u64) {
                         i += 1;
                     }
                 }
+            }
+        } // guard dropped — LINKED_TOKENS released
+
+        // Now safe to drop token refs (may cascade into session_release).
+        for i in 0..drop_count {
+            unsafe {
+                KacsToken::drop_ref(deferred_drops[i].0.0);
+                KacsToken::drop_ref(deferred_drops[i].1.0);
             }
         }
 
