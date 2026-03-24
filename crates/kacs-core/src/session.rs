@@ -5,7 +5,7 @@
 //! from the session ID. Tokens reference their session, and the logon
 //! SID is injected into the token's group list.
 
-use crate::compat::{self, AllocError, TryClone, Vec};
+use crate::compat::{self, AllocError, Vec};
 use crate::sid::Sid;
 
 /// Logon type — how the user authenticated. Matches Windows values.
@@ -143,38 +143,14 @@ impl SessionTable {
     }
 
     /// Remove a session by ID. Returns true if found and removed.
-    /// Remove a session by ID. Returns true if found and removed.
-    /// Uses linear scan + shift — fine for small tables (O(hundreds)).
+    /// Uses swap-remove — O(1), no allocation, no OOM risk.
     pub fn remove(&mut self, session_id: u64) -> bool {
-        let len = self.sessions.len();
-        let mut found = false;
-        let mut write = 0;
-        for read in 0..len {
-            if self.sessions[read].session_id == session_id && !found {
-                found = true;
-                continue; // skip this element
-            }
-            if write != read {
-                // Shift element left — we can't move AtomicU32, so
-                // reconstruct the entry. Session removal is rare.
-                let s = &self.sessions[read];
-                self.sessions[write] = LogonSession {
-                    session_id: s.session_id,
-                    logon_type: s.logon_type,
-                    user_sid: s.user_sid.try_clone().unwrap_or_else(|_| {
-                        crate::sid::Sid::new(0, &[]).unwrap()
-                    }),
-                    refcount: core::sync::atomic::AtomicU32::new(
-                        s.refcount.load(core::sync::atomic::Ordering::SeqCst)
-                    ),
-                };
-            }
-            write += 1;
+        if let Some(idx) = self.sessions.iter().position(|s| s.session_id == session_id) {
+            self.sessions.swap_remove(idx);
+            true
+        } else {
+            false
         }
-        if found {
-            self.sessions.truncate(write);
-        }
-        found
     }
 
     /// Look up a session by ID.

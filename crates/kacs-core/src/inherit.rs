@@ -92,13 +92,17 @@ pub fn compute_inherited_sd(
     let sacl_protected = creator_sd.map_or(false, |c| c.control & SE_SACL_PROTECTED != 0);
     if dacl.is_some() {
         control |= SE_DACL_PRESENT;
-        if !dacl_protected && parent_sd.and_then(|p| p.dacl.as_ref()).is_some() {
+        if dacl_protected {
+            control |= SE_DACL_PROTECTED;
+        } else if parent_sd.and_then(|p| p.dacl.as_ref()).is_some() {
             control |= SE_DACL_AUTO_INHERITED;
         }
     }
     if sacl.is_some() {
         control |= SE_SACL_PRESENT;
-        if !sacl_protected && parent_sd.and_then(|p| p.sacl.as_ref()).is_some() {
+        if sacl_protected {
+            control |= SE_SACL_PROTECTED;
+        } else if parent_sd.and_then(|p| p.sacl.as_ref()).is_some() {
             control |= SE_SACL_AUTO_INHERITED;
         }
     }

@@ -179,6 +179,21 @@ impl Privileges {
         }
     }
 
+    /// Create a privilege set with some privileges enabled and others
+    /// present but initially disabled. `disabled_mask` bits must not
+    /// overlap with `enabled_mask`. This is the correct way to construct
+    /// tokens where certain privileges (e.g. SE_BACKUP, SE_RESTORE)
+    /// must start disabled per §10.8.
+    pub fn new_with_disabled(enabled_mask: u64, disabled_mask: u64) -> Self {
+        let all = enabled_mask | disabled_mask;
+        Privileges {
+            present: AtomicU64::new(all),
+            enabled: AtomicU64::new(enabled_mask),
+            enabled_by_default: AtomicU64::new(enabled_mask),
+            used: AtomicU64::new(0),
+        }
+    }
+
     /// Check if a privilege is present AND enabled.
     #[inline]
     pub fn check(&self, privilege: u64) -> bool {

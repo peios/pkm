@@ -348,7 +348,8 @@ impl Ace {
             compat::vec_push(&mut body, 0)?;
         }
 
-        let ace_size = (4 + body.len()) as u16;
+        let ace_size = u16::try_from(4 + body.len())
+            .map_err(|_| crate::compat::AllocError)?; // ACE too large for u16 size field
         let mut result = compat::vec_with_capacity(ace_size as usize)?;
         compat::vec_push(&mut result, self.ace_type)?;
         compat::vec_push(&mut result, self.flags)?;

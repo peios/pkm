@@ -126,6 +126,11 @@ impl SecurityDescriptor {
 
         let control = u16::from_le_bytes([data[2], data[3]]);
 
+        // Reject absolute-format SDs — we only parse self-relative.
+        if control & SE_SELF_RELATIVE == 0 {
+            return Ok(None);
+        }
+
         // Self-relative format: four 32-bit offsets
         let owner_offset = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
         let group_offset = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;

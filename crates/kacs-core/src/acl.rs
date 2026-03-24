@@ -92,8 +92,10 @@ impl Acl {
             compat::vec_extend(&mut ace_bytes, &ace.to_bytes()?)?;
         }
 
-        let acl_size = (ACL_HEADER_SIZE + ace_bytes.len()) as u16;
-        let ace_count = self.aces.len() as u16;
+        let acl_size = u16::try_from(ACL_HEADER_SIZE + ace_bytes.len())
+            .map_err(|_| AllocError)?; // ACL too large for u16 size field
+        let ace_count = u16::try_from(self.aces.len())
+            .map_err(|_| AllocError)?; // Too many ACEs for u16 count field
 
         let mut buf = compat::vec_with_capacity(acl_size as usize)?;
         compat::vec_push(&mut buf, self.revision)?;
