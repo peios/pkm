@@ -98,7 +98,22 @@ RUN scripts/config \
         --set-val DEVTMPFS y \
         --set-val DEVTMPFS_MOUNT y \
         --set-val TMPFS y \
-        --set-val STRICT_DEVMEM y && \
+        --set-val STRICT_DEVMEM y \
+        --set-val VT y \
+        --set-val VT_CONSOLE y \
+        --set-val VGA_CONSOLE y \
+        --set-val FRAMEBUFFER_CONSOLE y \
+        --set-val DRM y \
+        --set-val DRM_BOCHS y \
+        --set-val SERIAL_8250 y \
+        --set-val SERIAL_8250_CONSOLE y \
+        --set-val ATA y \
+        --set-val ATA_PIIX y \
+        --set-val SATA_AHCI y \
+        --set-val BLK_DEV_SR y \
+        --set-val ISO9660_FS y \
+        --set-val SQUASHFS y \
+        --set-val SQUASHFS_ZSTD y && \
     make LLVM=1 olddefconfig
 
 # PKM syscalls: register in x86_64 syscall table
@@ -119,6 +134,13 @@ RUN printf '1000\tcommon\tkacs_open_self_token\t\tsys_kacs_open_self_token\n\
 1050\tcommon\tevent_emit\t\tsys_event_emit\n' \
     >> arch/x86/entry/syscalls/syscall_64.tbl
 
+
+# Cache-bust: everything below here rebuilds when source changes.
+# The Makefile passes --build-arg CACHE_BUST=$(checksum) to invalidate
+# Docker's layer cache when any PKM source file changes.
+ARG CACHE_BUST=0
+
+
 # PKM: kernel patches
 COPY kernel/patches/ /build/linux/pkm-patches/
 RUN for p in pkm-patches/*.patch; do \
@@ -126,10 +148,6 @@ RUN for p in pkm-patches/*.patch; do \
     done; \
     rm -rf pkm-patches
 
-# Cache-bust: everything below here rebuilds when source changes.
-# The Makefile passes --build-arg CACHE_BUST=$(checksum) to invalidate
-# Docker's layer cache when any PKM source file changes.
-ARG CACHE_BUST=0
 
 # PKM: copy module source into kernel tree
 # Structure: security/pkm/{kacs/,events/,Kconfig,Makefile}
