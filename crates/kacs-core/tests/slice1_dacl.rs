@@ -1,5 +1,5 @@
 use kacs_core::{
-    evaluate_dacl, GenericMapping, KacsError, SecurityDescriptor, Sid, SidAndAttributes, TokenView,
+    evaluate_dacl, GenericMapping, SecurityDescriptor, Sid, SidAndAttributes, TokenView,
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
     ACCESS_DENIED_ACE_TYPE, ACE_OBJECT_TYPE_PRESENT, DELETE, GENERIC_READ, MAXIMUM_ALLOWED,
     READ_CONTROL, SE_DACL_PRESENT, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY, SE_SELF_RELATIVE,
@@ -338,7 +338,8 @@ fn inherit_only_ace_is_skipped() {
 }
 
 #[test]
-fn callback_ace_in_dacl_fails_closed_for_slice_one() {
+fn malformed_callback_allow_ace_is_skipped_as_unknown() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 2001]);
     let dacl = acl_bytes(&[callback_ace(
         ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
@@ -347,7 +348,7 @@ fn callback_ace_in_dacl_fails_closed_for_slice_one() {
         &user,
         b"artx",
     )]);
-    let sd_bytes = sd_with_dacl(&user, Some(&dacl));
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
     let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
     let token = TokenView {
         user: parse_sid(&user),
@@ -355,16 +356,11 @@ fn callback_ace_in_dacl_fails_closed_for_slice_one() {
         groups: &[],
     };
 
-    let err = evaluate_dacl(&sd, &token, READ_CONTROL, &mapping(), false)
-        .expect_err("callback ace must fail closed");
+    let result = evaluate_dacl(&sd, &token, READ_CONTROL, &mapping(), false)
+        .expect("malformed callback ace should not error");
 
-    assert_eq!(
-        err,
-        KacsError::UnsupportedAceInDacl {
-            ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
-            reason: "callback ace evaluation is not yet implemented",
-        }
-    );
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
 }
 
 #[test]

@@ -5,6 +5,7 @@ use crate::ace::{
     Ace, AceKind, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
     ACCESS_DENIED_OBJECT_ACE_TYPE, ACE_OBJECT_TYPE_PRESENT,
 };
+use crate::condition::{evaluate_conditional_expression, ConditionalContext, ConditionalResult};
 use crate::error::{KacsError, KacsResult};
 use crate::object_tree::ObjectTypeList;
 use crate::security_descriptor::SecurityDescriptor;
@@ -52,6 +53,7 @@ struct ProjectedDaclAce<'a> {
     mask: u32,
     sid: Sid<'a>,
     target: AceTarget,
+    condition: Option<&'a [u8]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,13 +75,31 @@ pub fn evaluate_dacl(
     mapping: &GenericMapping,
     skip_owner_implicit: bool,
 ) -> KacsResult<DaclEvaluation> {
+    evaluate_dacl_with_context(
+        sd,
+        token,
+        desired_access,
+        mapping,
+        skip_owner_implicit,
+        &ConditionalContext::default(),
+    )
+}
+
+pub fn evaluate_dacl_with_context(
+    sd: &SecurityDescriptor<'_>,
+    token: &TokenView<'_>,
+    desired_access: u32,
+    mapping: &GenericMapping,
+    skip_owner_implicit: bool,
+    conditional_context: &ConditionalContext<'_>,
+) -> KacsResult<DaclEvaluation> {
     Ok(evaluate_dacl_internal(
         sd,
         token,
         desired_access,
         mapping,
         skip_owner_implicit,
-        None,
+        *conditional_context,
         None,
     )?
     .root)
@@ -93,13 +113,17 @@ pub fn evaluate_dacl_with_self_sid(
     skip_owner_implicit: bool,
     self_sid: Option<Sid<'_>>,
 ) -> KacsResult<DaclEvaluation> {
+    let context = ConditionalContext {
+        self_sid,
+        ..ConditionalContext::default()
+    };
     Ok(evaluate_dacl_internal(
         sd,
         token,
         desired_access,
         mapping,
         skip_owner_implicit,
-        self_sid,
+        context,
         None,
     )?
     .root)
@@ -114,13 +138,37 @@ pub fn evaluate_dacl_with_object_tree(
     self_sid: Option<Sid<'_>>,
     object_tree: &ObjectTypeList,
 ) -> KacsResult<DaclEvaluation> {
+    let context = ConditionalContext {
+        self_sid,
+        ..ConditionalContext::default()
+    };
+    evaluate_dacl_with_object_tree_and_context(
+        sd,
+        token,
+        desired_access,
+        mapping,
+        skip_owner_implicit,
+        object_tree,
+        &context,
+    )
+}
+
+pub fn evaluate_dacl_with_object_tree_and_context(
+    sd: &SecurityDescriptor<'_>,
+    token: &TokenView<'_>,
+    desired_access: u32,
+    mapping: &GenericMapping,
+    skip_owner_implicit: bool,
+    object_tree: &ObjectTypeList,
+    conditional_context: &ConditionalContext<'_>,
+) -> KacsResult<DaclEvaluation> {
     Ok(evaluate_dacl_internal(
         sd,
         token,
         desired_access,
         mapping,
         skip_owner_implicit,
-        self_sid,
+        *conditional_context,
         Some(object_tree),
     )?
     .root)
@@ -135,13 +183,37 @@ pub fn evaluate_dacl_result_list(
     self_sid: Option<Sid<'_>>,
     object_tree: &ObjectTypeList,
 ) -> KacsResult<ObjectDaclResultList> {
+    let context = ConditionalContext {
+        self_sid,
+        ..ConditionalContext::default()
+    };
+    evaluate_dacl_result_list_with_context(
+        sd,
+        token,
+        desired_access,
+        mapping,
+        skip_owner_implicit,
+        object_tree,
+        &context,
+    )
+}
+
+pub fn evaluate_dacl_result_list_with_context(
+    sd: &SecurityDescriptor<'_>,
+    token: &TokenView<'_>,
+    desired_access: u32,
+    mapping: &GenericMapping,
+    skip_owner_implicit: bool,
+    object_tree: &ObjectTypeList,
+    conditional_context: &ConditionalContext<'_>,
+) -> KacsResult<ObjectDaclResultList> {
     Ok(evaluate_dacl_internal(
         sd,
         token,
         desired_access,
         mapping,
         skip_owner_implicit,
-        self_sid,
+        *conditional_context,
         Some(object_tree),
     )?
     .result_list
@@ -154,7 +226,7 @@ fn evaluate_dacl_internal(
     desired_access: u32,
     mapping: &GenericMapping,
     skip_owner_implicit: bool,
-    self_sid: Option<Sid<'_>>,
+    conditional_context: ConditionalContext<'_>,
     object_tree: Option<&ObjectTypeList>,
 ) -> KacsResult<InternalDaclEvaluation> {
     let normalized = mapping.normalize_desired_access(desired_access)?;
@@ -214,9 +286,23 @@ fn evaluate_dacl_internal(
                     projected.sid,
                     projected.polarity,
                     caller_is_owner,
-                    self_sid,
+                    conditional_context.self_sid,
                 ) {
                     continue;
+                }
+
+                if let Some(condition) = projected.condition {
+                    let mut context = conditional_context;
+                    context.caller_is_owner = caller_is_owner;
+                    let cond_result = evaluate_conditional_expression(
+                        condition,
+                        token,
+                        &context,
+                        projected.polarity == AcePolarity::Allow,
+                    );
+                    if !condition_allows(projected.polarity, cond_result) {
+                        continue;
+                    }
                 }
 
                 let ace_bits = projected.mask & relevant_mask;
@@ -371,12 +457,14 @@ fn project_dacl_ace<'a>(
             mask: mapping.map_mask(mask)?,
             sid,
             target: AceTarget::Global,
+            condition: None,
         })),
         (ACCESS_DENIED_ACE_TYPE, AceKind::SingleSid { mask, sid }) => Ok(Some(ProjectedDaclAce {
             polarity: AcePolarity::Deny,
             mask: mapping.map_mask(mask)?,
             sid,
             target: AceTarget::Global,
+            condition: None,
         })),
         (
             ACCESS_ALLOWED_OBJECT_ACE_TYPE,
@@ -392,6 +480,7 @@ fn project_dacl_ace<'a>(
             mask: mapping.map_mask(mask)?,
             sid,
             target: project_object_target(flags, object_type)?,
+            condition: None,
         })),
         (
             ACCESS_DENIED_OBJECT_ACE_TYPE,
@@ -407,18 +496,80 @@ fn project_dacl_ace<'a>(
             mask: mapping.map_mask(mask)?,
             sid,
             target: project_object_target(flags, object_type)?,
+            condition: None,
         })),
         (
-            crate::ace::ACCESS_ALLOWED_CALLBACK_ACE_TYPE
-            | crate::ace::ACCESS_DENIED_CALLBACK_ACE_TYPE
-            | crate::ace::ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
-            | crate::ace::ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE,
-            _,
-        ) => Err(KacsError::UnsupportedAceInDacl {
-            ace_type: ace.ace_type(),
-            reason: "callback ace evaluation is not yet implemented",
-        }),
+            crate::ace::ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            AceKind::Callback {
+                mask,
+                sid,
+                application_data,
+            },
+        ) => Ok(Some(ProjectedDaclAce {
+            polarity: AcePolarity::Allow,
+            mask: mapping.map_mask(mask)?,
+            sid,
+            target: AceTarget::Global,
+            condition: Some(application_data),
+        })),
+        (
+            crate::ace::ACCESS_DENIED_CALLBACK_ACE_TYPE,
+            AceKind::Callback {
+                mask,
+                sid,
+                application_data,
+            },
+        ) => Ok(Some(ProjectedDaclAce {
+            polarity: AcePolarity::Deny,
+            mask: mapping.map_mask(mask)?,
+            sid,
+            target: AceTarget::Global,
+            condition: Some(application_data),
+        })),
+        (
+            crate::ace::ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE,
+            AceKind::CallbackObject {
+                mask,
+                flags,
+                object_type,
+                sid,
+                application_data,
+                ..
+            },
+        ) => Ok(Some(ProjectedDaclAce {
+            polarity: AcePolarity::Allow,
+            mask: mapping.map_mask(mask)?,
+            sid,
+            target: project_object_target(flags, object_type)?,
+            condition: Some(application_data),
+        })),
+        (
+            crate::ace::ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE,
+            AceKind::CallbackObject {
+                mask,
+                flags,
+                object_type,
+                sid,
+                application_data,
+                ..
+            },
+        ) => Ok(Some(ProjectedDaclAce {
+            polarity: AcePolarity::Deny,
+            mask: mapping.map_mask(mask)?,
+            sid,
+            target: project_object_target(flags, object_type)?,
+            condition: Some(application_data),
+        })),
         _ => Ok(None),
+    }
+}
+
+fn condition_allows(polarity: AcePolarity, result: ConditionalResult) -> bool {
+    match (polarity, result) {
+        (AcePolarity::Allow, ConditionalResult::True) => true,
+        (AcePolarity::Allow, ConditionalResult::False | ConditionalResult::Unknown) => false,
+        (AcePolarity::Deny, ConditionalResult::False) => false,
+        (AcePolarity::Deny, ConditionalResult::True | ConditionalResult::Unknown) => true,
     }
 }
 

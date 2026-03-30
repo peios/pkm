@@ -360,7 +360,7 @@ fn deny_on_one_property_fails_root_but_not_other_property_results() {
 }
 
 #[test]
-fn callback_object_aces_remain_fail_closed_in_slice_two() {
+fn malformed_callback_object_ace_is_skipped_as_unknown() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 2003]);
     let object_tree = ObjectTypeList::new(&[
@@ -391,7 +391,7 @@ fn callback_object_aces_remain_fail_closed_in_slice_two() {
         groups: &[],
     };
 
-    let err = evaluate_dacl_with_object_tree(
+    let result = evaluate_dacl_with_object_tree(
         &sd,
         &token,
         READ_CONTROL,
@@ -400,15 +400,10 @@ fn callback_object_aces_remain_fail_closed_in_slice_two() {
         None,
         &object_tree,
     )
-    .expect_err("callback object aces stay out of scope");
+    .expect("malformed callback object ace should not error");
 
-    assert_eq!(
-        err,
-        KacsError::UnsupportedAceInDacl {
-            ace_type: ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE,
-            reason: "callback ace evaluation is not yet implemented",
-        }
-    );
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
 }
 
 #[test]

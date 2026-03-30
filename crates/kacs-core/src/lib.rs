@@ -11,6 +11,8 @@ extern crate alloc;
 mod access_mask;
 mod ace;
 mod acl;
+mod claims;
+mod condition;
 mod dacl;
 mod error;
 mod object_tree;
@@ -31,9 +33,16 @@ pub use ace::{
     ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
 };
 pub use acl::Acl;
+pub use claims::{
+    ClaimAttribute, ClaimValue, CLAIM_SECURITY_ATTRIBUTE_DISABLED,
+    CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY, CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE,
+};
+pub use condition::{evaluate_conditional_expression, ConditionalContext, ConditionalResult};
 pub use dacl::{
-    evaluate_dacl, evaluate_dacl_result_list, evaluate_dacl_with_object_tree,
-    evaluate_dacl_with_self_sid, AccessStatus, DaclEvaluation, ObjectDaclResultList,
+    evaluate_dacl, evaluate_dacl_result_list, evaluate_dacl_result_list_with_context,
+    evaluate_dacl_with_context, evaluate_dacl_with_object_tree,
+    evaluate_dacl_with_object_tree_and_context, evaluate_dacl_with_self_sid, AccessStatus,
+    DaclEvaluation, ObjectDaclResultList,
 };
 pub use error::{KacsError, KacsResult};
 pub use object_tree::{ObjectTypeList, ObjectTypeNode};
