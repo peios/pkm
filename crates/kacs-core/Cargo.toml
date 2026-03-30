@@ -2,14 +2,8 @@
 name = "kacs-core"
 version = "0.1.0"
 edition = "2021"
-description = "KACS access control engine — AccessCheck, SDs, tokens, SIDs"
+description = "Fresh slow-track KACS semantic core scaffold"
 
 [features]
 default = []
-# Kernel build uses kbuild, not cargo. This feature gates kernel-specific
-# code paths (RCU primitives, printk) that only compile in kernel context.
-# Userspace tests run without this feature and use standard sync primitives.
 kernel = []
-
-[dev-dependencies]
-proptest = "1"

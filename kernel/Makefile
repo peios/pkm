@@ -1,20 +1,28 @@
-IMAGE  := pkm-kernel-builder
+SHELL := bash
+.SHELLFLAGS := -eu -o pipefail -c
+
+IMAGE  := pkm-new-kernel-builder
 OUT    := $(CURDIR)/out
-CCACHE := pkm-kernel-ccache
+CCACHE := pkm-new-kernel-ccache
 
 # Checksum of all PKM source files. When any file changes, the Docker
 # layer cache is busted from the COPY layers onward. Layers above
 # (package install, kernel clone, Rust toolchain) stay cached.
 PKM_SOURCES := $(shell find $(CURDIR)/../kacs $(CURDIR)/../crates/kacs-core/src \
-	$(CURDIR)/../events $(CURDIR)/../pkm_kconfig $(CURDIR)/../pkm_makefile \
-	$(CURDIR)/../kernel/patches -type f 2>/dev/null | sort)
-CACHE_BUST := $(shell cat $(PKM_SOURCES) 2>/dev/null | md5sum | cut -c1-12)
+	$(CURDIR)/../README.md $(CURDIR)/../pkm_kconfig $(CURDIR)/../pkm_makefile \
+	$(CURDIR)/Dockerfile $(CURDIR)/Makefile $(CURDIR)/install-pkm-subtree.sh \
+	$(CURDIR)/stage-kacs-core.sh $(CURDIR)/verify-scaffold.sh $(CURDIR)/lsmod.txt \
+	-type f 2>/dev/null | sort)
+CACHE_BUST := $(shell cat $(PKM_SOURCES) 2>/dev/null | sha256sum | cut -c1-16)
 
-.PHONY: all image kernel shell clean clean-all
+.PHONY: all verify-scaffold image kernel shell clean clean-all
 
 all: kernel
 
-image:
+verify-scaffold:
+	$(CURDIR)/verify-scaffold.sh $(CURDIR)/..
+
+image: verify-scaffold
 	docker build --build-arg CACHE_BUST=$(CACHE_BUST) -t $(IMAGE) -f $(CURDIR)/Dockerfile $(CURDIR)/..
 
 kernel: image

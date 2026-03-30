@@ -9,9 +9,9 @@ config SECURITY_PKM
 	depends on !SECURITY_SMACK
 	depends on !SECURITY_TOMOYO
 	help
-	  PKM is the Peios Kernel Module, containing:
-	  - KACS: Kernel-based Access Control System (tokens, SDs, AccessCheck)
-	  - Event subsystem: ring buffer for structured audit events
+	  PKM is the Peios Kernel Module scaffolding used for the KACS slow track.
+	  The current slow-track tree contains build scaffolding only; no
+	  normative KACS behavior is implemented yet.
 
 	  KACS must be the sole MAC LSM. Conflicting MAC LSMs (SELinux,
 	  AppArmor, SMACK, TOMOYO) are rejected at Kconfig level.

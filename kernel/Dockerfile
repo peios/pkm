@@ -1,4 +1,5 @@
 FROM archlinux:latest
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 # Kernel build dependencies (C only — Rust via rustup, LLVM 18 pinned)
 RUN pacman -Syu --noconfirm && \
@@ -116,71 +117,27 @@ RUN scripts/config \
         --set-val SQUASHFS_ZSTD y && \
     make LLVM=1 olddefconfig
 
-# PKM syscalls: register in x86_64 syscall table
-RUN printf '1000\tcommon\tkacs_open_self_token\t\tsys_kacs_open_self_token\n\
-1001\tcommon\tkacs_open_process_token\t\tsys_kacs_open_process_token\n\
-1002\tcommon\tkacs_open_thread_token\t\tsys_kacs_open_thread_token\n\
-1003\tcommon\tkacs_create_token\t\tsys_kacs_create_token\n\
-1004\tcommon\tkacs_create_session\t\tsys_kacs_create_session\n\
-1005\tcommon\tkacs_set_psb\t\tsys_kacs_set_psb\n\
-1010\tcommon\tkacs_open_peer_token\t\tsys_kacs_open_peer_token\n\
-1011\tcommon\tkacs_impersonate_peer\t\tsys_kacs_impersonate_peer\n\
-1012\tcommon\tkacs_revert\t\tsys_kacs_revert\n\
-1013\tcommon\tkacs_set_impersonation_level\t\tsys_kacs_set_impersonation_level\n\
-1020\tcommon\tkacs_open\t\tsys_kacs_open\n\
-1021\tcommon\tkacs_get_sd\t\tsys_kacs_get_sd\n\
-1022\tcommon\tkacs_set_sd\t\tsys_kacs_set_sd\n\
-1023\tcommon\tkacs_access_check\t\tsys_kacs_access_check\n\
-1050\tcommon\tevent_emit\t\tsys_event_emit\n' \
-    >> arch/x86/entry/syscalls/syscall_64.tbl
-
-
 # Cache-bust: everything below here rebuilds when source changes.
 # The Makefile passes --build-arg CACHE_BUST=$(checksum) to invalidate
 # Docker's layer cache when any PKM source file changes.
 ARG CACHE_BUST=0
 
-
-# PKM: kernel patches
-COPY kernel/patches/ /build/linux/pkm-patches/
-RUN for p in pkm-patches/*.patch; do \
-        [ -f "$p" ] && patch -p1 < "$p"; \
-    done; \
-    rm -rf pkm-patches
-
-
-# PKM: copy module source into kernel tree
-# Structure: security/pkm/{kacs/,events/,Kconfig,Makefile}
-#
-# kacs_core Rust source lives in crates/kacs-core/src/ (the Cargo crate).
-# We copy it into the kernel tree, stripping #[cfg(test)] blocks and
-# generating mod.rs from lib.rs (removing #![no_std] and extern crate alloc
-# which the kernel parent crate provides).
-RUN mkdir -p security/pkm/kacs/kacs_core
-COPY kacs/lsm.c /build/linux/security/pkm/kacs/lsm.c
-COPY kacs/kacs_rust.rs /build/linux/security/pkm/kacs/kacs_rust.rs
-COPY crates/kacs-core/src/ /tmp/kacs-core-src/
-RUN for f in /tmp/kacs-core-src/*.rs; do \
-        base=$(basename "$f"); \
-        if [ "$base" = "lib.rs" ]; then \
-            sed '/^#!\[no_std\]/d; /^extern crate alloc;/d' "$f" \
-                | sed '/^mod tests {/,$d' \
-                | sed '${ /^#\[cfg(test)\]$/d; }' \
-                > security/pkm/kacs/kacs_core/mod.rs; \
-        else \
-            sed '/^mod tests {/,$d' "$f" \
-                | sed '${ /^#\[cfg(test)\]$/d; }' \
-                > security/pkm/kacs/kacs_core/$base; \
-        fi; \
-    done && rm -rf /tmp/kacs-core-src
-COPY events/ /build/linux/security/pkm/events/
-COPY pkm_kconfig /build/linux/security/pkm/Kconfig
-COPY pkm_makefile /build/linux/security/pkm/Makefile
-RUN echo 'obj-$(CONFIG_SECURITY_PKM) += pkm/' >> security/Makefile && \
-    sed -i '/endmenu/i source "security/pkm/Kconfig"' security/Kconfig && \
-    scripts/config --enable SECURITY_PKM && \
-    scripts/config --set-str LSM "landlock,lockdown,yama,integrity,pkm" && \
-    make LLVM=1 olddefconfig
+# PKM: install the explicit slow-track scaffold into security/pkm.
+COPY kernel/install-pkm-subtree.sh /usr/local/bin/install-pkm-subtree
+COPY kernel/stage-kacs-core.sh /usr/local/bin/stage-kacs-core
+COPY kacs/lsm.c /tmp/pkm-src/kacs/lsm.c
+COPY kacs/kacs_rust.rs /tmp/pkm-src/kacs/kacs_rust.rs
+COPY crates/kacs-core/src/ /tmp/pkm-src/crates/kacs-core/src/
+COPY pkm_kconfig /tmp/pkm-src/pkm_kconfig
+COPY pkm_makefile /tmp/pkm-src/pkm_makefile
+COPY kernel/stage-kacs-core.sh /tmp/pkm-src/kernel/stage-kacs-core.sh
+RUN chmod +x /usr/local/bin/install-pkm-subtree /usr/local/bin/stage-kacs-core \
+	/tmp/pkm-src/kernel/stage-kacs-core.sh && \
+	install-pkm-subtree /tmp/pkm-src /build/linux && \
+	rm -rf /tmp/pkm-src && \
+	scripts/config --enable SECURITY_PKM && \
+	scripts/config --set-str LSM "landlock,lockdown,yama,integrity,pkm" && \
+	make LLVM=1 olddefconfig
 
 # ccache: persistent cache via volume mount at /ccache
 ENV CCACHE_DIR=/ccache
