@@ -362,7 +362,7 @@ fn callback_ace_in_dacl_fails_closed_for_slice_one() {
         err,
         KacsError::UnsupportedAceInDacl {
             ace_type: ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
-            reason: "callback ace evaluation is out of slice 1",
+            reason: "callback ace evaluation is not yet implemented",
         }
     );
 }
@@ -394,7 +394,7 @@ fn object_ace_without_object_type_guid_behaves_like_basic_allow() {
 }
 
 #[test]
-fn object_ace_with_object_type_guid_fails_closed_for_slice_one() {
+fn object_ace_with_object_type_guid_behaves_like_basic_allow_without_tree() {
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 2003]);
     let dacl = acl_bytes(&[object_ace(
         ACCESS_ALLOWED_OBJECT_ACE_TYPE,
@@ -412,16 +412,11 @@ fn object_ace_with_object_type_guid_fails_closed_for_slice_one() {
         groups: &[],
     };
 
-    let err = evaluate_dacl(&sd, &token, READ_CONTROL, &mapping(), false)
-        .expect_err("guid-scoped object ace must fail closed");
+    let result = evaluate_dacl(&sd, &token, READ_CONTROL, &mapping(), false)
+        .expect("guid-scoped object ace should behave globally without a tree");
 
-    assert_eq!(
-        err,
-        KacsError::UnsupportedAceInDacl {
-            ace_type: ACCESS_ALLOWED_OBJECT_ACE_TYPE,
-            reason: "object type guid scoping is out of slice 1",
-        }
-    );
+    assert!(result.success);
+    assert_eq!(result.granted, READ_CONTROL);
 }
 
 #[test]

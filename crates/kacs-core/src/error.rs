@@ -34,6 +34,14 @@ pub enum KacsError {
     InvalidAceSize(u16),
     InvalidObjectAceLayout(&'static str),
     InvalidResourceAttributeSid,
+    EmptyObjectTypeList,
+    InvalidObjectTypeRootLevel(u16),
+    MultipleObjectTypeRoots,
+    ObjectTypeLevelGap {
+        previous: u16,
+        current: u16,
+    },
+    DuplicateObjectTypeGuid([u8; 16]),
     UnsupportedAceInDacl {
         ace_type: u8,
         reason: &'static str,

@@ -6,11 +6,14 @@
 
 #![cfg_attr(feature = "kernel", no_std)]
 
+extern crate alloc;
+
 mod access_mask;
 mod ace;
 mod acl;
 mod dacl;
 mod error;
+mod object_tree;
 mod security_descriptor;
 mod sid;
 mod token;
@@ -28,8 +31,12 @@ pub use ace::{
     ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
 };
 pub use acl::Acl;
-pub use dacl::{evaluate_dacl, DaclEvaluation};
+pub use dacl::{
+    evaluate_dacl, evaluate_dacl_result_list, evaluate_dacl_with_object_tree,
+    evaluate_dacl_with_self_sid, AccessStatus, DaclEvaluation, ObjectDaclResultList,
+};
 pub use error::{KacsError, KacsResult};
+pub use object_tree::{ObjectTypeList, ObjectTypeNode};
 pub use security_descriptor::{
     SecurityDescriptor, SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE,
 };
