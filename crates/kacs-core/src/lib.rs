@@ -40,8 +40,9 @@ pub use claims::{
 pub use condition::{evaluate_conditional_expression, ConditionalContext, ConditionalResult};
 pub use dacl::{
     evaluate_dacl, evaluate_dacl_result_list, evaluate_dacl_result_list_with_context,
-    evaluate_dacl_with_context, evaluate_dacl_with_object_tree,
-    evaluate_dacl_with_object_tree_and_context, evaluate_dacl_with_self_sid, AccessStatus,
+    evaluate_dacl_result_list_with_restricted_context, evaluate_dacl_with_context,
+    evaluate_dacl_with_object_tree, evaluate_dacl_with_object_tree_and_context,
+    evaluate_dacl_with_restricted_context, evaluate_dacl_with_self_sid, AccessStatus,
     DaclEvaluation, ObjectDaclResultList,
 };
 pub use error::{KacsError, KacsResult};
@@ -50,4 +51,4 @@ pub use security_descriptor::{
     SecurityDescriptor, SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE,
 };
 pub use sid::{Sid, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
-pub use token::{SidAndAttributes, TokenView};
+pub use token::{IdentityView, RestrictedTokenContext, SidAndAttributes, TokenView};

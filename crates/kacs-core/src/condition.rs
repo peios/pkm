@@ -7,7 +7,7 @@ use crate::claims::{
     CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY, CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE,
 };
 use crate::sid::{Sid, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
-use crate::token::{SidAndAttributes, TokenView};
+use crate::token::{IdentityView, SidAndAttributes, TokenView};
 
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
 const PRINCIPAL_SELF_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 10, 0, 0, 0];
@@ -24,6 +24,7 @@ pub enum ConditionalResult {
 pub struct ConditionalContext<'a> {
     pub self_sid: Option<Sid<'a>>,
     pub caller_is_owner: bool,
+    pub identity: Option<IdentityView<'a>>,
     pub device_groups: &'a [SidAndAttributes<'a>],
     pub user_claims: &'a [ClaimAttribute],
     pub device_claims: &'a [ClaimAttribute],
@@ -36,6 +37,7 @@ impl<'a> Default for ConditionalContext<'a> {
         Self {
             self_sid: None,
             caller_is_owner: false,
+            identity: None,
             device_groups: &[],
             user_claims: &[],
             device_claims: &[],
@@ -270,7 +272,11 @@ fn parse_attribute_ref(
 }
 
 fn lookup_attribute(namespace: &[ClaimAttribute], name: &str, for_allow: bool) -> OperandValue {
-    let Some(attribute) = namespace.iter().find(|attribute| attribute.name == name) else {
+    let folded_name = fold_string(name);
+    let Some(attribute) = namespace
+        .iter()
+        .find(|attribute| fold_string(&attribute.name) == folded_name)
+    else {
         return attribute_null();
     };
 
@@ -738,14 +744,18 @@ fn sid_in_membership_set(
             let Some(self_sid) = context.self_sid else {
                 return Some(false);
             };
-            return Some(matches_identity(token, self_sid, for_allow));
+            return Some(matches_identity_view(
+                effective_identity_view(token, context),
+                self_sid,
+                for_allow,
+            ));
         }
     }
 
     let groups = if device {
         context.device_groups
     } else {
-        token.groups
+        effective_identity_view(token, context).groups
     };
 
     for group in groups {
@@ -763,16 +773,23 @@ fn sid_in_membership_set(
     Some(false)
 }
 
-fn matches_identity(token: &TokenView<'_>, sid: Sid<'_>, for_allow: bool) -> bool {
-    if sid == token.user {
+fn effective_identity_view<'a>(
+    token: &'a TokenView<'a>,
+    context: &'a ConditionalContext<'a>,
+) -> IdentityView<'a> {
+    context.identity.unwrap_or_else(|| token.identity())
+}
+
+fn matches_identity_view(identity: IdentityView<'_>, sid: Sid<'_>, for_allow: bool) -> bool {
+    if identity.user.is_some_and(|user| sid == user) {
         return if for_allow {
-            !token.user_deny_only
+            !identity.user_deny_only
         } else {
             true
         };
     }
 
-    for group in token.groups {
+    for group in identity.groups {
         if group.sid != sid {
             continue;
         }

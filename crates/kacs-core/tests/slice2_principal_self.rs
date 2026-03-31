@@ -101,7 +101,7 @@ fn principal_self_allow_matches_when_self_sid_matches_user() {
     .expect("principal-self evaluation should succeed");
 
     assert!(result.success);
-    assert_eq!(result.granted, READ_CONTROL);
+    assert_eq!(result.granted, READ_CONTROL | WRITE_DAC);
 }
 
 #[test]

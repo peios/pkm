@@ -1,6 +1,9 @@
 use alloc::vec::Vec;
 
-use crate::access_mask::{GenericMapping, GENERIC_ALL, MAXIMUM_ALLOWED, READ_CONTROL, WRITE_DAC};
+use crate::access_mask::{
+    GenericMapping, NormalizedDesiredAccess, GENERIC_ALL, GENERIC_WRITE, MAXIMUM_ALLOWED,
+    READ_CONTROL, WRITE_DAC,
+};
 use crate::ace::{
     Ace, AceKind, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
     ACCESS_DENIED_OBJECT_ACE_TYPE, ACE_OBJECT_TYPE_PRESENT,
@@ -10,7 +13,7 @@ use crate::error::{KacsError, KacsResult};
 use crate::object_tree::ObjectTypeList;
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::{Sid, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
-use crate::token::TokenView;
+use crate::token::{IdentityView, RestrictedTokenContext, SidAndAttributes, TokenView};
 
 const INHERIT_ONLY_ACE: u8 = 0x08;
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
@@ -64,8 +67,8 @@ struct NodeState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct InternalDaclEvaluation {
-    root: DaclEvaluation,
-    result_list: Option<ObjectDaclResultList>,
+    root: NodeState,
+    object_states: Option<Vec<NodeState>>,
 }
 
 pub fn evaluate_dacl(
@@ -93,16 +96,89 @@ pub fn evaluate_dacl_with_context(
     skip_owner_implicit: bool,
     conditional_context: &ConditionalContext<'_>,
 ) -> KacsResult<DaclEvaluation> {
-    Ok(evaluate_dacl_internal(
+    let normalized = mapping.normalize_desired_access(desired_access)?;
+    let valid_rights = mapping.map_mask(GENERIC_ALL)?;
+    let caller_is_owner = caller_is_owner_normal(sd, token);
+    let internal = evaluate_dacl_states(
         sd,
         token,
-        desired_access,
+        normalized,
+        valid_rights,
         mapping,
         skip_owner_implicit,
         *conditional_context,
         None,
-    )?
-    .root)
+        caller_is_owner,
+        |sid, polarity| sid_matches_token(token, sid, polarity),
+    )?;
+    Ok(finalize_scalar(internal.root, &normalized))
+}
+
+pub fn evaluate_dacl_with_restricted_context(
+    sd: &SecurityDescriptor<'_>,
+    token: &TokenView<'_>,
+    desired_access: u32,
+    mapping: &GenericMapping,
+    skip_owner_implicit: bool,
+    conditional_context: &ConditionalContext<'_>,
+    restricted_context: &RestrictedTokenContext<'_>,
+) -> KacsResult<DaclEvaluation> {
+    let normalized = mapping.normalize_desired_access(desired_access)?;
+    let valid_rights = mapping.map_mask(GENERIC_ALL)?;
+    let caller_is_owner = caller_is_owner_normal(sd, token);
+    let normal = evaluate_dacl_states(
+        sd,
+        token,
+        normalized,
+        valid_rights,
+        mapping,
+        skip_owner_implicit,
+        *conditional_context,
+        None,
+        caller_is_owner,
+        |sid, polarity| sid_matches_token(token, sid, polarity),
+    )?;
+
+    if restricted_context.restricted_sids.is_empty() {
+        return Ok(finalize_scalar(normal.root, &normalized));
+    }
+
+    let restricted_owner = sd
+        .owner()
+        .is_some_and(|owner| restricted_contains(restricted_context.restricted_sids, owner));
+    let mut restricted_conditions = *conditional_context;
+    restricted_conditions.identity = Some(IdentityView {
+        user: None,
+        user_deny_only: false,
+        groups: restricted_context.restricted_sids,
+    });
+    restricted_conditions.caller_is_owner = restricted_owner;
+    if !restricted_context.restricted_device_groups.is_empty() {
+        restricted_conditions.device_groups = restricted_context.restricted_device_groups;
+    }
+
+    let restricted = evaluate_dacl_states(
+        sd,
+        token,
+        normalized,
+        valid_rights,
+        mapping,
+        skip_owner_implicit,
+        restricted_conditions,
+        None,
+        restricted_owner,
+        |sid, _| restricted_contains(restricted_context.restricted_sids, sid),
+    )?;
+
+    let write_bits = mapping.map_mask(GENERIC_WRITE)?;
+    let merged = merge_restricted_results(
+        normal,
+        &restricted,
+        write_bits,
+        restricted_context.write_restricted,
+        restricted_context.privilege_granted,
+    );
+    Ok(finalize_scalar(merged.root, &normalized))
 }
 
 pub fn evaluate_dacl_with_self_sid(
@@ -117,16 +193,14 @@ pub fn evaluate_dacl_with_self_sid(
         self_sid,
         ..ConditionalContext::default()
     };
-    Ok(evaluate_dacl_internal(
+    evaluate_dacl_with_context(
         sd,
         token,
         desired_access,
         mapping,
         skip_owner_implicit,
-        context,
-        None,
-    )?
-    .root)
+        &context,
+    )
 }
 
 pub fn evaluate_dacl_with_object_tree(
@@ -162,16 +236,22 @@ pub fn evaluate_dacl_with_object_tree_and_context(
     object_tree: &ObjectTypeList,
     conditional_context: &ConditionalContext<'_>,
 ) -> KacsResult<DaclEvaluation> {
-    Ok(evaluate_dacl_internal(
+    let normalized = mapping.normalize_desired_access(desired_access)?;
+    let valid_rights = mapping.map_mask(GENERIC_ALL)?;
+    let caller_is_owner = caller_is_owner_normal(sd, token);
+    let internal = evaluate_dacl_states(
         sd,
         token,
-        desired_access,
+        normalized,
+        valid_rights,
         mapping,
         skip_owner_implicit,
         *conditional_context,
         Some(object_tree),
-    )?
-    .root)
+        caller_is_owner,
+        |sid, polarity| sid_matches_token(token, sid, polarity),
+    )?;
+    Ok(finalize_scalar(internal.root, &normalized))
 }
 
 pub fn evaluate_dacl_result_list(
@@ -207,37 +287,131 @@ pub fn evaluate_dacl_result_list_with_context(
     object_tree: &ObjectTypeList,
     conditional_context: &ConditionalContext<'_>,
 ) -> KacsResult<ObjectDaclResultList> {
-    Ok(evaluate_dacl_internal(
+    let normalized = mapping.normalize_desired_access(desired_access)?;
+    let valid_rights = mapping.map_mask(GENERIC_ALL)?;
+    let caller_is_owner = caller_is_owner_normal(sd, token);
+    let internal = evaluate_dacl_states(
         sd,
         token,
-        desired_access,
+        normalized,
+        valid_rights,
         mapping,
         skip_owner_implicit,
         *conditional_context,
         Some(object_tree),
-    )?
-    .result_list
-    .expect("object-tree evaluation always builds result-list output"))
+        caller_is_owner,
+        |sid, polarity| sid_matches_token(token, sid, polarity),
+    )?;
+    Ok(finalize_result_list(
+        internal
+            .object_states
+            .as_ref()
+            .expect("object-tree evaluation always builds result-list output"),
+        &normalized,
+    ))
 }
 
-fn evaluate_dacl_internal(
+pub fn evaluate_dacl_result_list_with_restricted_context(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,
     desired_access: u32,
     mapping: &GenericMapping,
     skip_owner_implicit: bool,
-    conditional_context: ConditionalContext<'_>,
-    object_tree: Option<&ObjectTypeList>,
-) -> KacsResult<InternalDaclEvaluation> {
+    object_tree: &ObjectTypeList,
+    conditional_context: &ConditionalContext<'_>,
+    restricted_context: &RestrictedTokenContext<'_>,
+) -> KacsResult<ObjectDaclResultList> {
     let normalized = mapping.normalize_desired_access(desired_access)?;
     let valid_rights = mapping.map_mask(GENERIC_ALL)?;
+    let caller_is_owner = caller_is_owner_normal(sd, token);
+    let normal = evaluate_dacl_states(
+        sd,
+        token,
+        normalized,
+        valid_rights,
+        mapping,
+        skip_owner_implicit,
+        *conditional_context,
+        Some(object_tree),
+        caller_is_owner,
+        |sid, polarity| sid_matches_token(token, sid, polarity),
+    )?;
+
+    if restricted_context.restricted_sids.is_empty() {
+        return Ok(finalize_result_list(
+            normal
+                .object_states
+                .as_ref()
+                .expect("object-tree evaluation always builds result-list output"),
+            &normalized,
+        ));
+    }
+
+    let restricted_owner = sd
+        .owner()
+        .is_some_and(|owner| restricted_contains(restricted_context.restricted_sids, owner));
+    let mut restricted_conditions = *conditional_context;
+    restricted_conditions.identity = Some(IdentityView {
+        user: None,
+        user_deny_only: false,
+        groups: restricted_context.restricted_sids,
+    });
+    restricted_conditions.caller_is_owner = restricted_owner;
+    if !restricted_context.restricted_device_groups.is_empty() {
+        restricted_conditions.device_groups = restricted_context.restricted_device_groups;
+    }
+
+    let restricted = evaluate_dacl_states(
+        sd,
+        token,
+        normalized,
+        valid_rights,
+        mapping,
+        skip_owner_implicit,
+        restricted_conditions,
+        Some(object_tree),
+        restricted_owner,
+        |sid, _| restricted_contains(restricted_context.restricted_sids, sid),
+    )?;
+
+    let write_bits = mapping.map_mask(GENERIC_WRITE)?;
+    let merged = merge_restricted_results(
+        normal,
+        &restricted,
+        write_bits,
+        restricted_context.write_restricted,
+        restricted_context.privilege_granted,
+    );
+    Ok(finalize_result_list(
+        merged
+            .object_states
+            .as_ref()
+            .expect("restricted object-tree evaluation must retain states"),
+        &normalized,
+    ))
+}
+
+fn evaluate_dacl_states<F>(
+    sd: &SecurityDescriptor<'_>,
+    token: &TokenView<'_>,
+    normalized: NormalizedDesiredAccess,
+    valid_rights: u32,
+    mapping: &GenericMapping,
+    skip_owner_implicit: bool,
+    conditional_context: ConditionalContext<'_>,
+    object_tree: Option<&ObjectTypeList>,
+    caller_is_owner: bool,
+    sid_matches: F,
+) -> KacsResult<InternalDaclEvaluation>
+where
+    F: Fn(Sid<'_>, AcePolarity) -> bool + Copy,
+{
     let relevant_mask = if normalized.maximum_allowed {
         valid_rights
     } else {
         normalized.mapped
     };
 
-    let caller_is_owner = sd.owner().is_some_and(|owner| owner == token.user);
     let owner_rights_suppressed = sd
         .dacl()
         .map(|dacl| owner_rights_suppressed(&dacl))
@@ -281,12 +455,12 @@ fn evaluate_dacl_internal(
                     continue;
                 };
 
-                if !ace_matches_token(
-                    token,
+                if !ace_matches_identity(
                     projected.sid,
                     projected.polarity,
                     caller_is_owner,
                     conditional_context.self_sid,
+                    sid_matches,
                 ) {
                     continue;
                 }
@@ -348,70 +522,113 @@ fn evaluate_dacl_internal(
     }
 
     if let Some(states) = object_states {
-        let root_state = states[0];
-        let root_granted = if normalized.maximum_allowed {
-            root_state.granted
-        } else {
-            root_state.granted & normalized.mapped
-        };
-        let root_success = if normalized.mapped == 0 {
-            true
-        } else {
-            (root_state.granted & normalized.mapped) == normalized.mapped
-        };
+        Ok(InternalDaclEvaluation {
+            root: states[0],
+            object_states: Some(states),
+        })
+    } else {
+        Ok(InternalDaclEvaluation {
+            root: NodeState { granted, decided },
+            object_states: None,
+        })
+    }
+}
 
-        let mut granted_list = Vec::with_capacity(states.len());
-        let mut status_list = Vec::with_capacity(states.len());
-        for state in states {
-            let granted_out = if normalized.maximum_allowed {
-                state.granted
-            } else {
-                state.granted & normalized.mapped
-            };
-            let status = if normalized.mapped == 0
-                || (state.granted & normalized.mapped) == normalized.mapped
-            {
+fn finalize_scalar(root: NodeState, normalized: &NormalizedDesiredAccess) -> DaclEvaluation {
+    let specific_request = normalized.requested & !MAXIMUM_ALLOWED;
+    let success = if specific_request == 0 {
+        true
+    } else {
+        (normalized.mapped & !root.granted) == 0
+    };
+
+    DaclEvaluation {
+        granted: root.granted,
+        decided: root.decided,
+        success,
+    }
+}
+
+fn finalize_result_list(
+    states: &[NodeState],
+    normalized: &NormalizedDesiredAccess,
+) -> ObjectDaclResultList {
+    let mut granted_list = Vec::with_capacity(states.len());
+    let mut status_list = Vec::with_capacity(states.len());
+    for state in states {
+        let status =
+            if normalized.mapped == 0 || (state.granted & normalized.mapped) == normalized.mapped {
                 AccessStatus::Ok
             } else {
                 AccessStatus::AccessDenied
             };
-            granted_list.push(granted_out);
-            status_list.push(status);
-        }
-
-        Ok(InternalDaclEvaluation {
-            root: DaclEvaluation {
-                granted: root_granted,
-                decided: root_state.decided,
-                success: root_success,
-            },
-            result_list: Some(ObjectDaclResultList {
-                granted_list,
-                status_list,
-            }),
-        })
-    } else {
-        let specific_request = normalized.requested & !MAXIMUM_ALLOWED;
-        let success = if specific_request == 0 {
-            true
-        } else {
-            (normalized.mapped & !granted) == 0
-        };
-        let returned_granted = if normalized.maximum_allowed {
-            granted
-        } else {
-            granted & normalized.mapped
-        };
-
-        Ok(InternalDaclEvaluation {
-            root: DaclEvaluation {
-                granted: returned_granted,
-                decided,
-                success,
-            },
-            result_list: None,
-        })
+        granted_list.push(state.granted);
+        status_list.push(status);
     }
+
+    ObjectDaclResultList {
+        granted_list,
+        status_list,
+    }
+}
+
+fn merge_restricted_results(
+    mut normal: InternalDaclEvaluation,
+    restricted: &InternalDaclEvaluation,
+    write_bits: u32,
+    write_restricted: bool,
+    privilege_granted: u32,
+) -> InternalDaclEvaluation {
+    normal.root.granted = merge_granted(
+        normal.root.granted,
+        restricted.root.granted,
+        write_bits,
+        write_restricted,
+        privilege_granted,
+    );
+
+    if let Some(states) = normal.object_states.as_mut() {
+        let restricted_states = restricted
+            .object_states
+            .as_ref()
+            .expect("restricted merge requires matching object-tree state");
+        for (state, restricted_state) in states.iter_mut().zip(restricted_states.iter()) {
+            state.granted = merge_granted(
+                state.granted,
+                restricted_state.granted,
+                write_bits,
+                write_restricted,
+                privilege_granted,
+            );
+        }
+        normal.root = states[0];
+    }
+
+    normal
+}
+
+fn merge_granted(
+    normal: u32,
+    restricted: u32,
+    write_bits: u32,
+    write_restricted: bool,
+    privilege_granted: u32,
+) -> u32 {
+    let merged = if write_restricted {
+        (normal & !write_bits) | (normal & restricted & write_bits)
+    } else {
+        normal & restricted
+    };
+    merged | privilege_granted
+}
+
+fn caller_is_owner_normal(sd: &SecurityDescriptor<'_>, token: &TokenView<'_>) -> bool {
+    sd.owner()
+        .is_some_and(|owner| sid_matches_token(token, owner, AcePolarity::Allow))
+}
+
+fn restricted_contains(restricted_sids: &[SidAndAttributes<'_>], sid: Sid<'_>) -> bool {
+    restricted_sids.iter().any(|entry| entry.sid == sid)
 }
 
 fn owner_rights_suppressed(dacl: &crate::acl::Acl<'_>) -> KacsResult<bool> {
@@ -584,24 +801,27 @@ fn project_object_target(flags: u32, object_type: Option<&[u8; 16]>) -> KacsResu
     Ok(AceTarget::Object(*guid))
 }
 
-fn ace_matches_token(
-    token: &TokenView<'_>,
+fn ace_matches_identity<F>(
     ace_sid: Sid<'_>,
     polarity: AcePolarity,
     caller_is_owner: bool,
     self_sid: Option<Sid<'_>>,
-) -> bool {
+    ordinary_sid_matches: F,
+) -> bool
+where
+    F: Fn(Sid<'_>, AcePolarity) -> bool + Copy,
+{
     if ace_sid.as_bytes() == OWNER_RIGHTS_SID_BYTES {
         return caller_is_owner;
     }
 
     if ace_sid.as_bytes() == PRINCIPAL_SELF_SID_BYTES {
         return self_sid
-            .map(|sid| sid_matches_token(token, sid, polarity))
+            .map(|sid| ordinary_sid_matches(sid, polarity))
             .unwrap_or(false);
     }
 
-    sid_matches_token(token, ace_sid, polarity)
+    ordinary_sid_matches(ace_sid, polarity)
 }
 
 fn sid_matches_token(token: &TokenView<'_>, sid: Sid<'_>, polarity: AcePolarity) -> bool {

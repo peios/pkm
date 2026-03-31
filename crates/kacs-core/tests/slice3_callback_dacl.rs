@@ -4,8 +4,8 @@ use kacs_core::{
     ConditionalContext, GenericMapping, ObjectTypeList, ObjectTypeNode, SecurityDescriptor, Sid,
     SidAndAttributes, TokenView, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
     ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
-    ACE_OBJECT_TYPE_PRESENT, READ_CONTROL, SE_DACL_PRESENT, SE_GROUP_ENABLED, SE_SELF_RELATIVE,
-    WRITE_DAC,
+    ACE_OBJECT_TYPE_PRESENT, CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY, READ_CONTROL,
+    SE_DACL_PRESENT, SE_GROUP_ENABLED, SE_SELF_RELATIVE, WRITE_DAC,
 };
 
 fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
@@ -193,6 +193,45 @@ fn callback_allow_ace_grants_when_condition_is_true() {
 }
 
 #[test]
+fn callback_attribute_lookup_is_case_insensitive() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 5008]);
+    let dacl = acl_bytes(&[callback_ace(
+        ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+        0,
+        READ_CONTROL,
+        &user,
+        &expr(&append_tokens(&[
+            attr_ref(0xf8, "mode"),
+            string_literal("yes"),
+            vec![0x80],
+        ])),
+    )]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let local_claims = [ClaimAttribute::new(
+        "Mode",
+        0,
+        vec![ClaimValue::String("yes".into())],
+    )];
+    let context = ConditionalContext {
+        local_claims: &local_claims,
+        ..ConditionalContext::default()
+    };
+
+    let result = evaluate_dacl_with_context(&sd, &token, READ_CONTROL, &mapping(), false, &context)
+        .expect("evaluation should succeed");
+
+    assert!(result.success);
+    assert_eq!(result.granted, READ_CONTROL);
+}
+
+#[test]
 fn callback_allow_ace_skips_on_unknown_condition() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 5001]);
@@ -342,6 +381,47 @@ fn callback_object_ace_propagates_across_the_object_tree() {
 }
 
 #[test]
+fn callback_object_owner_rights_suppresses_implicit_owner_grant() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 5005]);
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let dacl = acl_bytes(&[callback_object_ace(
+        ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE,
+        0,
+        READ_CONTROL,
+        ACE_OBJECT_TYPE_PRESENT,
+        Some([0x10; 16]),
+        &owner_rights,
+        &expr(&append_tokens(&[
+            attr_ref(0xf8, "mode"),
+            string_literal("yes"),
+            vec![0x80],
+        ])),
+    )]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&owner),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let local_claims = [ClaimAttribute::new(
+        "mode",
+        0,
+        vec![ClaimValue::String("no".into())],
+    )];
+    let context = ConditionalContext {
+        local_claims: &local_claims,
+        ..ConditionalContext::default()
+    };
+
+    let result = evaluate_dacl_with_context(&sd, &token, READ_CONTROL, &mapping(), false, &context)
+        .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
 fn callback_conditions_can_see_principal_self_and_device_membership() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 5004]);
@@ -394,4 +474,109 @@ fn callback_conditions_can_see_principal_self_and_device_membership() {
 
     assert!(result.success);
     assert_eq!(result.granted, WRITE_DAC);
+}
+
+#[test]
+fn deny_only_local_claim_is_visible_to_callback_deny_ace() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 5006]);
+    let dacl = acl_bytes(&[
+        callback_ace(
+            ACCESS_DENIED_CALLBACK_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &user,
+            &expr(&append_tokens(&[attr_ref(0xf8, "blocked"), vec![0x87]])),
+        ),
+        callback_ace(
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &user,
+            &expr(&append_tokens(&[
+                attr_ref(0xf8, "mode"),
+                string_literal("yes"),
+                vec![0x80],
+            ])),
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let local_claims = [
+        ClaimAttribute::new(
+            "blocked",
+            CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY,
+            vec![ClaimValue::Boolean(true)],
+        ),
+        ClaimAttribute::new("mode", 0, vec![ClaimValue::String("yes".into())]),
+    ];
+    let context = ConditionalContext {
+        local_claims: &local_claims,
+        ..ConditionalContext::default()
+    };
+
+    let result = evaluate_dacl_with_context(&sd, &token, READ_CONTROL, &mapping(), false, &context)
+        .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
+fn deny_only_resource_claim_is_visible_to_callback_deny_ace() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 5007]);
+    let dacl = acl_bytes(&[
+        callback_ace(
+            ACCESS_DENIED_CALLBACK_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &user,
+            &expr(&append_tokens(&[attr_ref(0xfa, "blocked"), vec![0x87]])),
+        ),
+        callback_ace(
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &user,
+            &expr(&append_tokens(&[
+                attr_ref(0xf8, "mode"),
+                string_literal("yes"),
+                vec![0x80],
+            ])),
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let resource_claims = [ClaimAttribute::new(
+        "blocked",
+        CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY,
+        vec![ClaimValue::Boolean(true)],
+    )];
+    let local_claims = [ClaimAttribute::new(
+        "mode",
+        0,
+        vec![ClaimValue::String("yes".into())],
+    )];
+    let context = ConditionalContext {
+        resource_claims: &resource_claims,
+        local_claims: &local_claims,
+        ..ConditionalContext::default()
+    };
+
+    let result = evaluate_dacl_with_context(&sd, &token, READ_CONTROL, &mapping(), false, &context)
+        .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
 }

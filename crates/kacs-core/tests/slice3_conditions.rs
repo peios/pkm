@@ -133,6 +133,26 @@ fn exists_resolves_user_claim_presence() {
 }
 
 #[test]
+fn attribute_lookup_is_case_insensitive() {
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 4013]);
+    let token = token(&user, &[]);
+    let claims = [ClaimAttribute::new(
+        "Clearance",
+        0,
+        vec![ClaimValue::UInt64(4)],
+    )];
+    let context = ConditionalContext {
+        user_claims: &claims,
+        ..ConditionalContext::default()
+    };
+    let program = expr(&append_tokens(&[attr_ref(0xf9, "clearance"), vec![0x87]]));
+
+    let result = evaluate_conditional_expression(&program, &token, &context, true);
+
+    assert_eq!(result, ConditionalResult::True);
+}
+
+#[test]
 fn literal_origin_in_logical_operator_forces_unknown() {
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 4002]);
     let token = token(&user, &[]);
@@ -254,6 +274,87 @@ fn member_of_sees_virtual_groups_and_polarity() {
     assert_eq!(owner_result, ConditionalResult::True);
     assert_eq!(allow_result, ConditionalResult::False);
     assert_eq!(deny_result, ConditionalResult::True);
+}
+
+#[test]
+fn inverted_membership_operators_respect_deny_only_group_polarity() {
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 4011]);
+    let deny_only_group = sid_bytes([0, 0, 0, 0, 0, 5], &[32, 546]);
+    let deny_only_device_group = sid_bytes([0, 0, 0, 0, 0, 5], &[32, 547]);
+    let groups = [SidAndAttributes {
+        sid: parse_sid(&deny_only_group),
+        attributes: SE_GROUP_USE_FOR_DENY_ONLY,
+    }];
+    let device_groups = [SidAndAttributes {
+        sid: parse_sid(&deny_only_device_group),
+        attributes: SE_GROUP_USE_FOR_DENY_ONLY,
+    }];
+    let token = token(&user, &groups);
+    let context = ConditionalContext {
+        device_groups: &device_groups,
+        ..ConditionalContext::default()
+    };
+
+    let not_member = expr(&append_tokens(&[sid_literal(&deny_only_group), vec![0x90]]));
+    let not_member_any = expr(&append_tokens(&[
+        composite(&[sid_literal(&deny_only_group)]),
+        vec![0x92],
+    ]));
+    let not_device_member = expr(&append_tokens(&[
+        sid_literal(&deny_only_device_group),
+        vec![0x91],
+    ]));
+    let not_device_member_any = expr(&append_tokens(&[
+        composite(&[sid_literal(&deny_only_device_group)]),
+        vec![0x93],
+    ]));
+
+    assert_eq!(
+        evaluate_conditional_expression(&not_member, &token, &context, true),
+        ConditionalResult::True
+    );
+    assert_eq!(
+        evaluate_conditional_expression(&not_member, &token, &context, false),
+        ConditionalResult::False
+    );
+    assert_eq!(
+        evaluate_conditional_expression(&not_member_any, &token, &context, true),
+        ConditionalResult::True
+    );
+    assert_eq!(
+        evaluate_conditional_expression(&not_member_any, &token, &context, false),
+        ConditionalResult::False
+    );
+    assert_eq!(
+        evaluate_conditional_expression(&not_device_member, &token, &context, true),
+        ConditionalResult::True
+    );
+    assert_eq!(
+        evaluate_conditional_expression(&not_device_member, &token, &context, false),
+        ConditionalResult::False
+    );
+    assert_eq!(
+        evaluate_conditional_expression(&not_device_member_any, &token, &context, true),
+        ConditionalResult::True
+    );
+    assert_eq!(
+        evaluate_conditional_expression(&not_device_member_any, &token, &context, false),
+        ConditionalResult::False
+    );
+}
+
+#[test]
+fn member_of_does_not_treat_user_sid_as_group_membership() {
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 4012]);
+    let token = token(&user, &[]);
+    let context = ConditionalContext::default();
+    let program = expr(&append_tokens(&[sid_literal(&user), vec![0x89]]));
+
+    let allow_result = evaluate_conditional_expression(&program, &token, &context, true);
+    let deny_result = evaluate_conditional_expression(&program, &token, &context, false);
+
+    assert_eq!(allow_result, ConditionalResult::False);
+    assert_eq!(deny_result, ConditionalResult::False);
 }
 
 #[test]

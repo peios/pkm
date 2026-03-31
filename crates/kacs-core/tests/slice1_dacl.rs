@@ -130,7 +130,7 @@ fn grants_access_for_matching_user_allow_ace() {
         .expect("evaluation should succeed");
 
     assert!(result.success);
-    assert_eq!(result.granted, READ_CONTROL);
+    assert_eq!(result.granted, READ_CONTROL | WRITE_DAC);
 }
 
 #[test]
@@ -194,6 +194,30 @@ fn enabled_group_matches_allow_and_deny_only_group_matches_deny() {
 
     assert!(!result.success);
     assert_eq!(result.granted, READ_CONTROL);
+}
+
+#[test]
+fn owner_group_receives_implicit_rights() {
+    let owner_group_bytes = sid_bytes([0, 0, 0, 0, 0, 5], &[32, 551]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 1002, 7]);
+    let groups = [SidAndAttributes {
+        sid: parse_sid(&owner_group_bytes),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let dacl = acl_bytes(&[]);
+    let sd_bytes = sd_with_dacl(&owner_group_bytes, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &groups,
+    };
+
+    let result = evaluate_dacl(&sd, &token, READ_CONTROL | WRITE_DAC, &mapping(), false)
+        .expect("evaluation should succeed");
+
+    assert!(result.success);
+    assert_eq!(result.granted, READ_CONTROL | WRITE_DAC);
 }
 
 #[test]
@@ -386,7 +410,7 @@ fn object_ace_without_object_type_guid_behaves_like_basic_allow() {
         .expect("evaluation should succeed");
 
     assert!(result.success);
-    assert_eq!(result.granted, READ_CONTROL);
+    assert_eq!(result.granted, READ_CONTROL | WRITE_DAC);
 }
 
 #[test]
@@ -412,7 +436,7 @@ fn object_ace_with_object_type_guid_behaves_like_basic_allow_without_tree() {
         .expect("guid-scoped object ace should behave globally without a tree");
 
     assert!(result.success);
-    assert_eq!(result.granted, READ_CONTROL);
+    assert_eq!(result.granted, READ_CONTROL | WRITE_DAC);
 }
 
 #[test]

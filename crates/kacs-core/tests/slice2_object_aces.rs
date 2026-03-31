@@ -216,7 +216,7 @@ fn guid_scoped_object_ace_without_tree_behaves_like_basic_ace() {
         .expect("evaluation should succeed");
 
     assert!(result.success);
-    assert_eq!(result.granted, READ_CONTROL);
+    assert_eq!(result.granted, READ_CONTROL | WRITE_DAC);
 }
 
 #[test]
@@ -455,4 +455,75 @@ fn group_match_still_applies_for_guid_scoped_object_aces() {
 
     assert!(result.success);
     assert_eq!(result.granted, READ_CONTROL);
+}
+
+#[test]
+fn later_child_deny_does_not_override_earlier_global_allow() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 2005]);
+    let object_tree = ObjectTypeList::new(&[
+        ObjectTypeNode {
+            level: 0,
+            guid: guid(1),
+        },
+        ObjectTypeNode {
+            level: 1,
+            guid: guid(2),
+        },
+    ])
+    .expect("tree should parse");
+    let dacl = acl_bytes(&[
+        object_ace(
+            ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            0,
+            None,
+            &user,
+        ),
+        object_ace(
+            ACCESS_DENIED_OBJECT_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            ACE_OBJECT_TYPE_PRESENT,
+            Some(guid(2)),
+            &user,
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+
+    let root = evaluate_dacl_with_object_tree(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        None,
+        &object_tree,
+    )
+    .expect("tree evaluation should succeed");
+    let result_list = evaluate_dacl_result_list(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        None,
+        &object_tree,
+    )
+    .expect("result-list evaluation should succeed");
+
+    assert!(root.success);
+    assert_eq!(root.granted, READ_CONTROL);
+    assert_eq!(result_list.granted_list, vec![READ_CONTROL, READ_CONTROL]);
+    assert_eq!(
+        result_list.status_list,
+        vec![AccessStatus::Ok, AccessStatus::Ok]
+    );
 }
