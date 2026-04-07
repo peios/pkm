@@ -13,7 +13,9 @@ use crate::error::{KacsError, KacsResult};
 use crate::object_tree::ObjectTypeList;
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::{Sid, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
-use crate::token::{IdentityView, RestrictedTokenContext, SidAndAttributes, TokenView};
+use crate::token::{
+    ConfinementTokenContext, IdentityView, RestrictedTokenContext, SidAndAttributes, TokenView,
+};
 
 const INHERIT_ONLY_ACE: u8 = 0x08;
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
@@ -178,6 +180,68 @@ pub fn evaluate_dacl_with_restricted_context(
         restricted_context.write_restricted,
         restricted_context.privilege_granted,
     );
+    Ok(finalize_scalar(merged.root, &normalized))
+}
+
+pub fn evaluate_dacl_with_confinement_context(
+    sd: &SecurityDescriptor<'_>,
+    token: &TokenView<'_>,
+    desired_access: u32,
+    mapping: &GenericMapping,
+    skip_owner_implicit: bool,
+    conditional_context: &ConditionalContext<'_>,
+    confinement_context: &ConfinementTokenContext<'_>,
+) -> KacsResult<DaclEvaluation> {
+    let normalized = mapping.normalize_desired_access(desired_access)?;
+    let valid_rights = mapping.map_mask(GENERIC_ALL)?;
+    let caller_is_owner = caller_is_owner_normal(sd, token);
+    let normal = evaluate_dacl_states(
+        sd,
+        token,
+        normalized,
+        valid_rights,
+        mapping,
+        skip_owner_implicit,
+        *conditional_context,
+        None,
+        caller_is_owner,
+        |sid, polarity| sid_matches_token(token, sid, polarity),
+    )?;
+
+    let Some(confinement_sid) = confinement_context.confinement_sid else {
+        return Ok(finalize_scalar(normal.root, &normalized));
+    };
+    if confinement_context.confinement_exempt {
+        return Ok(finalize_scalar(normal.root, &normalized));
+    }
+
+    let confinement_owner = sd
+        .owner()
+        .is_some_and(|owner| confinement_contains(confinement_context, owner));
+    let confinement_self = conditional_context
+        .self_sid
+        .filter(|sid| confinement_contains(confinement_context, *sid));
+    let mut confinement_conditions = *conditional_context;
+    confinement_conditions.self_sid = confinement_self;
+    confinement_conditions.principal_self_matches = Some(confinement_self.is_some());
+    confinement_conditions.caller_is_owner = confinement_owner;
+
+    let confinement = evaluate_dacl_states(
+        sd,
+        token,
+        normalized,
+        valid_rights,
+        mapping,
+        true,
+        confinement_conditions,
+        None,
+        confinement_owner,
+        |sid, _| {
+            sid == confinement_sid || confinement_contains_capability(confinement_context, sid)
+        },
+    )?;
+
+    let merged = merge_absolute_results(normal, &confinement);
     Ok(finalize_scalar(merged.root, &normalized))
 }
 
@@ -387,6 +451,87 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
             .object_states
             .as_ref()
             .expect("restricted object-tree evaluation must retain states"),
+        &normalized,
+    ))
+}
+
+pub fn evaluate_dacl_result_list_with_confinement_context(
+    sd: &SecurityDescriptor<'_>,
+    token: &TokenView<'_>,
+    desired_access: u32,
+    mapping: &GenericMapping,
+    skip_owner_implicit: bool,
+    object_tree: &ObjectTypeList,
+    conditional_context: &ConditionalContext<'_>,
+    confinement_context: &ConfinementTokenContext<'_>,
+) -> KacsResult<ObjectDaclResultList> {
+    let normalized = mapping.normalize_desired_access(desired_access)?;
+    let valid_rights = mapping.map_mask(GENERIC_ALL)?;
+    let caller_is_owner = caller_is_owner_normal(sd, token);
+    let normal = evaluate_dacl_states(
+        sd,
+        token,
+        normalized,
+        valid_rights,
+        mapping,
+        skip_owner_implicit,
+        *conditional_context,
+        Some(object_tree),
+        caller_is_owner,
+        |sid, polarity| sid_matches_token(token, sid, polarity),
+    )?;
+
+    let Some(confinement_sid) = confinement_context.confinement_sid else {
+        return Ok(finalize_result_list(
+            normal
+                .object_states
+                .as_ref()
+                .expect("object-tree evaluation always builds result-list output"),
+            &normalized,
+        ));
+    };
+    if confinement_context.confinement_exempt {
+        return Ok(finalize_result_list(
+            normal
+                .object_states
+                .as_ref()
+                .expect("object-tree evaluation always builds result-list output"),
+            &normalized,
+        ));
+    }
+
+    let confinement_owner = sd
+        .owner()
+        .is_some_and(|owner| confinement_contains(confinement_context, owner));
+    let confinement_self = conditional_context
+        .self_sid
+        .filter(|sid| confinement_contains(confinement_context, *sid));
+    let mut confinement_conditions = *conditional_context;
+    confinement_conditions.self_sid = confinement_self;
+    confinement_conditions.principal_self_matches = Some(confinement_self.is_some());
+    confinement_conditions.caller_is_owner = confinement_owner;
+
+    let confinement = evaluate_dacl_states(
+        sd,
+        token,
+        normalized,
+        valid_rights,
+        mapping,
+        true,
+        confinement_conditions,
+        Some(object_tree),
+        confinement_owner,
+        |sid, _| {
+            sid == confinement_sid || confinement_contains_capability(confinement_context, sid)
+        },
+    )?;
+
+    let merged = merge_absolute_results(normal, &confinement);
+    Ok(finalize_result_list(
+        merged
+            .object_states
+            .as_ref()
+            .expect("confinement object-tree evaluation must retain states"),
         &normalized,
     ))
 }
@@ -607,6 +752,26 @@ fn merge_restricted_results(
     normal
 }
 
+fn merge_absolute_results(
+    mut normal: InternalDaclEvaluation,
+    narrowed: &InternalDaclEvaluation,
+) -> InternalDaclEvaluation {
+    normal.root.granted &= narrowed.root.granted;
+
+    if let Some(states) = normal.object_states.as_mut() {
+        let narrowed_states = narrowed
+            .object_states
+            .as_ref()
+            .expect("absolute merge requires matching object-tree state");
+        for (state, narrowed_state) in states.iter_mut().zip(narrowed_states.iter()) {
+            state.granted &= narrowed_state.granted;
+        }
+        normal.root = states[0];
+    }
+
+    normal
+}
+
 fn merge_granted(
     normal: u32,
     restricted: u32,
@@ -629,6 +794,20 @@ fn caller_is_owner_normal(sd: &SecurityDescriptor<'_>, token: &TokenView<'_>) ->
 
 fn restricted_contains(restricted_sids: &[SidAndAttributes<'_>], sid: Sid<'_>) -> bool {
     restricted_sids.iter().any(|entry| entry.sid == sid)
+}
+
+fn confinement_contains(confinement: &ConfinementTokenContext<'_>, sid: Sid<'_>) -> bool {
+    confinement.confinement_sid == Some(sid) || confinement_contains_capability(confinement, sid)
+}
+
+fn confinement_contains_capability(
+    confinement: &ConfinementTokenContext<'_>,
+    sid: Sid<'_>,
+) -> bool {
+    confinement
+        .confinement_capabilities
+        .iter()
+        .any(|entry| entry.sid == sid)
 }
 
 fn owner_rights_suppressed(dacl: &crate::acl::Acl<'_>) -> KacsResult<bool> {

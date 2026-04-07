@@ -48,3 +48,20 @@ impl<'a> Default for RestrictedTokenContext<'a> {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConfinementTokenContext<'a> {
+    pub confinement_sid: Option<Sid<'a>>,
+    pub confinement_capabilities: &'a [SidAndAttributes<'a>],
+    pub confinement_exempt: bool,
+}
+
+impl<'a> Default for ConfinementTokenContext<'a> {
+    fn default() -> Self {
+        Self {
+            confinement_sid: None,
+            confinement_capabilities: &[],
+            confinement_exempt: false,
+        }
+    }
+}

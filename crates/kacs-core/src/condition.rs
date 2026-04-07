@@ -23,6 +23,7 @@ pub enum ConditionalResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConditionalContext<'a> {
     pub self_sid: Option<Sid<'a>>,
+    pub principal_self_matches: Option<bool>,
     pub caller_is_owner: bool,
     pub identity: Option<IdentityView<'a>>,
     pub device_groups: &'a [SidAndAttributes<'a>],
@@ -36,6 +37,7 @@ impl<'a> Default for ConditionalContext<'a> {
     fn default() -> Self {
         Self {
             self_sid: None,
+            principal_self_matches: None,
             caller_is_owner: false,
             identity: None,
             device_groups: &[],
@@ -741,6 +743,9 @@ fn sid_in_membership_set(
             return Some(context.caller_is_owner);
         }
         if sid_bytes == PRINCIPAL_SELF_SID_BYTES {
+            if let Some(matches) = context.principal_self_matches {
+                return Some(matches);
+            }
             let Some(self_sid) = context.self_sid else {
                 return Some(false);
             };
