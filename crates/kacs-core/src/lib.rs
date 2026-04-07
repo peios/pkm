@@ -15,6 +15,7 @@ mod claims;
 mod condition;
 mod dacl;
 mod error;
+mod mic;
 mod object_tree;
 mod privilege;
 mod security_descriptor;
@@ -48,6 +49,12 @@ pub use dacl::{
     DaclEvaluation, ObjectDaclResultList,
 };
 pub use error::{KacsError, KacsResult};
+pub use mic::{
+    apply_mic, resolve_mandatory_label, IntegrityLevel, MandatoryLabel, MicEnforcementState,
+    SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP, SYSTEM_MANDATORY_LABEL_NO_READ_UP,
+    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
+    TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
+};
 pub use object_tree::{ObjectTypeList, ObjectTypeNode};
 pub use privilege::{
     apply_take_ownership_fallback, seed_access_check_privileges, AccessDecisionState,

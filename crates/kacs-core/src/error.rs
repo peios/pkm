@@ -34,6 +34,7 @@ pub enum KacsError {
     InvalidAceSize(u16),
     InvalidObjectAceLayout(&'static str),
     InvalidResourceAttributeSid,
+    InvalidMandatoryLabelSid,
     EmptyObjectTypeList,
     InvalidObjectTypeRootLevel(u16),
     MultipleObjectTypeRoots,
