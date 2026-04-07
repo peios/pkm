@@ -12,6 +12,7 @@ pub const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0b;
 pub const ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0c;
 pub const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
 pub const SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE: u8 = 0x12;
+pub const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
 
 pub const ACE_OBJECT_TYPE_PRESENT: u32 = 0x0000_0001;
 pub const ACE_INHERITED_OBJECT_TYPE_PRESENT: u32 = 0x0000_0002;
@@ -128,9 +129,10 @@ impl<'a> Ace<'a> {
 
     fn parse_kind(ace_type: u8, bytes: &'a [u8]) -> KacsResult<AceKind<'a>> {
         match ace_type {
-            ACCESS_ALLOWED_ACE_TYPE | ACCESS_DENIED_ACE_TYPE | SYSTEM_MANDATORY_LABEL_ACE_TYPE => {
-                Self::parse_single_sid(bytes)
-            }
+            ACCESS_ALLOWED_ACE_TYPE
+            | ACCESS_DENIED_ACE_TYPE
+            | SYSTEM_MANDATORY_LABEL_ACE_TYPE
+            | SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE => Self::parse_single_sid(bytes),
             ACCESS_ALLOWED_OBJECT_ACE_TYPE | ACCESS_DENIED_OBJECT_ACE_TYPE => {
                 Self::parse_object(bytes)
             }

@@ -17,6 +17,7 @@ mod dacl;
 mod error;
 mod mic;
 mod object_tree;
+mod pip;
 mod privilege;
 mod security_descriptor;
 mod sid;
@@ -32,7 +33,8 @@ pub use ace::{
     ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
     ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
     ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE,
-    ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
+    ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT,
+    SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
 };
 pub use acl::Acl;
 pub use claims::{
@@ -56,6 +58,7 @@ pub use mic::{
     TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
 };
 pub use object_tree::{ObjectTypeList, ObjectTypeNode};
+pub use pip::{apply_pip, resolve_process_trust_label, PipEnforcementState, ProcessTrustLabel};
 pub use privilege::{
     apply_take_ownership_fallback, seed_access_check_privileges, AccessDecisionState,
     PrivilegeGrantState, PrivilegeProvenance, TokenPrivileges, BACKUP_INTENT, RESTORE_INTENT,
