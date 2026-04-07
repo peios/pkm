@@ -1,5 +1,7 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KacsError {
+    AccessDenied,
+    NullSecurityDescriptor,
     Truncated(&'static str),
     InvalidClaimFormat(&'static str),
     InvalidClaimType(u16),
@@ -11,6 +13,8 @@ pub enum KacsError {
     },
     InvalidSecurityDescriptorRevision(u8),
     MissingSelfRelativeControl(u16),
+    MissingSecurityDescriptorOwner,
+    MissingSecurityDescriptorGroup,
     InconsistentSecurityDescriptorField {
         field: &'static str,
         present: bool,

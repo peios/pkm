@@ -15,6 +15,7 @@ mod claims;
 mod condition;
 mod dacl;
 mod error;
+mod evaluate_sd;
 mod mic;
 mod object_tree;
 mod pip;
@@ -35,7 +36,7 @@ pub use ace::{
     ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
     ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
     ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE,
-    ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT,
+    ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
     SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
     SYSTEM_SCOPED_POLICY_ID_ACE_TYPE,
 };
@@ -56,6 +57,7 @@ pub use dacl::{
     DaclEvaluation, ObjectDaclResultList,
 };
 pub use error::{KacsError, KacsResult};
+pub use evaluate_sd::{evaluate_security_descriptor, EvaluateSecurityDescriptorState};
 pub use mic::{
     apply_mic, resolve_mandatory_label, IntegrityLevel, MandatoryLabel, MicEnforcementState,
     SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP, SYSTEM_MANDATORY_LABEL_NO_READ_UP,
@@ -77,5 +79,6 @@ pub use security_descriptor::{
 };
 pub use sid::{Sid, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
 pub use token::{
-    ConfinementTokenContext, IdentityView, RestrictedTokenContext, SidAndAttributes, TokenView,
+    AccessCheckToken, ConfinementTokenContext, IdentityView, ImpersonationLevel,
+    RestrictedTokenContext, SidAndAttributes, TokenType, TokenView,
 };

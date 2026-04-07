@@ -11,6 +11,7 @@ use crate::ace::{
 use crate::condition::{evaluate_conditional_expression, ConditionalContext, ConditionalResult};
 use crate::error::{KacsError, KacsResult};
 use crate::object_tree::ObjectTypeList;
+use crate::privilege::AccessDecisionState;
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::{Sid, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
 use crate::token::{
@@ -41,7 +42,7 @@ pub struct ObjectDaclResultList {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AcePolarity {
+pub(crate) enum AcePolarity {
     Allow,
     Deny,
 }
@@ -61,16 +62,10 @@ struct ProjectedDaclAce<'a> {
     condition: Option<&'a [u8]>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct NodeState {
-    granted: u32,
-    decided: u32,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct InternalDaclEvaluation {
-    root: NodeState,
-    object_states: Option<Vec<NodeState>>,
+pub(crate) struct InternalDaclEvaluation {
+    pub(crate) root: AccessDecisionState,
+    pub(crate) object_states: Option<Vec<AccessDecisionState>>,
 }
 
 pub fn evaluate_dacl(
@@ -110,6 +105,10 @@ pub fn evaluate_dacl_with_context(
         skip_owner_implicit,
         *conditional_context,
         None,
+        AccessDecisionState {
+            granted: 0,
+            decided: 0,
+        },
         caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
@@ -137,6 +136,10 @@ pub fn evaluate_dacl_with_restricted_context(
         skip_owner_implicit,
         *conditional_context,
         None,
+        AccessDecisionState {
+            granted: 0,
+            decided: 0,
+        },
         caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
@@ -168,6 +171,10 @@ pub fn evaluate_dacl_with_restricted_context(
         skip_owner_implicit,
         restricted_conditions,
         None,
+        AccessDecisionState {
+            granted: 0,
+            decided: 0,
+        },
         restricted_owner,
         |sid, _| restricted_contains(restricted_context.restricted_sids, sid),
     )?;
@@ -204,6 +211,10 @@ pub fn evaluate_dacl_with_confinement_context(
         skip_owner_implicit,
         *conditional_context,
         None,
+        AccessDecisionState {
+            granted: 0,
+            decided: 0,
+        },
         caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
@@ -235,6 +246,10 @@ pub fn evaluate_dacl_with_confinement_context(
         true,
         confinement_conditions,
         None,
+        AccessDecisionState {
+            granted: 0,
+            decided: 0,
+        },
         confinement_owner,
         |sid, _| {
             sid == confinement_sid || confinement_contains_capability(confinement_context, sid)
@@ -312,6 +327,10 @@ pub fn evaluate_dacl_with_object_tree_and_context(
         skip_owner_implicit,
         *conditional_context,
         Some(object_tree),
+        AccessDecisionState {
+            granted: 0,
+            decided: 0,
+        },
         caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
@@ -363,6 +382,10 @@ pub fn evaluate_dacl_result_list_with_context(
         skip_owner_implicit,
         *conditional_context,
         Some(object_tree),
+        AccessDecisionState {
+            granted: 0,
+            decided: 0,
+        },
         caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
@@ -397,6 +420,10 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
         skip_owner_implicit,
         *conditional_context,
         Some(object_tree),
+        AccessDecisionState {
+            granted: 0,
+            decided: 0,
+        },
         caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
@@ -434,6 +461,10 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
         skip_owner_implicit,
         restricted_conditions,
         Some(object_tree),
+        AccessDecisionState {
+            granted: 0,
+            decided: 0,
+        },
         restricted_owner,
         |sid, _| restricted_contains(restricted_context.restricted_sids, sid),
     )?;
@@ -477,6 +508,10 @@ pub fn evaluate_dacl_result_list_with_confinement_context(
         skip_owner_implicit,
         *conditional_context,
         Some(object_tree),
+        AccessDecisionState {
+            granted: 0,
+            decided: 0,
+        },
         caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
@@ -520,6 +555,10 @@ pub fn evaluate_dacl_result_list_with_confinement_context(
         true,
         confinement_conditions,
         Some(object_tree),
+        AccessDecisionState {
+            granted: 0,
+            decided: 0,
+        },
         confinement_owner,
         |sid, _| {
             sid == confinement_sid || confinement_contains_capability(confinement_context, sid)
@@ -536,7 +575,7 @@ pub fn evaluate_dacl_result_list_with_confinement_context(
     ))
 }
 
-fn evaluate_dacl_states<F>(
+pub(crate) fn evaluate_dacl_states<F>(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,
     normalized: NormalizedDesiredAccess,
@@ -545,6 +584,7 @@ fn evaluate_dacl_states<F>(
     skip_owner_implicit: bool,
     conditional_context: ConditionalContext<'_>,
     object_tree: Option<&ObjectTypeList>,
+    initial_state: AccessDecisionState,
     caller_is_owner: bool,
     sid_matches: F,
 ) -> KacsResult<InternalDaclEvaluation>
@@ -563,8 +603,8 @@ where
         .transpose()?
         .unwrap_or(false);
 
-    let mut decided = 0u32;
-    let mut granted = 0u32;
+    let mut decided = initial_state.decided;
+    let mut granted = initial_state.granted;
 
     if caller_is_owner && !skip_owner_implicit && !owner_rights_suppressed {
         let implicit = (READ_CONTROL | WRITE_DAC) & valid_rights;
@@ -573,7 +613,7 @@ where
     }
 
     let mut object_states =
-        object_tree.map(|tree| vec![NodeState { granted, decided }; tree.len()]);
+        object_tree.map(|tree| vec![AccessDecisionState { granted, decided }; tree.len()]);
 
     match sd.dacl() {
         None => {
@@ -673,13 +713,16 @@ where
         })
     } else {
         Ok(InternalDaclEvaluation {
-            root: NodeState { granted, decided },
+            root: AccessDecisionState { granted, decided },
             object_states: None,
         })
     }
 }
 
-fn finalize_scalar(root: NodeState, normalized: &NormalizedDesiredAccess) -> DaclEvaluation {
+fn finalize_scalar(
+    root: AccessDecisionState,
+    normalized: &NormalizedDesiredAccess,
+) -> DaclEvaluation {
     let specific_request = normalized.requested & !MAXIMUM_ALLOWED;
     let success = if specific_request == 0 {
         true
@@ -695,7 +738,7 @@ fn finalize_scalar(root: NodeState, normalized: &NormalizedDesiredAccess) -> Dac
 }
 
 fn finalize_result_list(
-    states: &[NodeState],
+    states: &[AccessDecisionState],
     normalized: &NormalizedDesiredAccess,
 ) -> ObjectDaclResultList {
     let mut granted_list = Vec::with_capacity(states.len());
@@ -717,7 +760,7 @@ fn finalize_result_list(
     }
 }
 
-fn merge_restricted_results(
+pub(crate) fn merge_restricted_results(
     mut normal: InternalDaclEvaluation,
     restricted: &InternalDaclEvaluation,
     write_bits: u32,
@@ -752,7 +795,7 @@ fn merge_restricted_results(
     normal
 }
 
-fn merge_absolute_results(
+pub(crate) fn merge_absolute_results(
     mut normal: InternalDaclEvaluation,
     narrowed: &InternalDaclEvaluation,
 ) -> InternalDaclEvaluation {
@@ -787,20 +830,23 @@ fn merge_granted(
     merged | privilege_granted
 }
 
-fn caller_is_owner_normal(sd: &SecurityDescriptor<'_>, token: &TokenView<'_>) -> bool {
+pub(crate) fn caller_is_owner_normal(sd: &SecurityDescriptor<'_>, token: &TokenView<'_>) -> bool {
     sd.owner()
         .is_some_and(|owner| sid_matches_token(token, owner, AcePolarity::Allow))
 }
 
-fn restricted_contains(restricted_sids: &[SidAndAttributes<'_>], sid: Sid<'_>) -> bool {
+pub(crate) fn restricted_contains(restricted_sids: &[SidAndAttributes<'_>], sid: Sid<'_>) -> bool {
     restricted_sids.iter().any(|entry| entry.sid == sid)
 }
 
-fn confinement_contains(confinement: &ConfinementTokenContext<'_>, sid: Sid<'_>) -> bool {
+pub(crate) fn confinement_contains(
+    confinement: &ConfinementTokenContext<'_>,
+    sid: Sid<'_>,
+) -> bool {
     confinement.confinement_sid == Some(sid) || confinement_contains_capability(confinement, sid)
 }
 
-fn confinement_contains_capability(
+pub(crate) fn confinement_contains_capability(
     confinement: &ConfinementTokenContext<'_>,
     sid: Sid<'_>,
 ) -> bool {
@@ -1003,7 +1049,11 @@ where
     ordinary_sid_matches(ace_sid, polarity)
 }
 
-fn sid_matches_token(token: &TokenView<'_>, sid: Sid<'_>, polarity: AcePolarity) -> bool {
+pub(crate) fn sid_matches_token(
+    token: &TokenView<'_>,
+    sid: Sid<'_>,
+    polarity: AcePolarity,
+) -> bool {
     if sid == token.user {
         return match polarity {
             AcePolarity::Allow => !token.user_deny_only,
@@ -1035,7 +1085,7 @@ fn sid_matches_token(token: &TokenView<'_>, sid: Sid<'_>, polarity: AcePolarity)
     false
 }
 
-fn apply_global_to_tree(states: &mut [NodeState], bits: u32, polarity: AcePolarity) {
+fn apply_global_to_tree(states: &mut [AccessDecisionState], bits: u32, polarity: AcePolarity) {
     for state in states.iter_mut() {
         apply_bits(state, bits, polarity);
     }
@@ -1043,7 +1093,7 @@ fn apply_global_to_tree(states: &mut [NodeState], bits: u32, polarity: AcePolari
 
 fn apply_object_ace_to_tree(
     tree: &ObjectTypeList,
-    states: &mut [NodeState],
+    states: &mut [AccessDecisionState],
     index: usize,
     bits: u32,
     polarity: AcePolarity,
@@ -1070,7 +1120,7 @@ fn apply_object_ace_to_tree(
     }
 }
 
-fn apply_bits(state: &mut NodeState, bits: u32, polarity: AcePolarity) -> u32 {
+fn apply_bits(state: &mut AccessDecisionState, bits: u32, polarity: AcePolarity) -> u32 {
     let undecided = bits & !state.decided;
     if undecided == 0 {
         return 0;
@@ -1084,7 +1134,7 @@ fn apply_bits(state: &mut NodeState, bits: u32, polarity: AcePolarity) -> u32 {
     undecided
 }
 
-fn propagate_grants_up(tree: &ObjectTypeList, states: &mut [NodeState]) {
+fn propagate_grants_up(tree: &ObjectTypeList, states: &mut [AccessDecisionState]) {
     for index in (0..states.len()).rev() {
         let mut children = tree.direct_children(index);
         let Some(first_child) = children.next() else {
@@ -1108,7 +1158,7 @@ fn propagate_grants_up(tree: &ObjectTypeList, states: &mut [NodeState]) {
 
 fn propagate_denials_up(
     tree: &ObjectTypeList,
-    states: &mut [NodeState],
+    states: &mut [AccessDecisionState],
     start_index: usize,
     denied_bits: u32,
 ) {
