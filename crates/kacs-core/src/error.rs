@@ -1,6 +1,8 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KacsError {
     Truncated(&'static str),
+    InvalidClaimFormat(&'static str),
+    InvalidClaimType(u16),
     InvalidSidRevision(u8),
     InvalidSidSubAuthorityCount(u8),
     InvalidSidLength {

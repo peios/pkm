@@ -19,6 +19,7 @@ mod mic;
 mod object_tree;
 mod pip;
 mod privilege;
+mod sacl;
 mod security_descriptor;
 mod sid;
 mod token;
@@ -35,11 +36,14 @@ pub use ace::{
     ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE,
     ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT,
     SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
+    SYSTEM_SCOPED_POLICY_ID_ACE_TYPE,
 };
 pub use acl::Acl;
 pub use claims::{
-    ClaimAttribute, ClaimValue, CLAIM_SECURITY_ATTRIBUTE_DISABLED,
-    CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY, CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE,
+    parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, ClaimValue,
+    CLAIM_SECURITY_ATTRIBUTE_DISABLED, CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY,
+    CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE, CLAIM_TYPE_BOOLEAN, CLAIM_TYPE_INT64,
+    CLAIM_TYPE_OCTET, CLAIM_TYPE_SID, CLAIM_TYPE_STRING, CLAIM_TYPE_UINT64,
 };
 pub use condition::{evaluate_conditional_expression, ConditionalContext, ConditionalResult};
 pub use dacl::{
@@ -65,6 +69,7 @@ pub use privilege::{
     SE_BACKUP_PRIVILEGE, SE_RELABEL_PRIVILEGE, SE_RESTORE_PRIVILEGE, SE_SECURITY_PRIVILEGE,
     SE_TAKE_OWNERSHIP_PRIVILEGE,
 };
+pub use sacl::{extract_sacl_metadata, SaclMetadata};
 pub use security_descriptor::{
     SecurityDescriptor, SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE,
 };
