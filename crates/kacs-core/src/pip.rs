@@ -4,11 +4,19 @@ use crate::error::{KacsError, KacsResult};
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
 
+const INHERIT_ONLY_ACE: u8 = 0x08;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessTrustLabel {
     pub pip_type: u32,
     pub pip_trust: u32,
     pub mask: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PipContext {
+    pub pip_type: u32,
+    pub pip_trust: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -25,6 +33,9 @@ pub fn resolve_process_trust_label(
 
     for ace in sacl.entries() {
         let ace = ace?;
+        if (ace.ace_flags() & INHERIT_ONLY_ACE) != 0 {
+            continue;
+        }
         if ace.ace_type() != SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE {
             continue;
         }
@@ -44,14 +55,14 @@ pub fn resolve_process_trust_label(
 
 pub fn apply_pip(
     label: ProcessTrustLabel,
-    pip_type: u32,
-    pip_trust: u32,
+    caller_pip: PipContext,
     mapping: &GenericMapping,
     decided: &mut u32,
     granted: &mut u32,
     privilege_granted: &mut u32,
 ) -> KacsResult<PipEnforcementState> {
-    let caller_dominates = pip_type >= label.pip_type && pip_trust >= label.pip_trust;
+    let caller_dominates =
+        caller_pip.pip_type >= label.pip_type && caller_pip.pip_trust >= label.pip_trust;
     if caller_dominates {
         return Ok(PipEnforcementState::default());
     }

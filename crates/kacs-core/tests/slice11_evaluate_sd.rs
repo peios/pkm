@@ -1,13 +1,15 @@
 use kacs_core::{
     evaluate_security_descriptor, AccessCheckToken, ConditionalContext, ConfinementTokenContext,
     GenericMapping, ImpersonationLevel, IntegrityLevel, KacsError, ObjectTypeList, ObjectTypeNode,
-    RestrictedTokenContext, SecurityDescriptor, Sid, SidAndAttributes, TokenPrivileges, TokenType,
-    TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACCESS_SYSTEM_SECURITY,
-    ACE_OBJECT_TYPE_PRESENT, GENERIC_WRITE, READ_CONTROL, SE_DACL_PRESENT, SE_GROUP_ENABLED,
-    SE_SACL_PRESENT, SE_SECURITY_PRIVILEGE, SE_SELF_RELATIVE, SE_TAKE_OWNERSHIP_PRIVILEGE,
-    SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
-    TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC, WRITE_OWNER,
+    PipContext, RestrictedTokenContext, SecurityDescriptor, Sid, SidAndAttributes, TokenPrivileges,
+    TokenType, TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+    ACCESS_SYSTEM_SECURITY, ACE_OBJECT_TYPE_PRESENT, GENERIC_WRITE, READ_CONTROL, SE_DACL_PRESENT,
+    SE_GROUP_ENABLED, SE_SACL_PRESENT, SE_SECURITY_PRIVILEGE, SE_SELF_RELATIVE,
+    SE_TAKE_OWNERSHIP_PRIVILEGE, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC, WRITE_OWNER,
 };
+
+const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
 
 fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
@@ -140,11 +142,13 @@ fn primary_token<'a>(user: Sid<'a>, groups: &'a [SidAndAttributes<'a>]) -> Acces
         privileges: TokenPrivileges::default(),
         integrity_level: IntegrityLevel::Medium,
         mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
-        pip_type: 0,
-        pip_trust: 0,
         restricted: RestrictedTokenContext::default(),
         confinement: ConfinementTokenContext::default(),
     }
+}
+
+fn default_pip() -> PipContext {
+    PipContext::default()
 }
 
 #[test]
@@ -159,6 +163,7 @@ fn identification_level_impersonation_denies_before_other_validation() {
     let err = evaluate_security_descriptor(
         None,
         &token,
+        default_pip(),
         READ_CONTROL,
         &mapping(),
         None,
@@ -182,6 +187,7 @@ fn missing_owner_or_group_is_rejected() {
     let missing_group_err = evaluate_security_descriptor(
         Some(&missing_group),
         &token,
+        default_pip(),
         READ_CONTROL,
         &mapping(),
         None,
@@ -196,6 +202,7 @@ fn missing_owner_or_group_is_rejected() {
     let missing_owner_err = evaluate_security_descriptor(
         Some(&missing_owner),
         &token,
+        default_pip(),
         READ_CONTROL,
         &mapping(),
         None,
@@ -230,6 +237,40 @@ fn malformed_object_tree_is_reused_as_a_fail_closed_dependency() {
 }
 
 #[test]
+fn write_restricted_requires_user_deny_only_in_full_pipeline() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 10015]);
+    let sd_bytes = sd_bytes(Some(&owner), Some(&group), None, None);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+
+    let mut token = primary_token(parse_sid(&user), &[]);
+    token.restricted = RestrictedTokenContext {
+        restricted_sids: &[],
+        restricted_device_groups: &[],
+        write_restricted: true,
+        privilege_granted: 0,
+    };
+
+    let err = evaluate_security_descriptor(
+        Some(&sd),
+        &token,
+        default_pip(),
+        READ_CONTROL,
+        &mapping(),
+        None,
+        &ConditionalContext::default(),
+        0,
+    )
+    .expect_err("invalid restricted token invariant must fail");
+
+    assert_eq!(
+        err,
+        KacsError::InvalidTokenInvariant("write_restricted requires user_deny_only")
+    );
+}
+
+#[test]
 fn scalar_pipeline_composes_mapping_dacl_and_take_ownership_fallback() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
@@ -249,6 +290,7 @@ fn scalar_pipeline_composes_mapping_dacl_and_take_ownership_fallback() {
     let result = evaluate_security_descriptor(
         Some(&sd),
         &token,
+        default_pip(),
         GENERIC_WRITE | WRITE_OWNER,
         &mapping(),
         None,
@@ -261,6 +303,57 @@ fn scalar_pipeline_composes_mapping_dacl_and_take_ownership_fallback() {
     assert!(!result.max_allowed_mode);
     assert_eq!(result.granted, WRITE_DAC | WRITE_OWNER);
     assert_eq!(result.privilege_granted, WRITE_OWNER);
+}
+
+#[test]
+fn pip_revocation_is_not_restored_after_restricted_merge() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 10020]);
+    let restricted = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 10021]);
+    let trust = sid_bytes([0, 0, 0, 0, 0, 19], &[512, 4096]);
+    let dacl = acl_bytes(&[]);
+    let sacl = acl_bytes(&[basic_ace(SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, 0, 0, &trust)]);
+    let sd_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+
+    let restricted_sids = [SidAndAttributes {
+        sid: parse_sid(&restricted),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let mut token = primary_token(parse_sid(&user), &[]);
+    token.privileges = TokenPrivileges {
+        present: kacs_core::SE_BACKUP_PRIVILEGE,
+        enabled: kacs_core::SE_BACKUP_PRIVILEGE,
+        enabled_by_default: 0,
+        used: 0,
+    };
+    token.restricted = RestrictedTokenContext {
+        restricted_sids: &restricted_sids,
+        restricted_device_groups: &[],
+        write_restricted: false,
+        privilege_granted: 0,
+    };
+    let pip = PipContext {
+        pip_type: 512,
+        pip_trust: 1024,
+    };
+
+    let result = evaluate_security_descriptor(
+        Some(&sd),
+        &token,
+        pip,
+        READ_CONTROL,
+        &mapping(),
+        None,
+        &ConditionalContext::default(),
+        kacs_core::BACKUP_INTENT,
+    )
+    .expect("evaluation should succeed");
+
+    assert_eq!(result.granted, 0);
+    assert_eq!(result.privilege_granted, 0);
+    assert_eq!(result.mapped_desired, READ_CONTROL);
 }
 
 #[test]
@@ -290,6 +383,7 @@ fn mandatory_decided_blocks_take_ownership_fallback() {
     let result = evaluate_security_descriptor(
         Some(&sd),
         &token,
+        default_pip(),
         WRITE_OWNER,
         &mapping(),
         None,
@@ -341,6 +435,7 @@ fn privilege_grants_survive_restricted_merge_but_not_confinement() {
     let result = evaluate_security_descriptor(
         Some(&sd),
         &token,
+        default_pip(),
         READ_CONTROL | ACCESS_SYSTEM_SECURITY,
         &mapping(),
         None,
@@ -384,6 +479,7 @@ fn object_tree_pipeline_preserves_root_and_per_node_grants() {
     let result = evaluate_security_descriptor(
         Some(&sd),
         &token,
+        default_pip(),
         READ_CONTROL,
         &mapping(),
         Some(&tree),

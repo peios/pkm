@@ -5,12 +5,13 @@ use crate::condition::{evaluate_conditional_expression, ConditionalContext, Cond
 use crate::error::{KacsError, KacsResult};
 use crate::evaluate_sd::{evaluate_security_descriptor, EvaluateSecurityDescriptorState};
 use crate::object_tree::ObjectTypeList;
+use crate::pip::PipContext;
 use crate::security_descriptor::{
     SecurityDescriptor, SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE,
 };
 use crate::sid::Sid;
 use crate::token::AccessCheckToken;
-use crate::{ACCESS_ALLOWED_ACE_TYPE, GENERIC_ALL};
+use crate::{ACCESS_ALLOWED_ACE_TYPE, GENERIC_ALL, SYSTEM_SCOPED_POLICY_ID_ACE_TYPE};
 
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
 const SYSTEM_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
@@ -55,6 +56,7 @@ struct RuleGrantState {
 pub fn evaluate_caap<'a>(
     sd: &SecurityDescriptor<'a>,
     token: &AccessCheckToken<'a>,
+    pip: PipContext,
     desired_access: u32,
     mapping: &GenericMapping,
     object_tree: Option<&ObjectTypeList>,
@@ -91,6 +93,7 @@ pub fn evaluate_caap<'a>(
                     rule.staged_sacl,
                     sd,
                     token,
+                    pip,
                     desired_access,
                     mapping,
                     object_tree,
@@ -114,6 +117,7 @@ pub fn evaluate_caap<'a>(
                 None,
                 sd,
                 token,
+                pip,
                 desired_access,
                 mapping,
                 object_tree,
@@ -148,6 +152,7 @@ fn apply_rule<'a>(
     staged_sacl: Option<&'a [u8]>,
     sd: &SecurityDescriptor<'a>,
     token: &AccessCheckToken<'a>,
+    pip: PipContext,
     desired_access: u32,
     mapping: &GenericMapping,
     object_tree: Option<&ObjectTypeList>,
@@ -172,6 +177,7 @@ fn apply_rule<'a>(
     let effective_rule = evaluate_rule_dacl(
         sd,
         token,
+        pip,
         desired_access,
         mapping,
         object_tree,
@@ -179,9 +185,9 @@ fn apply_rule<'a>(
         effective_dacl,
     );
 
-    let effective_state = effective_rule
-        .clone()
-        .unwrap_or_else(|| deny_except_privileges(base.privilege_granted, object_tree));
+    let effective_state = effective_rule.clone().unwrap_or_else(|| {
+        deny_except_privileges(base.privilege_granted, base.privilege_granted, object_tree)
+    });
     *granted &= effective_state.granted;
     intersect_object_grants(object_granted_list, &effective_state.object_granted_list)?;
 
@@ -193,17 +199,18 @@ fn apply_rule<'a>(
         evaluate_rule_dacl(
             sd,
             token,
+            pip,
             desired_access,
             mapping,
             object_tree,
             conditional_context,
             staged_dacl,
         )
-        .unwrap_or_else(|| deny_except_privileges(0, object_tree))
+        .unwrap_or_else(|| deny_except_privileges(0, base.privilege_granted, object_tree))
     } else {
-        effective_rule
-            .clone()
-            .unwrap_or_else(|| deny_except_privileges(base.privilege_granted, object_tree))
+        effective_rule.clone().unwrap_or_else(|| {
+            deny_except_privileges(base.privilege_granted, base.privilege_granted, object_tree)
+        })
     };
 
     *staged_granted &= staged_state.granted;
@@ -246,9 +253,10 @@ fn rule_applies(
         principal_self_matches: None,
         caller_is_owner: false,
         identity: None,
+        identity_membership_is_presence_based: false,
         device_groups: conditional_context.device_groups,
-        user_claims: &[],
-        device_claims: &[],
+        user_claims: conditional_context.user_claims,
+        device_claims: conditional_context.device_claims,
         resource_claims: resource_attributes,
         local_claims: conditional_context.local_claims,
     };
@@ -260,6 +268,7 @@ fn rule_applies(
 fn evaluate_rule_dacl<'a>(
     base_sd: &SecurityDescriptor<'a>,
     token: &AccessCheckToken<'a>,
+    pip: PipContext,
     desired_access: u32,
     mapping: &GenericMapping,
     object_tree: Option<&ObjectTypeList>,
@@ -271,6 +280,7 @@ fn evaluate_rule_dacl<'a>(
     let result = evaluate_security_descriptor(
         Some(&synthetic_sd),
         token,
+        pip,
         desired_access,
         mapping,
         object_tree,
@@ -295,7 +305,7 @@ fn build_synthetic_sd_bytes(
     let group = base_sd
         .group()
         .ok_or(KacsError::MissingSecurityDescriptorGroup)?;
-    let sacl = base_sd.sacl().map(|acl| acl.bytes());
+    let sacl = strip_scoped_policy_aces(base_sd.sacl())?;
 
     let mut control = base_sd.control() | SE_SELF_RELATIVE | SE_DACL_PRESENT;
     if sacl.is_some() {
@@ -316,7 +326,7 @@ fn build_synthetic_sd_bytes(
     bytes[8..12].copy_from_slice(&group_offset.to_le_bytes());
     bytes.extend_from_slice(group.as_bytes());
 
-    if let Some(sacl) = sacl {
+    if let Some(sacl) = sacl.as_deref() {
         let sacl_offset = bytes.len() as u32;
         bytes[12..16].copy_from_slice(&sacl_offset.to_le_bytes());
         bytes.extend_from_slice(sacl);
@@ -370,13 +380,41 @@ fn intersect_object_grants(
 }
 
 fn deny_except_privileges(
-    privilege_granted: u32,
+    scalar_privilege_granted: u32,
+    object_privilege_granted: u32,
     object_tree: Option<&ObjectTypeList>,
 ) -> RuleGrantState {
     RuleGrantState {
-        granted: privilege_granted,
-        object_granted_list: object_tree.map(|tree| vec![privilege_granted; tree.len()]),
+        granted: scalar_privilege_granted,
+        object_granted_list: object_tree.map(|tree| vec![object_privilege_granted; tree.len()]),
     }
+}
+
+fn strip_scoped_policy_aces(sacl: Option<crate::Acl<'_>>) -> KacsResult<Option<Vec<u8>>> {
+    let Some(sacl) = sacl else {
+        return Ok(None);
+    };
+
+    let mut kept = Vec::new();
+    for ace in sacl.entries() {
+        let ace = ace?;
+        if ace.ace_type() != SYSTEM_SCOPED_POLICY_ID_ACE_TYPE {
+            kept.push(ace.bytes().to_vec());
+        }
+    }
+
+    let size = 8 + kept.iter().map(Vec::len).sum::<usize>();
+    let mut bytes = Vec::with_capacity(size);
+    bytes.push(sacl.revision());
+    bytes.push(sacl.sbz1());
+    bytes.extend_from_slice(&(size as u16).to_le_bytes());
+    bytes.extend_from_slice(&(kept.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(&sacl.sbz2().to_le_bytes());
+    for ace in kept {
+        bytes.extend_from_slice(&ace);
+    }
+
+    Ok(Some(bytes))
 }
 
 fn build_recovery_policy_dacl() -> Vec<u8> {
@@ -421,4 +459,115 @@ fn acl_bytes(aces: &[Vec<u8>]) -> Vec<u8> {
         bytes.extend_from_slice(ace);
     }
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_synthetic_sd_bytes, strip_scoped_policy_aces};
+    use crate::{
+        extract_sacl_metadata, SecurityDescriptor, ACCESS_ALLOWED_ACE_TYPE, SE_DACL_PRESENT,
+        SE_SACL_PRESENT, SE_SELF_RELATIVE, SYSTEM_SCOPED_POLICY_ID_ACE_TYPE,
+    };
+
+    fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
+        bytes.push(1);
+        bytes.push(sub_authorities.len() as u8);
+        bytes.extend_from_slice(&authority);
+        for sub_authority in sub_authorities {
+            bytes.extend_from_slice(&sub_authority.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn basic_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
+        let size = 8 + sid.len();
+        let mut bytes = Vec::with_capacity(size);
+        bytes.push(ace_type);
+        bytes.push(flags);
+        bytes.extend_from_slice(&(size as u16).to_le_bytes());
+        bytes.extend_from_slice(&mask.to_le_bytes());
+        bytes.extend_from_slice(sid);
+        bytes
+    }
+
+    fn acl_bytes(aces: &[Vec<u8>]) -> Vec<u8> {
+        let size = 8 + aces.iter().map(Vec::len).sum::<usize>();
+        let mut bytes = Vec::with_capacity(size);
+        bytes.push(4);
+        bytes.push(0);
+        bytes.extend_from_slice(&(size as u16).to_le_bytes());
+        bytes.extend_from_slice(&(aces.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        for ace in aces {
+            bytes.extend_from_slice(ace);
+        }
+        bytes
+    }
+
+    fn sd_bytes(owner: &[u8], group: &[u8], sacl: &[u8], dacl: &[u8]) -> Vec<u8> {
+        let control = SE_SELF_RELATIVE | SE_SACL_PRESENT | SE_DACL_PRESENT;
+        let mut bytes = vec![0u8; 20];
+        bytes[0] = 1;
+        bytes[2..4].copy_from_slice(&control.to_le_bytes());
+        let owner_offset = bytes.len() as u32;
+        bytes[4..8].copy_from_slice(&owner_offset.to_le_bytes());
+        bytes.extend_from_slice(owner);
+        let group_offset = bytes.len() as u32;
+        bytes[8..12].copy_from_slice(&group_offset.to_le_bytes());
+        bytes.extend_from_slice(group);
+        let sacl_offset = bytes.len() as u32;
+        bytes[12..16].copy_from_slice(&sacl_offset.to_le_bytes());
+        bytes.extend_from_slice(sacl);
+        let dacl_offset = bytes.len() as u32;
+        bytes[16..20].copy_from_slice(&dacl_offset.to_le_bytes());
+        bytes.extend_from_slice(dacl);
+        bytes
+    }
+
+    #[test]
+    fn strip_scoped_policy_aces_removes_policy_references() {
+        let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+        let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+        let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 15000]);
+        let policy = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 15100]);
+        let sacl = acl_bytes(&[
+            basic_ace(SYSTEM_SCOPED_POLICY_ID_ACE_TYPE, 0, 0, &policy),
+            basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, 0x10, &user),
+        ]);
+        let dacl = acl_bytes(&[]);
+        let base_bytes = sd_bytes(&owner, &group, &sacl, &dacl);
+        let sd = SecurityDescriptor::parse(&base_bytes).expect("sd should parse");
+
+        let stripped = strip_scoped_policy_aces(sd.sacl())
+            .expect("strip should succeed")
+            .expect("sacl should remain present");
+        let stripped_sd_bytes = sd_bytes(&owner, &group, &stripped, &dacl);
+        let stripped_sd =
+            SecurityDescriptor::parse(&stripped_sd_bytes).expect("synthetic sd should parse");
+        let metadata = extract_sacl_metadata(&stripped_sd).expect("metadata should parse");
+
+        assert!(metadata.policy_sids.is_empty());
+    }
+
+    #[test]
+    fn synthetic_sd_builder_strips_scoped_policy_aces() {
+        let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+        let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+        let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 15200]);
+        let policy = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 15300]);
+        let sacl = acl_bytes(&[
+            basic_ace(SYSTEM_SCOPED_POLICY_ID_ACE_TYPE, 0, 0, &policy),
+            basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, 0x10, &user),
+        ]);
+        let dacl = acl_bytes(&[basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, 0x1, &user)]);
+        let base_sd_bytes = sd_bytes(&owner, &group, &sacl, &dacl);
+        let base_sd = SecurityDescriptor::parse(&base_sd_bytes).expect("sd should parse");
+
+        let synthetic = build_synthetic_sd_bytes(&base_sd, &dacl).expect("builder should succeed");
+        let synthetic_sd = SecurityDescriptor::parse(&synthetic).expect("synthetic sd parses");
+        let metadata = extract_sacl_metadata(&synthetic_sd).expect("metadata parses");
+
+        assert!(metadata.policy_sids.is_empty());
+    }
 }

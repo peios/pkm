@@ -2,6 +2,7 @@
 pub enum KacsError {
     AccessDenied,
     InvariantViolation(&'static str),
+    InvalidTokenInvariant(&'static str),
     NullSecurityDescriptor,
     Truncated(&'static str),
     InvalidClaimFormat(&'static str),
@@ -25,6 +26,15 @@ pub enum KacsError {
         field: &'static str,
         offset: u32,
         buffer_len: usize,
+    },
+    SecurityDescriptorOffsetInsideHeader {
+        field: &'static str,
+        offset: u32,
+        header_len: usize,
+    },
+    SecurityDescriptorComponentsOverlap {
+        first: &'static str,
+        second: &'static str,
     },
     InvalidAclSize(u16),
     AclSizeExceedsBuffer {

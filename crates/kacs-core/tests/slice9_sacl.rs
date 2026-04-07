@@ -4,6 +4,7 @@ use kacs_core::{
 
 const SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE: u8 = 0x12;
 const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
+const INHERIT_ONLY_ACE: u8 = 0x08;
 
 fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
@@ -86,8 +87,11 @@ fn sd_with_sacl(owner: &[u8], sacl: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0u8; 20];
     bytes[0] = 1;
     bytes[2..4].copy_from_slice(&control.to_le_bytes());
-    bytes[4..8].copy_from_slice(&20u32.to_le_bytes());
-    bytes[8..12].copy_from_slice(&20u32.to_le_bytes());
+    let owner_offset = bytes.len() as u32;
+    bytes[4..8].copy_from_slice(&owner_offset.to_le_bytes());
+    bytes.extend_from_slice(owner);
+    let group_offset = bytes.len() as u32;
+    bytes[8..12].copy_from_slice(&group_offset.to_le_bytes());
     bytes.extend_from_slice(owner);
     let sacl_offset = bytes.len() as u32;
     bytes[12..16].copy_from_slice(&sacl_offset.to_le_bytes());
@@ -144,4 +148,28 @@ fn malformed_resource_attribute_payload_fails_closed() {
 
     let err = extract_sacl_metadata(&sd).expect_err("malformed payload must fail");
     assert_eq!(err, KacsError::InvalidClaimFormat("claim entry header"));
+}
+
+#[test]
+fn inherit_only_sacl_metadata_aces_are_ignored() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let policy = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 3]);
+    let sacl = acl_bytes(&[
+        resource_attribute_ace(INHERIT_ONLY_ACE, &int64_claim("Inherited", 7)),
+        basic_ace(
+            SYSTEM_SCOPED_POLICY_ID_ACE_TYPE,
+            INHERIT_ONLY_ACE,
+            0,
+            &policy,
+        ),
+        resource_attribute_ace(0, &int64_claim("Effective", 9)),
+    ]);
+    let sd_bytes = sd_with_sacl(&owner, &sacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+
+    let metadata = extract_sacl_metadata(&sd).expect("metadata should extract");
+
+    assert_eq!(metadata.resource_attributes.len(), 1);
+    assert_eq!(metadata.resource_attributes[0].name, "Effective");
+    assert!(metadata.policy_sids.is_empty());
 }

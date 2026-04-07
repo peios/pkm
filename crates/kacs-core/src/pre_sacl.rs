@@ -4,7 +4,7 @@ use crate::access_mask::GenericMapping;
 use crate::claims::ClaimAttribute;
 use crate::error::KacsResult;
 use crate::mic::{apply_mic, resolve_mandatory_label, IntegrityLevel};
-use crate::pip::{apply_pip, resolve_process_trust_label};
+use crate::pip::{apply_pip, resolve_process_trust_label, PipContext};
 use crate::privilege::PrivilegeProvenance;
 use crate::sacl::extract_sacl_metadata;
 use crate::security_descriptor::SecurityDescriptor;
@@ -26,8 +26,7 @@ pub fn pre_sacl_walk<'a>(
     token_integrity: IntegrityLevel,
     mandatory_policy: u32,
     effective_privileges: u64,
-    pip_type: u32,
-    pip_trust: u32,
+    pip: PipContext,
     mapping: &GenericMapping,
     decided: u32,
     granted: u32,
@@ -58,8 +57,7 @@ pub fn pre_sacl_walk<'a>(
     if let Some(label) = trust_label {
         let pip = apply_pip(
             label,
-            pip_type,
-            pip_trust,
+            pip,
             mapping,
             &mut decided,
             &mut granted,

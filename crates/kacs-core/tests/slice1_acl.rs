@@ -1,6 +1,7 @@
 use kacs_core::{
     AceKind, Acl, KacsError, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
-    ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACE_OBJECT_TYPE_PRESENT,
+    ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACE_OBJECT_TYPE_PRESENT, SYSTEM_AUDIT_ACE_TYPE,
+    SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE,
 };
 
 fn sid_bytes(sub_authorities: &[u32]) -> Vec<u8> {
@@ -52,6 +53,30 @@ fn callback_allow_ace(mask: u32, sid: &[u8], application_data: &[u8]) -> Vec<u8>
     bytes.extend_from_slice(&mask.to_le_bytes());
     bytes.extend_from_slice(sid);
     bytes.extend_from_slice(application_data);
+    bytes
+}
+
+fn callback_object_ace(
+    ace_type: u8,
+    mask: u32,
+    flags: u32,
+    object_type: [u8; 16],
+    sid: &[u8],
+    application_data: &[u8],
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&mask.to_le_bytes());
+    body.extend_from_slice(&flags.to_le_bytes());
+    body.extend_from_slice(&object_type);
+    body.extend_from_slice(sid);
+    body.extend_from_slice(application_data);
+
+    let size = 4 + body.len();
+    let mut bytes = Vec::with_capacity(size);
+    bytes.push(ace_type);
+    bytes.push(0);
+    bytes.extend_from_slice(&(size as u16).to_le_bytes());
+    bytes.extend_from_slice(&body);
     bytes
 }
 
@@ -166,6 +191,70 @@ fn parses_callback_ace_and_exposes_application_data() {
             application_data,
         } => {
             assert_eq!(mask, 0x0000_0001);
+            assert_eq!(parsed_sid.as_bytes(), sid.as_slice());
+            assert_eq!(application_data, app_data);
+        }
+        other => panic!("unexpected ace kind: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_known_system_audit_single_sid_ace_layout() {
+    let sid = sid_bytes(&[18]);
+    let ace = basic_allow_ace(0x0000_0001, &sid);
+    let mut audit_ace = ace;
+    audit_ace[0] = SYSTEM_AUDIT_ACE_TYPE;
+    let bytes = acl_bytes(2, &[audit_ace]);
+    let acl = Acl::parse(&bytes).expect("acl should parse");
+    let entry = acl
+        .entries()
+        .next()
+        .expect("entry expected")
+        .expect("entry should parse");
+
+    match entry.kind() {
+        AceKind::SingleSid {
+            mask,
+            sid: parsed_sid,
+        } => {
+            assert_eq!(mask, 0x0000_0001);
+            assert_eq!(parsed_sid.as_bytes(), sid.as_slice());
+        }
+        other => panic!("unexpected ace kind: {other:?}"),
+    }
+}
+
+#[test]
+fn parses_known_system_audit_callback_object_ace_layout() {
+    let sid = sid_bytes(&[18]);
+    let guid = [0x22; 16];
+    let app_data = *b"artx";
+    let ace = callback_object_ace(
+        SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE,
+        0x0000_0001,
+        ACE_OBJECT_TYPE_PRESENT,
+        guid,
+        &sid,
+        &app_data,
+    );
+    let bytes = acl_bytes(4, &[ace]);
+    let acl = Acl::parse(&bytes).expect("acl should parse");
+    let entry = acl
+        .entries()
+        .next()
+        .expect("entry expected")
+        .expect("entry should parse");
+
+    match entry.kind() {
+        AceKind::CallbackObject {
+            mask,
+            object_type,
+            sid: parsed_sid,
+            application_data,
+            ..
+        } => {
+            assert_eq!(mask, 0x0000_0001);
+            assert_eq!(object_type, Some(&guid));
             assert_eq!(parsed_sid.as_bytes(), sid.as_slice());
             assert_eq!(application_data, app_data);
         }

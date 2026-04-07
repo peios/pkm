@@ -1,7 +1,7 @@
 use kacs_core::{
-    pre_sacl_walk, ClaimValue, GenericMapping, IntegrityLevel, KacsError, PrivilegeProvenance,
-    SecurityDescriptor, ACCESS_SYSTEM_SECURITY, READ_CONTROL, SE_SACL_PRESENT, SE_SELF_RELATIVE,
-    WRITE_DAC, WRITE_OWNER,
+    pre_sacl_walk, ClaimValue, GenericMapping, IntegrityLevel, KacsError, PipContext,
+    PrivilegeProvenance, SecurityDescriptor, ACCESS_SYSTEM_SECURITY, READ_CONTROL, SE_SACL_PRESENT,
+    SE_SELF_RELATIVE, WRITE_DAC, WRITE_OWNER,
 };
 
 const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
@@ -92,8 +92,11 @@ fn sd_with_sacl(owner: &[u8], sacl: Option<&[u8]>) -> Vec<u8> {
     let mut bytes = vec![0u8; 20];
     bytes[0] = 1;
     bytes[2..4].copy_from_slice(&control.to_le_bytes());
-    bytes[4..8].copy_from_slice(&20u32.to_le_bytes());
-    bytes[8..12].copy_from_slice(&20u32.to_le_bytes());
+    let owner_offset = bytes.len() as u32;
+    bytes[4..8].copy_from_slice(&owner_offset.to_le_bytes());
+    bytes.extend_from_slice(owner);
+    let group_offset = bytes.len() as u32;
+    bytes[8..12].copy_from_slice(&group_offset.to_le_bytes());
     bytes.extend_from_slice(owner);
     if let Some(sacl) = sacl {
         let sacl_offset = bytes.len() as u32;
@@ -127,8 +130,7 @@ fn no_sacl_leaves_pre_sacl_state_unchanged() {
         IntegrityLevel::Medium,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         0,
-        0,
-        0,
+        PipContext::default(),
         &mapping(),
         ACCESS_SYSTEM_SECURITY,
         READ_CONTROL | ACCESS_SYSTEM_SECURITY,
@@ -171,8 +173,10 @@ fn composed_pre_sacl_applies_mic_then_pip_and_returns_metadata() {
         IntegrityLevel::Medium,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         0,
-        512,
-        1024,
+        PipContext {
+            pip_type: 512,
+            pip_trust: 1024,
+        },
         &mapping(),
         ACCESS_SYSTEM_SECURITY,
         READ_CONTROL | WRITE_DAC | ACCESS_SYSTEM_SECURITY,
@@ -244,8 +248,10 @@ fn first_labels_only_still_apply_inside_composed_pre_sacl_walk() {
         IntegrityLevel::Medium,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         0,
-        512,
-        1024,
+        PipContext {
+            pip_type: 512,
+            pip_trust: 1024,
+        },
         &mapping(),
         0,
         READ_CONTROL | WRITE_DAC,
@@ -283,8 +289,7 @@ fn malformed_resource_attribute_payload_fails_closed_through_pre_sacl_walk() {
         IntegrityLevel::Medium,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         0,
-        0,
-        0,
+        PipContext::default(),
         &mapping(),
         0,
         0,

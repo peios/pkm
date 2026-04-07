@@ -117,7 +117,7 @@ fn parse_claim_value(bytes: &[u8], value_type: u16, offset: usize) -> KacsResult
         }
         CLAIM_TYPE_SID => {
             let sid_offset = read_u32(bytes, offset)? as usize;
-            let sid = Sid::parse(&bytes_at(bytes, sid_offset)?[..])?;
+            let (sid, _) = Sid::parse_prefix(bytes_at(bytes, sid_offset)?)?;
             Ok(ClaimValue::Sid(sid.as_bytes().to_owned()))
         }
         CLAIM_TYPE_OCTET => {

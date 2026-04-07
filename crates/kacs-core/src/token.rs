@@ -1,3 +1,4 @@
+use crate::error::{KacsError, KacsResult};
 use crate::mic::IntegrityLevel;
 use crate::privilege::TokenPrivileges;
 use crate::sid::Sid;
@@ -54,8 +55,6 @@ pub struct AccessCheckToken<'a> {
     pub privileges: TokenPrivileges,
     pub integrity_level: IntegrityLevel,
     pub mandatory_policy: u32,
-    pub pip_type: u32,
-    pub pip_trust: u32,
     pub restricted: RestrictedTokenContext<'a>,
     pub confinement: ConfinementTokenContext<'a>,
 }
@@ -94,4 +93,23 @@ impl<'a> Default for ConfinementTokenContext<'a> {
             confinement_exempt: false,
         }
     }
+}
+
+pub(crate) fn validate_access_check_token_invariants(
+    token: &AccessCheckToken<'_>,
+) -> KacsResult<()> {
+    validate_restricted_invariants(&token.subject, &token.restricted)
+}
+
+pub(crate) fn validate_restricted_invariants(
+    subject: &TokenView<'_>,
+    restricted: &RestrictedTokenContext<'_>,
+) -> KacsResult<()> {
+    if restricted.write_restricted && !subject.user_deny_only {
+        return Err(KacsError::InvalidTokenInvariant(
+            "write_restricted requires user_deny_only",
+        ));
+    }
+
+    Ok(())
 }

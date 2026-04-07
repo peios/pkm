@@ -4,12 +4,20 @@ use crate::sid::Sid;
 
 pub const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
 pub const ACCESS_DENIED_ACE_TYPE: u8 = 0x01;
+pub const SYSTEM_AUDIT_ACE_TYPE: u8 = 0x02;
+pub const SYSTEM_ALARM_ACE_TYPE: u8 = 0x03;
 pub const ACCESS_ALLOWED_OBJECT_ACE_TYPE: u8 = 0x05;
 pub const ACCESS_DENIED_OBJECT_ACE_TYPE: u8 = 0x06;
+pub const SYSTEM_AUDIT_OBJECT_ACE_TYPE: u8 = 0x07;
+pub const SYSTEM_ALARM_OBJECT_ACE_TYPE: u8 = 0x08;
 pub const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 0x09;
 pub const ACCESS_DENIED_CALLBACK_ACE_TYPE: u8 = 0x0a;
 pub const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0b;
 pub const ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0c;
+pub const SYSTEM_AUDIT_CALLBACK_ACE_TYPE: u8 = 0x0d;
+pub const SYSTEM_ALARM_CALLBACK_ACE_TYPE: u8 = 0x0e;
+pub const SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0f;
+pub const SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x10;
 pub const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
 pub const SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE: u8 = 0x12;
 pub const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
@@ -132,18 +140,23 @@ impl<'a> Ace<'a> {
         match ace_type {
             ACCESS_ALLOWED_ACE_TYPE
             | ACCESS_DENIED_ACE_TYPE
+            | SYSTEM_AUDIT_ACE_TYPE
+            | SYSTEM_ALARM_ACE_TYPE
             | SYSTEM_MANDATORY_LABEL_ACE_TYPE
             | SYSTEM_SCOPED_POLICY_ID_ACE_TYPE
             | SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE => Self::parse_single_sid(bytes),
-            ACCESS_ALLOWED_OBJECT_ACE_TYPE | ACCESS_DENIED_OBJECT_ACE_TYPE => {
-                Self::parse_object(bytes)
-            }
-            ACCESS_ALLOWED_CALLBACK_ACE_TYPE | ACCESS_DENIED_CALLBACK_ACE_TYPE => {
-                Self::parse_callback(bytes)
-            }
-            ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE | ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE => {
-                Self::parse_callback_object(bytes)
-            }
+            ACCESS_ALLOWED_OBJECT_ACE_TYPE
+            | ACCESS_DENIED_OBJECT_ACE_TYPE
+            | SYSTEM_AUDIT_OBJECT_ACE_TYPE
+            | SYSTEM_ALARM_OBJECT_ACE_TYPE => Self::parse_object(bytes),
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE
+            | ACCESS_DENIED_CALLBACK_ACE_TYPE
+            | SYSTEM_AUDIT_CALLBACK_ACE_TYPE
+            | SYSTEM_ALARM_CALLBACK_ACE_TYPE => Self::parse_callback(bytes),
+            ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
+            | ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE
+            | SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE
+            | SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE => Self::parse_callback_object(bytes),
             SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE => Self::parse_resource_attribute(bytes),
             _ => Ok(AceKind::Opaque),
         }

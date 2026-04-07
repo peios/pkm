@@ -1,11 +1,11 @@
 use kacs_core::{
     evaluate_caap, evaluate_security_descriptor, AccessCheckToken, CaapPolicy, CaapPolicyEntry,
-    CaapRule, ConditionalContext, GenericMapping, ImpersonationLevel, IntegrityLevel,
-    ObjectTypeList, ObjectTypeNode, RestrictedTokenContext, SecurityDescriptor, Sid,
-    TokenPrivileges, TokenType, TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
-    ACCESS_SYSTEM_SECURITY, ACE_OBJECT_TYPE_PRESENT, READ_CONTROL, SE_DACL_PRESENT,
-    SE_SACL_PRESENT, SE_SECURITY_PRIVILEGE, SE_SELF_RELATIVE, TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
-    WRITE_DAC,
+    CaapRule, ClaimAttribute, ClaimValue, ConditionalContext, GenericMapping, ImpersonationLevel,
+    IntegrityLevel, ObjectTypeList, ObjectTypeNode, PipContext, RestrictedTokenContext,
+    SecurityDescriptor, Sid, TokenPrivileges, TokenType, TokenView, ACCESS_ALLOWED_ACE_TYPE,
+    ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACCESS_SYSTEM_SECURITY, ACE_OBJECT_TYPE_PRESENT, READ_CONTROL,
+    SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SECURITY_PRIVILEGE, SE_SELF_RELATIVE,
+    TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC,
 };
 
 const SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE: u8 = 0x12;
@@ -220,11 +220,13 @@ fn primary_token<'a>(user: Sid<'a>) -> AccessCheckToken<'a> {
         privileges: TokenPrivileges::default(),
         integrity_level: IntegrityLevel::Medium,
         mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
-        pip_type: 0,
-        pip_trust: 0,
         restricted: RestrictedTokenContext::default(),
         confinement: Default::default(),
     }
+}
+
+fn default_pip() -> PipContext {
+    PipContext::default()
 }
 
 fn evaluate_base<'a>(
@@ -236,6 +238,7 @@ fn evaluate_base<'a>(
     evaluate_security_descriptor(
         Some(sd),
         token,
+        default_pip(),
         desired_access,
         &mapping(),
         object_tree,
@@ -261,6 +264,7 @@ fn missing_policy_uses_recovery_policy_and_narrows_access() {
     let result = evaluate_caap(
         &sd,
         &token,
+        default_pip(),
         READ_CONTROL,
         &mapping(),
         None,
@@ -332,6 +336,7 @@ fn applies_to_false_and_unknown_rules_are_skipped() {
     let result = evaluate_caap(
         &sd,
         &token,
+        default_pip(),
         READ_CONTROL | WRITE_DAC,
         &mapping(),
         None,
@@ -343,6 +348,64 @@ fn applies_to_false_and_unknown_rules_are_skipped() {
 
     assert_eq!(result.granted, READ_CONTROL | WRITE_DAC);
     assert_eq!(result.staged_granted, READ_CONTROL | WRITE_DAC);
+}
+
+#[test]
+fn applies_to_sees_user_claims_from_the_call_context() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 12002]);
+    let policy_sid = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 94]);
+    let dacl = acl_bytes(&[basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user)]);
+    let sacl = acl_bytes(&[scoped_policy_ace(&policy_sid)]);
+    let sd_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = primary_token(parse_sid(&user));
+    let base = evaluate_base(&sd, &token, READ_CONTROL, None);
+    let applies = expr(&append_tokens(&[
+        attr_ref(0xf9, "clearance"),
+        int64_literal(4),
+        vec![0x80],
+    ]));
+    let effective_dacl = acl_bytes(&[]);
+    let policy = CaapPolicy {
+        rules: vec![CaapRule {
+            applies_to: Some(applies.as_slice()),
+            effective_dacl: effective_dacl.as_slice(),
+            effective_sacl: None,
+            staged_dacl: None,
+            staged_sacl: None,
+        }],
+    };
+    let policies = [CaapPolicyEntry {
+        sid: parse_sid(&policy_sid),
+        policy,
+    }];
+    let user_claims = [ClaimAttribute::new(
+        "Clearance",
+        0,
+        vec![ClaimValue::Int64(4)],
+    )];
+    let context = ConditionalContext {
+        user_claims: &user_claims,
+        ..ConditionalContext::default()
+    };
+
+    let result = evaluate_caap(
+        &sd,
+        &token,
+        default_pip(),
+        READ_CONTROL,
+        &mapping(),
+        None,
+        &context,
+        &base,
+        &policies,
+    )
+    .expect("caap should evaluate");
+
+    assert_eq!(result.granted, 0);
+    assert_eq!(result.staged_granted, 0);
 }
 
 #[test]
@@ -392,6 +455,7 @@ fn effective_and_staged_dacls_are_tracked_separately_and_sacls_are_collected() {
     let result = evaluate_caap(
         &sd,
         &token,
+        default_pip(),
         READ_CONTROL | WRITE_DAC,
         &mapping(),
         None,
@@ -445,6 +509,7 @@ fn rule_dacl_error_preserves_only_privilege_granted_bits() {
     let result = evaluate_caap(
         &sd,
         &token,
+        default_pip(),
         READ_CONTROL | ACCESS_SYSTEM_SECURITY,
         &mapping(),
         None,
@@ -513,6 +578,7 @@ fn object_tree_tracks_effective_and_staged_per_node_results() {
     let result = evaluate_caap(
         &sd,
         &token,
+        default_pip(),
         READ_CONTROL,
         &mapping(),
         Some(&tree),
@@ -531,5 +597,71 @@ fn object_tree_tracks_effective_and_staged_per_node_results() {
     assert_eq!(
         result.staged_object_granted_list,
         Some(vec![0, READ_CONTROL, 0])
+    );
+}
+
+#[test]
+fn staged_object_tree_error_preserves_per_node_privilege_granted_bits() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 12005]);
+    let policy_sid = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 93]);
+    let tree = ObjectTypeList::new(&[
+        ObjectTypeNode {
+            level: 0,
+            guid: [0x10; 16],
+        },
+        ObjectTypeNode {
+            level: 1,
+            guid: [0x11; 16],
+        },
+    ])
+    .expect("tree should parse");
+    let dacl = acl_bytes(&[]);
+    let sacl = acl_bytes(&[scoped_policy_ace(&policy_sid)]);
+    let sd_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+
+    let mut token = primary_token(parse_sid(&user));
+    token.privileges = TokenPrivileges {
+        present: SE_SECURITY_PRIVILEGE,
+        enabled: SE_SECURITY_PRIVILEGE,
+        enabled_by_default: 0,
+        used: 0,
+    };
+    let base = evaluate_base(&sd, &token, ACCESS_SYSTEM_SECURITY, Some(&tree));
+
+    let malformed_dacl = [1u8, 2, 3];
+    let policy = CaapPolicy {
+        rules: vec![CaapRule {
+            applies_to: None,
+            effective_dacl: dacl.as_slice(),
+            effective_sacl: None,
+            staged_dacl: Some(&malformed_dacl),
+            staged_sacl: None,
+        }],
+    };
+    let entries = [CaapPolicyEntry {
+        sid: parse_sid(&policy_sid),
+        policy,
+    }];
+
+    let result = evaluate_caap(
+        &sd,
+        &token,
+        default_pip(),
+        ACCESS_SYSTEM_SECURITY,
+        &mapping(),
+        Some(&tree),
+        &ConditionalContext::default(),
+        &base,
+        &entries,
+    )
+    .expect("caap evaluation should succeed");
+
+    assert_eq!(result.staged_granted, 0);
+    assert_eq!(
+        result.staged_object_granted_list,
+        Some(vec![ACCESS_SYSTEM_SECURITY, ACCESS_SYSTEM_SECURITY])
     );
 }

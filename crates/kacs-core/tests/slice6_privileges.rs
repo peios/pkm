@@ -1,8 +1,9 @@
 use kacs_core::{
     apply_take_ownership_fallback, seed_access_check_privileges, AccessDecisionState,
     GenericMapping, TokenPrivileges, ACCESS_SYSTEM_SECURITY, BACKUP_INTENT, DELETE, GENERIC_READ,
-    MAXIMUM_ALLOWED, READ_CONTROL, RESTORE_INTENT, SE_BACKUP_PRIVILEGE, SE_RESTORE_PRIVILEGE,
-    SE_SECURITY_PRIVILEGE, SE_TAKE_OWNERSHIP_PRIVILEGE, WRITE_DAC, WRITE_OWNER,
+    MAXIMUM_ALLOWED, READ_CONTROL, RESTORE_INTENT, SE_BACKUP_PRIVILEGE, SE_RELABEL_PRIVILEGE,
+    SE_RESTORE_PRIVILEGE, SE_SECURITY_PRIVILEGE, SE_TAKE_OWNERSHIP_PRIVILEGE, WRITE_DAC,
+    WRITE_OWNER,
 };
 
 fn mapping() -> GenericMapping {
@@ -36,6 +37,15 @@ fn backup_and_restore_are_intent_gated() {
     assert_eq!(state.decided, ACCESS_SYSTEM_SECURITY);
     assert_eq!(state.granted, 0);
     assert_eq!(state.privilege_granted(), 0);
+}
+
+#[test]
+fn privilege_constants_match_the_ratified_bit_positions() {
+    assert_eq!(SE_SECURITY_PRIVILEGE, 0x0000_0000_0000_0100);
+    assert_eq!(SE_TAKE_OWNERSHIP_PRIVILEGE, 0x0000_0000_0000_0200);
+    assert_eq!(SE_BACKUP_PRIVILEGE, 0x0000_0000_0002_0000);
+    assert_eq!(SE_RESTORE_PRIVILEGE, 0x0000_0000_0004_0000);
+    assert_eq!(SE_RELABEL_PRIVILEGE, 0x0000_0001_0000_0000);
 }
 
 #[test]

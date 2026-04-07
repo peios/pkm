@@ -1,7 +1,7 @@
 use kacs_core::{
     parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, ClaimValue,
     KacsError, CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE, CLAIM_TYPE_BOOLEAN, CLAIM_TYPE_INT64,
-    CLAIM_TYPE_OCTET, CLAIM_TYPE_STRING,
+    CLAIM_TYPE_OCTET, CLAIM_TYPE_SID, CLAIM_TYPE_STRING,
 };
 
 fn utf16_cstr(value: &str) -> Vec<u8> {
@@ -93,6 +93,37 @@ fn octet_claim(name: &str, value: &[u8]) -> Vec<u8> {
     bytes
 }
 
+fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
+    bytes.push(1);
+    bytes.push(sub_authorities.len() as u8);
+    bytes.extend_from_slice(&authority);
+    for sub_authority in sub_authorities {
+        bytes.extend_from_slice(&sub_authority.to_le_bytes());
+    }
+    bytes
+}
+
+fn sid_claim_with_trailing_data(name: &str, sid: &[u8], trailing: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let offsets_start = 16usize;
+    let pointer_start = offsets_start + 4;
+    let sid_offset = pointer_start + 4;
+    let name_offset = sid_offset + sid.len() + trailing.len();
+
+    bytes.extend_from_slice(&(name_offset as u32).to_le_bytes());
+    bytes.extend_from_slice(&CLAIM_TYPE_SID.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&(pointer_start as u32).to_le_bytes());
+    bytes.extend_from_slice(&(sid_offset as u32).to_le_bytes());
+    bytes.extend_from_slice(sid);
+    bytes.extend_from_slice(trailing);
+    bytes.extend_from_slice(&utf16_cstr(name));
+    bytes
+}
+
 #[test]
 fn parses_int64_claim_entry() {
     let bytes = int64_claim("Clearance", &[3, 4], 0);
@@ -158,10 +189,38 @@ fn malformed_nested_offset_is_rejected() {
 }
 
 #[test]
+fn parses_sid_claim_when_sid_is_not_at_entry_tail() {
+    let sid = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 17000]);
+    let bytes = sid_claim_with_trailing_data("Owner", &sid, &[0xaa, 0xbb, 0xcc, 0xdd]);
+
+    let claim = parse_claim_attribute_entry(&bytes).expect("sid claim should parse");
+
+    assert_eq!(
+        claim,
+        ClaimAttribute {
+            name: "Owner".into(),
+            flags: 0,
+            values: vec![ClaimValue::Sid(sid)],
+        }
+    );
+}
+
+#[test]
 fn unsupported_claim_type_is_rejected() {
     let mut bytes = int64_claim("Bad", &[1], 0);
     bytes[4..6].copy_from_slice(&0x0004u16.to_le_bytes());
 
     let err = parse_claim_attribute_entry(&bytes).expect_err("unsupported type must fail");
     assert_eq!(err, KacsError::InvalidClaimType(0x0004));
+}
+
+#[test]
+fn oversized_value_count_is_rejected_before_allocation() {
+    let mut bytes = vec![0u8; 16];
+    bytes[0..4].copy_from_slice(&16u32.to_le_bytes());
+    bytes[4..6].copy_from_slice(&CLAIM_TYPE_INT64.to_le_bytes());
+    bytes[12..16].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+
+    let err = parse_claim_attribute_entry(&bytes).expect_err("oversized value_count must fail");
+    assert_eq!(err, KacsError::InvalidClaimFormat("claim value offsets"));
 }

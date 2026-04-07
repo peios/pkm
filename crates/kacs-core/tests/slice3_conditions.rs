@@ -245,6 +245,22 @@ fn claim_flags_are_applied_at_lookup_time() {
 }
 
 #[test]
+fn equality_of_two_absent_attributes_is_unknown() {
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 4014]);
+    let token = token(&user, &[]);
+    let context = ConditionalContext::default();
+    let program = expr(&append_tokens(&[
+        attr_ref(0xf9, "missing_user"),
+        attr_ref(0xfb, "missing_device"),
+        vec![0x80],
+    ]));
+
+    let result = evaluate_conditional_expression(&program, &token, &context, true);
+
+    assert_eq!(result, ConditionalResult::Unknown);
+}
+
+#[test]
 fn member_of_sees_virtual_groups_and_polarity() {
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 4006]);
     let principal_self = sid_bytes([0, 0, 0, 0, 0, 5], &[10]);

@@ -5,6 +5,7 @@ use kacs_core::{
 };
 
 const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
+const INHERIT_ONLY_ACE: u8 = 0x08;
 const SYSTEM_MANDATORY_LABEL_NO_READ_UP: u32 = 0x0000_0001;
 const SYSTEM_MANDATORY_LABEL_NO_WRITE_UP: u32 = 0x0000_0002;
 const SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP: u32 = 0x0000_0004;
@@ -51,8 +52,11 @@ fn sd_with_sacl(owner: &[u8], sacl: Option<&[u8]>) -> Vec<u8> {
     let mut bytes = vec![0u8; 20];
     bytes[0] = 1;
     bytes[2..4].copy_from_slice(&control.to_le_bytes());
-    bytes[4..8].copy_from_slice(&20u32.to_le_bytes());
-    bytes[8..12].copy_from_slice(&20u32.to_le_bytes());
+    let owner_offset = bytes.len() as u32;
+    bytes[4..8].copy_from_slice(&owner_offset.to_le_bytes());
+    bytes.extend_from_slice(owner);
+    let group_offset = bytes.len() as u32;
+    bytes[8..12].copy_from_slice(&group_offset.to_le_bytes());
     bytes.extend_from_slice(owner);
     if let Some(sacl) = sacl {
         let sacl_offset = bytes.len() as u32;
@@ -111,6 +115,34 @@ fn first_mandatory_label_is_used() {
     assert_eq!(label.integrity_level, IntegrityLevel::Low);
     assert_eq!(label.mask, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP);
     assert!(label.explicit);
+}
+
+#[test]
+fn inherit_only_mandatory_label_is_ignored() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let high = sid_bytes([0, 0, 0, 0, 0, 16], &[12288]);
+    let low = sid_bytes([0, 0, 0, 0, 0, 16], &[4096]);
+    let sacl = acl_bytes(&[
+        basic_ace(
+            SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+            INHERIT_ONLY_ACE,
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+            &high,
+        ),
+        basic_ace(
+            SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+            0,
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+            &low,
+        ),
+    ]);
+    let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+
+    let label = resolve_mandatory_label(&sd).expect("label resolution should succeed");
+
+    assert_eq!(label.integrity_level, IntegrityLevel::Low);
+    assert_eq!(label.mask, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP);
 }
 
 #[test]

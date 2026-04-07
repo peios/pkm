@@ -7,6 +7,8 @@ use crate::error::KacsResult;
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
 
+const INHERIT_ONLY_ACE: u8 = 0x08;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SaclMetadata<'a> {
     pub resource_attributes: Vec<ClaimAttribute>,
@@ -27,6 +29,9 @@ pub fn extract_sacl_metadata<'a>(sd: &SecurityDescriptor<'a>) -> KacsResult<Sacl
 
     for ace in sacl.entries() {
         let ace = ace?;
+        if (ace.ace_flags() & INHERIT_ONLY_ACE) != 0 {
+            continue;
+        }
         match ace.ace_type() {
             SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE => {
                 let AceKind::ResourceAttribute {

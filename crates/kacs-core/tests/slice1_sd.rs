@@ -138,3 +138,48 @@ fn rejects_nonzero_dacl_offset_when_dacl_not_present() {
         }
     );
 }
+
+#[test]
+fn rejects_component_offsets_inside_header() {
+    let owner = sid_bytes(&[18]);
+    let dacl = acl_bytes(&[]);
+    let mut bytes = sd_bytes(
+        &owner,
+        &dacl,
+        SE_SELF_RELATIVE | SE_DACL_PRESENT,
+        20 + owner.len() as u32,
+    );
+    bytes[4..8].copy_from_slice(&4u32.to_le_bytes());
+
+    let err =
+        SecurityDescriptor::parse(&bytes).expect_err("header-relative owner offset must fail");
+    assert_eq!(
+        err,
+        KacsError::SecurityDescriptorOffsetInsideHeader {
+            field: "owner",
+            offset: 4,
+            header_len: 20,
+        }
+    );
+}
+
+#[test]
+fn rejects_overlapping_components() {
+    let owner = sid_bytes(&[18]);
+    let dacl = acl_bytes(&[basic_allow_ace(0x0002_0001, &owner)]);
+    let mut bytes = vec![0u8; 20];
+    bytes[0] = 1;
+    bytes[2..4].copy_from_slice(&(SE_SELF_RELATIVE | SE_DACL_PRESENT).to_le_bytes());
+    bytes[4..8].copy_from_slice(&36u32.to_le_bytes());
+    bytes[16..20].copy_from_slice(&20u32.to_le_bytes());
+    bytes.extend_from_slice(&dacl);
+
+    let err = SecurityDescriptor::parse(&bytes).expect_err("overlapping owner and dacl must fail");
+    assert_eq!(
+        err,
+        KacsError::SecurityDescriptorComponentsOverlap {
+            first: "owner",
+            second: "dacl",
+        }
+    );
+}

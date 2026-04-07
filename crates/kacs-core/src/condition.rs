@@ -12,6 +12,7 @@ use crate::token::{IdentityView, SidAndAttributes, TokenView};
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
 const PRINCIPAL_SELF_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 10, 0, 0, 0];
 const MAX_STACK_DEPTH: usize = 1024;
+const MAX_COMPOSITE_LITERAL_DEPTH: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConditionalResult {
@@ -26,6 +27,7 @@ pub struct ConditionalContext<'a> {
     pub principal_self_matches: Option<bool>,
     pub caller_is_owner: bool,
     pub identity: Option<IdentityView<'a>>,
+    pub identity_membership_is_presence_based: bool,
     pub device_groups: &'a [SidAndAttributes<'a>],
     pub user_claims: &'a [ClaimAttribute],
     pub device_claims: &'a [ClaimAttribute],
@@ -40,6 +42,7 @@ impl<'a> Default for ConditionalContext<'a> {
             principal_self_matches: None,
             caller_is_owner: false,
             identity: None,
+            identity_membership_is_presence_based: false,
             device_groups: &[],
             user_claims: &[],
             device_claims: &[],
@@ -111,7 +114,7 @@ pub fn evaluate_conditional_expression(
             0x01..=0x04 => parse_int_literal(bytes, &mut offset),
             0x10 => parse_string_literal(bytes, &mut offset),
             0x18 => parse_octet_literal(bytes, &mut offset),
-            0x50 => parse_composite_literal(bytes, &mut offset),
+            0x50 => parse_composite_literal(bytes, &mut offset, 0),
             0x51 => parse_sid_literal(bytes, &mut offset),
             0x80 => binary_compare(&mut stack, compare_eq),
             0x81 => binary_compare(&mut stack, compare_ne),
@@ -210,7 +213,11 @@ fn parse_octet_literal(bytes: &[u8], offset: &mut usize) -> Option<StackEntry> {
     }))
 }
 
-fn parse_composite_literal(bytes: &[u8], offset: &mut usize) -> Option<StackEntry> {
+fn parse_composite_literal(bytes: &[u8], offset: &mut usize, depth: usize) -> Option<StackEntry> {
+    if depth >= MAX_COMPOSITE_LITERAL_DEPTH {
+        return None;
+    }
+
     let len = read_u32(bytes, offset)? as usize;
     let end = offset.checked_add(len)?;
     if end > bytes.len() {
@@ -228,7 +235,7 @@ fn parse_composite_literal(bytes: &[u8], offset: &mut usize) -> Option<StackEntr
             0x01..=0x04 => parse_int_literal(bytes, offset),
             0x10 => parse_string_literal(bytes, offset),
             0x18 => parse_octet_literal(bytes, offset),
-            0x50 => parse_composite_literal(bytes, offset),
+            0x50 => parse_composite_literal(bytes, offset, depth + 1),
             0x51 => parse_sid_literal(bytes, offset),
             _ => None,
         }?;
@@ -244,6 +251,43 @@ fn parse_composite_literal(bytes: &[u8], offset: &mut usize) -> Option<StackEntr
         origin: ValueOrigin::Literal,
         flags: 0,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_composite_literal, StackEntry};
+
+    fn nested_composite(depth: usize) -> Vec<u8> {
+        let mut inner = vec![0x10, 0, 0, 0, 0];
+        for _ in 0..depth {
+            let mut next = Vec::with_capacity(5 + inner.len());
+            next.push(0x50);
+            next.extend_from_slice(&(inner.len() as u32).to_le_bytes());
+            next.extend_from_slice(&inner);
+            inner = next;
+        }
+        inner
+    }
+
+    #[test]
+    fn composite_literal_depth_limit_fails_closed() {
+        let mut offset = 1usize;
+        let bytes = nested_composite(65);
+
+        let parsed = parse_composite_literal(&bytes, &mut offset, 0);
+
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn bounded_composite_literal_still_parses() {
+        let mut offset = 1usize;
+        let bytes = nested_composite(2);
+
+        let parsed = parse_composite_literal(&bytes, &mut offset, 0);
+
+        assert!(matches!(parsed, Some(StackEntry::Value(_))));
+    }
 }
 
 fn parse_sid_literal(bytes: &[u8], offset: &mut usize) -> Option<StackEntry> {
@@ -632,7 +676,7 @@ fn combine_pair(lhs: ConditionalResult, rhs: ConditionalResult) -> ConditionalRe
 
 fn values_equal(lhs: &Value, rhs: &Value, case_sensitive: bool) -> Option<bool> {
     match (lhs, rhs) {
-        (Value::Null, Value::Null) => Some(true),
+        (Value::Null, Value::Null) => None,
         (Value::Int64(lhs), Value::Int64(rhs)) => Some(lhs == rhs),
         (Value::UInt64(lhs), Value::UInt64(rhs)) => Some(lhs == rhs),
         (Value::Int64(lhs), Value::UInt64(rhs)) => {
@@ -757,10 +801,27 @@ fn sid_in_membership_set(
         }
     }
 
+    let identity = effective_identity_view(token, context);
+    if !device && context.identity_membership_is_presence_based {
+        if identity
+            .user
+            .is_some_and(|user| user.as_bytes() == sid_bytes)
+        {
+            return Some(true);
+        }
+
+        return Some(
+            identity
+                .groups
+                .iter()
+                .any(|group| group.sid.as_bytes() == sid_bytes),
+        );
+    }
+
     let groups = if device {
         context.device_groups
     } else {
-        effective_identity_view(token, context).groups
+        identity.groups
     };
 
     for group in groups {

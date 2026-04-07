@@ -15,7 +15,8 @@ use crate::privilege::AccessDecisionState;
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::{Sid, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
 use crate::token::{
-    ConfinementTokenContext, IdentityView, RestrictedTokenContext, SidAndAttributes, TokenView,
+    validate_restricted_invariants, ConfinementTokenContext, IdentityView, RestrictedTokenContext,
+    SidAndAttributes, TokenView,
 };
 
 const INHERIT_ONLY_ACE: u8 = 0x08;
@@ -124,6 +125,8 @@ pub fn evaluate_dacl_with_restricted_context(
     conditional_context: &ConditionalContext<'_>,
     restricted_context: &RestrictedTokenContext<'_>,
 ) -> KacsResult<DaclEvaluation> {
+    validate_restricted_invariants(token, restricted_context)?;
+
     let normalized = mapping.normalize_desired_access(desired_access)?;
     let valid_rights = mapping.map_mask(GENERIC_ALL)?;
     let caller_is_owner = caller_is_owner_normal(sd, token);
@@ -151,12 +154,18 @@ pub fn evaluate_dacl_with_restricted_context(
     let restricted_owner = sd
         .owner()
         .is_some_and(|owner| restricted_contains(restricted_context.restricted_sids, owner));
+    let restricted_self = conditional_context
+        .self_sid
+        .filter(|sid| restricted_contains(restricted_context.restricted_sids, *sid));
     let mut restricted_conditions = *conditional_context;
+    restricted_conditions.self_sid = restricted_self;
+    restricted_conditions.principal_self_matches = Some(restricted_self.is_some());
     restricted_conditions.identity = Some(IdentityView {
         user: None,
         user_deny_only: false,
         groups: restricted_context.restricted_sids,
     });
+    restricted_conditions.identity_membership_is_presence_based = true;
     restricted_conditions.caller_is_owner = restricted_owner;
     if !restricted_context.restricted_device_groups.is_empty() {
         restricted_conditions.device_groups = restricted_context.restricted_device_groups;
@@ -168,7 +177,7 @@ pub fn evaluate_dacl_with_restricted_context(
         normalized,
         valid_rights,
         mapping,
-        skip_owner_implicit,
+        false,
         restricted_conditions,
         None,
         AccessDecisionState {
@@ -408,6 +417,8 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
     conditional_context: &ConditionalContext<'_>,
     restricted_context: &RestrictedTokenContext<'_>,
 ) -> KacsResult<ObjectDaclResultList> {
+    validate_restricted_invariants(token, restricted_context)?;
+
     let normalized = mapping.normalize_desired_access(desired_access)?;
     let valid_rights = mapping.map_mask(GENERIC_ALL)?;
     let caller_is_owner = caller_is_owner_normal(sd, token);
@@ -441,12 +452,18 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
     let restricted_owner = sd
         .owner()
         .is_some_and(|owner| restricted_contains(restricted_context.restricted_sids, owner));
+    let restricted_self = conditional_context
+        .self_sid
+        .filter(|sid| restricted_contains(restricted_context.restricted_sids, *sid));
     let mut restricted_conditions = *conditional_context;
+    restricted_conditions.self_sid = restricted_self;
+    restricted_conditions.principal_self_matches = Some(restricted_self.is_some());
     restricted_conditions.identity = Some(IdentityView {
         user: None,
         user_deny_only: false,
         groups: restricted_context.restricted_sids,
     });
+    restricted_conditions.identity_membership_is_presence_based = true;
     restricted_conditions.caller_is_owner = restricted_owner;
     if !restricted_context.restricted_device_groups.is_empty() {
         restricted_conditions.device_groups = restricted_context.restricted_device_groups;
@@ -458,7 +475,7 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
         normalized,
         valid_rights,
         mapping,
-        skip_owner_implicit,
+        false,
         restricted_conditions,
         Some(object_tree),
         AccessDecisionState {
@@ -832,7 +849,7 @@ fn merge_granted(
 
 pub(crate) fn caller_is_owner_normal(sd: &SecurityDescriptor<'_>, token: &TokenView<'_>) -> bool {
     sd.owner()
-        .is_some_and(|owner| sid_matches_token(token, owner, AcePolarity::Allow))
+        .is_some_and(|owner| owner_matches_identity(token, owner))
 }
 
 pub(crate) fn restricted_contains(restricted_sids: &[SidAndAttributes<'_>], sid: Sid<'_>) -> bool {
@@ -854,6 +871,10 @@ pub(crate) fn confinement_contains_capability(
         .confinement_capabilities
         .iter()
         .any(|entry| entry.sid == sid)
+}
+
+fn owner_matches_identity(token: &TokenView<'_>, sid: Sid<'_>) -> bool {
+    sid == token.user || token.groups.iter().any(|group| group.sid == sid)
 }
 
 fn owner_rights_suppressed(dacl: &crate::acl::Acl<'_>) -> KacsResult<bool> {

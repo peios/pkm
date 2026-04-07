@@ -37,9 +37,12 @@ pub use ace::{
     ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
     ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
     ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE,
-    ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
-    SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
-    SYSTEM_SCOPED_POLICY_ID_ACE_TYPE,
+    ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, SYSTEM_ALARM_ACE_TYPE,
+    SYSTEM_ALARM_CALLBACK_ACE_TYPE, SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE,
+    SYSTEM_ALARM_OBJECT_ACE_TYPE, SYSTEM_AUDIT_ACE_TYPE, SYSTEM_AUDIT_CALLBACK_ACE_TYPE,
+    SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE, SYSTEM_AUDIT_OBJECT_ACE_TYPE,
+    SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+    SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE, SYSTEM_SCOPED_POLICY_ID_ACE_TYPE,
 };
 pub use acl::Acl;
 pub use caap::{evaluate_caap, CaapEvaluationState, CaapPolicy, CaapPolicyEntry, CaapRule};
@@ -67,7 +70,9 @@ pub use mic::{
     TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
 };
 pub use object_tree::{ObjectTypeList, ObjectTypeNode};
-pub use pip::{apply_pip, resolve_process_trust_label, PipEnforcementState, ProcessTrustLabel};
+pub use pip::{
+    apply_pip, resolve_process_trust_label, PipContext, PipEnforcementState, ProcessTrustLabel,
+};
 pub use pre_sacl::{pre_sacl_walk, PreSaclWalkState};
 pub use privilege::{
     apply_take_ownership_fallback, seed_access_check_privileges, AccessDecisionState,

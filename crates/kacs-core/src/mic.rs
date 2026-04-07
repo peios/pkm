@@ -7,6 +7,8 @@ use crate::privilege::{PrivilegeProvenance, SE_RELABEL_PRIVILEGE};
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
 
+const INHERIT_ONLY_ACE: u8 = 0x08;
+
 pub const TOKEN_MANDATORY_POLICY_NO_WRITE_UP: u32 = 0x0000_0001;
 pub const TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN: u32 = 0x0000_0002;
 
@@ -43,6 +45,9 @@ pub fn resolve_mandatory_label(sd: &SecurityDescriptor<'_>) -> KacsResult<Mandat
 
     for ace in sacl.entries() {
         let ace = ace?;
+        if (ace.ace_flags() & INHERIT_ONLY_ACE) != 0 {
+            continue;
+        }
         if ace.ace_type() != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
             continue;
         }

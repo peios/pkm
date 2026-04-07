@@ -10,6 +10,7 @@ use crate::dacl::{
 };
 use crate::error::{KacsError, KacsResult};
 use crate::object_tree::ObjectTypeList;
+use crate::pip::PipContext;
 use crate::pre_sacl::pre_sacl_walk;
 use crate::privilege::{
     apply_take_ownership_fallback, seed_access_check_privileges, AccessDecisionState,
@@ -17,7 +18,10 @@ use crate::privilege::{
 };
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
-use crate::token::{AccessCheckToken, IdentityView, ImpersonationLevel, TokenType};
+use crate::token::{
+    validate_access_check_token_invariants, AccessCheckToken, IdentityView, ImpersonationLevel,
+    TokenType,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluateSecurityDescriptorState<'a> {
@@ -35,12 +39,15 @@ pub struct EvaluateSecurityDescriptorState<'a> {
 pub fn evaluate_security_descriptor<'a>(
     sd: Option<&SecurityDescriptor<'a>>,
     token: &AccessCheckToken<'a>,
+    pip: PipContext,
     desired_access: u32,
     mapping: &GenericMapping,
     object_tree: Option<&ObjectTypeList>,
     conditional_context: &ConditionalContext<'a>,
     privilege_intent: u32,
 ) -> KacsResult<EvaluateSecurityDescriptorState<'a>> {
+    validate_access_check_token_invariants(token)?;
+
     if token.token_type == TokenType::Impersonation
         && token.impersonation_level == ImpersonationLevel::Identification
     {
@@ -68,8 +75,7 @@ pub fn evaluate_security_descriptor<'a>(
         token.integrity_level,
         token.mandatory_policy,
         privilege_seed.effective_privileges,
-        token.pip_type,
-        token.pip_trust,
+        pip,
         mapping,
         privilege_seed.decided,
         privilege_seed.granted,
@@ -110,7 +116,7 @@ pub fn evaluate_security_descriptor<'a>(
         mandatory_decided,
         &mut provenance,
     );
-    let privilege_granted = provenance.privilege_granted();
+    let privilege_granted = pre_sacl.privilege_granted | provenance.take_ownership_granted;
 
     if !token.restricted.restricted_sids.is_empty() {
         let mut restricted_context = token.restricted;
@@ -119,12 +125,18 @@ pub fn evaluate_security_descriptor<'a>(
         let restricted_owner = sd
             .owner()
             .is_some_and(|owner| restricted_contains(restricted_context.restricted_sids, owner));
+        let restricted_self = normal_context
+            .self_sid
+            .filter(|sid| restricted_contains(restricted_context.restricted_sids, *sid));
         let mut conditional_restricted = normal_context;
+        conditional_restricted.self_sid = restricted_self;
+        conditional_restricted.principal_self_matches = Some(restricted_self.is_some());
         conditional_restricted.identity = Some(IdentityView {
             user: None,
             user_deny_only: false,
             groups: restricted_context.restricted_sids,
         });
+        conditional_restricted.identity_membership_is_presence_based = true;
         conditional_restricted.caller_is_owner = restricted_owner;
         if !restricted_context.restricted_device_groups.is_empty() {
             conditional_restricted.device_groups = restricted_context.restricted_device_groups;

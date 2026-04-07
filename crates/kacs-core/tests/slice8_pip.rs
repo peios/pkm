@@ -1,10 +1,11 @@
 use kacs_core::{
-    apply_pip, resolve_process_trust_label, GenericMapping, KacsError, PipEnforcementState,
-    ProcessTrustLabel, SecurityDescriptor, ACCESS_SYSTEM_SECURITY, READ_CONTROL, SE_SACL_PRESENT,
-    SE_SELF_RELATIVE, WRITE_DAC, WRITE_OWNER,
+    apply_pip, resolve_process_trust_label, GenericMapping, KacsError, PipContext,
+    PipEnforcementState, ProcessTrustLabel, SecurityDescriptor, ACCESS_SYSTEM_SECURITY,
+    READ_CONTROL, SE_SACL_PRESENT, SE_SELF_RELATIVE, WRITE_DAC, WRITE_OWNER,
 };
 
 const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
+const INHERIT_ONLY_ACE: u8 = 0x08;
 
 fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
@@ -47,8 +48,11 @@ fn sd_with_sacl(owner: &[u8], sacl: Option<&[u8]>) -> Vec<u8> {
     let mut bytes = vec![0u8; 20];
     bytes[0] = 1;
     bytes[2..4].copy_from_slice(&control.to_le_bytes());
-    bytes[4..8].copy_from_slice(&20u32.to_le_bytes());
-    bytes[8..12].copy_from_slice(&20u32.to_le_bytes());
+    let owner_offset = bytes.len() as u32;
+    bytes[4..8].copy_from_slice(&owner_offset.to_le_bytes());
+    bytes.extend_from_slice(owner);
+    let group_offset = bytes.len() as u32;
+    bytes[8..12].copy_from_slice(&group_offset.to_le_bytes());
     bytes.extend_from_slice(owner);
     if let Some(sacl) = sacl {
         let sacl_offset = bytes.len() as u32;
@@ -105,6 +109,37 @@ fn first_trust_label_is_used() {
 }
 
 #[test]
+fn inherit_only_trust_label_is_ignored() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let inherited = sid_bytes([0, 0, 0, 0, 0, 19], &[1024, 8192]);
+    let effective = sid_bytes([0, 0, 0, 0, 0, 19], &[512, 1024]);
+    let sacl = acl_bytes(&[
+        basic_ace(
+            SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+            INHERIT_ONLY_ACE,
+            WRITE_DAC,
+            &inherited,
+        ),
+        basic_ace(
+            SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &effective,
+        ),
+    ]);
+    let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+
+    let label = resolve_process_trust_label(&sd)
+        .expect("trust label resolution should succeed")
+        .expect("trust label should exist");
+
+    assert_eq!(label.pip_type, 512);
+    assert_eq!(label.pip_trust, 1024);
+    assert_eq!(label.mask, READ_CONTROL);
+}
+
+#[test]
 fn malformed_trust_label_shape_is_rejected() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let invalid = sid_bytes([0, 0, 0, 0, 0, 19], &[512]);
@@ -134,8 +169,10 @@ fn dominant_callers_receive_no_pip_predecisions() {
 
     let pip = apply_pip(
         label,
-        1024,
-        8192,
+        PipContext {
+            pip_type: 1024,
+            pip_trust: 8192,
+        },
         &mapping(),
         &mut decided,
         &mut granted,
@@ -162,8 +199,10 @@ fn non_dominant_pip_revokes_privilege_granted_bits() {
 
     let pip = apply_pip(
         label,
-        512,
-        1024,
+        PipContext {
+            pip_type: 512,
+            pip_trust: 1024,
+        },
         &mapping(),
         &mut decided,
         &mut granted,
@@ -205,8 +244,10 @@ fn nonstandard_numeric_type_values_are_valid() {
     let mut privilege_granted = 0;
     let pip = apply_pip(
         label,
-        1024,
-        6000,
+        PipContext {
+            pip_type: 1024,
+            pip_trust: 6000,
+        },
         &mapping(),
         &mut decided,
         &mut granted,

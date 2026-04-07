@@ -32,20 +32,24 @@ impl<'a> SecurityDescriptor<'a> {
             return Err(KacsError::MissingSelfRelativeControl(control));
         }
 
-        let owner = parse_optional_sid(bytes, "owner", read_offset(bytes, 4), true)?;
-        let group = parse_optional_sid(bytes, "group", read_offset(bytes, 8), true)?;
-        let sacl = parse_optional_acl(
+        let (owner, owner_region) =
+            parse_optional_sid(bytes, "owner", read_offset(bytes, 4), true)?;
+        let (group, group_region) =
+            parse_optional_sid(bytes, "group", read_offset(bytes, 8), true)?;
+        let (sacl, sacl_region) = parse_optional_acl(
             bytes,
             "sacl",
             (control & SE_SACL_PRESENT) != 0,
             read_offset(bytes, 12),
         )?;
-        let dacl = parse_optional_acl(
+        let (dacl, dacl_region) = parse_optional_acl(
             bytes,
             "dacl",
             (control & SE_DACL_PRESENT) != 0,
             read_offset(bytes, 16),
         )?;
+
+        validate_component_overlap(&[owner_region, group_region, sacl_region, dacl_region])?;
 
         Ok(Self {
             bytes,
@@ -82,14 +86,21 @@ impl<'a> SecurityDescriptor<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ComponentRegion {
+    field: &'static str,
+    start: usize,
+    end: usize,
+}
+
 fn parse_optional_sid<'a>(
     bytes: &'a [u8],
     field: &'static str,
     offset: u32,
     zero_is_absent: bool,
-) -> KacsResult<Option<Sid<'a>>> {
+) -> KacsResult<(Option<Sid<'a>>, Option<ComponentRegion>)> {
     if offset == 0 && zero_is_absent {
-        return Ok(None);
+        return Ok((None, None));
     }
 
     let offset_usize =
@@ -98,6 +109,13 @@ fn parse_optional_sid<'a>(
             offset,
             buffer_len: bytes.len(),
         })?;
+    if offset_usize < SecurityDescriptor::HEADER_SIZE {
+        return Err(KacsError::SecurityDescriptorOffsetInsideHeader {
+            field,
+            offset,
+            header_len: SecurityDescriptor::HEADER_SIZE,
+        });
+    }
     if offset_usize >= bytes.len() {
         return Err(KacsError::SecurityDescriptorOffsetOutOfBounds {
             field,
@@ -106,8 +124,15 @@ fn parse_optional_sid<'a>(
         });
     }
 
-    let (sid, _) = Sid::parse_prefix(&bytes[offset_usize..])?;
-    Ok(Some(sid))
+    let (sid, consumed) = Sid::parse_prefix(&bytes[offset_usize..])?;
+    Ok((
+        Some(sid),
+        Some(ComponentRegion {
+            field,
+            start: offset_usize,
+            end: offset_usize + consumed,
+        }),
+    ))
 }
 
 fn parse_optional_acl<'a>(
@@ -115,7 +140,7 @@ fn parse_optional_acl<'a>(
     field: &'static str,
     present: bool,
     offset: u32,
-) -> KacsResult<Option<Acl<'a>>> {
+) -> KacsResult<(Option<Acl<'a>>, Option<ComponentRegion>)> {
     if !present {
         if offset != 0 {
             return Err(KacsError::InconsistentSecurityDescriptorField {
@@ -124,7 +149,7 @@ fn parse_optional_acl<'a>(
                 offset,
             });
         }
-        return Ok(None);
+        return Ok((None, None));
     }
 
     if offset == 0 {
@@ -141,6 +166,13 @@ fn parse_optional_acl<'a>(
             offset,
             buffer_len: bytes.len(),
         })?;
+    if offset_usize < SecurityDescriptor::HEADER_SIZE {
+        return Err(KacsError::SecurityDescriptorOffsetInsideHeader {
+            field,
+            offset,
+            header_len: SecurityDescriptor::HEADER_SIZE,
+        });
+    }
     if offset_usize >= bytes.len() {
         return Err(KacsError::SecurityDescriptorOffsetOutOfBounds {
             field,
@@ -149,8 +181,15 @@ fn parse_optional_acl<'a>(
         });
     }
 
-    let (acl, _) = Acl::parse_prefix(&bytes[offset_usize..])?;
-    Ok(Some(acl))
+    let (acl, consumed) = Acl::parse_prefix(&bytes[offset_usize..])?;
+    Ok((
+        Some(acl),
+        Some(ComponentRegion {
+            field,
+            start: offset_usize,
+            end: offset_usize + consumed,
+        }),
+    ))
 }
 
 fn read_offset(bytes: &[u8], offset: usize) -> u32 {
@@ -160,4 +199,24 @@ fn read_offset(bytes: &[u8], offset: usize) -> u32 {
         bytes[offset + 2],
         bytes[offset + 3],
     ])
+}
+
+fn validate_component_overlap(regions: &[Option<ComponentRegion>]) -> KacsResult<()> {
+    for (index, first) in regions.iter().enumerate() {
+        let Some(first) = first else {
+            continue;
+        };
+        for second in regions.iter().skip(index + 1) {
+            let Some(second) = second else {
+                continue;
+            };
+            if first.start < second.end && second.start < first.end {
+                return Err(KacsError::SecurityDescriptorComponentsOverlap {
+                    first: first.field,
+                    second: second.field,
+                });
+            }
+        }
+    }
+    Ok(())
 }

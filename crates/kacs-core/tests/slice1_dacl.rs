@@ -221,6 +221,31 @@ fn owner_group_receives_implicit_rights() {
 }
 
 #[test]
+fn deny_only_owner_still_matches_owner_rights_deny_aces() {
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 1002, 8]);
+    let dacl = acl_bytes(&[basic_ace(
+        ACCESS_DENIED_ACE_TYPE,
+        0,
+        READ_CONTROL | WRITE_DAC,
+        &owner_rights,
+    )]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&owner),
+        user_deny_only: true,
+        groups: &[],
+    };
+
+    let result = evaluate_dacl(&sd, &token, READ_CONTROL | WRITE_DAC, &mapping(), false)
+        .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
 fn disabled_group_matches_neither_allow_nor_deny() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 1003]);

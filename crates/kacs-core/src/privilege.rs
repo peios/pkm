@@ -7,11 +7,11 @@ use crate::error::KacsResult;
 pub const BACKUP_INTENT: u32 = 0x0000_0001;
 pub const RESTORE_INTENT: u32 = 0x0000_0002;
 
-pub const SE_SECURITY_PRIVILEGE: u64 = 1 << 0;
-pub const SE_TAKE_OWNERSHIP_PRIVILEGE: u64 = 1 << 1;
-pub const SE_BACKUP_PRIVILEGE: u64 = 1 << 2;
-pub const SE_RESTORE_PRIVILEGE: u64 = 1 << 3;
-pub const SE_RELABEL_PRIVILEGE: u64 = 1 << 4;
+pub const SE_SECURITY_PRIVILEGE: u64 = 1u64 << 8;
+pub const SE_TAKE_OWNERSHIP_PRIVILEGE: u64 = 1u64 << 9;
+pub const SE_BACKUP_PRIVILEGE: u64 = 1u64 << 17;
+pub const SE_RESTORE_PRIVILEGE: u64 = 1u64 << 18;
+pub const SE_RELABEL_PRIVILEGE: u64 = 1u64 << 32;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TokenPrivileges {
@@ -57,7 +57,6 @@ impl PrivilegeProvenance {
             | self.backup_granted
             | self.restore_granted
             | self.take_ownership_granted
-            | self.relabel_granted
     }
 }
 
