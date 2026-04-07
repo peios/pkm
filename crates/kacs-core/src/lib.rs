@@ -18,6 +18,7 @@ mod error;
 mod mic;
 mod object_tree;
 mod pip;
+mod pre_sacl;
 mod privilege;
 mod sacl;
 mod security_descriptor;
@@ -63,6 +64,7 @@ pub use mic::{
 };
 pub use object_tree::{ObjectTypeList, ObjectTypeNode};
 pub use pip::{apply_pip, resolve_process_trust_label, PipEnforcementState, ProcessTrustLabel};
+pub use pre_sacl::{pre_sacl_walk, PreSaclWalkState};
 pub use privilege::{
     apply_take_ownership_fallback, seed_access_check_privileges, AccessDecisionState,
     PrivilegeGrantState, PrivilegeProvenance, TokenPrivileges, BACKUP_INTENT, RESTORE_INTENT,
