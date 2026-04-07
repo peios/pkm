@@ -16,6 +16,7 @@ mod condition;
 mod dacl;
 mod error;
 mod object_tree;
+mod privilege;
 mod security_descriptor;
 mod sid;
 mod token;
@@ -48,6 +49,12 @@ pub use dacl::{
 };
 pub use error::{KacsError, KacsResult};
 pub use object_tree::{ObjectTypeList, ObjectTypeNode};
+pub use privilege::{
+    apply_take_ownership_fallback, seed_access_check_privileges, AccessDecisionState,
+    PrivilegeGrantState, PrivilegeProvenance, TokenPrivileges, BACKUP_INTENT, RESTORE_INTENT,
+    SE_BACKUP_PRIVILEGE, SE_RELABEL_PRIVILEGE, SE_RESTORE_PRIVILEGE, SE_SECURITY_PRIVILEGE,
+    SE_TAKE_OWNERSHIP_PRIVILEGE,
+};
 pub use security_descriptor::{
     SecurityDescriptor, SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE,
 };
