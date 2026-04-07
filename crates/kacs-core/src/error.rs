@@ -1,6 +1,7 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KacsError {
     AccessDenied,
+    InvariantViolation(&'static str),
     NullSecurityDescriptor,
     Truncated(&'static str),
     InvalidClaimFormat(&'static str),

@@ -11,6 +11,7 @@ extern crate alloc;
 mod access_mask;
 mod ace;
 mod acl;
+mod caap;
 mod claims;
 mod condition;
 mod dacl;
@@ -41,6 +42,7 @@ pub use ace::{
     SYSTEM_SCOPED_POLICY_ID_ACE_TYPE,
 };
 pub use acl::Acl;
+pub use caap::{evaluate_caap, CaapEvaluationState, CaapPolicy, CaapPolicyEntry, CaapRule};
 pub use claims::{
     parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, ClaimValue,
     CLAIM_SECURITY_ATTRIBUTE_DISABLED, CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY,
