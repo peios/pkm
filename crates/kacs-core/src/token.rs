@@ -3,6 +3,11 @@ use crate::mic::IntegrityLevel;
 use crate::privilege::TokenPrivileges;
 use crate::sid::Sid;
 
+pub const AUDIT_POLICY_OBJECT_ACCESS_SUCCESS: u32 = 0x0001;
+pub const AUDIT_POLICY_OBJECT_ACCESS_FAILURE: u32 = 0x0002;
+pub const AUDIT_POLICY_PRIVILEGE_USE_SUCCESS: u32 = 0x0004;
+pub const AUDIT_POLICY_PRIVILEGE_USE_FAILURE: u32 = 0x0008;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SidAndAttributes<'a> {
     pub sid: Sid<'a>,
@@ -52,6 +57,7 @@ pub struct AccessCheckToken<'a> {
     pub subject: TokenView<'a>,
     pub token_type: TokenType,
     pub impersonation_level: ImpersonationLevel,
+    pub audit_policy: u32,
     pub privileges: TokenPrivileges,
     pub integrity_level: IntegrityLevel,
     pub mandatory_policy: u32,

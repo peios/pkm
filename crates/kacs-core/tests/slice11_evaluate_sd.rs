@@ -139,6 +139,7 @@ fn primary_token<'a>(user: Sid<'a>, groups: &'a [SidAndAttributes<'a>]) -> Acces
         },
         token_type: TokenType::Primary,
         impersonation_level: ImpersonationLevel::Impersonation,
+        audit_policy: 0,
         privileges: TokenPrivileges::default(),
         integrity_level: IntegrityLevel::Medium,
         mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP,

@@ -8,9 +8,11 @@
 
 extern crate alloc;
 
+mod access_check;
 mod access_mask;
 mod ace;
 mod acl;
+mod audit;
 mod caap;
 mod claims;
 mod condition;
@@ -27,6 +29,10 @@ mod security_descriptor;
 mod sid;
 mod token;
 
+pub use access_check::{
+    access_check, access_check_core, access_check_result_list, AccessCheckCoreState,
+    AccessCheckResult, AccessCheckResultListState,
+};
 pub use access_mask::{
     validate_ace_mask, GenericMapping, NormalizedDesiredAccess, ACCESS_SYSTEM_SECURITY, DELETE,
     GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE, MAXIMUM_ALLOWED, READ_CONTROL,
@@ -45,6 +51,7 @@ pub use ace::{
     SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE, SYSTEM_SCOPED_POLICY_ID_ACE_TYPE,
 };
 pub use acl::Acl;
+pub use audit::{evaluate_sacl, AuditEvent, EvaluateSaclState};
 pub use caap::{evaluate_caap, CaapEvaluationState, CaapPolicy, CaapPolicyEntry, CaapRule};
 pub use claims::{
     parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, ClaimValue,
@@ -88,4 +95,6 @@ pub use sid::{Sid, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
 pub use token::{
     AccessCheckToken, ConfinementTokenContext, IdentityView, ImpersonationLevel,
     RestrictedTokenContext, SidAndAttributes, TokenType, TokenView,
+    AUDIT_POLICY_OBJECT_ACCESS_FAILURE, AUDIT_POLICY_OBJECT_ACCESS_SUCCESS,
+    AUDIT_POLICY_PRIVILEGE_USE_FAILURE, AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
 };
