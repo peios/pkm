@@ -25,6 +25,7 @@ done
 for required in \
 	"$repo_root/crates/kacs-core/src/lib.rs" \
 	"$repo_root/kacs/kacs_rust.rs" \
+	"$repo_root/kacs/kunit.c" \
 	"$repo_root/kacs/lsm.c"; do
 	if [[ ! -f "$required" ]]; then
 		die "required slow-track source file missing: $required"

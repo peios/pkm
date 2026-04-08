@@ -121,12 +121,14 @@ RUN scripts/config \
 # The Makefile passes --build-arg CACHE_BUST=$(checksum) to invalidate
 # Docker's layer cache when any PKM source file changes.
 ARG CACHE_BUST=0
+ARG ENABLE_PKM_KUNIT=0
 
 # PKM: install the explicit slow-track scaffold into security/pkm.
 COPY kernel/install-pkm-subtree.sh /usr/local/bin/install-pkm-subtree
 COPY kernel/stage-kacs-core.sh /usr/local/bin/stage-kacs-core
 COPY kacs/lsm.c /tmp/pkm-src/kacs/lsm.c
 COPY kacs/kacs_rust.rs /tmp/pkm-src/kacs/kacs_rust.rs
+COPY kacs/kunit.c /tmp/pkm-src/kacs/kunit.c
 COPY crates/kacs-core/src/ /tmp/pkm-src/crates/kacs-core/src/
 COPY pkm_kconfig /tmp/pkm-src/pkm_kconfig
 COPY pkm_makefile /tmp/pkm-src/pkm_makefile
@@ -137,6 +139,10 @@ RUN chmod +x /usr/local/bin/install-pkm-subtree /usr/local/bin/stage-kacs-core \
 	rm -rf /tmp/pkm-src && \
 	scripts/config --enable SECURITY_PKM && \
 	scripts/config --set-str LSM "landlock,lockdown,yama,integrity,pkm" && \
+	if [[ "${ENABLE_PKM_KUNIT}" == "1" ]]; then \
+		scripts/config --enable KUNIT && \
+		scripts/config --enable SECURITY_PKM_KUNIT; \
+	fi && \
 	make LLVM=1 olddefconfig
 
 # ccache: persistent cache via volume mount at /ccache

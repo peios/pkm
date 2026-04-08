@@ -48,6 +48,7 @@ insert_source_kconfig() {
 
 require_file "$src_root/kacs/lsm.c"
 require_file "$src_root/kacs/kacs_rust.rs"
+require_file "$src_root/kacs/kunit.c"
 require_file "$src_root/pkm_kconfig"
 require_file "$src_root/pkm_makefile"
 require_file "$src_root/kernel/stage-kacs-core.sh"
@@ -59,6 +60,7 @@ mkdir -p "$pkm_dir/kacs"
 
 install -m 0644 "$src_root/kacs/lsm.c" "$pkm_dir/kacs/lsm.c"
 install -m 0644 "$src_root/kacs/kacs_rust.rs" "$pkm_dir/kacs/kacs_rust.rs"
+install -m 0644 "$src_root/kacs/kunit.c" "$pkm_dir/kacs/kunit.c"
 install -m 0644 "$src_root/pkm_kconfig" "$pkm_dir/Kconfig"
 install -m 0644 "$src_root/pkm_makefile" "$pkm_dir/Makefile"
 

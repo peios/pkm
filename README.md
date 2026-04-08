@@ -39,6 +39,12 @@ kernel patching.
 2. `make -C kernel image`
 3. `make -C kernel kernel`
 
+For PKM-owned KUnit smoke infrastructure:
+
+1. `make -C kernel kunit-image`
+2. `make -C kernel kunit-kernel`
+3. `make -C kernel kunit-smoke`
+
 The Docker image clones the pinned kernel version, configures the toolchain,
 stages the PKM subtree from this repo, enables `SECURITY_PKM`, and builds the
 kernel. The image does not inject syscall registrations or apply any external

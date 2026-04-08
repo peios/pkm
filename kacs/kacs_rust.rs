@@ -20,3 +20,8 @@ pub extern "C" fn kacs_rust_init() -> c_int {
     let _ = kacs_core::kernel_compile_probe();
     0
 }
+
+#[no_mangle]
+pub extern "C" fn kacs_rust_kunit_probe() -> usize {
+    kacs_core::kernel_compile_probe()
+}
