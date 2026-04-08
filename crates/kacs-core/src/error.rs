@@ -3,6 +3,21 @@ pub enum KacsError {
     AccessDenied,
     InvariantViolation(&'static str),
     InvalidTokenInvariant(&'static str),
+    InvalidAbiStructSize {
+        provided: u32,
+        minimum: u32,
+    },
+    InvalidAbiInput(&'static str),
+    NonZeroAbiReservedField(&'static str),
+    UserMemoryFault {
+        field: &'static str,
+        ptr: u64,
+        len: usize,
+    },
+    AccessCheckListResultsCountMismatch {
+        expected: u32,
+        actual: u32,
+    },
     NullSecurityDescriptor,
     Truncated(&'static str),
     InvalidClaimFormat(&'static str),
