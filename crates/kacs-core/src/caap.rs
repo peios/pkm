@@ -1,5 +1,3 @@
-use alloc::vec::Vec;
-
 use crate::access_mask::GenericMapping;
 use crate::condition::{
     evaluate_conditional_expression, validate_conditional_expression_structure, ConditionalContext,
@@ -8,6 +6,7 @@ use crate::condition::{
 use crate::error::{KacsError, KacsResult};
 use crate::evaluate_sd::{evaluate_security_descriptor, EvaluateSecurityDescriptorState};
 use crate::object_tree::ObjectTypeList;
+use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::pip::PipContext;
 use crate::security_descriptor::{
     SecurityDescriptor, SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE,
@@ -33,18 +32,21 @@ pub struct CaapRule<'a> {
     pub staged_sacl: Option<&'a [u8]>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct CaapPolicy<'a> {
     pub rules: Vec<CaapRule<'a>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct CaapPolicyEntry<'a> {
     pub sid: Sid<'a>,
     pub policy: CaapPolicy<'a>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct OwnedCaapRule {
     pub applies_to: Option<Vec<u8>>,
     pub effective_dacl: Vec<u8>,
@@ -65,35 +67,40 @@ impl OwnedCaapRule {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct OwnedCaapPolicy {
     pub rules: Vec<OwnedCaapRule>,
 }
 
 impl OwnedCaapPolicy {
-    pub fn borrowed(&self) -> CaapPolicy<'_> {
-        CaapPolicy {
-            rules: self.rules.iter().map(OwnedCaapRule::borrowed).collect(),
+    pub fn borrowed(&self) -> KacsResult<CaapPolicy<'_>> {
+        let mut rules = Vec::with_capacity(self.rules.len())?;
+        for rule in &self.rules {
+            rules.push(rule.borrowed())?;
         }
+        Ok(CaapPolicy { rules })
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct OwnedCaapPolicyEntry {
     pub sid: Vec<u8>,
     pub policy: OwnedCaapPolicy,
 }
 
 impl OwnedCaapPolicyEntry {
-    pub fn borrowed(&self) -> CaapPolicyEntry<'_> {
-        CaapPolicyEntry {
+    pub fn borrowed(&self) -> KacsResult<CaapPolicyEntry<'_>> {
+        Ok(CaapPolicyEntry {
             sid: Sid::parse(self.sid.as_slice()).expect("policy SID validated at ingestion"),
-            policy: self.policy.borrowed(),
-        }
+            policy: self.policy.borrowed()?,
+        })
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub struct CaapPolicyCache {
     entries: Vec<OwnedCaapPolicyEntry>,
 }
@@ -103,11 +110,12 @@ impl CaapPolicyCache {
         self.entries.as_slice()
     }
 
-    pub fn borrowed_entries(&self) -> Vec<CaapPolicyEntry<'_>> {
-        self.entries
-            .iter()
-            .map(OwnedCaapPolicyEntry::borrowed)
-            .collect()
+    pub fn borrowed_entries(&self) -> KacsResult<Vec<CaapPolicyEntry<'_>>> {
+        let mut entries = Vec::with_capacity(self.entries.len())?;
+        for entry in &self.entries {
+            entries.push(entry.borrowed()?)?;
+        }
+        Ok(entries)
     }
 
     pub fn upsert_policy(&mut self, policy_sid: &[u8], policy: OwnedCaapPolicy) -> KacsResult<()> {
@@ -116,21 +124,21 @@ impl CaapPolicyCache {
         if let Some(entry) = self
             .entries
             .iter_mut()
-            .find(|entry| entry.sid == policy_sid)
+            .find(|entry| entry.sid.as_slice() == policy_sid)
         {
             entry.policy = policy;
         } else {
             self.entries.push(OwnedCaapPolicyEntry {
-                sid: policy_sid.to_vec(),
+                sid: slice_to_vec(policy_sid)?,
                 policy,
-            });
+            })?;
         }
         Ok(())
     }
 
     pub fn remove_policy(&mut self, policy_sid: &[u8]) -> KacsResult<()> {
         validate_policy_sid(policy_sid)?;
-        self.entries.retain(|entry| entry.sid != policy_sid);
+        remove_policy_entries(&mut self.entries, policy_sid)?;
         Ok(())
     }
 
@@ -138,7 +146,7 @@ impl CaapPolicyCache {
         validate_policy_sid(policy_sid)?;
 
         let Some(spec) = spec.filter(|spec| !spec.is_empty()) else {
-            self.entries.retain(|entry| entry.sid != policy_sid);
+            remove_policy_entries(&mut self.entries, policy_sid)?;
             return Ok(());
         };
 
@@ -146,20 +154,21 @@ impl CaapPolicyCache {
         if let Some(entry) = self
             .entries
             .iter_mut()
-            .find(|entry| entry.sid == policy_sid)
+            .find(|entry| entry.sid.as_slice() == policy_sid)
         {
             entry.policy = policy;
         } else {
             self.entries.push(OwnedCaapPolicyEntry {
-                sid: policy_sid.to_vec(),
+                sid: slice_to_vec(policy_sid)?,
                 policy,
-            });
+            })?;
         }
         Ok(())
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct CaapEvaluationState<'a> {
     pub granted: u32,
     pub object_granted_list: Option<Vec<u32>>,
@@ -169,7 +178,8 @@ pub struct CaapEvaluationState<'a> {
     pub staged_sacls: Vec<&'a [u8]>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 struct RuleGrantState {
     granted: u32,
     object_granted_list: Option<Vec<u32>>,
@@ -196,7 +206,7 @@ pub fn parse_caap_policy_spec(spec: &[u8]) -> KacsResult<OwnedCaapPolicy> {
         ));
     }
 
-    let mut rules = Vec::with_capacity(rule_count as usize);
+    let mut rules = Vec::with_capacity(rule_count as usize)?;
     for _ in 0..rule_count {
         let applies_to =
             read_len_prefixed_field(spec, &mut offset, MAX_CAAP_FIELD_LEN, "caap applies_to")?;
@@ -234,12 +244,20 @@ pub fn parse_caap_policy_spec(spec: &[u8]) -> KacsResult<OwnedCaapPolicy> {
         }
 
         rules.push(OwnedCaapRule {
-            applies_to: (!applies_to.is_empty()).then(|| applies_to.to_vec()),
-            effective_dacl: effective_dacl.to_vec(),
-            effective_sacl: (!effective_sacl.is_empty()).then(|| effective_sacl.to_vec()),
-            staged_dacl: (!staged_dacl.is_empty()).then(|| staged_dacl.to_vec()),
-            staged_sacl: (!staged_sacl.is_empty()).then(|| staged_sacl.to_vec()),
-        });
+            applies_to: (!applies_to.is_empty())
+                .then(|| slice_to_vec(applies_to))
+                .transpose()?,
+            effective_dacl: slice_to_vec(effective_dacl)?,
+            effective_sacl: (!effective_sacl.is_empty())
+                .then(|| slice_to_vec(effective_sacl))
+                .transpose()?,
+            staged_dacl: (!staged_dacl.is_empty())
+                .then(|| slice_to_vec(staged_dacl))
+                .transpose()?,
+            staged_sacl: (!staged_sacl.is_empty())
+                .then(|| slice_to_vec(staged_sacl))
+                .transpose()?,
+        })?;
     }
 
     if offset != spec.len() {
@@ -304,7 +322,7 @@ pub fn evaluate_caap<'a>(
                 )?;
             }
         } else {
-            let recovery_dacl = build_recovery_policy_dacl();
+            let recovery_dacl = build_recovery_policy_dacl()?;
             apply_rule(
                 None,
                 recovery_dacl.as_slice(),
@@ -381,18 +399,23 @@ fn apply_rule<'a>(
         effective_dacl,
     );
 
-    let effective_state = effective_rule.clone().unwrap_or_else(|| {
-        deny_except_privileges(base.privilege_granted, base.privilege_granted, object_tree)
-    });
+    let effective_state = match &effective_rule {
+        Some(state) => clone_rule_grants(state)?,
+        None => deny_except_privileges(
+            base.privilege_granted,
+            base.privilege_granted,
+            object_tree,
+        )?,
+    };
     *granted &= effective_state.granted;
     intersect_object_grants(object_granted_list, &effective_state.object_granted_list)?;
 
     if let Some(sacl) = effective_sacl {
-        effective_sacls.push(sacl);
+        effective_sacls.push(sacl)?;
     }
 
     let staged_state = if let Some(staged_dacl) = staged_dacl {
-        evaluate_rule_dacl(
+        match evaluate_rule_dacl(
             sd,
             token,
             pip,
@@ -401,12 +424,19 @@ fn apply_rule<'a>(
             object_tree,
             conditional_context,
             staged_dacl,
-        )
-        .unwrap_or_else(|| deny_except_privileges(0, base.privilege_granted, object_tree))
+        ) {
+            Some(state) => state,
+            None => deny_except_privileges(0, base.privilege_granted, object_tree)?,
+        }
     } else {
-        effective_rule.clone().unwrap_or_else(|| {
-            deny_except_privileges(base.privilege_granted, base.privilege_granted, object_tree)
-        })
+        match &effective_rule {
+            Some(state) => clone_rule_grants(state)?,
+            None => deny_except_privileges(
+                base.privilege_granted,
+                base.privilege_granted,
+                object_tree,
+            )?,
+        }
     };
 
     *staged_granted &= staged_state.granted;
@@ -416,9 +446,9 @@ fn apply_rule<'a>(
     )?;
 
     if let Some(sacl) = staged_sacl {
-        staged_sacls.push(sacl);
+        staged_sacls.push(sacl)?;
     } else if let Some(sacl) = effective_sacl {
-        staged_sacls.push(sacl);
+        staged_sacls.push(sacl)?;
     }
 
     Ok(())
@@ -510,27 +540,34 @@ fn build_synthetic_sd_bytes(
         control &= !SE_SACL_PRESENT;
     }
 
-    let mut bytes = vec![0u8; SecurityDescriptor::HEADER_SIZE];
+    let mut bytes = Vec::with_capacity(
+        SecurityDescriptor::HEADER_SIZE
+            + owner.as_bytes().len()
+            + group.as_bytes().len()
+            + sacl.as_ref().map_or(0, Vec::len)
+            + dacl_bytes.len(),
+    )?;
+    bytes.extend_from_slice(&[0u8; SecurityDescriptor::HEADER_SIZE])?;
     bytes[0] = 1;
     bytes[2..4].copy_from_slice(&control.to_le_bytes());
 
     let owner_offset = bytes.len() as u32;
     bytes[4..8].copy_from_slice(&owner_offset.to_le_bytes());
-    bytes.extend_from_slice(owner.as_bytes());
+    bytes.extend_from_slice(owner.as_bytes())?;
 
     let group_offset = bytes.len() as u32;
     bytes[8..12].copy_from_slice(&group_offset.to_le_bytes());
-    bytes.extend_from_slice(group.as_bytes());
+    bytes.extend_from_slice(group.as_bytes())?;
 
     if let Some(sacl) = sacl.as_deref() {
         let sacl_offset = bytes.len() as u32;
         bytes[12..16].copy_from_slice(&sacl_offset.to_le_bytes());
-        bytes.extend_from_slice(sacl);
+        bytes.extend_from_slice(sacl)?;
     }
 
     let dacl_offset = bytes.len() as u32;
     bytes[16..20].copy_from_slice(&dacl_offset.to_le_bytes());
-    bytes.extend_from_slice(dacl_bytes);
+    bytes.extend_from_slice(dacl_bytes)?;
 
     Ok(bytes)
 }
@@ -543,12 +580,13 @@ fn clone_base_object_grants(
         return Ok(None);
     };
 
-    let object_granted_list =
-        base.object_granted_list
-            .clone()
-            .ok_or(KacsError::InvariantViolation(
-                "missing base object_granted_list",
-            ))?;
+    let object_granted_list = base
+        .object_granted_list
+        .as_ref()
+        .ok_or(KacsError::InvariantViolation(
+            "missing base object_granted_list",
+        ))
+        .and_then(|list| slice_to_vec(list.as_slice()).map_err(Into::into))?;
     if object_granted_list.len() != object_tree.len() {
         return Err(KacsError::InvariantViolation(
             "base object_granted_list length mismatch",
@@ -579,11 +617,21 @@ fn deny_except_privileges(
     scalar_privilege_granted: u32,
     object_privilege_granted: u32,
     object_tree: Option<&ObjectTypeList>,
-) -> RuleGrantState {
-    RuleGrantState {
+) -> KacsResult<RuleGrantState> {
+    let object_granted_list = if let Some(tree) = object_tree {
+        let mut grants = Vec::with_capacity(tree.len())?;
+        for _ in 0..tree.len() {
+            grants.push(object_privilege_granted)?;
+        }
+        Some(grants)
+    } else {
+        None
+    };
+
+    Ok(RuleGrantState {
         granted: scalar_privilege_granted,
-        object_granted_list: object_tree.map(|tree| vec![object_privilege_granted; tree.len()]),
-    }
+        object_granted_list,
+    })
 }
 
 fn strip_scoped_policy_aces(sacl: Option<crate::Acl<'_>>) -> KacsResult<Option<Vec<u8>>> {
@@ -595,52 +643,52 @@ fn strip_scoped_policy_aces(sacl: Option<crate::Acl<'_>>) -> KacsResult<Option<V
     for ace in sacl.entries() {
         let ace = ace?;
         if ace.ace_type() != SYSTEM_SCOPED_POLICY_ID_ACE_TYPE {
-            kept.push(ace.bytes().to_vec());
+            kept.push(slice_to_vec(ace.bytes())?)?;
         }
     }
 
     let size = 8 + kept.iter().map(Vec::len).sum::<usize>();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(sacl.revision());
-    bytes.push(sacl.sbz1());
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&(kept.len() as u16).to_le_bytes());
-    bytes.extend_from_slice(&sacl.sbz2().to_le_bytes());
+    let mut bytes = Vec::with_capacity(size)?;
+    bytes.push(sacl.revision())?;
+    bytes.push(sacl.sbz1())?;
+    bytes.extend_from_slice(&(size as u16).to_le_bytes())?;
+    bytes.extend_from_slice(&(kept.len() as u16).to_le_bytes())?;
+    bytes.extend_from_slice(&sacl.sbz2().to_le_bytes())?;
     for ace in kept {
-        bytes.extend_from_slice(&ace);
+        bytes.extend_from_slice(ace.as_slice())?;
     }
 
     Ok(Some(bytes))
 }
 
-fn build_recovery_policy_dacl() -> Vec<u8> {
+fn build_recovery_policy_dacl() -> KacsResult<Vec<u8>> {
     let aces = [
         basic_ace(
             ACCESS_ALLOWED_ACE_TYPE,
             0,
             GENERIC_ALL,
             ADMINISTRATORS_SID_BYTES,
-        ),
-        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL, SYSTEM_SID_BYTES),
+        )?,
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL, SYSTEM_SID_BYTES)?,
         basic_ace(
             ACCESS_ALLOWED_ACE_TYPE,
             0,
             GENERIC_ALL,
             OWNER_RIGHTS_SID_BYTES,
-        ),
+        )?,
     ];
     acl_bytes(&aces)
 }
 
-fn basic_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
+fn basic_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8]) -> KacsResult<Vec<u8>> {
     let size = 8 + sid.len();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(ace_type);
-    bytes.push(flags);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&mask.to_le_bytes());
-    bytes.extend_from_slice(sid);
-    bytes
+    let mut bytes = Vec::with_capacity(size)?;
+    bytes.push(ace_type)?;
+    bytes.push(flags)?;
+    bytes.extend_from_slice(&(size as u16).to_le_bytes())?;
+    bytes.extend_from_slice(&mask.to_le_bytes())?;
+    bytes.extend_from_slice(sid)?;
+    Ok(bytes)
 }
 
 fn validate_policy_sid(policy_sid: &[u8]) -> KacsResult<()> {
@@ -695,18 +743,43 @@ fn read_len_prefixed_field<'a>(
     Ok(slice)
 }
 
-fn acl_bytes(aces: &[Vec<u8>]) -> Vec<u8> {
+fn acl_bytes(aces: &[Vec<u8>]) -> KacsResult<Vec<u8>> {
     let size = 8 + aces.iter().map(Vec::len).sum::<usize>();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(4);
-    bytes.push(0);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&(aces.len() as u16).to_le_bytes());
-    bytes.extend_from_slice(&0u16.to_le_bytes());
+    let mut bytes = Vec::with_capacity(size)?;
+    bytes.push(4)?;
+    bytes.push(0)?;
+    bytes.extend_from_slice(&(size as u16).to_le_bytes())?;
+    bytes.extend_from_slice(&(aces.len() as u16).to_le_bytes())?;
+    bytes.extend_from_slice(&0u16.to_le_bytes())?;
     for ace in aces {
-        bytes.extend_from_slice(ace);
+        bytes.extend_from_slice(ace.as_slice())?;
     }
-    bytes
+    Ok(bytes)
+}
+
+fn clone_rule_grants(state: &RuleGrantState) -> KacsResult<RuleGrantState> {
+    Ok(RuleGrantState {
+        granted: state.granted,
+        object_granted_list: state
+            .object_granted_list
+            .as_ref()
+            .map(|list| slice_to_vec(list.as_slice()))
+            .transpose()?,
+    })
+}
+
+fn remove_policy_entries(
+    entries: &mut Vec<OwnedCaapPolicyEntry>,
+    policy_sid: &[u8],
+) -> KacsResult<()> {
+    let mut kept = Vec::with_capacity(entries.len())?;
+    for entry in core::mem::take(entries) {
+        if entry.sid.as_slice() != policy_sid {
+            kept.push(entry)?;
+        }
+    }
+    *entries = kept;
+    Ok(())
 }
 
 #[cfg(test)]

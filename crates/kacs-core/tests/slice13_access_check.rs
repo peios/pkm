@@ -403,7 +403,8 @@ fn staged_audit_delta_sets_staging_mismatch() {
             effective_sacl: Some(effective_sacl.as_slice()),
             staged_dacl: Some(dacl.as_slice()),
             staged_sacl: Some(staged_sacl.as_slice()),
-        }],
+        }]
+        .into(),
     };
     let policies = [CaapPolicyEntry {
         sid: parse_sid(&policy_sid),
@@ -457,7 +458,7 @@ fn token_audit_policy_forces_success_and_failure_audits() {
     assert!(success.audit_events[0].policy_forced);
     assert_eq!(
         success.audit_events[0].object_audit_context,
-        Some(b"/obj".to_vec())
+        Some(b"/obj".to_vec().into())
     );
 
     let mut failure_token = primary_token(parse_sid(&user));

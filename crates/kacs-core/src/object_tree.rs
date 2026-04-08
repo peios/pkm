@@ -1,7 +1,9 @@
-use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::error::{KacsError, KacsResult};
+use crate::pkm_alloc::{slice_to_vec, Vec};
+#[cfg(feature = "kernel")]
+use crate::pkm_alloc::{AllocError, TryClone};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectTypeNode {
@@ -9,7 +11,15 @@ pub struct ObjectTypeNode {
     pub guid: [u8; 16],
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(feature = "kernel")]
+impl TryClone for ObjectTypeNode {
+    fn try_clone(&self) -> Result<Self, AllocError> {
+        Ok(*self)
+    }
+}
+
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ObjectTypeList {
     nodes: Vec<ObjectTypeNode>,
     parents: Vec<Option<usize>>,
@@ -24,8 +34,8 @@ impl ObjectTypeList {
             return Err(KacsError::InvalidObjectTypeRootLevel(nodes[0].level));
         }
 
-        let mut parents = Vec::with_capacity(nodes.len());
-        let mut stack: Vec<usize> = Vec::with_capacity(nodes.len());
+        let mut parents = Vec::with_capacity(nodes.len())?;
+        let mut stack: Vec<usize> = Vec::with_capacity(nodes.len())?;
 
         for (index, node) in nodes.iter().copied().enumerate() {
             if nodes[..index]
@@ -36,8 +46,8 @@ impl ObjectTypeList {
             }
 
             if index == 0 {
-                parents.push(None);
-                stack.push(index);
+                parents.push(None)?;
+                stack.push(index)?;
                 continue;
             }
 
@@ -61,12 +71,12 @@ impl ObjectTypeList {
                 previous: previous_level,
                 current: node.level,
             })?;
-            parents.push(Some(parent));
-            stack.push(index);
+            parents.push(Some(parent))?;
+            stack.push(index)?;
         }
 
         Ok(Self {
-            nodes: nodes.to_vec(),
+            nodes: slice_to_vec(nodes)?,
             parents,
         })
     }

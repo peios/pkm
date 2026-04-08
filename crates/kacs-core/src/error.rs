@@ -1,6 +1,9 @@
+use crate::pkm_alloc::AllocError;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KacsError {
     AccessDenied,
+    AllocationFailure,
     InvariantViolation(&'static str),
     InvalidTokenInvariant(&'static str),
     InvalidCaapSpec(&'static str),
@@ -86,3 +89,9 @@ pub enum KacsError {
 }
 
 pub type KacsResult<T> = core::result::Result<T, KacsError>;
+
+impl From<AllocError> for KacsError {
+    fn from(_: AllocError) -> Self {
+        KacsError::AllocationFailure
+    }
+}

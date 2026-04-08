@@ -277,7 +277,7 @@ fn parsed_policy_cache_feeds_existing_caap_evaluator() {
         resource_claims: &resource_claims,
         ..ConditionalContext::default()
     };
-    let borrowed = cache.borrowed_entries();
+    let borrowed = cache.borrowed_entries().expect("borrowed entries should build");
     let result = access_check_core(
         Some(&sd),
         &token,

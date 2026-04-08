@@ -492,6 +492,6 @@ fn object_tree_pipeline_preserves_root_and_per_node_grants() {
     assert_eq!(result.granted, READ_CONTROL);
     assert_eq!(
         result.object_granted_list,
-        Some(vec![READ_CONTROL, READ_CONTROL])
+        Some(vec![READ_CONTROL, READ_CONTROL].into())
     );
 }

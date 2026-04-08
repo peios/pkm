@@ -2,7 +2,7 @@ use kacs_core::{
     execute_access_check_abi, execute_access_check_list_abi, parse_access_check_abi_request,
     AccessCheckAbiMemory, AccessCheckAbiResolved, AccessCheckAbiReturn, AccessCheckToken,
     ConfinementTokenContext, ImpersonationLevel, IntegrityLevel, PipContext,
-    RestrictedTokenContext, Sid, TokenPrivileges, TokenType, TokenView,
+    RestrictedTokenContext, Sid, TokenPrivileges, TokenType, TokenView, PkmVec,
     KACS_ACCESS_CHECK_ARGS_V1_SIZE, READ_CONTROL, SE_DACL_PRESENT, SE_SELF_RELATIVE, WRITE_DAC,
 };
 use std::collections::BTreeMap;
@@ -116,7 +116,7 @@ impl TestMemory {
 }
 
 impl AccessCheckAbiMemory for TestMemory {
-    fn read_bytes(&self, ptr: u64, len: usize) -> Option<Vec<u8>> {
+    fn read_bytes(&self, ptr: u64, len: usize) -> Option<PkmVec<u8>> {
         for (base, region) in &self.regions {
             if ptr < *base {
                 continue;
@@ -124,7 +124,7 @@ impl AccessCheckAbiMemory for TestMemory {
             let start = usize::try_from(ptr - *base).ok()?;
             let end = start.checked_add(len)?;
             if end <= region.len() {
-                return Some(region[start..end].to_vec());
+                return Some(region[start..end].to_vec().into());
             }
         }
         None

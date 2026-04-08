@@ -1,5 +1,3 @@
-use alloc::vec::Vec;
-
 use crate::audit::{evaluate_sacl, AuditEvent};
 use crate::caap::{evaluate_caap, CaapPolicyEntry};
 use crate::condition::ConditionalContext;
@@ -7,6 +5,7 @@ use crate::dacl::AccessStatus;
 use crate::error::{KacsError, KacsResult};
 use crate::evaluate_sd::evaluate_security_descriptor;
 use crate::object_tree::ObjectTypeList;
+use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::pip::PipContext;
 use crate::privilege::{
     PrivilegeProvenance, TokenPrivileges, SE_BACKUP_PRIVILEGE, SE_RELABEL_PRIVILEGE,
@@ -25,7 +24,8 @@ pub enum AccessCheckMode {
     ResultList,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct PrivilegeUseEvent {
     pub privilege: u64,
     pub requested: u32,
@@ -35,7 +35,8 @@ pub struct PrivilegeUseEvent {
     pub object_audit_context: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct AccessCheckCoreState<'a> {
     pub decided: u32,
     pub granted: u32,
@@ -58,7 +59,8 @@ pub struct AccessCheckResult {
     pub staging_mismatch: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct AccessCheckResultListState {
     pub granted_list: Vec<u32>,
     pub status_list: Vec<AccessStatus>,
@@ -148,7 +150,7 @@ pub fn access_check_core<'a>(
                 &audit_context,
                 object_audit_context,
             )?;
-            audit_events.extend(state.audit_events);
+            audit_events.extend(state.audit_events)?;
             continuous_audit_mask |= state.continuous_audit_mask;
         }
 
@@ -166,7 +168,7 @@ pub fn access_check_core<'a>(
                     &audit_context,
                     object_audit_context,
                 ) {
-                    audit_events.extend(state.audit_events);
+                    audit_events.extend(state.audit_events)?;
                     continuous_audit_mask |= state.continuous_audit_mask;
                 }
             }
@@ -189,7 +191,7 @@ pub fn access_check_core<'a>(
                     &audit_context,
                     object_audit_context,
                 )?;
-                staged_audit_events.extend(state.audit_events);
+                staged_audit_events.extend(state.audit_events)?;
                 staged_continuous |= state.continuous_audit_mask;
             }
 
@@ -207,7 +209,7 @@ pub fn access_check_core<'a>(
                         &audit_context,
                         object_audit_context,
                     ) {
-                        staged_audit_events.extend(state.audit_events);
+                        staged_audit_events.extend(state.audit_events)?;
                         staged_continuous |= state.continuous_audit_mask;
                     }
                 }
@@ -230,7 +232,7 @@ pub fn access_check_core<'a>(
         caap.object_granted_list.as_deref(),
         base.max_allowed_mode,
         object_audit_context,
-    );
+    )?;
     let success =
         (caap.granted & base.mapped_desired) == base.mapped_desired || base.mapped_desired == 0;
     if success && (token.audit_policy & AUDIT_POLICY_OBJECT_ACCESS_SUCCESS) != 0 {
@@ -241,8 +243,8 @@ pub fn access_check_core<'a>(
             success: true,
             policy_forced: true,
             privilege: None,
-            object_audit_context: object_audit_context.map(|ctx| ctx.to_vec()),
-        });
+            object_audit_context: object_audit_context.map(slice_to_vec).transpose()?,
+        })?;
     }
     if !success && (token.audit_policy & AUDIT_POLICY_OBJECT_ACCESS_FAILURE) != 0 {
         audit_events.push(AuditEvent {
@@ -252,8 +254,8 @@ pub fn access_check_core<'a>(
             success: false,
             policy_forced: true,
             privilege: None,
-            object_audit_context: object_audit_context.map(|ctx| ctx.to_vec()),
-        });
+            object_audit_context: object_audit_context.map(slice_to_vec).transpose()?,
+        })?;
     }
 
     let mut updated_privileges = token.privileges;
@@ -349,12 +351,12 @@ pub fn access_check_result_list<'a>(
         .ok_or(KacsError::InvariantViolation(
             "result-list wrapper requires object grants",
         ))?;
-    let mut status_list = Vec::with_capacity(granted_list.len());
+    let mut status_list = Vec::with_capacity(granted_list.len())?;
     for granted in &granted_list {
         if state.mapped_desired == 0 || (*granted & state.mapped_desired) == state.mapped_desired {
-            status_list.push(AccessStatus::Ok);
+            status_list.push(AccessStatus::Ok)?;
         } else {
-            status_list.push(AccessStatus::AccessDenied);
+            status_list.push(AccessStatus::AccessDenied)?;
         }
     }
 
@@ -375,9 +377,9 @@ fn evaluate_privilege_use(
     object_granted_list: Option<&[u32]>,
     max_allowed_mode: bool,
     object_audit_context: Option<&[u8]>,
-) -> (u64, Vec<PrivilegeUseEvent>) {
+) -> KacsResult<(u64, Vec<PrivilegeUseEvent>)> {
     if max_allowed_mode {
-        return (0, Vec::new());
+        return Ok((0, Vec::new()));
     }
 
     let mut used_delta = 0u64;
@@ -418,8 +420,8 @@ fn evaluate_privilege_use(
                     granted: final_granted,
                     surviving_bits,
                     success: true,
-                    object_audit_context: object_audit_context.map(|ctx| ctx.to_vec()),
-                });
+                    object_audit_context: object_audit_context.map(slice_to_vec).transpose()?,
+                })?;
             }
         } else if (token.audit_policy & AUDIT_POLICY_PRIVILEGE_USE_FAILURE) != 0 {
             events.push(PrivilegeUseEvent {
@@ -428,10 +430,10 @@ fn evaluate_privilege_use(
                 granted: final_granted,
                 surviving_bits: 0,
                 success: false,
-                object_audit_context: object_audit_context.map(|ctx| ctx.to_vec()),
-            });
+                object_audit_context: object_audit_context.map(slice_to_vec).transpose()?,
+            })?;
         }
     }
 
-    (used_delta, events)
+    Ok((used_delta, events))
 }

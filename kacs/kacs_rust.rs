@@ -6,11 +6,17 @@
 //! kernel-facing slice can prove that Rust code is compiled, linked, and
 //! invoked by the built-in PKM LSM path.
 
-#![no_std]
+#![allow(elided_lifetimes_in_paths)]
+
+mod kacs_core;
+
+#[allow(hidden_glob_reexports)]
+pub use kacs_core::*;
 
 use core::ffi::c_int;
 
 #[no_mangle]
 pub extern "C" fn kacs_rust_init() -> c_int {
+    let _ = kacs_core::kernel_compile_probe();
     0
 }

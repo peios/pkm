@@ -1,16 +1,16 @@
-use alloc::vec::Vec;
-
 use crate::access_mask::GenericMapping;
 use crate::claims::ClaimAttribute;
 use crate::error::KacsResult;
 use crate::mic::{apply_mic, resolve_mandatory_label, IntegrityLevel};
+use crate::pkm_alloc::Vec;
 use crate::pip::{apply_pip, resolve_process_trust_label, PipContext};
 use crate::privilege::PrivilegeProvenance;
 use crate::sacl::extract_sacl_metadata;
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct PreSaclWalkState<'a> {
     pub decided: u32,
     pub granted: u32,

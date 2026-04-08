@@ -1,5 +1,3 @@
-use alloc::vec::Vec;
-
 use crate::access_mask::GenericMapping;
 use crate::claims::ClaimAttribute;
 use crate::condition::ConditionalContext;
@@ -10,6 +8,7 @@ use crate::dacl::{
 };
 use crate::error::{KacsError, KacsResult};
 use crate::object_tree::ObjectTypeList;
+use crate::pkm_alloc::Vec;
 use crate::pip::PipContext;
 use crate::pre_sacl::pre_sacl_walk;
 use crate::privilege::{
@@ -23,7 +22,8 @@ use crate::token::{
     TokenType,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct EvaluateSecurityDescriptorState<'a> {
     pub decided: u32,
     pub granted: u32,
@@ -207,12 +207,15 @@ pub fn evaluate_security_descriptor<'a>(
         evaluation = merge_absolute_results(evaluation, &confinement);
     }
 
-    let object_granted_list = evaluation.object_states.as_ref().map(|states| {
-        states
-            .iter()
-            .map(|state| state.granted)
-            .collect::<Vec<u32>>()
-    });
+    let object_granted_list = if let Some(states) = evaluation.object_states.as_ref() {
+        let mut granted_list = Vec::with_capacity(states.len())?;
+        for state in states.iter() {
+            granted_list.push(state.granted)?;
+        }
+        Some(granted_list)
+    } else {
+        None
+    };
 
     Ok(EvaluateSecurityDescriptorState {
         decided: evaluation.root.decided,

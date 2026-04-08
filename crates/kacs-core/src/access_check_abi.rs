@@ -1,5 +1,3 @@
-use alloc::vec::Vec;
-
 use crate::access_check::{access_check_core, AccessCheckMode, PrivilegeUseEvent};
 use crate::access_mask::GenericMapping;
 use crate::audit::AuditEvent;
@@ -9,6 +7,7 @@ use crate::condition::ConditionalContext;
 use crate::dacl::AccessStatus;
 use crate::error::{KacsError, KacsResult};
 use crate::object_tree::{ObjectTypeList, ObjectTypeNode};
+use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::pip::PipContext;
 use crate::privilege::TokenPrivileges;
 use crate::security_descriptor::SecurityDescriptor;
@@ -25,7 +24,8 @@ pub trait AccessCheckAbiMemory {
     fn read_bytes(&self, ptr: u64, len: usize) -> Option<Vec<u8>>;
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct AccessCheckAbiRequest {
     pub token_fd: i32,
     pub desired_access: u32,
@@ -65,7 +65,8 @@ pub struct U32Writeback {
     pub value: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct OwnedAuditEvent {
     pub ace_bytes: Option<Vec<u8>>,
     pub requested: u32,
@@ -82,7 +83,8 @@ pub struct KacsNodeResultAbi {
     pub status: i32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct AccessCheckAbiExecution {
     pub disposition: AccessCheckAbiReturn,
     pub granted_out: Option<U32Writeback>,
@@ -247,7 +249,7 @@ pub fn execute_access_check_abi<'a>(
             value: u32::from(state.staging_mismatch),
         }),
         node_results: None,
-        audit_events: own_audit_events(&state.audit_events),
+        audit_events: own_audit_events(&state.audit_events)?,
         privilege_use_events: state.privilege_use_events,
         updated_privileges: state.updated_privileges,
     })
@@ -309,9 +311,9 @@ pub fn execute_access_check_list_abi<'a>(
             "result-list ABI execution requires object grants",
         ))?;
     let root_granted = granted_list.first().copied().unwrap_or(0);
-    let node_results = granted_list
-        .iter()
-        .map(|granted| KacsNodeResultAbi {
+    let mut node_results = Vec::with_capacity(granted_list.len())?;
+    for granted in granted_list.iter() {
+        node_results.push(KacsNodeResultAbi {
             granted: *granted,
             status: if state.mapped_desired == 0
                 || (*granted & state.mapped_desired) == state.mapped_desired
@@ -320,8 +322,8 @@ pub fn execute_access_check_list_abi<'a>(
             } else {
                 access_status_code(AccessStatus::AccessDenied)
             },
-        })
-        .collect();
+        })?;
+    }
 
     Ok(AccessCheckAbiExecution {
         disposition: AccessCheckAbiReturn::Success,
@@ -338,7 +340,7 @@ pub fn execute_access_check_list_abi<'a>(
             value: u32::from(state.staging_mismatch),
         }),
         node_results: Some(node_results),
-        audit_events: own_audit_events(&state.audit_events),
+        audit_events: own_audit_events(&state.audit_events)?,
         privilege_use_events: state.privilege_use_events,
         updated_privileges: state.updated_privileges,
     })
@@ -364,7 +366,7 @@ fn parse_object_tree<M: AccessCheckAbiMemory>(
         .checked_mul(KACS_OBJECT_TYPE_ENTRY_SIZE)
         .ok_or(KacsError::InvalidAbiInput("object_tree_count overflow"))?;
     let bytes = read_memory(memory, "object_tree", ptr, total_len)?;
-    let mut nodes = Vec::with_capacity(count_usize);
+    let mut nodes = Vec::with_capacity(count_usize)?;
     for entry in bytes.chunks_exact(KACS_OBJECT_TYPE_ENTRY_SIZE) {
         let level = u16::from_le_bytes([entry[0], entry[1]]);
         let reserved = u16::from_le_bytes([entry[2], entry[3]]);
@@ -375,7 +377,7 @@ fn parse_object_tree<M: AccessCheckAbiMemory>(
         }
         let mut guid = [0u8; 16];
         guid.copy_from_slice(&entry[4..20]);
-        nodes.push(ObjectTypeNode { level, guid });
+        nodes.push(ObjectTypeNode { level, guid })?;
     }
 
     Ok(Some(ObjectTypeList::new(&nodes)?))
@@ -452,19 +454,27 @@ fn effective_pip(requested: PipContext, fallback: PipContext) -> PipContext {
     }
 }
 
-fn own_audit_events(events: &[AuditEvent<'_>]) -> Vec<OwnedAuditEvent> {
-    events
-        .iter()
-        .map(|event| OwnedAuditEvent {
-            ace_bytes: event.ace_bytes.map(|bytes| bytes.to_vec()),
+fn own_audit_events(events: &[AuditEvent<'_>]) -> KacsResult<Vec<OwnedAuditEvent>> {
+    let mut owned = Vec::with_capacity(events.len())?;
+    for event in events {
+        owned.push(OwnedAuditEvent {
+            ace_bytes: event
+                .ace_bytes
+                .map(slice_to_vec)
+                .transpose()?,
             requested: event.requested,
             granted: event.granted,
             success: event.success,
             policy_forced: event.policy_forced,
             privilege: event.privilege,
-            object_audit_context: event.object_audit_context.clone(),
-        })
-        .collect()
+            object_audit_context: event
+                .object_audit_context
+                .as_ref()
+                .map(|bytes| slice_to_vec(bytes.as_slice()))
+                .transpose()?,
+        })?;
+    }
+    Ok(owned)
 }
 
 fn access_status_code(status: AccessStatus) -> i32 {

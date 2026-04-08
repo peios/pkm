@@ -1,5 +1,3 @@
-use alloc::vec::Vec;
-
 use crate::access_mask::GenericMapping;
 use crate::ace::{
     Ace, AceKind, ACE_OBJECT_TYPE_PRESENT, SYSTEM_ALARM_ACE_TYPE, SYSTEM_ALARM_CALLBACK_ACE_TYPE,
@@ -12,6 +10,7 @@ use crate::condition::{evaluate_conditional_expression, ConditionalContext, Cond
 use crate::dacl::{sid_matches_token, AcePolarity};
 use crate::error::KacsResult;
 use crate::object_tree::ObjectTypeList;
+use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::sid::Sid;
 use crate::token::TokenView;
 
@@ -21,7 +20,8 @@ const FAILED_ACCESS_ACE_FLAG: u8 = 0x80;
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
 const PRINCIPAL_SELF_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 10, 0, 0, 0];
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct AuditEvent<'a> {
     pub ace_bytes: Option<&'a [u8]>,
     pub requested: u32,
@@ -32,7 +32,8 @@ pub struct AuditEvent<'a> {
     pub object_audit_context: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub struct EvaluateSaclState<'a> {
     pub audit_events: Vec<AuditEvent<'a>>,
     pub continuous_audit_mask: u32,
@@ -108,7 +109,7 @@ fn handle_sacl_ace<'a>(
             if (ace_mask & mapped_desired) == 0 {
                 return Ok(());
             }
-            maybe_append_access_audit(ace, mapped_desired, granted, object_audit_context, state);
+            maybe_append_access_audit(ace, mapped_desired, granted, object_audit_context, state)?;
         }
         (
             SYSTEM_AUDIT_CALLBACK_ACE_TYPE,
@@ -144,7 +145,7 @@ fn handle_sacl_ace<'a>(
             if (ace_mask & mapped_desired) == 0 {
                 return Ok(());
             }
-            maybe_append_access_audit(ace, mapped_desired, granted, object_audit_context, state);
+            maybe_append_access_audit(ace, mapped_desired, granted, object_audit_context, state)?;
         }
         (SYSTEM_ALARM_ACE_TYPE, AceKind::SingleSid { sid, .. })
         | (SYSTEM_ALARM_OBJECT_ACE_TYPE, AceKind::Object { sid, .. }) => {
@@ -201,7 +202,7 @@ fn maybe_append_access_audit<'a>(
     granted: u32,
     object_audit_context: Option<&[u8]>,
     state: &mut EvaluateSaclState<'a>,
-) {
+) -> KacsResult<()> {
     let success = (granted & mapped_desired) == mapped_desired || mapped_desired == 0;
     if success && (ace.ace_flags() & SUCCESSFUL_ACCESS_ACE_FLAG) != 0 {
         state.audit_events.push(AuditEvent {
@@ -211,8 +212,8 @@ fn maybe_append_access_audit<'a>(
             success: true,
             policy_forced: false,
             privilege: None,
-            object_audit_context: object_audit_context.map(|ctx| ctx.to_vec()),
-        });
+            object_audit_context: object_audit_context.map(slice_to_vec).transpose()?,
+        })?;
     }
     if !success && (ace.ace_flags() & FAILED_ACCESS_ACE_FLAG) != 0 {
         state.audit_events.push(AuditEvent {
@@ -222,9 +223,10 @@ fn maybe_append_access_audit<'a>(
             success: false,
             policy_forced: false,
             privilege: None,
-            object_audit_context: object_audit_context.map(|ctx| ctx.to_vec()),
-        });
+            object_audit_context: object_audit_context.map(slice_to_vec).transpose()?,
+        })?;
     }
+    Ok(())
 }
 
 fn mapped_ace_mask(ace: &Ace<'_>, mapping: &GenericMapping) -> KacsResult<u32> {

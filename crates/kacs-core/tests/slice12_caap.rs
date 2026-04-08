@@ -327,7 +327,8 @@ fn applies_to_false_and_unknown_rules_are_skipped() {
                 staged_dacl: None,
                 staged_sacl: None,
             },
-        ],
+        ]
+        .into(),
     };
     let entries = [CaapPolicyEntry {
         sid: parse_sid(&policy_sid),
@@ -376,7 +377,8 @@ fn applies_to_sees_user_claims_from_the_call_context() {
             effective_sacl: None,
             staged_dacl: None,
             staged_sacl: None,
-        }],
+        }]
+        .into(),
     };
     let policies = [CaapPolicyEntry {
         sid: parse_sid(&policy_sid),
@@ -446,7 +448,8 @@ fn effective_and_staged_dacls_are_tracked_separately_and_sacls_are_collected() {
             effective_sacl: Some(effective_sacl.as_slice()),
             staged_dacl: Some(staged_dacl.as_slice()),
             staged_sacl: Some(staged_sacl.as_slice()),
-        }],
+        }]
+        .into(),
     };
     let entries = [CaapPolicyEntry {
         sid: parse_sid(&policy_sid),
@@ -500,7 +503,8 @@ fn rule_dacl_error_preserves_only_privilege_granted_bits() {
             effective_sacl: None,
             staged_dacl: None,
             staged_sacl: None,
-        }],
+        }]
+        .into(),
     };
     let entries = [CaapPolicyEntry {
         sid: parse_sid(&policy_sid),
@@ -569,7 +573,8 @@ fn object_tree_tracks_effective_and_staged_per_node_results() {
             effective_sacl: None,
             staged_dacl: Some(staged_dacl.as_slice()),
             staged_sacl: None,
-        }],
+        }]
+        .into(),
     };
     let entries = [CaapPolicyEntry {
         sid: parse_sid(&policy_sid),
@@ -592,12 +597,12 @@ fn object_tree_tracks_effective_and_staged_per_node_results() {
     assert_eq!(result.granted, READ_CONTROL);
     assert_eq!(
         result.object_granted_list,
-        Some(vec![READ_CONTROL, READ_CONTROL, READ_CONTROL])
+        Some(vec![READ_CONTROL, READ_CONTROL, READ_CONTROL].into())
     );
     assert_eq!(result.staged_granted, 0);
     assert_eq!(
         result.staged_object_granted_list,
-        Some(vec![0, READ_CONTROL, 0])
+        Some(vec![0, READ_CONTROL, 0].into())
     );
 }
 
@@ -640,7 +645,8 @@ fn staged_object_tree_error_preserves_per_node_privilege_granted_bits() {
             effective_sacl: None,
             staged_dacl: Some(&malformed_dacl),
             staged_sacl: None,
-        }],
+        }]
+        .into(),
     };
     let entries = [CaapPolicyEntry {
         sid: parse_sid(&policy_sid),
@@ -663,6 +669,6 @@ fn staged_object_tree_error_preserves_per_node_privilege_granted_bits() {
     assert_eq!(result.staged_granted, 0);
     assert_eq!(
         result.staged_object_granted_list,
-        Some(vec![ACCESS_SYSTEM_SECURITY, ACCESS_SYSTEM_SECURITY])
+        Some(vec![ACCESS_SYSTEM_SECURITY, ACCESS_SYSTEM_SECURITY].into())
     );
 }

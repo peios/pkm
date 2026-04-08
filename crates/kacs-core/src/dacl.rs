@@ -1,5 +1,3 @@
-use alloc::vec::Vec;
-
 use crate::access_mask::{
     GenericMapping, NormalizedDesiredAccess, GENERIC_ALL, GENERIC_WRITE, MAXIMUM_ALLOWED,
     READ_CONTROL, WRITE_DAC,
@@ -11,6 +9,7 @@ use crate::ace::{
 use crate::condition::{evaluate_conditional_expression, ConditionalContext, ConditionalResult};
 use crate::error::{KacsError, KacsResult};
 use crate::object_tree::ObjectTypeList;
+use crate::pkm_alloc::Vec;
 use crate::privilege::AccessDecisionState;
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::{Sid, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
@@ -36,7 +35,8 @@ pub enum AccessStatus {
     AccessDenied,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ObjectDaclResultList {
     pub granted_list: Vec<u32>,
     pub status_list: Vec<AccessStatus>,
@@ -63,7 +63,8 @@ struct ProjectedDaclAce<'a> {
     condition: Option<&'a [u8]>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct InternalDaclEvaluation {
     pub(crate) root: AccessDecisionState,
     pub(crate) object_states: Option<Vec<AccessDecisionState>>,
@@ -404,7 +405,7 @@ pub fn evaluate_dacl_result_list_with_context(
             .as_ref()
             .expect("object-tree evaluation always builds result-list output"),
         &normalized,
-    ))
+    )?)
 }
 
 pub fn evaluate_dacl_result_list_with_restricted_context(
@@ -446,7 +447,7 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
                 .as_ref()
                 .expect("object-tree evaluation always builds result-list output"),
             &normalized,
-        ));
+        )?);
     }
 
     let restricted_owner = sd
@@ -500,7 +501,7 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
             .as_ref()
             .expect("restricted object-tree evaluation must retain states"),
         &normalized,
-    ))
+    )?)
 }
 
 pub fn evaluate_dacl_result_list_with_confinement_context(
@@ -540,7 +541,7 @@ pub fn evaluate_dacl_result_list_with_confinement_context(
                 .as_ref()
                 .expect("object-tree evaluation always builds result-list output"),
             &normalized,
-        ));
+        )?);
     };
     if confinement_context.confinement_exempt {
         return Ok(finalize_result_list(
@@ -549,7 +550,7 @@ pub fn evaluate_dacl_result_list_with_confinement_context(
                 .as_ref()
                 .expect("object-tree evaluation always builds result-list output"),
             &normalized,
-        ));
+        )?);
     }
 
     let confinement_owner = sd
@@ -589,7 +590,7 @@ pub fn evaluate_dacl_result_list_with_confinement_context(
             .as_ref()
             .expect("confinement object-tree evaluation must retain states"),
         &normalized,
-    ))
+    )?)
 }
 
 pub(crate) fn evaluate_dacl_states<F>(
@@ -629,8 +630,15 @@ where
         granted |= implicit;
     }
 
-    let mut object_states =
-        object_tree.map(|tree| vec![AccessDecisionState { granted, decided }; tree.len()]);
+    let mut object_states = if let Some(tree) = object_tree {
+        let mut states = Vec::with_capacity(tree.len())?;
+        for _ in 0..tree.len() {
+            states.push(AccessDecisionState { granted, decided })?;
+        }
+        Some(states)
+    } else {
+        None
+    };
 
     match sd.dacl() {
         None => {
@@ -700,7 +708,7 @@ where
                                     index,
                                     ace_bits,
                                     projected.polarity,
-                                );
+                                )?;
                             }
                         }
                     }
@@ -757,9 +765,9 @@ fn finalize_scalar(
 fn finalize_result_list(
     states: &[AccessDecisionState],
     normalized: &NormalizedDesiredAccess,
-) -> ObjectDaclResultList {
-    let mut granted_list = Vec::with_capacity(states.len());
-    let mut status_list = Vec::with_capacity(states.len());
+) -> KacsResult<ObjectDaclResultList> {
+    let mut granted_list = Vec::with_capacity(states.len())?;
+    let mut status_list = Vec::with_capacity(states.len())?;
     for state in states {
         let status =
             if normalized.mapped == 0 || (state.granted & normalized.mapped) == normalized.mapped {
@@ -767,14 +775,14 @@ fn finalize_result_list(
             } else {
                 AccessStatus::AccessDenied
             };
-        granted_list.push(state.granted);
-        status_list.push(status);
+        granted_list.push(state.granted)?;
+        status_list.push(status)?;
     }
 
-    ObjectDaclResultList {
+    Ok(ObjectDaclResultList {
         granted_list,
         status_list,
-    }
+    })
 }
 
 pub(crate) fn merge_restricted_results(
@@ -1118,7 +1126,7 @@ fn apply_object_ace_to_tree(
     index: usize,
     bits: u32,
     polarity: AcePolarity,
-) {
+) -> KacsResult<()> {
     match polarity {
         AcePolarity::Allow => {
             for node_index in tree.subtree_range(index) {
@@ -1131,7 +1139,7 @@ fn apply_object_ace_to_tree(
             for node_index in tree.subtree_range(index) {
                 let denied_bits = apply_bits(&mut states[node_index], bits, AcePolarity::Deny);
                 if denied_bits != 0 {
-                    newly_denied.push((node_index, denied_bits));
+                    newly_denied.push((node_index, denied_bits))?;
                 }
             }
             for (node_index, denied_bits) in newly_denied {
@@ -1139,6 +1147,7 @@ fn apply_object_ace_to_tree(
             }
         }
     }
+    Ok(())
 }
 
 fn apply_bits(state: &mut AccessDecisionState, bits: u32, polarity: AcePolarity) -> u32 {

@@ -5,30 +5,34 @@
 //! spec baseline.
 
 #![cfg_attr(feature = "kernel", no_std)]
+#![allow(unreachable_pub)]
 
-extern crate alloc;
+pub mod access_check;
+pub mod access_check_abi;
+pub mod access_mask;
+pub mod ace;
+pub mod acl;
+pub mod audit;
+pub mod caap;
+pub mod claims;
+pub mod condition;
+pub mod dacl;
+pub mod error;
+pub mod evaluate_sd;
+pub mod mic;
+pub mod object_tree;
+pub mod pkm_alloc;
+pub mod pip;
+pub mod pre_sacl;
+pub mod privilege;
+pub mod sacl;
+pub mod security_descriptor;
+pub mod sid;
+pub mod token;
 
-mod access_check;
-mod access_check_abi;
-mod access_mask;
-mod ace;
-mod acl;
-mod audit;
-mod caap;
-mod claims;
-mod condition;
-mod dacl;
-mod error;
-mod evaluate_sd;
-mod mic;
-mod object_tree;
-mod pip;
-mod pre_sacl;
-mod privilege;
-mod sacl;
-mod security_descriptor;
-mod sid;
-mod token;
+pub fn kernel_compile_probe() -> usize {
+    access_check_abi::KACS_ACCESS_CHECK_ARGS_V1_SIZE as usize
+}
 
 pub use access_check::{
     access_check, access_check_core, access_check_result_list, AccessCheckCoreState,
@@ -88,6 +92,7 @@ pub use mic::{
     TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
 };
 pub use object_tree::{ObjectTypeList, ObjectTypeNode};
+pub use pkm_alloc::{slice_to_vec, vec_collect, AllocError, String as PkmString, TryClone, Vec as PkmVec};
 pub use pip::{
     apply_pip, resolve_process_trust_label, PipContext, PipEnforcementState, ProcessTrustLabel,
 };

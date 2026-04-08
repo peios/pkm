@@ -1,8 +1,5 @@
-use alloc::borrow::ToOwned;
-use alloc::string::String;
-use alloc::vec::Vec;
-
 use crate::error::{KacsError, KacsResult};
+use crate::pkm_alloc::{slice_to_vec, String, Vec};
 use crate::sid::Sid;
 
 pub const CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE: u32 = 0x0002;
@@ -16,7 +13,8 @@ pub const CLAIM_TYPE_SID: u16 = 0x0005;
 pub const CLAIM_TYPE_BOOLEAN: u16 = 0x0006;
 pub const CLAIM_TYPE_OCTET: u16 = 0x0010;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub enum ClaimValue {
     Int64(i64),
     UInt64(u64),
@@ -27,7 +25,8 @@ pub enum ClaimValue {
     Composite(Vec<ClaimValue>),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ClaimAttribute {
     pub name: String,
     pub flags: u32,
@@ -35,11 +34,15 @@ pub struct ClaimAttribute {
 }
 
 impl ClaimAttribute {
-    pub fn new(name: impl Into<String>, flags: u32, values: Vec<ClaimValue>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        flags: u32,
+        values: impl Into<Vec<ClaimValue>>,
+    ) -> Self {
         Self {
             name: name.into(),
             flags,
-            values,
+            values: values.into(),
         }
     }
 }
@@ -65,10 +68,10 @@ pub fn parse_claim_attribute_entry(bytes: &[u8]) -> KacsResult<ClaimAttribute> {
     }
 
     let name = read_utf16_cstr(bytes, name_offset)?;
-    let mut values = Vec::with_capacity(value_count);
+    let mut values = Vec::with_capacity(value_count)?;
     for index in 0..value_count {
         let offset = read_u32(bytes, 16 + (index * 4))? as usize;
-        values.push(parse_claim_value(bytes, value_type, offset)?);
+        values.push(parse_claim_value(bytes, value_type, offset)?)?;
     }
 
     Ok(ClaimAttribute {
@@ -99,7 +102,7 @@ pub fn parse_claim_attribute_array(bytes: &[u8]) -> KacsResult<Vec<ClaimAttribut
             return Err(KacsError::InvalidClaimFormat("claim array entry length"));
         }
 
-        claims.push(parse_claim_attribute_entry(&bytes[offset..end])?);
+        claims.push(parse_claim_attribute_entry(&bytes[offset..end])?)?;
         offset = end;
     }
 
@@ -118,7 +121,7 @@ fn parse_claim_value(bytes: &[u8], value_type: u16, offset: usize) -> KacsResult
         CLAIM_TYPE_SID => {
             let sid_offset = read_u32(bytes, offset)? as usize;
             let (sid, _) = Sid::parse_prefix(bytes_at(bytes, sid_offset)?)?;
-            Ok(ClaimValue::Sid(sid.as_bytes().to_owned()))
+            Ok(ClaimValue::Sid(slice_to_vec(sid.as_bytes())?))
         }
         CLAIM_TYPE_OCTET => {
             let octet_offset = read_u32(bytes, offset)? as usize;
@@ -127,7 +130,7 @@ fn parse_claim_value(bytes: &[u8], value_type: u16, offset: usize) -> KacsResult
                 .checked_add(4)
                 .ok_or(KacsError::InvalidClaimFormat("octet length"))?;
             let data = read_slice(bytes, data_offset, length)?;
-            Ok(ClaimValue::Octet(data.to_vec()))
+            Ok(ClaimValue::Octet(slice_to_vec(data)?))
         }
         _ => Err(KacsError::InvalidClaimType(value_type)),
     }
@@ -184,14 +187,14 @@ fn read_utf16_cstr(bytes: &[u8], offset: usize) -> KacsResult<String> {
         if code_unit == 0 {
             break;
         }
-        units.push(code_unit);
+        units.push(code_unit)?;
         cursor += 2;
     }
 
     let mut output = String::new();
-    for scalar in core::char::decode_utf16(units.into_iter()) {
+    for scalar in core::char::decode_utf16(units.iter().copied()) {
         let scalar = scalar.map_err(|_| KacsError::InvalidClaimFormat("invalid utf16 string"))?;
-        output.push(scalar);
+        output.push(scalar)?;
     }
     Ok(output)
 }

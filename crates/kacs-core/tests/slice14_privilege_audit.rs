@@ -204,7 +204,7 @@ fn successful_privilege_use_marks_used_and_emits_events() {
     assert!(state.privilege_use_events.iter().all(|event| event.success));
     assert_eq!(
         state.privilege_use_events[0].object_audit_context,
-        Some(b"/priv-success".to_vec())
+        Some(b"/priv-success".to_vec().into())
     );
 }
 
@@ -412,7 +412,8 @@ fn result_list_mode_counts_survival_on_any_node_as_success() {
                 effective_sacl: None,
                 staged_dacl: None,
                 staged_sacl: None,
-            }],
+            }]
+            .into(),
         },
     }];
 
@@ -439,7 +440,7 @@ fn result_list_mode_counts_survival_on_any_node_as_success() {
     .expect("result-list privilege-use path should evaluate");
 
     assert_eq!(state.granted, 0);
-    assert_eq!(state.object_granted_list, Some(vec![0, READ_CONTROL, 0]));
+    assert_eq!(state.object_granted_list, Some(vec![0, READ_CONTROL, 0].into()));
     assert_eq!(state.updated_privileges.used, SE_BACKUP_PRIVILEGE);
     assert_eq!(state.privilege_use_events.len(), 1);
     assert_eq!(state.privilege_use_events[0].privilege, SE_BACKUP_PRIVILEGE);

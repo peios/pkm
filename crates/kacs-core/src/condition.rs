@@ -1,11 +1,10 @@
-use alloc::string::String;
-use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 use crate::claims::{
     ClaimAttribute, ClaimValue, CLAIM_SECURITY_ATTRIBUTE_DISABLED,
     CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY, CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE,
 };
+use crate::pkm_alloc::{slice_to_vec, String, TryClone, Vec};
 use crate::sid::{Sid, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
 use crate::token::{IdentityView, SidAndAttributes, TokenView};
 
@@ -52,7 +51,8 @@ impl<'a> Default for ConditionalContext<'a> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 enum Value {
     Null,
     Int64(i64),
@@ -69,14 +69,16 @@ enum ValueOrigin {
     Attribute,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 struct OperandValue {
     value: Value,
     origin: ValueOrigin,
     flags: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
 enum StackEntry {
     Value(OperandValue),
     Result(ConditionalResult),
@@ -153,7 +155,9 @@ pub fn evaluate_conditional_expression(
         let Some(entry) = entry else {
             return ConditionalResult::Unknown;
         };
-        stack.push(entry);
+        if stack.push(entry).is_err() {
+            return ConditionalResult::Unknown;
+        }
         if stack.len() > MAX_STACK_DEPTH {
             return ConditionalResult::Unknown;
         }
@@ -207,31 +211,41 @@ pub(crate) fn validate_conditional_expression_structure(bytes: &[u8]) -> bool {
                 if parse_int_literal(bytes, &mut offset).is_none() {
                     return false;
                 }
-                stack.push(StructuralEntry::Value);
+                if stack.push(StructuralEntry::Value).is_err() {
+                    return false;
+                }
             }
             0x10 => {
                 if parse_string_literal(bytes, &mut offset).is_none() {
                     return false;
                 }
-                stack.push(StructuralEntry::Value);
+                if stack.push(StructuralEntry::Value).is_err() {
+                    return false;
+                }
             }
             0x18 => {
                 if parse_octet_literal(bytes, &mut offset).is_none() {
                     return false;
                 }
-                stack.push(StructuralEntry::Value);
+                if stack.push(StructuralEntry::Value).is_err() {
+                    return false;
+                }
             }
             0x50 => {
                 if parse_composite_literal(bytes, &mut offset, 0).is_none() {
                     return false;
                 }
-                stack.push(StructuralEntry::Value);
+                if stack.push(StructuralEntry::Value).is_err() {
+                    return false;
+                }
             }
             0x51 => {
                 if parse_sid_literal(bytes, &mut offset).is_none() {
                     return false;
                 }
-                stack.push(StructuralEntry::Value);
+                if stack.push(StructuralEntry::Value).is_err() {
+                    return false;
+                }
             }
             0x80..=0x86 | 0x88 | 0x8e | 0x8f => {
                 if !pop_kind(&mut stack, StructuralEntry::Value)
@@ -239,13 +253,17 @@ pub(crate) fn validate_conditional_expression_structure(bytes: &[u8]) -> bool {
                 {
                     return false;
                 }
-                stack.push(StructuralEntry::Result);
+                if stack.push(StructuralEntry::Result).is_err() {
+                    return false;
+                }
             }
             0x87 | 0x89..=0x8d | 0x90..=0x93 => {
                 if !pop_kind(&mut stack, StructuralEntry::Value) {
                     return false;
                 }
-                stack.push(StructuralEntry::Result);
+                if stack.push(StructuralEntry::Result).is_err() {
+                    return false;
+                }
             }
             0xa0 | 0xa1 => {
                 if !pop_kind(&mut stack, StructuralEntry::Result)
@@ -253,19 +271,25 @@ pub(crate) fn validate_conditional_expression_structure(bytes: &[u8]) -> bool {
                 {
                     return false;
                 }
-                stack.push(StructuralEntry::Result);
+                if stack.push(StructuralEntry::Result).is_err() {
+                    return false;
+                }
             }
             0xa2 => {
                 if !pop_kind(&mut stack, StructuralEntry::Result) {
                     return false;
                 }
-                stack.push(StructuralEntry::Result);
+                if stack.push(StructuralEntry::Result).is_err() {
+                    return false;
+                }
             }
             0xf8..=0xfb => {
                 if parse_attribute_ref(bytes, &mut offset, &[], false).is_none() {
                     return false;
                 }
-                stack.push(StructuralEntry::Value);
+                if stack.push(StructuralEntry::Value).is_err() {
+                    return false;
+                }
             }
             _ => return false,
         }
@@ -316,7 +340,7 @@ fn parse_octet_literal(bytes: &[u8], offset: &mut usize) -> Option<StackEntry> {
     let len = read_u32(bytes, offset)? as usize;
     let raw = read_slice(bytes, offset, len)?;
     Some(StackEntry::Value(OperandValue {
-        value: Value::Octet(raw.to_vec()),
+        value: Value::Octet(slice_to_vec(raw).ok()?),
         origin: ValueOrigin::Literal,
         flags: 0,
     }))
@@ -350,7 +374,7 @@ fn parse_composite_literal(bytes: &[u8], offset: &mut usize, depth: usize) -> Op
         }?;
 
         match entry {
-            StackEntry::Value(value) => values.push(value.value),
+            StackEntry::Value(value) => values.push(value.value).ok()?,
             StackEntry::Result(_) => return None,
         }
     }
@@ -404,7 +428,7 @@ fn parse_sid_literal(bytes: &[u8], offset: &mut usize) -> Option<StackEntry> {
     let raw = read_slice(bytes, offset, len)?;
     Sid::parse(raw).ok()?;
     Some(StackEntry::Value(OperandValue {
-        value: Value::Sid(raw.to_vec()),
+        value: Value::Sid(slice_to_vec(raw).ok()?),
         origin: ValueOrigin::Literal,
         flags: 0,
     }))
@@ -427,10 +451,16 @@ fn parse_attribute_ref(
 }
 
 fn lookup_attribute(namespace: &[ClaimAttribute], name: &str, for_allow: bool) -> OperandValue {
-    let folded_name = fold_string(name);
+    let Some(folded_name) = fold_string(name) else {
+        return attribute_null();
+    };
     let Some(attribute) = namespace
         .iter()
-        .find(|attribute| fold_string(&attribute.name) == folded_name)
+        .find(|attribute| {
+            fold_string(&attribute.name)
+                .as_ref()
+                .is_some_and(|folded| folded == &folded_name)
+        })
     else {
         return attribute_null();
     };
@@ -446,9 +476,24 @@ fn lookup_attribute(namespace: &[ClaimAttribute], name: &str, for_allow: bool) -
     }
 
     let value = if attribute.values.len() == 1 {
-        claim_value_to_value(&attribute.values[0])
+        let Some(value) = claim_value_to_value(&attribute.values[0]) else {
+            return attribute_null();
+        };
+        value
     } else {
-        Value::Composite(attribute.values.iter().map(claim_value_to_value).collect())
+        let mut values = Vec::with_capacity(attribute.values.len()).ok();
+        let Some(values_vec) = values.as_mut() else {
+            return attribute_null();
+        };
+        for value in attribute.values.iter().filter_map(claim_value_to_value) {
+            if values_vec.push(value).is_err() {
+                return attribute_null();
+            }
+        }
+        if values_vec.len() != attribute.values.len() {
+            return attribute_null();
+        }
+        Value::Composite(values.take().expect("checked Some"))
     };
 
     OperandValue {
@@ -466,16 +511,20 @@ fn attribute_null() -> OperandValue {
     }
 }
 
-fn claim_value_to_value(value: &ClaimValue) -> Value {
+fn claim_value_to_value(value: &ClaimValue) -> Option<Value> {
     match value {
-        ClaimValue::Int64(value) => Value::Int64(*value),
-        ClaimValue::UInt64(value) => Value::UInt64(*value),
-        ClaimValue::String(value) => Value::String(value.clone()),
-        ClaimValue::Sid(value) => Value::Sid(value.clone()),
-        ClaimValue::Octet(value) => Value::Octet(value.clone()),
-        ClaimValue::Boolean(value) => Value::Int64(if *value { 1 } else { 0 }),
+        ClaimValue::Int64(value) => Some(Value::Int64(*value)),
+        ClaimValue::UInt64(value) => Some(Value::UInt64(*value)),
+        ClaimValue::String(value) => Some(Value::String(value.try_clone().ok()?)),
+        ClaimValue::Sid(value) => Some(Value::Sid(value.try_clone().ok()?)),
+        ClaimValue::Octet(value) => Some(Value::Octet(value.try_clone().ok()?)),
+        ClaimValue::Boolean(value) => Some(Value::Int64(if *value { 1 } else { 0 })),
         ClaimValue::Composite(values) => {
-            Value::Composite(values.iter().map(claim_value_to_value).collect())
+            let mut converted = Vec::with_capacity(values.len()).ok()?;
+            for value in values {
+                converted.push(claim_value_to_value(value)?).ok()?;
+            }
+            Some(Value::Composite(converted))
         }
     }
 }
@@ -795,10 +844,10 @@ fn values_equal(lhs: &Value, rhs: &Value, case_sensitive: bool) -> Option<bool> 
             Some(compare_int64_uint64(*rhs, *lhs) == Ordering::Equal)
         }
         (Value::String(lhs), Value::String(rhs)) => {
-            Some(compare_strings(lhs, rhs, case_sensitive) == Ordering::Equal)
+            compare_strings(lhs, rhs, case_sensitive).map(|ordering| ordering == Ordering::Equal)
         }
         (Value::Octet(lhs), Value::Octet(rhs)) => {
-            Some(compare_octets(lhs, rhs, case_sensitive) == Ordering::Equal)
+            compare_octets(lhs, rhs, case_sensitive).map(|ordering| ordering == Ordering::Equal)
         }
         (Value::Sid(lhs), Value::Sid(rhs)) => Some(lhs == rhs),
         (Value::Composite(_), Value::Composite(_))
@@ -822,8 +871,8 @@ fn compare_scalar(lhs: &Value, rhs: &Value, case_sensitive: bool) -> Option<Orde
         (Value::UInt64(lhs), Value::UInt64(rhs)) => Some(lhs.cmp(rhs)),
         (Value::Int64(lhs), Value::UInt64(rhs)) => Some(compare_int64_uint64(*lhs, *rhs)),
         (Value::UInt64(lhs), Value::Int64(rhs)) => Some(compare_int64_uint64(*rhs, *lhs).reverse()),
-        (Value::String(lhs), Value::String(rhs)) => Some(compare_strings(lhs, rhs, case_sensitive)),
-        (Value::Octet(lhs), Value::Octet(rhs)) => Some(compare_octets(lhs, rhs, case_sensitive)),
+        (Value::String(lhs), Value::String(rhs)) => compare_strings(lhs, rhs, case_sensitive),
+        (Value::Octet(lhs), Value::Octet(rhs)) => compare_octets(lhs, rhs, case_sensitive),
         _ => None,
     }
 }
@@ -836,45 +885,61 @@ fn compare_int64_uint64(lhs: i64, rhs: u64) -> Ordering {
     }
 }
 
-fn compare_strings(lhs: &str, rhs: &str, case_sensitive: bool) -> Ordering {
+fn compare_strings(lhs: &str, rhs: &str, case_sensitive: bool) -> Option<Ordering> {
     if case_sensitive {
-        lhs.cmp(rhs)
+        Some(lhs.cmp(rhs))
     } else {
-        fold_string(lhs).cmp(&fold_string(rhs))
+        Some(fold_string(lhs)?.cmp(&fold_string(rhs)?))
     }
 }
 
-fn fold_string(value: &str) -> String {
+fn fold_string(value: &str) -> Option<String> {
     let mut folded = String::new();
     for character in value.chars() {
         for lowered in character.to_lowercase() {
-            folded.push(lowered);
+            folded.push(lowered).ok()?;
         }
     }
-    folded
+    Some(folded)
 }
 
-fn compare_octets(lhs: &[u8], rhs: &[u8], case_sensitive: bool) -> Ordering {
-    let lhs_folded: Vec<u8>;
-    let rhs_folded: Vec<u8>;
+fn compare_octets(lhs: &[u8], rhs: &[u8], case_sensitive: bool) -> Option<Ordering> {
+    let lhs_folded;
+    let rhs_folded;
     let (lhs_bytes, rhs_bytes): (&[u8], &[u8]) = if case_sensitive {
         (lhs, rhs)
     } else {
-        lhs_folded = lhs.iter().map(|byte| byte.to_ascii_lowercase()).collect();
-        rhs_folded = rhs.iter().map(|byte| byte.to_ascii_lowercase()).collect();
+        lhs_folded = {
+            let mut folded = Vec::with_capacity(lhs.len()).ok()?;
+            for byte in lhs {
+                folded.push(byte.to_ascii_lowercase()).ok()?;
+            }
+            folded
+        };
+        rhs_folded = {
+            let mut folded = Vec::with_capacity(rhs.len()).ok()?;
+            for byte in rhs {
+                folded.push(byte.to_ascii_lowercase()).ok()?;
+            }
+            folded
+        };
         (lhs_folded.as_slice(), rhs_folded.as_slice())
     };
-    lhs_bytes.cmp(rhs_bytes)
+    Some(lhs_bytes.cmp(rhs_bytes))
 }
 
 fn extract_sid_values(value: &Value) -> Option<Vec<Vec<u8>>> {
     match value {
-        Value::Sid(bytes) => Some(vec![bytes.clone()]),
+        Value::Sid(bytes) => {
+            let mut extracted = Vec::with_capacity(1).ok()?;
+            extracted.push(bytes.try_clone().ok()?).ok()?;
+            Some(extracted)
+        }
         Value::Composite(values) => {
-            let mut extracted = Vec::with_capacity(values.len());
+            let mut extracted = Vec::with_capacity(values.len()).ok()?;
             for value in values {
                 match value {
-                    Value::Sid(bytes) => extracted.push(bytes.clone()),
+                    Value::Sid(bytes) => extracted.push(bytes.try_clone().ok()?).ok()?,
                     _ => return None,
                 }
             }
@@ -1073,14 +1138,14 @@ fn decode_utf16_string(bytes: &[u8]) -> Option<String> {
     if bytes.len() % 2 != 0 {
         return None;
     }
-    let mut code_units = Vec::with_capacity(bytes.len() / 2);
+    let mut code_units = Vec::with_capacity(bytes.len() / 2).ok()?;
     for chunk in bytes.chunks_exact(2) {
-        code_units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+        code_units.push(u16::from_le_bytes([chunk[0], chunk[1]])).ok()?;
     }
 
     let mut string = String::new();
-    for character in core::char::decode_utf16(code_units) {
-        string.push(character.ok()?);
+    for character in core::char::decode_utf16(code_units.iter().copied()) {
+        string.push(character.ok()?).ok()?;
     }
     Some(string)
 }
