@@ -11,8 +11,11 @@ kernel patching.
 
 - The KACS normative source is the ratified spec under
   `learn/content/kacs/v0.20/`.
-- The source files in `kacs/` and `crates/kacs-core/src/` are scaffolds only.
-- No KACS behavior is implemented yet.
+- The `crates/kacs-core/src/` tree contains the closed pure-core slow-track
+  implementation slices.
+- The `kacs/` subtree currently contains only an inert kernel-resident
+  scaffold: enough to compile into the pinned kernel image and prove a minimal
+  boot-time init path, but no live KACS semantics yet.
 - No inherited syscall-table mutation is present.
 - No inherited kernel patchset is present.
 - No inherited event subsystem implementation is present.
@@ -50,6 +53,6 @@ slice is opened:
 - ioctl/ABI registration
 - event transport
 - kernel patchset changes
-- KACS policy or AccessCheck semantics
+- live KACS policy or AccessCheck semantics
 
 Until then, this tree should remain obviously scaffold-only.

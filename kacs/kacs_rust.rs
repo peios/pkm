@@ -1,5 +1,16 @@
-//! Fresh slow-track KACS kernel Rust scaffold.
+// SPDX-License-Identifier: GPL-2.0-only
+
+//! Slow-track PKM kernel Rust scaffold.
 //!
-//! The previous fast-track implementation was intentionally removed from this
-//! worktree. New Rust modules should be added incrementally from the ratified
-//! spec baseline.
+//! This file intentionally exports only a tiny init function so the first
+//! kernel-facing slice can prove that Rust code is compiled, linked, and
+//! invoked by the built-in PKM LSM path.
+
+#![no_std]
+
+use core::ffi::c_int;
+
+#[no_mangle]
+pub extern "C" fn kacs_rust_init() -> c_int {
+    0
+}

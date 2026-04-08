@@ -15,7 +15,7 @@ PKM_SOURCES := $(shell find $(CURDIR)/../kacs $(CURDIR)/../crates/kacs-core/src 
 	-type f 2>/dev/null | sort)
 CACHE_BUST := $(shell cat $(PKM_SOURCES) 2>/dev/null | sha256sum | cut -c1-16)
 
-.PHONY: all verify-scaffold image kernel shell clean clean-all
+.PHONY: all verify-scaffold image kernel boot-smoke shell clean clean-all
 
 all: kernel
 
@@ -35,6 +35,9 @@ kernel: image
 	@echo ""
 	@echo "Kernel image: $(OUT)/bzImage"
 	@echo "Modules:      $(OUT)/lib/modules/"
+
+boot-smoke:
+	$(CURDIR)/check-boot-scaffold.sh
 
 shell: image
 	docker run --rm -it -v $(CCACHE):/ccache $(IMAGE) bash
