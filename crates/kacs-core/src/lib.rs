@@ -60,7 +60,10 @@ pub use ace::{
 };
 pub use acl::Acl;
 pub use audit::{evaluate_sacl, AuditEvent, EvaluateSaclState};
-pub use caap::{evaluate_caap, CaapEvaluationState, CaapPolicy, CaapPolicyEntry, CaapRule};
+pub use caap::{
+    evaluate_caap, parse_caap_policy_spec, CaapEvaluationState, CaapPolicy, CaapPolicyCache,
+    CaapPolicyEntry, CaapRule, OwnedCaapPolicy, OwnedCaapPolicyEntry, OwnedCaapRule,
+};
 pub use claims::{
     parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, ClaimValue,
     CLAIM_SECURITY_ATTRIBUTE_DISABLED, CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY,

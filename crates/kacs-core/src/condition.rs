@@ -169,6 +169,115 @@ pub fn evaluate_conditional_expression(
     }
 }
 
+pub(crate) fn validate_conditional_expression_structure(bytes: &[u8]) -> bool {
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum StructuralEntry {
+        Value,
+        Result,
+    }
+
+    fn pop_kind(stack: &mut Vec<StructuralEntry>, expected: StructuralEntry) -> bool {
+        matches!(stack.pop(), Some(kind) if kind == expected)
+    }
+
+    if bytes.len() < 4 || &bytes[..4] != b"artx" {
+        return false;
+    }
+
+    let mut offset = 4usize;
+    let mut stack = Vec::new();
+
+    while offset < bytes.len() {
+        if stack.len() > MAX_STACK_DEPTH {
+            return false;
+        }
+
+        let token_type = bytes[offset];
+        offset += 1;
+
+        if token_type == 0x00 {
+            if bytes[offset..].iter().any(|byte| *byte != 0) {
+                return false;
+            }
+            break;
+        }
+
+        match token_type {
+            0x01..=0x04 => {
+                if parse_int_literal(bytes, &mut offset).is_none() {
+                    return false;
+                }
+                stack.push(StructuralEntry::Value);
+            }
+            0x10 => {
+                if parse_string_literal(bytes, &mut offset).is_none() {
+                    return false;
+                }
+                stack.push(StructuralEntry::Value);
+            }
+            0x18 => {
+                if parse_octet_literal(bytes, &mut offset).is_none() {
+                    return false;
+                }
+                stack.push(StructuralEntry::Value);
+            }
+            0x50 => {
+                if parse_composite_literal(bytes, &mut offset, 0).is_none() {
+                    return false;
+                }
+                stack.push(StructuralEntry::Value);
+            }
+            0x51 => {
+                if parse_sid_literal(bytes, &mut offset).is_none() {
+                    return false;
+                }
+                stack.push(StructuralEntry::Value);
+            }
+            0x80..=0x86 | 0x88 | 0x8e | 0x8f => {
+                if !pop_kind(&mut stack, StructuralEntry::Value)
+                    || !pop_kind(&mut stack, StructuralEntry::Value)
+                {
+                    return false;
+                }
+                stack.push(StructuralEntry::Result);
+            }
+            0x87 | 0x89..=0x8d | 0x90..=0x93 => {
+                if !pop_kind(&mut stack, StructuralEntry::Value) {
+                    return false;
+                }
+                stack.push(StructuralEntry::Result);
+            }
+            0xa0 | 0xa1 => {
+                if !pop_kind(&mut stack, StructuralEntry::Result)
+                    || !pop_kind(&mut stack, StructuralEntry::Result)
+                {
+                    return false;
+                }
+                stack.push(StructuralEntry::Result);
+            }
+            0xa2 => {
+                if !pop_kind(&mut stack, StructuralEntry::Result) {
+                    return false;
+                }
+                stack.push(StructuralEntry::Result);
+            }
+            0xf8..=0xfb => {
+                if parse_attribute_ref(bytes, &mut offset, &[], false).is_none() {
+                    return false;
+                }
+                stack.push(StructuralEntry::Value);
+            }
+            _ => return false,
+        }
+
+        if stack.len() > MAX_STACK_DEPTH {
+            return false;
+        }
+    }
+
+    stack.len() == 1 && matches!(stack.pop(), Some(StructuralEntry::Result))
+}
+
 fn parse_int_literal(bytes: &[u8], offset: &mut usize) -> Option<StackEntry> {
     let raw = read_array::<8>(bytes, offset)?;
     let sign = read_u8(bytes, offset)?;

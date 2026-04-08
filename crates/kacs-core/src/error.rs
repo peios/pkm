@@ -3,6 +3,7 @@ pub enum KacsError {
     AccessDenied,
     InvariantViolation(&'static str),
     InvalidTokenInvariant(&'static str),
+    InvalidCaapSpec(&'static str),
     InvalidAbiStructSize {
         provided: u32,
         minimum: u32,

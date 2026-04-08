@@ -1,7 +1,10 @@
 use alloc::vec::Vec;
 
 use crate::access_mask::GenericMapping;
-use crate::condition::{evaluate_conditional_expression, ConditionalContext, ConditionalResult};
+use crate::condition::{
+    evaluate_conditional_expression, validate_conditional_expression_structure, ConditionalContext,
+    ConditionalResult,
+};
 use crate::error::{KacsError, KacsResult};
 use crate::evaluate_sd::{evaluate_security_descriptor, EvaluateSecurityDescriptorState};
 use crate::object_tree::ObjectTypeList;
@@ -11,11 +14,15 @@ use crate::security_descriptor::{
 };
 use crate::sid::Sid;
 use crate::token::AccessCheckToken;
-use crate::{ACCESS_ALLOWED_ACE_TYPE, GENERIC_ALL, SYSTEM_SCOPED_POLICY_ID_ACE_TYPE};
+use crate::{Acl, ACCESS_ALLOWED_ACE_TYPE, GENERIC_ALL, SYSTEM_SCOPED_POLICY_ID_ACE_TYPE};
 
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
 const SYSTEM_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 const ADMINISTRATORS_SID_BYTES: &[u8] = &[1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0];
+const CAAP_SPEC_VERSION: u8 = 0x01;
+const MAX_CAAP_SPEC_LEN: usize = 256 * 1024;
+const MAX_CAAP_RULE_COUNT: u32 = 256;
+const MAX_CAAP_FIELD_LEN: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CaapRule<'a> {
@@ -38,6 +45,121 @@ pub struct CaapPolicyEntry<'a> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnedCaapRule {
+    pub applies_to: Option<Vec<u8>>,
+    pub effective_dacl: Vec<u8>,
+    pub effective_sacl: Option<Vec<u8>>,
+    pub staged_dacl: Option<Vec<u8>>,
+    pub staged_sacl: Option<Vec<u8>>,
+}
+
+impl OwnedCaapRule {
+    pub fn borrowed(&self) -> CaapRule<'_> {
+        CaapRule {
+            applies_to: self.applies_to.as_deref(),
+            effective_dacl: self.effective_dacl.as_slice(),
+            effective_sacl: self.effective_sacl.as_deref(),
+            staged_dacl: self.staged_dacl.as_deref(),
+            staged_sacl: self.staged_sacl.as_deref(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnedCaapPolicy {
+    pub rules: Vec<OwnedCaapRule>,
+}
+
+impl OwnedCaapPolicy {
+    pub fn borrowed(&self) -> CaapPolicy<'_> {
+        CaapPolicy {
+            rules: self.rules.iter().map(OwnedCaapRule::borrowed).collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnedCaapPolicyEntry {
+    pub sid: Vec<u8>,
+    pub policy: OwnedCaapPolicy,
+}
+
+impl OwnedCaapPolicyEntry {
+    pub fn borrowed(&self) -> CaapPolicyEntry<'_> {
+        CaapPolicyEntry {
+            sid: Sid::parse(self.sid.as_slice()).expect("policy SID validated at ingestion"),
+            policy: self.policy.borrowed(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CaapPolicyCache {
+    entries: Vec<OwnedCaapPolicyEntry>,
+}
+
+impl CaapPolicyCache {
+    pub fn entries(&self) -> &[OwnedCaapPolicyEntry] {
+        self.entries.as_slice()
+    }
+
+    pub fn borrowed_entries(&self) -> Vec<CaapPolicyEntry<'_>> {
+        self.entries
+            .iter()
+            .map(OwnedCaapPolicyEntry::borrowed)
+            .collect()
+    }
+
+    pub fn upsert_policy(&mut self, policy_sid: &[u8], policy: OwnedCaapPolicy) -> KacsResult<()> {
+        validate_policy_sid(policy_sid)?;
+
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.sid == policy_sid)
+        {
+            entry.policy = policy;
+        } else {
+            self.entries.push(OwnedCaapPolicyEntry {
+                sid: policy_sid.to_vec(),
+                policy,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn remove_policy(&mut self, policy_sid: &[u8]) -> KacsResult<()> {
+        validate_policy_sid(policy_sid)?;
+        self.entries.retain(|entry| entry.sid != policy_sid);
+        Ok(())
+    }
+
+    pub fn set_policy_spec(&mut self, policy_sid: &[u8], spec: Option<&[u8]>) -> KacsResult<()> {
+        validate_policy_sid(policy_sid)?;
+
+        let Some(spec) = spec.filter(|spec| !spec.is_empty()) else {
+            self.entries.retain(|entry| entry.sid != policy_sid);
+            return Ok(());
+        };
+
+        let policy = parse_caap_policy_spec(spec)?;
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.sid == policy_sid)
+        {
+            entry.policy = policy;
+        } else {
+            self.entries.push(OwnedCaapPolicyEntry {
+                sid: policy_sid.to_vec(),
+                policy,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CaapEvaluationState<'a> {
     pub granted: u32,
     pub object_granted_list: Option<Vec<u32>>,
@@ -51,6 +173,80 @@ pub struct CaapEvaluationState<'a> {
 struct RuleGrantState {
     granted: u32,
     object_granted_list: Option<Vec<u32>>,
+}
+
+pub fn parse_caap_policy_spec(spec: &[u8]) -> KacsResult<OwnedCaapPolicy> {
+    if spec.is_empty() {
+        return Err(KacsError::InvalidCaapSpec("empty caap spec"));
+    }
+    if spec.len() > MAX_CAAP_SPEC_LEN {
+        return Err(KacsError::InvalidCaapSpec("caap spec exceeds maximum size"));
+    }
+
+    let mut offset = 0usize;
+    let version = read_u8(spec, &mut offset)?;
+    if version != CAAP_SPEC_VERSION {
+        return Err(KacsError::InvalidCaapSpec("unsupported caap version"));
+    }
+
+    let rule_count = read_u32(spec, &mut offset)?;
+    if rule_count > MAX_CAAP_RULE_COUNT {
+        return Err(KacsError::InvalidCaapSpec(
+            "caap rule count exceeds maximum",
+        ));
+    }
+
+    let mut rules = Vec::with_capacity(rule_count as usize);
+    for _ in 0..rule_count {
+        let applies_to =
+            read_len_prefixed_field(spec, &mut offset, MAX_CAAP_FIELD_LEN, "caap applies_to")?;
+        if !applies_to.is_empty() && !validate_conditional_expression_structure(applies_to) {
+            return Err(KacsError::InvalidCaapSpec(
+                "malformed caap applies_to expression",
+            ));
+        }
+
+        let effective_dacl =
+            read_len_prefixed_field(spec, &mut offset, MAX_CAAP_FIELD_LEN, "caap effective_dacl")?;
+        if effective_dacl.is_empty() {
+            return Err(KacsError::InvalidCaapSpec(
+                "caap effective_dacl must not be empty",
+            ));
+        }
+        validate_acl_payload(effective_dacl)?;
+
+        let effective_sacl =
+            read_len_prefixed_field(spec, &mut offset, MAX_CAAP_FIELD_LEN, "caap effective_sacl")?;
+        if !effective_sacl.is_empty() {
+            validate_acl_payload(effective_sacl)?;
+        }
+
+        let staged_dacl =
+            read_len_prefixed_field(spec, &mut offset, MAX_CAAP_FIELD_LEN, "caap staged_dacl")?;
+        if !staged_dacl.is_empty() {
+            validate_acl_payload(staged_dacl)?;
+        }
+
+        let staged_sacl =
+            read_len_prefixed_field(spec, &mut offset, MAX_CAAP_FIELD_LEN, "caap staged_sacl")?;
+        if !staged_sacl.is_empty() {
+            validate_acl_payload(staged_sacl)?;
+        }
+
+        rules.push(OwnedCaapRule {
+            applies_to: (!applies_to.is_empty()).then(|| applies_to.to_vec()),
+            effective_dacl: effective_dacl.to_vec(),
+            effective_sacl: (!effective_sacl.is_empty()).then(|| effective_sacl.to_vec()),
+            staged_dacl: (!staged_dacl.is_empty()).then(|| staged_dacl.to_vec()),
+            staged_sacl: (!staged_sacl.is_empty()).then(|| staged_sacl.to_vec()),
+        });
+    }
+
+    if offset != spec.len() {
+        return Err(KacsError::InvalidCaapSpec("trailing bytes in caap spec"));
+    }
+
+    Ok(OwnedCaapPolicy { rules })
 }
 
 pub fn evaluate_caap<'a>(
@@ -445,6 +641,58 @@ fn basic_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
     bytes.extend_from_slice(&mask.to_le_bytes());
     bytes.extend_from_slice(sid);
     bytes
+}
+
+fn validate_policy_sid(policy_sid: &[u8]) -> KacsResult<()> {
+    Sid::parse(policy_sid)?;
+    Ok(())
+}
+
+fn validate_acl_payload(bytes: &[u8]) -> KacsResult<()> {
+    let acl = Acl::parse(bytes)?;
+    for ace in acl.entries() {
+        ace?;
+    }
+    Ok(())
+}
+
+fn read_u8(bytes: &[u8], offset: &mut usize) -> KacsResult<u8> {
+    let value = *bytes
+        .get(*offset)
+        .ok_or(KacsError::Truncated("caap spec"))?;
+    *offset += 1;
+    Ok(value)
+}
+
+fn read_u32(bytes: &[u8], offset: &mut usize) -> KacsResult<u32> {
+    let end = offset
+        .checked_add(4)
+        .ok_or(KacsError::InvalidCaapSpec("caap length overflow"))?;
+    let slice = bytes
+        .get(*offset..end)
+        .ok_or(KacsError::Truncated("caap spec"))?;
+    *offset = end;
+    Ok(u32::from_le_bytes(
+        <[u8; 4]>::try_from(slice).expect("slice length checked"),
+    ))
+}
+
+fn read_len_prefixed_field<'a>(
+    bytes: &'a [u8],
+    offset: &mut usize,
+    max_len: usize,
+    field: &'static str,
+) -> KacsResult<&'a [u8]> {
+    let len = read_u32(bytes, offset)? as usize;
+    if len > max_len {
+        return Err(KacsError::InvalidCaapSpec(field));
+    }
+    let end = offset
+        .checked_add(len)
+        .ok_or(KacsError::InvalidCaapSpec("caap length overflow"))?;
+    let slice = bytes.get(*offset..end).ok_or(KacsError::Truncated(field))?;
+    *offset = end;
+    Ok(slice)
 }
 
 fn acl_bytes(aces: &[Vec<u8>]) -> Vec<u8> {
