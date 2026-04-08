@@ -28,6 +28,7 @@ pub struct AuditEvent<'a> {
     pub granted: u32,
     pub success: bool,
     pub policy_forced: bool,
+    pub privilege: Option<u64>,
     pub object_audit_context: Option<Vec<u8>>,
 }
 
@@ -209,6 +210,7 @@ fn maybe_append_access_audit<'a>(
             granted,
             success: true,
             policy_forced: false,
+            privilege: None,
             object_audit_context: object_audit_context.map(|ctx| ctx.to_vec()),
         });
     }
@@ -219,6 +221,7 @@ fn maybe_append_access_audit<'a>(
             granted,
             success: false,
             policy_forced: false,
+            privilege: None,
             object_audit_context: object_audit_context.map(|ctx| ctx.to_vec()),
         });
     }

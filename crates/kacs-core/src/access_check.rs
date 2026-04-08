@@ -8,11 +8,32 @@ use crate::error::{KacsError, KacsResult};
 use crate::evaluate_sd::evaluate_security_descriptor;
 use crate::object_tree::ObjectTypeList;
 use crate::pip::PipContext;
+use crate::privilege::{
+    PrivilegeProvenance, TokenPrivileges, SE_BACKUP_PRIVILEGE, SE_RELABEL_PRIVILEGE,
+    SE_RESTORE_PRIVILEGE, SE_SECURITY_PRIVILEGE, SE_TAKE_OWNERSHIP_PRIVILEGE,
+};
 use crate::security_descriptor::SecurityDescriptor;
 use crate::token::{
     AccessCheckToken, AUDIT_POLICY_OBJECT_ACCESS_FAILURE, AUDIT_POLICY_OBJECT_ACCESS_SUCCESS,
+    AUDIT_POLICY_PRIVILEGE_USE_FAILURE, AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
 };
 use crate::{Acl, GenericMapping};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccessCheckMode {
+    Scalar,
+    ResultList,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivilegeUseEvent {
+    pub privilege: u64,
+    pub requested: u32,
+    pub granted: u32,
+    pub surviving_bits: u32,
+    pub success: bool,
+    pub object_audit_context: Option<Vec<u8>>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccessCheckCoreState<'a> {
@@ -25,6 +46,8 @@ pub struct AccessCheckCoreState<'a> {
     pub staging_mismatch: bool,
     pub object_granted_list: Option<Vec<u32>>,
     pub audit_events: Vec<AuditEvent<'a>>,
+    pub privilege_use_events: Vec<PrivilegeUseEvent>,
+    pub updated_privileges: TokenPrivileges,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,12 +73,19 @@ pub fn access_check_core<'a>(
     pip: PipContext,
     desired_access: u32,
     mapping: &GenericMapping,
+    mode: AccessCheckMode,
     object_tree: Option<&ObjectTypeList>,
     conditional_context: &ConditionalContext<'a>,
     object_audit_context: Option<&'a [u8]>,
     privilege_intent: u32,
     policies: &[CaapPolicyEntry<'a>],
 ) -> KacsResult<AccessCheckCoreState<'a>> {
+    if mode == AccessCheckMode::ResultList && object_tree.is_none() {
+        return Err(KacsError::InvariantViolation(
+            "result-list mode requires object tree",
+        ));
+    }
+
     let sd = sd.ok_or(KacsError::NullSecurityDescriptor)?;
 
     let base = evaluate_security_descriptor(
@@ -191,6 +221,16 @@ pub fn access_check_core<'a>(
         (audit_events, continuous_audit_mask)
     };
 
+    let (used_delta, privilege_use_events) = evaluate_privilege_use(
+        mode,
+        token,
+        &base.provenance,
+        base.mapped_desired,
+        caap.granted,
+        caap.object_granted_list.as_deref(),
+        base.max_allowed_mode,
+        object_audit_context,
+    );
     let success =
         (caap.granted & base.mapped_desired) == base.mapped_desired || base.mapped_desired == 0;
     if success && (token.audit_policy & AUDIT_POLICY_OBJECT_ACCESS_SUCCESS) != 0 {
@@ -200,6 +240,7 @@ pub fn access_check_core<'a>(
             granted: caap.granted,
             success: true,
             policy_forced: true,
+            privilege: None,
             object_audit_context: object_audit_context.map(|ctx| ctx.to_vec()),
         });
     }
@@ -210,9 +251,13 @@ pub fn access_check_core<'a>(
             granted: caap.granted,
             success: false,
             policy_forced: true,
+            privilege: None,
             object_audit_context: object_audit_context.map(|ctx| ctx.to_vec()),
         });
     }
+
+    let mut updated_privileges = token.privileges;
+    updated_privileges.used |= used_delta;
 
     Ok(AccessCheckCoreState {
         decided: base.decided,
@@ -224,6 +269,8 @@ pub fn access_check_core<'a>(
         staging_mismatch,
         object_granted_list: caap.object_granted_list,
         audit_events,
+        privilege_use_events,
+        updated_privileges,
     })
 }
 
@@ -246,6 +293,7 @@ pub fn access_check<'a>(
         pip,
         desired_access,
         mapping,
+        AccessCheckMode::Scalar,
         object_tree,
         conditional_context,
         object_audit_context,
@@ -288,6 +336,7 @@ pub fn access_check_result_list<'a>(
         pip,
         desired_access,
         mapping,
+        AccessCheckMode::ResultList,
         Some(object_tree),
         conditional_context,
         object_audit_context,
@@ -315,4 +364,74 @@ pub fn access_check_result_list<'a>(
         continuous_audit_mask: state.continuous_audit_mask,
         staging_mismatch: state.staging_mismatch,
     })
+}
+
+fn evaluate_privilege_use(
+    mode: AccessCheckMode,
+    token: &AccessCheckToken<'_>,
+    provenance: &PrivilegeProvenance,
+    mapped_desired: u32,
+    final_granted: u32,
+    object_granted_list: Option<&[u32]>,
+    max_allowed_mode: bool,
+    object_audit_context: Option<&[u8]>,
+) -> (u64, Vec<PrivilegeUseEvent>) {
+    if max_allowed_mode {
+        return (0, Vec::new());
+    }
+
+    let mut used_delta = 0u64;
+    let mut events = Vec::new();
+    let provenance_entries = [
+        (SE_SECURITY_PRIVILEGE, provenance.security_granted),
+        (SE_BACKUP_PRIVILEGE, provenance.backup_granted),
+        (SE_RESTORE_PRIVILEGE, provenance.restore_granted),
+        (
+            SE_TAKE_OWNERSHIP_PRIVILEGE,
+            provenance.take_ownership_granted,
+        ),
+        (SE_RELABEL_PRIVILEGE, provenance.relabel_granted),
+    ];
+
+    for (privilege, provenance_mask) in provenance_entries {
+        let requested_contribution = provenance_mask & mapped_desired;
+        if requested_contribution == 0 {
+            continue;
+        }
+
+        let surviving_bits = match mode {
+            AccessCheckMode::Scalar => requested_contribution & final_granted,
+            AccessCheckMode::ResultList => object_granted_list
+                .unwrap_or(&[])
+                .iter()
+                .fold(0u32, |acc, granted| {
+                    acc | (requested_contribution & *granted)
+                }),
+        };
+
+        if surviving_bits != 0 {
+            used_delta |= privilege;
+            if (token.audit_policy & AUDIT_POLICY_PRIVILEGE_USE_SUCCESS) != 0 {
+                events.push(PrivilegeUseEvent {
+                    privilege,
+                    requested: mapped_desired,
+                    granted: final_granted,
+                    surviving_bits,
+                    success: true,
+                    object_audit_context: object_audit_context.map(|ctx| ctx.to_vec()),
+                });
+            }
+        } else if (token.audit_policy & AUDIT_POLICY_PRIVILEGE_USE_FAILURE) != 0 {
+            events.push(PrivilegeUseEvent {
+                privilege,
+                requested: mapped_desired,
+                granted: final_granted,
+                surviving_bits: 0,
+                success: false,
+                object_audit_context: object_audit_context.map(|ctx| ctx.to_vec()),
+            });
+        }
+    }
+
+    (used_delta, events)
 }

@@ -31,7 +31,7 @@ mod token;
 
 pub use access_check::{
     access_check, access_check_core, access_check_result_list, AccessCheckCoreState,
-    AccessCheckResult, AccessCheckResultListState,
+    AccessCheckMode, AccessCheckResult, AccessCheckResultListState, PrivilegeUseEvent,
 };
 pub use access_mask::{
     validate_ace_mask, GenericMapping, NormalizedDesiredAccess, ACCESS_SYSTEM_SECURITY, DELETE,
