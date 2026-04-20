@@ -5,7 +5,14 @@
 #include <linux/compiler_types.h>
 #include <linux/types.h>
 
-struct pkm_kacs_resolved_ctx;
+#define PKM_KACS_RESOLVED_CTX_KUNIT 0U
+#define PKM_KACS_RESOLVED_CTX_TOKEN 1U
+
+struct pkm_kacs_resolved_ctx {
+	u32 kind;
+	u32 _reserved;
+	const void *token;
+};
 
 struct kacs_node_result {
 	u32 granted;

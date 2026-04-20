@@ -11,8 +11,8 @@ use crate::access_check_abi::{
 };
 use crate::error::KacsError;
 use crate::mic::{IntegrityLevel, TOKEN_MANDATORY_POLICY_NO_WRITE_UP};
-use crate::pkm_alloc::Vec;
 use crate::pip::PipContext;
+use crate::pkm_alloc::Vec;
 use crate::privilege::TokenPrivileges;
 use crate::sid::Sid;
 use crate::token::{
@@ -25,10 +25,9 @@ const EFAULT: c_long = -14;
 const EINVAL: c_long = -22;
 const ENOMEM: c_long = -12;
 
-const KUNIT_CONTEXT_TAG: u8 = 0;
-const KUNIT_USER_SID_BYTES: &[u8] = &[
-    1, 2, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 160, 15, 0, 0,
-];
+const PKM_KACS_RESOLVED_CTX_KUNIT: u32 = 0;
+const PKM_KACS_RESOLVED_CTX_TOKEN: u32 = 1;
+const KUNIT_USER_SID_BYTES: &[u8] = &[1, 2, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 160, 15, 0, 0];
 const KUNIT_GROUPS: &[crate::token::SidAndAttributes<'static>] = &[];
 const KUNIT_DEVICE_GROUPS: &[crate::token::SidAndAttributes<'static>] = &[];
 const KUNIT_USER_CLAIMS: &[crate::claims::ClaimAttribute] = &[];
@@ -36,10 +35,20 @@ const KUNIT_DEVICE_CLAIMS: &[crate::claims::ClaimAttribute] = &[];
 const KUNIT_POLICIES: &[crate::caap::CaapPolicyEntry<'static>] = &[];
 
 #[repr(C)]
-/// Opaque handle for a resolved AccessCheck context owned by kernel glue.
+/// Resolved AccessCheck context owned by kernel glue.
 pub struct PkmKacsResolvedCtx {
-    _private: [u8; 0],
+    /// Context kind discriminator.
+    pub kind: u32,
+    /// Reserved for future expansion and must be zero in v0.20.
+    pub _reserved: u32,
+    /// Optional live token pointer used by real kernel callers.
+    pub token: *const c_void,
 }
+
+// SAFETY: `PkmKacsResolvedCtx` is a plain immutable C-ABI carrier. Sharing a
+// reference to it across threads does not dereference `token`; actual token
+// rehydration only happens later through explicit validated FFI paths.
+unsafe impl Sync for PkmKacsResolvedCtx {}
 
 #[repr(C)]
 /// Usercopy callbacks used by the Rust ingress helper.
@@ -47,11 +56,18 @@ pub struct PkmKacsUsercopyOps {
     /// Opaque callback context.
     pub ctx: *mut c_void,
     /// Reads `len` bytes from `user_ptr` into `dst`.
-    pub read_bytes:
-        Option<unsafe extern "C" fn(ctx: *mut c_void, user_ptr: u64, dst: *mut c_void, len: usize) -> bool>,
+    pub read_bytes: Option<
+        unsafe extern "C" fn(ctx: *mut c_void, user_ptr: u64, dst: *mut c_void, len: usize) -> bool,
+    >,
     /// Writes `len` bytes from `src` to `user_ptr`.
-    pub write_bytes:
-        Option<unsafe extern "C" fn(ctx: *mut c_void, user_ptr: u64, src: *const c_void, len: usize) -> bool>,
+    pub write_bytes: Option<
+        unsafe extern "C" fn(
+            ctx: *mut c_void,
+            user_ptr: u64,
+            src: *const c_void,
+            len: usize,
+        ) -> bool,
+    >,
 }
 
 #[repr(C)]
@@ -151,7 +167,13 @@ impl AccessCheckAbiMemory for CallbackMemory<'_> {
 /// Returns the built-in KUnit-only resolved context handle used by the current
 /// kernel ingress scaffold.
 pub extern "C" fn kacs_rust_kunit_access_check_context() -> *const PkmKacsResolvedCtx {
-    (&KUNIT_CONTEXT_TAG as *const u8).cast()
+    static KUNIT_CONTEXT: PkmKacsResolvedCtx = PkmKacsResolvedCtx {
+        kind: PKM_KACS_RESOLVED_CTX_KUNIT,
+        _reserved: 0,
+        token: core::ptr::null(),
+    };
+
+    &KUNIT_CONTEXT
 }
 
 #[no_mangle]
@@ -163,7 +185,7 @@ pub extern "C" fn kacs_rust_access_check_ingress_scalar(
     event_sinks: *const PkmKacsEventSinkOps,
     summary_out: *mut PkmKacsIngressSummary,
 ) -> c_long {
-    match with_resolved_context(resolved_ctx.cast(), |resolved| {
+    match with_resolved_context(resolved_ctx, |resolved| {
         let ops = validate_usercopy_ops(ops)?;
         zero_summary(summary_out);
         let args_bytes = read_args_prefix(ops, args_ptr)?;
@@ -188,7 +210,7 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
     event_sinks: *const PkmKacsEventSinkOps,
     summary_out: *mut PkmKacsIngressSummary,
 ) -> c_long {
-    match with_resolved_context(resolved_ctx.cast(), |resolved| {
+    match with_resolved_context(resolved_ctx, |resolved| {
         let ops = validate_usercopy_ops(ops)?;
         zero_summary(summary_out);
         let args_bytes = read_args_prefix(ops, args_ptr)?;
@@ -196,7 +218,13 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
             .map_err(map_kacs_error)?;
         let execution = execute_access_check_list_abi(&request, results_count, &resolved)
             .map_err(map_kacs_error)?;
-        finalize_execution(ops, event_sinks, summary_out, execution, Some((results_ptr, results_count)))
+        finalize_execution(
+            ops,
+            event_sinks,
+            summary_out,
+            execution,
+            Some((results_ptr, results_count)),
+        )
     }) {
         Ok(ret) => ret,
         Err(errno) => errno,
@@ -204,44 +232,59 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
 }
 
 fn with_resolved_context<T>(
-    resolved_ctx: *const c_void,
+    resolved_ctx: *const PkmKacsResolvedCtx,
     f: impl FnOnce(AccessCheckAbiResolved<'_>) -> Result<T, c_long>,
 ) -> Result<T, c_long> {
-    if resolved_ctx.is_null() || resolved_ctx != (&KUNIT_CONTEXT_TAG as *const u8).cast() {
+    let resolved_ctx = unsafe { resolved_ctx.as_ref() }.ok_or(EINVAL)?;
+    if resolved_ctx._reserved != 0 {
         return Err(EINVAL);
     }
 
-    let user = Sid::parse(KUNIT_USER_SID_BYTES).map_err(map_kacs_error)?;
-    let token = AccessCheckToken {
-        subject: TokenView {
-            user,
-            user_deny_only: false,
-            groups: KUNIT_GROUPS,
-        },
-        token_type: TokenType::Primary,
-        impersonation_level: ImpersonationLevel::Impersonation,
-        audit_policy: AUDIT_POLICY_OBJECT_ACCESS_SUCCESS | AUDIT_POLICY_OBJECT_ACCESS_FAILURE,
-        privileges: TokenPrivileges::default(),
-        integrity_level: IntegrityLevel::Medium,
-        mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
-        restricted: RestrictedTokenContext::default(),
-        confinement: ConfinementTokenContext::default(),
-    };
-    let resolved = AccessCheckAbiResolved {
-        token: &token,
-        default_pip: PipContext {
-            pip_type: 0,
-            pip_trust: 0,
-        },
-        device_groups: KUNIT_DEVICE_GROUPS,
-        user_claims: KUNIT_USER_CLAIMS,
-        device_claims: KUNIT_DEVICE_CLAIMS,
-        policies: KUNIT_POLICIES,
-    };
-    f(resolved)
+    match resolved_ctx.kind {
+        PKM_KACS_RESOLVED_CTX_KUNIT => {
+            let user = Sid::parse(KUNIT_USER_SID_BYTES).map_err(map_kacs_error)?;
+            let token = AccessCheckToken {
+                subject: TokenView {
+                    user,
+                    user_deny_only: false,
+                    groups: KUNIT_GROUPS,
+                },
+                token_type: TokenType::Primary,
+                impersonation_level: ImpersonationLevel::Impersonation,
+                audit_policy: AUDIT_POLICY_OBJECT_ACCESS_SUCCESS
+                    | AUDIT_POLICY_OBJECT_ACCESS_FAILURE,
+                privileges: TokenPrivileges::default(),
+                integrity_level: IntegrityLevel::Medium,
+                mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
+                restricted: RestrictedTokenContext::default(),
+                confinement: ConfinementTokenContext::default(),
+            };
+            let resolved = AccessCheckAbiResolved {
+                token: &token,
+                default_pip: PipContext {
+                    pip_type: 0,
+                    pip_trust: 0,
+                },
+                device_groups: KUNIT_DEVICE_GROUPS,
+                user_claims: KUNIT_USER_CLAIMS,
+                device_claims: KUNIT_DEVICE_CLAIMS,
+                policies: KUNIT_POLICIES,
+            };
+            f(resolved)
+        }
+        PKM_KACS_RESOLVED_CTX_TOKEN => {
+            if resolved_ctx.token.is_null() {
+                return Err(EINVAL);
+            }
+            crate::token_runtime::with_access_check_resolved_from_token(resolved_ctx.token, f)
+        }
+        _ => Err(EINVAL),
+    }
 }
 
-fn validate_usercopy_ops<'a>(ops: *const PkmKacsUsercopyOps) -> Result<&'a PkmKacsUsercopyOps, c_long> {
+fn validate_usercopy_ops<'a>(
+    ops: *const PkmKacsUsercopyOps,
+) -> Result<&'a PkmKacsUsercopyOps, c_long> {
     let ops = unsafe { ops.as_ref() }.ok_or(EINVAL)?;
     if ops.read_bytes.is_none() || ops.write_bytes.is_none() {
         return Err(EINVAL);
@@ -271,7 +314,11 @@ fn read_exact_into(ops: &PkmKacsUsercopyOps, user_ptr: u64, dst: &mut [u8]) -> R
     }
 }
 
-fn read_bytes_from_ops(ops: &PkmKacsUsercopyOps, user_ptr: u64, len: usize) -> Result<Vec<u8>, KacsError> {
+fn read_bytes_from_ops(
+    ops: &PkmKacsUsercopyOps,
+    user_ptr: u64,
+    len: usize,
+) -> Result<Vec<u8>, KacsError> {
     let Some(read_bytes) = ops.read_bytes else {
         return Err(KacsError::InvalidAbiInput("missing usercopy read callback"));
     };
@@ -331,7 +378,11 @@ fn finalize_execution(
         write_node_results(ops, results_ptr, node_results.as_slice())?;
     }
 
-    emit_events(event_sinks, &execution.audit_events, &execution.privilege_use_events);
+    emit_events(
+        event_sinks,
+        &execution.audit_events,
+        &execution.privilege_use_events,
+    );
     write_summary(summary_out, &execution);
 
     Ok(match execution.disposition {
@@ -353,9 +404,11 @@ fn write_node_results(
     let total_len = results.len().checked_mul(8).ok_or(EINVAL)?;
     let mut bytes = Vec::with_capacity(total_len).map_err(|_| ENOMEM)?;
     for result in results {
-        bytes.extend_from_slice(&result.granted.to_le_bytes())
+        bytes
+            .extend_from_slice(&result.granted.to_le_bytes())
             .map_err(|_| ENOMEM)?;
-        bytes.extend_from_slice(&result.status.to_le_bytes())
+        bytes
+            .extend_from_slice(&result.status.to_le_bytes())
             .map_err(|_| ENOMEM)?;
     }
     write_bytes_to_ops(ops, results_ptr, bytes.as_slice())
