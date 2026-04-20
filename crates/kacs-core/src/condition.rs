@@ -13,24 +13,43 @@ const PRINCIPAL_SELF_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 10, 0, 0, 0];
 const MAX_STACK_DEPTH: usize = 1024;
 const MAX_COMPOSITE_LITERAL_DEPTH: usize = 64;
 
+/// Tri-state result for conditional ACE evaluation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConditionalResult {
+    /// The expression evaluated to true.
     True,
+    /// The expression evaluated to false.
     False,
+    /// The expression could not be determined and must be treated as unknown.
     Unknown,
 }
 
+/// Claim, identity, and virtual-SID inputs used while evaluating a conditional
+/// ACE expression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConditionalContext<'a> {
+    /// Optional caller-provided `PRINCIPAL_SELF` substitution SID.
     pub self_sid: Option<Sid<'a>>,
+    /// Precomputed `PRINCIPAL_SELF` match outcome when the caller needs to
+    /// override default matching.
     pub principal_self_matches: Option<bool>,
+    /// Whether the caller is considered the owner for this evaluation.
     pub caller_is_owner: bool,
+    /// Optional identity view used for restricted or synthetic membership
+    /// checks.
     pub identity: Option<IdentityView<'a>>,
+    /// Whether `identity` membership should ignore SID attributes and match by
+    /// presence only.
     pub identity_membership_is_presence_based: bool,
+    /// Device-group SIDs visible to `Device_Member_of*` operators.
     pub device_groups: &'a [SidAndAttributes<'a>],
+    /// User claim set visible to `@User.*` references.
     pub user_claims: &'a [ClaimAttribute],
+    /// Device claim set visible to `@Device.*` references.
     pub device_claims: &'a [ClaimAttribute],
+    /// Resource claim set visible to `@Resource.*` references.
     pub resource_claims: &'a [ClaimAttribute],
+    /// Local claim set visible to `@Local.*` references.
     pub local_claims: &'a [ClaimAttribute],
 }
 
@@ -84,6 +103,9 @@ enum StackEntry {
     Result(ConditionalResult),
 }
 
+/// Evaluates one conditional ACE bytecode program and returns a tri-state
+/// result. Malformed inputs, bounds violations, and stack overflows return
+/// `Unknown`.
 pub fn evaluate_conditional_expression(
     bytes: &[u8],
     token: &TokenView<'_>,
@@ -454,14 +476,11 @@ fn lookup_attribute(namespace: &[ClaimAttribute], name: &str, for_allow: bool) -
     let Some(folded_name) = fold_string(name) else {
         return attribute_null();
     };
-    let Some(attribute) = namespace
-        .iter()
-        .find(|attribute| {
-            fold_string(&attribute.name)
-                .as_ref()
-                .is_some_and(|folded| folded == &folded_name)
-        })
-    else {
+    let Some(attribute) = namespace.iter().find(|attribute| {
+        fold_string(&attribute.name)
+            .as_ref()
+            .is_some_and(|folded| folded == &folded_name)
+    }) else {
         return attribute_null();
     };
 
@@ -1140,7 +1159,9 @@ fn decode_utf16_string(bytes: &[u8]) -> Option<String> {
     }
     let mut code_units = Vec::with_capacity(bytes.len() / 2).ok()?;
     for chunk in bytes.chunks_exact(2) {
-        code_units.push(u16::from_le_bytes([chunk[0], chunk[1]])).ok()?;
+        code_units
+            .push(u16::from_le_bytes([chunk[0], chunk[1]]))
+            .ok()?;
     }
 
     let mut string = String::new();

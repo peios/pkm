@@ -20,26 +20,40 @@ const FAILED_ACCESS_ACE_FLAG: u8 = 0x80;
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
 const PRINCIPAL_SELF_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 10, 0, 0, 0];
 
+/// One audit/alarm event emitted by SACL evaluation or forced policy.
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
 pub struct AuditEvent<'a> {
+    /// Optional original ACE bytes responsible for the event.
     pub ace_bytes: Option<&'a [u8]>,
+    /// Requested bits considered by the event.
     pub requested: u32,
+    /// Granted bits visible when the event fired.
     pub granted: u32,
+    /// Whether the event describes a success or failure.
     pub success: bool,
+    /// Whether the event was forced by token audit policy rather than by a SACL
+    /// ACE.
     pub policy_forced: bool,
+    /// Optional privilege bit for privilege-use auditing.
     pub privilege: Option<u64>,
+    /// Optional object-audit context blob.
     pub object_audit_context: Option<Vec<u8>>,
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Default, Eq, PartialEq)]
+/// Output of one `EvaluateSACL` run.
 pub struct EvaluateSaclState<'a> {
+    /// Audit events collected during the walk.
     pub audit_events: Vec<AuditEvent<'a>>,
+    /// Continuous-audit mask collected from matched alarm ACEs.
     pub continuous_audit_mask: u32,
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Evaluates one SACL against the current access result and returns emitted
+/// audit events plus the continuous-audit mask.
 pub fn evaluate_sacl<'a>(
     sacl: &Acl<'a>,
     token: &TokenView<'_>,

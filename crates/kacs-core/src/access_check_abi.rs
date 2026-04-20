@@ -7,95 +7,154 @@ use crate::condition::ConditionalContext;
 use crate::dacl::AccessStatus;
 use crate::error::{KacsError, KacsResult};
 use crate::object_tree::{ObjectTypeList, ObjectTypeNode};
-use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::pip::PipContext;
+use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::privilege::TokenPrivileges;
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
 use crate::token::{AccessCheckToken, SidAndAttributes};
 
+/// Full size of the current fixed-width `kacs_access_check_args` buffer copied
+/// by the ABI parser.
 pub const KACS_ACCESS_CHECK_ARGS_SIZE: usize = 136;
+/// Minimum accepted caller-provided size for v0.20 AccessCheck args.
 pub const KACS_ACCESS_CHECK_ARGS_V1_SIZE: u32 = 40;
+/// Size of one flat object-type entry in the ABI array.
 pub const KACS_OBJECT_TYPE_ENTRY_SIZE: usize = 20;
+/// Maximum accepted object-audit context length in bytes.
 pub const KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN: u32 = 4096;
+/// Negative errno value used for AccessCheck denial at the ABI boundary.
 pub const KACS_ABI_EACCES: i32 = -13;
 
+/// Abstracts raw pointer-backed reads for the pure ABI parser.
 pub trait AccessCheckAbiMemory {
+    /// Reads `len` bytes from a caller-controlled pointer, returning `None` on
+    /// fault.
     fn read_bytes(&self, ptr: u64, len: usize) -> Option<Vec<u8>>;
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// Owned representation of one parsed `kacs_access_check_args` buffer.
 pub struct AccessCheckAbiRequest {
+    /// Token file descriptor supplied by the caller.
     pub token_fd: i32,
+    /// Raw desired-access mask from the caller.
     pub desired_access: u32,
+    /// Generic mapping supplied by the caller.
     pub mapping: GenericMapping,
+    /// Privilege-intent flags used while seeding privileges.
     pub privilege_intent: u32,
+    /// PSB-derived PIP axes supplied at the ABI boundary.
     pub pip: PipContext,
+    /// Raw self-relative security descriptor bytes.
     pub sd_bytes: Vec<u8>,
+    /// Optional raw `PRINCIPAL_SELF` substitution SID bytes.
     pub self_sid_bytes: Option<Vec<u8>>,
+    /// Optional parsed object-type list for result-list mode.
     pub object_tree: Option<ObjectTypeList>,
+    /// Parsed `@Local` claims supplied by the caller.
     pub local_claims: Vec<ClaimAttribute>,
+    /// Optional object-audit context blob.
     pub audit_context: Option<Vec<u8>>,
+    /// Optional scalar granted writeback pointer.
     pub granted_out_ptr: Option<u64>,
+    /// Optional continuous-audit writeback pointer.
     pub continuous_audit_out_ptr: Option<u64>,
+    /// Optional staging-mismatch writeback pointer.
     pub staging_mismatch_out_ptr: Option<u64>,
 }
 
+/// Runtime context supplied by kernel glue after token and policy resolution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AccessCheckAbiResolved<'a> {
+    /// Fully resolved subject token.
     pub token: &'a AccessCheckToken<'a>,
+    /// Default PSB-derived PIP axes when the request leaves them zeroed.
     pub default_pip: PipContext,
+    /// Device groups visible to conditional expressions.
     pub device_groups: &'a [SidAndAttributes<'a>],
+    /// User claims visible to conditional expressions.
     pub user_claims: &'a [ClaimAttribute],
+    /// Device claims visible to conditional expressions.
     pub device_claims: &'a [ClaimAttribute],
+    /// CAAP policies visible to this AccessCheck request.
     pub policies: &'a [CaapPolicyEntry<'a>],
 }
 
+/// Final syscall-style disposition returned by ABI execution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccessCheckAbiReturn {
+    /// Scalar mode granted the returned mask.
     Granted(u32),
+    /// Access was denied and the caller should observe `-EACCES`.
     AccessDenied,
+    /// List mode succeeded and the caller must inspect the result buffer.
     Success,
 }
 
+/// One scalar `u32` writeback scheduled by the ABI executor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct U32Writeback {
+    /// Destination pointer in caller memory.
     pub ptr: u64,
+    /// Value to be written there.
     pub value: u32,
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// Owned audit event form returned by the pure ABI executor.
 pub struct OwnedAuditEvent {
+    /// Optional original ACE bytes for the matched audit/alarm ACE.
     pub ace_bytes: Option<Vec<u8>>,
+    /// Requested bits considered by the event.
     pub requested: u32,
+    /// Granted bits associated with the event.
     pub granted: u32,
+    /// Whether the event describes a success or failure.
     pub success: bool,
+    /// Whether the event came from forced object-access audit policy.
     pub policy_forced: bool,
+    /// Optional privilege bit for privilege-use events.
     pub privilege: Option<u64>,
+    /// Optional object-audit context copied into the event.
     pub object_audit_context: Option<Vec<u8>>,
 }
 
+/// ABI form of one result-list node.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KacsNodeResultAbi {
+    /// Granted bits for this node.
     pub granted: u32,
+    /// Node status encoded as an integer for C-side writeback.
     pub status: i32,
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// Fully shaped ABI execution output ready for kernel copy-out.
 pub struct AccessCheckAbiExecution {
+    /// Final scalar or list disposition.
     pub disposition: AccessCheckAbiReturn,
+    /// Optional granted writeback.
     pub granted_out: Option<U32Writeback>,
+    /// Optional continuous-audit writeback.
     pub continuous_audit_out: Option<U32Writeback>,
+    /// Optional staging-mismatch writeback.
     pub staging_mismatch_out: Option<U32Writeback>,
+    /// Optional result-list node outputs.
     pub node_results: Option<Vec<KacsNodeResultAbi>>,
+    /// Audit events emitted by the request.
     pub audit_events: Vec<OwnedAuditEvent>,
+    /// Privilege-use events emitted by the request.
     pub privilege_use_events: Vec<PrivilegeUseEvent>,
+    /// Updated privilege state after successful privilege-use marking.
     pub updated_privileges: TokenPrivileges,
 }
 
+/// Parses a raw `kacs_access_check_args` buffer and all pointer-referenced
+/// inputs into an owned pure-core request.
 pub fn parse_access_check_abi_request<M: AccessCheckAbiMemory>(
     args_bytes: &[u8],
     memory: &M,
@@ -186,6 +245,7 @@ pub fn parse_access_check_abi_request<M: AccessCheckAbiMemory>(
     })
 }
 
+/// Executes scalar AccessCheck for a previously parsed ABI request.
 pub fn execute_access_check_abi<'a>(
     request: &'a AccessCheckAbiRequest,
     resolved: &'a AccessCheckAbiResolved<'a>,
@@ -255,6 +315,7 @@ pub fn execute_access_check_abi<'a>(
     })
 }
 
+/// Executes result-list AccessCheck for a previously parsed ABI request.
 pub fn execute_access_check_list_abi<'a>(
     request: &'a AccessCheckAbiRequest,
     results_count: u32,
@@ -458,10 +519,7 @@ fn own_audit_events(events: &[AuditEvent<'_>]) -> KacsResult<Vec<OwnedAuditEvent
     let mut owned = Vec::with_capacity(events.len())?;
     for event in events {
         owned.push(OwnedAuditEvent {
-            ace_bytes: event
-                .ace_bytes
-                .map(slice_to_vec)
-                .transpose()?,
+            ace_bytes: event.ace_bytes.map(slice_to_vec).transpose()?,
             requested: event.requested,
             granted: event.granted,
             success: event.success,

@@ -7,13 +7,17 @@ use crate::sid::Sid;
 
 const INHERIT_ONLY_ACE: u8 = 0x08;
 
+/// Resource attributes and scoped policy IDs extracted from a descriptor SACL.
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
 pub struct SaclMetadata<'a> {
+    /// Deduplicated resource-attribute claims.
     pub resource_attributes: Vec<ClaimAttribute>,
+    /// Scoped policy SIDs in encounter order.
     pub policy_sids: Vec<Sid<'a>>,
 }
 
+/// Extracts resource attributes and scoped policy IDs from the descriptor SACL.
 pub fn extract_sacl_metadata<'a>(sd: &SecurityDescriptor<'a>) -> KacsResult<SaclMetadata<'a>> {
     let Some(sacl) = sd.sacl() else {
         return Ok(SaclMetadata {

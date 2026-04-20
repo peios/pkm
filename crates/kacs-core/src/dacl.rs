@@ -22,23 +22,33 @@ const INHERIT_ONLY_ACE: u8 = 0x08;
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
 const PRINCIPAL_SELF_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 10, 0, 0, 0];
 
+/// Scalar DACL evaluation result after the DACL walk completes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DaclEvaluation {
+    /// Granted scalar bits.
     pub granted: u32,
+    /// Decided scalar bits.
     pub decided: u32,
+    /// Whether the requested scalar access succeeded.
     pub success: bool,
 }
 
+/// Per-node status used by object-tree DACL result lists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccessStatus {
+    /// The node's requested access succeeded.
     Ok,
+    /// The node's requested access was denied.
     AccessDenied,
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// Object-tree DACL result list containing per-node grants and status.
 pub struct ObjectDaclResultList {
+    /// Granted bits for each node in preorder object-tree order.
     pub granted_list: Vec<u32>,
+    /// Final status for each node in preorder object-tree order.
     pub status_list: Vec<AccessStatus>,
 }
 
@@ -70,6 +80,7 @@ pub(crate) struct InternalDaclEvaluation {
     pub(crate) object_states: Option<Vec<AccessDecisionState>>,
 }
 
+/// Evaluates the descriptor's DACL in ordinary scalar mode.
 pub fn evaluate_dacl(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,
@@ -87,6 +98,8 @@ pub fn evaluate_dacl(
     )
 }
 
+/// Evaluates the descriptor's DACL with an explicit conditional-expression
+/// context.
 pub fn evaluate_dacl_with_context(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,
@@ -117,6 +130,8 @@ pub fn evaluate_dacl_with_context(
     Ok(finalize_scalar(internal.root, &normalized))
 }
 
+/// Evaluates the descriptor's DACL with restricted-token semantics applied to
+/// the second pass.
 pub fn evaluate_dacl_with_restricted_context(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,
@@ -200,6 +215,8 @@ pub fn evaluate_dacl_with_restricted_context(
     Ok(finalize_scalar(merged.root, &normalized))
 }
 
+/// Evaluates the descriptor's DACL and then narrows it through confinement
+/// semantics.
 pub fn evaluate_dacl_with_confinement_context(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,
@@ -270,6 +287,8 @@ pub fn evaluate_dacl_with_confinement_context(
     Ok(finalize_scalar(merged.root, &normalized))
 }
 
+/// Evaluates the descriptor's DACL with an explicit `PRINCIPAL_SELF`
+/// substitution SID.
 pub fn evaluate_dacl_with_self_sid(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,
@@ -292,6 +311,8 @@ pub fn evaluate_dacl_with_self_sid(
     )
 }
 
+/// Evaluates the descriptor's DACL against an object tree while returning the
+/// scalar root result.
 pub fn evaluate_dacl_with_object_tree(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,
@@ -316,6 +337,8 @@ pub fn evaluate_dacl_with_object_tree(
     )
 }
 
+/// Evaluates the descriptor's DACL against an object tree with an explicit
+/// conditional-expression context.
 pub fn evaluate_dacl_with_object_tree_and_context(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,
@@ -347,6 +370,8 @@ pub fn evaluate_dacl_with_object_tree_and_context(
     Ok(finalize_scalar(internal.root, &normalized))
 }
 
+/// Evaluates the descriptor's DACL and returns the full object-tree result
+/// list.
 pub fn evaluate_dacl_result_list(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,
@@ -371,6 +396,8 @@ pub fn evaluate_dacl_result_list(
     )
 }
 
+/// Evaluates the descriptor's DACL and returns the full object-tree result
+/// list with an explicit conditional-expression context.
 pub fn evaluate_dacl_result_list_with_context(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,
@@ -408,6 +435,8 @@ pub fn evaluate_dacl_result_list_with_context(
     )?)
 }
 
+/// Evaluates the descriptor's DACL and returns the full object-tree result
+/// list with restricted-token semantics.
 pub fn evaluate_dacl_result_list_with_restricted_context(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,
@@ -504,6 +533,8 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
     )?)
 }
 
+/// Evaluates the descriptor's DACL and returns the full object-tree result
+/// list after confinement narrowing.
 pub fn evaluate_dacl_result_list_with_confinement_context(
     sd: &SecurityDescriptor<'_>,
     token: &TokenView<'_>,

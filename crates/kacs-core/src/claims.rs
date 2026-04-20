@@ -2,43 +2,61 @@ use crate::error::{KacsError, KacsResult};
 use crate::pkm_alloc::{slice_to_vec, String, Vec};
 use crate::sid::Sid;
 
+/// Claim flag requesting case-sensitive string comparisons.
 pub const CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE: u32 = 0x0002;
+/// Claim flag marking the attribute as deny-only.
 pub const CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY: u32 = 0x0004;
+/// Claim flag marking the attribute as disabled.
 pub const CLAIM_SECURITY_ATTRIBUTE_DISABLED: u32 = 0x0010;
 
+/// Claim value type for signed 64-bit integers.
 pub const CLAIM_TYPE_INT64: u16 = 0x0001;
+/// Claim value type for unsigned 64-bit integers.
 pub const CLAIM_TYPE_UINT64: u16 = 0x0002;
+/// Claim value type for UTF-16 strings.
 pub const CLAIM_TYPE_STRING: u16 = 0x0003;
+/// Claim value type for SIDs.
 pub const CLAIM_TYPE_SID: u16 = 0x0005;
+/// Claim value type for booleans.
 pub const CLAIM_TYPE_BOOLEAN: u16 = 0x0006;
+/// Claim value type for octet strings.
 pub const CLAIM_TYPE_OCTET: u16 = 0x0010;
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// One parsed claim value.
 pub enum ClaimValue {
+    /// Signed 64-bit integer claim value.
     Int64(i64),
+    /// Unsigned 64-bit integer claim value.
     UInt64(u64),
+    /// String claim value.
     String(String),
+    /// SID claim value encoded as raw SID bytes.
     Sid(Vec<u8>),
+    /// Octet claim value.
     Octet(Vec<u8>),
+    /// Boolean claim value.
     Boolean(bool),
+    /// Composite claim value.
     Composite(Vec<ClaimValue>),
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// One parsed claim attribute entry.
 pub struct ClaimAttribute {
+    /// Attribute name.
     pub name: String,
+    /// Attribute flags.
     pub flags: u32,
+    /// Parsed attribute values.
     pub values: Vec<ClaimValue>,
 }
 
 impl ClaimAttribute {
-    pub fn new(
-        name: impl Into<String>,
-        flags: u32,
-        values: impl Into<Vec<ClaimValue>>,
-    ) -> Self {
+    /// Builds a claim attribute from owned parts.
+    pub fn new(name: impl Into<String>, flags: u32, values: impl Into<Vec<ClaimValue>>) -> Self {
         Self {
             name: name.into(),
             flags,
@@ -47,6 +65,7 @@ impl ClaimAttribute {
     }
 }
 
+/// Parses one claim attribute entry payload.
 pub fn parse_claim_attribute_entry(bytes: &[u8]) -> KacsResult<ClaimAttribute> {
     if bytes.len() < 16 {
         return Err(KacsError::InvalidClaimFormat("claim entry header"));
@@ -81,6 +100,7 @@ pub fn parse_claim_attribute_entry(bytes: &[u8]) -> KacsResult<ClaimAttribute> {
     })
 }
 
+/// Parses a packed array of claim attribute entries.
 pub fn parse_claim_attribute_array(bytes: &[u8]) -> KacsResult<Vec<ClaimAttribute>> {
     let mut claims = Vec::new();
     let mut offset = 0usize;

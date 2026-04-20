@@ -5,9 +5,12 @@ use crate::pkm_alloc::{slice_to_vec, Vec};
 #[cfg(feature = "kernel")]
 use crate::pkm_alloc::{AllocError, TryClone};
 
+/// One preorder object-type entry from an AccessCheck object tree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectTypeNode {
+    /// Depth in the preorder object-type list.
     pub level: u16,
+    /// Object-type GUID in little-endian byte order.
     pub guid: [u8; 16],
 }
 
@@ -18,6 +21,7 @@ impl TryClone for ObjectTypeNode {
     }
 }
 
+/// Parsed object-type tree with cached parent links.
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
 pub struct ObjectTypeList {
@@ -26,6 +30,7 @@ pub struct ObjectTypeList {
 }
 
 impl ObjectTypeList {
+    /// Validates and copies a preorder object-type list.
     pub fn new(nodes: &[ObjectTypeNode]) -> KacsResult<Self> {
         if nodes.is_empty() {
             return Err(KacsError::EmptyObjectTypeList);
@@ -81,14 +86,17 @@ impl ObjectTypeList {
         })
     }
 
+    /// Returns the number of nodes in the tree.
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
+    /// Returns whether the tree is empty.
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
+    /// Returns the original preorder node list.
     pub fn nodes(&self) -> &[ObjectTypeNode] {
         &self.nodes
     }

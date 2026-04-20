@@ -5,8 +5,8 @@ use crate::dacl::AccessStatus;
 use crate::error::{KacsError, KacsResult};
 use crate::evaluate_sd::evaluate_security_descriptor;
 use crate::object_tree::ObjectTypeList;
-use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::pip::PipContext;
+use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::privilege::{
     PrivilegeProvenance, TokenPrivileges, SE_BACKUP_PRIVILEGE, SE_RELABEL_PRIVILEGE,
     SE_RESTORE_PRIVILEGE, SE_SECURITY_PRIVILEGE, SE_TAKE_OWNERSHIP_PRIVILEGE,
@@ -18,57 +18,93 @@ use crate::token::{
 };
 use crate::{Acl, GenericMapping};
 
+/// Selects whether AccessCheck returns a single scalar decision or an
+/// object-tree result list.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccessCheckMode {
+    /// Evaluate scalar AccessCheck semantics.
     Scalar,
+    /// Evaluate object-tree result-list semantics.
     ResultList,
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// Records one privilege-use audit decision produced by step 13.
 pub struct PrivilegeUseEvent {
+    /// Privilege bit responsible for the recorded contribution.
     pub privilege: u64,
+    /// Requested bits attributed to that privilege.
     pub requested: u32,
+    /// Bits granted by the privilege before later narrowing.
     pub granted: u32,
+    /// Bits that survived into the final result.
     pub surviving_bits: u32,
+    /// Whether the privilege use counted as success rather than failure.
     pub success: bool,
+    /// Optional object-audit context copied into the event.
     pub object_audit_context: Option<Vec<u8>>,
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// Full internal AccessCheck state after DACL, CAAP, SACL, and privilege-use
+/// processing.
 pub struct AccessCheckCoreState<'a> {
+    /// Final decided bits.
     pub decided: u32,
+    /// Final granted bits.
     pub granted: u32,
+    /// Final privilege-granted bits that survived the pipeline.
     pub privilege_granted: u32,
+    /// Whether the request ran in `MAXIMUM_ALLOWED` mode.
     pub max_allowed_mode: bool,
+    /// Requested access after generic mapping.
     pub mapped_desired: u32,
+    /// Continuous-audit mask accumulated from matched SACL ACEs.
     pub continuous_audit_mask: u32,
+    /// Whether staged CAAP results differed from effective results.
     pub staging_mismatch: bool,
+    /// Final per-node granted list when result-list mode is active.
     pub object_granted_list: Option<Vec<u32>>,
+    /// Audit/alarm events emitted by step 14.
     pub audit_events: Vec<AuditEvent<'a>>,
+    /// Privilege-use audit events emitted by step 13.
     pub privilege_use_events: Vec<PrivilegeUseEvent>,
+    /// Updated privilege state after successful privilege-use marking.
     pub updated_privileges: TokenPrivileges,
 }
 
+/// Public scalar AccessCheck result returned by the convenience wrapper.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AccessCheckResult {
+    /// Granted scalar access mask.
     pub granted: u32,
+    /// Whether the scalar request succeeded.
     pub allowed: bool,
+    /// Continuous-audit mask accumulated during SACL evaluation.
     pub continuous_audit_mask: u32,
+    /// Whether staged CAAP state differed from effective state.
     pub staging_mismatch: bool,
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// Public result-list AccessCheck output for object-tree requests.
 pub struct AccessCheckResultListState {
+    /// Granted bits for each object-tree node.
     pub granted_list: Vec<u32>,
+    /// Final status for each object-tree node.
     pub status_list: Vec<AccessStatus>,
+    /// Continuous-audit mask accumulated during SACL evaluation.
     pub continuous_audit_mask: u32,
+    /// Whether staged CAAP state differed from effective state.
     pub staging_mismatch: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Executes the full pure-core AccessCheck pipeline and returns the complete
+/// internal state used by the ABI and kernel ingress layers.
 pub fn access_check_core<'a>(
     sd: Option<&SecurityDescriptor<'a>>,
     token: &AccessCheckToken<'a>,
@@ -277,6 +313,7 @@ pub fn access_check_core<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Executes scalar AccessCheck and returns the narrowed public scalar result.
 pub fn access_check<'a>(
     sd: Option<&SecurityDescriptor<'a>>,
     token: &AccessCheckToken<'a>,
@@ -320,6 +357,8 @@ pub fn access_check<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Executes result-list AccessCheck and returns the narrowed public list
+/// result.
 pub fn access_check_result_list<'a>(
     sd: Option<&SecurityDescriptor<'a>>,
     token: &AccessCheckToken<'a>,

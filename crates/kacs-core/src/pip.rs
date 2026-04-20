@@ -6,24 +6,34 @@ use crate::sid::Sid;
 
 const INHERIT_ONLY_ACE: u8 = 0x08;
 
+/// Parsed process trust label extracted from a process-trust-label ACE.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessTrustLabel {
+    /// Required caller PIP type.
     pub pip_type: u32,
+    /// Required caller PIP trust value.
     pub pip_trust: u32,
+    /// Access mask allowed when the caller does not dominate the label.
     pub mask: u32,
 }
 
+/// PSB-derived caller PIP axes supplied to AccessCheck.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PipContext {
+    /// Caller PIP type axis.
     pub pip_type: u32,
+    /// Caller PIP trust axis.
     pub pip_trust: u32,
 }
 
+/// Result of applying PIP to the current access state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PipEnforcementState {
+    /// Bits decided as denied by PIP.
     pub mandatory_decided: u32,
 }
 
+/// Resolves the first applicable process trust label from the descriptor SACL.
 pub fn resolve_process_trust_label(
     sd: &SecurityDescriptor<'_>,
 ) -> KacsResult<Option<ProcessTrustLabel>> {
@@ -53,6 +63,8 @@ pub fn resolve_process_trust_label(
     Ok(None)
 }
 
+/// Applies PIP to the in-flight decision and strips both normal and
+/// privilege-granted bits that the caller's PIP does not permit.
 pub fn apply_pip(
     label: ProcessTrustLabel,
     caller_pip: PipContext,

@@ -440,7 +440,10 @@ fn result_list_mode_counts_survival_on_any_node_as_success() {
     .expect("result-list privilege-use path should evaluate");
 
     assert_eq!(state.granted, 0);
-    assert_eq!(state.object_granted_list, Some(vec![0, READ_CONTROL, 0].into()));
+    assert_eq!(
+        state.object_granted_list,
+        Some(vec![0, READ_CONTROL, 0].into())
+    );
     assert_eq!(state.updated_privileges.used, SE_BACKUP_PRIVILEGE);
     assert_eq!(state.privilege_use_events.len(), 1);
     assert_eq!(state.privilege_use_events[0].privilege, SE_BACKUP_PRIVILEGE);

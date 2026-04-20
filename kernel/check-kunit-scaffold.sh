@@ -27,7 +27,7 @@ fi
 rm -f "$log_file"
 
 set +e
-timeout 10s "$qemu_bin" \
+timeout 30s "$qemu_bin" \
 	-m 2048 \
 	-smp 2 \
 	-nographic \

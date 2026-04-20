@@ -127,6 +127,9 @@ ARG ENABLE_PKM_KUNIT=0
 COPY kernel/install-pkm-subtree.sh /usr/local/bin/install-pkm-subtree
 COPY kernel/stage-kacs-core.sh /usr/local/bin/stage-kacs-core
 COPY kacs/lsm.c /tmp/pkm-src/kacs/lsm.c
+COPY kacs/access_check.c /tmp/pkm-src/kacs/access_check.c
+COPY kacs/access_check.h /tmp/pkm-src/kacs/access_check.h
+COPY kacs/access_check.rs /tmp/pkm-src/kacs/access_check.rs
 COPY kacs/kacs_rust.rs /tmp/pkm-src/kacs/kacs_rust.rs
 COPY kacs/kunit.c /tmp/pkm-src/kacs/kunit.c
 COPY crates/kacs-core/src/ /tmp/pkm-src/crates/kacs-core/src/

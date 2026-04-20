@@ -9,35 +9,54 @@ use crate::sid::Sid;
 
 const INHERIT_ONLY_ACE: u8 = 0x08;
 
+/// Token mandatory-policy bit enabling NO_WRITE_UP enforcement.
 pub const TOKEN_MANDATORY_POLICY_NO_WRITE_UP: u32 = 0x0000_0001;
+/// Token mandatory-policy bit enabling NEW_PROCESS_MIN semantics.
 pub const TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN: u32 = 0x0000_0002;
 
+/// Mandatory-label ACE bit denying read-up.
 pub const SYSTEM_MANDATORY_LABEL_NO_READ_UP: u32 = 0x0000_0001;
+/// Mandatory-label ACE bit denying write-up.
 pub const SYSTEM_MANDATORY_LABEL_NO_WRITE_UP: u32 = 0x0000_0002;
+/// Mandatory-label ACE bit denying execute-up.
 pub const SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP: u32 = 0x0000_0004;
 
+/// Integrity levels understood by the slow-track MIC implementation.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u32)]
 pub enum IntegrityLevel {
+    /// Untrusted integrity.
     Untrusted = 0,
+    /// Low integrity.
     Low = 4096,
+    /// Medium integrity.
     Medium = 8192,
+    /// High integrity.
     High = 12288,
+    /// System integrity.
     System = 16384,
 }
 
+/// Parsed mandatory label extracted from a descriptor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MandatoryLabel {
+    /// Label integrity level.
     pub integrity_level: IntegrityLevel,
+    /// Mandatory policy mask from the ACE.
     pub mask: u32,
+    /// Whether the label came from an explicit ACE rather than the implicit
+    /// default.
     pub explicit: bool,
 }
 
+/// Result of applying MIC to the current access state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MicEnforcementState {
+    /// Bits decided as denied by MIC.
     pub mandatory_decided: u32,
 }
 
+/// Resolves the effective mandatory label for a security descriptor.
 pub fn resolve_mandatory_label(sd: &SecurityDescriptor<'_>) -> KacsResult<MandatoryLabel> {
     let Some(sacl) = sd.sacl() else {
         return Ok(default_mandatory_label());
@@ -64,6 +83,8 @@ pub fn resolve_mandatory_label(sd: &SecurityDescriptor<'_>) -> KacsResult<Mandat
     Ok(default_mandatory_label())
 }
 
+/// Applies MIC to the current decision state and records relabel provenance when
+/// `SeRelabelPrivilege` loosens `WRITE_OWNER`.
 pub fn apply_mic(
     label: MandatoryLabel,
     token_integrity: IntegrityLevel,

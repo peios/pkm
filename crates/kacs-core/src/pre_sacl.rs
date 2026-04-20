@@ -2,25 +2,36 @@ use crate::access_mask::GenericMapping;
 use crate::claims::ClaimAttribute;
 use crate::error::KacsResult;
 use crate::mic::{apply_mic, resolve_mandatory_label, IntegrityLevel};
-use crate::pkm_alloc::Vec;
 use crate::pip::{apply_pip, resolve_process_trust_label, PipContext};
+use crate::pkm_alloc::Vec;
 use crate::privilege::PrivilegeProvenance;
 use crate::sacl::extract_sacl_metadata;
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
 
+/// Result of the pre-SACL walk after MIC, PIP, claim extraction, and policy-ID
+/// extraction have run.
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
 pub struct PreSaclWalkState<'a> {
+    /// Decided bits after pre-SACL enforcement.
     pub decided: u32,
+    /// Granted bits after pre-SACL enforcement.
     pub granted: u32,
+    /// Privilege-granted bits after pre-SACL enforcement.
     pub privilege_granted: u32,
+    /// Bits decided by MIC and PIP.
     pub mandatory_decided: u32,
+    /// Resource attributes extracted from the SACL.
     pub resource_attributes: Vec<ClaimAttribute>,
+    /// Scoped policy SIDs extracted from the SACL.
     pub policy_sids: Vec<Sid<'a>>,
+    /// Updated privilege provenance after MIC/PIP adjustments.
     pub provenance: PrivilegeProvenance,
 }
 
+/// Runs the pre-SACL portion of AccessCheck and returns the narrowed state plus
+/// extracted SACL metadata.
 pub fn pre_sacl_walk<'a>(
     sd: &SecurityDescriptor<'a>,
     token_integrity: IntegrityLevel,

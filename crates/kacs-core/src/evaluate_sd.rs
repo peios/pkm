@@ -8,8 +8,8 @@ use crate::dacl::{
 };
 use crate::error::{KacsError, KacsResult};
 use crate::object_tree::ObjectTypeList;
-use crate::pkm_alloc::Vec;
 use crate::pip::PipContext;
+use crate::pkm_alloc::Vec;
 use crate::pre_sacl::pre_sacl_walk;
 use crate::privilege::{
     apply_take_ownership_fallback, seed_access_check_privileges, AccessDecisionState,
@@ -22,20 +22,33 @@ use crate::token::{
     TokenType,
 };
 
+/// Output of the full security-descriptor evaluation before CAAP/SACL wrappers
+/// further shape the result.
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
 pub struct EvaluateSecurityDescriptorState<'a> {
+    /// Final decided scalar bits.
     pub decided: u32,
+    /// Final granted scalar bits.
     pub granted: u32,
+    /// Final privilege-granted bits.
     pub privilege_granted: u32,
+    /// Whether the request ran in `MAXIMUM_ALLOWED` mode.
     pub max_allowed_mode: bool,
+    /// Requested access after generic mapping.
     pub mapped_desired: u32,
+    /// Resource attributes extracted during the pre-SACL walk.
     pub resource_attributes: Vec<ClaimAttribute>,
+    /// Scoped policy SIDs extracted during the pre-SACL walk.
     pub policy_sids: Vec<Sid<'a>>,
+    /// Final privilege provenance.
     pub provenance: PrivilegeProvenance,
+    /// Final per-node granted list when object-tree mode is active.
     pub object_granted_list: Option<Vec<u32>>,
 }
 
+/// Executes the full security-descriptor evaluation pipeline through MIC, PIP,
+/// DACL, restricted pass, and confinement narrowing.
 pub fn evaluate_security_descriptor<'a>(
     sd: Option<&SecurityDescriptor<'a>>,
     token: &AccessCheckToken<'a>,

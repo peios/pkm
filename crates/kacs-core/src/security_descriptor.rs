@@ -2,10 +2,14 @@ use crate::acl::Acl;
 use crate::error::{KacsError, KacsResult};
 use crate::sid::Sid;
 
+/// Control bit indicating that the descriptor carries a DACL offset.
 pub const SE_DACL_PRESENT: u16 = 0x0004;
+/// Control bit indicating that the descriptor carries a SACL offset.
 pub const SE_SACL_PRESENT: u16 = 0x0010;
+/// Control bit indicating self-relative layout.
 pub const SE_SELF_RELATIVE: u16 = 0x8000;
 
+/// Parsed self-relative security descriptor with borrowed component views.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SecurityDescriptor<'a> {
     bytes: &'a [u8],
@@ -17,8 +21,11 @@ pub struct SecurityDescriptor<'a> {
 }
 
 impl<'a> SecurityDescriptor<'a> {
+    /// Size in bytes of the fixed self-relative security descriptor header.
     pub const HEADER_SIZE: usize = 20;
 
+    /// Parses a self-relative security descriptor and validates component
+    /// offsets and overlap.
     pub fn parse(bytes: &'a [u8]) -> KacsResult<Self> {
         if bytes.len() < Self::HEADER_SIZE {
             return Err(KacsError::Truncated("security descriptor"));
@@ -61,26 +68,32 @@ impl<'a> SecurityDescriptor<'a> {
         })
     }
 
+    /// Returns the full original descriptor bytes.
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 
+    /// Returns the descriptor control field.
     pub fn control(&self) -> u16 {
         self.control
     }
 
+    /// Returns the parsed owner SID, if present.
     pub fn owner(&self) -> Option<Sid<'a>> {
         self.owner
     }
 
+    /// Returns the parsed primary-group SID, if present.
     pub fn group(&self) -> Option<Sid<'a>> {
         self.group
     }
 
+    /// Returns the parsed SACL, if present.
     pub fn sacl(&self) -> Option<Acl<'a>> {
         self.sacl
     }
 
+    /// Returns the parsed DACL, if present.
     pub fn dacl(&self) -> Option<Acl<'a>> {
         self.dacl
     }

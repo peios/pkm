@@ -6,8 +6,8 @@ use crate::condition::{
 use crate::error::{KacsError, KacsResult};
 use crate::evaluate_sd::{evaluate_security_descriptor, EvaluateSecurityDescriptorState};
 use crate::object_tree::ObjectTypeList;
-use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::pip::PipContext;
+use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::security_descriptor::{
     SecurityDescriptor, SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE,
 };
@@ -23,39 +23,57 @@ const MAX_CAAP_SPEC_LEN: usize = 256 * 1024;
 const MAX_CAAP_RULE_COUNT: u32 = 256;
 const MAX_CAAP_FIELD_LEN: usize = 64 * 1024;
 
+/// Borrowed view of one CAAP rule.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CaapRule<'a> {
+    /// Optional `applies_to` conditional-expression bytecode.
     pub applies_to: Option<&'a [u8]>,
+    /// Effective DACL payload for the rule.
     pub effective_dacl: &'a [u8],
+    /// Optional effective SACL payload for the rule.
     pub effective_sacl: Option<&'a [u8]>,
+    /// Optional staged DACL payload for the rule.
     pub staged_dacl: Option<&'a [u8]>,
+    /// Optional staged SACL payload for the rule.
     pub staged_sacl: Option<&'a [u8]>,
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// Borrowed CAAP policy view.
 pub struct CaapPolicy<'a> {
+    /// Rules in policy order.
     pub rules: Vec<CaapRule<'a>>,
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// Borrowed mapping from one policy SID to one CAAP policy.
 pub struct CaapPolicyEntry<'a> {
+    /// Policy SID.
     pub sid: Sid<'a>,
+    /// Policy payload.
     pub policy: CaapPolicy<'a>,
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// Owned CAAP rule stored in the pure cache and ingestion layer.
 pub struct OwnedCaapRule {
+    /// Optional owned `applies_to` bytecode.
     pub applies_to: Option<Vec<u8>>,
+    /// Owned effective DACL payload.
     pub effective_dacl: Vec<u8>,
+    /// Owned effective SACL payload.
     pub effective_sacl: Option<Vec<u8>>,
+    /// Owned staged DACL payload.
     pub staged_dacl: Option<Vec<u8>>,
+    /// Owned staged SACL payload.
     pub staged_sacl: Option<Vec<u8>>,
 }
 
 impl OwnedCaapRule {
+    /// Returns a borrowed view over this owned rule.
     pub fn borrowed(&self) -> CaapRule<'_> {
         CaapRule {
             applies_to: self.applies_to.as_deref(),
@@ -69,11 +87,14 @@ impl OwnedCaapRule {
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// Owned CAAP policy stored in the pure cache and ingestion layer.
 pub struct OwnedCaapPolicy {
+    /// Owned rules in policy order.
     pub rules: Vec<OwnedCaapRule>,
 }
 
 impl OwnedCaapPolicy {
+    /// Returns a borrowed policy view over this owned policy.
     pub fn borrowed(&self) -> KacsResult<CaapPolicy<'_>> {
         let mut rules = Vec::with_capacity(self.rules.len())?;
         for rule in &self.rules {
@@ -85,12 +106,16 @@ impl OwnedCaapPolicy {
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
+/// Owned mapping from one policy SID to one owned CAAP policy.
 pub struct OwnedCaapPolicyEntry {
+    /// Raw policy SID bytes.
     pub sid: Vec<u8>,
+    /// Owned policy payload.
     pub policy: OwnedCaapPolicy,
 }
 
 impl OwnedCaapPolicyEntry {
+    /// Returns a borrowed policy entry view after re-validating the stored SID.
     pub fn borrowed(&self) -> KacsResult<CaapPolicyEntry<'_>> {
         Ok(CaapPolicyEntry {
             sid: Sid::parse(self.sid.as_slice()).expect("policy SID validated at ingestion"),
@@ -101,15 +126,18 @@ impl OwnedCaapPolicyEntry {
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Default, Eq, PartialEq)]
+/// Owned CAAP policy cache keyed by policy SID.
 pub struct CaapPolicyCache {
     entries: Vec<OwnedCaapPolicyEntry>,
 }
 
 impl CaapPolicyCache {
+    /// Returns the owned cache entries.
     pub fn entries(&self) -> &[OwnedCaapPolicyEntry] {
         self.entries.as_slice()
     }
 
+    /// Returns borrowed cache entries suitable for evaluation.
     pub fn borrowed_entries(&self) -> KacsResult<Vec<CaapPolicyEntry<'_>>> {
         let mut entries = Vec::with_capacity(self.entries.len())?;
         for entry in &self.entries {
@@ -118,6 +146,7 @@ impl CaapPolicyCache {
         Ok(entries)
     }
 
+    /// Inserts or replaces one policy by SID.
     pub fn upsert_policy(&mut self, policy_sid: &[u8], policy: OwnedCaapPolicy) -> KacsResult<()> {
         validate_policy_sid(policy_sid)?;
 
@@ -136,12 +165,14 @@ impl CaapPolicyCache {
         Ok(())
     }
 
+    /// Removes one policy by SID if it exists.
     pub fn remove_policy(&mut self, policy_sid: &[u8]) -> KacsResult<()> {
         validate_policy_sid(policy_sid)?;
         remove_policy_entries(&mut self.entries, policy_sid)?;
         Ok(())
     }
 
+    /// Applies the `kacs_set_caap` replace/remove semantics for one policy SID.
     pub fn set_policy_spec(&mut self, policy_sid: &[u8], spec: Option<&[u8]>) -> KacsResult<()> {
         validate_policy_sid(policy_sid)?;
 
@@ -167,14 +198,21 @@ impl CaapPolicyCache {
     }
 }
 
+/// CAAP evaluation output containing effective and staged intersections.
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
 pub struct CaapEvaluationState<'a> {
+    /// Effective scalar granted mask after CAAP.
     pub granted: u32,
+    /// Effective per-node granted list after CAAP.
     pub object_granted_list: Option<Vec<u32>>,
+    /// Staged scalar granted mask after CAAP.
     pub staged_granted: u32,
+    /// Staged per-node granted list after CAAP.
     pub staged_object_granted_list: Option<Vec<u32>>,
+    /// Effective SACL payloads contributed by matching rules.
     pub effective_sacls: Vec<&'a [u8]>,
+    /// Staged SACL payloads contributed by matching rules.
     pub staged_sacls: Vec<&'a [u8]>,
 }
 
@@ -185,6 +223,7 @@ struct RuleGrantState {
     object_granted_list: Option<Vec<u32>>,
 }
 
+/// Parses one CAAP policy spec into owned cache form.
 pub fn parse_caap_policy_spec(spec: &[u8]) -> KacsResult<OwnedCaapPolicy> {
     if spec.is_empty() {
         return Err(KacsError::InvalidCaapSpec("empty caap spec"));
@@ -267,6 +306,8 @@ pub fn parse_caap_policy_spec(spec: &[u8]) -> KacsResult<OwnedCaapPolicy> {
     Ok(OwnedCaapPolicy { rules })
 }
 
+/// Evaluates all CAAP policies referenced by the base security descriptor
+/// result.
 pub fn evaluate_caap<'a>(
     sd: &SecurityDescriptor<'a>,
     token: &AccessCheckToken<'a>,
@@ -401,11 +442,9 @@ fn apply_rule<'a>(
 
     let effective_state = match &effective_rule {
         Some(state) => clone_rule_grants(state)?,
-        None => deny_except_privileges(
-            base.privilege_granted,
-            base.privilege_granted,
-            object_tree,
-        )?,
+        None => {
+            deny_except_privileges(base.privilege_granted, base.privilege_granted, object_tree)?
+        }
     };
     *granted &= effective_state.granted;
     intersect_object_grants(object_granted_list, &effective_state.object_granted_list)?;
@@ -431,11 +470,9 @@ fn apply_rule<'a>(
     } else {
         match &effective_rule {
             Some(state) => clone_rule_grants(state)?,
-            None => deny_except_privileges(
-                base.privilege_granted,
-                base.privilege_granted,
-                object_tree,
-            )?,
+            None => {
+                deny_except_privileges(base.privilege_granted, base.privilege_granted, object_tree)?
+            }
         }
     };
 

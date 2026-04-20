@@ -2,30 +2,53 @@ use crate::access_mask::validate_ace_mask;
 use crate::error::{KacsError, KacsResult};
 use crate::sid::Sid;
 
+/// ACE type for access-allowed ACEs.
 pub const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
+/// ACE type for access-denied ACEs.
 pub const ACCESS_DENIED_ACE_TYPE: u8 = 0x01;
+/// ACE type for system-audit ACEs.
 pub const SYSTEM_AUDIT_ACE_TYPE: u8 = 0x02;
+/// ACE type for system-alarm ACEs.
 pub const SYSTEM_ALARM_ACE_TYPE: u8 = 0x03;
+/// ACE type for object-scoped access-allowed ACEs.
 pub const ACCESS_ALLOWED_OBJECT_ACE_TYPE: u8 = 0x05;
+/// ACE type for object-scoped access-denied ACEs.
 pub const ACCESS_DENIED_OBJECT_ACE_TYPE: u8 = 0x06;
+/// ACE type for object-scoped system-audit ACEs.
 pub const SYSTEM_AUDIT_OBJECT_ACE_TYPE: u8 = 0x07;
+/// ACE type for object-scoped system-alarm ACEs.
 pub const SYSTEM_ALARM_OBJECT_ACE_TYPE: u8 = 0x08;
+/// ACE type for callback access-allowed ACEs.
 pub const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 0x09;
+/// ACE type for callback access-denied ACEs.
 pub const ACCESS_DENIED_CALLBACK_ACE_TYPE: u8 = 0x0a;
+/// ACE type for callback object-scoped access-allowed ACEs.
 pub const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0b;
+/// ACE type for callback object-scoped access-denied ACEs.
 pub const ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0c;
+/// ACE type for callback system-audit ACEs.
 pub const SYSTEM_AUDIT_CALLBACK_ACE_TYPE: u8 = 0x0d;
+/// ACE type for callback system-alarm ACEs.
 pub const SYSTEM_ALARM_CALLBACK_ACE_TYPE: u8 = 0x0e;
+/// ACE type for callback object-scoped system-audit ACEs.
 pub const SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0f;
+/// ACE type for callback object-scoped system-alarm ACEs.
 pub const SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x10;
+/// ACE type for mandatory-label ACEs.
 pub const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
+/// ACE type for resource-attribute ACEs.
 pub const SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE: u8 = 0x12;
+/// ACE type for scoped-policy-ID ACEs.
 pub const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
+/// ACE type for process-trust-label ACEs.
 pub const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
 
+/// Object ACE flag indicating the presence of `object_type`.
 pub const ACE_OBJECT_TYPE_PRESENT: u32 = 0x0000_0001;
+/// Object ACE flag indicating the presence of `inherited_object_type`.
 pub const ACE_INHERITED_OBJECT_TYPE_PRESENT: u32 = 0x0000_0002;
 
+/// Parsed ACE with a typed payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Ace<'a> {
     bytes: &'a [u8],
@@ -35,37 +58,63 @@ pub struct Ace<'a> {
     kind: AceKind<'a>,
 }
 
+/// Typed ACE payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AceKind<'a> {
+    /// ACEs whose payload is just a mask and one SID.
     SingleSid {
+        /// Access mask.
         mask: u32,
+        /// Target SID.
         sid: Sid<'a>,
     },
+    /// Object ACEs with optional object GUID scoping.
     Object {
+        /// Access mask.
         mask: u32,
+        /// Object ACE flags.
         flags: u32,
+        /// Optional object-type GUID.
         object_type: Option<&'a [u8; 16]>,
+        /// Optional inherited object-type GUID.
         inherited_object_type: Option<&'a [u8; 16]>,
+        /// Target SID.
         sid: Sid<'a>,
     },
+    /// Callback ACEs carrying conditional-expression bytecode.
     Callback {
+        /// Access mask.
         mask: u32,
+        /// Target SID.
         sid: Sid<'a>,
+        /// Conditional-expression bytecode.
         application_data: &'a [u8],
     },
+    /// Callback object ACEs with GUID scoping and conditional bytecode.
     CallbackObject {
+        /// Access mask.
         mask: u32,
+        /// Object ACE flags.
         flags: u32,
+        /// Optional object-type GUID.
         object_type: Option<&'a [u8; 16]>,
+        /// Optional inherited object-type GUID.
         inherited_object_type: Option<&'a [u8; 16]>,
+        /// Target SID.
         sid: Sid<'a>,
+        /// Conditional-expression bytecode.
         application_data: &'a [u8],
     },
+    /// Resource-attribute ACE carrying claim data.
     ResourceAttribute {
+        /// ACE mask.
         mask: u32,
+        /// ACE SID.
         sid: Sid<'a>,
+        /// Application data blob containing claim encoding.
         application_data: &'a [u8],
     },
+    /// ACE type not structurally understood by the parser.
     Opaque,
 }
 
@@ -76,6 +125,7 @@ impl<'a> Ace<'a> {
     const MIN_SINGLE_SID_SIZE: usize = 16;
     const MIN_OBJECT_SIZE: usize = 20;
 
+    /// Parses an ACE that must occupy the entire provided slice.
     pub fn parse(bytes: &'a [u8]) -> KacsResult<Self> {
         let (ace, consumed) = Self::parse_prefix(bytes)?;
         if consumed != bytes.len() {
@@ -84,6 +134,8 @@ impl<'a> Ace<'a> {
         Ok(ace)
     }
 
+    /// Parses one ACE from the start of a larger buffer and returns the
+    /// consumed length.
     pub fn parse_prefix(bytes: &'a [u8]) -> KacsResult<(Self, usize)> {
         if bytes.len() < Self::HEADER_SIZE {
             return Err(KacsError::Truncated("ace"));
@@ -116,22 +168,27 @@ impl<'a> Ace<'a> {
         ))
     }
 
+    /// Returns the raw ACE bytes.
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 
+    /// Returns the ACE type byte.
     pub fn ace_type(&self) -> u8 {
         self.ace_type
     }
 
+    /// Returns the ACE flags byte.
     pub fn ace_flags(&self) -> u8 {
         self.ace_flags
     }
 
+    /// Returns the encoded ACE size.
     pub fn ace_size(&self) -> u16 {
         self.ace_size
     }
 
+    /// Returns the typed ACE payload.
     pub fn kind(&self) -> AceKind<'a> {
         self.kind
     }

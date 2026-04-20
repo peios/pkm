@@ -7,29 +7,53 @@
 #![cfg_attr(feature = "kernel", no_std)]
 #![allow(unreachable_pub)]
 
+/// AccessCheck orchestration, wrappers, and privilege-use audit accounting.
 pub mod access_check;
+/// Pure ABI parsing and execution shaping for AccessCheck entrypoints.
 pub mod access_check_abi;
+/// Access-mask constants and generic mapping helpers.
 pub mod access_mask;
+/// ACE type parsing and typed ACE representations.
 pub mod ace;
+/// ACL parsing and entry iteration.
 pub mod acl;
+/// SACL audit/alarm evaluation helpers.
 pub mod audit;
+/// Central Access Policy parsing, cache, and evaluation.
 pub mod caap;
+/// Claim attribute parsing and in-memory representations.
 pub mod claims;
+/// Conditional ACE bytecode evaluation.
 pub mod condition;
+/// DACL evaluation for scalar and object-tree modes.
 pub mod dacl;
+/// Shared error types for the slow-track semantic core.
 pub mod error;
+/// End-to-end security descriptor evaluation.
 pub mod evaluate_sd;
+/// Mandatory Integrity Control helpers.
 pub mod mic;
+/// Object-type tree parsing and traversal helpers.
 pub mod object_tree;
-pub mod pkm_alloc;
+/// Process trust label resolution and PIP enforcement.
 pub mod pip;
+/// PKM-owned fallible allocation wrappers.
+pub mod pkm_alloc;
+/// Pre-SACL orchestration for MIC, PIP, claims, and policy IDs.
 pub mod pre_sacl;
+/// Privilege seeding, provenance, and fallback helpers.
 pub mod privilege;
+/// SACL metadata extraction helpers.
 pub mod sacl;
+/// Self-relative security descriptor parsing.
 pub mod security_descriptor;
+/// SID parsing and SID attribute constants.
 pub mod sid;
+/// Token, restricted-token, and confinement-token views.
 pub mod token;
 
+/// Returns a stable value from the staged crate so kernel bring-up can prove the
+/// real `kacs-core` module graph compiled and linked.
 pub fn kernel_compile_probe() -> usize {
     access_check_abi::KACS_ACCESS_CHECK_ARGS_V1_SIZE as usize
 }
@@ -92,9 +116,11 @@ pub use mic::{
     TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
 };
 pub use object_tree::{ObjectTypeList, ObjectTypeNode};
-pub use pkm_alloc::{slice_to_vec, vec_collect, AllocError, String as PkmString, TryClone, Vec as PkmVec};
 pub use pip::{
     apply_pip, resolve_process_trust_label, PipContext, PipEnforcementState, ProcessTrustLabel,
+};
+pub use pkm_alloc::{
+    slice_to_vec, vec_collect, AllocError, String as PkmString, TryClone, Vec as PkmVec,
 };
 pub use pre_sacl::{pre_sacl_walk, PreSaclWalkState};
 pub use privilege::{

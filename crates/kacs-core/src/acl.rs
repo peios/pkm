@@ -1,6 +1,7 @@
 use crate::ace::Ace;
 use crate::error::{KacsError, KacsResult};
 
+/// Parsed ACL with borrowed ACE storage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Acl<'a> {
     bytes: &'a [u8],
@@ -12,8 +13,10 @@ pub struct Acl<'a> {
 }
 
 impl<'a> Acl<'a> {
+    /// Size in bytes of the fixed ACL header.
     pub const HEADER_SIZE: usize = 8;
 
+    /// Parses an ACL that must occupy the entire provided slice.
     pub fn parse(bytes: &'a [u8]) -> KacsResult<Self> {
         let (acl, consumed) = Self::parse_prefix(bytes)?;
         if consumed != bytes.len() {
@@ -25,6 +28,8 @@ impl<'a> Acl<'a> {
         Ok(acl)
     }
 
+    /// Parses an ACL from the start of a larger buffer and returns the
+    /// consumed length.
     pub fn parse_prefix(bytes: &'a [u8]) -> KacsResult<(Self, usize)> {
         if bytes.len() < Self::HEADER_SIZE {
             return Err(KacsError::Truncated("acl"));
@@ -82,18 +87,22 @@ impl<'a> Acl<'a> {
         ))
     }
 
+    /// Returns the raw ACL bytes.
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
 
+    /// Returns the ACL revision byte.
     pub fn revision(&self) -> u8 {
         self.revision
     }
 
+    /// Returns the ACE count recorded in the ACL header.
     pub fn ace_count(&self) -> u16 {
         self.ace_count
     }
 
+    /// Returns an iterator over parsed ACE entries.
     pub fn entries(&self) -> AclEntries<'a> {
         AclEntries {
             bytes: &self.bytes[Self::HEADER_SIZE..],
@@ -101,17 +110,20 @@ impl<'a> Acl<'a> {
         }
     }
 
+    /// Returns the first reserved ACL header byte.
     #[allow(dead_code)]
     pub fn sbz1(&self) -> u8 {
         self.sbz1
     }
 
+    /// Returns the second reserved ACL header field.
     #[allow(dead_code)]
     pub fn sbz2(&self) -> u16 {
         self.sbz2
     }
 }
 
+/// Iterator over parsed ACE entries in one ACL.
 pub struct AclEntries<'a> {
     bytes: &'a [u8],
     remaining: u16,

@@ -1,3 +1,4 @@
+/// Error returned by fallible PKM allocation helpers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AllocError;
 
@@ -7,7 +8,9 @@ impl core::fmt::Display for AllocError {
     }
 }
 
+/// Fallible clone trait used by PKM-owned container helpers in kernel mode.
 pub trait TryClone: Sized {
+    /// Attempts to clone `self`, returning `AllocError` on allocation failure.
     fn try_clone(&self) -> Result<Self, AllocError>;
 }
 
@@ -33,9 +36,7 @@ mod try_clone_prims {
     }
 
     impl_try_clone_copy!(
-        u8, u16, u32, u64, u128, usize,
-        i8, i16, i32, i64, i128, isize,
-        bool, char
+        u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, bool, char
     );
 
     impl<T: TryClone> TryClone for Option<T> {
@@ -59,23 +60,28 @@ mod vec_inner {
     use super::{AllocError, TryClone};
     use std::vec;
 
+    /// Fallible vector wrapper used by the slow-track core outside kernel mode.
     #[derive(Clone, Eq, PartialEq)]
     pub struct Vec<T>(vec::Vec<T>);
 
     impl<T> Vec<T> {
+        /// Creates an empty vector.
         pub const fn new() -> Self {
             Self(vec::Vec::new())
         }
 
+        /// Creates an empty vector with the requested capacity.
         pub fn with_capacity(capacity: usize) -> Result<Self, AllocError> {
             Ok(Self(vec::Vec::with_capacity(capacity)))
         }
 
+        /// Appends one element.
         pub fn push(&mut self, value: T) -> Result<(), AllocError> {
             self.0.push(value);
             Ok(())
         }
 
+        /// Extends the vector from an iterator.
         pub fn extend<I>(&mut self, iter: I) -> Result<(), AllocError>
         where
             I: IntoIterator<Item = T>,
@@ -86,6 +92,7 @@ mod vec_inner {
             Ok(())
         }
 
+        /// Extends the vector by fallibly cloning elements from a slice.
         pub fn extend_from_slice(&mut self, slice: &[T]) -> Result<(), AllocError>
         where
             T: TryClone,
@@ -96,32 +103,44 @@ mod vec_inner {
             Ok(())
         }
 
+        /// Pops one element from the end of the vector.
         pub fn pop(&mut self) -> Option<T> {
             self.0.pop()
         }
 
+        /// Truncates the vector to `len` elements.
         pub fn truncate(&mut self, len: usize) {
             self.0.truncate(len);
         }
 
+        /// Returns the current length.
         pub fn len(&self) -> usize {
             self.0.len()
         }
 
+        /// Returns whether the vector is empty.
         pub fn is_empty(&self) -> bool {
             self.0.is_empty()
         }
 
+        /// Returns an immutable iterator.
         pub fn iter(&self) -> core::slice::Iter<'_, T> {
             self.0.iter()
         }
 
+        /// Returns a mutable iterator.
         pub fn iter_mut(&mut self) -> core::slice::IterMut<'_, T> {
             self.0.iter_mut()
         }
 
+        /// Returns the vector as a slice.
         pub fn as_slice(&self) -> &[T] {
             &self.0
+        }
+
+        /// Returns a mutable raw pointer to the backing storage.
+        pub fn as_mut_ptr(&mut self) -> *mut T {
+            self.0.as_mut_ptr()
         }
     }
 
@@ -201,35 +220,37 @@ mod vec_inner {
             value.0
         }
     }
-
 }
 
 #[cfg(feature = "kernel")]
 mod vec_inner {
     use super::{AllocError, TryClone};
 
+    /// Fallible vector wrapper used by the slow-track core inside the kernel.
     pub struct Vec<T>(kernel::alloc::KVec<T>);
 
     impl<T> Vec<T> {
+        /// Creates an empty vector.
         pub const fn new() -> Self {
             Self(kernel::alloc::KVec::new())
         }
 
+        /// Creates an empty vector with the requested capacity.
         pub fn with_capacity(capacity: usize) -> Result<Self, AllocError> {
-            let inner = kernel::alloc::KVec::with_capacity(
-                capacity,
-                kernel::alloc::flags::GFP_KERNEL,
-            )
-            .map_err(|_| AllocError)?;
+            let inner =
+                kernel::alloc::KVec::with_capacity(capacity, kernel::alloc::flags::GFP_KERNEL)
+                    .map_err(|_| AllocError)?;
             Ok(Self(inner))
         }
 
+        /// Appends one element.
         pub fn push(&mut self, value: T) -> Result<(), AllocError> {
             self.0
                 .push(value, kernel::alloc::flags::GFP_KERNEL)
                 .map_err(|_| AllocError)
         }
 
+        /// Extends the vector from an iterator.
         pub fn extend<I>(&mut self, iter: I) -> Result<(), AllocError>
         where
             I: IntoIterator<Item = T>,
@@ -240,6 +261,7 @@ mod vec_inner {
             Ok(())
         }
 
+        /// Extends the vector by fallibly cloning elements from a slice.
         pub fn extend_from_slice(&mut self, slice: &[T]) -> Result<(), AllocError>
         where
             T: TryClone,
@@ -250,32 +272,44 @@ mod vec_inner {
             Ok(())
         }
 
+        /// Pops one element from the end of the vector.
         pub fn pop(&mut self) -> Option<T> {
             self.0.pop()
         }
 
+        /// Truncates the vector to `len` elements.
         pub fn truncate(&mut self, len: usize) {
             self.0.truncate(len);
         }
 
+        /// Returns the current length.
         pub fn len(&self) -> usize {
             self.0.len()
         }
 
+        /// Returns whether the vector is empty.
         pub fn is_empty(&self) -> bool {
             self.0.is_empty()
         }
 
+        /// Returns an immutable iterator.
         pub fn iter(&self) -> core::slice::Iter<'_, T> {
             self.0.iter()
         }
 
+        /// Returns a mutable iterator.
         pub fn iter_mut(&mut self) -> core::slice::IterMut<'_, T> {
             self.0.iter_mut()
         }
 
+        /// Returns the vector as a slice.
         pub fn as_slice(&self) -> &[T] {
             &self.0
+        }
+
+        /// Returns a mutable raw pointer to the backing storage.
+        pub fn as_mut_ptr(&mut self) -> *mut T {
+            self.0.as_mut_ptr()
         }
     }
 
@@ -363,31 +397,38 @@ pub use vec_inner::Vec;
 mod string_inner {
     use super::AllocError;
 
+    /// Owned UTF-8 string wrapper used outside kernel mode.
     #[derive(Clone, Default, Eq, PartialEq, Hash)]
     pub struct String(std::string::String);
 
     impl String {
+        /// Creates an empty string.
         pub fn new() -> Self {
             Self(std::string::String::new())
         }
 
+        /// Appends one Unicode scalar value.
         pub fn push(&mut self, character: char) -> Result<(), AllocError> {
             self.0.push(character);
             Ok(())
         }
 
+        /// Returns the string as `&str`.
         pub fn as_str(&self) -> &str {
             &self.0
         }
 
+        /// Returns the UTF-8 bytes.
         pub fn as_bytes(&self) -> &[u8] {
             self.0.as_bytes()
         }
 
+        /// Returns the string length in bytes.
         pub fn len(&self) -> usize {
             self.0.len()
         }
 
+        /// Returns whether the string is empty.
         pub fn is_empty(&self) -> bool {
             self.0.is_empty()
         }
@@ -442,31 +483,38 @@ mod string_inner {
 mod string_inner {
     use super::{AllocError, TryClone, Vec};
 
+    /// Owned UTF-8 string wrapper used inside the kernel.
     pub struct String(Vec<u8>);
 
     impl String {
+        /// Creates an empty string.
         pub fn new() -> Self {
             Self(Vec::new())
         }
 
+        /// Appends one Unicode scalar value.
         pub fn push(&mut self, character: char) -> Result<(), AllocError> {
             let mut buf = [0u8; 4];
             let encoded = character.encode_utf8(&mut buf);
             self.0.extend_from_slice(encoded.as_bytes())
         }
 
+        /// Returns the string as `&str`.
         pub fn as_str(&self) -> &str {
             unsafe { core::str::from_utf8_unchecked(self.0.as_slice()) }
         }
 
+        /// Returns the UTF-8 bytes.
         pub fn as_bytes(&self) -> &[u8] {
             self.0.as_slice()
         }
 
+        /// Returns the string length in bytes.
         pub fn len(&self) -> usize {
             self.0.len()
         }
 
+        /// Returns whether the string is empty.
         pub fn is_empty(&self) -> bool {
             self.0.is_empty()
         }
@@ -533,6 +581,7 @@ mod string_inner {
 
 pub use string_inner::String;
 
+/// Fallibly clones a slice into a PKM vector.
 pub fn slice_to_vec<T: TryClone>(slice: &[T]) -> Result<Vec<T>, AllocError> {
     let mut values = Vec::with_capacity(slice.len())?;
     for value in slice {
@@ -541,9 +590,8 @@ pub fn slice_to_vec<T: TryClone>(slice: &[T]) -> Result<Vec<T>, AllocError> {
     Ok(values)
 }
 
-pub fn vec_collect<T>(
-    iter: impl IntoIterator<Item = T>,
-) -> Result<Vec<T>, AllocError> {
+/// Collects an iterator into a PKM vector using fallible pushes.
+pub fn vec_collect<T>(iter: impl IntoIterator<Item = T>) -> Result<Vec<T>, AllocError> {
     let mut values = Vec::new();
     for value in iter {
         values.push(value)?;

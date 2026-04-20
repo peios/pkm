@@ -47,6 +47,9 @@ insert_source_kconfig() {
 }
 
 require_file "$src_root/kacs/lsm.c"
+require_file "$src_root/kacs/access_check.c"
+require_file "$src_root/kacs/access_check.h"
+require_file "$src_root/kacs/access_check.rs"
 require_file "$src_root/kacs/kacs_rust.rs"
 require_file "$src_root/kacs/kunit.c"
 require_file "$src_root/pkm_kconfig"
@@ -59,6 +62,9 @@ rm -rf "$pkm_dir"
 mkdir -p "$pkm_dir/kacs"
 
 install -m 0644 "$src_root/kacs/lsm.c" "$pkm_dir/kacs/lsm.c"
+install -m 0644 "$src_root/kacs/access_check.c" "$pkm_dir/kacs/access_check.c"
+install -m 0644 "$src_root/kacs/access_check.h" "$pkm_dir/kacs/access_check.h"
+install -m 0644 "$src_root/kacs/access_check.rs" "$pkm_dir/kacs/access_check.rs"
 install -m 0644 "$src_root/kacs/kacs_rust.rs" "$pkm_dir/kacs/kacs_rust.rs"
 install -m 0644 "$src_root/kacs/kunit.c" "$pkm_dir/kacs/kunit.c"
 install -m 0644 "$src_root/pkm_kconfig" "$pkm_dir/Kconfig"
