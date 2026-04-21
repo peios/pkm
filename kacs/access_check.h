@@ -100,6 +100,32 @@ long pkm_kacs_access_check_user_list(
 	const struct pkm_kacs_event_sink_ops *event_sinks,
 	struct pkm_kacs_ingress_summary *summary);
 
+long pkm_kacs_access_check_ingress_scalar_with_token_fd(
+	const struct pkm_kacs_usercopy_ops *ops,
+	u64 args_ptr,
+	const struct pkm_kacs_event_sink_ops *event_sinks,
+	struct pkm_kacs_ingress_summary *summary);
+
+long pkm_kacs_access_check_ingress_list_with_token_fd(
+	const struct pkm_kacs_usercopy_ops *ops,
+	u64 args_ptr,
+	u64 results_ptr,
+	u32 results_count,
+	const struct pkm_kacs_event_sink_ops *event_sinks,
+	struct pkm_kacs_ingress_summary *summary);
+
+long pkm_kacs_access_check_user_scalar_with_token_fd(
+	const void __user *uargs,
+	const struct pkm_kacs_event_sink_ops *event_sinks,
+	struct pkm_kacs_ingress_summary *summary);
+
+long pkm_kacs_access_check_user_list_with_token_fd(
+	const void __user *uargs,
+	struct kacs_node_result __user *results,
+	u32 results_count,
+	const struct pkm_kacs_event_sink_ops *event_sinks,
+	struct pkm_kacs_ingress_summary *summary);
+
 const struct pkm_kacs_resolved_ctx *kacs_rust_kunit_access_check_context(void);
 
 #endif /* _SECURITY_PKM_KACS_ACCESS_CHECK_H */

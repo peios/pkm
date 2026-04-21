@@ -134,6 +134,47 @@ SYSCALL_DEFINE2(kacs_open_self_token, unsigned int, flags, u32, access_mask)
 	return pkm_kacs_open_self_token_internal(flags, access_mask);
 }
 
+int pkm_kacs_token_fd_clone_token(int fd, const void **token_out,
+				  u32 *access_mask_out)
+{
+	struct fd f;
+	struct pkm_kacs_token_file *tf;
+	const void *token_ref;
+
+	if (!token_out)
+		return -EINVAL;
+
+	*token_out = NULL;
+	if (access_mask_out)
+		*access_mask_out = 0;
+
+	f = fdget(fd);
+	if (!fd_file(f))
+		return -EBADF;
+	if (fd_file(f)->f_op != &pkm_kacs_token_fops) {
+		fdput(f);
+		return -EINVAL;
+	}
+
+	tf = fd_file(f)->private_data;
+	if (!tf || !tf->token) {
+		fdput(f);
+		return -EINVAL;
+	}
+
+	token_ref = kacs_rust_token_clone(tf->token);
+	if (!token_ref) {
+		fdput(f);
+		return -EACCES;
+	}
+
+	*token_out = token_ref;
+	if (access_mask_out)
+		*access_mask_out = tf->access_mask;
+	fdput(f);
+	return 0;
+}
+
 int pkm_kacs_kunit_token_fd_snapshot(int fd, struct pkm_kacs_token_fd_view *out)
 {
 	struct fd f;

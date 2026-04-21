@@ -40,6 +40,8 @@ long pkm_kacs_open_self_token_internal(unsigned int flags, u32 access_mask);
 long pkm_kacs_kunit_open_token_fd_for_subject(const void *subject_token,
 					      const void *target_token,
 					      u32 access_mask);
+int pkm_kacs_token_fd_clone_token(int fd, const void **token_out,
+				  u32 *access_mask_out);
 int pkm_kacs_kunit_token_fd_snapshot(int fd,
 				     struct pkm_kacs_token_fd_view *out);
 

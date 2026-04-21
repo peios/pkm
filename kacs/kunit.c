@@ -8,11 +8,14 @@
  */
 
 #include <kunit/test.h>
+#include <linux/anon_inodes.h>
 #include <linux/capability.h>
 #include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/fdtable.h>
+#include <linux/fcntl.h>
 #include <linux/file.h>
+#include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -22,6 +25,10 @@
 #include "access_check.h"
 #include "token_fd.h"
 #include "token_runtime.h"
+
+#define PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT \
+	(KACS_ACCESS_READ_CONTROL | KACS_ACCESS_WRITE_DAC | \
+	 KACS_ACCESS_ACCESS_SYSTEM_SECURITY)
 
 extern size_t kacs_rust_kunit_probe(void);
 
@@ -215,6 +222,29 @@ static void pkm_kunit_build_args_v136(u8 *args)
 {
 	memset(args, 0, 136);
 	pkm_kunit_write_u32(args, 0, 136);
+}
+
+static const u8 pkm_kunit_system_read_sd[] = {
+	1, 0, 4, 128, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	32, 0, 0, 0,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+	2, 0, 28, 0, 1, 0, 0, 0,
+	0, 0, 20, 0, 0, 0, 2, 0,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+};
+
+static void pkm_kunit_build_read_control_args(u8 *args, s32 token_fd)
+{
+	pkm_kunit_build_args_v136(args);
+	pkm_kunit_write_u32(args, 4, (u32)token_fd);
+	pkm_kunit_write_u64(args, 8, 0x1000);
+	pkm_kunit_write_u32(args, 16, sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_write_u32(args, 20, KACS_ACCESS_READ_CONTROL);
+	pkm_kunit_write_u32(args, 24, KACS_ACCESS_READ_CONTROL);
+	pkm_kunit_write_u32(args, 28, KACS_ACCESS_WRITE_DAC);
+	pkm_kunit_write_u32(args, 36,
+			    KACS_ACCESS_READ_CONTROL | KACS_ACCESS_WRITE_DAC);
+	pkm_kunit_write_u64(args, 88, 0x3000);
 }
 
 static void pkm_kunit_scalar_denied_writebacks(struct kunit *test)
@@ -636,6 +666,192 @@ static void pkm_kunit_open_self_token_invalid_flags(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
 }
 
+static void pkm_kunit_access_check_token_fd_current_effective(struct kunit *test)
+{
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	struct pkm_kacs_ingress_summary summary = { };
+	long ret;
+
+	pkm_kunit_build_read_control_args(args, -1);
+
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_read_sd,
+			      sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+
+	ret = pkm_kacs_access_check_ingress_scalar_with_token_fd(
+		&ops, 0x0100, NULL, &summary);
+	KUNIT_EXPECT_EQ(test, ret, (long)PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0),
+			PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, summary.audit_event_count, 0U);
+	KUNIT_EXPECT_EQ(test, summary.privilege_use_event_count, 0U);
+}
+
+static void pkm_kunit_access_check_token_fd_explicit_handle(struct kunit *test)
+{
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	struct pkm_kacs_ingress_summary summary = { };
+	long fd;
+	long ret;
+
+	fd = pkm_kacs_open_self_token_internal(0, KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	pkm_kunit_build_read_control_args(args, (s32)fd);
+
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_read_sd,
+			      sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+
+	ret = pkm_kacs_access_check_ingress_scalar_with_token_fd(
+		&ops, 0x0100, NULL, &summary);
+	KUNIT_EXPECT_EQ(test, ret, (long)PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0),
+			PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_access_check_token_fd_invalid_negative(struct kunit *test)
+{
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	long ret;
+
+	pkm_kunit_build_read_control_args(args, -2);
+
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_read_sd,
+			      sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+
+	ret = pkm_kacs_access_check_ingress_scalar_with_token_fd(
+		&ops, 0x0100, NULL, NULL);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0), 0U);
+}
+
+static const struct file_operations pkm_kunit_non_token_fops = { };
+
+static void pkm_kunit_access_check_token_fd_rejects_non_token_fd(struct kunit *test)
+{
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	int fd;
+	long ret;
+
+	fd = anon_inode_getfd("pkm-kunit-not-token",
+			      &pkm_kunit_non_token_fops, NULL, O_CLOEXEC);
+	KUNIT_ASSERT_GE(test, fd, 0);
+
+	pkm_kunit_build_read_control_args(args, fd);
+
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_read_sd,
+			      sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+
+	ret = pkm_kacs_access_check_ingress_scalar_with_token_fd(
+		&ops, 0x0100, NULL, NULL);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0), 0U);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_access_check_token_fd_bad_size_before_lookup(struct kunit *test)
+{
+	u8 args[136];
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	long ret;
+
+	memset(args, 0, sizeof(args));
+	pkm_kunit_write_u32(args, 0, 4);
+	pkm_kunit_write_u32(args, 4, 123456U);
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+
+	ret = pkm_kacs_access_check_ingress_scalar_with_token_fd(
+		&ops, 0x0100, NULL, NULL);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
+}
+
+static void pkm_kunit_access_check_token_fd_result_list(struct kunit *test)
+{
+	u8 object_tree[40] = { 0 };
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	u8 results[16] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	struct pkm_kacs_ingress_summary summary = { };
+	long ret;
+
+	pkm_kunit_write_u16(object_tree, 0, 0);
+	pkm_kunit_write_u16(object_tree, 2, 0);
+	memset(object_tree + 4, 0x33, 16);
+	pkm_kunit_write_u16(object_tree, 20, 1);
+	pkm_kunit_write_u16(object_tree, 22, 0);
+	memset(object_tree + 24, 0x44, 16);
+
+	pkm_kunit_build_read_control_args(args, -1);
+	pkm_kunit_write_u64(args, 56, 0x2000);
+	pkm_kunit_write_u32(args, 64, 2);
+
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_read_sd,
+			      sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_add_region(&mem, 0x2000, object_tree, sizeof(object_tree));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+	pkm_kunit_add_region(&mem, 0x4000, results, sizeof(results));
+
+	ret = pkm_kacs_access_check_ingress_list_with_token_fd(
+		&ops, 0x0100, 0x4000, 2, NULL, &summary);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0),
+			PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(results, 0),
+			PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(results, 4), 0U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(results, 8),
+			PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(results, 12), 0U);
+}
+
 static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_probe_smoke),
 	KUNIT_CASE(pkm_kunit_scalar_denied_writebacks),
@@ -651,6 +867,12 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_open_self_token_maximum_allowed),
 	KUNIT_CASE(pkm_kunit_token_fd_holds_ref_after_source_drop),
 	KUNIT_CASE(pkm_kunit_open_self_token_invalid_flags),
+	KUNIT_CASE(pkm_kunit_access_check_token_fd_current_effective),
+	KUNIT_CASE(pkm_kunit_access_check_token_fd_explicit_handle),
+	KUNIT_CASE(pkm_kunit_access_check_token_fd_invalid_negative),
+	KUNIT_CASE(pkm_kunit_access_check_token_fd_rejects_non_token_fd),
+	KUNIT_CASE(pkm_kunit_access_check_token_fd_bad_size_before_lookup),
+	KUNIT_CASE(pkm_kunit_access_check_token_fd_result_list),
 	{}
 };
 
