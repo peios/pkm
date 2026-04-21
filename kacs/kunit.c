@@ -29,6 +29,7 @@
 #define PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT \
 	(KACS_ACCESS_READ_CONTROL | KACS_ACCESS_WRITE_DAC | \
 	 KACS_ACCESS_ACCESS_SYSTEM_SECURITY)
+#define PKM_KUNIT_SE_SECURITY_PRIVILEGE (1ULL << 8)
 
 extern size_t kacs_rust_kunit_probe(void);
 
@@ -207,6 +208,7 @@ static void pkm_kunit_expect_boot_snapshot_eq(
 	KUNIT_EXPECT_EQ(test, lhs->privileges_enabled, rhs->privileges_enabled);
 	KUNIT_EXPECT_EQ(test, lhs->privileges_enabled_by_default,
 			rhs->privileges_enabled_by_default);
+	KUNIT_EXPECT_EQ(test, lhs->privileges_used, rhs->privileges_used);
 	KUNIT_EXPECT_EQ(test, lhs->integrity_level, rhs->integrity_level);
 	KUNIT_EXPECT_EQ(test, lhs->token_type, rhs->token_type);
 	KUNIT_EXPECT_EQ(test, lhs->impersonation_level, rhs->impersonation_level);
@@ -245,6 +247,12 @@ static void pkm_kunit_build_read_control_args(u8 *args, s32 token_fd)
 	pkm_kunit_write_u32(args, 36,
 			    KACS_ACCESS_READ_CONTROL | KACS_ACCESS_WRITE_DAC);
 	pkm_kunit_write_u64(args, 88, 0x3000);
+}
+
+static void pkm_kunit_build_access_system_args(u8 *args, s32 token_fd)
+{
+	pkm_kunit_build_read_control_args(args, token_fd);
+	pkm_kunit_write_u32(args, 20, KACS_ACCESS_ACCESS_SYSTEM_SECURITY);
 }
 
 static void pkm_kunit_scalar_denied_writebacks(struct kunit *test)
@@ -449,6 +457,7 @@ static void pkm_kunit_boot_system_defaults(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, snapshot.privileges_enabled, 0xc000000ffffffffcULL);
 	KUNIT_EXPECT_EQ(test, snapshot.privileges_enabled_by_default,
 			0xc000000ffffffffcULL);
+	KUNIT_EXPECT_EQ(test, snapshot.privileges_used, 0ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.integrity_level, 16384U);
 	KUNIT_EXPECT_EQ(test, snapshot.token_type, 1U);
 	KUNIT_EXPECT_EQ(test, snapshot.impersonation_level, 0U);
@@ -852,6 +861,154 @@ static void pkm_kunit_access_check_token_fd_result_list(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(results, 12), 0U);
 }
 
+static void pkm_kunit_access_check_marks_live_privilege_used(struct kunit *test)
+{
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	struct pkm_kacs_ingress_summary summary = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(subject_token, target_token,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	pkm_kunit_build_access_system_args(args, (s32)fd);
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_read_sd,
+			      sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+
+	ret = pkm_kacs_access_check_ingress_scalar_with_token_fd(
+		&ops, 0x0100, NULL, &summary);
+	KUNIT_EXPECT_EQ(test, ret, (long)PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, before.privileges_used, 0ULL);
+	KUNIT_EXPECT_NE(test,
+			summary.updated_privileges.used &
+				PKM_KUNIT_SE_SECURITY_PRIVILEGE,
+			0ULL);
+
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_NE(test,
+			after.privileges_used & PKM_KUNIT_SE_SECURITY_PRIVILEGE,
+			0ULL);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_access_check_copyout_fault_still_marks_used(
+	struct kunit *test)
+{
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(subject_token, target_token,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	pkm_kunit_build_access_system_args(args, (s32)fd);
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_read_sd,
+			      sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+	mem.regions[2].fault_write = true;
+
+	ret = pkm_kacs_access_check_ingress_scalar_with_token_fd(
+		&ops, 0x0100, NULL, NULL);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
+
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_NE(test,
+			after.privileges_used & PKM_KUNIT_SE_SECURITY_PRIVILEGE,
+			0ULL);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_access_check_malformed_input_does_not_mark_used(
+	struct kunit *test)
+{
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(subject_token, target_token,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	pkm_kunit_build_access_system_args(args, (s32)fd);
+	pkm_kunit_write_u32(args, 68, 1);
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_read_sd,
+			      sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+
+	ret = pkm_kacs_access_check_ingress_scalar_with_token_fd(
+		&ops, 0x0100, NULL, NULL);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
+
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used & PKM_KUNIT_SE_SECURITY_PRIVILEGE,
+			0ULL);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
 static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_probe_smoke),
 	KUNIT_CASE(pkm_kunit_scalar_denied_writebacks),
@@ -873,6 +1030,9 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_rejects_non_token_fd),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_bad_size_before_lookup),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_result_list),
+	KUNIT_CASE(pkm_kunit_access_check_marks_live_privilege_used),
+	KUNIT_CASE(pkm_kunit_access_check_copyout_fault_still_marks_used),
+	KUNIT_CASE(pkm_kunit_access_check_malformed_input_does_not_mark_used),
 	{}
 };
 

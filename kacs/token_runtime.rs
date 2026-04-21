@@ -33,7 +33,7 @@ use crate::token::{
 };
 use core::ffi::c_void;
 use core::ptr::null;
-use core::sync::atomic::{fence, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
 
 const SYSTEM_PRIVILEGES_ALL: u64 = 0xC000_000F_FFFF_FFFC;
 const LOGON_TYPE_SERVICE: u32 = 5;
@@ -146,6 +146,8 @@ pub struct PkmKacsBootSnapshot {
     pub privileges_enabled: u64,
     /// Enabled-by-default privilege mask.
     pub privileges_enabled_by_default: u64,
+    /// Monotonic used privilege mask.
+    pub privileges_used: u64,
     /// Integrity level RID.
     pub integrity_level: u32,
     /// Token type ABI value.
@@ -180,7 +182,10 @@ struct PkmKacsBootToken {
     logon_sid: Sid<'static>,
     groups: [SidAndAttributes<'static>; 5],
     group_views: [PkmKacsBootGroupView; 5],
-    privileges: TokenPrivileges,
+    privileges_present: u64,
+    privileges_enabled: u64,
+    privileges_enabled_by_default: u64,
+    privileges_used: AtomicU64,
     integrity_level: IntegrityLevel,
     mandatory_policy: u32,
     token_type: TokenType,
@@ -259,12 +264,10 @@ impl PkmKacsBootToken {
             logon_sid,
             groups,
             group_views,
-            privileges: TokenPrivileges {
-                present: SYSTEM_PRIVILEGES_ALL,
-                enabled: SYSTEM_PRIVILEGES_ALL,
-                enabled_by_default: SYSTEM_PRIVILEGES_ALL,
-                used: 0,
-            },
+            privileges_present: SYSTEM_PRIVILEGES_ALL,
+            privileges_enabled: SYSTEM_PRIVILEGES_ALL,
+            privileges_enabled_by_default: SYSTEM_PRIVILEGES_ALL,
+            privileges_used: AtomicU64::new(0),
             integrity_level: IntegrityLevel::System,
             mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP
                 | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
@@ -312,6 +315,7 @@ impl PkmKacsBootToken {
             return null();
         }
 
+        let privileges = token.privileges_snapshot();
         let copy = Self {
             refcount: AtomicUsize::new(1),
             session: token.session,
@@ -319,7 +323,10 @@ impl PkmKacsBootToken {
             logon_sid: token.logon_sid,
             groups: token.groups,
             group_views: token.group_views,
-            privileges: token.privileges,
+            privileges_present: privileges.present,
+            privileges_enabled: privileges.enabled,
+            privileges_enabled_by_default: privileges.enabled_by_default,
+            privileges_used: AtomicU64::new(privileges.used),
             integrity_level: token.integrity_level,
             mandatory_policy: token.mandatory_policy,
             token_type: token.token_type,
@@ -362,9 +369,10 @@ impl PkmKacsBootToken {
             logon_sid_len: self.session.logon_sid.as_bytes().len(),
             groups_ptr: self.group_views.as_ptr(),
             group_count: self.group_views.len() as u32,
-            privileges_present: self.privileges.present,
-            privileges_enabled: self.privileges.enabled,
-            privileges_enabled_by_default: self.privileges.enabled_by_default,
+            privileges_present: self.privileges_present,
+            privileges_enabled: self.privileges_enabled,
+            privileges_enabled_by_default: self.privileges_enabled_by_default,
+            privileges_used: self.privileges_used.load(Ordering::Acquire),
             integrity_level: self.integrity_level as u32,
             token_type: TOKEN_TYPE_PRIMARY_ABI,
             impersonation_level: IMPERSONATION_LEVEL_ANONYMOUS_ABI,
@@ -374,6 +382,19 @@ impl PkmKacsBootToken {
             projected_gid: self.projected_gid,
             audit_policy: self.audit_policy,
         };
+    }
+
+    fn privileges_snapshot(&self) -> TokenPrivileges {
+        TokenPrivileges {
+            present: self.privileges_present,
+            enabled: self.privileges_enabled,
+            enabled_by_default: self.privileges_enabled_by_default,
+            used: self.privileges_used.load(Ordering::Acquire),
+        }
+    }
+
+    fn mark_privileges_used(&self, used_mask: u64) {
+        self.privileges_used.fetch_or(used_mask, Ordering::AcqRel);
     }
 
     fn access_token(&self) -> AccessCheckToken<'_> {
@@ -386,7 +407,7 @@ impl PkmKacsBootToken {
             token_type: self.token_type,
             impersonation_level: self.impersonation_level,
             audit_policy: self.audit_policy,
-            privileges: self.privileges,
+            privileges: self.privileges_snapshot(),
             integrity_level: self.integrity_level,
             mandatory_policy: self.mandatory_policy,
             restricted: RestrictedTokenContext::default(),
@@ -419,6 +440,17 @@ pub(crate) fn with_access_check_resolved_from_token<T>(
         policies: EMPTY_POLICIES,
     };
     f(resolved)
+}
+
+pub(crate) fn mark_token_privileges_used(token_ptr: *const c_void, used_mask: u64) -> bool {
+    if used_mask == 0 {
+        return true;
+    }
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return false;
+    };
+    token.mark_privileges_used(used_mask);
+    true
 }
 
 fn token_open_check_errno(

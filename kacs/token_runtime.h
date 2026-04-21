@@ -28,6 +28,7 @@ struct pkm_kacs_boot_snapshot {
 	u64 privileges_present;
 	u64 privileges_enabled;
 	u64 privileges_enabled_by_default;
+	u64 privileges_used;
 	u32 integrity_level;
 	u32 token_type;
 	u32 impersonation_level;

@@ -185,14 +185,14 @@ pub extern "C" fn kacs_rust_access_check_ingress_scalar(
     event_sinks: *const PkmKacsEventSinkOps,
     summary_out: *mut PkmKacsIngressSummary,
 ) -> c_long {
-    match with_resolved_context(resolved_ctx, |resolved| {
+    match with_resolved_context(resolved_ctx, |resolved, live_token| {
         let ops = validate_usercopy_ops(ops)?;
         zero_summary(summary_out);
         let args_bytes = read_args_prefix(ops, args_ptr)?;
         let request = parse_access_check_abi_request(&args_bytes, &CallbackMemory { ops })
             .map_err(map_kacs_error)?;
         let execution = execute_access_check_abi(&request, &resolved).map_err(map_kacs_error)?;
-        finalize_execution(ops, event_sinks, summary_out, execution, None)
+        finalize_execution(ops, event_sinks, summary_out, execution, None, live_token)
     }) {
         Ok(ret) => ret,
         Err(errno) => errno,
@@ -210,7 +210,7 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
     event_sinks: *const PkmKacsEventSinkOps,
     summary_out: *mut PkmKacsIngressSummary,
 ) -> c_long {
-    match with_resolved_context(resolved_ctx, |resolved| {
+    match with_resolved_context(resolved_ctx, |resolved, live_token| {
         let ops = validate_usercopy_ops(ops)?;
         zero_summary(summary_out);
         let args_bytes = read_args_prefix(ops, args_ptr)?;
@@ -224,6 +224,7 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
             summary_out,
             execution,
             Some((results_ptr, results_count)),
+            live_token,
         )
     }) {
         Ok(ret) => ret,
@@ -233,7 +234,7 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
 
 fn with_resolved_context<T>(
     resolved_ctx: *const PkmKacsResolvedCtx,
-    f: impl FnOnce(AccessCheckAbiResolved<'_>) -> Result<T, c_long>,
+    f: impl FnOnce(AccessCheckAbiResolved<'_>, Option<*const c_void>) -> Result<T, c_long>,
 ) -> Result<T, c_long> {
     let resolved_ctx = unsafe { resolved_ctx.as_ref() }.ok_or(EINVAL)?;
     if resolved_ctx._reserved != 0 {
@@ -270,13 +271,16 @@ fn with_resolved_context<T>(
                 device_claims: KUNIT_DEVICE_CLAIMS,
                 policies: KUNIT_POLICIES,
             };
-            f(resolved)
+            f(resolved, None)
         }
         PKM_KACS_RESOLVED_CTX_TOKEN => {
             if resolved_ctx.token.is_null() {
                 return Err(EINVAL);
             }
-            crate::token_runtime::with_access_check_resolved_from_token(resolved_ctx.token, f)
+            crate::token_runtime::with_access_check_resolved_from_token(
+                resolved_ctx.token,
+                |resolved| f(resolved, Some(resolved_ctx.token)),
+            )
         }
         _ => Err(EINVAL),
     }
@@ -356,7 +360,10 @@ fn finalize_execution(
     summary_out: *mut PkmKacsIngressSummary,
     execution: AccessCheckAbiExecution,
     list_output: Option<(u64, u32)>,
+    live_token: Option<*const c_void>,
 ) -> Result<c_long, c_long> {
+    persist_live_privilege_state(live_token, &execution)?;
+
     if let Some(writeback) = execution.granted_out {
         write_u32(ops, writeback.ptr, writeback.value)?;
     }
@@ -390,6 +397,25 @@ fn finalize_execution(
         AccessCheckAbiReturn::AccessDenied => KACS_ABI_EACCES as c_long,
         AccessCheckAbiReturn::Success => 0,
     })
+}
+
+fn persist_live_privilege_state(
+    live_token: Option<*const c_void>,
+    execution: &AccessCheckAbiExecution,
+) -> Result<(), c_long> {
+    let used = execution.updated_privileges.used;
+    if used == 0 {
+        return Ok(());
+    }
+
+    let Some(token) = live_token else {
+        return Ok(());
+    };
+    if crate::token_runtime::mark_token_privileges_used(token, used) {
+        Ok(())
+    } else {
+        Err(EINVAL)
+    }
 }
 
 fn write_u32(ops: &PkmKacsUsercopyOps, ptr: u64, value: u32) -> Result<(), c_long> {
