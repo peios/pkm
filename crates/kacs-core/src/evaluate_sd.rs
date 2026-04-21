@@ -71,9 +71,6 @@ pub fn evaluate_security_descriptor<'a>(
     if sd.owner().is_none() {
         return Err(KacsError::MissingSecurityDescriptorOwner);
     }
-    if sd.group().is_none() {
-        return Err(KacsError::MissingSecurityDescriptorGroup);
-    }
     if object_tree.is_some_and(ObjectTypeList::is_empty) {
         return Err(KacsError::EmptyObjectTypeList);
     }

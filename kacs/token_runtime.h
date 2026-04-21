@@ -51,10 +51,13 @@ const void *kacs_rust_create_boot_system_token(void);
 const void *kacs_rust_token_clone(const void *token);
 const void *kacs_rust_token_deep_copy(const void *token);
 void kacs_rust_token_drop(const void *token);
+int kacs_rust_token_open_check(const void *subject_token, const void *target_token,
+			       u32 desired_access, u32 *granted_out);
 u32 kacs_rust_token_projected_uid(const void *token);
 u32 kacs_rust_token_projected_gid(const void *token);
 bool kacs_rust_kunit_token_snapshot(const void *token,
 				    struct pkm_kacs_boot_snapshot *out);
 bool kacs_rust_kunit_boot_snapshot(struct pkm_kacs_boot_snapshot *out);
+const void *kacs_rust_kunit_create_query_only_token(void);
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_RUNTIME_H */

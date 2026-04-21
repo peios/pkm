@@ -2,11 +2,12 @@
 
 //! Boot-time PKM token/session runtime substrate.
 //!
-//! Slice 21 deliberately keeps this module narrower than a full token-handle
-//! implementation. It provides only:
+//! Slice 22 still keeps this module narrower than a full token-handle
+//! implementation. It provides:
 //! - the boot Session 0 / SYSTEM token object
 //! - reference management for that live token pointer
 //! - current-token conversion into the closed Slice 20 AccessCheck context
+//! - bounded token-own-SD material for the first self-open token-fd slice
 //! - a small KUnit snapshot seam for bootstrap verification
 //!
 //! Token-own security descriptors and broader mutable token state remain
@@ -14,12 +15,17 @@
 
 #![allow(unreachable_pub)]
 
+use crate::access_check::access_check;
 use crate::access_check_abi::AccessCheckAbiResolved;
+use crate::access_mask::{GenericMapping, READ_CONTROL, WRITE_DAC};
+use crate::condition::ConditionalContext;
+use crate::error::KacsError;
 use crate::mic::{
     IntegrityLevel, TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN, TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
 };
 use crate::pip::PipContext;
 use crate::privilege::TokenPrivileges;
+use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
 use crate::token::{
     AccessCheckToken, ConfinementTokenContext, ImpersonationLevel, RestrictedTokenContext,
@@ -33,12 +39,29 @@ const SYSTEM_PRIVILEGES_ALL: u64 = 0xC000_000F_FFFF_FFFC;
 const LOGON_TYPE_SERVICE: u32 = 5;
 const TOKEN_TYPE_PRIMARY_ABI: u32 = 1;
 const IMPERSONATION_LEVEL_ANONYMOUS_ABI: u32 = 0;
+const MAX_TOKEN_SD_BYTES: usize = 104;
+
+const EACCES: i32 = 13;
+const ENOMEM: i32 = 12;
 
 const SE_GROUP_MANDATORY: u32 = 0x0000_0001;
 const SE_GROUP_ENABLED_BY_DEFAULT: u32 = 0x0000_0002;
 const SE_GROUP_ENABLED: u32 = 0x0000_0004;
 const SE_GROUP_OWNER: u32 = 0x0000_0008;
 const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
+
+const KACS_TOKEN_IMPERSONATE: u32 = 0x0004;
+const KACS_TOKEN_QUERY: u32 = 0x0008;
+const KACS_TOKEN_QUERY_SOURCE: u32 = 0x0010;
+const KACS_TOKEN_ADJUST_PRIVS: u32 = 0x0020;
+const KACS_TOKEN_ADJUST_GROUPS: u32 = 0x0040;
+const KACS_TOKEN_ADJUST_DEFAULT: u32 = 0x0080;
+const KACS_TOKEN_ALL_ACCESS: u32 = 0x000F_01FF;
+const TOKEN_SELF_QUERY_ADJUST_MASK: u32 = KACS_TOKEN_QUERY
+    | KACS_TOKEN_QUERY_SOURCE
+    | KACS_TOKEN_ADJUST_PRIVS
+    | KACS_TOKEN_ADJUST_GROUPS
+    | KACS_TOKEN_ADJUST_DEFAULT;
 
 const SYSTEM_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 const ADMINISTRATORS_SID_BYTES: &[u8] = &[1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0];
@@ -47,9 +70,28 @@ const AUTHENTICATED_USERS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0,
 const LOCAL_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0];
 const LOGON_SID_BYTES: &[u8] = &[1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const AUTH_PACKAGE_NEGOTIATE: &[u8] = b"Negotiate";
+const SYSTEM_TOKEN_OWN_SD_BYTES: &[u8] = &[
+    1, 0, 4, 128, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0,
+    0, 0, 2, 0, 72, 0, 3, 0, 0, 0, 0, 0, 20, 0, 248, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+    0, 0, 20, 0, 255, 1, 15, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0, 0, 0, 24, 0, 255, 1, 15, 0, 1,
+    2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0,
+];
+const QUERY_ONLY_TOKEN_OWN_SD_BYTES: &[u8] = &[
+    1, 0, 4, 128, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0,
+    0, 0, 2, 0, 28, 0, 1, 0, 0, 0, 0, 0, 20, 0, 248, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+];
 const EMPTY_DEVICE_GROUPS: &[SidAndAttributes<'static>] = &[];
 const EMPTY_CLAIMS: &[crate::claims::ClaimAttribute] = &[];
 const EMPTY_POLICIES: &[crate::caap::CaapPolicyEntry<'static>] = &[];
+const TOKEN_GENERIC_MAPPING: GenericMapping = GenericMapping {
+    read: KACS_TOKEN_QUERY | READ_CONTROL,
+    write: KACS_TOKEN_ADJUST_PRIVS
+        | KACS_TOKEN_ADJUST_GROUPS
+        | KACS_TOKEN_ADJUST_DEFAULT
+        | WRITE_DAC,
+    execute: KACS_TOKEN_IMPERSONATE,
+    all: KACS_TOKEN_ALL_ACCESS,
+};
 
 extern "C" {
     fn pkm_kacs_boot_system_token_ptr() -> *const c_void;
@@ -147,17 +189,24 @@ struct PkmKacsBootToken {
     interactive_session_id: u32,
     projected_uid: u32,
     projected_gid: u32,
+    own_sd_len: usize,
+    own_sd: [u8; MAX_TOKEN_SD_BYTES],
 }
 
 impl PkmKacsBootToken {
-    fn create_system() -> Option<*const c_void> {
+    fn create_system_like(own_sd_bytes: &[u8]) -> Option<*const c_void> {
         let user_sid = Sid::parse(SYSTEM_SID_BYTES).ok()?;
         let logon_sid = Sid::parse(LOGON_SID_BYTES).ok()?;
         let administrators = Sid::parse(ADMINISTRATORS_SID_BYTES).ok()?;
         let everyone = Sid::parse(EVERYONE_SID_BYTES).ok()?;
         let authenticated_users = Sid::parse(AUTHENTICATED_USERS_SID_BYTES).ok()?;
         let local = Sid::parse(LOCAL_SID_BYTES).ok()?;
+        let mut own_sd = [0u8; MAX_TOKEN_SD_BYTES];
 
+        if own_sd_bytes.len() > own_sd.len() {
+            return None;
+        }
+        own_sd[..own_sd_bytes.len()].copy_from_slice(own_sd_bytes);
         let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
         if token_ptr.is_null() {
             return None;
@@ -225,10 +274,20 @@ impl PkmKacsBootToken {
             interactive_session_id: 0,
             projected_uid: 0,
             projected_gid: 0,
+            own_sd_len: own_sd_bytes.len(),
+            own_sd,
         };
 
         unsafe { core::ptr::write(token_ptr, token) };
         Some(token_ptr.cast())
+    }
+
+    fn create_system() -> Option<*const c_void> {
+        Self::create_system_like(SYSTEM_TOKEN_OWN_SD_BYTES)
+    }
+
+    fn create_query_only_system() -> Option<*const c_void> {
+        Self::create_system_like(QUERY_ONLY_TOKEN_OWN_SD_BYTES)
     }
 
     unsafe fn from_ptr<'a>(ptr: *const c_void) -> Option<&'a Self> {
@@ -269,6 +328,8 @@ impl PkmKacsBootToken {
             interactive_session_id: token.interactive_session_id,
             projected_uid: token.projected_uid,
             projected_gid: token.projected_gid,
+            own_sd_len: token.own_sd_len,
+            own_sd: token.own_sd,
         };
 
         unsafe { core::ptr::write(token_ptr, copy) };
@@ -314,6 +375,28 @@ impl PkmKacsBootToken {
             audit_policy: self.audit_policy,
         };
     }
+
+    fn access_token(&self) -> AccessCheckToken<'_> {
+        AccessCheckToken {
+            subject: TokenView {
+                user: self.user_sid,
+                user_deny_only: false,
+                groups: &self.groups,
+            },
+            token_type: self.token_type,
+            impersonation_level: self.impersonation_level,
+            audit_policy: self.audit_policy,
+            privileges: self.privileges,
+            integrity_level: self.integrity_level,
+            mandatory_policy: self.mandatory_policy,
+            restricted: RestrictedTokenContext::default(),
+            confinement: ConfinementTokenContext::default(),
+        }
+    }
+
+    fn own_sd(&self) -> Option<SecurityDescriptor<'_>> {
+        SecurityDescriptor::parse(&self.own_sd[..self.own_sd_len]).ok()
+    }
 }
 
 pub(crate) fn with_access_check_resolved_from_token<T>(
@@ -323,21 +406,7 @@ pub(crate) fn with_access_check_resolved_from_token<T>(
     let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
         return Err(-22);
     };
-    let access_token = AccessCheckToken {
-        subject: TokenView {
-            user: token.user_sid,
-            user_deny_only: false,
-            groups: &token.groups,
-        },
-        token_type: token.token_type,
-        impersonation_level: token.impersonation_level,
-        audit_policy: token.audit_policy,
-        privileges: token.privileges,
-        integrity_level: token.integrity_level,
-        mandatory_policy: token.mandatory_policy,
-        restricted: RestrictedTokenContext::default(),
-        confinement: ConfinementTokenContext::default(),
-    };
+    let access_token = token.access_token();
     let resolved = AccessCheckAbiResolved {
         token: &access_token,
         default_pip: PipContext {
@@ -350,6 +419,84 @@ pub(crate) fn with_access_check_resolved_from_token<T>(
         policies: EMPTY_POLICIES,
     };
     f(resolved)
+}
+
+fn token_open_check_errno(
+    subject_token: *const c_void,
+    target_token: *const c_void,
+    desired: u32,
+) -> i32 {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
+        return -EACCES;
+    };
+    let Some(target) = (unsafe { PkmKacsBootToken::from_ptr(target_token) }) else {
+        return -EACCES;
+    };
+    let Some(target_sd) = target.own_sd() else {
+        return -EACCES;
+    };
+    let normalized = match TOKEN_GENERIC_MAPPING.normalize_desired_access(desired) {
+        Ok(normalized) => normalized,
+        Err(KacsError::ReservedAccessMaskBits(_)) => return -22,
+        Err(_) => return -EACCES,
+    };
+    let subject_token = subject.access_token();
+    let conditional_context = ConditionalContext::default();
+    let pip = PipContext {
+        pip_type: 0,
+        pip_trust: 0,
+    };
+
+    match access_check(
+        Some(&target_sd),
+        &subject_token,
+        pip,
+        desired,
+        &TOKEN_GENERIC_MAPPING,
+        None,
+        &conditional_context,
+        None,
+        0,
+        EMPTY_POLICIES,
+    ) {
+        Ok(result) => {
+            if result.allowed {
+                if normalized.maximum_allowed {
+                    result.granted as i32
+                } else {
+                    (result.granted & normalized.mapped) as i32
+                }
+            } else {
+                -EACCES
+            }
+        }
+        Err(KacsError::AllocationFailure) => -ENOMEM,
+        Err(KacsError::ReservedAccessMaskBits(_)) => -22,
+        Err(KacsError::AccessDenied)
+        | Err(KacsError::InvalidAbiInput(_))
+        | Err(KacsError::MaximumAllowedInAce(_))
+        | Err(KacsError::InvariantViolation(_))
+        | Err(KacsError::InvalidTokenInvariant(_))
+        | Err(KacsError::MissingSecurityDescriptorOwner)
+        | Err(KacsError::MissingSelfRelativeControl(_))
+        | Err(KacsError::InvalidSecurityDescriptorRevision(_))
+        | Err(KacsError::InconsistentSecurityDescriptorField { .. })
+        | Err(KacsError::SecurityDescriptorOffsetOutOfBounds { .. })
+        | Err(KacsError::SecurityDescriptorOffsetInsideHeader { .. })
+        | Err(KacsError::SecurityDescriptorComponentsOverlap { .. })
+        | Err(KacsError::InvalidAclSize(_))
+        | Err(KacsError::AclSizeExceedsBuffer { .. })
+        | Err(KacsError::AclAceCountMismatch { .. })
+        | Err(KacsError::AclTrailingBytes { .. })
+        | Err(KacsError::InvalidAceSize(_))
+        | Err(KacsError::InvalidSidRevision(_))
+        | Err(KacsError::InvalidSidSubAuthorityCount(_))
+        | Err(KacsError::InvalidSidLength { .. })
+        | Err(KacsError::UnsupportedAceInDacl { .. })
+        | Err(KacsError::NullSecurityDescriptor)
+        | Err(KacsError::Truncated(_)) => -EACCES,
+        Err(_) => -EACCES,
+    }
 }
 
 #[no_mangle]
@@ -383,6 +530,25 @@ pub extern "C" fn kacs_rust_token_drop(token: *const c_void) {
         return;
     }
     unsafe { PkmKacsBootToken::drop_ref(token) };
+}
+
+#[no_mangle]
+/// Runs the bounded token-own-SD AccessCheck needed for Slice 22 token opens.
+pub extern "C" fn kacs_rust_token_open_check(
+    subject_token: *const c_void,
+    target_token: *const c_void,
+    desired_access: u32,
+    granted_out: *mut u32,
+) -> i32 {
+    let result = token_open_check_errno(subject_token, target_token, desired_access);
+    if result < 0 {
+        return result;
+    }
+
+    if let Some(granted_out) = (unsafe { granted_out.as_mut() }) {
+        *granted_out = result as u32;
+    }
+    0
 }
 
 #[no_mangle]
@@ -424,4 +590,11 @@ pub extern "C" fn kacs_rust_kunit_token_snapshot(
 /// Fills a KUnit-visible snapshot of the boot SYSTEM token and Session 0.
 pub extern "C" fn kacs_rust_kunit_boot_snapshot(out: *mut PkmKacsBootSnapshot) -> bool {
     kacs_rust_kunit_token_snapshot(unsafe { pkm_kacs_boot_system_token_ptr() }, out)
+}
+
+#[no_mangle]
+/// Creates a KUnit-only SYSTEM-like token whose own SD grants only query and
+/// non-escalating adjust rights to its user SID.
+pub extern "C" fn kacs_rust_kunit_create_query_only_token() -> *const c_void {
+    PkmKacsBootToken::create_query_only_system().unwrap_or(null())
 }

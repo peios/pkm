@@ -177,15 +177,16 @@ fn identification_level_impersonation_denies_before_other_validation() {
 }
 
 #[test]
-fn missing_owner_or_group_is_rejected() {
+fn missing_group_is_accepted_but_missing_owner_is_rejected() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 1001]);
+    let allow_read = acl_bytes(&[basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user)]);
     let token = primary_token(parse_sid(&user), &[]);
 
-    let missing_group_bytes = sd_bytes(Some(&owner), None, None, None);
+    let missing_group_bytes = sd_bytes(Some(&owner), None, None, Some(&allow_read));
     let missing_group = SecurityDescriptor::parse(&missing_group_bytes).expect("sd should parse");
-    let missing_group_err = evaluate_security_descriptor(
+    let missing_group_result = evaluate_security_descriptor(
         Some(&missing_group),
         &token,
         default_pip(),
@@ -195,8 +196,8 @@ fn missing_owner_or_group_is_rejected() {
         &ConditionalContext::default(),
         0,
     )
-    .expect_err("missing group must fail");
-    assert_eq!(missing_group_err, KacsError::MissingSecurityDescriptorGroup);
+    .expect("missing group must still evaluate");
+    assert_eq!(missing_group_result.granted, READ_CONTROL);
 
     let missing_owner_bytes = sd_bytes(None, Some(&group), None, None);
     let missing_owner = SecurityDescriptor::parse(&missing_owner_bytes).expect("sd should parse");

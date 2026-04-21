@@ -29,6 +29,8 @@ for required in \
 	"$repo_root/kacs/access_check.rs" \
 	"$repo_root/kacs/kacs_rust.rs" \
 	"$repo_root/kacs/kunit.c" \
+	"$repo_root/kacs/token_fd.c" \
+	"$repo_root/kacs/token_fd.h" \
 	"$repo_root/kacs/token_runtime.h" \
 	"$repo_root/kacs/token_runtime.rs" \
 	"$repo_root/kacs/lsm.c"; do

@@ -132,6 +132,8 @@ COPY kacs/access_check.h /tmp/pkm-src/kacs/access_check.h
 COPY kacs/access_check.rs /tmp/pkm-src/kacs/access_check.rs
 COPY kacs/kacs_rust.rs /tmp/pkm-src/kacs/kacs_rust.rs
 COPY kacs/kunit.c /tmp/pkm-src/kacs/kunit.c
+COPY kacs/token_fd.c /tmp/pkm-src/kacs/token_fd.c
+COPY kacs/token_fd.h /tmp/pkm-src/kacs/token_fd.h
 COPY kacs/token_runtime.h /tmp/pkm-src/kacs/token_runtime.h
 COPY kacs/token_runtime.rs /tmp/pkm-src/kacs/token_runtime.rs
 COPY crates/kacs-core/src/ /tmp/pkm-src/crates/kacs-core/src/

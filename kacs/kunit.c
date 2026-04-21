@@ -11,12 +11,16 @@
 #include <linux/capability.h>
 #include <linux/cred.h>
 #include <linux/errno.h>
+#include <linux/fdtable.h>
+#include <linux/file.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/syscalls.h>
 #include <linux/types.h>
 
 #include "access_check.h"
+#include "token_fd.h"
 #include "token_runtime.h"
 
 extern size_t kacs_rust_kunit_probe(void);
@@ -517,6 +521,121 @@ static void pkm_kunit_resolved_ctx_fails_closed_on_null_token(struct kunit *test
 	KUNIT_EXPECT_PTR_EQ(test, ctx.token, (void *)0x1);
 }
 
+static void pkm_kunit_open_self_token_effective_query(struct kunit *test)
+{
+	struct pkm_kacs_token_fd_view view = { };
+	const void *effective_token;
+	long fd;
+
+	effective_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, effective_token);
+
+	fd = pkm_kacs_open_self_token_internal(0, KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot((int)fd, &view), 0);
+	KUNIT_EXPECT_PTR_EQ(test, view.token, effective_token);
+	KUNIT_EXPECT_EQ(test, view.access_mask, KACS_TOKEN_QUERY);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_open_self_token_real_generic_read(struct kunit *test)
+{
+	struct pkm_kacs_token_fd_view view = { };
+	const void *primary_token;
+	long fd;
+
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+
+	fd = pkm_kacs_open_self_token_internal(KACS_REAL_TOKEN,
+					       KACS_ACCESS_GENERIC_READ);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot((int)fd, &view), 0);
+	KUNIT_EXPECT_PTR_EQ(test, view.token, primary_token);
+	KUNIT_EXPECT_EQ(test, view.access_mask,
+			KACS_TOKEN_QUERY | KACS_ACCESS_READ_CONTROL);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_open_token_denied_by_own_sd(struct kunit *test)
+{
+	const void *subject_token;
+	const void *target_token;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	ret = pkm_kacs_kunit_open_token_fd_for_subject(subject_token, target_token,
+						       KACS_TOKEN_DUPLICATE);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_open_self_token_maximum_allowed(struct kunit *test)
+{
+	struct pkm_kacs_token_fd_view view = { };
+	const void *effective_token;
+	long fd;
+
+	effective_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, effective_token);
+
+	fd = pkm_kacs_open_self_token_internal(0, KACS_ACCESS_MAXIMUM_ALLOWED);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot((int)fd, &view), 0);
+	KUNIT_EXPECT_PTR_EQ(test, view.token, effective_token);
+	KUNIT_EXPECT_EQ(test, view.access_mask,
+			KACS_TOKEN_ALL_ACCESS | KACS_ACCESS_ACCESS_SYSTEM_SECURITY);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_token_fd_holds_ref_after_source_drop(struct kunit *test)
+{
+	struct pkm_kacs_token_fd_view view = { };
+	struct pkm_kacs_boot_snapshot expected = { };
+	struct pkm_kacs_boot_snapshot held = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token,
+							 &expected));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(subject_token, target_token,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	kacs_rust_token_drop(target_token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot((int)fd, &view), 0);
+	KUNIT_EXPECT_EQ(test, view.access_mask, KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(view.token, &held));
+	pkm_kunit_expect_boot_snapshot_eq(test, &expected, &held);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_open_self_token_invalid_flags(struct kunit *test)
+{
+	long ret;
+
+	ret = pkm_kacs_open_self_token_internal(0x2, KACS_TOKEN_QUERY);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
+}
+
 static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_probe_smoke),
 	KUNIT_CASE(pkm_kunit_scalar_denied_writebacks),
@@ -526,6 +645,12 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_boot_allow_caps),
 	KUNIT_CASE(pkm_kunit_token_deep_copy_independent),
 	KUNIT_CASE(pkm_kunit_resolved_ctx_fails_closed_on_null_token),
+	KUNIT_CASE(pkm_kunit_open_self_token_effective_query),
+	KUNIT_CASE(pkm_kunit_open_self_token_real_generic_read),
+	KUNIT_CASE(pkm_kunit_open_token_denied_by_own_sd),
+	KUNIT_CASE(pkm_kunit_open_self_token_maximum_allowed),
+	KUNIT_CASE(pkm_kunit_token_fd_holds_ref_after_source_drop),
+	KUNIT_CASE(pkm_kunit_open_self_token_invalid_flags),
 	{}
 };
 

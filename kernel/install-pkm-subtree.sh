@@ -46,12 +46,29 @@ insert_source_kconfig() {
 	sed -i "${insert_line}i\\${source_line}" "$file"
 }
 
+append_x86_64_syscall_once() {
+	local file=$1
+	local number='1000'
+	local name='kacs_open_self_token'
+	local line
+
+	if grep -Eq "^[[:space:]]*${number}[[:space:]]+common[[:space:]]+${name}[[:space:]]+sys_${name}\$" \
+		"$file"; then
+		return
+	fi
+
+	line=$(printf '%s\tcommon\t%s\t\tsys_%s' "$number" "$name" "$name")
+	printf '%s\n' "$line" >> "$file"
+}
+
 require_file "$src_root/kacs/lsm.c"
 require_file "$src_root/kacs/access_check.c"
 require_file "$src_root/kacs/access_check.h"
 require_file "$src_root/kacs/access_check.rs"
 require_file "$src_root/kacs/kacs_rust.rs"
 require_file "$src_root/kacs/kunit.c"
+require_file "$src_root/kacs/token_fd.c"
+require_file "$src_root/kacs/token_fd.h"
 require_file "$src_root/kacs/token_runtime.h"
 require_file "$src_root/kacs/token_runtime.rs"
 require_file "$src_root/pkm_kconfig"
@@ -59,6 +76,7 @@ require_file "$src_root/pkm_makefile"
 require_file "$src_root/kernel/stage-kacs-core.sh"
 require_file "$kernel_root/security/Makefile"
 require_file "$kernel_root/security/Kconfig"
+require_file "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
 
 rm -rf "$pkm_dir"
 mkdir -p "$pkm_dir/kacs"
@@ -69,6 +87,8 @@ install -m 0644 "$src_root/kacs/access_check.h" "$pkm_dir/kacs/access_check.h"
 install -m 0644 "$src_root/kacs/access_check.rs" "$pkm_dir/kacs/access_check.rs"
 install -m 0644 "$src_root/kacs/kacs_rust.rs" "$pkm_dir/kacs/kacs_rust.rs"
 install -m 0644 "$src_root/kacs/kunit.c" "$pkm_dir/kacs/kunit.c"
+install -m 0644 "$src_root/kacs/token_fd.c" "$pkm_dir/kacs/token_fd.c"
+install -m 0644 "$src_root/kacs/token_fd.h" "$pkm_dir/kacs/token_fd.h"
 install -m 0644 "$src_root/kacs/token_runtime.h" "$pkm_dir/kacs/token_runtime.h"
 install -m 0644 "$src_root/kacs/token_runtime.rs" "$pkm_dir/kacs/token_runtime.rs"
 install -m 0644 "$src_root/pkm_kconfig" "$pkm_dir/Kconfig"
@@ -80,3 +100,4 @@ install -m 0644 "$src_root/pkm_makefile" "$pkm_dir/Makefile"
 
 append_line_once 'obj-$(CONFIG_SECURITY_PKM) += pkm/' "$kernel_root/security/Makefile"
 insert_source_kconfig "$kernel_root/security/Kconfig"
+append_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"

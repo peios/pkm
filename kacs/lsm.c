@@ -2,9 +2,10 @@
 /*
  * Slow-track PKM boot token/session substrate.
  *
- * Slice 21 adds only the first live credential blob and boot SYSTEM token
- * attachment. It intentionally stops short of public token syscalls,
- * impersonation install/revert, or broader process/object security plumbing.
+ * Slices 21 and 22 add the first live credential blob, boot SYSTEM token
+ * attachment, and the first narrow public token-open surface. Wider token
+ * syscalls, impersonation install/revert, and broader process/object security
+ * plumbing remain deliberately out of scope here.
  */
 
 #include <linux/capability.h>

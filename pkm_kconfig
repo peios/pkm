@@ -10,9 +10,10 @@ config SECURITY_PKM
 	depends on !SECURITY_TOMOYO
 	help
 	  PKM is the Peios Kernel Module used for the KACS slow track.
-	  The current slow-track tree contains an inert kernel-resident
-	  scaffold only: enough to prove build and boot wiring, but no
-	  normative KACS behavior is enforced yet.
+	  The current slow-track tree contains the bounded slow-track
+	  scaffold plus the first narrow public token-open surface.
+	  Broader syscall, handle, and enforcement behavior is still added
+	  deliberately slice by slice rather than carried forward implicitly.
 
 	  KACS must be the sole MAC LSM. Conflicting MAC LSMs (SELinux,
 	  AppArmor, SMACK, TOMOYO) are rejected at Kconfig level.

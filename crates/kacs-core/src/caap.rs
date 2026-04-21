@@ -565,9 +565,7 @@ fn build_synthetic_sd_bytes(
     let owner = base_sd
         .owner()
         .ok_or(KacsError::MissingSecurityDescriptorOwner)?;
-    let group = base_sd
-        .group()
-        .ok_or(KacsError::MissingSecurityDescriptorGroup)?;
+    let group = base_sd.group();
     let sacl = strip_scoped_policy_aces(base_sd.sacl())?;
 
     let mut control = base_sd.control() | SE_SELF_RELATIVE | SE_DACL_PRESENT;
@@ -580,7 +578,7 @@ fn build_synthetic_sd_bytes(
     let mut bytes = Vec::with_capacity(
         SecurityDescriptor::HEADER_SIZE
             + owner.as_bytes().len()
-            + group.as_bytes().len()
+            + group.map_or(0, |sid| sid.as_bytes().len())
             + sacl.as_ref().map_or(0, Vec::len)
             + dacl_bytes.len(),
     )?;
@@ -592,9 +590,11 @@ fn build_synthetic_sd_bytes(
     bytes[4..8].copy_from_slice(&owner_offset.to_le_bytes());
     bytes.extend_from_slice(owner.as_bytes())?;
 
-    let group_offset = bytes.len() as u32;
-    bytes[8..12].copy_from_slice(&group_offset.to_le_bytes());
-    bytes.extend_from_slice(group.as_bytes())?;
+    if let Some(group) = group {
+        let group_offset = bytes.len() as u32;
+        bytes[8..12].copy_from_slice(&group_offset.to_le_bytes());
+        bytes.extend_from_slice(group.as_bytes())?;
+    }
 
     if let Some(sacl) = sacl.as_deref() {
         let sacl_offset = bytes.len() as u32;
