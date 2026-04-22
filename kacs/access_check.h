@@ -53,9 +53,10 @@ struct pkm_kacs_privilege_use_event_view {
 
 struct pkm_kacs_event_sink_ops {
 	void *ctx;
-	void (*on_audit_event)(void *ctx,
-			       const struct pkm_kacs_audit_event_view *event);
-	void (*on_privilege_use_event)(
+	bool (*on_audit_event)(
+		void *ctx,
+		const struct pkm_kacs_audit_event_view *event);
+	bool (*on_privilege_use_event)(
 		void *ctx,
 		const struct pkm_kacs_privilege_use_event_view *event);
 };

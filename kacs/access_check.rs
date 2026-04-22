@@ -23,7 +23,9 @@ use core::ffi::{c_long, c_void};
 
 const EFAULT: c_long = -14;
 const EINVAL: c_long = -22;
+const EIO: c_long = -5;
 const ENOMEM: c_long = -12;
+const EOPNOTSUPP: c_long = -95;
 
 const PKM_KACS_RESOLVED_CTX_KUNIT: u32 = 0;
 const PKM_KACS_RESOLVED_CTX_TOKEN: u32 = 1;
@@ -127,10 +129,11 @@ pub struct PkmKacsEventSinkOps {
     pub ctx: *mut c_void,
     /// Callback for each audit event.
     pub on_audit_event:
-        Option<unsafe extern "C" fn(ctx: *mut c_void, event: *const PkmKacsAuditEventView)>,
+        Option<unsafe extern "C" fn(ctx: *mut c_void, event: *const PkmKacsAuditEventView) -> bool>,
     /// Callback for each privilege-use event.
-    pub on_privilege_use_event:
-        Option<unsafe extern "C" fn(ctx: *mut c_void, event: *const PkmKacsPrivilegeUseEventView)>,
+    pub on_privilege_use_event: Option<
+        unsafe extern "C" fn(ctx: *mut c_void, event: *const PkmKacsPrivilegeUseEventView) -> bool,
+    >,
 }
 
 #[repr(C)]
@@ -383,6 +386,15 @@ fn finalize_execution(
     live_token: Option<*const c_void>,
 ) -> Result<c_long, c_long> {
     persist_live_privilege_state(live_token, &execution)?;
+    write_summary(summary_out, &execution);
+
+    // Generated audit events must not be suppressible by bad user output
+    // pointers, so delivery is attempted before any caller writeback.
+    emit_events(
+        event_sinks,
+        &execution.audit_events,
+        &execution.privilege_use_events,
+    )?;
 
     if let Some(writeback) = execution.granted_out {
         write_u32(ops, writeback.ptr, writeback.value)?;
@@ -404,13 +416,6 @@ fn finalize_execution(
         }
         write_node_results(ops, results_ptr, node_results.as_slice())?;
     }
-
-    emit_events(
-        event_sinks,
-        &execution.audit_events,
-        &execution.privilege_use_events,
-    );
-    write_summary(summary_out, &execution);
 
     Ok(match execution.disposition {
         AccessCheckAbiReturn::Granted(granted) => granted as c_long,
@@ -464,12 +469,19 @@ fn emit_events(
     event_sinks: *const PkmKacsEventSinkOps,
     audit_events: &[OwnedAuditEvent],
     privilege_use_events: &[crate::PrivilegeUseEvent],
-) {
+) -> Result<(), c_long> {
+    if audit_events.is_empty() && privilege_use_events.is_empty() {
+        return Ok(());
+    }
+
     let Some(sinks) = (unsafe { event_sinks.as_ref() }) else {
-        return;
+        return Err(EOPNOTSUPP);
     };
 
-    if let Some(on_audit_event) = sinks.on_audit_event {
+    if !audit_events.is_empty() {
+        let Some(on_audit_event) = sinks.on_audit_event else {
+            return Err(EOPNOTSUPP);
+        };
         for event in audit_events {
             let (ace_bytes_ptr, ace_bytes_len) = match event.ace_bytes.as_ref() {
                 Some(bytes) => (bytes.as_slice().as_ptr(), bytes.len()),
@@ -491,11 +503,16 @@ fn emit_events(
                 object_audit_context_ptr: context_ptr,
                 object_audit_context_len: context_len,
             };
-            unsafe { on_audit_event(sinks.ctx, &view) };
+            if !unsafe { on_audit_event(sinks.ctx, &view) } {
+                return Err(EIO);
+            }
         }
     }
 
-    if let Some(on_privilege_use_event) = sinks.on_privilege_use_event {
+    if !privilege_use_events.is_empty() {
+        let Some(on_privilege_use_event) = sinks.on_privilege_use_event else {
+            return Err(EOPNOTSUPP);
+        };
         for event in privilege_use_events {
             let (context_ptr, context_len) = match event.object_audit_context.as_ref() {
                 Some(bytes) => (bytes.as_slice().as_ptr(), bytes.len()),
@@ -510,9 +527,13 @@ fn emit_events(
                 object_audit_context_ptr: context_ptr,
                 object_audit_context_len: context_len,
             };
-            unsafe { on_privilege_use_event(sinks.ctx, &view) };
+            if !unsafe { on_privilege_use_event(sinks.ctx, &view) } {
+                return Err(EIO);
+            }
         }
     }
+
+    Ok(())
 }
 
 fn write_summary(summary_out: *mut PkmKacsIngressSummary, execution: &AccessCheckAbiExecution) {
