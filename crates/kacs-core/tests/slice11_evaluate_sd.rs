@@ -359,6 +359,47 @@ fn pip_revocation_is_not_restored_after_restricted_merge() {
 }
 
 #[test]
+fn pip_decided_bits_block_owner_implicit_and_dacl_grants() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 10022]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let trust = sid_bytes([0, 0, 0, 0, 0, 19], &[512, 5]);
+    let sacl = acl_bytes(&[basic_ace(
+        SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+        0,
+        READ_CONTROL,
+        &trust,
+    )]);
+    let dacl = acl_bytes(&[basic_ace(
+        ACCESS_ALLOWED_ACE_TYPE,
+        0,
+        READ_CONTROL | WRITE_DAC,
+        &owner,
+    )]);
+    let sd_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = primary_token(parse_sid(&owner), &[]);
+    let pip = PipContext {
+        pip_type: 1,
+        pip_trust: 1,
+    };
+
+    let result = evaluate_security_descriptor(
+        Some(&sd),
+        &token,
+        pip,
+        READ_CONTROL | WRITE_DAC,
+        &mapping(),
+        None,
+        &ConditionalContext::default(),
+        0,
+    )
+    .expect("evaluation should succeed");
+
+    assert_eq!(result.granted, READ_CONTROL);
+    assert_eq!(result.decided & WRITE_DAC, WRITE_DAC);
+}
+
+#[test]
 fn mandatory_decided_blocks_take_ownership_fallback() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);

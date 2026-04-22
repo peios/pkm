@@ -52,16 +52,10 @@ const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
 
 const KACS_TOKEN_IMPERSONATE: u32 = 0x0004;
 const KACS_TOKEN_QUERY: u32 = 0x0008;
-const KACS_TOKEN_QUERY_SOURCE: u32 = 0x0010;
 const KACS_TOKEN_ADJUST_PRIVS: u32 = 0x0020;
 const KACS_TOKEN_ADJUST_GROUPS: u32 = 0x0040;
 const KACS_TOKEN_ADJUST_DEFAULT: u32 = 0x0080;
 const KACS_TOKEN_ALL_ACCESS: u32 = 0x000F_01FF;
-const TOKEN_SELF_QUERY_ADJUST_MASK: u32 = KACS_TOKEN_QUERY
-    | KACS_TOKEN_QUERY_SOURCE
-    | KACS_TOKEN_ADJUST_PRIVS
-    | KACS_TOKEN_ADJUST_GROUPS
-    | KACS_TOKEN_ADJUST_DEFAULT;
 
 const SYSTEM_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 const ADMINISTRATORS_SID_BYTES: &[u8] = &[1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0];
@@ -422,6 +416,8 @@ impl PkmKacsBootToken {
 
 pub(crate) fn with_access_check_resolved_from_token<T>(
     token_ptr: *const c_void,
+    default_pip: PipContext,
+    policies: &[crate::caap::CaapPolicyEntry<'_>],
     f: impl FnOnce(AccessCheckAbiResolved<'_>) -> Result<T, core::ffi::c_long>,
 ) -> Result<T, core::ffi::c_long> {
     let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
@@ -430,14 +426,11 @@ pub(crate) fn with_access_check_resolved_from_token<T>(
     let access_token = token.access_token();
     let resolved = AccessCheckAbiResolved {
         token: &access_token,
-        default_pip: PipContext {
-            pip_type: 0,
-            pip_trust: 0,
-        },
+        default_pip,
         device_groups: EMPTY_DEVICE_GROUPS,
         user_claims: EMPTY_CLAIMS,
         device_claims: EMPTY_CLAIMS,
-        policies: EMPTY_POLICIES,
+        policies,
     };
     f(resolved)
 }
@@ -577,7 +570,7 @@ pub extern "C" fn kacs_rust_token_open_check(
         return result;
     }
 
-    if let Some(granted_out) = (unsafe { granted_out.as_mut() }) {
+    if let Some(granted_out) = unsafe { granted_out.as_mut() } {
         *granted_out = result as u32;
     }
     0

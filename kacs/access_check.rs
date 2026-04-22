@@ -43,11 +43,17 @@ pub struct PkmKacsResolvedCtx {
     pub _reserved: u32,
     /// Optional live token pointer used by real kernel callers.
     pub token: *const c_void,
+    /// Optional locked CAAP cache pointer visible during this evaluation.
+    pub caap_cache: *const c_void,
+    /// PSB-derived default PIP type used when the ABI field is zero.
+    pub default_pip_type: u32,
+    /// PSB-derived default PIP trust used when the ABI field is zero.
+    pub default_pip_trust: u32,
 }
 
 // SAFETY: `PkmKacsResolvedCtx` is a plain immutable C-ABI carrier. Sharing a
-// reference to it across threads does not dereference `token`; actual token
-// rehydration only happens later through explicit validated FFI paths.
+// reference to it across threads does not dereference `token` or `caap_cache`;
+// actual rehydration only happens later through explicit validated FFI paths.
 unsafe impl Sync for PkmKacsResolvedCtx {}
 
 #[repr(C)]
@@ -171,6 +177,9 @@ pub extern "C" fn kacs_rust_kunit_access_check_context() -> *const PkmKacsResolv
         kind: PKM_KACS_RESOLVED_CTX_KUNIT,
         _reserved: 0,
         token: core::ptr::null(),
+        caap_cache: core::ptr::null(),
+        default_pip_type: 0,
+        default_pip_trust: 0,
     };
 
     &KUNIT_CONTEXT
@@ -277,10 +286,21 @@ fn with_resolved_context<T>(
             if resolved_ctx.token.is_null() {
                 return Err(EINVAL);
             }
-            crate::token_runtime::with_access_check_resolved_from_token(
-                resolved_ctx.token,
-                |resolved| f(resolved, Some(resolved_ctx.token)),
-            )
+            if resolved_ctx.caap_cache.is_null() {
+                return Err(EINVAL);
+            }
+            let default_pip = PipContext {
+                pip_type: resolved_ctx.default_pip_type,
+                pip_trust: resolved_ctx.default_pip_trust,
+            };
+            crate::caap_cache::with_caap_policies(resolved_ctx.caap_cache, |policies| {
+                crate::token_runtime::with_access_check_resolved_from_token(
+                    resolved_ctx.token,
+                    default_pip,
+                    policies,
+                    |resolved| f(resolved, Some(resolved_ctx.token)),
+                )
+            })
         }
         _ => Err(EINVAL),
     }

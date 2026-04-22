@@ -656,7 +656,7 @@ where
     let mut granted = initial_state.granted;
 
     if caller_is_owner && !skip_owner_implicit && !owner_rights_suppressed {
-        let implicit = (READ_CONTROL | WRITE_DAC) & valid_rights;
+        let implicit = (READ_CONTROL | WRITE_DAC) & valid_rights & !decided;
         decided |= implicit;
         granted |= implicit;
     }

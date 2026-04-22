@@ -42,6 +42,8 @@ struct pkm_kacs_boot_snapshot {
 const void *pkm_kacs_current_effective_token_ptr(void);
 const void *pkm_kacs_current_primary_token_ptr(void);
 const void *pkm_kacs_boot_system_token_ptr(void);
+void *pkm_kacs_zalloc(size_t size);
+void pkm_kacs_free(void *ptr);
 
 int pkm_kacs_resolve_ctx_from_token(const void *token,
 				    struct pkm_kacs_resolved_ctx *out);

@@ -15,6 +15,7 @@
 #include <linux/uaccess.h>
 
 #include "access_check.h"
+#include "caap_cache.h"
 #include "token_fd.h"
 #include "token_runtime.h"
 
@@ -251,6 +252,7 @@ long pkm_kacs_access_check_ingress_scalar_with_token_fd(
 	struct pkm_kacs_ingress_summary *summary)
 {
 	struct pkm_kacs_token_resolution resolution;
+	const void *caap_cache;
 	long ret;
 
 	if (summary)
@@ -260,9 +262,16 @@ long pkm_kacs_access_check_ingress_scalar_with_token_fd(
 	if (ret)
 		return ret;
 
+	ret = pkm_kacs_caap_cache_lock(&caap_cache);
+	if (ret) {
+		pkm_kacs_release_token_resolution(&resolution);
+		return ret;
+	}
+	resolution.ctx.caap_cache = caap_cache;
 	ret = pkm_kacs_access_check_ingress_scalar(&resolution.copied_ops,
 						   args_ptr, &resolution.ctx,
 						   event_sinks, summary);
+	pkm_kacs_caap_cache_unlock();
 	pkm_kacs_release_token_resolution(&resolution);
 	return ret;
 }
@@ -276,6 +285,7 @@ long pkm_kacs_access_check_ingress_list_with_token_fd(
 	struct pkm_kacs_ingress_summary *summary)
 {
 	struct pkm_kacs_token_resolution resolution;
+	const void *caap_cache;
 	long ret;
 
 	if (summary)
@@ -285,10 +295,17 @@ long pkm_kacs_access_check_ingress_list_with_token_fd(
 	if (ret)
 		return ret;
 
+	ret = pkm_kacs_caap_cache_lock(&caap_cache);
+	if (ret) {
+		pkm_kacs_release_token_resolution(&resolution);
+		return ret;
+	}
+	resolution.ctx.caap_cache = caap_cache;
 	ret = pkm_kacs_access_check_ingress_list(&resolution.copied_ops, args_ptr,
 						 results_ptr, results_count,
 						 &resolution.ctx,
 						 event_sinks, summary);
+	pkm_kacs_caap_cache_unlock();
 	pkm_kacs_release_token_resolution(&resolution);
 	return ret;
 }

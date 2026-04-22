@@ -2,10 +2,11 @@
 /*
  * Slow-track PKM boot token/session substrate.
  *
- * Slices 21 and 22 add the first live credential blob, boot SYSTEM token
- * attachment, and the first narrow public token-open surface. Wider token
- * syscalls, impersonation install/revert, and broader process/object security
- * plumbing remain deliberately out of scope here.
+ * Slices 21, 22, and 25 add the first live credential blob, boot SYSTEM token
+ * attachment, narrow public token-open surface, and the PSB PIP fields needed
+ * by AccessCheck defaulting. Wider token syscalls, impersonation
+ * install/revert, and broader process/object security plumbing remain
+ * deliberately out of scope here.
  */
 
 #include <linux/capability.h>
@@ -14,9 +15,11 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/lsm_hooks.h>
+#include <linux/sched.h>
 #include <linux/security.h>
 #include <linux/slab.h>
 
+#include "caap_cache.h"
 #include "token_runtime.h"
 
 #define PKM_KACS_UNMAPPED_ID 65534U
@@ -25,6 +28,11 @@ struct pkm_kacs_cred_security {
 	const void *token;
 	u32 projected_uid;
 	u32 projected_gid;
+};
+
+struct pkm_kacs_task_security {
+	u32 pip_type;
+	u32 pip_trust;
 };
 
 extern int kacs_rust_init(void);
@@ -37,12 +45,20 @@ static const void *pkm_kacs_boot_system_token;
 
 static struct lsm_blob_sizes pkm_blob_sizes __ro_after_init = {
 	.lbs_cred = sizeof(struct pkm_kacs_cred_security),
+	.lbs_task = sizeof(struct pkm_kacs_task_security),
 };
 
 static inline struct pkm_kacs_cred_security *pkm_kacs_cred(const struct cred *cred)
 {
 	return (struct pkm_kacs_cred_security *)((char *)cred->security +
 						 pkm_blob_sizes.lbs_cred);
+}
+
+static inline struct pkm_kacs_task_security *pkm_kacs_task(
+	const struct task_struct *task)
+{
+	return (struct pkm_kacs_task_security *)((char *)task->security +
+						 pkm_blob_sizes.lbs_task);
 }
 
 static void pkm_kacs_assert_boot_caps(struct cred *cred)
@@ -129,11 +145,28 @@ static void pkm_kacs_cred_free(struct cred *cred)
 		kacs_rust_token_drop(sec->token);
 }
 
+static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
+{
+	struct pkm_kacs_task_security *new_sec;
+	struct pkm_kacs_task_security *parent_sec;
+
+	(void)clone_flags;
+	if (!task || !task->security || !current || !current->security)
+		return -EACCES;
+
+	new_sec = pkm_kacs_task(task);
+	parent_sec = pkm_kacs_task(current);
+	new_sec->pip_type = parent_sec->pip_type;
+	new_sec->pip_trust = parent_sec->pip_trust;
+	return 0;
+}
+
 static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(cred_prepare, pkm_kacs_cred_prepare),
 	LSM_HOOK_INIT(cred_transfer, pkm_kacs_cred_transfer),
 	LSM_HOOK_INIT(cred_alloc_blank, pkm_kacs_cred_alloc_blank),
 	LSM_HOOK_INIT(cred_free, pkm_kacs_cred_free),
+	LSM_HOOK_INIT(task_alloc, pkm_kacs_task_alloc),
 };
 
 void *pkm_kacs_zalloc(size_t size)
@@ -161,17 +194,57 @@ const void *pkm_kacs_boot_system_token_ptr(void)
 	return pkm_kacs_boot_system_token;
 }
 
+int pkm_kacs_current_pip_context(u32 *pip_type, u32 *pip_trust)
+{
+	struct pkm_kacs_task_security *sec;
+
+	if (!pip_type || !pip_trust)
+		return -EINVAL;
+	if (!current || !current->security)
+		return -EACCES;
+
+	sec = pkm_kacs_task(current);
+	*pip_type = sec->pip_type;
+	*pip_trust = sec->pip_trust;
+	return 0;
+}
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+void pkm_kacs_kunit_set_current_pip_context(u32 pip_type, u32 pip_trust)
+{
+	struct pkm_kacs_task_security *sec;
+
+	if (!current || !current->security)
+		return;
+
+	sec = pkm_kacs_task(current);
+	sec->pip_type = pip_type;
+	sec->pip_trust = pip_trust;
+}
+#endif
+
 int pkm_kacs_resolve_ctx_from_token(const void *token,
 				    struct pkm_kacs_resolved_ctx *out)
 {
+	u32 pip_type;
+	u32 pip_trust;
+	int ret;
+
 	if (!out)
 		return -EINVAL;
 	if (!token)
 		return -EACCES;
 
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
 	out->kind = PKM_KACS_RESOLVED_CTX_TOKEN;
 	out->_reserved = 0;
 	out->token = token;
+	out->caap_cache = NULL;
+	out->default_pip_type = pip_type;
+	out->default_pip_trust = pip_trust;
 	return 0;
 }
 
@@ -207,6 +280,12 @@ static int __init pkm_init(void)
 	ret = kacs_rust_init();
 	if (ret) {
 		pr_err("pkm: slow-track Rust init failed (%d)\n", ret);
+		return ret;
+	}
+
+	ret = pkm_kacs_caap_cache_init();
+	if (ret) {
+		pr_err("pkm: CAAP cache init failed (%d)\n", ret);
 		return ret;
 	}
 

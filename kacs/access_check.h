@@ -12,6 +12,9 @@ struct pkm_kacs_resolved_ctx {
 	u32 kind;
 	u32 _reserved;
 	const void *token;
+	const void *caap_cache;
+	u32 default_pip_type;
+	u32 default_pip_trust;
 };
 
 struct kacs_node_result {
@@ -125,6 +128,12 @@ long pkm_kacs_access_check_user_list_with_token_fd(
 	u32 results_count,
 	const struct pkm_kacs_event_sink_ops *event_sinks,
 	struct pkm_kacs_ingress_summary *summary);
+
+int pkm_kacs_current_pip_context(u32 *pip_type, u32 *pip_trust);
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+void pkm_kacs_kunit_set_current_pip_context(u32 pip_type, u32 pip_trust);
+#endif
 
 const struct pkm_kacs_resolved_ctx *kacs_rust_kunit_access_check_context(void);
 

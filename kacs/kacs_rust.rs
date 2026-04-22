@@ -10,6 +10,7 @@
 
 #[path = "access_check.rs"]
 mod access_check_ingress;
+mod caap_cache;
 mod kacs_core;
 mod token_runtime;
 

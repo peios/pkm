@@ -27,6 +27,9 @@ for required in \
 	"$repo_root/kacs/access_check.c" \
 	"$repo_root/kacs/access_check.h" \
 	"$repo_root/kacs/access_check.rs" \
+	"$repo_root/kacs/caap_cache.c" \
+	"$repo_root/kacs/caap_cache.h" \
+	"$repo_root/kacs/caap_cache.rs" \
 	"$repo_root/kacs/kacs_rust.rs" \
 	"$repo_root/kacs/kunit.c" \
 	"$repo_root/kacs/token_fd.c" \
