@@ -35,6 +35,7 @@
 	(KACS_ACCESS_READ_CONTROL | KACS_ACCESS_ACCESS_SYSTEM_SECURITY)
 #define PKM_KUNIT_PIP_TYPE_PROTECTED 512U
 #define PKM_KUNIT_PIP_TRUST_TEST 5U
+#define PKM_KUNIT_SE_TCB_PRIVILEGE (1ULL << 7)
 #define PKM_KUNIT_SE_SECURITY_PRIVILEGE (1ULL << 8)
 
 extern size_t kacs_rust_kunit_probe(void);
@@ -1389,6 +1390,157 @@ static void pkm_kunit_caap_cache_malformed_replace_keeps_old_policy(
 			0);
 }
 
+static void pkm_kunit_set_caap_public_installs_and_marks_tcb_used(
+	struct kunit *test)
+{
+	u8 spec[64];
+	size_t spec_len;
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *token;
+
+	token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_set_caap_internal(pkm_kunit_caap_policy_sid,
+						   sizeof(pkm_kunit_caap_policy_sid),
+						   NULL, 0),
+			0);
+
+	spec_len = pkm_kunit_build_caap_spec(
+		spec, pkm_kunit_caap_system_read_dacl,
+		sizeof(pkm_kunit_caap_system_read_dacl));
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_caap_for_token(
+				token, pkm_kunit_caap_policy_sid,
+				sizeof(pkm_kunit_caap_policy_sid), spec,
+				(u32)spec_len),
+			0);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_caap_cache_len(), (size_t)1);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used & PKM_KUNIT_SE_TCB_PRIVILEGE,
+			PKM_KUNIT_SE_TCB_PRIVILEGE);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_set_caap_internal(pkm_kunit_caap_policy_sid,
+						   sizeof(pkm_kunit_caap_policy_sid),
+						   NULL, 0),
+			0);
+}
+
+static void pkm_kunit_set_caap_public_denies_without_tcb(struct kunit *test)
+{
+	u8 spec[64];
+	size_t spec_len;
+	const void *token;
+
+	token = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_set_caap_internal(pkm_kunit_caap_policy_sid,
+						   sizeof(pkm_kunit_caap_policy_sid),
+						   NULL, 0),
+			0);
+
+	spec_len = pkm_kunit_build_caap_spec(
+		spec, pkm_kunit_caap_system_read_dacl,
+		sizeof(pkm_kunit_caap_system_read_dacl));
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_caap_for_token(
+				token, pkm_kunit_caap_policy_sid,
+				sizeof(pkm_kunit_caap_policy_sid), spec,
+				(u32)spec_len),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_caap_cache_len(), (size_t)0);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_set_caap_public_checks_tcb_before_usercopy(
+	struct kunit *test)
+{
+	const void *token;
+
+	token = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_set_caap_internal(pkm_kunit_caap_policy_sid,
+						   sizeof(pkm_kunit_caap_policy_sid),
+						   NULL, 0),
+			0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_caap_user_for_token(
+				token, (const void __user *)1,
+				sizeof(pkm_kunit_caap_policy_sid),
+				(const void __user *)1, 16),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_caap_cache_len(), (size_t)0);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_set_caap_public_rejects_sid_bounds_before_copy(
+	struct kunit *test)
+{
+	const void *token;
+
+	token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_caap_user_for_token(
+				token, (const void __user *)1, 7, NULL, 0),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_caap_user_for_token(
+				token, (const void __user *)1, 69,
+				NULL, 0),
+			(long)-EINVAL);
+}
+
+static void pkm_kunit_set_caap_public_malformed_keeps_old_policy(
+	struct kunit *test)
+{
+	u8 spec[64];
+	size_t spec_len;
+	u32 granted = 0xffffffffU;
+	const void *token;
+	long ret;
+
+	token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_set_caap_internal(pkm_kunit_caap_policy_sid,
+						   sizeof(pkm_kunit_caap_policy_sid),
+						   NULL, 0),
+			0);
+
+	spec_len = pkm_kunit_build_caap_spec(
+		spec, pkm_kunit_caap_system_read_dacl,
+		sizeof(pkm_kunit_caap_system_read_dacl));
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_caap_for_token(
+				token, pkm_kunit_caap_policy_sid,
+				sizeof(pkm_kunit_caap_policy_sid), spec,
+				(u32)spec_len),
+			0);
+
+	spec_len = pkm_kunit_build_caap_spec(spec, NULL, 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_caap_for_token(
+				token, pkm_kunit_caap_policy_sid,
+				sizeof(pkm_kunit_caap_policy_sid), spec,
+				(u32)spec_len),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_caap_cache_len(), (size_t)1);
+
+	ret = pkm_kunit_run_caap_access_check(&granted);
+	KUNIT_EXPECT_EQ(test, ret, (long)PKM_KUNIT_CAAP_READ_GRANT);
+	KUNIT_EXPECT_EQ(test, granted, PKM_KUNIT_CAAP_READ_GRANT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_set_caap_internal(pkm_kunit_caap_policy_sid,
+						   sizeof(pkm_kunit_caap_policy_sid),
+						   NULL, 0),
+			0);
+}
+
 static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_probe_smoke),
 	KUNIT_CASE(pkm_kunit_scalar_denied_writebacks),
@@ -1421,6 +1573,11 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_caap_cache_replace_changes_future_decisions),
 	KUNIT_CASE(pkm_kunit_caap_cache_remove_uses_recovery_policy),
 	KUNIT_CASE(pkm_kunit_caap_cache_malformed_replace_keeps_old_policy),
+	KUNIT_CASE(pkm_kunit_set_caap_public_installs_and_marks_tcb_used),
+	KUNIT_CASE(pkm_kunit_set_caap_public_denies_without_tcb),
+	KUNIT_CASE(pkm_kunit_set_caap_public_checks_tcb_before_usercopy),
+	KUNIT_CASE(pkm_kunit_set_caap_public_rejects_sid_bounds_before_copy),
+	KUNIT_CASE(pkm_kunit_set_caap_public_malformed_keeps_old_policy),
 	{}
 };
 

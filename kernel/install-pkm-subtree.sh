@@ -48,8 +48,8 @@ insert_source_kconfig() {
 
 append_x86_64_syscall_once() {
 	local file=$1
-	local number='1000'
-	local name='kacs_open_self_token'
+	local number=$2
+	local name=$3
 	local line
 
 	if grep -Eq "^[[:space:]]*${number}[[:space:]]+common[[:space:]]+${name}[[:space:]]+sys_${name}\$" \
@@ -106,4 +106,7 @@ install -m 0644 "$src_root/pkm_makefile" "$pkm_dir/Makefile"
 
 append_line_once 'obj-$(CONFIG_SECURITY_PKM) += pkm/' "$kernel_root/security/Makefile"
 insert_source_kconfig "$kernel_root/security/Kconfig"
-append_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
+append_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1000 kacs_open_self_token
+append_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1025 kacs_set_caap

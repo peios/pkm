@@ -2,16 +2,25 @@
 /*
  * Slow-track PKM CAAP policy cache.
  *
- * This is intentionally an internal kernel-memory cache seam. Public
- * kacs_set_caap syscall registration and privilege gating remain deferred.
+ * Slice 27 exposes the bounded public kacs_set_caap syscall surface above the
+ * Slice 26 internal cache.
  */
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/mutex.h>
+#include <linux/slab.h>
+#include <linux/syscalls.h>
 #include <linux/types.h>
+#include <linux/uaccess.h>
 
 #include "caap_cache.h"
+#include "token_runtime.h"
+
+#define PKM_KACS_MIN_SID_LEN 8U
+#define PKM_KACS_MAX_SID_LEN 68U
+#define PKM_KACS_MAX_CAAP_SPEC_LEN (256U * 1024U)
+#define PKM_KACS_PRIVILEGE_SE_TCB (1ULL << 7)
 
 extern void *kacs_rust_caap_cache_create(void);
 extern void kacs_rust_caap_cache_destroy(void *cache);
@@ -22,6 +31,72 @@ extern size_t kacs_rust_caap_cache_len(const void *cache);
 
 static DEFINE_MUTEX(pkm_kacs_caap_mutex);
 static void *pkm_kacs_caap_cache;
+
+static int pkm_kacs_require_tcb(const void *token)
+{
+	if (!token)
+		return -EACCES;
+	if (!kacs_rust_token_has_enabled_privilege(token,
+						  PKM_KACS_PRIVILEGE_SE_TCB))
+		return -EACCES;
+	if (!kacs_rust_token_mark_privileges_used(token,
+						 PKM_KACS_PRIVILEGE_SE_TCB))
+		return -EACCES;
+
+	return 0;
+}
+
+static int pkm_kacs_copy_user_required_blob(const void __user *user_ptr,
+					    u32 len, u32 max_len, u8 **out)
+{
+	u8 *copy;
+
+	if (!out)
+		return -EINVAL;
+
+	*out = NULL;
+	if (!user_ptr || !len || len > max_len)
+		return -EINVAL;
+
+	copy = kmalloc(len, GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
+	if (copy_from_user(copy, user_ptr, len)) {
+		kfree(copy);
+		return -EFAULT;
+	}
+
+	*out = copy;
+	return 0;
+}
+
+static int pkm_kacs_copy_user_optional_spec(const void __user *user_ptr,
+					    u32 len, u8 **out, u32 *len_out)
+{
+	u8 *copy;
+
+	if (!out || !len_out)
+		return -EINVAL;
+
+	*out = NULL;
+	*len_out = 0;
+	if (!user_ptr || !len)
+		return 0;
+	if (len > PKM_KACS_MAX_CAAP_SPEC_LEN)
+		return -EINVAL;
+
+	copy = kmalloc(len, GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
+	if (copy_from_user(copy, user_ptr, len)) {
+		kfree(copy);
+		return -EFAULT;
+	}
+
+	*out = copy;
+	*len_out = len;
+	return 0;
+}
 
 int pkm_kacs_caap_cache_init(void)
 {
@@ -65,6 +140,83 @@ out:
 	mutex_unlock(&pkm_kacs_caap_mutex);
 	return ret;
 }
+
+static int pkm_kacs_set_caap_for_token(const void *token, const void *policy_sid,
+				       u32 policy_sid_len, const void *spec,
+				       u32 spec_len)
+{
+	int ret;
+
+	ret = pkm_kacs_require_tcb(token);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_set_caap_internal(policy_sid, policy_sid_len, spec,
+					  spec_len);
+}
+
+static long pkm_kacs_set_caap_user_for_token(
+	const void *token, const void __user *policy_sid, u32 policy_sid_len,
+	const void __user *spec, u32 spec_len)
+{
+	u8 *policy_sid_copy = NULL;
+	u8 *spec_copy = NULL;
+	u32 copied_spec_len = 0;
+	long ret;
+
+	ret = pkm_kacs_require_tcb(token);
+	if (ret)
+		return ret;
+	if (policy_sid_len < PKM_KACS_MIN_SID_LEN ||
+	    policy_sid_len > PKM_KACS_MAX_SID_LEN)
+		return -EINVAL;
+
+	ret = pkm_kacs_copy_user_required_blob(policy_sid, policy_sid_len,
+					       PKM_KACS_MAX_SID_LEN,
+					       &policy_sid_copy);
+	if (ret)
+		return ret;
+
+	ret = pkm_kacs_copy_user_optional_spec(spec, spec_len, &spec_copy,
+					       &copied_spec_len);
+	if (ret)
+		goto out;
+
+	ret = pkm_kacs_set_caap_internal(policy_sid_copy, policy_sid_len,
+					 spec_copy, copied_spec_len);
+
+out:
+	kfree(spec_copy);
+	kfree(policy_sid_copy);
+	return ret;
+}
+
+SYSCALL_DEFINE4(kacs_set_caap, const void __user *, policy_sid, u32,
+		policy_sid_len, const void __user *, spec, u32, spec_len)
+{
+	return pkm_kacs_set_caap_user_for_token(
+		pkm_kacs_current_effective_token_ptr(), policy_sid,
+		policy_sid_len, spec, spec_len);
+}
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+int pkm_kacs_kunit_set_caap_for_token(const void *token, const void *policy_sid,
+				      u32 policy_sid_len, const void *spec,
+				      u32 spec_len)
+{
+	return pkm_kacs_set_caap_for_token(token, policy_sid, policy_sid_len,
+					   spec, spec_len);
+}
+
+long pkm_kacs_kunit_set_caap_user_for_token(
+	const void *token, const void __user *policy_sid, u32 policy_sid_len,
+	const void __user *spec, u32 spec_len)
+{
+	return pkm_kacs_set_caap_user_for_token(token, policy_sid,
+						policy_sid_len, spec,
+						spec_len);
+}
+#endif
 
 int pkm_kacs_caap_cache_lock(const void **cache)
 {

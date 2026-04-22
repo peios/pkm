@@ -36,6 +36,7 @@ use core::ptr::null;
 use core::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
 
 const SYSTEM_PRIVILEGES_ALL: u64 = 0xC000_000F_FFFF_FFFC;
+const SE_TCB_PRIVILEGE: u64 = 1 << 7;
 const LOGON_TYPE_SERVICE: u32 = 5;
 const TOKEN_TYPE_PRIMARY_ABI: u32 = 1;
 const IMPERSONATION_LEVEL_ANONYMOUS_ABI: u32 = 0;
@@ -193,7 +194,12 @@ struct PkmKacsBootToken {
 }
 
 impl PkmKacsBootToken {
-    fn create_system_like(own_sd_bytes: &[u8]) -> Option<*const c_void> {
+    fn create_system_like(
+        own_sd_bytes: &[u8],
+        privileges_present: u64,
+        privileges_enabled: u64,
+        privileges_enabled_by_default: u64,
+    ) -> Option<*const c_void> {
         let user_sid = Sid::parse(SYSTEM_SID_BYTES).ok()?;
         let logon_sid = Sid::parse(LOGON_SID_BYTES).ok()?;
         let administrators = Sid::parse(ADMINISTRATORS_SID_BYTES).ok()?;
@@ -258,9 +264,9 @@ impl PkmKacsBootToken {
             logon_sid,
             groups,
             group_views,
-            privileges_present: SYSTEM_PRIVILEGES_ALL,
-            privileges_enabled: SYSTEM_PRIVILEGES_ALL,
-            privileges_enabled_by_default: SYSTEM_PRIVILEGES_ALL,
+            privileges_present,
+            privileges_enabled,
+            privileges_enabled_by_default,
             privileges_used: AtomicU64::new(0),
             integrity_level: IntegrityLevel::System,
             mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP
@@ -280,11 +286,32 @@ impl PkmKacsBootToken {
     }
 
     fn create_system() -> Option<*const c_void> {
-        Self::create_system_like(SYSTEM_TOKEN_OWN_SD_BYTES)
+        Self::create_system_like(
+            SYSTEM_TOKEN_OWN_SD_BYTES,
+            SYSTEM_PRIVILEGES_ALL,
+            SYSTEM_PRIVILEGES_ALL,
+            SYSTEM_PRIVILEGES_ALL,
+        )
     }
 
     fn create_query_only_system() -> Option<*const c_void> {
-        Self::create_system_like(QUERY_ONLY_TOKEN_OWN_SD_BYTES)
+        Self::create_system_like(
+            QUERY_ONLY_TOKEN_OWN_SD_BYTES,
+            SYSTEM_PRIVILEGES_ALL,
+            SYSTEM_PRIVILEGES_ALL,
+            SYSTEM_PRIVILEGES_ALL,
+        )
+    }
+
+    fn create_without_tcb() -> Option<*const c_void> {
+        let privileges = SYSTEM_PRIVILEGES_ALL & !SE_TCB_PRIVILEGE;
+
+        Self::create_system_like(
+            SYSTEM_TOKEN_OWN_SD_BYTES,
+            privileges,
+            privileges,
+            privileges,
+        )
     }
 
     unsafe fn from_ptr<'a>(ptr: *const c_void) -> Option<&'a Self> {
@@ -446,6 +473,18 @@ pub(crate) fn mark_token_privileges_used(token_ptr: *const c_void, used_mask: u6
     true
 }
 
+fn token_has_enabled_privilege(token_ptr: *const c_void, privilege: u64) -> bool {
+    if privilege == 0 {
+        return false;
+    }
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return false;
+    };
+    let privileges = token.privileges_snapshot();
+
+    (privileges.present & privilege) == privilege && (privileges.enabled & privilege) == privilege
+}
+
 fn token_open_check_errno(
     subject_token: *const c_void,
     target_token: *const c_void,
@@ -558,6 +597,25 @@ pub extern "C" fn kacs_rust_token_drop(token: *const c_void) {
 }
 
 #[no_mangle]
+/// Returns whether the token has all requested standalone privilege bits
+/// present and enabled.
+pub extern "C" fn kacs_rust_token_has_enabled_privilege(
+    token: *const c_void,
+    privilege: u64,
+) -> bool {
+    token_has_enabled_privilege(token, privilege)
+}
+
+#[no_mangle]
+/// Marks standalone privilege bits used on a live token.
+pub extern "C" fn kacs_rust_token_mark_privileges_used(
+    token: *const c_void,
+    used_mask: u64,
+) -> bool {
+    mark_token_privileges_used(token, used_mask)
+}
+
+#[no_mangle]
 /// Runs the bounded token-own-SD AccessCheck needed for Slice 22 token opens.
 pub extern "C" fn kacs_rust_token_open_check(
     subject_token: *const c_void,
@@ -622,4 +680,10 @@ pub extern "C" fn kacs_rust_kunit_boot_snapshot(out: *mut PkmKacsBootSnapshot) -
 /// non-escalating adjust rights to its user SID.
 pub extern "C" fn kacs_rust_kunit_create_query_only_token() -> *const c_void {
     PkmKacsBootToken::create_query_only_system().unwrap_or(null())
+}
+
+#[no_mangle]
+/// Creates a KUnit-only SYSTEM-like token with `SeTcbPrivilege` absent.
+pub extern "C" fn kacs_rust_kunit_create_without_tcb_token() -> *const c_void {
+    PkmKacsBootToken::create_without_tcb().unwrap_or(null())
 }

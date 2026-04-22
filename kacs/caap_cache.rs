@@ -108,7 +108,10 @@ pub(crate) fn with_caap_policies<T>(
     let Some(cache) = (unsafe { PkmKacsCaapCache::from_ptr(cache) }) else {
         return Err(EINVAL as c_long);
     };
-    let entries = cache.cache.borrowed_entries().map_err(map_kacs_error_long)?;
+    let entries = cache
+        .cache
+        .borrowed_entries()
+        .map_err(map_kacs_error_long)?;
     f(entries.as_slice())
 }
 
