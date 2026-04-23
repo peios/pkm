@@ -39,11 +39,19 @@ const SYSTEM_PRIVILEGES_ALL: u64 = 0xC000_000F_FFFF_FFFC;
 const SE_TCB_PRIVILEGE: u64 = 1 << 7;
 const LOGON_TYPE_SERVICE: u32 = 5;
 const TOKEN_TYPE_PRIMARY_ABI: u32 = 1;
+const TOKEN_TYPE_IMPERSONATION_ABI: u32 = 2;
 const IMPERSONATION_LEVEL_ANONYMOUS_ABI: u32 = 0;
+const IMPERSONATION_LEVEL_IDENTIFICATION_ABI: u32 = 1;
+const IMPERSONATION_LEVEL_IMPERSONATION_ABI: u32 = 2;
+const IMPERSONATION_LEVEL_DELEGATION_ABI: u32 = 3;
+const TOKEN_ELEVATION_DEFAULT_ABI: u32 = 1;
 const MAX_TOKEN_SD_BYTES: usize = 104;
 
 const EACCES: i32 = 13;
+const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
+const ERANGE: i32 = 34;
+const EOPNOTSUPP: i32 = 95;
 
 const SE_GROUP_MANDATORY: u32 = 0x0000_0001;
 const SE_GROUP_ENABLED_BY_DEFAULT: u32 = 0x0000_0002;
@@ -65,6 +73,7 @@ const AUTHENTICATED_USERS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0,
 const LOCAL_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0];
 const LOGON_SID_BYTES: &[u8] = &[1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const AUTH_PACKAGE_NEGOTIATE: &[u8] = b"Negotiate";
+const TOKEN_SOURCE_PEI_OS_KRN: &[u8; 8] = b"PeiosKrn";
 const SYSTEM_TOKEN_OWN_SD_BYTES: &[u8] = &[
     1, 0, 4, 128, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0,
     0, 0, 2, 0, 72, 0, 3, 0, 0, 0, 0, 0, 20, 0, 248, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
@@ -87,6 +96,28 @@ const TOKEN_GENERIC_MAPPING: GenericMapping = GenericMapping {
     execute: KACS_TOKEN_IMPERSONATE,
     all: KACS_TOKEN_ALL_ACCESS,
 };
+
+const TOKEN_CLASS_USER: u32 = 0x01;
+const TOKEN_CLASS_GROUPS: u32 = 0x02;
+const TOKEN_CLASS_PRIVILEGES: u32 = 0x03;
+const TOKEN_CLASS_TYPE: u32 = 0x04;
+const TOKEN_CLASS_INTEGRITY_LEVEL: u32 = 0x05;
+const TOKEN_CLASS_OWNER: u32 = 0x06;
+const TOKEN_CLASS_PRIMARY_GROUP: u32 = 0x07;
+const TOKEN_CLASS_SESSION_ID: u32 = 0x08;
+const TOKEN_CLASS_RESTRICTED_SIDS: u32 = 0x09;
+const TOKEN_CLASS_SOURCE: u32 = 0x0A;
+const TOKEN_CLASS_STATISTICS: u32 = 0x0B;
+const TOKEN_CLASS_ORIGIN: u32 = 0x0C;
+const TOKEN_CLASS_ELEVATION_TYPE: u32 = 0x0D;
+const TOKEN_CLASS_DEVICE_GROUPS: u32 = 0x0E;
+const TOKEN_CLASS_APPCONTAINER_SID: u32 = 0x0F;
+const TOKEN_CLASS_CAPABILITIES: u32 = 0x10;
+const TOKEN_CLASS_MANDATORY_POLICY: u32 = 0x11;
+const TOKEN_CLASS_LOGON_TYPE: u32 = 0x12;
+const TOKEN_CLASS_LOGON_SID: u32 = 0x13;
+const TOKEN_CLASS_DEFAULT_DACL: u32 = 0x14;
+const TOKEN_CLASS_IMPERSONATION_LEVEL: u32 = 0x15;
 
 extern "C" {
     fn pkm_kacs_boot_system_token_ptr() -> *const c_void;
@@ -191,6 +222,118 @@ struct PkmKacsBootToken {
     projected_gid: u32,
     own_sd_len: usize,
     own_sd: [u8; MAX_TOKEN_SD_BYTES],
+}
+
+struct QueryWriter {
+    out: *mut u8,
+    out_len: usize,
+    pos: usize,
+}
+
+impl QueryWriter {
+    fn new(out: *mut u8, out_len: usize) -> Self {
+        Self {
+            out,
+            out_len,
+            pos: 0,
+        }
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) -> bool {
+        let Some(end) = self.pos.checked_add(bytes.len()) else {
+            return false;
+        };
+        if end > self.out_len {
+            return false;
+        }
+        if !bytes.is_empty() {
+            if self.out.is_null() {
+                return false;
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.out.add(self.pos), bytes.len())
+            };
+        }
+        self.pos = end;
+        true
+    }
+
+    fn write_u32(&mut self, value: u32) -> bool {
+        self.write_bytes(&value.to_le_bytes())
+    }
+
+    fn write_u64(&mut self, value: u64) -> bool {
+        self.write_bytes(&value.to_le_bytes())
+    }
+
+    fn written(&self) -> usize {
+        self.pos
+    }
+}
+
+fn sid_and_attributes_query_len(sids: &[SidAndAttributes<'_>]) -> Option<usize> {
+    let mut len = 4usize;
+
+    for entry in sids {
+        let sid_len = entry.sid.as_bytes().len();
+
+        if sid_len > u32::MAX as usize {
+            return None;
+        }
+        len = len.checked_add(4)?;
+        len = len.checked_add(sid_len)?;
+        len = len.checked_add(4)?;
+    }
+
+    Some(len)
+}
+
+fn write_sid_and_attributes_query(writer: &mut QueryWriter, sids: &[SidAndAttributes<'_>]) -> bool {
+    if sids.len() > u32::MAX as usize {
+        return false;
+    }
+    if !writer.write_u32(sids.len() as u32) {
+        return false;
+    }
+
+    for entry in sids {
+        let sid = entry.sid.as_bytes();
+
+        if sid.len() > u32::MAX as usize {
+            return false;
+        }
+        if !writer.write_u32(sid.len() as u32) {
+            return false;
+        }
+        if !writer.write_bytes(sid) {
+            return false;
+        }
+        if !writer.write_u32(entry.attributes) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn token_type_abi(token_type: TokenType) -> u32 {
+    match token_type {
+        TokenType::Primary => TOKEN_TYPE_PRIMARY_ABI,
+        TokenType::Impersonation => TOKEN_TYPE_IMPERSONATION_ABI,
+    }
+}
+
+fn impersonation_level_abi(level: ImpersonationLevel) -> u32 {
+    match level {
+        ImpersonationLevel::Anonymous => IMPERSONATION_LEVEL_ANONYMOUS_ABI,
+        ImpersonationLevel::Identification => IMPERSONATION_LEVEL_IDENTIFICATION_ABI,
+        ImpersonationLevel::Impersonation => IMPERSONATION_LEVEL_IMPERSONATION_ABI,
+        ImpersonationLevel::Delegation => IMPERSONATION_LEVEL_DELEGATION_ABI,
+    }
+}
+
+fn write_integrity_sid(writer: &mut QueryWriter, integrity_level: IntegrityLevel) -> bool {
+    writer.write_bytes(&[1, 1, 0, 0, 0, 0, 0, 16]) && writer.write_u32(integrity_level as u32)
 }
 
 impl PkmKacsBootToken {
@@ -436,6 +579,76 @@ impl PkmKacsBootToken {
         }
     }
 
+    fn query_required_len(&self, token_class: u32) -> Result<usize, i32> {
+        match token_class {
+            TOKEN_CLASS_USER => Ok(self.user_sid.as_bytes().len()),
+            TOKEN_CLASS_GROUPS => sid_and_attributes_query_len(&self.groups).ok_or(-EINVAL),
+            TOKEN_CLASS_PRIVILEGES => Ok(32),
+            TOKEN_CLASS_TYPE => Ok(4),
+            TOKEN_CLASS_INTEGRITY_LEVEL => Ok(12),
+            TOKEN_CLASS_OWNER
+            | TOKEN_CLASS_PRIMARY_GROUP
+            | TOKEN_CLASS_STATISTICS
+            | TOKEN_CLASS_DEFAULT_DACL => Err(-EOPNOTSUPP),
+            TOKEN_CLASS_SESSION_ID => Ok(4),
+            TOKEN_CLASS_RESTRICTED_SIDS => Ok(4),
+            TOKEN_CLASS_SOURCE => Ok(16),
+            TOKEN_CLASS_ORIGIN => Ok(8),
+            TOKEN_CLASS_ELEVATION_TYPE => Ok(4),
+            TOKEN_CLASS_DEVICE_GROUPS => Ok(4),
+            TOKEN_CLASS_APPCONTAINER_SID => Ok(0),
+            TOKEN_CLASS_CAPABILITIES => Ok(4),
+            TOKEN_CLASS_MANDATORY_POLICY => Ok(4),
+            TOKEN_CLASS_LOGON_TYPE => Ok(4),
+            TOKEN_CLASS_LOGON_SID => Ok(self.logon_sid.as_bytes().len()),
+            TOKEN_CLASS_IMPERSONATION_LEVEL => Ok(4),
+            0 => Err(-EINVAL),
+            value if value > TOKEN_CLASS_IMPERSONATION_LEVEL => Err(-EINVAL),
+            _ => Err(-EINVAL),
+        }
+    }
+
+    fn write_query(&self, token_class: u32, writer: &mut QueryWriter) -> Result<(), i32> {
+        match token_class {
+            TOKEN_CLASS_USER => writer.write_bytes(self.user_sid.as_bytes()),
+            TOKEN_CLASS_GROUPS => write_sid_and_attributes_query(writer, &self.groups),
+            TOKEN_CLASS_PRIVILEGES => {
+                let privileges = self.privileges_snapshot();
+
+                writer.write_u64(privileges.present)
+                    && writer.write_u64(privileges.enabled)
+                    && writer.write_u64(privileges.enabled_by_default)
+                    && writer.write_u64(privileges.used)
+            }
+            TOKEN_CLASS_TYPE => writer.write_u32(token_type_abi(self.token_type)),
+            TOKEN_CLASS_INTEGRITY_LEVEL => write_integrity_sid(writer, self.integrity_level),
+            TOKEN_CLASS_SESSION_ID => writer.write_u32(self.interactive_session_id),
+            TOKEN_CLASS_RESTRICTED_SIDS => writer.write_u32(0),
+            TOKEN_CLASS_SOURCE => {
+                writer.write_bytes(TOKEN_SOURCE_PEI_OS_KRN) && writer.write_u64(0)
+            }
+            TOKEN_CLASS_ORIGIN => writer.write_u64(0),
+            TOKEN_CLASS_ELEVATION_TYPE => writer.write_u32(TOKEN_ELEVATION_DEFAULT_ABI),
+            TOKEN_CLASS_DEVICE_GROUPS => writer.write_u32(0),
+            TOKEN_CLASS_APPCONTAINER_SID => true,
+            TOKEN_CLASS_CAPABILITIES => writer.write_u32(0),
+            TOKEN_CLASS_MANDATORY_POLICY => writer.write_u32(self.mandatory_policy),
+            TOKEN_CLASS_LOGON_TYPE => writer.write_u32(self.session.logon_type),
+            TOKEN_CLASS_LOGON_SID => writer.write_bytes(self.logon_sid.as_bytes()),
+            TOKEN_CLASS_IMPERSONATION_LEVEL => {
+                writer.write_u32(impersonation_level_abi(self.impersonation_level))
+            }
+            _ => {
+                return Err(self
+                    .query_required_len(token_class)
+                    .err()
+                    .unwrap_or(-EINVAL))
+            }
+        }
+        .then_some(())
+        .ok_or(-ERANGE)
+    }
+
     fn own_sd(&self) -> Option<SecurityDescriptor<'_>> {
         SecurityDescriptor::parse(&self.own_sd[..self.own_sd_len]).ok()
     }
@@ -631,6 +844,47 @@ pub extern "C" fn kacs_rust_token_open_check(
     if let Some(granted_out) = unsafe { granted_out.as_mut() } {
         *granted_out = result as u32;
     }
+    0
+}
+
+#[no_mangle]
+/// Serializes one supported `KACS_IOC_QUERY` token information class.
+///
+/// When `out` is null or `out_len` is zero, only `required_out` is populated.
+/// Valid query classes whose backing token fields are not yet represented by
+/// the slow-track live token object fail closed with `-EOPNOTSUPP`.
+pub extern "C" fn kacs_rust_token_query(
+    token: *const c_void,
+    token_class: u32,
+    out: *mut u8,
+    out_len: usize,
+    required_out: *mut usize,
+) -> i32 {
+    let Some(required_out) = (unsafe { required_out.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let required = match token.query_required_len(token_class) {
+        Ok(required) => required,
+        Err(err) => return err,
+    };
+
+    *required_out = required;
+    if out.is_null() || out_len == 0 {
+        return 0;
+    }
+    if out_len < required {
+        return -ERANGE;
+    }
+
+    let mut writer = QueryWriter::new(out, out_len);
+    if let Err(err) = token.write_query(token_class, &mut writer) {
+        return err;
+    }
+
+    *required_out = writer.written();
     0
 }
 

@@ -2,6 +2,7 @@
 #ifndef _SECURITY_PKM_KACS_TOKEN_FD_H
 #define _SECURITY_PKM_KACS_TOKEN_FD_H
 
+#include <linux/ioctl.h>
 #include <linux/types.h>
 
 /* Syscall 1000 flags */
@@ -31,6 +32,39 @@
 #define KACS_TOKEN_ADJUST_SESSIONID 0x0100U
 #define KACS_TOKEN_ALL_ACCESS 0x000F01FFU
 
+/* Token ioctl ABI from Appendix A */
+#define KACS_IOC_MAGIC 0x4BU
+
+struct kacs_query_args {
+	u32 token_class;
+	u32 buf_len;
+	u64 buf_ptr;
+};
+
+#define KACS_IOC_QUERY _IOWR(KACS_IOC_MAGIC, 0, struct kacs_query_args)
+
+#define TOKEN_CLASS_USER 0x01U
+#define TOKEN_CLASS_GROUPS 0x02U
+#define TOKEN_CLASS_PRIVILEGES 0x03U
+#define TOKEN_CLASS_TYPE 0x04U
+#define TOKEN_CLASS_INTEGRITY_LEVEL 0x05U
+#define TOKEN_CLASS_OWNER 0x06U
+#define TOKEN_CLASS_PRIMARY_GROUP 0x07U
+#define TOKEN_CLASS_SESSION_ID 0x08U
+#define TOKEN_CLASS_RESTRICTED_SIDS 0x09U
+#define TOKEN_CLASS_SOURCE 0x0AU
+#define TOKEN_CLASS_STATISTICS 0x0BU
+#define TOKEN_CLASS_ORIGIN 0x0CU
+#define TOKEN_CLASS_ELEVATION_TYPE 0x0DU
+#define TOKEN_CLASS_DEVICE_GROUPS 0x0EU
+#define TOKEN_CLASS_APPCONTAINER_SID 0x0FU
+#define TOKEN_CLASS_CAPABILITIES 0x10U
+#define TOKEN_CLASS_MANDATORY_POLICY 0x11U
+#define TOKEN_CLASS_LOGON_TYPE 0x12U
+#define TOKEN_CLASS_LOGON_SID 0x13U
+#define TOKEN_CLASS_DEFAULT_DACL 0x14U
+#define TOKEN_CLASS_IMPERSONATION_LEVEL 0x15U
+
 struct pkm_kacs_token_fd_view {
 	const void *token;
 	u32 access_mask;
@@ -44,5 +78,7 @@ int pkm_kacs_token_fd_clone_token(int fd, const void **token_out,
 				  u32 *access_mask_out);
 int pkm_kacs_kunit_token_fd_snapshot(int fd,
 				     struct pkm_kacs_token_fd_view *out);
+long pkm_kacs_kunit_token_fd_query(int fd, struct kacs_query_args *args,
+				   void *out_buf);
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_FD_H */

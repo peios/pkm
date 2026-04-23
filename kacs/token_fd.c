@@ -2,9 +2,8 @@
 /*
  * Slow-track PKM token-fd and self-open surface.
  *
- * Slice 22 adds only the first token handle object and the public
- * kacs_open_self_token syscall. Wider token-open syscalls and token ioctls
- * remain deliberately out of scope.
+ * Slice 30 adds the first read-only token ioctl on top of the earlier
+ * token-fd handle object and kacs_open_self_token syscall.
  */
 
 #include <linux/anon_inodes.h>
@@ -14,8 +13,10 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
+#include <linux/overflow.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
+#include <linux/uaccess.h>
 
 #include "token_fd.h"
 #include "token_runtime.h"
@@ -31,6 +32,22 @@ struct pkm_kacs_token_file {
 	u32 access_mask;
 };
 
+static bool pkm_kacs_ranges_overlap(u64 lhs_start, size_t lhs_len,
+				    u64 rhs_start, size_t rhs_len)
+{
+	u64 lhs_end;
+	u64 rhs_end;
+
+	if (!lhs_len || !rhs_len)
+		return false;
+	if (check_add_overflow(lhs_start, (u64)lhs_len, &lhs_end))
+		return true;
+	if (check_add_overflow(rhs_start, (u64)rhs_len, &rhs_end))
+		return true;
+
+	return lhs_start < rhs_end && rhs_start < lhs_end;
+}
+
 static int pkm_kacs_token_release(struct inode *inode, struct file *file)
 {
 	struct pkm_kacs_token_file *tf = file->private_data;
@@ -44,7 +61,150 @@ static int pkm_kacs_token_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static long pkm_kacs_token_query_prepare(struct pkm_kacs_token_file *tf,
+					 struct kacs_query_args *args,
+					 size_t *required_out,
+					 bool *write_payload_out)
+{
+	size_t required = 0;
+	u32 input_len;
+	int ret;
+
+	if (!tf || !tf->token || !args || !required_out || !write_payload_out)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_QUERY) != KACS_TOKEN_QUERY)
+		return -EACCES;
+
+	input_len = args->buf_len;
+	*required_out = 0;
+	*write_payload_out = false;
+
+	ret = kacs_rust_token_query(tf->token, args->token_class, NULL, 0,
+				    &required);
+	if (ret)
+		return ret;
+	if (required > (size_t)~0U)
+		return -EOVERFLOW;
+
+	args->buf_len = (u32)required;
+	*required_out = required;
+
+	if (!args->buf_ptr || !input_len)
+		return 0;
+	if ((size_t)input_len < required)
+		return -ERANGE;
+
+	*write_payload_out = required > 0;
+	return 0;
+}
+
+static long pkm_kacs_token_query_fill(struct pkm_kacs_token_file *tf,
+				      const struct kacs_query_args *args,
+				      void *out_buf, size_t required)
+{
+	size_t written = 0;
+	int ret;
+
+	if (!required)
+		return 0;
+	if (!out_buf)
+		return -EFAULT;
+
+	ret = kacs_rust_token_query(tf->token, args->token_class, out_buf,
+				    required, &written);
+	if (ret)
+		return ret;
+	if (written != required)
+		return -EINVAL;
+
+	return 0;
+}
+
+static long pkm_kacs_token_query_core(struct pkm_kacs_token_file *tf,
+				      struct kacs_query_args *args,
+				      void *out_buf)
+{
+	size_t required;
+	bool write_payload;
+	long ret;
+
+	ret = pkm_kacs_token_query_prepare(tf, args, &required, &write_payload);
+	if (ret)
+		return ret;
+	if (!write_payload)
+		return 0;
+
+	return pkm_kacs_token_query_fill(tf, args, out_buf, required);
+}
+
+static long pkm_kacs_token_query_user(struct pkm_kacs_token_file *tf,
+				      struct kacs_query_args __user *uargs)
+{
+	struct kacs_query_args args;
+	size_t required;
+	bool write_payload;
+	u8 *payload = NULL;
+	long ret;
+
+	if (!tf || !tf->token)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_QUERY) != KACS_TOKEN_QUERY)
+		return -EACCES;
+	if (!uargs)
+		return -EFAULT;
+	if (copy_from_user(&args, uargs, sizeof(args)))
+		return -EFAULT;
+
+	ret = pkm_kacs_token_query_prepare(tf, &args, &required, &write_payload);
+	if (!ret && write_payload) {
+		if (pkm_kacs_ranges_overlap((u64)(unsigned long)uargs,
+					    sizeof(*uargs), args.buf_ptr,
+					    required)) {
+			ret = -EINVAL;
+			goto out;
+		}
+
+		payload = kmalloc(required, GFP_KERNEL);
+		if (!payload) {
+			ret = -ENOMEM;
+		} else {
+			ret = pkm_kacs_token_query_fill(tf, &args, payload,
+							required);
+			if (!ret &&
+			    copy_to_user((void __user *)(unsigned long)args.buf_ptr,
+					 payload, required))
+				ret = -EFAULT;
+		}
+	}
+
+	if (!ret || ret == -ERANGE || ret == -ENOMEM || ret == -EFAULT) {
+		if (copy_to_user(uargs, &args, sizeof(args)))
+			ret = -EFAULT;
+	}
+out:
+	kfree(payload);
+	return ret;
+}
+
+static long pkm_kacs_token_ioctl(struct file *file, unsigned int cmd,
+				 unsigned long arg)
+{
+	struct pkm_kacs_token_file *tf = file->private_data;
+
+	if (!tf)
+		return -EINVAL;
+
+	switch (cmd) {
+	case KACS_IOC_QUERY:
+		return pkm_kacs_token_query_user(
+			tf, (struct kacs_query_args __user *)arg);
+	default:
+		return -ENOTTY;
+	}
+}
+
 static const struct file_operations pkm_kacs_token_fops = {
+	.unlocked_ioctl = pkm_kacs_token_ioctl,
 	.release = pkm_kacs_token_release,
 };
 
@@ -201,4 +361,28 @@ int pkm_kacs_kunit_token_fd_snapshot(int fd, struct pkm_kacs_token_fd_view *out)
 	out->access_mask = tf->access_mask;
 	fdput(f);
 	return 0;
+}
+
+long pkm_kacs_kunit_token_fd_query(int fd, struct kacs_query_args *args,
+				   void *out_buf)
+{
+	struct fd f;
+	struct pkm_kacs_token_file *tf;
+	long ret;
+
+	if (!args)
+		return -EINVAL;
+
+	f = fdget(fd);
+	if (!fd_file(f))
+		return -EBADF;
+	if (fd_file(f)->f_op != &pkm_kacs_token_fops) {
+		fdput(f);
+		return -EINVAL;
+	}
+
+	tf = fd_file(f)->private_data;
+	ret = pkm_kacs_token_query_core(tf, args, out_buf);
+	fdput(f);
+	return ret;
 }

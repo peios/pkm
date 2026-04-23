@@ -65,5 +65,7 @@ bool kacs_rust_kunit_token_snapshot(const void *token,
 bool kacs_rust_kunit_boot_snapshot(struct pkm_kacs_boot_snapshot *out);
 const void *kacs_rust_kunit_create_query_only_token(void);
 const void *kacs_rust_kunit_create_without_tcb_token(void);
+int kacs_rust_token_query(const void *token, u32 token_class, u8 *out,
+			  size_t out_len, size_t *required_out);
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_RUNTIME_H */
