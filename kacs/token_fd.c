@@ -2,7 +2,7 @@
 /*
  * Slow-track PKM token-fd and self-open surface.
  *
- * Slices 30 through 33 add token query and the first narrow mutation ioctl on
+ * Slices 30 through 34 add token query and the first narrow mutation ioctls on
  * top of the earlier token-fd handle object and kacs_open_self_token syscall.
  */
 
@@ -27,6 +27,8 @@
 	 KACS_ACCESS_GENERIC_WRITE | KACS_ACCESS_GENERIC_EXECUTE | \
 	 KACS_ACCESS_GENERIC_ALL)
 #define PKM_KACS_PRIVILEGE_SE_TCB (1ULL << 7)
+#define PKM_KACS_DEFAULT_INDEX_NO_CHANGE 0xFFFFFFFFU
+#define PKM_KACS_MAX_DEFAULT_DACL_BYTES 65536U
 
 struct pkm_kacs_token_file {
 	const void *token;
@@ -185,6 +187,38 @@ static long pkm_kacs_token_adjust_session_after_gate(
 	return kacs_rust_token_adjust_session_id(tf->token, session_id);
 }
 
+static long pkm_kacs_token_adjust_default_core(
+	struct pkm_kacs_token_file *tf,
+	const struct kacs_adjust_default_args *args,
+	const void *dacl_bytes)
+{
+	u32 owner_index;
+	u32 group_index;
+	u32 change_dacl;
+
+	if (!tf || !tf->token || !args)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_ADJUST_DEFAULT) !=
+	    KACS_TOKEN_ADJUST_DEFAULT)
+		return -EACCES;
+	if (!args->dacl_ptr && args->dacl_len)
+		return -EINVAL;
+	if (args->dacl_len > PKM_KACS_MAX_DEFAULT_DACL_BYTES)
+		return -EINVAL;
+	if (args->dacl_ptr && args->dacl_len && !dacl_bytes)
+		return -EINVAL;
+
+	owner_index = args->owner_index == 0xFFFFU ?
+		PKM_KACS_DEFAULT_INDEX_NO_CHANGE : (u32)args->owner_index;
+	group_index = args->group_index == 0xFFFFU ?
+		PKM_KACS_DEFAULT_INDEX_NO_CHANGE : (u32)args->group_index;
+	change_dacl = args->dacl_ptr ? 1U : 0U;
+
+	return kacs_rust_token_adjust_default(tf->token, owner_index,
+					      group_index, dacl_bytes,
+					      args->dacl_len, change_dacl);
+}
+
 static long pkm_kacs_token_query_user(struct pkm_kacs_token_file *tf,
 				      struct kacs_query_args __user *uargs)
 {
@@ -256,6 +290,45 @@ static long pkm_kacs_token_adjust_session_user(struct pkm_kacs_token_file *tf,
 	return pkm_kacs_token_adjust_session_after_gate(tf, session_id);
 }
 
+static long pkm_kacs_token_adjust_default_user(
+	struct pkm_kacs_token_file *tf,
+	struct kacs_adjust_default_args __user *uargs)
+{
+	struct kacs_adjust_default_args args;
+	void *dacl = NULL;
+	long ret;
+
+	if (!tf || !tf->token)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_ADJUST_DEFAULT) !=
+	    KACS_TOKEN_ADJUST_DEFAULT)
+		return -EACCES;
+	if (!uargs)
+		return -EFAULT;
+	if (copy_from_user(&args, uargs, sizeof(args)))
+		return -EFAULT;
+	if (!args.dacl_ptr && args.dacl_len)
+		return -EINVAL;
+	if (args.dacl_len > PKM_KACS_MAX_DEFAULT_DACL_BYTES)
+		return -EINVAL;
+
+	if (args.dacl_ptr && args.dacl_len) {
+		dacl = kmalloc(args.dacl_len, GFP_KERNEL);
+		if (!dacl)
+			return -ENOMEM;
+		if (copy_from_user(dacl,
+				   (void __user *)(unsigned long)args.dacl_ptr,
+				   args.dacl_len)) {
+			kfree(dacl);
+			return -EFAULT;
+		}
+	}
+
+	ret = pkm_kacs_token_adjust_default_core(tf, &args, dacl);
+	kfree(dacl);
+	return ret;
+}
+
 static long pkm_kacs_token_ioctl(struct file *file, unsigned int cmd,
 				 unsigned long arg)
 {
@@ -268,6 +341,9 @@ static long pkm_kacs_token_ioctl(struct file *file, unsigned int cmd,
 	case KACS_IOC_QUERY:
 		return pkm_kacs_token_query_user(
 			tf, (struct kacs_query_args __user *)arg);
+	case KACS_IOC_ADJUST_DEFAULT:
+		return pkm_kacs_token_adjust_default_user(
+			tf, (struct kacs_adjust_default_args __user *)arg);
 	case KACS_IOC_ADJUST_SESSIONID:
 		return pkm_kacs_token_adjust_session_user(
 			tf, (u32 __user *)arg);
@@ -456,6 +532,32 @@ long pkm_kacs_kunit_token_fd_query(int fd, struct kacs_query_args *args,
 
 	tf = fd_file(f)->private_data;
 	ret = pkm_kacs_token_query_core(tf, args, out_buf);
+	fdput(f);
+	return ret;
+}
+
+long pkm_kacs_kunit_token_fd_adjust_default(
+	int fd,
+	const struct kacs_adjust_default_args *args,
+	const void *dacl_bytes)
+{
+	struct fd f;
+	struct pkm_kacs_token_file *tf;
+	long ret;
+
+	if (!args)
+		return -EINVAL;
+
+	f = fdget(fd);
+	if (!fd_file(f))
+		return -EBADF;
+	if (fd_file(f)->f_op != &pkm_kacs_token_fops) {
+		fdput(f);
+		return -EINVAL;
+	}
+
+	tf = fd_file(f)->private_data;
+	ret = pkm_kacs_token_adjust_default_core(tf, args, dacl_bytes);
 	fdput(f);
 	return ret;
 }

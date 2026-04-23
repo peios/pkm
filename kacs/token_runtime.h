@@ -74,5 +74,8 @@ const void *kacs_rust_kunit_create_without_tcb_token(void);
 int kacs_rust_token_query(const void *token, u32 token_class, u8 *out,
 			  size_t out_len, size_t *required_out);
 int kacs_rust_token_adjust_session_id(const void *token, u32 session_id);
+int kacs_rust_token_adjust_default(const void *token, u32 owner_index,
+				   u32 group_index, const u8 *dacl,
+				   size_t dacl_len, u32 change_dacl);
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_RUNTIME_H */

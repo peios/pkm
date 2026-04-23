@@ -10,6 +10,7 @@
 //! - bounded token-own-SD material for the first self-open token-fd slice
 //! - fixed boot-token default-object fields for the query ioctl surface
 //! - bounded interactive-session mutation for `KACS_IOC_ADJUST_SESSIONID`
+//! - bounded default-field mutation for `KACS_IOC_ADJUST_DEFAULT`
 //! - a small KUnit snapshot seam for bootstrap verification
 //!
 //! Broader mutable token state remains deferred to later token-handle slices.
@@ -19,6 +20,7 @@
 use crate::access_check::access_check;
 use crate::access_check_abi::AccessCheckAbiResolved;
 use crate::access_mask::{GenericMapping, READ_CONTROL, WRITE_DAC};
+use crate::acl::Acl;
 use crate::condition::ConditionalContext;
 use crate::error::KacsError;
 use crate::mic::{
@@ -33,8 +35,10 @@ use crate::token::{
     SidAndAttributes, TokenType, TokenView,
 };
 use core::ffi::c_void;
-use core::ptr::null;
-use core::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::ptr::{copy_nonoverlapping, null, null_mut};
+use core::sync::atomic::{
+    fence, AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 
 const SYSTEM_PRIVILEGES_ALL: u64 = 0xC000_000F_FFFF_FFFC;
 const SE_TCB_PRIVILEGE: u64 = 1 << 7;
@@ -47,6 +51,8 @@ const IMPERSONATION_LEVEL_IMPERSONATION_ABI: u32 = 2;
 const IMPERSONATION_LEVEL_DELEGATION_ABI: u32 = 3;
 const TOKEN_ELEVATION_DEFAULT_ABI: u32 = 1;
 const MAX_TOKEN_SD_BYTES: usize = 104;
+const MAX_DEFAULT_DACL_BYTES: usize = 65_536;
+const TOKEN_INDEX_NO_CHANGE: u32 = u32::MAX;
 
 const EACCES: i32 = 13;
 const EINVAL: i32 = 22;
@@ -231,9 +237,10 @@ struct PkmKacsBootToken {
     group_views: [PkmKacsBootGroupView; 5],
     token_id: u64,
     modified_id: AtomicU64,
-    owner_sid_index: u32,
-    primary_group_index: u32,
-    default_dacl: &'static [u8],
+    owner_sid_index: AtomicU32,
+    primary_group_index: AtomicU32,
+    default_dacl_ptr: AtomicPtr<u8>,
+    default_dacl_len: AtomicUsize,
     privileges_present: u64,
     privileges_enabled: u64,
     privileges_enabled_by_default: u64,
@@ -372,6 +379,31 @@ fn write_integrity_sid(writer: &mut QueryWriter, integrity_level: IntegrityLevel
     writer.write_bytes(&[1, 1, 0, 0, 0, 0, 0, 16]) && writer.write_u32(integrity_level as u32)
 }
 
+fn alloc_copy_bytes(bytes: &[u8]) -> Result<(*mut u8, usize), i32> {
+    let len = bytes.len();
+
+    if len > MAX_DEFAULT_DACL_BYTES {
+        return Err(-EINVAL);
+    }
+    if len == 0 {
+        return Ok((null_mut(), 0));
+    }
+
+    let ptr = unsafe { pkm_kacs_zalloc(len) } as *mut u8;
+    if ptr.is_null() {
+        return Err(-ENOMEM);
+    }
+
+    unsafe { copy_nonoverlapping(bytes.as_ptr(), ptr, len) };
+    Ok((ptr, len))
+}
+
+fn free_allocated_bytes(ptr: *mut u8) {
+    if !ptr.is_null() {
+        unsafe { pkm_kacs_free(ptr.cast()) };
+    }
+}
+
 impl PkmKacsBootToken {
     fn create_system_like(
         own_sd_bytes: &[u8],
@@ -385,14 +417,18 @@ impl PkmKacsBootToken {
         let everyone = Sid::parse(EVERYONE_SID_BYTES).ok()?;
         let authenticated_users = Sid::parse(AUTHENTICATED_USERS_SID_BYTES).ok()?;
         let local = Sid::parse(LOCAL_SID_BYTES).ok()?;
+        let (default_dacl_ptr, default_dacl_len) =
+            alloc_copy_bytes(SYSTEM_DEFAULT_DACL_BYTES).ok()?;
         let mut own_sd = [0u8; MAX_TOKEN_SD_BYTES];
 
         if own_sd_bytes.len() > own_sd.len() {
+            free_allocated_bytes(default_dacl_ptr);
             return None;
         }
         own_sd[..own_sd_bytes.len()].copy_from_slice(own_sd_bytes);
         let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
         if token_ptr.is_null() {
+            free_allocated_bytes(default_dacl_ptr);
             return None;
         }
 
@@ -446,9 +482,10 @@ impl PkmKacsBootToken {
             group_views,
             token_id: BOOT_SYSTEM_TOKEN_ID,
             modified_id: AtomicU64::new(BOOT_SYSTEM_MODIFIED_ID),
-            owner_sid_index: BOOT_SYSTEM_OWNER_SID_INDEX,
-            primary_group_index: BOOT_SYSTEM_PRIMARY_GROUP_INDEX,
-            default_dacl: SYSTEM_DEFAULT_DACL_BYTES,
+            owner_sid_index: AtomicU32::new(BOOT_SYSTEM_OWNER_SID_INDEX),
+            primary_group_index: AtomicU32::new(BOOT_SYSTEM_PRIMARY_GROUP_INDEX),
+            default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
+            default_dacl_len: AtomicUsize::new(default_dacl_len),
             privileges_present,
             privileges_enabled,
             privileges_enabled_by_default,
@@ -515,14 +552,18 @@ impl PkmKacsBootToken {
         let Some(token) = (unsafe { Self::from_ptr(ptr) }) else {
             return null();
         };
-
-        let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
-        if token_ptr.is_null() {
-            return null();
-        }
-
         let privileges = token.privileges_snapshot();
         let _guard = token.lock_mutation();
+        let (default_dacl_ptr, default_dacl_len) =
+            match alloc_copy_bytes(token.default_dacl_bytes()) {
+                Ok(copy) => copy,
+                Err(_) => return null(),
+            };
+        let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
+        if token_ptr.is_null() {
+            free_allocated_bytes(default_dacl_ptr);
+            return null();
+        }
         let copy = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
@@ -533,9 +574,10 @@ impl PkmKacsBootToken {
             group_views: token.group_views,
             token_id: token.token_id,
             modified_id: AtomicU64::new(token.modified_id.load(Ordering::Relaxed)),
-            owner_sid_index: token.owner_sid_index,
-            primary_group_index: token.primary_group_index,
-            default_dacl: token.default_dacl,
+            owner_sid_index: AtomicU32::new(token.owner_sid_index.load(Ordering::Relaxed)),
+            primary_group_index: AtomicU32::new(token.primary_group_index.load(Ordering::Relaxed)),
+            default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
+            default_dacl_len: AtomicUsize::new(default_dacl_len),
             privileges_present: privileges.present,
             privileges_enabled: privileges.enabled,
             privileges_enabled_by_default: privileges.enabled_by_default,
@@ -565,6 +607,7 @@ impl PkmKacsBootToken {
         if token.refcount.fetch_sub(1, Ordering::Release) == 1 {
             fence(Ordering::Acquire);
             let token_ptr = ptr as *mut Self;
+            free_allocated_bytes(token.default_dacl_ptr.load(Ordering::Relaxed));
             unsafe { core::ptr::drop_in_place(token_ptr) };
             unsafe { pkm_kacs_free(token_ptr.cast()) };
         }
@@ -572,6 +615,10 @@ impl PkmKacsBootToken {
 
     fn boot_snapshot(&self, out: &mut PkmKacsBootSnapshot) {
         let _guard = self.lock_mutation();
+        let owner_sid_index = self.owner_sid_index.load(Ordering::Relaxed);
+        let primary_group_index = self.primary_group_index.load(Ordering::Relaxed);
+        let default_dacl = self.default_dacl_bytes();
+
         *out = PkmKacsBootSnapshot {
             token_ptr: (self as *const Self).cast(),
             session_id: self.session.session_id,
@@ -587,10 +634,10 @@ impl PkmKacsBootToken {
             logon_sid_len: self.session.logon_sid.as_bytes().len(),
             groups_ptr: self.group_views.as_ptr(),
             group_count: self.group_views.len() as u32,
-            owner_sid_index: self.owner_sid_index,
-            primary_group_index: self.primary_group_index,
-            default_dacl_ptr: self.default_dacl.as_ptr(),
-            default_dacl_len: self.default_dacl.len(),
+            owner_sid_index,
+            primary_group_index,
+            default_dacl_ptr: default_dacl.as_ptr(),
+            default_dacl_len: default_dacl.len(),
             privileges_present: self.privileges_present,
             privileges_enabled: self.privileges_enabled,
             privileges_enabled_by_default: self.privileges_enabled_by_default,
@@ -643,6 +690,96 @@ impl PkmKacsBootToken {
         Ok(())
     }
 
+    fn default_dacl_bytes(&self) -> &[u8] {
+        let ptr = self.default_dacl_ptr.load(Ordering::Relaxed);
+        let len = self.default_dacl_len.load(Ordering::Relaxed);
+
+        if len == 0 {
+            return &[];
+        }
+
+        unsafe { core::slice::from_raw_parts(ptr.cast_const(), len) }
+    }
+
+    fn validate_owner_index(&self, index: u32) -> bool {
+        if index == 0 {
+            return true;
+        }
+
+        self.groups
+            .get((index - 1) as usize)
+            .map(|entry| (entry.attributes & SE_GROUP_OWNER) == SE_GROUP_OWNER)
+            .unwrap_or(false)
+    }
+
+    fn validate_group_index(&self, index: u32) -> bool {
+        if index == 0 {
+            return true;
+        }
+
+        self.groups.get((index - 1) as usize).is_some()
+    }
+
+    fn adjust_default(
+        &self,
+        owner_index: u32,
+        group_index: u32,
+        dacl: Option<&[u8]>,
+    ) -> Result<(), i32> {
+        let (replacement_ptr, replacement_len) = match dacl {
+            Some(bytes) => {
+                if bytes.len() > MAX_DEFAULT_DACL_BYTES {
+                    return Err(-EINVAL);
+                }
+                if !bytes.is_empty() {
+                    Acl::parse(bytes).map_err(|_| -EINVAL)?;
+                }
+                alloc_copy_bytes(bytes)?
+            }
+            None => (null_mut(), 0),
+        };
+        let old_default_dacl_ptr;
+
+        if owner_index != TOKEN_INDEX_NO_CHANGE && !self.validate_owner_index(owner_index) {
+            free_allocated_bytes(replacement_ptr);
+            return Err(-EINVAL);
+        }
+        if group_index != TOKEN_INDEX_NO_CHANGE && !self.validate_group_index(group_index) {
+            free_allocated_bytes(replacement_ptr);
+            return Err(-EINVAL);
+        }
+
+        {
+            let _guard = self.lock_mutation();
+            let modified_id = self.modified_id.load(Ordering::Relaxed);
+            let Some(next_modified_id) = modified_id.checked_add(1) else {
+                free_allocated_bytes(replacement_ptr);
+                return Err(-ERANGE);
+            };
+
+            if owner_index != TOKEN_INDEX_NO_CHANGE {
+                self.owner_sid_index.store(owner_index, Ordering::Relaxed);
+            }
+            if group_index != TOKEN_INDEX_NO_CHANGE {
+                self.primary_group_index
+                    .store(group_index, Ordering::Relaxed);
+            }
+
+            old_default_dacl_ptr = if dacl.is_some() {
+                self.default_dacl_len
+                    .store(replacement_len, Ordering::Relaxed);
+                self.default_dacl_ptr
+                    .swap(replacement_ptr, Ordering::Relaxed)
+            } else {
+                null_mut()
+            };
+            self.modified_id.store(next_modified_id, Ordering::Relaxed);
+        }
+
+        free_allocated_bytes(old_default_dacl_ptr);
+        Ok(())
+    }
+
     fn sid_by_index(&self, index: u32) -> Option<Sid<'_>> {
         if index == 0 {
             return Some(self.user_sid);
@@ -676,16 +813,25 @@ impl PkmKacsBootToken {
             TOKEN_CLASS_PRIVILEGES => Ok(32),
             TOKEN_CLASS_TYPE => Ok(4),
             TOKEN_CLASS_INTEGRITY_LEVEL => Ok(12),
-            TOKEN_CLASS_OWNER => self
-                .sid_by_index(self.owner_sid_index)
-                .map(|sid| sid.as_bytes().len())
-                .ok_or(-EINVAL),
-            TOKEN_CLASS_PRIMARY_GROUP => self
-                .sid_by_index(self.primary_group_index)
-                .map(|sid| sid.as_bytes().len())
-                .ok_or(-EINVAL),
+            TOKEN_CLASS_OWNER => {
+                let _guard = self.lock_mutation();
+
+                self.sid_by_index(self.owner_sid_index.load(Ordering::Relaxed))
+                    .map(|sid| sid.as_bytes().len())
+                    .ok_or(-EINVAL)
+            }
+            TOKEN_CLASS_PRIMARY_GROUP => {
+                let _guard = self.lock_mutation();
+
+                self.sid_by_index(self.primary_group_index.load(Ordering::Relaxed))
+                    .map(|sid| sid.as_bytes().len())
+                    .ok_or(-EINVAL)
+            }
             TOKEN_CLASS_STATISTICS => Ok(40),
-            TOKEN_CLASS_DEFAULT_DACL => Ok(self.default_dacl.len()),
+            TOKEN_CLASS_DEFAULT_DACL => {
+                let _guard = self.lock_mutation();
+                Ok(self.default_dacl_bytes().len())
+            }
             TOKEN_CLASS_SESSION_ID => Ok(4),
             TOKEN_CLASS_RESTRICTED_SIDS => Ok(4),
             TOKEN_CLASS_SOURCE => Ok(16),
@@ -718,14 +864,20 @@ impl PkmKacsBootToken {
             }
             TOKEN_CLASS_TYPE => writer.write_u32(token_type_abi(self.token_type)),
             TOKEN_CLASS_INTEGRITY_LEVEL => write_integrity_sid(writer, self.integrity_level),
-            TOKEN_CLASS_OWNER => self
-                .sid_by_index(self.owner_sid_index)
-                .map(|sid| writer.write_bytes(sid.as_bytes()))
-                .ok_or(-EINVAL)?,
-            TOKEN_CLASS_PRIMARY_GROUP => self
-                .sid_by_index(self.primary_group_index)
-                .map(|sid| writer.write_bytes(sid.as_bytes()))
-                .ok_or(-EINVAL)?,
+            TOKEN_CLASS_OWNER => {
+                let _guard = self.lock_mutation();
+
+                self.sid_by_index(self.owner_sid_index.load(Ordering::Relaxed))
+                    .map(|sid| writer.write_bytes(sid.as_bytes()))
+                    .ok_or(-EINVAL)?
+            }
+            TOKEN_CLASS_PRIMARY_GROUP => {
+                let _guard = self.lock_mutation();
+
+                self.sid_by_index(self.primary_group_index.load(Ordering::Relaxed))
+                    .map(|sid| writer.write_bytes(sid.as_bytes()))
+                    .ok_or(-EINVAL)?
+            }
             TOKEN_CLASS_SESSION_ID => {
                 let _guard = self.lock_mutation();
                 writer.write_u32(self.interactive_session_id.load(Ordering::Relaxed))
@@ -751,7 +903,10 @@ impl PkmKacsBootToken {
             TOKEN_CLASS_MANDATORY_POLICY => writer.write_u32(self.mandatory_policy),
             TOKEN_CLASS_LOGON_TYPE => writer.write_u32(self.session.logon_type),
             TOKEN_CLASS_LOGON_SID => writer.write_bytes(self.logon_sid.as_bytes()),
-            TOKEN_CLASS_DEFAULT_DACL => writer.write_bytes(self.default_dacl),
+            TOKEN_CLASS_DEFAULT_DACL => {
+                let _guard = self.lock_mutation();
+                writer.write_bytes(self.default_dacl_bytes())
+            }
             TOKEN_CLASS_IMPERSONATION_LEVEL => {
                 writer.write_u32(impersonation_level_abi(self.impersonation_level))
             }
@@ -1011,6 +1166,35 @@ pub extern "C" fn kacs_rust_token_adjust_session_id(token: *const c_void, sessio
     };
 
     match token.adjust_session_id(session_id) {
+        Ok(()) => 0,
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Adjusts a live token's default owner, primary group, and/or default DACL.
+pub extern "C" fn kacs_rust_token_adjust_default(
+    token: *const c_void,
+    owner_index: u32,
+    group_index: u32,
+    dacl: *const u8,
+    dacl_len: usize,
+    change_dacl: u32,
+) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let dacl = if change_dacl == 0 {
+        None
+    } else if dacl_len == 0 {
+        Some(&[][..])
+    } else if dacl.is_null() {
+        return -EINVAL;
+    } else {
+        Some(unsafe { core::slice::from_raw_parts(dacl, dacl_len) })
+    };
+
+    match token.adjust_default(owner_index, group_index, dacl) {
         Ok(()) => 0,
         Err(err) => err,
     }

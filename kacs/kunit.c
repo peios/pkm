@@ -283,6 +283,16 @@ static const u8 pkm_kunit_system_default_dacl[] = {
 	1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0,
 };
 
+static const u8 pkm_kunit_replacement_default_dacl[] = {
+	2, 0, 28, 0, 1, 0, 0, 0,
+	0, 0, 20, 0, 0, 0, 0, 16,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+};
+
+static const u8 pkm_kunit_invalid_default_dacl[] = {
+	2, 0, 7, 0, 0, 0, 0, 0,
+};
+
 /* Owner SYSTEM, success-audit SYSTEM READ_CONTROL, allow SYSTEM READ_CONTROL. */
 static const u8 pkm_kunit_system_read_audit_sd[] = {
 	1, 0, 20, 128, 20, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0,
@@ -1396,6 +1406,269 @@ static void pkm_kunit_token_adjust_sessionid_requires_tcb(struct kunit *test)
 	kacs_rust_token_drop(target_token);
 }
 
+static void pkm_kunit_token_adjust_default_updates_fields(struct kunit *test)
+{
+	struct kacs_adjust_default_args adjust = {
+		.dacl_ptr = 1,
+		.dacl_len = sizeof(pkm_kunit_replacement_default_dacl),
+		.owner_index = 1,
+		.group_index = 2,
+	};
+	struct kacs_query_args args = {
+		.buf_len = 64,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	u8 buf[64] = { 0 };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_ADJUST_DEFAULT);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_default(
+				(int)fd, &adjust,
+				pkm_kunit_replacement_default_dacl),
+			(long)0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_EQ(test, before.owner_sid_index, 0U);
+	KUNIT_EXPECT_EQ(test, after.owner_sid_index, 1U);
+	KUNIT_EXPECT_EQ(test, before.primary_group_index, 1U);
+	KUNIT_EXPECT_EQ(test, after.primary_group_index, 2U);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id + 1);
+	pkm_kunit_expect_bytes_eq(test, after.default_dacl_ptr,
+				  after.default_dacl_len,
+				  pkm_kunit_replacement_default_dacl,
+				  sizeof(pkm_kunit_replacement_default_dacl));
+
+	args.token_class = TOKEN_CLASS_OWNER;
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, args.buf_len, after.groups_ptr[0].sid_len);
+	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len,
+				  after.groups_ptr[0].sid_ptr,
+				  after.groups_ptr[0].sid_len);
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_PRIMARY_GROUP;
+	args.buf_len = sizeof(buf);
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, args.buf_len, after.groups_ptr[1].sid_len);
+	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len,
+				  after.groups_ptr[1].sid_ptr,
+				  after.groups_ptr[1].sid_len);
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_DEFAULT_DACL;
+	args.buf_len = sizeof(buf);
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, args.buf_len,
+			(u32)sizeof(pkm_kunit_replacement_default_dacl));
+	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len,
+				  pkm_kunit_replacement_default_dacl,
+				  sizeof(pkm_kunit_replacement_default_dacl));
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_STATISTICS;
+	args.buf_len = 40;
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 16), after.modified_id);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_default_clear_dacl(struct kunit *test)
+{
+	struct kacs_adjust_default_args adjust = {
+		.dacl_ptr = 1,
+		.dacl_len = 0,
+		.owner_index = 0xFFFF,
+		.group_index = 0xFFFF,
+	};
+	struct kacs_query_args args = {
+		.token_class = TOKEN_CLASS_DEFAULT_DACL,
+		.buf_len = 8,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	u8 buf[8] = { 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_ADJUST_DEFAULT);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_default((int)fd, &adjust,
+							      NULL),
+			(long)0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_EQ(test, after.default_dacl_len, 0U);
+	KUNIT_EXPECT_EQ(test, after.owner_sid_index, before.owner_sid_index);
+	KUNIT_EXPECT_EQ(test, after.primary_group_index,
+			before.primary_group_index);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id + 1);
+
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_default_requires_cached_right(
+	struct kunit *test)
+{
+	struct kacs_adjust_default_args adjust = {
+		.owner_index = 1,
+		.group_index = 2,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(subject_token,
+						      target_token,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_default((int)fd, &adjust,
+							      NULL),
+			(long)-EACCES);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_default_invalid_owner_fails_closed(
+	struct kunit *test)
+{
+	struct kacs_adjust_default_args adjust = {
+		.owner_index = 2,
+		.group_index = 0xFFFF,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_ADJUST_DEFAULT);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_default((int)fd, &adjust,
+							      NULL),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_default_invalid_dacl_fails_closed(
+	struct kunit *test)
+{
+	struct kacs_adjust_default_args adjust = {
+		.dacl_ptr = 1,
+		.dacl_len = sizeof(pkm_kunit_invalid_default_dacl),
+		.owner_index = 0xFFFF,
+		.group_index = 0xFFFF,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_ADJUST_DEFAULT);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_default(
+				(int)fd, &adjust, pkm_kunit_invalid_default_dacl),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
 static void pkm_kunit_access_check_token_fd_current_effective(struct kunit *test)
 {
 	u8 args[136];
@@ -2360,6 +2633,11 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_token_adjust_sessionid_updates_target),
 	KUNIT_CASE(pkm_kunit_token_adjust_sessionid_requires_cached_right),
 	KUNIT_CASE(pkm_kunit_token_adjust_sessionid_requires_tcb),
+	KUNIT_CASE(pkm_kunit_token_adjust_default_updates_fields),
+	KUNIT_CASE(pkm_kunit_token_adjust_default_clear_dacl),
+	KUNIT_CASE(pkm_kunit_token_adjust_default_requires_cached_right),
+	KUNIT_CASE(pkm_kunit_token_adjust_default_invalid_owner_fails_closed),
+	KUNIT_CASE(pkm_kunit_token_adjust_default_invalid_dacl_fails_closed),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_current_effective),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_explicit_handle),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_invalid_negative),
