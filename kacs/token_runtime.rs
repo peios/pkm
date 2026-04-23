@@ -9,6 +9,7 @@
 //! - current-token conversion into the closed Slice 20 AccessCheck context
 //! - bounded token-own-SD material for the first self-open token-fd slice
 //! - fixed boot-token default-object fields for the query ioctl surface
+//! - bounded interactive-session mutation for `KACS_IOC_ADJUST_SESSIONID`
 //! - a small KUnit snapshot seam for bootstrap verification
 //!
 //! Broader mutable token state remains deferred to later token-handle slices.
@@ -33,7 +34,7 @@ use crate::token::{
 };
 use core::ffi::c_void;
 use core::ptr::null;
-use core::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 const SYSTEM_PRIVILEGES_ALL: u64 = 0xC000_000F_FFFF_FFFC;
 const SE_TCB_PRIVILEGE: u64 = 1 << 7;
@@ -222,13 +223,14 @@ struct PkmKacsBootSession {
 
 struct PkmKacsBootToken {
     refcount: AtomicUsize,
+    mutation_lock: AtomicBool,
     session: PkmKacsBootSession,
     user_sid: Sid<'static>,
     logon_sid: Sid<'static>,
     groups: [SidAndAttributes<'static>; 5],
     group_views: [PkmKacsBootGroupView; 5],
     token_id: u64,
-    modified_id: u64,
+    modified_id: AtomicU64,
     owner_sid_index: u32,
     primary_group_index: u32,
     default_dacl: &'static [u8],
@@ -241,11 +243,21 @@ struct PkmKacsBootToken {
     token_type: TokenType,
     impersonation_level: ImpersonationLevel,
     audit_policy: u32,
-    interactive_session_id: u32,
+    interactive_session_id: AtomicU32,
     projected_uid: u32,
     projected_gid: u32,
     own_sd_len: usize,
     own_sd: [u8; MAX_TOKEN_SD_BYTES],
+}
+
+struct TokenMutationGuard<'a> {
+    token: &'a PkmKacsBootToken,
+}
+
+impl Drop for TokenMutationGuard<'_> {
+    fn drop(&mut self) {
+        self.token.mutation_lock.store(false, Ordering::Release);
+    }
 }
 
 struct QueryWriter {
@@ -420,6 +432,7 @@ impl PkmKacsBootToken {
 
         let token = Self {
             refcount: AtomicUsize::new(1),
+            mutation_lock: AtomicBool::new(false),
             session: PkmKacsBootSession {
                 session_id: 0,
                 logon_type: LOGON_TYPE_SERVICE,
@@ -432,7 +445,7 @@ impl PkmKacsBootToken {
             groups,
             group_views,
             token_id: BOOT_SYSTEM_TOKEN_ID,
-            modified_id: BOOT_SYSTEM_MODIFIED_ID,
+            modified_id: AtomicU64::new(BOOT_SYSTEM_MODIFIED_ID),
             owner_sid_index: BOOT_SYSTEM_OWNER_SID_INDEX,
             primary_group_index: BOOT_SYSTEM_PRIMARY_GROUP_INDEX,
             default_dacl: SYSTEM_DEFAULT_DACL_BYTES,
@@ -446,7 +459,7 @@ impl PkmKacsBootToken {
             token_type: TokenType::Primary,
             impersonation_level: ImpersonationLevel::Anonymous,
             audit_policy: 0,
-            interactive_session_id: 0,
+            interactive_session_id: AtomicU32::new(0),
             projected_uid: 0,
             projected_gid: 0,
             own_sd_len: own_sd_bytes.len(),
@@ -509,15 +522,17 @@ impl PkmKacsBootToken {
         }
 
         let privileges = token.privileges_snapshot();
+        let _guard = token.lock_mutation();
         let copy = Self {
             refcount: AtomicUsize::new(1),
+            mutation_lock: AtomicBool::new(false),
             session: token.session,
             user_sid: token.user_sid,
             logon_sid: token.logon_sid,
             groups: token.groups,
             group_views: token.group_views,
             token_id: token.token_id,
-            modified_id: token.modified_id,
+            modified_id: AtomicU64::new(token.modified_id.load(Ordering::Relaxed)),
             owner_sid_index: token.owner_sid_index,
             primary_group_index: token.primary_group_index,
             default_dacl: token.default_dacl,
@@ -530,7 +545,9 @@ impl PkmKacsBootToken {
             token_type: token.token_type,
             impersonation_level: token.impersonation_level,
             audit_policy: token.audit_policy,
-            interactive_session_id: token.interactive_session_id,
+            interactive_session_id: AtomicU32::new(
+                token.interactive_session_id.load(Ordering::Relaxed),
+            ),
             projected_uid: token.projected_uid,
             projected_gid: token.projected_gid,
             own_sd_len: token.own_sd_len,
@@ -554,12 +571,13 @@ impl PkmKacsBootToken {
     }
 
     fn boot_snapshot(&self, out: &mut PkmKacsBootSnapshot) {
+        let _guard = self.lock_mutation();
         *out = PkmKacsBootSnapshot {
             token_ptr: (self as *const Self).cast(),
             session_id: self.session.session_id,
             auth_id: self.session.session_id,
             token_id: self.token_id,
-            modified_id: self.modified_id,
+            modified_id: self.modified_id.load(Ordering::Relaxed),
             logon_type: self.session.logon_type,
             auth_pkg_ptr: self.session.auth_package.as_ptr(),
             auth_pkg_len: self.session.auth_package.len(),
@@ -581,7 +599,7 @@ impl PkmKacsBootToken {
             token_type: TOKEN_TYPE_PRIMARY_ABI,
             impersonation_level: IMPERSONATION_LEVEL_ANONYMOUS_ABI,
             mandatory_policy: self.mandatory_policy,
-            interactive_session_id: self.interactive_session_id,
+            interactive_session_id: self.interactive_session_id.load(Ordering::Relaxed),
             projected_uid: self.projected_uid,
             projected_gid: self.projected_gid,
             audit_policy: self.audit_policy,
@@ -599,6 +617,30 @@ impl PkmKacsBootToken {
 
     fn mark_privileges_used(&self, used_mask: u64) {
         self.privileges_used.fetch_or(used_mask, Ordering::AcqRel);
+    }
+
+    fn lock_mutation(&self) -> TokenMutationGuard<'_> {
+        while self
+            .mutation_lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        TokenMutationGuard { token: self }
+    }
+
+    fn adjust_session_id(&self, session_id: u32) -> Result<(), i32> {
+        let _guard = self.lock_mutation();
+        let modified_id = self.modified_id.load(Ordering::Relaxed);
+        let Some(next_modified_id) = modified_id.checked_add(1) else {
+            return Err(-ERANGE);
+        };
+
+        self.interactive_session_id
+            .store(session_id, Ordering::Relaxed);
+        self.modified_id.store(next_modified_id, Ordering::Relaxed);
+        Ok(())
     }
 
     fn sid_by_index(&self, index: u32) -> Option<Sid<'_>> {
@@ -684,15 +726,19 @@ impl PkmKacsBootToken {
                 .sid_by_index(self.primary_group_index)
                 .map(|sid| writer.write_bytes(sid.as_bytes()))
                 .ok_or(-EINVAL)?,
-            TOKEN_CLASS_SESSION_ID => writer.write_u32(self.interactive_session_id),
+            TOKEN_CLASS_SESSION_ID => {
+                let _guard = self.lock_mutation();
+                writer.write_u32(self.interactive_session_id.load(Ordering::Relaxed))
+            }
             TOKEN_CLASS_RESTRICTED_SIDS => writer.write_u32(0),
             TOKEN_CLASS_SOURCE => {
                 writer.write_bytes(TOKEN_SOURCE_PEI_OS_KRN) && writer.write_u64(0)
             }
             TOKEN_CLASS_STATISTICS => {
+                let _guard = self.lock_mutation();
                 writer.write_u64(self.token_id)
                     && writer.write_u64(self.session.session_id)
-                    && writer.write_u64(self.modified_id)
+                    && writer.write_u64(self.modified_id.load(Ordering::Relaxed))
                     && writer.write_u32(token_type_abi(self.token_type))
                     && writer.write_u32(0)
                     && writer.write_u64(0)
@@ -955,6 +1001,19 @@ pub extern "C" fn kacs_rust_token_query(
 
     *required_out = writer.written();
     0
+}
+
+#[no_mangle]
+/// Adjusts a live token's interactive session id and bumps `modified_id`.
+pub extern "C" fn kacs_rust_token_adjust_session_id(token: *const c_void, session_id: u32) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+
+    match token.adjust_session_id(session_id) {
+        Ok(()) => 0,
+        Err(err) => err,
+    }
 }
 
 #[no_mangle]

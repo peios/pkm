@@ -1261,6 +1261,141 @@ static void pkm_kunit_token_query_deferred_fields_payload(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_kunit_token_adjust_sessionid_updates_target(struct kunit *test)
+{
+	struct kacs_query_args args = {
+		.token_class = TOKEN_CLASS_SESSION_ID,
+		.buf_len = 4,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	struct pkm_kacs_boot_snapshot caller_after = { };
+	u8 buf[40] = { };
+	const void *caller_token;
+	const void *target_token;
+	long fd;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+
+	target_token = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		caller_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_ADJUST_SESSIONID);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_session_for_token(
+				(int)fd, caller_token, 7U),
+			(long)0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_EQ(test, before.interactive_session_id, 0U);
+	KUNIT_EXPECT_EQ(test, after.interactive_session_id, 7U);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id + 1);
+
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 0), 7U);
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_STATISTICS;
+	args.buf_len = sizeof(buf);
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 16), after.modified_id);
+
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(caller_token,
+							 &caller_after));
+	KUNIT_EXPECT_EQ(test,
+			caller_after.privileges_used & PKM_KUNIT_SE_TCB_PRIVILEGE,
+			PKM_KUNIT_SE_TCB_PRIVILEGE);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_sessionid_requires_cached_right(
+	struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *caller_token;
+	const void *target_token;
+	long fd;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+
+	target_token = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(caller_token,
+						      target_token,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_session_for_token(
+				(int)fd, caller_token, 9U),
+			(long)-EACCES);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_EQ(test, after.interactive_session_id,
+			before.interactive_session_id);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_sessionid_requires_tcb(struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	const void *caller_without_tcb;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	caller_without_tcb = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, caller_without_tcb);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_ADJUST_SESSIONID);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_session_for_token(
+				(int)fd, caller_without_tcb, 11U),
+			(long)-EACCES);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_EQ(test, after.interactive_session_id,
+			before.interactive_session_id);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(caller_without_tcb);
+	kacs_rust_token_drop(target_token);
+}
+
 static void pkm_kunit_access_check_token_fd_current_effective(struct kunit *test)
 {
 	u8 args[136];
@@ -2222,6 +2357,9 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_token_query_invalid_class),
 	KUNIT_CASE(pkm_kunit_token_query_short_and_fault_buffers),
 	KUNIT_CASE(pkm_kunit_token_query_deferred_fields_payload),
+	KUNIT_CASE(pkm_kunit_token_adjust_sessionid_updates_target),
+	KUNIT_CASE(pkm_kunit_token_adjust_sessionid_requires_cached_right),
+	KUNIT_CASE(pkm_kunit_token_adjust_sessionid_requires_tcb),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_current_effective),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_explicit_handle),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_invalid_negative),

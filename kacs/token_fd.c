@@ -2,8 +2,8 @@
 /*
  * Slow-track PKM token-fd and self-open surface.
  *
- * Slice 30 adds the first read-only token ioctl on top of the earlier
- * token-fd handle object and kacs_open_self_token syscall.
+ * Slices 30 through 33 add token query and the first narrow mutation ioctl on
+ * top of the earlier token-fd handle object and kacs_open_self_token syscall.
  */
 
 #include <linux/anon_inodes.h>
@@ -26,6 +26,7 @@
 	 KACS_ACCESS_MAXIMUM_ALLOWED | KACS_ACCESS_GENERIC_READ | \
 	 KACS_ACCESS_GENERIC_WRITE | KACS_ACCESS_GENERIC_EXECUTE | \
 	 KACS_ACCESS_GENERIC_ALL)
+#define PKM_KACS_PRIVILEGE_SE_TCB (1ULL << 7)
 
 struct pkm_kacs_token_file {
 	const void *token;
@@ -137,6 +138,53 @@ static long pkm_kacs_token_query_core(struct pkm_kacs_token_file *tf,
 	return pkm_kacs_token_query_fill(tf, args, out_buf, required);
 }
 
+static long pkm_kacs_require_tcb_for_token(const void *caller_token)
+{
+	if (!caller_token)
+		return -EACCES;
+	if (!kacs_rust_token_has_enabled_privilege(caller_token,
+						   PKM_KACS_PRIVILEGE_SE_TCB))
+		return -EACCES;
+	if (!kacs_rust_token_mark_privileges_used(caller_token,
+						  PKM_KACS_PRIVILEGE_SE_TCB))
+		return -EACCES;
+
+	return 0;
+}
+
+static long pkm_kacs_token_adjust_session_core(
+	struct pkm_kacs_token_file *tf,
+	const void *caller_token,
+	u32 session_id)
+{
+	long ret;
+
+	if (!tf || !tf->token)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_ADJUST_SESSIONID) !=
+	    KACS_TOKEN_ADJUST_SESSIONID)
+		return -EACCES;
+
+	ret = pkm_kacs_require_tcb_for_token(caller_token);
+	if (ret)
+		return ret;
+
+	return kacs_rust_token_adjust_session_id(tf->token, session_id);
+}
+
+static long pkm_kacs_token_adjust_session_after_gate(
+	struct pkm_kacs_token_file *tf,
+	u32 session_id)
+{
+	if (!tf || !tf->token)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_ADJUST_SESSIONID) !=
+	    KACS_TOKEN_ADJUST_SESSIONID)
+		return -EACCES;
+
+	return kacs_rust_token_adjust_session_id(tf->token, session_id);
+}
+
 static long pkm_kacs_token_query_user(struct pkm_kacs_token_file *tf,
 				      struct kacs_query_args __user *uargs)
 {
@@ -186,6 +234,28 @@ out:
 	return ret;
 }
 
+static long pkm_kacs_token_adjust_session_user(struct pkm_kacs_token_file *tf,
+					       u32 __user *session_id_ptr)
+{
+	u32 session_id;
+	long ret;
+
+	if (!tf || !tf->token)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_ADJUST_SESSIONID) !=
+	    KACS_TOKEN_ADJUST_SESSIONID)
+		return -EACCES;
+	ret = pkm_kacs_require_tcb_for_token(pkm_kacs_current_primary_token_ptr());
+	if (ret)
+		return ret;
+	if (!session_id_ptr)
+		return -EFAULT;
+	if (copy_from_user(&session_id, session_id_ptr, sizeof(session_id)))
+		return -EFAULT;
+
+	return pkm_kacs_token_adjust_session_after_gate(tf, session_id);
+}
+
 static long pkm_kacs_token_ioctl(struct file *file, unsigned int cmd,
 				 unsigned long arg)
 {
@@ -198,6 +268,9 @@ static long pkm_kacs_token_ioctl(struct file *file, unsigned int cmd,
 	case KACS_IOC_QUERY:
 		return pkm_kacs_token_query_user(
 			tf, (struct kacs_query_args __user *)arg);
+	case KACS_IOC_ADJUST_SESSIONID:
+		return pkm_kacs_token_adjust_session_user(
+			tf, (u32 __user *)arg);
 	default:
 		return -ENOTTY;
 	}
@@ -383,6 +456,28 @@ long pkm_kacs_kunit_token_fd_query(int fd, struct kacs_query_args *args,
 
 	tf = fd_file(f)->private_data;
 	ret = pkm_kacs_token_query_core(tf, args, out_buf);
+	fdput(f);
+	return ret;
+}
+
+long pkm_kacs_kunit_token_fd_adjust_session_for_token(int fd,
+						      const void *caller_token,
+						      u32 session_id)
+{
+	struct fd f;
+	struct pkm_kacs_token_file *tf;
+	long ret;
+
+	f = fdget(fd);
+	if (!fd_file(f))
+		return -EBADF;
+	if (fd_file(f)->f_op != &pkm_kacs_token_fops) {
+		fdput(f);
+		return -EINVAL;
+	}
+
+	tf = fd_file(f)->private_data;
+	ret = pkm_kacs_token_adjust_session_core(tf, caller_token, session_id);
 	fdput(f);
 	return ret;
 }

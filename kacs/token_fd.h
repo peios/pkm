@@ -42,6 +42,7 @@ struct kacs_query_args {
 };
 
 #define KACS_IOC_QUERY _IOWR(KACS_IOC_MAGIC, 0, struct kacs_query_args)
+#define KACS_IOC_ADJUST_SESSIONID _IOW(KACS_IOC_MAGIC, 10, u32)
 
 #define TOKEN_CLASS_USER 0x01U
 #define TOKEN_CLASS_GROUPS 0x02U
@@ -80,5 +81,8 @@ int pkm_kacs_kunit_token_fd_snapshot(int fd,
 				     struct pkm_kacs_token_fd_view *out);
 long pkm_kacs_kunit_token_fd_query(int fd, struct kacs_query_args *args,
 				   void *out_buf);
+long pkm_kacs_kunit_token_fd_adjust_session_for_token(int fd,
+						      const void *caller_token,
+						      u32 session_id);
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_FD_H */
