@@ -219,6 +219,8 @@ static void pkm_kunit_expect_boot_snapshot_eq(
 
 	KUNIT_EXPECT_EQ(test, lhs->session_id, rhs->session_id);
 	KUNIT_EXPECT_EQ(test, lhs->auth_id, rhs->auth_id);
+	KUNIT_EXPECT_EQ(test, lhs->token_id, rhs->token_id);
+	KUNIT_EXPECT_EQ(test, lhs->modified_id, rhs->modified_id);
 	KUNIT_EXPECT_EQ(test, lhs->logon_type, rhs->logon_type);
 	pkm_kunit_expect_bytes_eq(test, lhs->auth_pkg_ptr, lhs->auth_pkg_len,
 				  rhs->auth_pkg_ptr, rhs->auth_pkg_len);
@@ -235,6 +237,13 @@ static void pkm_kunit_expect_boot_snapshot_eq(
 					  rhs->groups_ptr[i].sid_ptr,
 					  rhs->groups_ptr[i].sid_len);
 	}
+	KUNIT_EXPECT_EQ(test, lhs->owner_sid_index, rhs->owner_sid_index);
+	KUNIT_EXPECT_EQ(test, lhs->primary_group_index,
+			rhs->primary_group_index);
+	pkm_kunit_expect_bytes_eq(test, lhs->default_dacl_ptr,
+				  lhs->default_dacl_len,
+				  rhs->default_dacl_ptr,
+				  rhs->default_dacl_len);
 	KUNIT_EXPECT_EQ(test, lhs->privileges_present, rhs->privileges_present);
 	KUNIT_EXPECT_EQ(test, lhs->privileges_enabled, rhs->privileges_enabled);
 	KUNIT_EXPECT_EQ(test, lhs->privileges_enabled_by_default,
@@ -264,6 +273,14 @@ static const u8 pkm_kunit_system_read_sd[] = {
 	2, 0, 28, 0, 1, 0, 0, 0,
 	0, 0, 20, 0, 0, 0, 2, 0,
 	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+};
+
+static const u8 pkm_kunit_system_default_dacl[] = {
+	2, 0, 52, 0, 2, 0, 0, 0,
+	0, 0, 20, 0, 0, 0, 0, 16,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+	0, 0, 24, 0, 0, 0, 0, 16,
+	1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0,
 };
 
 /* Owner SYSTEM, success-audit SYSTEM READ_CONTROL, allow SYSTEM READ_CONTROL. */
@@ -725,6 +742,8 @@ static void pkm_kunit_boot_system_defaults(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, effective_snapshot.token_ptr, effective_token);
 	KUNIT_EXPECT_EQ(test, snapshot.session_id, 0ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.auth_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.token_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.modified_id, 0ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.logon_type, 5U);
 	pkm_kunit_expect_bytes_eq(test, snapshot.auth_pkg_ptr, snapshot.auth_pkg_len,
 				  (const u8 *)auth_pkg, sizeof(auth_pkg) - 1);
@@ -743,6 +762,12 @@ static void pkm_kunit_boot_system_defaults(struct kunit *test)
 					  expected_group_sids[i],
 					  expected_group_lens[i]);
 	}
+	KUNIT_EXPECT_EQ(test, snapshot.owner_sid_index, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.primary_group_index, 1U);
+	pkm_kunit_expect_bytes_eq(test, snapshot.default_dacl_ptr,
+				  snapshot.default_dacl_len,
+				  pkm_kunit_system_default_dacl,
+				  sizeof(pkm_kunit_system_default_dacl));
 	KUNIT_EXPECT_EQ(test, snapshot.privileges_present, 0xc000000ffffffffcULL);
 	KUNIT_EXPECT_EQ(test, snapshot.privileges_enabled, 0xc000000ffffffffcULL);
 	KUNIT_EXPECT_EQ(test, snapshot.privileges_enabled_by_default,
@@ -1165,12 +1190,19 @@ static void pkm_kunit_token_query_short_and_fault_buffers(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
-static void pkm_kunit_token_query_unsupported_fields_fail_closed(
-	struct kunit *test)
+static void pkm_kunit_token_query_deferred_fields_payload(struct kunit *test)
 {
 	struct kacs_query_args args = {
-		.token_class = TOKEN_CLASS_STATISTICS,
+		.token_class = TOKEN_CLASS_OWNER,
 	};
+	static const u8 system_sid[] = {
+		1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+	};
+	static const u8 administrators_sid[] = {
+		1, 2, 0, 0, 0, 0, 0, 5,
+		32, 0, 0, 0, 32, 2, 0, 0,
+	};
+	u8 buf[64] = { };
 	long fd;
 
 	fd = pkm_kacs_open_self_token_internal(0, KACS_TOKEN_QUERY);
@@ -1178,15 +1210,54 @@ static void pkm_kunit_token_query_unsupported_fields_fail_closed(
 
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_token_fd_query((int)fd, &args, NULL),
-			(long)-EOPNOTSUPP);
-	args.token_class = TOKEN_CLASS_OWNER;
+			(long)0);
+	KUNIT_EXPECT_EQ(test, args.buf_len, (u32)sizeof(system_sid));
+	args.buf_len = sizeof(buf);
+	args.buf_ptr = (u64)(unsigned long)buf;
 	KUNIT_EXPECT_EQ(test,
-			pkm_kacs_kunit_token_fd_query((int)fd, &args, NULL),
-			(long)-EOPNOTSUPP);
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len, system_sid,
+				  sizeof(system_sid));
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_PRIMARY_GROUP;
+	args.buf_len = sizeof(buf);
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, args.buf_len, (u32)sizeof(administrators_sid));
+	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len, administrators_sid,
+				  sizeof(administrators_sid));
+
+	memset(buf, 0xff, sizeof(buf));
+	args.token_class = TOKEN_CLASS_STATISTICS;
+	args.buf_len = sizeof(buf);
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 40U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 0), 0ULL);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 8), 0ULL);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 16), 0ULL);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 24), 1U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 28), 0U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 32), 0ULL);
+
+	memset(buf, 0, sizeof(buf));
 	args.token_class = TOKEN_CLASS_DEFAULT_DACL;
+	args.buf_len = sizeof(buf);
+	args.buf_ptr = (u64)(unsigned long)buf;
 	KUNIT_EXPECT_EQ(test,
-			pkm_kacs_kunit_token_fd_query((int)fd, &args, NULL),
-			(long)-EOPNOTSUPP);
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, args.buf_len,
+			(u32)sizeof(pkm_kunit_system_default_dacl));
+	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len,
+				  pkm_kunit_system_default_dacl,
+				  sizeof(pkm_kunit_system_default_dacl));
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
@@ -2150,7 +2221,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_token_query_requires_cached_query),
 	KUNIT_CASE(pkm_kunit_token_query_invalid_class),
 	KUNIT_CASE(pkm_kunit_token_query_short_and_fault_buffers),
-	KUNIT_CASE(pkm_kunit_token_query_unsupported_fields_fail_closed),
+	KUNIT_CASE(pkm_kunit_token_query_deferred_fields_payload),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_current_effective),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_explicit_handle),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_invalid_negative),

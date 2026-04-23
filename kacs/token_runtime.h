@@ -16,6 +16,8 @@ struct pkm_kacs_boot_snapshot {
 	const void *token_ptr;
 	u64 session_id;
 	u64 auth_id;
+	u64 token_id;
+	u64 modified_id;
 	u32 logon_type;
 	const u8 *auth_pkg_ptr;
 	size_t auth_pkg_len;
@@ -25,6 +27,10 @@ struct pkm_kacs_boot_snapshot {
 	size_t logon_sid_len;
 	const struct pkm_kacs_boot_group_view *groups_ptr;
 	u32 group_count;
+	u32 owner_sid_index;
+	u32 primary_group_index;
+	const u8 *default_dacl_ptr;
+	size_t default_dacl_len;
 	u64 privileges_present;
 	u64 privileges_enabled;
 	u64 privileges_enabled_by_default;

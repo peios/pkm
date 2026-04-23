@@ -8,10 +8,10 @@
 //! - reference management for that live token pointer
 //! - current-token conversion into the closed Slice 20 AccessCheck context
 //! - bounded token-own-SD material for the first self-open token-fd slice
+//! - fixed boot-token default-object fields for the query ioctl surface
 //! - a small KUnit snapshot seam for bootstrap verification
 //!
-//! Token-own security descriptors and broader mutable token state remain
-//! deferred to later token-handle slices.
+//! Broader mutable token state remains deferred to later token-handle slices.
 
 #![allow(unreachable_pub)]
 
@@ -51,7 +51,6 @@ const EACCES: i32 = 13;
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
 const ERANGE: i32 = 34;
-const EOPNOTSUPP: i32 = 95;
 
 const SE_GROUP_MANDATORY: u32 = 0x0000_0001;
 const SE_GROUP_ENABLED_BY_DEFAULT: u32 = 0x0000_0002;
@@ -74,6 +73,14 @@ const LOCAL_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0];
 const LOGON_SID_BYTES: &[u8] = &[1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const AUTH_PACKAGE_NEGOTIATE: &[u8] = b"Negotiate";
 const TOKEN_SOURCE_PEI_OS_KRN: &[u8; 8] = b"PeiosKrn";
+const BOOT_SYSTEM_TOKEN_ID: u64 = 0;
+const BOOT_SYSTEM_MODIFIED_ID: u64 = 0;
+const BOOT_SYSTEM_OWNER_SID_INDEX: u32 = 0;
+const BOOT_SYSTEM_PRIMARY_GROUP_INDEX: u32 = 1;
+const SYSTEM_DEFAULT_DACL_BYTES: &[u8] = &[
+    2, 0, 52, 0, 2, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 16, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0, 0, 0,
+    24, 0, 0, 0, 0, 16, 1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0,
+];
 const SYSTEM_TOKEN_OWN_SD_BYTES: &[u8] = &[
     1, 0, 4, 128, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0,
     0, 0, 2, 0, 72, 0, 3, 0, 0, 0, 0, 0, 20, 0, 248, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
@@ -148,6 +155,10 @@ pub struct PkmKacsBootSnapshot {
     pub session_id: u64,
     /// Token auth_id / logon session LUID.
     pub auth_id: u64,
+    /// Token instance LUID.
+    pub token_id: u64,
+    /// Token modified-id LUID.
+    pub modified_id: u64,
     /// Logon type for Session 0.
     pub logon_type: u32,
     /// Authentication package bytes.
@@ -166,6 +177,14 @@ pub struct PkmKacsBootSnapshot {
     pub groups_ptr: *const PkmKacsBootGroupView,
     /// Number of entries in `groups_ptr`.
     pub group_count: u32,
+    /// Owner SID index, with 0 = user and N = groups[N - 1].
+    pub owner_sid_index: u32,
+    /// Primary group SID index, with 0 = user and N = groups[N - 1].
+    pub primary_group_index: u32,
+    /// Default DACL bytes.
+    pub default_dacl_ptr: *const u8,
+    /// Length of `default_dacl_ptr`.
+    pub default_dacl_len: usize,
     /// Present privilege mask.
     pub privileges_present: u64,
     /// Enabled privilege mask.
@@ -208,6 +227,11 @@ struct PkmKacsBootToken {
     logon_sid: Sid<'static>,
     groups: [SidAndAttributes<'static>; 5],
     group_views: [PkmKacsBootGroupView; 5],
+    token_id: u64,
+    modified_id: u64,
+    owner_sid_index: u32,
+    primary_group_index: u32,
+    default_dacl: &'static [u8],
     privileges_present: u64,
     privileges_enabled: u64,
     privileges_enabled_by_default: u64,
@@ -407,6 +431,11 @@ impl PkmKacsBootToken {
             logon_sid,
             groups,
             group_views,
+            token_id: BOOT_SYSTEM_TOKEN_ID,
+            modified_id: BOOT_SYSTEM_MODIFIED_ID,
+            owner_sid_index: BOOT_SYSTEM_OWNER_SID_INDEX,
+            primary_group_index: BOOT_SYSTEM_PRIMARY_GROUP_INDEX,
+            default_dacl: SYSTEM_DEFAULT_DACL_BYTES,
             privileges_present,
             privileges_enabled,
             privileges_enabled_by_default,
@@ -487,6 +516,11 @@ impl PkmKacsBootToken {
             logon_sid: token.logon_sid,
             groups: token.groups,
             group_views: token.group_views,
+            token_id: token.token_id,
+            modified_id: token.modified_id,
+            owner_sid_index: token.owner_sid_index,
+            primary_group_index: token.primary_group_index,
+            default_dacl: token.default_dacl,
             privileges_present: privileges.present,
             privileges_enabled: privileges.enabled,
             privileges_enabled_by_default: privileges.enabled_by_default,
@@ -524,6 +558,8 @@ impl PkmKacsBootToken {
             token_ptr: (self as *const Self).cast(),
             session_id: self.session.session_id,
             auth_id: self.session.session_id,
+            token_id: self.token_id,
+            modified_id: self.modified_id,
             logon_type: self.session.logon_type,
             auth_pkg_ptr: self.session.auth_package.as_ptr(),
             auth_pkg_len: self.session.auth_package.len(),
@@ -533,6 +569,10 @@ impl PkmKacsBootToken {
             logon_sid_len: self.session.logon_sid.as_bytes().len(),
             groups_ptr: self.group_views.as_ptr(),
             group_count: self.group_views.len() as u32,
+            owner_sid_index: self.owner_sid_index,
+            primary_group_index: self.primary_group_index,
+            default_dacl_ptr: self.default_dacl.as_ptr(),
+            default_dacl_len: self.default_dacl.len(),
             privileges_present: self.privileges_present,
             privileges_enabled: self.privileges_enabled,
             privileges_enabled_by_default: self.privileges_enabled_by_default,
@@ -561,6 +601,14 @@ impl PkmKacsBootToken {
         self.privileges_used.fetch_or(used_mask, Ordering::AcqRel);
     }
 
+    fn sid_by_index(&self, index: u32) -> Option<Sid<'_>> {
+        if index == 0 {
+            return Some(self.user_sid);
+        }
+
+        self.groups.get((index - 1) as usize).map(|entry| entry.sid)
+    }
+
     fn access_token(&self) -> AccessCheckToken<'_> {
         AccessCheckToken {
             subject: TokenView {
@@ -586,10 +634,16 @@ impl PkmKacsBootToken {
             TOKEN_CLASS_PRIVILEGES => Ok(32),
             TOKEN_CLASS_TYPE => Ok(4),
             TOKEN_CLASS_INTEGRITY_LEVEL => Ok(12),
-            TOKEN_CLASS_OWNER
-            | TOKEN_CLASS_PRIMARY_GROUP
-            | TOKEN_CLASS_STATISTICS
-            | TOKEN_CLASS_DEFAULT_DACL => Err(-EOPNOTSUPP),
+            TOKEN_CLASS_OWNER => self
+                .sid_by_index(self.owner_sid_index)
+                .map(|sid| sid.as_bytes().len())
+                .ok_or(-EINVAL),
+            TOKEN_CLASS_PRIMARY_GROUP => self
+                .sid_by_index(self.primary_group_index)
+                .map(|sid| sid.as_bytes().len())
+                .ok_or(-EINVAL),
+            TOKEN_CLASS_STATISTICS => Ok(40),
+            TOKEN_CLASS_DEFAULT_DACL => Ok(self.default_dacl.len()),
             TOKEN_CLASS_SESSION_ID => Ok(4),
             TOKEN_CLASS_RESTRICTED_SIDS => Ok(4),
             TOKEN_CLASS_SOURCE => Ok(16),
@@ -622,10 +676,26 @@ impl PkmKacsBootToken {
             }
             TOKEN_CLASS_TYPE => writer.write_u32(token_type_abi(self.token_type)),
             TOKEN_CLASS_INTEGRITY_LEVEL => write_integrity_sid(writer, self.integrity_level),
+            TOKEN_CLASS_OWNER => self
+                .sid_by_index(self.owner_sid_index)
+                .map(|sid| writer.write_bytes(sid.as_bytes()))
+                .ok_or(-EINVAL)?,
+            TOKEN_CLASS_PRIMARY_GROUP => self
+                .sid_by_index(self.primary_group_index)
+                .map(|sid| writer.write_bytes(sid.as_bytes()))
+                .ok_or(-EINVAL)?,
             TOKEN_CLASS_SESSION_ID => writer.write_u32(self.interactive_session_id),
             TOKEN_CLASS_RESTRICTED_SIDS => writer.write_u32(0),
             TOKEN_CLASS_SOURCE => {
                 writer.write_bytes(TOKEN_SOURCE_PEI_OS_KRN) && writer.write_u64(0)
+            }
+            TOKEN_CLASS_STATISTICS => {
+                writer.write_u64(self.token_id)
+                    && writer.write_u64(self.session.session_id)
+                    && writer.write_u64(self.modified_id)
+                    && writer.write_u32(token_type_abi(self.token_type))
+                    && writer.write_u32(0)
+                    && writer.write_u64(0)
             }
             TOKEN_CLASS_ORIGIN => writer.write_u64(0),
             TOKEN_CLASS_ELEVATION_TYPE => writer.write_u32(TOKEN_ELEVATION_DEFAULT_ABI),
@@ -635,6 +705,7 @@ impl PkmKacsBootToken {
             TOKEN_CLASS_MANDATORY_POLICY => writer.write_u32(self.mandatory_policy),
             TOKEN_CLASS_LOGON_TYPE => writer.write_u32(self.session.logon_type),
             TOKEN_CLASS_LOGON_SID => writer.write_bytes(self.logon_sid.as_bytes()),
+            TOKEN_CLASS_DEFAULT_DACL => writer.write_bytes(self.default_dacl),
             TOKEN_CLASS_IMPERSONATION_LEVEL => {
                 writer.write_u32(impersonation_level_abi(self.impersonation_level))
             }
@@ -851,8 +922,6 @@ pub extern "C" fn kacs_rust_token_open_check(
 /// Serializes one supported `KACS_IOC_QUERY` token information class.
 ///
 /// When `out` is null or `out_len` is zero, only `required_out` is populated.
-/// Valid query classes whose backing token fields are not yet represented by
-/// the slow-track live token object fail closed with `-EOPNOTSUPP`.
 pub extern "C" fn kacs_rust_token_query(
     token: *const c_void,
     token_class: u32,
