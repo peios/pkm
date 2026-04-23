@@ -138,4 +138,16 @@ void pkm_kacs_kunit_set_current_pip_context(u32 pip_type, u32 pip_trust);
 
 const struct pkm_kacs_resolved_ctx *kacs_rust_kunit_access_check_context(void);
 
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+long pkm_kacs_kunit_access_check_syscall_scalar(
+	const struct pkm_kacs_usercopy_ops *ops,
+	u64 args_ptr);
+
+long pkm_kacs_kunit_access_check_syscall_list(
+	const struct pkm_kacs_usercopy_ops *ops,
+	u64 args_ptr,
+	u64 results_ptr,
+	u32 results_count);
+#endif
+
 #endif /* _SECURITY_PKM_KACS_ACCESS_CHECK_H */

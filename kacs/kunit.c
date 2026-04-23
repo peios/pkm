@@ -253,6 +253,19 @@ static const u8 pkm_kunit_system_read_sd[] = {
 	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
 };
 
+/* Owner SYSTEM, success-audit SYSTEM READ_CONTROL, allow SYSTEM READ_CONTROL. */
+static const u8 pkm_kunit_system_read_audit_sd[] = {
+	1, 0, 20, 128, 20, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0,
+	60, 0, 0, 0,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+	2, 0, 28, 0, 1, 0, 0, 0,
+	2, 64, 20, 0, 0, 0, 2, 0,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+	2, 0, 28, 0, 1, 0, 0, 0,
+	0, 0, 20, 0, 0, 0, 2, 0,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+};
+
 static const u8 pkm_kunit_system_pip_sd[] = {
 	1, 0, 20, 128, 20, 0, 0, 0, 32, 0, 0, 0, 44, 0, 0, 0,
 	76, 0, 0, 0,
@@ -1137,6 +1150,220 @@ static void pkm_kunit_access_check_token_fd_result_list(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(results, 12), 0U);
 }
 
+static void pkm_kunit_access_check_public_scalar_current_effective(
+	struct kunit *test)
+{
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	long ret;
+
+	pkm_kunit_build_read_control_args(args, -1);
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_read_sd,
+			      sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+
+	ret = pkm_kacs_kunit_access_check_syscall_scalar(&ops, 0x0100);
+	KUNIT_EXPECT_EQ(test, ret, (long)PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0),
+			PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+}
+
+static void pkm_kunit_access_check_public_result_list(struct kunit *test)
+{
+	u8 object_tree[40] = { 0 };
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	u8 results[16] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	long ret;
+
+	pkm_kunit_write_u16(object_tree, 0, 0);
+	pkm_kunit_write_u16(object_tree, 2, 0);
+	memset(object_tree + 4, 0x55, 16);
+	pkm_kunit_write_u16(object_tree, 20, 1);
+	pkm_kunit_write_u16(object_tree, 22, 0);
+	memset(object_tree + 24, 0x66, 16);
+
+	pkm_kunit_build_read_control_args(args, -1);
+	pkm_kunit_write_u64(args, 56, 0x2000);
+	pkm_kunit_write_u32(args, 64, 2);
+
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_read_sd,
+			      sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_add_region(&mem, 0x2000, object_tree, sizeof(object_tree));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+	pkm_kunit_add_region(&mem, 0x4000, results, sizeof(results));
+
+	ret = pkm_kacs_kunit_access_check_syscall_list(&ops, 0x0100, 0x4000,
+						       2);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0),
+			PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(results, 0),
+			PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(results, 4), 0U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(results, 8),
+			PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(results, 12), 0U);
+}
+
+static void pkm_kunit_access_check_public_invalid_token_fd(struct kunit *test)
+{
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	long ret;
+
+	pkm_kunit_build_read_control_args(args, -2);
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_read_sd,
+			      sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+
+	ret = pkm_kacs_kunit_access_check_syscall_scalar(&ops, 0x0100);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0), 0U);
+}
+
+static void pkm_kunit_access_check_public_requires_audit_transport(
+	struct kunit *test)
+{
+	u8 args[136];
+	u8 writebacks[12] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	long ret;
+
+	pkm_kunit_build_args_v136(args);
+	pkm_kunit_write_u32(args, 4, (u32)-1);
+	pkm_kunit_write_u64(args, 8, 0x1000);
+	pkm_kunit_write_u32(args, 16, sizeof(pkm_kunit_system_read_audit_sd));
+	pkm_kunit_write_u32(args, 20, KACS_ACCESS_READ_CONTROL);
+	pkm_kunit_write_u32(args, 24, KACS_ACCESS_READ_CONTROL);
+	pkm_kunit_write_u32(args, 28, KACS_ACCESS_WRITE_DAC);
+	pkm_kunit_write_u32(args, 36,
+			    KACS_ACCESS_READ_CONTROL | KACS_ACCESS_WRITE_DAC);
+	pkm_kunit_write_u64(args, 88, 0x3000);
+	pkm_kunit_write_u64(args, 120, 0x3004);
+	pkm_kunit_write_u64(args, 128, 0x3008);
+
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000,
+			      (u8 *)pkm_kunit_system_read_audit_sd,
+			      sizeof(pkm_kunit_system_read_audit_sd));
+	pkm_kunit_add_region(&mem, 0x3000, writebacks, sizeof(writebacks));
+
+	ret = pkm_kacs_kunit_access_check_syscall_scalar(&ops, 0x0100);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(writebacks, 0), 0U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(writebacks, 4), 0U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(writebacks, 8), 0U);
+}
+
+static void pkm_kunit_access_check_public_uses_psb_pip_default(
+	struct kunit *test)
+{
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	u32 old_type = 0;
+	u32 old_trust = 0;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_current_pip_context(&old_type, &old_trust), 0);
+	pkm_kacs_kunit_set_current_pip_context(PKM_KUNIT_PIP_TYPE_PROTECTED,
+					       PKM_KUNIT_PIP_TRUST_TEST);
+
+	pkm_kunit_build_read_control_args(args, -1);
+	pkm_kunit_write_u32(args, 16, sizeof(pkm_kunit_system_pip_sd));
+	pkm_kunit_write_u32(args, 20,
+			    KACS_ACCESS_READ_CONTROL | KACS_ACCESS_WRITE_DAC);
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_pip_sd,
+			      sizeof(pkm_kunit_system_pip_sd));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+
+	ret = pkm_kacs_kunit_access_check_syscall_scalar(&ops, 0x0100);
+
+	pkm_kacs_kunit_set_current_pip_context(old_type, old_trust);
+	KUNIT_EXPECT_EQ(test, ret, (long)PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0),
+			PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+}
+
+static void pkm_kunit_access_check_public_uses_caap_cache(struct kunit *test)
+{
+	u8 spec[64];
+	size_t spec_len;
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	long ret;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_set_caap_internal(pkm_kunit_caap_policy_sid,
+						   sizeof(pkm_kunit_caap_policy_sid),
+						   NULL, 0),
+			0);
+	spec_len = pkm_kunit_build_caap_spec(spec, pkm_kunit_caap_empty_dacl,
+					     sizeof(pkm_kunit_caap_empty_dacl));
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_set_caap_internal(pkm_kunit_caap_policy_sid,
+						   sizeof(pkm_kunit_caap_policy_sid),
+						   spec, (u32)spec_len),
+			0);
+
+	pkm_kunit_build_read_control_args(args, -1);
+	pkm_kunit_write_u32(args, 16, sizeof(pkm_kunit_caap_object_sd));
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_caap_object_sd,
+			      sizeof(pkm_kunit_caap_object_sd));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+
+	ret = pkm_kacs_kunit_access_check_syscall_scalar(&ops, 0x0100);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0),
+			PKM_KUNIT_CAAP_PRIVILEGE_GRANT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_set_caap_internal(pkm_kunit_caap_policy_sid,
+						   sizeof(pkm_kunit_caap_policy_sid),
+						   NULL, 0),
+			0);
+}
+
 static void pkm_kunit_access_check_token_ctx_requires_caap_cache(
 	struct kunit *test)
 {
@@ -1696,6 +1923,12 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_rejects_non_token_fd),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_bad_size_before_lookup),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_result_list),
+	KUNIT_CASE(pkm_kunit_access_check_public_scalar_current_effective),
+	KUNIT_CASE(pkm_kunit_access_check_public_result_list),
+	KUNIT_CASE(pkm_kunit_access_check_public_invalid_token_fd),
+	KUNIT_CASE(pkm_kunit_access_check_public_requires_audit_transport),
+	KUNIT_CASE(pkm_kunit_access_check_public_uses_psb_pip_default),
+	KUNIT_CASE(pkm_kunit_access_check_public_uses_caap_cache),
 	KUNIT_CASE(pkm_kunit_access_check_token_ctx_requires_caap_cache),
 	KUNIT_CASE(pkm_kunit_access_check_psb_pip_default_none_denies),
 	KUNIT_CASE(pkm_kunit_access_check_uses_psb_pip_default),

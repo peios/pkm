@@ -46,6 +46,19 @@ if grep -q 'syscall_64.tbl' "$repo_root/kernel/Dockerfile"; then
 	die "kernel/Dockerfile still mutates the syscall table"
 fi
 
+for syscall in \
+	"1000 kacs_open_self_token" \
+	"1023 kacs_access_check" \
+	"1024 kacs_access_check_list" \
+	"1025 kacs_set_caap"; do
+	number=${syscall%% *}
+	name=${syscall#* }
+	if ! rg -q "^[[:space:]]*${number}[[:space:]]+${name}\$" \
+		"$repo_root/kernel/install-pkm-subtree.sh"; then
+		die "install-pkm-subtree.sh does not stage syscall ${number} ${name}"
+	fi
+done
+
 if [[ -d "$repo_root/kacs" ]] && \
 	rg -n 'eventfd' "$repo_root/kacs" >/dev/null; then
 	die "legacy eventfd plumbing found in kacs subtree"

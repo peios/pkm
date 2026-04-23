@@ -2,15 +2,16 @@
 /*
  * Slow-track PKM AccessCheck kernel ingress helper.
  *
- * This file deliberately stays below public syscall registration. It provides
- * the internal kernel usercopy/writeback seam above the closed pure Slice 15
- * ABI bridge, plus the token-fd resolution helper needed before the public
- * AccessCheck syscalls can be safely exposed.
+ * This file provides the public AccessCheck syscalls and the internal
+ * kernel usercopy/writeback seam above the closed pure Slice 15 ABI bridge.
+ * Public syscalls intentionally reuse the token-fd-aware ingress path instead
+ * of growing a parallel AccessCheck implementation.
  */
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
+#include <linux/syscalls.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
 
@@ -340,3 +341,64 @@ long pkm_kacs_access_check_user_list_with_token_fd(
 		&ops, (u64)(uintptr_t)uargs, (u64)(uintptr_t)results,
 		results_count, event_sinks, summary);
 }
+
+static long pkm_kacs_access_check_syscall_scalar_with_ops(
+	const struct pkm_kacs_usercopy_ops *ops,
+	u64 args_ptr)
+{
+	return pkm_kacs_access_check_ingress_scalar_with_token_fd(
+		ops, args_ptr, NULL, NULL);
+}
+
+static long pkm_kacs_access_check_syscall_list_with_ops(
+	const struct pkm_kacs_usercopy_ops *ops,
+	u64 args_ptr,
+	u64 results_ptr,
+	u32 results_count)
+{
+	return pkm_kacs_access_check_ingress_list_with_token_fd(
+		ops, args_ptr, results_ptr, results_count, NULL, NULL);
+}
+
+SYSCALL_DEFINE1(kacs_access_check, const void __user *, uargs)
+{
+	static const struct pkm_kacs_usercopy_ops ops = {
+		.read_bytes = pkm_kacs_read_user,
+		.write_bytes = pkm_kacs_write_user,
+	};
+
+	return pkm_kacs_access_check_syscall_scalar_with_ops(
+		&ops, (u64)(uintptr_t)uargs);
+}
+
+SYSCALL_DEFINE3(kacs_access_check_list, const void __user *, uargs,
+		struct kacs_node_result __user *, results, u32, results_count)
+{
+	static const struct pkm_kacs_usercopy_ops ops = {
+		.read_bytes = pkm_kacs_read_user,
+		.write_bytes = pkm_kacs_write_user,
+	};
+
+	return pkm_kacs_access_check_syscall_list_with_ops(
+		&ops, (u64)(uintptr_t)uargs, (u64)(uintptr_t)results,
+		results_count);
+}
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+long pkm_kacs_kunit_access_check_syscall_scalar(
+	const struct pkm_kacs_usercopy_ops *ops,
+	u64 args_ptr)
+{
+	return pkm_kacs_access_check_syscall_scalar_with_ops(ops, args_ptr);
+}
+
+long pkm_kacs_kunit_access_check_syscall_list(
+	const struct pkm_kacs_usercopy_ops *ops,
+	u64 args_ptr,
+	u64 results_ptr,
+	u32 results_count)
+{
+	return pkm_kacs_access_check_syscall_list_with_ops(
+		ops, args_ptr, results_ptr, results_count);
+}
+#endif

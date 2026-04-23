@@ -109,4 +109,8 @@ insert_source_kconfig "$kernel_root/security/Kconfig"
 append_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1000 kacs_open_self_token
 append_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1023 kacs_access_check
+append_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1024 kacs_access_check_list
+append_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1025 kacs_set_caap
