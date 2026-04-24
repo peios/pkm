@@ -34,11 +34,26 @@
 
 /* Token ioctl ABI from Appendix A */
 #define KACS_IOC_MAGIC 0x4BU
+#define SE_PRIVILEGE_ENABLED 0x00000002U
+#define SE_PRIVILEGE_REMOVED 0x00000004U
+#define KACS_PRIV_RESET_ALL_DEFAULTS 0x80000000U
 
 struct kacs_query_args {
 	u32 token_class;
 	u32 buf_len;
 	u64 buf_ptr;
+};
+
+struct kacs_adjust_privs_args {
+	u32 count;
+	u32 _pad;
+	u64 data_ptr;
+	u64 previous_enabled;
+};
+
+struct kacs_priv_entry {
+	u32 luid;
+	u32 attributes;
 };
 
 struct kacs_adjust_groups_args {
@@ -61,6 +76,8 @@ struct kacs_adjust_default_args {
 };
 
 #define KACS_IOC_QUERY _IOWR(KACS_IOC_MAGIC, 0, struct kacs_query_args)
+#define KACS_IOC_ADJUST_PRIVS \
+	_IOW(KACS_IOC_MAGIC, 1, struct kacs_adjust_privs_args)
 #define KACS_IOC_ADJUST_GROUPS \
 	_IOW(KACS_IOC_MAGIC, 7, struct kacs_adjust_groups_args)
 #define KACS_IOC_ADJUST_DEFAULT \
@@ -104,6 +121,9 @@ int pkm_kacs_kunit_token_fd_snapshot(int fd,
 				     struct pkm_kacs_token_fd_view *out);
 long pkm_kacs_kunit_token_fd_query(int fd, struct kacs_query_args *args,
 				   void *out_buf);
+long pkm_kacs_kunit_token_fd_adjust_privs(int fd,
+					  struct kacs_adjust_privs_args *args,
+					  const struct kacs_priv_entry *entries);
 long pkm_kacs_kunit_token_fd_adjust_groups(int fd,
 					   struct kacs_adjust_groups_args *args,
 					   const struct kacs_group_entry *entries);

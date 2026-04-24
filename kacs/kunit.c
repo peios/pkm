@@ -38,6 +38,29 @@
 #define PKM_KUNIT_SE_TCB_PRIVILEGE (1ULL << 7)
 #define PKM_KUNIT_SE_SECURITY_PRIVILEGE (1ULL << 8)
 #define PKM_KUNIT_SYSTEM_PRIVILEGES_ALL 0xC000000FFFFFFFFCULL
+#define PKM_KUNIT_SE_PRIVILEGE_ENABLED 0x00000002U
+#define PKM_KUNIT_SE_PRIVILEGE_REMOVED 0x00000004U
+#define PKM_KUNIT_PRIV_RESET_ALL_DEFAULTS 0x80000000U
+#define PKM_KUNIT_PRIV_LUID_REMOVE 2U
+#define PKM_KUNIT_PRIV_LUID_ENABLE 5U
+#define PKM_KUNIT_PRIV_LUID_DISABLE 9U
+#define PKM_KUNIT_PRIV_LUID_ABSENT_DISABLE 12U
+#define PKM_KUNIT_PRIV_LUID_ABSENT_REMOVE 13U
+#define PKM_KUNIT_ADJUSTABLE_PRIV_PRESENT \
+	((1ULL << PKM_KUNIT_PRIV_LUID_REMOVE) | \
+	 (1ULL << PKM_KUNIT_PRIV_LUID_ENABLE) | \
+	 (1ULL << PKM_KUNIT_PRIV_LUID_DISABLE))
+#define PKM_KUNIT_ADJUSTABLE_PRIV_ENABLED \
+	((1ULL << PKM_KUNIT_PRIV_LUID_REMOVE) | \
+	 (1ULL << PKM_KUNIT_PRIV_LUID_DISABLE))
+#define PKM_KUNIT_ADJUSTABLE_PRIV_ENABLED_BY_DEFAULT \
+	PKM_KUNIT_ADJUSTABLE_PRIV_ENABLED
+#define PKM_KUNIT_ADJUSTABLE_PRIV_AFTER_ENABLE_DISABLE \
+	((1ULL << PKM_KUNIT_PRIV_LUID_REMOVE) | \
+	 (1ULL << PKM_KUNIT_PRIV_LUID_ENABLE))
+#define PKM_KUNIT_ADJUSTABLE_PRIV_AFTER_REMOVE \
+	((1ULL << PKM_KUNIT_PRIV_LUID_ENABLE) | \
+	 (1ULL << PKM_KUNIT_PRIV_LUID_DISABLE))
 #define PKM_KUNIT_SE_GROUP_ENABLED 0x00000004U
 #define PKM_KUNIT_SE_GROUP_USE_FOR_DENY_ONLY 0x00000010U
 #define PKM_KUNIT_ADJUSTABLE_GROUP0_DEFAULT 0x0000000EU
@@ -2035,6 +2058,419 @@ static void pkm_kunit_token_adjust_groups_invalid_reset_encoding_fails_closed(
 	kacs_rust_token_drop(target_token);
 }
 
+static void pkm_kunit_token_adjust_privs_updates_and_queries_live_state(
+	struct kunit *test)
+{
+	struct kacs_adjust_privs_args adjust = {
+		.count = 2,
+	};
+	struct kacs_priv_entry entries[2] = {
+		{ .luid = PKM_KUNIT_PRIV_LUID_DISABLE, .attributes = 0 },
+		{ .luid = PKM_KUNIT_PRIV_LUID_ENABLE,
+		  .attributes = PKM_KUNIT_SE_PRIVILEGE_ENABLED },
+	};
+	struct kacs_query_args args = {
+		.token_class = TOKEN_CLASS_PRIVILEGES,
+		.buf_len = 32,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	u8 buf[32] = { 0 };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_ADJUST_PRIVS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_privs((int)fd, &adjust,
+							    entries),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, adjust.previous_enabled,
+			PKM_KUNIT_ADJUSTABLE_PRIV_ENABLED);
+
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_present,
+			PKM_KUNIT_ADJUSTABLE_PRIV_PRESENT);
+	KUNIT_EXPECT_EQ(test, after.privileges_enabled,
+			PKM_KUNIT_ADJUSTABLE_PRIV_AFTER_ENABLE_DISABLE);
+	KUNIT_EXPECT_EQ(test, after.privileges_enabled_by_default,
+			PKM_KUNIT_ADJUSTABLE_PRIV_ENABLED_BY_DEFAULT);
+	KUNIT_EXPECT_EQ(test, after.privileges_used, 0ULL);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id + 1);
+
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 32U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 0),
+			PKM_KUNIT_ADJUSTABLE_PRIV_PRESENT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 8),
+			PKM_KUNIT_ADJUSTABLE_PRIV_AFTER_ENABLE_DISABLE);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 16),
+			PKM_KUNIT_ADJUSTABLE_PRIV_ENABLED_BY_DEFAULT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 24), 0ULL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_privs_remove_preserves_used_and_reset(
+	struct kunit *test)
+{
+	struct kacs_adjust_privs_args remove = {
+		.count = 1,
+	};
+	struct kacs_priv_entry remove_entry = {
+		.luid = PKM_KUNIT_PRIV_LUID_REMOVE,
+		.attributes = PKM_KUNIT_SE_PRIVILEGE_REMOVED,
+	};
+	struct kacs_adjust_privs_args mutate = {
+		.count = 2,
+	};
+	struct kacs_priv_entry mutate_entries[2] = {
+		{ .luid = PKM_KUNIT_PRIV_LUID_DISABLE, .attributes = 0 },
+		{ .luid = PKM_KUNIT_PRIV_LUID_ENABLE,
+		  .attributes = PKM_KUNIT_SE_PRIVILEGE_ENABLED },
+	};
+	struct kacs_adjust_privs_args reset = {
+		.count = 1,
+	};
+	struct kacs_priv_entry reset_entry = {
+		.luid = 0,
+		.attributes = PKM_KUNIT_PRIV_RESET_ALL_DEFAULTS,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot removed = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_token_mark_privileges_used(
+				  target_token,
+				  1ULL << PKM_KUNIT_PRIV_LUID_REMOVE));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_ADJUST_PRIVS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_privs((int)fd, &remove,
+							    &remove_entry),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, remove.previous_enabled,
+			PKM_KUNIT_ADJUSTABLE_PRIV_ENABLED);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &removed));
+	KUNIT_EXPECT_EQ(test, removed.privileges_present,
+			PKM_KUNIT_ADJUSTABLE_PRIV_AFTER_REMOVE);
+	KUNIT_EXPECT_EQ(test, removed.privileges_enabled,
+			1ULL << PKM_KUNIT_PRIV_LUID_DISABLE);
+	KUNIT_EXPECT_EQ(test, removed.privileges_enabled_by_default,
+			1ULL << PKM_KUNIT_PRIV_LUID_DISABLE);
+	KUNIT_EXPECT_EQ(test,
+			removed.privileges_used &
+				(1ULL << PKM_KUNIT_PRIV_LUID_REMOVE),
+			1ULL << PKM_KUNIT_PRIV_LUID_REMOVE);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_privs((int)fd, &mutate,
+							    mutate_entries),
+			(long)0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_privs((int)fd, &reset,
+							    &reset_entry),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, reset.previous_enabled,
+			1ULL << PKM_KUNIT_PRIV_LUID_ENABLE);
+
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_present,
+			PKM_KUNIT_ADJUSTABLE_PRIV_AFTER_REMOVE);
+	KUNIT_EXPECT_EQ(test, after.privileges_enabled,
+			1ULL << PKM_KUNIT_PRIV_LUID_DISABLE);
+	KUNIT_EXPECT_EQ(test, after.privileges_enabled_by_default,
+			1ULL << PKM_KUNIT_PRIV_LUID_DISABLE);
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used &
+				(1ULL << PKM_KUNIT_PRIV_LUID_REMOVE),
+			1ULL << PKM_KUNIT_PRIV_LUID_REMOVE);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id + 3);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_privs_absent_disable_remove_noop(
+	struct kunit *test)
+{
+	struct kacs_adjust_privs_args adjust = {
+		.count = 2,
+	};
+	struct kacs_priv_entry entries[2] = {
+		{ .luid = PKM_KUNIT_PRIV_LUID_ABSENT_DISABLE, .attributes = 0 },
+		{ .luid = PKM_KUNIT_PRIV_LUID_ABSENT_REMOVE,
+		  .attributes = PKM_KUNIT_SE_PRIVILEGE_REMOVED },
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_ADJUST_PRIVS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_privs((int)fd, &adjust,
+							    entries),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, adjust.previous_enabled,
+			PKM_KUNIT_ADJUSTABLE_PRIV_ENABLED);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_present, before.privileges_present);
+	KUNIT_EXPECT_EQ(test, after.privileges_enabled, before.privileges_enabled);
+	KUNIT_EXPECT_EQ(test, after.privileges_enabled_by_default,
+			before.privileges_enabled_by_default);
+	KUNIT_EXPECT_EQ(test, after.privileges_used, before.privileges_used);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id + 1);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_privs_requires_cached_right(
+	struct kunit *test)
+{
+	struct kacs_adjust_privs_args adjust = {
+		.count = 1,
+	};
+	struct kacs_priv_entry entry = {
+		.luid = PKM_KUNIT_PRIV_LUID_DISABLE,
+		.attributes = 0,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(subject_token,
+						      target_token,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_privs((int)fd, &adjust,
+							    &entry),
+			(long)-EACCES);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_privs_duplicate_fails_closed(
+	struct kunit *test)
+{
+	struct kacs_adjust_privs_args adjust = {
+		.count = 2,
+	};
+	struct kacs_priv_entry entries[2] = {
+		{ .luid = PKM_KUNIT_PRIV_LUID_DISABLE, .attributes = 0 },
+		{ .luid = PKM_KUNIT_PRIV_LUID_DISABLE,
+		  .attributes = PKM_KUNIT_SE_PRIVILEGE_ENABLED },
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_ADJUST_PRIVS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_privs((int)fd, &adjust,
+							    entries),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_privs_enable_absent_fails_closed(
+	struct kunit *test)
+{
+	struct kacs_adjust_privs_args adjust = {
+		.count = 1,
+	};
+	struct kacs_priv_entry entry = {
+		.luid = PKM_KUNIT_PRIV_LUID_ABSENT_DISABLE,
+		.attributes = PKM_KUNIT_SE_PRIVILEGE_ENABLED,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_ADJUST_PRIVS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_privs((int)fd, &adjust,
+							    &entry),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_privs_invalid_reset_encoding_fails_closed(
+	struct kunit *test)
+{
+	struct kacs_adjust_privs_args adjust = {
+		.count = 1,
+	};
+	struct kacs_priv_entry entry = {
+		.luid = 1,
+		.attributes = PKM_KUNIT_PRIV_RESET_ALL_DEFAULTS,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_ADJUST_PRIVS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_privs((int)fd, &adjust,
+							    &entry),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_privs_invalid_attributes_fails_closed(
+	struct kunit *test)
+{
+	struct kacs_adjust_privs_args adjust = {
+		.count = 1,
+	};
+	struct kacs_priv_entry entry = {
+		.luid = PKM_KUNIT_PRIV_LUID_DISABLE,
+		.attributes = PKM_KUNIT_SE_PRIVILEGE_ENABLED |
+			      PKM_KUNIT_SE_PRIVILEGE_REMOVED,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_ADJUST_PRIVS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_privs((int)fd, &adjust,
+							    &entry),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
 static void pkm_kunit_access_check_token_fd_current_effective(struct kunit *test)
 {
 	u8 args[136];
@@ -3012,6 +3448,15 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_token_adjust_groups_user_sid_fails_closed),
 	KUNIT_CASE(
 		pkm_kunit_token_adjust_groups_invalid_reset_encoding_fails_closed),
+	KUNIT_CASE(pkm_kunit_token_adjust_privs_updates_and_queries_live_state),
+	KUNIT_CASE(pkm_kunit_token_adjust_privs_remove_preserves_used_and_reset),
+	KUNIT_CASE(pkm_kunit_token_adjust_privs_absent_disable_remove_noop),
+	KUNIT_CASE(pkm_kunit_token_adjust_privs_requires_cached_right),
+	KUNIT_CASE(pkm_kunit_token_adjust_privs_duplicate_fails_closed),
+	KUNIT_CASE(pkm_kunit_token_adjust_privs_enable_absent_fails_closed),
+	KUNIT_CASE(
+		pkm_kunit_token_adjust_privs_invalid_reset_encoding_fails_closed),
+	KUNIT_CASE(pkm_kunit_token_adjust_privs_invalid_attributes_fails_closed),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_current_effective),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_explicit_handle),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_invalid_negative),

@@ -12,6 +12,7 @@
 //! - bounded interactive-session mutation for `KACS_IOC_ADJUST_SESSIONID`
 //! - bounded default-field mutation for `KACS_IOC_ADJUST_DEFAULT`
 //! - bounded group-enabled-state mutation for `KACS_IOC_ADJUST_GROUPS`
+//! - bounded privilege mutation for `KACS_IOC_ADJUST_PRIVS`
 //! - a small KUnit snapshot seam for bootstrap verification
 //!
 //! Broader mutable token state remains deferred to later token-handle slices.
@@ -56,6 +57,7 @@ const MAX_TOKEN_SD_BYTES: usize = 104;
 const MAX_DEFAULT_DACL_BYTES: usize = 65_536;
 const TOKEN_INDEX_NO_CHANGE: u32 = u32::MAX;
 const MAX_BOOT_GROUPS: usize = 5;
+const MAX_PRIVILEGE_ADJUST_ENTRIES: usize = 64;
 
 const EACCES: i32 = 13;
 const EINVAL: i32 = 22;
@@ -68,6 +70,9 @@ const SE_GROUP_ENABLED: u32 = 0x0000_0004;
 const SE_GROUP_OWNER: u32 = 0x0000_0008;
 const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x0000_0010;
 const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
+const SE_PRIVILEGE_ENABLED: u32 = 0x0000_0002;
+const SE_PRIVILEGE_REMOVED: u32 = 0x0000_0004;
+const KACS_PRIV_RESET_ALL_DEFAULTS: u32 = 0x8000_0000;
 
 const KACS_TOKEN_IMPERSONATE: u32 = 0x0004;
 const KACS_TOKEN_QUERY: u32 = 0x0008;
@@ -102,6 +107,9 @@ const KUNIT_ADJUSTABLE_GROUP_ATTRIBUTES: [u32; MAX_BOOT_GROUPS] = [
     SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED,
     SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED | SE_GROUP_LOGON_ID,
 ];
+const KUNIT_ADJUSTABLE_PRIVILEGES_PRESENT: u64 = (1u64 << 2) | (1u64 << 5) | (1u64 << 9);
+const KUNIT_ADJUSTABLE_PRIVILEGES_ENABLED: u64 = (1u64 << 2) | (1u64 << 9);
+const KUNIT_ADJUSTABLE_PRIVILEGES_ENABLED_BY_DEFAULT: u64 = (1u64 << 2) | (1u64 << 9);
 const SYSTEM_DEFAULT_DACL_BYTES: &[u8] = &[
     2, 0, 52, 0, 2, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 16, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0, 0, 0,
     24, 0, 0, 0, 0, 16, 1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0,
@@ -177,6 +185,17 @@ pub struct PkmKacsGroupAdjustEntry {
     pub index: u32,
     /// 1 = enable, 0 = disable. The reset sentinel requires 0.
     pub enable: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+/// C-visible privilege-adjustment entry ABI for the bounded Slice 36 runtime.
+pub struct PkmKacsPrivilegeAdjustEntry {
+    /// Privilege bit position, or 0 when paired with the reset sentinel.
+    pub luid: u32,
+    /// Disable = 0, enable = `SE_PRIVILEGE_ENABLED`, remove =
+    /// `SE_PRIVILEGE_REMOVED`, reset = `KACS_PRIV_RESET_ALL_DEFAULTS`.
+    pub attributes: u32,
 }
 
 #[repr(C)]
@@ -271,9 +290,9 @@ struct PkmKacsBootToken {
     primary_group_index: AtomicU32,
     default_dacl_ptr: AtomicPtr<u8>,
     default_dacl_len: AtomicUsize,
-    privileges_present: u64,
-    privileges_enabled: u64,
-    privileges_enabled_by_default: u64,
+    privileges_present: AtomicU64,
+    privileges_enabled: AtomicU64,
+    privileges_enabled_by_default: AtomicU64,
     privileges_used: AtomicU64,
     integrity_level: IntegrityLevel,
     mandatory_policy: u32,
@@ -484,9 +503,9 @@ impl PkmKacsBootToken {
             primary_group_index: AtomicU32::new(BOOT_SYSTEM_PRIMARY_GROUP_INDEX),
             default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
             default_dacl_len: AtomicUsize::new(default_dacl_len),
-            privileges_present,
-            privileges_enabled,
-            privileges_enabled_by_default,
+            privileges_present: AtomicU64::new(privileges_present),
+            privileges_enabled: AtomicU64::new(privileges_enabled),
+            privileges_enabled_by_default: AtomicU64::new(privileges_enabled_by_default),
             privileges_used: AtomicU64::new(0),
             integrity_level: IntegrityLevel::System,
             mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP
@@ -551,6 +570,17 @@ impl PkmKacsBootToken {
         )
     }
 
+    fn create_adjustable_privileges() -> Option<*const c_void> {
+        Self::create_system_like(
+            QUERY_ONLY_TOKEN_OWN_SD_BYTES,
+            KUNIT_ADJUSTABLE_PRIVILEGES_PRESENT,
+            KUNIT_ADJUSTABLE_PRIVILEGES_ENABLED,
+            KUNIT_ADJUSTABLE_PRIVILEGES_ENABLED_BY_DEFAULT,
+            BOOT_SYSTEM_GROUP_ATTRIBUTES,
+            false,
+        )
+    }
+
     unsafe fn from_ptr<'a>(ptr: *const c_void) -> Option<&'a Self> {
         unsafe { (ptr as *const Self).as_ref() }
     }
@@ -567,8 +597,8 @@ impl PkmKacsBootToken {
         let Some(token) = (unsafe { Self::from_ptr(ptr) }) else {
             return null();
         };
-        let privileges = token.privileges_snapshot();
         let _guard = token.lock_mutation();
+        let privileges = token.privileges_snapshot_locked();
         let group_attributes = token.current_group_attributes();
         let (default_dacl_ptr, default_dacl_len) =
             match alloc_copy_bytes(token.default_dacl_bytes()) {
@@ -596,9 +626,9 @@ impl PkmKacsBootToken {
             primary_group_index: AtomicU32::new(token.primary_group_index.load(Ordering::Relaxed)),
             default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
             default_dacl_len: AtomicUsize::new(default_dacl_len),
-            privileges_present: privileges.present,
-            privileges_enabled: privileges.enabled,
-            privileges_enabled_by_default: privileges.enabled_by_default,
+            privileges_present: AtomicU64::new(privileges.present),
+            privileges_enabled: AtomicU64::new(privileges.enabled),
+            privileges_enabled_by_default: AtomicU64::new(privileges.enabled_by_default),
             privileges_used: AtomicU64::new(privileges.used),
             integrity_level: token.integrity_level,
             mandatory_policy: token.mandatory_policy,
@@ -636,6 +666,7 @@ impl PkmKacsBootToken {
         let owner_sid_index = self.owner_sid_index.load(Ordering::Relaxed);
         let primary_group_index = self.primary_group_index.load(Ordering::Relaxed);
         let default_dacl = self.default_dacl_bytes();
+        let privileges = self.privileges_snapshot_locked();
         let group_views = unsafe { &*self.group_views.get() };
 
         *out = PkmKacsBootSnapshot {
@@ -657,9 +688,9 @@ impl PkmKacsBootToken {
             primary_group_index,
             default_dacl_ptr: default_dacl.as_ptr(),
             default_dacl_len: default_dacl.len(),
-            privileges_present: self.privileges_present,
-            privileges_enabled: self.privileges_enabled,
-            privileges_enabled_by_default: self.privileges_enabled_by_default,
+            privileges_present: privileges.present,
+            privileges_enabled: privileges.enabled,
+            privileges_enabled_by_default: privileges.enabled_by_default,
             privileges_used: self.privileges_used.load(Ordering::Acquire),
             integrity_level: self.integrity_level as u32,
             token_type: TOKEN_TYPE_PRIMARY_ABI,
@@ -672,13 +703,18 @@ impl PkmKacsBootToken {
         };
     }
 
-    fn privileges_snapshot(&self) -> TokenPrivileges {
+    fn privileges_snapshot_locked(&self) -> TokenPrivileges {
         TokenPrivileges {
-            present: self.privileges_present,
-            enabled: self.privileges_enabled,
-            enabled_by_default: self.privileges_enabled_by_default,
+            present: self.privileges_present.load(Ordering::Relaxed),
+            enabled: self.privileges_enabled.load(Ordering::Relaxed),
+            enabled_by_default: self.privileges_enabled_by_default.load(Ordering::Relaxed),
             used: self.privileges_used.load(Ordering::Acquire),
         }
+    }
+
+    fn privileges_snapshot(&self) -> TokenPrivileges {
+        let _guard = self.lock_mutation();
+        self.privileges_snapshot_locked()
     }
 
     fn mark_privileges_used(&self, used_mask: u64) {
@@ -707,6 +743,87 @@ impl PkmKacsBootToken {
             .store(session_id, Ordering::Relaxed);
         self.modified_id.store(next_modified_id, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn adjust_privileges(&self, entries: &[PkmKacsPrivilegeAdjustEntry]) -> Result<u64, i32> {
+        let mut seen = [false; MAX_PRIVILEGE_ADJUST_ENTRIES];
+        let _guard = self.lock_mutation();
+        let previous = self.privileges_snapshot_locked();
+        let modified_id = self.modified_id.load(Ordering::Relaxed);
+        let Some(next_modified_id) = modified_id.checked_add(1) else {
+            return Err(-ERANGE);
+        };
+        let mut next_present = previous.present;
+        let mut next_enabled = previous.enabled;
+        let mut next_enabled_by_default = previous.enabled_by_default;
+
+        if entries.is_empty() {
+            return Err(-EINVAL);
+        }
+        if entries[0].attributes == KACS_PRIV_RESET_ALL_DEFAULTS {
+            if entries.len() != 1 || entries[0].luid != 0 {
+                return Err(-EINVAL);
+            }
+            next_enabled = next_enabled_by_default & next_present;
+            self.privileges_present
+                .store(next_present, Ordering::Relaxed);
+            self.privileges_enabled
+                .store(next_enabled, Ordering::Relaxed);
+            self.privileges_enabled_by_default
+                .store(next_enabled_by_default, Ordering::Relaxed);
+            self.modified_id.store(next_modified_id, Ordering::Relaxed);
+            return Ok(previous.enabled);
+        }
+
+        for entry in entries {
+            let mask = match entry.luid {
+                0..=63 => 1u64 << entry.luid,
+                _ => return Err(-EINVAL),
+            };
+
+            if seen[entry.luid as usize] {
+                return Err(-EINVAL);
+            }
+            seen[entry.luid as usize] = true;
+
+            match entry.attributes {
+                0 | SE_PRIVILEGE_REMOVED => {}
+                SE_PRIVILEGE_ENABLED => {
+                    if (previous.present & mask) == 0 {
+                        return Err(-EINVAL);
+                    }
+                }
+                _ => return Err(-EINVAL),
+            }
+        }
+
+        for entry in entries {
+            let mask = 1u64 << entry.luid;
+
+            match entry.attributes {
+                0 => {
+                    next_enabled &= !mask;
+                }
+                SE_PRIVILEGE_ENABLED => {
+                    next_enabled |= mask;
+                }
+                SE_PRIVILEGE_REMOVED => {
+                    next_present &= !mask;
+                    next_enabled &= !mask;
+                    next_enabled_by_default &= !mask;
+                }
+                _ => return Err(-EINVAL),
+            }
+        }
+
+        self.privileges_present
+            .store(next_present, Ordering::Relaxed);
+        self.privileges_enabled
+            .store(next_enabled, Ordering::Relaxed);
+        self.privileges_enabled_by_default
+            .store(next_enabled_by_default, Ordering::Relaxed);
+        self.modified_id.store(next_modified_id, Ordering::Relaxed);
+        Ok(previous.enabled)
     }
 
     fn default_dacl_bytes(&self) -> &[u8] {
@@ -849,7 +966,7 @@ impl PkmKacsBootToken {
     fn with_access_token<T>(&self, f: impl FnOnce(AccessCheckToken<'_>) -> T) -> T {
         let (groups, privileges) = {
             let _guard = self.lock_mutation();
-            (self.current_groups(), self.privileges_snapshot())
+            (self.current_groups(), self.privileges_snapshot_locked())
         };
         let access_token = AccessCheckToken {
             subject: TokenView {
@@ -1027,7 +1144,8 @@ impl PkmKacsBootToken {
                 true
             }
             TOKEN_CLASS_PRIVILEGES => {
-                let privileges = self.privileges_snapshot();
+                let _guard = self.lock_mutation();
+                let privileges = self.privileges_snapshot_locked();
 
                 writer.write_u64(privileges.present)
                     && writer.write_u64(privileges.enabled)
@@ -1333,6 +1451,40 @@ pub extern "C" fn kacs_rust_token_query(
 }
 
 #[no_mangle]
+/// Adjusts a live token's privilege masks and returns the prior enabled mask.
+pub extern "C" fn kacs_rust_token_adjust_privs(
+    token: *const c_void,
+    entries: *const PkmKacsPrivilegeAdjustEntry,
+    count: u32,
+    previous_enabled_out: *mut u64,
+) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let Some(previous_enabled_out) = (unsafe { previous_enabled_out.as_mut() }) else {
+        return -EINVAL;
+    };
+    if count as usize > MAX_PRIVILEGE_ADJUST_ENTRIES {
+        return -EINVAL;
+    }
+    let entries = if count == 0 {
+        &[][..]
+    } else if entries.is_null() {
+        return -EINVAL;
+    } else {
+        unsafe { core::slice::from_raw_parts(entries, count as usize) }
+    };
+
+    match token.adjust_privileges(entries) {
+        Ok(previous_enabled) => {
+            *previous_enabled_out = previous_enabled;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
 /// Adjusts a live token's interactive session id and bumps `modified_id`.
 pub extern "C" fn kacs_rust_token_adjust_session_id(token: *const c_void, session_id: u32) -> i32 {
     let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
@@ -1468,4 +1620,12 @@ pub extern "C" fn kacs_rust_kunit_create_without_tcb_token() -> *const c_void {
 /// paths.
 pub extern "C" fn kacs_rust_kunit_create_adjustable_groups_token() -> *const c_void {
     PkmKacsBootToken::create_adjustable_groups().unwrap_or(null())
+}
+
+#[no_mangle]
+/// Creates a KUnit-only SYSTEM-like token with a small nontrivial privilege
+/// state so `KACS_IOC_ADJUST_PRIVS` can exercise success and fail-closed
+/// paths.
+pub extern "C" fn kacs_rust_kunit_create_adjustable_privileges_token() -> *const c_void {
+    PkmKacsBootToken::create_adjustable_privileges().unwrap_or(null())
 }
