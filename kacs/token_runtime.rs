@@ -11,6 +11,7 @@
 //! - fixed boot-token default-object fields for the query ioctl surface
 //! - bounded interactive-session mutation for `KACS_IOC_ADJUST_SESSIONID`
 //! - bounded default-field mutation for `KACS_IOC_ADJUST_DEFAULT`
+//! - bounded group-enabled-state mutation for `KACS_IOC_ADJUST_GROUPS`
 //! - a small KUnit snapshot seam for bootstrap verification
 //!
 //! Broader mutable token state remains deferred to later token-handle slices.
@@ -34,6 +35,7 @@ use crate::token::{
     AccessCheckToken, ConfinementTokenContext, ImpersonationLevel, RestrictedTokenContext,
     SidAndAttributes, TokenType, TokenView,
 };
+use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::ptr::{copy_nonoverlapping, null, null_mut};
 use core::sync::atomic::{
@@ -53,6 +55,7 @@ const TOKEN_ELEVATION_DEFAULT_ABI: u32 = 1;
 const MAX_TOKEN_SD_BYTES: usize = 104;
 const MAX_DEFAULT_DACL_BYTES: usize = 65_536;
 const TOKEN_INDEX_NO_CHANGE: u32 = u32::MAX;
+const MAX_BOOT_GROUPS: usize = 5;
 
 const EACCES: i32 = 13;
 const EINVAL: i32 = 22;
@@ -63,6 +66,7 @@ const SE_GROUP_MANDATORY: u32 = 0x0000_0001;
 const SE_GROUP_ENABLED_BY_DEFAULT: u32 = 0x0000_0002;
 const SE_GROUP_ENABLED: u32 = 0x0000_0004;
 const SE_GROUP_OWNER: u32 = 0x0000_0008;
+const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x0000_0010;
 const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
 
 const KACS_TOKEN_IMPERSONATE: u32 = 0x0004;
@@ -84,6 +88,20 @@ const BOOT_SYSTEM_TOKEN_ID: u64 = 0;
 const BOOT_SYSTEM_MODIFIED_ID: u64 = 0;
 const BOOT_SYSTEM_OWNER_SID_INDEX: u32 = 0;
 const BOOT_SYSTEM_PRIMARY_GROUP_INDEX: u32 = 1;
+const BOOT_SYSTEM_GROUP_ATTRIBUTES: [u32; MAX_BOOT_GROUPS] = [
+    SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED | SE_GROUP_OWNER,
+    SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED,
+    SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED,
+    SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED,
+    SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED | SE_GROUP_LOGON_ID,
+];
+const KUNIT_ADJUSTABLE_GROUP_ATTRIBUTES: [u32; MAX_BOOT_GROUPS] = [
+    SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED | SE_GROUP_OWNER,
+    0,
+    SE_GROUP_USE_FOR_DENY_ONLY,
+    SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED,
+    SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED | SE_GROUP_LOGON_ID,
+];
 const SYSTEM_DEFAULT_DACL_BYTES: &[u8] = &[
     2, 0, 52, 0, 2, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 16, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0, 0, 0,
     24, 0, 0, 0, 0, 16, 1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0,
@@ -149,6 +167,16 @@ pub struct PkmKacsBootGroupView {
     pub sid_len: usize,
     /// Group attributes.
     pub attributes: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+/// C-visible group-adjustment entry ABI for the bounded Slice 35 runtime.
+pub struct PkmKacsGroupAdjustEntry {
+    /// Zero-based group array index, or `u32::MAX` as the reset sentinel.
+    pub index: u32,
+    /// 1 = enable, 0 = disable. The reset sentinel requires 0.
+    pub enable: u32,
 }
 
 #[repr(C)]
@@ -233,8 +261,10 @@ struct PkmKacsBootToken {
     session: PkmKacsBootSession,
     user_sid: Sid<'static>,
     logon_sid: Sid<'static>,
-    groups: [SidAndAttributes<'static>; 5],
-    group_views: [PkmKacsBootGroupView; 5],
+    group_sids: [Sid<'static>; MAX_BOOT_GROUPS],
+    group_default_attributes: [u32; MAX_BOOT_GROUPS],
+    group_attributes: [AtomicU32; MAX_BOOT_GROUPS],
+    group_views: UnsafeCell<[PkmKacsBootGroupView; MAX_BOOT_GROUPS]>,
     token_id: u64,
     modified_id: AtomicU64,
     owner_sid_index: AtomicU32,
@@ -314,11 +344,11 @@ impl QueryWriter {
     }
 }
 
-fn sid_and_attributes_query_len(sids: &[SidAndAttributes<'_>]) -> Option<usize> {
+fn sid_query_len(sids: &[Sid<'_>]) -> Option<usize> {
     let mut len = 4usize;
 
-    for entry in sids {
-        let sid_len = entry.sid.as_bytes().len();
+    for sid in sids {
+        let sid_len = sid.as_bytes().len();
 
         if sid_len > u32::MAX as usize {
             return None;
@@ -329,34 +359,6 @@ fn sid_and_attributes_query_len(sids: &[SidAndAttributes<'_>]) -> Option<usize> 
     }
 
     Some(len)
-}
-
-fn write_sid_and_attributes_query(writer: &mut QueryWriter, sids: &[SidAndAttributes<'_>]) -> bool {
-    if sids.len() > u32::MAX as usize {
-        return false;
-    }
-    if !writer.write_u32(sids.len() as u32) {
-        return false;
-    }
-
-    for entry in sids {
-        let sid = entry.sid.as_bytes();
-
-        if sid.len() > u32::MAX as usize {
-            return false;
-        }
-        if !writer.write_u32(sid.len() as u32) {
-            return false;
-        }
-        if !writer.write_bytes(sid) {
-            return false;
-        }
-        if !writer.write_u32(entry.attributes) {
-            return false;
-        }
-    }
-
-    true
 }
 
 fn token_type_abi(token_type: TokenType) -> u32 {
@@ -404,12 +406,25 @@ fn free_allocated_bytes(ptr: *mut u8) {
     }
 }
 
+fn build_group_views(
+    group_sids: &[Sid<'static>; MAX_BOOT_GROUPS],
+    group_attributes: &[u32; MAX_BOOT_GROUPS],
+) -> [PkmKacsBootGroupView; MAX_BOOT_GROUPS] {
+    core::array::from_fn(|index| PkmKacsBootGroupView {
+        sid_ptr: group_sids[index].as_bytes().as_ptr(),
+        sid_len: group_sids[index].as_bytes().len(),
+        attributes: group_attributes[index],
+    })
+}
+
 impl PkmKacsBootToken {
     fn create_system_like(
         own_sd_bytes: &[u8],
         privileges_present: u64,
         privileges_enabled: u64,
         privileges_enabled_by_default: u64,
+        group_attributes: [u32; MAX_BOOT_GROUPS],
+        include_user_group: bool,
     ) -> Option<*const c_void> {
         let user_sid = Sid::parse(SYSTEM_SID_BYTES).ok()?;
         let logon_sid = Sid::parse(LOGON_SID_BYTES).ok()?;
@@ -432,39 +447,20 @@ impl PkmKacsBootToken {
             return None;
         }
 
-        let groups = [
-            SidAndAttributes {
-                sid: administrators,
-                attributes: SE_GROUP_MANDATORY
-                    | SE_GROUP_ENABLED_BY_DEFAULT
-                    | SE_GROUP_ENABLED
-                    | SE_GROUP_OWNER,
+        let group_sids = [
+            administrators,
+            if include_user_group {
+                user_sid
+            } else {
+                everyone
             },
-            SidAndAttributes {
-                sid: everyone,
-                attributes: SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED,
-            },
-            SidAndAttributes {
-                sid: authenticated_users,
-                attributes: SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED,
-            },
-            SidAndAttributes {
-                sid: local,
-                attributes: SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED,
-            },
-            SidAndAttributes {
-                sid: logon_sid,
-                attributes: SE_GROUP_MANDATORY
-                    | SE_GROUP_ENABLED_BY_DEFAULT
-                    | SE_GROUP_ENABLED
-                    | SE_GROUP_LOGON_ID,
-            },
+            authenticated_users,
+            local,
+            logon_sid,
         ];
-        let group_views = groups.map(|group| PkmKacsBootGroupView {
-            sid_ptr: group.sid.as_bytes().as_ptr(),
-            sid_len: group.sid.as_bytes().len(),
-            attributes: group.attributes,
-        });
+        let group_default_attributes = group_attributes;
+        let group_views = build_group_views(&group_sids, &group_default_attributes);
+        let group_attributes = group_default_attributes.map(AtomicU32::new);
 
         let token = Self {
             refcount: AtomicUsize::new(1),
@@ -478,8 +474,10 @@ impl PkmKacsBootToken {
             },
             user_sid,
             logon_sid,
-            groups,
-            group_views,
+            group_sids,
+            group_default_attributes,
+            group_attributes,
+            group_views: UnsafeCell::new(group_views),
             token_id: BOOT_SYSTEM_TOKEN_ID,
             modified_id: AtomicU64::new(BOOT_SYSTEM_MODIFIED_ID),
             owner_sid_index: AtomicU32::new(BOOT_SYSTEM_OWNER_SID_INDEX),
@@ -513,6 +511,8 @@ impl PkmKacsBootToken {
             SYSTEM_PRIVILEGES_ALL,
             SYSTEM_PRIVILEGES_ALL,
             SYSTEM_PRIVILEGES_ALL,
+            BOOT_SYSTEM_GROUP_ATTRIBUTES,
+            false,
         )
     }
 
@@ -522,6 +522,8 @@ impl PkmKacsBootToken {
             SYSTEM_PRIVILEGES_ALL,
             SYSTEM_PRIVILEGES_ALL,
             SYSTEM_PRIVILEGES_ALL,
+            BOOT_SYSTEM_GROUP_ATTRIBUTES,
+            false,
         )
     }
 
@@ -533,6 +535,19 @@ impl PkmKacsBootToken {
             privileges,
             privileges,
             privileges,
+            BOOT_SYSTEM_GROUP_ATTRIBUTES,
+            false,
+        )
+    }
+
+    fn create_adjustable_groups() -> Option<*const c_void> {
+        Self::create_system_like(
+            QUERY_ONLY_TOKEN_OWN_SD_BYTES,
+            SYSTEM_PRIVILEGES_ALL,
+            SYSTEM_PRIVILEGES_ALL,
+            SYSTEM_PRIVILEGES_ALL,
+            KUNIT_ADJUSTABLE_GROUP_ATTRIBUTES,
+            true,
         )
     }
 
@@ -554,6 +569,7 @@ impl PkmKacsBootToken {
         };
         let privileges = token.privileges_snapshot();
         let _guard = token.lock_mutation();
+        let group_attributes = token.current_group_attributes();
         let (default_dacl_ptr, default_dacl_len) =
             match alloc_copy_bytes(token.default_dacl_bytes()) {
                 Ok(copy) => copy,
@@ -570,8 +586,10 @@ impl PkmKacsBootToken {
             session: token.session,
             user_sid: token.user_sid,
             logon_sid: token.logon_sid,
-            groups: token.groups,
-            group_views: token.group_views,
+            group_sids: token.group_sids,
+            group_default_attributes: token.group_default_attributes,
+            group_attributes: group_attributes.map(AtomicU32::new),
+            group_views: UnsafeCell::new(build_group_views(&token.group_sids, &group_attributes)),
             token_id: token.token_id,
             modified_id: AtomicU64::new(token.modified_id.load(Ordering::Relaxed)),
             owner_sid_index: AtomicU32::new(token.owner_sid_index.load(Ordering::Relaxed)),
@@ -618,6 +636,7 @@ impl PkmKacsBootToken {
         let owner_sid_index = self.owner_sid_index.load(Ordering::Relaxed);
         let primary_group_index = self.primary_group_index.load(Ordering::Relaxed);
         let default_dacl = self.default_dacl_bytes();
+        let group_views = unsafe { &*self.group_views.get() };
 
         *out = PkmKacsBootSnapshot {
             token_ptr: (self as *const Self).cast(),
@@ -632,8 +651,8 @@ impl PkmKacsBootToken {
             user_sid_len: self.session.user_sid.as_bytes().len(),
             logon_sid_ptr: self.session.logon_sid.as_bytes().as_ptr(),
             logon_sid_len: self.session.logon_sid.as_bytes().len(),
-            groups_ptr: self.group_views.as_ptr(),
-            group_count: self.group_views.len() as u32,
+            groups_ptr: group_views.as_ptr(),
+            group_count: group_views.len() as u32,
             owner_sid_index,
             primary_group_index,
             default_dacl_ptr: default_dacl.as_ptr(),
@@ -701,14 +720,53 @@ impl PkmKacsBootToken {
         unsafe { core::slice::from_raw_parts(ptr.cast_const(), len) }
     }
 
+    fn current_group_attributes(&self) -> [u32; MAX_BOOT_GROUPS] {
+        core::array::from_fn(|index| self.group_attributes[index].load(Ordering::Relaxed))
+    }
+
+    fn current_groups(&self) -> [SidAndAttributes<'static>; MAX_BOOT_GROUPS] {
+        let group_attributes = self.current_group_attributes();
+
+        core::array::from_fn(|index| SidAndAttributes {
+            sid: self.group_sids[index],
+            attributes: group_attributes[index],
+        })
+    }
+
+    fn sync_group_views_locked(&self, group_attributes: &[u32; MAX_BOOT_GROUPS]) {
+        let group_views = unsafe { &mut *self.group_views.get() };
+
+        for index in 0..group_views.len() {
+            group_views[index].attributes = group_attributes[index];
+        }
+    }
+
+    fn current_group_enabled_mask_locked(&self) -> u64 {
+        let mut mask = 0u64;
+
+        for index in 0..self.group_sids.len().min(64) {
+            let attributes = self.group_attributes[index].load(Ordering::Relaxed);
+
+            if (attributes & SE_GROUP_ENABLED) == SE_GROUP_ENABLED {
+                mask |= 1u64 << index;
+            }
+        }
+
+        mask
+    }
+
+    fn group_sid_at(&self, index: u32) -> Option<Sid<'static>> {
+        self.group_sids.get(index as usize).copied()
+    }
+
     fn validate_owner_index(&self, index: u32) -> bool {
         if index == 0 {
             return true;
         }
 
-        self.groups
+        self.group_attributes
             .get((index - 1) as usize)
-            .map(|entry| (entry.attributes & SE_GROUP_OWNER) == SE_GROUP_OWNER)
+            .map(|entry| (entry.load(Ordering::Relaxed) & SE_GROUP_OWNER) == SE_GROUP_OWNER)
             .unwrap_or(false)
     }
 
@@ -717,7 +775,7 @@ impl PkmKacsBootToken {
             return true;
         }
 
-        self.groups.get((index - 1) as usize).is_some()
+        self.group_sids.get((index - 1) as usize).is_some()
     }
 
     fn adjust_default(
@@ -785,31 +843,142 @@ impl PkmKacsBootToken {
             return Some(self.user_sid);
         }
 
-        self.groups.get((index - 1) as usize).map(|entry| entry.sid)
+        self.group_sid_at(index - 1)
     }
 
-    fn access_token(&self) -> AccessCheckToken<'_> {
-        AccessCheckToken {
+    fn with_access_token<T>(&self, f: impl FnOnce(AccessCheckToken<'_>) -> T) -> T {
+        let (groups, privileges) = {
+            let _guard = self.lock_mutation();
+            (self.current_groups(), self.privileges_snapshot())
+        };
+        let access_token = AccessCheckToken {
             subject: TokenView {
                 user: self.user_sid,
                 user_deny_only: false,
-                groups: &self.groups,
+                groups: &groups,
             },
             token_type: self.token_type,
             impersonation_level: self.impersonation_level,
             audit_policy: self.audit_policy,
-            privileges: self.privileges_snapshot(),
+            privileges,
             integrity_level: self.integrity_level,
             mandatory_policy: self.mandatory_policy,
             restricted: RestrictedTokenContext::default(),
             confinement: ConfinementTokenContext::default(),
+        };
+
+        f(access_token)
+    }
+
+    fn group_query_required_len(&self) -> Result<usize, i32> {
+        sid_query_len(&self.group_sids).ok_or(-EINVAL)
+    }
+
+    fn write_group_query(&self, writer: &mut QueryWriter) -> Result<(), i32> {
+        let _guard = self.lock_mutation();
+
+        if self.group_sids.len() > u32::MAX as usize {
+            return Err(-EINVAL);
         }
+        if !writer.write_u32(self.group_sids.len() as u32) {
+            return Err(-ERANGE);
+        }
+
+        for index in 0..self.group_sids.len() {
+            let sid = self.group_sids[index].as_bytes();
+            let attributes = self.group_attributes[index].load(Ordering::Relaxed);
+
+            if sid.len() > u32::MAX as usize {
+                return Err(-EINVAL);
+            }
+            if !writer.write_u32(sid.len() as u32) {
+                return Err(-ERANGE);
+            }
+            if !writer.write_bytes(sid) {
+                return Err(-ERANGE);
+            }
+            if !writer.write_u32(attributes) {
+                return Err(-ERANGE);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn adjust_groups(&self, entries: &[PkmKacsGroupAdjustEntry]) -> Result<u64, i32> {
+        let mut seen = [false; MAX_BOOT_GROUPS];
+        let _guard = self.lock_mutation();
+        let previous_state = self.current_group_enabled_mask_locked();
+        let modified_id = self.modified_id.load(Ordering::Relaxed);
+        let Some(next_modified_id) = modified_id.checked_add(1) else {
+            return Err(-ERANGE);
+        };
+
+        if entries.is_empty() {
+            return Err(-EINVAL);
+        }
+        if entries[0].index == u32::MAX {
+            if entries.len() != 1 || entries[0].enable != 0 {
+                return Err(-EINVAL);
+            }
+            for index in 0..self.group_sids.len() {
+                self.group_attributes[index]
+                    .store(self.group_default_attributes[index], Ordering::Relaxed);
+            }
+            self.sync_group_views_locked(&self.group_default_attributes);
+            self.modified_id.store(next_modified_id, Ordering::Relaxed);
+            return Ok(previous_state);
+        }
+
+        for entry in entries {
+            let index = entry.index as usize;
+            let Some(group_sid) = self.group_sids.get(index) else {
+                return Err(-EINVAL);
+            };
+            let attributes = self.group_attributes[index].load(Ordering::Relaxed);
+
+            if entry.enable > 1 {
+                return Err(-EINVAL);
+            }
+            if seen[index] {
+                return Err(-EINVAL);
+            }
+            seen[index] = true;
+
+            if entry.enable == 0 {
+                if (attributes & SE_GROUP_MANDATORY) == SE_GROUP_MANDATORY
+                    || (attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID
+                    || group_sid.as_bytes() == self.user_sid.as_bytes()
+                {
+                    return Err(-EINVAL);
+                }
+            } else if (attributes & SE_GROUP_USE_FOR_DENY_ONLY) == SE_GROUP_USE_FOR_DENY_ONLY {
+                return Err(-EINVAL);
+            }
+        }
+
+        for entry in entries {
+            let index = entry.index as usize;
+            let mut attributes = self.group_attributes[index].load(Ordering::Relaxed);
+
+            if entry.enable == 0 {
+                attributes &= !SE_GROUP_ENABLED;
+            } else {
+                attributes |= SE_GROUP_ENABLED;
+            }
+            self.group_attributes[index].store(attributes, Ordering::Relaxed);
+        }
+
+        let current_group_attributes = self.current_group_attributes();
+        self.sync_group_views_locked(&current_group_attributes);
+        self.modified_id.store(next_modified_id, Ordering::Relaxed);
+        Ok(previous_state)
     }
 
     fn query_required_len(&self, token_class: u32) -> Result<usize, i32> {
         match token_class {
             TOKEN_CLASS_USER => Ok(self.user_sid.as_bytes().len()),
-            TOKEN_CLASS_GROUPS => sid_and_attributes_query_len(&self.groups).ok_or(-EINVAL),
+            TOKEN_CLASS_GROUPS => self.group_query_required_len(),
             TOKEN_CLASS_PRIVILEGES => Ok(32),
             TOKEN_CLASS_TYPE => Ok(4),
             TOKEN_CLASS_INTEGRITY_LEVEL => Ok(12),
@@ -853,7 +1022,10 @@ impl PkmKacsBootToken {
     fn write_query(&self, token_class: u32, writer: &mut QueryWriter) -> Result<(), i32> {
         match token_class {
             TOKEN_CLASS_USER => writer.write_bytes(self.user_sid.as_bytes()),
-            TOKEN_CLASS_GROUPS => write_sid_and_attributes_query(writer, &self.groups),
+            TOKEN_CLASS_GROUPS => {
+                self.write_group_query(writer)?;
+                true
+            }
             TOKEN_CLASS_PRIVILEGES => {
                 let privileges = self.privileges_snapshot();
 
@@ -935,16 +1107,17 @@ pub(crate) fn with_access_check_resolved_from_token<T>(
     let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
         return Err(-22);
     };
-    let access_token = token.access_token();
-    let resolved = AccessCheckAbiResolved {
-        token: &access_token,
-        default_pip,
-        device_groups: EMPTY_DEVICE_GROUPS,
-        user_claims: EMPTY_CLAIMS,
-        device_claims: EMPTY_CLAIMS,
-        policies,
-    };
-    f(resolved)
+    token.with_access_token(|access_token| {
+        let resolved = AccessCheckAbiResolved {
+            token: &access_token,
+            default_pip,
+            device_groups: EMPTY_DEVICE_GROUPS,
+            user_claims: EMPTY_CLAIMS,
+            device_claims: EMPTY_CLAIMS,
+            policies,
+        };
+        f(resolved)
+    })
 }
 
 pub(crate) fn mark_token_privileges_used(token_ptr: *const c_void, used_mask: u64) -> bool {
@@ -989,63 +1162,64 @@ fn token_open_check_errno(
         Err(KacsError::ReservedAccessMaskBits(_)) => return -22,
         Err(_) => return -EACCES,
     };
-    let subject_token = subject.access_token();
     let conditional_context = ConditionalContext::default();
     let pip = PipContext {
         pip_type: 0,
         pip_trust: 0,
     };
 
-    match access_check(
-        Some(&target_sd),
-        &subject_token,
-        pip,
-        desired,
-        &TOKEN_GENERIC_MAPPING,
-        None,
-        &conditional_context,
-        None,
-        0,
-        EMPTY_POLICIES,
-    ) {
-        Ok(result) => {
-            if result.allowed {
-                if normalized.maximum_allowed {
-                    result.granted as i32
+    subject.with_access_token(|subject_token| {
+        match access_check(
+            Some(&target_sd),
+            &subject_token,
+            pip,
+            desired,
+            &TOKEN_GENERIC_MAPPING,
+            None,
+            &conditional_context,
+            None,
+            0,
+            EMPTY_POLICIES,
+        ) {
+            Ok(result) => {
+                if result.allowed {
+                    if normalized.maximum_allowed {
+                        result.granted as i32
+                    } else {
+                        (result.granted & normalized.mapped) as i32
+                    }
                 } else {
-                    (result.granted & normalized.mapped) as i32
+                    -EACCES
                 }
-            } else {
-                -EACCES
             }
+            Err(KacsError::AllocationFailure) => -ENOMEM,
+            Err(KacsError::ReservedAccessMaskBits(_)) => -22,
+            Err(KacsError::AccessDenied)
+            | Err(KacsError::InvalidAbiInput(_))
+            | Err(KacsError::MaximumAllowedInAce(_))
+            | Err(KacsError::InvariantViolation(_))
+            | Err(KacsError::InvalidTokenInvariant(_))
+            | Err(KacsError::MissingSecurityDescriptorOwner)
+            | Err(KacsError::MissingSelfRelativeControl(_))
+            | Err(KacsError::InvalidSecurityDescriptorRevision(_))
+            | Err(KacsError::InconsistentSecurityDescriptorField { .. })
+            | Err(KacsError::SecurityDescriptorOffsetOutOfBounds { .. })
+            | Err(KacsError::SecurityDescriptorOffsetInsideHeader { .. })
+            | Err(KacsError::SecurityDescriptorComponentsOverlap { .. })
+            | Err(KacsError::InvalidAclSize(_))
+            | Err(KacsError::AclSizeExceedsBuffer { .. })
+            | Err(KacsError::AclAceCountMismatch { .. })
+            | Err(KacsError::AclTrailingBytes { .. })
+            | Err(KacsError::InvalidAceSize(_))
+            | Err(KacsError::InvalidSidRevision(_))
+            | Err(KacsError::InvalidSidSubAuthorityCount(_))
+            | Err(KacsError::InvalidSidLength { .. })
+            | Err(KacsError::UnsupportedAceInDacl { .. })
+            | Err(KacsError::NullSecurityDescriptor)
+            | Err(KacsError::Truncated(_)) => -EACCES,
+            Err(_) => -EACCES,
         }
-        Err(KacsError::AllocationFailure) => -ENOMEM,
-        Err(KacsError::ReservedAccessMaskBits(_)) => -22,
-        Err(KacsError::AccessDenied)
-        | Err(KacsError::InvalidAbiInput(_))
-        | Err(KacsError::MaximumAllowedInAce(_))
-        | Err(KacsError::InvariantViolation(_))
-        | Err(KacsError::InvalidTokenInvariant(_))
-        | Err(KacsError::MissingSecurityDescriptorOwner)
-        | Err(KacsError::MissingSelfRelativeControl(_))
-        | Err(KacsError::InvalidSecurityDescriptorRevision(_))
-        | Err(KacsError::InconsistentSecurityDescriptorField { .. })
-        | Err(KacsError::SecurityDescriptorOffsetOutOfBounds { .. })
-        | Err(KacsError::SecurityDescriptorOffsetInsideHeader { .. })
-        | Err(KacsError::SecurityDescriptorComponentsOverlap { .. })
-        | Err(KacsError::InvalidAclSize(_))
-        | Err(KacsError::AclSizeExceedsBuffer { .. })
-        | Err(KacsError::AclAceCountMismatch { .. })
-        | Err(KacsError::AclTrailingBytes { .. })
-        | Err(KacsError::InvalidAceSize(_))
-        | Err(KacsError::InvalidSidRevision(_))
-        | Err(KacsError::InvalidSidSubAuthorityCount(_))
-        | Err(KacsError::InvalidSidLength { .. })
-        | Err(KacsError::UnsupportedAceInDacl { .. })
-        | Err(KacsError::NullSecurityDescriptor)
-        | Err(KacsError::Truncated(_)) => -EACCES,
-        Err(_) => -EACCES,
-    }
+    })
 }
 
 #[no_mangle]
@@ -1201,6 +1375,40 @@ pub extern "C" fn kacs_rust_token_adjust_default(
 }
 
 #[no_mangle]
+/// Adjusts a live token's group enabled-state according to the Slice 35 ABI.
+pub extern "C" fn kacs_rust_token_adjust_groups(
+    token: *const c_void,
+    entries: *const PkmKacsGroupAdjustEntry,
+    count: u32,
+    previous_state_out: *mut u64,
+) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let Some(previous_state_out) = (unsafe { previous_state_out.as_mut() }) else {
+        return -EINVAL;
+    };
+    if count > 256 {
+        return -EINVAL;
+    }
+    let entries = if count == 0 {
+        &[][..]
+    } else if entries.is_null() {
+        return -EINVAL;
+    } else {
+        unsafe { core::slice::from_raw_parts(entries, count as usize) }
+    };
+
+    match token.adjust_groups(entries) {
+        Ok(previous_state) => {
+            *previous_state_out = previous_state;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
 /// Returns the token's projected uid, or 65534 when the pointer is invalid.
 pub extern "C" fn kacs_rust_token_projected_uid(token: *const c_void) -> u32 {
     unsafe { PkmKacsBootToken::from_ptr(token) }
@@ -1252,4 +1460,12 @@ pub extern "C" fn kacs_rust_kunit_create_query_only_token() -> *const c_void {
 /// Creates a KUnit-only SYSTEM-like token with `SeTcbPrivilege` absent.
 pub extern "C" fn kacs_rust_kunit_create_without_tcb_token() -> *const c_void {
     PkmKacsBootToken::create_without_tcb().unwrap_or(null())
+}
+
+#[no_mangle]
+/// Creates a KUnit-only SYSTEM-like token with non-mandatory and deny-only
+/// groups so `KACS_IOC_ADJUST_GROUPS` can exercise both success and denial
+/// paths.
+pub extern "C" fn kacs_rust_kunit_create_adjustable_groups_token() -> *const c_void {
+    PkmKacsBootToken::create_adjustable_groups().unwrap_or(null())
 }

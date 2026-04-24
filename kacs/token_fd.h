@@ -41,6 +41,18 @@ struct kacs_query_args {
 	u64 buf_ptr;
 };
 
+struct kacs_adjust_groups_args {
+	u32 count;
+	u32 _pad;
+	u64 data_ptr;
+	u64 previous_state;
+};
+
+struct kacs_group_entry {
+	u32 index;
+	u32 enable;
+};
+
 struct kacs_adjust_default_args {
 	u64 dacl_ptr;
 	u32 dacl_len;
@@ -49,6 +61,8 @@ struct kacs_adjust_default_args {
 };
 
 #define KACS_IOC_QUERY _IOWR(KACS_IOC_MAGIC, 0, struct kacs_query_args)
+#define KACS_IOC_ADJUST_GROUPS \
+	_IOW(KACS_IOC_MAGIC, 7, struct kacs_adjust_groups_args)
 #define KACS_IOC_ADJUST_DEFAULT \
 	_IOW(KACS_IOC_MAGIC, 9, struct kacs_adjust_default_args)
 #define KACS_IOC_ADJUST_SESSIONID _IOW(KACS_IOC_MAGIC, 10, u32)
@@ -90,6 +104,9 @@ int pkm_kacs_kunit_token_fd_snapshot(int fd,
 				     struct pkm_kacs_token_fd_view *out);
 long pkm_kacs_kunit_token_fd_query(int fd, struct kacs_query_args *args,
 				   void *out_buf);
+long pkm_kacs_kunit_token_fd_adjust_groups(int fd,
+					   struct kacs_adjust_groups_args *args,
+					   const struct kacs_group_entry *entries);
 long pkm_kacs_kunit_token_fd_adjust_default(int fd,
 					    const struct kacs_adjust_default_args *args,
 					    const void *dacl_bytes);

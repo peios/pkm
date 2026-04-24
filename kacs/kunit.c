@@ -38,6 +38,15 @@
 #define PKM_KUNIT_SE_TCB_PRIVILEGE (1ULL << 7)
 #define PKM_KUNIT_SE_SECURITY_PRIVILEGE (1ULL << 8)
 #define PKM_KUNIT_SYSTEM_PRIVILEGES_ALL 0xC000000FFFFFFFFCULL
+#define PKM_KUNIT_SE_GROUP_ENABLED 0x00000004U
+#define PKM_KUNIT_SE_GROUP_USE_FOR_DENY_ONLY 0x00000010U
+#define PKM_KUNIT_ADJUSTABLE_GROUP0_DEFAULT 0x0000000EU
+#define PKM_KUNIT_ADJUSTABLE_GROUP1_DEFAULT 0x00000000U
+#define PKM_KUNIT_ADJUSTABLE_GROUP2_DEFAULT 0x00000010U
+#define PKM_KUNIT_ADJUSTABLE_GROUP3_DEFAULT 0x00000006U
+#define PKM_KUNIT_ADJUSTABLE_GROUP4_DEFAULT 0xC0000007U
+#define PKM_KUNIT_ADJUSTABLE_GROUP_PREV_MASK 0x19ULL
+#define PKM_KUNIT_ADJUSTABLE_GROUP_MUTATED_MASK 0x1AULL
 
 extern size_t kacs_rust_kunit_probe(void);
 
@@ -201,6 +210,21 @@ static u64 pkm_kunit_read_u64(const u8 *bytes, size_t offset)
 	       ((u64)bytes[offset + 5] << 40) |
 	       ((u64)bytes[offset + 6] << 48) |
 	       ((u64)bytes[offset + 7] << 56);
+}
+
+static u32 pkm_kunit_groups_query_attr(const u8 *bytes, u32 index)
+{
+	size_t offset = 4;
+	u32 i;
+
+	for (i = 0; i < index; i++) {
+		u32 sid_len = pkm_kunit_read_u32(bytes, offset);
+
+		offset += 4 + sid_len + 4;
+	}
+
+	return pkm_kunit_read_u32(bytes,
+				 offset + 4 + pkm_kunit_read_u32(bytes, offset));
 }
 
 static void pkm_kunit_expect_bytes_eq(struct kunit *test, const u8 *actual,
@@ -1669,6 +1693,348 @@ static void pkm_kunit_token_adjust_default_invalid_dacl_fails_closed(
 	kacs_rust_token_drop(target_token);
 }
 
+static void pkm_kunit_token_adjust_groups_updates_and_queries_live_state(
+	struct kunit *test)
+{
+	struct kacs_adjust_groups_args adjust = {
+		.count = 2,
+	};
+	struct kacs_group_entry entries[2] = {
+		{ .index = 0, .enable = 0 },
+		{ .index = 1, .enable = 1 },
+	};
+	struct kacs_query_args args = {
+		.token_class = TOKEN_CLASS_GROUPS,
+		.buf_len = 160,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	u8 buf[160] = { 0 };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_groups_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_ADJUST_GROUPS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_groups((int)fd, &adjust,
+							     entries),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, adjust.previous_state,
+			PKM_KUNIT_ADJUSTABLE_GROUP_PREV_MASK);
+
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_EQ(test, after.group_count, 5U);
+	KUNIT_EXPECT_EQ(test, after.groups_ptr[0].attributes,
+			PKM_KUNIT_ADJUSTABLE_GROUP0_DEFAULT &
+				~PKM_KUNIT_SE_GROUP_ENABLED);
+	KUNIT_EXPECT_EQ(test, after.groups_ptr[1].attributes,
+			PKM_KUNIT_SE_GROUP_ENABLED);
+	KUNIT_EXPECT_EQ(test, after.groups_ptr[2].attributes,
+			PKM_KUNIT_ADJUSTABLE_GROUP2_DEFAULT);
+	KUNIT_EXPECT_EQ(test, after.groups_ptr[3].attributes,
+			PKM_KUNIT_ADJUSTABLE_GROUP3_DEFAULT);
+	KUNIT_EXPECT_EQ(test, after.groups_ptr[4].attributes,
+			PKM_KUNIT_ADJUSTABLE_GROUP4_DEFAULT);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id + 1);
+
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 0), 5U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_groups_query_attr(buf, 0),
+			PKM_KUNIT_ADJUSTABLE_GROUP0_DEFAULT &
+				~PKM_KUNIT_SE_GROUP_ENABLED);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_groups_query_attr(buf, 1),
+			PKM_KUNIT_SE_GROUP_ENABLED);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_groups_reset_restores_defaults(
+	struct kunit *test)
+{
+	struct kacs_adjust_groups_args adjust = {
+		.count = 2,
+	};
+	struct kacs_group_entry entries[2] = {
+		{ .index = 0, .enable = 0 },
+		{ .index = 1, .enable = 1 },
+	};
+	struct kacs_adjust_groups_args reset = {
+		.count = 1,
+	};
+	struct kacs_group_entry reset_entry = {
+		.index = 0xFFFFFFFFU,
+		.enable = 0,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot mutated = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_groups_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_ADJUST_GROUPS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_groups((int)fd, &adjust,
+							     entries),
+			(long)0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &mutated));
+	KUNIT_EXPECT_EQ(test, mutated.groups_ptr[0].attributes,
+			PKM_KUNIT_ADJUSTABLE_GROUP0_DEFAULT &
+				~PKM_KUNIT_SE_GROUP_ENABLED);
+	KUNIT_EXPECT_EQ(test, mutated.groups_ptr[1].attributes,
+			PKM_KUNIT_SE_GROUP_ENABLED);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_groups((int)fd, &reset,
+							     &reset_entry),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, reset.previous_state,
+			PKM_KUNIT_ADJUSTABLE_GROUP_MUTATED_MASK);
+
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	KUNIT_EXPECT_EQ(test, after.groups_ptr[0].attributes,
+			PKM_KUNIT_ADJUSTABLE_GROUP0_DEFAULT);
+	KUNIT_EXPECT_EQ(test, after.groups_ptr[1].attributes,
+			PKM_KUNIT_ADJUSTABLE_GROUP1_DEFAULT);
+	KUNIT_EXPECT_EQ(test, after.groups_ptr[2].attributes,
+			PKM_KUNIT_ADJUSTABLE_GROUP2_DEFAULT);
+	KUNIT_EXPECT_EQ(test, after.groups_ptr[3].attributes,
+			PKM_KUNIT_ADJUSTABLE_GROUP3_DEFAULT);
+	KUNIT_EXPECT_EQ(test, after.groups_ptr[4].attributes,
+			PKM_KUNIT_ADJUSTABLE_GROUP4_DEFAULT);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id + 2);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_groups_requires_cached_right(
+	struct kunit *test)
+{
+	struct kacs_adjust_groups_args adjust = {
+		.count = 1,
+	};
+	struct kacs_group_entry entry = {
+		.index = 0,
+		.enable = 0,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_groups_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(subject_token,
+						      target_token,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_groups((int)fd, &adjust,
+							     &entry),
+			(long)-EACCES);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_groups_deny_only_fails_closed(
+	struct kunit *test)
+{
+	struct kacs_adjust_groups_args adjust = {
+		.count = 2,
+	};
+	struct kacs_group_entry entries[2] = {
+		{ .index = 0, .enable = 0 },
+		{ .index = 2, .enable = 1 },
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_groups_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_ADJUST_GROUPS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_groups((int)fd, &adjust,
+							     entries),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_groups_logon_sid_fails_closed(
+	struct kunit *test)
+{
+	struct kacs_adjust_groups_args adjust = {
+		.count = 2,
+	};
+	struct kacs_group_entry entries[2] = {
+		{ .index = 0, .enable = 0 },
+		{ .index = 4, .enable = 0 },
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_groups_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_ADJUST_GROUPS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_groups((int)fd, &adjust,
+							     entries),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_groups_user_sid_fails_closed(
+	struct kunit *test)
+{
+	struct kacs_adjust_groups_args adjust = {
+		.count = 1,
+	};
+	struct kacs_group_entry entry = {
+		.index = 1,
+		.enable = 0,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_groups_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_ADJUST_GROUPS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_groups((int)fd, &adjust,
+							     &entry),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_adjust_groups_invalid_reset_encoding_fails_closed(
+	struct kunit *test)
+{
+	struct kacs_adjust_groups_args adjust = {
+		.count = 2,
+	};
+	struct kacs_group_entry entries[2] = {
+		{ .index = 0xFFFFFFFFU, .enable = 0 },
+		{ .index = 0, .enable = 0 },
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_groups_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_ADJUST_GROUPS);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_groups((int)fd, &adjust,
+							     entries),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
 static void pkm_kunit_access_check_token_fd_current_effective(struct kunit *test)
 {
 	u8 args[136];
@@ -2638,6 +3004,14 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_token_adjust_default_requires_cached_right),
 	KUNIT_CASE(pkm_kunit_token_adjust_default_invalid_owner_fails_closed),
 	KUNIT_CASE(pkm_kunit_token_adjust_default_invalid_dacl_fails_closed),
+	KUNIT_CASE(pkm_kunit_token_adjust_groups_updates_and_queries_live_state),
+	KUNIT_CASE(pkm_kunit_token_adjust_groups_reset_restores_defaults),
+	KUNIT_CASE(pkm_kunit_token_adjust_groups_requires_cached_right),
+	KUNIT_CASE(pkm_kunit_token_adjust_groups_deny_only_fails_closed),
+	KUNIT_CASE(pkm_kunit_token_adjust_groups_logon_sid_fails_closed),
+	KUNIT_CASE(pkm_kunit_token_adjust_groups_user_sid_fails_closed),
+	KUNIT_CASE(
+		pkm_kunit_token_adjust_groups_invalid_reset_encoding_fails_closed),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_current_effective),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_explicit_handle),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_invalid_negative),

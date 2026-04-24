@@ -2,7 +2,7 @@
 /*
  * Slow-track PKM token-fd and self-open surface.
  *
- * Slices 30 through 34 add token query and the first narrow mutation ioctls on
+ * Slices 30 through 35 add token query and the first narrow mutation ioctls on
  * top of the earlier token-fd handle object and kacs_open_self_token syscall.
  */
 
@@ -27,6 +27,7 @@
 	 KACS_ACCESS_GENERIC_WRITE | KACS_ACCESS_GENERIC_EXECUTE | \
 	 KACS_ACCESS_GENERIC_ALL)
 #define PKM_KACS_PRIVILEGE_SE_TCB (1ULL << 7)
+#define PKM_KACS_ADJUST_GROUPS_RESET_INDEX 0xFFFFFFFFU
 #define PKM_KACS_DEFAULT_INDEX_NO_CHANGE 0xFFFFFFFFU
 #define PKM_KACS_MAX_DEFAULT_DACL_BYTES 65536U
 
@@ -187,6 +188,37 @@ static long pkm_kacs_token_adjust_session_after_gate(
 	return kacs_rust_token_adjust_session_id(tf->token, session_id);
 }
 
+static long pkm_kacs_token_adjust_groups_core(
+	struct pkm_kacs_token_file *tf,
+	struct kacs_adjust_groups_args *args,
+	const struct kacs_group_entry *entries)
+{
+	u64 previous_state = 0;
+	int ret;
+
+	if (!tf || !tf->token || !args)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_ADJUST_GROUPS) !=
+	    KACS_TOKEN_ADJUST_GROUPS)
+		return -EACCES;
+	if (args->_pad != 0)
+		return -EINVAL;
+	if (args->count == 0 || args->count > 256)
+		return -EINVAL;
+	if (!entries)
+		return -EINVAL;
+
+	ret = kacs_rust_token_adjust_groups(
+		tf->token,
+		(const struct pkm_kacs_group_adjust_entry *)entries,
+		args->count, &previous_state);
+	if (ret)
+		return ret;
+
+	args->previous_state = previous_state;
+	return 0;
+}
+
 static long pkm_kacs_token_adjust_default_core(
 	struct pkm_kacs_token_file *tf,
 	const struct kacs_adjust_default_args *args,
@@ -290,6 +322,44 @@ static long pkm_kacs_token_adjust_session_user(struct pkm_kacs_token_file *tf,
 	return pkm_kacs_token_adjust_session_after_gate(tf, session_id);
 }
 
+static long pkm_kacs_token_adjust_groups_user(
+	struct pkm_kacs_token_file *tf,
+	struct kacs_adjust_groups_args __user *uargs)
+{
+	struct kacs_adjust_groups_args args;
+	struct kacs_group_entry *entries;
+	size_t entries_size;
+	long ret;
+
+	if (!tf || !tf->token)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_ADJUST_GROUPS) !=
+	    KACS_TOKEN_ADJUST_GROUPS)
+		return -EACCES;
+	if (!uargs)
+		return -EFAULT;
+	if (copy_from_user(&args, uargs, sizeof(args)))
+		return -EFAULT;
+	if (args._pad != 0 || args.count == 0 || args.count > 256)
+		return -EINVAL;
+
+	entries_size = args.count * sizeof(*entries);
+	entries = kmalloc(entries_size, GFP_KERNEL);
+	if (!entries)
+		return -ENOMEM;
+	if (copy_from_user(entries, (void __user *)(unsigned long)args.data_ptr,
+			   entries_size)) {
+		kfree(entries);
+		return -EFAULT;
+	}
+
+	ret = pkm_kacs_token_adjust_groups_core(tf, &args, entries);
+	kfree(entries);
+	if (!ret && copy_to_user(uargs, &args, sizeof(args)))
+		return -EFAULT;
+	return ret;
+}
+
 static long pkm_kacs_token_adjust_default_user(
 	struct pkm_kacs_token_file *tf,
 	struct kacs_adjust_default_args __user *uargs)
@@ -341,6 +411,9 @@ static long pkm_kacs_token_ioctl(struct file *file, unsigned int cmd,
 	case KACS_IOC_QUERY:
 		return pkm_kacs_token_query_user(
 			tf, (struct kacs_query_args __user *)arg);
+	case KACS_IOC_ADJUST_GROUPS:
+		return pkm_kacs_token_adjust_groups_user(
+			tf, (struct kacs_adjust_groups_args __user *)arg);
 	case KACS_IOC_ADJUST_DEFAULT:
 		return pkm_kacs_token_adjust_default_user(
 			tf, (struct kacs_adjust_default_args __user *)arg);
@@ -532,6 +605,32 @@ long pkm_kacs_kunit_token_fd_query(int fd, struct kacs_query_args *args,
 
 	tf = fd_file(f)->private_data;
 	ret = pkm_kacs_token_query_core(tf, args, out_buf);
+	fdput(f);
+	return ret;
+}
+
+long pkm_kacs_kunit_token_fd_adjust_groups(
+	int fd,
+	struct kacs_adjust_groups_args *args,
+	const struct kacs_group_entry *entries)
+{
+	struct fd f;
+	struct pkm_kacs_token_file *tf;
+	long ret;
+
+	if (!args || !entries)
+		return -EINVAL;
+
+	f = fdget(fd);
+	if (!fd_file(f))
+		return -EBADF;
+	if (fd_file(f)->f_op != &pkm_kacs_token_fops) {
+		fdput(f);
+		return -EINVAL;
+	}
+
+	tf = fd_file(f)->private_data;
+	ret = pkm_kacs_token_adjust_groups_core(tf, args, entries);
 	fdput(f);
 	return ret;
 }

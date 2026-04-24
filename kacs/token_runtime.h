@@ -45,6 +45,11 @@ struct pkm_kacs_boot_snapshot {
 	u32 audit_policy;
 };
 
+struct pkm_kacs_group_adjust_entry {
+	u32 index;
+	u32 enable;
+};
+
 const void *pkm_kacs_current_effective_token_ptr(void);
 const void *pkm_kacs_current_primary_token_ptr(void);
 const void *pkm_kacs_boot_system_token_ptr(void);
@@ -71,8 +76,12 @@ bool kacs_rust_kunit_token_snapshot(const void *token,
 bool kacs_rust_kunit_boot_snapshot(struct pkm_kacs_boot_snapshot *out);
 const void *kacs_rust_kunit_create_query_only_token(void);
 const void *kacs_rust_kunit_create_without_tcb_token(void);
+const void *kacs_rust_kunit_create_adjustable_groups_token(void);
 int kacs_rust_token_query(const void *token, u32 token_class, u8 *out,
 			  size_t out_len, size_t *required_out);
+int kacs_rust_token_adjust_groups(
+	const void *token, const struct pkm_kacs_group_adjust_entry *entries,
+	u32 count, u64 *previous_state_out);
 int kacs_rust_token_adjust_session_id(const void *token, u32 session_id);
 int kacs_rust_token_adjust_default(const void *token, u32 owner_index,
 				   u32 group_index, const u8 *dacl,
