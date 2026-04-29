@@ -34,7 +34,8 @@ use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
 use crate::token::{
     AccessCheckToken, ConfinementTokenContext, ImpersonationLevel, RestrictedTokenContext,
-    SidAndAttributes, TokenType, TokenView,
+    SidAndAttributes, TokenType, TokenView, AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
+    AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
 };
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
@@ -444,6 +445,7 @@ impl PkmKacsBootToken {
         privileges_enabled_by_default: u64,
         group_attributes: [u32; MAX_BOOT_GROUPS],
         include_user_group: bool,
+        audit_policy: u32,
     ) -> Option<*const c_void> {
         let user_sid = Sid::parse(SYSTEM_SID_BYTES).ok()?;
         let logon_sid = Sid::parse(LOGON_SID_BYTES).ok()?;
@@ -512,7 +514,7 @@ impl PkmKacsBootToken {
                 | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
             token_type: TokenType::Primary,
             impersonation_level: ImpersonationLevel::Anonymous,
-            audit_policy: 0,
+            audit_policy,
             interactive_session_id: AtomicU32::new(0),
             projected_uid: 0,
             projected_gid: 0,
@@ -532,6 +534,7 @@ impl PkmKacsBootToken {
             SYSTEM_PRIVILEGES_ALL,
             BOOT_SYSTEM_GROUP_ATTRIBUTES,
             false,
+            0,
         )
     }
 
@@ -543,6 +546,7 @@ impl PkmKacsBootToken {
             SYSTEM_PRIVILEGES_ALL,
             BOOT_SYSTEM_GROUP_ATTRIBUTES,
             false,
+            0,
         )
     }
 
@@ -556,6 +560,7 @@ impl PkmKacsBootToken {
             privileges,
             BOOT_SYSTEM_GROUP_ATTRIBUTES,
             false,
+            0,
         )
     }
 
@@ -567,6 +572,7 @@ impl PkmKacsBootToken {
             SYSTEM_PRIVILEGES_ALL,
             KUNIT_ADJUSTABLE_GROUP_ATTRIBUTES,
             true,
+            0,
         )
     }
 
@@ -578,6 +584,19 @@ impl PkmKacsBootToken {
             KUNIT_ADJUSTABLE_PRIVILEGES_ENABLED_BY_DEFAULT,
             BOOT_SYSTEM_GROUP_ATTRIBUTES,
             false,
+            0,
+        )
+    }
+
+    fn create_privilege_audit() -> Option<*const c_void> {
+        Self::create_system_like(
+            QUERY_ONLY_TOKEN_OWN_SD_BYTES,
+            SYSTEM_PRIVILEGES_ALL,
+            SYSTEM_PRIVILEGES_ALL,
+            SYSTEM_PRIVILEGES_ALL,
+            BOOT_SYSTEM_GROUP_ATTRIBUTES,
+            false,
+            AUDIT_POLICY_PRIVILEGE_USE_SUCCESS | AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
         )
     }
 
@@ -1628,4 +1647,11 @@ pub extern "C" fn kacs_rust_kunit_create_adjustable_groups_token() -> *const c_v
 /// paths.
 pub extern "C" fn kacs_rust_kunit_create_adjustable_privileges_token() -> *const c_void {
     PkmKacsBootToken::create_adjustable_privileges().unwrap_or(null())
+}
+
+#[no_mangle]
+/// Creates a KUnit-only SYSTEM-like token whose audit policy emits
+/// privilege-use events for both success and failure outcomes.
+pub extern "C" fn kacs_rust_kunit_create_privilege_audit_token() -> *const c_void {
+    PkmKacsBootToken::create_privilege_audit().unwrap_or(null())
 }

@@ -134,6 +134,9 @@ COPY kacs/caap_cache.c /tmp/pkm-src/kacs/caap_cache.c
 COPY kacs/caap_cache.h /tmp/pkm-src/kacs/caap_cache.h
 COPY kacs/caap_cache.rs /tmp/pkm-src/kacs/caap_cache.rs
 COPY kacs/kacs_rust.rs /tmp/pkm-src/kacs/kacs_rust.rs
+COPY kacs/kmes.c /tmp/pkm-src/kacs/kmes.c
+COPY kacs/kmes.h /tmp/pkm-src/kacs/kmes.h
+COPY kacs/kmes_payload.rs /tmp/pkm-src/kacs/kmes_payload.rs
 COPY kacs/kunit.c /tmp/pkm-src/kacs/kunit.c
 COPY kacs/token_fd.c /tmp/pkm-src/kacs/token_fd.c
 COPY kacs/token_fd.h /tmp/pkm-src/kacs/token_fd.h

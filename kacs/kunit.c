@@ -24,6 +24,7 @@
 
 #include "access_check.h"
 #include "caap_cache.h"
+#include "kmes.h"
 #include "token_fd.h"
 #include "token_runtime.h"
 
@@ -70,6 +71,12 @@
 #define PKM_KUNIT_ADJUSTABLE_GROUP4_DEFAULT 0xC0000007U
 #define PKM_KUNIT_ADJUSTABLE_GROUP_PREV_MASK 0x19ULL
 #define PKM_KUNIT_ADJUSTABLE_GROUP_MUTATED_MASK 0x1AULL
+#define PKM_KUNIT_KMES_PROCESS_NAME "kunit-ac"
+#define PKM_KUNIT_KMES_PROCESS_PATH "/kunit/access-check"
+#define PKM_KUNIT_KMES_PRIV_PROCESS_NAME "kunit-priv"
+#define PKM_KUNIT_KMES_PRIV_PROCESS_PATH "/kunit/privilege"
+#define PKM_KUNIT_KMES_DIRECT_TYPE "kunit-smoke"
+#define PKM_KUNIT_KMES_CAPTURE_BYTES 2048U
 
 extern size_t kacs_rust_kunit_probe(void);
 
@@ -99,6 +106,19 @@ struct pkm_kunit_mem {
 struct pkm_kunit_event_counts {
 	u32 audit_events;
 	u32 privilege_use_events;
+};
+
+struct pkm_kunit_kmes_event_view {
+	u32 event_size;
+	u32 header_size;
+	u64 timestamp;
+	u64 sequence;
+	u16 cpu_id;
+	u8 origin_class;
+	u16 type_len;
+	const u8 *type_ptr;
+	const u8 *payload_ptr;
+	size_t payload_len;
 };
 
 static bool pkm_kunit_mem_read(void *ctx, u64 user_ptr, void *dst, size_t len)
@@ -223,6 +243,11 @@ static u32 pkm_kunit_read_u32(const u8 *bytes, size_t offset)
 	       ((u32)bytes[offset + 3] << 24);
 }
 
+static u16 pkm_kunit_read_u16(const u8 *bytes, size_t offset)
+{
+	return (u16)bytes[offset + 0] | ((u16)bytes[offset + 1] << 8);
+}
+
 static u64 pkm_kunit_read_u64(const u8 *bytes, size_t offset)
 {
 	return (u64)bytes[offset + 0] |
@@ -256,6 +281,61 @@ static void pkm_kunit_expect_bytes_eq(struct kunit *test, const u8 *actual,
 {
 	KUNIT_ASSERT_EQ(test, actual_len, expected_len);
 	KUNIT_EXPECT_EQ(test, memcmp(actual, expected, actual_len), 0);
+}
+
+static bool pkm_kunit_contains_bytes(const u8 *haystack, size_t haystack_len,
+				     const u8 *needle, size_t needle_len)
+{
+	size_t i;
+
+	if (needle_len == 0)
+		return true;
+	if (haystack_len < needle_len)
+		return false;
+
+	for (i = 0; i <= haystack_len - needle_len; i++) {
+		if (!memcmp(haystack + i, needle, needle_len))
+			return true;
+	}
+
+	return false;
+}
+
+static void pkm_kunit_reset_kmes(void)
+{
+	pkm_kmes_kunit_reset_all();
+	pkm_kmes_kunit_clear_process_override();
+}
+
+static bool pkm_kunit_parse_kmes_event(
+	const u8 *bytes, size_t len, struct pkm_kunit_kmes_event_view *out)
+{
+	u32 event_size;
+	u32 header_size;
+	u16 type_len;
+
+	if (!bytes || !out || len < 29)
+		return false;
+
+	event_size = pkm_kunit_read_u32(bytes, 0);
+	header_size = pkm_kunit_read_u32(bytes, 4);
+	type_len = pkm_kunit_read_u16(bytes, 27);
+	if (event_size > len || header_size > event_size)
+		return false;
+	if (header_size != 29U + (u32)type_len)
+		return false;
+
+	out->event_size = event_size;
+	out->header_size = header_size;
+	out->timestamp = pkm_kunit_read_u64(bytes, 8);
+	out->sequence = pkm_kunit_read_u64(bytes, 16);
+	out->cpu_id = pkm_kunit_read_u16(bytes, 24);
+	out->origin_class = bytes[26];
+	out->type_len = type_len;
+	out->type_ptr = bytes + 29;
+	out->payload_ptr = bytes + header_size;
+	out->payload_len = event_size - header_size;
+	return true;
 }
 
 static void pkm_kunit_expect_boot_snapshot_eq(
@@ -557,7 +637,65 @@ static void pkm_kunit_scalar_denied_writebacks(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, summary.privilege_use_event_count, 0U);
 }
 
-static void pkm_kunit_access_check_requires_audit_sink(struct kunit *test)
+static void pkm_kunit_kmes_direct_emit_writes_single_event(struct kunit *test)
+{
+	static const u8 payload[] = { 0xc0 };
+	u8 buffer[128] = { 0 };
+	size_t written = 0;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
+
+	pkm_kunit_reset_kmes();
+	pkm_kmes_emit_kernel(PKM_KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+			     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, payload,
+			     sizeof(payload));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(buffer, sizeof(buffer),
+							  &written, &snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, written, (size_t)view.event_size);
+	KUNIT_EXPECT_EQ(test, view.sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, view.origin_class, PKM_KMES_ORIGIN_KACS);
+	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
+				  (const u8 *)PKM_KUNIT_KMES_DIRECT_TYPE,
+				  sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1);
+	pkm_kunit_expect_bytes_eq(test, view.payload_ptr, view.payload_len,
+				  payload, sizeof(payload));
+}
+
+static void pkm_kunit_kmes_direct_invalid_type_drops_structurally(
+	struct kunit *test)
+{
+	static const u8 payload[] = { 0xc0 };
+	u8 buffer[1] = { 0xaa };
+	size_t written = 99;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+
+	pkm_kunit_reset_kmes();
+	pkm_kmes_emit_kernel(PKM_KMES_ORIGIN_KACS, NULL, 0, payload,
+			     sizeof(payload));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_snapshot_single_active(&snapshot), 0);
+	KUNIT_EXPECT_EQ(test, snapshot.write_pos, 0ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.tail_pos, 0ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 1ULL);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(buffer, sizeof(buffer),
+							  &written, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test, written, (size_t)0);
+	KUNIT_EXPECT_EQ(test, buffer[0], (u8)0xaa);
+}
+
+static void pkm_kunit_access_check_emits_to_kmes_without_sink(
+	struct kunit *test)
 {
 	static const u8 sd_bytes[] = {
 		1, 0, 4, 128, 20, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 0,
@@ -570,6 +708,7 @@ static void pkm_kunit_access_check_requires_audit_sink(struct kunit *test)
 	};
 	u8 args[136];
 	u8 writebacks[12] = { 0 };
+	u8 *buffer;
 	struct pkm_kunit_mem mem = { };
 	struct pkm_kacs_usercopy_ops ops = {
 		.ctx = &mem,
@@ -577,8 +716,21 @@ static void pkm_kunit_access_check_requires_audit_sink(struct kunit *test)
 		.write_bytes = pkm_kunit_mem_write,
 	};
 	struct pkm_kacs_ingress_summary summary = { };
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
 	const struct pkm_kacs_resolved_ctx *ctx;
+	size_t written = 0;
 	long ret;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_process_override(
+				4104, PKM_KUNIT_KMES_PROCESS_NAME,
+				PKM_KUNIT_KMES_PROCESS_PATH),
+			0);
 
 	pkm_kunit_build_args_v136(args);
 	pkm_kunit_write_u64(args, 8, 0x1000);
@@ -600,12 +752,39 @@ static void pkm_kunit_access_check_requires_audit_sink(struct kunit *test)
 
 	ret = pkm_kacs_access_check_ingress_scalar(&ops, 0x0100, ctx, NULL,
 						    &summary);
-	KUNIT_EXPECT_EQ(test, ret, (long)-EOPNOTSUPP);
-	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(writebacks, 0), 0U);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(writebacks, 0), 0x00020000U);
 	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(writebacks, 4), 0U);
 	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(writebacks, 8), 0U);
 	KUNIT_EXPECT_EQ(test, summary.audit_event_count, 1U);
 	KUNIT_EXPECT_EQ(test, summary.privilege_use_event_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
+				&snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
+	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
+				  (const u8 *)"access-audit",
+				  sizeof("access-audit") - 1);
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)PKM_KUNIT_KMES_PROCESS_NAME,
+						 sizeof(PKM_KUNIT_KMES_PROCESS_NAME) - 1));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)PKM_KUNIT_KMES_PROCESS_PATH,
+						 sizeof(PKM_KUNIT_KMES_PROCESS_PATH) - 1));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)"policy",
+						 sizeof("policy") - 1));
 }
 
 static void pkm_kunit_access_check_failing_audit_sink_fails_closed(
@@ -2750,18 +2929,32 @@ static void pkm_kunit_access_check_public_invalid_token_fd(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0), 0U);
 }
 
-static void pkm_kunit_access_check_public_requires_audit_transport(
+static void pkm_kunit_access_check_public_emits_to_kmes(
 	struct kunit *test)
 {
 	u8 args[136];
 	u8 writebacks[12] = { 0 };
+	u8 *buffer;
 	struct pkm_kunit_mem mem = { };
 	struct pkm_kacs_usercopy_ops ops = {
 		.ctx = &mem,
 		.read_bytes = pkm_kunit_mem_read,
 		.write_bytes = pkm_kunit_mem_write,
 	};
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
+	size_t written = 0;
 	long ret;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_process_override(
+				4105, PKM_KUNIT_KMES_PROCESS_NAME,
+				PKM_KUNIT_KMES_PROCESS_PATH),
+			0);
 
 	pkm_kunit_build_args_v136(args);
 	pkm_kunit_write_u32(args, 4, (u32)-1);
@@ -2783,10 +2976,119 @@ static void pkm_kunit_access_check_public_requires_audit_transport(
 	pkm_kunit_add_region(&mem, 0x3000, writebacks, sizeof(writebacks));
 
 	ret = pkm_kacs_kunit_access_check_syscall_scalar(&ops, 0x0100);
-	KUNIT_EXPECT_EQ(test, ret, (long)-EOPNOTSUPP);
-	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(writebacks, 0), 0U);
+	KUNIT_EXPECT_EQ(test, ret, (long)PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(writebacks, 0),
+			PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
 	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(writebacks, 4), 0U);
 	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(writebacks, 8), 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
+				&snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
+	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
+				  (const u8 *)"access-audit",
+				  sizeof("access-audit") - 1);
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)PKM_KUNIT_KMES_PROCESS_NAME,
+						 sizeof(PKM_KUNIT_KMES_PROCESS_NAME) - 1));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)PKM_KUNIT_KMES_PROCESS_PATH,
+						 sizeof(PKM_KUNIT_KMES_PROCESS_PATH) - 1));
+}
+
+static void pkm_kunit_access_check_privilege_use_emits_to_kmes(
+	struct kunit *test)
+{
+	u8 args[136];
+	u8 granted_out[4] = { 0 };
+	u8 *buffer;
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	struct pkm_kacs_ingress_summary summary = { };
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
+	const void *subject_token;
+	const void *target_token;
+	size_t written = 0;
+	long fd;
+	long ret;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_privilege_audit_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(subject_token, target_token,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_process_override(
+				4206, PKM_KUNIT_KMES_PRIV_PROCESS_NAME,
+				PKM_KUNIT_KMES_PRIV_PROCESS_PATH),
+			0);
+
+	pkm_kunit_build_access_system_args(args, (s32)fd);
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)pkm_kunit_system_read_sd,
+			      sizeof(pkm_kunit_system_read_sd));
+	pkm_kunit_add_region(&mem, 0x3000, granted_out, sizeof(granted_out));
+
+	ret = pkm_kacs_access_check_ingress_scalar_with_token_fd(
+		&ops, 0x0100, NULL, &summary);
+	KUNIT_EXPECT_EQ(test, ret, (long)PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0),
+			PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_EXPECT_EQ(test, summary.audit_event_count, 0U);
+	KUNIT_EXPECT_EQ(test, summary.privilege_use_event_count, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
+				&snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
+	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
+				  (const u8 *)"privilege-use",
+				  sizeof("privilege-use") - 1);
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)"SeSecurityPrivilege",
+						 sizeof("SeSecurityPrivilege") - 1));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)PKM_KUNIT_KMES_PRIV_PROCESS_NAME,
+						 sizeof(PKM_KUNIT_KMES_PRIV_PROCESS_NAME) - 1));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)PKM_KUNIT_KMES_PRIV_PROCESS_PATH,
+						 sizeof(PKM_KUNIT_KMES_PRIV_PROCESS_PATH) - 1));
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
 }
 
 static void pkm_kunit_access_check_public_uses_psb_pip_default(
@@ -3410,7 +3712,9 @@ static void pkm_kunit_set_caap_public_malformed_keeps_old_policy(
 static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_probe_smoke),
 	KUNIT_CASE(pkm_kunit_scalar_denied_writebacks),
-	KUNIT_CASE(pkm_kunit_access_check_requires_audit_sink),
+	KUNIT_CASE(pkm_kunit_kmes_direct_emit_writes_single_event),
+	KUNIT_CASE(pkm_kunit_kmes_direct_invalid_type_drops_structurally),
+	KUNIT_CASE(pkm_kunit_access_check_emits_to_kmes_without_sink),
 	KUNIT_CASE(pkm_kunit_access_check_failing_audit_sink_fails_closed),
 	KUNIT_CASE(pkm_kunit_list_faults_on_results_write),
 	KUNIT_CASE(pkm_kunit_boot_system_defaults),
@@ -3466,7 +3770,8 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_access_check_public_scalar_current_effective),
 	KUNIT_CASE(pkm_kunit_access_check_public_result_list),
 	KUNIT_CASE(pkm_kunit_access_check_public_invalid_token_fd),
-	KUNIT_CASE(pkm_kunit_access_check_public_requires_audit_transport),
+	KUNIT_CASE(pkm_kunit_access_check_public_emits_to_kmes),
+	KUNIT_CASE(pkm_kunit_access_check_privilege_use_emits_to_kmes),
 	KUNIT_CASE(pkm_kunit_access_check_public_uses_psb_pip_default),
 	KUNIT_CASE(pkm_kunit_access_check_public_uses_caap_cache),
 	KUNIT_CASE(pkm_kunit_access_check_token_ctx_requires_caap_cache),

@@ -83,6 +83,7 @@ const void *kacs_rust_kunit_create_query_only_token(void);
 const void *kacs_rust_kunit_create_without_tcb_token(void);
 const void *kacs_rust_kunit_create_adjustable_groups_token(void);
 const void *kacs_rust_kunit_create_adjustable_privileges_token(void);
+const void *kacs_rust_kunit_create_privilege_audit_token(void);
 int kacs_rust_token_query(const void *token, u32 token_class, u8 *out,
 			  size_t out_len, size_t *required_out);
 int kacs_rust_token_adjust_privs(

@@ -31,6 +31,9 @@ for required in \
 	"$repo_root/kacs/caap_cache.h" \
 	"$repo_root/kacs/caap_cache.rs" \
 	"$repo_root/kacs/kacs_rust.rs" \
+	"$repo_root/kacs/kmes.c" \
+	"$repo_root/kacs/kmes.h" \
+	"$repo_root/kacs/kmes_payload.rs" \
 	"$repo_root/kacs/kunit.c" \
 	"$repo_root/kacs/token_fd.c" \
 	"$repo_root/kacs/token_fd.h" \

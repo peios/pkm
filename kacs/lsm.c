@@ -20,6 +20,7 @@
 #include <linux/slab.h>
 
 #include "caap_cache.h"
+#include "kmes.h"
 #include "token_runtime.h"
 
 #define PKM_KACS_UNMAPPED_ID 65534U
@@ -286,6 +287,12 @@ static int __init pkm_init(void)
 	ret = pkm_kacs_caap_cache_init();
 	if (ret) {
 		pr_err("pkm: CAAP cache init failed (%d)\n", ret);
+		return ret;
+	}
+
+	ret = pkm_kmes_init();
+	if (ret) {
+		pr_err("pkm: KMES init failed (%d)\n", ret);
 		return ret;
 	}
 

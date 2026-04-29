@@ -203,8 +203,18 @@ pub extern "C" fn kacs_rust_access_check_ingress_scalar(
         let args_bytes = read_args_prefix(ops, args_ptr)?;
         let request = parse_access_check_abi_request(&args_bytes, &CallbackMemory { ops })
             .map_err(map_kacs_error)?;
+        let effective_pip = effective_pip(request.pip, resolved.default_pip);
         let execution = execute_access_check_abi(&request, &resolved).map_err(map_kacs_error)?;
-        finalize_execution(ops, event_sinks, summary_out, execution, None, live_token)
+        finalize_execution(
+            ops,
+            event_sinks,
+            summary_out,
+            execution,
+            None,
+            live_token,
+            resolved,
+            effective_pip,
+        )
     }) {
         Ok(ret) => ret,
         Err(errno) => errno,
@@ -228,6 +238,7 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
         let args_bytes = read_args_prefix(ops, args_ptr)?;
         let request = parse_access_check_abi_request(&args_bytes, &CallbackMemory { ops })
             .map_err(map_kacs_error)?;
+        let effective_pip = effective_pip(request.pip, resolved.default_pip);
         let execution = execute_access_check_list_abi(&request, results_count, &resolved)
             .map_err(map_kacs_error)?;
         finalize_execution(
@@ -237,6 +248,8 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
             execution,
             Some((results_ptr, results_count)),
             live_token,
+            resolved,
+            effective_pip,
         )
     }) {
         Ok(ret) => ret,
@@ -384,6 +397,8 @@ fn finalize_execution(
     execution: AccessCheckAbiExecution,
     list_output: Option<(u64, u32)>,
     live_token: Option<*const c_void>,
+    resolved: AccessCheckAbiResolved<'_>,
+    effective_pip: PipContext,
 ) -> Result<c_long, c_long> {
     persist_live_privilege_state(live_token, &execution)?;
     write_summary(summary_out, &execution);
@@ -394,6 +409,8 @@ fn finalize_execution(
         event_sinks,
         &execution.audit_events,
         &execution.privilege_use_events,
+        resolved,
+        effective_pip,
     )?;
 
     if let Some(writeback) = execution.granted_out {
@@ -469,13 +486,20 @@ fn emit_events(
     event_sinks: *const PkmKacsEventSinkOps,
     audit_events: &[OwnedAuditEvent],
     privilege_use_events: &[crate::PrivilegeUseEvent],
+    resolved: AccessCheckAbiResolved<'_>,
+    effective_pip: PipContext,
 ) -> Result<(), c_long> {
     if audit_events.is_empty() && privilege_use_events.is_empty() {
         return Ok(());
     }
 
     let Some(sinks) = (unsafe { event_sinks.as_ref() }) else {
-        return Err(EOPNOTSUPP);
+        return crate::kmes_payload::emit_access_check_events_to_kmes(
+            audit_events,
+            privilege_use_events,
+            resolved,
+            effective_pip,
+        );
     };
 
     if !audit_events.is_empty() {
@@ -562,5 +586,20 @@ fn map_kacs_error(error: KacsError) -> c_long {
         KacsError::UserMemoryFault { .. } => EFAULT,
         KacsError::AllocationFailure => ENOMEM,
         _ => EINVAL,
+    }
+}
+
+fn effective_pip(requested: PipContext, fallback: PipContext) -> PipContext {
+    PipContext {
+        pip_type: if requested.pip_type != 0 {
+            requested.pip_type
+        } else {
+            fallback.pip_type
+        },
+        pip_trust: if requested.pip_trust != 0 {
+            requested.pip_trust
+        } else {
+            fallback.pip_trust
+        },
     }
 }
