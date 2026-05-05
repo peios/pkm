@@ -10,6 +10,13 @@
 #define PKM_KMES_ORIGIN_KACS 2U
 #define PKM_KMES_ORIGIN_LCS 3U
 
+struct kmes_emit_entry {
+	const void *event_type;
+	u16 event_type_len;
+	const void *payload;
+	u32 payload_len;
+};
+
 int pkm_kmes_init(void);
 void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 			  size_t event_type_len, const void *payload,
@@ -18,8 +25,14 @@ int pkm_kmes_current_process_info(u64 *pid_out, u8 *name_out,
 				  size_t name_out_len, size_t *name_len_out,
 				  u8 *path_out, size_t path_out_len,
 				  size_t *path_len_out);
+long pkm_kmes_emit_user_for_token(const void *token, const void __user *event_type,
+				  u16 event_type_len,
+				  const void __user *payload, u32 payload_len);
 long pkm_kmes_attach_user_for_token(const void *token, int __user *fds,
 				    int __user *count, u64 __user *capacity);
+long pkm_kmes_emit_batch_user_for_token(
+	const void *token, const struct kmes_emit_entry __user *entries,
+	u32 count, u32 __user *emitted_out);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 struct pkm_kmes_kunit_snapshot {
@@ -63,6 +76,12 @@ int pkm_kmes_kunit_set_fd_need_wake(int fd, u8 value);
 int pkm_kmes_kunit_set_process_override(u64 pid, const char *name,
 					const char *path);
 void pkm_kmes_kunit_clear_process_override(void);
+long pkm_kmes_kunit_emit_for_token(const void *token, const void *event_type,
+				   u16 event_type_len, const void *payload,
+				   u32 payload_len);
+long pkm_kmes_kunit_emit_batch_for_token(const void *token,
+					 const struct kmes_emit_entry *entries,
+					 u32 count, u32 *emitted_out);
 #endif
 
 #endif /* _SECURITY_PKM_KACS_KMES_H */

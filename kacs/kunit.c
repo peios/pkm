@@ -39,11 +39,13 @@
 #define PKM_KUNIT_PIP_TRUST_TEST 5U
 #define PKM_KUNIT_SE_TCB_PRIVILEGE (1ULL << 7)
 #define PKM_KUNIT_SE_SECURITY_PRIVILEGE (1ULL << 8)
+#define PKM_KUNIT_SE_AUDIT_PRIVILEGE (1ULL << 21)
 #define PKM_KUNIT_SYSTEM_PRIVILEGES_ALL 0xC000000FFFFFFFFCULL
 #define PKM_KUNIT_SE_PRIVILEGE_ENABLED 0x00000002U
 #define PKM_KUNIT_SE_PRIVILEGE_REMOVED 0x00000004U
 #define PKM_KUNIT_PRIV_RESET_ALL_DEFAULTS 0x80000000U
 #define PKM_KUNIT_PRIV_LUID_SECURITY 8U
+#define PKM_KUNIT_PRIV_LUID_AUDIT 21U
 #define PKM_KUNIT_PRIV_LUID_REMOVE 2U
 #define PKM_KUNIT_PRIV_LUID_ENABLE 5U
 #define PKM_KUNIT_PRIV_LUID_DISABLE 9U
@@ -78,8 +80,12 @@
 #define PKM_KUNIT_KMES_PRIV_PROCESS_NAME "kunit-priv"
 #define PKM_KUNIT_KMES_PRIV_PROCESS_PATH "/kunit/privilege"
 #define PKM_KUNIT_KMES_DIRECT_TYPE "kunit-smoke"
+#define PKM_KUNIT_KMES_USER_TYPE "kmes-user"
+#define PKM_KUNIT_KMES_BATCH_TYPE0 "kmes-batch0"
+#define PKM_KUNIT_KMES_BATCH_TYPE1 "kmes-batch1"
 #define PKM_KUNIT_KMES_CAPTURE_BYTES 2048U
 #define PKM_KUNIT_KMES_DEFAULT_CAPACITY (4U * 1024U * 1024U)
+#define PKM_KUNIT_KMES_DEFAULT_RATE 10000U
 
 extern size_t kacs_rust_kunit_probe(void);
 static const u8 pkm_kunit_kmes_ring_magic[] = "KMESRING";
@@ -309,6 +315,8 @@ static void pkm_kunit_reset_kmes(void)
 {
 	pkm_kmes_kunit_reset_all();
 	pkm_kmes_kunit_clear_process_override();
+	(void)pkm_kmes_kunit_set_current_process_rate_tokens(
+		PKM_KUNIT_KMES_DEFAULT_RATE);
 }
 
 static void pkm_kunit_close_fds(struct kunit *test, int *fds, int count)
@@ -924,6 +932,314 @@ static void pkm_kunit_kmes_attach_mapping_view_tracks_emission(
 				  event_bytes, sizeof(event_bytes));
 
 	pkm_kunit_close_fds(test, fds, count);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_emit_user_success(struct kunit *test)
+{
+	static const u8 payload[] = { 0x81, 0xa1, 0x6b, 0xc0 };
+	const void *token;
+	struct pkm_kacs_boot_snapshot after = { };
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
+	u8 buffer[128] = { 0 };
+	size_t written = 0;
+	long ret;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	ret = pkm_kmes_kunit_emit_for_token(
+		token, PKM_KUNIT_KMES_USER_TYPE,
+		sizeof(PKM_KUNIT_KMES_USER_TYPE) - 1, payload, sizeof(payload));
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(buffer, sizeof(buffer),
+							  &written, &snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
+	KUNIT_EXPECT_EQ(test, view.origin_class, PKM_KMES_ORIGIN_USERSPACE);
+	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
+				  (const u8 *)PKM_KUNIT_KMES_USER_TYPE,
+				  sizeof(PKM_KUNIT_KMES_USER_TYPE) - 1);
+	pkm_kunit_expect_bytes_eq(test, view.payload_ptr, view.payload_len,
+				  payload, sizeof(payload));
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used &
+				(PKM_KUNIT_SE_AUDIT_PRIVILEGE |
+				 PKM_KUNIT_SE_TCB_PRIVILEGE),
+			PKM_KUNIT_SE_AUDIT_PRIVILEGE |
+				PKM_KUNIT_SE_TCB_PRIVILEGE);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_emit_denies_before_usercopy(struct kunit *test)
+{
+	const void *token;
+	struct pkm_kacs_boot_snapshot after = { };
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kacs_priv_adjust_entry entry = {
+		.luid = PKM_KUNIT_PRIV_LUID_AUDIT,
+		.attributes = 0,
+	};
+	u64 previous_enabled = 0;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(
+		test,
+		kacs_rust_token_has_enabled_privilege(token,
+						      PKM_KUNIT_SE_AUDIT_PRIVILEGE));
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_token_adjust_privs(token, &entry, 1,
+						     &previous_enabled),
+			0);
+	pkm_kunit_reset_kmes();
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_emit_user_for_token(token, (const void __user *)1,
+						     1, (const void __user *)1,
+						     1),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used & PKM_KUNIT_SE_AUDIT_PRIVILEGE,
+			0ULL);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_emit_rejects_invalid_msgpack(struct kunit *test)
+{
+	static const u8 payload[] = { 0xc1 };
+	const void *token;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_for_token(
+				token, PKM_KUNIT_KMES_USER_TYPE,
+				sizeof(PKM_KUNIT_KMES_USER_TYPE) - 1, payload,
+				sizeof(payload)),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_emit_size_check_precedes_usercopy(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_emit_user_for_token(token,
+						     (const void __user *)1, 1,
+						     (const void __user *)1,
+						     65536U),
+			(long)-ENOSPC);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_emit_rate_limit_denies_without_tcb(
+	struct kunit *test)
+{
+	static const u8 payload[] = { 0xc0 };
+	const void *token;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u32 tokens = 99;
+
+	token = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_current_process_rate_tokens(0), 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_for_token(
+				token, PKM_KUNIT_KMES_USER_TYPE,
+				sizeof(PKM_KUNIT_KMES_USER_TYPE) - 1, payload,
+				sizeof(payload)),
+			(long)-EAGAIN);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_get_current_process_rate_tokens(&tokens), 0);
+	KUNIT_EXPECT_EQ(test, tokens, 0U);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_emit_tcb_exempts_rate_limit(struct kunit *test)
+{
+	static const u8 payload[] = { 0xc0 };
+	const void *token;
+	u32 tokens = 99;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_current_process_rate_tokens(0), 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_for_token(
+				token, PKM_KUNIT_KMES_USER_TYPE,
+				sizeof(PKM_KUNIT_KMES_USER_TYPE) - 1, payload,
+				sizeof(payload)),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_get_current_process_rate_tokens(&tokens), 0);
+	KUNIT_EXPECT_EQ(test, tokens, 0U);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_emit_batch_success_shared_timestamp(
+	struct kunit *test)
+{
+	static const u8 payload0[] = { 0xc0 };
+	static const u8 payload1[] = { 0x81, 0xa1, 0x78, 0x01 };
+	struct kmes_emit_entry entries[] = {
+		{
+			.event_type = PKM_KUNIT_KMES_BATCH_TYPE0,
+			.event_type_len = sizeof(PKM_KUNIT_KMES_BATCH_TYPE0) - 1,
+			.payload = payload0,
+			.payload_len = sizeof(payload0),
+		},
+		{
+			.event_type = PKM_KUNIT_KMES_BATCH_TYPE1,
+			.event_type_len = sizeof(PKM_KUNIT_KMES_BATCH_TYPE1) - 1,
+			.payload = payload1,
+			.payload_len = sizeof(payload1),
+		},
+	};
+	const void *token;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view first = { };
+	struct pkm_kunit_kmes_event_view second = { };
+	u8 buffer[256] = { 0 };
+	u32 emitted = 99;
+	size_t written = 0;
+	long ret;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	ret = pkm_kmes_kunit_emit_batch_for_token(token, entries,
+						  ARRAY_SIZE(entries), &emitted);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, emitted, (u32)ARRAY_SIZE(entries));
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(buffer, sizeof(buffer),
+							  &written, &snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &first));
+	KUNIT_ASSERT_TRUE(
+		test,
+		pkm_kunit_parse_kmes_event(buffer + first.event_size,
+					   written - first.event_size, &second));
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 2ULL);
+	KUNIT_EXPECT_EQ(test, first.timestamp, second.timestamp);
+	KUNIT_EXPECT_EQ(test, first.sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, second.sequence, 2ULL);
+	KUNIT_EXPECT_EQ(test, first.origin_class, PKM_KMES_ORIGIN_USERSPACE);
+	KUNIT_EXPECT_EQ(test, second.origin_class, PKM_KMES_ORIGIN_USERSPACE);
+	pkm_kunit_expect_bytes_eq(test, first.type_ptr, first.type_len,
+				  (const u8 *)PKM_KUNIT_KMES_BATCH_TYPE0,
+				  sizeof(PKM_KUNIT_KMES_BATCH_TYPE0) - 1);
+	pkm_kunit_expect_bytes_eq(test, second.type_ptr, second.type_len,
+				  (const u8 *)PKM_KUNIT_KMES_BATCH_TYPE1,
+				  sizeof(PKM_KUNIT_KMES_BATCH_TYPE1) - 1);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_emit_batch_partial_refunds_unused_tokens(
+	struct kunit *test)
+{
+	static const u8 payload[] = { 0xc0 };
+	static const u8 bad_type[] = { 0x80 };
+	struct kmes_emit_entry entries[] = {
+		{
+			.event_type = PKM_KUNIT_KMES_BATCH_TYPE0,
+			.event_type_len = sizeof(PKM_KUNIT_KMES_BATCH_TYPE0) - 1,
+			.payload = payload,
+			.payload_len = sizeof(payload),
+		},
+		{
+			.event_type = bad_type,
+			.event_type_len = sizeof(bad_type),
+			.payload = payload,
+			.payload_len = sizeof(payload),
+		},
+	};
+	const void *token;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view first = { };
+	u8 buffer[128] = { 0 };
+	u32 emitted = 99;
+	u32 tokens = 0;
+	size_t written = 0;
+	long ret;
+
+	token = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_current_process_rate_tokens(5), 0);
+	ret = pkm_kmes_kunit_emit_batch_for_token(token, entries,
+						  ARRAY_SIZE(entries), &emitted);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, emitted, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_get_current_process_rate_tokens(&tokens), 0);
+	KUNIT_EXPECT_EQ(test, tokens, 4U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(buffer, sizeof(buffer),
+							  &written, &snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &first));
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	pkm_kunit_expect_bytes_eq(test, first.type_ptr, first.type_len,
+				  (const u8 *)PKM_KUNIT_KMES_BATCH_TYPE0,
+				  sizeof(PKM_KUNIT_KMES_BATCH_TYPE0) - 1);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_emit_batch_checks_emitted_out_before_entries(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_emit_batch_user_for_token(
+				token, (const struct kmes_emit_entry __user *)1,
+				1, (u32 __user *)1),
+			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
 	kacs_rust_token_drop(token);
 }
 
@@ -3952,6 +4268,15 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_attach_denies_without_security),
 	KUNIT_CASE(pkm_kunit_kmes_attach_checks_privilege_before_usercopy),
 	KUNIT_CASE(pkm_kunit_kmes_attach_mapping_view_tracks_emission),
+	KUNIT_CASE(pkm_kunit_kmes_emit_user_success),
+	KUNIT_CASE(pkm_kunit_kmes_emit_denies_before_usercopy),
+	KUNIT_CASE(pkm_kunit_kmes_emit_rejects_invalid_msgpack),
+	KUNIT_CASE(pkm_kunit_kmes_emit_size_check_precedes_usercopy),
+	KUNIT_CASE(pkm_kunit_kmes_emit_rate_limit_denies_without_tcb),
+	KUNIT_CASE(pkm_kunit_kmes_emit_tcb_exempts_rate_limit),
+	KUNIT_CASE(pkm_kunit_kmes_emit_batch_success_shared_timestamp),
+	KUNIT_CASE(pkm_kunit_kmes_emit_batch_partial_refunds_unused_tokens),
+	KUNIT_CASE(pkm_kunit_kmes_emit_batch_checks_emitted_out_before_entries),
 	KUNIT_CASE(pkm_kunit_access_check_emits_to_kmes_without_sink),
 	KUNIT_CASE(pkm_kunit_access_check_failing_audit_sink_fails_closed),
 	KUNIT_CASE(pkm_kunit_list_faults_on_results_write),

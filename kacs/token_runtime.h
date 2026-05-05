@@ -65,6 +65,8 @@ int pkm_kacs_resolve_ctx_from_token(const void *token,
 				    struct pkm_kacs_resolved_ctx *out);
 int pkm_kacs_resolve_current_effective_ctx(struct pkm_kacs_resolved_ctx *out);
 int pkm_kacs_resolve_current_primary_ctx(struct pkm_kacs_resolved_ctx *out);
+int pkm_kmes_current_process_rate_reserve(u32 count);
+void pkm_kmes_current_process_rate_refund(u32 count);
 
 const void *kacs_rust_create_boot_system_token(void);
 const void *kacs_rust_token_clone(const void *token);
@@ -96,5 +98,10 @@ int kacs_rust_token_adjust_session_id(const void *token, u32 session_id);
 int kacs_rust_token_adjust_default(const void *token, u32 owner_index,
 				   u32 group_index, const u8 *dacl,
 				   size_t dacl_len, u32 change_dacl);
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+int pkm_kmes_kunit_set_current_process_rate_tokens(u32 tokens);
+int pkm_kmes_kunit_get_current_process_rate_tokens(u32 *tokens_out);
+#endif
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_RUNTIME_H */

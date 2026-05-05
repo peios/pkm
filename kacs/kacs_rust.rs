@@ -13,6 +13,7 @@ mod access_check_ingress;
 mod caap_cache;
 mod kacs_core;
 mod kmes_payload;
+mod kmes_validate;
 mod token_runtime;
 
 #[allow(hidden_glob_reexports)]

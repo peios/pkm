@@ -94,6 +94,7 @@ require_file "$src_root/kacs/kacs_rust.rs"
 require_file "$src_root/kacs/kmes.c"
 require_file "$src_root/kacs/kmes.h"
 require_file "$src_root/kacs/kmes_payload.rs"
+require_file "$src_root/kacs/kmes_validate.rs"
 require_file "$src_root/kacs/kunit.c"
 require_file "$src_root/kacs/token_fd.c"
 require_file "$src_root/kacs/token_fd.h"
@@ -120,6 +121,7 @@ install -m 0644 "$src_root/kacs/kacs_rust.rs" "$pkm_dir/kacs/kacs_rust.rs"
 install -m 0644 "$src_root/kacs/kmes.c" "$pkm_dir/kacs/kmes.c"
 install -m 0644 "$src_root/kacs/kmes.h" "$pkm_dir/kacs/kmes.h"
 install -m 0644 "$src_root/kacs/kmes_payload.rs" "$pkm_dir/kacs/kmes_payload.rs"
+install -m 0644 "$src_root/kacs/kmes_validate.rs" "$pkm_dir/kacs/kmes_validate.rs"
 install -m 0644 "$src_root/kacs/kunit.c" "$pkm_dir/kacs/kunit.c"
 install -m 0644 "$src_root/kacs/token_fd.c" "$pkm_dir/kacs/token_fd.c"
 install -m 0644 "$src_root/kacs/token_fd.h" "$pkm_dir/kacs/token_fd.h"
@@ -136,6 +138,10 @@ append_line_once 'obj-$(CONFIG_SECURITY_PKM) += pkm/' "$kernel_root/security/Mak
 insert_source_kconfig "$kernel_root/security/Kconfig"
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1000 kacs_open_self_token
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1090 kmes_emit
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1092 kmes_emit_batch
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1023 kacs_access_check
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \

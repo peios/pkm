@@ -34,6 +34,7 @@ for required in \
 	"$repo_root/kacs/kmes.c" \
 	"$repo_root/kacs/kmes.h" \
 	"$repo_root/kacs/kmes_payload.rs" \
+	"$repo_root/kacs/kmes_validate.rs" \
 	"$repo_root/kacs/kunit.c" \
 	"$repo_root/kacs/token_fd.c" \
 	"$repo_root/kacs/token_fd.h" \
@@ -51,7 +52,9 @@ fi
 
 for syscall in \
 	"1000 kacs_open_self_token" \
+	"1090 kmes_emit" \
 	"1091 kmes_attach" \
+	"1092 kmes_emit_batch" \
 	"1023 kacs_access_check" \
 	"1024 kacs_access_check_list" \
 	"1025 kacs_set_caap"; do

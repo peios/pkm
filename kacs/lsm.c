@@ -14,16 +14,28 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/math64.h>
 #include <linux/lsm_hooks.h>
+#include <linux/refcount.h>
 #include <linux/sched.h>
 #include <linux/security.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/timekeeping.h>
 
 #include "caap_cache.h"
 #include "kmes.h"
 #include "token_runtime.h"
 
 #define PKM_KACS_UNMAPPED_ID 65534U
+#define PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS 10000U
+
+struct pkm_kmes_rate_bucket {
+	refcount_t refs;
+	spinlock_t lock;
+	u64 last_refill_ns;
+	u32 tokens;
+};
 
 struct pkm_kacs_cred_security {
 	const void *token;
@@ -34,6 +46,7 @@ struct pkm_kacs_cred_security {
 struct pkm_kacs_task_security {
 	u32 pip_type;
 	u32 pip_trust;
+	struct pkm_kmes_rate_bucket *kmes_rate_bucket;
 };
 
 extern int kacs_rust_init(void);
@@ -60,6 +73,111 @@ static inline struct pkm_kacs_task_security *pkm_kacs_task(
 {
 	return (struct pkm_kacs_task_security *)((char *)task->security +
 						 pkm_blob_sizes.lbs_task);
+}
+
+static struct pkm_kmes_rate_bucket *pkm_kmes_rate_bucket_alloc(void)
+{
+	struct pkm_kmes_rate_bucket *bucket;
+
+	bucket = kzalloc(sizeof(*bucket), GFP_KERNEL);
+	if (!bucket)
+		return NULL;
+
+	refcount_set(&bucket->refs, 1);
+	spin_lock_init(&bucket->lock);
+	bucket->last_refill_ns = ktime_get_ns();
+	bucket->tokens = PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS;
+	return bucket;
+}
+
+static struct pkm_kmes_rate_bucket *pkm_kmes_rate_bucket_get(
+	struct pkm_kmes_rate_bucket *bucket)
+{
+	if (bucket)
+		refcount_inc(&bucket->refs);
+	return bucket;
+}
+
+static void pkm_kmes_rate_bucket_put(struct pkm_kmes_rate_bucket *bucket)
+{
+	if (!bucket)
+		return;
+	if (refcount_dec_and_test(&bucket->refs))
+		kfree(bucket);
+}
+
+static void pkm_kmes_rate_bucket_refill(struct pkm_kmes_rate_bucket *bucket,
+					 u64 now_ns, u32 rate)
+{
+	u64 elapsed_ns;
+	u64 added;
+	u64 consumed_ns;
+	u64 tokens;
+
+	if (!bucket || rate == 0)
+		return;
+	if (bucket->tokens >= rate) {
+		bucket->tokens = rate;
+		bucket->last_refill_ns = now_ns;
+		return;
+	}
+
+	elapsed_ns = now_ns - bucket->last_refill_ns;
+	if (elapsed_ns == 0)
+		return;
+
+	added = div_u64(elapsed_ns * (u64)rate, NSEC_PER_SEC);
+	if (added == 0)
+		return;
+
+	tokens = bucket->tokens + added;
+	if (tokens > rate)
+		tokens = rate;
+	bucket->tokens = (u32)tokens;
+
+	consumed_ns = div_u64(added * NSEC_PER_SEC, rate);
+	if (consumed_ns > elapsed_ns)
+		consumed_ns = elapsed_ns;
+	bucket->last_refill_ns += consumed_ns;
+}
+
+static int pkm_kmes_rate_bucket_reserve(struct pkm_kmes_rate_bucket *bucket,
+					u32 count)
+{
+	unsigned long flags;
+	u64 now_ns;
+
+	if (!bucket || count == 0)
+		return -EPERM;
+
+	now_ns = ktime_get_ns();
+	spin_lock_irqsave(&bucket->lock, flags);
+	pkm_kmes_rate_bucket_refill(bucket, now_ns,
+				    PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS);
+	if (bucket->tokens < count) {
+		spin_unlock_irqrestore(&bucket->lock, flags);
+		return -EAGAIN;
+	}
+	bucket->tokens -= count;
+	spin_unlock_irqrestore(&bucket->lock, flags);
+	return 0;
+}
+
+static void pkm_kmes_rate_bucket_refund(struct pkm_kmes_rate_bucket *bucket,
+					 u32 count)
+{
+	unsigned long flags;
+	u64 tokens;
+
+	if (!bucket || count == 0)
+		return;
+
+	spin_lock_irqsave(&bucket->lock, flags);
+	tokens = bucket->tokens + (u64)count;
+	if (tokens > PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS)
+		tokens = PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS;
+	bucket->tokens = (u32)tokens;
+	spin_unlock_irqrestore(&bucket->lock, flags);
 }
 
 static void pkm_kacs_assert_boot_caps(struct cred *cred)
@@ -150,16 +268,45 @@ static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 {
 	struct pkm_kacs_task_security *new_sec;
 	struct pkm_kacs_task_security *parent_sec;
+	struct pkm_kmes_rate_bucket *bucket;
 
 	(void)clone_flags;
-	if (!task || !task->security || !current || !current->security)
+	if (!task || !task->security)
 		return -EACCES;
 
 	new_sec = pkm_kacs_task(task);
-	parent_sec = pkm_kacs_task(current);
-	new_sec->pip_type = parent_sec->pip_type;
-	new_sec->pip_trust = parent_sec->pip_trust;
+	new_sec->pip_type = 0;
+	new_sec->pip_trust = 0;
+	new_sec->kmes_rate_bucket = NULL;
+
+	if (current && current->security) {
+		parent_sec = pkm_kacs_task(current);
+		new_sec->pip_type = parent_sec->pip_type;
+		new_sec->pip_trust = parent_sec->pip_trust;
+		if ((clone_flags & CLONE_THREAD) != 0)
+			bucket = pkm_kmes_rate_bucket_get(
+				parent_sec->kmes_rate_bucket);
+		else
+			bucket = pkm_kmes_rate_bucket_alloc();
+	} else {
+		bucket = pkm_kmes_rate_bucket_alloc();
+	}
+	if (!bucket)
+		return -ENOMEM;
+	new_sec->kmes_rate_bucket = bucket;
 	return 0;
+}
+
+static void pkm_kacs_task_free(struct task_struct *task)
+{
+	struct pkm_kacs_task_security *sec;
+
+	if (!task || !task->security)
+		return;
+
+	sec = pkm_kacs_task(task);
+	pkm_kmes_rate_bucket_put(sec->kmes_rate_bucket);
+	sec->kmes_rate_bucket = NULL;
 }
 
 static struct security_hook_list pkm_hooks[] __ro_after_init = {
@@ -168,6 +315,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(cred_alloc_blank, pkm_kacs_cred_alloc_blank),
 	LSM_HOOK_INIT(cred_free, pkm_kacs_cred_free),
 	LSM_HOOK_INIT(task_alloc, pkm_kacs_task_alloc),
+	LSM_HOOK_INIT(task_free, pkm_kacs_task_free),
 };
 
 void *pkm_kacs_zalloc(size_t size)
@@ -210,6 +358,26 @@ int pkm_kacs_current_pip_context(u32 *pip_type, u32 *pip_trust)
 	return 0;
 }
 
+int pkm_kmes_current_process_rate_reserve(u32 count)
+{
+	struct pkm_kacs_task_security *sec;
+
+	if (!current || !current->security)
+		return -EPERM;
+	sec = pkm_kacs_task(current);
+	return pkm_kmes_rate_bucket_reserve(sec->kmes_rate_bucket, count);
+}
+
+void pkm_kmes_current_process_rate_refund(u32 count)
+{
+	struct pkm_kacs_task_security *sec;
+
+	if (!current || !current->security || count == 0)
+		return;
+	sec = pkm_kacs_task(current);
+	pkm_kmes_rate_bucket_refund(sec->kmes_rate_bucket, count);
+}
+
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_kacs_kunit_set_current_pip_context(u32 pip_type, u32 pip_trust)
 {
@@ -221,6 +389,47 @@ void pkm_kacs_kunit_set_current_pip_context(u32 pip_type, u32 pip_trust)
 	sec = pkm_kacs_task(current);
 	sec->pip_type = pip_type;
 	sec->pip_trust = pip_trust;
+}
+
+int pkm_kmes_kunit_set_current_process_rate_tokens(u32 tokens)
+{
+	struct pkm_kacs_task_security *sec;
+	unsigned long flags;
+
+	if (!current || !current->security)
+		return -EACCES;
+	if (tokens > PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS)
+		return -EINVAL;
+
+	sec = pkm_kacs_task(current);
+	if (!sec->kmes_rate_bucket)
+		return -EACCES;
+
+	spin_lock_irqsave(&sec->kmes_rate_bucket->lock, flags);
+	sec->kmes_rate_bucket->tokens = tokens;
+	sec->kmes_rate_bucket->last_refill_ns = ktime_get_ns();
+	spin_unlock_irqrestore(&sec->kmes_rate_bucket->lock, flags);
+	return 0;
+}
+
+int pkm_kmes_kunit_get_current_process_rate_tokens(u32 *tokens_out)
+{
+	struct pkm_kacs_task_security *sec;
+	unsigned long flags;
+
+	if (!tokens_out)
+		return -EINVAL;
+	if (!current || !current->security)
+		return -EACCES;
+
+	sec = pkm_kacs_task(current);
+	if (!sec->kmes_rate_bucket)
+		return -EACCES;
+
+	spin_lock_irqsave(&sec->kmes_rate_bucket->lock, flags);
+	*tokens_out = sec->kmes_rate_bucket->tokens;
+	spin_unlock_irqrestore(&sec->kmes_rate_bucket->lock, flags);
+	return 0;
 }
 #endif
 
@@ -265,6 +474,7 @@ static int __init pkm_init(void)
 {
 	const void *system_token;
 	struct pkm_kacs_cred_security *sec;
+	struct pkm_kacs_task_security *task_sec;
 	int ret;
 
 	if (IS_ENABLED(CONFIG_SECURITY_SELINUX) ||
@@ -300,6 +510,13 @@ static int __init pkm_init(void)
 	if (!system_token)
 		return -ENOMEM;
 	pkm_kacs_boot_system_token = system_token;
+
+	task_sec = pkm_kacs_task(current);
+	if (!task_sec->kmes_rate_bucket) {
+		task_sec->kmes_rate_bucket = pkm_kmes_rate_bucket_alloc();
+		if (!task_sec->kmes_rate_bucket)
+			return -ENOMEM;
+	}
 
 	sec = pkm_kacs_cred(current_cred());
 	sec->token = system_token;

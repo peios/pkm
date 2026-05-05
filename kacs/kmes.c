@@ -7,7 +7,9 @@
  * - PKM-owned per-CPU buffers;
  * - the first public consumer attach/mmap surface.
  *
- * Userspace emit, boot-buffer swap-over, and runtime resizing remain deferred.
+ * Slice 40 adds the public userspace emit surface.
+ *
+ * Boot-buffer swap-over and runtime resizing remain deferred.
  */
 
 #include <linux/anon_inodes.h>
@@ -38,6 +40,10 @@
 
 #define PKM_KMES_EVENT_HEADER_BASE_SIZE 29U
 #define PKM_KMES_DEFAULT_BUFFER_CAPACITY (4U * 1024U * 1024U)
+#define PKM_KMES_DEFAULT_MAX_EVENT_SIZE 65536U
+#define PKM_KMES_DEFAULT_MAX_NESTING_DEPTH 32U
+#define PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS 10000U
+#define PKM_KMES_MAX_USER_BATCH_COUNT 256U
 #define PKM_KMES_MAX_KERNEL_TYPE_LEN ((size_t)U16_MAX)
 #define PKM_KMES_RING_VERSION 1U
 #define PKM_KMES_METADATA_PAGE_SIZE 4096U
@@ -52,7 +58,9 @@
 #define PKM_KMES_PRODUCER_TAIL_POS_OFFSET 72U
 #define PKM_KMES_PRODUCER_FUTEX_COUNTER_OFFSET 128U
 #define PKM_KMES_CONSUMER_NEED_WAKE_OFFSET 0U
+#define PKM_KMES_PRIVILEGE_SE_TCB (1ULL << 7)
 #define PKM_KMES_PRIVILEGE_SE_SECURITY (1ULL << 8)
+#define PKM_KMES_PRIVILEGE_SE_AUDIT (1ULL << 21)
 
 struct pkm_kmes_cpu_state {
 	u16 cpu_id;
@@ -83,6 +91,16 @@ struct pkm_kmes_process_view {
 	size_t path_len;
 };
 
+struct pkm_kmes_staged_event {
+	u8 *bytes;
+	const u8 *event_type;
+	const u8 *payload;
+	u16 event_type_len;
+	u32 payload_len;
+	u32 header_size;
+	u32 event_size;
+};
+
 static struct pkm_kmes_cpu_state *pkm_kmes_cpus;
 static unsigned int pkm_kmes_cpu_slots;
 static unsigned int pkm_kmes_cpu_count;
@@ -90,6 +108,12 @@ static bool pkm_kmes_ready;
 static const u8 pkm_kmes_ring_magic[8] = {
 	0x4b, 0x4d, 0x45, 0x53, 0x52, 0x49, 0x4e, 0x47,
 };
+
+extern int kacs_rust_kmes_validate_staged_event(const u8 *event_type_ptr,
+						size_t event_type_len,
+						const u8 *payload_ptr,
+						size_t payload_len,
+						u32 max_nesting_depth);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 struct pkm_kmes_kunit_process_override {
@@ -353,6 +377,31 @@ static void pkm_kmes_drop_event(struct pkm_kmes_cpu_state *cpu)
 	cpu->dropped_events++;
 }
 
+static void pkm_kmes_reserve_space_local(struct pkm_kmes_cpu_state *cpu,
+					 u64 *tail_io, u64 write_pos,
+					 size_t event_size)
+{
+	u64 next_tail = *tail_io;
+	u64 used = write_pos - next_tail;
+
+	while (used + event_size > cpu->capacity) {
+		u32 overwritten_size =
+			pkm_kmes_read_u32_at(cpu->data, cpu->capacity, next_tail);
+
+		if (overwritten_size == 0 ||
+		    overwritten_size > cpu->capacity ||
+		    overwritten_size > write_pos - next_tail) {
+			next_tail = write_pos;
+			break;
+		}
+
+		next_tail += overwritten_size;
+		used = write_pos - next_tail;
+	}
+
+	*tail_io = next_tail;
+}
+
 static void pkm_kmes_reserve_space(struct pkm_kmes_cpu_state *cpu,
 				   size_t event_size)
 {
@@ -377,13 +426,12 @@ static void pkm_kmes_reserve_space(struct pkm_kmes_cpu_state *cpu,
 	pkm_kmes_store_tail_pos(cpu, next_tail);
 }
 
-static void pkm_kmes_write_event(struct pkm_kmes_cpu_state *cpu, u8 origin_class,
-				 const void *event_type, size_t event_type_len,
-				 const void *payload, size_t payload_len,
-				 u64 timestamp, u64 sequence,
-				 bool *wake_needed_out)
+static void pkm_kmes_write_event_at(struct pkm_kmes_cpu_state *cpu, u64 pos,
+				    u8 origin_class, const void *event_type,
+				    size_t event_type_len, const void *payload,
+				    size_t payload_len, u64 timestamp,
+				    u64 sequence)
 {
-	u64 pos = cpu->write_pos;
 	u32 header_size = PKM_KMES_EVENT_HEADER_BASE_SIZE + (u32)event_type_len;
 	u32 event_size = header_size + (u32)payload_len;
 
@@ -407,10 +455,518 @@ static void pkm_kmes_write_event(struct pkm_kmes_cpu_state *cpu, u8 origin_class
 	pos += event_type_len;
 	pkm_kmes_write_bytes_at(cpu->data, cpu->capacity, pos, payload,
 				payload_len);
+}
+
+static void pkm_kmes_write_event(struct pkm_kmes_cpu_state *cpu, u8 origin_class,
+				 const void *event_type, size_t event_type_len,
+				 const void *payload, size_t payload_len,
+				 u64 timestamp, u64 sequence,
+				 bool *wake_needed_out)
+{
+	u32 event_size = PKM_KMES_EVENT_HEADER_BASE_SIZE + (u32)event_type_len +
+			 (u32)payload_len;
+
+	pkm_kmes_write_event_at(cpu, cpu->write_pos, origin_class, event_type,
+				event_type_len, payload, payload_len, timestamp,
+				sequence);
 
 	pkm_kmes_store_write_pos(cpu, cpu->write_pos + event_size);
 	if (wake_needed_out)
 		*wake_needed_out = pkm_kmes_note_wake(cpu);
+}
+
+static int pkm_kmes_runtime_capacity(u64 *capacity_out)
+{
+	unsigned int cpu;
+
+	if (!capacity_out)
+		return -EINVAL;
+	if (!pkm_kmes_ready || !pkm_kmes_cpus || pkm_kmes_cpu_count == 0)
+		return -ENOMEM;
+
+	for (cpu = 0; cpu < pkm_kmes_cpu_slots; cpu++) {
+		if (!pkm_kmes_cpus[cpu].data)
+			continue;
+		*capacity_out = pkm_kmes_cpus[cpu].capacity;
+		return 0;
+	}
+
+	return -ENOMEM;
+}
+
+static long pkm_kmes_require_audit(const void *token, bool *tcb_exempt_out)
+{
+	if (!tcb_exempt_out)
+		return -EINVAL;
+	if (!token)
+		return -EPERM;
+	if (!kacs_rust_token_has_enabled_privilege(token,
+						   PKM_KMES_PRIVILEGE_SE_AUDIT))
+		return -EPERM;
+	if (!kacs_rust_token_mark_privileges_used(token,
+						  PKM_KMES_PRIVILEGE_SE_AUDIT))
+		return -EPERM;
+
+	if (kacs_rust_token_has_enabled_privilege(token,
+						  PKM_KMES_PRIVILEGE_SE_TCB)) {
+		if (!kacs_rust_token_mark_privileges_used(
+			    token, PKM_KMES_PRIVILEGE_SE_TCB))
+			return -EPERM;
+		*tcb_exempt_out = true;
+	} else {
+		*tcb_exempt_out = false;
+	}
+
+	return 0;
+}
+
+static long pkm_kmes_declared_event_size(u16 event_type_len, u32 payload_len,
+					 u32 *header_size_out,
+					 u32 *event_size_out)
+{
+	size_t header_size;
+	size_t event_size;
+
+	if (check_add_overflow((size_t)PKM_KMES_EVENT_HEADER_BASE_SIZE,
+			       (size_t)event_type_len, &header_size))
+		return -EINVAL;
+	if (check_add_overflow(header_size, (size_t)payload_len, &event_size))
+		return -EINVAL;
+	if (header_size > U32_MAX || event_size > U32_MAX)
+		return -EINVAL;
+
+	*header_size_out = (u32)header_size;
+	*event_size_out = (u32)event_size;
+	return 0;
+}
+
+static long pkm_kmes_validate_declared_size(u64 ring_capacity,
+					    u16 event_type_len,
+					    u32 payload_len,
+					    struct pkm_kmes_staged_event *out)
+{
+	u32 header_size;
+	u32 event_size;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+
+	ret = pkm_kmes_declared_event_size(event_type_len, payload_len,
+					   &header_size, &event_size);
+	if (ret)
+		return ret;
+	if (event_size > PKM_KMES_DEFAULT_MAX_EVENT_SIZE)
+		return -ENOSPC;
+	if ((u64)event_size > ring_capacity / 2)
+		return -ENOSPC;
+
+	out->event_type_len = event_type_len;
+	out->payload_len = payload_len;
+	out->header_size = header_size;
+	out->event_size = event_size;
+	return 0;
+}
+
+static long pkm_kmes_copy_bytes(void *dst, const void *src, size_t len,
+				bool from_user)
+{
+	if (!len)
+		return 0;
+	if (!src)
+		return -EFAULT;
+	if (from_user) {
+		if (copy_from_user(dst, (const void __user *)src, len))
+			return -EFAULT;
+	} else {
+		memcpy(dst, src, len);
+	}
+
+	return 0;
+}
+
+static void pkm_kmes_staged_event_reset(struct pkm_kmes_staged_event *event)
+{
+	if (!event)
+		return;
+
+	kvfree(event->bytes);
+	memset(event, 0, sizeof(*event));
+}
+
+static long pkm_kmes_stage_event(u64 ring_capacity,
+				 const void *event_type,
+				 u16 event_type_len,
+				 const void *payload,
+				 u32 payload_len,
+				 bool from_user,
+				 struct pkm_kmes_staged_event *out)
+{
+	size_t staged_len;
+	u8 *bytes;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+
+	memset(out, 0, sizeof(*out));
+	ret = pkm_kmes_validate_declared_size(ring_capacity, event_type_len,
+					      payload_len, out);
+	if (ret)
+		return ret;
+
+	staged_len = (size_t)event_type_len + (size_t)payload_len;
+	bytes = kvmalloc(staged_len ? staged_len : 1, GFP_KERNEL);
+	if (!bytes)
+		return -ENOMEM;
+
+	ret = pkm_kmes_copy_bytes(bytes, event_type, event_type_len, from_user);
+	if (ret)
+		goto fail;
+	ret = pkm_kmes_copy_bytes(bytes + event_type_len, payload, payload_len,
+				  from_user);
+	if (ret)
+		goto fail;
+	ret = kacs_rust_kmes_validate_staged_event(
+		bytes, event_type_len, bytes + event_type_len, payload_len,
+		PKM_KMES_DEFAULT_MAX_NESTING_DEPTH);
+	if (ret)
+		goto fail;
+
+	out->bytes = bytes;
+	out->event_type = bytes;
+	out->payload = bytes + event_type_len;
+	return 0;
+
+fail:
+	kvfree(bytes);
+	memset(out, 0, sizeof(*out));
+	return ret;
+}
+
+static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *events,
+					u32 count, u8 origin_class)
+{
+	struct pkm_kmes_cpu_state *cpu = NULL;
+	u64 timestamp;
+	u64 write_pos;
+	u64 tail_pos;
+	u64 sequence;
+	unsigned int cpu_id;
+	u32 index;
+	bool wake_needed = false;
+
+	if (!count)
+		return 0;
+	if (!events || !pkm_kmes_ready || !pkm_kmes_cpus)
+		return -ENOMEM;
+
+	preempt_disable();
+
+	cpu_id = smp_processor_id();
+	if (cpu_id >= pkm_kmes_cpu_slots || !pkm_kmes_cpus[cpu_id].data) {
+		preempt_enable();
+		return -ENOMEM;
+	}
+
+	cpu = &pkm_kmes_cpus[cpu_id];
+	if (cpu->cpu_id != cpu_id) {
+		preempt_enable();
+		return -EINVAL;
+	}
+
+	timestamp = ktime_get_real_ns();
+	write_pos = cpu->write_pos;
+	tail_pos = cpu->tail_pos;
+	sequence = cpu->sequence;
+
+	for (index = 0; index < count; index++) {
+		pkm_kmes_reserve_space_local(cpu, &tail_pos, write_pos,
+					     events[index].event_size);
+		sequence++;
+		pkm_kmes_write_event_at(cpu, write_pos, origin_class,
+					events[index].event_type,
+					events[index].event_type_len,
+					events[index].payload,
+					events[index].payload_len, timestamp,
+					sequence);
+		write_pos += events[index].event_size;
+	}
+
+	cpu->sequence = sequence;
+	pkm_kmes_store_tail_pos(cpu, tail_pos);
+	pkm_kmes_store_write_pos(cpu, write_pos);
+	wake_needed = pkm_kmes_note_wake(cpu);
+
+	preempt_enable();
+	if (wake_needed)
+		pkm_kmes_futex_wake(cpu);
+
+	return 0;
+}
+
+static long pkm_kmes_emit_one_for_token(const void *token, const void *event_type,
+					u16 event_type_len, const void *payload,
+					u32 payload_len, bool from_user)
+{
+	struct pkm_kmes_staged_event event = { };
+	u64 ring_capacity = 0;
+	bool tcb_exempt;
+	bool reserved = false;
+	long ret;
+
+	ret = pkm_kmes_require_audit(token, &tcb_exempt);
+	if (ret)
+		return ret;
+
+	if (!tcb_exempt) {
+		ret = pkm_kmes_current_process_rate_reserve(1);
+		if (ret)
+			return ret;
+		reserved = true;
+	}
+
+	if (event_type_len == 0) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = pkm_kmes_runtime_capacity(&ring_capacity);
+	if (ret)
+		goto out;
+
+	ret = pkm_kmes_stage_event(ring_capacity, event_type, event_type_len,
+				   payload, payload_len, from_user, &event);
+	if (ret)
+		goto out;
+
+	ret = pkm_kmes_emit_staged_events(&event, 1, PKM_KMES_ORIGIN_USERSPACE);
+	if (ret)
+		goto out;
+
+	reserved = false;
+	ret = 0;
+
+out:
+	pkm_kmes_staged_event_reset(&event);
+	if (reserved)
+		pkm_kmes_current_process_rate_refund(1);
+	return ret;
+}
+
+static long pkm_kmes_copy_entry_array_user(
+	const struct kmes_emit_entry __user *entries, u32 count,
+	struct kmes_emit_entry **out_entries)
+{
+	size_t bytes = (size_t)count * sizeof(*entries);
+	struct kmes_emit_entry *copy;
+
+	if (!out_entries)
+		return -EINVAL;
+	*out_entries = NULL;
+	if (!entries)
+		return -EFAULT;
+
+	copy = memdup_user(entries, bytes);
+	if (IS_ERR(copy))
+		return PTR_ERR(copy);
+
+	*out_entries = copy;
+	return 0;
+}
+
+static long pkm_kmes_copy_entry_array_kernel(const struct kmes_emit_entry *entries,
+					     u32 count,
+					     struct kmes_emit_entry **out_entries)
+{
+	size_t bytes = (size_t)count * sizeof(*entries);
+	struct kmes_emit_entry *copy;
+
+	if (!out_entries)
+		return -EINVAL;
+	*out_entries = NULL;
+	if (!entries)
+		return -EINVAL;
+
+	copy = kmemdup(entries, bytes, GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
+
+	*out_entries = copy;
+	return 0;
+}
+
+static long pkm_kmes_stage_batch_events(const struct kmes_emit_entry *entries,
+					u32 count, bool from_user,
+					struct pkm_kmes_staged_event *staged,
+					u32 *validated_out)
+{
+	u64 ring_capacity = 0;
+	u32 validated = 0;
+	long ret;
+
+	if (!entries || !staged || !validated_out)
+		return -EINVAL;
+
+	ret = pkm_kmes_runtime_capacity(&ring_capacity);
+	if (ret)
+		return ret;
+
+	for (validated = 0; validated < count; validated++) {
+		ret = pkm_kmes_stage_event(ring_capacity,
+					   entries[validated].event_type,
+					   entries[validated].event_type_len,
+					   entries[validated].payload,
+					   entries[validated].payload_len,
+					   from_user, &staged[validated]);
+		if (ret)
+			break;
+	}
+
+	*validated_out = validated;
+	return validated == count ? 0 : ret;
+}
+
+static void pkm_kmes_free_staged_events(struct pkm_kmes_staged_event *events,
+					u32 count)
+{
+	u32 index;
+
+	if (!events)
+		return;
+
+	for (index = 0; index < count; index++)
+		pkm_kmes_staged_event_reset(&events[index]);
+	kvfree(events);
+}
+
+static long pkm_kmes_store_emitted_out(void *emitted_out, bool to_user,
+				       u32 value)
+{
+	if (to_user) {
+		if (!emitted_out || put_user(value, (u32 __user *)emitted_out))
+			return -EFAULT;
+		return 0;
+	}
+
+	if (!emitted_out)
+		return -EINVAL;
+	*(u32 *)emitted_out = value;
+	return 0;
+}
+
+static long pkm_kmes_emit_batch_common(const void *token,
+				       const struct kmes_emit_entry *entries,
+				       u32 count, bool entries_from_user,
+				       void *emitted_out, bool emitted_out_user)
+{
+	struct kmes_emit_entry *entry_copy = NULL;
+	struct pkm_kmes_staged_event *staged = NULL;
+	bool tcb_exempt;
+	u32 emitted = 0;
+	u32 validated = 0;
+	u32 refund = 0;
+	long ret;
+
+	ret = pkm_kmes_require_audit(token, &tcb_exempt);
+	if (ret)
+		return ret;
+	if (count == 0 || count > PKM_KMES_MAX_USER_BATCH_COUNT)
+		return -EINVAL;
+
+	if (!tcb_exempt) {
+		ret = pkm_kmes_current_process_rate_reserve(count);
+		if (ret)
+			return ret;
+	}
+	ret = pkm_kmes_store_emitted_out(emitted_out, emitted_out_user, 0);
+	if (ret)
+		goto out;
+
+	if (entries_from_user)
+		ret = pkm_kmes_copy_entry_array_user(
+			(const struct kmes_emit_entry __user *)entries, count,
+			&entry_copy);
+	else
+		ret = pkm_kmes_copy_entry_array_kernel(entries, count,
+						       &entry_copy);
+	if (ret)
+		goto out;
+
+	staged = kvcalloc(count, sizeof(*staged), GFP_KERNEL);
+	if (!staged) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = pkm_kmes_stage_batch_events(entry_copy, count, entries_from_user,
+					  staged, &validated);
+	if (validated > 0) {
+		long emit_ret = pkm_kmes_emit_staged_events(
+			staged, validated, PKM_KMES_ORIGIN_USERSPACE);
+
+		if (emit_ret) {
+			ret = emit_ret;
+			goto out;
+		}
+		emitted = validated;
+	}
+
+	if (ret == 0)
+		emitted = count;
+	{
+		long store_ret =
+			pkm_kmes_store_emitted_out(emitted_out, emitted_out_user,
+						   emitted);
+
+		if (store_ret)
+			ret = store_ret;
+	}
+
+out:
+	if (!tcb_exempt) {
+		refund = count - emitted;
+		if (refund)
+			pkm_kmes_current_process_rate_refund(refund);
+	}
+	pkm_kmes_free_staged_events(staged, count);
+	kfree(entry_copy);
+	return ret;
+}
+
+long pkm_kmes_emit_user_for_token(const void *token,
+				  const void __user *event_type,
+				  u16 event_type_len,
+				  const void __user *payload,
+				  u32 payload_len)
+{
+	return pkm_kmes_emit_one_for_token(token, event_type, event_type_len,
+					   payload, payload_len, true);
+}
+
+long pkm_kmes_emit_batch_user_for_token(
+	const void *token, const struct kmes_emit_entry __user *entries,
+	u32 count, u32 __user *emitted_out)
+{
+	return pkm_kmes_emit_batch_common(
+		token, (const struct kmes_emit_entry *)entries, count, true,
+		(void *)emitted_out, true);
+}
+
+SYSCALL_DEFINE4(kmes_emit, const char __user *, event_type, u16,
+		event_type_len, const void __user *, payload, u32, payload_len)
+{
+	return pkm_kmes_emit_user_for_token(
+		pkm_kacs_current_effective_token_ptr(), event_type,
+		event_type_len, payload, payload_len);
+}
+
+SYSCALL_DEFINE3(kmes_emit_batch, const struct kmes_emit_entry __user *,
+		entries, u32, count, u32 __user *, emitted_out)
+{
+	return pkm_kmes_emit_batch_user_for_token(
+		pkm_kacs_current_effective_token_ptr(), entries, count,
+		emitted_out);
 }
 
 static int pkm_kmes_load_live_process_view(struct pkm_kmes_process_view *view,
@@ -1245,5 +1801,21 @@ int pkm_kmes_kunit_set_process_override(u64 pid, const char *name,
 void pkm_kmes_kunit_clear_process_override(void)
 {
 	memset(&pkm_kmes_override, 0, sizeof(pkm_kmes_override));
+}
+
+long pkm_kmes_kunit_emit_for_token(const void *token, const void *event_type,
+				   u16 event_type_len, const void *payload,
+				   u32 payload_len)
+{
+	return pkm_kmes_emit_one_for_token(token, event_type, event_type_len,
+					   payload, payload_len, false);
+}
+
+long pkm_kmes_kunit_emit_batch_for_token(const void *token,
+					 const struct kmes_emit_entry *entries,
+					 u32 count, u32 *emitted_out)
+{
+	return pkm_kmes_emit_batch_common(token, entries, count, false,
+					  emitted_out, false);
 }
 #endif
