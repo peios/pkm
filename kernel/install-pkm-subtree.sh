@@ -46,19 +46,41 @@ insert_source_kconfig() {
 	sed -i "${insert_line}i\\${source_line}" "$file"
 }
 
-append_x86_64_syscall_once() {
+insert_x86_64_syscall_once() {
 	local file=$1
 	local number=$2
 	local name=$3
 	local line
+	local insert_line
 
 	if grep -Eq "^[[:space:]]*${number}[[:space:]]+common[[:space:]]+${name}[[:space:]]+sys_${name}\$" \
 		"$file"; then
 		return
 	fi
 
+	if grep -Eq "^[[:space:]]*${number}[[:space:]]+common[[:space:]]+" "$file"; then
+		echo "syscall number ${number} already occupied in $file" >&2
+		exit 1
+	fi
+
+	if grep -Eq "^[[:space:]]*[0-9]+[[:space:]]+common[[:space:]]+${name}[[:space:]]+sys_${name}\$" \
+		"$file"; then
+		echo "syscall name ${name} already present with a different number in $file" >&2
+		exit 1
+	fi
+
 	line=$(printf '%s\tcommon\t%s\t\tsys_%s' "$number" "$name" "$name")
-	printf '%s\n' "$line" >> "$file"
+	insert_line=$(awk -v number="$number" '
+		$1 ~ /^[0-9]+$/ && ($1 + 0) > (number + 0) {
+			print NR
+			exit
+		}
+	' "$file")
+	if [[ -n "$insert_line" ]]; then
+		sed -i "${insert_line}i\\${line}" "$file"
+	else
+		printf '%s\n' "$line" >> "$file"
+	fi
 }
 
 require_file "$src_root/kacs/lsm.c"
@@ -112,11 +134,13 @@ install -m 0644 "$src_root/pkm_makefile" "$pkm_dir/Makefile"
 
 append_line_once 'obj-$(CONFIG_SECURITY_PKM) += pkm/' "$kernel_root/security/Makefile"
 insert_source_kconfig "$kernel_root/security/Kconfig"
-append_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1000 kacs_open_self_token
-append_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1023 kacs_access_check
-append_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1024 kacs_access_check_list
-append_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1025 kacs_set_caap
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1091 kmes_attach

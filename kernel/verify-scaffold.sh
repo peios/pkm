@@ -51,6 +51,7 @@ fi
 
 for syscall in \
 	"1000 kacs_open_self_token" \
+	"1091 kmes_attach" \
 	"1023 kacs_access_check" \
 	"1024 kacs_access_check_list" \
 	"1025 kacs_set_caap"; do
