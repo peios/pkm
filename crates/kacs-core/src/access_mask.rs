@@ -23,8 +23,46 @@ pub const GENERIC_WRITE: u32 = 0x4000_0000;
 /// Generic access bit for read rights.
 pub const GENERIC_READ: u32 = 0x8000_0000;
 
+/// Process right permitting termination-style signals.
+pub const PROCESS_TERMINATE: u32 = 0x0000_0001;
+/// Process right permitting informational signals.
+pub const PROCESS_SIGNAL: u32 = 0x0000_0002;
+/// Process right permitting virtual-memory reads.
+pub const PROCESS_VM_READ: u32 = 0x0000_0010;
+/// Process right permitting virtual-memory writes / invasive attach.
+pub const PROCESS_VM_WRITE: u32 = 0x0000_0020;
+/// Process right permitting handle extraction.
+pub const PROCESS_DUP_HANDLE: u32 = 0x0000_0040;
+/// Process right permitting process-attribute mutation.
+pub const PROCESS_SET_INFORMATION: u32 = 0x0000_0200;
+/// Process right permitting detailed process inspection.
+pub const PROCESS_QUERY_INFORMATION: u32 = 0x0000_0400;
+/// Process right permitting suspend / resume signals.
+pub const PROCESS_SUSPEND_RESUME: u32 = 0x0000_0800;
+/// Process right permitting limited process inspection.
+pub const PROCESS_QUERY_LIMITED: u32 = 0x0000_1000;
+
 const RESERVED_ACCESS_MASK_BITS: u32 = 0x0ce0_0000;
 const GENERIC_MASK: u32 = GENERIC_ALL | GENERIC_EXECUTE | GENERIC_WRITE | GENERIC_READ;
+
+/// Generic mapping for process security descriptors.
+pub const PROCESS_GENERIC_MAPPING: GenericMapping = GenericMapping {
+    read: PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | READ_CONTROL,
+    write: PROCESS_SET_INFORMATION | PROCESS_VM_WRITE | WRITE_DAC,
+    execute: PROCESS_TERMINATE | PROCESS_SUSPEND_RESUME | PROCESS_QUERY_LIMITED,
+    all: PROCESS_TERMINATE
+        | PROCESS_SIGNAL
+        | PROCESS_SUSPEND_RESUME
+        | PROCESS_VM_READ
+        | PROCESS_VM_WRITE
+        | PROCESS_DUP_HANDLE
+        | PROCESS_SET_INFORMATION
+        | PROCESS_QUERY_INFORMATION
+        | PROCESS_QUERY_LIMITED
+        | READ_CONTROL
+        | WRITE_DAC
+        | WRITE_OWNER,
+};
 
 /// Maps generic access bits onto object-specific rights.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

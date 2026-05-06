@@ -21,7 +21,10 @@
 
 use crate::access_check::access_check;
 use crate::access_check_abi::AccessCheckAbiResolved;
-use crate::access_mask::{GenericMapping, READ_CONTROL, WRITE_DAC};
+use crate::access_mask::{
+    GenericMapping, PROCESS_GENERIC_MAPPING, PROCESS_QUERY_LIMITED, GENERIC_ALL, READ_CONTROL,
+    WRITE_DAC,
+};
 use crate::acl::Acl;
 use crate::condition::ConditionalContext;
 use crate::error::KacsError;
@@ -59,6 +62,11 @@ const MAX_DEFAULT_DACL_BYTES: usize = 65_536;
 const TOKEN_INDEX_NO_CHANGE: u32 = u32::MAX;
 const MAX_BOOT_GROUPS: usize = 5;
 const MAX_PRIVILEGE_ADJUST_ENTRIES: usize = 64;
+const SD_HEADER_LEN: usize = 20;
+const ACL_HEADER_LEN: usize = 8;
+const ACE_HEADER_LEN: usize = 8;
+const ACL_REVISION: u8 = 2;
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 
 const EACCES: i32 = 13;
 const EINVAL: i32 = 22;
@@ -435,6 +443,130 @@ fn build_group_views(
         sid_len: group_sids[index].as_bytes().len(),
         attributes: group_attributes[index],
     })
+}
+
+fn write_le_u16(dst: &mut [u8], offset: usize, value: u16) {
+    dst[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_le_u32(dst: &mut [u8], offset: usize, value: u32) {
+    dst[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn ace_len_for_sid(sid: Sid<'_>) -> Result<usize, i32> {
+    ACE_HEADER_LEN
+        .checked_add(sid.as_bytes().len())
+        .ok_or(-ERANGE)
+}
+
+fn write_allow_ace(dst: &mut [u8], offset: usize, mask: u32, sid: Sid<'_>) -> Result<usize, i32> {
+    let ace_len = ace_len_for_sid(sid)?;
+    let end = offset.checked_add(ace_len).ok_or(-ERANGE)?;
+    let ace = dst.get_mut(offset..end).ok_or(-ERANGE)?;
+
+    ace[0] = ACCESS_ALLOWED_ACE_TYPE;
+    ace[1] = 0;
+    write_le_u16(ace, 2, ace_len as u16);
+    write_le_u32(ace, 4, mask);
+    ace[ACE_HEADER_LEN..].copy_from_slice(sid.as_bytes());
+    Ok(ace_len)
+}
+
+fn build_process_sd_bytes(
+    owner_sid: Sid<'_>,
+    group_sid: Sid<'_>,
+    self_mask: Option<u32>,
+    admin_mask: Option<u32>,
+    system_mask: Option<u32>,
+    everyone_mask: Option<u32>,
+) -> Result<(*mut u8, usize), i32> {
+    let administrators = Sid::parse(ADMINISTRATORS_SID_BYTES).map_err(|_| -EINVAL)?;
+    let system = Sid::parse(SYSTEM_SID_BYTES).map_err(|_| -EINVAL)?;
+    let everyone = Sid::parse(EVERYONE_SID_BYTES).map_err(|_| -EINVAL)?;
+    let mut ace_count = 0usize;
+    let mut dacl_len = ACL_HEADER_LEN;
+
+    for (mask, sid) in [
+        (self_mask, owner_sid),
+        (admin_mask, administrators),
+        (system_mask, system),
+        (everyone_mask, everyone),
+    ] {
+        if mask.is_some() {
+            ace_count = ace_count.checked_add(1).ok_or(-ERANGE)?;
+            dacl_len = dacl_len.checked_add(ace_len_for_sid(sid)?).ok_or(-ERANGE)?;
+        }
+    }
+
+    let owner_len = owner_sid.as_bytes().len();
+    let group_len = group_sid.as_bytes().len();
+    let group_offset = SD_HEADER_LEN.checked_add(owner_len).ok_or(-ERANGE)?;
+    let dacl_offset = group_offset.checked_add(group_len).ok_or(-ERANGE)?;
+    let total_len = dacl_offset.checked_add(dacl_len).ok_or(-ERANGE)?;
+    let ptr = unsafe { pkm_kacs_zalloc(total_len) } as *mut u8;
+    let mut cursor = ACL_HEADER_LEN;
+
+    if ptr.is_null() {
+        return Err(-ENOMEM);
+    }
+
+    let bytes = unsafe { core::slice::from_raw_parts_mut(ptr, total_len) };
+    bytes[0] = 1;
+    bytes[1] = 0;
+    write_le_u16(bytes, 2, crate::security_descriptor::SE_SELF_RELATIVE | crate::security_descriptor::SE_DACL_PRESENT);
+    write_le_u32(bytes, 4, SD_HEADER_LEN as u32);
+    write_le_u32(bytes, 8, group_offset as u32);
+    write_le_u32(bytes, 12, 0);
+    write_le_u32(bytes, 16, dacl_offset as u32);
+    bytes[SD_HEADER_LEN..group_offset].copy_from_slice(owner_sid.as_bytes());
+    bytes[group_offset..dacl_offset].copy_from_slice(group_sid.as_bytes());
+
+    bytes[dacl_offset] = ACL_REVISION;
+    bytes[dacl_offset + 1] = 0;
+    write_le_u16(bytes, dacl_offset + 2, dacl_len as u16);
+    write_le_u16(bytes, dacl_offset + 4, ace_count as u16);
+    write_le_u16(bytes, dacl_offset + 6, 0);
+
+    for (mask, sid) in [
+        (self_mask, owner_sid),
+        (admin_mask, administrators),
+        (system_mask, system),
+        (everyone_mask, everyone),
+    ] {
+        if let Some(mask) = mask {
+            let written = write_allow_ace(&mut bytes[dacl_offset..], cursor, mask, sid)?;
+            cursor = cursor.checked_add(written).ok_or(-ERANGE)?;
+        }
+    }
+
+    Ok((ptr, total_len))
+}
+
+fn build_default_process_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8, usize), i32> {
+    let _guard = token.lock_mutation();
+    let group_sid = token
+        .sid_by_index(token.primary_group_index.load(Ordering::Relaxed))
+        .ok_or(-EINVAL)?;
+
+    build_process_sd_bytes(
+        token.user_sid,
+        group_sid,
+        Some(GENERIC_ALL),
+        Some(GENERIC_ALL),
+        Some(GENERIC_ALL),
+        Some(PROCESS_QUERY_LIMITED),
+    )
+}
+
+fn build_query_limited_only_process_sd_bytes(
+    token: &PkmKacsBootToken,
+) -> Result<(*mut u8, usize), i32> {
+    let _guard = token.lock_mutation();
+    let group_sid = token
+        .sid_by_index(token.primary_group_index.load(Ordering::Relaxed))
+        .ok_or(-EINVAL)?;
+
+    build_process_sd_bytes(token.user_sid, group_sid, None, None, None, Some(PROCESS_QUERY_LIMITED))
 }
 
 impl PkmKacsBootToken {
@@ -1359,6 +1491,54 @@ fn token_open_check_errno(
     })
 }
 
+fn process_sd_access_check_errno(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+) -> Result<u32, i32> {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
+        return Err(-EACCES);
+    };
+    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(|_| -EINVAL)?;
+    let normalized = match PROCESS_GENERIC_MAPPING.normalize_desired_access(desired) {
+        Ok(normalized) => normalized,
+        Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
+        Err(_) => return Err(-EINVAL),
+    };
+    let conditional_context = ConditionalContext::default();
+    let pip = PipContext {
+        pip_type: 0,
+        pip_trust: 0,
+    };
+
+    subject.with_access_token(|subject_token| {
+        match access_check(
+            Some(&target_sd),
+            &subject_token,
+            pip,
+            desired,
+            &PROCESS_GENERIC_MAPPING,
+            None,
+            &conditional_context,
+            None,
+            0,
+            EMPTY_POLICIES,
+        ) {
+            Ok(result) if result.allowed => {
+                if normalized.maximum_allowed {
+                    Ok(result.granted)
+                } else {
+                    Ok(result.granted & normalized.mapped)
+                }
+            }
+            Ok(_) => Err(-EACCES),
+            Err(KacsError::AllocationFailure) => Err(-ENOMEM),
+            Err(KacsError::ReservedAccessMaskBits(_)) => Err(-EINVAL),
+            Err(_) => Err(-EINVAL),
+        }
+    })
+}
+
 #[no_mangle]
 /// Creates the boot SYSTEM token object described by Appendix A step 3.
 pub extern "C" fn kacs_rust_create_boot_system_token() -> *const c_void {
@@ -1428,6 +1608,70 @@ pub extern "C" fn kacs_rust_token_open_check(
         *granted_out = result as u32;
     }
     0
+}
+
+#[no_mangle]
+/// Builds the default process SD for a new non-thread child process.
+pub extern "C" fn kacs_rust_create_default_process_sd(
+    token_ptr: *const c_void,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    let Ok((ptr, len)) = build_default_process_sd_bytes(token) else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
+/// Builds a restrictive KUnit-only process SD with only Everyone
+/// `PROCESS_QUERY_LIMITED`.
+pub extern "C" fn kacs_rust_kunit_create_query_limited_process_sd(
+    token_ptr: *const c_void,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    let Ok((ptr, len)) = build_query_limited_only_process_sd_bytes(token) else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
+/// Runs AccessCheck against one process SD using the supplied caller token.
+pub extern "C" fn kacs_rust_check_process_sd(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired: u32,
+    granted_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match process_sd_access_check_errno(subject_token_ptr, sd_bytes, desired) {
+        Ok(granted) => {
+            if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                *granted_out = granted;
+            }
+            0
+        }
+        Err(err) => err,
+    }
 }
 
 #[no_mangle]

@@ -6,6 +6,9 @@
 
 #include "access_check.h"
 
+#define KACS_PROCESS_QUERY_INFORMATION 0x0400U
+#define KACS_PROCESS_QUERY_LIMITED 0x1000U
+
 struct pkm_kacs_boot_group_view {
 	const u8 *sid_ptr;
 	size_t sid_len;
@@ -55,6 +58,27 @@ struct pkm_kacs_priv_adjust_entry {
 	u32 attributes;
 };
 
+struct pkm_kacs_kunit_process_state_view {
+	const void *state_ptr;
+	const void *process_sd_ptr;
+	size_t process_sd_len;
+	const void *rate_bucket_ptr;
+	u32 pip_type;
+	u32 pip_trust;
+};
+
+struct pkm_kacs_kunit_process_token_open_args {
+	const void *subject_token;
+	const void *target_token;
+	const u8 *target_process_sd_ptr;
+	size_t target_process_sd_len;
+	u32 caller_pip_type;
+	u32 caller_pip_trust;
+	u32 target_pip_type;
+	u32 target_pip_trust;
+	u32 access_mask;
+};
+
 const void *pkm_kacs_current_effective_token_ptr(void);
 const void *pkm_kacs_current_primary_token_ptr(void);
 const void *pkm_kacs_boot_system_token_ptr(void);
@@ -76,6 +100,13 @@ bool kacs_rust_token_has_enabled_privilege(const void *token, u64 privilege);
 bool kacs_rust_token_mark_privileges_used(const void *token, u64 used_mask);
 int kacs_rust_token_open_check(const void *subject_token, const void *target_token,
 			       u32 desired_access, u32 *granted_out);
+const u8 *kacs_rust_create_default_process_sd(const void *token_ptr,
+					      size_t *len_out);
+const u8 *kacs_rust_kunit_create_query_limited_process_sd(const void *token_ptr,
+							  size_t *len_out);
+int kacs_rust_check_process_sd(const void *subject_token_ptr,
+			       const u8 *sd_ptr, size_t sd_len, u32 desired,
+			       u32 *granted_out);
 u32 kacs_rust_token_projected_uid(const void *token);
 u32 kacs_rust_token_projected_gid(const void *token);
 bool kacs_rust_kunit_token_snapshot(const void *token,
@@ -103,6 +134,14 @@ int kacs_rust_token_adjust_default(const void *token, u32 owner_index,
 int pkm_kmes_kunit_set_current_process_rate_tokens(u32 tokens);
 int pkm_kmes_kunit_set_current_process_rate_refill_frozen(bool frozen);
 int pkm_kmes_kunit_get_current_process_rate_tokens(u32 *tokens_out);
+const void *pkm_kacs_kunit_current_process_state_ptr(void);
+const void *pkm_kacs_kunit_inherit_current_process_state(u64 clone_flags);
+void pkm_kacs_kunit_put_process_state(const void *state_ptr);
+int pkm_kacs_kunit_process_state_snapshot(
+	const void *state_ptr,
+	struct pkm_kacs_kunit_process_state_view *out);
+long pkm_kacs_kunit_open_process_token_for_subject(
+	const struct pkm_kacs_kunit_process_token_open_args *args);
 #endif
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_RUNTIME_H */

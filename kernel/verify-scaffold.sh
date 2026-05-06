@@ -52,6 +52,7 @@ fi
 
 for syscall in \
 	"1000 kacs_open_self_token" \
+	"1001 kacs_open_process_token" \
 	"1090 kmes_emit" \
 	"1091 kmes_attach" \
 	"1092 kmes_emit_batch" \

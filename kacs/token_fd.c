@@ -528,6 +528,16 @@ static int pkm_kacs_token_to_fd(const void *token, u32 granted_access)
 	return fd;
 }
 
+int pkm_kacs_validate_token_open_access_mask(u32 access_mask)
+{
+	if (!access_mask)
+		return -EINVAL;
+	if (access_mask & ~PKM_KACS_TOKEN_OPEN_ALLOWED_MASK)
+		return -EINVAL;
+
+	return 0;
+}
+
 static long pkm_kacs_open_token_fd_for_subject(const void *subject_token,
 					       const void *target_token,
 					       u32 access_mask)
@@ -548,30 +558,40 @@ static long pkm_kacs_open_token_fd_for_subject(const void *subject_token,
 	return pkm_kacs_token_to_fd(token_ref, granted);
 }
 
+long pkm_kacs_open_token_fd_for_subject_checked(const void *subject_token,
+						const void *target_token,
+						u32 access_mask)
+{
+	int ret;
+
+	ret = pkm_kacs_validate_token_open_access_mask(access_mask);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_open_token_fd_for_subject(subject_token, target_token,
+						  access_mask);
+}
+
 long pkm_kacs_kunit_open_token_fd_for_subject(const void *subject_token,
 					      const void *target_token,
 					      u32 access_mask)
 {
-	if (!access_mask)
-		return -EINVAL;
-	if (access_mask & ~PKM_KACS_TOKEN_OPEN_ALLOWED_MASK)
-		return -EINVAL;
-
-	return pkm_kacs_open_token_fd_for_subject(subject_token, target_token,
-						  access_mask);
+	return pkm_kacs_open_token_fd_for_subject_checked(subject_token,
+							  target_token,
+							  access_mask);
 }
 
 long pkm_kacs_open_self_token_internal(unsigned int flags, u32 access_mask)
 {
 	const void *subject_token;
 	const void *target_token;
+	int ret;
 
 	if (flags & ~KACS_REAL_TOKEN)
 		return -EINVAL;
-	if (!access_mask)
-		return -EINVAL;
-	if (access_mask & ~PKM_KACS_TOKEN_OPEN_ALLOWED_MASK)
-		return -EINVAL;
+	ret = pkm_kacs_validate_token_open_access_mask(access_mask);
+	if (ret)
+		return ret;
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	if (flags & KACS_REAL_TOKEN)
@@ -582,8 +602,9 @@ long pkm_kacs_open_self_token_internal(unsigned int flags, u32 access_mask)
 	if (!subject_token || !target_token)
 		return -EACCES;
 
-	return pkm_kacs_open_token_fd_for_subject(subject_token, target_token,
-						  access_mask);
+	return pkm_kacs_open_token_fd_for_subject_checked(subject_token,
+							  target_token,
+							  access_mask);
 }
 
 SYSCALL_DEFINE2(kacs_open_self_token, unsigned int, flags, u32, access_mask)

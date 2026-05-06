@@ -2,11 +2,11 @@
 /*
  * Slow-track PKM boot token/session substrate.
  *
- * Slices 21, 22, and 25 add the first live credential blob, boot SYSTEM token
- * attachment, narrow public token-open surface, and the PSB PIP fields needed
- * by AccessCheck defaulting. Wider token syscalls, impersonation
- * install/revert, and broader process/object security plumbing remain
- * deliberately out of scope here.
+ * Slices 21, 22, 25, and 42 add the first live credential blob, boot SYSTEM
+ * token attachment, narrow public token-open surface, shared process state for
+ * PIP/rate/SD, and the first process-boundary token-open syscall. Wider token
+ * syscalls, impersonation install/revert, and broader process/object security
+ * plumbing remain deliberately out of scope here.
  */
 
 #include <linux/capability.h>
@@ -17,18 +17,23 @@
 #include <linux/math64.h>
 #include <linux/lsm_hooks.h>
 #include <linux/refcount.h>
+#include <linux/pid.h>
+#include <linux/pidfd.h>
 #include <linux/sched.h>
 #include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/syscalls.h>
 #include <linux/timekeeping.h>
 
 #include "caap_cache.h"
 #include "kmes.h"
+#include "token_fd.h"
 #include "token_runtime.h"
 
 #define PKM_KACS_UNMAPPED_ID 65534U
 #define PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS 10000U
+#define PKM_KACS_PRIVILEGE_SE_DEBUG (1ULL << 20)
 
 struct pkm_kmes_rate_bucket {
 	refcount_t refs;
@@ -46,10 +51,22 @@ struct pkm_kacs_cred_security {
 	u32 projected_gid;
 };
 
-struct pkm_kacs_task_security {
+struct pkm_kacs_process_sd {
+	refcount_t refs;
+	const u8 *bytes;
+	size_t len;
+};
+
+struct pkm_kacs_process_state {
+	refcount_t refs;
 	u32 pip_type;
 	u32 pip_trust;
 	struct pkm_kmes_rate_bucket *kmes_rate_bucket;
+	struct pkm_kacs_process_sd *process_sd;
+};
+
+struct pkm_kacs_task_security {
+	struct pkm_kacs_process_state *process_state;
 };
 
 extern int kacs_rust_init(void);
@@ -78,6 +95,43 @@ static inline struct pkm_kacs_task_security *pkm_kacs_task(
 						 pkm_blob_sizes.lbs_task);
 }
 
+static struct pkm_kacs_process_sd *pkm_kacs_process_sd_alloc(const void *token)
+{
+	struct pkm_kacs_process_sd *process_sd;
+	size_t len = 0;
+	const u8 *bytes;
+
+	if (!token)
+		return NULL;
+
+	bytes = kacs_rust_create_default_process_sd(token, &len);
+	if (!bytes || len == 0)
+		return NULL;
+
+	process_sd = kzalloc(sizeof(*process_sd), GFP_KERNEL);
+	if (!process_sd) {
+		pkm_kacs_free((void *)bytes);
+		return NULL;
+	}
+
+	refcount_set(&process_sd->refs, 1);
+	process_sd->bytes = bytes;
+	process_sd->len = len;
+	return process_sd;
+}
+
+static void pkm_kacs_process_sd_put(struct pkm_kacs_process_sd *process_sd)
+{
+	if (!process_sd)
+		return;
+	if (!refcount_dec_and_test(&process_sd->refs))
+		return;
+
+	if (process_sd->bytes)
+		pkm_kacs_free((void *)process_sd->bytes);
+	kfree(process_sd);
+}
+
 static struct pkm_kmes_rate_bucket *pkm_kmes_rate_bucket_alloc(void)
 {
 	struct pkm_kmes_rate_bucket *bucket;
@@ -93,20 +147,97 @@ static struct pkm_kmes_rate_bucket *pkm_kmes_rate_bucket_alloc(void)
 	return bucket;
 }
 
-static struct pkm_kmes_rate_bucket *pkm_kmes_rate_bucket_get(
-	struct pkm_kmes_rate_bucket *bucket)
-{
-	if (bucket)
-		refcount_inc(&bucket->refs);
-	return bucket;
-}
-
 static void pkm_kmes_rate_bucket_put(struct pkm_kmes_rate_bucket *bucket)
 {
 	if (!bucket)
 		return;
 	if (refcount_dec_and_test(&bucket->refs))
 		kfree(bucket);
+}
+
+static struct pkm_kacs_process_state *pkm_kacs_process_state_alloc(
+	const void *primary_token, u32 pip_type, u32 pip_trust)
+{
+	struct pkm_kacs_process_state *state;
+	struct pkm_kmes_rate_bucket *bucket;
+	struct pkm_kacs_process_sd *process_sd;
+
+	if (!primary_token)
+		return NULL;
+
+	bucket = pkm_kmes_rate_bucket_alloc();
+	if (!bucket)
+		return NULL;
+
+	process_sd = pkm_kacs_process_sd_alloc(primary_token);
+	if (!process_sd) {
+		pkm_kmes_rate_bucket_put(bucket);
+		return NULL;
+	}
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state) {
+		pkm_kacs_process_sd_put(process_sd);
+		pkm_kmes_rate_bucket_put(bucket);
+		return NULL;
+	}
+
+	refcount_set(&state->refs, 1);
+	state->pip_type = pip_type;
+	state->pip_trust = pip_trust;
+	state->kmes_rate_bucket = bucket;
+	state->process_sd = process_sd;
+	return state;
+}
+
+static struct pkm_kacs_process_state *pkm_kacs_process_state_get(
+	struct pkm_kacs_process_state *state)
+{
+	if (state)
+		refcount_inc(&state->refs);
+	return state;
+}
+
+static void pkm_kacs_process_state_put(struct pkm_kacs_process_state *state)
+{
+	if (!state)
+		return;
+	if (!refcount_dec_and_test(&state->refs))
+		return;
+
+	pkm_kacs_process_sd_put(state->process_sd);
+	pkm_kmes_rate_bucket_put(state->kmes_rate_bucket);
+	kfree(state);
+}
+
+static struct pkm_kacs_process_state *pkm_kacs_current_process_state(void)
+{
+	if (!current || !current->security)
+		return NULL;
+
+	return pkm_kacs_task(current)->process_state;
+}
+
+static struct pkm_kacs_process_state *pkm_kacs_inherit_process_state(
+	u64 clone_flags)
+{
+	struct pkm_kacs_process_state *parent_state;
+	const void *primary_token;
+
+	parent_state = pkm_kacs_current_process_state();
+	if (!parent_state)
+		return NULL;
+
+	if ((clone_flags & CLONE_THREAD) != 0)
+		return pkm_kacs_process_state_get(parent_state);
+
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	if (!primary_token)
+		return NULL;
+
+	return pkm_kacs_process_state_alloc(primary_token,
+					    READ_ONCE(parent_state->pip_type),
+					    READ_ONCE(parent_state->pip_trust));
 }
 
 static void pkm_kmes_rate_bucket_refill(struct pkm_kmes_rate_bucket *bucket,
@@ -274,33 +405,19 @@ static void pkm_kacs_cred_free(struct cred *cred)
 static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 {
 	struct pkm_kacs_task_security *new_sec;
-	struct pkm_kacs_task_security *parent_sec;
-	struct pkm_kmes_rate_bucket *bucket;
+	struct pkm_kacs_process_state *state;
 
-	(void)clone_flags;
 	if (!task || !task->security)
 		return -EACCES;
 
 	new_sec = pkm_kacs_task(task);
-	new_sec->pip_type = 0;
-	new_sec->pip_trust = 0;
-	new_sec->kmes_rate_bucket = NULL;
+	new_sec->process_state = NULL;
 
-	if (current && current->security) {
-		parent_sec = pkm_kacs_task(current);
-		new_sec->pip_type = parent_sec->pip_type;
-		new_sec->pip_trust = parent_sec->pip_trust;
-		if ((clone_flags & CLONE_THREAD) != 0)
-			bucket = pkm_kmes_rate_bucket_get(
-				parent_sec->kmes_rate_bucket);
-		else
-			bucket = pkm_kmes_rate_bucket_alloc();
-	} else {
-		bucket = pkm_kmes_rate_bucket_alloc();
-	}
-	if (!bucket)
+	state = pkm_kacs_inherit_process_state(clone_flags);
+	if (!state)
 		return -ENOMEM;
-	new_sec->kmes_rate_bucket = bucket;
+
+	new_sec->process_state = state;
 	return 0;
 }
 
@@ -312,8 +429,8 @@ static void pkm_kacs_task_free(struct task_struct *task)
 		return;
 
 	sec = pkm_kacs_task(task);
-	pkm_kmes_rate_bucket_put(sec->kmes_rate_bucket);
-	sec->kmes_rate_bucket = NULL;
+	pkm_kacs_process_state_put(sec->process_state);
+	sec->process_state = NULL;
 }
 
 static struct security_hook_list pkm_hooks[] __ro_after_init = {
@@ -352,109 +469,259 @@ const void *pkm_kacs_boot_system_token_ptr(void)
 
 int pkm_kacs_current_pip_context(u32 *pip_type, u32 *pip_trust)
 {
-	struct pkm_kacs_task_security *sec;
+	struct pkm_kacs_process_state *state;
 
 	if (!pip_type || !pip_trust)
 		return -EINVAL;
-	if (!current || !current->security)
+
+	state = pkm_kacs_current_process_state();
+	if (!state)
 		return -EACCES;
 
-	sec = pkm_kacs_task(current);
-	*pip_type = sec->pip_type;
-	*pip_trust = sec->pip_trust;
+	*pip_type = READ_ONCE(state->pip_type);
+	*pip_trust = READ_ONCE(state->pip_trust);
 	return 0;
 }
 
 int pkm_kmes_current_process_rate_reserve(u32 count)
 {
-	struct pkm_kacs_task_security *sec;
+	struct pkm_kacs_process_state *state;
 
-	if (!current || !current->security)
+	state = pkm_kacs_current_process_state();
+	if (!state)
 		return -EPERM;
-	sec = pkm_kacs_task(current);
-	return pkm_kmes_rate_bucket_reserve(sec->kmes_rate_bucket, count);
+
+	return pkm_kmes_rate_bucket_reserve(state->kmes_rate_bucket, count);
 }
 
 void pkm_kmes_current_process_rate_refund(u32 count)
 {
-	struct pkm_kacs_task_security *sec;
+	struct pkm_kacs_process_state *state;
 
-	if (!current || !current->security || count == 0)
+	if (count == 0)
 		return;
-	sec = pkm_kacs_task(current);
-	pkm_kmes_rate_bucket_refund(sec->kmes_rate_bucket, count);
+
+	state = pkm_kacs_current_process_state();
+	if (!state)
+		return;
+
+	pkm_kmes_rate_bucket_refund(state->kmes_rate_bucket, count);
+}
+
+static bool pkm_kacs_pip_dominates(u32 caller_pip_type, u32 caller_pip_trust,
+				   u32 target_pip_type, u32 target_pip_trust)
+{
+	if (target_pip_type == 0)
+		return true;
+
+	return caller_pip_type >= target_pip_type &&
+	       caller_pip_trust >= target_pip_trust;
+}
+
+static long pkm_kacs_authorize_process_sd_open(
+	const void *subject_token,
+	const struct pkm_kacs_process_sd *process_sd)
+{
+	u32 granted = 0;
+	int ret;
+
+	if (!subject_token || !process_sd || !process_sd->bytes || !process_sd->len)
+		return -EACCES;
+
+	ret = kacs_rust_check_process_sd(subject_token, process_sd->bytes,
+					 process_sd->len,
+					 KACS_PROCESS_QUERY_INFORMATION,
+					 &granted);
+	if (!ret)
+		return 0;
+	if (ret != -EACCES)
+		return ret;
+	if (!kacs_rust_token_has_enabled_privilege(subject_token,
+						   PKM_KACS_PRIVILEGE_SE_DEBUG))
+		return -EACCES;
+	if (!kacs_rust_token_mark_privileges_used(
+		    subject_token, PKM_KACS_PRIVILEGE_SE_DEBUG))
+		return -EACCES;
+
+	return 0;
+}
+
+static long pkm_kacs_open_process_token_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *target_state,
+	const void *target_token, u32 caller_pip_type, u32 caller_pip_trust,
+	u32 access_mask)
+{
+	long ret;
+
+	ret = pkm_kacs_validate_token_open_access_mask(access_mask);
+	if (ret)
+		return ret;
+	if (!subject_token || !target_state || !target_token)
+		return -EACCES;
+
+	ret = pkm_kacs_authorize_process_sd_open(subject_token,
+						 target_state->process_sd);
+	if (ret)
+		return ret;
+	if (!pkm_kacs_pip_dominates(caller_pip_type, caller_pip_trust,
+				    READ_ONCE(target_state->pip_type),
+				    READ_ONCE(target_state->pip_trust)))
+		return -EACCES;
+
+	return pkm_kacs_open_token_fd_for_subject_checked(subject_token,
+							  target_token,
+							  access_mask);
+}
+
+static long pkm_kacs_open_process_token_task(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	struct task_struct *task, u32 access_mask)
+{
+	const struct cred *target_real_cred;
+	struct pkm_kacs_process_state *target_state;
+	const void *target_token;
+	long ret;
+
+	if (!subject_token || !caller_state || !task || !task->security)
+		return -EACCES;
+
+	target_state = pkm_kacs_task(task)->process_state;
+	if (!target_state)
+		return -EACCES;
+
+	target_real_cred = get_task_cred(task);
+	target_token = pkm_kacs_cred(target_real_cred)->token;
+	if (!target_token) {
+		put_cred(target_real_cred);
+		return -EACCES;
+	}
+
+	ret = pkm_kacs_open_process_token_core(
+		subject_token, target_state, target_token,
+		READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust), access_mask);
+	put_cred(target_real_cred);
+	return ret;
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_kacs_kunit_set_current_pip_context(u32 pip_type, u32 pip_trust)
 {
-	struct pkm_kacs_task_security *sec;
+	struct pkm_kacs_process_state *state;
 
-	if (!current || !current->security)
+	state = pkm_kacs_current_process_state();
+	if (!state)
 		return;
 
-	sec = pkm_kacs_task(current);
-	sec->pip_type = pip_type;
-	sec->pip_trust = pip_trust;
+	WRITE_ONCE(state->pip_type, pip_type);
+	WRITE_ONCE(state->pip_trust, pip_trust);
 }
 
 int pkm_kmes_kunit_set_current_process_rate_tokens(u32 tokens)
 {
-	struct pkm_kacs_task_security *sec;
+	struct pkm_kacs_process_state *state;
 	unsigned long flags;
 
-	if (!current || !current->security)
-		return -EACCES;
 	if (tokens > PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS)
 		return -EINVAL;
 
-	sec = pkm_kacs_task(current);
-	if (!sec->kmes_rate_bucket)
+	state = pkm_kacs_current_process_state();
+	if (!state || !state->kmes_rate_bucket)
 		return -EACCES;
 
-	spin_lock_irqsave(&sec->kmes_rate_bucket->lock, flags);
-	sec->kmes_rate_bucket->tokens = tokens;
-	sec->kmes_rate_bucket->last_refill_ns = ktime_get_ns();
-	spin_unlock_irqrestore(&sec->kmes_rate_bucket->lock, flags);
+	spin_lock_irqsave(&state->kmes_rate_bucket->lock, flags);
+	state->kmes_rate_bucket->tokens = tokens;
+	state->kmes_rate_bucket->last_refill_ns = ktime_get_ns();
+	spin_unlock_irqrestore(&state->kmes_rate_bucket->lock, flags);
 	return 0;
 }
 
 int pkm_kmes_kunit_set_current_process_rate_refill_frozen(bool frozen)
 {
-	struct pkm_kacs_task_security *sec;
+	struct pkm_kacs_process_state *state;
 	unsigned long flags;
 
-	if (!current || !current->security)
+	state = pkm_kacs_current_process_state();
+	if (!state || !state->kmes_rate_bucket)
 		return -EACCES;
 
-	sec = pkm_kacs_task(current);
-	if (!sec->kmes_rate_bucket)
-		return -EACCES;
-
-	spin_lock_irqsave(&sec->kmes_rate_bucket->lock, flags);
-	sec->kmes_rate_bucket->kunit_freeze_refill = frozen;
-	spin_unlock_irqrestore(&sec->kmes_rate_bucket->lock, flags);
+	spin_lock_irqsave(&state->kmes_rate_bucket->lock, flags);
+	state->kmes_rate_bucket->kunit_freeze_refill = frozen;
+	spin_unlock_irqrestore(&state->kmes_rate_bucket->lock, flags);
 	return 0;
 }
 
 int pkm_kmes_kunit_get_current_process_rate_tokens(u32 *tokens_out)
 {
-	struct pkm_kacs_task_security *sec;
+	struct pkm_kacs_process_state *state;
 	unsigned long flags;
 
 	if (!tokens_out)
 		return -EINVAL;
-	if (!current || !current->security)
+	state = pkm_kacs_current_process_state();
+	if (!state || !state->kmes_rate_bucket)
 		return -EACCES;
 
-	sec = pkm_kacs_task(current);
-	if (!sec->kmes_rate_bucket)
-		return -EACCES;
-
-	spin_lock_irqsave(&sec->kmes_rate_bucket->lock, flags);
-	*tokens_out = sec->kmes_rate_bucket->tokens;
-	spin_unlock_irqrestore(&sec->kmes_rate_bucket->lock, flags);
+	spin_lock_irqsave(&state->kmes_rate_bucket->lock, flags);
+	*tokens_out = state->kmes_rate_bucket->tokens;
+	spin_unlock_irqrestore(&state->kmes_rate_bucket->lock, flags);
 	return 0;
+}
+
+const void *pkm_kacs_kunit_current_process_state_ptr(void)
+{
+	return pkm_kacs_current_process_state();
+}
+
+const void *pkm_kacs_kunit_inherit_current_process_state(u64 clone_flags)
+{
+	return pkm_kacs_inherit_process_state(clone_flags);
+}
+
+void pkm_kacs_kunit_put_process_state(const void *state_ptr)
+{
+	pkm_kacs_process_state_put((struct pkm_kacs_process_state *)state_ptr);
+}
+
+int pkm_kacs_kunit_process_state_snapshot(
+	const void *state_ptr,
+	struct pkm_kacs_kunit_process_state_view *out)
+{
+	const struct pkm_kacs_process_state *state = state_ptr;
+
+	if (!state || !out)
+		return -EINVAL;
+
+	out->state_ptr = state;
+	out->process_sd_ptr = state->process_sd ? state->process_sd->bytes : NULL;
+	out->process_sd_len = state->process_sd ? state->process_sd->len : 0;
+	out->rate_bucket_ptr = state->kmes_rate_bucket;
+	out->pip_type = READ_ONCE(state->pip_type);
+	out->pip_trust = READ_ONCE(state->pip_trust);
+	return 0;
+}
+
+long pkm_kacs_kunit_open_process_token_for_subject(
+	const struct pkm_kacs_kunit_process_token_open_args *args)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state target_state = {};
+
+	if (!args)
+		return -EINVAL;
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = &process_sd;
+
+	return pkm_kacs_open_process_token_core(
+		args->subject_token, &target_state, args->target_token,
+		args->caller_pip_type, args->caller_pip_trust,
+		args->access_mask);
 }
 #endif
 
@@ -493,6 +760,40 @@ int pkm_kacs_resolve_current_primary_ctx(struct pkm_kacs_resolved_ctx *out)
 {
 	return pkm_kacs_resolve_ctx_from_token(
 		pkm_kacs_current_primary_token_ptr(), out);
+}
+
+SYSCALL_DEFINE2(kacs_open_process_token, int, pidfd, u32, access_mask)
+{
+	struct pkm_kacs_process_state *caller_state;
+	const void *subject_token;
+	struct task_struct *task;
+	struct pid *pid;
+	unsigned int pidfd_flags = 0;
+	long ret;
+
+	ret = pkm_kacs_validate_token_open_access_mask(access_mask);
+	if (ret)
+		return ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	caller_state = pkm_kacs_current_process_state();
+	if (!subject_token || !caller_state)
+		return -EACCES;
+
+	pid = pidfd_get_pid(pidfd, &pidfd_flags);
+	if (IS_ERR(pid))
+		return PTR_ERR(pid);
+	(void)pidfd_flags;
+
+	task = get_pid_task(pid, PIDTYPE_PID);
+	put_pid(pid);
+	if (!task)
+		return -ESRCH;
+
+	ret = pkm_kacs_open_process_token_task(subject_token, caller_state, task,
+					       access_mask);
+	put_task_struct(task);
+	return ret;
 }
 
 static int __init pkm_init(void)
@@ -537,9 +838,10 @@ static int __init pkm_init(void)
 	pkm_kacs_boot_system_token = system_token;
 
 	task_sec = pkm_kacs_task(current);
-	if (!task_sec->kmes_rate_bucket) {
-		task_sec->kmes_rate_bucket = pkm_kmes_rate_bucket_alloc();
-		if (!task_sec->kmes_rate_bucket)
+	if (!task_sec->process_state) {
+		task_sec->process_state = pkm_kacs_process_state_alloc(
+			system_token, 0, 0);
+		if (!task_sec->process_state)
 			return -ENOMEM;
 	}
 
