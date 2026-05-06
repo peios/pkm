@@ -19,7 +19,9 @@
 #include <linux/refcount.h>
 #include <linux/pid.h>
 #include <linux/pidfd.h>
+#include <linux/rcupdate.h>
 #include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -67,6 +69,7 @@ struct pkm_kacs_process_state {
 
 struct pkm_kacs_task_security {
 	struct pkm_kacs_process_state *process_state;
+	const struct cred *impersonation_saved_cred;
 };
 
 extern int kacs_rust_init(void);
@@ -412,6 +415,7 @@ static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 
 	new_sec = pkm_kacs_task(task);
 	new_sec->process_state = NULL;
+	new_sec->impersonation_saved_cred = NULL;
 
 	state = pkm_kacs_inherit_process_state(clone_flags);
 	if (!state)
@@ -431,6 +435,7 @@ static void pkm_kacs_task_free(struct task_struct *task)
 	sec = pkm_kacs_task(task);
 	pkm_kacs_process_state_put(sec->process_state);
 	sec->process_state = NULL;
+	sec->impersonation_saved_cred = NULL;
 }
 
 static struct security_hook_list pkm_hooks[] __ro_after_init = {
@@ -606,6 +611,108 @@ static long pkm_kacs_open_process_token_task(
 	return ret;
 }
 
+static long pkm_kacs_revert_current_impersonation(void)
+{
+	struct pkm_kacs_task_security *task_sec;
+
+	if (!current || !current->security)
+		return -EACCES;
+
+	task_sec = pkm_kacs_task(current);
+	if (!task_sec->impersonation_saved_cred)
+		return 0;
+
+	revert_creds(task_sec->impersonation_saved_cred);
+	task_sec->impersonation_saved_cred = NULL;
+	return 0;
+}
+
+int pkm_kacs_install_impersonation_token(const void *token)
+{
+	struct pkm_kacs_task_security *task_sec;
+	struct pkm_kacs_cred_security *new_sec;
+	struct cred *new;
+	long ret;
+
+	if (!token || !current || !current->security)
+		return -EACCES;
+
+	task_sec = pkm_kacs_task(current);
+	ret = pkm_kacs_revert_current_impersonation();
+	if (ret)
+		return ret;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+
+	new_sec = pkm_kacs_cred(new);
+	if (new_sec->token)
+		kacs_rust_token_drop(new_sec->token);
+	new_sec->token = token;
+	pkm_kacs_stamp_projected_ids(new_sec);
+	pkm_kacs_assert_boot_caps(new);
+
+	task_sec->impersonation_saved_cred = override_creds(new);
+	return 0;
+}
+
+int pkm_kacs_revert_impersonation(void)
+{
+	return pkm_kacs_revert_current_impersonation();
+}
+
+static const struct cred *pkm_kacs_get_task_effective_cred(
+	struct task_struct *task)
+{
+	const struct cred *cred;
+
+	if (!task)
+		return NULL;
+
+	rcu_read_lock();
+	cred = rcu_dereference(task->cred);
+	if (cred)
+		get_cred(cred);
+	rcu_read_unlock();
+	return cred;
+}
+
+static long pkm_kacs_open_thread_token_task(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	struct task_struct *task, u32 access_mask)
+{
+	const struct cred *target_effective_cred;
+	struct pkm_kacs_process_state *target_state;
+	const void *target_token;
+	long ret;
+
+	if (!subject_token || !caller_state || !task || !task->security)
+		return -EACCES;
+
+	target_state = pkm_kacs_task(task)->process_state;
+	if (!target_state)
+		return -EACCES;
+
+	target_effective_cred = pkm_kacs_get_task_effective_cred(task);
+	if (!target_effective_cred)
+		return -EACCES;
+
+	target_token = pkm_kacs_cred(target_effective_cred)->token;
+	if (!target_token) {
+		put_cred(target_effective_cred);
+		return -EACCES;
+	}
+
+	ret = pkm_kacs_open_process_token_core(
+		subject_token, target_state, target_token,
+		READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust), access_mask);
+	put_cred(target_effective_cred);
+	return ret;
+}
+
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_kacs_kunit_set_current_pip_context(u32 pip_type, u32 pip_trust)
 {
@@ -723,6 +830,22 @@ long pkm_kacs_kunit_open_process_token_for_subject(
 		args->caller_pip_type, args->caller_pip_trust,
 		args->access_mask);
 }
+
+long pkm_kacs_kunit_open_current_thread_token_for_subject(
+	const void *subject_token, u32 access_mask)
+{
+	struct pkm_kacs_process_state *caller_state;
+
+	if (!subject_token)
+		return -EINVAL;
+
+	caller_state = pkm_kacs_current_process_state();
+	if (!caller_state)
+		return -EACCES;
+
+	return pkm_kacs_open_thread_token_task(subject_token, caller_state,
+					       current, access_mask);
+}
 #endif
 
 int pkm_kacs_resolve_ctx_from_token(const void *token,
@@ -794,6 +917,69 @@ SYSCALL_DEFINE2(kacs_open_process_token, int, pidfd, u32, access_mask)
 					       access_mask);
 	put_task_struct(task);
 	return ret;
+}
+
+SYSCALL_DEFINE3(kacs_open_thread_token, int, pidfd, int, tid, u32, access_mask)
+{
+	struct pkm_kacs_process_state *caller_state;
+	const void *subject_token;
+	struct task_struct *process_task;
+	struct task_struct *thread_task;
+	struct pid *pid;
+	struct pid *thread_pid;
+	unsigned int pidfd_flags = 0;
+	long ret;
+
+	ret = pkm_kacs_validate_token_open_access_mask(access_mask);
+	if (ret)
+		return ret;
+	if (tid <= 0)
+		return -EINVAL;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	caller_state = pkm_kacs_current_process_state();
+	if (!subject_token || !caller_state)
+		return -EACCES;
+
+	pid = pidfd_get_pid(pidfd, &pidfd_flags);
+	if (IS_ERR(pid))
+		return PTR_ERR(pid);
+	(void)pidfd_flags;
+
+	process_task = get_pid_task(pid, PIDTYPE_PID);
+	put_pid(pid);
+	if (!process_task)
+		return -ESRCH;
+
+	thread_pid = find_get_pid(tid);
+	if (!thread_pid) {
+		put_task_struct(process_task);
+		return -ESRCH;
+	}
+
+	thread_task = get_pid_task(thread_pid, PIDTYPE_PID);
+	put_pid(thread_pid);
+	if (!thread_task) {
+		put_task_struct(process_task);
+		return -ESRCH;
+	}
+
+	if (!same_thread_group(process_task, thread_task)) {
+		put_task_struct(thread_task);
+		put_task_struct(process_task);
+		return -ESRCH;
+	}
+
+	ret = pkm_kacs_open_thread_token_task(subject_token, caller_state,
+					      thread_task, access_mask);
+	put_task_struct(thread_task);
+	put_task_struct(process_task);
+	return ret;
+}
+
+SYSCALL_DEFINE0(kacs_revert)
+{
+	return pkm_kacs_revert_current_impersonation();
 }
 
 static int __init pkm_init(void)

@@ -37,6 +37,12 @@
 #define SE_PRIVILEGE_ENABLED 0x00000002U
 #define SE_PRIVILEGE_REMOVED 0x00000004U
 #define KACS_PRIV_RESET_ALL_DEFAULTS 0x80000000U
+#define KACS_TOKEN_TYPE_PRIMARY 0x01U
+#define KACS_TOKEN_TYPE_IMPERSONATION 0x02U
+#define KACS_LEVEL_ANONYMOUS 0x00U
+#define KACS_LEVEL_IDENTIFICATION 0x01U
+#define KACS_LEVEL_IMPERSONATION 0x02U
+#define KACS_LEVEL_DELEGATION 0x03U
 
 struct kacs_query_args {
 	u32 token_class;
@@ -63,6 +69,13 @@ struct kacs_adjust_groups_args {
 	u64 previous_state;
 };
 
+struct kacs_duplicate_args {
+	u32 access_mask;
+	u32 token_type;
+	u32 impersonation_level;
+	s32 result_fd;
+};
+
 struct kacs_group_entry {
 	u32 index;
 	u32 enable;
@@ -78,8 +91,11 @@ struct kacs_adjust_default_args {
 #define KACS_IOC_QUERY _IOWR(KACS_IOC_MAGIC, 0, struct kacs_query_args)
 #define KACS_IOC_ADJUST_PRIVS \
 	_IOW(KACS_IOC_MAGIC, 1, struct kacs_adjust_privs_args)
+#define KACS_IOC_DUPLICATE \
+	_IOWR(KACS_IOC_MAGIC, 2, struct kacs_duplicate_args)
 #define KACS_IOC_ADJUST_GROUPS \
 	_IOW(KACS_IOC_MAGIC, 7, struct kacs_adjust_groups_args)
+#define KACS_IOC_IMPERSONATE _IO(KACS_IOC_MAGIC, 8)
 #define KACS_IOC_ADJUST_DEFAULT \
 	_IOW(KACS_IOC_MAGIC, 9, struct kacs_adjust_default_args)
 #define KACS_IOC_ADJUST_SESSIONID _IOW(KACS_IOC_MAGIC, 10, u32)
@@ -128,6 +144,11 @@ long pkm_kacs_kunit_token_fd_query(int fd, struct kacs_query_args *args,
 long pkm_kacs_kunit_token_fd_adjust_privs(int fd,
 					  struct kacs_adjust_privs_args *args,
 					  const struct kacs_priv_entry *entries);
+long pkm_kacs_kunit_token_fd_duplicate(int fd,
+				       const void *subject_token,
+				       const void *creator_token,
+				       struct kacs_duplicate_args *args);
+long pkm_kacs_kunit_token_fd_impersonate(int fd, const void *server_token);
 long pkm_kacs_kunit_token_fd_adjust_groups(int fd,
 					   struct kacs_adjust_groups_args *args,
 					   const struct kacs_group_entry *entries);

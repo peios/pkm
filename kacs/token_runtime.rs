@@ -57,7 +57,6 @@ const IMPERSONATION_LEVEL_IDENTIFICATION_ABI: u32 = 1;
 const IMPERSONATION_LEVEL_IMPERSONATION_ABI: u32 = 2;
 const IMPERSONATION_LEVEL_DELEGATION_ABI: u32 = 3;
 const TOKEN_ELEVATION_DEFAULT_ABI: u32 = 1;
-const MAX_TOKEN_SD_BYTES: usize = 104;
 const MAX_DEFAULT_DACL_BYTES: usize = 65_536;
 const TOKEN_INDEX_NO_CHANGE: u32 = u32::MAX;
 const MAX_BOOT_GROUPS: usize = 5;
@@ -69,6 +68,7 @@ const ACL_REVISION: u8 = 2;
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 
 const EACCES: i32 = 13;
+const EPERM: i32 = 1;
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
 const ERANGE: i32 = 34;
@@ -85,12 +85,20 @@ const KACS_PRIV_RESET_ALL_DEFAULTS: u32 = 0x8000_0000;
 
 const KACS_TOKEN_IMPERSONATE: u32 = 0x0004;
 const KACS_TOKEN_QUERY: u32 = 0x0008;
+const KACS_TOKEN_QUERY_SOURCE: u32 = 0x0010;
 const KACS_TOKEN_ADJUST_PRIVS: u32 = 0x0020;
 const KACS_TOKEN_ADJUST_GROUPS: u32 = 0x0040;
 const KACS_TOKEN_ADJUST_DEFAULT: u32 = 0x0080;
 const KACS_TOKEN_ALL_ACCESS: u32 = 0x000F_01FF;
+const KACS_TOKEN_DEFAULT_SELF_ACCESS: u32 = KACS_TOKEN_QUERY
+    | KACS_TOKEN_QUERY_SOURCE
+    | KACS_TOKEN_ADJUST_PRIVS
+    | KACS_TOKEN_ADJUST_GROUPS
+    | KACS_TOKEN_ADJUST_DEFAULT;
+const SE_IMPERSONATE_PRIVILEGE: u64 = 1 << 29;
 
 const SYSTEM_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+const LOCAL_SERVICE_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 19, 0, 0, 0];
 const ADMINISTRATORS_SID_BYTES: &[u8] = &[1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0];
 const EVERYONE_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
 const AUTHENTICATED_USERS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0];
@@ -123,19 +131,10 @@ const SYSTEM_DEFAULT_DACL_BYTES: &[u8] = &[
     2, 0, 52, 0, 2, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 16, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0, 0, 0,
     24, 0, 0, 0, 0, 16, 1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0,
 ];
-const SYSTEM_TOKEN_OWN_SD_BYTES: &[u8] = &[
-    1, 0, 4, 128, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0,
-    0, 0, 2, 0, 72, 0, 3, 0, 0, 0, 0, 0, 20, 0, 248, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
-    0, 0, 20, 0, 255, 1, 15, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0, 0, 0, 24, 0, 255, 1, 15, 0, 1,
-    2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0,
-];
-const QUERY_ONLY_TOKEN_OWN_SD_BYTES: &[u8] = &[
-    1, 0, 4, 128, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0,
-    0, 0, 2, 0, 28, 0, 1, 0, 0, 0, 0, 0, 20, 0, 248, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
-];
 const EMPTY_DEVICE_GROUPS: &[SidAndAttributes<'static>] = &[];
 const EMPTY_CLAIMS: &[crate::claims::ClaimAttribute] = &[];
 const EMPTY_POLICIES: &[crate::caap::CaapPolicyEntry<'static>] = &[];
+static NEXT_DYNAMIC_TOKEN_ID: AtomicU64 = AtomicU64::new(1);
 const TOKEN_GENERIC_MAPPING: GenericMapping = GenericMapping {
     read: KACS_TOKEN_QUERY | READ_CONTROL,
     write: KACS_TOKEN_ADJUST_PRIVS
@@ -294,6 +293,7 @@ struct PkmKacsBootToken {
     group_attributes: [AtomicU32; MAX_BOOT_GROUPS],
     group_views: UnsafeCell<[PkmKacsBootGroupView; MAX_BOOT_GROUPS]>,
     token_id: u64,
+    created_at: u64,
     modified_id: AtomicU64,
     owner_sid_index: AtomicU32,
     primary_group_index: AtomicU32,
@@ -307,12 +307,13 @@ struct PkmKacsBootToken {
     mandatory_policy: u32,
     token_type: TokenType,
     impersonation_level: ImpersonationLevel,
+    restricted: bool,
     audit_policy: u32,
     interactive_session_id: AtomicU32,
     projected_uid: u32,
     projected_gid: u32,
-    own_sd_len: usize,
-    own_sd: [u8; MAX_TOKEN_SD_BYTES],
+    own_sd_ptr: AtomicPtr<u8>,
+    own_sd_len: AtomicUsize,
 }
 
 struct TokenMutationGuard<'a> {
@@ -402,6 +403,51 @@ fn impersonation_level_abi(level: ImpersonationLevel) -> u32 {
         ImpersonationLevel::Identification => IMPERSONATION_LEVEL_IDENTIFICATION_ABI,
         ImpersonationLevel::Impersonation => IMPERSONATION_LEVEL_IMPERSONATION_ABI,
         ImpersonationLevel::Delegation => IMPERSONATION_LEVEL_DELEGATION_ABI,
+    }
+}
+
+fn impersonation_level_from_abi(value: u32) -> Result<ImpersonationLevel, i32> {
+    match value {
+        IMPERSONATION_LEVEL_ANONYMOUS_ABI => Ok(ImpersonationLevel::Anonymous),
+        IMPERSONATION_LEVEL_IDENTIFICATION_ABI => Ok(ImpersonationLevel::Identification),
+        IMPERSONATION_LEVEL_IMPERSONATION_ABI => Ok(ImpersonationLevel::Impersonation),
+        IMPERSONATION_LEVEL_DELEGATION_ABI => Ok(ImpersonationLevel::Delegation),
+        _ => Err(-EINVAL),
+    }
+}
+
+fn token_type_from_abi(value: u32) -> Result<TokenType, i32> {
+    match value {
+        TOKEN_TYPE_PRIMARY_ABI => Ok(TokenType::Primary),
+        TOKEN_TYPE_IMPERSONATION_ABI => Ok(TokenType::Impersonation),
+        _ => Err(-EINVAL),
+    }
+}
+
+fn allocate_dynamic_token_id() -> Result<u64, i32> {
+    NEXT_DYNAMIC_TOKEN_ID
+        .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| -ERANGE)
+}
+
+fn integrity_level_from_abi(value: u32) -> Result<IntegrityLevel, i32> {
+    match value {
+        0 => Ok(IntegrityLevel::Untrusted),
+        4096 => Ok(IntegrityLevel::Low),
+        8192 => Ok(IntegrityLevel::Medium),
+        12288 => Ok(IntegrityLevel::High),
+        16384 => Ok(IntegrityLevel::System),
+        _ => Err(-EINVAL),
+    }
+}
+
+fn sid_from_kunit_kind(kind: u32) -> Result<Sid<'static>, i32> {
+    match kind {
+        0 => Sid::parse(SYSTEM_SID_BYTES).map_err(|_| -EINVAL),
+        1 => Sid::parse(LOCAL_SERVICE_SID_BYTES).map_err(|_| -EINVAL),
+        _ => Err(-EINVAL),
     }
 }
 
@@ -558,6 +604,76 @@ fn build_default_process_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8, 
     )
 }
 
+fn build_token_sd_bytes(
+    creator_sid: Sid<'_>,
+    token_user_sid: Sid<'_>,
+    self_mask: Option<u32>,
+    creator_mask: Option<u32>,
+    system_mask: Option<u32>,
+) -> Result<(*mut u8, usize), i32> {
+    let system = Sid::parse(SYSTEM_SID_BYTES).map_err(|_| -EINVAL)?;
+    let mut ace_count = 0usize;
+    let mut dacl_len = ACL_HEADER_LEN;
+
+    for (mask, sid) in [
+        (self_mask, token_user_sid),
+        (creator_mask, creator_sid),
+        (system_mask, system),
+    ] {
+        if mask.is_some() {
+            ace_count = ace_count.checked_add(1).ok_or(-ERANGE)?;
+            dacl_len = dacl_len.checked_add(ace_len_for_sid(sid)?).ok_or(-ERANGE)?;
+        }
+    }
+
+    let owner_len = creator_sid.as_bytes().len();
+    let group_len = creator_sid.as_bytes().len();
+    let group_offset = SD_HEADER_LEN.checked_add(owner_len).ok_or(-ERANGE)?;
+    let dacl_offset = group_offset.checked_add(group_len).ok_or(-ERANGE)?;
+    let total_len = dacl_offset.checked_add(dacl_len).ok_or(-ERANGE)?;
+    let ptr = unsafe { pkm_kacs_zalloc(total_len) } as *mut u8;
+    let mut cursor = ACL_HEADER_LEN;
+
+    if ptr.is_null() {
+        return Err(-ENOMEM);
+    }
+
+    let bytes = unsafe { core::slice::from_raw_parts_mut(ptr, total_len) };
+    bytes[0] = 1;
+    bytes[1] = 0;
+    write_le_u16(
+        bytes,
+        2,
+        crate::security_descriptor::SE_SELF_RELATIVE
+            | crate::security_descriptor::SE_DACL_PRESENT,
+    );
+    write_le_u32(bytes, 4, SD_HEADER_LEN as u32);
+    write_le_u32(bytes, 8, group_offset as u32);
+    write_le_u32(bytes, 12, 0);
+    write_le_u32(bytes, 16, dacl_offset as u32);
+    bytes[SD_HEADER_LEN..group_offset].copy_from_slice(creator_sid.as_bytes());
+    bytes[group_offset..dacl_offset].copy_from_slice(creator_sid.as_bytes());
+
+    bytes[dacl_offset] = ACL_REVISION;
+    bytes[dacl_offset + 1] = 0;
+    write_le_u16(bytes, dacl_offset + 2, dacl_len as u16);
+    write_le_u16(bytes, dacl_offset + 4, ace_count as u16);
+    write_le_u16(bytes, dacl_offset + 6, 0);
+
+    for (mask, sid) in [
+        (self_mask, token_user_sid),
+        (creator_mask, creator_sid),
+        (system_mask, system),
+    ] {
+        if let Some(mask) = mask {
+            let written = write_allow_ace(&mut bytes[dacl_offset..], cursor, mask, sid)?;
+            cursor = cursor.checked_add(written).ok_or(-ERANGE)?;
+        }
+    }
+
+    Ok((ptr, total_len))
+}
+
 fn build_query_limited_only_process_sd_bytes(
     token: &PkmKacsBootToken,
 ) -> Result<(*mut u8, usize), i32> {
@@ -571,7 +687,14 @@ fn build_query_limited_only_process_sd_bytes(
 
 impl PkmKacsBootToken {
     fn create_system_like(
-        own_sd_bytes: &[u8],
+        user_sid: Sid<'static>,
+        creator_sid: Sid<'static>,
+        integrity_level: IntegrityLevel,
+        token_type: TokenType,
+        impersonation_level: ImpersonationLevel,
+        restricted: bool,
+        token_id: u64,
+        modified_id: u64,
         privileges_present: u64,
         privileges_enabled: u64,
         privileges_enabled_by_default: u64,
@@ -579,7 +702,6 @@ impl PkmKacsBootToken {
         include_user_group: bool,
         audit_policy: u32,
     ) -> Option<*const c_void> {
-        let user_sid = Sid::parse(SYSTEM_SID_BYTES).ok()?;
         let logon_sid = Sid::parse(LOGON_SID_BYTES).ok()?;
         let administrators = Sid::parse(ADMINISTRATORS_SID_BYTES).ok()?;
         let everyone = Sid::parse(EVERYONE_SID_BYTES).ok()?;
@@ -587,16 +709,23 @@ impl PkmKacsBootToken {
         let local = Sid::parse(LOCAL_SID_BYTES).ok()?;
         let (default_dacl_ptr, default_dacl_len) =
             alloc_copy_bytes(SYSTEM_DEFAULT_DACL_BYTES).ok()?;
-        let mut own_sd = [0u8; MAX_TOKEN_SD_BYTES];
-
-        if own_sd_bytes.len() > own_sd.len() {
-            free_allocated_bytes(default_dacl_ptr);
-            return None;
-        }
-        own_sd[..own_sd_bytes.len()].copy_from_slice(own_sd_bytes);
+        let (own_sd_ptr, own_sd_len) = match build_token_sd_bytes(
+            creator_sid,
+            user_sid,
+            Some(KACS_TOKEN_DEFAULT_SELF_ACCESS),
+            Some(KACS_TOKEN_ALL_ACCESS),
+            Some(KACS_TOKEN_ALL_ACCESS),
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                free_allocated_bytes(default_dacl_ptr);
+                return None;
+            }
+        };
         let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
         if token_ptr.is_null() {
             free_allocated_bytes(default_dacl_ptr);
+            free_allocated_bytes(own_sd_ptr);
             return None;
         }
 
@@ -631,8 +760,9 @@ impl PkmKacsBootToken {
             group_default_attributes,
             group_attributes,
             group_views: UnsafeCell::new(group_views),
-            token_id: BOOT_SYSTEM_TOKEN_ID,
-            modified_id: AtomicU64::new(BOOT_SYSTEM_MODIFIED_ID),
+            token_id,
+            created_at: 0,
+            modified_id: AtomicU64::new(modified_id),
             owner_sid_index: AtomicU32::new(BOOT_SYSTEM_OWNER_SID_INDEX),
             primary_group_index: AtomicU32::new(BOOT_SYSTEM_PRIMARY_GROUP_INDEX),
             default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
@@ -641,17 +771,18 @@ impl PkmKacsBootToken {
             privileges_enabled: AtomicU64::new(privileges_enabled),
             privileges_enabled_by_default: AtomicU64::new(privileges_enabled_by_default),
             privileges_used: AtomicU64::new(0),
-            integrity_level: IntegrityLevel::System,
+            integrity_level,
             mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP
                 | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
-            token_type: TokenType::Primary,
-            impersonation_level: ImpersonationLevel::Anonymous,
+            token_type,
+            impersonation_level,
+            restricted,
             audit_policy,
             interactive_session_id: AtomicU32::new(0),
             projected_uid: 0,
             projected_gid: 0,
-            own_sd_len: own_sd_bytes.len(),
-            own_sd,
+            own_sd_ptr: AtomicPtr::new(own_sd_ptr),
+            own_sd_len: AtomicUsize::new(own_sd_len),
         };
 
         unsafe { core::ptr::write(token_ptr, token) };
@@ -660,7 +791,14 @@ impl PkmKacsBootToken {
 
     fn create_system() -> Option<*const c_void> {
         Self::create_system_like(
-            SYSTEM_TOKEN_OWN_SD_BYTES,
+            Sid::parse(SYSTEM_SID_BYTES).ok()?,
+            Sid::parse(SYSTEM_SID_BYTES).ok()?,
+            IntegrityLevel::System,
+            TokenType::Primary,
+            ImpersonationLevel::Anonymous,
+            false,
+            BOOT_SYSTEM_TOKEN_ID,
+            BOOT_SYSTEM_MODIFIED_ID,
             SYSTEM_PRIVILEGES_ALL,
             SYSTEM_PRIVILEGES_ALL,
             SYSTEM_PRIVILEGES_ALL,
@@ -671,22 +809,90 @@ impl PkmKacsBootToken {
     }
 
     fn create_query_only_system() -> Option<*const c_void> {
-        Self::create_system_like(
-            QUERY_ONLY_TOKEN_OWN_SD_BYTES,
-            SYSTEM_PRIVILEGES_ALL,
-            SYSTEM_PRIVILEGES_ALL,
-            SYSTEM_PRIVILEGES_ALL,
-            BOOT_SYSTEM_GROUP_ATTRIBUTES,
-            false,
-            0,
+        let user_sid = Sid::parse(SYSTEM_SID_BYTES).ok()?;
+        let creator_sid = user_sid;
+        let logon_sid = Sid::parse(LOGON_SID_BYTES).ok()?;
+        let administrators = Sid::parse(ADMINISTRATORS_SID_BYTES).ok()?;
+        let everyone = Sid::parse(EVERYONE_SID_BYTES).ok()?;
+        let authenticated_users = Sid::parse(AUTHENTICATED_USERS_SID_BYTES).ok()?;
+        let local = Sid::parse(LOCAL_SID_BYTES).ok()?;
+        let (default_dacl_ptr, default_dacl_len) =
+            alloc_copy_bytes(SYSTEM_DEFAULT_DACL_BYTES).ok()?;
+        let (own_sd_ptr, own_sd_len) = build_token_sd_bytes(
+            creator_sid,
+            user_sid,
+            Some(KACS_TOKEN_DEFAULT_SELF_ACCESS),
+            None,
+            None,
         )
+        .ok()?;
+        let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
+        if token_ptr.is_null() {
+            free_allocated_bytes(default_dacl_ptr);
+            free_allocated_bytes(own_sd_ptr);
+            return None;
+        }
+        let group_sids = [administrators, everyone, authenticated_users, local, logon_sid];
+        let group_default_attributes = BOOT_SYSTEM_GROUP_ATTRIBUTES;
+        let group_views = build_group_views(&group_sids, &group_default_attributes);
+        let group_attributes = group_default_attributes.map(AtomicU32::new);
+        let token = Self {
+            refcount: AtomicUsize::new(1),
+            mutation_lock: AtomicBool::new(false),
+            session: PkmKacsBootSession {
+                session_id: 0,
+                logon_type: LOGON_TYPE_SERVICE,
+                user_sid,
+                auth_package: AUTH_PACKAGE_NEGOTIATE,
+                logon_sid,
+            },
+            user_sid,
+            logon_sid,
+            group_sids,
+            group_default_attributes,
+            group_attributes,
+            group_views: UnsafeCell::new(group_views),
+            token_id: BOOT_SYSTEM_TOKEN_ID,
+            created_at: 0,
+            modified_id: AtomicU64::new(BOOT_SYSTEM_MODIFIED_ID),
+            owner_sid_index: AtomicU32::new(BOOT_SYSTEM_OWNER_SID_INDEX),
+            primary_group_index: AtomicU32::new(BOOT_SYSTEM_PRIMARY_GROUP_INDEX),
+            default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
+            default_dacl_len: AtomicUsize::new(default_dacl_len),
+            privileges_present: AtomicU64::new(SYSTEM_PRIVILEGES_ALL),
+            privileges_enabled: AtomicU64::new(SYSTEM_PRIVILEGES_ALL),
+            privileges_enabled_by_default: AtomicU64::new(SYSTEM_PRIVILEGES_ALL),
+            privileges_used: AtomicU64::new(0),
+            integrity_level: IntegrityLevel::System,
+            mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP
+                | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
+            token_type: TokenType::Primary,
+            impersonation_level: ImpersonationLevel::Anonymous,
+            restricted: false,
+            audit_policy: 0,
+            interactive_session_id: AtomicU32::new(0),
+            projected_uid: 0,
+            projected_gid: 0,
+            own_sd_ptr: AtomicPtr::new(own_sd_ptr),
+            own_sd_len: AtomicUsize::new(own_sd_len),
+        };
+
+        unsafe { core::ptr::write(token_ptr, token) };
+        Some(token_ptr.cast())
     }
 
     fn create_without_tcb() -> Option<*const c_void> {
         let privileges = SYSTEM_PRIVILEGES_ALL & !SE_TCB_PRIVILEGE;
 
         Self::create_system_like(
-            SYSTEM_TOKEN_OWN_SD_BYTES,
+            Sid::parse(SYSTEM_SID_BYTES).ok()?,
+            Sid::parse(SYSTEM_SID_BYTES).ok()?,
+            IntegrityLevel::System,
+            TokenType::Primary,
+            ImpersonationLevel::Anonymous,
+            false,
+            BOOT_SYSTEM_TOKEN_ID,
+            BOOT_SYSTEM_MODIFIED_ID,
             privileges,
             privileges,
             privileges,
@@ -698,7 +904,14 @@ impl PkmKacsBootToken {
 
     fn create_adjustable_groups() -> Option<*const c_void> {
         Self::create_system_like(
-            QUERY_ONLY_TOKEN_OWN_SD_BYTES,
+            Sid::parse(SYSTEM_SID_BYTES).ok()?,
+            Sid::parse(SYSTEM_SID_BYTES).ok()?,
+            IntegrityLevel::System,
+            TokenType::Primary,
+            ImpersonationLevel::Anonymous,
+            false,
+            BOOT_SYSTEM_TOKEN_ID,
+            BOOT_SYSTEM_MODIFIED_ID,
             SYSTEM_PRIVILEGES_ALL,
             SYSTEM_PRIVILEGES_ALL,
             SYSTEM_PRIVILEGES_ALL,
@@ -710,7 +923,14 @@ impl PkmKacsBootToken {
 
     fn create_adjustable_privileges() -> Option<*const c_void> {
         Self::create_system_like(
-            QUERY_ONLY_TOKEN_OWN_SD_BYTES,
+            Sid::parse(SYSTEM_SID_BYTES).ok()?,
+            Sid::parse(SYSTEM_SID_BYTES).ok()?,
+            IntegrityLevel::System,
+            TokenType::Primary,
+            ImpersonationLevel::Anonymous,
+            false,
+            BOOT_SYSTEM_TOKEN_ID,
+            BOOT_SYSTEM_MODIFIED_ID,
             KUNIT_ADJUSTABLE_PRIVILEGES_PRESENT,
             KUNIT_ADJUSTABLE_PRIVILEGES_ENABLED,
             KUNIT_ADJUSTABLE_PRIVILEGES_ENABLED_BY_DEFAULT,
@@ -722,13 +942,48 @@ impl PkmKacsBootToken {
 
     fn create_privilege_audit() -> Option<*const c_void> {
         Self::create_system_like(
-            QUERY_ONLY_TOKEN_OWN_SD_BYTES,
+            Sid::parse(SYSTEM_SID_BYTES).ok()?,
+            Sid::parse(SYSTEM_SID_BYTES).ok()?,
+            IntegrityLevel::System,
+            TokenType::Primary,
+            ImpersonationLevel::Anonymous,
+            false,
+            BOOT_SYSTEM_TOKEN_ID,
+            BOOT_SYSTEM_MODIFIED_ID,
             SYSTEM_PRIVILEGES_ALL,
             SYSTEM_PRIVILEGES_ALL,
             SYSTEM_PRIVILEGES_ALL,
             BOOT_SYSTEM_GROUP_ATTRIBUTES,
             false,
             AUDIT_POLICY_PRIVILEGE_USE_SUCCESS | AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
+        )
+    }
+
+    fn create_kunit_variant(
+        user_sid: Sid<'static>,
+        integrity_level: IntegrityLevel,
+        token_type: TokenType,
+        impersonation_level: ImpersonationLevel,
+        restricted: bool,
+        enabled_privileges: u64,
+    ) -> Option<*const c_void> {
+        let token_id = allocate_dynamic_token_id().ok()?;
+
+        Self::create_system_like(
+            user_sid,
+            Sid::parse(SYSTEM_SID_BYTES).ok()?,
+            integrity_level,
+            token_type,
+            impersonation_level,
+            restricted,
+            token_id,
+            token_id,
+            enabled_privileges,
+            enabled_privileges,
+            enabled_privileges,
+            BOOT_SYSTEM_GROUP_ATTRIBUTES,
+            false,
+            0,
         )
     }
 
@@ -756,9 +1011,17 @@ impl PkmKacsBootToken {
                 Ok(copy) => copy,
                 Err(_) => return null(),
             };
+        let (own_sd_ptr, own_sd_len) = match alloc_copy_bytes(token.own_sd_bytes()) {
+            Ok(copy) => copy,
+            Err(_) => {
+                free_allocated_bytes(default_dacl_ptr);
+                return null();
+            }
+        };
         let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
         if token_ptr.is_null() {
             free_allocated_bytes(default_dacl_ptr);
+            free_allocated_bytes(own_sd_ptr);
             return null();
         }
         let copy = Self {
@@ -772,6 +1035,7 @@ impl PkmKacsBootToken {
             group_attributes: group_attributes.map(AtomicU32::new),
             group_views: UnsafeCell::new(build_group_views(&token.group_sids, &group_attributes)),
             token_id: token.token_id,
+            created_at: token.created_at,
             modified_id: AtomicU64::new(token.modified_id.load(Ordering::Relaxed)),
             owner_sid_index: AtomicU32::new(token.owner_sid_index.load(Ordering::Relaxed)),
             primary_group_index: AtomicU32::new(token.primary_group_index.load(Ordering::Relaxed)),
@@ -785,18 +1049,182 @@ impl PkmKacsBootToken {
             mandatory_policy: token.mandatory_policy,
             token_type: token.token_type,
             impersonation_level: token.impersonation_level,
+            restricted: token.restricted,
             audit_policy: token.audit_policy,
             interactive_session_id: AtomicU32::new(
                 token.interactive_session_id.load(Ordering::Relaxed),
             ),
             projected_uid: token.projected_uid,
             projected_gid: token.projected_gid,
-            own_sd_len: token.own_sd_len,
-            own_sd: token.own_sd,
+            own_sd_ptr: AtomicPtr::new(own_sd_ptr),
+            own_sd_len: AtomicUsize::new(own_sd_len),
         };
 
         unsafe { core::ptr::write(token_ptr, copy) };
         token_ptr.cast()
+    }
+
+    fn duplicate(
+        &self,
+        creator: &PkmKacsBootToken,
+        new_type: TokenType,
+        requested_level: ImpersonationLevel,
+    ) -> Result<*const c_void, i32> {
+        let _guard = self.lock_mutation();
+        let privileges = self.privileges_snapshot_locked();
+        let group_attributes = self.current_group_attributes();
+        let group_default_attributes = group_attributes;
+        let token_id = allocate_dynamic_token_id()?;
+        let modified_id = token_id;
+        let impersonation_level = match new_type {
+            TokenType::Primary => ImpersonationLevel::Anonymous,
+            TokenType::Impersonation => {
+                if self.token_type == TokenType::Impersonation
+                    && impersonation_level_abi(requested_level)
+                        > impersonation_level_abi(self.impersonation_level)
+                {
+                    return Err(-EINVAL);
+                }
+                requested_level
+            }
+        };
+        let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(self.default_dacl_bytes())?;
+        let (own_sd_ptr, own_sd_len) = match build_token_sd_bytes(
+            creator.user_sid,
+            self.user_sid,
+            Some(KACS_TOKEN_DEFAULT_SELF_ACCESS),
+            Some(KACS_TOKEN_ALL_ACCESS),
+            Some(KACS_TOKEN_ALL_ACCESS),
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                free_allocated_bytes(default_dacl_ptr);
+                return Err(err);
+            }
+        };
+        let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
+
+        if token_ptr.is_null() {
+            free_allocated_bytes(default_dacl_ptr);
+            free_allocated_bytes(own_sd_ptr);
+            return Err(-ENOMEM);
+        }
+
+        let duplicate = Self {
+            refcount: AtomicUsize::new(1),
+            mutation_lock: AtomicBool::new(false),
+            session: self.session,
+            user_sid: self.user_sid,
+            logon_sid: self.logon_sid,
+            group_sids: self.group_sids,
+            group_default_attributes,
+            group_attributes: group_attributes.map(AtomicU32::new),
+            group_views: UnsafeCell::new(build_group_views(&self.group_sids, &group_attributes)),
+            token_id,
+            created_at: self.created_at,
+            modified_id: AtomicU64::new(modified_id),
+            owner_sid_index: AtomicU32::new(self.owner_sid_index.load(Ordering::Relaxed)),
+            primary_group_index: AtomicU32::new(
+                self.primary_group_index.load(Ordering::Relaxed),
+            ),
+            default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
+            default_dacl_len: AtomicUsize::new(default_dacl_len),
+            privileges_present: AtomicU64::new(privileges.present),
+            privileges_enabled: AtomicU64::new(privileges.enabled),
+            privileges_enabled_by_default: AtomicU64::new(privileges.enabled_by_default),
+            privileges_used: AtomicU64::new(privileges.used),
+            integrity_level: self.integrity_level,
+            mandatory_policy: self.mandatory_policy,
+            token_type: new_type,
+            impersonation_level,
+            restricted: self.restricted,
+            audit_policy: self.audit_policy,
+            interactive_session_id: AtomicU32::new(
+                self.interactive_session_id.load(Ordering::Relaxed),
+            ),
+            projected_uid: self.projected_uid,
+            projected_gid: self.projected_gid,
+            own_sd_ptr: AtomicPtr::new(own_sd_ptr),
+            own_sd_len: AtomicUsize::new(own_sd_len),
+        };
+
+        unsafe { core::ptr::write(token_ptr, duplicate) };
+        Ok(token_ptr.cast())
+    }
+
+    fn clone_with_impersonation_level(
+        &self,
+        level: ImpersonationLevel,
+    ) -> Result<*const c_void, i32> {
+        if self.token_type != TokenType::Impersonation {
+            return Err(-EINVAL);
+        }
+        if impersonation_level_abi(level) > impersonation_level_abi(self.impersonation_level) {
+            return Err(-EINVAL);
+        }
+        if level == self.impersonation_level {
+            return Ok(Self::clone_ref((self as *const Self).cast()));
+        }
+
+        let _guard = self.lock_mutation();
+        let privileges = self.privileges_snapshot_locked();
+        let group_attributes = self.current_group_attributes();
+        let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(self.default_dacl_bytes())?;
+        let (own_sd_ptr, own_sd_len) = match alloc_copy_bytes(self.own_sd_bytes()) {
+            Ok(value) => value,
+            Err(err) => {
+                free_allocated_bytes(default_dacl_ptr);
+                return Err(err);
+            }
+        };
+        let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
+
+        if token_ptr.is_null() {
+            free_allocated_bytes(default_dacl_ptr);
+            free_allocated_bytes(own_sd_ptr);
+            return Err(-ENOMEM);
+        }
+
+        let derived = Self {
+            refcount: AtomicUsize::new(1),
+            mutation_lock: AtomicBool::new(false),
+            session: self.session,
+            user_sid: self.user_sid,
+            logon_sid: self.logon_sid,
+            group_sids: self.group_sids,
+            group_default_attributes: self.group_default_attributes,
+            group_attributes: group_attributes.map(AtomicU32::new),
+            group_views: UnsafeCell::new(build_group_views(&self.group_sids, &group_attributes)),
+            token_id: self.token_id,
+            created_at: self.created_at,
+            modified_id: AtomicU64::new(self.modified_id.load(Ordering::Relaxed)),
+            owner_sid_index: AtomicU32::new(self.owner_sid_index.load(Ordering::Relaxed)),
+            primary_group_index: AtomicU32::new(
+                self.primary_group_index.load(Ordering::Relaxed),
+            ),
+            default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
+            default_dacl_len: AtomicUsize::new(default_dacl_len),
+            privileges_present: AtomicU64::new(privileges.present),
+            privileges_enabled: AtomicU64::new(privileges.enabled),
+            privileges_enabled_by_default: AtomicU64::new(privileges.enabled_by_default),
+            privileges_used: AtomicU64::new(privileges.used),
+            integrity_level: self.integrity_level,
+            mandatory_policy: self.mandatory_policy,
+            token_type: TokenType::Impersonation,
+            impersonation_level: level,
+            restricted: self.restricted,
+            audit_policy: self.audit_policy,
+            interactive_session_id: AtomicU32::new(
+                self.interactive_session_id.load(Ordering::Relaxed),
+            ),
+            projected_uid: self.projected_uid,
+            projected_gid: self.projected_gid,
+            own_sd_ptr: AtomicPtr::new(own_sd_ptr),
+            own_sd_len: AtomicUsize::new(own_sd_len),
+        };
+
+        unsafe { core::ptr::write(token_ptr, derived) };
+        Ok(token_ptr.cast())
     }
 
     unsafe fn drop_ref(ptr: *const c_void) {
@@ -807,6 +1235,7 @@ impl PkmKacsBootToken {
             fence(Ordering::Acquire);
             let token_ptr = ptr as *mut Self;
             free_allocated_bytes(token.default_dacl_ptr.load(Ordering::Relaxed));
+            free_allocated_bytes(token.own_sd_ptr.load(Ordering::Relaxed));
             unsafe { core::ptr::drop_in_place(token_ptr) };
             unsafe { pkm_kacs_free(token_ptr.cast()) };
         }
@@ -844,8 +1273,8 @@ impl PkmKacsBootToken {
             privileges_enabled_by_default: privileges.enabled_by_default,
             privileges_used: self.privileges_used.load(Ordering::Acquire),
             integrity_level: self.integrity_level as u32,
-            token_type: TOKEN_TYPE_PRIMARY_ABI,
-            impersonation_level: IMPERSONATION_LEVEL_ANONYMOUS_ABI,
+            token_type: token_type_abi(self.token_type),
+            impersonation_level: impersonation_level_abi(self.impersonation_level),
             mandatory_policy: self.mandatory_policy,
             interactive_session_id: self.interactive_session_id.load(Ordering::Relaxed),
             projected_uid: self.projected_uid,
@@ -980,6 +1409,17 @@ impl PkmKacsBootToken {
     fn default_dacl_bytes(&self) -> &[u8] {
         let ptr = self.default_dacl_ptr.load(Ordering::Relaxed);
         let len = self.default_dacl_len.load(Ordering::Relaxed);
+
+        if len == 0 {
+            return &[];
+        }
+
+        unsafe { core::slice::from_raw_parts(ptr.cast_const(), len) }
+    }
+
+    fn own_sd_bytes(&self) -> &[u8] {
+        let ptr = self.own_sd_ptr.load(Ordering::Relaxed);
+        let len = self.own_sd_len.load(Ordering::Relaxed);
 
         if len == 0 {
             return &[];
@@ -1363,7 +1803,7 @@ impl PkmKacsBootToken {
     }
 
     fn own_sd(&self) -> Option<SecurityDescriptor<'_>> {
-        SecurityDescriptor::parse(&self.own_sd[..self.own_sd_len]).ok()
+        SecurityDescriptor::parse(self.own_sd_bytes()).ok()
     }
 }
 
@@ -1410,6 +1850,58 @@ fn token_has_enabled_privilege(token_ptr: *const c_void, privilege: u64) -> bool
     let privileges = token.privileges_snapshot();
 
     (privileges.present & privilege) == privilege && (privileges.enabled & privilege) == privilege
+}
+
+fn min_impersonation_level(
+    lhs: ImpersonationLevel,
+    rhs: ImpersonationLevel,
+) -> ImpersonationLevel {
+    if impersonation_level_abi(lhs) <= impersonation_level_abi(rhs) {
+        lhs
+    } else {
+        rhs
+    }
+}
+
+fn impersonation_gate_effective_level(
+    server: &PkmKacsBootToken,
+    client: &PkmKacsBootToken,
+) -> Result<(ImpersonationLevel, bool), i32> {
+    let requested = client.impersonation_level;
+    let mut permitted = requested;
+    let mut used_impersonate = false;
+    let same_user = server.user_sid.as_bytes() == client.user_sid.as_bytes();
+    let same_restriction = server.restricted == client.restricted;
+
+    if requested == ImpersonationLevel::Anonymous {
+        return Ok((ImpersonationLevel::Anonymous, false));
+    }
+
+    if same_user && server.restricted && !client.restricted {
+        return Err(-EPERM);
+    }
+
+    if !(same_user && same_restriction) {
+        let privileges = server.privileges_snapshot();
+        let has_impersonate = (privileges.present & SE_IMPERSONATE_PRIVILEGE)
+            == SE_IMPERSONATE_PRIVILEGE
+            && (privileges.enabled & SE_IMPERSONATE_PRIVILEGE) == SE_IMPERSONATE_PRIVILEGE;
+
+        if has_impersonate {
+            used_impersonate = true;
+        } else {
+            permitted = min_impersonation_level(
+                permitted,
+                ImpersonationLevel::Identification,
+            );
+        }
+    }
+
+    if (client.integrity_level as u32) > (server.integrity_level as u32) {
+        permitted = min_impersonation_level(permitted, ImpersonationLevel::Identification);
+    }
+
+    Ok((permitted, used_impersonate))
 }
 
 fn token_open_check_errno(
@@ -1608,6 +2100,108 @@ pub extern "C" fn kacs_rust_token_open_check(
         *granted_out = result as u32;
     }
     0
+}
+
+#[no_mangle]
+/// Duplicates a live token according to the bounded Slice 43 DuplicateToken
+/// rules.
+pub extern "C" fn kacs_rust_token_duplicate(
+    source_token: *const c_void,
+    creator_token: *const c_void,
+    token_type: u32,
+    impersonation_level: u32,
+    out_token: *mut *const c_void,
+) -> i32 {
+    let Some(source_token) = (unsafe { PkmKacsBootToken::from_ptr(source_token) }) else {
+        return -EACCES;
+    };
+    let Some(creator_token) = (unsafe { PkmKacsBootToken::from_ptr(creator_token) }) else {
+        return -EACCES;
+    };
+    let Some(out_token) = (unsafe { out_token.as_mut() }) else {
+        return -EINVAL;
+    };
+    let token_type = match token_type_from_abi(token_type) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+    let impersonation_level = match impersonation_level_from_abi(impersonation_level) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+
+    match source_token.duplicate(creator_token, token_type, impersonation_level) {
+        Ok(token) => {
+            *out_token = token;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Computes the effective impersonation level for a server/client token pair.
+pub extern "C" fn kacs_rust_token_impersonation_gate(
+    server_token: *const c_void,
+    client_token: *const c_void,
+    effective_level_out: *mut u32,
+    used_impersonate_privilege_out: *mut u32,
+) -> i32 {
+    let Some(server_token) = (unsafe { PkmKacsBootToken::from_ptr(server_token) }) else {
+        return -EACCES;
+    };
+    let Some(client_token) = (unsafe { PkmKacsBootToken::from_ptr(client_token) }) else {
+        return -EACCES;
+    };
+    let Some(effective_level_out) = (unsafe { effective_level_out.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(used_impersonate_privilege_out) =
+        (unsafe { used_impersonate_privilege_out.as_mut() })
+    else {
+        return -EINVAL;
+    };
+
+    if client_token.token_type != TokenType::Impersonation {
+        return -EINVAL;
+    }
+
+    match impersonation_gate_effective_level(server_token, client_token) {
+        Ok((level, used_impersonate)) => {
+            *effective_level_out = impersonation_level_abi(level);
+            *used_impersonate_privilege_out = u32::from(used_impersonate);
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Clones an impersonation token while forcing a specific effective
+/// impersonation level no greater than the source level.
+pub extern "C" fn kacs_rust_token_clone_with_impersonation_level(
+    token: *const c_void,
+    impersonation_level: u32,
+    out_token: *mut *const c_void,
+) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let Some(out_token) = (unsafe { out_token.as_mut() }) else {
+        return -EINVAL;
+    };
+    let impersonation_level = match impersonation_level_from_abi(impersonation_level) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+
+    match token.clone_with_impersonation_level(impersonation_level) {
+        Ok(clone) => {
+            *out_token = clone;
+            0
+        }
+        Err(err) => err,
+    }
 }
 
 #[no_mangle]
@@ -1898,4 +2492,39 @@ pub extern "C" fn kacs_rust_kunit_create_adjustable_privileges_token() -> *const
 /// privilege-use events for both success and failure outcomes.
 pub extern "C" fn kacs_rust_kunit_create_privilege_audit_token() -> *const c_void {
     PkmKacsBootToken::create_privilege_audit().unwrap_or(null())
+}
+
+#[no_mangle]
+/// Creates a bounded KUnit-only token variant for Slice 43 impersonation
+/// gate and thread-token tests.
+pub extern "C" fn kacs_rust_kunit_create_impersonation_variant_token(
+    user_kind: u32,
+    token_type: u32,
+    impersonation_level: u32,
+    integrity_level: u32,
+    restricted: u32,
+    enabled_privileges: u64,
+) -> *const c_void {
+    let Some(user_sid) = sid_from_kunit_kind(user_kind).ok() else {
+        return null();
+    };
+    let Some(token_type) = token_type_from_abi(token_type).ok() else {
+        return null();
+    };
+    let Some(impersonation_level) = impersonation_level_from_abi(impersonation_level).ok() else {
+        return null();
+    };
+    let Some(integrity_level) = integrity_level_from_abi(integrity_level).ok() else {
+        return null();
+    };
+
+    PkmKacsBootToken::create_kunit_variant(
+        user_sid,
+        integrity_level,
+        token_type,
+        impersonation_level,
+        restricted != 0,
+        enabled_privileges,
+    )
+    .unwrap_or(null())
 }

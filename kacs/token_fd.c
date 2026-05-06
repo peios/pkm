@@ -27,6 +27,7 @@
 	 KACS_ACCESS_GENERIC_WRITE | KACS_ACCESS_GENERIC_EXECUTE | \
 	 KACS_ACCESS_GENERIC_ALL)
 #define PKM_KACS_PRIVILEGE_SE_TCB (1ULL << 7)
+#define PKM_KACS_PRIVILEGE_SE_IMPERSONATE (1ULL << 29)
 #define PKM_KACS_MAX_PRIVILEGE_ADJUST_ENTRIES 64U
 #define PKM_KACS_ADJUST_GROUPS_RESET_INDEX 0xFFFFFFFFU
 #define PKM_KACS_DEFAULT_INDEX_NO_CHANGE 0xFFFFFFFFU
@@ -187,6 +188,82 @@ static long pkm_kacs_token_adjust_session_after_gate(
 		return -EACCES;
 
 	return kacs_rust_token_adjust_session_id(tf->token, session_id);
+}
+
+static long pkm_kacs_token_duplicate_core(
+	struct pkm_kacs_token_file *tf,
+	const void *subject_token,
+	const void *creator_token,
+	struct kacs_duplicate_args *args)
+{
+	const void *new_token = NULL;
+	long fd;
+	int ret;
+
+	if (!tf || !tf->token || !args)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_DUPLICATE) != KACS_TOKEN_DUPLICATE)
+		return -EACCES;
+	if (!subject_token || !creator_token)
+		return -EACCES;
+
+	ret = kacs_rust_token_duplicate(tf->token, creator_token,
+					 args->token_type,
+					 args->impersonation_level,
+					 &new_token);
+	if (ret)
+		return ret;
+	if (!new_token)
+		return -EACCES;
+
+	fd = pkm_kacs_open_token_fd_for_subject_checked(subject_token, new_token,
+							  args->access_mask);
+	kacs_rust_token_drop(new_token);
+	if (fd < 0)
+		return fd;
+
+	args->result_fd = (s32)fd;
+	return 0;
+}
+
+static long pkm_kacs_token_impersonate_core(
+	struct pkm_kacs_token_file *tf,
+	const void *server_primary_token)
+{
+	const void *effective_token = NULL;
+	u32 effective_level = 0;
+	u32 used_impersonate_privilege = 0;
+	long ret;
+
+	if (!tf || !tf->token)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_IMPERSONATE) != KACS_TOKEN_IMPERSONATE)
+		return -EACCES;
+	if (!server_primary_token)
+		return -EACCES;
+
+	ret = kacs_rust_token_impersonation_gate(server_primary_token, tf->token,
+						 &effective_level,
+						 &used_impersonate_privilege);
+	if (ret)
+		return ret;
+
+	if (used_impersonate_privilege &&
+	    !kacs_rust_token_mark_privileges_used(
+		    server_primary_token, PKM_KACS_PRIVILEGE_SE_IMPERSONATE))
+		return -EACCES;
+
+	ret = kacs_rust_token_clone_with_impersonation_level(
+		tf->token, effective_level, &effective_token);
+	if (ret)
+		return ret;
+	if (!effective_token)
+		return -EACCES;
+
+	ret = pkm_kacs_install_impersonation_token(effective_token);
+	if (ret)
+		kacs_rust_token_drop(effective_token);
+	return ret;
 }
 
 static long pkm_kacs_token_adjust_privs_core(
@@ -355,6 +432,36 @@ static long pkm_kacs_token_adjust_session_user(struct pkm_kacs_token_file *tf,
 	return pkm_kacs_token_adjust_session_after_gate(tf, session_id);
 }
 
+static long pkm_kacs_token_duplicate_user(
+	struct pkm_kacs_token_file *tf,
+	struct kacs_duplicate_args __user *uargs)
+{
+	struct kacs_duplicate_args args;
+	long ret;
+
+	if (!tf || !tf->token)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_DUPLICATE) != KACS_TOKEN_DUPLICATE)
+		return -EACCES;
+	if (!uargs)
+		return -EFAULT;
+	if (copy_from_user(&args, uargs, sizeof(args)))
+		return -EFAULT;
+
+	ret = pkm_kacs_token_duplicate_core(
+		tf, pkm_kacs_current_effective_token_ptr(),
+		pkm_kacs_current_primary_token_ptr(), &args);
+	if (!ret && copy_to_user(uargs, &args, sizeof(args)))
+		return -EFAULT;
+	return ret;
+}
+
+static long pkm_kacs_token_impersonate_user(struct pkm_kacs_token_file *tf)
+{
+	return pkm_kacs_token_impersonate_core(
+		tf, pkm_kacs_current_primary_token_ptr());
+}
+
 static long pkm_kacs_token_adjust_privs_user(
 	struct pkm_kacs_token_file *tf,
 	struct kacs_adjust_privs_args __user *uargs)
@@ -489,6 +596,11 @@ static long pkm_kacs_token_ioctl(struct file *file, unsigned int cmd,
 	case KACS_IOC_ADJUST_GROUPS:
 		return pkm_kacs_token_adjust_groups_user(
 			tf, (struct kacs_adjust_groups_args __user *)arg);
+	case KACS_IOC_DUPLICATE:
+		return pkm_kacs_token_duplicate_user(
+			tf, (struct kacs_duplicate_args __user *)arg);
+	case KACS_IOC_IMPERSONATE:
+		return pkm_kacs_token_impersonate_user(tf);
 	case KACS_IOC_ADJUST_DEFAULT:
 		return pkm_kacs_token_adjust_default_user(
 			tf, (struct kacs_adjust_default_args __user *)arg);
@@ -727,6 +839,57 @@ long pkm_kacs_kunit_token_fd_adjust_privs(
 
 	tf = fd_file(f)->private_data;
 	ret = pkm_kacs_token_adjust_privs_core(tf, args, entries);
+	fdput(f);
+	return ret;
+}
+
+long pkm_kacs_kunit_token_fd_duplicate(
+	int fd,
+	const void *subject_token,
+	const void *creator_token,
+	struct kacs_duplicate_args *args)
+{
+	struct fd f;
+	struct pkm_kacs_token_file *tf;
+	long ret;
+
+	if (!args || !subject_token || !creator_token)
+		return -EINVAL;
+
+	f = fdget(fd);
+	if (!fd_file(f))
+		return -EBADF;
+	if (fd_file(f)->f_op != &pkm_kacs_token_fops) {
+		fdput(f);
+		return -EINVAL;
+	}
+
+	tf = fd_file(f)->private_data;
+	ret = pkm_kacs_token_duplicate_core(tf, subject_token, creator_token,
+					    args);
+	fdput(f);
+	return ret;
+}
+
+long pkm_kacs_kunit_token_fd_impersonate(int fd, const void *server_token)
+{
+	struct fd f;
+	struct pkm_kacs_token_file *tf;
+	long ret;
+
+	if (!server_token)
+		return -EINVAL;
+
+	f = fdget(fd);
+	if (!fd_file(f))
+		return -EBADF;
+	if (fd_file(f)->f_op != &pkm_kacs_token_fops) {
+		fdput(f);
+		return -EINVAL;
+	}
+
+	tf = fd_file(f)->private_data;
+	ret = pkm_kacs_token_impersonate_core(tf, server_token);
 	fdput(f);
 	return ret;
 }

@@ -89,6 +89,8 @@ int pkm_kacs_resolve_ctx_from_token(const void *token,
 				    struct pkm_kacs_resolved_ctx *out);
 int pkm_kacs_resolve_current_effective_ctx(struct pkm_kacs_resolved_ctx *out);
 int pkm_kacs_resolve_current_primary_ctx(struct pkm_kacs_resolved_ctx *out);
+int pkm_kacs_install_impersonation_token(const void *token);
+int pkm_kacs_revert_impersonation(void);
 int pkm_kmes_current_process_rate_reserve(u32 count);
 void pkm_kmes_current_process_rate_refund(u32 count);
 
@@ -100,6 +102,15 @@ bool kacs_rust_token_has_enabled_privilege(const void *token, u64 privilege);
 bool kacs_rust_token_mark_privileges_used(const void *token, u64 used_mask);
 int kacs_rust_token_open_check(const void *subject_token, const void *target_token,
 			       u32 desired_access, u32 *granted_out);
+int kacs_rust_token_duplicate(const void *source_token,
+			      const void *creator_token, u32 token_type,
+			      u32 impersonation_level,
+			      const void **out_token);
+int kacs_rust_token_impersonation_gate(
+	const void *server_token, const void *client_token,
+	u32 *effective_level_out, u32 *used_impersonate_privilege_out);
+int kacs_rust_token_clone_with_impersonation_level(
+	const void *token, u32 impersonation_level, const void **out_token);
 const u8 *kacs_rust_create_default_process_sd(const void *token_ptr,
 					      size_t *len_out);
 const u8 *kacs_rust_kunit_create_query_limited_process_sd(const void *token_ptr,
@@ -117,6 +128,9 @@ const void *kacs_rust_kunit_create_without_tcb_token(void);
 const void *kacs_rust_kunit_create_adjustable_groups_token(void);
 const void *kacs_rust_kunit_create_adjustable_privileges_token(void);
 const void *kacs_rust_kunit_create_privilege_audit_token(void);
+const void *kacs_rust_kunit_create_impersonation_variant_token(
+	u32 user_kind, u32 token_type, u32 impersonation_level,
+	u32 integrity_level, u32 restricted, u64 enabled_privileges);
 int kacs_rust_token_query(const void *token, u32 token_class, u8 *out,
 			  size_t out_len, size_t *required_out);
 int kacs_rust_token_adjust_privs(
@@ -142,6 +156,8 @@ int pkm_kacs_kunit_process_state_snapshot(
 	struct pkm_kacs_kunit_process_state_view *out);
 long pkm_kacs_kunit_open_process_token_for_subject(
 	const struct pkm_kacs_kunit_process_token_open_args *args);
+long pkm_kacs_kunit_open_current_thread_token_for_subject(
+	const void *subject_token, u32 access_mask);
 #endif
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_RUNTIME_H */

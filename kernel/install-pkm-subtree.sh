@@ -141,6 +141,10 @@ insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1001 kacs_open_process_token
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1002 kacs_open_thread_token
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1012 kacs_revert
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1090 kmes_emit
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1092 kmes_emit_batch
