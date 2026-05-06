@@ -6,7 +6,14 @@
 
 #include "access_check.h"
 
+#define KACS_PROCESS_TERMINATE 0x0001U
+#define KACS_PROCESS_SIGNAL 0x0002U
+#define KACS_PROCESS_VM_READ 0x0010U
+#define KACS_PROCESS_VM_WRITE 0x0020U
+#define KACS_PROCESS_DUP_HANDLE 0x0040U
+#define KACS_PROCESS_SET_INFORMATION 0x0200U
 #define KACS_PROCESS_QUERY_INFORMATION 0x0400U
+#define KACS_PROCESS_SUSPEND_RESUME 0x0800U
 #define KACS_PROCESS_QUERY_LIMITED 0x1000U
 
 struct pkm_kacs_boot_group_view {
@@ -77,6 +84,29 @@ struct pkm_kacs_kunit_process_token_open_args {
 	u32 target_pip_type;
 	u32 target_pip_trust;
 	u32 access_mask;
+};
+
+struct pkm_kacs_kunit_process_signal_check_args {
+	const void *subject_token;
+	const u8 *target_process_sd_ptr;
+	size_t target_process_sd_len;
+	u32 caller_pip_type;
+	u32 caller_pip_trust;
+	u32 target_pip_type;
+	u32 target_pip_trust;
+	int sig;
+	u32 kernel_originated;
+};
+
+struct pkm_kacs_kunit_process_ptrace_check_args {
+	const void *subject_token;
+	const u8 *target_process_sd_ptr;
+	size_t target_process_sd_len;
+	u32 caller_pip_type;
+	u32 caller_pip_trust;
+	u32 target_pip_type;
+	u32 target_pip_trust;
+	u32 mode;
 };
 
 const void *pkm_kacs_current_effective_token_ptr(void);
@@ -156,6 +186,10 @@ int pkm_kacs_kunit_process_state_snapshot(
 	struct pkm_kacs_kunit_process_state_view *out);
 long pkm_kacs_kunit_open_process_token_for_subject(
 	const struct pkm_kacs_kunit_process_token_open_args *args);
+long pkm_kacs_kunit_check_signal_for_subject(
+	const struct pkm_kacs_kunit_process_signal_check_args *args);
+long pkm_kacs_kunit_check_ptrace_for_subject(
+	const struct pkm_kacs_kunit_process_ptrace_check_args *args);
 long pkm_kacs_kunit_open_current_thread_token_for_subject(
 	const void *subject_token, u32 access_mask);
 #endif

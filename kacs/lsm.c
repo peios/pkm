@@ -19,6 +19,7 @@
 #include <linux/refcount.h>
 #include <linux/pid.h>
 #include <linux/pidfd.h>
+#include <linux/ptrace.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
@@ -97,6 +98,12 @@ static inline struct pkm_kacs_task_security *pkm_kacs_task(
 	return (struct pkm_kacs_task_security *)((char *)task->security +
 						 pkm_blob_sizes.lbs_task);
 }
+
+static int pkm_kacs_task_kill(struct task_struct *target,
+			      struct kernel_siginfo *info, int sig,
+			      const struct cred *cred);
+static int pkm_kacs_ptrace_access_check(struct task_struct *child,
+					unsigned int mode);
 
 static struct pkm_kacs_process_sd *pkm_kacs_process_sd_alloc(const void *token)
 {
@@ -445,6 +452,8 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(cred_free, pkm_kacs_cred_free),
 	LSM_HOOK_INIT(task_alloc, pkm_kacs_task_alloc),
 	LSM_HOOK_INIT(task_free, pkm_kacs_task_free),
+	LSM_HOOK_INIT(task_kill, pkm_kacs_task_kill),
+	LSM_HOOK_INIT(ptrace_access_check, pkm_kacs_ptrace_access_check),
 };
 
 void *pkm_kacs_zalloc(size_t size)
@@ -523,9 +532,9 @@ static bool pkm_kacs_pip_dominates(u32 caller_pip_type, u32 caller_pip_trust,
 	       caller_pip_trust >= target_pip_trust;
 }
 
-static long pkm_kacs_authorize_process_sd_open(
+static long pkm_kacs_authorize_process_sd_access(
 	const void *subject_token,
-	const struct pkm_kacs_process_sd *process_sd)
+	const struct pkm_kacs_process_sd *process_sd, u32 desired_access)
 {
 	u32 granted = 0;
 	int ret;
@@ -534,8 +543,7 @@ static long pkm_kacs_authorize_process_sd_open(
 		return -EACCES;
 
 	ret = kacs_rust_check_process_sd(subject_token, process_sd->bytes,
-					 process_sd->len,
-					 KACS_PROCESS_QUERY_INFORMATION,
+					 process_sd->len, desired_access,
 					 &granted);
 	if (!ret)
 		return 0;
@@ -546,6 +554,29 @@ static long pkm_kacs_authorize_process_sd_open(
 		return -EACCES;
 	if (!kacs_rust_token_mark_privileges_used(
 		    subject_token, PKM_KACS_PRIVILEGE_SE_DEBUG))
+		return -EACCES;
+
+	return 0;
+}
+
+static long pkm_kacs_authorize_process_access_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *target_state, u32 caller_pip_type,
+	u32 caller_pip_trust, u32 desired_process_access)
+{
+	long ret;
+
+	if (!subject_token || !target_state)
+		return -EACCES;
+
+	ret = pkm_kacs_authorize_process_sd_access(subject_token,
+						   target_state->process_sd,
+						   desired_process_access);
+	if (ret)
+		return ret;
+	if (!pkm_kacs_pip_dominates(caller_pip_type, caller_pip_trust,
+				    READ_ONCE(target_state->pip_type),
+				    READ_ONCE(target_state->pip_trust)))
 		return -EACCES;
 
 	return 0;
@@ -562,21 +593,156 @@ static long pkm_kacs_open_process_token_core(
 	ret = pkm_kacs_validate_token_open_access_mask(access_mask);
 	if (ret)
 		return ret;
-	if (!subject_token || !target_state || !target_token)
+	if (!target_token)
 		return -EACCES;
 
-	ret = pkm_kacs_authorize_process_sd_open(subject_token,
-						 target_state->process_sd);
+	ret = pkm_kacs_authorize_process_access_core(
+		subject_token, target_state, caller_pip_type, caller_pip_trust,
+		KACS_PROCESS_QUERY_INFORMATION);
 	if (ret)
 		return ret;
-	if (!pkm_kacs_pip_dominates(caller_pip_type, caller_pip_trust,
-				    READ_ONCE(target_state->pip_type),
-				    READ_ONCE(target_state->pip_trust)))
-		return -EACCES;
 
 	return pkm_kacs_open_token_fd_for_subject_checked(subject_token,
 							  target_token,
 							  access_mask);
+}
+
+static long pkm_kacs_signal_to_process_access(int sig, u32 *desired_access)
+{
+	if (!desired_access)
+		return -EINVAL;
+	if (sig == 0)
+		return -EACCES;
+	if (sig < 0 || sig > SIGRTMAX)
+		return -EINVAL;
+
+	switch (sig) {
+	case SIGHUP:
+	case SIGINT:
+	case SIGQUIT:
+	case SIGILL:
+	case SIGTRAP:
+	case SIGABRT:
+	case SIGBUS:
+	case SIGFPE:
+	case SIGKILL:
+	case SIGUSR1:
+	case SIGSEGV:
+	case SIGUSR2:
+	case SIGPIPE:
+	case SIGALRM:
+	case SIGTERM:
+	case SIGSTKFLT:
+	case SIGXCPU:
+	case SIGXFSZ:
+	case SIGVTALRM:
+	case SIGPROF:
+	case SIGIO:
+	case SIGPWR:
+	case SIGSYS:
+		*desired_access = KACS_PROCESS_TERMINATE;
+		return 0;
+	case SIGCONT:
+	case SIGSTOP:
+	case SIGTSTP:
+	case SIGTTIN:
+	case SIGTTOU:
+		*desired_access = KACS_PROCESS_SUSPEND_RESUME;
+		return 0;
+	case SIGCHLD:
+	case SIGURG:
+	case SIGWINCH:
+		*desired_access = KACS_PROCESS_SIGNAL;
+		return 0;
+	default:
+		if (sig >= SIGRTMIN) {
+			*desired_access = KACS_PROCESS_TERMINATE;
+			return 0;
+		}
+		return -EACCES;
+	}
+}
+
+static long pkm_kacs_ptrace_mode_to_process_access(unsigned int mode,
+						   u32 *desired_access)
+{
+	bool is_read_mode;
+	bool is_attach_mode;
+
+	if (!desired_access)
+		return -EINVAL;
+
+	is_read_mode = (mode & PTRACE_MODE_READ) != 0;
+	is_attach_mode = (mode & PTRACE_MODE_ATTACH) != 0;
+	if (is_read_mode == is_attach_mode)
+		return -EACCES;
+
+	*desired_access = is_attach_mode ? KACS_PROCESS_VM_WRITE :
+					     KACS_PROCESS_VM_READ;
+	return 0;
+}
+
+static int pkm_kacs_task_kill(struct task_struct *target,
+			      struct kernel_siginfo *info, int sig,
+			      const struct cred *cred)
+{
+	struct pkm_kacs_process_state *caller_state;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+	u32 desired_access;
+	long ret;
+
+	(void)info;
+
+	if (!target || !target->security)
+		return -EACCES;
+	if (!cred)
+		return 0;
+	if (target == current)
+		return 0;
+
+	caller_state = pkm_kacs_current_process_state();
+	target_state = pkm_kacs_task(target)->process_state;
+	subject_token = pkm_kacs_cred(cred)->token;
+	if (!caller_state || !target_state || !subject_token)
+		return -EACCES;
+
+	ret = pkm_kacs_signal_to_process_access(sig, &desired_access);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_authorize_process_access_core(
+		subject_token, target_state, READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust), desired_access);
+}
+
+static int pkm_kacs_ptrace_access_check(struct task_struct *child,
+					unsigned int mode)
+{
+	struct pkm_kacs_process_state *caller_state;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+	u32 desired_access;
+	long ret;
+
+	if (!child || !child->security)
+		return -EACCES;
+	if (child == current)
+		return 0;
+
+	caller_state = pkm_kacs_current_process_state();
+	target_state = pkm_kacs_task(child)->process_state;
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!caller_state || !target_state || !subject_token)
+		return -EACCES;
+
+	ret = pkm_kacs_ptrace_mode_to_process_access(mode, &desired_access);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_authorize_process_access_core(
+		subject_token, target_state, READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust), desired_access);
 }
 
 static long pkm_kacs_open_process_token_task(
@@ -829,6 +995,61 @@ long pkm_kacs_kunit_open_process_token_for_subject(
 		args->subject_token, &target_state, args->target_token,
 		args->caller_pip_type, args->caller_pip_trust,
 		args->access_mask);
+}
+
+long pkm_kacs_kunit_check_signal_for_subject(
+	const struct pkm_kacs_kunit_process_signal_check_args *args)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state target_state = {};
+	u32 desired_access;
+	long ret;
+
+	if (!args)
+		return -EINVAL;
+	if (args->kernel_originated)
+		return 0;
+
+	ret = pkm_kacs_signal_to_process_access(args->sig, &desired_access);
+	if (ret)
+		return ret;
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = &process_sd;
+
+	return pkm_kacs_authorize_process_access_core(
+		args->subject_token, &target_state, args->caller_pip_type,
+		args->caller_pip_trust, desired_access);
+}
+
+long pkm_kacs_kunit_check_ptrace_for_subject(
+	const struct pkm_kacs_kunit_process_ptrace_check_args *args)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state target_state = {};
+	u32 desired_access;
+	long ret;
+
+	if (!args)
+		return -EINVAL;
+
+	ret = pkm_kacs_ptrace_mode_to_process_access(args->mode,
+						     &desired_access);
+	if (ret)
+		return ret;
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = &process_sd;
+
+	return pkm_kacs_authorize_process_access_core(
+		args->subject_token, &target_state, args->caller_pip_type,
+		args->caller_pip_trust, desired_access);
 }
 
 long pkm_kacs_kunit_open_current_thread_token_for_subject(
