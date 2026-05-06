@@ -54,6 +54,7 @@ for syscall in \
 	"1000 kacs_open_self_token" \
 	"1001 kacs_open_process_token" \
 	"1002 kacs_open_thread_token" \
+	"1005 kacs_set_psb" \
 	"1012 kacs_revert" \
 	"1090 kmes_emit" \
 	"1091 kmes_attach" \
@@ -88,6 +89,11 @@ if ! rg -q 'PTRACE_MODE_READ_FSCREDS \|' \
    ! rg -q 'PTRACE_MODE_PIDFD_OPEN' \
 	"$repo_root/kernel/install-pkm-subtree.sh"; then
 	die "install-pkm-subtree.sh does not patch pidfd_open to carry PTRACE_MODE_PIDFD_OPEN"
+fi
+
+if ! rg -Fq 'security_task_prctl(option, arg2,' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not patch arch_prctl shadow-stack ops through security_task_prctl"
 fi
 
 if [[ -d "$repo_root/kacs" ]] && \

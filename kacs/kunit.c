@@ -12,12 +12,16 @@
 #include <linux/capability.h>
 #include <linux/cpumask.h>
 #include <linux/cred.h>
+#include <linux/elf.h>
 #include <linux/errno.h>
 #include <linux/fdtable.h>
 #include <linux/fcntl.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
+#include <linux/mman.h>
+#include <linux/prctl.h>
 #include <linux/ptrace.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -108,6 +112,10 @@
 
 #ifndef PTRACE_MODE_GETFD
 #define PTRACE_MODE_GETFD 0x20
+#endif
+
+#ifndef ARCH_SHSTK_DISABLE
+#define ARCH_SHSTK_DISABLE 0x5002
 #endif
 
 extern size_t kacs_rust_kunit_probe(void);
@@ -2149,6 +2157,16 @@ static void pkm_kunit_process_state_clone_thread_shares_live_object(
 			    current_view.rate_bucket_ptr);
 	KUNIT_EXPECT_PTR_EQ(test, shared_view.process_sd_ptr,
 			    current_view.process_sd_ptr);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_current_process_mitigation_bits(
+				KACS_MIT_UI_ACCESS | KACS_MIT_WXP),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_process_state_snapshot(
+				shared_state, &shared_view),
+			0);
+	KUNIT_EXPECT_EQ(test, shared_view.mitigation_bits,
+			KACS_MIT_UI_ACCESS | KACS_MIT_WXP);
 
 	pkm_kacs_kunit_set_current_pip_context(PKM_KUNIT_PIP_TYPE_PROTECTED,
 					       PKM_KUNIT_PIP_TRUST_TEST);
@@ -2161,6 +2179,9 @@ static void pkm_kunit_process_state_clone_thread_shares_live_object(
 	KUNIT_EXPECT_EQ(test, shared_view.pip_trust,
 			PKM_KUNIT_PIP_TRUST_TEST);
 
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_current_process_mitigation_bits(0),
+			0);
 	pkm_kacs_kunit_set_current_pip_context(0, 0);
 	pkm_kacs_kunit_put_process_state(shared_state);
 }
@@ -2199,9 +2220,330 @@ static void pkm_kunit_process_state_fork_gets_fresh_sd_and_rate_bucket(
 			PKM_KUNIT_PIP_TYPE_PROTECTED);
 	KUNIT_EXPECT_EQ(test, child_view.pip_trust,
 			PKM_KUNIT_PIP_TRUST_TEST);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_current_process_mitigation_bits(
+				KACS_MIT_UI_ACCESS | KACS_MIT_WXP),
+			0);
+	pkm_kacs_kunit_put_process_state(child_state);
 
+	child_state = pkm_kacs_kunit_inherit_current_process_state(0);
+	KUNIT_ASSERT_NOT_NULL(test, child_state);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_process_state_snapshot(child_state,
+							      &child_view),
+			0);
+	KUNIT_EXPECT_EQ(test, child_view.mitigation_bits,
+			KACS_MIT_UI_ACCESS | KACS_MIT_WXP);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_current_process_mitigation_bits(0),
+			0);
 	pkm_kacs_kunit_set_current_pip_context(0, 0);
 	pkm_kacs_kunit_put_process_state(child_state);
+}
+
+static void pkm_kunit_set_psb_self_supported_bits_success(struct kunit *test)
+{
+	struct pkm_kacs_kunit_set_psb_args args = {
+		.requested_mitigations = KACS_MIT_WXP | KACS_MIT_UI_ACCESS |
+					 KACS_MIT_NO_CHILD | KACS_MIT_PIE |
+					 KACS_MIT_SML,
+		.self_target = 1,
+		.ibt_supported = 1,
+		.shstk_supported = 1,
+	};
+	u32 resulting_bits = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_psb_for_subject(&args,
+							   &resulting_bits),
+			0L);
+	KUNIT_EXPECT_EQ(test, resulting_bits, args.requested_mitigations);
+}
+
+static void pkm_kunit_set_psb_cross_process_success(struct kunit *test)
+{
+	struct pkm_kacs_kunit_set_psb_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	u32 resulting_bits = 0;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_create_default_process_sd(target_token,
+							 &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.requested_mitigations = KACS_MIT_UI_ACCESS;
+	args.ibt_supported = 1;
+	args.shstk_supported = 1;
+
+	ret = pkm_kacs_kunit_set_psb_for_subject(&args, &resulting_bits);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, resulting_bits, KACS_MIT_UI_ACCESS);
+
+	pkm_kacs_free((void *)process_sd);
+}
+
+static void pkm_kunit_set_psb_denied_by_process_sd(struct kunit *test)
+{
+	struct pkm_kacs_kunit_set_psb_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	u32 resulting_bits = 0xDEADBEEFU;
+	long ret;
+
+	subject_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_kunit_create_query_limited_process_sd(
+		target_token, &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.requested_mitigations = KACS_MIT_UI_ACCESS;
+	args.ibt_supported = 1;
+	args.shstk_supported = 1;
+
+	ret = pkm_kacs_kunit_set_psb_for_subject(&args, &resulting_bits);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_EXPECT_EQ(test, resulting_bits, 0xDEADBEEFU);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_psb_debug_bypasses_process_sd_only(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_set_psb_args args = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	u32 resulting_bits = 0;
+	long ret;
+
+	subject_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_effective_token_ptr());
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	process_sd = kacs_rust_kunit_create_query_limited_process_sd(
+		target_token, &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.requested_mitigations = KACS_MIT_UI_ACCESS;
+	args.ibt_supported = 1;
+	args.shstk_supported = 1;
+
+	ret = pkm_kacs_kunit_set_psb_for_subject(&args, &resulting_bits);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, resulting_bits, KACS_MIT_UI_ACCESS);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used | PKM_KUNIT_SE_DEBUG_PRIVILEGE);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_psb_debug_still_fails_on_pip(struct kunit *test)
+{
+	struct pkm_kacs_kunit_set_psb_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	u32 resulting_bits = 0;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_kunit_create_query_limited_process_sd(
+		target_token, &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.target_pip_type = PKM_KUNIT_PIP_TYPE_PROTECTED;
+	args.target_pip_trust = PKM_KUNIT_PIP_TRUST_TEST;
+	args.requested_mitigations = KACS_MIT_UI_ACCESS;
+	args.ibt_supported = 1;
+	args.shstk_supported = 1;
+
+	ret = pkm_kacs_kunit_set_psb_for_subject(&args, &resulting_bits);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+
+	pkm_kacs_free((void *)process_sd);
+}
+
+static void pkm_kunit_set_psb_cfi_alias_expands(struct kunit *test)
+{
+	struct pkm_kacs_kunit_set_psb_args args = {
+		.requested_mitigations = KACS_MIT_CFI,
+		.self_target = 1,
+		.ibt_supported = 1,
+		.shstk_supported = 1,
+	};
+	u32 resulting_bits = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_psb_for_subject(&args,
+							   &resulting_bits),
+			0L);
+	KUNIT_EXPECT_EQ(test, resulting_bits,
+			KACS_MIT_CFIF | KACS_MIT_CFIB);
+}
+
+static void pkm_kunit_set_psb_cfi_requires_cpu_support(struct kunit *test)
+{
+	struct pkm_kacs_kunit_set_psb_args args = {
+		.requested_mitigations = KACS_MIT_CFI,
+		.self_target = 1,
+		.ibt_supported = 0,
+		.shstk_supported = 1,
+	};
+	u32 resulting_bits = 0xABCDU;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_psb_for_subject(&args,
+							   &resulting_bits),
+			(long)-ENODEV);
+	KUNIT_EXPECT_EQ(test, resulting_bits, 0xABCDU);
+}
+
+static void pkm_kunit_set_psb_tlp_lsv_fail_closed(struct kunit *test)
+{
+	struct pkm_kacs_kunit_set_psb_args args = {
+		.initial_mitigation_bits = KACS_MIT_UI_ACCESS,
+		.requested_mitigations = KACS_MIT_WXP | KACS_MIT_TLP,
+		.self_target = 1,
+		.ibt_supported = 1,
+		.shstk_supported = 1,
+	};
+	u32 resulting_bits = 0xBADCAFEU;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_psb_for_subject(&args,
+							   &resulting_bits),
+			(long)-EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, resulting_bits, 0xBADCAFEU);
+}
+
+static void pkm_kunit_set_psb_unknown_bits_fail_closed(struct kunit *test)
+{
+	struct pkm_kacs_kunit_set_psb_args args = {
+		.requested_mitigations = KACS_MIT_UI_ACCESS | 0x80000000U,
+		.self_target = 1,
+		.ibt_supported = 1,
+		.shstk_supported = 1,
+	};
+	u32 resulting_bits = 0xBADF00DU;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_psb_for_subject(&args,
+							   &resulting_bits),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, resulting_bits, 0xBADF00DU);
+}
+
+static void pkm_kunit_no_child_blocks_process_fork_only(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_no_child_process(
+				KACS_MIT_NO_CHILD, 0),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_no_child_process(
+				KACS_MIT_NO_CHILD, CLONE_THREAD),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_no_child_process(0, 0),
+			0);
+}
+
+static void pkm_kunit_wxp_rejects_wx_map_and_transition(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_wxp_mmap(
+				KACS_MIT_WXP, PROT_WRITE | PROT_EXEC),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_wxp_mprotect(
+				KACS_MIT_WXP, VM_WRITE, PROT_EXEC),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_wxp_mprotect(
+				KACS_MIT_WXP, VM_EXEC, PROT_WRITE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_wxp_mmap(KACS_MIT_WXP, PROT_READ),
+			0);
+}
+
+static void pkm_kunit_pie_rejects_et_exec(struct kunit *test)
+{
+	u8 exec_buf[18] = { 0x7f, 'E', 'L', 'F' };
+	u8 pie_buf[18] = { 0x7f, 'E', 'L', 'F' };
+	u8 script_buf[4] = { '#', '!', '/', 'b' };
+
+	exec_buf[16] = ET_EXEC & 0xFF;
+	exec_buf[17] = (ET_EXEC >> 8) & 0xFF;
+	pie_buf[16] = ET_DYN & 0xFF;
+	pie_buf[17] = (ET_DYN >> 8) & 0xFF;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_pie_bprm(KACS_MIT_PIE, exec_buf,
+						      sizeof(exec_buf)),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_pie_bprm(KACS_MIT_PIE, pie_buf,
+						      sizeof(pie_buf)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_pie_bprm(KACS_MIT_PIE, script_buf,
+						      sizeof(script_buf)),
+			0);
+}
+
+static void pkm_kunit_task_prctl_sml_and_cfib_block_disable_paths(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_task_prctl_mitigations(
+				KACS_MIT_SML, PR_SET_SPECULATION_CTRL,
+				PR_SPEC_STORE_BYPASS, PR_SPEC_ENABLE, 0, 0),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_task_prctl_mitigations(
+				KACS_MIT_CFIB, ARCH_SHSTK_DISABLE, 0, 0, 0, 0),
+			-EACCES);
 }
 
 static void pkm_kunit_open_process_token_success(struct kunit *test)
@@ -6363,6 +6705,19 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_open_self_token_invalid_flags),
 	KUNIT_CASE(pkm_kunit_process_state_clone_thread_shares_live_object),
 	KUNIT_CASE(pkm_kunit_process_state_fork_gets_fresh_sd_and_rate_bucket),
+	KUNIT_CASE(pkm_kunit_set_psb_self_supported_bits_success),
+	KUNIT_CASE(pkm_kunit_set_psb_cross_process_success),
+	KUNIT_CASE(pkm_kunit_set_psb_denied_by_process_sd),
+	KUNIT_CASE(pkm_kunit_set_psb_debug_bypasses_process_sd_only),
+	KUNIT_CASE(pkm_kunit_set_psb_debug_still_fails_on_pip),
+	KUNIT_CASE(pkm_kunit_set_psb_cfi_alias_expands),
+	KUNIT_CASE(pkm_kunit_set_psb_cfi_requires_cpu_support),
+	KUNIT_CASE(pkm_kunit_set_psb_tlp_lsv_fail_closed),
+	KUNIT_CASE(pkm_kunit_set_psb_unknown_bits_fail_closed),
+	KUNIT_CASE(pkm_kunit_no_child_blocks_process_fork_only),
+	KUNIT_CASE(pkm_kunit_wxp_rejects_wx_map_and_transition),
+	KUNIT_CASE(pkm_kunit_pie_rejects_et_exec),
+	KUNIT_CASE(pkm_kunit_task_prctl_sml_and_cfib_block_disable_paths),
 	KUNIT_CASE(pkm_kunit_open_process_token_success),
 	KUNIT_CASE(pkm_kunit_open_process_token_denied_by_process_sd),
 	KUNIT_CASE(pkm_kunit_open_process_token_denied_by_target_token_sd),

@@ -177,6 +177,7 @@ require_file "$src_root/kernel/stage-kacs-core.sh"
 require_file "$kernel_root/security/Makefile"
 require_file "$kernel_root/security/Kconfig"
 require_file "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
+require_file "$kernel_root/arch/x86/kernel/process_64.c"
 require_file "$kernel_root/include/linux/ptrace.h"
 require_file "$kernel_root/kernel/pid.c"
 
@@ -239,12 +240,24 @@ insert_block_before_exact_once '	fd = pidfd_create(p, flags);' \
 	}
 ' \
 	"$kernel_root/kernel/pid.c"
+insert_block_before_exact_once '		return shstk_prctl(task, option, arg2);' \
+	'security_task_prctl(option, arg2,' \
+	'		if (option != ARCH_SHSTK_STATUS) {
+			int lsm_ret = security_task_prctl(option, arg2,
+							  0, 0, 0);
+			if (lsm_ret != -ENOSYS)
+				return lsm_ret;
+		}
+' \
+	"$kernel_root/arch/x86/kernel/process_64.c"
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1000 kacs_open_self_token
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1001 kacs_open_process_token
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1002 kacs_open_thread_token
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1005 kacs_set_psb
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1012 kacs_revert
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \

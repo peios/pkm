@@ -16,6 +16,18 @@
 #define KACS_PROCESS_SUSPEND_RESUME 0x0800U
 #define KACS_PROCESS_QUERY_LIMITED 0x1000U
 
+#define KACS_MIT_WXP 0x001U
+#define KACS_MIT_TLP 0x002U
+#define KACS_MIT_LSV 0x004U
+#define KACS_MIT_CFI 0x008U
+#define KACS_MIT_UI_ACCESS 0x010U
+#define KACS_MIT_NO_CHILD 0x020U
+#define KACS_MIT_CFIF 0x040U
+#define KACS_MIT_CFIB 0x080U
+#define KACS_MIT_PIE 0x100U
+#define KACS_MIT_SML 0x200U
+#define KACS_MIT_ALL 0x3FFU
+
 struct pkm_kacs_boot_group_view {
 	const u8 *sid_ptr;
 	size_t sid_len;
@@ -72,6 +84,7 @@ struct pkm_kacs_kunit_process_state_view {
 	const void *rate_bucket_ptr;
 	u32 pip_type;
 	u32 pip_trust;
+	u32 mitigation_bits;
 };
 
 struct pkm_kacs_kunit_process_token_open_args {
@@ -130,6 +143,21 @@ struct pkm_kacs_kunit_process_prlimit_check_args {
 	u32 target_pip_trust;
 	u32 self_target;
 	u32 flags;
+};
+
+struct pkm_kacs_kunit_set_psb_args {
+	const void *subject_token;
+	const u8 *target_process_sd_ptr;
+	size_t target_process_sd_len;
+	u32 caller_pip_type;
+	u32 caller_pip_trust;
+	u32 target_pip_type;
+	u32 target_pip_trust;
+	u32 initial_mitigation_bits;
+	u32 requested_mitigations;
+	u32 self_target;
+	u32 ibt_supported;
+	u32 shstk_supported;
 };
 
 const void *pkm_kacs_current_effective_token_ptr(void);
@@ -203,6 +231,7 @@ int kacs_rust_token_adjust_default(const void *token, u32 owner_index,
 int pkm_kmes_kunit_set_current_process_rate_tokens(u32 tokens);
 int pkm_kmes_kunit_set_current_process_rate_refill_frozen(bool frozen);
 int pkm_kmes_kunit_get_current_process_rate_tokens(u32 *tokens_out);
+int pkm_kacs_kunit_set_current_process_mitigation_bits(u32 mitigation_bits);
 const void *pkm_kacs_kunit_current_process_state_ptr(void);
 const void *pkm_kacs_kunit_inherit_current_process_state(u64 clone_flags);
 void pkm_kacs_kunit_put_process_state(const void *state_ptr);
@@ -221,6 +250,21 @@ long pkm_kacs_kunit_check_prlimit_for_subject(
 	const struct pkm_kacs_kunit_process_prlimit_check_args *args);
 long pkm_kacs_kunit_open_current_thread_token_for_subject(
 	const void *subject_token, u32 access_mask);
+long pkm_kacs_kunit_set_current_psb(u32 requested_mitigations);
+long pkm_kacs_kunit_set_psb_for_subject(
+	const struct pkm_kacs_kunit_set_psb_args *args,
+	u32 *result_mitigation_bits_out);
+int pkm_kacs_kunit_check_no_child_process(u32 mitigation_bits,
+					  u64 clone_flags);
+int pkm_kacs_kunit_check_wxp_mmap(u32 mitigation_bits, unsigned long prot);
+int pkm_kacs_kunit_check_wxp_mprotect(u32 mitigation_bits,
+				      unsigned long vm_flags,
+				      unsigned long prot);
+int pkm_kacs_kunit_check_task_prctl_mitigations(
+	u32 mitigation_bits, int option, unsigned long arg2,
+	unsigned long arg3, unsigned long arg4, unsigned long arg5);
+int pkm_kacs_kunit_check_pie_bprm(u32 mitigation_bits, const u8 *buf,
+				  size_t len);
 #endif
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_RUNTIME_H */

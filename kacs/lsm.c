@@ -9,16 +9,22 @@
  * plumbing remain deliberately out of scope here.
  */
 
+#include <linux/binfmts.h>
 #include <linux/capability.h>
 #include <linux/cred.h>
+#include <linux/elf.h>
 #include <linux/errno.h>
+#include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/math64.h>
 #include <linux/lsm_hooks.h>
+#include <linux/mm.h>
+#include <linux/mman.h>
 #include <linux/refcount.h>
 #include <linux/pid.h>
 #include <linux/pidfd.h>
+#include <linux/prctl.h>
 #include <linux/ptrace.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
@@ -28,6 +34,8 @@
 #include <linux/spinlock.h>
 #include <linux/syscalls.h>
 #include <linux/timekeeping.h>
+
+#include <asm/cpufeatures.h>
 
 #include "caap_cache.h"
 #include "kmes.h"
@@ -73,8 +81,10 @@ struct pkm_kacs_process_sd {
 
 struct pkm_kacs_process_state {
 	refcount_t refs;
+	spinlock_t mitigation_lock;
 	u32 pip_type;
 	u32 pip_trust;
+	u32 mitigation_bits;
 	struct pkm_kmes_rate_bucket *kmes_rate_bucket;
 	struct pkm_kacs_process_sd *process_sd;
 };
@@ -141,6 +151,19 @@ static int pkm_kacs_task_setioprio(struct task_struct *task, int ioprio);
 static int pkm_kacs_task_prlimit(const struct cred *cred,
 				 const struct cred *tcred,
 				 unsigned int flags);
+static int pkm_kacs_task_prctl(int option, unsigned long arg2,
+			       unsigned long arg3, unsigned long arg4,
+			       unsigned long arg5);
+static int pkm_kacs_mmap_file(struct file *file, unsigned long reqprot,
+			      unsigned long prot, unsigned long flags);
+static int pkm_kacs_file_mprotect(struct vm_area_struct *vma,
+				  unsigned long reqprot,
+				  unsigned long prot);
+static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm);
+static long pkm_kacs_check_process_setinfo_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state);
 
 static struct pkm_kacs_process_sd *pkm_kacs_process_sd_alloc(const void *token)
 {
@@ -203,7 +226,8 @@ static void pkm_kmes_rate_bucket_put(struct pkm_kmes_rate_bucket *bucket)
 }
 
 static struct pkm_kacs_process_state *pkm_kacs_process_state_alloc(
-	const void *primary_token, u32 pip_type, u32 pip_trust)
+	const void *primary_token, u32 pip_type, u32 pip_trust,
+	u32 mitigation_bits)
 {
 	struct pkm_kacs_process_state *state;
 	struct pkm_kmes_rate_bucket *bucket;
@@ -230,8 +254,10 @@ static struct pkm_kacs_process_state *pkm_kacs_process_state_alloc(
 	}
 
 	refcount_set(&state->refs, 1);
+	spin_lock_init(&state->mitigation_lock);
 	state->pip_type = pip_type;
 	state->pip_trust = pip_trust;
+	state->mitigation_bits = mitigation_bits;
 	state->kmes_rate_bucket = bucket;
 	state->process_sd = process_sd;
 	return state;
@@ -265,15 +291,36 @@ static struct pkm_kacs_process_state *pkm_kacs_current_process_state(void)
 	return pkm_kacs_task(current)->process_state;
 }
 
+static u32 pkm_kacs_process_state_mitigation_bits(
+	const struct pkm_kacs_process_state *state)
+{
+	if (!state)
+		return 0;
+
+	return READ_ONCE(state->mitigation_bits);
+}
+
+static bool pkm_kacs_clone_is_blocked_by_no_child(u32 mitigation_bits,
+						   u64 clone_flags)
+{
+	if ((clone_flags & CLONE_THREAD) != 0)
+		return false;
+
+	return (mitigation_bits & KACS_MIT_NO_CHILD) != 0;
+}
+
 static struct pkm_kacs_process_state *pkm_kacs_inherit_process_state(
 	u64 clone_flags)
 {
 	struct pkm_kacs_process_state *parent_state;
 	const void *primary_token;
+	u32 mitigation_bits;
 
 	parent_state = pkm_kacs_current_process_state();
 	if (!parent_state)
 		return NULL;
+
+	mitigation_bits = pkm_kacs_process_state_mitigation_bits(parent_state);
 
 	if ((clone_flags & CLONE_THREAD) != 0)
 		return pkm_kacs_process_state_get(parent_state);
@@ -284,7 +331,8 @@ static struct pkm_kacs_process_state *pkm_kacs_inherit_process_state(
 
 	return pkm_kacs_process_state_alloc(primary_token,
 					    READ_ONCE(parent_state->pip_type),
-					    READ_ONCE(parent_state->pip_trust));
+					    READ_ONCE(parent_state->pip_trust),
+					    mitigation_bits);
 }
 
 static void pkm_kmes_rate_bucket_refill(struct pkm_kmes_rate_bucket *bucket,
@@ -466,6 +514,7 @@ static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 {
 	struct pkm_kacs_task_security *new_sec;
 	struct pkm_kacs_process_state *state;
+	struct pkm_kacs_process_state *parent_state;
 
 	if (!task || !task->security)
 		return -EACCES;
@@ -473,6 +522,13 @@ static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 	new_sec = pkm_kacs_task(task);
 	new_sec->process_state = NULL;
 	new_sec->impersonation_saved_cred = NULL;
+
+	parent_state = pkm_kacs_current_process_state();
+	if (parent_state &&
+	    pkm_kacs_clone_is_blocked_by_no_child(
+		    pkm_kacs_process_state_mitigation_bits(parent_state),
+		    clone_flags))
+		return -EACCES;
 
 	state = pkm_kacs_inherit_process_state(clone_flags);
 	if (!state)
@@ -511,6 +567,10 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(task_setscheduler, pkm_kacs_task_setscheduler),
 	LSM_HOOK_INIT(task_setioprio, pkm_kacs_task_setioprio),
 	LSM_HOOK_INIT(task_prlimit, pkm_kacs_task_prlimit),
+	LSM_HOOK_INIT(task_prctl, pkm_kacs_task_prctl),
+	LSM_HOOK_INIT(mmap_file, pkm_kacs_mmap_file),
+	LSM_HOOK_INIT(file_mprotect, pkm_kacs_file_mprotect),
+	LSM_HOOK_INIT(bprm_check_security, pkm_kacs_bprm_check_security),
 };
 
 void *pkm_kacs_zalloc(size_t size)
@@ -551,6 +611,160 @@ int pkm_kacs_current_pip_context(u32 *pip_type, u32 *pip_trust)
 
 	*pip_type = READ_ONCE(state->pip_type);
 	*pip_trust = READ_ONCE(state->pip_trust);
+	return 0;
+}
+
+static bool pkm_kacs_ibt_supported(void)
+{
+	return cpu_feature_enabled(X86_FEATURE_IBT);
+}
+
+static bool pkm_kacs_shstk_supported(void)
+{
+	return cpu_feature_enabled(X86_FEATURE_SHSTK);
+}
+
+static long pkm_kacs_normalize_requested_mitigations(
+	u32 requested_mitigations, bool ibt_supported, bool shstk_supported,
+	u32 *normalized_out)
+{
+	u32 normalized = requested_mitigations;
+
+	if (!normalized_out)
+		return -EINVAL;
+	if (requested_mitigations & ~KACS_MIT_ALL)
+		return -EINVAL;
+	if (requested_mitigations & (KACS_MIT_TLP | KACS_MIT_LSV))
+		return -EOPNOTSUPP;
+
+	if ((normalized & KACS_MIT_CFI) != 0)
+		normalized |= KACS_MIT_CFIF | KACS_MIT_CFIB;
+	normalized &= ~KACS_MIT_CFI;
+
+	if ((normalized & KACS_MIT_CFIF) != 0 && !ibt_supported)
+		return -ENODEV;
+	if ((normalized & KACS_MIT_CFIB) != 0 && !shstk_supported)
+		return -ENODEV;
+
+	*normalized_out = normalized;
+	return 0;
+}
+
+static long pkm_kacs_apply_psb_mitigations_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	struct pkm_kacs_process_state *target_state, bool self_target,
+	u32 requested_mitigations, bool ibt_supported, bool shstk_supported,
+	u32 *result_mitigation_bits_out)
+{
+	unsigned long flags;
+	u32 normalized_bits;
+	u32 result_bits;
+	long ret;
+
+	if (!target_state)
+		return -EACCES;
+
+	ret = pkm_kacs_normalize_requested_mitigations(
+		requested_mitigations, ibt_supported, shstk_supported,
+		&normalized_bits);
+	if (ret)
+		return ret;
+
+	if (!self_target) {
+		ret = pkm_kacs_check_process_setinfo_core(
+			subject_token, caller_state, target_state);
+		if (ret)
+			return ret;
+	}
+
+	spin_lock_irqsave(&target_state->mitigation_lock, flags);
+	target_state->mitigation_bits |= normalized_bits;
+	result_bits = target_state->mitigation_bits;
+	spin_unlock_irqrestore(&target_state->mitigation_lock, flags);
+
+	if (result_mitigation_bits_out)
+		*result_mitigation_bits_out = result_bits;
+
+	return 0;
+}
+
+static int pkm_kacs_check_wxp_mmap_core(u32 mitigation_bits,
+					unsigned long prot)
+{
+	if ((mitigation_bits & KACS_MIT_WXP) == 0)
+		return 0;
+	if ((prot & PROT_WRITE) != 0 && (prot & PROT_EXEC) != 0)
+		return -EACCES;
+
+	return 0;
+}
+
+static int pkm_kacs_check_wxp_mprotect_core(u32 mitigation_bits,
+					    unsigned long vm_flags,
+					    unsigned long prot)
+{
+	if ((mitigation_bits & KACS_MIT_WXP) == 0)
+		return 0;
+	if ((prot & PROT_WRITE) != 0 && (prot & PROT_EXEC) != 0)
+		return -EACCES;
+	if ((vm_flags & VM_WRITE) != 0 && (prot & PROT_EXEC) != 0)
+		return -EACCES;
+	if ((vm_flags & VM_EXEC) != 0 && (prot & PROT_WRITE) != 0)
+		return -EACCES;
+
+	return 0;
+}
+
+static int pkm_kacs_check_task_prctl_mitigations_core(
+	u32 mitigation_bits, int option, unsigned long arg2,
+	unsigned long arg3, unsigned long arg4, unsigned long arg5)
+{
+	(void)arg4;
+	(void)arg5;
+
+	if ((mitigation_bits & KACS_MIT_SML) != 0 &&
+	    option == PR_SET_SPECULATION_CTRL &&
+	    (arg3 & PR_SPEC_ENABLE) != 0)
+		return -EACCES;
+
+#ifdef PR_SET_SHADOW_STACK_STATUS
+	if ((mitigation_bits & KACS_MIT_CFIB) != 0 &&
+	    option == PR_SET_SHADOW_STACK_STATUS &&
+	    (arg2 & PR_SHADOW_STACK_ENABLE) == 0)
+		return -EACCES;
+#endif
+
+#ifndef ARCH_SHSTK_DISABLE
+#define ARCH_SHSTK_DISABLE 0x5002
+#endif
+#ifndef ARCH_SHSTK_UNLOCK
+#define ARCH_SHSTK_UNLOCK 0x5004
+#endif
+	if ((mitigation_bits & KACS_MIT_CFIB) != 0 &&
+	    (option == ARCH_SHSTK_DISABLE || option == ARCH_SHSTK_UNLOCK))
+		return -EACCES;
+
+	return -ENOSYS;
+}
+
+static int pkm_kacs_check_pie_bprm_core(u32 mitigation_bits,
+					const u8 *buf, size_t len)
+{
+	u16 elf_type;
+
+	if ((mitigation_bits & KACS_MIT_PIE) == 0)
+		return 0;
+	if (!buf || len < 18)
+		return 0;
+	if (buf[0] != 0x7f || buf[1] != 'E' || buf[2] != 'L' ||
+	    buf[3] != 'F')
+		return 0;
+
+	elf_type = (u16)buf[16] | ((u16)buf[17] << 8);
+	if (elf_type == ET_EXEC)
+		return -EACCES;
+
 	return 0;
 }
 
@@ -918,6 +1132,73 @@ static int pkm_kacs_task_prlimit(const struct cred *cred,
 		READ_ONCE(caller_state->pip_trust), desired_access);
 }
 
+static int pkm_kacs_task_prctl(int option, unsigned long arg2,
+			       unsigned long arg3, unsigned long arg4,
+			       unsigned long arg5)
+{
+	struct pkm_kacs_process_state *state;
+
+	state = pkm_kacs_current_process_state();
+	if (!state)
+		return -EACCES;
+
+	return pkm_kacs_check_task_prctl_mitigations_core(
+		pkm_kacs_process_state_mitigation_bits(state), option, arg2,
+		arg3, arg4, arg5);
+}
+
+static int pkm_kacs_mmap_file(struct file *file, unsigned long reqprot,
+			      unsigned long prot, unsigned long flags)
+{
+	struct pkm_kacs_process_state *state;
+
+	(void)file;
+	(void)reqprot;
+	(void)flags;
+
+	state = pkm_kacs_current_process_state();
+	if (!state)
+		return -EACCES;
+
+	return pkm_kacs_check_wxp_mmap_core(
+		pkm_kacs_process_state_mitigation_bits(state), prot);
+}
+
+static int pkm_kacs_file_mprotect(struct vm_area_struct *vma,
+				  unsigned long reqprot,
+				  unsigned long prot)
+{
+	struct pkm_kacs_process_state *state;
+
+	(void)reqprot;
+	if (!vma)
+		return -EACCES;
+
+	state = pkm_kacs_current_process_state();
+	if (!state)
+		return -EACCES;
+
+	return pkm_kacs_check_wxp_mprotect_core(
+		pkm_kacs_process_state_mitigation_bits(state),
+		vma->vm_flags, prot);
+}
+
+static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm)
+{
+	struct pkm_kacs_process_state *state;
+
+	if (!bprm)
+		return -EACCES;
+
+	state = pkm_kacs_current_process_state();
+	if (!state)
+		return -EACCES;
+
+	return pkm_kacs_check_pie_bprm_core(
+		pkm_kacs_process_state_mitigation_bits(state),
+		(const u8 *)bprm->buf, sizeof(bprm->buf));
+}
+
 static long pkm_kacs_open_process_token_task(
 	const void *subject_token,
 	const struct pkm_kacs_process_state *caller_state,
@@ -1116,6 +1397,24 @@ int pkm_kmes_kunit_get_current_process_rate_tokens(u32 *tokens_out)
 	return 0;
 }
 
+int pkm_kacs_kunit_set_current_process_mitigation_bits(u32 mitigation_bits)
+{
+	struct pkm_kacs_process_state *state;
+	unsigned long flags;
+
+	if ((mitigation_bits & ~KACS_MIT_ALL) != 0)
+		return -EINVAL;
+
+	state = pkm_kacs_current_process_state();
+	if (!state)
+		return -EACCES;
+
+	spin_lock_irqsave(&state->mitigation_lock, flags);
+	state->mitigation_bits = mitigation_bits;
+	spin_unlock_irqrestore(&state->mitigation_lock, flags);
+	return 0;
+}
+
 const void *pkm_kacs_kunit_current_process_state_ptr(void)
 {
 	return pkm_kacs_current_process_state();
@@ -1146,6 +1445,7 @@ int pkm_kacs_kunit_process_state_snapshot(
 	out->rate_bucket_ptr = state->kmes_rate_bucket;
 	out->pip_type = READ_ONCE(state->pip_type);
 	out->pip_trust = READ_ONCE(state->pip_trust);
+	out->mitigation_bits = pkm_kacs_process_state_mitigation_bits(state);
 	return 0;
 }
 
@@ -1294,6 +1594,84 @@ long pkm_kacs_kunit_open_current_thread_token_for_subject(
 	return pkm_kacs_open_thread_token_task(subject_token, caller_state,
 					       current, access_mask);
 }
+
+long pkm_kacs_kunit_set_current_psb(u32 requested_mitigations)
+{
+	struct pkm_kacs_process_state *state;
+
+	state = pkm_kacs_current_process_state();
+	if (!state)
+		return -EACCES;
+
+	return pkm_kacs_apply_psb_mitigations_core(
+		pkm_kacs_current_effective_token_ptr(), state, state, true,
+		requested_mitigations, pkm_kacs_ibt_supported(),
+		pkm_kacs_shstk_supported(), NULL);
+}
+
+long pkm_kacs_kunit_set_psb_for_subject(
+	const struct pkm_kacs_kunit_set_psb_args *args,
+	u32 *result_mitigation_bits_out)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state caller_state = {};
+	struct pkm_kacs_process_state target_state = {};
+
+	if (!args)
+		return -EINVAL;
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	caller_state.pip_type = args->caller_pip_type;
+	caller_state.pip_trust = args->caller_pip_trust;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.mitigation_bits = args->initial_mitigation_bits;
+	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
+
+	return pkm_kacs_apply_psb_mitigations_core(
+		args->subject_token, &caller_state, &target_state,
+		args->self_target != 0, args->requested_mitigations,
+		args->ibt_supported != 0, args->shstk_supported != 0,
+		result_mitigation_bits_out);
+}
+
+int pkm_kacs_kunit_check_no_child_process(u32 mitigation_bits,
+					  u64 clone_flags)
+{
+	return pkm_kacs_clone_is_blocked_by_no_child(mitigation_bits,
+						     clone_flags) ?
+		       -EACCES :
+		       0;
+}
+
+int pkm_kacs_kunit_check_wxp_mmap(u32 mitigation_bits, unsigned long prot)
+{
+	return pkm_kacs_check_wxp_mmap_core(mitigation_bits, prot);
+}
+
+int pkm_kacs_kunit_check_wxp_mprotect(u32 mitigation_bits,
+				      unsigned long vm_flags,
+				      unsigned long prot)
+{
+	return pkm_kacs_check_wxp_mprotect_core(mitigation_bits, vm_flags,
+						prot);
+}
+
+int pkm_kacs_kunit_check_task_prctl_mitigations(
+	u32 mitigation_bits, int option, unsigned long arg2,
+	unsigned long arg3, unsigned long arg4, unsigned long arg5)
+{
+	return pkm_kacs_check_task_prctl_mitigations_core(
+		mitigation_bits, option, arg2, arg3, arg4, arg5);
+}
+
+int pkm_kacs_kunit_check_pie_bprm(u32 mitigation_bits, const u8 *buf,
+				  size_t len)
+{
+	return pkm_kacs_check_pie_bprm_core(mitigation_bits, buf, len);
+}
 #endif
 
 int pkm_kacs_resolve_ctx_from_token(const void *token,
@@ -1331,6 +1709,54 @@ int pkm_kacs_resolve_current_primary_ctx(struct pkm_kacs_resolved_ctx *out)
 {
 	return pkm_kacs_resolve_ctx_from_token(
 		pkm_kacs_current_primary_token_ptr(), out);
+}
+
+SYSCALL_DEFINE2(kacs_set_psb, int, pidfd, u32, mitigations)
+{
+	struct pkm_kacs_process_state *caller_state;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+	struct task_struct *task = NULL;
+	struct pid *pid;
+	unsigned int pidfd_flags = 0;
+	bool self_target;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	caller_state = pkm_kacs_current_process_state();
+	if (!subject_token || !caller_state)
+		return -EACCES;
+
+	if (pidfd == -1) {
+		target_state = caller_state;
+		self_target = true;
+	} else {
+		pid = pidfd_get_pid(pidfd, &pidfd_flags);
+		if (IS_ERR(pid))
+			return PTR_ERR(pid);
+		(void)pidfd_flags;
+
+		task = get_pid_task(pid, PIDTYPE_PID);
+		put_pid(pid);
+		if (!task)
+			return -ESRCH;
+		if (!task->security) {
+			put_task_struct(task);
+			return -EACCES;
+		}
+
+		target_state = pkm_kacs_task(task)->process_state;
+		self_target = target_state == caller_state;
+	}
+
+	ret = pkm_kacs_apply_psb_mitigations_core(
+		subject_token, caller_state, target_state, self_target,
+		mitigations, pkm_kacs_ibt_supported(),
+		pkm_kacs_shstk_supported(), NULL);
+	if (task)
+		put_task_struct(task);
+
+	return ret;
 }
 
 SYSCALL_DEFINE2(kacs_open_process_token, int, pidfd, u32, access_mask)
@@ -1474,7 +1900,7 @@ static int __init pkm_init(void)
 	task_sec = pkm_kacs_task(current);
 	if (!task_sec->process_state) {
 		task_sec->process_state = pkm_kacs_process_state_alloc(
-			system_token, 0, 0);
+			system_token, 0, 0, 0);
 		if (!task_sec->process_state)
 			return -ENOMEM;
 	}
