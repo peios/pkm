@@ -37,6 +37,8 @@
 #define PKM_KACS_UNMAPPED_ID 65534U
 #define PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS 10000U
 #define PKM_KACS_PRIVILEGE_SE_DEBUG (1ULL << 20)
+#define PKM_KACS_LSM_PRLIMIT_READ 1U
+#define PKM_KACS_LSM_PRLIMIT_WRITE 2U
 
 struct pkm_kmes_rate_bucket {
 	refcount_t refs;
@@ -50,6 +52,7 @@ struct pkm_kmes_rate_bucket {
 
 struct pkm_kacs_cred_security {
 	const void *token;
+	struct pkm_kacs_process_state *process_state;
 	u32 projected_uid;
 	u32 projected_gid;
 };
@@ -99,11 +102,37 @@ static inline struct pkm_kacs_task_security *pkm_kacs_task(
 						 pkm_blob_sizes.lbs_task);
 }
 
+static struct pkm_kacs_process_state *pkm_kacs_process_state_get(
+	struct pkm_kacs_process_state *state);
+static void pkm_kacs_process_state_put(struct pkm_kacs_process_state *state);
+
+static void pkm_kacs_set_cred_process_state(struct cred *cred,
+					    struct pkm_kacs_process_state *state)
+{
+	struct pkm_kacs_cred_security *sec;
+
+	if (!cred)
+		return;
+
+	sec = pkm_kacs_cred(cred);
+	if (sec->process_state == state)
+		return;
+	if (sec->process_state)
+		pkm_kacs_process_state_put(sec->process_state);
+	sec->process_state = state ? pkm_kacs_process_state_get(state) : NULL;
+}
+
 static int pkm_kacs_task_kill(struct task_struct *target,
 			      struct kernel_siginfo *info, int sig,
 			      const struct cred *cred);
 static int pkm_kacs_ptrace_access_check(struct task_struct *child,
 					unsigned int mode);
+static int pkm_kacs_task_setnice(struct task_struct *task, int nice);
+static int pkm_kacs_task_setscheduler(struct task_struct *task);
+static int pkm_kacs_task_setioprio(struct task_struct *task, int ioprio);
+static int pkm_kacs_task_prlimit(const struct cred *cred,
+				 const struct cred *tcred,
+				 unsigned int flags);
 
 static struct pkm_kacs_process_sd *pkm_kacs_process_sd_alloc(const void *token)
 {
@@ -373,6 +402,11 @@ static int pkm_kacs_cred_prepare(struct cred *new, const struct cred *old,
 		new_sec->token = kacs_rust_token_deep_copy(old_sec->token);
 	else
 		new_sec->token = NULL;
+	if (old_sec->process_state)
+		new_sec->process_state =
+			pkm_kacs_process_state_get(old_sec->process_state);
+	else
+		new_sec->process_state = NULL;
 
 	pkm_kacs_stamp_projected_ids(new_sec);
 	pkm_kacs_assert_boot_caps(new);
@@ -388,6 +422,11 @@ static void pkm_kacs_cred_transfer(struct cred *new, const struct cred *old)
 		new_sec->token = kacs_rust_token_deep_copy(old_sec->token);
 	else
 		new_sec->token = NULL;
+	if (old_sec->process_state)
+		new_sec->process_state =
+			pkm_kacs_process_state_get(old_sec->process_state);
+	else
+		new_sec->process_state = NULL;
 
 	pkm_kacs_stamp_projected_ids(new_sec);
 	pkm_kacs_assert_boot_caps(new);
@@ -399,6 +438,7 @@ static int pkm_kacs_cred_alloc_blank(struct cred *cred, gfp_t gfp)
 
 	(void)gfp;
 	sec->token = NULL;
+	sec->process_state = NULL;
 	sec->projected_uid = PKM_KACS_UNMAPPED_ID;
 	sec->projected_gid = PKM_KACS_UNMAPPED_ID;
 	return 0;
@@ -410,6 +450,8 @@ static void pkm_kacs_cred_free(struct cred *cred)
 
 	if (sec->token)
 		kacs_rust_token_drop(sec->token);
+	if (sec->process_state)
+		pkm_kacs_process_state_put(sec->process_state);
 }
 
 static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
@@ -429,6 +471,9 @@ static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 		return -ENOMEM;
 
 	new_sec->process_state = state;
+	pkm_kacs_set_cred_process_state((struct cred *)task->real_cred, state);
+	if (task->cred != task->real_cred)
+		pkm_kacs_set_cred_process_state((struct cred *)task->cred, state);
 	return 0;
 }
 
@@ -454,6 +499,10 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(task_free, pkm_kacs_task_free),
 	LSM_HOOK_INIT(task_kill, pkm_kacs_task_kill),
 	LSM_HOOK_INIT(ptrace_access_check, pkm_kacs_ptrace_access_check),
+	LSM_HOOK_INIT(task_setnice, pkm_kacs_task_setnice),
+	LSM_HOOK_INIT(task_setscheduler, pkm_kacs_task_setscheduler),
+	LSM_HOOK_INIT(task_setioprio, pkm_kacs_task_setioprio),
+	LSM_HOOK_INIT(task_prlimit, pkm_kacs_task_prlimit),
 };
 
 void *pkm_kacs_zalloc(size_t size)
@@ -682,6 +731,38 @@ static long pkm_kacs_ptrace_mode_to_process_access(unsigned int mode,
 	return 0;
 }
 
+static long pkm_kacs_prlimit_flags_to_process_access(unsigned int flags,
+						     u32 *desired_access)
+{
+	if (!desired_access)
+		return -EINVAL;
+
+	switch (flags) {
+	case PKM_KACS_LSM_PRLIMIT_READ:
+		*desired_access = KACS_PROCESS_QUERY_INFORMATION;
+		return 0;
+	case PKM_KACS_LSM_PRLIMIT_WRITE:
+		*desired_access = KACS_PROCESS_SET_INFORMATION;
+		return 0;
+	default:
+		return -EACCES;
+	}
+}
+
+static long pkm_kacs_check_process_setinfo_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state)
+{
+	if (!caller_state || !target_state)
+		return -EACCES;
+
+	return pkm_kacs_authorize_process_access_core(
+		subject_token, target_state, READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust),
+		KACS_PROCESS_SET_INFORMATION);
+}
+
 static int pkm_kacs_task_kill(struct task_struct *target,
 			      struct kernel_siginfo *info, int sig,
 			      const struct cred *cred)
@@ -737,6 +818,74 @@ static int pkm_kacs_ptrace_access_check(struct task_struct *child,
 		return -EACCES;
 
 	ret = pkm_kacs_ptrace_mode_to_process_access(mode, &desired_access);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_authorize_process_access_core(
+		subject_token, target_state, READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust), desired_access);
+}
+
+static int pkm_kacs_task_setnice(struct task_struct *task, int nice)
+{
+	struct pkm_kacs_process_state *caller_state;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+
+	(void)nice;
+
+	if (!task || !task->security)
+		return -EACCES;
+
+	caller_state = pkm_kacs_current_process_state();
+	target_state = pkm_kacs_task(task)->process_state;
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!caller_state || !target_state || !subject_token)
+		return -EACCES;
+	if (caller_state == target_state)
+		return 0;
+
+	return pkm_kacs_check_process_setinfo_core(subject_token, caller_state,
+						   target_state);
+}
+
+static int pkm_kacs_task_setscheduler(struct task_struct *task)
+{
+	return pkm_kacs_task_setnice(task, 0);
+}
+
+static int pkm_kacs_task_setioprio(struct task_struct *task, int ioprio)
+{
+	(void)ioprio;
+	return pkm_kacs_task_setnice(task, 0);
+}
+
+static int pkm_kacs_task_prlimit(const struct cred *cred,
+				 const struct cred *tcred,
+				 unsigned int flags)
+{
+	const struct pkm_kacs_cred_security *caller_sec;
+	const struct pkm_kacs_cred_security *target_sec;
+	const struct pkm_kacs_process_state *caller_state;
+	const struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+	u32 desired_access;
+	long ret;
+
+	if (!cred || !tcred)
+		return -EACCES;
+
+	caller_sec = pkm_kacs_cred(cred);
+	target_sec = pkm_kacs_cred(tcred);
+	caller_state = caller_sec->process_state;
+	target_state = target_sec->process_state;
+	subject_token = caller_sec->token;
+	if (!caller_state || !target_state || !subject_token)
+		return -EACCES;
+	if (caller_state == target_state)
+		return 0;
+
+	ret = pkm_kacs_prlimit_flags_to_process_access(flags, &desired_access);
 	if (ret)
 		return ret;
 
@@ -1052,6 +1201,60 @@ long pkm_kacs_kunit_check_ptrace_for_subject(
 		args->caller_pip_trust, desired_access);
 }
 
+long pkm_kacs_kunit_check_process_setinfo_for_subject(
+	const struct pkm_kacs_kunit_process_setinfo_check_args *args)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state caller_state = {};
+	struct pkm_kacs_process_state target_state = {};
+
+	if (!args)
+		return -EINVAL;
+	if (args->self_target)
+		return 0;
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	caller_state.pip_type = args->caller_pip_type;
+	caller_state.pip_trust = args->caller_pip_trust;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = &process_sd;
+
+	return pkm_kacs_check_process_setinfo_core(args->subject_token,
+						   &caller_state,
+						   &target_state);
+}
+
+long pkm_kacs_kunit_check_prlimit_for_subject(
+	const struct pkm_kacs_kunit_process_prlimit_check_args *args)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state target_state = {};
+	u32 desired_access;
+	long ret;
+
+	if (!args)
+		return -EINVAL;
+	if (args->self_target)
+		return 0;
+
+	ret = pkm_kacs_prlimit_flags_to_process_access(args->flags,
+						       &desired_access);
+	if (ret)
+		return ret;
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = &process_sd;
+
+	return pkm_kacs_authorize_process_access_core(
+		args->subject_token, &target_state, args->caller_pip_type,
+		args->caller_pip_trust, desired_access);
+}
+
 long pkm_kacs_kunit_open_current_thread_token_for_subject(
 	const void *subject_token, u32 access_mask)
 {
@@ -1251,6 +1454,11 @@ static int __init pkm_init(void)
 		if (!task_sec->process_state)
 			return -ENOMEM;
 	}
+	pkm_kacs_set_cred_process_state((struct cred *)current->real_cred,
+					task_sec->process_state);
+	if (current->cred != current->real_cred)
+		pkm_kacs_set_cred_process_state((struct cred *)current->cred,
+						task_sec->process_state);
 
 	sec = pkm_kacs_cred(current_cred());
 	sec->token = system_token;

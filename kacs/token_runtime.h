@@ -109,6 +109,29 @@ struct pkm_kacs_kunit_process_ptrace_check_args {
 	u32 mode;
 };
 
+struct pkm_kacs_kunit_process_setinfo_check_args {
+	const void *subject_token;
+	const u8 *target_process_sd_ptr;
+	size_t target_process_sd_len;
+	u32 caller_pip_type;
+	u32 caller_pip_trust;
+	u32 target_pip_type;
+	u32 target_pip_trust;
+	u32 self_target;
+};
+
+struct pkm_kacs_kunit_process_prlimit_check_args {
+	const void *subject_token;
+	const u8 *target_process_sd_ptr;
+	size_t target_process_sd_len;
+	u32 caller_pip_type;
+	u32 caller_pip_trust;
+	u32 target_pip_type;
+	u32 target_pip_trust;
+	u32 self_target;
+	u32 flags;
+};
+
 const void *pkm_kacs_current_effective_token_ptr(void);
 const void *pkm_kacs_current_primary_token_ptr(void);
 const void *pkm_kacs_boot_system_token_ptr(void);
@@ -190,6 +213,10 @@ long pkm_kacs_kunit_check_signal_for_subject(
 	const struct pkm_kacs_kunit_process_signal_check_args *args);
 long pkm_kacs_kunit_check_ptrace_for_subject(
 	const struct pkm_kacs_kunit_process_ptrace_check_args *args);
+long pkm_kacs_kunit_check_process_setinfo_for_subject(
+	const struct pkm_kacs_kunit_process_setinfo_check_args *args);
+long pkm_kacs_kunit_check_prlimit_for_subject(
+	const struct pkm_kacs_kunit_process_prlimit_check_args *args);
 long pkm_kacs_kunit_open_current_thread_token_for_subject(
 	const void *subject_token, u32 access_mask);
 #endif
