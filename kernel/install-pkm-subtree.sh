@@ -28,6 +28,42 @@ append_line_once() {
 	fi
 }
 
+insert_line_after_exact_once() {
+	local anchor=$1
+	local line=$2
+	local file=$3
+	local anchor_line
+
+	if grep -Fqx "$line" "$file"; then
+		return
+	fi
+
+	anchor_line=$(grep -nF "$anchor" "$file" | head -n1 | cut -d: -f1 || true)
+	if [[ -z "$anchor_line" ]]; then
+		echo "could not find anchor '$anchor' in $file" >&2
+		exit 1
+	fi
+
+	sed -i "$((anchor_line + 1))i\\${line}" "$file"
+}
+
+replace_line_once() {
+	local from=$1
+	local to=$2
+	local file=$3
+
+	if grep -Fqx "$to" "$file"; then
+		return
+	fi
+
+	if ! grep -Fqx "$from" "$file"; then
+		echo "could not find line to replace in $file: $from" >&2
+		exit 1
+	fi
+
+	sed -i "s|^${from//|/\\|}\$|${to//|/\\|}|" "$file"
+}
+
 insert_source_kconfig() {
 	local file=$1
 	local source_line='source "security/pkm/Kconfig"'
@@ -106,6 +142,8 @@ require_file "$src_root/kernel/stage-kacs-core.sh"
 require_file "$kernel_root/security/Makefile"
 require_file "$kernel_root/security/Kconfig"
 require_file "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
+require_file "$kernel_root/include/linux/ptrace.h"
+require_file "$kernel_root/kernel/pid.c"
 
 rm -rf "$pkm_dir"
 mkdir -p "$pkm_dir/kacs"
@@ -136,6 +174,12 @@ install -m 0644 "$src_root/pkm_makefile" "$pkm_dir/Makefile"
 
 append_line_once 'obj-$(CONFIG_SECURITY_PKM) += pkm/' "$kernel_root/security/Makefile"
 insert_source_kconfig "$kernel_root/security/Kconfig"
+insert_line_after_exact_once '#define PTRACE_MODE_REALCREDS	0x10' \
+	'#define PTRACE_MODE_GETFD	0x20' \
+	"$kernel_root/include/linux/ptrace.h"
+replace_line_once '	if (ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS))' \
+	'	if (ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS | PTRACE_MODE_GETFD))' \
+	"$kernel_root/kernel/pid.c"
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1000 kacs_open_self_token
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
