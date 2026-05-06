@@ -64,6 +64,41 @@ replace_line_once() {
 	sed -i "s|^${from//|/\\|}\$|${to//|/\\|}|" "$file"
 }
 
+insert_block_before_exact_once() {
+	local anchor=$1
+	local marker=$2
+	local block=$3
+	local file=$4
+	local tmp
+
+	if grep -Fq "$marker" "$file"; then
+		return
+	fi
+
+	if ! grep -Fqx "$anchor" "$file"; then
+		echo "could not find anchor '$anchor' in $file" >&2
+		exit 1
+	fi
+
+	tmp=$(mktemp)
+	awk -v anchor="$anchor" -v block="$block" '
+		$0 == anchor {
+			printf "%s\n", block
+			inserted = 1
+		}
+		{ print }
+		END {
+			if (!inserted)
+				exit 1
+		}
+	' "$file" > "$tmp" || {
+		rm -f "$tmp"
+		echo "failed to insert block before '$anchor' in $file" >&2
+		exit 1
+	}
+	mv "$tmp" "$file"
+}
+
 insert_source_kconfig() {
 	local file=$1
 	local source_line='source "security/pkm/Kconfig"'
@@ -177,8 +212,32 @@ insert_source_kconfig "$kernel_root/security/Kconfig"
 insert_line_after_exact_once '#define PTRACE_MODE_REALCREDS	0x10' \
 	'#define PTRACE_MODE_GETFD	0x20' \
 	"$kernel_root/include/linux/ptrace.h"
+insert_line_after_exact_once '#define PTRACE_MODE_GETFD	0x20' \
+	'#define PTRACE_MODE_PIDFD_OPEN	0x40' \
+	"$kernel_root/include/linux/ptrace.h"
 replace_line_once '	if (ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS))' \
 	'	if (ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS | PTRACE_MODE_GETFD))' \
+	"$kernel_root/kernel/pid.c"
+insert_block_before_exact_once '	fd = pidfd_create(p, flags);' \
+	'	if (!ptrace_may_access(task,' \
+	'	{
+		struct task_struct *task;
+
+		task = get_pid_task(p, PIDTYPE_PID);
+	if (!task) {
+		put_pid(p);
+		return -ESRCH;
+	}
+	if (!ptrace_may_access(task,
+			       PTRACE_MODE_READ_FSCREDS |
+			       PTRACE_MODE_PIDFD_OPEN)) {
+		put_task_struct(task);
+		put_pid(p);
+		return -EACCES;
+	}
+	put_task_struct(task);
+	}
+' \
 	"$kernel_root/kernel/pid.c"
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1000 kacs_open_self_token

@@ -31,6 +31,10 @@
 #include "token_fd.h"
 #include "token_runtime.h"
 
+#ifndef PTRACE_MODE_PIDFD_OPEN
+#define PTRACE_MODE_PIDFD_OPEN 0x40
+#endif
+
 #define PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT \
 	(KACS_ACCESS_READ_CONTROL | KACS_ACCESS_WRITE_DAC | \
 	 KACS_ACCESS_ACCESS_SYSTEM_SECURITY)
@@ -2927,6 +2931,134 @@ static void pkm_kunit_pidfd_getfd_debug_still_fails_on_pip(
 	args.target_pip_type = PKM_KUNIT_PIP_TYPE_PROTECTED;
 	args.target_pip_trust = PKM_KUNIT_PIP_TRUST_TEST;
 	args.mode = PTRACE_MODE_ATTACH | PTRACE_MODE_GETFD;
+
+	ret = pkm_kacs_kunit_check_ptrace_for_subject(&args);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+
+	pkm_kacs_free((void *)process_sd);
+}
+
+static void pkm_kunit_pidfd_open_success(struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_ptrace_check_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_create_default_process_sd(target_token,
+							 &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.mode = PTRACE_MODE_READ | PTRACE_MODE_PIDFD_OPEN;
+
+	ret = pkm_kacs_kunit_check_ptrace_for_subject(&args);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+
+	pkm_kacs_free((void *)process_sd);
+}
+
+static void pkm_kunit_pidfd_open_denied_by_process_sd(struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_ptrace_check_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	long ret;
+
+	subject_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_kunit_create_query_information_process_sd(
+		target_token, &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.mode = PTRACE_MODE_READ | PTRACE_MODE_PIDFD_OPEN;
+
+	ret = pkm_kacs_kunit_check_ptrace_for_subject(&args);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_pidfd_open_debug_bypasses_process_sd_only(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_ptrace_check_args args = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	long ret;
+
+	subject_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_effective_token_ptr());
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	process_sd = kacs_rust_kunit_create_query_information_process_sd(
+		target_token, &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.mode = PTRACE_MODE_READ | PTRACE_MODE_PIDFD_OPEN;
+
+	ret = pkm_kacs_kunit_check_ptrace_for_subject(&args);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used | PKM_KUNIT_SE_DEBUG_PRIVILEGE);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_pidfd_open_debug_still_fails_on_pip(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_ptrace_check_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_kunit_create_query_information_process_sd(
+		target_token, &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.target_pip_type = PKM_KUNIT_PIP_TYPE_PROTECTED;
+	args.target_pip_trust = PKM_KUNIT_PIP_TRUST_TEST;
+	args.mode = PTRACE_MODE_READ | PTRACE_MODE_PIDFD_OPEN;
 
 	ret = pkm_kacs_kunit_check_ptrace_for_subject(&args);
 	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
@@ -6253,6 +6385,10 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_ptrace_debug_bypasses_process_sd_only),
 	KUNIT_CASE(pkm_kunit_ptrace_debug_still_fails_on_pip),
 	KUNIT_CASE(pkm_kunit_ptrace_unknown_mode_fails_closed),
+	KUNIT_CASE(pkm_kunit_pidfd_open_success),
+	KUNIT_CASE(pkm_kunit_pidfd_open_denied_by_process_sd),
+	KUNIT_CASE(pkm_kunit_pidfd_open_debug_bypasses_process_sd_only),
+	KUNIT_CASE(pkm_kunit_pidfd_open_debug_still_fails_on_pip),
 	KUNIT_CASE(pkm_kunit_pidfd_getfd_success),
 	KUNIT_CASE(pkm_kunit_pidfd_getfd_denied_by_process_sd),
 	KUNIT_CASE(pkm_kunit_pidfd_getfd_debug_bypasses_process_sd_only),

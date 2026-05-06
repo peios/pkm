@@ -44,6 +44,10 @@
 #define PTRACE_MODE_GETFD 0x20
 #endif
 
+#ifndef PTRACE_MODE_PIDFD_OPEN
+#define PTRACE_MODE_PIDFD_OPEN 0x40
+#endif
+
 struct pkm_kmes_rate_bucket {
 	refcount_t refs;
 	spinlock_t lock;
@@ -719,6 +723,7 @@ static long pkm_kacs_signal_to_process_access(int sig, u32 *desired_access)
 static long pkm_kacs_ptrace_mode_to_process_access(unsigned int mode,
 						   u32 *desired_access)
 {
+	bool is_pidfd_open_mode;
 	bool is_getfd_mode;
 	bool is_read_mode;
 	bool is_attach_mode;
@@ -726,9 +731,16 @@ static long pkm_kacs_ptrace_mode_to_process_access(unsigned int mode,
 	if (!desired_access)
 		return -EINVAL;
 
+	is_pidfd_open_mode = (mode & PTRACE_MODE_PIDFD_OPEN) != 0;
 	is_getfd_mode = (mode & PTRACE_MODE_GETFD) != 0;
 	is_read_mode = (mode & PTRACE_MODE_READ) != 0;
 	is_attach_mode = (mode & PTRACE_MODE_ATTACH) != 0;
+	if (is_pidfd_open_mode) {
+		if (!is_read_mode || is_attach_mode || is_getfd_mode)
+			return -EACCES;
+		*desired_access = KACS_PROCESS_QUERY_LIMITED;
+		return 0;
+	}
 	if (is_getfd_mode) {
 		if (is_read_mode || !is_attach_mode)
 			return -EACCES;

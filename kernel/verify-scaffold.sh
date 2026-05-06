@@ -78,6 +78,18 @@ if ! rg -q 'PTRACE_MODE_ATTACH_REALCREDS \| PTRACE_MODE_GETFD' \
 	die "install-pkm-subtree.sh does not patch pidfd_getfd to carry PTRACE_MODE_GETFD"
 fi
 
+if ! rg -q 'PTRACE_MODE_PIDFD_OPEN' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the PTRACE_MODE_PIDFD_OPEN patch"
+fi
+
+if ! rg -q 'PTRACE_MODE_READ_FSCREDS \|' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'PTRACE_MODE_PIDFD_OPEN' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not patch pidfd_open to carry PTRACE_MODE_PIDFD_OPEN"
+fi
+
 if [[ -d "$repo_root/kacs" ]] && \
 	rg -n 'eventfd' "$repo_root/kacs" >/dev/null; then
 	die "legacy eventfd plumbing found in kacs subtree"

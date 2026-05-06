@@ -22,8 +22,8 @@
 use crate::access_check::access_check;
 use crate::access_check_abi::AccessCheckAbiResolved;
 use crate::access_mask::{
-    GenericMapping, PROCESS_GENERIC_MAPPING, PROCESS_QUERY_LIMITED, GENERIC_ALL, READ_CONTROL,
-    WRITE_DAC,
+    GenericMapping, PROCESS_GENERIC_MAPPING, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED,
+    GENERIC_ALL, READ_CONTROL, WRITE_DAC,
 };
 use crate::acl::Acl;
 use crate::condition::ConditionalContext;
@@ -683,6 +683,24 @@ fn build_query_limited_only_process_sd_bytes(
         .ok_or(-EINVAL)?;
 
     build_process_sd_bytes(token.user_sid, group_sid, None, None, None, Some(PROCESS_QUERY_LIMITED))
+}
+
+fn build_query_information_only_process_sd_bytes(
+    token: &PkmKacsBootToken,
+) -> Result<(*mut u8, usize), i32> {
+    let _guard = token.lock_mutation();
+    let group_sid = token
+        .sid_by_index(token.primary_group_index.load(Ordering::Relaxed))
+        .ok_or(-EINVAL)?;
+
+    build_process_sd_bytes(
+        token.user_sid,
+        group_sid,
+        None,
+        None,
+        None,
+        Some(PROCESS_QUERY_INFORMATION),
+    )
 }
 
 impl PkmKacsBootToken {
@@ -2234,6 +2252,26 @@ pub extern "C" fn kacs_rust_kunit_create_query_limited_process_sd(
         return null();
     };
     let Ok((ptr, len)) = build_query_limited_only_process_sd_bytes(token) else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
+/// Builds a restrictive KUnit-only process SD with only Everyone
+/// `PROCESS_QUERY_INFORMATION`.
+pub extern "C" fn kacs_rust_kunit_create_query_information_process_sd(
+    token_ptr: *const c_void,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    let Ok((ptr, len)) = build_query_information_only_process_sd_bytes(token) else {
         return null();
     };
 
