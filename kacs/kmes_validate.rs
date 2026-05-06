@@ -23,15 +23,6 @@ fn read_be_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
     Some(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
 }
 
-fn read_be_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
-    let end = pos.checked_add(8)?;
-    let chunk = bytes.get(*pos..end)?;
-    *pos = end;
-    Some(u64::from_be_bytes([
-        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-    ]))
-}
-
 fn validate_msgpack_str(bytes: &[u8], pos: &mut usize, len: usize) -> bool {
     let Some(end) = pos.checked_add(len) else {
         return false;
@@ -344,6 +335,7 @@ fn validate_msgpack(bytes: &[u8], max_nesting_depth: u32) -> bool {
 }
 
 #[no_mangle]
+#[allow(unreachable_pub)]
 /// Validates one staged KMES syscall event type string and msgpack payload.
 pub extern "C" fn kacs_rust_kmes_validate_staged_event(
     event_type_ptr: *const u8,

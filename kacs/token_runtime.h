@@ -101,6 +101,7 @@ int kacs_rust_token_adjust_default(const void *token, u32 owner_index,
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 int pkm_kmes_kunit_set_current_process_rate_tokens(u32 tokens);
+int pkm_kmes_kunit_set_current_process_rate_refill_frozen(bool frozen);
 int pkm_kmes_kunit_get_current_process_rate_tokens(u32 *tokens_out);
 #endif
 

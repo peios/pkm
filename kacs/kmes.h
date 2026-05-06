@@ -64,6 +64,8 @@ int pkm_kmes_kunit_copy_single_buffer(u8 *out, size_t out_len,
 				      size_t *written_out,
 				      struct pkm_kmes_kunit_snapshot *out_snapshot);
 u16 pkm_kmes_kunit_current_cpu_id(void);
+int pkm_kmes_kunit_swap_capacity(u64 new_capacity);
+void pkm_kmes_kunit_fail_next_swap_alloc(void);
 long pkm_kmes_kunit_attach_for_token(const void *token, int *fds, int *count,
 				     u64 *capacity);
 long pkm_kmes_kunit_attach_user_for_token(const void *token, int __user *fds,

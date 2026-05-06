@@ -35,6 +35,9 @@ struct pkm_kmes_rate_bucket {
 	spinlock_t lock;
 	u64 last_refill_ns;
 	u32 tokens;
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	bool kunit_freeze_refill;
+#endif
 };
 
 struct pkm_kacs_cred_security {
@@ -116,6 +119,10 @@ static void pkm_kmes_rate_bucket_refill(struct pkm_kmes_rate_bucket *bucket,
 
 	if (!bucket || rate == 0)
 		return;
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	if (bucket->kunit_freeze_refill)
+		return;
+#endif
 	if (bucket->tokens >= rate) {
 		bucket->tokens = rate;
 		bucket->last_refill_ns = now_ns;
@@ -408,6 +415,24 @@ int pkm_kmes_kunit_set_current_process_rate_tokens(u32 tokens)
 	spin_lock_irqsave(&sec->kmes_rate_bucket->lock, flags);
 	sec->kmes_rate_bucket->tokens = tokens;
 	sec->kmes_rate_bucket->last_refill_ns = ktime_get_ns();
+	spin_unlock_irqrestore(&sec->kmes_rate_bucket->lock, flags);
+	return 0;
+}
+
+int pkm_kmes_kunit_set_current_process_rate_refill_frozen(bool frozen)
+{
+	struct pkm_kacs_task_security *sec;
+	unsigned long flags;
+
+	if (!current || !current->security)
+		return -EACCES;
+
+	sec = pkm_kacs_task(current);
+	if (!sec->kmes_rate_bucket)
+		return -EACCES;
+
+	spin_lock_irqsave(&sec->kmes_rate_bucket->lock, flags);
+	sec->kmes_rate_bucket->kunit_freeze_refill = frozen;
 	spin_unlock_irqrestore(&sec->kmes_rate_bucket->lock, flags);
 	return 0;
 }
