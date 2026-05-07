@@ -111,6 +111,11 @@ if ! rg -q 'proc_pkm_check_task_metadata_access' \
 	die "install-pkm-subtree.sh does not stage the procfs metadata visibility patch"
 fi
 
+if ! rg -q 'pkm_kacs_sched_setaffinity' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the sched_setaffinity KACS patch"
+fi
+
 if ! rg -q 'PTRACE_MODE_PROC_QUERY_INFORMATION' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
    ! rg -q 'PTRACE_MODE_PROC_QUERY_LIMITED' \

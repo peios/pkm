@@ -59,6 +59,7 @@
 #define PKM_KUNIT_PIP_TRUST_TEST 5U
 #define PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE (1ULL << 3)
 #define PKM_KUNIT_SE_TCB_PRIVILEGE (1ULL << 7)
+#define PKM_KUNIT_SE_INCREASE_BASE_PRIORITY_PRIVILEGE (1ULL << 14)
 #define PKM_KUNIT_SE_DEBUG_PRIVILEGE (1ULL << 20)
 #define PKM_KUNIT_SE_SECURITY_PRIVILEGE (1ULL << 8)
 #define PKM_KUNIT_SE_RESTORE_PRIVILEGE (1ULL << 18)
@@ -3839,6 +3840,216 @@ static void pkm_kunit_process_setinfo_self_target_bypasses_boundary_gate(
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_process_setinfo_for_subject(&args),
 			0L);
+}
+
+static void pkm_kunit_affinity_same_process_bypasses_boundary_gate(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_affinity_check_args args = {
+		.same_process = 1,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_process_affinity_for_subject(
+				&args),
+			0L);
+}
+
+static void pkm_kunit_affinity_cross_process_success_with_privilege(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_affinity_check_args args = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_INCREASE_BASE_PRIORITY_PRIVILEGE);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	process_sd = kacs_rust_create_default_process_sd(target_token,
+							 &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_process_affinity_for_subject(
+				&args),
+			0L);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_INCREASE_BASE_PRIORITY_PRIVILEGE);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_affinity_cross_process_denied_without_privilege(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_affinity_check_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_create_default_process_sd(target_token,
+							 &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_process_affinity_for_subject(
+				&args),
+			(long)-EACCES);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_affinity_debug_does_not_bypass_standalone_privilege(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_affinity_check_args args = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_DEBUG_PRIVILEGE);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	process_sd = kacs_rust_kunit_create_query_limited_process_sd(
+		target_token, &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_process_affinity_for_subject(
+				&args),
+			(long)-EACCES);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used,
+			before.privileges_used);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void
+pkm_kunit_affinity_debug_plus_privilege_bypasses_process_sd_only(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_affinity_check_args args = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_DEBUG_PRIVILEGE |
+			PKM_KUNIT_SE_INCREASE_BASE_PRIORITY_PRIVILEGE);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	process_sd = kacs_rust_kunit_create_query_limited_process_sd(
+		target_token, &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_process_affinity_for_subject(
+				&args),
+			0L);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_DEBUG_PRIVILEGE |
+				PKM_KUNIT_SE_INCREASE_BASE_PRIORITY_PRIVILEGE);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_affinity_privilege_still_fails_on_pip(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_affinity_check_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_INCREASE_BASE_PRIORITY_PRIVILEGE);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_create_default_process_sd(target_token,
+							 &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.target_pip_type = PKM_KUNIT_PIP_TYPE_PROTECTED;
+	args.target_pip_trust = PKM_KUNIT_PIP_TRUST_TEST;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_process_affinity_for_subject(
+				&args),
+			(long)-EACCES);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
 }
 
 static void pkm_kunit_prlimit_read_success(struct kunit *test)
@@ -8821,6 +9032,14 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_process_setinfo_debug_still_fails_on_pip),
 	KUNIT_CASE(
 		pkm_kunit_process_setinfo_self_target_bypasses_boundary_gate),
+	KUNIT_CASE(pkm_kunit_affinity_same_process_bypasses_boundary_gate),
+	KUNIT_CASE(pkm_kunit_affinity_cross_process_success_with_privilege),
+	KUNIT_CASE(pkm_kunit_affinity_cross_process_denied_without_privilege),
+	KUNIT_CASE(
+		pkm_kunit_affinity_debug_does_not_bypass_standalone_privilege),
+	KUNIT_CASE(
+		pkm_kunit_affinity_debug_plus_privilege_bypasses_process_sd_only),
+	KUNIT_CASE(pkm_kunit_affinity_privilege_still_fails_on_pip),
 	KUNIT_CASE(pkm_kunit_prlimit_read_success),
 	KUNIT_CASE(pkm_kunit_prlimit_write_success),
 	KUNIT_CASE(pkm_kunit_prlimit_read_denied_by_process_sd),

@@ -53,6 +53,7 @@
 #define PKM_KACS_UNMAPPED_ID 65534U
 #define PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS 10000U
 #define PKM_KACS_PRIVILEGE_SE_DEBUG (1ULL << 20)
+#define PKM_KACS_PRIVILEGE_SE_INCREASE_BASE_PRIORITY (1ULL << 14)
 #define PKM_KACS_LSM_PRLIMIT_READ 1U
 #define PKM_KACS_LSM_PRLIMIT_WRITE 2U
 #define PKM_KACS_SOCKET_FILE_WRITE_DATA 0x00000002U
@@ -240,6 +241,10 @@ static int pkm_kacs_file_mprotect(struct vm_area_struct *vma,
 				  unsigned long prot);
 static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm);
 static long pkm_kacs_check_process_setinfo_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state);
+static long pkm_kacs_check_process_affinity_core(
 	const void *subject_token,
 	const struct pkm_kacs_process_state *caller_state,
 	const struct pkm_kacs_process_state *target_state);
@@ -1823,6 +1828,47 @@ static long pkm_kacs_check_process_setinfo_core(
 		KACS_PROCESS_SET_INFORMATION);
 }
 
+static long pkm_kacs_check_process_affinity_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state)
+{
+	if (!subject_token || !caller_state || !target_state)
+		return -EACCES;
+	if (caller_state == target_state)
+		return 0;
+	if (!kacs_rust_token_has_enabled_privilege(
+		    subject_token,
+		    PKM_KACS_PRIVILEGE_SE_INCREASE_BASE_PRIORITY))
+		return -EACCES;
+	if (!kacs_rust_token_mark_privileges_used(
+		    subject_token,
+		    PKM_KACS_PRIVILEGE_SE_INCREASE_BASE_PRIORITY))
+		return -EACCES;
+
+	return pkm_kacs_check_process_setinfo_core(subject_token, caller_state,
+						   target_state);
+}
+
+long pkm_kacs_sched_setaffinity(struct task_struct *task)
+{
+	struct pkm_kacs_process_state *caller_state;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+
+	if (!task || !task->security)
+		return -EACCES;
+
+	caller_state = pkm_kacs_current_process_state();
+	target_state = pkm_kacs_task(task)->process_state;
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!caller_state || !target_state || !subject_token)
+		return -EACCES;
+
+	return pkm_kacs_check_process_affinity_core(subject_token, caller_state,
+						    target_state);
+}
+
 static int pkm_kacs_task_kill(struct task_struct *target,
 			      struct kernel_siginfo *info, int sig,
 			      const struct cred *cred)
@@ -2925,6 +2971,32 @@ long pkm_kacs_kunit_check_process_setinfo_for_subject(
 	return pkm_kacs_check_process_setinfo_core(args->subject_token,
 						   &caller_state,
 						   &target_state);
+}
+
+long pkm_kacs_kunit_check_process_affinity_for_subject(
+	const struct pkm_kacs_kunit_process_affinity_check_args *args)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state caller_state = {};
+	struct pkm_kacs_process_state target_state = {};
+
+	if (!args)
+		return -EINVAL;
+	if (args->same_process)
+		return 0;
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	refcount_set(&process_sd.refs, 1);
+	caller_state.pip_type = args->caller_pip_type;
+	caller_state.pip_trust = args->caller_pip_trust;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = &process_sd;
+
+	return pkm_kacs_check_process_affinity_core(args->subject_token,
+						    &caller_state,
+						    &target_state);
 }
 
 long pkm_kacs_kunit_check_prlimit_for_subject(

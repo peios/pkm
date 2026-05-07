@@ -217,6 +217,7 @@ require_file "$kernel_root/fs/proc/base.c"
 require_file "$kernel_root/fs/proc/array.c"
 require_file "$kernel_root/include/linux/ptrace.h"
 require_file "$kernel_root/kernel/pid.c"
+require_file "$kernel_root/kernel/sched/syscalls.c"
 
 rm -rf "$pkm_dir"
 mkdir -p "$pkm_dir/kacs"
@@ -293,6 +294,34 @@ insert_block_before_exact_once '		return shstk_prctl(task, option, arg2);' \
 		}
 ' \
 	"$kernel_root/arch/x86/kernel/process_64.c"
+insert_block_before_exact_once 'static inline int __normal_prio(int policy, int rt_prio, int nice)' \
+	'extern long pkm_kacs_sched_setaffinity' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern long pkm_kacs_sched_setaffinity(struct task_struct *task);
+#endif
+
+' \
+	"$kernel_root/kernel/sched/syscalls.c"
+replace_line_after_anchor_once 'long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)' \
+	'	if (!check_same_owner(p)) {
+		guard(rcu)();
+		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE))
+			return -EPERM;
+	}
+' \
+	'#ifdef CONFIG_SECURITY_PKM
+	retval = pkm_kacs_sched_setaffinity(p);
+	if (retval)
+		return retval;
+#else
+	if (!check_same_owner(p)) {
+		guard(rcu)();
+		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE))
+			return -EPERM;
+	}
+#endif
+' \
+	"$kernel_root/kernel/sched/syscalls.c"
 insert_block_before_exact_once 'static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,' \
 	'static unsigned int proc_pkm_metadata_ptrace_mode' \
 	'static unsigned int proc_pkm_metadata_ptrace_mode(const struct file *file)
