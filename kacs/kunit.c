@@ -181,6 +181,13 @@ struct pkm_kunit_event_counts {
 	u32 privilege_use_events;
 };
 
+struct pkm_kunit_linked_pair {
+	const void *source_token;
+	long elevated_fd;
+	long filtered_fd;
+	u64 session_id;
+};
+
 struct pkm_kunit_kmes_event_view {
 	u32 event_size;
 	u32 header_size;
@@ -333,6 +340,22 @@ static u64 pkm_kunit_read_u64(const u8 *bytes, size_t offset)
 	       ((u64)bytes[offset + 7] << 56);
 }
 
+static u32 pkm_kunit_query_token_u32(struct kunit *test, int fd, u32 token_class)
+{
+	struct kacs_query_args args = {
+		.token_class = token_class,
+		.buf_len = 4,
+	};
+	u8 buf[4] = { 0 };
+
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query(fd, &args, buf),
+			(long)0);
+	KUNIT_ASSERT_EQ(test, args.buf_len, 4U);
+	return pkm_kunit_read_u32(buf, 0);
+}
+
 static u32 pkm_kunit_groups_query_attr(const u8 *bytes, u32 index)
 {
 	size_t offset = 4;
@@ -417,6 +440,106 @@ static void pkm_kunit_close_fds(struct kunit *test, int *fds, int count)
 			KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fds[i]), 0);
 		fds[i] = -1;
 	}
+}
+
+static void pkm_kunit_cleanup_linked_pair(struct kunit *test,
+					  struct pkm_kunit_linked_pair *pair)
+{
+	int fds[2];
+
+	if (!pair)
+		return;
+
+	fds[0] = pair->elevated_fd < 0 ? -1 : (int)pair->elevated_fd;
+	fds[1] = pair->filtered_fd < 0 ? -1 : (int)pair->filtered_fd;
+	pkm_kunit_close_fds(test, fds, 2);
+	pair->elevated_fd = -1;
+	pair->filtered_fd = -1;
+	if (pair->source_token) {
+		kacs_rust_token_drop(pair->source_token);
+		pair->source_token = NULL;
+	}
+	pair->session_id = 0;
+}
+
+static int pkm_kunit_create_link_candidates(struct kunit *test,
+					    const void *caller_token,
+					    struct pkm_kunit_linked_pair *out)
+{
+	struct kacs_duplicate_args duplicate = {
+		.access_mask = KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE,
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_LEVEL_ANONYMOUS,
+		.result_fd = -1,
+	};
+	struct pkm_kacs_boot_snapshot snapshot = { };
+	const void *source_token;
+	long source_fd;
+
+	if (!test || !caller_token || !out)
+		return -EINVAL;
+
+	memset(out, 0, sizeof(*out));
+	out->elevated_fd = -1;
+	out->filtered_fd = -1;
+
+	source_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0U, 0ULL);
+	if (!source_token)
+		return -ENOMEM;
+	if (!kacs_rust_kunit_token_snapshot(source_token, &snapshot)) {
+		kacs_rust_token_drop(source_token);
+		return -EINVAL;
+	}
+
+	source_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		caller_token, source_token, KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE);
+	if (source_fd < 0) {
+		kacs_rust_token_drop(source_token);
+		return (int)source_fd;
+	}
+	if (pkm_kacs_kunit_token_fd_duplicate((int)source_fd, caller_token,
+					      source_token, &duplicate)) {
+		close_fd((unsigned int)source_fd);
+		kacs_rust_token_drop(source_token);
+		return -EINVAL;
+	}
+	if (duplicate.result_fd < 0) {
+		close_fd((unsigned int)source_fd);
+		kacs_rust_token_drop(source_token);
+		return -EINVAL;
+	}
+
+	out->source_token = source_token;
+	out->elevated_fd = source_fd;
+	out->filtered_fd = duplicate.result_fd;
+	out->session_id = snapshot.session_id;
+	return 0;
+}
+
+static int pkm_kunit_create_linked_pair(struct kunit *test,
+					const void *caller_token,
+					struct pkm_kunit_linked_pair *out)
+{
+	struct kacs_link_tokens_args link;
+	int ret;
+
+	ret = pkm_kunit_create_link_candidates(test, caller_token, out);
+	if (ret)
+		return ret;
+
+	link.elevated_fd = (s32)out->elevated_fd;
+	link.filtered_fd = (s32)out->filtered_fd;
+	link.session_id = out->session_id;
+	ret = (int)pkm_kacs_kunit_token_fd_link((int)out->elevated_fd,
+						 caller_token, &link);
+	if (ret) {
+		pkm_kunit_cleanup_linked_pair(test, out);
+		return ret;
+	}
+
+	return 0;
 }
 
 static int pkm_kunit_find_current_kmes_fd(struct kunit *test, int *fds, int count,
@@ -7368,6 +7491,465 @@ static void pkm_kunit_token_query_deferred_fields_payload(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_kunit_token_link_success_sets_roles_and_gets_partner(
+	struct kunit *test)
+{
+	struct pkm_kunit_linked_pair pair = {
+		.elevated_fd = -1,
+		.filtered_fd = -1,
+	};
+	struct kacs_get_linked_token_args get = {
+		.result_fd = -1,
+	};
+	struct pkm_kacs_token_fd_view view = { };
+	struct pkm_kacs_boot_snapshot caller_after = { };
+	const void *caller_token;
+	const void *actual_partner = NULL;
+	u32 access_mask = 0;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_create_linked_pair(test, caller_token, &pair),
+			0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, (int)pair.elevated_fd,
+						  TOKEN_CLASS_ELEVATION_TYPE),
+			KACS_ELEVATION_FULL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, (int)pair.filtered_fd,
+						  TOKEN_CLASS_ELEVATION_TYPE),
+			KACS_ELEVATION_LIMITED);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_token_fd_clone_token((int)pair.filtered_fd,
+						      &actual_partner,
+						      &access_mask),
+			0);
+	KUNIT_EXPECT_EQ(test, access_mask,
+			KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_get_linked(
+				(int)pair.elevated_fd, caller_token, &get),
+			(long)0);
+	KUNIT_ASSERT_GE(test, (long)get.result_fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot(get.result_fd, &view),
+			0);
+	KUNIT_EXPECT_PTR_EQ(test, view.token, actual_partner);
+	KUNIT_EXPECT_EQ(test, view.access_mask, KACS_TOKEN_ALL_ACCESS);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(caller_token,
+							 &caller_after));
+	KUNIT_EXPECT_EQ(test,
+			caller_after.privileges_used & PKM_KUNIT_SE_TCB_PRIVILEGE,
+			PKM_KUNIT_SE_TCB_PRIVILEGE);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)get.result_fd), 0);
+	kacs_rust_token_drop(actual_partner);
+	pkm_kunit_cleanup_linked_pair(test, &pair);
+}
+
+static void pkm_kunit_token_get_linked_unprivileged_returns_query_copy(
+	struct kunit *test)
+{
+	struct pkm_kunit_linked_pair pair = {
+		.elevated_fd = -1,
+		.filtered_fd = -1,
+	};
+	struct kacs_get_linked_token_args get = {
+		.result_fd = -1,
+	};
+	struct pkm_kacs_token_fd_view view = { };
+	const void *caller_token;
+	const void *caller_without_tcb;
+	const void *actual_partner = NULL;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+	caller_without_tcb = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, caller_without_tcb);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_create_linked_pair(test, caller_token, &pair),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_token_fd_clone_token((int)pair.elevated_fd,
+						      &actual_partner, NULL),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_get_linked(
+				(int)pair.filtered_fd, caller_without_tcb, &get),
+			(long)0);
+	KUNIT_ASSERT_GE(test, (long)get.result_fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot(get.result_fd, &view),
+			0);
+	KUNIT_EXPECT_FALSE(test, view.token == actual_partner);
+	KUNIT_EXPECT_EQ(test, view.access_mask, KACS_TOKEN_QUERY);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, get.result_fd,
+						  TOKEN_CLASS_TYPE),
+			KACS_TOKEN_TYPE_IMPERSONATION);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, get.result_fd,
+						  TOKEN_CLASS_IMPERSONATION_LEVEL),
+			KACS_LEVEL_IDENTIFICATION);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, get.result_fd,
+						  TOKEN_CLASS_ELEVATION_TYPE),
+			KACS_ELEVATION_FULL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)get.result_fd), 0);
+	kacs_rust_token_drop(actual_partner);
+	kacs_rust_token_drop(caller_without_tcb);
+	pkm_kunit_cleanup_linked_pair(test, &pair);
+}
+
+static void pkm_kunit_token_link_requires_tcb(struct kunit *test)
+{
+	struct pkm_kunit_linked_pair pair = {
+		.elevated_fd = -1,
+		.filtered_fd = -1,
+	};
+	struct kacs_link_tokens_args link;
+	const void *caller_token;
+	const void *caller_without_tcb;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+	caller_without_tcb = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, caller_without_tcb);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_create_link_candidates(test, caller_token,
+							 &pair),
+			0);
+
+	link.elevated_fd = (s32)pair.elevated_fd;
+	link.filtered_fd = (s32)pair.filtered_fd;
+	link.session_id = pair.session_id;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_link((int)pair.elevated_fd,
+						      caller_without_tcb,
+						      &link),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, (int)pair.elevated_fd,
+						  TOKEN_CLASS_ELEVATION_TYPE),
+			KACS_ELEVATION_DEFAULT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, (int)pair.filtered_fd,
+						  TOKEN_CLASS_ELEVATION_TYPE),
+			KACS_ELEVATION_DEFAULT);
+
+	kacs_rust_token_drop(caller_without_tcb);
+	pkm_kunit_cleanup_linked_pair(test, &pair);
+}
+
+static void pkm_kunit_token_link_requires_duplicate_rights(
+	struct kunit *test)
+{
+	struct pkm_kunit_linked_pair pair = {
+		.elevated_fd = -1,
+		.filtered_fd = -1,
+	};
+	struct kacs_link_tokens_args link;
+	const void *caller_token;
+	const void *filtered_token = NULL;
+	long readonly_fd;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_create_link_candidates(test, caller_token,
+							 &pair),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_token_fd_clone_token((int)pair.filtered_fd,
+						      &filtered_token, NULL),
+			0);
+	KUNIT_ASSERT_EQ(test, close_fd((unsigned int)pair.filtered_fd), 0);
+	readonly_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		caller_token, filtered_token, KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, readonly_fd, 0L);
+	pair.filtered_fd = readonly_fd;
+
+	link.elevated_fd = (s32)pair.elevated_fd;
+	link.filtered_fd = (s32)pair.filtered_fd;
+	link.session_id = pair.session_id;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_link((int)pair.elevated_fd,
+						      caller_token, &link),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, (int)pair.elevated_fd,
+						  TOKEN_CLASS_ELEVATION_TYPE),
+			KACS_ELEVATION_DEFAULT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, (int)pair.filtered_fd,
+						  TOKEN_CLASS_ELEVATION_TYPE),
+			KACS_ELEVATION_DEFAULT);
+
+	kacs_rust_token_drop(filtered_token);
+	pkm_kunit_cleanup_linked_pair(test, &pair);
+}
+
+static void pkm_kunit_token_link_self_denies(struct kunit *test)
+{
+	struct pkm_kunit_linked_pair pair = {
+		.elevated_fd = -1,
+		.filtered_fd = -1,
+	};
+	struct kacs_link_tokens_args link;
+	const void *caller_token;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_create_link_candidates(test, caller_token,
+							 &pair),
+			0);
+
+	link.elevated_fd = (s32)pair.elevated_fd;
+	link.filtered_fd = (s32)pair.elevated_fd;
+	link.session_id = pair.session_id;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_link((int)pair.elevated_fd,
+						      caller_token, &link),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, (int)pair.elevated_fd,
+						  TOKEN_CLASS_ELEVATION_TYPE),
+			KACS_ELEVATION_DEFAULT);
+
+	pkm_kunit_cleanup_linked_pair(test, &pair);
+}
+
+static void pkm_kunit_token_link_session_mismatch_denies(struct kunit *test)
+{
+	struct pkm_kunit_linked_pair pair = {
+		.elevated_fd = -1,
+		.filtered_fd = -1,
+	};
+	struct kacs_link_tokens_args link;
+	const void *caller_token;
+	long mismatch_fd;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_create_link_candidates(test, caller_token,
+							 &pair),
+			0);
+
+	mismatch_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		caller_token, pkm_kacs_boot_system_token_ptr(),
+		KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, mismatch_fd, 0L);
+
+	link.elevated_fd = (s32)pair.elevated_fd;
+	link.filtered_fd = (s32)mismatch_fd;
+	link.session_id = pair.session_id;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_link((int)pair.elevated_fd,
+						      caller_token, &link),
+			(long)-EINVAL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mismatch_fd), 0);
+	pkm_kunit_cleanup_linked_pair(test, &pair);
+}
+
+static void pkm_kunit_token_link_non_primary_denies(struct kunit *test)
+{
+	struct pkm_kunit_linked_pair pair = {
+		.elevated_fd = -1,
+		.filtered_fd = -1,
+	};
+	struct kacs_link_tokens_args link;
+	const void *caller_token;
+	const void *impersonation_token;
+	long impersonation_fd;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_create_link_candidates(test, caller_token,
+							 &pair),
+			0);
+
+	impersonation_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE,
+		KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_LEVEL_IDENTIFICATION,
+		PKM_KUNIT_IL_MEDIUM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, impersonation_token);
+	impersonation_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		caller_token, impersonation_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, impersonation_fd, 0L);
+
+	link.elevated_fd = (s32)pair.elevated_fd;
+	link.filtered_fd = (s32)impersonation_fd;
+	link.session_id = pair.session_id;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_link((int)pair.elevated_fd,
+						      caller_token, &link),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, (int)pair.elevated_fd,
+						  TOKEN_CLASS_ELEVATION_TYPE),
+			KACS_ELEVATION_DEFAULT);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)impersonation_fd), 0);
+
+	kacs_rust_token_drop(impersonation_token);
+	pkm_kunit_cleanup_linked_pair(test, &pair);
+}
+
+static void pkm_kunit_token_link_role_swap_denies(struct kunit *test)
+{
+	struct pkm_kunit_linked_pair pair = {
+		.elevated_fd = -1,
+		.filtered_fd = -1,
+	};
+	struct kacs_link_tokens_args link;
+	const void *caller_token;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_create_linked_pair(test, caller_token, &pair),
+			0);
+
+	link.elevated_fd = (s32)pair.filtered_fd;
+	link.filtered_fd = (s32)pair.elevated_fd;
+	link.session_id = pair.session_id;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_link((int)pair.elevated_fd,
+						      caller_token, &link),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, (int)pair.elevated_fd,
+						  TOKEN_CLASS_ELEVATION_TYPE),
+			KACS_ELEVATION_FULL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, (int)pair.filtered_fd,
+						  TOKEN_CLASS_ELEVATION_TYPE),
+			KACS_ELEVATION_LIMITED);
+
+	pkm_kunit_cleanup_linked_pair(test, &pair);
+}
+
+static void pkm_kunit_token_link_replacement_invalidates_old_partner(
+	struct kunit *test)
+{
+	struct pkm_kunit_linked_pair pair = {
+		.elevated_fd = -1,
+		.filtered_fd = -1,
+	};
+	struct kacs_duplicate_args duplicate = {
+		.access_mask = KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE,
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_LEVEL_ANONYMOUS,
+		.result_fd = -1,
+	};
+	struct kacs_link_tokens_args link;
+	struct kacs_get_linked_token_args get = {
+		.result_fd = -1,
+	};
+	const void *caller_token;
+	long old_filtered_fd;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_create_linked_pair(test, caller_token, &pair),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_duplicate(
+				(int)pair.elevated_fd, caller_token,
+				pair.source_token, &duplicate),
+			(long)0);
+	KUNIT_ASSERT_GE(test, (long)duplicate.result_fd, 0L);
+
+	old_filtered_fd = pair.filtered_fd;
+	link.elevated_fd = (s32)pair.elevated_fd;
+	link.filtered_fd = duplicate.result_fd;
+	link.session_id = pair.session_id;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_link((int)pair.elevated_fd,
+						      caller_token, &link),
+			(long)0);
+	pair.filtered_fd = duplicate.result_fd;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_get_linked((int)old_filtered_fd,
+						      caller_token, &get),
+			(long)-ENOENT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_query_token_u32(test, (int)old_filtered_fd,
+						  TOKEN_CLASS_ELEVATION_TYPE),
+			KACS_ELEVATION_LIMITED);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)old_filtered_fd), 0);
+	pkm_kunit_cleanup_linked_pair(test, &pair);
+}
+
+static void pkm_kunit_token_get_linked_requires_query_right(
+	struct kunit *test)
+{
+	struct pkm_kunit_linked_pair pair = {
+		.elevated_fd = -1,
+		.filtered_fd = -1,
+	};
+	struct kacs_get_linked_token_args get = {
+		.result_fd = -1,
+	};
+	const void *caller_token;
+	long no_query_fd;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_create_linked_pair(test, caller_token, &pair),
+			0);
+
+	no_query_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		caller_token, pair.source_token, KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, no_query_fd, 0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_get_linked((int)no_query_fd,
+						      caller_token, &get),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)no_query_fd), 0);
+	pkm_kunit_cleanup_linked_pair(test, &pair);
+}
+
+static void pkm_kunit_token_get_linked_default_token_returns_enoent(
+	struct kunit *test)
+{
+	struct pkm_kunit_linked_pair pair = {
+		.elevated_fd = -1,
+		.filtered_fd = -1,
+	};
+	struct kacs_get_linked_token_args get = {
+		.result_fd = -1,
+	};
+	const void *caller_token;
+
+	caller_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_create_link_candidates(test, caller_token,
+							 &pair),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_get_linked((int)pair.elevated_fd,
+						      caller_token, &get),
+			(long)-ENOENT);
+	pkm_kunit_cleanup_linked_pair(test, &pair);
+}
+
 static void pkm_kunit_token_adjust_sessionid_updates_target(struct kunit *test)
 {
 	struct kacs_query_args args = {
@@ -10283,6 +10865,17 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_token_query_invalid_class),
 	KUNIT_CASE(pkm_kunit_token_query_short_and_fault_buffers),
 	KUNIT_CASE(pkm_kunit_token_query_deferred_fields_payload),
+	KUNIT_CASE(pkm_kunit_token_link_success_sets_roles_and_gets_partner),
+	KUNIT_CASE(pkm_kunit_token_get_linked_unprivileged_returns_query_copy),
+	KUNIT_CASE(pkm_kunit_token_link_requires_tcb),
+	KUNIT_CASE(pkm_kunit_token_link_requires_duplicate_rights),
+	KUNIT_CASE(pkm_kunit_token_link_self_denies),
+	KUNIT_CASE(pkm_kunit_token_link_session_mismatch_denies),
+	KUNIT_CASE(pkm_kunit_token_link_non_primary_denies),
+	KUNIT_CASE(pkm_kunit_token_link_role_swap_denies),
+	KUNIT_CASE(pkm_kunit_token_link_replacement_invalidates_old_partner),
+	KUNIT_CASE(pkm_kunit_token_get_linked_requires_query_right),
+	KUNIT_CASE(pkm_kunit_token_get_linked_default_token_returns_enoent),
 	KUNIT_CASE(pkm_kunit_token_adjust_sessionid_updates_target),
 	KUNIT_CASE(pkm_kunit_token_adjust_sessionid_requires_cached_right),
 	KUNIT_CASE(pkm_kunit_token_adjust_sessionid_requires_tcb),

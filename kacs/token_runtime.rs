@@ -69,6 +69,8 @@ const IMPERSONATION_LEVEL_IDENTIFICATION_ABI: u32 = 1;
 const IMPERSONATION_LEVEL_IMPERSONATION_ABI: u32 = 2;
 const IMPERSONATION_LEVEL_DELEGATION_ABI: u32 = 3;
 const TOKEN_ELEVATION_DEFAULT_ABI: u32 = 1;
+const TOKEN_ELEVATION_FULL_ABI: u32 = 2;
+const TOKEN_ELEVATION_LIMITED_ABI: u32 = 3;
 const MAX_DEFAULT_DACL_BYTES: usize = 65_536;
 const MAX_SESSION_SPEC_BYTES: usize = 4096;
 const MIN_SESSION_SPEC_BYTES: usize = 15;
@@ -90,6 +92,7 @@ const INHERIT_ONLY_ACE: u8 = 0x08;
 
 const EACCES: i32 = 13;
 const EPERM: i32 = 1;
+const ENOENT: i32 = 2;
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
 const ERANGE: i32 = 34;
@@ -348,6 +351,8 @@ struct PkmKacsSession {
     logon_sid_ptr: *mut u8,
     logon_sid_len: usize,
     logon_sid: Sid<'static>,
+    linked_elevated: *const c_void,
+    linked_filtered: *const c_void,
 }
 
 struct OwnedSidAndAttributes {
@@ -380,6 +385,7 @@ struct PkmKacsBootToken {
     mandatory_policy: u32,
     token_type: TokenType,
     impersonation_level: ImpersonationLevel,
+    elevation_type: AtomicU32,
     restricted: bool,
     user_deny_only: bool,
     write_restricted: bool,
@@ -435,6 +441,15 @@ impl PkmKacsSession {
         if session.refcount.fetch_sub(1, Ordering::Release) == 1 {
             fence(Ordering::Acquire);
             let session_ptr = ptr as *mut Self;
+            let linked_elevated = session.linked_elevated;
+            let linked_filtered = session.linked_filtered;
+
+            if !linked_elevated.is_null() {
+                unsafe { PkmKacsBootToken::drop_ref(linked_elevated) };
+            }
+            if !linked_filtered.is_null() {
+                unsafe { PkmKacsBootToken::drop_ref(linked_filtered) };
+            }
 
             free_allocated_bytes(session.user_sid_ptr);
             free_allocated_bytes(session.auth_package_ptr);
@@ -908,6 +923,8 @@ fn create_session_object(
                 logon_sid_ptr,
                 logon_sid_len,
                 logon_sid,
+                linked_elevated: null(),
+                linked_filtered: null(),
             },
         )
     };
@@ -1926,6 +1943,7 @@ impl PkmKacsBootToken {
                 | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
             token_type,
             impersonation_level,
+            elevation_type: AtomicU32::new(TOKEN_ELEVATION_DEFAULT_ABI),
             restricted,
             user_deny_only: false,
             write_restricted: false,
@@ -2046,6 +2064,7 @@ impl PkmKacsBootToken {
                 | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
             token_type: TokenType::Primary,
             impersonation_level: ImpersonationLevel::Anonymous,
+            elevation_type: AtomicU32::new(TOKEN_ELEVATION_DEFAULT_ABI),
             restricted: false,
             user_deny_only: false,
             write_restricted: false,
@@ -2270,6 +2289,7 @@ impl PkmKacsBootToken {
                 | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
             token_type: TokenType::Impersonation,
             impersonation_level: ImpersonationLevel::Anonymous,
+            elevation_type: AtomicU32::new(TOKEN_ELEVATION_DEFAULT_ABI),
             restricted: false,
             user_deny_only: false,
             write_restricted: false,
@@ -2363,6 +2383,7 @@ impl PkmKacsBootToken {
             mandatory_policy: token.mandatory_policy,
             token_type: token.token_type,
             impersonation_level: token.impersonation_level,
+            elevation_type: AtomicU32::new(token.elevation_type.load(Ordering::Relaxed)),
             restricted: token.restricted,
             user_deny_only: token.user_deny_only,
             write_restricted: token.write_restricted,
@@ -2458,6 +2479,7 @@ impl PkmKacsBootToken {
             mandatory_policy: self.mandatory_policy,
             token_type: new_type,
             impersonation_level,
+            elevation_type: AtomicU32::new(TOKEN_ELEVATION_DEFAULT_ABI),
             restricted: self.restricted,
             user_deny_only: self.user_deny_only,
             write_restricted: self.write_restricted,
@@ -2540,6 +2562,7 @@ impl PkmKacsBootToken {
             mandatory_policy: self.mandatory_policy,
             token_type: TokenType::Impersonation,
             impersonation_level: level,
+            elevation_type: AtomicU32::new(self.elevation_type.load(Ordering::Relaxed)),
             restricted: self.restricted,
             user_deny_only: self.user_deny_only,
             write_restricted: self.write_restricted,
@@ -2638,6 +2661,14 @@ impl PkmKacsBootToken {
         self.privileges_used.fetch_or(used_mask, Ordering::AcqRel);
     }
 
+    fn elevation_type(&self) -> u32 {
+        self.elevation_type.load(Ordering::Acquire)
+    }
+
+    fn set_elevation_type(&self, elevation_type: u32) {
+        self.elevation_type.store(elevation_type, Ordering::Release);
+    }
+
     fn lock_mutation(&self) -> TokenMutationGuard<'_> {
         while self
             .mutation_lock
@@ -2660,6 +2691,21 @@ impl PkmKacsBootToken {
             .store(session_id, Ordering::Relaxed);
         self.modified_id.store(next_modified_id, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn linked_query_copy(&self) -> Result<*const c_void, i32> {
+        let copy = self.duplicate(
+            self,
+            TokenType::Impersonation,
+            ImpersonationLevel::Identification,
+        )?;
+        let Some(copy_token) = (unsafe { Self::from_ptr(copy) }) else {
+            unsafe { Self::drop_ref(copy) };
+            return Err(-EACCES);
+        };
+
+        copy_token.set_elevation_type(self.elevation_type());
+        Ok(copy)
     }
 
     fn adjust_privileges(&self, entries: &[PkmKacsPrivilegeAdjustEntry]) -> Result<u64, i32> {
@@ -3173,6 +3219,7 @@ impl PkmKacsBootToken {
             mandatory_policy: self.mandatory_policy,
             token_type: self.token_type,
             impersonation_level: self.impersonation_level,
+            elevation_type: AtomicU32::new(TOKEN_ELEVATION_DEFAULT_ABI),
             restricted,
             user_deny_only,
             write_restricted,
@@ -3295,7 +3342,7 @@ impl PkmKacsBootToken {
                     && writer.write_u64(0)
             }
             TOKEN_CLASS_ORIGIN => writer.write_u64(0),
-            TOKEN_CLASS_ELEVATION_TYPE => writer.write_u32(TOKEN_ELEVATION_DEFAULT_ABI),
+            TOKEN_CLASS_ELEVATION_TYPE => writer.write_u32(self.elevation_type()),
             TOKEN_CLASS_DEVICE_GROUPS => writer.write_u32(0),
             TOKEN_CLASS_APPCONTAINER_SID => true,
             TOKEN_CLASS_CAPABILITIES => writer.write_u32(0),
@@ -3400,6 +3447,126 @@ fn token_has_enabled_privilege(token_ptr: *const c_void, privilege: u64) -> bool
     let privileges = token.privileges_snapshot();
 
     (privileges.present & privilege) == privilege && (privileges.enabled & privilege) == privilege
+}
+
+fn validate_link_role(token: &PkmKacsBootToken, expected: u32) -> Result<(), i32> {
+    match token.elevation_type() {
+        TOKEN_ELEVATION_DEFAULT_ABI => Ok(()),
+        value if value == expected => Ok(()),
+        TOKEN_ELEVATION_FULL_ABI | TOKEN_ELEVATION_LIMITED_ABI => Err(-EINVAL),
+        _ => Err(-EINVAL),
+    }
+}
+
+fn link_tokens_on_session(
+    elevated_token: &PkmKacsBootToken,
+    filtered_token: &PkmKacsBootToken,
+    session_id: u64,
+) -> Result<(), i32> {
+    let elevated_ptr = (elevated_token as *const PkmKacsBootToken).cast::<c_void>();
+    let filtered_ptr = (filtered_token as *const PkmKacsBootToken).cast::<c_void>();
+    let elevated_ref;
+    let filtered_ref;
+    let old_elevated;
+    let old_filtered;
+    let _guard = lock_session_table();
+    let Some(session_ptr) = session_list_find_locked(session_id) else {
+        return Err(-EINVAL);
+    };
+    let session = unsafe { &mut *session_ptr };
+
+    if elevated_ptr == filtered_ptr {
+        return Err(-EINVAL);
+    }
+    if elevated_token.token_type != TokenType::Primary
+        || filtered_token.token_type != TokenType::Primary
+    {
+        return Err(-EINVAL);
+    }
+    if session_ptr.cast_const() != elevated_token.session
+        || session_ptr.cast_const() != filtered_token.session
+    {
+        return Err(-EINVAL);
+    }
+    if elevated_token.user_sid.as_bytes() != filtered_token.user_sid.as_bytes() {
+        return Err(-EINVAL);
+    }
+
+    validate_link_role(elevated_token, TOKEN_ELEVATION_FULL_ABI)?;
+    validate_link_role(filtered_token, TOKEN_ELEVATION_LIMITED_ABI)?;
+
+    elevated_ref = PkmKacsBootToken::clone_ref(elevated_ptr);
+    if elevated_ref.is_null() {
+        return Err(-EACCES);
+    }
+    filtered_ref = PkmKacsBootToken::clone_ref(filtered_ptr);
+    if filtered_ref.is_null() {
+        unsafe { PkmKacsBootToken::drop_ref(elevated_ref) };
+        return Err(-EACCES);
+    }
+
+    old_elevated = session.linked_elevated;
+    old_filtered = session.linked_filtered;
+    session.linked_elevated = elevated_ref;
+    session.linked_filtered = filtered_ref;
+    elevated_token.set_elevation_type(TOKEN_ELEVATION_FULL_ABI);
+    filtered_token.set_elevation_type(TOKEN_ELEVATION_LIMITED_ABI);
+
+    if !old_elevated.is_null() {
+        unsafe { PkmKacsBootToken::drop_ref(old_elevated) };
+    }
+    if !old_filtered.is_null() {
+        unsafe { PkmKacsBootToken::drop_ref(old_filtered) };
+    }
+
+    Ok(())
+}
+
+fn get_linked_token(
+    token: &PkmKacsBootToken,
+    return_actual: bool,
+) -> Result<*const c_void, i32> {
+    let token_ptr = (token as *const PkmKacsBootToken).cast::<c_void>();
+    let partner_ptr;
+    let _guard = lock_session_table();
+    let Some(session) = token.session_ref() else {
+        return Err(-EACCES);
+    };
+
+    match token.elevation_type() {
+        TOKEN_ELEVATION_FULL_ABI => {
+            if session.linked_elevated != token_ptr {
+                return Err(-ENOENT);
+            }
+            partner_ptr = session.linked_filtered;
+        }
+        TOKEN_ELEVATION_LIMITED_ABI => {
+            if session.linked_filtered != token_ptr {
+                return Err(-ENOENT);
+            }
+            partner_ptr = session.linked_elevated;
+        }
+        TOKEN_ELEVATION_DEFAULT_ABI => return Err(-ENOENT),
+        _ => return Err(-EINVAL),
+    }
+
+    if partner_ptr.is_null() {
+        return Err(-ENOENT);
+    }
+
+    let Some(partner) = (unsafe { PkmKacsBootToken::from_ptr(partner_ptr) }) else {
+        return Err(-ENOENT);
+    };
+
+    if return_actual {
+        let partner_ref = PkmKacsBootToken::clone_ref(partner_ptr);
+        if partner_ref.is_null() {
+            return Err(-EACCES);
+        }
+        Ok(partner_ref)
+    } else {
+        partner.linked_query_copy()
+    }
 }
 
 fn min_impersonation_level(lhs: ImpersonationLevel, rhs: ImpersonationLevel) -> ImpersonationLevel {
@@ -3864,6 +4031,67 @@ pub extern "C" fn kacs_rust_token_duplicate(
     match source_token.duplicate(creator_token, token_type, impersonation_level) {
         Ok(token) => {
             *out_token = token;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn kacs_rust_token_link_tokens(
+    elevated_token: *const c_void,
+    filtered_token: *const c_void,
+    session_id: u64,
+) -> i32 {
+    let Some(elevated_token) = (unsafe { PkmKacsBootToken::from_ptr(elevated_token) }) else {
+        return -EACCES;
+    };
+    let Some(filtered_token) = (unsafe { PkmKacsBootToken::from_ptr(filtered_token) }) else {
+        return -EACCES;
+    };
+
+    match link_tokens_on_session(elevated_token, filtered_token, session_id) {
+        Ok(()) => 0,
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn kacs_rust_token_get_linked_actual(
+    token: *const c_void,
+    out_token: *mut *const c_void,
+) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let Some(out_token) = (unsafe { out_token.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    match get_linked_token(token, true) {
+        Ok(linked) => {
+            *out_token = linked;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn kacs_rust_token_get_linked_query_copy(
+    token: *const c_void,
+    out_token: *mut *const c_void,
+) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let Some(out_token) = (unsafe { out_token.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    match get_linked_token(token, false) {
+        Ok(linked) => {
+            *out_token = linked;
             0
         }
         Err(err) => err,

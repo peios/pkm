@@ -44,6 +44,9 @@
 #define KACS_LEVEL_IDENTIFICATION 0x01U
 #define KACS_LEVEL_IMPERSONATION 0x02U
 #define KACS_LEVEL_DELEGATION 0x03U
+#define KACS_ELEVATION_DEFAULT 0x01U
+#define KACS_ELEVATION_FULL 0x02U
+#define KACS_ELEVATION_LIMITED 0x03U
 
 struct kacs_query_args {
 	u32 token_class;
@@ -99,6 +102,16 @@ struct kacs_restrict_args {
 	s32 result_fd;
 };
 
+struct kacs_link_tokens_args {
+	s32 elevated_fd;
+	s32 filtered_fd;
+	u64 session_id;
+};
+
+struct kacs_get_linked_token_args {
+	s32 result_fd;
+};
+
 #define KACS_IOC_QUERY _IOWR(KACS_IOC_MAGIC, 0, struct kacs_query_args)
 #define KACS_IOC_ADJUST_PRIVS \
 	_IOW(KACS_IOC_MAGIC, 1, struct kacs_adjust_privs_args)
@@ -107,6 +120,10 @@ struct kacs_restrict_args {
 #define KACS_IOC_INSTALL _IO(KACS_IOC_MAGIC, 3)
 #define KACS_IOC_RESTRICT \
 	_IOWR(KACS_IOC_MAGIC, 4, struct kacs_restrict_args)
+#define KACS_IOC_LINK_TOKENS \
+	_IOW(KACS_IOC_MAGIC, 5, struct kacs_link_tokens_args)
+#define KACS_IOC_GET_LINKED_TOKEN \
+	_IOWR(KACS_IOC_MAGIC, 6, struct kacs_get_linked_token_args)
 #define KACS_IOC_ADJUST_GROUPS \
 	_IOW(KACS_IOC_MAGIC, 7, struct kacs_adjust_groups_args)
 #define KACS_IOC_IMPERSONATE _IO(KACS_IOC_MAGIC, 8)
@@ -171,6 +188,11 @@ long pkm_kacs_kunit_token_fd_restrict(int fd, const void *subject_token,
 				      const void *creator_token,
 				      struct kacs_restrict_args *args,
 				      const void *payload);
+long pkm_kacs_kunit_token_fd_link(int fd, const void *caller_token,
+				  struct kacs_link_tokens_args *args);
+long pkm_kacs_kunit_token_fd_get_linked(
+	int fd, const void *caller_token,
+	struct kacs_get_linked_token_args *args);
 long pkm_kacs_kunit_token_fd_adjust_groups(int fd,
 					   struct kacs_adjust_groups_args *args,
 					   const struct kacs_group_entry *entries);

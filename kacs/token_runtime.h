@@ -266,6 +266,12 @@ int kacs_rust_token_duplicate(const void *source_token,
 			      const void *creator_token, u32 token_type,
 			      u32 impersonation_level,
 			      const void **out_token);
+int kacs_rust_token_link_tokens(const void *elevated_token,
+				const void *filtered_token, u64 session_id);
+int kacs_rust_token_get_linked_actual(const void *token,
+				      const void **out_token);
+int kacs_rust_token_get_linked_query_copy(const void *token,
+					  const void **out_token);
 int kacs_rust_token_impersonation_gate(
 	const void *server_token, const void *client_token,
 	u32 *effective_level_out, u32 *used_impersonate_privilege_out);
