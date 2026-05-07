@@ -119,6 +119,8 @@
 #define PKM_KUNIT_USER_KIND_LOCAL_SERVICE 1U
 #define PKM_KUNIT_PRLIMIT_READ 1U
 #define PKM_KUNIT_PRLIMIT_WRITE 2U
+#define PKM_KUNIT_EXEC_SETID_UID 0x1U
+#define PKM_KUNIT_EXEC_SETID_GID 0x2U
 #define PKM_KUNIT_IL_UNTRUSTED 0U
 #define PKM_KUNIT_IL_LOW 4096U
 #define PKM_KUNIT_IL_MEDIUM 8192U
@@ -2573,6 +2575,112 @@ static void pkm_kunit_projected_fsids_fallback_to_raw_without_token(
 			0);
 	KUNIT_EXPECT_EQ(test, fsuid, 1234U);
 	KUNIT_EXPECT_EQ(test, fsgid, 1235U);
+}
+
+static void pkm_kunit_exec_setid_uid_compat_rewrites_visible_uid_only(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	struct pkm_kacs_kunit_exec_setid_view view = { };
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &before));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_check_exec_setid_compat_for_subject(
+				token, PKM_KUNIT_EXEC_SETID_UID, &view),
+			0L);
+
+	KUNIT_EXPECT_EQ(test, view.uid, 5000U);
+	KUNIT_EXPECT_EQ(test, view.euid, 5000U);
+	KUNIT_EXPECT_EQ(test, view.suid, 5000U);
+	KUNIT_EXPECT_EQ(test, view.fsuid, 3234U);
+	KUNIT_EXPECT_EQ(test, view.gid, 2234U);
+	KUNIT_EXPECT_EQ(test, view.egid, 2234U);
+	KUNIT_EXPECT_EQ(test, view.sgid, 2234U);
+	KUNIT_EXPECT_EQ(test, view.fsgid, 4234U);
+	KUNIT_EXPECT_EQ(test, view.projected_fsuid, before.projected_uid);
+	KUNIT_EXPECT_EQ(test, view.projected_fsgid, before.projected_gid);
+
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test, after.token_id, before.token_id);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id);
+	KUNIT_EXPECT_EQ(test, after.privileges_used, before.privileges_used);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_exec_setid_gid_compat_rewrites_visible_gid_only(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	struct pkm_kacs_kunit_exec_setid_view view = { };
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &before));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_check_exec_setid_compat_for_subject(
+				token, PKM_KUNIT_EXEC_SETID_GID, &view),
+			0L);
+
+	KUNIT_EXPECT_EQ(test, view.uid, 1234U);
+	KUNIT_EXPECT_EQ(test, view.euid, 1234U);
+	KUNIT_EXPECT_EQ(test, view.suid, 1234U);
+	KUNIT_EXPECT_EQ(test, view.fsuid, 3234U);
+	KUNIT_EXPECT_EQ(test, view.gid, 6000U);
+	KUNIT_EXPECT_EQ(test, view.egid, 6000U);
+	KUNIT_EXPECT_EQ(test, view.sgid, 6000U);
+	KUNIT_EXPECT_EQ(test, view.fsgid, 4234U);
+	KUNIT_EXPECT_EQ(test, view.projected_fsuid, before.projected_uid);
+	KUNIT_EXPECT_EQ(test, view.projected_fsgid, before.projected_gid);
+
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test, after.token_id, before.token_id);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id);
+	KUNIT_EXPECT_EQ(test, after.privileges_used, before.privileges_used);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_exec_setid_without_token_fails_closed(struct kunit *test)
+{
+	struct pkm_kacs_kunit_exec_setid_view view = { };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_exec_setid_compat_for_subject(
+				NULL, PKM_KUNIT_EXEC_SETID_UID, &view),
+			(long)-EACCES);
+}
+
+static void pkm_kunit_exec_setid_privileged_path_fails_closed(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kacs_kunit_exec_setid_view view = { };
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U,
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_exec_setid_compat_for_subject(
+				token,
+				PKM_KUNIT_EXEC_SETID_UID |
+					PKM_KUNIT_EXEC_SETID_GID,
+				&view),
+			(long)-EOPNOTSUPP);
+	kacs_rust_token_drop(token);
 }
 
 static void pkm_kunit_live_capable_sys_boot_uses_shutdown_privilege(
@@ -10011,6 +10119,12 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_setgroups_fixup_suppresses_unprivileged_change),
 	KUNIT_CASE(pkm_kunit_projected_fsids_follow_effective_token),
 	KUNIT_CASE(pkm_kunit_projected_fsids_fallback_to_raw_without_token),
+	KUNIT_CASE(
+		pkm_kunit_exec_setid_uid_compat_rewrites_visible_uid_only),
+	KUNIT_CASE(
+		pkm_kunit_exec_setid_gid_compat_rewrites_visible_gid_only),
+	KUNIT_CASE(pkm_kunit_exec_setid_without_token_fails_closed),
+	KUNIT_CASE(pkm_kunit_exec_setid_privileged_path_fails_closed),
 	KUNIT_CASE(pkm_kunit_live_capable_sys_boot_uses_shutdown_privilege),
 	KUNIT_CASE(pkm_kunit_token_deep_copy_independent),
 	KUNIT_CASE(pkm_kunit_resolved_ctx_fails_closed_on_null_token),

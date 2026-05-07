@@ -199,6 +199,19 @@ struct pkm_kacs_kunit_process_sd_set_args {
 	u32 security_info;
 };
 
+struct pkm_kacs_kunit_exec_setid_view {
+	u32 uid;
+	u32 euid;
+	u32 suid;
+	u32 fsuid;
+	u32 gid;
+	u32 egid;
+	u32 sgid;
+	u32 fsgid;
+	u32 projected_fsuid;
+	u32 projected_fsgid;
+};
+
 struct pkm_kacs_kunit_set_psb_args {
 	const void *subject_token;
 	const u8 *target_process_sd_ptr;
@@ -434,6 +447,9 @@ long pkm_kacs_kunit_check_setgid_fixup_for_subject(const void *subject_token,
 						   int flags);
 long pkm_kacs_kunit_check_setgroups_fixup_for_subject(
 	const void *subject_token);
+long pkm_kacs_kunit_check_exec_setid_compat_for_subject(
+	const void *subject_token, u32 exec_mask,
+	struct pkm_kacs_kunit_exec_setid_view *out);
 int pkm_kacs_kunit_projected_fsids_for_subject(const void *subject_token,
 					       u32 raw_fsuid, u32 raw_fsgid,
 					       u32 *fsuid_out,

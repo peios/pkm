@@ -2745,6 +2745,50 @@ static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm)
 		(const u8 *)bprm->buf, sizeof(bprm->buf));
 }
 
+static long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
+					       struct cred *new,
+					       const struct cred *old)
+{
+	bool uid_changed;
+	bool gid_changed;
+	struct user_struct *old_user;
+
+	if (!new || !old)
+		return -EACCES;
+
+	uid_changed = !uid_eq(new->euid, old->euid);
+	gid_changed = !gid_eq(new->egid, old->egid);
+
+	if ((uid_changed || gid_changed) && !subject_token)
+		return -EACCES;
+	if ((uid_changed || gid_changed) &&
+	    kacs_rust_token_has_enabled_privilege(
+		    subject_token, PKM_KACS_PRIVILEGE_SE_ASSIGN_PRIMARY))
+		return -EOPNOTSUPP;
+
+	pkm_kacs_copy_exec_compat_caps(new, old);
+
+	if (uid_changed) {
+		new->uid = new->euid;
+		new->suid = new->euid;
+		new->fsuid = old->fsuid;
+
+		if (new->user != old->user) {
+			old_user = get_uid(old->user);
+			free_uid(new->user);
+			new->user = old_user;
+		}
+	}
+
+	if (gid_changed) {
+		new->gid = new->egid;
+		new->sgid = new->egid;
+		new->fsgid = old->fsgid;
+	}
+
+	return 0;
+}
+
 static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 					 const struct file *file)
 {
@@ -2752,8 +2796,9 @@ static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 	if (!bprm || !bprm->cred)
 		return -EACCES;
 
-	pkm_kacs_copy_exec_compat_caps(bprm->cred, current_cred());
-	return 0;
+	return (int)pkm_kacs_bprm_creds_from_file_core(
+		pkm_kacs_current_effective_token_ptr(), bprm->cred,
+		current_cred());
 }
 
 static long pkm_kacs_open_process_token_task(
@@ -4040,6 +4085,101 @@ int pkm_kacs_kunit_reproject_exec_caps(
 	*permitted_out = pkm_kacs_kernel_cap_to_u64(&new.cap_permitted);
 	*ambient_out = pkm_kacs_kernel_cap_to_u64(&new.cap_ambient);
 	return 0;
+}
+
+long pkm_kacs_kunit_check_exec_setid_compat_for_subject(
+	const void *subject_token, u32 exec_mask,
+	struct pkm_kacs_kunit_exec_setid_view *out)
+{
+	static const u32 old_uid = 1234U;
+	static const u32 old_gid = 2234U;
+	static const u32 old_fsuid = 3234U;
+	static const u32 old_fsgid = 4234U;
+	static const u32 exec_uid = 5000U;
+	static const u32 exec_gid = 6000U;
+	struct cred *old;
+	struct cred *new;
+	struct pkm_kacs_cred_security *old_sec;
+	const struct cred *saved_old;
+	const struct cred *saved_new;
+	const void *token_ref = NULL;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+	if (exec_mask & ~0x3U)
+		return -EINVAL;
+
+	memset(out, 0, sizeof(*out));
+
+	old = prepare_creds();
+	if (!old)
+		return -ENOMEM;
+
+	old->uid = KUIDT_INIT(old_uid);
+	old->euid = KUIDT_INIT(old_uid);
+	old->suid = KUIDT_INIT(old_uid);
+	old->fsuid = KUIDT_INIT(old_fsuid);
+	old->gid = KGIDT_INIT(old_gid);
+	old->egid = KGIDT_INIT(old_gid);
+	old->sgid = KGIDT_INIT(old_gid);
+	old->fsgid = KGIDT_INIT(old_fsgid);
+
+	old_sec = pkm_kacs_cred(old);
+	if (old_sec->token) {
+		kacs_rust_token_drop(old_sec->token);
+		old_sec->token = NULL;
+	}
+	if (subject_token) {
+		token_ref = kacs_rust_token_clone(subject_token);
+		if (!token_ref) {
+			abort_creds(old);
+			return -ENOMEM;
+		}
+		old_sec->token = token_ref;
+	}
+	pkm_kacs_stamp_projected_ids(old_sec);
+
+	saved_old = override_creds(old);
+	new = prepare_creds();
+	if (!new) {
+		revert_creds(saved_old);
+		abort_creds(old);
+		return -ENOMEM;
+	}
+
+	if (exec_mask & 0x1U) {
+		new->euid = KUIDT_INIT(exec_uid);
+		new->suid = KUIDT_INIT(exec_uid);
+		new->fsuid = KUIDT_INIT(exec_uid);
+	}
+	if (exec_mask & 0x2U) {
+		new->egid = KGIDT_INIT(exec_gid);
+		new->sgid = KGIDT_INIT(exec_gid);
+		new->fsgid = KGIDT_INIT(exec_gid);
+	}
+
+	ret = pkm_kacs_bprm_creds_from_file_core(subject_token, new, old);
+	if (!ret) {
+		out->uid = __kuid_val(new->uid);
+		out->euid = __kuid_val(new->euid);
+		out->suid = __kuid_val(new->suid);
+		out->fsuid = __kuid_val(new->fsuid);
+		out->gid = __kgid_val(new->gid);
+		out->egid = __kgid_val(new->egid);
+		out->sgid = __kgid_val(new->sgid);
+		out->fsgid = __kgid_val(new->fsgid);
+
+		saved_new = override_creds(new);
+		out->projected_fsuid = __kuid_val(pkm_kacs_current_fsuid_kuid());
+		out->projected_fsgid = __kgid_val(pkm_kacs_current_fsgid_kgid());
+		revert_creds(saved_new);
+	}
+
+	abort_creds(new);
+	revert_creds(saved_old);
+	abort_creds(old);
+	return ret;
 }
 
 long pkm_kacs_kunit_check_setuid_fixup_for_subject(const void *subject_token,
