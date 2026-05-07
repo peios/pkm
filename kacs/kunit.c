@@ -5100,6 +5100,528 @@ static void pkm_kunit_set_process_sd_mandatory_resource_attr_protected(
 	kacs_rust_token_drop(subject_token);
 }
 
+static void pkm_kunit_get_token_sd_success(struct kunit *test)
+{
+	const u8 *subset = NULL;
+	const u8 *expected_subset = NULL;
+	const void *subject_token;
+	const void *target_token;
+	size_t subset_len = 0;
+	size_t expected_subset_len = 0;
+	long token_fd;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_get_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_OWNER_SECURITY_INFORMATION |
+					PKM_KUNIT_GROUP_SECURITY_INFORMATION |
+					PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&subset, &subset_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_token_sd_subset(
+				target_token,
+				PKM_KUNIT_OWNER_SECURITY_INFORMATION |
+					PKM_KUNIT_GROUP_SECURITY_INFORMATION |
+					PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, subset);
+	KUNIT_ASSERT_NOT_NULL(test, expected_subset);
+	KUNIT_EXPECT_EQ(test, subset_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test, memcmp(subset, expected_subset, subset_len), 0);
+
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)subset);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_get_token_sd_label_on_unlabeled_returns_empty_subset(
+	struct kunit *test)
+{
+	const u8 *subset = NULL;
+	const void *subject_token;
+	const void *target_token;
+	size_t subset_len = 0;
+	long token_fd;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_get_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_LABEL_SECURITY_INFORMATION,
+				&subset, &subset_len),
+			0L);
+	KUNIT_ASSERT_NOT_NULL(test, subset);
+	KUNIT_EXPECT_EQ(test, subset_len, (size_t)20);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(subset, 12), 0U);
+
+	pkm_kacs_free((void *)subset);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_get_token_sd_denied_by_token_sd(struct kunit *test)
+{
+	const u8 *subset = NULL;
+	const void *subject_token;
+	const void *target_token;
+	size_t subset_len = 0;
+	long token_fd;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		pkm_kacs_current_effective_token_ptr(), target_token,
+		KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_get_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&subset, &subset_len),
+			(long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, subset, NULL);
+	KUNIT_EXPECT_EQ(test, subset_len, (size_t)0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_get_token_sd_debug_does_not_bypass(struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const u8 *subset = NULL;
+	const void *subject_token;
+	const void *target_token;
+	size_t subset_len = 0;
+	long token_fd;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_DEBUG_PRIVILEGE);
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		pkm_kacs_current_effective_token_ptr(), target_token,
+		KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_get_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&subset, &subset_len),
+			(long)-EACCES);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used, before.privileges_used);
+	KUNIT_EXPECT_PTR_EQ(test, subset, NULL);
+	KUNIT_EXPECT_EQ(test, subset_len, (size_t)0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_token_sd_dacl_success(struct kunit *test)
+{
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const u8 *expected_subset = NULL;
+	const void *subject_token;
+	const void *target_token;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	size_t expected_subset_len = 0;
+	long token_fd;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	input_sd = kacs_rust_kunit_create_query_only_token_sd(&input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION, input_sd,
+				input_sd_len, &result_sd, &result_sd_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_process_sd_subset(
+				input_sd, input_sd_len,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, result_sd);
+	KUNIT_ASSERT_NOT_NULL(test, expected_subset);
+	KUNIT_EXPECT_EQ(test, result_sd_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result_sd, expected_subset, result_sd_len), 0);
+
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)result_sd);
+	pkm_kacs_free((void *)input_sd);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_set_token_sd_dacl_denied_without_write_dac(
+	struct kunit *test)
+{
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const void *subject_token;
+	const void *target_token;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	long token_fd;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		pkm_kacs_current_effective_token_ptr(), target_token,
+		KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	input_sd = kacs_rust_kunit_create_query_only_token_sd(&input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION, input_sd,
+				input_sd_len, &result_sd, &result_sd_len),
+			(long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, result_sd, NULL);
+	KUNIT_EXPECT_EQ(test, result_sd_len, (size_t)0);
+
+	pkm_kacs_free((void *)input_sd);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_token_sd_owner_self_success(struct kunit *test)
+{
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const u8 *expected_subset = NULL;
+	const void *subject_token;
+	const void *target_token;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	size_t expected_subset_len = 0;
+	long token_fd;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token, KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	input_sd = kacs_rust_create_default_process_sd(subject_token,
+						       &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_OWNER_SECURITY_INFORMATION, input_sd,
+				input_sd_len, &result_sd, &result_sd_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_process_sd_subset(
+				input_sd, input_sd_len,
+				PKM_KUNIT_OWNER_SECURITY_INFORMATION,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, result_sd);
+	KUNIT_ASSERT_NOT_NULL(test, expected_subset);
+	KUNIT_EXPECT_EQ(test, result_sd_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result_sd, expected_subset, result_sd_len), 0);
+
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)result_sd);
+	pkm_kacs_free((void *)input_sd);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_set_token_sd_owner_foreign_denied(struct kunit *test)
+{
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const void *subject_token;
+	const void *foreign_token;
+	const void *target_token;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	long token_fd;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	foreign_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, foreign_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		pkm_kacs_current_effective_token_ptr(), target_token,
+		KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	input_sd = kacs_rust_create_default_process_sd(foreign_token,
+						       &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_OWNER_SECURITY_INFORMATION, input_sd,
+				input_sd_len, &result_sd, &result_sd_len),
+			(long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, result_sd, NULL);
+	KUNIT_EXPECT_EQ(test, result_sd_len, (size_t)0);
+
+	pkm_kacs_free((void *)input_sd);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+	kacs_rust_token_drop(foreign_token);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_token_sd_label_requires_relabel(
+	struct kunit *test)
+{
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const void *subject_token;
+	const void *target_token;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	long token_fd;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0, 0);
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		pkm_kacs_current_effective_token_ptr(), target_token,
+		KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_LABEL_SECURITY_INFORMATION, input_sd,
+				input_sd_len, &result_sd, &result_sd_len),
+			(long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, result_sd, NULL);
+	KUNIT_EXPECT_EQ(test, result_sd_len, (size_t)0);
+
+	pkm_kacs_free((void *)input_sd);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_token_sd_label_with_privilege_succeeds(
+	struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const u8 *expected_subset = NULL;
+	const void *subject_token;
+	const void *target_token;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	size_t expected_subset_len = 0;
+	long token_fd;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0,
+		PKM_KUNIT_SE_RELABEL_PRIVILEGE);
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		pkm_kacs_current_effective_token_ptr(), target_token,
+		KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_LABEL_SECURITY_INFORMATION, input_sd,
+				input_sd_len, &result_sd, &result_sd_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_process_sd_subset(
+				input_sd, input_sd_len,
+				PKM_KUNIT_LABEL_SECURITY_INFORMATION,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test, result_sd_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result_sd, expected_subset, result_sd_len), 0);
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_RELABEL_PRIVILEGE);
+
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)result_sd);
+	pkm_kacs_free((void *)input_sd);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_token_sd_restore_bypasses_access_check(
+	struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const u8 *expected_subset = NULL;
+	const void *subject_token;
+	const void *target_token;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	size_t expected_subset_len = 0;
+	long token_fd;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_RESTORE_PRIVILEGE);
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		pkm_kacs_current_effective_token_ptr(), target_token,
+		KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	input_sd = kacs_rust_kunit_create_query_only_token_sd(&input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION, input_sd,
+				input_sd_len, &result_sd, &result_sd_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_process_sd_subset(
+				input_sd, input_sd_len,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test, result_sd_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result_sd, expected_subset, result_sd_len), 0);
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_RESTORE_PRIVILEGE);
+
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)result_sd);
+	pkm_kacs_free((void *)input_sd);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+	kacs_rust_token_drop(subject_token);
+}
+
 static void pkm_kunit_token_duplicate_primary_to_impersonation(
 	struct kunit *test)
 {
@@ -9284,6 +9806,18 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_set_process_sd_sacl_label_combo_invalid),
 	KUNIT_CASE(
 		pkm_kunit_set_process_sd_mandatory_resource_attr_protected),
+	KUNIT_CASE(pkm_kunit_get_token_sd_success),
+	KUNIT_CASE(
+		pkm_kunit_get_token_sd_label_on_unlabeled_returns_empty_subset),
+	KUNIT_CASE(pkm_kunit_get_token_sd_denied_by_token_sd),
+	KUNIT_CASE(pkm_kunit_get_token_sd_debug_does_not_bypass),
+	KUNIT_CASE(pkm_kunit_set_token_sd_dacl_success),
+	KUNIT_CASE(pkm_kunit_set_token_sd_dacl_denied_without_write_dac),
+	KUNIT_CASE(pkm_kunit_set_token_sd_owner_self_success),
+	KUNIT_CASE(pkm_kunit_set_token_sd_owner_foreign_denied),
+	KUNIT_CASE(pkm_kunit_set_token_sd_label_requires_relabel),
+	KUNIT_CASE(pkm_kunit_set_token_sd_label_with_privilege_succeeds),
+	KUNIT_CASE(pkm_kunit_set_token_sd_restore_bypasses_access_check),
 	KUNIT_CASE(pkm_kunit_token_duplicate_primary_to_impersonation),
 	KUNIT_CASE(
 		pkm_kunit_token_duplicate_impersonation_level_escalation_fails_closed),

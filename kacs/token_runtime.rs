@@ -2849,6 +2849,28 @@ impl PkmKacsBootToken {
     fn own_sd(&self) -> Option<SecurityDescriptor<'_>> {
         SecurityDescriptor::parse(self.own_sd_bytes()).ok()
     }
+
+    fn replace_own_sd(
+        &self,
+        subject: &PkmKacsBootToken,
+        security_info: u32,
+        input_sd_bytes: &[u8],
+    ) -> Result<(), i32> {
+        let _guard = self.lock_mutation();
+        let modified_id = self.modified_id.load(Ordering::Relaxed);
+        let Some(next_modified_id) = modified_id.checked_add(1) else {
+            return Err(-ERANGE);
+        };
+        let (new_sd_ptr, new_sd_len) =
+            merge_process_sd_bytes(subject, self.own_sd_bytes(), security_info, input_sd_bytes)?;
+        let old_sd_ptr = self.own_sd_ptr.load(Ordering::Relaxed);
+
+        self.own_sd_ptr.store(new_sd_ptr, Ordering::Relaxed);
+        self.own_sd_len.store(new_sd_len, Ordering::Relaxed);
+        self.modified_id.store(next_modified_id, Ordering::Relaxed);
+        free_allocated_bytes(old_sd_ptr);
+        Ok(())
+    }
 }
 
 pub(crate) fn with_access_check_resolved_from_token<T>(
@@ -3023,6 +3045,72 @@ fn token_open_check_errno(
             | Err(KacsError::NullSecurityDescriptor)
             | Err(KacsError::Truncated(_)) => -EACCES,
             Err(_) => -EACCES,
+        }
+    })
+}
+
+fn token_sd_access_check_errno_with_intent(
+    subject_token: *const c_void,
+    target_token: *const c_void,
+    desired: u32,
+    privilege_intent: u32,
+) -> Result<u32, i32> {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
+        return Err(-EACCES);
+    };
+    let Some(target) = (unsafe { PkmKacsBootToken::from_ptr(target_token) }) else {
+        return Err(-EACCES);
+    };
+    let Some(target_sd) = target.own_sd() else {
+        return Err(-EACCES);
+    };
+    let normalized = match TOKEN_GENERIC_MAPPING.normalize_desired_access(desired) {
+        Ok(normalized) => normalized,
+        Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
+        Err(_) => return Err(-EINVAL),
+    };
+    let conditional_context = ConditionalContext::default();
+    let pip = PipContext {
+        pip_type: 0,
+        pip_trust: 0,
+    };
+
+    subject.with_access_token(|subject_token| {
+        match access_check_core(
+            Some(&target_sd),
+            &subject_token,
+            pip,
+            desired,
+            &TOKEN_GENERIC_MAPPING,
+            AccessCheckMode::Scalar,
+            None,
+            &conditional_context,
+            None,
+            privilege_intent,
+            EMPTY_POLICIES,
+        ) {
+            Ok(result) => {
+                subject.mark_privileges_used(result.updated_privileges.used);
+                let granted = result
+                    .object_granted_list
+                    .as_ref()
+                    .and_then(|list| list.first().copied())
+                    .unwrap_or(result.granted);
+                let allowed = result.mapped_desired == 0
+                    || (granted & result.mapped_desired) == result.mapped_desired;
+
+                if !allowed {
+                    return Err(-EACCES);
+                }
+                if normalized.maximum_allowed {
+                    Ok(granted)
+                } else {
+                    Ok(granted & normalized.mapped)
+                }
+            }
+            Err(KacsError::AllocationFailure) => Err(-ENOMEM),
+            Err(KacsError::ReservedAccessMaskBits(_)) => Err(-EINVAL),
+            Err(_) => Err(-EACCES),
         }
     })
 }
@@ -3536,6 +3624,32 @@ pub extern "C" fn kacs_rust_kunit_create_process_sd_with_mandatory_resource_attr
 }
 
 #[no_mangle]
+/// Builds a KUnit-only token SD that grants only the bounded self query and
+/// non-escalating adjust rights to the token user SID.
+pub extern "C" fn kacs_rust_kunit_create_query_only_token_sd(len_out: *mut usize) -> *const u8 {
+    let Some(token_ptr) = PkmKacsBootToken::create_query_only_system() else {
+        return null();
+    };
+    let result = {
+        let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+            unsafe { PkmKacsBootToken::drop_ref(token_ptr) };
+            return null();
+        };
+        alloc_copy_bytes(token.own_sd_bytes())
+    };
+
+    unsafe { PkmKacsBootToken::drop_ref(token_ptr) };
+    let Ok((ptr, len)) = result else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
 /// Runs AccessCheck against one process SD using the supplied caller token.
 pub extern "C" fn kacs_rust_check_process_sd(
     subject_token_ptr: *const c_void,
@@ -3593,6 +3707,36 @@ pub extern "C" fn kacs_rust_check_process_sd_with_intent(
 }
 
 #[no_mangle]
+/// Runs live AccessCheck against one token's own SD using the supplied caller
+/// token and privilege-intent flags.
+pub extern "C" fn kacs_rust_check_token_sd_with_intent(
+    subject_token_ptr: *const c_void,
+    target_token_ptr: *const c_void,
+    desired: u32,
+    privilege_intent: u32,
+    granted_out: *mut u32,
+) -> i32 {
+    if desired == 0 {
+        return -EINVAL;
+    }
+
+    match token_sd_access_check_errno_with_intent(
+        subject_token_ptr,
+        target_token_ptr,
+        desired,
+        privilege_intent,
+    ) {
+        Ok(granted) => {
+            if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                *granted_out = granted;
+            }
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
 /// Serializes a requested subset of a live process SD into one self-relative
 /// descriptor buffer.
 pub extern "C" fn kacs_rust_query_process_sd_subset(
@@ -3618,6 +3762,38 @@ pub extern "C" fn kacs_rust_query_process_sd_subset(
 
     let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
     match build_sd_subset_bytes(sd_bytes, security_info) {
+        Ok((ptr, len)) => {
+            *out_sd_ptr = ptr.cast_const();
+            *out_sd_len = len;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Serializes a requested subset of a live token SD into one self-relative
+/// descriptor buffer.
+pub extern "C" fn kacs_rust_query_token_sd_subset(
+    token_ptr: *const c_void,
+    security_info: u32,
+    out_sd_ptr: *mut *const u8,
+    out_sd_len: *mut usize,
+) -> i32 {
+    let Some(out_sd_ptr) = (unsafe { out_sd_ptr.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(out_sd_len) = (unsafe { out_sd_len.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return -EACCES;
+    };
+
+    *out_sd_ptr = null();
+    *out_sd_len = 0;
+
+    match build_sd_subset_bytes(token.own_sd_bytes(), security_info) {
         Ok((ptr, len)) => {
             *out_sd_ptr = ptr.cast_const();
             *out_sd_len = len;
@@ -3669,6 +3845,34 @@ pub extern "C" fn kacs_rust_merge_process_sd(
             *out_sd_len = len;
             0
         }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Merges one caller-supplied subset descriptor into the current live token SD
+/// using the generic set-security rules.
+pub extern "C" fn kacs_rust_set_token_sd(
+    subject_token_ptr: *const c_void,
+    target_token_ptr: *const c_void,
+    security_info: u32,
+    input_sd_ptr: *const u8,
+    input_sd_len: usize,
+) -> i32 {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token_ptr) }) else {
+        return -EACCES;
+    };
+    let Some(target) = (unsafe { PkmKacsBootToken::from_ptr(target_token_ptr) }) else {
+        return -EACCES;
+    };
+
+    if input_sd_ptr.is_null() || input_sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let input_sd_bytes = unsafe { core::slice::from_raw_parts(input_sd_ptr, input_sd_len) };
+    match target.replace_own_sd(subject, security_info, input_sd_bytes) {
+        Ok(()) => 0,
         Err(err) => err,
     }
 }

@@ -1802,6 +1802,96 @@ static long pkm_kacs_resolve_pidfd_process_target(
 	return 0;
 }
 
+static long pkm_kacs_resolve_tokenfd_target(int dirfd,
+					    const char __user *path,
+					    u32 flags,
+					    const void **subject_token_out,
+					    const void **target_token_out)
+{
+	const void *subject_token;
+	const void *target_token = NULL;
+	long ret;
+
+	if (!subject_token_out || !target_token_out)
+		return -EINVAL;
+
+	ret = pkm_kacs_validate_empty_path_target(path, flags);
+	if (ret)
+		return ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!subject_token)
+		return -EACCES;
+
+	ret = pkm_kacs_token_fd_clone_token(dirfd, &target_token, NULL);
+	if (ret == -EINVAL)
+		return -EOPNOTSUPP;
+	if (ret)
+		return ret;
+
+	*subject_token_out = subject_token;
+	*target_token_out = target_token;
+	return 0;
+}
+
+static long pkm_kacs_query_token_sd_core(const void *subject_token,
+					 const void *target_token,
+					 u32 security_info,
+					 const u8 **out_sd_ptr,
+					 size_t *out_sd_len)
+{
+	u32 desired_access;
+	u32 granted = 0;
+	long ret;
+
+	if (!subject_token || !target_token || !out_sd_ptr || !out_sd_len)
+		return -EINVAL;
+
+	*out_sd_ptr = NULL;
+	*out_sd_len = 0;
+
+	ret = pkm_kacs_get_sd_required_access(security_info, &desired_access);
+	if (ret)
+		return ret;
+
+	ret = kacs_rust_check_token_sd_with_intent(subject_token, target_token,
+						   desired_access, 0,
+						   &granted);
+	if (ret)
+		return ret;
+
+	return kacs_rust_query_token_sd_subset(target_token, security_info,
+					       out_sd_ptr, out_sd_len);
+}
+
+static long pkm_kacs_set_token_sd_core(const void *subject_token,
+				       const void *target_token,
+				       u32 security_info,
+				       const u8 *input_sd_ptr,
+				       size_t input_sd_len)
+{
+	u32 desired_access;
+	u32 granted = 0;
+	long ret;
+
+	if (!subject_token || !target_token || !input_sd_ptr || input_sd_len == 0)
+		return -EINVAL;
+
+	ret = pkm_kacs_set_sd_required_access(security_info, &desired_access);
+	if (ret)
+		return ret;
+
+	ret = kacs_rust_check_token_sd_with_intent(subject_token, target_token,
+						   desired_access,
+						   KACS_RESTORE_INTENT,
+						   &granted);
+	if (ret)
+		return ret;
+
+	return kacs_rust_set_token_sd(subject_token, target_token, security_info,
+				      input_sd_ptr, input_sd_len);
+}
+
 static long pkm_kacs_query_process_sd_core(
 	const void *subject_token,
 	const struct pkm_kacs_process_state *caller_state,
@@ -3468,6 +3558,64 @@ out:
 	return ret;
 }
 
+long pkm_kacs_kunit_get_token_sd_for_subject(int token_fd,
+					     const void *subject_token,
+					     u32 security_info,
+					     const u8 **out_sd_ptr,
+					     size_t *out_sd_len)
+{
+	const void *target_token = NULL;
+	long ret;
+
+	if (!subject_token || !out_sd_ptr || !out_sd_len)
+		return -EINVAL;
+
+	ret = pkm_kacs_token_fd_clone_token(token_fd, &target_token, NULL);
+	if (ret)
+		return ret;
+
+	ret = pkm_kacs_query_token_sd_core(subject_token, target_token,
+					   security_info, out_sd_ptr,
+					   out_sd_len);
+	kacs_rust_token_drop(target_token);
+	return ret;
+}
+
+long pkm_kacs_kunit_set_token_sd_for_subject(int token_fd,
+					     const void *subject_token,
+					     u32 security_info,
+					     const u8 *input_sd_ptr,
+					     size_t input_sd_len,
+					     const u8 **out_sd_ptr,
+					     size_t *out_sd_len)
+{
+	const void *target_token = NULL;
+	long ret;
+
+	if (!subject_token || !input_sd_ptr || input_sd_len == 0 || !out_sd_ptr ||
+	    !out_sd_len)
+		return -EINVAL;
+
+	*out_sd_ptr = NULL;
+	*out_sd_len = 0;
+
+	ret = pkm_kacs_token_fd_clone_token(token_fd, &target_token, NULL);
+	if (ret)
+		return ret;
+
+	ret = pkm_kacs_set_token_sd_core(subject_token, target_token,
+					 security_info, input_sd_ptr,
+					 input_sd_len);
+	if (!ret)
+		ret = kacs_rust_query_token_sd_subset(target_token,
+						      security_info,
+						      out_sd_ptr,
+						      out_sd_len);
+
+	kacs_rust_token_drop(target_token);
+	return ret;
+}
+
 long pkm_kacs_kunit_open_current_thread_token_for_subject(
 	const void *subject_token, u32 access_mask)
 {
@@ -3816,11 +3964,23 @@ SYSCALL_DEFINE6(kacs_get_sd, int, dirfd, const char __user *, path,
 	struct pkm_kacs_process_state *caller_state;
 	struct pkm_kacs_process_state *target_state;
 	const void *subject_token;
+	const void *target_token = NULL;
 	struct task_struct *task = NULL;
 	const u8 *result_sd = NULL;
 	size_t result_len = 0;
 	bool self_target;
 	long ret;
+
+	ret = pkm_kacs_resolve_tokenfd_target(dirfd, path, flags, &subject_token,
+					      &target_token);
+	if (!ret) {
+		ret = pkm_kacs_query_token_sd_core(subject_token, target_token,
+						   security_info, &result_sd,
+						   &result_len);
+		goto out;
+	}
+	if (ret != -EOPNOTSUPP)
+		return ret;
 
 	ret = pkm_kacs_resolve_pidfd_process_target(
 		dirfd, path, flags, &subject_token, &caller_state, &task,
@@ -3833,6 +3993,7 @@ SYSCALL_DEFINE6(kacs_get_sd, int, dirfd, const char __user *, path,
 					     security_info, &result_sd,
 					     &result_len);
 	put_task_struct(task);
+	task = NULL;
 	if (ret)
 		goto out;
 
@@ -3848,6 +4009,8 @@ SYSCALL_DEFINE6(kacs_get_sd, int, dirfd, const char __user *, path,
 out:
 	if (result_sd)
 		pkm_kacs_free((void *)result_sd);
+	if (target_token)
+		kacs_rust_token_drop(target_token);
 	return ret;
 }
 
@@ -3858,6 +4021,7 @@ SYSCALL_DEFINE6(kacs_set_sd, int, dirfd, const char __user *, path,
 	struct pkm_kacs_process_state *caller_state;
 	struct pkm_kacs_process_state *target_state;
 	const void *subject_token;
+	const void *target_token = NULL;
 	struct task_struct *task = NULL;
 	u8 *input_sd = NULL;
 	bool self_target;
@@ -3866,11 +4030,28 @@ SYSCALL_DEFINE6(kacs_set_sd, int, dirfd, const char __user *, path,
 	if (!sd_buf || sd_len == 0 || sd_len > PKM_KACS_MAX_SD_BYTES)
 		return -EINVAL;
 
+	ret = pkm_kacs_resolve_tokenfd_target(dirfd, path, flags, &subject_token,
+					      &target_token);
+	if (!ret) {
+		input_sd = memdup_user(sd_buf, sd_len);
+		if (IS_ERR(input_sd)) {
+			ret = PTR_ERR(input_sd);
+			input_sd = NULL;
+			goto out;
+		}
+		ret = pkm_kacs_set_token_sd_core(subject_token, target_token,
+						 security_info, input_sd,
+						 sd_len);
+		goto out;
+	}
+	if (ret != -EOPNOTSUPP)
+		goto out;
+
 	ret = pkm_kacs_resolve_pidfd_process_target(
 		dirfd, path, flags, &subject_token, &caller_state, &task,
 		&target_state, &self_target);
 	if (ret)
-		return ret;
+		goto out;
 
 	input_sd = memdup_user(sd_buf, sd_len);
 	if (IS_ERR(input_sd)) {
@@ -3885,6 +4066,8 @@ SYSCALL_DEFINE6(kacs_set_sd, int, dirfd, const char __user *, path,
 
 out:
 	kfree(input_sd);
+	if (target_token)
+		kacs_rust_token_drop(target_token);
 	if (task)
 		put_task_struct(task);
 	return ret;
