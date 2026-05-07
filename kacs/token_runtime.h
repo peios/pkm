@@ -374,6 +374,21 @@ int pkm_kacs_kunit_check_task_prctl_mitigations(
 	unsigned long arg3, unsigned long arg4, unsigned long arg5);
 int pkm_kacs_kunit_check_pie_bprm(u32 mitigation_bits, const u8 *buf,
 				  size_t len);
+u64 pkm_kacs_kunit_allow_cap_mask(void);
+long pkm_kacs_kunit_check_capability_for_subject(const void *subject_token,
+						 int cap);
+long pkm_kacs_kunit_check_capset_for_subject(const void *subject_token,
+					     u64 effective_mask,
+					     u64 inheritable_mask,
+					     u64 permitted_mask);
+long pkm_kacs_kunit_check_prctl_capability_guard_for_subject(
+	const void *subject_token, u64 ambient_mask, int option,
+	unsigned long arg2, unsigned long arg3, unsigned long arg4,
+	unsigned long arg5);
+int pkm_kacs_kunit_reproject_exec_caps(
+	u64 effective_mask, u64 inheritable_mask, u64 permitted_mask,
+	u64 ambient_mask, u64 *effective_out, u64 *inheritable_out,
+	u64 *permitted_out, u64 *ambient_out);
 #endif
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_RUNTIME_H */

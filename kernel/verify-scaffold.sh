@@ -116,6 +116,16 @@ if ! rg -q 'pkm_kacs_sched_setaffinity' \
 	die "install-pkm-subtree.sh does not stage the sched_setaffinity KACS patch"
 fi
 
+if ! rg -q 'pkm_kacs_capable_in_cred_ns' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the commoncap capability switchboard patch"
+fi
+
+if ! rg -q 'pkm_kacs_prctl_capability_guard' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the prctl capability guard patch"
+fi
+
 if ! rg -q 'PTRACE_MODE_PROC_QUERY_INFORMATION' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
    ! rg -q 'PTRACE_MODE_PROC_QUERY_LIMITED' \

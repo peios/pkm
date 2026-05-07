@@ -218,6 +218,8 @@ require_file "$kernel_root/fs/proc/array.c"
 require_file "$kernel_root/include/linux/ptrace.h"
 require_file "$kernel_root/kernel/pid.c"
 require_file "$kernel_root/kernel/sched/syscalls.c"
+require_file "$kernel_root/kernel/sys.c"
+require_file "$kernel_root/security/commoncap.c"
 
 rm -rf "$pkm_dir"
 mkdir -p "$pkm_dir/kacs"
@@ -248,6 +250,25 @@ install -m 0644 "$src_root/pkm_makefile" "$pkm_dir/Makefile"
 
 append_line_once 'obj-$(CONFIG_SECURITY_PKM) += pkm/' "$kernel_root/security/Makefile"
 insert_source_kconfig "$kernel_root/security/Kconfig"
+insert_block_before_exact_once 'int cap_capable(const struct cred *cred, struct user_namespace *target_ns,' \
+	'extern long pkm_kacs_capable_in_cred_ns' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern long pkm_kacs_capable_in_cred_ns(const struct cred *cred,
+					struct user_namespace *target_ns,
+					int cap, unsigned int opts);
+#endif
+
+' \
+	"$kernel_root/security/commoncap.c"
+replace_line_after_anchor_once 'int cap_capable(const struct cred *cred, struct user_namespace *target_ns,' \
+	'	int ret = cap_capable_helper(cred, target_ns, cred_ns, cap);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	int ret = pkm_kacs_capable_in_cred_ns(cred, target_ns, cap, opts);
+#else
+	int ret = cap_capable_helper(cred, target_ns, cred_ns, cap);
+#endif
+' \
+	"$kernel_root/security/commoncap.c"
 insert_line_after_exact_once '#define PTRACE_MODE_REALCREDS	0x10' \
 	'#define PTRACE_MODE_GETFD	0x20' \
 	"$kernel_root/include/linux/ptrace.h"
@@ -322,6 +343,27 @@ replace_line_after_anchor_once 'long sched_setaffinity(pid_t pid, const struct c
 #endif
 ' \
 	"$kernel_root/kernel/sched/syscalls.c"
+insert_block_before_exact_once 'SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,' \
+	'extern long pkm_kacs_prctl_capability_guard' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern long pkm_kacs_prctl_capability_guard(int option, unsigned long arg2,
+					    unsigned long arg3,
+					    unsigned long arg4,
+					    unsigned long arg5);
+#endif
+
+' \
+	"$kernel_root/kernel/sys.c"
+replace_line_after_anchor_once 'SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,' \
+	'	error = security_task_prctl(option, arg2, arg3, arg4, arg5);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	error = pkm_kacs_prctl_capability_guard(option, arg2, arg3, arg4,
+						 arg5);
+	if (error)
+		return error;
+#endif
+	error = security_task_prctl(option, arg2, arg3, arg4, arg5);' \
+	"$kernel_root/kernel/sys.c"
 insert_block_before_exact_once 'static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,' \
 	'static unsigned int proc_pkm_metadata_ptrace_mode' \
 	'static unsigned int proc_pkm_metadata_ptrace_mode(const struct file *file)

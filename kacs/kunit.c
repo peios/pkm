@@ -60,6 +60,7 @@
 #define PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE (1ULL << 3)
 #define PKM_KUNIT_SE_TCB_PRIVILEGE (1ULL << 7)
 #define PKM_KUNIT_SE_INCREASE_BASE_PRIORITY_PRIVILEGE (1ULL << 14)
+#define PKM_KUNIT_SE_SHUTDOWN_PRIVILEGE (1ULL << 19)
 #define PKM_KUNIT_SE_DEBUG_PRIVILEGE (1ULL << 20)
 #define PKM_KUNIT_SE_SECURITY_PRIVILEGE (1ULL << 8)
 #define PKM_KUNIT_SE_RESTORE_PRIVILEGE (1ULL << 18)
@@ -2085,9 +2086,221 @@ static void pkm_kunit_boot_allow_caps(struct kunit *test)
 			memcmp(&cred->cap_effective, &cred->cap_inheritable,
 			       sizeof(kernel_cap_t)),
 			0);
+	KUNIT_EXPECT_TRUE(test, cap_raised(cred->cap_bset, CAP_CHOWN));
+	KUNIT_EXPECT_TRUE(test, cap_raised(cred->cap_bset, CAP_DAC_OVERRIDE));
+	KUNIT_EXPECT_TRUE(test,
+			  cap_raised(cred->cap_bset, CAP_DAC_READ_SEARCH));
+	KUNIT_EXPECT_TRUE(test, cap_raised(cred->cap_bset, CAP_FOWNER));
+	KUNIT_EXPECT_TRUE(test, cap_raised(cred->cap_bset, CAP_FSETID));
+	KUNIT_EXPECT_TRUE(test, cap_raised(cred->cap_bset, CAP_KILL));
+	KUNIT_EXPECT_TRUE(test, cap_raised(cred->cap_bset, CAP_SETGID));
+	KUNIT_EXPECT_TRUE(test, cap_raised(cred->cap_bset, CAP_SETUID));
+	KUNIT_EXPECT_TRUE(test,
+			  cap_raised(cred->cap_bset, CAP_NET_BROADCAST));
+	KUNIT_EXPECT_TRUE(test, cap_raised(cred->cap_bset, CAP_IPC_OWNER));
+	KUNIT_EXPECT_TRUE(test, cap_raised(cred->cap_bset, CAP_LEASE));
 	KUNIT_EXPECT_EQ(test,
 			memcmp(&cred->cap_ambient, &empty, sizeof(kernel_cap_t)),
 			0);
+}
+
+static void pkm_kunit_capability_allow_succeeds_without_privilege(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, 1U, 0U, PKM_KUNIT_IL_SYSTEM, 0U,
+		0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(token, &before));
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_capability_for_subject(token,
+								     CAP_CHOWN),
+			0L);
+
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used, before.privileges_used);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_capability_privilege_success_marks_used(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, 1U, 0U, PKM_KUNIT_IL_SYSTEM, 0U,
+		PKM_KUNIT_SE_SHUTDOWN_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(token, &before));
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_capability_for_subject(
+				token, CAP_SYS_BOOT),
+			0L);
+
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_SHUTDOWN_PRIVILEGE);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_capability_privilege_denied_without_privilege(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, 1U, 0U, PKM_KUNIT_IL_SYSTEM, 0U,
+		0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(token, &before));
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_capability_for_subject(
+				token, CAP_SYS_BOOT),
+			(long)-EPERM);
+
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used, before.privileges_used);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_capability_denied_caps_fail_closed(struct kunit *test)
+{
+	const void *token;
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, 1U, 0U, PKM_KUNIT_IL_SYSTEM, 0U,
+		PKM_KUNIT_SYSTEM_PRIVILEGES_ALL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(token, &before));
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_capability_for_subject(
+				token, CAP_SETPCAP),
+			(long)-EPERM);
+
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used, before.privileges_used);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_capset_preserves_allow_and_rejects_clear(
+	struct kunit *test)
+{
+	const void *token;
+	u64 allow_mask;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, 1U, 0U, PKM_KUNIT_IL_SYSTEM, 0U,
+		0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	allow_mask = pkm_kacs_kunit_allow_cap_mask();
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_capset_for_subject(
+				token, allow_mask | (1ULL << CAP_SYS_BOOT),
+				allow_mask | (1ULL << CAP_SYS_BOOT),
+				allow_mask | (1ULL << CAP_SYS_BOOT)),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_capset_for_subject(
+				token,
+				allow_mask & ~(1ULL << CAP_CHOWN),
+				allow_mask, allow_mask),
+			(long)-EPERM);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_prctl_capability_guard_rejects_allow_mutations(
+	struct kunit *test)
+{
+	const void *token;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, 1U, 0U, PKM_KUNIT_IL_SYSTEM, 0U,
+		0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_prctl_capability_guard_for_subject(
+				token, 0ULL, PR_CAPBSET_DROP, CAP_CHOWN, 0, 0,
+				0),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_prctl_capability_guard_for_subject(
+				token, 1ULL << CAP_CHOWN, PR_CAP_AMBIENT,
+				PR_CAP_AMBIENT_LOWER, CAP_CHOWN, 0, 0),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_prctl_capability_guard_for_subject(
+				token, 1ULL << CAP_SYS_BOOT, PR_CAP_AMBIENT,
+				PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0),
+			0L);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_exec_cap_reprojection_suppresses_filecap_grants(
+	struct kunit *test)
+{
+	u64 allow_mask;
+	u64 effective_out = 0;
+	u64 inheritable_out = 0;
+	u64 permitted_out = 0;
+	u64 ambient_out = 0;
+
+	allow_mask = pkm_kacs_kunit_allow_cap_mask();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_reproject_exec_caps(
+				allow_mask | (1ULL << CAP_SYS_BOOT),
+				allow_mask | (1ULL << CAP_SYS_BOOT),
+				allow_mask | (1ULL << CAP_SYS_BOOT),
+				1ULL << CAP_SYS_BOOT, &effective_out,
+				&inheritable_out, &permitted_out,
+				&ambient_out),
+			0);
+	KUNIT_EXPECT_EQ(test, effective_out, allow_mask);
+	KUNIT_EXPECT_EQ(test, inheritable_out, allow_mask);
+	KUNIT_EXPECT_EQ(test, permitted_out, allow_mask);
+	KUNIT_EXPECT_EQ(test, ambient_out, 0ULL);
+}
+
+static void pkm_kunit_live_capable_sys_boot_uses_shutdown_privilege(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+
+	token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(token, &before));
+
+	KUNIT_EXPECT_TRUE(test, capable(CAP_SYS_BOOT));
+
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_SHUTDOWN_PRIVILEGE);
 }
 
 static void pkm_kunit_token_deep_copy_independent(struct kunit *test)
@@ -8963,6 +9176,14 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_boot_system_defaults),
 	KUNIT_CASE(pkm_kunit_current_token_resolution),
 	KUNIT_CASE(pkm_kunit_boot_allow_caps),
+	KUNIT_CASE(pkm_kunit_capability_allow_succeeds_without_privilege),
+	KUNIT_CASE(pkm_kunit_capability_privilege_success_marks_used),
+	KUNIT_CASE(pkm_kunit_capability_privilege_denied_without_privilege),
+	KUNIT_CASE(pkm_kunit_capability_denied_caps_fail_closed),
+	KUNIT_CASE(pkm_kunit_capset_preserves_allow_and_rejects_clear),
+	KUNIT_CASE(pkm_kunit_prctl_capability_guard_rejects_allow_mutations),
+	KUNIT_CASE(pkm_kunit_exec_cap_reprojection_suppresses_filecap_grants),
+	KUNIT_CASE(pkm_kunit_live_capable_sys_boot_uses_shutdown_privilege),
 	KUNIT_CASE(pkm_kunit_token_deep_copy_independent),
 	KUNIT_CASE(pkm_kunit_resolved_ctx_fails_closed_on_null_token),
 	KUNIT_CASE(pkm_kunit_open_self_token_effective_query),
