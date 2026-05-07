@@ -55,7 +55,10 @@ for syscall in \
 	"1001 kacs_open_process_token" \
 	"1002 kacs_open_thread_token" \
 	"1005 kacs_set_psb" \
+	"1010 kacs_open_peer_token" \
+	"1011 kacs_impersonate_peer" \
 	"1012 kacs_revert" \
+	"1013 kacs_set_impersonation_level" \
 	"1090 kmes_emit" \
 	"1091 kmes_attach" \
 	"1092 kmes_emit_batch" \

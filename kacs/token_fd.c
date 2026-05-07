@@ -226,23 +226,34 @@ static long pkm_kacs_token_duplicate_core(
 	return 0;
 }
 
+static long pkm_kacs_impersonate_token_core(const void *client_token,
+					    const void *server_primary_token);
+
 static long pkm_kacs_token_impersonate_core(
 	struct pkm_kacs_token_file *tf,
 	const void *server_primary_token)
+{
+	if (!tf || !tf->token)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_IMPERSONATE) != KACS_TOKEN_IMPERSONATE)
+		return -EACCES;
+
+	return pkm_kacs_impersonate_token_core(tf->token,
+					       server_primary_token);
+}
+
+static long pkm_kacs_impersonate_token_core(const void *client_token,
+					    const void *server_primary_token)
 {
 	const void *effective_token = NULL;
 	u32 effective_level = 0;
 	u32 used_impersonate_privilege = 0;
 	long ret;
 
-	if (!tf || !tf->token)
-		return -EINVAL;
-	if ((tf->access_mask & KACS_TOKEN_IMPERSONATE) != KACS_TOKEN_IMPERSONATE)
-		return -EACCES;
-	if (!server_primary_token)
+	if (!client_token || !server_primary_token)
 		return -EACCES;
 
-	ret = kacs_rust_token_impersonation_gate(server_primary_token, tf->token,
+	ret = kacs_rust_token_impersonation_gate(server_primary_token, client_token,
 						 &effective_level,
 						 &used_impersonate_privilege);
 	if (ret)
@@ -254,7 +265,7 @@ static long pkm_kacs_token_impersonate_core(
 		return -EACCES;
 
 	ret = kacs_rust_token_clone_with_impersonation_level(
-		tf->token, effective_level, &effective_token);
+		client_token, effective_level, &effective_token);
 	if (ret)
 		return ret;
 	if (!effective_token)
@@ -640,6 +651,21 @@ static int pkm_kacs_token_to_fd(const void *token, u32 granted_access)
 	return fd;
 }
 
+long pkm_kacs_open_token_fd_with_fixed_access(const void *target_token,
+					      u32 granted_access)
+{
+	const void *token_ref;
+
+	if (!target_token || !granted_access)
+		return -EACCES;
+
+	token_ref = kacs_rust_token_clone(target_token);
+	if (!token_ref)
+		return -EACCES;
+
+	return pkm_kacs_token_to_fd(token_ref, granted_access);
+}
+
 int pkm_kacs_validate_token_open_access_mask(u32 access_mask)
 {
 	if (!access_mask)
@@ -682,6 +708,12 @@ long pkm_kacs_open_token_fd_for_subject_checked(const void *subject_token,
 
 	return pkm_kacs_open_token_fd_for_subject(subject_token, target_token,
 						  access_mask);
+}
+
+long pkm_kacs_impersonate_token_for_current(const void *client_token)
+{
+	return pkm_kacs_impersonate_token_core(client_token,
+					       pkm_kacs_current_primary_token_ptr());
 }
 
 long pkm_kacs_kunit_open_token_fd_for_subject(const void *subject_token,

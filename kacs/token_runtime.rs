@@ -23,7 +23,7 @@ use crate::access_check::access_check;
 use crate::access_check_abi::AccessCheckAbiResolved;
 use crate::access_mask::{
     GenericMapping, PROCESS_GENERIC_MAPPING, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED,
-    GENERIC_ALL, READ_CONTROL, WRITE_DAC,
+    GENERIC_ALL, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use crate::acl::Acl;
 use crate::condition::ConditionalContext;
@@ -50,6 +50,7 @@ use core::sync::atomic::{
 const SYSTEM_PRIVILEGES_ALL: u64 = 0xC000_000F_FFFF_FFFC;
 const SE_TCB_PRIVILEGE: u64 = 1 << 7;
 const LOGON_TYPE_SERVICE: u32 = 5;
+const LOGON_TYPE_NETWORK: u32 = 3;
 const TOKEN_TYPE_PRIMARY_ABI: u32 = 1;
 const TOKEN_TYPE_IMPERSONATION_ABI: u32 = 2;
 const IMPERSONATION_LEVEL_ANONYMOUS_ABI: u32 = 0;
@@ -98,16 +99,21 @@ const KACS_TOKEN_DEFAULT_SELF_ACCESS: u32 = KACS_TOKEN_QUERY
 const SE_IMPERSONATE_PRIVILEGE: u64 = 1 << 29;
 
 const SYSTEM_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+const ANONYMOUS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 7, 0, 0, 0];
 const LOCAL_SERVICE_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 19, 0, 0, 0];
 const ADMINISTRATORS_SID_BYTES: &[u8] = &[1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0];
 const EVERYONE_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
 const AUTHENTICATED_USERS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0];
 const LOCAL_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0];
 const LOGON_SID_BYTES: &[u8] = &[1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+const ANONYMOUS_LOGON_SID_BYTES: &[u8] = &[
+    1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 230, 3, 0, 0,
+];
 const AUTH_PACKAGE_NEGOTIATE: &[u8] = b"Negotiate";
 const TOKEN_SOURCE_PEI_OS_KRN: &[u8; 8] = b"PeiosKrn";
 const BOOT_SYSTEM_TOKEN_ID: u64 = 0;
 const BOOT_SYSTEM_MODIFIED_ID: u64 = 0;
+const ANONYMOUS_LOGON_LUID: u64 = 998;
 const BOOT_SYSTEM_OWNER_SID_INDEX: u32 = 0;
 const BOOT_SYSTEM_PRIMARY_GROUP_INDEX: u32 = 1;
 const BOOT_SYSTEM_GROUP_ATTRIBUTES: [u32; MAX_BOOT_GROUPS] = [
@@ -131,10 +137,25 @@ const SYSTEM_DEFAULT_DACL_BYTES: &[u8] = &[
     2, 0, 52, 0, 2, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 16, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0, 0, 0,
     24, 0, 0, 0, 0, 16, 1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0,
 ];
+const ANONYMOUS_PROJECTED_ID: u32 = 65534;
 const EMPTY_DEVICE_GROUPS: &[SidAndAttributes<'static>] = &[];
 const EMPTY_CLAIMS: &[crate::claims::ClaimAttribute] = &[];
 const EMPTY_POLICIES: &[crate::caap::CaapPolicyEntry<'static>] = &[];
 static NEXT_DYNAMIC_TOKEN_ID: AtomicU64 = AtomicU64::new(1);
+const ANONYMOUS_ONLY_GROUP_ATTRIBUTES: [u32; MAX_BOOT_GROUPS] = [
+    SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED,
+    0,
+    0,
+    0,
+    0,
+];
+const FILE_WRITE_DATA: u32 = 0x0000_0002;
+const SOCKET_GENERIC_MAPPING: GenericMapping = GenericMapping {
+    read: READ_CONTROL,
+    write: FILE_WRITE_DATA | WRITE_DAC,
+    execute: READ_CONTROL,
+    all: FILE_WRITE_DATA | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+};
 const TOKEN_GENERIC_MAPPING: GenericMapping = GenericMapping {
     read: KACS_TOKEN_QUERY | READ_CONTROL,
     write: KACS_TOKEN_ADJUST_PRIVS
@@ -288,6 +309,7 @@ struct PkmKacsBootToken {
     session: PkmKacsBootSession,
     user_sid: Sid<'static>,
     logon_sid: Sid<'static>,
+    group_count: usize,
     group_sids: [Sid<'static>; MAX_BOOT_GROUPS],
     group_default_attributes: [u32; MAX_BOOT_GROUPS],
     group_attributes: [AtomicU32; MAX_BOOT_GROUPS],
@@ -604,6 +626,22 @@ fn build_default_process_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8, 
     )
 }
 
+fn build_default_socket_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8, usize), i32> {
+    let _guard = token.lock_mutation();
+    let group_sid = token
+        .sid_by_index(token.primary_group_index.load(Ordering::Relaxed))
+        .ok_or(-EINVAL)?;
+
+    build_process_sd_bytes(
+        token.user_sid,
+        group_sid,
+        Some(GENERIC_ALL),
+        Some(GENERIC_ALL),
+        Some(GENERIC_ALL),
+        None,
+    )
+}
+
 fn build_token_sd_bytes(
     creator_sid: Sid<'_>,
     token_user_sid: Sid<'_>,
@@ -703,6 +741,24 @@ fn build_query_information_only_process_sd_bytes(
     )
 }
 
+fn build_read_only_socket_sd_bytes(
+    token: &PkmKacsBootToken,
+) -> Result<(*mut u8, usize), i32> {
+    let _guard = token.lock_mutation();
+    let group_sid = token
+        .sid_by_index(token.primary_group_index.load(Ordering::Relaxed))
+        .ok_or(-EINVAL)?;
+
+    build_process_sd_bytes(
+        token.user_sid,
+        group_sid,
+        None,
+        None,
+        None,
+        Some(READ_CONTROL),
+    )
+}
+
 impl PkmKacsBootToken {
     fn create_system_like(
         user_sid: Sid<'static>,
@@ -774,6 +830,7 @@ impl PkmKacsBootToken {
             },
             user_sid,
             logon_sid,
+            group_count: MAX_BOOT_GROUPS,
             group_sids,
             group_default_attributes,
             group_attributes,
@@ -866,6 +923,7 @@ impl PkmKacsBootToken {
             },
             user_sid,
             logon_sid,
+            group_count: MAX_BOOT_GROUPS,
             group_sids,
             group_default_attributes,
             group_attributes,
@@ -1005,6 +1063,79 @@ impl PkmKacsBootToken {
         )
     }
 
+    fn create_anonymous() -> Option<*const c_void> {
+        let anonymous = Sid::parse(ANONYMOUS_SID_BYTES).ok()?;
+        let everyone = Sid::parse(EVERYONE_SID_BYTES).ok()?;
+        let logon_sid = Sid::parse(ANONYMOUS_LOGON_SID_BYTES).ok()?;
+        let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(&[]).ok()?;
+        let (own_sd_ptr, own_sd_len) = build_token_sd_bytes(
+            anonymous,
+            anonymous,
+            Some(KACS_TOKEN_DEFAULT_SELF_ACCESS),
+            None,
+            None,
+        )
+        .ok()?;
+        let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
+        let token_id = allocate_dynamic_token_id().ok()?;
+
+        if token_ptr.is_null() {
+            free_allocated_bytes(default_dacl_ptr);
+            free_allocated_bytes(own_sd_ptr);
+            return None;
+        }
+
+        let empty_sid = Sid::parse(SYSTEM_SID_BYTES).ok()?;
+        let group_sids = [everyone, empty_sid, empty_sid, empty_sid, empty_sid];
+        let group_default_attributes = ANONYMOUS_ONLY_GROUP_ATTRIBUTES;
+        let group_views = build_group_views(&group_sids, &group_default_attributes);
+        let group_attributes = group_default_attributes.map(AtomicU32::new);
+        let token = Self {
+            refcount: AtomicUsize::new(1),
+            mutation_lock: AtomicBool::new(false),
+            session: PkmKacsBootSession {
+                session_id: ANONYMOUS_LOGON_LUID,
+                logon_type: LOGON_TYPE_NETWORK,
+                user_sid: anonymous,
+                auth_package: AUTH_PACKAGE_NEGOTIATE,
+                logon_sid,
+            },
+            user_sid: anonymous,
+            logon_sid,
+            group_count: 1,
+            group_sids,
+            group_default_attributes,
+            group_attributes,
+            group_views: UnsafeCell::new(group_views),
+            token_id,
+            created_at: 0,
+            modified_id: AtomicU64::new(token_id),
+            owner_sid_index: AtomicU32::new(0),
+            primary_group_index: AtomicU32::new(1),
+            default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
+            default_dacl_len: AtomicUsize::new(default_dacl_len),
+            privileges_present: AtomicU64::new(0),
+            privileges_enabled: AtomicU64::new(0),
+            privileges_enabled_by_default: AtomicU64::new(0),
+            privileges_used: AtomicU64::new(0),
+            integrity_level: IntegrityLevel::Untrusted,
+            mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP
+                | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
+            token_type: TokenType::Impersonation,
+            impersonation_level: ImpersonationLevel::Anonymous,
+            restricted: false,
+            audit_policy: 0,
+            interactive_session_id: AtomicU32::new(0),
+            projected_uid: ANONYMOUS_PROJECTED_ID,
+            projected_gid: ANONYMOUS_PROJECTED_ID,
+            own_sd_ptr: AtomicPtr::new(own_sd_ptr),
+            own_sd_len: AtomicUsize::new(own_sd_len),
+        };
+
+        unsafe { core::ptr::write(token_ptr, token) };
+        Some(token_ptr.cast())
+    }
+
     unsafe fn from_ptr<'a>(ptr: *const c_void) -> Option<&'a Self> {
         unsafe { (ptr as *const Self).as_ref() }
     }
@@ -1048,6 +1179,7 @@ impl PkmKacsBootToken {
             session: token.session,
             user_sid: token.user_sid,
             logon_sid: token.logon_sid,
+            group_count: token.group_count,
             group_sids: token.group_sids,
             group_default_attributes: token.group_default_attributes,
             group_attributes: group_attributes.map(AtomicU32::new),
@@ -1134,6 +1266,7 @@ impl PkmKacsBootToken {
             session: self.session,
             user_sid: self.user_sid,
             logon_sid: self.logon_sid,
+            group_count: self.group_count,
             group_sids: self.group_sids,
             group_default_attributes,
             group_attributes: group_attributes.map(AtomicU32::new),
@@ -1209,6 +1342,7 @@ impl PkmKacsBootToken {
             session: self.session,
             user_sid: self.user_sid,
             logon_sid: self.logon_sid,
+            group_count: self.group_count,
             group_sids: self.group_sids,
             group_default_attributes: self.group_default_attributes,
             group_attributes: group_attributes.map(AtomicU32::new),
@@ -1281,7 +1415,7 @@ impl PkmKacsBootToken {
             logon_sid_ptr: self.session.logon_sid.as_bytes().as_ptr(),
             logon_sid_len: self.session.logon_sid.as_bytes().len(),
             groups_ptr: group_views.as_ptr(),
-            group_count: group_views.len() as u32,
+            group_count: self.group_count as u32,
             owner_sid_index,
             primary_group_index,
             default_dacl_ptr: default_dacl.as_ptr(),
@@ -1470,7 +1604,7 @@ impl PkmKacsBootToken {
     fn current_group_enabled_mask_locked(&self) -> u64 {
         let mut mask = 0u64;
 
-        for index in 0..self.group_sids.len().min(64) {
+        for index in 0..self.group_count.min(64) {
             let attributes = self.group_attributes[index].load(Ordering::Relaxed);
 
             if (attributes & SE_GROUP_ENABLED) == SE_GROUP_ENABLED {
@@ -1482,12 +1616,20 @@ impl PkmKacsBootToken {
     }
 
     fn group_sid_at(&self, index: u32) -> Option<Sid<'static>> {
+        if (index as usize) >= self.group_count {
+            return None;
+        }
+
         self.group_sids.get(index as usize).copied()
     }
 
     fn validate_owner_index(&self, index: u32) -> bool {
         if index == 0 {
             return true;
+        }
+
+        if ((index - 1) as usize) >= self.group_count {
+            return false;
         }
 
         self.group_attributes
@@ -1501,7 +1643,7 @@ impl PkmKacsBootToken {
             return true;
         }
 
-        self.group_sids.get((index - 1) as usize).is_some()
+        ((index - 1) as usize) < self.group_count
     }
 
     fn adjust_default(
@@ -1581,7 +1723,7 @@ impl PkmKacsBootToken {
             subject: TokenView {
                 user: self.user_sid,
                 user_deny_only: false,
-                groups: &groups,
+                groups: &groups[..self.group_count],
             },
             token_type: self.token_type,
             impersonation_level: self.impersonation_level,
@@ -1597,20 +1739,20 @@ impl PkmKacsBootToken {
     }
 
     fn group_query_required_len(&self) -> Result<usize, i32> {
-        sid_query_len(&self.group_sids).ok_or(-EINVAL)
+        sid_query_len(&self.group_sids[..self.group_count]).ok_or(-EINVAL)
     }
 
     fn write_group_query(&self, writer: &mut QueryWriter) -> Result<(), i32> {
         let _guard = self.lock_mutation();
 
-        if self.group_sids.len() > u32::MAX as usize {
+        if self.group_count > u32::MAX as usize {
             return Err(-EINVAL);
         }
-        if !writer.write_u32(self.group_sids.len() as u32) {
+        if !writer.write_u32(self.group_count as u32) {
             return Err(-ERANGE);
         }
 
-        for index in 0..self.group_sids.len() {
+        for index in 0..self.group_count {
             let sid = self.group_sids[index].as_bytes();
             let attributes = self.group_attributes[index].load(Ordering::Relaxed);
 
@@ -1647,7 +1789,7 @@ impl PkmKacsBootToken {
             if entries.len() != 1 || entries[0].enable != 0 {
                 return Err(-EINVAL);
             }
-            for index in 0..self.group_sids.len() {
+            for index in 0..self.group_count {
                 self.group_attributes[index]
                     .store(self.group_default_attributes[index], Ordering::Relaxed);
             }
@@ -1658,6 +1800,9 @@ impl PkmKacsBootToken {
 
         for entry in entries {
             let index = entry.index as usize;
+            if index >= self.group_count {
+                return Err(-EINVAL);
+            }
             let Some(group_sid) = self.group_sids.get(index) else {
                 return Err(-EINVAL);
             };
@@ -2049,6 +2194,54 @@ fn process_sd_access_check_errno(
     })
 }
 
+fn socket_sd_access_check_errno(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+) -> Result<u32, i32> {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
+        return Err(-EACCES);
+    };
+    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(|_| -EINVAL)?;
+    let normalized = match SOCKET_GENERIC_MAPPING.normalize_desired_access(desired) {
+        Ok(normalized) => normalized,
+        Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
+        Err(_) => return Err(-EINVAL),
+    };
+    let conditional_context = ConditionalContext::default();
+    let pip = PipContext {
+        pip_type: 0,
+        pip_trust: 0,
+    };
+
+    subject.with_access_token(|subject_token| {
+        match access_check(
+            Some(&target_sd),
+            &subject_token,
+            pip,
+            desired,
+            &SOCKET_GENERIC_MAPPING,
+            None,
+            &conditional_context,
+            None,
+            0,
+            EMPTY_POLICIES,
+        ) {
+            Ok(result) if result.allowed => {
+                if normalized.maximum_allowed {
+                    Ok(result.granted)
+                } else {
+                    Ok(result.granted & normalized.mapped)
+                }
+            }
+            Ok(_) => Err(-EACCES),
+            Err(KacsError::AllocationFailure) => Err(-ENOMEM),
+            Err(KacsError::ReservedAccessMaskBits(_)) => Err(-EINVAL),
+            Err(_) => Err(-EACCES),
+        }
+    })
+}
+
 #[no_mangle]
 /// Creates the boot SYSTEM token object described by Appendix A step 3.
 pub extern "C" fn kacs_rust_create_boot_system_token() -> *const c_void {
@@ -2223,6 +2416,57 @@ pub extern "C" fn kacs_rust_token_clone_with_impersonation_level(
 }
 
 #[no_mangle]
+pub extern "C" fn kacs_rust_create_anonymous_impersonation_token(
+    out_token: *mut *const c_void,
+) -> i32 {
+    let Some(out_token) = (unsafe { out_token.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    match PkmKacsBootToken::create_anonymous() {
+        Some(token) => {
+            *out_token = token;
+            0
+        }
+        None => -ENOMEM,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn kacs_rust_create_peer_impersonation_token(
+    token: *const c_void,
+    impersonation_level: u32,
+    out_token: *mut *const c_void,
+) -> i32 {
+    let Some(source_token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let Some(out_token) = (unsafe { out_token.as_mut() }) else {
+        return -EINVAL;
+    };
+    let impersonation_level = match impersonation_level_from_abi(impersonation_level) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+
+    if impersonation_level == ImpersonationLevel::Anonymous {
+        return kacs_rust_create_anonymous_impersonation_token(out_token);
+    }
+
+    match source_token.duplicate(
+        source_token,
+        TokenType::Impersonation,
+        impersonation_level,
+    ) {
+        Ok(token) => {
+            *out_token = token;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
 /// Builds the default process SD for a new non-thread child process.
 pub extern "C" fn kacs_rust_create_default_process_sd(
     token_ptr: *const c_void,
@@ -2232,6 +2476,25 @@ pub extern "C" fn kacs_rust_create_default_process_sd(
         return null();
     };
     let Ok((ptr, len)) = build_default_process_sd_bytes(token) else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
+/// Builds the default abstract-socket SD stamped at bind time.
+pub extern "C" fn kacs_rust_create_default_socket_sd(
+    token_ptr: *const c_void,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    let Ok((ptr, len)) = build_default_socket_sd_bytes(token) else {
         return null();
     };
 
@@ -2282,6 +2545,26 @@ pub extern "C" fn kacs_rust_kunit_create_query_information_process_sd(
 }
 
 #[no_mangle]
+/// Builds a KUnit-only abstract-socket SD that grants only `READ_CONTROL` to
+/// Everyone, so `FILE_WRITE_DATA` checks fail closed.
+pub extern "C" fn kacs_rust_kunit_create_read_only_socket_sd(
+    token_ptr: *const c_void,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    let Ok((ptr, len)) = build_read_only_socket_sd_bytes(token) else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
 /// Runs AccessCheck against one process SD using the supplied caller token.
 pub extern "C" fn kacs_rust_check_process_sd(
     subject_token_ptr: *const c_void,
@@ -2296,6 +2579,32 @@ pub extern "C" fn kacs_rust_check_process_sd(
 
     let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
     match process_sd_access_check_errno(subject_token_ptr, sd_bytes, desired) {
+        Ok(granted) => {
+            if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                *granted_out = granted;
+            }
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Runs AccessCheck against one abstract-socket SD using the supplied caller
+/// token.
+pub extern "C" fn kacs_rust_check_socket_sd(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired: u32,
+    granted_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match socket_sd_access_check_errno(subject_token_ptr, sd_bytes, desired) {
         Ok(granted) => {
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
                 *granted_out = granted;

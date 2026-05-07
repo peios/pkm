@@ -160,6 +160,13 @@ struct pkm_kacs_kunit_set_psb_args {
 	u32 shstk_supported;
 };
 
+struct pkm_kacs_kunit_socket_view {
+	const void *peer_token;
+	const void *socket_sd_ptr;
+	size_t socket_sd_len;
+	u32 max_impersonation;
+};
+
 const void *pkm_kacs_current_effective_token_ptr(void);
 const void *pkm_kacs_current_primary_token_ptr(void);
 const void *pkm_kacs_boot_system_token_ptr(void);
@@ -192,15 +199,26 @@ int kacs_rust_token_impersonation_gate(
 	u32 *effective_level_out, u32 *used_impersonate_privilege_out);
 int kacs_rust_token_clone_with_impersonation_level(
 	const void *token, u32 impersonation_level, const void **out_token);
+int kacs_rust_create_anonymous_impersonation_token(const void **out_token);
+int kacs_rust_create_peer_impersonation_token(const void *token,
+					      u32 impersonation_level,
+					      const void **out_token);
 const u8 *kacs_rust_create_default_process_sd(const void *token_ptr,
 					      size_t *len_out);
+const u8 *kacs_rust_create_default_socket_sd(const void *token_ptr,
+					     size_t *len_out);
 const u8 *kacs_rust_kunit_create_query_limited_process_sd(const void *token_ptr,
 							  size_t *len_out);
 const u8 *kacs_rust_kunit_create_query_information_process_sd(
 	const void *token_ptr, size_t *len_out);
+const u8 *kacs_rust_kunit_create_read_only_socket_sd(const void *token_ptr,
+						      size_t *len_out);
 int kacs_rust_check_process_sd(const void *subject_token_ptr,
 			       const u8 *sd_ptr, size_t sd_len, u32 desired,
 			       u32 *granted_out);
+int kacs_rust_check_socket_sd(const void *subject_token_ptr,
+			      const u8 *sd_ptr, size_t sd_len, u32 desired,
+			      u32 *granted_out);
 u32 kacs_rust_token_projected_uid(const void *token);
 u32 kacs_rust_token_projected_gid(const void *token);
 bool kacs_rust_kunit_token_snapshot(const void *token,
@@ -254,6 +272,23 @@ long pkm_kacs_kunit_set_current_psb(u32 requested_mitigations);
 long pkm_kacs_kunit_set_psb_for_subject(
 	const struct pkm_kacs_kunit_set_psb_args *args,
 	u32 *result_mitigation_bits_out);
+long pkm_kacs_kunit_bind_abstract_socket_for_subject(
+	const void *subject_token,
+	struct pkm_kacs_kunit_socket_view *first_out,
+	struct pkm_kacs_kunit_socket_view *second_out);
+long pkm_kacs_kunit_set_socket_impersonation_level(
+	u32 socket_type, u32 connected, u32 level,
+	struct pkm_kacs_kunit_socket_view *out);
+long pkm_kacs_kunit_capture_peer_socket_for_subject(
+	const void *client_token, u32 socket_type, u32 max_impersonation,
+	u32 abstract_socket, u32 allow_write,
+	const void **captured_token_out,
+	struct pkm_kacs_kunit_socket_view *listener_out,
+	struct pkm_kacs_kunit_socket_view *accepted_out);
+long pkm_kacs_kunit_open_peer_token_for_socket(u32 connected,
+					       const void *peer_token);
+long pkm_kacs_kunit_impersonate_peer_for_socket(u32 connected,
+						const void *peer_token);
 int pkm_kacs_kunit_check_no_child_process(u32 mitigation_bits,
 					  u64 clone_flags);
 int pkm_kacs_kunit_check_wxp_mmap(u32 mitigation_bits, unsigned long prot);
