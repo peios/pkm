@@ -1,5 +1,7 @@
 use crate::error::{KacsError, KacsResult};
 use crate::pkm_alloc::{slice_to_vec, String, Vec};
+#[cfg(feature = "kernel")]
+use crate::pkm_alloc::TryClone;
 use crate::sid::Sid;
 
 /// Claim flag requesting case-sensitive string comparisons.
@@ -62,6 +64,32 @@ impl ClaimAttribute {
             flags,
             values: values.into(),
         }
+    }
+}
+
+#[cfg(feature = "kernel")]
+impl TryClone for ClaimValue {
+    fn try_clone(&self) -> Result<Self, crate::pkm_alloc::AllocError> {
+        match self {
+            Self::Int64(value) => Ok(Self::Int64(*value)),
+            Self::UInt64(value) => Ok(Self::UInt64(*value)),
+            Self::String(value) => Ok(Self::String(value.try_clone()?)),
+            Self::Sid(value) => Ok(Self::Sid(value.try_clone()?)),
+            Self::Octet(value) => Ok(Self::Octet(value.try_clone()?)),
+            Self::Boolean(value) => Ok(Self::Boolean(*value)),
+            Self::Composite(values) => Ok(Self::Composite(values.try_clone()?)),
+        }
+    }
+}
+
+#[cfg(feature = "kernel")]
+impl TryClone for ClaimAttribute {
+    fn try_clone(&self) -> Result<Self, crate::pkm_alloc::AllocError> {
+        Ok(Self {
+            name: self.name.try_clone()?,
+            flags: self.flags,
+            values: self.values.try_clone()?,
+        })
     }
 }
 

@@ -251,6 +251,9 @@ int pkm_kmes_current_process_rate_reserve(u32 count);
 void pkm_kmes_current_process_rate_refund(u32 count);
 
 const void *kacs_rust_create_boot_system_token(void);
+int kacs_rust_create_token(const void *creator_token, const u8 *spec,
+			   size_t spec_len, u64 created_at,
+			   const void **out_token);
 int kacs_rust_create_session(const u8 *spec, size_t spec_len, u64 created_at,
 			     u64 *session_id_out);
 const void *kacs_rust_token_clone(const void *token);
@@ -385,6 +388,8 @@ long pkm_kacs_kunit_check_prlimit_for_subject(
 long pkm_kacs_kunit_create_session_for_subject(const void *subject_token,
 					       const u8 *spec, size_t spec_len,
 					       u64 *session_id_out);
+long pkm_kacs_kunit_create_token_for_subject(const void *subject_token,
+					     const u8 *spec, size_t spec_len);
 long pkm_kacs_kunit_get_process_sd_for_subject(
 	const struct pkm_kacs_kunit_process_sd_get_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);

@@ -53,6 +53,7 @@
 #define PKM_KACS_UNMAPPED_ID 65534U
 #define PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS 10000U
 #define PKM_KACS_PRIVILEGE_SE_LOCK_MEMORY (1ULL << 4)
+#define PKM_KACS_PRIVILEGE_SE_CREATE_TOKEN (1ULL << 2)
 #define PKM_KACS_PRIVILEGE_SE_INCREASE_QUOTA (1ULL << 5)
 #define PKM_KACS_PRIVILEGE_SE_ASSIGN_PRIMARY (1ULL << 3)
 #define PKM_KACS_PRIVILEGE_SE_TCB (1ULL << 7)
@@ -240,6 +241,8 @@ static int pkm_kacs_task_fix_setgroups(struct cred *new,
 static long pkm_kacs_create_session_core(const void *subject_token,
 					 const u8 *spec, size_t spec_len,
 					 u64 *session_id_out);
+static long pkm_kacs_create_token_core(const void *subject_token,
+				       const u8 *spec, size_t spec_len);
 static int pkm_kacs_task_prlimit(const struct cred *cred,
 				 const struct cred *tcred,
 				 unsigned int flags);
@@ -2303,6 +2306,38 @@ static long pkm_kacs_create_session_core(const void *subject_token,
 	return 0;
 }
 
+static long pkm_kacs_create_token_core(const void *subject_token,
+				       const u8 *spec, size_t spec_len)
+{
+	const void *new_token = NULL;
+	long fd;
+	long ret;
+
+	if (!subject_token || !spec)
+		return -EINVAL;
+
+	if (!kacs_rust_token_has_enabled_privilege(
+		    subject_token, PKM_KACS_PRIVILEGE_SE_CREATE_TOKEN))
+		return -EPERM;
+
+	ret = kacs_rust_create_token(subject_token, spec, spec_len,
+				     ktime_get_real_seconds(), &new_token);
+	if (ret)
+		return ret;
+	if (!new_token)
+		return -EACCES;
+
+	fd = pkm_kacs_open_token_fd_with_fixed_access(new_token,
+						      KACS_TOKEN_ALL_ACCESS);
+	kacs_rust_token_drop(new_token);
+	if (fd < 0)
+		return fd;
+	if (!kacs_rust_token_mark_privileges_used(
+		    subject_token, PKM_KACS_PRIVILEGE_SE_CREATE_TOKEN))
+		return -EPERM;
+	return fd;
+}
+
 static long pkm_kacs_signal_to_process_access(int sig, u32 *desired_access)
 {
 	if (!desired_access)
@@ -3610,6 +3645,12 @@ long pkm_kacs_kunit_create_session_for_subject(const void *subject_token,
 					    session_id_out);
 }
 
+long pkm_kacs_kunit_create_token_for_subject(const void *subject_token,
+					     const u8 *spec, size_t spec_len)
+{
+	return pkm_kacs_create_token_core(subject_token, spec, spec_len);
+}
+
 long pkm_kacs_kunit_open_process_token_for_subject(
 	const struct pkm_kacs_kunit_process_token_open_args *args)
 {
@@ -4402,6 +4443,27 @@ int pkm_kacs_resolve_current_primary_ctx(struct pkm_kacs_resolved_ctx *out)
 {
 	return pkm_kacs_resolve_ctx_from_token(
 		pkm_kacs_current_primary_token_ptr(), out);
+}
+
+SYSCALL_DEFINE2(kacs_create_token, const void __user *, spec, size_t, spec_len)
+{
+	const void *subject_token;
+	u8 *spec_bytes;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!subject_token)
+		return -EACCES;
+	if (!spec)
+		return -EINVAL;
+
+	spec_bytes = memdup_user(spec, spec_len);
+	if (IS_ERR(spec_bytes))
+		return PTR_ERR(spec_bytes);
+
+	ret = pkm_kacs_create_token_core(subject_token, spec_bytes, spec_len);
+	kfree(spec_bytes);
+	return ret;
 }
 
 SYSCALL_DEFINE2(kacs_create_session, const void __user *, spec, size_t, spec_len)

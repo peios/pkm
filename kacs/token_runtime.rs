@@ -22,21 +22,21 @@
 use crate::access_check::{access_check, access_check_core, AccessCheckMode};
 use crate::access_check_abi::AccessCheckAbiResolved;
 use crate::access_mask::{
-    GenericMapping, ACCESS_SYSTEM_SECURITY, GENERIC_ALL, PROCESS_GENERIC_MAPPING,
-    PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    GenericMapping, GENERIC_ALL, PROCESS_GENERIC_MAPPING, PROCESS_QUERY_INFORMATION,
+    PROCESS_QUERY_LIMITED, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use crate::ace::{AceKind, SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE};
 use crate::acl::Acl;
-use crate::claims::{parse_claim_attribute_entry, CLAIM_TYPE_INT64};
+use crate::claims::{parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, CLAIM_TYPE_INT64};
 use crate::condition::ConditionalContext;
 use crate::error::KacsError;
 use crate::mic::{
     IntegrityLevel, TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN, TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
 };
 use crate::pip::PipContext;
-use crate::pkm_alloc::Vec;
+use crate::pkm_alloc::{slice_to_vec, TryClone, Vec};
 use crate::privilege::{
-    TokenPrivileges, RESTORE_INTENT, SE_RELABEL_PRIVILEGE, SE_RESTORE_PRIVILEGE,
+    TokenPrivileges, SE_RELABEL_PRIVILEGE, SE_RESTORE_PRIVILEGE,
 };
 use crate::security_descriptor::{
     SecurityDescriptor, SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE,
@@ -44,7 +44,8 @@ use crate::security_descriptor::{
 use crate::sid::Sid;
 use crate::token::{
     AccessCheckToken, ConfinementTokenContext, ImpersonationLevel, RestrictedTokenContext,
-    SidAndAttributes, TokenType, TokenView, AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
+    SidAndAttributes, TokenType, TokenView, AUDIT_POLICY_OBJECT_ACCESS_FAILURE,
+    AUDIT_POLICY_OBJECT_ACCESS_SUCCESS, AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
     AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
 };
 use core::cell::UnsafeCell;
@@ -71,11 +72,15 @@ const IMPERSONATION_LEVEL_DELEGATION_ABI: u32 = 3;
 const TOKEN_ELEVATION_DEFAULT_ABI: u32 = 1;
 const TOKEN_ELEVATION_FULL_ABI: u32 = 2;
 const TOKEN_ELEVATION_LIMITED_ABI: u32 = 3;
+const TOKEN_SPEC_VERSION: u32 = 2;
+const TOKEN_SPEC_HEADER_LEN: usize = 192;
+const MAX_TOKEN_SPEC_BYTES: usize = 65_536;
+const TOKEN_SOURCE_NAME_LEN: usize = 8;
 const MAX_DEFAULT_DACL_BYTES: usize = 65_536;
 const MAX_SESSION_SPEC_BYTES: usize = 4096;
 const MIN_SESSION_SPEC_BYTES: usize = 15;
-const TOKEN_INDEX_NO_CHANGE: u32 = u32::MAX;
 const MAX_BOOT_GROUPS: usize = 5;
+const TOKEN_INDEX_NO_CHANGE: u32 = u32::MAX;
 const MAX_PRIVILEGE_ADJUST_ENTRIES: usize = 64;
 const SD_HEADER_LEN: usize = 20;
 const ACL_HEADER_LEN: usize = 8;
@@ -119,7 +124,14 @@ const KACS_TOKEN_DEFAULT_SELF_ACCESS: u32 = KACS_TOKEN_QUERY
     | KACS_TOKEN_ADJUST_PRIVS
     | KACS_TOKEN_ADJUST_GROUPS
     | KACS_TOKEN_ADJUST_DEFAULT;
+const TOKEN_MANDATORY_POLICY_ALLOWED_MASK: u32 =
+    TOKEN_MANDATORY_POLICY_NO_WRITE_UP | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN;
+const TOKEN_AUDIT_POLICY_ALLOWED_MASK: u32 = AUDIT_POLICY_OBJECT_ACCESS_SUCCESS
+    | AUDIT_POLICY_OBJECT_ACCESS_FAILURE
+    | AUDIT_POLICY_PRIVILEGE_USE_SUCCESS
+    | AUDIT_POLICY_PRIVILEGE_USE_FAILURE;
 const SE_IMPERSONATE_PRIVILEGE: u64 = 1 << 29;
+const SE_CREATE_TOKEN_PRIVILEGE: u64 = 1 << 2;
 
 const SYSTEM_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 const ANONYMOUS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 7, 0, 0, 0];
@@ -161,10 +173,14 @@ const SYSTEM_DEFAULT_DACL_BYTES: &[u8] = &[
     24, 0, 0, 0, 0, 16, 1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0,
 ];
 const ANONYMOUS_PROJECTED_ID: u32 = 65534;
+const LOGON_GROUP_ATTRIBUTES: u32 = SE_GROUP_MANDATORY
+    | SE_GROUP_ENABLED_BY_DEFAULT
+    | SE_GROUP_ENABLED
+    | SE_GROUP_LOGON_ID;
 const EMPTY_DEVICE_GROUPS: &[SidAndAttributes<'static>] = &[];
 const EMPTY_CLAIMS: &[crate::claims::ClaimAttribute] = &[];
 const EMPTY_POLICIES: &[crate::caap::CaapPolicyEntry<'static>] = &[];
-static NEXT_DYNAMIC_TOKEN_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_DYNAMIC_TOKEN_ID: AtomicU64 = AtomicU64::new(KUNIT_LOCAL_SERVICE_SESSION_LUID + 1);
 static NEXT_DYNAMIC_SESSION_ID: AtomicU64 = AtomicU64::new(KUNIT_LOCAL_SERVICE_SESSION_LUID + 1);
 static SESSION_LIST_HEAD: AtomicPtr<PkmKacsSession> = AtomicPtr::new(null_mut());
 static SESSION_TABLE_LOCK: AtomicBool = AtomicBool::new(false);
@@ -357,19 +373,33 @@ struct PkmKacsSession {
 
 struct OwnedSidAndAttributes {
     sid_bytes: Vec<u8>,
+    sid: Sid<'static>,
     attributes: u32,
+}
+
+struct OwnedSid {
+    sid_bytes: Vec<u8>,
+    sid: Sid<'static>,
+}
+
+impl OwnedSid {
+    fn as_bytes(&self) -> &[u8] {
+        self.sid.as_bytes()
+    }
 }
 
 struct PkmKacsBootToken {
     refcount: AtomicUsize,
     mutation_lock: AtomicBool,
     session: *const PkmKacsSession,
-    user_sid: Sid<'static>,
+    user_sid: OwnedSid,
+    groups: Vec<OwnedSidAndAttributes>,
     group_count: usize,
-    group_sids: [Sid<'static>; MAX_BOOT_GROUPS],
-    group_default_attributes: [u32; MAX_BOOT_GROUPS],
-    group_attributes: [AtomicU32; MAX_BOOT_GROUPS],
-    group_views: UnsafeCell<[PkmKacsBootGroupView; MAX_BOOT_GROUPS]>,
+    group_sids: Vec<Sid<'static>>,
+    group_default_attributes: Vec<u32>,
+    group_attributes: Vec<AtomicU32>,
+    group_views: UnsafeCell<Vec<PkmKacsBootGroupView>>,
+    group_runtime_views: UnsafeCell<Vec<SidAndAttributes<'static>>>,
     token_id: u64,
     created_at: u64,
     modified_id: AtomicU64,
@@ -391,10 +421,26 @@ struct PkmKacsBootToken {
     write_restricted: bool,
     restricted_sids: Vec<OwnedSidAndAttributes>,
     restricted_sid_views: Vec<SidAndAttributes<'static>>,
+    device_groups: Vec<OwnedSidAndAttributes>,
+    device_group_views: Vec<SidAndAttributes<'static>>,
+    restricted_device_groups: Vec<OwnedSidAndAttributes>,
+    restricted_device_group_views: Vec<SidAndAttributes<'static>>,
+    user_claims: Vec<ClaimAttribute>,
+    device_claims: Vec<ClaimAttribute>,
+    confinement_sid: Option<OwnedSid>,
+    confinement_capabilities: Vec<OwnedSidAndAttributes>,
+    confinement_capability_views: Vec<SidAndAttributes<'static>>,
+    confinement_exempt: bool,
+    isolation_boundary: bool,
     audit_policy: u32,
+    expiration: u64,
+    source_name: [u8; TOKEN_SOURCE_NAME_LEN],
+    source_id: u64,
+    origin: u64,
     interactive_session_id: AtomicU32,
     projected_uid: u32,
     projected_gid: u32,
+    projected_supplementary_gids: Vec<u32>,
     own_sd_ptr: AtomicPtr<u8>,
     own_sd_len: AtomicUsize,
 }
@@ -584,6 +630,72 @@ fn copy_sid_bytes(bytes: &[u8]) -> Result<Vec<u8>, i32> {
     Ok(copied)
 }
 
+fn build_owned_sid(bytes: &[u8]) -> Result<OwnedSid, i32> {
+    let sid_bytes = copy_sid_bytes(bytes)?;
+    let sid_slice: &'static [u8] =
+        unsafe { core::slice::from_raw_parts(sid_bytes.as_ptr(), sid_bytes.len()) };
+    let sid = Sid::parse(sid_slice).map_err(|_| -EINVAL)?;
+
+    Ok(OwnedSid { sid_bytes, sid })
+}
+
+fn clone_owned_sid(value: &OwnedSid) -> Result<OwnedSid, i32> {
+    build_owned_sid(value.as_bytes())
+}
+
+fn clone_optional_owned_sid(value: Option<&OwnedSid>) -> Result<Option<OwnedSid>, i32> {
+    match value {
+        Some(value) => Ok(Some(clone_owned_sid(value)?)),
+        None => Ok(None),
+    }
+}
+
+fn clone_owned_sid_entries(
+    entries: &[OwnedSidAndAttributes],
+) -> Result<Vec<OwnedSidAndAttributes>, i32> {
+    let mut cloned = Vec::with_capacity(entries.len()).map_err(|_| -ENOMEM)?;
+
+    for entry in entries {
+        let sid_owned = build_owned_sid(entry.sid.as_bytes())?;
+        cloned
+            .push(OwnedSidAndAttributes {
+                sid_bytes: sid_owned.sid_bytes,
+                sid: sid_owned.sid,
+                attributes: entry.attributes,
+            })
+            .map_err(|_| -ENOMEM)?;
+    }
+
+    Ok(cloned)
+}
+
+fn build_sid_and_attributes_views(
+    entries: &[OwnedSidAndAttributes],
+) -> Result<Vec<SidAndAttributes<'static>>, i32> {
+    let mut views = Vec::with_capacity(entries.len()).map_err(|_| -ENOMEM)?;
+
+    for entry in entries {
+        views
+            .push(SidAndAttributes {
+                sid: entry.sid,
+                attributes: entry.attributes,
+            })
+            .map_err(|_| -ENOMEM)?;
+    }
+
+    Ok(views)
+}
+
+fn sid_vec_from_owned_entries(entries: &[OwnedSidAndAttributes]) -> Result<Vec<Sid<'static>>, i32> {
+    let mut sids = Vec::with_capacity(entries.len()).map_err(|_| -ENOMEM)?;
+
+    for entry in entries {
+        sids.push(entry.sid).map_err(|_| -ENOMEM)?;
+    }
+
+    Ok(sids)
+}
+
 fn build_owned_sid_entries_from_views(
     entries: &[SidAndAttributes<'_>],
 ) -> Result<(Vec<OwnedSidAndAttributes>, Vec<SidAndAttributes<'static>>), i32> {
@@ -591,25 +703,75 @@ fn build_owned_sid_entries_from_views(
     let mut views = Vec::with_capacity(entries.len()).map_err(|_| -ENOMEM)?;
 
     for entry in entries {
+        let sid_bytes = copy_sid_bytes(entry.sid.as_bytes())?;
+        let sid_slice: &'static [u8] =
+            unsafe { core::slice::from_raw_parts(sid_bytes.as_ptr(), sid_bytes.len()) };
+        let sid = Sid::parse(sid_slice).map_err(|_| -EINVAL)?;
+
         owned
             .push(OwnedSidAndAttributes {
-                sid_bytes: copy_sid_bytes(entry.sid.as_bytes())?,
+                sid_bytes,
+                sid,
                 attributes: entry.attributes,
             })
             .map_err(|_| -ENOMEM)?;
 
         let owned_entry = &owned[owned.len() - 1];
-        let sid_bytes: &'static [u8] = unsafe {
-            core::slice::from_raw_parts(owned_entry.sid_bytes.as_ptr(), owned_entry.sid_bytes.len())
-        };
-        let sid = Sid::parse(sid_bytes).map_err(|_| -EINVAL)?;
-
         views
             .push(SidAndAttributes {
-                sid,
+                sid: owned_entry.sid,
                 attributes: owned_entry.attributes,
             })
             .map_err(|_| -ENOMEM)?;
+    }
+
+    Ok((owned, views))
+}
+
+fn parse_sid_and_attributes_array(
+    bytes: &[u8],
+    count: u32,
+) -> Result<(Vec<OwnedSidAndAttributes>, Vec<SidAndAttributes<'static>>), i32> {
+    let count = usize::try_from(count).map_err(|_| -EINVAL)?;
+    let mut owned = Vec::with_capacity(count).map_err(|_| -ENOMEM)?;
+    let mut views = Vec::with_capacity(count).map_err(|_| -ENOMEM)?;
+    let mut offset = 0usize;
+
+    for _ in 0..count {
+        let sid_len = usize::try_from(read_le_u32(bytes, offset).ok_or(-EINVAL)?)
+            .map_err(|_| -EINVAL)?;
+        let sid_offset = offset.checked_add(4).ok_or(-ERANGE)?;
+        let sid_end = sid_offset.checked_add(sid_len).ok_or(-ERANGE)?;
+        let attr_offset = sid_end;
+        let attr_end = attr_offset.checked_add(4).ok_or(-ERANGE)?;
+        let sid_bytes = bytes.get(sid_offset..sid_end).ok_or(-EINVAL)?;
+        let attributes = read_le_u32(bytes, attr_offset).ok_or(-EINVAL)?;
+        let sid_owned = build_owned_sid(sid_bytes)?;
+
+        if sid_owned.sid.as_bytes().len() != sid_len {
+            return Err(-EINVAL);
+        }
+
+        offset = attr_end;
+        owned
+            .push(OwnedSidAndAttributes {
+                sid_bytes: sid_owned.sid_bytes,
+                sid: sid_owned.sid,
+                attributes,
+            })
+            .map_err(|_| -ENOMEM)?;
+
+        let owned_entry = &owned[owned.len() - 1];
+        views
+            .push(SidAndAttributes {
+                sid: owned_entry.sid,
+                attributes: owned_entry.attributes,
+            })
+            .map_err(|_| -ENOMEM)?;
+    }
+
+    if offset != bytes.len() {
+        return Err(-EINVAL);
     }
 
     Ok((owned, views))
@@ -790,6 +952,156 @@ fn read_le_u32(src: &[u8], offset: usize) -> Option<u32> {
     let bytes = src.get(offset..offset.checked_add(4)?)?;
 
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_le_u64(src: &[u8], offset: usize) -> Option<u64> {
+    let bytes = src.get(offset..offset.checked_add(8)?)?;
+
+    Some(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+fn read_bool_u8(src: &[u8], offset: usize) -> Result<bool, i32> {
+    match *src.get(offset).ok_or(-EINVAL)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(-EINVAL),
+    }
+}
+
+fn sorted_active_section_offsets(spec: &[u8], offsets: &[u32]) -> Result<Vec<usize>, i32> {
+    let mut sorted = Vec::with_capacity(offsets.len()).map_err(|_| -ENOMEM)?;
+
+    for raw_offset in offsets {
+        if *raw_offset == 0 {
+            continue;
+        }
+
+        let offset = usize::try_from(*raw_offset).map_err(|_| -EINVAL)?;
+        if offset < TOKEN_SPEC_HEADER_LEN || offset >= spec.len() {
+            return Err(-EINVAL);
+        }
+
+        let mut insert_at = sorted.len();
+        for (index, existing) in sorted.iter().enumerate() {
+            if *existing == offset {
+                return Err(-EINVAL);
+            }
+            if *existing > offset {
+                insert_at = index;
+                break;
+            }
+        }
+
+        sorted.push(0).map_err(|_| -ENOMEM)?;
+        let mut cursor = sorted.len() - 1;
+        while cursor > insert_at {
+            sorted[cursor] = sorted[cursor - 1];
+            cursor -= 1;
+        }
+        sorted[insert_at] = offset;
+    }
+
+    Ok(sorted)
+}
+
+fn section_limit(sorted_offsets: &[usize], offset: usize, total_len: usize) -> Result<usize, i32> {
+    for (index, candidate) in sorted_offsets.iter().enumerate() {
+        if *candidate == offset {
+            return Ok(sorted_offsets
+                .get(index + 1)
+                .copied()
+                .unwrap_or(total_len));
+        }
+    }
+
+    Err(-EINVAL)
+}
+
+fn token_spec_fixed_section<'a>(
+    spec: &'a [u8],
+    sorted_offsets: &[usize],
+    offset: u32,
+    len: u32,
+) -> Result<&'a [u8], i32> {
+    if offset == 0 && len == 0 {
+        return Ok(&[]);
+    }
+    if offset == 0 || len == 0 {
+        return Err(-EINVAL);
+    }
+
+    let offset = usize::try_from(offset).map_err(|_| -EINVAL)?;
+    let len = usize::try_from(len).map_err(|_| -EINVAL)?;
+    let limit = section_limit(sorted_offsets, offset, spec.len())?;
+    let end = offset.checked_add(len).ok_or(-ERANGE)?;
+    if end > limit || end > spec.len() {
+        return Err(-EINVAL);
+    }
+
+    spec.get(offset..end).ok_or(-EINVAL)
+}
+
+fn token_spec_count_section<'a>(
+    spec: &'a [u8],
+    sorted_offsets: &[usize],
+    offset: u32,
+    count: u32,
+) -> Result<&'a [u8], i32> {
+    if offset == 0 && count == 0 {
+        return Ok(&[]);
+    }
+    if offset == 0 || count == 0 {
+        return Err(-EINVAL);
+    }
+
+    let offset = usize::try_from(offset).map_err(|_| -EINVAL)?;
+    let limit = section_limit(sorted_offsets, offset, spec.len())?;
+
+    spec.get(offset..limit).ok_or(-EINVAL)
+}
+
+fn token_spec_unbounded_section<'a>(
+    spec: &'a [u8],
+    sorted_offsets: &[usize],
+    offset: u32,
+) -> Result<&'a [u8], i32> {
+    if offset == 0 {
+        return Err(-EINVAL);
+    }
+
+    let offset = usize::try_from(offset).map_err(|_| -EINVAL)?;
+    let limit = section_limit(sorted_offsets, offset, spec.len())?;
+
+    spec.get(offset..limit).ok_or(-EINVAL)
+}
+
+fn parse_projected_supplementary_gids(bytes: &[u8], count: u32) -> Result<Vec<u32>, i32> {
+    let count = usize::try_from(count).map_err(|_| -EINVAL)?;
+    let required_len = count.checked_mul(4).ok_or(-ERANGE)?;
+    let mut gids = Vec::with_capacity(count).map_err(|_| -ENOMEM)?;
+
+    if bytes.len() != required_len {
+        return Err(-EINVAL);
+    }
+
+    for index in 0..count {
+        let offset = index.checked_mul(4).ok_or(-ERANGE)?;
+        gids.push(read_le_u32(bytes, offset).ok_or(-EINVAL)?)
+            .map_err(|_| -ENOMEM)?;
+    }
+
+    Ok(gids)
+}
+
+fn published_session_ref_by_id(session_id: u64) -> Result<*const PkmKacsSession, i32> {
+    let _guard = lock_session_table();
+    let Some(session_ptr) = session_list_find_locked(session_id) else {
+        return Err(-EINVAL);
+    };
+
+    PkmKacsSession::clone_ref_ptr(session_ptr.cast()).ok_or(-EINVAL)
 }
 
 fn session_logon_type_valid(logon_type: u32) -> bool {
@@ -1002,14 +1314,89 @@ fn parse_session_spec(spec: &[u8]) -> Result<(u32, &[u8], Sid<'_>), i32> {
 }
 
 fn build_group_views(
-    group_sids: &[Sid<'static>; MAX_BOOT_GROUPS],
-    group_attributes: &[u32; MAX_BOOT_GROUPS],
-) -> [PkmKacsBootGroupView; MAX_BOOT_GROUPS] {
-    core::array::from_fn(|index| PkmKacsBootGroupView {
-        sid_ptr: group_sids[index].as_bytes().as_ptr(),
-        sid_len: group_sids[index].as_bytes().len(),
-        attributes: group_attributes[index],
-    })
+    group_sids: &[Sid<'static>],
+    group_attributes: &[u32],
+) -> Result<Vec<PkmKacsBootGroupView>, i32> {
+    if group_sids.len() != group_attributes.len() {
+        return Err(-EINVAL);
+    }
+
+    let mut views = Vec::with_capacity(group_sids.len()).map_err(|_| -ENOMEM)?;
+
+    for (sid, attributes) in group_sids.iter().zip(group_attributes.iter()) {
+        views
+            .push(PkmKacsBootGroupView {
+                sid_ptr: sid.as_bytes().as_ptr(),
+                sid_len: sid.as_bytes().len(),
+                attributes: *attributes,
+            })
+            .map_err(|_| -ENOMEM)?;
+    }
+
+    Ok(views)
+}
+
+fn build_group_runtime_views(
+    group_sids: &[Sid<'static>],
+    group_attributes: &[u32],
+) -> Result<Vec<SidAndAttributes<'static>>, i32> {
+    if group_sids.len() != group_attributes.len() {
+        return Err(-EINVAL);
+    }
+
+    let mut views = Vec::with_capacity(group_sids.len()).map_err(|_| -ENOMEM)?;
+
+    for (sid, attributes) in group_sids.iter().zip(group_attributes.iter()) {
+        views
+            .push(SidAndAttributes {
+                sid: *sid,
+                attributes: *attributes,
+            })
+            .map_err(|_| -ENOMEM)?;
+    }
+
+    Ok(views)
+}
+
+fn build_atomic_u32_vec(values: &[u32]) -> Result<Vec<AtomicU32>, i32> {
+    let mut atoms = Vec::with_capacity(values.len()).map_err(|_| -ENOMEM)?;
+
+    for value in values {
+        atoms.push(AtomicU32::new(*value)).map_err(|_| -ENOMEM)?;
+    }
+
+    Ok(atoms)
+}
+
+fn try_clone_vec<T: TryClone>(values: &Vec<T>) -> Result<Vec<T>, i32> {
+    values.try_clone().map_err(|_| -ENOMEM)
+}
+
+fn build_owned_group_entries(entries: &[(Sid<'_>, u32)]) -> Result<Vec<OwnedSidAndAttributes>, i32> {
+    let mut owned = Vec::with_capacity(entries.len()).map_err(|_| -ENOMEM)?;
+
+    for (sid, attributes) in entries {
+        let sid_owned = build_owned_sid(sid.as_bytes())?;
+        owned
+            .push(OwnedSidAndAttributes {
+                sid_bytes: sid_owned.sid_bytes,
+                sid: sid_owned.sid,
+                attributes: *attributes,
+            })
+            .map_err(|_| -ENOMEM)?;
+    }
+
+    Ok(owned)
+}
+
+fn attributes_vec_from_owned_entries(entries: &[OwnedSidAndAttributes]) -> Result<Vec<u32>, i32> {
+    let mut attributes = Vec::with_capacity(entries.len()).map_err(|_| -ENOMEM)?;
+
+    for entry in entries {
+        attributes.push(entry.attributes).map_err(|_| -ENOMEM)?;
+    }
+
+    Ok(attributes)
 }
 
 fn write_le_u16(dst: &mut [u8], offset: usize, value: u16) {
@@ -1644,7 +2031,7 @@ fn build_default_process_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8, 
         .ok_or(-EINVAL)?;
 
     build_process_sd_bytes(
-        token.user_sid,
+        token.user_sid.sid,
         group_sid,
         Some(GENERIC_ALL),
         Some(GENERIC_ALL),
@@ -1660,7 +2047,7 @@ fn build_default_socket_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8, u
         .ok_or(-EINVAL)?;
 
     build_process_sd_bytes(
-        token.user_sid,
+        token.user_sid.sid,
         group_sid,
         Some(GENERIC_ALL),
         Some(GENERIC_ALL),
@@ -1768,7 +2155,7 @@ fn build_query_limited_only_process_sd_bytes(
         .ok_or(-EINVAL)?;
 
     build_process_sd_bytes(
-        token.user_sid,
+        token.user_sid.sid,
         group_sid,
         None,
         None,
@@ -1786,7 +2173,7 @@ fn build_query_information_only_process_sd_bytes(
         .ok_or(-EINVAL)?;
 
     build_process_sd_bytes(
-        token.user_sid,
+        token.user_sid.sid,
         group_sid,
         None,
         None,
@@ -1802,7 +2189,7 @@ fn build_read_only_socket_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8,
         .ok_or(-EINVAL)?;
 
     build_process_sd_bytes(
-        token.user_sid,
+        token.user_sid.sid,
         group_sid,
         None,
         None,
@@ -1902,31 +2289,42 @@ impl PkmKacsBootToken {
             return None;
         }
 
+        let user_sid = build_owned_sid(user_sid.as_bytes()).ok()?;
+        let group_defaults = group_attributes.as_slice();
         let group_sids = [
             administrators,
-            if include_user_group {
-                user_sid
-            } else {
-                everyone
-            },
+            if include_user_group { user_sid.sid } else { everyone },
             authenticated_users,
             local,
             logon_sid,
         ];
-        let group_default_attributes = group_attributes;
-        let group_views = build_group_views(&group_sids, &group_default_attributes);
-        let group_attributes = group_default_attributes.map(AtomicU32::new);
+        let groups = build_owned_group_entries(&[
+            (administrators, group_defaults[0]),
+            (group_sids[1], group_defaults[1]),
+            (authenticated_users, group_defaults[2]),
+            (local, group_defaults[3]),
+            (logon_sid, group_defaults[4]),
+        ])
+        .ok()?;
+        let group_sids = slice_to_vec(group_sids.as_slice()).ok()?;
+        let group_default_attributes = slice_to_vec(group_defaults).ok()?;
+        let group_views = build_group_views(group_sids.as_slice(), group_defaults).ok()?;
+        let group_runtime_views =
+            build_group_runtime_views(group_sids.as_slice(), group_defaults).ok()?;
+        let group_attributes = build_atomic_u32_vec(group_defaults).ok()?;
 
         let token = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
             session,
             user_sid,
-            group_count: MAX_BOOT_GROUPS,
+            groups,
+            group_count: group_defaults.len(),
             group_sids,
             group_default_attributes,
             group_attributes,
             group_views: UnsafeCell::new(group_views),
+            group_runtime_views: UnsafeCell::new(group_runtime_views),
             token_id,
             created_at: 0,
             modified_id: AtomicU64::new(modified_id),
@@ -1949,10 +2347,26 @@ impl PkmKacsBootToken {
             write_restricted: false,
             restricted_sids: Vec::new(),
             restricted_sid_views: Vec::new(),
+            device_groups: Vec::new(),
+            device_group_views: Vec::new(),
+            restricted_device_groups: Vec::new(),
+            restricted_device_group_views: Vec::new(),
+            user_claims: Vec::new(),
+            device_claims: Vec::new(),
+            confinement_sid: None,
+            confinement_capabilities: Vec::new(),
+            confinement_capability_views: Vec::new(),
+            confinement_exempt: false,
+            isolation_boundary: false,
             audit_policy,
+            expiration: 0,
+            source_name: *TOKEN_SOURCE_PEI_OS_KRN,
+            source_id: 0,
+            origin: 0,
             interactive_session_id: AtomicU32::new(0),
             projected_uid: 0,
             projected_gid: 0,
+            projected_supplementary_gids: Vec::new(),
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
         };
@@ -2028,26 +2442,35 @@ impl PkmKacsBootToken {
             unsafe { PkmKacsSession::drop_ref(session.cast()) };
             return None;
         }
-        let group_sids = [
-            administrators,
-            everyone,
-            authenticated_users,
-            local,
-            logon_sid,
-        ];
-        let group_default_attributes = BOOT_SYSTEM_GROUP_ATTRIBUTES;
-        let group_views = build_group_views(&group_sids, &group_default_attributes);
-        let group_attributes = group_default_attributes.map(AtomicU32::new);
+        let user_sid = build_owned_sid(user_sid.as_bytes()).ok()?;
+        let group_defaults = BOOT_SYSTEM_GROUP_ATTRIBUTES.as_slice();
+        let group_sids = [administrators, everyone, authenticated_users, local, logon_sid];
+        let groups = build_owned_group_entries(&[
+            (administrators, group_defaults[0]),
+            (everyone, group_defaults[1]),
+            (authenticated_users, group_defaults[2]),
+            (local, group_defaults[3]),
+            (logon_sid, group_defaults[4]),
+        ])
+        .ok()?;
+        let group_sids = slice_to_vec(group_sids.as_slice()).ok()?;
+        let group_default_attributes = slice_to_vec(group_defaults).ok()?;
+        let group_views = build_group_views(group_sids.as_slice(), group_defaults).ok()?;
+        let group_runtime_views =
+            build_group_runtime_views(group_sids.as_slice(), group_defaults).ok()?;
+        let group_attributes = build_atomic_u32_vec(group_defaults).ok()?;
         let token = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
             session,
             user_sid,
-            group_count: MAX_BOOT_GROUPS,
+            groups,
+            group_count: group_defaults.len(),
             group_sids,
             group_default_attributes,
             group_attributes,
             group_views: UnsafeCell::new(group_views),
+            group_runtime_views: UnsafeCell::new(group_runtime_views),
             token_id: BOOT_SYSTEM_TOKEN_ID,
             created_at: 0,
             modified_id: AtomicU64::new(BOOT_SYSTEM_MODIFIED_ID),
@@ -2070,10 +2493,26 @@ impl PkmKacsBootToken {
             write_restricted: false,
             restricted_sids: Vec::new(),
             restricted_sid_views: Vec::new(),
+            device_groups: Vec::new(),
+            device_group_views: Vec::new(),
+            restricted_device_groups: Vec::new(),
+            restricted_device_group_views: Vec::new(),
+            user_claims: Vec::new(),
+            device_claims: Vec::new(),
+            confinement_sid: None,
+            confinement_capabilities: Vec::new(),
+            confinement_capability_views: Vec::new(),
+            confinement_exempt: false,
+            isolation_boundary: false,
             audit_policy: 0,
+            expiration: 0,
+            source_name: *TOKEN_SOURCE_PEI_OS_KRN,
+            source_id: 0,
+            origin: 0,
             interactive_session_id: AtomicU32::new(0),
             projected_uid: 0,
             projected_gid: 0,
+            projected_supplementary_gids: Vec::new(),
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
         };
@@ -2083,7 +2522,8 @@ impl PkmKacsBootToken {
     }
 
     fn create_without_tcb() -> Option<*const c_void> {
-        let privileges = SYSTEM_PRIVILEGES_ALL & !SE_TCB_PRIVILEGE;
+        let privileges =
+            SYSTEM_PRIVILEGES_ALL & !(SE_TCB_PRIVILEGE | SE_CREATE_TOKEN_PRIVILEGE);
         let session = boot_system_session_ref().ok()?;
 
         Self::create_system_like(
@@ -2218,7 +2658,6 @@ impl PkmKacsBootToken {
                 return None;
             }
         };
-        let logon_sid = session_ref.logon_sid;
         let (default_dacl_ptr, default_dacl_len) = match alloc_copy_bytes(&[]) {
             Ok(value) => value,
             Err(_) => {
@@ -2258,21 +2697,34 @@ impl PkmKacsBootToken {
             return None;
         }
 
-        let empty_sid = Sid::parse(SYSTEM_SID_BYTES).ok()?;
-        let group_sids = [everyone, empty_sid, empty_sid, empty_sid, empty_sid];
-        let group_default_attributes = ANONYMOUS_ONLY_GROUP_ATTRIBUTES;
-        let group_views = build_group_views(&group_sids, &group_default_attributes);
-        let group_attributes = group_default_attributes.map(AtomicU32::new);
+        let anonymous = build_owned_sid(anonymous.as_bytes()).ok()?;
+        let group_sids = [everyone];
+        let groups =
+            build_owned_group_entries(&[(everyone, ANONYMOUS_ONLY_GROUP_ATTRIBUTES[0])]).ok()?;
+        let group_sids = slice_to_vec(group_sids.as_slice()).ok()?;
+        let group_default_attributes =
+            slice_to_vec(&ANONYMOUS_ONLY_GROUP_ATTRIBUTES[..1]).ok()?;
+        let group_views =
+            build_group_views(group_sids.as_slice(), &ANONYMOUS_ONLY_GROUP_ATTRIBUTES[..1]).ok()?;
+        let group_runtime_views = build_group_runtime_views(
+            group_sids.as_slice(),
+            &ANONYMOUS_ONLY_GROUP_ATTRIBUTES[..1],
+        )
+        .ok()?;
+        let group_attributes =
+            build_atomic_u32_vec(&ANONYMOUS_ONLY_GROUP_ATTRIBUTES[..1]).ok()?;
         let token = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
             session,
             user_sid: anonymous,
+            groups,
             group_count: 1,
             group_sids,
             group_default_attributes,
             group_attributes,
             group_views: UnsafeCell::new(group_views),
+            group_runtime_views: UnsafeCell::new(group_runtime_views),
             token_id,
             created_at: 0,
             modified_id: AtomicU64::new(token_id),
@@ -2295,16 +2747,413 @@ impl PkmKacsBootToken {
             write_restricted: false,
             restricted_sids: Vec::new(),
             restricted_sid_views: Vec::new(),
+            device_groups: Vec::new(),
+            device_group_views: Vec::new(),
+            restricted_device_groups: Vec::new(),
+            restricted_device_group_views: Vec::new(),
+            user_claims: Vec::new(),
+            device_claims: Vec::new(),
+            confinement_sid: None,
+            confinement_capabilities: Vec::new(),
+            confinement_capability_views: Vec::new(),
+            confinement_exempt: false,
+            isolation_boundary: false,
             audit_policy: 0,
+            expiration: 0,
+            source_name: *TOKEN_SOURCE_PEI_OS_KRN,
+            source_id: 0,
+            origin: 0,
             interactive_session_id: AtomicU32::new(0),
             projected_uid: ANONYMOUS_PROJECTED_ID,
             projected_gid: ANONYMOUS_PROJECTED_ID,
+            projected_supplementary_gids: Vec::new(),
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
         };
 
         unsafe { core::ptr::write(token_ptr, token) };
         Some(token_ptr.cast())
+    }
+
+    fn create_from_spec(
+        creator: &PkmKacsBootToken,
+        spec: &[u8],
+        created_at: u64,
+    ) -> Result<*const c_void, i32> {
+        let version = read_le_u32(spec, 0).ok_or(-EINVAL)?;
+        let token_type = token_type_from_abi(u32::from(*spec.get(4).ok_or(-EINVAL)?))?;
+        let impersonation_level =
+            impersonation_level_from_abi(u32::from(*spec.get(5).ok_or(-EINVAL)?))?;
+        let integrity_level = integrity_level_from_abi(read_le_u32(spec, 8).ok_or(-EINVAL)?)?;
+        let mandatory_policy = read_le_u32(spec, 12).ok_or(-EINVAL)?;
+        let privileges_present = read_le_u64(spec, 16).ok_or(-EINVAL)?;
+        let privileges_enabled = read_le_u64(spec, 24).ok_or(-EINVAL)?;
+        let projected_uid = read_le_u32(spec, 36).ok_or(-EINVAL)?;
+        let projected_gid = read_le_u32(spec, 40).ok_or(-EINVAL)?;
+        let audit_policy = read_le_u32(spec, 44).ok_or(-EINVAL)?;
+        let expiration = read_le_u64(spec, 48).ok_or(-EINVAL)?;
+        let session_id = read_le_u64(spec, 56).ok_or(-EINVAL)?;
+        let owner_sid_index = read_le_u32(spec, 64).ok_or(-EINVAL)?;
+        let primary_group_index = read_le_u32(spec, 68).ok_or(-EINVAL)?;
+        let source_name = <[u8; TOKEN_SOURCE_NAME_LEN]>::try_from(
+            spec.get(72..80).ok_or(-EINVAL)?,
+        )
+        .map_err(|_| -EINVAL)?;
+        let source_id = read_le_u64(spec, 80).ok_or(-EINVAL)?;
+        let user_sid_offset = read_le_u32(spec, 88).ok_or(-EINVAL)?;
+        let groups_offset = read_le_u32(spec, 92).ok_or(-EINVAL)?;
+        let groups_count = read_le_u32(spec, 96).ok_or(-EINVAL)?;
+        let default_dacl_offset = read_le_u32(spec, 100).ok_or(-EINVAL)?;
+        let default_dacl_len = read_le_u32(spec, 104).ok_or(-EINVAL)?;
+        let user_claims_offset = read_le_u32(spec, 108).ok_or(-EINVAL)?;
+        let user_claims_len = read_le_u32(spec, 112).ok_or(-EINVAL)?;
+        let device_claims_offset = read_le_u32(spec, 116).ok_or(-EINVAL)?;
+        let device_claims_len = read_le_u32(spec, 120).ok_or(-EINVAL)?;
+        let device_groups_offset = read_le_u32(spec, 124).ok_or(-EINVAL)?;
+        let device_groups_count = read_le_u32(spec, 128).ok_or(-EINVAL)?;
+        let restricted_sids_offset = read_le_u32(spec, 132).ok_or(-EINVAL)?;
+        let restricted_sids_count = read_le_u32(spec, 136).ok_or(-EINVAL)?;
+        let confinement_sid_offset = read_le_u32(spec, 140).ok_or(-EINVAL)?;
+        let confinement_sid_len = read_le_u32(spec, 144).ok_or(-EINVAL)?;
+        let confinement_caps_offset = read_le_u32(spec, 148).ok_or(-EINVAL)?;
+        let confinement_caps_count = read_le_u32(spec, 152).ok_or(-EINVAL)?;
+        let confinement_exempt = read_bool_u8(spec, 156)?;
+        let write_restricted = read_bool_u8(spec, 157)?;
+        let user_deny_only = read_bool_u8(spec, 158)?;
+        let isolation_boundary = read_bool_u8(spec, 159)?;
+        let supp_gids_offset = read_le_u32(spec, 160).ok_or(-EINVAL)?;
+        let supp_gids_count = read_le_u32(spec, 164).ok_or(-EINVAL)?;
+        let restricted_device_groups_offset = read_le_u32(spec, 168).ok_or(-EINVAL)?;
+        let restricted_device_groups_count = read_le_u32(spec, 172).ok_or(-EINVAL)?;
+        let origin = read_le_u64(spec, 176).ok_or(-EINVAL)?;
+        let interactive_session_id = read_le_u32(spec, 184).ok_or(-EINVAL)?;
+        let token_id;
+        let modified_id;
+        let session;
+        let group_default_attributes;
+        let group_sids;
+        let group_attributes;
+        let group_views;
+        let group_runtime_views;
+        let default_dacl_ptr;
+        let default_dacl_alloc_len;
+        let own_sd_ptr;
+        let own_sd_len;
+        let token_ptr;
+
+        if spec.len() < TOKEN_SPEC_HEADER_LEN || spec.len() > MAX_TOKEN_SPEC_BYTES {
+            return Err(-EINVAL);
+        }
+        if version != TOKEN_SPEC_VERSION {
+            return Err(-EINVAL);
+        }
+        if spec[6] != 0 || spec[7] != 0 {
+            return Err(-EINVAL);
+        }
+        if read_le_u32(spec, 32).ok_or(-EINVAL)? != 0 {
+            return Err(-EINVAL);
+        }
+        if read_le_u32(spec, 188).ok_or(-EINVAL)? != 0 {
+            return Err(-EINVAL);
+        }
+        if (mandatory_policy & !TOKEN_MANDATORY_POLICY_ALLOWED_MASK) != 0 {
+            return Err(-EINVAL);
+        }
+        if (audit_policy & !TOKEN_AUDIT_POLICY_ALLOWED_MASK) != 0 {
+            return Err(-EINVAL);
+        }
+        if (privileges_enabled & !privileges_present) != 0 {
+            return Err(-EINVAL);
+        }
+        if token_type == TokenType::Primary
+            && impersonation_level != ImpersonationLevel::Anonymous
+        {
+            return Err(-EINVAL);
+        }
+        if write_restricted && !user_deny_only {
+            return Err(-EINVAL);
+        }
+
+        let sorted_offsets = sorted_active_section_offsets(
+            spec,
+            &[
+                user_sid_offset,
+                groups_offset,
+                default_dacl_offset,
+                user_claims_offset,
+                device_claims_offset,
+                device_groups_offset,
+                restricted_sids_offset,
+                confinement_sid_offset,
+                confinement_caps_offset,
+                supp_gids_offset,
+                restricted_device_groups_offset,
+            ],
+        )?;
+        let user_sid = build_owned_sid(token_spec_unbounded_section(
+            spec,
+            &sorted_offsets,
+            user_sid_offset,
+        )?)?;
+        let default_dacl_bytes =
+            token_spec_fixed_section(spec, &sorted_offsets, default_dacl_offset, default_dacl_len)?;
+        let user_claims_bytes =
+            token_spec_fixed_section(spec, &sorted_offsets, user_claims_offset, user_claims_len)?;
+        let device_claims_bytes = token_spec_fixed_section(
+            spec,
+            &sorted_offsets,
+            device_claims_offset,
+            device_claims_len,
+        )?;
+        let groups_bytes = token_spec_count_section(spec, &sorted_offsets, groups_offset, groups_count)?;
+        let device_groups_bytes = token_spec_count_section(
+            spec,
+            &sorted_offsets,
+            device_groups_offset,
+            device_groups_count,
+        )?;
+        let restricted_sids_bytes = token_spec_count_section(
+            spec,
+            &sorted_offsets,
+            restricted_sids_offset,
+            restricted_sids_count,
+        )?;
+        let confinement_sid = match token_spec_fixed_section(
+            spec,
+            &sorted_offsets,
+            confinement_sid_offset,
+            confinement_sid_len,
+        )? {
+            [] => None,
+            bytes => Some(build_owned_sid(bytes)?),
+        };
+        let confinement_caps_bytes = token_spec_count_section(
+            spec,
+            &sorted_offsets,
+            confinement_caps_offset,
+            confinement_caps_count,
+        )?;
+        let supp_gids_bytes =
+            token_spec_count_section(spec, &sorted_offsets, supp_gids_offset, supp_gids_count)?;
+        let restricted_device_groups_bytes = token_spec_count_section(
+            spec,
+            &sorted_offsets,
+            restricted_device_groups_offset,
+            restricted_device_groups_count,
+        )?;
+        let (mut groups, _) = parse_sid_and_attributes_array(groups_bytes, groups_count)?;
+        let (device_groups, device_group_views) =
+            parse_sid_and_attributes_array(device_groups_bytes, device_groups_count)?;
+        let (restricted_sids, restricted_sid_views) =
+            parse_sid_and_attributes_array(restricted_sids_bytes, restricted_sids_count)?;
+        let (confinement_capabilities, confinement_capability_views) =
+            parse_sid_and_attributes_array(confinement_caps_bytes, confinement_caps_count)?;
+        let (restricted_device_groups, restricted_device_group_views) =
+            parse_sid_and_attributes_array(
+                restricted_device_groups_bytes,
+                restricted_device_groups_count,
+            )?;
+        let projected_supplementary_gids =
+            parse_projected_supplementary_gids(supp_gids_bytes, supp_gids_count)?;
+        let user_claims = if user_claims_bytes.is_empty() {
+            Vec::new()
+        } else {
+            parse_claim_attribute_array(user_claims_bytes).map_err(|_| -EINVAL)?
+        };
+        let device_claims = if device_claims_bytes.is_empty() {
+            Vec::new()
+        } else {
+            parse_claim_attribute_array(device_claims_bytes).map_err(|_| -EINVAL)?
+        };
+        let caller_group_count = groups.len();
+
+        if !default_dacl_bytes.is_empty() {
+            Acl::parse(default_dacl_bytes).map_err(|_| -EINVAL)?;
+        }
+        if isolation_boundary && confinement_sid.is_none() {
+            return Err(-EINVAL);
+        }
+        if owner_sid_index == 0 {
+        } else {
+            let owner_index = usize::try_from(owner_sid_index - 1).map_err(|_| -EINVAL)?;
+            let Some(owner_group) = groups.get(owner_index) else {
+                return Err(-EINVAL);
+            };
+            if (owner_group.attributes & SE_GROUP_OWNER) != SE_GROUP_OWNER {
+                return Err(-EINVAL);
+            }
+        }
+        if primary_group_index > u32::try_from(caller_group_count).map_err(|_| -EINVAL)? {
+            return Err(-EINVAL);
+        }
+
+        session = published_session_ref_by_id(session_id)?;
+        let session_ref = unsafe { PkmKacsSession::from_ptr(session.cast()) }.ok_or(-EINVAL)?;
+        if groups
+            .iter()
+            .any(|entry| entry.sid.as_bytes() == session_ref.logon_sid.as_bytes())
+        {
+            unsafe { PkmKacsSession::drop_ref(session.cast()) };
+            return Err(-EINVAL);
+        }
+
+        let logon_sid = match build_owned_sid(session_ref.logon_sid.as_bytes()) {
+            Ok(value) => value,
+            Err(err) => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return Err(err);
+            }
+        };
+        if groups
+            .push(OwnedSidAndAttributes {
+                sid_bytes: logon_sid.sid_bytes,
+                sid: logon_sid.sid,
+                attributes: LOGON_GROUP_ATTRIBUTES,
+            })
+            .is_err()
+        {
+            unsafe { PkmKacsSession::drop_ref(session.cast()) };
+            return Err(-ENOMEM);
+        }
+        group_sids = match sid_vec_from_owned_entries(groups.as_slice()) {
+            Ok(value) => value,
+            Err(err) => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return Err(err);
+            }
+        };
+        group_default_attributes = match attributes_vec_from_owned_entries(groups.as_slice()) {
+            Ok(value) => value,
+            Err(err) => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return Err(err);
+            }
+        };
+        group_attributes = match build_atomic_u32_vec(group_default_attributes.as_slice()) {
+            Ok(value) => value,
+            Err(err) => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return Err(err);
+            }
+        };
+        group_views = match build_group_views(group_sids.as_slice(), group_default_attributes.as_slice()) {
+            Ok(value) => value,
+            Err(err) => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return Err(err);
+            }
+        };
+        group_runtime_views = match build_group_runtime_views(
+            group_sids.as_slice(),
+            group_default_attributes.as_slice(),
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return Err(err);
+            }
+        };
+        token_id = match allocate_dynamic_token_id() {
+            Ok(value) => value,
+            Err(err) => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return Err(err);
+            }
+        };
+        modified_id = token_id;
+        match alloc_copy_bytes(default_dacl_bytes) {
+            Ok(value) => {
+                (default_dacl_ptr, default_dacl_alloc_len) = value;
+            }
+            Err(err) => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return Err(err);
+            }
+        }
+        match build_token_sd_bytes(
+            creator.user_sid.sid,
+            user_sid.sid,
+            Some(KACS_TOKEN_DEFAULT_SELF_ACCESS),
+            Some(KACS_TOKEN_ALL_ACCESS),
+            Some(KACS_TOKEN_ALL_ACCESS),
+        ) {
+            Ok(value) => {
+                (own_sd_ptr, own_sd_len) = value;
+            }
+            Err(err) => {
+                free_allocated_bytes(default_dacl_ptr);
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return Err(err);
+            }
+        }
+        token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
+        if token_ptr.is_null() {
+            free_allocated_bytes(default_dacl_ptr);
+            free_allocated_bytes(own_sd_ptr);
+            unsafe { PkmKacsSession::drop_ref(session.cast()) };
+            return Err(-ENOMEM);
+        }
+
+        let token = Self {
+            refcount: AtomicUsize::new(1),
+            mutation_lock: AtomicBool::new(false),
+            session,
+            user_sid,
+            group_count: groups.len(),
+            groups,
+            group_sids,
+            group_default_attributes,
+            group_attributes,
+            group_views: UnsafeCell::new(group_views),
+            group_runtime_views: UnsafeCell::new(group_runtime_views),
+            token_id,
+            created_at,
+            modified_id: AtomicU64::new(modified_id),
+            owner_sid_index: AtomicU32::new(owner_sid_index),
+            primary_group_index: AtomicU32::new(primary_group_index),
+            default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
+            default_dacl_len: AtomicUsize::new(default_dacl_alloc_len),
+            privileges_present: AtomicU64::new(privileges_present),
+            privileges_enabled: AtomicU64::new(privileges_enabled),
+            privileges_enabled_by_default: AtomicU64::new(privileges_enabled),
+            privileges_used: AtomicU64::new(0),
+            integrity_level,
+            mandatory_policy,
+            token_type,
+            impersonation_level,
+            elevation_type: AtomicU32::new(TOKEN_ELEVATION_DEFAULT_ABI),
+            restricted: !restricted_sid_views.is_empty()
+                || !restricted_device_group_views.is_empty(),
+            user_deny_only,
+            write_restricted,
+            restricted_sids,
+            restricted_sid_views,
+            device_groups,
+            device_group_views,
+            restricted_device_groups,
+            restricted_device_group_views,
+            user_claims,
+            device_claims,
+            confinement_sid,
+            confinement_capabilities,
+            confinement_capability_views,
+            confinement_exempt,
+            isolation_boundary,
+            audit_policy,
+            expiration,
+            source_name,
+            source_id,
+            origin,
+            interactive_session_id: AtomicU32::new(interactive_session_id),
+            projected_uid,
+            projected_gid,
+            projected_supplementary_gids,
+            own_sd_ptr: AtomicPtr::new(own_sd_ptr),
+            own_sd_len: AtomicUsize::new(own_sd_len),
+        };
+
+        unsafe { core::ptr::write(token_ptr, token) };
+        Ok(token_ptr.cast())
     }
 
     unsafe fn from_ptr<'a>(ptr: *const c_void) -> Option<&'a Self> {
@@ -2325,9 +3174,74 @@ impl PkmKacsBootToken {
         };
         let _guard = token.lock_mutation();
         let privileges = token.privileges_snapshot_locked();
-        let group_attributes = token.current_group_attributes();
+        let group_attributes = match token.current_group_attributes() {
+            Ok(value) => value,
+            Err(_) => return null(),
+        };
+        let user_sid = match clone_owned_sid(&token.user_sid) {
+            Ok(value) => value,
+            Err(_) => return null(),
+        };
+        let groups = match clone_owned_sid_entries(token.groups.as_slice()) {
+            Ok(value) => value,
+            Err(_) => return null(),
+        };
+        let group_sids = match sid_vec_from_owned_entries(groups.as_slice()) {
+            Ok(value) => value,
+            Err(_) => return null(),
+        };
+        let group_default_attributes = match try_clone_vec(&token.group_default_attributes) {
+            Ok(value) => value,
+            Err(_) => return null(),
+        };
+        let group_attributes_atoms = match build_atomic_u32_vec(group_attributes.as_slice()) {
+            Ok(value) => value,
+            Err(_) => return null(),
+        };
+        let group_views = match build_group_views(group_sids.as_slice(), group_attributes.as_slice())
+        {
+            Ok(value) => value,
+            Err(_) => return null(),
+        };
+        let group_runtime_views =
+            match build_group_runtime_views(group_sids.as_slice(), group_attributes.as_slice()) {
+                Ok(value) => value,
+                Err(_) => return null(),
+            };
         let (restricted_sids, restricted_sid_views) =
             match build_owned_sid_entries_from_views(token.restricted_sid_views()) {
+                Ok(value) => value,
+                Err(_) => return null(),
+            };
+        let device_groups = match clone_owned_sid_entries(token.device_groups.as_slice()) {
+            Ok(value) => value,
+            Err(_) => return null(),
+        };
+        let device_group_views = match build_sid_and_attributes_views(device_groups.as_slice()) {
+            Ok(value) => value,
+            Err(_) => return null(),
+        };
+        let restricted_device_groups =
+            match clone_owned_sid_entries(token.restricted_device_groups.as_slice()) {
+                Ok(value) => value,
+                Err(_) => return null(),
+            };
+        let restricted_device_group_views =
+            match build_sid_and_attributes_views(restricted_device_groups.as_slice()) {
+                Ok(value) => value,
+                Err(_) => return null(),
+            };
+        let confinement_sid = match clone_optional_owned_sid(token.confinement_sid.as_ref()) {
+            Ok(value) => value,
+            Err(_) => return null(),
+        };
+        let confinement_capabilities =
+            match clone_owned_sid_entries(token.confinement_capabilities.as_slice()) {
+                Ok(value) => value,
+                Err(_) => return null(),
+            };
+        let confinement_capability_views =
+            match build_sid_and_attributes_views(confinement_capabilities.as_slice()) {
                 Ok(value) => value,
                 Err(_) => return null(),
             };
@@ -2362,12 +3276,14 @@ impl PkmKacsBootToken {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
             session,
-            user_sid: token.user_sid,
+            user_sid,
+            groups,
             group_count: token.group_count,
-            group_sids: token.group_sids,
-            group_default_attributes: token.group_default_attributes,
-            group_attributes: group_attributes.map(AtomicU32::new),
-            group_views: UnsafeCell::new(build_group_views(&token.group_sids, &group_attributes)),
+            group_sids,
+            group_default_attributes,
+            group_attributes: group_attributes_atoms,
+            group_views: UnsafeCell::new(group_views),
+            group_runtime_views: UnsafeCell::new(group_runtime_views),
             token_id: token.token_id,
             created_at: token.created_at,
             modified_id: AtomicU64::new(token.modified_id.load(Ordering::Relaxed)),
@@ -2389,12 +3305,57 @@ impl PkmKacsBootToken {
             write_restricted: token.write_restricted,
             restricted_sids,
             restricted_sid_views,
+            device_groups,
+            device_group_views,
+            restricted_device_groups,
+            restricted_device_group_views,
+            user_claims: match try_clone_vec(&token.user_claims) {
+                Ok(value) => value,
+                Err(_) => {
+                    free_allocated_bytes(default_dacl_ptr);
+                    free_allocated_bytes(own_sd_ptr);
+                    unsafe { PkmKacsSession::drop_ref(session) };
+                    unsafe { pkm_kacs_free(token_ptr.cast()) };
+                    return null();
+                }
+            },
+            device_claims: match try_clone_vec(&token.device_claims) {
+                Ok(value) => value,
+                Err(_) => {
+                    free_allocated_bytes(default_dacl_ptr);
+                    free_allocated_bytes(own_sd_ptr);
+                    unsafe { PkmKacsSession::drop_ref(session) };
+                    unsafe { pkm_kacs_free(token_ptr.cast()) };
+                    return null();
+                }
+            },
+            confinement_sid,
+            confinement_capabilities,
+            confinement_capability_views,
+            confinement_exempt: token.confinement_exempt,
+            isolation_boundary: token.isolation_boundary,
             audit_policy: token.audit_policy,
+            expiration: token.expiration,
+            source_name: token.source_name,
+            source_id: token.source_id,
+            origin: token.origin,
             interactive_session_id: AtomicU32::new(
                 token.interactive_session_id.load(Ordering::Relaxed),
             ),
             projected_uid: token.projected_uid,
             projected_gid: token.projected_gid,
+            projected_supplementary_gids: match try_clone_vec(
+                &token.projected_supplementary_gids,
+            ) {
+                Ok(value) => value,
+                Err(_) => {
+                    free_allocated_bytes(default_dacl_ptr);
+                    free_allocated_bytes(own_sd_ptr);
+                    unsafe { PkmKacsSession::drop_ref(session) };
+                    unsafe { pkm_kacs_free(token_ptr.cast()) };
+                    return null();
+                }
+            },
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
         };
@@ -2411,10 +3372,28 @@ impl PkmKacsBootToken {
     ) -> Result<*const c_void, i32> {
         let _guard = self.lock_mutation();
         let privileges = self.privileges_snapshot_locked();
-        let group_attributes = self.current_group_attributes();
-        let group_default_attributes = group_attributes;
+        let group_attributes = self.current_group_attributes()?;
+        let group_default_attributes = group_attributes.try_clone().map_err(|_| -ENOMEM)?;
+        let user_sid = clone_owned_sid(&self.user_sid)?;
+        let groups = clone_owned_sid_entries(self.groups.as_slice())?;
+        let group_sids = sid_vec_from_owned_entries(groups.as_slice())?;
+        let group_attributes_atoms = build_atomic_u32_vec(group_attributes.as_slice())?;
+        let group_views = build_group_views(group_sids.as_slice(), group_attributes.as_slice())?;
+        let group_runtime_views =
+            build_group_runtime_views(group_sids.as_slice(), group_attributes.as_slice())?;
         let (restricted_sids, restricted_sid_views) =
             build_owned_sid_entries_from_views(self.restricted_sid_views())?;
+        let device_groups = clone_owned_sid_entries(self.device_groups.as_slice())?;
+        let device_group_views = build_sid_and_attributes_views(device_groups.as_slice())?;
+        let restricted_device_groups =
+            clone_owned_sid_entries(self.restricted_device_groups.as_slice())?;
+        let restricted_device_group_views =
+            build_sid_and_attributes_views(restricted_device_groups.as_slice())?;
+        let confinement_sid = clone_optional_owned_sid(self.confinement_sid.as_ref())?;
+        let confinement_capabilities =
+            clone_owned_sid_entries(self.confinement_capabilities.as_slice())?;
+        let confinement_capability_views =
+            build_sid_and_attributes_views(confinement_capabilities.as_slice())?;
         let token_id = allocate_dynamic_token_id()?;
         let modified_id = token_id;
         let impersonation_level = match new_type {
@@ -2432,8 +3411,8 @@ impl PkmKacsBootToken {
         let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(self.default_dacl_bytes())?;
         let session = PkmKacsSession::clone_ref_ptr(self.session).ok_or(-EINVAL)?;
         let (own_sd_ptr, own_sd_len) = match build_token_sd_bytes(
-            creator.user_sid,
-            self.user_sid,
+            creator.user_sid.sid,
+            self.user_sid.sid,
             Some(KACS_TOKEN_DEFAULT_SELF_ACCESS),
             Some(KACS_TOKEN_ALL_ACCESS),
             Some(KACS_TOKEN_ALL_ACCESS),
@@ -2458,12 +3437,14 @@ impl PkmKacsBootToken {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
             session,
-            user_sid: self.user_sid,
+            user_sid,
+            groups,
             group_count: self.group_count,
-            group_sids: self.group_sids,
+            group_sids,
             group_default_attributes,
-            group_attributes: group_attributes.map(AtomicU32::new),
-            group_views: UnsafeCell::new(build_group_views(&self.group_sids, &group_attributes)),
+            group_attributes: group_attributes_atoms,
+            group_views: UnsafeCell::new(group_views),
+            group_runtime_views: UnsafeCell::new(group_runtime_views),
             token_id,
             created_at: self.created_at,
             modified_id: AtomicU64::new(modified_id),
@@ -2485,12 +3466,30 @@ impl PkmKacsBootToken {
             write_restricted: self.write_restricted,
             restricted_sids,
             restricted_sid_views,
+            device_groups,
+            device_group_views,
+            restricted_device_groups,
+            restricted_device_group_views,
+            user_claims: try_clone_vec(&self.user_claims)?,
+            device_claims: try_clone_vec(&self.device_claims)?,
+            confinement_sid,
+            confinement_capabilities,
+            confinement_capability_views,
+            confinement_exempt: self.confinement_exempt,
+            isolation_boundary: self.isolation_boundary,
             audit_policy: self.audit_policy,
+            expiration: self.expiration,
+            source_name: self.source_name,
+            source_id: self.source_id,
+            origin: self.origin,
             interactive_session_id: AtomicU32::new(
                 self.interactive_session_id.load(Ordering::Relaxed),
             ),
             projected_uid: self.projected_uid,
             projected_gid: self.projected_gid,
+            projected_supplementary_gids: try_clone_vec(
+                &self.projected_supplementary_gids,
+            )?,
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
         };
@@ -2515,9 +3514,28 @@ impl PkmKacsBootToken {
 
         let _guard = self.lock_mutation();
         let privileges = self.privileges_snapshot_locked();
-        let group_attributes = self.current_group_attributes();
+        let group_attributes = self.current_group_attributes()?;
+        let user_sid = clone_owned_sid(&self.user_sid)?;
+        let groups = clone_owned_sid_entries(self.groups.as_slice())?;
+        let group_sids = sid_vec_from_owned_entries(groups.as_slice())?;
+        let group_default_attributes = try_clone_vec(&self.group_default_attributes)?;
+        let group_attributes_atoms = build_atomic_u32_vec(group_attributes.as_slice())?;
+        let group_views = build_group_views(group_sids.as_slice(), group_attributes.as_slice())?;
+        let group_runtime_views =
+            build_group_runtime_views(group_sids.as_slice(), group_attributes.as_slice())?;
         let (restricted_sids, restricted_sid_views) =
             build_owned_sid_entries_from_views(self.restricted_sid_views())?;
+        let device_groups = clone_owned_sid_entries(self.device_groups.as_slice())?;
+        let device_group_views = build_sid_and_attributes_views(device_groups.as_slice())?;
+        let restricted_device_groups =
+            clone_owned_sid_entries(self.restricted_device_groups.as_slice())?;
+        let restricted_device_group_views =
+            build_sid_and_attributes_views(restricted_device_groups.as_slice())?;
+        let confinement_sid = clone_optional_owned_sid(self.confinement_sid.as_ref())?;
+        let confinement_capabilities =
+            clone_owned_sid_entries(self.confinement_capabilities.as_slice())?;
+        let confinement_capability_views =
+            build_sid_and_attributes_views(confinement_capabilities.as_slice())?;
         let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(self.default_dacl_bytes())?;
         let session = PkmKacsSession::clone_ref_ptr(self.session).ok_or(-EINVAL)?;
         let (own_sd_ptr, own_sd_len) = match alloc_copy_bytes(self.own_sd_bytes()) {
@@ -2541,12 +3559,14 @@ impl PkmKacsBootToken {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
             session,
-            user_sid: self.user_sid,
+            user_sid,
+            groups,
             group_count: self.group_count,
-            group_sids: self.group_sids,
-            group_default_attributes: self.group_default_attributes,
-            group_attributes: group_attributes.map(AtomicU32::new),
-            group_views: UnsafeCell::new(build_group_views(&self.group_sids, &group_attributes)),
+            group_sids,
+            group_default_attributes,
+            group_attributes: group_attributes_atoms,
+            group_views: UnsafeCell::new(group_views),
+            group_runtime_views: UnsafeCell::new(group_runtime_views),
             token_id: self.token_id,
             created_at: self.created_at,
             modified_id: AtomicU64::new(self.modified_id.load(Ordering::Relaxed)),
@@ -2568,12 +3588,30 @@ impl PkmKacsBootToken {
             write_restricted: self.write_restricted,
             restricted_sids,
             restricted_sid_views,
+            device_groups,
+            device_group_views,
+            restricted_device_groups,
+            restricted_device_group_views,
+            user_claims: try_clone_vec(&self.user_claims)?,
+            device_claims: try_clone_vec(&self.device_claims)?,
+            confinement_sid,
+            confinement_capabilities,
+            confinement_capability_views,
+            confinement_exempt: self.confinement_exempt,
+            isolation_boundary: self.isolation_boundary,
             audit_policy: self.audit_policy,
+            expiration: self.expiration,
+            source_name: self.source_name,
+            source_id: self.source_id,
+            origin: self.origin,
             interactive_session_id: AtomicU32::new(
                 self.interactive_session_id.load(Ordering::Relaxed),
             ),
             projected_uid: self.projected_uid,
             projected_gid: self.projected_gid,
+            projected_supplementary_gids: try_clone_vec(
+                &self.projected_supplementary_gids,
+            )?,
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
         };
@@ -2618,8 +3656,8 @@ impl PkmKacsBootToken {
             logon_type: session.logon_type,
             auth_pkg_ptr: session.auth_package_bytes().as_ptr(),
             auth_pkg_len: session.auth_package_bytes().len(),
-            user_sid_ptr: session.user_sid.as_bytes().as_ptr(),
-            user_sid_len: session.user_sid.as_bytes().len(),
+            user_sid_ptr: self.user_sid.as_bytes().as_ptr(),
+            user_sid_len: self.user_sid.as_bytes().len(),
             logon_sid_ptr: session.logon_sid.as_bytes().as_ptr(),
             logon_sid_len: session.logon_sid.as_bytes().len(),
             groups_ptr: group_views.as_ptr(),
@@ -2811,28 +3849,29 @@ impl PkmKacsBootToken {
         unsafe { core::slice::from_raw_parts(ptr.cast_const(), len) }
     }
 
-    fn current_group_attributes(&self) -> [u32; MAX_BOOT_GROUPS] {
-        core::array::from_fn(|index| self.group_attributes[index].load(Ordering::Relaxed))
-    }
+    fn current_group_attributes(&self) -> Result<Vec<u32>, i32> {
+        let mut attributes = Vec::with_capacity(self.group_count).map_err(|_| -ENOMEM)?;
 
-    fn current_groups(&self) -> [SidAndAttributes<'static>; MAX_BOOT_GROUPS] {
-        let group_attributes = self.current_group_attributes();
+        for index in 0..self.group_count {
+            attributes
+                .push(self.group_attributes[index].load(Ordering::Relaxed))
+                .map_err(|_| -ENOMEM)?;
+        }
 
-        core::array::from_fn(|index| SidAndAttributes {
-            sid: self.group_sids[index],
-            attributes: group_attributes[index],
-        })
+        Ok(attributes)
     }
 
     fn restricted_sid_views(&self) -> &[SidAndAttributes<'static>] {
         self.restricted_sid_views.as_slice()
     }
 
-    fn sync_group_views_locked(&self, group_attributes: &[u32; MAX_BOOT_GROUPS]) {
+    fn sync_group_views_locked(&self, group_attributes: &[u32]) {
         let group_views = unsafe { &mut *self.group_views.get() };
+        let group_runtime_views = unsafe { &mut *self.group_runtime_views.get() };
 
         for index in 0..group_views.len() {
             group_views[index].attributes = group_attributes[index];
+            group_runtime_views[index].attributes = group_attributes[index];
         }
     }
 
@@ -2943,22 +3982,21 @@ impl PkmKacsBootToken {
 
     fn sid_by_index(&self, index: u32) -> Option<Sid<'_>> {
         if index == 0 {
-            return Some(self.user_sid);
+            return Some(self.user_sid.sid);
         }
 
         self.group_sid_at(index - 1)
     }
 
     fn with_access_token<T>(&self, f: impl FnOnce(AccessCheckToken<'_>) -> T) -> T {
-        let (groups, privileges) = {
-            let _guard = self.lock_mutation();
-            (self.current_groups(), self.privileges_snapshot_locked())
-        };
+        let _guard = self.lock_mutation();
+        let groups = unsafe { &*self.group_runtime_views.get() };
+        let privileges = self.privileges_snapshot_locked();
         let access_token = AccessCheckToken {
             subject: TokenView {
-                user: self.user_sid,
+                user: self.user_sid.sid,
                 user_deny_only: self.user_deny_only,
-                groups: &groups[..self.group_count],
+                groups: groups.as_slice(),
             },
             token_type: self.token_type,
             impersonation_level: self.impersonation_level,
@@ -2968,11 +4006,15 @@ impl PkmKacsBootToken {
             mandatory_policy: self.mandatory_policy,
             restricted: RestrictedTokenContext {
                 restricted_sids: self.restricted_sid_views(),
-                restricted_device_groups: EMPTY_DEVICE_GROUPS,
+                restricted_device_groups: self.restricted_device_group_views.as_slice(),
                 write_restricted: self.write_restricted,
                 privilege_granted: 0,
             },
-            confinement: ConfinementTokenContext::default(),
+            confinement: ConfinementTokenContext {
+                confinement_sid: self.confinement_sid.as_ref().map(|sid| sid.sid),
+                confinement_capabilities: self.confinement_capability_views.as_slice(),
+                confinement_exempt: self.confinement_exempt,
+            },
         };
 
         f(access_token)
@@ -3018,37 +4060,43 @@ impl PkmKacsBootToken {
     }
 
     fn write_restricted_sid_query(&self, writer: &mut QueryWriter) -> Result<(), i32> {
-        let entries = self.restricted_sid_views();
+        write_sid_and_attributes_query(self.restricted_sid_views(), writer)
+    }
+}
 
-        if entries.len() > u32::MAX as usize {
-            return Err(-EINVAL);
-        }
-        if !writer.write_u32(entries.len() as u32) {
-            return Err(-ERANGE);
-        }
-
-        for entry in entries {
-            let sid = entry.sid.as_bytes();
-
-            if sid.len() > u32::MAX as usize {
-                return Err(-EINVAL);
-            }
-            if !writer.write_u32(sid.len() as u32) {
-                return Err(-ERANGE);
-            }
-            if !writer.write_bytes(sid) {
-                return Err(-ERANGE);
-            }
-            if !writer.write_u32(entry.attributes) {
-                return Err(-ERANGE);
-            }
-        }
-
-        Ok(())
+fn write_sid_and_attributes_query(
+    entries: &[SidAndAttributes<'_>],
+    writer: &mut QueryWriter,
+) -> Result<(), i32> {
+    if entries.len() > u32::MAX as usize {
+        return Err(-EINVAL);
+    }
+    if !writer.write_u32(entries.len() as u32) {
+        return Err(-ERANGE);
     }
 
+    for entry in entries {
+        let sid = entry.sid.as_bytes();
+
+        if sid.len() > u32::MAX as usize {
+            return Err(-EINVAL);
+        }
+        if !writer.write_u32(sid.len() as u32) {
+            return Err(-ERANGE);
+        }
+        if !writer.write_bytes(sid) {
+            return Err(-ERANGE);
+        }
+        if !writer.write_u32(entry.attributes) {
+            return Err(-ERANGE);
+        }
+    }
+
+    Ok(())
+}
+
+impl PkmKacsBootToken {
     fn adjust_groups(&self, entries: &[PkmKacsGroupAdjustEntry]) -> Result<u64, i32> {
-        let mut seen = [false; MAX_BOOT_GROUPS];
         let _guard = self.lock_mutation();
         let previous_state = self.current_group_enabled_mask_locked();
         let modified_id = self.modified_id.load(Ordering::Relaxed);
@@ -3072,7 +4120,7 @@ impl PkmKacsBootToken {
             return Ok(previous_state);
         }
 
-        for entry in entries {
+        for (entry_index, entry) in entries.iter().enumerate() {
             let index = entry.index as usize;
             if index >= self.group_count {
                 return Err(-EINVAL);
@@ -3085,10 +4133,11 @@ impl PkmKacsBootToken {
             if entry.enable > 1 {
                 return Err(-EINVAL);
             }
-            if seen[index] {
-                return Err(-EINVAL);
+            for previous in &entries[..entry_index] {
+                if previous.index == entry.index {
+                    return Err(-EINVAL);
+                }
             }
-            seen[index] = true;
 
             if entry.enable == 0 {
                 if (attributes & SE_GROUP_MANDATORY) == SE_GROUP_MANDATORY
@@ -3114,7 +4163,7 @@ impl PkmKacsBootToken {
             self.group_attributes[index].store(attributes, Ordering::Relaxed);
         }
 
-        let current_group_attributes = self.current_group_attributes();
+        let current_group_attributes = self.current_group_attributes()?;
         self.sync_group_views_locked(&current_group_attributes);
         self.modified_id.store(next_modified_id, Ordering::Relaxed);
         Ok(previous_state)
@@ -3130,8 +4179,7 @@ impl PkmKacsBootToken {
     ) -> Result<*const c_void, i32> {
         let _guard = self.lock_mutation();
         let privileges = self.privileges_snapshot_locked();
-        let mut group_attributes = self.current_group_attributes();
-        let mut seen = [false; MAX_BOOT_GROUPS];
+        let mut group_attributes = self.current_group_attributes()?;
         let source_was_restricted = !self.restricted_sid_views().is_empty();
         let privileges_present = privileges.present & !privs_to_delete;
         let privileges_enabled = privileges.enabled & !privs_to_delete;
@@ -3139,20 +4187,35 @@ impl PkmKacsBootToken {
         let token_id = allocate_dynamic_token_id()?;
         let write_restricted = write_restricted_requested || self.write_restricted;
         let user_deny_only = write_restricted;
+        let user_sid = clone_owned_sid(&self.user_sid)?;
+        let mut groups = clone_owned_sid_entries(self.groups.as_slice())?;
+        let group_sids = sid_vec_from_owned_entries(groups.as_slice())?;
         let (restricted_sids, restricted_sid_views) = if !source_was_restricted {
             build_owned_sid_entries_from_views(restrict_sids)?
         } else {
             intersect_restricted_sid_views(self.restricted_sid_views(), restrict_sids)?
         };
+        let device_groups = clone_owned_sid_entries(self.device_groups.as_slice())?;
+        let device_group_views = build_sid_and_attributes_views(device_groups.as_slice())?;
+        let restricted_device_groups =
+            clone_owned_sid_entries(self.restricted_device_groups.as_slice())?;
+        let restricted_device_group_views =
+            build_sid_and_attributes_views(restricted_device_groups.as_slice())?;
+        let confinement_sid = clone_optional_owned_sid(self.confinement_sid.as_ref())?;
+        let confinement_capabilities =
+            clone_owned_sid_entries(self.confinement_capabilities.as_slice())?;
+        let confinement_capability_views =
+            build_sid_and_attributes_views(confinement_capabilities.as_slice())?;
         if source_was_restricted && restricted_sid_views.is_empty() {
             return Err(-EINVAL);
         }
-        let restricted = !restricted_sid_views.is_empty();
+        let restricted = !restricted_sid_views.is_empty()
+            || !restricted_device_group_views.is_empty();
         let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(self.default_dacl_bytes())?;
         let session = PkmKacsSession::clone_ref_ptr(self.session).ok_or(-EINVAL)?;
         let (own_sd_ptr, own_sd_len) = match build_token_sd_bytes(
-            creator.user_sid,
-            self.user_sid,
+            creator.user_sid.sid,
+            self.user_sid.sid,
             Some(KACS_TOKEN_DEFAULT_SELF_ACCESS),
             Some(KACS_TOKEN_ALL_ACCESS),
             Some(KACS_TOKEN_ALL_ACCESS),
@@ -3173,7 +4236,7 @@ impl PkmKacsBootToken {
             return Err(-ENOMEM);
         }
 
-        for deny_index in deny_indices {
+        for (deny_pos, deny_index) in deny_indices.iter().enumerate() {
             let index = usize::try_from(*deny_index).map_err(|_| -EINVAL)?;
 
             if index >= self.group_count {
@@ -3183,27 +4246,38 @@ impl PkmKacsBootToken {
                 unsafe { pkm_kacs_free(token_ptr.cast()) };
                 return Err(-EINVAL);
             }
-            if seen[index] {
-                free_allocated_bytes(default_dacl_ptr);
-                free_allocated_bytes(own_sd_ptr);
-                unsafe { PkmKacsSession::drop_ref(session) };
-                unsafe { pkm_kacs_free(token_ptr.cast()) };
-                return Err(-EINVAL);
+            for previous in &deny_indices[..deny_pos] {
+                if previous == deny_index {
+                    free_allocated_bytes(default_dacl_ptr);
+                    free_allocated_bytes(own_sd_ptr);
+                    unsafe { PkmKacsSession::drop_ref(session) };
+                    unsafe { pkm_kacs_free(token_ptr.cast()) };
+                    return Err(-EINVAL);
+                }
             }
-            seen[index] = true;
             group_attributes[index] |= SE_GROUP_USE_FOR_DENY_ONLY;
         }
+        for (index, entry) in groups.iter_mut().enumerate() {
+            entry.attributes = group_attributes[index];
+        }
+        let group_default_attributes = group_attributes.try_clone().map_err(|_| -ENOMEM)?;
+        let group_attributes_atoms = build_atomic_u32_vec(group_attributes.as_slice())?;
+        let group_views = build_group_views(group_sids.as_slice(), group_attributes.as_slice())?;
+        let group_runtime_views =
+            build_group_runtime_views(group_sids.as_slice(), group_attributes.as_slice())?;
 
         let restricted_token = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
             session,
-            user_sid: self.user_sid,
+            user_sid,
+            groups,
             group_count: self.group_count,
-            group_sids: self.group_sids,
-            group_default_attributes: group_attributes,
-            group_attributes: group_attributes.map(AtomicU32::new),
-            group_views: UnsafeCell::new(build_group_views(&self.group_sids, &group_attributes)),
+            group_sids,
+            group_default_attributes,
+            group_attributes: group_attributes_atoms,
+            group_views: UnsafeCell::new(group_views),
+            group_runtime_views: UnsafeCell::new(group_runtime_views),
             token_id,
             created_at: self.created_at,
             modified_id: AtomicU64::new(token_id),
@@ -3225,12 +4299,30 @@ impl PkmKacsBootToken {
             write_restricted,
             restricted_sids,
             restricted_sid_views,
+            device_groups,
+            device_group_views,
+            restricted_device_groups,
+            restricted_device_group_views,
+            user_claims: try_clone_vec(&self.user_claims)?,
+            device_claims: try_clone_vec(&self.device_claims)?,
+            confinement_sid,
+            confinement_capabilities,
+            confinement_capability_views,
+            confinement_exempt: self.confinement_exempt,
+            isolation_boundary: self.isolation_boundary,
             audit_policy: self.audit_policy,
+            expiration: self.expiration,
+            source_name: self.source_name,
+            source_id: self.source_id,
+            origin: self.origin,
             interactive_session_id: AtomicU32::new(
                 self.interactive_session_id.load(Ordering::Relaxed),
             ),
             projected_uid: self.projected_uid,
             projected_gid: self.projected_gid,
+            projected_supplementary_gids: try_clone_vec(
+                &self.projected_supplementary_gids,
+            )?,
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
         };
@@ -3270,9 +4362,18 @@ impl PkmKacsBootToken {
             TOKEN_CLASS_SOURCE => Ok(16),
             TOKEN_CLASS_ORIGIN => Ok(8),
             TOKEN_CLASS_ELEVATION_TYPE => Ok(4),
-            TOKEN_CLASS_DEVICE_GROUPS => Ok(4),
-            TOKEN_CLASS_APPCONTAINER_SID => Ok(0),
-            TOKEN_CLASS_CAPABILITIES => Ok(4),
+            TOKEN_CLASS_DEVICE_GROUPS => {
+                sid_and_attributes_query_len(self.device_group_views.as_slice()).ok_or(-EINVAL)
+            }
+            TOKEN_CLASS_APPCONTAINER_SID => Ok(self
+                .confinement_sid
+                .as_ref()
+                .map(|sid| sid.as_bytes().len())
+                .unwrap_or(0)),
+            TOKEN_CLASS_CAPABILITIES => sid_and_attributes_query_len(
+                self.confinement_capability_views.as_slice(),
+            )
+            .ok_or(-EINVAL),
             TOKEN_CLASS_MANDATORY_POLICY => Ok(4),
             TOKEN_CLASS_LOGON_TYPE => Ok(4),
             TOKEN_CLASS_LOGON_SID => self
@@ -3327,7 +4428,7 @@ impl PkmKacsBootToken {
                 true
             }
             TOKEN_CLASS_SOURCE => {
-                writer.write_bytes(TOKEN_SOURCE_PEI_OS_KRN) && writer.write_u64(0)
+                writer.write_bytes(&self.source_name) && writer.write_u64(self.source_id)
             }
             TOKEN_CLASS_STATISTICS => {
                 let _guard = self.lock_mutation();
@@ -3339,13 +4440,26 @@ impl PkmKacsBootToken {
                     && writer.write_u64(self.modified_id.load(Ordering::Relaxed))
                     && writer.write_u32(token_type_abi(self.token_type))
                     && writer.write_u32(0)
-                    && writer.write_u64(0)
+                    && writer.write_u64(self.expiration)
             }
-            TOKEN_CLASS_ORIGIN => writer.write_u64(0),
+            TOKEN_CLASS_ORIGIN => writer.write_u64(self.origin),
             TOKEN_CLASS_ELEVATION_TYPE => writer.write_u32(self.elevation_type()),
-            TOKEN_CLASS_DEVICE_GROUPS => writer.write_u32(0),
-            TOKEN_CLASS_APPCONTAINER_SID => true,
-            TOKEN_CLASS_CAPABILITIES => writer.write_u32(0),
+            TOKEN_CLASS_DEVICE_GROUPS => {
+                write_sid_and_attributes_query(self.device_group_views.as_slice(), writer)?;
+                true
+            }
+            TOKEN_CLASS_APPCONTAINER_SID => self
+                .confinement_sid
+                .as_ref()
+                .map(|sid| writer.write_bytes(sid.as_bytes()))
+                .unwrap_or(true),
+            TOKEN_CLASS_CAPABILITIES => {
+                write_sid_and_attributes_query(
+                    self.confinement_capability_views.as_slice(),
+                    writer,
+                )?;
+                true
+            }
             TOKEN_CLASS_MANDATORY_POLICY => writer.write_u32(self.mandatory_policy),
             TOKEN_CLASS_LOGON_TYPE => {
                 let Some(session) = self.session_ref() else {
@@ -3417,9 +4531,9 @@ pub(crate) fn with_access_check_resolved_from_token<T>(
         let resolved = AccessCheckAbiResolved {
             token: &access_token,
             default_pip,
-            device_groups: EMPTY_DEVICE_GROUPS,
-            user_claims: EMPTY_CLAIMS,
-            device_claims: EMPTY_CLAIMS,
+            device_groups: token.device_group_views.as_slice(),
+            user_claims: token.user_claims.as_slice(),
+            device_claims: token.device_claims.as_slice(),
             policies,
         };
         f(resolved)
@@ -3908,6 +5022,41 @@ pub extern "C" fn kacs_rust_create_session(
     match create_published_dynamic_session(created_at, logon_type, auth_package, user_sid) {
         Ok(session_id) => {
             *session_id_out = session_id;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Creates one new token object from the exact `v0.20` token wire format.
+pub extern "C" fn kacs_rust_create_token(
+    creator_token: *const c_void,
+    spec: *const u8,
+    spec_len: usize,
+    created_at: u64,
+    out_token: *mut *const c_void,
+) -> i32 {
+    let Some(creator_token) = (unsafe { PkmKacsBootToken::from_ptr(creator_token) }) else {
+        return -EACCES;
+    };
+    let Some(out_token) = (unsafe { out_token.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    *out_token = null();
+
+    if spec.is_null() || spec_len < TOKEN_SPEC_HEADER_LEN || spec_len > MAX_TOKEN_SPEC_BYTES {
+        return -EINVAL;
+    }
+
+    match PkmKacsBootToken::create_from_spec(
+        creator_token,
+        unsafe { core::slice::from_raw_parts(spec, spec_len) },
+        created_at,
+    ) {
+        Ok(token) => {
+            *out_token = token;
             0
         }
         Err(err) => err,

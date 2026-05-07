@@ -1,4 +1,6 @@
 use crate::error::{KacsError, KacsResult};
+#[cfg(feature = "kernel")]
+use crate::pkm_alloc::{AllocError, TryClone};
 
 /// Group attribute bit marking an enabled SID.
 pub const SE_GROUP_ENABLED: u32 = 0x0000_0004;
@@ -9,6 +11,13 @@ pub const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x0000_0010;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Sid<'a> {
     bytes: &'a [u8],
+}
+
+#[cfg(feature = "kernel")]
+impl<'a> TryClone for Sid<'a> {
+    fn try_clone(&self) -> Result<Self, AllocError> {
+        Ok(*self)
+    }
 }
 
 impl<'a> Sid<'a> {

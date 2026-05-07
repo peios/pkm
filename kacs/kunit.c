@@ -57,6 +57,7 @@
 	(KACS_ACCESS_READ_CONTROL | KACS_ACCESS_ACCESS_SYSTEM_SECURITY)
 #define PKM_KUNIT_PIP_TYPE_PROTECTED 512U
 #define PKM_KUNIT_PIP_TRUST_TEST 5U
+#define PKM_KUNIT_SE_CREATE_TOKEN_PRIVILEGE (1ULL << 2)
 #define PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE (1ULL << 3)
 #define PKM_KUNIT_SE_TCB_PRIVILEGE (1ULL << 7)
 #define PKM_KUNIT_SE_INCREASE_BASE_PRIORITY_PRIVILEGE (1ULL << 14)
@@ -93,8 +94,12 @@
 #define PKM_KUNIT_ADJUSTABLE_PRIV_AFTER_REMOVE \
 	((1ULL << PKM_KUNIT_PRIV_LUID_ENABLE) | \
 	 (1ULL << PKM_KUNIT_PRIV_LUID_DISABLE))
+#define PKM_KUNIT_SE_GROUP_MANDATORY 0x00000001U
+#define PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT 0x00000002U
 #define PKM_KUNIT_SE_GROUP_ENABLED 0x00000004U
+#define PKM_KUNIT_SE_GROUP_OWNER 0x00000008U
 #define PKM_KUNIT_SE_GROUP_USE_FOR_DENY_ONLY 0x00000010U
+#define PKM_KUNIT_SE_GROUP_LOGON_ID 0xC0000000U
 #define PKM_KUNIT_ADJUSTABLE_GROUP0_DEFAULT 0x0000000EU
 #define PKM_KUNIT_ADJUSTABLE_GROUP1_DEFAULT 0x00000000U
 #define PKM_KUNIT_ADJUSTABLE_GROUP2_DEFAULT 0x00000010U
@@ -132,6 +137,8 @@
 #define PKM_KUNIT_DACL_SECURITY_INFORMATION 0x00000004U
 #define PKM_KUNIT_SACL_SECURITY_INFORMATION 0x00000008U
 #define PKM_KUNIT_LABEL_SECURITY_INFORMATION 0x00000010U
+#define PKM_KUNIT_TOKEN_SPEC_VERSION 2U
+#define PKM_KUNIT_TOKEN_SPEC_HEADER_LEN 192U
 
 #ifndef PTRACE_MODE_GETFD
 #define PTRACE_MODE_GETFD 0x20
@@ -146,11 +153,20 @@ static const u8 pkm_kunit_kmes_ring_magic[] = "KMESRING";
 static const u8 pkm_kunit_anonymous_sid[] = {
 	1, 1, 0, 0, 0, 0, 0, 5, 7, 0, 0, 0
 };
+static const u8 pkm_kunit_local_service_sid[] = {
+	1, 1, 0, 0, 0, 0, 0, 5, 19, 0, 0, 0
+};
 static const u8 pkm_kunit_everyone_sid[] = {
 	1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0
 };
 static const u8 pkm_kunit_authenticated_users_sid[] = {
 	1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0
+};
+static const u8 pkm_kunit_all_restricted_application_packages_sid[] = {
+	1, 2, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 2, 0, 0, 0
+};
+static const u8 pkm_kunit_sample_confinement_sid[] = {
+	1, 2, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 0xe8, 0x03, 0, 0
 };
 
 static void pkm_kunit_probe_smoke(struct kunit *test)
@@ -186,6 +202,58 @@ struct pkm_kunit_linked_pair {
 	long elevated_fd;
 	long filtered_fd;
 	u64 session_id;
+};
+
+struct pkm_kunit_sid_attr_spec {
+	const u8 *sid;
+	size_t sid_len;
+	u32 attributes;
+};
+
+struct pkm_kunit_token_spec_args {
+	u8 token_type;
+	u8 impersonation_level;
+	u32 integrity_level;
+	u32 mandatory_policy;
+	u64 privileges_present;
+	u64 privileges_enabled;
+	u32 projected_uid;
+	u32 projected_gid;
+	u32 audit_policy;
+	u64 expiration;
+	u64 session_id;
+	u32 owner_sid_index;
+	u32 primary_group_index;
+	const u8 *source_name;
+	u64 source_id;
+	const u8 *user_sid;
+	size_t user_sid_len;
+	const struct pkm_kunit_sid_attr_spec *groups;
+	u32 group_count;
+	const u8 *default_dacl;
+	size_t default_dacl_len;
+	const u8 *user_claims;
+	size_t user_claims_len;
+	const u8 *device_claims;
+	size_t device_claims_len;
+	const struct pkm_kunit_sid_attr_spec *device_groups;
+	u32 device_group_count;
+	const struct pkm_kunit_sid_attr_spec *restricted_sids;
+	u32 restricted_sid_count;
+	const u8 *confinement_sid;
+	size_t confinement_sid_len;
+	const struct pkm_kunit_sid_attr_spec *confinement_caps;
+	u32 confinement_cap_count;
+	u32 confinement_exempt;
+	u32 write_restricted;
+	u32 user_deny_only;
+	u32 isolation_boundary;
+	const u32 *projected_supplementary_gids;
+	u32 projected_supplementary_gid_count;
+	const struct pkm_kunit_sid_attr_spec *restricted_device_groups;
+	u32 restricted_device_group_count;
+	u64 origin;
+	u32 interactive_session_id;
 };
 
 struct pkm_kunit_kmes_event_view {
@@ -664,6 +732,236 @@ static size_t pkm_kunit_build_session_spec(u8 *dst, u8 logon_type,
 	pkm_kunit_write_u32(dst, 3 + auth_pkg_len, (u32)user_sid_len);
 	memcpy(dst + 7 + auth_pkg_len, user_sid, user_sid_len);
 	return 7 + auth_pkg_len + user_sid_len;
+}
+
+static size_t pkm_kunit_sid_attr_array_len(
+	const struct pkm_kunit_sid_attr_spec *entries, u32 count)
+{
+	size_t total = 0;
+	u32 i;
+
+	for (i = 0; i < count; i++) {
+		if (!entries || !entries[i].sid)
+			return 0;
+		if (entries[i].sid_len > SIZE_MAX - 8 ||
+		    total > SIZE_MAX - (entries[i].sid_len + 8))
+			return 0;
+		total += entries[i].sid_len + 8;
+	}
+
+	return total;
+}
+
+static size_t pkm_kunit_write_sid_attr_array(
+	u8 *dst, const struct pkm_kunit_sid_attr_spec *entries, u32 count)
+{
+	size_t offset = 0;
+	u32 i;
+
+	for (i = 0; i < count; i++) {
+		pkm_kunit_write_u32(dst, offset, (u32)entries[i].sid_len);
+		memcpy(dst + offset + 4, entries[i].sid, entries[i].sid_len);
+		pkm_kunit_write_u32(dst, offset + 4 + entries[i].sid_len,
+				    entries[i].attributes);
+		offset += entries[i].sid_len + 8;
+	}
+
+	return offset;
+}
+
+static int pkm_kunit_append_bytes_section(u8 *dst, size_t dst_len,
+					  size_t *offset_io,
+					  const void *bytes, size_t len,
+					  u32 *offset_out)
+{
+	if (!offset_io || !offset_out)
+		return -EINVAL;
+
+	if (!bytes || len == 0) {
+		*offset_out = 0;
+		return 0;
+	}
+
+	if (*offset_io > dst_len || len > dst_len - *offset_io ||
+	    *offset_io > U32_MAX || len > U32_MAX)
+		return -EINVAL;
+
+	memcpy(dst + *offset_io, bytes, len);
+	*offset_out = (u32)*offset_io;
+	*offset_io += len;
+	return 0;
+}
+
+static int pkm_kunit_append_sid_attr_section(
+	u8 *dst, size_t dst_len, size_t *offset_io,
+	const struct pkm_kunit_sid_attr_spec *entries, u32 count,
+	u32 *offset_out)
+{
+	size_t len;
+
+	if (!count)
+		return pkm_kunit_append_bytes_section(dst, dst_len, offset_io,
+						      NULL, 0, offset_out);
+
+	len = pkm_kunit_sid_attr_array_len(entries, count);
+	if (!len || *offset_io > dst_len || len > dst_len - *offset_io ||
+	    *offset_io > U32_MAX)
+		return -EINVAL;
+
+	*offset_out = (u32)*offset_io;
+	pkm_kunit_write_sid_attr_array(dst + *offset_io, entries, count);
+	*offset_io += len;
+	return 0;
+}
+
+static int pkm_kunit_append_u32_section(u8 *dst, size_t dst_len,
+					size_t *offset_io,
+					const u32 *values, u32 count,
+					u32 *offset_out)
+{
+	size_t len;
+	u32 i;
+
+	if (!count)
+		return pkm_kunit_append_bytes_section(dst, dst_len, offset_io,
+						      NULL, 0, offset_out);
+
+	len = (size_t)count * sizeof(u32);
+	if (!values || *offset_io > dst_len || len > dst_len - *offset_io ||
+	    *offset_io > U32_MAX)
+		return -EINVAL;
+
+	*offset_out = (u32)*offset_io;
+	for (i = 0; i < count; i++)
+		pkm_kunit_write_u32(dst + *offset_io, i * sizeof(u32),
+				    values[i]);
+	*offset_io += len;
+	return 0;
+}
+
+static size_t pkm_kunit_build_token_spec(
+	u8 *dst, size_t dst_len, const struct pkm_kunit_token_spec_args *args)
+{
+	size_t offset = PKM_KUNIT_TOKEN_SPEC_HEADER_LEN;
+	u32 section_offset = 0;
+
+	if (!dst || !args || dst_len < PKM_KUNIT_TOKEN_SPEC_HEADER_LEN ||
+	    !args->user_sid || !args->source_name)
+		return 0;
+
+	memset(dst, 0, dst_len);
+	pkm_kunit_write_u32(dst, 0, PKM_KUNIT_TOKEN_SPEC_VERSION);
+	dst[4] = args->token_type;
+	dst[5] = args->impersonation_level;
+	pkm_kunit_write_u32(dst, 8, args->integrity_level);
+	pkm_kunit_write_u32(dst, 12, args->mandatory_policy);
+	pkm_kunit_write_u64(dst, 16, args->privileges_present);
+	pkm_kunit_write_u64(dst, 24, args->privileges_enabled);
+	pkm_kunit_write_u32(dst, 36, args->projected_uid);
+	pkm_kunit_write_u32(dst, 40, args->projected_gid);
+	pkm_kunit_write_u32(dst, 44, args->audit_policy);
+	pkm_kunit_write_u64(dst, 48, args->expiration);
+	pkm_kunit_write_u64(dst, 56, args->session_id);
+	pkm_kunit_write_u32(dst, 64, args->owner_sid_index);
+	pkm_kunit_write_u32(dst, 68, args->primary_group_index);
+	memcpy(dst + 72, args->source_name, 8);
+	pkm_kunit_write_u64(dst, 80, args->source_id);
+
+	if (pkm_kunit_append_bytes_section(dst, dst_len, &offset,
+					   args->user_sid,
+					   args->user_sid_len,
+					   &section_offset))
+		return 0;
+	pkm_kunit_write_u32(dst, 88, section_offset);
+
+	if (pkm_kunit_append_sid_attr_section(dst, dst_len, &offset,
+					      args->groups, args->group_count,
+					      &section_offset))
+		return 0;
+	pkm_kunit_write_u32(dst, 92, section_offset);
+	pkm_kunit_write_u32(dst, 96, args->group_count);
+
+	if (pkm_kunit_append_bytes_section(dst, dst_len, &offset,
+					   args->default_dacl,
+					   args->default_dacl_len,
+					   &section_offset))
+		return 0;
+	pkm_kunit_write_u32(dst, 100, section_offset);
+	pkm_kunit_write_u32(dst, 104, (u32)args->default_dacl_len);
+
+	if (pkm_kunit_append_bytes_section(dst, dst_len, &offset,
+					   args->user_claims,
+					   args->user_claims_len,
+					   &section_offset))
+		return 0;
+	pkm_kunit_write_u32(dst, 108, section_offset);
+	pkm_kunit_write_u32(dst, 112, (u32)args->user_claims_len);
+
+	if (pkm_kunit_append_bytes_section(dst, dst_len, &offset,
+					   args->device_claims,
+					   args->device_claims_len,
+					   &section_offset))
+		return 0;
+	pkm_kunit_write_u32(dst, 116, section_offset);
+	pkm_kunit_write_u32(dst, 120, (u32)args->device_claims_len);
+
+	if (pkm_kunit_append_sid_attr_section(dst, dst_len, &offset,
+					      args->device_groups,
+					      args->device_group_count,
+					      &section_offset))
+		return 0;
+	pkm_kunit_write_u32(dst, 124, section_offset);
+	pkm_kunit_write_u32(dst, 128, args->device_group_count);
+
+	if (pkm_kunit_append_sid_attr_section(dst, dst_len, &offset,
+					      args->restricted_sids,
+					      args->restricted_sid_count,
+					      &section_offset))
+		return 0;
+	pkm_kunit_write_u32(dst, 132, section_offset);
+	pkm_kunit_write_u32(dst, 136, args->restricted_sid_count);
+
+	if (pkm_kunit_append_bytes_section(dst, dst_len, &offset,
+					   args->confinement_sid,
+					   args->confinement_sid_len,
+					   &section_offset))
+		return 0;
+	pkm_kunit_write_u32(dst, 140, section_offset);
+	pkm_kunit_write_u32(dst, 144, (u32)args->confinement_sid_len);
+
+	if (pkm_kunit_append_sid_attr_section(dst, dst_len, &offset,
+					      args->confinement_caps,
+					      args->confinement_cap_count,
+					      &section_offset))
+		return 0;
+	pkm_kunit_write_u32(dst, 148, section_offset);
+	pkm_kunit_write_u32(dst, 152, args->confinement_cap_count);
+	dst[156] = args->confinement_exempt ? 1 : 0;
+	dst[157] = args->write_restricted ? 1 : 0;
+	dst[158] = args->user_deny_only ? 1 : 0;
+	dst[159] = args->isolation_boundary ? 1 : 0;
+
+	if (pkm_kunit_append_u32_section(dst, dst_len, &offset,
+					 args->projected_supplementary_gids,
+					 args->projected_supplementary_gid_count,
+					 &section_offset))
+		return 0;
+	pkm_kunit_write_u32(dst, 160, section_offset);
+	pkm_kunit_write_u32(dst, 164,
+			    args->projected_supplementary_gid_count);
+
+	if (pkm_kunit_append_sid_attr_section(dst, dst_len, &offset,
+					      args->restricted_device_groups,
+					      args->restricted_device_group_count,
+					      &section_offset))
+		return 0;
+	pkm_kunit_write_u32(dst, 168, section_offset);
+	pkm_kunit_write_u32(dst, 172,
+			    args->restricted_device_group_count);
+	pkm_kunit_write_u64(dst, 176, args->origin);
+	pkm_kunit_write_u32(dst, 184, args->interactive_session_id);
+
+	return offset;
 }
 
 static void pkm_kunit_build_logon_sid(u64 session_id, u8 out[20])
@@ -2322,6 +2620,542 @@ static void pkm_kunit_create_session_invalid_spec_fails_closed(
 				&session_id),
 			(long)-EINVAL);
 	KUNIT_EXPECT_EQ(test, session_id, 0ULL);
+}
+
+static void pkm_kunit_create_token_success(struct kunit *test)
+{
+	static const u8 source_name[8] = {
+		'A', 'u', 't', 'h', 'd', 0, 0, 0,
+	};
+	static const struct pkm_kunit_sid_attr_spec groups[] = {
+		{
+			.sid = pkm_kunit_everyone_sid,
+			.sid_len = sizeof(pkm_kunit_everyone_sid),
+			.attributes = PKM_KUNIT_SE_GROUP_MANDATORY |
+				      PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT |
+				      PKM_KUNIT_SE_GROUP_ENABLED |
+				      PKM_KUNIT_SE_GROUP_OWNER,
+		},
+		{
+			.sid = pkm_kunit_authenticated_users_sid,
+			.sid_len = sizeof(pkm_kunit_authenticated_users_sid),
+			.attributes = PKM_KUNIT_SE_GROUP_MANDATORY |
+				      PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT |
+				      PKM_KUNIT_SE_GROUP_ENABLED,
+		},
+	};
+	static const struct pkm_kunit_sid_attr_spec device_groups[] = {
+		{
+			.sid = pkm_kunit_everyone_sid,
+			.sid_len = sizeof(pkm_kunit_everyone_sid),
+			.attributes = 0U,
+		},
+	};
+	static const struct pkm_kunit_sid_attr_spec confinement_caps[] = {
+		{
+			.sid = pkm_kunit_all_restricted_application_packages_sid,
+			.sid_len =
+				sizeof(pkm_kunit_all_restricted_application_packages_sid),
+			.attributes = 0U,
+		},
+	};
+	static const u32 supplementary_gids[] = {
+		77U, 88U,
+	};
+	struct pkm_kacs_token_fd_view view = { };
+	struct pkm_kacs_boot_snapshot snapshot = { };
+	struct pkm_kacs_boot_snapshot caller_after = { };
+	struct kacs_query_args args = { };
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_LEVEL_ANONYMOUS,
+		.integrity_level = PKM_KUNIT_IL_MEDIUM,
+		.mandatory_policy = 0x00000003U,
+		.privileges_present = PKM_KUNIT_SE_DEBUG_PRIVILEGE,
+		.privileges_enabled = PKM_KUNIT_SE_DEBUG_PRIVILEGE,
+		.projected_uid = 1234U,
+		.projected_gid = 2345U,
+		.audit_policy = 0x00000005U,
+		.expiration = 0x1122334455667788ULL,
+		.owner_sid_index = 1U,
+		.primary_group_index = 2U,
+		.source_name = source_name,
+		.source_id = 0x0102030405060708ULL,
+		.user_sid = pkm_kunit_local_service_sid,
+		.user_sid_len = sizeof(pkm_kunit_local_service_sid),
+		.groups = groups,
+		.group_count = ARRAY_SIZE(groups),
+		.default_dacl = pkm_kunit_replacement_default_dacl,
+		.default_dacl_len = sizeof(pkm_kunit_replacement_default_dacl),
+		.device_groups = device_groups,
+		.device_group_count = ARRAY_SIZE(device_groups),
+		.confinement_sid = pkm_kunit_sample_confinement_sid,
+		.confinement_sid_len = sizeof(pkm_kunit_sample_confinement_sid),
+		.confinement_caps = confinement_caps,
+		.confinement_cap_count = ARRAY_SIZE(confinement_caps),
+		.projected_supplementary_gids = supplementary_gids,
+		.projected_supplementary_gid_count =
+			ARRAY_SIZE(supplementary_gids),
+		.origin = 0x8877665544332211ULL,
+		.interactive_session_id = 9U,
+	};
+	u8 spec[512] = { };
+	u8 buf[128] = { };
+	u8 expected_logon_sid[20] = { };
+	const void *subject_token;
+	u64 session_id = 0;
+	u32 logon_attributes = 0;
+	size_t spec_len;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	spec_len = pkm_kunit_build_session_spec(spec,
+						PKM_KUNIT_LOGON_TYPE_NETWORK,
+						"Kerberos",
+						pkm_kunit_local_service_sid,
+						sizeof(pkm_kunit_local_service_sid));
+	KUNIT_ASSERT_GT(test, (long)spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_session_for_subject(
+				subject_token, spec, spec_len, &session_id),
+			0L);
+	KUNIT_ASSERT_GE(test, session_id, 1000ULL);
+
+	memset(spec, 0, sizeof(spec));
+	spec_args.session_id = session_id;
+	spec_len = pkm_kunit_build_token_spec(spec, sizeof(spec), &spec_args);
+	KUNIT_ASSERT_GT(test, (long)spec_len, 0L);
+
+	fd = pkm_kacs_kunit_create_token_for_subject(subject_token, spec, spec_len);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test, pkm_kacs_kunit_token_fd_snapshot((int)fd, &view), 0);
+	KUNIT_EXPECT_EQ(test, view.access_mask, KACS_TOKEN_ALL_ACCESS);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(view.token,
+							       &snapshot));
+
+	KUNIT_EXPECT_EQ(test, snapshot.session_id, session_id);
+	KUNIT_EXPECT_EQ(test, snapshot.auth_id, session_id);
+	KUNIT_EXPECT_EQ(test, snapshot.logon_type,
+			PKM_KUNIT_LOGON_TYPE_NETWORK);
+	pkm_kunit_expect_bytes_eq(test, snapshot.user_sid_ptr,
+				  snapshot.user_sid_len,
+				  pkm_kunit_local_service_sid,
+				  sizeof(pkm_kunit_local_service_sid));
+	KUNIT_EXPECT_EQ(test, snapshot.group_count, 3U);
+	KUNIT_EXPECT_EQ(test, snapshot.owner_sid_index, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.primary_group_index, 2U);
+	KUNIT_EXPECT_EQ(test, snapshot.projected_uid, 1234U);
+	KUNIT_EXPECT_EQ(test, snapshot.projected_gid, 2345U);
+	KUNIT_EXPECT_EQ(test, snapshot.audit_policy, 0x00000005U);
+	KUNIT_EXPECT_EQ(test, snapshot.integrity_level, PKM_KUNIT_IL_MEDIUM);
+	KUNIT_EXPECT_EQ(test, snapshot.token_type, KACS_TOKEN_TYPE_PRIMARY);
+	KUNIT_EXPECT_EQ(test, snapshot.impersonation_level,
+			KACS_LEVEL_ANONYMOUS);
+	KUNIT_EXPECT_EQ(test, snapshot.privileges_present,
+			PKM_KUNIT_SE_DEBUG_PRIVILEGE);
+	KUNIT_EXPECT_EQ(test, snapshot.privileges_enabled,
+			PKM_KUNIT_SE_DEBUG_PRIVILEGE);
+	KUNIT_EXPECT_EQ(test, snapshot.privileges_enabled_by_default,
+			PKM_KUNIT_SE_DEBUG_PRIVILEGE);
+	KUNIT_EXPECT_EQ(test, snapshot.privileges_used, 0ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.modified_id, snapshot.token_id);
+	KUNIT_EXPECT_GE(test, snapshot.token_id, 1000ULL);
+	pkm_kunit_build_logon_sid(session_id, expected_logon_sid);
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_snapshot_has_group(
+				 &snapshot, expected_logon_sid,
+				 sizeof(expected_logon_sid),
+				 &logon_attributes));
+	KUNIT_EXPECT_EQ(test, logon_attributes,
+			PKM_KUNIT_SE_GROUP_MANDATORY |
+				PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT |
+				PKM_KUNIT_SE_GROUP_ENABLED |
+				PKM_KUNIT_SE_GROUP_LOGON_ID);
+
+	args.token_class = TOKEN_CLASS_OWNER;
+	args.buf_len = sizeof(buf);
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len,
+				  pkm_kunit_everyone_sid,
+				  sizeof(pkm_kunit_everyone_sid));
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_PRIMARY_GROUP;
+	args.buf_len = sizeof(buf);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len,
+				  pkm_kunit_authenticated_users_sid,
+				  sizeof(pkm_kunit_authenticated_users_sid));
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_SOURCE;
+	args.buf_len = 16U;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 16U);
+	pkm_kunit_expect_bytes_eq(test, buf, 8U, source_name, sizeof(source_name));
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 8),
+			0x0102030405060708ULL);
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_ORIGIN;
+	args.buf_len = 8U;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 0),
+			0x8877665544332211ULL);
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_STATISTICS;
+	args.buf_len = 40U;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 0), snapshot.token_id);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 8), session_id);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 16), snapshot.modified_id);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(buf, 32),
+			0x1122334455667788ULL);
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_LOGON_TYPE;
+	args.buf_len = 4U;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 0),
+			PKM_KUNIT_LOGON_TYPE_NETWORK);
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_LOGON_SID;
+	args.buf_len = sizeof(buf);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len, expected_logon_sid,
+				  sizeof(expected_logon_sid));
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_DEVICE_GROUPS;
+	args.buf_len = sizeof(buf);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 0), 1U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 4),
+			(u32)sizeof(pkm_kunit_everyone_sid));
+	pkm_kunit_expect_bytes_eq(test, &buf[8],
+				  sizeof(pkm_kunit_everyone_sid),
+				  pkm_kunit_everyone_sid,
+				  sizeof(pkm_kunit_everyone_sid));
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_read_u32(
+				buf, 8U + sizeof(pkm_kunit_everyone_sid)),
+			0U);
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_APPCONTAINER_SID;
+	args.buf_len = sizeof(buf);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len,
+				  pkm_kunit_sample_confinement_sid,
+				  sizeof(pkm_kunit_sample_confinement_sid));
+
+	memset(buf, 0, sizeof(buf));
+	args.token_class = TOKEN_CLASS_CAPABILITIES;
+	args.buf_len = sizeof(buf);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 0), 1U);
+	KUNIT_EXPECT_EQ(
+		test, pkm_kunit_read_u32(buf, 4),
+		(u32)sizeof(pkm_kunit_all_restricted_application_packages_sid));
+	pkm_kunit_expect_bytes_eq(
+		test, &buf[8],
+		sizeof(pkm_kunit_all_restricted_application_packages_sid),
+		pkm_kunit_all_restricted_application_packages_sid,
+		sizeof(pkm_kunit_all_restricted_application_packages_sid));
+
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token,
+							 &caller_after));
+	KUNIT_EXPECT_EQ(test,
+			caller_after.privileges_used &
+				PKM_KUNIT_SE_CREATE_TOKEN_PRIVILEGE,
+			PKM_KUNIT_SE_CREATE_TOKEN_PRIVILEGE);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_create_token_requires_privilege(struct kunit *test)
+{
+	static const u8 source_name[8] = {
+		'A', 'u', 't', 'h', 'd', 0, 0, 0,
+	};
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_LEVEL_ANONYMOUS,
+		.integrity_level = PKM_KUNIT_IL_MEDIUM,
+		.mandatory_policy = 0x00000003U,
+		.session_id = 0,
+		.source_name = source_name,
+		.user_sid = pkm_kunit_local_service_sid,
+		.user_sid_len = sizeof(pkm_kunit_local_service_sid),
+	};
+	u8 session_spec[64] = { };
+	u8 token_spec[256] = { };
+	const void *subject_token;
+	const void *caller_without_privilege;
+	u64 session_id = 0;
+	size_t session_spec_len;
+	size_t token_spec_len;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	caller_without_privilege = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, caller_without_privilege);
+
+	session_spec_len = pkm_kunit_build_session_spec(
+		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
+		pkm_kunit_local_service_sid, sizeof(pkm_kunit_local_service_sid));
+	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_session_for_subject(
+				subject_token, session_spec, session_spec_len,
+				&session_id),
+			0L);
+
+	spec_args.session_id = session_id;
+	token_spec_len = pkm_kunit_build_token_spec(token_spec,
+						    sizeof(token_spec),
+						    &spec_args);
+	KUNIT_ASSERT_GT(test, (long)token_spec_len, 0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_create_token_for_subject(
+				caller_without_privilege, token_spec,
+				token_spec_len),
+			(long)-EPERM);
+
+	kacs_rust_token_drop(caller_without_privilege);
+}
+
+static void pkm_kunit_create_token_invalid_session_fails_closed(
+	struct kunit *test)
+{
+	static const u8 source_name[8] = {
+		'A', 'u', 't', 'h', 'd', 0, 0, 0,
+	};
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_LEVEL_ANONYMOUS,
+		.integrity_level = PKM_KUNIT_IL_MEDIUM,
+		.mandatory_policy = 0x00000003U,
+		.session_id = 0x8877665544332211ULL,
+		.source_name = source_name,
+		.user_sid = pkm_kunit_local_service_sid,
+		.user_sid_len = sizeof(pkm_kunit_local_service_sid),
+	};
+	u8 token_spec[256] = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	size_t token_spec_len;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token,
+							 &before));
+
+	token_spec_len = pkm_kunit_build_token_spec(token_spec,
+						    sizeof(token_spec),
+						    &spec_args);
+	KUNIT_ASSERT_GT(test, (long)token_spec_len, 0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_create_token_for_subject(
+				subject_token, token_spec, token_spec_len),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token,
+							 &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used, before.privileges_used);
+}
+
+static void pkm_kunit_create_token_primary_non_anonymous_denies(
+	struct kunit *test)
+{
+	static const u8 source_name[8] = {
+		'A', 'u', 't', 'h', 'd', 0, 0, 0,
+	};
+	u8 session_spec[64] = { };
+	u8 token_spec[256] = { };
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_LEVEL_IDENTIFICATION,
+		.integrity_level = PKM_KUNIT_IL_MEDIUM,
+		.mandatory_policy = 0x00000003U,
+		.source_name = source_name,
+		.user_sid = pkm_kunit_local_service_sid,
+		.user_sid_len = sizeof(pkm_kunit_local_service_sid),
+	};
+	const void *subject_token;
+	u64 session_id = 0;
+	size_t session_spec_len;
+	size_t token_spec_len;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	session_spec_len = pkm_kunit_build_session_spec(
+		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
+		pkm_kunit_local_service_sid, sizeof(pkm_kunit_local_service_sid));
+	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_session_for_subject(
+				subject_token, session_spec, session_spec_len,
+				&session_id),
+			0L);
+
+	spec_args.session_id = session_id;
+	token_spec_len = pkm_kunit_build_token_spec(token_spec,
+						    sizeof(token_spec),
+						    &spec_args);
+	KUNIT_ASSERT_GT(test, (long)token_spec_len, 0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_create_token_for_subject(
+				subject_token, token_spec, token_spec_len),
+			(long)-EINVAL);
+}
+
+static void pkm_kunit_create_token_invalid_owner_index_denies(
+	struct kunit *test)
+{
+	static const u8 source_name[8] = {
+		'A', 'u', 't', 'h', 'd', 0, 0, 0,
+	};
+	static const struct pkm_kunit_sid_attr_spec groups[] = {
+		{
+			.sid = pkm_kunit_everyone_sid,
+			.sid_len = sizeof(pkm_kunit_everyone_sid),
+			.attributes = PKM_KUNIT_SE_GROUP_MANDATORY |
+				      PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT |
+				      PKM_KUNIT_SE_GROUP_ENABLED |
+				      PKM_KUNIT_SE_GROUP_OWNER,
+		},
+		{
+			.sid = pkm_kunit_authenticated_users_sid,
+			.sid_len = sizeof(pkm_kunit_authenticated_users_sid),
+			.attributes = PKM_KUNIT_SE_GROUP_MANDATORY |
+				      PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT |
+				      PKM_KUNIT_SE_GROUP_ENABLED,
+		},
+	};
+	u8 session_spec[64] = { };
+	u8 token_spec[256] = { };
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_LEVEL_ANONYMOUS,
+		.integrity_level = PKM_KUNIT_IL_MEDIUM,
+		.mandatory_policy = 0x00000003U,
+		.owner_sid_index = 3U,
+		.source_name = source_name,
+		.user_sid = pkm_kunit_local_service_sid,
+		.user_sid_len = sizeof(pkm_kunit_local_service_sid),
+		.groups = groups,
+		.group_count = ARRAY_SIZE(groups),
+	};
+	const void *subject_token;
+	u64 session_id = 0;
+	size_t session_spec_len;
+	size_t token_spec_len;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	session_spec_len = pkm_kunit_build_session_spec(
+		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
+		pkm_kunit_local_service_sid, sizeof(pkm_kunit_local_service_sid));
+	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_session_for_subject(
+				subject_token, session_spec, session_spec_len,
+				&session_id),
+			0L);
+
+	spec_args.session_id = session_id;
+	token_spec_len = pkm_kunit_build_token_spec(token_spec,
+						    sizeof(token_spec),
+						    &spec_args);
+	KUNIT_ASSERT_GT(test, (long)token_spec_len, 0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_create_token_for_subject(
+				subject_token, token_spec, token_spec_len),
+			(long)-EINVAL);
+}
+
+static void pkm_kunit_create_token_caller_logon_sid_denies(
+	struct kunit *test)
+{
+	static const u8 source_name[8] = {
+		'A', 'u', 't', 'h', 'd', 0, 0, 0,
+	};
+	struct pkm_kunit_sid_attr_spec groups[1] = { };
+	u8 session_spec[64] = { };
+	u8 token_spec[256] = { };
+	u8 logon_sid[20] = { };
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_LEVEL_ANONYMOUS,
+		.integrity_level = PKM_KUNIT_IL_MEDIUM,
+		.mandatory_policy = 0x00000003U,
+		.source_name = source_name,
+		.user_sid = pkm_kunit_local_service_sid,
+		.user_sid_len = sizeof(pkm_kunit_local_service_sid),
+		.groups = groups,
+		.group_count = ARRAY_SIZE(groups),
+	};
+	const void *subject_token;
+	u64 session_id = 0;
+	size_t session_spec_len;
+	size_t token_spec_len;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	session_spec_len = pkm_kunit_build_session_spec(
+		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
+		pkm_kunit_local_service_sid, sizeof(pkm_kunit_local_service_sid));
+	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_session_for_subject(
+				subject_token, session_spec, session_spec_len,
+				&session_id),
+			0L);
+
+	pkm_kunit_build_logon_sid(session_id, logon_sid);
+	groups[0].sid = logon_sid;
+	groups[0].sid_len = sizeof(logon_sid);
+	groups[0].attributes = PKM_KUNIT_SE_GROUP_MANDATORY |
+			       PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT |
+			       PKM_KUNIT_SE_GROUP_ENABLED |
+			       PKM_KUNIT_SE_GROUP_LOGON_ID;
+	spec_args.session_id = session_id;
+	token_spec_len = pkm_kunit_build_token_spec(token_spec,
+						    sizeof(token_spec),
+						    &spec_args);
+	KUNIT_ASSERT_GT(test, (long)token_spec_len, 0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_create_token_for_subject(
+				subject_token, token_spec, token_spec_len),
+			(long)-EINVAL);
 }
 
 static void pkm_kunit_current_token_resolution(struct kunit *test)
@@ -10685,6 +11519,12 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_create_session_success),
 	KUNIT_CASE(pkm_kunit_create_session_requires_tcb),
 	KUNIT_CASE(pkm_kunit_create_session_invalid_spec_fails_closed),
+	KUNIT_CASE(pkm_kunit_create_token_success),
+	KUNIT_CASE(pkm_kunit_create_token_requires_privilege),
+	KUNIT_CASE(pkm_kunit_create_token_invalid_session_fails_closed),
+	KUNIT_CASE(pkm_kunit_create_token_primary_non_anonymous_denies),
+	KUNIT_CASE(pkm_kunit_create_token_invalid_owner_index_denies),
+	KUNIT_CASE(pkm_kunit_create_token_caller_logon_sid_denies),
 	KUNIT_CASE(pkm_kunit_current_token_resolution),
 	KUNIT_CASE(pkm_kunit_boot_allow_caps),
 	KUNIT_CASE(pkm_kunit_capability_allow_succeeds_without_privilege),

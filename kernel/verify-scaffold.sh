@@ -54,6 +54,7 @@ for syscall in \
 	"1000 kacs_open_self_token" \
 	"1001 kacs_open_process_token" \
 	"1002 kacs_open_thread_token" \
+	"1003 kacs_create_token" \
 	"1004 kacs_create_session" \
 	"1005 kacs_set_psb" \
 	"1010 kacs_open_peer_token" \
