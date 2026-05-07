@@ -22,8 +22,8 @@
 use crate::access_check::{access_check, access_check_core, AccessCheckMode};
 use crate::access_check_abi::AccessCheckAbiResolved;
 use crate::access_mask::{
-    GenericMapping, PROCESS_GENERIC_MAPPING, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED,
-    ACCESS_SYSTEM_SECURITY, GENERIC_ALL, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    GenericMapping, ACCESS_SYSTEM_SECURITY, GENERIC_ALL, PROCESS_GENERIC_MAPPING,
+    PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use crate::ace::{AceKind, SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE};
 use crate::acl::Acl;
@@ -33,8 +33,8 @@ use crate::error::KacsError;
 use crate::mic::{
     IntegrityLevel, TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN, TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
 };
-use crate::pkm_alloc::Vec;
 use crate::pip::PipContext;
+use crate::pkm_alloc::Vec;
 use crate::privilege::{
     TokenPrivileges, RESTORE_INTENT, SE_RELABEL_PRIVILEGE, SE_RESTORE_PRIVILEGE,
 };
@@ -56,8 +56,12 @@ use core::sync::atomic::{
 
 const SYSTEM_PRIVILEGES_ALL: u64 = 0xC000_000F_FFFF_FFFC;
 const SE_TCB_PRIVILEGE: u64 = 1 << 7;
-const LOGON_TYPE_SERVICE: u32 = 5;
+const LOGON_TYPE_INTERACTIVE: u32 = 2;
 const LOGON_TYPE_NETWORK: u32 = 3;
+const LOGON_TYPE_BATCH: u32 = 4;
+const LOGON_TYPE_SERVICE: u32 = 5;
+const LOGON_TYPE_NETWORK_CLEARTEXT: u32 = 8;
+const LOGON_TYPE_NEW_CREDENTIALS: u32 = 9;
 const TOKEN_TYPE_PRIMARY_ABI: u32 = 1;
 const TOKEN_TYPE_IMPERSONATION_ABI: u32 = 2;
 const IMPERSONATION_LEVEL_ANONYMOUS_ABI: u32 = 0;
@@ -66,6 +70,8 @@ const IMPERSONATION_LEVEL_IMPERSONATION_ABI: u32 = 2;
 const IMPERSONATION_LEVEL_DELEGATION_ABI: u32 = 3;
 const TOKEN_ELEVATION_DEFAULT_ABI: u32 = 1;
 const MAX_DEFAULT_DACL_BYTES: usize = 65_536;
+const MAX_SESSION_SPEC_BYTES: usize = 4096;
+const MIN_SESSION_SPEC_BYTES: usize = 15;
 const TOKEN_INDEX_NO_CHANGE: u32 = u32::MAX;
 const MAX_BOOT_GROUPS: usize = 5;
 const MAX_PRIVILEGE_ADJUST_ENTRIES: usize = 64;
@@ -120,14 +126,14 @@ const EVERYONE_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
 const AUTHENTICATED_USERS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0];
 const LOCAL_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0];
 const LOGON_SID_BYTES: &[u8] = &[1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-const ANONYMOUS_LOGON_SID_BYTES: &[u8] = &[
-    1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 230, 3, 0, 0,
-];
+const ANONYMOUS_LOGON_SID_BYTES: &[u8] =
+    &[1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 230, 3, 0, 0];
 const AUTH_PACKAGE_NEGOTIATE: &[u8] = b"Negotiate";
 const TOKEN_SOURCE_PEI_OS_KRN: &[u8; 8] = b"PeiosKrn";
 const BOOT_SYSTEM_TOKEN_ID: u64 = 0;
 const BOOT_SYSTEM_MODIFIED_ID: u64 = 0;
 const ANONYMOUS_LOGON_LUID: u64 = 998;
+const KUNIT_LOCAL_SERVICE_SESSION_LUID: u64 = 999;
 const BOOT_SYSTEM_OWNER_SID_INDEX: u32 = 0;
 const BOOT_SYSTEM_PRIMARY_GROUP_INDEX: u32 = 1;
 const BOOT_SYSTEM_GROUP_ATTRIBUTES: [u32; MAX_BOOT_GROUPS] = [
@@ -156,6 +162,9 @@ const EMPTY_DEVICE_GROUPS: &[SidAndAttributes<'static>] = &[];
 const EMPTY_CLAIMS: &[crate::claims::ClaimAttribute] = &[];
 const EMPTY_POLICIES: &[crate::caap::CaapPolicyEntry<'static>] = &[];
 static NEXT_DYNAMIC_TOKEN_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_DYNAMIC_SESSION_ID: AtomicU64 = AtomicU64::new(KUNIT_LOCAL_SERVICE_SESSION_LUID + 1);
+static SESSION_LIST_HEAD: AtomicPtr<PkmKacsSession> = AtomicPtr::new(null_mut());
+static SESSION_TABLE_LOCK: AtomicBool = AtomicBool::new(false);
 const ANONYMOUS_ONLY_GROUP_ATTRIBUTES: [u32; MAX_BOOT_GROUPS] = [
     SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED,
     0,
@@ -248,6 +257,8 @@ pub struct PkmKacsPrivilegeAdjustEntry {
 pub struct PkmKacsBootSnapshot {
     /// Opaque live token pointer.
     pub token_ptr: *const c_void,
+    /// Opaque shared session pointer.
+    pub session_ptr: *const c_void,
     /// Boot session identifier.
     pub session_id: u64,
     /// Token auth_id / logon session LUID.
@@ -308,12 +319,34 @@ pub struct PkmKacsBootSnapshot {
     pub audit_policy: u32,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy)]
-struct PkmKacsBootSession {
+pub struct PkmKacsSessionSnapshot {
+    pub session_ptr: *const c_void,
+    pub session_id: u64,
+    pub created_at: u64,
+    pub logon_type: u32,
+    pub auth_pkg_ptr: *const u8,
+    pub auth_pkg_len: usize,
+    pub user_sid_ptr: *const u8,
+    pub user_sid_len: usize,
+    pub logon_sid_ptr: *const u8,
+    pub logon_sid_len: usize,
+}
+
+struct PkmKacsSession {
+    refcount: AtomicUsize,
+    next: AtomicPtr<PkmKacsSession>,
     session_id: u64,
+    created_at: u64,
     logon_type: u32,
+    user_sid_ptr: *mut u8,
+    user_sid_len: usize,
     user_sid: Sid<'static>,
-    auth_package: &'static [u8],
+    auth_package_ptr: *mut u8,
+    auth_package_len: usize,
+    logon_sid_ptr: *mut u8,
+    logon_sid_len: usize,
     logon_sid: Sid<'static>,
 }
 
@@ -325,9 +358,8 @@ struct OwnedSidAndAttributes {
 struct PkmKacsBootToken {
     refcount: AtomicUsize,
     mutation_lock: AtomicBool,
-    session: PkmKacsBootSession,
+    session: *const PkmKacsSession,
     user_sid: Sid<'static>,
-    logon_sid: Sid<'static>,
     group_count: usize,
     group_sids: [Sid<'static>; MAX_BOOT_GROUPS],
     group_default_attributes: [u32; MAX_BOOT_GROUPS],
@@ -369,6 +401,84 @@ impl Drop for TokenMutationGuard<'_> {
     fn drop(&mut self) {
         self.token.mutation_lock.store(false, Ordering::Release);
     }
+}
+
+struct SessionTableGuard;
+
+impl Drop for SessionTableGuard {
+    fn drop(&mut self) {
+        SESSION_TABLE_LOCK.store(false, Ordering::Release);
+    }
+}
+
+impl PkmKacsSession {
+    unsafe fn from_ptr(ptr: *const c_void) -> Option<&'static Self> {
+        if ptr.is_null() {
+            return None;
+        }
+
+        Some(unsafe { &*(ptr as *const Self) })
+    }
+
+    fn clone_ref_ptr(ptr: *const Self) -> Option<*const Self> {
+        let session = unsafe { Self::from_ptr(ptr.cast()) }?;
+
+        session.refcount.fetch_add(1, Ordering::Relaxed);
+        Some(ptr)
+    }
+
+    unsafe fn drop_ref(ptr: *const Self) {
+        let Some(session) = (unsafe { Self::from_ptr(ptr.cast()) }) else {
+            return;
+        };
+
+        if session.refcount.fetch_sub(1, Ordering::Release) == 1 {
+            fence(Ordering::Acquire);
+            let session_ptr = ptr as *mut Self;
+
+            free_allocated_bytes(session.user_sid_ptr);
+            free_allocated_bytes(session.auth_package_ptr);
+            free_allocated_bytes(session.logon_sid_ptr);
+            unsafe { core::ptr::drop_in_place(session_ptr) };
+            unsafe { pkm_kacs_free(session_ptr.cast()) };
+        }
+    }
+
+    fn auth_package_bytes(&self) -> &[u8] {
+        if self.auth_package_ptr.is_null() || self.auth_package_len == 0 {
+            return &[];
+        }
+
+        unsafe {
+            core::slice::from_raw_parts(self.auth_package_ptr.cast_const(), self.auth_package_len)
+        }
+    }
+
+    fn snapshot(&self, out: &mut PkmKacsSessionSnapshot) {
+        *out = PkmKacsSessionSnapshot {
+            session_ptr: (self as *const Self).cast(),
+            session_id: self.session_id,
+            created_at: self.created_at,
+            logon_type: self.logon_type,
+            auth_pkg_ptr: self.auth_package_bytes().as_ptr(),
+            auth_pkg_len: self.auth_package_bytes().len(),
+            user_sid_ptr: self.user_sid.as_bytes().as_ptr(),
+            user_sid_len: self.user_sid.as_bytes().len(),
+            logon_sid_ptr: self.logon_sid.as_bytes().as_ptr(),
+            logon_sid_len: self.logon_sid.as_bytes().len(),
+        };
+    }
+}
+
+fn lock_session_table() -> SessionTableGuard {
+    while SESSION_TABLE_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+
+    SessionTableGuard
 }
 
 struct QueryWriter {
@@ -475,10 +585,7 @@ fn build_owned_sid_entries_from_views(
 
         let owned_entry = &owned[owned.len() - 1];
         let sid_bytes: &'static [u8] = unsafe {
-            core::slice::from_raw_parts(
-                owned_entry.sid_bytes.as_ptr(),
-                owned_entry.sid_bytes.len(),
-            )
+            core::slice::from_raw_parts(owned_entry.sid_bytes.as_ptr(), owned_entry.sid_bytes.len())
         };
         let sid = Sid::parse(sid_bytes).map_err(|_| -EINVAL)?;
 
@@ -541,8 +648,8 @@ fn parse_restrict_payload<'a>(
     }
 
     for _ in 0..sid_count {
-        let (sid, consumed) = Sid::parse_prefix(data.get(offset..).ok_or(-EINVAL)?)
-            .map_err(|_| -EINVAL)?;
+        let (sid, consumed) =
+            Sid::parse_prefix(data.get(offset..).ok_or(-EINVAL)?).map_err(|_| -EINVAL)?;
 
         restrict_sids
             .push(SidAndAttributes {
@@ -602,6 +709,14 @@ fn allocate_dynamic_token_id() -> Result<u64, i32> {
         .map_err(|_| -ERANGE)
 }
 
+fn allocate_dynamic_session_id() -> Result<u64, i32> {
+    NEXT_DYNAMIC_SESSION_ID
+        .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| -ERANGE)
+}
+
 fn integrity_level_from_abi(value: u32) -> Result<IntegrityLevel, i32> {
     match value {
         0 => Ok(IntegrityLevel::Untrusted),
@@ -648,6 +763,225 @@ fn free_allocated_bytes(ptr: *mut u8) {
     if !ptr.is_null() {
         unsafe { pkm_kacs_free(ptr.cast()) };
     }
+}
+
+fn read_le_u16(src: &[u8], offset: usize) -> Option<u16> {
+    let bytes = src.get(offset..offset.checked_add(2)?)?;
+
+    Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_le_u32(src: &[u8], offset: usize) -> Option<u32> {
+    let bytes = src.get(offset..offset.checked_add(4)?)?;
+
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn session_logon_type_valid(logon_type: u32) -> bool {
+    matches!(
+        logon_type,
+        LOGON_TYPE_INTERACTIVE
+            | LOGON_TYPE_NETWORK
+            | LOGON_TYPE_BATCH
+            | LOGON_TYPE_SERVICE
+            | LOGON_TYPE_NETWORK_CLEARTEXT
+            | LOGON_TYPE_NEW_CREDENTIALS
+    )
+}
+
+fn build_logon_sid_bytes(session_id: u64) -> [u8; 20] {
+    let high = (session_id >> 32) as u32;
+    let low = session_id as u32;
+
+    [
+        1,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        5,
+        5,
+        0,
+        0,
+        0,
+        high as u8,
+        (high >> 8) as u8,
+        (high >> 16) as u8,
+        (high >> 24) as u8,
+        low as u8,
+        (low >> 8) as u8,
+        (low >> 16) as u8,
+        (low >> 24) as u8,
+    ]
+}
+
+fn session_list_find_locked(session_id: u64) -> Option<*mut PkmKacsSession> {
+    let mut cursor = SESSION_LIST_HEAD.load(Ordering::Acquire);
+
+    while !cursor.is_null() {
+        let session = unsafe { &*cursor };
+
+        if session.session_id == session_id {
+            return Some(cursor);
+        }
+        cursor = session.next.load(Ordering::Relaxed);
+    }
+
+    None
+}
+
+fn create_session_object(
+    session_id: u64,
+    created_at: u64,
+    logon_type: u32,
+    auth_package: &[u8],
+    user_sid: Sid<'_>,
+) -> Result<*const PkmKacsSession, i32> {
+    let (user_sid_ptr, user_sid_len) = alloc_copy_bytes(user_sid.as_bytes())?;
+    let (auth_package_ptr, auth_package_len) = match alloc_copy_bytes(auth_package) {
+        Ok(value) => value,
+        Err(err) => {
+            free_allocated_bytes(user_sid_ptr);
+            return Err(err);
+        }
+    };
+    let logon_sid_bytes = build_logon_sid_bytes(session_id);
+    let (logon_sid_ptr, logon_sid_len) = match alloc_copy_bytes(&logon_sid_bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            free_allocated_bytes(user_sid_ptr);
+            free_allocated_bytes(auth_package_ptr);
+            return Err(err);
+        }
+    };
+    let session_ptr =
+        unsafe { pkm_kacs_zalloc(core::mem::size_of::<PkmKacsSession>()) } as *mut PkmKacsSession;
+
+    if session_ptr.is_null() {
+        free_allocated_bytes(user_sid_ptr);
+        free_allocated_bytes(auth_package_ptr);
+        free_allocated_bytes(logon_sid_ptr);
+        return Err(-ENOMEM);
+    }
+
+    let user_sid = match Sid::parse(unsafe {
+        core::slice::from_raw_parts(user_sid_ptr.cast_const(), user_sid_len)
+    }) {
+        Ok(user_sid) => user_sid,
+        Err(_) => {
+            free_allocated_bytes(user_sid_ptr);
+            free_allocated_bytes(auth_package_ptr);
+            free_allocated_bytes(logon_sid_ptr);
+            unsafe { pkm_kacs_free(session_ptr.cast()) };
+            return Err(-EINVAL);
+        }
+    };
+    let logon_sid = match Sid::parse(unsafe {
+        core::slice::from_raw_parts(logon_sid_ptr.cast_const(), logon_sid_len)
+    }) {
+        Ok(logon_sid) => logon_sid,
+        Err(_) => {
+            free_allocated_bytes(user_sid_ptr);
+            free_allocated_bytes(auth_package_ptr);
+            free_allocated_bytes(logon_sid_ptr);
+            unsafe { pkm_kacs_free(session_ptr.cast()) };
+            return Err(-EINVAL);
+        }
+    };
+
+    unsafe {
+        core::ptr::write(
+            session_ptr,
+            PkmKacsSession {
+                refcount: AtomicUsize::new(1),
+                next: AtomicPtr::new(null_mut()),
+                session_id,
+                created_at,
+                logon_type,
+                user_sid_ptr,
+                user_sid_len,
+                user_sid,
+                auth_package_ptr,
+                auth_package_len,
+                logon_sid_ptr,
+                logon_sid_len,
+                logon_sid,
+            },
+        )
+    };
+
+    Ok(session_ptr.cast())
+}
+
+fn get_or_create_published_session(
+    session_id: u64,
+    created_at: u64,
+    logon_type: u32,
+    auth_package: &[u8],
+    user_sid: Sid<'_>,
+) -> Result<*const PkmKacsSession, i32> {
+    let _guard = lock_session_table();
+
+    if let Some(session_ptr) = session_list_find_locked(session_id) {
+        return PkmKacsSession::clone_ref_ptr(session_ptr.cast()).ok_or(-EINVAL);
+    }
+
+    let session_ptr =
+        create_session_object(session_id, created_at, logon_type, auth_package, user_sid)?;
+    let head = SESSION_LIST_HEAD.load(Ordering::Relaxed);
+
+    unsafe { &*session_ptr }.next.store(head, Ordering::Relaxed);
+    SESSION_LIST_HEAD.store(session_ptr.cast_mut(), Ordering::Release);
+    PkmKacsSession::clone_ref_ptr(session_ptr).ok_or(-EINVAL)
+}
+
+fn create_published_dynamic_session(
+    created_at: u64,
+    logon_type: u32,
+    auth_package: &[u8],
+    user_sid: Sid<'_>,
+) -> Result<u64, i32> {
+    let session_id = allocate_dynamic_session_id()?;
+    let _guard = lock_session_table();
+    let session_ptr =
+        create_session_object(session_id, created_at, logon_type, auth_package, user_sid)?;
+    let head = SESSION_LIST_HEAD.load(Ordering::Relaxed);
+
+    unsafe { &*session_ptr }.next.store(head, Ordering::Relaxed);
+    SESSION_LIST_HEAD.store(session_ptr.cast_mut(), Ordering::Release);
+    Ok(session_id)
+}
+
+fn parse_session_spec(spec: &[u8]) -> Result<(u32, &[u8], Sid<'_>), i32> {
+    if spec.len() < MIN_SESSION_SPEC_BYTES || spec.len() > MAX_SESSION_SPEC_BYTES {
+        return Err(-EINVAL);
+    }
+
+    let logon_type = spec[0] as u32;
+    if !session_logon_type_valid(logon_type) {
+        return Err(-EINVAL);
+    }
+
+    let auth_pkg_len = usize::from(read_le_u16(spec, 1).ok_or(-EINVAL)?);
+    let auth_pkg_end = 3usize.checked_add(auth_pkg_len).ok_or(-ERANGE)?;
+    let user_sid_len =
+        usize::try_from(read_le_u32(spec, auth_pkg_end).ok_or(-EINVAL)?).map_err(|_| -EINVAL)?;
+    let user_sid_offset = auth_pkg_end.checked_add(4).ok_or(-ERANGE)?;
+    let user_sid_end = user_sid_offset.checked_add(user_sid_len).ok_or(-ERANGE)?;
+    if user_sid_end != spec.len() {
+        return Err(-EINVAL);
+    }
+
+    let auth_package = spec.get(3..auth_pkg_end).ok_or(-EINVAL)?;
+    let user_sid_bytes = spec.get(user_sid_offset..user_sid_end).ok_or(-EINVAL)?;
+    let user_sid = Sid::parse(user_sid_bytes).map_err(|_| -EINVAL)?;
+    if user_sid.as_bytes().len() != user_sid_len {
+        return Err(-EINVAL);
+    }
+
+    Ok((logon_type, auth_package, user_sid))
 }
 
 fn build_group_views(
@@ -729,7 +1063,11 @@ fn build_process_sd_bytes(
     let bytes = unsafe { core::slice::from_raw_parts_mut(ptr, total_len) };
     bytes[0] = 1;
     bytes[1] = 0;
-    write_le_u16(bytes, 2, crate::security_descriptor::SE_SELF_RELATIVE | crate::security_descriptor::SE_DACL_PRESENT);
+    write_le_u16(
+        bytes,
+        2,
+        crate::security_descriptor::SE_SELF_RELATIVE | crate::security_descriptor::SE_DACL_PRESENT,
+    );
     write_le_u32(bytes, 4, SD_HEADER_LEN as u32);
     write_le_u32(bytes, 8, group_offset as u32);
     write_le_u32(bytes, 12, 0);
@@ -800,7 +1138,8 @@ fn build_acl_bytes_from_aces(revision: u8, aces: &[&[u8]]) -> Result<Option<Vec<
     }
 
     let mut bytes = Vec::with_capacity(acl_len).map_err(|_| -ENOMEM)?;
-    bytes.extend_from_slice(&[0u8; ACL_HEADER_LEN])
+    bytes
+        .extend_from_slice(&[0u8; ACL_HEADER_LEN])
         .map_err(|_| -ENOMEM)?;
     bytes[0] = revision;
     bytes[1] = 0;
@@ -842,7 +1181,8 @@ fn build_sd_bytes_from_components(
     total_len = total_len.checked_add(dacl_len).ok_or(-ERANGE)?;
 
     let mut bytes = Vec::with_capacity(total_len).map_err(|_| -ENOMEM)?;
-    bytes.extend_from_slice(&[0u8; SD_HEADER_LEN])
+    bytes
+        .extend_from_slice(&[0u8; SD_HEADER_LEN])
         .map_err(|_| -ENOMEM)?;
     bytes[0] = 1;
     bytes[1] = 0;
@@ -904,10 +1244,12 @@ fn build_utf16_cstr_bytes(value: &str) -> Result<Vec<u8>, i32> {
     let mut bytes = Vec::new();
 
     for unit in value.encode_utf16() {
-        bytes.extend_from_slice(&unit.to_le_bytes())
+        bytes
+            .extend_from_slice(&unit.to_le_bytes())
             .map_err(|_| -ENOMEM)?;
     }
-    bytes.extend_from_slice(&0u16.to_le_bytes())
+    bytes
+        .extend_from_slice(&0u16.to_le_bytes())
         .map_err(|_| -ENOMEM)?;
     Ok(bytes)
 }
@@ -930,9 +1272,11 @@ fn build_int64_claim_entry(name: &str, values: &[i64], flags: u32) -> Result<Vec
     bytes
         .extend_from_slice(&CLAIM_TYPE_INT64.to_le_bytes())
         .map_err(|_| -ENOMEM)?;
-    bytes.extend_from_slice(&0u16.to_le_bytes())
+    bytes
+        .extend_from_slice(&0u16.to_le_bytes())
         .map_err(|_| -ENOMEM)?;
-    bytes.extend_from_slice(&flags.to_le_bytes())
+    bytes
+        .extend_from_slice(&flags.to_le_bytes())
         .map_err(|_| -ENOMEM)?;
     bytes
         .extend_from_slice(&(value_count as u32).to_le_bytes())
@@ -947,10 +1291,12 @@ fn build_int64_claim_entry(name: &str, values: &[i64], flags: u32) -> Result<Vec
             .map_err(|_| -ENOMEM)?;
     }
     for value in values {
-        bytes.extend_from_slice(&value.to_le_bytes())
+        bytes
+            .extend_from_slice(&value.to_le_bytes())
             .map_err(|_| -ENOMEM)?;
     }
-    bytes.extend_from_slice(name_bytes.as_slice())
+    bytes
+        .extend_from_slice(name_bytes.as_slice())
         .map_err(|_| -ENOMEM)?;
     Ok(bytes)
 }
@@ -973,7 +1319,8 @@ fn build_mandatory_resource_attribute_ace_bytes() -> Result<Vec<u8>, i32> {
             (ace_len as u16).to_le_bytes()[1],
         ])
         .map_err(|_| -ENOMEM)?;
-    bytes.extend_from_slice(&0u32.to_le_bytes())
+    bytes
+        .extend_from_slice(&0u32.to_le_bytes())
         .map_err(|_| -ENOMEM)?;
     bytes
         .extend_from_slice(everyone.as_bytes())
@@ -1024,13 +1371,13 @@ fn parse_label_subset_ace_bytes(input_sd: &SecurityDescriptor<'_>) -> Result<Opt
     }
 
     let mut bytes = Vec::with_capacity(first.bytes().len()).map_err(|_| -ENOMEM)?;
-    bytes.extend_from_slice(first.bytes()).map_err(|_| -ENOMEM)?;
+    bytes
+        .extend_from_slice(first.bytes())
+        .map_err(|_| -ENOMEM)?;
     Ok(Some(bytes))
 }
 
-fn collect_mandatory_resource_attribute_aces(
-    acl: Option<Acl<'_>>,
-) -> Result<Vec<Vec<u8>>, i32> {
+fn collect_mandatory_resource_attribute_aces(acl: Option<Acl<'_>>) -> Result<Vec<Vec<u8>>, i32> {
     let mut mandatory_aces = Vec::new();
     let Some(acl) = acl else {
         return Ok(mandatory_aces);
@@ -1158,10 +1505,7 @@ fn validate_label_assignment(
     Err(-EACCES)
 }
 
-fn build_sd_subset_bytes(
-    sd_bytes: &[u8],
-    security_info: u32,
-) -> Result<(*mut u8, usize), i32> {
+fn build_sd_subset_bytes(sd_bytes: &[u8], security_info: u32) -> Result<(*mut u8, usize), i32> {
     validate_sd_security_info(security_info)?;
 
     let sd = SecurityDescriptor::parse(sd_bytes).map_err(|_| -EINVAL)?;
@@ -1193,9 +1537,7 @@ fn build_sd_subset_bytes(
         } else {
             None
         },
-        full_sacl
-            .as_deref()
-            .or(label_sacl.as_deref()),
+        full_sacl.as_deref().or(label_sacl.as_deref()),
         dacl.as_deref(),
     )
 }
@@ -1240,7 +1582,10 @@ fn merge_process_sd_bytes(
         let label_ace = parse_label_subset_ace_bytes(&input_sd)?;
         validate_label_assignment(subject, label_ace.as_deref())?;
 
-        let current_revision = current_sd.sacl().map(|acl| acl.revision()).unwrap_or(ACL_REVISION);
+        let current_revision = current_sd
+            .sacl()
+            .map(|acl| acl.revision())
+            .unwrap_or(ACL_REVISION);
         let mut preserved_aces = Vec::new();
 
         if let Some(existing_sacl) = current_sd.sacl() {
@@ -1368,8 +1713,7 @@ fn build_token_sd_bytes(
     write_le_u16(
         bytes,
         2,
-        crate::security_descriptor::SE_SELF_RELATIVE
-            | crate::security_descriptor::SE_DACL_PRESENT,
+        crate::security_descriptor::SE_SELF_RELATIVE | crate::security_descriptor::SE_DACL_PRESENT,
     );
     write_le_u32(bytes, 4, SD_HEADER_LEN as u32);
     write_le_u32(bytes, 8, group_offset as u32);
@@ -1406,7 +1750,14 @@ fn build_query_limited_only_process_sd_bytes(
         .sid_by_index(token.primary_group_index.load(Ordering::Relaxed))
         .ok_or(-EINVAL)?;
 
-    build_process_sd_bytes(token.user_sid, group_sid, None, None, None, Some(PROCESS_QUERY_LIMITED))
+    build_process_sd_bytes(
+        token.user_sid,
+        group_sid,
+        None,
+        None,
+        None,
+        Some(PROCESS_QUERY_LIMITED),
+    )
 }
 
 fn build_query_information_only_process_sd_bytes(
@@ -1427,9 +1778,7 @@ fn build_query_information_only_process_sd_bytes(
     )
 }
 
-fn build_read_only_socket_sd_bytes(
-    token: &PkmKacsBootToken,
-) -> Result<(*mut u8, usize), i32> {
+fn build_read_only_socket_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8, usize), i32> {
     let _guard = token.lock_mutation();
     let group_sid = token
         .sid_by_index(token.primary_group_index.load(Ordering::Relaxed))
@@ -1445,8 +1794,43 @@ fn build_read_only_socket_sd_bytes(
     )
 }
 
+fn boot_system_session_ref() -> Result<*const PkmKacsSession, i32> {
+    get_or_create_published_session(
+        0,
+        0,
+        LOGON_TYPE_SERVICE,
+        AUTH_PACKAGE_NEGOTIATE,
+        Sid::parse(SYSTEM_SID_BYTES).map_err(|_| -EINVAL)?,
+    )
+}
+
+fn anonymous_session_ref() -> Result<*const PkmKacsSession, i32> {
+    get_or_create_published_session(
+        ANONYMOUS_LOGON_LUID,
+        0,
+        LOGON_TYPE_NETWORK,
+        AUTH_PACKAGE_NEGOTIATE,
+        Sid::parse(ANONYMOUS_SID_BYTES).map_err(|_| -EINVAL)?,
+    )
+}
+
+fn kunit_local_service_session_ref() -> Result<*const PkmKacsSession, i32> {
+    get_or_create_published_session(
+        KUNIT_LOCAL_SERVICE_SESSION_LUID,
+        0,
+        LOGON_TYPE_SERVICE,
+        AUTH_PACKAGE_NEGOTIATE,
+        Sid::parse(LOCAL_SERVICE_SID_BYTES).map_err(|_| -EINVAL)?,
+    )
+}
+
 impl PkmKacsBootToken {
+    fn session_ref(&self) -> Option<&PkmKacsSession> {
+        unsafe { PkmKacsSession::from_ptr(self.session.cast()) }
+    }
+
     fn create_system_like(
+        session: *const PkmKacsSession,
         user_sid: Sid<'static>,
         creator_sid: Sid<'static>,
         integrity_level: IntegrityLevel,
@@ -1462,13 +1846,23 @@ impl PkmKacsBootToken {
         include_user_group: bool,
         audit_policy: u32,
     ) -> Option<*const c_void> {
-        let logon_sid = Sid::parse(LOGON_SID_BYTES).ok()?;
         let administrators = Sid::parse(ADMINISTRATORS_SID_BYTES).ok()?;
         let everyone = Sid::parse(EVERYONE_SID_BYTES).ok()?;
         let authenticated_users = Sid::parse(AUTHENTICATED_USERS_SID_BYTES).ok()?;
         let local = Sid::parse(LOCAL_SID_BYTES).ok()?;
-        let (default_dacl_ptr, default_dacl_len) =
-            alloc_copy_bytes(SYSTEM_DEFAULT_DACL_BYTES).ok()?;
+        let session_ref = match unsafe { PkmKacsSession::from_ptr(session.cast()) } {
+            Some(session_ref) => session_ref,
+            None => return None,
+        };
+        let logon_sid = session_ref.logon_sid;
+        let (default_dacl_ptr, default_dacl_len) = match alloc_copy_bytes(SYSTEM_DEFAULT_DACL_BYTES)
+        {
+            Ok(value) => value,
+            Err(_) => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return None;
+            }
+        };
         let (own_sd_ptr, own_sd_len) = match build_token_sd_bytes(
             creator_sid,
             user_sid,
@@ -1479,6 +1873,7 @@ impl PkmKacsBootToken {
             Ok(value) => value,
             Err(_) => {
                 free_allocated_bytes(default_dacl_ptr);
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
                 return None;
             }
         };
@@ -1486,6 +1881,7 @@ impl PkmKacsBootToken {
         if token_ptr.is_null() {
             free_allocated_bytes(default_dacl_ptr);
             free_allocated_bytes(own_sd_ptr);
+            unsafe { PkmKacsSession::drop_ref(session.cast()) };
             return None;
         }
 
@@ -1507,15 +1903,8 @@ impl PkmKacsBootToken {
         let token = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
-            session: PkmKacsBootSession {
-                session_id: 0,
-                logon_type: LOGON_TYPE_SERVICE,
-                user_sid,
-                auth_package: AUTH_PACKAGE_NEGOTIATE,
-                logon_sid,
-            },
+            session,
             user_sid,
-            logon_sid,
             group_count: MAX_BOOT_GROUPS,
             group_sids,
             group_default_attributes,
@@ -1555,7 +1944,10 @@ impl PkmKacsBootToken {
     }
 
     fn create_system() -> Option<*const c_void> {
+        let session = boot_system_session_ref().ok()?;
+
         Self::create_system_like(
+            session,
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             IntegrityLevel::System,
@@ -1576,43 +1968,63 @@ impl PkmKacsBootToken {
     fn create_query_only_system() -> Option<*const c_void> {
         let user_sid = Sid::parse(SYSTEM_SID_BYTES).ok()?;
         let creator_sid = user_sid;
-        let logon_sid = Sid::parse(LOGON_SID_BYTES).ok()?;
+        let session = boot_system_session_ref().ok()?;
+        let session_ref = match unsafe { PkmKacsSession::from_ptr(session.cast()) } {
+            Some(session_ref) => session_ref,
+            None => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return None;
+            }
+        };
+        let logon_sid = session_ref.logon_sid;
         let administrators = Sid::parse(ADMINISTRATORS_SID_BYTES).ok()?;
         let everyone = Sid::parse(EVERYONE_SID_BYTES).ok()?;
         let authenticated_users = Sid::parse(AUTHENTICATED_USERS_SID_BYTES).ok()?;
         let local = Sid::parse(LOCAL_SID_BYTES).ok()?;
-        let (default_dacl_ptr, default_dacl_len) =
-            alloc_copy_bytes(SYSTEM_DEFAULT_DACL_BYTES).ok()?;
-        let (own_sd_ptr, own_sd_len) = build_token_sd_bytes(
+        let (default_dacl_ptr, default_dacl_len) = match alloc_copy_bytes(SYSTEM_DEFAULT_DACL_BYTES)
+        {
+            Ok(value) => value,
+            Err(_) => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return None;
+            }
+        };
+        let (own_sd_ptr, own_sd_len) = match build_token_sd_bytes(
             creator_sid,
             user_sid,
             Some(KACS_TOKEN_DEFAULT_SELF_ACCESS),
             None,
             None,
-        )
-        .ok()?;
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                free_allocated_bytes(default_dacl_ptr);
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return None;
+            }
+        };
         let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
         if token_ptr.is_null() {
             free_allocated_bytes(default_dacl_ptr);
             free_allocated_bytes(own_sd_ptr);
+            unsafe { PkmKacsSession::drop_ref(session.cast()) };
             return None;
         }
-        let group_sids = [administrators, everyone, authenticated_users, local, logon_sid];
+        let group_sids = [
+            administrators,
+            everyone,
+            authenticated_users,
+            local,
+            logon_sid,
+        ];
         let group_default_attributes = BOOT_SYSTEM_GROUP_ATTRIBUTES;
         let group_views = build_group_views(&group_sids, &group_default_attributes);
         let group_attributes = group_default_attributes.map(AtomicU32::new);
         let token = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
-            session: PkmKacsBootSession {
-                session_id: 0,
-                logon_type: LOGON_TYPE_SERVICE,
-                user_sid,
-                auth_package: AUTH_PACKAGE_NEGOTIATE,
-                logon_sid,
-            },
+            session,
             user_sid,
-            logon_sid,
             group_count: MAX_BOOT_GROUPS,
             group_sids,
             group_default_attributes,
@@ -1653,8 +2065,10 @@ impl PkmKacsBootToken {
 
     fn create_without_tcb() -> Option<*const c_void> {
         let privileges = SYSTEM_PRIVILEGES_ALL & !SE_TCB_PRIVILEGE;
+        let session = boot_system_session_ref().ok()?;
 
         Self::create_system_like(
+            session,
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             IntegrityLevel::System,
@@ -1673,7 +2087,10 @@ impl PkmKacsBootToken {
     }
 
     fn create_adjustable_groups() -> Option<*const c_void> {
+        let session = boot_system_session_ref().ok()?;
+
         Self::create_system_like(
+            session,
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             IntegrityLevel::System,
@@ -1692,7 +2109,10 @@ impl PkmKacsBootToken {
     }
 
     fn create_adjustable_privileges() -> Option<*const c_void> {
+        let session = boot_system_session_ref().ok()?;
+
         Self::create_system_like(
+            session,
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             IntegrityLevel::System,
@@ -1711,7 +2131,10 @@ impl PkmKacsBootToken {
     }
 
     fn create_privilege_audit() -> Option<*const c_void> {
+        let session = boot_system_session_ref().ok()?;
+
         Self::create_system_like(
+            session,
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             IntegrityLevel::System,
@@ -1738,8 +2161,16 @@ impl PkmKacsBootToken {
         enabled_privileges: u64,
     ) -> Option<*const c_void> {
         let token_id = allocate_dynamic_token_id().ok()?;
+        let session = if user_sid.as_bytes() == SYSTEM_SID_BYTES {
+            boot_system_session_ref().ok()?
+        } else if user_sid.as_bytes() == LOCAL_SERVICE_SID_BYTES {
+            kunit_local_service_session_ref().ok()?
+        } else {
+            return None;
+        };
 
         Self::create_system_like(
+            session,
             user_sid,
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             integrity_level,
@@ -1760,22 +2191,51 @@ impl PkmKacsBootToken {
     fn create_anonymous() -> Option<*const c_void> {
         let anonymous = Sid::parse(ANONYMOUS_SID_BYTES).ok()?;
         let everyone = Sid::parse(EVERYONE_SID_BYTES).ok()?;
-        let logon_sid = Sid::parse(ANONYMOUS_LOGON_SID_BYTES).ok()?;
-        let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(&[]).ok()?;
-        let (own_sd_ptr, own_sd_len) = build_token_sd_bytes(
+        let session = anonymous_session_ref().ok()?;
+        let session_ref = match unsafe { PkmKacsSession::from_ptr(session.cast()) } {
+            Some(session_ref) => session_ref,
+            None => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return None;
+            }
+        };
+        let logon_sid = session_ref.logon_sid;
+        let (default_dacl_ptr, default_dacl_len) = match alloc_copy_bytes(&[]) {
+            Ok(value) => value,
+            Err(_) => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return None;
+            }
+        };
+        let (own_sd_ptr, own_sd_len) = match build_token_sd_bytes(
             anonymous,
             anonymous,
             Some(KACS_TOKEN_DEFAULT_SELF_ACCESS),
             None,
             None,
-        )
-        .ok()?;
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                free_allocated_bytes(default_dacl_ptr);
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return None;
+            }
+        };
         let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
-        let token_id = allocate_dynamic_token_id().ok()?;
+        let token_id = match allocate_dynamic_token_id() {
+            Ok(token_id) => token_id,
+            Err(_) => {
+                free_allocated_bytes(default_dacl_ptr);
+                free_allocated_bytes(own_sd_ptr);
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return None;
+            }
+        };
 
         if token_ptr.is_null() {
             free_allocated_bytes(default_dacl_ptr);
             free_allocated_bytes(own_sd_ptr);
+            unsafe { PkmKacsSession::drop_ref(session.cast()) };
             return None;
         }
 
@@ -1787,15 +2247,8 @@ impl PkmKacsBootToken {
         let token = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
-            session: PkmKacsBootSession {
-                session_id: ANONYMOUS_LOGON_LUID,
-                logon_type: LOGON_TYPE_NETWORK,
-                user_sid: anonymous,
-                auth_package: AUTH_PACKAGE_NEGOTIATE,
-                logon_sid,
-            },
+            session,
             user_sid: anonymous,
-            logon_sid,
             group_count: 1,
             group_sids,
             group_default_attributes,
@@ -1863,10 +2316,18 @@ impl PkmKacsBootToken {
                 Ok(copy) => copy,
                 Err(_) => return null(),
             };
+        let session = match PkmKacsSession::clone_ref_ptr(token.session) {
+            Some(session) => session,
+            None => {
+                free_allocated_bytes(default_dacl_ptr);
+                return null();
+            }
+        };
         let (own_sd_ptr, own_sd_len) = match alloc_copy_bytes(token.own_sd_bytes()) {
             Ok(copy) => copy,
             Err(_) => {
                 free_allocated_bytes(default_dacl_ptr);
+                unsafe { PkmKacsSession::drop_ref(session) };
                 return null();
             }
         };
@@ -1874,14 +2335,14 @@ impl PkmKacsBootToken {
         if token_ptr.is_null() {
             free_allocated_bytes(default_dacl_ptr);
             free_allocated_bytes(own_sd_ptr);
+            unsafe { PkmKacsSession::drop_ref(session) };
             return null();
         }
         let copy = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
-            session: token.session,
+            session,
             user_sid: token.user_sid,
-            logon_sid: token.logon_sid,
             group_count: token.group_count,
             group_sids: token.group_sids,
             group_default_attributes: token.group_default_attributes,
@@ -1948,6 +2409,7 @@ impl PkmKacsBootToken {
             }
         };
         let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(self.default_dacl_bytes())?;
+        let session = PkmKacsSession::clone_ref_ptr(self.session).ok_or(-EINVAL)?;
         let (own_sd_ptr, own_sd_len) = match build_token_sd_bytes(
             creator.user_sid,
             self.user_sid,
@@ -1958,6 +2420,7 @@ impl PkmKacsBootToken {
             Ok(value) => value,
             Err(err) => {
                 free_allocated_bytes(default_dacl_ptr);
+                unsafe { PkmKacsSession::drop_ref(session) };
                 return Err(err);
             }
         };
@@ -1966,15 +2429,15 @@ impl PkmKacsBootToken {
         if token_ptr.is_null() {
             free_allocated_bytes(default_dacl_ptr);
             free_allocated_bytes(own_sd_ptr);
+            unsafe { PkmKacsSession::drop_ref(session) };
             return Err(-ENOMEM);
         }
 
         let duplicate = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
-            session: self.session,
+            session,
             user_sid: self.user_sid,
-            logon_sid: self.logon_sid,
             group_count: self.group_count,
             group_sids: self.group_sids,
             group_default_attributes,
@@ -1984,9 +2447,7 @@ impl PkmKacsBootToken {
             created_at: self.created_at,
             modified_id: AtomicU64::new(modified_id),
             owner_sid_index: AtomicU32::new(self.owner_sid_index.load(Ordering::Relaxed)),
-            primary_group_index: AtomicU32::new(
-                self.primary_group_index.load(Ordering::Relaxed),
-            ),
+            primary_group_index: AtomicU32::new(self.primary_group_index.load(Ordering::Relaxed)),
             default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
             default_dacl_len: AtomicUsize::new(default_dacl_len),
             privileges_present: AtomicU64::new(privileges.present),
@@ -2036,10 +2497,12 @@ impl PkmKacsBootToken {
         let (restricted_sids, restricted_sid_views) =
             build_owned_sid_entries_from_views(self.restricted_sid_views())?;
         let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(self.default_dacl_bytes())?;
+        let session = PkmKacsSession::clone_ref_ptr(self.session).ok_or(-EINVAL)?;
         let (own_sd_ptr, own_sd_len) = match alloc_copy_bytes(self.own_sd_bytes()) {
             Ok(value) => value,
             Err(err) => {
                 free_allocated_bytes(default_dacl_ptr);
+                unsafe { PkmKacsSession::drop_ref(session) };
                 return Err(err);
             }
         };
@@ -2048,15 +2511,15 @@ impl PkmKacsBootToken {
         if token_ptr.is_null() {
             free_allocated_bytes(default_dacl_ptr);
             free_allocated_bytes(own_sd_ptr);
+            unsafe { PkmKacsSession::drop_ref(session) };
             return Err(-ENOMEM);
         }
 
         let derived = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
-            session: self.session,
+            session,
             user_sid: self.user_sid,
-            logon_sid: self.logon_sid,
             group_count: self.group_count,
             group_sids: self.group_sids,
             group_default_attributes: self.group_default_attributes,
@@ -2066,9 +2529,7 @@ impl PkmKacsBootToken {
             created_at: self.created_at,
             modified_id: AtomicU64::new(self.modified_id.load(Ordering::Relaxed)),
             owner_sid_index: AtomicU32::new(self.owner_sid_index.load(Ordering::Relaxed)),
-            primary_group_index: AtomicU32::new(
-                self.primary_group_index.load(Ordering::Relaxed),
-            ),
+            primary_group_index: AtomicU32::new(self.primary_group_index.load(Ordering::Relaxed)),
             default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
             default_dacl_len: AtomicUsize::new(default_dacl_len),
             privileges_present: AtomicU64::new(privileges.present),
@@ -2107,6 +2568,7 @@ impl PkmKacsBootToken {
             let token_ptr = ptr as *mut Self;
             free_allocated_bytes(token.default_dacl_ptr.load(Ordering::Relaxed));
             free_allocated_bytes(token.own_sd_ptr.load(Ordering::Relaxed));
+            unsafe { PkmKacsSession::drop_ref(token.session.cast()) };
             unsafe { core::ptr::drop_in_place(token_ptr) };
             unsafe { pkm_kacs_free(token_ptr.cast()) };
         }
@@ -2119,20 +2581,24 @@ impl PkmKacsBootToken {
         let default_dacl = self.default_dacl_bytes();
         let privileges = self.privileges_snapshot_locked();
         let group_views = unsafe { &*self.group_views.get() };
+        let Some(session) = self.session_ref() else {
+            return;
+        };
 
         *out = PkmKacsBootSnapshot {
             token_ptr: (self as *const Self).cast(),
-            session_id: self.session.session_id,
-            auth_id: self.session.session_id,
+            session_ptr: session as *const PkmKacsSession as *const c_void,
+            session_id: session.session_id,
+            auth_id: session.session_id,
             token_id: self.token_id,
             modified_id: self.modified_id.load(Ordering::Relaxed),
-            logon_type: self.session.logon_type,
-            auth_pkg_ptr: self.session.auth_package.as_ptr(),
-            auth_pkg_len: self.session.auth_package.len(),
-            user_sid_ptr: self.session.user_sid.as_bytes().as_ptr(),
-            user_sid_len: self.session.user_sid.as_bytes().len(),
-            logon_sid_ptr: self.session.logon_sid.as_bytes().as_ptr(),
-            logon_sid_len: self.session.logon_sid.as_bytes().len(),
+            logon_type: session.logon_type,
+            auth_pkg_ptr: session.auth_package_bytes().as_ptr(),
+            auth_pkg_len: session.auth_package_bytes().len(),
+            user_sid_ptr: session.user_sid.as_bytes().as_ptr(),
+            user_sid_len: session.user_sid.as_bytes().len(),
+            logon_sid_ptr: session.logon_sid.as_bytes().as_ptr(),
+            logon_sid_len: session.logon_sid.as_bytes().len(),
             groups_ptr: group_views.as_ptr(),
             group_count: self.group_count as u32,
             owner_sid_index,
@@ -2637,6 +3103,7 @@ impl PkmKacsBootToken {
         }
         let restricted = !restricted_sid_views.is_empty();
         let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(self.default_dacl_bytes())?;
+        let session = PkmKacsSession::clone_ref_ptr(self.session).ok_or(-EINVAL)?;
         let (own_sd_ptr, own_sd_len) = match build_token_sd_bytes(
             creator.user_sid,
             self.user_sid,
@@ -2647,6 +3114,7 @@ impl PkmKacsBootToken {
             Ok(value) => value,
             Err(err) => {
                 free_allocated_bytes(default_dacl_ptr);
+                unsafe { PkmKacsSession::drop_ref(session) };
                 return Err(err);
             }
         };
@@ -2655,6 +3123,7 @@ impl PkmKacsBootToken {
         if token_ptr.is_null() {
             free_allocated_bytes(default_dacl_ptr);
             free_allocated_bytes(own_sd_ptr);
+            unsafe { PkmKacsSession::drop_ref(session) };
             return Err(-ENOMEM);
         }
 
@@ -2664,12 +3133,14 @@ impl PkmKacsBootToken {
             if index >= self.group_count {
                 free_allocated_bytes(default_dacl_ptr);
                 free_allocated_bytes(own_sd_ptr);
+                unsafe { PkmKacsSession::drop_ref(session) };
                 unsafe { pkm_kacs_free(token_ptr.cast()) };
                 return Err(-EINVAL);
             }
             if seen[index] {
                 free_allocated_bytes(default_dacl_ptr);
                 free_allocated_bytes(own_sd_ptr);
+                unsafe { PkmKacsSession::drop_ref(session) };
                 unsafe { pkm_kacs_free(token_ptr.cast()) };
                 return Err(-EINVAL);
             }
@@ -2680,9 +3151,8 @@ impl PkmKacsBootToken {
         let restricted_token = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
-            session: self.session,
+            session,
             user_sid: self.user_sid,
-            logon_sid: self.logon_sid,
             group_count: self.group_count,
             group_sids: self.group_sids,
             group_default_attributes: group_attributes,
@@ -2692,9 +3162,7 @@ impl PkmKacsBootToken {
             created_at: self.created_at,
             modified_id: AtomicU64::new(token_id),
             owner_sid_index: AtomicU32::new(self.owner_sid_index.load(Ordering::Relaxed)),
-            primary_group_index: AtomicU32::new(
-                self.primary_group_index.load(Ordering::Relaxed),
-            ),
+            primary_group_index: AtomicU32::new(self.primary_group_index.load(Ordering::Relaxed)),
             default_dacl_ptr: AtomicPtr::new(default_dacl_ptr),
             default_dacl_len: AtomicUsize::new(default_dacl_len),
             privileges_present: AtomicU64::new(privileges_present),
@@ -2760,7 +3228,10 @@ impl PkmKacsBootToken {
             TOKEN_CLASS_CAPABILITIES => Ok(4),
             TOKEN_CLASS_MANDATORY_POLICY => Ok(4),
             TOKEN_CLASS_LOGON_TYPE => Ok(4),
-            TOKEN_CLASS_LOGON_SID => Ok(self.logon_sid.as_bytes().len()),
+            TOKEN_CLASS_LOGON_SID => self
+                .session_ref()
+                .map(|session| session.logon_sid.as_bytes().len())
+                .ok_or(-EINVAL),
             TOKEN_CLASS_IMPERSONATION_LEVEL => Ok(4),
             0 => Err(-EINVAL),
             value if value > TOKEN_CLASS_IMPERSONATION_LEVEL => Err(-EINVAL),
@@ -2813,8 +3284,11 @@ impl PkmKacsBootToken {
             }
             TOKEN_CLASS_STATISTICS => {
                 let _guard = self.lock_mutation();
+                let Some(session) = self.session_ref() else {
+                    return Err(-EINVAL);
+                };
                 writer.write_u64(self.token_id)
-                    && writer.write_u64(self.session.session_id)
+                    && writer.write_u64(session.session_id)
                     && writer.write_u64(self.modified_id.load(Ordering::Relaxed))
                     && writer.write_u32(token_type_abi(self.token_type))
                     && writer.write_u32(0)
@@ -2826,8 +3300,18 @@ impl PkmKacsBootToken {
             TOKEN_CLASS_APPCONTAINER_SID => true,
             TOKEN_CLASS_CAPABILITIES => writer.write_u32(0),
             TOKEN_CLASS_MANDATORY_POLICY => writer.write_u32(self.mandatory_policy),
-            TOKEN_CLASS_LOGON_TYPE => writer.write_u32(self.session.logon_type),
-            TOKEN_CLASS_LOGON_SID => writer.write_bytes(self.logon_sid.as_bytes()),
+            TOKEN_CLASS_LOGON_TYPE => {
+                let Some(session) = self.session_ref() else {
+                    return Err(-EINVAL);
+                };
+                writer.write_u32(session.logon_type)
+            }
+            TOKEN_CLASS_LOGON_SID => {
+                let Some(session) = self.session_ref() else {
+                    return Err(-EINVAL);
+                };
+                writer.write_bytes(session.logon_sid.as_bytes())
+            }
             TOKEN_CLASS_DEFAULT_DACL => {
                 let _guard = self.lock_mutation();
                 writer.write_bytes(self.default_dacl_bytes())
@@ -2918,10 +3402,7 @@ fn token_has_enabled_privilege(token_ptr: *const c_void, privilege: u64) -> bool
     (privileges.present & privilege) == privilege && (privileges.enabled & privilege) == privilege
 }
 
-fn min_impersonation_level(
-    lhs: ImpersonationLevel,
-    rhs: ImpersonationLevel,
-) -> ImpersonationLevel {
+fn min_impersonation_level(lhs: ImpersonationLevel, rhs: ImpersonationLevel) -> ImpersonationLevel {
     if impersonation_level_abi(lhs) <= impersonation_level_abi(rhs) {
         lhs
     } else {
@@ -2956,10 +3437,7 @@ fn impersonation_gate_effective_level(
         if has_impersonate {
             used_impersonate = true;
         } else {
-            permitted = min_impersonation_level(
-                permitted,
-                ImpersonationLevel::Identification,
-            );
+            permitted = min_impersonation_level(permitted, ImpersonationLevel::Identification);
         }
     }
 
@@ -3157,8 +3635,8 @@ fn process_sd_access_check_errno_with_intent(
                     .as_ref()
                     .and_then(|list| list.first().copied())
                     .unwrap_or(result.granted);
-                let allowed =
-                    result.mapped_desired == 0 || (granted & result.mapped_desired) == result.mapped_desired;
+                let allowed = result.mapped_desired == 0
+                    || (granted & result.mapped_desired) == result.mapped_desired;
 
                 if !allowed {
                     return Err(-EACCES);
@@ -3236,6 +3714,37 @@ fn socket_sd_access_check_errno(
 /// Creates the boot SYSTEM token object described by Appendix A step 3.
 pub extern "C" fn kacs_rust_create_boot_system_token() -> *const c_void {
     PkmKacsBootToken::create_system().unwrap_or(null())
+}
+
+#[no_mangle]
+/// Creates one published logon-session object from the exact `v0.20`
+/// wire-format session specification.
+pub extern "C" fn kacs_rust_create_session(
+    spec: *const u8,
+    spec_len: usize,
+    created_at: u64,
+    session_id_out: *mut u64,
+) -> i32 {
+    let Some(session_id_out) = (unsafe { session_id_out.as_mut() }) else {
+        return -EINVAL;
+    };
+    if spec.is_null() {
+        return -EINVAL;
+    }
+
+    let spec = unsafe { core::slice::from_raw_parts(spec, spec_len) };
+    let (logon_type, auth_package, user_sid) = match parse_session_spec(spec) {
+        Ok(parsed) => parsed,
+        Err(err) => return err,
+    };
+
+    match create_published_dynamic_session(created_at, logon_type, auth_package, user_sid) {
+        Ok(session_id) => {
+            *session_id_out = session_id;
+            0
+        }
+        Err(err) => err,
+    }
 }
 
 #[no_mangle]
@@ -3378,8 +3887,7 @@ pub extern "C" fn kacs_rust_token_impersonation_gate(
     let Some(effective_level_out) = (unsafe { effective_level_out.as_mut() }) else {
         return -EINVAL;
     };
-    let Some(used_impersonate_privilege_out) =
-        (unsafe { used_impersonate_privilege_out.as_mut() })
+    let Some(used_impersonate_privilege_out) = (unsafe { used_impersonate_privilege_out.as_mut() })
     else {
         return -EINVAL;
     };
@@ -3464,11 +3972,7 @@ pub extern "C" fn kacs_rust_create_peer_impersonation_token(
         return kacs_rust_create_anonymous_impersonation_token(out_token);
     }
 
-    match source_token.duplicate(
-        source_token,
-        TokenType::Impersonation,
-        impersonation_level,
-    ) {
+    match source_token.duplicate(source_token, TokenType::Impersonation, impersonation_level) {
         Ok(token) => {
             *out_token = token;
             0
@@ -4145,6 +4649,25 @@ pub extern "C" fn kacs_rust_kunit_token_snapshot(
 /// Fills a KUnit-visible snapshot of the boot SYSTEM token and Session 0.
 pub extern "C" fn kacs_rust_kunit_boot_snapshot(out: *mut PkmKacsBootSnapshot) -> bool {
     kacs_rust_kunit_token_snapshot(unsafe { pkm_kacs_boot_system_token_ptr() }, out)
+}
+
+#[no_mangle]
+/// Fills one KUnit-visible snapshot of a published logon session by id.
+pub extern "C" fn kacs_rust_kunit_session_snapshot(
+    session_id: u64,
+    out: *mut PkmKacsSessionSnapshot,
+) -> i32 {
+    let Some(out) = (unsafe { out.as_mut() }) else {
+        return -EINVAL;
+    };
+    let _guard = lock_session_table();
+    let Some(session_ptr) = session_list_find_locked(session_id) else {
+        return -EACCES;
+    };
+    let session = unsafe { &*session_ptr };
+
+    session.snapshot(out);
+    0
 }
 
 #[no_mangle]

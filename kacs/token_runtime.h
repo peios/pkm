@@ -39,6 +39,7 @@ struct pkm_kacs_boot_group_view {
 
 struct pkm_kacs_boot_snapshot {
 	const void *token_ptr;
+	const void *session_ptr;
 	u64 session_id;
 	u64 auth_id;
 	u64 token_id;
@@ -68,6 +69,19 @@ struct pkm_kacs_boot_snapshot {
 	u32 projected_uid;
 	u32 projected_gid;
 	u32 audit_policy;
+};
+
+struct pkm_kacs_session_snapshot {
+	const void *session_ptr;
+	u64 session_id;
+	u64 created_at;
+	u32 logon_type;
+	const u8 *auth_pkg_ptr;
+	size_t auth_pkg_len;
+	const u8 *user_sid_ptr;
+	size_t user_sid_len;
+	const u8 *logon_sid_ptr;
+	size_t logon_sid_len;
 };
 
 struct pkm_kacs_group_adjust_entry {
@@ -224,6 +238,8 @@ int pkm_kmes_current_process_rate_reserve(u32 count);
 void pkm_kmes_current_process_rate_refund(u32 count);
 
 const void *kacs_rust_create_boot_system_token(void);
+int kacs_rust_create_session(const u8 *spec, size_t spec_len, u64 created_at,
+			     u64 *session_id_out);
 const void *kacs_rust_token_clone(const void *token);
 const void *kacs_rust_token_deep_copy(const void *token);
 void kacs_rust_token_drop(const void *token);
@@ -296,6 +312,8 @@ u32 kacs_rust_token_projected_gid(const void *token);
 bool kacs_rust_kunit_token_snapshot(const void *token,
 				    struct pkm_kacs_boot_snapshot *out);
 bool kacs_rust_kunit_boot_snapshot(struct pkm_kacs_boot_snapshot *out);
+int kacs_rust_kunit_session_snapshot(
+	u64 session_id, struct pkm_kacs_session_snapshot *out);
 const void *kacs_rust_kunit_create_query_only_token(void);
 const void *kacs_rust_kunit_create_without_tcb_token(void);
 const void *kacs_rust_kunit_create_adjustable_groups_token(void);
@@ -345,6 +363,9 @@ long pkm_kacs_kunit_check_process_affinity_for_subject(
 	const struct pkm_kacs_kunit_process_affinity_check_args *args);
 long pkm_kacs_kunit_check_prlimit_for_subject(
 	const struct pkm_kacs_kunit_process_prlimit_check_args *args);
+long pkm_kacs_kunit_create_session_for_subject(const void *subject_token,
+					       const u8 *spec, size_t spec_len,
+					       u64 *session_id_out);
 long pkm_kacs_kunit_get_process_sd_for_subject(
 	const struct pkm_kacs_kunit_process_sd_get_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
