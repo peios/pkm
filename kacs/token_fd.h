@@ -93,6 +93,7 @@ struct kacs_adjust_default_args {
 	_IOW(KACS_IOC_MAGIC, 1, struct kacs_adjust_privs_args)
 #define KACS_IOC_DUPLICATE \
 	_IOWR(KACS_IOC_MAGIC, 2, struct kacs_duplicate_args)
+#define KACS_IOC_INSTALL _IO(KACS_IOC_MAGIC, 3)
 #define KACS_IOC_ADJUST_GROUPS \
 	_IOW(KACS_IOC_MAGIC, 7, struct kacs_adjust_groups_args)
 #define KACS_IOC_IMPERSONATE _IO(KACS_IOC_MAGIC, 8)
@@ -151,6 +152,7 @@ long pkm_kacs_kunit_token_fd_duplicate(int fd,
 				       const void *subject_token,
 				       const void *creator_token,
 				       struct kacs_duplicate_args *args);
+long pkm_kacs_kunit_token_fd_install(int fd, const void *caller_primary_token);
 long pkm_kacs_kunit_token_fd_impersonate(int fd, const void *server_token);
 long pkm_kacs_kunit_token_fd_adjust_groups(int fd,
 					   struct kacs_adjust_groups_args *args,

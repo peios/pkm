@@ -49,6 +49,7 @@
 	(KACS_ACCESS_READ_CONTROL | KACS_ACCESS_ACCESS_SYSTEM_SECURITY)
 #define PKM_KUNIT_PIP_TYPE_PROTECTED 512U
 #define PKM_KUNIT_PIP_TRUST_TEST 5U
+#define PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE (1ULL << 3)
 #define PKM_KUNIT_SE_TCB_PRIVILEGE (1ULL << 7)
 #define PKM_KUNIT_SE_DEBUG_PRIVILEGE (1ULL << 20)
 #define PKM_KUNIT_SE_SECURITY_PRIVILEGE (1ULL << 8)
@@ -1036,7 +1037,7 @@ static void pkm_kunit_kmes_swap_old_fd_freezes_and_new_attach_rebinds(
 	struct pkm_kmes_kunit_fd_snapshot old_post_emit = { };
 	struct pkm_kmes_kunit_fd_snapshot new_before_emit = { };
 	struct pkm_kmes_kunit_fd_snapshot new_after_emit = { };
-	struct pkm_kmes_kunit_fd_snapshot emit_after_emit = { };
+	struct pkm_kmes_kunit_fd_snapshot scan_snapshot = { };
 	struct pkm_kunit_kmes_event_view first = { };
 	struct pkm_kunit_kmes_event_view second = { };
 	int *fds;
@@ -1047,7 +1048,9 @@ static void pkm_kunit_kmes_swap_old_fd_freezes_and_new_attach_rebinds(
 	u64 new_capacity = 0;
 	int old_fd;
 	int new_fd;
-	int emit_fd;
+	int i;
+	bool found_copied_event = false;
+	bool found_emitted_event = false;
 	u8 old_bytes[128] = { 0 };
 	u8 new_bytes[256] = { 0 };
 
@@ -1122,51 +1125,50 @@ static void pkm_kunit_kmes_swap_old_fd_freezes_and_new_attach_rebinds(
 	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_fd_snapshot(new_fd, &new_after_emit),
 			0);
 	KUNIT_EXPECT_EQ(test, new_after_emit.generation, 2ULL);
-	emit_fd = pkm_kunit_find_current_kmes_fd(test, new_fds, new_count,
-						 &emit_after_emit);
-	KUNIT_ASSERT_GE(test, emit_fd, 0);
+	KUNIT_EXPECT_TRUE(test,
+			  new_after_emit.write_pos == old_before.write_pos ||
+			  new_after_emit.write_pos > old_before.write_pos);
 
-	if (emit_fd == new_fd) {
-		KUNIT_EXPECT_GT(test, new_after_emit.write_pos, old_before.write_pos);
+	for (i = 0; i < new_count; i++) {
+		if (new_fds[i] < 0)
+			continue;
 		KUNIT_ASSERT_EQ(test,
-				pkm_kmes_kunit_copy_fd_view(new_fd, 8192, new_bytes,
+				pkm_kmes_kunit_fd_snapshot(new_fds[i],
+							   &scan_snapshot),
+				0);
+		KUNIT_EXPECT_EQ(test, scan_snapshot.generation, 2ULL);
+		if (!scan_snapshot.write_pos)
+			continue;
+		memset(new_bytes, 0, sizeof(new_bytes));
+		KUNIT_ASSERT_EQ(test,
+				pkm_kmes_kunit_copy_fd_view(new_fds[i], 8192,
+							 new_bytes,
 							 sizeof(new_bytes)),
 				0);
 		KUNIT_ASSERT_TRUE(test,
 				  pkm_kunit_parse_kmes_event(
 					  new_bytes, sizeof(new_bytes), &first));
-		KUNIT_ASSERT_TRUE(
-			test,
-			pkm_kunit_parse_kmes_event(
-				new_bytes + first.event_size,
-				sizeof(new_bytes) - first.event_size, &second));
-		KUNIT_EXPECT_EQ(test, first.sequence, 1ULL);
-		KUNIT_EXPECT_EQ(test, second.sequence, 2ULL);
-		KUNIT_EXPECT_EQ(test, first.payload_ptr[0], payload0[0]);
-		KUNIT_EXPECT_EQ(test, second.payload_ptr[0], payload1[0]);
-	} else {
-		KUNIT_EXPECT_EQ(test, new_after_emit.write_pos, old_before.write_pos);
-		KUNIT_ASSERT_EQ(test,
-				pkm_kmes_kunit_copy_fd_view(new_fd, 8192, new_bytes,
-							 sizeof(new_bytes)),
-				0);
-		KUNIT_ASSERT_TRUE(test,
-				  pkm_kunit_parse_kmes_event(
-					  new_bytes, sizeof(new_bytes), &first));
-		KUNIT_EXPECT_EQ(test, first.sequence, 1ULL);
-		KUNIT_EXPECT_EQ(test, first.payload_ptr[0], payload0[0]);
-
-		KUNIT_EXPECT_GT(test, emit_after_emit.write_pos, 0ULL);
-		KUNIT_ASSERT_EQ(test,
-				pkm_kmes_kunit_copy_fd_view(emit_fd, 8192, new_bytes,
-							 sizeof(new_bytes)),
-				0);
-		KUNIT_ASSERT_TRUE(test,
-				  pkm_kunit_parse_kmes_event(
-					  new_bytes, sizeof(new_bytes), &second));
-		KUNIT_EXPECT_EQ(test, second.sequence, 1ULL);
-		KUNIT_EXPECT_EQ(test, second.payload_ptr[0], payload1[0]);
+		if (first.sequence == 1ULL && first.payload_len == sizeof(payload0) &&
+		    first.payload_ptr[0] == payload0[0]) {
+			found_copied_event = true;
+			if (pkm_kunit_parse_kmes_event(new_bytes + first.event_size,
+						       sizeof(new_bytes) -
+							       first.event_size,
+						       &second)) {
+				if (second.sequence == 2ULL &&
+				    second.payload_len == sizeof(payload1) &&
+				    second.payload_ptr[0] == payload1[0])
+					found_emitted_event = true;
+			}
+		}
+		if (first.sequence == 1ULL && first.payload_len == sizeof(payload1) &&
+		    first.payload_ptr[0] == payload1[0]) {
+			found_emitted_event = true;
+		}
 	}
+
+	KUNIT_EXPECT_TRUE(test, found_copied_event);
+	KUNIT_EXPECT_TRUE(test, found_emitted_event);
 
 	pkm_kunit_close_fds(test, new_fds, new_count);
 	pkm_kunit_close_fds(test, fds, count);
@@ -4200,6 +4202,362 @@ static void pkm_kunit_open_current_thread_token_observes_effective_token_and_rev
 	kacs_rust_token_drop(client_token);
 }
 
+static void pkm_kunit_token_install_requires_assign_primary_handle(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_state_view before = { };
+	struct pkm_kacs_kunit_process_state_view after = { };
+	const void *target_token;
+	const void *primary_token;
+	const void *state_ptr;
+	long fd;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	state_ptr = pkm_kacs_kunit_current_process_state_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+	KUNIT_ASSERT_NOT_NULL(test, state_ptr);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_process_state_snapshot(state_ptr, &before),
+			0);
+
+	target_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(primary_token, target_token,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	ret = pkm_kacs_kunit_token_fd_install((int)fd, primary_token);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    primary_token);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_effective_token_ptr(),
+			    primary_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_process_state_snapshot(state_ptr, &after),
+			0);
+	KUNIT_EXPECT_PTR_EQ(test, after.state_ptr, before.state_ptr);
+	KUNIT_EXPECT_PTR_EQ(test, after.process_sd_ptr, before.process_sd_ptr);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_install_requires_assign_primary_privilege(
+	struct kunit *test)
+{
+	const void *target_token;
+	const void *caller_without_privilege;
+	const void *primary_token;
+	long fd;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+
+	target_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
+	caller_without_privilege =
+		kacs_rust_kunit_create_impersonation_variant_token(
+			PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+			KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_NOT_NULL(test, caller_without_privilege);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		primary_token, target_token, KACS_TOKEN_ASSIGN_PRIMARY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	ret = pkm_kacs_kunit_token_fd_install((int)fd,
+						 caller_without_privilege);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    primary_token);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_effective_token_ptr(),
+			    primary_token);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(caller_without_privilege);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_install_rejects_impersonation_token(
+	struct kunit *test)
+{
+	const void *target_token;
+	const void *primary_token;
+	long fd;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+
+	target_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_LEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		primary_token, target_token, KACS_TOKEN_ASSIGN_PRIMARY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	ret = pkm_kacs_kunit_token_fd_install((int)fd, primary_token);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    primary_token);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_effective_token_ptr(),
+			    primary_token);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_install_same_user_preserves_process_sd(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_state_view before = { };
+	struct pkm_kacs_kunit_process_state_view after_install = { };
+	struct pkm_kacs_kunit_process_state_view after_restore = { };
+	const void *old_primary_token;
+	const void *new_primary_token;
+	const void *state_ptr;
+	long old_fd;
+	long install_fd;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	old_primary_token = pkm_kacs_current_primary_token_ptr();
+	state_ptr = pkm_kacs_kunit_current_process_state_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, old_primary_token);
+	KUNIT_ASSERT_NOT_NULL(test, state_ptr);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_process_state_snapshot(state_ptr, &before),
+			0);
+
+	old_fd = pkm_kacs_open_self_token_internal(KACS_REAL_TOKEN,
+						   KACS_TOKEN_ASSIGN_PRIMARY);
+	KUNIT_ASSERT_GE(test, old_fd, 0L);
+
+	new_primary_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, new_primary_token);
+
+	install_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		old_primary_token, new_primary_token, KACS_TOKEN_ASSIGN_PRIMARY);
+	KUNIT_ASSERT_GE(test, install_fd, 0L);
+
+	ret = pkm_kacs_kunit_token_fd_install((int)install_fd,
+						 old_primary_token);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    new_primary_token);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_effective_token_ptr(),
+			    new_primary_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_process_state_snapshot(
+				pkm_kacs_kunit_current_process_state_ptr(),
+				&after_install),
+			0);
+	KUNIT_EXPECT_PTR_EQ(test, after_install.state_ptr, before.state_ptr);
+	KUNIT_EXPECT_PTR_EQ(test, after_install.process_sd_ptr,
+			    before.process_sd_ptr);
+	KUNIT_EXPECT_EQ(test, after_install.process_sd_len,
+			before.process_sd_len);
+
+	ret = pkm_kacs_kunit_token_fd_install(
+		(int)old_fd, pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    old_primary_token);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_effective_token_ptr(),
+			    old_primary_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_process_state_snapshot(
+				pkm_kacs_kunit_current_process_state_ptr(),
+				&after_restore),
+			0);
+	KUNIT_EXPECT_PTR_EQ(test, after_restore.state_ptr, before.state_ptr);
+	KUNIT_EXPECT_PTR_EQ(test, after_restore.process_sd_ptr,
+			    before.process_sd_ptr);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)install_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)old_fd), 0);
+	kacs_rust_token_drop(new_primary_token);
+}
+
+static void pkm_kunit_token_install_different_user_regenerates_process_sd(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_state_view before = { };
+	struct pkm_kacs_kunit_process_state_view after_install = { };
+	struct pkm_kacs_kunit_process_state_view after_restore = { };
+	const void *old_primary_token;
+	const void *new_primary_token;
+	const void *state_ptr;
+	long old_fd;
+	long install_fd;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	old_primary_token = pkm_kacs_current_primary_token_ptr();
+	state_ptr = pkm_kacs_kunit_current_process_state_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, old_primary_token);
+	KUNIT_ASSERT_NOT_NULL(test, state_ptr);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_process_state_snapshot(state_ptr, &before),
+			0);
+
+	old_fd = pkm_kacs_open_self_token_internal(KACS_REAL_TOKEN,
+						   KACS_TOKEN_ASSIGN_PRIMARY);
+	KUNIT_ASSERT_GE(test, old_fd, 0L);
+
+	new_primary_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, new_primary_token);
+
+	install_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		old_primary_token, new_primary_token, KACS_TOKEN_ASSIGN_PRIMARY);
+	KUNIT_ASSERT_GE(test, install_fd, 0L);
+
+	ret = pkm_kacs_kunit_token_fd_install((int)install_fd,
+						 old_primary_token);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    new_primary_token);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_effective_token_ptr(),
+			    new_primary_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_process_state_snapshot(
+				pkm_kacs_kunit_current_process_state_ptr(),
+				&after_install),
+			0);
+	KUNIT_EXPECT_PTR_EQ(test, after_install.state_ptr, before.state_ptr);
+	KUNIT_EXPECT_TRUE(test,
+			  after_install.process_sd_ptr !=
+				  before.process_sd_ptr);
+	KUNIT_EXPECT_GT(test, after_install.process_sd_len, (size_t)0);
+
+	ret = pkm_kacs_kunit_token_fd_install(
+		(int)old_fd, pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    old_primary_token);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_effective_token_ptr(),
+			    old_primary_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_process_state_snapshot(
+				pkm_kacs_kunit_current_process_state_ptr(),
+				&after_restore),
+			0);
+	KUNIT_EXPECT_PTR_EQ(test, after_restore.state_ptr, before.state_ptr);
+	KUNIT_EXPECT_TRUE(test,
+			  after_restore.process_sd_ptr !=
+				  after_install.process_sd_ptr);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)install_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)old_fd), 0);
+	kacs_rust_token_drop(new_primary_token);
+}
+
+static void pkm_kunit_token_install_under_impersonation_revert_lands_on_new_primary(
+	struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot effective = { };
+	const void *old_primary_token;
+	const void *new_primary_token;
+	const void *client_token;
+	long old_fd;
+	long install_fd;
+	long impersonation_fd;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	old_primary_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, old_primary_token);
+
+	old_fd = pkm_kacs_open_self_token_internal(KACS_REAL_TOKEN,
+						   KACS_TOKEN_ASSIGN_PRIMARY);
+	KUNIT_ASSERT_GE(test, old_fd, 0L);
+
+	new_primary_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
+	client_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_LEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, new_primary_token);
+	KUNIT_ASSERT_NOT_NULL(test, client_token);
+
+	install_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		old_primary_token, new_primary_token, KACS_TOKEN_ASSIGN_PRIMARY);
+	KUNIT_ASSERT_GE(test, install_fd, 0L);
+	impersonation_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		old_primary_token, client_token, KACS_TOKEN_IMPERSONATE);
+	KUNIT_ASSERT_GE(test, impersonation_fd, 0L);
+
+	ret = pkm_kacs_kunit_token_fd_impersonate((int)impersonation_fd,
+						 old_primary_token);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    old_primary_token);
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kacs_current_effective_token_ptr() !=
+				  old_primary_token);
+
+	ret = pkm_kacs_kunit_token_fd_install(
+		(int)install_fd, pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    new_primary_token);
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kacs_current_effective_token_ptr() !=
+				  new_primary_token);
+	KUNIT_ASSERT_TRUE(
+		test,
+		kacs_rust_kunit_token_snapshot(
+			pkm_kacs_current_effective_token_ptr(), &effective));
+	KUNIT_EXPECT_EQ(test, effective.token_type,
+			(u32)KACS_TOKEN_TYPE_IMPERSONATION);
+	KUNIT_EXPECT_EQ(test, effective.impersonation_level,
+			(u32)KACS_LEVEL_IMPERSONATION);
+
+	ret = pkm_kacs_revert_impersonation();
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    new_primary_token);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_effective_token_ptr(),
+			    new_primary_token);
+
+	ret = pkm_kacs_kunit_token_fd_install(
+		(int)old_fd, pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    old_primary_token);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_effective_token_ptr(),
+			    old_primary_token);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)impersonation_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)install_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)old_fd), 0);
+	kacs_rust_token_drop(client_token);
+	kacs_rust_token_drop(new_primary_token);
+}
+
 static void pkm_kunit_peer_socket_abstract_bind_stamps_once(struct kunit *test)
 {
 	struct pkm_kacs_kunit_socket_view first = { };
@@ -7149,6 +7507,14 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_token_impersonate_anonymous_bypasses_gates),
 	KUNIT_CASE(
 		pkm_kunit_open_current_thread_token_observes_effective_token_and_revert),
+	KUNIT_CASE(pkm_kunit_token_install_requires_assign_primary_handle),
+	KUNIT_CASE(pkm_kunit_token_install_requires_assign_primary_privilege),
+	KUNIT_CASE(pkm_kunit_token_install_rejects_impersonation_token),
+	KUNIT_CASE(pkm_kunit_token_install_same_user_preserves_process_sd),
+	KUNIT_CASE(
+		pkm_kunit_token_install_different_user_regenerates_process_sd),
+	KUNIT_CASE(
+		pkm_kunit_token_install_under_impersonation_revert_lands_on_new_primary),
 	KUNIT_CASE(pkm_kunit_peer_socket_abstract_bind_stamps_once),
 	KUNIT_CASE(pkm_kunit_peer_socket_set_level_updates_unconnected),
 	KUNIT_CASE(pkm_kunit_peer_socket_set_level_invalid_fails_closed),

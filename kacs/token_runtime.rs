@@ -2276,6 +2276,27 @@ pub extern "C" fn kacs_rust_token_drop(token: *const c_void) {
 }
 
 #[no_mangle]
+/// Returns whether the supplied live token object is a primary token.
+pub extern "C" fn kacs_rust_token_is_primary(token: *const c_void) -> bool {
+    unsafe { PkmKacsBootToken::from_ptr(token) }
+        .map(|value| value.token_type == TokenType::Primary)
+        .unwrap_or(false)
+}
+
+#[no_mangle]
+/// Returns whether two live tokens carry the same user SID bytes.
+pub extern "C" fn kacs_rust_token_same_user_sid(lhs: *const c_void, rhs: *const c_void) -> bool {
+    let Some(lhs) = (unsafe { PkmKacsBootToken::from_ptr(lhs) }) else {
+        return false;
+    };
+    let Some(rhs) = (unsafe { PkmKacsBootToken::from_ptr(rhs) }) else {
+        return false;
+    };
+
+    lhs.user_sid.as_bytes() == rhs.user_sid.as_bytes()
+}
+
+#[no_mangle]
 /// Returns whether the token has all requested standalone privilege bits
 /// present and enabled.
 pub extern "C" fn kacs_rust_token_has_enabled_privilege(

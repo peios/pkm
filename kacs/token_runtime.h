@@ -179,6 +179,7 @@ int pkm_kacs_resolve_current_effective_ctx(struct pkm_kacs_resolved_ctx *out);
 int pkm_kacs_resolve_current_primary_ctx(struct pkm_kacs_resolved_ctx *out);
 int pkm_kacs_install_impersonation_token(const void *token);
 int pkm_kacs_revert_impersonation(void);
+int pkm_kacs_install_current_primary_token(const void *token);
 int pkm_kmes_current_process_rate_reserve(u32 count);
 void pkm_kmes_current_process_rate_refund(u32 count);
 
@@ -186,6 +187,8 @@ const void *kacs_rust_create_boot_system_token(void);
 const void *kacs_rust_token_clone(const void *token);
 const void *kacs_rust_token_deep_copy(const void *token);
 void kacs_rust_token_drop(const void *token);
+bool kacs_rust_token_is_primary(const void *token);
+bool kacs_rust_token_same_user_sid(const void *lhs, const void *rhs);
 bool kacs_rust_token_has_enabled_privilege(const void *token, u64 privilege);
 bool kacs_rust_token_mark_privileges_used(const void *token, u64 used_mask);
 int kacs_rust_token_open_check(const void *subject_token, const void *target_token,
