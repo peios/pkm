@@ -19,13 +19,15 @@
 
 #![allow(unreachable_pub)]
 
-use crate::access_check::access_check;
+use crate::access_check::{access_check, access_check_core, AccessCheckMode};
 use crate::access_check_abi::AccessCheckAbiResolved;
 use crate::access_mask::{
     GenericMapping, PROCESS_GENERIC_MAPPING, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED,
-    GENERIC_ALL, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    ACCESS_SYSTEM_SECURITY, GENERIC_ALL, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
+use crate::ace::{AceKind, SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE};
 use crate::acl::Acl;
+use crate::claims::{parse_claim_attribute_entry, CLAIM_TYPE_INT64};
 use crate::condition::ConditionalContext;
 use crate::error::KacsError;
 use crate::mic::{
@@ -33,8 +35,12 @@ use crate::mic::{
 };
 use crate::pkm_alloc::Vec;
 use crate::pip::PipContext;
-use crate::privilege::TokenPrivileges;
-use crate::security_descriptor::SecurityDescriptor;
+use crate::privilege::{
+    TokenPrivileges, RESTORE_INTENT, SE_RELABEL_PRIVILEGE, SE_RESTORE_PRIVILEGE,
+};
+use crate::security_descriptor::{
+    SecurityDescriptor, SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE,
+};
 use crate::sid::Sid;
 use crate::token::{
     AccessCheckToken, ConfinementTokenContext, ImpersonationLevel, RestrictedTokenContext,
@@ -68,6 +74,13 @@ const ACL_HEADER_LEN: usize = 8;
 const ACE_HEADER_LEN: usize = 8;
 const ACL_REVISION: u8 = 2;
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+const OWNER_SECURITY_INFORMATION: u32 = 0x0000_0001;
+const GROUP_SECURITY_INFORMATION: u32 = 0x0000_0002;
+const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
+const SACL_SECURITY_INFORMATION: u32 = 0x0000_0008;
+const LABEL_SECURITY_INFORMATION: u32 = 0x0000_0010;
+const CLAIM_SECURITY_ATTRIBUTE_MANDATORY: u32 = 0x0000_0020;
+const INHERIT_ONLY_ACE: u8 = 0x08;
 
 const EACCES: i32 = 13;
 const EPERM: i32 = 1;
@@ -745,6 +758,523 @@ fn build_process_sd_bytes(
     Ok((ptr, total_len))
 }
 
+fn validate_sd_security_info(security_info: u32) -> Result<(), i32> {
+    let supported = OWNER_SECURITY_INFORMATION
+        | GROUP_SECURITY_INFORMATION
+        | DACL_SECURITY_INFORMATION
+        | SACL_SECURITY_INFORMATION
+        | LABEL_SECURITY_INFORMATION;
+
+    if security_info == 0 || (security_info & !supported) != 0 {
+        return Err(-EINVAL);
+    }
+    if (security_info & SACL_SECURITY_INFORMATION) != 0
+        && (security_info & LABEL_SECURITY_INFORMATION) != 0
+    {
+        return Err(-EINVAL);
+    }
+
+    Ok(())
+}
+
+fn clone_optional_acl_bytes(acl: Option<Acl<'_>>) -> Result<Option<Vec<u8>>, i32> {
+    let Some(acl) = acl else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::with_capacity(acl.bytes().len()).map_err(|_| -ENOMEM)?;
+    bytes.extend_from_slice(acl.bytes()).map_err(|_| -ENOMEM)?;
+    Ok(Some(bytes))
+}
+
+fn build_acl_bytes_from_aces(revision: u8, aces: &[&[u8]]) -> Result<Option<Vec<u8>>, i32> {
+    if aces.is_empty() {
+        return Ok(None);
+    }
+
+    let mut acl_len = ACL_HEADER_LEN;
+    for ace in aces {
+        acl_len = acl_len.checked_add(ace.len()).ok_or(-ERANGE)?;
+    }
+    if acl_len > usize::from(u16::MAX) || aces.len() > usize::from(u16::MAX) {
+        return Err(-EINVAL);
+    }
+
+    let mut bytes = Vec::with_capacity(acl_len).map_err(|_| -ENOMEM)?;
+    bytes.extend_from_slice(&[0u8; ACL_HEADER_LEN])
+        .map_err(|_| -ENOMEM)?;
+    bytes[0] = revision;
+    bytes[1] = 0;
+    bytes[2..4].copy_from_slice(&(acl_len as u16).to_le_bytes());
+    bytes[4..6].copy_from_slice(&(aces.len() as u16).to_le_bytes());
+    bytes[6..8].copy_from_slice(&0u16.to_le_bytes());
+
+    for ace in aces {
+        bytes.extend_from_slice(ace).map_err(|_| -ENOMEM)?;
+    }
+
+    Ok(Some(bytes))
+}
+
+fn build_sd_bytes_from_components(
+    base_control: u16,
+    owner: Option<&[u8]>,
+    group: Option<&[u8]>,
+    sacl: Option<&[u8]>,
+    dacl: Option<&[u8]>,
+) -> Result<(*mut u8, usize), i32> {
+    let mut control = (base_control | SE_SELF_RELATIVE) & !(SE_SACL_PRESENT | SE_DACL_PRESENT);
+    let owner_len = owner.map_or(0, <[u8]>::len);
+    let group_len = group.map_or(0, <[u8]>::len);
+    let sacl_len = sacl.map_or(0, <[u8]>::len);
+    let dacl_len = dacl.map_or(0, <[u8]>::len);
+    let mut total_len = SD_HEADER_LEN;
+
+    if sacl.is_some() {
+        control |= SE_SACL_PRESENT;
+    }
+    if dacl.is_some() {
+        control |= SE_DACL_PRESENT;
+    }
+
+    total_len = total_len.checked_add(owner_len).ok_or(-ERANGE)?;
+    total_len = total_len.checked_add(group_len).ok_or(-ERANGE)?;
+    total_len = total_len.checked_add(sacl_len).ok_or(-ERANGE)?;
+    total_len = total_len.checked_add(dacl_len).ok_or(-ERANGE)?;
+
+    let mut bytes = Vec::with_capacity(total_len).map_err(|_| -ENOMEM)?;
+    bytes.extend_from_slice(&[0u8; SD_HEADER_LEN])
+        .map_err(|_| -ENOMEM)?;
+    bytes[0] = 1;
+    bytes[1] = 0;
+    bytes[2..4].copy_from_slice(&control.to_le_bytes());
+
+    if let Some(owner) = owner {
+        let owner_offset = bytes.len() as u32;
+        bytes[4..8].copy_from_slice(&owner_offset.to_le_bytes());
+        bytes.extend_from_slice(owner).map_err(|_| -ENOMEM)?;
+    }
+
+    if let Some(group) = group {
+        let group_offset = bytes.len() as u32;
+        bytes[8..12].copy_from_slice(&group_offset.to_le_bytes());
+        bytes.extend_from_slice(group).map_err(|_| -ENOMEM)?;
+    }
+
+    if let Some(sacl) = sacl {
+        let sacl_offset = bytes.len() as u32;
+        bytes[12..16].copy_from_slice(&sacl_offset.to_le_bytes());
+        bytes.extend_from_slice(sacl).map_err(|_| -ENOMEM)?;
+    }
+
+    if let Some(dacl) = dacl {
+        let dacl_offset = bytes.len() as u32;
+        bytes[16..20].copy_from_slice(&dacl_offset.to_le_bytes());
+        bytes.extend_from_slice(dacl).map_err(|_| -ENOMEM)?;
+    }
+
+    alloc_copy_bytes(bytes.as_slice())
+}
+
+fn build_label_ace_bytes(integrity_level: IntegrityLevel) -> Result<Vec<u8>, i32> {
+    let sid_len = 12usize;
+    let ace_len = ACE_HEADER_LEN.checked_add(sid_len).ok_or(-ERANGE)?;
+    let mut bytes = Vec::with_capacity(ace_len).map_err(|_| -ENOMEM)?;
+
+    bytes
+        .extend_from_slice(&[
+            SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+            0,
+            (ace_len as u16).to_le_bytes()[0],
+            (ace_len as u16).to_le_bytes()[1],
+        ])
+        .map_err(|_| -ENOMEM)?;
+    bytes
+        .extend_from_slice(&TOKEN_MANDATORY_POLICY_NO_WRITE_UP.to_le_bytes())
+        .map_err(|_| -ENOMEM)?;
+    bytes
+        .extend_from_slice(&[1, 1, 0, 0, 0, 0, 0, 16])
+        .map_err(|_| -ENOMEM)?;
+    bytes
+        .extend_from_slice(&(integrity_level as u32).to_le_bytes())
+        .map_err(|_| -ENOMEM)?;
+    Ok(bytes)
+}
+
+fn build_utf16_cstr_bytes(value: &str) -> Result<Vec<u8>, i32> {
+    let mut bytes = Vec::new();
+
+    for unit in value.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes())
+            .map_err(|_| -ENOMEM)?;
+    }
+    bytes.extend_from_slice(&0u16.to_le_bytes())
+        .map_err(|_| -ENOMEM)?;
+    Ok(bytes)
+}
+
+fn build_int64_claim_entry(name: &str, values: &[i64], flags: u32) -> Result<Vec<u8>, i32> {
+    let value_count = values.len();
+    let offsets_start = 16usize;
+    let values_start = offsets_start
+        .checked_add(value_count.checked_mul(4).ok_or(-ERANGE)?)
+        .ok_or(-ERANGE)?;
+    let name_bytes = build_utf16_cstr_bytes(name)?;
+    let name_offset = values_start
+        .checked_add(value_count.checked_mul(8).ok_or(-ERANGE)?)
+        .ok_or(-ERANGE)?;
+    let mut bytes = Vec::new();
+
+    bytes
+        .extend_from_slice(&(name_offset as u32).to_le_bytes())
+        .map_err(|_| -ENOMEM)?;
+    bytes
+        .extend_from_slice(&CLAIM_TYPE_INT64.to_le_bytes())
+        .map_err(|_| -ENOMEM)?;
+    bytes.extend_from_slice(&0u16.to_le_bytes())
+        .map_err(|_| -ENOMEM)?;
+    bytes.extend_from_slice(&flags.to_le_bytes())
+        .map_err(|_| -ENOMEM)?;
+    bytes
+        .extend_from_slice(&(value_count as u32).to_le_bytes())
+        .map_err(|_| -ENOMEM)?;
+
+    for index in 0..value_count {
+        let offset = values_start
+            .checked_add(index.checked_mul(8).ok_or(-ERANGE)?)
+            .ok_or(-ERANGE)?;
+        bytes
+            .extend_from_slice(&(offset as u32).to_le_bytes())
+            .map_err(|_| -ENOMEM)?;
+    }
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes())
+            .map_err(|_| -ENOMEM)?;
+    }
+    bytes.extend_from_slice(name_bytes.as_slice())
+        .map_err(|_| -ENOMEM)?;
+    Ok(bytes)
+}
+
+fn build_mandatory_resource_attribute_ace_bytes() -> Result<Vec<u8>, i32> {
+    let application_data =
+        build_int64_claim_entry("Mandatory", &[1], CLAIM_SECURITY_ATTRIBUTE_MANDATORY)?;
+    let everyone = Sid::parse(EVERYONE_SID_BYTES).map_err(|_| -EINVAL)?;
+    let ace_len = ACE_HEADER_LEN
+        .checked_add(everyone.as_bytes().len())
+        .and_then(|value| value.checked_add(application_data.len()))
+        .ok_or(-ERANGE)?;
+    let mut bytes = Vec::with_capacity(ace_len).map_err(|_| -ENOMEM)?;
+
+    bytes
+        .extend_from_slice(&[
+            SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
+            0,
+            (ace_len as u16).to_le_bytes()[0],
+            (ace_len as u16).to_le_bytes()[1],
+        ])
+        .map_err(|_| -ENOMEM)?;
+    bytes.extend_from_slice(&0u32.to_le_bytes())
+        .map_err(|_| -ENOMEM)?;
+    bytes
+        .extend_from_slice(everyone.as_bytes())
+        .map_err(|_| -ENOMEM)?;
+    bytes
+        .extend_from_slice(application_data.as_slice())
+        .map_err(|_| -ENOMEM)?;
+    Ok(bytes)
+}
+
+fn extract_label_subset_sacl_bytes(sd: &SecurityDescriptor<'_>) -> Result<Option<Vec<u8>>, i32> {
+    let Some(sacl) = sd.sacl() else {
+        return Ok(None);
+    };
+
+    for ace in sacl.entries() {
+        let ace = ace.map_err(|_| -EINVAL)?;
+        if ace.ace_type() != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+            continue;
+        }
+        if (ace.ace_flags() & INHERIT_ONLY_ACE) != 0 {
+            continue;
+        }
+        return build_acl_bytes_from_aces(sacl.revision(), &[ace.bytes()]);
+    }
+
+    Ok(None)
+}
+
+fn parse_label_subset_ace_bytes(input_sd: &SecurityDescriptor<'_>) -> Result<Option<Vec<u8>>, i32> {
+    let Some(sacl) = input_sd.sacl() else {
+        return Ok(None);
+    };
+
+    let mut entries = sacl.entries();
+    let Some(first) = entries.next() else {
+        return Err(-EINVAL);
+    };
+    let first = first.map_err(|_| -EINVAL)?;
+    if entries.next().is_some() {
+        return Err(-EINVAL);
+    }
+    if first.ace_type() != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+        return Err(-EINVAL);
+    }
+    if (first.ace_flags() & INHERIT_ONLY_ACE) != 0 {
+        return Err(-EINVAL);
+    }
+
+    let mut bytes = Vec::with_capacity(first.bytes().len()).map_err(|_| -ENOMEM)?;
+    bytes.extend_from_slice(first.bytes()).map_err(|_| -ENOMEM)?;
+    Ok(Some(bytes))
+}
+
+fn collect_mandatory_resource_attribute_aces(
+    acl: Option<Acl<'_>>,
+) -> Result<Vec<Vec<u8>>, i32> {
+    let mut mandatory_aces = Vec::new();
+    let Some(acl) = acl else {
+        return Ok(mandatory_aces);
+    };
+
+    for ace in acl.entries() {
+        let ace = ace.map_err(|_| -EINVAL)?;
+        if ace.ace_type() != SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE {
+            continue;
+        }
+        let AceKind::ResourceAttribute {
+            application_data, ..
+        } = ace.kind()
+        else {
+            continue;
+        };
+        let attribute = parse_claim_attribute_entry(application_data).map_err(|_| -EINVAL)?;
+        if (attribute.flags & CLAIM_SECURITY_ATTRIBUTE_MANDATORY) == 0 {
+            continue;
+        }
+
+        let mut bytes = Vec::with_capacity(ace.bytes().len()).map_err(|_| -ENOMEM)?;
+        bytes.extend_from_slice(ace.bytes()).map_err(|_| -ENOMEM)?;
+        mandatory_aces.push(bytes).map_err(|_| -ENOMEM)?;
+    }
+
+    Ok(mandatory_aces)
+}
+
+fn subject_has_enabled_privilege(subject: &PkmKacsBootToken, privilege: u64) -> bool {
+    let privileges = subject.privileges_snapshot();
+
+    (privileges.present & privilege) == privilege && (privileges.enabled & privilege) == privilege
+}
+
+fn validate_mandatory_resource_attribute_preservation(
+    subject: &PkmKacsBootToken,
+    current_sacl: Option<Acl<'_>>,
+    new_sacl: Option<Acl<'_>>,
+) -> Result<(), i32> {
+    let current = collect_mandatory_resource_attribute_aces(current_sacl)?;
+
+    if current.is_empty() {
+        return Ok(());
+    }
+
+    let new = collect_mandatory_resource_attribute_aces(new_sacl)?;
+    'next_current: for existing in current.iter() {
+        for candidate in new.iter() {
+            if existing.as_slice() == candidate.as_slice() {
+                continue 'next_current;
+            }
+        }
+
+        if !subject_has_enabled_privilege(subject, SE_TCB_PRIVILEGE) {
+            return Err(-EACCES);
+        }
+
+        subject.mark_privileges_used(SE_TCB_PRIVILEGE);
+        break;
+    }
+
+    Ok(())
+}
+
+fn label_integrity_from_ace(ace_bytes: &[u8]) -> Result<IntegrityLevel, i32> {
+    let ace = crate::ace::Ace::parse(ace_bytes).map_err(|_| -EINVAL)?;
+    let AceKind::SingleSid { sid, .. } = ace.kind() else {
+        return Err(-EINVAL);
+    };
+    if sid.identifier_authority() != [0, 0, 0, 0, 0, 16] || sid.sub_authority_count() != 1 {
+        return Err(-EINVAL);
+    }
+
+    match sid.sub_authority(0) {
+        Some(0) => Ok(IntegrityLevel::Untrusted),
+        Some(4096) => Ok(IntegrityLevel::Low),
+        Some(8192) => Ok(IntegrityLevel::Medium),
+        Some(12288) => Ok(IntegrityLevel::High),
+        Some(16384) => Ok(IntegrityLevel::System),
+        _ => Err(-EINVAL),
+    }
+}
+
+fn validate_owner_assignment(subject: &PkmKacsBootToken, owner_sid: Sid<'_>) -> Result<(), i32> {
+    if owner_sid.as_bytes() == subject.user_sid.as_bytes() {
+        return Ok(());
+    }
+
+    for index in 0..subject.group_count {
+        let attributes = subject.group_attributes[index].load(Ordering::Relaxed);
+        if (attributes & SE_GROUP_OWNER) != SE_GROUP_OWNER {
+            continue;
+        }
+        if subject.group_sids[index].as_bytes() == owner_sid.as_bytes() {
+            return Ok(());
+        }
+    }
+
+    if subject_has_enabled_privilege(subject, SE_RESTORE_PRIVILEGE) {
+        subject.mark_privileges_used(SE_RESTORE_PRIVILEGE);
+        return Ok(());
+    }
+
+    Err(-EACCES)
+}
+
+fn validate_label_assignment(
+    subject: &PkmKacsBootToken,
+    label_ace_bytes: Option<&[u8]>,
+) -> Result<(), i32> {
+    let Some(label_ace_bytes) = label_ace_bytes else {
+        return Ok(());
+    };
+    let label_integrity = label_integrity_from_ace(label_ace_bytes)?;
+
+    if (label_integrity as u32) <= (subject.integrity_level as u32) {
+        return Ok(());
+    }
+    if subject_has_enabled_privilege(subject, SE_RELABEL_PRIVILEGE) {
+        subject.mark_privileges_used(SE_RELABEL_PRIVILEGE);
+        return Ok(());
+    }
+
+    Err(-EACCES)
+}
+
+fn build_sd_subset_bytes(
+    sd_bytes: &[u8],
+    security_info: u32,
+) -> Result<(*mut u8, usize), i32> {
+    validate_sd_security_info(security_info)?;
+
+    let sd = SecurityDescriptor::parse(sd_bytes).map_err(|_| -EINVAL)?;
+    let label_sacl = if (security_info & LABEL_SECURITY_INFORMATION) != 0 {
+        extract_label_subset_sacl_bytes(&sd)?
+    } else {
+        None
+    };
+    let full_sacl = if (security_info & SACL_SECURITY_INFORMATION) != 0 {
+        clone_optional_acl_bytes(sd.sacl())?
+    } else {
+        None
+    };
+    let dacl = if (security_info & DACL_SECURITY_INFORMATION) != 0 {
+        clone_optional_acl_bytes(sd.dacl())?
+    } else {
+        None
+    };
+
+    build_sd_bytes_from_components(
+        sd.control(),
+        if (security_info & OWNER_SECURITY_INFORMATION) != 0 {
+            sd.owner().map(|sid| sid.as_bytes())
+        } else {
+            None
+        },
+        if (security_info & GROUP_SECURITY_INFORMATION) != 0 {
+            sd.group().map(|sid| sid.as_bytes())
+        } else {
+            None
+        },
+        full_sacl
+            .as_deref()
+            .or(label_sacl.as_deref()),
+        dacl.as_deref(),
+    )
+}
+
+fn merge_process_sd_bytes(
+    subject: &PkmKacsBootToken,
+    current_sd_bytes: &[u8],
+    security_info: u32,
+    input_sd_bytes: &[u8],
+) -> Result<(*mut u8, usize), i32> {
+    let current_sd = SecurityDescriptor::parse(current_sd_bytes).map_err(|_| -EINVAL)?;
+    let input_sd = SecurityDescriptor::parse(input_sd_bytes).map_err(|_| -EINVAL)?;
+    let mut sacl = clone_optional_acl_bytes(current_sd.sacl())?;
+    let mut dacl = clone_optional_acl_bytes(current_sd.dacl())?;
+    let owner = if (security_info & OWNER_SECURITY_INFORMATION) != 0 {
+        let owner = input_sd.owner().ok_or(-EINVAL)?;
+        validate_owner_assignment(subject, owner)?;
+        owner
+    } else {
+        current_sd.owner().ok_or(-EINVAL)?
+    };
+    let group = if (security_info & GROUP_SECURITY_INFORMATION) != 0 {
+        input_sd.group().ok_or(-EINVAL)?
+    } else {
+        current_sd.group().ok_or(-EINVAL)?
+    };
+
+    validate_sd_security_info(security_info)?;
+
+    if (security_info & DACL_SECURITY_INFORMATION) != 0 {
+        dacl = clone_optional_acl_bytes(input_sd.dacl())?;
+    }
+
+    if (security_info & SACL_SECURITY_INFORMATION) != 0 {
+        validate_mandatory_resource_attribute_preservation(
+            subject,
+            current_sd.sacl(),
+            input_sd.sacl(),
+        )?;
+        sacl = clone_optional_acl_bytes(input_sd.sacl())?;
+    } else if (security_info & LABEL_SECURITY_INFORMATION) != 0 {
+        let label_ace = parse_label_subset_ace_bytes(&input_sd)?;
+        validate_label_assignment(subject, label_ace.as_deref())?;
+
+        let current_revision = current_sd.sacl().map(|acl| acl.revision()).unwrap_or(ACL_REVISION);
+        let mut preserved_aces = Vec::new();
+
+        if let Some(existing_sacl) = current_sd.sacl() {
+            for ace in existing_sacl.entries() {
+                let ace = ace.map_err(|_| -EINVAL)?;
+                if ace.ace_type() == SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+                    continue;
+                }
+                let mut bytes = Vec::with_capacity(ace.bytes().len()).map_err(|_| -ENOMEM)?;
+                bytes.extend_from_slice(ace.bytes()).map_err(|_| -ENOMEM)?;
+                preserved_aces.push(bytes).map_err(|_| -ENOMEM)?;
+            }
+        }
+
+        let mut ace_refs = Vec::new();
+        if let Some(label_ace) = label_ace.as_ref() {
+            ace_refs.push(label_ace.as_slice()).map_err(|_| -ENOMEM)?;
+        }
+        for ace in preserved_aces.iter() {
+            ace_refs.push(ace.as_slice()).map_err(|_| -ENOMEM)?;
+        }
+
+        sacl = build_acl_bytes_from_aces(current_revision, ace_refs.as_slice())?;
+    }
+
+    build_sd_bytes_from_components(
+        current_sd.control(),
+        Some(owner.as_bytes()),
+        Some(group.as_bytes()),
+        sacl.as_deref(),
+        dacl.as_deref(),
+    )
+}
+
 fn build_default_process_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8, usize), i32> {
     let _guard = token.lock_mutation();
     let group_sid = token
@@ -775,6 +1305,27 @@ fn build_default_socket_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8, u
         Some(GENERIC_ALL),
         None,
     )
+}
+
+fn build_process_sd_with_mandatory_resource_attribute_bytes(
+    token: &PkmKacsBootToken,
+) -> Result<(*mut u8, usize), i32> {
+    let (default_ptr, default_len) = build_default_process_sd_bytes(token)?;
+    let default_bytes = unsafe { core::slice::from_raw_parts(default_ptr, default_len) };
+    let default_sd = SecurityDescriptor::parse(default_bytes).map_err(|_| -EINVAL)?;
+    let resource_ace = build_mandatory_resource_attribute_ace_bytes()?;
+    let sacl = build_acl_bytes_from_aces(ACL_REVISION, &[resource_ace.as_slice()])?;
+    let dacl = clone_optional_acl_bytes(default_sd.dacl())?;
+    let result = build_sd_bytes_from_components(
+        default_sd.control(),
+        default_sd.owner().map(|sid| sid.as_bytes()),
+        default_sd.group().map(|sid| sid.as_bytes()),
+        sacl.as_deref(),
+        dacl.as_deref(),
+    );
+
+    free_allocated_bytes(default_ptr);
+    result
 }
 
 fn build_token_sd_bytes(
@@ -2476,10 +3027,11 @@ fn token_open_check_errno(
     })
 }
 
-fn process_sd_access_check_errno(
+fn process_sd_access_check_errno_with_intent(
     subject_token: *const c_void,
     sd_bytes: &[u8],
     desired: u32,
+    privilege_intent: u32,
 ) -> Result<u32, i32> {
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
@@ -2497,31 +3049,51 @@ fn process_sd_access_check_errno(
     };
 
     subject.with_access_token(|subject_token| {
-        match access_check(
+        match access_check_core(
             Some(&target_sd),
             &subject_token,
             pip,
             desired,
             &PROCESS_GENERIC_MAPPING,
+            AccessCheckMode::Scalar,
             None,
             &conditional_context,
             None,
-            0,
+            privilege_intent,
             EMPTY_POLICIES,
         ) {
-            Ok(result) if result.allowed => {
+            Ok(result) => {
+                subject.mark_privileges_used(result.updated_privileges.used);
+                let granted = result
+                    .object_granted_list
+                    .as_ref()
+                    .and_then(|list| list.first().copied())
+                    .unwrap_or(result.granted);
+                let allowed =
+                    result.mapped_desired == 0 || (granted & result.mapped_desired) == result.mapped_desired;
+
+                if !allowed {
+                    return Err(-EACCES);
+                }
                 if normalized.maximum_allowed {
-                    Ok(result.granted)
+                    Ok(granted)
                 } else {
-                    Ok(result.granted & normalized.mapped)
+                    Ok(granted & normalized.mapped)
                 }
             }
-            Ok(_) => Err(-EACCES),
             Err(KacsError::AllocationFailure) => Err(-ENOMEM),
             Err(KacsError::ReservedAccessMaskBits(_)) => Err(-EINVAL),
             Err(_) => Err(-EINVAL),
         }
     })
+}
+
+fn process_sd_access_check_errno(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+) -> Result<u32, i32> {
+    process_sd_access_check_errno_with_intent(subject_token, sd_bytes, desired, 0)
 }
 
 fn socket_sd_access_check_errno(
@@ -2916,6 +3488,54 @@ pub extern "C" fn kacs_rust_kunit_create_read_only_socket_sd(
 }
 
 #[no_mangle]
+/// Builds a KUnit-only self-relative SD subset carrying one explicit
+/// mandatory-label ACE in the descriptor SACL field.
+pub extern "C" fn kacs_rust_kunit_create_label_sd_subset(
+    integrity_level: u32,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(integrity_level) = integrity_level_from_abi(integrity_level).ok() else {
+        return null();
+    };
+    let Ok(label_ace) = build_label_ace_bytes(integrity_level) else {
+        return null();
+    };
+    let Ok(sacl) = build_acl_bytes_from_aces(ACL_REVISION, &[label_ace.as_slice()]) else {
+        return null();
+    };
+    let Ok((ptr, len)) =
+        build_sd_bytes_from_components(SE_SELF_RELATIVE, None, None, sacl.as_deref(), None)
+    else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
+/// Builds a KUnit-only process SD carrying one mandatory resource-attribute
+/// ACE in the SACL.
+pub extern "C" fn kacs_rust_kunit_create_process_sd_with_mandatory_resource_attr(
+    token_ptr: *const c_void,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    let Ok((ptr, len)) = build_process_sd_with_mandatory_resource_attribute_bytes(token) else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
 /// Runs AccessCheck against one process SD using the supplied caller token.
 pub extern "C" fn kacs_rust_check_process_sd(
     subject_token_ptr: *const c_void,
@@ -2934,6 +3554,119 @@ pub extern "C" fn kacs_rust_check_process_sd(
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
                 *granted_out = granted;
             }
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Runs AccessCheck against one process SD using the supplied caller token and
+/// privilege-intent flags.
+pub extern "C" fn kacs_rust_check_process_sd_with_intent(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired: u32,
+    privilege_intent: u32,
+    granted_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match process_sd_access_check_errno_with_intent(
+        subject_token_ptr,
+        sd_bytes,
+        desired,
+        privilege_intent,
+    ) {
+        Ok(granted) => {
+            if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                *granted_out = granted;
+            }
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Serializes a requested subset of a live process SD into one self-relative
+/// descriptor buffer.
+pub extern "C" fn kacs_rust_query_process_sd_subset(
+    sd_ptr: *const u8,
+    sd_len: usize,
+    security_info: u32,
+    out_sd_ptr: *mut *const u8,
+    out_sd_len: *mut usize,
+) -> i32 {
+    let Some(out_sd_ptr) = (unsafe { out_sd_ptr.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(out_sd_len) = (unsafe { out_sd_len.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    *out_sd_ptr = null();
+    *out_sd_len = 0;
+
+    if sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match build_sd_subset_bytes(sd_bytes, security_info) {
+        Ok((ptr, len)) => {
+            *out_sd_ptr = ptr.cast_const();
+            *out_sd_len = len;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Merges one caller-supplied subset descriptor into the current live process
+/// SD using the bounded Slice 52 process-SD rules.
+pub extern "C" fn kacs_rust_merge_process_sd(
+    subject_token_ptr: *const c_void,
+    current_sd_ptr: *const u8,
+    current_sd_len: usize,
+    security_info: u32,
+    input_sd_ptr: *const u8,
+    input_sd_len: usize,
+    out_sd_ptr: *mut *const u8,
+    out_sd_len: *mut usize,
+) -> i32 {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token_ptr) }) else {
+        return -EACCES;
+    };
+    let Some(out_sd_ptr) = (unsafe { out_sd_ptr.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(out_sd_len) = (unsafe { out_sd_len.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    *out_sd_ptr = null();
+    *out_sd_len = 0;
+
+    if current_sd_ptr.is_null()
+        || current_sd_len == 0
+        || input_sd_ptr.is_null()
+        || input_sd_len == 0
+    {
+        return -EINVAL;
+    }
+
+    let current_sd_bytes = unsafe { core::slice::from_raw_parts(current_sd_ptr, current_sd_len) };
+    let input_sd_bytes = unsafe { core::slice::from_raw_parts(input_sd_ptr, input_sd_len) };
+    match merge_process_sd_bytes(subject, current_sd_bytes, security_info, input_sd_bytes) {
+        Ok((ptr, len)) => {
+            *out_sd_ptr = ptr.cast_const();
+            *out_sd_len = len;
             0
         }
         Err(err) => err,

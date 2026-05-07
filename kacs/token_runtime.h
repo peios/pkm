@@ -16,6 +16,9 @@
 #define KACS_PROCESS_SUSPEND_RESUME 0x0800U
 #define KACS_PROCESS_QUERY_LIMITED 0x1000U
 
+#define KACS_BACKUP_INTENT 0x00000001U
+#define KACS_RESTORE_INTENT 0x00000002U
+
 #define KACS_MIT_WXP 0x001U
 #define KACS_MIT_TLP 0x002U
 #define KACS_MIT_LSV 0x004U
@@ -145,6 +148,32 @@ struct pkm_kacs_kunit_process_prlimit_check_args {
 	u32 flags;
 };
 
+struct pkm_kacs_kunit_process_sd_get_args {
+	const void *subject_token;
+	const u8 *target_process_sd_ptr;
+	size_t target_process_sd_len;
+	u32 caller_pip_type;
+	u32 caller_pip_trust;
+	u32 target_pip_type;
+	u32 target_pip_trust;
+	u32 self_target;
+	u32 security_info;
+};
+
+struct pkm_kacs_kunit_process_sd_set_args {
+	const void *subject_token;
+	const u8 *target_process_sd_ptr;
+	size_t target_process_sd_len;
+	const u8 *input_sd_ptr;
+	size_t input_sd_len;
+	u32 caller_pip_type;
+	u32 caller_pip_trust;
+	u32 target_pip_type;
+	u32 target_pip_trust;
+	u32 self_target;
+	u32 security_info;
+};
+
 struct pkm_kacs_kunit_set_psb_args {
 	const void *subject_token;
 	const u8 *target_process_sd_ptr;
@@ -216,9 +245,27 @@ const u8 *kacs_rust_kunit_create_query_information_process_sd(
 	const void *token_ptr, size_t *len_out);
 const u8 *kacs_rust_kunit_create_read_only_socket_sd(const void *token_ptr,
 						      size_t *len_out);
+const u8 *kacs_rust_kunit_create_label_sd_subset(u32 integrity_level,
+						 size_t *len_out);
+const u8 *kacs_rust_kunit_create_process_sd_with_mandatory_resource_attr(
+	const void *token_ptr, size_t *len_out);
 int kacs_rust_check_process_sd(const void *subject_token_ptr,
 			       const u8 *sd_ptr, size_t sd_len, u32 desired,
 			       u32 *granted_out);
+int kacs_rust_check_process_sd_with_intent(const void *subject_token_ptr,
+					   const u8 *sd_ptr, size_t sd_len,
+					   u32 desired, u32 privilege_intent,
+					   u32 *granted_out);
+int kacs_rust_query_process_sd_subset(const u8 *sd_ptr, size_t sd_len,
+				      u32 security_info,
+				      const u8 **out_sd_ptr,
+				      size_t *out_sd_len);
+int kacs_rust_merge_process_sd(const void *subject_token_ptr,
+			       const u8 *current_sd_ptr,
+			       size_t current_sd_len, u32 security_info,
+			       const u8 *input_sd_ptr, size_t input_sd_len,
+			       const u8 **out_sd_ptr,
+			       size_t *out_sd_len);
 int kacs_rust_check_socket_sd(const void *subject_token_ptr,
 			      const u8 *sd_ptr, size_t sd_len, u32 desired,
 			      u32 *granted_out);
@@ -274,6 +321,12 @@ long pkm_kacs_kunit_check_process_setinfo_for_subject(
 	const struct pkm_kacs_kunit_process_setinfo_check_args *args);
 long pkm_kacs_kunit_check_prlimit_for_subject(
 	const struct pkm_kacs_kunit_process_prlimit_check_args *args);
+long pkm_kacs_kunit_get_process_sd_for_subject(
+	const struct pkm_kacs_kunit_process_sd_get_args *args,
+	const u8 **out_sd_ptr, size_t *out_sd_len);
+long pkm_kacs_kunit_set_process_sd_for_subject(
+	const struct pkm_kacs_kunit_process_sd_set_args *args,
+	const u8 **out_sd_ptr, size_t *out_sd_len);
 long pkm_kacs_kunit_open_current_thread_token_for_subject(
 	const void *subject_token, u32 access_mask);
 long pkm_kacs_kunit_set_current_psb(u32 requested_mitigations);

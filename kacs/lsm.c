@@ -21,6 +21,7 @@
 #include <linux/lsm_hooks.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
+#include <linux/mutex.h>
 #include <linux/net.h>
 #include <linux/refcount.h>
 #include <linux/pid.h>
@@ -37,6 +38,7 @@
 #include <linux/syscalls.h>
 #include <linux/task_work.h>
 #include <linux/timekeeping.h>
+#include <linux/uaccess.h>
 #include <linux/un.h>
 
 #include <asm/cpufeatures.h>
@@ -65,6 +67,19 @@
 #define PTRACE_MODE_PIDFD_OPEN 0x40
 #endif
 
+#define OWNER_SECURITY_INFORMATION 0x00000001U
+#define GROUP_SECURITY_INFORMATION 0x00000002U
+#define DACL_SECURITY_INFORMATION 0x00000004U
+#define SACL_SECURITY_INFORMATION 0x00000008U
+#define LABEL_SECURITY_INFORMATION 0x00000010U
+#define PKM_KACS_MAX_SD_BYTES 65536U
+
+#define PKM_KACS_SD_SUPPORTED_INFO                                             \
+	(OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |             \
+	 DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION |              \
+	 LABEL_SECURITY_INFORMATION)
+#define PKM_KACS_SD_ALLOWED_AT_FLAGS (AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)
+
 struct pkm_kmes_rate_bucket {
 	refcount_t refs;
 	spinlock_t lock;
@@ -91,6 +106,7 @@ struct pkm_kacs_process_sd {
 struct pkm_kacs_process_state {
 	refcount_t refs;
 	spinlock_t mitigation_lock;
+	struct mutex sd_lock;
 	u32 pip_type;
 	u32 pip_trust;
 	u32 mitigation_bits;
@@ -222,10 +238,37 @@ static long pkm_kacs_check_process_setinfo_core(
 static long pkm_kacs_revert_current_impersonation(void);
 static void pkm_kacs_free_primary_install_work(
 	struct pkm_kacs_primary_install_work *work);
+static long pkm_kacs_query_process_sd_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state, bool self_target,
+	u32 security_info, const u8 **out_sd_ptr, size_t *out_sd_len);
+static long pkm_kacs_set_process_sd_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	struct pkm_kacs_process_state *target_state, bool self_target,
+	u32 security_info, const u8 *input_sd_ptr, size_t input_sd_len);
+
+static struct pkm_kacs_process_sd *pkm_kacs_process_sd_wrap_bytes(
+	const u8 *bytes, size_t len)
+{
+	struct pkm_kacs_process_sd *process_sd;
+
+	if (!bytes || !len)
+		return NULL;
+
+	process_sd = kzalloc(sizeof(*process_sd), GFP_KERNEL);
+	if (!process_sd)
+		return NULL;
+
+	refcount_set(&process_sd->refs, 1);
+	process_sd->bytes = bytes;
+	process_sd->len = len;
+	return process_sd;
+}
 
 static struct pkm_kacs_process_sd *pkm_kacs_process_sd_alloc(const void *token)
 {
-	struct pkm_kacs_process_sd *process_sd;
 	size_t len = 0;
 	const u8 *bytes;
 
@@ -236,21 +279,11 @@ static struct pkm_kacs_process_sd *pkm_kacs_process_sd_alloc(const void *token)
 	if (!bytes || len == 0)
 		return NULL;
 
-	process_sd = kzalloc(sizeof(*process_sd), GFP_KERNEL);
-	if (!process_sd) {
-		pkm_kacs_free((void *)bytes);
-		return NULL;
-	}
-
-	refcount_set(&process_sd->refs, 1);
-	process_sd->bytes = bytes;
-	process_sd->len = len;
-	return process_sd;
+	return pkm_kacs_process_sd_wrap_bytes(bytes, len);
 }
 
 static struct pkm_kacs_process_sd *pkm_kacs_socket_sd_alloc(const void *token)
 {
-	struct pkm_kacs_process_sd *socket_sd;
 	size_t len = 0;
 	const u8 *bytes;
 
@@ -261,16 +294,7 @@ static struct pkm_kacs_process_sd *pkm_kacs_socket_sd_alloc(const void *token)
 	if (!bytes || len == 0)
 		return NULL;
 
-	socket_sd = kzalloc(sizeof(*socket_sd), GFP_KERNEL);
-	if (!socket_sd) {
-		pkm_kacs_free((void *)bytes);
-		return NULL;
-	}
-
-	refcount_set(&socket_sd->refs, 1);
-	socket_sd->bytes = bytes;
-	socket_sd->len = len;
-	return socket_sd;
+	return pkm_kacs_process_sd_wrap_bytes(bytes, len);
 }
 
 static void pkm_kacs_process_sd_put(struct pkm_kacs_process_sd *process_sd)
@@ -300,7 +324,7 @@ static struct pkm_kacs_process_sd *pkm_kacs_process_state_get_sd(
 	return process_sd;
 }
 
-static void pkm_kacs_process_state_replace_sd(
+static void pkm_kacs_process_state_replace_sd_locked(
 	struct pkm_kacs_process_state *state,
 	struct pkm_kacs_process_sd *new_sd)
 {
@@ -316,6 +340,18 @@ static void pkm_kacs_process_state_replace_sd(
 	spin_unlock_irqrestore(&state->mitigation_lock, flags);
 
 	pkm_kacs_process_sd_put(old_sd);
+}
+
+static void pkm_kacs_process_state_replace_sd(
+	struct pkm_kacs_process_state *state,
+	struct pkm_kacs_process_sd *new_sd)
+{
+	if (!state || !new_sd)
+		return;
+
+	mutex_lock(&state->sd_lock);
+	pkm_kacs_process_state_replace_sd_locked(state, new_sd);
+	mutex_unlock(&state->sd_lock);
 }
 
 static void pkm_kacs_socket_peer_token_drop(struct pkm_kacs_socket_security *sec)
@@ -411,6 +447,7 @@ static struct pkm_kacs_process_state *pkm_kacs_process_state_alloc(
 
 	refcount_set(&state->refs, 1);
 	spin_lock_init(&state->mitigation_lock);
+	mutex_init(&state->sd_lock);
 	state->pip_type = pip_type;
 	state->pip_trust = pip_trust;
 	state->mitigation_bits = mitigation_bits;
@@ -1316,6 +1353,270 @@ static long pkm_kacs_authorize_process_sd_access(
 		return -EACCES;
 
 	return 0;
+}
+
+static long pkm_kacs_authorize_process_sd_access_nondebug(
+	const void *subject_token,
+	const struct pkm_kacs_process_sd *process_sd, u32 desired_access,
+	u32 privilege_intent)
+{
+	u32 granted = 0;
+
+	if (!subject_token || !process_sd || !process_sd->bytes || !process_sd->len)
+		return -EACCES;
+
+	return kacs_rust_check_process_sd_with_intent(
+		subject_token, process_sd->bytes, process_sd->len,
+		desired_access, privilege_intent, &granted);
+}
+
+static long pkm_kacs_validate_sd_security_info(u32 security_info)
+{
+	if (security_info == 0 ||
+	    (security_info & ~PKM_KACS_SD_SUPPORTED_INFO) != 0)
+		return -EINVAL;
+	if ((security_info & SACL_SECURITY_INFORMATION) != 0 &&
+	    (security_info & LABEL_SECURITY_INFORMATION) != 0)
+		return -EINVAL;
+
+	return 0;
+}
+
+static long pkm_kacs_get_sd_required_access(u32 security_info,
+					    u32 *desired_access_out)
+{
+	u32 desired_access = 0;
+	long ret;
+
+	if (!desired_access_out)
+		return -EINVAL;
+
+	ret = pkm_kacs_validate_sd_security_info(security_info);
+	if (ret)
+		return ret;
+
+	if ((security_info &
+	     (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+	      DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) != 0)
+		desired_access |= KACS_ACCESS_READ_CONTROL;
+	if ((security_info & SACL_SECURITY_INFORMATION) != 0)
+		desired_access |= KACS_ACCESS_ACCESS_SYSTEM_SECURITY;
+
+	*desired_access_out = desired_access;
+	return 0;
+}
+
+static long pkm_kacs_set_sd_required_access(u32 security_info,
+					    u32 *desired_access_out)
+{
+	u32 desired_access = 0;
+	long ret;
+
+	if (!desired_access_out)
+		return -EINVAL;
+
+	ret = pkm_kacs_validate_sd_security_info(security_info);
+	if (ret)
+		return ret;
+
+	if ((security_info &
+	     (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+	      LABEL_SECURITY_INFORMATION)) != 0)
+		desired_access |= KACS_ACCESS_WRITE_OWNER;
+	if ((security_info & DACL_SECURITY_INFORMATION) != 0)
+		desired_access |= KACS_ACCESS_WRITE_DAC;
+	if ((security_info & SACL_SECURITY_INFORMATION) != 0)
+		desired_access |= KACS_ACCESS_ACCESS_SYSTEM_SECURITY;
+
+	*desired_access_out = desired_access;
+	return 0;
+}
+
+static long pkm_kacs_enforce_cross_process_pip(
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state, bool self_target)
+{
+	if (self_target)
+		return 0;
+	if (!caller_state || !target_state)
+		return -EACCES;
+	if (!pkm_kacs_pip_dominates(READ_ONCE(caller_state->pip_type),
+				    READ_ONCE(caller_state->pip_trust),
+				    READ_ONCE(target_state->pip_type),
+				    READ_ONCE(target_state->pip_trust)))
+		return -EACCES;
+
+	return 0;
+}
+
+static long pkm_kacs_validate_empty_path_target(const char __user *path,
+						u32 flags)
+{
+	char ch = '\0';
+
+	if ((flags & ~PKM_KACS_SD_ALLOWED_AT_FLAGS) != 0)
+		return -EINVAL;
+	if ((flags & AT_EMPTY_PATH) == 0)
+		return -EOPNOTSUPP;
+	if (!path)
+		return -EFAULT;
+	if (copy_from_user(&ch, path, sizeof(ch)))
+		return -EFAULT;
+	if (ch != '\0')
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+static long pkm_kacs_resolve_pidfd_process_target(
+	int dirfd, const char __user *path, u32 flags,
+	const void **subject_token_out,
+	struct pkm_kacs_process_state **caller_state_out,
+	struct task_struct **task_out,
+	struct pkm_kacs_process_state **target_state_out, bool *self_target_out)
+{
+	struct pkm_kacs_process_state *caller_state;
+	const void *subject_token;
+	unsigned int pidfd_flags = 0;
+	struct task_struct *task;
+	struct pid *pid;
+	long ret;
+
+	if (!subject_token_out || !caller_state_out || !task_out ||
+	    !target_state_out || !self_target_out)
+		return -EINVAL;
+
+	ret = pkm_kacs_validate_empty_path_target(path, flags);
+	if (ret)
+		return ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	caller_state = pkm_kacs_current_process_state();
+	if (!subject_token || !caller_state)
+		return -EACCES;
+
+	pid = pidfd_get_pid(dirfd, &pidfd_flags);
+	if (IS_ERR(pid))
+		return PTR_ERR(pid);
+	(void)pidfd_flags;
+
+	task = get_pid_task(pid, PIDTYPE_PID);
+	put_pid(pid);
+	if (!task)
+		return -ESRCH;
+	if (!task->security || !pkm_kacs_task(task)->process_state) {
+		put_task_struct(task);
+		return -EACCES;
+	}
+
+	*subject_token_out = subject_token;
+	*caller_state_out = caller_state;
+	*task_out = task;
+	*target_state_out = pkm_kacs_task(task)->process_state;
+	*self_target_out = (*target_state_out == caller_state);
+	return 0;
+}
+
+static long pkm_kacs_query_process_sd_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state, bool self_target,
+	u32 security_info, const u8 **out_sd_ptr, size_t *out_sd_len)
+{
+	struct pkm_kacs_process_sd *process_sd;
+	u32 desired_access;
+	long ret;
+
+	if (!out_sd_ptr || !out_sd_len)
+		return -EINVAL;
+
+	*out_sd_ptr = NULL;
+	*out_sd_len = 0;
+
+	ret = pkm_kacs_get_sd_required_access(security_info, &desired_access);
+	if (ret)
+		return ret;
+
+	process_sd = pkm_kacs_process_state_get_sd(
+		(struct pkm_kacs_process_state *)target_state);
+	if (!process_sd)
+		return -EACCES;
+
+	ret = pkm_kacs_authorize_process_sd_access_nondebug(
+		subject_token, process_sd, desired_access, 0);
+	if (!ret)
+		ret = pkm_kacs_enforce_cross_process_pip(caller_state,
+							 target_state,
+							 self_target);
+	if (!ret)
+		ret = kacs_rust_query_process_sd_subset(
+			process_sd->bytes, process_sd->len, security_info,
+			out_sd_ptr, out_sd_len);
+
+	pkm_kacs_process_sd_put(process_sd);
+	return ret;
+}
+
+static long pkm_kacs_set_process_sd_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	struct pkm_kacs_process_state *target_state, bool self_target,
+	u32 security_info, const u8 *input_sd_ptr, size_t input_sd_len)
+{
+	struct pkm_kacs_process_sd *process_sd = NULL;
+	struct pkm_kacs_process_sd *new_sd = NULL;
+	const u8 *new_sd_bytes = NULL;
+	size_t new_sd_len = 0;
+	u32 desired_access;
+	long ret;
+
+	if (!subject_token || !caller_state || !target_state || !input_sd_ptr ||
+	    input_sd_len == 0)
+		return -EINVAL;
+
+	ret = pkm_kacs_set_sd_required_access(security_info, &desired_access);
+	if (ret)
+		return ret;
+
+	mutex_lock(&target_state->sd_lock);
+	process_sd = pkm_kacs_process_sd_get(target_state->process_sd);
+	if (!process_sd) {
+		ret = -EACCES;
+		goto out_unlock;
+	}
+
+	ret = pkm_kacs_authorize_process_sd_access_nondebug(
+		subject_token, process_sd, desired_access, KACS_RESTORE_INTENT);
+	if (ret)
+		goto out_process_sd;
+	ret = pkm_kacs_enforce_cross_process_pip(caller_state, target_state,
+							 self_target);
+	if (ret)
+		goto out_process_sd;
+	ret = kacs_rust_merge_process_sd(subject_token, process_sd->bytes,
+					 process_sd->len, security_info,
+					 input_sd_ptr, input_sd_len,
+					 &new_sd_bytes, &new_sd_len);
+	if (ret)
+		goto out_process_sd;
+
+	new_sd = pkm_kacs_process_sd_wrap_bytes(new_sd_bytes, new_sd_len);
+	if (!new_sd) {
+		pkm_kacs_free((void *)new_sd_bytes);
+		ret = -ENOMEM;
+		goto out_process_sd;
+	}
+
+	pkm_kacs_process_state_replace_sd_locked(target_state, new_sd);
+	new_sd = NULL;
+	ret = 0;
+
+out_process_sd:
+	pkm_kacs_process_sd_put(process_sd);
+out_unlock:
+	mutex_unlock(&target_state->sd_lock);
+	pkm_kacs_process_sd_put(new_sd);
+	return ret;
 }
 
 static long pkm_kacs_authorize_process_access_core(
@@ -2629,6 +2930,101 @@ long pkm_kacs_kunit_check_prlimit_for_subject(
 		args->caller_pip_trust, desired_access);
 }
 
+long pkm_kacs_kunit_get_process_sd_for_subject(
+	const struct pkm_kacs_kunit_process_sd_get_args *args,
+	const u8 **out_sd_ptr, size_t *out_sd_len)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state caller_state = {};
+	struct pkm_kacs_process_state target_state = {};
+
+	if (!args || !out_sd_ptr || !out_sd_len)
+		return -EINVAL;
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	refcount_set(&process_sd.refs, 1);
+	caller_state.pip_type = args->caller_pip_type;
+	caller_state.pip_trust = args->caller_pip_trust;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
+
+	return pkm_kacs_query_process_sd_core(
+		args->subject_token, &caller_state, &target_state,
+		args->self_target != 0, args->security_info, out_sd_ptr,
+		out_sd_len);
+}
+
+long pkm_kacs_kunit_set_process_sd_for_subject(
+	const struct pkm_kacs_kunit_process_sd_set_args *args,
+	const u8 **out_sd_ptr, size_t *out_sd_len)
+{
+	struct pkm_kacs_process_state caller_state = {};
+	struct pkm_kacs_process_state target_state = {};
+	struct pkm_kacs_process_sd *current_sd = NULL;
+	const u8 *copied_bytes;
+	long ret;
+
+	if (!args || !out_sd_ptr || !out_sd_len || !args->input_sd_ptr ||
+	    args->input_sd_len == 0)
+		return -EINVAL;
+
+	*out_sd_ptr = NULL;
+	*out_sd_len = 0;
+
+	if (!args->target_process_sd_ptr || args->target_process_sd_len == 0)
+		return -EINVAL;
+
+	copied_bytes = kmemdup(args->target_process_sd_ptr,
+			       args->target_process_sd_len, GFP_KERNEL);
+	if (!copied_bytes)
+		return -ENOMEM;
+
+	current_sd = pkm_kacs_process_sd_wrap_bytes(copied_bytes,
+						       args->target_process_sd_len);
+	if (!current_sd) {
+		kfree(copied_bytes);
+		return -ENOMEM;
+	}
+
+	caller_state.pip_type = args->caller_pip_type;
+	caller_state.pip_trust = args->caller_pip_trust;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = current_sd;
+	spin_lock_init(&target_state.mitigation_lock);
+	mutex_init(&target_state.sd_lock);
+
+	ret = pkm_kacs_set_process_sd_core(
+		args->subject_token, &caller_state, &target_state,
+		args->self_target != 0, args->security_info, args->input_sd_ptr,
+		args->input_sd_len);
+	if (ret)
+		goto out;
+	if (!target_state.process_sd || !target_state.process_sd->bytes ||
+	    target_state.process_sd->len == 0) {
+		ret = -EACCES;
+		goto out;
+	}
+
+	copied_bytes = kmemdup(target_state.process_sd->bytes,
+			       target_state.process_sd->len, GFP_KERNEL);
+	if (!copied_bytes) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	*out_sd_ptr = copied_bytes;
+	*out_sd_len = target_state.process_sd->len;
+	ret = 0;
+
+out:
+	pkm_kacs_process_sd_put(target_state.process_sd);
+	return ret;
+}
+
 long pkm_kacs_kunit_open_current_thread_token_for_subject(
 	const void *subject_token, u32 access_mask)
 {
@@ -2899,6 +3295,87 @@ SYSCALL_DEFINE3(kacs_open_thread_token, int, pidfd, int, tid, u32, access_mask)
 					      thread_task, access_mask);
 	put_task_struct(thread_task);
 	put_task_struct(process_task);
+	return ret;
+}
+
+SYSCALL_DEFINE6(kacs_get_sd, int, dirfd, const char __user *, path,
+		u32, security_info, void __user *, buf, u32, buf_len,
+		u32, flags)
+{
+	struct pkm_kacs_process_state *caller_state;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+	struct task_struct *task = NULL;
+	const u8 *result_sd = NULL;
+	size_t result_len = 0;
+	bool self_target;
+	long ret;
+
+	ret = pkm_kacs_resolve_pidfd_process_target(
+		dirfd, path, flags, &subject_token, &caller_state, &task,
+		&target_state, &self_target);
+	if (ret)
+		return ret;
+
+	ret = pkm_kacs_query_process_sd_core(subject_token, caller_state,
+					     target_state, self_target,
+					     security_info, &result_sd,
+					     &result_len);
+	put_task_struct(task);
+	if (ret)
+		goto out;
+
+	if (buf_len != 0 && result_len <= buf_len) {
+		if (!buf || copy_to_user(buf, result_sd, result_len)) {
+			ret = -EFAULT;
+			goto out;
+		}
+	}
+
+	ret = (long)result_len;
+
+out:
+	if (result_sd)
+		pkm_kacs_free((void *)result_sd);
+	return ret;
+}
+
+SYSCALL_DEFINE6(kacs_set_sd, int, dirfd, const char __user *, path,
+		u32, security_info, const void __user *, sd_buf, u32, sd_len,
+		u32, flags)
+{
+	struct pkm_kacs_process_state *caller_state;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+	struct task_struct *task = NULL;
+	u8 *input_sd = NULL;
+	bool self_target;
+	long ret;
+
+	if (!sd_buf || sd_len == 0 || sd_len > PKM_KACS_MAX_SD_BYTES)
+		return -EINVAL;
+
+	ret = pkm_kacs_resolve_pidfd_process_target(
+		dirfd, path, flags, &subject_token, &caller_state, &task,
+		&target_state, &self_target);
+	if (ret)
+		return ret;
+
+	input_sd = memdup_user(sd_buf, sd_len);
+	if (IS_ERR(input_sd)) {
+		ret = PTR_ERR(input_sd);
+		input_sd = NULL;
+		goto out;
+	}
+
+	ret = pkm_kacs_set_process_sd_core(subject_token, caller_state,
+					   target_state, self_target,
+					   security_info, input_sd, sd_len);
+
+out:
+	kfree(input_sd);
+	if (task)
+		put_task_struct(task);
 	return ret;
 }
 
