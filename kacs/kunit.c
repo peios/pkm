@@ -519,6 +519,15 @@ static const u8 pkm_kunit_system_read_sd[] = {
 	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
 };
 
+static const u8 pkm_kunit_everyone_read_sd[] = {
+	1, 0, 4, 128, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	32, 0, 0, 0,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+	2, 0, 28, 0, 1, 0, 0, 0,
+	0, 0, 20, 0, 0, 0, 2, 0,
+	1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+};
+
 static const u8 pkm_kunit_system_default_dacl[] = {
 	2, 0, 52, 0, 2, 0, 0, 0,
 	0, 0, 20, 0, 0, 0, 0, 16,
@@ -627,6 +636,59 @@ static void pkm_kunit_build_read_control_args(u8 *args, s32 token_fd)
 	pkm_kunit_write_u32(args, 36,
 			    KACS_ACCESS_READ_CONTROL | KACS_ACCESS_WRITE_DAC);
 	pkm_kunit_write_u64(args, 88, 0x3000);
+}
+
+static size_t pkm_kunit_build_restrict_payload(
+	u8 *payload,
+	const u32 *deny_indices,
+	size_t deny_count,
+	const struct pkm_kacs_boot_group_view *restrict_sids,
+	size_t sid_count)
+{
+	size_t offset = 0;
+	size_t index;
+
+	for (index = 0; index < deny_count; index++) {
+		pkm_kunit_write_u32(payload, offset, deny_indices[index]);
+		offset += sizeof(u32);
+	}
+
+	for (index = 0; index < sid_count; index++) {
+		memcpy(payload + offset, restrict_sids[index].sid_ptr,
+		       restrict_sids[index].sid_len);
+		offset += restrict_sids[index].sid_len;
+	}
+
+	return offset;
+}
+
+static long pkm_kunit_run_read_control_with_token_fd(int token_fd, const u8 *sd,
+						     size_t sd_len,
+						     u32 *granted_out)
+{
+	u8 args[136];
+	u8 granted_bytes[4] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+	struct pkm_kacs_ingress_summary summary = { };
+	long ret;
+
+	pkm_kunit_build_read_control_args(args, token_fd);
+	pkm_kunit_write_u32(args, 16, sd_len);
+
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000, (u8 *)sd, sd_len);
+	pkm_kunit_add_region(&mem, 0x3000, granted_bytes, sizeof(granted_bytes));
+
+	ret = pkm_kacs_access_check_ingress_scalar_with_token_fd(
+		&ops, 0x0100, NULL, &summary);
+	if (granted_out)
+		*granted_out = pkm_kunit_read_u32(granted_bytes, 0);
+	return ret;
 }
 
 static long pkm_kunit_run_pip_labeled_access_check(u32 arg_pip_type,
@@ -6335,6 +6397,498 @@ static void pkm_kunit_token_adjust_privs_invalid_attributes_fails_closed(
 	kacs_rust_token_drop(target_token);
 }
 
+static void pkm_kunit_token_restrict_updates_query_and_source_unchanged(
+	struct kunit *test)
+{
+	struct kacs_restrict_args restrict_args = {
+		.privs_to_delete = 1ULL << PKM_KUNIT_PRIV_LUID_REMOVE,
+		.num_deny_indices = 1,
+		.num_restrict_sids = 1,
+		.result_fd = -1,
+	};
+	struct kacs_query_args priv_query = {
+		.token_class = TOKEN_CLASS_PRIVILEGES,
+		.buf_len = 32,
+	};
+	struct kacs_query_args group_query = {
+		.token_class = TOKEN_CLASS_GROUPS,
+		.buf_len = 256,
+	};
+	struct kacs_query_args restricted_query = {
+		.token_class = TOKEN_CLASS_RESTRICTED_SIDS,
+		.buf_len = 128,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	u8 payload[64] = { 0 };
+	u8 priv_buf[32] = { 0 };
+	u8 group_buf[256] = { 0 };
+	u8 restricted_buf[128] = { 0 };
+	const void *subject_token;
+	const void *target_token;
+	size_t first_group_attr_offset;
+	size_t restricted_attr_offset;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	restrict_args.data_len = pkm_kunit_build_restrict_payload(
+		payload, (u32[]){ 0U }, 1, before.groups_ptr, 1);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict((int)fd, subject_token,
+							subject_token, &restrict_args,
+							payload),
+			(long)0);
+	KUNIT_ASSERT_GE(test, restrict_args.result_fd, 0);
+
+	priv_query.buf_ptr = (u64)(unsigned long)priv_buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query(restrict_args.result_fd,
+						      &priv_query, priv_buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(priv_buf, 0),
+			PKM_KUNIT_ADJUSTABLE_PRIV_AFTER_REMOVE);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(priv_buf, 8),
+			1ULL << PKM_KUNIT_PRIV_LUID_DISABLE);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(priv_buf, 16),
+			1ULL << PKM_KUNIT_PRIV_LUID_DISABLE);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u64(priv_buf, 24), 0ULL);
+
+	group_query.buf_ptr = (u64)(unsigned long)group_buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query(restrict_args.result_fd,
+						      &group_query, group_buf),
+			(long)0);
+	first_group_attr_offset = 4U + 4U + before.groups_ptr[0].sid_len;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_read_u32(group_buf, first_group_attr_offset) &
+				PKM_KUNIT_SE_GROUP_USE_FOR_DENY_ONLY,
+			PKM_KUNIT_SE_GROUP_USE_FOR_DENY_ONLY);
+
+	restricted_query.buf_ptr = (u64)(unsigned long)restricted_buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query(restrict_args.result_fd,
+						      &restricted_query,
+						      restricted_buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(restricted_buf, 0), 1U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(restricted_buf, 4),
+			(u32)before.groups_ptr[0].sid_len);
+	pkm_kunit_expect_bytes_eq(test, restricted_buf + 8,
+				  before.groups_ptr[0].sid_len,
+				  before.groups_ptr[0].sid_ptr,
+				  before.groups_ptr[0].sid_len);
+	restricted_attr_offset = 8U + before.groups_ptr[0].sid_len;
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(restricted_buf,
+						 restricted_attr_offset),
+			PKM_KUNIT_SE_GROUP_ENABLED);
+
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)restrict_args.result_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_restrict_intersects_existing_restricted_sids(
+	struct kunit *test)
+{
+	struct kacs_restrict_args first = {
+		.num_restrict_sids = 2,
+		.result_fd = -1,
+	};
+	struct kacs_restrict_args second = {
+		.num_restrict_sids = 1,
+		.result_fd = -1,
+	};
+	struct kacs_query_args restricted_query = {
+		.token_class = TOKEN_CLASS_RESTRICTED_SIDS,
+		.buf_len = 128,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	u8 first_payload[64] = { 0 };
+	u8 second_payload[64] = { 0 };
+	u8 restricted_buf[128] = { 0 };
+	const void *subject_token;
+	const void *target_token;
+	const struct pkm_kacs_boot_group_view *everyone_group;
+	size_t restricted_attr_offset;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+	everyone_group = &before.groups_ptr[1];
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	first.data_len = pkm_kunit_build_restrict_payload(first_payload, NULL, 0,
+							  before.groups_ptr, 2);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict((int)fd, subject_token,
+							subject_token, &first,
+							first_payload),
+			(long)0);
+	KUNIT_ASSERT_GE(test, first.result_fd, 0);
+
+	second.data_len = pkm_kunit_build_restrict_payload(
+		second_payload, NULL, 0, everyone_group, 1);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict(first.result_fd,
+							subject_token,
+							subject_token, &second,
+							second_payload),
+			(long)0);
+	KUNIT_ASSERT_GE(test, second.result_fd, 0);
+
+	restricted_query.buf_ptr = (u64)(unsigned long)restricted_buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query(second.result_fd,
+						      &restricted_query,
+						      restricted_buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(restricted_buf, 0), 1U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(restricted_buf, 4),
+			(u32)everyone_group->sid_len);
+	pkm_kunit_expect_bytes_eq(test, restricted_buf + 8, everyone_group->sid_len,
+				  everyone_group->sid_ptr,
+				  everyone_group->sid_len);
+	restricted_attr_offset = 8U + everyone_group->sid_len;
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(restricted_buf,
+						 restricted_attr_offset),
+			PKM_KUNIT_SE_GROUP_ENABLED);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)second.result_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)first.result_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_restrict_empty_intersection_fails_closed(
+	struct kunit *test)
+{
+	struct kacs_restrict_args first = {
+		.num_restrict_sids = 2,
+		.result_fd = -1,
+	};
+	struct kacs_restrict_args second = {
+		.num_restrict_sids = 1,
+		.result_fd = -1,
+	};
+	struct kacs_query_args restricted_query = {
+		.token_class = TOKEN_CLASS_RESTRICTED_SIDS,
+		.buf_len = 128,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	u8 first_payload[64] = { 0 };
+	u8 second_payload[64] = { 0 };
+	u8 restricted_buf[128] = { 0 };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+	KUNIT_ASSERT_GE(test, before.group_count, 3U);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	first.data_len = pkm_kunit_build_restrict_payload(first_payload, NULL, 0,
+							  before.groups_ptr, 2);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict((int)fd, subject_token,
+							subject_token, &first,
+							first_payload),
+			(long)0);
+	KUNIT_ASSERT_GE(test, first.result_fd, 0);
+
+	second.data_len = pkm_kunit_build_restrict_payload(
+		second_payload, NULL, 0, &before.groups_ptr[2], 1);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict(first.result_fd,
+							subject_token,
+							subject_token, &second,
+							second_payload),
+			(long)-EINVAL);
+
+	restricted_query.buf_ptr = (u64)(unsigned long)restricted_buf;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_query(first.result_fd,
+						      &restricted_query,
+						      restricted_buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(restricted_buf, 0), 2U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)first.result_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_restrict_write_restricted_bypasses_read_pass(
+	struct kunit *test)
+{
+	struct kacs_restrict_args restricted = {
+		.num_restrict_sids = 1,
+		.result_fd = -1,
+	};
+	struct kacs_restrict_args write_restricted = {
+		.num_restrict_sids = 1,
+		.flags = KACS_RESTRICT_WRITE_RESTRICTED,
+		.result_fd = -1,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	u8 payload[64] = { 0 };
+	u32 granted = 0;
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	restricted.data_len = pkm_kunit_build_restrict_payload(payload, NULL, 0,
+							       before.groups_ptr, 1);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict((int)fd, subject_token,
+							subject_token,
+							&restricted, payload),
+			(long)0);
+	KUNIT_ASSERT_GE(test, restricted.result_fd, 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_run_read_control_with_token_fd(
+				restricted.result_fd, pkm_kunit_everyone_read_sd,
+				sizeof(pkm_kunit_everyone_read_sd), &granted),
+			(long)-EACCES);
+
+	write_restricted.data_len = restricted.data_len;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict((int)fd, subject_token,
+							subject_token,
+							&write_restricted,
+							payload),
+			(long)0);
+	KUNIT_ASSERT_GE(test, write_restricted.result_fd, 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_run_read_control_with_token_fd(
+				write_restricted.result_fd,
+				pkm_kunit_everyone_read_sd,
+				sizeof(pkm_kunit_everyone_read_sd), &granted),
+			(long)KACS_ACCESS_READ_CONTROL);
+	KUNIT_EXPECT_EQ(test, granted, KACS_ACCESS_READ_CONTROL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)write_restricted.result_fd),
+			0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)restricted.result_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_restrict_requires_cached_duplicate(
+	struct kunit *test)
+{
+	struct kacs_restrict_args restrict_args = {
+		.num_restrict_sids = 1,
+		.result_fd = -1,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	u8 payload[64] = { 0 };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(subject_token, target_token,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	restrict_args.data_len = pkm_kunit_build_restrict_payload(payload, NULL, 0,
+							       before.groups_ptr, 1);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict((int)fd, subject_token,
+							subject_token, &restrict_args,
+							payload),
+			(long)-EACCES);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_restrict_duplicate_deny_indices_fail_closed(
+	struct kunit *test)
+{
+	struct kacs_restrict_args restrict_args = {
+		.num_deny_indices = 2,
+		.result_fd = -1,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	u8 payload[16] = { 0 };
+	u32 deny_indices[2] = { 0U, 0U };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	restrict_args.data_len = pkm_kunit_build_restrict_payload(payload, deny_indices,
+							      2, NULL, 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict((int)fd, subject_token,
+							subject_token, &restrict_args,
+							payload),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_restrict_reserved_flags_fail_closed(
+	struct kunit *test)
+{
+	struct kacs_restrict_args restrict_args = {
+		.flags = 0x2U,
+		.result_fd = -1,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict((int)fd, subject_token,
+							subject_token, &restrict_args,
+							NULL),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_restrict_malformed_payload_fails_closed(
+	struct kunit *test)
+{
+	struct kacs_restrict_args restrict_args = {
+		.num_restrict_sids = 1,
+		.result_fd = -1,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	u8 payload[64] = { 0 };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &before));
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	restrict_args.data_len = pkm_kunit_build_restrict_payload(payload, NULL, 0,
+							       before.groups_ptr, 1);
+	payload[restrict_args.data_len] = 0xaa;
+	restrict_args.data_len += 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict((int)fd, subject_token,
+							subject_token, &restrict_args,
+							payload),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(target_token, &after));
+	pkm_kunit_expect_boot_snapshot_eq(test, &before, &after);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
 static void pkm_kunit_access_check_token_fd_current_effective(struct kunit *test)
 {
 	u8 args[136];
@@ -7563,6 +8117,15 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_kunit_token_adjust_privs_invalid_reset_encoding_fails_closed),
 	KUNIT_CASE(pkm_kunit_token_adjust_privs_invalid_attributes_fails_closed),
+	KUNIT_CASE(pkm_kunit_token_restrict_updates_query_and_source_unchanged),
+	KUNIT_CASE(pkm_kunit_token_restrict_intersects_existing_restricted_sids),
+	KUNIT_CASE(pkm_kunit_token_restrict_empty_intersection_fails_closed),
+	KUNIT_CASE(pkm_kunit_token_restrict_write_restricted_bypasses_read_pass),
+	KUNIT_CASE(pkm_kunit_token_restrict_requires_cached_duplicate),
+	KUNIT_CASE(
+		pkm_kunit_token_restrict_duplicate_deny_indices_fail_closed),
+	KUNIT_CASE(pkm_kunit_token_restrict_reserved_flags_fail_closed),
+	KUNIT_CASE(pkm_kunit_token_restrict_malformed_payload_fails_closed),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_current_effective),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_explicit_handle),
 	KUNIT_CASE(pkm_kunit_access_check_token_fd_invalid_negative),

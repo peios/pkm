@@ -39,6 +39,8 @@ struct pkm_kacs_token_file {
 	u32 access_mask;
 };
 
+static int pkm_kacs_token_to_fd(const void *token, u32 granted_access);
+
 static bool pkm_kacs_ranges_overlap(u64 lhs_start, size_t lhs_len,
 				    u64 rhs_start, size_t rhs_len)
 {
@@ -366,6 +368,53 @@ static long pkm_kacs_token_adjust_groups_core(
 	return 0;
 }
 
+static long pkm_kacs_token_restrict_core(
+	struct pkm_kacs_token_file *tf,
+	const void *subject_token,
+	const void *creator_token,
+	struct kacs_restrict_args *args,
+	const void *payload)
+{
+	const void *new_token = NULL;
+	u32 granted = 0;
+	long fd;
+	int ret;
+
+	if (!tf || !tf->token || !subject_token || !creator_token || !args)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_DUPLICATE) != KACS_TOKEN_DUPLICATE)
+		return -EACCES;
+	if ((args->flags & ~KACS_RESTRICT_WRITE_RESTRICTED) != 0)
+		return -EINVAL;
+	if (args->data_len && !payload)
+		return -EINVAL;
+
+	ret = kacs_rust_token_restrict(tf->token, creator_token,
+					 args->privs_to_delete, args->flags,
+					 payload, args->data_len,
+					 args->num_deny_indices,
+					 args->num_restrict_sids,
+					 &new_token);
+	if (ret)
+		return ret;
+	if (!new_token)
+		return -EACCES;
+
+	ret = kacs_rust_token_open_check(subject_token, new_token,
+					 KACS_TOKEN_ALL_ACCESS, &granted);
+	if (ret) {
+		kacs_rust_token_drop(new_token);
+		return ret;
+	}
+
+	fd = pkm_kacs_token_to_fd(new_token, granted);
+	if (fd < 0)
+		return fd;
+
+	args->result_fd = (s32)fd;
+	return 0;
+}
+
 static long pkm_kacs_token_adjust_default_core(
 	struct pkm_kacs_token_file *tf,
 	const struct kacs_adjust_default_args *args,
@@ -621,6 +670,46 @@ static long pkm_kacs_token_adjust_default_user(
 	return ret;
 }
 
+static long pkm_kacs_token_restrict_user(
+	struct pkm_kacs_token_file *tf,
+	struct kacs_restrict_args __user *uargs)
+{
+	struct kacs_restrict_args args;
+	void *payload = NULL;
+	long ret;
+
+	if (!tf || !tf->token)
+		return -EINVAL;
+	if ((tf->access_mask & KACS_TOKEN_DUPLICATE) != KACS_TOKEN_DUPLICATE)
+		return -EACCES;
+	if (!uargs)
+		return -EFAULT;
+	if (copy_from_user(&args, uargs, sizeof(args)))
+		return -EFAULT;
+	if ((args.flags & ~KACS_RESTRICT_WRITE_RESTRICTED) != 0)
+		return -EINVAL;
+
+	if (args.data_len) {
+		payload = kmalloc(args.data_len, GFP_KERNEL);
+		if (!payload)
+			return -ENOMEM;
+		if (copy_from_user(payload,
+				   (void __user *)(unsigned long)args.data_ptr,
+				   args.data_len)) {
+			kfree(payload);
+			return -EFAULT;
+		}
+	}
+
+	ret = pkm_kacs_token_restrict_core(
+		tf, pkm_kacs_current_effective_token_ptr(),
+		pkm_kacs_current_effective_token_ptr(), &args, payload);
+	kfree(payload);
+	if (!ret && copy_to_user(uargs, &args, sizeof(args)))
+		return -EFAULT;
+	return ret;
+}
+
 static long pkm_kacs_token_ioctl(struct file *file, unsigned int cmd,
 				 unsigned long arg)
 {
@@ -644,6 +733,9 @@ static long pkm_kacs_token_ioctl(struct file *file, unsigned int cmd,
 			tf, (struct kacs_duplicate_args __user *)arg);
 	case KACS_IOC_INSTALL:
 		return pkm_kacs_token_install_user(tf);
+	case KACS_IOC_RESTRICT:
+		return pkm_kacs_token_restrict_user(
+			tf, (struct kacs_restrict_args __user *)arg);
 	case KACS_IOC_IMPERSONATE:
 		return pkm_kacs_token_impersonate_user(tf);
 	case KACS_IOC_ADJUST_DEFAULT:
@@ -979,6 +1071,35 @@ long pkm_kacs_kunit_token_fd_install(int fd, const void *caller_primary_token)
 
 	tf = fd_file(f)->private_data;
 	ret = pkm_kacs_token_install_core(tf, caller_primary_token);
+	fdput(f);
+	return ret;
+}
+
+long pkm_kacs_kunit_token_fd_restrict(
+	int fd,
+	const void *subject_token,
+	const void *creator_token,
+	struct kacs_restrict_args *args,
+	const void *payload)
+{
+	struct fd f;
+	struct pkm_kacs_token_file *tf;
+	long ret;
+
+	if (!subject_token || !creator_token || !args)
+		return -EINVAL;
+
+	f = fdget(fd);
+	if (!fd_file(f))
+		return -EBADF;
+	if (fd_file(f)->f_op != &pkm_kacs_token_fops) {
+		fdput(f);
+		return -EINVAL;
+	}
+
+	tf = fd_file(f)->private_data;
+	ret = pkm_kacs_token_restrict_core(tf, subject_token, creator_token,
+					   args, payload);
 	fdput(f);
 	return ret;
 }

@@ -247,6 +247,11 @@ int kacs_rust_token_adjust_session_id(const void *token, u32 session_id);
 int kacs_rust_token_adjust_default(const void *token, u32 owner_index,
 				   u32 group_index, const u8 *dacl,
 				   size_t dacl_len, u32 change_dacl);
+int kacs_rust_token_restrict(const void *source_token,
+			     const void *creator_token, u64 privs_to_delete,
+			     u32 flags, const u8 *payload, size_t payload_len,
+			     u32 num_deny_indices, u32 num_restrict_sids,
+			     const void **out_token);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 int pkm_kmes_kunit_set_current_process_rate_tokens(u32 tokens);

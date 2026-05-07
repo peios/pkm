@@ -2162,6 +2162,18 @@ static void pkm_kacs_kunit_cleanup_socket(struct sock *sk, void *blob)
 	kfree(blob);
 }
 
+struct pkm_kacs_kunit_peer_capture_state {
+	struct socket client_sock;
+	struct socket listener_sock;
+	struct socket accepted_sock;
+	struct sock client_sk;
+	struct sock listener_sk;
+	struct sock accepted_sk;
+	void *client_blob;
+	void *listener_blob;
+	void *accepted_blob;
+};
+
 long pkm_kacs_kunit_bind_abstract_socket_for_subject(
 	const void *subject_token,
 	struct pkm_kacs_kunit_socket_view *first_out,
@@ -2222,18 +2234,10 @@ long pkm_kacs_kunit_capture_peer_socket_for_subject(
 	struct pkm_kacs_kunit_socket_view *listener_out,
 	struct pkm_kacs_kunit_socket_view *accepted_out)
 {
-	struct socket client_sock;
-	struct socket listener_sock;
-	struct socket accepted_sock;
-	struct sock client_sk;
-	struct sock listener_sk;
-	struct sock accepted_sk;
+	struct pkm_kacs_kunit_peer_capture_state *state;
 	struct pkm_kacs_socket_security *client_sec;
 	struct pkm_kacs_socket_security *listener_sec;
 	struct pkm_kacs_socket_security *accepted_sec;
-	void *client_blob = NULL;
-	void *listener_blob = NULL;
-	void *accepted_blob = NULL;
 	const void *bind_token;
 	long ret;
 
@@ -2242,23 +2246,29 @@ long pkm_kacs_kunit_capture_peer_socket_for_subject(
 	if (!client_token)
 		return -EINVAL;
 
-	ret = pkm_kacs_kunit_init_socket(&client_sock, &client_sk, &client_blob,
-					 socket_type, 0);
-	if (ret)
-		return ret;
-	ret = pkm_kacs_kunit_init_socket(&listener_sock, &listener_sk,
-					 &listener_blob, socket_type, 0);
-	if (ret)
-		goto out;
-	ret = pkm_kacs_kunit_init_socket(&accepted_sock, &accepted_sk,
-					 &accepted_blob, socket_type, 1);
-	if (ret)
-		goto out;
-	client_sec = pkm_kacs_sock(&client_sk);
-	listener_sec = pkm_kacs_sock(&listener_sk);
-	accepted_sec = pkm_kacs_sock(&accepted_sk);
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
 
-	ret = pkm_kacs_set_socket_impersonation_level_core(&client_sock,
+	ret = pkm_kacs_kunit_init_socket(&state->client_sock, &state->client_sk,
+					 &state->client_blob, socket_type, 0);
+	if (ret)
+		goto out_free_state;
+	ret = pkm_kacs_kunit_init_socket(&state->listener_sock,
+					 &state->listener_sk,
+					 &state->listener_blob, socket_type, 0);
+	if (ret)
+		goto out;
+	ret = pkm_kacs_kunit_init_socket(&state->accepted_sock,
+					 &state->accepted_sk,
+					 &state->accepted_blob, socket_type, 1);
+	if (ret)
+		goto out;
+	client_sec = pkm_kacs_sock(&state->client_sk);
+	listener_sec = pkm_kacs_sock(&state->listener_sk);
+	accepted_sec = pkm_kacs_sock(&state->accepted_sk);
+
+	ret = pkm_kacs_set_socket_impersonation_level_core(&state->client_sock,
 							    client_sec,
 							    max_impersonation);
 	if (ret)
@@ -2301,18 +2311,23 @@ long pkm_kacs_kunit_capture_peer_socket_for_subject(
 	}
 
 out:
-	pkm_kacs_kunit_socket_snapshot(listener_blob ?
-				       pkm_kacs_sock(&listener_sk) : NULL,
+	pkm_kacs_kunit_socket_snapshot(state->listener_blob ?
+				       pkm_kacs_sock(&state->listener_sk) : NULL,
 				       listener_out);
-	pkm_kacs_kunit_socket_snapshot(accepted_blob ?
-				       pkm_kacs_sock(&accepted_sk) : NULL,
+	pkm_kacs_kunit_socket_snapshot(state->accepted_blob ?
+				       pkm_kacs_sock(&state->accepted_sk) : NULL,
 				       accepted_out);
-	if (accepted_blob)
-		pkm_kacs_kunit_cleanup_socket(&accepted_sk, accepted_blob);
-	if (listener_blob)
-		pkm_kacs_kunit_cleanup_socket(&listener_sk, listener_blob);
-	if (client_blob)
-		pkm_kacs_kunit_cleanup_socket(&client_sk, client_blob);
+	if (state->accepted_blob)
+		pkm_kacs_kunit_cleanup_socket(&state->accepted_sk,
+					      state->accepted_blob);
+	if (state->listener_blob)
+		pkm_kacs_kunit_cleanup_socket(&state->listener_sk,
+					      state->listener_blob);
+	if (state->client_blob)
+		pkm_kacs_kunit_cleanup_socket(&state->client_sk,
+					      state->client_blob);
+out_free_state:
+	kfree(state);
 	return ret;
 }
 
