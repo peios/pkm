@@ -116,6 +116,13 @@ if ! rg -q 'pkm_kacs_sched_setaffinity' \
 	die "install-pkm-subtree.sh does not stage the sched_setaffinity KACS patch"
 fi
 
+if ! rg -q 'pkm_kacs_current_fsuid_kuid' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'pkm_kacs_current_fsuid_fsgid' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the projected fsuid/fsgid patch"
+fi
+
 if ! rg -q 'pkm_kacs_capable_in_cred_ns' \
 	"$repo_root/kernel/install-pkm-subtree.sh"; then
 	die "install-pkm-subtree.sh does not stage the commoncap capability switchboard patch"

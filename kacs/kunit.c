@@ -2282,6 +2282,127 @@ static void pkm_kunit_exec_cap_reprojection_suppresses_filecap_grants(
 	KUNIT_EXPECT_EQ(test, ambient_out, 0ULL);
 }
 
+static void pkm_kunit_setuid_fixup_suppresses_unprivileged_change(
+	struct kunit *test)
+{
+	const void *token;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_setuid_fixup_for_subject(
+				token, LSM_SETID_RES),
+			0L);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_setuid_fixup_privileged_path_fails_closed(
+	struct kunit *test)
+{
+	const void *token;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U,
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_setuid_fixup_for_subject(
+				token, LSM_SETID_RES),
+			(long)-EOPNOTSUPP);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_setuid_fixup_unknown_flags_fail_closed(
+	struct kunit *test)
+{
+	const void *token;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_setuid_fixup_for_subject(token,
+								      99),
+			(long)-EINVAL);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_setgid_fixup_suppresses_unprivileged_change(
+	struct kunit *test)
+{
+	const void *token;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_setgid_fixup_for_subject(
+				token, LSM_SETID_RES),
+			0L);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_setgroups_fixup_suppresses_unprivileged_change(
+	struct kunit *test)
+{
+	const void *token;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_setgroups_fixup_for_subject(token),
+			0L);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_projected_fsids_follow_effective_token(
+	struct kunit *test)
+{
+	const void *token = NULL;
+	u32 fsuid = 0;
+	u32 fsgid = 0;
+
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_create_anonymous_impersonation_token(
+				&token),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_projected_fsids_for_subject(
+				token, 1234U, 1235U, &fsuid, &fsgid),
+			0);
+	KUNIT_EXPECT_EQ(test, fsuid, 65534U);
+	KUNIT_EXPECT_EQ(test, fsgid, 65534U);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_projected_fsids_fallback_to_raw_without_token(
+	struct kunit *test)
+{
+	u32 fsuid = 0;
+	u32 fsgid = 0;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_projected_fsids_for_subject(
+				NULL, 1234U, 1235U, &fsuid, &fsgid),
+			0);
+	KUNIT_EXPECT_EQ(test, fsuid, 1234U);
+	KUNIT_EXPECT_EQ(test, fsgid, 1235U);
+}
+
 static void pkm_kunit_live_capable_sys_boot_uses_shutdown_privilege(
 	struct kunit *test)
 {
@@ -9705,6 +9826,13 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_capset_preserves_allow_and_rejects_clear),
 	KUNIT_CASE(pkm_kunit_prctl_capability_guard_rejects_allow_mutations),
 	KUNIT_CASE(pkm_kunit_exec_cap_reprojection_suppresses_filecap_grants),
+	KUNIT_CASE(pkm_kunit_setuid_fixup_suppresses_unprivileged_change),
+	KUNIT_CASE(pkm_kunit_setuid_fixup_privileged_path_fails_closed),
+	KUNIT_CASE(pkm_kunit_setuid_fixup_unknown_flags_fail_closed),
+	KUNIT_CASE(pkm_kunit_setgid_fixup_suppresses_unprivileged_change),
+	KUNIT_CASE(pkm_kunit_setgroups_fixup_suppresses_unprivileged_change),
+	KUNIT_CASE(pkm_kunit_projected_fsids_follow_effective_token),
+	KUNIT_CASE(pkm_kunit_projected_fsids_fallback_to_raw_without_token),
 	KUNIT_CASE(pkm_kunit_live_capable_sys_boot_uses_shutdown_privilege),
 	KUNIT_CASE(pkm_kunit_token_deep_copy_independent),
 	KUNIT_CASE(pkm_kunit_resolved_ctx_fails_closed_on_null_token),

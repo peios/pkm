@@ -407,6 +407,16 @@ int pkm_kacs_kunit_reproject_exec_caps(
 	u64 effective_mask, u64 inheritable_mask, u64 permitted_mask,
 	u64 ambient_mask, u64 *effective_out, u64 *inheritable_out,
 	u64 *permitted_out, u64 *ambient_out);
+long pkm_kacs_kunit_check_setuid_fixup_for_subject(const void *subject_token,
+						   int flags);
+long pkm_kacs_kunit_check_setgid_fixup_for_subject(const void *subject_token,
+						   int flags);
+long pkm_kacs_kunit_check_setgroups_fixup_for_subject(
+	const void *subject_token);
+int pkm_kacs_kunit_projected_fsids_for_subject(const void *subject_token,
+					       u32 raw_fsuid, u32 raw_fsgid,
+					       u32 *fsuid_out,
+					       u32 *fsgid_out);
 #endif
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_RUNTIME_H */

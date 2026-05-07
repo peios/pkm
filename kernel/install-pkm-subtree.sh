@@ -215,6 +215,7 @@ require_file "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
 require_file "$kernel_root/arch/x86/kernel/process_64.c"
 require_file "$kernel_root/fs/proc/base.c"
 require_file "$kernel_root/fs/proc/array.c"
+require_file "$kernel_root/include/linux/cred.h"
 require_file "$kernel_root/include/linux/ptrace.h"
 require_file "$kernel_root/kernel/pid.c"
 require_file "$kernel_root/kernel/sched/syscalls.c"
@@ -343,6 +344,71 @@ replace_line_after_anchor_once 'long sched_setaffinity(pid_t pid, const struct c
 #endif
 ' \
 	"$kernel_root/kernel/sched/syscalls.c"
+insert_block_before_exact_once '#define current_uid()		(current_cred_xxx(uid))' \
+	'extern kuid_t pkm_kacs_current_fsuid_kuid' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern kuid_t pkm_kacs_current_fsuid_kuid(void);
+extern kgid_t pkm_kacs_current_fsgid_kgid(void);
+extern void pkm_kacs_current_fsuid_fsgid(kuid_t *fsuid, kgid_t *fsgid);
+#endif
+
+' \
+	"$kernel_root/include/linux/cred.h"
+replace_line_after_anchor_once '#define current_sgid()		(current_cred_xxx(sgid))' \
+	'#define current_fsuid() 	(current_cred_xxx(fsuid))' \
+	'#ifdef CONFIG_SECURITY_PKM
+#define current_fsuid()		(pkm_kacs_current_fsuid_kuid())
+#else
+#define current_fsuid()		(current_cred_xxx(fsuid))
+#endif
+' \
+	"$kernel_root/include/linux/cred.h"
+replace_line_after_anchor_once '#ifdef CONFIG_SECURITY_PKM
+#define current_fsuid()		(pkm_kacs_current_fsuid_kuid())
+#else
+#define current_fsuid()		(current_cred_xxx(fsuid))
+#endif
+' \
+	'#define current_fsgid() 	(current_cred_xxx(fsgid))' \
+	'#ifdef CONFIG_SECURITY_PKM
+#define current_fsgid()		(pkm_kacs_current_fsgid_kgid())
+#else
+#define current_fsgid()		(current_cred_xxx(fsgid))
+#endif
+' \
+	"$kernel_root/include/linux/cred.h"
+replace_line_after_anchor_once '#define current_euid_egid(_euid, _egid)		\
+do {						\
+	const struct cred *__cred;		\
+	__cred = current_cred();		\
+	*(_euid) = __cred->euid;		\
+	*(_egid) = __cred->egid;		\
+} while(0)
+' \
+	'#define current_fsuid_fsgid(_fsuid, _fsgid)	\
+do {						\
+	const struct cred *__cred;		\
+	__cred = current_cred();		\
+	*(_fsuid) = __cred->fsuid;		\
+	*(_fsgid) = __cred->fsgid;		\
+} while(0)
+' \
+	'#ifdef CONFIG_SECURITY_PKM
+#define current_fsuid_fsgid(_fsuid, _fsgid)	\
+do {						\
+	pkm_kacs_current_fsuid_fsgid((_fsuid), (_fsgid)); \
+} while (0)
+#else
+#define current_fsuid_fsgid(_fsuid, _fsgid)	\
+do {						\
+	const struct cred *__cred;		\
+	__cred = current_cred();		\
+	*(_fsuid) = __cred->fsuid;		\
+	*(_fsgid) = __cred->fsgid;		\
+} while(0)
+#endif
+' \
+	"$kernel_root/include/linux/cred.h"
 insert_block_before_exact_once 'SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,' \
 	'extern long pkm_kacs_prctl_capability_guard' \
 	'#ifdef CONFIG_SECURITY_PKM

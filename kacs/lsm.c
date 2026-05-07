@@ -54,6 +54,7 @@
 #define PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS 10000U
 #define PKM_KACS_PRIVILEGE_SE_LOCK_MEMORY (1ULL << 4)
 #define PKM_KACS_PRIVILEGE_SE_INCREASE_QUOTA (1ULL << 5)
+#define PKM_KACS_PRIVILEGE_SE_ASSIGN_PRIMARY (1ULL << 3)
 #define PKM_KACS_PRIVILEGE_SE_TCB (1ULL << 7)
 #define PKM_KACS_PRIVILEGE_SE_SECURITY (1ULL << 8)
 #define PKM_KACS_PRIVILEGE_SE_LOAD_DRIVER (1ULL << 10)
@@ -230,6 +231,12 @@ static int pkm_kacs_ptrace_access_check(struct task_struct *child,
 static int pkm_kacs_task_setnice(struct task_struct *task, int nice);
 static int pkm_kacs_task_setscheduler(struct task_struct *task);
 static int pkm_kacs_task_setioprio(struct task_struct *task, int ioprio);
+static int pkm_kacs_task_fix_setuid(struct cred *new, const struct cred *old,
+				    int flags);
+static int pkm_kacs_task_fix_setgid(struct cred *new, const struct cred *old,
+				    int flags);
+static int pkm_kacs_task_fix_setgroups(struct cred *new,
+				       const struct cred *old);
 static int pkm_kacs_task_prlimit(const struct cred *cred,
 				 const struct cred *tcred,
 				 unsigned int flags);
@@ -1045,6 +1052,9 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(task_setnice, pkm_kacs_task_setnice),
 	LSM_HOOK_INIT(task_setscheduler, pkm_kacs_task_setscheduler),
 	LSM_HOOK_INIT(task_setioprio, pkm_kacs_task_setioprio),
+	LSM_HOOK_INIT(task_fix_setuid, pkm_kacs_task_fix_setuid),
+	LSM_HOOK_INIT(task_fix_setgid, pkm_kacs_task_fix_setgid),
+	LSM_HOOK_INIT(task_fix_setgroups, pkm_kacs_task_fix_setgroups),
 	LSM_HOOK_INIT(task_prlimit, pkm_kacs_task_prlimit),
 	LSM_HOOK_INIT(capable, pkm_kacs_capable),
 	LSM_HOOK_INIT(capset, pkm_kacs_capset),
@@ -1215,6 +1225,209 @@ static long pkm_kacs_authorize_socket_sd_access(
 					 socket_sd->len, desired_access,
 					 &granted);
 }
+
+static void pkm_kacs_restore_capability_sets(struct cred *new,
+					     const struct cred *old)
+{
+	if (!new || !old)
+		return;
+
+	new->cap_inheritable = old->cap_inheritable;
+	new->cap_permitted = old->cap_permitted;
+	new->cap_effective = old->cap_effective;
+	new->cap_bset = old->cap_bset;
+	new->cap_ambient = old->cap_ambient;
+}
+
+static void pkm_kacs_restore_uid_state(struct cred *new,
+				       const struct cred *old)
+{
+	struct user_struct *old_user;
+
+	if (!new || !old)
+		return;
+
+	new->uid = old->uid;
+	new->euid = old->euid;
+	new->suid = old->suid;
+	new->fsuid = old->fsuid;
+	pkm_kacs_restore_capability_sets(new, old);
+
+	if (new->user == old->user)
+		return;
+
+	old_user = get_uid(old->user);
+	free_uid(new->user);
+	new->user = old_user;
+}
+
+static void pkm_kacs_restore_gid_state(struct cred *new,
+				       const struct cred *old)
+{
+	if (!new || !old)
+		return;
+
+	new->gid = old->gid;
+	new->egid = old->egid;
+	new->sgid = old->sgid;
+	new->fsgid = old->fsgid;
+	pkm_kacs_restore_capability_sets(new, old);
+}
+
+static void pkm_kacs_restore_groups_state(struct cred *new,
+					  const struct cred *old)
+{
+	if (!new || !old)
+		return;
+
+	set_groups(new, old->group_info);
+	pkm_kacs_restore_capability_sets(new, old);
+}
+
+static long pkm_kacs_task_fix_setid_common(const void *subject_token)
+{
+	if (!subject_token)
+		return -EACCES;
+	if (kacs_rust_token_has_enabled_privilege(
+		    subject_token, PKM_KACS_PRIVILEGE_SE_ASSIGN_PRIMARY))
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+static long pkm_kacs_task_fix_setuid_core(const void *subject_token,
+					  struct cred *new,
+					  const struct cred *old,
+					  int flags)
+{
+	long ret;
+
+	if (!new || !old)
+		return -EINVAL;
+
+	switch (flags) {
+	case LSM_SETID_RE:
+	case LSM_SETID_ID:
+	case LSM_SETID_RES:
+	case LSM_SETID_FS:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = pkm_kacs_task_fix_setid_common(subject_token);
+	if (ret)
+		return ret;
+
+	pkm_kacs_restore_uid_state(new, old);
+	return 0;
+}
+
+static long pkm_kacs_task_fix_setgid_core(const void *subject_token,
+					  struct cred *new,
+					  const struct cred *old,
+					  int flags)
+{
+	long ret;
+
+	if (!new || !old)
+		return -EINVAL;
+
+	switch (flags) {
+	case LSM_SETID_RE:
+	case LSM_SETID_ID:
+	case LSM_SETID_RES:
+	case LSM_SETID_FS:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = pkm_kacs_task_fix_setid_common(subject_token);
+	if (ret)
+		return ret;
+
+	pkm_kacs_restore_gid_state(new, old);
+	return 0;
+}
+
+static long pkm_kacs_task_fix_setgroups_core(const void *subject_token,
+					     struct cred *new,
+					     const struct cred *old)
+{
+	long ret;
+
+	if (!new || !old)
+		return -EINVAL;
+
+	ret = pkm_kacs_task_fix_setid_common(subject_token);
+	if (ret)
+		return ret;
+
+	pkm_kacs_restore_groups_state(new, old);
+	return 0;
+}
+
+int pkm_kacs_task_fix_setuid(struct cred *new, const struct cred *old,
+			     int flags)
+{
+	return (int)pkm_kacs_task_fix_setuid_core(
+		pkm_kacs_current_effective_token_ptr(), new, old, flags);
+}
+
+int pkm_kacs_task_fix_setgid(struct cred *new, const struct cred *old,
+			     int flags)
+{
+	return (int)pkm_kacs_task_fix_setgid_core(
+		pkm_kacs_current_effective_token_ptr(), new, old, flags);
+}
+
+int pkm_kacs_task_fix_setgroups(struct cred *new, const struct cred *old)
+{
+	return (int)pkm_kacs_task_fix_setgroups_core(
+		pkm_kacs_current_effective_token_ptr(), new, old);
+}
+
+kuid_t pkm_kacs_current_fsuid_kuid(void)
+{
+	const struct cred *cred = current_cred();
+	const struct pkm_kacs_cred_security *sec;
+
+	if (!cred || !cred->security)
+		return cred ? cred->fsuid : GLOBAL_ROOT_UID;
+
+	sec = pkm_kacs_cred(cred);
+	if (!sec->token)
+		return cred->fsuid;
+
+	return KUIDT_INIT(sec->projected_uid);
+}
+EXPORT_SYMBOL_GPL(pkm_kacs_current_fsuid_kuid);
+
+kgid_t pkm_kacs_current_fsgid_kgid(void)
+{
+	const struct cred *cred = current_cred();
+	const struct pkm_kacs_cred_security *sec;
+
+	if (!cred || !cred->security)
+		return cred ? cred->fsgid : GLOBAL_ROOT_GID;
+
+	sec = pkm_kacs_cred(cred);
+	if (!sec->token)
+		return cred->fsgid;
+
+	return KGIDT_INIT(sec->projected_gid);
+}
+EXPORT_SYMBOL_GPL(pkm_kacs_current_fsgid_kgid);
+
+void pkm_kacs_current_fsuid_fsgid(kuid_t *fsuid, kgid_t *fsgid)
+{
+	if (fsuid)
+		*fsuid = pkm_kacs_current_fsuid_kuid();
+	if (fsgid)
+		*fsgid = pkm_kacs_current_fsgid_kgid();
+}
+EXPORT_SYMBOL_GPL(pkm_kacs_current_fsuid_fsgid);
 
 static long pkm_kacs_create_captured_peer_token(
 	const void *client_token, u32 max_impersonation,
@@ -3776,6 +3989,190 @@ int pkm_kacs_kunit_reproject_exec_caps(
 	*inheritable_out = pkm_kacs_kernel_cap_to_u64(&new.cap_inheritable);
 	*permitted_out = pkm_kacs_kernel_cap_to_u64(&new.cap_permitted);
 	*ambient_out = pkm_kacs_kernel_cap_to_u64(&new.cap_ambient);
+	return 0;
+}
+
+long pkm_kacs_kunit_check_setuid_fixup_for_subject(const void *subject_token,
+						   int flags)
+{
+	struct cred *new;
+	const struct cred *old = current_cred();
+	struct user_struct *new_user;
+	long ret;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+
+	new->uid = KUIDT_INIT(4242);
+	new->euid = KUIDT_INIT(4243);
+	new->suid = KUIDT_INIT(4244);
+	new->fsuid = KUIDT_INIT(4245);
+	new->cap_effective = CAP_EMPTY_SET;
+	new->cap_inheritable = CAP_EMPTY_SET;
+	new->cap_permitted = CAP_EMPTY_SET;
+	new->cap_bset = CAP_EMPTY_SET;
+	new->cap_ambient = CAP_EMPTY_SET;
+
+	new_user = alloc_uid(KUIDT_INIT(65534));
+	if (!new_user) {
+		abort_creds(new);
+		return -ENOMEM;
+	}
+	free_uid(new->user);
+	new->user = new_user;
+
+	ret = pkm_kacs_task_fix_setuid_core(subject_token, new, old, flags);
+	if (!ret) {
+		if (!uid_eq(new->uid, old->uid) || !uid_eq(new->euid, old->euid) ||
+		    !uid_eq(new->suid, old->suid) ||
+		    !uid_eq(new->fsuid, old->fsuid) ||
+		    new->user != old->user ||
+		    memcmp(&new->cap_effective, &old->cap_effective,
+			   sizeof(new->cap_effective)) != 0 ||
+		    memcmp(&new->cap_inheritable, &old->cap_inheritable,
+			   sizeof(new->cap_inheritable)) != 0 ||
+		    memcmp(&new->cap_permitted, &old->cap_permitted,
+			   sizeof(new->cap_permitted)) != 0 ||
+		    memcmp(&new->cap_bset, &old->cap_bset,
+			   sizeof(new->cap_bset)) != 0 ||
+		    memcmp(&new->cap_ambient, &old->cap_ambient,
+			   sizeof(new->cap_ambient)) != 0)
+			ret = -EBADE;
+	}
+
+	abort_creds(new);
+	return ret;
+}
+
+long pkm_kacs_kunit_check_setgid_fixup_for_subject(const void *subject_token,
+						   int flags)
+{
+	struct cred *new;
+	const struct cred *old = current_cred();
+	long ret;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+
+	new->gid = KGIDT_INIT(4342);
+	new->egid = KGIDT_INIT(4343);
+	new->sgid = KGIDT_INIT(4344);
+	new->fsgid = KGIDT_INIT(4345);
+	new->cap_effective = CAP_EMPTY_SET;
+	new->cap_inheritable = CAP_EMPTY_SET;
+	new->cap_permitted = CAP_EMPTY_SET;
+	new->cap_bset = CAP_EMPTY_SET;
+	new->cap_ambient = CAP_EMPTY_SET;
+
+	ret = pkm_kacs_task_fix_setgid_core(subject_token, new, old, flags);
+	if (!ret) {
+		if (!gid_eq(new->gid, old->gid) ||
+		    !gid_eq(new->egid, old->egid) ||
+		    !gid_eq(new->sgid, old->sgid) ||
+		    !gid_eq(new->fsgid, old->fsgid) ||
+		    memcmp(&new->cap_effective, &old->cap_effective,
+			   sizeof(new->cap_effective)) != 0 ||
+		    memcmp(&new->cap_inheritable, &old->cap_inheritable,
+			   sizeof(new->cap_inheritable)) != 0 ||
+		    memcmp(&new->cap_permitted, &old->cap_permitted,
+			   sizeof(new->cap_permitted)) != 0 ||
+		    memcmp(&new->cap_bset, &old->cap_bset,
+			   sizeof(new->cap_bset)) != 0 ||
+		    memcmp(&new->cap_ambient, &old->cap_ambient,
+			   sizeof(new->cap_ambient)) != 0)
+			ret = -EBADE;
+	}
+
+	abort_creds(new);
+	return ret;
+}
+
+long pkm_kacs_kunit_check_setgroups_fixup_for_subject(const void *subject_token)
+{
+	struct cred *new;
+	const struct cred *old = current_cred();
+	struct group_info *groups;
+	long ret;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+
+	groups = groups_alloc(1);
+	if (!groups) {
+		abort_creds(new);
+		return -ENOMEM;
+	}
+	groups->gid[0] = KGIDT_INIT(65534);
+	set_groups(new, groups);
+	put_group_info(groups);
+	new->cap_effective = CAP_EMPTY_SET;
+	new->cap_inheritable = CAP_EMPTY_SET;
+	new->cap_permitted = CAP_EMPTY_SET;
+	new->cap_bset = CAP_EMPTY_SET;
+	new->cap_ambient = CAP_EMPTY_SET;
+
+	ret = pkm_kacs_task_fix_setgroups_core(subject_token, new, old);
+	if (!ret) {
+		if (new->group_info != old->group_info ||
+		    memcmp(&new->cap_effective, &old->cap_effective,
+			   sizeof(new->cap_effective)) != 0 ||
+		    memcmp(&new->cap_inheritable, &old->cap_inheritable,
+			   sizeof(new->cap_inheritable)) != 0 ||
+		    memcmp(&new->cap_permitted, &old->cap_permitted,
+			   sizeof(new->cap_permitted)) != 0 ||
+		    memcmp(&new->cap_bset, &old->cap_bset,
+			   sizeof(new->cap_bset)) != 0 ||
+		    memcmp(&new->cap_ambient, &old->cap_ambient,
+			   sizeof(new->cap_ambient)) != 0)
+			ret = -EBADE;
+	}
+
+	abort_creds(new);
+	return ret;
+}
+
+int pkm_kacs_kunit_projected_fsids_for_subject(const void *subject_token,
+					       u32 raw_fsuid, u32 raw_fsgid,
+					       u32 *fsuid_out,
+					       u32 *fsgid_out)
+{
+	struct cred *new;
+	struct pkm_kacs_cred_security *sec;
+	const struct cred *saved;
+	const void *token_ref = NULL;
+
+	if (!fsuid_out || !fsgid_out)
+		return -EINVAL;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+
+	new->fsuid = KUIDT_INIT(raw_fsuid);
+	new->fsgid = KGIDT_INIT(raw_fsgid);
+	sec = pkm_kacs_cred(new);
+	if (sec->token) {
+		kacs_rust_token_drop(sec->token);
+		sec->token = NULL;
+	}
+	if (subject_token) {
+		token_ref = kacs_rust_token_clone(subject_token);
+		if (!token_ref) {
+			abort_creds(new);
+			return -ENOMEM;
+		}
+		sec->token = token_ref;
+	}
+	pkm_kacs_stamp_projected_ids(sec);
+
+	saved = override_creds(new);
+	*fsuid_out = __kuid_val(pkm_kacs_current_fsuid_kuid());
+	*fsgid_out = __kgid_val(pkm_kacs_current_fsgid_kgid());
+	revert_creds(saved);
+	abort_creds(new);
 	return 0;
 }
 #endif
