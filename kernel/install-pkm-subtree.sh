@@ -64,6 +64,41 @@ replace_line_once() {
 	sed -i "s|^${from//|/\\|}\$|${to//|/\\|}|" "$file"
 }
 
+replace_line_after_anchor_once() {
+	local anchor=$1
+	local from=$2
+	local to=$3
+	local file=$4
+
+	python - "$file" "$anchor" "$from" "$to" <<'PY'
+from pathlib import Path
+import sys
+
+file_path, anchor, old, new = sys.argv[1:]
+path = Path(file_path)
+text = path.read_text()
+
+anchor_idx = text.find(anchor)
+if anchor_idx == -1:
+    sys.stderr.write(f"could not find anchor '{anchor}' in {file_path}\n")
+    sys.exit(1)
+
+new_idx = text.find(new, anchor_idx)
+if new_idx != -1:
+    sys.exit(0)
+
+old_idx = text.find(old, anchor_idx)
+if old_idx == -1:
+    sys.stderr.write(
+        f"could not find line to replace after anchor '{anchor}' in {file_path}: {old}\n"
+    )
+    sys.exit(1)
+
+text = text[:old_idx] + new + text[old_idx + len(old):]
+path.write_text(text)
+PY
+}
+
 insert_block_before_exact_once() {
 	local anchor=$1
 	local marker=$2
@@ -178,6 +213,8 @@ require_file "$kernel_root/security/Makefile"
 require_file "$kernel_root/security/Kconfig"
 require_file "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
 require_file "$kernel_root/arch/x86/kernel/process_64.c"
+require_file "$kernel_root/fs/proc/base.c"
+require_file "$kernel_root/fs/proc/array.c"
 require_file "$kernel_root/include/linux/ptrace.h"
 require_file "$kernel_root/kernel/pid.c"
 
@@ -216,6 +253,12 @@ insert_line_after_exact_once '#define PTRACE_MODE_REALCREDS	0x10' \
 insert_line_after_exact_once '#define PTRACE_MODE_GETFD	0x20' \
 	'#define PTRACE_MODE_PIDFD_OPEN	0x40' \
 	"$kernel_root/include/linux/ptrace.h"
+insert_line_after_exact_once '#define PTRACE_MODE_PIDFD_OPEN	0x40' \
+	'#define PTRACE_MODE_PROC_QUERY_LIMITED	0x80' \
+	"$kernel_root/include/linux/ptrace.h"
+insert_line_after_exact_once '#define PTRACE_MODE_PROC_QUERY_LIMITED	0x80' \
+	'#define PTRACE_MODE_PROC_QUERY_INFORMATION	0x100' \
+	"$kernel_root/include/linux/ptrace.h"
 replace_line_once '	if (ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS))' \
 	'	if (ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS | PTRACE_MODE_GETFD))' \
 	"$kernel_root/kernel/pid.c"
@@ -250,6 +293,69 @@ insert_block_before_exact_once '		return shstk_prctl(task, option, arg2);' \
 		}
 ' \
 	"$kernel_root/arch/x86/kernel/process_64.c"
+insert_block_before_exact_once 'static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,' \
+	'static unsigned int proc_pkm_metadata_ptrace_mode' \
+	'static unsigned int proc_pkm_metadata_ptrace_mode(const struct file *file)
+{
+	const char *name;
+
+	if (!file)
+		return 0;
+
+	name = file_dentry(file)->d_name.name;
+	if (strcmp(name, "stat") == 0)
+		return PTRACE_MODE_READ_FSCREDS |
+		       PTRACE_MODE_PROC_QUERY_LIMITED;
+	if (strcmp(name, "cmdline") == 0 || strcmp(name, "status") == 0 ||
+	    strcmp(name, "io") == 0 || strcmp(name, "cgroup") == 0)
+		return PTRACE_MODE_READ_FSCREDS |
+		       PTRACE_MODE_PROC_QUERY_INFORMATION;
+
+	return 0;
+}
+
+static int proc_pkm_check_task_metadata_access(struct task_struct *task,
+					       const struct file *file)
+{
+	unsigned int mode;
+
+	mode = proc_pkm_metadata_ptrace_mode(file);
+	if (mode == 0)
+		return 0;
+	if (!ptrace_may_access(task, mode))
+		return -EACCES;
+
+	return 0;
+}
+
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	ret = get_task_cmdline(tsk, buf, count, pos);' \
+	'	ret = proc_pkm_check_task_metadata_access(tsk, file);' \
+	'	ret = proc_pkm_check_task_metadata_access(tsk, file);
+	if (ret) {
+		put_task_struct(tsk);
+		return ret;
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	ret = PROC_I(inode)->op.proc_show(m, ns, pid, task);' \
+	'	ret = proc_pkm_check_task_metadata_access(task, m->file);' \
+	'	ret = proc_pkm_check_task_metadata_access(task, m->file);
+	if (ret) {
+		put_task_struct(task);
+		return ret;
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+replace_line_after_anchor_once 'static int do_io_accounting(struct task_struct *task, struct seq_file *m, int whole)' \
+	'	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS)) {' \
+	'	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_PROC_QUERY_INFORMATION)) {' \
+	"$kernel_root/fs/proc/base.c"
+replace_line_after_anchor_once 'static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,' \
+	'	permitted = ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_NOAUDIT);' \
+	'	permitted = ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_PROC_QUERY_LIMITED | PTRACE_MODE_NOAUDIT);' \
+	"$kernel_root/fs/proc/array.c"
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1000 kacs_open_self_token
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \

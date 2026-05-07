@@ -67,6 +67,14 @@
 #define PTRACE_MODE_PIDFD_OPEN 0x40
 #endif
 
+#ifndef PTRACE_MODE_PROC_QUERY_LIMITED
+#define PTRACE_MODE_PROC_QUERY_LIMITED 0x80
+#endif
+
+#ifndef PTRACE_MODE_PROC_QUERY_INFORMATION
+#define PTRACE_MODE_PROC_QUERY_INFORMATION 0x100
+#endif
+
 #define OWNER_SECURITY_INFORMATION 0x00000001U
 #define GROUP_SECURITY_INFORMATION 0x00000002U
 #define DACL_SECURITY_INFORMATION 0x00000004U
@@ -1734,6 +1742,8 @@ static long pkm_kacs_ptrace_mode_to_process_access(unsigned int mode,
 {
 	bool is_pidfd_open_mode;
 	bool is_getfd_mode;
+	bool is_proc_query_limited_mode;
+	bool is_proc_query_information_mode;
 	bool is_read_mode;
 	bool is_attach_mode;
 
@@ -1742,6 +1752,10 @@ static long pkm_kacs_ptrace_mode_to_process_access(unsigned int mode,
 
 	is_pidfd_open_mode = (mode & PTRACE_MODE_PIDFD_OPEN) != 0;
 	is_getfd_mode = (mode & PTRACE_MODE_GETFD) != 0;
+	is_proc_query_limited_mode =
+		(mode & PTRACE_MODE_PROC_QUERY_LIMITED) != 0;
+	is_proc_query_information_mode =
+		(mode & PTRACE_MODE_PROC_QUERY_INFORMATION) != 0;
 	is_read_mode = (mode & PTRACE_MODE_READ) != 0;
 	is_attach_mode = (mode & PTRACE_MODE_ATTACH) != 0;
 	if (is_pidfd_open_mode) {
@@ -1754,6 +1768,19 @@ static long pkm_kacs_ptrace_mode_to_process_access(unsigned int mode,
 		if (is_read_mode || !is_attach_mode)
 			return -EACCES;
 		*desired_access = KACS_PROCESS_DUP_HANDLE;
+		return 0;
+	}
+	if (is_proc_query_limited_mode || is_proc_query_information_mode) {
+		if (is_proc_query_limited_mode &&
+		    is_proc_query_information_mode)
+			return -EACCES;
+		if (!is_read_mode || is_attach_mode || is_getfd_mode ||
+		    is_pidfd_open_mode)
+			return -EACCES;
+
+		*desired_access = is_proc_query_information_mode ?
+					  KACS_PROCESS_QUERY_INFORMATION :
+					  KACS_PROCESS_QUERY_LIMITED;
 		return 0;
 	}
 	if (is_read_mode == is_attach_mode)

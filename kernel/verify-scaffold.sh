@@ -89,11 +89,33 @@ if ! rg -q 'PTRACE_MODE_PIDFD_OPEN' \
 	die "install-pkm-subtree.sh does not stage the PTRACE_MODE_PIDFD_OPEN patch"
 fi
 
+if ! rg -q 'PTRACE_MODE_PROC_QUERY_LIMITED' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the PTRACE_MODE_PROC_QUERY_LIMITED patch"
+fi
+
+if ! rg -q 'PTRACE_MODE_PROC_QUERY_INFORMATION' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the PTRACE_MODE_PROC_QUERY_INFORMATION patch"
+fi
+
 if ! rg -q 'PTRACE_MODE_READ_FSCREDS \|' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
    ! rg -q 'PTRACE_MODE_PIDFD_OPEN' \
 	"$repo_root/kernel/install-pkm-subtree.sh"; then
 	die "install-pkm-subtree.sh does not patch pidfd_open to carry PTRACE_MODE_PIDFD_OPEN"
+fi
+
+if ! rg -q 'proc_pkm_check_task_metadata_access' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the procfs metadata visibility patch"
+fi
+
+if ! rg -q 'PTRACE_MODE_PROC_QUERY_INFORMATION' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'PTRACE_MODE_PROC_QUERY_LIMITED' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not patch procfs metadata checks to the ratified KACS query modes"
 fi
 
 if ! rg -Fq 'security_task_prctl(option, arg2,' \
