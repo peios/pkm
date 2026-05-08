@@ -152,6 +152,9 @@ struct kacs_get_linked_token_args {
 #define TOKEN_CLASS_LOGON_SID 0x13U
 #define TOKEN_CLASS_DEFAULT_DACL 0x14U
 #define TOKEN_CLASS_IMPERSONATION_LEVEL 0x15U
+#define TOKEN_CLASS_USER_CLAIMS 0x16U
+#define TOKEN_CLASS_DEVICE_CLAIMS 0x17U
+#define TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS 0x18U
 
 struct pkm_kacs_token_fd_view {
 	const void *token;

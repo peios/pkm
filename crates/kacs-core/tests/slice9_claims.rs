@@ -134,6 +134,7 @@ fn parses_int64_claim_entry() {
         claim,
         ClaimAttribute {
             name: "Clearance".into(),
+            value_type: 0x0001,
             flags: 0,
             values: vec![ClaimValue::Int64(3), ClaimValue::Int64(4)].into(),
         }
@@ -154,6 +155,7 @@ fn parses_string_claim_entry_with_case_sensitive_flag() {
         claim,
         ClaimAttribute {
             name: "Department".into(),
+            value_type: 0x0003,
             flags: CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE,
             values: vec![ClaimValue::String("Finance".into())].into(),
         }
@@ -199,6 +201,7 @@ fn parses_sid_claim_when_sid_is_not_at_entry_tail() {
         claim,
         ClaimAttribute {
             name: "Owner".into(),
+            value_type: 0x0005,
             flags: 0,
             values: vec![ClaimValue::Sid(sid.into())].into(),
         }

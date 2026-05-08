@@ -27,7 +27,11 @@ use crate::access_mask::{
 };
 use crate::ace::{AceKind, SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE};
 use crate::acl::Acl;
-use crate::claims::{parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, CLAIM_TYPE_INT64};
+use crate::claims::{
+    parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, ClaimValue,
+    CLAIM_TYPE_BOOLEAN, CLAIM_TYPE_INT64, CLAIM_TYPE_OCTET, CLAIM_TYPE_SID, CLAIM_TYPE_STRING,
+    CLAIM_TYPE_UINT64,
+};
 use crate::condition::ConditionalContext;
 use crate::error::KacsError;
 use crate::kmes_payload::emit_logon_session_destroyed_to_kmes;
@@ -230,6 +234,9 @@ const TOKEN_CLASS_LOGON_TYPE: u32 = 0x12;
 const TOKEN_CLASS_LOGON_SID: u32 = 0x13;
 const TOKEN_CLASS_DEFAULT_DACL: u32 = 0x14;
 const TOKEN_CLASS_IMPERSONATION_LEVEL: u32 = 0x15;
+const TOKEN_CLASS_USER_CLAIMS: u32 = 0x16;
+const TOKEN_CLASS_DEVICE_CLAIMS: u32 = 0x17;
+const TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS: u32 = 0x18;
 
 extern "C" {
     fn pkm_kacs_boot_system_token_ptr() -> *const c_void;
@@ -740,6 +747,10 @@ impl QueryWriter {
         self.write_bytes(&value.to_le_bytes())
     }
 
+    fn write_u16(&mut self, value: u16) -> bool {
+        self.write_bytes(&value.to_le_bytes())
+    }
+
     fn write_u64(&mut self, value: u64) -> bool {
         self.write_bytes(&value.to_le_bytes())
     }
@@ -781,6 +792,262 @@ fn sid_and_attributes_query_len(entries: &[SidAndAttributes<'_>]) -> Option<usiz
     }
 
     Some(len)
+}
+
+fn claim_value_type_supported(value_type: u16) -> bool {
+    matches!(
+        value_type,
+        CLAIM_TYPE_INT64
+            | CLAIM_TYPE_UINT64
+            | CLAIM_TYPE_STRING
+            | CLAIM_TYPE_SID
+            | CLAIM_TYPE_BOOLEAN
+            | CLAIM_TYPE_OCTET
+    )
+}
+
+fn utf16_cstr_len(value: &str) -> Option<usize> {
+    let mut len = 2usize;
+
+    for _ in value.encode_utf16() {
+        len = len.checked_add(2)?;
+    }
+
+    Some(len)
+}
+
+fn claim_value_slot_len(value_type: u16) -> Result<usize, i32> {
+    match value_type {
+        CLAIM_TYPE_INT64 | CLAIM_TYPE_UINT64 | CLAIM_TYPE_BOOLEAN => Ok(8),
+        CLAIM_TYPE_STRING | CLAIM_TYPE_SID | CLAIM_TYPE_OCTET => Ok(4),
+        _ => Err(-EINVAL),
+    }
+}
+
+fn claim_value_nested_len(value_type: u16, value: &ClaimValue) -> Result<usize, i32> {
+    match (value_type, value) {
+        (CLAIM_TYPE_INT64, ClaimValue::Int64(_))
+        | (CLAIM_TYPE_UINT64, ClaimValue::UInt64(_))
+        | (CLAIM_TYPE_BOOLEAN, ClaimValue::Boolean(_)) => Ok(0),
+        (CLAIM_TYPE_STRING, ClaimValue::String(value)) => utf16_cstr_len(value.as_str()).ok_or(-EINVAL),
+        (CLAIM_TYPE_SID, ClaimValue::Sid(value)) => Ok(value.len()),
+        (CLAIM_TYPE_OCTET, ClaimValue::Octet(value)) => {
+            4usize.checked_add(value.len()).ok_or(-EINVAL)
+        }
+        _ => Err(-EINVAL),
+    }
+}
+
+fn claim_entry_query_len(claim: &ClaimAttribute) -> Result<usize, i32> {
+    let value_type = claim.value_type;
+    let value_count = claim.values.len();
+    let offsets_len = value_count.checked_mul(4).ok_or(-EINVAL)?;
+    let mut len = 16usize
+        .checked_add(offsets_len)
+        .and_then(|value| value.checked_add(utf16_cstr_len(claim.name.as_str())?))
+        .ok_or(-EINVAL)?;
+
+    if !claim_value_type_supported(value_type) {
+        return Err(-EINVAL);
+    }
+
+    for value in claim.values.as_slice() {
+        len = len
+            .checked_add(claim_value_slot_len(value_type)?)
+            .and_then(|value_len| value_len.checked_add(claim_value_nested_len(value_type, value).ok()?))
+            .ok_or(-EINVAL)?;
+    }
+
+    if len > u32::MAX as usize {
+        return Err(-EINVAL);
+    }
+
+    Ok(len)
+}
+
+fn claim_array_query_len(claims: &[ClaimAttribute]) -> Result<usize, i32> {
+    let mut len = 0usize;
+
+    for claim in claims {
+        let entry_len = claim_entry_query_len(claim)?;
+        len = len
+            .checked_add(4)
+            .and_then(|value| value.checked_add(entry_len))
+            .ok_or(-EINVAL)?;
+    }
+
+    Ok(len)
+}
+
+fn write_utf16_cstr(writer: &mut QueryWriter, value: &str) -> bool {
+    for unit in value.encode_utf16() {
+        if !writer.write_u16(unit) {
+            return false;
+        }
+    }
+
+    writer.write_u16(0)
+}
+
+fn write_claim_array_query(
+    claims: &[ClaimAttribute],
+    writer: &mut QueryWriter,
+) -> Result<(), i32> {
+    for claim in claims {
+        let entry_len = claim_entry_query_len(claim)?;
+
+        if !writer.write_u32(entry_len as u32) {
+            return Err(-ERANGE);
+        }
+        write_claim_entry(claim, writer)?;
+    }
+
+    Ok(())
+}
+
+fn write_claim_entry(claim: &ClaimAttribute, writer: &mut QueryWriter) -> Result<(), i32> {
+    let value_type = claim.value_type;
+    let value_count = claim.values.len();
+    let offsets_len = value_count.checked_mul(4).ok_or(-EINVAL)?;
+    let name_len = utf16_cstr_len(claim.name.as_str()).ok_or(-EINVAL)?;
+    let name_offset = 16usize.checked_add(offsets_len).ok_or(-EINVAL)?;
+    let value_slot_base = name_offset.checked_add(name_len).ok_or(-EINVAL)?;
+    let mut slot_total_len = 0usize;
+
+    if !claim_value_type_supported(value_type) {
+        return Err(-EINVAL);
+    }
+
+    for value in claim.values.as_slice() {
+        slot_total_len = slot_total_len
+            .checked_add(claim_value_slot_len(value_type)?)
+            .ok_or(-EINVAL)?;
+        claim_value_nested_len(value_type, value)?;
+    }
+
+    if name_offset > u32::MAX as usize {
+        return Err(-EINVAL);
+    }
+    if value_count > u32::MAX as usize {
+        return Err(-EINVAL);
+    }
+
+    if !writer.write_u32(name_offset as u32)
+        || !writer.write_u16(value_type)
+        || !writer.write_u16(0)
+        || !writer.write_u32(claim.flags)
+        || !writer.write_u32(value_count as u32)
+    {
+        return Err(-ERANGE);
+    }
+
+    let mut slot_cursor = value_slot_base;
+    for value in claim.values.as_slice() {
+        if slot_cursor > u32::MAX as usize {
+            return Err(-EINVAL);
+        }
+        if !writer.write_u32(slot_cursor as u32) {
+            return Err(-ERANGE);
+        }
+        slot_cursor = slot_cursor
+            .checked_add(claim_value_slot_len(value_type)?)
+            .ok_or(-EINVAL)?;
+    }
+
+    if !write_utf16_cstr(writer, claim.name.as_str()) {
+        return Err(-ERANGE);
+    }
+
+    let mut nested_cursor = value_slot_base
+        .checked_add(slot_total_len)
+        .ok_or(-EINVAL)?;
+    for value in claim.values.as_slice() {
+        match (value_type, value) {
+            (CLAIM_TYPE_INT64, ClaimValue::Int64(value)) => {
+                if !writer.write_bytes(&value.to_le_bytes()) {
+                    return Err(-ERANGE);
+                }
+            }
+            (CLAIM_TYPE_UINT64, ClaimValue::UInt64(value)) => {
+                if !writer.write_u64(*value) {
+                    return Err(-ERANGE);
+                }
+            }
+            (CLAIM_TYPE_BOOLEAN, ClaimValue::Boolean(value)) => {
+                if !writer.write_u64(if *value { 1 } else { 0 }) {
+                    return Err(-ERANGE);
+                }
+            }
+            (CLAIM_TYPE_STRING, ClaimValue::String(_))
+            | (CLAIM_TYPE_SID, ClaimValue::Sid(_))
+            | (CLAIM_TYPE_OCTET, ClaimValue::Octet(_)) => {
+                if nested_cursor > u32::MAX as usize {
+                    return Err(-EINVAL);
+                }
+                if !writer.write_u32(nested_cursor as u32) {
+                    return Err(-ERANGE);
+                }
+                nested_cursor = nested_cursor
+                    .checked_add(claim_value_nested_len(value_type, value)?)
+                    .ok_or(-EINVAL)?;
+            }
+            _ => return Err(-EINVAL),
+        }
+    }
+
+    for value in claim.values.as_slice() {
+        match (value_type, value) {
+            (CLAIM_TYPE_INT64, ClaimValue::Int64(_))
+            | (CLAIM_TYPE_UINT64, ClaimValue::UInt64(_))
+            | (CLAIM_TYPE_BOOLEAN, ClaimValue::Boolean(_)) => {}
+            (CLAIM_TYPE_STRING, ClaimValue::String(value)) => {
+                if !write_utf16_cstr(writer, value.as_str()) {
+                    return Err(-ERANGE);
+                }
+            }
+            (CLAIM_TYPE_SID, ClaimValue::Sid(value)) => {
+                if !writer.write_bytes(value.as_slice()) {
+                    return Err(-ERANGE);
+                }
+            }
+            (CLAIM_TYPE_OCTET, ClaimValue::Octet(value)) => {
+                if value.len() > u32::MAX as usize
+                    || !writer.write_u32(value.len() as u32)
+                    || !writer.write_bytes(value.as_slice())
+                {
+                    return Err(-ERANGE);
+                }
+            }
+            _ => return Err(-EINVAL),
+        }
+    }
+
+    Ok(())
+}
+
+fn u32_array_query_len(values: &[u32]) -> Result<usize, i32> {
+    if values.len() > u32::MAX as usize {
+        return Err(-EINVAL);
+    }
+
+    4usize
+        .checked_add(values.len().checked_mul(4).ok_or(-EINVAL)?)
+        .ok_or(-EINVAL)
+}
+
+fn write_u32_array_query(values: &[u32], writer: &mut QueryWriter) -> Result<(), i32> {
+    if values.len() > u32::MAX as usize {
+        return Err(-EINVAL);
+    }
+    if !writer.write_u32(values.len() as u32) {
+        return Err(-ERANGE);
+    }
+    for value in values {
+        if !writer.write_u32(*value) {
+            return Err(-ERANGE);
+        }
+    }
+    Ok(())
 }
 
 fn copy_sid_bytes(bytes: &[u8]) -> Result<Vec<u8>, i32> {
@@ -4559,9 +4826,14 @@ impl PkmKacsBootToken {
                 .session_ref()
                 .map(|session| session.logon_sid.as_bytes().len())
                 .ok_or(-EINVAL),
+            TOKEN_CLASS_USER_CLAIMS => claim_array_query_len(self.user_claims.as_slice()),
+            TOKEN_CLASS_DEVICE_CLAIMS => claim_array_query_len(self.device_claims.as_slice()),
+            TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS => {
+                u32_array_query_len(self.projected_supplementary_gids.as_slice())
+            }
             TOKEN_CLASS_IMPERSONATION_LEVEL => Ok(4),
             0 => Err(-EINVAL),
-            value if value > TOKEN_CLASS_IMPERSONATION_LEVEL => Err(-EINVAL),
+            value if value > TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS => Err(-EINVAL),
             _ => Err(-EINVAL),
         }
     }
@@ -4651,6 +4923,18 @@ impl PkmKacsBootToken {
                     return Err(-EINVAL);
                 };
                 writer.write_bytes(session.logon_sid.as_bytes())
+            }
+            TOKEN_CLASS_USER_CLAIMS => {
+                write_claim_array_query(self.user_claims.as_slice(), writer)?;
+                true
+            }
+            TOKEN_CLASS_DEVICE_CLAIMS => {
+                write_claim_array_query(self.device_claims.as_slice(), writer)?;
+                true
+            }
+            TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS => {
+                write_u32_array_query(self.projected_supplementary_gids.as_slice(), writer)?;
+                true
             }
             TOKEN_CLASS_DEFAULT_DACL => {
                 let _guard = self.lock_mutation();

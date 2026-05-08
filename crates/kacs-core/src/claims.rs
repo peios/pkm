@@ -1,7 +1,7 @@
 use crate::error::{KacsError, KacsResult};
-use crate::pkm_alloc::{slice_to_vec, String, Vec};
 #[cfg(feature = "kernel")]
 use crate::pkm_alloc::TryClone;
+use crate::pkm_alloc::{slice_to_vec, String, Vec};
 use crate::sid::Sid;
 
 /// Claim flag requesting case-sensitive string comparisons.
@@ -50,6 +50,8 @@ pub enum ClaimValue {
 pub struct ClaimAttribute {
     /// Attribute name.
     pub name: String,
+    /// Original claim value type.
+    pub value_type: u16,
     /// Attribute flags.
     pub flags: u32,
     /// Parsed attribute values.
@@ -59,10 +61,13 @@ pub struct ClaimAttribute {
 impl ClaimAttribute {
     /// Builds a claim attribute from owned parts.
     pub fn new(name: impl Into<String>, flags: u32, values: impl Into<Vec<ClaimValue>>) -> Self {
+        let values = values.into();
+
         Self {
             name: name.into(),
+            value_type: values.as_slice().first().map(claim_value_type).unwrap_or(0),
             flags,
-            values: values.into(),
+            values,
         }
     }
 }
@@ -87,6 +92,7 @@ impl TryClone for ClaimAttribute {
     fn try_clone(&self) -> Result<Self, crate::pkm_alloc::AllocError> {
         Ok(Self {
             name: self.name.try_clone()?,
+            value_type: self.value_type,
             flags: self.flags,
             values: self.values.try_clone()?,
         })
@@ -123,9 +129,22 @@ pub fn parse_claim_attribute_entry(bytes: &[u8]) -> KacsResult<ClaimAttribute> {
 
     Ok(ClaimAttribute {
         name,
+        value_type,
         flags,
         values,
     })
+}
+
+fn claim_value_type(value: &ClaimValue) -> u16 {
+    match value {
+        ClaimValue::Int64(_) => CLAIM_TYPE_INT64,
+        ClaimValue::UInt64(_) => CLAIM_TYPE_UINT64,
+        ClaimValue::String(_) => CLAIM_TYPE_STRING,
+        ClaimValue::Sid(_) => CLAIM_TYPE_SID,
+        ClaimValue::Boolean(_) => CLAIM_TYPE_BOOLEAN,
+        ClaimValue::Octet(_) => CLAIM_TYPE_OCTET,
+        ClaimValue::Composite(_) => 0,
+    }
 }
 
 /// Parses a packed array of claim attribute entries.
