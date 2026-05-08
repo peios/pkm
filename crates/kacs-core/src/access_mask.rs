@@ -42,6 +42,25 @@ pub const PROCESS_SUSPEND_RESUME: u32 = 0x0000_0800;
 /// Process right permitting limited process inspection.
 pub const PROCESS_QUERY_LIMITED: u32 = 0x0000_1000;
 
+/// File right permitting file data reads.
+pub const FILE_READ_DATA: u32 = 0x0000_0001;
+/// File right permitting file data writes.
+pub const FILE_WRITE_DATA: u32 = 0x0000_0002;
+/// File right permitting append-only writes.
+pub const FILE_APPEND_DATA: u32 = 0x0000_0004;
+/// File right permitting named-attribute reads.
+pub const FILE_READ_EA: u32 = 0x0000_0008;
+/// File right permitting named-attribute writes.
+pub const FILE_WRITE_EA: u32 = 0x0000_0010;
+/// File right permitting execution / directory traversal.
+pub const FILE_EXECUTE: u32 = 0x0000_0020;
+/// File right permitting directory child deletion.
+pub const FILE_DELETE_CHILD: u32 = 0x0000_0040;
+/// File right permitting basic attribute reads.
+pub const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+/// File right permitting basic attribute writes.
+pub const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+
 const RESERVED_ACCESS_MASK_BITS: u32 = 0x0ce0_0000;
 const GENERIC_MASK: u32 = GENERIC_ALL | GENERIC_EXECUTE | GENERIC_WRITE | GENERIC_READ;
 
@@ -62,6 +81,32 @@ pub const PROCESS_GENERIC_MAPPING: GenericMapping = GenericMapping {
         | READ_CONTROL
         | WRITE_DAC
         | WRITE_OWNER,
+};
+
+/// Generic mapping for file and directory security descriptors.
+pub const FILE_GENERIC_MAPPING: GenericMapping = GenericMapping {
+    read: FILE_READ_DATA | FILE_READ_ATTRIBUTES | FILE_READ_EA | READ_CONTROL | SYNCHRONIZE,
+    write: FILE_WRITE_DATA
+        | FILE_APPEND_DATA
+        | FILE_WRITE_ATTRIBUTES
+        | FILE_WRITE_EA
+        | READ_CONTROL
+        | SYNCHRONIZE,
+    execute: FILE_EXECUTE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+    all: FILE_READ_DATA
+        | FILE_WRITE_DATA
+        | FILE_APPEND_DATA
+        | FILE_READ_EA
+        | FILE_WRITE_EA
+        | FILE_EXECUTE
+        | FILE_DELETE_CHILD
+        | FILE_READ_ATTRIBUTES
+        | FILE_WRITE_ATTRIBUTES
+        | DELETE
+        | READ_CONTROL
+        | WRITE_DAC
+        | WRITE_OWNER
+        | SYNCHRONIZE,
 };
 
 /// Maps generic access bits onto object-specific rights.

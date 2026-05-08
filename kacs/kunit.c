@@ -147,6 +147,26 @@
 #define PKM_KUNIT_LABEL_SECURITY_INFORMATION 0x00000010U
 #define PKM_KUNIT_TOKEN_SPEC_VERSION 2U
 #define PKM_KUNIT_TOKEN_SPEC_HEADER_LEN 192U
+#define PKM_KUNIT_FILE_READ_DATA 0x00000001U
+#define PKM_KUNIT_FILE_WRITE_DATA 0x00000002U
+#define PKM_KUNIT_FILE_APPEND_DATA 0x00000004U
+#define PKM_KUNIT_FILE_READ_EA 0x00000008U
+#define PKM_KUNIT_FILE_WRITE_EA 0x00000010U
+#define PKM_KUNIT_FILE_EXECUTE 0x00000020U
+#define PKM_KUNIT_FILE_DELETE_CHILD 0x00000040U
+#define PKM_KUNIT_FILE_READ_ATTRIBUTES 0x00000080U
+#define PKM_KUNIT_FILE_WRITE_ATTRIBUTES 0x00000100U
+#define PKM_KUNIT_FILE_SD_ADMIN_MASK                                           \
+	(PKM_KUNIT_FILE_READ_DATA | PKM_KUNIT_FILE_WRITE_DATA |               \
+	 PKM_KUNIT_FILE_APPEND_DATA | PKM_KUNIT_FILE_READ_EA |               \
+	 PKM_KUNIT_FILE_WRITE_EA | PKM_KUNIT_FILE_EXECUTE |                 \
+	 PKM_KUNIT_FILE_DELETE_CHILD | PKM_KUNIT_FILE_READ_ATTRIBUTES |      \
+	 PKM_KUNIT_FILE_WRITE_ATTRIBUTES | KACS_ACCESS_DELETE |              \
+	 KACS_ACCESS_READ_CONTROL | KACS_ACCESS_WRITE_DAC |                  \
+	 KACS_ACCESS_WRITE_OWNER)
+#define PKM_KUNIT_FILE_SD_QUERY_MASK KACS_ACCESS_READ_CONTROL
+#define PKM_KUNIT_FILE_SD_WRITE_MASK KACS_ACCESS_WRITE_DAC
+#define PKM_KUNIT_FILE_SD_SACL_MASK KACS_ACCESS_ACCESS_SYSTEM_SECURITY
 
 #ifndef PTRACE_MODE_GETFD
 #define PTRACE_MODE_GETFD 0x20
@@ -6265,6 +6285,626 @@ static void pkm_kunit_prlimit_unknown_flags_fail_closed(struct kunit *test)
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_prlimit_for_subject(&args),
 			(long)-EACCES);
+}
+
+static const u8 *pkm_kunit_create_default_file_sd(const void *token,
+						  size_t *len_out)
+{
+	return kacs_rust_kunit_create_file_sd(
+		token, PKM_KUNIT_FILE_SD_ADMIN_MASK,
+		PKM_KUNIT_FILE_SD_ADMIN_MASK, PKM_KUNIT_FILE_SD_ADMIN_MASK, 0,
+		len_out);
+}
+
+static const u8 *pkm_kunit_create_query_only_file_sd(const void *token,
+						     size_t *len_out)
+{
+	return kacs_rust_kunit_create_file_sd(token, 0, 0, 0,
+					      PKM_KUNIT_FILE_SD_QUERY_MASK,
+					      len_out);
+}
+
+static const u8 *pkm_kunit_create_write_only_file_sd(const void *token,
+						     size_t *len_out)
+{
+	return kacs_rust_kunit_create_file_sd(token, 0, 0, 0,
+					      PKM_KUNIT_FILE_SD_WRITE_MASK,
+					      len_out);
+}
+
+static const u8 *pkm_kunit_create_sacl_only_file_sd(const void *token,
+						    size_t *len_out)
+{
+	return kacs_rust_kunit_create_file_sd(token, 0, 0, 0,
+					      PKM_KUNIT_FILE_SD_SACL_MASK,
+					      len_out);
+}
+
+static const u8 *pkm_kunit_create_file_sd_with_mandatory_resource_attr(
+	const void *token, size_t *len_out)
+{
+	return kacs_rust_kunit_create_file_sd_with_mandatory_resource_attr(
+		token, PKM_KUNIT_FILE_SD_ADMIN_MASK,
+		PKM_KUNIT_FILE_SD_ADMIN_MASK, PKM_KUNIT_FILE_SD_ADMIN_MASK,
+		0, len_out);
+}
+
+static void pkm_kunit_file_sd_cache_population_from_valid_xattr(
+	struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *file_sd;
+	size_t file_sd_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	file_sd = pkm_kunit_create_default_file_sd(subject_token, &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_classify_file_sd_bytes(file_sd,
+							      file_sd_len),
+			PKM_KACS_KUNIT_FILE_SD_VALID);
+
+	pkm_kacs_free((void *)file_sd);
+}
+
+static void pkm_kunit_file_sd_cache_population_corrupt_fails_closed(
+	struct kunit *test)
+{
+	static const u8 invalid_sd[] = { 1, 0, 0, 0 };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_classify_file_sd_bytes(
+				invalid_sd, sizeof(invalid_sd)),
+			PKM_KACS_KUNIT_FILE_SD_CORRUPT);
+}
+
+static void pkm_kunit_inode_raw_sd_xattr_hooks_deny_canonical_names(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_inode_sd_xattr_get(
+				"security.peios.sd", 0),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_inode_sd_xattr_set(
+				"security.peios.sd", 0),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_inode_sd_xattr_remove(
+				"security.peios.sd", 0),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_inode_sd_xattr_get(
+				"system.ntfs_security", 1),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_inode_sd_xattr_get(
+				"system.ntfs_security", 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_inode_sd_xattr_get("user.other", 0),
+			0);
+}
+
+static void pkm_kunit_get_file_sd_success(struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_get_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_OWNER_SECURITY_INFORMATION |
+				 PKM_KUNIT_GROUP_SECURITY_INFORMATION |
+				 PKM_KUNIT_DACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const u8 *file_sd;
+	const u8 *subset = NULL;
+	const u8 *expected_subset = NULL;
+	size_t file_sd_len = 0;
+	size_t subset_len = 0;
+	size_t expected_subset_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	file_sd = pkm_kunit_create_default_file_sd(subject_token, &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = file_sd;
+	args.target_file_sd_len = file_sd_len;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_get_file_sd_for_subject(
+				&args, &subset, &subset_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				file_sd, file_sd_len, args.security_info,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, subset);
+	KUNIT_ASSERT_NOT_NULL(test, expected_subset);
+	KUNIT_EXPECT_EQ(test, subset_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test, memcmp(subset, expected_subset, subset_len), 0);
+
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)subset);
+	pkm_kacs_free((void *)file_sd);
+}
+
+static void pkm_kunit_get_file_sd_label_on_unlabeled_returns_empty_subset(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_get_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_LABEL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const u8 *file_sd;
+	const u8 *subset = NULL;
+	size_t file_sd_len = 0;
+	size_t subset_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	file_sd = pkm_kunit_create_default_file_sd(subject_token, &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = file_sd;
+	args.target_file_sd_len = file_sd_len;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_get_file_sd_for_subject(
+				&args, &subset, &subset_len),
+			0L);
+	KUNIT_ASSERT_NOT_NULL(test, subset);
+	KUNIT_EXPECT_EQ(test, subset_len, (size_t)20);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(subset, 12), 0U);
+
+	pkm_kacs_free((void *)subset);
+	pkm_kacs_free((void *)file_sd);
+}
+
+static void pkm_kunit_get_file_sd_missing_denies(struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_get_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_MISSING,
+		.security_info = PKM_KUNIT_DACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const u8 *subset = NULL;
+	size_t subset_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	args.subject_token = subject_token;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_get_file_sd_for_subject(
+				&args, &subset, &subset_len),
+			(long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, subset, NULL);
+	KUNIT_EXPECT_EQ(test, subset_len, (size_t)0);
+}
+
+static void pkm_kunit_get_file_sd_denied_without_read_control(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_get_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_DACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const void *target_token;
+	const u8 *file_sd;
+	const u8 *subset = NULL;
+	size_t file_sd_len = 0;
+	size_t subset_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	file_sd = pkm_kunit_create_write_only_file_sd(target_token,
+						      &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = file_sd;
+	args.target_file_sd_len = file_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_get_file_sd_for_subject(
+				&args, &subset, &subset_len),
+			(long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, subset, NULL);
+	KUNIT_EXPECT_EQ(test, subset_len, (size_t)0);
+
+	pkm_kacs_free((void *)file_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_file_sd_dacl_success(struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_DACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const u8 *target_file_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const u8 *expected_subset = NULL;
+	const u8 *actual_subset = NULL;
+	size_t target_file_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	size_t expected_subset_len = 0;
+	size_t actual_subset_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_file_sd = pkm_kunit_create_default_file_sd(subject_token,
+							  &target_file_sd_len);
+	input_sd = pkm_kunit_create_query_only_file_sd(subject_token,
+						      &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_file_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = target_file_sd;
+	args.target_file_sd_len = target_file_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				input_sd, input_sd_len,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				result_sd, result_sd_len,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&actual_subset, &actual_subset_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, result_sd);
+	KUNIT_EXPECT_EQ(test, actual_subset_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(actual_subset, expected_subset, actual_subset_len),
+			0);
+
+	pkm_kacs_free((void *)actual_subset);
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)result_sd);
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_file_sd);
+}
+
+static void pkm_kunit_set_file_sd_dacl_denied_without_write_dac(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_DACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const void *target_token;
+	const u8 *target_file_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	size_t target_file_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	target_file_sd = pkm_kunit_create_query_only_file_sd(target_token,
+							     &target_file_sd_len);
+	input_sd = pkm_kunit_create_query_only_file_sd(target_token,
+						      &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_file_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = target_file_sd;
+	args.target_file_sd_len = target_file_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			(long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, result_sd, NULL);
+	KUNIT_EXPECT_EQ(test, result_sd_len, (size_t)0);
+
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_file_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_file_sd_missing_restore_success(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_MISSING,
+		.security_info = PKM_KUNIT_OWNER_SECURITY_INFORMATION |
+				 PKM_KUNIT_GROUP_SECURITY_INFORMATION |
+				 PKM_KUNIT_DACL_SECURITY_INFORMATION,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const u8 *expected_subset = NULL;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	size_t expected_subset_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_RESTORE_PRIVILEGE);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	input_sd = pkm_kunit_create_default_file_sd(target_token, &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				input_sd, input_sd_len, args.security_info,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test, result_sd_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result_sd, expected_subset, result_sd_len), 0);
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_RESTORE_PRIVILEGE);
+
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)result_sd);
+	pkm_kacs_free((void *)input_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_file_sd_label_requires_relabel(struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_LABEL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const void *target_token;
+	const u8 *target_file_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	size_t target_file_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0, 0);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	target_file_sd = pkm_kunit_create_default_file_sd(target_token,
+							  &target_file_sd_len);
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_file_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = target_file_sd;
+	args.target_file_sd_len = target_file_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			(long)-EACCES);
+
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_file_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_file_sd_label_with_privilege_succeeds(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_LABEL_SECURITY_INFORMATION,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *target_file_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const u8 *expected_subset = NULL;
+	const u8 *actual_subset = NULL;
+	size_t target_file_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	size_t expected_subset_len = 0;
+	size_t actual_subset_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0,
+		PKM_KUNIT_SE_RELABEL_PRIVILEGE);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	target_file_sd = pkm_kunit_create_default_file_sd(target_token,
+							  &target_file_sd_len);
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_file_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = target_file_sd;
+	args.target_file_sd_len = target_file_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				input_sd, input_sd_len,
+				PKM_KUNIT_LABEL_SECURITY_INFORMATION,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				result_sd, result_sd_len,
+				PKM_KUNIT_LABEL_SECURITY_INFORMATION,
+				&actual_subset, &actual_subset_len),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test, actual_subset_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(actual_subset, expected_subset, actual_subset_len),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_RELABEL_PRIVILEGE);
+
+	pkm_kacs_free((void *)actual_subset);
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)result_sd);
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_file_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_file_sd_sacl_label_combo_invalid(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_SACL_SECURITY_INFORMATION |
+				 PKM_KUNIT_LABEL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const u8 *target_file_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	size_t target_file_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_file_sd = pkm_kunit_create_default_file_sd(subject_token,
+							  &target_file_sd_len);
+	input_sd = pkm_kunit_create_default_file_sd(subject_token,
+						    &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_file_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = target_file_sd;
+	args.target_file_sd_len = target_file_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			(long)-EINVAL);
+
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_file_sd);
+}
+
+static void pkm_kunit_set_file_sd_mandatory_resource_attr_protected(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_SACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const void *target_token;
+	const u8 *target_file_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	size_t target_file_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_SECURITY_PRIVILEGE);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	target_file_sd =
+		pkm_kunit_create_file_sd_with_mandatory_resource_attr(
+			target_token, &target_file_sd_len);
+	input_sd = pkm_kunit_create_default_file_sd(target_token,
+						    &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_file_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = target_file_sd;
+	args.target_file_sd_len = target_file_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			(long)-EACCES);
+
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_file_sd);
+	kacs_rust_token_drop(subject_token);
 }
 
 static void pkm_kunit_get_process_sd_success(struct kunit *test)
@@ -12451,6 +13091,21 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_prlimit_debug_still_fails_on_pip),
 	KUNIT_CASE(pkm_kunit_prlimit_self_target_bypasses_boundary_gate),
 	KUNIT_CASE(pkm_kunit_prlimit_unknown_flags_fail_closed),
+	KUNIT_CASE(pkm_kunit_file_sd_cache_population_from_valid_xattr),
+	KUNIT_CASE(pkm_kunit_file_sd_cache_population_corrupt_fails_closed),
+	KUNIT_CASE(pkm_kunit_inode_raw_sd_xattr_hooks_deny_canonical_names),
+	KUNIT_CASE(pkm_kunit_get_file_sd_success),
+	KUNIT_CASE(
+		pkm_kunit_get_file_sd_label_on_unlabeled_returns_empty_subset),
+	KUNIT_CASE(pkm_kunit_get_file_sd_missing_denies),
+	KUNIT_CASE(pkm_kunit_get_file_sd_denied_without_read_control),
+	KUNIT_CASE(pkm_kunit_set_file_sd_dacl_success),
+	KUNIT_CASE(pkm_kunit_set_file_sd_dacl_denied_without_write_dac),
+	KUNIT_CASE(pkm_kunit_set_file_sd_missing_restore_success),
+	KUNIT_CASE(pkm_kunit_set_file_sd_label_requires_relabel),
+	KUNIT_CASE(pkm_kunit_set_file_sd_label_with_privilege_succeeds),
+	KUNIT_CASE(pkm_kunit_set_file_sd_sacl_label_combo_invalid),
+	KUNIT_CASE(pkm_kunit_set_file_sd_mandatory_resource_attr_protected),
 	KUNIT_CASE(pkm_kunit_get_process_sd_success),
 	KUNIT_CASE(
 		pkm_kunit_get_process_sd_label_on_unlabeled_returns_empty_subset),

@@ -199,6 +199,28 @@ struct pkm_kacs_kunit_process_sd_set_args {
 	u32 security_info;
 };
 
+#define PKM_KACS_KUNIT_FILE_SD_VALID 1U
+#define PKM_KACS_KUNIT_FILE_SD_MISSING 2U
+#define PKM_KACS_KUNIT_FILE_SD_CORRUPT 3U
+
+struct pkm_kacs_kunit_file_sd_get_args {
+	const void *subject_token;
+	const u8 *target_file_sd_ptr;
+	size_t target_file_sd_len;
+	u32 target_file_sd_state;
+	u32 security_info;
+};
+
+struct pkm_kacs_kunit_file_sd_set_args {
+	const void *subject_token;
+	const u8 *target_file_sd_ptr;
+	size_t target_file_sd_len;
+	u32 target_file_sd_state;
+	const u8 *input_sd_ptr;
+	size_t input_sd_len;
+	u32 security_info;
+};
+
 struct pkm_kacs_kunit_exec_setid_view {
 	u32 uid;
 	u32 euid;
@@ -294,6 +316,12 @@ const u8 *kacs_rust_kunit_create_query_information_process_sd(
 	const void *token_ptr, size_t *len_out);
 const u8 *kacs_rust_kunit_create_read_only_socket_sd(const void *token_ptr,
 						      size_t *len_out);
+const u8 *kacs_rust_kunit_create_file_sd(const void *token_ptr, u32 self_mask,
+					 u32 admin_mask, u32 system_mask,
+					 u32 everyone_mask, size_t *len_out);
+const u8 *kacs_rust_kunit_create_file_sd_with_mandatory_resource_attr(
+	const void *token_ptr, u32 self_mask, u32 admin_mask, u32 system_mask,
+	u32 everyone_mask, size_t *len_out);
 const u8 *kacs_rust_kunit_create_label_sd_subset(u32 integrity_level,
 						 size_t *len_out);
 const u8 *kacs_rust_kunit_create_process_sd_with_mandatory_resource_attr(
@@ -306,23 +334,44 @@ int kacs_rust_check_process_sd_with_intent(const void *subject_token_ptr,
 					   const u8 *sd_ptr, size_t sd_len,
 					   u32 desired, u32 privilege_intent,
 					   u32 *granted_out);
+int kacs_rust_check_file_sd_with_intent(const void *subject_token_ptr,
+					const u8 *sd_ptr, size_t sd_len,
+					u32 desired, u32 privilege_intent,
+					u32 *granted_out);
 int kacs_rust_check_token_sd_with_intent(const void *subject_token_ptr,
 					 const void *target_token_ptr,
 					 u32 desired, u32 privilege_intent,
 					 u32 *granted_out);
+int kacs_rust_validate_sd_bytes(const u8 *sd_ptr, size_t sd_len);
 int kacs_rust_query_process_sd_subset(const u8 *sd_ptr, size_t sd_len,
 				      u32 security_info,
 				      const u8 **out_sd_ptr,
 				      size_t *out_sd_len);
+int kacs_rust_query_file_sd_subset(const u8 *sd_ptr, size_t sd_len,
+				   u32 security_info,
+				   const u8 **out_sd_ptr,
+				   size_t *out_sd_len);
 int kacs_rust_query_token_sd_subset(const void *token_ptr, u32 security_info,
 				    const u8 **out_sd_ptr,
 				    size_t *out_sd_len);
+int kacs_rust_merge_file_sd(const void *subject_token_ptr,
+			    const u8 *current_sd_ptr,
+			    size_t current_sd_len, u32 security_info,
+			    const u8 *input_sd_ptr, size_t input_sd_len,
+			    const u8 **out_sd_ptr,
+			    size_t *out_sd_len);
 int kacs_rust_merge_process_sd(const void *subject_token_ptr,
 			       const u8 *current_sd_ptr,
 			       size_t current_sd_len, u32 security_info,
 			       const u8 *input_sd_ptr, size_t input_sd_len,
 			       const u8 **out_sd_ptr,
 			       size_t *out_sd_len);
+int kacs_rust_build_replacement_file_sd(const void *subject_token_ptr,
+					u32 security_info,
+					const u8 *input_sd_ptr,
+					size_t input_sd_len,
+					const u8 **out_sd_ptr,
+					size_t *out_sd_len);
 int kacs_rust_set_token_sd(const void *subject_token_ptr,
 			   const void *target_token_ptr, u32 security_info,
 			   const u8 *input_sd_ptr, size_t input_sd_len);
@@ -396,6 +445,16 @@ long pkm_kacs_kunit_get_process_sd_for_subject(
 long pkm_kacs_kunit_set_process_sd_for_subject(
 	const struct pkm_kacs_kunit_process_sd_set_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
+long pkm_kacs_kunit_get_file_sd_for_subject(
+	const struct pkm_kacs_kunit_file_sd_get_args *args,
+	const u8 **out_sd_ptr, size_t *out_sd_len);
+long pkm_kacs_kunit_set_file_sd_for_subject(
+	const struct pkm_kacs_kunit_file_sd_set_args *args,
+	const u8 **out_sd_ptr, size_t *out_sd_len);
+u32 pkm_kacs_kunit_classify_file_sd_bytes(const u8 *sd_ptr, size_t sd_len);
+int pkm_kacs_kunit_inode_sd_xattr_get(const char *name, u32 ntfs);
+int pkm_kacs_kunit_inode_sd_xattr_set(const char *name, u32 ntfs);
+int pkm_kacs_kunit_inode_sd_xattr_remove(const char *name, u32 ntfs);
 long pkm_kacs_kunit_get_token_sd_for_subject(
 	int token_fd, const void *subject_token, u32 security_info,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
