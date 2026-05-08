@@ -5941,6 +5941,62 @@ fn file_sd_access_check_errno_with_intent(
     })
 }
 
+fn file_sd_granted_mask_errno_with_intent(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+    privilege_intent: u32,
+) -> Result<u32, i32> {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
+        return Err(-EACCES);
+    };
+    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(|_| -EINVAL)?;
+    let normalized = match FILE_GENERIC_MAPPING.normalize_desired_access(desired) {
+        Ok(normalized) => normalized,
+        Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
+        Err(_) => return Err(-EINVAL),
+    };
+    let conditional_context = ConditionalContext::default();
+    let pip = PipContext {
+        pip_type: 0,
+        pip_trust: 0,
+    };
+
+    subject.with_access_token(|subject_token| {
+        match access_check_core(
+            Some(&target_sd),
+            &subject_token,
+            pip,
+            desired,
+            &FILE_GENERIC_MAPPING,
+            AccessCheckMode::Scalar,
+            None,
+            &conditional_context,
+            None,
+            privilege_intent,
+            EMPTY_POLICIES,
+        ) {
+            Ok(result) => {
+                subject.mark_privileges_used(result.updated_privileges.used);
+                let granted = result
+                    .object_granted_list
+                    .as_ref()
+                    .and_then(|list| list.first().copied())
+                    .unwrap_or(result.granted);
+
+                if normalized.maximum_allowed {
+                    Ok(granted)
+                } else {
+                    Ok(granted & normalized.mapped)
+                }
+            }
+            Err(KacsError::AllocationFailure) => Err(-ENOMEM),
+            Err(KacsError::ReservedAccessMaskBits(_)) => Err(-EINVAL),
+            Err(_) => Err(-EINVAL),
+        }
+    })
+}
+
 fn process_sd_access_check_errno(
     subject_token: *const c_void,
     sd_bytes: &[u8],
@@ -6667,6 +6723,38 @@ pub extern "C" fn kacs_rust_check_file_sd_with_intent(
     let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
     match file_sd_access_check_errno_with_intent(subject_token_ptr, sd_bytes, desired, privilege_intent)
     {
+        Ok(granted) => {
+            if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                *granted_out = granted;
+            }
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Runs AccessCheck against one file SD and returns the granted subset of the
+/// requested mask without requiring the entire request to succeed.
+pub extern "C" fn kacs_rust_granted_file_sd_with_intent(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired: u32,
+    privilege_intent: u32,
+    granted_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match file_sd_granted_mask_errno_with_intent(
+        subject_token_ptr,
+        sd_bytes,
+        desired,
+        privilege_intent,
+    ) {
         Ok(granted) => {
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
                 *granted_out = granted;

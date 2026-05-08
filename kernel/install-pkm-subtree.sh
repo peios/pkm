@@ -215,6 +215,7 @@ require_file "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
 require_file "$kernel_root/arch/x86/kernel/process_64.c"
 require_file "$kernel_root/fs/proc/base.c"
 require_file "$kernel_root/fs/proc/array.c"
+require_file "$kernel_root/fs/xattr.c"
 require_file "$kernel_root/include/linux/cred.h"
 require_file "$kernel_root/include/linux/ptrace.h"
 require_file "$kernel_root/kernel/pid.c"
@@ -493,6 +494,47 @@ replace_line_after_anchor_once 'static int do_task_stat(struct seq_file *m, stru
 	'	permitted = ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_NOAUDIT);' \
 	'	permitted = ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_PROC_QUERY_LIMITED | PTRACE_MODE_NOAUDIT);' \
 	"$kernel_root/fs/proc/array.c"
+insert_block_before_exact_once 'int setxattr_copy(const char __user *name, struct kernel_xattr_ctx *ctx)' \
+	'extern int pkm_kacs_file_sd_xattr_get' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_file_sd_xattr_get(struct file *file, const char *name);
+extern int pkm_kacs_file_sd_xattr_set(struct file *file, const char *name);
+extern int pkm_kacs_file_sd_xattr_remove(struct file *file, const char *name);
+#endif
+
+' \
+	"$kernel_root/fs/xattr.c"
+replace_line_after_anchor_once 'int file_setxattr(struct file *f, struct kernel_xattr_ctx *ctx)' \
+	'	int error = mnt_want_write_file(f);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	int error = pkm_kacs_file_sd_xattr_set(f, ctx->kname->name);
+	if (error)
+		return error;
+#else
+	int error = 0;
+#endif
+	error = mnt_want_write_file(f);' \
+	"$kernel_root/fs/xattr.c"
+replace_line_after_anchor_once 'ssize_t file_getxattr(struct file *f, struct kernel_xattr_ctx *ctx)' \
+	'	audit_file(f);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	ssize_t error = pkm_kacs_file_sd_xattr_get(f, ctx->kname->name);
+	if (error)
+		return error;
+#endif
+	audit_file(f);' \
+	"$kernel_root/fs/xattr.c"
+replace_line_after_anchor_once 'static int file_removexattr(struct file *f, struct xattr_name *kname)' \
+	'	int error = mnt_want_write_file(f);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	int error = pkm_kacs_file_sd_xattr_remove(f, kname->name);
+	if (error)
+		return error;
+#else
+	int error = 0;
+#endif
+	error = mnt_want_write_file(f);' \
+	"$kernel_root/fs/xattr.c"
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1000 kacs_open_self_token
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \

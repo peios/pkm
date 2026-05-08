@@ -214,6 +214,13 @@ struct pkm_kacs_kunit_file_sd_get_args {
 	size_t target_file_sd_len;
 	u32 target_file_sd_state;
 	u32 security_info;
+	u32 cached_granted_access;
+	u32 file_mode;
+	u32 file_flags;
+	u32 mount_policy_override;
+	u64 mount_magic;
+	u16 inode_mode;
+	u16 _reserved;
 };
 
 struct pkm_kacs_kunit_file_sd_set_args {
@@ -224,6 +231,26 @@ struct pkm_kacs_kunit_file_sd_set_args {
 	const u8 *input_sd_ptr;
 	size_t input_sd_len;
 	u32 security_info;
+	u32 cached_granted_access;
+	u32 file_mode;
+	u32 file_flags;
+	u32 mount_policy_override;
+	u64 mount_magic;
+	u16 inode_mode;
+	u16 _reserved;
+};
+
+struct pkm_kacs_kunit_file_open_args {
+	const void *subject_token;
+	const u8 *target_file_sd_ptr;
+	size_t target_file_sd_len;
+	u32 target_file_sd_state;
+	u32 file_mode;
+	u32 file_flags;
+	u32 mount_policy_override;
+	u64 mount_magic;
+	u16 inode_mode;
+	u16 _reserved;
 };
 
 struct pkm_kacs_kunit_missing_file_sd_query_args {
@@ -352,6 +379,10 @@ int kacs_rust_check_file_sd_with_intent(const void *subject_token_ptr,
 					const u8 *sd_ptr, size_t sd_len,
 					u32 desired, u32 privilege_intent,
 					u32 *granted_out);
+int kacs_rust_granted_file_sd_with_intent(const void *subject_token_ptr,
+					  const u8 *sd_ptr, size_t sd_len,
+					  u32 desired, u32 privilege_intent,
+					  u32 *granted_out);
 int kacs_rust_check_token_sd_with_intent(const void *subject_token_ptr,
 					 const void *target_token_ptr,
 					 u32 desired, u32 privilege_intent,
@@ -471,6 +502,15 @@ long pkm_kacs_kunit_get_file_sd_for_subject(
 long pkm_kacs_kunit_set_file_sd_for_subject(
 	const struct pkm_kacs_kunit_file_sd_set_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
+long pkm_kacs_kunit_open_file_for_subject(
+	const struct pkm_kacs_kunit_file_open_args *args,
+	u32 *granted_access_out);
+long pkm_kacs_kunit_get_cached_file_sd_for_subject(
+	const struct pkm_kacs_kunit_file_sd_get_args *args,
+	const u8 **out_sd_ptr, size_t *out_sd_len);
+long pkm_kacs_kunit_set_cached_file_sd_for_subject(
+	const struct pkm_kacs_kunit_file_sd_set_args *args,
+	const u8 **out_sd_ptr, size_t *out_sd_len);
 u32 pkm_kacs_kunit_classify_file_sd_bytes(const u8 *sd_ptr, size_t sd_len);
 u32 pkm_kacs_kunit_mount_policy_for_magic(u64 magic);
 long pkm_kacs_kunit_missing_file_sd_result_for_magic(u64 magic);
@@ -486,6 +526,9 @@ long pkm_kacs_kunit_query_missing_file_sd_on_policy_mount(
 int pkm_kacs_kunit_inode_sd_xattr_get(const char *name, u32 ntfs);
 int pkm_kacs_kunit_inode_sd_xattr_set(const char *name, u32 ntfs);
 int pkm_kacs_kunit_inode_sd_xattr_remove(const char *name, u32 ntfs);
+int pkm_kacs_kunit_file_sd_xattr_get(const char *name, u32 ntfs);
+int pkm_kacs_kunit_file_sd_xattr_set(const char *name, u32 ntfs);
+int pkm_kacs_kunit_file_sd_xattr_remove(const char *name, u32 ntfs);
 long pkm_kacs_kunit_get_token_sd_for_subject(
 	int token_fd, const void *subject_token, u32 security_info,
 	const u8 **out_sd_ptr, size_t *out_sd_len);

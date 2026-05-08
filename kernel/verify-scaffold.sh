@@ -113,6 +113,15 @@ if ! rg -q 'proc_pkm_check_task_metadata_access' \
 	die "install-pkm-subtree.sh does not stage the procfs metadata visibility patch"
 fi
 
+if ! rg -q 'pkm_kacs_file_sd_xattr_get' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'pkm_kacs_file_sd_xattr_set' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'pkm_kacs_file_sd_xattr_remove' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the fd raw SD xattr guard patch"
+fi
+
 if ! rg -q 'pkm_kacs_sched_setaffinity' \
 	"$repo_root/kernel/install-pkm-subtree.sh"; then
 	die "install-pkm-subtree.sh does not stage the sched_setaffinity KACS patch"
