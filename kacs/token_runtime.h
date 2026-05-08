@@ -313,6 +313,15 @@ struct pkm_kacs_kunit_native_create_args {
 	u64 mount_magic;
 };
 
+struct pkm_kacs_kunit_delete_on_close_result {
+	u32 granted_access;
+	u32 status;
+	long reopen_result;
+	u32 pending_before_release;
+	u32 pending_after_release;
+	u32 unlink_calls;
+};
+
 struct pkm_kacs_kunit_missing_file_sd_query_args {
 	const void *subject_token;
 	const u8 *template_sd_ptr;
@@ -580,6 +589,9 @@ long pkm_kacs_kunit_native_create_for_subject(
 	const struct pkm_kacs_kunit_native_create_args *args,
 	const u8 **created_sd_out, size_t *created_sd_len_out,
 	u32 *granted_access_out, u32 *status_out);
+long pkm_kacs_kunit_delete_on_close_for_subject(
+	const struct pkm_kacs_kunit_native_open_args *args,
+	struct pkm_kacs_kunit_delete_on_close_result *out);
 long pkm_kacs_kunit_get_cached_file_sd_for_subject(
 	const struct pkm_kacs_kunit_file_sd_get_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
