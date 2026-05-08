@@ -283,6 +283,8 @@ struct pkm_kacs_kunit_native_open_args {
 	const u8 *target_file_sd_ptr;
 	size_t target_file_sd_len;
 	u32 target_file_sd_state;
+	const u8 *input_sd_ptr;
+	size_t input_sd_len;
 	u32 desired_access;
 	u32 create_disposition;
 	u32 create_options;
@@ -291,6 +293,21 @@ struct pkm_kacs_kunit_native_open_args {
 	u64 mount_magic;
 	u16 inode_mode;
 	u16 _reserved;
+};
+
+struct pkm_kacs_kunit_native_create_args {
+	const void *subject_token;
+	const u8 *parent_file_sd_ptr;
+	size_t parent_file_sd_len;
+	u32 parent_file_sd_state;
+	const u8 *creator_sd_ptr;
+	size_t creator_sd_len;
+	u32 desired_access;
+	u32 create_disposition;
+	u32 create_options;
+	u32 flags;
+	u32 mount_policy_override;
+	u64 mount_magic;
 };
 
 struct pkm_kacs_kunit_missing_file_sd_query_args {
@@ -457,6 +474,14 @@ int kacs_rust_build_replacement_file_sd(const void *subject_token_ptr,
 					size_t input_sd_len,
 					const u8 **out_sd_ptr,
 					size_t *out_sd_len);
+int kacs_rust_build_created_file_sd(const void *subject_token_ptr,
+				    const u8 *parent_sd_ptr,
+				    size_t parent_sd_len,
+				    const u8 *creator_sd_ptr,
+				    size_t creator_sd_len,
+				    u32 child_is_directory,
+				    const u8 **out_sd_ptr,
+				    size_t *out_sd_len);
 int kacs_rust_synthesize_file_sd(const u8 *parent_sd_ptr, size_t parent_sd_len,
 				 const u8 *template_sd_ptr,
 				 size_t template_sd_len,
@@ -548,6 +573,10 @@ long pkm_kacs_kunit_open_file_for_subject(
 long pkm_kacs_kunit_native_open_for_subject(
 	const struct pkm_kacs_kunit_native_open_args *args,
 	u32 *granted_access_out, u32 *status_out, u32 *file_mode_out);
+long pkm_kacs_kunit_native_create_for_subject(
+	const struct pkm_kacs_kunit_native_create_args *args,
+	const u8 **created_sd_out, size_t *created_sd_len_out,
+	u32 *granted_access_out, u32 *status_out);
 long pkm_kacs_kunit_get_cached_file_sd_for_subject(
 	const struct pkm_kacs_kunit_file_sd_get_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);

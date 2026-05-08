@@ -108,6 +108,8 @@
 #define PKM_KACS_FILE_EXECUTE 0x00000020U
 #define PKM_KACS_FILE_LIST_DIRECTORY PKM_KACS_FILE_READ_DATA
 #define PKM_KACS_FILE_TRAVERSE PKM_KACS_FILE_EXECUTE
+#define PKM_KACS_FILE_ADD_FILE PKM_KACS_FILE_WRITE_DATA
+#define PKM_KACS_FILE_ADD_SUBDIRECTORY PKM_KACS_FILE_APPEND_DATA
 #define PKM_KACS_FILE_READ_ATTRIBUTES 0x00000080U
 #define PKM_KACS_FILE_WRITE_ATTRIBUTES 0x00000100U
 #define PKM_KACS_FILE_DELETE_CHILD 0x00000040U
@@ -131,8 +133,17 @@ struct pkm_kacs_native_open_request {
 	bool active;
 };
 
+struct pkm_kacs_native_create_request {
+	const struct inode *expected_parent_inode;
+	const u8 *sd_bytes;
+	size_t sd_len;
+	bool directory;
+	bool active;
+};
+
 struct pkm_kacs_native_open_prepared {
 	u32 desired_access;
+	u32 create_disposition;
 	u32 status;
 	int open_flags;
 	bool directory_required;
@@ -210,6 +221,7 @@ struct pkm_kacs_task_security {
 	struct pkm_kacs_process_state *process_state;
 	const struct cred *impersonation_saved_cred;
 	struct pkm_kacs_native_open_request native_open;
+	struct pkm_kacs_native_create_request native_create;
 };
 
 struct pkm_kacs_socket_security {
@@ -249,6 +261,7 @@ static struct lsm_blob_sizes pkm_blob_sizes __ro_after_init = {
 	.lbs_file = sizeof(struct pkm_kacs_file_security),
 	.lbs_inode = sizeof(struct pkm_kacs_inode_security),
 	.lbs_superblock = sizeof(struct pkm_kacs_superblock_security),
+	.lbs_xattr_count = 1,
 };
 
 static inline struct pkm_kacs_cred_security *pkm_kacs_cred(const struct cred *cred)
@@ -363,6 +376,11 @@ static int pkm_kacs_inode_setxattr(struct mnt_idmap *idmap,
 static int pkm_kacs_inode_removexattr(struct mnt_idmap *idmap,
 				      struct dentry *dentry,
 				      const char *name);
+static int pkm_kacs_inode_init_security(struct inode *inode,
+					struct inode *dir,
+					const struct qstr *qstr,
+					struct xattr *xattrs,
+					int *xattr_count);
 static int pkm_kacs_file_open(struct file *file);
 static int pkm_kacs_sk_alloc_security(struct sock *sk, int family,
 				      gfp_t priority);
@@ -406,6 +424,10 @@ static long pkm_kacs_map_file_generic_access_mask(u32 desired,
 static long pkm_kacs_prepare_native_open(
 	const struct kacs_open_how *how,
 	struct pkm_kacs_native_open_prepared *prepared);
+static long pkm_kacs_copy_creator_sd_from_user(
+	const struct kacs_open_how *how,
+	u8 **creator_sd_bytes_out,
+	size_t *creator_sd_len_out);
 static long pkm_kacs_resolve_native_open_path(
 	int dirfd, const char __user *path,
 	const struct pkm_kacs_native_open_prepared *prepared,
@@ -415,6 +437,24 @@ static void pkm_kacs_set_current_native_open_request(
 static void pkm_kacs_clear_current_native_open_request(void);
 static bool pkm_kacs_native_open_request_matches(struct file *file,
 						 u32 *desired_access_out);
+static void pkm_kacs_set_current_native_create_request(
+	const struct inode *parent_inode, bool directory, const u8 *sd_bytes,
+	size_t sd_len);
+static void pkm_kacs_clear_current_native_create_request(void);
+static bool pkm_kacs_current_native_create_request_matches(
+	const struct inode *parent_inode, bool directory,
+	const u8 **sd_bytes_out, size_t *sd_len_out);
+static umode_t pkm_kacs_native_create_mode(bool directory);
+static long pkm_kacs_build_created_file_sd_for_subject(
+	const void *subject_token, struct file *parent_file,
+	const u8 *creator_sd_ptr, size_t creator_sd_len, bool directory,
+	u32 desired_access, const u8 **out_sd_ptr, size_t *out_sd_len,
+	u32 *granted_access_out);
+static long pkm_kacs_do_native_create_open(
+	int dirfd, const char __user *path,
+	const struct kacs_open_how *how,
+	const struct pkm_kacs_native_open_prepared *prepared,
+	struct file **file_out, u32 *status_out);
 static long pkm_kacs_path_sd_lookup_flags(u32 flags,
 					  unsigned int *lookup_flags_out);
 static long pkm_kacs_open_path_lookup_flags(u32 flags,
@@ -1901,6 +1941,11 @@ static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 	new_sec->native_open.expected_mnt = NULL;
 	new_sec->native_open.desired_access = 0;
 	new_sec->native_open.active = false;
+	new_sec->native_create.expected_parent_inode = NULL;
+	new_sec->native_create.sd_bytes = NULL;
+	new_sec->native_create.sd_len = 0;
+	new_sec->native_create.directory = false;
+	new_sec->native_create.active = false;
 
 	parent_state = pkm_kacs_current_process_state();
 	if (parent_state &&
@@ -1945,6 +1990,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_getxattr, pkm_kacs_inode_getxattr),
 	LSM_HOOK_INIT(inode_setxattr, pkm_kacs_inode_setxattr),
 	LSM_HOOK_INIT(inode_removexattr, pkm_kacs_inode_removexattr),
+	LSM_HOOK_INIT(inode_init_security, pkm_kacs_inode_init_security),
 	LSM_HOOK_INIT(file_alloc_security, pkm_kacs_file_alloc_security),
 	LSM_HOOK_INIT(file_open, pkm_kacs_file_open),
 	LSM_HOOK_INIT(task_alloc, pkm_kacs_task_alloc),
@@ -2999,13 +3045,20 @@ static long pkm_kacs_prepare_native_open(
 		return -EINVAL;
 	if (how->__pad != 0)
 		return -EINVAL;
+	if ((how->sd_ptr == 0) != (how->sd_len == 0))
+		return -EINVAL;
+	if (how->sd_len > PKM_KACS_MAX_SD_BYTES)
+		return -EINVAL;
 	if (how->create_disposition > KACS_FILE_OVERWRITE_IF)
 		return -EINVAL;
-	if (how->create_disposition != KACS_FILE_OPEN)
+	if (how->create_disposition != KACS_FILE_OPEN &&
+	    how->create_disposition != KACS_FILE_CREATE &&
+	    how->create_disposition != KACS_FILE_OPEN_IF)
 		return -EOPNOTSUPP;
 	if ((how->create_options & KACS_CREATE_OPT_DELETE_ON_CLOSE) != 0)
 		return -EOPNOTSUPP;
-	if (how->sd_ptr != 0 || how->sd_len != 0)
+	if (how->create_disposition == KACS_FILE_OPEN &&
+	    (how->sd_ptr != 0 || how->sd_len != 0))
 		return -EOPNOTSUPP;
 
 	ret = pkm_kacs_map_file_generic_access_mask(how->desired_access,
@@ -3041,10 +3094,35 @@ static long pkm_kacs_prepare_native_open(
 		open_flags |= O_DIRECTORY;
 
 	prepared->desired_access = desired_access;
+	prepared->create_disposition = how->create_disposition;
 	prepared->status = KACS_STATUS_OPENED;
 	prepared->open_flags = open_flags;
 	prepared->directory_required =
 		(how->create_options & KACS_CREATE_OPT_DIRECTORY) != 0;
+	return 0;
+}
+
+static long pkm_kacs_copy_creator_sd_from_user(
+	const struct kacs_open_how *how,
+	u8 **creator_sd_bytes_out,
+	size_t *creator_sd_len_out)
+{
+	u8 *creator_sd_bytes;
+
+	if (!how || !creator_sd_bytes_out || !creator_sd_len_out)
+		return -EINVAL;
+
+	*creator_sd_bytes_out = NULL;
+	*creator_sd_len_out = 0;
+	if (how->sd_ptr == 0 || how->sd_len == 0)
+		return 0;
+
+	creator_sd_bytes = memdup_user(u64_to_user_ptr(how->sd_ptr), how->sd_len);
+	if (IS_ERR(creator_sd_bytes))
+		return PTR_ERR(creator_sd_bytes);
+
+	*creator_sd_bytes_out = creator_sd_bytes;
+	*creator_sd_len_out = how->sd_len;
 	return 0;
 }
 
@@ -3088,6 +3166,56 @@ static bool pkm_kacs_native_open_request_matches(struct file *file,
 	return true;
 }
 
+static void pkm_kacs_set_current_native_create_request(
+	const struct inode *parent_inode, bool directory, const u8 *sd_bytes,
+	size_t sd_len)
+{
+	struct pkm_kacs_task_security *sec;
+
+	if (!current->security)
+		return;
+
+	sec = pkm_kacs_task(current);
+	sec->native_create.expected_parent_inode = parent_inode;
+	sec->native_create.sd_bytes = sd_bytes;
+	sec->native_create.sd_len = sd_len;
+	sec->native_create.directory = directory;
+	sec->native_create.active = parent_inode && sd_bytes && sd_len != 0;
+}
+
+static void pkm_kacs_clear_current_native_create_request(void)
+{
+	pkm_kacs_set_current_native_create_request(NULL, false, NULL, 0);
+}
+
+static bool pkm_kacs_current_native_create_request_matches(
+	const struct inode *parent_inode, bool directory,
+	const u8 **sd_bytes_out, size_t *sd_len_out)
+{
+	struct pkm_kacs_task_security *sec;
+
+	if (!current->security)
+		return false;
+
+	sec = pkm_kacs_task(current);
+	if (!sec->native_create.active)
+		return false;
+	if (sec->native_create.expected_parent_inode != parent_inode ||
+	    sec->native_create.directory != directory)
+		return false;
+
+	if (sd_bytes_out)
+		*sd_bytes_out = sec->native_create.sd_bytes;
+	if (sd_len_out)
+		*sd_len_out = sec->native_create.sd_len;
+	return true;
+}
+
+static umode_t pkm_kacs_native_create_mode(bool directory)
+{
+	return directory ? (S_IFDIR | 0700) : (S_IFREG | 0600);
+}
+
 static long pkm_kacs_path_sd_lookup_flags(u32 flags,
 					  unsigned int *lookup_flags_out)
 {
@@ -3122,6 +3250,246 @@ static long pkm_kacs_open_path_lookup_flags(u32 flags,
 
 	*lookup_flags_out = lookup_flags;
 	return 0;
+}
+
+static long pkm_kacs_build_created_file_sd_for_subject(
+	const void *subject_token, struct file *parent_file,
+	const u8 *creator_sd_ptr, size_t creator_sd_len, bool directory,
+	u32 desired_access, const u8 **out_sd_ptr, size_t *out_sd_len,
+	u32 *granted_access_out)
+{
+	struct inode *parent_inode;
+	struct pkm_kacs_inode_security *parent_sec;
+	struct pkm_kacs_inode_sd_cache *parent_cache = NULL;
+	u32 parent_right;
+	u32 granted_access = 0;
+	long ret;
+
+	if (!subject_token || !parent_file || !out_sd_ptr || !out_sd_len)
+		return -EINVAL;
+
+	*out_sd_ptr = NULL;
+	*out_sd_len = 0;
+	if (granted_access_out)
+		*granted_access_out = 0;
+	if (creator_sd_len != 0 && !creator_sd_ptr)
+		return -EINVAL;
+
+	parent_inode = file_inode(parent_file);
+	if (!parent_inode || !parent_inode->i_security)
+		return -EACCES;
+	if (!pkm_kacs_mount_policy_is_managed(
+		    pkm_kacs_superblock_mount_policy(parent_inode->i_sb)))
+		return -EOPNOTSUPP;
+	if (pkm_kacs_inode_is_ntfs(parent_inode))
+		return -EOPNOTSUPP;
+
+	parent_sec = pkm_kacs_inode(parent_inode);
+	parent_right = directory ? PKM_KACS_FILE_ADD_SUBDIRECTORY :
+				   PKM_KACS_FILE_ADD_FILE;
+
+	mutex_lock(&parent_sec->lock);
+	ret = pkm_kacs_inode_resolve_effective_cache_locked(parent_file, parent_sec,
+							    &parent_cache);
+	if (ret)
+		goto out_unlock;
+	if (parent_cache->state != PKM_KACS_INODE_SD_VALID ||
+	    !parent_cache->bytes || parent_cache->len == 0) {
+		ret = -EACCES;
+		goto out_unlock;
+	}
+
+	ret = kacs_rust_check_file_sd_with_intent(subject_token, parent_cache->bytes,
+						  parent_cache->len, parent_right,
+						  0, &granted_access);
+	if (ret)
+		goto out_unlock;
+
+	ret = kacs_rust_build_created_file_sd(subject_token, parent_cache->bytes,
+					      parent_cache->len, creator_sd_ptr,
+					      creator_sd_len, directory,
+					      out_sd_ptr, out_sd_len);
+out_unlock:
+	mutex_unlock(&parent_sec->lock);
+	if (ret)
+		return ret;
+
+	ret = kacs_rust_check_file_sd_with_intent(subject_token, *out_sd_ptr,
+						  *out_sd_len, desired_access, 0,
+						  &granted_access);
+	if (ret) {
+		pkm_kacs_free((void *)*out_sd_ptr);
+		*out_sd_ptr = NULL;
+		*out_sd_len = 0;
+		return ret;
+	}
+
+	if (granted_access_out)
+		*granted_access_out = granted_access;
+	return 0;
+}
+
+static int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
+					const struct qstr *qstr,
+					struct xattr *xattrs,
+					int *xattr_count)
+{
+	struct xattr *xattr;
+	const u8 *sd_bytes = NULL;
+	size_t sd_len = 0;
+	u8 *copied_bytes;
+
+	(void)qstr;
+	if (!inode || !dir || !xattrs || !xattr_count)
+		return -EOPNOTSUPP;
+	if (pkm_kacs_inode_is_ntfs(inode))
+		return -EOPNOTSUPP;
+	if (!pkm_kacs_current_native_create_request_matches(
+		    dir, S_ISDIR(inode->i_mode), &sd_bytes, &sd_len))
+		return -EOPNOTSUPP;
+	if (!sd_bytes || sd_len == 0)
+		return -EOPNOTSUPP;
+
+	copied_bytes = kmemdup(sd_bytes, sd_len, GFP_NOFS);
+	if (!copied_bytes)
+		return -ENOMEM;
+
+	xattr = lsm_get_xattr_slot(xattrs, xattr_count);
+	if (!xattr) {
+		kfree(copied_bytes);
+		return -ENOMEM;
+	}
+
+	xattr->name = "peios.sd";
+	xattr->value = copied_bytes;
+	xattr->value_len = sd_len;
+	return 0;
+}
+
+static long pkm_kacs_do_native_create_open(
+	int dirfd, const char __user *path, const struct kacs_open_how *how,
+	const struct pkm_kacs_native_open_prepared *prepared,
+	struct file **file_out, u32 *status_out)
+{
+	struct path parent_path = {};
+	struct path child_path = {};
+	struct file parent_file = {};
+	struct file *opened_file = NULL;
+	struct dentry *dentry;
+	struct inode *parent_inode;
+	const void *subject_token;
+	const u8 *created_sd = NULL;
+	u8 *creator_sd_bytes = NULL;
+	size_t created_sd_len = 0;
+	size_t creator_sd_len = 0;
+	u32 granted_access = 0;
+	unsigned int lookup_flags = 0;
+	umode_t mode;
+	bool directory;
+	long ret;
+
+	if (!path || !how || !prepared || !file_out || !status_out)
+		return -EINVAL;
+
+	*file_out = NULL;
+	*status_out = 0;
+	directory = prepared->directory_required;
+	if (directory &&
+	    (prepared->desired_access & PKM_KACS_DIRECTORY_MUTATION_RIGHTS) != 0)
+		return -EOPNOTSUPP;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!subject_token)
+		return -EACCES;
+
+	ret = pkm_kacs_open_path_lookup_flags(how->flags, &lookup_flags);
+	if (ret)
+		return ret;
+	if (directory)
+		lookup_flags |= LOOKUP_DIRECTORY;
+
+	ret = pkm_kacs_copy_creator_sd_from_user(
+		how, &creator_sd_bytes, &creator_sd_len);
+	if (ret)
+		return ret;
+
+	dentry = start_creating_user_path(dirfd, path, &parent_path, lookup_flags);
+	if (IS_ERR(dentry)) {
+		ret = PTR_ERR(dentry);
+		goto out_creator_sd;
+	}
+
+	parent_inode = d_inode(parent_path.dentry);
+	if (!parent_inode) {
+		ret = -EACCES;
+		goto out_end_create;
+	}
+
+	parent_file.f_inode = parent_inode;
+	*(struct path *)&parent_file.f_path = parent_path;
+	ret = pkm_kacs_build_created_file_sd_for_subject(
+		subject_token, &parent_file, creator_sd_bytes, creator_sd_len,
+		directory, prepared->desired_access, &created_sd, &created_sd_len,
+		&granted_access);
+	if (ret)
+		goto out_end_create;
+
+	mode = pkm_kacs_native_create_mode(directory);
+	pkm_kacs_set_current_native_create_request(parent_inode, directory,
+						   created_sd, created_sd_len);
+	if (directory)
+		ret = security_path_mkdir(&parent_path, dentry, mode);
+	else
+		ret = security_path_mknod(&parent_path, dentry, mode, 0);
+	if (!ret) {
+		if (directory) {
+			struct dentry *created = vfs_mkdir(mnt_idmap(parent_path.mnt),
+							   parent_inode, dentry,
+							   mode, NULL);
+			if (IS_ERR(created))
+				ret = PTR_ERR(created);
+			else
+				dentry = created;
+		} else {
+			ret = vfs_create(mnt_idmap(parent_path.mnt), dentry, mode,
+					 NULL);
+		}
+	}
+	pkm_kacs_clear_current_native_create_request();
+	if (ret)
+		goto out_end_create;
+
+	child_path.mnt = parent_path.mnt;
+	child_path.dentry = dget(dentry);
+	pkm_kacs_set_current_native_open_request(&child_path,
+						 prepared->desired_access);
+	opened_file = dentry_open(&child_path, prepared->open_flags, current_cred());
+	pkm_kacs_clear_current_native_open_request();
+	path_put(&child_path);
+	if (IS_ERR(opened_file)) {
+		ret = PTR_ERR(opened_file);
+		opened_file = NULL;
+		if (directory)
+			vfs_rmdir(mnt_idmap(parent_path.mnt), parent_inode, dentry,
+				  NULL);
+		else
+			vfs_unlink(mnt_idmap(parent_path.mnt), parent_inode, dentry,
+				   NULL);
+		goto out_end_create;
+	}
+
+	*file_out = opened_file;
+	*status_out = KACS_STATUS_CREATED;
+	ret = 0;
+
+out_end_create:
+	pkm_kacs_clear_current_native_create_request();
+	end_creating_path(&parent_path, dentry);
+	if (created_sd)
+		pkm_kacs_free((void *)created_sd);
+out_creator_sd:
+	kfree(creator_sd_bytes);
+	return ret;
 }
 
 static long pkm_kacs_resolve_pidfd_process_target(
@@ -5755,10 +6123,17 @@ long pkm_kacs_kunit_native_open_for_subject(
 			.create_disposition = args->create_disposition,
 			.create_options = args->create_options,
 			.flags = args->flags,
+			.sd_ptr = (u64)(uintptr_t)args->input_sd_ptr,
+			.sd_len = (u32)args->input_sd_len,
 		},
 		&prepared);
 	if (ret)
 		return ret;
+	if (args->create_disposition == KACS_FILE_CREATE)
+		return -EEXIST;
+	if (args->create_disposition == KACS_FILE_OPEN_IF &&
+	    args->input_sd_ptr && args->input_sd_len != 0)
+		return -EINVAL;
 
 	cache = pkm_kacs_kunit_file_sd_cache_alloc(args->target_file_sd_ptr,
 						   args->target_file_sd_len,
@@ -5825,6 +6200,80 @@ long pkm_kacs_kunit_native_open_for_subject(
 	}
 
 out_cleanup:
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_free:
+	kfree(state);
+	return ret;
+}
+
+long pkm_kacs_kunit_native_create_for_subject(
+	const struct pkm_kacs_kunit_native_create_args *args,
+	const u8 **created_sd_out, size_t *created_sd_len_out,
+	u32 *granted_access_out, u32 *status_out)
+{
+	struct pkm_kacs_kunit_file_mount_state *state;
+	struct pkm_kacs_inode_sd_cache *cache;
+	struct pkm_kacs_native_open_prepared prepared = {};
+	struct kacs_open_how how = {};
+	u64 magic;
+	long ret;
+
+	if (!args || !created_sd_out || !created_sd_len_out)
+		return -EINVAL;
+
+	*created_sd_out = NULL;
+	*created_sd_len_out = 0;
+	if (granted_access_out)
+		*granted_access_out = 0;
+	if (status_out)
+		*status_out = 0;
+
+	how.desired_access = args->desired_access;
+	how.create_disposition = args->create_disposition;
+	how.create_options = args->create_options;
+	how.flags = args->flags;
+	how.sd_ptr = (u64)(uintptr_t)args->creator_sd_ptr;
+	how.sd_len = (u32)args->creator_sd_len;
+
+	ret = pkm_kacs_prepare_native_open(&how, &prepared);
+	if (ret)
+		return ret;
+	if (args->create_disposition != KACS_FILE_CREATE &&
+	    args->create_disposition != KACS_FILE_OPEN_IF)
+		return -EINVAL;
+	if (prepared.directory_required &&
+	    (prepared.desired_access & PKM_KACS_DIRECTORY_MUTATION_RIGHTS) != 0)
+		return -EOPNOTSUPP;
+
+	cache = pkm_kacs_kunit_file_sd_cache_alloc(args->parent_file_sd_ptr,
+						   args->parent_file_sd_len,
+						   args->parent_file_sd_state);
+	if (!cache)
+		return -EINVAL;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		return -ENOMEM;
+	}
+
+	magic = args->mount_magic ? args->mount_magic : TMPFS_MAGIC;
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		state, magic, cache, args->mount_policy_override, NULL, 0,
+		S_IFDIR, true);
+	if (ret) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		goto out_free;
+	}
+
+	ret = pkm_kacs_build_created_file_sd_for_subject(
+		args->subject_token, &state->file, args->creator_sd_ptr,
+		args->creator_sd_len, prepared.directory_required,
+		prepared.desired_access, created_sd_out, created_sd_len_out,
+		granted_access_out);
+	if (!ret && status_out)
+		*status_out = KACS_STATUS_CREATED;
+
 	pkm_kacs_kunit_cleanup_file_mount_state(state);
 out_free:
 	kfree(state);
@@ -7198,6 +7647,7 @@ SYSCALL_DEFINE5(kacs_open, int, dirfd, const char __user *, path,
 	struct file *file;
 	const void *subject_token;
 	struct kacs_open_how how;
+	u32 status = KACS_STATUS_OPENED;
 	int fd;
 	long ret;
 
@@ -7217,20 +7667,39 @@ SYSCALL_DEFINE5(kacs_open, int, dirfd, const char __user *, path,
 	ret = pkm_kacs_prepare_native_open(&how, &prepared);
 	if (ret)
 		return ret;
+	status = prepared.status;
+
+	if (prepared.create_disposition == KACS_FILE_CREATE)
+		goto do_create;
 
 	ret = pkm_kacs_resolve_native_open_path(dirfd, path, &prepared,
 						 how.flags, &resolved_path);
+	if (!ret) {
+		if (prepared.create_disposition == KACS_FILE_OPEN_IF &&
+		    (how.sd_ptr != 0 || how.sd_len != 0)) {
+			path_put(&resolved_path);
+			return -EINVAL;
+		}
+
+		pkm_kacs_set_current_native_open_request(&resolved_path,
+							 prepared.desired_access);
+		file = dentry_open(&resolved_path, prepared.open_flags, current_cred());
+		pkm_kacs_clear_current_native_open_request();
+		path_put(&resolved_path);
+		if (IS_ERR(file))
+			return PTR_ERR(file);
+		goto install_fd;
+	}
+	if (ret != -ENOENT || prepared.create_disposition != KACS_FILE_OPEN_IF)
+		return ret;
+
+do_create:
+	ret = pkm_kacs_do_native_create_open(dirfd, path, &how, &prepared, &file,
+					     &status);
 	if (ret)
 		return ret;
 
-	pkm_kacs_set_current_native_open_request(&resolved_path,
-						 prepared.desired_access);
-	file = dentry_open(&resolved_path, prepared.open_flags, current_cred());
-	pkm_kacs_clear_current_native_open_request();
-	path_put(&resolved_path);
-	if (IS_ERR(file))
-		return PTR_ERR(file);
-
+install_fd:
 	fd = get_unused_fd_flags(0);
 	if (fd < 0) {
 		fput(file);
@@ -7238,7 +7707,7 @@ SYSCALL_DEFINE5(kacs_open, int, dirfd, const char __user *, path,
 	}
 
 	if (status_out &&
-	    put_user(prepared.status, status_out)) {
+	    put_user(status, status_out)) {
 		put_unused_fd(fd);
 		fput(file);
 		return -EFAULT;
