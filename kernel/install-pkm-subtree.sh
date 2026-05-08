@@ -556,6 +556,8 @@ insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1013 kacs_set_impersonation_level
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1020 kacs_open
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1021 kacs_get_sd
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1022 kacs_set_sd

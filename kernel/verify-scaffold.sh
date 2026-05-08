@@ -61,6 +61,7 @@ for syscall in \
 	"1011 kacs_impersonate_peer" \
 	"1012 kacs_revert" \
 	"1013 kacs_set_impersonation_level" \
+	"1020 kacs_open" \
 	"1021 kacs_get_sd" \
 	"1022 kacs_set_sd" \
 	"1090 kmes_emit" \

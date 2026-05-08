@@ -24,6 +24,21 @@
 #define PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL 3U
 #define PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT 4U
 
+#define KACS_FILE_SUPERSEDE 0U
+#define KACS_FILE_OPEN 1U
+#define KACS_FILE_CREATE 2U
+#define KACS_FILE_OPEN_IF 3U
+#define KACS_FILE_OVERWRITE 4U
+#define KACS_FILE_OVERWRITE_IF 5U
+
+#define KACS_CREATE_OPT_DIRECTORY 0x0001U
+#define KACS_CREATE_OPT_DELETE_ON_CLOSE 0x0002U
+
+#define KACS_STATUS_OPENED 1U
+#define KACS_STATUS_CREATED 2U
+#define KACS_STATUS_OVERWRITTEN 3U
+#define KACS_STATUS_SUPERSEDED 4U
+
 #define KACS_MIT_WXP 0x001U
 #define KACS_MIT_TLP 0x002U
 #define KACS_MIT_LSV 0x004U
@@ -97,6 +112,16 @@ struct pkm_kacs_group_adjust_entry {
 struct pkm_kacs_priv_adjust_entry {
 	u32 luid;
 	u32 attributes;
+};
+
+struct kacs_open_how {
+	u32 desired_access;
+	u32 create_disposition;
+	u32 create_options;
+	u32 flags;
+	u64 sd_ptr;
+	u32 sd_len;
+	u32 __pad;
 };
 
 struct pkm_kacs_kunit_process_state_view {
@@ -247,6 +272,21 @@ struct pkm_kacs_kunit_file_open_args {
 	u32 target_file_sd_state;
 	u32 file_mode;
 	u32 file_flags;
+	u32 mount_policy_override;
+	u64 mount_magic;
+	u16 inode_mode;
+	u16 _reserved;
+};
+
+struct pkm_kacs_kunit_native_open_args {
+	const void *subject_token;
+	const u8 *target_file_sd_ptr;
+	size_t target_file_sd_len;
+	u32 target_file_sd_state;
+	u32 desired_access;
+	u32 create_disposition;
+	u32 create_options;
+	u32 flags;
 	u32 mount_policy_override;
 	u64 mount_magic;
 	u16 inode_mode;
@@ -505,6 +545,9 @@ long pkm_kacs_kunit_set_file_sd_for_subject(
 long pkm_kacs_kunit_open_file_for_subject(
 	const struct pkm_kacs_kunit_file_open_args *args,
 	u32 *granted_access_out);
+long pkm_kacs_kunit_native_open_for_subject(
+	const struct pkm_kacs_kunit_native_open_args *args,
+	u32 *granted_access_out, u32 *status_out, u32 *file_mode_out);
 long pkm_kacs_kunit_get_cached_file_sd_for_subject(
 	const struct pkm_kacs_kunit_file_sd_get_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
