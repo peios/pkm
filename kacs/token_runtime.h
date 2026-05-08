@@ -519,6 +519,11 @@ long pkm_kacs_kunit_get_file_sd_on_mount_for_subject(
 	const u8 **out_sd_ptr, size_t *out_sd_len);
 long pkm_kacs_kunit_set_file_sd_on_mount_for_subject(
 	const struct pkm_kacs_kunit_file_sd_set_args *args, u64 magic);
+long pkm_kacs_kunit_get_path_file_sd_on_mount_for_subject(
+	const struct pkm_kacs_kunit_file_sd_get_args *args, u64 magic, u32 flags,
+	const u8 **out_sd_ptr, size_t *out_sd_len);
+long pkm_kacs_kunit_set_path_file_sd_on_mount_for_subject(
+	const struct pkm_kacs_kunit_file_sd_set_args *args, u64 magic, u32 flags);
 long pkm_kacs_kunit_query_missing_file_sd_on_policy_mount(
 	const struct pkm_kacs_kunit_missing_file_sd_query_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len,

@@ -26,6 +26,7 @@
 #include <linux/mman.h>
 #include <linux/mount.h>
 #include <linux/mutex.h>
+#include <linux/namei.h>
 #include <linux/net.h>
 #include <linux/refcount.h>
 #include <linux/pid.h>
@@ -376,6 +377,8 @@ static long pkm_kacs_get_sd_required_access(u32 security_info,
 					    u32 *desired_access_out);
 static long pkm_kacs_set_sd_required_access(u32 security_info,
 					    u32 *desired_access_out);
+static long pkm_kacs_path_sd_lookup_flags(u32 flags,
+					  unsigned int *lookup_flags_out);
 static long pkm_kacs_query_process_sd_core(
 	const void *subject_token,
 	const struct pkm_kacs_process_state *caller_state,
@@ -397,6 +400,18 @@ static long pkm_kacs_set_file_sd_core(const void *subject_token,
 				      struct file *file, u32 security_info,
 				      const u8 *input_sd_ptr,
 				      size_t input_sd_len);
+static void pkm_kacs_init_path_anchor_file(struct file *file,
+					   const struct path *path);
+static long pkm_kacs_query_path_file_sd_core(const void *subject_token,
+					     const struct path *path,
+					     u32 security_info,
+					     const u8 **out_sd_ptr,
+					     size_t *out_sd_len);
+static long pkm_kacs_set_path_file_sd_core(const void *subject_token,
+					   const struct path *path,
+					   u32 security_info,
+					   const u8 *input_sd_ptr,
+					   size_t input_sd_len);
 int pkm_kacs_file_sd_xattr_get(struct file *file, const char *name);
 int pkm_kacs_file_sd_xattr_set(struct file *file, const char *name);
 int pkm_kacs_file_sd_xattr_remove(struct file *file, const char *name);
@@ -2819,6 +2834,25 @@ static long pkm_kacs_validate_empty_path_target(const char __user *path,
 	return 0;
 }
 
+static long pkm_kacs_path_sd_lookup_flags(u32 flags,
+					  unsigned int *lookup_flags_out)
+{
+	unsigned int lookup_flags = 0;
+
+	if (!lookup_flags_out)
+		return -EINVAL;
+	if ((flags & ~PKM_KACS_SD_ALLOWED_AT_FLAGS) != 0)
+		return -EINVAL;
+	if ((flags & AT_EMPTY_PATH) != 0)
+		return -EOPNOTSUPP;
+
+	if ((flags & AT_SYMLINK_NOFOLLOW) == 0)
+		lookup_flags |= LOOKUP_FOLLOW;
+
+	*lookup_flags_out = lookup_flags;
+	return 0;
+}
+
 static long pkm_kacs_resolve_pidfd_process_target(
 	int dirfd, const char __user *path, u32 flags,
 	const void **subject_token_out,
@@ -2920,6 +2954,39 @@ static long pkm_kacs_resolve_file_target(
 
 	*subject_token_out = subject_token;
 	*file_out = file;
+	return 0;
+}
+
+static long pkm_kacs_resolve_path_file_target(
+	int dirfd, const char __user *path, u32 flags,
+	const void **subject_token_out, struct path *path_out)
+{
+	const void *subject_token;
+	unsigned int lookup_flags = 0;
+	long ret;
+
+	if (!subject_token_out || !path_out)
+		return -EINVAL;
+	if (!path)
+		return -EFAULT;
+
+	ret = pkm_kacs_path_sd_lookup_flags(flags, &lookup_flags);
+	if (ret)
+		return ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!subject_token)
+		return -EACCES;
+
+	ret = user_path_at(dirfd, path, lookup_flags, path_out);
+	if (ret)
+		return ret;
+	if (!path_out->dentry || !d_inode(path_out->dentry)) {
+		path_put(path_out);
+		return -EACCES;
+	}
+
+	*subject_token_out = subject_token;
 	return 0;
 }
 
@@ -3305,6 +3372,34 @@ static long pkm_kacs_query_file_sd_core(const void *subject_token,
 	return ret;
 }
 
+static void pkm_kacs_init_path_anchor_file(struct file *file,
+					   const struct path *path)
+{
+	if (!file || !path)
+		return;
+
+	memset(file, 0, sizeof(*file));
+	file->f_inode = d_inode(path->dentry);
+	file->f_mode = FMODE_PATH;
+	*(struct path *)&file->f_path = *path;
+}
+
+static long pkm_kacs_query_path_file_sd_core(const void *subject_token,
+					     const struct path *path,
+					     u32 security_info,
+					     const u8 **out_sd_ptr,
+					     size_t *out_sd_len)
+{
+	struct file file = {};
+
+	if (!path)
+		return -EINVAL;
+
+	pkm_kacs_init_path_anchor_file(&file, path);
+	return pkm_kacs_query_file_sd_core(subject_token, &file, security_info,
+					   out_sd_ptr, out_sd_len);
+}
+
 static long pkm_kacs_set_file_sd_core(const void *subject_token,
 				      struct file *file, u32 security_info,
 				      const u8 *input_sd_ptr,
@@ -3390,6 +3485,22 @@ out_unlock:
 	mutex_unlock(&sec->lock);
 	pkm_kacs_inode_sd_cache_free(new_cache);
 	return ret;
+}
+
+static long pkm_kacs_set_path_file_sd_core(const void *subject_token,
+					   const struct path *path,
+					   u32 security_info,
+					   const u8 *input_sd_ptr,
+					   size_t input_sd_len)
+{
+	struct file file = {};
+
+	if (!path)
+		return -EINVAL;
+
+	pkm_kacs_init_path_anchor_file(&file, path);
+	return pkm_kacs_set_file_sd_core(subject_token, &file, security_info,
+					 input_sd_ptr, input_sd_len);
 }
 
 static long pkm_kacs_authorize_process_access_core(
@@ -5641,6 +5752,107 @@ out_free:
 	return ret;
 }
 
+long pkm_kacs_kunit_get_path_file_sd_on_mount_for_subject(
+	const struct pkm_kacs_kunit_file_sd_get_args *args, u64 magic, u32 flags,
+	const u8 **out_sd_ptr, size_t *out_sd_len)
+{
+	struct pkm_kacs_kunit_file_mount_state *state;
+	struct pkm_kacs_inode_sd_cache *cache;
+	unsigned int lookup_flags = 0;
+	umode_t mode;
+	long ret;
+
+	if (!args || !out_sd_ptr || !out_sd_len)
+		return -EINVAL;
+
+	*out_sd_ptr = NULL;
+	*out_sd_len = 0;
+
+	ret = pkm_kacs_path_sd_lookup_flags(flags, &lookup_flags);
+	if (ret)
+		return ret;
+	(void)lookup_flags;
+
+	cache = pkm_kacs_kunit_file_sd_cache_alloc(args->target_file_sd_ptr,
+						   args->target_file_sd_len,
+						   args->target_file_sd_state);
+	if (!cache)
+		return -EINVAL;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		return -ENOMEM;
+	}
+
+	mode = args->inode_mode ? args->inode_mode : S_IFREG;
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		state, magic ? magic : TMPFS_MAGIC, cache,
+		args->mount_policy_override, NULL, 0, mode, true);
+	if (ret) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		goto out_free;
+	}
+
+	ret = pkm_kacs_query_path_file_sd_core(args->subject_token,
+					       &state->file.f_path,
+					       args->security_info,
+					       out_sd_ptr, out_sd_len);
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_free:
+	kfree(state);
+	return ret;
+}
+
+long pkm_kacs_kunit_set_path_file_sd_on_mount_for_subject(
+	const struct pkm_kacs_kunit_file_sd_set_args *args, u64 magic, u32 flags)
+{
+	struct pkm_kacs_kunit_file_mount_state *state;
+	struct pkm_kacs_inode_sd_cache *cache;
+	unsigned int lookup_flags = 0;
+	umode_t mode;
+	long ret;
+
+	if (!args || !args->input_sd_ptr || args->input_sd_len == 0)
+		return -EINVAL;
+
+	ret = pkm_kacs_path_sd_lookup_flags(flags, &lookup_flags);
+	if (ret)
+		return ret;
+	(void)lookup_flags;
+
+	cache = pkm_kacs_kunit_file_sd_cache_alloc(args->target_file_sd_ptr,
+						   args->target_file_sd_len,
+						   args->target_file_sd_state);
+	if (!cache)
+		return -EINVAL;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		return -ENOMEM;
+	}
+
+	mode = args->inode_mode ? args->inode_mode : S_IFREG;
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		state, magic ? magic : TMPFS_MAGIC, cache,
+		args->mount_policy_override, NULL, 0, mode, true);
+	if (ret) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		goto out_free;
+	}
+
+	ret = pkm_kacs_set_path_file_sd_core(args->subject_token,
+					     &state->file.f_path,
+					     args->security_info,
+					     args->input_sd_ptr,
+					     args->input_sd_len);
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_free:
+	kfree(state);
+	return ret;
+}
+
 long pkm_kacs_kunit_query_missing_file_sd_on_policy_mount(
 	const struct pkm_kacs_kunit_missing_file_sd_query_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len, u32 *xattr_written_out)
@@ -6503,10 +6715,12 @@ SYSCALL_DEFINE6(kacs_get_sd, int, dirfd, const char __user *, path,
 	const void *subject_token;
 	const void *target_token = NULL;
 	struct file *file = NULL;
+	struct path resolved_path = {};
 	struct task_struct *task = NULL;
 	const u8 *result_sd = NULL;
 	size_t result_len = 0;
 	bool self_target;
+	bool resolved_path_valid = false;
 	long ret;
 
 	ret = pkm_kacs_resolve_tokenfd_target(dirfd, path, flags, &subject_token,
@@ -6536,17 +6750,35 @@ SYSCALL_DEFINE6(kacs_get_sd, int, dirfd, const char __user *, path,
 	ret = pkm_kacs_resolve_pidfd_process_target(
 		dirfd, path, flags, &subject_token, &caller_state, &task,
 		&target_state, &self_target);
-	if (ret)
-		return ret;
+	if (!ret) {
+		ret = pkm_kacs_query_process_sd_core(subject_token, caller_state,
+						     target_state,
+						     self_target,
+						     security_info,
+						     &result_sd,
+						     &result_len);
+		put_task_struct(task);
+		task = NULL;
+		if (ret)
+			goto out;
+	} else {
+		if (ret != -EOPNOTSUPP)
+			return ret;
 
-	ret = pkm_kacs_query_process_sd_core(subject_token, caller_state,
-					     target_state, self_target,
-					     security_info, &result_sd,
-					     &result_len);
-	put_task_struct(task);
-	task = NULL;
-	if (ret)
-		goto out;
+		ret = pkm_kacs_resolve_path_file_target(dirfd, path, flags,
+							&subject_token,
+							&resolved_path);
+		if (ret)
+			return ret;
+		resolved_path_valid = true;
+		ret = pkm_kacs_query_path_file_sd_core(subject_token,
+						       &resolved_path,
+						       security_info,
+						       &result_sd,
+						       &result_len);
+		if (ret)
+			goto out;
+	}
 
 	if (buf_len != 0 && result_len <= buf_len) {
 		if (!buf || copy_to_user(buf, result_sd, result_len)) {
@@ -6564,6 +6796,8 @@ out:
 		kacs_rust_token_drop(target_token);
 	if (file)
 		fput(file);
+	if (resolved_path_valid)
+		path_put(&resolved_path);
 	return ret;
 }
 
@@ -6576,9 +6810,11 @@ SYSCALL_DEFINE6(kacs_set_sd, int, dirfd, const char __user *, path,
 	const void *subject_token;
 	const void *target_token = NULL;
 	struct file *file = NULL;
+	struct path resolved_path = {};
 	struct task_struct *task = NULL;
 	u8 *input_sd = NULL;
 	bool self_target;
+	bool resolved_path_valid = false;
 	long ret;
 
 	if (!sd_buf || sd_len == 0 || sd_len > PKM_KACS_MAX_SD_BYTES)
@@ -6622,19 +6858,41 @@ SYSCALL_DEFINE6(kacs_set_sd, int, dirfd, const char __user *, path,
 	ret = pkm_kacs_resolve_pidfd_process_target(
 		dirfd, path, flags, &subject_token, &caller_state, &task,
 		&target_state, &self_target);
-	if (ret)
-		goto out;
+	if (!ret) {
+		input_sd = memdup_user(sd_buf, sd_len);
+		if (IS_ERR(input_sd)) {
+			ret = PTR_ERR(input_sd);
+			input_sd = NULL;
+			goto out;
+		}
 
-	input_sd = memdup_user(sd_buf, sd_len);
-	if (IS_ERR(input_sd)) {
-		ret = PTR_ERR(input_sd);
-		input_sd = NULL;
-		goto out;
+		ret = pkm_kacs_set_process_sd_core(subject_token, caller_state,
+						   target_state, self_target,
+						   security_info, input_sd,
+						   sd_len);
+	} else {
+		if (ret != -EOPNOTSUPP)
+			goto out;
+
+		ret = pkm_kacs_resolve_path_file_target(dirfd, path, flags,
+							&subject_token,
+							&resolved_path);
+		if (ret)
+			goto out;
+		resolved_path_valid = true;
+
+		input_sd = memdup_user(sd_buf, sd_len);
+		if (IS_ERR(input_sd)) {
+			ret = PTR_ERR(input_sd);
+			input_sd = NULL;
+			goto out;
+		}
+
+		ret = pkm_kacs_set_path_file_sd_core(subject_token,
+						     &resolved_path,
+						     security_info,
+						     input_sd, sd_len);
 	}
-
-	ret = pkm_kacs_set_process_sd_core(subject_token, caller_state,
-					   target_state, self_target,
-					   security_info, input_sd, sd_len);
 
 out:
 	kfree(input_sd);
@@ -6644,6 +6902,8 @@ out:
 		fput(file);
 	if (task)
 		put_task_struct(task);
+	if (resolved_path_valid)
+		path_put(&resolved_path);
 	return ret;
 }
 
