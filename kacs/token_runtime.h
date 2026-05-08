@@ -283,6 +283,9 @@ struct pkm_kacs_kunit_native_open_args {
 	const u8 *target_file_sd_ptr;
 	size_t target_file_sd_len;
 	u32 target_file_sd_state;
+	const u8 *parent_file_sd_ptr;
+	size_t parent_file_sd_len;
+	u32 parent_file_sd_state;
 	const u8 *input_sd_ptr;
 	size_t input_sd_len;
 	u32 desired_access;
