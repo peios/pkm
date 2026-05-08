@@ -6330,6 +6330,42 @@ static const u8 *pkm_kunit_create_file_sd_with_mandatory_resource_attr(
 		0, len_out);
 }
 
+static const u8 *pkm_kunit_synthesize_file_sd(const u8 *parent_sd,
+					      size_t parent_sd_len,
+					      const u8 *template_sd,
+					      size_t template_sd_len,
+					      u32 child_is_directory,
+					      size_t *len_out)
+{
+	const u8 *sd = NULL;
+	size_t sd_len = 0;
+
+	if (kacs_rust_synthesize_file_sd(parent_sd, parent_sd_len, template_sd,
+					 template_sd_len,
+					 child_is_directory, &sd,
+					 &sd_len) != 0)
+		return NULL;
+
+	if (len_out)
+		*len_out = sd_len;
+	return sd;
+}
+
+static void pkm_kunit_make_first_file_ace_inheritable(u8 *sd_bytes,
+						      u8 inherit_flags)
+{
+	u32 dacl_offset;
+
+	if (!sd_bytes)
+		return;
+
+	dacl_offset = pkm_kunit_read_u32(sd_bytes, 16);
+	if (dacl_offset == 0)
+		return;
+
+	sd_bytes[dacl_offset + 8 + 1] = inherit_flags;
+}
+
 static void pkm_kunit_file_sd_cache_population_from_valid_xattr(
 	struct kunit *test)
 {
@@ -6483,7 +6519,7 @@ static void pkm_kunit_file_missing_sd_synthesize_mount_fails_closed(
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_missing_file_sd_result_for_magic(
 				NFS_SUPER_MAGIC),
-			(long)-EOPNOTSUPP);
+			(long)PKM_KACS_KUNIT_FILE_SD_MISSING);
 }
 
 static void pkm_kunit_get_file_sd_synthesize_mount_valid_cache_success(
@@ -6527,6 +6563,223 @@ static void pkm_kunit_get_file_sd_synthesize_mount_valid_cache_success(
 	pkm_kacs_free((void *)expected_subset);
 	pkm_kacs_free((void *)subset);
 	pkm_kacs_free((void *)file_sd);
+}
+
+static void pkm_kunit_synthesize_file_sd_parent_inheritance_success(
+	struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *parent_sd;
+	const u8 *child_sd;
+	const u8 *parent_subset = NULL;
+	const u8 *child_subset = NULL;
+	size_t parent_sd_len = 0;
+	size_t child_sd_len = 0;
+	size_t parent_subset_len = 0;
+	size_t child_subset_len = 0;
+	u32 child_dacl_offset;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	parent_sd = pkm_kunit_create_query_only_file_sd(subject_token,
+							&parent_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, parent_sd);
+	pkm_kunit_make_first_file_ace_inheritable((u8 *)parent_sd, 0x01);
+
+	child_sd = pkm_kunit_synthesize_file_sd(parent_sd, parent_sd_len,
+						NULL, 0, 0, &child_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, child_sd);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				parent_sd, parent_sd_len,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&parent_subset, &parent_subset_len),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				child_sd, child_sd_len,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&child_subset, &child_subset_len),
+			0);
+
+	KUNIT_ASSERT_EQ(test, child_subset_len, parent_subset_len);
+	child_dacl_offset = pkm_kunit_read_u32(child_subset, 16);
+	KUNIT_ASSERT_NE(test, child_dacl_offset, 0U);
+	KUNIT_EXPECT_EQ(test, child_subset[child_dacl_offset + 8 + 1], 0x11);
+
+	pkm_kacs_free((void *)child_subset);
+	pkm_kacs_free((void *)parent_subset);
+	pkm_kacs_free((void *)child_sd);
+	pkm_kacs_free((void *)parent_sd);
+}
+
+static void pkm_kunit_synthesize_file_sd_parent_without_inheritance_falls_back(
+	struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *parent_sd;
+	const u8 *child_sd;
+	const u8 *fallback_sd;
+	const u8 *child_subset = NULL;
+	const u8 *fallback_subset = NULL;
+	size_t parent_sd_len = 0;
+	size_t child_sd_len = 0;
+	size_t fallback_sd_len = 0;
+	size_t child_subset_len = 0;
+	size_t fallback_subset_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	parent_sd = pkm_kunit_create_query_only_file_sd(subject_token,
+							&parent_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, parent_sd);
+	child_sd = pkm_kunit_synthesize_file_sd(parent_sd, parent_sd_len,
+						NULL, 0, 0, &child_sd_len);
+	fallback_sd = pkm_kunit_synthesize_file_sd(NULL, 0, NULL, 0, 0,
+						   &fallback_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, child_sd);
+	KUNIT_ASSERT_NOT_NULL(test, fallback_sd);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				child_sd, child_sd_len,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&child_subset, &child_subset_len),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				fallback_sd, fallback_sd_len,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&fallback_subset, &fallback_subset_len),
+			0);
+	pkm_kunit_expect_bytes_eq(test, child_subset, child_subset_len,
+				  fallback_subset, fallback_subset_len);
+
+	pkm_kacs_free((void *)fallback_subset);
+	pkm_kacs_free((void *)child_subset);
+	pkm_kacs_free((void *)fallback_sd);
+	pkm_kacs_free((void *)child_sd);
+	pkm_kacs_free((void *)parent_sd);
+}
+
+static void pkm_kunit_file_missing_sd_synthesize_ephemeral_root_query_success(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_missing_file_sd_query_args args = {
+		.mount_policy = PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL,
+		.security_info = PKM_KUNIT_DACL_SECURITY_INFORMATION,
+		.mode = S_IFREG,
+	};
+	const void *subject_token;
+	const u8 *subset = NULL;
+	const u8 *expected_sd;
+	const u8 *expected_subset = NULL;
+	size_t subset_len = 0;
+	size_t expected_sd_len = 0;
+	size_t expected_subset_len = 0;
+	u32 xattr_written = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	args.subject_token = subject_token;
+
+	expected_sd = pkm_kunit_synthesize_file_sd(NULL, 0, NULL, 0, 0,
+						   &expected_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, expected_sd);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_query_missing_file_sd_on_policy_mount(
+				&args, &subset, &subset_len,
+				&xattr_written),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				expected_sd, expected_sd_len, args.security_info,
+				&expected_subset, &expected_subset_len),
+			0);
+	pkm_kunit_expect_bytes_eq(test, subset, subset_len, expected_subset,
+				  expected_subset_len);
+	KUNIT_EXPECT_EQ(test, xattr_written, 0U);
+
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)expected_sd);
+	pkm_kacs_free((void *)subset);
+}
+
+static void pkm_kunit_file_missing_sd_synthesize_persistent_root_writes_xattr(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_missing_file_sd_query_args args = {
+		.mount_policy = PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT,
+		.security_info = PKM_KUNIT_DACL_SECURITY_INFORMATION,
+		.mode = S_IFREG,
+	};
+	const void *subject_token;
+	const u8 *subset = NULL;
+	size_t subset_len = 0;
+	u32 xattr_written = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	args.subject_token = subject_token;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_query_missing_file_sd_on_policy_mount(
+				&args, &subset, &subset_len,
+				&xattr_written),
+			0L);
+	KUNIT_ASSERT_NOT_NULL(test, subset);
+	KUNIT_EXPECT_NE(test, subset_len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, xattr_written, 1U);
+
+	pkm_kacs_free((void *)subset);
+}
+
+static void pkm_kunit_file_missing_sd_synthesize_root_template_success(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_missing_file_sd_query_args args = {
+		.mount_policy = PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL,
+		.security_info = PKM_KUNIT_DACL_SECURITY_INFORMATION,
+		.mode = S_IFREG,
+	};
+	const void *subject_token;
+	const u8 *template_sd;
+	const u8 *subset = NULL;
+	const u8 *expected_subset = NULL;
+	size_t template_sd_len = 0;
+	size_t subset_len = 0;
+	size_t expected_subset_len = 0;
+	u32 xattr_written = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	template_sd = pkm_kunit_create_default_file_sd(subject_token,
+						       &template_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, template_sd);
+	args.subject_token = subject_token;
+	args.template_sd_ptr = template_sd;
+	args.template_sd_len = template_sd_len;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_query_missing_file_sd_on_policy_mount(
+				&args, &subset, &subset_len,
+				&xattr_written),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				template_sd, template_sd_len,
+				args.security_info, &expected_subset,
+				&expected_subset_len),
+			0);
+	pkm_kunit_expect_bytes_eq(test, subset, subset_len, expected_subset,
+				  expected_subset_len);
+	KUNIT_EXPECT_EQ(test, xattr_written, 0U);
+
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)subset);
+	pkm_kacs_free((void *)template_sd);
 }
 
 static void pkm_kunit_get_file_sd_unmanaged_mount_fails_closed(
@@ -13269,6 +13522,16 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_get_file_sd_success),
 	KUNIT_CASE(
 		pkm_kunit_get_file_sd_synthesize_mount_valid_cache_success),
+	KUNIT_CASE(
+		pkm_kunit_synthesize_file_sd_parent_inheritance_success),
+	KUNIT_CASE(
+		pkm_kunit_synthesize_file_sd_parent_without_inheritance_falls_back),
+	KUNIT_CASE(
+		pkm_kunit_file_missing_sd_synthesize_ephemeral_root_query_success),
+	KUNIT_CASE(
+		pkm_kunit_file_missing_sd_synthesize_persistent_root_writes_xattr),
+	KUNIT_CASE(
+		pkm_kunit_file_missing_sd_synthesize_root_template_success),
 	KUNIT_CASE(
 		pkm_kunit_get_file_sd_label_on_unlabeled_returns_empty_subset),
 	KUNIT_CASE(pkm_kunit_get_file_sd_missing_denies),

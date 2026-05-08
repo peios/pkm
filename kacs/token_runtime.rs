@@ -98,7 +98,11 @@ const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
 const SACL_SECURITY_INFORMATION: u32 = 0x0000_0008;
 const LABEL_SECURITY_INFORMATION: u32 = 0x0000_0010;
 const CLAIM_SECURITY_ATTRIBUTE_MANDATORY: u32 = 0x0000_0020;
+const OBJECT_INHERIT_ACE: u8 = 0x01;
+const CONTAINER_INHERIT_ACE: u8 = 0x02;
+const NO_PROPAGATE_INHERIT_ACE: u8 = 0x04;
 const INHERIT_ONLY_ACE: u8 = 0x08;
+const INHERITED_ACE: u8 = 0x10;
 
 const EACCES: i32 = 13;
 const EPERM: i32 = 1;
@@ -145,6 +149,8 @@ const ADMINISTRATORS_SID_BYTES: &[u8] = &[1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 3
 const EVERYONE_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
 const AUTHENTICATED_USERS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0];
 const LOCAL_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0];
+const CREATOR_OWNER_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0];
+const CREATOR_GROUP_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 1, 0, 0, 0];
 const LOGON_SID_BYTES: &[u8] = &[1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const ANONYMOUS_LOGON_SID_BYTES: &[u8] =
     &[1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 230, 3, 0, 0];
@@ -1926,6 +1932,380 @@ fn build_process_sd_bytes(
     }
 
     Ok((ptr, total_len))
+}
+
+fn build_mount_fallback_file_sd_bytes() -> Result<(*mut u8, usize), i32> {
+    let system = Sid::parse(SYSTEM_SID_BYTES).map_err(|_| -EINVAL)?;
+
+    build_process_sd_bytes(
+        system,
+        system,
+        Some(GENERIC_ALL),
+        Some(GENERIC_ALL),
+        None,
+        Some(crate::GENERIC_READ | crate::GENERIC_EXECUTE),
+    )
+}
+
+fn ace_inherits_to_child(ace_flags: u8, child_is_container: bool) -> bool {
+    if child_is_container {
+        (ace_flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)) != 0
+    } else {
+        (ace_flags & OBJECT_INHERIT_ACE) != 0
+    }
+}
+
+fn inherited_ace_flags(parent_flags: u8, child_is_container: bool) -> u8 {
+    let mut flags = (parent_flags | INHERITED_ACE) & !INHERIT_ONLY_ACE;
+
+    if child_is_container
+        && (parent_flags & OBJECT_INHERIT_ACE) != 0
+        && (parent_flags & CONTAINER_INHERIT_ACE) == 0
+        && (parent_flags & NO_PROPAGATE_INHERIT_ACE) == 0
+    {
+        flags |= INHERIT_ONLY_ACE;
+    }
+    if (parent_flags & NO_PROPAGATE_INHERIT_ACE) != 0 {
+        flags &= !(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
+    }
+
+    flags
+}
+
+fn map_inherited_ace_mask(kind: AceKind<'_>) -> Result<u32, i32> {
+    let mask = match kind {
+        AceKind::SingleSid { mask, .. }
+        | AceKind::Object { mask, .. }
+        | AceKind::Callback { mask, .. }
+        | AceKind::CallbackObject { mask, .. }
+        | AceKind::ResourceAttribute { mask, .. } => mask,
+        AceKind::Opaque => return Err(-EACCES),
+    };
+
+    FILE_GENERIC_MAPPING.map_mask(mask).map_err(|_| -EINVAL)
+}
+
+fn build_inherited_ace_bytes(
+    ace: crate::ace::Ace<'_>,
+    owner_sid: Sid<'_>,
+    group_sid: Sid<'_>,
+    child_is_container: bool,
+) -> Result<Option<Vec<u8>>, i32> {
+    let parent_flags = ace.ace_flags();
+    let mut bytes = Vec::new();
+    let new_flags;
+    let mask;
+
+    if !ace_inherits_to_child(parent_flags, child_is_container) {
+        return Ok(None);
+    }
+
+    new_flags = inherited_ace_flags(parent_flags, child_is_container);
+    mask = map_inherited_ace_mask(ace.kind())?;
+
+    match ace.kind() {
+        AceKind::SingleSid { sid, .. } => {
+            let sid_bytes = if sid.as_bytes() == CREATOR_OWNER_SID_BYTES {
+                owner_sid.as_bytes()
+            } else if sid.as_bytes() == CREATOR_GROUP_SID_BYTES {
+                group_sid.as_bytes()
+            } else {
+                sid.as_bytes()
+            };
+            let ace_len = ACE_HEADER_LEN
+                .checked_add(sid_bytes.len())
+                .ok_or(-ERANGE)?;
+
+            bytes
+                .extend_from_slice(&[
+                    ace.ace_type(),
+                    new_flags,
+                    (ace_len as u16).to_le_bytes()[0],
+                    (ace_len as u16).to_le_bytes()[1],
+                ])
+                .map_err(|_| -ENOMEM)?;
+            bytes
+                .extend_from_slice(&mask.to_le_bytes())
+                .map_err(|_| -ENOMEM)?;
+            bytes.extend_from_slice(sid_bytes).map_err(|_| -ENOMEM)?;
+        }
+        AceKind::Object {
+            flags,
+            object_type,
+            inherited_object_type,
+            sid,
+            ..
+        } => {
+            let sid_bytes = if sid.as_bytes() == CREATOR_OWNER_SID_BYTES {
+                owner_sid.as_bytes()
+            } else if sid.as_bytes() == CREATOR_GROUP_SID_BYTES {
+                group_sid.as_bytes()
+            } else {
+                sid.as_bytes()
+            };
+            let ace_len = 12usize
+                .checked_add(object_type.map_or(0, |_| 16))
+                .and_then(|value| value.checked_add(inherited_object_type.map_or(0, |_| 16)))
+                .and_then(|value| value.checked_add(sid_bytes.len()))
+                .ok_or(-ERANGE)?;
+
+            bytes
+                .extend_from_slice(&[
+                    ace.ace_type(),
+                    new_flags,
+                    (ace_len as u16).to_le_bytes()[0],
+                    (ace_len as u16).to_le_bytes()[1],
+                ])
+                .map_err(|_| -ENOMEM)?;
+            bytes
+                .extend_from_slice(&mask.to_le_bytes())
+                .map_err(|_| -ENOMEM)?;
+            bytes
+                .extend_from_slice(&flags.to_le_bytes())
+                .map_err(|_| -ENOMEM)?;
+            if let Some(object_type) = object_type {
+                bytes
+                    .extend_from_slice(object_type.as_slice())
+                    .map_err(|_| -ENOMEM)?;
+            }
+            if let Some(inherited_object_type) = inherited_object_type {
+                bytes
+                    .extend_from_slice(inherited_object_type.as_slice())
+                    .map_err(|_| -ENOMEM)?;
+            }
+            bytes.extend_from_slice(sid_bytes).map_err(|_| -ENOMEM)?;
+        }
+        AceKind::Callback {
+            sid,
+            application_data,
+            ..
+        } => {
+            let sid_bytes = if sid.as_bytes() == CREATOR_OWNER_SID_BYTES {
+                owner_sid.as_bytes()
+            } else if sid.as_bytes() == CREATOR_GROUP_SID_BYTES {
+                group_sid.as_bytes()
+            } else {
+                sid.as_bytes()
+            };
+            let ace_len = ACE_HEADER_LEN
+                .checked_add(sid_bytes.len())
+                .and_then(|value| value.checked_add(application_data.len()))
+                .ok_or(-ERANGE)?;
+
+            bytes
+                .extend_from_slice(&[
+                    ace.ace_type(),
+                    new_flags,
+                    (ace_len as u16).to_le_bytes()[0],
+                    (ace_len as u16).to_le_bytes()[1],
+                ])
+                .map_err(|_| -ENOMEM)?;
+            bytes
+                .extend_from_slice(&mask.to_le_bytes())
+                .map_err(|_| -ENOMEM)?;
+            bytes.extend_from_slice(sid_bytes).map_err(|_| -ENOMEM)?;
+            bytes
+                .extend_from_slice(application_data)
+                .map_err(|_| -ENOMEM)?;
+        }
+        AceKind::CallbackObject {
+            flags,
+            object_type,
+            inherited_object_type,
+            sid,
+            application_data,
+            ..
+        } => {
+            let sid_bytes = if sid.as_bytes() == CREATOR_OWNER_SID_BYTES {
+                owner_sid.as_bytes()
+            } else if sid.as_bytes() == CREATOR_GROUP_SID_BYTES {
+                group_sid.as_bytes()
+            } else {
+                sid.as_bytes()
+            };
+            let ace_len = 12usize
+                .checked_add(object_type.map_or(0, |_| 16))
+                .and_then(|value| value.checked_add(inherited_object_type.map_or(0, |_| 16)))
+                .and_then(|value| value.checked_add(sid_bytes.len()))
+                .and_then(|value| value.checked_add(application_data.len()))
+                .ok_or(-ERANGE)?;
+
+            bytes
+                .extend_from_slice(&[
+                    ace.ace_type(),
+                    new_flags,
+                    (ace_len as u16).to_le_bytes()[0],
+                    (ace_len as u16).to_le_bytes()[1],
+                ])
+                .map_err(|_| -ENOMEM)?;
+            bytes
+                .extend_from_slice(&mask.to_le_bytes())
+                .map_err(|_| -ENOMEM)?;
+            bytes
+                .extend_from_slice(&flags.to_le_bytes())
+                .map_err(|_| -ENOMEM)?;
+            if let Some(object_type) = object_type {
+                bytes
+                    .extend_from_slice(object_type.as_slice())
+                    .map_err(|_| -ENOMEM)?;
+            }
+            if let Some(inherited_object_type) = inherited_object_type {
+                bytes
+                    .extend_from_slice(inherited_object_type.as_slice())
+                    .map_err(|_| -ENOMEM)?;
+            }
+            bytes.extend_from_slice(sid_bytes).map_err(|_| -ENOMEM)?;
+            bytes
+                .extend_from_slice(application_data)
+                .map_err(|_| -ENOMEM)?;
+        }
+        AceKind::ResourceAttribute {
+            sid,
+            application_data,
+            ..
+        } => {
+            let sid_bytes = if sid.as_bytes() == CREATOR_OWNER_SID_BYTES {
+                owner_sid.as_bytes()
+            } else if sid.as_bytes() == CREATOR_GROUP_SID_BYTES {
+                group_sid.as_bytes()
+            } else {
+                sid.as_bytes()
+            };
+            let ace_len = ACE_HEADER_LEN
+                .checked_add(sid_bytes.len())
+                .and_then(|value| value.checked_add(application_data.len()))
+                .ok_or(-ERANGE)?;
+
+            bytes
+                .extend_from_slice(&[
+                    ace.ace_type(),
+                    new_flags,
+                    (ace_len as u16).to_le_bytes()[0],
+                    (ace_len as u16).to_le_bytes()[1],
+                ])
+                .map_err(|_| -ENOMEM)?;
+            bytes
+                .extend_from_slice(&mask.to_le_bytes())
+                .map_err(|_| -ENOMEM)?;
+            bytes.extend_from_slice(sid_bytes).map_err(|_| -ENOMEM)?;
+            bytes
+                .extend_from_slice(application_data)
+                .map_err(|_| -ENOMEM)?;
+        }
+        AceKind::Opaque => return Err(-EACCES),
+    }
+
+    Ok(Some(bytes))
+}
+
+fn inherit_acl_from_parent(
+    parent_acl: Option<Acl<'_>>,
+    owner_sid: Sid<'_>,
+    group_sid: Sid<'_>,
+    child_is_container: bool,
+) -> Result<Option<Vec<u8>>, i32> {
+    let mut inherited_aces = Vec::new();
+    let Some(parent_acl) = parent_acl else {
+        return Ok(None);
+    };
+
+    for ace in parent_acl.entries() {
+        let ace = ace.map_err(|_| -EINVAL)?;
+        let Some(ace_bytes) =
+            build_inherited_ace_bytes(ace, owner_sid, group_sid, child_is_container)?
+        else {
+            continue;
+        };
+        inherited_aces.push(ace_bytes).map_err(|_| -ENOMEM)?;
+    }
+
+    if inherited_aces.is_empty() {
+        return Ok(None);
+    }
+
+    let mut ace_refs = Vec::new();
+    for ace in inherited_aces.iter() {
+        ace_refs.push(ace.as_slice()).map_err(|_| -ENOMEM)?;
+    }
+
+    build_acl_bytes_from_aces(parent_acl.revision(), ace_refs.as_slice())
+}
+
+fn build_synthesized_file_sd_bytes(
+    parent_sd_bytes: Option<&[u8]>,
+    template_sd_bytes: Option<&[u8]>,
+    child_is_container: bool,
+) -> Result<(*mut u8, usize), i32> {
+    let mut fallback_ptr = null_mut();
+    let mut fallback_len = 0usize;
+    let result;
+    let template_bytes = if let Some(template_sd_bytes) = template_sd_bytes {
+        template_sd_bytes
+    } else {
+        let (ptr, len) = build_mount_fallback_file_sd_bytes()?;
+        fallback_ptr = ptr;
+        fallback_len = len;
+        unsafe { core::slice::from_raw_parts(ptr, len) }
+    };
+    let template_sd = match SecurityDescriptor::parse(template_bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            if !fallback_ptr.is_null() {
+                free_allocated_bytes(fallback_ptr);
+            }
+            return Err(-EACCES);
+        }
+    };
+
+    if let Some(parent_sd_bytes) = parent_sd_bytes {
+        let owner_sid = match template_sd.owner() {
+            Some(value) => value,
+            None => {
+                if !fallback_ptr.is_null() {
+                    free_allocated_bytes(fallback_ptr);
+                }
+                return Err(-EACCES);
+            }
+        };
+        let group_sid = match template_sd.group() {
+            Some(value) => value,
+            None => {
+                if !fallback_ptr.is_null() {
+                    free_allocated_bytes(fallback_ptr);
+                }
+                return Err(-EACCES);
+            }
+        };
+        let parent_sd = match SecurityDescriptor::parse(parent_sd_bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                if !fallback_ptr.is_null() {
+                    free_allocated_bytes(fallback_ptr);
+                }
+                return Err(-EACCES);
+            }
+        };
+        let inherited_dacl =
+            inherit_acl_from_parent(parent_sd.dacl(), owner_sid, group_sid, child_is_container)?;
+        let inherited_sacl =
+            inherit_acl_from_parent(parent_sd.sacl(), owner_sid, group_sid, child_is_container)?;
+        let template_dacl = clone_optional_acl_bytes(template_sd.dacl())?;
+
+        result = build_sd_bytes_from_components(
+            0,
+            Some(owner_sid.as_bytes()),
+            Some(group_sid.as_bytes()),
+            inherited_sacl.as_deref(),
+            inherited_dacl.as_deref().or(template_dacl.as_deref()),
+        );
+    } else {
+        result = alloc_copy_bytes(template_bytes);
+    }
+
+    if !fallback_ptr.is_null() {
+        free_allocated_bytes(fallback_ptr);
+    }
+    result
 }
 
 fn validate_sd_bytes(sd_bytes: &[u8]) -> Result<(), i32> {
@@ -6565,6 +6945,52 @@ pub extern "C" fn kacs_rust_build_replacement_file_sd(
 
     let input_sd_bytes = unsafe { core::slice::from_raw_parts(input_sd_ptr, input_sd_len) };
     match build_replacement_file_sd_bytes(subject, security_info, input_sd_bytes) {
+        Ok((ptr, len)) => {
+            *out_sd_ptr = ptr.cast_const();
+            *out_sd_len = len;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Synthesizes one complete file SD for a missing-SD foreign object from the
+/// parent SD (if any) plus the mount template or fallback system policy.
+pub extern "C" fn kacs_rust_synthesize_file_sd(
+    parent_sd_ptr: *const u8,
+    parent_sd_len: usize,
+    template_sd_ptr: *const u8,
+    template_sd_len: usize,
+    child_is_directory: u32,
+    out_sd_ptr: *mut *const u8,
+    out_sd_len: *mut usize,
+) -> i32 {
+    let Some(out_sd_ptr) = (unsafe { out_sd_ptr.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(out_sd_len) = (unsafe { out_sd_len.as_mut() }) else {
+        return -EINVAL;
+    };
+    let parent_sd_bytes = if parent_sd_ptr.is_null() || parent_sd_len == 0 {
+        None
+    } else {
+        Some(unsafe { core::slice::from_raw_parts(parent_sd_ptr, parent_sd_len) })
+    };
+    let template_sd_bytes = if template_sd_ptr.is_null() || template_sd_len == 0 {
+        None
+    } else {
+        Some(unsafe { core::slice::from_raw_parts(template_sd_ptr, template_sd_len) })
+    };
+
+    *out_sd_ptr = null();
+    *out_sd_len = 0;
+
+    match build_synthesized_file_sd_bytes(
+        parent_sd_bytes,
+        template_sd_bytes,
+        child_is_directory != 0,
+    ) {
         Ok((ptr, len)) => {
             *out_sd_ptr = ptr.cast_const();
             *out_sd_len = len;

@@ -144,11 +144,18 @@ struct pkm_kacs_inode_sd_cache {
 
 struct pkm_kacs_superblock_security {
 	u8 mount_policy;
+	const u8 *template_sd_bytes;
+	size_t template_sd_len;
 };
 
 struct pkm_kacs_inode_security {
 	struct mutex lock;
 	struct pkm_kacs_inode_sd_cache __rcu *sd_cache;
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	bool kunit_fake_xattr_enabled;
+	const u8 *kunit_fake_xattr_bytes;
+	size_t kunit_fake_xattr_len;
+#endif
 };
 
 struct pkm_kacs_process_state {
@@ -297,6 +304,7 @@ static int pkm_kacs_capable(const struct cred *cred,
 			    struct user_namespace *target_ns, int cap,
 			    unsigned int opts);
 static int pkm_kacs_inode_alloc_security(struct inode *inode);
+static void pkm_kacs_sb_free_security(struct super_block *sb);
 static void pkm_kacs_inode_free_security_rcu(void *inode_security);
 static int pkm_kacs_sb_alloc_security(struct super_block *sb);
 static struct pkm_kacs_inode_sd_cache *pkm_kacs_inode_sd_cache_alloc(
@@ -352,6 +360,9 @@ static long pkm_kacs_set_process_sd_core(
 	const struct pkm_kacs_process_state *caller_state,
 	struct pkm_kacs_process_state *target_state, bool self_target,
 	u32 security_info, const u8 *input_sd_ptr, size_t input_sd_len);
+static long pkm_kacs_inode_write_sd_xattr_locked(struct file *file,
+						 const u8 *sd_bytes,
+						 size_t sd_len);
 static long pkm_kacs_query_file_sd_core(const void *subject_token,
 					struct file *file, u32 security_info,
 					const u8 **out_sd_ptr,
@@ -465,6 +476,27 @@ static u32 pkm_kacs_superblock_mount_policy(const struct super_block *sb)
 	}
 }
 
+static void pkm_kacs_superblock_template_sd(const struct super_block *sb,
+					    const u8 **sd_ptr_out,
+					    size_t *sd_len_out)
+{
+	struct pkm_kacs_superblock_security *sec;
+
+	if (sd_ptr_out)
+		*sd_ptr_out = NULL;
+	if (sd_len_out)
+		*sd_len_out = 0;
+	if (!sb || !sd_ptr_out || !sd_len_out || !sb->s_security)
+		return;
+
+	sec = pkm_kacs_sb(sb);
+	if (!sec->template_sd_bytes || sec->template_sd_len == 0)
+		return;
+
+	*sd_ptr_out = sec->template_sd_bytes;
+	*sd_len_out = sec->template_sd_len;
+}
+
 static long pkm_kacs_missing_file_sd_policy_result(
 	const struct super_block *sb,
 	struct pkm_kacs_inode_sd_cache **cache_out)
@@ -478,6 +510,8 @@ static long pkm_kacs_missing_file_sd_policy_result(
 	policy = pkm_kacs_superblock_mount_policy(sb);
 	switch (policy) {
 	case PKM_KACS_MOUNT_POLICY_DENY_MISSING:
+	case PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL:
+	case PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT:
 		cache = pkm_kacs_inode_sd_cache_alloc(PKM_KACS_INODE_SD_MISSING,
 						      NULL, 0);
 		if (!cache)
@@ -485,8 +519,6 @@ static long pkm_kacs_missing_file_sd_policy_result(
 		*cache_out = cache;
 		return 0;
 	case PKM_KACS_MOUNT_POLICY_UNMANAGED:
-	case PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL:
-	case PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT:
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -577,6 +609,11 @@ static int pkm_kacs_inode_alloc_security(struct inode *inode)
 	sec = pkm_kacs_inode(inode);
 	mutex_init(&sec->lock);
 	RCU_INIT_POINTER(sec->sd_cache, NULL);
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	sec->kunit_fake_xattr_enabled = false;
+	sec->kunit_fake_xattr_bytes = NULL;
+	sec->kunit_fake_xattr_len = 0;
+#endif
 	return 0;
 }
 
@@ -589,27 +626,91 @@ static int pkm_kacs_sb_alloc_security(struct super_block *sb)
 
 	sec = pkm_kacs_sb(sb);
 	sec->mount_policy = pkm_kacs_mount_policy_for_magic(sb->s_magic);
+	sec->template_sd_bytes = NULL;
+	sec->template_sd_len = 0;
 	return 0;
+}
+
+static void pkm_kacs_sb_free_security(struct super_block *sb)
+{
+	struct pkm_kacs_superblock_security *sec;
+
+	if (!sb || !sb->s_security)
+		return;
+
+	sec = pkm_kacs_sb(sb);
+	if (sec->template_sd_bytes)
+		pkm_kacs_free((void *)sec->template_sd_bytes);
+	sec->template_sd_bytes = NULL;
+	sec->template_sd_len = 0;
 }
 
 static void pkm_kacs_inode_free_security_rcu(void *inode_security)
 {
-	struct pkm_kacs_inode_security *sec = inode_security;
+	struct pkm_kacs_inode_security *sec;
 	struct pkm_kacs_inode_sd_cache *cache;
 
-	if (!sec)
+	if (!inode_security)
 		return;
 
+	sec = (struct pkm_kacs_inode_security *)((char *)inode_security +
+						 pkm_blob_sizes.lbs_inode);
 	cache = rcu_dereference_protected(sec->sd_cache, 1);
 	RCU_INIT_POINTER(sec->sd_cache, NULL);
 	pkm_kacs_inode_sd_cache_free(cache);
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	if (sec->kunit_fake_xattr_bytes)
+		kfree(sec->kunit_fake_xattr_bytes);
+	sec->kunit_fake_xattr_bytes = NULL;
+	sec->kunit_fake_xattr_len = 0;
+	sec->kunit_fake_xattr_enabled = false;
+#endif
 }
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+static ssize_t pkm_kacs_kunit_fake_getxattr_locked(
+	struct pkm_kacs_inode_security *sec, void *buffer, size_t size)
+{
+	if (!sec->kunit_fake_xattr_enabled)
+		return -EOPNOTSUPP;
+	if (!sec->kunit_fake_xattr_bytes || sec->kunit_fake_xattr_len == 0)
+		return -ENODATA;
+	if (!buffer)
+		return (ssize_t)sec->kunit_fake_xattr_len;
+	if (size < sec->kunit_fake_xattr_len)
+		return -ERANGE;
+
+	memcpy(buffer, sec->kunit_fake_xattr_bytes, sec->kunit_fake_xattr_len);
+	return (ssize_t)sec->kunit_fake_xattr_len;
+}
+
+static long pkm_kacs_kunit_fake_setxattr_locked(
+	struct pkm_kacs_inode_security *sec, const u8 *sd_bytes, size_t sd_len)
+{
+	const u8 *copied_bytes;
+
+	if (!sec->kunit_fake_xattr_enabled)
+		return -EOPNOTSUPP;
+	if (!sd_bytes || sd_len == 0)
+		return -EINVAL;
+
+	copied_bytes = kmemdup(sd_bytes, sd_len, GFP_KERNEL);
+	if (!copied_bytes)
+		return -ENOMEM;
+
+	kfree(sec->kunit_fake_xattr_bytes);
+	sec->kunit_fake_xattr_bytes = copied_bytes;
+	sec->kunit_fake_xattr_len = sd_len;
+	return 0;
+}
+#endif
 
 static long pkm_kacs_inode_read_sd_xattr_locked(
 	struct file *file, struct pkm_kacs_inode_sd_cache **cache_out)
 {
 	struct dentry *dentry;
 	struct inode *inode;
+	struct pkm_kacs_inode_security *sec;
 	struct pkm_kacs_inode_sd_cache *cache = NULL;
 	const char *name;
 	u8 *bytes = NULL;
@@ -623,8 +724,14 @@ static long pkm_kacs_inode_read_sd_xattr_locked(
 	inode = file_inode(file);
 	if (!dentry || !inode)
 		return -EACCES;
+	sec = inode->i_security ? pkm_kacs_inode(inode) : NULL;
 
 	name = pkm_kacs_inode_sd_xattr_name(inode);
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	if (sec && sec->kunit_fake_xattr_enabled)
+		len = pkm_kacs_kunit_fake_getxattr_locked(sec, NULL, 0);
+	else
+#endif
 	len = __vfs_getxattr(dentry, inode, name, NULL, 0);
 	if (len == -ENODATA || len == -EOPNOTSUPP)
 		return pkm_kacs_missing_file_sd_policy_result(inode->i_sb,
@@ -644,6 +751,11 @@ static long pkm_kacs_inode_read_sd_xattr_locked(
 	if (!bytes)
 		return -ENOMEM;
 
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	if (sec && sec->kunit_fake_xattr_enabled)
+		ret = pkm_kacs_kunit_fake_getxattr_locked(sec, bytes, len);
+	else
+#endif
 	ret = __vfs_getxattr(dentry, inode, name, bytes, len);
 	if (ret < 0) {
 		pkm_kacs_free(bytes);
@@ -694,6 +806,144 @@ static long pkm_kacs_inode_get_or_populate_cache_locked(
 	pkm_kacs_inode_replace_sd_cache_locked(sec, cache);
 	*cache_out = cache;
 	return 0;
+}
+
+static long pkm_kacs_inode_resolve_effective_cache_locked(
+	struct file *file, struct pkm_kacs_inode_security *sec,
+	struct pkm_kacs_inode_sd_cache **cache_out);
+
+static long pkm_kacs_synthesize_missing_file_sd_locked(
+	struct file *file, struct pkm_kacs_inode_security *sec,
+	struct pkm_kacs_inode_sd_cache **cache_out)
+{
+	struct pkm_kacs_inode_sd_cache *new_cache = NULL;
+	struct pkm_kacs_inode_sd_cache *parent_cache = NULL;
+	struct pkm_kacs_inode_security *parent_sec;
+	struct dentry *dentry;
+	struct dentry *parent_dentry;
+	struct inode *inode;
+	struct inode *parent_inode;
+	struct file parent_file = {};
+	const u8 *template_sd_ptr = NULL;
+	const u8 *parent_sd_ptr = NULL;
+	const u8 *new_sd_bytes = NULL;
+	size_t template_sd_len = 0;
+	size_t parent_sd_len = 0;
+	size_t new_sd_len = 0;
+	u32 mount_policy;
+	long ret;
+
+	if (!file || !sec || !cache_out)
+		return -EINVAL;
+
+	inode = file_inode(file);
+	dentry = file_dentry(file);
+	if (!inode || !dentry)
+		return -EACCES;
+
+	mount_policy = pkm_kacs_superblock_mount_policy(inode->i_sb);
+	if (mount_policy != PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL &&
+	    mount_policy != PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT)
+		return -EACCES;
+
+	parent_dentry = dentry->d_parent;
+	if (parent_dentry && parent_dentry != dentry) {
+		struct path parent_path;
+
+		parent_inode = d_inode(parent_dentry);
+		if (!parent_inode || !parent_inode->i_security)
+			return -EACCES;
+
+		parent_sec = pkm_kacs_inode(parent_inode);
+		parent_file.f_inode = parent_inode;
+		parent_path = file->f_path;
+		parent_path.dentry = parent_dentry;
+		*(struct path *)&parent_file.f_path = parent_path;
+
+		mutex_lock(&parent_sec->lock);
+		ret = pkm_kacs_inode_resolve_effective_cache_locked(
+			&parent_file, parent_sec, &parent_cache);
+		if (ret) {
+			mutex_unlock(&parent_sec->lock);
+			return ret;
+		}
+		if (parent_cache->state != PKM_KACS_INODE_SD_VALID ||
+		    !parent_cache->bytes || parent_cache->len == 0) {
+			mutex_unlock(&parent_sec->lock);
+			return -EACCES;
+		}
+		parent_sd_ptr = parent_cache->bytes;
+		parent_sd_len = parent_cache->len;
+		pkm_kacs_superblock_template_sd(inode->i_sb, &template_sd_ptr,
+						&template_sd_len);
+		ret = kacs_rust_synthesize_file_sd(
+			parent_sd_ptr, parent_sd_len, template_sd_ptr,
+			template_sd_len, S_ISDIR(inode->i_mode), &new_sd_bytes,
+			&new_sd_len);
+		mutex_unlock(&parent_sec->lock);
+		if (ret)
+			return ret;
+	} else {
+		pkm_kacs_superblock_template_sd(inode->i_sb, &template_sd_ptr,
+						&template_sd_len);
+		ret = kacs_rust_synthesize_file_sd(
+			NULL, 0, template_sd_ptr, template_sd_len,
+			S_ISDIR(inode->i_mode), &new_sd_bytes, &new_sd_len);
+		if (ret)
+			return ret;
+	}
+
+	new_cache = pkm_kacs_inode_sd_cache_alloc(PKM_KACS_INODE_SD_VALID,
+						  new_sd_bytes, new_sd_len);
+	if (!new_cache) {
+		pkm_kacs_free((void *)new_sd_bytes);
+		return -ENOMEM;
+	}
+
+	if (mount_policy == PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT) {
+		ret = pkm_kacs_inode_write_sd_xattr_locked(file, new_sd_bytes,
+							   new_sd_len);
+		if (ret)
+			goto out;
+	}
+
+	pkm_kacs_inode_replace_sd_cache_locked(sec, new_cache);
+	*cache_out = new_cache;
+	new_cache = NULL;
+	return 0;
+
+out:
+	pkm_kacs_inode_sd_cache_free(new_cache);
+	return ret;
+}
+
+static long pkm_kacs_inode_resolve_effective_cache_locked(
+	struct file *file, struct pkm_kacs_inode_security *sec,
+	struct pkm_kacs_inode_sd_cache **cache_out)
+{
+	struct pkm_kacs_inode_sd_cache *cache;
+	u32 mount_policy;
+	long ret;
+
+	if (!file || !sec || !cache_out)
+		return -EINVAL;
+
+	ret = pkm_kacs_inode_get_or_populate_cache_locked(file, sec, &cache);
+	if (ret)
+		return ret;
+	if (cache->state != PKM_KACS_INODE_SD_MISSING) {
+		*cache_out = cache;
+		return 0;
+	}
+
+	mount_policy = pkm_kacs_superblock_mount_policy(file_inode(file)->i_sb);
+	if (mount_policy != PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL &&
+	    mount_policy != PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT) {
+		*cache_out = cache;
+		return 0;
+	}
+
+	return pkm_kacs_synthesize_missing_file_sd_locked(file, sec, cache_out);
 }
 
 static long pkm_kacs_query_file_sd_bytes_core(
@@ -777,6 +1027,7 @@ static long pkm_kacs_inode_write_sd_xattr_locked(struct file *file,
 {
 	struct dentry *dentry;
 	struct inode *inode;
+	struct pkm_kacs_inode_security *sec;
 	int ret;
 
 	if (!file || !sd_bytes || sd_len == 0)
@@ -786,6 +1037,12 @@ static long pkm_kacs_inode_write_sd_xattr_locked(struct file *file,
 	inode = file_inode(file);
 	if (!dentry || !inode)
 		return -EACCES;
+	sec = inode->i_security ? pkm_kacs_inode(inode) : NULL;
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	if (sec && sec->kunit_fake_xattr_enabled)
+		return pkm_kacs_kunit_fake_setxattr_locked(sec, sd_bytes, sd_len);
+#endif
 
 	inode_lock(inode);
 	ret = __vfs_setxattr_noperm(file_mnt_idmap(file), dentry,
@@ -1510,6 +1767,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(cred_alloc_blank, pkm_kacs_cred_alloc_blank),
 	LSM_HOOK_INIT(cred_free, pkm_kacs_cred_free),
 	LSM_HOOK_INIT(sb_alloc_security, pkm_kacs_sb_alloc_security),
+	LSM_HOOK_INIT(sb_free_security, pkm_kacs_sb_free_security),
 	LSM_HOOK_INIT(inode_alloc_security, pkm_kacs_inode_alloc_security),
 	LSM_HOOK_INIT(inode_free_security_rcu, pkm_kacs_inode_free_security_rcu),
 	LSM_HOOK_INIT(inode_getxattr, pkm_kacs_inode_getxattr),
@@ -2763,7 +3021,7 @@ static long pkm_kacs_query_file_sd_core(const void *subject_token,
 
 	sec = pkm_kacs_inode(inode);
 	mutex_lock(&sec->lock);
-	ret = pkm_kacs_inode_get_or_populate_cache_locked(file, sec, &cache);
+	ret = pkm_kacs_inode_resolve_effective_cache_locked(file, sec, &cache);
 	if (!ret)
 		ret = pkm_kacs_query_file_sd_bytes_core(subject_token, cache,
 							security_info,
@@ -2799,7 +3057,7 @@ static long pkm_kacs_set_file_sd_core(const void *subject_token,
 
 	sec = pkm_kacs_inode(inode);
 	mutex_lock(&sec->lock);
-	ret = pkm_kacs_inode_get_or_populate_cache_locked(file, sec, &cache);
+	ret = pkm_kacs_inode_resolve_effective_cache_locked(file, sec, &cache);
 	if (ret)
 		goto out_unlock;
 
@@ -4629,11 +4887,14 @@ struct pkm_kacs_kunit_file_mount_state {
 	void *inode_blob;
 };
 
-static int pkm_kacs_kunit_init_file_mount_state(
+static int pkm_kacs_kunit_init_file_mount_state_ex(
 	struct pkm_kacs_kunit_file_mount_state *state, u64 magic,
-	struct pkm_kacs_inode_sd_cache *cache)
+	struct pkm_kacs_inode_sd_cache *cache, u32 policy_override,
+	const u8 *template_sd_ptr, size_t template_sd_len, umode_t mode,
+	bool fake_xattr_enabled)
 {
 	struct pkm_kacs_inode_security *sec;
+	struct pkm_kacs_superblock_security *sb_sec;
 	size_t sb_blob_len;
 	size_t inode_blob_len;
 	int ret;
@@ -4662,34 +4923,62 @@ static int pkm_kacs_kunit_init_file_mount_state(
 	ret = pkm_kacs_sb_alloc_security(&state->sb);
 	if (ret)
 		goto out_err;
+	sb_sec = pkm_kacs_sb(&state->sb);
+	if (policy_override != 0)
+		sb_sec->mount_policy = policy_override;
+	if (template_sd_ptr && template_sd_len != 0) {
+		const u8 *copied_bytes = kmemdup(template_sd_ptr,
+						 template_sd_len,
+						 GFP_KERNEL);
+
+		if (!copied_bytes) {
+			ret = -ENOMEM;
+			goto out_err;
+		}
+		sb_sec->template_sd_bytes = copied_bytes;
+		sb_sec->template_sd_len = template_sd_len;
+	}
 
 	state->inode.i_sb = &state->sb;
+	state->inode.i_mode = mode;
 	state->inode.i_security = state->inode_blob;
 	ret = pkm_kacs_inode_alloc_security(&state->inode);
 	if (ret)
 		goto out_err;
 
 	state->dentry.d_inode = &state->inode;
+	state->dentry.d_parent = &state->dentry;
 	state->file.f_inode = &state->inode;
 	*(struct path *)&state->file.f_path = (struct path){
 		.dentry = &state->dentry,
 	};
 
-	if (cache) {
-		sec = pkm_kacs_inode(&state->inode);
+	sec = pkm_kacs_inode(&state->inode);
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	sec->kunit_fake_xattr_enabled = fake_xattr_enabled;
+#endif
+	if (cache)
 		RCU_INIT_POINTER(sec->sd_cache, cache);
-	}
 
 	return 0;
 
 out_err:
+	pkm_kacs_sb_free_security(&state->sb);
 	if (state->inode.i_security)
-		pkm_kacs_inode_free_security_rcu(pkm_kacs_inode(&state->inode));
+		pkm_kacs_inode_free_security_rcu(state->inode.i_security);
 	kfree(state->inode_blob);
 	kfree(state->sb_blob);
 	state->inode_blob = NULL;
 	state->sb_blob = NULL;
 	return ret;
+}
+
+static int pkm_kacs_kunit_init_file_mount_state(
+	struct pkm_kacs_kunit_file_mount_state *state, u64 magic,
+	struct pkm_kacs_inode_sd_cache *cache)
+{
+	return pkm_kacs_kunit_init_file_mount_state_ex(
+		state, magic, cache, 0, NULL, 0, S_IFREG, false);
 }
 
 static void pkm_kacs_kunit_cleanup_file_mount_state(
@@ -4699,7 +4988,8 @@ static void pkm_kacs_kunit_cleanup_file_mount_state(
 		return;
 
 	if (state->inode.i_security)
-		pkm_kacs_inode_free_security_rcu(pkm_kacs_inode(&state->inode));
+		pkm_kacs_inode_free_security_rcu(state->inode.i_security);
+	pkm_kacs_sb_free_security(&state->sb);
 	kfree(state->inode_blob);
 	kfree(state->sb_blob);
 	memset(state, 0, sizeof(*state));
@@ -4707,34 +4997,47 @@ static void pkm_kacs_kunit_cleanup_file_mount_state(
 
 u32 pkm_kacs_kunit_mount_policy_for_magic(u64 magic)
 {
-	struct pkm_kacs_kunit_file_mount_state state;
+	struct pkm_kacs_kunit_file_mount_state *state;
 	u32 policy;
 
-	if (pkm_kacs_kunit_init_file_mount_state(&state, magic, NULL) != 0)
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
 		return 0;
 
-	policy = pkm_kacs_superblock_mount_policy(&state.sb);
-	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	if (pkm_kacs_kunit_init_file_mount_state(state, magic, NULL) != 0) {
+		kfree(state);
+		return 0;
+	}
+
+	policy = pkm_kacs_superblock_mount_policy(&state->sb);
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+	kfree(state);
 	return policy;
 }
 
 long pkm_kacs_kunit_missing_file_sd_result_for_magic(u64 magic)
 {
-	struct pkm_kacs_kunit_file_mount_state state;
+	struct pkm_kacs_kunit_file_mount_state *state;
 	struct pkm_kacs_inode_sd_cache *cache = NULL;
 	long ret;
 
-	ret = pkm_kacs_kunit_init_file_mount_state(&state, magic, NULL);
-	if (ret)
-		return ret;
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
 
-	ret = pkm_kacs_missing_file_sd_policy_result(&state.sb, &cache);
+	ret = pkm_kacs_kunit_init_file_mount_state(state, magic, NULL);
+	if (ret)
+		goto out_free;
+
+	ret = pkm_kacs_missing_file_sd_policy_result(&state->sb, &cache);
 	if (!ret && cache) {
 		ret = cache->state;
 		pkm_kacs_inode_sd_cache_free(cache);
 	}
 
-	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_free:
+	kfree(state);
 	return ret;
 }
 
@@ -4742,7 +5045,7 @@ long pkm_kacs_kunit_get_file_sd_on_mount_for_subject(
 	const struct pkm_kacs_kunit_file_sd_get_args *args, u64 magic,
 	const u8 **out_sd_ptr, size_t *out_sd_len)
 {
-	struct pkm_kacs_kunit_file_mount_state state;
+	struct pkm_kacs_kunit_file_mount_state *state;
 	struct pkm_kacs_inode_sd_cache *cache;
 	long ret;
 
@@ -4758,23 +5061,31 @@ long pkm_kacs_kunit_get_file_sd_on_mount_for_subject(
 	if (!cache)
 		return -EINVAL;
 
-	ret = pkm_kacs_kunit_init_file_mount_state(&state, magic, cache);
-	if (ret) {
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state) {
 		pkm_kacs_inode_sd_cache_free(cache);
-		return ret;
+		return -ENOMEM;
 	}
 
-	ret = pkm_kacs_query_file_sd_core(args->subject_token, &state.file,
+	ret = pkm_kacs_kunit_init_file_mount_state(state, magic, cache);
+	if (ret) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		goto out_free;
+	}
+
+	ret = pkm_kacs_query_file_sd_core(args->subject_token, &state->file,
 					  args->security_info, out_sd_ptr,
 					  out_sd_len);
-	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_free:
+	kfree(state);
 	return ret;
 }
 
 long pkm_kacs_kunit_set_file_sd_on_mount_for_subject(
 	const struct pkm_kacs_kunit_file_sd_set_args *args, u64 magic)
 {
-	struct pkm_kacs_kunit_file_mount_state state;
+	struct pkm_kacs_kunit_file_mount_state *state;
 	struct pkm_kacs_inode_sd_cache *cache;
 	long ret;
 
@@ -4787,17 +5098,68 @@ long pkm_kacs_kunit_set_file_sd_on_mount_for_subject(
 	if (!cache)
 		return -EINVAL;
 
-	ret = pkm_kacs_kunit_init_file_mount_state(&state, magic, cache);
-	if (ret) {
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state) {
 		pkm_kacs_inode_sd_cache_free(cache);
-		return ret;
+		return -ENOMEM;
 	}
 
-	ret = pkm_kacs_set_file_sd_core(args->subject_token, &state.file,
+	ret = pkm_kacs_kunit_init_file_mount_state(state, magic, cache);
+	if (ret) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		goto out_free;
+	}
+
+	ret = pkm_kacs_set_file_sd_core(args->subject_token, &state->file,
 					args->security_info,
 					args->input_sd_ptr,
 					args->input_sd_len);
-	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_free:
+	kfree(state);
+	return ret;
+}
+
+long pkm_kacs_kunit_query_missing_file_sd_on_policy_mount(
+	const struct pkm_kacs_kunit_missing_file_sd_query_args *args,
+	const u8 **out_sd_ptr, size_t *out_sd_len, u32 *xattr_written_out)
+{
+	struct pkm_kacs_kunit_file_mount_state *state;
+	struct pkm_kacs_inode_security *sec;
+	long ret;
+
+	if (!args || !out_sd_ptr || !out_sd_len || !xattr_written_out)
+		return -EINVAL;
+
+	*out_sd_ptr = NULL;
+	*out_sd_len = 0;
+	*xattr_written_out = 0;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		state, TMPFS_MAGIC, NULL, args->mount_policy,
+		args->template_sd_ptr, args->template_sd_len,
+		args->mode ? args->mode : S_IFREG, true);
+	if (ret)
+		goto out_free;
+
+	ret = pkm_kacs_query_file_sd_core(args->subject_token, &state->file,
+					  args->security_info, out_sd_ptr,
+					  out_sd_len);
+	if (!ret) {
+		sec = pkm_kacs_inode(&state->inode);
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+		*xattr_written_out = sec->kunit_fake_xattr_bytes &&
+				     sec->kunit_fake_xattr_len != 0;
+#endif
+	}
+
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_free:
+	kfree(state);
 	return ret;
 }
 

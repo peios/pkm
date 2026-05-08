@@ -5,7 +5,7 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 
 kernel_image=${1:-"$script_dir/out/bzImage"}
-initrd_image=${2:-"/home/jack/projects/peios/provium/testdata/minimal.cpio.gz"}
+initrd_image=${2:-"/home/jack/projects/peios/depr/provium/testdata/minimal.cpio.gz"}
 qemu_bin=${QEMU_BIN:-qemu-system-x86_64}
 log_file=${TMPDIR:-/tmp}/pkm-slice17-boot.log
 boot_marker='pkm: slow-track kernel scaffold initialized'

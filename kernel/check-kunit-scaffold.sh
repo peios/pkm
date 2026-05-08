@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 kernel_image=${1:-"$script_dir/out-kunit/bzImage"}
-initrd_image=${2:-"/home/jack/projects/peios/provium/testdata/minimal.cpio.gz"}
+initrd_image=${2:-"/home/jack/projects/peios/depr/provium/testdata/minimal.cpio.gz"}
 qemu_bin=${QEMU_BIN:-qemu-system-x86_64}
 log_file=${TMPDIR:-/tmp}/pkm-slice19-kunit.log
 suite_marker='pkm: kunit scaffold smoke passed'
@@ -35,7 +35,7 @@ timeout 30s "$qemu_bin" \
 	-serial mon:stdio \
 	-kernel "$kernel_image" \
 	-initrd "$initrd_image" \
-	-append 'console=ttyS0 loglevel=7 ignore_loglevel init=/sbin/real-init kunit.enable=1' \
+	-append 'console=ttyS0 loglevel=7 ignore_loglevel panic=-1 init=/sbin/real-init kunit.enable=1' \
 	2>&1 | tee "$log_file"
 qemu_status=${PIPESTATUS[0]}
 set -e
