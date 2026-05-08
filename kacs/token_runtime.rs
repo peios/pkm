@@ -30,6 +30,7 @@ use crate::acl::Acl;
 use crate::claims::{parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, CLAIM_TYPE_INT64};
 use crate::condition::ConditionalContext;
 use crate::error::KacsError;
+use crate::kmes_payload::emit_logon_session_destroyed_to_kmes;
 use crate::mic::{
     IntegrityLevel, TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN, TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
 };
@@ -367,6 +368,8 @@ struct PkmKacsSession {
     logon_sid_ptr: *mut u8,
     logon_sid_len: usize,
     logon_sid: Sid<'static>,
+    live_tokens: AtomicUsize,
+    destroying: AtomicBool,
     linked_elevated: *const c_void,
     linked_filtered: *const c_void,
 }
@@ -464,6 +467,153 @@ impl Drop for SessionTableGuard {
 }
 
 impl PkmKacsSession {
+    fn session_list_remove_locked(target: *mut Self) -> bool {
+        let mut prev: *mut Self = null_mut();
+        let mut cursor = SESSION_LIST_HEAD.load(Ordering::Acquire);
+
+        while !cursor.is_null() {
+            let session = unsafe { &*cursor };
+
+            if cursor == target {
+                let next = session.next.load(Ordering::Relaxed);
+
+                if prev.is_null() {
+                    SESSION_LIST_HEAD.store(next, Ordering::Release);
+                } else {
+                    unsafe { &*prev }.next.store(next, Ordering::Relaxed);
+                }
+                session.next.store(null_mut(), Ordering::Relaxed);
+                return true;
+            }
+
+            prev = cursor;
+            cursor = session.next.load(Ordering::Relaxed);
+        }
+
+        false
+    }
+
+    fn prepare_destroy_locked(session_ptr: *mut Self) -> Option<(*const c_void, *const c_void)> {
+        let session = unsafe { &mut *session_ptr };
+        let linked_elevated;
+        let linked_filtered;
+
+        if session.destroying.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+
+        linked_elevated = session.linked_elevated;
+        linked_filtered = if session.linked_filtered == linked_elevated {
+            null()
+        } else {
+            session.linked_filtered
+        };
+        session.linked_elevated = null();
+        session.linked_filtered = null();
+        Self::session_list_remove_locked(session_ptr);
+        Some((linked_elevated, linked_filtered))
+    }
+
+    fn finish_destroy(
+        ptr: *const Self,
+        linked_elevated: *const c_void,
+        linked_filtered: *const c_void,
+    ) {
+        let Some(session) = (unsafe { Self::from_ptr(ptr.cast()) }) else {
+            return;
+        };
+
+        let _ = emit_logon_session_destroyed_to_kmes(
+            session.session_id,
+            session.user_sid.as_bytes(),
+            session.logon_type,
+            session.auth_package_bytes(),
+            session.created_at,
+        );
+
+        if !linked_elevated.is_null() {
+            unsafe { PkmKacsBootToken::drop_ref(linked_elevated) };
+        }
+        if !linked_filtered.is_null() {
+            unsafe { PkmKacsBootToken::drop_ref(linked_filtered) };
+        }
+
+        unsafe { Self::drop_ref(ptr) };
+    }
+
+    fn destroy_published_session(ptr: *const Self) {
+        let prepared = {
+            let _guard = lock_session_table();
+            Self::prepare_destroy_locked(ptr as *mut Self)
+        };
+
+        if let Some((linked_elevated, linked_filtered)) = prepared {
+            Self::finish_destroy(ptr, linked_elevated, linked_filtered);
+        }
+    }
+
+    fn maybe_destroy_if_only_link_refs_remaining(ptr: *const Self) {
+        let prepared = {
+            let _guard = lock_session_table();
+            let Some(session) = (unsafe { Self::from_ptr(ptr.cast()) }) else {
+                return;
+            };
+            let Some(elevated) =
+                (unsafe { PkmKacsBootToken::from_ptr(session.linked_elevated) })
+            else {
+                return;
+            };
+            let Some(filtered) =
+                (unsafe { PkmKacsBootToken::from_ptr(session.linked_filtered) })
+            else {
+                return;
+            };
+
+            if session.destroying.load(Ordering::Acquire)
+                || session.live_tokens.load(Ordering::Acquire) != 2
+                || elevated.refcount.load(Ordering::Acquire) != 1
+                || filtered.refcount.load(Ordering::Acquire) != 1
+            {
+                None
+            } else {
+                Self::prepare_destroy_locked(ptr as *mut Self)
+            }
+        };
+
+        if let Some((linked_elevated, linked_filtered)) = prepared {
+            Self::finish_destroy(ptr, linked_elevated, linked_filtered);
+        }
+    }
+
+    fn register_live_token(ptr: *const Self) {
+        let Some(session) = (unsafe { Self::from_ptr(ptr.cast()) }) else {
+            return;
+        };
+
+        session.live_tokens.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn release_live_token(ptr: *const Self) -> usize {
+        let Some(session) = (unsafe { Self::from_ptr(ptr.cast()) }) else {
+            return 0;
+        };
+
+        loop {
+            let current = session.live_tokens.load(Ordering::Acquire);
+
+            if current == 0 {
+                return 0;
+            }
+            if session
+                .live_tokens
+                .compare_exchange(current, current - 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return current - 1;
+            }
+        }
+    }
+
     unsafe fn from_ptr(ptr: *const c_void) -> Option<&'static Self> {
         if ptr.is_null() {
             return None;
@@ -484,7 +634,9 @@ impl PkmKacsSession {
             return;
         };
 
-        if session.refcount.fetch_sub(1, Ordering::Release) == 1 {
+        let previous = session.refcount.fetch_sub(1, Ordering::Release);
+
+        if previous == 1 {
             fence(Ordering::Acquire);
             let session_ptr = ptr as *mut Self;
             let linked_elevated = session.linked_elevated;
@@ -502,6 +654,14 @@ impl PkmKacsSession {
             free_allocated_bytes(session.logon_sid_ptr);
             unsafe { core::ptr::drop_in_place(session_ptr) };
             unsafe { pkm_kacs_free(session_ptr.cast()) };
+            return;
+        }
+
+        if previous == 2
+            && session.live_tokens.load(Ordering::Acquire) == 0
+            && !session.destroying.load(Ordering::Acquire)
+        {
+            Self::destroy_published_session(ptr);
         }
     }
 
@@ -1235,6 +1395,8 @@ fn create_session_object(
                 logon_sid_ptr,
                 logon_sid_len,
                 logon_sid,
+                live_tokens: AtomicUsize::new(0),
+                destroying: AtomicBool::new(false),
                 linked_elevated: null(),
                 linked_filtered: null(),
             },
@@ -2372,6 +2534,7 @@ impl PkmKacsBootToken {
         };
 
         unsafe { core::ptr::write(token_ptr, token) };
+        PkmKacsSession::register_live_token(session);
         Some(token_ptr.cast())
     }
 
@@ -2518,6 +2681,7 @@ impl PkmKacsBootToken {
         };
 
         unsafe { core::ptr::write(token_ptr, token) };
+        PkmKacsSession::register_live_token(session);
         Some(token_ptr.cast())
     }
 
@@ -2772,6 +2936,7 @@ impl PkmKacsBootToken {
         };
 
         unsafe { core::ptr::write(token_ptr, token) };
+        PkmKacsSession::register_live_token(session);
         Some(token_ptr.cast())
     }
 
@@ -3153,6 +3318,7 @@ impl PkmKacsBootToken {
         };
 
         unsafe { core::ptr::write(token_ptr, token) };
+        PkmKacsSession::register_live_token(session);
         Ok(token_ptr.cast())
     }
 
@@ -3361,6 +3527,7 @@ impl PkmKacsBootToken {
         };
 
         unsafe { core::ptr::write(token_ptr, copy) };
+        PkmKacsSession::register_live_token(session);
         token_ptr.cast()
     }
 
@@ -3495,6 +3662,7 @@ impl PkmKacsBootToken {
         };
 
         unsafe { core::ptr::write(token_ptr, duplicate) };
+        PkmKacsSession::register_live_token(session);
         Ok(token_ptr.cast())
     }
 
@@ -3617,6 +3785,7 @@ impl PkmKacsBootToken {
         };
 
         unsafe { core::ptr::write(token_ptr, derived) };
+        PkmKacsSession::register_live_token(session);
         Ok(token_ptr.cast())
     }
 
@@ -3624,14 +3793,23 @@ impl PkmKacsBootToken {
         let Some(token) = (unsafe { Self::from_ptr(ptr) }) else {
             return;
         };
-        if token.refcount.fetch_sub(1, Ordering::Release) == 1 {
+        let previous = token.refcount.fetch_sub(1, Ordering::Release);
+
+        if previous == 1 {
             fence(Ordering::Acquire);
             let token_ptr = ptr as *mut Self;
+            let session_ptr = token.session.cast();
+            let remaining_live_tokens = PkmKacsSession::release_live_token(session_ptr);
             free_allocated_bytes(token.default_dacl_ptr.load(Ordering::Relaxed));
             free_allocated_bytes(token.own_sd_ptr.load(Ordering::Relaxed));
-            unsafe { PkmKacsSession::drop_ref(token.session.cast()) };
+            unsafe { PkmKacsSession::drop_ref(session_ptr) };
+            if remaining_live_tokens == 2 {
+                PkmKacsSession::maybe_destroy_if_only_link_refs_remaining(session_ptr);
+            }
             unsafe { core::ptr::drop_in_place(token_ptr) };
             unsafe { pkm_kacs_free(token_ptr.cast()) };
+        } else if previous == 2 {
+            PkmKacsSession::maybe_destroy_if_only_link_refs_remaining(token.session.cast());
         }
     }
 
@@ -4328,6 +4506,7 @@ impl PkmKacsBootToken {
         };
 
         unsafe { core::ptr::write(token_ptr, restricted_token) };
+        PkmKacsSession::register_live_token(session);
         Ok(token_ptr.cast())
     }
 
@@ -4583,48 +4762,50 @@ fn link_tokens_on_session(
     let filtered_ref;
     let old_elevated;
     let old_filtered;
-    let _guard = lock_session_table();
-    let Some(session_ptr) = session_list_find_locked(session_id) else {
-        return Err(-EINVAL);
-    };
-    let session = unsafe { &mut *session_ptr };
-
-    if elevated_ptr == filtered_ptr {
-        return Err(-EINVAL);
-    }
-    if elevated_token.token_type != TokenType::Primary
-        || filtered_token.token_type != TokenType::Primary
     {
-        return Err(-EINVAL);
-    }
-    if session_ptr.cast_const() != elevated_token.session
-        || session_ptr.cast_const() != filtered_token.session
-    {
-        return Err(-EINVAL);
-    }
-    if elevated_token.user_sid.as_bytes() != filtered_token.user_sid.as_bytes() {
-        return Err(-EINVAL);
-    }
+        let _guard = lock_session_table();
+        let Some(session_ptr) = session_list_find_locked(session_id) else {
+            return Err(-EINVAL);
+        };
+        let session = unsafe { &mut *session_ptr };
 
-    validate_link_role(elevated_token, TOKEN_ELEVATION_FULL_ABI)?;
-    validate_link_role(filtered_token, TOKEN_ELEVATION_LIMITED_ABI)?;
+        if elevated_ptr == filtered_ptr {
+            return Err(-EINVAL);
+        }
+        if elevated_token.token_type != TokenType::Primary
+            || filtered_token.token_type != TokenType::Primary
+        {
+            return Err(-EINVAL);
+        }
+        if session_ptr.cast_const() != elevated_token.session
+            || session_ptr.cast_const() != filtered_token.session
+        {
+            return Err(-EINVAL);
+        }
+        if elevated_token.user_sid.as_bytes() != filtered_token.user_sid.as_bytes() {
+            return Err(-EINVAL);
+        }
 
-    elevated_ref = PkmKacsBootToken::clone_ref(elevated_ptr);
-    if elevated_ref.is_null() {
-        return Err(-EACCES);
-    }
-    filtered_ref = PkmKacsBootToken::clone_ref(filtered_ptr);
-    if filtered_ref.is_null() {
-        unsafe { PkmKacsBootToken::drop_ref(elevated_ref) };
-        return Err(-EACCES);
-    }
+        validate_link_role(elevated_token, TOKEN_ELEVATION_FULL_ABI)?;
+        validate_link_role(filtered_token, TOKEN_ELEVATION_LIMITED_ABI)?;
 
-    old_elevated = session.linked_elevated;
-    old_filtered = session.linked_filtered;
-    session.linked_elevated = elevated_ref;
-    session.linked_filtered = filtered_ref;
-    elevated_token.set_elevation_type(TOKEN_ELEVATION_FULL_ABI);
-    filtered_token.set_elevation_type(TOKEN_ELEVATION_LIMITED_ABI);
+        elevated_ref = PkmKacsBootToken::clone_ref(elevated_ptr);
+        if elevated_ref.is_null() {
+            return Err(-EACCES);
+        }
+        filtered_ref = PkmKacsBootToken::clone_ref(filtered_ptr);
+        if filtered_ref.is_null() {
+            unsafe { PkmKacsBootToken::drop_ref(elevated_ref) };
+            return Err(-EACCES);
+        }
+
+        old_elevated = session.linked_elevated;
+        old_filtered = session.linked_filtered;
+        session.linked_elevated = elevated_ref;
+        session.linked_filtered = filtered_ref;
+        elevated_token.set_elevation_type(TOKEN_ELEVATION_FULL_ABI);
+        filtered_token.set_elevation_type(TOKEN_ELEVATION_LIMITED_ABI);
+    }
 
     if !old_elevated.is_null() {
         unsafe { PkmKacsBootToken::drop_ref(old_elevated) };

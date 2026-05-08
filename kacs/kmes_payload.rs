@@ -22,6 +22,7 @@ const ERANGE: c_long = -34;
 const KMES_ORIGIN_KACS: u8 = 2;
 const ACCESS_AUDIT_TYPE: &[u8] = b"access-audit";
 const PRIVILEGE_USE_TYPE: &[u8] = b"privilege-use";
+const LOGON_SESSION_DESTROYED_TYPE: &[u8] = b"logon-session-destroyed";
 
 extern "C" {
     fn pkm_kmes_emit_kernel(
@@ -374,6 +375,32 @@ fn encode_privilege_use_payload(
     Ok(writer.into_vec())
 }
 
+fn encode_logon_session_destroyed_payload(
+    session_id: u64,
+    user_sid: &[u8],
+    logon_type: u32,
+    auth_package: &[u8],
+    created_at: u64,
+) -> Result<Vec<u8>, c_long> {
+    let mut writer = MsgpackWriter::with_capacity(96 + user_sid.len() + auth_package.len())?;
+
+    let _ = str::from_utf8(auth_package).map_err(|_| EIO)?;
+
+    writer.write_map_len(5)?;
+    writer.write_key(b"session_id")?;
+    writer.write_u64(session_id)?;
+    writer.write_key(b"user_sid")?;
+    writer.write_bin(user_sid)?;
+    writer.write_key(b"logon_type")?;
+    writer.write_u64(logon_type as u64)?;
+    writer.write_key(b"auth_package")?;
+    writer.write_str(auth_package)?;
+    writer.write_key(b"created_at")?;
+    writer.write_u64(created_at)?;
+
+    Ok(writer.into_vec())
+}
+
 pub(crate) fn emit_access_check_events_to_kmes(
     audit_events: &[OwnedAuditEvent],
     privilege_use_events: &[PrivilegeUseEvent],
@@ -420,6 +447,34 @@ pub(crate) fn emit_access_check_events_to_kmes(
                 payload.len(),
             );
         }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn emit_logon_session_destroyed_to_kmes(
+    session_id: u64,
+    user_sid: &[u8],
+    logon_type: u32,
+    auth_package: &[u8],
+    created_at: u64,
+) -> Result<(), c_long> {
+    let payload = encode_logon_session_destroyed_payload(
+        session_id,
+        user_sid,
+        logon_type,
+        auth_package,
+        created_at,
+    )?;
+
+    unsafe {
+        pkm_kmes_emit_kernel(
+            KMES_ORIGIN_KACS,
+            LOGON_SESSION_DESTROYED_TYPE.as_ptr().cast(),
+            LOGON_SESSION_DESTROYED_TYPE.len(),
+            payload.as_ptr().cast(),
+            payload.len(),
+        );
     }
 
     Ok(())
