@@ -19,6 +19,11 @@
 #define KACS_BACKUP_INTENT 0x00000001U
 #define KACS_RESTORE_INTENT 0x00000002U
 
+#define PKM_KACS_MOUNT_POLICY_UNMANAGED 1U
+#define PKM_KACS_MOUNT_POLICY_DENY_MISSING 2U
+#define PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL 3U
+#define PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT 4U
+
 #define KACS_MIT_WXP 0x001U
 #define KACS_MIT_TLP 0x002U
 #define KACS_MIT_LSV 0x004U
@@ -452,6 +457,13 @@ long pkm_kacs_kunit_set_file_sd_for_subject(
 	const struct pkm_kacs_kunit_file_sd_set_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
 u32 pkm_kacs_kunit_classify_file_sd_bytes(const u8 *sd_ptr, size_t sd_len);
+u32 pkm_kacs_kunit_mount_policy_for_magic(u64 magic);
+long pkm_kacs_kunit_missing_file_sd_result_for_magic(u64 magic);
+long pkm_kacs_kunit_get_file_sd_on_mount_for_subject(
+	const struct pkm_kacs_kunit_file_sd_get_args *args, u64 magic,
+	const u8 **out_sd_ptr, size_t *out_sd_len);
+long pkm_kacs_kunit_set_file_sd_on_mount_for_subject(
+	const struct pkm_kacs_kunit_file_sd_set_args *args, u64 magic);
 int pkm_kacs_kunit_inode_sd_xattr_get(const char *name, u32 ntfs);
 int pkm_kacs_kunit_inode_sd_xattr_set(const char *name, u32 ntfs);
 int pkm_kacs_kunit_inode_sd_xattr_remove(const char *name, u32 ntfs);

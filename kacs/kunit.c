@@ -19,6 +19,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
+#include <linux/magic.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/net.h>
@@ -6430,6 +6431,172 @@ static void pkm_kunit_get_file_sd_success(struct kunit *test)
 	pkm_kacs_free((void *)expected_subset);
 	pkm_kacs_free((void *)subset);
 	pkm_kacs_free((void *)file_sd);
+}
+
+static void pkm_kunit_file_mount_policy_classifies_unmanaged_special_fs(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_mount_policy_for_magic(
+				       PROC_SUPER_MAGIC),
+			PKM_KACS_MOUNT_POLICY_UNMANAGED);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_mount_policy_for_magic(SYSFS_MAGIC),
+			PKM_KACS_MOUNT_POLICY_UNMANAGED);
+}
+
+static void pkm_kunit_file_mount_policy_classifies_synthesize_ephemeral_fs(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_mount_policy_for_magic(
+				       NFS_SUPER_MAGIC),
+			PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_mount_policy_for_magic(
+				       MSDOS_SUPER_MAGIC),
+			PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_mount_policy_for_magic(
+				       EXFAT_SUPER_MAGIC),
+			PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL);
+}
+
+static void pkm_kunit_file_mount_policy_defaults_to_deny_missing(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_mount_policy_for_magic(EXT4_SUPER_MAGIC),
+			PKM_KACS_MOUNT_POLICY_DENY_MISSING);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_mount_policy_for_magic(TMPFS_MAGIC),
+			PKM_KACS_MOUNT_POLICY_DENY_MISSING);
+}
+
+static void pkm_kunit_file_missing_sd_deny_mount_returns_missing_state(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_missing_file_sd_result_for_magic(
+				EXT4_SUPER_MAGIC),
+			(long)PKM_KACS_KUNIT_FILE_SD_MISSING);
+}
+
+static void pkm_kunit_file_missing_sd_synthesize_mount_fails_closed(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_missing_file_sd_result_for_magic(
+				NFS_SUPER_MAGIC),
+			(long)-EOPNOTSUPP);
+}
+
+static void pkm_kunit_get_file_sd_synthesize_mount_valid_cache_success(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_get_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_DACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const u8 *file_sd;
+	const u8 *subset = NULL;
+	const u8 *expected_subset = NULL;
+	size_t file_sd_len = 0;
+	size_t subset_len = 0;
+	size_t expected_subset_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	file_sd = pkm_kunit_create_default_file_sd(subject_token, &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = file_sd;
+	args.target_file_sd_len = file_sd_len;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_get_file_sd_on_mount_for_subject(
+				&args, NFS_SUPER_MAGIC, &subset, &subset_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				file_sd, file_sd_len,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_EXPECT_EQ(test, subset_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(subset, expected_subset, subset_len), 0);
+
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)subset);
+	pkm_kacs_free((void *)file_sd);
+}
+
+static void pkm_kunit_get_file_sd_unmanaged_mount_fails_closed(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_get_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_DACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const u8 *file_sd;
+	const u8 *subset = NULL;
+	size_t file_sd_len = 0;
+	size_t subset_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	file_sd = pkm_kunit_create_default_file_sd(subject_token, &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = file_sd;
+	args.target_file_sd_len = file_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_get_file_sd_on_mount_for_subject(
+				&args, PROC_SUPER_MAGIC, &subset,
+				&subset_len),
+			(long)-EOPNOTSUPP);
+	KUNIT_EXPECT_PTR_EQ(test, subset, NULL);
+	KUNIT_EXPECT_EQ(test, subset_len, (size_t)0);
+
+	pkm_kacs_free((void *)file_sd);
+}
+
+static void pkm_kunit_set_file_sd_unmanaged_mount_fails_closed(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_DACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const u8 *target_file_sd;
+	const u8 *input_sd;
+	size_t target_file_sd_len = 0;
+	size_t input_sd_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_file_sd = pkm_kunit_create_default_file_sd(subject_token,
+							  &target_file_sd_len);
+	input_sd = pkm_kunit_create_query_only_file_sd(subject_token,
+						      &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_file_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = target_file_sd;
+	args.target_file_sd_len = target_file_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_file_sd_on_mount_for_subject(
+				&args, PROC_SUPER_MAGIC),
+			(long)-EOPNOTSUPP);
+
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_file_sd);
 }
 
 static void pkm_kunit_get_file_sd_label_on_unlabeled_returns_empty_subset(
@@ -13094,11 +13261,23 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_sd_cache_population_from_valid_xattr),
 	KUNIT_CASE(pkm_kunit_file_sd_cache_population_corrupt_fails_closed),
 	KUNIT_CASE(pkm_kunit_inode_raw_sd_xattr_hooks_deny_canonical_names),
+	KUNIT_CASE(
+		pkm_kunit_file_mount_policy_classifies_unmanaged_special_fs),
+	KUNIT_CASE(
+		pkm_kunit_file_mount_policy_classifies_synthesize_ephemeral_fs),
+	KUNIT_CASE(pkm_kunit_file_mount_policy_defaults_to_deny_missing),
 	KUNIT_CASE(pkm_kunit_get_file_sd_success),
+	KUNIT_CASE(
+		pkm_kunit_get_file_sd_synthesize_mount_valid_cache_success),
 	KUNIT_CASE(
 		pkm_kunit_get_file_sd_label_on_unlabeled_returns_empty_subset),
 	KUNIT_CASE(pkm_kunit_get_file_sd_missing_denies),
+	KUNIT_CASE(
+		pkm_kunit_file_missing_sd_deny_mount_returns_missing_state),
+	KUNIT_CASE(
+		pkm_kunit_file_missing_sd_synthesize_mount_fails_closed),
 	KUNIT_CASE(pkm_kunit_get_file_sd_denied_without_read_control),
+	KUNIT_CASE(pkm_kunit_get_file_sd_unmanaged_mount_fails_closed),
 	KUNIT_CASE(pkm_kunit_set_file_sd_dacl_success),
 	KUNIT_CASE(pkm_kunit_set_file_sd_dacl_denied_without_write_dac),
 	KUNIT_CASE(pkm_kunit_set_file_sd_missing_restore_success),
@@ -13106,6 +13285,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_set_file_sd_label_with_privilege_succeeds),
 	KUNIT_CASE(pkm_kunit_set_file_sd_sacl_label_combo_invalid),
 	KUNIT_CASE(pkm_kunit_set_file_sd_mandatory_resource_attr_protected),
+	KUNIT_CASE(pkm_kunit_set_file_sd_unmanaged_mount_fails_closed),
 	KUNIT_CASE(pkm_kunit_get_process_sd_success),
 	KUNIT_CASE(
 		pkm_kunit_get_process_sd_label_on_unlabeled_returns_empty_subset),
