@@ -90,6 +90,9 @@ int pkm_kacs_open_by_handle_at(void);
 #define KACS_MIT_PIE 0x100U
 #define KACS_MIT_SML 0x200U
 #define KACS_MIT_ALL 0x3FFU
+#define PKM_KACS_KUNIT_SIGNING_SOURCE_NONE 0U
+#define PKM_KACS_KUNIT_SIGNING_SOURCE_ELF 1U
+#define PKM_KACS_KUNIT_SIGNING_SOURCE_XATTR 2U
 
 struct pkm_kacs_boot_group_view {
 	const u8 *sid_ptr;
@@ -173,6 +176,12 @@ struct pkm_kacs_kunit_process_state_view {
 	u32 pip_type;
 	u32 pip_trust;
 	u32 mitigation_bits;
+};
+
+struct pkm_kacs_kunit_signing_probe {
+	u32 source;
+	u8 signature[64];
+	u8 hash[32];
 };
 
 struct pkm_kacs_kunit_process_token_open_args {
@@ -800,6 +809,9 @@ int pkm_kacs_kunit_check_tlp_mprotect_path(u32 mitigation_bits,
 					   unsigned long prot,
 					   const char *path,
 					   u32 file_backed);
+int pkm_kacs_kunit_probe_signing_material(
+	const u8 *file_bytes, size_t file_len, const u8 *xattr_sig,
+	size_t xattr_sig_len, struct pkm_kacs_kunit_signing_probe *out);
 int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
 				       unsigned long prot,
 				       unsigned long flags);

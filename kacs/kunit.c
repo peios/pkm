@@ -7,6 +7,8 @@
  * introducing live security semantics.
  */
 
+#include <crypto/sha2.h>
+
 #include <kunit/test.h>
 #include <linux/anon_inodes.h>
 #include <linux/capability.h>
@@ -5036,6 +5038,259 @@ static void pkm_kunit_tlp_mprotect_checks_new_exec_only(struct kunit *test)
 			0);
 
 	pkm_kacs_kunit_clear_tlp_prefixes();
+}
+
+#define PKM_KUNIT_SIGNING_BLOB_LEN 65U
+#define PKM_KUNIT_SIGNING_SIG_LEN 64U
+#define PKM_KUNIT_SIGNING_VERSION 0x01U
+#define PKM_KUNIT_ELF_LEN 512U
+#define PKM_KUNIT_ELF_SIG_OFFSET 0x40U
+#define PKM_KUNIT_ELF_STRTAB_OFFSET 0x90U
+#define PKM_KUNIT_ELF_SHOFF 0x100U
+
+static void pkm_kunit_signing_fill_blob(u8 blob[PKM_KUNIT_SIGNING_BLOB_LEN],
+					u8 seed)
+{
+	u32 i;
+
+	blob[0] = PKM_KUNIT_SIGNING_VERSION;
+	for (i = 0; i < PKM_KUNIT_SIGNING_SIG_LEN; i++)
+		blob[i + 1] = seed + (u8)i;
+}
+
+static void pkm_kunit_signing_build_elf(
+	u8 file[PKM_KUNIT_ELF_LEN],
+	const u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN], bool include_sig_section,
+	bool valid_sig_section)
+{
+	static const char shstrtab[] = "\0.shstrtab\0.peios.sig\0";
+	const u32 shstrtab_name = 1U;
+	const u32 sig_name = sizeof("\0.shstrtab");
+	Elf64_Ehdr ehdr = {};
+	Elf64_Shdr shdr = {};
+	u32 i;
+
+	for (i = 0; i < PKM_KUNIT_ELF_LEN; i++)
+		file[i] = (u8)(0x31U + (i * 17U));
+
+	memcpy(ehdr.e_ident, ELFMAG, SELFMAG);
+	ehdr.e_ident[EI_CLASS] = ELFCLASS64;
+	ehdr.e_ident[EI_DATA] = ELFDATA2LSB;
+	ehdr.e_ident[EI_VERSION] = EV_CURRENT;
+	ehdr.e_shoff = PKM_KUNIT_ELF_SHOFF;
+	ehdr.e_shentsize = sizeof(Elf64_Shdr);
+	ehdr.e_shnum = include_sig_section ? 3 : 2;
+	ehdr.e_shstrndx = 1;
+	memcpy(file, &ehdr, sizeof(ehdr));
+
+	memcpy(file + PKM_KUNIT_ELF_STRTAB_OFFSET, shstrtab, sizeof(shstrtab));
+
+	memset(&shdr, 0, sizeof(shdr));
+	shdr.sh_name = shstrtab_name;
+	shdr.sh_type = SHT_STRTAB;
+	shdr.sh_offset = PKM_KUNIT_ELF_STRTAB_OFFSET;
+	shdr.sh_size = sizeof(shstrtab);
+	memcpy(file + PKM_KUNIT_ELF_SHOFF + sizeof(Elf64_Shdr), &shdr,
+	       sizeof(shdr));
+
+	if (!include_sig_section)
+		return;
+
+	memcpy(file + PKM_KUNIT_ELF_SIG_OFFSET, sig_blob,
+	       PKM_KUNIT_SIGNING_BLOB_LEN);
+	memset(&shdr, 0, sizeof(shdr));
+	shdr.sh_name = sig_name;
+	shdr.sh_type = SHT_PROGBITS;
+	shdr.sh_offset = PKM_KUNIT_ELF_SIG_OFFSET;
+	shdr.sh_size = valid_sig_section ? PKM_KUNIT_SIGNING_BLOB_LEN :
+					   PKM_KUNIT_SIGNING_BLOB_LEN - 1;
+	memcpy(file + PKM_KUNIT_ELF_SHOFF + (2 * sizeof(Elf64_Shdr)), &shdr,
+	       sizeof(shdr));
+}
+
+static void pkm_kunit_signing_xattr_hashes_non_elf(struct kunit *test)
+{
+	static const u8 file[] = "abc";
+	static const u8 expected_hash[32] = {
+		0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
+		0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+		0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+		0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+	};
+	struct pkm_kacs_kunit_signing_probe out = {};
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0x20);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_material(
+				file, sizeof(file) - 1, sig_blob,
+				sizeof(sig_blob), &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_XATTR);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out.signature, sig_blob + 1,
+			       PKM_KUNIT_SIGNING_SIG_LEN),
+			0);
+	KUNIT_EXPECT_EQ(test, memcmp(out.hash, expected_hash,
+				     sizeof(expected_hash)),
+			0);
+}
+
+static void pkm_kunit_signing_short_file_uses_xattr(struct kunit *test)
+{
+	static const u8 file[] = { 0x7f, 'E', 'L' };
+	struct pkm_kacs_kunit_signing_probe out = {};
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0x30);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_material(
+				file, sizeof(file), sig_blob, sizeof(sig_blob),
+				&out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_XATTR);
+}
+
+static void pkm_kunit_signing_elf_section_zeroes_signature_bytes(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_probe out = {};
+	u8 expected_file[PKM_KUNIT_ELF_LEN];
+	u8 expected_hash[32];
+	u8 raw_hash[32];
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+	u8 file[PKM_KUNIT_ELF_LEN];
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0x40);
+	pkm_kunit_signing_build_elf(file, sig_blob, true, true);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_material(
+				file, sizeof(file), NULL, 0, &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_ELF);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out.signature, sig_blob + 1,
+			       PKM_KUNIT_SIGNING_SIG_LEN),
+			0);
+
+	memcpy(expected_file, file, sizeof(expected_file));
+	memset(expected_file + PKM_KUNIT_ELF_SIG_OFFSET, 0,
+	       PKM_KUNIT_SIGNING_BLOB_LEN);
+	sha256(expected_file, sizeof(expected_file), expected_hash);
+	sha256(file, sizeof(file), raw_hash);
+	KUNIT_EXPECT_EQ(test, memcmp(out.hash, expected_hash,
+				     sizeof(expected_hash)),
+			0);
+	KUNIT_EXPECT_NE(test, memcmp(out.hash, raw_hash, sizeof(raw_hash)), 0);
+}
+
+static void pkm_kunit_signing_elf_priority_blocks_xattr_fallback(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_probe out = {};
+	u8 xattr_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+	u8 file[PKM_KUNIT_ELF_LEN];
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0x50);
+	pkm_kunit_signing_fill_blob(xattr_blob, 0x60);
+	pkm_kunit_signing_build_elf(file, sig_blob, true, false);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_material(
+				file, sizeof(file), xattr_blob,
+				sizeof(xattr_blob), &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_NONE);
+}
+
+static void pkm_kunit_signing_malformed_elf_metadata_blocks_xattr(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_probe out = {};
+	u8 xattr_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+	u8 file[PKM_KUNIT_ELF_LEN];
+	Elf64_Shdr shstr = {};
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0xa0);
+	pkm_kunit_signing_fill_blob(xattr_blob, 0xb0);
+	pkm_kunit_signing_build_elf(file, sig_blob, true, true);
+
+	memcpy(&shstr, file + PKM_KUNIT_ELF_SHOFF + sizeof(Elf64_Shdr),
+	       sizeof(shstr));
+	shstr.sh_offset = PKM_KUNIT_ELF_LEN + 1;
+	memcpy(file + PKM_KUNIT_ELF_SHOFF + sizeof(Elf64_Shdr), &shstr,
+	       sizeof(shstr));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_material(
+				file, sizeof(file), xattr_blob,
+				sizeof(xattr_blob), &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_NONE);
+}
+
+static void pkm_kunit_signing_elf_without_section_uses_xattr(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_probe out = {};
+	u8 xattr_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+	u8 expected_hash[32];
+	u8 file[PKM_KUNIT_ELF_LEN];
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0x70);
+	pkm_kunit_signing_fill_blob(xattr_blob, 0x80);
+	pkm_kunit_signing_build_elf(file, sig_blob, false, false);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_material(
+				file, sizeof(file), xattr_blob,
+				sizeof(xattr_blob), &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_XATTR);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out.signature, xattr_blob + 1,
+			       PKM_KUNIT_SIGNING_SIG_LEN),
+			0);
+	sha256(file, sizeof(file), expected_hash);
+	KUNIT_EXPECT_EQ(test, memcmp(out.hash, expected_hash,
+				     sizeof(expected_hash)),
+			0);
+}
+
+static void pkm_kunit_signing_invalid_xattr_unsigned(struct kunit *test)
+{
+	static const u8 file[] = "plain";
+	struct pkm_kacs_kunit_signing_probe out = {};
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0x90);
+	sig_blob[0] = 0x02;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_material(
+				file, sizeof(file) - 1, sig_blob,
+				sizeof(sig_blob), &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_NONE);
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0x90);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_material(
+				file, sizeof(file) - 1, sig_blob,
+				sizeof(sig_blob) - 1, &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_NONE);
 }
 
 static void pkm_kunit_file_mmap_snapshot_read_and_private_write(
@@ -18888,6 +19143,13 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_tlp_cache_validation),
 	KUNIT_CASE(pkm_kunit_tlp_executable_mapping_enforcement),
 	KUNIT_CASE(pkm_kunit_tlp_mprotect_checks_new_exec_only),
+	KUNIT_CASE(pkm_kunit_signing_xattr_hashes_non_elf),
+	KUNIT_CASE(pkm_kunit_signing_short_file_uses_xattr),
+	KUNIT_CASE(pkm_kunit_signing_elf_section_zeroes_signature_bytes),
+	KUNIT_CASE(pkm_kunit_signing_elf_priority_blocks_xattr_fallback),
+	KUNIT_CASE(pkm_kunit_signing_malformed_elf_metadata_blocks_xattr),
+	KUNIT_CASE(pkm_kunit_signing_elf_without_section_uses_xattr),
+	KUNIT_CASE(pkm_kunit_signing_invalid_xattr_unsigned),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_read_and_private_write),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_shared_write),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_exec),

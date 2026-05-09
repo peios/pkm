@@ -9,6 +9,8 @@
  * plumbing remain deliberately out of scope here.
  */
 
+#include <crypto/sha2.h>
+
 #include <linux/binfmts.h>
 #include <linux/capability.h>
 #include <linux/cred.h>
@@ -125,6 +127,13 @@
 #define PKM_KACS_FILE_DELETE_CHILD 0x00000040U
 #define PKM_KACS_MAX_SD_BYTES 65536U
 #define PKM_KACS_OPEN_HOW_MIN_SIZE 16U
+#define PKM_KACS_SIGNING_BLOB_LEN 65U
+#define PKM_KACS_SIGNING_SIGNATURE_LEN 64U
+#define PKM_KACS_SIGNING_VERSION 0x01U
+#define PKM_KACS_SIGNING_ELF_SECTION ".peios.sig"
+#define PKM_KACS_SIGNING_SOURCE_NONE 0U
+#define PKM_KACS_SIGNING_SOURCE_ELF 1U
+#define PKM_KACS_SIGNING_SOURCE_XATTR 2U
 
 #define PKM_KACS_SD_SUPPORTED_INFO                                             \
 	(OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |             \
@@ -3628,6 +3637,281 @@ out_putname:
 	__putname(path_buf);
 	return ret;
 }
+
+struct pkm_kacs_signing_material {
+	u32 source;
+	u8 signature[PKM_KACS_SIGNING_SIGNATURE_LEN];
+	u8 hash[SHA256_DIGEST_SIZE];
+};
+
+static void pkm_kacs_signing_material_clear(
+	struct pkm_kacs_signing_material *out)
+{
+	memset(out, 0, sizeof(*out));
+}
+
+static bool pkm_kacs_signing_range_valid(size_t offset, size_t len,
+					 size_t file_len)
+{
+	return offset <= file_len && len <= file_len - offset;
+}
+
+static bool pkm_kacs_signing_elf_range_valid(u64 offset, u64 len,
+					     size_t file_len,
+					     size_t *offset_out,
+					     size_t *len_out)
+{
+	size_t offset_size;
+	size_t len_size;
+
+	if (offset > SIZE_MAX || len > SIZE_MAX)
+		return false;
+
+	offset_size = (size_t)offset;
+	len_size = (size_t)len;
+	if (!pkm_kacs_signing_range_valid(offset_size, len_size, file_len))
+		return false;
+
+	*offset_out = offset_size;
+	*len_out = len_size;
+	return true;
+}
+
+static bool pkm_kacs_signing_section_name_eq(const u8 *strtab,
+					     size_t strtab_len, u32 name_offset,
+					     const char *expected)
+{
+	size_t expected_len = strlen(expected);
+	size_t remaining;
+
+	if (name_offset >= strtab_len)
+		return false;
+
+	remaining = strtab_len - name_offset;
+	if (remaining < expected_len + 1)
+		return false;
+	if (memcmp(strtab + name_offset, expected, expected_len) != 0)
+		return false;
+
+	return strtab[name_offset + expected_len] == '\0';
+}
+
+static void pkm_kacs_signing_hash_buffer(const u8 *file_bytes,
+					 size_t file_len, size_t zero_offset,
+					 size_t zero_len,
+					 u8 hash[SHA256_DIGEST_SIZE])
+{
+	static const u8 zeros[SHA256_BLOCK_SIZE];
+	struct sha256_ctx ctx;
+	size_t zero_end;
+
+	sha256_init(&ctx);
+	if (zero_len == 0) {
+		if (file_len != 0)
+			sha256_update(&ctx, file_bytes, file_len);
+		sha256_final(&ctx, hash);
+		return;
+	}
+
+	zero_end = zero_offset + zero_len;
+	if (zero_offset != 0)
+		sha256_update(&ctx, file_bytes, zero_offset);
+	while (zero_len != 0) {
+		size_t chunk = min_t(size_t, zero_len, sizeof(zeros));
+
+		sha256_update(&ctx, zeros, chunk);
+		zero_len -= chunk;
+	}
+	if (zero_end < file_len)
+		sha256_update(&ctx, file_bytes + zero_end,
+			      file_len - zero_end);
+	sha256_final(&ctx, hash);
+}
+
+static bool pkm_kacs_signing_blob_valid(const u8 *blob, size_t blob_len)
+{
+	return blob && blob_len == PKM_KACS_SIGNING_BLOB_LEN &&
+	       blob[0] == PKM_KACS_SIGNING_VERSION;
+}
+
+static int pkm_kacs_signing_probe_xattr_buffer(
+	const u8 *file_bytes, size_t file_len, const u8 *xattr_sig,
+	size_t xattr_sig_len, struct pkm_kacs_signing_material *out)
+{
+	if (xattr_sig_len == 0)
+		return 0;
+	if (!xattr_sig)
+		return -EINVAL;
+	if (!pkm_kacs_signing_blob_valid(xattr_sig, xattr_sig_len))
+		return 0;
+
+	out->source = PKM_KACS_SIGNING_SOURCE_XATTR;
+	memcpy(out->signature, xattr_sig + 1, PKM_KACS_SIGNING_SIGNATURE_LEN);
+	pkm_kacs_signing_hash_buffer(file_bytes, file_len, 0, 0, out->hash);
+	return 0;
+}
+
+static bool pkm_kacs_signing_buffer_is_elf(const u8 *file_bytes,
+					   size_t file_len)
+{
+	return file_len >= SELFMAG &&
+	       memcmp(file_bytes, ELFMAG, SELFMAG) == 0;
+}
+
+static int pkm_kacs_signing_probe_elf_buffer(
+	const u8 *file_bytes, size_t file_len,
+	struct pkm_kacs_signing_material *out, bool *committed_out)
+{
+	const u8 *strtab;
+	Elf64_Shdr shstr = {};
+	Elf64_Ehdr ehdr = {};
+	size_t shdrs_offset;
+	size_t shdrs_len;
+	size_t strtab_offset;
+	size_t strtab_len;
+	u16 shnum;
+	u16 shentsize;
+	u16 shstrndx;
+	u16 i;
+
+	*committed_out = false;
+	if (!pkm_kacs_signing_buffer_is_elf(file_bytes, file_len))
+		return 0;
+	if (file_len < sizeof(ehdr)) {
+		*committed_out = true;
+		return 0;
+	}
+
+	memcpy(&ehdr, file_bytes, sizeof(ehdr));
+	if (ehdr.e_ident[EI_CLASS] != ELFCLASS64 ||
+	    ehdr.e_ident[EI_DATA] != ELFDATA2LSB ||
+	    ehdr.e_ident[EI_VERSION] != EV_CURRENT) {
+		*committed_out = true;
+		return 0;
+	}
+
+	shnum = ehdr.e_shnum;
+	shentsize = ehdr.e_shentsize;
+	shstrndx = ehdr.e_shstrndx;
+	if (shnum == 0)
+		return 0;
+	if (shentsize != sizeof(Elf64_Shdr) ||
+	    shstrndx == SHN_UNDEF || shstrndx >= shnum) {
+		*committed_out = true;
+		return 0;
+	}
+
+	if (ehdr.e_shoff > SIZE_MAX) {
+		*committed_out = true;
+		return 0;
+	}
+	shdrs_offset = (size_t)ehdr.e_shoff;
+	if (shnum > (SIZE_MAX / sizeof(Elf64_Shdr))) {
+		*committed_out = true;
+		return 0;
+	}
+	shdrs_len = (size_t)shnum * sizeof(Elf64_Shdr);
+	if (!pkm_kacs_signing_range_valid(shdrs_offset, shdrs_len, file_len)) {
+		*committed_out = true;
+		return 0;
+	}
+
+	memcpy(&shstr,
+	       file_bytes + shdrs_offset +
+		       ((size_t)shstrndx * sizeof(Elf64_Shdr)),
+	       sizeof(shstr));
+	if (!pkm_kacs_signing_elf_range_valid(shstr.sh_offset, shstr.sh_size,
+					      file_len, &strtab_offset,
+					      &strtab_len)) {
+		*committed_out = true;
+		return 0;
+	}
+	strtab = file_bytes + strtab_offset;
+
+	for (i = 0; i < shnum; i++) {
+		Elf64_Shdr shdr = {};
+		size_t sig_offset;
+		size_t sig_len;
+
+		memcpy(&shdr,
+		       file_bytes + shdrs_offset +
+			       ((size_t)i * sizeof(Elf64_Shdr)),
+		       sizeof(shdr));
+		if (!pkm_kacs_signing_section_name_eq(
+			    strtab, strtab_len, shdr.sh_name,
+			    PKM_KACS_SIGNING_ELF_SECTION))
+			continue;
+
+		*committed_out = true;
+		if (shdr.sh_type != SHT_PROGBITS ||
+		    shdr.sh_size != PKM_KACS_SIGNING_BLOB_LEN ||
+		    !pkm_kacs_signing_elf_range_valid(shdr.sh_offset,
+						      shdr.sh_size, file_len,
+						      &sig_offset,
+						      &sig_len) ||
+		    !pkm_kacs_signing_blob_valid(file_bytes + sig_offset,
+						 sig_len))
+			return 0;
+
+		out->source = PKM_KACS_SIGNING_SOURCE_ELF;
+		memcpy(out->signature, file_bytes + sig_offset + 1,
+		       PKM_KACS_SIGNING_SIGNATURE_LEN);
+		pkm_kacs_signing_hash_buffer(file_bytes, file_len, sig_offset,
+					     sig_len, out->hash);
+		return 0;
+	}
+
+	return 0;
+}
+
+static int __maybe_unused pkm_kacs_signing_probe_buffer(
+	const u8 *file_bytes, size_t file_len, const u8 *xattr_sig,
+	size_t xattr_sig_len, struct pkm_kacs_signing_material *out)
+{
+	bool committed = false;
+	int ret;
+
+	if (!out)
+		return -EINVAL;
+	if (file_len != 0 && !file_bytes)
+		return -EINVAL;
+	if (xattr_sig_len != 0 && !xattr_sig)
+		return -EINVAL;
+
+	pkm_kacs_signing_material_clear(out);
+	ret = pkm_kacs_signing_probe_elf_buffer(file_bytes, file_len, out,
+						&committed);
+	if (ret || committed)
+		return ret;
+
+	return pkm_kacs_signing_probe_xattr_buffer(file_bytes, file_len,
+						   xattr_sig, xattr_sig_len,
+						   out);
+}
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+int pkm_kacs_kunit_probe_signing_material(
+	const u8 *file_bytes, size_t file_len, const u8 *xattr_sig,
+	size_t xattr_sig_len, struct pkm_kacs_kunit_signing_probe *out)
+{
+	struct pkm_kacs_signing_material material;
+	int ret;
+
+	if (!out)
+		return -EINVAL;
+
+	ret = pkm_kacs_signing_probe_buffer(file_bytes, file_len, xattr_sig,
+					    xattr_sig_len, &material);
+	if (ret)
+		return ret;
+
+	memset(out, 0, sizeof(*out));
+	out->source = material.source;
+	memcpy(out->signature, material.signature, sizeof(out->signature));
+	memcpy(out->hash, material.hash, sizeof(out->hash));
+	return 0;
+}
+#endif
 
 static const char pkm_kacs_audit_op_file_access[] = "file.access";
 static const char pkm_kacs_audit_op_file_mmap[] = "file.mmap";
