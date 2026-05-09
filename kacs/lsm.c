@@ -13,6 +13,7 @@
 #include <linux/capability.h>
 #include <linux/cred.h>
 #include <linux/dcache.h>
+#include <linux/falloc.h>
 #include <linux/file.h>
 #include <linux/elf.h>
 #include <linux/errno.h>
@@ -424,6 +425,8 @@ static int pkm_kacs_check_file_permission_snapshot(struct file *file,
 static int pkm_kacs_check_file_lock_snapshot(struct file *file,
 					     unsigned int cmd);
 static int pkm_kacs_check_file_truncate_snapshot(struct file *file);
+static int pkm_kacs_check_file_fallocate_snapshot(struct file *file,
+						  int mode);
 static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm);
 static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 					 const struct file *file);
@@ -2036,6 +2039,20 @@ static int pkm_kacs_file_truncate(struct file *file)
 	return pkm_kacs_check_file_truncate_snapshot(file);
 }
 
+int pkm_kacs_file_fallocate(struct file *file, int mode)
+{
+	int ret;
+
+	if (!file)
+		return -EACCES;
+
+	ret = security_file_permission(file, MAY_WRITE);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_check_file_fallocate_snapshot(file, mode);
+}
+
 static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 {
 	struct pkm_kacs_task_security *new_sec;
@@ -2964,6 +2981,69 @@ static int pkm_kacs_check_file_truncate_snapshot(struct file *file)
 		return 0;
 
 	if ((file_sec->granted_access & PKM_KACS_FILE_WRITE_DATA) != 0)
+		return 0;
+	return -EACCES;
+}
+
+static bool pkm_kacs_fallocate_mode_supported(int mode,
+					      bool *requires_write_data)
+{
+	if (!requires_write_data)
+		return false;
+	if ((mode & ~(FALLOC_FL_MODE_MASK | FALLOC_FL_KEEP_SIZE)) != 0)
+		return false;
+
+	switch (mode & FALLOC_FL_MODE_MASK) {
+	case FALLOC_FL_ALLOCATE_RANGE:
+		*requires_write_data = false;
+		return true;
+	case FALLOC_FL_PUNCH_HOLE:
+		if ((mode & FALLOC_FL_KEEP_SIZE) == 0)
+			return false;
+		*requires_write_data = true;
+		return true;
+	case FALLOC_FL_ZERO_RANGE:
+		*requires_write_data = true;
+		return true;
+	case FALLOC_FL_COLLAPSE_RANGE:
+	case FALLOC_FL_INSERT_RANGE:
+		if ((mode & FALLOC_FL_KEEP_SIZE) != 0)
+			return false;
+		*requires_write_data = true;
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int pkm_kacs_check_file_fallocate_snapshot(struct file *file,
+						  int mode)
+{
+	struct pkm_kacs_file_security *file_sec;
+	bool requires_write_data = false;
+	u32 granted_access;
+
+	if (!file)
+		return -EACCES;
+	if (!file->f_security)
+		return -EACCES;
+
+	file_sec = pkm_kacs_file(file);
+	if (!file_sec->managed)
+		return 0;
+
+	if (!pkm_kacs_fallocate_mode_supported(mode, &requires_write_data))
+		return -EACCES;
+
+	granted_access = file_sec->granted_access;
+	if (requires_write_data) {
+		if ((granted_access & PKM_KACS_FILE_WRITE_DATA) != 0)
+			return 0;
+		return -EACCES;
+	}
+
+	if ((granted_access & (PKM_KACS_FILE_WRITE_DATA |
+			       PKM_KACS_FILE_APPEND_DATA)) != 0)
 		return 0;
 	return -EACCES;
 }
@@ -8724,6 +8804,34 @@ int pkm_kacs_kunit_check_file_truncate_snapshot(u32 managed,
 int pkm_kacs_kunit_check_file_truncate_null(void)
 {
 	return pkm_kacs_check_file_truncate_snapshot(NULL);
+}
+
+int pkm_kacs_kunit_check_file_fallocate_snapshot(u32 managed,
+						 u32 granted_access,
+						 int mode)
+{
+	struct pkm_kacs_kunit_file_mount_state state = { };
+	struct pkm_kacs_file_security *file_sec;
+	int ret;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&state, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		return ret;
+
+	file_sec = pkm_kacs_file(&state.file);
+	file_sec->managed = managed ? 1 : 0;
+	file_sec->granted_access = granted_access;
+
+	ret = pkm_kacs_check_file_fallocate_snapshot(&state.file, mode);
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
+}
+
+int pkm_kacs_kunit_check_file_fallocate_null(void)
+{
+	return pkm_kacs_check_file_fallocate_snapshot(NULL, 0);
 }
 
 int pkm_kacs_kunit_check_task_prctl_mitigations(

@@ -445,6 +445,23 @@ replace_line_after_anchor_once 'SYSCALL_DEFINE1(fchdir, unsigned int, fd)' \
 #endif
 ' \
 	"$kernel_root/fs/open.c"
+insert_block_before_exact_once 'int vfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)' \
+	'extern int pkm_kacs_file_fallocate' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_file_fallocate(struct file *file, int mode);
+#endif
+
+' \
+	"$kernel_root/fs/open.c"
+replace_line_after_anchor_once 'int vfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)' \
+	'	ret = security_file_permission(file, MAY_WRITE);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	ret = pkm_kacs_file_fallocate(file, mode);
+#else
+	ret = security_file_permission(file, MAY_WRITE);
+#endif
+' \
+	"$kernel_root/fs/open.c"
 insert_block_before_exact_once 'static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,' \
 	'static unsigned int proc_pkm_metadata_ptrace_mode' \
 	'static unsigned int proc_pkm_metadata_ptrace_mode(const struct file *file)

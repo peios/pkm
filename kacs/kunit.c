@@ -14,6 +14,7 @@
 #include <linux/cred.h>
 #include <linux/elf.h>
 #include <linux/errno.h>
+#include <linux/falloc.h>
 #include <linux/fdtable.h>
 #include <linux/fcntl.h>
 #include <linux/file.h>
@@ -5103,6 +5104,91 @@ static void pkm_kunit_file_truncate_snapshot_requires_write_data(
 			0);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_file_truncate_null(),
+			-EACCES);
+}
+
+static void pkm_kunit_file_fallocate_snapshot_extend_modes(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA,
+				FALLOC_FL_ALLOCATE_RANGE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA,
+				FALLOC_FL_ALLOCATE_RANGE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA,
+				FALLOC_FL_KEEP_SIZE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA,
+				FALLOC_FL_ALLOCATE_RANGE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				0, 0, FALLOC_FL_WRITE_ZEROES),
+			0);
+}
+
+static void pkm_kunit_file_fallocate_snapshot_mutation_modes(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA,
+				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA,
+				FALLOC_FL_ZERO_RANGE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA,
+				FALLOC_FL_COLLAPSE_RANGE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA,
+				FALLOC_FL_INSERT_RANGE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA,
+				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA,
+				FALLOC_FL_ZERO_RANGE),
+			-EACCES);
+}
+
+static void pkm_kunit_file_fallocate_snapshot_unsupported_fail_closed(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA,
+				FALLOC_FL_UNSHARE_RANGE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA,
+				FALLOC_FL_WRITE_ZEROES),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA,
+				FALLOC_FL_PUNCH_HOLE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fallocate_null(),
 			-EACCES);
 }
 
@@ -16585,6 +16671,9 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_lock_snapshot_shared_and_exclusive),
 	KUNIT_CASE(pkm_kunit_file_lock_snapshot_denials_and_unmanaged),
 	KUNIT_CASE(pkm_kunit_file_truncate_snapshot_requires_write_data),
+	KUNIT_CASE(pkm_kunit_file_fallocate_snapshot_extend_modes),
+	KUNIT_CASE(pkm_kunit_file_fallocate_snapshot_mutation_modes),
+	KUNIT_CASE(pkm_kunit_file_fallocate_snapshot_unsupported_fail_closed),
 	KUNIT_CASE(pkm_kunit_pie_rejects_et_exec),
 	KUNIT_CASE(pkm_kunit_task_prctl_sml_and_cfib_block_disable_paths),
 	KUNIT_CASE(pkm_kunit_open_process_token_success),

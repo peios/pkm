@@ -567,6 +567,7 @@ int pkm_kacs_proc_open_process_token_file(struct file *file,
 int pkm_kacs_proc_open_thread_token_file(struct file *file,
 					 struct task_struct *task);
 int pkm_kacs_securityfs_open_self_token_file(struct file *file);
+int pkm_kacs_file_fallocate(struct file *file, int mode);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 int pkm_kmes_kunit_set_current_process_rate_tokens(u32 tokens);
@@ -709,6 +710,10 @@ int pkm_kacs_kunit_check_file_lock_snapshot(u32 managed, u32 granted_access,
 int pkm_kacs_kunit_check_file_truncate_snapshot(u32 managed,
 						u32 granted_access);
 int pkm_kacs_kunit_check_file_truncate_null(void);
+int pkm_kacs_kunit_check_file_fallocate_snapshot(u32 managed,
+						 u32 granted_access,
+						 int mode);
+int pkm_kacs_kunit_check_file_fallocate_null(void);
 int pkm_kacs_kunit_check_task_prctl_mitigations(
 	u32 mitigation_bits, int option, unsigned long arg2,
 	unsigned long arg3, unsigned long arg4, unsigned long arg5);

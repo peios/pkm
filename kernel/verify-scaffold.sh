@@ -139,6 +139,13 @@ if ! rg -q 'SYSCALL_DEFINE1\(fchdir, unsigned int, fd\)' \
 	die "install-pkm-subtree.sh does not stage the fchdir FILE_TRAVERSE patch"
 fi
 
+if ! rg -q 'int vfs_fallocate\(struct file \*file, int mode,' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'pkm_kacs_file_fallocate\(file, mode\)' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the fallocate KACS patch"
+fi
+
 if ! rg -q 'pkm_kacs_sched_setaffinity' \
 	"$repo_root/kernel/install-pkm-subtree.sh"; then
 	die "install-pkm-subtree.sh does not stage the sched_setaffinity KACS patch"
