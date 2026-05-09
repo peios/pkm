@@ -374,6 +374,7 @@ struct pkm_kacs_kunit_namespace_args {
 	u64 mount_magic;
 	u16 source_mode;
 	u16 target_mode;
+	u32 target_mode_set;
 };
 
 struct pkm_kacs_kunit_delete_on_close_result {

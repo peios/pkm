@@ -4750,6 +4750,24 @@ static umode_t pkm_kacs_native_create_mode(bool directory)
 	return directory ? (S_IFDIR | 0700) : (S_IFREG | 0600);
 }
 
+static bool pkm_kacs_special_node_mode_supported(umode_t mode)
+{
+	switch (mode & S_IFMT) {
+	case S_IFCHR:
+	case S_IFBLK:
+	case S_IFIFO:
+	case S_IFSOCK:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool pkm_kacs_existing_file_object_mode_supported(umode_t mode)
+{
+	return S_ISREG(mode) || pkm_kacs_special_node_mode_supported(mode);
+}
+
 static long pkm_kacs_path_sd_lookup_flags(u32 flags,
 					  unsigned int *lookup_flags_out)
 {
@@ -5246,8 +5264,12 @@ static int pkm_kacs_inode_mkdir(struct inode *dir, struct dentry *dentry,
 static int pkm_kacs_inode_mknod(struct inode *dir, struct dentry *dentry,
 				umode_t mode, dev_t dev)
 {
-	(void)mode;
 	(void)dev;
+
+	if (!pkm_kacs_inode_on_unmanaged_mount(dir) &&
+	    !pkm_kacs_special_node_mode_supported(mode))
+		return -EOPNOTSUPP;
+
 	return (int)pkm_kacs_authorize_namespace_create_for_subject(
 		pkm_kacs_current_effective_token_ptr(), dir, dentry, false);
 }
@@ -5957,6 +5979,14 @@ static long pkm_kacs_resolve_native_open_path(
 	} else if (prepared->directory_required) {
 		path_put(resolved_path);
 		return -ENOTDIR;
+	} else if (!pkm_kacs_existing_file_object_mode_supported(
+			   inode->i_mode)) {
+		path_put(resolved_path);
+		return -EACCES;
+	} else if (!S_ISREG(inode->i_mode) &&
+		   (prepared->desired_access & PKM_KACS_FILE_EXECUTE) != 0) {
+		path_put(resolved_path);
+		return -EACCES;
 	}
 
 	return 0;
@@ -8966,6 +8996,11 @@ long pkm_kacs_kunit_native_open_for_subject(
 		ret = -EOPNOTSUPP;
 		goto out_parent_cleanup;
 	}
+	if ((args->flags & AT_SYMLINK_NOFOLLOW) != 0 &&
+	    S_ISLNK(inode->i_mode)) {
+		ret = -ELOOP;
+		goto out_parent_cleanup;
+	}
 	if (args->create_disposition == KACS_FILE_SUPERSEDE ||
 	    args->create_disposition == KACS_FILE_OVERWRITE ||
 	    args->create_disposition == KACS_FILE_OVERWRITE_IF) {
@@ -8982,10 +9017,13 @@ long pkm_kacs_kunit_native_open_for_subject(
 	} else if (prepared.directory_required) {
 		ret = -ENOTDIR;
 		goto out_parent_cleanup;
-	}
-	if ((args->flags & AT_SYMLINK_NOFOLLOW) != 0 &&
-	    S_ISLNK(inode->i_mode)) {
-		ret = -ELOOP;
+	} else if (!pkm_kacs_existing_file_object_mode_supported(
+			   inode->i_mode)) {
+		ret = -EACCES;
+		goto out_parent_cleanup;
+	} else if (!S_ISREG(inode->i_mode) &&
+		   (prepared.desired_access & PKM_KACS_FILE_EXECUTE) != 0) {
+		ret = -EACCES;
 		goto out_parent_cleanup;
 	}
 	if ((args->create_disposition == KACS_FILE_OVERWRITE ||
@@ -10586,6 +10624,7 @@ int pkm_kacs_kunit_check_namespace_live(
 	u64 magic;
 	umode_t source_mode;
 	umode_t target_mode;
+	umode_t mknod_mode;
 	bool source_ready = false;
 	bool old_parent_ready = false;
 	bool new_parent_ready = false;
@@ -10605,6 +10644,7 @@ int pkm_kacs_kunit_check_namespace_live(
 			 PKM_KACS_MOUNT_POLICY_DENY_MISSING;
 	source_mode = args->source_mode ? args->source_mode : S_IFREG;
 	target_mode = args->target_mode ? args->target_mode : S_IFREG;
+	mknod_mode = args->target_mode_set ? args->target_mode : S_IFIFO;
 
 	if (args->old_parent_sd_state != 0) {
 		ret = pkm_kacs_kunit_init_namespace_state(
@@ -10680,6 +10720,11 @@ int pkm_kacs_kunit_check_namespace_live(
 	case PKM_KACS_KUNIT_NAMESPACE_MKNOD:
 		if (!old_parent_ready) {
 			ret = -EINVAL;
+			break;
+		}
+		if (!pkm_kacs_inode_on_unmanaged_mount(&old_parent.inode) &&
+		    !pkm_kacs_special_node_mode_supported(mknod_mode)) {
+			ret = -EOPNOTSUPP;
 			break;
 		}
 		ret = (int)pkm_kacs_authorize_namespace_create_for_subject(
