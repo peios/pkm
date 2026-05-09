@@ -4769,7 +4769,8 @@ static void pkm_kunit_set_psb_cfi_requires_cpu_support(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, resulting_bits, 0xABCDU);
 }
 
-static void pkm_kunit_set_psb_tlp_lsv_fail_closed(struct kunit *test)
+static void pkm_kunit_set_psb_tlp_supported_lsv_fail_closed(
+	struct kunit *test)
 {
 	struct pkm_kacs_kunit_set_psb_args args = {
 		.initial_mitigation_bits = KACS_MIT_UI_ACCESS,
@@ -4780,6 +4781,23 @@ static void pkm_kunit_set_psb_tlp_lsv_fail_closed(struct kunit *test)
 	};
 	u32 resulting_bits = 0xBADCAFEU;
 
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_psb_for_subject(&args,
+							   &resulting_bits),
+			0L);
+	KUNIT_EXPECT_EQ(test, resulting_bits,
+			KACS_MIT_UI_ACCESS | KACS_MIT_WXP | KACS_MIT_TLP);
+
+	args.requested_mitigations = KACS_MIT_WXP | KACS_MIT_LSV;
+	resulting_bits = 0xBADCAFEU;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_psb_for_subject(&args,
+							   &resulting_bits),
+			(long)-EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, resulting_bits, 0xBADCAFEU);
+
+	args.requested_mitigations = KACS_MIT_TLP | KACS_MIT_LSV;
+	resulting_bits = 0xBADCAFEU;
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_set_psb_for_subject(&args,
 							   &resulting_bits),
@@ -4836,6 +4854,188 @@ static void pkm_kunit_wxp_rejects_wx_map_and_transition(struct kunit *test)
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_wxp_mmap(KACS_MIT_WXP, PROT_READ),
 			0);
+}
+
+static void pkm_kunit_tlp_cache_validation(struct kunit *test)
+{
+	const char *prefixes[] = { "/usr/lib/" };
+	size_t prefix_lens[] = { sizeof("/usr/lib/") - 1 };
+	const char *empty_prefixes[] = { "" };
+	size_t empty_lens[] = { 0 };
+	const char *relative_prefixes[] = { "usr/lib/" };
+	size_t relative_lens[] = { sizeof("usr/lib/") - 1 };
+	const char *unterminated_prefixes[] = { "/usr/lib" };
+	size_t unterminated_lens[] = { sizeof("/usr/lib") - 1 };
+	const char *overlong_prefixes[1];
+	size_t overlong_lens[] = { 4097 };
+	char *overlong;
+
+	pkm_kacs_kunit_clear_tlp_prefixes();
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_replace_tlp_prefixes(
+				prefixes, prefix_lens, ARRAY_SIZE(prefixes)),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC, "/usr/lib/libok.so",
+				1),
+			0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_replace_tlp_prefixes(
+				empty_prefixes, empty_lens,
+				ARRAY_SIZE(empty_prefixes)),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC, "/usr/lib/libok.so",
+				1),
+			0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_replace_tlp_prefixes(
+				relative_prefixes, relative_lens,
+				ARRAY_SIZE(relative_prefixes)),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC, "/usr/lib/libok.so",
+				1),
+			0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_replace_tlp_prefixes(
+				unterminated_prefixes, unterminated_lens,
+				ARRAY_SIZE(unterminated_prefixes)),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC, "/usr/lib/libok.so",
+				1),
+			0);
+
+	overlong = kunit_kmalloc(test, 4097, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, overlong);
+	memset(overlong, 'a', 4097);
+	overlong_prefixes[0] = overlong;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_replace_tlp_prefixes(
+				overlong_prefixes, overlong_lens,
+				ARRAY_SIZE(overlong_prefixes)),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC, "/usr/lib/libok.so",
+				1),
+			0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_replace_tlp_prefixes(NULL, NULL, 65),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC, "/usr/lib/libok.so",
+				1),
+			0);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_replace_tlp_prefixes(NULL, NULL,
+								  0),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC, "/usr/lib/libok.so",
+				1),
+			-EACCES);
+	pkm_kacs_kunit_clear_tlp_prefixes();
+}
+
+static void pkm_kunit_tlp_executable_mapping_enforcement(struct kunit *test)
+{
+	const char *prefixes[] = { "/usr/lib/" };
+	size_t prefix_lens[] = { sizeof("/usr/lib/") - 1 };
+
+	pkm_kacs_kunit_clear_tlp_prefixes();
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC, "/usr/lib/libc.so",
+				1),
+			-EACCES);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_replace_tlp_prefixes(
+				prefixes, prefix_lens, ARRAY_SIZE(prefixes)),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC, "/usr/lib/libc.so",
+				1),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC, "/tmp/libevil.so",
+				1),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC,
+				"/usr/libevil/libc.so", 1),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_READ, "/tmp/libevil.so",
+				1),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC, NULL, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				0, PROT_EXEC, "/tmp/libevil.so", 1),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mmap_path(
+				KACS_MIT_TLP, PROT_EXEC, NULL, 1),
+			-EACCES);
+
+	pkm_kacs_kunit_clear_tlp_prefixes();
+}
+
+static void pkm_kunit_tlp_mprotect_checks_new_exec_only(struct kunit *test)
+{
+	const char *prefixes[] = { "/trusted/" };
+	size_t prefix_lens[] = { sizeof("/trusted/") - 1 };
+
+	pkm_kacs_kunit_clear_tlp_prefixes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_replace_tlp_prefixes(
+				prefixes, prefix_lens, ARRAY_SIZE(prefixes)),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mprotect_path(
+				KACS_MIT_TLP, 0, PROT_EXEC,
+				"/trusted/libok.so", 1),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mprotect_path(
+				KACS_MIT_TLP, 0, PROT_EXEC,
+				"/tmp/libevil.so", 1),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mprotect_path(
+				KACS_MIT_TLP, VM_EXEC, PROT_EXEC,
+				"/tmp/libevil.so", 1),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mprotect_path(
+				KACS_MIT_TLP, 0, PROT_READ,
+				"/tmp/libevil.so", 1),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_tlp_mprotect_path(
+				KACS_MIT_TLP, 0, PROT_EXEC, NULL, 0),
+			0);
+
+	pkm_kacs_kunit_clear_tlp_prefixes();
 }
 
 static void pkm_kunit_file_mmap_snapshot_read_and_private_write(
@@ -18681,10 +18881,13 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_set_psb_debug_still_fails_on_pip),
 	KUNIT_CASE(pkm_kunit_set_psb_cfi_alias_expands),
 	KUNIT_CASE(pkm_kunit_set_psb_cfi_requires_cpu_support),
-	KUNIT_CASE(pkm_kunit_set_psb_tlp_lsv_fail_closed),
+	KUNIT_CASE(pkm_kunit_set_psb_tlp_supported_lsv_fail_closed),
 	KUNIT_CASE(pkm_kunit_set_psb_unknown_bits_fail_closed),
 	KUNIT_CASE(pkm_kunit_no_child_blocks_process_fork_only),
 	KUNIT_CASE(pkm_kunit_wxp_rejects_wx_map_and_transition),
+	KUNIT_CASE(pkm_kunit_tlp_cache_validation),
+	KUNIT_CASE(pkm_kunit_tlp_executable_mapping_enforcement),
+	KUNIT_CASE(pkm_kunit_tlp_mprotect_checks_new_exec_only),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_read_and_private_write),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_shared_write),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_exec),

@@ -787,6 +787,19 @@ int pkm_kacs_kunit_check_wxp_mmap(u32 mitigation_bits, unsigned long prot);
 int pkm_kacs_kunit_check_wxp_mprotect(u32 mitigation_bits,
 				      unsigned long vm_flags,
 				      unsigned long prot);
+long pkm_kacs_kunit_replace_tlp_prefixes(const char * const *prefixes,
+					 const size_t *prefix_lens,
+					 u32 count);
+void pkm_kacs_kunit_clear_tlp_prefixes(void);
+int pkm_kacs_kunit_check_tlp_mmap_path(u32 mitigation_bits,
+				       unsigned long prot,
+				       const char *path,
+				       u32 file_backed);
+int pkm_kacs_kunit_check_tlp_mprotect_path(u32 mitigation_bits,
+					   unsigned long vm_flags,
+					   unsigned long prot,
+					   const char *path,
+					   u32 file_backed);
 int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
 				       unsigned long prot,
 				       unsigned long flags);

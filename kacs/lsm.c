@@ -81,6 +81,8 @@
 #define PKM_KACS_PRIVILEGE_SE_CHANGE_NOTIFY (1ULL << 23)
 #define PKM_KACS_PRIVILEGE_SE_CREATE_SYMBOLIC_LINK (1ULL << 35)
 #define PKM_KACS_PRIVILEGE_SE_BIND_PRIVILEGED_PORT (1ULL << 63)
+#define PKM_KACS_TLP_MAX_PREFIXES 64U
+#define PKM_KACS_TLP_MAX_PREFIX_LEN 4096U
 #define PKM_KACS_LSM_PRLIMIT_READ 1U
 #define PKM_KACS_LSM_PRLIMIT_WRITE 2U
 #define PKM_KACS_SOCKET_FILE_WRITE_DATA 0x00000002U
@@ -300,6 +302,10 @@ static const void *pkm_kacs_boot_system_token;
 static struct dentry *pkm_kacs_securityfs_dir;
 static struct dentry *pkm_kacs_securityfs_self;
 static struct dentry *pkm_kacs_securityfs_sessions;
+static DEFINE_MUTEX(pkm_kacs_tlp_cache_lock);
+static char *pkm_kacs_tlp_prefixes[PKM_KACS_TLP_MAX_PREFIXES];
+static size_t pkm_kacs_tlp_prefix_lens[PKM_KACS_TLP_MAX_PREFIXES];
+static u32 pkm_kacs_tlp_prefix_count;
 
 static struct lsm_blob_sizes pkm_blob_sizes __ro_after_init = {
 	.lbs_cred = sizeof(struct pkm_kacs_cred_security),
@@ -3393,7 +3399,7 @@ static long pkm_kacs_normalize_requested_mitigations(
 		return -EINVAL;
 	if (requested_mitigations & ~KACS_MIT_ALL)
 		return -EINVAL;
-	if (requested_mitigations & (KACS_MIT_TLP | KACS_MIT_LSV))
+	if (requested_mitigations & KACS_MIT_LSV)
 		return -EOPNOTSUPP;
 
 	if ((normalized & KACS_MIT_CFI) != 0)
@@ -3473,6 +3479,154 @@ static int pkm_kacs_check_wxp_mprotect_core(u32 mitigation_bits,
 		return -EACCES;
 
 	return 0;
+}
+
+static void pkm_kacs_tlp_clear_prefixes_locked(void)
+{
+	u32 i;
+
+	for (i = 0; i < pkm_kacs_tlp_prefix_count; i++) {
+		kfree(pkm_kacs_tlp_prefixes[i]);
+		pkm_kacs_tlp_prefixes[i] = NULL;
+		pkm_kacs_tlp_prefix_lens[i] = 0;
+	}
+	pkm_kacs_tlp_prefix_count = 0;
+}
+
+static long pkm_kacs_tlp_replace_prefixes_kernel(
+	const char * const *prefixes, const size_t *prefix_lens, u32 count)
+{
+	char *new_prefixes[PKM_KACS_TLP_MAX_PREFIXES] = {};
+	size_t new_lens[PKM_KACS_TLP_MAX_PREFIXES] = {};
+	u32 i;
+	long ret = 0;
+
+	if (count > PKM_KACS_TLP_MAX_PREFIXES)
+		return -EINVAL;
+	if (count != 0 && (!prefixes || !prefix_lens))
+		return -EINVAL;
+
+	for (i = 0; i < count; i++) {
+		size_t len = prefix_lens[i];
+		char *copy;
+
+		if (!prefixes[i] || len == 0 ||
+		    len > PKM_KACS_TLP_MAX_PREFIX_LEN) {
+			ret = -EINVAL;
+			goto out_free;
+		}
+		if (prefixes[i][0] != '/' || prefixes[i][len - 1] != '/') {
+			ret = -EINVAL;
+			goto out_free;
+		}
+		if (memchr(prefixes[i], '\0', len)) {
+			ret = -EINVAL;
+			goto out_free;
+		}
+
+		copy = kmalloc(len + 1, GFP_KERNEL);
+		if (!copy) {
+			ret = -ENOMEM;
+			goto out_free;
+		}
+		memcpy(copy, prefixes[i], len);
+		copy[len] = '\0';
+		new_prefixes[i] = copy;
+		new_lens[i] = len;
+	}
+
+	mutex_lock(&pkm_kacs_tlp_cache_lock);
+	pkm_kacs_tlp_clear_prefixes_locked();
+	for (i = 0; i < count; i++) {
+		pkm_kacs_tlp_prefixes[i] = new_prefixes[i];
+		pkm_kacs_tlp_prefix_lens[i] = new_lens[i];
+		new_prefixes[i] = NULL;
+		new_lens[i] = 0;
+	}
+	pkm_kacs_tlp_prefix_count = count;
+	mutex_unlock(&pkm_kacs_tlp_cache_lock);
+
+	return 0;
+
+out_free:
+	for (i = 0; i < count; i++)
+		kfree(new_prefixes[i]);
+	return ret;
+}
+
+static bool pkm_kacs_tlp_path_allowed(const char *path, size_t path_len)
+{
+	bool allowed = false;
+	u32 i;
+
+	mutex_lock(&pkm_kacs_tlp_cache_lock);
+	for (i = 0; i < pkm_kacs_tlp_prefix_count; i++) {
+		size_t prefix_len = pkm_kacs_tlp_prefix_lens[i];
+
+		if (path_len >= prefix_len &&
+		    memcmp(path, pkm_kacs_tlp_prefixes[i], prefix_len) == 0) {
+			allowed = true;
+			break;
+		}
+	}
+	mutex_unlock(&pkm_kacs_tlp_cache_lock);
+
+	return allowed;
+}
+
+static int pkm_kacs_check_tlp_path_core(u32 mitigation_bits,
+					bool file_backed,
+					bool executable_transition,
+					const char *path, size_t path_len)
+{
+	if ((mitigation_bits & KACS_MIT_TLP) == 0)
+		return 0;
+	if (!executable_transition)
+		return 0;
+	if (!file_backed)
+		return 0;
+	if (!path || path_len == 0)
+		return -EACCES;
+	if (!pkm_kacs_tlp_path_allowed(path, path_len))
+		return -EACCES;
+
+	return 0;
+}
+
+static int pkm_kacs_check_tlp_file_core(u32 mitigation_bits,
+					struct file *file,
+					bool executable_transition)
+{
+	char *path_buf;
+	char *resolved;
+	size_t path_len;
+	int ret;
+
+	if ((mitigation_bits & KACS_MIT_TLP) == 0)
+		return 0;
+	if (!executable_transition)
+		return 0;
+	if (!file)
+		return 0;
+
+	path_buf = __getname();
+	if (!path_buf)
+		return -ENOMEM;
+
+	resolved = d_path(&file->f_path, path_buf, PATH_MAX);
+	if (IS_ERR(resolved)) {
+		ret = -EACCES;
+		goto out_putname;
+	}
+
+	path_len = strnlen(resolved,
+			   (size_t)(path_buf + PATH_MAX - resolved));
+	ret = pkm_kacs_check_tlp_path_core(mitigation_bits, true, true,
+					   resolved, path_len);
+
+out_putname:
+	__putname(path_buf);
+	return ret;
 }
 
 static const char pkm_kacs_audit_op_file_access[] = "file.access";
@@ -7374,6 +7528,12 @@ static int pkm_kacs_mmap_file(struct file *file, unsigned long reqprot,
 	if (ret)
 		return ret;
 
+	ret = pkm_kacs_check_tlp_file_core(
+		pkm_kacs_process_state_mitigation_bits(state), file,
+		(prot & PROT_EXEC) != 0);
+	if (ret)
+		return ret;
+
 	return pkm_kacs_check_mmap_snapshot(file, prot, flags);
 }
 
@@ -7395,6 +7555,12 @@ static int pkm_kacs_file_mprotect(struct vm_area_struct *vma,
 	ret = pkm_kacs_check_wxp_mprotect_core(
 		pkm_kacs_process_state_mitigation_bits(state),
 		vma->vm_flags, prot);
+	if (ret)
+		return ret;
+
+	ret = pkm_kacs_check_tlp_file_core(
+		pkm_kacs_process_state_mitigation_bits(state), vma->vm_file,
+		(prot & PROT_EXEC) != 0 && (vma->vm_flags & VM_EXEC) == 0);
 	if (ret)
 		return ret;
 
@@ -10534,6 +10700,43 @@ int pkm_kacs_kunit_check_wxp_mprotect(u32 mitigation_bits,
 {
 	return pkm_kacs_check_wxp_mprotect_core(mitigation_bits, vm_flags,
 						prot);
+}
+
+long pkm_kacs_kunit_replace_tlp_prefixes(const char * const *prefixes,
+					 const size_t *prefix_lens,
+					 u32 count)
+{
+	return pkm_kacs_tlp_replace_prefixes_kernel(prefixes, prefix_lens,
+						    count);
+}
+
+void pkm_kacs_kunit_clear_tlp_prefixes(void)
+{
+	mutex_lock(&pkm_kacs_tlp_cache_lock);
+	pkm_kacs_tlp_clear_prefixes_locked();
+	mutex_unlock(&pkm_kacs_tlp_cache_lock);
+}
+
+int pkm_kacs_kunit_check_tlp_mmap_path(u32 mitigation_bits,
+				       unsigned long prot,
+				       const char *path,
+				       u32 file_backed)
+{
+	return pkm_kacs_check_tlp_path_core(
+		mitigation_bits, file_backed != 0, (prot & PROT_EXEC) != 0,
+		path, path ? strlen(path) : 0);
+}
+
+int pkm_kacs_kunit_check_tlp_mprotect_path(u32 mitigation_bits,
+					   unsigned long vm_flags,
+					   unsigned long prot,
+					   const char *path,
+					   u32 file_backed)
+{
+	return pkm_kacs_check_tlp_path_core(
+		mitigation_bits, file_backed != 0,
+		(prot & PROT_EXEC) != 0 && (vm_flags & VM_EXEC) == 0,
+		path, path ? strlen(path) : 0);
 }
 
 int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
