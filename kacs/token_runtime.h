@@ -694,6 +694,12 @@ int pkm_kacs_kunit_check_wxp_mmap(u32 mitigation_bits, unsigned long prot);
 int pkm_kacs_kunit_check_wxp_mprotect(u32 mitigation_bits,
 				      unsigned long vm_flags,
 				      unsigned long prot);
+int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
+				       unsigned long prot,
+				       unsigned long flags);
+int pkm_kacs_kunit_check_mprotect_snapshot(u32 managed, u32 granted_access,
+					   unsigned long vm_flags,
+					   unsigned long prot);
 int pkm_kacs_kunit_check_task_prctl_mitigations(
 	u32 mitigation_bits, int option, unsigned long arg2,
 	unsigned long arg3, unsigned long arg4, unsigned long arg5);

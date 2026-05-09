@@ -410,6 +410,12 @@ static int pkm_kacs_mmap_file(struct file *file, unsigned long reqprot,
 static int pkm_kacs_file_mprotect(struct vm_area_struct *vma,
 				  unsigned long reqprot,
 				  unsigned long prot);
+static int pkm_kacs_check_mmap_snapshot(struct file *file,
+					unsigned long prot,
+					unsigned long flags);
+static int pkm_kacs_check_mprotect_snapshot(struct file *file,
+					    unsigned long vm_flags,
+					    unsigned long prot);
 static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm);
 static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 					 const struct file *file);
@@ -2773,6 +2779,71 @@ static int pkm_kacs_check_wxp_mprotect_core(u32 mitigation_bits,
 		return -EACCES;
 
 	return 0;
+}
+
+static int pkm_kacs_check_file_snapshot_grant(struct file *file,
+					      u32 required_access)
+{
+	struct pkm_kacs_file_security *file_sec;
+
+	if (required_access == 0 || !file)
+		return 0;
+	if (!file->f_security)
+		return -EACCES;
+
+	file_sec = pkm_kacs_file(file);
+	if (!file_sec->managed)
+		return 0;
+	if ((file_sec->granted_access & required_access) != required_access)
+		return -EACCES;
+
+	return 0;
+}
+
+static bool pkm_kacs_mmap_flags_shared(unsigned long flags)
+{
+	unsigned long map_type = flags & MAP_TYPE;
+
+	if (map_type == MAP_SHARED)
+		return true;
+#ifdef MAP_SHARED_VALIDATE
+	if (map_type == MAP_SHARED_VALIDATE)
+		return true;
+#endif
+	return false;
+}
+
+static u32 pkm_kacs_mapping_required_access(unsigned long prot, bool shared)
+{
+	u32 required_access = 0;
+
+	if ((prot & PROT_READ) != 0)
+		required_access |= PKM_KACS_FILE_READ_DATA;
+	if ((prot & PROT_EXEC) != 0)
+		required_access |= PKM_KACS_FILE_EXECUTE;
+	if ((prot & PROT_WRITE) != 0)
+		required_access |= shared ? PKM_KACS_FILE_WRITE_DATA :
+					    PKM_KACS_FILE_READ_DATA;
+
+	return required_access;
+}
+
+static int pkm_kacs_check_mmap_snapshot(struct file *file,
+					unsigned long prot,
+					unsigned long flags)
+{
+	return pkm_kacs_check_file_snapshot_grant(
+		file, pkm_kacs_mapping_required_access(
+			      prot, pkm_kacs_mmap_flags_shared(flags)));
+}
+
+static int pkm_kacs_check_mprotect_snapshot(struct file *file,
+					    unsigned long vm_flags,
+					    unsigned long prot)
+{
+	return pkm_kacs_check_file_snapshot_grant(
+		file, pkm_kacs_mapping_required_access(
+			      prot, (vm_flags & VM_SHARED) != 0));
 }
 
 static int pkm_kacs_check_task_prctl_mitigations_core(
@@ -5373,17 +5444,20 @@ static int pkm_kacs_mmap_file(struct file *file, unsigned long reqprot,
 			      unsigned long prot, unsigned long flags)
 {
 	struct pkm_kacs_process_state *state;
+	int ret;
 
-	(void)file;
 	(void)reqprot;
-	(void)flags;
 
 	state = pkm_kacs_current_process_state();
 	if (!state)
 		return -EACCES;
 
-	return pkm_kacs_check_wxp_mmap_core(
+	ret = pkm_kacs_check_wxp_mmap_core(
 		pkm_kacs_process_state_mitigation_bits(state), prot);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_check_mmap_snapshot(file, prot, flags);
 }
 
 static int pkm_kacs_file_mprotect(struct vm_area_struct *vma,
@@ -5391,6 +5465,7 @@ static int pkm_kacs_file_mprotect(struct vm_area_struct *vma,
 				  unsigned long prot)
 {
 	struct pkm_kacs_process_state *state;
+	int ret;
 
 	(void)reqprot;
 	if (!vma)
@@ -5400,9 +5475,14 @@ static int pkm_kacs_file_mprotect(struct vm_area_struct *vma,
 	if (!state)
 		return -EACCES;
 
-	return pkm_kacs_check_wxp_mprotect_core(
+	ret = pkm_kacs_check_wxp_mprotect_core(
 		pkm_kacs_process_state_mitigation_bits(state),
 		vma->vm_flags, prot);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_check_mprotect_snapshot(vma->vm_file, vma->vm_flags,
+						prot);
 }
 
 static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm)
@@ -8402,6 +8482,52 @@ int pkm_kacs_kunit_check_wxp_mprotect(u32 mitigation_bits,
 {
 	return pkm_kacs_check_wxp_mprotect_core(mitigation_bits, vm_flags,
 						prot);
+}
+
+int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
+				       unsigned long prot,
+				       unsigned long flags)
+{
+	struct pkm_kacs_kunit_file_mount_state state = { };
+	struct pkm_kacs_file_security *file_sec;
+	int ret;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&state, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		return ret;
+
+	file_sec = pkm_kacs_file(&state.file);
+	file_sec->managed = managed ? 1 : 0;
+	file_sec->granted_access = granted_access;
+
+	ret = pkm_kacs_check_mmap_snapshot(&state.file, prot, flags);
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
+}
+
+int pkm_kacs_kunit_check_mprotect_snapshot(u32 managed, u32 granted_access,
+					   unsigned long vm_flags,
+					   unsigned long prot)
+{
+	struct pkm_kacs_kunit_file_mount_state state = { };
+	struct pkm_kacs_file_security *file_sec;
+	int ret;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&state, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		return ret;
+
+	file_sec = pkm_kacs_file(&state.file);
+	file_sec->managed = managed ? 1 : 0;
+	file_sec->granted_access = granted_access;
+
+	ret = pkm_kacs_check_mprotect_snapshot(&state.file, vm_flags, prot);
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
 }
 
 int pkm_kacs_kunit_check_task_prctl_mitigations(

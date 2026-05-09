@@ -4813,6 +4813,137 @@ static void pkm_kunit_wxp_rejects_wx_map_and_transition(struct kunit *test)
 			0);
 }
 
+static void pkm_kunit_file_mmap_snapshot_read_and_private_write(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, PROT_READ,
+				MAP_PRIVATE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1, 0, PROT_READ, MAP_PRIVATE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, PROT_WRITE,
+				MAP_PRIVATE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, PROT_WRITE,
+				MAP_PRIVATE),
+			-EACCES);
+}
+
+static void pkm_kunit_file_mmap_snapshot_shared_write(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, PROT_WRITE,
+				MAP_SHARED),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, PROT_WRITE,
+				MAP_SHARED),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1,
+				PKM_KUNIT_FILE_READ_DATA |
+					PKM_KUNIT_FILE_WRITE_DATA,
+				PROT_READ | PROT_WRITE, MAP_SHARED),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA,
+				PROT_READ | PROT_WRITE, MAP_SHARED),
+			-EACCES);
+}
+
+static void pkm_kunit_file_mmap_snapshot_exec(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1, PKM_KUNIT_FILE_EXECUTE, PROT_EXEC,
+				MAP_PRIVATE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, PROT_EXEC,
+				MAP_PRIVATE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1,
+				PKM_KUNIT_FILE_READ_DATA |
+					PKM_KUNIT_FILE_EXECUTE,
+				PROT_READ | PROT_EXEC, MAP_PRIVATE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1, PKM_KUNIT_FILE_EXECUTE,
+				PROT_READ | PROT_EXEC, MAP_PRIVATE),
+			-EACCES);
+}
+
+static void pkm_kunit_file_mprotect_snapshot_uses_vma_shape(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mprotect_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, 0, PROT_WRITE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mprotect_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, 0, PROT_WRITE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mprotect_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, VM_SHARED,
+				PROT_WRITE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mprotect_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, VM_SHARED,
+				PROT_WRITE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mprotect_snapshot(
+				1,
+				PKM_KUNIT_FILE_READ_DATA |
+					PKM_KUNIT_FILE_EXECUTE,
+				0, PROT_READ | PROT_EXEC),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mprotect_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, 0, PROT_EXEC),
+			-EACCES);
+}
+
+static void pkm_kunit_file_mapping_snapshot_unmanaged_bypasses_facs(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				0, 0, PROT_READ | PROT_EXEC, MAP_PRIVATE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				0, 0, PROT_WRITE, MAP_SHARED),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mprotect_snapshot(
+				0, 0, VM_SHARED, PROT_WRITE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_mmap_snapshot(
+				1, 0, PROT_NONE, MAP_PRIVATE),
+			0);
+}
+
 static void pkm_kunit_pie_rejects_et_exec(struct kunit *test)
 {
 	u8 exec_buf[18] = { 0x7f, 'E', 'L', 'F' };
@@ -16280,6 +16411,11 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_set_psb_unknown_bits_fail_closed),
 	KUNIT_CASE(pkm_kunit_no_child_blocks_process_fork_only),
 	KUNIT_CASE(pkm_kunit_wxp_rejects_wx_map_and_transition),
+	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_read_and_private_write),
+	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_shared_write),
+	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_exec),
+	KUNIT_CASE(pkm_kunit_file_mprotect_snapshot_uses_vma_shape),
+	KUNIT_CASE(pkm_kunit_file_mapping_snapshot_unmanaged_bypasses_facs),
 	KUNIT_CASE(pkm_kunit_pie_rejects_et_exec),
 	KUNIT_CASE(pkm_kunit_task_prctl_sml_and_cfib_block_disable_paths),
 	KUNIT_CASE(pkm_kunit_open_process_token_success),
