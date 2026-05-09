@@ -359,6 +359,8 @@ pub struct PkmKacsBootSnapshot {
     pub projected_gid: u32,
     /// Audit policy mask.
     pub audit_policy: u32,
+    /// Elevation type ABI value.
+    pub elevation_type: u32,
 }
 
 #[repr(C)]
@@ -2925,6 +2927,26 @@ fn extract_label_subset_sacl_bytes(sd: &SecurityDescriptor<'_>) -> Result<Option
     Ok(None)
 }
 
+fn file_sd_integrity_label(sd_bytes: &[u8]) -> Result<IntegrityLevel, i32> {
+    let sd = SecurityDescriptor::parse(sd_bytes).map_err(|_| -EINVAL)?;
+    let Some(sacl) = sd.sacl() else {
+        return Ok(IntegrityLevel::Medium);
+    };
+
+    for ace in sacl.entries() {
+        let ace = ace.map_err(|_| -EINVAL)?;
+        if ace.ace_type() != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+            continue;
+        }
+        if (ace.ace_flags() & INHERIT_ONLY_ACE) != 0 {
+            continue;
+        }
+        return label_integrity_from_ace(ace.bytes());
+    }
+
+    Ok(IntegrityLevel::Medium)
+}
+
 fn parse_label_subset_ace_bytes(input_sd: &SecurityDescriptor<'_>) -> Result<Option<Vec<u8>>, i32> {
     let Some(sacl) = input_sd.sacl() else {
         return Ok(None);
@@ -4635,6 +4657,43 @@ impl PkmKacsBootToken {
         token_ptr.cast()
     }
 
+    fn new_process_min_exec_clone(
+        &self,
+        file_integrity: IntegrityLevel,
+    ) -> Result<Option<*const c_void>, i32> {
+        if self.token_type != TokenType::Primary {
+            return Err(-EACCES);
+        }
+        if (self.mandatory_policy & TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN) == 0 {
+            return Ok(None);
+        }
+        if (file_integrity as u32) >= (self.integrity_level as u32) {
+            return Ok(None);
+        }
+
+        let token_id = allocate_dynamic_token_id()?;
+        let copy = Self::deep_copy((self as *const Self).cast());
+        if copy.is_null() {
+            return Err(-ENOMEM);
+        }
+
+        let lowered = copy as *mut Self;
+        unsafe {
+            (*lowered).token_id = token_id;
+            (*lowered)
+                .modified_id
+                .store(token_id, Ordering::Relaxed);
+            (*lowered).integrity_level = file_integrity;
+            (*lowered).token_type = TokenType::Primary;
+            (*lowered).impersonation_level = ImpersonationLevel::Anonymous;
+            (*lowered)
+                .elevation_type
+                .store(TOKEN_ELEVATION_DEFAULT_ABI, Ordering::Release);
+        }
+
+        Ok(Some(copy))
+    }
+
     fn duplicate(
         &self,
         creator: &PkmKacsBootToken,
@@ -4960,6 +5019,7 @@ impl PkmKacsBootToken {
             projected_uid: self.projected_uid,
             projected_gid: self.projected_gid,
             audit_policy: self.audit_policy,
+            elevation_type: self.elevation_type(),
         };
     }
 
@@ -6541,6 +6601,17 @@ pub extern "C" fn kacs_rust_token_has_enabled_privilege(
 }
 
 #[no_mangle]
+/// Returns whether the live token carries the NEW_PROCESS_MIN mandatory
+/// policy bit.
+pub extern "C" fn kacs_rust_token_has_new_process_min(token: *const c_void) -> bool {
+    unsafe { PkmKacsBootToken::from_ptr(token) }
+        .map(|value| {
+            (value.mandatory_policy & TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN) != 0
+        })
+        .unwrap_or(false)
+}
+
+#[no_mangle]
 /// Marks standalone privilege bits used on a live token.
 pub extern "C" fn kacs_rust_token_mark_privileges_used(
     token: *const c_void,
@@ -6601,6 +6672,36 @@ pub extern "C" fn kacs_rust_token_duplicate(
             *out_token = token;
             0
         }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Applies the v0.20 NEW_PROCESS_MIN exec lowering rule to a primary token.
+/// `out_token` is set to null when no replacement is required.
+pub extern "C" fn kacs_rust_token_new_process_min_exec(
+    source_token: *const c_void,
+    file_integrity_level: u32,
+    out_token: *mut *const c_void,
+) -> i32 {
+    let Some(source_token) = (unsafe { PkmKacsBootToken::from_ptr(source_token) }) else {
+        return -EACCES;
+    };
+    let Some(out_token) = (unsafe { out_token.as_mut() }) else {
+        return -EINVAL;
+    };
+    let file_integrity = match integrity_level_from_abi(file_integrity_level) {
+        Ok(value) => value,
+        Err(err) => return err,
+    };
+
+    *out_token = null();
+    match source_token.new_process_min_exec_clone(file_integrity) {
+        Ok(Some(token)) => {
+            *out_token = token;
+            0
+        }
+        Ok(None) => 0,
         Err(err) => err,
     }
 }
@@ -7084,6 +7185,31 @@ pub extern "C" fn kacs_rust_check_file_sd_with_intent(
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
                 *granted_out = granted;
             }
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Extracts the v0.20 file-object integrity label, defaulting valid unlabeled
+/// descriptors to Medium.
+pub extern "C" fn kacs_rust_file_sd_integrity_label(
+    sd_ptr: *const u8,
+    sd_len: usize,
+    integrity_level_out: *mut u32,
+) -> i32 {
+    if sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+    let Some(integrity_level_out) = (unsafe { integrity_level_out.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match file_sd_integrity_label(sd_bytes) {
+        Ok(integrity_level) => {
+            *integrity_level_out = integrity_level as u32;
             0
         }
         Err(err) => err,

@@ -5421,13 +5421,107 @@ static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm)
 		(const u8 *)bprm->buf, sizeof(bprm->buf));
 }
 
+static long pkm_kacs_install_token_ref_on_cred(struct cred *cred,
+					       const void *token_ref)
+{
+	struct pkm_kacs_cred_security *sec;
+
+	if (!cred || !cred->security || !token_ref)
+		return -EACCES;
+
+	sec = pkm_kacs_cred(cred);
+	if (sec->token)
+		kacs_rust_token_drop(sec->token);
+	sec->token = token_ref;
+	pkm_kacs_stamp_projected_ids(sec);
+	pkm_kacs_raise_allow_compat_caps(cred);
+	return 0;
+}
+
+static long pkm_kacs_exec_file_integrity_label(const struct file *file,
+					       u32 *integrity_out)
+{
+	struct pkm_kacs_inode_sd_cache *cache;
+	struct pkm_kacs_inode_security *sec;
+	struct inode *inode;
+	long ret;
+
+	if (!file || !integrity_out)
+		return -EACCES;
+
+	inode = file_inode(file);
+	if (!inode || !inode->i_security)
+		return -EACCES;
+
+	sec = pkm_kacs_inode(inode);
+	mutex_lock(&sec->lock);
+	ret = pkm_kacs_inode_resolve_effective_cache_locked(
+		(struct file *)file, sec, &cache);
+	if (!ret) {
+		if (cache->state != PKM_KACS_INODE_SD_VALID ||
+		    !cache->bytes || cache->len == 0) {
+			ret = -EACCES;
+		} else {
+			ret = kacs_rust_file_sd_integrity_label(
+				cache->bytes, cache->len, integrity_out);
+		}
+	}
+	mutex_unlock(&sec->lock);
+	return ret;
+}
+
+static long pkm_kacs_apply_exec_primary_token(const void *primary_token,
+					      const struct file *file,
+					      struct cred *new,
+					      bool require_file_for_npm)
+{
+	const void *exec_token = NULL;
+	u32 file_integrity = 0;
+	long ret;
+
+	if (!primary_token || !new)
+		return -EACCES;
+
+	if (kacs_rust_token_has_new_process_min(primary_token)) {
+		if (!file) {
+			if (require_file_for_npm)
+				return -EACCES;
+		} else {
+			ret = pkm_kacs_exec_file_integrity_label(
+				file, &file_integrity);
+			if (ret)
+				return ret;
+
+			ret = kacs_rust_token_new_process_min_exec(
+				primary_token, file_integrity, &exec_token);
+			if (ret)
+				return ret;
+		}
+	}
+
+	if (!exec_token) {
+		exec_token = kacs_rust_token_clone(primary_token);
+		if (!exec_token)
+			return -EACCES;
+	}
+
+	ret = pkm_kacs_install_token_ref_on_cred(new, exec_token);
+	if (ret)
+		kacs_rust_token_drop(exec_token);
+	return ret;
+}
+
 static long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
+					       const void *primary_token,
+					       const struct file *file,
 					       struct cred *new,
-					       const struct cred *old)
+					       const struct cred *old,
+					       bool require_file_for_npm)
 {
 	bool uid_changed;
 	bool gid_changed;
 	struct user_struct *old_user;
+	long ret;
 
 	if (!new || !old)
 		return -EACCES;
@@ -5462,19 +5556,24 @@ static long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 		new->fsgid = old->fsgid;
 	}
 
+	ret = pkm_kacs_apply_exec_primary_token(primary_token, file, new,
+					       require_file_for_npm);
+	if (ret)
+		return ret;
+
 	return 0;
 }
 
 static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 					 const struct file *file)
 {
-	(void)file;
 	if (!bprm || !bprm->cred)
 		return -EACCES;
 
 	return (int)pkm_kacs_bprm_creds_from_file_core(
-		pkm_kacs_current_effective_token_ptr(), bprm->cred,
-		current_cred());
+		pkm_kacs_current_effective_token_ptr(),
+		pkm_kacs_current_primary_token_ptr(), file, bprm->cred,
+		current_cred(), true);
 }
 
 static long pkm_kacs_open_process_token_task(
@@ -8363,28 +8462,42 @@ int pkm_kacs_kunit_reproject_exec_caps(
 	u64 ambient_mask, u64 *effective_out, u64 *inheritable_out,
 	u64 *permitted_out, u64 *ambient_out)
 {
-	struct cred new = {};
 	struct linux_binprm bprm = {};
+	struct cred *new;
+	int ret;
 
 	if (!effective_out || !inheritable_out || !permitted_out ||
 	    !ambient_out)
 		return -EINVAL;
 
-	new.cap_effective = pkm_kacs_u64_to_kernel_cap(effective_mask);
-	new.cap_inheritable = pkm_kacs_u64_to_kernel_cap(inheritable_mask);
-	new.cap_permitted = pkm_kacs_u64_to_kernel_cap(permitted_mask);
-	new.cap_ambient = pkm_kacs_u64_to_kernel_cap(ambient_mask);
-	new.cap_bset = current_cred()->cap_bset;
-	bprm.cred = &new;
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
 
-	if (pkm_kacs_bprm_creds_from_file(&bprm, NULL))
-		return -EACCES;
+	new->cap_effective = pkm_kacs_u64_to_kernel_cap(effective_mask);
+	new->cap_inheritable = pkm_kacs_u64_to_kernel_cap(inheritable_mask);
+	new->cap_permitted = pkm_kacs_u64_to_kernel_cap(permitted_mask);
+	new->cap_ambient = pkm_kacs_u64_to_kernel_cap(ambient_mask);
+	new->cap_bset = current_cred()->cap_bset;
+	bprm.cred = new;
 
-	*effective_out = pkm_kacs_kernel_cap_to_u64(&new.cap_effective);
-	*inheritable_out = pkm_kacs_kernel_cap_to_u64(&new.cap_inheritable);
-	*permitted_out = pkm_kacs_kernel_cap_to_u64(&new.cap_permitted);
-	*ambient_out = pkm_kacs_kernel_cap_to_u64(&new.cap_ambient);
-	return 0;
+	if (pkm_kacs_bprm_creds_from_file_core(
+		    pkm_kacs_current_effective_token_ptr(),
+		    pkm_kacs_current_primary_token_ptr(), NULL, bprm.cred,
+		    current_cred(), false)) {
+		ret = -EACCES;
+		goto out;
+	}
+
+	*effective_out = pkm_kacs_kernel_cap_to_u64(&new->cap_effective);
+	*inheritable_out = pkm_kacs_kernel_cap_to_u64(&new->cap_inheritable);
+	*permitted_out = pkm_kacs_kernel_cap_to_u64(&new->cap_permitted);
+	*ambient_out = pkm_kacs_kernel_cap_to_u64(&new->cap_ambient);
+	ret = 0;
+
+out:
+	abort_creds(new);
+	return ret;
 }
 
 long pkm_kacs_kunit_check_exec_setid_compat_for_subject(
@@ -8459,7 +8572,8 @@ long pkm_kacs_kunit_check_exec_setid_compat_for_subject(
 		new->fsgid = KGIDT_INIT(exec_gid);
 	}
 
-	ret = pkm_kacs_bprm_creds_from_file_core(subject_token, new, old);
+	ret = pkm_kacs_bprm_creds_from_file_core(
+		subject_token, subject_token, NULL, new, old, false);
 	if (!ret) {
 		out->uid = __kuid_val(new->uid);
 		out->euid = __kuid_val(new->euid);
@@ -8479,6 +8593,105 @@ long pkm_kacs_kunit_check_exec_setid_compat_for_subject(
 	abort_creds(new);
 	revert_creds(saved_old);
 	abort_creds(old);
+	return ret;
+}
+
+long pkm_kacs_kunit_check_exec_new_process_min(
+	const struct pkm_kacs_kunit_exec_new_process_min_args *args,
+	struct pkm_kacs_boot_snapshot *snapshot_out, u32 *changed_out)
+{
+	struct pkm_kacs_kunit_file_mount_state *state;
+	struct pkm_kacs_inode_sd_cache *cache;
+	struct pkm_kacs_cred_security *old_sec;
+	struct pkm_kacs_cred_security *new_sec;
+	const struct cred *saved_old;
+	const void *token_ref;
+	struct cred *old;
+	struct cred *new;
+	u64 magic;
+	long ret;
+
+	if (!args || !snapshot_out || !changed_out)
+		return -EINVAL;
+	if (!args->primary_token)
+		return -EACCES;
+
+	memset(snapshot_out, 0, sizeof(*snapshot_out));
+	*changed_out = 0;
+
+	cache = pkm_kacs_kunit_file_sd_cache_alloc(args->target_file_sd_ptr,
+						   args->target_file_sd_len,
+						   args->target_file_sd_state);
+	if (!cache)
+		return -EINVAL;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		return -ENOMEM;
+	}
+
+	magic = args->mount_magic ? args->mount_magic : TMPFS_MAGIC;
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		state, magic, cache, args->mount_policy_override, NULL, 0,
+		S_IFREG, true);
+	if (ret) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		goto out_state;
+	}
+
+	old = prepare_creds();
+	if (!old) {
+		ret = -ENOMEM;
+		goto out_mount;
+	}
+
+	old_sec = pkm_kacs_cred(old);
+	if (old_sec->token) {
+		kacs_rust_token_drop(old_sec->token);
+		old_sec->token = NULL;
+	}
+	token_ref = kacs_rust_token_clone(args->primary_token);
+	if (!token_ref) {
+		abort_creds(old);
+		ret = -ENOMEM;
+		goto out_mount;
+	}
+	old_sec->token = token_ref;
+	pkm_kacs_stamp_projected_ids(old_sec);
+
+	saved_old = override_creds(old);
+	new = prepare_creds();
+	if (!new) {
+		revert_creds(saved_old);
+		abort_creds(old);
+		ret = -ENOMEM;
+		goto out_mount;
+	}
+
+	ret = pkm_kacs_bprm_creds_from_file_core(
+		args->subject_token, args->primary_token, &state->file, new,
+		old, true);
+	if (!ret) {
+		new_sec = pkm_kacs_cred(new);
+		if (!new_sec->token) {
+			ret = -EACCES;
+		} else if (!kacs_rust_kunit_token_snapshot(new_sec->token,
+							   snapshot_out)) {
+			ret = -EACCES;
+		} else {
+			*changed_out = new_sec->token != args->primary_token;
+		}
+	}
+
+	abort_creds(new);
+	revert_creds(saved_old);
+	abort_creds(old);
+
+out_mount:
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_state:
+	kfree(state);
 	return ret;
 }
 

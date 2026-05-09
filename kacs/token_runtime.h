@@ -92,6 +92,7 @@ struct pkm_kacs_boot_snapshot {
 	u32 projected_uid;
 	u32 projected_gid;
 	u32 audit_policy;
+	u32 elevation_type;
 };
 
 struct pkm_kacs_session_snapshot {
@@ -348,6 +349,16 @@ struct pkm_kacs_kunit_exec_setid_view {
 	u32 projected_fsgid;
 };
 
+struct pkm_kacs_kunit_exec_new_process_min_args {
+	const void *subject_token;
+	const void *primary_token;
+	const u8 *target_file_sd_ptr;
+	size_t target_file_sd_len;
+	u32 target_file_sd_state;
+	u32 mount_policy_override;
+	u64 mount_magic;
+};
+
 struct pkm_kacs_kunit_set_psb_args {
 	const void *subject_token;
 	const u8 *target_process_sd_ptr;
@@ -398,6 +409,7 @@ void kacs_rust_token_drop(const void *token);
 bool kacs_rust_token_is_primary(const void *token);
 bool kacs_rust_token_same_user_sid(const void *lhs, const void *rhs);
 bool kacs_rust_token_has_enabled_privilege(const void *token, u64 privilege);
+bool kacs_rust_token_has_new_process_min(const void *token);
 bool kacs_rust_token_mark_privileges_used(const void *token, u64 used_mask);
 int kacs_rust_token_open_check(const void *subject_token, const void *target_token,
 			       u32 desired_access, u32 *granted_out);
@@ -405,6 +417,9 @@ int kacs_rust_token_duplicate(const void *source_token,
 			      const void *creator_token, u32 token_type,
 			      u32 impersonation_level,
 			      const void **out_token);
+int kacs_rust_token_new_process_min_exec(const void *source_token,
+					 u32 file_integrity_level,
+					 const void **out_token);
 int kacs_rust_token_link_tokens(const void *elevated_token,
 				const void *filtered_token, u64 session_id);
 int kacs_rust_token_get_linked_actual(const void *token,
@@ -452,6 +467,8 @@ int kacs_rust_check_file_sd_with_intent(const void *subject_token_ptr,
 					const u8 *sd_ptr, size_t sd_len,
 					u32 desired, u32 privilege_intent,
 					u32 *granted_out);
+int kacs_rust_file_sd_integrity_label(const u8 *sd_ptr, size_t sd_len,
+				      u32 *integrity_level_out);
 int kacs_rust_granted_file_sd_with_intent(const void *subject_token_ptr,
 					  const u8 *sd_ptr, size_t sd_len,
 					  u32 desired, u32 privilege_intent,
@@ -706,6 +723,9 @@ long pkm_kacs_kunit_check_setgroups_fixup_for_subject(
 long pkm_kacs_kunit_check_exec_setid_compat_for_subject(
 	const void *subject_token, u32 exec_mask,
 	struct pkm_kacs_kunit_exec_setid_view *out);
+long pkm_kacs_kunit_check_exec_new_process_min(
+	const struct pkm_kacs_kunit_exec_new_process_min_args *args,
+	struct pkm_kacs_boot_snapshot *snapshot_out, u32 *changed_out);
 int pkm_kacs_kunit_projected_fsids_for_subject(const void *subject_token,
 					       u32 raw_fsuid, u32 raw_fsgid,
 					       u32 *fsuid_out,

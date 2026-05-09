@@ -4102,6 +4102,165 @@ static void pkm_kunit_exec_setid_privileged_path_fails_closed(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_kunit_exec_new_process_min_lowers_to_file_label(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_exec_new_process_min_args args = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *token;
+	const u8 *file_sd;
+	size_t file_sd_len = 0;
+	u32 changed = 0;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &before));
+
+	file_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_LOW,
+							 &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	args.subject_token = token;
+	args.primary_token = token;
+	args.target_file_sd_ptr = file_sd;
+	args.target_file_sd_len = file_sd_len;
+	args.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_check_exec_new_process_min(
+				&args, &after, &changed),
+			0L);
+	KUNIT_EXPECT_EQ(test, changed, 1U);
+	KUNIT_EXPECT_NE(test, after.token_id, before.token_id);
+	KUNIT_EXPECT_EQ(test, after.modified_id, after.token_id);
+	KUNIT_EXPECT_EQ(test, after.integrity_level, PKM_KUNIT_IL_LOW);
+	KUNIT_EXPECT_EQ(test, after.token_type, KACS_TOKEN_TYPE_PRIMARY);
+	KUNIT_EXPECT_EQ(test, after.impersonation_level, KACS_LEVEL_ANONYMOUS);
+	KUNIT_EXPECT_EQ(test, after.elevation_type, KACS_ELEVATION_DEFAULT);
+	KUNIT_EXPECT_EQ(test, after.session_id, before.session_id);
+	KUNIT_EXPECT_EQ(test, after.user_sid_len, before.user_sid_len);
+	KUNIT_EXPECT_EQ(test, after.mandatory_policy, before.mandatory_policy);
+	KUNIT_EXPECT_EQ(test, after.privileges_present,
+			before.privileges_present);
+	KUNIT_EXPECT_EQ(test, after.privileges_enabled,
+			before.privileges_enabled);
+
+	pkm_kacs_free((void *)file_sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_exec_new_process_min_unlabeled_defaults_medium(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_exec_new_process_min_args args = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *token;
+	const u8 *file_sd;
+	size_t file_sd_len = 0;
+	u32 changed = 0;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	file_sd = kacs_rust_kunit_create_file_sd(
+		token, PKM_KUNIT_FILE_SD_ADMIN_MASK,
+		PKM_KUNIT_FILE_SD_ADMIN_MASK, PKM_KUNIT_FILE_SD_ADMIN_MASK,
+		0, &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	args.subject_token = token;
+	args.primary_token = token;
+	args.target_file_sd_ptr = file_sd;
+	args.target_file_sd_len = file_sd_len;
+	args.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_check_exec_new_process_min(
+				&args, &after, &changed),
+			0L);
+	KUNIT_EXPECT_EQ(test, changed, 1U);
+	KUNIT_EXPECT_EQ(test, after.integrity_level, PKM_KUNIT_IL_MEDIUM);
+	KUNIT_EXPECT_EQ(test, after.modified_id, after.token_id);
+
+	pkm_kacs_free((void *)file_sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_exec_new_process_min_equal_label_noops(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_exec_new_process_min_args args = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *token;
+	const u8 *file_sd;
+	size_t file_sd_len = 0;
+	u32 changed = 0;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &before));
+
+	file_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_SYSTEM,
+							 &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	args.subject_token = token;
+	args.primary_token = token;
+	args.target_file_sd_ptr = file_sd;
+	args.target_file_sd_len = file_sd_len;
+	args.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_check_exec_new_process_min(
+				&args, &after, &changed),
+			0L);
+	KUNIT_EXPECT_EQ(test, changed, 0U);
+	KUNIT_EXPECT_EQ(test, after.token_id, before.token_id);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id);
+	KUNIT_EXPECT_EQ(test, after.integrity_level, PKM_KUNIT_IL_SYSTEM);
+
+	pkm_kacs_free((void *)file_sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_exec_new_process_min_corrupt_sd_fails_closed(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_exec_new_process_min_args args = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *token;
+	u32 changed = 1;
+	u32 label = 0;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	args.subject_token = token;
+	args.primary_token = token;
+	args.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_CORRUPT;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_exec_new_process_min(
+				&args, &after, &changed),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test, changed, 0U);
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_file_sd_integrity_label(NULL, 0, &label),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_token_new_process_min_exec(
+				token, PKM_KUNIT_IL_LOW, NULL),
+			-EINVAL);
+
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_kunit_live_capable_sys_boot_uses_shutdown_privilege(
 	struct kunit *test)
 {
@@ -16095,6 +16254,10 @@ static struct kunit_case pkm_kunit_cases[] = {
 		pkm_kunit_exec_setid_gid_compat_rewrites_visible_gid_only),
 	KUNIT_CASE(pkm_kunit_exec_setid_without_token_fails_closed),
 	KUNIT_CASE(pkm_kunit_exec_setid_privileged_path_fails_closed),
+	KUNIT_CASE(pkm_kunit_exec_new_process_min_lowers_to_file_label),
+	KUNIT_CASE(pkm_kunit_exec_new_process_min_unlabeled_defaults_medium),
+	KUNIT_CASE(pkm_kunit_exec_new_process_min_equal_label_noops),
+	KUNIT_CASE(pkm_kunit_exec_new_process_min_corrupt_sd_fails_closed),
 	KUNIT_CASE(pkm_kunit_live_capable_sys_boot_uses_shutdown_privilege),
 	KUNIT_CASE(pkm_kunit_token_deep_copy_independent),
 	KUNIT_CASE(pkm_kunit_resolved_ctx_fails_closed_on_null_token),
