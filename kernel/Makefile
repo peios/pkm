@@ -17,6 +17,11 @@ PKM_SOURCES := $(shell find $(CURDIR)/../kacs $(CURDIR)/../crates/kacs-core/src 
 	$(CURDIR)/stage-kacs-core.sh $(CURDIR)/verify-scaffold.sh $(CURDIR)/check-kunit-scaffold.sh $(CURDIR)/lsmod.txt \
 	-type f 2>/dev/null | sort)
 CACHE_BUST := $(shell cat $(PKM_SOURCES) 2>/dev/null | sha256sum | cut -c1-16)
+PKM_KACS_TCB_PUBKEY_HEX ?=
+PKM_DOCKER_BUILD_ARGS := --build-arg CACHE_BUST=$(CACHE_BUST)
+ifneq ($(strip $(PKM_KACS_TCB_PUBKEY_HEX)),)
+PKM_DOCKER_BUILD_ARGS += --build-arg PKM_KACS_TCB_PUBKEY_HEX=$(PKM_KACS_TCB_PUBKEY_HEX)
+endif
 
 .PHONY: all verify-scaffold image kernel boot-smoke kunit-image kunit-kernel kunit-smoke shell clean clean-all
 
@@ -26,10 +31,10 @@ verify-scaffold:
 	$(CURDIR)/verify-scaffold.sh $(CURDIR)/..
 
 image: verify-scaffold
-	docker build --build-arg CACHE_BUST=$(CACHE_BUST) -t $(IMAGE) -f $(CURDIR)/Dockerfile $(CURDIR)/..
+	docker build $(PKM_DOCKER_BUILD_ARGS) -t $(IMAGE) -f $(CURDIR)/Dockerfile $(CURDIR)/..
 
 kunit-image: verify-scaffold
-	docker build --build-arg CACHE_BUST=$(CACHE_BUST) --build-arg ENABLE_PKM_KUNIT=1 -t $(IMAGE_KUNIT) -f $(CURDIR)/Dockerfile $(CURDIR)/..
+	docker build $(PKM_DOCKER_BUILD_ARGS) --build-arg ENABLE_PKM_KUNIT=1 -t $(IMAGE_KUNIT) -f $(CURDIR)/Dockerfile $(CURDIR)/..
 
 kernel: image
 	mkdir -p $(OUT)

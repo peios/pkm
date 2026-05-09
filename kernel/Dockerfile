@@ -122,6 +122,7 @@ RUN scripts/config \
 # Docker's layer cache when any PKM source file changes.
 ARG CACHE_BUST=0
 ARG ENABLE_PKM_KUNIT=0
+ARG PKM_KACS_TCB_PUBKEY_HEX=""
 
 # PKM: install the explicit slow-track scaffold into security/pkm.
 COPY kernel/install-pkm-subtree.sh /usr/local/bin/install-pkm-subtree
@@ -139,6 +140,7 @@ COPY kacs/kmes.h /tmp/pkm-src/kacs/kmes.h
 COPY kacs/kmes_payload.rs /tmp/pkm-src/kacs/kmes_payload.rs
 COPY kacs/kmes_validate.rs /tmp/pkm-src/kacs/kmes_validate.rs
 COPY kacs/kunit.c /tmp/pkm-src/kacs/kunit.c
+COPY kacs/builtin_signing_keys.h /tmp/pkm-src/kacs/builtin_signing_keys.h
 COPY kacs/token_fd.c /tmp/pkm-src/kacs/token_fd.c
 COPY kacs/token_fd.h /tmp/pkm-src/kacs/token_fd.h
 COPY kacs/token_runtime.h /tmp/pkm-src/kacs/token_runtime.h
@@ -146,12 +148,14 @@ COPY kacs/token_runtime.rs /tmp/pkm-src/kacs/token_runtime.rs
 COPY crates/kacs-core/src/ /tmp/pkm-src/crates/kacs-core/src/
 COPY kernel/crypto/ /tmp/pkm-src/kernel/crypto/
 COPY kernel/scripts/update-ed25519-hacl.py /tmp/pkm-src/kernel/scripts/update-ed25519-hacl.py
+COPY kernel/scripts/generate-kacs-builtin-signing-keys.py /tmp/pkm-src/kernel/scripts/generate-kacs-builtin-signing-keys.py
 COPY pkm_kconfig /tmp/pkm-src/pkm_kconfig
 COPY pkm_makefile /tmp/pkm-src/pkm_makefile
 COPY kernel/stage-kacs-core.sh /tmp/pkm-src/kernel/stage-kacs-core.sh
 RUN chmod +x /usr/local/bin/install-pkm-subtree /usr/local/bin/stage-kacs-core \
 	/tmp/pkm-src/kernel/stage-kacs-core.sh && \
-	install-pkm-subtree /tmp/pkm-src /build/linux && \
+	PKM_KACS_TCB_PUBKEY_HEX="${PKM_KACS_TCB_PUBKEY_HEX}" \
+		install-pkm-subtree /tmp/pkm-src /build/linux && \
 	rm -rf /tmp/pkm-src && \
 	scripts/config --enable SECURITY_PKM && \
 	scripts/config --set-str LSM "landlock,lockdown,yama,integrity,pkm" && \

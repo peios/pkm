@@ -684,6 +684,7 @@ int pkm_kacs_file_fallocate(struct file *file, int mode);
 int pkm_kmes_kunit_set_current_process_rate_tokens(u32 tokens);
 int pkm_kmes_kunit_set_current_process_rate_refill_frozen(bool frozen);
 int pkm_kmes_kunit_get_current_process_rate_tokens(u32 *tokens_out);
+void pkm_kacs_kunit_set_current_pip_context(u32 pip_type, u32 pip_trust);
 int pkm_kacs_kunit_set_current_process_mitigation_bits(u32 mitigation_bits);
 const void *pkm_kacs_kunit_current_process_state_ptr(void);
 const void *pkm_kacs_kunit_inherit_current_process_state(u64 clone_flags);
@@ -847,6 +848,12 @@ int pkm_kacs_kunit_verify_signing_material_crypto(
 	const struct pkm_kacs_kunit_signing_probe *material,
 	const struct pkm_kacs_kunit_signing_key_entry *keys, size_t key_count,
 	struct pkm_kacs_kunit_signing_verify_out *out);
+int pkm_kacs_kunit_determine_exec_pip_from_signing_material(
+	const struct pkm_kacs_kunit_signing_probe *material,
+	struct pkm_kacs_kunit_signing_verify_out *out);
+int pkm_kacs_kunit_stage_exec_pip_from_signing_material(
+	const struct pkm_kacs_kunit_signing_probe *material, u32 commit,
+	struct pkm_kacs_kunit_process_state_view *out);
 int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
 				       unsigned long prot,
 				       unsigned long flags);

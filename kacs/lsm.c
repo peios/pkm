@@ -142,6 +142,8 @@
 #define PKM_KACS_PIP_TYPE_PROTECTED 512U
 #define PKM_KACS_PIP_TRUST_PEIOS_TCB 8192U
 
+#include "builtin_signing_keys.h"
+
 #define PKM_KACS_SD_SUPPORTED_INFO                                             \
 	(OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |             \
 	 DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION |              \
@@ -284,6 +286,9 @@ struct pkm_kacs_task_security {
 	struct pkm_kacs_native_create_request native_create;
 	struct pkm_kacs_file_write_intent write_intent;
 	struct pkm_kacs_file_metadata_decision metadata_decision;
+	u32 pending_exec_pip_type;
+	u32 pending_exec_pip_trust;
+	u8 pending_exec_pip_valid;
 };
 
 struct pkm_kacs_socket_security {
@@ -553,6 +558,7 @@ int pkm_kacs_inode_rename_flags(struct inode *old_dir,
 static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm);
 static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 					 const struct file *file);
+static void pkm_kacs_bprm_committed_creds(const struct linux_binprm *bprm);
 static long pkm_kacs_check_process_setinfo_core(
 	const void *subject_token,
 	const struct pkm_kacs_process_state *caller_state,
@@ -2085,6 +2091,52 @@ static struct pkm_kacs_process_state *pkm_kacs_current_process_state(void)
 	return pkm_kacs_task(current)->process_state;
 }
 
+static void pkm_kacs_clear_pending_exec_pip(void)
+{
+	struct pkm_kacs_task_security *sec;
+
+	if (!current || !current->security)
+		return;
+
+	sec = pkm_kacs_task(current);
+	sec->pending_exec_pip_type = 0;
+	sec->pending_exec_pip_trust = 0;
+	sec->pending_exec_pip_valid = 0;
+}
+
+static void pkm_kacs_stage_pending_exec_pip(u32 pip_type, u32 pip_trust)
+{
+	struct pkm_kacs_task_security *sec;
+
+	if (!current || !current->security)
+		return;
+
+	sec = pkm_kacs_task(current);
+	sec->pending_exec_pip_type = pip_type;
+	sec->pending_exec_pip_trust = pip_trust;
+	sec->pending_exec_pip_valid = 1;
+}
+
+static void pkm_kacs_commit_pending_exec_pip(void)
+{
+	struct pkm_kacs_task_security *sec;
+	struct pkm_kacs_process_state *state;
+
+	if (!current || !current->security)
+		return;
+
+	sec = pkm_kacs_task(current);
+	if (!sec->pending_exec_pip_valid)
+		return;
+
+	state = sec->process_state;
+	if (state) {
+		WRITE_ONCE(state->pip_type, sec->pending_exec_pip_type);
+		WRITE_ONCE(state->pip_trust, sec->pending_exec_pip_trust);
+	}
+	pkm_kacs_clear_pending_exec_pip();
+}
+
 static u32 pkm_kacs_process_state_mitigation_bits(
 	const struct pkm_kacs_process_state *state)
 {
@@ -2693,6 +2745,9 @@ static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 	new_sec->metadata_decision.inode = NULL;
 	new_sec->metadata_decision.op_class = PKM_KACS_METADATA_OP_NONE;
 	new_sec->metadata_decision.active = 0;
+	new_sec->pending_exec_pip_type = 0;
+	new_sec->pending_exec_pip_trust = 0;
+	new_sec->pending_exec_pip_valid = 0;
 
 	parent_state = pkm_kacs_current_process_state();
 	if (parent_state &&
@@ -2723,6 +2778,9 @@ static void pkm_kacs_task_free(struct task_struct *task)
 	pkm_kacs_process_state_put(sec->process_state);
 	sec->process_state = NULL;
 	sec->impersonation_saved_cred = NULL;
+	sec->pending_exec_pip_type = 0;
+	sec->pending_exec_pip_trust = 0;
+	sec->pending_exec_pip_valid = 0;
 }
 
 static struct security_hook_list pkm_hooks[] __ro_after_init = {
@@ -2785,6 +2843,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(file_mprotect, pkm_kacs_file_mprotect),
 	LSM_HOOK_INIT(bprm_check_security, pkm_kacs_bprm_check_security),
 	LSM_HOOK_INIT(bprm_creds_from_file, pkm_kacs_bprm_creds_from_file),
+	LSM_HOOK_INIT(bprm_committed_creds, pkm_kacs_bprm_committed_creds),
 };
 
 void *pkm_kacs_zalloc(size_t size)
@@ -4327,6 +4386,28 @@ struct pkm_kacs_signing_key_entry {
 	__le32 pip_trust;
 } __packed;
 
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+static const struct pkm_kacs_signing_key_entry pkm_kacs_builtin_signing_keys[]
+	__used __section(".pkm_kacs_builtin_signing_keys") = {
+	{
+		.public_key = {
+			0x03, 0xa1, 0x07, 0xbf, 0xf3, 0xce, 0x10, 0xbe,
+			0x1d, 0x70, 0xdd, 0x18, 0xe7, 0x4b, 0xc0, 0x99,
+			0x67, 0xe4, 0xd6, 0x30, 0x9b, 0xa5, 0x0d, 0x5f,
+			0x1d, 0xdc, 0x86, 0x64, 0x12, 0x55, 0x31, 0xb8,
+		},
+		.pip_type = cpu_to_le32(PKM_KACS_PIP_TYPE_PROTECTED),
+		.pip_trust = cpu_to_le32(PKM_KACS_PIP_TRUST_PEIOS_TCB),
+	},
+	{ { 0 }, 0, 0 },
+};
+#else
+static const struct pkm_kacs_signing_key_entry pkm_kacs_builtin_signing_keys[]
+	__used __section(".pkm_kacs_builtin_signing_keys") = {
+	PKM_KACS_BUILTIN_SIGNING_KEY_TABLE
+};
+#endif
+
 struct pkm_kacs_signing_trust_result {
 	u32 verified;
 	u32 pip_type;
@@ -4436,6 +4517,55 @@ static bool __maybe_unused pkm_kacs_signing_crypto_verify(
 
 	crypto_free_sig(tfm);
 	return ret == 0;
+}
+
+static void pkm_kacs_exec_pip_from_material(
+	const struct pkm_kacs_signing_material *material, u32 *pip_type_out,
+	u32 *pip_trust_out)
+{
+	struct pkm_kacs_signing_trust_result result;
+	int ret;
+
+	if (!pip_type_out || !pip_trust_out)
+		return;
+
+	*pip_type_out = 0;
+	*pip_trust_out = 0;
+	if (!material)
+		return;
+
+	ret = pkm_kacs_signing_verify_with_keys(
+		material, pkm_kacs_builtin_signing_keys,
+		ARRAY_SIZE(pkm_kacs_builtin_signing_keys),
+		pkm_kacs_signing_crypto_verify, NULL, &result);
+	if (ret || !result.verified)
+		return;
+
+	*pip_type_out = result.pip_type;
+	*pip_trust_out = result.pip_trust;
+}
+
+static void pkm_kacs_exec_pip_from_file(const struct file *file,
+					u32 *pip_type_out,
+					u32 *pip_trust_out)
+{
+	struct pkm_kacs_signing_material material;
+	int ret;
+
+	if (!pip_type_out || !pip_trust_out)
+		return;
+
+	*pip_type_out = 0;
+	*pip_trust_out = 0;
+	if (!file)
+		return;
+
+	ret = pkm_kacs_signing_probe_file((struct file *)file, &material);
+	if (ret)
+		return;
+
+	pkm_kacs_exec_pip_from_material(&material, pip_type_out,
+					pip_trust_out);
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
@@ -4565,6 +4695,25 @@ static int pkm_kacs_kunit_copy_signing_keys(
 	return 0;
 }
 
+static int pkm_kacs_kunit_material_from_probe(
+	const struct pkm_kacs_kunit_signing_probe *material,
+	struct pkm_kacs_signing_material *material_out)
+{
+	if (!material || !material_out)
+		return -EINVAL;
+	if (material->source != PKM_KACS_SIGNING_SOURCE_NONE &&
+	    material->source != PKM_KACS_SIGNING_SOURCE_ELF &&
+	    material->source != PKM_KACS_SIGNING_SOURCE_XATTR)
+		return -EINVAL;
+
+	memset(material_out, 0, sizeof(*material_out));
+	material_out->source = material->source;
+	memcpy(material_out->signature, material->signature,
+	       sizeof(material_out->signature));
+	memcpy(material_out->hash, material->hash, sizeof(material_out->hash));
+	return 0;
+}
+
 int pkm_kacs_kunit_probe_signing_material(
 	const u8 *file_bytes, size_t file_len, const u8 *xattr_sig,
 	size_t xattr_sig_len, struct pkm_kacs_kunit_signing_probe *out)
@@ -4668,6 +4817,61 @@ int pkm_kacs_kunit_verify_signing_material_crypto(
 
 out_free:
 	kfree(key_table);
+	return ret;
+}
+
+int pkm_kacs_kunit_determine_exec_pip_from_signing_material(
+	const struct pkm_kacs_kunit_signing_probe *material,
+	struct pkm_kacs_kunit_signing_verify_out *out)
+{
+	struct pkm_kacs_signing_material material_in;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+	int ret;
+
+	if (!out)
+		return -EINVAL;
+
+	memset(out, 0, sizeof(*out));
+	ret = pkm_kacs_kunit_material_from_probe(material, &material_in);
+	if (ret)
+		return ret;
+
+	pkm_kacs_exec_pip_from_material(&material_in, &pip_type, &pip_trust);
+	out->verified = pip_type != 0 || pip_trust != 0;
+	out->pip_type = pip_type;
+	out->pip_trust = pip_trust;
+	return 0;
+}
+
+int pkm_kacs_kunit_stage_exec_pip_from_signing_material(
+	const struct pkm_kacs_kunit_signing_probe *material, u32 commit,
+	struct pkm_kacs_kunit_process_state_view *out)
+{
+	struct pkm_kacs_signing_material material_in;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+	int ret;
+
+	ret = pkm_kacs_kunit_material_from_probe(material, &material_in);
+	if (ret)
+		return ret;
+
+	pkm_kacs_clear_pending_exec_pip();
+	pkm_kacs_exec_pip_from_material(&material_in, &pip_type, &pip_trust);
+	pkm_kacs_stage_pending_exec_pip(pip_type, pip_trust);
+	if (commit)
+		pkm_kacs_commit_pending_exec_pip();
+
+	if (out) {
+		ret = pkm_kacs_kunit_process_state_snapshot(
+			pkm_kacs_kunit_current_process_state_ptr(), out);
+	} else {
+		ret = 0;
+	}
+
+	if (!commit)
+		pkm_kacs_clear_pending_exec_pip();
 	return ret;
 }
 
@@ -8752,15 +8956,24 @@ static long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 					       const struct file *file,
 					       struct cred *new,
 					       const struct cred *old,
-					       bool require_file_for_npm)
+					       bool require_file_for_npm,
+					       bool stage_exec_pip)
 {
 	bool uid_changed;
 	bool gid_changed;
 	struct user_struct *old_user;
+	u32 exec_pip_type = 0;
+	u32 exec_pip_trust = 0;
 	long ret;
 
 	if (!new || !old)
 		return -EACCES;
+
+	if (stage_exec_pip) {
+		pkm_kacs_clear_pending_exec_pip();
+		pkm_kacs_exec_pip_from_file(file, &exec_pip_type,
+					    &exec_pip_trust);
+	}
 
 	uid_changed = !uid_eq(new->euid, old->euid);
 	gid_changed = !gid_eq(new->egid, old->egid);
@@ -8797,6 +9010,9 @@ static long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 	if (ret)
 		return ret;
 
+	if (stage_exec_pip)
+		pkm_kacs_stage_pending_exec_pip(exec_pip_type, exec_pip_trust);
+
 	return 0;
 }
 
@@ -8809,7 +9025,14 @@ static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 	return (int)pkm_kacs_bprm_creds_from_file_core(
 		pkm_kacs_current_effective_token_ptr(),
 		pkm_kacs_current_primary_token_ptr(), file, bprm->cred,
-		current_cred(), true);
+		current_cred(), true, true);
+}
+
+static void pkm_kacs_bprm_committed_creds(const struct linux_binprm *bprm)
+{
+	(void)bprm;
+
+	pkm_kacs_commit_pending_exec_pip();
 }
 
 static long pkm_kacs_open_process_token_task(
@@ -12672,7 +12895,7 @@ int pkm_kacs_kunit_reproject_exec_caps(
 	if (pkm_kacs_bprm_creds_from_file_core(
 		    pkm_kacs_current_effective_token_ptr(),
 		    pkm_kacs_current_primary_token_ptr(), NULL, bprm.cred,
-		    current_cred(), false)) {
+		    current_cred(), false, false)) {
 		ret = -EACCES;
 		goto out;
 	}
@@ -12761,7 +12984,7 @@ long pkm_kacs_kunit_check_exec_setid_compat_for_subject(
 	}
 
 	ret = pkm_kacs_bprm_creds_from_file_core(
-		subject_token, subject_token, NULL, new, old, false);
+		subject_token, subject_token, NULL, new, old, false, false);
 	if (!ret) {
 		out->uid = __kuid_val(new->uid);
 		out->euid = __kuid_val(new->euid);
@@ -12859,7 +13082,7 @@ long pkm_kacs_kunit_check_exec_new_process_min(
 
 	ret = pkm_kacs_bprm_creds_from_file_core(
 		args->subject_token, args->primary_token, &state->file, new,
-		old, true);
+		old, true, false);
 	if (!ret) {
 		new_sec = pkm_kacs_cred(new);
 		if (!new_sec->token) {
@@ -13687,6 +13910,9 @@ static int __init pkm_init(void)
 	pkm_kacs_boot_system_token = system_token;
 
 	task_sec = pkm_kacs_task(current);
+	task_sec->pending_exec_pip_type = 0;
+	task_sec->pending_exec_pip_trust = 0;
+	task_sec->pending_exec_pip_valid = 0;
 	if (!task_sec->process_state) {
 		task_sec->process_state = pkm_kacs_process_state_alloc(
 			system_token, 0, 0, 0);
