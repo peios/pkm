@@ -260,6 +260,8 @@ static const struct lsm_id pkm_lsmid = {
 	.id = 1000,
 };
 static const void *pkm_kacs_boot_system_token;
+static struct dentry *pkm_kacs_securityfs_dir;
+static struct dentry *pkm_kacs_securityfs_self;
 
 static struct lsm_blob_sizes pkm_blob_sizes __ro_after_init = {
 	.lbs_cred = sizeof(struct pkm_kacs_cred_security),
@@ -4863,6 +4865,60 @@ static long pkm_kacs_open_process_token_core(
 							  access_mask);
 }
 
+static long pkm_kacs_authorize_process_token_inspection_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state,
+	bool self_target)
+{
+	if (!subject_token || !caller_state || !target_state)
+		return -EACCES;
+	if (self_target)
+		return 0;
+
+	return pkm_kacs_authorize_process_access_core(
+		subject_token, target_state, READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust),
+		KACS_PROCESS_QUERY_INFORMATION);
+}
+
+static long pkm_kacs_open_process_token_inspection_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state,
+	const void *target_token, bool self_target)
+{
+	long ret;
+
+	if (!target_token)
+		return -EACCES;
+
+	ret = pkm_kacs_authorize_process_token_inspection_core(
+		subject_token, caller_state, target_state, self_target);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_open_token_fd_with_fixed_access(target_token,
+							KACS_TOKEN_QUERY);
+}
+
+static int pkm_kacs_bind_process_token_inspection_file(
+	struct file *file,
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state,
+	const void *target_token, bool self_target)
+{
+	long ret;
+
+	ret = pkm_kacs_authorize_process_token_inspection_core(
+		subject_token, caller_state, target_state, self_target);
+	if (ret)
+		return (int)ret;
+
+	return pkm_kacs_bind_query_token_file(file, target_token);
+}
+
 static long pkm_kacs_create_session_core(const void *subject_token,
 					 const u8 *spec, size_t spec_len,
 					 u64 *session_id_out)
@@ -5451,6 +5507,39 @@ static long pkm_kacs_open_process_token_task(
 	return ret;
 }
 
+static long pkm_kacs_open_process_token_inspection_task(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	struct task_struct *task)
+{
+	const struct cred *target_real_cred;
+	struct pkm_kacs_process_state *target_state;
+	const void *target_token;
+	long ret;
+	bool self_target;
+
+	if (!subject_token || !caller_state || !task || !task->security)
+		return -EACCES;
+
+	target_state = pkm_kacs_task(task)->process_state;
+	if (!target_state)
+		return -EACCES;
+	self_target = caller_state == target_state;
+
+	target_real_cred = get_task_cred(task);
+	target_token = pkm_kacs_cred(target_real_cred)->token;
+	if (!target_token) {
+		put_cred(target_real_cred);
+		return -EACCES;
+	}
+
+	ret = pkm_kacs_open_process_token_inspection_core(
+		subject_token, caller_state, target_state, target_token,
+		self_target);
+	put_cred(target_real_cred);
+	return ret;
+}
+
 static long pkm_kacs_revert_current_impersonation(void)
 {
 	struct pkm_kacs_task_security *task_sec;
@@ -5781,6 +5870,171 @@ static long pkm_kacs_open_thread_token_task(
 		READ_ONCE(caller_state->pip_trust), access_mask);
 	put_cred(target_effective_cred);
 	return ret;
+}
+
+static long pkm_kacs_open_thread_token_inspection_task(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	struct task_struct *task)
+{
+	const struct cred *target_effective_cred;
+	struct pkm_kacs_process_state *target_state;
+	const void *target_token;
+	long ret;
+	bool self_target;
+
+	if (!subject_token || !caller_state || !task || !task->security)
+		return -EACCES;
+
+	target_state = pkm_kacs_task(task)->process_state;
+	if (!target_state)
+		return -EACCES;
+	self_target = caller_state == target_state;
+
+	target_effective_cred = pkm_kacs_get_task_effective_cred(task);
+	if (!target_effective_cred)
+		return -EACCES;
+
+	target_token = pkm_kacs_cred(target_effective_cred)->token;
+	if (!target_token) {
+		put_cred(target_effective_cred);
+		return -EACCES;
+	}
+
+	ret = pkm_kacs_open_process_token_inspection_core(
+		subject_token, caller_state, target_state, target_token,
+		self_target);
+	put_cred(target_effective_cred);
+	return ret;
+}
+
+int pkm_kacs_proc_open_process_token_file(struct file *file,
+					  struct task_struct *task)
+{
+	struct pkm_kacs_process_state *caller_state;
+	const struct cred *target_real_cred;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+	const void *target_token;
+	int ret;
+	bool self_target;
+
+	if (!file || !task || !task->security)
+		return -EACCES;
+
+	caller_state = pkm_kacs_current_process_state();
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_state = pkm_kacs_task(task)->process_state;
+	if (!caller_state || !subject_token || !target_state)
+		return -EACCES;
+	self_target = caller_state == target_state;
+
+	target_real_cred = get_task_cred(task);
+	target_token = pkm_kacs_cred(target_real_cred)->token;
+	if (!target_token) {
+		put_cred(target_real_cred);
+		return -EACCES;
+	}
+
+	ret = pkm_kacs_bind_process_token_inspection_file(
+		file, subject_token, caller_state, target_state, target_token,
+		self_target);
+	put_cred(target_real_cred);
+	return ret;
+}
+
+int pkm_kacs_proc_open_thread_token_file(struct file *file,
+					 struct task_struct *task)
+{
+	struct pkm_kacs_process_state *caller_state;
+	const struct cred *target_effective_cred;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+	const void *target_token;
+	int ret;
+	bool self_target;
+
+	if (!file || !task || !task->security)
+		return -EACCES;
+
+	caller_state = pkm_kacs_current_process_state();
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_state = pkm_kacs_task(task)->process_state;
+	if (!caller_state || !subject_token || !target_state)
+		return -EACCES;
+	self_target = caller_state == target_state;
+
+	target_effective_cred = pkm_kacs_get_task_effective_cred(task);
+	if (!target_effective_cred)
+		return -EACCES;
+
+	target_token = pkm_kacs_cred(target_effective_cred)->token;
+	if (!target_token) {
+		put_cred(target_effective_cred);
+		return -EACCES;
+	}
+
+	ret = pkm_kacs_bind_process_token_inspection_file(
+		file, subject_token, caller_state, target_state, target_token,
+		self_target);
+	put_cred(target_effective_cred);
+	return ret;
+}
+
+int pkm_kacs_securityfs_open_self_token_file(struct file *file)
+{
+	const void *subject_token;
+
+	if (!file)
+		return -EINVAL;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!subject_token)
+		return -EACCES;
+
+	return pkm_kacs_bind_query_token_file(file, subject_token);
+}
+
+static int pkm_kacs_securityfs_self_open(struct inode *inode,
+					 struct file *file)
+{
+	(void)inode;
+	return pkm_kacs_securityfs_open_self_token_file(file);
+}
+
+static const struct file_operations pkm_kacs_securityfs_self_fops = {
+	.open = pkm_kacs_securityfs_self_open,
+	.llseek = noop_llseek,
+};
+
+static int __init pkm_kacs_securityfs_init(void)
+{
+	int ret;
+
+	if (pkm_kacs_securityfs_dir || pkm_kacs_securityfs_self)
+		return 0;
+
+	pkm_kacs_securityfs_dir = securityfs_create_dir("kacs", NULL);
+	if (IS_ERR(pkm_kacs_securityfs_dir)) {
+		ret = PTR_ERR(pkm_kacs_securityfs_dir);
+		pkm_kacs_securityfs_dir = NULL;
+		pr_err("pkm: securityfs kacs dir init failed (%d)\n", ret);
+		return ret;
+	}
+
+	pkm_kacs_securityfs_self = securityfs_create_file(
+		"self", 0444, pkm_kacs_securityfs_dir, NULL,
+		&pkm_kacs_securityfs_self_fops);
+	if (IS_ERR(pkm_kacs_securityfs_self)) {
+		ret = PTR_ERR(pkm_kacs_securityfs_self);
+		pkm_kacs_securityfs_self = NULL;
+		securityfs_remove(pkm_kacs_securityfs_dir);
+		pkm_kacs_securityfs_dir = NULL;
+		pr_err("pkm: securityfs kacs/self init failed (%d)\n", ret);
+		return ret;
+	}
+
+	return 0;
 }
 
 static long pkm_kacs_lookup_peer_socket(
@@ -6254,6 +6508,47 @@ long pkm_kacs_kunit_open_process_token_for_subject(
 		args->subject_token, &target_state, args->target_token,
 		args->caller_pip_type, args->caller_pip_trust,
 		args->access_mask);
+}
+
+long pkm_kacs_kunit_open_process_token_inspection_for_subject(
+	const struct pkm_kacs_kunit_process_token_open_args *args)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state caller_state = {};
+	struct pkm_kacs_process_state target_state = {};
+
+	if (!args)
+		return -EINVAL;
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	refcount_set(&process_sd.refs, 1);
+	caller_state.pip_type = args->caller_pip_type;
+	caller_state.pip_trust = args->caller_pip_trust;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = &process_sd;
+
+	return pkm_kacs_open_process_token_inspection_core(
+		args->subject_token, &caller_state, &target_state,
+		args->target_token, args->self_target != 0);
+}
+
+long pkm_kacs_kunit_open_thread_token_inspection_for_subject(
+	const struct pkm_kacs_kunit_process_token_open_args *args)
+{
+	return pkm_kacs_kunit_open_process_token_inspection_for_subject(args);
+}
+
+long pkm_kacs_kunit_open_self_token_inspection_for_subject(void)
+{
+	const void *subject_token = pkm_kacs_current_effective_token_ptr();
+
+	if (!subject_token)
+		return -EACCES;
+
+	return pkm_kacs_open_token_fd_with_fixed_access(subject_token,
+							KACS_TOKEN_QUERY);
 }
 
 long pkm_kacs_kunit_check_signal_for_subject(
@@ -8947,3 +9242,5 @@ DEFINE_LSM(pkm) = {
 	.init = pkm_init,
 	.blobs = &pkm_blob_sizes,
 };
+
+late_initcall(pkm_kacs_securityfs_init);

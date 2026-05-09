@@ -114,6 +114,13 @@ if ! rg -q 'proc_pkm_check_task_metadata_access' \
 	die "install-pkm-subtree.sh does not stage the procfs metadata visibility patch"
 fi
 
+if ! rg -q 'proc_pid_token_operations' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'proc_tid_token_operations' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the procfs token inspection patch"
+fi
+
 if ! rg -q 'pkm_kacs_file_sd_xattr_get' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
    ! rg -q 'pkm_kacs_file_sd_xattr_set' \

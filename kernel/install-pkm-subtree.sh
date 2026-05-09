@@ -486,6 +486,69 @@ insert_block_before_exact_once '	ret = PROC_I(inode)->op.proc_show(m, ns, pid, t
 	}
 ' \
 	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once 'static const struct pid_entry tgid_base_stuff[] = {' \
+	'static const struct file_operations proc_pid_token_operations' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_proc_open_process_token_file(struct file *file,
+						 struct task_struct *task);
+extern int pkm_kacs_proc_open_thread_token_file(struct file *file,
+						struct task_struct *task);
+
+static int proc_pid_token_open(struct inode *inode, struct file *file)
+{
+	struct task_struct *task;
+	int ret;
+
+	task = get_proc_task(inode);
+	if (!task)
+		return -ESRCH;
+
+	ret = pkm_kacs_proc_open_process_token_file(file, task);
+	put_task_struct(task);
+	return ret;
+}
+
+static int proc_tid_token_open(struct inode *inode, struct file *file)
+{
+	struct task_struct *task;
+	int ret;
+
+	task = get_proc_task(inode);
+	if (!task)
+		return -ESRCH;
+
+	ret = pkm_kacs_proc_open_thread_token_file(file, task);
+	put_task_struct(task);
+	return ret;
+}
+
+static const struct file_operations proc_pid_token_operations = {
+	.open		= proc_pid_token_open,
+	.llseek		= noop_llseek,
+};
+
+static const struct file_operations proc_tid_token_operations = {
+	.open		= proc_tid_token_open,
+	.llseek		= noop_llseek,
+};
+#endif
+
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	REG("auxv",       S_IRUSR, proc_auxv_operations),' \
+	'REG("token",      S_IRUGO, proc_pid_token_operations)' \
+	'#ifdef CONFIG_SECURITY_PKM
+	REG("token",      S_IRUGO, proc_pid_token_operations),
+#endif
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	REG("auxv",      S_IRUSR, proc_auxv_operations),' \
+	'REG("token",     S_IRUGO, proc_tid_token_operations)' \
+	'#ifdef CONFIG_SECURITY_PKM
+	REG("token",     S_IRUGO, proc_tid_token_operations),
+#endif
+' \
+	"$kernel_root/fs/proc/base.c"
 replace_line_after_anchor_once 'static int do_io_accounting(struct task_struct *task, struct seq_file *m, int whole)' \
 	'	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS)) {' \
 	'	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_PROC_QUERY_INFORMATION)) {' \

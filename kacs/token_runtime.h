@@ -6,6 +6,9 @@
 
 #include "access_check.h"
 
+struct file;
+struct task_struct;
+
 #define KACS_PROCESS_TERMINATE 0x0001U
 #define KACS_PROCESS_SIGNAL 0x0002U
 #define KACS_PROCESS_VM_READ 0x0010U
@@ -144,6 +147,7 @@ struct pkm_kacs_kunit_process_token_open_args {
 	u32 target_pip_type;
 	u32 target_pip_trust;
 	u32 access_mask;
+	u32 self_target;
 };
 
 struct pkm_kacs_kunit_process_signal_check_args {
@@ -538,6 +542,11 @@ int kacs_rust_token_restrict(const void *source_token,
 			     u32 flags, const u8 *payload, size_t payload_len,
 			     u32 num_deny_indices, u32 num_restrict_sids,
 			     const void **out_token);
+int pkm_kacs_proc_open_process_token_file(struct file *file,
+					  struct task_struct *task);
+int pkm_kacs_proc_open_thread_token_file(struct file *file,
+					 struct task_struct *task);
+int pkm_kacs_securityfs_open_self_token_file(struct file *file);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 int pkm_kmes_kunit_set_current_process_rate_tokens(u32 tokens);
@@ -552,6 +561,11 @@ int pkm_kacs_kunit_process_state_snapshot(
 	struct pkm_kacs_kunit_process_state_view *out);
 long pkm_kacs_kunit_open_process_token_for_subject(
 	const struct pkm_kacs_kunit_process_token_open_args *args);
+long pkm_kacs_kunit_open_process_token_inspection_for_subject(
+	const struct pkm_kacs_kunit_process_token_open_args *args);
+long pkm_kacs_kunit_open_thread_token_inspection_for_subject(
+	const struct pkm_kacs_kunit_process_token_open_args *args);
+long pkm_kacs_kunit_open_self_token_inspection_for_subject(void);
 long pkm_kacs_kunit_check_signal_for_subject(
 	const struct pkm_kacs_kunit_process_signal_check_args *args);
 long pkm_kacs_kunit_check_ptrace_for_subject(

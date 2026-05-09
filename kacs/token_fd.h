@@ -5,6 +5,8 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
+struct file;
+
 /* Syscall 1000 flags */
 #define KACS_REAL_TOKEN 0x01U
 
@@ -168,6 +170,8 @@ long pkm_kacs_open_token_fd_for_subject_checked(const void *subject_token,
 						u32 access_mask);
 long pkm_kacs_open_token_fd_with_fixed_access(const void *target_token,
 					      u32 granted_access);
+int pkm_kacs_bind_query_token_file(struct file *file,
+				   const void *target_token);
 long pkm_kacs_impersonate_token_for_current(const void *client_token);
 long pkm_kacs_open_self_token_internal(unsigned int flags, u32 access_mask);
 long pkm_kacs_kunit_open_token_fd_for_subject(const void *subject_token,

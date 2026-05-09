@@ -43,6 +43,8 @@ static const struct file_operations pkm_kacs_token_fops;
 static int pkm_kacs_token_to_fd(const void *token, u32 granted_access);
 static long pkm_kacs_token_file_get(int fd, struct fd *held,
 				    struct pkm_kacs_token_file **out);
+static int pkm_kacs_bind_token_file_with_fixed_access(
+	struct file *file, const void *target_token, u32 granted_access);
 
 static bool pkm_kacs_ranges_overlap(u64 lhs_start, size_t lhs_len,
 				    u64 rhs_start, size_t rhs_len)
@@ -937,6 +939,33 @@ static int pkm_kacs_token_to_fd(const void *token, u32 granted_access)
 	return fd;
 }
 
+static int pkm_kacs_bind_token_file_with_fixed_access(
+	struct file *file, const void *target_token, u32 granted_access)
+{
+	struct pkm_kacs_token_file *tf;
+	const void *token_ref;
+
+	if (!file || !target_token || !granted_access)
+		return -EACCES;
+
+	token_ref = kacs_rust_token_clone(target_token);
+	if (!token_ref)
+		return -EACCES;
+
+	tf = kmalloc(sizeof(*tf), GFP_KERNEL);
+	if (!tf) {
+		kacs_rust_token_drop(token_ref);
+		return -ENOMEM;
+	}
+
+	tf->token = token_ref;
+	tf->access_mask = granted_access;
+
+	replace_fops(file, &pkm_kacs_token_fops);
+	file->private_data = tf;
+	return 0;
+}
+
 long pkm_kacs_open_token_fd_with_fixed_access(const void *target_token,
 					      u32 granted_access)
 {
@@ -950,6 +979,12 @@ long pkm_kacs_open_token_fd_with_fixed_access(const void *target_token,
 		return -EACCES;
 
 	return pkm_kacs_token_to_fd(token_ref, granted_access);
+}
+
+int pkm_kacs_bind_query_token_file(struct file *file, const void *target_token)
+{
+	return pkm_kacs_bind_token_file_with_fixed_access(
+		file, target_token, KACS_TOKEN_QUERY);
 }
 
 int pkm_kacs_validate_token_open_access_mask(u32 access_mask)
