@@ -3474,8 +3474,6 @@ static long pkm_kacs_normalize_requested_mitigations(
 		return -EINVAL;
 	if (requested_mitigations & ~KACS_MIT_ALL)
 		return -EINVAL;
-	if (requested_mitigations & KACS_MIT_LSV)
-		return -EOPNOTSUPP;
 
 	if ((normalized & KACS_MIT_CFI) != 0)
 		normalized |= KACS_MIT_CFIF | KACS_MIT_CFIB;
@@ -5777,6 +5775,142 @@ static bool pkm_kacs_pip_dominates(u32 caller_pip_type, u32 caller_pip_trust,
 	return caller_pip_type >= target_pip_type &&
 	       caller_pip_trust >= target_pip_trust;
 }
+
+static int pkm_kacs_lsv_verify_material_trust(
+	const struct pkm_kacs_signing_material *material,
+	struct pkm_kacs_signing_trust_result *result)
+{
+	int ret;
+
+	if (!material || !result)
+		return -EACCES;
+
+	ret = pkm_kacs_signing_verify_with_keys(
+		material, pkm_kacs_builtin_signing_keys,
+		ARRAY_SIZE(pkm_kacs_builtin_signing_keys),
+		pkm_kacs_signing_crypto_verify, NULL, result);
+	if (ret || !result->verified)
+		return -EACCES;
+
+	return 0;
+}
+
+static int pkm_kacs_check_lsv_trust_core(
+	u32 mitigation_bits, bool file_backed, bool executable_transition,
+	u32 process_pip_type, u32 process_pip_trust,
+	const struct pkm_kacs_signing_trust_result *result)
+{
+	if ((mitigation_bits & KACS_MIT_LSV) == 0)
+		return 0;
+	if (!executable_transition)
+		return 0;
+	if (!file_backed)
+		return 0;
+	if (!result || !result->verified)
+		return -EACCES;
+	if (process_pip_type != 0 &&
+	    !pkm_kacs_pip_dominates(result->pip_type, result->pip_trust,
+				    process_pip_type, process_pip_trust))
+		return -EACCES;
+
+	return 0;
+}
+
+static int pkm_kacs_check_lsv_material_core(
+	u32 mitigation_bits, bool file_backed, bool executable_transition,
+	u32 process_pip_type, u32 process_pip_trust,
+	const struct pkm_kacs_signing_material *material)
+{
+	struct pkm_kacs_signing_trust_result result;
+	int ret;
+
+	if ((mitigation_bits & KACS_MIT_LSV) == 0)
+		return 0;
+	if (!executable_transition)
+		return 0;
+	if (!file_backed)
+		return 0;
+
+	ret = pkm_kacs_lsv_verify_material_trust(material, &result);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_check_lsv_trust_core(
+		mitigation_bits, file_backed, executable_transition,
+		process_pip_type, process_pip_trust, &result);
+}
+
+static int pkm_kacs_check_lsv_file_core(u32 mitigation_bits,
+					struct file *file,
+					bool executable_transition,
+					u32 process_pip_type,
+					u32 process_pip_trust)
+{
+	struct pkm_kacs_signing_material material;
+	int ret;
+
+	if ((mitigation_bits & KACS_MIT_LSV) == 0)
+		return 0;
+	if (!executable_transition)
+		return 0;
+	if (!file)
+		return 0;
+
+	ret = pkm_kacs_signing_probe_file(file, &material);
+	if (ret)
+		return ret == -ENOMEM ? -ENOMEM : -EACCES;
+
+	return pkm_kacs_check_lsv_material_core(
+		mitigation_bits, true, true, process_pip_type,
+		process_pip_trust, &material);
+}
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+static int pkm_kacs_kunit_check_lsv_material_common(
+	u32 mitigation_bits, bool file_backed, bool executable_transition,
+	u32 process_pip_type, u32 process_pip_trust,
+	const struct pkm_kacs_kunit_signing_probe *material)
+{
+	struct pkm_kacs_signing_material material_in;
+	int ret;
+
+	if ((mitigation_bits & KACS_MIT_LSV) == 0)
+		return 0;
+	if (!executable_transition)
+		return 0;
+	if (!file_backed)
+		return 0;
+
+	ret = pkm_kacs_kunit_material_from_probe(material, &material_in);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_check_lsv_material_core(
+		mitigation_bits, file_backed, executable_transition,
+		process_pip_type, process_pip_trust, &material_in);
+}
+
+int pkm_kacs_kunit_check_lsv_mmap_material(
+	u32 mitigation_bits, unsigned long prot, u32 process_pip_type,
+	u32 process_pip_trust, u32 file_backed,
+	const struct pkm_kacs_kunit_signing_probe *material)
+{
+	return pkm_kacs_kunit_check_lsv_material_common(
+		mitigation_bits, file_backed != 0, (prot & PROT_EXEC) != 0,
+		process_pip_type, process_pip_trust, material);
+}
+
+int pkm_kacs_kunit_check_lsv_mprotect_material(
+	u32 mitigation_bits, unsigned long vm_flags, unsigned long prot,
+	u32 process_pip_type, u32 process_pip_trust, u32 file_backed,
+	const struct pkm_kacs_kunit_signing_probe *material)
+{
+	return pkm_kacs_kunit_check_lsv_material_common(
+		mitigation_bits, file_backed != 0,
+		(prot & PROT_EXEC) != 0 && (vm_flags & VM_EXEC) == 0,
+		process_pip_type, process_pip_trust, material);
+}
+#endif
 
 static long pkm_kacs_authorize_process_sd_access(
 	const void *subject_token,
@@ -8792,6 +8926,7 @@ static int pkm_kacs_mmap_file(struct file *file, unsigned long reqprot,
 			      unsigned long prot, unsigned long flags)
 {
 	struct pkm_kacs_process_state *state;
+	u32 mitigation_bits;
 	int ret;
 
 	(void)reqprot;
@@ -8800,14 +8935,19 @@ static int pkm_kacs_mmap_file(struct file *file, unsigned long reqprot,
 	if (!state)
 		return -EACCES;
 
-	ret = pkm_kacs_check_wxp_mmap_core(
-		pkm_kacs_process_state_mitigation_bits(state), prot);
+	mitigation_bits = pkm_kacs_process_state_mitigation_bits(state);
+	ret = pkm_kacs_check_wxp_mmap_core(mitigation_bits, prot);
 	if (ret)
 		return ret;
 
 	ret = pkm_kacs_check_tlp_file_core(
-		pkm_kacs_process_state_mitigation_bits(state), file,
-		(prot & PROT_EXEC) != 0);
+		mitigation_bits, file, (prot & PROT_EXEC) != 0);
+	if (ret)
+		return ret;
+
+	ret = pkm_kacs_check_lsv_file_core(
+		mitigation_bits, file, (prot & PROT_EXEC) != 0,
+		READ_ONCE(state->pip_type), READ_ONCE(state->pip_trust));
 	if (ret)
 		return ret;
 
@@ -8819,6 +8959,8 @@ static int pkm_kacs_file_mprotect(struct vm_area_struct *vma,
 				  unsigned long prot)
 {
 	struct pkm_kacs_process_state *state;
+	bool executable_transition;
+	u32 mitigation_bits;
 	int ret;
 
 	(void)reqprot;
@@ -8829,15 +8971,23 @@ static int pkm_kacs_file_mprotect(struct vm_area_struct *vma,
 	if (!state)
 		return -EACCES;
 
-	ret = pkm_kacs_check_wxp_mprotect_core(
-		pkm_kacs_process_state_mitigation_bits(state),
-		vma->vm_flags, prot);
+	mitigation_bits = pkm_kacs_process_state_mitigation_bits(state);
+	executable_transition = (prot & PROT_EXEC) != 0 &&
+				(vma->vm_flags & VM_EXEC) == 0;
+
+	ret = pkm_kacs_check_wxp_mprotect_core(mitigation_bits,
+					       vma->vm_flags, prot);
 	if (ret)
 		return ret;
 
 	ret = pkm_kacs_check_tlp_file_core(
-		pkm_kacs_process_state_mitigation_bits(state), vma->vm_file,
-		(prot & PROT_EXEC) != 0 && (vma->vm_flags & VM_EXEC) == 0);
+		mitigation_bits, vma->vm_file, executable_transition);
+	if (ret)
+		return ret;
+
+	ret = pkm_kacs_check_lsv_file_core(
+		mitigation_bits, vma->vm_file, executable_transition,
+		READ_ONCE(state->pip_type), READ_ONCE(state->pip_trust));
 	if (ret)
 		return ret;
 

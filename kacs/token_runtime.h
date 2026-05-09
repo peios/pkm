@@ -833,6 +833,14 @@ int pkm_kacs_kunit_check_tlp_mprotect_path(u32 mitigation_bits,
 					   unsigned long prot,
 					   const char *path,
 					   u32 file_backed);
+int pkm_kacs_kunit_check_lsv_mmap_material(
+	u32 mitigation_bits, unsigned long prot, u32 process_pip_type,
+	u32 process_pip_trust, u32 file_backed,
+	const struct pkm_kacs_kunit_signing_probe *material);
+int pkm_kacs_kunit_check_lsv_mprotect_material(
+	u32 mitigation_bits, unsigned long vm_flags, unsigned long prot,
+	u32 process_pip_type, u32 process_pip_trust, u32 file_backed,
+	const struct pkm_kacs_kunit_signing_probe *material);
 int pkm_kacs_kunit_probe_signing_material(
 	const u8 *file_bytes, size_t file_len, const u8 *xattr_sig,
 	size_t xattr_sig_len, struct pkm_kacs_kunit_signing_probe *out);

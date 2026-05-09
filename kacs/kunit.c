@@ -4773,8 +4773,7 @@ static void pkm_kunit_set_psb_cfi_requires_cpu_support(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, resulting_bits, 0xABCDU);
 }
 
-static void pkm_kunit_set_psb_tlp_supported_lsv_fail_closed(
-	struct kunit *test)
+static void pkm_kunit_set_psb_tlp_lsv_supported(struct kunit *test)
 {
 	struct pkm_kacs_kunit_set_psb_args args = {
 		.initial_mitigation_bits = KACS_MIT_UI_ACCESS,
@@ -4797,16 +4796,18 @@ static void pkm_kunit_set_psb_tlp_supported_lsv_fail_closed(
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_set_psb_for_subject(&args,
 							   &resulting_bits),
-			(long)-EOPNOTSUPP);
-	KUNIT_EXPECT_EQ(test, resulting_bits, 0xBADCAFEU);
+			0L);
+	KUNIT_EXPECT_EQ(test, resulting_bits,
+			KACS_MIT_UI_ACCESS | KACS_MIT_WXP | KACS_MIT_LSV);
 
 	args.requested_mitigations = KACS_MIT_TLP | KACS_MIT_LSV;
 	resulting_bits = 0xBADCAFEU;
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_set_psb_for_subject(&args,
 							   &resulting_bits),
-			(long)-EOPNOTSUPP);
-	KUNIT_EXPECT_EQ(test, resulting_bits, 0xBADCAFEU);
+			0L);
+	KUNIT_EXPECT_EQ(test, resulting_bits,
+			KACS_MIT_UI_ACCESS | KACS_MIT_TLP | KACS_MIT_LSV);
 }
 
 static void pkm_kunit_set_psb_unknown_bits_fail_closed(struct kunit *test)
@@ -5487,6 +5488,98 @@ static void pkm_kunit_exec_pip_unsigned_commit_clears_existing_pip(
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_set_current_process_mitigation_bits(
 				saved.mitigation_bits),
+			0);
+}
+
+static void pkm_kunit_lsv_signed_tcb_allows_none_and_tcb_pip(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_probe material = {};
+
+	pkm_kunit_signing_fill_tcb_vector_material(&material);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_lsv_mmap_material(
+				KACS_MIT_LSV, PROT_EXEC, 0, 0, 1,
+				&material),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_lsv_mmap_material(
+				KACS_MIT_LSV, PROT_EXEC,
+				PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				PKM_KUNIT_SIGNING_TRUST_TCB, 1, &material),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_lsv_mprotect_material(
+				KACS_MIT_LSV, 0, PROT_EXEC,
+				PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				PKM_KUNIT_SIGNING_TRUST_TCB, 1, &material),
+			0);
+}
+
+static void pkm_kunit_lsv_unsigned_and_bad_signature_deny(struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_probe material = {};
+
+	material.source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_lsv_mmap_material(
+				KACS_MIT_LSV, PROT_EXEC, 0, 0, 1,
+				&material),
+			-EACCES);
+
+	pkm_kunit_signing_fill_tcb_vector_material(&material);
+	material.signature[0] ^= 0x01;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_lsv_mmap_material(
+				KACS_MIT_LSV, PROT_EXEC, 0, 0, 1,
+				&material),
+			-EACCES);
+}
+
+static void pkm_kunit_lsv_insufficient_trust_denies(struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_probe material = {};
+
+	pkm_kunit_signing_fill_tcb_vector_material(&material);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_lsv_mmap_material(
+				KACS_MIT_LSV, PROT_EXEC,
+				PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				PKM_KUNIT_SIGNING_TRUST_TCB + 1U, 1,
+				&material),
+			-EACCES);
+}
+
+static void pkm_kunit_lsv_bypasses_non_exec_and_anonymous(struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_probe material = {};
+
+	material.source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_lsv_mmap_material(
+				0, PROT_EXEC, PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				PKM_KUNIT_SIGNING_TRUST_TCB, 1, &material),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_lsv_mmap_material(
+				KACS_MIT_LSV, PROT_READ,
+				PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				PKM_KUNIT_SIGNING_TRUST_TCB, 1, &material),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_lsv_mmap_material(
+				KACS_MIT_LSV, PROT_EXEC,
+				PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				PKM_KUNIT_SIGNING_TRUST_TCB, 0, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_lsv_mprotect_material(
+				KACS_MIT_LSV, VM_EXEC, PROT_EXEC,
+				PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				PKM_KUNIT_SIGNING_TRUST_TCB, 1, NULL),
 			0);
 }
 
@@ -19844,7 +19937,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_set_psb_debug_still_fails_on_pip),
 	KUNIT_CASE(pkm_kunit_set_psb_cfi_alias_expands),
 	KUNIT_CASE(pkm_kunit_set_psb_cfi_requires_cpu_support),
-	KUNIT_CASE(pkm_kunit_set_psb_tlp_supported_lsv_fail_closed),
+	KUNIT_CASE(pkm_kunit_set_psb_tlp_lsv_supported),
 	KUNIT_CASE(pkm_kunit_set_psb_unknown_bits_fail_closed),
 	KUNIT_CASE(pkm_kunit_no_child_blocks_process_fork_only),
 	KUNIT_CASE(pkm_kunit_wxp_rejects_wx_map_and_transition),
@@ -19858,6 +19951,10 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_exec_pip_bad_signature_resets_none),
 	KUNIT_CASE(pkm_kunit_exec_pip_pending_is_transactional),
 	KUNIT_CASE(pkm_kunit_exec_pip_unsigned_commit_clears_existing_pip),
+	KUNIT_CASE(pkm_kunit_lsv_signed_tcb_allows_none_and_tcb_pip),
+	KUNIT_CASE(pkm_kunit_lsv_unsigned_and_bad_signature_deny),
+	KUNIT_CASE(pkm_kunit_lsv_insufficient_trust_denies),
+	KUNIT_CASE(pkm_kunit_lsv_bypasses_non_exec_and_anonymous),
 	KUNIT_CASE(pkm_kunit_signing_xattr_hashes_non_elf),
 	KUNIT_CASE(pkm_kunit_signing_short_file_uses_xattr),
 	KUNIT_CASE(pkm_kunit_signing_elf_section_zeroes_signature_bytes),
