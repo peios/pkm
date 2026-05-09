@@ -510,6 +510,9 @@ int kacs_rust_set_token_sd(const void *subject_token_ptr,
 int kacs_rust_check_socket_sd(const void *subject_token_ptr,
 			      const u8 *sd_ptr, size_t sd_len, u32 desired,
 			      u32 *granted_out);
+int kacs_rust_check_securityfs_sessions_read(const void *subject_token_ptr);
+int kacs_rust_securityfs_sessions_listing(u8 *out, size_t out_len,
+					  size_t *required_out);
 u32 kacs_rust_token_projected_uid(const void *token);
 u32 kacs_rust_token_projected_gid(const void *token);
 bool kacs_rust_kunit_token_snapshot(const void *token,
@@ -566,6 +569,9 @@ long pkm_kacs_kunit_open_process_token_inspection_for_subject(
 long pkm_kacs_kunit_open_thread_token_inspection_for_subject(
 	const struct pkm_kacs_kunit_process_token_open_args *args);
 long pkm_kacs_kunit_open_self_token_inspection_for_subject(void);
+long pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+	const void *subject_token, u8 *buf, size_t buf_len,
+	size_t *required_out);
 long pkm_kacs_kunit_check_signal_for_subject(
 	const struct pkm_kacs_kunit_process_signal_check_args *args);
 long pkm_kacs_kunit_check_ptrace_for_subject(

@@ -22,8 +22,9 @@
 use crate::access_check::{access_check, access_check_core, AccessCheckMode};
 use crate::access_check_abi::AccessCheckAbiResolved;
 use crate::access_mask::{
-    GenericMapping, FILE_GENERIC_MAPPING, FILE_WRITE_DATA, GENERIC_ALL, PROCESS_GENERIC_MAPPING,
-    PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    GenericMapping, FILE_GENERIC_MAPPING, FILE_READ_DATA, FILE_WRITE_DATA, GENERIC_ALL,
+    PROCESS_GENERIC_MAPPING, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED, READ_CONTROL,
+    WRITE_DAC, WRITE_OWNER,
 };
 use crate::ace::{AceKind, SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE};
 use crate::acl::Acl;
@@ -710,6 +711,107 @@ impl PkmKacsSession {
             logon_sid_len: self.logon_sid.as_bytes().len(),
         };
     }
+}
+
+fn decimal_u64_len(mut value: u64) -> usize {
+    let mut len = 1usize;
+
+    while value >= 10 {
+        value /= 10;
+        len += 1;
+    }
+    len
+}
+
+fn session_listing_line_len(session: &PkmKacsSession) -> Option<usize> {
+    let mut len = b"session_id=".len();
+
+    len = len.checked_add(decimal_u64_len(session.session_id))?;
+    len = len.checked_add(b" user_sid=".len())?;
+    len = len.checked_add(session.user_sid.as_bytes().len().checked_mul(2)?)?;
+    len = len.checked_add(b" logon_type=".len())?;
+    len = len.checked_add(decimal_u64_len(u64::from(session.logon_type)))?;
+    len = len.checked_add(b" auth_package=".len())?;
+    len = len.checked_add(session.auth_package_bytes().len().checked_mul(2)?)?;
+    len = len.checked_add(b" created_at=".len())?;
+    len = len.checked_add(decimal_u64_len(session.created_at))?;
+    len.checked_add(1)
+}
+
+fn sessions_listing_len_locked() -> Result<usize, i32> {
+    let mut cursor = SESSION_LIST_HEAD.load(Ordering::Acquire);
+    let mut len = 0usize;
+
+    while !cursor.is_null() {
+        let session = unsafe { &*cursor };
+
+        len = len
+            .checked_add(session_listing_line_len(session).ok_or(-ERANGE)?)
+            .ok_or(-ERANGE)?;
+        cursor = session.next.load(Ordering::Relaxed);
+    }
+
+    Ok(len)
+}
+
+fn write_decimal_u64(writer: &mut QueryWriter, mut value: u64) -> bool {
+    let mut buf = [0u8; 20];
+    let mut pos = buf.len();
+
+    loop {
+        pos -= 1;
+        buf[pos] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+
+    writer.write_bytes(&buf[pos..])
+}
+
+fn write_hex_bytes(writer: &mut QueryWriter, bytes: &[u8]) -> bool {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    for byte in bytes {
+        let pair = [HEX[(byte >> 4) as usize], HEX[(byte & 0x0f) as usize]];
+
+        if !writer.write_bytes(&pair) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn write_session_listing_line(writer: &mut QueryWriter, session: &PkmKacsSession) -> bool {
+    writer.write_bytes(b"session_id=")
+        && write_decimal_u64(writer, session.session_id)
+        && writer.write_bytes(b" user_sid=")
+        && write_hex_bytes(writer, session.user_sid.as_bytes())
+        && writer.write_bytes(b" logon_type=")
+        && write_decimal_u64(writer, u64::from(session.logon_type))
+        && writer.write_bytes(b" auth_package=")
+        && write_hex_bytes(writer, session.auth_package_bytes())
+        && writer.write_bytes(b" created_at=")
+        && write_decimal_u64(writer, session.created_at)
+        && writer.write_bytes(b"\n")
+}
+
+fn write_sessions_listing_locked(out: *mut u8, out_len: usize) -> Result<usize, i32> {
+    let mut cursor = SESSION_LIST_HEAD.load(Ordering::Acquire);
+    let mut writer = QueryWriter::new(out, out_len);
+
+    while !cursor.is_null() {
+        let session = unsafe { &*cursor };
+
+        if !write_session_listing_line(&mut writer, session) {
+            return Err(-ERANGE);
+        }
+        cursor = session.next.load(Ordering::Relaxed);
+    }
+
+    Ok(writer.written())
 }
 
 fn lock_session_table() -> SessionTableGuard {
@@ -1953,6 +2055,19 @@ fn build_mount_fallback_file_sd_bytes() -> Result<(*mut u8, usize), i32> {
         Some(GENERIC_ALL),
         None,
         Some(crate::GENERIC_READ | crate::GENERIC_EXECUTE),
+    )
+}
+
+fn build_securityfs_sessions_sd_bytes() -> Result<(*mut u8, usize), i32> {
+    let system = Sid::parse(SYSTEM_SID_BYTES).map_err(|_| -EINVAL)?;
+
+    build_process_sd_bytes(
+        system,
+        system,
+        None,
+        Some(FILE_READ_DATA),
+        Some(FILE_READ_DATA),
+        None,
     )
 }
 
@@ -6971,6 +7086,69 @@ pub extern "C" fn kacs_rust_check_file_sd_with_intent(
             }
             0
         }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Runs AccessCheck for the bounded `/sys/kernel/security/kacs/sessions`
+/// listing SD.
+pub extern "C" fn kacs_rust_check_securityfs_sessions_read(
+    subject_token_ptr: *const c_void,
+) -> i32 {
+    if subject_token_ptr.is_null() {
+        return -EACCES;
+    }
+
+    let Ok((sd_ptr, sd_len)) = build_securityfs_sessions_sd_bytes() else {
+        return -ENOMEM;
+    };
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    let ret = match file_sd_access_check_errno_with_intent(
+        subject_token_ptr,
+        sd_bytes,
+        FILE_READ_DATA,
+        0,
+    ) {
+        Ok(_) => 0,
+        Err(err) => err,
+    };
+
+    free_allocated_bytes(sd_ptr);
+    ret
+}
+
+#[no_mangle]
+/// Serializes active published sessions for
+/// `/sys/kernel/security/kacs/sessions`.
+pub extern "C" fn kacs_rust_securityfs_sessions_listing(
+    out: *mut u8,
+    out_len: usize,
+    required_out: *mut usize,
+) -> i32 {
+    let Some(required_out) = (unsafe { required_out.as_mut() }) else {
+        return -EINVAL;
+    };
+    let _guard = lock_session_table();
+    let required = match sessions_listing_len_locked() {
+        Ok(required) => required,
+        Err(err) => return err,
+    };
+
+    *required_out = required;
+    if out_len == 0 {
+        return 0;
+    }
+    if out.is_null() {
+        return -EINVAL;
+    }
+    if out_len < required {
+        return -ERANGE;
+    }
+
+    match write_sessions_listing_locked(out, out_len) {
+        Ok(written) if written == required => 0,
+        Ok(_) => -EINVAL,
         Err(err) => err,
     }
 }

@@ -45,6 +45,7 @@
 #include <linux/timekeeping.h>
 #include <linux/uaccess.h>
 #include <linux/un.h>
+#include <linux/vmalloc.h>
 #include <linux/xattr.h>
 
 #include <asm/cpufeatures.h>
@@ -262,6 +263,7 @@ static const struct lsm_id pkm_lsmid = {
 static const void *pkm_kacs_boot_system_token;
 static struct dentry *pkm_kacs_securityfs_dir;
 static struct dentry *pkm_kacs_securityfs_self;
+static struct dentry *pkm_kacs_securityfs_sessions;
 
 static struct lsm_blob_sizes pkm_blob_sizes __ro_after_init = {
 	.lbs_cred = sizeof(struct pkm_kacs_cred_security),
@@ -6007,11 +6009,57 @@ static const struct file_operations pkm_kacs_securityfs_self_fops = {
 	.llseek = noop_llseek,
 };
 
+static ssize_t pkm_kacs_securityfs_sessions_read(struct file *file,
+						 char __user *buf,
+						 size_t count, loff_t *ppos)
+{
+	const void *subject_token;
+	size_t required = 0;
+	u8 *kbuf;
+	int ret;
+	ssize_t copied;
+
+	(void)file;
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!subject_token)
+		return -EACCES;
+
+	ret = kacs_rust_check_securityfs_sessions_read(subject_token);
+	if (ret)
+		return ret;
+
+	ret = kacs_rust_securityfs_sessions_listing(NULL, 0, &required);
+	if (ret)
+		return ret;
+	if (*ppos >= required || !required)
+		return 0;
+
+	kbuf = kvzalloc(required, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	ret = kacs_rust_securityfs_sessions_listing(kbuf, required, &required);
+	if (ret) {
+		kvfree(kbuf);
+		return ret;
+	}
+
+	copied = simple_read_from_buffer(buf, count, ppos, kbuf, required);
+	kvfree(kbuf);
+	return copied;
+}
+
+static const struct file_operations pkm_kacs_securityfs_sessions_fops = {
+	.read = pkm_kacs_securityfs_sessions_read,
+	.llseek = default_llseek,
+};
+
 static int __init pkm_kacs_securityfs_init(void)
 {
 	int ret;
 
-	if (pkm_kacs_securityfs_dir || pkm_kacs_securityfs_self)
+	if (pkm_kacs_securityfs_dir || pkm_kacs_securityfs_self ||
+	    pkm_kacs_securityfs_sessions)
 		return 0;
 
 	pkm_kacs_securityfs_dir = securityfs_create_dir("kacs", NULL);
@@ -6031,6 +6079,21 @@ static int __init pkm_kacs_securityfs_init(void)
 		securityfs_remove(pkm_kacs_securityfs_dir);
 		pkm_kacs_securityfs_dir = NULL;
 		pr_err("pkm: securityfs kacs/self init failed (%d)\n", ret);
+		return ret;
+	}
+
+	pkm_kacs_securityfs_sessions = securityfs_create_file(
+		"sessions", 0444, pkm_kacs_securityfs_dir, NULL,
+		&pkm_kacs_securityfs_sessions_fops);
+	if (IS_ERR(pkm_kacs_securityfs_sessions)) {
+		ret = PTR_ERR(pkm_kacs_securityfs_sessions);
+		pkm_kacs_securityfs_sessions = NULL;
+		securityfs_remove(pkm_kacs_securityfs_self);
+		pkm_kacs_securityfs_self = NULL;
+		securityfs_remove(pkm_kacs_securityfs_dir);
+		pkm_kacs_securityfs_dir = NULL;
+		pr_err("pkm: securityfs kacs/sessions init failed (%d)\n",
+		       ret);
 		return ret;
 	}
 
@@ -6549,6 +6612,23 @@ long pkm_kacs_kunit_open_self_token_inspection_for_subject(void)
 
 	return pkm_kacs_open_token_fd_with_fixed_access(subject_token,
 							KACS_TOKEN_QUERY);
+}
+
+long pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+	const void *subject_token, u8 *buf, size_t buf_len,
+	size_t *required_out)
+{
+	long ret;
+
+	if (!subject_token)
+		return -EACCES;
+
+	ret = kacs_rust_check_securityfs_sessions_read(subject_token);
+	if (ret)
+		return ret;
+
+	return kacs_rust_securityfs_sessions_listing(buf, buf_len,
+						    required_out);
 }
 
 long pkm_kacs_kunit_check_signal_for_subject(

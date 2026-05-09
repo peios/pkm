@@ -5169,6 +5169,111 @@ static void pkm_kunit_securityfs_self_token_inspection_query_only(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_kunit_securityfs_sessions_listing_success(struct kunit *test)
+{
+	static const u8 local_service_sid[] = {
+		1, 1, 0, 0, 0, 0, 0, 5, 19, 0, 0, 0,
+	};
+	static const char auth_pkg[] = "Kerberos";
+	u8 spec[64] = {};
+	char expected[192];
+	const void *subject_token;
+	u8 *buf;
+	u64 session_id = 0;
+	size_t spec_len;
+	size_t required = 0;
+	size_t written = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	spec_len = pkm_kunit_build_session_spec(spec, 2, auth_pkg,
+						local_service_sid,
+						sizeof(local_service_sid));
+	KUNIT_ASSERT_GT(test, (long)spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_session_for_subject(
+				subject_token, spec, spec_len, &session_id),
+			0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+				subject_token, NULL, 0, &required),
+			0L);
+	KUNIT_ASSERT_GT(test, required, 0UL);
+
+	buf = kunit_kzalloc(test, required + 1, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+				subject_token, buf, required, &written),
+			0L);
+	KUNIT_EXPECT_EQ(test, written, required);
+
+	snprintf(expected, sizeof(expected),
+		 "session_id=%llu user_sid=010100000000000513000000 "
+		 "logon_type=2 auth_package=4b65726265726f73 created_at=",
+		 (unsigned long long)session_id);
+	KUNIT_EXPECT_NOT_NULL(test,
+			      strnstr((const char *)buf, expected, required));
+}
+
+static void pkm_kunit_securityfs_sessions_short_buffer(struct kunit *test)
+{
+	const void *subject_token;
+	size_t required = 0;
+	size_t second_required = 0;
+	u8 *buf;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+				subject_token, NULL, 0, &required),
+			0L);
+	KUNIT_ASSERT_GT(test, required, 0UL);
+
+	buf = kunit_kzalloc(test, required, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+				subject_token, buf, required - 1,
+				&second_required),
+			(long)-ERANGE);
+	KUNIT_EXPECT_EQ(test, second_required, required);
+}
+
+static void pkm_kunit_securityfs_sessions_denies_anonymous(
+	struct kunit *test)
+{
+	const void *anonymous_token = NULL;
+	size_t required = 0;
+
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_create_anonymous_impersonation_token(
+				&anonymous_token),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, anonymous_token);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+				anonymous_token, NULL, 0, &required),
+			(long)-EACCES);
+	kacs_rust_token_drop(anonymous_token);
+}
+
+static void pkm_kunit_securityfs_sessions_null_required_fails_closed(
+	struct kunit *test)
+{
+	const void *subject_token;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+				subject_token, NULL, 0, NULL),
+			(long)-EINVAL);
+}
+
 static void pkm_kunit_signal_terminate_success(struct kunit *test)
 {
 	struct pkm_kacs_kunit_process_signal_check_args args = { };
@@ -16029,6 +16134,10 @@ static struct kunit_case pkm_kunit_cases[] = {
 		pkm_kunit_thread_token_inspection_returns_impersonation_token),
 	KUNIT_CASE(pkm_kunit_thread_token_inspection_self_bypasses_process_sd),
 	KUNIT_CASE(pkm_kunit_securityfs_self_token_inspection_query_only),
+	KUNIT_CASE(pkm_kunit_securityfs_sessions_listing_success),
+	KUNIT_CASE(pkm_kunit_securityfs_sessions_short_buffer),
+	KUNIT_CASE(pkm_kunit_securityfs_sessions_denies_anonymous),
+	KUNIT_CASE(pkm_kunit_securityfs_sessions_null_required_fails_closed),
 	KUNIT_CASE(pkm_kunit_signal_terminate_success),
 	KUNIT_CASE(pkm_kunit_signal_info_success),
 	KUNIT_CASE(pkm_kunit_signal_denied_by_process_sd),
