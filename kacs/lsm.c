@@ -10,11 +10,13 @@
  */
 
 #include <crypto/sha2.h>
+#include <crypto/sig.h>
 
 #include <linux/binfmts.h>
 #include <linux/capability.h>
 #include <linux/cred.h>
 #include <linux/dcache.h>
+#include <linux/err.h>
 #include <linux/falloc.h>
 #include <linux/fcntl.h>
 #include <linux/fiemap.h>
@@ -4411,6 +4413,31 @@ static int __maybe_unused pkm_kacs_signing_verify_with_keys(
 	return 0;
 }
 
+static bool __maybe_unused pkm_kacs_signing_crypto_verify(
+	const u8 public_key[PKM_KACS_SIGNING_PUBLIC_KEY_LEN],
+	const u8 hash[SHA256_DIGEST_SIZE],
+	const u8 signature[PKM_KACS_SIGNING_SIGNATURE_LEN], void *ctx)
+{
+	struct crypto_sig *tfm;
+	int ret;
+
+	(void)ctx;
+
+	tfm = crypto_alloc_sig("ed25519", 0, 0);
+	if (IS_ERR(tfm))
+		return false;
+
+	ret = crypto_sig_set_pubkey(tfm, public_key,
+				    PKM_KACS_SIGNING_PUBLIC_KEY_LEN);
+	if (!ret)
+		ret = crypto_sig_verify(tfm, signature,
+					PKM_KACS_SIGNING_SIGNATURE_LEN, hash,
+					SHA256_DIGEST_SIZE);
+
+	crypto_free_sig(tfm);
+	return ret == 0;
+}
+
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 struct pkm_kacs_kunit_signing_reader_ctx {
 	const struct pkm_kacs_kunit_signing_reader_args *args;
@@ -4508,6 +4535,36 @@ static bool pkm_kacs_kunit_signing_fake_verify(
 		      PKM_KACS_SIGNING_PUBLIC_KEY_LEN) == 0;
 }
 
+static int pkm_kacs_kunit_copy_signing_keys(
+	const struct pkm_kacs_kunit_signing_key_entry *keys, size_t key_count,
+	struct pkm_kacs_signing_key_entry **key_table_out)
+{
+	struct pkm_kacs_signing_key_entry *key_table = NULL;
+	size_t i;
+
+	if (!key_table_out)
+		return -EINVAL;
+	*key_table_out = NULL;
+	if (key_count != 0 && !keys)
+		return -EINVAL;
+
+	if (key_count != 0) {
+		key_table = kcalloc(key_count, sizeof(*key_table), GFP_KERNEL);
+		if (!key_table)
+			return -ENOMEM;
+	}
+
+	for (i = 0; i < key_count; i++) {
+		memcpy(key_table[i].public_key, keys[i].public_key,
+		       sizeof(key_table[i].public_key));
+		key_table[i].pip_type = cpu_to_le32(keys[i].pip_type);
+		key_table[i].pip_trust = cpu_to_le32(keys[i].pip_trust);
+	}
+
+	*key_table_out = key_table;
+	return 0;
+}
+
 int pkm_kacs_kunit_probe_signing_material(
 	const u8 *file_bytes, size_t file_len, const u8 *xattr_sig,
 	size_t xattr_sig_len, struct pkm_kacs_kunit_signing_probe *out)
@@ -4540,12 +4597,9 @@ int pkm_kacs_kunit_verify_signing_material(
 	struct pkm_kacs_signing_trust_result result;
 	struct pkm_kacs_signing_material material_in;
 	struct pkm_kacs_signing_key_entry *key_table = NULL;
-	size_t i;
 	int ret;
 
 	if (!material || !out)
-		return -EINVAL;
-	if (key_count != 0 && !keys)
 		return -EINVAL;
 
 	memset(out, 0, sizeof(*out));
@@ -4555,18 +4609,9 @@ int pkm_kacs_kunit_verify_signing_material(
 	       sizeof(material_in.signature));
 	memcpy(material_in.hash, material->hash, sizeof(material_in.hash));
 
-	if (key_count != 0) {
-		key_table = kcalloc(key_count, sizeof(*key_table), GFP_KERNEL);
-		if (!key_table)
-			return -ENOMEM;
-	}
-
-	for (i = 0; i < key_count; i++) {
-		memcpy(key_table[i].public_key, keys[i].public_key,
-		       sizeof(key_table[i].public_key));
-		key_table[i].pip_type = cpu_to_le32(keys[i].pip_type);
-		key_table[i].pip_trust = cpu_to_le32(keys[i].pip_trust);
-	}
+	ret = pkm_kacs_kunit_copy_signing_keys(keys, key_count, &key_table);
+	if (ret)
+		return ret;
 
 	verify_ctx.keys = key_table;
 	verify_ctx.key_count = key_count;
@@ -4575,6 +4620,45 @@ int pkm_kacs_kunit_verify_signing_material(
 	ret = pkm_kacs_signing_verify_with_keys(
 		&material_in, key_table, key_count,
 		pkm_kacs_kunit_signing_fake_verify, &verify_ctx, &result);
+	if (ret)
+		goto out_free;
+
+	out->verified = result.verified;
+	out->pip_type = result.pip_type;
+	out->pip_trust = result.pip_trust;
+
+out_free:
+	kfree(key_table);
+	return ret;
+}
+
+int pkm_kacs_kunit_verify_signing_material_crypto(
+	const struct pkm_kacs_kunit_signing_probe *material,
+	const struct pkm_kacs_kunit_signing_key_entry *keys, size_t key_count,
+	struct pkm_kacs_kunit_signing_verify_out *out)
+{
+	struct pkm_kacs_signing_trust_result result;
+	struct pkm_kacs_signing_material material_in;
+	struct pkm_kacs_signing_key_entry *key_table = NULL;
+	int ret;
+
+	if (!material || !out)
+		return -EINVAL;
+
+	memset(out, 0, sizeof(*out));
+	memset(&material_in, 0, sizeof(material_in));
+	material_in.source = material->source;
+	memcpy(material_in.signature, material->signature,
+	       sizeof(material_in.signature));
+	memcpy(material_in.hash, material->hash, sizeof(material_in.hash));
+
+	ret = pkm_kacs_kunit_copy_signing_keys(keys, key_count, &key_table);
+	if (ret)
+		return ret;
+
+	ret = pkm_kacs_signing_verify_with_keys(
+		&material_in, key_table, key_count,
+		pkm_kacs_signing_crypto_verify, NULL, &result);
 	if (ret)
 		goto out_free;
 

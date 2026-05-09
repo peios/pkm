@@ -206,9 +206,17 @@ require_file "$src_root/kacs/token_fd.c"
 require_file "$src_root/kacs/token_fd.h"
 require_file "$src_root/kacs/token_runtime.h"
 require_file "$src_root/kacs/token_runtime.rs"
+require_file "$src_root/kernel/crypto/ed25519.c"
+require_file "$src_root/kernel/crypto/ed25519-hacl.c"
+require_file "$src_root/kernel/crypto/ed25519-hacl.h"
+require_file "$src_root/kernel/scripts/update-ed25519-hacl.py"
 require_file "$src_root/pkm_kconfig"
 require_file "$src_root/pkm_makefile"
 require_file "$src_root/kernel/stage-kacs-core.sh"
+require_file "$kernel_root/crypto/Kconfig"
+require_file "$kernel_root/crypto/Makefile"
+require_file "$kernel_root/crypto/testmgr.c"
+require_file "$kernel_root/crypto/testmgr.h"
 require_file "$kernel_root/security/Makefile"
 require_file "$kernel_root/security/Kconfig"
 require_file "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
@@ -254,6 +262,9 @@ install -m 0644 "$src_root/kacs/token_runtime.h" "$pkm_dir/kacs/token_runtime.h"
 install -m 0644 "$src_root/kacs/token_runtime.rs" "$pkm_dir/kacs/token_runtime.rs"
 install -m 0644 "$src_root/pkm_kconfig" "$pkm_dir/Kconfig"
 install -m 0644 "$src_root/pkm_makefile" "$pkm_dir/Makefile"
+install -m 0644 "$src_root/kernel/crypto/ed25519.c" "$kernel_root/crypto/ed25519.c"
+install -m 0644 "$src_root/kernel/crypto/ed25519-hacl.c" "$kernel_root/crypto/ed25519-hacl.c"
+install -m 0644 "$src_root/kernel/crypto/ed25519-hacl.h" "$kernel_root/crypto/ed25519-hacl.h"
 
 "$src_root/kernel/stage-kacs-core.sh" \
 	"$src_root/crates/kacs-core/src" \
@@ -261,6 +272,77 @@ install -m 0644 "$src_root/pkm_makefile" "$pkm_dir/Makefile"
 
 append_line_once 'obj-$(CONFIG_SECURITY_PKM) += pkm/' "$kernel_root/security/Makefile"
 insert_source_kconfig "$kernel_root/security/Kconfig"
+insert_block_before_exact_once 'config CRYPTO_ECRDSA' \
+	'config CRYPTO_ED25519' \
+	'config CRYPTO_ED25519
+	tristate "Ed25519 signature verification"
+	depends on 64BIT
+	select CRYPTO_SIG
+	select CRYPTO_LIB_SHA512
+	help
+	  Ed25519 signature verification (RFC 8032).
+
+	  Only signature verification is implemented.
+
+' \
+	"$kernel_root/crypto/Kconfig"
+insert_block_before_exact_once 'crypto_acompress-y := acompress.o' \
+	'obj-$(CONFIG_CRYPTO_ED25519)' \
+	'ed25519_generic-y := ed25519.o
+ed25519_generic-y += ed25519-hacl.o
+obj-$(CONFIG_CRYPTO_ED25519) += ed25519_generic.o
+
+' \
+	"$kernel_root/crypto/Makefile"
+insert_block_before_exact_once '#ifdef CONFIG_CPU_BIG_ENDIAN' \
+	'ed25519_tv_template' \
+	'/*
+ * Ed25519 test vectors from RFC 8032, section 7.1.
+ */
+static const struct sig_testvec ed25519_tv_template[] = {
+	{
+	.key =
+	"\xd7\x5a\x98\x01\x82\xb1\x0a\xb7\xd5\x4b\xfe\xd3\xc9\x64\x07\x3a"
+	"\x0e\xe1\x72\xf3\xda\xa6\x23\x25\xaf\x02\x1a\x68\xf7\x07\x51\x1a",
+	.key_len = 32,
+	.m = "",
+	.m_size = 0,
+	.c =
+	"\xe5\x56\x43\x00\xc3\x60\xac\x72\x90\x86\xe2\xcc\x80\x6e\x82\x8a"
+	"\x84\x87\x7f\x1e\xb8\xe5\xd9\x74\xd8\x73\xe0\x65\x22\x49\x01\x55"
+	"\x5f\xb8\x82\x15\x90\xa3\x3b\xac\xc6\x1e\x39\x70\x1c\xf9\xb4\x6b"
+	"\xd2\x5b\xf5\xf0\x59\x5b\xbe\x24\x65\x51\x41\x43\x8e\x7a\x10\x0b",
+	.c_size = 64,
+	.public_key_vec = true,
+	}, {
+	.key =
+	"\x3d\x40\x17\xc3\xe8\x43\x89\x5a\x92\xb7\x0a\xa7\x4d\x1b\x7e\xbc"
+	"\x9c\x98\x2c\xcf\x2e\xc4\x96\x8c\xc0\xcd\x55\xf1\x2a\xf4\x66\x0c",
+	.key_len = 32,
+	.m = "\x72",
+	.m_size = 1,
+	.c =
+	"\x92\xa0\x09\xa9\xf0\xd4\xca\xb8\x72\x0e\x82\x0b\x5f\x64\x25\x40"
+	"\xa2\xb2\x7b\x54\x16\x50\x3f\x8f\xb3\x76\x22\x23\xeb\xdb\x69\xda"
+	"\x08\x5a\xc1\xe4\x3e\x15\x99\x6e\x45\x8f\x36\x13\xd0\xf1\x1d\x8c"
+	"\x38\x7b\x2e\xae\xb4\x30\x2a\xee\xb0\x0d\x29\x16\x12\xbb\x0c\x00",
+	.c_size = 64,
+	.public_key_vec = true,
+	},
+};
+
+' \
+	"$kernel_root/crypto/testmgr.h"
+insert_block_before_exact_once '		.alg = "ecdsa-nist-p192",' \
+	'		.alg = "ed25519",' \
+	'		.alg = "ed25519",
+		.test = alg_test_sig,
+		.suite = {
+			.sig = __VECS(ed25519_tv_template)
+		}
+	}, {
+' \
+	"$kernel_root/crypto/testmgr.c"
 insert_block_before_exact_once 'int cap_capable(const struct cred *cred, struct user_namespace *target_ns,' \
 	'extern long pkm_kacs_capable_in_cred_ns' \
 	'#ifdef CONFIG_SECURITY_PKM

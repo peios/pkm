@@ -144,6 +144,8 @@ COPY kacs/token_fd.h /tmp/pkm-src/kacs/token_fd.h
 COPY kacs/token_runtime.h /tmp/pkm-src/kacs/token_runtime.h
 COPY kacs/token_runtime.rs /tmp/pkm-src/kacs/token_runtime.rs
 COPY crates/kacs-core/src/ /tmp/pkm-src/crates/kacs-core/src/
+COPY kernel/crypto/ /tmp/pkm-src/kernel/crypto/
+COPY kernel/scripts/update-ed25519-hacl.py /tmp/pkm-src/kernel/scripts/update-ed25519-hacl.py
 COPY pkm_kconfig /tmp/pkm-src/pkm_kconfig
 COPY pkm_makefile /tmp/pkm-src/pkm_makefile
 COPY kernel/stage-kacs-core.sh /tmp/pkm-src/kernel/stage-kacs-core.sh

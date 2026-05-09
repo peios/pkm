@@ -11,6 +11,7 @@ CCACHE      := pkm-new-kernel-ccache
 # layer cache is busted from the COPY layers onward. Layers above
 # (package install, kernel clone, Rust toolchain) stay cached.
 PKM_SOURCES := $(shell find $(CURDIR)/../kacs $(CURDIR)/../crates/kacs-core/src \
+	$(CURDIR)/crypto $(CURDIR)/scripts \
 	$(CURDIR)/../README.md $(CURDIR)/../pkm_kconfig $(CURDIR)/../pkm_makefile \
 	$(CURDIR)/Dockerfile $(CURDIR)/Makefile $(CURDIR)/install-pkm-subtree.sh \
 	$(CURDIR)/stage-kacs-core.sh $(CURDIR)/verify-scaffold.sh $(CURDIR)/check-kunit-scaffold.sh $(CURDIR)/lsmod.txt \

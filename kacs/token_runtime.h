@@ -843,6 +843,10 @@ int pkm_kacs_kunit_verify_signing_material(
 	const struct pkm_kacs_kunit_signing_key_entry *keys, size_t key_count,
 	u32 match_key_index, u32 match_enabled,
 	struct pkm_kacs_kunit_signing_verify_out *out);
+int pkm_kacs_kunit_verify_signing_material_crypto(
+	const struct pkm_kacs_kunit_signing_probe *material,
+	const struct pkm_kacs_kunit_signing_key_entry *keys, size_t key_count,
+	struct pkm_kacs_kunit_signing_verify_out *out);
 int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
 				       unsigned long prot,
 				       unsigned long flags);

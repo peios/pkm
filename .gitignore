@@ -2,3 +2,5 @@
 Cargo.lock
 .cairn/
 .pm/
+__pycache__/
+*.pyc

@@ -40,6 +40,10 @@ for required in \
 	"$repo_root/kacs/token_fd.h" \
 	"$repo_root/kacs/token_runtime.h" \
 	"$repo_root/kacs/token_runtime.rs" \
+	"$repo_root/kernel/crypto/ed25519.c" \
+	"$repo_root/kernel/crypto/ed25519-hacl.c" \
+	"$repo_root/kernel/crypto/ed25519-hacl.h" \
+	"$repo_root/kernel/scripts/update-ed25519-hacl.py" \
 	"$repo_root/kacs/lsm.c"; do
 	if [[ ! -f "$required" ]]; then
 		die "required slow-track source file missing: $required"
@@ -228,6 +232,23 @@ fi
 if ! rg -q 'pkm_kacs_capable_in_cred_ns' \
 	"$repo_root/kernel/install-pkm-subtree.sh"; then
 	die "install-pkm-subtree.sh does not stage the commoncap capability switchboard patch"
+fi
+
+if ! rg -q 'CRYPTO_ED25519' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'ed25519-hacl.c' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'ed25519_generic-y' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'ed25519_tv_template' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'alg = "ed25519"' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the Ed25519 crypto verifier and testmgr vectors"
+fi
+
+if ! rg -q 'CRYPTO_ED25519' "$repo_root/pkm_kconfig"; then
+	die "pkm_kconfig does not select the Ed25519 crypto verifier"
 fi
 
 if ! rg -q 'pkm_kacs_prctl_capability_guard' \
