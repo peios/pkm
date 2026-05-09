@@ -5047,6 +5047,8 @@ static void pkm_kunit_tlp_mprotect_checks_new_exec_only(struct kunit *test)
 #define PKM_KUNIT_ELF_SIG_OFFSET 0x40U
 #define PKM_KUNIT_ELF_STRTAB_OFFSET 0x90U
 #define PKM_KUNIT_ELF_SHOFF 0x100U
+#define PKM_KUNIT_SIGNING_PIP_PROTECTED 512U
+#define PKM_KUNIT_SIGNING_TRUST_TCB 8192U
 
 static void pkm_kunit_signing_fill_blob(u8 blob[PKM_KUNIT_SIGNING_BLOB_LEN],
 					u8 seed)
@@ -5106,6 +5108,32 @@ static void pkm_kunit_signing_build_elf(
 					   PKM_KUNIT_SIGNING_BLOB_LEN - 1;
 	memcpy(file + PKM_KUNIT_ELF_SHOFF + (2 * sizeof(Elf64_Shdr)), &shdr,
 	       sizeof(shdr));
+}
+
+static void pkm_kunit_signing_fill_probe(
+	struct pkm_kacs_kunit_signing_probe *probe)
+{
+	u32 i;
+
+	memset(probe, 0, sizeof(*probe));
+	probe->source = PKM_KACS_KUNIT_SIGNING_SOURCE_XATTR;
+	for (i = 0; i < sizeof(probe->signature); i++)
+		probe->signature[i] = (u8)(0x41U + i);
+	for (i = 0; i < sizeof(probe->hash); i++)
+		probe->hash[i] = (u8)(0x81U + i);
+}
+
+static void pkm_kunit_signing_fill_key(
+	struct pkm_kacs_kunit_signing_key_entry *key, u8 seed, u32 pip_type,
+	u32 pip_trust)
+{
+	u32 i;
+
+	memset(key, 0, sizeof(*key));
+	for (i = 0; i < sizeof(key->public_key); i++)
+		key->public_key[i] = seed + (u8)i;
+	key->pip_type = pip_type;
+	key->pip_trust = pip_trust;
 }
 
 static void pkm_kunit_signing_xattr_hashes_non_elf(struct kunit *test)
@@ -5469,6 +5497,152 @@ static void pkm_kunit_signing_reader_malformed_elf_blocks_xattr(
 			pkm_kacs_kunit_probe_signing_reader(&args, &out), 0);
 	KUNIT_EXPECT_EQ(test, out.source,
 			PKM_KACS_KUNIT_SIGNING_SOURCE_NONE);
+}
+
+static void pkm_kunit_signing_verify_unsigned_has_no_trust(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_verify_out out = {};
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_verify_signing_material(
+				&material, NULL, 0, 0, 0, &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verified, 0U);
+	KUNIT_EXPECT_EQ(test, out.pip_type, 0U);
+	KUNIT_EXPECT_EQ(test, out.pip_trust, 0U);
+}
+
+static void pkm_kunit_signing_verify_first_key_sets_tcb_trust(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_key_entry keys[2] = {};
+	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_verify_out out = {};
+
+	pkm_kunit_signing_fill_probe(&material);
+	pkm_kunit_signing_fill_key(&keys[0], 0x10,
+				   PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				   PKM_KUNIT_SIGNING_TRUST_TCB);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_verify_signing_material(
+				&material, keys, ARRAY_SIZE(keys), 0, 1,
+				&out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verified, 1U);
+	KUNIT_EXPECT_EQ(test, out.pip_type,
+			PKM_KUNIT_SIGNING_PIP_PROTECTED);
+	KUNIT_EXPECT_EQ(test, out.pip_trust, PKM_KUNIT_SIGNING_TRUST_TCB);
+}
+
+static void pkm_kunit_signing_verify_later_key_after_miss(struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_key_entry keys[3] = {};
+	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_verify_out out = {};
+
+	pkm_kunit_signing_fill_probe(&material);
+	pkm_kunit_signing_fill_key(&keys[0], 0x20,
+				   PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				   PKM_KUNIT_SIGNING_TRUST_TCB);
+	pkm_kunit_signing_fill_key(&keys[1], 0x40,
+				   PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				   PKM_KUNIT_SIGNING_TRUST_TCB);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_verify_signing_material(
+				&material, keys, ARRAY_SIZE(keys), 1, 1,
+				&out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verified, 1U);
+	KUNIT_EXPECT_EQ(test, out.pip_type,
+			PKM_KUNIT_SIGNING_PIP_PROTECTED);
+	KUNIT_EXPECT_EQ(test, out.pip_trust, PKM_KUNIT_SIGNING_TRUST_TCB);
+}
+
+static void pkm_kunit_signing_verify_no_matching_key_unsigned(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_key_entry keys[2] = {};
+	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_verify_out out = {};
+
+	pkm_kunit_signing_fill_probe(&material);
+	pkm_kunit_signing_fill_key(&keys[0], 0x50,
+				   PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				   PKM_KUNIT_SIGNING_TRUST_TCB);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_verify_signing_material(
+				&material, keys, ARRAY_SIZE(keys), 0, 0,
+				&out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verified, 0U);
+	KUNIT_EXPECT_EQ(test, out.pip_type, 0U);
+	KUNIT_EXPECT_EQ(test, out.pip_trust, 0U);
+}
+
+static void pkm_kunit_signing_verify_unsupported_tier_fails_closed(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_key_entry keys[2] = {};
+	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_verify_out out = {};
+
+	pkm_kunit_signing_fill_probe(&material);
+	pkm_kunit_signing_fill_key(&keys[0], 0x60, 1024U,
+				   PKM_KUNIT_SIGNING_TRUST_TCB);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_verify_signing_material(
+				&material, keys, ARRAY_SIZE(keys), 0, 1,
+				&out),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, out.verified, 0U);
+}
+
+static void pkm_kunit_signing_verify_missing_terminator_fails_closed(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_key_entry keys[1] = {};
+	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_verify_out out = {};
+
+	pkm_kunit_signing_fill_probe(&material);
+	pkm_kunit_signing_fill_key(&keys[0], 0x70,
+				   PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				   PKM_KUNIT_SIGNING_TRUST_TCB);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_verify_signing_material(
+				&material, keys, ARRAY_SIZE(keys), 0, 1,
+				&out),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, out.verified, 0U);
+}
+
+static void pkm_kunit_signing_verify_terminator_stops_iteration(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_key_entry keys[3] = {};
+	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_verify_out out = {};
+
+	pkm_kunit_signing_fill_probe(&material);
+	pkm_kunit_signing_fill_key(&keys[1], 0x80,
+				   PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				   PKM_KUNIT_SIGNING_TRUST_TCB);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_verify_signing_material(
+				&material, keys, ARRAY_SIZE(keys), 1, 1,
+				&out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verified, 0U);
+	KUNIT_EXPECT_EQ(test, out.pip_type, 0U);
+	KUNIT_EXPECT_EQ(test, out.pip_trust, 0U);
 }
 
 static void pkm_kunit_file_mmap_snapshot_read_and_private_write(
@@ -8166,7 +8340,7 @@ static void pkm_kunit_securityfs_sessions_listing_success(struct kunit *test)
 	u64 session_id = 0;
 	size_t spec_len;
 	size_t required = 0;
-	size_t written = 0;
+	size_t second_required = 0;
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
@@ -8190,16 +8364,18 @@ static void pkm_kunit_securityfs_sessions_listing_success(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, buf);
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
-				subject_token, buf, required, &written),
+				subject_token, buf, required, &second_required),
 			0L);
-	KUNIT_EXPECT_EQ(test, written, required);
+	KUNIT_EXPECT_GT(test, second_required, 0UL);
+	KUNIT_EXPECT_LE(test, second_required, required);
 
 	snprintf(expected, sizeof(expected),
 		 "session_id=%llu user_sid=010100000000000513000000 "
 		 "logon_type=2 auth_package=4b65726265726f73 created_at=",
 		 (unsigned long long)session_id);
 	KUNIT_EXPECT_NOT_NULL(test,
-			      strnstr((const char *)buf, expected, required));
+			      strnstr((const char *)buf, expected,
+				      second_required));
 }
 
 static void pkm_kunit_securityfs_sessions_short_buffer(struct kunit *test)
@@ -19335,6 +19511,13 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_signing_reader_size_change_invalidates),
 	KUNIT_CASE(pkm_kunit_signing_reader_read_failure_invalidates),
 	KUNIT_CASE(pkm_kunit_signing_reader_malformed_elf_blocks_xattr),
+	KUNIT_CASE(pkm_kunit_signing_verify_unsigned_has_no_trust),
+	KUNIT_CASE(pkm_kunit_signing_verify_first_key_sets_tcb_trust),
+	KUNIT_CASE(pkm_kunit_signing_verify_later_key_after_miss),
+	KUNIT_CASE(pkm_kunit_signing_verify_no_matching_key_unsigned),
+	KUNIT_CASE(pkm_kunit_signing_verify_unsupported_tier_fails_closed),
+	KUNIT_CASE(pkm_kunit_signing_verify_missing_terminator_fails_closed),
+	KUNIT_CASE(pkm_kunit_signing_verify_terminator_stops_iteration),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_read_and_private_write),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_shared_write),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_exec),

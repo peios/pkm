@@ -133,9 +133,12 @@
 #define PKM_KACS_SIGNING_ELF_SECTION ".peios.sig"
 #define PKM_KACS_SIGNING_XATTR_NAME "security.peios.sig"
 #define PKM_KACS_SIGNING_HASH_CHUNK 4096U
+#define PKM_KACS_SIGNING_PUBLIC_KEY_LEN 32U
 #define PKM_KACS_SIGNING_SOURCE_NONE 0U
 #define PKM_KACS_SIGNING_SOURCE_ELF 1U
 #define PKM_KACS_SIGNING_SOURCE_XATTR 2U
+#define PKM_KACS_PIP_TYPE_PROTECTED 512U
+#define PKM_KACS_PIP_TRUST_PEIOS_TCB 8192U
 
 #define PKM_KACS_SD_SUPPORTED_INFO                                             \
 	(OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |             \
@@ -4316,10 +4319,109 @@ static int __maybe_unused pkm_kacs_signing_probe_file(
 	return pkm_kacs_signing_probe_reader(&reader, out);
 }
 
+struct pkm_kacs_signing_key_entry {
+	u8 public_key[PKM_KACS_SIGNING_PUBLIC_KEY_LEN];
+	__le32 pip_type;
+	__le32 pip_trust;
+} __packed;
+
+struct pkm_kacs_signing_trust_result {
+	u32 verified;
+	u32 pip_type;
+	u32 pip_trust;
+};
+
+typedef bool (*pkm_kacs_signing_verify_fn)(
+	const u8 public_key[PKM_KACS_SIGNING_PUBLIC_KEY_LEN],
+	const u8 hash[SHA256_DIGEST_SIZE],
+	const u8 signature[PKM_KACS_SIGNING_SIGNATURE_LEN], void *ctx);
+
+static void pkm_kacs_signing_trust_clear(
+	struct pkm_kacs_signing_trust_result *out)
+{
+	memset(out, 0, sizeof(*out));
+}
+
+static bool pkm_kacs_signing_key_entry_zero(
+	const struct pkm_kacs_signing_key_entry *entry)
+{
+	return memchr_inv(entry, 0, sizeof(*entry)) == NULL;
+}
+
+static bool pkm_kacs_signing_key_tier_valid(u32 pip_type, u32 pip_trust)
+{
+	return pip_type == PKM_KACS_PIP_TYPE_PROTECTED &&
+	       pip_trust == PKM_KACS_PIP_TRUST_PEIOS_TCB;
+}
+
+static int __maybe_unused pkm_kacs_signing_verify_with_keys(
+	const struct pkm_kacs_signing_material *material,
+	const struct pkm_kacs_signing_key_entry *keys, size_t key_count,
+	pkm_kacs_signing_verify_fn verify, void *verify_ctx,
+	struct pkm_kacs_signing_trust_result *out)
+{
+	size_t usable_count = 0;
+	bool terminated = false;
+	size_t i;
+
+	if (!material || !out)
+		return -EINVAL;
+
+	pkm_kacs_signing_trust_clear(out);
+	if (material->source == PKM_KACS_SIGNING_SOURCE_NONE)
+		return 0;
+	if (!keys || key_count == 0 || !verify)
+		return -EINVAL;
+
+	for (i = 0; i < key_count; i++) {
+		u32 pip_type;
+		u32 pip_trust;
+
+		if (pkm_kacs_signing_key_entry_zero(&keys[i])) {
+			terminated = true;
+			break;
+		}
+
+		pip_type = le32_to_cpu(keys[i].pip_type);
+		pip_trust = le32_to_cpu(keys[i].pip_trust);
+		if (!pkm_kacs_signing_key_tier_valid(pip_type, pip_trust))
+			return -EINVAL;
+
+		usable_count++;
+	}
+	if (!terminated)
+		return -EINVAL;
+
+	for (i = 0; i < usable_count; i++) {
+		u32 pip_type;
+		u32 pip_trust;
+
+		if (!verify(keys[i].public_key, material->hash,
+			    material->signature, verify_ctx))
+			continue;
+
+		pip_type = le32_to_cpu(keys[i].pip_type);
+		pip_trust = le32_to_cpu(keys[i].pip_trust);
+		out->verified = 1;
+		out->pip_type = pip_type;
+		out->pip_trust = pip_trust;
+		return 0;
+	}
+
+	return 0;
+}
+
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 struct pkm_kacs_kunit_signing_reader_ctx {
 	const struct pkm_kacs_kunit_signing_reader_args *args;
 	u32 size_calls;
+};
+
+struct pkm_kacs_kunit_signing_verify_ctx {
+	const struct pkm_kacs_signing_key_entry *keys;
+	size_t key_count;
+	u32 match_key_index;
+	u32 match_enabled;
 };
 
 static int pkm_kacs_kunit_signing_reader_size(void *ctx, size_t *size_out)
@@ -4387,6 +4489,25 @@ static int pkm_kacs_kunit_signing_reader_xattr(void *ctx, u8 *dst,
 	return 0;
 }
 
+static bool pkm_kacs_kunit_signing_fake_verify(
+	const u8 public_key[PKM_KACS_SIGNING_PUBLIC_KEY_LEN],
+	const u8 hash[SHA256_DIGEST_SIZE],
+	const u8 signature[PKM_KACS_SIGNING_SIGNATURE_LEN], void *ctx)
+{
+	struct pkm_kacs_kunit_signing_verify_ctx *verify_ctx = ctx;
+
+	(void)hash;
+	(void)signature;
+
+	if (!verify_ctx || !verify_ctx->match_enabled ||
+	    verify_ctx->match_key_index >= verify_ctx->key_count)
+		return false;
+
+	return memcmp(public_key,
+		      verify_ctx->keys[verify_ctx->match_key_index].public_key,
+		      PKM_KACS_SIGNING_PUBLIC_KEY_LEN) == 0;
+}
+
 int pkm_kacs_kunit_probe_signing_material(
 	const u8 *file_bytes, size_t file_len, const u8 *xattr_sig,
 	size_t xattr_sig_len, struct pkm_kacs_kunit_signing_probe *out)
@@ -4407,6 +4528,63 @@ int pkm_kacs_kunit_probe_signing_material(
 	memcpy(out->signature, material.signature, sizeof(out->signature));
 	memcpy(out->hash, material.hash, sizeof(out->hash));
 	return 0;
+}
+
+int pkm_kacs_kunit_verify_signing_material(
+	const struct pkm_kacs_kunit_signing_probe *material,
+	const struct pkm_kacs_kunit_signing_key_entry *keys, size_t key_count,
+	u32 match_key_index, u32 match_enabled,
+	struct pkm_kacs_kunit_signing_verify_out *out)
+{
+	struct pkm_kacs_kunit_signing_verify_ctx verify_ctx;
+	struct pkm_kacs_signing_trust_result result;
+	struct pkm_kacs_signing_material material_in;
+	struct pkm_kacs_signing_key_entry *key_table = NULL;
+	size_t i;
+	int ret;
+
+	if (!material || !out)
+		return -EINVAL;
+	if (key_count != 0 && !keys)
+		return -EINVAL;
+
+	memset(out, 0, sizeof(*out));
+	memset(&material_in, 0, sizeof(material_in));
+	material_in.source = material->source;
+	memcpy(material_in.signature, material->signature,
+	       sizeof(material_in.signature));
+	memcpy(material_in.hash, material->hash, sizeof(material_in.hash));
+
+	if (key_count != 0) {
+		key_table = kcalloc(key_count, sizeof(*key_table), GFP_KERNEL);
+		if (!key_table)
+			return -ENOMEM;
+	}
+
+	for (i = 0; i < key_count; i++) {
+		memcpy(key_table[i].public_key, keys[i].public_key,
+		       sizeof(key_table[i].public_key));
+		key_table[i].pip_type = cpu_to_le32(keys[i].pip_type);
+		key_table[i].pip_trust = cpu_to_le32(keys[i].pip_trust);
+	}
+
+	verify_ctx.keys = key_table;
+	verify_ctx.key_count = key_count;
+	verify_ctx.match_key_index = match_key_index;
+	verify_ctx.match_enabled = match_enabled;
+	ret = pkm_kacs_signing_verify_with_keys(
+		&material_in, key_table, key_count,
+		pkm_kacs_kunit_signing_fake_verify, &verify_ctx, &result);
+	if (ret)
+		goto out_free;
+
+	out->verified = result.verified;
+	out->pip_type = result.pip_type;
+	out->pip_trust = result.pip_trust;
+
+out_free:
+	kfree(key_table);
+	return ret;
 }
 
 int pkm_kacs_kunit_probe_signing_reader(

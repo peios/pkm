@@ -195,6 +195,18 @@ struct pkm_kacs_kunit_signing_reader_args {
 	u32 fail_xattr;
 };
 
+struct pkm_kacs_kunit_signing_key_entry {
+	u8 public_key[32];
+	u32 pip_type;
+	u32 pip_trust;
+};
+
+struct pkm_kacs_kunit_signing_verify_out {
+	u32 verified;
+	u32 pip_type;
+	u32 pip_trust;
+};
+
 struct pkm_kacs_kunit_process_token_open_args {
 	const void *subject_token;
 	const void *target_token;
@@ -826,6 +838,11 @@ int pkm_kacs_kunit_probe_signing_material(
 int pkm_kacs_kunit_probe_signing_reader(
 	const struct pkm_kacs_kunit_signing_reader_args *args,
 	struct pkm_kacs_kunit_signing_probe *out);
+int pkm_kacs_kunit_verify_signing_material(
+	const struct pkm_kacs_kunit_signing_probe *material,
+	const struct pkm_kacs_kunit_signing_key_entry *keys, size_t key_count,
+	u32 match_key_index, u32 match_enabled,
+	struct pkm_kacs_kunit_signing_verify_out *out);
 int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
 				       unsigned long prot,
 				       unsigned long flags);
