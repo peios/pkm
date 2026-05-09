@@ -700,6 +700,10 @@ int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
 int pkm_kacs_kunit_check_mprotect_snapshot(u32 managed, u32 granted_access,
 					   unsigned long vm_flags,
 					   unsigned long prot);
+int pkm_kacs_kunit_check_file_permission_snapshot(u32 managed,
+						  u32 granted_access,
+						  int file_flags,
+						  int mask);
 int pkm_kacs_kunit_check_task_prctl_mitigations(
 	u32 mitigation_bits, int option, unsigned long arg2,
 	unsigned long arg3, unsigned long arg4, unsigned long arg5);

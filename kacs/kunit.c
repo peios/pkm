@@ -4944,6 +4944,87 @@ static void pkm_kunit_file_mapping_snapshot_unmanaged_bypasses_facs(
 			0);
 }
 
+static void pkm_kunit_file_permission_snapshot_read_and_unmanaged(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, 0, MAY_READ),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, 0, 0, MAY_READ),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				0, 0, 0, MAY_READ | MAY_WRITE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, 0, 0, 0),
+			0);
+}
+
+static void pkm_kunit_file_permission_snapshot_write_and_append(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, 0, MAY_WRITE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, 0, MAY_WRITE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, O_APPEND,
+				MAY_WRITE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, O_APPEND,
+				MAY_WRITE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, O_APPEND,
+				MAY_WRITE),
+			-EACCES);
+}
+
+static void pkm_kunit_file_permission_snapshot_combined_masks(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1,
+				PKM_KUNIT_FILE_READ_DATA |
+					PKM_KUNIT_FILE_APPEND_DATA,
+				O_APPEND, MAY_READ | MAY_WRITE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, O_APPEND,
+				MAY_READ | MAY_WRITE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, 0,
+				MAY_WRITE | MAY_APPEND),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, PKM_KUNIT_FILE_EXECUTE, 0,
+				MAY_EXEC | MAY_CHDIR),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, 0,
+				MAY_EXEC | MAY_CHDIR),
+			-EACCES);
+}
+
 static void pkm_kunit_pie_rejects_et_exec(struct kunit *test)
 {
 	u8 exec_buf[18] = { 0x7f, 'E', 'L', 'F' };
@@ -16416,6 +16497,9 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_exec),
 	KUNIT_CASE(pkm_kunit_file_mprotect_snapshot_uses_vma_shape),
 	KUNIT_CASE(pkm_kunit_file_mapping_snapshot_unmanaged_bypasses_facs),
+	KUNIT_CASE(pkm_kunit_file_permission_snapshot_read_and_unmanaged),
+	KUNIT_CASE(pkm_kunit_file_permission_snapshot_write_and_append),
+	KUNIT_CASE(pkm_kunit_file_permission_snapshot_combined_masks),
 	KUNIT_CASE(pkm_kunit_pie_rejects_et_exec),
 	KUNIT_CASE(pkm_kunit_task_prctl_sml_and_cfib_block_disable_paths),
 	KUNIT_CASE(pkm_kunit_open_process_token_success),

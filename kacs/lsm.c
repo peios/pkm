@@ -394,6 +394,7 @@ static int pkm_kacs_inode_init_security(struct inode *inode,
 					struct xattr *xattrs,
 					int *xattr_count);
 static int pkm_kacs_file_open(struct file *file);
+static int pkm_kacs_file_permission(struct file *file, int mask);
 static int pkm_kacs_sk_alloc_security(struct sock *sk, int family,
 				      gfp_t priority);
 static void pkm_kacs_sk_free_security(struct sock *sk);
@@ -416,6 +417,8 @@ static int pkm_kacs_check_mmap_snapshot(struct file *file,
 static int pkm_kacs_check_mprotect_snapshot(struct file *file,
 					    unsigned long vm_flags,
 					    unsigned long prot);
+static int pkm_kacs_check_file_permission_snapshot(struct file *file,
+						   int mask);
 static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm);
 static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 					 const struct file *file);
@@ -2013,6 +2016,11 @@ static int pkm_kacs_file_open(struct file *file)
 		subject_token, file);
 }
 
+static int pkm_kacs_file_permission(struct file *file, int mask)
+{
+	return pkm_kacs_check_file_permission_snapshot(file, mask);
+}
+
 static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 {
 	struct pkm_kacs_task_security *new_sec;
@@ -2083,6 +2091,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(file_alloc_security, pkm_kacs_file_alloc_security),
 	LSM_HOOK_INIT(file_release, pkm_kacs_file_release),
 	LSM_HOOK_INIT(file_open, pkm_kacs_file_open),
+	LSM_HOOK_INIT(file_permission, pkm_kacs_file_permission),
 	LSM_HOOK_INIT(task_alloc, pkm_kacs_task_alloc),
 	LSM_HOOK_INIT(task_free, pkm_kacs_task_free),
 	LSM_HOOK_INIT(sk_alloc_security, pkm_kacs_sk_alloc_security),
@@ -2844,6 +2853,51 @@ static int pkm_kacs_check_mprotect_snapshot(struct file *file,
 	return pkm_kacs_check_file_snapshot_grant(
 		file, pkm_kacs_mapping_required_access(
 			      prot, (vm_flags & VM_SHARED) != 0));
+}
+
+static int pkm_kacs_check_file_permission_snapshot(struct file *file,
+						   int mask)
+{
+	struct pkm_kacs_file_security *file_sec;
+	u32 required_access = 0;
+	bool append_intent;
+	bool write_intent;
+
+	if (!file)
+		return -EACCES;
+	if (!file->f_security)
+		return -EACCES;
+
+	file_sec = pkm_kacs_file(file);
+	if (!file_sec->managed)
+		return 0;
+
+	if ((mask & MAY_READ) != 0)
+		required_access |= PKM_KACS_FILE_READ_DATA;
+	if ((mask & (MAY_EXEC | MAY_CHDIR)) != 0)
+		required_access |= PKM_KACS_FILE_TRAVERSE;
+
+	if ((file_sec->granted_access & required_access) != required_access)
+		return -EACCES;
+
+	write_intent = (mask & MAY_WRITE) != 0;
+	append_intent = (mask & MAY_APPEND) != 0 ||
+			(write_intent && (file->f_flags & O_APPEND) != 0);
+	if (write_intent || append_intent) {
+		u32 write_grants = file_sec->granted_access &
+				   (PKM_KACS_FILE_WRITE_DATA |
+				    PKM_KACS_FILE_APPEND_DATA);
+
+		if (append_intent) {
+			if (write_grants == 0)
+				return -EACCES;
+		} else if ((file_sec->granted_access &
+			    PKM_KACS_FILE_WRITE_DATA) == 0) {
+			return -EACCES;
+		}
+	}
+
+	return 0;
 }
 
 static int pkm_kacs_check_task_prctl_mitigations_core(
@@ -8526,6 +8580,31 @@ int pkm_kacs_kunit_check_mprotect_snapshot(u32 managed, u32 granted_access,
 	file_sec->granted_access = granted_access;
 
 	ret = pkm_kacs_check_mprotect_snapshot(&state.file, vm_flags, prot);
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
+}
+
+int pkm_kacs_kunit_check_file_permission_snapshot(u32 managed,
+						  u32 granted_access,
+						  int file_flags,
+						  int mask)
+{
+	struct pkm_kacs_kunit_file_mount_state state = { };
+	struct pkm_kacs_file_security *file_sec;
+	int ret;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&state, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		return ret;
+
+	file_sec = pkm_kacs_file(&state.file);
+	file_sec->managed = managed ? 1 : 0;
+	file_sec->granted_access = granted_access;
+	state.file.f_flags = file_flags;
+
+	ret = pkm_kacs_check_file_permission_snapshot(&state.file, mask);
 	pkm_kacs_kunit_cleanup_file_mount_state(&state);
 	return ret;
 }
