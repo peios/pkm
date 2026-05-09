@@ -3872,6 +3872,9 @@ static bool pkm_kacs_fallocate_mode_supported(int mode,
 	case FALLOC_FL_ALLOCATE_RANGE:
 		*requires_write_data = false;
 		return true;
+	case FALLOC_FL_UNSHARE_RANGE:
+		*requires_write_data = true;
+		return true;
 	case FALLOC_FL_PUNCH_HOLE:
 		if ((mode & FALLOC_FL_KEEP_SIZE) == 0)
 			return false;
@@ -3882,6 +3885,7 @@ static bool pkm_kacs_fallocate_mode_supported(int mode,
 		return true;
 	case FALLOC_FL_COLLAPSE_RANGE:
 	case FALLOC_FL_INSERT_RANGE:
+	case FALLOC_FL_WRITE_ZEROES:
 		if ((mode & FALLOC_FL_KEEP_SIZE) != 0)
 			return false;
 		*requires_write_data = true;
