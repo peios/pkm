@@ -14,6 +14,7 @@
 #include <linux/cred.h>
 #include <linux/dcache.h>
 #include <linux/falloc.h>
+#include <linux/fcntl.h>
 #include <linux/file.h>
 #include <linux/elf.h>
 #include <linux/errno.h>
@@ -405,6 +406,8 @@ static int pkm_kacs_inode_init_security(struct inode *inode,
 static int pkm_kacs_file_open(struct file *file);
 static int pkm_kacs_file_permission(struct file *file, int mask);
 static int pkm_kacs_file_lock(struct file *file, unsigned int cmd);
+static int pkm_kacs_file_fcntl(struct file *file, unsigned int cmd,
+			       unsigned long arg);
 static int pkm_kacs_file_truncate(struct file *file);
 int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,
 				     bool positioned);
@@ -438,6 +441,9 @@ static int pkm_kacs_check_file_write_intent_snapshot(struct file *file,
 						     bool positioned);
 static int pkm_kacs_check_file_lock_snapshot(struct file *file,
 					     unsigned int cmd);
+static int pkm_kacs_check_file_fcntl_snapshot(struct file *file,
+					      unsigned int cmd,
+					      unsigned long arg);
 static int pkm_kacs_check_file_truncate_snapshot(struct file *file);
 static int pkm_kacs_check_file_fallocate_snapshot(struct file *file,
 						  int mode);
@@ -2048,6 +2054,12 @@ static int pkm_kacs_file_lock(struct file *file, unsigned int cmd)
 	return pkm_kacs_check_file_lock_snapshot(file, cmd);
 }
 
+static int pkm_kacs_file_fcntl(struct file *file, unsigned int cmd,
+			       unsigned long arg)
+{
+	return pkm_kacs_check_file_fcntl_snapshot(file, cmd, arg);
+}
+
 static int pkm_kacs_file_truncate(struct file *file)
 {
 	return pkm_kacs_check_file_truncate_snapshot(file);
@@ -2177,6 +2189,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(file_open, pkm_kacs_file_open),
 	LSM_HOOK_INIT(file_permission, pkm_kacs_file_permission),
 	LSM_HOOK_INIT(file_lock, pkm_kacs_file_lock),
+	LSM_HOOK_INIT(file_fcntl, pkm_kacs_file_fcntl),
 	LSM_HOOK_INIT(file_truncate, pkm_kacs_file_truncate),
 	LSM_HOOK_INIT(task_alloc, pkm_kacs_task_alloc),
 	LSM_HOOK_INIT(task_free, pkm_kacs_task_free),
@@ -3080,6 +3093,43 @@ static int pkm_kacs_check_file_lock_snapshot(struct file *file,
 	default:
 		return -EACCES;
 	}
+}
+
+static int pkm_kacs_check_file_fcntl_snapshot(struct file *file,
+					      unsigned int cmd,
+					      unsigned long arg)
+{
+	struct pkm_kacs_file_security *file_sec;
+	unsigned long old_flags;
+	unsigned long new_flags;
+	u32 granted_access;
+
+	if (!file)
+		return -EACCES;
+	if (!file->f_security)
+		return -EACCES;
+
+	file_sec = pkm_kacs_file(file);
+	if (!file_sec->managed)
+		return 0;
+
+	if (cmd != F_SETFL)
+		return 0;
+
+	old_flags = file->f_flags;
+	new_flags = arg;
+	granted_access = file_sec->granted_access;
+
+	if ((old_flags & O_APPEND) != 0 && (new_flags & O_APPEND) == 0 &&
+	    (granted_access & PKM_KACS_FILE_APPEND_DATA) != 0 &&
+	    (granted_access & PKM_KACS_FILE_WRITE_DATA) == 0)
+		return -EACCES;
+
+	if ((old_flags & O_NOATIME) == 0 && (new_flags & O_NOATIME) != 0 &&
+	    (granted_access & PKM_KACS_FILE_WRITE_ATTRIBUTES) == 0)
+		return -EACCES;
+
+	return 0;
 }
 
 static int pkm_kacs_check_file_truncate_snapshot(struct file *file)
@@ -8988,6 +9038,36 @@ int pkm_kacs_kunit_check_file_lock_snapshot(u32 managed, u32 granted_access,
 	ret = pkm_kacs_check_file_lock_snapshot(&state.file, cmd);
 	pkm_kacs_kunit_cleanup_file_mount_state(&state);
 	return ret;
+}
+
+int pkm_kacs_kunit_check_file_fcntl_snapshot(u32 managed, u32 granted_access,
+					     int file_flags,
+					     unsigned int cmd,
+					     unsigned long arg)
+{
+	struct pkm_kacs_kunit_file_mount_state state = { };
+	struct pkm_kacs_file_security *file_sec;
+	int ret;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&state, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		return ret;
+
+	file_sec = pkm_kacs_file(&state.file);
+	file_sec->managed = managed ? 1 : 0;
+	file_sec->granted_access = granted_access;
+	state.file.f_flags = file_flags;
+
+	ret = pkm_kacs_check_file_fcntl_snapshot(&state.file, cmd, arg);
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
+}
+
+int pkm_kacs_kunit_check_file_fcntl_null(void)
+{
+	return pkm_kacs_check_file_fcntl_snapshot(NULL, F_SETFL, 0);
 }
 
 int pkm_kacs_kunit_check_file_truncate_snapshot(u32 managed,

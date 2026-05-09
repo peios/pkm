@@ -719,6 +719,11 @@ int pkm_kacs_kunit_check_file_permission_write_intent(
 int pkm_kacs_kunit_check_file_permission_write_intent_mismatch(void);
 int pkm_kacs_kunit_check_file_lock_snapshot(u32 managed, u32 granted_access,
 					    unsigned int cmd);
+int pkm_kacs_kunit_check_file_fcntl_snapshot(u32 managed, u32 granted_access,
+					     int file_flags,
+					     unsigned int cmd,
+					     unsigned long arg);
+int pkm_kacs_kunit_check_file_fcntl_null(void);
 int pkm_kacs_kunit_check_file_truncate_snapshot(u32 managed,
 						u32 granted_access);
 int pkm_kacs_kunit_check_file_truncate_null(void);

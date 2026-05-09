@@ -5124,6 +5124,78 @@ static void pkm_kunit_file_write_intent_marker_drives_permission(
 			-EACCES);
 }
 
+static void pkm_kunit_file_fcntl_snapshot_append_transitions(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, O_APPEND,
+				F_SETFL, 0),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1,
+				PKM_KUNIT_FILE_APPEND_DATA |
+					PKM_KUNIT_FILE_WRITE_DATA,
+				O_APPEND, F_SETFL, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, O_APPEND,
+				F_SETFL, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, 0,
+				F_SETFL, O_APPEND),
+			0);
+}
+
+static void pkm_kunit_file_fcntl_snapshot_noatime_transitions(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_READ_ATTRIBUTES, 0,
+				F_SETFL, O_NOATIME),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_ATTRIBUTES, 0,
+				F_SETFL, O_NOATIME),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, O_NOATIME, F_SETFL, 0),
+			0);
+}
+
+static void pkm_kunit_file_fcntl_snapshot_non_right_flags_and_unmanaged(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_SETFL,
+				O_NONBLOCK | O_NDELAY | O_DIRECT),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, O_APPEND,
+				F_SETFL, O_APPEND | O_NONBLOCK | O_DIRECT),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				0, 0, O_APPEND, F_SETFL, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, O_APPEND,
+				F_GETFL, 0),
+			0);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_check_file_fcntl_null(),
+			-EACCES);
+}
+
 static void pkm_kunit_file_lock_snapshot_shared_and_exclusive(
 	struct kunit *test)
 {
@@ -16754,6 +16826,10 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_write_intent_append_and_positioned),
 	KUNIT_CASE(pkm_kunit_file_write_intent_noappend_fails_closed),
 	KUNIT_CASE(pkm_kunit_file_write_intent_marker_drives_permission),
+	KUNIT_CASE(pkm_kunit_file_fcntl_snapshot_append_transitions),
+	KUNIT_CASE(pkm_kunit_file_fcntl_snapshot_noatime_transitions),
+	KUNIT_CASE(
+		pkm_kunit_file_fcntl_snapshot_non_right_flags_and_unmanaged),
 	KUNIT_CASE(pkm_kunit_file_lock_snapshot_shared_and_exclusive),
 	KUNIT_CASE(pkm_kunit_file_lock_snapshot_denials_and_unmanaged),
 	KUNIT_CASE(pkm_kunit_file_truncate_snapshot_requires_write_data),
