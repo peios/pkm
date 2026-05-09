@@ -11,6 +11,7 @@ RUN pacman -Syu --noconfirm && \
         inetutils \
         kmod \
         libelf \
+        openssl \
         pahole \
         perl \
         python \
@@ -100,6 +101,11 @@ RUN scripts/config \
         --set-val DEVTMPFS_MOUNT y \
         --set-val TMPFS y \
         --set-val STRICT_DEVMEM y \
+        --set-val MODULE_SIG y \
+        --set-val MODULE_SIG_FORCE y \
+        --set-val MODULE_SIG_ALL y \
+        --set-val MODULE_SIG_SHA512 y \
+        --set-str MODULE_SIG_KEY "certs/signing_key.pem" \
         --set-val VT y \
         --set-val VT_CONSOLE y \
         --set-val VGA_CONSOLE y \

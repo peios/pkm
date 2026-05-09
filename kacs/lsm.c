@@ -14151,6 +14151,12 @@ static int __init pkm_init(void)
 		return -EINVAL;
 	}
 
+	if (!IS_ENABLED(CONFIG_STRICT_DEVMEM) ||
+	    !IS_ENABLED(CONFIG_MODULE_SIG_FORCE)) {
+		pr_err("pkm: required PIP build hardening config missing\n");
+		return -EINVAL;
+	}
+
 	security_add_hooks(pkm_hooks, ARRAY_SIZE(pkm_hooks), &pkm_lsmid);
 
 	ret = kacs_rust_init();

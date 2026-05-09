@@ -3727,6 +3727,13 @@ static void pkm_kunit_boot_allow_caps(struct kunit *test)
 			0);
 }
 
+static void pkm_kunit_required_build_config_enabled(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test, IS_ENABLED(CONFIG_STRICT_DEVMEM));
+	KUNIT_EXPECT_TRUE(test, IS_ENABLED(CONFIG_MODULE_SIG));
+	KUNIT_EXPECT_TRUE(test, IS_ENABLED(CONFIG_MODULE_SIG_FORCE));
+}
+
 static void pkm_kunit_capability_allow_succeeds_without_privilege(
 	struct kunit *test)
 {
@@ -19973,6 +19980,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_session_destroy_last_token_emits_kmes),
 	KUNIT_CASE(pkm_kunit_current_token_resolution),
 	KUNIT_CASE(pkm_kunit_boot_allow_caps),
+	KUNIT_CASE(pkm_kunit_required_build_config_enabled),
 	KUNIT_CASE(pkm_kunit_capability_allow_succeeds_without_privilege),
 	KUNIT_CASE(pkm_kunit_capability_privilege_success_marks_used),
 	KUNIT_CASE(pkm_kunit_capability_privilege_denied_without_privilege),

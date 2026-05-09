@@ -56,6 +56,34 @@ if grep -q 'syscall_64.tbl' "$repo_root/kernel/Dockerfile"; then
 	die "kernel/Dockerfile still mutates the syscall table"
 fi
 
+if ! rg -q 'openssl' "$repo_root/kernel/Dockerfile"; then
+	die "kernel/Dockerfile does not install OpenSSL for module signing"
+fi
+
+for required_config in \
+	'--set-val STRICT_DEVMEM y' \
+	'--set-val MODULE_SIG y' \
+	'--set-val MODULE_SIG_FORCE y' \
+	'--set-val MODULE_SIG_ALL y' \
+	'--set-str MODULE_SIG_KEY "certs/signing_key.pem"'; do
+	if ! rg -Fq -- "$required_config" "$repo_root/kernel/Dockerfile"; then
+		die "kernel/Dockerfile does not force required config: $required_config"
+	fi
+done
+
+for required_dep in \
+	'depends on STRICT_DEVMEM' \
+	'depends on MODULE_SIG_FORCE'; do
+	if ! rg -Fq "$required_dep" "$repo_root/pkm_kconfig"; then
+		die "pkm_kconfig missing required dependency: $required_dep"
+	fi
+done
+
+if ! rg -q 'CONFIG_STRICT_DEVMEM' "$repo_root/kacs/lsm.c" || \
+   ! rg -q 'CONFIG_MODULE_SIG_FORCE' "$repo_root/kacs/lsm.c"; then
+	die "lsm.c does not fail closed on missing PIP build hardening config"
+fi
+
 for syscall in \
 	"1000 kacs_open_self_token" \
 	"1001 kacs_open_process_token" \

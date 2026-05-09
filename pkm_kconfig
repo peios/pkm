@@ -5,6 +5,8 @@ config SECURITY_PKM
 	depends on SECURITY
 	depends on RUST
 	depends on 64BIT
+	depends on STRICT_DEVMEM
+	depends on MODULE_SIG_FORCE
 	depends on !SECURITY_SELINUX
 	depends on !SECURITY_APPARMOR
 	depends on !SECURITY_SMACK
@@ -22,6 +24,11 @@ config SECURITY_PKM
 	  Non-MAC LSMs (landlock, lockdown, yama, integrity) are accepted.
 
 	  If unsure, say N.
+
+	  KACS also requires STRICT_DEVMEM and MODULE_SIG_FORCE. These are
+	  defense-in-depth prerequisites for PIP: unrestricted /dev/mem and
+	  unsigned kernel modules both bypass process-isolation guarantees by
+	  entering the kernel trust boundary directly.
 
 config SECURITY_PKM_KUNIT
 	bool "PKM KUnit scaffold"
