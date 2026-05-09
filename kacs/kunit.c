@@ -160,6 +160,7 @@
 #define PKM_KUNIT_FILE_READ_DATA 0x00000001U
 #define PKM_KUNIT_FILE_WRITE_DATA 0x00000002U
 #define PKM_KUNIT_FILE_APPEND_DATA 0x00000004U
+#define PKM_KUNIT_FILE_LIST_DIRECTORY PKM_KUNIT_FILE_READ_DATA
 #define PKM_KUNIT_FILE_READ_EA 0x00000008U
 #define PKM_KUNIT_FILE_WRITE_EA 0x00000010U
 #define PKM_KUNIT_FILE_EXECUTE 0x00000020U
@@ -6466,6 +6467,140 @@ static void pkm_kunit_file_fcntl_snapshot_non_right_flags_and_unmanaged(
 			0);
 	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_check_file_fcntl_null(),
 			-EACCES);
+}
+
+static void pkm_kunit_file_fcntl_snapshot_tail_no_right_commands(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_CREATED_QUERY, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_DUPFD_CLOEXEC, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_SETFD, FD_CLOEXEC),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_SETOWN, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_SETSIG, 0),
+			0);
+}
+
+static void pkm_kunit_file_fcntl_snapshot_tail_lock_commands(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_SETLK, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_SETLKW64, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_SETLEASE, F_WRLCK),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_SETDELEG, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_GETLK, 0),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, 0, F_GETLK, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, 0,
+				F_OFD_GETLK, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, 0,
+				F_GETLK64, 0),
+			0);
+}
+
+static void pkm_kunit_file_fcntl_snapshot_tail_attr_commands(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_GETLEASE, 0),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_READ_ATTRIBUTES, 0,
+				F_GETLEASE, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_READ_ATTRIBUTES, 0,
+				F_GET_SEALS, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, 0,
+				F_SETPIPE_SZ, 4096),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_ATTRIBUTES, 0,
+				F_SETPIPE_SZ, 4096),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_ATTRIBUTES, 0,
+				F_ADD_SEALS, F_SEAL_WRITE),
+			0);
+}
+
+static void pkm_kunit_file_fcntl_snapshot_tail_notify_and_unknown(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_NOTIFY, 0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_NOTIFY, DN_MULTISHOT),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, 0, 0, F_NOTIFY, DN_CREATE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_LIST_DIRECTORY, 0,
+				F_NOTIFY, DN_CREATE | DN_RENAME),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_LIST_DIRECTORY, 0,
+				F_NOTIFY, 0x40000000UL),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				1, PKM_KUNIT_FILE_SD_ADMIN_MASK, 0,
+				0xffffffffU, 0),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_fcntl_snapshot(
+				0, 0, 0, 0xffffffffU, 0),
+			0);
 }
 
 static void pkm_kunit_file_lock_snapshot_shared_and_exclusive(
@@ -18153,6 +18288,10 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_fcntl_snapshot_noatime_transitions),
 	KUNIT_CASE(
 		pkm_kunit_file_fcntl_snapshot_non_right_flags_and_unmanaged),
+	KUNIT_CASE(pkm_kunit_file_fcntl_snapshot_tail_no_right_commands),
+	KUNIT_CASE(pkm_kunit_file_fcntl_snapshot_tail_lock_commands),
+	KUNIT_CASE(pkm_kunit_file_fcntl_snapshot_tail_attr_commands),
+	KUNIT_CASE(pkm_kunit_file_fcntl_snapshot_tail_notify_and_unknown),
 	KUNIT_CASE(pkm_kunit_file_lock_snapshot_shared_and_exclusive),
 	KUNIT_CASE(pkm_kunit_file_lock_snapshot_denials_and_unmanaged),
 	KUNIT_CASE(pkm_kunit_file_truncate_snapshot_requires_write_data),

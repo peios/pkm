@@ -3805,11 +3805,120 @@ static int pkm_kacs_check_file_lock_snapshot(struct file *file,
 	}
 }
 
+enum pkm_kacs_fcntl_requirement {
+	PKM_KACS_FCNTL_REQUIRE_NONE,
+	PKM_KACS_FCNTL_REQUIRE_ANY_DATA,
+	PKM_KACS_FCNTL_REQUIRE_READ_ATTRIBUTES,
+	PKM_KACS_FCNTL_REQUIRE_WRITE_ATTRIBUTES,
+	PKM_KACS_FCNTL_REQUIRE_NOTIFY,
+	PKM_KACS_FCNTL_REQUIRE_SETFL,
+	PKM_KACS_FCNTL_REQUIRE_DENY,
+};
+
+static enum pkm_kacs_fcntl_requirement
+pkm_kacs_classify_file_fcntl(unsigned int cmd)
+{
+	switch (cmd) {
+	case F_CREATED_QUERY:
+	case F_DUPFD:
+	case F_DUPFD_CLOEXEC:
+	case F_DUPFD_QUERY:
+	case F_GETFD:
+	case F_SETFD:
+	case F_GETFL:
+	case F_GETOWN:
+	case F_SETOWN:
+	case F_GETOWN_EX:
+	case F_SETOWN_EX:
+	case F_GETOWNER_UIDS:
+	case F_GETSIG:
+	case F_SETSIG:
+	case F_SETLK:
+	case F_SETLKW:
+	case F_SETLK64:
+	case F_SETLKW64:
+	case F_OFD_SETLK:
+	case F_OFD_SETLKW:
+	case F_SETLEASE:
+	case F_SETDELEG:
+		return PKM_KACS_FCNTL_REQUIRE_NONE;
+	case F_SETFL:
+		return PKM_KACS_FCNTL_REQUIRE_SETFL;
+	case F_GETLK:
+	case F_GETLK64:
+	case F_OFD_GETLK:
+		return PKM_KACS_FCNTL_REQUIRE_ANY_DATA;
+	case F_GETLEASE:
+	case F_GETDELEG:
+	case F_GETPIPE_SZ:
+	case F_GET_SEALS:
+	case F_GET_RW_HINT:
+	case F_GET_FILE_RW_HINT:
+		return PKM_KACS_FCNTL_REQUIRE_READ_ATTRIBUTES;
+	case F_SETPIPE_SZ:
+	case F_ADD_SEALS:
+	case F_SET_RW_HINT:
+	case F_SET_FILE_RW_HINT:
+		return PKM_KACS_FCNTL_REQUIRE_WRITE_ATTRIBUTES;
+	case F_NOTIFY:
+		return PKM_KACS_FCNTL_REQUIRE_NOTIFY;
+	default:
+		return PKM_KACS_FCNTL_REQUIRE_DENY;
+	}
+}
+
+static int pkm_kacs_check_file_fcntl_notify(u32 granted_access,
+					    unsigned long arg)
+{
+	const unsigned long known_mask = DN_ACCESS | DN_MODIFY | DN_CREATE |
+					DN_DELETE | DN_RENAME | DN_ATTRIB |
+					DN_MULTISHOT;
+	const unsigned long event_mask = DN_ACCESS | DN_MODIFY | DN_CREATE |
+					DN_DELETE | DN_RENAME | DN_ATTRIB;
+
+	if ((arg & ~known_mask) != 0)
+		return -EACCES;
+	if ((arg & event_mask) == 0)
+		return 0;
+	if ((granted_access & PKM_KACS_FILE_LIST_DIRECTORY) != 0)
+		return 0;
+	return -EACCES;
+}
+
+static int pkm_kacs_check_file_fcntl_requirement(
+	u32 granted_access, enum pkm_kacs_fcntl_requirement req,
+	unsigned long arg)
+{
+	switch (req) {
+	case PKM_KACS_FCNTL_REQUIRE_NONE:
+	case PKM_KACS_FCNTL_REQUIRE_SETFL:
+		return 0;
+	case PKM_KACS_FCNTL_REQUIRE_ANY_DATA:
+		if ((granted_access & PKM_KACS_FILE_DATA_RIGHTS) != 0)
+			return 0;
+		return -EACCES;
+	case PKM_KACS_FCNTL_REQUIRE_READ_ATTRIBUTES:
+		if ((granted_access & PKM_KACS_FILE_READ_ATTRIBUTES) != 0)
+			return 0;
+		return -EACCES;
+	case PKM_KACS_FCNTL_REQUIRE_WRITE_ATTRIBUTES:
+		if ((granted_access & PKM_KACS_FILE_WRITE_ATTRIBUTES) != 0)
+			return 0;
+		return -EACCES;
+	case PKM_KACS_FCNTL_REQUIRE_NOTIFY:
+		return pkm_kacs_check_file_fcntl_notify(granted_access, arg);
+	case PKM_KACS_FCNTL_REQUIRE_DENY:
+	default:
+		return -EACCES;
+	}
+}
+
 static int pkm_kacs_check_file_fcntl_snapshot(struct file *file,
 					      unsigned int cmd,
 					      unsigned long arg)
 {
 	struct pkm_kacs_file_security *file_sec;
+	enum pkm_kacs_fcntl_requirement req;
 	unsigned long old_flags;
 	unsigned long new_flags;
 	u32 granted_access;
@@ -3823,13 +3932,14 @@ static int pkm_kacs_check_file_fcntl_snapshot(struct file *file,
 	if (!file_sec->managed)
 		return 0;
 
-	if (cmd != F_SETFL)
-		return 0;
+	req = pkm_kacs_classify_file_fcntl(cmd);
+	granted_access = file_sec->granted_access;
+	if (req != PKM_KACS_FCNTL_REQUIRE_SETFL)
+		return pkm_kacs_check_file_fcntl_requirement(
+			granted_access, req, arg);
 
 	old_flags = file->f_flags;
 	new_flags = arg;
-	granted_access = file_sec->granted_access;
-
 	if ((old_flags & O_APPEND) != 0 && (new_flags & O_APPEND) == 0 &&
 	    (granted_access & PKM_KACS_FILE_APPEND_DATA) != 0 &&
 	    (granted_access & PKM_KACS_FILE_WRITE_DATA) == 0)
