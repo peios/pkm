@@ -184,6 +184,17 @@ struct pkm_kacs_kunit_signing_probe {
 	u8 hash[32];
 };
 
+struct pkm_kacs_kunit_signing_reader_args {
+	const u8 *file_bytes;
+	size_t file_len;
+	const u8 *xattr_sig;
+	size_t xattr_sig_len;
+	size_t final_file_len;
+	u32 use_final_file_len;
+	u32 fail_reads;
+	u32 fail_xattr;
+};
+
 struct pkm_kacs_kunit_process_token_open_args {
 	const void *subject_token;
 	const void *target_token;
@@ -812,6 +823,9 @@ int pkm_kacs_kunit_check_tlp_mprotect_path(u32 mitigation_bits,
 int pkm_kacs_kunit_probe_signing_material(
 	const u8 *file_bytes, size_t file_len, const u8 *xattr_sig,
 	size_t xattr_sig_len, struct pkm_kacs_kunit_signing_probe *out);
+int pkm_kacs_kunit_probe_signing_reader(
+	const struct pkm_kacs_kunit_signing_reader_args *args,
+	struct pkm_kacs_kunit_signing_probe *out);
 int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
 				       unsigned long prot,
 				       unsigned long flags);

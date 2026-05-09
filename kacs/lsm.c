@@ -131,6 +131,8 @@
 #define PKM_KACS_SIGNING_SIGNATURE_LEN 64U
 #define PKM_KACS_SIGNING_VERSION 0x01U
 #define PKM_KACS_SIGNING_ELF_SECTION ".peios.sig"
+#define PKM_KACS_SIGNING_XATTR_NAME "security.peios.sig"
+#define PKM_KACS_SIGNING_HASH_CHUNK 4096U
 #define PKM_KACS_SIGNING_SOURCE_NONE 0U
 #define PKM_KACS_SIGNING_SOURCE_ELF 1U
 #define PKM_KACS_SIGNING_SOURCE_XATTR 2U
@@ -3889,7 +3891,502 @@ static int __maybe_unused pkm_kacs_signing_probe_buffer(
 						   out);
 }
 
+struct pkm_kacs_signing_reader {
+	void *ctx;
+	int (*size)(void *ctx, size_t *size_out);
+	int (*read)(void *ctx, size_t offset, u8 *dst, size_t len);
+	int (*xattr)(void *ctx, u8 *dst, size_t dst_len, size_t *actual_len);
+};
+
+static bool pkm_kacs_signing_reader_valid(
+	const struct pkm_kacs_signing_reader *reader)
+{
+	return reader && reader->size && reader->read && reader->xattr;
+}
+
+static int pkm_kacs_signing_reader_exact(
+	const struct pkm_kacs_signing_reader *reader, size_t offset, u8 *dst,
+	size_t len)
+{
+	if (len == 0)
+		return 0;
+	if (!reader || !reader->read || !dst)
+		return -EINVAL;
+
+	return reader->read(reader->ctx, offset, dst, len);
+}
+
+static int pkm_kacs_signing_hash_reader(
+	const struct pkm_kacs_signing_reader *reader, size_t file_len,
+	size_t zero_offset, size_t zero_len, u8 hash[SHA256_DIGEST_SIZE])
+{
+	static const u8 zeros[SHA256_BLOCK_SIZE];
+	struct sha256_ctx ctx;
+	size_t zero_end;
+	size_t pos = 0;
+	u8 *buf;
+	int ret = 0;
+
+	if (!hash || !pkm_kacs_signing_reader_valid(reader))
+		return -EINVAL;
+	if (zero_len != 0 &&
+	    !pkm_kacs_signing_range_valid(zero_offset, zero_len, file_len))
+		return -EINVAL;
+
+	buf = kmalloc(PKM_KACS_SIGNING_HASH_CHUNK, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	sha256_init(&ctx);
+	zero_end = zero_offset + zero_len;
+	while (pos < file_len) {
+		size_t chunk;
+
+		if (zero_len != 0 && pos >= zero_offset && pos < zero_end) {
+			chunk = min_t(size_t, zero_end - pos, file_len - pos);
+			while (chunk != 0) {
+				size_t zero_chunk =
+					min_t(size_t, chunk, sizeof(zeros));
+
+				sha256_update(&ctx, zeros, zero_chunk);
+				pos += zero_chunk;
+				chunk -= zero_chunk;
+			}
+			continue;
+		}
+
+		chunk = min_t(size_t, PKM_KACS_SIGNING_HASH_CHUNK,
+			      file_len - pos);
+		if (zero_len != 0 && pos < zero_offset &&
+		    chunk > zero_offset - pos)
+			chunk = zero_offset - pos;
+
+		ret = pkm_kacs_signing_reader_exact(reader, pos, buf, chunk);
+		if (ret)
+			goto out_free;
+
+		sha256_update(&ctx, buf, chunk);
+		pos += chunk;
+	}
+
+	sha256_final(&ctx, hash);
+
+out_free:
+	kfree(buf);
+	return ret;
+}
+
+static int pkm_kacs_signing_reader_section_name_eq(
+	const struct pkm_kacs_signing_reader *reader, size_t file_len,
+	size_t strtab_offset, size_t strtab_len, u32 name_offset,
+	bool *match_out)
+{
+	char name[sizeof(PKM_KACS_SIGNING_ELF_SECTION)];
+	size_t name_pos;
+	int ret;
+
+	if (!match_out)
+		return -EINVAL;
+
+	*match_out = false;
+	if (!pkm_kacs_signing_range_valid(name_offset, sizeof(name),
+					  strtab_len))
+		return 0;
+	if (strtab_offset > SIZE_MAX - name_offset)
+		return -EOVERFLOW;
+
+	name_pos = strtab_offset + name_offset;
+	if (!pkm_kacs_signing_range_valid(name_pos, sizeof(name), file_len))
+		return -EOVERFLOW;
+
+	ret = pkm_kacs_signing_reader_exact(reader, name_pos, (u8 *)name,
+					    sizeof(name));
+	if (ret)
+		return ret;
+
+	*match_out = memcmp(name, PKM_KACS_SIGNING_ELF_SECTION,
+			    sizeof(name)) == 0;
+	return 0;
+}
+
+static bool pkm_kacs_signing_reader_is_elf(
+	const struct pkm_kacs_signing_reader *reader, size_t file_len,
+	bool *invalid_out)
+{
+	u8 magic[SELFMAG];
+	int ret;
+
+	*invalid_out = false;
+	if (file_len < SELFMAG)
+		return false;
+
+	ret = pkm_kacs_signing_reader_exact(reader, 0, magic, sizeof(magic));
+	if (ret) {
+		*invalid_out = true;
+		return false;
+	}
+
+	return memcmp(magic, ELFMAG, SELFMAG) == 0;
+}
+
+static int pkm_kacs_signing_probe_elf_reader(
+	const struct pkm_kacs_signing_reader *reader, size_t file_len,
+	struct pkm_kacs_signing_material *out, bool *committed_out)
+{
+	Elf64_Shdr shstr = {};
+	Elf64_Ehdr ehdr = {};
+	size_t shdrs_offset;
+	size_t shdrs_len;
+	size_t strtab_offset;
+	size_t strtab_len;
+	bool invalid = false;
+	u16 shnum;
+	u16 shentsize;
+	u16 shstrndx;
+	u16 i;
+	int ret;
+
+	*committed_out = false;
+	if (!pkm_kacs_signing_reader_is_elf(reader, file_len, &invalid)) {
+		*committed_out = invalid;
+		return 0;
+	}
+	if (file_len < sizeof(ehdr)) {
+		*committed_out = true;
+		return 0;
+	}
+
+	ret = pkm_kacs_signing_reader_exact(reader, 0, (u8 *)&ehdr,
+					    sizeof(ehdr));
+	if (ret) {
+		*committed_out = true;
+		return 0;
+	}
+
+	if (ehdr.e_ident[EI_CLASS] != ELFCLASS64 ||
+	    ehdr.e_ident[EI_DATA] != ELFDATA2LSB ||
+	    ehdr.e_ident[EI_VERSION] != EV_CURRENT) {
+		*committed_out = true;
+		return 0;
+	}
+
+	shnum = ehdr.e_shnum;
+	shentsize = ehdr.e_shentsize;
+	shstrndx = ehdr.e_shstrndx;
+	if (shnum == 0)
+		return 0;
+	if (shentsize != sizeof(Elf64_Shdr) ||
+	    shstrndx == SHN_UNDEF || shstrndx >= shnum) {
+		*committed_out = true;
+		return 0;
+	}
+
+	if (ehdr.e_shoff > SIZE_MAX) {
+		*committed_out = true;
+		return 0;
+	}
+	shdrs_offset = (size_t)ehdr.e_shoff;
+	if (shnum > (SIZE_MAX / sizeof(Elf64_Shdr))) {
+		*committed_out = true;
+		return 0;
+	}
+	shdrs_len = (size_t)shnum * sizeof(Elf64_Shdr);
+	if (!pkm_kacs_signing_range_valid(shdrs_offset, shdrs_len, file_len)) {
+		*committed_out = true;
+		return 0;
+	}
+
+	ret = pkm_kacs_signing_reader_exact(
+		reader,
+		shdrs_offset + ((size_t)shstrndx * sizeof(Elf64_Shdr)),
+		(u8 *)&shstr, sizeof(shstr));
+	if (ret) {
+		*committed_out = true;
+		return 0;
+	}
+
+	if (!pkm_kacs_signing_elf_range_valid(shstr.sh_offset, shstr.sh_size,
+					      file_len, &strtab_offset,
+					      &strtab_len)) {
+		*committed_out = true;
+		return 0;
+	}
+
+	for (i = 0; i < shnum; i++) {
+		Elf64_Shdr shdr = {};
+		size_t sig_offset;
+		size_t sig_len;
+		bool name_match = false;
+		u8 blob[PKM_KACS_SIGNING_BLOB_LEN];
+
+		ret = pkm_kacs_signing_reader_exact(
+			reader, shdrs_offset + ((size_t)i * sizeof(Elf64_Shdr)),
+			(u8 *)&shdr, sizeof(shdr));
+		if (ret) {
+			*committed_out = true;
+			return 0;
+		}
+
+		ret = pkm_kacs_signing_reader_section_name_eq(
+			reader, file_len, strtab_offset, strtab_len,
+			shdr.sh_name, &name_match);
+		if (ret) {
+			*committed_out = true;
+			return 0;
+		}
+		if (!name_match)
+			continue;
+
+		*committed_out = true;
+		if (shdr.sh_type != SHT_PROGBITS ||
+		    shdr.sh_size != PKM_KACS_SIGNING_BLOB_LEN ||
+		    !pkm_kacs_signing_elf_range_valid(shdr.sh_offset,
+						      shdr.sh_size, file_len,
+						      &sig_offset,
+						      &sig_len))
+			return 0;
+
+		ret = pkm_kacs_signing_reader_exact(reader, sig_offset, blob,
+						    sizeof(blob));
+		if (ret || !pkm_kacs_signing_blob_valid(blob, sig_len))
+			return 0;
+
+		ret = pkm_kacs_signing_hash_reader(reader, file_len, sig_offset,
+						   sig_len, out->hash);
+		if (ret)
+			return 0;
+
+		out->source = PKM_KACS_SIGNING_SOURCE_ELF;
+		memcpy(out->signature, blob + 1,
+		       PKM_KACS_SIGNING_SIGNATURE_LEN);
+		return 0;
+	}
+
+	return 0;
+}
+
+static int pkm_kacs_signing_probe_xattr_reader(
+	const struct pkm_kacs_signing_reader *reader, size_t file_len,
+	struct pkm_kacs_signing_material *out)
+{
+	u8 blob[PKM_KACS_SIGNING_BLOB_LEN];
+	size_t actual_len = 0;
+	int ret;
+
+	ret = reader->xattr(reader->ctx, blob, sizeof(blob), &actual_len);
+	if (ret || actual_len == 0)
+		return 0;
+	if (!pkm_kacs_signing_blob_valid(blob, actual_len))
+		return 0;
+
+	ret = pkm_kacs_signing_hash_reader(reader, file_len, 0, 0, out->hash);
+	if (ret)
+		return 0;
+
+	out->source = PKM_KACS_SIGNING_SOURCE_XATTR;
+	memcpy(out->signature, blob + 1, PKM_KACS_SIGNING_SIGNATURE_LEN);
+	return 0;
+}
+
+static int pkm_kacs_signing_probe_reader(
+	const struct pkm_kacs_signing_reader *reader,
+	struct pkm_kacs_signing_material *out)
+{
+	size_t file_len = 0;
+	size_t final_len = 0;
+	bool committed = false;
+	int ret;
+
+	if (!out || !pkm_kacs_signing_reader_valid(reader))
+		return -EINVAL;
+
+	pkm_kacs_signing_material_clear(out);
+	ret = reader->size(reader->ctx, &file_len);
+	if (ret)
+		return 0;
+
+	ret = pkm_kacs_signing_probe_elf_reader(reader, file_len, out,
+						&committed);
+	if (ret)
+		return ret;
+	if (!committed && out->source == PKM_KACS_SIGNING_SOURCE_NONE) {
+		ret = pkm_kacs_signing_probe_xattr_reader(reader, file_len,
+							  out);
+		if (ret)
+			return ret;
+	}
+
+	ret = reader->size(reader->ctx, &final_len);
+	if (ret || final_len != file_len)
+		pkm_kacs_signing_material_clear(out);
+
+	return 0;
+}
+
+static int pkm_kacs_signing_file_size(void *ctx, size_t *size_out)
+{
+	struct file *file = ctx;
+	loff_t size;
+
+	if (!file || !file_inode(file) || !size_out)
+		return -EINVAL;
+
+	size = i_size_read(file_inode(file));
+	if (size < 0 || (u64)size > (u64)SIZE_MAX)
+		return -EOVERFLOW;
+
+	*size_out = (size_t)size;
+	return 0;
+}
+
+static int pkm_kacs_signing_file_read(void *ctx, size_t offset, u8 *dst,
+				      size_t len)
+{
+	struct file *file = ctx;
+	ssize_t read_len;
+	loff_t pos;
+
+	if (!file || !dst)
+		return -EINVAL;
+	if ((u64)offset > (u64)LLONG_MAX)
+		return -EOVERFLOW;
+
+	pos = (loff_t)offset;
+	read_len = kernel_read(file, dst, len, &pos);
+	if (read_len < 0)
+		return (int)read_len;
+	if ((size_t)read_len != len)
+		return -EIO;
+
+	return 0;
+}
+
+static int pkm_kacs_signing_file_xattr(void *ctx, u8 *dst, size_t dst_len,
+				       size_t *actual_len)
+{
+	struct file *file = ctx;
+	struct dentry *dentry;
+	struct inode *inode;
+	ssize_t ret;
+
+	if (!file || !dst || !actual_len)
+		return -EINVAL;
+
+	*actual_len = 0;
+	dentry = file_dentry(file);
+	inode = file_inode(file);
+	if (!dentry || !inode)
+		return -EINVAL;
+
+	ret = __vfs_getxattr(dentry, inode, PKM_KACS_SIGNING_XATTR_NAME, NULL,
+			     0);
+	if (ret == -ENODATA || ret == -EOPNOTSUPP)
+		return 0;
+	if (ret < 0)
+		return (int)ret;
+	if ((u64)ret > (u64)SIZE_MAX)
+		return -EOVERFLOW;
+
+	*actual_len = (size_t)ret;
+	if ((size_t)ret != PKM_KACS_SIGNING_BLOB_LEN)
+		return 0;
+	if (dst_len < PKM_KACS_SIGNING_BLOB_LEN)
+		return -ERANGE;
+
+	ret = __vfs_getxattr(dentry, inode, PKM_KACS_SIGNING_XATTR_NAME, dst,
+			     PKM_KACS_SIGNING_BLOB_LEN);
+	if (ret < 0)
+		return (int)ret;
+	if (ret != PKM_KACS_SIGNING_BLOB_LEN)
+		return -EIO;
+
+	return 0;
+}
+
+static int __maybe_unused pkm_kacs_signing_probe_file(
+	struct file *file, struct pkm_kacs_signing_material *out)
+{
+	struct pkm_kacs_signing_reader reader = {
+		.ctx = file,
+		.size = pkm_kacs_signing_file_size,
+		.read = pkm_kacs_signing_file_read,
+		.xattr = pkm_kacs_signing_file_xattr,
+	};
+
+	return pkm_kacs_signing_probe_reader(&reader, out);
+}
+
 #ifdef CONFIG_SECURITY_PKM_KUNIT
+struct pkm_kacs_kunit_signing_reader_ctx {
+	const struct pkm_kacs_kunit_signing_reader_args *args;
+	u32 size_calls;
+};
+
+static int pkm_kacs_kunit_signing_reader_size(void *ctx, size_t *size_out)
+{
+	struct pkm_kacs_kunit_signing_reader_ctx *reader_ctx = ctx;
+	const struct pkm_kacs_kunit_signing_reader_args *args;
+
+	if (!reader_ctx || !reader_ctx->args || !size_out)
+		return -EINVAL;
+
+	args = reader_ctx->args;
+	reader_ctx->size_calls++;
+	if (args->use_final_file_len && reader_ctx->size_calls > 1)
+		*size_out = args->final_file_len;
+	else
+		*size_out = args->file_len;
+	return 0;
+}
+
+static int pkm_kacs_kunit_signing_reader_read(void *ctx, size_t offset,
+					      u8 *dst, size_t len)
+{
+	struct pkm_kacs_kunit_signing_reader_ctx *reader_ctx = ctx;
+	const struct pkm_kacs_kunit_signing_reader_args *args;
+
+	if (!reader_ctx || !reader_ctx->args || !dst)
+		return -EINVAL;
+
+	args = reader_ctx->args;
+	if (args->fail_reads)
+		return -EIO;
+	if (len == 0)
+		return 0;
+	if (len != 0 && !args->file_bytes)
+		return -EINVAL;
+	if (!pkm_kacs_signing_range_valid(offset, len, args->file_len))
+		return -EIO;
+
+	memcpy(dst, args->file_bytes + offset, len);
+	return 0;
+}
+
+static int pkm_kacs_kunit_signing_reader_xattr(void *ctx, u8 *dst,
+					       size_t dst_len,
+					       size_t *actual_len)
+{
+	struct pkm_kacs_kunit_signing_reader_ctx *reader_ctx = ctx;
+	const struct pkm_kacs_kunit_signing_reader_args *args;
+
+	if (!reader_ctx || !reader_ctx->args || !dst || !actual_len)
+		return -EINVAL;
+
+	args = reader_ctx->args;
+	*actual_len = args->xattr_sig_len;
+	if (args->fail_xattr)
+		return -EIO;
+	if (args->xattr_sig_len == 0)
+		return 0;
+	if (args->xattr_sig_len != PKM_KACS_SIGNING_BLOB_LEN)
+		return 0;
+	if (!args->xattr_sig || dst_len < PKM_KACS_SIGNING_BLOB_LEN)
+		return -EINVAL;
+
+	memcpy(dst, args->xattr_sig, PKM_KACS_SIGNING_BLOB_LEN);
+	return 0;
+}
+
 int pkm_kacs_kunit_probe_signing_material(
 	const u8 *file_bytes, size_t file_len, const u8 *xattr_sig,
 	size_t xattr_sig_len, struct pkm_kacs_kunit_signing_probe *out)
@@ -3902,6 +4399,36 @@ int pkm_kacs_kunit_probe_signing_material(
 
 	ret = pkm_kacs_signing_probe_buffer(file_bytes, file_len, xattr_sig,
 					    xattr_sig_len, &material);
+	if (ret)
+		return ret;
+
+	memset(out, 0, sizeof(*out));
+	out->source = material.source;
+	memcpy(out->signature, material.signature, sizeof(out->signature));
+	memcpy(out->hash, material.hash, sizeof(out->hash));
+	return 0;
+}
+
+int pkm_kacs_kunit_probe_signing_reader(
+	const struct pkm_kacs_kunit_signing_reader_args *args,
+	struct pkm_kacs_kunit_signing_probe *out)
+{
+	struct pkm_kacs_kunit_signing_reader_ctx ctx = {
+		.args = args,
+	};
+	struct pkm_kacs_signing_reader reader = {
+		.ctx = &ctx,
+		.size = pkm_kacs_kunit_signing_reader_size,
+		.read = pkm_kacs_kunit_signing_reader_read,
+		.xattr = pkm_kacs_kunit_signing_reader_xattr,
+	};
+	struct pkm_kacs_signing_material material;
+	int ret;
+
+	if (!args || !out)
+		return -EINVAL;
+
+	ret = pkm_kacs_signing_probe_reader(&reader, &material);
 	if (ret)
 		return ret;
 

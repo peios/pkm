@@ -5293,6 +5293,184 @@ static void pkm_kunit_signing_invalid_xattr_unsigned(struct kunit *test)
 			PKM_KACS_KUNIT_SIGNING_SOURCE_NONE);
 }
 
+static void pkm_kunit_signing_reader_matches_buffer_for_elf(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_reader_args args = {};
+	struct pkm_kacs_kunit_signing_probe reader_out = {};
+	struct pkm_kacs_kunit_signing_probe buffer_out = {};
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+	u8 file[PKM_KUNIT_ELF_LEN];
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0xc0);
+	pkm_kunit_signing_build_elf(file, sig_blob, true, true);
+	args.file_bytes = file;
+	args.file_len = sizeof(file);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_material(
+				file, sizeof(file), NULL, 0, &buffer_out),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_reader(&args,
+							    &reader_out),
+			0);
+	KUNIT_EXPECT_EQ(test, reader_out.source, buffer_out.source);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(reader_out.signature, buffer_out.signature,
+			       sizeof(reader_out.signature)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(reader_out.hash, buffer_out.hash,
+			       sizeof(reader_out.hash)),
+			0);
+}
+
+static void pkm_kunit_signing_reader_xattr_hashes_non_elf(struct kunit *test)
+{
+	static const u8 file[] = "reader-file";
+	struct pkm_kacs_kunit_signing_reader_args args = {};
+	struct pkm_kacs_kunit_signing_probe out = {};
+	u8 expected_hash[32];
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0xd0);
+	args.file_bytes = file;
+	args.file_len = sizeof(file) - 1;
+	args.xattr_sig = sig_blob;
+	args.xattr_sig_len = sizeof(sig_blob);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_reader(&args, &out), 0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_XATTR);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out.signature, sig_blob + 1,
+			       PKM_KUNIT_SIGNING_SIG_LEN),
+			0);
+	sha256(file, sizeof(file) - 1, expected_hash);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out.hash, expected_hash, sizeof(expected_hash)),
+			0);
+}
+
+static void pkm_kunit_signing_reader_missing_xattr_unsigned(
+	struct kunit *test)
+{
+	static const u8 file[] = "unsigned";
+	struct pkm_kacs_kunit_signing_reader_args args = {
+		.file_bytes = file,
+		.file_len = sizeof(file) - 1,
+	};
+	struct pkm_kacs_kunit_signing_probe out = {};
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_reader(&args, &out), 0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_NONE);
+}
+
+static void pkm_kunit_signing_reader_invalid_xattr_unsigned(
+	struct kunit *test)
+{
+	static const u8 file[] = "reader-invalid-xattr";
+	struct pkm_kacs_kunit_signing_reader_args args = {};
+	struct pkm_kacs_kunit_signing_probe out = {};
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0xe0);
+	args.file_bytes = file;
+	args.file_len = sizeof(file) - 1;
+	args.xattr_sig = sig_blob;
+	args.xattr_sig_len = sizeof(sig_blob) - 1;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_reader(&args, &out), 0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_NONE);
+
+	args.xattr_sig_len = sizeof(sig_blob);
+	sig_blob[0] = 0x02;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_reader(&args, &out), 0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_NONE);
+}
+
+static void pkm_kunit_signing_reader_size_change_invalidates(
+	struct kunit *test)
+{
+	static const u8 file[] = "size-change";
+	struct pkm_kacs_kunit_signing_reader_args args = {};
+	struct pkm_kacs_kunit_signing_probe out = {};
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0xf0);
+	args.file_bytes = file;
+	args.file_len = sizeof(file) - 1;
+	args.xattr_sig = sig_blob;
+	args.xattr_sig_len = sizeof(sig_blob);
+	args.use_final_file_len = 1;
+	args.final_file_len = args.file_len + 1;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_reader(&args, &out), 0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_NONE);
+}
+
+static void pkm_kunit_signing_reader_read_failure_invalidates(
+	struct kunit *test)
+{
+	static const u8 file[] = "read-failure";
+	struct pkm_kacs_kunit_signing_reader_args args = {};
+	struct pkm_kacs_kunit_signing_probe out = {};
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0x10);
+	args.file_bytes = file;
+	args.file_len = sizeof(file) - 1;
+	args.xattr_sig = sig_blob;
+	args.xattr_sig_len = sizeof(sig_blob);
+	args.fail_reads = 1;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_reader(&args, &out), 0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_NONE);
+}
+
+static void pkm_kunit_signing_reader_malformed_elf_blocks_xattr(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_reader_args args = {};
+	struct pkm_kacs_kunit_signing_probe out = {};
+	u8 xattr_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+	u8 sig_blob[PKM_KUNIT_SIGNING_BLOB_LEN];
+	u8 file[PKM_KUNIT_ELF_LEN];
+	Elf64_Shdr shstr = {};
+
+	pkm_kunit_signing_fill_blob(sig_blob, 0x20);
+	pkm_kunit_signing_fill_blob(xattr_blob, 0x30);
+	pkm_kunit_signing_build_elf(file, sig_blob, true, true);
+
+	memcpy(&shstr, file + PKM_KUNIT_ELF_SHOFF + sizeof(Elf64_Shdr),
+	       sizeof(shstr));
+	shstr.sh_offset = PKM_KUNIT_ELF_LEN + 1;
+	memcpy(file + PKM_KUNIT_ELF_SHOFF + sizeof(Elf64_Shdr), &shstr,
+	       sizeof(shstr));
+
+	args.file_bytes = file;
+	args.file_len = sizeof(file);
+	args.xattr_sig = xattr_blob;
+	args.xattr_sig_len = sizeof(xattr_blob);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_probe_signing_reader(&args, &out), 0);
+	KUNIT_EXPECT_EQ(test, out.source,
+			PKM_KACS_KUNIT_SIGNING_SOURCE_NONE);
+}
+
 static void pkm_kunit_file_mmap_snapshot_read_and_private_write(
 	struct kunit *test)
 {
@@ -19150,6 +19328,13 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_signing_malformed_elf_metadata_blocks_xattr),
 	KUNIT_CASE(pkm_kunit_signing_elf_without_section_uses_xattr),
 	KUNIT_CASE(pkm_kunit_signing_invalid_xattr_unsigned),
+	KUNIT_CASE(pkm_kunit_signing_reader_matches_buffer_for_elf),
+	KUNIT_CASE(pkm_kunit_signing_reader_xattr_hashes_non_elf),
+	KUNIT_CASE(pkm_kunit_signing_reader_missing_xattr_unsigned),
+	KUNIT_CASE(pkm_kunit_signing_reader_invalid_xattr_unsigned),
+	KUNIT_CASE(pkm_kunit_signing_reader_size_change_invalidates),
+	KUNIT_CASE(pkm_kunit_signing_reader_read_failure_invalidates),
+	KUNIT_CASE(pkm_kunit_signing_reader_malformed_elf_blocks_xattr),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_read_and_private_write),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_shared_write),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_exec),
