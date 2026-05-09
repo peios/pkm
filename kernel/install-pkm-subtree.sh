@@ -215,6 +215,7 @@ require_file "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
 require_file "$kernel_root/arch/x86/kernel/process_64.c"
 require_file "$kernel_root/fs/proc/base.c"
 require_file "$kernel_root/fs/proc/array.c"
+require_file "$kernel_root/fs/open.c"
 require_file "$kernel_root/fs/xattr.c"
 require_file "$kernel_root/include/linux/cred.h"
 require_file "$kernel_root/include/linux/ptrace.h"
@@ -431,6 +432,19 @@ replace_line_after_anchor_once 'SYSCALL_DEFINE5(prctl, int, option, unsigned lon
 #endif
 	error = security_task_prctl(option, arg2, arg3, arg4, arg5);' \
 	"$kernel_root/kernel/sys.c"
+replace_line_after_anchor_once 'SYSCALL_DEFINE1(fchdir, unsigned int, fd)' \
+	'	error = file_permission(fd_file(f), MAY_EXEC | MAY_CHDIR);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	if (fd_file(f)->f_mode & FMODE_PATH)
+		error = file_permission(fd_file(f), MAY_EXEC | MAY_CHDIR);
+	else
+		error = security_file_permission(fd_file(f),
+						 MAY_EXEC | MAY_CHDIR);
+#else
+	error = file_permission(fd_file(f), MAY_EXEC | MAY_CHDIR);
+#endif
+' \
+	"$kernel_root/fs/open.c"
 insert_block_before_exact_once 'static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,' \
 	'static unsigned int proc_pkm_metadata_ptrace_mode' \
 	'static unsigned int proc_pkm_metadata_ptrace_mode(const struct file *file)

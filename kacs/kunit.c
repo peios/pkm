@@ -155,6 +155,7 @@
 #define PKM_KUNIT_FILE_READ_EA 0x00000008U
 #define PKM_KUNIT_FILE_WRITE_EA 0x00000010U
 #define PKM_KUNIT_FILE_EXECUTE 0x00000020U
+#define PKM_KUNIT_FILE_TRAVERSE PKM_KUNIT_FILE_EXECUTE
 #define PKM_KUNIT_FILE_DELETE_CHILD 0x00000040U
 #define PKM_KUNIT_FILE_READ_ATTRIBUTES 0x00000080U
 #define PKM_KUNIT_FILE_WRITE_ATTRIBUTES 0x00000100U
@@ -5021,6 +5022,20 @@ static void pkm_kunit_file_permission_snapshot_combined_masks(
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_file_permission_snapshot(
 				1, PKM_KUNIT_FILE_READ_DATA, 0,
+				MAY_EXEC | MAY_CHDIR),
+			-EACCES);
+}
+
+static void pkm_kunit_fchdir_snapshot_requires_traverse(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, PKM_KUNIT_FILE_TRAVERSE, 0,
+				MAY_EXEC | MAY_CHDIR),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_snapshot(
+				1, PKM_KUNIT_FILE_READ_ATTRIBUTES, 0,
 				MAY_EXEC | MAY_CHDIR),
 			-EACCES);
 }
@@ -16500,6 +16515,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_permission_snapshot_read_and_unmanaged),
 	KUNIT_CASE(pkm_kunit_file_permission_snapshot_write_and_append),
 	KUNIT_CASE(pkm_kunit_file_permission_snapshot_combined_masks),
+	KUNIT_CASE(pkm_kunit_fchdir_snapshot_requires_traverse),
 	KUNIT_CASE(pkm_kunit_pie_rejects_et_exec),
 	KUNIT_CASE(pkm_kunit_task_prctl_sml_and_cfib_block_disable_paths),
 	KUNIT_CASE(pkm_kunit_open_process_token_success),
