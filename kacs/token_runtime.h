@@ -48,6 +48,18 @@ struct task_struct;
 #define PKM_KACS_KUNIT_FILE_METADATA_XATTR_SET 9U
 #define PKM_KACS_KUNIT_FILE_METADATA_XATTR_REMOVE 10U
 #define PKM_KACS_KUNIT_FILE_METADATA_XATTR_LIST 11U
+#define PKM_KACS_KUNIT_PATH_METADATA_GETATTR 12U
+#define PKM_KACS_KUNIT_PATH_METADATA_SETATTR_CHMOD 13U
+#define PKM_KACS_KUNIT_PATH_METADATA_SETATTR_CHOWN 14U
+#define PKM_KACS_KUNIT_PATH_METADATA_SETATTR_UTIMENS 15U
+#define PKM_KACS_KUNIT_PATH_METADATA_SETATTR_TRUNCATE 16U
+#define PKM_KACS_KUNIT_PATH_METADATA_FILEATTR_GET 17U
+#define PKM_KACS_KUNIT_PATH_METADATA_FILEATTR_SET 18U
+#define PKM_KACS_KUNIT_PATH_METADATA_XATTR_GET 19U
+#define PKM_KACS_KUNIT_PATH_METADATA_XATTR_SET 20U
+#define PKM_KACS_KUNIT_PATH_METADATA_XATTR_REMOVE 21U
+#define PKM_KACS_KUNIT_PATH_METADATA_XATTR_LIST 22U
+#define PKM_KACS_KUNIT_PATH_METADATA_ACCESS 23U
 
 #define KACS_STATUS_OPENED 1U
 #define KACS_STATUS_CREATED 2U
@@ -733,6 +745,10 @@ int pkm_kacs_kunit_check_file_metadata_snapshot(u32 managed,
 						u32 granted_access, u32 op,
 						const char *name);
 int pkm_kacs_kunit_check_file_metadata_null(u32 op, const char *name);
+int pkm_kacs_kunit_check_path_metadata_live(const u8 *target_file_sd_ptr,
+					    size_t target_file_sd_len,
+					    u32 target_file_sd_state, u32 op,
+					    u32 mode, const char *name);
 int pkm_kacs_kunit_check_file_ioctl_snapshot(u32 managed, u32 granted_access,
 					     umode_t mode, unsigned int cmd,
 					     bool compat);

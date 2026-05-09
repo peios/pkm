@@ -5299,6 +5299,256 @@ static void pkm_kunit_file_metadata_xattr_protected_names(struct kunit *test)
 			-EACCES);
 }
 
+static const u8 *pkm_kunit_create_precise_file_sd(const void *token,
+						  u32 self_mask,
+						  size_t *len_out);
+
+static int pkm_kunit_check_path_metadata_with_mask(u32 granted_mask, u32 op,
+						   u32 mode, const char *name)
+{
+	const void *subject_token = pkm_kacs_current_effective_token_ptr();
+	const u8 *file_sd;
+	size_t file_sd_len = 0;
+	int ret;
+
+	if (!subject_token)
+		return -EACCES;
+
+	file_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						   granted_mask,
+						   &file_sd_len);
+	if (!file_sd)
+		return -ENOMEM;
+
+	ret = pkm_kacs_kunit_check_path_metadata_live(
+		file_sd, file_sd_len, PKM_KACS_KUNIT_FILE_SD_VALID, op,
+		mode, name);
+	pkm_kacs_free((void *)file_sd);
+	return ret;
+}
+
+static int pkm_kunit_check_path_metadata_with_foreign_everyone_mask(
+	u32 granted_mask, u32 op, u32 mode, const char *name)
+{
+	const void *owner_token;
+	const u8 *file_sd;
+	size_t file_sd_len = 0;
+	int ret;
+
+	owner_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0U, 0ULL);
+	if (!owner_token)
+		return -ENOMEM;
+
+	file_sd = kacs_rust_kunit_create_file_sd(owner_token, 0, 0, 0,
+						 granted_mask, &file_sd_len);
+	if (!file_sd) {
+		kacs_rust_token_drop(owner_token);
+		return -ENOMEM;
+	}
+
+	ret = pkm_kacs_kunit_check_path_metadata_live(
+		file_sd, file_sd_len, PKM_KACS_KUNIT_FILE_SD_VALID, op,
+		mode, name);
+	pkm_kacs_free((void *)file_sd);
+	kacs_rust_token_drop(owner_token);
+	return ret;
+}
+
+static void pkm_kunit_path_metadata_getattr_live(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_READ_ATTRIBUTES,
+				PKM_KACS_KUNIT_PATH_METADATA_GETATTR, 0,
+				NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_READ_ATTRIBUTES,
+				PKM_KACS_KUNIT_PATH_METADATA_FILEATTR_GET,
+				0, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KACS_KUNIT_PATH_METADATA_GETATTR, 0,
+				NULL),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_path_metadata_live(
+				NULL, 0, PKM_KACS_KUNIT_FILE_SD_MISSING,
+				PKM_KACS_KUNIT_PATH_METADATA_GETATTR, 0,
+				NULL),
+			-EACCES);
+}
+
+static void pkm_kunit_path_metadata_setattr_live(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_foreign_everyone_mask(
+				KACS_ACCESS_WRITE_DAC,
+				PKM_KACS_KUNIT_PATH_METADATA_SETATTR_CHMOD,
+				0, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_foreign_everyone_mask(
+				PKM_KUNIT_FILE_WRITE_ATTRIBUTES,
+				PKM_KACS_KUNIT_PATH_METADATA_SETATTR_CHMOD,
+				0, NULL),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_foreign_everyone_mask(
+				KACS_ACCESS_WRITE_OWNER,
+				PKM_KACS_KUNIT_PATH_METADATA_SETATTR_CHOWN,
+				0, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_path_metadata_live(
+				NULL, 0, PKM_KACS_KUNIT_FILE_SD_MISSING,
+				PKM_KACS_KUNIT_PATH_METADATA_SETATTR_CHOWN,
+				0, NULL),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_foreign_everyone_mask(
+				PKM_KUNIT_FILE_WRITE_ATTRIBUTES,
+				PKM_KACS_KUNIT_PATH_METADATA_SETATTR_UTIMENS,
+				0, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_foreign_everyone_mask(
+				PKM_KUNIT_FILE_WRITE_DATA,
+				PKM_KACS_KUNIT_PATH_METADATA_SETATTR_TRUNCATE,
+				0, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_foreign_everyone_mask(
+				PKM_KUNIT_FILE_WRITE_ATTRIBUTES,
+				PKM_KACS_KUNIT_PATH_METADATA_SETATTR_TRUNCATE,
+				0, NULL),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_foreign_everyone_mask(
+				PKM_KUNIT_FILE_WRITE_ATTRIBUTES,
+				PKM_KACS_KUNIT_PATH_METADATA_FILEATTR_SET,
+				0, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_foreign_everyone_mask(
+				PKM_KUNIT_FILE_READ_ATTRIBUTES,
+				PKM_KACS_KUNIT_PATH_METADATA_FILEATTR_SET,
+				0, NULL),
+			-EACCES);
+}
+
+static void pkm_kunit_path_metadata_xattr_live(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_READ_EA,
+				PKM_KACS_KUNIT_PATH_METADATA_XATTR_GET, 0,
+				"user.test"),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_READ_ATTRIBUTES,
+				PKM_KACS_KUNIT_PATH_METADATA_XATTR_GET, 0,
+				"user.test"),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_WRITE_EA,
+				PKM_KACS_KUNIT_PATH_METADATA_XATTR_SET, 0,
+				"user.test"),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_READ_EA,
+				PKM_KACS_KUNIT_PATH_METADATA_XATTR_SET, 0,
+				"user.test"),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_WRITE_EA,
+				PKM_KACS_KUNIT_PATH_METADATA_XATTR_REMOVE, 0,
+				"user.test"),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				0, PKM_KACS_KUNIT_PATH_METADATA_XATTR_LIST,
+				0, NULL),
+			0);
+}
+
+static void pkm_kunit_path_metadata_xattr_protected_names(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_SD_ADMIN_MASK,
+				PKM_KACS_KUNIT_PATH_METADATA_XATTR_GET, 0,
+				"security.peios.sd"),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_SD_ADMIN_MASK,
+				PKM_KACS_KUNIT_PATH_METADATA_XATTR_SET, 0,
+				"security.peios.sd"),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_SD_ADMIN_MASK,
+				PKM_KACS_KUNIT_PATH_METADATA_XATTR_REMOVE, 0,
+				"security.peios.sd"),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_READ_EA,
+				PKM_KACS_KUNIT_PATH_METADATA_XATTR_GET, 0,
+				XATTR_NAME_POSIX_ACL_ACCESS),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_WRITE_EA,
+				PKM_KACS_KUNIT_PATH_METADATA_XATTR_SET, 0,
+				XATTR_NAME_POSIX_ACL_ACCESS),
+			-EACCES);
+}
+
+static void pkm_kunit_path_metadata_access_live(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_READ_ATTRIBUTES,
+				PKM_KACS_KUNIT_PATH_METADATA_ACCESS, 0,
+				NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KACS_KUNIT_PATH_METADATA_ACCESS,
+				MAY_READ, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_WRITE_DATA,
+				PKM_KACS_KUNIT_PATH_METADATA_ACCESS,
+				MAY_WRITE, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_EXECUTE,
+				PKM_KACS_KUNIT_PATH_METADATA_ACCESS,
+				MAY_EXEC, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_path_metadata_with_mask(
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KACS_KUNIT_PATH_METADATA_ACCESS,
+				MAY_READ | MAY_EXEC, NULL),
+			-EACCES);
+}
+
 static void pkm_kunit_file_ioctl_snapshot_read_classified(struct kunit *test)
 {
 	KUNIT_EXPECT_EQ(test,
@@ -17160,6 +17410,11 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_metadata_setattr_snapshot),
 	KUNIT_CASE(pkm_kunit_file_metadata_xattr_snapshot),
 	KUNIT_CASE(pkm_kunit_file_metadata_xattr_protected_names),
+	KUNIT_CASE(pkm_kunit_path_metadata_getattr_live),
+	KUNIT_CASE(pkm_kunit_path_metadata_setattr_live),
+	KUNIT_CASE(pkm_kunit_path_metadata_xattr_live),
+	KUNIT_CASE(pkm_kunit_path_metadata_xattr_protected_names),
+	KUNIT_CASE(pkm_kunit_path_metadata_access_live),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_read_classified),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_write_classified),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_fdlocal_fallback_unmanaged),

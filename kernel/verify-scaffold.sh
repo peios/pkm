@@ -138,10 +138,25 @@ for fd_metadata_symbol in \
 	"pkm_kacs_file_utimens" \
 	"pkm_kacs_file_fileattr_get" \
 	"pkm_kacs_file_fileattr_set" \
-	"pkm_kacs_file_listxattr"; do
+	"pkm_kacs_file_listxattr" \
+	"pkm_kacs_file_end_metadata" \
+	"pkm_kacs_path_fileattr_set" \
+	"pkm_kacs_path_access"; do
 	if ! rg -q "$fd_metadata_symbol" \
 		"$repo_root/kernel/install-pkm-subtree.sh"; then
 		die "install-pkm-subtree.sh does not stage fd metadata patch: $fd_metadata_symbol"
+	fi
+done
+
+for metadata_hook_symbol in \
+	"inode_getattr" \
+	"inode_setattr" \
+	"inode_file_getattr" \
+	"inode_file_setattr" \
+	"inode_listxattr"; do
+	if ! rg -q "LSM_HOOK_INIT\\(${metadata_hook_symbol}," \
+		"$repo_root/kacs/lsm.c"; then
+		die "lsm.c does not register metadata hook: $metadata_hook_symbol"
 	fi
 done
 
