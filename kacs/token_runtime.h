@@ -747,8 +747,18 @@ long pkm_kacs_kunit_capture_peer_socket_for_subject(
 	const void **captured_token_out,
 	struct pkm_kacs_kunit_socket_view *listener_out,
 	struct pkm_kacs_kunit_socket_view *accepted_out);
+long pkm_kacs_kunit_unix_dgram_send_for_subject(
+	const void *subject_token, u32 abstract_socket, u32 allow_write,
+	struct pkm_kacs_kunit_socket_view *sender_out,
+	struct pkm_kacs_kunit_socket_view *target_out);
+long pkm_kacs_kunit_open_peer_token_for_socket_type(u32 socket_type,
+						    u32 connected,
+						    const void *peer_token);
 long pkm_kacs_kunit_open_peer_token_for_socket(u32 connected,
 					       const void *peer_token);
+long pkm_kacs_kunit_impersonate_peer_for_socket_type(u32 socket_type,
+						     u32 connected,
+						     const void *peer_token);
 long pkm_kacs_kunit_impersonate_peer_for_socket(u32 connected,
 						const void *peer_token);
 int pkm_kacs_kunit_check_no_child_process(u32 mitigation_bits,

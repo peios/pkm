@@ -14369,6 +14369,42 @@ static void pkm_kunit_peer_socket_abstract_connect_denied_without_write_data(
 	KUNIT_EXPECT_PTR_EQ(test, accepted.peer_token, NULL);
 }
 
+static void pkm_kunit_peer_socket_dgram_send_checks_abstract_sd(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_socket_view sender = { };
+	struct pkm_kacs_kunit_socket_view target = { };
+	long ret;
+
+	ret = pkm_kacs_kunit_unix_dgram_send_for_subject(
+		pkm_kacs_current_effective_token_ptr(), 1, 1, &sender,
+		&target);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_NOT_NULL(test, target.socket_sd_ptr);
+	KUNIT_EXPECT_PTR_EQ(test, target.peer_token, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, sender.peer_token, NULL);
+
+	memset(&sender, 0, sizeof(sender));
+	memset(&target, 0, sizeof(target));
+	ret = pkm_kacs_kunit_unix_dgram_send_for_subject(
+		pkm_kacs_current_effective_token_ptr(), 1, 0, &sender,
+		&target);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_ASSERT_NOT_NULL(test, target.socket_sd_ptr);
+	KUNIT_EXPECT_PTR_EQ(test, target.peer_token, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, sender.peer_token, NULL);
+
+	memset(&sender, 0, sizeof(sender));
+	memset(&target, 0, sizeof(target));
+	ret = pkm_kacs_kunit_unix_dgram_send_for_subject(
+		pkm_kacs_current_effective_token_ptr(), 0, 0, &sender,
+		&target);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_PTR_EQ(test, target.socket_sd_ptr, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, target.peer_token, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, sender.peer_token, NULL);
+}
+
 static void pkm_kunit_peer_socket_open_token_fixed_rights(struct kunit *test)
 {
 	struct pkm_kacs_token_fd_view view = { };
@@ -14543,10 +14579,20 @@ static void pkm_kunit_peer_socket_unsupported_or_uncaptured_fail_closed(
 			pkm_kacs_kunit_open_peer_token_for_socket(1, NULL),
 			(long)-EACCES);
 	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_open_peer_token_for_socket_type(
+				SOCK_DGRAM, 1,
+				pkm_kacs_current_effective_token_ptr()),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_impersonate_peer_for_socket(0, NULL),
 			(long)-EACCES);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_impersonate_peer_for_socket(1, NULL),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_impersonate_peer_for_socket_type(
+				SOCK_DGRAM, 1,
+				pkm_kacs_current_effective_token_ptr()),
 			(long)-EACCES);
 }
 
@@ -18763,6 +18809,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_peer_socket_capture_anonymous_shape),
 	KUNIT_CASE(
 		pkm_kunit_peer_socket_abstract_connect_denied_without_write_data),
+	KUNIT_CASE(pkm_kunit_peer_socket_dgram_send_checks_abstract_sd),
 	KUNIT_CASE(pkm_kunit_peer_socket_open_token_fixed_rights),
 	KUNIT_CASE(pkm_kunit_peer_socket_impersonate_success_and_revert),
 	KUNIT_CASE(
