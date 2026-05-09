@@ -146,6 +146,19 @@ if ! rg -q 'int vfs_fallocate\(struct file \*file, int mode,' \
 	die "install-pkm-subtree.sh does not stage the fallocate KACS patch"
 fi
 
+if ! rg -q 'pkm_kacs_file_begin_write_intent' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'ssize_t ksys_pwrite64' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'static ssize_t do_pwritev' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'int io_write\(struct io_kiocb \*req' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'static int aio_write\(struct kiocb \*req' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the positioned write-intent patches"
+fi
+
 if ! rg -q 'pkm_kacs_sched_setaffinity' \
 	"$repo_root/kernel/install-pkm-subtree.sh"; then
 	die "install-pkm-subtree.sh does not stage the sched_setaffinity KACS patch"

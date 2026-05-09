@@ -567,6 +567,9 @@ int pkm_kacs_proc_open_process_token_file(struct file *file,
 int pkm_kacs_proc_open_thread_token_file(struct file *file,
 					 struct task_struct *task);
 int pkm_kacs_securityfs_open_self_token_file(struct file *file);
+int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,
+				     bool positioned);
+void pkm_kacs_file_end_write_intent(struct file *file);
 int pkm_kacs_file_fallocate(struct file *file, int mode);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
@@ -705,6 +708,15 @@ int pkm_kacs_kunit_check_file_permission_snapshot(u32 managed,
 						  u32 granted_access,
 						  int file_flags,
 						  int mask);
+int pkm_kacs_kunit_check_file_write_intent_snapshot(u32 managed,
+						    u32 granted_access,
+						    int file_flags,
+						    u32 rwf_flags,
+						    bool positioned);
+int pkm_kacs_kunit_check_file_permission_write_intent(
+	u32 managed, u32 granted_access, int file_flags, u32 rwf_flags,
+	bool positioned);
+int pkm_kacs_kunit_check_file_permission_write_intent_mismatch(void);
 int pkm_kacs_kunit_check_file_lock_snapshot(u32 managed, u32 granted_access,
 					    unsigned int cmd);
 int pkm_kacs_kunit_check_file_truncate_snapshot(u32 managed,

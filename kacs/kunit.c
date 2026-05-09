@@ -5041,6 +5041,89 @@ static void pkm_kunit_fchdir_snapshot_requires_traverse(struct kunit *test)
 			-EACCES);
 }
 
+static void pkm_kunit_file_write_intent_append_and_positioned(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_write_intent_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, 0, 0, false),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_write_intent_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, O_APPEND, 0,
+				false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_write_intent_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, 0,
+				(u32)RWF_APPEND, false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_write_intent_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, 0, 0, true),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_write_intent_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, O_APPEND, 0,
+				true),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_write_intent_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, 0,
+				(u32)RWF_APPEND, true),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_write_intent_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, 0, 0, true),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_write_intent_snapshot(
+				0, 0, 0, 0, true),
+			0);
+}
+
+static void pkm_kunit_file_write_intent_noappend_fails_closed(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_write_intent_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, O_APPEND,
+				(u32)RWF_NOAPPEND, false),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_write_intent_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, O_APPEND,
+				(u32)RWF_NOAPPEND, false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_write_intent_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, 0,
+				(u32)RWF_APPEND | (u32)RWF_NOAPPEND, false),
+			-EACCES);
+}
+
+static void pkm_kunit_file_write_intent_marker_drives_permission(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_write_intent(
+				1, PKM_KUNIT_FILE_APPEND_DATA, 0,
+				(u32)RWF_APPEND, false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_write_intent(
+				1, PKM_KUNIT_FILE_APPEND_DATA, O_APPEND,
+				(u32)RWF_NOAPPEND, false),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_write_intent(
+				1, PKM_KUNIT_FILE_WRITE_DATA, 0, 0, true),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_permission_write_intent_mismatch(),
+			-EACCES);
+}
+
 static void pkm_kunit_file_lock_snapshot_shared_and_exclusive(
 	struct kunit *test)
 {
@@ -16668,6 +16751,9 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_permission_snapshot_write_and_append),
 	KUNIT_CASE(pkm_kunit_file_permission_snapshot_combined_masks),
 	KUNIT_CASE(pkm_kunit_fchdir_snapshot_requires_traverse),
+	KUNIT_CASE(pkm_kunit_file_write_intent_append_and_positioned),
+	KUNIT_CASE(pkm_kunit_file_write_intent_noappend_fails_closed),
+	KUNIT_CASE(pkm_kunit_file_write_intent_marker_drives_permission),
 	KUNIT_CASE(pkm_kunit_file_lock_snapshot_shared_and_exclusive),
 	KUNIT_CASE(pkm_kunit_file_lock_snapshot_denials_and_unmanaged),
 	KUNIT_CASE(pkm_kunit_file_truncate_snapshot_requires_write_data),

@@ -203,6 +203,13 @@ struct pkm_kacs_file_security {
 	u8 delete_on_close;
 };
 
+struct pkm_kacs_file_write_intent {
+	struct file *file;
+	u32 rwf_flags;
+	u8 active;
+	u8 positioned;
+};
+
 struct pkm_kacs_inode_security {
 	struct mutex lock;
 	struct pkm_kacs_inode_sd_cache __rcu *sd_cache;
@@ -231,6 +238,7 @@ struct pkm_kacs_task_security {
 	const struct cred *impersonation_saved_cred;
 	struct pkm_kacs_native_open_request native_open;
 	struct pkm_kacs_native_create_request native_create;
+	struct pkm_kacs_file_write_intent write_intent;
 };
 
 struct pkm_kacs_socket_security {
@@ -398,6 +406,9 @@ static int pkm_kacs_file_open(struct file *file);
 static int pkm_kacs_file_permission(struct file *file, int mask);
 static int pkm_kacs_file_lock(struct file *file, unsigned int cmd);
 static int pkm_kacs_file_truncate(struct file *file);
+int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,
+				     bool positioned);
+void pkm_kacs_file_end_write_intent(struct file *file);
 static int pkm_kacs_sk_alloc_security(struct sock *sk, int family,
 				      gfp_t priority);
 static void pkm_kacs_sk_free_security(struct sock *sk);
@@ -422,6 +433,9 @@ static int pkm_kacs_check_mprotect_snapshot(struct file *file,
 					    unsigned long prot);
 static int pkm_kacs_check_file_permission_snapshot(struct file *file,
 						   int mask);
+static int pkm_kacs_check_file_write_intent_snapshot(struct file *file,
+						     u32 rwf_flags,
+						     bool positioned);
 static int pkm_kacs_check_file_lock_snapshot(struct file *file,
 					     unsigned int cmd);
 static int pkm_kacs_check_file_truncate_snapshot(struct file *file);
@@ -2039,6 +2053,44 @@ static int pkm_kacs_file_truncate(struct file *file)
 	return pkm_kacs_check_file_truncate_snapshot(file);
 }
 
+int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,
+				     bool positioned)
+{
+	struct pkm_kacs_task_security *task_sec;
+
+	if (!file || !current || !current->security)
+		return -EACCES;
+
+	task_sec = pkm_kacs_task(current);
+	if (task_sec->write_intent.active)
+		return -EACCES;
+
+	task_sec->write_intent.file = file;
+	task_sec->write_intent.rwf_flags = rwf_flags;
+	task_sec->write_intent.positioned = positioned ? 1 : 0;
+	task_sec->write_intent.active = 1;
+	return 0;
+}
+
+void pkm_kacs_file_end_write_intent(struct file *file)
+{
+	struct pkm_kacs_task_security *task_sec;
+
+	(void)file;
+
+	if (!current || !current->security)
+		return;
+
+	task_sec = pkm_kacs_task(current);
+	if (!task_sec->write_intent.active)
+		return;
+
+	task_sec->write_intent.active = 0;
+	task_sec->write_intent.file = NULL;
+	task_sec->write_intent.rwf_flags = 0;
+	task_sec->write_intent.positioned = 0;
+}
+
 int pkm_kacs_file_fallocate(struct file *file, int mode)
 {
 	int ret;
@@ -2893,6 +2945,8 @@ static int pkm_kacs_check_file_permission_snapshot(struct file *file,
 						   int mask)
 {
 	struct pkm_kacs_file_security *file_sec;
+	struct pkm_kacs_task_security *task_sec = NULL;
+	struct pkm_kacs_file_write_intent marker = { };
 	u32 required_access = 0;
 	bool append_intent;
 	bool write_intent;
@@ -2915,6 +2969,21 @@ static int pkm_kacs_check_file_permission_snapshot(struct file *file,
 		return -EACCES;
 
 	write_intent = (mask & MAY_WRITE) != 0;
+	if (write_intent && current && current->security) {
+		task_sec = pkm_kacs_task(current);
+		if (task_sec->write_intent.active) {
+			if (task_sec->write_intent.file != file)
+				return -EACCES;
+			marker = task_sec->write_intent;
+			task_sec->write_intent.active = 0;
+			task_sec->write_intent.file = NULL;
+			task_sec->write_intent.rwf_flags = 0;
+			task_sec->write_intent.positioned = 0;
+			return pkm_kacs_check_file_write_intent_snapshot(
+				file, marker.rwf_flags, marker.positioned != 0);
+		}
+	}
+
 	append_intent = (mask & MAY_APPEND) != 0 ||
 			(write_intent && (file->f_flags & O_APPEND) != 0);
 	if (write_intent || append_intent) {
@@ -2932,6 +3001,52 @@ static int pkm_kacs_check_file_permission_snapshot(struct file *file,
 	}
 
 	return 0;
+}
+
+static int pkm_kacs_check_file_write_intent_snapshot(struct file *file,
+						     u32 rwf_flags,
+						     bool positioned)
+{
+	struct pkm_kacs_file_security *file_sec;
+	bool append_intent;
+	bool noappend;
+	u32 granted_access;
+
+	if (!file)
+		return -EACCES;
+	if (!file->f_security)
+		return -EACCES;
+
+	file_sec = pkm_kacs_file(file);
+	if (!file_sec->managed)
+		return 0;
+
+	if ((rwf_flags & RWF_APPEND) != 0 &&
+	    (rwf_flags & RWF_NOAPPEND) != 0)
+		return -EACCES;
+
+	noappend = (rwf_flags & RWF_NOAPPEND) != 0;
+	append_intent = !noappend &&
+			(((rwf_flags & RWF_APPEND) != 0) ||
+			 ((file->f_flags & O_APPEND) != 0));
+	granted_access = file_sec->granted_access;
+
+	if (noappend || (positioned && !append_intent)) {
+		if ((granted_access & PKM_KACS_FILE_WRITE_DATA) != 0)
+			return 0;
+		return -EACCES;
+	}
+
+	if (append_intent) {
+		if ((granted_access & (PKM_KACS_FILE_WRITE_DATA |
+				       PKM_KACS_FILE_APPEND_DATA)) != 0)
+			return 0;
+		return -EACCES;
+	}
+
+	if ((granted_access & PKM_KACS_FILE_WRITE_DATA) != 0)
+		return 0;
+	return -EACCES;
 }
 
 static int pkm_kacs_check_file_lock_snapshot(struct file *file,
@@ -8754,6 +8869,102 @@ int pkm_kacs_kunit_check_file_permission_snapshot(u32 managed,
 
 	ret = pkm_kacs_check_file_permission_snapshot(&state.file, mask);
 	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
+}
+
+int pkm_kacs_kunit_check_file_write_intent_snapshot(u32 managed,
+						    u32 granted_access,
+						    int file_flags,
+						    u32 rwf_flags,
+						    bool positioned)
+{
+	struct pkm_kacs_kunit_file_mount_state state = { };
+	struct pkm_kacs_file_security *file_sec;
+	int ret;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&state, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		return ret;
+
+	file_sec = pkm_kacs_file(&state.file);
+	file_sec->managed = managed ? 1 : 0;
+	file_sec->granted_access = granted_access;
+	state.file.f_flags = file_flags;
+
+	ret = pkm_kacs_check_file_write_intent_snapshot(
+		&state.file, rwf_flags, positioned);
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
+}
+
+int pkm_kacs_kunit_check_file_permission_write_intent(
+	u32 managed, u32 granted_access, int file_flags, u32 rwf_flags,
+	bool positioned)
+{
+	struct pkm_kacs_kunit_file_mount_state state = { };
+	struct pkm_kacs_file_security *file_sec;
+	int ret;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&state, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		return ret;
+
+	file_sec = pkm_kacs_file(&state.file);
+	file_sec->managed = managed ? 1 : 0;
+	file_sec->granted_access = granted_access;
+	state.file.f_flags = file_flags;
+
+	ret = pkm_kacs_file_begin_write_intent(&state.file, rwf_flags,
+					       positioned);
+	if (!ret) {
+		ret = pkm_kacs_check_file_permission_snapshot(&state.file,
+							      MAY_WRITE);
+		pkm_kacs_file_end_write_intent(&state.file);
+	}
+
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
+}
+
+int pkm_kacs_kunit_check_file_permission_write_intent_mismatch(void)
+{
+	struct pkm_kacs_kunit_file_mount_state first = { };
+	struct pkm_kacs_kunit_file_mount_state second = { };
+	struct pkm_kacs_file_security *file_sec;
+	int ret;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&first, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		return ret;
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&second, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		goto out_first;
+
+	file_sec = pkm_kacs_file(&first.file);
+	file_sec->managed = 1;
+	file_sec->granted_access = PKM_KACS_FILE_APPEND_DATA;
+	file_sec = pkm_kacs_file(&second.file);
+	file_sec->managed = 1;
+	file_sec->granted_access = PKM_KACS_FILE_APPEND_DATA;
+
+	ret = pkm_kacs_file_begin_write_intent(&first.file, 0, true);
+	if (!ret) {
+		ret = pkm_kacs_check_file_permission_snapshot(&second.file,
+							      MAY_WRITE);
+		pkm_kacs_file_end_write_intent(&first.file);
+	}
+
+	pkm_kacs_kunit_cleanup_file_mount_state(&second);
+out_first:
+	pkm_kacs_kunit_cleanup_file_mount_state(&first);
 	return ret;
 }
 

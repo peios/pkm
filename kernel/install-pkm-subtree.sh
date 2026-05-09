@@ -213,12 +213,15 @@ require_file "$kernel_root/security/Makefile"
 require_file "$kernel_root/security/Kconfig"
 require_file "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
 require_file "$kernel_root/arch/x86/kernel/process_64.c"
+require_file "$kernel_root/fs/aio.c"
 require_file "$kernel_root/fs/proc/base.c"
 require_file "$kernel_root/fs/proc/array.c"
 require_file "$kernel_root/fs/open.c"
+require_file "$kernel_root/fs/read_write.c"
 require_file "$kernel_root/fs/xattr.c"
 require_file "$kernel_root/include/linux/cred.h"
 require_file "$kernel_root/include/linux/ptrace.h"
+require_file "$kernel_root/io_uring/rw.c"
 require_file "$kernel_root/kernel/pid.c"
 require_file "$kernel_root/kernel/sched/syscalls.c"
 require_file "$kernel_root/kernel/sys.c"
@@ -432,6 +435,116 @@ replace_line_after_anchor_once 'SYSCALL_DEFINE5(prctl, int, option, unsigned lon
 #endif
 	error = security_task_prctl(option, arg2, arg3, arg4, arg5);' \
 	"$kernel_root/kernel/sys.c"
+insert_block_before_exact_once 'ssize_t ksys_pwrite64(unsigned int fd, const char __user *buf,' \
+	'extern int pkm_kacs_file_begin_write_intent' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,
+					    bool positioned);
+extern void pkm_kacs_file_end_write_intent(struct file *file);
+#endif
+
+' \
+	"$kernel_root/fs/read_write.c"
+replace_line_after_anchor_once 'ssize_t ksys_pwrite64(unsigned int fd, const char __user *buf,' \
+	'		return vfs_write(fd_file(f), buf, count, &pos);' \
+	'		{
+#ifdef CONFIG_SECURITY_PKM
+			ssize_t pkm_ret;
+
+			pkm_ret = pkm_kacs_file_begin_write_intent(
+				fd_file(f), 0, true);
+			if (pkm_ret)
+				return pkm_ret;
+			pkm_ret = vfs_write(fd_file(f), buf, count, &pos);
+			pkm_kacs_file_end_write_intent(fd_file(f));
+			return pkm_ret;
+#else
+			return vfs_write(fd_file(f), buf, count, &pos);
+#endif
+		}' \
+	"$kernel_root/fs/read_write.c"
+replace_line_after_anchor_once 'static ssize_t do_writev(unsigned long fd, const struct iovec __user *vec,' \
+	'		ret = vfs_writev(fd_file(f), vec, vlen, ppos, flags);' \
+	'		{
+#ifdef CONFIG_SECURITY_PKM
+			ret = pkm_kacs_file_begin_write_intent(
+				fd_file(f), (u32)flags, false);
+			if (!ret) {
+				ret = vfs_writev(fd_file(f), vec, vlen, ppos,
+						 flags);
+				pkm_kacs_file_end_write_intent(fd_file(f));
+			}
+#else
+			ret = vfs_writev(fd_file(f), vec, vlen, ppos, flags);
+#endif
+		}' \
+	"$kernel_root/fs/read_write.c"
+replace_line_after_anchor_once 'static ssize_t do_pwritev(unsigned long fd, const struct iovec __user *vec,' \
+	'			ret = vfs_writev(fd_file(f), vec, vlen, &pos, flags);' \
+	'			{
+#ifdef CONFIG_SECURITY_PKM
+				ret = pkm_kacs_file_begin_write_intent(
+					fd_file(f), (u32)flags, true);
+				if (!ret) {
+					ret = vfs_writev(fd_file(f), vec,
+							 vlen, &pos, flags);
+					pkm_kacs_file_end_write_intent(
+						fd_file(f));
+				}
+#else
+				ret = vfs_writev(fd_file(f), vec, vlen, &pos,
+						 flags);
+#endif
+			}' \
+	"$kernel_root/fs/read_write.c"
+insert_block_before_exact_once 'int io_write(struct io_kiocb *req, unsigned int issue_flags)' \
+	'extern int pkm_kacs_file_begin_write_intent' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,
+					    bool positioned);
+extern void pkm_kacs_file_end_write_intent(struct file *file);
+#endif
+
+' \
+	"$kernel_root/io_uring/rw.c"
+replace_line_after_anchor_once 'int io_write(struct io_kiocb *req, unsigned int issue_flags)' \
+	'	ret = rw_verify_area(WRITE, req->file, ppos, req->cqe.res);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	ret = pkm_kacs_file_begin_write_intent(
+		req->file, (u32)rw->flags,
+		ppos && !(req->flags & REQ_F_CUR_POS));
+	if (unlikely(ret))
+		return ret;
+	ret = rw_verify_area(WRITE, req->file, ppos, req->cqe.res);
+	pkm_kacs_file_end_write_intent(req->file);
+#else
+	ret = rw_verify_area(WRITE, req->file, ppos, req->cqe.res);
+#endif' \
+	"$kernel_root/io_uring/rw.c"
+insert_block_before_exact_once 'static int aio_write(struct kiocb *req, const struct iocb *iocb,' \
+	'extern int pkm_kacs_file_begin_write_intent' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,
+					    bool positioned);
+extern void pkm_kacs_file_end_write_intent(struct file *file);
+#endif
+
+' \
+	"$kernel_root/fs/aio.c"
+replace_line_after_anchor_once 'static int aio_write(struct kiocb *req, const struct iocb *iocb,' \
+	'	ret = rw_verify_area(WRITE, file, &req->ki_pos, iov_iter_count(&iter));' \
+	'#ifdef CONFIG_SECURITY_PKM
+	ret = pkm_kacs_file_begin_write_intent(file, (u32)iocb->aio_rw_flags,
+					       true);
+	if (!ret) {
+		ret = rw_verify_area(WRITE, file, &req->ki_pos,
+				     iov_iter_count(&iter));
+		pkm_kacs_file_end_write_intent(file);
+	}
+#else
+	ret = rw_verify_area(WRITE, file, &req->ki_pos, iov_iter_count(&iter));
+#endif' \
+	"$kernel_root/fs/aio.c"
 replace_line_after_anchor_once 'SYSCALL_DEFINE1(fchdir, unsigned int, fd)' \
 	'	error = file_permission(fd_file(f), MAY_EXEC | MAY_CHDIR);' \
 	'#ifdef CONFIG_SECURITY_PKM
