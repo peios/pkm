@@ -562,6 +562,23 @@ replace_line_after_anchor_once 'SYSCALL_DEFINE1(fchdir, unsigned int, fd)' \
 #endif
 ' \
 	"$kernel_root/fs/open.c"
+insert_block_before_exact_once 'static long do_handle_open(int mountdirfd, struct file_handle __user *ufh,' \
+	'extern int pkm_kacs_open_by_handle_at' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_open_by_handle_at(void);
+#endif
+
+' \
+	"$kernel_root/fs/fhandle.c"
+replace_line_after_anchor_once 'static long do_handle_open(int mountdirfd, struct file_handle __user *ufh,' \
+	'	retval = handle_to_path(mountdirfd, ufh, &path, open_flag);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	retval = pkm_kacs_open_by_handle_at();
+	if (retval)
+		return retval;
+#endif
+	retval = handle_to_path(mountdirfd, ufh, &path, open_flag);' \
+	"$kernel_root/fs/fhandle.c"
 insert_block_before_exact_once 'static bool access_need_override_creds(int flags)' \
 	'extern int pkm_kacs_path_access' \
 	'#ifdef CONFIG_SECURITY_PKM

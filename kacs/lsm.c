@@ -78,6 +78,7 @@
 #define PKM_KACS_PRIVILEGE_SE_AUDIT (1ULL << 21)
 #define PKM_KACS_PRIVILEGE_SE_PROFILE_SINGLE_PROCESS (1ULL << 13)
 #define PKM_KACS_PRIVILEGE_SE_RESTORE (1ULL << 18)
+#define PKM_KACS_PRIVILEGE_SE_CHANGE_NOTIFY (1ULL << 23)
 #define PKM_KACS_PRIVILEGE_SE_BIND_PRIVILEGED_PORT (1ULL << 63)
 #define PKM_KACS_LSM_PRLIMIT_READ 1U
 #define PKM_KACS_LSM_PRLIMIT_WRITE 2U
@@ -430,6 +431,7 @@ static int pkm_kacs_inode_file_getattr(struct dentry *dentry,
 static int pkm_kacs_inode_file_setattr(struct dentry *dentry,
 				       struct file_kattr *fa);
 static int pkm_kacs_inode_listxattr(struct dentry *dentry);
+static int pkm_kacs_inode_permission(struct inode *inode, int mask);
 static int pkm_kacs_inode_init_security(struct inode *inode,
 					struct inode *dir,
 					const struct qstr *qstr,
@@ -498,6 +500,9 @@ static int pkm_kacs_check_file_fcntl_snapshot(struct file *file,
 static int pkm_kacs_check_file_truncate_snapshot(struct file *file);
 static int pkm_kacs_check_file_fallocate_snapshot(struct file *file,
 						  int mode);
+static long pkm_kacs_check_inode_permission_live_for_subject(
+	const void *subject_token, struct inode *inode, struct dentry *dentry,
+	int mask);
 static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm);
 static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 					 const struct file *file);
@@ -1525,6 +1530,12 @@ static int pkm_kacs_inode_listxattr(struct dentry *dentry)
 		return -EACCES;
 
 	return 0;
+}
+
+static int pkm_kacs_inode_permission(struct inode *inode, int mask)
+{
+	return (int)pkm_kacs_check_inode_permission_live_for_subject(
+		pkm_kacs_current_effective_token_ptr(), inode, NULL, mask);
 }
 
 static void pkm_kacs_clear_file_metadata_decision(
@@ -2683,6 +2694,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_setxattr, pkm_kacs_inode_setxattr),
 	LSM_HOOK_INIT(inode_removexattr, pkm_kacs_inode_removexattr),
 	LSM_HOOK_INIT(inode_listxattr, pkm_kacs_inode_listxattr),
+	LSM_HOOK_INIT(inode_permission, pkm_kacs_inode_permission),
 	LSM_HOOK_INIT(inode_init_security, pkm_kacs_inode_init_security),
 	LSM_HOOK_INIT(file_alloc_security, pkm_kacs_file_alloc_security),
 	LSM_HOOK_INIT(file_release, pkm_kacs_file_release),
@@ -4006,6 +4018,13 @@ static long pkm_kacs_require_enabled_privilege(const void *subject_token,
 	return 0;
 }
 
+int pkm_kacs_open_by_handle_at(void)
+{
+	return (int)pkm_kacs_require_enabled_privilege(
+		pkm_kacs_current_effective_token_ptr(),
+		PKM_KACS_PRIVILEGE_SE_CHANGE_NOTIFY);
+}
+
 static long pkm_kacs_authorize_process_sd_access_nondebug(
 	const void *subject_token,
 	const struct pkm_kacs_process_sd *process_sd, u32 desired_access,
@@ -4745,6 +4764,86 @@ static long pkm_kacs_authorize_path_file_access_core(
 	pkm_kacs_init_path_anchor_file(&file, path);
 	return pkm_kacs_authorize_live_file_access_core(subject_token, &file,
 							desired_access);
+}
+
+static bool pkm_kacs_inode_permission_is_traverse(struct inode *inode, int mask)
+{
+	int permission_mask = mask & ~MAY_NOT_BLOCK;
+
+	if (!inode || !S_ISDIR(inode->i_mode))
+		return false;
+	if ((permission_mask & MAY_EXEC) == 0)
+		return false;
+	if ((permission_mask & (MAY_OPEN | MAY_ACCESS)) != 0)
+		return false;
+
+	return true;
+}
+
+static long pkm_kacs_authorize_inode_file_access_core(
+	const void *subject_token, struct inode *inode, struct dentry *dentry,
+	u32 desired_access)
+{
+	struct vfsmount mnt = {};
+	struct dentry *alias = NULL;
+	struct path path = {};
+	struct file file = {};
+	long ret;
+
+	if (!subject_token || !inode || desired_access == 0)
+		return -EINVAL;
+	if (!inode->i_security)
+		return -EACCES;
+
+	if (!dentry) {
+		alias = d_find_any_alias(inode);
+		if (!alias)
+			return -EACCES;
+		dentry = alias;
+	}
+
+	mnt.mnt_root = dentry;
+	mnt.mnt_sb = inode->i_sb;
+	mnt.mnt_idmap = &nop_mnt_idmap;
+	path.mnt = &mnt;
+	path.dentry = dentry;
+	pkm_kacs_init_path_anchor_file(&file, &path);
+
+	ret = pkm_kacs_authorize_live_file_access_core(subject_token, &file,
+						       desired_access);
+	if (alias)
+		dput(alias);
+	return ret;
+}
+
+static long pkm_kacs_check_inode_permission_live_for_subject(
+	const void *subject_token, struct inode *inode, struct dentry *dentry,
+	int mask)
+{
+	bool explicit_chdir;
+
+	if (!pkm_kacs_inode_permission_is_traverse(inode, mask))
+		return 0;
+	if (pkm_kacs_inode_on_unmanaged_mount(inode))
+		return 0;
+	if (!subject_token)
+		return -EACCES;
+
+	explicit_chdir = (mask & MAY_CHDIR) != 0;
+	if (!explicit_chdir &&
+	    kacs_rust_token_has_enabled_privilege(
+		    subject_token, PKM_KACS_PRIVILEGE_SE_CHANGE_NOTIFY)) {
+		if (!kacs_rust_token_mark_privileges_used(
+			    subject_token, PKM_KACS_PRIVILEGE_SE_CHANGE_NOTIFY))
+			return -EACCES;
+		return 0;
+	}
+
+	if ((mask & MAY_NOT_BLOCK) != 0)
+		return -ECHILD;
+
+	return pkm_kacs_authorize_inode_file_access_core(
+		subject_token, inode, dentry, PKM_KACS_FILE_TRAVERSE);
 }
 
 static bool pkm_kacs_inode_on_unmanaged_mount(const struct inode *inode)
@@ -9919,6 +10018,45 @@ int pkm_kacs_kunit_check_path_metadata_live(const u8 *target_file_sd_ptr,
 	ret = pkm_kacs_kunit_call_path_metadata_op(&state, op, mode, name);
 	pkm_kacs_kunit_cleanup_file_mount_state(&state);
 	return ret;
+}
+
+int pkm_kacs_kunit_check_inode_permission_live(
+	const u8 *target_file_sd_ptr, size_t target_file_sd_len,
+	u32 target_file_sd_state, u32 mount_policy,
+	const void *subject_token, int mask)
+{
+	struct pkm_kacs_kunit_file_mount_state state = { };
+	struct pkm_kacs_inode_sd_cache *cache;
+	int ret;
+
+	if (!subject_token)
+		return -EINVAL;
+
+	cache = pkm_kacs_kunit_file_sd_cache_alloc(target_file_sd_ptr,
+						   target_file_sd_len,
+						   target_file_sd_state);
+	if (!cache)
+		return -EINVAL;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&state, TMPFS_MAGIC, cache, mount_policy, NULL, 0, S_IFDIR,
+		true);
+	if (ret) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		return ret;
+	}
+
+	ret = (int)pkm_kacs_check_inode_permission_live_for_subject(
+		subject_token, &state.inode, &state.dentry, mask);
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
+}
+
+int pkm_kacs_kunit_check_open_by_handle_for_subject(
+	const void *subject_token)
+{
+	return (int)pkm_kacs_require_enabled_privilege(
+		subject_token, PKM_KACS_PRIVILEGE_SE_CHANGE_NOTIFY);
 }
 
 int pkm_kacs_kunit_check_file_ioctl_snapshot(u32 managed, u32 granted_access,

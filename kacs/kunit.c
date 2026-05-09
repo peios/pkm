@@ -70,6 +70,7 @@
 #define PKM_KUNIT_SE_INCREASE_BASE_PRIORITY_PRIVILEGE (1ULL << 14)
 #define PKM_KUNIT_SE_SHUTDOWN_PRIVILEGE (1ULL << 19)
 #define PKM_KUNIT_SE_DEBUG_PRIVILEGE (1ULL << 20)
+#define PKM_KUNIT_SE_CHANGE_NOTIFY_PRIVILEGE (1ULL << 23)
 #define PKM_KUNIT_SE_SECURITY_PRIVILEGE (1ULL << 8)
 #define PKM_KUNIT_SE_RESTORE_PRIVILEGE (1ULL << 18)
 #define PKM_KUNIT_SE_RELABEL_PRIVILEGE (1ULL << 32)
@@ -5547,6 +5548,191 @@ static void pkm_kunit_path_metadata_access_live(struct kunit *test)
 				PKM_KACS_KUNIT_PATH_METADATA_ACCESS,
 				MAY_READ | MAY_EXEC, NULL),
 			-EACCES);
+}
+
+static int pkm_kunit_check_inode_permission_with_mask(
+	const void *subject_token, u32 granted_mask, int mask)
+{
+	const u8 *file_sd;
+	size_t file_sd_len = 0;
+	int ret;
+
+	if (!subject_token)
+		return -EINVAL;
+
+	file_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						   granted_mask,
+						   &file_sd_len);
+	if (!file_sd)
+		return -ENOMEM;
+
+	ret = pkm_kacs_kunit_check_inode_permission_live(
+		file_sd, file_sd_len, PKM_KACS_KUNIT_FILE_SD_VALID,
+		PKM_KACS_MOUNT_POLICY_DENY_MISSING, subject_token, mask);
+	pkm_kacs_free((void *)file_sd);
+	return ret;
+}
+
+static void pkm_kunit_inode_permission_traverse_live(struct kunit *test)
+{
+	const void *subject_token;
+
+	subject_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_inode_permission_with_mask(
+				subject_token, PKM_KUNIT_FILE_TRAVERSE,
+				MAY_EXEC),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_inode_permission_with_mask(
+				subject_token, PKM_KUNIT_FILE_READ_DATA,
+				MAY_EXEC),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_inode_permission_with_mask(
+				subject_token, PKM_KUNIT_FILE_TRAVERSE,
+				MAY_READ),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_inode_permission_with_mask(
+				subject_token, PKM_KUNIT_FILE_READ_DATA,
+				MAY_EXEC | MAY_OPEN),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_inode_permission_with_mask(
+				subject_token, PKM_KUNIT_FILE_READ_DATA,
+				MAY_EXEC | MAY_ACCESS),
+			0);
+
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_inode_permission_change_notify_bypass(
+	struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+
+	subject_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_effective_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token,
+							 &before));
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_inode_permission_live(
+				NULL, 0, PKM_KACS_KUNIT_FILE_SD_MISSING,
+				PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+				subject_token, MAY_EXEC),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token,
+							 &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_CHANGE_NOTIFY_PRIVILEGE);
+
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_inode_permission_chdir_requires_traverse(
+	struct kunit *test)
+{
+	const void *subject_token;
+
+	subject_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_effective_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_inode_permission_with_mask(
+				subject_token, PKM_KUNIT_FILE_READ_DATA,
+				MAY_EXEC | MAY_CHDIR),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_inode_permission_with_mask(
+				subject_token, PKM_KUNIT_FILE_TRAVERSE,
+				MAY_EXEC | MAY_CHDIR),
+			0);
+
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_inode_permission_nonblocking_retries(
+	struct kunit *test)
+{
+	const void *subject_token;
+
+	subject_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_inode_permission_with_mask(
+				subject_token, PKM_KUNIT_FILE_TRAVERSE,
+				MAY_EXEC | MAY_NOT_BLOCK),
+			-ECHILD);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_check_inode_permission_with_mask(
+				subject_token, PKM_KUNIT_FILE_TRAVERSE,
+				MAY_EXEC),
+			0);
+
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_inode_permission_unmanaged_skips(struct kunit *test)
+{
+	const void *subject_token;
+
+	subject_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_inode_permission_live(
+				NULL, 0, PKM_KACS_KUNIT_FILE_SD_MISSING,
+				PKM_KACS_MOUNT_POLICY_UNMANAGED,
+				subject_token, MAY_EXEC),
+			0);
+
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_open_by_handle_requires_change_notify(struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *privileged_token;
+
+	subject_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_open_by_handle_for_subject(
+				subject_token),
+			-EPERM);
+	kacs_rust_token_drop(subject_token);
+
+	privileged_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_effective_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, privileged_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(privileged_token,
+							 &before));
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_open_by_handle_for_subject(
+				privileged_token),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(privileged_token,
+							 &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_CHANGE_NOTIFY_PRIVILEGE);
+	kacs_rust_token_drop(privileged_token);
 }
 
 static void pkm_kunit_file_ioctl_snapshot_read_classified(struct kunit *test)
@@ -17415,6 +17601,12 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_path_metadata_xattr_live),
 	KUNIT_CASE(pkm_kunit_path_metadata_xattr_protected_names),
 	KUNIT_CASE(pkm_kunit_path_metadata_access_live),
+	KUNIT_CASE(pkm_kunit_inode_permission_traverse_live),
+	KUNIT_CASE(pkm_kunit_inode_permission_change_notify_bypass),
+	KUNIT_CASE(pkm_kunit_inode_permission_chdir_requires_traverse),
+	KUNIT_CASE(pkm_kunit_inode_permission_nonblocking_retries),
+	KUNIT_CASE(pkm_kunit_inode_permission_unmanaged_skips),
+	KUNIT_CASE(pkm_kunit_open_by_handle_requires_change_notify),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_read_classified),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_write_classified),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_fdlocal_fallback_unmanaged),

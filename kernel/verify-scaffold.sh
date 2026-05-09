@@ -141,7 +141,8 @@ for fd_metadata_symbol in \
 	"pkm_kacs_file_listxattr" \
 	"pkm_kacs_file_end_metadata" \
 	"pkm_kacs_path_fileattr_set" \
-	"pkm_kacs_path_access"; do
+	"pkm_kacs_path_access" \
+	"pkm_kacs_open_by_handle_at"; do
 	if ! rg -q "$fd_metadata_symbol" \
 		"$repo_root/kernel/install-pkm-subtree.sh"; then
 		die "install-pkm-subtree.sh does not stage fd metadata patch: $fd_metadata_symbol"
@@ -153,12 +154,20 @@ for metadata_hook_symbol in \
 	"inode_setattr" \
 	"inode_file_getattr" \
 	"inode_file_setattr" \
-	"inode_listxattr"; do
+	"inode_listxattr" \
+	"inode_permission"; do
 	if ! rg -q "LSM_HOOK_INIT\\(${metadata_hook_symbol}," \
 		"$repo_root/kacs/lsm.c"; then
 		die "lsm.c does not register metadata hook: $metadata_hook_symbol"
 	fi
 done
+
+if ! rg -q 'static long do_handle_open\(int mountdirfd, struct file_handle __user \*ufh,' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'pkm_kacs_open_by_handle_at\(\)' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the open_by_handle_at KACS privilege gate"
+fi
 
 if ! rg -q 'SYSCALL_DEFINE1\(fchdir, unsigned int, fd\)' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \

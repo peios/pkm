@@ -7,7 +7,10 @@
 #include "access_check.h"
 
 struct file;
+struct path;
 struct task_struct;
+
+int pkm_kacs_open_by_handle_at(void);
 
 #define KACS_PROCESS_TERMINATE 0x0001U
 #define KACS_PROCESS_SIGNAL 0x0002U
@@ -749,6 +752,12 @@ int pkm_kacs_kunit_check_path_metadata_live(const u8 *target_file_sd_ptr,
 					    size_t target_file_sd_len,
 					    u32 target_file_sd_state, u32 op,
 					    u32 mode, const char *name);
+int pkm_kacs_kunit_check_inode_permission_live(
+	const u8 *target_file_sd_ptr, size_t target_file_sd_len,
+	u32 target_file_sd_state, u32 mount_policy,
+	const void *subject_token, int mask);
+int pkm_kacs_kunit_check_open_by_handle_for_subject(
+	const void *subject_token);
 int pkm_kacs_kunit_check_file_ioctl_snapshot(u32 managed, u32 granted_access,
 					     umode_t mode, unsigned int cmd,
 					     bool compat);
