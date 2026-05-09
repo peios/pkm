@@ -15,10 +15,12 @@
 #include <linux/dcache.h>
 #include <linux/falloc.h>
 #include <linux/fcntl.h>
+#include <linux/fiemap.h>
 #include <linux/file.h>
 #include <linux/elf.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
+#include <linux/fscrypt.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/math64.h>
@@ -50,6 +52,7 @@
 #include <linux/vmalloc.h>
 #include <linux/xattr.h>
 
+#include <asm/ioctls.h>
 #include <asm/cpufeatures.h>
 
 #include <net/sock.h>
@@ -125,6 +128,9 @@
 	 LABEL_SECURITY_INFORMATION)
 #define PKM_KACS_SD_ALLOWED_AT_FLAGS (AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)
 #define PKM_KACS_OPEN_ALLOWED_AT_FLAGS (AT_SYMLINK_NOFOLLOW)
+#define PKM_KACS_FILE_DATA_RIGHTS                                             \
+	(PKM_KACS_FILE_READ_DATA | PKM_KACS_FILE_WRITE_DATA |                \
+	 PKM_KACS_FILE_APPEND_DATA)
 #define PKM_KACS_DIRECTORY_MUTATION_RIGHTS                                     \
 	(PKM_KACS_FILE_WRITE_DATA | PKM_KACS_FILE_APPEND_DATA |              \
 	 PKM_KACS_FILE_DELETE_CHILD)
@@ -405,6 +411,10 @@ static int pkm_kacs_inode_init_security(struct inode *inode,
 					int *xattr_count);
 static int pkm_kacs_file_open(struct file *file);
 static int pkm_kacs_file_permission(struct file *file, int mask);
+static int pkm_kacs_file_ioctl(struct file *file, unsigned int cmd,
+			       unsigned long arg);
+static int pkm_kacs_file_ioctl_compat(struct file *file, unsigned int cmd,
+				      unsigned long arg);
 static int pkm_kacs_file_lock(struct file *file, unsigned int cmd);
 static int pkm_kacs_file_fcntl(struct file *file, unsigned int cmd,
 			       unsigned long arg);
@@ -439,6 +449,10 @@ static int pkm_kacs_check_file_permission_snapshot(struct file *file,
 static int pkm_kacs_check_file_write_intent_snapshot(struct file *file,
 						     u32 rwf_flags,
 						     bool positioned);
+static int pkm_kacs_check_file_ioctl_snapshot(struct file *file,
+					      unsigned int cmd,
+					      unsigned long arg,
+					      bool compat);
 static int pkm_kacs_check_file_lock_snapshot(struct file *file,
 					     unsigned int cmd);
 static int pkm_kacs_check_file_fcntl_snapshot(struct file *file,
@@ -2049,6 +2063,18 @@ static int pkm_kacs_file_permission(struct file *file, int mask)
 	return pkm_kacs_check_file_permission_snapshot(file, mask);
 }
 
+static int pkm_kacs_file_ioctl(struct file *file, unsigned int cmd,
+			       unsigned long arg)
+{
+	return pkm_kacs_check_file_ioctl_snapshot(file, cmd, arg, false);
+}
+
+static int pkm_kacs_file_ioctl_compat(struct file *file, unsigned int cmd,
+				      unsigned long arg)
+{
+	return pkm_kacs_check_file_ioctl_snapshot(file, cmd, arg, true);
+}
+
 static int pkm_kacs_file_lock(struct file *file, unsigned int cmd)
 {
 	return pkm_kacs_check_file_lock_snapshot(file, cmd);
@@ -2188,6 +2214,8 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(file_release, pkm_kacs_file_release),
 	LSM_HOOK_INIT(file_open, pkm_kacs_file_open),
 	LSM_HOOK_INIT(file_permission, pkm_kacs_file_permission),
+	LSM_HOOK_INIT(file_ioctl, pkm_kacs_file_ioctl),
+	LSM_HOOK_INIT(file_ioctl_compat, pkm_kacs_file_ioctl_compat),
 	LSM_HOOK_INIT(file_lock, pkm_kacs_file_lock),
 	LSM_HOOK_INIT(file_fcntl, pkm_kacs_file_fcntl),
 	LSM_HOOK_INIT(file_truncate, pkm_kacs_file_truncate),
@@ -3060,6 +3088,170 @@ static int pkm_kacs_check_file_write_intent_snapshot(struct file *file,
 	if ((granted_access & PKM_KACS_FILE_WRITE_DATA) != 0)
 		return 0;
 	return -EACCES;
+}
+
+enum pkm_kacs_ioctl_requirement {
+	PKM_KACS_IOCTL_REQUIRE_NONE,
+	PKM_KACS_IOCTL_REQUIRE_ANY_DATA,
+	PKM_KACS_IOCTL_REQUIRE_READ_DATA,
+	PKM_KACS_IOCTL_REQUIRE_WRITE_DATA,
+	PKM_KACS_IOCTL_REQUIRE_APPEND_OR_WRITE_DATA,
+	PKM_KACS_IOCTL_REQUIRE_READ_ATTRIBUTES,
+	PKM_KACS_IOCTL_REQUIRE_WRITE_ATTRIBUTES,
+};
+
+static unsigned int pkm_kacs_normalize_compat_ioctl_cmd(unsigned int cmd)
+{
+	switch (cmd) {
+	case FS_IOC32_GETFLAGS:
+		return FS_IOC_GETFLAGS;
+	case FS_IOC32_SETFLAGS:
+		return FS_IOC_SETFLAGS;
+	case FS_IOC32_GETVERSION:
+		return FS_IOC_GETVERSION;
+	case FS_IOC32_SETVERSION:
+		return FS_IOC_SETVERSION;
+#if defined(CONFIG_X86_64)
+	case FS_IOC_RESVSP_32:
+		return FS_IOC_RESVSP;
+	case FS_IOC_RESVSP64_32:
+		return FS_IOC_RESVSP64;
+	case FS_IOC_UNRESVSP_32:
+		return FS_IOC_UNRESVSP;
+	case FS_IOC_UNRESVSP64_32:
+		return FS_IOC_UNRESVSP64;
+	case FS_IOC_ZERO_RANGE_32:
+		return FS_IOC_ZERO_RANGE;
+#endif
+	default:
+		return cmd;
+	}
+}
+
+static enum pkm_kacs_ioctl_requirement
+pkm_kacs_classify_file_ioctl(unsigned int cmd, umode_t mode, bool compat)
+{
+	(void)compat;
+	cmd = pkm_kacs_normalize_compat_ioctl_cmd(cmd);
+
+	switch (cmd) {
+	case FIOCLEX:
+	case FIONCLEX:
+	case FIONBIO:
+	case FIOASYNC:
+		return PKM_KACS_IOCTL_REQUIRE_NONE;
+	case FIBMAP:
+	case FS_IOC_FIEMAP:
+		return PKM_KACS_IOCTL_REQUIRE_READ_DATA;
+	case FIONREAD:
+		if (S_ISREG(mode))
+			return PKM_KACS_IOCTL_REQUIRE_READ_DATA;
+		return PKM_KACS_IOCTL_REQUIRE_ANY_DATA;
+	case FIGETBSZ:
+	case FIOQSIZE:
+	case FS_IOC_GETFLAGS:
+	case FS_IOC_GETVERSION:
+	case FS_IOC_FSGETXATTR:
+	case FS_IOC_GETFSLABEL:
+	case FS_IOC_GETFSUUID:
+	case FS_IOC_GETFSSYSFSPATH:
+	case FS_IOC_GETLBMD_CAP:
+	case FS_IOC_GET_ENCRYPTION_PWSALT:
+	case FS_IOC_GET_ENCRYPTION_POLICY:
+	case FS_IOC_GET_ENCRYPTION_POLICY_EX:
+	case FS_IOC_GET_ENCRYPTION_KEY_STATUS:
+	case BLKGETSIZE64:
+		return PKM_KACS_IOCTL_REQUIRE_READ_ATTRIBUTES;
+	case FS_IOC_SETFLAGS:
+	case FS_IOC_SETVERSION:
+	case FS_IOC_FSSETXATTR:
+	case FS_IOC_SETFSLABEL:
+	case FS_IOC_SET_ENCRYPTION_POLICY:
+	case FS_IOC_ADD_ENCRYPTION_KEY:
+	case FS_IOC_REMOVE_ENCRYPTION_KEY:
+	case FS_IOC_REMOVE_ENCRYPTION_KEY_ALL_USERS:
+	case FIFREEZE:
+	case FITHAW:
+	case FITRIM:
+		return PKM_KACS_IOCTL_REQUIRE_WRITE_ATTRIBUTES;
+	case FS_IOC_RESVSP:
+	case FS_IOC_RESVSP64:
+		return PKM_KACS_IOCTL_REQUIRE_APPEND_OR_WRITE_DATA;
+	case FS_IOC_UNRESVSP:
+	case FS_IOC_UNRESVSP64:
+	case FS_IOC_ZERO_RANGE:
+	case FICLONE:
+	case FICLONERANGE:
+	case FIDEDUPERANGE:
+	case BLKFLSBUF:
+		return PKM_KACS_IOCTL_REQUIRE_WRITE_DATA;
+	default:
+		return PKM_KACS_IOCTL_REQUIRE_ANY_DATA;
+	}
+}
+
+static int pkm_kacs_check_ioctl_requirement(u32 granted_access,
+					    enum pkm_kacs_ioctl_requirement req)
+{
+	switch (req) {
+	case PKM_KACS_IOCTL_REQUIRE_NONE:
+		return 0;
+	case PKM_KACS_IOCTL_REQUIRE_ANY_DATA:
+		if ((granted_access & PKM_KACS_FILE_DATA_RIGHTS) != 0)
+			return 0;
+		return -EACCES;
+	case PKM_KACS_IOCTL_REQUIRE_READ_DATA:
+		if ((granted_access & PKM_KACS_FILE_READ_DATA) != 0)
+			return 0;
+		return -EACCES;
+	case PKM_KACS_IOCTL_REQUIRE_WRITE_DATA:
+		if ((granted_access & PKM_KACS_FILE_WRITE_DATA) != 0)
+			return 0;
+		return -EACCES;
+	case PKM_KACS_IOCTL_REQUIRE_APPEND_OR_WRITE_DATA:
+		if ((granted_access & (PKM_KACS_FILE_APPEND_DATA |
+				       PKM_KACS_FILE_WRITE_DATA)) != 0)
+			return 0;
+		return -EACCES;
+	case PKM_KACS_IOCTL_REQUIRE_READ_ATTRIBUTES:
+		if ((granted_access & PKM_KACS_FILE_READ_ATTRIBUTES) != 0)
+			return 0;
+		return -EACCES;
+	case PKM_KACS_IOCTL_REQUIRE_WRITE_ATTRIBUTES:
+		if ((granted_access & PKM_KACS_FILE_WRITE_ATTRIBUTES) != 0)
+			return 0;
+		return -EACCES;
+	default:
+		return -EACCES;
+	}
+}
+
+static int pkm_kacs_check_file_ioctl_snapshot(struct file *file,
+					      unsigned int cmd,
+					      unsigned long arg,
+					      bool compat)
+{
+	struct pkm_kacs_file_security *file_sec;
+	struct inode *inode;
+
+	(void)arg;
+
+	if (!file)
+		return -EACCES;
+	if (!file->f_security)
+		return -EACCES;
+
+	file_sec = pkm_kacs_file(file);
+	if (!file_sec->managed)
+		return 0;
+
+	inode = file_inode(file);
+	if (!inode)
+		return -EACCES;
+
+	return pkm_kacs_check_ioctl_requirement(
+		file_sec->granted_access,
+		pkm_kacs_classify_file_ioctl(cmd, inode->i_mode, compat));
 }
 
 static int pkm_kacs_check_file_lock_snapshot(struct file *file,
@@ -9016,6 +9208,35 @@ int pkm_kacs_kunit_check_file_permission_write_intent_mismatch(void)
 out_first:
 	pkm_kacs_kunit_cleanup_file_mount_state(&first);
 	return ret;
+}
+
+int pkm_kacs_kunit_check_file_ioctl_snapshot(u32 managed, u32 granted_access,
+					     umode_t mode, unsigned int cmd,
+					     bool compat)
+{
+	struct pkm_kacs_kunit_file_mount_state state = { };
+	struct pkm_kacs_file_security *file_sec;
+	int ret;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&state, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, mode, true);
+	if (ret)
+		return ret;
+
+	file_sec = pkm_kacs_file(&state.file);
+	file_sec->managed = managed ? 1 : 0;
+	file_sec->granted_access = granted_access;
+
+	ret = pkm_kacs_check_file_ioctl_snapshot(&state.file, cmd, 0, compat);
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
+}
+
+int pkm_kacs_kunit_check_file_ioctl_null(void)
+{
+	return pkm_kacs_check_file_ioctl_snapshot(NULL, FS_IOC_GETFLAGS, 0,
+						  false);
 }
 
 int pkm_kacs_kunit_check_file_lock_snapshot(u32 managed, u32 granted_access,

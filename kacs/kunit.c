@@ -17,8 +17,10 @@
 #include <linux/falloc.h>
 #include <linux/fdtable.h>
 #include <linux/fcntl.h>
+#include <linux/fiemap.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/fscrypt.h>
 #include <linux/kernel.h>
 #include <linux/magic.h>
 #include <linux/mm.h>
@@ -32,6 +34,8 @@
 #include <linux/string.h>
 #include <linux/syscalls.h>
 #include <linux/types.h>
+
+#include <asm/ioctls.h>
 
 #include "access_check.h"
 #include "caap_cache.h"
@@ -5122,6 +5126,161 @@ static void pkm_kunit_file_write_intent_marker_drives_permission(
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_file_permission_write_intent_mismatch(),
 			-EACCES);
+}
+
+static void pkm_kunit_file_ioctl_snapshot_read_classified(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, S_IFREG,
+				FS_IOC_FIEMAP, false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, S_IFREG,
+				FS_IOC_FIEMAP, false),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, S_IFREG,
+				FIBMAP, false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, S_IFREG,
+				FIONREAD, false),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_READ_ATTRIBUTES, S_IFREG,
+				FS_IOC_GETFLAGS, false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, S_IFREG,
+				FIGETBSZ, false),
+			-EACCES);
+}
+
+static void pkm_kunit_file_ioctl_snapshot_write_classified(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_ATTRIBUTES, S_IFREG,
+				FS_IOC_SETFLAGS, false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_READ_ATTRIBUTES, S_IFREG,
+				FS_IOC_SETFLAGS, false),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, S_IFREG,
+				FICLONE, false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, S_IFREG,
+				FICLONE, false),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, S_IFREG,
+				FS_IOC_RESVSP, false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, S_IFREG,
+				FS_IOC_ZERO_RANGE, false),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_ATTRIBUTES, S_IFREG,
+				FITRIM, false),
+			0);
+}
+
+static void pkm_kunit_file_ioctl_snapshot_fdlocal_fallback_unmanaged(
+	struct kunit *test)
+{
+	const unsigned int unclassified = 0x5a5a5a5aU;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, 0, S_IFREG, FIONBIO, false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, S_IFREG,
+				unclassified, false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_READ_ATTRIBUTES, S_IFREG,
+				unclassified, false),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, S_IFIFO,
+				FIONREAD, false),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, 0, S_IFCHR, unclassified, false),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				0, 0, S_IFREG, unclassified, false),
+			0);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_check_file_ioctl_null(),
+			-EACCES);
+}
+
+static void pkm_kunit_file_ioctl_snapshot_compat_aliases(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_READ_ATTRIBUTES, S_IFREG,
+				FS_IOC32_GETFLAGS, true),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, S_IFREG,
+				FS_IOC32_GETFLAGS, true),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_ATTRIBUTES, S_IFREG,
+				FS_IOC32_SETFLAGS, true),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA, S_IFREG,
+				FS_IOC32_SETFLAGS, false),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_ATTRIBUTES, S_IFREG,
+				FS_IOC32_SETFLAGS, false),
+			0);
+#if defined(CONFIG_X86_64)
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, S_IFREG,
+				FS_IOC_RESVSP_32, true),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_APPEND_DATA, S_IFREG,
+				FS_IOC_ZERO_RANGE_32, true),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_ioctl_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_DATA, S_IFREG,
+				FS_IOC_ZERO_RANGE_32, true),
+			0);
+#endif
 }
 
 static void pkm_kunit_file_fcntl_snapshot_append_transitions(
@@ -16826,6 +16985,10 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_write_intent_append_and_positioned),
 	KUNIT_CASE(pkm_kunit_file_write_intent_noappend_fails_closed),
 	KUNIT_CASE(pkm_kunit_file_write_intent_marker_drives_permission),
+	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_read_classified),
+	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_write_classified),
+	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_fdlocal_fallback_unmanaged),
+	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_compat_aliases),
 	KUNIT_CASE(pkm_kunit_file_fcntl_snapshot_append_transitions),
 	KUNIT_CASE(pkm_kunit_file_fcntl_snapshot_noatime_transitions),
 	KUNIT_CASE(
