@@ -1398,6 +1398,19 @@ static const u8 pkm_kunit_system_read_audit_sd[] = {
 	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
 };
 
+/* Owner SYSTEM, alarm SYSTEM FILE_READ_DATA, allow SYSTEM read-open subset. */
+static const u8 pkm_kunit_system_file_read_alarm_sd[] = {
+	1, 0, 20, 128, 20, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0,
+	60, 0, 0, 0,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+	2, 0, 28, 0, 1, 0, 0, 0,
+	3, 0, 20, 0, 1, 0, 0, 0,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+	2, 0, 28, 0, 1, 0, 0, 0,
+	0, 0, 20, 0, 137, 0, 6, 0,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+};
+
 static const u8 pkm_kunit_system_pip_sd[] = {
 	1, 0, 20, 128, 20, 0, 0, 0, 32, 0, 0, 0, 44, 0, 0, 0,
 	76, 0, 0, 0,
@@ -5035,6 +5048,133 @@ static void pkm_kunit_file_permission_snapshot_combined_masks(
 				1, PKM_KUNIT_FILE_READ_DATA, 0,
 				MAY_EXEC | MAY_CHDIR),
 			-EACCES);
+}
+
+static void pkm_kunit_file_continuous_audit_read_emits_kmes(
+	struct kunit *test)
+{
+	u8 *buffer;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
+	size_t written = 0;
+	int ret;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_process_override(
+				4301, PKM_KUNIT_KMES_PROCESS_NAME,
+				PKM_KUNIT_KMES_PROCESS_PATH),
+			0);
+
+	ret = pkm_kacs_kunit_check_file_permission_snapshot_audit(
+		1, PKM_KUNIT_FILE_READ_DATA, PKM_KUNIT_FILE_READ_DATA, 0,
+		MAY_READ);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
+				&snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
+	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
+				  (const u8 *)"continuous-audit",
+				  sizeof("continuous-audit") - 1);
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)"file.permission",
+						 sizeof("file.permission") - 1));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)PKM_KUNIT_KMES_PROCESS_NAME,
+						 sizeof(PKM_KUNIT_KMES_PROCESS_NAME) - 1));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)PKM_KUNIT_KMES_PROCESS_PATH,
+						 sizeof(PKM_KUNIT_KMES_PROCESS_PATH) - 1));
+}
+
+static void pkm_kunit_file_continuous_audit_unmatched_mask_no_event(
+	struct kunit *test)
+{
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	int ret;
+
+	pkm_kunit_reset_kmes();
+	ret = pkm_kacs_kunit_check_file_permission_snapshot_audit(
+		1, PKM_KUNIT_FILE_READ_DATA, PKM_KUNIT_FILE_WRITE_DATA, 0,
+		MAY_READ);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+}
+
+static void pkm_kunit_file_continuous_audit_denial_emits_failure(
+	struct kunit *test)
+{
+	u8 *buffer;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
+	size_t written = 0;
+	int ret;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_process_override(
+				4302, PKM_KUNIT_KMES_PROCESS_NAME,
+				PKM_KUNIT_KMES_PROCESS_PATH),
+			0);
+
+	ret = pkm_kacs_kunit_check_file_permission_snapshot_audit(
+		1, 0, PKM_KUNIT_FILE_READ_DATA, 0, MAY_READ);
+	KUNIT_EXPECT_EQ(test, ret, -EACCES);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
+				&snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
+				  (const u8 *)"continuous-audit",
+				  sizeof("continuous-audit") - 1);
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)"file.permission",
+						 sizeof("file.permission") - 1));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8[]){ 0xc2 },
+						 1));
+}
+
+static void pkm_kunit_file_continuous_audit_emit_malformed_fails_closed(
+	struct kunit *test)
+{
+	const void *subject_token = pkm_kacs_current_effective_token_ptr();
+
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_emit_file_continuous_audit(
+				subject_token, (const u8 *)"file.permission",
+				sizeof("file.permission") - 1,
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_WRITE_DATA,
+				PKM_KUNIT_FILE_READ_DATA, 1),
+			-EINVAL);
 }
 
 static void pkm_kunit_fchdir_snapshot_requires_traverse(struct kunit *test)
@@ -9084,6 +9224,34 @@ static void pkm_kunit_file_open_append_trunc_stamps_expected_core(
 
 	pkm_kacs_free((void *)file_sd);
 	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_file_open_stamps_continuous_audit_mask(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_open_args args = {
+		.file_mode = FMODE_READ,
+		.subject_token = pkm_kacs_current_effective_token_ptr(),
+		.target_file_sd_ptr = pkm_kunit_system_file_read_alarm_sd,
+		.target_file_sd_len = sizeof(pkm_kunit_system_file_read_alarm_sd),
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+	};
+	u32 continuous_audit = 0;
+	u32 granted = 0;
+
+	KUNIT_ASSERT_NOT_NULL(test, args.subject_token);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_open_file_for_subject_audit(
+				&args, &granted, &continuous_audit),
+			0L);
+	KUNIT_EXPECT_EQ(test, granted,
+			PKM_KUNIT_FILE_READ_DATA |
+				PKM_KUNIT_FILE_READ_ATTRIBUTES |
+				PKM_KUNIT_FILE_READ_EA |
+				KACS_ACCESS_READ_CONTROL |
+				KACS_ACCESS_WRITE_DAC |
+				KACS_ACCESS_WRITE_OWNER);
+	KUNIT_EXPECT_EQ(test, continuous_audit, PKM_KUNIT_FILE_READ_DATA);
 }
 
 static void pkm_kunit_file_open_directory_read_stamps_expected_subset(
@@ -18525,6 +18693,11 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_permission_snapshot_read_and_unmanaged),
 	KUNIT_CASE(pkm_kunit_file_permission_snapshot_write_and_append),
 	KUNIT_CASE(pkm_kunit_file_permission_snapshot_combined_masks),
+	KUNIT_CASE(pkm_kunit_file_continuous_audit_read_emits_kmes),
+	KUNIT_CASE(pkm_kunit_file_continuous_audit_unmatched_mask_no_event),
+	KUNIT_CASE(pkm_kunit_file_continuous_audit_denial_emits_failure),
+	KUNIT_CASE(
+		pkm_kunit_file_continuous_audit_emit_malformed_fails_closed),
 	KUNIT_CASE(pkm_kunit_fchdir_snapshot_requires_traverse),
 	KUNIT_CASE(pkm_kunit_file_write_intent_append_and_positioned),
 	KUNIT_CASE(pkm_kunit_file_write_intent_noappend_fails_closed),
@@ -18651,6 +18824,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_inode_raw_sd_xattr_hooks_deny_canonical_names),
 	KUNIT_CASE(pkm_kunit_file_open_read_stamps_granted_subset),
 	KUNIT_CASE(pkm_kunit_file_open_append_trunc_stamps_expected_core),
+	KUNIT_CASE(pkm_kunit_file_open_stamps_continuous_audit_mask),
 	KUNIT_CASE(pkm_kunit_file_open_directory_read_stamps_expected_subset),
 	KUNIT_CASE(pkm_kunit_file_open_core_denial_fails_closed),
 	KUNIT_CASE(pkm_kunit_file_open_directory_write_fails_closed),

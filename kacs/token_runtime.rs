@@ -35,7 +35,7 @@ use crate::claims::{
 };
 use crate::condition::ConditionalContext;
 use crate::error::KacsError;
-use crate::kmes_payload::emit_logon_session_destroyed_to_kmes;
+use crate::kmes_payload::{emit_continuous_audit_to_kmes, emit_logon_session_destroyed_to_kmes};
 use crate::mic::{
     IntegrityLevel, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
     TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
@@ -117,6 +117,7 @@ const EACCES: i32 = 13;
 const EPERM: i32 = 1;
 const ENOENT: i32 = 2;
 const EINVAL: i32 = 22;
+const EIO: i32 = 5;
 const ENOMEM: i32 = 12;
 const ERANGE: i32 = 34;
 const EOPNOTSUPP: i32 = 95;
@@ -6297,12 +6298,18 @@ fn process_sd_access_check_errno_with_intent(
     })
 }
 
-fn file_sd_access_check_errno_with_intent(
+struct FileSdAccessOutcome {
+    granted: u32,
+    continuous_audit_mask: u32,
+    allowed: bool,
+}
+
+fn file_sd_access_outcome_with_intent(
     subject_token: *const c_void,
     sd_bytes: &[u8],
     desired: u32,
     privilege_intent: u32,
-) -> Result<u32, i32> {
+) -> Result<FileSdAccessOutcome, i32> {
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
     };
@@ -6341,15 +6348,17 @@ fn file_sd_access_check_errno_with_intent(
                     .unwrap_or(result.granted);
                 let allowed = result.mapped_desired == 0
                     || (granted & result.mapped_desired) == result.mapped_desired;
-
-                if !allowed {
-                    return Err(-EACCES);
-                }
-                if normalized.maximum_allowed {
-                    Ok(granted)
+                let granted = if normalized.maximum_allowed {
+                    granted
                 } else {
-                    Ok(granted & normalized.mapped)
-                }
+                    granted & normalized.mapped
+                };
+
+                Ok(FileSdAccessOutcome {
+                    granted,
+                    continuous_audit_mask: result.continuous_audit_mask,
+                    allowed,
+                })
             }
             Err(KacsError::AllocationFailure) => Err(-ENOMEM),
             Err(KacsError::ReservedAccessMaskBits(_)) => Err(-EINVAL),
@@ -6358,60 +6367,29 @@ fn file_sd_access_check_errno_with_intent(
     })
 }
 
+fn file_sd_access_check_errno_with_intent(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+    privilege_intent: u32,
+) -> Result<FileSdAccessOutcome, i32> {
+    let outcome =
+        file_sd_access_outcome_with_intent(subject_token, sd_bytes, desired, privilege_intent)?;
+
+    if !outcome.allowed {
+        return Err(-EACCES);
+    }
+
+    Ok(outcome)
+}
+
 fn file_sd_granted_mask_errno_with_intent(
     subject_token: *const c_void,
     sd_bytes: &[u8],
     desired: u32,
     privilege_intent: u32,
-) -> Result<u32, i32> {
-    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
-        return Err(-EACCES);
-    };
-    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(|_| -EINVAL)?;
-    let normalized = match FILE_GENERIC_MAPPING.normalize_desired_access(desired) {
-        Ok(normalized) => normalized,
-        Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
-        Err(_) => return Err(-EINVAL),
-    };
-    let conditional_context = ConditionalContext::default();
-    let pip = PipContext {
-        pip_type: 0,
-        pip_trust: 0,
-    };
-
-    subject.with_access_token(|subject_token| {
-        match access_check_core(
-            Some(&target_sd),
-            &subject_token,
-            pip,
-            desired,
-            &FILE_GENERIC_MAPPING,
-            AccessCheckMode::Scalar,
-            None,
-            &conditional_context,
-            None,
-            privilege_intent,
-            EMPTY_POLICIES,
-        ) {
-            Ok(result) => {
-                subject.mark_privileges_used(result.updated_privileges.used);
-                let granted = result
-                    .object_granted_list
-                    .as_ref()
-                    .and_then(|list| list.first().copied())
-                    .unwrap_or(result.granted);
-
-                if normalized.maximum_allowed {
-                    Ok(granted)
-                } else {
-                    Ok(granted & normalized.mapped)
-                }
-            }
-            Err(KacsError::AllocationFailure) => Err(-ENOMEM),
-            Err(KacsError::ReservedAccessMaskBits(_)) => Err(-EINVAL),
-            Err(_) => Err(-EINVAL),
-        }
-    })
+) -> Result<FileSdAccessOutcome, i32> {
+    file_sd_access_outcome_with_intent(subject_token, sd_bytes, desired, privilege_intent)
 }
 
 fn process_sd_access_check_errno(
@@ -7179,11 +7157,53 @@ pub extern "C" fn kacs_rust_check_file_sd_with_intent(
     }
 
     let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
-    match file_sd_access_check_errno_with_intent(subject_token_ptr, sd_bytes, desired, privilege_intent)
-    {
-        Ok(granted) => {
+    match file_sd_access_check_errno_with_intent(
+        subject_token_ptr,
+        sd_bytes,
+        desired,
+        privilege_intent,
+    ) {
+        Ok(outcome) => {
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
-                *granted_out = granted;
+                *granted_out = outcome.granted;
+            }
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Runs AccessCheck against one file SD and also returns the continuous-audit
+/// mask accumulated from matched alarm ACEs.
+pub extern "C" fn kacs_rust_check_file_sd_with_intent_audit(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired: u32,
+    privilege_intent: u32,
+    granted_out: *mut u32,
+    continuous_audit_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match file_sd_access_check_errno_with_intent(
+        subject_token_ptr,
+        sd_bytes,
+        desired,
+        privilege_intent,
+    ) {
+        Ok(outcome) => {
+            if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                *granted_out = outcome.granted;
+            }
+            if let Some(continuous_audit_out) =
+                unsafe { continuous_audit_out.as_mut() }
+            {
+                *continuous_audit_out = outcome.continuous_audit_mask;
             }
             0
         }
@@ -7301,14 +7321,99 @@ pub extern "C" fn kacs_rust_granted_file_sd_with_intent(
         desired,
         privilege_intent,
     ) {
-        Ok(granted) => {
+        Ok(outcome) => {
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
-                *granted_out = granted;
+                *granted_out = outcome.granted;
             }
             0
         }
         Err(err) => err,
     }
+}
+
+#[no_mangle]
+/// Runs AccessCheck for a file SD, returning the granted subset and the
+/// continuous-audit mask without requiring the whole requested mask to pass.
+pub extern "C" fn kacs_rust_granted_file_sd_with_intent_audit(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired: u32,
+    privilege_intent: u32,
+    granted_out: *mut u32,
+    continuous_audit_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match file_sd_granted_mask_errno_with_intent(
+        subject_token_ptr,
+        sd_bytes,
+        desired,
+        privilege_intent,
+    ) {
+        Ok(outcome) => {
+            if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                *granted_out = outcome.granted;
+            }
+            if let Some(continuous_audit_out) =
+                unsafe { continuous_audit_out.as_mut() }
+            {
+                *continuous_audit_out = outcome.continuous_audit_mask;
+            }
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Emits one file-handle continuous-audit event for an already classified
+/// operation-time enforcement decision.
+pub extern "C" fn kacs_rust_emit_file_continuous_audit(
+    subject_token_ptr: *const c_void,
+    operation_ptr: *const u8,
+    operation_len: usize,
+    requested_access: u32,
+    matched_access: u32,
+    granted_access: u32,
+    success: u8,
+) -> i32 {
+    if subject_token_ptr.is_null()
+        || operation_ptr.is_null()
+        || operation_len == 0
+        || requested_access == 0
+        || matched_access == 0
+        || (matched_access & requested_access) != matched_access
+    {
+        return -EINVAL;
+    }
+
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token_ptr) }) else {
+        return -EACCES;
+    };
+    let operation = unsafe { core::slice::from_raw_parts(operation_ptr, operation_len) };
+    let pip = PipContext {
+        pip_type: 0,
+        pip_trust: 0,
+    };
+
+    subject.with_access_token(|access_token| {
+        match emit_continuous_audit_to_kmes(
+            &access_token,
+            pip,
+            operation,
+            requested_access,
+            matched_access,
+            granted_access,
+            success != 0,
+        ) {
+            Ok(()) => 0,
+            Err(err) => i32::try_from(err).unwrap_or(-EIO),
+        }
+    })
 }
 
 #[no_mangle]

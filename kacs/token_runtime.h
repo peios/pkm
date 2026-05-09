@@ -526,12 +526,29 @@ int kacs_rust_check_file_sd_with_intent(const void *subject_token_ptr,
 					const u8 *sd_ptr, size_t sd_len,
 					u32 desired, u32 privilege_intent,
 					u32 *granted_out);
+int kacs_rust_check_file_sd_with_intent_audit(const void *subject_token_ptr,
+					      const u8 *sd_ptr, size_t sd_len,
+					      u32 desired, u32 privilege_intent,
+					      u32 *granted_out,
+					      u32 *continuous_audit_out);
 int kacs_rust_file_sd_integrity_label(const u8 *sd_ptr, size_t sd_len,
 				      u32 *integrity_level_out);
 int kacs_rust_granted_file_sd_with_intent(const void *subject_token_ptr,
 					  const u8 *sd_ptr, size_t sd_len,
 					  u32 desired, u32 privilege_intent,
 					  u32 *granted_out);
+int kacs_rust_granted_file_sd_with_intent_audit(const void *subject_token_ptr,
+						const u8 *sd_ptr,
+						size_t sd_len, u32 desired,
+						u32 privilege_intent,
+						u32 *granted_out,
+						u32 *continuous_audit_out);
+int kacs_rust_emit_file_continuous_audit(const void *subject_token_ptr,
+					 const u8 *operation_ptr,
+					 size_t operation_len,
+					 u32 requested_access,
+					 u32 matched_access,
+					 u32 granted_access, u8 success);
 int kacs_rust_check_token_sd_with_intent(const void *subject_token_ptr,
 					 const void *target_token_ptr,
 					 u32 desired, u32 privilege_intent,
@@ -682,6 +699,9 @@ long pkm_kacs_kunit_set_file_sd_for_subject(
 long pkm_kacs_kunit_open_file_for_subject(
 	const struct pkm_kacs_kunit_file_open_args *args,
 	u32 *granted_access_out);
+long pkm_kacs_kunit_open_file_for_subject_audit(
+	const struct pkm_kacs_kunit_file_open_args *args,
+	u32 *granted_access_out, u32 *continuous_audit_out);
 long pkm_kacs_kunit_native_open_for_subject(
 	const struct pkm_kacs_kunit_native_open_args *args,
 	u32 *granted_access_out, u32 *status_out, u32 *file_mode_out);
@@ -777,6 +797,11 @@ int pkm_kacs_kunit_check_file_permission_snapshot(u32 managed,
 						  u32 granted_access,
 						  int file_flags,
 						  int mask);
+int pkm_kacs_kunit_check_file_permission_snapshot_audit(u32 managed,
+							u32 granted_access,
+							u32 continuous_audit,
+							int file_flags,
+							int mask);
 int pkm_kacs_kunit_check_file_write_intent_snapshot(u32 managed,
 						    u32 granted_access,
 						    int file_flags,

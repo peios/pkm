@@ -9,7 +9,7 @@ use crate::privilege::{
     SE_BACKUP_PRIVILEGE, SE_RELABEL_PRIVILEGE, SE_RESTORE_PRIVILEGE, SE_SECURITY_PRIVILEGE,
     SE_TAKE_OWNERSHIP_PRIVILEGE,
 };
-use crate::token::SidAndAttributes;
+use crate::token::{AccessCheckToken, SidAndAttributes};
 use crate::PrivilegeUseEvent;
 use core::ffi::c_long;
 use core::ptr::null_mut;
@@ -21,6 +21,7 @@ const ERANGE: c_long = -34;
 
 const KMES_ORIGIN_KACS: u8 = 2;
 const ACCESS_AUDIT_TYPE: &[u8] = b"access-audit";
+const CONTINUOUS_AUDIT_TYPE: &[u8] = b"continuous-audit";
 const PRIVILEGE_USE_TYPE: &[u8] = b"privilege-use";
 const LOGON_SESSION_DESTROYED_TYPE: &[u8] = b"logon-session-destroyed";
 
@@ -253,25 +254,32 @@ fn encode_sid_array(
     Ok(())
 }
 
-fn encode_subject_map(
-    resolved: AccessCheckAbiResolved<'_>,
+fn encode_subject_token_map(
+    token: &AccessCheckToken<'_>,
     effective_pip: PipContext,
 ) -> Result<Vec<u8>, c_long> {
     let mut writer = MsgpackWriter::with_capacity(256)?;
 
     writer.write_map_len(5)?;
     writer.write_key(b"user_sid")?;
-    writer.write_bin(resolved.token.subject.user.as_bytes())?;
+    writer.write_bin(token.subject.user.as_bytes())?;
     writer.write_key(b"group_sids")?;
-    encode_sid_array(&mut writer, resolved.token.subject.groups)?;
+    encode_sid_array(&mut writer, token.subject.groups)?;
     writer.write_key(b"integrity_level")?;
-    writer.write_u64(resolved.token.integrity_level as u32 as u64)?;
+    writer.write_u64(token.integrity_level as u32 as u64)?;
     writer.write_key(b"pip_type")?;
     writer.write_u64(effective_pip.pip_type as u64)?;
     writer.write_key(b"pip_trust")?;
     writer.write_u64(effective_pip.pip_trust as u64)?;
 
     Ok(writer.into_vec())
+}
+
+fn encode_subject_map(
+    resolved: AccessCheckAbiResolved<'_>,
+    effective_pip: PipContext,
+) -> Result<Vec<u8>, c_long> {
+    encode_subject_token_map(resolved.token, effective_pip)
 }
 
 fn encode_process_map(process: &ProcessInfo) -> Result<Vec<u8>, c_long> {
@@ -375,6 +383,43 @@ fn encode_privilege_use_payload(
     Ok(writer.into_vec())
 }
 
+fn encode_continuous_audit_payload(
+    subject_map: &[u8],
+    process_map: &[u8],
+    operation: &[u8],
+    requested_access: u32,
+    matched_access: u32,
+    granted_access: u32,
+    success: bool,
+) -> Result<Vec<u8>, c_long> {
+    let mut writer = MsgpackWriter::with_capacity(256 + operation.len())?;
+
+    let _ = str::from_utf8(operation).map_err(|_| EIO)?;
+    if requested_access == 0 || matched_access == 0 {
+        return Err(EIO);
+    }
+
+    writer.write_map_len(8)?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject_map)?;
+    writer.write_key(b"object_context")?;
+    encode_object_context(&mut writer, None)?;
+    writer.write_key(b"operation")?;
+    writer.write_str(operation)?;
+    writer.write_key(b"requested_access")?;
+    writer.write_u64(requested_access as u64)?;
+    writer.write_key(b"matched_access")?;
+    writer.write_u64(matched_access as u64)?;
+    writer.write_key(b"granted_access")?;
+    writer.write_u64(granted_access as u64)?;
+    writer.write_key(b"success")?;
+    writer.write_bool(success)?;
+    writer.write_key(b"process")?;
+    writer.extend(process_map)?;
+
+    Ok(writer.into_vec())
+}
+
 fn encode_logon_session_destroyed_payload(
     session_id: u64,
     user_sid: &[u8],
@@ -447,6 +492,41 @@ pub(crate) fn emit_access_check_events_to_kmes(
                 payload.len(),
             );
         }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn emit_continuous_audit_to_kmes(
+    token: &AccessCheckToken<'_>,
+    effective_pip: PipContext,
+    operation: &[u8],
+    requested_access: u32,
+    matched_access: u32,
+    granted_access: u32,
+    success: bool,
+) -> Result<(), c_long> {
+    let process_info = load_process_info()?;
+    let process_map = encode_process_map(&process_info)?;
+    let subject_map = encode_subject_token_map(token, effective_pip)?;
+    let payload = encode_continuous_audit_payload(
+        subject_map.as_slice(),
+        process_map.as_slice(),
+        operation,
+        requested_access,
+        matched_access,
+        granted_access,
+        success,
+    )?;
+
+    unsafe {
+        pkm_kmes_emit_kernel(
+            KMES_ORIGIN_KACS,
+            CONTINUOUS_AUDIT_TYPE.as_ptr().cast(),
+            CONTINUOUS_AUDIT_TYPE.len(),
+            payload.as_ptr().cast(),
+            payload.len(),
+        );
     }
 
     Ok(())
