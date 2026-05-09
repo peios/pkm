@@ -37,6 +37,18 @@ struct task_struct;
 #define KACS_CREATE_OPT_DIRECTORY 0x0001U
 #define KACS_CREATE_OPT_DELETE_ON_CLOSE 0x0002U
 
+#define PKM_KACS_KUNIT_FILE_METADATA_GETATTR 1U
+#define PKM_KACS_KUNIT_FILE_METADATA_STATFS 2U
+#define PKM_KACS_KUNIT_FILE_METADATA_CHMOD 3U
+#define PKM_KACS_KUNIT_FILE_METADATA_CHOWN 4U
+#define PKM_KACS_KUNIT_FILE_METADATA_UTIMENS 5U
+#define PKM_KACS_KUNIT_FILE_METADATA_FILEATTR_GET 6U
+#define PKM_KACS_KUNIT_FILE_METADATA_FILEATTR_SET 7U
+#define PKM_KACS_KUNIT_FILE_METADATA_XATTR_GET 8U
+#define PKM_KACS_KUNIT_FILE_METADATA_XATTR_SET 9U
+#define PKM_KACS_KUNIT_FILE_METADATA_XATTR_REMOVE 10U
+#define PKM_KACS_KUNIT_FILE_METADATA_XATTR_LIST 11U
+
 #define KACS_STATUS_OPENED 1U
 #define KACS_STATUS_CREATED 2U
 #define KACS_STATUS_OVERWRITTEN 3U
@@ -717,6 +729,10 @@ int pkm_kacs_kunit_check_file_permission_write_intent(
 	u32 managed, u32 granted_access, int file_flags, u32 rwf_flags,
 	bool positioned);
 int pkm_kacs_kunit_check_file_permission_write_intent_mismatch(void);
+int pkm_kacs_kunit_check_file_metadata_snapshot(u32 managed,
+						u32 granted_access, u32 op,
+						const char *name);
+int pkm_kacs_kunit_check_file_metadata_null(u32 op, const char *name);
 int pkm_kacs_kunit_check_file_ioctl_snapshot(u32 managed, u32 granted_access,
 					     umode_t mode, unsigned int cmd,
 					     bool compat);

@@ -34,6 +34,7 @@
 #include <linux/string.h>
 #include <linux/syscalls.h>
 #include <linux/types.h>
+#include <linux/xattr.h>
 
 #include <asm/ioctls.h>
 
@@ -5125,6 +5126,176 @@ static void pkm_kunit_file_write_intent_marker_drives_permission(
 			0);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_file_permission_write_intent_mismatch(),
+			-EACCES);
+}
+
+static void pkm_kunit_file_metadata_getattr_snapshot(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_READ_ATTRIBUTES,
+				PKM_KACS_KUNIT_FILE_METADATA_GETATTR, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_READ_DATA,
+				PKM_KACS_KUNIT_FILE_METADATA_GETATTR, NULL),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_READ_ATTRIBUTES,
+				PKM_KACS_KUNIT_FILE_METADATA_STATFS, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_READ_ATTRIBUTES,
+				PKM_KACS_KUNIT_FILE_METADATA_FILEATTR_GET,
+				NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				0, 0, PKM_KACS_KUNIT_FILE_METADATA_GETATTR,
+				NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_null(
+				PKM_KACS_KUNIT_FILE_METADATA_GETATTR, NULL),
+			-EACCES);
+}
+
+static void pkm_kunit_file_metadata_setattr_snapshot(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, KACS_ACCESS_WRITE_DAC,
+				PKM_KACS_KUNIT_FILE_METADATA_CHMOD, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_ATTRIBUTES,
+				PKM_KACS_KUNIT_FILE_METADATA_CHMOD, NULL),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, KACS_ACCESS_WRITE_OWNER,
+				PKM_KACS_KUNIT_FILE_METADATA_CHOWN, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, KACS_ACCESS_WRITE_DAC,
+				PKM_KACS_KUNIT_FILE_METADATA_CHOWN, NULL),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_ATTRIBUTES,
+				PKM_KACS_KUNIT_FILE_METADATA_UTIMENS, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_EA,
+				PKM_KACS_KUNIT_FILE_METADATA_UTIMENS, NULL),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_ATTRIBUTES,
+				PKM_KACS_KUNIT_FILE_METADATA_FILEATTR_SET,
+				NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				0, 0, PKM_KACS_KUNIT_FILE_METADATA_CHOWN,
+				NULL),
+			0);
+}
+
+static void pkm_kunit_file_metadata_xattr_snapshot(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_READ_EA,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_GET,
+				"user.test"),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_READ_ATTRIBUTES,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_GET,
+				"user.test"),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_EA,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_SET,
+				"user.test"),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_READ_EA,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_SET,
+				"user.test"),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_EA,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_REMOVE,
+				"user.test"),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, 0,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_LIST,
+				NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				0, 0,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_GET,
+				"user.test"),
+			0);
+}
+
+static void pkm_kunit_file_metadata_xattr_protected_names(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_SD_ADMIN_MASK,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_GET,
+				"security.peios.sd"),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_SD_ADMIN_MASK,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_SET,
+				"security.peios.sd"),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_SD_ADMIN_MASK,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_REMOVE,
+				"security.peios.sd"),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_READ_EA,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_GET,
+				XATTR_NAME_POSIX_ACL_ACCESS),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_EA,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_SET,
+				XATTR_NAME_POSIX_ACL_ACCESS),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_EA,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_REMOVE,
+				XATTR_NAME_POSIX_ACL_DEFAULT),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_null(
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_GET,
+				"user.test"),
 			-EACCES);
 }
 
@@ -16985,6 +17156,10 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_write_intent_append_and_positioned),
 	KUNIT_CASE(pkm_kunit_file_write_intent_noappend_fails_closed),
 	KUNIT_CASE(pkm_kunit_file_write_intent_marker_drives_permission),
+	KUNIT_CASE(pkm_kunit_file_metadata_getattr_snapshot),
+	KUNIT_CASE(pkm_kunit_file_metadata_setattr_snapshot),
+	KUNIT_CASE(pkm_kunit_file_metadata_xattr_snapshot),
+	KUNIT_CASE(pkm_kunit_file_metadata_xattr_protected_names),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_read_classified),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_write_classified),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_fdlocal_fallback_unmanaged),

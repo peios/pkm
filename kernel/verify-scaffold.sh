@@ -130,6 +130,21 @@ if ! rg -q 'pkm_kacs_file_sd_xattr_get' \
 	die "install-pkm-subtree.sh does not stage the fd raw SD xattr guard patch"
 fi
 
+for fd_metadata_symbol in \
+	"pkm_kacs_file_getattr" \
+	"pkm_kacs_file_statfs" \
+	"pkm_kacs_file_chmod" \
+	"pkm_kacs_file_chown" \
+	"pkm_kacs_file_utimens" \
+	"pkm_kacs_file_fileattr_get" \
+	"pkm_kacs_file_fileattr_set" \
+	"pkm_kacs_file_listxattr"; do
+	if ! rg -q "$fd_metadata_symbol" \
+		"$repo_root/kernel/install-pkm-subtree.sh"; then
+		die "install-pkm-subtree.sh does not stage fd metadata patch: $fd_metadata_symbol"
+	fi
+done
+
 if ! rg -q 'SYSCALL_DEFINE1\(fchdir, unsigned int, fd\)' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
    ! rg -q 'fd_file\(f\)->f_mode & FMODE_PATH' \

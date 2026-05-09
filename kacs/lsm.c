@@ -444,6 +444,8 @@ static int pkm_kacs_check_mmap_snapshot(struct file *file,
 static int pkm_kacs_check_mprotect_snapshot(struct file *file,
 					    unsigned long vm_flags,
 					    unsigned long prot);
+static int pkm_kacs_check_file_snapshot_grant(struct file *file,
+					      u32 required_access);
 static int pkm_kacs_check_file_permission_snapshot(struct file *file,
 						   int mask);
 static int pkm_kacs_check_file_write_intent_snapshot(struct file *file,
@@ -584,6 +586,14 @@ static long pkm_kacs_set_path_file_sd_core(const void *subject_token,
 int pkm_kacs_file_sd_xattr_get(struct file *file, const char *name);
 int pkm_kacs_file_sd_xattr_set(struct file *file, const char *name);
 int pkm_kacs_file_sd_xattr_remove(struct file *file, const char *name);
+int pkm_kacs_file_getattr(struct file *file);
+int pkm_kacs_file_statfs(struct file *file);
+int pkm_kacs_file_chmod(struct file *file);
+int pkm_kacs_file_chown(struct file *file);
+int pkm_kacs_file_utimens(struct file *file);
+int pkm_kacs_file_fileattr_get(struct file *file);
+int pkm_kacs_file_fileattr_set(struct file *file);
+int pkm_kacs_file_listxattr(struct file *file);
 long pkm_kacs_capable_in_cred_ns(const struct cred *cred,
 				 struct user_namespace *target_ns, int cap,
 				 unsigned int opts);
@@ -1352,36 +1362,105 @@ static int pkm_kacs_inode_removexattr(struct mnt_idmap *idmap,
 	return 0;
 }
 
-int pkm_kacs_file_sd_xattr_get(struct file *file, const char *name)
+static int pkm_kacs_check_file_xattr_snapshot(struct file *file,
+					      const char *name,
+					      u32 required_access,
+					      bool write_operation)
 {
 	struct inode *inode;
 
-	inode = file ? file_inode(file) : NULL;
-	if (inode && pkm_kacs_is_canonical_sd_xattr(inode, name))
+	if (!name)
+		return -EACCES;
+	if (!file)
 		return -EACCES;
 
-	return 0;
+	inode = file_inode(file);
+	if (inode && pkm_kacs_is_canonical_sd_xattr(inode, name))
+		return -EACCES;
+	if (write_operation && is_posix_acl_xattr(name))
+		return -EACCES;
+
+	return pkm_kacs_check_file_snapshot_grant(file, required_access);
 }
 
 int pkm_kacs_file_sd_xattr_set(struct file *file, const char *name)
 {
-	struct inode *inode;
+	return pkm_kacs_check_file_xattr_snapshot(
+		file, name, PKM_KACS_FILE_WRITE_EA, true);
+}
 
-	inode = file ? file_inode(file) : NULL;
-	if (inode && pkm_kacs_is_canonical_sd_xattr(inode, name))
-		return -EACCES;
-
-	return 0;
+int pkm_kacs_file_sd_xattr_get(struct file *file, const char *name)
+{
+	return pkm_kacs_check_file_xattr_snapshot(
+		file, name, PKM_KACS_FILE_READ_EA, false);
 }
 
 int pkm_kacs_file_sd_xattr_remove(struct file *file, const char *name)
 {
-	struct inode *inode;
+	return pkm_kacs_check_file_xattr_snapshot(
+		file, name, PKM_KACS_FILE_WRITE_EA, true);
+}
 
-	inode = file ? file_inode(file) : NULL;
-	if (inode && pkm_kacs_is_canonical_sd_xattr(inode, name))
+int pkm_kacs_file_getattr(struct file *file)
+{
+	if (!file)
 		return -EACCES;
+	return pkm_kacs_check_file_snapshot_grant(
+		file, PKM_KACS_FILE_READ_ATTRIBUTES);
+}
 
+int pkm_kacs_file_statfs(struct file *file)
+{
+	if (!file)
+		return -EACCES;
+	return pkm_kacs_check_file_snapshot_grant(
+		file, PKM_KACS_FILE_READ_ATTRIBUTES);
+}
+
+int pkm_kacs_file_chmod(struct file *file)
+{
+	if (!file)
+		return -EACCES;
+	return pkm_kacs_check_file_snapshot_grant(file,
+						  KACS_ACCESS_WRITE_DAC);
+}
+
+int pkm_kacs_file_chown(struct file *file)
+{
+	if (!file)
+		return -EACCES;
+	return pkm_kacs_check_file_snapshot_grant(file,
+						  KACS_ACCESS_WRITE_OWNER);
+}
+
+int pkm_kacs_file_utimens(struct file *file)
+{
+	if (!file)
+		return -EACCES;
+	return pkm_kacs_check_file_snapshot_grant(
+		file, PKM_KACS_FILE_WRITE_ATTRIBUTES);
+}
+
+int pkm_kacs_file_fileattr_get(struct file *file)
+{
+	if (!file)
+		return -EACCES;
+	return pkm_kacs_check_file_snapshot_grant(
+		file, PKM_KACS_FILE_READ_ATTRIBUTES);
+}
+
+int pkm_kacs_file_fileattr_set(struct file *file)
+{
+	if (!file)
+		return -EACCES;
+	return pkm_kacs_check_file_snapshot_grant(
+		file, PKM_KACS_FILE_WRITE_ATTRIBUTES);
+}
+
+int pkm_kacs_file_listxattr(struct file *file)
+{
+	if (!file)
+		return -EACCES;
 	return 0;
 }
 
@@ -8868,25 +8947,43 @@ static int pkm_kacs_kunit_file_sd_xattr_check(u32 op, const char *name,
 	struct dentry dentry = {};
 	struct file file = {};
 	struct path path = {};
+	void *file_blob;
+	size_t file_blob_len;
+	int ret;
+
+	file_blob_len = pkm_blob_sizes.lbs_file +
+		sizeof(struct pkm_kacs_file_security);
+	file_blob = kzalloc(file_blob_len, GFP_KERNEL);
+	if (!file_blob)
+		return -ENOMEM;
 
 	fs_type.name = ntfs ? "ntfs3" : "tmpfs";
 	sb.s_type = &fs_type;
 	inode.i_sb = &sb;
 	dentry.d_inode = &inode;
 	file.f_inode = &inode;
+	file.f_security = file_blob;
 	path.dentry = &dentry;
 	*(struct path *)&file.f_path = path;
+	pkm_kacs_file(&file)->managed = 0;
 
 	switch (op) {
 	case 1:
-		return pkm_kacs_file_sd_xattr_get(&file, name);
+		ret = pkm_kacs_file_sd_xattr_get(&file, name);
+		break;
 	case 2:
-		return pkm_kacs_file_sd_xattr_set(&file, name);
+		ret = pkm_kacs_file_sd_xattr_set(&file, name);
+		break;
 	case 3:
-		return pkm_kacs_file_sd_xattr_remove(&file, name);
+		ret = pkm_kacs_file_sd_xattr_remove(&file, name);
+		break;
 	default:
-		return -EINVAL;
+		ret = -EINVAL;
+		break;
 	}
+
+	kfree(file_blob);
+	return ret;
 }
 
 int pkm_kacs_kunit_file_sd_xattr_get(const char *name, u32 ntfs)
@@ -9208,6 +9305,65 @@ int pkm_kacs_kunit_check_file_permission_write_intent_mismatch(void)
 out_first:
 	pkm_kacs_kunit_cleanup_file_mount_state(&first);
 	return ret;
+}
+
+static int pkm_kacs_kunit_call_file_metadata_op(struct file *file, u32 op,
+						const char *name)
+{
+	switch (op) {
+	case PKM_KACS_KUNIT_FILE_METADATA_GETATTR:
+		return pkm_kacs_file_getattr(file);
+	case PKM_KACS_KUNIT_FILE_METADATA_STATFS:
+		return pkm_kacs_file_statfs(file);
+	case PKM_KACS_KUNIT_FILE_METADATA_CHMOD:
+		return pkm_kacs_file_chmod(file);
+	case PKM_KACS_KUNIT_FILE_METADATA_CHOWN:
+		return pkm_kacs_file_chown(file);
+	case PKM_KACS_KUNIT_FILE_METADATA_UTIMENS:
+		return pkm_kacs_file_utimens(file);
+	case PKM_KACS_KUNIT_FILE_METADATA_FILEATTR_GET:
+		return pkm_kacs_file_fileattr_get(file);
+	case PKM_KACS_KUNIT_FILE_METADATA_FILEATTR_SET:
+		return pkm_kacs_file_fileattr_set(file);
+	case PKM_KACS_KUNIT_FILE_METADATA_XATTR_GET:
+		return pkm_kacs_file_sd_xattr_get(file, name);
+	case PKM_KACS_KUNIT_FILE_METADATA_XATTR_SET:
+		return pkm_kacs_file_sd_xattr_set(file, name);
+	case PKM_KACS_KUNIT_FILE_METADATA_XATTR_REMOVE:
+		return pkm_kacs_file_sd_xattr_remove(file, name);
+	case PKM_KACS_KUNIT_FILE_METADATA_XATTR_LIST:
+		return pkm_kacs_file_listxattr(file);
+	default:
+		return -EINVAL;
+	}
+}
+
+int pkm_kacs_kunit_check_file_metadata_snapshot(u32 managed,
+						u32 granted_access, u32 op,
+						const char *name)
+{
+	struct pkm_kacs_kunit_file_mount_state state = { };
+	struct pkm_kacs_file_security *file_sec;
+	int ret;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&state, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		return ret;
+
+	file_sec = pkm_kacs_file(&state.file);
+	file_sec->managed = managed ? 1 : 0;
+	file_sec->granted_access = granted_access;
+
+	ret = pkm_kacs_kunit_call_file_metadata_op(&state.file, op, name);
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
+}
+
+int pkm_kacs_kunit_check_file_metadata_null(u32 op, const char *name)
+{
+	return pkm_kacs_kunit_call_file_metadata_op(NULL, op, name);
 }
 
 int pkm_kacs_kunit_check_file_ioctl_snapshot(u32 managed, u32 granted_access,

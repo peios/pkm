@@ -218,6 +218,10 @@ require_file "$kernel_root/fs/proc/base.c"
 require_file "$kernel_root/fs/proc/array.c"
 require_file "$kernel_root/fs/open.c"
 require_file "$kernel_root/fs/read_write.c"
+require_file "$kernel_root/fs/file_attr.c"
+require_file "$kernel_root/fs/stat.c"
+require_file "$kernel_root/fs/statfs.c"
+require_file "$kernel_root/fs/utimes.c"
 require_file "$kernel_root/fs/xattr.c"
 require_file "$kernel_root/include/linux/cred.h"
 require_file "$kernel_root/include/linux/ptrace.h"
@@ -558,6 +562,130 @@ replace_line_after_anchor_once 'SYSCALL_DEFINE1(fchdir, unsigned int, fd)' \
 #endif
 ' \
 	"$kernel_root/fs/open.c"
+insert_block_before_exact_once 'int vfs_fstat(int fd, struct kstat *stat)' \
+	'extern int pkm_kacs_file_getattr' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_file_getattr(struct file *file);
+#endif
+
+' \
+	"$kernel_root/fs/stat.c"
+replace_line_after_anchor_once 'int vfs_fstat(int fd, struct kstat *stat)' \
+	'	return vfs_getattr(&fd_file(f)->f_path, stat, STATX_BASIC_STATS, 0);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	{
+		int ret = pkm_kacs_file_getattr(fd_file(f));
+		if (ret)
+			return ret;
+	}
+#endif
+	return vfs_getattr(&fd_file(f)->f_path, stat, STATX_BASIC_STATS, 0);' \
+	"$kernel_root/fs/stat.c"
+replace_line_after_anchor_once 'static int vfs_statx_fd(int fd, int flags, struct kstat *stat,' \
+	'	return vfs_statx_path(&fd_file(f)->f_path, flags, stat, request_mask);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	{
+		int ret = pkm_kacs_file_getattr(fd_file(f));
+		if (ret)
+			return ret;
+	}
+#endif
+	return vfs_statx_path(&fd_file(f)->f_path, flags, stat, request_mask);' \
+	"$kernel_root/fs/stat.c"
+insert_block_before_exact_once 'int fd_statfs(int fd, struct kstatfs *st)' \
+	'extern int pkm_kacs_file_statfs' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_file_statfs(struct file *file);
+#endif
+
+' \
+	"$kernel_root/fs/statfs.c"
+replace_line_after_anchor_once 'int fd_statfs(int fd, struct kstatfs *st)' \
+	'	return vfs_statfs(&fd_file(f)->f_path, st);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	{
+		int ret = pkm_kacs_file_statfs(fd_file(f));
+		if (ret)
+			return ret;
+	}
+#endif
+	return vfs_statfs(&fd_file(f)->f_path, st);' \
+	"$kernel_root/fs/statfs.c"
+insert_block_before_exact_once 'int vfs_fchmod(struct file *file, umode_t mode)' \
+	'extern int pkm_kacs_file_chmod' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_file_chmod(struct file *file);
+extern int pkm_kacs_file_chown(struct file *file);
+#endif
+
+' \
+	"$kernel_root/fs/open.c"
+replace_line_after_anchor_once 'int vfs_fchmod(struct file *file, umode_t mode)' \
+	'	audit_file(file);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	{
+		int ret = pkm_kacs_file_chmod(file);
+		if (ret)
+			return ret;
+	}
+#endif
+	audit_file(file);' \
+	"$kernel_root/fs/open.c"
+replace_line_after_anchor_once 'int vfs_fchown(struct file *file, uid_t user, gid_t group)' \
+	'	error = mnt_want_write_file(file);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	error = pkm_kacs_file_chown(file);
+	if (error)
+		return error;
+#endif
+	error = mnt_want_write_file(file);' \
+	"$kernel_root/fs/open.c"
+insert_block_before_exact_once 'static int do_utimes_fd(int fd, struct timespec64 *times, int flags)' \
+	'extern int pkm_kacs_file_utimens' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_file_utimens(struct file *file);
+#endif
+
+' \
+	"$kernel_root/fs/utimes.c"
+replace_line_after_anchor_once 'static int do_utimes_fd(int fd, struct timespec64 *times, int flags)' \
+	'	return vfs_utimes(&fd_file(f)->f_path, times);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	{
+		int ret = pkm_kacs_file_utimens(fd_file(f));
+		if (ret)
+			return ret;
+	}
+#endif
+	return vfs_utimes(&fd_file(f)->f_path, times);' \
+	"$kernel_root/fs/utimes.c"
+insert_block_before_exact_once 'SYSCALL_DEFINE5(file_getattr, int, dfd, const char __user *, filename,' \
+	'extern int pkm_kacs_file_fileattr_get' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_file_fileattr_get(struct file *file);
+extern int pkm_kacs_file_fileattr_set(struct file *file);
+#endif
+
+' \
+	"$kernel_root/fs/file_attr.c"
+replace_line_after_anchor_once 'SYSCALL_DEFINE5(file_getattr, int, dfd, const char __user *, filename,' \
+	'		filepath = fd_file(f)->f_path;' \
+	'#ifdef CONFIG_SECURITY_PKM
+		error = pkm_kacs_file_fileattr_get(fd_file(f));
+		if (error)
+			return error;
+#endif
+		filepath = fd_file(f)->f_path;' \
+	"$kernel_root/fs/file_attr.c"
+replace_line_after_anchor_once 'SYSCALL_DEFINE5(file_setattr, int, dfd, const char __user *, filename,' \
+	'		filepath = fd_file(f)->f_path;' \
+	'#ifdef CONFIG_SECURITY_PKM
+		error = pkm_kacs_file_fileattr_set(fd_file(f));
+		if (error)
+			return error;
+#endif
+		filepath = fd_file(f)->f_path;' \
+	"$kernel_root/fs/file_attr.c"
 insert_block_before_exact_once 'int vfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)' \
 	'extern int pkm_kacs_file_fallocate' \
 	'#ifdef CONFIG_SECURITY_PKM
@@ -707,6 +835,7 @@ insert_block_before_exact_once 'int setxattr_copy(const char __user *name, struc
 extern int pkm_kacs_file_sd_xattr_get(struct file *file, const char *name);
 extern int pkm_kacs_file_sd_xattr_set(struct file *file, const char *name);
 extern int pkm_kacs_file_sd_xattr_remove(struct file *file, const char *name);
+extern int pkm_kacs_file_listxattr(struct file *file);
 #endif
 
 ' \
@@ -728,6 +857,17 @@ replace_line_after_anchor_once 'ssize_t file_getxattr(struct file *f, struct ker
 	ssize_t error = pkm_kacs_file_sd_xattr_get(f, ctx->kname->name);
 	if (error)
 		return error;
+#endif
+	audit_file(f);' \
+	"$kernel_root/fs/xattr.c"
+replace_line_after_anchor_once 'ssize_t file_listxattr(struct file *f, char __user *list, size_t size)' \
+	'	audit_file(f);' \
+	'#ifdef CONFIG_SECURITY_PKM
+	{
+		int ret = pkm_kacs_file_listxattr(f);
+		if (ret)
+			return ret;
+	}
 #endif
 	audit_file(f);' \
 	"$kernel_root/fs/xattr.c"
