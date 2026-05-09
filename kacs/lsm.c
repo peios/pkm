@@ -395,6 +395,7 @@ static int pkm_kacs_inode_init_security(struct inode *inode,
 					int *xattr_count);
 static int pkm_kacs_file_open(struct file *file);
 static int pkm_kacs_file_permission(struct file *file, int mask);
+static int pkm_kacs_file_lock(struct file *file, unsigned int cmd);
 static int pkm_kacs_sk_alloc_security(struct sock *sk, int family,
 				      gfp_t priority);
 static void pkm_kacs_sk_free_security(struct sock *sk);
@@ -419,6 +420,8 @@ static int pkm_kacs_check_mprotect_snapshot(struct file *file,
 					    unsigned long prot);
 static int pkm_kacs_check_file_permission_snapshot(struct file *file,
 						   int mask);
+static int pkm_kacs_check_file_lock_snapshot(struct file *file,
+					     unsigned int cmd);
 static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm);
 static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 					 const struct file *file);
@@ -2021,6 +2024,11 @@ static int pkm_kacs_file_permission(struct file *file, int mask)
 	return pkm_kacs_check_file_permission_snapshot(file, mask);
 }
 
+static int pkm_kacs_file_lock(struct file *file, unsigned int cmd)
+{
+	return pkm_kacs_check_file_lock_snapshot(file, cmd);
+}
+
 static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 {
 	struct pkm_kacs_task_security *new_sec;
@@ -2092,6 +2100,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(file_release, pkm_kacs_file_release),
 	LSM_HOOK_INIT(file_open, pkm_kacs_file_open),
 	LSM_HOOK_INIT(file_permission, pkm_kacs_file_permission),
+	LSM_HOOK_INIT(file_lock, pkm_kacs_file_lock),
 	LSM_HOOK_INIT(task_alloc, pkm_kacs_task_alloc),
 	LSM_HOOK_INIT(task_free, pkm_kacs_task_free),
 	LSM_HOOK_INIT(sk_alloc_security, pkm_kacs_sk_alloc_security),
@@ -2898,6 +2907,39 @@ static int pkm_kacs_check_file_permission_snapshot(struct file *file,
 	}
 
 	return 0;
+}
+
+static int pkm_kacs_check_file_lock_snapshot(struct file *file,
+					     unsigned int cmd)
+{
+	struct pkm_kacs_file_security *file_sec;
+	u32 granted_access;
+
+	if (!file)
+		return -EACCES;
+	if (!file->f_security)
+		return -EACCES;
+
+	file_sec = pkm_kacs_file(file);
+	if (!file_sec->managed)
+		return 0;
+
+	granted_access = file_sec->granted_access;
+	switch (cmd) {
+	case F_UNLCK:
+		return 0;
+	case F_RDLCK:
+		if ((granted_access & PKM_KACS_FILE_READ_DATA) != 0)
+			return 0;
+		return -EACCES;
+	case F_WRLCK:
+		if ((granted_access & (PKM_KACS_FILE_WRITE_DATA |
+				       PKM_KACS_FILE_APPEND_DATA)) != 0)
+			return 0;
+		return -EACCES;
+	default:
+		return -EACCES;
+	}
 }
 
 static int pkm_kacs_check_task_prctl_mitigations_core(
@@ -8605,6 +8647,28 @@ int pkm_kacs_kunit_check_file_permission_snapshot(u32 managed,
 	state.file.f_flags = file_flags;
 
 	ret = pkm_kacs_check_file_permission_snapshot(&state.file, mask);
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
+}
+
+int pkm_kacs_kunit_check_file_lock_snapshot(u32 managed, u32 granted_access,
+					    unsigned int cmd)
+{
+	struct pkm_kacs_kunit_file_mount_state state = { };
+	struct pkm_kacs_file_security *file_sec;
+	int ret;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&state, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		return ret;
+
+	file_sec = pkm_kacs_file(&state.file);
+	file_sec->managed = managed ? 1 : 0;
+	file_sec->granted_access = granted_access;
+
+	ret = pkm_kacs_check_file_lock_snapshot(&state.file, cmd);
 	pkm_kacs_kunit_cleanup_file_mount_state(&state);
 	return ret;
 }
