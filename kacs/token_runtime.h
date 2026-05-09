@@ -64,6 +64,16 @@ int pkm_kacs_open_by_handle_at(void);
 #define PKM_KACS_KUNIT_PATH_METADATA_XATTR_LIST 22U
 #define PKM_KACS_KUNIT_PATH_METADATA_ACCESS 23U
 
+#define PKM_KACS_KUNIT_NAMESPACE_CREATE_FILE 1U
+#define PKM_KACS_KUNIT_NAMESPACE_MKDIR 2U
+#define PKM_KACS_KUNIT_NAMESPACE_MKNOD 3U
+#define PKM_KACS_KUNIT_NAMESPACE_SYMLINK 4U
+#define PKM_KACS_KUNIT_NAMESPACE_LINK 5U
+#define PKM_KACS_KUNIT_NAMESPACE_UNLINK 6U
+#define PKM_KACS_KUNIT_NAMESPACE_RMDIR 7U
+#define PKM_KACS_KUNIT_NAMESPACE_RENAME 8U
+#define PKM_KACS_KUNIT_NAMESPACE_READLINK 9U
+
 #define KACS_STATUS_OPENED 1U
 #define KACS_STATUS_CREATED 2U
 #define KACS_STATUS_OVERWRITTEN 3U
@@ -343,6 +353,27 @@ struct pkm_kacs_kunit_native_create_args {
 	u32 flags;
 	u32 mount_policy_override;
 	u64 mount_magic;
+};
+
+struct pkm_kacs_kunit_namespace_args {
+	const void *subject_token;
+	const u8 *source_sd_ptr;
+	size_t source_sd_len;
+	u32 source_sd_state;
+	const u8 *old_parent_sd_ptr;
+	size_t old_parent_sd_len;
+	u32 old_parent_sd_state;
+	const u8 *new_parent_sd_ptr;
+	size_t new_parent_sd_len;
+	u32 new_parent_sd_state;
+	const u8 *target_sd_ptr;
+	size_t target_sd_len;
+	u32 target_sd_state;
+	u32 op;
+	u32 mount_policy_override;
+	u64 mount_magic;
+	u16 source_mode;
+	u16 target_mode;
 };
 
 struct pkm_kacs_kunit_delete_on_close_result {
@@ -758,6 +789,11 @@ int pkm_kacs_kunit_check_inode_permission_live(
 	const void *subject_token, int mask);
 int pkm_kacs_kunit_check_open_by_handle_for_subject(
 	const void *subject_token);
+int pkm_kacs_kunit_check_namespace_live(
+	const struct pkm_kacs_kunit_namespace_args *args,
+	const u8 **created_sd_out, size_t *created_sd_len_out);
+int pkm_kacs_kunit_check_namespace_rename_flags(
+	const struct pkm_kacs_kunit_namespace_args *args, unsigned int flags);
 int pkm_kacs_kunit_check_file_ioctl_snapshot(u32 managed, u32 granted_access,
 					     umode_t mode, unsigned int cmd,
 					     bool compat);

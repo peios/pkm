@@ -230,6 +230,7 @@ require_file "$kernel_root/kernel/pid.c"
 require_file "$kernel_root/kernel/sched/syscalls.c"
 require_file "$kernel_root/kernel/sys.c"
 require_file "$kernel_root/security/commoncap.c"
+require_file "$kernel_root/security/security.c"
 
 rm -rf "$pkm_dir"
 mkdir -p "$pkm_dir/kacs"
@@ -279,6 +280,31 @@ replace_line_after_anchor_once 'int cap_capable(const struct cred *cred, struct 
 #endif
 ' \
 	"$kernel_root/security/commoncap.c"
+insert_block_before_exact_once 'int security_inode_rename(struct inode *old_dir, struct dentry *old_dentry,' \
+	'extern int pkm_kacs_inode_rename_flags' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern int pkm_kacs_inode_rename_flags(struct inode *old_dir,
+				       struct dentry *old_dentry,
+				       struct inode *new_dir,
+				       struct dentry *new_dentry,
+				       unsigned int flags);
+#endif
+
+' \
+	"$kernel_root/security/security.c"
+replace_line_after_anchor_once 'int security_inode_rename(struct inode *old_dir, struct dentry *old_dentry,' \
+	'	if (flags & RENAME_EXCHANGE) {' \
+	'#ifdef CONFIG_SECURITY_PKM
+	{
+		int pkm_ret = pkm_kacs_inode_rename_flags(
+			old_dir, old_dentry, new_dir, new_dentry, flags);
+		if (pkm_ret)
+			return pkm_ret;
+	}
+#endif
+
+	if (flags & RENAME_EXCHANGE) {' \
+	"$kernel_root/security/security.c"
 insert_line_after_exact_once '#define PTRACE_MODE_REALCREDS	0x10' \
 	'#define PTRACE_MODE_GETFD	0x20' \
 	"$kernel_root/include/linux/ptrace.h"

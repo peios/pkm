@@ -79,6 +79,7 @@
 #define PKM_KACS_PRIVILEGE_SE_PROFILE_SINGLE_PROCESS (1ULL << 13)
 #define PKM_KACS_PRIVILEGE_SE_RESTORE (1ULL << 18)
 #define PKM_KACS_PRIVILEGE_SE_CHANGE_NOTIFY (1ULL << 23)
+#define PKM_KACS_PRIVILEGE_SE_CREATE_SYMBOLIC_LINK (1ULL << 35)
 #define PKM_KACS_PRIVILEGE_SE_BIND_PRIVILEGED_PORT (1ULL << 63)
 #define PKM_KACS_LSM_PRLIMIT_READ 1U
 #define PKM_KACS_LSM_PRLIMIT_WRITE 2U
@@ -432,6 +433,23 @@ static int pkm_kacs_inode_file_setattr(struct dentry *dentry,
 				       struct file_kattr *fa);
 static int pkm_kacs_inode_listxattr(struct dentry *dentry);
 static int pkm_kacs_inode_permission(struct inode *inode, int mask);
+static int pkm_kacs_inode_create(struct inode *dir, struct dentry *dentry,
+				 umode_t mode);
+static int pkm_kacs_inode_link(struct dentry *old_dentry, struct inode *dir,
+			       struct dentry *new_dentry);
+static int pkm_kacs_inode_unlink(struct inode *dir, struct dentry *dentry);
+static int pkm_kacs_inode_symlink(struct inode *dir, struct dentry *dentry,
+				  const char *old_name);
+static int pkm_kacs_inode_mkdir(struct inode *dir, struct dentry *dentry,
+				umode_t mode);
+static int pkm_kacs_inode_rmdir(struct inode *dir, struct dentry *dentry);
+static int pkm_kacs_inode_mknod(struct inode *dir, struct dentry *dentry,
+				umode_t mode, dev_t dev);
+static int pkm_kacs_inode_rename(struct inode *old_dir,
+				 struct dentry *old_dentry,
+				 struct inode *new_dir,
+				 struct dentry *new_dentry);
+static int pkm_kacs_inode_readlink(struct dentry *dentry);
 static int pkm_kacs_inode_init_security(struct inode *inode,
 					struct inode *dir,
 					const struct qstr *qstr,
@@ -503,6 +521,11 @@ static int pkm_kacs_check_file_fallocate_snapshot(struct file *file,
 static long pkm_kacs_check_inode_permission_live_for_subject(
 	const void *subject_token, struct inode *inode, struct dentry *dentry,
 	int mask);
+int pkm_kacs_inode_rename_flags(struct inode *old_dir,
+				struct dentry *old_dentry,
+				struct inode *new_dir,
+				struct dentry *new_dentry,
+				unsigned int flags);
 static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm);
 static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 					 const struct file *file);
@@ -2695,6 +2718,15 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_removexattr, pkm_kacs_inode_removexattr),
 	LSM_HOOK_INIT(inode_listxattr, pkm_kacs_inode_listxattr),
 	LSM_HOOK_INIT(inode_permission, pkm_kacs_inode_permission),
+	LSM_HOOK_INIT(inode_create, pkm_kacs_inode_create),
+	LSM_HOOK_INIT(inode_link, pkm_kacs_inode_link),
+	LSM_HOOK_INIT(inode_unlink, pkm_kacs_inode_unlink),
+	LSM_HOOK_INIT(inode_symlink, pkm_kacs_inode_symlink),
+	LSM_HOOK_INIT(inode_mkdir, pkm_kacs_inode_mkdir),
+	LSM_HOOK_INIT(inode_rmdir, pkm_kacs_inode_rmdir),
+	LSM_HOOK_INIT(inode_mknod, pkm_kacs_inode_mknod),
+	LSM_HOOK_INIT(inode_rename, pkm_kacs_inode_rename),
+	LSM_HOOK_INIT(inode_readlink, pkm_kacs_inode_readlink),
 	LSM_HOOK_INIT(inode_init_security, pkm_kacs_inode_init_security),
 	LSM_HOOK_INIT(file_alloc_security, pkm_kacs_file_alloc_security),
 	LSM_HOOK_INIT(file_release, pkm_kacs_file_release),
@@ -4702,14 +4734,16 @@ out_unlock:
 	if (ret)
 		return ret;
 
-	ret = kacs_rust_check_file_sd_with_intent(subject_token, *out_sd_ptr,
-						  *out_sd_len, desired_access, 0,
-						  &granted_access);
-	if (ret) {
-		pkm_kacs_free((void *)*out_sd_ptr);
-		*out_sd_ptr = NULL;
-		*out_sd_len = 0;
-		return ret;
+	if (desired_access != 0) {
+		ret = kacs_rust_check_file_sd_with_intent(
+			subject_token, *out_sd_ptr, *out_sd_len,
+			desired_access, 0, &granted_access);
+		if (ret) {
+			pkm_kacs_free((void *)*out_sd_ptr);
+			*out_sd_ptr = NULL;
+			*out_sd_len = 0;
+			return ret;
+		}
 	}
 
 	if (granted_access_out)
@@ -4851,6 +4885,308 @@ static bool pkm_kacs_inode_on_unmanaged_mount(const struct inode *inode)
 	return inode &&
 	       pkm_kacs_superblock_mount_policy(inode->i_sb) ==
 		       PKM_KACS_MOUNT_POLICY_UNMANAGED;
+}
+
+static struct dentry *pkm_kacs_parent_dentry_for_inode(
+	struct inode *parent_inode, struct dentry *child_dentry)
+{
+	struct dentry *parent_dentry;
+
+	if (!parent_inode || !child_dentry)
+		return NULL;
+
+	parent_dentry = child_dentry->d_parent;
+	if (!parent_dentry || d_inode(parent_dentry) != parent_inode)
+		return NULL;
+
+	return parent_dentry;
+}
+
+static long pkm_kacs_authorize_inode_namespace_access_for_subject(
+	const void *subject_token, struct inode *inode, struct dentry *dentry,
+	u32 desired_access)
+{
+	if (!inode || desired_access == 0)
+		return -EACCES;
+	if (pkm_kacs_inode_on_unmanaged_mount(inode))
+		return 0;
+	if (!subject_token)
+		return -EACCES;
+
+	return pkm_kacs_authorize_inode_file_access_core(
+		subject_token, inode, dentry, desired_access);
+}
+
+static long pkm_kacs_authorize_parent_namespace_access_for_subject(
+	const void *subject_token, struct inode *parent_inode,
+	struct dentry *child_dentry, u32 desired_access)
+{
+	struct dentry *parent_dentry;
+
+	if (!parent_inode || desired_access == 0)
+		return -EACCES;
+	if (pkm_kacs_inode_on_unmanaged_mount(parent_inode))
+		return 0;
+
+	parent_dentry = pkm_kacs_parent_dentry_for_inode(parent_inode,
+							  child_dentry);
+	return pkm_kacs_authorize_inode_namespace_access_for_subject(
+		subject_token, parent_inode, parent_dentry, desired_access);
+}
+
+static long pkm_kacs_authorize_namespace_delete_for_subject(
+	const void *subject_token, struct inode *parent_inode,
+	struct dentry *target_dentry)
+{
+	struct inode *target_inode;
+	long ret;
+
+	if (!target_dentry)
+		return -EACCES;
+
+	target_inode = d_inode(target_dentry);
+	if (!target_inode)
+		return -EACCES;
+	if (pkm_kacs_inode_on_unmanaged_mount(target_inode) &&
+	    pkm_kacs_inode_on_unmanaged_mount(parent_inode))
+		return 0;
+
+	ret = pkm_kacs_authorize_inode_namespace_access_for_subject(
+		subject_token, target_inode, target_dentry, KACS_ACCESS_DELETE);
+	if (ret != -EACCES)
+		return ret;
+
+	return pkm_kacs_authorize_parent_namespace_access_for_subject(
+		subject_token, parent_inode, target_dentry,
+		PKM_KACS_FILE_DELETE_CHILD);
+}
+
+static long pkm_kacs_authorize_namespace_create_for_subject(
+	const void *subject_token, struct inode *parent_inode,
+	struct dentry *child_dentry, bool directory)
+{
+	u32 desired_access = directory ? PKM_KACS_FILE_ADD_SUBDIRECTORY :
+					 PKM_KACS_FILE_ADD_FILE;
+
+	return pkm_kacs_authorize_parent_namespace_access_for_subject(
+		subject_token, parent_inode, child_dentry, desired_access);
+}
+
+static long pkm_kacs_authorize_namespace_symlink_for_subject(
+	const void *subject_token, struct inode *parent_inode,
+	struct dentry *child_dentry)
+{
+	long ret;
+
+	ret = pkm_kacs_authorize_namespace_create_for_subject(
+		subject_token, parent_inode, child_dentry, false);
+	if (ret)
+		return ret;
+	if (pkm_kacs_inode_on_unmanaged_mount(parent_inode))
+		return 0;
+
+	return pkm_kacs_require_enabled_privilege(
+		subject_token, PKM_KACS_PRIVILEGE_SE_CREATE_SYMBOLIC_LINK);
+}
+
+static long pkm_kacs_authorize_namespace_link_for_subject(
+	const void *subject_token, struct dentry *old_dentry, struct inode *dir,
+	struct dentry *new_dentry)
+{
+	struct inode *source_inode;
+	long ret;
+
+	if (!old_dentry || !dir || !new_dentry)
+		return -EACCES;
+
+	ret = pkm_kacs_authorize_parent_namespace_access_for_subject(
+		subject_token, dir, new_dentry, PKM_KACS_FILE_ADD_FILE);
+	if (ret)
+		return ret;
+
+	source_inode = d_inode(old_dentry);
+	if (!source_inode)
+		return -EACCES;
+
+	return pkm_kacs_authorize_inode_namespace_access_for_subject(
+		subject_token, source_inode, old_dentry,
+		PKM_KACS_FILE_WRITE_ATTRIBUTES);
+}
+
+static long pkm_kacs_authorize_namespace_rename_for_subject(
+	const void *subject_token, struct inode *old_dir,
+	struct dentry *old_dentry, struct inode *new_dir,
+	struct dentry *new_dentry)
+{
+	struct inode *source_inode;
+	u32 add_access;
+	long ret;
+
+	if (!old_dir || !old_dentry || !new_dir || !new_dentry)
+		return -EACCES;
+
+	source_inode = d_inode(old_dentry);
+	if (!source_inode)
+		return -EACCES;
+
+	ret = pkm_kacs_authorize_namespace_delete_for_subject(
+		subject_token, old_dir, old_dentry);
+	if (ret)
+		return ret;
+
+	add_access = S_ISDIR(source_inode->i_mode) ?
+			     PKM_KACS_FILE_ADD_SUBDIRECTORY :
+			     PKM_KACS_FILE_ADD_FILE;
+	ret = pkm_kacs_authorize_parent_namespace_access_for_subject(
+		subject_token, new_dir, new_dentry, add_access);
+	if (ret)
+		return ret;
+
+	if (d_is_positive(new_dentry)) {
+		ret = pkm_kacs_authorize_namespace_delete_for_subject(
+			subject_token, new_dir, new_dentry);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static long pkm_kacs_build_legacy_created_file_sd_for_subject(
+	const void *subject_token, struct inode *parent_inode,
+	struct dentry *parent_dentry, bool directory, const u8 **out_sd_ptr,
+	size_t *out_sd_len)
+{
+	struct vfsmount mnt = {};
+	struct dentry *alias = NULL;
+	struct path parent_path = {};
+	struct file parent_file = {};
+	long ret;
+
+	if (!subject_token || !parent_inode || !out_sd_ptr || !out_sd_len)
+		return -EINVAL;
+	if (pkm_kacs_inode_on_unmanaged_mount(parent_inode))
+		return -EOPNOTSUPP;
+
+	if (!parent_dentry) {
+		alias = d_find_any_alias(parent_inode);
+		if (!alias)
+			return -EACCES;
+		parent_dentry = alias;
+	}
+	if (d_inode(parent_dentry) != parent_inode) {
+		ret = -EACCES;
+		goto out;
+	}
+
+	mnt.mnt_root = parent_dentry;
+	mnt.mnt_sb = parent_inode->i_sb;
+	mnt.mnt_idmap = &nop_mnt_idmap;
+	parent_path.mnt = &mnt;
+	parent_path.dentry = parent_dentry;
+	pkm_kacs_init_path_anchor_file(&parent_file, &parent_path);
+
+	ret = pkm_kacs_build_created_file_sd_for_subject(
+		subject_token, &parent_file, NULL, 0, directory, 0,
+		out_sd_ptr, out_sd_len, NULL);
+out:
+	if (alias)
+		dput(alias);
+	return ret;
+}
+
+int pkm_kacs_inode_rename_flags(struct inode *old_dir,
+				struct dentry *old_dentry,
+				struct inode *new_dir,
+				struct dentry *new_dentry,
+				unsigned int flags)
+{
+	(void)old_dentry;
+	(void)new_dentry;
+
+	if ((flags & RENAME_WHITEOUT) == 0)
+		return 0;
+	if (pkm_kacs_inode_on_unmanaged_mount(old_dir) &&
+	    pkm_kacs_inode_on_unmanaged_mount(new_dir))
+		return 0;
+
+	return -EOPNOTSUPP;
+}
+
+static int pkm_kacs_inode_create(struct inode *dir, struct dentry *dentry,
+				 umode_t mode)
+{
+	(void)mode;
+	return (int)pkm_kacs_authorize_namespace_create_for_subject(
+		pkm_kacs_current_effective_token_ptr(), dir, dentry, false);
+}
+
+static int pkm_kacs_inode_mkdir(struct inode *dir, struct dentry *dentry,
+				umode_t mode)
+{
+	(void)mode;
+	return (int)pkm_kacs_authorize_namespace_create_for_subject(
+		pkm_kacs_current_effective_token_ptr(), dir, dentry, true);
+}
+
+static int pkm_kacs_inode_mknod(struct inode *dir, struct dentry *dentry,
+				umode_t mode, dev_t dev)
+{
+	(void)mode;
+	(void)dev;
+	return (int)pkm_kacs_authorize_namespace_create_for_subject(
+		pkm_kacs_current_effective_token_ptr(), dir, dentry, false);
+}
+
+static int pkm_kacs_inode_symlink(struct inode *dir, struct dentry *dentry,
+				  const char *old_name)
+{
+	(void)old_name;
+	return (int)pkm_kacs_authorize_namespace_symlink_for_subject(
+		pkm_kacs_current_effective_token_ptr(), dir, dentry);
+}
+
+static int pkm_kacs_inode_link(struct dentry *old_dentry, struct inode *dir,
+			       struct dentry *new_dentry)
+{
+	return (int)pkm_kacs_authorize_namespace_link_for_subject(
+		pkm_kacs_current_effective_token_ptr(), old_dentry, dir,
+		new_dentry);
+}
+
+static int pkm_kacs_inode_unlink(struct inode *dir, struct dentry *dentry)
+{
+	return (int)pkm_kacs_authorize_namespace_delete_for_subject(
+		pkm_kacs_current_effective_token_ptr(), dir, dentry);
+}
+
+static int pkm_kacs_inode_rmdir(struct inode *dir, struct dentry *dentry)
+{
+	return (int)pkm_kacs_authorize_namespace_delete_for_subject(
+		pkm_kacs_current_effective_token_ptr(), dir, dentry);
+}
+
+static int pkm_kacs_inode_rename(struct inode *old_dir,
+				 struct dentry *old_dentry,
+				 struct inode *new_dir,
+				 struct dentry *new_dentry)
+{
+	return (int)pkm_kacs_authorize_namespace_rename_for_subject(
+		pkm_kacs_current_effective_token_ptr(), old_dir, old_dentry,
+		new_dir, new_dentry);
+}
+
+static int pkm_kacs_inode_readlink(struct dentry *dentry)
+{
+	struct inode *inode;
+
+	if (!dentry)
+		return -EACCES;
+
+	inode = d_inode(dentry);
+	return (int)pkm_kacs_authorize_inode_namespace_access_for_subject(
+		pkm_kacs_current_effective_token_ptr(), inode, dentry,
+		PKM_KACS_FILE_READ_DATA);
 }
 
 static int pkm_kacs_authorize_path_metadata_access(const struct path *path,
@@ -5154,9 +5490,12 @@ static int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 					int *xattr_count)
 {
 	struct xattr *xattr;
+	const void *subject_token;
 	const u8 *sd_bytes = NULL;
 	size_t sd_len = 0;
 	u8 *copied_bytes;
+	bool allocated_sd = false;
+	long ret;
 
 	(void)qstr;
 	if (!inode || !dir || !xattrs || !xattr_count)
@@ -5164,12 +5503,23 @@ static int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 	if (pkm_kacs_inode_is_ntfs(inode))
 		return -EOPNOTSUPP;
 	if (!pkm_kacs_current_native_create_request_matches(
-		    dir, S_ISDIR(inode->i_mode), &sd_bytes, &sd_len))
-		return -EOPNOTSUPP;
+		    dir, S_ISDIR(inode->i_mode), &sd_bytes, &sd_len)) {
+		subject_token = pkm_kacs_current_effective_token_ptr();
+		if (!subject_token)
+			return -EACCES;
+		ret = pkm_kacs_build_legacy_created_file_sd_for_subject(
+			subject_token, dir, NULL, S_ISDIR(inode->i_mode),
+			&sd_bytes, &sd_len);
+		if (ret)
+			return ret;
+		allocated_sd = true;
+	}
 	if (!sd_bytes || sd_len == 0)
-		return -EOPNOTSUPP;
+		return allocated_sd ? -EACCES : -EOPNOTSUPP;
 
 	copied_bytes = kmemdup(sd_bytes, sd_len, GFP_NOFS);
+	if (allocated_sd)
+		pkm_kacs_free((void *)sd_bytes);
 	if (!copied_bytes)
 		return -ENOMEM;
 
@@ -9121,6 +9471,14 @@ static int pkm_kacs_kunit_init_file_mount_state_ex(
 
 	state->dentry.d_inode = &state->inode;
 	state->dentry.d_parent = &state->dentry;
+	if (S_ISDIR(mode))
+		state->dentry.d_flags = DCACHE_DIRECTORY_TYPE;
+	else if (S_ISLNK(mode))
+		state->dentry.d_flags = DCACHE_SYMLINK_TYPE;
+	else if (S_ISREG(mode))
+		state->dentry.d_flags = DCACHE_REGULAR_TYPE;
+	else
+		state->dentry.d_flags = DCACHE_SPECIAL_TYPE;
 	state->mnt.mnt_root = &state->dentry;
 	state->mnt.mnt_sb = &state->sb;
 	state->mnt.mnt_flags = 0;
@@ -10057,6 +10415,276 @@ int pkm_kacs_kunit_check_open_by_handle_for_subject(
 {
 	return (int)pkm_kacs_require_enabled_privilege(
 		subject_token, PKM_KACS_PRIVILEGE_SE_CHANGE_NOTIFY);
+}
+
+static int pkm_kacs_kunit_init_namespace_state(
+	struct pkm_kacs_kunit_file_mount_state *state,
+	const u8 *sd_ptr, size_t sd_len, u32 sd_state, u64 magic,
+	u32 mount_policy, umode_t mode)
+{
+	struct pkm_kacs_inode_sd_cache *cache;
+	int ret;
+
+	cache = pkm_kacs_kunit_file_sd_cache_alloc(sd_ptr, sd_len, sd_state);
+	if (!cache)
+		return -EINVAL;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		state, magic, cache, mount_policy, NULL, 0, mode, true);
+	if (ret) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int pkm_kacs_kunit_namespace_maybe_build_created_sd(
+	const struct pkm_kacs_kunit_namespace_args *args,
+	struct pkm_kacs_kunit_file_mount_state *parent, bool directory,
+	const u8 **created_sd_out, size_t *created_sd_len_out)
+{
+	long ret;
+
+	if (!created_sd_out || !created_sd_len_out)
+		return 0;
+
+	*created_sd_out = NULL;
+	*created_sd_len_out = 0;
+	ret = pkm_kacs_build_legacy_created_file_sd_for_subject(
+		args->subject_token, &parent->inode, &parent->dentry,
+		directory, created_sd_out, created_sd_len_out);
+	return (int)ret;
+}
+
+int pkm_kacs_kunit_check_namespace_live(
+	const struct pkm_kacs_kunit_namespace_args *args,
+	const u8 **created_sd_out, size_t *created_sd_len_out)
+{
+	struct pkm_kacs_kunit_file_mount_state source = {};
+	struct pkm_kacs_kunit_file_mount_state old_parent = {};
+	struct pkm_kacs_kunit_file_mount_state new_parent = {};
+	struct pkm_kacs_kunit_file_mount_state target = {};
+	struct dentry negative = {};
+	struct dentry create_child = {};
+	struct dentry *new_dentry;
+	u32 policy;
+	u64 magic;
+	umode_t source_mode;
+	umode_t target_mode;
+	bool source_ready = false;
+	bool old_parent_ready = false;
+	bool new_parent_ready = false;
+	bool target_ready = false;
+	int ret = 0;
+
+	if (!args || !args->subject_token)
+		return -EINVAL;
+	if (created_sd_out)
+		*created_sd_out = NULL;
+	if (created_sd_len_out)
+		*created_sd_len_out = 0;
+
+	magic = args->mount_magic ? args->mount_magic : TMPFS_MAGIC;
+	policy = args->mount_policy_override ?
+			 args->mount_policy_override :
+			 PKM_KACS_MOUNT_POLICY_DENY_MISSING;
+	source_mode = args->source_mode ? args->source_mode : S_IFREG;
+	target_mode = args->target_mode ? args->target_mode : S_IFREG;
+
+	if (args->old_parent_sd_state != 0) {
+		ret = pkm_kacs_kunit_init_namespace_state(
+			&old_parent, args->old_parent_sd_ptr,
+			args->old_parent_sd_len, args->old_parent_sd_state,
+			magic, policy, S_IFDIR);
+		if (ret)
+			goto out;
+		old_parent_ready = true;
+	}
+	if (args->new_parent_sd_state != 0) {
+		ret = pkm_kacs_kunit_init_namespace_state(
+			&new_parent, args->new_parent_sd_ptr,
+			args->new_parent_sd_len, args->new_parent_sd_state,
+			magic, policy, S_IFDIR);
+		if (ret)
+			goto out;
+		new_parent_ready = true;
+	}
+	if (args->source_sd_state != 0) {
+		ret = pkm_kacs_kunit_init_namespace_state(
+			&source, args->source_sd_ptr, args->source_sd_len,
+			args->source_sd_state, magic, policy, source_mode);
+		if (ret)
+			goto out;
+		source_ready = true;
+	}
+	if (args->target_sd_state != 0) {
+		ret = pkm_kacs_kunit_init_namespace_state(
+			&target, args->target_sd_ptr, args->target_sd_len,
+			args->target_sd_state, magic, policy, target_mode);
+		if (ret)
+			goto out;
+		target_ready = true;
+	}
+
+	if (source_ready && old_parent_ready)
+		source.dentry.d_parent = &old_parent.dentry;
+	if (target_ready && new_parent_ready)
+		target.dentry.d_parent = &new_parent.dentry;
+	if (old_parent_ready)
+		create_child.d_parent = &old_parent.dentry;
+	if (new_parent_ready)
+		negative.d_parent = &new_parent.dentry;
+
+	switch (args->op) {
+	case PKM_KACS_KUNIT_NAMESPACE_CREATE_FILE:
+		if (!old_parent_ready) {
+			ret = -EINVAL;
+			break;
+		}
+		ret = (int)pkm_kacs_authorize_namespace_create_for_subject(
+			args->subject_token, &old_parent.inode, &create_child,
+			false);
+		if (!ret)
+			ret = pkm_kacs_kunit_namespace_maybe_build_created_sd(
+				args, &old_parent, false, created_sd_out,
+				created_sd_len_out);
+		break;
+	case PKM_KACS_KUNIT_NAMESPACE_MKDIR:
+		if (!old_parent_ready) {
+			ret = -EINVAL;
+			break;
+		}
+		ret = (int)pkm_kacs_authorize_namespace_create_for_subject(
+			args->subject_token, &old_parent.inode, &create_child,
+			true);
+		if (!ret)
+			ret = pkm_kacs_kunit_namespace_maybe_build_created_sd(
+				args, &old_parent, true, created_sd_out,
+				created_sd_len_out);
+		break;
+	case PKM_KACS_KUNIT_NAMESPACE_MKNOD:
+		if (!old_parent_ready) {
+			ret = -EINVAL;
+			break;
+		}
+		ret = (int)pkm_kacs_authorize_namespace_create_for_subject(
+			args->subject_token, &old_parent.inode, &create_child,
+			false);
+		if (!ret)
+			ret = pkm_kacs_kunit_namespace_maybe_build_created_sd(
+				args, &old_parent, false, created_sd_out,
+				created_sd_len_out);
+		break;
+	case PKM_KACS_KUNIT_NAMESPACE_SYMLINK:
+		if (!old_parent_ready) {
+			ret = -EINVAL;
+			break;
+		}
+		ret = (int)pkm_kacs_authorize_namespace_symlink_for_subject(
+			args->subject_token, &old_parent.inode, &create_child);
+		if (!ret)
+			ret = pkm_kacs_kunit_namespace_maybe_build_created_sd(
+				args, &old_parent, false, created_sd_out,
+				created_sd_len_out);
+		break;
+	case PKM_KACS_KUNIT_NAMESPACE_LINK:
+		if (!source_ready || !new_parent_ready) {
+			ret = -EINVAL;
+			break;
+		}
+		ret = (int)pkm_kacs_authorize_namespace_link_for_subject(
+			args->subject_token, &source.dentry, &new_parent.inode,
+			&negative);
+		break;
+	case PKM_KACS_KUNIT_NAMESPACE_UNLINK:
+	case PKM_KACS_KUNIT_NAMESPACE_RMDIR:
+		if (!source_ready || !old_parent_ready) {
+			ret = -EINVAL;
+			break;
+		}
+		ret = (int)pkm_kacs_authorize_namespace_delete_for_subject(
+			args->subject_token, &old_parent.inode,
+			&source.dentry);
+		break;
+	case PKM_KACS_KUNIT_NAMESPACE_RENAME:
+		if (!source_ready || !old_parent_ready || !new_parent_ready) {
+			ret = -EINVAL;
+			break;
+		}
+		new_dentry = target_ready ? &target.dentry : &negative;
+		ret = (int)pkm_kacs_authorize_namespace_rename_for_subject(
+			args->subject_token, &old_parent.inode, &source.dentry,
+			&new_parent.inode, new_dentry);
+		break;
+	case PKM_KACS_KUNIT_NAMESPACE_READLINK:
+		if (!source_ready) {
+			ret = -EINVAL;
+			break;
+		}
+		ret = (int)pkm_kacs_authorize_inode_namespace_access_for_subject(
+			args->subject_token, &source.inode, &source.dentry,
+			PKM_KACS_FILE_READ_DATA);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+out:
+	if (target_ready)
+		pkm_kacs_kunit_cleanup_file_mount_state(&target);
+	if (source_ready)
+		pkm_kacs_kunit_cleanup_file_mount_state(&source);
+	if (new_parent_ready)
+		pkm_kacs_kunit_cleanup_file_mount_state(&new_parent);
+	if (old_parent_ready)
+		pkm_kacs_kunit_cleanup_file_mount_state(&old_parent);
+	return ret;
+}
+
+int pkm_kacs_kunit_check_namespace_rename_flags(
+	const struct pkm_kacs_kunit_namespace_args *args, unsigned int flags)
+{
+	struct pkm_kacs_kunit_file_mount_state old_parent = {};
+	struct pkm_kacs_kunit_file_mount_state new_parent = {};
+	u32 policy;
+	u64 magic;
+	bool old_ready = false;
+	bool new_ready = false;
+	int ret;
+
+	if (!args)
+		return -EINVAL;
+
+	magic = args->mount_magic ? args->mount_magic : TMPFS_MAGIC;
+	policy = args->mount_policy_override ?
+			 args->mount_policy_override :
+			 PKM_KACS_MOUNT_POLICY_DENY_MISSING;
+
+	ret = pkm_kacs_kunit_init_namespace_state(
+		&old_parent, args->old_parent_sd_ptr,
+		args->old_parent_sd_len, args->old_parent_sd_state, magic,
+		policy, S_IFDIR);
+	if (ret)
+		goto out;
+	old_ready = true;
+	ret = pkm_kacs_kunit_init_namespace_state(
+		&new_parent, args->new_parent_sd_ptr,
+		args->new_parent_sd_len, args->new_parent_sd_state, magic,
+		policy, S_IFDIR);
+	if (ret)
+		goto out;
+	new_ready = true;
+
+	ret = pkm_kacs_inode_rename_flags(&old_parent.inode, NULL,
+					  &new_parent.inode, NULL, flags);
+out:
+	if (new_ready)
+		pkm_kacs_kunit_cleanup_file_mount_state(&new_parent);
+	if (old_ready)
+		pkm_kacs_kunit_cleanup_file_mount_state(&old_parent);
+	return ret;
 }
 
 int pkm_kacs_kunit_check_file_ioctl_snapshot(u32 managed, u32 granted_access,

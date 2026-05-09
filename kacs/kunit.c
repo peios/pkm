@@ -76,6 +76,7 @@
 #define PKM_KUNIT_SE_RELABEL_PRIVILEGE (1ULL << 32)
 #define PKM_KUNIT_SE_AUDIT_PRIVILEGE (1ULL << 21)
 #define PKM_KUNIT_SE_IMPERSONATE_PRIVILEGE (1ULL << 29)
+#define PKM_KUNIT_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE (1ULL << 35)
 #define PKM_KUNIT_SYSTEM_PRIVILEGES_ALL 0xC000000FFFFFFFFCULL
 #define PKM_KUNIT_SE_PRIVILEGE_ENABLED 0x00000002U
 #define PKM_KUNIT_SE_PRIVILEGE_REMOVED 0x00000004U
@@ -163,6 +164,8 @@
 #define PKM_KUNIT_FILE_WRITE_EA 0x00000010U
 #define PKM_KUNIT_FILE_EXECUTE 0x00000020U
 #define PKM_KUNIT_FILE_TRAVERSE PKM_KUNIT_FILE_EXECUTE
+#define PKM_KUNIT_FILE_ADD_FILE PKM_KUNIT_FILE_WRITE_DATA
+#define PKM_KUNIT_FILE_ADD_SUBDIRECTORY PKM_KUNIT_FILE_APPEND_DATA
 #define PKM_KUNIT_FILE_DELETE_CHILD 0x00000040U
 #define PKM_KUNIT_FILE_READ_ATTRIBUTES 0x00000080U
 #define PKM_KUNIT_FILE_WRITE_ATTRIBUTES 0x00000100U
@@ -5303,6 +5306,8 @@ static void pkm_kunit_file_metadata_xattr_protected_names(struct kunit *test)
 static const u8 *pkm_kunit_create_precise_file_sd(const void *token,
 						  u32 self_mask,
 						  size_t *len_out);
+static void pkm_kunit_make_first_file_ace_inheritable(u8 *sd_bytes,
+						      u8 inherit_flags);
 
 static int pkm_kunit_check_path_metadata_with_mask(u32 granted_mask, u32 op,
 						   u32 mode, const char *name)
@@ -5733,6 +5738,507 @@ static void pkm_kunit_open_by_handle_requires_change_notify(struct kunit *test)
 			before.privileges_used |
 				PKM_KUNIT_SE_CHANGE_NOTIFY_PRIVILEGE);
 	kacs_rust_token_drop(privileged_token);
+}
+
+static int pkm_kunit_namespace_parent_op(const void *subject_token,
+					 u32 parent_mask, u32 op,
+					 const u8 **created_sd_out,
+					 size_t *created_sd_len_out)
+{
+	struct pkm_kacs_kunit_namespace_args args = {
+		.subject_token = subject_token,
+		.old_parent_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.op = op,
+	};
+	const u8 *parent_sd;
+	size_t parent_sd_len = 0;
+	int ret;
+
+	parent_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						     parent_mask,
+						     &parent_sd_len);
+	if (!parent_sd)
+		return -ENOMEM;
+	pkm_kunit_make_first_file_ace_inheritable((u8 *)parent_sd, 0x03);
+
+	args.old_parent_sd_ptr = parent_sd;
+	args.old_parent_sd_len = parent_sd_len;
+	ret = pkm_kacs_kunit_check_namespace_live(&args, created_sd_out,
+						  created_sd_len_out);
+	pkm_kacs_free((void *)parent_sd);
+	return ret;
+}
+
+static int pkm_kunit_namespace_link_op(const void *subject_token,
+				       u32 source_mask, u32 parent_mask)
+{
+	struct pkm_kacs_kunit_namespace_args args = {
+		.subject_token = subject_token,
+		.source_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.new_parent_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.op = PKM_KACS_KUNIT_NAMESPACE_LINK,
+	};
+	const u8 *source_sd;
+	const u8 *parent_sd;
+	size_t source_sd_len = 0;
+	size_t parent_sd_len = 0;
+	int ret;
+
+	source_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						     source_mask,
+						     &source_sd_len);
+	if (!source_sd)
+		return -ENOMEM;
+	parent_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						     parent_mask,
+						     &parent_sd_len);
+	if (!parent_sd) {
+		pkm_kacs_free((void *)source_sd);
+		return -ENOMEM;
+	}
+
+	args.source_sd_ptr = source_sd;
+	args.source_sd_len = source_sd_len;
+	args.new_parent_sd_ptr = parent_sd;
+	args.new_parent_sd_len = parent_sd_len;
+	ret = pkm_kacs_kunit_check_namespace_live(&args, NULL, NULL);
+
+	pkm_kacs_free((void *)parent_sd);
+	pkm_kacs_free((void *)source_sd);
+	return ret;
+}
+
+static int pkm_kunit_namespace_delete_op(const void *subject_token,
+					 u32 target_mask, u32 parent_mask,
+					 u32 op, umode_t target_mode)
+{
+	struct pkm_kacs_kunit_namespace_args args = {
+		.subject_token = subject_token,
+		.source_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.old_parent_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.op = op,
+		.source_mode = target_mode,
+	};
+	const u8 *target_sd;
+	const u8 *parent_sd;
+	size_t target_sd_len = 0;
+	size_t parent_sd_len = 0;
+	int ret;
+
+	target_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						     target_mask,
+						     &target_sd_len);
+	if (!target_sd)
+		return -ENOMEM;
+	parent_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						     parent_mask,
+						     &parent_sd_len);
+	if (!parent_sd) {
+		pkm_kacs_free((void *)target_sd);
+		return -ENOMEM;
+	}
+
+	args.source_sd_ptr = target_sd;
+	args.source_sd_len = target_sd_len;
+	args.old_parent_sd_ptr = parent_sd;
+	args.old_parent_sd_len = parent_sd_len;
+	ret = pkm_kacs_kunit_check_namespace_live(&args, NULL, NULL);
+
+	pkm_kacs_free((void *)parent_sd);
+	pkm_kacs_free((void *)target_sd);
+	return ret;
+}
+
+static int pkm_kunit_namespace_rename_op(const void *subject_token,
+					 u32 source_mask,
+					 u32 old_parent_mask,
+					 u32 new_parent_mask,
+					 u32 target_mask,
+					 bool target_present,
+					 umode_t source_mode)
+{
+	struct pkm_kacs_kunit_namespace_args args = {
+		.subject_token = subject_token,
+		.source_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.old_parent_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.new_parent_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.op = PKM_KACS_KUNIT_NAMESPACE_RENAME,
+		.source_mode = source_mode,
+	};
+	const u8 *source_sd;
+	const u8 *old_parent_sd;
+	const u8 *new_parent_sd;
+	const u8 *target_sd = NULL;
+	size_t source_sd_len = 0;
+	size_t old_parent_sd_len = 0;
+	size_t new_parent_sd_len = 0;
+	size_t target_sd_len = 0;
+	int ret;
+
+	source_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						     source_mask,
+						     &source_sd_len);
+	if (!source_sd)
+		return -ENOMEM;
+	old_parent_sd = pkm_kunit_create_precise_file_sd(subject_token,
+							 old_parent_mask,
+							 &old_parent_sd_len);
+	if (!old_parent_sd) {
+		ret = -ENOMEM;
+		goto out_source;
+	}
+	new_parent_sd = pkm_kunit_create_precise_file_sd(subject_token,
+							 new_parent_mask,
+							 &new_parent_sd_len);
+	if (!new_parent_sd) {
+		ret = -ENOMEM;
+		goto out_old_parent;
+	}
+	if (target_present) {
+		target_sd = pkm_kunit_create_precise_file_sd(subject_token,
+							     target_mask,
+							     &target_sd_len);
+		if (!target_sd) {
+			ret = -ENOMEM;
+			goto out_new_parent;
+		}
+		args.target_sd_ptr = target_sd;
+		args.target_sd_len = target_sd_len;
+		args.target_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID;
+	}
+
+	args.source_sd_ptr = source_sd;
+	args.source_sd_len = source_sd_len;
+	args.old_parent_sd_ptr = old_parent_sd;
+	args.old_parent_sd_len = old_parent_sd_len;
+	args.new_parent_sd_ptr = new_parent_sd;
+	args.new_parent_sd_len = new_parent_sd_len;
+	ret = pkm_kacs_kunit_check_namespace_live(&args, NULL, NULL);
+
+	if (target_sd)
+		pkm_kacs_free((void *)target_sd);
+out_new_parent:
+	pkm_kacs_free((void *)new_parent_sd);
+out_old_parent:
+	pkm_kacs_free((void *)old_parent_sd);
+out_source:
+	pkm_kacs_free((void *)source_sd);
+	return ret;
+}
+
+static int pkm_kunit_namespace_readlink_op(const void *subject_token,
+					   u32 source_mask)
+{
+	struct pkm_kacs_kunit_namespace_args args = {
+		.subject_token = subject_token,
+		.source_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.op = PKM_KACS_KUNIT_NAMESPACE_READLINK,
+		.source_mode = S_IFLNK,
+	};
+	const u8 *source_sd;
+	size_t source_sd_len = 0;
+	int ret;
+
+	source_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						     source_mask,
+						     &source_sd_len);
+	if (!source_sd)
+		return -ENOMEM;
+
+	args.source_sd_ptr = source_sd;
+	args.source_sd_len = source_sd_len;
+	ret = pkm_kacs_kunit_check_namespace_live(&args, NULL, NULL);
+
+	pkm_kacs_free((void *)source_sd);
+	return ret;
+}
+
+static int pkm_kunit_namespace_rename_flags_op(const void *subject_token,
+					       u32 mount_policy,
+					       unsigned int flags)
+{
+	struct pkm_kacs_kunit_namespace_args args = {
+		.subject_token = subject_token,
+		.old_parent_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.new_parent_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.mount_policy_override = mount_policy,
+	};
+	const u8 *old_parent_sd;
+	const u8 *new_parent_sd;
+	size_t old_parent_sd_len = 0;
+	size_t new_parent_sd_len = 0;
+	int ret;
+
+	old_parent_sd = pkm_kunit_create_precise_file_sd(
+		subject_token, PKM_KUNIT_FILE_SD_ADMIN_MASK,
+		&old_parent_sd_len);
+	if (!old_parent_sd)
+		return -ENOMEM;
+	new_parent_sd = pkm_kunit_create_precise_file_sd(
+		subject_token, PKM_KUNIT_FILE_SD_ADMIN_MASK,
+		&new_parent_sd_len);
+	if (!new_parent_sd) {
+		pkm_kacs_free((void *)old_parent_sd);
+		return -ENOMEM;
+	}
+
+	args.old_parent_sd_ptr = old_parent_sd;
+	args.old_parent_sd_len = old_parent_sd_len;
+	args.new_parent_sd_ptr = new_parent_sd;
+	args.new_parent_sd_len = new_parent_sd_len;
+	ret = pkm_kacs_kunit_check_namespace_rename_flags(&args, flags);
+
+	pkm_kacs_free((void *)new_parent_sd);
+	pkm_kacs_free((void *)old_parent_sd);
+	return ret;
+}
+
+static void pkm_kunit_namespace_create_rights_and_sd(struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *created_sd = NULL;
+	size_t created_sd_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_namespace_parent_op(
+				subject_token, PKM_KUNIT_FILE_ADD_FILE,
+				PKM_KACS_KUNIT_NAMESPACE_CREATE_FILE,
+				&created_sd, &created_sd_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, created_sd);
+	KUNIT_EXPECT_GT(test, created_sd_len, (size_t)0);
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_validate_sd_bytes(created_sd, created_sd_len),
+			0);
+	pkm_kacs_free((void *)created_sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_parent_op(
+				subject_token, PKM_KUNIT_FILE_READ_DATA,
+				PKM_KACS_KUNIT_NAMESPACE_CREATE_FILE, NULL,
+				NULL),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_parent_op(
+				subject_token, PKM_KUNIT_FILE_ADD_SUBDIRECTORY,
+				PKM_KACS_KUNIT_NAMESPACE_MKDIR, NULL, NULL),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_parent_op(
+				subject_token, PKM_KUNIT_FILE_ADD_FILE,
+				PKM_KACS_KUNIT_NAMESPACE_MKDIR, NULL, NULL),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_parent_op(
+				subject_token, PKM_KUNIT_FILE_ADD_FILE,
+				PKM_KACS_KUNIT_NAMESPACE_MKNOD, NULL, NULL),
+			0);
+}
+
+static void pkm_kunit_namespace_symlink_requires_privilege(
+	struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *privileged_token;
+
+	subject_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_parent_op(
+				subject_token, PKM_KUNIT_FILE_ADD_FILE,
+				PKM_KACS_KUNIT_NAMESPACE_SYMLINK, NULL,
+				NULL),
+			-EPERM);
+	kacs_rust_token_drop(subject_token);
+
+	privileged_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, privileged_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(privileged_token,
+							 &before));
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_parent_op(
+				privileged_token, PKM_KUNIT_FILE_ADD_FILE,
+				PKM_KACS_KUNIT_NAMESPACE_SYMLINK, NULL,
+				NULL),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(privileged_token,
+							 &after));
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used &
+				PKM_KUNIT_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE,
+			PKM_KUNIT_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE);
+	KUNIT_EXPECT_EQ(test,
+			before.privileges_used &
+				PKM_KUNIT_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE,
+			0ULL);
+	kacs_rust_token_drop(privileged_token);
+}
+
+static void pkm_kunit_namespace_link_requires_parent_and_source(
+	struct kunit *test)
+{
+	const void *subject_token;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_link_op(
+				subject_token,
+				PKM_KUNIT_FILE_WRITE_ATTRIBUTES,
+				PKM_KUNIT_FILE_ADD_FILE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_link_op(
+				subject_token, PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_ADD_FILE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_link_op(
+				subject_token,
+				PKM_KUNIT_FILE_WRITE_ATTRIBUTES,
+				PKM_KUNIT_FILE_READ_DATA),
+			-EACCES);
+}
+
+static void pkm_kunit_namespace_unlink_delete_duality(struct kunit *test)
+{
+	const void *subject_token;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_delete_op(
+				subject_token, KACS_ACCESS_DELETE,
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KACS_KUNIT_NAMESPACE_UNLINK, S_IFREG),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_delete_op(
+				subject_token, PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_DELETE_CHILD,
+				PKM_KACS_KUNIT_NAMESPACE_UNLINK, S_IFREG),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_delete_op(
+				subject_token, PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_READ_ATTRIBUTES,
+				PKM_KACS_KUNIT_NAMESPACE_UNLINK, S_IFREG),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_delete_op(
+				subject_token, KACS_ACCESS_DELETE,
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KACS_KUNIT_NAMESPACE_RMDIR, S_IFDIR),
+			0);
+}
+
+static void pkm_kunit_namespace_rename_checks_required_edges(
+	struct kunit *test)
+{
+	const void *subject_token;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_rename_op(
+				subject_token, KACS_ACCESS_DELETE,
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_ADD_FILE, 0, false, S_IFREG),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_rename_op(
+				subject_token, PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_DELETE_CHILD,
+				PKM_KUNIT_FILE_ADD_FILE, 0, false, S_IFREG),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_rename_op(
+				subject_token, KACS_ACCESS_DELETE,
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_READ_DATA, 0, false, S_IFREG),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_rename_op(
+				subject_token, KACS_ACCESS_DELETE,
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_ADD_FILE, PKM_KUNIT_FILE_READ_DATA,
+				true, S_IFREG),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_rename_op(
+				subject_token, KACS_ACCESS_DELETE,
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_ADD_FILE, KACS_ACCESS_DELETE,
+				true, S_IFREG),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_rename_op(
+				subject_token, KACS_ACCESS_DELETE,
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_ADD_FILE, 0, false, S_IFDIR),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_rename_op(
+				subject_token, KACS_ACCESS_DELETE,
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_ADD_SUBDIRECTORY, 0, false,
+				S_IFDIR),
+			0);
+}
+
+static void pkm_kunit_namespace_readlink_requires_read_data(struct kunit *test)
+{
+	const void *subject_token;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_readlink_op(
+				subject_token, PKM_KUNIT_FILE_READ_DATA),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_readlink_op(
+				subject_token, PKM_KUNIT_FILE_READ_ATTRIBUTES),
+			-EACCES);
+}
+
+static void pkm_kunit_namespace_whiteout_flags_fail_closed(
+	struct kunit *test)
+{
+	const void *subject_token;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_rename_flags_op(
+				subject_token, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+				0),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_rename_flags_op(
+				subject_token, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+				RENAME_WHITEOUT),
+			-EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_rename_flags_op(
+				subject_token, PKM_KACS_MOUNT_POLICY_UNMANAGED,
+				RENAME_WHITEOUT),
+			0);
 }
 
 static void pkm_kunit_file_ioctl_snapshot_read_classified(struct kunit *test)
@@ -17607,6 +18113,13 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_inode_permission_nonblocking_retries),
 	KUNIT_CASE(pkm_kunit_inode_permission_unmanaged_skips),
 	KUNIT_CASE(pkm_kunit_open_by_handle_requires_change_notify),
+	KUNIT_CASE(pkm_kunit_namespace_create_rights_and_sd),
+	KUNIT_CASE(pkm_kunit_namespace_symlink_requires_privilege),
+	KUNIT_CASE(pkm_kunit_namespace_link_requires_parent_and_source),
+	KUNIT_CASE(pkm_kunit_namespace_unlink_delete_duality),
+	KUNIT_CASE(pkm_kunit_namespace_rename_checks_required_edges),
+	KUNIT_CASE(pkm_kunit_namespace_readlink_requires_read_data),
+	KUNIT_CASE(pkm_kunit_namespace_whiteout_flags_fail_closed),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_read_classified),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_write_classified),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_fdlocal_fallback_unmanaged),

@@ -155,12 +155,27 @@ for metadata_hook_symbol in \
 	"inode_file_getattr" \
 	"inode_file_setattr" \
 	"inode_listxattr" \
-	"inode_permission"; do
+	"inode_permission" \
+	"inode_create" \
+	"inode_link" \
+	"inode_unlink" \
+	"inode_symlink" \
+	"inode_mkdir" \
+	"inode_rmdir" \
+	"inode_mknod" \
+	"inode_rename" \
+	"inode_readlink"; do
 	if ! rg -q "LSM_HOOK_INIT\\(${metadata_hook_symbol}," \
 		"$repo_root/kacs/lsm.c"; then
 		die "lsm.c does not register metadata hook: $metadata_hook_symbol"
 	fi
 done
+
+if ! rg -q 'pkm_kacs_inode_rename_flags' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'RENAME_WHITEOUT' "$repo_root/kacs/lsm.c"; then
+	die "install-pkm-subtree.sh does not stage the namespace rename flags gate"
+fi
 
 if ! rg -q 'static long do_handle_open\(int mountdirfd, struct file_handle __user \*ufh,' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
