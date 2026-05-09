@@ -862,6 +862,13 @@ int pkm_kacs_kunit_determine_exec_pip_from_signing_material(
 int pkm_kacs_kunit_stage_exec_pip_from_signing_material(
 	const struct pkm_kacs_kunit_signing_probe *material, u32 commit,
 	struct pkm_kacs_kunit_process_state_view *out);
+long pkm_kacs_kunit_exec_dumpable_after_pip(u32 pip_type,
+					    u32 current_dumpable);
+long pkm_kacs_kunit_get_current_dumpable(void);
+long pkm_kacs_kunit_set_current_dumpable(u32 dumpable);
+long pkm_kacs_kunit_stage_exec_dumpable_from_signing_material(
+	const struct pkm_kacs_kunit_signing_probe *material,
+	u32 initial_dumpable);
 int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
 				       unsigned long prot,
 				       unsigned long flags);
@@ -926,6 +933,8 @@ int pkm_kacs_kunit_check_file_fallocate_null(void);
 int pkm_kacs_kunit_check_task_prctl_mitigations(
 	u32 mitigation_bits, int option, unsigned long arg2,
 	unsigned long arg3, unsigned long arg4, unsigned long arg5);
+int pkm_kacs_kunit_check_task_prctl_pip(u32 pip_type, int option,
+					unsigned long arg2);
 int pkm_kacs_kunit_check_pie_bprm(u32 mitigation_bits, const u8 *buf,
 				  size_t len);
 u64 pkm_kacs_kunit_allow_cap_mask(void);

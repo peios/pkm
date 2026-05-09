@@ -33,6 +33,7 @@
 #include <linux/prctl.h>
 #include <linux/ptrace.h>
 #include <linux/sched.h>
+#include <linux/sched/coredump.h>
 #include <linux/slab.h>
 #include <linux/socket.h>
 #include <linux/string.h>
@@ -5491,6 +5492,59 @@ static void pkm_kunit_exec_pip_unsigned_commit_clears_existing_pip(
 			0);
 }
 
+static void pkm_kunit_exec_dumpable_decision_tracks_pip(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_exec_dumpable_after_pip(
+				PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				SUID_DUMP_USER),
+			(long)SUID_DUMP_DISABLE);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_exec_dumpable_after_pip(
+				PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				SUID_DUMP_ROOT),
+			(long)SUID_DUMP_DISABLE);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_exec_dumpable_after_pip(
+				0, SUID_DUMP_USER),
+			(long)SUID_DUMP_USER);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_exec_dumpable_after_pip(
+				0, SUID_DUMP_DISABLE),
+			(long)SUID_DUMP_DISABLE);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_exec_dumpable_after_pip(0, 3),
+			(long)-EINVAL);
+}
+
+static void pkm_kunit_exec_dumpable_signed_material_clears_if_mm(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_probe material = {};
+	long saved_dumpable;
+
+	saved_dumpable = pkm_kacs_kunit_get_current_dumpable();
+	if (saved_dumpable == -ENODEV)
+		kunit_skip(test, "current task has no mm");
+	KUNIT_ASSERT_GE(test, saved_dumpable, 0L);
+
+	pkm_kunit_signing_fill_tcb_vector_material(&material);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_stage_exec_dumpable_from_signing_material(
+				&material, SUID_DUMP_USER),
+			(long)SUID_DUMP_DISABLE);
+
+	material.source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_stage_exec_dumpable_from_signing_material(
+				&material, SUID_DUMP_USER),
+			(long)SUID_DUMP_USER);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_current_dumpable((u32)saved_dumpable),
+			0L);
+}
+
 static void pkm_kunit_lsv_signed_tcb_allows_none_and_tcb_pip(
 	struct kunit *test)
 {
@@ -8296,6 +8350,30 @@ static void pkm_kunit_task_prctl_sml_and_cfib_block_disable_paths(
 			pkm_kacs_kunit_check_task_prctl_mitigations(
 				KACS_MIT_CFIB, ARCH_SHSTK_DISABLE, 0, 0, 0, 0),
 			-EACCES);
+}
+
+static void pkm_kunit_task_prctl_pip_blocks_dumpable_reenable(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_task_prctl_pip(
+				PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				PR_SET_DUMPABLE, SUID_DUMP_USER),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_task_prctl_pip(
+				PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				PR_SET_DUMPABLE, SUID_DUMP_DISABLE),
+			-ENOSYS);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_task_prctl_pip(
+				0, PR_SET_DUMPABLE, SUID_DUMP_USER),
+			-ENOSYS);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_task_prctl_pip(
+				PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				PR_SET_DUMPABLE, SUID_DUMP_ROOT),
+			-ENOSYS);
 }
 
 static void pkm_kunit_open_process_token_success(struct kunit *test)
@@ -19951,6 +20029,8 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_exec_pip_bad_signature_resets_none),
 	KUNIT_CASE(pkm_kunit_exec_pip_pending_is_transactional),
 	KUNIT_CASE(pkm_kunit_exec_pip_unsigned_commit_clears_existing_pip),
+	KUNIT_CASE(pkm_kunit_exec_dumpable_decision_tracks_pip),
+	KUNIT_CASE(pkm_kunit_exec_dumpable_signed_material_clears_if_mm),
 	KUNIT_CASE(pkm_kunit_lsv_signed_tcb_allows_none_and_tcb_pip),
 	KUNIT_CASE(pkm_kunit_lsv_unsigned_and_bad_signature_deny),
 	KUNIT_CASE(pkm_kunit_lsv_insufficient_trust_denies),
@@ -20036,6 +20116,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_fallocate_snapshot_unsupported_fail_closed),
 	KUNIT_CASE(pkm_kunit_pie_rejects_et_exec),
 	KUNIT_CASE(pkm_kunit_task_prctl_sml_and_cfib_block_disable_paths),
+	KUNIT_CASE(pkm_kunit_task_prctl_pip_blocks_dumpable_reenable),
 	KUNIT_CASE(pkm_kunit_open_process_token_success),
 	KUNIT_CASE(pkm_kunit_open_process_token_denied_by_process_sd),
 	KUNIT_CASE(pkm_kunit_open_process_token_denied_by_target_token_sd),

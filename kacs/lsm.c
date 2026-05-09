@@ -43,6 +43,7 @@
 #include <linux/ptrace.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
+#include <linux/sched/coredump.h>
 #include <linux/sched/signal.h>
 #include <linux/security.h>
 #include <linux/slab.h>
@@ -558,6 +559,7 @@ int pkm_kacs_inode_rename_flags(struct inode *old_dir,
 static int pkm_kacs_bprm_check_security(struct linux_binprm *bprm);
 static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 					 const struct file *file);
+static void pkm_kacs_bprm_committing_creds(const struct linux_binprm *bprm);
 static void pkm_kacs_bprm_committed_creds(const struct linux_binprm *bprm);
 static long pkm_kacs_check_process_setinfo_core(
 	const void *subject_token,
@@ -2117,6 +2119,35 @@ static void pkm_kacs_stage_pending_exec_pip(u32 pip_type, u32 pip_trust)
 	sec->pending_exec_pip_valid = 1;
 }
 
+static int pkm_kacs_exec_dumpable_after_pip(u32 pip_type,
+					    int current_dumpable)
+{
+	if (pip_type != 0)
+		return SUID_DUMP_DISABLE;
+
+	return current_dumpable;
+}
+
+static void pkm_kacs_apply_pending_exec_dumpable(void)
+{
+	struct pkm_kacs_task_security *sec;
+	int dumpable;
+	int hardened;
+
+	if (!current || !current->security || !current->mm)
+		return;
+
+	sec = pkm_kacs_task(current);
+	if (!sec->pending_exec_pip_valid)
+		return;
+
+	dumpable = get_dumpable(current->mm);
+	hardened = pkm_kacs_exec_dumpable_after_pip(sec->pending_exec_pip_type,
+						    dumpable);
+	if (hardened != dumpable)
+		set_dumpable(current->mm, hardened);
+}
+
 static void pkm_kacs_commit_pending_exec_pip(void)
 {
 	struct pkm_kacs_task_security *sec;
@@ -2843,6 +2874,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(file_mprotect, pkm_kacs_file_mprotect),
 	LSM_HOOK_INIT(bprm_check_security, pkm_kacs_bprm_check_security),
 	LSM_HOOK_INIT(bprm_creds_from_file, pkm_kacs_bprm_creds_from_file),
+	LSM_HOOK_INIT(bprm_committing_creds, pkm_kacs_bprm_committing_creds),
 	LSM_HOOK_INIT(bprm_committed_creds, pkm_kacs_bprm_committed_creds),
 };
 
@@ -4873,6 +4905,63 @@ int pkm_kacs_kunit_stage_exec_pip_from_signing_material(
 	return ret;
 }
 
+long pkm_kacs_kunit_exec_dumpable_after_pip(u32 pip_type,
+					    u32 current_dumpable)
+{
+	if (current_dumpable > SUID_DUMP_ROOT)
+		return -EINVAL;
+
+	return pkm_kacs_exec_dumpable_after_pip(pip_type,
+						(int)current_dumpable);
+}
+
+long pkm_kacs_kunit_get_current_dumpable(void)
+{
+	if (!current || !current->mm)
+		return -ENODEV;
+
+	return get_dumpable(current->mm);
+}
+
+long pkm_kacs_kunit_set_current_dumpable(u32 dumpable)
+{
+	if (dumpable > SUID_DUMP_ROOT)
+		return -EINVAL;
+	if (!current || !current->mm)
+		return -ENODEV;
+
+	set_dumpable(current->mm, dumpable);
+	return 0;
+}
+
+long pkm_kacs_kunit_stage_exec_dumpable_from_signing_material(
+	const struct pkm_kacs_kunit_signing_probe *material,
+	u32 initial_dumpable)
+{
+	struct pkm_kacs_signing_material material_in;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+	int ret;
+
+	if (initial_dumpable > SUID_DUMP_ROOT)
+		return -EINVAL;
+	if (!current || !current->mm)
+		return -ENODEV;
+
+	ret = pkm_kacs_kunit_material_from_probe(material, &material_in);
+	if (ret)
+		return ret;
+
+	set_dumpable(current->mm, initial_dumpable);
+	pkm_kacs_clear_pending_exec_pip();
+	pkm_kacs_exec_pip_from_material(&material_in, &pip_type, &pip_trust);
+	pkm_kacs_stage_pending_exec_pip(pip_type, pip_trust);
+	pkm_kacs_apply_pending_exec_dumpable();
+	pkm_kacs_clear_pending_exec_pip();
+
+	return get_dumpable(current->mm);
+}
+
 int pkm_kacs_kunit_probe_signing_reader(
 	const struct pkm_kacs_kunit_signing_reader_args *args,
 	struct pkm_kacs_kunit_signing_probe *out)
@@ -5716,6 +5805,16 @@ static int pkm_kacs_check_task_prctl_mitigations_core(
 #endif
 	if ((mitigation_bits & KACS_MIT_CFIB) != 0 &&
 	    (option == ARCH_SHSTK_DISABLE || option == ARCH_SHSTK_UNLOCK))
+		return -EACCES;
+
+	return -ENOSYS;
+}
+
+static int pkm_kacs_check_task_prctl_pip_core(u32 pip_type, int option,
+					      unsigned long arg2)
+{
+	if (pip_type != 0 && option == PR_SET_DUMPABLE &&
+	    arg2 == SUID_DUMP_USER)
 		return -EACCES;
 
 	return -ENOSYS;
@@ -8917,6 +9016,11 @@ static int pkm_kacs_task_prctl(int option, unsigned long arg2,
 	if (!state)
 		return -EACCES;
 
+	ret = pkm_kacs_check_task_prctl_pip_core(
+		READ_ONCE(state->pip_type), option, arg2);
+	if (ret != -ENOSYS)
+		return ret;
+
 	return pkm_kacs_check_task_prctl_mitigations_core(
 		pkm_kacs_process_state_mitigation_bits(state), option, arg2,
 		arg3, arg4, arg5);
@@ -9176,6 +9280,13 @@ static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 		pkm_kacs_current_effective_token_ptr(),
 		pkm_kacs_current_primary_token_ptr(), file, bprm->cred,
 		current_cred(), true, true);
+}
+
+static void pkm_kacs_bprm_committing_creds(const struct linux_binprm *bprm)
+{
+	(void)bprm;
+
+	pkm_kacs_apply_pending_exec_dumpable();
 }
 
 static void pkm_kacs_bprm_committed_creds(const struct linux_binprm *bprm)
@@ -12971,6 +13082,12 @@ int pkm_kacs_kunit_check_task_prctl_mitigations(
 {
 	return pkm_kacs_check_task_prctl_mitigations_core(
 		mitigation_bits, option, arg2, arg3, arg4, arg5);
+}
+
+int pkm_kacs_kunit_check_task_prctl_pip(u32 pip_type, int option,
+					unsigned long arg2)
+{
+	return pkm_kacs_check_task_prctl_pip_core(pip_type, option, arg2);
 }
 
 int pkm_kacs_kunit_check_pie_bprm(u32 mitigation_bits, const u8 *buf,
