@@ -519,6 +519,8 @@ struct pkm_kacs_kunit_socket_view {
 const void *pkm_kacs_current_effective_token_ptr(void);
 const void *pkm_kacs_current_primary_token_ptr(void);
 const void *pkm_kacs_boot_system_token_ptr(void);
+unsigned long pkm_kacs_local_irq_save(void);
+void pkm_kacs_local_irq_restore(unsigned long flags);
 void *pkm_kacs_zalloc(size_t size);
 void pkm_kacs_free(void *ptr);
 

@@ -26,6 +26,7 @@
 #include <linux/fs.h>
 #include <linux/fscrypt.h>
 #include <linux/init.h>
+#include <linux/irqflags.h>
 #include <linux/kernel.h>
 #include <linux/math64.h>
 #include <linux/lsm_hooks.h>
@@ -741,6 +742,7 @@ long pkm_kacs_prctl_capability_guard(int option, unsigned long arg2,
 				     unsigned long arg4,
 				     unsigned long arg5);
 long pkm_kacs_sched_setaffinity(struct task_struct *task);
+long pkm_kacs_proc_process_setinfo(struct task_struct *task);
 long pkm_kacs_perf_event_open(struct task_struct *task);
 
 static struct pkm_kacs_process_sd *pkm_kacs_process_sd_wrap_bytes(
@@ -3266,6 +3268,19 @@ void *pkm_kacs_zalloc(size_t size)
 void pkm_kacs_free(void *ptr)
 {
 	kfree(ptr);
+}
+
+unsigned long pkm_kacs_local_irq_save(void)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	return flags;
+}
+
+void pkm_kacs_local_irq_restore(unsigned long flags)
+{
+	local_irq_restore(flags);
 }
 
 const void *pkm_kacs_current_effective_token_ptr(void)
@@ -9465,6 +9480,12 @@ static long pkm_kacs_check_process_setinfo_core(
 	return pkm_kacs_check_process_attribute_core(
 		subject_token, caller_state, target_state,
 		KACS_PROCESS_SET_INFORMATION);
+}
+
+long pkm_kacs_proc_process_setinfo(struct task_struct *task)
+{
+	return pkm_kacs_task_process_attribute_access(
+		task, KACS_PROCESS_SET_INFORMATION);
 }
 
 static long pkm_kacs_check_process_affinity_core(

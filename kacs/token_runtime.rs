@@ -56,7 +56,7 @@ use crate::token::{
     AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
 };
 use core::cell::UnsafeCell;
-use core::ffi::c_void;
+use core::ffi::{c_ulong, c_void};
 use core::ptr::{copy_nonoverlapping, null, null_mut};
 use core::sync::atomic::{
     fence, AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering,
@@ -256,6 +256,8 @@ const TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS: u32 = 0x18;
 
 extern "C" {
     fn pkm_kacs_boot_system_token_ptr() -> *const c_void;
+    fn pkm_kacs_local_irq_save() -> c_ulong;
+    fn pkm_kacs_local_irq_restore(flags: c_ulong);
     fn pkm_kacs_zalloc(size: usize) -> *mut c_void;
     fn pkm_kacs_free(ptr: *mut c_void);
 }
@@ -483,11 +485,14 @@ impl Drop for TokenMutationGuard<'_> {
     }
 }
 
-struct SessionTableGuard;
+struct SessionTableGuard {
+    irq_flags: c_ulong,
+}
 
 impl Drop for SessionTableGuard {
     fn drop(&mut self) {
         SESSION_TABLE_LOCK.store(false, Ordering::Release);
+        unsafe { pkm_kacs_local_irq_restore(self.irq_flags) };
     }
 }
 
@@ -818,6 +823,8 @@ fn write_sessions_listing_locked(out: *mut u8, out_len: usize) -> Result<usize, 
 }
 
 fn lock_session_table() -> SessionTableGuard {
+    let irq_flags = unsafe { pkm_kacs_local_irq_save() };
+
     while SESSION_TABLE_LOCK
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
@@ -825,7 +832,7 @@ fn lock_session_table() -> SessionTableGuard {
         core::hint::spin_loop();
     }
 
-    SessionTableGuard
+    SessionTableGuard { irq_flags }
 }
 
 struct QueryWriter {

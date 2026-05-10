@@ -213,6 +213,11 @@ for proc_query_information_name in \
 	"oom_score_adj" \
 	"loginuid" \
 	"make-it-fail" \
+	"fail-nth" \
+	"uid_map" \
+	"gid_map" \
+	"projid_map" \
+	"setgroups" \
 	"seccomp_cache" \
 	"ksm_merging_pages" \
 	"ksm_stat"; do
@@ -236,6 +241,7 @@ for proc_read_gate in \
 	"loginuid" \
 	"sessionid" \
 	"make-it-fail" \
+	"fail-nth" \
 	"sched" \
 	"autogroup" \
 	"timens_offsets" \
@@ -250,6 +256,32 @@ require_install_literal 'if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS |
 	"install-pkm-subtree.sh does not patch /proc/<pid>/io to the ratified query-information mode"
 require_install_literal 'permitted = ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_PROC_QUERY_LIMITED | PTRACE_MODE_NOAUDIT);' \
 	"install-pkm-subtree.sh does not patch /proc/<pid>/stat to the ratified query-limited mode"
+if ! rg -q 'pkm_kacs_proc_process_setinfo' "$repo_root/kacs/lsm.c" || \
+   ! rg -q 'pkm_kacs_proc_process_setinfo' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'proc_pkm_check_task_setinfo_access' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "procfs mutation setinfo helper is not staged"
+fi
+for proc_write_gate in \
+	"latency writes" \
+	"sched writes" \
+	"autogroup writes" \
+	"timens_offsets writes" \
+	"oom adjustment writes" \
+	"make-it-fail writes" \
+	"fail-nth writes" \
+	"coredump_filter writes" \
+	"clear_refs writes"; do
+	require_install_literal "PKM: gate /proc/<pid>/${proc_write_gate}" \
+		"install-pkm-subtree.sh does not patch /proc/<pid>/${proc_write_gate} through the KACS set-information gate"
+done
+require_install_literal 'PKM: gate /proc/<pid> id-map open intent' \
+	"install-pkm-subtree.sh does not patch /proc/<pid> id-map open intent through the KACS read/write intent gates"
+require_install_literal 'PKM: gate /proc/<pid>/setgroups open intent' \
+	"install-pkm-subtree.sh does not patch /proc/<pid>/setgroups open intent through the KACS read/write intent gates"
+require_install_literal 'PKM: fail closed on multiprocess mm OOM fan-out' \
+	"install-pkm-subtree.sh does not fail closed on multiprocess OOM fan-out"
 
 if ! rg -q 'proc_pid_token_operations' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \

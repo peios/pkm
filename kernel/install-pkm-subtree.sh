@@ -1222,6 +1222,11 @@ insert_block_before_exact_once 'static ssize_t proc_pid_cmdline_read(struct file
 	    strcmp(name, "oom_score_adj") == 0 ||
 	    strcmp(name, "loginuid") == 0 ||
 	    strcmp(name, "make-it-fail") == 0 ||
+	    strcmp(name, "fail-nth") == 0 ||
+	    strcmp(name, "uid_map") == 0 ||
+	    strcmp(name, "gid_map") == 0 ||
+	    strcmp(name, "projid_map") == 0 ||
+	    strcmp(name, "setgroups") == 0 ||
 	    strcmp(name, "seccomp_cache") == 0 ||
 	    strcmp(name, "ksm_merging_pages") == 0 ||
 	    strcmp(name, "ksm_stat") == 0)
@@ -1241,6 +1246,23 @@ static int proc_pkm_check_task_metadata_access(struct task_struct *task,
 		return 0;
 	if (!ptrace_may_access(task, mode))
 		return -EACCES;
+
+	return 0;
+}
+
+#ifdef CONFIG_SECURITY_PKM
+extern long pkm_kacs_proc_process_setinfo(struct task_struct *task);
+#endif
+
+static int proc_pkm_check_task_setinfo_access(struct task_struct *task)
+{
+#ifdef CONFIG_SECURITY_PKM
+	long ret;
+
+	ret = pkm_kacs_proc_process_setinfo(task);
+	if (ret)
+		return (int)ret;
+#endif
 
 	return 0;
 }
@@ -1346,6 +1368,20 @@ insert_block_before_exact_once '	make_it_fail = task->make_it_fail;' \
 	}
 ' \
 	"$kernel_root/fs/proc/base.c"
+replace_line_after_anchor_once 'static ssize_t proc_fail_nth_read(struct file *file, char __user *buf,' \
+	'	len = snprintf(numbuf, sizeof(numbuf), "%u\n", task->fail_nth);' \
+	'	/* PKM: gate /proc/<pid>/fail-nth read metadata. */
+	{
+		int ret = proc_pkm_check_task_metadata_access(task, file);
+
+		if (ret) {
+			put_task_struct(task);
+			return ret;
+		}
+	}
+	len = snprintf(numbuf, sizeof(numbuf), "%u\n", task->fail_nth);
+' \
+	"$kernel_root/fs/proc/base.c"
 insert_block_before_exact_once '	proc_sched_show_task(p, ns, m);' \
 	'PKM: gate /proc/<pid>/sched read metadata' \
 	'	/* PKM: gate /proc/<pid>/sched read metadata. */
@@ -1428,6 +1464,173 @@ replace_line_after_anchor_once 'static ssize_t proc_coredump_filter_read(struct 
 	}
 	ret = 0;' \
 	"$kernel_root/fs/proc/base.c"
+replace_line_after_anchor_once 'static ssize_t lstats_write(struct file *file, const char __user *buf,' \
+	'	if (!task)
+		return -ESRCH;
+	clear_tsk_latency_tracing(task);' \
+	'	if (!task)
+		return -ESRCH;
+	/* PKM: gate /proc/<pid>/latency writes. */
+	{
+		int ret = proc_pkm_check_task_setinfo_access(task);
+
+		if (ret) {
+			put_task_struct(task);
+			return ret;
+		}
+	}
+	clear_tsk_latency_tracing(task);' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	proc_sched_set_task(p);' \
+	'PKM: gate /proc/<pid>/sched writes' \
+	'	/* PKM: gate /proc/<pid>/sched writes. */
+	{
+		int ret = proc_pkm_check_task_setinfo_access(p);
+
+		if (ret) {
+			put_task_struct(p);
+			return ret;
+		}
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	err = proc_sched_autogroup_set_nice(p, nice);' \
+	'PKM: gate /proc/<pid>/autogroup writes' \
+	'	/* PKM: gate /proc/<pid>/autogroup writes. */
+	err = proc_pkm_check_task_setinfo_access(p);
+	if (err) {
+		put_task_struct(p);
+		return err;
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	ret = proc_timens_set_offset(file, p, offsets, noffsets);' \
+	'PKM: gate /proc/<pid>/timens_offsets writes' \
+	'	/* PKM: gate /proc/<pid>/timens_offsets writes. */
+	ret = proc_pkm_check_task_setinfo_access(p);
+	if (ret) {
+		put_task_struct(p);
+		goto out;
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	mutex_lock(&oom_adj_mutex);' \
+	'PKM: gate /proc/<pid>/oom adjustment writes' \
+	'#ifdef CONFIG_SECURITY_PKM
+	err = proc_pkm_check_task_setinfo_access(task);
+	if (err) {
+		put_task_struct(task);
+		return err;
+	}
+#endif
+
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	task->signal->oom_score_adj = oom_adj;' \
+	'PKM: fail closed on multiprocess mm OOM fan-out' \
+	'#ifdef CONFIG_SECURITY_PKM
+	if (mm) {
+		mmdrop(mm);
+		mm = NULL;
+		err = -EACCES;
+		goto err_unlock;
+	}
+#endif
+
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	task->make_it_fail = make_it_fail;' \
+	'PKM: gate /proc/<pid>/make-it-fail writes' \
+	'	/* PKM: gate /proc/<pid>/make-it-fail writes. */
+	rv = proc_pkm_check_task_setinfo_access(task);
+	if (rv) {
+		put_task_struct(task);
+		return rv;
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	task->fail_nth = n;' \
+	'PKM: gate /proc/<pid>/fail-nth writes' \
+	'	/* PKM: gate /proc/<pid>/fail-nth writes. */
+	err = proc_pkm_check_task_setinfo_access(task);
+	if (err) {
+		put_task_struct(task);
+		return err;
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+replace_line_after_anchor_once 'static ssize_t proc_coredump_filter_write(struct file *file,' \
+	'	mm = get_task_mm(task);' \
+	'	/* PKM: gate /proc/<pid>/coredump_filter writes. */
+	ret = proc_pkm_check_task_setinfo_access(task);
+	if (ret)
+		goto out_no_mm;
+	mm = get_task_mm(task);
+' \
+	"$kernel_root/fs/proc/base.c"
+replace_line_after_anchor_once 'static int proc_id_map_open(struct inode *inode, struct file *file,' \
+	'	if (task) {
+		rcu_read_lock();' \
+	'	if (task) {
+		/* PKM: gate /proc/<pid> id-map open intent. */
+		if (file->f_mode & FMODE_READ) {
+			ret = proc_pkm_check_task_metadata_access(task, file);
+			if (ret) {
+				put_task_struct(task);
+				goto err;
+			}
+		}
+		if (file->f_mode & FMODE_WRITE) {
+			ret = proc_pkm_check_task_setinfo_access(task);
+			if (ret) {
+				put_task_struct(task);
+				goto err;
+			}
+		}
+		rcu_read_lock();' \
+	"$kernel_root/fs/proc/base.c"
+replace_line_after_anchor_once 'static int proc_setgroups_open(struct inode *inode, struct file *file)' \
+	'	if (task) {
+		rcu_read_lock();' \
+	'	if (task) {
+		/* PKM: gate /proc/<pid>/setgroups open intent. */
+		if (file->f_mode & FMODE_READ) {
+			ret = proc_pkm_check_task_metadata_access(task, file);
+			if (ret) {
+				put_task_struct(task);
+				goto err;
+			}
+		}
+		if (file->f_mode & FMODE_WRITE) {
+			ret = proc_pkm_check_task_setinfo_access(task);
+			if (ret) {
+				put_task_struct(task);
+				goto err;
+			}
+		}
+		rcu_read_lock();' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once 'static ssize_t clear_refs_write(struct file *file, const char __user *buf,' \
+	'extern long pkm_kacs_proc_process_setinfo' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern long pkm_kacs_proc_process_setinfo(struct task_struct *task);
+#endif
+
+' \
+	"$kernel_root/fs/proc/task_mmu.c"
+insert_block_before_exact_once '	mm = get_task_mm(task);' \
+	'PKM: gate /proc/<pid>/clear_refs writes' \
+	'#ifdef CONFIG_SECURITY_PKM
+	/* PKM: gate /proc/<pid>/clear_refs writes. */
+	rv = pkm_kacs_proc_process_setinfo(task);
+	if (rv) {
+		put_task_struct(task);
+		return rv;
+	}
+#endif
+
+' \
+	"$kernel_root/fs/proc/task_mmu.c"
 insert_line_after_exact_once '#include <linux/nsproxy.h>' \
 	'#include <linux/ptrace.h>' \
 	"$kernel_root/fs/proc_namespace.c"
