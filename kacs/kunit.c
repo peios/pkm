@@ -5069,6 +5069,142 @@ static void pkm_kunit_process_state_fork_gets_fresh_sd_and_rate_bucket(
 	pkm_kacs_kunit_put_process_state(child_state);
 }
 
+static void pkm_kunit_clone_process_impersonation_uses_primary_copy(
+	struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot parent_primary = { };
+	struct pkm_kacs_boot_snapshot parent_effective = { };
+	struct pkm_kacs_boot_snapshot child_effective = { };
+	const void *client_token;
+	const void *primary_token;
+	u32 child_token_is_parent_primary = 1;
+	u32 child_cred_is_parent_real = 1;
+	long fd;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+
+	client_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_LEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, client_token);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		primary_token, client_token, KACS_TOKEN_IMPERSONATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_impersonate((int)fd,
+							   primary_token),
+			0L);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kacs_current_effective_token_ptr() !=
+				  primary_token);
+
+	ret = pkm_kacs_kunit_clone_token_lifecycle_probe(
+		0, 0, &parent_primary, &parent_effective, &child_effective,
+		&child_token_is_parent_primary, &child_cred_is_parent_real);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_PTR_EQ(test, parent_primary.token_ptr, primary_token);
+	KUNIT_EXPECT_TRUE(test,
+			  parent_effective.token_ptr != parent_primary.token_ptr);
+	pkm_kunit_expect_boot_snapshot_eq(test, &parent_primary,
+					  &child_effective);
+	KUNIT_EXPECT_EQ(test, child_token_is_parent_primary, 0U);
+	KUNIT_EXPECT_EQ(test, child_cred_is_parent_real, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(client_token);
+}
+
+static void pkm_kunit_clone_thread_impersonation_starts_on_primary(
+	struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot parent_primary = { };
+	struct pkm_kacs_boot_snapshot parent_effective = { };
+	struct pkm_kacs_boot_snapshot child_effective = { };
+	const void *client_token;
+	const void *primary_token;
+	u32 child_token_is_parent_primary = 0;
+	u32 child_cred_is_parent_real = 0;
+	long fd;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+
+	client_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_LEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, client_token);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		primary_token, client_token, KACS_TOKEN_IMPERSONATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_impersonate((int)fd,
+							   primary_token),
+			0L);
+
+	ret = pkm_kacs_kunit_clone_token_lifecycle_probe(
+		CLONE_THREAD, 1, &parent_primary, &parent_effective,
+		&child_effective, &child_token_is_parent_primary,
+		&child_cred_is_parent_real);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_TRUE(test,
+			  parent_effective.token_ptr != parent_primary.token_ptr);
+	pkm_kunit_expect_boot_snapshot_eq(test, &parent_primary,
+					  &child_effective);
+	KUNIT_EXPECT_EQ(test, child_token_is_parent_primary, 1U);
+	KUNIT_EXPECT_EQ(test, child_cred_is_parent_real, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(client_token);
+}
+
+static void pkm_kunit_exec_committing_reverts_impersonation(struct kunit *test)
+{
+	const void *client_token;
+	const void *primary_token;
+	long fd;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+
+	client_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_LEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, client_token);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		primary_token, client_token, KACS_TOKEN_IMPERSONATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_impersonate((int)fd,
+							   primary_token),
+			0L);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kacs_current_effective_token_ptr() !=
+				  primary_token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_exec_committing_creds_for_current(),
+			0L);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_effective_token_ptr(),
+			    primary_token);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    primary_token);
+
+	KUNIT_EXPECT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(client_token);
+}
+
 static void pkm_kunit_set_psb_self_supported_bits_success(struct kunit *test)
 {
 	struct pkm_kacs_kunit_set_psb_args args = {
@@ -21119,6 +21255,9 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_open_self_token_invalid_flags),
 	KUNIT_CASE(pkm_kunit_process_state_clone_thread_shares_live_object),
 	KUNIT_CASE(pkm_kunit_process_state_fork_gets_fresh_sd_and_rate_bucket),
+	KUNIT_CASE(pkm_kunit_clone_process_impersonation_uses_primary_copy),
+	KUNIT_CASE(pkm_kunit_clone_thread_impersonation_starts_on_primary),
+	KUNIT_CASE(pkm_kunit_exec_committing_reverts_impersonation),
 	KUNIT_CASE(pkm_kunit_set_psb_self_supported_bits_success),
 	KUNIT_CASE(pkm_kunit_set_psb_cross_process_success),
 	KUNIT_CASE(pkm_kunit_set_psb_denied_by_process_sd),

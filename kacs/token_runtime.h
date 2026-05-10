@@ -710,6 +710,14 @@ void pkm_kacs_kunit_set_current_pip_context(u32 pip_type, u32 pip_trust);
 int pkm_kacs_kunit_set_current_process_mitigation_bits(u32 mitigation_bits);
 const void *pkm_kacs_kunit_current_process_state_ptr(void);
 const void *pkm_kacs_kunit_inherit_current_process_state(u64 clone_flags);
+long pkm_kacs_kunit_clone_token_lifecycle_probe(
+	u64 clone_flags, u32 simulate_shared_thread_cred,
+	struct pkm_kacs_boot_snapshot *parent_primary_out,
+	struct pkm_kacs_boot_snapshot *parent_effective_out,
+	struct pkm_kacs_boot_snapshot *child_effective_out,
+	u32 *child_token_is_parent_primary_out,
+	u32 *child_cred_is_parent_real_out);
+long pkm_kacs_kunit_exec_committing_creds_for_current(void);
 void pkm_kacs_kunit_put_process_state(const void *state_ptr);
 int pkm_kacs_kunit_process_state_snapshot(
 	const void *state_ptr,

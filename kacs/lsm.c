@@ -573,6 +573,8 @@ static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 					 const struct file *file);
 static void pkm_kacs_bprm_committing_creds(const struct linux_binprm *bprm);
 static void pkm_kacs_bprm_committed_creds(const struct linux_binprm *bprm);
+static long pkm_kacs_install_token_ref_on_cred(struct cred *cred,
+					       const void *token_ref);
 static long pkm_kacs_check_process_setinfo_core(
 	const void *subject_token,
 	const struct pkm_kacs_process_state *caller_state,
@@ -2718,10 +2720,13 @@ static int pkm_kacs_cred_prepare(struct cred *new, const struct cred *old,
 	const struct pkm_kacs_cred_security *old_sec = pkm_kacs_cred(old);
 
 	(void)gfp;
-	if (old_sec->token)
-		new_sec->token = kacs_rust_token_deep_copy(old_sec->token);
-	else
+	if (old_sec->token) {
+		new_sec->token = kacs_rust_token_clone(old_sec->token);
+		if (!new_sec->token)
+			return -ENOMEM;
+	} else {
 		new_sec->token = NULL;
+	}
 	if (old_sec->process_state)
 		new_sec->process_state =
 			pkm_kacs_process_state_get(old_sec->process_state);
@@ -2739,7 +2744,7 @@ static void pkm_kacs_cred_transfer(struct cred *new, const struct cred *old)
 	const struct pkm_kacs_cred_security *old_sec = pkm_kacs_cred(old);
 
 	if (old_sec->token)
-		new_sec->token = kacs_rust_token_deep_copy(old_sec->token);
+		new_sec->token = kacs_rust_token_clone(old_sec->token);
 	else
 		new_sec->token = NULL;
 	if (old_sec->process_state)
@@ -2772,6 +2777,101 @@ static void pkm_kacs_cred_free(struct cred *cred)
 		kacs_rust_token_drop(sec->token);
 	if (sec->process_state)
 		pkm_kacs_process_state_put(sec->process_state);
+}
+
+static bool pkm_kacs_cred_is_current_shared(const struct cred *cred)
+{
+	return cred == current_cred() || cred == current_real_cred();
+}
+
+static long pkm_kacs_install_primary_on_child_cred_pair(
+	const struct cred *child_cred, const struct cred *child_real_cred,
+	const void *source_primary_token, bool deep_copy_primary)
+{
+	const void *child_primary;
+	const void *child_effective;
+	long ret;
+
+	if (!child_cred || !child_real_cred || !source_primary_token)
+		return -EACCES;
+	if (pkm_kacs_cred_is_current_shared(child_cred) ||
+	    pkm_kacs_cred_is_current_shared(child_real_cred))
+		return -EACCES;
+
+	child_primary = deep_copy_primary ?
+				kacs_rust_token_deep_copy(source_primary_token) :
+				kacs_rust_token_clone(source_primary_token);
+	if (!child_primary)
+		return -ENOMEM;
+
+	ret = pkm_kacs_install_token_ref_on_cred((struct cred *)child_real_cred,
+						child_primary);
+	if (ret) {
+		kacs_rust_token_drop(child_primary);
+		return ret;
+	}
+
+	if (child_cred == child_real_cred)
+		return 0;
+
+	child_effective = kacs_rust_token_clone(
+		pkm_kacs_cred(child_real_cred)->token);
+	if (!child_effective)
+		return -ENOMEM;
+
+	ret = pkm_kacs_install_token_ref_on_cred((struct cred *)child_cred,
+						child_effective);
+	if (ret) {
+		kacs_rust_token_drop(child_effective);
+		return ret;
+	}
+	return 0;
+}
+
+static long pkm_kacs_apply_clone_token_lifecycle(
+	const struct cred **child_credp, const struct cred **child_real_credp,
+	u64 clone_flags)
+{
+	const struct cred *child_cred;
+	const struct cred *child_real_cred;
+	const struct cred *parent_effective_cred;
+	const struct cred *parent_primary_cred;
+	const void *parent_primary_token;
+
+	if (!child_credp || !child_real_credp)
+		return -EACCES;
+
+	child_cred = *child_credp;
+	child_real_cred = *child_real_credp;
+	parent_effective_cred = current_cred();
+	parent_primary_cred = current_real_cred();
+	parent_primary_token = pkm_kacs_current_primary_token_ptr();
+	if (!child_cred || !child_real_cred || !parent_primary_token)
+		return -EACCES;
+
+	if ((clone_flags & CLONE_THREAD) != 0) {
+		if (parent_effective_cred != parent_primary_cred &&
+		    (child_cred == parent_effective_cred ||
+		     child_real_cred == parent_effective_cred)) {
+			get_cred_many(parent_primary_cred, 2);
+			put_cred(child_cred);
+			put_cred(child_real_cred);
+			*child_credp = parent_primary_cred;
+			*child_real_credp = parent_primary_cred;
+			return 0;
+		}
+
+		if (child_cred == parent_primary_cred &&
+		    child_real_cred == parent_primary_cred)
+			return 0;
+
+		return pkm_kacs_install_primary_on_child_cred_pair(
+			child_cred, child_real_cred, parent_primary_token,
+			false);
+	}
+
+	return pkm_kacs_install_primary_on_child_cred_pair(
+		child_cred, child_real_cred, parent_primary_token, true);
 }
 
 static long pkm_kacs_stamp_file_granted_access_for_subject(
@@ -2897,9 +2997,12 @@ int pkm_kacs_file_fallocate(struct file *file, int mode)
 
 static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 {
+	const struct cred *child_cred;
+	const struct cred *child_real_cred;
 	struct pkm_kacs_task_security *new_sec;
 	struct pkm_kacs_process_state *state;
 	struct pkm_kacs_process_state *parent_state;
+	long ret;
 
 	if (!task || !task->security)
 		return -EACCES;
@@ -2930,6 +3033,16 @@ static int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 		    pkm_kacs_process_state_mitigation_bits(parent_state),
 		    clone_flags))
 		return -EACCES;
+
+	child_cred = task->cred;
+	child_real_cred = task->real_cred;
+	ret = pkm_kacs_apply_clone_token_lifecycle(&child_cred,
+						   &child_real_cred,
+						   clone_flags);
+	if (ret)
+		return (int)ret;
+	rcu_assign_pointer(task->cred, child_cred);
+	rcu_assign_pointer(task->real_cred, child_real_cred);
 
 	state = pkm_kacs_inherit_process_state(clone_flags);
 	if (!state)
@@ -9634,7 +9747,13 @@ static int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 
 static void pkm_kacs_bprm_committing_creds(const struct linux_binprm *bprm)
 {
+	long ret;
+
 	(void)bprm;
+
+	ret = pkm_kacs_revert_current_impersonation();
+	if (ret)
+		pr_warn("pkm: exec impersonation revert failed (%ld)\n", ret);
 
 	pkm_kacs_apply_pending_exec_dumpable();
 }
@@ -10754,6 +10873,89 @@ const void *pkm_kacs_kunit_current_process_state_ptr(void)
 const void *pkm_kacs_kunit_inherit_current_process_state(u64 clone_flags)
 {
 	return pkm_kacs_inherit_process_state(clone_flags);
+}
+
+long pkm_kacs_kunit_clone_token_lifecycle_probe(
+	u64 clone_flags, u32 simulate_shared_thread_cred,
+	struct pkm_kacs_boot_snapshot *parent_primary_out,
+	struct pkm_kacs_boot_snapshot *parent_effective_out,
+	struct pkm_kacs_boot_snapshot *child_effective_out,
+	u32 *child_token_is_parent_primary_out,
+	u32 *child_cred_is_parent_real_out)
+{
+	const struct cred *child_cred;
+	const struct cred *child_real_cred;
+	const void *parent_primary;
+	const void *parent_effective;
+	const void *child_token;
+	struct cred *prepared = NULL;
+	long ret;
+
+	if (!parent_primary_out || !parent_effective_out ||
+	    !child_effective_out || !child_token_is_parent_primary_out ||
+	    !child_cred_is_parent_real_out)
+		return -EINVAL;
+
+	memset(parent_primary_out, 0, sizeof(*parent_primary_out));
+	memset(parent_effective_out, 0, sizeof(*parent_effective_out));
+	memset(child_effective_out, 0, sizeof(*child_effective_out));
+	*child_token_is_parent_primary_out = 0;
+	*child_cred_is_parent_real_out = 0;
+
+	parent_primary = pkm_kacs_current_primary_token_ptr();
+	parent_effective = pkm_kacs_current_effective_token_ptr();
+	if (!parent_primary || !parent_effective)
+		return -EACCES;
+	if (!kacs_rust_kunit_token_snapshot(parent_primary,
+					    parent_primary_out) ||
+	    !kacs_rust_kunit_token_snapshot(parent_effective,
+					    parent_effective_out))
+		return -EACCES;
+
+	if (simulate_shared_thread_cred) {
+		if ((clone_flags & CLONE_THREAD) == 0)
+			return -EINVAL;
+		child_cred = get_cred(current_cred());
+		child_real_cred = get_cred(current_cred());
+	} else {
+		prepared = prepare_creds();
+		if (!prepared)
+			return -ENOMEM;
+		child_cred = prepared;
+		child_real_cred = prepared;
+	}
+
+	ret = pkm_kacs_apply_clone_token_lifecycle(&child_cred,
+						   &child_real_cred,
+						   clone_flags);
+	if (ret)
+		goto out;
+
+	child_token = pkm_kacs_cred(child_cred)->token;
+	if (!child_token ||
+	    !kacs_rust_kunit_token_snapshot(child_token,
+					    child_effective_out)) {
+		ret = -EACCES;
+		goto out;
+	}
+
+	*child_token_is_parent_primary_out = child_token == parent_primary;
+	*child_cred_is_parent_real_out = child_cred == current_real_cred();
+
+out:
+	if (simulate_shared_thread_cred) {
+		put_cred(child_cred);
+		put_cred(child_real_cred);
+	} else if (prepared) {
+		abort_creds(prepared);
+	}
+	return ret;
+}
+
+long pkm_kacs_kunit_exec_committing_creds_for_current(void)
+{
+	pkm_kacs_bprm_committing_creds(NULL);
+	return 0;
 }
 
 void pkm_kacs_kunit_put_process_state(const void *state_ptr)
