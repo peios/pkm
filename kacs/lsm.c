@@ -430,6 +430,12 @@ static int pkm_kacs_ptrace_traceme(struct task_struct *parent);
 static int pkm_kacs_task_setnice(struct task_struct *task, int nice);
 static int pkm_kacs_task_setscheduler(struct task_struct *task);
 static int pkm_kacs_task_setioprio(struct task_struct *task, int ioprio);
+static int pkm_kacs_task_setpgid(struct task_struct *task, pid_t pgid);
+static int pkm_kacs_task_getpgid(struct task_struct *task);
+static int pkm_kacs_task_getsid(struct task_struct *task);
+static int pkm_kacs_task_getscheduler(struct task_struct *task);
+static int pkm_kacs_task_getioprio(struct task_struct *task);
+static int pkm_kacs_task_movememory(struct task_struct *task);
 static int pkm_kacs_task_fix_setuid(struct cred *new, const struct cred *old,
 				    int flags);
 static int pkm_kacs_task_fix_setgid(struct cred *new, const struct cred *old,
@@ -3231,6 +3237,12 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(task_setnice, pkm_kacs_task_setnice),
 	LSM_HOOK_INIT(task_setscheduler, pkm_kacs_task_setscheduler),
 	LSM_HOOK_INIT(task_setioprio, pkm_kacs_task_setioprio),
+	LSM_HOOK_INIT(task_setpgid, pkm_kacs_task_setpgid),
+	LSM_HOOK_INIT(task_getpgid, pkm_kacs_task_getpgid),
+	LSM_HOOK_INIT(task_getsid, pkm_kacs_task_getsid),
+	LSM_HOOK_INIT(task_getscheduler, pkm_kacs_task_getscheduler),
+	LSM_HOOK_INIT(task_getioprio, pkm_kacs_task_getioprio),
+	LSM_HOOK_INIT(task_movememory, pkm_kacs_task_movememory),
 	LSM_HOOK_INIT(task_fix_setuid, pkm_kacs_task_fix_setuid),
 	LSM_HOOK_INIT(task_fix_setgid, pkm_kacs_task_fix_setgid),
 	LSM_HOOK_INIT(task_fix_setgroups, pkm_kacs_task_fix_setgroups),
@@ -9377,6 +9389,56 @@ static long pkm_kacs_check_process_capget_core(
 		KACS_PROCESS_QUERY_INFORMATION);
 }
 
+static long pkm_kacs_validate_process_attribute_access(u32 desired_access)
+{
+	switch (desired_access) {
+	case KACS_PROCESS_QUERY_LIMITED:
+	case KACS_PROCESS_QUERY_INFORMATION:
+	case KACS_PROCESS_SET_INFORMATION:
+		return 0;
+	default:
+		return -EACCES;
+	}
+}
+
+static long pkm_kacs_check_process_attribute_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state,
+	u32 desired_access)
+{
+	long ret;
+
+	ret = pkm_kacs_validate_process_attribute_access(desired_access);
+	if (ret)
+		return ret;
+	if (!subject_token || !caller_state || !target_state)
+		return -EACCES;
+	if (caller_state == target_state)
+		return 0;
+
+	return pkm_kacs_authorize_process_access_core(
+		subject_token, target_state, READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust), desired_access);
+}
+
+static int pkm_kacs_task_process_attribute_access(struct task_struct *task,
+						  u32 desired_access)
+{
+	struct pkm_kacs_process_state *caller_state;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+
+	if (!task || !task->security)
+		return -EACCES;
+
+	caller_state = pkm_kacs_current_process_state();
+	target_state = pkm_kacs_task(task)->process_state;
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	return (int)pkm_kacs_check_process_attribute_core(
+		subject_token, caller_state, target_state, desired_access);
+}
+
 static long pkm_kacs_prlimit_flags_to_process_access(unsigned int flags,
 						     u32 *desired_access)
 {
@@ -9400,12 +9462,8 @@ static long pkm_kacs_check_process_setinfo_core(
 	const struct pkm_kacs_process_state *caller_state,
 	const struct pkm_kacs_process_state *target_state)
 {
-	if (!caller_state || !target_state)
-		return -EACCES;
-
-	return pkm_kacs_authorize_process_access_core(
-		subject_token, target_state, READ_ONCE(caller_state->pip_type),
-		READ_ONCE(caller_state->pip_trust),
+	return pkm_kacs_check_process_attribute_core(
+		subject_token, caller_state, target_state,
 		KACS_PROCESS_SET_INFORMATION);
 }
 
@@ -9601,25 +9659,10 @@ out_put:
 
 static int pkm_kacs_task_setnice(struct task_struct *task, int nice)
 {
-	struct pkm_kacs_process_state *caller_state;
-	struct pkm_kacs_process_state *target_state;
-	const void *subject_token;
-
 	(void)nice;
 
-	if (!task || !task->security)
-		return -EACCES;
-
-	caller_state = pkm_kacs_current_process_state();
-	target_state = pkm_kacs_task(task)->process_state;
-	subject_token = pkm_kacs_current_effective_token_ptr();
-	if (!caller_state || !target_state || !subject_token)
-		return -EACCES;
-	if (caller_state == target_state)
-		return 0;
-
-	return pkm_kacs_check_process_setinfo_core(subject_token, caller_state,
-						   target_state);
+	return pkm_kacs_task_process_attribute_access(
+		task, KACS_PROCESS_SET_INFORMATION);
 }
 
 static int pkm_kacs_task_setscheduler(struct task_struct *task)
@@ -9631,6 +9674,43 @@ static int pkm_kacs_task_setioprio(struct task_struct *task, int ioprio)
 {
 	(void)ioprio;
 	return pkm_kacs_task_setnice(task, 0);
+}
+
+static int pkm_kacs_task_setpgid(struct task_struct *task, pid_t pgid)
+{
+	(void)pgid;
+	return pkm_kacs_task_process_attribute_access(
+		task, KACS_PROCESS_SET_INFORMATION);
+}
+
+static int pkm_kacs_task_getpgid(struct task_struct *task)
+{
+	return pkm_kacs_task_process_attribute_access(
+		task, KACS_PROCESS_QUERY_LIMITED);
+}
+
+static int pkm_kacs_task_getsid(struct task_struct *task)
+{
+	return pkm_kacs_task_process_attribute_access(
+		task, KACS_PROCESS_QUERY_LIMITED);
+}
+
+static int pkm_kacs_task_getscheduler(struct task_struct *task)
+{
+	return pkm_kacs_task_process_attribute_access(
+		task, KACS_PROCESS_QUERY_INFORMATION);
+}
+
+static int pkm_kacs_task_getioprio(struct task_struct *task)
+{
+	return pkm_kacs_task_process_attribute_access(
+		task, KACS_PROCESS_QUERY_INFORMATION);
+}
+
+static int pkm_kacs_task_movememory(struct task_struct *task)
+{
+	return pkm_kacs_task_process_attribute_access(
+		task, KACS_PROCESS_SET_INFORMATION);
 }
 
 static int pkm_kacs_task_prlimit(const struct cred *cred,
@@ -11535,6 +11615,33 @@ long pkm_kacs_kunit_check_prlimit_for_subject(
 	return pkm_kacs_authorize_process_access_core(
 		args->subject_token, &target_state, args->caller_pip_type,
 		args->caller_pip_trust, desired_access);
+}
+
+long pkm_kacs_kunit_check_process_attribute_for_subject(
+	const struct pkm_kacs_kunit_process_access_check_args *args)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state caller_state = {};
+	struct pkm_kacs_process_state target_state = {};
+
+	if (!args)
+		return -EINVAL;
+	if (args->self_target)
+		return pkm_kacs_validate_process_attribute_access(
+			args->desired_access);
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	refcount_set(&process_sd.refs, 1);
+	caller_state.pip_type = args->caller_pip_type;
+	caller_state.pip_trust = args->caller_pip_trust;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = &process_sd;
+
+	return pkm_kacs_check_process_attribute_core(
+		args->subject_token, &caller_state, &target_state,
+		args->desired_access);
 }
 
 long pkm_kacs_kunit_check_perf_event_for_subject(

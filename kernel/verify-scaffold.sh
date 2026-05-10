@@ -302,6 +302,13 @@ if ! rg -q 'pkm_kacs_sched_setaffinity' \
 	die "install-pkm-subtree.sh does not stage the sched_setaffinity KACS patch"
 fi
 
+if ! rg -q 'timerslack_ns_write' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'timerslack_ns_show' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the timerslack KACS precheck patch"
+fi
+
 if ! rg -q 'pkm_kacs_perf_event_open' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
    ! rg -q 'kernel/events/core.c' \

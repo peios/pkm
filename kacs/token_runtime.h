@@ -275,6 +275,18 @@ struct pkm_kacs_kunit_process_setinfo_check_args {
 	u32 self_target;
 };
 
+struct pkm_kacs_kunit_process_access_check_args {
+	const void *subject_token;
+	const u8 *target_process_sd_ptr;
+	size_t target_process_sd_len;
+	u32 caller_pip_type;
+	u32 caller_pip_trust;
+	u32 target_pip_type;
+	u32 target_pip_trust;
+	u32 self_target;
+	u32 desired_access;
+};
+
 struct pkm_kacs_kunit_process_affinity_check_args {
 	const void *subject_token;
 	const u8 *target_process_sd_ptr;
@@ -750,6 +762,8 @@ long pkm_kacs_kunit_check_ptrace_traceme_for_subject(
 	const struct pkm_kacs_kunit_process_ptrace_check_args *args);
 long pkm_kacs_kunit_check_process_setinfo_for_subject(
 	const struct pkm_kacs_kunit_process_setinfo_check_args *args);
+long pkm_kacs_kunit_check_process_attribute_for_subject(
+	const struct pkm_kacs_kunit_process_access_check_args *args);
 long pkm_kacs_kunit_check_process_affinity_for_subject(
 	const struct pkm_kacs_kunit_process_affinity_check_args *args);
 long pkm_kacs_kunit_check_prlimit_for_subject(

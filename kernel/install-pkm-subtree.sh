@@ -540,6 +540,46 @@ replace_line_after_anchor_once 'long sched_setaffinity(pid_t pid, const struct c
 #endif
 ' \
 	"$kernel_root/kernel/sched/syscalls.c"
+replace_line_after_anchor_once 'static ssize_t timerslack_ns_write(struct file *file, const char __user *buf,' \
+	'		rcu_read_lock();
+		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE)) {
+			rcu_read_unlock();
+			count = -EPERM;
+			goto out;
+		}
+		rcu_read_unlock();
+' \
+	'#ifndef CONFIG_SECURITY_PKM
+		rcu_read_lock();
+		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE)) {
+			rcu_read_unlock();
+			count = -EPERM;
+			goto out;
+		}
+		rcu_read_unlock();
+#endif
+' \
+	"$kernel_root/fs/proc/base.c"
+replace_line_after_anchor_once 'static int timerslack_ns_show(struct seq_file *m, void *v)' \
+	'		rcu_read_lock();
+		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE)) {
+			rcu_read_unlock();
+			err = -EPERM;
+			goto out;
+		}
+		rcu_read_unlock();
+' \
+	'#ifndef CONFIG_SECURITY_PKM
+		rcu_read_lock();
+		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE)) {
+			rcu_read_unlock();
+			err = -EPERM;
+			goto out;
+		}
+		rcu_read_unlock();
+#endif
+' \
+	"$kernel_root/fs/proc/base.c"
 insert_block_before_exact_once 'SYSCALL_DEFINE5(perf_event_open,' \
 	'extern long pkm_kacs_perf_event_open' \
 	'#ifdef CONFIG_SECURITY_PKM
