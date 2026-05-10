@@ -1192,11 +1192,39 @@ insert_block_before_exact_once 'static ssize_t proc_pid_cmdline_read(struct file
 		return 0;
 
 	name = file_dentry(file)->d_name.name;
-	if (strcmp(name, "stat") == 0)
+	if (strcmp(name, "stat") == 0 || strcmp(name, "statm") == 0 ||
+	    strcmp(name, "comm") == 0 || strcmp(name, "wchan") == 0 ||
+	    strcmp(name, "schedstat") == 0 || strcmp(name, "cpuset") == 0 ||
+	    strcmp(name, "cgroup") == 0 ||
+	    strcmp(name, "cpu_resctrl_groups") == 0 ||
+	    strcmp(name, "oom_score") == 0 ||
+	    strcmp(name, "sessionid") == 0 ||
+	    strcmp(name, "patch_state") == 0 ||
+	    strcmp(name, "stack_depth") == 0 ||
+	    strcmp(name, "arch_status") == 0)
 		return PTRACE_MODE_READ_FSCREDS |
 		       PTRACE_MODE_PROC_QUERY_LIMITED;
 	if (strcmp(name, "cmdline") == 0 || strcmp(name, "status") == 0 ||
-	    strcmp(name, "io") == 0 || strcmp(name, "cgroup") == 0)
+	    strcmp(name, "io") == 0 || strcmp(name, "limits") == 0 ||
+	    strcmp(name, "sched") == 0 ||
+	    strcmp(name, "autogroup") == 0 ||
+	    strcmp(name, "timens_offsets") == 0 ||
+	    strcmp(name, "personality") == 0 ||
+	    strcmp(name, "syscall") == 0 ||
+	    strcmp(name, "latency") == 0 ||
+	    strcmp(name, "timers") == 0 ||
+	    strcmp(name, "timerslack_ns") == 0 ||
+	    strcmp(name, "mounts") == 0 ||
+	    strcmp(name, "mountinfo") == 0 ||
+	    strcmp(name, "mountstats") == 0 ||
+	    strcmp(name, "coredump_filter") == 0 ||
+	    strcmp(name, "oom_adj") == 0 ||
+	    strcmp(name, "oom_score_adj") == 0 ||
+	    strcmp(name, "loginuid") == 0 ||
+	    strcmp(name, "make-it-fail") == 0 ||
+	    strcmp(name, "seccomp_cache") == 0 ||
+	    strcmp(name, "ksm_merging_pages") == 0 ||
+	    strcmp(name, "ksm_stat") == 0)
 		return PTRACE_MODE_READ_FSCREDS |
 		       PTRACE_MODE_PROC_QUERY_INFORMATION;
 
@@ -1237,6 +1265,186 @@ insert_block_before_exact_once '	ret = PROC_I(inode)->op.proc_show(m, ns, pid, t
 	}
 ' \
 	"$kernel_root/fs/proc/base.c"
+replace_line_after_anchor_once 'static int lstats_show_proc(struct seq_file *m, void *v)' \
+	'	if (!task)
+		return -ESRCH;' \
+	'	if (!task)
+		return -ESRCH;
+	/* PKM: gate /proc/<pid>/latency read metadata. */
+	{
+		int ret = proc_pkm_check_task_metadata_access(task, m->file);
+
+		if (ret) {
+			put_task_struct(task);
+			return ret;
+		}
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	if (task->signal->oom_score_adj == OOM_SCORE_ADJ_MAX)' \
+	'PKM: gate /proc/<pid>/oom_adj read metadata' \
+	'	/* PKM: gate /proc/<pid>/oom_adj read metadata. */
+	{
+		int ret = proc_pkm_check_task_metadata_access(task, file);
+
+		if (ret) {
+			put_task_struct(task);
+			return ret;
+		}
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	oom_score_adj = task->signal->oom_score_adj;' \
+	'PKM: gate /proc/<pid>/oom_score_adj read metadata' \
+	'	/* PKM: gate /proc/<pid>/oom_score_adj read metadata. */
+	{
+		int ret = proc_pkm_check_task_metadata_access(task, file);
+
+		if (ret) {
+			put_task_struct(task);
+			return ret;
+		}
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+replace_line_after_anchor_once 'static ssize_t proc_loginuid_read(struct file * file, char __user * buf,' \
+	'	length = scnprintf(tmpbuf, TMPBUFLEN, "%u",' \
+	'	/* PKM: gate /proc/<pid>/loginuid read metadata. */
+	{
+		int ret = proc_pkm_check_task_metadata_access(task, file);
+
+		if (ret) {
+			put_task_struct(task);
+			return ret;
+		}
+	}
+	length = scnprintf(tmpbuf, TMPBUFLEN, "%u",' \
+	"$kernel_root/fs/proc/base.c"
+replace_line_after_anchor_once 'static ssize_t proc_sessionid_read(struct file * file, char __user * buf,' \
+	'	length = scnprintf(tmpbuf, TMPBUFLEN, "%u",' \
+	'	/* PKM: gate /proc/<pid>/sessionid read metadata. */
+	{
+		int ret = proc_pkm_check_task_metadata_access(task, file);
+
+		if (ret) {
+			put_task_struct(task);
+			return ret;
+		}
+	}
+	length = scnprintf(tmpbuf, TMPBUFLEN, "%u",' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	make_it_fail = task->make_it_fail;' \
+	'PKM: gate /proc/<pid>/make-it-fail read metadata' \
+	'	/* PKM: gate /proc/<pid>/make-it-fail read metadata. */
+	{
+		int ret = proc_pkm_check_task_metadata_access(task, file);
+
+		if (ret) {
+			put_task_struct(task);
+			return ret;
+		}
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	proc_sched_show_task(p, ns, m);' \
+	'PKM: gate /proc/<pid>/sched read metadata' \
+	'	/* PKM: gate /proc/<pid>/sched read metadata. */
+	{
+		int ret = proc_pkm_check_task_metadata_access(p, m->file);
+
+		if (ret) {
+			put_task_struct(p);
+			return ret;
+		}
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	proc_sched_autogroup_show_task(p, m);' \
+	'PKM: gate /proc/<pid>/autogroup read metadata' \
+	'	/* PKM: gate /proc/<pid>/autogroup read metadata. */
+	{
+		int ret = proc_pkm_check_task_metadata_access(p, m->file);
+
+		if (ret) {
+			put_task_struct(p);
+			return ret;
+		}
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	proc_timens_show_offsets(p, m);' \
+	'PKM: gate /proc/<pid>/timens_offsets read metadata' \
+	'	/* PKM: gate /proc/<pid>/timens_offsets read metadata. */
+	{
+		int ret = proc_pkm_check_task_metadata_access(p, m->file);
+
+		if (ret) {
+			put_task_struct(p);
+			return ret;
+		}
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	proc_task_name(m, p, false);' \
+	'PKM: gate /proc/<pid>/comm read metadata' \
+	'	/* PKM: gate /proc/<pid>/comm read metadata. */
+	{
+		int ret = proc_pkm_check_task_metadata_access(p, m->file);
+
+		if (ret) {
+			put_task_struct(p);
+			return ret;
+		}
+	}
+' \
+	"$kernel_root/fs/proc/base.c"
+insert_block_before_exact_once '	tp = __seq_open_private(file, &proc_timers_seq_ops,' \
+	'PKM: gate /proc/<pid>/timers read metadata' \
+	'#ifdef CONFIG_SECURITY_PKM
+	{
+		struct task_struct *task;
+		int ret;
+
+		/* PKM: gate /proc/<pid>/timers read metadata. */
+		task = get_proc_task(inode);
+		if (!task)
+			return -ESRCH;
+		ret = proc_pkm_check_task_metadata_access(task, file);
+		put_task_struct(task);
+		if (ret)
+			return ret;
+	}
+#endif
+
+' \
+	"$kernel_root/fs/proc/base.c"
+replace_line_after_anchor_once 'static ssize_t proc_coredump_filter_read(struct file *file, char __user *buf,' \
+	'	ret = 0;' \
+	'	/* PKM: gate /proc/<pid>/coredump_filter read metadata. */
+	ret = proc_pkm_check_task_metadata_access(task, file);
+	if (ret) {
+		put_task_struct(task);
+		return ret;
+	}
+	ret = 0;' \
+	"$kernel_root/fs/proc/base.c"
+insert_line_after_exact_once '#include <linux/nsproxy.h>' \
+	'#include <linux/ptrace.h>' \
+	"$kernel_root/fs/proc_namespace.c"
+insert_block_before_exact_once '	task_lock(task);' \
+	'PKM: gate /proc/<pid>/mount namespace read metadata' \
+	'#ifdef CONFIG_SECURITY_PKM
+	/* PKM: gate /proc/<pid>/mount namespace read metadata. */
+	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS |
+			       PTRACE_MODE_PROC_QUERY_INFORMATION)) {
+		put_task_struct(task);
+		ret = -EACCES;
+		goto err;
+	}
+#endif
+
+' \
+	"$kernel_root/fs/proc_namespace.c"
 insert_block_before_exact_once 'static const struct pid_entry tgid_base_stuff[] = {' \
 	'static const struct file_operations proc_pid_token_operations' \
 	'#ifdef CONFIG_SECURITY_PKM

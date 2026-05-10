@@ -174,25 +174,78 @@ fi
 require_install_literal 'strcmp(name, "stat") == 0' \
 	"install-pkm-subtree.sh does not stage /proc/<pid>/stat metadata classification"
 require_install_literal 'PTRACE_MODE_PROC_QUERY_LIMITED;' \
-	"install-pkm-subtree.sh does not map /proc/<pid>/stat to PROCESS_QUERY_LIMITED"
-require_install_literal 'strcmp(name, "cmdline") == 0' \
-	"install-pkm-subtree.sh does not stage /proc/<pid>/cmdline metadata classification"
-require_install_literal 'strcmp(name, "status") == 0' \
-	"install-pkm-subtree.sh does not stage /proc/<pid>/status metadata classification"
-require_install_literal 'strcmp(name, "io") == 0' \
-	"install-pkm-subtree.sh does not stage /proc/<pid>/io metadata classification"
-require_install_literal 'strcmp(name, "cgroup") == 0' \
-	"install-pkm-subtree.sh does not stage /proc/<pid>/cgroup metadata classification"
+	"install-pkm-subtree.sh does not map basic procfs metadata to PROCESS_QUERY_LIMITED"
+for proc_query_limited_name in \
+	"stat" \
+	"statm" \
+	"comm" \
+	"wchan" \
+	"schedstat" \
+	"cpuset" \
+	"cgroup" \
+	"cpu_resctrl_groups" \
+	"oom_score" \
+	"sessionid" \
+	"patch_state" \
+	"stack_depth" \
+	"arch_status"; do
+	require_install_literal "strcmp(name, \"${proc_query_limited_name}\") == 0" \
+		"install-pkm-subtree.sh does not stage /proc/<pid>/${proc_query_limited_name} metadata classification"
+done
+for proc_query_information_name in \
+	"cmdline" \
+	"status" \
+	"io" \
+	"limits" \
+	"sched" \
+	"autogroup" \
+	"timens_offsets" \
+	"personality" \
+	"syscall" \
+	"latency" \
+	"timers" \
+	"timerslack_ns" \
+	"mounts" \
+	"mountinfo" \
+	"mountstats" \
+	"coredump_filter" \
+	"oom_adj" \
+	"oom_score_adj" \
+	"loginuid" \
+	"make-it-fail" \
+	"seccomp_cache" \
+	"ksm_merging_pages" \
+	"ksm_stat"; do
+	require_install_literal "strcmp(name, \"${proc_query_information_name}\") == 0" \
+		"install-pkm-subtree.sh does not stage /proc/<pid>/${proc_query_information_name} metadata classification"
+done
 require_install_literal 'PTRACE_MODE_PROC_QUERY_INFORMATION;' \
 	"install-pkm-subtree.sh does not map detailed procfs metadata to PROCESS_QUERY_INFORMATION"
-require_install_block $'if (strcmp(name, "stat") == 0)\n\t\treturn PTRACE_MODE_READ_FSCREDS |\n\t\t       PTRACE_MODE_PROC_QUERY_LIMITED;' \
-	"install-pkm-subtree.sh does not map /proc/<pid>/stat exactly to PROCESS_QUERY_LIMITED"
-require_install_block $'if (strcmp(name, "cmdline") == 0 || strcmp(name, "status") == 0 ||\n\t    strcmp(name, "io") == 0 || strcmp(name, "cgroup") == 0)\n\t\treturn PTRACE_MODE_READ_FSCREDS |\n\t\t       PTRACE_MODE_PROC_QUERY_INFORMATION;' \
+require_install_block $'strcmp(name, "arch_status") == 0)\n\t\treturn PTRACE_MODE_READ_FSCREDS |\n\t\t       PTRACE_MODE_PROC_QUERY_LIMITED;' \
+	"install-pkm-subtree.sh does not map basic procfs metadata exactly to PROCESS_QUERY_LIMITED"
+require_install_block $'strcmp(name, "ksm_stat") == 0)\n\t\treturn PTRACE_MODE_READ_FSCREDS |\n\t\t       PTRACE_MODE_PROC_QUERY_INFORMATION;' \
 	"install-pkm-subtree.sh does not map detailed procfs metadata exactly to PROCESS_QUERY_INFORMATION"
 require_install_literal 'ret = proc_pkm_check_task_metadata_access(tsk, file);' \
 	"install-pkm-subtree.sh does not patch proc_pid_cmdline_read through the KACS metadata gate"
 require_install_literal 'ret = proc_pkm_check_task_metadata_access(task, m->file);' \
 	"install-pkm-subtree.sh does not patch proc_single_show through the KACS metadata gate"
+for proc_read_gate in \
+	"latency" \
+	"oom_adj" \
+	"oom_score_adj" \
+	"loginuid" \
+	"sessionid" \
+	"make-it-fail" \
+	"sched" \
+	"autogroup" \
+	"timens_offsets" \
+	"comm" \
+	"timers" \
+	"coredump_filter" \
+	"mount namespace"; do
+	require_install_literal "PKM: gate /proc/<pid>/${proc_read_gate} read metadata" \
+		"install-pkm-subtree.sh does not patch /proc/<pid>/${proc_read_gate} read metadata through the KACS gate"
+done
 require_install_literal 'if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_PROC_QUERY_INFORMATION)) {' \
 	"install-pkm-subtree.sh does not patch /proc/<pid>/io to the ratified query-information mode"
 require_install_literal 'permitted = ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_PROC_QUERY_LIMITED | PTRACE_MODE_NOAUDIT);' \
