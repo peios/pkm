@@ -9874,6 +9874,117 @@ static void pkm_kunit_proc_metadata_query_information_denied_by_process_sd(
 	kacs_rust_token_drop(subject_token);
 }
 
+static void pkm_kunit_expect_proc_metadata_debug_bypass(
+	struct kunit *test, u32 proc_mode)
+{
+	struct pkm_kacs_kunit_process_ptrace_check_args args = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	long ret;
+
+	subject_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_effective_token_ptr());
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	if (proc_mode == PTRACE_MODE_PROC_QUERY_INFORMATION)
+		process_sd = kacs_rust_kunit_create_query_limited_process_sd(
+			target_token, &process_sd_len);
+	else
+		process_sd = kacs_rust_kunit_create_query_information_process_sd(
+			target_token, &process_sd_len);
+
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.mode = PTRACE_MODE_READ | proc_mode;
+
+	ret = pkm_kacs_kunit_check_ptrace_for_subject(&args);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used | PKM_KUNIT_SE_DEBUG_PRIVILEGE);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_proc_metadata_debug_bypasses_limited_process_sd_only(
+	struct kunit *test)
+{
+	pkm_kunit_expect_proc_metadata_debug_bypass(
+		test, PTRACE_MODE_PROC_QUERY_LIMITED);
+}
+
+static void pkm_kunit_proc_metadata_debug_bypasses_information_process_sd_only(
+	struct kunit *test)
+{
+	pkm_kunit_expect_proc_metadata_debug_bypass(
+		test, PTRACE_MODE_PROC_QUERY_INFORMATION);
+}
+
+static void pkm_kunit_expect_proc_metadata_debug_pip_denial(
+	struct kunit *test, u32 proc_mode)
+{
+	struct pkm_kacs_kunit_process_ptrace_check_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	long ret;
+
+	subject_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_effective_token_ptr());
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	if (proc_mode == PTRACE_MODE_PROC_QUERY_INFORMATION)
+		process_sd = kacs_rust_kunit_create_query_limited_process_sd(
+			target_token, &process_sd_len);
+	else
+		process_sd = kacs_rust_kunit_create_query_information_process_sd(
+			target_token, &process_sd_len);
+
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.target_pip_type = PKM_KUNIT_PIP_TYPE_PROTECTED;
+	args.target_pip_trust = PKM_KUNIT_PIP_TRUST_TEST;
+	args.mode = PTRACE_MODE_READ | proc_mode;
+
+	ret = pkm_kacs_kunit_check_ptrace_for_subject(&args);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_proc_metadata_debug_limited_still_fails_on_pip(
+	struct kunit *test)
+{
+	pkm_kunit_expect_proc_metadata_debug_pip_denial(
+		test, PTRACE_MODE_PROC_QUERY_LIMITED);
+}
+
+static void pkm_kunit_proc_metadata_debug_information_still_fails_on_pip(
+	struct kunit *test)
+{
+	pkm_kunit_expect_proc_metadata_debug_pip_denial(
+		test, PTRACE_MODE_PROC_QUERY_INFORMATION);
+}
+
 static void pkm_kunit_proc_metadata_query_mode_combo_fails_closed(
 	struct kunit *test)
 {
@@ -20505,6 +20616,13 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_proc_metadata_query_information_success),
 	KUNIT_CASE(
 		pkm_kunit_proc_metadata_query_information_denied_by_process_sd),
+	KUNIT_CASE(
+		pkm_kunit_proc_metadata_debug_bypasses_limited_process_sd_only),
+	KUNIT_CASE(
+		pkm_kunit_proc_metadata_debug_bypasses_information_process_sd_only),
+	KUNIT_CASE(pkm_kunit_proc_metadata_debug_limited_still_fails_on_pip),
+	KUNIT_CASE(
+		pkm_kunit_proc_metadata_debug_information_still_fails_on_pip),
 	KUNIT_CASE(pkm_kunit_proc_metadata_query_mode_combo_fails_closed),
 	KUNIT_CASE(pkm_kunit_pidfd_open_success),
 	KUNIT_CASE(pkm_kunit_pidfd_open_denied_by_process_sd),

@@ -7,10 +7,31 @@ if [[ $# -ne 1 ]]; then
 fi
 
 repo_root=$1
+install_script="$repo_root/kernel/install-pkm-subtree.sh"
 
 die() {
 	echo "verify-scaffold: $*" >&2
 	exit 1
+}
+
+require_install_literal() {
+	local needle=$1
+	local message=$2
+
+	if ! rg -Fq "$needle" "$install_script"; then
+		die "$message"
+	fi
+}
+
+require_install_block() {
+	local needle=$1
+	local message=$2
+	local contents
+
+	contents=$(<"$install_script")
+	if [[ "$contents" != *"$needle"* ]]; then
+		die "$message"
+	fi
 }
 
 for forbidden in \
@@ -147,6 +168,33 @@ if ! rg -q 'proc_pkm_check_task_metadata_access' \
 	"$repo_root/kernel/install-pkm-subtree.sh"; then
 	die "install-pkm-subtree.sh does not stage the procfs metadata visibility patch"
 fi
+
+require_install_literal 'strcmp(name, "stat") == 0' \
+	"install-pkm-subtree.sh does not stage /proc/<pid>/stat metadata classification"
+require_install_literal 'PTRACE_MODE_PROC_QUERY_LIMITED;' \
+	"install-pkm-subtree.sh does not map /proc/<pid>/stat to PROCESS_QUERY_LIMITED"
+require_install_literal 'strcmp(name, "cmdline") == 0' \
+	"install-pkm-subtree.sh does not stage /proc/<pid>/cmdline metadata classification"
+require_install_literal 'strcmp(name, "status") == 0' \
+	"install-pkm-subtree.sh does not stage /proc/<pid>/status metadata classification"
+require_install_literal 'strcmp(name, "io") == 0' \
+	"install-pkm-subtree.sh does not stage /proc/<pid>/io metadata classification"
+require_install_literal 'strcmp(name, "cgroup") == 0' \
+	"install-pkm-subtree.sh does not stage /proc/<pid>/cgroup metadata classification"
+require_install_literal 'PTRACE_MODE_PROC_QUERY_INFORMATION;' \
+	"install-pkm-subtree.sh does not map detailed procfs metadata to PROCESS_QUERY_INFORMATION"
+require_install_block $'if (strcmp(name, "stat") == 0)\n\t\treturn PTRACE_MODE_READ_FSCREDS |\n\t\t       PTRACE_MODE_PROC_QUERY_LIMITED;' \
+	"install-pkm-subtree.sh does not map /proc/<pid>/stat exactly to PROCESS_QUERY_LIMITED"
+require_install_block $'if (strcmp(name, "cmdline") == 0 || strcmp(name, "status") == 0 ||\n\t    strcmp(name, "io") == 0 || strcmp(name, "cgroup") == 0)\n\t\treturn PTRACE_MODE_READ_FSCREDS |\n\t\t       PTRACE_MODE_PROC_QUERY_INFORMATION;' \
+	"install-pkm-subtree.sh does not map detailed procfs metadata exactly to PROCESS_QUERY_INFORMATION"
+require_install_literal 'ret = proc_pkm_check_task_metadata_access(tsk, file);' \
+	"install-pkm-subtree.sh does not patch proc_pid_cmdline_read through the KACS metadata gate"
+require_install_literal 'ret = proc_pkm_check_task_metadata_access(task, m->file);' \
+	"install-pkm-subtree.sh does not patch proc_single_show through the KACS metadata gate"
+require_install_literal 'if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_PROC_QUERY_INFORMATION)) {' \
+	"install-pkm-subtree.sh does not patch /proc/<pid>/io to the ratified query-information mode"
+require_install_literal 'permitted = ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_PROC_QUERY_LIMITED | PTRACE_MODE_NOAUDIT);' \
+	"install-pkm-subtree.sh does not patch /proc/<pid>/stat to the ratified query-limited mode"
 
 if ! rg -q 'proc_pid_token_operations' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
