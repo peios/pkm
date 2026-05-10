@@ -5412,6 +5412,141 @@ static void pkm_kunit_exec_pip_bad_signature_resets_none(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, out.pip_trust, 0U);
 }
 
+static void pkm_kunit_signed_exec_pin_tracks_verified_material(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_probe material = {};
+	u32 pinned = 0;
+
+	pkm_kunit_signing_fill_tcb_vector_material(&material);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_signed_exec_pin_from_signing_material(
+				&material, &pinned),
+			0);
+	KUNIT_EXPECT_EQ(test, pinned, 1U);
+
+	material.signature[0] ^= 0x01;
+	pinned = 1;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_signed_exec_pin_from_signing_material(
+				&material, &pinned),
+			0);
+	KUNIT_EXPECT_EQ(test, pinned, 0U);
+
+	material.source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
+	pinned = 1;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_signed_exec_pin_from_signing_material(
+				&material, &pinned),
+			0);
+	KUNIT_EXPECT_EQ(test, pinned, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_signed_exec_pin_from_signing_material(
+				NULL, &pinned),
+			-EINVAL);
+}
+
+static void pkm_kunit_signed_exec_pin_blocks_content_mutation(
+	struct kunit *test)
+{
+	static const u32 ops[] = {
+		PKM_KACS_KUNIT_PIN_OP_WRITE_PERMISSION,
+		PKM_KACS_KUNIT_PIN_OP_WRITE_INTENT,
+		PKM_KACS_KUNIT_PIN_OP_TRUNCATE,
+		PKM_KACS_KUNIT_PIN_OP_FALLOCATE_MUTATE,
+		PKM_KACS_KUNIT_PIN_OP_FALLOCATE_ALLOCATE,
+		PKM_KACS_KUNIT_PIN_OP_IOCTL_MUTATE,
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(ops); i++) {
+		KUNIT_EXPECT_EQ(test,
+				pkm_kacs_kunit_check_signed_exec_pin_mutation(
+					1, 1, PKM_KUNIT_FILE_WRITE_DATA,
+					ops[i]),
+				-EACCES);
+	}
+}
+
+static void pkm_kunit_signed_exec_pin_blocks_unmanaged_mutation(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				1, 0, 0,
+				PKM_KACS_KUNIT_PIN_OP_WRITE_PERMISSION),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				1, 0, 0,
+				PKM_KACS_KUNIT_PIN_OP_FALLOCATE_MUTATE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				1, 0, 0,
+				PKM_KACS_KUNIT_PIN_OP_IOCTL_MUTATE),
+			-EACCES);
+}
+
+static void pkm_kunit_signed_exec_pin_preserves_unpinned_facs(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				0, 1, PKM_KUNIT_FILE_WRITE_DATA,
+				PKM_KACS_KUNIT_PIN_OP_WRITE_PERMISSION),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				0, 1, PKM_KUNIT_FILE_WRITE_DATA,
+				PKM_KACS_KUNIT_PIN_OP_WRITE_INTENT),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				0, 1, PKM_KUNIT_FILE_WRITE_DATA,
+				PKM_KACS_KUNIT_PIN_OP_TRUNCATE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				0, 1, PKM_KUNIT_FILE_WRITE_DATA,
+				PKM_KACS_KUNIT_PIN_OP_FALLOCATE_MUTATE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				0, 1, PKM_KUNIT_FILE_WRITE_DATA,
+				PKM_KACS_KUNIT_PIN_OP_FALLOCATE_ALLOCATE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				0, 1, PKM_KUNIT_FILE_WRITE_DATA,
+				PKM_KACS_KUNIT_PIN_OP_IOCTL_MUTATE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				0, 1, 0,
+				PKM_KACS_KUNIT_PIN_OP_WRITE_PERMISSION),
+			-EACCES);
+}
+
+static void pkm_kunit_signed_exec_pin_blocks_path_and_sig_xattr(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				1, 1, PKM_KUNIT_FILE_WRITE_DATA,
+				PKM_KACS_KUNIT_PIN_OP_PATH_TRUNCATE),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				1, 1, PKM_KUNIT_FILE_WRITE_EA,
+				PKM_KACS_KUNIT_PIN_OP_SIGNING_XATTR_SET),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_signed_exec_pin_mutation(
+				0, 1, PKM_KUNIT_FILE_WRITE_DATA, 0),
+			-EINVAL);
+}
+
 static void pkm_kunit_exec_pip_pending_is_transactional(struct kunit *test)
 {
 	struct pkm_kacs_kunit_process_state_view saved = {};
@@ -20235,6 +20370,11 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_signing_crypto_verify_sets_tcb_trust),
 	KUNIT_CASE(pkm_kunit_exec_pip_signed_material_sets_tcb_trust),
 	KUNIT_CASE(pkm_kunit_exec_pip_bad_signature_resets_none),
+	KUNIT_CASE(pkm_kunit_signed_exec_pin_tracks_verified_material),
+	KUNIT_CASE(pkm_kunit_signed_exec_pin_blocks_content_mutation),
+	KUNIT_CASE(pkm_kunit_signed_exec_pin_blocks_unmanaged_mutation),
+	KUNIT_CASE(pkm_kunit_signed_exec_pin_preserves_unpinned_facs),
+	KUNIT_CASE(pkm_kunit_signed_exec_pin_blocks_path_and_sig_xattr),
 	KUNIT_CASE(pkm_kunit_exec_pip_pending_is_transactional),
 	KUNIT_CASE(pkm_kunit_exec_pip_unsigned_commit_clears_existing_pip),
 	KUNIT_CASE(pkm_kunit_exec_dumpable_decision_tracks_pip),

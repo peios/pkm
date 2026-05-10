@@ -875,6 +875,8 @@ int pkm_kacs_kunit_determine_exec_pip_from_signing_material(
 int pkm_kacs_kunit_stage_exec_pip_from_signing_material(
 	const struct pkm_kacs_kunit_signing_probe *material, u32 commit,
 	struct pkm_kacs_kunit_process_state_view *out);
+int pkm_kacs_kunit_signed_exec_pin_from_signing_material(
+	const struct pkm_kacs_kunit_signing_probe *material, u32 *pinned_out);
 long pkm_kacs_kunit_exec_dumpable_after_pip(u32 pip_type,
 					    u32 current_dumpable);
 long pkm_kacs_kunit_get_current_dumpable(void);
@@ -882,6 +884,17 @@ long pkm_kacs_kunit_set_current_dumpable(u32 dumpable);
 long pkm_kacs_kunit_stage_exec_dumpable_from_signing_material(
 	const struct pkm_kacs_kunit_signing_probe *material,
 	u32 initial_dumpable);
+#define PKM_KACS_KUNIT_PIN_OP_WRITE_PERMISSION 1U
+#define PKM_KACS_KUNIT_PIN_OP_WRITE_INTENT 2U
+#define PKM_KACS_KUNIT_PIN_OP_TRUNCATE 3U
+#define PKM_KACS_KUNIT_PIN_OP_FALLOCATE_MUTATE 4U
+#define PKM_KACS_KUNIT_PIN_OP_FALLOCATE_ALLOCATE 5U
+#define PKM_KACS_KUNIT_PIN_OP_PATH_TRUNCATE 6U
+#define PKM_KACS_KUNIT_PIN_OP_SIGNING_XATTR_SET 7U
+#define PKM_KACS_KUNIT_PIN_OP_IOCTL_MUTATE 8U
+int pkm_kacs_kunit_check_signed_exec_pin_mutation(u32 pinned, u32 managed,
+						  u32 granted_access,
+						  u32 operation);
 int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
 				       unsigned long prot,
 				       unsigned long flags);

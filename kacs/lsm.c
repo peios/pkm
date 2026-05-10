@@ -261,6 +261,7 @@ struct pkm_kacs_inode_security {
 	struct mutex lock;
 	struct pkm_kacs_inode_sd_cache __rcu *sd_cache;
 	atomic_t delete_on_close_lineages;
+	atomic_t signed_exec_pinned;
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 	bool kunit_fake_xattr_enabled;
 	const u8 *kunit_fake_xattr_bytes;
@@ -945,6 +946,7 @@ static int pkm_kacs_inode_alloc_security(struct inode *inode)
 	mutex_init(&sec->lock);
 	RCU_INIT_POINTER(sec->sd_cache, NULL);
 	atomic_set(&sec->delete_on_close_lineages, 0);
+	atomic_set(&sec->signed_exec_pinned, 0);
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 	sec->kunit_fake_xattr_enabled = false;
 	sec->kunit_fake_xattr_bytes = NULL;
@@ -1040,6 +1042,7 @@ static void pkm_kacs_inode_free_security_rcu(void *inode_security)
 	cache = rcu_dereference_protected(sec->sd_cache, 1);
 	RCU_INIT_POINTER(sec->sd_cache, NULL);
 	atomic_set(&sec->delete_on_close_lineages, 0);
+	atomic_set(&sec->signed_exec_pinned, 0);
 	pkm_kacs_inode_sd_cache_free(cache);
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 	if (sec->kunit_fake_xattr_bytes)
@@ -1049,6 +1052,68 @@ static void pkm_kacs_inode_free_security_rcu(void *inode_security)
 	sec->kunit_fake_xattr_enabled = false;
 	sec->kunit_unlink_calls = 0;
 #endif
+}
+
+static bool pkm_kacs_inode_signed_exec_pinned(const struct inode *inode)
+{
+	struct pkm_kacs_inode_security *sec;
+
+	if (!inode || !inode->i_security)
+		return false;
+
+	sec = pkm_kacs_inode((struct inode *)inode);
+	return atomic_read(&sec->signed_exec_pinned) != 0;
+}
+
+static int pkm_kacs_mark_signed_exec_pinned_file(const struct file *file)
+{
+	struct inode *inode;
+	struct pkm_kacs_inode_security *sec;
+
+	if (!file)
+		return -EACCES;
+
+	inode = file_inode((struct file *)file);
+	if (!inode || !inode->i_security)
+		return -EACCES;
+
+	sec = pkm_kacs_inode(inode);
+	atomic_set(&sec->signed_exec_pinned, 1);
+	return 0;
+}
+
+static int pkm_kacs_check_signed_exec_content_mutation_inode(
+	const struct inode *inode)
+{
+	return pkm_kacs_inode_signed_exec_pinned(inode) ? -EACCES : 0;
+}
+
+static int pkm_kacs_check_signed_exec_content_mutation_file(
+	const struct file *file)
+{
+	if (!file)
+		return -EACCES;
+
+	return pkm_kacs_check_signed_exec_content_mutation_inode(
+		file_inode((struct file *)file));
+}
+
+static bool pkm_kacs_is_signing_xattr(const char *name)
+{
+	return name && strcmp(name, PKM_KACS_SIGNING_XATTR_NAME) == 0;
+}
+
+static int pkm_kacs_check_signed_exec_xattr_mutation(
+	const struct inode *inode, const char *name)
+{
+	if (!name)
+		return -EACCES;
+	if (!pkm_kacs_is_signing_xattr(name))
+		return 0;
+	if (!inode)
+		return -EACCES;
+
+	return pkm_kacs_check_signed_exec_content_mutation_inode(inode);
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
@@ -1482,9 +1547,17 @@ static int pkm_kacs_inode_setattr(struct mnt_idmap *idmap,
 				  struct iattr *attr)
 {
 	u32 required_access;
+	int ret;
 
 	if (!dentry || !attr)
 		return -EACCES;
+
+	if ((attr->ia_valid & ATTR_SIZE) != 0) {
+		ret = pkm_kacs_check_signed_exec_content_mutation_inode(
+			d_inode(dentry));
+		if (ret)
+			return ret;
+	}
 
 	if (pkm_kacs_consume_file_metadata_decision(
 		    d_inode(dentry), PKM_KACS_METADATA_OP_SETATTR))
@@ -1550,12 +1623,18 @@ static int pkm_kacs_inode_setxattr(struct mnt_idmap *idmap,
 				   struct dentry *dentry, const char *name,
 				   const void *value, size_t size, int flags)
 {
+	int ret;
+
 	if (dentry && pkm_kacs_is_canonical_sd_xattr(d_inode(dentry), name))
 		return -EACCES;
 	if (!name)
 		return -EACCES;
 	if (is_posix_acl_xattr(name))
 		return -EACCES;
+	ret = pkm_kacs_check_signed_exec_xattr_mutation(
+		dentry ? d_inode(dentry) : NULL, name);
+	if (ret)
+		return ret;
 
 	if (pkm_kacs_consume_file_metadata_decision(
 		    dentry ? d_inode(dentry) : NULL,
@@ -1570,12 +1649,18 @@ static int pkm_kacs_inode_removexattr(struct mnt_idmap *idmap,
 				      struct dentry *dentry,
 				      const char *name)
 {
+	int ret;
+
 	if (dentry && pkm_kacs_is_canonical_sd_xattr(d_inode(dentry), name))
 		return -EACCES;
 	if (!name)
 		return -EACCES;
 	if (is_posix_acl_xattr(name))
 		return -EACCES;
+	ret = pkm_kacs_check_signed_exec_xattr_mutation(
+		dentry ? d_inode(dentry) : NULL, name);
+	if (ret)
+		return ret;
 
 	if (pkm_kacs_consume_file_metadata_decision(
 		    dentry ? d_inode(dentry) : NULL,
@@ -1739,6 +1824,11 @@ static int pkm_kacs_check_file_xattr_snapshot(struct file *file,
 		return -EACCES;
 	if (write_operation && is_posix_acl_xattr(name))
 		return -EACCES;
+	if (write_operation) {
+		ret = pkm_kacs_check_signed_exec_xattr_mutation(inode, name);
+		if (ret)
+			return ret;
+	}
 
 	ret = pkm_kacs_check_file_snapshot_grant(file, required_access);
 	if (ret)
@@ -4602,6 +4692,11 @@ static void pkm_kacs_exec_pip_from_file(const struct file *file,
 
 	pkm_kacs_exec_pip_from_material(&material, pip_type_out,
 					pip_trust_out);
+	if ((*pip_type_out != 0 || *pip_trust_out != 0) &&
+	    pkm_kacs_mark_signed_exec_pinned_file(file)) {
+		*pip_type_out = 0;
+		*pip_trust_out = 0;
+	}
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
@@ -4880,6 +4975,27 @@ int pkm_kacs_kunit_determine_exec_pip_from_signing_material(
 	return 0;
 }
 
+int pkm_kacs_kunit_signed_exec_pin_from_signing_material(
+	const struct pkm_kacs_kunit_signing_probe *material, u32 *pinned_out)
+{
+	struct pkm_kacs_signing_material material_in;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+	int ret;
+
+	if (!pinned_out)
+		return -EINVAL;
+
+	*pinned_out = 0;
+	ret = pkm_kacs_kunit_material_from_probe(material, &material_in);
+	if (ret)
+		return ret;
+
+	pkm_kacs_exec_pip_from_material(&material_in, &pip_type, &pip_trust);
+	*pinned_out = (pip_type != 0 || pip_trust != 0) ? 1U : 0U;
+	return 0;
+}
+
 int pkm_kacs_kunit_stage_exec_pip_from_signing_material(
 	const struct pkm_kacs_kunit_signing_probe *material, u32 commit,
 	struct pkm_kacs_kunit_process_state_view *out)
@@ -5147,14 +5263,23 @@ static int pkm_kacs_check_file_permission_snapshot(struct file *file,
 		return -EACCES;
 
 	file_sec = pkm_kacs_file(file);
-	if (!file_sec->managed)
-		return 0;
-
 	if ((mask & MAY_READ) != 0)
 		required_access |= PKM_KACS_FILE_READ_DATA;
 	if ((mask & (MAY_EXEC | MAY_CHDIR)) != 0)
 		required_access |= PKM_KACS_FILE_TRAVERSE;
 	audit_required_access = required_access;
+
+	write_intent = (mask & MAY_WRITE) != 0;
+	append_intent = (mask & MAY_APPEND) != 0 ||
+			(write_intent && (file->f_flags & O_APPEND) != 0);
+	if (write_intent || append_intent) {
+		ret = pkm_kacs_check_signed_exec_content_mutation_file(file);
+		if (ret)
+			return ret;
+	}
+
+	if (!file_sec->managed)
+		return 0;
 
 	if ((file_sec->granted_access & required_access) != required_access)
 		return pkm_kacs_emit_file_continuous_audit(
@@ -5162,7 +5287,6 @@ static int pkm_kacs_check_file_permission_snapshot(struct file *file,
 			sizeof(pkm_kacs_audit_op_file_permission) - 1,
 			audit_required_access, -EACCES);
 
-	write_intent = (mask & MAY_WRITE) != 0;
 	if (write_intent && current && current->security) {
 		task_sec = pkm_kacs_task(current);
 		if (task_sec->write_intent.active) {
@@ -5178,8 +5302,6 @@ static int pkm_kacs_check_file_permission_snapshot(struct file *file,
 		}
 	}
 
-	append_intent = (mask & MAY_APPEND) != 0 ||
-			(write_intent && (file->f_flags & O_APPEND) != 0);
 	if (write_intent || append_intent) {
 		u32 write_grants = file_sec->granted_access &
 				   (PKM_KACS_FILE_WRITE_DATA |
@@ -5220,6 +5342,10 @@ static int pkm_kacs_check_file_write_intent_snapshot(struct file *file,
 		return -EACCES;
 	if (!file->f_security)
 		return -EACCES;
+
+	ret = pkm_kacs_check_signed_exec_content_mutation_file(file);
+	if (ret)
+		return ret;
 
 	file_sec = pkm_kacs_file(file);
 	if (!file_sec->managed)
@@ -5440,16 +5566,23 @@ static int pkm_kacs_check_file_ioctl_snapshot(struct file *file,
 	if (!file->f_security)
 		return -EACCES;
 
-	file_sec = pkm_kacs_file(file);
-	if (!file_sec->managed)
-		return 0;
-
 	inode = file_inode(file);
 	if (!inode)
 		return -EACCES;
 
 	req = pkm_kacs_classify_file_ioctl(cmd, inode->i_mode, compat);
 	required_access = pkm_kacs_ioctl_requirement_mask(req);
+	if (req == PKM_KACS_IOCTL_REQUIRE_WRITE_DATA ||
+	    req == PKM_KACS_IOCTL_REQUIRE_APPEND_OR_WRITE_DATA) {
+		ret = pkm_kacs_check_signed_exec_content_mutation_file(file);
+		if (ret)
+			return ret;
+	}
+
+	file_sec = pkm_kacs_file(file);
+	if (!file_sec->managed)
+		return 0;
+
 	ret = pkm_kacs_check_ioctl_requirement(file_sec->granted_access, req);
 	return pkm_kacs_emit_file_continuous_audit(
 		file, pkm_kacs_audit_op_file_ioctl,
@@ -5696,6 +5829,10 @@ static int pkm_kacs_check_file_truncate_snapshot(struct file *file)
 	if (!file->f_security)
 		return -EACCES;
 
+	ret = pkm_kacs_check_signed_exec_content_mutation_file(file);
+	if (ret)
+		return ret;
+
 	file_sec = pkm_kacs_file(file);
 	if (!file_sec->managed)
 		return 0;
@@ -5747,6 +5884,7 @@ static int pkm_kacs_check_file_fallocate_snapshot(struct file *file,
 						  int mode)
 {
 	struct pkm_kacs_file_security *file_sec;
+	bool mode_supported;
 	bool requires_write_data = false;
 	u32 granted_access;
 	u32 required_access;
@@ -5757,11 +5895,19 @@ static int pkm_kacs_check_file_fallocate_snapshot(struct file *file,
 	if (!file->f_security)
 		return -EACCES;
 
+	mode_supported = pkm_kacs_fallocate_mode_supported(mode,
+							   &requires_write_data);
+	if (pkm_kacs_inode_signed_exec_pinned(file_inode(file))) {
+		ret = pkm_kacs_check_signed_exec_content_mutation_file(file);
+		if (ret)
+			return ret;
+	}
+
 	file_sec = pkm_kacs_file(file);
 	if (!file_sec->managed)
 		return 0;
 
-	if (!pkm_kacs_fallocate_mode_supported(mode, &requires_write_data))
+	if (!mode_supported)
 		return -EACCES;
 
 	granted_access = file_sec->granted_access;
@@ -5965,9 +6111,13 @@ static int pkm_kacs_check_lsv_file_core(u32 mitigation_bits,
 	if (ret)
 		return ret == -ENOMEM ? -ENOMEM : -EACCES;
 
-	return pkm_kacs_check_lsv_material_core(
+	ret = pkm_kacs_check_lsv_material_core(
 		mitigation_bits, true, true, process_pip_type,
 		process_pip_trust, &material);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_mark_signed_exec_pinned_file(file);
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
@@ -13149,6 +13299,72 @@ int pkm_kacs_kunit_check_file_fallocate_snapshot(u32 managed,
 int pkm_kacs_kunit_check_file_fallocate_null(void)
 {
 	return pkm_kacs_check_file_fallocate_snapshot(NULL, 0);
+}
+
+int pkm_kacs_kunit_check_signed_exec_pin_mutation(u32 pinned, u32 managed,
+						  u32 granted_access,
+						  u32 operation)
+{
+	struct pkm_kacs_kunit_file_mount_state state = { };
+	struct pkm_kacs_file_security *file_sec;
+	struct pkm_kacs_inode_security *inode_sec;
+	struct iattr attr = { };
+	int ret;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		&state, TMPFS_MAGIC, NULL, PKM_KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		return ret;
+
+	file_sec = pkm_kacs_file(&state.file);
+	file_sec->managed = managed ? 1 : 0;
+	file_sec->granted_access = granted_access;
+	inode_sec = pkm_kacs_inode(&state.inode);
+	atomic_set(&inode_sec->signed_exec_pinned, pinned ? 1 : 0);
+
+	switch (operation) {
+	case PKM_KACS_KUNIT_PIN_OP_WRITE_PERMISSION:
+		ret = pkm_kacs_check_file_permission_snapshot(&state.file,
+							      MAY_WRITE);
+		break;
+	case PKM_KACS_KUNIT_PIN_OP_WRITE_INTENT:
+		ret = pkm_kacs_check_file_write_intent_snapshot(&state.file,
+								0, true);
+		break;
+	case PKM_KACS_KUNIT_PIN_OP_TRUNCATE:
+		ret = pkm_kacs_check_file_truncate_snapshot(&state.file);
+		break;
+	case PKM_KACS_KUNIT_PIN_OP_FALLOCATE_MUTATE:
+		ret = pkm_kacs_check_file_fallocate_snapshot(
+			&state.file, FALLOC_FL_ZERO_RANGE);
+		break;
+	case PKM_KACS_KUNIT_PIN_OP_FALLOCATE_ALLOCATE:
+		ret = pkm_kacs_check_file_fallocate_snapshot(
+			&state.file, FALLOC_FL_ALLOCATE_RANGE);
+		break;
+	case PKM_KACS_KUNIT_PIN_OP_IOCTL_MUTATE:
+		ret = pkm_kacs_check_file_ioctl_snapshot(&state.file,
+							 FS_IOC_ZERO_RANGE, 0,
+							 false);
+		break;
+	case PKM_KACS_KUNIT_PIN_OP_PATH_TRUNCATE:
+		attr.ia_valid = ATTR_SIZE;
+		ret = pkm_kacs_inode_setattr(&nop_mnt_idmap, &state.dentry,
+					     &attr);
+		break;
+	case PKM_KACS_KUNIT_PIN_OP_SIGNING_XATTR_SET:
+		ret = pkm_kacs_inode_setxattr(&nop_mnt_idmap, &state.dentry,
+					      PKM_KACS_SIGNING_XATTR_NAME,
+					      NULL, 0, 0);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
 }
 
 int pkm_kacs_kunit_check_task_prctl_mitigations(
