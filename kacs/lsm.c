@@ -435,6 +435,10 @@ static int pkm_kacs_capset(struct cred *new, const struct cred *old,
 			   const kernel_cap_t *effective,
 			   const kernel_cap_t *inheritable,
 			   const kernel_cap_t *permitted);
+long pkm_kacs_capget_for_task(const struct task_struct *target,
+			      kernel_cap_t *effective,
+			      kernel_cap_t *inheritable,
+			      kernel_cap_t *permitted);
 static int pkm_kacs_capable(const struct cred *cred,
 			    struct user_namespace *target_ns, int cap,
 			    unsigned int opts);
@@ -2423,6 +2427,15 @@ static void pkm_kacs_raise_allow_compat_caps(struct cred *cred)
 	pkm_kacs_raise_allow_kernel_caps(&cred->cap_permitted);
 	pkm_kacs_raise_allow_kernel_caps(&cred->cap_inheritable);
 	pkm_kacs_raise_allow_kernel_caps(&cred->cap_bset);
+}
+
+static void pkm_kacs_capget_fixup(kernel_cap_t *effective,
+				  kernel_cap_t *inheritable,
+				  kernel_cap_t *permitted)
+{
+	pkm_kacs_raise_allow_kernel_caps(effective);
+	pkm_kacs_raise_allow_kernel_caps(inheritable);
+	pkm_kacs_raise_allow_kernel_caps(permitted);
 }
 
 static void pkm_kacs_reset_allow_compat_caps(struct cred *cred)
@@ -8897,6 +8910,22 @@ static long pkm_kacs_ptrace_mode_to_process_access(unsigned int mode,
 	return 0;
 }
 
+static long pkm_kacs_check_process_capget_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state)
+{
+	if (!caller_state || !target_state)
+		return -EACCES;
+	if (caller_state == target_state)
+		return 0;
+
+	return pkm_kacs_authorize_process_access_core(
+		subject_token, target_state, READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust),
+		KACS_PROCESS_QUERY_INFORMATION);
+}
+
 static long pkm_kacs_prlimit_flags_to_process_access(unsigned int flags,
 						     u32 *desired_access)
 {
@@ -9159,6 +9188,48 @@ long pkm_kacs_capable_in_cred_ns(const struct cred *cred,
 
 	sec = pkm_kacs_cred(cred);
 	return pkm_kacs_check_capability_for_token(sec ? sec->token : NULL, cap);
+}
+
+long pkm_kacs_capget_for_task(const struct task_struct *target,
+			      kernel_cap_t *effective,
+			      kernel_cap_t *inheritable,
+			      kernel_cap_t *permitted)
+{
+	const struct cred *caller_cred;
+	const struct cred *target_cred;
+	const struct pkm_kacs_cred_security *caller_sec;
+	const struct pkm_kacs_cred_security *target_sec;
+	struct pkm_kacs_process_state *caller_state;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+	long ret;
+
+	if (!target || !effective || !inheritable || !permitted)
+		return -EINVAL;
+
+	pkm_kacs_capget_fixup(effective, inheritable, permitted);
+	if (target == current)
+		return 0;
+
+	caller_cred = current_cred();
+	target_cred = get_task_cred((struct task_struct *)target);
+	if (!target_cred)
+		return -EACCES;
+	if (!caller_cred) {
+		put_cred(target_cred);
+		return -EACCES;
+	}
+
+	caller_sec = pkm_kacs_cred(caller_cred);
+	target_sec = pkm_kacs_cred(target_cred);
+	subject_token = caller_sec ? caller_sec->token : NULL;
+	caller_state = caller_sec ? caller_sec->process_state : NULL;
+	target_state = target_sec ? target_sec->process_state : NULL;
+
+	ret = pkm_kacs_check_process_capget_core(subject_token, caller_state,
+						 target_state);
+	put_cred(target_cred);
+	return ret;
 }
 
 static int pkm_kacs_capable(const struct cred *cred,
@@ -13390,6 +13461,57 @@ int pkm_kacs_kunit_check_pie_bprm(u32 mitigation_bits, const u8 *buf,
 u64 pkm_kacs_kunit_allow_cap_mask(void)
 {
 	return pkm_kacs_allow_cap_mask_u64();
+}
+
+long pkm_kacs_kunit_capget_fixup_masks(u64 effective_mask,
+					u64 inheritable_mask,
+					u64 permitted_mask,
+					u64 *effective_out,
+					u64 *inheritable_out,
+					u64 *permitted_out)
+{
+	kernel_cap_t effective;
+	kernel_cap_t inheritable;
+	kernel_cap_t permitted;
+
+	if (!effective_out || !inheritable_out || !permitted_out)
+		return -EINVAL;
+
+	effective = pkm_kacs_u64_to_kernel_cap(effective_mask);
+	inheritable = pkm_kacs_u64_to_kernel_cap(inheritable_mask);
+	permitted = pkm_kacs_u64_to_kernel_cap(permitted_mask);
+	pkm_kacs_capget_fixup(&effective, &inheritable, &permitted);
+
+	*effective_out = pkm_kacs_kernel_cap_to_u64(&effective);
+	*inheritable_out = pkm_kacs_kernel_cap_to_u64(&inheritable);
+	*permitted_out = pkm_kacs_kernel_cap_to_u64(&permitted);
+	return 0;
+}
+
+long pkm_kacs_kunit_check_capget_for_subject(
+	const struct pkm_kacs_kunit_process_capget_check_args *args)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state caller_state = {};
+	struct pkm_kacs_process_state target_state = {};
+
+	if (!args)
+		return -EINVAL;
+	if (args->self_target)
+		return 0;
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	refcount_set(&process_sd.refs, 1);
+	caller_state.pip_type = args->caller_pip_type;
+	caller_state.pip_trust = args->caller_pip_trust;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = &process_sd;
+
+	return pkm_kacs_check_process_capget_core(args->subject_token,
+						  &caller_state,
+						  &target_state);
 }
 
 long pkm_kacs_kunit_check_capability_for_subject(const void *subject_token,

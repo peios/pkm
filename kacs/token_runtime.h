@@ -243,6 +243,17 @@ struct pkm_kacs_kunit_process_ptrace_check_args {
 	u32 mode;
 };
 
+struct pkm_kacs_kunit_process_capget_check_args {
+	const void *subject_token;
+	const u8 *target_process_sd_ptr;
+	size_t target_process_sd_len;
+	u32 caller_pip_type;
+	u32 caller_pip_trust;
+	u32 target_pip_type;
+	u32 target_pip_trust;
+	u32 self_target;
+};
+
 struct pkm_kacs_kunit_process_setinfo_check_args {
 	const void *subject_token;
 	const u8 *target_process_sd_ptr;
@@ -964,6 +975,14 @@ int pkm_kacs_kunit_check_task_prctl_pip(u32 pip_type, int option,
 int pkm_kacs_kunit_check_pie_bprm(u32 mitigation_bits, const u8 *buf,
 				  size_t len);
 u64 pkm_kacs_kunit_allow_cap_mask(void);
+long pkm_kacs_kunit_capget_fixup_masks(u64 effective_mask,
+					u64 inheritable_mask,
+					u64 permitted_mask,
+					u64 *effective_out,
+					u64 *inheritable_out,
+					u64 *permitted_out);
+long pkm_kacs_kunit_check_capget_for_subject(
+	const struct pkm_kacs_kunit_process_capget_check_args *args);
 long pkm_kacs_kunit_check_capability_for_subject(const void *subject_token,
 						 int cap);
 long pkm_kacs_kunit_check_capset_for_subject(const void *subject_token,

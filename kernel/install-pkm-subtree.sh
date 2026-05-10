@@ -351,6 +351,27 @@ insert_block_before_exact_once '		.alg = "ecdsa-nist-p192",' \
 	}, {
 ' \
 	"$kernel_root/crypto/testmgr.c"
+insert_block_before_exact_once 'int cap_capget(const struct task_struct *target, kernel_cap_t *effective,' \
+	'extern long pkm_kacs_capget_for_task' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern long pkm_kacs_capget_for_task(const struct task_struct *target,
+				     kernel_cap_t *effective,
+				     kernel_cap_t *inheritable,
+				     kernel_cap_t *permitted);
+#endif
+
+' \
+	"$kernel_root/security/commoncap.c"
+replace_line_after_anchor_once 'int cap_capget(const struct task_struct *target, kernel_cap_t *effective,' \
+	'	return 0;' \
+	'#ifdef CONFIG_SECURITY_PKM
+	return pkm_kacs_capget_for_task(target, effective, inheritable,
+					permitted);
+#else
+	return 0;
+#endif
+' \
+	"$kernel_root/security/commoncap.c"
 insert_block_before_exact_once 'int cap_capable(const struct cred *cred, struct user_namespace *target_ns,' \
 	'extern long pkm_kacs_capable_in_cred_ns' \
 	'#ifdef CONFIG_SECURITY_PKM
