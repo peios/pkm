@@ -4167,6 +4167,182 @@ static void pkm_kunit_capset_preserves_allow_and_rejects_clear(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_kunit_capset_rejects_each_allow_clear(struct kunit *test)
+{
+	const void *token;
+	u64 allow_mask;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, 1U, 0U, PKM_KUNIT_IL_SYSTEM, 0U,
+		0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	allow_mask = pkm_kacs_kunit_allow_cap_mask();
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_capset_for_subject(
+				token, allow_mask & ~(1ULL << CAP_CHOWN),
+				allow_mask, allow_mask),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_capset_for_subject(
+				token, allow_mask,
+				allow_mask & ~(1ULL << CAP_CHOWN),
+				allow_mask),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_capset_for_subject(
+				token, allow_mask, allow_mask,
+				allow_mask & ~(1ULL << CAP_CHOWN)),
+			(long)-EPERM);
+
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_capset_preserves_non_allow_and_repairs_bset(
+	struct kunit *test)
+{
+	const void *token;
+	u64 allow_mask;
+	u64 effective_in;
+	u64 inheritable_in;
+	u64 permitted_in;
+	u64 bset_in;
+	u64 effective_out = 0;
+	u64 inheritable_out = 0;
+	u64 permitted_out = 0;
+	u64 bset_out = 0;
+	u64 ambient_out = 0;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, 1U, 0U, PKM_KUNIT_IL_SYSTEM, 0U,
+		0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	allow_mask = pkm_kacs_kunit_allow_cap_mask();
+	effective_in = allow_mask | (1ULL << CAP_SYS_BOOT);
+	inheritable_in = allow_mask | (1ULL << CAP_SYS_TIME);
+	permitted_in = effective_in | (1ULL << CAP_PERFMON);
+	bset_in = 1ULL << CAP_SYS_ADMIN;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_capset_result_masks(
+				token, effective_in, inheritable_in,
+				permitted_in, bset_in, 0ULL, &effective_out,
+				&inheritable_out, &permitted_out, &bset_out,
+				&ambient_out),
+			0L);
+	KUNIT_EXPECT_EQ(test, effective_out, effective_in);
+	KUNIT_EXPECT_EQ(test, inheritable_out, inheritable_in);
+	KUNIT_EXPECT_EQ(test, permitted_out, permitted_in);
+	KUNIT_EXPECT_EQ(test, bset_out, allow_mask | bset_in);
+	KUNIT_EXPECT_EQ(test, ambient_out, 0ULL);
+
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_capset_masks_ambient_to_permitted_inheritable(
+	struct kunit *test)
+{
+	const void *token;
+	u64 allow_mask;
+	u64 requested;
+	u64 ambient_in;
+	u64 effective_out = 0;
+	u64 inheritable_out = 0;
+	u64 permitted_out = 0;
+	u64 bset_out = 0;
+	u64 ambient_out = 0;
+	u64 expected_ambient;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, 1U, 0U, PKM_KUNIT_IL_SYSTEM, 0U,
+		0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	allow_mask = pkm_kacs_kunit_allow_cap_mask();
+	requested = allow_mask | (1ULL << CAP_SYS_BOOT);
+	ambient_in = (1ULL << CAP_CHOWN) | (1ULL << CAP_SYS_BOOT) |
+		     (1ULL << CAP_SYS_TIME);
+	expected_ambient = (1ULL << CAP_CHOWN) | (1ULL << CAP_SYS_BOOT);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_capset_result_masks(
+				token, requested, requested, requested,
+				allow_mask, ambient_in, &effective_out,
+				&inheritable_out, &permitted_out, &bset_out,
+				&ambient_out),
+			0L);
+	KUNIT_EXPECT_EQ(test, effective_out, requested);
+	KUNIT_EXPECT_EQ(test, inheritable_out, requested);
+	KUNIT_EXPECT_EQ(test, permitted_out, requested);
+	KUNIT_EXPECT_EQ(test, bset_out, allow_mask);
+	KUNIT_EXPECT_EQ(test, ambient_out, expected_ambient);
+
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_capset_null_and_tokenless_fail_closed(struct kunit *test)
+{
+	u64 allow_mask;
+	const void *token;
+	u64 effective_out = 0;
+	u64 inheritable_out = 0;
+	u64 permitted_out = 0;
+	u64 bset_out = 0;
+	u64 ambient_out = 0;
+
+	allow_mask = pkm_kacs_kunit_allow_cap_mask();
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, 1U, 0U, PKM_KUNIT_IL_SYSTEM, 0U,
+		0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_capset_for_subject(
+				NULL, allow_mask, allow_mask, allow_mask),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_capset_result_masks(
+				NULL, allow_mask, allow_mask, allow_mask,
+				allow_mask, 0ULL, &effective_out,
+				&inheritable_out, &permitted_out, &bset_out,
+				&ambient_out),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_capset_result_masks(
+				token, allow_mask, allow_mask, allow_mask,
+				allow_mask, 0ULL, NULL, &inheritable_out,
+				&permitted_out, &bset_out, &ambient_out),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_capset_result_masks(
+				token, allow_mask, allow_mask, allow_mask,
+				allow_mask, 0ULL, &effective_out, NULL,
+				&permitted_out, &bset_out, &ambient_out),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_capset_result_masks(
+				token, allow_mask, allow_mask, allow_mask,
+				allow_mask, 0ULL, &effective_out,
+				&inheritable_out, NULL, &bset_out,
+				&ambient_out),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_capset_result_masks(
+				token, allow_mask, allow_mask, allow_mask,
+				allow_mask, 0ULL, &effective_out,
+				&inheritable_out, &permitted_out, NULL,
+				&ambient_out),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_capset_result_masks(
+				token, allow_mask, allow_mask, allow_mask,
+				allow_mask, 0ULL, &effective_out,
+				&inheritable_out, &permitted_out, &bset_out,
+				NULL),
+			(long)-EINVAL);
+
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_kunit_prctl_capability_guard_rejects_allow_mutations(
 	struct kunit *test)
 {
@@ -20750,6 +20926,10 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_capability_privilege_denied_without_privilege),
 	KUNIT_CASE(pkm_kunit_capability_denied_caps_fail_closed),
 	KUNIT_CASE(pkm_kunit_capset_preserves_allow_and_rejects_clear),
+	KUNIT_CASE(pkm_kunit_capset_rejects_each_allow_clear),
+	KUNIT_CASE(pkm_kunit_capset_preserves_non_allow_and_repairs_bset),
+	KUNIT_CASE(pkm_kunit_capset_masks_ambient_to_permitted_inheritable),
+	KUNIT_CASE(pkm_kunit_capset_null_and_tokenless_fail_closed),
 	KUNIT_CASE(pkm_kunit_prctl_capability_guard_rejects_allow_mutations),
 	KUNIT_CASE(pkm_kunit_exec_cap_reprojection_suppresses_filecap_grants),
 	KUNIT_CASE(pkm_kunit_setuid_fixup_suppresses_unprivileged_change),

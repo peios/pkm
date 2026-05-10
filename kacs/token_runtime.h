@@ -994,6 +994,11 @@ long pkm_kacs_kunit_check_capset_for_subject(const void *subject_token,
 					     u64 effective_mask,
 					     u64 inheritable_mask,
 					     u64 permitted_mask);
+long pkm_kacs_kunit_capset_result_masks(
+	const void *subject_token, u64 effective_mask, u64 inheritable_mask,
+	u64 permitted_mask, u64 bset_mask, u64 ambient_mask,
+	u64 *effective_out, u64 *inheritable_out, u64 *permitted_out,
+	u64 *bset_out, u64 *ambient_out);
 long pkm_kacs_kunit_check_prctl_capability_guard_for_subject(
 	const void *subject_token, u64 ambient_mask, int option,
 	unsigned long arg2, unsigned long arg3, unsigned long arg4,

@@ -2639,6 +2639,9 @@ static long pkm_kacs_capset_core(const void *subject_token, struct cred *new,
 	new->cap_effective = *effective;
 	new->cap_inheritable = *inheritable;
 	new->cap_permitted = *permitted;
+	new->cap_ambient = cap_intersect(new->cap_ambient,
+					 cap_intersect(*permitted,
+						       *inheritable));
 	pkm_kacs_raise_allow_compat_caps(new);
 	return 0;
 }
@@ -13593,6 +13596,41 @@ long pkm_kacs_kunit_check_capset_for_subject(const void *subject_token,
 
 	return pkm_kacs_capset_core(subject_token, &new, &effective,
 				    &inheritable, &permitted);
+}
+
+long pkm_kacs_kunit_capset_result_masks(
+	const void *subject_token, u64 effective_mask, u64 inheritable_mask,
+	u64 permitted_mask, u64 bset_mask, u64 ambient_mask,
+	u64 *effective_out, u64 *inheritable_out, u64 *permitted_out,
+	u64 *bset_out, u64 *ambient_out)
+{
+	struct cred new = {};
+	kernel_cap_t effective;
+	kernel_cap_t inheritable;
+	kernel_cap_t permitted;
+	long ret;
+
+	if (!effective_out || !inheritable_out || !permitted_out ||
+	    !bset_out || !ambient_out)
+		return -EINVAL;
+
+	effective = pkm_kacs_u64_to_kernel_cap(effective_mask);
+	inheritable = pkm_kacs_u64_to_kernel_cap(inheritable_mask);
+	permitted = pkm_kacs_u64_to_kernel_cap(permitted_mask);
+	new.cap_bset = pkm_kacs_u64_to_kernel_cap(bset_mask);
+	new.cap_ambient = pkm_kacs_u64_to_kernel_cap(ambient_mask);
+
+	ret = pkm_kacs_capset_core(subject_token, &new, &effective,
+				   &inheritable, &permitted);
+	if (ret)
+		return ret;
+
+	*effective_out = pkm_kacs_kernel_cap_to_u64(&new.cap_effective);
+	*inheritable_out = pkm_kacs_kernel_cap_to_u64(&new.cap_inheritable);
+	*permitted_out = pkm_kacs_kernel_cap_to_u64(&new.cap_permitted);
+	*bset_out = pkm_kacs_kernel_cap_to_u64(&new.cap_bset);
+	*ambient_out = pkm_kacs_kernel_cap_to_u64(&new.cap_ambient);
+	return 0;
 }
 
 long pkm_kacs_kunit_check_prctl_capability_guard_for_subject(
