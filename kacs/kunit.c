@@ -9984,6 +9984,141 @@ static void pkm_kunit_ptrace_unknown_mode_fails_closed(struct kunit *test)
 			(long)-EACCES);
 }
 
+static void pkm_kunit_ptrace_traceme_success(struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_ptrace_check_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_create_default_process_sd(target_token,
+							 &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+
+	ret = pkm_kacs_kunit_check_ptrace_traceme_for_subject(&args);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+
+	pkm_kacs_free((void *)process_sd);
+}
+
+static void pkm_kunit_ptrace_traceme_denied_by_process_sd(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_ptrace_check_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	long ret;
+
+	subject_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_kunit_create_query_limited_process_sd(
+		target_token, &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+
+	ret = pkm_kacs_kunit_check_ptrace_traceme_for_subject(&args);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_ptrace_traceme_debug_bypasses_process_sd_only(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_ptrace_check_args args = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	long ret;
+
+	subject_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_effective_token_ptr());
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token,
+							 &before));
+
+	process_sd = kacs_rust_kunit_create_query_limited_process_sd(
+		target_token, &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+
+	ret = pkm_kacs_kunit_check_ptrace_traceme_for_subject(&args);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token,
+							 &after));
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used | PKM_KUNIT_SE_DEBUG_PRIVILEGE);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_ptrace_traceme_debug_still_fails_on_pip(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_ptrace_check_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_kunit_create_query_limited_process_sd(
+		target_token, &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.target_pip_type = PKM_KUNIT_PIP_TYPE_PROTECTED;
+	args.target_pip_trust = PKM_KUNIT_PIP_TRUST_TEST;
+
+	ret = pkm_kacs_kunit_check_ptrace_traceme_for_subject(&args);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+
+	pkm_kacs_free((void *)process_sd);
+}
+
+static void pkm_kunit_ptrace_traceme_null_args_fail_closed(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_ptrace_traceme_for_subject(NULL),
+			(long)-EINVAL);
+}
+
 static void pkm_kunit_pidfd_getfd_success(struct kunit *test)
 {
 	struct pkm_kacs_kunit_process_ptrace_check_args args = { };
@@ -11419,6 +11554,30 @@ static void pkm_kunit_inode_raw_sd_xattr_hooks_deny_canonical_names(
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_inode_sd_xattr_get("user.other", 0),
 			0);
+}
+
+static void pkm_kunit_inode_xattr_skipcap_defers_to_kacs(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_inode_xattr_skipcap("security.peios.sd"),
+			1);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_inode_xattr_skipcap(
+				"security.capability"),
+			1);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_inode_xattr_skipcap("security.other"),
+			1);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_inode_xattr_skipcap("user.other"),
+			1);
+}
+
+static void pkm_kunit_inode_xattr_skipcap_null_fails_closed(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_inode_xattr_skipcap(NULL), 0);
 }
 
 static void pkm_kunit_file_open_read_stamps_granted_subset(
@@ -21108,6 +21267,11 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_ptrace_debug_bypasses_process_sd_only),
 	KUNIT_CASE(pkm_kunit_ptrace_debug_still_fails_on_pip),
 	KUNIT_CASE(pkm_kunit_ptrace_unknown_mode_fails_closed),
+	KUNIT_CASE(pkm_kunit_ptrace_traceme_success),
+	KUNIT_CASE(pkm_kunit_ptrace_traceme_denied_by_process_sd),
+	KUNIT_CASE(pkm_kunit_ptrace_traceme_debug_bypasses_process_sd_only),
+	KUNIT_CASE(pkm_kunit_ptrace_traceme_debug_still_fails_on_pip),
+	KUNIT_CASE(pkm_kunit_ptrace_traceme_null_args_fail_closed),
 	KUNIT_CASE(pkm_kunit_proc_metadata_query_limited_success),
 	KUNIT_CASE(
 		pkm_kunit_proc_metadata_query_limited_denied_by_process_sd),
@@ -21165,6 +21329,8 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_sd_cache_population_from_valid_xattr),
 	KUNIT_CASE(pkm_kunit_file_sd_cache_population_corrupt_fails_closed),
 	KUNIT_CASE(pkm_kunit_inode_raw_sd_xattr_hooks_deny_canonical_names),
+	KUNIT_CASE(pkm_kunit_inode_xattr_skipcap_defers_to_kacs),
+	KUNIT_CASE(pkm_kunit_inode_xattr_skipcap_null_fails_closed),
 	KUNIT_CASE(pkm_kunit_file_open_read_stamps_granted_subset),
 	KUNIT_CASE(pkm_kunit_file_open_append_trunc_stamps_expected_core),
 	KUNIT_CASE(pkm_kunit_file_open_stamps_continuous_audit_mask),

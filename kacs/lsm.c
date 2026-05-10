@@ -414,6 +414,7 @@ static int pkm_kacs_task_kill(struct task_struct *target,
 			      const struct cred *cred);
 static int pkm_kacs_ptrace_access_check(struct task_struct *child,
 					unsigned int mode);
+static int pkm_kacs_ptrace_traceme(struct task_struct *parent);
 static int pkm_kacs_task_setnice(struct task_struct *task, int nice);
 static int pkm_kacs_task_setscheduler(struct task_struct *task);
 static int pkm_kacs_task_setioprio(struct task_struct *task, int ioprio);
@@ -455,6 +456,7 @@ static void pkm_kacs_inode_free_security_rcu(void *inode_security);
 static int pkm_kacs_sb_alloc_security(struct super_block *sb);
 static struct pkm_kacs_inode_sd_cache *pkm_kacs_inode_sd_cache_alloc(
 	u8 state, const u8 *bytes, size_t len);
+static int pkm_kacs_inode_xattr_skipcap(const char *name);
 static int pkm_kacs_inode_getxattr(struct dentry *dentry, const char *name);
 static int pkm_kacs_inode_setxattr(struct mnt_idmap *idmap,
 				   struct dentry *dentry, const char *name,
@@ -1609,6 +1611,15 @@ static int pkm_kacs_inode_file_setattr(struct dentry *dentry,
 
 	return pkm_kacs_authorize_dentry_metadata_access(
 		dentry, PKM_KACS_FILE_WRITE_ATTRIBUTES);
+}
+
+static int pkm_kacs_inode_xattr_skipcap(const char *name)
+{
+	/*
+	 * FACS is authoritative for xattr metadata access. A missing name is an
+	 * invalid hook shape, so leave native capability checks in place.
+	 */
+	return name ? 1 : 0;
 }
 
 static int pkm_kacs_inode_getxattr(struct dentry *dentry, const char *name)
@@ -2960,6 +2971,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_setattr, pkm_kacs_inode_setattr),
 	LSM_HOOK_INIT(inode_file_getattr, pkm_kacs_inode_file_getattr),
 	LSM_HOOK_INIT(inode_file_setattr, pkm_kacs_inode_file_setattr),
+	LSM_HOOK_INIT(inode_xattr_skipcap, pkm_kacs_inode_xattr_skipcap),
 	LSM_HOOK_INIT(inode_getxattr, pkm_kacs_inode_getxattr),
 	LSM_HOOK_INIT(inode_setxattr, pkm_kacs_inode_setxattr),
 	LSM_HOOK_INIT(inode_removexattr, pkm_kacs_inode_removexattr),
@@ -2993,6 +3005,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(unix_may_send, pkm_kacs_unix_may_send),
 	LSM_HOOK_INIT(task_kill, pkm_kacs_task_kill),
 	LSM_HOOK_INIT(ptrace_access_check, pkm_kacs_ptrace_access_check),
+	LSM_HOOK_INIT(ptrace_traceme, pkm_kacs_ptrace_traceme),
 	LSM_HOOK_INIT(task_setnice, pkm_kacs_task_setnice),
 	LSM_HOOK_INIT(task_setscheduler, pkm_kacs_task_setscheduler),
 	LSM_HOOK_INIT(task_setioprio, pkm_kacs_task_setioprio),
@@ -9130,6 +9143,48 @@ static int pkm_kacs_ptrace_access_check(struct task_struct *child,
 		READ_ONCE(caller_state->pip_trust), desired_access);
 }
 
+static int pkm_kacs_ptrace_traceme(struct task_struct *parent)
+{
+	struct pkm_kacs_process_state *caller_state;
+	struct pkm_kacs_process_state *target_state;
+	const struct cred *parent_cred;
+	const void *subject_token;
+	long ret;
+
+	if (!parent || !parent->security)
+		return -EACCES;
+	if (parent == current)
+		return 0;
+
+	parent_cred = get_task_cred(parent);
+	if (!parent_cred)
+		return -EACCES;
+	if (!parent_cred->security) {
+		put_cred(parent_cred);
+		return -EACCES;
+	}
+
+	caller_state = pkm_kacs_task(parent)->process_state;
+	target_state = pkm_kacs_current_process_state();
+	subject_token = pkm_kacs_cred(parent_cred)->token;
+	if (!caller_state || !target_state || !subject_token) {
+		ret = -EACCES;
+		goto out_put;
+	}
+	if (caller_state == target_state) {
+		ret = 0;
+		goto out_put;
+	}
+
+	ret = pkm_kacs_authorize_process_access_core(
+		subject_token, target_state, READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust), KACS_PROCESS_VM_WRITE);
+
+out_put:
+	put_cred(parent_cred);
+	return ret;
+}
+
 static int pkm_kacs_task_setnice(struct task_struct *task, int nice)
 {
 	struct pkm_kacs_process_state *caller_state;
@@ -10876,6 +10931,27 @@ long pkm_kacs_kunit_check_ptrace_for_subject(
 		args->caller_pip_trust, desired_access);
 }
 
+long pkm_kacs_kunit_check_ptrace_traceme_for_subject(
+	const struct pkm_kacs_kunit_process_ptrace_check_args *args)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state target_state = {};
+
+	if (!args)
+		return -EINVAL;
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	refcount_set(&process_sd.refs, 1);
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = &process_sd;
+
+	return pkm_kacs_authorize_process_access_core(
+		args->subject_token, &target_state, args->caller_pip_type,
+		args->caller_pip_trust, KACS_PROCESS_VM_WRITE);
+}
+
 long pkm_kacs_kunit_check_process_setinfo_for_subject(
 	const struct pkm_kacs_kunit_process_setinfo_check_args *args)
 {
@@ -12374,6 +12450,11 @@ int pkm_kacs_kunit_inode_sd_xattr_set(const char *name, u32 ntfs)
 int pkm_kacs_kunit_inode_sd_xattr_remove(const char *name, u32 ntfs)
 {
 	return pkm_kacs_kunit_inode_sd_xattr_check(3, name, ntfs);
+}
+
+int pkm_kacs_kunit_inode_xattr_skipcap(const char *name)
+{
+	return pkm_kacs_inode_xattr_skipcap(name);
 }
 
 static int pkm_kacs_kunit_file_sd_xattr_check(u32 op, const char *name,

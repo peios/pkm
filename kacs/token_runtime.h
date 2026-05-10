@@ -728,6 +728,8 @@ long pkm_kacs_kunit_check_signal_for_subject(
 	const struct pkm_kacs_kunit_process_signal_check_args *args);
 long pkm_kacs_kunit_check_ptrace_for_subject(
 	const struct pkm_kacs_kunit_process_ptrace_check_args *args);
+long pkm_kacs_kunit_check_ptrace_traceme_for_subject(
+	const struct pkm_kacs_kunit_process_ptrace_check_args *args);
 long pkm_kacs_kunit_check_process_setinfo_for_subject(
 	const struct pkm_kacs_kunit_process_setinfo_check_args *args);
 long pkm_kacs_kunit_check_process_affinity_for_subject(
@@ -795,6 +797,7 @@ long pkm_kacs_kunit_query_missing_file_sd_on_policy_mount(
 int pkm_kacs_kunit_inode_sd_xattr_get(const char *name, u32 ntfs);
 int pkm_kacs_kunit_inode_sd_xattr_set(const char *name, u32 ntfs);
 int pkm_kacs_kunit_inode_sd_xattr_remove(const char *name, u32 ntfs);
+int pkm_kacs_kunit_inode_xattr_skipcap(const char *name);
 int pkm_kacs_kunit_file_sd_xattr_get(const char *name, u32 ntfs);
 int pkm_kacs_kunit_file_sd_xattr_set(const char *name, u32 ntfs);
 int pkm_kacs_kunit_file_sd_xattr_remove(const char *name, u32 ntfs);

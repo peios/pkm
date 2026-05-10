@@ -414,6 +414,33 @@ replace_line_after_anchor_once 'int cap_capable(const struct cred *cred, struct 
 #endif
 ' \
 	"$kernel_root/security/commoncap.c"
+replace_line_after_anchor_once 'int cap_ptrace_access_check(struct task_struct *child, unsigned int mode)' \
+	'	const kernel_cap_t *caller_caps;' \
+	'	const kernel_cap_t *caller_caps;
+
+#ifdef CONFIG_SECURITY_PKM
+	return 0;
+#endif
+' \
+	"$kernel_root/security/commoncap.c"
+replace_line_after_anchor_once 'int cap_ptrace_traceme(struct task_struct *parent)' \
+	'	const struct cred *cred, *child_cred;' \
+	'	const struct cred *cred, *child_cred;
+
+#ifdef CONFIG_SECURITY_PKM
+	return 0;
+#endif
+' \
+	"$kernel_root/security/commoncap.c"
+replace_line_after_anchor_once 'static int cap_safe_nice(struct task_struct *p)' \
+	'	int is_subset, ret = 0;' \
+	'	int is_subset, ret = 0;
+
+#ifdef CONFIG_SECURITY_PKM
+	return 0;
+#endif
+' \
+	"$kernel_root/security/commoncap.c"
 insert_block_before_exact_once 'int security_inode_rename(struct inode *old_dir, struct dentry *old_dentry,' \
 	'extern int pkm_kacs_inode_rename_flags' \
 	'#ifdef CONFIG_SECURITY_PKM

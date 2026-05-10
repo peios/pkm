@@ -331,6 +331,16 @@ if ! rg -q 'pkm_kacs_proc_status_cap_fixup' \
 	die "install-pkm-subtree.sh does not stage the proc status capability reporting patch"
 fi
 
+for required_commoncap_bypass in \
+	'cap_ptrace_access_check(struct task_struct *child, unsigned int mode)' \
+	'cap_ptrace_traceme(struct task_struct *parent)' \
+	'static int cap_safe_nice(struct task_struct *p)'; do
+	if ! rg -Fq "$required_commoncap_bypass" \
+		"$repo_root/kernel/install-pkm-subtree.sh"; then
+		die "install-pkm-subtree.sh does not stage commoncap bypass: $required_commoncap_bypass"
+	fi
+done
+
 if ! rg -q 'CRYPTO_ED25519' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
    ! rg -q 'ed25519-hacl.c' \
