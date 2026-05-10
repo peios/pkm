@@ -124,7 +124,9 @@ for syscall in \
 	"1092 kmes_emit_batch" \
 	"1023 kacs_access_check" \
 	"1024 kacs_access_check_list" \
-	"1025 kacs_set_caap"; do
+	"1025 kacs_set_caap" \
+	"1026 kacs_get_mount_policy" \
+	"1027 kacs_set_mount_policy"; do
 	number=${syscall%% *}
 	name=${syscall#* }
 	if ! rg -q "^[[:space:]]*${number}[[:space:]]+${name}\$" \

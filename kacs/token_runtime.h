@@ -168,6 +168,16 @@ struct kacs_open_how {
 	u32 __pad;
 };
 
+struct kacs_mount_policy_args {
+	u32 policy;
+	u32 flags;
+	u32 generation;
+	u32 __pad0;
+	u64 template_sd_ptr;
+	u32 template_sd_len;
+	u32 __pad1;
+};
+
 struct pkm_kacs_kunit_process_state_view {
 	const void *state_ptr;
 	const void *process_sd_ptr;
@@ -802,6 +812,14 @@ long pkm_kacs_kunit_query_missing_file_sd_on_policy_mount(
 	const struct pkm_kacs_kunit_missing_file_sd_query_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len,
 	u32 *xattr_written_out);
+long pkm_kacs_kunit_set_mount_policy_for_subject(
+	const void *subject_token, u64 magic,
+	const struct kacs_mount_policy_args *args, u32 *policy_out,
+	u32 *generation_out, u32 *template_len_out);
+long pkm_kacs_kunit_adopt_missing_mount_for_subject(
+	const void *subject_token, const struct kacs_mount_policy_args *args,
+	const u8 **out_sd_ptr, size_t *out_sd_len,
+	u32 *xattr_written_out, long *first_query_ret_out);
 int pkm_kacs_kunit_inode_sd_xattr_get(const char *name, u32 ntfs);
 int pkm_kacs_kunit_inode_sd_xattr_set(const char *name, u32 ntfs);
 int pkm_kacs_kunit_inode_sd_xattr_remove(const char *name, u32 ntfs);

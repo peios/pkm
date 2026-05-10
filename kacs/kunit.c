@@ -14143,6 +14143,159 @@ static void pkm_kunit_file_mount_policy_defaults_to_deny_missing(
 			PKM_KACS_MOUNT_POLICY_DENY_MISSING);
 }
 
+static void pkm_kunit_mount_policy_set_persistent_template_success(
+	struct kunit *test)
+{
+	struct kacs_mount_policy_args args = {
+		.policy = PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT,
+	};
+	const void *subject_token;
+	const u8 *template_sd;
+	size_t template_sd_len = 0;
+	u32 policy = 0;
+	u32 generation = 0;
+	u32 template_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	template_sd = pkm_kunit_create_default_file_sd(subject_token,
+						       &template_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, template_sd);
+	args.template_sd_ptr = (u64)(unsigned long)template_sd;
+	args.template_sd_len = (u32)template_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_mount_policy_for_subject(
+				subject_token, TMPFS_MAGIC, &args, &policy,
+				&generation, &template_len),
+			0L);
+	KUNIT_EXPECT_EQ(test, policy,
+			PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT);
+	KUNIT_EXPECT_EQ(test, generation, 1U);
+	KUNIT_EXPECT_EQ(test, template_len, (u32)template_sd_len);
+
+	pkm_kacs_free((void *)template_sd);
+}
+
+static void pkm_kunit_mount_policy_set_requires_tcb(struct kunit *test)
+{
+	struct kacs_mount_policy_args args = {
+		.policy = PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL,
+	};
+	const void *subject_token;
+	u32 policy = 0;
+	u32 generation = 0;
+	u32 template_len = 0;
+
+	subject_token = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_mount_policy_for_subject(
+				subject_token, TMPFS_MAGIC, &args, &policy,
+				&generation, &template_len),
+			(long)-EPERM);
+
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_mount_policy_rejects_unmanaged_and_hard_unmanaged(
+	struct kunit *test)
+{
+	struct kacs_mount_policy_args args = {
+		.policy = PKM_KACS_MOUNT_POLICY_UNMANAGED,
+	};
+	const void *subject_token;
+	u32 policy = 0;
+	u32 generation = 0;
+	u32 template_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_mount_policy_for_subject(
+				subject_token, TMPFS_MAGIC, &args, &policy,
+				&generation, &template_len),
+			(long)-EINVAL);
+
+	args.policy = PKM_KACS_MOUNT_POLICY_DENY_MISSING;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_mount_policy_for_subject(
+				subject_token, PROC_SUPER_MAGIC, &args, &policy,
+				&generation, &template_len),
+			(long)-EOPNOTSUPP);
+}
+
+static void pkm_kunit_mount_policy_rejects_invalid_templates(
+	struct kunit *test)
+{
+	static const u8 malformed_sd[4] = { 0 };
+	struct kacs_mount_policy_args args = {
+		.policy = PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL,
+		.template_sd_ptr = (u64)(unsigned long)malformed_sd,
+		.template_sd_len = sizeof(malformed_sd),
+	};
+	const void *subject_token;
+	const u8 *template_sd;
+	size_t template_sd_len = 0;
+	u32 policy = 0;
+	u32 generation = 0;
+	u32 template_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_mount_policy_for_subject(
+				subject_token, TMPFS_MAGIC, &args, &policy,
+				&generation, &template_len),
+			(long)-EINVAL);
+
+	template_sd = pkm_kunit_create_default_file_sd(subject_token,
+						       &template_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, template_sd);
+	args.policy = PKM_KACS_MOUNT_POLICY_DENY_MISSING;
+	args.template_sd_ptr = (u64)(unsigned long)template_sd;
+	args.template_sd_len = (u32)template_sd_len;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_mount_policy_for_subject(
+				subject_token, TMPFS_MAGIC, &args, &policy,
+				&generation, &template_len),
+			(long)-EINVAL);
+
+	pkm_kacs_free((void *)template_sd);
+}
+
+static void pkm_kunit_mount_policy_adoption_invalidates_missing_cache(
+	struct kunit *test)
+{
+	struct kacs_mount_policy_args args = {
+		.policy = PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT,
+	};
+	const void *subject_token;
+	const u8 *subset = NULL;
+	size_t subset_len = 0;
+	u32 xattr_written = 0;
+	long first_query_ret = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_adopt_missing_mount_for_subject(
+				subject_token, &args, &subset, &subset_len,
+				&xattr_written, &first_query_ret),
+			0L);
+	KUNIT_EXPECT_EQ(test, first_query_ret, (long)-EACCES);
+	KUNIT_EXPECT_NOT_NULL(test, subset);
+	KUNIT_EXPECT_NE(test, subset_len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, xattr_written, 1U);
+
+	pkm_kacs_free((void *)subset);
+}
+
 static void pkm_kunit_file_missing_sd_deny_mount_returns_missing_state(
 	struct kunit *test)
 {
@@ -21541,6 +21694,14 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_get_path_file_sd_empty_path_fails_closed),
 	KUNIT_CASE(
 		pkm_kunit_get_file_sd_synthesize_mount_valid_cache_success),
+	KUNIT_CASE(
+		pkm_kunit_mount_policy_set_persistent_template_success),
+	KUNIT_CASE(pkm_kunit_mount_policy_set_requires_tcb),
+	KUNIT_CASE(
+		pkm_kunit_mount_policy_rejects_unmanaged_and_hard_unmanaged),
+	KUNIT_CASE(pkm_kunit_mount_policy_rejects_invalid_templates),
+	KUNIT_CASE(
+		pkm_kunit_mount_policy_adoption_invalidates_missing_cache),
 	KUNIT_CASE(
 		pkm_kunit_synthesize_file_sd_parent_inheritance_success),
 	KUNIT_CASE(
