@@ -252,6 +252,13 @@ if ! rg -q 'pkm_kacs_sched_setaffinity' \
 	die "install-pkm-subtree.sh does not stage the sched_setaffinity KACS patch"
 fi
 
+if ! rg -q 'pkm_kacs_perf_event_open' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'kernel/events/core.c' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the perf_event_open KACS patch"
+fi
+
 if ! rg -q 'pkm_kacs_current_fsuid_kuid' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
    ! rg -q 'pkm_kacs_current_fsuid_fsgid' \

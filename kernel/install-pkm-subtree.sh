@@ -236,6 +236,7 @@ require_file "$kernel_root/fs/xattr.c"
 require_file "$kernel_root/include/linux/cred.h"
 require_file "$kernel_root/include/linux/ptrace.h"
 require_file "$kernel_root/io_uring/rw.c"
+require_file "$kernel_root/kernel/events/core.c"
 require_file "$kernel_root/kernel/pid.c"
 require_file "$kernel_root/kernel/sched/syscalls.c"
 require_file "$kernel_root/kernel/sys.c"
@@ -468,6 +469,31 @@ replace_line_after_anchor_once 'long sched_setaffinity(pid_t pid, const struct c
 #endif
 ' \
 	"$kernel_root/kernel/sched/syscalls.c"
+insert_block_before_exact_once 'SYSCALL_DEFINE5(perf_event_open,' \
+	'extern long pkm_kacs_perf_event_open' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern long pkm_kacs_perf_event_open(struct task_struct *task);
+#endif
+
+' \
+	"$kernel_root/kernel/events/core.c"
+replace_line_after_anchor_once 'SYSCALL_DEFINE5(perf_event_open,' \
+	'		if (IS_ERR(task)) {
+			err = PTR_ERR(task);
+			goto err_fd;
+		}
+' \
+	'		if (IS_ERR(task)) {
+			err = PTR_ERR(task);
+			goto err_fd;
+		}
+#ifdef CONFIG_SECURITY_PKM
+		err = pkm_kacs_perf_event_open(task);
+		if (err)
+			goto err_task;
+#endif
+' \
+	"$kernel_root/kernel/events/core.c"
 insert_block_before_exact_once '#define current_uid()		(current_cred_xxx(uid))' \
 	'extern kuid_t pkm_kacs_current_fsuid_kuid' \
 	'#ifdef CONFIG_SECURITY_PKM
