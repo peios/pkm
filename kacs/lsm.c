@@ -439,6 +439,11 @@ long pkm_kacs_capget_for_task(const struct task_struct *target,
 			      kernel_cap_t *effective,
 			      kernel_cap_t *inheritable,
 			      kernel_cap_t *permitted);
+long pkm_kacs_proc_status_cap_fixup(kernel_cap_t *inheritable,
+				    kernel_cap_t *permitted,
+				    kernel_cap_t *effective,
+				    kernel_cap_t *bset,
+				    kernel_cap_t *ambient);
 static int pkm_kacs_capable(const struct cred *cred,
 			    struct user_namespace *target_ns, int cap,
 			    unsigned int opts);
@@ -2436,6 +2441,22 @@ static void pkm_kacs_capget_fixup(kernel_cap_t *effective,
 	pkm_kacs_raise_allow_kernel_caps(effective);
 	pkm_kacs_raise_allow_kernel_caps(inheritable);
 	pkm_kacs_raise_allow_kernel_caps(permitted);
+}
+
+long pkm_kacs_proc_status_cap_fixup(kernel_cap_t *inheritable,
+				    kernel_cap_t *permitted,
+				    kernel_cap_t *effective,
+				    kernel_cap_t *bset,
+				    kernel_cap_t *ambient)
+{
+	if (!inheritable || !permitted || !effective || !bset || !ambient)
+		return -EINVAL;
+
+	pkm_kacs_raise_allow_kernel_caps(inheritable);
+	pkm_kacs_raise_allow_kernel_caps(permitted);
+	pkm_kacs_raise_allow_kernel_caps(effective);
+	pkm_kacs_raise_allow_kernel_caps(bset);
+	return 0;
 }
 
 static void pkm_kacs_reset_allow_compat_caps(struct cred *cred)
@@ -13485,6 +13506,42 @@ long pkm_kacs_kunit_capget_fixup_masks(u64 effective_mask,
 	*effective_out = pkm_kacs_kernel_cap_to_u64(&effective);
 	*inheritable_out = pkm_kacs_kernel_cap_to_u64(&inheritable);
 	*permitted_out = pkm_kacs_kernel_cap_to_u64(&permitted);
+	return 0;
+}
+
+long pkm_kacs_kunit_proc_status_cap_fixup_masks(
+	u64 inheritable_mask, u64 permitted_mask, u64 effective_mask,
+	u64 bset_mask, u64 ambient_mask, u64 *inheritable_out,
+	u64 *permitted_out, u64 *effective_out, u64 *bset_out,
+	u64 *ambient_out)
+{
+	kernel_cap_t inheritable;
+	kernel_cap_t permitted;
+	kernel_cap_t effective;
+	kernel_cap_t bset;
+	kernel_cap_t ambient;
+	long ret;
+
+	if (!inheritable_out || !permitted_out || !effective_out || !bset_out ||
+	    !ambient_out)
+		return -EINVAL;
+
+	inheritable = pkm_kacs_u64_to_kernel_cap(inheritable_mask);
+	permitted = pkm_kacs_u64_to_kernel_cap(permitted_mask);
+	effective = pkm_kacs_u64_to_kernel_cap(effective_mask);
+	bset = pkm_kacs_u64_to_kernel_cap(bset_mask);
+	ambient = pkm_kacs_u64_to_kernel_cap(ambient_mask);
+
+	ret = pkm_kacs_proc_status_cap_fixup(&inheritable, &permitted,
+					     &effective, &bset, &ambient);
+	if (ret)
+		return ret;
+
+	*inheritable_out = pkm_kacs_kernel_cap_to_u64(&inheritable);
+	*permitted_out = pkm_kacs_kernel_cap_to_u64(&permitted);
+	*effective_out = pkm_kacs_kernel_cap_to_u64(&effective);
+	*bset_out = pkm_kacs_kernel_cap_to_u64(&bset);
+	*ambient_out = pkm_kacs_kernel_cap_to_u64(&ambient);
 	return 0;
 }
 

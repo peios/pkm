@@ -324,6 +324,13 @@ if ! rg -q 'pkm_kacs_capget_for_task' \
 	die "install-pkm-subtree.sh does not stage the commoncap capget reporting patch"
 fi
 
+if ! rg -q 'pkm_kacs_proc_status_cap_fixup' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'fs/proc/array.c' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the proc status capability reporting patch"
+fi
+
 if ! rg -q 'CRYPTO_ED25519' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
    ! rg -q 'ed25519-hacl.c' \

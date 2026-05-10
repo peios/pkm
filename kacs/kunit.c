@@ -3941,6 +3941,107 @@ static void pkm_kunit_capget_null_args_fail_closed(struct kunit *test)
 			(long)-EINVAL);
 }
 
+static void pkm_kunit_proc_status_caps_report_allow_substrate(
+	struct kunit *test)
+{
+	u64 allow_mask;
+	u64 inheritable_out = 0;
+	u64 permitted_out = 0;
+	u64 effective_out = 0;
+	u64 bset_out = 0;
+	u64 ambient_out = ~0ULL;
+
+	allow_mask = pkm_kacs_kunit_allow_cap_mask();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_proc_status_cap_fixup_masks(
+				0ULL, 0ULL, 0ULL, 0ULL, 0ULL,
+				&inheritable_out, &permitted_out,
+				&effective_out, &bset_out, &ambient_out),
+			0L);
+	KUNIT_EXPECT_EQ(test, inheritable_out, allow_mask);
+	KUNIT_EXPECT_EQ(test, permitted_out, allow_mask);
+	KUNIT_EXPECT_EQ(test, effective_out, allow_mask);
+	KUNIT_EXPECT_EQ(test, bset_out, allow_mask);
+	KUNIT_EXPECT_EQ(test, ambient_out, 0ULL);
+}
+
+static void pkm_kunit_proc_status_caps_preserve_non_allow_and_ambient(
+	struct kunit *test)
+{
+	u64 allow_mask;
+	u64 inheritable_in;
+	u64 permitted_in;
+	u64 effective_in;
+	u64 bset_in;
+	u64 ambient_in;
+	u64 inheritable_out = 0;
+	u64 permitted_out = 0;
+	u64 effective_out = 0;
+	u64 bset_out = 0;
+	u64 ambient_out = 0;
+
+	allow_mask = pkm_kacs_kunit_allow_cap_mask();
+	inheritable_in = 1ULL << CAP_SYS_BOOT;
+	permitted_in = 1ULL << CAP_SYS_TIME;
+	effective_in = 1ULL << CAP_PERFMON;
+	bset_in = 1ULL << CAP_SYS_ADMIN;
+	ambient_in = 1ULL << CAP_SYS_NICE;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_proc_status_cap_fixup_masks(
+				inheritable_in, permitted_in, effective_in,
+				bset_in, ambient_in, &inheritable_out,
+				&permitted_out, &effective_out, &bset_out,
+				&ambient_out),
+			0L);
+	KUNIT_EXPECT_EQ(test, inheritable_out, allow_mask | inheritable_in);
+	KUNIT_EXPECT_EQ(test, permitted_out, allow_mask | permitted_in);
+	KUNIT_EXPECT_EQ(test, effective_out, allow_mask | effective_in);
+	KUNIT_EXPECT_EQ(test, bset_out, allow_mask | bset_in);
+	KUNIT_EXPECT_EQ(test, ambient_out, ambient_in);
+}
+
+static void pkm_kunit_proc_status_caps_null_args_fail_closed(
+	struct kunit *test)
+{
+	u64 inheritable_out = 0;
+	u64 permitted_out = 0;
+	u64 effective_out = 0;
+	u64 bset_out = 0;
+	u64 ambient_out = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_proc_status_cap_fixup_masks(
+				0ULL, 0ULL, 0ULL, 0ULL, 0ULL, NULL,
+				&permitted_out, &effective_out, &bset_out,
+				&ambient_out),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_proc_status_cap_fixup_masks(
+				0ULL, 0ULL, 0ULL, 0ULL, 0ULL,
+				&inheritable_out, NULL, &effective_out,
+				&bset_out, &ambient_out),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_proc_status_cap_fixup_masks(
+				0ULL, 0ULL, 0ULL, 0ULL, 0ULL,
+				&inheritable_out, &permitted_out, NULL,
+				&bset_out, &ambient_out),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_proc_status_cap_fixup_masks(
+				0ULL, 0ULL, 0ULL, 0ULL, 0ULL,
+				&inheritable_out, &permitted_out,
+				&effective_out, NULL, &ambient_out),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_proc_status_cap_fixup_masks(
+				0ULL, 0ULL, 0ULL, 0ULL, 0ULL,
+				&inheritable_out, &permitted_out,
+				&effective_out, &bset_out, NULL),
+			(long)-EINVAL);
+}
+
 static void pkm_kunit_capability_allow_succeeds_without_privilege(
 	struct kunit *test)
 {
@@ -20641,6 +20742,9 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_capget_debug_still_fails_on_pip),
 	KUNIT_CASE(pkm_kunit_capget_self_target_bypasses_boundary_gate),
 	KUNIT_CASE(pkm_kunit_capget_null_args_fail_closed),
+	KUNIT_CASE(pkm_kunit_proc_status_caps_report_allow_substrate),
+	KUNIT_CASE(pkm_kunit_proc_status_caps_preserve_non_allow_and_ambient),
+	KUNIT_CASE(pkm_kunit_proc_status_caps_null_args_fail_closed),
 	KUNIT_CASE(pkm_kunit_capability_allow_succeeds_without_privilege),
 	KUNIT_CASE(pkm_kunit_capability_privilege_success_marks_used),
 	KUNIT_CASE(pkm_kunit_capability_privilege_denied_without_privilege),

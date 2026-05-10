@@ -372,6 +372,29 @@ replace_line_after_anchor_once 'int cap_capget(const struct task_struct *target,
 #endif
 ' \
 	"$kernel_root/security/commoncap.c"
+insert_block_before_exact_once 'static inline void task_cap(struct seq_file *m, struct task_struct *p)' \
+	'extern long pkm_kacs_proc_status_cap_fixup' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern long pkm_kacs_proc_status_cap_fixup(kernel_cap_t *inheritable,
+					   kernel_cap_t *permitted,
+					   kernel_cap_t *effective,
+					   kernel_cap_t *bset,
+					   kernel_cap_t *ambient);
+#endif
+
+' \
+	"$kernel_root/fs/proc/array.c"
+replace_line_after_anchor_once 'static inline void task_cap(struct seq_file *m, struct task_struct *p)' \
+	'	rcu_read_unlock();' \
+	'	rcu_read_unlock();
+
+#ifdef CONFIG_SECURITY_PKM
+	pkm_kacs_proc_status_cap_fixup(&cap_inheritable, &cap_permitted,
+				       &cap_effective, &cap_bset,
+				       &cap_ambient);
+#endif
+' \
+	"$kernel_root/fs/proc/array.c"
 insert_block_before_exact_once 'int cap_capable(const struct cred *cred, struct user_namespace *target_ns,' \
 	'extern long pkm_kacs_capable_in_cred_ns' \
 	'#ifdef CONFIG_SECURITY_PKM

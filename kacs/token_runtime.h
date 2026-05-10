@@ -981,6 +981,11 @@ long pkm_kacs_kunit_capget_fixup_masks(u64 effective_mask,
 					u64 *effective_out,
 					u64 *inheritable_out,
 					u64 *permitted_out);
+long pkm_kacs_kunit_proc_status_cap_fixup_masks(
+	u64 inheritable_mask, u64 permitted_mask, u64 effective_mask,
+	u64 bset_mask, u64 ambient_mask, u64 *inheritable_out,
+	u64 *permitted_out, u64 *effective_out, u64 *bset_out,
+	u64 *ambient_out);
 long pkm_kacs_kunit_check_capget_for_subject(
 	const struct pkm_kacs_kunit_process_capget_check_args *args);
 long pkm_kacs_kunit_check_capability_for_subject(const void *subject_token,
