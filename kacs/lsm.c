@@ -3005,6 +3005,8 @@ static int pkm_kacs_file_open(struct file *file)
 		return -EACCES;
 	if (pkm_kacs_file_delete_on_close_pending(file))
 		return -EACCES;
+	if (!IS_ERR(pidfd_pid(file)))
+		return 0;
 	if ((file->f_mode & FMODE_PATH) != 0)
 		return 0;
 
@@ -6607,23 +6609,47 @@ static long pkm_kacs_enforce_cross_process_pip(
 	return 0;
 }
 
-static long pkm_kacs_validate_empty_path_target(const char __user *path,
-						u32 flags)
+static long pkm_kacs_validate_empty_path_flags(u32 flags)
 {
-	char ch = '\0';
-
 	if ((flags & ~PKM_KACS_SD_ALLOWED_AT_FLAGS) != 0)
 		return -EINVAL;
 	if ((flags & AT_EMPTY_PATH) == 0)
 		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+static long pkm_kacs_validate_empty_path_first_char(bool path_present,
+						    char first_ch, u32 flags)
+{
+	long ret;
+
+	ret = pkm_kacs_validate_empty_path_flags(flags);
+	if (ret)
+		return ret;
+	if (!path_present)
+		return -EFAULT;
+	if (first_ch != '\0')
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+static long pkm_kacs_validate_empty_path_target(const char __user *path,
+						u32 flags)
+{
+	char ch = '\0';
+	long ret;
+
+	ret = pkm_kacs_validate_empty_path_flags(flags);
+	if (ret)
+		return ret;
 	if (!path)
 		return -EFAULT;
 	if (copy_from_user(&ch, path, sizeof(ch)))
 		return -EFAULT;
-	if (ch != '\0')
-		return -EOPNOTSUPP;
 
-	return 0;
+	return pkm_kacs_validate_empty_path_first_char(true, ch, flags);
 }
 
 static long pkm_kacs_copy_open_how_from_user(
@@ -8332,8 +8358,8 @@ out_creator_sd:
 	return ret;
 }
 
-static long pkm_kacs_resolve_pidfd_process_target(
-	int dirfd, const char __user *path, u32 flags,
+static long pkm_kacs_resolve_pidfd_process_target_checked(
+	int dirfd,
 	const void **subject_token_out,
 	struct pkm_kacs_process_state **caller_state_out,
 	struct task_struct **task_out,
@@ -8345,15 +8371,10 @@ static long pkm_kacs_resolve_pidfd_process_target(
 	struct file *pidfd_file;
 	struct task_struct *task;
 	struct pid *pid;
-	long ret;
 
 	if (!subject_token_out || !caller_state_out || !task_out ||
 	    !target_state_out || !self_target_out)
 		return -EINVAL;
-
-	ret = pkm_kacs_validate_empty_path_target(path, flags);
-	if (ret)
-		return ret;
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	caller_state = pkm_kacs_current_process_state();
@@ -8391,6 +8412,59 @@ static long pkm_kacs_resolve_pidfd_process_target(
 	*self_target_out = (*target_state_out == caller_state);
 	return 0;
 }
+
+static long pkm_kacs_resolve_pidfd_process_target(
+	int dirfd, const char __user *path, u32 flags,
+	const void **subject_token_out,
+	struct pkm_kacs_process_state **caller_state_out,
+	struct task_struct **task_out,
+	struct pkm_kacs_process_state **target_state_out, bool *self_target_out)
+{
+	long ret;
+
+	ret = pkm_kacs_validate_empty_path_target(path, flags);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_resolve_pidfd_process_target_checked(
+		dirfd, subject_token_out, caller_state_out, task_out,
+		target_state_out, self_target_out);
+}
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+long pkm_kacs_kunit_resolve_process_sd_pidfd_target(int dirfd,
+						    const char *path,
+						    u32 flags,
+						    bool *self_target_out)
+{
+	struct pkm_kacs_process_state *caller_state;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+	struct task_struct *task;
+	bool self_target;
+	long ret;
+
+	if (!self_target_out)
+		return -EINVAL;
+
+	*self_target_out = false;
+	ret = pkm_kacs_validate_empty_path_first_char(path != NULL,
+						     path ? path[0] : '\0',
+						     flags);
+	if (ret)
+		return ret;
+
+	ret = pkm_kacs_resolve_pidfd_process_target_checked(
+		dirfd, &subject_token, &caller_state, &task, &target_state,
+		&self_target);
+	if (ret)
+		return ret;
+
+	*self_target_out = self_target;
+	put_task_struct(task);
+	return 0;
+}
+#endif
 
 static bool pkm_kacs_file_is_pidfd(const struct file *file)
 {

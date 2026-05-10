@@ -30,6 +30,7 @@
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/net.h>
+#include <linux/pid.h>
 #include <linux/prctl.h>
 #include <linux/ptrace.h>
 #include <linux/sched.h>
@@ -15482,6 +15483,132 @@ static void pkm_kunit_set_file_sd_mandatory_resource_attr_protected(
 	kacs_rust_token_drop(subject_token);
 }
 
+static const struct file_operations pkm_kunit_non_process_fops = { };
+
+static int pkm_kunit_open_current_pidfd(void)
+{
+	struct file *file = NULL;
+	struct pid *pid;
+	int fd;
+
+	pid = get_task_pid(current, PIDTYPE_PID);
+	if (!pid)
+		return -ESRCH;
+
+	fd = pidfd_prepare(pid, 0, &file);
+	put_pid(pid);
+	if (fd < 0)
+		return fd;
+
+	fd_install(fd, file);
+	return fd;
+}
+
+static void pkm_kunit_process_sd_resolver_accepts_pidfd_empty_path(
+	struct kunit *test)
+{
+	bool self_target = false;
+	int fd;
+
+	fd = pkm_kunit_open_current_pidfd();
+	KUNIT_ASSERT_GE(test, fd, 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_resolve_process_sd_pidfd_target(
+				fd, "", AT_EMPTY_PATH, &self_target),
+			0L);
+	KUNIT_EXPECT_TRUE(test, self_target);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_process_sd_resolver_accepts_pidfd_nofollow(
+	struct kunit *test)
+{
+	bool self_target = false;
+	int fd;
+
+	fd = pkm_kunit_open_current_pidfd();
+	KUNIT_ASSERT_GE(test, fd, 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_resolve_process_sd_pidfd_target(
+				fd, "", AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW,
+				&self_target),
+			0L);
+	KUNIT_EXPECT_TRUE(test, self_target);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_process_sd_resolver_rejects_missing_empty_path(
+	struct kunit *test)
+{
+	bool self_target = true;
+	int fd;
+
+	fd = pkm_kunit_open_current_pidfd();
+	KUNIT_ASSERT_GE(test, fd, 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_resolve_process_sd_pidfd_target(
+				fd, "", 0, &self_target),
+			(long)-EOPNOTSUPP);
+	KUNIT_EXPECT_FALSE(test, self_target);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_process_sd_resolver_rejects_nonempty_path(
+	struct kunit *test)
+{
+	bool self_target = true;
+	int fd;
+
+	fd = pkm_kunit_open_current_pidfd();
+	KUNIT_ASSERT_GE(test, fd, 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_resolve_process_sd_pidfd_target(
+				fd, "x", AT_EMPTY_PATH, &self_target),
+			(long)-EOPNOTSUPP);
+	KUNIT_EXPECT_FALSE(test, self_target);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_process_sd_resolver_rejects_unknown_flags(
+	struct kunit *test)
+{
+	bool self_target = true;
+	int fd;
+
+	fd = pkm_kunit_open_current_pidfd();
+	KUNIT_ASSERT_GE(test, fd, 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_resolve_process_sd_pidfd_target(
+				fd, "", AT_EMPTY_PATH | 0x80000000U,
+				&self_target),
+			(long)-EINVAL);
+	KUNIT_EXPECT_FALSE(test, self_target);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_process_sd_resolver_rejects_non_pidfd(
+	struct kunit *test)
+{
+	bool self_target = true;
+	int fd;
+
+	fd = anon_inode_getfd("pkm-kunit-not-process",
+			      &pkm_kunit_non_process_fops, NULL, O_CLOEXEC);
+	KUNIT_ASSERT_GE(test, fd, 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_resolve_process_sd_pidfd_target(
+				fd, "", AT_EMPTY_PATH, &self_target),
+			(long)-EOPNOTSUPP);
+	KUNIT_EXPECT_FALSE(test, self_target);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_kunit_get_process_sd_success(struct kunit *test)
 {
 	struct pkm_kacs_kunit_process_sd_get_args args = {
@@ -22004,6 +22131,12 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_set_file_sd_mandatory_resource_attr_protected),
 	KUNIT_CASE(pkm_kunit_set_file_sd_unmanaged_mount_fails_closed),
 	KUNIT_CASE(pkm_kunit_set_path_file_sd_unmanaged_mount_fails_closed),
+	KUNIT_CASE(pkm_kunit_process_sd_resolver_accepts_pidfd_empty_path),
+	KUNIT_CASE(pkm_kunit_process_sd_resolver_accepts_pidfd_nofollow),
+	KUNIT_CASE(pkm_kunit_process_sd_resolver_rejects_missing_empty_path),
+	KUNIT_CASE(pkm_kunit_process_sd_resolver_rejects_nonempty_path),
+	KUNIT_CASE(pkm_kunit_process_sd_resolver_rejects_unknown_flags),
+	KUNIT_CASE(pkm_kunit_process_sd_resolver_rejects_non_pidfd),
 	KUNIT_CASE(pkm_kunit_get_process_sd_success),
 	KUNIT_CASE(
 		pkm_kunit_get_process_sd_label_on_unlabeled_returns_empty_subset),

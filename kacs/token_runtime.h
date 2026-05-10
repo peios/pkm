@@ -783,6 +783,10 @@ long pkm_kacs_kunit_get_process_sd_for_subject(
 long pkm_kacs_kunit_set_process_sd_for_subject(
 	const struct pkm_kacs_kunit_process_sd_set_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
+long pkm_kacs_kunit_resolve_process_sd_pidfd_target(int dirfd,
+						    const char *path,
+						    u32 flags,
+						    bool *self_target_out);
 long pkm_kacs_kunit_get_file_sd_for_subject(
 	const struct pkm_kacs_kunit_file_sd_get_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
