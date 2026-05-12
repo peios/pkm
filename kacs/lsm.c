@@ -811,6 +811,18 @@ static u32 pkm_kacs_mount_policy_for_magic(unsigned long magic)
 	case PROC_SUPER_MAGIC:
 	case SYSFS_MAGIC:
 		return PKM_KACS_MOUNT_POLICY_UNMANAGED;
+	case RAMFS_MAGIC:
+	case TMPFS_MAGIC:
+		/*
+		 * rootfs (the initial ramfs the kernel populates from a
+		 * builtin/external cpio) and tmpfs have no on-disk SD
+		 * storage. Treat them like fat/nfs: synthesize an ephemeral
+		 * SD from the mount template. The initramfs is trusted by
+		 * construction (same trust chain as the kernel image it
+		 * ships with), and tmpfs is a runtime scratch surface whose
+		 * policy belongs on the mount, not on each inode.
+		 */
+		return PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL;
 	case NFS_SUPER_MAGIC:
 	case MSDOS_SUPER_MAGIC:
 	case EXFAT_SUPER_MAGIC:
@@ -824,6 +836,7 @@ static u32 pkm_kacs_superblock_mount_policy(const struct super_block *sb)
 {
 	struct pkm_kacs_superblock_security *sec;
 	u32 policy;
+	u32 resolved;
 
 	if (!sb)
 		return PKM_KACS_MOUNT_POLICY_DENY_MISSING;
@@ -838,9 +851,27 @@ static u32 pkm_kacs_superblock_mount_policy(const struct super_block *sb)
 	case PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL:
 	case PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT:
 		return policy;
-	default:
-		return pkm_kacs_mount_policy_for_magic(sb->s_magic);
 	}
+
+	/*
+	 * Lazy resolution: sb_alloc_security cannot capture the magic-derived
+	 * policy because s_magic is still zero at that point in alloc_super().
+	 * Defer resolution to the first read that observes a populated magic,
+	 * then cache it so subsequent reads are O(1).
+	 *
+	 * If s_magic is still unresolved here (extremely unusual — would mean
+	 * the filesystem type hasn't initialized at all yet), fall back to
+	 * DENY_MISSING. That matches the !sb branch above and avoids returning
+	 * a value outside the documented policy set. We do NOT cache that
+	 * fallback, so a later read with a populated magic still gets the
+	 * correct value.
+	 */
+	if (sb->s_magic == 0)
+		return PKM_KACS_MOUNT_POLICY_DENY_MISSING;
+
+	resolved = pkm_kacs_mount_policy_for_magic(sb->s_magic);
+	WRITE_ONCE(sec->mount_policy, resolved);
+	return resolved;
 }
 
 static u32 pkm_kacs_superblock_policy_generation(const struct super_block *sb)
@@ -1112,7 +1143,17 @@ static int pkm_kacs_sb_alloc_security(struct super_block *sb)
 
 	sec = pkm_kacs_sb(sb);
 	mutex_init(&sec->lock);
-	sec->mount_policy = pkm_kacs_mount_policy_for_magic(sb->s_magic);
+	/*
+	 * security_sb_alloc fires in alloc_super() BEFORE the filesystem
+	 * type's fill_super/init_fs_context callback sets s_magic. We cannot
+	 * resolve the magic-derived policy here — s_magic is always zero at
+	 * this point. Leave mount_policy at the invalid sentinel 0 and let
+	 * superblock_mount_policy() lazy-resolve + lazy-cache on the first
+	 * read that observes a populated magic. Explicit kacs_set_mount_policy()
+	 * syscalls still write a valid value here and short-circuit the
+	 * lazy path.
+	 */
+	sec->mount_policy = 0;
 	sec->policy_generation = 0;
 	sec->template_sd_bytes = NULL;
 	sec->template_sd_len = 0;
