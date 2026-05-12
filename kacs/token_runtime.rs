@@ -2137,6 +2137,14 @@ fn build_rewritten_file_ace_bytes(
 ) -> Result<Vec<u8>, i32> {
     let mut bytes = Vec::new();
     let mask;
+    if ace.kind() == AceKind::Opaque {
+        bytes
+            .extend_from_slice(ace.bytes())
+            .map_err(|_| -ENOMEM)?;
+        bytes[1] = new_flags;
+        return Ok(bytes);
+    }
+
     mask = map_file_ace_mask(ace.kind())?;
 
     match ace.kind() {
