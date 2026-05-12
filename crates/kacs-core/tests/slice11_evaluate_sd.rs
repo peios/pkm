@@ -216,6 +216,32 @@ fn missing_group_is_accepted_but_missing_owner_is_rejected() {
 }
 
 #[test]
+fn security_descriptor_group_sid_does_not_grant_access() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let object_group = sid_bytes([0, 0, 0, 0, 0, 5], &[32, 545]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 1001]);
+    let empty_dacl = acl_bytes(&[]);
+    let sd_bytes = sd_bytes(Some(&owner), Some(&object_group), None, Some(&empty_dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token_groups = [sid_attr(parse_sid(&object_group))];
+    let token = primary_token(parse_sid(&user), &token_groups);
+
+    let result = evaluate_security_descriptor(
+        Some(&sd),
+        &token,
+        default_pip(),
+        READ_CONTROL,
+        &mapping(),
+        None,
+        &ConditionalContext::default(),
+        0,
+    )
+    .expect("sd group should not make evaluation malformed");
+
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
 fn malformed_object_tree_is_reused_as_a_fail_closed_dependency() {
     let err = ObjectTypeList::new(&[
         ObjectTypeNode {

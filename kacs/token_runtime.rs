@@ -26,7 +26,10 @@ use crate::access_mask::{
     PROCESS_GENERIC_MAPPING, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED, READ_CONTROL,
     WRITE_DAC, WRITE_OWNER,
 };
-use crate::ace::{AceKind, SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE};
+use crate::ace::{
+    minimum_acl_revision_with_source_floor_for_opaque, AceKind, ACL_REVISION,
+    SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
+};
 use crate::acl::Acl;
 use crate::claims::{
     parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, ClaimValue,
@@ -46,7 +49,11 @@ use crate::privilege::{
     TokenPrivileges, SE_RELABEL_PRIVILEGE, SE_RESTORE_PRIVILEGE, SE_SECURITY_PRIVILEGE,
 };
 use crate::security_descriptor::{
-    SecurityDescriptor, SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE,
+    SecurityDescriptor, MAX_SECURITY_DESCRIPTOR_BYTES, SE_DACL_AUTO_INHERITED,
+    SE_DACL_AUTO_INHERIT_REQ, SE_DACL_DEFAULTED, SE_DACL_PRESENT, SE_DACL_PROTECTED,
+    SE_DACL_TRUSTED, SE_GROUP_DEFAULTED, SE_OWNER_DEFAULTED, SE_RM_CONTROL_VALID,
+    SE_SACL_AUTO_INHERITED, SE_SACL_AUTO_INHERIT_REQ, SE_SACL_DEFAULTED, SE_SACL_PRESENT,
+    SE_SACL_PROTECTED, SE_SELF_RELATIVE, SE_SERVER_SECURITY,
 };
 use crate::sid::Sid;
 use crate::token::{
@@ -92,7 +99,6 @@ const MAX_PRIVILEGE_ADJUST_ENTRIES: usize = 64;
 const SD_HEADER_LEN: usize = 20;
 const ACL_HEADER_LEN: usize = 8;
 const ACE_HEADER_LEN: usize = 8;
-const ACL_REVISION: u8 = 2;
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 const OWNER_SECURITY_INFORMATION: u32 = 0x0000_0001;
 const GROUP_SECURITY_INFORMATION: u32 = 0x0000_0002;
@@ -100,13 +106,6 @@ const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
 const SACL_SECURITY_INFORMATION: u32 = 0x0000_0008;
 const LABEL_SECURITY_INFORMATION: u32 = 0x0000_0010;
 const CLAIM_SECURITY_ATTRIBUTE_MANDATORY: u32 = 0x0000_0020;
-const SE_SERVER_SECURITY: u16 = 0x0080;
-const SE_DACL_AUTO_INHERIT_REQ: u16 = 0x0100;
-const SE_SACL_AUTO_INHERIT_REQ: u16 = 0x0200;
-const SE_DACL_AUTO_INHERITED: u16 = 0x0400;
-const SE_SACL_AUTO_INHERITED: u16 = 0x0800;
-const SE_DACL_PROTECTED: u16 = 0x1000;
-const SE_SACL_PROTECTED: u16 = 0x2000;
 const OBJECT_INHERIT_ACE: u8 = 0x01;
 const CONTAINER_INHERIT_ACE: u8 = 0x02;
 const NO_PROPAGATE_INHERIT_ACE: u8 = 0x04;
@@ -1330,6 +1329,20 @@ fn parse_sid_and_attributes_array(
     Ok((owned, views))
 }
 
+fn normalize_group_attributes_for_creation(attributes: u32) -> u32 {
+    if (attributes & SE_GROUP_ENABLED_BY_DEFAULT) == SE_GROUP_ENABLED_BY_DEFAULT {
+        attributes | SE_GROUP_ENABLED
+    } else {
+        attributes & !SE_GROUP_ENABLED
+    }
+}
+
+fn normalize_group_entries_for_creation(entries: &mut [OwnedSidAndAttributes]) {
+    for entry in entries {
+        entry.attributes = normalize_group_attributes_for_creation(entry.attributes);
+    }
+}
+
 fn restrict_sid_list_contains(entries: &[SidAndAttributes<'_>], sid: Sid<'_>) -> bool {
     entries
         .iter()
@@ -2012,6 +2025,9 @@ fn build_process_sd_bytes(
     let group_offset = SD_HEADER_LEN.checked_add(owner_len).ok_or(-ERANGE)?;
     let dacl_offset = group_offset.checked_add(group_len).ok_or(-ERANGE)?;
     let total_len = dacl_offset.checked_add(dacl_len).ok_or(-ERANGE)?;
+    if total_len > MAX_SECURITY_DESCRIPTOR_BYTES {
+        return Err(-ERANGE);
+    }
     let ptr = unsafe { pkm_kacs_zalloc(total_len) } as *mut u8;
     let mut cursor = ACL_HEADER_LEN;
 
@@ -2025,7 +2041,11 @@ fn build_process_sd_bytes(
     write_le_u16(
         bytes,
         2,
-        crate::security_descriptor::SE_SELF_RELATIVE | crate::security_descriptor::SE_DACL_PRESENT,
+        SE_SELF_RELATIVE
+            | SE_OWNER_DEFAULTED
+            | SE_GROUP_DEFAULTED
+            | SE_DACL_DEFAULTED
+            | SE_DACL_PRESENT,
     );
     write_le_u32(bytes, 4, SD_HEADER_LEN as u32);
     write_le_u32(bytes, 8, group_offset as u32);
@@ -2363,7 +2383,12 @@ fn inherit_acl_from_parent(
         ace_refs.push(ace.as_slice()).map_err(|_| -ENOMEM)?;
     }
 
-    build_acl_bytes_from_aces(parent_acl.revision(), ace_refs.as_slice())
+    build_acl_bytes_from_aces_with_reserved(
+        parent_acl.revision(),
+        parent_acl.sbz1(),
+        parent_acl.sbz2(),
+        ace_refs.as_slice(),
+    )
 }
 
 fn build_synthesized_file_sd_bytes(
@@ -2423,9 +2448,17 @@ fn build_synthesized_file_sd_bytes(
         let inherited_sacl =
             inherit_acl_from_parent(parent_sd.sacl(), owner_sid, group_sid, child_is_container)?;
         let template_dacl = clone_optional_acl_bytes(template_sd.dacl())?;
+        let base_control = if inherited_dacl.is_some() {
+            template_sd.control() & SE_RM_CONTROL_VALID
+        } else if template_dacl.is_some() {
+            template_sd.control() & (SE_RM_CONTROL_VALID | SE_DACL_DEFAULTED)
+        } else {
+            template_sd.control() & SE_RM_CONTROL_VALID
+        };
 
         result = build_sd_bytes_from_components(
-            0,
+            base_control,
+            template_sd.resource_manager_control(),
             Some(owner_sid.as_bytes()),
             Some(group_sid.as_bytes()),
             inherited_sacl.as_deref(),
@@ -2441,16 +2474,24 @@ fn build_synthesized_file_sd_bytes(
     result
 }
 
-fn build_empty_acl_bytes(revision: u8) -> Result<Option<Vec<u8>>, i32> {
+fn build_empty_acl_bytes(_revision: u8) -> Result<Option<Vec<u8>>, i32> {
+    build_empty_acl_bytes_with_reserved(ACL_REVISION, 0, 0)
+}
+
+fn build_empty_acl_bytes_with_reserved(
+    _revision: u8,
+    sbz1: u8,
+    sbz2: u16,
+) -> Result<Option<Vec<u8>>, i32> {
     let mut bytes = Vec::with_capacity(ACL_HEADER_LEN).map_err(|_| -ENOMEM)?;
     bytes
         .extend_from_slice(&[0u8; ACL_HEADER_LEN])
         .map_err(|_| -ENOMEM)?;
-    bytes[0] = revision;
-    bytes[1] = 0;
+    bytes[0] = ACL_REVISION;
+    bytes[1] = sbz1;
     bytes[2..4].copy_from_slice(&(ACL_HEADER_LEN as u16).to_le_bytes());
     bytes[4..6].copy_from_slice(&0u16.to_le_bytes());
-    bytes[6..8].copy_from_slice(&0u16.to_le_bytes());
+    bytes[6..8].copy_from_slice(&sbz2.to_le_bytes());
     Ok(Some(bytes))
 }
 
@@ -2476,7 +2517,11 @@ fn build_explicit_acl_bytes(
     }
 
     if explicit_aces.is_empty() {
-        return build_empty_acl_bytes(creator_acl.revision());
+        return build_empty_acl_bytes_with_reserved(
+            creator_acl.revision(),
+            creator_acl.sbz1(),
+            creator_acl.sbz2(),
+        );
     }
 
     let mut ace_refs = Vec::new();
@@ -2484,13 +2529,20 @@ fn build_explicit_acl_bytes(
         ace_refs.push(ace.as_slice()).map_err(|_| -ENOMEM)?;
     }
 
-    build_acl_bytes_from_aces(creator_acl.revision(), ace_refs.as_slice())
+    build_acl_bytes_from_aces_with_reserved(
+        creator_acl.revision(),
+        creator_acl.sbz1(),
+        creator_acl.sbz2(),
+        ace_refs.as_slice(),
+    )
 }
 
 fn append_acl_bytes(
     explicit_acl: Option<&[u8]>,
     inherited_acl: Option<&[u8]>,
     revision: u8,
+    sbz1: u8,
+    sbz2: u16,
 ) -> Result<Option<Vec<u8>>, i32> {
     let mut aces = Vec::new();
 
@@ -2522,7 +2574,7 @@ fn append_acl_bytes(
         ace_refs.push(ace.as_slice()).map_err(|_| -ENOMEM)?;
     }
 
-    build_acl_bytes_from_aces(revision, ace_refs.as_slice())
+    build_acl_bytes_from_aces_with_reserved(revision, sbz1, sbz2, ace_refs.as_slice())
 }
 
 fn find_explicit_label_ace_bytes(acl: Option<Acl<'_>>) -> Result<Option<Vec<u8>>, i32> {
@@ -2560,7 +2612,7 @@ fn build_created_file_acl_bytes(
     group_sid: Sid<'_>,
     child_is_container: bool,
     fallback_acl: Option<&[u8]>,
-) -> Result<(Option<Vec<u8>>, bool), i32> {
+) -> Result<(Option<Vec<u8>>, bool, bool), i32> {
     let inherited_acl =
         inherit_acl_from_parent(parent_acl, owner_sid, group_sid, child_is_container)?;
     let explicit_acl = build_explicit_acl_bytes(creator_acl, owner_sid, group_sid)?;
@@ -2568,32 +2620,34 @@ fn build_created_file_acl_bytes(
 
     if explicit_present {
         if (creator_control & protected) == protected {
-            return Ok((explicit_acl, false));
+            return Ok((explicit_acl, false, false));
         }
         if (creator_control & auto_inherit_req) == auto_inherit_req {
             let combined = append_acl_bytes(
                 explicit_acl.as_deref(),
                 inherited_acl.as_deref(),
                 creator_acl.map(|acl| acl.revision()).unwrap_or(ACL_REVISION),
+                creator_acl.map(|acl| acl.sbz1()).unwrap_or(0),
+                creator_acl.map(|acl| acl.sbz2()).unwrap_or(0),
             )?;
 
-            return Ok((combined.or(explicit_acl), inherited_acl.is_some()));
+            return Ok((combined.or(explicit_acl), inherited_acl.is_some(), false));
         }
 
-        return Ok((explicit_acl, false));
+        return Ok((explicit_acl, false, false));
     }
 
     if inherited_acl.is_some() {
-        return Ok((inherited_acl, true));
+        return Ok((inherited_acl, true, false));
     }
 
     if let Some(fallback_acl) = fallback_acl {
         let mut bytes = Vec::with_capacity(fallback_acl.len()).map_err(|_| -ENOMEM)?;
         bytes.extend_from_slice(fallback_acl).map_err(|_| -ENOMEM)?;
-        return Ok((Some(bytes), false));
+        return Ok((Some(bytes), false, true));
     }
 
-    Ok((None, false))
+    Ok((None, false, false))
 }
 
 fn build_created_file_sd_bytes(
@@ -2602,13 +2656,19 @@ fn build_created_file_sd_bytes(
     creator_sd_bytes: Option<&[u8]>,
     child_is_container: bool,
 ) -> Result<(*mut u8, usize), i32> {
-    let parent_sd = SecurityDescriptor::parse(parent_sd_bytes).map_err(|_| -EINVAL)?;
+    let parent_sd = SecurityDescriptor::parse(parent_sd_bytes).map_err(sd_parse_errno)?;
     let creator_sd = match creator_sd_bytes {
-        Some(bytes) => Some(SecurityDescriptor::parse(bytes).map_err(|_| -EINVAL)?),
+        Some(bytes) => Some(SecurityDescriptor::parse(bytes).map_err(sd_parse_errno)?),
         None => None,
     };
     let creator_control = creator_sd.map(|sd| sd.control()).unwrap_or(0);
-    let owner_sid = if let Some(owner) = creator_sd.and_then(|sd| sd.owner()) {
+    let creator_owner = creator_sd.and_then(|sd| sd.owner());
+    let creator_group = creator_sd.and_then(|sd| sd.group());
+    let creator_dacl = creator_sd.and_then(|sd| sd.dacl());
+    let creator_sacl = creator_sd.and_then(|sd| sd.sacl());
+    let owner_defaulted = creator_owner.is_none();
+    let group_defaulted = creator_group.is_none();
+    let owner_sid = if let Some(owner) = creator_owner {
         validate_owner_assignment(subject, owner)?;
         owner
     } else {
@@ -2616,7 +2676,7 @@ fn build_created_file_sd_bytes(
             .sid_by_index(subject.owner_sid_index.load(Ordering::Relaxed))
             .ok_or(-EACCES)?
     };
-    let group_sid = if let Some(group) = creator_sd.and_then(|sd| sd.group()) {
+    let group_sid = if let Some(group) = creator_group {
         group
     } else {
         subject
@@ -2624,40 +2684,50 @@ fn build_created_file_sd_bytes(
             .ok_or(-EACCES)?
     };
     let mut base_control = creator_control
-        & (SE_DACL_AUTO_INHERIT_REQ
+        & (SE_DACL_TRUSTED
+            | SE_DACL_AUTO_INHERIT_REQ
             | SE_SACL_AUTO_INHERIT_REQ
             | SE_DACL_PROTECTED
             | SE_SACL_PROTECTED);
+    if creator_dacl.is_none() {
+        base_control &= !SE_DACL_TRUSTED;
+    }
 
     if (creator_control & SE_SERVER_SECURITY) == SE_SERVER_SECURITY {
         return Err(-EOPNOTSUPP);
     }
 
-    if let Some(creator_sd) = creator_sd {
-        if creator_sd.sacl().is_some() {
+    if creator_sd.is_some() {
+        if creator_sacl.is_some() {
             if !subject_has_enabled_privilege(subject, SE_SECURITY_PRIVILEGE) {
                 return Err(-EACCES);
             }
             subject.mark_privileges_used(SE_SECURITY_PRIVILEGE);
         }
-        let label_ace = find_explicit_label_ace_bytes(creator_sd.sacl())?;
+        let label_ace = find_explicit_label_ace_bytes(creator_sacl)?;
         validate_label_assignment(subject, label_ace.as_deref())?;
     }
 
-    let (dacl, dacl_inherited) = build_created_file_acl_bytes(
+    let token_default_dacl = subject.default_dacl_bytes();
+    let fallback_dacl = if token_default_dacl.is_empty() {
+        None
+    } else {
+        Some(token_default_dacl)
+    };
+    let (dacl, dacl_inherited, dacl_defaulted) = build_created_file_acl_bytes(
         parent_sd.dacl(),
-        creator_sd.and_then(|sd| sd.dacl()),
+        creator_dacl,
         creator_control,
         SE_DACL_AUTO_INHERIT_REQ,
         SE_DACL_PROTECTED,
         owner_sid,
         group_sid,
         child_is_container,
-        Some(subject.default_dacl_bytes()),
+        fallback_dacl,
     )?;
-    let (sacl, sacl_inherited) = build_created_file_acl_bytes(
+    let (sacl, sacl_inherited, sacl_defaulted) = build_created_file_acl_bytes(
         parent_sd.sacl(),
-        creator_sd.and_then(|sd| sd.sacl()),
+        creator_sacl,
         creator_control,
         SE_SACL_AUTO_INHERIT_REQ,
         SE_SACL_PROTECTED,
@@ -2673,9 +2743,22 @@ fn build_created_file_sd_bytes(
     if sacl_inherited {
         base_control |= SE_SACL_AUTO_INHERITED;
     }
+    if owner_defaulted {
+        base_control |= SE_OWNER_DEFAULTED;
+    }
+    if group_defaulted {
+        base_control |= SE_GROUP_DEFAULTED;
+    }
+    if dacl_defaulted {
+        base_control |= SE_DACL_DEFAULTED;
+    }
+    if sacl_defaulted {
+        base_control |= SE_SACL_DEFAULTED;
+    }
 
     build_sd_bytes_from_components(
         base_control,
+        0,
         Some(owner_sid.as_bytes()),
         Some(group_sid.as_bytes()),
         sacl.as_deref(),
@@ -2686,7 +2769,14 @@ fn build_created_file_sd_bytes(
 fn validate_sd_bytes(sd_bytes: &[u8]) -> Result<(), i32> {
     SecurityDescriptor::parse(sd_bytes)
         .map(|_| ())
-        .map_err(|_| -EINVAL)
+        .map_err(sd_parse_errno)
+}
+
+fn sd_parse_errno(error: KacsError) -> i32 {
+    match error {
+        KacsError::SecurityDescriptorTooLarge { .. } => -ERANGE,
+        _ => -EINVAL,
+    }
 }
 
 fn validate_sd_security_info(security_info: u32) -> Result<(), i32> {
@@ -2718,9 +2808,20 @@ fn clone_optional_acl_bytes(acl: Option<Acl<'_>>) -> Result<Option<Vec<u8>>, i32
 }
 
 fn build_acl_bytes_from_aces(revision: u8, aces: &[&[u8]]) -> Result<Option<Vec<u8>>, i32> {
+    build_acl_bytes_from_aces_with_reserved(revision, 0, 0, aces)
+}
+
+fn build_acl_bytes_from_aces_with_reserved(
+    revision: u8,
+    sbz1: u8,
+    sbz2: u16,
+    aces: &[&[u8]],
+) -> Result<Option<Vec<u8>>, i32> {
     if aces.is_empty() {
         return Ok(None);
     }
+    let write_revision =
+        minimum_acl_revision_with_source_floor_for_opaque(revision, aces).map_err(|_| -EINVAL)?;
 
     let mut acl_len = ACL_HEADER_LEN;
     for ace in aces {
@@ -2734,11 +2835,11 @@ fn build_acl_bytes_from_aces(revision: u8, aces: &[&[u8]]) -> Result<Option<Vec<
     bytes
         .extend_from_slice(&[0u8; ACL_HEADER_LEN])
         .map_err(|_| -ENOMEM)?;
-    bytes[0] = revision;
-    bytes[1] = 0;
+    bytes[0] = write_revision;
+    bytes[1] = sbz1;
     bytes[2..4].copy_from_slice(&(acl_len as u16).to_le_bytes());
     bytes[4..6].copy_from_slice(&(aces.len() as u16).to_le_bytes());
-    bytes[6..8].copy_from_slice(&0u16.to_le_bytes());
+    bytes[6..8].copy_from_slice(&sbz2.to_le_bytes());
 
     for ace in aces {
         bytes.extend_from_slice(ace).map_err(|_| -ENOMEM)?;
@@ -2749,6 +2850,7 @@ fn build_acl_bytes_from_aces(revision: u8, aces: &[&[u8]]) -> Result<Option<Vec<
 
 fn build_sd_bytes_from_components(
     base_control: u16,
+    resource_manager_control: u8,
     owner: Option<&[u8]>,
     group: Option<&[u8]>,
     sacl: Option<&[u8]>,
@@ -2772,13 +2874,16 @@ fn build_sd_bytes_from_components(
     total_len = total_len.checked_add(group_len).ok_or(-ERANGE)?;
     total_len = total_len.checked_add(sacl_len).ok_or(-ERANGE)?;
     total_len = total_len.checked_add(dacl_len).ok_or(-ERANGE)?;
+    if total_len > MAX_SECURITY_DESCRIPTOR_BYTES {
+        return Err(-ERANGE);
+    }
 
     let mut bytes = Vec::with_capacity(total_len).map_err(|_| -ENOMEM)?;
     bytes
         .extend_from_slice(&[0u8; SD_HEADER_LEN])
         .map_err(|_| -ENOMEM)?;
     bytes[0] = 1;
-    bytes[1] = 0;
+    bytes[1] = resource_manager_control;
     bytes[2..4].copy_from_slice(&control.to_le_bytes());
 
     if let Some(owner) = owner {
@@ -2937,14 +3042,19 @@ fn extract_label_subset_sacl_bytes(sd: &SecurityDescriptor<'_>) -> Result<Option
         if (ace.ace_flags() & INHERIT_ONLY_ACE) != 0 {
             continue;
         }
-        return build_acl_bytes_from_aces(sacl.revision(), &[ace.bytes()]);
+        return build_acl_bytes_from_aces_with_reserved(
+            sacl.revision(),
+            sacl.sbz1(),
+            sacl.sbz2(),
+            &[ace.bytes()],
+        );
     }
 
     Ok(None)
 }
 
 fn file_sd_integrity_label(sd_bytes: &[u8]) -> Result<IntegrityLevel, i32> {
-    let sd = SecurityDescriptor::parse(sd_bytes).map_err(|_| -EINVAL)?;
+    let sd = SecurityDescriptor::parse(sd_bytes).map_err(sd_parse_errno)?;
     let Some(sacl) = sd.sacl() else {
         return Ok(IntegrityLevel::Medium);
     };
@@ -3118,10 +3228,76 @@ fn validate_label_assignment(
     Err(-EACCES)
 }
 
+fn sd_subset_control(base_control: u16, security_info: u32) -> u16 {
+    let mut control = base_control & SE_RM_CONTROL_VALID;
+
+    if (security_info & OWNER_SECURITY_INFORMATION) != 0 {
+        control |= base_control & SE_OWNER_DEFAULTED;
+    }
+    if (security_info & GROUP_SECURITY_INFORMATION) != 0 {
+        control |= base_control & SE_GROUP_DEFAULTED;
+    }
+    if (security_info & DACL_SECURITY_INFORMATION) != 0 {
+        control |= base_control
+            & (SE_DACL_DEFAULTED
+                | SE_DACL_TRUSTED
+                | SE_DACL_AUTO_INHERIT_REQ
+                | SE_DACL_AUTO_INHERITED
+                | SE_DACL_PROTECTED);
+    }
+    if (security_info & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) != 0 {
+        control |= base_control
+            & (SE_SACL_DEFAULTED
+                | SE_SACL_AUTO_INHERIT_REQ
+                | SE_SACL_AUTO_INHERITED
+                | SE_SACL_PROTECTED);
+    }
+
+    control
+}
+
+fn replace_control_bits(control: &mut u16, input_control: u16, bits: u16) {
+    *control = (*control & !bits) | (input_control & bits);
+}
+
+fn merged_sd_control(current_control: u16, input_control: u16, security_info: u32) -> u16 {
+    let mut control = current_control;
+
+    if (security_info & OWNER_SECURITY_INFORMATION) != 0 {
+        replace_control_bits(&mut control, input_control, SE_OWNER_DEFAULTED);
+    }
+    if (security_info & GROUP_SECURITY_INFORMATION) != 0 {
+        replace_control_bits(&mut control, input_control, SE_GROUP_DEFAULTED);
+    }
+    if (security_info & DACL_SECURITY_INFORMATION) != 0 {
+        replace_control_bits(
+            &mut control,
+            input_control,
+            SE_DACL_DEFAULTED
+                | SE_DACL_TRUSTED
+                | SE_DACL_AUTO_INHERIT_REQ
+                | SE_DACL_AUTO_INHERITED
+                | SE_DACL_PROTECTED,
+        );
+    }
+    if (security_info & SACL_SECURITY_INFORMATION) != 0 {
+        replace_control_bits(
+            &mut control,
+            input_control,
+            SE_SACL_DEFAULTED
+                | SE_SACL_AUTO_INHERIT_REQ
+                | SE_SACL_AUTO_INHERITED
+                | SE_SACL_PROTECTED,
+        );
+    }
+
+    control
+}
+
 fn build_sd_subset_bytes(sd_bytes: &[u8], security_info: u32) -> Result<(*mut u8, usize), i32> {
     validate_sd_security_info(security_info)?;
 
-    let sd = SecurityDescriptor::parse(sd_bytes).map_err(|_| -EINVAL)?;
+    let sd = SecurityDescriptor::parse(sd_bytes).map_err(sd_parse_errno)?;
     let label_sacl = if (security_info & LABEL_SECURITY_INFORMATION) != 0 {
         extract_label_subset_sacl_bytes(&sd)?
     } else {
@@ -3139,7 +3315,8 @@ fn build_sd_subset_bytes(sd_bytes: &[u8], security_info: u32) -> Result<(*mut u8
     };
 
     build_sd_bytes_from_components(
-        sd.control(),
+        sd_subset_control(sd.control(), security_info),
+        sd.resource_manager_control(),
         if (security_info & OWNER_SECURITY_INFORMATION) != 0 {
             sd.owner().map(|sid| sid.as_bytes())
         } else {
@@ -3161,8 +3338,8 @@ fn merge_process_sd_bytes(
     security_info: u32,
     input_sd_bytes: &[u8],
 ) -> Result<(*mut u8, usize), i32> {
-    let current_sd = SecurityDescriptor::parse(current_sd_bytes).map_err(|_| -EINVAL)?;
-    let input_sd = SecurityDescriptor::parse(input_sd_bytes).map_err(|_| -EINVAL)?;
+    let current_sd = SecurityDescriptor::parse(current_sd_bytes).map_err(sd_parse_errno)?;
+    let input_sd = SecurityDescriptor::parse(input_sd_bytes).map_err(sd_parse_errno)?;
     let mut sacl = clone_optional_acl_bytes(current_sd.sacl())?;
     let mut dacl = clone_optional_acl_bytes(current_sd.dacl())?;
     let owner = if (security_info & OWNER_SECURITY_INFORMATION) != 0 {
@@ -3195,10 +3372,10 @@ fn merge_process_sd_bytes(
         let label_ace = parse_label_subset_ace_bytes(&input_sd)?;
         validate_label_assignment(subject, label_ace.as_deref())?;
 
-        let current_revision = current_sd
+        let (current_revision, current_sbz1, current_sbz2) = current_sd
             .sacl()
-            .map(|acl| acl.revision())
-            .unwrap_or(ACL_REVISION);
+            .map(|acl| (acl.revision(), acl.sbz1(), acl.sbz2()))
+            .unwrap_or((ACL_REVISION, 0, 0));
         let mut preserved_aces = Vec::new();
 
         if let Some(existing_sacl) = current_sd.sacl() {
@@ -3221,11 +3398,17 @@ fn merge_process_sd_bytes(
             ace_refs.push(ace.as_slice()).map_err(|_| -ENOMEM)?;
         }
 
-        sacl = build_acl_bytes_from_aces(current_revision, ace_refs.as_slice())?;
+        sacl = build_acl_bytes_from_aces_with_reserved(
+            current_revision,
+            current_sbz1,
+            current_sbz2,
+            ace_refs.as_slice(),
+        )?;
     }
 
     build_sd_bytes_from_components(
-        current_sd.control(),
+        merged_sd_control(current_sd.control(), input_sd.control(), security_info),
+        current_sd.resource_manager_control(),
         Some(owner.as_bytes()),
         Some(group.as_bytes()),
         sacl.as_deref(),
@@ -3239,7 +3422,7 @@ fn build_replacement_file_sd_bytes(
     input_sd_bytes: &[u8],
 ) -> Result<(*mut u8, usize), i32> {
     let required = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
-    let input_sd = SecurityDescriptor::parse(input_sd_bytes).map_err(|_| -EINVAL)?;
+    let input_sd = SecurityDescriptor::parse(input_sd_bytes).map_err(sd_parse_errno)?;
     let owner = input_sd.owner().ok_or(-EINVAL)?;
     let group = input_sd.group().ok_or(-EINVAL)?;
     let mut sacl = None;
@@ -3260,15 +3443,25 @@ fn build_replacement_file_sd_bytes(
         let label_ace = parse_label_subset_ace_bytes(&input_sd)?;
         validate_label_assignment(subject, label_ace.as_deref())?;
         let mut ace_refs = Vec::new();
+        let (input_sacl_revision, input_sacl_sbz1, input_sacl_sbz2) = input_sd
+            .sacl()
+            .map(|acl| (acl.revision(), acl.sbz1(), acl.sbz2()))
+            .unwrap_or((ACL_REVISION, 0, 0));
 
         if let Some(label_ace) = label_ace.as_ref() {
             ace_refs.push(label_ace.as_slice()).map_err(|_| -ENOMEM)?;
         }
-        sacl = build_acl_bytes_from_aces(ACL_REVISION, ace_refs.as_slice())?;
+        sacl = build_acl_bytes_from_aces_with_reserved(
+            input_sacl_revision,
+            input_sacl_sbz1,
+            input_sacl_sbz2,
+            ace_refs.as_slice(),
+        )?;
     }
 
     build_sd_bytes_from_components(
         input_sd.control(),
+        input_sd.resource_manager_control(),
         Some(owner.as_bytes()),
         Some(group.as_bytes()),
         sacl.as_deref(),
@@ -3313,12 +3506,13 @@ fn build_process_sd_with_mandatory_resource_attribute_bytes(
 ) -> Result<(*mut u8, usize), i32> {
     let (default_ptr, default_len) = build_default_process_sd_bytes(token)?;
     let default_bytes = unsafe { core::slice::from_raw_parts(default_ptr, default_len) };
-    let default_sd = SecurityDescriptor::parse(default_bytes).map_err(|_| -EINVAL)?;
+    let default_sd = SecurityDescriptor::parse(default_bytes).map_err(sd_parse_errno)?;
     let resource_ace = build_mandatory_resource_attribute_ace_bytes()?;
     let sacl = build_acl_bytes_from_aces(ACL_REVISION, &[resource_ace.as_slice()])?;
     let dacl = clone_optional_acl_bytes(default_sd.dacl())?;
     let result = build_sd_bytes_from_components(
         default_sd.control(),
+        default_sd.resource_manager_control(),
         default_sd.owner().map(|sid| sid.as_bytes()),
         default_sd.group().map(|sid| sid.as_bytes()),
         sacl.as_deref(),
@@ -3356,6 +3550,9 @@ fn build_token_sd_bytes(
     let group_offset = SD_HEADER_LEN.checked_add(owner_len).ok_or(-ERANGE)?;
     let dacl_offset = group_offset.checked_add(group_len).ok_or(-ERANGE)?;
     let total_len = dacl_offset.checked_add(dacl_len).ok_or(-ERANGE)?;
+    if total_len > MAX_SECURITY_DESCRIPTOR_BYTES {
+        return Err(-ERANGE);
+    }
     let ptr = unsafe { pkm_kacs_zalloc(total_len) } as *mut u8;
     let mut cursor = ACL_HEADER_LEN;
 
@@ -3369,7 +3566,11 @@ fn build_token_sd_bytes(
     write_le_u16(
         bytes,
         2,
-        crate::security_descriptor::SE_SELF_RELATIVE | crate::security_descriptor::SE_DACL_PRESENT,
+        SE_SELF_RELATIVE
+            | SE_OWNER_DEFAULTED
+            | SE_GROUP_DEFAULTED
+            | SE_DACL_DEFAULTED
+            | SE_DACL_PRESENT,
     );
     write_le_u32(bytes, 4, SD_HEADER_LEN as u32);
     write_le_u32(bytes, 8, group_offset as u32);
@@ -3486,12 +3687,13 @@ fn build_file_sd_with_mandatory_resource_attribute_bytes(
     let (default_ptr, default_len) =
         build_file_sd_bytes_from_masks(token, self_mask, admin_mask, system_mask, everyone_mask)?;
     let default_bytes = unsafe { core::slice::from_raw_parts(default_ptr, default_len) };
-    let default_sd = SecurityDescriptor::parse(default_bytes).map_err(|_| -EINVAL)?;
+    let default_sd = SecurityDescriptor::parse(default_bytes).map_err(sd_parse_errno)?;
     let resource_ace = build_mandatory_resource_attribute_ace_bytes()?;
     let sacl = build_acl_bytes_from_aces(ACL_REVISION, &[resource_ace.as_slice()])?;
     let dacl = clone_optional_acl_bytes(default_sd.dacl())?;
     let result = build_sd_bytes_from_components(
         default_sd.control(),
+        default_sd.resource_manager_control(),
         default_sd.owner().map(|sid| sid.as_bytes()),
         default_sd.group().map(|sid| sid.as_bytes()),
         sacl.as_deref(),
@@ -4272,6 +4474,8 @@ impl PkmKacsBootToken {
         } else {
             parse_claim_attribute_array(device_claims_bytes).map_err(|_| -EINVAL)?
         };
+
+        normalize_group_entries_for_creation(&mut groups);
         let caller_group_count = groups.len();
 
         if !default_dacl_bytes.is_empty() {
@@ -6165,6 +6369,7 @@ fn token_open_check_errno(
             | Err(KacsError::InvalidTokenInvariant(_))
             | Err(KacsError::MissingSecurityDescriptorOwner)
             | Err(KacsError::MissingSelfRelativeControl(_))
+            | Err(KacsError::SecurityDescriptorTooLarge { .. })
             | Err(KacsError::InvalidSecurityDescriptorRevision(_))
             | Err(KacsError::InconsistentSecurityDescriptorField { .. })
             | Err(KacsError::SecurityDescriptorOffsetOutOfBounds { .. })
@@ -6261,7 +6466,7 @@ fn process_sd_access_check_errno_with_intent(
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
     };
-    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(|_| -EINVAL)?;
+    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(sd_parse_errno)?;
     let normalized = match PROCESS_GENERIC_MAPPING.normalize_desired_access(desired) {
         Ok(normalized) => normalized,
         Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
@@ -6328,7 +6533,7 @@ fn file_sd_access_outcome_with_intent(
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
     };
-    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(|_| -EINVAL)?;
+    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(sd_parse_errno)?;
     let normalized = match FILE_GENERIC_MAPPING.normalize_desired_access(desired) {
         Ok(normalized) => normalized,
         Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
@@ -6423,7 +6628,7 @@ fn socket_sd_access_check_errno(
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
     };
-    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(|_| -EINVAL)?;
+    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(sd_parse_errno)?;
     let normalized = match SOCKET_GENERIC_MAPPING.normalize_desired_access(desired) {
         Ok(normalized) => normalized,
         Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
@@ -7042,7 +7247,7 @@ pub extern "C" fn kacs_rust_kunit_create_label_sd_subset(
         return null();
     };
     let Ok((ptr, len)) =
-        build_sd_bytes_from_components(SE_SELF_RELATIVE, None, None, sacl.as_deref(), None)
+        build_sd_bytes_from_components(SE_SELF_RELATIVE, 0, None, None, sacl.as_deref(), None)
     else {
         return null();
     };

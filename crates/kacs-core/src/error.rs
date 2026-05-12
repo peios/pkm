@@ -61,6 +61,13 @@ pub enum KacsError {
     },
     /// Security descriptor revision was invalid.
     InvalidSecurityDescriptorRevision(u8),
+    /// Security descriptor exceeded the architectural size limit.
+    SecurityDescriptorTooLarge {
+        /// Actual descriptor length.
+        len: usize,
+        /// Maximum permitted descriptor length.
+        max: usize,
+    },
     /// Self-relative control bit was missing.
     MissingSelfRelativeControl(u16),
     /// Descriptor owner SID was required but missing.

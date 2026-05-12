@@ -3,6 +3,10 @@ use crate::claims::validate_claim_attribute_entry;
 use crate::error::{KacsError, KacsResult};
 use crate::sid::Sid;
 
+/// ACL revision for basic, audit/alarm, MIC, resource, scoped-policy, and PIP ACEs.
+pub const ACL_REVISION: u8 = 0x02;
+/// ACL revision required by object and callback ACE families.
+pub const ACL_REVISION_DS: u8 = 0x04;
 /// ACE type for access-allowed ACEs.
 pub const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
 /// ACE type for access-denied ACEs.
@@ -48,6 +52,73 @@ pub const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
 pub const ACE_OBJECT_TYPE_PRESENT: u32 = 0x0000_0001;
 /// Object ACE flag indicating the presence of `inherited_object_type`.
 pub const ACE_INHERITED_OBJECT_TYPE_PRESENT: u32 = 0x0000_0002;
+
+/// Returns the minimum ACL revision required by a recognized ACE type.
+///
+/// Unknown ACE types are opaque to KACS. Callers preserving opaque ACEs from an
+/// existing ACL should use [`minimum_acl_revision_with_source_floor_for_opaque`]
+/// so the source ACL revision remains a compatibility floor.
+pub fn minimum_acl_revision_for_ace_type(ace_type: u8) -> u8 {
+    match ace_type {
+        ACCESS_ALLOWED_OBJECT_ACE_TYPE
+        | ACCESS_DENIED_OBJECT_ACE_TYPE
+        | SYSTEM_AUDIT_OBJECT_ACE_TYPE
+        | SYSTEM_ALARM_OBJECT_ACE_TYPE
+        | ACCESS_ALLOWED_CALLBACK_ACE_TYPE
+        | ACCESS_DENIED_CALLBACK_ACE_TYPE
+        | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
+        | ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE
+        | SYSTEM_AUDIT_CALLBACK_ACE_TYPE
+        | SYSTEM_ALARM_CALLBACK_ACE_TYPE
+        | SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE
+        | SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE => ACL_REVISION_DS,
+        _ => ACL_REVISION,
+    }
+}
+
+/// Returns the minimum ACL revision required by one ACE byte slice.
+pub fn minimum_acl_revision_for_ace_bytes(ace: &[u8]) -> KacsResult<u8> {
+    let ace = Ace::parse(ace)?;
+    Ok(minimum_acl_revision_for_ace_type(ace.ace_type()))
+}
+
+/// Returns the minimum ACL revision required by a set of ACE byte slices.
+pub fn minimum_acl_revision_for_ace_slices(aces: &[&[u8]]) -> KacsResult<u8> {
+    let mut revision = ACL_REVISION;
+
+    for ace in aces {
+        revision = core::cmp::max(revision, minimum_acl_revision_for_ace_bytes(ace)?);
+    }
+
+    Ok(revision)
+}
+
+/// Computes the write revision for a rewritten ACL that may preserve opaque ACEs.
+///
+/// Known ACE families drive the minimum revision. If any opaque ACE is
+/// preserved, the source ACL revision is retained as a floor because KACS does
+/// not know which external revision class that opaque ACE requires.
+pub fn minimum_acl_revision_with_source_floor_for_opaque(
+    source_revision: u8,
+    aces: &[&[u8]],
+) -> KacsResult<u8> {
+    let mut revision = ACL_REVISION;
+    let mut saw_opaque = false;
+
+    for ace in aces {
+        let ace = Ace::parse(ace)?;
+        if ace.kind() == AceKind::Opaque {
+            saw_opaque = true;
+        }
+        revision = core::cmp::max(revision, minimum_acl_revision_for_ace_type(ace.ace_type()));
+    }
+
+    if saw_opaque {
+        revision = core::cmp::max(revision, source_revision);
+    }
+
+    Ok(revision)
+}
 
 /// Parsed ACE with a typed payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

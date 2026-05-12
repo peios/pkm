@@ -9,11 +9,15 @@ use crate::object_tree::ObjectTypeList;
 use crate::pip::PipContext;
 use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::security_descriptor::{
-    SecurityDescriptor, SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE,
+    SecurityDescriptor, MAX_SECURITY_DESCRIPTOR_BYTES, SE_DACL_PRESENT, SE_SACL_PRESENT,
+    SE_SELF_RELATIVE,
 };
 use crate::sid::Sid;
 use crate::token::AccessCheckToken;
-use crate::{Acl, ACCESS_ALLOWED_ACE_TYPE, GENERIC_ALL, SYSTEM_SCOPED_POLICY_ID_ACE_TYPE};
+use crate::{
+    minimum_acl_revision_for_ace_slices, minimum_acl_revision_with_source_floor_for_opaque, Acl,
+    ACCESS_ALLOWED_ACE_TYPE, GENERIC_ALL, SYSTEM_SCOPED_POLICY_ID_ACE_TYPE,
+};
 
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
 const SYSTEM_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
@@ -575,15 +579,25 @@ fn build_synthetic_sd_bytes(
         control &= !SE_SACL_PRESENT;
     }
 
-    let mut bytes = Vec::with_capacity(
-        SecurityDescriptor::HEADER_SIZE
-            + owner.as_bytes().len()
-            + group.map_or(0, |sid| sid.as_bytes().len())
-            + sacl.as_ref().map_or(0, Vec::len)
-            + dacl_bytes.len(),
-    )?;
+    let total_len = SecurityDescriptor::HEADER_SIZE
+        .checked_add(owner.as_bytes().len())
+        .and_then(|len| len.checked_add(group.map_or(0, |sid| sid.as_bytes().len())))
+        .and_then(|len| len.checked_add(sacl.as_ref().map_or(0, Vec::len)))
+        .and_then(|len| len.checked_add(dacl_bytes.len()))
+        .ok_or(KacsError::InvariantViolation(
+            "synthetic sd length overflow",
+        ))?;
+    if total_len > MAX_SECURITY_DESCRIPTOR_BYTES {
+        return Err(KacsError::SecurityDescriptorTooLarge {
+            len: total_len,
+            max: MAX_SECURITY_DESCRIPTOR_BYTES,
+        });
+    }
+
+    let mut bytes = Vec::with_capacity(total_len)?;
     bytes.extend_from_slice(&[0u8; SecurityDescriptor::HEADER_SIZE])?;
     bytes[0] = 1;
+    bytes[1] = base_sd.resource_manager_control();
     bytes[2..4].copy_from_slice(&control.to_le_bytes());
 
     let owner_offset = bytes.len() as u32;
@@ -684,14 +698,20 @@ fn strip_scoped_policy_aces(sacl: Option<crate::Acl<'_>>) -> KacsResult<Option<V
         }
     }
 
+    let mut ace_refs = Vec::with_capacity(kept.len())?;
+    for ace in kept.iter() {
+        ace_refs.push(ace.as_slice())?;
+    }
+    let revision =
+        minimum_acl_revision_with_source_floor_for_opaque(sacl.revision(), ace_refs.as_slice())?;
     let size = 8 + kept.iter().map(Vec::len).sum::<usize>();
     let mut bytes = Vec::with_capacity(size)?;
-    bytes.push(sacl.revision())?;
+    bytes.push(revision)?;
     bytes.push(sacl.sbz1())?;
     bytes.extend_from_slice(&(size as u16).to_le_bytes())?;
     bytes.extend_from_slice(&(kept.len() as u16).to_le_bytes())?;
     bytes.extend_from_slice(&sacl.sbz2().to_le_bytes())?;
-    for ace in kept {
+    for ace in &kept {
         bytes.extend_from_slice(ace.as_slice())?;
     }
 
@@ -781,9 +801,14 @@ fn read_len_prefixed_field<'a>(
 }
 
 fn acl_bytes(aces: &[Vec<u8>]) -> KacsResult<Vec<u8>> {
+    let mut ace_refs = Vec::with_capacity(aces.len())?;
+    for ace in aces.iter() {
+        ace_refs.push(ace.as_slice())?;
+    }
+    let revision = minimum_acl_revision_for_ace_slices(ace_refs.as_slice())?;
     let size = 8 + aces.iter().map(Vec::len).sum::<usize>();
     let mut bytes = Vec::with_capacity(size)?;
-    bytes.push(4)?;
+    bytes.push(revision)?;
     bytes.push(0)?;
     bytes.extend_from_slice(&(size as u16).to_le_bytes())?;
     bytes.extend_from_slice(&(aces.len() as u16).to_le_bytes())?;
@@ -821,10 +846,11 @@ fn remove_policy_entries(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_synthetic_sd_bytes, strip_scoped_policy_aces};
+    use super::{build_recovery_policy_dacl, build_synthetic_sd_bytes, strip_scoped_policy_aces};
     use crate::{
-        extract_sacl_metadata, SecurityDescriptor, ACCESS_ALLOWED_ACE_TYPE, SE_DACL_PRESENT,
-        SE_SACL_PRESENT, SE_SELF_RELATIVE, SYSTEM_SCOPED_POLICY_ID_ACE_TYPE,
+        extract_sacl_metadata, KacsError, SecurityDescriptor, ACCESS_ALLOWED_ACE_TYPE,
+        ACL_REVISION, ACL_REVISION_DS, MAX_SECURITY_DESCRIPTOR_BYTES, SE_DACL_PRESENT,
+        SE_RM_CONTROL_VALID, SE_SACL_PRESENT, SE_SELF_RELATIVE, SYSTEM_SCOPED_POLICY_ID_ACE_TYPE,
     };
 
     fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
@@ -852,7 +878,7 @@ mod tests {
     fn acl_bytes(aces: &[Vec<u8>]) -> Vec<u8> {
         let size = 8 + aces.iter().map(Vec::len).sum::<usize>();
         let mut bytes = Vec::with_capacity(size);
-        bytes.push(4);
+        bytes.push(ACL_REVISION_DS);
         bytes.push(0);
         bytes.extend_from_slice(&(size as u16).to_le_bytes());
         bytes.extend_from_slice(&(aces.len() as u16).to_le_bytes());
@@ -860,6 +886,16 @@ mod tests {
         for ace in aces {
             bytes.extend_from_slice(ace);
         }
+        bytes
+    }
+
+    fn opaque_ace(ace_type: u8, body: &[u8]) -> Vec<u8> {
+        let size = 4 + body.len();
+        let mut bytes = Vec::with_capacity(size);
+        bytes.push(ace_type);
+        bytes.push(0);
+        bytes.extend_from_slice(&(size as u16).to_le_bytes());
+        bytes.extend_from_slice(body);
         bytes
     }
 
@@ -900,12 +936,42 @@ mod tests {
         let stripped = strip_scoped_policy_aces(sd.sacl())
             .expect("strip should succeed")
             .expect("sacl should remain present");
+        assert_eq!(stripped[0], ACL_REVISION);
         let stripped_sd_bytes = sd_bytes(&owner, &group, &stripped, &dacl);
         let stripped_sd =
             SecurityDescriptor::parse(&stripped_sd_bytes).expect("synthetic sd should parse");
         let metadata = extract_sacl_metadata(&stripped_sd).expect("metadata should parse");
 
         assert!(metadata.policy_sids.is_empty());
+    }
+
+    #[test]
+    fn strip_scoped_policy_aces_keeps_source_revision_floor_for_opaque_aces() {
+        let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+        let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+        let policy = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 15100]);
+        let opaque = opaque_ace(0x7f, &[0, 0, 0, 0]);
+        let sacl = acl_bytes(&[
+            basic_ace(SYSTEM_SCOPED_POLICY_ID_ACE_TYPE, 0, 0, &policy),
+            opaque.clone(),
+        ]);
+        let dacl = acl_bytes(&[]);
+        let base_bytes = sd_bytes(&owner, &group, &sacl, &dacl);
+        let sd = SecurityDescriptor::parse(&base_bytes).expect("sd should parse");
+
+        let stripped = strip_scoped_policy_aces(sd.sacl())
+            .expect("strip should succeed")
+            .expect("opaque sacl should remain present");
+
+        assert_eq!(stripped[0], ACL_REVISION_DS);
+        assert!(stripped.ends_with(opaque.as_slice()));
+    }
+
+    #[test]
+    fn recovery_policy_dacl_uses_minimum_revision() {
+        let dacl = build_recovery_policy_dacl().expect("recovery policy should build");
+
+        assert_eq!(dacl[0], ACL_REVISION);
     }
 
     #[test]
@@ -927,5 +993,55 @@ mod tests {
         let metadata = extract_sacl_metadata(&synthetic_sd).expect("metadata parses");
 
         assert!(metadata.policy_sids.is_empty());
+    }
+
+    #[test]
+    fn synthetic_sd_builder_preserves_resource_manager_control_byte() {
+        let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+        let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+        let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 15400]);
+        let sacl = acl_bytes(&[]);
+        let dacl = acl_bytes(&[basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, 0x1, &user)]);
+        let mut base_sd_bytes = sd_bytes(&owner, &group, &sacl, &dacl);
+        let control =
+            u16::from_le_bytes([base_sd_bytes[2], base_sd_bytes[3]]) | SE_RM_CONTROL_VALID;
+        base_sd_bytes[1] = 0xa5;
+        base_sd_bytes[2..4].copy_from_slice(&control.to_le_bytes());
+        let base_sd = SecurityDescriptor::parse(&base_sd_bytes).expect("sd should parse");
+
+        let synthetic = build_synthetic_sd_bytes(&base_sd, &dacl).expect("builder should succeed");
+        let synthetic_sd = SecurityDescriptor::parse(&synthetic).expect("synthetic sd parses");
+
+        assert_eq!(synthetic_sd.resource_manager_control(), 0xa5);
+        assert_eq!(
+            synthetic_sd.control() & SE_RM_CONTROL_VALID,
+            SE_RM_CONTROL_VALID
+        );
+    }
+
+    #[test]
+    fn synthetic_sd_builder_rejects_oversized_output() {
+        let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+        let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+        let sacl = acl_bytes(&[]);
+        let dacl = acl_bytes(&[]);
+        let base_sd_bytes = sd_bytes(&owner, &group, &sacl, &dacl);
+        let base_sd = SecurityDescriptor::parse(&base_sd_bytes).expect("sd should parse");
+        let oversized_dacl = vec![0u8; MAX_SECURITY_DESCRIPTOR_BYTES];
+
+        let err = build_synthetic_sd_bytes(&base_sd, &oversized_dacl)
+            .expect_err("oversized synthetic sd must fail");
+
+        assert_eq!(
+            err,
+            KacsError::SecurityDescriptorTooLarge {
+                len: SecurityDescriptor::HEADER_SIZE
+                    + owner.len()
+                    + group.len()
+                    + sacl.len()
+                    + oversized_dacl.len(),
+                max: MAX_SECURITY_DESCRIPTOR_BYTES,
+            }
+        );
     }
 }

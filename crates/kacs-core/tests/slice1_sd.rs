@@ -1,4 +1,10 @@
-use kacs_core::{KacsError, SecurityDescriptor, SE_DACL_PRESENT, SE_SELF_RELATIVE};
+use kacs_core::{
+    KacsError, SecurityDescriptor, MAX_SECURITY_DESCRIPTOR_BYTES, SE_DACL_AUTO_INHERITED,
+    SE_DACL_AUTO_INHERIT_REQ, SE_DACL_DEFAULTED, SE_DACL_PRESENT, SE_DACL_PROTECTED,
+    SE_DACL_TRUSTED, SE_GROUP_DEFAULTED, SE_OWNER_DEFAULTED, SE_RM_CONTROL_VALID,
+    SE_SACL_AUTO_INHERITED, SE_SACL_AUTO_INHERIT_REQ, SE_SACL_DEFAULTED, SE_SACL_PRESENT,
+    SE_SACL_PROTECTED, SE_SELF_RELATIVE, SE_SERVER_SECURITY,
+};
 
 fn sid_bytes(sub_authorities: &[u32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
@@ -51,6 +57,52 @@ fn sd_bytes(owner: &[u8], dacl: &[u8], control: u16, dacl_offset: u32) -> Vec<u8
 }
 
 #[test]
+fn exposes_security_descriptor_control_flag_catalog() {
+    assert_eq!(SE_OWNER_DEFAULTED, 0x0001);
+    assert_eq!(SE_GROUP_DEFAULTED, 0x0002);
+    assert_eq!(SE_DACL_PRESENT, 0x0004);
+    assert_eq!(SE_DACL_DEFAULTED, 0x0008);
+    assert_eq!(SE_SACL_PRESENT, 0x0010);
+    assert_eq!(SE_SACL_DEFAULTED, 0x0020);
+    assert_eq!(SE_DACL_TRUSTED, 0x0040);
+    assert_eq!(SE_SERVER_SECURITY, 0x0080);
+    assert_eq!(SE_DACL_AUTO_INHERIT_REQ, 0x0100);
+    assert_eq!(SE_SACL_AUTO_INHERIT_REQ, 0x0200);
+    assert_eq!(SE_DACL_AUTO_INHERITED, 0x0400);
+    assert_eq!(SE_SACL_AUTO_INHERITED, 0x0800);
+    assert_eq!(SE_DACL_PROTECTED, 0x1000);
+    assert_eq!(SE_SACL_PROTECTED, 0x2000);
+    assert_eq!(SE_RM_CONTROL_VALID, 0x4000);
+    assert_eq!(SE_SELF_RELATIVE, 0x8000);
+}
+
+#[test]
+fn accepts_security_descriptor_at_architectural_maximum_size() {
+    let mut bytes = vec![0u8; MAX_SECURITY_DESCRIPTOR_BYTES];
+    bytes[0] = 1;
+    bytes[2..4].copy_from_slice(&SE_SELF_RELATIVE.to_le_bytes());
+
+    let sd = SecurityDescriptor::parse(&bytes).expect("maximum-sized sd should parse");
+
+    assert_eq!(sd.bytes().len(), MAX_SECURITY_DESCRIPTOR_BYTES);
+}
+
+#[test]
+fn rejects_security_descriptor_above_architectural_maximum_size() {
+    let bytes = vec![0u8; MAX_SECURITY_DESCRIPTOR_BYTES + 1];
+
+    let err = SecurityDescriptor::parse(&bytes).expect_err("oversized sd must fail");
+
+    assert_eq!(
+        err,
+        KacsError::SecurityDescriptorTooLarge {
+            len: MAX_SECURITY_DESCRIPTOR_BYTES + 1,
+            max: MAX_SECURITY_DESCRIPTOR_BYTES,
+        }
+    );
+}
+
+#[test]
 fn parses_self_relative_sd_with_owner_and_dacl() {
     let owner = sid_bytes(&[18]);
     let dacl = acl_bytes(&[basic_allow_ace(0x0002_0001, &owner)]);
@@ -70,6 +122,24 @@ fn parses_self_relative_sd_with_owner_and_dacl() {
     assert!(sd.group().is_none());
     assert!(sd.sacl().is_none());
     assert_eq!(sd.dacl().expect("dacl expected").ace_count(), 1);
+}
+
+#[test]
+fn preserves_resource_manager_control_byte() {
+    let owner = sid_bytes(&[18]);
+    let dacl = acl_bytes(&[]);
+    let mut bytes = sd_bytes(
+        &owner,
+        &dacl,
+        SE_SELF_RELATIVE | SE_DACL_PRESENT | SE_RM_CONTROL_VALID,
+        20 + owner.len() as u32,
+    );
+    bytes[1] = 0x5a;
+
+    let sd = SecurityDescriptor::parse(&bytes).expect("sd should parse");
+
+    assert_eq!(sd.resource_manager_control(), 0x5a);
+    assert_eq!(sd.bytes()[1], 0x5a);
 }
 
 #[test]

@@ -115,6 +115,7 @@
 #define PKM_KUNIT_SE_GROUP_ENABLED 0x00000004U
 #define PKM_KUNIT_SE_GROUP_OWNER 0x00000008U
 #define PKM_KUNIT_SE_GROUP_USE_FOR_DENY_ONLY 0x00000010U
+#define PKM_KUNIT_SE_GROUP_RESOURCE 0x20000000U
 #define PKM_KUNIT_SE_GROUP_LOGON_ID 0xC0000000U
 #define PKM_KUNIT_ADJUSTABLE_GROUP0_DEFAULT 0x0000000EU
 #define PKM_KUNIT_ADJUSTABLE_GROUP1_DEFAULT 0x00000000U
@@ -161,7 +162,28 @@
 #define PKM_KUNIT_DACL_SECURITY_INFORMATION 0x00000004U
 #define PKM_KUNIT_SACL_SECURITY_INFORMATION 0x00000008U
 #define PKM_KUNIT_LABEL_SECURITY_INFORMATION 0x00000010U
+#define PKM_KUNIT_OBJECT_INHERIT_ACE 0x01U
+#define PKM_KUNIT_CONTAINER_INHERIT_ACE 0x02U
+#define PKM_KUNIT_INHERITED_ACE 0x10U
+#define PKM_KUNIT_OPAQUE_ACE_TYPE 0x7fU
+#define PKM_KUNIT_SE_OWNER_DEFAULTED 0x0001U
+#define PKM_KUNIT_SE_GROUP_DEFAULTED 0x0002U
+#define PKM_KUNIT_SE_DACL_PRESENT 0x0004U
+#define PKM_KUNIT_SE_DACL_DEFAULTED 0x0008U
+#define PKM_KUNIT_SE_SACL_PRESENT 0x0010U
+#define PKM_KUNIT_SE_SACL_DEFAULTED 0x0020U
+#define PKM_KUNIT_SE_DACL_TRUSTED 0x0040U
 #define PKM_KUNIT_SE_SERVER_SECURITY 0x0080U
+#define PKM_KUNIT_SE_DACL_AUTO_INHERIT_REQ 0x0100U
+#define PKM_KUNIT_SE_SACL_AUTO_INHERIT_REQ 0x0200U
+#define PKM_KUNIT_SE_DACL_AUTO_INHERITED 0x0400U
+#define PKM_KUNIT_SE_SACL_AUTO_INHERITED 0x0800U
+#define PKM_KUNIT_SE_DACL_PROTECTED 0x1000U
+#define PKM_KUNIT_SE_SACL_PROTECTED 0x2000U
+#define PKM_KUNIT_SE_RM_CONTROL_VALID 0x4000U
+#define PKM_KUNIT_SE_SELF_RELATIVE 0x8000U
+#define PKM_KUNIT_MAX_SECURITY_DESCRIPTOR_BYTES 65535U
+#define PKM_KUNIT_TOKEN_INDEX_NO_CHANGE 0xFFFFFFFFU
 #define PKM_KUNIT_TOKEN_SPEC_VERSION 2U
 #define PKM_KUNIT_TOKEN_SPEC_HEADER_LEN 192U
 #define PKM_KUNIT_FILE_READ_DATA 0x00000001U
@@ -669,6 +691,70 @@ static u32 pkm_kunit_read_u32(const u8 *bytes, size_t offset)
 static u16 pkm_kunit_read_u16(const u8 *bytes, size_t offset)
 {
 	return (u16)bytes[offset + 0] | ((u16)bytes[offset + 1] << 8);
+}
+
+static void pkm_kunit_set_sd_rm_control(u8 *sd, u8 value)
+{
+	pkm_kunit_write_u16(sd, 2,
+			    pkm_kunit_read_u16(sd, 2) |
+				    PKM_KUNIT_SE_RM_CONTROL_VALID);
+	sd[1] = value;
+}
+
+static void pkm_kunit_expect_sd_rm_control(struct kunit *test, const u8 *sd,
+					   u8 value)
+{
+	KUNIT_EXPECT_EQ(test, sd[1], value);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_read_u16(sd, 2) &
+				PKM_KUNIT_SE_RM_CONTROL_VALID,
+			PKM_KUNIT_SE_RM_CONTROL_VALID);
+}
+
+static void pkm_kunit_set_sd_dacl_reserved_fields(u8 *sd, u8 sbz1, u16 sbz2)
+{
+	u32 dacl_offset;
+
+	if (!sd)
+		return;
+
+	dacl_offset = pkm_kunit_read_u32(sd, 16);
+	if (dacl_offset == 0)
+		return;
+
+	sd[dacl_offset + 1] = sbz1;
+	pkm_kunit_write_u16(sd, dacl_offset + 6, sbz2);
+}
+
+static void pkm_kunit_expect_sd_dacl_reserved_fields(struct kunit *test,
+						     const u8 *sd, u8 sbz1,
+						     u16 sbz2)
+{
+	u32 dacl_offset;
+
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	dacl_offset = pkm_kunit_read_u32(sd, 16);
+	KUNIT_ASSERT_NE(test, dacl_offset, 0U);
+	KUNIT_EXPECT_EQ(test, sd[dacl_offset + 1], sbz1);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u16(sd, dacl_offset + 6), sbz2);
+}
+
+static void pkm_kunit_validate_sd_rejects_oversized_descriptor(
+	struct kunit *test)
+{
+	u8 *sd;
+
+	sd = kunit_kzalloc(test, PKM_KUNIT_MAX_SECURITY_DESCRIPTOR_BYTES + 1,
+			   GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+
+	sd[0] = 1;
+	pkm_kunit_write_u16(sd, 2, PKM_KUNIT_SE_SELF_RELATIVE);
+
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_validate_sd_bytes(
+				sd, PKM_KUNIT_MAX_SECURITY_DESCRIPTOR_BYTES + 1),
+			-ERANGE);
 }
 
 static u64 pkm_kunit_read_u64(const u8 *bytes, size_t offset)
@@ -3272,6 +3358,163 @@ static void pkm_kunit_create_token_success(struct kunit *test)
 			caller_after.privileges_used &
 				PKM_KUNIT_SE_CREATE_TOKEN_PRIVILEGE,
 			PKM_KUNIT_SE_CREATE_TOKEN_PRIVILEGE);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_create_token_default_enabled_derives_live_groups(
+	struct kunit *test)
+{
+	static const u8 source_name[8] = {
+		'A', 'u', 't', 'h', 'd', 0, 0, 0,
+	};
+	static const struct pkm_kunit_sid_attr_spec groups[] = {
+		{
+			.sid = pkm_kunit_everyone_sid,
+			.sid_len = sizeof(pkm_kunit_everyone_sid),
+			.attributes = PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT |
+				      PKM_KUNIT_SE_GROUP_OWNER,
+		},
+		{
+			.sid = pkm_kunit_authenticated_users_sid,
+			.sid_len = sizeof(pkm_kunit_authenticated_users_sid),
+			.attributes = PKM_KUNIT_SE_GROUP_ENABLED,
+		},
+	};
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_LEVEL_ANONYMOUS,
+		.integrity_level = PKM_KUNIT_IL_MEDIUM,
+		.mandatory_policy = 0x00000003U,
+		.owner_sid_index = 1U,
+		.primary_group_index = 2U,
+		.source_name = source_name,
+		.user_sid = pkm_kunit_local_service_sid,
+		.user_sid_len = sizeof(pkm_kunit_local_service_sid),
+		.groups = groups,
+		.group_count = ARRAY_SIZE(groups),
+		.default_dacl = pkm_kunit_replacement_default_dacl,
+		.default_dacl_len = sizeof(pkm_kunit_replacement_default_dacl),
+	};
+	struct pkm_kacs_token_fd_view view = { };
+	struct pkm_kacs_boot_snapshot snapshot = { };
+	u8 spec[512] = { };
+	const void *subject_token;
+	u64 session_id = 0;
+	size_t spec_len;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	spec_len = pkm_kunit_build_session_spec(spec,
+						PKM_KUNIT_LOGON_TYPE_NETWORK,
+						"Kerberos",
+						pkm_kunit_local_service_sid,
+						sizeof(pkm_kunit_local_service_sid));
+	KUNIT_ASSERT_GT(test, (long)spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_session_for_subject(
+				subject_token, spec, spec_len, &session_id),
+			0L);
+	KUNIT_ASSERT_GE(test, session_id, 1000ULL);
+
+	memset(spec, 0, sizeof(spec));
+	spec_args.session_id = session_id;
+	spec_len = pkm_kunit_build_token_spec(spec, sizeof(spec), &spec_args);
+	KUNIT_ASSERT_GT(test, (long)spec_len, 0L);
+
+	fd = pkm_kacs_kunit_create_token_for_subject(subject_token, spec, spec_len);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test, pkm_kacs_kunit_token_fd_snapshot((int)fd,
+							       &view), 0);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(view.token,
+							       &snapshot));
+	KUNIT_EXPECT_EQ(test, snapshot.group_count, 3U);
+	KUNIT_EXPECT_EQ(test, snapshot.groups_ptr[0].attributes,
+			PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT |
+				PKM_KUNIT_SE_GROUP_ENABLED |
+				PKM_KUNIT_SE_GROUP_OWNER);
+	KUNIT_EXPECT_EQ(test, snapshot.groups_ptr[1].attributes, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_kunit_create_token_preserves_resource_group_metadata(
+	struct kunit *test)
+{
+	static const u8 source_name[8] = {
+		'A', 'u', 't', 'h', 'd', 0, 0, 0,
+	};
+	static const struct pkm_kunit_sid_attr_spec groups[] = {
+		{
+			.sid = pkm_kunit_everyone_sid,
+			.sid_len = sizeof(pkm_kunit_everyone_sid),
+			.attributes = PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT |
+				      PKM_KUNIT_SE_GROUP_OWNER |
+				      PKM_KUNIT_SE_GROUP_RESOURCE,
+		},
+	};
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_LEVEL_ANONYMOUS,
+		.integrity_level = PKM_KUNIT_IL_MEDIUM,
+		.mandatory_policy = 0x00000003U,
+		.owner_sid_index = 1U,
+		.primary_group_index = 1U,
+		.source_name = source_name,
+		.user_sid = pkm_kunit_local_service_sid,
+		.user_sid_len = sizeof(pkm_kunit_local_service_sid),
+		.groups = groups,
+		.group_count = ARRAY_SIZE(groups),
+		.default_dacl = pkm_kunit_replacement_default_dacl,
+		.default_dacl_len = sizeof(pkm_kunit_replacement_default_dacl),
+	};
+	struct kacs_query_args group_query = {
+		.token_class = TOKEN_CLASS_GROUPS,
+		.buf_len = 128,
+	};
+	u8 group_buf[128] = { 0 };
+	u8 spec[512] = { };
+	const void *subject_token;
+	u64 session_id = 0;
+	size_t spec_len;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	spec_len = pkm_kunit_build_session_spec(spec,
+						PKM_KUNIT_LOGON_TYPE_NETWORK,
+						"Kerberos",
+						pkm_kunit_local_service_sid,
+						sizeof(pkm_kunit_local_service_sid));
+	KUNIT_ASSERT_GT(test, (long)spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_session_for_subject(
+				subject_token, spec, spec_len, &session_id),
+			0L);
+	KUNIT_ASSERT_GE(test, session_id, 1000ULL);
+
+	memset(spec, 0, sizeof(spec));
+	spec_args.session_id = session_id;
+	spec_len = pkm_kunit_build_token_spec(spec, sizeof(spec), &spec_args);
+	KUNIT_ASSERT_GT(test, (long)spec_len, 0L);
+
+	fd = pkm_kacs_kunit_create_token_for_subject(subject_token, spec, spec_len);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	group_query.buf_ptr = (u64)(unsigned long)group_buf;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query((int)fd, &group_query,
+						      group_buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(group_buf, 0), 2U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_groups_query_attr(group_buf, 0),
+			PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT |
+				PKM_KUNIT_SE_GROUP_ENABLED |
+				PKM_KUNIT_SE_GROUP_OWNER |
+				PKM_KUNIT_SE_GROUP_RESOURCE);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
@@ -11875,19 +12118,49 @@ static const u8 *pkm_kunit_synthesize_file_sd(const u8 *parent_sd,
 	return sd;
 }
 
-static void pkm_kunit_make_first_file_ace_inheritable(u8 *sd_bytes,
-						      u8 inherit_flags)
+static const u8 *pkm_kunit_first_dacl_ace_const(const u8 *sd_bytes)
 {
 	u32 dacl_offset;
 
 	if (!sd_bytes)
-		return;
+		return NULL;
 
 	dacl_offset = pkm_kunit_read_u32(sd_bytes, 16);
 	if (dacl_offset == 0)
+		return NULL;
+	if (pkm_kunit_read_u16(sd_bytes, dacl_offset + 4) == 0)
+		return NULL;
+
+	return sd_bytes + dacl_offset + 8;
+}
+
+static u8 *pkm_kunit_first_dacl_ace(u8 *sd_bytes)
+{
+	return (u8 *)pkm_kunit_first_dacl_ace_const(sd_bytes);
+}
+
+static void pkm_kunit_make_first_file_ace_inheritable(u8 *sd_bytes,
+						      u8 inherit_flags)
+{
+	u8 *ace;
+
+	ace = pkm_kunit_first_dacl_ace(sd_bytes);
+	if (!ace)
 		return;
 
-	sd_bytes[dacl_offset + 8 + 1] = inherit_flags;
+	ace[1] = inherit_flags;
+}
+
+static void pkm_kunit_make_first_file_ace_opaque(u8 *sd_bytes, u8 ace_flags)
+{
+	u8 *ace;
+
+	ace = pkm_kunit_first_dacl_ace(sd_bytes);
+	if (!ace)
+		return;
+
+	ace[0] = PKM_KUNIT_OPAQUE_ACE_TYPE;
+	ace[1] = ace_flags;
 }
 
 static void pkm_kunit_file_sd_cache_population_from_valid_xattr(
@@ -12241,6 +12514,100 @@ static void pkm_kunit_native_open_read_success(struct kunit *test)
 	KUNIT_EXPECT_NE(test, file_mode & FMODE_READ, 0U);
 	KUNIT_EXPECT_EQ(test, file_mode & FMODE_WRITE, 0U);
 	KUNIT_EXPECT_EQ(test, file_mode & FMODE_EXEC, 0U);
+
+	pkm_kacs_free((void *)file_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_native_open_maximum_allowed_with_read_success(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_native_open_args args = {
+		.desired_access = KACS_ACCESS_MAXIMUM_ALLOWED |
+				  PKM_KUNIT_FILE_READ_DATA,
+		.create_disposition = KACS_FILE_OPEN,
+	};
+	const void *subject_token;
+	const u8 *file_sd;
+	size_t file_sd_len = 0;
+	u32 granted = 0;
+	u32 status = 0;
+	u32 file_mode = 0;
+	u32 expected;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	expected = PKM_KUNIT_FILE_READ_DATA | PKM_KUNIT_FILE_WRITE_DATA |
+		   PKM_KUNIT_FILE_READ_ATTRIBUTES | KACS_ACCESS_READ_CONTROL |
+		   KACS_ACCESS_WRITE_DAC;
+	file_sd = pkm_kunit_create_precise_file_sd(subject_token, expected,
+						   &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = file_sd;
+	args.target_file_sd_len = file_sd_len;
+	args.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_native_open_for_subject(
+				&args, &granted, &status, &file_mode),
+			0L);
+	KUNIT_EXPECT_EQ(test, granted, expected);
+	KUNIT_EXPECT_EQ(test, status, KACS_STATUS_OPENED);
+	KUNIT_EXPECT_NE(test, file_mode & FMODE_READ, 0U);
+	KUNIT_EXPECT_EQ(test, file_mode & FMODE_WRITE, 0U);
+	KUNIT_EXPECT_EQ(test, file_mode & FMODE_EXEC, 0U);
+
+	pkm_kacs_free((void *)file_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_native_open_maximum_allowed_requires_mode_bit(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_native_open_args args = {
+		.desired_access = KACS_ACCESS_MAXIMUM_ALLOWED,
+		.create_disposition = KACS_FILE_OPEN,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_native_open_for_subject(
+				&args, NULL, NULL, NULL),
+			(long)-EINVAL);
+}
+
+static void pkm_kunit_native_open_maximum_allowed_mode_bit_denied(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_native_open_args args = {
+		.desired_access = KACS_ACCESS_MAXIMUM_ALLOWED |
+				  PKM_KUNIT_FILE_READ_DATA,
+		.create_disposition = KACS_FILE_OPEN,
+	};
+	const void *subject_token;
+	const u8 *file_sd;
+	size_t file_sd_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	file_sd = pkm_kunit_create_precise_file_sd(
+		subject_token, PKM_KUNIT_FILE_WRITE_DATA, &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = file_sd;
+	args.target_file_sd_len = file_sd_len;
+	args.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_native_open_for_subject(
+				&args, NULL, NULL, NULL),
+			(long)-EACCES);
 
 	pkm_kacs_free((void *)file_sd);
 	kacs_rust_token_drop(subject_token);
@@ -13440,6 +13807,72 @@ static void pkm_kunit_native_create_regular_success(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, status, KACS_STATUS_CREATED);
 	KUNIT_ASSERT_NOT_NULL(test, created_sd);
 	KUNIT_EXPECT_GT(test, created_sd_len, (size_t)0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_read_u16(created_sd, 2) &
+				PKM_KUNIT_SE_OWNER_DEFAULTED,
+			PKM_KUNIT_SE_OWNER_DEFAULTED);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_read_u16(created_sd, 2) &
+				PKM_KUNIT_SE_GROUP_DEFAULTED,
+			PKM_KUNIT_SE_GROUP_DEFAULTED);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_read_u16(created_sd, 2) &
+				PKM_KUNIT_SE_DACL_DEFAULTED,
+			0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_read_u16(created_sd, 2) &
+				PKM_KUNIT_SE_DACL_AUTO_INHERITED,
+			PKM_KUNIT_SE_DACL_AUTO_INHERITED);
+
+	pkm_kacs_free((void *)created_sd);
+	pkm_kacs_free((void *)parent_sd);
+}
+
+static void pkm_kunit_native_create_defaulted_control_flags(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_native_create_args args = {
+		.desired_access = PKM_KUNIT_FILE_READ_DATA,
+		.create_disposition = KACS_FILE_CREATE,
+	};
+	const void *subject_token;
+	const u8 *parent_sd = NULL;
+	const u8 *created_sd = NULL;
+	size_t parent_sd_len = 0;
+	size_t created_sd_len = 0;
+	u16 control;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	parent_sd = pkm_kunit_create_precise_file_sd(
+		subject_token,
+		PKM_KUNIT_FILE_WRITE_DATA | PKM_KUNIT_FILE_READ_DATA,
+		&parent_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, parent_sd);
+
+	args.subject_token = subject_token;
+	args.parent_file_sd_ptr = parent_sd;
+	args.parent_file_sd_len = parent_sd_len;
+	args.parent_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_native_create_for_subject(
+				&args, &created_sd, &created_sd_len, NULL,
+				NULL),
+			0L);
+	KUNIT_ASSERT_NOT_NULL(test, created_sd);
+
+	control = pkm_kunit_read_u16(created_sd, 2);
+	KUNIT_EXPECT_EQ(test, control & PKM_KUNIT_SE_OWNER_DEFAULTED,
+			PKM_KUNIT_SE_OWNER_DEFAULTED);
+	KUNIT_EXPECT_EQ(test, control & PKM_KUNIT_SE_GROUP_DEFAULTED,
+			PKM_KUNIT_SE_GROUP_DEFAULTED);
+	KUNIT_EXPECT_EQ(test, control & PKM_KUNIT_SE_DACL_DEFAULTED,
+			PKM_KUNIT_SE_DACL_DEFAULTED);
+	KUNIT_EXPECT_EQ(test, control & PKM_KUNIT_SE_DACL_AUTO_INHERITED, 0U);
+	KUNIT_EXPECT_EQ(test, control & PKM_KUNIT_SE_DACL_PRESENT,
+			PKM_KUNIT_SE_DACL_PRESENT);
 
 	pkm_kacs_free((void *)created_sd);
 	pkm_kacs_free((void *)parent_sd);
@@ -14165,6 +14598,83 @@ static void pkm_kunit_set_file_sd_cached_success(struct kunit *test)
 	pkm_kacs_free((void *)target_file_sd);
 }
 
+static void pkm_kunit_set_file_sd_cached_sacl_uses_cached_access(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_SACL_SECURITY_INFORMATION,
+		.file_mode = FMODE_READ,
+	};
+	const void *subject_token;
+	const void *target_token;
+	const u8 *target_file_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const u8 *expected_subset = NULL;
+	const u8 *actual_subset = NULL;
+	size_t target_file_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	size_t expected_subset_len = 0;
+	size_t actual_subset_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	target_file_sd = pkm_kunit_create_default_file_sd(target_token,
+							  &target_file_sd_len);
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_file_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = target_file_sd;
+	args.target_file_sd_len = target_file_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_cached_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			(long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, result_sd, NULL);
+	KUNIT_EXPECT_EQ(test, result_sd_len, (size_t)0);
+
+	args.cached_granted_access = KACS_ACCESS_ACCESS_SYSTEM_SECURITY;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_cached_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				input_sd, input_sd_len,
+				PKM_KUNIT_SACL_SECURITY_INFORMATION,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				result_sd, result_sd_len,
+				PKM_KUNIT_SACL_SECURITY_INFORMATION,
+				&actual_subset, &actual_subset_len),
+			0);
+	KUNIT_EXPECT_EQ(test, actual_subset_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(actual_subset, expected_subset, actual_subset_len),
+			0);
+
+	pkm_kacs_free((void *)actual_subset);
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)result_sd);
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_file_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
 static void pkm_kunit_get_file_sd_cached_unmanaged_fails_closed(
 	struct kunit *test)
 {
@@ -14522,6 +15032,15 @@ static void pkm_kunit_mount_policy_rejects_invalid_templates(
 				&generation, &template_len),
 			(long)-EINVAL);
 
+	args.policy = PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL;
+	args.template_sd_ptr = (u64)(unsigned long)template_sd;
+	args.template_sd_len = PKM_KUNIT_MAX_SECURITY_DESCRIPTOR_BYTES + 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_mount_policy_for_subject(
+				subject_token, TMPFS_MAGIC, &args, &policy,
+				&generation, &template_len),
+			(long)-EINVAL);
+
 	pkm_kacs_free((void *)template_sd);
 }
 
@@ -14634,6 +15153,7 @@ static void pkm_kunit_synthesize_file_sd_parent_inheritance_success(
 	parent_sd = pkm_kunit_create_query_only_file_sd(subject_token,
 							&parent_sd_len);
 	KUNIT_ASSERT_NOT_NULL(test, parent_sd);
+	pkm_kunit_set_sd_dacl_reserved_fields((u8 *)parent_sd, 0x5d, 0x1234);
 	pkm_kunit_make_first_file_ace_inheritable((u8 *)parent_sd, 0x01);
 
 	child_sd = pkm_kunit_synthesize_file_sd(parent_sd, parent_sd_len,
@@ -14656,6 +15176,8 @@ static void pkm_kunit_synthesize_file_sd_parent_inheritance_success(
 	child_dacl_offset = pkm_kunit_read_u32(child_subset, 16);
 	KUNIT_ASSERT_NE(test, child_dacl_offset, 0U);
 	KUNIT_EXPECT_EQ(test, child_subset[child_dacl_offset + 8 + 1], 0x11);
+	pkm_kunit_expect_sd_dacl_reserved_fields(test, child_sd, 0x5d,
+						 0x1234);
 
 	pkm_kacs_free((void *)child_subset);
 	pkm_kacs_free((void *)parent_subset);
@@ -14710,6 +15232,199 @@ static void pkm_kunit_synthesize_file_sd_parent_without_inheritance_falls_back(
 	pkm_kacs_free((void *)fallback_sd);
 	pkm_kacs_free((void *)child_sd);
 	pkm_kacs_free((void *)parent_sd);
+}
+
+static void pkm_kunit_build_created_file_sd_creator_dacl_preserves_acl_reserved(
+	struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *parent_sd;
+	const u8 *creator_sd;
+	const u8 *child_sd = NULL;
+	size_t parent_sd_len = 0;
+	size_t creator_sd_len = 0;
+	size_t child_sd_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	parent_sd = pkm_kunit_create_query_only_file_sd(subject_token,
+							&parent_sd_len);
+	creator_sd = pkm_kunit_create_query_only_file_sd(subject_token,
+							 &creator_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, parent_sd);
+	KUNIT_ASSERT_NOT_NULL(test, creator_sd);
+	pkm_kunit_set_sd_dacl_reserved_fields((u8 *)creator_sd, 0x6e,
+					      0x5678);
+
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_build_created_file_sd(subject_token,
+							parent_sd,
+							parent_sd_len,
+							creator_sd,
+							creator_sd_len, 0,
+							&child_sd,
+							&child_sd_len),
+			0);
+	pkm_kunit_expect_sd_dacl_reserved_fields(test, child_sd, 0x6e,
+						 0x5678);
+
+	pkm_kacs_free((void *)child_sd);
+	pkm_kacs_free((void *)creator_sd);
+	pkm_kacs_free((void *)parent_sd);
+}
+
+static void pkm_kunit_build_created_file_sd_creator_dacl_preserves_opaque_ace(
+	struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *parent_sd;
+	const u8 *creator_sd;
+	const u8 *child_sd = NULL;
+	const u8 *source_ace;
+	const u8 *actual_ace;
+	u8 *expected_ace;
+	size_t parent_sd_len = 0;
+	size_t creator_sd_len = 0;
+	size_t child_sd_len = 0;
+	u16 source_ace_len;
+	u16 actual_ace_len;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	parent_sd = pkm_kunit_create_query_only_file_sd(subject_token,
+							&parent_sd_len);
+	creator_sd = pkm_kunit_create_query_only_file_sd(subject_token,
+							 &creator_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, parent_sd);
+	KUNIT_ASSERT_NOT_NULL(test, creator_sd);
+	pkm_kunit_make_first_file_ace_opaque(
+		(u8 *)creator_sd,
+		PKM_KUNIT_CONTAINER_INHERIT_ACE | PKM_KUNIT_INHERITED_ACE);
+
+	source_ace = pkm_kunit_first_dacl_ace_const(creator_sd);
+	KUNIT_ASSERT_NOT_NULL(test, source_ace);
+	source_ace_len = pkm_kunit_read_u16(source_ace, 2);
+	expected_ace = kunit_kzalloc(test, source_ace_len, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, expected_ace);
+	memcpy(expected_ace, source_ace, source_ace_len);
+	expected_ace[1] = PKM_KUNIT_CONTAINER_INHERIT_ACE;
+
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_build_created_file_sd(subject_token,
+							parent_sd,
+							parent_sd_len,
+							creator_sd,
+							creator_sd_len, 0,
+							&child_sd,
+							&child_sd_len),
+			0);
+	actual_ace = pkm_kunit_first_dacl_ace_const(child_sd);
+	KUNIT_ASSERT_NOT_NULL(test, actual_ace);
+	actual_ace_len = pkm_kunit_read_u16(actual_ace, 2);
+	pkm_kunit_expect_bytes_eq(test, actual_ace, actual_ace_len,
+				  expected_ace, source_ace_len);
+
+	pkm_kacs_free((void *)child_sd);
+	pkm_kacs_free((void *)creator_sd);
+	pkm_kacs_free((void *)parent_sd);
+}
+
+static void pkm_kunit_build_created_file_sd_parent_preserves_opaque_ace(
+	struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *parent_sd;
+	const u8 *child_sd = NULL;
+	const u8 *source_ace;
+	const u8 *actual_ace;
+	u8 *expected_ace;
+	size_t parent_sd_len = 0;
+	size_t child_sd_len = 0;
+	u16 source_ace_len;
+	u16 actual_ace_len;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	parent_sd = pkm_kunit_create_query_only_file_sd(subject_token,
+							&parent_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, parent_sd);
+	pkm_kunit_make_first_file_ace_opaque(
+		(u8 *)parent_sd, PKM_KUNIT_OBJECT_INHERIT_ACE);
+
+	source_ace = pkm_kunit_first_dacl_ace_const(parent_sd);
+	KUNIT_ASSERT_NOT_NULL(test, source_ace);
+	source_ace_len = pkm_kunit_read_u16(source_ace, 2);
+	expected_ace = kunit_kzalloc(test, source_ace_len, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, expected_ace);
+	memcpy(expected_ace, source_ace, source_ace_len);
+	expected_ace[1] = PKM_KUNIT_OBJECT_INHERIT_ACE |
+			  PKM_KUNIT_INHERITED_ACE;
+
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_build_created_file_sd(subject_token,
+							parent_sd,
+							parent_sd_len, NULL,
+							0, 0, &child_sd,
+							&child_sd_len),
+			0);
+	actual_ace = pkm_kunit_first_dacl_ace_const(child_sd);
+	KUNIT_ASSERT_NOT_NULL(test, actual_ace);
+	actual_ace_len = pkm_kunit_read_u16(actual_ace, 2);
+	pkm_kunit_expect_bytes_eq(test, actual_ace, actual_ace_len,
+				  expected_ace, source_ace_len);
+
+	pkm_kacs_free((void *)child_sd);
+	pkm_kacs_free((void *)parent_sd);
+}
+
+static void pkm_kunit_build_created_file_sd_without_default_dacl_gets_null_dacl(
+	struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *parent_sd;
+	const u8 *child_sd = NULL;
+	size_t parent_sd_len = 0;
+	size_t child_sd_len = 0;
+	u16 control;
+
+	subject_token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	parent_sd = pkm_kunit_create_query_only_file_sd(subject_token,
+							&parent_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, parent_sd);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_token_adjust_default(subject_token,
+						       PKM_KUNIT_TOKEN_INDEX_NO_CHANGE,
+						       PKM_KUNIT_TOKEN_INDEX_NO_CHANGE,
+						       NULL,
+						       0, 1U),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_build_created_file_sd(subject_token,
+							parent_sd,
+							parent_sd_len, NULL,
+							0, 0, &child_sd,
+							&child_sd_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, child_sd);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_validate_sd_bytes(child_sd, child_sd_len),
+			0);
+
+	control = pkm_kunit_read_u16(child_sd, 2);
+	KUNIT_EXPECT_EQ(test, control & PKM_KUNIT_SE_DACL_PRESENT, 0U);
+	KUNIT_EXPECT_EQ(test, control & PKM_KUNIT_SE_DACL_DEFAULTED, 0U);
+	KUNIT_EXPECT_NE(test, pkm_kunit_read_u32(child_sd, 4), 0U);
+	KUNIT_EXPECT_NE(test, pkm_kunit_read_u32(child_sd, 8), 0U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(child_sd, 16), 0U);
+
+	pkm_kacs_free((void *)child_sd);
+	pkm_kacs_free((void *)parent_sd);
+	kacs_rust_token_drop(subject_token);
 }
 
 static void pkm_kunit_file_missing_sd_synthesize_ephemeral_root_query_success(
@@ -14930,6 +15645,69 @@ static void pkm_kunit_get_file_sd_label_on_unlabeled_returns_empty_subset(
 	KUNIT_ASSERT_NOT_NULL(test, subset);
 	KUNIT_EXPECT_EQ(test, subset_len, (size_t)20);
 	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(subset, 12), 0U);
+
+	pkm_kacs_free((void *)subset);
+	pkm_kacs_free((void *)file_sd);
+}
+
+static void pkm_kunit_file_sd_subset_preserves_rm_control_byte(
+	struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *file_sd;
+	const u8 *subset = NULL;
+	size_t file_sd_len = 0;
+	size_t subset_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	file_sd = pkm_kunit_create_default_file_sd(subject_token, &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	pkm_kunit_set_sd_rm_control((u8 *)file_sd, 0x5a);
+
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				file_sd, file_sd_len,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION, &subset,
+				&subset_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, subset);
+	pkm_kunit_expect_sd_rm_control(test, subset, 0x5a);
+
+	pkm_kacs_free((void *)subset);
+	pkm_kacs_free((void *)file_sd);
+}
+
+static void pkm_kunit_file_sd_subset_preserves_dacl_trusted_metadata(
+	struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *file_sd;
+	const u8 *subset = NULL;
+	size_t file_sd_len = 0;
+	size_t subset_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	file_sd = pkm_kunit_create_default_file_sd(subject_token, &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	pkm_kunit_write_u16((u8 *)file_sd, 2,
+			    pkm_kunit_read_u16(file_sd, 2) |
+				    PKM_KUNIT_SE_DACL_TRUSTED);
+
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				file_sd, file_sd_len,
+				PKM_KUNIT_DACL_SECURITY_INFORMATION, &subset,
+				&subset_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, subset);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_read_u16(subset, 2) &
+				PKM_KUNIT_SE_DACL_TRUSTED,
+			PKM_KUNIT_SE_DACL_TRUSTED);
 
 	pkm_kacs_free((void *)subset);
 	pkm_kacs_free((void *)file_sd);
@@ -15212,6 +15990,132 @@ static void pkm_kunit_set_file_sd_dacl_denied_without_write_dac(
 	kacs_rust_token_drop(subject_token);
 }
 
+static void pkm_kunit_set_file_sd_sacl_denied_without_security(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_SACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const void *target_token;
+	const u8 *target_file_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	size_t target_file_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	target_file_sd = pkm_kunit_create_default_file_sd(target_token,
+							  &target_file_sd_len);
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_file_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = target_file_sd;
+	args.target_file_sd_len = target_file_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			(long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, result_sd, NULL);
+	KUNIT_EXPECT_EQ(test, result_sd_len, (size_t)0);
+
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_file_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_file_sd_sacl_with_security_succeeds(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_SACL_SECURITY_INFORMATION,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *target_file_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const u8 *expected_subset = NULL;
+	const u8 *actual_subset = NULL;
+	size_t target_file_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	size_t expected_subset_len = 0;
+	size_t actual_subset_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_SECURITY_PRIVILEGE);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	target_file_sd = pkm_kunit_create_default_file_sd(target_token,
+							  &target_file_sd_len);
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_file_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = target_file_sd;
+	args.target_file_sd_len = target_file_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				input_sd, input_sd_len,
+				PKM_KUNIT_SACL_SECURITY_INFORMATION,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_file_sd_subset(
+				result_sd, result_sd_len,
+				PKM_KUNIT_SACL_SECURITY_INFORMATION,
+				&actual_subset, &actual_subset_len),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test, actual_subset_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(actual_subset, expected_subset, actual_subset_len),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_SECURITY_PRIVILEGE);
+
+	pkm_kacs_free((void *)actual_subset);
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)result_sd);
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_file_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
 static void pkm_kunit_set_file_sd_missing_restore_success(
 	struct kunit *test)
 {
@@ -15244,6 +16148,7 @@ static void pkm_kunit_set_file_sd_missing_restore_success(
 
 	input_sd = pkm_kunit_create_default_file_sd(target_token, &input_sd_len);
 	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	pkm_kunit_set_sd_rm_control((u8 *)input_sd, 0x6b);
 	args.subject_token = subject_token;
 	args.input_sd_ptr = input_sd;
 	args.input_sd_len = input_sd_len;
@@ -15262,6 +16167,7 @@ static void pkm_kunit_set_file_sd_missing_restore_success(
 	KUNIT_EXPECT_EQ(test, result_sd_len, expected_subset_len);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(result_sd, expected_subset, result_sd_len), 0);
+	pkm_kunit_expect_sd_rm_control(test, result_sd, 0x6b);
 	KUNIT_EXPECT_EQ(test,
 			after.privileges_used,
 			before.privileges_used |
@@ -15620,8 +16526,10 @@ static void pkm_kunit_get_process_sd_success(struct kunit *test)
 	const void *subject_token;
 	const u8 *process_sd;
 	const u8 *subset = NULL;
+	const u8 *expected_subset = NULL;
 	size_t process_sd_len = 0;
 	size_t subset_len = 0;
+	size_t expected_subset_len = 0;
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
@@ -15637,9 +16545,17 @@ static void pkm_kunit_get_process_sd_success(struct kunit *test)
 			pkm_kacs_kunit_get_process_sd_for_subject(
 				&args, &subset, &subset_len),
 			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_process_sd_subset(
+				process_sd, process_sd_len, args.security_info,
+				&expected_subset, &expected_subset_len),
+			0);
 	KUNIT_ASSERT_NOT_NULL(test, subset);
-	KUNIT_EXPECT_GT(test, subset_len, (size_t)20);
+	KUNIT_ASSERT_NOT_NULL(test, expected_subset);
+	KUNIT_EXPECT_EQ(test, subset_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test, memcmp(subset, expected_subset, subset_len), 0);
 
+	pkm_kacs_free((void *)expected_subset);
 	pkm_kacs_free((void *)subset);
 	pkm_kacs_free((void *)process_sd);
 }
@@ -15791,6 +16707,7 @@ static void pkm_kunit_set_process_sd_dacl_success(struct kunit *test)
 		subject_token, &input_sd_len);
 	KUNIT_ASSERT_NOT_NULL(test, target_process_sd);
 	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	pkm_kunit_set_sd_rm_control((u8 *)target_process_sd, 0x7c);
 	args.subject_token = subject_token;
 	args.target_process_sd_ptr = target_process_sd;
 	args.target_process_sd_len = target_process_sd_len;
@@ -15808,6 +16725,7 @@ static void pkm_kunit_set_process_sd_dacl_success(struct kunit *test)
 				PKM_KUNIT_DACL_SECURITY_INFORMATION,
 				&expected_subset, &expected_subset_len),
 			0);
+	pkm_kunit_set_sd_rm_control((u8 *)expected_subset, 0x7c);
 	KUNIT_ASSERT_EQ(test,
 			kacs_rust_query_process_sd_subset(
 				result_sd, result_sd_len,
@@ -15818,6 +16736,7 @@ static void pkm_kunit_set_process_sd_dacl_success(struct kunit *test)
 	KUNIT_EXPECT_EQ(test,
 			memcmp(actual_subset, expected_subset, actual_subset_len),
 			0);
+	pkm_kunit_expect_sd_rm_control(test, result_sd, 0x7c);
 
 	pkm_kacs_free((void *)actual_subset);
 	pkm_kacs_free((void *)expected_subset);
@@ -15868,6 +16787,133 @@ static void pkm_kunit_set_process_sd_dacl_denied_without_write_dac(
 	KUNIT_EXPECT_PTR_EQ(test, result_sd, NULL);
 	KUNIT_EXPECT_EQ(test, result_sd_len, (size_t)0);
 
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_process_sd_sacl_denied_without_security(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_sd_set_args args = {
+		.self_target = 1,
+		.security_info = PKM_KUNIT_SACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const void *target_token;
+	const u8 *target_process_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	size_t target_process_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	target_process_sd = kacs_rust_create_default_process_sd(
+		target_token, &target_process_sd_len);
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_process_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = target_process_sd;
+	args.target_process_sd_len = target_process_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_process_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			(long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, result_sd, NULL);
+	KUNIT_EXPECT_EQ(test, result_sd_len, (size_t)0);
+
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_process_sd_sacl_with_security_succeeds(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_sd_set_args args = {
+		.self_target = 1,
+		.security_info = PKM_KUNIT_SACL_SECURITY_INFORMATION,
+	};
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *target_process_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const u8 *expected_subset = NULL;
+	const u8 *actual_subset = NULL;
+	size_t target_process_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	size_t expected_subset_len = 0;
+	size_t actual_subset_len = 0;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_SECURITY_PRIVILEGE);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	target_process_sd = kacs_rust_create_default_process_sd(
+		target_token, &target_process_sd_len);
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_process_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = target_process_sd;
+	args.target_process_sd_len = target_process_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_process_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			0L);
+	KUNIT_ASSERT_NOT_NULL(test, result_sd);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_process_sd_subset(
+				input_sd, input_sd_len,
+				PKM_KUNIT_SACL_SECURITY_INFORMATION,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_process_sd_subset(
+				result_sd, result_sd_len,
+				PKM_KUNIT_SACL_SECURITY_INFORMATION,
+				&actual_subset, &actual_subset_len),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_EXPECT_EQ(test, actual_subset_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(actual_subset, expected_subset, actual_subset_len),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_SECURITY_PRIVILEGE);
+
+	pkm_kacs_free((void *)actual_subset);
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)result_sd);
 	pkm_kacs_free((void *)input_sd);
 	pkm_kacs_free((void *)target_process_sd);
 	kacs_rust_token_drop(subject_token);
@@ -16485,6 +17531,116 @@ static void pkm_kunit_set_token_sd_dacl_denied_without_write_dac(
 	KUNIT_EXPECT_PTR_EQ(test, result_sd, NULL);
 	KUNIT_EXPECT_EQ(test, result_sd_len, (size_t)0);
 
+	pkm_kacs_free((void *)input_sd);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_token_sd_sacl_denied_without_security(
+	struct kunit *test)
+{
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const void *subject_token;
+	const void *target_token;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	long token_fd;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		pkm_kacs_current_effective_token_ptr(), target_token,
+		KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_SACL_SECURITY_INFORMATION, input_sd,
+				input_sd_len, &result_sd, &result_sd_len),
+			(long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, result_sd, NULL);
+	KUNIT_EXPECT_EQ(test, result_sd_len, (size_t)0);
+
+	pkm_kacs_free((void *)input_sd);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
+	kacs_rust_token_drop(target_token);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_token_sd_sacl_with_security_succeeds(
+	struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	const u8 *expected_subset = NULL;
+	const void *subject_token;
+	const void *target_token;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+	size_t expected_subset_len = 0;
+	long token_fd;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_LEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_SECURITY_PRIVILEGE);
+	target_token = kacs_rust_token_deep_copy(
+		pkm_kacs_current_primary_token_ptr());
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &before));
+
+	token_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		pkm_kacs_current_effective_token_ptr(), target_token,
+		KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, token_fd, 0);
+
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_token_sd_for_subject(
+				(int)token_fd, subject_token,
+				PKM_KUNIT_SACL_SECURITY_INFORMATION, input_sd,
+				input_sd_len, &result_sd, &result_sd_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_query_process_sd_subset(
+				input_sd, input_sd_len,
+				PKM_KUNIT_SACL_SECURITY_INFORMATION,
+				&expected_subset, &expected_subset_len),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(subject_token, &after));
+	KUNIT_ASSERT_NOT_NULL(test, result_sd);
+	KUNIT_ASSERT_NOT_NULL(test, expected_subset);
+	KUNIT_EXPECT_EQ(test, result_sd_len, expected_subset_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result_sd, expected_subset, result_sd_len), 0);
+	KUNIT_EXPECT_EQ(test,
+			after.privileges_used,
+			before.privileges_used |
+				PKM_KUNIT_SE_SECURITY_PRIVILEGE);
+
+	pkm_kacs_free((void *)expected_subset);
+	pkm_kacs_free((void *)result_sd);
 	pkm_kacs_free((void *)input_sd);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)token_fd), 0);
 	kacs_rust_token_drop(target_token);
@@ -20256,6 +21412,121 @@ static void pkm_kunit_token_restrict_updates_query_and_source_unchanged(
 	kacs_rust_token_drop(target_token);
 }
 
+static void pkm_kunit_token_restrict_deny_only_survives_group_reset(
+	struct kunit *test)
+{
+	struct kacs_restrict_args restrict_args = {
+		.num_deny_indices = 1,
+		.result_fd = -1,
+	};
+	struct kacs_adjust_groups_args enable_deny_only = {
+		.count = 1,
+	};
+	struct kacs_group_entry enable_deny_only_entry = {
+		.index = 0,
+		.enable = 1,
+	};
+	struct kacs_adjust_groups_args mutate = {
+		.count = 1,
+	};
+	struct kacs_group_entry mutate_entry = {
+		.index = 1,
+		.enable = 1,
+	};
+	struct kacs_adjust_groups_args reset = {
+		.count = 1,
+	};
+	struct kacs_group_entry reset_entry = {
+		.index = 0xFFFFFFFFU,
+		.enable = 0,
+	};
+	struct kacs_query_args group_query = {
+		.token_class = TOKEN_CLASS_GROUPS,
+		.buf_len = 256,
+	};
+	u32 deny_indices[1] = { 0U };
+	u8 payload[16] = { 0 };
+	u8 group_buf[256] = { 0 };
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	target_token = kacs_rust_kunit_create_adjustable_groups_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, target_token,
+		KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	restrict_args.data_len = pkm_kunit_build_restrict_payload(
+		payload, deny_indices, ARRAY_SIZE(deny_indices), NULL, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict((int)fd, subject_token,
+							subject_token,
+							&restrict_args, payload),
+			(long)0);
+	KUNIT_ASSERT_GE(test, restrict_args.result_fd, 0);
+
+	group_query.buf_ptr = (u64)(unsigned long)group_buf;
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query(restrict_args.result_fd,
+						      &group_query, group_buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_groups_query_attr(group_buf, 0) &
+				PKM_KUNIT_SE_GROUP_USE_FOR_DENY_ONLY,
+			PKM_KUNIT_SE_GROUP_USE_FOR_DENY_ONLY);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_groups(
+				restrict_args.result_fd, &enable_deny_only,
+				&enable_deny_only_entry),
+			(long)-EINVAL);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_groups(
+				restrict_args.result_fd, &mutate, &mutate_entry),
+			(long)0);
+
+	memset(group_buf, 0, sizeof(group_buf));
+	group_query.buf_len = sizeof(group_buf);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query(restrict_args.result_fd,
+						      &group_query, group_buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_groups_query_attr(group_buf, 0) &
+				PKM_KUNIT_SE_GROUP_USE_FOR_DENY_ONLY,
+			PKM_KUNIT_SE_GROUP_USE_FOR_DENY_ONLY);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_groups_query_attr(group_buf, 1),
+			PKM_KUNIT_SE_GROUP_ENABLED);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_adjust_groups(
+				restrict_args.result_fd, &reset, &reset_entry),
+			(long)0);
+
+	memset(group_buf, 0, sizeof(group_buf));
+	group_query.buf_len = sizeof(group_buf);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_query(restrict_args.result_fd,
+						      &group_query, group_buf),
+			(long)0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_groups_query_attr(group_buf, 0) &
+				PKM_KUNIT_SE_GROUP_USE_FOR_DENY_ONLY,
+			PKM_KUNIT_SE_GROUP_USE_FOR_DENY_ONLY);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_groups_query_attr(group_buf, 1),
+			PKM_KUNIT_ADJUSTABLE_GROUP1_DEFAULT);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)restrict_args.result_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
 static void pkm_kunit_token_restrict_intersects_existing_restricted_sids(
 	struct kunit *test)
 {
@@ -21732,6 +23003,8 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_create_session_requires_tcb),
 	KUNIT_CASE(pkm_kunit_create_session_invalid_spec_fails_closed),
 	KUNIT_CASE(pkm_kunit_create_token_success),
+	KUNIT_CASE(pkm_kunit_create_token_default_enabled_derives_live_groups),
+	KUNIT_CASE(pkm_kunit_create_token_preserves_resource_group_metadata),
 	KUNIT_CASE(pkm_kunit_create_token_requires_privilege),
 	KUNIT_CASE(pkm_kunit_create_token_invalid_session_fails_closed),
 	KUNIT_CASE(pkm_kunit_create_token_primary_non_anonymous_denies),
@@ -22027,6 +23300,12 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_open_directory_write_fails_closed),
 	KUNIT_CASE(pkm_kunit_file_open_unmanaged_mount_leaves_no_grant),
 	KUNIT_CASE(pkm_kunit_native_open_read_success),
+	KUNIT_CASE(
+		pkm_kunit_native_open_maximum_allowed_with_read_success),
+	KUNIT_CASE(
+		pkm_kunit_native_open_maximum_allowed_requires_mode_bit),
+	KUNIT_CASE(
+		pkm_kunit_native_open_maximum_allowed_mode_bit_denied),
 	KUNIT_CASE(pkm_kunit_native_open_execute_only_sets_exec_mode),
 	KUNIT_CASE(pkm_kunit_native_open_directory_read_success),
 	KUNIT_CASE(pkm_kunit_native_open_special_nodes_use_file_rights),
@@ -22067,6 +23346,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 		pkm_kunit_native_destructive_directory_target_fails_closed),
 	KUNIT_CASE(pkm_kunit_native_create_existing_fails_closed),
 	KUNIT_CASE(pkm_kunit_native_create_regular_success),
+	KUNIT_CASE(pkm_kunit_native_create_defaulted_control_flags),
 	KUNIT_CASE(pkm_kunit_native_create_directory_success),
 	KUNIT_CASE(pkm_kunit_native_open_if_missing_creates_success),
 	KUNIT_CASE(pkm_kunit_native_overwrite_if_missing_creates_success),
@@ -22103,6 +23383,14 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_kunit_synthesize_file_sd_parent_without_inheritance_falls_back),
 	KUNIT_CASE(
+		pkm_kunit_build_created_file_sd_creator_dacl_preserves_acl_reserved),
+	KUNIT_CASE(
+		pkm_kunit_build_created_file_sd_creator_dacl_preserves_opaque_ace),
+	KUNIT_CASE(
+		pkm_kunit_build_created_file_sd_parent_preserves_opaque_ace),
+	KUNIT_CASE(
+		pkm_kunit_build_created_file_sd_without_default_dacl_gets_null_dacl),
+	KUNIT_CASE(
 		pkm_kunit_file_missing_sd_synthesize_ephemeral_root_query_success),
 	KUNIT_CASE(
 		pkm_kunit_file_missing_sd_synthesize_persistent_root_writes_xattr),
@@ -22120,10 +23408,16 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_get_file_sd_cached_denied_without_read_control),
 	KUNIT_CASE(pkm_kunit_get_file_sd_cached_unmanaged_fails_closed),
 	KUNIT_CASE(pkm_kunit_get_file_sd_unmanaged_mount_fails_closed),
+	KUNIT_CASE(pkm_kunit_validate_sd_rejects_oversized_descriptor),
+	KUNIT_CASE(pkm_kunit_file_sd_subset_preserves_rm_control_byte),
+	KUNIT_CASE(pkm_kunit_file_sd_subset_preserves_dacl_trusted_metadata),
 	KUNIT_CASE(pkm_kunit_set_file_sd_dacl_success),
 	KUNIT_CASE(pkm_kunit_set_path_file_sd_dacl_success),
 	KUNIT_CASE(pkm_kunit_set_file_sd_cached_success),
+	KUNIT_CASE(pkm_kunit_set_file_sd_cached_sacl_uses_cached_access),
 	KUNIT_CASE(pkm_kunit_set_file_sd_dacl_denied_without_write_dac),
+	KUNIT_CASE(pkm_kunit_set_file_sd_sacl_denied_without_security),
+	KUNIT_CASE(pkm_kunit_set_file_sd_sacl_with_security_succeeds),
 	KUNIT_CASE(pkm_kunit_set_file_sd_missing_restore_success),
 	KUNIT_CASE(pkm_kunit_set_file_sd_label_requires_relabel),
 	KUNIT_CASE(pkm_kunit_set_file_sd_label_with_privilege_succeeds),
@@ -22144,6 +23438,8 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_get_process_sd_debug_does_not_bypass),
 	KUNIT_CASE(pkm_kunit_set_process_sd_dacl_success),
 	KUNIT_CASE(pkm_kunit_set_process_sd_dacl_denied_without_write_dac),
+	KUNIT_CASE(pkm_kunit_set_process_sd_sacl_denied_without_security),
+	KUNIT_CASE(pkm_kunit_set_process_sd_sacl_with_security_succeeds),
 	KUNIT_CASE(pkm_kunit_set_process_sd_owner_self_success),
 	KUNIT_CASE(pkm_kunit_set_process_sd_owner_foreign_denied),
 	KUNIT_CASE(pkm_kunit_set_process_sd_label_requires_relabel),
@@ -22159,6 +23455,8 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_get_token_sd_debug_does_not_bypass),
 	KUNIT_CASE(pkm_kunit_set_token_sd_dacl_success),
 	KUNIT_CASE(pkm_kunit_set_token_sd_dacl_denied_without_write_dac),
+	KUNIT_CASE(pkm_kunit_set_token_sd_sacl_denied_without_security),
+	KUNIT_CASE(pkm_kunit_set_token_sd_sacl_with_security_succeeds),
 	KUNIT_CASE(pkm_kunit_set_token_sd_owner_self_success),
 	KUNIT_CASE(pkm_kunit_set_token_sd_owner_foreign_denied),
 	KUNIT_CASE(pkm_kunit_set_token_sd_label_requires_relabel),
@@ -22250,6 +23548,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 		pkm_kunit_token_adjust_privs_invalid_reset_encoding_fails_closed),
 	KUNIT_CASE(pkm_kunit_token_adjust_privs_invalid_attributes_fails_closed),
 	KUNIT_CASE(pkm_kunit_token_restrict_updates_query_and_source_unchanged),
+	KUNIT_CASE(pkm_kunit_token_restrict_deny_only_survives_group_reset),
 	KUNIT_CASE(pkm_kunit_token_restrict_intersects_existing_restricted_sids),
 	KUNIT_CASE(pkm_kunit_token_restrict_empty_intersection_fails_closed),
 	KUNIT_CASE(pkm_kunit_token_restrict_write_restricted_bypasses_read_pass),

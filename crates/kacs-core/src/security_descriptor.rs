@@ -2,10 +2,39 @@ use crate::acl::Acl;
 use crate::error::{KacsError, KacsResult};
 use crate::sid::Sid;
 
+/// Architectural maximum size of one serialized self-relative SD.
+pub const MAX_SECURITY_DESCRIPTOR_BYTES: usize = u16::MAX as usize;
+
+/// Control bit indicating that the owner SID was defaulted.
+pub const SE_OWNER_DEFAULTED: u16 = 0x0001;
+/// Control bit indicating that the primary group SID was defaulted.
+pub const SE_GROUP_DEFAULTED: u16 = 0x0002;
 /// Control bit indicating that the descriptor carries a DACL offset.
 pub const SE_DACL_PRESENT: u16 = 0x0004;
+/// Control bit indicating that the DACL was defaulted.
+pub const SE_DACL_DEFAULTED: u16 = 0x0008;
 /// Control bit indicating that the descriptor carries a SACL offset.
 pub const SE_SACL_PRESENT: u16 = 0x0010;
+/// Control bit indicating that the SACL was defaulted.
+pub const SE_SACL_DEFAULTED: u16 = 0x0020;
+/// Control bit carrying reserved DACL trusted-source metadata.
+pub const SE_DACL_TRUSTED: u16 = 0x0040;
+/// Control bit requesting server-security DACL construction.
+pub const SE_SERVER_SECURITY: u16 = 0x0080;
+/// Control bit requesting DACL auto-inheritance.
+pub const SE_DACL_AUTO_INHERIT_REQ: u16 = 0x0100;
+/// Control bit requesting SACL auto-inheritance.
+pub const SE_SACL_AUTO_INHERIT_REQ: u16 = 0x0200;
+/// Control bit indicating the DACL was auto-inherited.
+pub const SE_DACL_AUTO_INHERITED: u16 = 0x0400;
+/// Control bit indicating the SACL was auto-inherited.
+pub const SE_SACL_AUTO_INHERITED: u16 = 0x0800;
+/// Control bit protecting the DACL from inheritance.
+pub const SE_DACL_PROTECTED: u16 = 0x1000;
+/// Control bit protecting the SACL from inheritance.
+pub const SE_SACL_PROTECTED: u16 = 0x2000;
+/// Control bit indicating that header byte 1 carries RM control metadata.
+pub const SE_RM_CONTROL_VALID: u16 = 0x4000;
 /// Control bit indicating self-relative layout.
 pub const SE_SELF_RELATIVE: u16 = 0x8000;
 
@@ -27,6 +56,12 @@ impl<'a> SecurityDescriptor<'a> {
     /// Parses a self-relative security descriptor and validates component
     /// offsets and overlap.
     pub fn parse(bytes: &'a [u8]) -> KacsResult<Self> {
+        if bytes.len() > MAX_SECURITY_DESCRIPTOR_BYTES {
+            return Err(KacsError::SecurityDescriptorTooLarge {
+                len: bytes.len(),
+                max: MAX_SECURITY_DESCRIPTOR_BYTES,
+            });
+        }
         if bytes.len() < Self::HEADER_SIZE {
             return Err(KacsError::Truncated("security descriptor"));
         }
@@ -76,6 +111,11 @@ impl<'a> SecurityDescriptor<'a> {
     /// Returns the descriptor control field.
     pub fn control(&self) -> u16 {
         self.control
+    }
+
+    /// Returns self-relative header byte 1, the RM control byte when valid.
+    pub fn resource_manager_control(&self) -> u8 {
+        self.bytes[1]
     }
 
     /// Returns the parsed owner SID, if present.

@@ -1,11 +1,26 @@
 use crate::error::{KacsError, KacsResult};
 #[cfg(feature = "kernel")]
 use crate::pkm_alloc::{AllocError, TryClone};
+use core::fmt;
 
+/// Group attribute bit marking a group that cannot be disabled.
+pub const SE_GROUP_MANDATORY: u32 = 0x0000_0001;
+/// Group attribute bit marking a group enabled by default at token creation.
+pub const SE_GROUP_ENABLED_BY_DEFAULT: u32 = 0x0000_0002;
 /// Group attribute bit marking an enabled SID.
 pub const SE_GROUP_ENABLED: u32 = 0x0000_0004;
+/// Group attribute bit marking a group usable as the default owner.
+pub const SE_GROUP_OWNER: u32 = 0x0000_0008;
 /// Group attribute bit marking a SID as deny-only.
 pub const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x0000_0010;
+/// Group attribute bit marking an integrity level SID.
+pub const SE_GROUP_INTEGRITY: u32 = 0x0000_0020;
+/// Group attribute bit used with `SE_GROUP_INTEGRITY`.
+pub const SE_GROUP_INTEGRITY_ENABLED: u32 = 0x0000_0040;
+/// Group attribute bit marking a per-session logon SID.
+pub const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
+/// Group attribute bit marking a resource-domain local group.
+pub const SE_GROUP_RESOURCE: u32 = 0x2000_0000;
 
 /// Borrowed SID view.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,5 +127,47 @@ impl<'a> Sid<'a> {
         let mut word = [0u8; 4];
         word.copy_from_slice(&self.bytes[start..end]);
         Some(u32::from_le_bytes(word))
+    }
+
+    /// Returns the last sub-authority, also known as the relative identifier.
+    pub fn relative_identifier(&self) -> Option<u32> {
+        let count = usize::from(self.sub_authority_count());
+        count
+            .checked_sub(1)
+            .and_then(|index| self.sub_authority(index))
+    }
+}
+
+impl fmt::Display for Sid<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "S-{}", self.revision())?;
+
+        let authority = self.identifier_authority();
+        if authority[0] == 0 && authority[1] == 0 {
+            let lower =
+                u32::from_be_bytes([authority[2], authority[3], authority[4], authority[5]]);
+            write!(f, "-{}", lower)?;
+        } else {
+            let full = u64::from_be_bytes([
+                0,
+                0,
+                authority[0],
+                authority[1],
+                authority[2],
+                authority[3],
+                authority[4],
+                authority[5],
+            ]);
+            write!(f, "-0x{:012x}", full)?;
+        }
+
+        for index in 0..usize::from(self.sub_authority_count()) {
+            let sub_authority = self
+                .sub_authority(index)
+                .expect("validated SID count matches backing bytes");
+            write!(f, "-{}", sub_authority)?;
+        }
+
+        Ok(())
     }
 }
