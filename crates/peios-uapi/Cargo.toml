@@ -1,0 +1,16 @@
+[package]
+name = "peios-uapi"
+version = "0.19.0"
+edition = "2021"
+publish = false
+description = "Rust bindings for the Peios userspace kernel ABI (KACS, KMES, LCS)"
+
+# Lives in the kernel repo (pkm-new) deliberately: every constant in this
+# crate is a translation of a UAPI header (kacs/token_fd.h, kacs/kmes.h,
+# etc.). Keeping the bindings next to their source of truth removes any
+# possibility of drift -- the same PR that adds a syscall or constant in C
+# bumps the Rust shadow.
+
+[lib]
+name = "peios_uapi"
+path = "src/lib.rs"
