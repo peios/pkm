@@ -135,6 +135,35 @@ pub fn parse_claim_attribute_entry(bytes: &[u8]) -> KacsResult<ClaimAttribute> {
     })
 }
 
+/// Validates one claim attribute entry payload without allocating parsed values.
+pub fn validate_claim_attribute_entry(bytes: &[u8]) -> KacsResult<()> {
+    if bytes.len() < 16 {
+        return Err(KacsError::InvalidClaimFormat("claim entry header"));
+    }
+
+    let name_offset = read_u32(bytes, 0)? as usize;
+    let value_type = read_u16(bytes, 4)?;
+    let value_count = read_u32(bytes, 12)? as usize;
+    let offsets_end = 16usize
+        .checked_add(
+            value_count
+                .checked_mul(4)
+                .ok_or(KacsError::InvalidClaimFormat("claim value offsets"))?,
+        )
+        .ok_or(KacsError::InvalidClaimFormat("claim value offsets"))?;
+    if offsets_end > bytes.len() {
+        return Err(KacsError::InvalidClaimFormat("claim value offsets"));
+    }
+
+    validate_utf16_cstr(bytes, name_offset)?;
+    for index in 0..value_count {
+        let offset = read_u32(bytes, 16 + (index * 4))? as usize;
+        validate_claim_value(bytes, value_type, offset)?;
+    }
+
+    Ok(())
+}
+
 fn claim_value_type(value: &ClaimValue) -> u16 {
     match value {
         ClaimValue::Int64(_) => CLAIM_TYPE_INT64,
@@ -174,6 +203,33 @@ pub fn parse_claim_attribute_array(bytes: &[u8]) -> KacsResult<Vec<ClaimAttribut
     }
 
     Ok(claims)
+}
+
+fn validate_claim_value(bytes: &[u8], value_type: u16, offset: usize) -> KacsResult<()> {
+    match value_type {
+        CLAIM_TYPE_INT64 | CLAIM_TYPE_UINT64 | CLAIM_TYPE_BOOLEAN => {
+            read_u64(bytes, offset)?;
+        }
+        CLAIM_TYPE_STRING => {
+            let string_offset = read_u32(bytes, offset)? as usize;
+            validate_utf16_cstr(bytes, string_offset)?;
+        }
+        CLAIM_TYPE_SID => {
+            let sid_offset = read_u32(bytes, offset)? as usize;
+            Sid::parse_prefix(bytes_at(bytes, sid_offset)?)?;
+        }
+        CLAIM_TYPE_OCTET => {
+            let octet_offset = read_u32(bytes, offset)? as usize;
+            let length = read_u32(bytes, octet_offset)? as usize;
+            let data_offset = octet_offset
+                .checked_add(4)
+                .ok_or(KacsError::InvalidClaimFormat("octet length"))?;
+            read_slice(bytes, data_offset, length)?;
+        }
+        _ => return Err(KacsError::InvalidClaimType(value_type)),
+    }
+
+    Ok(())
 }
 
 fn parse_claim_value(bytes: &[u8], value_type: u16, offset: usize) -> KacsResult<ClaimValue> {
@@ -239,6 +295,48 @@ fn read_u64(bytes: &[u8], offset: usize) -> KacsResult<u64> {
 
 fn read_i64(bytes: &[u8], offset: usize) -> KacsResult<i64> {
     Ok(read_u64(bytes, offset)? as i64)
+}
+
+fn validate_utf16_cstr(bytes: &[u8], offset: usize) -> KacsResult<()> {
+    let input = bytes_at(bytes, offset)?;
+    let mut cursor = 0usize;
+    let mut pending_high_surrogate = false;
+
+    loop {
+        let code_unit_bytes = input
+            .get(cursor..cursor + 2)
+            .ok_or(KacsError::InvalidClaimFormat("unterminated utf16 string"))?;
+        let code_unit = u16::from_le_bytes([code_unit_bytes[0], code_unit_bytes[1]]);
+
+        if code_unit == 0 {
+            if pending_high_surrogate {
+                return Err(KacsError::InvalidClaimFormat("invalid utf16 string"));
+            }
+            return Ok(());
+        }
+
+        match code_unit {
+            0xD800..=0xDBFF => {
+                if pending_high_surrogate {
+                    return Err(KacsError::InvalidClaimFormat("invalid utf16 string"));
+                }
+                pending_high_surrogate = true;
+            }
+            0xDC00..=0xDFFF => {
+                if !pending_high_surrogate {
+                    return Err(KacsError::InvalidClaimFormat("invalid utf16 string"));
+                }
+                pending_high_surrogate = false;
+            }
+            _ => {
+                if pending_high_surrogate {
+                    return Err(KacsError::InvalidClaimFormat("invalid utf16 string"));
+                }
+            }
+        }
+
+        cursor += 2;
+    }
 }
 
 fn read_utf16_cstr(bytes: &[u8], offset: usize) -> KacsResult<String> {

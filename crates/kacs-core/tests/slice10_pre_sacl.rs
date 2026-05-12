@@ -273,7 +273,7 @@ fn malformed_resource_attribute_payload_fails_closed_through_pre_sacl_walk() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let high = sid_bytes([0, 0, 0, 0, 0, 16], &[12288]);
     let sacl = acl_bytes(&[
-        resource_attribute_ace(0, &[1, 2, 3]),
+        resource_attribute_ace(0, &[1, 2, 3, 4]),
         basic_ace(
             SYSTEM_MANDATORY_LABEL_ACE_TYPE,
             0,
@@ -282,21 +282,6 @@ fn malformed_resource_attribute_payload_fails_closed_through_pre_sacl_walk() {
         ),
     ]);
     let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
-    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
-
-    let err = pre_sacl_walk(
-        &sd,
-        IntegrityLevel::Medium,
-        TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
-        0,
-        PipContext::default(),
-        &mapping(),
-        0,
-        0,
-        0,
-        PrivilegeProvenance::default(),
-    )
-    .expect_err("malformed metadata must fail");
-
+    let err = SecurityDescriptor::parse(&sd_bytes).expect_err("malformed metadata must fail");
     assert_eq!(err, KacsError::InvalidClaimFormat("claim entry header"));
 }

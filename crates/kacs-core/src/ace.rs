@@ -1,4 +1,5 @@
 use crate::access_mask::validate_ace_mask;
+use crate::claims::validate_claim_attribute_entry;
 use crate::error::{KacsError, KacsResult};
 use crate::sid::Sid;
 
@@ -296,11 +297,13 @@ impl<'a> Ace<'a> {
         }
 
         let mask = read_u32(bytes, 4);
+        validate_ace_mask(mask)?;
         let (sid, consumed) = Sid::parse_prefix(&bytes[Self::SINGLE_SID_PREFIX_SIZE..])?;
         if sid.as_bytes() != everyone_sid_bytes() {
             return Err(KacsError::InvalidResourceAttributeSid);
         }
         let application_data = &bytes[Self::SINGLE_SID_PREFIX_SIZE + consumed..];
+        validate_claim_attribute_entry(application_data)?;
 
         Ok(AceKind::ResourceAttribute {
             mask,

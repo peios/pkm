@@ -142,11 +142,9 @@ fn scoped_policy_sids_preserve_scan_order() {
 #[test]
 fn malformed_resource_attribute_payload_fails_closed() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
-    let sacl = acl_bytes(&[resource_attribute_ace(0, &[1, 2, 3])]);
+    let sacl = acl_bytes(&[resource_attribute_ace(0, &[1, 2, 3, 4])]);
     let sd_bytes = sd_with_sacl(&owner, &sacl);
-    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
-
-    let err = extract_sacl_metadata(&sd).expect_err("malformed payload must fail");
+    let err = SecurityDescriptor::parse(&sd_bytes).expect_err("malformed payload must fail");
     assert_eq!(err, KacsError::InvalidClaimFormat("claim entry header"));
 }
 
