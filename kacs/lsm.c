@@ -6927,8 +6927,6 @@ static long pkm_kacs_map_file_generic_access_mask(u32 desired, u32 *mapped_out)
 		     KACS_ACCESS_GENERIC_READ;
 	if ((desired & ~valid_mask) != 0)
 		return -EINVAL;
-	if ((desired & KACS_ACCESS_MAXIMUM_ALLOWED) != 0)
-		return -EINVAL;
 
 	mapped = desired;
 	if ((mapped & KACS_ACCESS_GENERIC_READ) != 0) {
