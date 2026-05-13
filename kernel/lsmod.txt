@@ -41,3 +41,5 @@ intel_agp              24576  0
 bochs                  28672  0
 intel_gtt              28672  1 intel_agp
 serio_raw              20480  0
+loop                   36864  0
+squashfs               65536  0

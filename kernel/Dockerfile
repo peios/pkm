@@ -100,6 +100,8 @@ RUN scripts/config \
         --set-val DEVTMPFS y \
         --set-val DEVTMPFS_MOUNT y \
         --set-val TMPFS y \
+        --set-val BLK_DEV_LOOP y \
+        --set-val SQUASHFS y \
         --set-val STRICT_DEVMEM y \
         --set-val MODULE_SIG y \
         --set-val MODULE_SIG_FORCE y \
