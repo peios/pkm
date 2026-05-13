@@ -813,14 +813,16 @@ static u32 pkm_kacs_mount_policy_for_magic(unsigned long magic)
 		return PKM_KACS_MOUNT_POLICY_UNMANAGED;
 	case RAMFS_MAGIC:
 	case TMPFS_MAGIC:
+	case SQUASHFS_MAGIC:
 		/*
 		 * rootfs (the initial ramfs the kernel populates from a
-		 * builtin/external cpio) and tmpfs have no on-disk SD
-		 * storage. Treat them like fat/nfs: synthesize an ephemeral
-		 * SD from the mount template. The initramfs is trusted by
-		 * construction (same trust chain as the kernel image it
-		 * ships with), and tmpfs is a runtime scratch surface whose
-		 * policy belongs on the mount, not on each inode.
+		 * builtin/external cpio), tmpfs, and squashfs have no on-disk
+		 * SD storage we care to consult: rootfs/tmpfs have no
+		 * persistent backing at all, and squashfs is read-only by
+		 * construction and shipped as part of the boot artifact.
+		 * Treat them like fat/nfs: synthesize an ephemeral SD from
+		 * the mount template. The trust chain is the same as the
+		 * kernel image they ship with.
 		 */
 		return PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL;
 	case NFS_SUPER_MAGIC:
