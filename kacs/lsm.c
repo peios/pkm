@@ -1589,6 +1589,8 @@ static long pkm_kacs_query_file_sd_bytes_core(
 {
 	u32 desired_access;
 	u32 granted = 0;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
 	long ret;
 
 	if (!subject_token || !cache || !out_sd_ptr || !out_sd_len)
@@ -1604,8 +1606,13 @@ static long pkm_kacs_query_file_sd_bytes_core(
 	    cache->len == 0)
 		return -EACCES;
 
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
 	ret = kacs_rust_check_file_sd_with_intent(subject_token, cache->bytes,
 						  cache->len, desired_access, 0,
+						  pip_type, pip_trust,
 						  &granted);
 	if (ret)
 		return ret;
@@ -1634,14 +1641,21 @@ static long pkm_kacs_prepare_new_file_sd_core(
 		if (authorize_live) {
 			u32 desired_access;
 			u32 granted = 0;
+			u32 pip_type = 0;
+			u32 pip_trust = 0;
 
 			ret = pkm_kacs_set_sd_required_access(security_info,
 							      &desired_access);
 			if (ret)
 				return ret;
+			ret = pkm_kacs_current_pip_context(&pip_type,
+							   &pip_trust);
+			if (ret)
+				return ret;
 			ret = kacs_rust_check_file_sd_with_intent(
 				subject_token, cache->bytes, cache->len,
 				desired_access, KACS_RESTORE_INTENT,
+				pip_type, pip_trust,
 				&granted);
 			if (ret)
 				return ret;
@@ -3575,12 +3589,20 @@ static long pkm_kacs_authorize_socket_sd_access(
 	const struct pkm_kacs_process_sd *socket_sd, u32 desired_access)
 {
 	u32 granted = 0;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+	int ret;
 
 	if (!subject_token || !socket_sd || !socket_sd->bytes || !socket_sd->len)
 		return -EACCES;
 
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
 	return kacs_rust_check_socket_sd(subject_token, socket_sd->bytes,
 					 socket_sd->len, desired_access,
+					 pip_type, pip_trust,
 					 &granted);
 }
 
@@ -5857,6 +5879,8 @@ static int pkm_kacs_emit_file_continuous_audit(struct file *file,
 	struct pkm_kacs_file_security *file_sec;
 	const void *subject_token;
 	u32 matched_access;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
 	int ret;
 
 	if (!file || !file->f_security || !operation || operation_len == 0 ||
@@ -5875,9 +5899,13 @@ static int pkm_kacs_emit_file_continuous_audit(struct file *file,
 	if (!subject_token)
 		return decision ? decision : -EACCES;
 
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
 	ret = kacs_rust_emit_file_continuous_audit(
-		subject_token, (const u8 *)operation, operation_len,
-		required_access,
+		subject_token, pip_type, pip_trust, (const u8 *)operation,
+		operation_len, required_access,
 		matched_access, file_sec->granted_access,
 		decision == 0 ? 1 : 0);
 	if (ret)
@@ -6899,21 +6927,26 @@ int pkm_kacs_kunit_check_lsv_mprotect_material(
 
 static long pkm_kacs_authorize_process_sd_access(
 	const void *subject_token,
-	const struct pkm_kacs_process_sd *process_sd, u32 desired_access)
+	const struct pkm_kacs_process_sd *process_sd, u32 desired_access,
+	u32 pip_type, u32 pip_trust)
 {
 	u32 granted = 0;
+	u32 pip_denied = 0;
 	int ret;
 
 	if (!subject_token || !process_sd || !process_sd->bytes || !process_sd->len)
 		return -EACCES;
 
-	ret = kacs_rust_check_process_sd(subject_token, process_sd->bytes,
-					 process_sd->len, desired_access,
-					 &granted);
+	ret = kacs_rust_check_process_sd_with_intent_status(
+		subject_token, process_sd->bytes, process_sd->len,
+		desired_access, 0, pip_type, pip_trust, &granted,
+		&pip_denied);
 	if (!ret)
 		return 0;
 	if (ret != -EACCES)
 		return ret;
+	if (pip_denied)
+		return -EACCES;
 	if (!kacs_rust_token_has_enabled_privilege(subject_token,
 						   PKM_KACS_PRIVILEGE_SE_DEBUG))
 		return -EACCES;
@@ -6947,7 +6980,7 @@ int pkm_kacs_open_by_handle_at(void)
 static long pkm_kacs_authorize_process_sd_access_nondebug(
 	const void *subject_token,
 	const struct pkm_kacs_process_sd *process_sd, u32 desired_access,
-	u32 privilege_intent)
+	u32 privilege_intent, u32 pip_type, u32 pip_trust)
 {
 	u32 granted = 0;
 
@@ -6956,7 +6989,7 @@ static long pkm_kacs_authorize_process_sd_access_nondebug(
 
 	return kacs_rust_check_process_sd_with_intent(
 		subject_token, process_sd->bytes, process_sd->len,
-		desired_access, privilege_intent, &granted);
+		desired_access, privilege_intent, pip_type, pip_trust, &granted);
 }
 
 static long pkm_kacs_validate_sd_security_info(u32 security_info)
@@ -7802,6 +7835,8 @@ static long pkm_kacs_build_created_file_sd_for_subject(
 	struct pkm_kacs_inode_sd_cache *parent_cache = NULL;
 	u32 parent_right;
 	u32 granted_access = 0;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
 	long ret;
 
 	if (!subject_token || !parent_file || !out_sd_ptr || !out_sd_len)
@@ -7827,6 +7862,10 @@ static long pkm_kacs_build_created_file_sd_for_subject(
 	parent_right = directory ? PKM_KACS_FILE_ADD_SUBDIRECTORY :
 				   PKM_KACS_FILE_ADD_FILE;
 
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
 	mutex_lock(&parent_sec->lock);
 	ret = pkm_kacs_inode_resolve_effective_cache_locked(parent_file, parent_sec,
 							    &parent_cache);
@@ -7840,7 +7879,8 @@ static long pkm_kacs_build_created_file_sd_for_subject(
 
 	ret = kacs_rust_check_file_sd_with_intent(subject_token, parent_cache->bytes,
 						  parent_cache->len, parent_right,
-						  0, &granted_access);
+						  0, pip_type, pip_trust,
+						  &granted_access);
 	if (ret)
 		goto out_unlock;
 
@@ -7856,7 +7896,8 @@ out_unlock:
 	if (desired_access != 0) {
 		ret = kacs_rust_check_file_sd_with_intent(
 			subject_token, *out_sd_ptr, *out_sd_len,
-			desired_access, 0, &granted_access);
+			desired_access, 0, pip_type, pip_trust,
+			&granted_access);
 		if (ret) {
 			pkm_kacs_free((void *)*out_sd_ptr);
 			*out_sd_ptr = NULL;
@@ -7877,6 +7918,8 @@ static long pkm_kacs_authorize_live_file_access_core(
 	struct pkm_kacs_inode_sd_cache *cache = NULL;
 	struct inode *inode;
 	u32 granted_access = 0;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
 	long ret;
 
 	if (!subject_token || !file || desired_access == 0)
@@ -7889,6 +7932,10 @@ static long pkm_kacs_authorize_live_file_access_core(
 	    PKM_KACS_MOUNT_POLICY_UNMANAGED)
 		return -EOPNOTSUPP;
 
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
 	sec = pkm_kacs_inode(inode);
 	mutex_lock(&sec->lock);
 	ret = pkm_kacs_inode_resolve_effective_cache_locked(file, sec, &cache);
@@ -7899,7 +7946,8 @@ static long pkm_kacs_authorize_live_file_access_core(
 		} else {
 			ret = kacs_rust_check_file_sd_with_intent(
 				subject_token, cache->bytes, cache->len,
-				desired_access, 0, &granted_access);
+				desired_access, 0, pip_type, pip_trust,
+				&granted_access);
 		}
 	}
 	mutex_unlock(&sec->lock);
@@ -9134,6 +9182,8 @@ static long pkm_kacs_stamp_native_file_granted_access_for_subject(
 	struct inode *inode;
 	u32 granted_access = 0;
 	u32 continuous_audit_mask = 0;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
 	long ret;
 
 	if (!subject_token || !file || !file->f_security || desired_access == 0)
@@ -9154,6 +9204,10 @@ static long pkm_kacs_stamp_native_file_granted_access_for_subject(
 	    PKM_KACS_MOUNT_POLICY_UNMANAGED)
 		return -EOPNOTSUPP;
 
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
 	inode_sec = pkm_kacs_inode(inode);
 	mutex_lock(&inode_sec->lock);
 	ret = pkm_kacs_inode_resolve_effective_cache_locked(file, inode_sec,
@@ -9165,7 +9219,8 @@ static long pkm_kacs_stamp_native_file_granted_access_for_subject(
 		} else {
 			ret = kacs_rust_check_file_sd_with_intent_audit(
 				subject_token, cache->bytes, cache->len,
-				desired_access, 0, &granted_access,
+				desired_access, 0, pip_type, pip_trust,
+				&granted_access,
 				&continuous_audit_mask);
 			if (!ret) {
 				file_sec->granted_access = granted_access;
@@ -9203,6 +9258,8 @@ static long pkm_kacs_stamp_file_granted_access_for_subject(
 	u32 requested_access = 0;
 	u32 granted_access = 0;
 	u32 continuous_audit_mask = 0;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
 	long ret;
 
 	if (!subject_token || !file || !file->f_security)
@@ -9228,6 +9285,10 @@ static long pkm_kacs_stamp_file_granted_access_for_subject(
 	if (ret)
 		return ret;
 
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
 	inode_sec = pkm_kacs_inode(inode);
 	mutex_lock(&inode_sec->lock);
 	ret = pkm_kacs_inode_resolve_effective_cache_locked(file, inode_sec,
@@ -9239,7 +9300,8 @@ static long pkm_kacs_stamp_file_granted_access_for_subject(
 		} else {
 			ret = kacs_rust_granted_file_sd_with_intent_audit(
 				subject_token, cache->bytes, cache->len,
-				requested_access, 0, &granted_access,
+				requested_access, 0, pip_type, pip_trust,
+				&granted_access,
 				&continuous_audit_mask);
 			if (!ret &&
 			    (granted_access & core_access) != core_access)
@@ -9296,6 +9358,8 @@ static long pkm_kacs_query_token_sd_core(const void *subject_token,
 {
 	u32 desired_access;
 	u32 granted = 0;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
 	long ret;
 
 	if (!subject_token || !target_token || !out_sd_ptr || !out_sd_len)
@@ -9308,8 +9372,13 @@ static long pkm_kacs_query_token_sd_core(const void *subject_token,
 	if (ret)
 		return ret;
 
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
 	ret = kacs_rust_check_token_sd_with_intent(subject_token, target_token,
 						   desired_access, 0,
+						   pip_type, pip_trust,
 						   &granted);
 	if (ret)
 		return ret;
@@ -9326,6 +9395,8 @@ static long pkm_kacs_set_token_sd_core(const void *subject_token,
 {
 	u32 desired_access;
 	u32 granted = 0;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
 	long ret;
 
 	if (!subject_token || !target_token || !input_sd_ptr || input_sd_len == 0)
@@ -9335,9 +9406,14 @@ static long pkm_kacs_set_token_sd_core(const void *subject_token,
 	if (ret)
 		return ret;
 
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
 	ret = kacs_rust_check_token_sd_with_intent(subject_token, target_token,
 						   desired_access,
 						   KACS_RESTORE_INTENT,
+						   pip_type, pip_trust,
 						   &granted);
 	if (ret)
 		return ret;
@@ -9372,7 +9448,9 @@ static long pkm_kacs_query_process_sd_core(
 		return -EACCES;
 
 	ret = pkm_kacs_authorize_process_sd_access_nondebug(
-		subject_token, process_sd, desired_access, 0);
+		subject_token, process_sd, desired_access, 0,
+		READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust));
 	if (!ret)
 		ret = pkm_kacs_enforce_cross_process_pip(caller_state,
 							 target_state,
@@ -9415,7 +9493,9 @@ static long pkm_kacs_set_process_sd_core(
 	}
 
 	ret = pkm_kacs_authorize_process_sd_access_nondebug(
-		subject_token, process_sd, desired_access, KACS_RESTORE_INTENT);
+		subject_token, process_sd, desired_access, KACS_RESTORE_INTENT,
+		READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust));
 	if (ret)
 		goto out_process_sd;
 	ret = pkm_kacs_enforce_cross_process_pip(caller_state, target_state,
@@ -9659,7 +9739,9 @@ static long pkm_kacs_authorize_process_access_core(
 		return -EACCES;
 
 	ret = pkm_kacs_authorize_process_sd_access(subject_token, process_sd,
-						   desired_process_access);
+						   desired_process_access,
+						   caller_pip_type,
+						   caller_pip_trust);
 	pkm_kacs_process_sd_put(process_sd);
 	if (ret)
 		return ret;
@@ -9691,9 +9773,9 @@ static long pkm_kacs_open_process_token_core(
 	if (ret)
 		return ret;
 
-	return pkm_kacs_open_token_fd_for_subject_checked(subject_token,
-							  target_token,
-							  access_mask);
+	return pkm_kacs_open_token_fd_for_subject_checked_with_pip(
+		subject_token, target_token, access_mask, caller_pip_type,
+		caller_pip_trust);
 }
 
 static long pkm_kacs_authorize_process_token_inspection_core(
@@ -9825,10 +9907,12 @@ static long pkm_kacs_signal_to_process_access(int sig, u32 *desired_access)
 {
 	if (!desired_access)
 		return -EINVAL;
-	if (sig == 0)
-		return -EACCES;
 	if (sig < 0 || sig > SIGRTMAX)
 		return -EINVAL;
+	if (sig == 0) {
+		*desired_access = KACS_PROCESS_QUERY_LIMITED;
+		return 0;
+	}
 
 	switch (sig) {
 	case SIGHUP:
@@ -9876,6 +9960,56 @@ static long pkm_kacs_signal_to_process_access(int sig, u32 *desired_access)
 		return -EACCES;
 	}
 }
+
+static bool pkm_kacs_signal_is_kernel_originated(
+	const struct kernel_siginfo *info, const struct cred *cred)
+{
+	if (cred)
+		return false;
+	if (info == SEND_SIG_PRIV)
+		return true;
+	if (info == SEND_SIG_NOINFO)
+		return false;
+	if (!info)
+		return false;
+
+	return SI_FROMKERNEL(info);
+}
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+long pkm_kacs_kunit_signal_origin_is_kernel(u32 origin_kind)
+{
+	struct kernel_siginfo info = {};
+	const struct cred *cred = NULL;
+	const struct kernel_siginfo *info_ptr = &info;
+
+	switch (origin_kind) {
+	case PKM_KUNIT_SIGNAL_ORIGIN_NOINFO:
+		info_ptr = SEND_SIG_NOINFO;
+		break;
+	case PKM_KUNIT_SIGNAL_ORIGIN_PRIV:
+		info_ptr = SEND_SIG_PRIV;
+		break;
+	case PKM_KUNIT_SIGNAL_ORIGIN_USER:
+		info.si_code = SI_USER;
+		break;
+	case PKM_KUNIT_SIGNAL_ORIGIN_TKILL:
+		info.si_code = SI_TKILL;
+		break;
+	case PKM_KUNIT_SIGNAL_ORIGIN_KERNEL:
+		info.si_code = SI_KERNEL;
+		break;
+	case PKM_KUNIT_SIGNAL_ORIGIN_STORED_CRED:
+		info.si_code = SI_KERNEL;
+		cred = current_cred();
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return pkm_kacs_signal_is_kernel_originated(info_ptr, cred) ? 1L : 0L;
+}
+#endif
 
 static long pkm_kacs_ptrace_mode_to_process_access(unsigned int mode,
 						   u32 *desired_access)
@@ -10122,24 +10256,32 @@ static int pkm_kacs_task_kill(struct task_struct *target,
 {
 	struct pkm_kacs_process_state *caller_state;
 	struct pkm_kacs_process_state *target_state;
+	const struct cred *subject_cred;
 	const void *subject_token;
 	u32 desired_access;
 	long ret;
 
-	(void)info;
-
 	if (!target || !target->security)
 		return -EACCES;
-	if (!cred)
+	if (pkm_kacs_signal_is_kernel_originated(info, cred))
 		return 0;
-	if (target == current)
-		return 0;
-	if (!pkm_kacs_current_token_eval_context_allowed())
+
+	if (cred) {
+		if (!cred->security)
+			return -EACCES;
+		subject_cred = cred;
+		caller_state = pkm_kacs_cred(cred)->process_state;
+	} else {
+		if (!pkm_kacs_current_token_eval_context_allowed())
+			return -EACCES;
+		subject_cred = current_cred();
+		caller_state = pkm_kacs_current_process_state();
+	}
+	if (!subject_cred || !subject_cred->security)
 		return -EACCES;
 
-	caller_state = pkm_kacs_current_process_state();
 	target_state = pkm_kacs_task(target)->process_state;
-	subject_token = pkm_kacs_cred(cred)->token;
+	subject_token = pkm_kacs_cred(subject_cred)->token;
 	if (!caller_state || !target_state || !subject_token)
 		return -EACCES;
 
@@ -11259,6 +11401,8 @@ static ssize_t pkm_kacs_securityfs_sessions_read(struct file *file,
 						 size_t count, loff_t *ppos)
 {
 	const void *subject_token;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
 	size_t required = 0;
 	u8 *kbuf;
 	int ret;
@@ -11269,7 +11413,12 @@ static ssize_t pkm_kacs_securityfs_sessions_read(struct file *file,
 	if (!subject_token)
 		return -EACCES;
 
-	ret = kacs_rust_check_securityfs_sessions_read(subject_token);
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
+	ret = kacs_rust_check_securityfs_sessions_read(subject_token, pip_type,
+						       pip_trust);
 	if (ret)
 		return ret;
 
@@ -12190,12 +12339,19 @@ long pkm_kacs_kunit_read_securityfs_sessions_for_subject(
 	const void *subject_token, u8 *buf, size_t buf_len,
 	size_t *required_out)
 {
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
 	long ret;
 
 	if (!subject_token)
 		return -EACCES;
 
-	ret = kacs_rust_check_securityfs_sessions_read(subject_token);
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
+	ret = kacs_rust_check_securityfs_sessions_read(subject_token, pip_type,
+						       pip_trust);
 	if (ret)
 		return ret;
 

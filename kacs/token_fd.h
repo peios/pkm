@@ -169,6 +169,9 @@ int pkm_kacs_validate_token_open_access_mask(u32 access_mask);
 long pkm_kacs_open_token_fd_for_subject_checked(const void *subject_token,
 						const void *target_token,
 						u32 access_mask);
+long pkm_kacs_open_token_fd_for_subject_checked_with_pip(
+	const void *subject_token, const void *target_token, u32 access_mask,
+	u32 pip_type, u32 pip_trust);
 long pkm_kacs_open_token_fd_with_fixed_access(const void *target_token,
 					      u32 granted_access);
 int pkm_kacs_bind_query_token_file(struct file *file,

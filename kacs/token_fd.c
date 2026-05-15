@@ -495,6 +495,8 @@ static long pkm_kacs_token_restrict_core(
 {
 	const void *new_token = NULL;
 	u32 granted = 0;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
 	long fd;
 	int ret;
 
@@ -518,8 +520,15 @@ static long pkm_kacs_token_restrict_core(
 	if (!new_token)
 		return -EACCES;
 
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret) {
+		kacs_rust_token_drop(new_token);
+		return ret;
+	}
+
 	ret = kacs_rust_token_open_check(subject_token, new_token,
-					 KACS_TOKEN_ALL_ACCESS, &granted);
+					 KACS_TOKEN_ALL_ACCESS, pip_type,
+					 pip_trust, &granted);
 	if (ret) {
 		kacs_rust_token_drop(new_token);
 		return ret;
@@ -1002,12 +1011,32 @@ static long pkm_kacs_open_token_fd_for_subject(const void *subject_token,
 					       const void *target_token,
 					       u32 access_mask)
 {
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+	int ret;
+
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_open_token_fd_for_subject_checked_with_pip(
+		subject_token, target_token, access_mask, pip_type, pip_trust);
+}
+
+long pkm_kacs_open_token_fd_for_subject_checked_with_pip(
+	const void *subject_token, const void *target_token, u32 access_mask,
+	u32 pip_type, u32 pip_trust)
+{
 	const void *token_ref;
 	u32 granted = 0;
 	int ret;
 
+	ret = pkm_kacs_validate_token_open_access_mask(access_mask);
+	if (ret)
+		return ret;
+
 	ret = kacs_rust_token_open_check(subject_token, target_token, access_mask,
-					 &granted);
+					 pip_type, pip_trust, &granted);
 	if (ret)
 		return ret;
 

@@ -65,6 +65,8 @@ pub struct AccessCheckCoreState<'a> {
     pub continuous_audit_mask: u32,
     /// Whether staged CAAP results differed from effective results.
     pub staging_mismatch: bool,
+    /// Bits decided specifically by PIP before DACL/CAAP processing.
+    pub pip_decided: u32,
     /// Final per-node granted list when result-list mode is active.
     pub object_granted_list: Option<Vec<u32>>,
     /// Audit/alarm events emitted by step 14.
@@ -305,6 +307,7 @@ pub fn access_check_core<'a>(
         mapped_desired: base.mapped_desired,
         continuous_audit_mask,
         staging_mismatch,
+        pip_decided: base.pip_decided,
         object_granted_list: caap.object_granted_list,
         audit_events,
         privilege_use_events,

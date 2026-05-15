@@ -22,6 +22,8 @@ pub struct PreSaclWalkState<'a> {
     pub privilege_granted: u32,
     /// Bits decided by MIC and PIP.
     pub mandatory_decided: u32,
+    /// Bits decided specifically by PIP.
+    pub pip_decided: u32,
     /// Resource attributes extracted from the SACL.
     pub resource_attributes: Vec<ClaimAttribute>,
     /// Scoped policy SIDs extracted from the SACL.
@@ -53,6 +55,7 @@ pub fn pre_sacl_walk<'a>(
     let mut privilege_granted = privilege_granted;
     let mut provenance = provenance;
     let mut mandatory_decided = 0u32;
+    let mut pip_decided = 0u32;
 
     let mic = apply_mic(
         label,
@@ -75,6 +78,7 @@ pub fn pre_sacl_walk<'a>(
             &mut privilege_granted,
         )?;
         mandatory_decided |= pip.mandatory_decided;
+        pip_decided |= pip.mandatory_decided;
     }
 
     Ok(PreSaclWalkState {
@@ -82,6 +86,7 @@ pub fn pre_sacl_walk<'a>(
         granted,
         privilege_granted,
         mandatory_decided,
+        pip_decided,
         resource_attributes: metadata.resource_attributes,
         policy_sids: metadata.policy_sids,
         provenance,

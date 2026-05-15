@@ -6626,6 +6626,13 @@ pub(crate) fn with_access_check_resolved_from_token<T>(
     })
 }
 
+fn pip_context_from_abi(pip_type: u32, pip_trust: u32) -> PipContext {
+    PipContext {
+        pip_type,
+        pip_trust,
+    }
+}
+
 pub(crate) fn mark_token_privileges_used(token_ptr: *const c_void, used_mask: u64) -> bool {
     if used_mask == 0 {
         return true;
@@ -6821,6 +6828,7 @@ fn token_open_check_errno(
     subject_token: *const c_void,
     target_token: *const c_void,
     desired: u32,
+    pip: PipContext,
 ) -> i32 {
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return -EACCES;
@@ -6835,10 +6843,6 @@ fn token_open_check_errno(
         Ok(normalized) => normalized,
         Err(KacsError::ReservedAccessMaskBits(_)) => return -22,
         Err(_) => return -EACCES,
-    };
-    let pip = PipContext {
-        pip_type: 0,
-        pip_trust: 0,
     };
 
     subject.with_access_token(|access_token| {
@@ -6903,6 +6907,7 @@ fn token_sd_access_check_errno_with_intent(
     target_token: *const c_void,
     desired: u32,
     privilege_intent: u32,
+    pip: PipContext,
 ) -> Result<u32, i32> {
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
@@ -6917,10 +6922,6 @@ fn token_sd_access_check_errno_with_intent(
         Ok(normalized) => normalized,
         Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
         Err(_) => return Err(-EINVAL),
-    };
-    let pip = PipContext {
-        pip_type: 0,
-        pip_trust: 0,
     };
 
     subject.with_access_token(|access_token| {
@@ -6965,12 +6966,19 @@ fn token_sd_access_check_errno_with_intent(
     })
 }
 
-fn process_sd_access_check_errno_with_intent(
+struct ProcessSdAccessOutcome {
+    granted: u32,
+    allowed: bool,
+    pip_denied_requested: u32,
+}
+
+fn process_sd_access_outcome_with_intent(
     subject_token: *const c_void,
     sd_bytes: &[u8],
     desired: u32,
     privilege_intent: u32,
-) -> Result<u32, i32> {
+    pip: PipContext,
+) -> Result<ProcessSdAccessOutcome, i32> {
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
     };
@@ -6979,10 +6987,6 @@ fn process_sd_access_check_errno_with_intent(
         Ok(normalized) => normalized,
         Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
         Err(_) => return Err(-EINVAL),
-    };
-    let pip = PipContext {
-        pip_type: 0,
-        pip_trust: 0,
     };
 
     subject.with_access_token(|access_token| {
@@ -7010,21 +7014,45 @@ fn process_sd_access_check_errno_with_intent(
                     .unwrap_or(result.granted);
                 let allowed = result.mapped_desired == 0
                     || (granted & result.mapped_desired) == result.mapped_desired;
-
-                if !allowed {
-                    return Err(-EACCES);
-                }
-                if normalized.maximum_allowed {
-                    Ok(granted)
+                let granted = if normalized.maximum_allowed {
+                    granted
                 } else {
-                    Ok(granted & normalized.mapped)
-                }
+                    granted & normalized.mapped
+                };
+
+                Ok(ProcessSdAccessOutcome {
+                    granted,
+                    allowed,
+                    pip_denied_requested: result.pip_decided & result.mapped_desired,
+                })
             }
             Err(KacsError::AllocationFailure) => Err(-ENOMEM),
             Err(KacsError::ReservedAccessMaskBits(_)) => Err(-EINVAL),
             Err(_) => Err(-EINVAL),
         }
     })
+}
+
+fn process_sd_access_check_errno_with_intent(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+    privilege_intent: u32,
+    pip: PipContext,
+) -> Result<u32, i32> {
+    let outcome = process_sd_access_outcome_with_intent(
+        subject_token,
+        sd_bytes,
+        desired,
+        privilege_intent,
+        pip,
+    )?;
+
+    if !outcome.allowed {
+        return Err(-EACCES);
+    }
+
+    Ok(outcome.granted)
 }
 
 struct FileSdAccessOutcome {
@@ -7038,6 +7066,7 @@ fn file_sd_access_outcome_with_intent(
     sd_bytes: &[u8],
     desired: u32,
     privilege_intent: u32,
+    pip: PipContext,
 ) -> Result<FileSdAccessOutcome, i32> {
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
@@ -7047,10 +7076,6 @@ fn file_sd_access_outcome_with_intent(
         Ok(normalized) => normalized,
         Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
         Err(_) => return Err(-EINVAL),
-    };
-    let pip = PipContext {
-        pip_type: 0,
-        pip_trust: 0,
     };
 
     subject.with_access_token(|access_token| {
@@ -7102,9 +7127,15 @@ fn file_sd_access_check_errno_with_intent(
     sd_bytes: &[u8],
     desired: u32,
     privilege_intent: u32,
+    pip: PipContext,
 ) -> Result<FileSdAccessOutcome, i32> {
-    let outcome =
-        file_sd_access_outcome_with_intent(subject_token, sd_bytes, desired, privilege_intent)?;
+    let outcome = file_sd_access_outcome_with_intent(
+        subject_token,
+        sd_bytes,
+        desired,
+        privilege_intent,
+        pip,
+    )?;
 
     if !outcome.allowed {
         return Err(-EACCES);
@@ -7118,22 +7149,25 @@ fn file_sd_granted_mask_errno_with_intent(
     sd_bytes: &[u8],
     desired: u32,
     privilege_intent: u32,
+    pip: PipContext,
 ) -> Result<FileSdAccessOutcome, i32> {
-    file_sd_access_outcome_with_intent(subject_token, sd_bytes, desired, privilege_intent)
+    file_sd_access_outcome_with_intent(subject_token, sd_bytes, desired, privilege_intent, pip)
 }
 
 fn process_sd_access_check_errno(
     subject_token: *const c_void,
     sd_bytes: &[u8],
     desired: u32,
+    pip: PipContext,
 ) -> Result<u32, i32> {
-    process_sd_access_check_errno_with_intent(subject_token, sd_bytes, desired, 0)
+    process_sd_access_check_errno_with_intent(subject_token, sd_bytes, desired, 0, pip)
 }
 
 fn socket_sd_access_check_errno(
     subject_token: *const c_void,
     sd_bytes: &[u8],
     desired: u32,
+    pip: PipContext,
 ) -> Result<u32, i32> {
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
@@ -7143,10 +7177,6 @@ fn socket_sd_access_check_errno(
         Ok(normalized) => normalized,
         Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
         Err(_) => return Err(-EINVAL),
-    };
-    let pip = PipContext {
-        pip_type: 0,
-        pip_trust: 0,
     };
 
     subject.with_access_token(|access_token| {
@@ -7364,9 +7394,16 @@ pub extern "C" fn kacs_rust_token_open_check(
     subject_token: *const c_void,
     target_token: *const c_void,
     desired_access: u32,
+    pip_type: u32,
+    pip_trust: u32,
     granted_out: *mut u32,
 ) -> i32 {
-    let result = token_open_check_errno(subject_token, target_token, desired_access);
+    let result = token_open_check_errno(
+        subject_token,
+        target_token,
+        desired_access,
+        pip_context_from_abi(pip_type, pip_trust),
+    );
     if result < 0 {
         return result;
     }
@@ -7920,6 +7957,8 @@ pub extern "C" fn kacs_rust_check_process_sd(
     sd_ptr: *const u8,
     sd_len: usize,
     desired: u32,
+    pip_type: u32,
+    pip_trust: u32,
     granted_out: *mut u32,
 ) -> i32 {
     if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
@@ -7927,7 +7966,12 @@ pub extern "C" fn kacs_rust_check_process_sd(
     }
 
     let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
-    match process_sd_access_check_errno(subject_token_ptr, sd_bytes, desired) {
+    match process_sd_access_check_errno(
+        subject_token_ptr,
+        sd_bytes,
+        desired,
+        pip_context_from_abi(pip_type, pip_trust),
+    ) {
         Ok(granted) => {
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
                 *granted_out = granted;
@@ -7947,6 +7991,8 @@ pub extern "C" fn kacs_rust_check_process_sd_with_intent(
     sd_len: usize,
     desired: u32,
     privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
     granted_out: *mut u32,
 ) -> i32 {
     if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
@@ -7959,12 +8005,55 @@ pub extern "C" fn kacs_rust_check_process_sd_with_intent(
         sd_bytes,
         desired,
         privilege_intent,
+        pip_context_from_abi(pip_type, pip_trust),
     ) {
         Ok(granted) => {
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
                 *granted_out = granted;
             }
             0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Runs process-SD AccessCheck and reports whether PIP denied requested bits.
+pub extern "C" fn kacs_rust_check_process_sd_with_intent_status(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired: u32,
+    privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
+    granted_out: *mut u32,
+    pip_denied_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match process_sd_access_outcome_with_intent(
+        subject_token_ptr,
+        sd_bytes,
+        desired,
+        privilege_intent,
+        pip_context_from_abi(pip_type, pip_trust),
+    ) {
+        Ok(outcome) => {
+            if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                *granted_out = outcome.granted;
+            }
+            if let Some(pip_denied_out) = unsafe { pip_denied_out.as_mut() } {
+                *pip_denied_out = outcome.pip_denied_requested;
+            }
+            if outcome.allowed {
+                0
+            } else {
+                -EACCES
+            }
         }
         Err(err) => err,
     }
@@ -7979,6 +8068,8 @@ pub extern "C" fn kacs_rust_check_file_sd_with_intent(
     sd_len: usize,
     desired: u32,
     privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
     granted_out: *mut u32,
 ) -> i32 {
     if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
@@ -7991,6 +8082,7 @@ pub extern "C" fn kacs_rust_check_file_sd_with_intent(
         sd_bytes,
         desired,
         privilege_intent,
+        pip_context_from_abi(pip_type, pip_trust),
     ) {
         Ok(outcome) => {
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
@@ -8011,6 +8103,8 @@ pub extern "C" fn kacs_rust_check_file_sd_with_intent_audit(
     sd_len: usize,
     desired: u32,
     privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
     granted_out: *mut u32,
     continuous_audit_out: *mut u32,
 ) -> i32 {
@@ -8024,6 +8118,7 @@ pub extern "C" fn kacs_rust_check_file_sd_with_intent_audit(
         sd_bytes,
         desired,
         privilege_intent,
+        pip_context_from_abi(pip_type, pip_trust),
     ) {
         Ok(outcome) => {
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
@@ -8070,6 +8165,8 @@ pub extern "C" fn kacs_rust_file_sd_integrity_label(
 /// listing SD.
 pub extern "C" fn kacs_rust_check_securityfs_sessions_read(
     subject_token_ptr: *const c_void,
+    pip_type: u32,
+    pip_trust: u32,
 ) -> i32 {
     if subject_token_ptr.is_null() {
         return -EACCES;
@@ -8084,6 +8181,7 @@ pub extern "C" fn kacs_rust_check_securityfs_sessions_read(
         sd_bytes,
         FILE_READ_DATA,
         0,
+        pip_context_from_abi(pip_type, pip_trust),
     ) {
         Ok(_) => 0,
         Err(err) => err,
@@ -8137,6 +8235,8 @@ pub extern "C" fn kacs_rust_granted_file_sd_with_intent(
     sd_len: usize,
     desired: u32,
     privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
     granted_out: *mut u32,
 ) -> i32 {
     if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
@@ -8149,6 +8249,7 @@ pub extern "C" fn kacs_rust_granted_file_sd_with_intent(
         sd_bytes,
         desired,
         privilege_intent,
+        pip_context_from_abi(pip_type, pip_trust),
     ) {
         Ok(outcome) => {
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
@@ -8169,6 +8270,8 @@ pub extern "C" fn kacs_rust_granted_file_sd_with_intent_audit(
     sd_len: usize,
     desired: u32,
     privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
     granted_out: *mut u32,
     continuous_audit_out: *mut u32,
 ) -> i32 {
@@ -8182,6 +8285,7 @@ pub extern "C" fn kacs_rust_granted_file_sd_with_intent_audit(
         sd_bytes,
         desired,
         privilege_intent,
+        pip_context_from_abi(pip_type, pip_trust),
     ) {
         Ok(outcome) => {
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
@@ -8203,6 +8307,8 @@ pub extern "C" fn kacs_rust_granted_file_sd_with_intent_audit(
 /// operation-time enforcement decision.
 pub extern "C" fn kacs_rust_emit_file_continuous_audit(
     subject_token_ptr: *const c_void,
+    pip_type: u32,
+    pip_trust: u32,
     operation_ptr: *const u8,
     operation_len: usize,
     requested_access: u32,
@@ -8224,10 +8330,7 @@ pub extern "C" fn kacs_rust_emit_file_continuous_audit(
         return -EACCES;
     };
     let operation = unsafe { core::slice::from_raw_parts(operation_ptr, operation_len) };
-    let pip = PipContext {
-        pip_type: 0,
-        pip_trust: 0,
-    };
+    let pip = pip_context_from_abi(pip_type, pip_trust);
 
     subject.with_access_token(|access_token| {
         match emit_continuous_audit_to_kmes(
@@ -8253,6 +8356,8 @@ pub extern "C" fn kacs_rust_check_token_sd_with_intent(
     target_token_ptr: *const c_void,
     desired: u32,
     privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
     granted_out: *mut u32,
 ) -> i32 {
     if desired == 0 {
@@ -8264,6 +8369,7 @@ pub extern "C" fn kacs_rust_check_token_sd_with_intent(
         target_token_ptr,
         desired,
         privilege_intent,
+        pip_context_from_abi(pip_type, pip_trust),
     ) {
         Ok(granted) => {
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
@@ -8672,6 +8778,8 @@ pub extern "C" fn kacs_rust_check_socket_sd(
     sd_ptr: *const u8,
     sd_len: usize,
     desired: u32,
+    pip_type: u32,
+    pip_trust: u32,
     granted_out: *mut u32,
 ) -> i32 {
     if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
@@ -8679,7 +8787,12 @@ pub extern "C" fn kacs_rust_check_socket_sd(
     }
 
     let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
-    match socket_sd_access_check_errno(subject_token_ptr, sd_bytes, desired) {
+    match socket_sd_access_check_errno(
+        subject_token_ptr,
+        sd_bytes,
+        desired,
+        pip_context_from_abi(pip_type, pip_trust),
+    ) {
         Ok(granted) => {
             if let Some(granted_out) = unsafe { granted_out.as_mut() } {
                 *granted_out = granted;

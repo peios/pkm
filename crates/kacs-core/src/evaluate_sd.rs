@@ -41,6 +41,8 @@ pub struct EvaluateSecurityDescriptorState<'a> {
     pub resource_attributes: Vec<ClaimAttribute>,
     /// Scoped policy SIDs extracted during the pre-SACL walk.
     pub policy_sids: Vec<Sid<'a>>,
+    /// Bits decided specifically by PIP.
+    pub pip_decided: u32,
     /// Final privilege provenance.
     pub provenance: PrivilegeProvenance,
     /// Final per-node granted list when object-tree mode is active.
@@ -237,6 +239,7 @@ pub fn evaluate_security_descriptor<'a>(
         mapped_desired: normalized.mapped,
         resource_attributes: pre_sacl.resource_attributes,
         policy_sids: pre_sacl.policy_sids,
+        pip_decided: pre_sacl.pip_decided,
         provenance,
         object_granted_list,
     })

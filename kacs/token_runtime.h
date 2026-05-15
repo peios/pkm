@@ -265,6 +265,13 @@ struct pkm_kacs_kunit_process_signal_check_args {
 	u32 kernel_originated;
 };
 
+#define PKM_KUNIT_SIGNAL_ORIGIN_NOINFO 0U
+#define PKM_KUNIT_SIGNAL_ORIGIN_PRIV 1U
+#define PKM_KUNIT_SIGNAL_ORIGIN_USER 2U
+#define PKM_KUNIT_SIGNAL_ORIGIN_TKILL 3U
+#define PKM_KUNIT_SIGNAL_ORIGIN_KERNEL 4U
+#define PKM_KUNIT_SIGNAL_ORIGIN_STORED_CRED 5U
+
 struct pkm_kacs_kunit_process_ptrace_check_args {
 	const void *subject_token;
 	const u8 *target_process_sd_ptr;
@@ -578,7 +585,8 @@ bool kacs_rust_token_has_enabled_privilege(const void *token, u64 privilege);
 bool kacs_rust_token_has_new_process_min(const void *token);
 bool kacs_rust_token_mark_privileges_used(const void *token, u64 used_mask);
 int kacs_rust_token_open_check(const void *subject_token, const void *target_token,
-			       u32 desired_access, u32 *granted_out);
+			       u32 desired_access, u32 pip_type,
+			       u32 pip_trust, u32 *granted_out);
 int kacs_rust_token_duplicate(const void *source_token,
 			      const void *creator_token, u32 token_type,
 			      u32 impersonation_level,
@@ -630,18 +638,26 @@ const u8 *kacs_rust_kunit_create_process_sd_with_mandatory_resource_attr(
 const u8 *kacs_rust_kunit_create_query_only_token_sd(size_t *len_out);
 int kacs_rust_check_process_sd(const void *subject_token_ptr,
 			       const u8 *sd_ptr, size_t sd_len, u32 desired,
+			       u32 pip_type, u32 pip_trust,
 			       u32 *granted_out);
 int kacs_rust_check_process_sd_with_intent(const void *subject_token_ptr,
 					   const u8 *sd_ptr, size_t sd_len,
 					   u32 desired, u32 privilege_intent,
+					   u32 pip_type, u32 pip_trust,
 					   u32 *granted_out);
+int kacs_rust_check_process_sd_with_intent_status(
+	const void *subject_token_ptr, const u8 *sd_ptr, size_t sd_len,
+	u32 desired, u32 privilege_intent, u32 pip_type, u32 pip_trust,
+	u32 *granted_out, u32 *pip_denied_out);
 int kacs_rust_check_file_sd_with_intent(const void *subject_token_ptr,
 					const u8 *sd_ptr, size_t sd_len,
 					u32 desired, u32 privilege_intent,
+					u32 pip_type, u32 pip_trust,
 					u32 *granted_out);
 int kacs_rust_check_file_sd_with_intent_audit(const void *subject_token_ptr,
 					      const u8 *sd_ptr, size_t sd_len,
 					      u32 desired, u32 privilege_intent,
+					      u32 pip_type, u32 pip_trust,
 					      u32 *granted_out,
 					      u32 *continuous_audit_out);
 int kacs_rust_file_sd_integrity_label(const u8 *sd_ptr, size_t sd_len,
@@ -649,14 +665,17 @@ int kacs_rust_file_sd_integrity_label(const u8 *sd_ptr, size_t sd_len,
 int kacs_rust_granted_file_sd_with_intent(const void *subject_token_ptr,
 					  const u8 *sd_ptr, size_t sd_len,
 					  u32 desired, u32 privilege_intent,
+					  u32 pip_type, u32 pip_trust,
 					  u32 *granted_out);
 int kacs_rust_granted_file_sd_with_intent_audit(const void *subject_token_ptr,
 						const u8 *sd_ptr,
 						size_t sd_len, u32 desired,
 						u32 privilege_intent,
+						u32 pip_type, u32 pip_trust,
 						u32 *granted_out,
 						u32 *continuous_audit_out);
 int kacs_rust_emit_file_continuous_audit(const void *subject_token_ptr,
+					 u32 pip_type, u32 pip_trust,
 					 const u8 *operation_ptr,
 					 size_t operation_len,
 					 u32 requested_access,
@@ -665,6 +684,7 @@ int kacs_rust_emit_file_continuous_audit(const void *subject_token_ptr,
 int kacs_rust_check_token_sd_with_intent(const void *subject_token_ptr,
 					 const void *target_token_ptr,
 					 u32 desired, u32 privilege_intent,
+					 u32 pip_type, u32 pip_trust,
 					 u32 *granted_out);
 int kacs_rust_validate_sd_bytes(const u8 *sd_ptr, size_t sd_len);
 int kacs_rust_validate_stored_sd_bytes(const u8 *sd_ptr, size_t sd_len);
@@ -716,8 +736,10 @@ int kacs_rust_set_token_sd(const void *subject_token_ptr,
 			   const u8 *input_sd_ptr, size_t input_sd_len);
 int kacs_rust_check_socket_sd(const void *subject_token_ptr,
 			      const u8 *sd_ptr, size_t sd_len, u32 desired,
+			      u32 pip_type, u32 pip_trust,
 			      u32 *granted_out);
-int kacs_rust_check_securityfs_sessions_read(const void *subject_token_ptr);
+int kacs_rust_check_securityfs_sessions_read(const void *subject_token_ptr,
+					     u32 pip_type, u32 pip_trust);
 int kacs_rust_securityfs_sessions_listing(u8 *out, size_t out_len,
 					  size_t *required_out);
 u32 kacs_rust_token_projected_uid(const void *token);
@@ -801,6 +823,7 @@ long pkm_kacs_kunit_open_self_token_inspection_for_subject(void);
 long pkm_kacs_kunit_read_securityfs_sessions_for_subject(
 	const void *subject_token, u8 *buf, size_t buf_len,
 	size_t *required_out);
+long pkm_kacs_kunit_signal_origin_is_kernel(u32 origin_kind);
 long pkm_kacs_kunit_check_signal_for_subject(
 	const struct pkm_kacs_kunit_process_signal_check_args *args);
 long pkm_kacs_kunit_check_ptrace_for_subject(
