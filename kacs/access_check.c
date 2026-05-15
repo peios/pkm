@@ -259,6 +259,9 @@ long pkm_kacs_access_check_ingress_scalar_with_token_fd(
 	if (summary)
 		memset(summary, 0, sizeof(*summary));
 
+	if (!pkm_kacs_current_token_eval_context_allowed())
+		return -EACCES;
+
 	ret = pkm_kacs_begin_token_resolution(ops, args_ptr, &resolution);
 	if (ret)
 		return ret;
@@ -291,6 +294,9 @@ long pkm_kacs_access_check_ingress_list_with_token_fd(
 
 	if (summary)
 		memset(summary, 0, sizeof(*summary));
+
+	if (!pkm_kacs_current_token_eval_context_allowed())
+		return -EACCES;
 
 	ret = pkm_kacs_begin_token_resolution(ops, args_ptr, &resolution);
 	if (ret)

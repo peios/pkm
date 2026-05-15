@@ -38,8 +38,8 @@ pub enum ClaimValue {
     Sid(Vec<u8>),
     /// Octet claim value.
     Octet(Vec<u8>),
-    /// Boolean claim value.
-    Boolean(bool),
+    /// Boolean claim value stored as its raw unsigned 64-bit wire scalar.
+    Boolean(u64),
     /// Composite claim value.
     Composite(Vec<ClaimValue>),
 }
@@ -236,7 +236,7 @@ fn parse_claim_value(bytes: &[u8], value_type: u16, offset: usize) -> KacsResult
     match value_type {
         CLAIM_TYPE_INT64 => Ok(ClaimValue::Int64(read_i64(bytes, offset)?)),
         CLAIM_TYPE_UINT64 => Ok(ClaimValue::UInt64(read_u64(bytes, offset)?)),
-        CLAIM_TYPE_BOOLEAN => Ok(ClaimValue::Boolean(read_u64(bytes, offset)? != 0)),
+        CLAIM_TYPE_BOOLEAN => Ok(ClaimValue::Boolean(read_u64(bytes, offset)?)),
         CLAIM_TYPE_STRING => {
             let string_offset = read_u32(bytes, offset)? as usize;
             Ok(ClaimValue::String(read_utf16_cstr(bytes, string_offset)?))

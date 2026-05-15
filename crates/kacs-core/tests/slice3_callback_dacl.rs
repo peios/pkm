@@ -511,7 +511,7 @@ fn deny_only_local_claim_is_visible_to_callback_deny_ace() {
         ClaimAttribute::new(
             "blocked",
             CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY,
-            vec![ClaimValue::Boolean(true)],
+            vec![ClaimValue::Boolean(2)],
         ),
         ClaimAttribute::new("mode", 0, vec![ClaimValue::String("yes".into())]),
     ];
@@ -561,7 +561,7 @@ fn deny_only_resource_claim_is_visible_to_callback_deny_ace() {
     let resource_claims = [ClaimAttribute::new(
         "blocked",
         CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY,
-        vec![ClaimValue::Boolean(true)],
+        vec![ClaimValue::Boolean(2)],
     )];
     let local_claims = [ClaimAttribute::new(
         "mode",

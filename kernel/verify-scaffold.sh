@@ -112,6 +112,7 @@ for syscall in \
 	"1003 kacs_create_token" \
 	"1004 kacs_create_session" \
 	"1005 kacs_set_psb" \
+	"1006 kacs_destroy_empty_session" \
 	"1010 kacs_open_peer_token" \
 	"1011 kacs_impersonate_peer" \
 	"1012 kacs_revert" \

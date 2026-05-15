@@ -103,6 +103,12 @@ enum StackEntry {
     Result(ConditionalResult),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogicalOperand {
+    Result(ConditionalResult),
+    LiteralOrigin,
+}
+
 /// Evaluates one conditional ACE bytecode program and returns a tri-state
 /// result. Malformed inputs, bounds violations, and stack overflows return
 /// `Unknown`.
@@ -206,6 +212,13 @@ pub(crate) fn validate_conditional_expression_structure(bytes: &[u8]) -> bool {
         matches!(stack.pop(), Some(kind) if kind == expected)
     }
 
+    fn pop_logical_operand(stack: &mut Vec<StructuralEntry>) -> bool {
+        matches!(
+            stack.pop(),
+            Some(StructuralEntry::Value | StructuralEntry::Result)
+        )
+    }
+
     if bytes.len() < 4 || &bytes[..4] != b"artx" {
         return false;
     }
@@ -288,9 +301,7 @@ pub(crate) fn validate_conditional_expression_structure(bytes: &[u8]) -> bool {
                 }
             }
             0xa0 | 0xa1 => {
-                if !pop_kind(&mut stack, StructuralEntry::Result)
-                    || !pop_kind(&mut stack, StructuralEntry::Result)
-                {
+                if !pop_logical_operand(&mut stack) || !pop_logical_operand(&mut stack) {
                     return false;
                 }
                 if stack.push(StructuralEntry::Result).is_err() {
@@ -298,7 +309,7 @@ pub(crate) fn validate_conditional_expression_structure(bytes: &[u8]) -> bool {
                 }
             }
             0xa2 => {
-                if !pop_kind(&mut stack, StructuralEntry::Result) {
+                if !pop_logical_operand(&mut stack) {
                     return false;
                 }
                 if stack.push(StructuralEntry::Result).is_err() {
@@ -410,7 +421,24 @@ fn parse_composite_literal(bytes: &[u8], offset: &mut usize, depth: usize) -> Op
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_composite_literal, StackEntry};
+    use super::{parse_composite_literal, validate_conditional_expression_structure, StackEntry};
+
+    fn string_payload(value: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let utf16: std::vec::Vec<u16> = value.encode_utf16().collect();
+        bytes.extend_from_slice(&((utf16.len() * 2) as u32).to_le_bytes());
+        for code_unit in utf16 {
+            bytes.extend_from_slice(&code_unit.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn attr_ref(opcode: u8, name: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.push(opcode);
+        bytes.extend_from_slice(&string_payload(name));
+        bytes
+    }
 
     fn nested_composite(depth: usize) -> Vec<u8> {
         let mut inner = vec![0x10, 0, 0, 0, 0];
@@ -442,6 +470,16 @@ mod tests {
         let parsed = parse_composite_literal(&bytes, &mut offset, 0);
 
         assert!(matches!(parsed, Some(StackEntry::Value(_))));
+    }
+
+    #[test]
+    fn structural_validator_accepts_logical_attribute_operands() {
+        let mut bytes = b"artx".to_vec();
+        bytes.extend_from_slice(&attr_ref(0xf9, "enabled"));
+        bytes.extend_from_slice(&attr_ref(0xfa, "allowed"));
+        bytes.push(0xa0);
+
+        assert!(validate_conditional_expression_structure(&bytes));
     }
 }
 
@@ -537,7 +575,7 @@ fn claim_value_to_value(value: &ClaimValue) -> Option<Value> {
         ClaimValue::String(value) => Some(Value::String(value.try_clone().ok()?)),
         ClaimValue::Sid(value) => Some(Value::Sid(value.try_clone().ok()?)),
         ClaimValue::Octet(value) => Some(Value::Octet(value.try_clone().ok()?)),
-        ClaimValue::Boolean(value) => Some(Value::Int64(if *value { 1 } else { 0 })),
+        ClaimValue::Boolean(value) => Some(Value::Int64(if *value != 0 { 1 } else { 0 })),
         ClaimValue::Composite(values) => {
             let mut converted = Vec::with_capacity(values.len()).ok()?;
             for value in values {
@@ -626,14 +664,24 @@ fn binary_logical(
     stack: &mut Vec<StackEntry>,
     op: fn(ConditionalResult, ConditionalResult) -> ConditionalResult,
 ) -> Option<StackEntry> {
-    let rhs = pop_logical_value(stack)?;
-    let lhs = pop_logical_value(stack)?;
-    Some(StackEntry::Result(op(lhs, rhs)))
+    let rhs = pop_logical_operand(stack)?;
+    let lhs = pop_logical_operand(stack)?;
+    let result = match (lhs, rhs) {
+        (LogicalOperand::LiteralOrigin, _) | (_, LogicalOperand::LiteralOrigin) => {
+            ConditionalResult::Unknown
+        }
+        (LogicalOperand::Result(lhs), LogicalOperand::Result(rhs)) => op(lhs, rhs),
+    };
+    Some(StackEntry::Result(result))
 }
 
 fn unary_logical_not(stack: &mut Vec<StackEntry>) -> Option<StackEntry> {
-    let value = pop_logical_value(stack)?;
-    Some(StackEntry::Result(invert_result(value)))
+    let value = pop_logical_operand(stack)?;
+    let result = match value {
+        LogicalOperand::LiteralOrigin => ConditionalResult::Unknown,
+        LogicalOperand::Result(result) => invert_result(result),
+    };
+    Some(StackEntry::Result(result))
 }
 
 fn pop_value(stack: &mut Vec<StackEntry>) -> Option<OperandValue> {
@@ -643,17 +691,17 @@ fn pop_value(stack: &mut Vec<StackEntry>) -> Option<OperandValue> {
     }
 }
 
-fn pop_logical_value(stack: &mut Vec<StackEntry>) -> Option<ConditionalResult> {
+fn pop_logical_operand(stack: &mut Vec<StackEntry>) -> Option<LogicalOperand> {
     match stack.pop()? {
-        StackEntry::Result(result) => Some(result),
-        StackEntry::Value(value) => Some(coerce_logical_value(&value)),
+        StackEntry::Result(result) => Some(LogicalOperand::Result(result)),
+        StackEntry::Value(value) => coerce_logical_value(&value),
     }
 }
 
-fn coerce_logical_value(value: &OperandValue) -> ConditionalResult {
+fn coerce_logical_value(value: &OperandValue) -> Option<LogicalOperand> {
     match value.origin {
-        ValueOrigin::Literal => ConditionalResult::Unknown,
-        ValueOrigin::Attribute => match &value.value {
+        ValueOrigin::Literal => Some(LogicalOperand::LiteralOrigin),
+        ValueOrigin::Attribute => Some(LogicalOperand::Result(match &value.value {
             Value::Null => ConditionalResult::Unknown,
             Value::Int64(value) => {
                 if *value == 0 {
@@ -677,7 +725,7 @@ fn coerce_logical_value(value: &OperandValue) -> ConditionalResult {
                 }
             }
             Value::Octet(_) | Value::Sid(_) | Value::Composite(_) => ConditionalResult::Unknown,
-        },
+        })),
     }
 }
 
@@ -905,11 +953,10 @@ fn compare_int64_uint64(lhs: i64, rhs: u64) -> Ordering {
 }
 
 fn compare_strings(lhs: &str, rhs: &str, case_sensitive: bool) -> Option<Ordering> {
-    if case_sensitive {
-        Some(lhs.cmp(rhs))
-    } else {
-        Some(fold_string(lhs)?.cmp(&fold_string(rhs)?))
-    }
+    let lhs_bytes = utf16le_bytes(lhs)?;
+    let rhs_bytes = utf16le_bytes(rhs)?;
+
+    compare_octets(lhs_bytes.as_slice(), rhs_bytes.as_slice(), case_sensitive)
 }
 
 fn fold_string(value: &str) -> Option<String> {
@@ -920,6 +967,15 @@ fn fold_string(value: &str) -> Option<String> {
         }
     }
     Some(folded)
+}
+
+fn utf16le_bytes(value: &str) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for code_unit in value.encode_utf16() {
+        bytes.push((code_unit & 0x00ff) as u8).ok()?;
+        bytes.push((code_unit >> 8) as u8).ok()?;
+    }
+    Some(bytes)
 }
 
 fn compare_octets(lhs: &[u8], rhs: &[u8], case_sensitive: bool) -> Option<Ordering> {
@@ -1072,21 +1128,23 @@ fn invert_result(result: ConditionalResult) -> ConditionalResult {
 }
 
 fn normalize_signed_literal(raw_value: i64, sign: u8) -> Option<i64> {
+    if raw_value == i64::MIN {
+        return match sign {
+            0x01 | 0x03 => None,
+            0x02 => Some(i64::MIN),
+            _ => None,
+        };
+    }
+
+    let magnitude = if raw_value < 0 {
+        raw_value.checked_neg()?
+    } else {
+        raw_value
+    };
+
     match sign {
-        0x01 | 0x03 => {
-            if raw_value < 0 {
-                None
-            } else {
-                Some(raw_value)
-            }
-        }
-        0x02 => {
-            if raw_value > 0 {
-                None
-            } else {
-                Some(raw_value)
-            }
-        }
+        0x01 | 0x03 => Some(magnitude),
+        0x02 => Some(magnitude.checked_neg()?),
         _ => None,
     }
 }

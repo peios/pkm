@@ -128,7 +128,9 @@ pub fn evaluate_security_descriptor<'a>(
     );
     let privilege_granted = pre_sacl.privilege_granted | provenance.take_ownership_granted;
 
-    if !token.restricted.restricted_sids.is_empty() {
+    if !token.restricted.restricted_sids.is_empty()
+        || !token.restricted.restricted_device_groups.is_empty()
+    {
         let mut restricted_context = token.restricted;
         restricted_context.privilege_granted = privilege_granted;
 

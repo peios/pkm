@@ -3,7 +3,7 @@ use kacs_core::{
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
     ACCESS_DENIED_ACE_TYPE, ACE_OBJECT_TYPE_PRESENT, DELETE, GENERIC_READ, MAXIMUM_ALLOWED,
     READ_CONTROL, SE_DACL_PRESENT, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY, SE_SELF_RELATIVE,
-    WRITE_DAC,
+    SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE, WRITE_DAC,
 };
 
 fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
@@ -66,6 +66,45 @@ fn callback_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8], app_data: &[u8])
     bytes.extend_from_slice(&mask.to_le_bytes());
     bytes.extend_from_slice(sid);
     bytes.extend_from_slice(app_data);
+    bytes
+}
+
+fn utf16_cstr(value: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for unit in value.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes
+}
+
+fn int64_claim(name: &str, value: i64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let values_start = 20usize;
+    let name_offset = 28usize;
+
+    bytes.extend_from_slice(&(name_offset as u32).to_le_bytes());
+    bytes.extend_from_slice(&0x0001u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&(values_start as u32).to_le_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
+    bytes.extend_from_slice(&utf16_cstr(name));
+    bytes
+}
+
+fn resource_attribute_ace(flags: u8, mask: u32, sid: &[u8], application_data: &[u8]) -> Vec<u8> {
+    let unpadded_size = 8 + sid.len() + application_data.len();
+    let size = (unpadded_size + 3) & !3;
+    let mut bytes = Vec::with_capacity(size);
+    bytes.push(SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE);
+    bytes.push(flags);
+    bytes.extend_from_slice(&(size as u16).to_le_bytes());
+    bytes.extend_from_slice(&mask.to_le_bytes());
+    bytes.extend_from_slice(sid);
+    bytes.extend_from_slice(application_data);
+    bytes.resize(size, 0);
     bytes
 }
 
@@ -342,6 +381,26 @@ fn owner_rights_ace_suppresses_implicit_owner_grant() {
 }
 
 #[test]
+fn owner_rights_allow_ace_expands_owner_access_beyond_implicit_rights() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let dacl = acl_bytes(&[basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, DELETE, &owner_rights)]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&owner),
+        user_deny_only: false,
+        groups: &[],
+    };
+
+    let result =
+        evaluate_dacl(&sd, &token, DELETE, &mapping(), false).expect("evaluation should succeed");
+
+    assert!(result.success);
+    assert_eq!(result.granted, DELETE);
+}
+
+#[test]
 fn null_dacl_grants_all_valid_rights() {
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let sd_bytes = sd_with_dacl(&user, None);
@@ -360,6 +419,32 @@ fn null_dacl_grants_all_valid_rights() {
         result.granted,
         DELETE | READ_CONTROL | WRITE_DAC | 0x0000_0007
     );
+}
+
+#[test]
+fn resource_attribute_ace_does_not_grant_access_directly() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 2025]);
+    let resource_attribute_sid = sid_bytes([0, 0, 0, 0, 0, 1], &[0]);
+    let dacl = acl_bytes(&[resource_attribute_ace(
+        0,
+        READ_CONTROL,
+        &resource_attribute_sid,
+        &int64_claim("Level", 7),
+    )]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+
+    let result = evaluate_dacl(&sd, &token, READ_CONTROL, &mapping(), false)
+        .expect("resource attribute ACE should not affect DACL grants");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
 }
 
 #[test]

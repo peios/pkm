@@ -583,6 +583,7 @@ fn zero_summary(summary_out: *mut PkmKacsIngressSummary) {
 
 fn map_kacs_error(error: KacsError) -> c_long {
     match error {
+        KacsError::AccessDenied => KACS_ABI_EACCES as c_long,
         KacsError::UserMemoryFault { .. } => EFAULT,
         KacsError::AllocationFailure => ENOMEM,
         _ => EINVAL,

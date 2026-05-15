@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 kernel_image=${1:-"$script_dir/out-kunit/bzImage"}
-initrd_image=${2:-"/home/jack/projects/peios/depr/provium/testdata/minimal.cpio.gz"}
+initrd_image=${2:-"$script_dir/../../_depr/provium/testdata/minimal.cpio.gz"}
 qemu_bin=${QEMU_BIN:-qemu-system-x86_64}
 log_file=${KUNIT_QEMU_LOG:-${TMPDIR:-/tmp}/pkm-slice19-kunit.log}
 qemu_timeout=${KUNIT_QEMU_TIMEOUT:-420s}

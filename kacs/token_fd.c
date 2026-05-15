@@ -470,7 +470,7 @@ static long pkm_kacs_token_adjust_groups_core(
 		return -EACCES;
 	if (args->_pad != 0)
 		return -EINVAL;
-	if (args->count == 0 || args->count > 256)
+	if (args->count == 0 || args->count > PKM_KACS_MAX_TOKEN_GROUPS)
 		return -EINVAL;
 	if (!entries)
 		return -EINVAL;
@@ -767,7 +767,8 @@ static long pkm_kacs_token_adjust_groups_user(
 		return -EFAULT;
 	if (copy_from_user(&args, uargs, sizeof(args)))
 		return -EFAULT;
-	if (args._pad != 0 || args.count == 0 || args.count > 256)
+	if (args._pad != 0 || args.count == 0 ||
+	    args.count > PKM_KACS_MAX_TOKEN_GROUPS)
 		return -EINVAL;
 
 	entries_size = args.count * sizeof(*entries);

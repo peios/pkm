@@ -1,13 +1,16 @@
 use kacs_core::{
     access_check, access_check_core, access_check_result_list, AccessCheckMode, AccessCheckResult,
     AccessCheckResultListState, AccessCheckToken, AccessStatus, CaapPolicy, CaapPolicyEntry,
-    CaapRule, ConditionalContext, GenericMapping, ImpersonationLevel, IntegrityLevel,
-    ObjectTypeList, ObjectTypeNode, PipContext, RestrictedTokenContext, SecurityDescriptor, Sid,
-    TokenPrivileges, TokenType, TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+    CaapRule, ClaimAttribute, ClaimValue, ConditionalContext, GenericMapping, ImpersonationLevel,
+    IntegrityLevel, ObjectTypeList, ObjectTypeNode, PipContext, RestrictedTokenContext,
+    SecurityDescriptor, Sid, SidAndAttributes, TokenPrivileges, TokenType, TokenView,
+    ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
     ACE_OBJECT_TYPE_PRESENT, AUDIT_POLICY_OBJECT_ACCESS_FAILURE,
-    AUDIT_POLICY_OBJECT_ACCESS_SUCCESS, READ_CONTROL, SE_DACL_PRESENT, SE_SACL_PRESENT,
-    SE_SELF_RELATIVE, SYSTEM_ALARM_ACE_TYPE, SYSTEM_ALARM_OBJECT_ACE_TYPE, SYSTEM_AUDIT_ACE_TYPE,
-    SYSTEM_AUDIT_CALLBACK_ACE_TYPE, TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC,
+    AUDIT_POLICY_OBJECT_ACCESS_SUCCESS, CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY, READ_CONTROL,
+    SE_DACL_PRESENT, SE_GROUP_USE_FOR_DENY_ONLY, SE_SACL_PRESENT, SE_SELF_RELATIVE,
+    SYSTEM_ALARM_ACE_TYPE, SYSTEM_ALARM_CALLBACK_ACE_TYPE, SYSTEM_ALARM_OBJECT_ACE_TYPE,
+    SYSTEM_AUDIT_ACE_TYPE, SYSTEM_AUDIT_CALLBACK_ACE_TYPE, SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
+    TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC,
 };
 
 const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
@@ -50,6 +53,21 @@ fn callback_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8], condition: &[u8]
     bytes.extend_from_slice(&mask.to_le_bytes());
     bytes.extend_from_slice(sid);
     bytes.extend_from_slice(condition);
+    bytes.resize(size, 0);
+    bytes
+}
+
+fn resource_attribute_ace(flags: u8, application_data: &[u8]) -> Vec<u8> {
+    let sid = sid_bytes([0, 0, 0, 0, 0, 1], &[0]);
+    let unpadded_size = 8 + sid.len() + application_data.len();
+    let size = (unpadded_size + 3) & !3;
+    let mut bytes = Vec::with_capacity(size);
+    bytes.push(SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE);
+    bytes.push(flags);
+    bytes.extend_from_slice(&(size as u16).to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&sid);
+    bytes.extend_from_slice(application_data);
     bytes.resize(size, 0);
     bytes
 }
@@ -161,10 +179,43 @@ fn string_literal(value: &str) -> Vec<u8> {
     bytes
 }
 
+fn utf16_cstr(value: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for unit in value.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes
+}
+
+fn int64_claim(name: &str, value: i64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let values_start = 20usize;
+    let name_offset = 28usize;
+
+    bytes.extend_from_slice(&(name_offset as u32).to_le_bytes());
+    bytes.extend_from_slice(&0x0001u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&(values_start as u32).to_le_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
+    bytes.extend_from_slice(&utf16_cstr(name));
+    bytes
+}
+
 fn attr_ref(opcode: u8, name: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.push(opcode);
     bytes.extend_from_slice(&string_literal(name)[1..]);
+    bytes
+}
+
+fn sid_literal(sid: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.push(0x51);
+    bytes.extend_from_slice(&(sid.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(sid);
     bytes
 }
 
@@ -190,11 +241,18 @@ fn mapping() -> GenericMapping {
 }
 
 fn primary_token<'a>(user: Sid<'a>) -> AccessCheckToken<'a> {
+    primary_token_with_groups(user, &[])
+}
+
+fn primary_token_with_groups<'a>(
+    user: Sid<'a>,
+    groups: &'a [SidAndAttributes<'a>],
+) -> AccessCheckToken<'a> {
     AccessCheckToken {
         subject: TokenView {
             user,
             user_deny_only: false,
-            groups: &[],
+            groups,
         },
         token_type: TokenType::Primary,
         impersonation_level: ImpersonationLevel::Impersonation,
@@ -231,8 +289,8 @@ fn audit_aces_use_mapped_desired_overlap_and_final_success_or_failure() {
             &user,
         ),
     ]);
-    let sd_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
-    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let with_sacl_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
+    let sd = SecurityDescriptor::parse(&with_sacl_bytes).expect("sd should parse");
     let token = primary_token(parse_sid(&user));
 
     let success = access_check_core(
@@ -291,8 +349,8 @@ fn callback_unknown_audits_and_alarm_masks_are_accumulated() {
         ),
         basic_ace(SYSTEM_ALARM_ACE_TYPE, 0, WRITE_DAC, &user),
     ]);
-    let sd_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
-    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let with_sacl_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
+    let sd = SecurityDescriptor::parse(&with_sacl_bytes).expect("sd should parse");
     let token = primary_token(parse_sid(&user));
 
     let result = access_check_core(
@@ -310,6 +368,180 @@ fn callback_unknown_audits_and_alarm_masks_are_accumulated() {
     )
     .expect("callback audit should evaluate");
 
+    assert_eq!(result.audit_events.len(), 1);
+    assert_eq!(result.continuous_audit_mask, WRITE_DAC);
+}
+
+#[test]
+fn sacl_resource_attribute_feeds_dacl_callback_condition() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 13011]);
+    let condition = expr(&append_tokens(&[
+        attr_ref(0xfa, "Level"),
+        int64_literal(7),
+        vec![0x80],
+    ]));
+    let dacl = acl_bytes(&[callback_ace(
+        ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+        0,
+        READ_CONTROL,
+        &user,
+        &condition,
+    )]);
+    let sacl = acl_bytes(&[resource_attribute_ace(0, &int64_claim("Level", 7))]);
+    let with_sacl_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
+    let sd = SecurityDescriptor::parse(&with_sacl_bytes).expect("sd should parse");
+    let without_sacl_bytes = sd_bytes(Some(&owner), Some(&group), None, Some(&dacl));
+    let without_sacl =
+        SecurityDescriptor::parse(&without_sacl_bytes).expect("sd without sacl should parse");
+    let token = primary_token(parse_sid(&user));
+
+    let result = access_check_core(
+        Some(&sd),
+        &token,
+        default_pip(),
+        READ_CONTROL,
+        &mapping(),
+        AccessCheckMode::Scalar,
+        None,
+        &ConditionalContext::default(),
+        None,
+        0,
+        &[],
+    )
+    .expect("resource-backed callback should evaluate");
+    let missing_result = access_check_core(
+        Some(&without_sacl),
+        &token,
+        default_pip(),
+        READ_CONTROL,
+        &mapping(),
+        AccessCheckMode::Scalar,
+        None,
+        &ConditionalContext::default(),
+        None,
+        0,
+        &[],
+    )
+    .expect("missing resource callback should evaluate as skipped");
+
+    assert_eq!(result.granted, READ_CONTROL);
+    assert_eq!(missing_result.granted, 0);
+}
+
+#[test]
+fn deny_only_claims_are_visible_to_audit_and_alarm_conditions() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 13009]);
+    let dacl = acl_bytes(&[basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user)]);
+    let audit_condition = expr(&append_tokens(&[attr_ref(0xf8, "audit_gate"), vec![0x87]]));
+    let alarm_condition = expr(&append_tokens(&[attr_ref(0xf8, "alarm_gate"), vec![0x87]]));
+    let sacl = acl_bytes(&[
+        callback_ace(
+            SYSTEM_AUDIT_CALLBACK_ACE_TYPE,
+            SUCCESSFUL_ACCESS_ACE_FLAG,
+            READ_CONTROL,
+            &user,
+            &audit_condition,
+        ),
+        callback_ace(
+            SYSTEM_ALARM_CALLBACK_ACE_TYPE,
+            0,
+            WRITE_DAC,
+            &user,
+            &alarm_condition,
+        ),
+    ]);
+    let sd_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = primary_token(parse_sid(&user));
+    let local_claims = [
+        ClaimAttribute::new(
+            "audit_gate",
+            CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY,
+            vec![ClaimValue::Boolean(2)],
+        ),
+        ClaimAttribute::new(
+            "alarm_gate",
+            CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY,
+            vec![ClaimValue::Boolean(2)],
+        ),
+    ];
+    let context = ConditionalContext {
+        local_claims: &local_claims,
+        ..ConditionalContext::default()
+    };
+
+    let result = access_check_core(
+        Some(&sd),
+        &token,
+        default_pip(),
+        READ_CONTROL,
+        &mapping(),
+        AccessCheckMode::Scalar,
+        None,
+        &context,
+        None,
+        0,
+        &[],
+    )
+    .expect("deny-only audit conditions should evaluate");
+
+    assert_eq!(result.granted, READ_CONTROL);
+    assert_eq!(result.audit_events.len(), 1);
+    assert_eq!(result.continuous_audit_mask, WRITE_DAC);
+}
+
+#[test]
+fn deny_only_groups_are_visible_to_audit_and_alarm_member_conditions() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 13010]);
+    let deny_only_group = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 23010]);
+    let dacl = acl_bytes(&[basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user)]);
+    let member_condition = expr(&append_tokens(&[sid_literal(&deny_only_group), vec![0x89]]));
+    let sacl = acl_bytes(&[
+        callback_ace(
+            SYSTEM_AUDIT_CALLBACK_ACE_TYPE,
+            SUCCESSFUL_ACCESS_ACE_FLAG,
+            READ_CONTROL,
+            &user,
+            &member_condition,
+        ),
+        callback_ace(
+            SYSTEM_ALARM_CALLBACK_ACE_TYPE,
+            0,
+            WRITE_DAC,
+            &user,
+            &member_condition,
+        ),
+    ]);
+    let sd_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let groups = [SidAndAttributes {
+        sid: parse_sid(&deny_only_group),
+        attributes: SE_GROUP_USE_FOR_DENY_ONLY,
+    }];
+    let token = primary_token_with_groups(parse_sid(&user), &groups);
+
+    let result = access_check_core(
+        Some(&sd),
+        &token,
+        default_pip(),
+        READ_CONTROL,
+        &mapping(),
+        AccessCheckMode::Scalar,
+        None,
+        &ConditionalContext::default(),
+        None,
+        0,
+        &[],
+    )
+    .expect("deny-only membership audit conditions should evaluate");
+
+    assert_eq!(result.granted, READ_CONTROL);
     assert_eq!(result.audit_events.len(), 1);
     assert_eq!(result.continuous_audit_mask, WRITE_DAC);
 }

@@ -1821,6 +1821,8 @@ insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1005 kacs_set_psb
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1006 kacs_destroy_empty_session
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1010 kacs_open_peer_token
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1011 kacs_impersonate_peer

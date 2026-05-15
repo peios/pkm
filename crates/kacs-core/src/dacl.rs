@@ -163,7 +163,9 @@ pub fn evaluate_dacl_with_restricted_context(
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
 
-    if restricted_context.restricted_sids.is_empty() {
+    if restricted_context.restricted_sids.is_empty()
+        && restricted_context.restricted_device_groups.is_empty()
+    {
         return Ok(finalize_scalar(normal.root, &normalized));
     }
 
@@ -469,7 +471,9 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
 
-    if restricted_context.restricted_sids.is_empty() {
+    if restricted_context.restricted_sids.is_empty()
+        && restricted_context.restricted_device_groups.is_empty()
+    {
         return Ok(finalize_result_list(
             normal
                 .object_states

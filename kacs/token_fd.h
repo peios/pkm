@@ -50,6 +50,7 @@ struct file;
 #define KACS_ELEVATION_DEFAULT 0x01U
 #define KACS_ELEVATION_FULL 0x02U
 #define KACS_ELEVATION_LIMITED 0x03U
+#define PKM_KACS_MAX_TOKEN_GROUPS 64U
 
 struct kacs_query_args {
 	u32 token_class;
