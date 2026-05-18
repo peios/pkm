@@ -1,0 +1,18 @@
+# peios-uapi — the generated Rust mirror of the PKM kernel ABI.
+#
+# This crate is deliberately NOT a member of the pkm Cargo workspace: it
+# shares the package name `peios-uapi` with the legacy hand-written crate
+# at crates/peios-uapi/, and a workspace cannot hold two packages of the
+# same name. It is listed in the workspace's `exclude`. Once libp-rs has
+# migrated off the legacy crate and that crate is deleted, this one moves
+# into `members`.
+#
+# Bindings are generated from pkm/uapi/pkm/ by ./gen.sh — see that script.
+[package]
+name = "peios-uapi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Generated Rust bindings for the PKM kernel ABI (KACS, KMES)"

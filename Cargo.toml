@@ -9,6 +9,10 @@ members = [
     "crates/libp-event",
     "crates/libp-test",
 ]
+# uapi/rust is the generated replacement for crates/peios-uapi. It shares
+# the package name `peios-uapi`, so it cannot be a workspace member
+# alongside the legacy crate; it is excluded until that crate is retired.
+exclude = ["uapi/rust"]
 
 # Shared package metadata. Members opt-in via `field.workspace = true`.
 # Members with reasons to diverge (kacs-core stays on edition 2021 during
