@@ -125,6 +125,40 @@ fn parses_self_relative_sd_with_owner_and_dacl() {
 }
 
 #[test]
+fn cached_layout_reconstructs_same_descriptor_views() {
+    let owner = sid_bytes(&[18]);
+    let group = sid_bytes(&[32, 544]);
+    let dacl = acl_bytes(&[basic_allow_ace(0x0002_0001, &owner)]);
+    let mut bytes = sd_bytes(
+        &owner,
+        &dacl,
+        SE_SELF_RELATIVE | SE_DACL_PRESENT,
+        20 + owner.len() as u32 + group.len() as u32,
+    );
+    bytes[8..12].copy_from_slice(&(20 + owner.len() as u32).to_le_bytes());
+    bytes.truncate(20 + owner.len());
+    bytes.extend_from_slice(&group);
+    bytes.extend_from_slice(&dacl);
+
+    let layout = SecurityDescriptor::parse_layout(&bytes).expect("layout should parse");
+    let parsed = SecurityDescriptor::parse(&bytes).expect("sd should parse");
+    let cached =
+        SecurityDescriptor::from_cached_layout(&bytes, &layout).expect("layout should rebuild");
+
+    assert_eq!(cached.control(), parsed.control());
+    assert_eq!(
+        cached.resource_manager_control(),
+        parsed.resource_manager_control()
+    );
+    assert_eq!(cached.owner(), parsed.owner());
+    assert_eq!(cached.group(), parsed.group());
+    assert_eq!(
+        cached.dacl().map(|acl| acl.bytes()),
+        parsed.dacl().map(|acl| acl.bytes())
+    );
+}
+
+#[test]
 fn preserves_resource_manager_control_byte() {
     let owner = sid_bytes(&[18]);
     let dacl = acl_bytes(&[]);
@@ -210,6 +244,68 @@ fn rejects_nonzero_dacl_offset_when_dacl_not_present() {
 }
 
 #[test]
+fn rejects_sacl_present_with_zero_offset() {
+    let owner = sid_bytes(&[18]);
+    let mut bytes = vec![0u8; 20];
+    bytes[0] = 1;
+    bytes[2..4].copy_from_slice(&(SE_SELF_RELATIVE | SE_SACL_PRESENT).to_le_bytes());
+    bytes[4..8].copy_from_slice(&20u32.to_le_bytes());
+    bytes.extend_from_slice(&owner);
+
+    let err = SecurityDescriptor::parse(&bytes).expect_err("zero sacl offset must fail");
+    assert_eq!(
+        err,
+        KacsError::InconsistentSecurityDescriptorField {
+            field: "sacl",
+            present: true,
+            offset: 0,
+        }
+    );
+}
+
+#[test]
+fn rejects_sacl_offset_beyond_buffer() {
+    let owner = sid_bytes(&[18]);
+    let mut bytes = vec![0u8; 20];
+    bytes[0] = 1;
+    bytes[2..4].copy_from_slice(&(SE_SELF_RELATIVE | SE_SACL_PRESENT).to_le_bytes());
+    bytes[4..8].copy_from_slice(&20u32.to_le_bytes());
+    bytes[12..16].copy_from_slice(&4096u32.to_le_bytes());
+    bytes.extend_from_slice(&owner);
+
+    let err = SecurityDescriptor::parse(&bytes).expect_err("oob sacl offset must fail");
+    assert_eq!(
+        err,
+        KacsError::SecurityDescriptorOffsetOutOfBounds {
+            field: "sacl",
+            offset: 4096,
+            buffer_len: bytes.len(),
+        }
+    );
+}
+
+#[test]
+fn rejects_nonzero_sacl_offset_when_sacl_not_present() {
+    let owner = sid_bytes(&[18]);
+    let mut bytes = vec![0u8; 20];
+    bytes[0] = 1;
+    bytes[2..4].copy_from_slice(&SE_SELF_RELATIVE.to_le_bytes());
+    bytes[4..8].copy_from_slice(&20u32.to_le_bytes());
+    bytes[12..16].copy_from_slice(&(20 + owner.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&owner);
+
+    let err = SecurityDescriptor::parse(&bytes).expect_err("nonzero absent sacl offset must fail");
+    assert_eq!(
+        err,
+        KacsError::InconsistentSecurityDescriptorField {
+            field: "sacl",
+            present: false,
+            offset: 32,
+        }
+    );
+}
+
+#[test]
 fn rejects_component_offsets_inside_header() {
     let owner = sid_bytes(&[18]);
     let dacl = acl_bytes(&[]);
@@ -249,6 +345,27 @@ fn rejects_overlapping_components() {
         err,
         KacsError::SecurityDescriptorComponentsOverlap {
             first: "owner",
+            second: "dacl",
+        }
+    );
+}
+
+#[test]
+fn rejects_overlapping_sacl_and_dacl_components() {
+    let sacl = acl_bytes(&[]);
+    let mut bytes = vec![0u8; 20];
+    bytes[0] = 1;
+    bytes[2..4]
+        .copy_from_slice(&(SE_SELF_RELATIVE | SE_SACL_PRESENT | SE_DACL_PRESENT).to_le_bytes());
+    bytes[12..16].copy_from_slice(&20u32.to_le_bytes());
+    bytes[16..20].copy_from_slice(&20u32.to_le_bytes());
+    bytes.extend_from_slice(&sacl);
+
+    let err = SecurityDescriptor::parse(&bytes).expect_err("overlapping sacl and dacl must fail");
+    assert_eq!(
+        err,
+        KacsError::SecurityDescriptorComponentsOverlap {
+            first: "sacl",
             second: "dacl",
         }
     );

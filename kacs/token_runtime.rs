@@ -19,16 +19,17 @@
 
 #![allow(unreachable_pub)]
 
-use crate::access_check::{access_check, access_check_core, AccessCheckMode};
-use crate::access_check_abi::AccessCheckAbiResolved;
+use crate::access_check::{access_check_core, AccessCheckMode};
+use crate::access_check_abi::{own_audit_events, AccessCheckAbiResolved};
 use crate::access_mask::{
-    GenericMapping, FILE_GENERIC_MAPPING, FILE_READ_DATA, FILE_WRITE_DATA, GENERIC_ALL,
-    PROCESS_GENERIC_MAPPING, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED, READ_CONTROL,
-    WRITE_DAC, WRITE_OWNER,
+    GenericMapping, ACCESS_SYSTEM_SECURITY, FILE_GENERIC_MAPPING, FILE_READ_DATA,
+    FILE_WRITE_DATA, GENERIC_ALL, PROCESS_GENERIC_MAPPING, PROCESS_QUERY_INFORMATION,
+    PROCESS_QUERY_LIMITED, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
+use crate::audit::evaluate_sacl;
 use crate::ace::{
     minimum_acl_revision_with_source_floor_for_opaque, AceKind, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
-    ACL_REVISION, ACL_REVISION_DS, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+    ACL_REVISION, ACL_REVISION_DS, SYSTEM_AUDIT_ACE_TYPE, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
     SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE,
 };
 use crate::acl::Acl;
@@ -39,7 +40,10 @@ use crate::claims::{
 };
 use crate::condition::ConditionalContext;
 use crate::error::KacsError;
-use crate::kmes_payload::{emit_continuous_audit_to_kmes, emit_logon_session_destroyed_to_kmes};
+use crate::kmes_payload::{
+    emit_access_check_events_to_kmes, emit_continuous_audit_to_kmes,
+    emit_logon_session_destroyed_to_kmes,
+};
 use crate::mic::{
     IntegrityLevel, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
     TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
@@ -49,12 +53,14 @@ use crate::pkm_alloc::{slice_to_vec, TryClone, Vec};
 use crate::privilege::{
     TokenPrivileges, SE_RELABEL_PRIVILEGE, SE_RESTORE_PRIVILEGE, SE_SECURITY_PRIVILEGE,
 };
+use crate::sacl::extract_sacl_metadata;
 use crate::security_descriptor::{
-    SecurityDescriptor, MAX_SECURITY_DESCRIPTOR_BYTES, SE_DACL_AUTO_INHERITED,
-    SE_DACL_AUTO_INHERIT_REQ, SE_DACL_DEFAULTED, SE_DACL_PRESENT, SE_DACL_PROTECTED,
-    SE_DACL_TRUSTED, SE_GROUP_DEFAULTED, SE_OWNER_DEFAULTED, SE_RM_CONTROL_VALID,
-    SE_SACL_AUTO_INHERITED, SE_SACL_AUTO_INHERIT_REQ, SE_SACL_DEFAULTED, SE_SACL_PRESENT,
-    SE_SACL_PROTECTED, SE_SELF_RELATIVE, SE_SERVER_SECURITY,
+    SecurityDescriptor, SecurityDescriptorComponentLayout, SecurityDescriptorLayout,
+    MAX_SECURITY_DESCRIPTOR_BYTES, SE_DACL_AUTO_INHERITED, SE_DACL_AUTO_INHERIT_REQ,
+    SE_DACL_DEFAULTED, SE_DACL_PRESENT, SE_DACL_PROTECTED, SE_DACL_TRUSTED,
+    SE_GROUP_DEFAULTED, SE_OWNER_DEFAULTED, SE_RM_CONTROL_VALID, SE_SACL_AUTO_INHERITED,
+    SE_SACL_AUTO_INHERIT_REQ, SE_SACL_DEFAULTED, SE_SACL_PRESENT, SE_SACL_PROTECTED,
+    SE_SELF_RELATIVE, SE_SERVER_SECURITY,
 };
 use crate::sid::Sid;
 use crate::token::{
@@ -64,7 +70,7 @@ use crate::token::{
     AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
 };
 use core::cell::UnsafeCell;
-use core::ffi::{c_ulong, c_void};
+use core::ffi::{c_long, c_ulong, c_void};
 use core::ptr::{copy_nonoverlapping, null, null_mut};
 use core::sync::atomic::{
     fence, AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering,
@@ -113,6 +119,7 @@ const CONTAINER_INHERIT_ACE: u8 = 0x02;
 const NO_PROPAGATE_INHERIT_ACE: u8 = 0x04;
 const INHERIT_ONLY_ACE: u8 = 0x08;
 const INHERITED_ACE: u8 = 0x10;
+const SUCCESSFUL_ACCESS_ACE_FLAG: u8 = 0x40;
 
 const EACCES: i32 = 13;
 const EPERM: i32 = 1;
@@ -174,6 +181,7 @@ const BOOT_SYSTEM_TOKEN_ID: u64 = 0;
 const BOOT_SYSTEM_MODIFIED_ID: u64 = 0;
 const ANONYMOUS_LOGON_LUID: u64 = 998;
 const KUNIT_LOCAL_SERVICE_SESSION_LUID: u64 = 999;
+const KUNIT_LOGON_TYPE_SESSION_LUID_BASE: u64 = 0x4b41_1000;
 const BOOT_SYSTEM_OWNER_SID_INDEX: u32 = 0;
 const BOOT_SYSTEM_PRIMARY_GROUP_INDEX: u32 = 1;
 const BOOT_SYSTEM_GROUP_ATTRIBUTES: [u32; MAX_BOOT_GROUPS] = [
@@ -274,6 +282,29 @@ extern "C" {
     fn pkm_kacs_rcu_read_lock();
     fn pkm_kacs_rcu_read_unlock();
     fn pkm_kacs_free_after_rcu(ptr: *mut c_void);
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct KacsRustCachedSdComponent {
+    offset: u32,
+    len: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct KacsRustCachedSdLayout {
+    control: u16,
+    rm_control: u8,
+    owner_present: u8,
+    group_present: u8,
+    sacl_present: u8,
+    dacl_present: u8,
+    __reserved: u8,
+    owner: KacsRustCachedSdComponent,
+    group: KacsRustCachedSdComponent,
+    sacl: KacsRustCachedSdComponent,
+    dacl: KacsRustCachedSdComponent,
 }
 
 #[repr(C)]
@@ -394,6 +425,24 @@ pub struct PkmKacsBootSnapshot {
     pub confinement_exempt: u32,
     /// Whether the token marks an isolation boundary.
     pub isolation_boundary: u32,
+    /// Token source name bytes.
+    pub source_name_ptr: *const u8,
+    /// Length of `source_name_ptr`.
+    pub source_name_len: usize,
+    /// Token source LUID.
+    pub source_id: u64,
+    /// Expiration time, or zero for no expiry.
+    pub expiration: u64,
+    /// Origin LUID.
+    pub origin: u64,
+    /// Count of restricted SID entries.
+    pub restricted_sid_count: u32,
+    /// Whether a confinement SID is present.
+    pub confinement_sid_present: u32,
+    /// Count of confinement capability entries.
+    pub confinement_capability_count: u32,
+    /// Count of projected supplementary Linux GIDs.
+    pub projected_supplementary_gid_count: u32,
 }
 
 #[repr(C)]
@@ -1654,6 +1703,83 @@ fn free_allocated_bytes_after_rcu(ptr: *mut u8) {
     }
 }
 
+fn cached_component_from_core(
+    component: Option<SecurityDescriptorComponentLayout>,
+) -> (u8, KacsRustCachedSdComponent) {
+    match component {
+        Some(component) => (
+            1,
+            KacsRustCachedSdComponent {
+                offset: component.offset.try_into().unwrap_or(u32::MAX),
+                len: component.len.try_into().unwrap_or(u32::MAX),
+            },
+        ),
+        None => (0, KacsRustCachedSdComponent { offset: 0, len: 0 }),
+    }
+}
+
+fn cached_layout_from_core(layout: &SecurityDescriptorLayout) -> KacsRustCachedSdLayout {
+    let (owner_present, owner) = cached_component_from_core(layout.owner);
+    let (group_present, group) = cached_component_from_core(layout.group);
+    let (sacl_present, sacl) = cached_component_from_core(layout.sacl);
+    let (dacl_present, dacl) = cached_component_from_core(layout.dacl);
+
+    KacsRustCachedSdLayout {
+        control: layout.control,
+        rm_control: layout.resource_manager_control,
+        owner_present,
+        group_present,
+        sacl_present,
+        dacl_present,
+        __reserved: 0,
+        owner,
+        group,
+        sacl,
+        dacl,
+    }
+}
+
+fn cached_component_to_core(
+    present: u8,
+    component: KacsRustCachedSdComponent,
+) -> Result<Option<SecurityDescriptorComponentLayout>, i32> {
+    match present {
+        0 => Ok(None),
+        1 => Ok(Some(SecurityDescriptorComponentLayout {
+            offset: component.offset as usize,
+            len: component.len as usize,
+        })),
+        _ => Err(-EINVAL),
+    }
+}
+
+fn cached_layout_to_core(layout: &KacsRustCachedSdLayout) -> Result<SecurityDescriptorLayout, i32> {
+    if layout.__reserved != 0 {
+        return Err(-EINVAL);
+    }
+
+    Ok(SecurityDescriptorLayout {
+        control: layout.control,
+        resource_manager_control: layout.rm_control,
+        owner: cached_component_to_core(layout.owner_present, layout.owner)?,
+        group: cached_component_to_core(layout.group_present, layout.group)?,
+        sacl: cached_component_to_core(layout.sacl_present, layout.sacl)?,
+        dacl: cached_component_to_core(layout.dacl_present, layout.dacl)?,
+    })
+}
+
+fn cached_file_sd_descriptor<'a>(
+    sd_bytes: &'a [u8],
+    layout: *const KacsRustCachedSdLayout,
+) -> Result<SecurityDescriptor<'a>, i32> {
+    let Some(layout) = (unsafe { layout.as_ref() }) else {
+        return Err(-EINVAL);
+    };
+    let layout = cached_layout_to_core(layout)?;
+
+    SecurityDescriptor::from_cached_layout(sd_bytes, &layout).map_err(sd_parse_errno)
+}
+
 fn read_le_u16(src: &[u8], offset: usize) -> Option<u16> {
     let bytes = src.get(offset..offset.checked_add(2)?)?;
 
@@ -2045,6 +2171,7 @@ fn parse_session_spec(spec: &[u8]) -> Result<(u32, &[u8], Sid<'_>), i32> {
     }
 
     let auth_package = spec.get(3..auth_pkg_end).ok_or(-EINVAL)?;
+    core::str::from_utf8(auth_package).map_err(|_| -EINVAL)?;
     let user_sid_bytes = spec.get(user_sid_offset..user_sid_end).ok_or(-EINVAL)?;
     let user_sid = Sid::parse(user_sid_bytes).map_err(|_| -EINVAL)?;
     if user_sid.as_bytes().len() != user_sid_len {
@@ -2322,13 +2449,17 @@ fn map_file_ace_mask(kind: AceKind<'_>) -> Result<u32, i32> {
     FILE_GENERIC_MAPPING.map_mask(mask).map_err(|_| -EINVAL)
 }
 
-fn resolved_creator_ace_sid<'a>(sid: Sid<'a>, owner_sid: Sid<'a>, group_sid: Sid<'a>) -> &'a [u8] {
+fn resolved_creator_ace_sid<'a>(
+    sid: Sid<'a>,
+    owner_sid: Sid<'a>,
+    group_sid: Option<Sid<'a>>,
+) -> Result<&'a [u8], i32> {
     if sid.as_bytes() == CREATOR_OWNER_SID_BYTES {
-        owner_sid.as_bytes()
+        Ok(owner_sid.as_bytes())
     } else if sid.as_bytes() == CREATOR_GROUP_SID_BYTES {
-        group_sid.as_bytes()
+        group_sid.map(|sid| sid.as_bytes()).ok_or(-EINVAL)
     } else {
-        sid.as_bytes()
+        Ok(sid.as_bytes())
     }
 }
 
@@ -2336,7 +2467,7 @@ fn build_rewritten_file_ace_bytes(
     ace: crate::ace::Ace<'_>,
     new_flags: u8,
     owner_sid: Sid<'_>,
-    group_sid: Sid<'_>,
+    group_sid: Option<Sid<'_>>,
 ) -> Result<Vec<u8>, i32> {
     let mut bytes = Vec::new();
     let mask;
@@ -2352,7 +2483,7 @@ fn build_rewritten_file_ace_bytes(
 
     match ace.kind() {
         AceKind::SingleSid { sid, .. } => {
-            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid);
+            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid)?;
             let ace_len = ACE_HEADER_LEN
                 .checked_add(sid_bytes.len())
                 .ok_or(-ERANGE)?;
@@ -2377,7 +2508,7 @@ fn build_rewritten_file_ace_bytes(
             sid,
             ..
         } => {
-            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid);
+            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid)?;
             let ace_len = 12usize
                 .checked_add(object_type.map_or(0, |_| 16))
                 .and_then(|value| value.checked_add(inherited_object_type.map_or(0, |_| 16)))
@@ -2415,7 +2546,7 @@ fn build_rewritten_file_ace_bytes(
             application_data,
             ..
         } => {
-            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid);
+            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid)?;
             let ace_len = ACE_HEADER_LEN
                 .checked_add(sid_bytes.len())
                 .and_then(|value| value.checked_add(application_data.len()))
@@ -2445,7 +2576,7 @@ fn build_rewritten_file_ace_bytes(
             application_data,
             ..
         } => {
-            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid);
+            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid)?;
             let ace_len = 12usize
                 .checked_add(object_type.map_or(0, |_| 16))
                 .and_then(|value| value.checked_add(inherited_object_type.map_or(0, |_| 16)))
@@ -2487,7 +2618,7 @@ fn build_rewritten_file_ace_bytes(
             application_data,
             ..
         } => {
-            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid);
+            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid)?;
             let ace_len = ACE_HEADER_LEN
                 .checked_add(sid_bytes.len())
                 .and_then(|value| value.checked_add(application_data.len()))
@@ -2518,7 +2649,7 @@ fn build_rewritten_file_ace_bytes(
 fn build_inherited_ace_bytes(
     ace: crate::ace::Ace<'_>,
     owner_sid: Sid<'_>,
-    group_sid: Sid<'_>,
+    group_sid: Option<Sid<'_>>,
     child_is_container: bool,
 ) -> Result<Option<Vec<u8>>, i32> {
     let parent_flags = ace.ace_flags();
@@ -2539,7 +2670,7 @@ fn build_inherited_ace_bytes(
 fn inherit_acl_from_parent(
     parent_acl: Option<Acl<'_>>,
     owner_sid: Sid<'_>,
-    group_sid: Sid<'_>,
+    group_sid: Option<Sid<'_>>,
     child_is_container: bool,
 ) -> Result<Option<Vec<u8>>, i32> {
     let mut inherited_aces = Vec::new();
@@ -2614,15 +2745,7 @@ fn build_synthesized_file_sd_bytes(
                 return Err(-EACCES);
             }
         };
-        let group_sid = match template_sd.group() {
-            Some(value) => value,
-            None => {
-                if !fallback_ptr.is_null() {
-                    free_allocated_bytes(fallback_ptr);
-                }
-                return Err(-EACCES);
-            }
-        };
+        let group_sid = template_sd.group();
         let parent_sd = match SecurityDescriptor::parse(parent_sd_bytes) {
             Ok(value) => value,
             Err(_) => {
@@ -2649,7 +2772,7 @@ fn build_synthesized_file_sd_bytes(
             base_control,
             template_sd.resource_manager_control(),
             Some(owner_sid.as_bytes()),
-            Some(group_sid.as_bytes()),
+            group_sid.map(|sid| sid.as_bytes()),
             inherited_sacl.as_deref(),
             inherited_dacl.as_deref().or(template_dacl.as_deref()),
         );
@@ -2687,7 +2810,7 @@ fn build_empty_acl_bytes_with_reserved(
 fn build_explicit_acl_bytes(
     creator_acl: Option<Acl<'_>>,
     owner_sid: Sid<'_>,
-    group_sid: Sid<'_>,
+    group_sid: Option<Sid<'_>>,
 ) -> Result<Option<Vec<u8>>, i32> {
     let Some(creator_acl) = creator_acl else {
         return Ok(None);
@@ -2802,7 +2925,7 @@ fn build_created_file_acl_bytes(
     child_is_container: bool,
     fallback_acl: Option<&[u8]>,
 ) -> Result<(Option<Vec<u8>>, bool, bool), i32> {
-    let explicit_acl = build_explicit_acl_bytes(creator_acl, owner_sid, group_sid)?;
+    let explicit_acl = build_explicit_acl_bytes(creator_acl, owner_sid, Some(group_sid))?;
     let explicit_present = creator_acl.is_some();
 
     if explicit_present {
@@ -2811,7 +2934,7 @@ fn build_created_file_acl_bytes(
         }
         if (creator_control & auto_inherit_req) == auto_inherit_req {
             let inherited_acl =
-                inherit_acl_from_parent(parent_acl, owner_sid, group_sid, child_is_container)?;
+                inherit_acl_from_parent(parent_acl, owner_sid, Some(group_sid), child_is_container)?;
             let combined = append_acl_bytes(
                 explicit_acl.as_deref(),
                 inherited_acl.as_deref(),
@@ -2827,7 +2950,7 @@ fn build_created_file_acl_bytes(
     }
 
     let inherited_acl =
-        inherit_acl_from_parent(parent_acl, owner_sid, group_sid, child_is_container)?;
+        inherit_acl_from_parent(parent_acl, owner_sid, Some(group_sid), child_is_container)?;
     if inherited_acl.is_some() {
         return Ok((inherited_acl, true, false));
     }
@@ -2860,7 +2983,7 @@ fn build_created_file_sd_bytes(
     let owner_defaulted = creator_owner.is_none();
     let group_defaulted = creator_group.is_none();
     let owner_sid = if let Some(owner) = creator_owner {
-        validate_owner_assignment(subject, owner)?;
+        validate_owner_assignment(subject, owner, true)?;
         owner
     } else {
         subject
@@ -2971,6 +3094,33 @@ fn validate_stored_sd_bytes(sd_bytes: &[u8]) -> Result<(), i32> {
     }
 
     Ok(())
+}
+
+fn build_kunit_single_opaque_acl_len(ace_len: usize) -> Result<usize, i32> {
+    const OPAQUE_ACE_HEADER_LEN: usize = 4;
+
+    if ace_len < OPAQUE_ACE_HEADER_LEN
+        || ace_len > usize::from(u16::MAX)
+        || (ace_len % 4) != 0
+    {
+        return Err(-EINVAL);
+    }
+
+    let mut ace = Vec::with_capacity(ace_len).map_err(|_| -ENOMEM)?;
+    ace.push(0x87).map_err(|_| -ENOMEM)?;
+    ace.push(0).map_err(|_| -ENOMEM)?;
+    ace.extend_from_slice(&(ace_len as u16).to_le_bytes())
+        .map_err(|_| -ENOMEM)?;
+    for _ in OPAQUE_ACE_HEADER_LEN..ace_len {
+        ace.push(0).map_err(|_| -ENOMEM)?;
+    }
+
+    let ace_refs = [ace.as_slice()];
+    let Some(acl) = build_acl_bytes_from_aces(ACL_REVISION, &ace_refs)? else {
+        return Err(-EINVAL);
+    };
+
+    Ok(acl.len())
 }
 
 fn sd_parse_errno(error: KacsError) -> i32 {
@@ -3139,6 +3289,28 @@ fn build_label_ace_bytes(integrity_level: IntegrityLevel) -> Result<Vec<u8>, i32
     Ok(bytes)
 }
 
+fn build_system_success_audit_ace_bytes(mask: u32) -> Result<Vec<u8>, i32> {
+    let system = Sid::parse(SYSTEM_SID_BYTES).map_err(|_| -EINVAL)?;
+    let ace_len = ace_len_for_sid(system)?;
+    let mut bytes = Vec::with_capacity(ace_len).map_err(|_| -ENOMEM)?;
+
+    bytes
+        .extend_from_slice(&[
+            SYSTEM_AUDIT_ACE_TYPE,
+            SUCCESSFUL_ACCESS_ACE_FLAG,
+            (ace_len as u16).to_le_bytes()[0],
+            (ace_len as u16).to_le_bytes()[1],
+        ])
+        .map_err(|_| -ENOMEM)?;
+    bytes
+        .extend_from_slice(&mask.to_le_bytes())
+        .map_err(|_| -ENOMEM)?;
+    bytes
+        .extend_from_slice(system.as_bytes())
+        .map_err(|_| -ENOMEM)?;
+    Ok(bytes)
+}
+
 fn build_utf16_cstr_bytes(value: &str) -> Result<Vec<u8>, i32> {
     let mut bytes = Vec::new();
 
@@ -3200,14 +3372,18 @@ fn build_int64_claim_entry(name: &str, values: &[i64], flags: u32) -> Result<Vec
     Ok(bytes)
 }
 
-fn build_mandatory_resource_attribute_ace_bytes() -> Result<Vec<u8>, i32> {
+fn build_mandatory_resource_attribute_ace_bytes(value: i64) -> Result<Vec<u8>, i32> {
     let application_data =
-        build_int64_claim_entry("Mandatory", &[1], CLAIM_SECURITY_ATTRIBUTE_MANDATORY)?;
+        build_int64_claim_entry("Mandatory", &[value], CLAIM_SECURITY_ATTRIBUTE_MANDATORY)?;
     let everyone = Sid::parse(EVERYONE_SID_BYTES).map_err(|_| -EINVAL)?;
-    let ace_len = ACE_HEADER_LEN
+    let unpadded_ace_len = ACE_HEADER_LEN
         .checked_add(everyone.as_bytes().len())
         .and_then(|value| value.checked_add(application_data.len()))
         .ok_or(-ERANGE)?;
+    let ace_len = unpadded_ace_len.checked_add(3).ok_or(-ERANGE)? & !3usize;
+    if ace_len > usize::from(u16::MAX) {
+        return Err(-EINVAL);
+    }
     let mut bytes = Vec::with_capacity(ace_len).map_err(|_| -ENOMEM)?;
 
     bytes
@@ -3227,6 +3403,9 @@ fn build_mandatory_resource_attribute_ace_bytes() -> Result<Vec<u8>, i32> {
     bytes
         .extend_from_slice(application_data.as_slice())
         .map_err(|_| -ENOMEM)?;
+    while bytes.len() < ace_len {
+        bytes.push(0).map_err(|_| -ENOMEM)?;
+    }
     Ok(bytes)
 }
 
@@ -3255,8 +3434,11 @@ fn build_device_member_condition_bytes(device_sid: Sid<'_>) -> Result<Vec<u8>, i
     Ok(bytes)
 }
 
-fn build_claim_exists_condition_bytes(namespace_opcode: u8, claim_name: &str) -> Result<Vec<u8>, i32> {
-    if !matches!(namespace_opcode, 0xf9 | 0xfb) {
+fn build_claim_exists_condition_bytes(
+    namespace_opcode: u8,
+    claim_name: &str,
+) -> Result<Vec<u8>, i32> {
+    if !matches!(namespace_opcode, 0xf9 | 0xfa | 0xfb) {
         return Err(-EINVAL);
     }
 
@@ -3295,10 +3477,11 @@ fn build_callback_allow_ace_bytes(
     sid: Sid<'_>,
     application_data: &[u8],
 ) -> Result<Vec<u8>, i32> {
-    let ace_len = ACE_HEADER_LEN
+    let unpadded_ace_len = ACE_HEADER_LEN
         .checked_add(sid.as_bytes().len())
         .and_then(|value| value.checked_add(application_data.len()))
         .ok_or(-ERANGE)?;
+    let ace_len = unpadded_ace_len.checked_add(3).ok_or(-ERANGE)? & !3usize;
 
     if ace_len > usize::from(u16::MAX) {
         return Err(-EINVAL);
@@ -3320,6 +3503,9 @@ fn build_callback_allow_ace_bytes(
     bytes
         .extend_from_slice(application_data)
         .map_err(|_| -ENOMEM)?;
+    while bytes.len() < ace_len {
+        bytes.push(0).map_err(|_| -ENOMEM)?;
+    }
     Ok(bytes)
 }
 
@@ -3479,7 +3665,11 @@ fn label_integrity_from_ace(ace_bytes: &[u8]) -> Result<IntegrityLevel, i32> {
     }
 }
 
-fn validate_owner_assignment(subject: &PkmKacsBootToken, owner_sid: Sid<'_>) -> Result<(), i32> {
+fn validate_owner_assignment(
+    subject: &PkmKacsBootToken,
+    owner_sid: Sid<'_>,
+    allow_restore_owner_assignment: bool,
+) -> Result<(), i32> {
     if owner_sid.as_bytes() == subject.user_sid.as_bytes() {
         return Ok(());
     }
@@ -3494,7 +3684,9 @@ fn validate_owner_assignment(subject: &PkmKacsBootToken, owner_sid: Sid<'_>) -> 
         }
     }
 
-    if subject_has_enabled_privilege(subject, SE_RESTORE_PRIVILEGE) {
+    if allow_restore_owner_assignment
+        && subject_has_enabled_privilege(subject, SE_RESTORE_PRIVILEGE)
+    {
         subject.mark_privileges_used(SE_RESTORE_PRIVILEGE);
         return Ok(());
     }
@@ -3589,11 +3781,19 @@ fn merged_sd_control(current_control: u16, input_control: u16, security_info: u3
 }
 
 fn build_sd_subset_bytes(sd_bytes: &[u8], security_info: u32) -> Result<(*mut u8, usize), i32> {
+    let sd = SecurityDescriptor::parse(sd_bytes).map_err(sd_parse_errno)?;
+
+    build_sd_subset_from_descriptor(&sd, security_info)
+}
+
+fn build_sd_subset_from_descriptor(
+    sd: &SecurityDescriptor<'_>,
+    security_info: u32,
+) -> Result<(*mut u8, usize), i32> {
     validate_sd_security_info(security_info)?;
 
-    let sd = SecurityDescriptor::parse(sd_bytes).map_err(sd_parse_errno)?;
     let label_sacl = if (security_info & LABEL_SECURITY_INFORMATION) != 0 {
-        extract_label_subset_sacl_bytes(&sd)?
+        extract_label_subset_sacl_bytes(sd)?
     } else {
         None
     };
@@ -3631,22 +3831,40 @@ fn merge_process_sd_bytes(
     current_sd_bytes: &[u8],
     security_info: u32,
     input_sd_bytes: &[u8],
+    allow_restore_owner_assignment: bool,
 ) -> Result<(*mut u8, usize), i32> {
     let current_sd = SecurityDescriptor::parse(current_sd_bytes).map_err(sd_parse_errno)?;
+
+    merge_sd_with_current_descriptor(
+        subject,
+        &current_sd,
+        security_info,
+        input_sd_bytes,
+        allow_restore_owner_assignment,
+    )
+}
+
+fn merge_sd_with_current_descriptor(
+    subject: &PkmKacsBootToken,
+    current_sd: &SecurityDescriptor<'_>,
+    security_info: u32,
+    input_sd_bytes: &[u8],
+    allow_restore_owner_assignment: bool,
+) -> Result<(*mut u8, usize), i32> {
     let input_sd = SecurityDescriptor::parse(input_sd_bytes).map_err(sd_parse_errno)?;
     let mut sacl = clone_optional_acl_bytes(current_sd.sacl())?;
     let mut dacl = clone_optional_acl_bytes(current_sd.dacl())?;
     let owner = if (security_info & OWNER_SECURITY_INFORMATION) != 0 {
         let owner = input_sd.owner().ok_or(-EINVAL)?;
-        validate_owner_assignment(subject, owner)?;
+        validate_owner_assignment(subject, owner, allow_restore_owner_assignment)?;
         owner
     } else {
         current_sd.owner().ok_or(-EINVAL)?
     };
     let group = if (security_info & GROUP_SECURITY_INFORMATION) != 0 {
-        input_sd.group().ok_or(-EINVAL)?
+        input_sd.group()
     } else {
-        current_sd.group().ok_or(-EINVAL)?
+        current_sd.group()
     };
 
     validate_sd_security_info(security_info)?;
@@ -3704,7 +3922,7 @@ fn merge_process_sd_bytes(
         merged_sd_control(current_sd.control(), input_sd.control(), security_info),
         current_sd.resource_manager_control(),
         Some(owner.as_bytes()),
-        Some(group.as_bytes()),
+        group.map(|sid| sid.as_bytes()),
         sacl.as_deref(),
         dacl.as_deref(),
     )
@@ -3715,10 +3933,11 @@ fn build_replacement_file_sd_bytes(
     security_info: u32,
     input_sd_bytes: &[u8],
 ) -> Result<(*mut u8, usize), i32> {
-    let required = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let required =
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
     let input_sd = SecurityDescriptor::parse(input_sd_bytes).map_err(sd_parse_errno)?;
     let owner = input_sd.owner().ok_or(-EINVAL)?;
-    let group = input_sd.group().ok_or(-EINVAL)?;
+    let group = input_sd.group();
     let mut sacl = None;
     let dacl;
 
@@ -3727,7 +3946,7 @@ fn build_replacement_file_sd_bytes(
         return Err(-EINVAL);
     }
 
-    validate_owner_assignment(subject, owner)?;
+    validate_owner_assignment(subject, owner, true)?;
 
     dacl = clone_optional_acl_bytes(input_sd.dacl())?;
 
@@ -3757,7 +3976,7 @@ fn build_replacement_file_sd_bytes(
         input_sd.control(),
         input_sd.resource_manager_control(),
         Some(owner.as_bytes()),
-        Some(group.as_bytes()),
+        group.map(|sid| sid.as_bytes()),
         sacl.as_deref(),
         dacl.as_deref(),
     )
@@ -3815,7 +4034,7 @@ fn build_process_sd_with_mandatory_resource_attribute_bytes(
     let (default_ptr, default_len) = build_default_process_sd_bytes(token)?;
     let default_bytes = unsafe { core::slice::from_raw_parts(default_ptr, default_len) };
     let default_sd = SecurityDescriptor::parse(default_bytes).map_err(sd_parse_errno)?;
-    let resource_ace = build_mandatory_resource_attribute_ace_bytes()?;
+    let resource_ace = build_mandatory_resource_attribute_ace_bytes(1)?;
     let sacl = build_acl_bytes_from_aces(ACL_REVISION, &[resource_ace.as_slice()])?;
     let dacl = clone_optional_acl_bytes(default_sd.dacl())?;
     let result = build_sd_bytes_from_components(
@@ -3962,6 +4181,25 @@ fn build_query_information_only_process_sd_bytes(
     )
 }
 
+fn build_everyone_mask_only_process_sd_bytes(
+    token: &PkmKacsBootToken,
+    everyone_mask: u32,
+) -> Result<(*mut u8, usize), i32> {
+    let _guard = token.lock_mutation();
+    let group_sid = token
+        .sid_by_index(token.primary_group_index.load(Ordering::Relaxed))
+        .ok_or(-EINVAL)?;
+
+    build_process_sd_bytes(
+        token.user_sid.sid,
+        group_sid,
+        None,
+        None,
+        None,
+        Some(everyone_mask),
+    )
+}
+
 fn build_read_only_socket_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8, usize), i32> {
     let _guard = token.lock_mutation();
     let group_sid = token
@@ -4010,13 +4248,49 @@ fn build_file_sd_with_mandatory_resource_attribute_bytes(
     admin_mask: u32,
     system_mask: u32,
     everyone_mask: u32,
+    mandatory_value: i64,
 ) -> Result<(*mut u8, usize), i32> {
     let (default_ptr, default_len) =
         build_file_sd_bytes_from_masks(token, self_mask, admin_mask, system_mask, everyone_mask)?;
     let default_bytes = unsafe { core::slice::from_raw_parts(default_ptr, default_len) };
     let default_sd = SecurityDescriptor::parse(default_bytes).map_err(sd_parse_errno)?;
-    let resource_ace = build_mandatory_resource_attribute_ace_bytes()?;
+    let resource_ace = build_mandatory_resource_attribute_ace_bytes(mandatory_value)?;
     let sacl = build_acl_bytes_from_aces(ACL_REVISION, &[resource_ace.as_slice()])?;
+    let dacl = clone_optional_acl_bytes(default_sd.dacl())?;
+    let result = build_sd_bytes_from_components(
+        default_sd.control(),
+        default_sd.resource_manager_control(),
+        default_sd.owner().map(|sid| sid.as_bytes()),
+        default_sd.group().map(|sid| sid.as_bytes()),
+        sacl.as_deref(),
+        dacl.as_deref(),
+    );
+
+    free_allocated_bytes(default_ptr);
+    result
+}
+
+fn build_labeled_file_sd_bytes(
+    token: &PkmKacsBootToken,
+    self_mask: u32,
+    admin_mask: u32,
+    system_mask: u32,
+    everyone_mask: u32,
+    integrity_level: IntegrityLevel,
+    include_success_audit: bool,
+) -> Result<(*mut u8, usize), i32> {
+    let (default_ptr, default_len) =
+        build_file_sd_bytes_from_masks(token, self_mask, admin_mask, system_mask, everyone_mask)?;
+    let default_bytes = unsafe { core::slice::from_raw_parts(default_ptr, default_len) };
+    let default_sd = SecurityDescriptor::parse(default_bytes).map_err(sd_parse_errno)?;
+    let label_ace = build_label_ace_bytes(integrity_level)?;
+    let audit_ace;
+    let sacl = if include_success_audit {
+        audit_ace = build_system_success_audit_ace_bytes(ACCESS_SYSTEM_SECURITY)?;
+        build_acl_bytes_from_aces(ACL_REVISION, &[label_ace.as_slice(), audit_ace.as_slice()])?
+    } else {
+        build_acl_bytes_from_aces(ACL_REVISION, &[label_ace.as_slice()])?
+    };
     let dacl = clone_optional_acl_bytes(default_sd.dacl())?;
     let result = build_sd_bytes_from_components(
         default_sd.control(),
@@ -4080,6 +4354,32 @@ fn build_claim_exists_file_sd_bytes(
     )
 }
 
+fn build_resource_claim_exists_file_sd_bytes(
+    token: &PkmKacsBootToken,
+    claim_name: &str,
+    mask: u32,
+) -> Result<(*mut u8, usize), i32> {
+    let everyone = Sid::parse(EVERYONE_SID_BYTES).map_err(|_| -EINVAL)?;
+    let condition = build_claim_exists_condition_bytes(0xfa, claim_name)?;
+    let allow_ace = build_callback_allow_ace_bytes(mask, everyone, condition.as_slice())?;
+    let dacl = build_acl_bytes_from_aces(ACL_REVISION_DS, &[allow_ace.as_slice()])?;
+    let resource_ace = build_mandatory_resource_attribute_ace_bytes(1)?;
+    let sacl = build_acl_bytes_from_aces(ACL_REVISION, &[resource_ace.as_slice()])?;
+    let _guard = token.lock_mutation();
+    let group_sid = token
+        .sid_by_index(token.primary_group_index.load(Ordering::Relaxed))
+        .ok_or(-EINVAL)?;
+
+    build_sd_bytes_from_components(
+        SE_SELF_RELATIVE,
+        0,
+        Some(token.user_sid.sid.as_bytes()),
+        Some(group_sid.as_bytes()),
+        sacl.as_deref(),
+        dacl.as_deref(),
+    )
+}
+
 fn boot_system_session_ref() -> Result<*const PkmKacsSession, i32> {
     let system = Sid::parse(SYSTEM_SID_BYTES).map_err(|_| -EINVAL)?;
 
@@ -4113,6 +4413,23 @@ fn kunit_local_service_session_ref() -> Result<*const PkmKacsSession, i32> {
         KUNIT_LOCAL_SERVICE_SESSION_LUID,
         0,
         LOGON_TYPE_SERVICE,
+        AUTH_PACKAGE_NEGOTIATE,
+        local_service,
+        local_service,
+    )
+}
+
+fn kunit_logon_type_session_ref(logon_type: u32) -> Result<*const PkmKacsSession, i32> {
+    if !session_logon_type_valid(logon_type) {
+        return Err(-EINVAL);
+    }
+
+    let local_service = Sid::parse(LOCAL_SERVICE_SID_BYTES).map_err(|_| -EINVAL)?;
+
+    get_or_create_published_session(
+        KUNIT_LOGON_TYPE_SESSION_LUID_BASE + u64::from(logon_type),
+        0,
+        logon_type,
         AUTH_PACKAGE_NEGOTIATE,
         local_service,
         local_service,
@@ -4183,6 +4500,11 @@ impl PkmKacsBootToken {
             return None;
         }
 
+        let projected_id = if user_sid.as_bytes() == SYSTEM_SID_BYTES {
+            0
+        } else {
+            ANONYMOUS_PROJECTED_ID
+        };
         let user_sid = build_owned_sid(user_sid.as_bytes()).ok()?;
         let group_defaults = group_attributes.as_slice();
         let first_group_sid = first_group_sid.unwrap_or(administrators);
@@ -4260,8 +4582,8 @@ impl PkmKacsBootToken {
             source_id: 0,
             origin: 0,
             interactive_session_id: AtomicU32::new(0),
-            projected_uid: 0,
-            projected_gid: 0,
+            projected_uid: projected_id,
+            projected_gid: projected_id,
             projected_supplementary_gids: Vec::new(),
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
@@ -4473,6 +4795,31 @@ impl PkmKacsBootToken {
         )
     }
 
+    fn create_local_administrator() -> Option<*const c_void> {
+        let session = kunit_local_service_session_ref().ok()?;
+        let token_id = allocate_dynamic_token_id().ok()?;
+
+        Self::create_system_like(
+            session,
+            Sid::parse(LOCAL_SERVICE_SID_BYTES).ok()?,
+            Sid::parse(SYSTEM_SID_BYTES).ok()?,
+            IntegrityLevel::System,
+            TokenType::Primary,
+            ImpersonationLevel::Anonymous,
+            false,
+            token_id,
+            token_id,
+            0,
+            0,
+            0,
+            BOOT_SYSTEM_GROUP_ATTRIBUTES,
+            None,
+            false,
+            false,
+            0,
+        )
+    }
+
     fn create_adjustable_privileges() -> Option<*const c_void> {
         let session = boot_system_session_ref().ok()?;
 
@@ -4529,6 +4876,34 @@ impl PkmKacsBootToken {
         restricted: bool,
         enabled_privileges: u64,
     ) -> Option<*const c_void> {
+        Self::create_kunit_variant_with_privileges(
+            user_sid,
+            integrity_level,
+            token_type,
+            impersonation_level,
+            restricted,
+            enabled_privileges,
+            enabled_privileges,
+            enabled_privileges,
+        )
+    }
+
+    fn create_kunit_variant_with_privileges(
+        user_sid: Sid<'static>,
+        integrity_level: IntegrityLevel,
+        token_type: TokenType,
+        impersonation_level: ImpersonationLevel,
+        restricted: bool,
+        privileges_present: u64,
+        privileges_enabled: u64,
+        privileges_enabled_by_default: u64,
+    ) -> Option<*const c_void> {
+        if (privileges_enabled & !privileges_present) != 0
+            || (privileges_enabled_by_default & !privileges_present) != 0
+        {
+            return None;
+        }
+
         let token_id = allocate_dynamic_token_id().ok()?;
         let session = if user_sid.as_bytes() == SYSTEM_SID_BYTES {
             boot_system_session_ref().ok()?
@@ -4559,12 +4934,49 @@ impl PkmKacsBootToken {
             restricted,
             token_id,
             token_id,
-            enabled_privileges,
-            enabled_privileges,
-            enabled_privileges,
+            privileges_present,
+            privileges_enabled,
+            privileges_enabled_by_default,
             group_attributes,
             first_group_sid,
             include_user_group,
+            false,
+            0,
+        )
+    }
+
+    fn create_kunit_logon_type_token(
+        logon_type: u32,
+        enabled_privileges: u64,
+    ) -> Option<*const c_void> {
+        let user_sid = Sid::parse(LOCAL_SERVICE_SID_BYTES).ok()?;
+        let creator_sid = Sid::parse(SYSTEM_SID_BYTES).ok()?;
+        let service_sid = Sid::parse(SERVICE_SID_BYTES).ok()?;
+        let session = kunit_logon_type_session_ref(logon_type).ok()?;
+        let token_id = match allocate_dynamic_token_id() {
+            Ok(token_id) => token_id,
+            Err(_) => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return None;
+            }
+        };
+
+        Self::create_system_like(
+            session,
+            user_sid,
+            creator_sid,
+            IntegrityLevel::System,
+            TokenType::Primary,
+            ImpersonationLevel::Anonymous,
+            false,
+            token_id,
+            token_id,
+            enabled_privileges,
+            enabled_privileges,
+            enabled_privileges,
+            KUNIT_LOCAL_SERVICE_GROUP_ATTRIBUTES,
+            Some(service_sid),
+            false,
             false,
             0,
         )
@@ -4821,6 +5233,9 @@ impl PkmKacsBootToken {
             &sorted_offsets,
             user_sid_offset,
         )?)?;
+        if projected_uid == 0 && user_sid.sid.as_bytes() != SYSTEM_SID_BYTES {
+            return Err(-EINVAL);
+        }
         let default_dacl_bytes =
             token_spec_fixed_section(spec, &sorted_offsets, default_dacl_offset, default_dacl_len)?;
         let user_claims_bytes =
@@ -5675,6 +6090,19 @@ impl PkmKacsBootToken {
             write_restricted: if self.write_restricted { 1 } else { 0 },
             confinement_exempt: if self.confinement_exempt { 1 } else { 0 },
             isolation_boundary: if self.isolation_boundary { 1 } else { 0 },
+            source_name_ptr: self.source_name.as_ptr(),
+            source_name_len: TOKEN_SOURCE_NAME_LEN,
+            source_id: self.source_id,
+            expiration: self.expiration,
+            origin: self.origin,
+            restricted_sid_count: self.restricted_sids.len() as u32,
+            confinement_sid_present: if self.confinement_sid.is_some() {
+                1
+            } else {
+                0
+            },
+            confinement_capability_count: self.confinement_capabilities.len() as u32,
+            projected_supplementary_gid_count: self.projected_supplementary_gids.len() as u32,
         };
     }
 
@@ -6205,14 +6633,11 @@ impl PkmKacsBootToken {
                 }
             }
 
-            if entry.enable == 0 {
-                if (attributes & SE_GROUP_MANDATORY) == SE_GROUP_MANDATORY
-                    || (attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID
-                    || group_sid.as_bytes() == self.user_sid.as_bytes()
-                {
-                    return Err(-EINVAL);
-                }
-            } else if (attributes & SE_GROUP_USE_FOR_DENY_ONLY) == SE_GROUP_USE_FOR_DENY_ONLY {
+            if (attributes & SE_GROUP_MANDATORY) == SE_GROUP_MANDATORY
+                || (attributes & SE_GROUP_USE_FOR_DENY_ONLY) == SE_GROUP_USE_FOR_DENY_ONLY
+                || (attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID
+                || (entry.enable == 0 && group_sid.as_bytes() == self.user_sid.as_bytes())
+            {
                 return Err(-EINVAL);
             }
         }
@@ -6592,8 +7017,13 @@ impl PkmKacsBootToken {
         let Some(next_modified_id) = modified_id.checked_add(1) else {
             return Err(-ERANGE);
         };
-        let (new_sd_ptr, new_sd_len) =
-            merge_process_sd_bytes(subject, self.own_sd_bytes(), security_info, input_sd_bytes)?;
+        let (new_sd_ptr, new_sd_len) = merge_process_sd_bytes(
+            subject,
+            self.own_sd_bytes(),
+            security_info,
+            input_sd_bytes,
+            true,
+        )?;
         let old_sd_ptr = self.own_sd_ptr.load(Ordering::Relaxed);
 
         self.own_sd_ptr.store(new_sd_ptr, Ordering::Relaxed);
@@ -6624,6 +7054,43 @@ pub(crate) fn with_access_check_resolved_from_token<T>(
         };
         f(resolved)
     })
+}
+
+fn emit_internal_access_check_events(
+    subject: &PkmKacsBootToken,
+    access_token: &AccessCheckToken<'_>,
+    state: &crate::access_check::AccessCheckCoreState<'_>,
+    effective_pip: PipContext,
+    policies: &[crate::caap::CaapPolicyEntry<'_>],
+) -> Result<(), i32> {
+    if state.audit_events.is_empty()
+        && state.privilege_use_events.is_empty()
+        && state.caap_diagnostic_events.is_empty()
+    {
+        return Ok(());
+    }
+
+    let audit_events = own_audit_events(state.audit_events.as_slice()).map_err(|err| match err {
+        KacsError::AllocationFailure => -ENOMEM,
+        _ => -EACCES,
+    })?;
+    let resolved = AccessCheckAbiResolved {
+        token: access_token,
+        default_pip: effective_pip,
+        device_groups: subject.device_group_views.as_slice(),
+        user_claims: subject.user_claims.as_slice(),
+        device_claims: subject.device_claims.as_slice(),
+        policies,
+    };
+
+    emit_access_check_events_to_kmes(
+        audit_events.as_slice(),
+        state.privilege_use_events.as_slice(),
+        state.caap_diagnostic_events.as_slice(),
+        resolved,
+        effective_pip,
+    )
+    .map_err(|err| err as i32)
 }
 
 fn pip_context_from_abi(pip_type: u32, pip_trust: u32) -> PipContext {
@@ -6848,12 +7315,13 @@ fn token_open_check_errno(
     subject.with_access_token(|access_token| {
         let conditional_context = subject.access_check_conditional_context();
 
-        match access_check(
+        match access_check_core(
             Some(&target_sd),
             &access_token,
             pip,
             desired,
             &TOKEN_GENERIC_MAPPING,
+            AccessCheckMode::Scalar,
             None,
             &conditional_context,
             None,
@@ -6861,14 +7329,31 @@ fn token_open_check_errno(
             EMPTY_POLICIES,
         ) {
             Ok(result) => {
-                if result.allowed {
-                    if normalized.maximum_allowed {
-                        result.granted as i32
-                    } else {
-                        (result.granted & normalized.mapped) as i32
-                    }
+                subject.mark_privileges_used(result.updated_privileges.used);
+                if let Err(err) = emit_internal_access_check_events(
+                    subject,
+                    &access_token,
+                    &result,
+                    pip,
+                    EMPTY_POLICIES,
+                ) {
+                    return err;
+                }
+                let granted = result
+                    .object_granted_list
+                    .as_ref()
+                    .and_then(|list| list.first().copied())
+                    .unwrap_or(result.granted);
+                let allowed = result.mapped_desired == 0
+                    || (granted & result.mapped_desired) == result.mapped_desired;
+
+                if !allowed {
+                    return -EACCES;
+                }
+                if normalized.maximum_allowed {
+                    granted as i32
                 } else {
-                    -EACCES
+                    (granted & normalized.mapped) as i32
                 }
             }
             Err(KacsError::AllocationFailure) => -ENOMEM,
@@ -6942,6 +7427,13 @@ fn token_sd_access_check_errno_with_intent(
         ) {
             Ok(result) => {
                 subject.mark_privileges_used(result.updated_privileges.used);
+                emit_internal_access_check_events(
+                    subject,
+                    &access_token,
+                    &result,
+                    pip,
+                    EMPTY_POLICIES,
+                )?;
                 let granted = result
                     .object_granted_list
                     .as_ref()
@@ -7007,6 +7499,13 @@ fn process_sd_access_outcome_with_intent(
         ) {
             Ok(result) => {
                 subject.mark_privileges_used(result.updated_privileges.used);
+                emit_internal_access_check_events(
+                    subject,
+                    &access_token,
+                    &result,
+                    pip,
+                    EMPTY_POLICIES,
+                )?;
                 let granted = result
                     .object_granted_list
                     .as_ref()
@@ -7068,10 +7567,47 @@ fn file_sd_access_outcome_with_intent(
     privilege_intent: u32,
     pip: PipContext,
 ) -> Result<FileSdAccessOutcome, i32> {
+    file_sd_access_outcome_with_intent_and_policies(
+        subject_token,
+        sd_bytes,
+        desired,
+        privilege_intent,
+        pip,
+        EMPTY_POLICIES,
+    )
+}
+
+fn file_sd_access_outcome_with_intent_and_policies(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+    privilege_intent: u32,
+    pip: PipContext,
+    policies: &[crate::caap::CaapPolicyEntry<'_>],
+) -> Result<FileSdAccessOutcome, i32> {
+    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(sd_parse_errno)?;
+
+    file_sd_access_outcome_for_descriptor(
+        subject_token,
+        &target_sd,
+        desired,
+        privilege_intent,
+        pip,
+        policies,
+    )
+}
+
+fn file_sd_access_outcome_for_descriptor(
+    subject_token: *const c_void,
+    target_sd: &SecurityDescriptor<'_>,
+    desired: u32,
+    privilege_intent: u32,
+    pip: PipContext,
+    policies: &[crate::caap::CaapPolicyEntry<'_>],
+) -> Result<FileSdAccessOutcome, i32> {
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
     };
-    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(sd_parse_errno)?;
     let normalized = match FILE_GENERIC_MAPPING.normalize_desired_access(desired) {
         Ok(normalized) => normalized,
         Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
@@ -7082,7 +7618,7 @@ fn file_sd_access_outcome_with_intent(
         let conditional_context = subject.access_check_conditional_context();
 
         match access_check_core(
-            Some(&target_sd),
+            Some(target_sd),
             &access_token,
             pip,
             desired,
@@ -7092,10 +7628,11 @@ fn file_sd_access_outcome_with_intent(
             &conditional_context,
             None,
             privilege_intent,
-            EMPTY_POLICIES,
+            policies,
         ) {
             Ok(result) => {
                 subject.mark_privileges_used(result.updated_privileges.used);
+                emit_internal_access_check_events(subject, &access_token, &result, pip, policies)?;
                 let granted = result
                     .object_granted_list
                     .as_ref()
@@ -7144,6 +7681,123 @@ fn file_sd_access_check_errno_with_intent(
     Ok(outcome)
 }
 
+fn file_sd_access_check_errno_with_intent_and_policies(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+    privilege_intent: u32,
+    pip: PipContext,
+    policies: &[crate::caap::CaapPolicyEntry<'_>],
+) -> Result<FileSdAccessOutcome, i32> {
+    let outcome = file_sd_access_outcome_with_intent_and_policies(
+        subject_token,
+        sd_bytes,
+        desired,
+        privilege_intent,
+        pip,
+        policies,
+    )?;
+
+    if !outcome.allowed {
+        return Err(-EACCES);
+    }
+
+    Ok(outcome)
+}
+
+fn emit_file_set_sd_audit_events(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+    pip: PipContext,
+) -> Result<(), i32> {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
+        return Err(-EACCES);
+    };
+    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(sd_parse_errno)?;
+    let Some(sacl) = target_sd.sacl() else {
+        return Ok(());
+    };
+    let owner = target_sd.owner().ok_or(-EINVAL)?;
+    let normalized = match FILE_GENERIC_MAPPING.normalize_desired_access(desired) {
+        Ok(normalized) => normalized,
+        Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
+        Err(_) => return Err(-EINVAL),
+    };
+    let metadata = extract_sacl_metadata(&target_sd).map_err(|err| match err {
+        KacsError::AllocationFailure => -ENOMEM,
+        _ => -EINVAL,
+    })?;
+
+    subject.with_access_token(|access_token| {
+        let mut conditional_context = subject.access_check_conditional_context();
+        conditional_context.resource_claims = metadata.resource_attributes.as_slice();
+
+        let state = evaluate_sacl(
+            &sacl,
+            &access_token.subject,
+            owner,
+            conditional_context.self_sid,
+            None,
+            normalized.mapped,
+            normalized.mapped,
+            &FILE_GENERIC_MAPPING,
+            &conditional_context,
+            None,
+        )
+        .map_err(|err| match err {
+            KacsError::AllocationFailure => -ENOMEM,
+            KacsError::ReservedAccessMaskBits(_) => -EINVAL,
+            _ => -EINVAL,
+        })?;
+        if state.audit_events.is_empty() {
+            return Ok(());
+        }
+
+        let audit_events = own_audit_events(state.audit_events.as_slice()).map_err(|err| match err {
+            KacsError::AllocationFailure => -ENOMEM,
+            _ => -EACCES,
+        })?;
+        let resolved = AccessCheckAbiResolved {
+            token: &access_token,
+            default_pip: pip,
+            device_groups: subject.device_group_views.as_slice(),
+            user_claims: subject.user_claims.as_slice(),
+            device_claims: subject.device_claims.as_slice(),
+            policies: EMPTY_POLICIES,
+        };
+
+        emit_access_check_events_to_kmes(audit_events.as_slice(), &[], &[], resolved, pip)
+            .map_err(|err| err as i32)
+    })
+}
+
+#[no_mangle]
+/// Emits post-success file set-security SACL audit events for the merged SD.
+pub extern "C" fn kacs_rust_emit_file_set_sd_audit(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired: u32,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    if subject_token_ptr.is_null() || sd_ptr.is_null() || sd_len == 0 || desired == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match emit_file_set_sd_audit_events(
+        subject_token_ptr,
+        sd_bytes,
+        desired,
+        pip_context_from_abi(pip_type, pip_trust),
+    ) {
+        Ok(()) => 0,
+        Err(err) => err,
+    }
+}
+
 fn file_sd_granted_mask_errno_with_intent(
     subject_token: *const c_void,
     sd_bytes: &[u8],
@@ -7152,6 +7806,24 @@ fn file_sd_granted_mask_errno_with_intent(
     pip: PipContext,
 ) -> Result<FileSdAccessOutcome, i32> {
     file_sd_access_outcome_with_intent(subject_token, sd_bytes, desired, privilege_intent, pip)
+}
+
+fn file_sd_granted_mask_errno_with_intent_and_policies(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+    privilege_intent: u32,
+    pip: PipContext,
+    policies: &[crate::caap::CaapPolicyEntry<'_>],
+) -> Result<FileSdAccessOutcome, i32> {
+    file_sd_access_outcome_with_intent_and_policies(
+        subject_token,
+        sd_bytes,
+        desired,
+        privilege_intent,
+        pip,
+        policies,
+    )
 }
 
 fn process_sd_access_check_errno(
@@ -7182,26 +7854,45 @@ fn socket_sd_access_check_errno(
     subject.with_access_token(|access_token| {
         let conditional_context = subject.access_check_conditional_context();
 
-        match access_check(
+        match access_check_core(
             Some(&target_sd),
             &access_token,
             pip,
             desired,
             &SOCKET_GENERIC_MAPPING,
+            AccessCheckMode::Scalar,
             None,
             &conditional_context,
             None,
             0,
             EMPTY_POLICIES,
         ) {
-            Ok(result) if result.allowed => {
+            Ok(result) => {
+                subject.mark_privileges_used(result.updated_privileges.used);
+                emit_internal_access_check_events(
+                    subject,
+                    &access_token,
+                    &result,
+                    pip,
+                    EMPTY_POLICIES,
+                )?;
+                let granted = result
+                    .object_granted_list
+                    .as_ref()
+                    .and_then(|list| list.first().copied())
+                    .unwrap_or(result.granted);
+                let allowed = result.mapped_desired == 0
+                    || (granted & result.mapped_desired) == result.mapped_desired;
+
+                if !allowed {
+                    return Err(-EACCES);
+                }
                 if normalized.maximum_allowed {
-                    Ok(result.granted)
+                    Ok(granted)
                 } else {
-                    Ok(result.granted & normalized.mapped)
+                    Ok(granted & normalized.mapped)
                 }
             }
-            Ok(_) => Err(-EACCES),
             Err(KacsError::AllocationFailure) => Err(-ENOMEM),
             Err(KacsError::ReservedAccessMaskBits(_)) => Err(-EINVAL),
             Err(_) => Err(-EACCES),
@@ -7366,6 +8057,24 @@ pub extern "C" fn kacs_rust_token_has_enabled_privilege(
     privilege: u64,
 ) -> bool {
     token_has_enabled_privilege(token, privilege)
+}
+
+#[no_mangle]
+/// Returns 1 when the token's logon type requires remote-shutdown privilege,
+/// 0 for local logon types, or a negative errno when the token/session is invalid.
+pub extern "C" fn kacs_rust_token_is_remote_shutdown_origin(token: *const c_void) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EINVAL;
+    };
+    let Some(session) = token.session_ref() else {
+        return -EINVAL;
+    };
+
+    match session.logon_type {
+        LOGON_TYPE_NETWORK | LOGON_TYPE_NETWORK_CLEARTEXT | LOGON_TYPE_NEW_CREDENTIALS => 1,
+        LOGON_TYPE_INTERACTIVE | LOGON_TYPE_BATCH | LOGON_TYPE_SERVICE => 0,
+        _ => -EINVAL,
+    }
 }
 
 #[no_mangle]
@@ -7738,6 +8447,29 @@ pub extern "C" fn kacs_rust_kunit_create_query_information_process_sd(
 }
 
 #[no_mangle]
+/// Builds a restrictive KUnit-only process SD with only Everyone
+/// `everyone_mask`.
+pub extern "C" fn kacs_rust_kunit_create_process_sd_with_everyone_mask(
+    token_ptr: *const c_void,
+    everyone_mask: u32,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    let Ok((ptr, len)) =
+        build_everyone_mask_only_process_sd_bytes(token, everyone_mask)
+    else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
 /// Builds a KUnit-only abstract-socket SD that grants only `READ_CONTROL` to
 /// Everyone, so `FILE_WRITE_DATA` checks fail closed.
 pub extern "C" fn kacs_rust_kunit_create_read_only_socket_sd(
@@ -7803,6 +8535,114 @@ pub extern "C" fn kacs_rust_kunit_create_file_sd_with_mandatory_resource_attr(
         admin_mask,
         system_mask,
         everyone_mask,
+        1,
+    ) else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
+/// Builds a KUnit-only file SD carrying one mandatory resource-attribute ACE
+/// with a caller-selected INT64 value in the SACL.
+pub extern "C" fn kacs_rust_kunit_create_file_sd_with_mandatory_resource_attr_value(
+    token_ptr: *const c_void,
+    self_mask: u32,
+    admin_mask: u32,
+    system_mask: u32,
+    everyone_mask: u32,
+    mandatory_value: u64,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    if mandatory_value > i64::MAX as u64 {
+        return null();
+    }
+    let mandatory_value = mandatory_value as i64;
+    let Ok((ptr, len)) = build_file_sd_with_mandatory_resource_attribute_bytes(
+        token,
+        self_mask,
+        admin_mask,
+        system_mask,
+        everyone_mask,
+        mandatory_value,
+    ) else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
+/// Builds a KUnit-only file SD carrying one mandatory-label ACE in the SACL.
+pub extern "C" fn kacs_rust_kunit_create_labeled_file_sd(
+    token_ptr: *const c_void,
+    self_mask: u32,
+    admin_mask: u32,
+    system_mask: u32,
+    everyone_mask: u32,
+    integrity_level: u32,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    let Some(integrity_level) = integrity_level_from_abi(integrity_level).ok() else {
+        return null();
+    };
+    let Ok((ptr, len)) = build_labeled_file_sd_bytes(
+        token,
+        self_mask,
+        admin_mask,
+        system_mask,
+        everyone_mask,
+        integrity_level,
+        false,
+    ) else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
+/// Builds a KUnit-only file SD carrying a mandatory-label ACE and a
+/// non-label success-audit ACE in the SACL.
+pub extern "C" fn kacs_rust_kunit_create_labeled_audit_file_sd(
+    token_ptr: *const c_void,
+    self_mask: u32,
+    admin_mask: u32,
+    system_mask: u32,
+    everyone_mask: u32,
+    integrity_level: u32,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    let Some(integrity_level) = integrity_level_from_abi(integrity_level).ok() else {
+        return null();
+    };
+    let Ok((ptr, len)) = build_labeled_file_sd_bytes(
+        token,
+        self_mask,
+        admin_mask,
+        system_mask,
+        everyone_mask,
+        integrity_level,
+        true,
     ) else {
         return null();
     };
@@ -7845,7 +8685,7 @@ pub extern "C" fn kacs_rust_kunit_create_device_member_file_sd(
 
 #[no_mangle]
 /// Builds a KUnit-only file SD carrying an Everyone callback allow ACE guarded
-/// by an `Exists` condition over a token user or device claim.
+/// by an `Exists` condition over a user, resource, or device claim namespace.
 pub extern "C" fn kacs_rust_kunit_create_claim_exists_file_sd(
     token_ptr: *const c_void,
     namespace_opcode: u8,
@@ -7866,6 +8706,38 @@ pub extern "C" fn kacs_rust_kunit_create_claim_exists_file_sd(
     };
     let Ok((ptr, len)) =
         build_claim_exists_file_sd_bytes(token, namespace_opcode, claim_name, allow_mask)
+    else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
+/// Builds a KUnit-only file SD carrying an Everyone callback allow ACE guarded
+/// by an `Exists` condition over a SACL resource attribute.
+pub extern "C" fn kacs_rust_kunit_create_resource_claim_exists_file_sd(
+    token_ptr: *const c_void,
+    claim_name_ptr: *const u8,
+    claim_name_len: usize,
+    allow_mask: u32,
+    len_out: *mut usize,
+) -> *const u8 {
+    if claim_name_ptr.is_null() || claim_name_len == 0 || allow_mask == 0 {
+        return null();
+    }
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    let claim_name_bytes = unsafe { core::slice::from_raw_parts(claim_name_ptr, claim_name_len) };
+    let Ok(claim_name) = core::str::from_utf8(claim_name_bytes) else {
+        return null();
+    };
+    let Ok((ptr, len)) =
+        build_resource_claim_exists_file_sd_bytes(token, claim_name, allow_mask)
     else {
         return null();
     };
@@ -8095,6 +8967,50 @@ pub extern "C" fn kacs_rust_check_file_sd_with_intent(
 }
 
 #[no_mangle]
+/// Runs AccessCheck against one cached file SD using its prevalidated component
+/// layout.
+pub extern "C" fn kacs_rust_check_cached_file_sd_with_intent(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    layout: *const KacsRustCachedSdLayout,
+    desired: u32,
+    privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
+    granted_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    let target_sd = match cached_file_sd_descriptor(sd_bytes, layout) {
+        Ok(target_sd) => target_sd,
+        Err(err) => return err,
+    };
+    match file_sd_access_outcome_for_descriptor(
+        subject_token_ptr,
+        &target_sd,
+        desired,
+        privilege_intent,
+        pip_context_from_abi(pip_type, pip_trust),
+        EMPTY_POLICIES,
+    ) {
+        Ok(outcome) => {
+            if !outcome.allowed {
+                return -EACCES;
+            }
+            if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                *granted_out = outcome.granted;
+            }
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
 /// Runs AccessCheck against one file SD and also returns the continuous-audit
 /// mask accumulated from matched alarm ACEs.
 pub extern "C" fn kacs_rust_check_file_sd_with_intent_audit(
@@ -8136,6 +9052,107 @@ pub extern "C" fn kacs_rust_check_file_sd_with_intent_audit(
 }
 
 #[no_mangle]
+/// Runs AccessCheck against one file SD using the supplied CAAP policy cache
+/// and also returns the continuous-audit mask accumulated from matched alarm
+/// ACEs.
+pub extern "C" fn kacs_rust_check_file_sd_with_intent_audit_caap(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired: u32,
+    privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
+    caap_cache: *const c_void,
+    granted_out: *mut u32,
+    continuous_audit_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match crate::caap_cache::with_caap_policies(caap_cache, |policies| {
+        match file_sd_access_check_errno_with_intent_and_policies(
+            subject_token_ptr,
+            sd_bytes,
+            desired,
+            privilege_intent,
+            pip_context_from_abi(pip_type, pip_trust),
+            policies,
+        ) {
+            Ok(outcome) => {
+                if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                    *granted_out = outcome.granted;
+                }
+                if let Some(continuous_audit_out) = unsafe { continuous_audit_out.as_mut() } {
+                    *continuous_audit_out = outcome.continuous_audit_mask;
+                }
+                Ok(0)
+            }
+            Err(err) => Ok(err as c_long),
+        }
+    }) {
+        Ok(ret) => ret as i32,
+        Err(err) => err as i32,
+    }
+}
+
+#[no_mangle]
+/// Runs AccessCheck against one cached file SD using the supplied CAAP policy
+/// cache and cached SD component layout.
+pub extern "C" fn kacs_rust_check_cached_file_sd_with_intent_audit_caap(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    layout: *const KacsRustCachedSdLayout,
+    desired: u32,
+    privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
+    caap_cache: *const c_void,
+    granted_out: *mut u32,
+    continuous_audit_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    let target_sd = match cached_file_sd_descriptor(sd_bytes, layout) {
+        Ok(target_sd) => target_sd,
+        Err(err) => return err,
+    };
+    match crate::caap_cache::with_caap_policies(caap_cache, |policies| {
+        match file_sd_access_outcome_for_descriptor(
+            subject_token_ptr,
+            &target_sd,
+            desired,
+            privilege_intent,
+            pip_context_from_abi(pip_type, pip_trust),
+            policies,
+        ) {
+            Ok(outcome) => {
+                if !outcome.allowed {
+                    return Ok(-EACCES as c_long);
+                }
+                if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                    *granted_out = outcome.granted;
+                }
+                if let Some(continuous_audit_out) = unsafe { continuous_audit_out.as_mut() } {
+                    *continuous_audit_out = outcome.continuous_audit_mask;
+                }
+                Ok(0)
+            }
+            Err(err) => Ok(err as c_long),
+        }
+    }) {
+        Ok(ret) => ret as i32,
+        Err(err) => err as i32,
+    }
+}
+
+#[no_mangle]
 /// Extracts the v0.20 file-object integrity label, defaulting valid unlabeled
 /// descriptors to Medium.
 pub extern "C" fn kacs_rust_file_sd_integrity_label(
@@ -8158,6 +9175,55 @@ pub extern "C" fn kacs_rust_file_sd_integrity_label(
         }
         Err(err) => err,
     }
+}
+
+#[no_mangle]
+/// Extracts the v0.20 file-object integrity label from a cached file SD.
+pub extern "C" fn kacs_rust_cached_file_sd_integrity_label(
+    sd_ptr: *const u8,
+    sd_len: usize,
+    layout: *const KacsRustCachedSdLayout,
+    integrity_level_out: *mut u32,
+) -> i32 {
+    if sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+    let Some(integrity_level_out) = (unsafe { integrity_level_out.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    let sd = match cached_file_sd_descriptor(sd_bytes, layout) {
+        Ok(sd) => sd,
+        Err(err) => return err,
+    };
+    let integrity_level = match sd.sacl() {
+        Some(sacl) => {
+            let mut level = IntegrityLevel::Medium;
+            for ace in sacl.entries() {
+                let ace = match ace {
+                    Ok(ace) => ace,
+                    Err(_) => return -EINVAL,
+                };
+                if ace.ace_type() != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+                    continue;
+                }
+                if (ace.ace_flags() & INHERIT_ONLY_ACE) != 0 {
+                    continue;
+                }
+                level = match label_integrity_from_ace(ace.bytes()) {
+                    Ok(level) => level,
+                    Err(err) => return err,
+                };
+                break;
+            }
+            level
+        }
+        None => IntegrityLevel::Medium,
+    };
+
+    *integrity_level_out = integrity_level as u32;
+    0
 }
 
 #[no_mangle]
@@ -8303,6 +9369,105 @@ pub extern "C" fn kacs_rust_granted_file_sd_with_intent_audit(
 }
 
 #[no_mangle]
+/// Runs AccessCheck for a file SD against the supplied CAAP policy cache,
+/// returning the granted subset and continuous-audit mask without requiring
+/// the whole requested mask to pass.
+pub extern "C" fn kacs_rust_granted_file_sd_with_intent_audit_caap(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired: u32,
+    privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
+    caap_cache: *const c_void,
+    granted_out: *mut u32,
+    continuous_audit_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match crate::caap_cache::with_caap_policies(caap_cache, |policies| {
+        match file_sd_granted_mask_errno_with_intent_and_policies(
+            subject_token_ptr,
+            sd_bytes,
+            desired,
+            privilege_intent,
+            pip_context_from_abi(pip_type, pip_trust),
+            policies,
+        ) {
+            Ok(outcome) => {
+                if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                    *granted_out = outcome.granted;
+                }
+                if let Some(continuous_audit_out) = unsafe { continuous_audit_out.as_mut() } {
+                    *continuous_audit_out = outcome.continuous_audit_mask;
+                }
+                Ok(0)
+            }
+            Err(err) => Ok(err as c_long),
+        }
+    }) {
+        Ok(ret) => ret as i32,
+        Err(err) => err as i32,
+    }
+}
+
+#[no_mangle]
+/// Runs AccessCheck for a cached file SD against the supplied CAAP policy
+/// cache, returning the granted subset and continuous-audit mask without
+/// requiring the whole requested mask to pass.
+pub extern "C" fn kacs_rust_granted_cached_file_sd_with_intent_audit_caap(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    layout: *const KacsRustCachedSdLayout,
+    desired: u32,
+    privilege_intent: u32,
+    pip_type: u32,
+    pip_trust: u32,
+    caap_cache: *const c_void,
+    granted_out: *mut u32,
+    continuous_audit_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    let target_sd = match cached_file_sd_descriptor(sd_bytes, layout) {
+        Ok(target_sd) => target_sd,
+        Err(err) => return err,
+    };
+    match crate::caap_cache::with_caap_policies(caap_cache, |policies| {
+        match file_sd_access_outcome_for_descriptor(
+            subject_token_ptr,
+            &target_sd,
+            desired,
+            privilege_intent,
+            pip_context_from_abi(pip_type, pip_trust),
+            policies,
+        ) {
+            Ok(outcome) => {
+                if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                    *granted_out = outcome.granted;
+                }
+                if let Some(continuous_audit_out) = unsafe { continuous_audit_out.as_mut() } {
+                    *continuous_audit_out = outcome.continuous_audit_mask;
+                }
+                Ok(0)
+            }
+            Err(err) => Ok(err as c_long),
+        }
+    }) {
+        Ok(ret) => ret as i32,
+        Err(err) => err as i32,
+    }
+}
+
+#[no_mangle]
 /// Emits one file-handle continuous-audit event for an already classified
 /// operation-time enforcement decision.
 pub extern "C" fn kacs_rust_emit_file_continuous_audit(
@@ -8412,6 +9577,72 @@ pub extern "C" fn kacs_rust_validate_stored_sd_bytes(
 }
 
 #[no_mangle]
+pub extern "C" fn kacs_rust_kunit_build_single_opaque_acl_len(
+    ace_len: usize,
+    out_len: *mut usize,
+) -> i32 {
+    let Some(out_len) = (unsafe { out_len.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    *out_len = 0;
+    match build_kunit_single_opaque_acl_len(ace_len) {
+        Ok(len) => {
+            *out_len = len;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Parses one structurally valid file SD and returns a reusable cached
+/// component layout for inode-cache readers.
+pub extern "C" fn kacs_rust_parse_file_sd_layout(
+    sd_ptr: *const u8,
+    sd_len: usize,
+    layout_out: *mut KacsRustCachedSdLayout,
+) -> i32 {
+    let Some(layout_out) = (unsafe { layout_out.as_mut() }) else {
+        return -EINVAL;
+    };
+    if sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    let layout = match SecurityDescriptor::parse_layout(sd_bytes).map_err(sd_parse_errno) {
+        Ok(layout) => layout,
+        Err(err) => return err,
+    };
+
+    *layout_out = cached_layout_from_core(&layout);
+    0
+}
+
+#[no_mangle]
+/// Parses one complete stored/effective file SD and returns a reusable cached
+/// component layout for inode-cache readers.
+pub extern "C" fn kacs_rust_parse_stored_file_sd_layout(
+    sd_ptr: *const u8,
+    sd_len: usize,
+    layout_out: *mut KacsRustCachedSdLayout,
+) -> i32 {
+    let Some(layout_out_ref) = (unsafe { layout_out.as_mut() }) else {
+        return -EINVAL;
+    };
+    let ret = kacs_rust_parse_file_sd_layout(sd_ptr, sd_len, layout_out);
+    if ret != 0 {
+        return ret;
+    }
+
+    if layout_out_ref.owner_present == 0 {
+        return -EINVAL;
+    }
+    0
+}
+
+#[no_mangle]
 /// Serializes a requested subset of a live process SD into one self-relative
 /// descriptor buffer.
 pub extern "C" fn kacs_rust_query_process_sd_subset(
@@ -8472,6 +9703,46 @@ pub extern "C" fn kacs_rust_query_file_sd_subset(
 
     let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
     match build_sd_subset_bytes(sd_bytes, security_info) {
+        Ok((ptr, len)) => {
+            *out_sd_ptr = ptr.cast_const();
+            *out_sd_len = len;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Serializes a requested subset of one cached file SD into one self-relative
+/// descriptor buffer.
+pub extern "C" fn kacs_rust_query_cached_file_sd_subset(
+    sd_ptr: *const u8,
+    sd_len: usize,
+    layout: *const KacsRustCachedSdLayout,
+    security_info: u32,
+    out_sd_ptr: *mut *const u8,
+    out_sd_len: *mut usize,
+) -> i32 {
+    let Some(out_sd_ptr) = (unsafe { out_sd_ptr.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(out_sd_len) = (unsafe { out_sd_len.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    *out_sd_ptr = null();
+    *out_sd_len = 0;
+
+    if sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    let sd = match cached_file_sd_descriptor(sd_bytes, layout) {
+        Ok(sd) => sd,
+        Err(err) => return err,
+    };
+    match build_sd_subset_from_descriptor(&sd, security_info) {
         Ok((ptr, len)) => {
             *out_sd_ptr = ptr.cast_const();
             *out_sd_len = len;
@@ -8549,7 +9820,66 @@ pub extern "C" fn kacs_rust_merge_file_sd(
 
     let current_sd_bytes = unsafe { core::slice::from_raw_parts(current_sd_ptr, current_sd_len) };
     let input_sd_bytes = unsafe { core::slice::from_raw_parts(input_sd_ptr, input_sd_len) };
-    match merge_process_sd_bytes(subject, current_sd_bytes, security_info, input_sd_bytes) {
+    match merge_process_sd_bytes(subject, current_sd_bytes, security_info, input_sd_bytes, true) {
+        Ok((ptr, len)) => {
+            *out_sd_ptr = ptr.cast_const();
+            *out_sd_len = len;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Merges one caller-supplied subset descriptor into the current cached live
+/// file SD using the generic set-security rules.
+pub extern "C" fn kacs_rust_merge_cached_file_sd(
+    subject_token_ptr: *const c_void,
+    current_sd_ptr: *const u8,
+    current_sd_len: usize,
+    layout: *const KacsRustCachedSdLayout,
+    security_info: u32,
+    input_sd_ptr: *const u8,
+    input_sd_len: usize,
+    allow_restore_owner_assignment: u32,
+    out_sd_ptr: *mut *const u8,
+    out_sd_len: *mut usize,
+) -> i32 {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token_ptr) }) else {
+        return -EACCES;
+    };
+    let Some(out_sd_ptr) = (unsafe { out_sd_ptr.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(out_sd_len) = (unsafe { out_sd_len.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    *out_sd_ptr = null();
+    *out_sd_len = 0;
+
+    if current_sd_ptr.is_null()
+        || current_sd_len == 0
+        || input_sd_ptr.is_null()
+        || input_sd_len == 0
+    {
+        return -EINVAL;
+    }
+
+    let current_sd_bytes =
+        unsafe { core::slice::from_raw_parts(current_sd_ptr, current_sd_len) };
+    let current_sd = match cached_file_sd_descriptor(current_sd_bytes, layout) {
+        Ok(sd) => sd,
+        Err(err) => return err,
+    };
+    let input_sd_bytes = unsafe { core::slice::from_raw_parts(input_sd_ptr, input_sd_len) };
+    match merge_sd_with_current_descriptor(
+        subject,
+        &current_sd,
+        security_info,
+        input_sd_bytes,
+        allow_restore_owner_assignment != 0,
+    ) {
         Ok((ptr, len)) => {
             *out_sd_ptr = ptr.cast_const();
             *out_sd_len = len;
@@ -8595,7 +9925,7 @@ pub extern "C" fn kacs_rust_merge_process_sd(
 
     let current_sd_bytes = unsafe { core::slice::from_raw_parts(current_sd_ptr, current_sd_len) };
     let input_sd_bytes = unsafe { core::slice::from_raw_parts(input_sd_ptr, input_sd_len) };
-    match merge_process_sd_bytes(subject, current_sd_bytes, security_info, input_sd_bytes) {
+    match merge_process_sd_bytes(subject, current_sd_bytes, security_info, input_sd_bytes, true) {
         Ok((ptr, len)) => {
             *out_sd_ptr = ptr.cast_const();
             *out_sd_len = len;
@@ -9023,6 +10353,47 @@ pub extern "C" fn kacs_rust_token_projected_gid(token: *const c_void) -> u32 {
 }
 
 #[no_mangle]
+/// Returns whether the token's projected UID satisfies the UID0/SYSTEM invariant.
+pub extern "C" fn kacs_rust_token_allows_uid0_projection(token: *const c_void) -> bool {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return false;
+    };
+
+    token.projected_uid != 0 || token.user_sid.sid.as_bytes() == SYSTEM_SID_BYTES
+}
+
+#[no_mangle]
+/// Returns the number of precomputed supplementary GIDs stored on the token.
+pub extern "C" fn kacs_rust_token_projected_supplementary_gid_count(
+    token: *const c_void,
+) -> usize {
+    unsafe { PkmKacsBootToken::from_ptr(token) }
+        .map(|value| value.projected_supplementary_gids.len())
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+/// Copies one precomputed supplementary GID by index.
+pub extern "C" fn kacs_rust_token_projected_supplementary_gid(
+    token: *const c_void,
+    index: usize,
+    out: *mut u32,
+) -> i32 {
+    let Some(out) = (unsafe { out.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EINVAL;
+    };
+    let Some(value) = token.projected_supplementary_gids.as_slice().get(index) else {
+        return -EINVAL;
+    };
+
+    *out = *value;
+    0
+}
+
+#[no_mangle]
 /// Fills a KUnit-visible snapshot of any live Slice 21 token object.
 pub extern "C" fn kacs_rust_kunit_token_snapshot(
     token_ptr: *const c_void,
@@ -9067,6 +10438,18 @@ pub extern "C" fn kacs_rust_kunit_session_snapshot(
 }
 
 #[no_mangle]
+/// Builds the derived logon SID for an arbitrary session ID for KUnit vectors.
+pub extern "C" fn kacs_rust_kunit_build_logon_sid(session_id: u64, out: *mut u8) -> i32 {
+    let Some(out) = (unsafe { out.as_mut() }) else {
+        return -EINVAL;
+    };
+    let sid = build_logon_sid_bytes(session_id);
+
+    unsafe { copy_nonoverlapping(sid.as_ptr(), out, sid.len()) };
+    0
+}
+
+#[no_mangle]
 /// Creates a KUnit-only SYSTEM-like token whose own SD grants only query and
 /// non-escalating adjust rights to its user SID.
 pub extern "C" fn kacs_rust_kunit_create_query_only_token() -> *const c_void {
@@ -9088,6 +10471,13 @@ pub extern "C" fn kacs_rust_kunit_create_adjustable_groups_token() -> *const c_v
 }
 
 #[no_mangle]
+/// Creates a KUnit-only LocalService token with enabled Administrators
+/// membership and no standalone privileges.
+pub extern "C" fn kacs_rust_kunit_create_local_administrator_token() -> *const c_void {
+    PkmKacsBootToken::create_local_administrator().unwrap_or(null())
+}
+
+#[no_mangle]
 /// Creates a KUnit-only SYSTEM-like token with a small nontrivial privilege
 /// state so `KACS_IOC_ADJUST_PRIVS` can exercise success and fail-closed
 /// paths.
@@ -9100,6 +10490,17 @@ pub extern "C" fn kacs_rust_kunit_create_adjustable_privileges_token() -> *const
 /// privilege-use events for both success and failure outcomes.
 pub extern "C" fn kacs_rust_kunit_create_privilege_audit_token() -> *const c_void {
     PkmKacsBootToken::create_privilege_audit().unwrap_or(null())
+}
+
+#[no_mangle]
+/// Creates a KUnit-only primary token for exercising logon-type sensitive
+/// standalone privilege gates.
+pub extern "C" fn kacs_rust_kunit_create_logon_type_token(
+    logon_type: u32,
+    enabled_privileges: u64,
+) -> *const c_void {
+    PkmKacsBootToken::create_kunit_logon_type_token(logon_type, enabled_privileges)
+        .unwrap_or(null())
 }
 
 #[no_mangle]
@@ -9133,6 +10534,44 @@ pub extern "C" fn kacs_rust_kunit_create_impersonation_variant_token(
         impersonation_level,
         restricted != 0,
         enabled_privileges,
+    )
+    .unwrap_or(null())
+}
+
+#[no_mangle]
+/// Creates a bounded KUnit-only token variant with independent privilege masks.
+pub extern "C" fn kacs_rust_kunit_create_impersonation_variant_token_with_privileges(
+    user_kind: u32,
+    token_type: u32,
+    impersonation_level: u32,
+    integrity_level: u32,
+    restricted: u32,
+    privileges_present: u64,
+    privileges_enabled: u64,
+    privileges_enabled_by_default: u64,
+) -> *const c_void {
+    let Some(user_sid) = sid_from_kunit_kind(user_kind).ok() else {
+        return null();
+    };
+    let Some(token_type) = token_type_from_abi(token_type).ok() else {
+        return null();
+    };
+    let Some(impersonation_level) = impersonation_level_from_abi(impersonation_level).ok() else {
+        return null();
+    };
+    let Some(integrity_level) = integrity_level_from_abi(integrity_level).ok() else {
+        return null();
+    };
+
+    PkmKacsBootToken::create_kunit_variant_with_privileges(
+        user_sid,
+        integrity_level,
+        token_type,
+        impersonation_level,
+        restricted != 0,
+        privileges_present,
+        privileges_enabled,
+        privileges_enabled_by_default,
     )
     .unwrap_or(null())
 }

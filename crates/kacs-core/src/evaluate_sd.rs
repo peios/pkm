@@ -128,13 +128,14 @@ pub fn evaluate_security_descriptor<'a>(
         mandatory_decided,
         &mut provenance,
     );
-    let privilege_granted = pre_sacl.privilege_granted | provenance.take_ownership_granted;
+    let privilege_granted_before_restriction =
+        pre_sacl.privilege_granted | provenance.take_ownership_granted;
 
     if !token.restricted.restricted_sids.is_empty()
         || !token.restricted.restricted_device_groups.is_empty()
     {
         let mut restricted_context = token.restricted;
-        restricted_context.privilege_granted = privilege_granted;
+        restricted_context.privilege_granted = privilege_granted_before_restriction;
 
         let restricted_owner = sd
             .owner()
@@ -152,9 +153,8 @@ pub fn evaluate_security_descriptor<'a>(
         });
         conditional_restricted.identity_membership_is_presence_based = true;
         conditional_restricted.caller_is_owner = restricted_owner;
-        if !restricted_context.restricted_device_groups.is_empty() {
-            conditional_restricted.device_groups = restricted_context.restricted_device_groups;
-        }
+        conditional_restricted.device_groups = restricted_context.restricted_device_groups;
+        conditional_restricted.device_membership_uses_virtual_groups = true;
 
         let restricted = evaluate_dacl_states(
             sd,
@@ -179,7 +179,7 @@ pub fn evaluate_security_descriptor<'a>(
             &restricted,
             write_bits,
             restricted_context.write_restricted,
-            privilege_granted,
+            privilege_granted_before_restriction,
         );
     }
 
@@ -194,6 +194,7 @@ pub fn evaluate_security_descriptor<'a>(
         conditional_confinement.self_sid = confinement_self;
         conditional_confinement.principal_self_matches = Some(confinement_self.is_some());
         conditional_confinement.caller_is_owner = confinement_owner;
+        conditional_confinement.device_membership_uses_virtual_groups = true;
 
         let confinement_sid = token
             .confinement
@@ -220,6 +221,8 @@ pub fn evaluate_security_descriptor<'a>(
 
         evaluation = merge_absolute_results(evaluation, &confinement);
     }
+
+    let privilege_granted = privilege_granted_before_restriction & evaluation.root.granted;
 
     let object_granted_list = if let Some(states) = evaluation.object_states.as_ref() {
         let mut granted_list = Vec::with_capacity(states.len())?;

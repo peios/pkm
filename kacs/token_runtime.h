@@ -10,6 +10,25 @@ struct file;
 struct path;
 struct task_struct;
 
+struct kacs_rust_cached_sd_component {
+	u32 offset;
+	u32 len;
+};
+
+struct kacs_rust_cached_sd_layout {
+	u16 control;
+	u8 rm_control;
+	u8 owner_present;
+	u8 group_present;
+	u8 sacl_present;
+	u8 dacl_present;
+	u8 __reserved;
+	struct kacs_rust_cached_sd_component owner;
+	struct kacs_rust_cached_sd_component group;
+	struct kacs_rust_cached_sd_component sacl;
+	struct kacs_rust_cached_sd_component dacl;
+};
+
 int pkm_kacs_open_by_handle_at(void);
 void pkm_kacs_rcu_read_lock(void);
 void pkm_kacs_rcu_read_unlock(void);
@@ -144,6 +163,15 @@ struct pkm_kacs_boot_snapshot {
 	u32 write_restricted;
 	u32 confinement_exempt;
 	u32 isolation_boundary;
+	const u8 *source_name_ptr;
+	size_t source_name_len;
+	u64 source_id;
+	u64 expiration;
+	u64 origin;
+	u32 restricted_sid_count;
+	u32 confinement_sid_present;
+	u32 confinement_capability_count;
+	u32 projected_supplementary_gid_count;
 };
 
 struct pkm_kacs_session_snapshot {
@@ -411,6 +439,7 @@ struct pkm_kacs_kunit_file_sd_set_args {
 	u64 mount_magic;
 	u16 inode_mode;
 	u16 _reserved;
+	u32 fail_xattr_write;
 };
 
 struct pkm_kacs_kunit_file_open_args {
@@ -488,8 +517,35 @@ struct pkm_kacs_kunit_delete_on_close_result {
 	u32 status;
 	long reopen_result;
 	u32 pending_before_release;
+	u32 pending_after_duplicate_close;
 	u32 pending_after_release;
+	u32 unlink_calls_after_duplicate_close;
 	u32 unlink_calls;
+};
+
+struct pkm_kacs_kunit_live_file_fd {
+	int fd;
+	char dir_path[64];
+	char target_path[96];
+	char link_path[96];
+};
+
+struct pkm_kacs_kunit_native_identity_result {
+	u32 granted_access;
+	u32 status;
+	u32 failure_step;
+	u32 same_inode_after;
+	u32 hardlink_preserved;
+	u32 old_fd_preserved;
+	u32 sd_preserved;
+	u32 sd_recomputed;
+	u64 size_before;
+	u64 size_after;
+	u64 old_fd_size_after;
+	u64 old_inode;
+	u64 target_inode_after;
+	u64 link_inode_after;
+	u64 old_fd_inode_after;
 };
 
 struct pkm_kacs_kunit_missing_file_sd_query_args {
@@ -512,6 +568,23 @@ struct pkm_kacs_kunit_exec_setid_view {
 	u32 fsgid;
 	u32 projected_fsuid;
 	u32 projected_fsgid;
+};
+
+#define PKM_KACS_KUNIT_CRED_PROJECTION_GROUP_MAX 8U
+
+struct pkm_kacs_kunit_cred_projection_view {
+	u32 uid;
+	u32 euid;
+	u32 suid;
+	u32 fsuid;
+	u32 gid;
+	u32 egid;
+	u32 sgid;
+	u32 fsgid;
+	u32 projected_fsuid;
+	u32 projected_fsgid;
+	u32 group_count;
+	u32 groups[PKM_KACS_KUNIT_CRED_PROJECTION_GROUP_MAX];
 };
 
 struct pkm_kacs_kunit_exec_new_process_min_args {
@@ -582,6 +655,7 @@ void kacs_rust_token_drop(const void *token);
 bool kacs_rust_token_is_primary(const void *token);
 bool kacs_rust_token_same_user_sid(const void *lhs, const void *rhs);
 bool kacs_rust_token_has_enabled_privilege(const void *token, u64 privilege);
+int kacs_rust_token_is_remote_shutdown_origin(const void *token);
 bool kacs_rust_token_has_new_process_min(const void *token);
 bool kacs_rust_token_mark_privileges_used(const void *token, u64 used_mask);
 int kacs_rust_token_open_check(const void *subject_token, const void *target_token,
@@ -617,6 +691,8 @@ const u8 *kacs_rust_kunit_create_query_limited_process_sd(const void *token_ptr,
 							  size_t *len_out);
 const u8 *kacs_rust_kunit_create_query_information_process_sd(
 	const void *token_ptr, size_t *len_out);
+const u8 *kacs_rust_kunit_create_process_sd_with_everyone_mask(
+	const void *token_ptr, u32 everyone_mask, size_t *len_out);
 const u8 *kacs_rust_kunit_create_read_only_socket_sd(const void *token_ptr,
 						      size_t *len_out);
 const u8 *kacs_rust_kunit_create_file_sd(const void *token_ptr, u32 self_mask,
@@ -625,12 +701,24 @@ const u8 *kacs_rust_kunit_create_file_sd(const void *token_ptr, u32 self_mask,
 const u8 *kacs_rust_kunit_create_file_sd_with_mandatory_resource_attr(
 	const void *token_ptr, u32 self_mask, u32 admin_mask, u32 system_mask,
 	u32 everyone_mask, size_t *len_out);
+const u8 *kacs_rust_kunit_create_file_sd_with_mandatory_resource_attr_value(
+	const void *token_ptr, u32 self_mask, u32 admin_mask, u32 system_mask,
+	u32 everyone_mask, u64 mandatory_value, size_t *len_out);
+const u8 *kacs_rust_kunit_create_labeled_file_sd(
+	const void *token_ptr, u32 self_mask, u32 admin_mask, u32 system_mask,
+	u32 everyone_mask, u32 integrity_level, size_t *len_out);
+const u8 *kacs_rust_kunit_create_labeled_audit_file_sd(
+	const void *token_ptr, u32 self_mask, u32 admin_mask, u32 system_mask,
+	u32 everyone_mask, u32 integrity_level, size_t *len_out);
 const u8 *kacs_rust_kunit_create_device_member_file_sd(
 	const void *token_ptr, const u8 *device_sid_ptr, size_t device_sid_len,
 	u32 allow_mask, size_t *len_out);
 const u8 *kacs_rust_kunit_create_claim_exists_file_sd(
 	const void *token_ptr, u8 namespace_opcode, const u8 *claim_name_ptr,
 	size_t claim_name_len, u32 allow_mask, size_t *len_out);
+const u8 *kacs_rust_kunit_create_resource_claim_exists_file_sd(
+	const void *token_ptr, const u8 *claim_name_ptr, size_t claim_name_len,
+	u32 allow_mask, size_t *len_out);
 const u8 *kacs_rust_kunit_create_label_sd_subset(u32 integrity_level,
 						 size_t *len_out);
 const u8 *kacs_rust_kunit_create_process_sd_with_mandatory_resource_attr(
@@ -660,8 +748,25 @@ int kacs_rust_check_file_sd_with_intent_audit(const void *subject_token_ptr,
 					      u32 pip_type, u32 pip_trust,
 					      u32 *granted_out,
 					      u32 *continuous_audit_out);
+int kacs_rust_check_file_sd_with_intent_audit_caap(
+	const void *subject_token_ptr, const u8 *sd_ptr, size_t sd_len,
+	u32 desired, u32 privilege_intent, u32 pip_type, u32 pip_trust,
+	const void *caap_cache, u32 *granted_out, u32 *continuous_audit_out);
+int kacs_rust_check_cached_file_sd_with_intent(
+	const void *subject_token_ptr, const u8 *sd_ptr, size_t sd_len,
+	const struct kacs_rust_cached_sd_layout *layout, u32 desired,
+	u32 privilege_intent, u32 pip_type, u32 pip_trust, u32 *granted_out);
+int kacs_rust_check_cached_file_sd_with_intent_audit_caap(
+	const void *subject_token_ptr, const u8 *sd_ptr, size_t sd_len,
+	const struct kacs_rust_cached_sd_layout *layout, u32 desired,
+	u32 privilege_intent, u32 pip_type, u32 pip_trust,
+	const void *caap_cache, u32 *granted_out, u32 *continuous_audit_out);
 int kacs_rust_file_sd_integrity_label(const u8 *sd_ptr, size_t sd_len,
 				      u32 *integrity_level_out);
+int kacs_rust_cached_file_sd_integrity_label(
+	const u8 *sd_ptr, size_t sd_len,
+	const struct kacs_rust_cached_sd_layout *layout,
+	u32 *integrity_level_out);
 int kacs_rust_granted_file_sd_with_intent(const void *subject_token_ptr,
 					  const u8 *sd_ptr, size_t sd_len,
 					  u32 desired, u32 privilege_intent,
@@ -674,6 +779,15 @@ int kacs_rust_granted_file_sd_with_intent_audit(const void *subject_token_ptr,
 						u32 pip_type, u32 pip_trust,
 						u32 *granted_out,
 						u32 *continuous_audit_out);
+int kacs_rust_granted_file_sd_with_intent_audit_caap(
+	const void *subject_token_ptr, const u8 *sd_ptr, size_t sd_len,
+	u32 desired, u32 privilege_intent, u32 pip_type, u32 pip_trust,
+	const void *caap_cache, u32 *granted_out, u32 *continuous_audit_out);
+int kacs_rust_granted_cached_file_sd_with_intent_audit_caap(
+	const void *subject_token_ptr, const u8 *sd_ptr, size_t sd_len,
+	const struct kacs_rust_cached_sd_layout *layout, u32 desired,
+	u32 privilege_intent, u32 pip_type, u32 pip_trust,
+	const void *caap_cache, u32 *granted_out, u32 *continuous_audit_out);
 int kacs_rust_emit_file_continuous_audit(const void *subject_token_ptr,
 					 u32 pip_type, u32 pip_trust,
 					 const u8 *operation_ptr,
@@ -681,6 +795,9 @@ int kacs_rust_emit_file_continuous_audit(const void *subject_token_ptr,
 					 u32 requested_access,
 					 u32 matched_access,
 					 u32 granted_access, u8 success);
+int kacs_rust_emit_file_set_sd_audit(const void *subject_token_ptr,
+				     const u8 *sd_ptr, size_t sd_len,
+				     u32 desired, u32 pip_type, u32 pip_trust);
 int kacs_rust_check_token_sd_with_intent(const void *subject_token_ptr,
 					 const void *target_token_ptr,
 					 u32 desired, u32 privilege_intent,
@@ -688,6 +805,14 @@ int kacs_rust_check_token_sd_with_intent(const void *subject_token_ptr,
 					 u32 *granted_out);
 int kacs_rust_validate_sd_bytes(const u8 *sd_ptr, size_t sd_len);
 int kacs_rust_validate_stored_sd_bytes(const u8 *sd_ptr, size_t sd_len);
+int kacs_rust_kunit_build_single_opaque_acl_len(size_t ace_len,
+						size_t *out_len);
+int kacs_rust_parse_stored_file_sd_layout(
+	const u8 *sd_ptr, size_t sd_len,
+	struct kacs_rust_cached_sd_layout *layout_out);
+int kacs_rust_parse_file_sd_layout(
+	const u8 *sd_ptr, size_t sd_len,
+	struct kacs_rust_cached_sd_layout *layout_out);
 int kacs_rust_query_process_sd_subset(const u8 *sd_ptr, size_t sd_len,
 				      u32 security_info,
 				      const u8 **out_sd_ptr,
@@ -696,6 +821,10 @@ int kacs_rust_query_file_sd_subset(const u8 *sd_ptr, size_t sd_len,
 				   u32 security_info,
 				   const u8 **out_sd_ptr,
 				   size_t *out_sd_len);
+int kacs_rust_query_cached_file_sd_subset(
+	const u8 *sd_ptr, size_t sd_len,
+	const struct kacs_rust_cached_sd_layout *layout, u32 security_info,
+	const u8 **out_sd_ptr, size_t *out_sd_len);
 int kacs_rust_query_token_sd_subset(const void *token_ptr, u32 security_info,
 				    const u8 **out_sd_ptr,
 				    size_t *out_sd_len);
@@ -705,6 +834,12 @@ int kacs_rust_merge_file_sd(const void *subject_token_ptr,
 			    const u8 *input_sd_ptr, size_t input_sd_len,
 			    const u8 **out_sd_ptr,
 			    size_t *out_sd_len);
+int kacs_rust_merge_cached_file_sd(
+	const void *subject_token_ptr, const u8 *current_sd_ptr,
+	size_t current_sd_len, const struct kacs_rust_cached_sd_layout *layout,
+	u32 security_info, const u8 *input_sd_ptr, size_t input_sd_len,
+	u32 allow_restore_owner_assignment, const u8 **out_sd_ptr,
+	size_t *out_sd_len);
 int kacs_rust_merge_process_sd(const void *subject_token_ptr,
 			       const u8 *current_sd_ptr,
 			       size_t current_sd_len, u32 security_info,
@@ -744,19 +879,31 @@ int kacs_rust_securityfs_sessions_listing(u8 *out, size_t out_len,
 					  size_t *required_out);
 u32 kacs_rust_token_projected_uid(const void *token);
 u32 kacs_rust_token_projected_gid(const void *token);
+bool kacs_rust_token_allows_uid0_projection(const void *token);
+size_t kacs_rust_token_projected_supplementary_gid_count(const void *token);
+int kacs_rust_token_projected_supplementary_gid(const void *token,
+						size_t index, u32 *out);
 bool kacs_rust_kunit_token_snapshot(const void *token,
 				    struct pkm_kacs_boot_snapshot *out);
 bool kacs_rust_kunit_boot_snapshot(struct pkm_kacs_boot_snapshot *out);
 int kacs_rust_kunit_session_snapshot(
 	u64 session_id, struct pkm_kacs_session_snapshot *out);
+int kacs_rust_kunit_build_logon_sid(u64 session_id, u8 *out);
 const void *kacs_rust_kunit_create_query_only_token(void);
 const void *kacs_rust_kunit_create_without_tcb_token(void);
 const void *kacs_rust_kunit_create_adjustable_groups_token(void);
+const void *kacs_rust_kunit_create_local_administrator_token(void);
 const void *kacs_rust_kunit_create_adjustable_privileges_token(void);
 const void *kacs_rust_kunit_create_privilege_audit_token(void);
+const void *kacs_rust_kunit_create_logon_type_token(u32 logon_type,
+						    u64 enabled_privileges);
 const void *kacs_rust_kunit_create_impersonation_variant_token(
 	u32 user_kind, u32 token_type, u32 impersonation_level,
 	u32 integrity_level, u32 restricted, u64 enabled_privileges);
+const void *kacs_rust_kunit_create_impersonation_variant_token_with_privileges(
+	u32 user_kind, u32 token_type, u32 impersonation_level,
+	u32 integrity_level, u32 restricted, u64 privileges_present,
+	u64 privileges_enabled, u64 privileges_enabled_by_default);
 int kacs_rust_token_query(const void *token, u32 token_class, u8 *out,
 			  size_t out_len, size_t *required_out);
 int kacs_rust_token_adjust_privs(
@@ -790,9 +937,10 @@ int pkm_kmes_kunit_set_current_process_rate_refill_frozen(bool frozen);
 int pkm_kmes_kunit_get_current_process_rate_tokens(u32 *tokens_out);
 void pkm_kacs_kunit_set_current_pip_context(u32 pip_type, u32 pip_trust);
 int pkm_kacs_kunit_set_current_process_mitigation_bits(u32 mitigation_bits);
-int pkm_kacs_kunit_token_eval_context_allowed(u64 task_flags,
-					      u32 task_context,
-					      u32 override_cred);
+int pkm_kacs_kunit_token_eval_context_allowed(u32 task_context,
+					      u32 has_cred,
+					      u32 has_security_blob,
+					      u32 has_token);
 const void *pkm_kacs_kunit_current_process_state_ptr(void);
 const void *pkm_kacs_kunit_current_effective_cred_process_state_ptr(void);
 const void *pkm_kacs_kunit_current_real_cred_process_state_ptr(void);
@@ -813,6 +961,8 @@ void pkm_kacs_kunit_put_process_state(const void *state_ptr);
 int pkm_kacs_kunit_process_state_snapshot(
 	const void *state_ptr,
 	struct pkm_kacs_kunit_process_state_view *out);
+bool pkm_kacs_kunit_pip_dominates(u32 caller_pip_type, u32 caller_pip_trust,
+				  u32 target_pip_type, u32 target_pip_trust);
 long pkm_kacs_kunit_open_process_token_for_subject(
 	const struct pkm_kacs_kunit_process_token_open_args *args);
 long pkm_kacs_kunit_open_process_token_inspection_for_subject(
@@ -825,6 +975,8 @@ long pkm_kacs_kunit_read_securityfs_sessions_for_subject(
 	size_t *required_out);
 long pkm_kacs_kunit_signal_origin_is_kernel(u32 origin_kind);
 long pkm_kacs_kunit_check_signal_for_subject(
+	const struct pkm_kacs_kunit_process_signal_check_args *args);
+long pkm_kacs_kunit_check_signal_for_current(
 	const struct pkm_kacs_kunit_process_signal_check_args *args);
 long pkm_kacs_kunit_check_ptrace_for_subject(
 	const struct pkm_kacs_kunit_process_ptrace_check_args *args);
@@ -863,12 +1015,19 @@ long pkm_kacs_kunit_get_file_sd_for_subject(
 long pkm_kacs_kunit_set_file_sd_for_subject(
 	const struct pkm_kacs_kunit_file_sd_set_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
+long pkm_kacs_kunit_open_then_change_sd_for_subject(
+	const struct pkm_kacs_kunit_file_sd_set_args *args,
+	u32 *cached_grant_out, long *new_open_ret_out,
+	u32 *new_open_grant_out);
 long pkm_kacs_kunit_open_file_for_subject(
 	const struct pkm_kacs_kunit_file_open_args *args,
 	u32 *granted_access_out);
 long pkm_kacs_kunit_open_file_for_subject_audit(
 	const struct pkm_kacs_kunit_file_open_args *args,
 	u32 *granted_access_out, u32 *continuous_audit_out);
+long pkm_kacs_kunit_open_opath_for_subject(
+	const struct pkm_kacs_kunit_file_open_args *args, u32 *managed_out,
+	u32 *granted_access_out);
 long pkm_kacs_kunit_native_open_for_subject(
 	const struct pkm_kacs_kunit_native_open_args *args,
 	u32 *granted_access_out, u32 *status_out, u32 *file_mode_out);
@@ -876,18 +1035,46 @@ long pkm_kacs_kunit_native_create_for_subject(
 	const struct pkm_kacs_kunit_native_create_args *args,
 	const u8 **created_sd_out, size_t *created_sd_len_out,
 	u32 *granted_access_out, u32 *status_out);
+long pkm_kacs_kunit_native_create_mode_for_subject(
+	const struct pkm_kacs_kunit_native_create_args *args, u32 *mode_out);
+long pkm_kacs_kunit_native_prepare_open_with_padding(u32 padding);
+long pkm_kacs_kunit_native_missing_existing_result(u32 create_disposition);
 long pkm_kacs_kunit_delete_on_close_for_subject(
 	const struct pkm_kacs_kunit_native_open_args *args,
 	struct pkm_kacs_kunit_delete_on_close_result *out);
+long pkm_kacs_kunit_delete_on_close_dup_lineage_for_subject(
+	const struct pkm_kacs_kunit_native_open_args *args,
+	struct pkm_kacs_kunit_delete_on_close_result *out);
+long pkm_kacs_kunit_native_overwrite_identity_for_subject(
+	const struct pkm_kacs_kunit_native_open_args *args,
+	struct pkm_kacs_kunit_native_identity_result *out);
+long pkm_kacs_kunit_native_supersede_identity_for_subject(
+	const struct pkm_kacs_kunit_native_open_args *args,
+	struct pkm_kacs_kunit_native_identity_result *out);
 long pkm_kacs_kunit_get_cached_file_sd_for_subject(
 	const struct pkm_kacs_kunit_file_sd_get_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
 long pkm_kacs_kunit_set_cached_file_sd_for_subject(
 	const struct pkm_kacs_kunit_file_sd_set_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
+long pkm_kacs_kunit_get_sd_syscall(int dirfd, const char *path,
+				   u32 security_info, u8 *buf, u32 buf_len,
+				   u32 flags);
+long pkm_kacs_kunit_create_live_file_fd_for_get_sd(
+	const void *subject_token, u32 security_info,
+	struct pkm_kacs_kunit_live_file_fd *live_out,
+	const u8 **expected_sd_out, size_t *expected_len_out);
+void pkm_kacs_kunit_cleanup_live_file_fd(
+	struct pkm_kacs_kunit_live_file_fd *live);
 u32 pkm_kacs_kunit_classify_file_sd_bytes(const u8 *sd_ptr, size_t sd_len);
+int pkm_kacs_kunit_file_sd_cache_cas_loser(
+	const u8 *sd_ptr, size_t sd_len, u32 *first_installed_out,
+	u32 *second_installed_out, size_t *live_len_out);
 u32 pkm_kacs_kunit_mount_policy_for_magic(u64 magic);
 long pkm_kacs_kunit_missing_file_sd_result_for_magic(u64 magic);
+long pkm_kacs_kunit_corrupt_file_sd_population_twice(
+	const u8 *sd_ptr, size_t sd_len, long *first_ret_out,
+	long *second_ret_out);
 long pkm_kacs_kunit_get_file_sd_on_mount_for_subject(
 	const struct pkm_kacs_kunit_file_sd_get_args *args, u64 magic,
 	const u8 **out_sd_ptr, size_t *out_sd_len);
@@ -902,18 +1089,47 @@ long pkm_kacs_kunit_query_missing_file_sd_on_policy_mount(
 	const struct pkm_kacs_kunit_missing_file_sd_query_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len,
 	u32 *xattr_written_out);
+long pkm_kacs_kunit_persistent_synthesis_second_query_uses_cache(
+	const void *subject_token, long *first_ret_out, long *second_ret_out,
+	u32 *xattr_written_out);
+int pkm_kacs_kunit_cache_generation_currentness(
+	const u8 *valid_sd_ptr, size_t valid_sd_len, u32 *missing_current_out,
+	u32 *synthetic_current_out, u32 *xattr_current_out,
+	u32 *corrupt_current_out);
 long pkm_kacs_kunit_set_mount_policy_for_subject(
 	const void *subject_token, u64 magic,
 	const struct kacs_mount_policy_args *args, u32 *policy_out,
 	u32 *generation_out, u32 *template_len_out);
+long pkm_kacs_kunit_same_superblock_mount_policy_for_subject(
+	const void *subject_token, const struct kacs_mount_policy_args *args,
+	u32 *first_policy_out, u32 *second_policy_out,
+	u32 *first_generation_out, u32 *second_generation_out,
+	u32 *first_template_len_out, u32 *second_template_len_out);
+long pkm_kacs_kunit_mount_policy_failure_preserves_state(
+	const void *subject_token, u64 magic,
+	const struct kacs_mount_policy_args *initial_args,
+	const struct kacs_mount_policy_args *failure_args,
+	long *failure_ret_out, u32 *policy_out, u32 *generation_out,
+	u32 *template_len_out);
+long pkm_kacs_kunit_mount_policy_opath_fd_resolves_superblock(
+	u32 *policy_out);
+u32 pkm_kacs_kunit_next_mount_policy_generation(u32 generation);
 long pkm_kacs_kunit_adopt_missing_mount_for_subject(
 	const void *subject_token, const struct kacs_mount_policy_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len,
 	u32 *xattr_written_out, long *first_query_ret_out);
 int pkm_kacs_kunit_inode_sd_xattr_get(const char *name, u32 ntfs);
 int pkm_kacs_kunit_inode_sd_xattr_set(const char *name, u32 ntfs);
+int pkm_kacs_kunit_inode_sd_xattr_set_sized(const char *name, size_t size,
+					    u32 ntfs);
 int pkm_kacs_kunit_inode_sd_xattr_remove(const char *name, u32 ntfs);
 int pkm_kacs_kunit_inode_xattr_skipcap(const char *name);
+int pkm_kacs_kunit_check_inode_follow_link(void);
+int pkm_kacs_kunit_check_inode_set_acl(void);
+int pkm_kacs_kunit_check_inode_remove_acl(void);
+int pkm_kacs_kunit_check_inode_getsecurity_sd(
+	const u8 *sd_ptr, size_t sd_len, const char *name, u8 *out,
+	size_t out_len, size_t *written);
 int pkm_kacs_kunit_file_sd_xattr_get(const char *name, u32 ntfs);
 int pkm_kacs_kunit_file_sd_xattr_set(const char *name, u32 ntfs);
 int pkm_kacs_kunit_file_sd_xattr_remove(const char *name, u32 ntfs);
@@ -927,6 +1143,9 @@ long pkm_kacs_kunit_set_token_sd_for_subject(
 long pkm_kacs_kunit_open_current_thread_token_for_subject(
 	const void *subject_token, u32 access_mask);
 long pkm_kacs_kunit_set_current_psb(u32 requested_mitigations);
+long pkm_kacs_kunit_set_current_psb_with_platform(
+	u32 requested_mitigations, u32 ibt_supported, u32 shstk_supported,
+	u32 *result_mitigation_bits_out);
 long pkm_kacs_kunit_set_psb_for_subject(
 	const struct pkm_kacs_kunit_set_psb_args *args,
 	u32 *result_mitigation_bits_out);
@@ -1003,6 +1222,8 @@ int pkm_kacs_kunit_verify_signing_material_crypto(
 	const struct pkm_kacs_kunit_signing_probe *material,
 	const struct pkm_kacs_kunit_signing_key_entry *keys, size_t key_count,
 	struct pkm_kacs_kunit_signing_verify_out *out);
+int pkm_kacs_kunit_builtin_signing_key_table_shape(u32 *usable_count_out,
+						   u32 *terminated_out);
 int pkm_kacs_kunit_determine_exec_pip_from_signing_material(
 	const struct pkm_kacs_kunit_signing_probe *material,
 	struct pkm_kacs_kunit_signing_verify_out *out);
@@ -1026,12 +1247,14 @@ long pkm_kacs_kunit_stage_exec_dumpable_from_signing_material(
 #define PKM_KACS_KUNIT_PIN_OP_PATH_TRUNCATE 6U
 #define PKM_KACS_KUNIT_PIN_OP_SIGNING_XATTR_SET 7U
 #define PKM_KACS_KUNIT_PIN_OP_IOCTL_MUTATE 8U
+#define PKM_KACS_KUNIT_PIN_OP_IOCTL_UNKNOWN 9U
 int pkm_kacs_kunit_check_signed_exec_pin_mutation(u32 pinned, u32 managed,
 						  u32 granted_access,
 						  u32 operation);
 int pkm_kacs_kunit_check_mmap_snapshot(u32 managed, u32 granted_access,
 				       unsigned long prot,
 				       unsigned long flags);
+int pkm_kacs_kunit_check_mmap_opath(unsigned long prot, unsigned long flags);
 int pkm_kacs_kunit_check_mprotect_snapshot(u32 managed, u32 granted_access,
 					   unsigned long vm_flags,
 					   unsigned long prot);
@@ -1044,11 +1267,40 @@ int pkm_kacs_kunit_check_file_permission_snapshot_audit(u32 managed,
 							u32 continuous_audit,
 							int file_flags,
 							int mask);
+int pkm_kacs_kunit_check_file_permission_snapshot_for_subject(
+	const void *subject_token, u64 magic, u32 managed, u32 granted_access,
+	int file_flags, int mask);
+#define PKM_KACS_KUNIT_CONT_AUDIT_OP_ACCESS 1U
+#define PKM_KACS_KUNIT_CONT_AUDIT_OP_MMAP 2U
+#define PKM_KACS_KUNIT_CONT_AUDIT_OP_MPROTECT 3U
+#define PKM_KACS_KUNIT_CONT_AUDIT_OP_PERMISSION 4U
+#define PKM_KACS_KUNIT_CONT_AUDIT_OP_WRITE 5U
+#define PKM_KACS_KUNIT_CONT_AUDIT_OP_IOCTL 6U
+#define PKM_KACS_KUNIT_CONT_AUDIT_OP_LOCK 7U
+#define PKM_KACS_KUNIT_CONT_AUDIT_OP_FCNTL 8U
+#define PKM_KACS_KUNIT_CONT_AUDIT_OP_TRUNCATE 9U
+#define PKM_KACS_KUNIT_CONT_AUDIT_OP_FALLOCATE 10U
+int pkm_kacs_kunit_check_file_continuous_audit_op(
+	u32 op, u32 managed, u32 granted_access, u32 continuous_audit,
+	int file_flags, unsigned long arg0, unsigned long arg1);
+struct pkm_kacs_kunit_file_fd_view {
+	unsigned long file_cookie;
+	u32 managed;
+	u32 granted_access;
+};
+long pkm_kacs_kunit_set_file_fd_snapshot(int fd, u32 managed,
+					 u32 granted_access, int file_flags);
+long pkm_kacs_kunit_file_fd_snapshot(
+	int fd, struct pkm_kacs_kunit_file_fd_view *view);
+long pkm_kacs_kunit_check_file_permission_fd(int fd, int mask);
 int pkm_kacs_kunit_check_file_write_intent_snapshot(u32 managed,
 						    u32 granted_access,
 						    int file_flags,
 						    u32 rwf_flags,
 						    bool positioned);
+int pkm_kacs_kunit_check_file_write_intent_snapshot_for_subject(
+	const void *subject_token, u64 magic, u32 managed, u32 granted_access,
+	int file_flags, u32 rwf_flags, bool positioned);
 int pkm_kacs_kunit_check_file_permission_write_intent(
 	u32 managed, u32 granted_access, int file_flags, u32 rwf_flags,
 	bool positioned);
@@ -1056,7 +1308,9 @@ int pkm_kacs_kunit_check_file_permission_write_intent_mismatch(void);
 int pkm_kacs_kunit_check_file_metadata_snapshot(u32 managed,
 						u32 granted_access, u32 op,
 						const char *name);
+int pkm_kacs_kunit_check_file_metadata_opath(u32 op, const char *name);
 int pkm_kacs_kunit_check_file_metadata_null(u32 op, const char *name);
+int pkm_kacs_kunit_check_file_metadata_marker_clears(void);
 int pkm_kacs_kunit_check_path_metadata_live(const u8 *target_file_sd_ptr,
 					    size_t target_file_sd_len,
 					    u32 target_file_sd_state, u32 op,
@@ -1079,6 +1333,7 @@ int pkm_kacs_kunit_check_namespace_rename_flags(
 int pkm_kacs_kunit_check_file_ioctl_snapshot(u32 managed, u32 granted_access,
 					     umode_t mode, unsigned int cmd,
 					     bool compat);
+int pkm_kacs_kunit_check_file_ioctl_opath(unsigned int cmd, bool compat);
 int pkm_kacs_kunit_check_file_ioctl_null(void);
 int pkm_kacs_kunit_check_file_lock_snapshot(u32 managed, u32 granted_access,
 					    unsigned int cmd);
@@ -1087,6 +1342,7 @@ int pkm_kacs_kunit_check_file_fcntl_snapshot(u32 managed, u32 granted_access,
 					     unsigned int cmd,
 					     unsigned long arg);
 int pkm_kacs_kunit_check_file_fcntl_null(void);
+int pkm_kacs_kunit_check_file_receive(void);
 int pkm_kacs_kunit_check_file_truncate_snapshot(u32 managed,
 						u32 granted_access);
 int pkm_kacs_kunit_check_file_truncate_null(void);
@@ -1101,6 +1357,8 @@ int pkm_kacs_kunit_check_task_prctl_pip(u32 pip_type, int option,
 					unsigned long arg2);
 int pkm_kacs_kunit_check_pie_bprm(u32 mitigation_bits, const u8 *buf,
 				  size_t len);
+long pkm_kacs_kunit_check_bprm_file_execute_for_subject(
+	const struct pkm_kacs_kunit_file_open_args *args);
 u64 pkm_kacs_kunit_allow_cap_mask(void);
 long pkm_kacs_kunit_capget_fixup_masks(u64 effective_mask,
 					u64 inheritable_mask,
@@ -1126,6 +1384,8 @@ long pkm_kacs_kunit_capset_result_masks(
 	u64 permitted_mask, u64 bset_mask, u64 ambient_mask,
 	u64 *effective_out, u64 *inheritable_out, u64 *permitted_out,
 	u64 *bset_out, u64 *ambient_out);
+int pkm_kacs_kunit_check_blob_lifecycle_defaults(void);
+int pkm_kacs_kunit_check_cred_prepare_transfer_allow_caps(void);
 long pkm_kacs_kunit_check_prctl_capability_guard_for_subject(
 	const void *subject_token, u64 ambient_mask, int option,
 	unsigned long arg2, unsigned long arg3, unsigned long arg4,
@@ -1150,6 +1410,12 @@ int pkm_kacs_kunit_projected_fsids_for_subject(const void *subject_token,
 					       u32 raw_fsuid, u32 raw_fsgid,
 					       u32 *fsuid_out,
 					       u32 *fsgid_out);
+int pkm_kacs_kunit_project_peer_cred_for_subject(const void *subject_token,
+						 u32 raw_euid, u32 raw_egid,
+						 u32 *uid_out, u32 *gid_out);
+int pkm_kacs_kunit_prepare_projected_cred_for_subject(
+	const void *subject_token,
+	struct pkm_kacs_kunit_cred_projection_view *out);
 #endif
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_RUNTIME_H */

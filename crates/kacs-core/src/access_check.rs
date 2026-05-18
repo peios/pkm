@@ -1,5 +1,5 @@
 use crate::audit::{evaluate_sacl, AuditEvent};
-use crate::caap::{evaluate_caap, CaapPolicyEntry};
+use crate::caap::{evaluate_caap, CaapPolicyEntry, CaapSaclContribution, CaapSaclPhase};
 use crate::condition::ConditionalContext;
 use crate::dacl::AccessStatus;
 use crate::error::{KacsError, KacsResult};
@@ -12,6 +12,7 @@ use crate::privilege::{
     SE_RESTORE_PRIVILEGE, SE_SECURITY_PRIVILEGE, SE_TAKE_OWNERSHIP_PRIVILEGE,
 };
 use crate::security_descriptor::SecurityDescriptor;
+use crate::sid::Sid;
 use crate::token::{
     AccessCheckToken, AUDIT_POLICY_OBJECT_ACCESS_FAILURE, AUDIT_POLICY_OBJECT_ACCESS_SUCCESS,
     AUDIT_POLICY_PRIVILEGE_USE_FAILURE, AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
@@ -46,6 +47,41 @@ pub struct PrivilegeUseEvent {
     pub object_audit_context: Option<Vec<u8>>,
 }
 
+/// Classifies one CAAP diagnostic KMES event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaapDiagnosticKind {
+    /// A CAAP SACL failed parse or evaluation and its audit contribution was skipped.
+    SaclError,
+    /// Effective and staged CAAP results differed.
+    StagingMismatch,
+}
+
+#[cfg_attr(not(feature = "kernel"), derive(Clone))]
+#[derive(Debug, Eq, PartialEq)]
+/// Durable diagnostic emitted for CAAP policy evaluation issues.
+pub struct CaapDiagnosticEvent {
+    /// Diagnostic class.
+    pub kind: CaapDiagnosticKind,
+    /// CAAP SACL phase for SACL diagnostics, or `None` for whole-result diagnostics.
+    pub phase: Option<CaapSaclPhase>,
+    /// Policy SID for SACL diagnostics.
+    pub policy_sid: Option<Vec<u8>>,
+    /// Zero-based rule index for SACL diagnostics.
+    pub rule_index: Option<u32>,
+    /// Stable machine-readable reason string.
+    pub reason: &'static str,
+    /// Requested access after generic mapping.
+    pub requested: u32,
+    /// Effective CAAP scalar grant.
+    pub effective_granted: u32,
+    /// Staged CAAP scalar grant.
+    pub staged_granted: u32,
+    /// Whether result-list per-node outputs differ.
+    pub object_results_differ: bool,
+    /// Optional object-audit context copied into the event.
+    pub object_audit_context: Option<Vec<u8>>,
+}
+
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
 /// Full internal AccessCheck state after DACL, CAAP, SACL, and privilege-use
@@ -73,6 +109,8 @@ pub struct AccessCheckCoreState<'a> {
     pub audit_events: Vec<AuditEvent<'a>>,
     /// Privilege-use audit events emitted by step 13.
     pub privilege_use_events: Vec<PrivilegeUseEvent>,
+    /// CAAP policy diagnostics emitted by step 14.
+    pub caap_diagnostic_events: Vec<CaapDiagnosticEvent>,
     /// Updated privilege state after successful privilege-use marking.
     pub updated_privileges: TokenPrivileges,
 }
@@ -151,19 +189,31 @@ pub fn access_check_core<'a>(
     )?;
 
     let mut staging_mismatch = false;
+    let mut object_results_differ = false;
+    let mut caap_diagnostic_events = Vec::new();
     if !base.policy_sids.is_empty() {
         if caap.staged_granted != caap.granted {
             staging_mismatch = true;
         }
-        if let (Some(staged), Some(effective)) = (
+        object_results_differ = object_grants_differ(
             caap.staged_object_granted_list.as_ref(),
             caap.object_granted_list.as_ref(),
-        ) {
-            if staged.iter().zip(effective.iter()).any(|(s, e)| s != e) {
-                staging_mismatch = true;
-            }
+        );
+        if object_results_differ {
+            staging_mismatch = true;
         }
     }
+
+    let (used_delta, privilege_use_events) = evaluate_privilege_use(
+        mode,
+        token,
+        &base.provenance,
+        base.mapped_desired,
+        caap.granted,
+        caap.object_granted_list.as_deref(),
+        base.max_allowed_mode,
+        object_audit_context,
+    )?;
 
     let owner = sd
         .owner()
@@ -193,23 +243,24 @@ pub fn access_check_core<'a>(
         }
 
         for caap_sacl in &caap.effective_sacls {
-            if let Ok(acl) = Acl::parse(caap_sacl) {
-                if let Ok(state) = evaluate_sacl(
-                    &acl,
-                    &token.subject,
-                    owner,
-                    conditional_context.self_sid,
-                    object_tree,
-                    base.mapped_desired,
-                    caap.granted,
-                    mapping,
-                    &audit_context,
-                    object_audit_context,
-                ) {
-                    audit_events.extend(state.audit_events)?;
-                    continuous_audit_mask |= state.continuous_audit_mask;
-                }
-            }
+            evaluate_caap_sacl_contribution(
+                caap_sacl,
+                token,
+                owner,
+                conditional_context.self_sid,
+                object_tree,
+                base.mapped_desired,
+                caap.granted,
+                caap.granted,
+                caap.staged_granted,
+                mapping,
+                &audit_context,
+                object_audit_context,
+                object_results_differ,
+                &mut audit_events,
+                &mut continuous_audit_mask,
+                &mut caap_diagnostic_events,
+            )?;
         }
 
         if !caap.staged_sacls.is_empty() {
@@ -224,7 +275,7 @@ pub fn access_check_core<'a>(
                     conditional_context.self_sid,
                     object_tree,
                     base.mapped_desired,
-                    caap.granted,
+                    caap.staged_granted,
                     mapping,
                     &audit_context,
                     object_audit_context,
@@ -234,23 +285,24 @@ pub fn access_check_core<'a>(
             }
 
             for caap_sacl in &caap.staged_sacls {
-                if let Ok(acl) = Acl::parse(caap_sacl) {
-                    if let Ok(state) = evaluate_sacl(
-                        &acl,
-                        &token.subject,
-                        owner,
-                        conditional_context.self_sid,
-                        object_tree,
-                        base.mapped_desired,
-                        caap.granted,
-                        mapping,
-                        &audit_context,
-                        object_audit_context,
-                    ) {
-                        staged_audit_events.extend(state.audit_events)?;
-                        staged_continuous |= state.continuous_audit_mask;
-                    }
-                }
+                evaluate_caap_sacl_contribution(
+                    caap_sacl,
+                    token,
+                    owner,
+                    conditional_context.self_sid,
+                    object_tree,
+                    base.mapped_desired,
+                    caap.staged_granted,
+                    caap.granted,
+                    caap.staged_granted,
+                    mapping,
+                    &audit_context,
+                    object_audit_context,
+                    object_results_differ,
+                    &mut staged_audit_events,
+                    &mut staged_continuous,
+                    &mut caap_diagnostic_events,
+                )?;
             }
 
             if staged_audit_events != audit_events || staged_continuous != continuous_audit_mask {
@@ -261,16 +313,21 @@ pub fn access_check_core<'a>(
         (audit_events, continuous_audit_mask)
     };
 
-    let (used_delta, privilege_use_events) = evaluate_privilege_use(
-        mode,
-        token,
-        &base.provenance,
-        base.mapped_desired,
-        caap.granted,
-        caap.object_granted_list.as_deref(),
-        base.max_allowed_mode,
-        object_audit_context,
-    )?;
+    if !base.policy_sids.is_empty() && staging_mismatch {
+        caap_diagnostic_events.push(CaapDiagnosticEvent {
+            kind: CaapDiagnosticKind::StagingMismatch,
+            phase: None,
+            policy_sid: None,
+            rule_index: None,
+            reason: "effective-staged-delta",
+            requested: base.mapped_desired,
+            effective_granted: caap.granted,
+            staged_granted: caap.staged_granted,
+            object_results_differ,
+            object_audit_context: object_audit_context.map(slice_to_vec).transpose()?,
+        })?;
+    }
+
     let success =
         (caap.granted & base.mapped_desired) == base.mapped_desired || base.mapped_desired == 0;
     if success && (token.audit_policy & AUDIT_POLICY_OBJECT_ACCESS_SUCCESS) != 0 {
@@ -302,7 +359,7 @@ pub fn access_check_core<'a>(
     Ok(AccessCheckCoreState {
         decided: base.decided,
         granted: caap.granted,
-        privilege_granted: base.privilege_granted,
+        privilege_granted: base.privilege_granted & caap.granted,
         max_allowed_mode: base.max_allowed_mode,
         mapped_desired: base.mapped_desired,
         continuous_audit_mask,
@@ -311,8 +368,118 @@ pub fn access_check_core<'a>(
         object_granted_list: caap.object_granted_list,
         audit_events,
         privilege_use_events,
+        caap_diagnostic_events,
         updated_privileges,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_caap_sacl_contribution<'a>(
+    contribution: &CaapSaclContribution<'a>,
+    token: &AccessCheckToken<'a>,
+    owner: Sid<'_>,
+    self_sid: Option<Sid<'_>>,
+    object_tree: Option<&ObjectTypeList>,
+    requested: u32,
+    granted_for_phase: u32,
+    effective_granted: u32,
+    staged_granted: u32,
+    mapping: &GenericMapping,
+    audit_context: &ConditionalContext<'_>,
+    object_audit_context: Option<&[u8]>,
+    object_results_differ: bool,
+    audit_events: &mut Vec<AuditEvent<'a>>,
+    continuous_audit_mask: &mut u32,
+    caap_diagnostic_events: &mut Vec<CaapDiagnosticEvent>,
+) -> KacsResult<()> {
+    let acl = match Acl::parse(contribution.sacl) {
+        Ok(acl) => acl,
+        Err(_) => {
+            push_caap_sacl_error_diagnostic(
+                caap_diagnostic_events,
+                contribution,
+                "invalid-caap-sacl",
+                requested,
+                effective_granted,
+                staged_granted,
+                object_results_differ,
+                object_audit_context,
+            )?;
+            return Ok(());
+        }
+    };
+
+    match evaluate_sacl(
+        &acl,
+        &token.subject,
+        owner,
+        self_sid,
+        object_tree,
+        requested,
+        granted_for_phase,
+        mapping,
+        audit_context,
+        object_audit_context,
+    ) {
+        Ok(state) => {
+            audit_events.extend(state.audit_events)?;
+            *continuous_audit_mask |= state.continuous_audit_mask;
+            Ok(())
+        }
+        Err(_) => {
+            push_caap_sacl_error_diagnostic(
+                caap_diagnostic_events,
+                contribution,
+                "caap-sacl-evaluation-error",
+                requested,
+                effective_granted,
+                staged_granted,
+                object_results_differ,
+                object_audit_context,
+            )?;
+            Ok(())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_caap_sacl_error_diagnostic(
+    caap_diagnostic_events: &mut Vec<CaapDiagnosticEvent>,
+    contribution: &CaapSaclContribution<'_>,
+    reason: &'static str,
+    requested: u32,
+    effective_granted: u32,
+    staged_granted: u32,
+    object_results_differ: bool,
+    object_audit_context: Option<&[u8]>,
+) -> KacsResult<()> {
+    caap_diagnostic_events.push(CaapDiagnosticEvent {
+        kind: CaapDiagnosticKind::SaclError,
+        phase: Some(contribution.phase),
+        policy_sid: Some(slice_to_vec(contribution.policy_sid.as_bytes())?),
+        rule_index: Some(contribution.rule_index),
+        reason,
+        requested,
+        effective_granted,
+        staged_granted,
+        object_results_differ,
+        object_audit_context: object_audit_context.map(slice_to_vec).transpose()?,
+    })?;
+    Ok(())
+}
+
+fn object_grants_differ(staged: Option<&Vec<u32>>, effective: Option<&Vec<u32>>) -> bool {
+    match (staged, effective) {
+        (Some(staged), Some(effective)) => {
+            staged.len() != effective.len()
+                || staged
+                    .iter()
+                    .zip(effective.iter())
+                    .any(|(staged, effective)| staged != effective)
+        }
+        (None, None) => false,
+        _ => true,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -458,8 +625,8 @@ fn evaluate_privilege_use(
             if (token.audit_policy & AUDIT_POLICY_PRIVILEGE_USE_SUCCESS) != 0 {
                 events.push(PrivilegeUseEvent {
                     privilege,
-                    requested: mapped_desired,
-                    granted: final_granted,
+                    requested: requested_contribution,
+                    granted: requested_contribution,
                     surviving_bits,
                     success: true,
                     object_audit_context: object_audit_context.map(slice_to_vec).transpose()?,
@@ -468,8 +635,8 @@ fn evaluate_privilege_use(
         } else if (token.audit_policy & AUDIT_POLICY_PRIVILEGE_USE_FAILURE) != 0 {
             events.push(PrivilegeUseEvent {
                 privilege,
-                requested: mapped_desired,
-                granted: final_granted,
+                requested: requested_contribution,
+                granted: requested_contribution,
                 surviving_bits: 0,
                 success: false,
                 object_audit_context: object_audit_context.map(slice_to_vec).transpose()?,

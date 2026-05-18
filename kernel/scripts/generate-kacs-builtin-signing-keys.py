@@ -58,6 +58,11 @@ def build_header(pubkey: bytes | None) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pubkey-hex", default="")
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="emit a terminator-only table for KUnit/test builds",
+    )
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
@@ -65,6 +70,13 @@ def main() -> int:
         pubkey = parse_pubkey_hex(args.pubkey_hex)
     except ValueError as exc:
         print(f"generate-kacs-builtin-signing-keys.py: {exc}", file=sys.stderr)
+        return 2
+    if pubkey is None and not args.allow_empty:
+        print(
+            "generate-kacs-builtin-signing-keys.py: "
+            "PKM_KACS_TCB_PUBKEY_HEX is required for non-KUnit builds",
+            file=sys.stderr,
+        )
         return 2
 
     out = Path(args.out)

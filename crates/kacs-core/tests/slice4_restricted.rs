@@ -192,6 +192,154 @@ fn restricted_pass_intersects_normal_grants() {
 }
 
 #[test]
+fn restricted_device_only_context_still_runs_restricted_pass() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 7020]);
+    let device_group = sid_bytes([0, 0, 0, 0, 0, 5], &[32, 580]);
+    let dacl = acl_bytes(&[basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user)]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let restricted_device_groups = [SidAndAttributes {
+        sid: parse_sid(&device_group),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let restricted_context = RestrictedTokenContext {
+        restricted_sids: &[],
+        restricted_device_groups: &restricted_device_groups,
+        write_restricted: false,
+        privilege_granted: 0,
+    };
+
+    let result = evaluate_dacl_with_restricted_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &restricted_context,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
+fn restricted_pass_hides_unrestricted_device_groups() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 7021]);
+    let restricted = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 8021]);
+    let unrestricted_device_group = sid_bytes([0, 0, 0, 0, 0, 5], &[32, 581]);
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user),
+        callback_ace(
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &restricted,
+            &expr(&append_tokens(&[
+                sid_literal(&unrestricted_device_group),
+                vec![0x8a],
+            ])),
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let restricted_sids = [SidAndAttributes {
+        sid: parse_sid(&restricted),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let unrestricted_device_groups = [SidAndAttributes {
+        sid: parse_sid(&unrestricted_device_group),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let condition_context = ConditionalContext {
+        device_groups: &unrestricted_device_groups,
+        ..ConditionalContext::default()
+    };
+    let restricted_context = RestrictedTokenContext {
+        restricted_sids: &restricted_sids,
+        restricted_device_groups: &[],
+        write_restricted: false,
+        privilege_granted: 0,
+    };
+
+    let result = evaluate_dacl_with_restricted_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &condition_context,
+        &restricted_context,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
+fn restricted_pass_hides_normal_token_groups() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 7022]);
+    let normal_group = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 7122]);
+    let restricted = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 8022]);
+    let dacl = acl_bytes(&[basic_ace(
+        ACCESS_ALLOWED_ACE_TYPE,
+        0,
+        READ_CONTROL,
+        &normal_group,
+    )]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let normal_groups = [SidAndAttributes {
+        sid: parse_sid(&normal_group),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &normal_groups,
+    };
+    let restricted_sids = [SidAndAttributes {
+        sid: parse_sid(&restricted),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let restricted_context = RestrictedTokenContext {
+        restricted_sids: &restricted_sids,
+        restricted_device_groups: &[],
+        write_restricted: false,
+        privilege_granted: 0,
+    };
+
+    let result = evaluate_dacl_with_restricted_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &restricted_context,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
 fn write_restricted_only_intersects_write_bits() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 7001]);
@@ -238,6 +386,67 @@ fn write_restricted_only_intersects_write_bits() {
 
     assert!(!result.success);
     assert_eq!(result.granted, READ_CONTROL);
+}
+
+#[test]
+fn write_restricted_intersects_only_generic_write_mapped_bits() {
+    const READ_BIT: u32 = 0x0000_0001;
+    const WRITE_LOW_BIT: u32 = 0x0000_0002;
+    const WRITE_HIGH_BIT: u32 = 0x0000_0004;
+    const EXECUTE_BIT: u32 = 0x0000_0008;
+
+    let mapping = GenericMapping {
+        read: READ_BIT,
+        write: WRITE_LOW_BIT | WRITE_HIGH_BIT,
+        execute: EXECUTE_BIT,
+        all: READ_BIT | WRITE_LOW_BIT | WRITE_HIGH_BIT | EXECUTE_BIT,
+    };
+    let desired = mapping.all;
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 7026]);
+    let normal_group = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 7126]);
+    let restricted = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 8026]);
+    let dacl = acl_bytes(&[basic_ace(
+        ACCESS_ALLOWED_ACE_TYPE,
+        0,
+        desired,
+        &normal_group,
+    )]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let normal_groups = [SidAndAttributes {
+        sid: parse_sid(&normal_group),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: true,
+        groups: &normal_groups,
+    };
+    let restricted_sids = [SidAndAttributes {
+        sid: parse_sid(&restricted),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let restricted_context = RestrictedTokenContext {
+        restricted_sids: &restricted_sids,
+        restricted_device_groups: &[],
+        write_restricted: true,
+        privilege_granted: 0,
+    };
+
+    let result = evaluate_dacl_with_restricted_context(
+        &sd,
+        &token,
+        desired,
+        &mapping,
+        false,
+        &ConditionalContext::default(),
+        &restricted_context,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, READ_BIT | EXECUTE_BIT);
 }
 
 #[test]
@@ -475,6 +684,133 @@ fn restricted_pass_grants_owner_implicit_rights_independently() {
 }
 
 #[test]
+fn restricted_pass_denies_owner_implicit_when_owner_not_restricting() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 8023]);
+    let restricted = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 8123]);
+    let dacl = acl_bytes(&[]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&owner),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let restricted_sids = [SidAndAttributes {
+        sid: parse_sid(&restricted),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let restricted_context = RestrictedTokenContext {
+        restricted_sids: &restricted_sids,
+        restricted_device_groups: &[],
+        write_restricted: false,
+        privilege_granted: 0,
+    };
+
+    let result = evaluate_dacl_with_restricted_context(
+        &sd,
+        &token,
+        READ_CONTROL | WRITE_DAC,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &restricted_context,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
+fn restricted_owner_rights_ace_suppresses_implicit_owner_grant() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 8024]);
+    let normal_group = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 8124]);
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, WRITE_DAC, &owner_rights),
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &normal_group),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let normal_groups = [SidAndAttributes {
+        sid: parse_sid(&normal_group),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let token = TokenView {
+        user: parse_sid(&owner),
+        user_deny_only: false,
+        groups: &normal_groups,
+    };
+    let restricted_sids = [SidAndAttributes {
+        sid: parse_sid(&owner),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let restricted_context = RestrictedTokenContext {
+        restricted_sids: &restricted_sids,
+        restricted_device_groups: &[],
+        write_restricted: false,
+        privilege_granted: 0,
+    };
+
+    let result = evaluate_dacl_with_restricted_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &restricted_context,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
+fn restricted_owner_rights_ace_matches_when_owner_is_restricting() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 8025]);
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let dacl = acl_bytes(&[basic_ace(
+        ACCESS_ALLOWED_ACE_TYPE,
+        0,
+        READ_CONTROL,
+        &owner_rights,
+    )]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&owner),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let restricted_sids = [SidAndAttributes {
+        sid: parse_sid(&owner),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let restricted_context = RestrictedTokenContext {
+        restricted_sids: &restricted_sids,
+        restricted_device_groups: &[],
+        write_restricted: false,
+        privilege_granted: 0,
+    };
+
+    let result = evaluate_dacl_with_restricted_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &restricted_context,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(result.success);
+    assert_eq!(result.granted, READ_CONTROL);
+}
+
+#[test]
 fn restricted_principal_self_matches_restricting_sid() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 7004]);
@@ -634,6 +970,107 @@ fn restricted_device_groups_drive_device_member_of_conditions() {
 
     assert!(result.success);
     assert_eq!(result.granted, READ_CONTROL);
+}
+
+#[test]
+fn restricted_device_member_of_sees_owner_rights_virtual_group() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 8020]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 7020]);
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user),
+        callback_ace(
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &owner,
+            &expr(&[sid_literal(&owner_rights), vec![0x8a]].concat()),
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let restricted_sids = [SidAndAttributes {
+        sid: parse_sid(&owner),
+        attributes: 0,
+    }];
+    let restricted_context = RestrictedTokenContext {
+        restricted_sids: &restricted_sids,
+        restricted_device_groups: &[],
+        write_restricted: false,
+        privilege_granted: 0,
+    };
+
+    let result = evaluate_dacl_with_restricted_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &restricted_context,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(result.success);
+    assert_eq!(result.granted, READ_CONTROL);
+}
+
+#[test]
+fn restricted_not_device_member_of_sees_principal_self_virtual_group() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 7021]);
+    let restricted = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 8021]);
+    let principal_self = sid_bytes([0, 0, 0, 0, 0, 5], &[10]);
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user),
+        callback_ace(
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &restricted,
+            &expr(&[sid_literal(&principal_self), vec![0x91]].concat()),
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, &dacl);
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let restricted_sids = [SidAndAttributes {
+        sid: parse_sid(&restricted),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let restricted_context = RestrictedTokenContext {
+        restricted_sids: &restricted_sids,
+        restricted_device_groups: &[],
+        write_restricted: false,
+        privilege_granted: 0,
+    };
+    let context = ConditionalContext {
+        self_sid: Some(parse_sid(&restricted)),
+        ..ConditionalContext::default()
+    };
+
+    let result = evaluate_dacl_with_restricted_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &context,
+        &restricted_context,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
 }
 
 #[test]

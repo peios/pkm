@@ -1,7 +1,7 @@
 use kacs_core::{
-    validate_ace_mask, GenericMapping, KacsError, NormalizedDesiredAccess, DELETE, GENERIC_ALL,
-    GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE, MAXIMUM_ALLOWED, READ_CONTROL, WRITE_DAC,
-    WRITE_OWNER,
+    validate_ace_mask, GenericMapping, KacsError, NormalizedDesiredAccess, ACCESS_SYSTEM_SECURITY,
+    DELETE, GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE, MAXIMUM_ALLOWED,
+    READ_CONTROL, SYNCHRONIZE, WRITE_DAC, WRITE_OWNER,
 };
 
 fn test_mapping() -> GenericMapping {
@@ -11,6 +11,21 @@ fn test_mapping() -> GenericMapping {
         execute: 0x0000_0004,
         all: DELETE | READ_CONTROL | WRITE_DAC | WRITE_OWNER | 0x0000_000f,
     }
+}
+
+#[test]
+fn access_mask_constants_match_psd_004_bit_layout() {
+    assert_eq!(DELETE, 0x0001_0000);
+    assert_eq!(READ_CONTROL, 0x0002_0000);
+    assert_eq!(WRITE_DAC, 0x0004_0000);
+    assert_eq!(WRITE_OWNER, 0x0008_0000);
+    assert_eq!(SYNCHRONIZE, 0x0010_0000);
+    assert_eq!(ACCESS_SYSTEM_SECURITY, 0x0100_0000);
+    assert_eq!(MAXIMUM_ALLOWED, 0x0200_0000);
+    assert_eq!(GENERIC_ALL, 0x1000_0000);
+    assert_eq!(GENERIC_EXECUTE, 0x2000_0000);
+    assert_eq!(GENERIC_WRITE, 0x4000_0000);
+    assert_eq!(GENERIC_READ, 0x8000_0000);
 }
 
 #[test]
@@ -68,6 +83,22 @@ fn rejects_reserved_bits_in_requests_and_ace_masks() {
 
     let err = validate_ace_mask(0x0020_0000).expect_err("reserved bits must fail in ace masks");
     assert_eq!(err, KacsError::ReservedAccessMaskBits(0x0020_0000));
+}
+
+#[test]
+fn rejects_every_reserved_access_mask_bit() {
+    let mapping = test_mapping();
+
+    for bit in [21, 22, 23, 26, 27] {
+        let mask = 1u32 << bit;
+        let err = mapping
+            .map_mask(mask)
+            .expect_err("reserved desired-access bit must fail");
+        assert_eq!(err, KacsError::ReservedAccessMaskBits(mask));
+
+        let err = validate_ace_mask(mask).expect_err("reserved ace-mask bit must fail");
+        assert_eq!(err, KacsError::ReservedAccessMaskBits(mask));
+    }
 }
 
 #[test]

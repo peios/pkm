@@ -67,14 +67,95 @@ for required in \
 	"$repo_root/kernel/crypto/ed25519-hacl.h" \
 	"$repo_root/kernel/scripts/update-ed25519-hacl.py" \
 	"$repo_root/kernel/scripts/generate-kacs-builtin-signing-keys.py" \
+	"$repo_root/kernel/verify-generated-tree.sh" \
+	"$repo_root/kernel/verify-kernel-config.sh" \
 	"$repo_root/kacs/lsm.c"; do
 	if [[ ! -f "$required" ]]; then
 		die "required slow-track source file missing: $required"
 	fi
 done
 
+verify_tmp=$(mktemp -d "${TMPDIR:-/tmp}/pkm-verify-scaffold.XXXXXX")
+trap 'rm -rf "$verify_tmp"' EXIT
+generated_key_header="$verify_tmp/builtin_signing_keys.h"
+
+if python3 "$repo_root/kernel/scripts/generate-kacs-builtin-signing-keys.py" \
+	--out "$generated_key_header" >/dev/null 2>&1; then
+	die "signing-key generator accepts an empty production TCB public key"
+fi
+
+python3 "$repo_root/kernel/scripts/generate-kacs-builtin-signing-keys.py" \
+	--allow-empty --out "$generated_key_header"
+if grep -Fq '.public_key = {' "$generated_key_header"; then
+	die "signing-key generator emits a key for the KUnit empty-key allowance"
+fi
+
+python3 "$repo_root/kernel/scripts/generate-kacs-builtin-signing-keys.py" \
+	--pubkey-hex 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f \
+	--out "$generated_key_header"
+key_entry_count=$(grep -F -c '.public_key = {' "$generated_key_header" || true)
+if [[ "$key_entry_count" != "1" ]]; then
+	die "signing-key generator does not emit exactly one TCB key entry"
+fi
+if ! grep -Fq 'PKM_KACS_PIP_TYPE_PROTECTED' "$generated_key_header" || \
+   ! grep -Fq 'PKM_KACS_PIP_TRUST_PEIOS_TCB' "$generated_key_header" || \
+   ! grep -Fq '{ { 0 }, 0, 0 }' "$generated_key_header"; then
+	die "signing-key generator output does not carry the TCB tier and terminator"
+fi
+
 if grep -q 'syscall_64.tbl' "$repo_root/kernel/Dockerfile"; then
 	die "kernel/Dockerfile still mutates the syscall table"
+fi
+
+config_check_good="$verify_tmp/kernel.config"
+cat > "$config_check_good" <<'EOF'
+CONFIG_SECURITY_PKM=y
+CONFIG_RUST=y
+# CONFIG_SECURITY_SELINUX is not set
+# CONFIG_SECURITY_APPARMOR is not set
+# CONFIG_SECURITY_SMACK is not set
+# CONFIG_SECURITY_TOMOYO is not set
+# CONFIG_BPF_LSM is not set
+CONFIG_LSM="landlock,lockdown,yama,integrity,pkm"
+CONFIG_STRICT_DEVMEM=y
+CONFIG_MODULE_SIG_FORCE=y
+EOF
+"$repo_root/kernel/verify-kernel-config.sh" "$config_check_good"
+
+config_check_bad="$verify_tmp/kernel-bad.config"
+cp "$config_check_good" "$config_check_bad"
+sed -i 's/CONFIG_BPF_LSM is not set/CONFIG_BPF_LSM=y/' \
+	"$config_check_bad"
+if "$repo_root/kernel/verify-kernel-config.sh" "$config_check_bad" \
+	>/dev/null 2>&1; then
+	die "kernel config verifier accepts CONFIG_BPF_LSM=y"
+fi
+
+if ! rg -Fq 'verify-generated-tree.sh /build/linux' \
+	"$repo_root/kernel/Dockerfile"; then
+	die "kernel/Dockerfile does not validate the generated kernel tree"
+fi
+
+if ! rg -Fq 'verify-generated-tree.sh" "$kernel"' \
+	"$repo_root/kernel/kunit-fast-build.sh"; then
+	die "kunit-fast-build.sh does not validate the generated kernel tree"
+fi
+
+if ! rg -Fq 'verify-kernel-config.sh /build/linux/.config' \
+	"$repo_root/kernel/Dockerfile"; then
+	die "kernel/Dockerfile does not validate the generated kernel config"
+fi
+
+if ! rg -Fq 'verify-kernel-config.sh" "$kernel/.config"' \
+	"$repo_root/kernel/kunit-fast-build.sh"; then
+	die "kunit-fast-build.sh does not validate the generated kernel config"
+fi
+
+if ! rg -Fq 'cp .config /out/kernel.config' \
+	"$repo_root/kernel/Makefile" || \
+   ! rg -Fq 'cp .config "$out/kernel.config"' \
+	"$repo_root/kernel/kunit-fast-build.sh"; then
+	die "kernel builds do not export the generated .config"
 fi
 
 if ! rg -q 'openssl' "$repo_root/kernel/Dockerfile"; then
@@ -103,6 +184,26 @@ done
 if ! rg -q 'CONFIG_STRICT_DEVMEM' "$repo_root/kacs/lsm.c" || \
    ! rg -q 'CONFIG_MODULE_SIG_FORCE' "$repo_root/kacs/lsm.c"; then
 	die "lsm.c does not fail closed on missing PIP build hardening config"
+fi
+
+rust_init_line=$(rg -n 'ret = kacs_rust_init\(\);' "$repo_root/kacs/lsm.c" |
+	cut -d: -f1)
+caap_init_line=$(rg -n 'ret = pkm_kacs_caap_cache_init\(\);' \
+	"$repo_root/kacs/lsm.c" | cut -d: -f1)
+kmes_init_line=$(rg -n 'ret = pkm_kmes_init\(\);' "$repo_root/kacs/lsm.c" |
+	cut -d: -f1)
+hook_add_line=$(rg -n 'security_add_hooks\(pkm_hooks' "$repo_root/kacs/lsm.c" |
+	cut -d: -f1)
+if [[ -z "$rust_init_line" || -z "$caap_init_line" ||
+      -z "$kmes_init_line" || -z "$hook_add_line" ]]; then
+	die "lsm.c missing expected pkm_init initialization calls"
+fi
+if (( hook_add_line <= rust_init_line || hook_add_line <= caap_init_line ||
+      hook_add_line <= kmes_init_line )); then
+	die "lsm.c registers KACS hooks before fallible substrate initialization"
+fi
+if ! rg -Fq 'pkm_kacs_caap_cache_destroy();' "$repo_root/kacs/lsm.c"; then
+	die "lsm.c does not clean up CAAP cache on pre-hook initialization failure"
 fi
 
 for syscall in \
@@ -159,6 +260,21 @@ if ! rg -q 'PTRACE_MODE_PROC_QUERY_INFORMATION' \
 	"$repo_root/kernel/install-pkm-subtree.sh"; then
 	die "install-pkm-subtree.sh does not stage the PTRACE_MODE_PROC_QUERY_INFORMATION patch"
 fi
+
+require_install_block $'#ifdef CONFIG_SECURITY_PKM\n\treturn security_task_kill(t, info, sig, NULL);\n#endif' \
+	"install-pkm-subtree.sh does not bypass native signal UID/CAP_KILL prechecks under PKM"
+require_install_block $'#ifdef CONFIG_SECURITY_PKM\n\treturn security_ptrace_access_check(task, mode);\n#endif' \
+	"install-pkm-subtree.sh does not bypass native ptrace UID/GID/CAP_SYS_PTRACE/dumpability prechecks under PKM"
+require_install_block $'#ifndef CONFIG_SECURITY_PKM\n\tif (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)) {\n\t\tmm = ERR_PTR(-EPERM);' \
+	"install-pkm-subtree.sh does not neutralize move_pages native ptrace precheck under PKM"
+require_install_block $'#ifndef CONFIG_SECURITY_PKM\n\tif (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)) {\n\t\trcu_read_unlock();\n\t\terr = -EPERM;' \
+	"install-pkm-subtree.sh does not neutralize migrate_pages native ptrace precheck under PKM"
+require_install_literal 'PKM: gate migrate_pages before native node/capability constraints' \
+	"install-pkm-subtree.sh does not move migrate_pages KACS process-SD gate before native node/capability constraints"
+require_install_literal 'vm_write ? PTRACE_MODE_ATTACH_REALCREDS :' \
+	"install-pkm-subtree.sh does not split process_vm_readv from process_vm_writev ptrace modes"
+require_install_literal '(file->f_mode & FMODE_WRITE) ? PTRACE_MODE_ATTACH :' \
+	"install-pkm-subtree.sh does not split read-only /proc/<pid>/mem from write-capable opens"
 
 if ! rg -q 'PTRACE_MODE_READ_FSCREDS \|' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
@@ -325,6 +441,10 @@ for metadata_hook_symbol in \
 	"inode_file_getattr" \
 	"inode_file_setattr" \
 	"inode_listxattr" \
+	"inode_follow_link" \
+	"inode_set_acl" \
+	"inode_remove_acl" \
+	"inode_getsecurity" \
 	"inode_permission" \
 	"inode_create" \
 	"inode_link" \
@@ -341,10 +461,19 @@ for metadata_hook_symbol in \
 	fi
 done
 
+if rg -q 'LSM_HOOK_INIT\(path_' "$repo_root/kacs/lsm.c"; then
+	die "lsm.c registers forbidden KACS path hooks"
+fi
+
 if ! rg -q 'pkm_kacs_inode_rename_flags' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
    ! rg -q 'RENAME_WHITEOUT' "$repo_root/kacs/lsm.c"; then
 	die "install-pkm-subtree.sh does not stage the namespace rename flags gate"
+fi
+
+if ! rg -q 'LSM_HOOK_INIT\(file_receive, pkm_kacs_file_receive\)' \
+	"$repo_root/kacs/lsm.c"; then
+	die "lsm.c does not register the SCM_RIGHTS file_receive allow hook"
 fi
 
 if ! rg -q 'static long do_handle_open\(int mountdirfd, struct file_handle __user \*ufh,' \
@@ -409,6 +538,20 @@ if ! rg -q 'pkm_kacs_current_fsuid_kuid' \
 	die "install-pkm-subtree.sh does not stage the projected fsuid/fsgid patch"
 fi
 
+if ! rg -Fq 'current_real_cred()->uid' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -Fq 'current_real_cred()->gid' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the projected getuid/getgid patch"
+fi
+
+if ! rg -q 'pkm_kacs_project_cred_uid_gid' \
+	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q 'net/core/sock.c' \
+	"$repo_root/kernel/install-pkm-subtree.sh"; then
+	die "install-pkm-subtree.sh does not stage the SO_PEERCRED projection patch"
+fi
+
 if ! rg -q 'pkm_kacs_capable_in_cred_ns' \
 	"$repo_root/kernel/install-pkm-subtree.sh"; then
 	die "install-pkm-subtree.sh does not stage the commoncap capability switchboard patch"
@@ -424,6 +567,22 @@ if ! rg -q 'pkm_kacs_proc_status_cap_fixup' \
    ! rg -q 'fs/proc/array.c' \
 	"$repo_root/kernel/install-pkm-subtree.sh"; then
 	die "install-pkm-subtree.sh does not stage the proc status capability reporting patch"
+fi
+
+if ! rg -Fq 'scripts/config --set-str LSM "landlock,lockdown,yama,integrity,pkm"' \
+	"$repo_root/kernel/Dockerfile" || \
+   ! rg -Fq 'scripts/config --set-str LSM "landlock,lockdown,yama,integrity,pkm"' \
+	"$repo_root/kernel/kunit-fast-build.sh"; then
+	die "PKM builds do not force pkm to the end of the mutable LSM order"
+fi
+
+if ! rg -Fq 'LSM_HOOK_INIT(bprm_creds_from_file, pkm_kacs_bprm_creds_from_file)' \
+	"$repo_root/kacs/lsm.c" || \
+   ! rg -Fq 'pkm_kacs_copy_exec_compat_caps(new, old)' \
+	"$repo_root/kacs/lsm.c" || \
+   ! rg -q 'pkm_kunit_exec_cap_reprojection_suppresses_filecap_grants' \
+	"$repo_root/kacs/kunit.c"; then
+	die "KACS exec reprojection does not verify file-capability suppression"
 fi
 
 for required_commoncap_bypass in \
@@ -454,9 +613,14 @@ if ! rg -q 'CRYPTO_ED25519' "$repo_root/pkm_kconfig"; then
 fi
 
 if ! rg -q 'PKM_KACS_TCB_PUBKEY_HEX' "$repo_root/kernel/Makefile" || \
+   ! rg -q 'require-tcb-pubkey' "$repo_root/kernel/Makefile" || \
    ! rg -q 'PKM_KACS_TCB_PUBKEY_HEX' "$repo_root/kernel/Dockerfile" || \
+   ! rg -q 'PKM_KACS_ALLOW_EMPTY_TCB_PUBKEY' "$repo_root/kernel/Dockerfile" || \
    ! rg -q 'generate-kacs-builtin-signing-keys.py' \
 	"$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q -- '--allow-empty' "$repo_root/kernel/install-pkm-subtree.sh" || \
+   ! rg -q -- '--allow-empty' \
+	"$repo_root/kernel/scripts/generate-kacs-builtin-signing-keys.py" || \
    ! rg -q 'builtin_signing_keys.h' "$repo_root/kernel/install-pkm-subtree.sh"; then
 	die "kernel scaffold does not stage built-in KACS signing key generation"
 fi

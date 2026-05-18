@@ -119,6 +119,19 @@ int pkm_kacs_caap_cache_init(void)
 	return 0;
 }
 
+void pkm_kacs_caap_cache_destroy(void)
+{
+	void *cache;
+
+	mutex_lock(&pkm_kacs_caap_mutex);
+	cache = pkm_kacs_caap_cache;
+	pkm_kacs_caap_cache = NULL;
+	mutex_unlock(&pkm_kacs_caap_mutex);
+
+	if (cache)
+		kacs_rust_caap_cache_destroy(cache);
+}
+
 int pkm_kacs_set_caap_internal(const void *policy_sid, u32 policy_sid_len,
 			       const void *spec, u32 spec_len)
 {

@@ -10,7 +10,7 @@ use crate::privilege::{
     SE_TAKE_OWNERSHIP_PRIVILEGE,
 };
 use crate::token::{AccessCheckToken, SidAndAttributes};
-use crate::PrivilegeUseEvent;
+use crate::{CaapDiagnosticEvent, CaapDiagnosticKind, CaapSaclPhase, PrivilegeUseEvent};
 use core::ffi::c_long;
 use core::ptr::null_mut;
 use core::str;
@@ -23,6 +23,7 @@ const KMES_ORIGIN_KACS: u8 = 2;
 const ACCESS_AUDIT_TYPE: &[u8] = b"access-audit";
 const CONTINUOUS_AUDIT_TYPE: &[u8] = b"continuous-audit";
 const PRIVILEGE_USE_TYPE: &[u8] = b"privilege-use";
+const CAAP_POLICY_DIAGNOSTIC_TYPE: &[u8] = b"caap-policy-diagnostic";
 const LOGON_SESSION_DESTROYED_TYPE: &[u8] = b"logon-session-destroyed";
 
 extern "C" {
@@ -243,6 +244,20 @@ fn privilege_name(privilege: u64) -> Result<&'static [u8], c_long> {
     }
 }
 
+fn caap_diagnostic_kind_name(kind: CaapDiagnosticKind) -> &'static [u8] {
+    match kind {
+        CaapDiagnosticKind::SaclError => b"sacl-error",
+        CaapDiagnosticKind::StagingMismatch => b"staging-mismatch",
+    }
+}
+
+fn caap_sacl_phase_name(phase: CaapSaclPhase) -> &'static [u8] {
+    match phase {
+        CaapSaclPhase::Effective => b"effective-sacl",
+        CaapSaclPhase::Staged => b"staged-sacl",
+    }
+}
+
 fn encode_sid_array(
     writer: &mut MsgpackWriter,
     groups: &[SidAndAttributes<'_>],
@@ -383,6 +398,53 @@ fn encode_privilege_use_payload(
     Ok(writer.into_vec())
 }
 
+fn encode_caap_policy_diagnostic_payload(
+    event: &CaapDiagnosticEvent,
+    subject_map: &[u8],
+    process_map: &[u8],
+) -> Result<Vec<u8>, c_long> {
+    let mut writer = MsgpackWriter::with_capacity(320)?;
+
+    let _ = str::from_utf8(event.reason.as_bytes()).map_err(|_| EIO)?;
+
+    writer.write_map_len(12)?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject_map)?;
+    writer.write_key(b"object_context")?;
+    encode_object_context(&mut writer, event.object_audit_context.as_deref())?;
+    writer.write_key(b"kind")?;
+    writer.write_str(caap_diagnostic_kind_name(event.kind))?;
+    writer.write_key(b"phase")?;
+    match event.phase {
+        Some(phase) => writer.write_str(caap_sacl_phase_name(phase))?,
+        None => writer.write_nil()?,
+    }
+    writer.write_key(b"policy_sid")?;
+    match event.policy_sid.as_ref() {
+        Some(policy_sid) => writer.write_bin(policy_sid.as_slice())?,
+        None => writer.write_nil()?,
+    }
+    writer.write_key(b"rule_index")?;
+    match event.rule_index {
+        Some(rule_index) => writer.write_u64(rule_index as u64)?,
+        None => writer.write_nil()?,
+    }
+    writer.write_key(b"reason")?;
+    writer.write_str(event.reason.as_bytes())?;
+    writer.write_key(b"requested_access")?;
+    writer.write_u64(event.requested as u64)?;
+    writer.write_key(b"effective_granted_access")?;
+    writer.write_u64(event.effective_granted as u64)?;
+    writer.write_key(b"staged_granted_access")?;
+    writer.write_u64(event.staged_granted as u64)?;
+    writer.write_key(b"object_results_differ")?;
+    writer.write_bool(event.object_results_differ)?;
+    writer.write_key(b"process")?;
+    writer.extend(process_map)?;
+
+    Ok(writer.into_vec())
+}
+
 fn encode_continuous_audit_payload(
     subject_map: &[u8],
     process_map: &[u8],
@@ -449,6 +511,7 @@ fn encode_logon_session_destroyed_payload(
 pub(crate) fn emit_access_check_events_to_kmes(
     audit_events: &[OwnedAuditEvent],
     privilege_use_events: &[PrivilegeUseEvent],
+    caap_diagnostic_events: &[CaapDiagnosticEvent],
     resolved: AccessCheckAbiResolved<'_>,
     effective_pip: PipContext,
 ) -> Result<(), c_long> {
@@ -456,13 +519,31 @@ pub(crate) fn emit_access_check_events_to_kmes(
     let process_map;
     let subject_map;
 
-    if audit_events.is_empty() && privilege_use_events.is_empty() {
+    if audit_events.is_empty()
+        && privilege_use_events.is_empty()
+        && caap_diagnostic_events.is_empty()
+    {
         return Ok(());
     }
 
     process_info = load_process_info()?;
     process_map = encode_process_map(&process_info)?;
     subject_map = encode_subject_map(resolved, effective_pip)?;
+
+    for event in privilege_use_events {
+        let payload =
+            encode_privilege_use_payload(event, subject_map.as_slice(), process_map.as_slice())?;
+
+        unsafe {
+            pkm_kmes_emit_kernel(
+                KMES_ORIGIN_KACS,
+                PRIVILEGE_USE_TYPE.as_ptr().cast(),
+                PRIVILEGE_USE_TYPE.len(),
+                payload.as_ptr().cast(),
+                payload.len(),
+            );
+        }
+    }
 
     for event in audit_events {
         let payload =
@@ -479,15 +560,18 @@ pub(crate) fn emit_access_check_events_to_kmes(
         }
     }
 
-    for event in privilege_use_events {
-        let payload =
-            encode_privilege_use_payload(event, subject_map.as_slice(), process_map.as_slice())?;
+    for event in caap_diagnostic_events {
+        let payload = encode_caap_policy_diagnostic_payload(
+            event,
+            subject_map.as_slice(),
+            process_map.as_slice(),
+        )?;
 
         unsafe {
             pkm_kmes_emit_kernel(
                 KMES_ORIGIN_KACS,
-                PRIVILEGE_USE_TYPE.as_ptr().cast(),
-                PRIVILEGE_USE_TYPE.len(),
+                CAAP_POLICY_DIAGNOSTIC_TYPE.as_ptr().cast(),
+                CAAP_POLICY_DIAGNOSTIC_TYPE.len(),
                 payload.as_ptr().cast(),
                 payload.len(),
             );

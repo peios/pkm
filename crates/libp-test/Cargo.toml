@@ -1,0 +1,29 @@
+[package]
+name = "libp-test"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Test bridge: exposes the libp-* crates as JSON-CLI subcommands for Provium-driven integration tests"
+
+[[bin]]
+name = "libp-test"
+path = "src/main.rs"
+
+[dependencies]
+libp-token = { workspace = true, features = ["std"] }
+libp-sd = { workspace = true, features = ["std"] }
+libp-files = { workspace = true, features = ["std"] }
+libp-event = { workspace = true, features = ["std"] }
+peios-uapi = { workspace = true, features = ["std"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Static-musl build:
+#   cargo build -p libp-test --release --target x86_64-unknown-linux-musl
+#
+# The Provium fixture (test-suite/tests/fixtures/libp-tools.fixture.lua)
+# pushes the resulting binary into the guest via vm:push_file, which
+# auto-folds mtime+size into the fixture cache key.

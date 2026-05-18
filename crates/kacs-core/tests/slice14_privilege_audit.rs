@@ -1,12 +1,12 @@
 use kacs_core::{
     access_check_core, AccessCheckMode, AccessCheckToken, CaapPolicy, CaapPolicyEntry, CaapRule,
-    ConditionalContext, GenericMapping, ImpersonationLevel, IntegrityLevel, ObjectTypeList,
-    ObjectTypeNode, PipContext, RestrictedTokenContext, SecurityDescriptor, Sid, TokenPrivileges,
-    TokenType, TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
-    ACCESS_SYSTEM_SECURITY, ACE_OBJECT_TYPE_PRESENT, AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
-    AUDIT_POLICY_PRIVILEGE_USE_SUCCESS, BACKUP_INTENT, MAXIMUM_ALLOWED, READ_CONTROL,
-    SE_BACKUP_PRIVILEGE, SE_DACL_PRESENT, SE_RELABEL_PRIVILEGE, SE_SACL_PRESENT,
-    SE_SECURITY_PRIVILEGE, SE_SELF_RELATIVE, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+    ConditionalContext, ConfinementTokenContext, GenericMapping, ImpersonationLevel,
+    IntegrityLevel, ObjectTypeList, ObjectTypeNode, PipContext, RestrictedTokenContext,
+    SecurityDescriptor, Sid, TokenPrivileges, TokenType, TokenView, ACCESS_ALLOWED_ACE_TYPE,
+    ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACCESS_SYSTEM_SECURITY, ACE_OBJECT_TYPE_PRESENT,
+    AUDIT_POLICY_PRIVILEGE_USE_FAILURE, AUDIT_POLICY_PRIVILEGE_USE_SUCCESS, BACKUP_INTENT,
+    MAXIMUM_ALLOWED, READ_CONTROL, SE_BACKUP_PRIVILEGE, SE_DACL_PRESENT, SE_RELABEL_PRIVILEGE,
+    SE_SACL_PRESENT, SE_SECURITY_PRIVILEGE, SE_SELF_RELATIVE, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
     SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC,
     WRITE_OWNER,
 };
@@ -203,7 +203,31 @@ fn successful_privilege_use_marks_used_and_emits_events() {
     assert_eq!(state.privilege_use_events.len(), 2);
     assert!(state.privilege_use_events.iter().all(|event| event.success));
     assert_eq!(
+        state.privilege_use_events[0].privilege,
+        SE_SECURITY_PRIVILEGE
+    );
+    assert_eq!(
+        state.privilege_use_events[0].requested,
+        ACCESS_SYSTEM_SECURITY
+    );
+    assert_eq!(
+        state.privilege_use_events[0].granted,
+        ACCESS_SYSTEM_SECURITY
+    );
+    assert_eq!(
+        state.privilege_use_events[0].surviving_bits,
+        ACCESS_SYSTEM_SECURITY
+    );
+    assert_eq!(
         state.privilege_use_events[0].object_audit_context,
+        Some(b"/priv-success".to_vec().into())
+    );
+    assert_eq!(state.privilege_use_events[1].privilege, SE_BACKUP_PRIVILEGE);
+    assert_eq!(state.privilege_use_events[1].requested, READ_CONTROL);
+    assert_eq!(state.privilege_use_events[1].granted, READ_CONTROL);
+    assert_eq!(state.privilege_use_events[1].surviving_bits, READ_CONTROL);
+    assert_eq!(
+        state.privilege_use_events[1].object_audit_context,
         Some(b"/priv-success".to_vec().into())
     );
 }
@@ -286,6 +310,15 @@ fn pip_stripping_causes_failure_privilege_use_event_without_mark_used() {
         state.privilege_use_events[0].privilege,
         SE_SECURITY_PRIVILEGE
     );
+    assert_eq!(
+        state.privilege_use_events[0].requested,
+        ACCESS_SYSTEM_SECURITY
+    );
+    assert_eq!(
+        state.privilege_use_events[0].granted,
+        ACCESS_SYSTEM_SECURITY
+    );
+    assert_eq!(state.privilege_use_events[0].surviving_bits, 0);
     assert!(!state.privilege_use_events[0].success);
 }
 
@@ -448,5 +481,92 @@ fn result_list_mode_counts_survival_on_any_node_as_success() {
     assert_eq!(state.privilege_use_events.len(), 1);
     assert_eq!(state.privilege_use_events[0].privilege, SE_BACKUP_PRIVILEGE);
     assert!(state.privilege_use_events[0].success);
+    assert_eq!(state.privilege_use_events[0].requested, READ_CONTROL);
+    assert_eq!(state.privilege_use_events[0].granted, READ_CONTROL);
     assert_eq!(state.privilege_use_events[0].surviving_bits, READ_CONTROL);
+}
+
+#[test]
+fn confinement_stripping_causes_failure_privilege_use_event_without_mark_used() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 14005]);
+    let package = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 14005]);
+    let dacl = acl_bytes(&[]);
+    let sd_bytes = sd_bytes(Some(&owner), Some(&group), None, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let mut token = token_with_privileges(
+        parse_sid(&user),
+        IntegrityLevel::Medium,
+        SE_BACKUP_PRIVILEGE,
+        AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
+    );
+    token.confinement = ConfinementTokenContext {
+        confinement_sid: Some(parse_sid(&package)),
+        confinement_capabilities: &[],
+        confinement_exempt: false,
+    };
+
+    let state = access_check_core(
+        Some(&sd),
+        &token,
+        PipContext::default(),
+        kacs_core::GENERIC_READ,
+        &mapping(),
+        AccessCheckMode::Scalar,
+        None,
+        &ConditionalContext::default(),
+        Some(b"/priv-confinement"),
+        BACKUP_INTENT,
+        &[],
+    )
+    .expect("confinement-narrowed privilege-use path should evaluate");
+
+    assert_eq!(state.granted, 0);
+    assert_eq!(state.updated_privileges.used, 0);
+    assert_eq!(state.privilege_use_events.len(), 1);
+    assert_eq!(state.privilege_use_events[0].privilege, SE_BACKUP_PRIVILEGE);
+    assert_eq!(state.privilege_use_events[0].requested, READ_CONTROL);
+    assert_eq!(state.privilege_use_events[0].granted, READ_CONTROL);
+    assert_eq!(state.privilege_use_events[0].surviving_bits, 0);
+    assert!(!state.privilege_use_events[0].success);
+    assert_eq!(
+        state.privilege_use_events[0].object_audit_context,
+        Some(b"/priv-confinement".to_vec().into())
+    );
+}
+
+#[test]
+fn enabled_but_unrequested_privilege_emits_no_privilege_use_event() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 14006]);
+    let dacl = acl_bytes(&[]);
+    let sd_bytes = sd_bytes(Some(&owner), Some(&group), None, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = token_with_privileges(
+        parse_sid(&user),
+        IntegrityLevel::Medium,
+        SE_BACKUP_PRIVILEGE,
+        AUDIT_POLICY_PRIVILEGE_USE_SUCCESS | AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
+    );
+
+    let state = access_check_core(
+        Some(&sd),
+        &token,
+        PipContext::default(),
+        WRITE_DAC,
+        &mapping(),
+        AccessCheckMode::Scalar,
+        None,
+        &ConditionalContext::default(),
+        Some(b"/priv-unrequested"),
+        BACKUP_INTENT,
+        &[],
+    )
+    .expect("unrequested privilege path should evaluate");
+
+    assert_eq!(state.granted, READ_CONTROL);
+    assert_eq!(state.updated_privileges.used, 0);
+    assert!(state.privilege_use_events.is_empty());
 }

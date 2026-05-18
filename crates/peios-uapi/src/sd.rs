@@ -20,8 +20,18 @@
 //   u8  AceType
 //   u8  AceFlags
 //   u16 AceSize       (total bytes including header)
+//
+// Parser shapes:
+//
+//   `SecurityDescriptor<'a>` — borrowed view, lazy submembers.
+//   `Acl<'a>`                — borrowed view, lazy ACE iteration.
+//   `AceRef<'a>`             — borrowed ACE view (body as `&[u8]`).
+//   `Ace`                    — owned ACE (body as `Vec<u8>`); built via
+//                              `AceRef::to_owned()` when ownership is needed.
 
-use crate::sid::Sid;
+use crate::parse::ParseError;
+use crate::sid::{Sid, SidRef};
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // SECURITY_INFORMATION bits (caller-side info-selector for kacs_get_sd /
@@ -53,8 +63,8 @@ pub const SE_SELF_RELATIVE: u16 = 0x8000;
 
 pub const SD_HEADER_BYTES: usize = 20;
 
-/// Decoded control bits as a list of names; falls back to hex if none of the
-/// known bits are present.
+/// Decoded control bits as a list of names; falls back to empty if none of
+/// the known bits are present.
 pub fn control_bit_names(c: u16) -> Vec<&'static str> {
     let pairs = [
         (SE_OWNER_DEFAULTED, "OWNER_DEFAULTED"),
@@ -70,7 +80,11 @@ pub fn control_bit_names(c: u16) -> Vec<&'static str> {
         (SE_RM_CONTROL_VALID, "RM_CONTROL_VALID"),
         (SE_SELF_RELATIVE, "SELF_RELATIVE"),
     ];
-    pairs.iter().filter(|(b, _)| c & *b != 0).map(|(_, n)| *n).collect()
+    pairs
+        .iter()
+        .filter(|(b, _)| c & *b != 0)
+        .map(|(_, n)| *n)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +102,27 @@ pub const ACCESS_GENERIC_ALL: u32 = 0x1000_0000;
 pub const ACCESS_GENERIC_EXECUTE: u32 = 0x2000_0000;
 pub const ACCESS_GENERIC_WRITE: u32 = 0x4000_0000;
 pub const ACCESS_GENERIC_READ: u32 = 0x8000_0000;
+
+pub const DELETE: u32 = ACCESS_DELETE;
+pub const READ_CONTROL: u32 = ACCESS_READ_CONTROL;
+pub const WRITE_DAC: u32 = ACCESS_WRITE_DAC;
+pub const WRITE_OWNER: u32 = ACCESS_WRITE_OWNER;
+pub const SYNCHRONIZE: u32 = ACCESS_SYNCHRONIZE;
+pub const MAXIMUM_ALLOWED: u32 = ACCESS_MAXIMUM_ALLOWED;
+pub const GENERIC_ALL: u32 = ACCESS_GENERIC_ALL;
+pub const GENERIC_EXECUTE: u32 = ACCESS_GENERIC_EXECUTE;
+pub const GENERIC_WRITE: u32 = ACCESS_GENERIC_WRITE;
+pub const GENERIC_READ: u32 = ACCESS_GENERIC_READ;
+
+/// Object-class-specific mapping from generic access bits to concrete rights.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GenericMapping {
+    pub read: u32,
+    pub write: u32,
+    pub execute: u32,
+    pub all: u32,
+}
 
 const ACCESS_MASK_NAMES: &[(u32, &str)] = &[
     (ACCESS_DELETE, "DELETE"),
@@ -210,24 +245,96 @@ pub fn ace_flag_names(f: u8) -> Vec<&'static str> {
         (ACE_FLAG_SUCCESSFUL_ACCESS, "SUCCESSFUL_ACCESS"),
         (ACE_FLAG_FAILED_ACCESS, "FAILED_ACCESS"),
     ];
-    NAMES.iter().filter(|(b, _)| f & *b != 0).map(|(_, n)| *n).collect()
+    NAMES
+        .iter()
+        .filter(|(b, _)| f & *b != 0)
+        .map(|(_, n)| *n)
+        .collect()
 }
+
+// ---------------------------------------------------------------------------
+// Object-ACE `Flags` field bits — the `u32` at body offset 8 of an object
+// ACE, distinct from the 1-byte `AceFlags` header field above.
+// ---------------------------------------------------------------------------
+
+/// The object-ACE body carries an `ObjectType` GUID.
+pub const ACE_OBJECT_TYPE_PRESENT: u32 = 0x0000_0001;
+/// The object-ACE body carries an `InheritedObjectType` GUID.
+pub const ACE_INHERITED_OBJECT_TYPE_PRESENT: u32 = 0x0000_0002;
 
 // ---------------------------------------------------------------------------
 // Parsed structures.
 // ---------------------------------------------------------------------------
 
-/// One ACE entry.
-pub struct Ace {
+/// Borrowed view over a single ACE on the wire. Zero allocation.
+#[derive(Clone, Copy)]
+pub struct AceRef<'a> {
     pub ace_type: u8,
     pub flags: u8,
     pub size: u16,
     /// Raw body bytes (everything after the 4-byte ACE header).
+    pub body: &'a [u8],
+}
+
+/// Owned ACE. Produced via `AceRef::to_owned()` when the caller needs to
+/// retain the ACE beyond the lifetime of the parent buffer.
+#[derive(Clone)]
+pub struct Ace {
+    pub ace_type: u8,
+    pub flags: u8,
+    pub size: u16,
     pub body: Vec<u8>,
 }
 
-/// Parsed ACL. `aces` is decoded lazily — callers iterate `aces_iter` to walk
-/// over the wire bytes without allocating a vector.
+impl<'a> AceRef<'a> {
+    /// Promote into an owned [`Ace`]. Allocates `body`.
+    pub fn to_owned(&self) -> Ace {
+        Ace {
+            ace_type: self.ace_type,
+            flags: self.flags,
+            size: self.size,
+            body: self.body.to_vec(),
+        }
+    }
+
+    /// Decode this ACE as the common "u32 mask, then SID" layout. Returns
+    /// `None` for ACE types that don't use this layout. The borrowed SID
+    /// view shares the ACE's body lifetime.
+    pub fn as_mask_sid(&self) -> Option<(u32, SidRef<'a>)> {
+        if !ace_type_is_simple_mask_sid(self.ace_type) {
+            return None;
+        }
+        if self.body.len() < 4 {
+            return None;
+        }
+        let mask = u32::from_le_bytes([self.body[0], self.body[1], self.body[2], self.body[3]]);
+        let (sid, _) = SidRef::parse(&self.body[4..]).ok()?;
+        Some((mask, sid))
+    }
+
+    /// Owned variant of [`AceRef::as_mask_sid`]. Allocates the SID's
+    /// subauthority vector.
+    pub fn as_mask_sid_owned(&self) -> Option<(u32, Sid)> {
+        self.as_mask_sid().map(|(m, s)| (m, s.to_owned()))
+    }
+}
+
+impl Ace {
+    /// Decode this ACE as the common "u32 mask, then SID" layout, returning
+    /// the owned-SID form. See [`AceRef::as_mask_sid`] for the zero-alloc
+    /// variant.
+    pub fn as_mask_sid(&self) -> Option<(u32, Sid)> {
+        AceRef {
+            ace_type: self.ace_type,
+            flags: self.flags,
+            size: self.size,
+            body: &self.body,
+        }
+        .as_mask_sid_owned()
+    }
+}
+
+/// Parsed ACL. Lazy iteration over ACEs via [`Acl::aces_iter`].
 pub struct Acl<'a> {
     pub revision: u8,
     pub size: u16,
@@ -238,16 +345,16 @@ pub struct Acl<'a> {
 
 impl<'a> Acl<'a> {
     /// Parse the ACL header at the start of `bytes`. Returns the ACL view; the
-    /// header itself bounds-checks `size` against `bytes.len()`.
-    pub fn parse(bytes: &'a [u8]) -> Result<Self, &'static str> {
+    /// header bounds-checks `size` against `bytes.len()`.
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, ParseError> {
         if bytes.len() < 8 {
-            return Err("ACL header truncated");
+            return Err(ParseError::AclHeaderTruncated);
         }
         let revision = bytes[0];
         let size = u16::from_le_bytes([bytes[2], bytes[3]]);
         let ace_count = u16::from_le_bytes([bytes[4], bytes[5]]);
         if (size as usize) > bytes.len() {
-            return Err("ACL size runs past buffer");
+            return Err(ParseError::AclSizeOutOfBounds);
         }
         Ok(Self {
             revision,
@@ -257,7 +364,8 @@ impl<'a> Acl<'a> {
         })
     }
 
-    /// Iterate over ACEs in declaration order.
+    /// Iterate over ACEs in declaration order. Yields borrowed [`AceRef`]
+    /// views; callers can `.to_owned()` per-ACE if needed.
     pub fn aces_iter(&self) -> AceIter<'a> {
         AceIter {
             bytes: &self.bytes[8..],
@@ -272,26 +380,26 @@ pub struct AceIter<'a> {
 }
 
 impl<'a> Iterator for AceIter<'a> {
-    type Item = Result<Ace, &'static str>;
+    type Item = Result<AceRef<'a>, ParseError>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
             return None;
         }
         if self.bytes.len() < 4 {
             self.remaining = 0;
-            return Some(Err("ACE header truncated"));
+            return Some(Err(ParseError::AceHeaderTruncated));
         }
         let ace_type = self.bytes[0];
         let flags = self.bytes[1];
         let size = u16::from_le_bytes([self.bytes[2], self.bytes[3]]);
         if (size as usize) < 4 || self.bytes.len() < size as usize {
             self.remaining = 0;
-            return Some(Err("ACE size invalid or truncated"));
+            return Some(Err(ParseError::AceSizeInvalid));
         }
-        let body = self.bytes[4..size as usize].to_vec();
+        let body = &self.bytes[4..size as usize];
         self.bytes = &self.bytes[size as usize..];
         self.remaining -= 1;
-        Some(Ok(Ace {
+        Some(Ok(AceRef {
             ace_type,
             flags,
             size,
@@ -300,23 +408,7 @@ impl<'a> Iterator for AceIter<'a> {
     }
 }
 
-impl Ace {
-    /// Decode this ACE as the common "u32 mask, then SID" layout. Returns
-    /// `None` for ACE types that don't use this layout.
-    pub fn as_mask_sid(&self) -> Option<(u32, Sid)> {
-        if !ace_type_is_simple_mask_sid(self.ace_type) {
-            return None;
-        }
-        if self.body.len() < 4 {
-            return None;
-        }
-        let mask = u32::from_le_bytes([self.body[0], self.body[1], self.body[2], self.body[3]]);
-        let (sid, _) = Sid::parse(&self.body[4..]).ok()?;
-        Some((mask, sid))
-    }
-}
-
-/// Top-level parsed SECURITY_DESCRIPTOR (self-relative).
+/// Top-level parsed SECURITY_DESCRIPTOR (self-relative). Borrowed view.
 pub struct SecurityDescriptor<'a> {
     pub revision: u8,
     pub sbz1: u8,
@@ -329,9 +421,9 @@ pub struct SecurityDescriptor<'a> {
 }
 
 impl<'a> SecurityDescriptor<'a> {
-    pub fn parse(bytes: &'a [u8]) -> Result<Self, &'static str> {
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, ParseError> {
         if bytes.len() < SD_HEADER_BYTES {
-            return Err("SD header truncated");
+            return Err(ParseError::SdHeaderTruncated);
         }
         let revision = bytes[0];
         let sbz1 = bytes[1];
@@ -352,7 +444,7 @@ impl<'a> SecurityDescriptor<'a> {
         })
     }
 
-    fn sid_at(&self, off: u32) -> Option<Sid> {
+    fn sid_at(&self, off: u32) -> Option<SidRef<'a>> {
         if off == 0 {
             return None;
         }
@@ -360,34 +452,48 @@ impl<'a> SecurityDescriptor<'a> {
         if start >= self.bytes.len() {
             return None;
         }
-        Sid::parse(&self.bytes[start..]).ok().map(|(s, _)| s)
+        SidRef::parse(&self.bytes[start..]).ok().map(|(s, _)| s)
     }
 
-    pub fn owner(&self) -> Option<Sid> {
+    /// Borrowed-SID accessor for owner. Returns `None` if owner is absent
+    /// or the offset is out of bounds.
+    pub fn owner_ref(&self) -> Option<SidRef<'a>> {
         self.sid_at(self.owner_off)
     }
-    pub fn group(&self) -> Option<Sid> {
+
+    /// Owned-SID accessor for owner. Allocates if present.
+    pub fn owner(&self) -> Option<Sid> {
+        self.owner_ref().map(|s| s.to_owned())
+    }
+
+    /// Borrowed-SID accessor for group.
+    pub fn group_ref(&self) -> Option<SidRef<'a>> {
         self.sid_at(self.group_off)
     }
 
-    pub fn dacl(&self) -> Option<Result<Acl<'_>, &'static str>> {
+    /// Owned-SID accessor for group.
+    pub fn group(&self) -> Option<Sid> {
+        self.group_ref().map(|s| s.to_owned())
+    }
+
+    pub fn dacl(&self) -> Option<Result<Acl<'_>, ParseError>> {
         if self.control & SE_DACL_PRESENT == 0 || self.dacl_off == 0 {
             return None;
         }
         let start = self.dacl_off as usize;
         if start >= self.bytes.len() {
-            return Some(Err("DACL offset out of bounds"));
+            return Some(Err(ParseError::SdOffsetOutOfBounds));
         }
         Some(Acl::parse(&self.bytes[start..]))
     }
 
-    pub fn sacl(&self) -> Option<Result<Acl<'_>, &'static str>> {
+    pub fn sacl(&self) -> Option<Result<Acl<'_>, ParseError>> {
         if self.control & SE_SACL_PRESENT == 0 || self.sacl_off == 0 {
             return None;
         }
         let start = self.sacl_off as usize;
         if start >= self.bytes.len() {
-            return Some(Err("SACL offset out of bounds"));
+            return Some(Err(ParseError::SdOffsetOutOfBounds));
         }
         Some(Acl::parse(&self.bytes[start..]))
     }
@@ -396,6 +502,7 @@ impl<'a> SecurityDescriptor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn control_decode() {
@@ -417,9 +524,36 @@ mod tests {
     }
 
     #[test]
+    fn standard_and_generic_aliases_match_psd_004() {
+        assert_eq!(DELETE, 0x0001_0000);
+        assert_eq!(READ_CONTROL, 0x0002_0000);
+        assert_eq!(WRITE_DAC, 0x0004_0000);
+        assert_eq!(WRITE_OWNER, 0x0008_0000);
+        assert_eq!(SYNCHRONIZE, 0x0010_0000);
+        assert_eq!(ACCESS_SYSTEM_SECURITY, 0x0100_0000);
+        assert_eq!(MAXIMUM_ALLOWED, 0x0200_0000);
+        assert_eq!(GENERIC_ALL, 0x1000_0000);
+        assert_eq!(GENERIC_EXECUTE, 0x2000_0000);
+        assert_eq!(GENERIC_WRITE, 0x4000_0000);
+        assert_eq!(GENERIC_READ, 0x8000_0000);
+    }
+
+    #[test]
+    fn generic_mapping_is_c_abi_shape() {
+        assert_eq!(core::mem::size_of::<GenericMapping>(), 16);
+        assert_eq!(core::mem::offset_of!(GenericMapping, read), 0);
+        assert_eq!(core::mem::offset_of!(GenericMapping, write), 4);
+        assert_eq!(core::mem::offset_of!(GenericMapping, execute), 8);
+        assert_eq!(core::mem::offset_of!(GenericMapping, all), 12);
+    }
+
+    #[test]
     fn ace_type_lookup() {
         assert_eq!(ace_type_name(ACE_TYPE_ACCESS_ALLOWED), "ACCESS_ALLOWED");
-        assert_eq!(ace_type_name(ACE_TYPE_SYSTEM_MANDATORY_LABEL), "SYSTEM_MANDATORY_LABEL");
+        assert_eq!(
+            ace_type_name(ACE_TYPE_SYSTEM_MANDATORY_LABEL),
+            "SYSTEM_MANDATORY_LABEL"
+        );
         assert_eq!(ace_type_name(0xFE), "UNKNOWN");
     }
 }

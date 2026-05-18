@@ -50,6 +50,23 @@ stages the PKM subtree from this repo, enables `SECURITY_PKM`, and builds the
 kernel. The image does not inject syscall registrations or apply any external
 patches.
 
+### Fast KUnit iteration loop
+
+`kunit-kernel` rebuilds the whole kernel from scratch in a fresh container on
+every run. For tight iteration on KACS/KUnit sources, use the `-fast` variants:
+
+1. `make -C kernel kunit-smoke-fast`
+
+This builds the kernel in a persistent Docker volume (`pkm-new-kunit-buildtree`)
+so only changed objects recompile, and stages PKM source at runtime instead of
+rebuilding the Docker image. It is **non-hermetic** — use `kunit-smoke` for
+trustworthy or CI results, `kunit-smoke-fast` for the dev loop.
+
+Run `make -C kernel kunit-clean-fast` to discard the persistent build tree.
+That is needed only after bumping the kernel version or toolchain, or if a fast
+build fails in a way unrelated to your change; ordinary source edits never
+require it.
+
 ## Deliberate Omissions
 
 The following must be reintroduced only when their spec-driven implementation

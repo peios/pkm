@@ -126,6 +126,284 @@ fn mapping() -> GenericMapping {
 }
 
 #[test]
+fn ms_dtyp_bytecode_golden_vectors_cover_token_families() {
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 4035]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32, 544]);
+    let device_group = sid_bytes([0, 0, 0, 0, 0, 5], &[32, 560]);
+    let missing_group = sid_bytes([0, 0, 0, 0, 0, 5], &[32, 561]);
+    let groups = [SidAndAttributes {
+        sid: parse_sid(&group),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let device_groups = [SidAndAttributes {
+        sid: parse_sid(&device_group),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let token = token(&user, &groups);
+    let local_claims = [ClaimAttribute::new(
+        "LocalGate",
+        0,
+        vec![ClaimValue::Boolean(1)],
+    )];
+    let user_claims = [ClaimAttribute::new(
+        "UserGate",
+        0,
+        vec![ClaimValue::UInt64(1)],
+    )];
+    let resource_claims = [ClaimAttribute::new(
+        "ResourceGate",
+        0,
+        vec![ClaimValue::String("present".into())],
+    )];
+    let device_claims = [ClaimAttribute::new(
+        "DeviceGate",
+        0,
+        vec![ClaimValue::String("present".into())],
+    )];
+    let context = ConditionalContext {
+        device_groups: &device_groups,
+        local_claims: &local_claims,
+        user_claims: &user_claims,
+        resource_claims: &resource_claims,
+        device_claims: &device_claims,
+        ..ConditionalContext::default()
+    };
+    let true_result = result_tokens(ConditionalResult::True);
+    let false_result = result_tokens(ConditionalResult::False);
+    let cases = vec![
+        (
+            "int8 literal",
+            append_tokens(&[
+                signed_literal(0x01, 0x7f, 0x01, 0x02),
+                int64_literal(127),
+                vec![0x80],
+            ]),
+            ConditionalResult::True,
+        ),
+        (
+            "int16 literal",
+            append_tokens(&[
+                signed_literal(0x02, 0x7fff, 0x01, 0x02),
+                int64_literal(32767),
+                vec![0x80],
+            ]),
+            ConditionalResult::True,
+        ),
+        (
+            "int32 literal",
+            append_tokens(&[
+                signed_literal(0x03, 0x7fff_ffff, 0x01, 0x02),
+                int64_literal(2_147_483_647),
+                vec![0x80],
+            ]),
+            ConditionalResult::True,
+        ),
+        (
+            "int64 literal",
+            append_tokens(&[
+                signed_literal(0x04, -1, 0x02, 0x02),
+                int64_literal(-1),
+                vec![0x80],
+            ]),
+            ConditionalResult::True,
+        ),
+        (
+            "unicode string literal",
+            append_tokens(&[string_literal("Alpha"), string_literal("alpha"), vec![0x80]]),
+            ConditionalResult::True,
+        ),
+        (
+            "octet string literal",
+            append_tokens(&[
+                octet_literal(&[0xaa, 0xbb]),
+                octet_literal(&[0xaa, 0xbb]),
+                vec![0x80],
+            ]),
+            ConditionalResult::True,
+        ),
+        (
+            "sid literal",
+            append_tokens(&[sid_literal(&user), sid_literal(&user), vec![0x80]]),
+            ConditionalResult::True,
+        ),
+        (
+            "composite literal",
+            append_tokens(&[
+                composite(&[int64_literal(1), int64_literal(2)]),
+                composite(&[int64_literal(2)]),
+                vec![0x86],
+            ]),
+            ConditionalResult::True,
+        ),
+        (
+            "eq",
+            append_tokens(&[int64_literal(7), int64_literal(7), vec![0x80]]),
+            ConditionalResult::True,
+        ),
+        (
+            "ne",
+            append_tokens(&[int64_literal(7), int64_literal(8), vec![0x81]]),
+            ConditionalResult::True,
+        ),
+        (
+            "lt",
+            append_tokens(&[int64_literal(7), int64_literal(8), vec![0x82]]),
+            ConditionalResult::True,
+        ),
+        (
+            "le",
+            append_tokens(&[int64_literal(7), int64_literal(7), vec![0x83]]),
+            ConditionalResult::True,
+        ),
+        (
+            "gt",
+            append_tokens(&[int64_literal(8), int64_literal(7), vec![0x84]]),
+            ConditionalResult::True,
+        ),
+        (
+            "ge",
+            append_tokens(&[int64_literal(7), int64_literal(7), vec![0x85]]),
+            ConditionalResult::True,
+        ),
+        (
+            "contains",
+            append_tokens(&[
+                composite(&[string_literal("red"), string_literal("blue")]),
+                composite(&[string_literal("blue")]),
+                vec![0x86],
+            ]),
+            ConditionalResult::True,
+        ),
+        (
+            "any_of",
+            append_tokens(&[
+                string_literal("blue"),
+                composite(&[string_literal("red"), string_literal("blue")]),
+                vec![0x88],
+            ]),
+            ConditionalResult::True,
+        ),
+        (
+            "not_contains",
+            append_tokens(&[
+                composite(&[string_literal("red")]),
+                composite(&[string_literal("blue")]),
+                vec![0x8e],
+            ]),
+            ConditionalResult::True,
+        ),
+        (
+            "not_any_of",
+            append_tokens(&[
+                string_literal("green"),
+                composite(&[string_literal("red"), string_literal("blue")]),
+                vec![0x8f],
+            ]),
+            ConditionalResult::True,
+        ),
+        (
+            "exists local",
+            append_tokens(&[attr_ref(0xf8, "LocalGate"), vec![0x87]]),
+            ConditionalResult::True,
+        ),
+        (
+            "exists user",
+            append_tokens(&[attr_ref(0xf9, "UserGate"), vec![0x87]]),
+            ConditionalResult::True,
+        ),
+        (
+            "exists resource",
+            append_tokens(&[attr_ref(0xfa, "ResourceGate"), vec![0x87]]),
+            ConditionalResult::True,
+        ),
+        (
+            "exists device",
+            append_tokens(&[attr_ref(0xfb, "DeviceGate"), vec![0x87]]),
+            ConditionalResult::True,
+        ),
+        (
+            "not exists",
+            append_tokens(&[attr_ref(0xf8, "Missing"), vec![0x8d]]),
+            ConditionalResult::True,
+        ),
+        (
+            "member_of",
+            append_tokens(&[sid_literal(&group), vec![0x89]]),
+            ConditionalResult::True,
+        ),
+        (
+            "device_member_of",
+            append_tokens(&[sid_literal(&device_group), vec![0x8a]]),
+            ConditionalResult::True,
+        ),
+        (
+            "member_of_any",
+            append_tokens(&[
+                composite(&[sid_literal(&missing_group), sid_literal(&group)]),
+                vec![0x8b],
+            ]),
+            ConditionalResult::True,
+        ),
+        (
+            "device_member_of_any",
+            append_tokens(&[
+                composite(&[sid_literal(&missing_group), sid_literal(&device_group)]),
+                vec![0x8c],
+            ]),
+            ConditionalResult::True,
+        ),
+        (
+            "not_member_of",
+            append_tokens(&[sid_literal(&missing_group), vec![0x90]]),
+            ConditionalResult::True,
+        ),
+        (
+            "not_device_member_of",
+            append_tokens(&[sid_literal(&missing_group), vec![0x91]]),
+            ConditionalResult::True,
+        ),
+        (
+            "not_member_of_any",
+            append_tokens(&[composite(&[sid_literal(&missing_group)]), vec![0x92]]),
+            ConditionalResult::True,
+        ),
+        (
+            "not_device_member_of_any",
+            append_tokens(&[composite(&[sid_literal(&missing_group)]), vec![0x93]]),
+            ConditionalResult::True,
+        ),
+        (
+            "and",
+            append_tokens(&[true_result.clone(), true_result.clone(), vec![0xa0]]),
+            ConditionalResult::True,
+        ),
+        (
+            "or",
+            append_tokens(&[false_result.clone(), true_result.clone(), vec![0xa1]]),
+            ConditionalResult::True,
+        ),
+        (
+            "not",
+            append_tokens(&[false_result, vec![0xa2]]),
+            ConditionalResult::True,
+        ),
+        (
+            "zero padding",
+            append_tokens(&[true_result, vec![0x00, 0x00, 0x00]]),
+            ConditionalResult::True,
+        ),
+    ];
+
+    for (name, tokens, expected) in cases {
+        assert_eq!(
+            evaluate_conditional_expression(&expr(&tokens), &token, &context, true),
+            expected,
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn malformed_magic_returns_unknown() {
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 4000]);
     let token = token(&user, &[]);

@@ -185,9 +185,8 @@ pub fn evaluate_dacl_with_restricted_context(
     });
     restricted_conditions.identity_membership_is_presence_based = true;
     restricted_conditions.caller_is_owner = restricted_owner;
-    if !restricted_context.restricted_device_groups.is_empty() {
-        restricted_conditions.device_groups = restricted_context.restricted_device_groups;
-    }
+    restricted_conditions.device_groups = restricted_context.restricted_device_groups;
+    restricted_conditions.device_membership_uses_virtual_groups = true;
 
     let restricted = evaluate_dacl_states(
         sd,
@@ -265,6 +264,7 @@ pub fn evaluate_dacl_with_confinement_context(
     confinement_conditions.self_sid = confinement_self;
     confinement_conditions.principal_self_matches = Some(confinement_self.is_some());
     confinement_conditions.caller_is_owner = confinement_owner;
+    confinement_conditions.device_membership_uses_virtual_groups = true;
 
     let confinement = evaluate_dacl_states(
         sd,
@@ -499,9 +499,8 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
     });
     restricted_conditions.identity_membership_is_presence_based = true;
     restricted_conditions.caller_is_owner = restricted_owner;
-    if !restricted_context.restricted_device_groups.is_empty() {
-        restricted_conditions.device_groups = restricted_context.restricted_device_groups;
-    }
+    restricted_conditions.device_groups = restricted_context.restricted_device_groups;
+    restricted_conditions.device_membership_uses_virtual_groups = true;
 
     let restricted = evaluate_dacl_states(
         sd,
@@ -598,6 +597,7 @@ pub fn evaluate_dacl_result_list_with_confinement_context(
     confinement_conditions.self_sid = confinement_self;
     confinement_conditions.principal_self_matches = Some(confinement_self.is_some());
     confinement_conditions.caller_is_owner = confinement_owner;
+    confinement_conditions.device_membership_uses_virtual_groups = true;
 
     let confinement = evaluate_dacl_states(
         sd,

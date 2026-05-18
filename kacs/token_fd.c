@@ -494,13 +494,10 @@ static long pkm_kacs_token_restrict_core(
 	const void *payload)
 {
 	const void *new_token = NULL;
-	u32 granted = 0;
-	u32 pip_type = 0;
-	u32 pip_trust = 0;
 	long fd;
 	int ret;
 
-	if (!tf || !tf->token || !subject_token || !creator_token || !args)
+	if (!tf || !tf->token || !creator_token || !args)
 		return -EINVAL;
 	if ((tf->access_mask & KACS_TOKEN_DUPLICATE) != KACS_TOKEN_DUPLICATE)
 		return -EACCES;
@@ -508,6 +505,7 @@ static long pkm_kacs_token_restrict_core(
 		return -EINVAL;
 	if (args->data_len && !payload)
 		return -EINVAL;
+	(void)subject_token;
 
 	ret = kacs_rust_token_restrict(tf->token, creator_token,
 					 args->privs_to_delete, args->flags,
@@ -520,21 +518,7 @@ static long pkm_kacs_token_restrict_core(
 	if (!new_token)
 		return -EACCES;
 
-	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
-	if (ret) {
-		kacs_rust_token_drop(new_token);
-		return ret;
-	}
-
-	ret = kacs_rust_token_open_check(subject_token, new_token,
-					 KACS_TOKEN_ALL_ACCESS, pip_type,
-					 pip_trust, &granted);
-	if (ret) {
-		kacs_rust_token_drop(new_token);
-		return ret;
-	}
-
-	fd = pkm_kacs_token_to_fd(new_token, granted);
+	fd = pkm_kacs_token_to_fd(new_token, tf->access_mask);
 	if (fd < 0)
 		return fd;
 
@@ -1437,6 +1421,24 @@ long pkm_kacs_kunit_token_fd_adjust_session_for_token(int fd,
 
 	tf = fd_file(f)->private_data;
 	ret = pkm_kacs_token_adjust_session_core(tf, caller_token, session_id);
+	fdput(f);
+	return ret;
+}
+
+long pkm_kacs_kunit_token_fd_ioctl(int fd, unsigned int cmd, unsigned long arg)
+{
+	struct fd f;
+	long ret;
+
+	f = fdget(fd);
+	if (!fd_file(f))
+		return -EBADF;
+	if (fd_file(f)->f_op != &pkm_kacs_token_fops) {
+		fdput(f);
+		return -EINVAL;
+	}
+
+	ret = fd_file(f)->f_op->unlocked_ioctl(fd_file(f), cmd, arg);
 	fdput(f);
 	return ret;
 }

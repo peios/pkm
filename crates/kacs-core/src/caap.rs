@@ -215,9 +215,31 @@ pub struct CaapEvaluationState<'a> {
     /// Staged per-node granted list after CAAP.
     pub staged_object_granted_list: Option<Vec<u32>>,
     /// Effective SACL payloads contributed by matching rules.
-    pub effective_sacls: Vec<&'a [u8]>,
+    pub effective_sacls: Vec<CaapSaclContribution<'a>>,
     /// Staged SACL payloads contributed by matching rules.
-    pub staged_sacls: Vec<&'a [u8]>,
+    pub staged_sacls: Vec<CaapSaclContribution<'a>>,
+}
+
+/// Identifies the CAAP audit phase that contributed a SACL payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaapSaclPhase {
+    /// Effective policy path.
+    Effective,
+    /// Staged policy path.
+    Staged,
+}
+
+/// Metadata-bearing borrowed CAAP SACL contribution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CaapSaclContribution<'a> {
+    /// Policy SID that owned the matched rule.
+    pub policy_sid: Sid<'a>,
+    /// Zero-based rule index inside the policy.
+    pub rule_index: u32,
+    /// Effective or staged contribution phase.
+    pub phase: CaapSaclPhase,
+    /// SACL payload.
+    pub sacl: &'a [u8],
 }
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
@@ -343,8 +365,10 @@ pub fn evaluate_caap<'a>(
 
     for policy_sid in &base.policy_sids {
         if let Some(policy) = lookup_policy(policies, *policy_sid) {
-            for rule in &policy.rules {
+            for (rule_index, rule) in policy.rules.iter().enumerate() {
                 apply_rule(
+                    Some(*policy_sid),
+                    rule_index as u32,
                     rule.applies_to,
                     rule.effective_dacl,
                     rule.effective_sacl,
@@ -369,6 +393,8 @@ pub fn evaluate_caap<'a>(
         } else {
             let recovery_dacl = build_recovery_policy_dacl()?;
             apply_rule(
+                None,
+                0,
                 None,
                 recovery_dacl.as_slice(),
                 None,
@@ -404,6 +430,8 @@ pub fn evaluate_caap<'a>(
 
 #[allow(clippy::too_many_arguments)]
 fn apply_rule<'a>(
+    policy_sid: Option<Sid<'a>>,
+    rule_index: u32,
     applies_to: Option<&[u8]>,
     effective_dacl: &[u8],
     effective_sacl: Option<&'a [u8]>,
@@ -421,8 +449,8 @@ fn apply_rule<'a>(
     object_granted_list: Option<&mut Vec<u32>>,
     staged_granted: &mut u32,
     staged_object_granted_list: Option<&mut Vec<u32>>,
-    effective_sacls: &mut Vec<&'a [u8]>,
-    staged_sacls: &mut Vec<&'a [u8]>,
+    effective_sacls: &mut Vec<CaapSaclContribution<'a>>,
+    staged_sacls: &mut Vec<CaapSaclContribution<'a>>,
 ) -> KacsResult<()> {
     if !rule_applies(
         applies_to,
@@ -453,8 +481,13 @@ fn apply_rule<'a>(
     *granted &= effective_state.granted;
     intersect_object_grants(object_granted_list, &effective_state.object_granted_list)?;
 
-    if let Some(sacl) = effective_sacl {
-        effective_sacls.push(sacl)?;
+    if let (Some(policy_sid), Some(sacl)) = (policy_sid, effective_sacl) {
+        effective_sacls.push(CaapSaclContribution {
+            policy_sid,
+            rule_index,
+            phase: CaapSaclPhase::Effective,
+            sacl,
+        })?;
     }
 
     let staged_state = if let Some(staged_dacl) = staged_dacl {
@@ -486,10 +519,20 @@ fn apply_rule<'a>(
         &staged_state.object_granted_list,
     )?;
 
-    if let Some(sacl) = staged_sacl {
-        staged_sacls.push(sacl)?;
-    } else if let Some(sacl) = effective_sacl {
-        staged_sacls.push(sacl)?;
+    if let (Some(policy_sid), Some(sacl)) = (policy_sid, staged_sacl) {
+        staged_sacls.push(CaapSaclContribution {
+            policy_sid,
+            rule_index,
+            phase: CaapSaclPhase::Staged,
+            sacl,
+        })?;
+    } else if let (Some(policy_sid), Some(sacl)) = (policy_sid, effective_sacl) {
+        staged_sacls.push(CaapSaclContribution {
+            policy_sid,
+            rule_index,
+            phase: CaapSaclPhase::Staged,
+            sacl,
+        })?;
     }
 
     Ok(())
@@ -521,7 +564,9 @@ fn rule_applies(
         caller_is_owner: false,
         identity: None,
         identity_membership_is_presence_based: false,
-        device_groups: conditional_context.device_groups,
+        device_groups: &[],
+        device_membership_uses_virtual_groups: false,
+        membership_allowed: false,
         user_claims: conditional_context.user_claims,
         device_claims: conditional_context.device_claims,
         resource_claims: resource_attributes,
@@ -919,6 +964,23 @@ mod tests {
         bytes
     }
 
+    fn sd_bytes_without_group(owner: &[u8], sacl: &[u8], dacl: &[u8]) -> Vec<u8> {
+        let control = SE_SELF_RELATIVE | SE_SACL_PRESENT | SE_DACL_PRESENT;
+        let mut bytes = vec![0u8; 20];
+        bytes[0] = 1;
+        bytes[2..4].copy_from_slice(&control.to_le_bytes());
+        let owner_offset = bytes.len() as u32;
+        bytes[4..8].copy_from_slice(&owner_offset.to_le_bytes());
+        bytes.extend_from_slice(owner);
+        let sacl_offset = bytes.len() as u32;
+        bytes[12..16].copy_from_slice(&sacl_offset.to_le_bytes());
+        bytes.extend_from_slice(sacl);
+        let dacl_offset = bytes.len() as u32;
+        bytes[16..20].copy_from_slice(&dacl_offset.to_le_bytes());
+        bytes.extend_from_slice(dacl);
+        bytes
+    }
+
     #[test]
     fn strip_scoped_policy_aces_removes_policy_references() {
         let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
@@ -993,6 +1055,22 @@ mod tests {
         let metadata = extract_sacl_metadata(&synthetic_sd).expect("metadata parses");
 
         assert!(metadata.policy_sids.is_empty());
+    }
+
+    #[test]
+    fn synthetic_sd_builder_preserves_missing_group() {
+        let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+        let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 15410]);
+        let sacl = acl_bytes(&[]);
+        let dacl = acl_bytes(&[basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, 0x1, &user)]);
+        let base_sd_bytes = sd_bytes_without_group(&owner, &sacl, &dacl);
+        let base_sd = SecurityDescriptor::parse(&base_sd_bytes).expect("sd should parse");
+
+        let synthetic = build_synthetic_sd_bytes(&base_sd, &dacl).expect("builder should succeed");
+        let synthetic_sd = SecurityDescriptor::parse(&synthetic).expect("synthetic sd parses");
+
+        assert!(synthetic_sd.owner().is_some());
+        assert!(synthetic_sd.group().is_none());
     }
 
     #[test]

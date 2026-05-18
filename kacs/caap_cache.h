@@ -6,6 +6,7 @@
 #include <linux/types.h>
 
 int pkm_kacs_caap_cache_init(void);
+void pkm_kacs_caap_cache_destroy(void);
 /*
  * Raw cache mutation. Public callers must go through the SeTcb-gated syscall
  * wrapper in caap_cache.c.

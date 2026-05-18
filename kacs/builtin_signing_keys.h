@@ -2,9 +2,9 @@
 /*
  * Default KACS built-in binary-signing key table.
  *
- * Production builds may replace this file during kernel staging with a table
- * generated from PKM_KACS_TCB_PUBKEY_HEX. The default is terminator-only, so
- * binaries resolve to PIP None/0 unless a build supplies a TCB public key.
+ * Kernel staging replaces this file with a table generated from
+ * PKM_KACS_TCB_PUBKEY_HEX. The default terminator-only table is valid only
+ * before staging or for KUnit/test builds that use the hard-coded KUnit key.
  */
 
 #ifndef PKM_KACS_BUILTIN_SIGNING_KEYS_H

@@ -1,3 +1,30 @@
 [workspace]
 resolver = "2"
-members = ["crates/kacs-core"]
+members = [
+    "crates/kacs-core",
+    "crates/peios-uapi",
+    "crates/libp-token",
+    "crates/libp-sd",
+    "crates/libp-files",
+    "crates/libp-event",
+    "crates/libp-test",
+]
+
+# Shared package metadata. Members opt-in via `field.workspace = true`.
+# Members with reasons to diverge (kacs-core stays on edition 2021 during
+# the slow-track impl) override locally.
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+
+# Shared dependency declarations. Members consume via
+# `dep.workspace = true`. Inline deps in members are still allowed when
+# the member has a version reason that diverges from the workspace pin.
+[workspace.dependencies]
+thiserror = { version = "2", default-features = false }
+
+peios-uapi = { path = "crates/peios-uapi", default-features = false }
+libp-token = { path = "crates/libp-token", default-features = false }
+libp-sd    = { path = "crates/libp-sd", default-features = false }
+libp-files = { path = "crates/libp-files", default-features = false }
+libp-event = { path = "crates/libp-event", default-features = false }

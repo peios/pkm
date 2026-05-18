@@ -60,6 +60,19 @@ fn zero_subauthority_sid_has_no_relative_identifier() {
 }
 
 #[test]
+fn parses_maximum_fifteen_subauthority_sid() {
+    let sub_authorities = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+    let bytes = sid_bytes(&sub_authorities);
+    let sid = Sid::parse(&bytes).expect("15-subauthority sid should parse");
+
+    assert_eq!(sid.sub_authority_count(), 15);
+    assert_eq!(sid.as_bytes().len(), Sid::MIN_SIZE + (15 * 4));
+    assert_eq!(sid.sub_authority(14), Some(14));
+    assert_eq!(sid.sub_authority(15), None);
+    assert_eq!(sid.relative_identifier(), Some(14));
+}
+
+#[test]
 fn preserves_full_six_byte_identifier_authority() {
     let authority = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
     let bytes = sid_bytes_with_authority(authority, &[0x1122_3344]);

@@ -49,6 +49,32 @@ pub struct SecurityDescriptor<'a> {
     dacl: Option<Acl<'a>>,
 }
 
+/// Cached component range for a parsed self-relative security descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SecurityDescriptorComponentLayout {
+    /// Component start offset from the beginning of the descriptor.
+    pub offset: usize,
+    /// Component length in bytes.
+    pub len: usize,
+}
+
+/// Cached layout for a parsed self-relative security descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SecurityDescriptorLayout {
+    /// Descriptor control field.
+    pub control: u16,
+    /// Header byte 1, used as resource-manager control when valid.
+    pub resource_manager_control: u8,
+    /// Owner SID component.
+    pub owner: Option<SecurityDescriptorComponentLayout>,
+    /// Primary group SID component.
+    pub group: Option<SecurityDescriptorComponentLayout>,
+    /// SACL component.
+    pub sacl: Option<SecurityDescriptorComponentLayout>,
+    /// DACL component.
+    pub dacl: Option<SecurityDescriptorComponentLayout>,
+}
+
 impl<'a> SecurityDescriptor<'a> {
     /// Size in bytes of the fixed self-relative security descriptor header.
     pub const HEADER_SIZE: usize = 20;
@@ -56,6 +82,14 @@ impl<'a> SecurityDescriptor<'a> {
     /// Parses a self-relative security descriptor and validates component
     /// offsets and overlap.
     pub fn parse(bytes: &'a [u8]) -> KacsResult<Self> {
+        let layout = Self::parse_layout(bytes)?;
+
+        Self::from_cached_layout(bytes, &layout)
+    }
+
+    /// Parses and validates a self-relative security descriptor, returning a
+    /// reusable component layout suitable for immutable cache entries.
+    pub fn parse_layout(bytes: &[u8]) -> KacsResult<SecurityDescriptorLayout> {
         if bytes.len() > MAX_SECURITY_DESCRIPTOR_BYTES {
             return Err(KacsError::SecurityDescriptorTooLarge {
                 len: bytes.len(),
@@ -74,17 +108,15 @@ impl<'a> SecurityDescriptor<'a> {
             return Err(KacsError::MissingSelfRelativeControl(control));
         }
 
-        let (owner, owner_region) =
-            parse_optional_sid(bytes, "owner", read_offset(bytes, 4), true)?;
-        let (group, group_region) =
-            parse_optional_sid(bytes, "group", read_offset(bytes, 8), true)?;
-        let (sacl, sacl_region) = parse_optional_acl(
+        let (_, owner_region) = parse_optional_sid(bytes, "owner", read_offset(bytes, 4), true)?;
+        let (_, group_region) = parse_optional_sid(bytes, "group", read_offset(bytes, 8), true)?;
+        let (_, sacl_region) = parse_optional_acl(
             bytes,
             "sacl",
             (control & SE_SACL_PRESENT) != 0,
             read_offset(bytes, 12),
         )?;
-        let (dacl, dacl_region) = parse_optional_acl(
+        let (_, dacl_region) = parse_optional_acl(
             bytes,
             "dacl",
             (control & SE_DACL_PRESENT) != 0,
@@ -93,13 +125,39 @@ impl<'a> SecurityDescriptor<'a> {
 
         validate_component_overlap(&[owner_region, group_region, sacl_region, dacl_region])?;
 
+        Ok(SecurityDescriptorLayout {
+            control,
+            resource_manager_control: bytes[1],
+            owner: component_layout(owner_region),
+            group: component_layout(group_region),
+            sacl: component_layout(sacl_region),
+            dacl: component_layout(dacl_region),
+        })
+    }
+
+    /// Reconstructs borrowed descriptor views from a previously validated
+    /// cached layout.
+    pub fn from_cached_layout(
+        bytes: &'a [u8],
+        layout: &SecurityDescriptorLayout,
+    ) -> KacsResult<Self> {
+        if bytes.len() < Self::HEADER_SIZE {
+            return Err(KacsError::Truncated("security descriptor"));
+        }
+        if bytes[0] != 1 {
+            return Err(KacsError::InvalidSecurityDescriptorRevision(bytes[0]));
+        }
+        if (layout.control & SE_SELF_RELATIVE) == 0 {
+            return Err(KacsError::MissingSelfRelativeControl(layout.control));
+        }
+
         Ok(Self {
             bytes,
-            control,
-            owner,
-            group,
-            sacl,
-            dacl,
+            control: layout.control,
+            owner: parse_sid_from_layout(bytes, "owner", layout.owner)?,
+            group: parse_sid_from_layout(bytes, "group", layout.group)?,
+            sacl: parse_acl_from_layout(bytes, "sacl", layout.sacl)?,
+            dacl: parse_acl_from_layout(bytes, "dacl", layout.dacl)?,
         })
     }
 
@@ -137,6 +195,54 @@ impl<'a> SecurityDescriptor<'a> {
     pub fn dacl(&self) -> Option<Acl<'a>> {
         self.dacl
     }
+}
+
+fn component_layout(region: Option<ComponentRegion>) -> Option<SecurityDescriptorComponentLayout> {
+    region.map(|region| SecurityDescriptorComponentLayout {
+        offset: region.start,
+        len: region.end - region.start,
+    })
+}
+
+fn component_slice<'a>(
+    bytes: &'a [u8],
+    field: &'static str,
+    component: SecurityDescriptorComponentLayout,
+) -> KacsResult<&'a [u8]> {
+    let end = component.offset.checked_add(component.len).ok_or(
+        KacsError::SecurityDescriptorOffsetOutOfBounds {
+            field,
+            offset: u32::MAX,
+            buffer_len: bytes.len(),
+        },
+    )?;
+    bytes
+        .get(component.offset..end)
+        .ok_or(KacsError::SecurityDescriptorOffsetOutOfBounds {
+            field,
+            offset: u32::try_from(component.offset).unwrap_or(u32::MAX),
+            buffer_len: bytes.len(),
+        })
+}
+
+fn parse_sid_from_layout<'a>(
+    bytes: &'a [u8],
+    field: &'static str,
+    component: Option<SecurityDescriptorComponentLayout>,
+) -> KacsResult<Option<Sid<'a>>> {
+    component
+        .map(|component| Sid::parse(component_slice(bytes, field, component)?))
+        .transpose()
+}
+
+fn parse_acl_from_layout<'a>(
+    bytes: &'a [u8],
+    field: &'static str,
+    component: Option<SecurityDescriptorComponentLayout>,
+) -> KacsResult<Option<Acl<'a>>> {
+    component
+        .map(|component| Acl::parse(component_slice(bytes, field, component)?))
+        .transpose()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

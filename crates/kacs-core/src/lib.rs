@@ -60,7 +60,8 @@ pub fn kernel_compile_probe() -> usize {
 
 pub use access_check::{
     access_check, access_check_core, access_check_result_list, AccessCheckCoreState,
-    AccessCheckMode, AccessCheckResult, AccessCheckResultListState, PrivilegeUseEvent,
+    AccessCheckMode, AccessCheckResult, AccessCheckResultListState, CaapDiagnosticEvent,
+    CaapDiagnosticKind, PrivilegeUseEvent,
 };
 pub use access_check_abi::{
     execute_access_check_abi, execute_access_check_list_abi, parse_access_check_abi_request,
@@ -94,7 +95,8 @@ pub use acl::Acl;
 pub use audit::{evaluate_sacl, AuditEvent, EvaluateSaclState};
 pub use caap::{
     evaluate_caap, parse_caap_policy_spec, CaapEvaluationState, CaapPolicy, CaapPolicyCache,
-    CaapPolicyEntry, CaapRule, OwnedCaapPolicy, OwnedCaapPolicyEntry, OwnedCaapRule,
+    CaapPolicyEntry, CaapRule, CaapSaclContribution, CaapSaclPhase, OwnedCaapPolicy,
+    OwnedCaapPolicyEntry, OwnedCaapRule,
 };
 pub use claims::{
     parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, ClaimValue,

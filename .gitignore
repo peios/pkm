@@ -4,3 +4,6 @@ Cargo.lock
 .pm/
 __pycache__/
 *.pyc
+kacs-tcb-dev.key
+kacs-tcb-dev.key.pub
+crates/libp-test/dist/

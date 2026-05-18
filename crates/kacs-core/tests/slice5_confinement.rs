@@ -1,10 +1,10 @@
 use kacs_core::{
     evaluate_dacl_result_list_with_confinement_context, evaluate_dacl_with_confinement_context,
-    AccessStatus, ConditionalContext, ConfinementTokenContext, GenericMapping, ObjectTypeList,
-    ObjectTypeNode, SecurityDescriptor, Sid, SidAndAttributes, TokenView, ACCESS_ALLOWED_ACE_TYPE,
-    ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACE_OBJECT_TYPE_PRESENT,
-    READ_CONTROL, SE_DACL_PRESENT, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY, SE_SELF_RELATIVE,
-    WRITE_DAC,
+    AccessStatus, ClaimAttribute, ClaimValue, ConditionalContext, ConfinementTokenContext,
+    GenericMapping, ObjectTypeList, ObjectTypeNode, SecurityDescriptor, Sid, SidAndAttributes,
+    TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+    ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACE_OBJECT_TYPE_PRESENT, READ_CONTROL, SE_DACL_PRESENT,
+    SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY, SE_SELF_RELATIVE, WRITE_DAC,
 };
 
 fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
@@ -140,6 +140,35 @@ fn sid_literal(sid: &[u8]) -> Vec<u8> {
     bytes.push(0x51);
     bytes.extend_from_slice(&(sid.len() as u32).to_le_bytes());
     bytes.extend_from_slice(sid);
+    bytes
+}
+
+fn string_literal(value: &str) -> Vec<u8> {
+    let utf16: Vec<u16> = value.encode_utf16().collect();
+    let mut bytes = Vec::new();
+    bytes.push(0x10);
+    bytes.extend_from_slice(&((utf16.len() * 2) as u32).to_le_bytes());
+    for code_unit in utf16 {
+        bytes.extend_from_slice(&code_unit.to_le_bytes());
+    }
+    bytes
+}
+
+fn attr_ref(opcode: u8, name: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.push(opcode);
+    bytes.extend_from_slice(&string_literal(name)[1..]);
+    bytes
+}
+
+fn composite(elements: &[Vec<u8>]) -> Vec<u8> {
+    let total = elements.iter().map(Vec::len).sum::<usize>();
+    let mut bytes = Vec::new();
+    bytes.push(0x50);
+    bytes.extend_from_slice(&(total as u32).to_le_bytes());
+    for element in elements {
+        bytes.extend_from_slice(element);
+    }
     bytes
 }
 
@@ -388,6 +417,89 @@ fn confinement_callback_membership_uses_full_token_groups() {
 }
 
 #[test]
+fn confinement_callback_conditions_see_all_claim_namespaces() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 9017]);
+    let package = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 66]);
+    let cases = [
+        (0xf8, "local", 0x01u32),
+        (0xf9, "user", 0x02u32),
+        (0xfa, "resource", 0x04u32),
+        (0xfb, "device", 0x08u32),
+    ];
+    let mut aces = Vec::new();
+    aces.push(basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, 0x0f, &user));
+    for (opcode, name, mask) in cases {
+        aces.push(callback_ace(
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            0,
+            mask,
+            &package,
+            &expr(&append_tokens(&[attr_ref(opcode, name), vec![0x87]])),
+        ));
+    }
+    let dacl = acl_bytes(&aces);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let confinement = ConfinementTokenContext {
+        confinement_sid: Some(parse_sid(&package)),
+        confinement_capabilities: &[],
+        confinement_exempt: false,
+    };
+    let local_claims = [ClaimAttribute::new(
+        "local",
+        0,
+        vec![ClaimValue::String("present".into())],
+    )];
+    let user_claims = [ClaimAttribute::new(
+        "user",
+        0,
+        vec![ClaimValue::String("present".into())],
+    )];
+    let resource_claims = [ClaimAttribute::new(
+        "resource",
+        0,
+        vec![ClaimValue::String("present".into())],
+    )];
+    let device_claims = [ClaimAttribute::new(
+        "device",
+        0,
+        vec![ClaimValue::String("present".into())],
+    )];
+    let context = ConditionalContext {
+        local_claims: &local_claims,
+        user_claims: &user_claims,
+        resource_claims: &resource_claims,
+        device_claims: &device_claims,
+        ..ConditionalContext::default()
+    };
+
+    let result = evaluate_dacl_with_confinement_context(
+        &sd,
+        &token,
+        0x0f,
+        &GenericMapping {
+            read: 0x01,
+            write: 0x02,
+            execute: 0x04,
+            all: 0x0f,
+        },
+        false,
+        &context,
+        &confinement,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(result.success);
+    assert_eq!(result.granted, 0x0f);
+}
+
+#[test]
 fn disabled_confinement_capability_still_matches_by_presence() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 9010]);
@@ -411,6 +523,159 @@ fn disabled_confinement_capability_still_matches_by_presence() {
     let confinement = ConfinementTokenContext {
         confinement_sid: Some(parse_sid(&package)),
         confinement_capabilities: &capability_entries,
+        confinement_exempt: false,
+    };
+
+    let result = evaluate_dacl_with_confinement_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &confinement,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(result.success);
+    assert_eq!(result.granted, READ_CONTROL);
+}
+
+#[test]
+fn deny_only_confinement_capability_still_matches_direct_ace_by_presence() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 9018]);
+    let package = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 67]);
+    let capability = sid_bytes([0, 0, 0, 0, 0, 15], &[3, 67]);
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user),
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &capability),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let capability_entries = [SidAndAttributes {
+        sid: parse_sid(&capability),
+        attributes: SE_GROUP_USE_FOR_DENY_ONLY,
+    }];
+    let confinement = ConfinementTokenContext {
+        confinement_sid: Some(parse_sid(&package)),
+        confinement_capabilities: &capability_entries,
+        confinement_exempt: false,
+    };
+
+    let result = evaluate_dacl_with_confinement_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &confinement,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(result.success);
+    assert_eq!(result.granted, READ_CONTROL);
+}
+
+#[test]
+fn all_application_packages_participates_only_when_supplied() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 9011]);
+    let package = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 60]);
+    let all_application_packages = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 1]);
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user),
+        basic_ace(
+            ACCESS_ALLOWED_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &all_application_packages,
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let all_application_packages_entry = [SidAndAttributes {
+        sid: parse_sid(&all_application_packages),
+        attributes: 0,
+    }];
+    let normal_confinement = ConfinementTokenContext {
+        confinement_sid: Some(parse_sid(&package)),
+        confinement_capabilities: &all_application_packages_entry,
+        confinement_exempt: false,
+    };
+    let strict_confinement = ConfinementTokenContext {
+        confinement_sid: Some(parse_sid(&package)),
+        confinement_capabilities: &[],
+        confinement_exempt: false,
+    };
+
+    let normal = evaluate_dacl_with_confinement_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &normal_confinement,
+    )
+    .expect("normal confinement evaluation should succeed");
+    let strict = evaluate_dacl_with_confinement_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &strict_confinement,
+    )
+    .expect("strict confinement evaluation should succeed");
+
+    assert!(normal.success);
+    assert_eq!(normal.granted, READ_CONTROL);
+    assert!(!strict.success);
+    assert_eq!(strict.granted, 0);
+}
+
+#[test]
+fn all_restricted_application_packages_participates_when_supplied() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 9012]);
+    let package = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 61]);
+    let all_restricted_application_packages = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 2]);
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user),
+        basic_ace(
+            ACCESS_ALLOWED_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &all_restricted_application_packages,
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let all_restricted_application_packages_entry = [SidAndAttributes {
+        sid: parse_sid(&all_restricted_application_packages),
+        attributes: 0,
+    }];
+    let confinement = ConfinementTokenContext {
+        confinement_sid: Some(parse_sid(&package)),
+        confinement_capabilities: &all_restricted_application_packages_entry,
         confinement_exempt: false,
     };
 
@@ -555,6 +820,269 @@ fn confinement_owner_rights_does_not_match_when_owner_is_outside_confinement_set
         &mapping(),
         false,
         &ConditionalContext::default(),
+        &confinement,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
+fn confinement_skips_owner_implicit_rights_even_when_confinement_sid_owns_object() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 68]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 9019]);
+    let dacl = acl_bytes(&[basic_ace(
+        ACCESS_ALLOWED_ACE_TYPE,
+        0,
+        READ_CONTROL | WRITE_DAC,
+        &user,
+    )]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let confinement = ConfinementTokenContext {
+        confinement_sid: Some(parse_sid(&owner)),
+        confinement_capabilities: &[],
+        confinement_exempt: false,
+    };
+
+    let result = evaluate_dacl_with_confinement_context(
+        &sd,
+        &token,
+        READ_CONTROL | WRITE_DAC,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &confinement,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
+fn confinement_owner_rights_ace_matches_when_owner_is_in_confinement_set() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 69]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 9020]);
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user),
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &owner_rights),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let confinement = ConfinementTokenContext {
+        confinement_sid: Some(parse_sid(&owner)),
+        confinement_capabilities: &[],
+        confinement_exempt: false,
+    };
+
+    let result = evaluate_dacl_with_confinement_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &confinement,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(result.success);
+    assert_eq!(result.granted, READ_CONTROL);
+}
+
+#[test]
+fn confinement_device_member_of_sees_owner_rights_virtual_group() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 62]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 9013]);
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user),
+        callback_ace(
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &owner,
+            &expr(&append_tokens(&[sid_literal(&owner_rights), vec![0x8a]])),
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let confinement = ConfinementTokenContext {
+        confinement_sid: Some(parse_sid(&owner)),
+        confinement_capabilities: &[],
+        confinement_exempt: false,
+    };
+
+    let result = evaluate_dacl_with_confinement_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &confinement,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(result.success);
+    assert_eq!(result.granted, READ_CONTROL);
+}
+
+#[test]
+fn confinement_device_member_of_any_sees_principal_self_virtual_group() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 9014]);
+    let package = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 63]);
+    let principal_self = sid_bytes([0, 0, 0, 0, 0, 5], &[10]);
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user),
+        callback_ace(
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &package,
+            &expr(&append_tokens(&[
+                composite(&[sid_literal(&principal_self)]),
+                vec![0x8c],
+            ])),
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let confinement = ConfinementTokenContext {
+        confinement_sid: Some(parse_sid(&package)),
+        confinement_capabilities: &[],
+        confinement_exempt: false,
+    };
+    let context = ConditionalContext {
+        self_sid: Some(parse_sid(&package)),
+        ..ConditionalContext::default()
+    };
+
+    let result = evaluate_dacl_with_confinement_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &context,
+        &confinement,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(result.success);
+    assert_eq!(result.granted, READ_CONTROL);
+}
+
+#[test]
+fn confinement_not_device_member_of_sees_owner_rights_virtual_group() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 64]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 9015]);
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user),
+        callback_ace(
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &owner,
+            &expr(&append_tokens(&[sid_literal(&owner_rights), vec![0x91]])),
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let confinement = ConfinementTokenContext {
+        confinement_sid: Some(parse_sid(&owner)),
+        confinement_capabilities: &[],
+        confinement_exempt: false,
+    };
+
+    let result = evaluate_dacl_with_confinement_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &ConditionalContext::default(),
+        &confinement,
+    )
+    .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
+fn confinement_not_device_member_of_any_sees_principal_self_virtual_group() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 9016]);
+    let package = sid_bytes([0, 0, 0, 0, 0, 15], &[2, 65]);
+    let principal_self = sid_bytes([0, 0, 0, 0, 0, 5], &[10]);
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user),
+        callback_ace(
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &package,
+            &expr(&append_tokens(&[
+                composite(&[sid_literal(&principal_self)]),
+                vec![0x93],
+            ])),
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &[],
+    };
+    let confinement = ConfinementTokenContext {
+        confinement_sid: Some(parse_sid(&package)),
+        confinement_capabilities: &[],
+        confinement_exempt: false,
+    };
+    let context = ConditionalContext {
+        self_sid: Some(parse_sid(&package)),
+        ..ConditionalContext::default()
+    };
+
+    let result = evaluate_dacl_with_confinement_context(
+        &sd,
+        &token,
+        READ_CONTROL,
+        &mapping(),
+        false,
+        &context,
         &confinement,
     )
     .expect("evaluation should succeed");

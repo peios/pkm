@@ -291,6 +291,19 @@ fn malformed_resource_attribute_payload_fails_closed() {
 }
 
 #[test]
+fn resource_attribute_rejects_fqbn_claim_type() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let mut fqbn_claim = int64_claim("Publisher", 1);
+    fqbn_claim[4..6].copy_from_slice(&0x0004u16.to_le_bytes());
+    let sacl = acl_bytes(&[resource_attribute_ace(0, &fqbn_claim)]);
+    let sd_bytes = sd_with_sacl(&owner, &sacl);
+
+    let err = SecurityDescriptor::parse(&sd_bytes).expect_err("FQBN resource claim must fail");
+
+    assert_eq!(err, KacsError::InvalidClaimType(0x0004));
+}
+
+#[test]
 fn inherit_only_sacl_metadata_aces_are_ignored() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let policy = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 3]);

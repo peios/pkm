@@ -72,8 +72,6 @@ pub enum KacsError {
     MissingSelfRelativeControl(u16),
     /// Descriptor owner SID was required but missing.
     MissingSecurityDescriptorOwner,
-    /// Descriptor group SID was required but missing.
-    MissingSecurityDescriptorGroup,
     /// A security descriptor presence bit and offset disagreed.
     InconsistentSecurityDescriptorField {
         /// Logical field name.

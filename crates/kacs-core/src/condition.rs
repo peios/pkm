@@ -43,6 +43,13 @@ pub struct ConditionalContext<'a> {
     pub identity_membership_is_presence_based: bool,
     /// Device-group SIDs visible to `Device_Member_of*` operators.
     pub device_groups: &'a [SidAndAttributes<'a>],
+    /// Whether device membership operators also see caller/owner virtual
+    /// groups injected by a synthetic pass.
+    pub device_membership_uses_virtual_groups: bool,
+    /// Whether SID membership operators may inspect token or device-group
+    /// membership. CAAP `applies_to` disables this while still allowing claim
+    /// predicates.
+    pub membership_allowed: bool,
     /// User claim set visible to `@User.*` references.
     pub user_claims: &'a [ClaimAttribute],
     /// Device claim set visible to `@Device.*` references.
@@ -62,6 +69,8 @@ impl<'a> Default for ConditionalContext<'a> {
             identity: None,
             identity_membership_is_presence_based: false,
             device_groups: &[],
+            device_membership_uses_virtual_groups: false,
+            membership_allowed: true,
             user_claims: &[],
             device_claims: &[],
             resource_claims: &[],
@@ -1031,7 +1040,11 @@ fn sid_in_membership_set(
     for_allow: bool,
     device: bool,
 ) -> Option<bool> {
-    if !device {
+    if !context.membership_allowed {
+        return None;
+    }
+
+    if !device || context.device_membership_uses_virtual_groups {
         if sid_bytes == OWNER_RIGHTS_SID_BYTES {
             return Some(context.caller_is_owner);
         }

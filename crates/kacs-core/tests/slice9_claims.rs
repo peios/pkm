@@ -247,6 +247,18 @@ fn nonzero_reserved_field_is_ignored() {
 }
 
 #[test]
+fn unknown_claim_flags_are_preserved_without_parser_semantics() {
+    let unknown_flags = 0x8000_0040u32;
+    let bytes = uint64_claim("OpaqueFlags", &[5], unknown_flags);
+
+    let claim = parse_claim_attribute_entry(&bytes).expect("claim should parse");
+
+    assert_eq!(claim.name, "OpaqueFlags");
+    assert_eq!(claim.flags, unknown_flags);
+    assert_eq!(claim.values, vec![ClaimValue::UInt64(5)]);
+}
+
+#[test]
 fn unterminated_claim_name_is_rejected() {
     let mut bytes = int64_claim("NoTerminator", &[1], 0);
     bytes.truncate(bytes.len() - 2);
@@ -315,6 +327,33 @@ fn parses_length_prefixed_claim_array() {
     assert_eq!(claims[0].values, vec![ClaimValue::Int64(7)]);
     assert_eq!(claims[1].name, "Mfa");
     assert_eq!(claims[1].values, vec![ClaimValue::Boolean(1)]);
+}
+
+#[test]
+fn claim_array_rejects_zero_entry_length() {
+    let bytes = 0u32.to_le_bytes();
+
+    let err = parse_claim_attribute_array(&bytes).expect_err("zero entry length must fail");
+
+    assert_eq!(
+        err,
+        KacsError::InvalidClaimFormat("zero-length claim entry")
+    );
+}
+
+#[test]
+fn claim_array_rejects_overlong_entry_length() {
+    let first = int64_claim("Score", &[7], 0);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&((first.len() + 1) as u32).to_le_bytes());
+    bytes.extend_from_slice(&first);
+
+    let err = parse_claim_attribute_array(&bytes).expect_err("overlong entry length must fail");
+
+    assert_eq!(
+        err,
+        KacsError::InvalidClaimFormat("claim array entry length")
+    );
 }
 
 #[test]

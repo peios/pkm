@@ -1,6 +1,6 @@
 use kacs_core::{
     apply_mic, resolve_mandatory_label, GenericMapping, IntegrityLevel, KacsError,
-    MicEnforcementState, PrivilegeProvenance, SecurityDescriptor, READ_CONTROL,
+    MicEnforcementState, PrivilegeProvenance, SecurityDescriptor, MAXIMUM_ALLOWED, READ_CONTROL,
     SE_RELABEL_PRIVILEGE, SE_SACL_PRESENT, SE_SELF_RELATIVE, WRITE_DAC, WRITE_OWNER,
 };
 
@@ -160,6 +160,128 @@ fn invalid_label_sid_is_rejected() {
 
     let err = resolve_mandatory_label(&sd).expect_err("invalid label sid must fail");
     assert_eq!(err, KacsError::InvalidMandatoryLabelSid);
+}
+
+#[test]
+fn all_defined_integrity_label_sids_are_accepted() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let cases = [
+        (0, IntegrityLevel::Untrusted),
+        (4096, IntegrityLevel::Low),
+        (8192, IntegrityLevel::Medium),
+        (12288, IntegrityLevel::High),
+        (16384, IntegrityLevel::System),
+    ];
+
+    for (rid, expected) in cases {
+        let sid = sid_bytes([0, 0, 0, 0, 0, 16], &[rid]);
+        let sacl = acl_bytes(&[basic_ace(
+            SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+            0,
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+            &sid,
+        )]);
+        let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
+        let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+
+        let label = resolve_mandatory_label(&sd).expect("defined label should resolve");
+
+        assert_eq!(label.integrity_level, expected);
+    }
+}
+
+#[test]
+fn mandatory_label_sid_requires_integrity_authority_and_single_subauthority() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let wrong_authority = sid_bytes([0, 0, 0, 0, 0, 5], &[8192]);
+    let wrong_count = sid_bytes([0, 0, 0, 0, 0, 16], &[8192, 1]);
+
+    for invalid in [wrong_authority, wrong_count] {
+        let sacl = acl_bytes(&[basic_ace(
+            SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+            0,
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+            &invalid,
+        )]);
+        let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
+        let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+
+        let err = resolve_mandatory_label(&sd).expect_err("invalid label sid must fail");
+        assert_eq!(err, KacsError::InvalidMandatoryLabelSid);
+    }
+}
+
+#[test]
+fn mandatory_label_reserved_mask_bits_are_ignored() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let high = sid_bytes([0, 0, 0, 0, 0, 16], &[12288]);
+    let ignored_reserved = 0x0800_0000;
+    let sacl = acl_bytes(&[basic_ace(
+        SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+        0,
+        SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | ignored_reserved,
+        &high,
+    )]);
+    let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+
+    let label = resolve_mandatory_label(&sd).expect("label resolution should succeed");
+    assert_eq!(
+        label.mask,
+        SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | ignored_reserved
+    );
+
+    let mut decided = 0u32;
+    let mut provenance = PrivilegeProvenance::default();
+    let mic = apply_mic(
+        label,
+        IntegrityLevel::Medium,
+        TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
+        0,
+        &mapping(),
+        &mut decided,
+        &mut provenance,
+    )
+    .expect("mic should ignore unknown policy bits");
+
+    assert_eq!(decided, WRITE_DAC | WRITE_OWNER);
+    assert_eq!(mic.mandatory_decided, decided);
+}
+
+#[test]
+fn mandatory_label_maximum_allowed_mask_bit_is_ignored() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let high = sid_bytes([0, 0, 0, 0, 0, 16], &[12288]);
+    let sacl = acl_bytes(&[basic_ace(
+        SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+        0,
+        SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | MAXIMUM_ALLOWED,
+        &high,
+    )]);
+    let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+
+    let label = resolve_mandatory_label(&sd).expect("label resolution should succeed");
+    assert_eq!(
+        label.mask,
+        SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | MAXIMUM_ALLOWED
+    );
+
+    let mut decided = 0u32;
+    let mut provenance = PrivilegeProvenance::default();
+    let mic = apply_mic(
+        label,
+        IntegrityLevel::Medium,
+        TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
+        0,
+        &mapping(),
+        &mut decided,
+        &mut provenance,
+    )
+    .expect("mic should ignore non-policy maximum-allowed bit");
+
+    assert_eq!(decided, WRITE_DAC | WRITE_OWNER);
+    assert_eq!(mic.mandatory_decided, decided);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use kacs_core::{
     apply_pip, resolve_process_trust_label, GenericMapping, KacsError, PipContext,
     PipEnforcementState, ProcessTrustLabel, SecurityDescriptor, ACCESS_SYSTEM_SECURITY,
-    READ_CONTROL, SE_SACL_PRESENT, SE_SELF_RELATIVE, WRITE_DAC, WRITE_OWNER,
+    GENERIC_WRITE, READ_CONTROL, SE_SACL_PRESENT, SE_SELF_RELATIVE, WRITE_DAC, WRITE_OWNER,
 };
 
 const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
@@ -157,6 +157,62 @@ fn malformed_trust_label_shape_is_rejected() {
 }
 
 #[test]
+fn malformed_trust_label_sid_matrix_is_rejected() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let cases = [
+        sid_bytes([0, 0, 0, 0, 0, 5], &[512, 4096]),
+        sid_bytes([0, 0, 0, 0, 0, 19], &[512]),
+        sid_bytes([0, 0, 0, 0, 0, 19], &[512, 4096, 8192]),
+    ];
+
+    for invalid in cases {
+        let sacl = acl_bytes(&[basic_ace(
+            SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+            0,
+            READ_CONTROL,
+            &invalid,
+        )]);
+        let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
+        let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+
+        let err =
+            resolve_process_trust_label(&sd).expect_err("malformed trust label sid must fail");
+        assert_eq!(err, KacsError::InvalidProcessTrustLabelSid);
+    }
+}
+
+#[test]
+fn first_applicable_valid_trust_label_ignores_later_malformed_labels() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let valid = sid_bytes([0, 0, 0, 0, 0, 19], &[512, 4096]);
+    let malformed = sid_bytes([0, 0, 0, 0, 0, 19], &[1024]);
+    let sacl = acl_bytes(&[
+        basic_ace(SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, 0, READ_CONTROL, &valid),
+        basic_ace(
+            SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+            0,
+            WRITE_DAC,
+            &malformed,
+        ),
+    ]);
+    let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+
+    let label = resolve_process_trust_label(&sd)
+        .expect("later malformed labels must not be inspected")
+        .expect("first label should exist");
+
+    assert_eq!(
+        label,
+        ProcessTrustLabel {
+            pip_type: 512,
+            pip_trust: 4096,
+            mask: READ_CONTROL,
+        }
+    );
+}
+
+#[test]
 fn dominant_callers_receive_no_pip_predecisions() {
     let label = ProcessTrustLabel {
         pip_type: 512,
@@ -184,6 +240,109 @@ fn dominant_callers_receive_no_pip_predecisions() {
     assert_eq!(granted, READ_CONTROL | WRITE_DAC);
     assert_eq!(privilege_granted, ACCESS_SYSTEM_SECURITY);
     assert_eq!(pip, PipEnforcementState::default());
+}
+
+#[test]
+fn dominance_matrix_requires_both_pip_axes() {
+    let label = ProcessTrustLabel {
+        pip_type: 512,
+        pip_trust: 4096,
+        mask: READ_CONTROL,
+    };
+    let cases = [
+        (
+            PipContext {
+                pip_type: 512,
+                pip_trust: 4096,
+            },
+            true,
+        ),
+        (
+            PipContext {
+                pip_type: 1024,
+                pip_trust: 8192,
+            },
+            true,
+        ),
+        (
+            PipContext {
+                pip_type: 1024,
+                pip_trust: 1024,
+            },
+            false,
+        ),
+        (
+            PipContext {
+                pip_type: 256,
+                pip_trust: 8192,
+            },
+            false,
+        ),
+    ];
+
+    for (caller_pip, dominates) in cases {
+        let mut decided = 0u32;
+        let mut granted = READ_CONTROL | WRITE_DAC;
+        let mut privilege_granted = WRITE_DAC;
+
+        let pip = apply_pip(
+            label,
+            caller_pip,
+            &mapping(),
+            &mut decided,
+            &mut granted,
+            &mut privilege_granted,
+        )
+        .expect("pip should succeed");
+
+        if dominates {
+            assert_eq!(decided, 0);
+            assert_eq!(granted, READ_CONTROL | WRITE_DAC);
+            assert_eq!(privilege_granted, WRITE_DAC);
+            assert_eq!(pip, PipEnforcementState::default());
+        } else {
+            assert_eq!(
+                decided,
+                WRITE_DAC | WRITE_OWNER | 0x0000_0020 | ACCESS_SYSTEM_SECURITY
+            );
+            assert_eq!(granted, READ_CONTROL);
+            assert_eq!(privilege_granted, 0);
+            assert_eq!(pip.mandatory_decided, decided);
+        }
+    }
+}
+
+#[test]
+fn generic_trust_label_mask_is_mapped_before_denial() {
+    let label = ProcessTrustLabel {
+        pip_type: 512,
+        pip_trust: 4096,
+        mask: GENERIC_WRITE,
+    };
+    let mut decided = 0u32;
+    let mut granted = READ_CONTROL | WRITE_DAC | WRITE_OWNER | 0x0000_0020 | ACCESS_SYSTEM_SECURITY;
+    let mut privilege_granted = WRITE_OWNER | ACCESS_SYSTEM_SECURITY;
+
+    let pip = apply_pip(
+        label,
+        PipContext {
+            pip_type: 512,
+            pip_trust: 1024,
+        },
+        &mapping(),
+        &mut decided,
+        &mut granted,
+        &mut privilege_granted,
+    )
+    .expect("pip should succeed");
+
+    assert_eq!(
+        decided,
+        READ_CONTROL | WRITE_OWNER | 0x0000_0020 | ACCESS_SYSTEM_SECURITY
+    );
+    assert_eq!(granted, WRITE_DAC);
+    assert_eq!(privilege_granted, 0);
+    assert_eq!(pip.mandatory_decided, decided);
 }
 
 #[test]

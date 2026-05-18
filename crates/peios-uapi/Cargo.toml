@@ -1,7 +1,9 @@
 [package]
 name = "peios-uapi"
-version = "0.19.0"
-edition = "2021"
+version = "0.19.8"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
 publish = false
 description = "Rust bindings for the Peios userspace kernel ABI (KACS, KMES, LCS)"
 
@@ -10,7 +12,18 @@ description = "Rust bindings for the Peios userspace kernel ABI (KACS, KMES, LCS
 # etc.). Keeping the bindings next to their source of truth removes any
 # possibility of drift -- the same PR that adds a syscall or constant in C
 # bumps the Rust shadow.
+#
+# no_std + alloc by default; the `std` feature (default) enables
+# `From<Errno> for std::io::Error` and other std-only conveniences.
 
 [lib]
 name = "peios_uapi"
 path = "src/lib.rs"
+
+[features]
+default = ["std"]
+# Enables std-only conveniences: `From<Errno> for std::io::Error`,
+# `Value::render` (which uses `println!`), and similar. Disable for
+# libc-free targets (recovery shells, future Tier 3, embedded contexts).
+# The `alloc` crate is always required — every parser allocates.
+std = []

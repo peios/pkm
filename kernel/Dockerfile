@@ -1,4 +1,4 @@
-FROM archlinux:latest
+FROM archlinux:latest AS base
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 # Kernel build dependencies (C only — Rust via rustup, LLVM 18 pinned)
@@ -125,6 +125,20 @@ RUN scripts/config \
         --set-val SQUASHFS_ZSTD y && \
     make LLVM=1 olddefconfig
 
+# ccache: persistent cache via volume mount at /ccache
+ENV CCACHE_DIR=/ccache
+ENV CCACHE_MAXSIZE=10G
+
+# ─── base stage ends here ────────────────────────────────────────────────
+# Everything above is independent of PKM source (toolchain, pinned kernel
+# source, base kernel config). The `base` stage is the foundation for the
+# fast KUnit iteration loop (make kunit-*-fast), which stages PKM source at
+# runtime into a persistent build-tree volume rather than baking it into an
+# image — keeping the kernel object tree incremental between runs.
+
+# ─── pkm stage: bakes PKM source into the image (hermetic build path) ─────
+FROM base AS pkm
+
 # Cache-bust: everything below here rebuilds when source changes.
 # The Makefile passes --build-arg CACHE_BUST=$(checksum) to invalidate
 # Docker's layer cache when any PKM source file changes.
@@ -160,22 +174,24 @@ COPY kernel/scripts/generate-kacs-builtin-signing-keys.py /tmp/pkm-src/kernel/sc
 COPY pkm_kconfig /tmp/pkm-src/pkm_kconfig
 COPY pkm_makefile /tmp/pkm-src/pkm_makefile
 COPY kernel/stage-kacs-core.sh /tmp/pkm-src/kernel/stage-kacs-core.sh
+COPY kernel/verify-generated-tree.sh /tmp/pkm-src/kernel/verify-generated-tree.sh
+COPY kernel/verify-kernel-config.sh /tmp/pkm-src/kernel/verify-kernel-config.sh
 RUN chmod +x /usr/local/bin/install-pkm-subtree /usr/local/bin/stage-kacs-core \
-	/tmp/pkm-src/kernel/stage-kacs-core.sh && \
+	/tmp/pkm-src/kernel/stage-kacs-core.sh \
+	/tmp/pkm-src/kernel/verify-kernel-config.sh && \
 	PKM_KACS_TCB_PUBKEY_HEX="${PKM_KACS_TCB_PUBKEY_HEX}" \
+	PKM_KACS_ALLOW_EMPTY_TCB_PUBKEY="${ENABLE_PKM_KUNIT}" \
 		install-pkm-subtree /tmp/pkm-src /build/linux && \
-	rm -rf /tmp/pkm-src && \
+	bash /tmp/pkm-src/kernel/verify-generated-tree.sh /build/linux && \
 	scripts/config --enable SECURITY_PKM && \
 	scripts/config --set-str LSM "landlock,lockdown,yama,integrity,pkm" && \
 	if [[ "${ENABLE_PKM_KUNIT}" == "1" ]]; then \
 		scripts/config --enable KUNIT && \
 		scripts/config --enable SECURITY_PKM_KUNIT; \
 	fi && \
-	make LLVM=1 olddefconfig
-
-# ccache: persistent cache via volume mount at /ccache
-ENV CCACHE_DIR=/ccache
-ENV CCACHE_MAXSIZE=10G
+	make LLVM=1 olddefconfig && \
+	bash /tmp/pkm-src/kernel/verify-kernel-config.sh /build/linux/.config && \
+	rm -rf /tmp/pkm-src
 
 # Default: build using all available cores
 CMD ["bash", "-c", "make LLVM=1 CC=\"ccache clang\" -j$(nproc)"]

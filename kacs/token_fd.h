@@ -214,5 +214,7 @@ long pkm_kacs_kunit_token_fd_adjust_default(int fd,
 long pkm_kacs_kunit_token_fd_adjust_session_for_token(int fd,
 						      const void *caller_token,
 						      u32 session_id);
+long pkm_kacs_kunit_token_fd_ioctl(int fd, unsigned int cmd,
+				   unsigned long arg);
 
 #endif /* _SECURITY_PKM_KACS_TOKEN_FD_H */

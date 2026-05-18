@@ -1,4 +1,6 @@
-use crate::access_check::{access_check_core, AccessCheckMode, PrivilegeUseEvent};
+use crate::access_check::{
+    access_check_core, AccessCheckMode, CaapDiagnosticEvent, PrivilegeUseEvent,
+};
 use crate::access_mask::GenericMapping;
 use crate::audit::AuditEvent;
 use crate::caap::CaapPolicyEntry;
@@ -149,6 +151,8 @@ pub struct AccessCheckAbiExecution {
     pub audit_events: Vec<OwnedAuditEvent>,
     /// Privilege-use events emitted by the request.
     pub privilege_use_events: Vec<PrivilegeUseEvent>,
+    /// CAAP diagnostic events emitted by the request.
+    pub caap_diagnostic_events: Vec<CaapDiagnosticEvent>,
     /// Updated privilege state after successful privilege-use marking.
     pub updated_privileges: TokenPrivileges,
 }
@@ -263,6 +267,8 @@ pub fn execute_access_check_abi<'a>(
         identity: None,
         identity_membership_is_presence_based: false,
         device_groups: resolved.device_groups,
+        device_membership_uses_virtual_groups: false,
+        membership_allowed: true,
         user_claims: resolved.user_claims,
         device_claims: resolved.device_claims,
         resource_claims: &[],
@@ -311,6 +317,7 @@ pub fn execute_access_check_abi<'a>(
         node_results: None,
         audit_events: own_audit_events(&state.audit_events)?,
         privilege_use_events: state.privilege_use_events,
+        caap_diagnostic_events: state.caap_diagnostic_events,
         updated_privileges: state.updated_privileges,
     })
 }
@@ -347,6 +354,8 @@ pub fn execute_access_check_list_abi<'a>(
         identity: None,
         identity_membership_is_presence_based: false,
         device_groups: resolved.device_groups,
+        device_membership_uses_virtual_groups: false,
+        membership_allowed: true,
         user_claims: resolved.user_claims,
         device_claims: resolved.device_claims,
         resource_claims: &[],
@@ -403,6 +412,7 @@ pub fn execute_access_check_list_abi<'a>(
         node_results: Some(node_results),
         audit_events: own_audit_events(&state.audit_events)?,
         privilege_use_events: state.privilege_use_events,
+        caap_diagnostic_events: state.caap_diagnostic_events,
         updated_privileges: state.updated_privileges,
     })
 }
@@ -515,7 +525,7 @@ fn effective_pip(requested: PipContext, fallback: PipContext) -> PipContext {
     }
 }
 
-fn own_audit_events(events: &[AuditEvent<'_>]) -> KacsResult<Vec<OwnedAuditEvent>> {
+pub(crate) fn own_audit_events(events: &[AuditEvent<'_>]) -> KacsResult<Vec<OwnedAuditEvent>> {
     let mut owned = Vec::with_capacity(events.len())?;
     for event in events {
         owned.push(OwnedAuditEvent {
@@ -593,4 +603,227 @@ fn read_u64_fixed(bytes: &[u8; KACS_ACCESS_CHECK_ARGS_SIZE], offset: usize) -> u
         bytes[offset + 6],
         bytes[offset + 7],
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    const SD_PTR: u64 = 0x1000;
+    const TREE_PTR: u64 = 0x2000;
+    const AUDIT_PTR: u64 = 0x3000;
+    const SD_BYTES: [u8; 1] = [0x42];
+
+    struct TestMemory {
+        entries: BTreeMap<u64, std::vec::Vec<u8>>,
+    }
+
+    impl TestMemory {
+        fn new() -> Self {
+            let mut entries = BTreeMap::new();
+            entries.insert(SD_PTR, SD_BYTES.to_vec());
+            Self { entries }
+        }
+
+        fn with(mut self, ptr: u64, bytes: &[u8]) -> Self {
+            self.entries.insert(ptr, bytes.to_vec());
+            self
+        }
+    }
+
+    impl AccessCheckAbiMemory for TestMemory {
+        fn read_bytes(&self, ptr: u64, len: usize) -> Option<Vec<u8>> {
+            let bytes = self.entries.get(&ptr)?;
+            if bytes.len() < len {
+                return None;
+            }
+            let mut out = Vec::new();
+            out.extend_from_slice(&bytes[..len]).ok()?;
+            Some(out)
+        }
+    }
+
+    fn base_args(caller_size: u32) -> std::vec::Vec<u8> {
+        let mut args = std::vec![0u8; KACS_ACCESS_CHECK_ARGS_SIZE];
+        write_u32(&mut args, 0, caller_size);
+        write_i32(&mut args, 4, -1);
+        write_u64(&mut args, 8, SD_PTR);
+        write_u32(&mut args, 16, SD_BYTES.len() as u32);
+        write_u32(&mut args, 20, 0x20089);
+        args
+    }
+
+    fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_i32(bytes: &mut [u8], offset: usize, value: i32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    #[test]
+    fn parser_accepts_v1_minimum_and_zero_fills_appended_fields() {
+        let mut args = base_args(KACS_ACCESS_CHECK_ARGS_V1_SIZE);
+        args.truncate(KACS_ACCESS_CHECK_ARGS_V1_SIZE as usize);
+
+        let request = parse_access_check_abi_request(&args, &TestMemory::new()).unwrap();
+
+        assert_eq!(request.token_fd, -1);
+        assert_eq!(request.sd_bytes.as_slice(), &SD_BYTES);
+        assert_eq!(request.self_sid_bytes, None);
+        assert_eq!(request.object_tree, None);
+        assert!(request.local_claims.is_empty());
+        assert_eq!(request.audit_context, None);
+        assert_eq!(request.granted_out_ptr, None);
+        assert_eq!(request.continuous_audit_out_ptr, None);
+        assert_eq!(request.staging_mismatch_out_ptr, None);
+        assert_eq!(request.pip, PipContext::default());
+    }
+
+    #[test]
+    fn parser_rejects_undersized_and_truncated_args() {
+        let mut undersized = base_args(KACS_ACCESS_CHECK_ARGS_V1_SIZE - 1);
+        undersized.truncate((KACS_ACCESS_CHECK_ARGS_V1_SIZE - 1) as usize);
+        assert_eq!(
+            parse_access_check_abi_request(&undersized, &TestMemory::new()).unwrap_err(),
+            KacsError::InvalidAbiStructSize {
+                provided: KACS_ACCESS_CHECK_ARGS_V1_SIZE - 1,
+                minimum: KACS_ACCESS_CHECK_ARGS_V1_SIZE
+            }
+        );
+
+        let mut truncated = base_args(KACS_ACCESS_CHECK_ARGS_SIZE as u32);
+        truncated.truncate(KACS_ACCESS_CHECK_ARGS_SIZE - 1);
+        assert_eq!(
+            parse_access_check_abi_request(&truncated, &TestMemory::new()).unwrap_err(),
+            KacsError::Truncated("kacs_access_check_args")
+        );
+    }
+
+    #[test]
+    fn parser_ignores_nonzero_bytes_after_current_struct_size() {
+        let mut args = base_args(160);
+        args.resize(160, 0xff);
+
+        let request = parse_access_check_abi_request(&args, &TestMemory::new()).unwrap();
+
+        assert_eq!(request.sd_bytes.as_slice(), &SD_BYTES);
+    }
+
+    #[test]
+    fn parser_rejects_nonzero_reserved_padding_fields() {
+        for (offset, field) in [(68, "_pad0"), (84, "_pad1"), (116, "_pad2")] {
+            let mut args = base_args(KACS_ACCESS_CHECK_ARGS_SIZE as u32);
+            write_u32(&mut args, offset, 1);
+
+            assert_eq!(
+                parse_access_check_abi_request(&args, &TestMemory::new()).unwrap_err(),
+                KacsError::NonZeroAbiReservedField(field)
+            );
+        }
+    }
+
+    #[test]
+    fn parser_rejects_optional_pointer_length_mismatches() {
+        for (ptr_offset, len_offset, ptr_value, len_value, expected) in [
+            (
+                40,
+                48,
+                0x4000,
+                0,
+                "self_sid_ptr and self_sid_len must both be present",
+            ),
+            (
+                40,
+                48,
+                0,
+                8,
+                "self_sid_ptr and self_sid_len must both be present",
+            ),
+            (
+                56,
+                64,
+                0x4000,
+                0,
+                "object_tree_ptr and object_tree_count must both be present",
+            ),
+            (
+                56,
+                64,
+                0,
+                1,
+                "object_tree_ptr and object_tree_count must both be present",
+            ),
+            (
+                72,
+                80,
+                0x4000,
+                0,
+                "local_claims_ptr and local_claims_len must both be present",
+            ),
+            (
+                72,
+                80,
+                0,
+                4,
+                "local_claims_ptr and local_claims_len must both be present",
+            ),
+            (
+                104,
+                112,
+                0x4000,
+                0,
+                "audit_context_ptr and audit_context_len must both be present",
+            ),
+            (
+                104,
+                112,
+                0,
+                4,
+                "audit_context_ptr and audit_context_len must both be present",
+            ),
+        ] {
+            let mut args = base_args(KACS_ACCESS_CHECK_ARGS_SIZE as u32);
+            write_u64(&mut args, ptr_offset, ptr_value);
+            write_u32(&mut args, len_offset, len_value);
+
+            assert_eq!(
+                parse_access_check_abi_request(&args, &TestMemory::new()).unwrap_err(),
+                KacsError::InvalidAbiInput(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn parser_rejects_object_tree_reserved_field() {
+        let mut args = base_args(KACS_ACCESS_CHECK_ARGS_SIZE as u32);
+        write_u64(&mut args, 56, TREE_PTR);
+        write_u32(&mut args, 64, 1);
+
+        let mut entry = [0u8; KACS_OBJECT_TYPE_ENTRY_SIZE];
+        entry[2..4].copy_from_slice(&1u16.to_le_bytes());
+        let memory = TestMemory::new().with(TREE_PTR, &entry);
+
+        assert_eq!(
+            parse_access_check_abi_request(&args, &memory).unwrap_err(),
+            KacsError::NonZeroAbiReservedField("kacs_object_type_entry._reserved")
+        );
+    }
+
+    #[test]
+    fn parser_rejects_oversized_audit_context() {
+        let mut args = base_args(KACS_ACCESS_CHECK_ARGS_SIZE as u32);
+        write_u64(&mut args, 104, AUDIT_PTR);
+        write_u32(&mut args, 112, KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN + 1);
+
+        assert_eq!(
+            parse_access_check_abi_request(&args, &TestMemory::new()).unwrap_err(),
+            KacsError::InvalidAbiInput("audit_context_len exceeds 4096")
+        );
+    }
 }

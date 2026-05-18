@@ -238,8 +238,13 @@ require_file "$kernel_root/include/linux/ptrace.h"
 require_file "$kernel_root/io_uring/rw.c"
 require_file "$kernel_root/kernel/events/core.c"
 require_file "$kernel_root/kernel/pid.c"
+require_file "$kernel_root/kernel/ptrace.c"
 require_file "$kernel_root/kernel/sched/syscalls.c"
+require_file "$kernel_root/kernel/signal.c"
 require_file "$kernel_root/kernel/sys.c"
+require_file "$kernel_root/mm/mempolicy.c"
+require_file "$kernel_root/mm/migrate.c"
+require_file "$kernel_root/mm/process_vm_access.c"
 require_file "$kernel_root/security/commoncap.c"
 require_file "$kernel_root/security/security.c"
 
@@ -270,9 +275,15 @@ install -m 0644 "$src_root/kernel/crypto/ed25519.c" "$kernel_root/crypto/ed25519
 install -m 0644 "$src_root/kernel/crypto/ed25519-hacl.c" "$kernel_root/crypto/ed25519-hacl.c"
 install -m 0644 "$src_root/kernel/crypto/ed25519-hacl.h" "$kernel_root/crypto/ed25519-hacl.h"
 
-python3 "$src_root/kernel/scripts/generate-kacs-builtin-signing-keys.py" \
-	--pubkey-hex "${PKM_KACS_TCB_PUBKEY_HEX:-}" \
+signing_key_args=(
+	--pubkey-hex "${PKM_KACS_TCB_PUBKEY_HEX:-}"
 	--out "$pkm_dir/kacs/builtin_signing_keys.h"
+)
+if [[ "${PKM_KACS_ALLOW_EMPTY_TCB_PUBKEY:-0}" == "1" ]]; then
+	signing_key_args+=(--allow-empty)
+fi
+python3 "$src_root/kernel/scripts/generate-kacs-builtin-signing-keys.py" \
+	"${signing_key_args[@]}"
 
 "$src_root/kernel/stage-kacs-core.sh" \
 	"$src_root/crates/kacs-core/src" \
@@ -478,6 +489,84 @@ insert_line_after_exact_once '#define PTRACE_MODE_PIDFD_OPEN	0x40' \
 insert_line_after_exact_once '#define PTRACE_MODE_PROC_QUERY_LIMITED	0x80' \
 	'#define PTRACE_MODE_PROC_QUERY_INFORMATION	0x100' \
 	"$kernel_root/include/linux/ptrace.h"
+replace_line_after_anchor_once 'static int check_kill_permission(int sig, struct kernel_siginfo *info,' \
+	'	if (!same_thread_group(current, t) &&
+	    !kill_ok_by_cred(t)) {' \
+	'#ifdef CONFIG_SECURITY_PKM
+	return security_task_kill(t, info, sig, NULL);
+#endif
+
+	if (!same_thread_group(current, t) &&
+	    !kill_ok_by_cred(t)) {' \
+	"$kernel_root/kernel/signal.c"
+replace_line_after_anchor_once 'static int __ptrace_may_access(struct task_struct *task, unsigned int mode)' \
+	'	rcu_read_lock();' \
+	'#ifdef CONFIG_SECURITY_PKM
+	return security_ptrace_access_check(task, mode);
+#endif
+
+	rcu_read_lock();' \
+	"$kernel_root/kernel/ptrace.c"
+replace_line_after_anchor_once 'static struct mm_struct *find_mm_struct(pid_t pid, nodemask_t *mem_nodes)' \
+	'	if (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)) {
+		mm = ERR_PTR(-EPERM);
+		goto out;
+	}' \
+	'#ifndef CONFIG_SECURITY_PKM
+	if (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)) {
+		mm = ERR_PTR(-EPERM);
+		goto out;
+	}
+#endif' \
+	"$kernel_root/mm/migrate.c"
+replace_line_after_anchor_once 'static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,' \
+	'	if (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)) {
+		rcu_read_unlock();
+		err = -EPERM;
+		goto out_put;
+	}
+	rcu_read_unlock();' \
+	'#ifndef CONFIG_SECURITY_PKM
+	if (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)) {
+		rcu_read_unlock();
+		err = -EPERM;
+		goto out_put;
+	}
+#endif
+	rcu_read_unlock();' \
+	"$kernel_root/mm/mempolicy.c"
+replace_line_after_anchor_once 'static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,' \
+	'	err = security_task_movememory(task);
+	if (err)
+		goto out_put;' \
+	'#ifndef CONFIG_SECURITY_PKM
+	err = security_task_movememory(task);
+	if (err)
+		goto out_put;
+#endif' \
+	"$kernel_root/mm/mempolicy.c"
+insert_block_before_exact_once '	task_nodes = cpuset_mems_allowed(task);' \
+	'PKM: gate migrate_pages before native node/capability constraints' \
+	'#ifdef CONFIG_SECURITY_PKM
+	/* PKM: gate migrate_pages before native node/capability constraints. */
+	err = security_task_movememory(task);
+	if (err)
+		goto out_put;
+#endif
+
+' \
+	"$kernel_root/mm/mempolicy.c"
+replace_line_after_anchor_once 'static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,' \
+	'	mm = mm_access(task, PTRACE_MODE_ATTACH_REALCREDS);' \
+	'	mm = mm_access(task, vm_write ? PTRACE_MODE_ATTACH_REALCREDS :
+				      PTRACE_MODE_READ_REALCREDS);' \
+	"$kernel_root/mm/process_vm_access.c"
+replace_line_after_anchor_once 'static int mem_open(struct inode *inode, struct file *file)' \
+	'	return __mem_open(inode, file, PTRACE_MODE_ATTACH);' \
+	'	return __mem_open(inode, file,
+			  (file->f_mode & FMODE_WRITE) ? PTRACE_MODE_ATTACH :
+						 PTRACE_MODE_READ);' \
+	"$kernel_root/fs/proc/base.c"
 replace_line_once '	if (ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS))' \
 	'	if (ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS | PTRACE_MODE_GETFD))' \
 	"$kernel_root/kernel/pid.c"
@@ -670,6 +759,47 @@ do {						\
 #endif
 ' \
 	"$kernel_root/include/linux/cred.h"
+replace_line_after_anchor_once 'SYSCALL_DEFINE0(getuid)' \
+	'	return from_kuid_munged(current_user_ns(), current_uid());' \
+	'#ifdef CONFIG_SECURITY_PKM
+	return from_kuid_munged(current_user_ns(), current_real_cred()->uid);
+#else
+	return from_kuid_munged(current_user_ns(), current_uid());
+#endif' \
+	"$kernel_root/kernel/sys.c"
+replace_line_after_anchor_once 'SYSCALL_DEFINE0(getgid)' \
+	'	return from_kgid_munged(current_user_ns(), current_gid());' \
+	'#ifdef CONFIG_SECURITY_PKM
+return from_kgid_munged(current_user_ns(), current_real_cred()->gid);
+#else
+return from_kgid_munged(current_user_ns(), current_gid());
+#endif' \
+	"$kernel_root/kernel/sys.c"
+insert_block_before_exact_once 'static void cred_to_ucred(struct pid *pid, const struct cred *cred,' \
+	'extern void pkm_kacs_project_cred_uid_gid' \
+	'#ifdef CONFIG_SECURITY_PKM
+extern void pkm_kacs_project_cred_uid_gid(const struct cred *cred,
+					  kuid_t *uid, kgid_t *gid);
+#endif
+
+' \
+	"$kernel_root/net/core/sock.c"
+replace_line_after_anchor_once 'static void cred_to_ucred(struct pid *pid, const struct cred *cred,' \
+	'		ucred->uid = from_kuid_munged(current_ns, cred->euid);
+		ucred->gid = from_kgid_munged(current_ns, cred->egid);' \
+	'#ifdef CONFIG_SECURITY_PKM
+		kuid_t projected_uid;
+		kgid_t projected_gid;
+
+		pkm_kacs_project_cred_uid_gid(cred, &projected_uid,
+					      &projected_gid);
+		ucred->uid = from_kuid_munged(current_ns, projected_uid);
+		ucred->gid = from_kgid_munged(current_ns, projected_gid);
+#else
+		ucred->uid = from_kuid_munged(current_ns, cred->euid);
+		ucred->gid = from_kgid_munged(current_ns, cred->egid);
+#endif' \
+	"$kernel_root/net/core/sock.c"
 insert_block_before_exact_once 'SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,' \
 	'extern long pkm_kacs_prctl_capability_guard' \
 	'#ifdef CONFIG_SECURITY_PKM
@@ -1517,6 +1647,7 @@ insert_block_before_exact_once '	ret = proc_timens_set_offset(file, p, offsets, 
 insert_block_before_exact_once '	mutex_lock(&oom_adj_mutex);' \
 	'PKM: gate /proc/<pid>/oom adjustment writes' \
 	'#ifdef CONFIG_SECURITY_PKM
+	/* PKM: gate /proc/<pid>/oom adjustment writes. */
 	err = proc_pkm_check_task_setinfo_access(task);
 	if (err) {
 		put_task_struct(task);
@@ -1529,6 +1660,7 @@ insert_block_before_exact_once '	mutex_lock(&oom_adj_mutex);' \
 insert_block_before_exact_once '	task->signal->oom_score_adj = oom_adj;' \
 	'PKM: fail closed on multiprocess mm OOM fan-out' \
 	'#ifdef CONFIG_SECURITY_PKM
+	/* PKM: fail closed on multiprocess mm OOM fan-out. */
 	if (mm) {
 		mmdrop(mm);
 		mm = NULL;

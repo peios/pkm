@@ -40,6 +40,7 @@ pub const SYS_KACS_SET_MOUNT_POLICY: i64 = 1027;
 
 pub const SYS_KMES_EMIT: i64 = 1090;
 pub const SYS_KMES_ATTACH: i64 = 1091;
+pub const SYS_KMES_EMIT_BATCH: i64 = 1092;
 
 // ---------------------------------------------------------------------------
 // Generic dirfd convenience.
@@ -48,3 +49,21 @@ pub const SYS_KMES_ATTACH: i64 = 1091;
 /// AT_FDCWD: dirfd value meaning "current working directory" for path-based
 /// *at-family syscalls. Defined by Linux UAPI as -100.
 pub const AT_FDCWD: i32 = -100;
+
+/// Do not follow the terminal symlink.
+pub const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+
+/// Operate on the supplied fd itself when the path is empty.
+pub const AT_EMPTY_PATH: i32 = 0x1000;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_constants_match_linux_uapi_and_psd_004() {
+        assert_eq!(AT_FDCWD, -100);
+        assert_eq!(AT_SYMLINK_NOFOLLOW, 0x100);
+        assert_eq!(AT_EMPTY_PATH, 0x1000);
+    }
+}

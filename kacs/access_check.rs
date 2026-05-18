@@ -409,6 +409,7 @@ fn finalize_execution(
         event_sinks,
         &execution.audit_events,
         &execution.privilege_use_events,
+        &execution.caap_diagnostic_events,
         resolved,
         effective_pip,
     )?;
@@ -486,10 +487,14 @@ fn emit_events(
     event_sinks: *const PkmKacsEventSinkOps,
     audit_events: &[OwnedAuditEvent],
     privilege_use_events: &[crate::PrivilegeUseEvent],
+    caap_diagnostic_events: &[crate::CaapDiagnosticEvent],
     resolved: AccessCheckAbiResolved<'_>,
     effective_pip: PipContext,
 ) -> Result<(), c_long> {
-    if audit_events.is_empty() && privilege_use_events.is_empty() {
+    if audit_events.is_empty()
+        && privilege_use_events.is_empty()
+        && caap_diagnostic_events.is_empty()
+    {
         return Ok(());
     }
 
@@ -497,10 +502,35 @@ fn emit_events(
         return crate::kmes_payload::emit_access_check_events_to_kmes(
             audit_events,
             privilege_use_events,
+            caap_diagnostic_events,
             resolved,
             effective_pip,
         );
     };
+
+    if !privilege_use_events.is_empty() {
+        let Some(on_privilege_use_event) = sinks.on_privilege_use_event else {
+            return Err(EOPNOTSUPP);
+        };
+        for event in privilege_use_events {
+            let (context_ptr, context_len) = match event.object_audit_context.as_ref() {
+                Some(bytes) => (bytes.as_slice().as_ptr(), bytes.len()),
+                None => (core::ptr::null(), 0),
+            };
+            let view = PkmKacsPrivilegeUseEventView {
+                privilege: event.privilege,
+                requested: event.requested,
+                granted: event.granted,
+                surviving_bits: event.surviving_bits,
+                success: event.success,
+                object_audit_context_ptr: context_ptr,
+                object_audit_context_len: context_len,
+            };
+            if !unsafe { on_privilege_use_event(sinks.ctx, &view) } {
+                return Err(EIO);
+            }
+        }
+    }
 
     if !audit_events.is_empty() {
         let Some(on_audit_event) = sinks.on_audit_event else {
@@ -533,28 +563,14 @@ fn emit_events(
         }
     }
 
-    if !privilege_use_events.is_empty() {
-        let Some(on_privilege_use_event) = sinks.on_privilege_use_event else {
-            return Err(EOPNOTSUPP);
-        };
-        for event in privilege_use_events {
-            let (context_ptr, context_len) = match event.object_audit_context.as_ref() {
-                Some(bytes) => (bytes.as_slice().as_ptr(), bytes.len()),
-                None => (core::ptr::null(), 0),
-            };
-            let view = PkmKacsPrivilegeUseEventView {
-                privilege: event.privilege,
-                requested: event.requested,
-                granted: event.granted,
-                surviving_bits: event.surviving_bits,
-                success: event.success,
-                object_audit_context_ptr: context_ptr,
-                object_audit_context_len: context_len,
-            };
-            if !unsafe { on_privilege_use_event(sinks.ctx, &view) } {
-                return Err(EIO);
-            }
-        }
+    if !caap_diagnostic_events.is_empty() {
+        crate::kmes_payload::emit_access_check_events_to_kmes(
+            &[],
+            &[],
+            caap_diagnostic_events,
+            resolved,
+            effective_pip,
+        )?;
     }
 
     Ok(())

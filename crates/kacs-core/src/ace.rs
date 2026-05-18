@@ -271,9 +271,9 @@ impl<'a> Ace<'a> {
             | ACCESS_DENIED_ACE_TYPE
             | SYSTEM_AUDIT_ACE_TYPE
             | SYSTEM_ALARM_ACE_TYPE
-            | SYSTEM_MANDATORY_LABEL_ACE_TYPE
             | SYSTEM_SCOPED_POLICY_ID_ACE_TYPE
             | SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE => Self::parse_single_sid(bytes),
+            SYSTEM_MANDATORY_LABEL_ACE_TYPE => Self::parse_mandatory_label(bytes),
             ACCESS_ALLOWED_OBJECT_ACE_TYPE
             | ACCESS_DENIED_OBJECT_ACE_TYPE
             | SYSTEM_AUDIT_OBJECT_ACE_TYPE
@@ -298,6 +298,17 @@ impl<'a> Ace<'a> {
 
         let mask = read_u32(bytes, 4);
         validate_ace_mask(mask)?;
+        let sid = Sid::parse(&bytes[Self::SINGLE_SID_PREFIX_SIZE..])?;
+
+        Ok(AceKind::SingleSid { mask, sid })
+    }
+
+    fn parse_mandatory_label(bytes: &'a [u8]) -> KacsResult<AceKind<'a>> {
+        if bytes.len() < Self::MIN_SINGLE_SID_SIZE {
+            return Err(KacsError::Truncated("ace mandatory label"));
+        }
+
+        let mask = read_u32(bytes, 4);
         let sid = Sid::parse(&bytes[Self::SINGLE_SID_PREFIX_SIZE..])?;
 
         Ok(AceKind::SingleSid { mask, sid })

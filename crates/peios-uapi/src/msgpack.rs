@@ -6,9 +6,15 @@
 // float32/64, fixstr/str8/16/32, bin8/16/32, fixarray/array16/32,
 // fixmap/map16/32, fixext1/2/4/8/16 and ext8/16/32.
 
-use std::convert::TryInto;
+use crate::parse::ParseError;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::convert::TryInto;
 
 /// A decoded msgpack value tree.
+#[derive(Debug)]
 pub enum Value {
     Nil,
     Bool(bool),
@@ -33,7 +39,7 @@ impl Value {
     /// string. For containers, returns a short `array(N)` / `map(N)` summary.
     pub fn one_line(&self) -> String {
         match self {
-            Value::Nil => "nil".to_string(),
+            Value::Nil => String::from("nil"),
             Value::Bool(v) => format!("{v}"),
             Value::UInt(v) => format!("uint({v})"),
             Value::Int(v) => format!("int({v})"),
@@ -57,45 +63,47 @@ impl Value {
         }
     }
 
-    /// Pretty-print this value to stdout at the given column indent. Arrays and
-    /// maps expand recursively. Caller is responsible for printing any
-    /// "payload:" label first.
+    /// Pretty-print this value to stdout at the given column indent. Arrays
+    /// and maps expand recursively. Caller is responsible for printing any
+    /// "payload:" label first. Available only with the `std` feature since
+    /// it uses `println!`.
+    #[cfg(feature = "std")]
     pub fn render(&self, indent: usize) {
         let pre = " ".repeat(indent);
         match self {
             Value::Array(items) => {
-                println!("{pre}array({}):", items.len());
+                std::println!("{pre}array({}):", items.len());
                 for (i, v) in items.iter().enumerate() {
                     let line_pre = format!("{}[{}]", " ".repeat(indent + 2), i);
                     if v.is_primitive() {
-                        println!("{line_pre} = {}", v.one_line());
+                        std::println!("{line_pre} = {}", v.one_line());
                     } else {
-                        println!("{line_pre}:");
+                        std::println!("{line_pre}:");
                         v.render(indent + 4);
                     }
                 }
             }
             Value::Map(items) => {
-                println!("{pre}map({}):", items.len());
+                std::println!("{pre}map({}):", items.len());
                 for (k, v) in items {
                     let key = k.one_line();
                     let key_pre = format!("{}{}", " ".repeat(indent + 2), key);
                     if v.is_primitive() {
-                        println!("{key_pre} = {}", v.one_line());
+                        std::println!("{key_pre} = {}", v.one_line());
                     } else {
-                        println!("{key_pre}:");
+                        std::println!("{key_pre}:");
                         v.render(indent + 4);
                     }
                 }
             }
-            _ => println!("{pre}{}", self.one_line()),
+            _ => std::println!("{pre}{}", self.one_line()),
         }
     }
 }
 
 /// Parse one msgpack value from `buf`. Returns the value plus any trailing
 /// bytes that weren't consumed.
-pub fn parse(buf: &[u8]) -> Result<(Value, &[u8]), String> {
+pub fn parse(buf: &[u8]) -> Result<(Value, &[u8]), ParseError> {
     let mut p = Parser { buf, pos: 0 };
     let v = p.value()?;
     Ok((v, &buf[p.pos..]))
@@ -107,22 +115,28 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn read_u8(&mut self) -> Result<u8, String> {
-        let b = *self.buf.get(self.pos).ok_or("EOF reading tag")?;
+    fn read_u8(&mut self) -> Result<u8, ParseError> {
+        let b = *self.buf.get(self.pos).ok_or(ParseError::MsgpackTruncated)?;
         self.pos += 1;
         Ok(b)
     }
-    fn read_slice(&mut self, n: usize) -> Result<&'a [u8], String> {
-        let end = self.pos.checked_add(n).ok_or("len overflow")?;
-        let s = self.buf.get(self.pos..end).ok_or("EOF reading slice")?;
+    fn read_slice(&mut self, n: usize) -> Result<&'a [u8], ParseError> {
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or(ParseError::MsgpackTruncated)?;
+        let s = self
+            .buf
+            .get(self.pos..end)
+            .ok_or(ParseError::MsgpackTruncated)?;
         self.pos = end;
         Ok(s)
     }
-    fn read_be<const N: usize>(&mut self) -> Result<[u8; N], String> {
+    fn read_be<const N: usize>(&mut self) -> Result<[u8; N], ParseError> {
         let s = self.read_slice(N)?;
         Ok(s.try_into().unwrap())
     }
-    fn value(&mut self) -> Result<Value, String> {
+    fn value(&mut self) -> Result<Value, ParseError> {
         let t = self.read_u8()?;
         Ok(match t {
             0xc0 => Value::Nil,
@@ -191,36 +205,45 @@ impl<'a> Parser<'a> {
             0xc7 => {
                 let n = self.read_u8()? as usize;
                 let ty = self.read_u8()? as i8;
-                Value::Ext { ty, data: self.read_slice(n)?.to_vec() }
+                Value::Ext {
+                    ty,
+                    data: self.read_slice(n)?.to_vec(),
+                }
             }
             0xc8 => {
                 let n = u16::from_be_bytes(self.read_be::<2>()?) as usize;
                 let ty = self.read_u8()? as i8;
-                Value::Ext { ty, data: self.read_slice(n)?.to_vec() }
+                Value::Ext {
+                    ty,
+                    data: self.read_slice(n)?.to_vec(),
+                }
             }
             0xc9 => {
                 let n = u32::from_be_bytes(self.read_be::<4>()?) as usize;
                 let ty = self.read_u8()? as i8;
-                Value::Ext { ty, data: self.read_slice(n)?.to_vec() }
+                Value::Ext {
+                    ty,
+                    data: self.read_slice(n)?.to_vec(),
+                }
             }
-            _ => return Err(format!("unknown msgpack tag {t:#04x} at pos {}", self.pos - 1)),
+            _ => return Err(ParseError::MsgpackUnknownType(t)),
         })
     }
-    fn read_str(&mut self, n: usize) -> Result<Value, String> {
+    fn read_str(&mut self, n: usize) -> Result<Value, ParseError> {
         let bytes = self.read_slice(n)?.to_vec();
         match String::from_utf8(bytes) {
             Ok(s) => Ok(Value::Str(s)),
-            Err(e) => Err(format!("str not utf-8: {e}")),
+            Err(_) => Err(ParseError::MsgpackInvalidUtf8),
         }
     }
-    fn read_array(&mut self, n: usize) -> Result<Value, String> {
+    fn read_array(&mut self, n: usize) -> Result<Value, ParseError> {
         let mut items = Vec::with_capacity(n);
         for _ in 0..n {
             items.push(self.value()?);
         }
         Ok(Value::Array(items))
     }
-    fn read_map(&mut self, n: usize) -> Result<Value, String> {
+    fn read_map(&mut self, n: usize) -> Result<Value, ParseError> {
         let mut items = Vec::with_capacity(n);
         for _ in 0..n {
             let k = self.value()?;
@@ -229,7 +252,7 @@ impl<'a> Parser<'a> {
         }
         Ok(Value::Map(items))
     }
-    fn read_fixext(&mut self, n: usize) -> Result<Value, String> {
+    fn read_fixext(&mut self, n: usize) -> Result<Value, ParseError> {
         let ty = self.read_u8()? as i8;
         let data = self.read_slice(n)?.to_vec();
         Ok(Value::Ext { ty, data })
@@ -351,7 +374,17 @@ mod tests {
 
     #[test]
     fn roundtrip_uint() {
-        for &v in &[0u64, 127, 128, 255, 256, 65535, 65536, u32::MAX as u64, u64::MAX] {
+        for &v in &[
+            0u64,
+            127,
+            128,
+            255,
+            256,
+            65535,
+            65536,
+            u32::MAX as u64,
+            u64::MAX,
+        ] {
             let enc = encode_uint(v);
             let (val, _) = parse(&enc).unwrap();
             match val {
@@ -387,5 +420,12 @@ mod tests {
             }
             _ => panic!("expected map"),
         }
+    }
+
+    #[test]
+    fn rejects_unknown_tag() {
+        // 0xc1 is the explicitly-reserved msgpack byte.
+        let err = parse(&[0xc1]).unwrap_err();
+        assert_eq!(err, ParseError::MsgpackUnknownType(0xc1));
     }
 }
