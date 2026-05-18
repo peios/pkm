@@ -128,6 +128,7 @@ struct kacs_restrict_args {
 	__u32 flags;
 	__u64 data_ptr;
 	__s32 result_fd;
+	__u32 _pad;
 };
 
 struct kacs_link_tokens_args {
