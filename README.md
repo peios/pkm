@@ -1,81 +1,95 @@
-# pkm-new
+# pkm
 
-`pkm-new` is the clean slow-track KACS workspace.
+`pkm` is the Peios kernel workspace. It stages the PKM security subtree into a
+pinned Linux kernel build and carries the slow-track KACS implementation plus
+the KMES event substrate used by KACS and userspace tooling.
 
-It intentionally preserves only the build plumbing needed to stage a fresh
-PKM/KACS subtree into a pinned Linux kernel build. It does not preserve any
-inherited KACS semantics, syscall ABI wiring, event transport, or fast-track
-kernel patching.
+## Source Layout
 
-## Current State
+- `kacs/` contains KACS kernel glue, token/process/file enforcement, KUnit
+  tests, Rust ingress, and KACS-specific KMES payload emission.
+- `kmes/` contains the standalone KMES runtime, public KMES header, and
+  syscall-side event validator.
+- `crates/kacs-core/` contains the pure Rust KACS semantic core used by the
+  kernel Rust module.
+- `crates/peios-uapi/` contains userspace Rust bindings for PKM UAPI shapes.
+- `crates/libp-*` contains early userspace/test clients for the PKM ABI.
+- `kernel/` contains the Dockerized kernel build, subtree installer, generated
+  tree verifiers, and KUnit smoke harness.
+- `kernel/crypto/` contains the in-kernel Ed25519 implementation staged for
+  KACS signing support.
 
-- The KACS normative source is the ratified spec under
-  `learn/content/kacs/v0.20/`.
-- The `crates/kacs-core/src/` tree contains the closed pure-core slow-track
-  implementation slices.
-- The `kacs/` subtree currently contains only an inert kernel-resident
-  scaffold: enough to compile into the pinned kernel image and prove a minimal
-  boot-time init path, but no live KACS semantics yet.
-- No inherited syscall-table mutation is present.
-- No inherited kernel patchset is present.
-- No inherited event subsystem implementation is present.
-
-## What Remains On Purpose
-
-- A pinned Dockerized kernel build in [kernel/Dockerfile](kernel/Dockerfile)
-- A host-side build entry point in [kernel/Makefile](kernel/Makefile)
-- A small PKM subtree installer in
-  [kernel/install-pkm-subtree.sh](kernel/install-pkm-subtree.sh)
-- A Rust source staging helper in
-  [kernel/stage-kacs-core.sh](kernel/stage-kacs-core.sh)
-- A scaffold verifier in
-  [kernel/verify-scaffold.sh](kernel/verify-scaffold.sh)
-- Kernel subtree metadata in [pkm_kconfig](pkm_kconfig) and
-  [pkm_makefile](pkm_makefile)
+The normative KACS and KMES specs live outside this repo under
+`../learn/specs/psd-004--kacs/` and `../learn/specs/psd-003--kmes/`.
+For KACS behavior changes, follow the top-level `AGENTS.md` and
+`KACS_IMPLEMENTATION_CONTRACT.md` workflow before editing code.
 
 ## Build Flow
 
-1. `make -C kernel verify-scaffold`
-2. `make -C kernel image`
-3. `make -C kernel kernel`
+Run scaffold verification before kernel builds:
 
-For PKM-owned KUnit smoke infrastructure:
+```sh
+make -C kernel verify-scaffold
+```
 
-1. `make -C kernel kunit-image`
-2. `make -C kernel kunit-kernel`
-3. `make -C kernel kunit-smoke`
+Non-KUnit kernel builds require a TCB public key:
 
-The Docker image clones the pinned kernel version, configures the toolchain,
-stages the PKM subtree from this repo, enables `SECURITY_PKM`, and builds the
-kernel. The image does not inject syscall registrations or apply any external
-patches.
+```sh
+PKM_KACS_TCB_PUBKEY_HEX=<hex-encoded-ed25519-public-key> make -C kernel kernel
+```
 
-### Fast KUnit iteration loop
+The build writes:
 
-`kunit-kernel` rebuilds the whole kernel from scratch in a fresh container on
-every run. For tight iteration on KACS/KUnit sources, use the `-fast` variants:
+- `kernel/out/bzImage`
+- `kernel/out/kernel.config`
+- `kernel/out/lib/modules/`
 
-1. `make -C kernel kunit-smoke-fast`
+The Docker build clones the pinned kernel version, stages PKM into
+`security/pkm`, enables `SECURITY_PKM`, verifies generated kernel patches and
+required hardening config, then builds the kernel and modules.
 
-This builds the kernel in a persistent Docker volume (`pkm-new-kunit-buildtree`)
-so only changed objects recompile, and stages PKM source at runtime instead of
-rebuilding the Docker image. It is **non-hermetic** — use `kunit-smoke` for
-trustworthy or CI results, `kunit-smoke-fast` for the dev loop.
+## KUnit
 
-Run `make -C kernel kunit-clean-fast` to discard the persistent build tree.
-That is needed only after bumping the kernel version or toolchain, or if a fast
-build fails in a way unrelated to your change; ordinary source edits never
-require it.
+For a hermetic KUnit smoke run:
 
-## Deliberate Omissions
+```sh
+make -C kernel kunit-smoke
+```
 
-The following must be reintroduced only when their spec-driven implementation
-slice is opened:
+For normal development iteration:
 
-- syscall registration
-- ioctl/ABI registration
-- event transport
-- kernel patchset changes
-- live KACS policy or AccessCheck semantics
+```sh
+make -C kernel kunit-smoke-fast
+```
 
-Until then, this tree should remain obviously scaffold-only.
+The fast path keeps an incremental kernel build tree in the Docker volume
+`pkm-new-kunit-buildtree` and stages PKM source at runtime. It is intended for
+the inner dev loop. Use `kunit-smoke` for a clean trust boundary or CI-style
+result.
+
+If the fast build reports that staged scripts or generated-patch inputs changed,
+reset the persistent build tree:
+
+```sh
+make -C kernel kunit-clean-fast
+```
+
+## Build Hygiene
+
+The scaffold and generated-tree gates are part of the contract:
+
+- `kernel/verify-scaffold.sh` checks that required PKM source files and init
+  ordering are present before staging.
+- `kernel/install-pkm-subtree.sh` installs this repo's PKM files into the
+  kernel tree.
+- `kernel/verify-generated-tree.sh` checks that generated Linux call-site
+  patches are present.
+- `kernel/verify-kernel-config.sh` checks required KACS/PIP hardening options.
+
+Do not edit generated kernel output directly. Update the source, installer, or
+generator scripts, then rerun the relevant verification gate.
+
+## Notes
+
+The Docker image and volume names still use the historical `pkm-new-*` prefixes.
+Those names are build-cache identifiers only; the active workspace is `pkm`.

@@ -17,7 +17,8 @@ BUILDTREE        := pkm-new-kunit-buildtree
 # Checksum of all PKM source files. When any file changes, the Docker
 # layer cache is busted from the COPY layers onward. Layers above
 # (package install, kernel clone, Rust toolchain) stay cached.
-PKM_SOURCES := $(shell find $(CURDIR)/../kacs $(CURDIR)/../crates/kacs-core/src \
+PKM_SOURCES := $(shell find $(CURDIR)/../kacs $(CURDIR)/../kmes \
+	$(CURDIR)/../crates/kacs-core/src \
 	$(CURDIR)/crypto $(CURDIR)/scripts \
 	$(CURDIR)/../README.md $(CURDIR)/../pkm_kconfig $(CURDIR)/../pkm_makefile \
 	$(CURDIR)/Dockerfile $(CURDIR)/Makefile $(CURDIR)/install-pkm-subtree.sh \
