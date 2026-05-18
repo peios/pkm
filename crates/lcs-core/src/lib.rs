@@ -13,6 +13,7 @@ pub mod config;
 pub mod constants;
 pub mod error;
 pub mod path;
+pub mod resolution;
 pub mod sequence;
 pub mod string;
 pub mod value;
@@ -39,6 +40,11 @@ pub use path::{
     PathKind, PathSummary, is_base_layer_name, is_reserved_current_user_name,
     validate_hive_name_bytes, validate_key_component_bytes, validate_layer_name_bytes,
     validate_registry_path_bytes, validate_registry_path_str, validate_value_name_bytes,
+};
+pub use resolution::{
+    BlanketTombstoneEntry, Guid, LayerResolutionContext, LayerView, PathEntry, PathResolution,
+    PathTarget, ResolvedPathEntry, ResolvedValueEntry, ValueEntry, ValueResolution,
+    resolve_path_entry, resolve_value,
 };
 pub use sequence::SequenceCounter;
 pub use string::validate_lcs_str;

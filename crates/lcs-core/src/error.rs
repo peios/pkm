@@ -96,6 +96,15 @@ pub enum LcsError {
         /// Current LCS next-sequence value.
         next_sequence: u64,
     },
+    /// Two entries tied for the winning resolution tuple.
+    DuplicateWinningSequenceTie {
+        /// Winning layer precedence.
+        precedence: u32,
+        /// Winning sequence number.
+        sequence: u64,
+    },
+    /// The layer table contained duplicate folded identities.
+    DuplicateLayerIdentity,
 }
 
 /// Standard result type for the LCS semantic core.
