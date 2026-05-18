@@ -26,9 +26,6 @@
 	 KACS_ACCESS_MAXIMUM_ALLOWED | KACS_ACCESS_GENERIC_READ | \
 	 KACS_ACCESS_GENERIC_WRITE | KACS_ACCESS_GENERIC_EXECUTE | \
 	 KACS_ACCESS_GENERIC_ALL)
-#define PKM_KACS_PRIVILEGE_SE_ASSIGN_PRIMARY (1ULL << 3)
-#define PKM_KACS_PRIVILEGE_SE_TCB (1ULL << 7)
-#define PKM_KACS_PRIVILEGE_SE_IMPERSONATE (1ULL << 29)
 #define PKM_KACS_MAX_PRIVILEGE_ADJUST_ENTRIES 64U
 #define PKM_KACS_ADJUST_GROUPS_RESET_INDEX 0xFFFFFFFFU
 #define PKM_KACS_DEFAULT_INDEX_NO_CHANGE 0xFFFFFFFFU
@@ -177,10 +174,10 @@ static long pkm_kacs_require_tcb_for_token(const void *caller_token)
 	if (!caller_token)
 		return -EACCES;
 	if (!kacs_rust_token_has_enabled_privilege(caller_token,
-						   PKM_KACS_PRIVILEGE_SE_TCB))
+						   KACS_SE_TCB_PRIVILEGE))
 		return -EACCES;
 	if (!kacs_rust_token_mark_privileges_used(caller_token,
-						  PKM_KACS_PRIVILEGE_SE_TCB))
+						  KACS_SE_TCB_PRIVILEGE))
 		return -EACCES;
 
 	return 0;
@@ -321,9 +318,9 @@ static long pkm_kacs_token_get_linked_core(
 
 	if (caller_token &&
 	    kacs_rust_token_has_enabled_privilege(caller_token,
-						  PKM_KACS_PRIVILEGE_SE_TCB)) {
+						  KACS_SE_TCB_PRIVILEGE)) {
 		if (!kacs_rust_token_mark_privileges_used(
-			    caller_token, PKM_KACS_PRIVILEGE_SE_TCB))
+			    caller_token, KACS_SE_TCB_PRIVILEGE))
 			return -EACCES;
 
 		ret = kacs_rust_token_get_linked_actual(tf->token, &linked_token);
@@ -362,11 +359,11 @@ static long pkm_kacs_token_install_core(
 		return -EINVAL;
 	if (!kacs_rust_token_has_enabled_privilege(
 		    caller_primary_token,
-		    PKM_KACS_PRIVILEGE_SE_ASSIGN_PRIMARY))
+		    KACS_SE_ASSIGN_PRIMARY_TOKEN_PRIVILEGE))
 		return -EACCES;
 	if (!kacs_rust_token_mark_privileges_used(
 		    caller_primary_token,
-		    PKM_KACS_PRIVILEGE_SE_ASSIGN_PRIMARY))
+		    KACS_SE_ASSIGN_PRIMARY_TOKEN_PRIVILEGE))
 		return -EACCES;
 
 	return pkm_kacs_install_current_primary_token(tf->token);
@@ -407,7 +404,7 @@ static long pkm_kacs_impersonate_token_core(const void *client_token,
 
 	if (used_impersonate_privilege &&
 	    !kacs_rust_token_mark_privileges_used(
-		    server_primary_token, PKM_KACS_PRIVILEGE_SE_IMPERSONATE))
+		    server_primary_token, KACS_SE_IMPERSONATE_PRIVILEGE))
 		return -EACCES;
 
 	ret = kacs_rust_token_clone_with_impersonation_level(
@@ -470,7 +467,7 @@ static long pkm_kacs_token_adjust_groups_core(
 		return -EACCES;
 	if (args->_pad != 0)
 		return -EINVAL;
-	if (args->count == 0 || args->count > PKM_KACS_MAX_TOKEN_GROUPS)
+	if (args->count == 0 || args->count > KACS_TOKEN_MAX_GROUPS)
 		return -EINVAL;
 	if (!entries)
 		return -EINVAL;
@@ -501,7 +498,7 @@ static long pkm_kacs_token_restrict_core(
 		return -EINVAL;
 	if ((tf->access_mask & KACS_TOKEN_DUPLICATE) != KACS_TOKEN_DUPLICATE)
 		return -EACCES;
-	if ((args->flags & ~KACS_RESTRICT_WRITE_RESTRICTED) != 0)
+	if ((args->flags & ~KACS_TOKEN_RESTRICT_WRITE_RESTRICTED) != 0)
 		return -EINVAL;
 	if (args->data_len && !payload)
 		return -EINVAL;
@@ -761,7 +758,7 @@ static long pkm_kacs_token_adjust_groups_user(
 	if (copy_from_user(&args, uargs, sizeof(args)))
 		return -EFAULT;
 	if (args._pad != 0 || args.count == 0 ||
-	    args.count > PKM_KACS_MAX_TOKEN_GROUPS)
+	    args.count > KACS_TOKEN_MAX_GROUPS)
 		return -EINVAL;
 
 	entries_size = args.count * sizeof(*entries);
@@ -836,7 +833,7 @@ static long pkm_kacs_token_restrict_user(
 		return -EFAULT;
 	if (copy_from_user(&args, uargs, sizeof(args)))
 		return -EFAULT;
-	if ((args.flags & ~KACS_RESTRICT_WRITE_RESTRICTED) != 0)
+	if ((args.flags & ~KACS_TOKEN_RESTRICT_WRITE_RESTRICTED) != 0)
 		return -EINVAL;
 
 	if (args.data_len) {
@@ -1066,14 +1063,14 @@ long pkm_kacs_open_self_token_internal(unsigned int flags, u32 access_mask)
 	const void *target_token;
 	int ret;
 
-	if (flags & ~KACS_REAL_TOKEN)
+	if (flags & ~KACS_TOKEN_OPEN_REAL)
 		return -EINVAL;
 	ret = pkm_kacs_validate_token_open_access_mask(access_mask);
 	if (ret)
 		return ret;
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
-	if (flags & KACS_REAL_TOKEN)
+	if (flags & KACS_TOKEN_OPEN_REAL)
 		target_token = pkm_kacs_current_primary_token_ptr();
 	else
 		target_token = subject_token;

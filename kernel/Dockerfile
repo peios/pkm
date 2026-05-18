@@ -167,6 +167,14 @@ COPY kacs/token_runtime.rs /tmp/pkm-src/kacs/token_runtime.rs
 COPY kmes/kmes.c /tmp/pkm-src/kmes/kmes.c
 COPY kmes/kmes.h /tmp/pkm-src/kmes/kmes.h
 COPY kmes/kmes_validate.rs /tmp/pkm-src/kmes/kmes_validate.rs
+COPY uapi/pkm/pkm.h /tmp/pkm-src/uapi/pkm/pkm.h
+COPY uapi/pkm/syscall.h /tmp/pkm-src/uapi/pkm/syscall.h
+COPY uapi/pkm/sid.h /tmp/pkm-src/uapi/pkm/sid.h
+COPY uapi/pkm/sd.h /tmp/pkm-src/uapi/pkm/sd.h
+COPY uapi/pkm/token.h /tmp/pkm-src/uapi/pkm/token.h
+COPY uapi/pkm/access.h /tmp/pkm-src/uapi/pkm/access.h
+COPY uapi/pkm/file.h /tmp/pkm-src/uapi/pkm/file.h
+COPY uapi/pkm/kmes.h /tmp/pkm-src/uapi/pkm/kmes.h
 COPY crates/kacs-core/src/ /tmp/pkm-src/crates/kacs-core/src/
 COPY kernel/crypto/ /tmp/pkm-src/kernel/crypto/
 COPY kernel/scripts/update-ed25519-hacl.py /tmp/pkm-src/kernel/scripts/update-ed25519-hacl.py

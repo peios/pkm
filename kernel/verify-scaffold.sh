@@ -69,6 +69,17 @@ for required in \
 	"$repo_root/kernel/scripts/generate-kacs-builtin-signing-keys.py" \
 	"$repo_root/kernel/verify-generated-tree.sh" \
 	"$repo_root/kernel/verify-kernel-config.sh" \
+	"$repo_root/uapi/pkm/pkm.h" \
+	"$repo_root/uapi/pkm/syscall.h" \
+	"$repo_root/uapi/pkm/sid.h" \
+	"$repo_root/uapi/pkm/sd.h" \
+	"$repo_root/uapi/pkm/token.h" \
+	"$repo_root/uapi/pkm/access.h" \
+	"$repo_root/uapi/pkm/file.h" \
+	"$repo_root/uapi/pkm/kmes.h" \
+	"$repo_root/uapi/smoke_test.c" \
+	"$repo_root/uapi/check-userspace-clean.sh" \
+	"$repo_root/uapi/check-codegen-safe.sh" \
 	"$repo_root/kacs/lsm.c"; do
 	if [[ ! -f "$required" ]]; then
 		die "required slow-track source file missing: $required"
@@ -645,4 +656,16 @@ fi
 if [[ -d "$repo_root/kacs" ]] && \
 	rg -n 'eventfd' "$repo_root/kacs" >/dev/null; then
 	die "legacy eventfd plumbing found in kacs subtree"
+fi
+
+# The PKM UAPI headers must compile with an ordinary, non-kernel C compiler —
+# the precondition for the binding generator and for userspace consumers.
+if ! bash "$repo_root/uapi/check-userspace-clean.sh" >/dev/null; then
+	die "PKM UAPI headers are not userspace-clean (uapi/check-userspace-clean.sh failed)"
+fi
+
+# ... and they must stay within the codegen-safe subset of C, so the Rust
+# and Go binding generators reproduce every struct layout faithfully.
+if ! bash "$repo_root/uapi/check-codegen-safe.sh" >/dev/null; then
+	die "PKM UAPI headers leave the codegen-safe subset (uapi/check-codegen-safe.sh failed)"
 fi

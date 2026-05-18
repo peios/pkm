@@ -41,26 +41,11 @@
 #include "../kacs/token_runtime.h"
 #include "kmes.h"
 
-#define PKM_KMES_EVENT_HEADER_BASE_SIZE 29U
 #define PKM_KMES_DEFAULT_BUFFER_CAPACITY (4U * 1024U * 1024U)
 #define PKM_KMES_DEFAULT_MAX_EVENT_SIZE 65536U
 #define PKM_KMES_DEFAULT_MAX_NESTING_DEPTH 32U
 #define PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS 10000U
-#define PKM_KMES_MAX_USER_BATCH_COUNT 256U
 #define PKM_KMES_MAX_KERNEL_TYPE_LEN ((size_t)U16_MAX)
-#define PKM_KMES_RING_VERSION 1U
-#define PKM_KMES_METADATA_PAGE_SIZE 4096U
-#define PKM_KMES_METADATA_TOTAL_SIZE (2U * PKM_KMES_METADATA_PAGE_SIZE)
-#define PKM_KMES_PRODUCER_MAGIC_OFFSET 0U
-#define PKM_KMES_PRODUCER_VERSION_OFFSET 8U
-#define PKM_KMES_PRODUCER_CPU_ID_OFFSET 12U
-#define PKM_KMES_PRODUCER_CAPACITY_OFFSET 16U
-#define PKM_KMES_PRODUCER_DATA_OFFSET_OFFSET 24U
-#define PKM_KMES_PRODUCER_GENERATION_OFFSET 32U
-#define PKM_KMES_PRODUCER_WRITE_POS_OFFSET 64U
-#define PKM_KMES_PRODUCER_TAIL_POS_OFFSET 72U
-#define PKM_KMES_PRODUCER_FUTEX_COUNTER_OFFSET 128U
-#define PKM_KMES_CONSUMER_NEED_WAKE_OFFSET 0U
 #define PKM_KMES_PRIVILEGE_SE_TCB (1ULL << 7)
 #define PKM_KMES_PRIVILEGE_SE_SECURITY (1ULL << 8)
 #define PKM_KMES_PRIVILEGE_SE_AUDIT (1ULL << 21)
@@ -141,7 +126,7 @@ static bool pkm_kmes_kunit_fail_next_ring_alloc;
 
 static size_t pkm_kmes_mapping_size(u64 capacity)
 {
-	return (size_t)(PKM_KMES_METADATA_TOTAL_SIZE + (2 * capacity));
+	return (size_t)(KMES_METADATA_TOTAL_SIZE + (2 * capacity));
 }
 
 static void pkm_kmes_meta_store_u16(u8 *page, size_t offset, u16 value)
@@ -222,11 +207,11 @@ static void pkm_kmes_store_tail_pos(struct pkm_kmes_cpu_state *cpu, u64 value)
 {
 	cpu->tail_pos = value;
 	smp_store_release((__le64 *)(cpu->producer_page +
-				     PKM_KMES_PRODUCER_TAIL_POS_OFFSET),
+				     KMES_PRODUCER_TAIL_POS_OFFSET),
 			  cpu_to_le64(value));
 	if (cpu->producer_shared_page) {
 		smp_store_release((__le64 *)(cpu->producer_shared_page +
-					     PKM_KMES_PRODUCER_TAIL_POS_OFFSET),
+					     KMES_PRODUCER_TAIL_POS_OFFSET),
 				  cpu_to_le64(value));
 	}
 }
@@ -235,11 +220,11 @@ static void pkm_kmes_store_write_pos(struct pkm_kmes_cpu_state *cpu, u64 value)
 {
 	cpu->write_pos = value;
 	smp_store_release((__le64 *)(cpu->producer_page +
-				     PKM_KMES_PRODUCER_WRITE_POS_OFFSET),
+				     KMES_PRODUCER_WRITE_POS_OFFSET),
 			  cpu_to_le64(value));
 	if (cpu->producer_shared_page) {
 		smp_store_release((__le64 *)(cpu->producer_shared_page +
-					     PKM_KMES_PRODUCER_WRITE_POS_OFFSET),
+					     KMES_PRODUCER_WRITE_POS_OFFSET),
 				  cpu_to_le64(value));
 	}
 }
@@ -249,11 +234,11 @@ static void pkm_kmes_store_futex_counter(struct pkm_kmes_cpu_state *cpu,
 {
 	cpu->futex_counter = value;
 	smp_store_release((__le32 *)(cpu->producer_page +
-				     PKM_KMES_PRODUCER_FUTEX_COUNTER_OFFSET),
+				     KMES_PRODUCER_FUTEX_COUNTER_OFFSET),
 			  cpu_to_le32(value));
 	if (cpu->producer_shared_page) {
 		smp_store_release((__le32 *)(cpu->producer_shared_page +
-					     PKM_KMES_PRODUCER_FUTEX_COUNTER_OFFSET),
+					     KMES_PRODUCER_FUTEX_COUNTER_OFFSET),
 				  cpu_to_le32(value));
 	}
 }
@@ -262,11 +247,11 @@ static void pkm_kmes_store_generation(struct pkm_kmes_cpu_state *cpu, u64 value)
 {
 	cpu->generation = value;
 	smp_store_release((__le64 *)(cpu->producer_page +
-				     PKM_KMES_PRODUCER_GENERATION_OFFSET),
+				     KMES_PRODUCER_GENERATION_OFFSET),
 			  cpu_to_le64(value));
 	if (cpu->producer_shared_page) {
 		smp_store_release((__le64 *)(cpu->producer_shared_page +
-					     PKM_KMES_PRODUCER_GENERATION_OFFSET),
+					     KMES_PRODUCER_GENERATION_OFFSET),
 				  cpu_to_le64(value));
 	}
 }
@@ -274,7 +259,7 @@ static void pkm_kmes_store_generation(struct pkm_kmes_cpu_state *cpu, u64 value)
 static bool pkm_kmes_need_wake(const struct pkm_kmes_cpu_state *cpu)
 {
 	return READ_ONCE(*(u8 *)(cpu->consumer_page +
-				 PKM_KMES_CONSUMER_NEED_WAKE_OFFSET)) != 0;
+				 KMES_CONSUMER_NEED_WAKE_OFFSET)) != 0;
 }
 
 static void pkm_kmes_futex_wake(struct pkm_kmes_cpu_state *cpu)
@@ -296,7 +281,7 @@ static void pkm_kmes_futex_wake(struct pkm_kmes_cpu_state *cpu)
 	/* Shared futex waiters key off the producer page's backing inode sequence. */
 	key.shared.i_seq = i_seq;
 	key.shared.pgoff = 0;
-	key.shared.offset = PKM_KMES_PRODUCER_FUTEX_COUNTER_OFFSET |
+	key.shared.offset = KMES_PRODUCER_FUTEX_COUNTER_OFFSET |
 			    FUT_OFF_INODE;
 
 	hb = futex_hash(&key);
@@ -324,42 +309,42 @@ static bool pkm_kmes_note_wake(struct pkm_kmes_cpu_state *cpu)
 
 static void pkm_kmes_init_metadata_pages(struct pkm_kmes_cpu_state *cpu)
 {
-	memcpy(cpu->producer_page + PKM_KMES_PRODUCER_MAGIC_OFFSET,
+	memcpy(cpu->producer_page + KMES_PRODUCER_MAGIC_OFFSET,
 	       pkm_kmes_ring_magic, sizeof(pkm_kmes_ring_magic));
 	if (cpu->producer_shared_page) {
-		memcpy(cpu->producer_shared_page + PKM_KMES_PRODUCER_MAGIC_OFFSET,
+		memcpy(cpu->producer_shared_page + KMES_PRODUCER_MAGIC_OFFSET,
 		       pkm_kmes_ring_magic, sizeof(pkm_kmes_ring_magic));
 	}
 	pkm_kmes_meta_store_u32(cpu->producer_page,
-				PKM_KMES_PRODUCER_VERSION_OFFSET,
-				PKM_KMES_RING_VERSION);
+				KMES_PRODUCER_VERSION_OFFSET,
+				KMES_RING_VERSION);
 	if (cpu->producer_shared_page) {
 		pkm_kmes_meta_store_u32(cpu->producer_shared_page,
-					PKM_KMES_PRODUCER_VERSION_OFFSET,
-					PKM_KMES_RING_VERSION);
+					KMES_PRODUCER_VERSION_OFFSET,
+					KMES_RING_VERSION);
 	}
 	pkm_kmes_meta_store_u16(cpu->producer_page,
-				PKM_KMES_PRODUCER_CPU_ID_OFFSET, cpu->cpu_id);
+				KMES_PRODUCER_CPU_ID_OFFSET, cpu->cpu_id);
 	if (cpu->producer_shared_page) {
 		pkm_kmes_meta_store_u16(cpu->producer_shared_page,
-					PKM_KMES_PRODUCER_CPU_ID_OFFSET,
+					KMES_PRODUCER_CPU_ID_OFFSET,
 					cpu->cpu_id);
 	}
 	pkm_kmes_meta_store_u64(cpu->producer_page,
-				PKM_KMES_PRODUCER_CAPACITY_OFFSET,
+				KMES_PRODUCER_CAPACITY_OFFSET,
 				cpu->capacity);
 	if (cpu->producer_shared_page) {
 		pkm_kmes_meta_store_u64(cpu->producer_shared_page,
-					PKM_KMES_PRODUCER_CAPACITY_OFFSET,
+					KMES_PRODUCER_CAPACITY_OFFSET,
 					cpu->capacity);
 	}
 	pkm_kmes_meta_store_u64(cpu->producer_page,
-				PKM_KMES_PRODUCER_DATA_OFFSET_OFFSET,
-				PKM_KMES_METADATA_TOTAL_SIZE);
+				KMES_PRODUCER_DATA_OFFSET_OFFSET,
+				KMES_METADATA_TOTAL_SIZE);
 	if (cpu->producer_shared_page) {
 		pkm_kmes_meta_store_u64(cpu->producer_shared_page,
-					PKM_KMES_PRODUCER_DATA_OFFSET_OFFSET,
-					PKM_KMES_METADATA_TOTAL_SIZE);
+					KMES_PRODUCER_DATA_OFFSET_OFFSET,
+					KMES_METADATA_TOTAL_SIZE);
 	}
 	pkm_kmes_store_generation(cpu, cpu->generation);
 	pkm_kmes_store_write_pos(cpu, cpu->write_pos);
@@ -525,7 +510,7 @@ static void pkm_kmes_write_event_at(struct pkm_kmes_cpu_state *cpu, u64 pos,
 				    size_t payload_len, u64 timestamp,
 				    u64 sequence)
 {
-	u32 header_size = PKM_KMES_EVENT_HEADER_BASE_SIZE + (u32)event_type_len;
+	u32 header_size = KMES_EVENT_HEADER_BASE_SIZE + (u32)event_type_len;
 	u32 event_size = header_size + (u32)payload_len;
 
 	pkm_kmes_write_u32_at(cpu->data, cpu->capacity, pos, event_size);
@@ -556,7 +541,7 @@ static void pkm_kmes_write_event(struct pkm_kmes_cpu_state *cpu, u8 origin_class
 				 u64 timestamp, u64 sequence,
 				 bool *wake_needed_out)
 {
-	u32 event_size = PKM_KMES_EVENT_HEADER_BASE_SIZE + (u32)event_type_len +
+	u32 event_size = KMES_EVENT_HEADER_BASE_SIZE + (u32)event_type_len +
 			 (u32)payload_len;
 
 	pkm_kmes_write_event_at(cpu, cpu->write_pos, origin_class, event_type,
@@ -623,7 +608,7 @@ static long pkm_kmes_declared_event_size(u16 event_type_len, u32 payload_len,
 	size_t header_size;
 	size_t event_size;
 
-	if (check_add_overflow((size_t)PKM_KMES_EVENT_HEADER_BASE_SIZE,
+	if (check_add_overflow((size_t)KMES_EVENT_HEADER_BASE_SIZE,
 			       (size_t)event_type_len, &header_size))
 		return -EINVAL;
 	if (check_add_overflow(header_size, (size_t)payload_len, &event_size))
@@ -849,7 +834,7 @@ static long pkm_kmes_emit_one_for_token(const void *token, const void *event_typ
 	if (ret)
 		goto out;
 
-	ret = pkm_kmes_emit_staged_events(&event, 1, PKM_KMES_ORIGIN_USERSPACE);
+	ret = pkm_kmes_emit_staged_events(&event, 1, KMES_ORIGIN_USERSPACE);
 	if (ret)
 		goto out;
 
@@ -923,9 +908,9 @@ static long pkm_kmes_stage_batch_events(const struct kmes_emit_entry *entries,
 
 	for (validated = 0; validated < count; validated++) {
 		ret = pkm_kmes_stage_event(ring_capacity,
-					   entries[validated].event_type,
+					   (const void *)(uintptr_t)entries[validated].event_type,
 					   entries[validated].event_type_len,
-					   entries[validated].payload,
+					   (const void *)(uintptr_t)entries[validated].payload,
 					   entries[validated].payload_len,
 					   from_user, &staged[validated]);
 		if (ret)
@@ -980,7 +965,7 @@ static long pkm_kmes_emit_batch_common(const void *token,
 	ret = pkm_kmes_require_audit(token, &tcb_exempt);
 	if (ret)
 		return ret;
-	if (count == 0 || count > PKM_KMES_MAX_USER_BATCH_COUNT)
+	if (count == 0 || count > KMES_BATCH_MAX_ENTRIES)
 		return -EINVAL;
 
 	if (!tcb_exempt) {
@@ -1012,7 +997,7 @@ static long pkm_kmes_emit_batch_common(const void *token,
 					  staged, &validated);
 	if (validated > 0) {
 		long emit_ret = pkm_kmes_emit_staged_events(
-			staged, validated, PKM_KMES_ORIGIN_USERSPACE);
+			staged, validated, KMES_ORIGIN_USERSPACE);
 
 		if (emit_ret) {
 			ret = emit_ret;
@@ -1505,7 +1490,7 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 
 	if (event_type_len == 0 || event_type_len > PKM_KMES_MAX_KERNEL_TYPE_LEN)
 		goto drop;
-	if (check_add_overflow(PKM_KMES_EVENT_HEADER_BASE_SIZE, event_type_len,
+	if (check_add_overflow(KMES_EVENT_HEADER_BASE_SIZE, event_type_len,
 			       &header_size))
 		goto drop;
 	if (check_add_overflow(header_size, payload_len, &event_size))
@@ -2006,14 +1991,14 @@ static int pkm_kmes_copy_fd_view_from_cpu(const struct pkm_kmes_cpu_state *cpu,
 		if (offset < PAGE_SIZE) {
 			chunk = min_t(size_t, remaining, PAGE_SIZE - (size_t)offset);
 			memcpy(out, producer_page + offset, chunk);
-		} else if (offset < PKM_KMES_METADATA_TOTAL_SIZE) {
+		} else if (offset < KMES_METADATA_TOTAL_SIZE) {
 			u64 local = offset - PAGE_SIZE;
 
 			chunk = min_t(size_t, remaining,
 				      PAGE_SIZE - (size_t)local);
 			memcpy(out, cpu->consumer_page + local, chunk);
 		} else {
-			u64 local = offset - PKM_KMES_METADATA_TOTAL_SIZE;
+			u64 local = offset - KMES_METADATA_TOTAL_SIZE;
 			u64 mirror = local >= cpu->capacity ? local - cpu->capacity :
 							      local;
 
@@ -2043,24 +2028,24 @@ int pkm_kmes_kunit_fd_snapshot(int fd, struct pkm_kmes_kunit_fd_snapshot *out)
 		return ret;
 
 	out->cpu_id = pkm_kmes_meta_load_u16(pkm_kmes_visible_producer_page(cpu),
-					     PKM_KMES_PRODUCER_CPU_ID_OFFSET);
+					     KMES_PRODUCER_CPU_ID_OFFSET);
 	out->_reserved = 0;
 	out->capacity = pkm_kmes_meta_load_u64(pkm_kmes_visible_producer_page(cpu),
-					       PKM_KMES_PRODUCER_CAPACITY_OFFSET);
+					       KMES_PRODUCER_CAPACITY_OFFSET);
 	out->generation = pkm_kmes_meta_load_u64(
 		pkm_kmes_visible_producer_page(cpu),
-		PKM_KMES_PRODUCER_GENERATION_OFFSET);
+		KMES_PRODUCER_GENERATION_OFFSET);
 	out->write_pos = pkm_kmes_meta_load_u64(
 		pkm_kmes_visible_producer_page(cpu),
-		PKM_KMES_PRODUCER_WRITE_POS_OFFSET);
+		KMES_PRODUCER_WRITE_POS_OFFSET);
 	out->tail_pos = pkm_kmes_meta_load_u64(
 		pkm_kmes_visible_producer_page(cpu),
-		PKM_KMES_PRODUCER_TAIL_POS_OFFSET);
+		KMES_PRODUCER_TAIL_POS_OFFSET);
 	out->futex_counter = pkm_kmes_meta_load_u32(
 		pkm_kmes_visible_producer_page(cpu),
-		PKM_KMES_PRODUCER_FUTEX_COUNTER_OFFSET);
+		KMES_PRODUCER_FUTEX_COUNTER_OFFSET);
 	out->need_wake = READ_ONCE(*(u8 *)(cpu->consumer_page +
-					   PKM_KMES_CONSUMER_NEED_WAKE_OFFSET));
+					   KMES_CONSUMER_NEED_WAKE_OFFSET));
 	memset(out->_padding, 0, sizeof(out->_padding));
 	out->mapping_size = pkm_kmes_mapping_size(cpu->capacity);
 	return 0;
@@ -2087,7 +2072,7 @@ int pkm_kmes_kunit_set_fd_need_wake(int fd, u8 value)
 	if (ret)
 		return ret;
 
-	WRITE_ONCE(*(u8 *)(cpu->consumer_page + PKM_KMES_CONSUMER_NEED_WAKE_OFFSET),
+	WRITE_ONCE(*(u8 *)(cpu->consumer_page + KMES_CONSUMER_NEED_WAKE_OFFSET),
 		   value);
 	return 0;
 }

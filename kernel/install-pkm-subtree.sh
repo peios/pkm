@@ -9,6 +9,7 @@ fi
 src_root=$1
 kernel_root=$2
 pkm_dir="$kernel_root/security/pkm"
+uapi_dir="$kernel_root/include/uapi/pkm"
 
 require_file() {
 	local path=$1
@@ -207,6 +208,14 @@ require_file "$src_root/kacs/token_runtime.rs"
 require_file "$src_root/kmes/kmes.c"
 require_file "$src_root/kmes/kmes.h"
 require_file "$src_root/kmes/kmes_validate.rs"
+require_file "$src_root/uapi/pkm/pkm.h"
+require_file "$src_root/uapi/pkm/syscall.h"
+require_file "$src_root/uapi/pkm/sid.h"
+require_file "$src_root/uapi/pkm/sd.h"
+require_file "$src_root/uapi/pkm/token.h"
+require_file "$src_root/uapi/pkm/access.h"
+require_file "$src_root/uapi/pkm/file.h"
+require_file "$src_root/uapi/pkm/kmes.h"
 require_file "$src_root/kernel/crypto/ed25519.c"
 require_file "$src_root/kernel/crypto/ed25519-hacl.c"
 require_file "$src_root/kernel/crypto/ed25519-hacl.h"
@@ -252,6 +261,9 @@ rm -rf "$pkm_dir"
 mkdir -p "$pkm_dir/kacs"
 mkdir -p "$pkm_dir/kmes"
 
+rm -rf "$uapi_dir"
+mkdir -p "$uapi_dir"
+
 install -m 0644 "$src_root/kacs/lsm.c" "$pkm_dir/kacs/lsm.c"
 install -m 0644 "$src_root/kacs/access_check.c" "$pkm_dir/kacs/access_check.c"
 install -m 0644 "$src_root/kacs/access_check.h" "$pkm_dir/kacs/access_check.h"
@@ -270,6 +282,14 @@ install -m 0644 "$src_root/kacs/token_runtime.rs" "$pkm_dir/kacs/token_runtime.r
 install -m 0644 "$src_root/kmes/kmes.c" "$pkm_dir/kmes/kmes.c"
 install -m 0644 "$src_root/kmes/kmes.h" "$pkm_dir/kmes/kmes.h"
 install -m 0644 "$src_root/kmes/kmes_validate.rs" "$pkm_dir/kmes/kmes_validate.rs"
+install -m 0644 "$src_root/uapi/pkm/pkm.h" "$uapi_dir/pkm.h"
+install -m 0644 "$src_root/uapi/pkm/syscall.h" "$uapi_dir/syscall.h"
+install -m 0644 "$src_root/uapi/pkm/sid.h" "$uapi_dir/sid.h"
+install -m 0644 "$src_root/uapi/pkm/sd.h" "$uapi_dir/sd.h"
+install -m 0644 "$src_root/uapi/pkm/token.h" "$uapi_dir/token.h"
+install -m 0644 "$src_root/uapi/pkm/access.h" "$uapi_dir/access.h"
+install -m 0644 "$src_root/uapi/pkm/file.h" "$uapi_dir/file.h"
+install -m 0644 "$src_root/uapi/pkm/kmes.h" "$uapi_dir/kmes.h"
 install -m 0644 "$src_root/pkm_kconfig" "$pkm_dir/Kconfig"
 install -m 0644 "$src_root/pkm_makefile" "$pkm_dir/Makefile"
 install -m 0644 "$src_root/kernel/crypto/ed25519.c" "$kernel_root/crypto/ed25519.c"

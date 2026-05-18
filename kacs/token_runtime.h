@@ -4,6 +4,7 @@
 
 #include <linux/types.h>
 
+#include <pkm/file.h>
 #include "access_check.h"
 
 struct file;
@@ -44,24 +45,6 @@ void pkm_kacs_free_after_rcu(void *ptr);
 #define KACS_PROCESS_SUSPEND_RESUME 0x0800U
 #define KACS_PROCESS_QUERY_LIMITED 0x1000U
 
-#define KACS_BACKUP_INTENT 0x00000001U
-#define KACS_RESTORE_INTENT 0x00000002U
-
-#define PKM_KACS_MOUNT_POLICY_UNMANAGED 1U
-#define PKM_KACS_MOUNT_POLICY_DENY_MISSING 2U
-#define PKM_KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL 3U
-#define PKM_KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT 4U
-
-#define KACS_FILE_SUPERSEDE 0U
-#define KACS_FILE_OPEN 1U
-#define KACS_FILE_CREATE 2U
-#define KACS_FILE_OPEN_IF 3U
-#define KACS_FILE_OVERWRITE 4U
-#define KACS_FILE_OVERWRITE_IF 5U
-
-#define KACS_CREATE_OPT_DIRECTORY 0x0001U
-#define KACS_CREATE_OPT_DELETE_ON_CLOSE 0x0002U
-
 #define PKM_KACS_KUNIT_FILE_METADATA_GETATTR 1U
 #define PKM_KACS_KUNIT_FILE_METADATA_STATFS 2U
 #define PKM_KACS_KUNIT_FILE_METADATA_CHMOD 3U
@@ -95,11 +78,6 @@ void pkm_kacs_free_after_rcu(void *ptr);
 #define PKM_KACS_KUNIT_NAMESPACE_RMDIR 7U
 #define PKM_KACS_KUNIT_NAMESPACE_RENAME 8U
 #define PKM_KACS_KUNIT_NAMESPACE_READLINK 9U
-
-#define KACS_STATUS_OPENED 1U
-#define KACS_STATUS_CREATED 2U
-#define KACS_STATUS_OVERWRITTEN 3U
-#define KACS_STATUS_SUPERSEDED 4U
 
 #define KACS_MIT_WXP 0x001U
 #define KACS_MIT_TLP 0x002U
@@ -207,26 +185,6 @@ struct pkm_kacs_group_adjust_entry {
 struct pkm_kacs_priv_adjust_entry {
 	u32 luid;
 	u32 attributes;
-};
-
-struct kacs_open_how {
-	u32 desired_access;
-	u32 create_disposition;
-	u32 create_options;
-	u32 flags;
-	u64 sd_ptr;
-	u32 sd_len;
-	u32 __pad;
-};
-
-struct kacs_mount_policy_args {
-	u32 policy;
-	u32 flags;
-	u32 generation;
-	u32 __pad0;
-	u64 template_sd_ptr;
-	u32 template_sd_len;
-	u32 __pad1;
 };
 
 struct pkm_kacs_kunit_process_state_view {

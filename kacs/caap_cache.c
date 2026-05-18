@@ -14,13 +14,14 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 
+#include <pkm/token.h>
+
 #include "caap_cache.h"
 #include "token_runtime.h"
 
 #define PKM_KACS_MIN_SID_LEN 8U
 #define PKM_KACS_MAX_SID_LEN 68U
 #define PKM_KACS_MAX_CAAP_SPEC_LEN (256U * 1024U)
-#define PKM_KACS_PRIVILEGE_SE_TCB (1ULL << 7)
 
 extern void *kacs_rust_caap_cache_create(void);
 extern void kacs_rust_caap_cache_destroy(void *cache);
@@ -37,10 +38,10 @@ static int pkm_kacs_require_tcb(const void *token)
 	if (!token)
 		return -EACCES;
 	if (!kacs_rust_token_has_enabled_privilege(token,
-						  PKM_KACS_PRIVILEGE_SE_TCB))
+						  KACS_SE_TCB_PRIVILEGE))
 		return -EACCES;
 	if (!kacs_rust_token_mark_privileges_used(token,
-						 PKM_KACS_PRIVILEGE_SE_TCB))
+						 KACS_SE_TCB_PRIVILEGE))
 		return -EACCES;
 
 	return 0;

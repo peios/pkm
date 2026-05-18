@@ -20,8 +20,6 @@
 #include "token_fd.h"
 #include "token_runtime.h"
 
-#define PKM_KACS_ACCESS_CHECK_ARGS_SIZE 136U
-#define PKM_KACS_ACCESS_CHECK_ARGS_V1_SIZE 40U
 #define PKM_KACS_ACCESS_CHECK_TOKEN_FD_OFFSET 4U
 
 extern long kacs_rust_access_check_ingress_scalar(
@@ -63,7 +61,7 @@ struct pkm_kacs_token_resolution {
 	struct pkm_kacs_usercopy_ops copied_ops;
 	u64 args_ptr;
 	size_t args_len;
-	u8 args_copy[PKM_KACS_ACCESS_CHECK_ARGS_SIZE];
+	u8 args_copy[KACS_ACCESS_CHECK_ARGS_SIZE];
 };
 
 static void pkm_kacs_release_token_resolution(
@@ -129,12 +127,12 @@ static long pkm_kacs_copy_args_prefix(
 			     sizeof(size_bytes)))
 		return -EFAULT;
 	size = pkm_kacs_read_le32(size_bytes);
-	if (size < PKM_KACS_ACCESS_CHECK_ARGS_V1_SIZE)
+	if (size < KACS_ACCESS_CHECK_ARGS_V1_SIZE)
 		return -EINVAL;
 
 	copied_len = size;
-	if (copied_len > PKM_KACS_ACCESS_CHECK_ARGS_SIZE)
-		copied_len = PKM_KACS_ACCESS_CHECK_ARGS_SIZE;
+	if (copied_len > KACS_ACCESS_CHECK_ARGS_SIZE)
+		copied_len = KACS_ACCESS_CHECK_ARGS_SIZE;
 	if (!ops->read_bytes(ops->ctx, args_ptr, resolution->args_copy,
 			     copied_len))
 		return -EFAULT;

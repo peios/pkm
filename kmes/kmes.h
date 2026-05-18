@@ -5,17 +5,7 @@
 #include <linux/uaccess.h>
 #include <linux/types.h>
 
-#define PKM_KMES_ORIGIN_USERSPACE 0U
-#define PKM_KMES_ORIGIN_KMES 1U
-#define PKM_KMES_ORIGIN_KACS 2U
-#define PKM_KMES_ORIGIN_LCS 3U
-
-struct kmes_emit_entry {
-	const void *event_type;
-	u16 event_type_len;
-	const void *payload;
-	u32 payload_len;
-};
+#include <pkm/kmes.h>
 
 int pkm_kmes_init(void);
 void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
