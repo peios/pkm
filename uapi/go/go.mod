@@ -1,5 +1,3 @@
-// Provisional module path — change with `go mod edit -module <path>` once
-// the pkm repo's hosting / vanity-import convention is settled.
-module peios.org/pkm/uapi
+module github.com/peios/pkm/uapi/go
 
 go 1.26
