@@ -1,7 +1,8 @@
+use crate::casefold::casefold_is;
 use crate::config::LcsLimits;
 use crate::constants::BASE_LAYER_NAME;
 use crate::error::{LcsError, LcsResult};
-use crate::string::{ascii_case_eq, validate_lcs_str};
+use crate::string::validate_lcs_str;
 
 /// Registry path interpretation context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -144,11 +145,11 @@ pub fn validate_value_name_bytes<'a>(bytes: &'a [u8], limits: &LcsLimits) -> Lcs
 }
 
 pub fn is_reserved_current_user_name(name: &str) -> bool {
-    ascii_case_eq(name, "CurrentUser")
+    casefold_is(name, "CurrentUser")
 }
 
 pub fn is_base_layer_name(name: &str) -> bool {
-    ascii_case_eq(name, BASE_LAYER_NAME)
+    casefold_is(name, BASE_LAYER_NAME)
 }
 
 fn validate_key_like_name<'a>(

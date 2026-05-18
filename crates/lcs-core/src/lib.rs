@@ -8,6 +8,7 @@
 #![allow(unreachable_pub)]
 
 pub mod access;
+pub mod casefold;
 pub mod config;
 pub mod constants;
 pub mod error;
@@ -20,6 +21,9 @@ pub use access::{
     NormalizedRegistryAccess, REGISTRY_GENERIC_MAPPING, RegistryGenericMapping,
     map_registry_generic_bits, registry_fd_has_right, validate_registry_ace_mask,
     validate_registry_desired_access,
+};
+pub use casefold::{
+    casefold_cmp, casefold_eq, casefold_eq_bytes, casefold_is, unicode_simple_case_fold,
 };
 pub use config::{
     ConfigRange, LcsLimits, MAX_BOUND_TRANSACTIONS_PER_SOURCE, MAX_CONCURRENT_RSI_REQUESTS,
@@ -37,7 +41,7 @@ pub use path::{
     validate_registry_path_bytes, validate_registry_path_str, validate_value_name_bytes,
 };
 pub use sequence::SequenceCounter;
-pub use string::{ascii_case_eq, validate_lcs_str};
+pub use string::validate_lcs_str;
 pub use value::{
     RegistryValueType, ValidatedValueType, validate_value_data_len, validate_value_write_type,
 };

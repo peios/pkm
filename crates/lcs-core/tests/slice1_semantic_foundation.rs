@@ -8,7 +8,7 @@ use lcs_core::{
     REG_RESOURCE_LIST, REG_RESOURCE_REQUIREMENTS_LIST, REG_SZ, REG_TOMBSTONE,
     REG_VALID_ACE_ACCESS_MASK, REG_VALID_DESIRED_ACCESS_MASK, REG_VALID_MAPPED_ACCESS_MASK,
     REG_WATCH_OVERFLOW, RSI_CREATE_KEY, RSI_LOOKUP, RSI_RESPONSE_BIT, SYNCHRONIZE, SequenceCounter,
-    WRITE_DAC, WRITE_OWNER, ascii_case_eq, is_base_layer_name, is_reserved_current_user_name,
+    WRITE_DAC, WRITE_OWNER, casefold_eq, is_base_layer_name, is_reserved_current_user_name,
     map_registry_generic_bits, registry_fd_has_right, validate_config_value,
     validate_hive_name_bytes, validate_key_component_bytes, validate_layer_name_bytes,
     validate_lcs_str, validate_registry_ace_mask, validate_registry_desired_access,
@@ -152,7 +152,7 @@ fn hive_and_layer_sentinel_names_are_ascii_case_insensitive_only() {
     );
     assert!(is_reserved_current_user_name("CURRENTUSER"));
     assert!(is_base_layer_name("BASE"));
-    assert!(ascii_case_eq("CurrentUser", "currentuser"));
+    assert!(casefold_eq("CurrentUser", "currentuser"));
 }
 
 #[test]
