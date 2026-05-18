@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/kacs-core",
+    "crates/lcs-core",
     "crates/peios-uapi",
     "crates/libp-token",
     "crates/libp-sd",

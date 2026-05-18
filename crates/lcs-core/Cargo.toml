@@ -1,0 +1,12 @@
+[package]
+name = "lcs-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "GPL-2.0"
+publish = false
+description = "Slow-track LCS semantic core primitives"
+
+[features]
+default = []
+kernel = []
