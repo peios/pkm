@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-#ifndef _SECURITY_PKM_KACS_KMES_H
-#define _SECURITY_PKM_KACS_KMES_H
+#ifndef _SECURITY_PKM_KMES_H
+#define _SECURITY_PKM_KMES_H
 
 #include <linux/uaccess.h>
 #include <linux/types.h>
@@ -86,4 +86,4 @@ long pkm_kmes_kunit_emit_batch_for_token(const void *token,
 					 u32 count, u32 *emitted_out);
 #endif
 
-#endif /* _SECURITY_PKM_KACS_KMES_H */
+#endif /* _SECURITY_PKM_KMES_H */

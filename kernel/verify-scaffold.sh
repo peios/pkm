@@ -52,16 +52,16 @@ for required in \
 	"$repo_root/kacs/caap_cache.h" \
 	"$repo_root/kacs/caap_cache.rs" \
 	"$repo_root/kacs/kacs_rust.rs" \
-	"$repo_root/kacs/kmes.c" \
-	"$repo_root/kacs/kmes.h" \
 	"$repo_root/kacs/kmes_payload.rs" \
-	"$repo_root/kacs/kmes_validate.rs" \
 	"$repo_root/kacs/kunit.c" \
 	"$repo_root/kacs/builtin_signing_keys.h" \
 	"$repo_root/kacs/token_fd.c" \
 	"$repo_root/kacs/token_fd.h" \
 	"$repo_root/kacs/token_runtime.h" \
 	"$repo_root/kacs/token_runtime.rs" \
+	"$repo_root/kmes/kmes.c" \
+	"$repo_root/kmes/kmes.h" \
+	"$repo_root/kmes/kmes_validate.rs" \
 	"$repo_root/kernel/crypto/ed25519.c" \
 	"$repo_root/kernel/crypto/ed25519-hacl.c" \
 	"$repo_root/kernel/crypto/ed25519-hacl.h" \

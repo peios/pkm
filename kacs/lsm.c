@@ -74,7 +74,7 @@
 #include <net/sock.h>
 
 #include "caap_cache.h"
-#include "kmes.h"
+#include "../kmes/kmes.h"
 #include "token_fd.h"
 #include "token_runtime.h"
 

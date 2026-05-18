@@ -23,7 +23,7 @@ use crate::parse::ParseError;
 //   then payload bytes  — kernel validator requires this to parse as msgpack
 
 // ---------------------------------------------------------------------------
-// Origin classes — pkm_new/kacs/kmes.h.
+// Origin classes — kmes/kmes.h.
 // ---------------------------------------------------------------------------
 
 pub const KMES_ORIGIN_USERSPACE: u8 = 0;

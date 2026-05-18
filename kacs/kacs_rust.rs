@@ -13,6 +13,7 @@ mod access_check_ingress;
 mod caap_cache;
 mod kacs_core;
 mod kmes_payload;
+#[path = "../kmes/kmes_validate.rs"]
 mod kmes_validate;
 mod token_runtime;
 
