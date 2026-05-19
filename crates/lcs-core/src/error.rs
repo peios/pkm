@@ -207,6 +207,25 @@ pub enum LcsError {
     },
     /// KACS AccessCheck failed before producing an allow/deny decision.
     AccessCheckEvaluationFailed,
+    /// A planned audit caller summary carried a malformed user SID.
+    MalformedAuditCallerSid {
+        /// Logical audit field.
+        field: &'static str,
+    },
+    /// A key-open audit record was requested without any SACL match flags.
+    ZeroSaclMatchFlags,
+    /// A key-open audit SACL match mask contained reserved bits.
+    UnknownSaclMatchFlags {
+        /// Full supplied flags value.
+        flags: u32,
+        /// Unknown flag bits.
+        unknown: u32,
+    },
+    /// A backup/restore start audit record carried an invalid fd number.
+    InvalidAuditFd {
+        /// Invalid fd number.
+        fd: i32,
+    },
     /// A non-volatile child was requested under a volatile parent key.
     NonVolatileChildUnderVolatile,
     /// Key creation was attempted without KEY_CREATE_SUB_KEY on the parent.
