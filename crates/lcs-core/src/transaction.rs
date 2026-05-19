@@ -235,6 +235,13 @@ pub struct TransactionBoundCounterPlan {
     pub next_count: usize,
 }
 
+/// Planned counter mutation selected from a transaction state transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionBoundCounterTransitionPlan<'a> {
+    pub affected_binding: Option<TransactionBinding<'a>>,
+    pub counter: TransactionBoundCounterPlan,
+}
+
 /// Plans reg_begin_transaction without selecting a source.
 pub fn plan_begin_transaction(
     limits: &LcsLimits,
@@ -640,6 +647,54 @@ pub fn plan_transaction_bound_counter_update(
     }
 }
 
+/// Selects the per-source bound-transaction counter update for a state transition.
+pub fn plan_transaction_bound_counter_transition<'a>(
+    limits: &LcsLimits,
+    previous_state: TransactionState<'a>,
+    next_state: TransactionState<'a>,
+    current_bound_transactions_for_source: usize,
+) -> LcsResult<TransactionBoundCounterTransitionPlan<'a>> {
+    let (affected_binding, update) = match (previous_state, next_state) {
+        (TransactionState::ActiveUnbound, TransactionState::ActiveUnbound) => {
+            (None, TransactionBoundCounterUpdate::NoChange)
+        }
+        (TransactionState::ActiveUnbound, TransactionState::ActiveBound(next)) => {
+            validate_transaction_binding(limits, next)?;
+            (Some(next), TransactionBoundCounterUpdate::Increment)
+        }
+        (TransactionState::ActiveUnbound, next) if is_terminal_transaction_state(next) => {
+            (None, TransactionBoundCounterUpdate::NoChange)
+        }
+        (TransactionState::ActiveBound(previous), TransactionState::ActiveBound(next)) => {
+            if !same_transaction_binding(limits, previous, next)? {
+                return Err(LcsError::InvalidTransactionRuntimeState);
+            }
+            (Some(previous), TransactionBoundCounterUpdate::NoChange)
+        }
+        (TransactionState::ActiveBound(previous), next) if is_terminal_transaction_state(next) => {
+            validate_transaction_binding(limits, previous)?;
+            (Some(previous), TransactionBoundCounterUpdate::Decrement)
+        }
+        (previous, next)
+            if is_terminal_transaction_state(previous)
+                && is_terminal_transaction_state(next)
+                && previous == next =>
+        {
+            (None, TransactionBoundCounterUpdate::NoChange)
+        }
+        _ => return Err(LcsError::InvalidTransactionRuntimeState),
+    };
+
+    Ok(TransactionBoundCounterTransitionPlan {
+        affected_binding,
+        counter: plan_transaction_bound_counter_update(
+            limits,
+            current_bound_transactions_for_source,
+            update,
+        )?,
+    })
+}
+
 fn validate_transaction_binding(
     limits: &LcsLimits,
     binding: TransactionBinding<'_>,
@@ -661,4 +716,14 @@ fn same_transaction_binding(
     Ok(left.source_id == right.source_id
         && left.hive_root_guid == right.hive_root_guid
         && casefold_eq(left.hive_name, right.hive_name))
+}
+
+fn is_terminal_transaction_state(state: TransactionState<'_>) -> bool {
+    matches!(
+        state,
+        TransactionState::Committed
+            | TransactionState::Aborted
+            | TransactionState::TimedOut
+            | TransactionState::SourceDown
+    )
 }
