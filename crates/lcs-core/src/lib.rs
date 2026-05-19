@@ -13,6 +13,7 @@ pub mod config;
 pub mod constants;
 pub mod error;
 pub mod hives;
+pub mod ioctl;
 pub mod key;
 pub mod layers;
 pub mod path;
@@ -45,6 +46,12 @@ pub use error::{LcsError, LcsResult};
 pub use hives::{
     CurrentUserRewrite, HiveRoute, HiveScope, HiveStatus, HiveView, RoutedHive, SourceId,
     for_each_routable_path_component, route_hive, validate_hive_table, validate_scope_guid_set,
+};
+pub use ioctl::{
+    RegistryIoctlAccessRequirement, RegistryIoctlPrivilege, RegistrySecurityOperation,
+    registry_ioctl_access_requirement, registry_ioctl_fixed_granted_mask_allows,
+    registry_security_info_granted_mask_allows, registry_security_info_required_access,
+    validate_registry_security_info,
 };
 pub use key::{
     KeyCreateOptions, KeyCreatePlan, KeyCreateRequest, KeyParent, KeyRecordView,

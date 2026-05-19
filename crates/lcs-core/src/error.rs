@@ -210,6 +210,17 @@ pub enum LcsError {
     },
     /// A source response carried a status outside the defined RSI vocabulary.
     UnknownRsiStatus(u32),
+    /// An ioctl command number is outside the PSD-005 registry ioctl vocabulary.
+    UnknownRegistryIoctl(u8),
+    /// A security descriptor component selector was zero.
+    ZeroSecurityInfo,
+    /// A security descriptor component selector contained bits PSD-005 does not define for LCS.
+    UnknownSecurityInfoFlags {
+        /// Full selector value.
+        flags: u32,
+        /// Unknown selector bits.
+        unknown: u32,
+    },
 }
 
 /// Standard result type for the LCS semantic core.
