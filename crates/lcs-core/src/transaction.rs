@@ -48,6 +48,15 @@ pub struct TransactionStatusResult {
     pub terminal_errno: TransactionTerminalErrno,
 }
 
+/// Transaction fd poll readiness bits expressed without platform poll constants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionPollPlan {
+    pub readable: bool,
+    pub writable: bool,
+    pub hangup: bool,
+    pub error: bool,
+}
+
 /// Pre-dispatch failure class for operations using a transaction fd.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionUseFailure {
@@ -334,6 +343,27 @@ pub fn transaction_terminal_failure(state: TransactionState<'_>) -> Option<Trans
         }
         TransactionState::TimedOut => Some(TransactionUseFailure::TimedOut),
         TransactionState::SourceDown => Some(TransactionUseFailure::SourceDown),
+    }
+}
+
+/// Plans transaction-fd poll readiness from the transaction state.
+pub fn plan_transaction_poll(state: TransactionState<'_>) -> TransactionPollPlan {
+    match state {
+        TransactionState::ActiveUnbound | TransactionState::ActiveBound(_) => TransactionPollPlan {
+            readable: false,
+            writable: false,
+            hangup: false,
+            error: false,
+        },
+        TransactionState::Committed
+        | TransactionState::Aborted
+        | TransactionState::TimedOut
+        | TransactionState::SourceDown => TransactionPollPlan {
+            readable: false,
+            writable: false,
+            hangup: true,
+            error: true,
+        },
     }
 }
 
