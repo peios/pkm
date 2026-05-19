@@ -22,6 +22,72 @@ pub struct KeyFdDelegationPlan {
     pub delegated_granted_access: u32,
 }
 
+/// Operation category for orphaned-key fd admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyFdOperationScope {
+    GuidLocal,
+    Namespace,
+    Backup,
+}
+
+/// Key-fd operation admitted or rejected by the orphaned-key gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyFdOperation {
+    QueryValue,
+    SetValue,
+    DeleteValue,
+    SetBlanketTombstone,
+    RemoveBlanketTombstone,
+    QuerySecurityDescriptor,
+    SetSecurityDescriptor,
+    QueryMetadata,
+    FlushHive,
+    Close,
+    CreateChildKey,
+    RelativeOpenKey,
+    RelativeCreateKey,
+    DeletePathEntry,
+    HideKey,
+    Backup,
+}
+
+impl KeyFdOperation {
+    pub fn scope(self) -> KeyFdOperationScope {
+        match self {
+            Self::QueryValue
+            | Self::SetValue
+            | Self::DeleteValue
+            | Self::SetBlanketTombstone
+            | Self::RemoveBlanketTombstone
+            | Self::QuerySecurityDescriptor
+            | Self::SetSecurityDescriptor
+            | Self::QueryMetadata
+            | Self::FlushHive
+            | Self::Close => KeyFdOperationScope::GuidLocal,
+            Self::CreateChildKey
+            | Self::RelativeOpenKey
+            | Self::RelativeCreateKey
+            | Self::DeletePathEntry
+            | Self::HideKey => KeyFdOperationScope::Namespace,
+            Self::Backup => KeyFdOperationScope::Backup,
+        }
+    }
+}
+
+/// Caller-visible errno class for orphaned-key fd admission failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyFdOrphanOperationErrno {
+    Enoent,
+}
+
+/// Successful orphaned-key fd admission result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyFdOrphanOperationPlan {
+    pub operation: KeyFdOperation,
+    pub scope: KeyFdOperationScope,
+    pub orphaned: bool,
+}
+
 /// Planned cleanup when a key fd is closed by normal Linux fd teardown.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyFdClosePlan {
@@ -55,6 +121,41 @@ pub fn plan_key_fd_delegation(
     Ok(KeyFdDelegationPlan {
         delegated_granted_access: fd.granted_access,
     })
+}
+
+/// Applies the orphaned-key operation split to an existing key fd.
+pub fn plan_key_fd_orphan_operation(
+    orphaned: bool,
+    operation: KeyFdOperation,
+) -> LcsResult<KeyFdOrphanOperationPlan> {
+    let scope = operation.scope();
+    if orphaned {
+        match scope {
+            KeyFdOperationScope::GuidLocal => {}
+            KeyFdOperationScope::Namespace => {
+                return Err(LcsError::OrphanedKeyNamespaceOperation);
+            }
+            KeyFdOperationScope::Backup => {
+                return Err(LcsError::OrphanedKeyBackupOperation);
+            }
+        }
+    }
+
+    Ok(KeyFdOrphanOperationPlan {
+        operation,
+        scope,
+        orphaned,
+    })
+}
+
+/// Maps orphaned-key fd admission failures to their PSD-005 errno class.
+pub fn key_fd_orphan_operation_errno(error: &LcsError) -> Option<KeyFdOrphanOperationErrno> {
+    match error {
+        LcsError::OrphanedKeyNamespaceOperation | LcsError::OrphanedKeyBackupOperation => {
+            Some(KeyFdOrphanOperationErrno::Enoent)
+        }
+        _ => None,
+    }
 }
 
 /// Plans key-fd release side effects for close(), close-on-exec, or process exit.

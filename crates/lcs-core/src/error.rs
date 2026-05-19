@@ -691,6 +691,8 @@ pub enum LcsError {
     HiveRootKeyOperation,
     /// A namespace mutation was attempted through an already-orphaned key fd.
     OrphanedKeyNamespaceOperation,
+    /// Backup was attempted through an already-orphaned key fd.
+    OrphanedKeyBackupOperation,
     /// A key delete was attempted while visible children still exist.
     KeyHasVisibleChildren {
         /// Visible child count observed before delete.

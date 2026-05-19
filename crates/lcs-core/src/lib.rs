@@ -112,8 +112,10 @@ pub use config::{
 pub use constants::*;
 pub use error::{LcsError, LcsResult};
 pub use fd::{
-    KeyFdClosePlan, KeyFdDelegationPlan, KeyFdOpenView, key_fd_granted_access_allows,
-    plan_key_fd_close, plan_key_fd_delegation, validate_key_fd_open_view,
+    KeyFdClosePlan, KeyFdDelegationPlan, KeyFdOpenView, KeyFdOperation, KeyFdOperationScope,
+    KeyFdOrphanOperationErrno, KeyFdOrphanOperationPlan, key_fd_granted_access_allows,
+    key_fd_orphan_operation_errno, plan_key_fd_close, plan_key_fd_delegation,
+    plan_key_fd_orphan_operation, validate_key_fd_open_view,
 };
 pub use hives::{
     CurrentUserRewrite, CurrentUserSidComponent, HiveRoute, HiveRouteErrno, HiveRouteOutcome,
