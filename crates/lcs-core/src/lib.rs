@@ -180,9 +180,10 @@ pub use query::{
     EnumValueOutputBufferDecision, EnumValueOutputBuffers, EnumValueResult, EnumeratedSubkeyInfo,
     QueryValueOutcome, QueryValueOutputBufferDecision, QueryValueOutputBuffers, QueryValueResult,
     QueryValuesBatchOutputDecision, enum_subkey_result_at, enum_value_result_at,
-    packed_batch_value_len, query_value_result_from_resolution, query_values_batch_required_len,
-    validate_enum_subkey_output_buffer, validate_enum_value_output_buffers,
-    validate_query_value_output_buffers, validate_query_values_batch_output,
+    packed_batch_value_len, query_value_not_found_errno, query_value_result_from_resolution,
+    query_values_batch_required_len, validate_enum_subkey_output_buffer,
+    validate_enum_value_output_buffers, validate_query_value_output_buffers,
+    validate_query_values_batch_output,
 };
 pub use resolution::{
     BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid, LayerResolutionContext,

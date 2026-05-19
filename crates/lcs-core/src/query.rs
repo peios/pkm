@@ -4,6 +4,7 @@ use crate::output_buffer::{
     aggregate_output_buffer_decisions, validate_output_buffer_required_size,
 };
 use crate::resolution::{EnumeratedSubkey, EnumeratedValue, ResolvedValueEntry, ValueResolution};
+use crate::rsi::RsiMappedErrno;
 use crate::value::RegistryValueType;
 
 /// Caller-facing `REG_IOC_QUERY_VALUE` result after value resolution.
@@ -120,6 +121,14 @@ pub fn query_value_result_from_resolution<'a>(
     match resolution {
         ValueResolution::Found(value) => QueryValueOutcome::Found(query_value_result(value)),
         ValueResolution::NotFound => QueryValueOutcome::NotFound,
+    }
+}
+
+/// Maps caller-visible query-value absence to the required errno.
+pub fn query_value_not_found_errno(outcome: &QueryValueOutcome<'_>) -> Option<RsiMappedErrno> {
+    match outcome {
+        QueryValueOutcome::Found(_) => None,
+        QueryValueOutcome::NotFound => Some(RsiMappedErrno::Enoent),
     }
 }
 
