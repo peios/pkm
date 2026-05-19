@@ -104,6 +104,12 @@ pub struct BackupRestoreRootWritePlan<'a> {
     pub last_write_time_ns: i64,
 }
 
+/// Restore teardown plan for purging one descendant key record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreTeardownDropKeyPlan {
+    pub guid: Guid,
+}
+
 /// Non-root KEY create plan derived from a buffered restore key section.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupRestoreNonRootKeyCreatePlan<'a> {
@@ -906,6 +912,25 @@ pub fn plan_backup_restore_root_write<'a>(
         target_guid: target_root.guid,
         security_descriptor: root_key.security_descriptor,
         last_write_time_ns: root_key.last_write_time_ns,
+    })
+}
+
+/// Plans teardown of an existing descendant key while preserving the target root.
+pub fn plan_backup_restore_teardown_drop_descendant_key(
+    target_root_guid: Guid,
+    descendant_guid: Guid,
+) -> LcsResult<BackupRestoreTeardownDropKeyPlan> {
+    if target_root_guid == NIL_GUID || descendant_guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    if descendant_guid == target_root_guid {
+        return Err(LcsError::BackupRestoreTargetRootDropNotAllowed {
+            guid: target_root_guid,
+        });
+    }
+
+    Ok(BackupRestoreTeardownDropKeyPlan {
+        guid: descendant_guid,
     })
 }
 

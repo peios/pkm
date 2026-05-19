@@ -469,6 +469,11 @@ pub enum LcsError {
         /// KEY GUID supplied as the root KEY.
         actual: [u8; 16],
     },
+    /// Restore teardown attempted to drop the restore target root key.
+    BackupRestoreTargetRootDropNotAllowed {
+        /// Restore target root GUID.
+        guid: [u8; 16],
+    },
     /// Restore tried to create the already-existing target root key as a non-root key.
     BackupRestoreRootKeyCreateNotAllowed {
         /// Root KEY GUID supplied to the non-root create planner.
