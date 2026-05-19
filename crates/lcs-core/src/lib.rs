@@ -12,6 +12,7 @@ pub mod casefold;
 pub mod config;
 pub mod constants;
 pub mod error;
+pub mod fd;
 pub mod hives;
 pub mod ioctl;
 pub mod key;
@@ -35,7 +36,7 @@ pub mod watch;
 pub use access::{
     NormalizedRegistryAccess, REGISTRY_GENERIC_MAPPING, RegistryGenericMapping,
     map_registry_generic_bits, registry_fd_has_right, validate_registry_ace_mask,
-    validate_registry_desired_access,
+    validate_registry_desired_access, validate_registry_granted_access,
 };
 pub use casefold::{
     casefold_cmp, casefold_eq, casefold_eq_bytes, casefold_is, unicode_simple_case_fold,
@@ -50,6 +51,10 @@ pub use config::{
 };
 pub use constants::*;
 pub use error::{LcsError, LcsResult};
+pub use fd::{
+    KeyFdDelegationPlan, KeyFdOpenView, key_fd_granted_access_allows, plan_key_fd_delegation,
+    validate_key_fd_open_view,
+};
 pub use hives::{
     CurrentUserRewrite, HiveRoute, HiveScope, HiveStatus, HiveView, RoutedHive, SourceId,
     for_each_routable_path_component, route_hive, validate_hive_table, validate_scope_guid_set,

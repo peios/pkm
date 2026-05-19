@@ -89,6 +89,12 @@ pub fn registry_fd_has_right(granted: u32, required: u32) -> bool {
     (granted & required) == required
 }
 
+/// Validates a concrete granted mask stored on a key fd after AccessCheck.
+pub fn validate_registry_granted_access(granted: u32) -> LcsResult<u32> {
+    validate_mask_subset(granted, REG_VALID_MAPPED_ACCESS_MASK)?;
+    Ok(granted)
+}
+
 fn validate_mask_subset(mask: u32, valid: u32) -> LcsResult<()> {
     let invalid = mask & !valid;
     if invalid != 0 {
