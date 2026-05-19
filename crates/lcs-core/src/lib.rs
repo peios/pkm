@@ -162,8 +162,10 @@ pub use rsi::{
     validate_rsi_read_key_response_security_descriptor, validate_rsi_request_op_code,
     validate_rsi_response_for_request, validate_rsi_status_only_response_for_request,
     validate_rsi_write_key_field_mask, write_rsi_create_entry_request_frame,
-    write_rsi_delete_entry_request_frame, write_rsi_enum_children_request_frame,
+    write_rsi_create_key_request_frame, write_rsi_delete_entry_request_frame,
+    write_rsi_drop_key_request_frame, write_rsi_enum_children_request_frame,
     write_rsi_hide_entry_request_frame, write_rsi_lookup_request_frame,
+    write_rsi_read_key_request_frame, write_rsi_write_key_request_frame,
 };
 pub use sequence::SequenceCounter;
 pub use source::{

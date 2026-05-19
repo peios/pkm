@@ -673,6 +673,10 @@ impl<'a> RsiFrameWriter<'a> {
         Ok(())
     }
 
+    fn write_u8(&mut self, value: u8) -> LcsResult<()> {
+        self.write_fixed(&[value])
+    }
+
     fn write_u16_le(&mut self, value: u16) -> LcsResult<()> {
         self.write_fixed(&value.to_le_bytes())
     }
@@ -817,6 +821,109 @@ pub fn write_rsi_enum_children_request_frame(
 ) -> LcsResult<RsiBuiltRequest> {
     write_rsi_request_frame(dst, request_id, RSI_ENUM_CHILDREN, txn_id, 16, |writer| {
         writer.write_guid(parent_guid)
+    })
+}
+
+/// Writes a complete RSI_CREATE_KEY request frame.
+pub fn write_rsi_create_key_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    guid: Guid,
+    name: &[u8],
+    parent_guid: Guid,
+    sd: &[u8],
+    volatile: bool,
+    symlink: bool,
+) -> LcsResult<RsiBuiltRequest> {
+    let payload_len = checked_add_len(
+        checked_add_len(
+            checked_add_len(
+                checked_add_len(16, checked_rsi_length_prefixed_len(name)?)?,
+                16,
+            )?,
+            checked_rsi_length_prefixed_len(sd)?,
+        )?,
+        2,
+    )?;
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_CREATE_KEY,
+        txn_id,
+        payload_len,
+        |writer| {
+            writer.write_guid(guid)?;
+            writer.write_length_prefixed(name)?;
+            writer.write_guid(parent_guid)?;
+            writer.write_length_prefixed(sd)?;
+            writer.write_u8(u8::from(volatile))?;
+            writer.write_u8(u8::from(symlink))
+        },
+    )
+}
+
+/// Writes a complete RSI_READ_KEY request frame.
+pub fn write_rsi_read_key_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    guid: Guid,
+) -> LcsResult<RsiBuiltRequest> {
+    write_rsi_request_frame(dst, request_id, RSI_READ_KEY, txn_id, 16, |writer| {
+        writer.write_guid(guid)
+    })
+}
+
+/// Writes a complete RSI_WRITE_KEY request frame.
+pub fn write_rsi_write_key_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    guid: Guid,
+    sd: Option<&[u8]>,
+    last_write_time: Option<u64>,
+) -> LcsResult<RsiBuiltRequest> {
+    let mut field_mask = 0u32;
+    let mut payload_len = checked_add_len(16, 4)?;
+    if let Some(sd) = sd {
+        field_mask |= RSI_WRITE_KEY_FIELD_SD;
+        payload_len = checked_add_len(payload_len, checked_rsi_length_prefixed_len(sd)?)?;
+    }
+    if last_write_time.is_some() {
+        field_mask |= RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME;
+        payload_len = checked_add_len(payload_len, 8)?;
+    }
+
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_WRITE_KEY,
+        txn_id,
+        payload_len,
+        |writer| {
+            writer.write_guid(guid)?;
+            writer.write_u32_le(field_mask)?;
+            if let Some(sd) = sd {
+                writer.write_length_prefixed(sd)?;
+            }
+            if let Some(last_write_time) = last_write_time {
+                writer.write_u64_le(last_write_time)?;
+            }
+            Ok(())
+        },
+    )
+}
+
+/// Writes a complete RSI_DROP_KEY request frame.
+pub fn write_rsi_drop_key_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    guid: Guid,
+) -> LcsResult<RsiBuiltRequest> {
+    write_rsi_request_frame(dst, request_id, RSI_DROP_KEY, txn_id, 16, |writer| {
+        writer.write_guid(guid)
     })
 }
 
