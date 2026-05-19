@@ -40,6 +40,33 @@ pub enum ParsedLayerMetadataValue<'a> {
     Owner(&'a [u8]),
 }
 
+/// Source selected for the informational layer owner SID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayerOwnerSource {
+    MetadataValue,
+    CreatorToken,
+    PreviousKnownGood,
+    MetadataSecurityDescriptorOwner,
+}
+
+/// Inputs for selecting a layer's informational owner SID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerOwnerSelectionInput<'a> {
+    pub metadata_owner_sid: Option<&'a [u8]>,
+    pub creator_sid: Option<&'a [u8]>,
+    pub previous_known_good_owner_sid: Option<&'a [u8]>,
+    pub metadata_security_descriptor: Option<&'a [u8]>,
+    pub is_new_layer: bool,
+}
+
+/// Selected informational owner SID for a layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerOwnerSelection<'a> {
+    pub owner_sid: &'a [u8],
+    pub source: LayerOwnerSource,
+    pub informational_only: bool,
+}
+
 /// Complete non-base layer metadata needed before publication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LayerPublicationInput<'a> {
@@ -215,6 +242,55 @@ pub fn plan_layer_publication<'a>(
         metadata_security_descriptor: input.metadata_security_descriptor,
         publish_atomically: true,
     })
+}
+
+/// Selects the informational Owner SID for layer metadata refresh.
+pub fn select_layer_owner<'a>(
+    input: LayerOwnerSelectionInput<'a>,
+) -> LcsResult<LayerOwnerSelection<'a>> {
+    if let Some(owner_sid) = input.metadata_owner_sid {
+        validate_layer_owner_sid(owner_sid)?;
+        return Ok(layer_owner_selection(
+            owner_sid,
+            LayerOwnerSource::MetadataValue,
+        ));
+    }
+
+    if input.is_new_layer {
+        let creator_sid = input.creator_sid.ok_or(LcsError::LayerOwnerUnavailable)?;
+        validate_layer_owner_sid(creator_sid)?;
+        return Ok(layer_owner_selection(
+            creator_sid,
+            LayerOwnerSource::CreatorToken,
+        ));
+    }
+
+    if let Some(previous_owner_sid) = input.previous_known_good_owner_sid {
+        validate_layer_owner_sid(previous_owner_sid)?;
+        return Ok(layer_owner_selection(
+            previous_owner_sid,
+            LayerOwnerSource::PreviousKnownGood,
+        ));
+    }
+
+    let metadata_security_descriptor = input
+        .metadata_security_descriptor
+        .ok_or(LcsError::LayerOwnerUnavailable)?;
+    let sd = kacs_core::SecurityDescriptor::parse(metadata_security_descriptor).map_err(|_| {
+        LcsError::MalformedSecurityDescriptor {
+            field: "layer_metadata.sd",
+        }
+    })?;
+    let owner = sd
+        .owner()
+        .ok_or(LcsError::MalformedSecurityDescriptor {
+            field: "layer_metadata.sd",
+        })?
+        .as_bytes();
+    Ok(layer_owner_selection(
+        owner,
+        LayerOwnerSource::MetadataSecurityDescriptorOwner,
+    ))
 }
 
 /// Plans the kernel-side effects of deleting a layer metadata key.
@@ -443,6 +519,19 @@ fn parse_layer_metadata_dword(
         entry.data[2],
         entry.data[3],
     ]))
+}
+
+fn validate_layer_owner_sid(owner_sid: &[u8]) -> LcsResult<()> {
+    kacs_core::Sid::parse(owner_sid).map_err(|_| LcsError::MalformedLayerOwnerSid)?;
+    Ok(())
+}
+
+fn layer_owner_selection(owner_sid: &[u8], source: LayerOwnerSource) -> LayerOwnerSelection<'_> {
+    LayerOwnerSelection {
+        owner_sid,
+        source,
+        informational_only: true,
+    }
 }
 
 fn validate_layer_metadata_snapshot(

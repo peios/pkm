@@ -310,6 +310,8 @@ pub enum LcsError {
     InvalidLayerMetadataEnabledValue(u32),
     /// The `Owner` layer metadata value was not a parseable SID.
     MalformedLayerOwnerSid,
+    /// No informational layer owner SID was available from metadata, creator, previous cache, or SD owner.
+    LayerOwnerUnavailable,
     /// A symlink key had no effective default value to interpret as REG_LINK.
     SymlinkDefaultValueMissing,
     /// A symlink key's effective default value was not REG_LINK.
