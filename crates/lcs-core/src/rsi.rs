@@ -1476,6 +1476,31 @@ pub fn validate_rsi_read_key_response_names(
     Ok(())
 }
 
+/// Validates the read-key response SD before AccessCheck use.
+pub fn validate_rsi_read_key_response_security_descriptor(
+    payload: &RsiReadKeySuccessResponsePayload<'_>,
+) -> LcsResult<()> {
+    validate_rsi_source_security_descriptor(payload.sd.data, "rsi_read_key.sd")
+}
+
+/// Validates lookup metadata SDs before path resolution uses them.
+pub fn validate_rsi_lookup_metadata_security_descriptors(
+    payload: &RsiLookupSuccessResponsePayload<'_>,
+) -> LcsResult<()> {
+    payload.for_each_key_metadata(|metadata| {
+        validate_rsi_source_security_descriptor(metadata.sd.data, "rsi_lookup.metadata.sd")
+    })
+}
+
+/// Validates enum-children metadata SDs before enumeration uses them.
+pub fn validate_rsi_enum_children_metadata_security_descriptors(
+    payload: &RsiEnumChildrenSuccessResponsePayload<'_>,
+) -> LcsResult<()> {
+    payload.for_each_key_metadata(|metadata| {
+        validate_rsi_source_security_descriptor(metadata.sd.data, "rsi_enum_children.metadata.sd")
+    })
+}
+
 /// Validates query-values response string fields before value resolution.
 pub fn validate_rsi_query_values_response_names(
     payload: &RsiQueryValuesSuccessResponsePayload<'_>,
@@ -1879,6 +1904,15 @@ where
 fn validate_rsi_path_metadata_guid(guid: Guid) -> LcsResult<()> {
     if guid == [0; 16] {
         return Err(LcsError::RsiPathMetadataNilGuid);
+    }
+    Ok(())
+}
+
+fn validate_rsi_source_security_descriptor(bytes: &[u8], field: &'static str) -> LcsResult<()> {
+    let sd = kacs_core::SecurityDescriptor::parse(bytes)
+        .map_err(|_| LcsError::MalformedSecurityDescriptor { field })?;
+    if sd.owner().is_none() {
+        return Err(LcsError::MalformedSecurityDescriptor { field });
     }
     Ok(())
 }

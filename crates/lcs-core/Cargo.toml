@@ -9,4 +9,7 @@ description = "Slow-track LCS semantic core primitives"
 
 [features]
 default = []
-kernel = []
+kernel = ["kacs-core/kernel"]
+
+[dependencies]
+kacs-core = { path = "../kacs-core", default-features = false }

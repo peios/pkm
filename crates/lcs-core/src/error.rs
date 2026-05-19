@@ -295,6 +295,11 @@ pub enum LcsError {
     },
     /// A path response metadata block used nil as a key GUID.
     RsiPathMetadataNilGuid,
+    /// A source-returned security descriptor was malformed or unusable for AccessCheck.
+    MalformedSecurityDescriptor {
+        /// Logical source-response field.
+        field: &'static str,
+    },
     /// The per-source RSI request id allocator cannot advance without reusing an id.
     RsiRequestIdOverflow,
     /// A length-prefixed RSI payload field would overflow host arithmetic.
