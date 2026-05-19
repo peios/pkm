@@ -103,6 +103,20 @@ pub struct PlannedValueWrite<'a> {
     pub updates_last_write_time: bool,
 }
 
+/// Source-observed layer-count admission input for a value write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ValueLayerAdmissionInput {
+    pub current_distinct_layers: usize,
+    pub replacing_existing_layer_entry: bool,
+}
+
+/// Best-effort per-value layer cap admission plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ValueLayerAdmissionPlan {
+    pub distinct_layers_after_write: usize,
+    pub best_effort_admission_control: bool,
+}
+
 /// LCS-produced value delete before source dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ValueDeleteRequest<'a> {
@@ -216,6 +230,31 @@ pub fn plan_value_write<'a>(
             ..validated
         },
         updates_last_write_time: true,
+    })
+}
+
+/// Applies MaxLayersPerValue before dispatching a value write to the source.
+pub fn plan_value_layer_admission(
+    limits: &LcsLimits,
+    input: ValueLayerAdmissionInput,
+) -> LcsResult<ValueLayerAdmissionPlan> {
+    if input.replacing_existing_layer_entry {
+        return Ok(ValueLayerAdmissionPlan {
+            distinct_layers_after_write: input.current_distinct_layers,
+            best_effort_admission_control: true,
+        });
+    }
+
+    if input.current_distinct_layers >= limits.max_layers_per_value {
+        return Err(LcsError::TooManyLayersPerValue {
+            count: input.current_distinct_layers,
+            max: limits.max_layers_per_value,
+        });
+    }
+
+    Ok(ValueLayerAdmissionPlan {
+        distinct_layers_after_write: input.current_distinct_layers + 1,
+        best_effort_admission_control: true,
     })
 }
 

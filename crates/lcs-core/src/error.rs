@@ -76,6 +76,13 @@ pub enum LcsError {
         /// Maximum permitted payload length.
         max: usize,
     },
+    /// A value write would exceed MaxLayersPerValue admission control.
+    TooManyLayersPerValue {
+        /// Distinct layers currently observed for the value.
+        count: usize,
+        /// Maximum permitted distinct layers for one value.
+        max: usize,
+    },
     /// A configuration value was outside its ratified range.
     InvalidConfigValue {
         /// Parameter name.

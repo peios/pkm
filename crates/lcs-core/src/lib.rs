@@ -143,10 +143,10 @@ pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,
     PlannedBlanketTombstone, PlannedValueDelete, PlannedValueWrite, RegistryValueType,
     ValidatedBlanketTombstone, ValidatedValueDelete, ValidatedValueType, ValidatedValueWrite,
-    ValueDeleteRequest, ValueWriteInput, ValueWriteRequest, plan_blanket_tombstone,
-    plan_value_delete, plan_value_write, validate_blanket_tombstone_request,
-    validate_value_data_len, validate_value_delete_request, validate_value_write_request,
-    validate_value_write_type,
+    ValueDeleteRequest, ValueLayerAdmissionInput, ValueLayerAdmissionPlan, ValueWriteInput,
+    ValueWriteRequest, plan_blanket_tombstone, plan_value_delete, plan_value_layer_admission,
+    plan_value_write, validate_blanket_tombstone_request, validate_value_data_len,
+    validate_value_delete_request, validate_value_write_request, validate_value_write_type,
 };
 pub use watch::{
     KeyWatchState, QueuedWatchEvent, TransactionWatchBurstPlan, WatchDelivery,
