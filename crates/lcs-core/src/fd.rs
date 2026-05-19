@@ -3,7 +3,7 @@ use crate::config::LcsLimits;
 use crate::error::{LcsError, LcsResult};
 use crate::path::{validate_hive_name_bytes, validate_key_component_bytes};
 use crate::resolution::Guid;
-use crate::source::NIL_GUID;
+use crate::source::{NIL_GUID, SourceSlotStatus};
 use crate::watch::KeyWatchState;
 
 /// Semantic snapshot stored by an open registry key fd.
@@ -96,6 +96,17 @@ pub struct KeyFdClosePlan {
     pub discard_pending_watch_events: bool,
 }
 
+/// Planned cleanup when the last fd to an orphaned key closes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrphanedKeyLastFdClosePlan {
+    pub send_rsi_drop_key: bool,
+    pub dispatch_drop_before_releasing_kernel_state: bool,
+    pub release_kernel_key_state: bool,
+    pub queue_deferred_drop: bool,
+    pub close_reports_cleanup_failure: bool,
+    pub source_startup_cleanup_responsible: bool,
+}
+
 /// Validates the immutable semantic fields captured on a key fd at open time.
 pub fn validate_key_fd_open_view(limits: &LcsLimits, fd: &KeyFdOpenView<'_>) -> LcsResult<()> {
     if fd.key_guid == NIL_GUID {
@@ -156,6 +167,35 @@ pub fn key_fd_orphan_operation_errno(error: &LcsError) -> Option<KeyFdOrphanOper
         }
         _ => None,
     }
+}
+
+/// Plans source cleanup for the last fd close on an already-orphaned key.
+pub fn plan_orphaned_key_last_fd_close(
+    key_guid: Guid,
+    source_status: SourceSlotStatus,
+) -> LcsResult<OrphanedKeyLastFdClosePlan> {
+    if key_guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+
+    Ok(match source_status {
+        SourceSlotStatus::Active => OrphanedKeyLastFdClosePlan {
+            send_rsi_drop_key: true,
+            dispatch_drop_before_releasing_kernel_state: true,
+            release_kernel_key_state: true,
+            queue_deferred_drop: false,
+            close_reports_cleanup_failure: false,
+            source_startup_cleanup_responsible: false,
+        },
+        SourceSlotStatus::Down => OrphanedKeyLastFdClosePlan {
+            send_rsi_drop_key: false,
+            dispatch_drop_before_releasing_kernel_state: false,
+            release_kernel_key_state: true,
+            queue_deferred_drop: false,
+            close_reports_cleanup_failure: false,
+            source_startup_cleanup_responsible: true,
+        },
+    })
 }
 
 /// Plans key-fd release side effects for close(), close-on-exec, or process exit.
