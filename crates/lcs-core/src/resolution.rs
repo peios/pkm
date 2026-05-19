@@ -6,6 +6,7 @@ use crate::layers::validate_layer_resolution_context;
 use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
 };
+use crate::source::NIL_GUID;
 use crate::value::{RegistryValueType, ValidatedValueType, validate_value_write_type};
 
 /// LCS GUID bytes in canonical on-wire order.
@@ -38,6 +39,26 @@ pub enum PathTarget {
 /// One source-returned path entry for a single `(parent GUID, child name)`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PathEntry<'a> {
+    pub layer: &'a str,
+    pub sequence: u64,
+    pub target: PathTarget,
+}
+
+/// LCS-produced path-entry write before source dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PathEntryWriteRequest<'a> {
+    pub parent_guid: Guid,
+    pub child_name: &'a str,
+    pub layer: &'a str,
+    pub sequence: u64,
+    pub target: PathTarget,
+}
+
+/// Validated LCS path-entry write fields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ValidatedPathEntryWrite<'a> {
+    pub parent_guid: Guid,
+    pub child_name: &'a str,
     pub layer: &'a str,
     pub sequence: u64,
     pub target: PathTarget,
@@ -180,11 +201,12 @@ pub fn resolve_path_entry<'a>(
             continue;
         };
         validate_sequence(context, entry.sequence)?;
+        let target = validate_path_target(entry.target)?;
 
         let candidate = PathCandidate {
             layer,
             sequence: entry.sequence,
-            target: entry.target,
+            target,
         };
         update_best_path(&mut best, &mut duplicate_best, candidate);
     }
@@ -203,6 +225,37 @@ pub fn resolve_path_entry<'a>(
         })),
         PathTarget::Hidden => Ok(PathResolution::NotFound),
     }
+}
+
+/// Validates one LCS-produced path-entry write before source dispatch.
+pub fn validate_path_entry_write_request<'a>(
+    limits: &LcsLimits,
+    request: &PathEntryWriteRequest<'a>,
+) -> LcsResult<ValidatedPathEntryWrite<'a>> {
+    if request.parent_guid == NIL_GUID {
+        return Err(LcsError::NilParentGuid);
+    }
+    let child_name = validate_key_component_bytes(request.child_name.as_bytes(), limits)?;
+    let layer = validate_layer_name_bytes(request.layer.as_bytes(), limits)?;
+    let target = validate_path_target(request.target)?;
+
+    Ok(ValidatedPathEntryWrite {
+        parent_guid: request.parent_guid,
+        child_name,
+        layer,
+        sequence: request.sequence,
+        target,
+    })
+}
+
+/// Validates a path-entry target value.
+pub fn validate_path_target(target: PathTarget) -> LcsResult<PathTarget> {
+    if let PathTarget::Guid(guid) = target {
+        if guid == NIL_GUID {
+            return Err(LcsError::NilKeyGuid);
+        }
+    }
+    Ok(target)
 }
 
 /// Resolves one source-returned value candidate set.
@@ -398,12 +451,13 @@ where
                 continue;
             };
             validate_sequence(context, candidate_entry.entry.sequence)?;
+            let target = validate_path_target(candidate_entry.entry.target)?;
 
             let candidate = NamedPathCandidate {
                 name: candidate_name,
                 layer,
                 sequence: candidate_entry.entry.sequence,
-                target: candidate_entry.entry.target,
+                target,
             };
             update_best_named_path(&mut best, &mut duplicate_best, candidate);
         }
@@ -507,6 +561,7 @@ fn prevalidate_subkey_enumeration_source<'a>(
             continue;
         };
         validate_sequence(context, entry.entry.sequence)?;
+        validate_path_target(entry.entry.target)?;
     }
 
     Ok(())

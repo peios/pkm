@@ -61,9 +61,10 @@ pub use path::{
 };
 pub use resolution::{
     BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid, LayerResolutionContext,
-    LayerView, NamedPathEntry, NamedValueEntry, PathEntry, PathResolution, PathTarget,
-    ResolvedPathEntry, ResolvedValueEntry, ValueEntry, ValueResolution, for_each_effective_value,
-    for_each_visible_subkey, resolve_path_entry, resolve_value,
+    LayerView, NamedPathEntry, NamedValueEntry, PathEntry, PathEntryWriteRequest, PathResolution,
+    PathTarget, ResolvedPathEntry, ResolvedValueEntry, ValidatedPathEntryWrite, ValueEntry,
+    ValueResolution, for_each_effective_value, for_each_visible_subkey, resolve_path_entry,
+    resolve_value, validate_path_entry_write_request, validate_path_target,
 };
 pub use sequence::SequenceCounter;
 pub use source::{
