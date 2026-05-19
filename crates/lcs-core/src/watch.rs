@@ -247,6 +247,13 @@ pub enum TransactionWatchQueueApplyPlan {
     Applied(TransactionWatchQueueApplySummary),
 }
 
+/// Source-restart watch overflow queue application decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceRestartWatchQueueApplyPlan {
+    Unaffected(WatchQueueState),
+    Applied(WatchQueueMutationSummary),
+}
+
 /// Value-level effective-state watch event selected by snapshot diffing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectiveValueWatchEvent<'a> {
@@ -1019,6 +1026,29 @@ fn require_transaction_watch_event_count(expected: usize, actual: usize) -> LcsR
         return Err(LcsError::TransactionWatchEventCountMismatch { expected, actual });
     }
     Ok(())
+}
+
+/// Applies source-restart overflow delivery to one watch queue.
+pub fn apply_source_restart_watch_overflow(
+    limits: &LcsLimits,
+    queue: &mut [WatchQueueEntry],
+    queued_events: usize,
+    enqueue_overflow: bool,
+) -> LcsResult<SourceRestartWatchQueueApplyPlan> {
+    validate_watch_queue_storage(limits.notification_queue_size, queue.len())?;
+    if !enqueue_overflow {
+        return Ok(SourceRestartWatchQueueApplyPlan::Unaffected(
+            watch_queue_snapshot(queue, queued_events)?,
+        ));
+    }
+
+    let summary = push_watch_queue_event(
+        limits.notification_queue_size,
+        queue,
+        queued_events,
+        overflow_queue_entry(),
+    )?;
+    Ok(SourceRestartWatchQueueApplyPlan::Applied(summary))
 }
 
 /// Emits value watch events for the caller-visible effective-state difference.
