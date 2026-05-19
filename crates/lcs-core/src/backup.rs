@@ -104,6 +104,18 @@ pub struct BackupRestoreRootWritePlan<'a> {
     pub last_write_time_ns: i64,
 }
 
+/// Non-root KEY create plan derived from a buffered restore key section.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreNonRootKeyCreatePlan<'a> {
+    pub guid: Guid,
+    pub parent_guid: Guid,
+    pub child_name: &'a str,
+    pub security_descriptor: &'a [u8],
+    pub volatile: bool,
+    pub symlink: bool,
+    pub anchor_path_entry_index: usize,
+}
+
 /// Parsed PATH_ENTRY record payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupPathEntryPayload<'a> {
@@ -685,6 +697,60 @@ pub fn plan_backup_restore_root_write<'a>(
         target_guid: target_root.guid,
         security_descriptor: root_key.security_descriptor,
         last_write_time_ns: root_key.last_write_time_ns,
+    })
+}
+
+/// Selects the deterministic create anchor for a non-root restore KEY section.
+pub fn plan_backup_restore_non_root_key_create<'a>(
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    key: BackupKeyPayload<'a>,
+    path_entries: &[BackupPathEntryPayload<'a>],
+    processed_non_root_key_guids: &[Guid],
+) -> LcsResult<BackupRestoreNonRootKeyCreatePlan<'a>> {
+    if header_root_guid == NIL_GUID || target_root_guid == NIL_GUID || key.guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    if key.guid == header_root_guid || key.guid == target_root_guid {
+        return Err(LcsError::BackupRestoreRootKeyCreateNotAllowed { guid: key.guid });
+    }
+    validate_backup_security_descriptor(key.security_descriptor, "backup_key.sd")?;
+
+    let mut anchor = None;
+    for (index, path_entry) in path_entries.iter().enumerate() {
+        let restored = remap_backup_restore_path_entry(
+            *path_entry,
+            header_root_guid,
+            target_root_guid,
+            processed_non_root_key_guids,
+        )?;
+        let child_guid = match restored.target {
+            PathTarget::Guid(child_guid) => child_guid,
+            PathTarget::Hidden => NIL_GUID,
+        };
+        if child_guid != key.guid {
+            return Err(LcsError::BackupRestoreKeyCreateAnchorTargetMismatch {
+                key_guid: key.guid,
+                child_guid,
+            });
+        }
+        if anchor.is_none() {
+            anchor = Some((index, restored.parent_guid, restored.child_name));
+        }
+    }
+
+    let Some((anchor_path_entry_index, parent_guid, child_name)) = anchor else {
+        return Err(LcsError::BackupRestoreKeyCreateAnchorMissing { key_guid: key.guid });
+    };
+
+    Ok(BackupRestoreNonRootKeyCreatePlan {
+        guid: key.guid,
+        parent_guid,
+        child_name,
+        security_descriptor: key.security_descriptor,
+        volatile: key.volatile,
+        symlink: key.symlink,
+        anchor_path_entry_index,
     })
 }
 

@@ -447,6 +447,11 @@ pub enum LcsError {
         /// KEY GUID supplied as the root KEY.
         actual: [u8; 16],
     },
+    /// Restore tried to create the already-existing target root key as a non-root key.
+    BackupRestoreRootKeyCreateNotAllowed {
+        /// Root KEY GUID supplied to the non-root create planner.
+        guid: [u8; 16],
+    },
     /// A backup restore stream contained more than one KEY for HEADER.RootGUID.
     BackupRestoreRootKeyDuplicate,
     /// A backup root KEY immutable flag did not match the restore target key.
@@ -474,6 +479,18 @@ pub enum LcsError {
     BackupRestoreParentGuidOutsideSubtree {
         /// Remapped parent GUID.
         parent_guid: [u8; 16],
+    },
+    /// A non-root KEY section did not contain a GUID-bearing create anchor for that key.
+    BackupRestoreKeyCreateAnchorMissing {
+        /// Non-root key GUID being restored.
+        key_guid: [u8; 16],
+    },
+    /// A PATH_ENTRY in a non-root KEY section did not target that section's KEY.
+    BackupRestoreKeyCreateAnchorTargetMismatch {
+        /// Non-root key GUID being restored.
+        key_guid: [u8; 16],
+        /// Remapped child GUID, or nil for HIDDEN.
+        child_guid: [u8; 16],
     },
     /// A restore VALUE or BLANKET_TOMBSTONE KeyGUID did not refer to the remapped subtree.
     BackupRestoreKeyGuidOutsideSubtree {
