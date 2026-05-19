@@ -22,6 +22,14 @@ pub struct KeyFdDelegationPlan {
     pub delegated_granted_access: u32,
 }
 
+/// Planned cleanup when a key fd is closed by normal Linux fd teardown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyFdClosePlan {
+    pub release_key_reference: bool,
+    pub remove_watch: bool,
+    pub discard_pending_watch_events: bool,
+}
+
 /// Validates the immutable semantic fields captured on a key fd at open time.
 pub fn validate_key_fd_open_view(limits: &LcsLimits, fd: &KeyFdOpenView<'_>) -> LcsResult<()> {
     if fd.key_guid == NIL_GUID {
@@ -46,6 +54,16 @@ pub fn plan_key_fd_delegation(
     validate_key_fd_open_view(limits, fd)?;
     Ok(KeyFdDelegationPlan {
         delegated_granted_access: fd.granted_access,
+    })
+}
+
+/// Plans key-fd release side effects for close(), close-on-exec, or process exit.
+pub fn plan_key_fd_close(limits: &LcsLimits, fd: &KeyFdOpenView<'_>) -> LcsResult<KeyFdClosePlan> {
+    validate_key_fd_open_view(limits, fd)?;
+    Ok(KeyFdClosePlan {
+        release_key_reference: true,
+        remove_watch: fd.watch_state.armed,
+        discard_pending_watch_events: fd.watch_state.armed,
     })
 }
 

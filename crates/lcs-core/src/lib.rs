@@ -91,8 +91,8 @@ pub use config::{
 pub use constants::*;
 pub use error::{LcsError, LcsResult};
 pub use fd::{
-    KeyFdDelegationPlan, KeyFdOpenView, key_fd_granted_access_allows, plan_key_fd_delegation,
-    validate_key_fd_open_view,
+    KeyFdClosePlan, KeyFdDelegationPlan, KeyFdOpenView, key_fd_granted_access_allows,
+    plan_key_fd_close, plan_key_fd_delegation, validate_key_fd_open_view,
 };
 pub use hives::{
     CurrentUserRewrite, HiveRoute, HiveScope, HiveStatus, HiveView, RoutedHive, SourceId,
@@ -226,12 +226,13 @@ pub use symlink::{
 };
 pub use transaction::{
     StartedTransaction, TransactionBinding, TransactionCommitPlan, TransactionCompletionEvent,
-    TransactionFdPublicationPlan, TransactionId, TransactionIdCounter,
+    TransactionFdClosePlan, TransactionFdPublicationPlan, TransactionId, TransactionIdCounter,
     TransactionKernelEffectsPlan, TransactionMutationBindingPlan, TransactionReadPlan,
     TransactionState, TransactionStatusResult, TransactionTerminalErrno, TransactionUseFailure,
     plan_begin_transaction, plan_begin_transaction_fd, plan_transaction_commit,
-    plan_transaction_completion_effects, plan_transaction_mutation_binding, plan_transaction_read,
-    transaction_status, transaction_terminal_failure,
+    plan_transaction_completion_effects, plan_transaction_fd_close,
+    plan_transaction_mutation_binding, plan_transaction_read, transaction_status,
+    transaction_terminal_failure,
 };
 pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,

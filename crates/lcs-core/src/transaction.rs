@@ -160,6 +160,17 @@ pub struct TransactionFdPublicationPlan {
     pub close_without_commit_aborts: bool,
 }
 
+/// Planned cleanup when a transaction fd is closed by normal Linux fd teardown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionFdClosePlan<'a> {
+    pub final_state: TransactionState<'a>,
+    pub binding: Option<TransactionBinding<'a>>,
+    pub dispatch_source_abort: bool,
+    pub discard_mutation_log: bool,
+    pub wake_poll_waiters: bool,
+    pub release_fd_object: bool,
+}
+
 /// Plans reg_begin_transaction without selecting a source.
 pub fn plan_begin_transaction(
     limits: &LcsLimits,
@@ -188,6 +199,45 @@ pub fn plan_begin_transaction_fd(
         source_contact_required: false,
         close_without_commit_aborts: true,
     })
+}
+
+/// Plans transaction-fd release side effects for close(), close-on-exec, or process exit.
+pub fn plan_transaction_fd_close<'a>(
+    limits: &LcsLimits,
+    state: TransactionState<'a>,
+) -> LcsResult<TransactionFdClosePlan<'a>> {
+    match state {
+        TransactionState::ActiveUnbound => Ok(TransactionFdClosePlan {
+            final_state: TransactionState::Aborted,
+            binding: None,
+            dispatch_source_abort: false,
+            discard_mutation_log: true,
+            wake_poll_waiters: true,
+            release_fd_object: true,
+        }),
+        TransactionState::ActiveBound(binding) => {
+            validate_transaction_binding(limits, binding)?;
+            Ok(TransactionFdClosePlan {
+                final_state: TransactionState::Aborted,
+                binding: Some(binding),
+                dispatch_source_abort: true,
+                discard_mutation_log: true,
+                wake_poll_waiters: true,
+                release_fd_object: true,
+            })
+        }
+        terminal @ (TransactionState::Committed
+        | TransactionState::Aborted
+        | TransactionState::TimedOut
+        | TransactionState::SourceDown) => Ok(TransactionFdClosePlan {
+            final_state: terminal,
+            binding: None,
+            dispatch_source_abort: false,
+            discard_mutation_log: false,
+            wake_poll_waiters: false,
+            release_fd_object: true,
+        }),
+    }
 }
 
 /// Shapes the REG_IOC_TXN_STATUS output payload from stored state.
