@@ -246,9 +246,11 @@ pub use security::{
 };
 pub use sequence::SequenceCounter;
 pub use source::{
-    NIL_GUID, RegisteredHiveIdentity, SourceDeviceOpenPlan, SourceRegistrationDecision,
-    SourceRegistrationHive, SourceRegistrationPlan, SourceRegistrationRequest, SourceSlotStatus,
-    SourceSlotView, for_each_source_slot_hive, plan_source_device_open,
+    NIL_GUID, RegisteredHiveIdentity, SourceDeviceOpenPlan, SourceDisconnectPlan,
+    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationLifecycleEffects,
+    SourceRegistrationPlan, SourceRegistrationRequest, SourceRoundTripPlan, SourceSlotStatus,
+    SourceSlotView, for_each_source_slot_hive, plan_source_device_open, plan_source_disconnect,
+    plan_source_registration_lifecycle_effects, plan_source_round_trip,
     source_registration_hive_scope, source_slot_hive_status, validate_source_registration,
     validate_source_registration_hives, validate_source_slots,
 };

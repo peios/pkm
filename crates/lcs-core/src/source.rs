@@ -64,6 +64,34 @@ pub struct SourceRegistrationPlan {
     pub source_next_sequence: u64,
 }
 
+/// Kernel-side effects when an active source connection is lost.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceDisconnectPlan {
+    pub mark_hives_unavailable: bool,
+    pub fail_pending_requests_with_eio: bool,
+    pub keep_key_fds_valid: bool,
+    pub source_round_trips_return_eio: bool,
+    pub mark_bound_transactions_source_down: bool,
+    pub wake_transaction_pollers: bool,
+    pub keep_watches_armed: bool,
+    pub deliver_watch_overflow: bool,
+}
+
+/// Source round-trip gate selected from source slot state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceRoundTripPlan {
+    pub dispatch_to_source: bool,
+}
+
+/// Kernel-side effects after a successful source registration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceRegistrationLifecycleEffects {
+    pub resumed_source_id: Option<SourceId>,
+    pub mark_hives_active: bool,
+    pub deliver_overflow_to_affected_watches: bool,
+    pub existing_fds_resume: bool,
+}
+
 /// Validated source-device open plan before any registration ioctl is accepted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceDeviceOpenPlan {
@@ -78,6 +106,52 @@ pub fn plan_source_device_open(caller_has_tcb: bool) -> LcsResult<SourceDeviceOp
     Ok(SourceDeviceOpenPlan {
         grants_source_fd: true,
     })
+}
+
+/// Plans source crash/disconnect side effects.
+pub fn plan_source_disconnect() -> SourceDisconnectPlan {
+    SourceDisconnectPlan {
+        mark_hives_unavailable: true,
+        fail_pending_requests_with_eio: true,
+        keep_key_fds_valid: true,
+        source_round_trips_return_eio: true,
+        mark_bound_transactions_source_down: true,
+        wake_transaction_pollers: true,
+        keep_watches_armed: true,
+        deliver_watch_overflow: false,
+    }
+}
+
+/// Plans whether a source-backed operation may be dispatched.
+pub fn plan_source_round_trip(status: SourceSlotStatus) -> LcsResult<SourceRoundTripPlan> {
+    match status {
+        SourceSlotStatus::Active => Ok(SourceRoundTripPlan {
+            dispatch_to_source: true,
+        }),
+        SourceSlotStatus::Down => Err(LcsError::HiveSourceUnavailable),
+    }
+}
+
+/// Plans lifecycle effects after source registration validation succeeds.
+pub fn plan_source_registration_lifecycle_effects(
+    registration: SourceRegistrationPlan,
+) -> SourceRegistrationLifecycleEffects {
+    match registration.decision {
+        SourceRegistrationDecision::NewSlot => SourceRegistrationLifecycleEffects {
+            resumed_source_id: None,
+            mark_hives_active: true,
+            deliver_overflow_to_affected_watches: false,
+            existing_fds_resume: false,
+        },
+        SourceRegistrationDecision::ResumeDownSlot(source_id) => {
+            SourceRegistrationLifecycleEffects {
+                resumed_source_id: Some(source_id),
+                mark_hives_active: true,
+                deliver_overflow_to_affected_watches: true,
+                existing_fds_resume: true,
+            }
+        }
+    }
 }
 
 /// Validates a REG_SRC_REGISTER request against existing source slots.
