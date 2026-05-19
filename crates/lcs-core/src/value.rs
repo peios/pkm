@@ -59,6 +59,12 @@ pub enum ValidatedValueType {
     Tombstone,
 }
 
+/// Caller-facing errno class for value type validation failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValueTypeValidationErrno {
+    Einval,
+}
+
 /// LCS-produced value write before source dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ValueWriteRequest<'a> {
@@ -354,6 +360,16 @@ pub fn validate_value_write_type(
     RegistryValueType::from_code(value_type)
         .map(ValidatedValueType::Normal)
         .ok_or(LcsError::UnknownValueType(value_type))
+}
+
+/// Classifies value-type validation errors before sequence allocation or dispatch.
+pub fn value_type_validation_errno(error: &LcsError) -> Option<ValueTypeValidationErrno> {
+    match error {
+        LcsError::UnknownValueType(_)
+        | LcsError::TombstoneNotExplicit
+        | LcsError::TombstoneDataMustBeEmpty { .. } => Some(ValueTypeValidationErrno::Einval),
+        _ => None,
+    }
 }
 
 /// Validates the configured maximum value payload length.
