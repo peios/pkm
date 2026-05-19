@@ -56,6 +56,20 @@ pub enum HiveRoute<'a> {
     NotRegistered,
 }
 
+/// Caller-facing errno category selected after hive routing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HiveRouteErrno {
+    Enoent,
+    Eio,
+}
+
+/// Kernel-facing routing outcome before integer errno translation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HiveRouteOutcome<'a> {
+    Dispatch(RoutedHive<'a>),
+    Failure(HiveRouteErrno),
+}
+
 /// Controls whether `CurrentUser` is treated as an initial caller alias.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurrentUserRewrite<'a> {
@@ -165,6 +179,40 @@ pub fn route_hive<'a>(
     }
 
     Ok(HiveRoute::NotRegistered)
+}
+
+/// Maps a pure hive route to the syscall-visible routing outcome.
+pub fn classify_hive_route(route: HiveRoute<'_>) -> HiveRouteOutcome<'_> {
+    match route {
+        HiveRoute::Active(hive) => HiveRouteOutcome::Dispatch(hive),
+        HiveRoute::Unavailable(_) => HiveRouteOutcome::Failure(HiveRouteErrno::Eio),
+        HiveRoute::NotRegistered => HiveRouteOutcome::Failure(HiveRouteErrno::Enoent),
+    }
+}
+
+/// Routes a validated routable path by its first emitted path component.
+pub fn route_routable_path_hive<'a>(
+    limits: &LcsLimits,
+    hives: &'a [HiveView<'a>],
+    path: &'a str,
+    rewrite: CurrentUserRewrite<'a>,
+    scope_guids: &[Guid],
+) -> LcsResult<HiveRouteOutcome<'a>> {
+    let mut first_component = None;
+    for_each_routable_path_component(limits, path, rewrite, |component| {
+        if first_component.is_none() {
+            first_component = Some(component);
+        }
+        Ok(())
+    })?;
+    let first_component =
+        first_component.expect("validated non-empty path emits at least one component");
+    Ok(classify_hive_route(route_hive(
+        limits,
+        hives,
+        first_component,
+        scope_guids,
+    )?))
 }
 
 /// Emits normalized absolute path components, applying `CurrentUser` only for
