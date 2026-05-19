@@ -228,6 +228,8 @@ pub enum LcsError {
     },
     /// A computed userspace output payload length overflowed host arithmetic.
     OutputSizeOverflow,
+    /// A volatile per-hive generation counter cannot advance without overflowing.
+    HiveGenerationOverflow,
 }
 
 /// Standard result type for the LCS semantic core.

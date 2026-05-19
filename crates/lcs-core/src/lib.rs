@@ -16,6 +16,7 @@ pub mod hives;
 pub mod ioctl;
 pub mod key;
 pub mod layers;
+pub mod metadata;
 pub mod output_buffer;
 pub mod path;
 pub mod query;
@@ -63,6 +64,10 @@ pub use key::{
 pub use layers::{
     BASE_LAYER_VIEW, LayerMetadataEntry, for_each_effective_layer, normalize_layer_target,
     validate_layer_resolution_context, validate_layer_views, validate_private_layer_set,
+};
+pub use metadata::{
+    HiveGenerationCounter, QueryKeyInfoInput, QueryKeyInfoOutputBufferDecision, QueryKeyInfoResult,
+    query_key_info_result, validate_query_key_info_output_buffer,
 };
 pub use output_buffer::{
     OutputBufferAggregate, OutputBufferDecision, OutputBufferRequest, OutputBufferShape,
