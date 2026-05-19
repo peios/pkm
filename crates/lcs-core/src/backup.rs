@@ -100,6 +100,104 @@ pub struct BackupTrailerPayload {
     pub checksum: [u8; BACKUP_TRAILER_CHECKSUM_LEN],
 }
 
+/// Stream-level backup envelope state for HEADER/TRAILER invariants.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BackupStreamEnvelopeState {
+    records_seen: u64,
+    header_seen: bool,
+    trailer_seen: bool,
+}
+
+impl BackupStreamEnvelopeState {
+    pub const fn new() -> Self {
+        Self {
+            records_seen: 0,
+            header_seen: false,
+            trailer_seen: false,
+        }
+    }
+
+    pub const fn records_seen(self) -> u64 {
+        self.records_seen
+    }
+
+    pub const fn header_seen(self) -> bool {
+        self.header_seen
+    }
+
+    pub const fn trailer_seen(self) -> bool {
+        self.trailer_seen
+    }
+
+    /// Records one parsed backup frame kind in stream order.
+    pub fn observe_record(&mut self, kind: BackupRecordKind) -> LcsResult<()> {
+        let index = self.records_seen;
+        if self.trailer_seen {
+            return Err(LcsError::BackupStreamRecordAfterTrailer {
+                index,
+                record_type: kind.code(),
+            });
+        }
+        if index == 0 && kind != BackupRecordKind::Header {
+            return Err(LcsError::BackupStreamFirstRecordNotHeader {
+                actual: kind.code(),
+            });
+        }
+        if index != 0 && kind == BackupRecordKind::Header {
+            return Err(LcsError::BackupStreamDuplicateHeader { index });
+        }
+
+        self.records_seen = self
+            .records_seen
+            .checked_add(1)
+            .ok_or(LcsError::BackupStreamRecordCountOverflow)?;
+        if kind == BackupRecordKind::Header {
+            self.header_seen = true;
+        }
+        if kind == BackupRecordKind::Trailer {
+            self.trailer_seen = true;
+        }
+
+        Ok(())
+    }
+
+    /// Finalizes stream envelope validation after the caller computes SHA-256.
+    pub fn finish(
+        self,
+        trailer: BackupTrailerPayload,
+        computed_checksum: [u8; BACKUP_TRAILER_CHECKSUM_LEN],
+    ) -> LcsResult<BackupStreamEnvelopeSummary> {
+        if !self.header_seen {
+            return Err(LcsError::BackupStreamMissingHeader);
+        }
+        if !self.trailer_seen {
+            return Err(LcsError::BackupStreamMissingTrailer);
+        }
+        if trailer.record_count != self.records_seen {
+            return Err(LcsError::BackupStreamRecordCountMismatch {
+                declared: trailer.record_count,
+                observed: self.records_seen,
+            });
+        }
+        if trailer.checksum != computed_checksum {
+            return Err(LcsError::BackupStreamChecksumMismatch {
+                declared: trailer.checksum,
+                computed: computed_checksum,
+            });
+        }
+
+        Ok(BackupStreamEnvelopeSummary {
+            record_count: self.records_seen,
+        })
+    }
+}
+
+/// Successful stream-envelope validation result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupStreamEnvelopeSummary {
+    pub record_count: u64,
+}
+
 /// Known backup record type vocabulary, preserving unknown extensions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupRecordKind {

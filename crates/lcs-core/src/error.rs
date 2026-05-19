@@ -397,6 +397,43 @@ pub enum LcsError {
         /// TRAILER-declared record count.
         record_count: u64,
     },
+    /// A backup stream ended before any HEADER record was observed.
+    BackupStreamMissingHeader,
+    /// The first backup stream record was not HEADER.
+    BackupStreamFirstRecordNotHeader {
+        /// Actual first record type code.
+        actual: u16,
+    },
+    /// A backup stream contained HEADER after record index zero.
+    BackupStreamDuplicateHeader {
+        /// Zero-based record index of the invalid HEADER.
+        index: u64,
+    },
+    /// A backup stream contained a record after TRAILER.
+    BackupStreamRecordAfterTrailer {
+        /// Zero-based record index of the invalid record.
+        index: u64,
+        /// Invalid record type code.
+        record_type: u16,
+    },
+    /// A backup stream ended without a TRAILER record.
+    BackupStreamMissingTrailer,
+    /// A backup stream's TRAILER RecordCount did not match observed records.
+    BackupStreamRecordCountMismatch {
+        /// TRAILER-declared record count.
+        declared: u64,
+        /// Number of records observed by LCS.
+        observed: u64,
+    },
+    /// A backup stream checksum did not match the TRAILER checksum.
+    BackupStreamChecksumMismatch {
+        /// TRAILER-declared checksum.
+        declared: [u8; 32],
+        /// SHA-256 digest computed by the caller over the specified stream range.
+        computed: [u8; 32],
+    },
+    /// The backup stream record counter cannot advance without overflowing.
+    BackupStreamRecordCountOverflow,
     /// A length-prefixed RSI payload field would overflow host arithmetic.
     RsiPayloadLengthOverflow,
     /// An RSI_WRITE_KEY request field mask contained bits not defined by PSD-005.
