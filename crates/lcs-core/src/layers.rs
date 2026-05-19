@@ -234,6 +234,11 @@ pub fn plan_layer_metadata_cache_update(
     }
 }
 
+/// Validates a layer metadata key SD before publishing it into the layer cache.
+pub fn validate_layer_metadata_security_descriptor(bytes: &[u8]) -> LcsResult<()> {
+    validate_source_security_descriptor(bytes, "layer_metadata.sd")
+}
+
 fn validate_layer_metadata_snapshot(
     limits: &LcsLimits,
     metadata: &[LayerMetadataEntry<'_>],
@@ -274,6 +279,15 @@ fn metadata_name_seen_before(
         }
     }
     Ok(false)
+}
+
+fn validate_source_security_descriptor(bytes: &[u8], field: &'static str) -> LcsResult<()> {
+    let sd = kacs_core::SecurityDescriptor::parse(bytes)
+        .map_err(|_| LcsError::MalformedSecurityDescriptor { field })?;
+    if sd.owner().is_none() {
+        return Err(LcsError::MalformedSecurityDescriptor { field });
+    }
+    Ok(())
 }
 
 fn layer_name_seen_before(
