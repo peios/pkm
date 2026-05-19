@@ -14,6 +14,7 @@ use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
 };
 use crate::resolution::Guid;
+use crate::transaction::TransactionKernelEffectsPlan;
 use crate::value::{validate_value_data_len, validate_value_write_type};
 
 pub type RsiRequestId = u64;
@@ -556,6 +557,60 @@ pub enum RsiLateResponseRecordPlan {
         reason: RsiMalformedProtocolReason,
         tear_down_source: bool,
         mark_source_down: bool,
+    },
+}
+
+/// Kernel-side effects for a successful late mutating response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiLateMutatingKernelEffects {
+    pub update_hive_generation: bool,
+    pub dispatch_watch_events: bool,
+    pub refresh_layer_cache: bool,
+    pub track_orphans: bool,
+    pub transaction_commit_effects: Option<TransactionKernelEffectsPlan>,
+}
+
+/// Post-validation outcome for a retained late response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiLateResponseValidationOutcome {
+    SourceError(RsiMappedErrno),
+    SuccessReadOnly,
+    SuccessMutating(RsiLateMutatingKernelEffects),
+    MalformedData(RsiSourceDataValidationFailure),
+    MalformedProtocol,
+    MissingOrInvalidKernelMetadata,
+}
+
+/// Fail-closed reason for a late response that cannot safely be applied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiLateResponseTearDownReason {
+    MalformedProtocol,
+    MissingOrInvalidKernelMetadata,
+}
+
+/// Kernel-side effect plan for a retained late response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiLateResponseEffectPlan {
+    ReleaseRecordNoNormalEffects {
+        source_errno: Option<RsiMappedErrno>,
+        release_request_record: bool,
+    },
+    DiscardValidatedReadOnlyResponse {
+        release_request_record: bool,
+    },
+    ApplyMutatingKernelEffects {
+        effects: RsiLateMutatingKernelEffects,
+        release_request_record: bool,
+    },
+    MalformedData {
+        plan: RsiMalformedSourceDataPlan,
+        release_request_record: bool,
+    },
+    MalformedProtocolTearDown {
+        reason: RsiLateResponseTearDownReason,
+        tear_down_source: bool,
+        mark_source_down: bool,
+        release_in_flight_table: bool,
     },
 }
 
@@ -2278,11 +2333,61 @@ pub fn plan_rsi_late_response_record(
     }
 }
 
+/// Plans side effects for a retained late response after normal response validation.
+pub fn plan_rsi_late_response_effects(
+    outcome: RsiLateResponseValidationOutcome,
+) -> RsiLateResponseEffectPlan {
+    match outcome {
+        RsiLateResponseValidationOutcome::SourceError(source_errno) => {
+            RsiLateResponseEffectPlan::ReleaseRecordNoNormalEffects {
+                source_errno: Some(source_errno),
+                release_request_record: true,
+            }
+        }
+        RsiLateResponseValidationOutcome::SuccessReadOnly => {
+            RsiLateResponseEffectPlan::DiscardValidatedReadOnlyResponse {
+                release_request_record: true,
+            }
+        }
+        RsiLateResponseValidationOutcome::SuccessMutating(effects) => {
+            RsiLateResponseEffectPlan::ApplyMutatingKernelEffects {
+                effects,
+                release_request_record: true,
+            }
+        }
+        RsiLateResponseValidationOutcome::MalformedData(failure) => {
+            RsiLateResponseEffectPlan::MalformedData {
+                plan: plan_rsi_malformed_source_data(failure),
+                release_request_record: true,
+            }
+        }
+        RsiLateResponseValidationOutcome::MalformedProtocol => {
+            malformed_late_response_effect_plan(RsiLateResponseTearDownReason::MalformedProtocol)
+        }
+        RsiLateResponseValidationOutcome::MissingOrInvalidKernelMetadata => {
+            malformed_late_response_effect_plan(
+                RsiLateResponseTearDownReason::MissingOrInvalidKernelMetadata,
+            )
+        }
+    }
+}
+
 fn malformed_late_response_plan(reason: RsiMalformedProtocolReason) -> RsiLateResponseRecordPlan {
     RsiLateResponseRecordPlan::MalformedProtocolTearDown {
         reason,
         tear_down_source: true,
         mark_source_down: true,
+    }
+}
+
+fn malformed_late_response_effect_plan(
+    reason: RsiLateResponseTearDownReason,
+) -> RsiLateResponseEffectPlan {
+    RsiLateResponseEffectPlan::MalformedProtocolTearDown {
+        reason,
+        tear_down_source: true,
+        mark_source_down: true,
+        release_in_flight_table: true,
     }
 }
 
