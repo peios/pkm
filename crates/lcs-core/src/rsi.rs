@@ -9,6 +9,7 @@ use crate::constants::{
     RSI_TOO_LARGE, RSI_TXN_BUSY, RSI_TXN_NOT_SUPPORTED, RSI_WRITE_KEY,
 };
 use crate::error::{LcsError, LcsResult};
+use crate::resolution::Guid;
 
 pub type RsiRequestId = u64;
 
@@ -92,9 +93,31 @@ impl<'a> RsiPayloadCursor<'a> {
         Ok(data)
     }
 
+    pub fn read_u8(&mut self) -> LcsResult<u8> {
+        Ok(self.read_fixed(1)?[0])
+    }
+
+    pub fn read_u32_le(&mut self) -> LcsResult<u32> {
+        let bytes = self.read_fixed(4)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    pub fn read_u64_le(&mut self) -> LcsResult<u64> {
+        let bytes = self.read_fixed(8)?;
+        Ok(u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
+    pub fn read_guid(&mut self) -> LcsResult<Guid> {
+        let bytes = self.read_fixed(16)?;
+        let mut guid = [0u8; 16];
+        guid.copy_from_slice(bytes);
+        Ok(guid)
+    }
+
     pub fn read_length_prefixed(&mut self) -> LcsResult<RsiLengthPrefixedField<'a>> {
-        let len_bytes = self.read_fixed(4)?;
-        let len = u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
+        let len = self.read_u32_le()?;
         let data = self.read_fixed(len as usize)?;
         Ok(RsiLengthPrefixedField { len, data })
     }
@@ -104,6 +127,51 @@ impl<'a> RsiPayloadCursor<'a> {
             ignored_trailing_len: self.remaining_len(),
         }
     }
+}
+
+/// Parsed RSI_LOOKUP request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiLookupRequestPayload<'a> {
+    pub parent_guid: Guid,
+    pub child_name: RsiLengthPrefixedField<'a>,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_CREATE_ENTRY request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiCreateEntryRequestPayload<'a> {
+    pub parent_guid: Guid,
+    pub child_name: RsiLengthPrefixedField<'a>,
+    pub layer_name: RsiLengthPrefixedField<'a>,
+    pub child_guid: Guid,
+    pub sequence: u64,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_HIDE_ENTRY request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiHideEntryRequestPayload<'a> {
+    pub parent_guid: Guid,
+    pub child_name: RsiLengthPrefixedField<'a>,
+    pub layer_name: RsiLengthPrefixedField<'a>,
+    pub sequence: u64,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_DELETE_ENTRY request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiDeleteEntryRequestPayload<'a> {
+    pub parent_guid: Guid,
+    pub child_name: RsiLengthPrefixedField<'a>,
+    pub layer_name: RsiLengthPrefixedField<'a>,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_ENUM_CHILDREN request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiEnumChildrenRequestPayload {
+    pub parent_guid: Guid,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
 }
 
 /// Retained-record lookup result for a late response.
@@ -376,6 +444,89 @@ pub fn plan_rsi_malformed_source_data(
             RsiSourceDataValidationFailure::MalformedLayerMetadataSecurityDescriptor
         ),
     }
+}
+
+/// Parses the RSI_LOOKUP request payload layout.
+pub fn parse_rsi_lookup_request_payload(payload: &[u8]) -> LcsResult<RsiLookupRequestPayload<'_>> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let parent_guid = cursor.read_guid()?;
+    let child_name = cursor.read_length_prefixed()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiLookupRequestPayload {
+        parent_guid,
+        child_name,
+        trailing,
+    })
+}
+
+/// Parses the RSI_CREATE_ENTRY request payload layout.
+pub fn parse_rsi_create_entry_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiCreateEntryRequestPayload<'_>> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let parent_guid = cursor.read_guid()?;
+    let child_name = cursor.read_length_prefixed()?;
+    let layer_name = cursor.read_length_prefixed()?;
+    let child_guid = cursor.read_guid()?;
+    let sequence = cursor.read_u64_le()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiCreateEntryRequestPayload {
+        parent_guid,
+        child_name,
+        layer_name,
+        child_guid,
+        sequence,
+        trailing,
+    })
+}
+
+/// Parses the RSI_HIDE_ENTRY request payload layout.
+pub fn parse_rsi_hide_entry_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiHideEntryRequestPayload<'_>> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let parent_guid = cursor.read_guid()?;
+    let child_name = cursor.read_length_prefixed()?;
+    let layer_name = cursor.read_length_prefixed()?;
+    let sequence = cursor.read_u64_le()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiHideEntryRequestPayload {
+        parent_guid,
+        child_name,
+        layer_name,
+        sequence,
+        trailing,
+    })
+}
+
+/// Parses the RSI_DELETE_ENTRY request payload layout.
+pub fn parse_rsi_delete_entry_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiDeleteEntryRequestPayload<'_>> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let parent_guid = cursor.read_guid()?;
+    let child_name = cursor.read_length_prefixed()?;
+    let layer_name = cursor.read_length_prefixed()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiDeleteEntryRequestPayload {
+        parent_guid,
+        child_name,
+        layer_name,
+        trailing,
+    })
+}
+
+/// Parses the RSI_ENUM_CHILDREN request payload layout.
+pub fn parse_rsi_enum_children_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiEnumChildrenRequestPayload> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let parent_guid = cursor.read_guid()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiEnumChildrenRequestPayload {
+        parent_guid,
+        trailing,
+    })
 }
 
 /// Validates that an op code is one of PSD-005's request op codes.
