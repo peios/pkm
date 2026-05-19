@@ -153,12 +153,15 @@ pub use rsi::{
     rsi_request_has_status_only_response, rsi_response_op_code,
     validate_rsi_delete_layer_orphaned_guids, validate_rsi_enum_children_metadata_completeness,
     validate_rsi_enum_children_metadata_security_descriptors,
-    validate_rsi_enum_children_path_response_names, validate_rsi_lookup_metadata_completeness,
+    validate_rsi_enum_children_path_response_names,
+    validate_rsi_enum_children_path_response_sequences, validate_rsi_lookup_metadata_completeness,
     validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,
-    validate_rsi_query_values_response_names, validate_rsi_query_values_response_value_payloads,
-    validate_rsi_read_key_response_names, validate_rsi_read_key_response_security_descriptor,
-    validate_rsi_request_op_code, validate_rsi_response_for_request,
-    validate_rsi_status_only_response_for_request, validate_rsi_write_key_field_mask,
+    validate_rsi_lookup_path_response_sequences, validate_rsi_query_values_response_names,
+    validate_rsi_query_values_response_sequences,
+    validate_rsi_query_values_response_value_payloads, validate_rsi_read_key_response_names,
+    validate_rsi_read_key_response_security_descriptor, validate_rsi_request_op_code,
+    validate_rsi_response_for_request, validate_rsi_status_only_response_for_request,
+    validate_rsi_write_key_field_mask,
 };
 pub use sequence::SequenceCounter;
 pub use source::{

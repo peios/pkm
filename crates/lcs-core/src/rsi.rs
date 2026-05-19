@@ -1523,6 +1523,38 @@ pub fn validate_rsi_delete_layer_orphaned_guids(
     Ok(())
 }
 
+/// Validates lookup response path-entry sequence numbers before resolution.
+pub fn validate_rsi_lookup_path_response_sequences(
+    payload: &RsiLookupSuccessResponsePayload<'_>,
+    next_sequence: u64,
+) -> LcsResult<()> {
+    payload.for_each_path_entry(|entry| validate_rsi_source_sequence(entry.sequence, next_sequence))
+}
+
+/// Validates enum-children response path-entry sequence numbers before enumeration resolution.
+pub fn validate_rsi_enum_children_path_response_sequences(
+    payload: &RsiEnumChildrenSuccessResponsePayload<'_>,
+    next_sequence: u64,
+) -> LcsResult<()> {
+    payload.for_each_child(|child| {
+        child.for_each_path_entry(|entry| {
+            validate_rsi_source_sequence(entry.sequence, next_sequence)
+        })
+    })
+}
+
+/// Validates query-values response value and blanket sequence numbers before resolution.
+pub fn validate_rsi_query_values_response_sequences(
+    payload: &RsiQueryValuesSuccessResponsePayload<'_>,
+    next_sequence: u64,
+) -> LcsResult<()> {
+    payload.for_each_value_entry(|entry| {
+        validate_rsi_source_sequence(entry.sequence, next_sequence)
+    })?;
+    payload
+        .for_each_blanket_entry(|entry| validate_rsi_source_sequence(entry.sequence, next_sequence))
+}
+
 /// Validates query-values response string fields before value resolution.
 pub fn validate_rsi_query_values_response_names(
     payload: &RsiQueryValuesSuccessResponsePayload<'_>,
@@ -1935,6 +1967,16 @@ fn validate_rsi_source_security_descriptor(bytes: &[u8], field: &'static str) ->
         .map_err(|_| LcsError::MalformedSecurityDescriptor { field })?;
     if sd.owner().is_none() {
         return Err(LcsError::MalformedSecurityDescriptor { field });
+    }
+    Ok(())
+}
+
+fn validate_rsi_source_sequence(sequence: u64, next_sequence: u64) -> LcsResult<()> {
+    if sequence >= next_sequence {
+        return Err(LcsError::FutureSequence {
+            sequence,
+            next_sequence,
+        });
     }
     Ok(())
 }
