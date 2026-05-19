@@ -16,7 +16,8 @@ use crate::path::{
 use crate::resolution::{Guid, PathTarget, ValidatedPathEntryWrite};
 use crate::transaction::TransactionKernelEffectsPlan;
 use crate::value::{
-    PlannedValueWrite, ValidatedValueType, validate_value_data_len, validate_value_write_type,
+    BlanketTombstoneAction, PlannedBlanketTombstone, PlannedValueWrite, ValidatedValueType,
+    validate_value_data_len, validate_value_write_type,
 };
 
 pub type RsiRequestId = u64;
@@ -1188,6 +1189,29 @@ pub fn write_rsi_set_blanket_tombstone_request_frame(
             writer.write_u8(u8::from(set))?;
             writer.write_u64_le(sequence)
         },
+    )
+}
+
+/// Writes a planned blanket tombstone mutation to a complete RSI request frame.
+pub fn write_planned_rsi_set_blanket_tombstone_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    planned: &PlannedBlanketTombstone<'_>,
+) -> LcsResult<RsiBuiltRequest> {
+    let (set, sequence) = match planned.blanket.action {
+        BlanketTombstoneAction::Set { sequence } => (true, sequence),
+        BlanketTombstoneAction::Remove => (false, 0),
+    };
+
+    write_rsi_set_blanket_tombstone_request_frame(
+        dst,
+        request_id,
+        txn_id,
+        planned.blanket.key_guid,
+        planned.blanket.layer.as_bytes(),
+        set,
+        sequence,
     )
 }
 
