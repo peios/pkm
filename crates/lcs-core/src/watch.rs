@@ -5,6 +5,7 @@ use crate::constants::{
     REG_WATCH_VALUE_DELETED, REG_WATCH_VALUE_SET,
 };
 use crate::error::{LcsError, LcsResult};
+use crate::path::{validate_layer_name_bytes, validate_value_name_bytes};
 use crate::resolution::Guid;
 use crate::source::NIL_GUID;
 
@@ -186,6 +187,42 @@ pub enum InternalSelfWatchPlan {
     MachineRootFallback {
         root: InternalWatchRegistration,
     },
+}
+
+/// Dirty path classified by live internal watch dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InternalWatchDirtyPath<'a> {
+    SelfConfigurationValue {
+        value_name: &'a str,
+    },
+    LayerMetadata {
+        layer_name: &'a str,
+    },
+    LayerSubkey {
+        event_type: u32,
+        layer_name: &'a str,
+    },
+    RegistrySubtreeAvailable,
+}
+
+/// Action selected for one internal watch callback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InternalWatchCallbackPlan<'a> {
+    RefreshSelfConfiguration {
+        dirty_value_name: &'a str,
+    },
+    RefreshLayerMetadata {
+        dirty_layer_name: &'a str,
+        publish_only_complete_entry: bool,
+    },
+    AddLayer {
+        layer_name: &'a str,
+        publish_only_complete_entry: bool,
+    },
+    DeleteLayer {
+        layer_name: &'a str,
+    },
+    ResolveAndRearmTargetedWatches,
 }
 
 /// Validates the REG_IOC_NOTIFY filter bitmask.
@@ -507,6 +544,50 @@ pub fn plan_internal_self_watch(roots: InternalSelfWatchRoots) -> LcsResult<Inte
                 InternalWatchTarget::MachineRootFallback,
             ),
         }),
+    }
+}
+
+/// Plans the synchronous callback action for an internal self-watch event.
+pub fn plan_internal_watch_callback<'a>(
+    limits: &LcsLimits,
+    dirty_path: InternalWatchDirtyPath<'a>,
+) -> LcsResult<InternalWatchCallbackPlan<'a>> {
+    match dirty_path {
+        InternalWatchDirtyPath::SelfConfigurationValue { value_name } => {
+            let value_name = validate_value_name_bytes(value_name.as_bytes(), limits)?;
+            Ok(InternalWatchCallbackPlan::RefreshSelfConfiguration {
+                dirty_value_name: value_name,
+            })
+        }
+        InternalWatchDirtyPath::LayerMetadata { layer_name } => {
+            let layer_name = validate_layer_name_bytes(layer_name.as_bytes(), limits)?;
+            Ok(InternalWatchCallbackPlan::RefreshLayerMetadata {
+                dirty_layer_name: layer_name,
+                publish_only_complete_entry: true,
+            })
+        }
+        InternalWatchDirtyPath::LayerSubkey {
+            event_type,
+            layer_name,
+        } => {
+            let layer_name = validate_layer_name_bytes(layer_name.as_bytes(), limits)?;
+            match event_type {
+                REG_WATCH_SUBKEY_CREATED => Ok(InternalWatchCallbackPlan::AddLayer {
+                    layer_name,
+                    publish_only_complete_entry: true,
+                }),
+                REG_WATCH_SUBKEY_DELETED => {
+                    Ok(InternalWatchCallbackPlan::DeleteLayer { layer_name })
+                }
+                _ => {
+                    watch_event_category(event_type)?;
+                    Err(LcsError::UnexpectedInternalWatchEvent { event_type })
+                }
+            }
+        }
+        InternalWatchDirtyPath::RegistrySubtreeAvailable => {
+            Ok(InternalWatchCallbackPlan::ResolveAndRearmTargetedWatches)
+        }
     }
 }
 

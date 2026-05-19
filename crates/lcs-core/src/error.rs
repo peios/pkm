@@ -627,6 +627,11 @@ pub enum LcsError {
     InvalidWatchAncestry,
     /// The changed key GUID was not the last GUID in the captured mutation ancestry.
     WatchChangedKeyNotLastAncestor,
+    /// A known watch event type was not valid for the internal watch action being planned.
+    UnexpectedInternalWatchEvent {
+        /// Watch event type.
+        event_type: u32,
+    },
     /// A maintenance operation targeted a hive whose source is currently unavailable.
     HiveSourceUnavailable,
     /// Transaction ID zero is reserved for "no transaction" in RSI.
