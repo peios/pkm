@@ -151,7 +151,7 @@ pub use rsi::{
     plan_rsi_late_response_record, plan_rsi_malformed_source_data, plan_rsi_slot_reservation,
     plan_rsi_source_poll, plan_rsi_source_read, plan_rsi_transaction_begin_status,
     rsi_request_has_status_only_response, rsi_response_op_code,
-    validate_rsi_enum_children_metadata_completeness,
+    validate_rsi_delete_layer_orphaned_guids, validate_rsi_enum_children_metadata_completeness,
     validate_rsi_enum_children_metadata_security_descriptors,
     validate_rsi_enum_children_path_response_names, validate_rsi_lookup_metadata_completeness,
     validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,

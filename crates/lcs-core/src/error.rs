@@ -300,6 +300,13 @@ pub enum LcsError {
         /// Logical source-response field.
         field: &'static str,
     },
+    /// RSI_DELETE_LAYER returned nil as an orphaned key GUID.
+    RsiDeleteLayerOrphanedGuidNil,
+    /// RSI_DELETE_LAYER returned the same orphaned key GUID more than once.
+    RsiDeleteLayerOrphanedGuidDuplicate {
+        /// Duplicated orphaned key GUID.
+        guid: [u8; 16],
+    },
     /// The per-source RSI request id allocator cannot advance without reusing an id.
     RsiRequestIdOverflow,
     /// A length-prefixed RSI payload field would overflow host arithmetic.

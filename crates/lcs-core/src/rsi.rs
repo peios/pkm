@@ -1501,6 +1501,28 @@ pub fn validate_rsi_enum_children_metadata_security_descriptors(
     })
 }
 
+/// Validates delete-layer orphan GUIDs before orphan tracking consumes them.
+pub fn validate_rsi_delete_layer_orphaned_guids(
+    payload: &RsiDeleteLayerSuccessResponsePayload<'_>,
+) -> LcsResult<()> {
+    for index in 0..payload.orphaned_guids.count {
+        let guid = payload
+            .orphaned_guids
+            .guid_at(index)
+            .ok_or(LcsError::RsiPayloadLengthOverflow)?;
+        if guid == [0; 16] {
+            return Err(LcsError::RsiDeleteLayerOrphanedGuidNil);
+        }
+
+        for previous_index in 0..index {
+            if payload.orphaned_guids.guid_at(previous_index) == Some(guid) {
+                return Err(LcsError::RsiDeleteLayerOrphanedGuidDuplicate { guid });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validates query-values response string fields before value resolution.
 pub fn validate_rsi_query_values_response_names(
     payload: &RsiQueryValuesSuccessResponsePayload<'_>,
