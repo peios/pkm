@@ -10,6 +10,7 @@ use crate::constants::{
     RSI_WRITE_KEY,
 };
 use crate::error::{LcsError, LcsResult};
+use crate::path::{validate_key_component_bytes, validate_layer_name_bytes};
 use crate::resolution::Guid;
 
 pub type RsiRequestId = u64;
@@ -1435,6 +1436,31 @@ pub fn validate_rsi_enum_children_metadata_completeness(
             });
         }
         Ok(())
+    })
+}
+
+/// Validates lookup response string fields before path resolution.
+pub fn validate_rsi_lookup_path_response_names(
+    payload: &RsiLookupSuccessResponsePayload<'_>,
+    limits: &LcsLimits,
+) -> LcsResult<()> {
+    payload.for_each_path_entry(|entry| {
+        validate_layer_name_bytes(entry.layer_name.data, limits)?;
+        Ok(())
+    })
+}
+
+/// Validates enum-children response string fields before enumeration resolution.
+pub fn validate_rsi_enum_children_path_response_names(
+    payload: &RsiEnumChildrenSuccessResponsePayload<'_>,
+    limits: &LcsLimits,
+) -> LcsResult<()> {
+    payload.for_each_child(|child| {
+        validate_key_component_bytes(child.child_name.data, limits)?;
+        child.for_each_path_entry(|entry| {
+            validate_layer_name_bytes(entry.layer_name.data, limits)?;
+            Ok(())
+        })
     })
 }
 
