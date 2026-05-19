@@ -8,6 +8,7 @@
 #![allow(unreachable_pub)]
 
 pub mod access;
+pub mod audit;
 pub mod backup;
 pub mod casefold;
 pub mod config;
@@ -39,6 +40,11 @@ pub use access::{
     NormalizedRegistryAccess, REGISTRY_GENERIC_MAPPING, RegistryGenericMapping,
     map_registry_generic_bits, registry_fd_has_right, validate_registry_ace_mask,
     validate_registry_desired_access, validate_registry_granted_access,
+};
+pub use audit::{
+    LCS_CONFIG_ROOT_PATH, LcsAuditEmissionFailurePolicy, LcsAuditEventKind,
+    LcsSelfConfigInvalidAuditRecord, LcsSelfConfigReceivedValue, lcs_audit_emission_failure_policy,
+    plan_self_config_invalid_audit_record,
 };
 pub use backup::{
     BACKUP_RECORD_HEADER_LEN, BACKUP_TRAILER_CHECKSUM_LEN, BACKUP_TRAILER_PAYLOAD_LEN,
