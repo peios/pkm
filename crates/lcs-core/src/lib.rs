@@ -263,11 +263,12 @@ pub use transaction::{
     StartedTransaction, TransactionBinding, TransactionCommitPlan, TransactionCompletionEvent,
     TransactionFdClosePlan, TransactionFdPublicationPlan, TransactionId, TransactionIdCounter,
     TransactionKernelEffectsPlan, TransactionMutationBindingPlan, TransactionReadPlan,
-    TransactionState, TransactionStatusResult, TransactionTerminalErrno, TransactionUseFailure,
-    plan_begin_transaction, plan_begin_transaction_fd, plan_transaction_commit,
+    TransactionRuntimeTransitionPlan, TransactionState, TransactionStatusResult,
+    TransactionTerminalErrno, TransactionUseFailure, plan_begin_transaction,
+    plan_begin_transaction_fd, plan_transaction_bound_source_down, plan_transaction_commit,
     plan_transaction_completion_effects, plan_transaction_fd_close,
-    plan_transaction_mutation_binding, plan_transaction_read, transaction_status,
-    transaction_terminal_failure,
+    plan_transaction_mutation_binding, plan_transaction_read, plan_transaction_timeout,
+    transaction_status, transaction_terminal_failure,
 };
 pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,

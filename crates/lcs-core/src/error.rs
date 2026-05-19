@@ -699,6 +699,8 @@ pub enum LcsError {
     InvalidTransactionId,
     /// The monotonic transaction ID allocator cannot advance without overflowing.
     TransactionIdOverflow,
+    /// A transaction runtime transition was requested from an impossible state.
+    InvalidTransactionRuntimeState,
 }
 
 /// Standard result type for the LCS semantic core.

@@ -171,6 +171,19 @@ pub struct TransactionFdClosePlan<'a> {
     pub release_fd_object: bool,
 }
 
+/// Planned effects when a transaction runtime event changes or observes state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionRuntimeTransitionPlan<'a> {
+    pub final_state: TransactionState<'a>,
+    pub binding: Option<TransactionBinding<'a>>,
+    pub state_changed: bool,
+    pub wake_poll_waiters: bool,
+    pub fd_remains_present: bool,
+    pub future_operation_failure: Option<TransactionUseFailure>,
+    pub dispatch_source_abort: bool,
+    pub kernel_effects: Option<TransactionKernelEffectsPlan>,
+}
+
 /// Plans reg_begin_transaction without selecting a source.
 pub fn plan_begin_transaction(
     limits: &LcsLimits,
@@ -378,6 +391,110 @@ pub fn plan_transaction_completion_effects(
         | TransactionCompletionEvent::SourceConnectionTornDownAfterCommitTimeout => {
             TransactionKernelEffectsPlan::DiscardMutationLogWithoutEvents
         }
+    }
+}
+
+/// Plans the transaction lifetime timer firing for an active or terminal fd object.
+pub fn plan_transaction_timeout<'a>(
+    limits: &LcsLimits,
+    state: TransactionState<'a>,
+    commit_in_flight: bool,
+) -> LcsResult<TransactionRuntimeTransitionPlan<'a>> {
+    match state {
+        TransactionState::ActiveUnbound => {
+            if commit_in_flight {
+                return Err(LcsError::InvalidTransactionRuntimeState);
+            }
+            Ok(TransactionRuntimeTransitionPlan {
+                final_state: TransactionState::TimedOut,
+                binding: None,
+                state_changed: true,
+                wake_poll_waiters: true,
+                fd_remains_present: true,
+                future_operation_failure: Some(TransactionUseFailure::TimedOut),
+                dispatch_source_abort: false,
+                kernel_effects: Some(plan_transaction_completion_effects(
+                    TransactionCompletionEvent::TimeoutBeforeCommitDispatch,
+                )),
+            })
+        }
+        TransactionState::ActiveBound(binding) => {
+            validate_transaction_binding(limits, binding)?;
+            Ok(TransactionRuntimeTransitionPlan {
+                final_state: TransactionState::TimedOut,
+                binding: Some(binding),
+                state_changed: true,
+                wake_poll_waiters: true,
+                fd_remains_present: true,
+                future_operation_failure: Some(TransactionUseFailure::TimedOut),
+                dispatch_source_abort: !commit_in_flight,
+                kernel_effects: Some(plan_transaction_completion_effects(if commit_in_flight {
+                    TransactionCompletionEvent::CommitRequestTimedOutAfterDispatch
+                } else {
+                    TransactionCompletionEvent::TimeoutBeforeCommitDispatch
+                })),
+            })
+        }
+        terminal @ (TransactionState::Committed
+        | TransactionState::Aborted
+        | TransactionState::TimedOut
+        | TransactionState::SourceDown) => Ok(TransactionRuntimeTransitionPlan {
+            final_state: terminal,
+            binding: None,
+            state_changed: false,
+            wake_poll_waiters: false,
+            fd_remains_present: true,
+            future_operation_failure: transaction_terminal_failure(terminal),
+            dispatch_source_abort: false,
+            kernel_effects: None,
+        }),
+    }
+}
+
+/// Plans the transition for a transaction already bound to a source that went Down.
+pub fn plan_transaction_bound_source_down<'a>(
+    limits: &LcsLimits,
+    state: TransactionState<'a>,
+) -> LcsResult<TransactionRuntimeTransitionPlan<'a>> {
+    match state {
+        TransactionState::ActiveBound(binding) => {
+            validate_transaction_binding(limits, binding)?;
+            Ok(TransactionRuntimeTransitionPlan {
+                final_state: TransactionState::SourceDown,
+                binding: Some(binding),
+                state_changed: true,
+                wake_poll_waiters: true,
+                fd_remains_present: true,
+                future_operation_failure: Some(TransactionUseFailure::SourceDown),
+                dispatch_source_abort: false,
+                kernel_effects: Some(plan_transaction_completion_effects(
+                    TransactionCompletionEvent::SourceDownCancellation,
+                )),
+            })
+        }
+        TransactionState::ActiveUnbound => Ok(TransactionRuntimeTransitionPlan {
+            final_state: TransactionState::ActiveUnbound,
+            binding: None,
+            state_changed: false,
+            wake_poll_waiters: false,
+            fd_remains_present: true,
+            future_operation_failure: None,
+            dispatch_source_abort: false,
+            kernel_effects: None,
+        }),
+        terminal @ (TransactionState::Committed
+        | TransactionState::Aborted
+        | TransactionState::TimedOut
+        | TransactionState::SourceDown) => Ok(TransactionRuntimeTransitionPlan {
+            final_state: terminal,
+            binding: None,
+            state_changed: false,
+            wake_poll_waiters: false,
+            fd_remains_present: true,
+            future_operation_failure: transaction_terminal_failure(terminal),
+            dispatch_source_abort: false,
+            kernel_effects: None,
+        }),
     }
 }
 
