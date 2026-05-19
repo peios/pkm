@@ -291,6 +291,24 @@ pub enum InternalWatchCallbackPlan<'a> {
     ResolveAndRearmTargetedWatches,
 }
 
+/// Reason a layer metadata refresh needs source I/O.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InternalLayerMetadataRefreshReason {
+    MetadataChanged,
+    LayerCreated,
+}
+
+/// Lock-discipline plan for layer metadata refresh source I/O.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InternalLayerMetadataRefreshLockPlan<'a> {
+    pub layer_name: &'a str,
+    pub reason: InternalLayerMetadataRefreshReason,
+    pub release_watch_map_lock_before_source_round_trip: bool,
+    pub release_layer_publication_lock_before_source_round_trip: bool,
+    pub acquire_layer_publication_lock_only_for_atomic_publish: bool,
+    pub publish_only_complete_entry: bool,
+}
+
 /// Validates the REG_IOC_NOTIFY filter bitmask.
 pub fn validate_notify_filter(filter: u32) -> LcsResult<u32> {
     let unknown = filter & !REG_NOTIFY_ALL;
@@ -795,6 +813,42 @@ pub fn plan_internal_watch_callback<'a>(
             Ok(InternalWatchCallbackPlan::ResolveAndRearmTargetedWatches)
         }
     }
+}
+
+/// Plans source-I/O lock discipline for layer metadata internal callbacks.
+pub fn plan_internal_layer_metadata_refresh_locking<'a>(
+    callback: InternalWatchCallbackPlan<'a>,
+) -> Option<InternalLayerMetadataRefreshLockPlan<'a>> {
+    let (layer_name, reason, publish_only_complete_entry) = match callback {
+        InternalWatchCallbackPlan::RefreshLayerMetadata {
+            dirty_layer_name,
+            publish_only_complete_entry,
+        } => (
+            dirty_layer_name,
+            InternalLayerMetadataRefreshReason::MetadataChanged,
+            publish_only_complete_entry,
+        ),
+        InternalWatchCallbackPlan::AddLayer {
+            layer_name,
+            publish_only_complete_entry,
+        } => (
+            layer_name,
+            InternalLayerMetadataRefreshReason::LayerCreated,
+            publish_only_complete_entry,
+        ),
+        InternalWatchCallbackPlan::RefreshSelfConfiguration { .. }
+        | InternalWatchCallbackPlan::DeleteLayer { .. }
+        | InternalWatchCallbackPlan::ResolveAndRearmTargetedWatches => return None,
+    };
+
+    Some(InternalLayerMetadataRefreshLockPlan {
+        layer_name,
+        reason,
+        release_watch_map_lock_before_source_round_trip: true,
+        release_layer_publication_lock_before_source_round_trip: true,
+        acquire_layer_publication_lock_only_for_atomic_publish: true,
+        publish_only_complete_entry,
+    })
 }
 
 fn internal_watch_registration(
