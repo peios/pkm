@@ -16,6 +16,7 @@ pub mod constants;
 pub mod error;
 pub mod fd;
 pub mod hives;
+pub mod identity;
 pub mod ioctl;
 pub mod key;
 pub mod key_path;
@@ -118,6 +119,7 @@ pub use hives::{
     CurrentUserRewrite, HiveRoute, HiveScope, HiveStatus, HiveView, RoutedHive, SourceId,
     for_each_routable_path_component, route_hive, validate_hive_table, validate_scope_guid_set,
 };
+pub use identity::sid_bytes_equal;
 pub use ioctl::{
     RegistryIoctlAccessRequirement, RegistryIoctlPrivilege, RegistrySecurityOperation,
     registry_ioctl_access_requirement, registry_ioctl_fixed_granted_mask_allows,
