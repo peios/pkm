@@ -2,7 +2,7 @@ use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
 use crate::constants::RSI_HIVE_PRIVATE;
 use crate::error::{LcsError, LcsResult};
-use crate::hives::{HiveScope, SourceId};
+use crate::hives::{HiveScope, HiveStatus, HiveView, SourceId};
 use crate::path::validate_hive_name_bytes;
 use crate::resolution::Guid;
 use crate::sequence::SequenceCounter;
@@ -74,7 +74,7 @@ pub fn validate_source_registration(
         return Err(LcsError::MissingTcbPrivilege);
     }
     validate_source_registration_hives(limits, request.hives)?;
-    validate_existing_source_slots(limits, existing_slots)?;
+    validate_source_slots(limits, existing_slots)?;
 
     let source_next_sequence =
         SequenceCounter::from_highest_persisted(request.max_sequence)?.next_sequence();
@@ -102,6 +102,50 @@ pub fn validate_source_registration(
         hive_count: request.hives.len(),
         source_next_sequence,
     })
+}
+
+/// Validates the kernel-owned source slot table shape before publication.
+pub fn validate_source_slots(
+    limits: &LcsLimits,
+    existing_slots: &[SourceSlotView<'_>],
+) -> LcsResult<()> {
+    validate_existing_source_slots(limits, existing_slots)
+}
+
+/// Emits routeable hive views from Active and Down source slot snapshots.
+pub fn for_each_source_slot_hive<'a, F>(
+    limits: &LcsLimits,
+    source_slots: &'a [SourceSlotView<'a>],
+    mut emit: F,
+) -> LcsResult<usize>
+where
+    F: FnMut(HiveView<'a>) -> LcsResult<()>,
+{
+    validate_source_slots(limits, source_slots)?;
+
+    let mut emitted = 0usize;
+    for slot in source_slots {
+        let status = source_slot_hive_status(slot.status);
+        for hive in slot.hives {
+            emit(HiveView {
+                name: hive.name,
+                root_guid: hive.root_guid,
+                source_id: slot.source_id,
+                status,
+                scope: hive.scope,
+            })?;
+            emitted += 1;
+        }
+    }
+    Ok(emitted)
+}
+
+/// Maps source slot lifecycle state to published hive route status.
+pub fn source_slot_hive_status(status: SourceSlotStatus) -> HiveStatus {
+    match status {
+        SourceSlotStatus::Active => HiveStatus::Active,
+        SourceSlotStatus::Down => HiveStatus::Unavailable,
+    }
 }
 
 /// Validates source-provided hive entries independent of existing slots.
@@ -180,6 +224,9 @@ fn validate_existing_source_slots(
             if existing_hive_seen_before(limits, slot.hives, index, hive)? {
                 return Err(LcsError::DuplicateHiveIdentity);
             }
+            if existing_root_guid_seen_before(slot.hives, index, hive.root_guid) {
+                return Err(LcsError::DuplicateHiveRootGuid);
+            }
             if existing_hive_seen_in_prior_slot(limits, existing_slots, slot_index, hive)? {
                 return Err(LcsError::DuplicateHiveIdentity);
             }
@@ -256,6 +303,16 @@ fn existing_root_guid_seen_in_prior_slot(
 
 fn root_guid_seen_before(
     hives: &[SourceRegistrationHive<'_>],
+    index: usize,
+    root_guid: Guid,
+) -> bool {
+    hives[..index]
+        .iter()
+        .any(|previous| previous.root_guid == root_guid)
+}
+
+fn existing_root_guid_seen_before(
+    hives: &[RegisteredHiveIdentity<'_>],
     index: usize,
     root_guid: Guid,
 ) -> bool {
