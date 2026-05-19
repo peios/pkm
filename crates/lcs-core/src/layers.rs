@@ -70,6 +70,19 @@ pub enum LayerMetadataCacheUpdatePlan {
     NoRefresh,
 }
 
+/// Planned global effects when a non-base layer metadata key is deleted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerDeletionPlan<'a> {
+    pub layer_name: &'a str,
+    pub remove_from_layer_table: bool,
+    pub broadcast_delete_layer_to_all_sources: bool,
+    pub affected_bound_transaction_count: usize,
+    pub abort_affected_bound_transactions: bool,
+    pub preserve_security_descriptors: bool,
+    pub recompute_effective_state: bool,
+    pub dispatch_watch_events_for_effective_changes: bool,
+}
+
 /// Normalizes an optional caller-supplied layer target.
 pub fn normalize_layer_target<'a>(
     layer: Option<&'a str>,
@@ -79,6 +92,29 @@ pub fn normalize_layer_target<'a>(
         return Ok(BASE_LAYER_NAME);
     };
     validate_layer_name_bytes(layer.as_bytes(), limits)
+}
+
+/// Plans the kernel-side effects of deleting a layer metadata key.
+pub fn plan_layer_deletion<'a>(
+    limits: &LcsLimits,
+    layer_name: &'a str,
+    affected_bound_transaction_count: usize,
+) -> LcsResult<LayerDeletionPlan<'a>> {
+    let layer_name = validate_layer_name_bytes(layer_name.as_bytes(), limits)?;
+    if is_base_layer_name(layer_name) {
+        return Err(LcsError::BaseLayerDeletionNotAllowed);
+    }
+
+    Ok(LayerDeletionPlan {
+        layer_name,
+        remove_from_layer_table: true,
+        broadcast_delete_layer_to_all_sources: true,
+        affected_bound_transaction_count,
+        abort_affected_bound_transactions: affected_bound_transaction_count != 0,
+        preserve_security_descriptors: true,
+        recompute_effective_state: true,
+        dispatch_watch_events_for_effective_changes: true,
+    })
 }
 
 /// Emits the effective layer table from cached/source metadata.

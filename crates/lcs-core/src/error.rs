@@ -121,6 +121,8 @@ pub enum LcsError {
         /// Observed base-layer enabled flag.
         enabled: bool,
     },
+    /// Deletion of the hardcoded base layer was attempted.
+    BaseLayerDeletionNotAllowed,
     /// The in-memory layer table exceeded the configured layer cap.
     TooManyLayers {
         /// Effective layer count.
