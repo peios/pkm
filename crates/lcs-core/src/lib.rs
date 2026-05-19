@@ -144,14 +144,16 @@ pub use key_path::{
     PlannedKeyDelete, PlannedKeyHide, derive_key_path_mutation, plan_key_delete, plan_key_hide,
 };
 pub use layers::{
-    BASE_LAYER_VIEW, LayerDeletionPlan, LayerDeletionSourceCompletionPlan,
-    LayerMetadataCacheUpdatePlan, LayerMetadataEntry, LayerMetadataMutationTiming,
-    LayerWriteAuthorizationInput, LayerWriteAuthorizationPlan, TransactionalLayerReadPlan,
+    BASE_LAYER_VIEW, LAYER_METADATA_ENABLED_VALUE_NAME, LAYER_METADATA_OWNER_VALUE_NAME,
+    LAYER_METADATA_PRECEDENCE_VALUE_NAME, LCS_LAYER_METADATA_ROOT_PATH, LayerDeletionPlan,
+    LayerDeletionSourceCompletionPlan, LayerMetadataCacheUpdatePlan, LayerMetadataEntry,
+    LayerMetadataMutationTiming, LayerMetadataValueEntry, LayerWriteAuthorizationInput,
+    LayerWriteAuthorizationPlan, ParsedLayerMetadataValue, TransactionalLayerReadPlan,
     TransactionalLayerReadSubject, for_each_effective_layer, normalize_layer_target,
-    plan_layer_deletion, plan_layer_deletion_source_completion, plan_layer_metadata_cache_update,
-    plan_layer_write_authorization, plan_transactional_layer_read,
-    validate_layer_metadata_security_descriptor, validate_layer_resolution_context,
-    validate_layer_views, validate_private_layer_set,
+    parse_layer_metadata_value, plan_layer_deletion, plan_layer_deletion_source_completion,
+    plan_layer_metadata_cache_update, plan_layer_write_authorization,
+    plan_transactional_layer_read, validate_layer_metadata_security_descriptor,
+    validate_layer_resolution_context, validate_layer_views, validate_private_layer_set,
 };
 pub use maintenance::{KeyFdHiveView, PlannedFlush, plan_flush_for_key_fd};
 pub use metadata::{

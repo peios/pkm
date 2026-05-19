@@ -1,10 +1,20 @@
 use crate::access::{registry_fd_has_right, validate_registry_granted_access};
 use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
-use crate::constants::{BASE_LAYER_NAME, KEY_SET_VALUE};
+use crate::constants::{BASE_LAYER_NAME, KEY_SET_VALUE, REG_BINARY, REG_DWORD};
 use crate::error::{LcsError, LcsResult};
-use crate::path::{is_base_layer_name, validate_layer_name_bytes};
+use crate::path::{is_base_layer_name, validate_layer_name_bytes, validate_value_name_bytes};
 use crate::resolution::{LayerResolutionContext, LayerView};
+
+/// Absolute registry path containing layer metadata keys.
+pub const LCS_LAYER_METADATA_ROOT_PATH: &str = "Machine\\System\\Registry\\Layers";
+/// Layer metadata value name carrying the uint32 precedence.
+pub const LAYER_METADATA_PRECEDENCE_VALUE_NAME: &str = "Precedence";
+/// Layer metadata value name carrying the enabled boolean as REG_DWORD 0/1.
+pub const LAYER_METADATA_ENABLED_VALUE_NAME: &str = "Enabled";
+/// Layer metadata value name carrying the informational creator SID.
+pub const LAYER_METADATA_OWNER_VALUE_NAME: &str = "Owner";
+const LAYER_METADATA_DWORD_LEN: usize = 4;
 
 /// Canonical hardcoded base layer view.
 pub const BASE_LAYER_VIEW: LayerView<'static> = LayerView {
@@ -12,6 +22,22 @@ pub const BASE_LAYER_VIEW: LayerView<'static> = LayerView {
     precedence: 0,
     enabled: true,
 };
+
+/// Raw layer metadata value returned by the registry source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerMetadataValueEntry<'a> {
+    pub name: &'a str,
+    pub value_type: u32,
+    pub data: &'a [u8],
+}
+
+/// Parsed well-known layer metadata value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParsedLayerMetadataValue<'a> {
+    Precedence(u32),
+    Enabled(bool),
+    Owner(&'a [u8]),
+}
 
 /// Source/cache layer metadata before PSD-005 defaults are applied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,6 +131,44 @@ pub fn normalize_layer_target<'a>(
         return Ok(BASE_LAYER_NAME);
     };
     validate_layer_name_bytes(layer.as_bytes(), limits)
+}
+
+/// Parses one value under `Machine\System\Registry\Layers\<LayerName>\`.
+///
+/// Unknown but otherwise valid value names are ignored so future metadata
+/// extensions do not make existing refresh paths reject the entire layer.
+pub fn parse_layer_metadata_value<'a>(
+    limits: &LcsLimits,
+    entry: LayerMetadataValueEntry<'a>,
+) -> LcsResult<Option<ParsedLayerMetadataValue<'a>>> {
+    let name = validate_value_name_bytes(entry.name.as_bytes(), limits)?;
+
+    if casefold_eq(name, LAYER_METADATA_PRECEDENCE_VALUE_NAME) {
+        return Ok(Some(ParsedLayerMetadataValue::Precedence(
+            parse_layer_metadata_dword(LAYER_METADATA_PRECEDENCE_VALUE_NAME, entry)?,
+        )));
+    }
+    if casefold_eq(name, LAYER_METADATA_ENABLED_VALUE_NAME) {
+        let raw = parse_layer_metadata_dword(LAYER_METADATA_ENABLED_VALUE_NAME, entry)?;
+        return match raw {
+            0 => Ok(Some(ParsedLayerMetadataValue::Enabled(false))),
+            1 => Ok(Some(ParsedLayerMetadataValue::Enabled(true))),
+            value => Err(LcsError::InvalidLayerMetadataEnabledValue(value)),
+        };
+    }
+    if casefold_eq(name, LAYER_METADATA_OWNER_VALUE_NAME) {
+        if entry.value_type != REG_BINARY {
+            return Err(LcsError::LayerMetadataValueTypeMismatch {
+                value_name: LAYER_METADATA_OWNER_VALUE_NAME,
+                expected: REG_BINARY,
+                actual: entry.value_type,
+            });
+        }
+        kacs_core::Sid::parse(entry.data).map_err(|_| LcsError::MalformedLayerOwnerSid)?;
+        return Ok(Some(ParsedLayerMetadataValue::Owner(entry.data)));
+    }
+
+    Ok(None)
 }
 
 /// Plans the kernel-side effects of deleting a layer metadata key.
@@ -306,6 +370,33 @@ pub fn plan_layer_metadata_cache_update(
 /// Validates a layer metadata key SD before publishing it into the layer cache.
 pub fn validate_layer_metadata_security_descriptor(bytes: &[u8]) -> LcsResult<()> {
     validate_source_security_descriptor(bytes, "layer_metadata.sd")
+}
+
+fn parse_layer_metadata_dword(
+    value_name: &'static str,
+    entry: LayerMetadataValueEntry<'_>,
+) -> LcsResult<u32> {
+    if entry.value_type != REG_DWORD {
+        return Err(LcsError::LayerMetadataValueTypeMismatch {
+            value_name,
+            expected: REG_DWORD,
+            actual: entry.value_type,
+        });
+    }
+    if entry.data.len() != LAYER_METADATA_DWORD_LEN {
+        return Err(LcsError::LayerMetadataValueLengthMismatch {
+            value_name,
+            expected: LAYER_METADATA_DWORD_LEN,
+            actual: entry.data.len(),
+        });
+    }
+
+    Ok(u32::from_le_bytes([
+        entry.data[0],
+        entry.data[1],
+        entry.data[2],
+        entry.data[3],
+    ]))
 }
 
 fn validate_layer_metadata_snapshot(

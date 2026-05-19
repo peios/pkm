@@ -284,6 +284,28 @@ pub enum LcsError {
     MissingLayerMetadataSetValue,
     /// Establishing or elevating a layer above precedence 0 was attempted without SeTcbPrivilege.
     MissingLayerPrecedenceTcb,
+    /// A well-known layer metadata value used the wrong registry value type.
+    LayerMetadataValueTypeMismatch {
+        /// Logical layer metadata value name.
+        value_name: &'static str,
+        /// PSD-005 required registry value type.
+        expected: u32,
+        /// Source-returned registry value type.
+        actual: u32,
+    },
+    /// A fixed-size layer metadata value carried the wrong byte length.
+    LayerMetadataValueLengthMismatch {
+        /// Logical layer metadata value name.
+        value_name: &'static str,
+        /// Required byte length.
+        expected: usize,
+        /// Source-returned byte length.
+        actual: usize,
+    },
+    /// The `Enabled` layer metadata DWORD was neither 0 nor 1.
+    InvalidLayerMetadataEnabledValue(u32),
+    /// The `Owner` layer metadata value was not a parseable SID.
+    MalformedLayerOwnerSid,
     /// A symlink key had no effective default value to interpret as REG_LINK.
     SymlinkDefaultValueMissing,
     /// A symlink key's effective default value was not REG_LINK.
