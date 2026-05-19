@@ -15,6 +15,7 @@ pub mod error;
 pub mod hives;
 pub mod ioctl;
 pub mod key;
+pub mod key_path;
 pub mod layers;
 pub mod metadata;
 pub mod output_buffer;
@@ -60,6 +61,10 @@ pub use key::{
     KeyCreateOptions, KeyCreatePlan, KeyCreateRequest, KeyParent, KeyRecordView,
     validate_key_create_flags, validate_key_create_request, validate_key_record,
     validate_symlink_create_authority,
+};
+pub use key_path::{
+    DeleteKeyInput, DerivedKeyPathMutation, HideKeyInput, KeyFdNamespaceView, KeyPathMutationInput,
+    PlannedKeyDelete, PlannedKeyHide, derive_key_path_mutation, plan_key_delete, plan_key_hide,
 };
 pub use layers::{
     BASE_LAYER_VIEW, LayerMetadataEntry, for_each_effective_layer, normalize_layer_target,

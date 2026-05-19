@@ -230,6 +230,17 @@ pub enum LcsError {
     OutputSizeOverflow,
     /// A volatile per-hive generation counter cannot advance without overflowing.
     HiveGenerationOverflow,
+    /// A key fd's resolved path and ancestor GUID metadata were inconsistent.
+    InvalidFdAncestry,
+    /// A namespace mutation was attempted on a hive root key.
+    HiveRootKeyOperation,
+    /// A namespace mutation was attempted through an already-orphaned key fd.
+    OrphanedKeyNamespaceOperation,
+    /// A key delete was attempted while visible children still exist.
+    KeyHasVisibleChildren {
+        /// Visible child count observed before delete.
+        count: u32,
+    },
 }
 
 /// Standard result type for the LCS semantic core.
