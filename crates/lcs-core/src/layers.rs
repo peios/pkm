@@ -20,6 +20,37 @@ pub struct LayerMetadataEntry<'a> {
     pub enabled: Option<bool>,
 }
 
+/// Transactional read target affected by layer-precedence coherency.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionalLayerReadSubject {
+    LayerMetadataValue,
+    RegistryResolution,
+}
+
+/// Read source selected for a transactional layer-precedence-sensitive read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionalLayerReadPlan {
+    UseTransactionalSourceRead,
+    UsePublishedLayerCache,
+}
+
+/// Commit timing for a mutation under the layer metadata subtree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayerMetadataMutationTiming {
+    NonTransactionalCommitted,
+    TransactionPending,
+    TransactionCommitSucceeded,
+    TransactionDiscarded,
+}
+
+/// Layer metadata cache update selected for a layer metadata mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayerMetadataCacheUpdatePlan {
+    RefreshBeforeReturn,
+    DeferUntilTransactionCommit,
+    NoRefresh,
+}
+
 /// Normalizes an optional caller-supplied layer target.
 pub fn normalize_layer_target<'a>(
     layer: Option<&'a str>,
@@ -118,6 +149,43 @@ pub fn validate_private_layer_set(limits: &LcsLimits, private_layers: &[&str]) -
     }
 
     Ok(())
+}
+
+/// Selects the read source for transactional layer-precedence-sensitive logic.
+pub fn plan_transactional_layer_read(
+    subject: TransactionalLayerReadSubject,
+) -> TransactionalLayerReadPlan {
+    match subject {
+        TransactionalLayerReadSubject::LayerMetadataValue => {
+            TransactionalLayerReadPlan::UseTransactionalSourceRead
+        }
+        TransactionalLayerReadSubject::RegistryResolution => {
+            TransactionalLayerReadPlan::UsePublishedLayerCache
+        }
+    }
+}
+
+/// Plans cache refresh timing for a mutation under `Machine\System\Registry\Layers\`.
+pub fn plan_layer_metadata_cache_update(
+    affects_layer_metadata_subtree: bool,
+    timing: LayerMetadataMutationTiming,
+) -> LayerMetadataCacheUpdatePlan {
+    if !affects_layer_metadata_subtree {
+        return LayerMetadataCacheUpdatePlan::NoRefresh;
+    }
+
+    match timing {
+        LayerMetadataMutationTiming::NonTransactionalCommitted
+        | LayerMetadataMutationTiming::TransactionCommitSucceeded => {
+            LayerMetadataCacheUpdatePlan::RefreshBeforeReturn
+        }
+        LayerMetadataMutationTiming::TransactionPending => {
+            LayerMetadataCacheUpdatePlan::DeferUntilTransactionCommit
+        }
+        LayerMetadataMutationTiming::TransactionDiscarded => {
+            LayerMetadataCacheUpdatePlan::NoRefresh
+        }
+    }
 }
 
 fn validate_layer_metadata_snapshot(

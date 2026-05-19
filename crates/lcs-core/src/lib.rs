@@ -70,7 +70,9 @@ pub use key_path::{
     PlannedKeyDelete, PlannedKeyHide, derive_key_path_mutation, plan_key_delete, plan_key_hide,
 };
 pub use layers::{
-    BASE_LAYER_VIEW, LayerMetadataEntry, for_each_effective_layer, normalize_layer_target,
+    BASE_LAYER_VIEW, LayerMetadataCacheUpdatePlan, LayerMetadataEntry, LayerMetadataMutationTiming,
+    TransactionalLayerReadPlan, TransactionalLayerReadSubject, for_each_effective_layer,
+    normalize_layer_target, plan_layer_metadata_cache_update, plan_transactional_layer_read,
     validate_layer_resolution_context, validate_layer_views, validate_private_layer_set,
 };
 pub use maintenance::{KeyFdHiveView, PlannedFlush, plan_flush_for_key_fd};
