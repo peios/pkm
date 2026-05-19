@@ -737,6 +737,13 @@ pub enum LcsError {
         /// First queued event length.
         first_event_len: usize,
     },
+    /// A watch event output buffer was too small for byte serialization.
+    WatchEventOutputBufferTooSmall {
+        /// Provided output buffer length.
+        buffer_len: usize,
+        /// Required serialized event length.
+        required_len: usize,
+    },
     /// A watch queue limit was zero.
     InvalidWatchQueueLimit,
     /// A watch queue snapshot was internally inconsistent.

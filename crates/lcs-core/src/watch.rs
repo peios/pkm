@@ -78,6 +78,13 @@ pub enum WatchEventRecordPlan {
     OverflowInstead,
 }
 
+/// Byte-serialization result for a watch event record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchEventRecordWritePlan {
+    Written { bytes: usize },
+    OverflowInstead,
+}
+
 /// Pending event length stored in a watch queue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QueuedWatchEvent {
@@ -450,6 +457,48 @@ pub fn plan_watch_event_record(
         name_len,
         path_depth,
     }))
+}
+
+/// Serializes a direct or subtree watch event record into PSD-005's raw byte
+/// layout without writing partial output.
+pub fn write_watch_event_record(
+    request: &WatchEventRecordRequest<'_>,
+    output: &mut [u8],
+) -> LcsResult<WatchEventRecordWritePlan> {
+    let shape = match plan_watch_event_record(request)? {
+        WatchEventRecordPlan::Record(shape) => shape,
+        WatchEventRecordPlan::OverflowInstead => {
+            return Ok(WatchEventRecordWritePlan::OverflowInstead);
+        }
+    };
+    let total_len = shape.total_len as usize;
+    if output.len() < total_len {
+        return Err(LcsError::WatchEventOutputBufferTooSmall {
+            buffer_len: output.len(),
+            required_len: total_len,
+        });
+    }
+
+    output[..4].copy_from_slice(&shape.total_len.to_le_bytes());
+    output[4..6].copy_from_slice(&(request.event_type as u16).to_le_bytes());
+    output[6..8].copy_from_slice(&shape.name_len.to_le_bytes());
+    let mut offset = DIRECT_WATCH_EVENT_HEADER_LEN;
+    output[offset..offset + request.name.len()].copy_from_slice(request.name.as_bytes());
+    offset += request.name.len();
+
+    if let Some(path_depth) = shape.path_depth {
+        output[offset..offset + 2].copy_from_slice(&path_depth.to_le_bytes());
+        offset += SUBTREE_WATCH_EVENT_DEPTH_LEN;
+        for component in request.path_components {
+            let component_len = component.len() as u16;
+            output[offset..offset + 2].copy_from_slice(&component_len.to_le_bytes());
+            offset += WATCH_COMPONENT_LEN_FIELD;
+            output[offset..offset + component.len()].copy_from_slice(component.as_bytes());
+            offset += component.len();
+        }
+    }
+
+    Ok(WatchEventRecordWritePlan::Written { bytes: total_len })
 }
 
 /// Plans one read() batch without splitting variable-length watch records.
