@@ -116,6 +116,13 @@ pub struct BackupRestoreNonRootKeyCreatePlan<'a> {
     pub anchor_path_entry_index: usize,
 }
 
+/// Non-root KEY timestamp write plan issued immediately after create.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreNonRootKeyTimestampWritePlan {
+    pub guid: Guid,
+    pub last_write_time_ns: i64,
+}
+
 /// Parsed PATH_ENTRY record payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupPathEntryPayload<'a> {
@@ -751,6 +758,26 @@ pub fn plan_backup_restore_non_root_key_create<'a>(
         volatile: key.volatile,
         symlink: key.symlink,
         anchor_path_entry_index,
+    })
+}
+
+/// Plans the post-create timestamp write for a non-root restore KEY.
+pub fn plan_backup_restore_non_root_key_timestamp_write(
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    key: BackupKeyPayload<'_>,
+) -> LcsResult<BackupRestoreNonRootKeyTimestampWritePlan> {
+    if header_root_guid == NIL_GUID || target_root_guid == NIL_GUID || key.guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    if key.guid == header_root_guid || key.guid == target_root_guid {
+        return Err(LcsError::BackupRestoreRootKeyCreateNotAllowed { guid: key.guid });
+    }
+    validate_backup_security_descriptor(key.security_descriptor, "backup_key.sd")?;
+
+    Ok(BackupRestoreNonRootKeyTimestampWritePlan {
+        guid: key.guid,
+        last_write_time_ns: key.last_write_time_ns,
     })
 }
 
