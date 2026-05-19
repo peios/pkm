@@ -614,6 +614,30 @@ pub enum RsiLateResponseEffectPlan {
     },
 }
 
+/// Cleanup needed after a late source-state success creates source-side state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiLateCleanupPlan {
+    pub abort_transaction_id: u64,
+    pub enqueue_abort_transaction: bool,
+}
+
+/// Retained metadata for a successful late response whose op code has been validated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiLateSuccessMetadata {
+    pub txn_id: u64,
+    pub mutation_effects: Option<RsiLateMutatingKernelEffects>,
+}
+
+/// Op-code-specific effect plan for a retained late success.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiLateSuccessEffectPlan {
+    Effect(RsiLateResponseEffectPlan),
+    EnqueueCleanup {
+        cleanup: RsiLateCleanupPlan,
+        release_request_record: bool,
+    },
+}
+
 /// Source fd read behavior selected from queue state and caller flags.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RsiReadPlan {
@@ -2369,6 +2393,71 @@ pub fn plan_rsi_late_response_effects(
                 RsiLateResponseTearDownReason::MissingOrInvalidKernelMetadata,
             )
         }
+    }
+}
+
+/// Plans a successful retained late response from the validated request op code.
+pub fn plan_rsi_late_success_by_op_code(
+    op_code: u16,
+    metadata: RsiLateSuccessMetadata,
+) -> RsiLateSuccessEffectPlan {
+    match op_code {
+        RSI_LOOKUP | RSI_ENUM_CHILDREN | RSI_READ_KEY | RSI_QUERY_VALUES => {
+            RsiLateSuccessEffectPlan::Effect(plan_rsi_late_response_effects(
+                RsiLateResponseValidationOutcome::SuccessReadOnly,
+            ))
+        }
+        RSI_CREATE_ENTRY
+        | RSI_HIDE_ENTRY
+        | RSI_DELETE_ENTRY
+        | RSI_CREATE_KEY
+        | RSI_WRITE_KEY
+        | RSI_DROP_KEY
+        | RSI_SET_VALUE
+        | RSI_DELETE_VALUE_ENTRY
+        | RSI_SET_BLANKET_TOMBSTONE
+        | RSI_DELETE_LAYER => match metadata.mutation_effects {
+            Some(effects) => RsiLateSuccessEffectPlan::Effect(plan_rsi_late_response_effects(
+                RsiLateResponseValidationOutcome::SuccessMutating(effects),
+            )),
+            None => RsiLateSuccessEffectPlan::Effect(plan_rsi_late_response_effects(
+                RsiLateResponseValidationOutcome::MissingOrInvalidKernelMetadata,
+            )),
+        },
+        RSI_COMMIT_TRANSACTION => match metadata.mutation_effects {
+            Some(effects) if effects.transaction_commit_effects.is_some() => {
+                RsiLateSuccessEffectPlan::Effect(plan_rsi_late_response_effects(
+                    RsiLateResponseValidationOutcome::SuccessMutating(effects),
+                ))
+            }
+            _ => RsiLateSuccessEffectPlan::Effect(plan_rsi_late_response_effects(
+                RsiLateResponseValidationOutcome::MissingOrInvalidKernelMetadata,
+            )),
+        },
+        RSI_BEGIN_TRANSACTION => {
+            if metadata.txn_id == 0 {
+                RsiLateSuccessEffectPlan::Effect(plan_rsi_late_response_effects(
+                    RsiLateResponseValidationOutcome::MissingOrInvalidKernelMetadata,
+                ))
+            } else {
+                RsiLateSuccessEffectPlan::EnqueueCleanup {
+                    cleanup: RsiLateCleanupPlan {
+                        abort_transaction_id: metadata.txn_id,
+                        enqueue_abort_transaction: true,
+                    },
+                    release_request_record: true,
+                }
+            }
+        }
+        RSI_ABORT_TRANSACTION | RSI_FLUSH => RsiLateSuccessEffectPlan::Effect(
+            RsiLateResponseEffectPlan::ReleaseRecordNoNormalEffects {
+                source_errno: None,
+                release_request_record: true,
+            },
+        ),
+        _ => RsiLateSuccessEffectPlan::Effect(plan_rsi_late_response_effects(
+            RsiLateResponseValidationOutcome::MissingOrInvalidKernelMetadata,
+        )),
     }
 }
 
