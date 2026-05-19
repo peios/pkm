@@ -785,6 +785,13 @@ pub enum LcsError {
     },
     /// Transaction watch batch event counting overflowed `usize`.
     TransactionWatchBatchEventCountOverflow,
+    /// Transaction watch queue application received the wrong number of event records.
+    TransactionWatchEventCountMismatch {
+        /// Event count selected by the batch planner.
+        expected: usize,
+        /// Event records supplied for queue application.
+        actual: usize,
+    },
     /// Captured watch dispatch ancestry was empty or had mismatched GUID/path lengths.
     InvalidWatchAncestry,
     /// The changed key GUID was not the last GUID in the captured mutation ancestry.

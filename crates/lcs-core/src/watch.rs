@@ -229,6 +229,24 @@ pub struct TransactionWatchBatchPlan {
     pub dispatch_without_interleaving: bool,
 }
 
+/// Applied transaction watch-batch queue effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionWatchQueueApplySummary {
+    pub queued_events: usize,
+    pub contains_overflow: bool,
+    pub attempted_event_count: usize,
+    pub queued_individual_events: usize,
+    pub queued_overflow_only: bool,
+    pub dispatch_without_interleaving: bool,
+}
+
+/// Transaction watch-batch queue application decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionWatchQueueApplyPlan {
+    NoEvents(WatchQueueState),
+    Applied(TransactionWatchQueueApplySummary),
+}
+
 /// Value-level effective-state watch event selected by snapshot diffing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectiveValueWatchEvent<'a> {
@@ -921,6 +939,86 @@ pub fn plan_transaction_watch_batch(
         delivery,
         dispatch_without_interleaving: total_event_count != 0,
     })
+}
+
+/// Applies a committed transaction watch batch to fixed watch queue storage.
+pub fn apply_transaction_watch_queue_batch(
+    limits: &LcsLimits,
+    queue: &mut [WatchQueueEntry],
+    queued_events: usize,
+    members: &[TransactionWatchBatchMember],
+    events: &[WatchQueueEntry],
+) -> LcsResult<TransactionWatchQueueApplyPlan> {
+    validate_watch_queue_storage(limits.notification_queue_size, queue.len())?;
+    let initial_state = watch_queue_snapshot(queue, queued_events)?;
+    let batch = plan_transaction_watch_batch(limits, members)?;
+
+    match batch.delivery {
+        TransactionWatchBurstPlan::NoEvents => {
+            require_transaction_watch_event_count(0, events.len())?;
+            Ok(TransactionWatchQueueApplyPlan::NoEvents(initial_state))
+        }
+        TransactionWatchBurstPlan::EmitIndividualEvents { event_count } => {
+            require_transaction_watch_event_count(event_count, events.len())?;
+            for event in events {
+                validate_watch_queue_entry(*event)?;
+            }
+
+            let mut current_queued_events = queued_events;
+            let mut contains_overflow = initial_state.contains_overflow;
+            for event in events {
+                let summary = push_watch_queue_event(
+                    limits.notification_queue_size,
+                    queue,
+                    current_queued_events,
+                    *event,
+                )?;
+                current_queued_events = summary.queued_events;
+                contains_overflow = summary.contains_overflow;
+            }
+
+            Ok(TransactionWatchQueueApplyPlan::Applied(
+                TransactionWatchQueueApplySummary {
+                    queued_events: current_queued_events,
+                    contains_overflow,
+                    attempted_event_count: batch.total_event_count,
+                    queued_individual_events: event_count,
+                    queued_overflow_only: false,
+                    dispatch_without_interleaving: batch.dispatch_without_interleaving,
+                },
+            ))
+        }
+        TransactionWatchBurstPlan::EmitOverflowOnly {
+            attempted_event_count,
+            ..
+        } => {
+            require_transaction_watch_event_count(0, events.len())?;
+            let summary = push_watch_queue_event(
+                limits.notification_queue_size,
+                queue,
+                queued_events,
+                overflow_queue_entry(),
+            )?;
+
+            Ok(TransactionWatchQueueApplyPlan::Applied(
+                TransactionWatchQueueApplySummary {
+                    queued_events: summary.queued_events,
+                    contains_overflow: summary.contains_overflow,
+                    attempted_event_count,
+                    queued_individual_events: 0,
+                    queued_overflow_only: true,
+                    dispatch_without_interleaving: batch.dispatch_without_interleaving,
+                },
+            ))
+        }
+    }
+}
+
+fn require_transaction_watch_event_count(expected: usize, actual: usize) -> LcsResult<()> {
+    if actual != expected {
+        return Err(LcsError::TransactionWatchEventCountMismatch { expected, actual });
+    }
+    Ok(())
 }
 
 /// Emits value watch events for the caller-visible effective-state difference.
