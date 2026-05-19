@@ -260,6 +260,13 @@ pub enum LcsError {
     RsiRequestIdOverflow,
     /// A length-prefixed RSI payload field would overflow host arithmetic.
     RsiPayloadLengthOverflow,
+    /// An RSI_WRITE_KEY request field mask contained bits not defined by PSD-005.
+    UnknownRsiWriteKeyFieldMask {
+        /// Full field mask.
+        field_mask: u32,
+        /// Unknown field mask bits.
+        unknown: u32,
+    },
     /// An ioctl command number is outside the PSD-005 registry ioctl vocabulary.
     UnknownRegistryIoctl(u8),
     /// A security descriptor component selector was zero.

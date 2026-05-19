@@ -13,6 +13,11 @@ use crate::resolution::Guid;
 
 pub type RsiRequestId = u64;
 
+pub const RSI_WRITE_KEY_FIELD_SD: u32 = 0x01;
+pub const RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME: u32 = 0x02;
+pub const RSI_WRITE_KEY_FIELD_KNOWN_MASK: u32 =
+    RSI_WRITE_KEY_FIELD_SD | RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME;
+
 /// Parsed common RSI request header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiRequestHeader {
@@ -97,6 +102,14 @@ impl<'a> RsiPayloadCursor<'a> {
         Ok(self.read_fixed(1)?[0])
     }
 
+    pub fn read_bool(&mut self, field: &'static str) -> LcsResult<bool> {
+        match self.read_u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            value => Err(LcsError::InvalidBooleanFlag { field, value }),
+        }
+    }
+
     pub fn read_u32_le(&mut self) -> LcsResult<u32> {
         let bytes = self.read_fixed(4)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -171,6 +184,42 @@ pub struct RsiDeleteEntryRequestPayload<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiEnumChildrenRequestPayload {
     pub parent_guid: Guid,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_CREATE_KEY request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiCreateKeyRequestPayload<'a> {
+    pub guid: Guid,
+    pub name: RsiLengthPrefixedField<'a>,
+    pub parent_guid: Guid,
+    pub sd: RsiLengthPrefixedField<'a>,
+    pub volatile: bool,
+    pub symlink: bool,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_READ_KEY request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiReadKeyRequestPayload {
+    pub guid: Guid,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_WRITE_KEY request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiWriteKeyRequestPayload<'a> {
+    pub guid: Guid,
+    pub field_mask: u32,
+    pub sd: Option<RsiLengthPrefixedField<'a>>,
+    pub last_write_time: Option<u64>,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_DROP_KEY request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiDropKeyRequestPayload {
+    pub guid: Guid,
     pub trailing: RsiTrailingOptionalFieldsPlan,
 }
 
@@ -527,6 +576,87 @@ pub fn parse_rsi_enum_children_request_payload(
         parent_guid,
         trailing,
     })
+}
+
+/// Parses the RSI_CREATE_KEY request payload layout.
+pub fn parse_rsi_create_key_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiCreateKeyRequestPayload<'_>> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let guid = cursor.read_guid()?;
+    let name = cursor.read_length_prefixed()?;
+    let parent_guid = cursor.read_guid()?;
+    let sd = cursor.read_length_prefixed()?;
+    let volatile = cursor.read_bool("rsi_create_key.volatile")?;
+    let symlink = cursor.read_bool("rsi_create_key.symlink")?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiCreateKeyRequestPayload {
+        guid,
+        name,
+        parent_guid,
+        sd,
+        volatile,
+        symlink,
+        trailing,
+    })
+}
+
+/// Parses the RSI_READ_KEY request payload layout.
+pub fn parse_rsi_read_key_request_payload(payload: &[u8]) -> LcsResult<RsiReadKeyRequestPayload> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let guid = cursor.read_guid()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiReadKeyRequestPayload { guid, trailing })
+}
+
+/// Parses the RSI_WRITE_KEY request payload layout.
+pub fn parse_rsi_write_key_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiWriteKeyRequestPayload<'_>> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let guid = cursor.read_guid()?;
+    let field_mask = cursor.read_u32_le()?;
+    validate_rsi_write_key_field_mask(field_mask)?;
+
+    let sd = if (field_mask & RSI_WRITE_KEY_FIELD_SD) != 0 {
+        Some(cursor.read_length_prefixed()?)
+    } else {
+        None
+    };
+    let last_write_time = if (field_mask & RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME) != 0 {
+        Some(cursor.read_u64_le()?)
+    } else {
+        None
+    };
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+
+    Ok(RsiWriteKeyRequestPayload {
+        guid,
+        field_mask,
+        sd,
+        last_write_time,
+        trailing,
+    })
+}
+
+/// Parses the RSI_DROP_KEY request payload layout.
+pub fn parse_rsi_drop_key_request_payload(payload: &[u8]) -> LcsResult<RsiDropKeyRequestPayload> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let guid = cursor.read_guid()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiDropKeyRequestPayload { guid, trailing })
+}
+
+/// Validates the defined RSI_WRITE_KEY mutable-field bitmask vocabulary.
+pub fn validate_rsi_write_key_field_mask(field_mask: u32) -> LcsResult<u32> {
+    let unknown = field_mask & !RSI_WRITE_KEY_FIELD_KNOWN_MASK;
+    if unknown != 0 {
+        return Err(LcsError::UnknownRsiWriteKeyFieldMask {
+            field_mask,
+            unknown,
+        });
+    }
+    Ok(field_mask)
 }
 
 /// Validates that an op code is one of PSD-005's request op codes.
