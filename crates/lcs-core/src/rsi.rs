@@ -328,6 +328,36 @@ pub struct RsiDeleteLayerRequestPayload<'a> {
     pub trailing: RsiTrailingOptionalFieldsPlan,
 }
 
+/// Borrowed count-prefixed GUID array in an RSI response payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiGuidArray<'a> {
+    pub count: u32,
+    pub bytes: &'a [u8],
+}
+
+impl<'a> RsiGuidArray<'a> {
+    pub fn guid_at(&self, index: u32) -> Option<Guid> {
+        if index >= self.count {
+            return None;
+        }
+        let start = (index as usize).checked_mul(16)?;
+        let end = start.checked_add(16)?;
+        if end > self.bytes.len() {
+            return None;
+        }
+        let mut guid = [0u8; 16];
+        guid.copy_from_slice(&self.bytes[start..end]);
+        Some(guid)
+    }
+}
+
+/// Parsed successful RSI_DELETE_LAYER response payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiDeleteLayerSuccessResponsePayload<'a> {
+    pub response: RsiValidatedResponse,
+    pub orphaned_guids: RsiGuidArray<'a>,
+}
+
 /// Parsed RSI_FLUSH request payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiFlushRequestPayload<'a> {
@@ -1065,6 +1095,31 @@ pub fn parse_rsi_read_key_success_response_payload<'a>(
         volatile,
         symlink,
         last_write_time,
+    })
+}
+
+/// Parses the successful RSI_DELETE_LAYER response payload.
+pub fn parse_rsi_delete_layer_success_response_payload<'a>(
+    frame: &'a [u8],
+    retained: RsiRetainedRequest,
+) -> LcsResult<RsiDeleteLayerSuccessResponsePayload<'a>> {
+    let response = validate_rsi_success_response_for_request(frame, retained, RSI_DELETE_LAYER)?;
+    let mut cursor = RsiPayloadCursor::new(&frame[RSI_MIN_RESPONSE_LEN..]);
+    let count = cursor.read_u32_le()?;
+    let guid_bytes_len = (count as usize)
+        .checked_mul(16)
+        .ok_or(LcsError::RsiPayloadLengthOverflow)?;
+    let bytes = cursor.read_fixed(guid_bytes_len)?;
+    if cursor.remaining_len() != 0 {
+        return Err(LcsError::RsiUnexpectedResponsePayload {
+            op_code: retained.op_code,
+            extra_len: cursor.remaining_len(),
+        });
+    }
+
+    Ok(RsiDeleteLayerSuccessResponsePayload {
+        response,
+        orphaned_guids: RsiGuidArray { count, bytes },
     })
 }
 
