@@ -434,6 +434,10 @@ pub enum LcsError {
     },
     /// The backup stream record counter cannot advance without overflowing.
     BackupStreamRecordCountOverflow,
+    /// A backup stream contained duplicate folded LAYER manifest identities.
+    DuplicateBackupLayerManifest,
+    /// A backup layer-qualified record referenced a layer missing from the manifest.
+    MissingBackupLayerManifest,
     /// A length-prefixed RSI payload field would overflow host arithmetic.
     RsiPayloadLengthOverflow,
     /// An RSI_WRITE_KEY request field mask contained bits not defined by PSD-005.

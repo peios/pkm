@@ -1,3 +1,4 @@
+use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
 use crate::constants::{
     REG_BACKUP_BLANKET_TOMBSTONE, REG_BACKUP_HEADER, REG_BACKUP_KEY, REG_BACKUP_LAYER,
@@ -52,6 +53,13 @@ pub struct BackupLayerManifestPayload<'a> {
     pub precedence: u32,
     pub enabled: bool,
     pub owner_sid: &'a [u8],
+}
+
+/// Summary returned after validating a backup LAYER manifest set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupLayerManifestSetSummary {
+    pub manifest_count: usize,
+    pub referenced_layer_count: usize,
 }
 
 /// Parsed KEY record payload.
@@ -353,6 +361,35 @@ pub fn parse_backup_layer_manifest_record<'a>(
         });
     }
     parse_backup_layer_manifest_payload(limits, record.payload)
+}
+
+/// Validates manifest-level LAYER record invariants for restore.
+pub fn validate_backup_layer_manifest_set(
+    limits: &LcsLimits,
+    manifests: &[BackupLayerManifestPayload<'_>],
+    referenced_layers: &[&str],
+) -> LcsResult<BackupLayerManifestSetSummary> {
+    for (index, manifest) in manifests.iter().enumerate() {
+        let name = validate_layer_name_bytes(manifest.name.as_bytes(), limits)?;
+        kacs_core::Sid::parse(manifest.owner_sid).map_err(|_| LcsError::MalformedBackupSid {
+            field: "backup_layer.owner",
+        })?;
+        if backup_manifest_seen_before(limits, manifests, index, name)? {
+            return Err(LcsError::DuplicateBackupLayerManifest);
+        }
+    }
+
+    for layer_name in referenced_layers {
+        let referenced = validate_layer_name_bytes(layer_name.as_bytes(), limits)?;
+        if !backup_manifest_contains_layer(limits, manifests, referenced)? {
+            return Err(LcsError::MissingBackupLayerManifest);
+        }
+    }
+
+    Ok(BackupLayerManifestSetSummary {
+        manifest_count: manifests.len(),
+        referenced_layer_count: referenced_layers.len(),
+    })
 }
 
 /// Parses and validates one KEY payload.
@@ -918,6 +955,35 @@ fn validate_backup_security_descriptor(bytes: &[u8], field: &'static str) -> Lcs
         return Err(LcsError::MalformedSecurityDescriptor { field });
     }
     Ok(())
+}
+
+fn backup_manifest_seen_before(
+    limits: &LcsLimits,
+    manifests: &[BackupLayerManifestPayload<'_>],
+    index: usize,
+    current_name: &str,
+) -> LcsResult<bool> {
+    for previous in &manifests[..index] {
+        let previous_name = validate_layer_name_bytes(previous.name.as_bytes(), limits)?;
+        if casefold_eq(previous_name, current_name) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn backup_manifest_contains_layer(
+    limits: &LcsLimits,
+    manifests: &[BackupLayerManifestPayload<'_>],
+    referenced: &str,
+) -> LcsResult<bool> {
+    for manifest in manifests {
+        let manifest_name = validate_layer_name_bytes(manifest.name.as_bytes(), limits)?;
+        if casefold_eq(manifest_name, referenced) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
