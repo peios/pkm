@@ -183,10 +183,11 @@ pub use query::{
 };
 pub use resolution::{
     BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid, LayerResolutionContext,
-    LayerView, NamedPathEntry, NamedValueEntry, PathEntry, PathEntryWriteRequest, PathResolution,
-    PathTarget, ResolvedPathEntry, ResolvedValueEntry, ValidatedPathEntryWrite, ValueEntry,
-    ValueResolution, for_each_effective_value, for_each_visible_subkey, resolve_path_entry,
-    resolve_value, validate_path_entry_write_request, validate_path_target,
+    LayerView, NamedPathEntry, NamedPathResolution, NamedValueEntry, PathEntry,
+    PathEntryWriteRequest, PathResolution, PathTarget, ResolvedNamedPathEntry, ResolvedPathEntry,
+    ResolvedValueEntry, ValidatedPathEntryWrite, ValueEntry, ValueResolution,
+    for_each_effective_value, for_each_visible_subkey, resolve_named_path_entry,
+    resolve_path_entry, resolve_value, validate_path_entry_write_request, validate_path_target,
 };
 pub use resource::{
     RegistryMemoryBoundInputs, RegistryMemoryBoundPlan, plan_registry_memory_bounds,

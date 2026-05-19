@@ -141,6 +141,20 @@ pub struct EnumeratedSubkey<'a> {
     pub path: ResolvedPathEntry<'a>,
 }
 
+/// Effective visible child selected by key-name lookup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedNamedPathEntry<'a> {
+    pub child_name: &'a str,
+    pub path: ResolvedPathEntry<'a>,
+}
+
+/// Result of resolving one named child path-entry candidate set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NamedPathResolution<'a> {
+    Found(ResolvedNamedPathEntry<'a>),
+    NotFound,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ActiveLayer<'a> {
     name: &'a str,
@@ -256,6 +270,62 @@ pub fn validate_path_target(target: PathTarget) -> LcsResult<PathTarget> {
         }
     }
     Ok(target)
+}
+
+/// Resolves source-returned child path entries for one requested key component.
+pub fn resolve_named_path_entry<'a>(
+    context: &LayerResolutionContext<'a>,
+    requested_child_name: &str,
+    entries: &'a [NamedPathEntry<'a>],
+) -> LcsResult<NamedPathResolution<'a>> {
+    validate_layer_resolution_context(context)?;
+    let requested_name =
+        validate_key_component_bytes(requested_child_name.as_bytes(), context.limits)?;
+    prevalidate_subkey_enumeration_source(context, entries)?;
+
+    let mut best: Option<NamedPathCandidate<'a>> = None;
+    let mut duplicate_best = false;
+
+    for candidate_entry in entries {
+        let candidate_name =
+            validate_key_component_bytes(candidate_entry.child_name.as_bytes(), context.limits)?;
+        if !casefold_eq(candidate_name, requested_name) {
+            continue;
+        }
+
+        let Some(layer) = active_layer_for_source_entry(context, candidate_entry.entry.layer)?
+        else {
+            continue;
+        };
+        validate_sequence(context, candidate_entry.entry.sequence)?;
+        let target = validate_path_target(candidate_entry.entry.target)?;
+
+        let candidate = NamedPathCandidate {
+            name: candidate_name,
+            layer,
+            sequence: candidate_entry.entry.sequence,
+            target,
+        };
+        update_best_named_path(&mut best, &mut duplicate_best, candidate);
+    }
+
+    let Some(best) = best else {
+        return Ok(NamedPathResolution::NotFound);
+    };
+    reject_duplicate_winning_tie(duplicate_best, best.layer.precedence, best.sequence)?;
+
+    match best.target {
+        PathTarget::Guid(guid) => Ok(NamedPathResolution::Found(ResolvedNamedPathEntry {
+            child_name: best.name,
+            path: ResolvedPathEntry {
+                guid,
+                layer: best.layer.name,
+                precedence: best.layer.precedence,
+                sequence: best.sequence,
+            },
+        })),
+        PathTarget::Hidden => Ok(NamedPathResolution::NotFound),
+    }
 }
 
 /// Resolves one source-returned value candidate set.
