@@ -59,6 +59,9 @@ pub fn validate_registry_path_str<'a>(
     if path.is_empty() {
         return Err(LcsError::EmptyPath);
     }
+    if path.as_bytes().contains(&0) {
+        return Err(LcsError::NullByte { field: "path" });
+    }
     if path.len() > limits.max_total_path_length {
         return Err(LcsError::PathTooLong {
             len: path.len(),
