@@ -43,6 +43,14 @@ pub const SYS_KMES_ATTACH: i64 = 1091;
 pub const SYS_KMES_EMIT_BATCH: i64 = 1092;
 
 // ---------------------------------------------------------------------------
+// LCS — registry.
+// ---------------------------------------------------------------------------
+
+pub const SYS_REG_OPEN_KEY: i64 = 1100;
+pub const SYS_REG_CREATE_KEY: i64 = 1101;
+pub const SYS_REG_BEGIN_TRANSACTION: i64 = 1102;
+
+// ---------------------------------------------------------------------------
 // Generic dirfd convenience.
 // ---------------------------------------------------------------------------
 
@@ -65,5 +73,12 @@ mod tests {
         assert_eq!(AT_FDCWD, -100);
         assert_eq!(AT_SYMLINK_NOFOLLOW, 0x100);
         assert_eq!(AT_EMPTY_PATH, 0x1000);
+    }
+
+    #[test]
+    fn lcs_syscall_numbers_match_psd_005() {
+        assert_eq!(SYS_REG_OPEN_KEY, 1100);
+        assert_eq!(SYS_REG_CREATE_KEY, 1101);
+        assert_eq!(SYS_REG_BEGIN_TRANSACTION, 1102);
     }
 }

@@ -44,4 +44,9 @@
 #define SYS_KMES_ATTACH			1091
 #define SYS_KMES_EMIT_BATCH		1092
 
+/* LCS — registry. */
+#define SYS_REG_OPEN_KEY		1100
+#define SYS_REG_CREATE_KEY		1101
+#define SYS_REG_BEGIN_TRANSACTION	1102
+
 #endif /* _UAPI_PKM_SYSCALL_H */

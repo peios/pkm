@@ -175,6 +175,7 @@ COPY uapi/pkm/token.h /tmp/pkm-src/uapi/pkm/token.h
 COPY uapi/pkm/access.h /tmp/pkm-src/uapi/pkm/access.h
 COPY uapi/pkm/file.h /tmp/pkm-src/uapi/pkm/file.h
 COPY uapi/pkm/kmes.h /tmp/pkm-src/uapi/pkm/kmes.h
+COPY uapi/pkm/lcs.h /tmp/pkm-src/uapi/pkm/lcs.h
 COPY crates/kacs-core/src/ /tmp/pkm-src/crates/kacs-core/src/
 COPY kernel/crypto/ /tmp/pkm-src/kernel/crypto/
 COPY kernel/scripts/update-ed25519-hacl.py /tmp/pkm-src/kernel/scripts/update-ed25519-hacl.py

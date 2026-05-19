@@ -41,6 +41,24 @@ _Static_assert(KMES_EVENT_HEADER_BASE_SIZE
 	       "KMES event-header base size disagrees with its field offsets");
 _Static_assert(sizeof(struct kmes_emit_entry) == 32,
 	       "kmes_emit_entry must be 32 bytes");
+_Static_assert(_IOC_TYPE(REG_IOC_QUERY_VALUE) == REG_IOC_TYPE,
+	       "REG_IOC_QUERY_VALUE type disagrees with PSD-005");
+_Static_assert(_IOC_NR(REG_IOC_QUERY_VALUE) == REG_IOC_QUERY_VALUE_NR,
+	       "REG_IOC_QUERY_VALUE number disagrees with PSD-005");
+_Static_assert(_IOC_DIR(REG_IOC_QUERY_VALUE) == (_IOC_READ | _IOC_WRITE),
+	       "REG_IOC_QUERY_VALUE direction disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_QUERY_VALUE) == REG_QUERY_VALUE_ARGS_SIZE,
+	       "REG_IOC_QUERY_VALUE size disagrees with PSD-005");
+_Static_assert(_IOC_DIR(REG_IOC_FLUSH) == _IOC_NONE,
+	       "REG_IOC_FLUSH direction disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_FLUSH) == 0,
+	       "REG_IOC_FLUSH must not carry an argument");
+_Static_assert(_IOC_TYPE(REG_SRC_REGISTER) == REG_IOC_TYPE,
+	       "REG_SRC_REGISTER type disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_SRC_REGISTER) == REG_SRC_REGISTER_ARGS_SIZE,
+	       "REG_SRC_REGISTER size disagrees with PSD-005");
+_Static_assert(sizeof(REG_BACKUP_MAGIC) - 1 == 8,
+	       "REG_BACKUP_MAGIC must be eight bytes");
 
 int main(void)
 {
@@ -50,5 +68,10 @@ int main(void)
 		     + KACS_TOKEN_QUERY
 		     + KACS_SD_DACL_PRESENT
 		     + KMES_ORIGIN_KACS
+		     + SYS_REG_OPEN_KEY
+		     + REG_OPEN_LINK
+		     + KEY_QUERY_VALUE
+		     + REG_IOC_QUERY_VALUE
+		     + REG_BACKUP_HEADER
 		     + sizeof(struct kacs_query_args));
 }

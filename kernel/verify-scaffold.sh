@@ -77,6 +77,7 @@ for required in \
 	"$repo_root/uapi/pkm/access.h" \
 	"$repo_root/uapi/pkm/file.h" \
 	"$repo_root/uapi/pkm/kmes.h" \
+	"$repo_root/uapi/pkm/lcs.h" \
 	"$repo_root/uapi/smoke_test.c" \
 	"$repo_root/uapi/check-userspace-clean.sh" \
 	"$repo_root/uapi/check-codegen-safe.sh" \

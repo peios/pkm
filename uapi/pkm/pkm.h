@@ -11,9 +11,9 @@
  *         (<pkm/token.h>, <pkm/sd.h>, <pkm/sid.h>, <pkm/access.h>,
  *          <pkm/file.h>)
  *   KMES  the kernel-mediated event stream (<pkm/kmes.h>)
+ *   LCS   the registry (<pkm/lcs.h>)
  * share one wire-format vocabulary (SIDs, security descriptors, access
  * masks) and are versioned and shipped together as a single kernel module.
- * LCS (the registry) joins this header set when it lands.
  *
  * These headers are the single source of truth for the ABI: the kernel
  * compiles against them and so does userspace, so the two see
@@ -34,5 +34,6 @@
 #include <pkm/access.h>
 #include <pkm/file.h>
 #include <pkm/kmes.h>
+#include <pkm/lcs.h>
 
 #endif /* _UAPI_PKM_H */
