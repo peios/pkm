@@ -6,8 +6,10 @@ use crate::constants::{
     REG_WATCH_VALUE_DELETED, REG_WATCH_VALUE_SET,
 };
 use crate::error::{LcsError, LcsResult};
-use crate::path::{validate_layer_name_bytes, validate_value_name_bytes};
-use crate::resolution::{EnumeratedValue, Guid};
+use crate::path::{
+    validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
+};
+use crate::resolution::{EnumeratedSubkey, EnumeratedValue, Guid, ResolvedPathEntry};
 use crate::source::NIL_GUID;
 use crate::value::validate_value_data_len;
 
@@ -162,6 +164,36 @@ impl EffectiveValueWatchEvent<'_> {
         match self {
             Self::ValueSet { .. } => REG_WATCH_VALUE_SET,
             Self::ValueDeleted { .. } => REG_WATCH_VALUE_DELETED,
+        }
+    }
+}
+
+/// Subkey-level effective-state watch event selected by snapshot diffing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectiveSubkeyWatchEvent<'a> {
+    SubkeyCreated { name: &'a str },
+    SubkeyDeleted { name: &'a str },
+}
+
+impl EffectiveSubkeyWatchEvent<'_> {
+    pub fn event_type(self) -> u32 {
+        match self {
+            Self::SubkeyCreated { .. } => REG_WATCH_SUBKEY_CREATED,
+            Self::SubkeyDeleted { .. } => REG_WATCH_SUBKEY_DELETED,
+        }
+    }
+}
+
+/// Visibility event for a GUID-bound watched key object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchedKeyVisibilityEvent {
+    KeyDeleted,
+}
+
+impl WatchedKeyVisibilityEvent {
+    pub fn event_type(self) -> u32 {
+        match self {
+            Self::KeyDeleted => REG_WATCH_KEY_DELETED,
         }
     }
 }
@@ -561,6 +593,75 @@ where
     Ok(emitted)
 }
 
+/// Emits subkey watch events for the effective child-visibility difference.
+pub fn for_each_effective_subkey_watch_event<'a, F>(
+    limits: &LcsLimits,
+    before: &'a [EnumeratedSubkey<'a>],
+    after: &'a [EnumeratedSubkey<'a>],
+    mut emit: F,
+) -> LcsResult<usize>
+where
+    F: FnMut(EffectiveSubkeyWatchEvent<'a>) -> LcsResult<()>,
+{
+    validate_effective_subkey_snapshot(limits, "before", before)?;
+    validate_effective_subkey_snapshot(limits, "after", after)?;
+
+    let mut emitted = 0usize;
+    for before_subkey in before {
+        let Some(after_subkey) = find_effective_subkey(after, before_subkey.child_name) else {
+            emit(EffectiveSubkeyWatchEvent::SubkeyDeleted {
+                name: before_subkey.child_name,
+            })?;
+            emitted += 1;
+            continue;
+        };
+        if before_subkey.path.guid != after_subkey.path.guid {
+            emit(EffectiveSubkeyWatchEvent::SubkeyDeleted {
+                name: before_subkey.child_name,
+            })?;
+            emit(EffectiveSubkeyWatchEvent::SubkeyCreated {
+                name: after_subkey.child_name,
+            })?;
+            emitted += 2;
+        }
+    }
+
+    for after_subkey in after {
+        if find_effective_subkey(before, after_subkey.child_name).is_none() {
+            emit(EffectiveSubkeyWatchEvent::SubkeyCreated {
+                name: after_subkey.child_name,
+            })?;
+            emitted += 1;
+        }
+    }
+
+    Ok(emitted)
+}
+
+/// Selects the direct `KEY_DELETED` event for a GUID-bound watched key object.
+pub fn plan_watched_key_visibility_event(
+    limits: &LcsLimits,
+    watched_guid: Guid,
+    before: Option<ResolvedPathEntry<'_>>,
+    after: Option<ResolvedPathEntry<'_>>,
+) -> LcsResult<Option<WatchedKeyVisibilityEvent>> {
+    validate_watch_key_guid(watched_guid)?;
+    if let Some(before) = before {
+        validate_resolved_path_entry(limits, before)?;
+    }
+    if let Some(after) = after {
+        validate_resolved_path_entry(limits, after)?;
+    }
+
+    let was_visible = before.is_some_and(|entry| entry.guid == watched_guid);
+    let still_visible = after.is_some_and(|entry| entry.guid == watched_guid);
+    if was_visible && !still_visible {
+        Ok(Some(WatchedKeyVisibilityEvent::KeyDeleted))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Plans internal LCS self-watch registrations after source registration.
 pub fn plan_internal_self_watch(roots: InternalSelfWatchRoots) -> LcsResult<InternalSelfWatchPlan> {
     validate_internal_watch_guid(roots.machine_root_guid)?;
@@ -690,6 +791,37 @@ fn validate_effective_value_snapshot(
     Ok(())
 }
 
+fn validate_effective_subkey_snapshot(
+    limits: &LcsLimits,
+    snapshot: &'static str,
+    subkeys: &[EnumeratedSubkey<'_>],
+) -> LcsResult<()> {
+    for (index, subkey) in subkeys.iter().enumerate() {
+        validate_key_component_bytes(subkey.child_name.as_bytes(), limits)?;
+        validate_resolved_path_entry(limits, subkey.path)?;
+        if effective_subkey_seen_before(limits, subkeys, index, subkey.child_name)? {
+            return Err(LcsError::DuplicateEffectiveWatchSubkeyName { snapshot, index });
+        }
+    }
+    Ok(())
+}
+
+fn effective_subkey_seen_before(
+    limits: &LcsLimits,
+    subkeys: &[EnumeratedSubkey<'_>],
+    index: usize,
+    current_name: &str,
+) -> LcsResult<bool> {
+    let current_name = validate_key_component_bytes(current_name.as_bytes(), limits)?;
+    for previous in &subkeys[..index] {
+        let previous_name = validate_key_component_bytes(previous.child_name.as_bytes(), limits)?;
+        if casefold_eq(previous_name, current_name) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn effective_value_seen_before(
     limits: &LcsLimits,
     values: &[EnumeratedValue<'_>],
@@ -721,6 +853,28 @@ fn same_effective_value(before: &EnumeratedValue<'_>, after: &EnumeratedValue<'_
         && before.value.data == after.value.data
         && before.value.layer == after.value.layer
         && before.value.sequence == after.value.sequence
+}
+
+fn find_effective_subkey<'a>(
+    subkeys: &'a [EnumeratedSubkey<'a>],
+    name: &str,
+) -> Option<&'a EnumeratedSubkey<'a>> {
+    subkeys
+        .iter()
+        .find(|candidate| casefold_eq(candidate.child_name, name))
+}
+
+fn validate_resolved_path_entry(limits: &LcsLimits, entry: ResolvedPathEntry<'_>) -> LcsResult<()> {
+    validate_watch_key_guid(entry.guid)?;
+    validate_layer_name_bytes(entry.layer.as_bytes(), limits)?;
+    Ok(())
+}
+
+fn validate_watch_key_guid(guid: Guid) -> LcsResult<()> {
+    if guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    Ok(())
 }
 
 fn validate_watch_mutation_context(mutation: &WatchMutationContext<'_>) -> LcsResult<()> {

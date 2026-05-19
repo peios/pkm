@@ -681,6 +681,13 @@ pub enum LcsError {
         /// Index of the duplicate value.
         index: usize,
     },
+    /// An effective subkey snapshot has duplicate folded child identities.
+    DuplicateEffectiveWatchSubkeyName {
+        /// Snapshot label supplied by the caller.
+        snapshot: &'static str,
+        /// Index of the duplicate subkey.
+        index: usize,
+    },
     /// A known watch event type was not valid for the internal watch action being planned.
     UnexpectedInternalWatchEvent {
         /// Watch event type.
