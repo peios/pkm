@@ -260,12 +260,14 @@ pub use symlink::{
     validate_symlink_target_bytes,
 };
 pub use transaction::{
-    StartedTransaction, TransactionBinding, TransactionCommitPlan, TransactionCompletionEvent,
+    StartedTransaction, TransactionBinding, TransactionBoundCounterPlan,
+    TransactionBoundCounterUpdate, TransactionCommitPlan, TransactionCompletionEvent,
     TransactionFdClosePlan, TransactionFdPublicationPlan, TransactionId, TransactionIdCounter,
     TransactionKernelEffectsPlan, TransactionMutationBindingPlan, TransactionReadPlan,
     TransactionRuntimeTransitionPlan, TransactionState, TransactionStatusResult,
     TransactionTerminalErrno, TransactionUseFailure, plan_begin_transaction,
-    plan_begin_transaction_fd, plan_transaction_bound_source_down, plan_transaction_commit,
+    plan_begin_transaction_fd, plan_transaction_bound_counter_update,
+    plan_transaction_bound_source_down, plan_transaction_commit,
     plan_transaction_completion_effects, plan_transaction_fd_close,
     plan_transaction_mutation_binding, plan_transaction_read, plan_transaction_timeout,
     transaction_status, transaction_terminal_failure,

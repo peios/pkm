@@ -184,6 +184,22 @@ pub struct TransactionRuntimeTransitionPlan<'a> {
     pub kernel_effects: Option<TransactionKernelEffectsPlan>,
 }
 
+/// Per-source bound-transaction counter mutation selected by live state code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionBoundCounterUpdate {
+    NoChange,
+    Increment,
+    Decrement,
+}
+
+/// Planned per-source bound-transaction counter result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionBoundCounterPlan {
+    pub update: TransactionBoundCounterUpdate,
+    pub previous_count: usize,
+    pub next_count: usize,
+}
+
 /// Plans reg_begin_transaction without selecting a source.
 pub fn plan_begin_transaction(
     limits: &LcsLimits,
@@ -495,6 +511,41 @@ pub fn plan_transaction_bound_source_down<'a>(
             dispatch_source_abort: false,
             kernel_effects: None,
         }),
+    }
+}
+
+/// Plans mutation of the per-source count of currently bound transactions.
+pub fn plan_transaction_bound_counter_update(
+    limits: &LcsLimits,
+    current_bound_transactions_for_source: usize,
+    update: TransactionBoundCounterUpdate,
+) -> LcsResult<TransactionBoundCounterPlan> {
+    match update {
+        TransactionBoundCounterUpdate::NoChange => Ok(TransactionBoundCounterPlan {
+            update,
+            previous_count: current_bound_transactions_for_source,
+            next_count: current_bound_transactions_for_source,
+        }),
+        TransactionBoundCounterUpdate::Increment => {
+            if current_bound_transactions_for_source >= limits.max_bound_transactions_per_source {
+                return Err(LcsError::InvalidTransactionRuntimeState);
+            }
+            Ok(TransactionBoundCounterPlan {
+                update,
+                previous_count: current_bound_transactions_for_source,
+                next_count: current_bound_transactions_for_source + 1,
+            })
+        }
+        TransactionBoundCounterUpdate::Decrement => {
+            let next_count = current_bound_transactions_for_source
+                .checked_sub(1)
+                .ok_or(LcsError::InvalidTransactionRuntimeState)?;
+            Ok(TransactionBoundCounterPlan {
+                update,
+                previous_count: current_bound_transactions_for_source,
+                next_count,
+            })
+        }
     }
 }
 
