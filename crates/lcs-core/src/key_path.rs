@@ -38,11 +38,20 @@ pub struct DeleteKeyInput<'a> {
     pub visible_child_count: u32,
 }
 
+/// Kernel-side effect contract for explicit key deletion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyDeleteEffects {
+    pub removes_target_layer_path_entry: bool,
+    pub preserves_key_data: bool,
+    pub preserves_other_layer_path_entries: bool,
+}
+
 /// Source-dispatch-ready delete-key plan plus side effects.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlannedKeyDelete<'a> {
     pub target: DerivedKeyPathMutation<'a>,
     pub updates_parent_last_write_time: bool,
+    pub effects: KeyDeleteEffects,
 }
 
 /// Hide-key input.
@@ -114,6 +123,11 @@ pub fn plan_key_delete<'a>(
     Ok(PlannedKeyDelete {
         target,
         updates_parent_last_write_time: true,
+        effects: KeyDeleteEffects {
+            removes_target_layer_path_entry: true,
+            preserves_key_data: true,
+            preserves_other_layer_path_entries: true,
+        },
     })
 }
 
