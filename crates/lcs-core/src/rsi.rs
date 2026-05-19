@@ -1450,6 +1450,7 @@ pub enum RsiTransactionBeginStatusPlan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RsiSourceDataValidationFailure {
     MalformedSecurityDescriptor,
+    MalformedLayerName,
     FutureSequenceNumber,
     DuplicateWinningSequenceTie,
     MalformedLayerMetadataSecurityDescriptor,

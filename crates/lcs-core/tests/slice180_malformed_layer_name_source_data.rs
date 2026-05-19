@@ -1,0 +1,80 @@
+use lcs_core::{
+    LayerResolutionContext, LayerView, LcsError, LcsLimits, LcsSourceValidationClass, REG_SZ,
+    RsiMalformedSourceDataPlan, RsiMappedErrno, RsiSourceDataValidationFailure, ValueEntry,
+    ValueResolution, plan_rsi_malformed_source_data, resolve_value,
+};
+
+fn context<'a>(layers: &'a [LayerView<'a>], limits: &'a LcsLimits) -> LayerResolutionContext<'a> {
+    LayerResolutionContext {
+        layers,
+        private_layers: &[],
+        limits,
+        next_sequence: 100,
+    }
+}
+
+#[test]
+fn malformed_source_layer_name_rejects_before_resolution() {
+    let limits = LcsLimits::default();
+    let layers = [LayerView {
+        name: "base",
+        precedence: 0,
+        enabled: true,
+    }];
+    let entries = [ValueEntry {
+        layer: "bad/layer",
+        sequence: 1,
+        value_type: REG_SZ,
+        data: b"value",
+    }];
+
+    assert_eq!(
+        resolve_value(&context(&layers, &limits), &entries, &[]),
+        Err(LcsError::NameContainsSeparator {
+            field: "layer_name"
+        })
+    );
+}
+
+#[test]
+fn malformed_layer_name_maps_to_source_data_eio_audit_policy() {
+    assert_eq!(
+        plan_rsi_malformed_source_data(RsiSourceDataValidationFailure::MalformedLayerName),
+        RsiMalformedSourceDataPlan {
+            failure: RsiSourceDataValidationFailure::MalformedLayerName,
+            caller_errno: RsiMappedErrno::Eio,
+            emit_audit: true,
+            keep_source_alive: true,
+            retain_previous_layer_metadata_sd: false,
+        }
+    );
+}
+
+#[test]
+fn source_validation_audit_vocabulary_names_malformed_layer_names() {
+    let class = LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedLayerName);
+
+    assert_eq!(class, LcsSourceValidationClass::MalformedLayerName);
+    assert_eq!(class.as_str(), "malformed_layer_name");
+}
+
+#[test]
+fn well_formed_absent_source_layer_remains_latent_not_malformed() {
+    let limits = LcsLimits::default();
+    let layers = [LayerView {
+        name: "base",
+        precedence: 0,
+        enabled: true,
+    }];
+    let entries = [ValueEntry {
+        layer: "future",
+        sequence: 1,
+        value_type: REG_SZ,
+        data: b"value",
+    }];
+
+    assert_eq!(
+        resolve_value(&context(&layers, &limits), &entries, &[]),
+        Ok(ValueResolution::NotFound)
+    );
+}

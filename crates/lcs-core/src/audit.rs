@@ -114,6 +114,7 @@ pub struct LcsBackupRestoreCompleteAuditRecord<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LcsSourceValidationClass {
     MalformedSecurityDescriptor,
+    MalformedLayerName,
     FutureSequenceNumber,
     DuplicateWinningSequenceTie,
     MalformedLayerMetadataSecurityDescriptor,
@@ -123,6 +124,7 @@ impl LcsSourceValidationClass {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::MalformedSecurityDescriptor => "malformed_security_descriptor",
+            Self::MalformedLayerName => "malformed_layer_name",
             Self::FutureSequenceNumber => "future_sequence_number",
             Self::DuplicateWinningSequenceTie => "duplicate_winning_sequence_tie",
             Self::MalformedLayerMetadataSecurityDescriptor => {
@@ -138,6 +140,7 @@ impl From<RsiSourceDataValidationFailure> for LcsSourceValidationClass {
             RsiSourceDataValidationFailure::MalformedSecurityDescriptor => {
                 Self::MalformedSecurityDescriptor
             }
+            RsiSourceDataValidationFailure::MalformedLayerName => Self::MalformedLayerName,
             RsiSourceDataValidationFailure::FutureSequenceNumber => Self::FutureSequenceNumber,
             RsiSourceDataValidationFailure::DuplicateWinningSequenceTie => {
                 Self::DuplicateWinningSequenceTie
