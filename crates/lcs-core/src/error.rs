@@ -392,6 +392,11 @@ pub enum LcsError {
         /// Unknown flag bits.
         unknown: u32,
     },
+    /// A backup TRAILER record count cannot include both HEADER and TRAILER.
+    BackupRecordCountTooSmall {
+        /// TRAILER-declared record count.
+        record_count: u64,
+    },
     /// A length-prefixed RSI payload field would overflow host arithmetic.
     RsiPayloadLengthOverflow,
     /// An RSI_WRITE_KEY request field mask contained bits not defined by PSD-005.

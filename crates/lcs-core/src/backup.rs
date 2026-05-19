@@ -14,6 +14,8 @@ use crate::value::{ValidatedValueType, validate_value_data_len, validate_value_w
 
 pub const BACKUP_RECORD_HEADER_LEN: usize = 6;
 const BACKUP_HEADER_FIXED_PAYLOAD_LEN: usize = 8 + 4 + 4 + 8 + 16 + 4;
+pub const BACKUP_TRAILER_CHECKSUM_LEN: usize = 32;
+pub const BACKUP_TRAILER_PAYLOAD_LEN: usize = 8 + BACKUP_TRAILER_CHECKSUM_LEN;
 const BACKUP_KEY_FLAG_VOLATILE: u32 = 0x01;
 const BACKUP_KEY_FLAG_SYMLINK: u32 = 0x02;
 const BACKUP_KEY_KNOWN_FLAGS: u32 = BACKUP_KEY_FLAG_VOLATILE | BACKUP_KEY_FLAG_SYMLINK;
@@ -89,6 +91,13 @@ pub struct BackupBlanketTombstonePayload<'a> {
     pub key_guid: Guid,
     pub layer_name: &'a str,
     pub sequence: u64,
+}
+
+/// Parsed TRAILER record payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupTrailerPayload {
+    pub record_count: u64,
+    pub checksum: [u8; BACKUP_TRAILER_CHECKSUM_LEN],
 }
 
 /// Known backup record type vocabulary, preserving unknown extensions.
@@ -408,6 +417,36 @@ pub fn parse_backup_blanket_tombstone_record<'a>(
     parse_backup_blanket_tombstone_payload(limits, record.payload)
 }
 
+/// Parses and validates one TRAILER payload.
+pub fn parse_backup_trailer_payload(payload: &[u8]) -> LcsResult<BackupTrailerPayload> {
+    let mut cursor = BackupPayloadCursor::new(payload);
+    let record_count = cursor.read_u64_le()?;
+    if record_count < 2 {
+        return Err(LcsError::BackupRecordCountTooSmall { record_count });
+    }
+    let checksum_bytes = cursor.read_fixed(BACKUP_TRAILER_CHECKSUM_LEN)?;
+    let mut checksum = [0u8; BACKUP_TRAILER_CHECKSUM_LEN];
+    checksum.copy_from_slice(checksum_bytes);
+    cursor.finish_exact(REG_BACKUP_TRAILER as u16)?;
+
+    Ok(BackupTrailerPayload {
+        record_count,
+        checksum,
+    })
+}
+
+/// Parses a complete TRAILER record frame and validates the payload.
+pub fn parse_backup_trailer_record(frame: &[u8]) -> LcsResult<BackupTrailerPayload> {
+    let record = parse_backup_record_frame(frame)?;
+    if record.kind != BackupRecordKind::Trailer {
+        return Err(LcsError::BackupRecordKindMismatch {
+            expected: REG_BACKUP_TRAILER as u16,
+            actual: record.header.record_type,
+        });
+    }
+    parse_backup_trailer_payload(record.payload)
+}
+
 /// Writes the common backup record header into a caller-provided buffer.
 pub fn write_backup_record_header(
     dst: &mut [u8],
@@ -718,6 +757,37 @@ pub fn write_backup_blanket_tombstone_record_frame(
     );
     write_fixed(payload, &mut offset, layer_name.as_bytes());
     write_fixed(payload, &mut offset, &sequence.to_le_bytes());
+
+    Ok(total_len)
+}
+
+/// Writes a complete TRAILER record frame into a caller-provided buffer.
+pub fn write_backup_trailer_record_frame(
+    dst: &mut [u8],
+    record_count: u64,
+    checksum: [u8; BACKUP_TRAILER_CHECKSUM_LEN],
+) -> LcsResult<usize> {
+    if record_count < 2 {
+        return Err(LcsError::BackupRecordCountTooSmall { record_count });
+    }
+    let total_len = checked_add_len(BACKUP_RECORD_HEADER_LEN, BACKUP_TRAILER_PAYLOAD_LEN)?;
+    let record_len = u32::try_from(total_len).map_err(|_| LcsError::BackupPayloadLengthOverflow)?;
+    if dst.len() < total_len {
+        return Err(LcsError::BackupRecordFrameBufferTooSmall {
+            len: dst.len(),
+            required: total_len,
+        });
+    }
+
+    write_backup_record_header(
+        &mut dst[..BACKUP_RECORD_HEADER_LEN],
+        REG_BACKUP_TRAILER as u16,
+        record_len,
+    )?;
+    let payload = &mut dst[BACKUP_RECORD_HEADER_LEN..total_len];
+    let mut offset = 0usize;
+    write_fixed(payload, &mut offset, &record_count.to_le_bytes());
+    write_fixed(payload, &mut offset, &checksum);
 
     Ok(total_len)
 }
