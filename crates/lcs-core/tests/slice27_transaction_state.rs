@@ -43,6 +43,7 @@ fn transaction_status_maps_active_and_terminal_states() {
     let binding = TransactionBinding {
         source_id: 3,
         hive_name: "Machine",
+        hive_root_guid: [0x11; 16],
     };
     let cases = [
         (
@@ -113,6 +114,7 @@ fn commit_precheck_requires_active_bound_transaction() {
     let binding = TransactionBinding {
         source_id: 9,
         hive_name: "Machine",
+        hive_root_guid: [0x22; 16],
     };
     let commit =
         plan_transaction_commit(TransactionState::ActiveBound(binding)).expect("bound commit");

@@ -122,9 +122,10 @@ pub use symlink::{
 };
 pub use transaction::{
     StartedTransaction, TransactionBinding, TransactionCommitPlan, TransactionId,
-    TransactionIdCounter, TransactionState, TransactionStatusResult, TransactionTerminalErrno,
-    TransactionUseFailure, plan_begin_transaction, plan_transaction_commit, transaction_status,
-    transaction_terminal_failure,
+    TransactionIdCounter, TransactionMutationBindingPlan, TransactionReadPlan, TransactionState,
+    TransactionStatusResult, TransactionTerminalErrno, TransactionUseFailure,
+    plan_begin_transaction, plan_transaction_commit, plan_transaction_mutation_binding,
+    plan_transaction_read, transaction_status, transaction_terminal_failure,
 };
 pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,

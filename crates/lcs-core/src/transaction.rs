@@ -1,3 +1,4 @@
+use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
 use crate::constants::{
     REG_TXN_ABORTED, REG_TXN_ACTIVE_BOUND, REG_TXN_ACTIVE_UNBOUND, REG_TXN_COMMITTED,
@@ -5,6 +6,9 @@ use crate::constants::{
 };
 use crate::error::{LcsError, LcsResult};
 use crate::hives::SourceId;
+use crate::path::validate_hive_name_bytes;
+use crate::resolution::Guid;
+use crate::source::NIL_GUID;
 
 /// Kernel-internal transaction identifier.
 pub type TransactionId = u64;
@@ -14,6 +18,7 @@ pub type TransactionId = u64;
 pub struct TransactionBinding<'a> {
     pub source_id: SourceId,
     pub hive_name: &'a str,
+    pub hive_root_guid: Guid,
 }
 
 /// LCS-visible transaction state.
@@ -49,12 +54,29 @@ pub enum TransactionUseFailure {
     Invalid,
     TimedOut,
     SourceDown,
+    CrossHive,
+    Busy,
+    NotSupported,
 }
 
 /// Source-dispatch-ready commit precheck.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransactionCommitPlan<'a> {
     pub binding: TransactionBinding<'a>,
+}
+
+/// Binding decision for a mutating operation using a transaction fd.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionMutationBindingPlan<'a> {
+    BindNew(TransactionBinding<'a>),
+    UseExisting(TransactionBinding<'a>),
+}
+
+/// Read context selected for a read ioctl with an optional transaction fd.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionReadPlan<'a> {
+    NonTransactional,
+    Transactional(TransactionBinding<'a>),
 }
 
 /// Monotonic non-zero transaction ID allocator.
@@ -171,4 +193,89 @@ pub fn plan_transaction_commit(
         | TransactionState::Committed
         | TransactionState::Aborted => Err(TransactionUseFailure::Invalid),
     }
+}
+
+/// Plans first-bind or existing-bind behavior for transactional mutations.
+pub fn plan_transaction_mutation_binding<'a>(
+    limits: &LcsLimits,
+    state: TransactionState<'a>,
+    target: TransactionBinding<'a>,
+    source_supports_transactions: bool,
+    current_bound_transactions_for_source: usize,
+) -> Result<TransactionMutationBindingPlan<'a>, TransactionUseFailure> {
+    validate_transaction_binding(limits, target).map_err(|_| TransactionUseFailure::Invalid)?;
+    match state {
+        TransactionState::ActiveUnbound => {
+            if !source_supports_transactions {
+                return Err(TransactionUseFailure::NotSupported);
+            }
+            if current_bound_transactions_for_source >= limits.max_bound_transactions_per_source {
+                return Err(TransactionUseFailure::Busy);
+            }
+            Ok(TransactionMutationBindingPlan::BindNew(target))
+        }
+        TransactionState::ActiveBound(existing) => {
+            if same_transaction_binding(limits, existing, target)
+                .map_err(|_| TransactionUseFailure::Invalid)?
+            {
+                Ok(TransactionMutationBindingPlan::UseExisting(existing))
+            } else {
+                Err(TransactionUseFailure::CrossHive)
+            }
+        }
+        TransactionState::Committed | TransactionState::Aborted => {
+            Err(TransactionUseFailure::Invalid)
+        }
+        TransactionState::TimedOut => Err(TransactionUseFailure::TimedOut),
+        TransactionState::SourceDown => Err(TransactionUseFailure::SourceDown),
+    }
+}
+
+/// Plans read behavior when a read ioctl is supplied a transaction fd.
+pub fn plan_transaction_read<'a>(
+    limits: &LcsLimits,
+    state: TransactionState<'a>,
+    target: TransactionBinding<'a>,
+) -> Result<TransactionReadPlan<'a>, TransactionUseFailure> {
+    validate_transaction_binding(limits, target).map_err(|_| TransactionUseFailure::Invalid)?;
+    match state {
+        TransactionState::ActiveUnbound => Ok(TransactionReadPlan::NonTransactional),
+        TransactionState::ActiveBound(existing) => {
+            if same_transaction_binding(limits, existing, target)
+                .map_err(|_| TransactionUseFailure::Invalid)?
+            {
+                Ok(TransactionReadPlan::Transactional(existing))
+            } else {
+                Err(TransactionUseFailure::CrossHive)
+            }
+        }
+        TransactionState::Committed | TransactionState::Aborted => {
+            Err(TransactionUseFailure::Invalid)
+        }
+        TransactionState::TimedOut => Err(TransactionUseFailure::TimedOut),
+        TransactionState::SourceDown => Err(TransactionUseFailure::SourceDown),
+    }
+}
+
+fn validate_transaction_binding(
+    limits: &LcsLimits,
+    binding: TransactionBinding<'_>,
+) -> LcsResult<()> {
+    validate_hive_name_bytes(binding.hive_name.as_bytes(), limits)?;
+    if binding.hive_root_guid == NIL_GUID {
+        return Err(LcsError::NilHiveRootGuid);
+    }
+    Ok(())
+}
+
+fn same_transaction_binding(
+    limits: &LcsLimits,
+    left: TransactionBinding<'_>,
+    right: TransactionBinding<'_>,
+) -> LcsResult<bool> {
+    validate_transaction_binding(limits, left)?;
+    validate_transaction_binding(limits, right)?;
+    Ok(left.source_id == right.source_id
+        && left.hive_root_guid == right.hive_root_guid
+        && casefold_eq(left.hive_name, right.hive_name))
 }
