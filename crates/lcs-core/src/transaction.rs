@@ -79,6 +79,28 @@ pub enum TransactionReadPlan<'a> {
     Transactional(TransactionBinding<'a>),
 }
 
+/// Transaction lifetime event that determines mutation-log side effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionCompletionEvent {
+    CommitSucceeded,
+    ExplicitAbort,
+    TimeoutBeforeCommitDispatch,
+    SourceDownCancellation,
+    CommitFailed,
+    CommitRequestTimedOutAfterDispatch,
+    LateCommitSucceeded,
+    LateCommitFailed,
+    SourceConnectionTornDownAfterCommitTimeout,
+}
+
+/// Kernel-owned transaction mutation-log disposition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionKernelEffectsPlan {
+    ApplyMutationLogAndEmitCommitEffects,
+    DiscardMutationLogWithoutEvents,
+    RetainMutationLogForLateResponse,
+}
+
 /// Monotonic non-zero transaction ID allocator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransactionIdCounter {
@@ -254,6 +276,29 @@ pub fn plan_transaction_read<'a>(
         }
         TransactionState::TimedOut => Err(TransactionUseFailure::TimedOut),
         TransactionState::SourceDown => Err(TransactionUseFailure::SourceDown),
+    }
+}
+
+/// Plans transaction mutation-log effects after a terminal or pending commit event.
+pub fn plan_transaction_completion_effects(
+    event: TransactionCompletionEvent,
+) -> TransactionKernelEffectsPlan {
+    match event {
+        TransactionCompletionEvent::CommitSucceeded
+        | TransactionCompletionEvent::LateCommitSucceeded => {
+            TransactionKernelEffectsPlan::ApplyMutationLogAndEmitCommitEffects
+        }
+        TransactionCompletionEvent::CommitRequestTimedOutAfterDispatch => {
+            TransactionKernelEffectsPlan::RetainMutationLogForLateResponse
+        }
+        TransactionCompletionEvent::ExplicitAbort
+        | TransactionCompletionEvent::TimeoutBeforeCommitDispatch
+        | TransactionCompletionEvent::SourceDownCancellation
+        | TransactionCompletionEvent::CommitFailed
+        | TransactionCompletionEvent::LateCommitFailed
+        | TransactionCompletionEvent::SourceConnectionTornDownAfterCommitTimeout => {
+            TransactionKernelEffectsPlan::DiscardMutationLogWithoutEvents
+        }
     }
 }
 

@@ -133,6 +133,19 @@ pub enum WatchDispatchDecision<'a> {
     SuppressedByDepthLimit { depth: usize, max: usize },
 }
 
+/// Per-watcher event-generation policy for one transaction commit batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionWatchBurstPlan {
+    NoEvents,
+    EmitIndividualEvents {
+        event_count: usize,
+    },
+    EmitOverflowOnly {
+        attempted_event_count: usize,
+        max_event_burst: usize,
+    },
+}
+
 /// Validates the REG_IOC_NOTIFY filter bitmask.
 pub fn validate_notify_filter(filter: u32) -> LcsResult<u32> {
     let unknown = filter & !REG_NOTIFY_ALL;
@@ -386,6 +399,27 @@ pub fn plan_watch_dispatch<'a>(
         subtree_record: true,
         relative_path_components: &mutation.path_components[watched_index + 1..=changed_index],
     }))
+}
+
+/// Plans transaction commit watch emission after per-watcher event counting.
+pub fn plan_transaction_watch_burst(
+    limits: &LcsLimits,
+    event_count: usize,
+) -> LcsResult<TransactionWatchBurstPlan> {
+    let max_event_burst = limits.max_transaction_watch_event_burst;
+    if max_event_burst == 0 {
+        return Err(LcsError::InvalidTransactionWatchBurstLimit);
+    }
+    if event_count == 0 {
+        return Ok(TransactionWatchBurstPlan::NoEvents);
+    }
+    if event_count > max_event_burst {
+        return Ok(TransactionWatchBurstPlan::EmitOverflowOnly {
+            attempted_event_count: event_count,
+            max_event_burst,
+        });
+    }
+    Ok(TransactionWatchBurstPlan::EmitIndividualEvents { event_count })
 }
 
 fn validate_watch_mutation_context(mutation: &WatchMutationContext<'_>) -> LcsResult<()> {

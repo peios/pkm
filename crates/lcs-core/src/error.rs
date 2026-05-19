@@ -284,6 +284,8 @@ pub enum LcsError {
     InvalidWatchQueueLimit,
     /// A watch queue snapshot was internally inconsistent.
     InvalidWatchQueueState,
+    /// A transaction watch burst limit was zero.
+    InvalidTransactionWatchBurstLimit,
     /// Captured watch dispatch ancestry was empty or had mismatched GUID/path lengths.
     InvalidWatchAncestry,
     /// The changed key GUID was not the last GUID in the captured mutation ancestry.

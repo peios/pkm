@@ -121,11 +121,13 @@ pub use symlink::{
     validate_symlink_target_bytes,
 };
 pub use transaction::{
-    StartedTransaction, TransactionBinding, TransactionCommitPlan, TransactionId,
-    TransactionIdCounter, TransactionMutationBindingPlan, TransactionReadPlan, TransactionState,
-    TransactionStatusResult, TransactionTerminalErrno, TransactionUseFailure,
-    plan_begin_transaction, plan_transaction_commit, plan_transaction_mutation_binding,
-    plan_transaction_read, transaction_status, transaction_terminal_failure,
+    StartedTransaction, TransactionBinding, TransactionCommitPlan, TransactionCompletionEvent,
+    TransactionId, TransactionIdCounter, TransactionKernelEffectsPlan,
+    TransactionMutationBindingPlan, TransactionReadPlan, TransactionState, TransactionStatusResult,
+    TransactionTerminalErrno, TransactionUseFailure, plan_begin_transaction,
+    plan_transaction_commit, plan_transaction_completion_effects,
+    plan_transaction_mutation_binding, plan_transaction_read, transaction_status,
+    transaction_terminal_failure,
 };
 pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,
@@ -137,10 +139,11 @@ pub use value::{
     validate_value_write_type,
 };
 pub use watch::{
-    KeyWatchState, QueuedWatchEvent, WatchDelivery, WatchDispatchDecision, WatchEventCategory,
-    WatchEventRecordPlan, WatchEventRecordRequest, WatchEventRecordShape, WatchMutationContext,
-    WatchNotifyArgs, WatchNotifyPlan, WatchQueueInsertPlan, WatchQueueState, WatchReadBatchPlan,
-    WatcherView, plan_watch_dispatch, plan_watch_event_record, plan_watch_notify,
+    KeyWatchState, QueuedWatchEvent, TransactionWatchBurstPlan, WatchDelivery,
+    WatchDispatchDecision, WatchEventCategory, WatchEventRecordPlan, WatchEventRecordRequest,
+    WatchEventRecordShape, WatchMutationContext, WatchNotifyArgs, WatchNotifyPlan,
+    WatchQueueInsertPlan, WatchQueueState, WatchReadBatchPlan, WatcherView,
+    plan_transaction_watch_burst, plan_watch_dispatch, plan_watch_event_record, plan_watch_notify,
     plan_watch_queue_insert, plan_watch_read_batch, validate_abi_bool, validate_notify_filter,
     validate_notify_reserved, watch_event_category, watch_event_matches_filter,
 };
