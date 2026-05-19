@@ -25,6 +25,13 @@ pub enum SymlinkDefaultValueResolution<'a> {
     Failed(SymlinkResolutionErrno),
 }
 
+/// Symlink recursion-depth result before integer errno translation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SymlinkFollowDepthResolution {
+    Advanced(usize),
+    Failed(SymlinkResolutionErrno),
+}
+
 /// Validates the effective default value of a symlink key and returns its target path.
 pub fn validate_symlink_default_value<'a>(
     limits: &LcsLimits,
@@ -89,4 +96,18 @@ pub fn validate_symlink_follow_depth(current_depth: usize, limits: &LcsLimits) -
         });
     }
     Ok(next_depth)
+}
+
+/// Classifies symlink follow-depth validation for caller-facing resolution.
+pub fn classify_symlink_follow_depth(
+    current_depth: usize,
+    limits: &LcsLimits,
+) -> SymlinkFollowDepthResolution {
+    match validate_symlink_follow_depth(current_depth, limits) {
+        Ok(next_depth) => SymlinkFollowDepthResolution::Advanced(next_depth),
+        Err(LcsError::SymlinkDepthExceeded { .. }) => {
+            SymlinkFollowDepthResolution::Failed(SymlinkResolutionErrno::Eloop)
+        }
+        Err(_) => SymlinkFollowDepthResolution::Failed(SymlinkResolutionErrno::Einval),
+    }
 }
