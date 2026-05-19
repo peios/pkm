@@ -258,6 +258,8 @@ pub enum LcsError {
     },
     /// The per-source RSI request id allocator cannot advance without reusing an id.
     RsiRequestIdOverflow,
+    /// A length-prefixed RSI payload field would overflow host arithmetic.
+    RsiPayloadLengthOverflow,
     /// An ioctl command number is outside the PSD-005 registry ioctl vocabulary.
     UnknownRegistryIoctl(u8),
     /// A security descriptor component selector was zero.

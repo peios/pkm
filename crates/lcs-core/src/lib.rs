@@ -116,14 +116,15 @@ pub use resolution::{
 };
 pub use rsi::{
     RsiDispatchedWaitPlan, RsiLateResponseRecordPlan, RsiLateResponseRecordState,
-    RsiMalformedProtocolReason, RsiMappedErrno, RsiPollPlan, RsiReadPlan, RsiRequestHeader,
-    RsiRequestId, RsiRequestIdCounter, RsiResponseHeader, RsiRetainedRequest,
-    RsiSlotReservationPlan, RsiStatus, RsiStatusOutcome, RsiTransactionBeginStatusPlan,
-    RsiTransactionBeginUse, RsiValidatedResponse, classify_rsi_status_code, map_rsi_status,
-    parse_rsi_request_header, parse_rsi_response_header, parse_rsi_status,
-    plan_rsi_dispatched_wait, plan_rsi_late_response_record, plan_rsi_slot_reservation,
-    plan_rsi_source_poll, plan_rsi_source_read, plan_rsi_transaction_begin_status,
-    rsi_response_op_code, validate_rsi_request_op_code, validate_rsi_response_for_request,
+    RsiLengthPrefixedField, RsiMalformedProtocolReason, RsiMappedErrno, RsiPayloadCursor,
+    RsiPollPlan, RsiReadPlan, RsiRequestHeader, RsiRequestId, RsiRequestIdCounter,
+    RsiResponseHeader, RsiRetainedRequest, RsiSlotReservationPlan, RsiStatus, RsiStatusOutcome,
+    RsiTrailingOptionalFieldsPlan, RsiTransactionBeginStatusPlan, RsiTransactionBeginUse,
+    RsiValidatedResponse, classify_rsi_status_code, map_rsi_status, parse_rsi_request_header,
+    parse_rsi_response_header, parse_rsi_status, plan_rsi_dispatched_wait,
+    plan_rsi_late_response_record, plan_rsi_slot_reservation, plan_rsi_source_poll,
+    plan_rsi_source_read, plan_rsi_transaction_begin_status, rsi_response_op_code,
+    validate_rsi_request_op_code, validate_rsi_response_for_request,
 };
 pub use sequence::SequenceCounter;
 pub use source::{

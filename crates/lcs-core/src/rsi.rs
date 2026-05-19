@@ -43,6 +43,69 @@ pub struct RsiValidatedResponse {
     pub status: RsiStatus,
 }
 
+/// One length-prefixed RSI string or byte-array field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiLengthPrefixedField<'a> {
+    pub len: u32,
+    pub data: &'a [u8],
+}
+
+/// Explicit plan for ignored forward-compatible trailing request fields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiTrailingOptionalFieldsPlan {
+    pub ignored_trailing_len: usize,
+}
+
+/// Cursor for parsing fixed-order RSI payload fields from a framed message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiPayloadCursor<'a> {
+    payload: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> RsiPayloadCursor<'a> {
+    pub const fn new(payload: &'a [u8]) -> Self {
+        Self { payload, offset: 0 }
+    }
+
+    pub const fn position(&self) -> usize {
+        self.offset
+    }
+
+    pub const fn remaining_len(&self) -> usize {
+        self.payload.len() - self.offset
+    }
+
+    pub fn read_fixed(&mut self, len: usize) -> LcsResult<&'a [u8]> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or(LcsError::RsiPayloadLengthOverflow)?;
+        if end > self.payload.len() {
+            return Err(LcsError::RsiMessageTooShort {
+                len: self.payload.len(),
+                min: end,
+            });
+        }
+        let data = &self.payload[self.offset..end];
+        self.offset = end;
+        Ok(data)
+    }
+
+    pub fn read_length_prefixed(&mut self) -> LcsResult<RsiLengthPrefixedField<'a>> {
+        let len_bytes = self.read_fixed(4)?;
+        let len = u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
+        let data = self.read_fixed(len as usize)?;
+        Ok(RsiLengthPrefixedField { len, data })
+    }
+
+    pub fn finish_allowing_trailing_optional_fields(&self) -> RsiTrailingOptionalFieldsPlan {
+        RsiTrailingOptionalFieldsPlan {
+            ignored_trailing_len: self.remaining_len(),
+        }
+    }
+}
+
 /// Retained-record lookup result for a late response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RsiLateResponseRecordState {
