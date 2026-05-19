@@ -17,6 +17,7 @@ pub mod ioctl;
 pub mod key;
 pub mod key_path;
 pub mod layers;
+pub mod maintenance;
 pub mod metadata;
 pub mod output_buffer;
 pub mod path;
@@ -71,6 +72,7 @@ pub use layers::{
     BASE_LAYER_VIEW, LayerMetadataEntry, for_each_effective_layer, normalize_layer_target,
     validate_layer_resolution_context, validate_layer_views, validate_private_layer_set,
 };
+pub use maintenance::{KeyFdHiveView, PlannedFlush, plan_flush_for_key_fd};
 pub use metadata::{
     HiveGenerationCounter, QueryKeyInfoInput, QueryKeyInfoOutputBufferDecision, QueryKeyInfoResult,
     query_key_info_result, validate_query_key_info_output_buffer,

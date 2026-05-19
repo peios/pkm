@@ -288,6 +288,8 @@ pub enum LcsError {
     InvalidWatchAncestry,
     /// The changed key GUID was not the last GUID in the captured mutation ancestry.
     WatchChangedKeyNotLastAncestor,
+    /// A maintenance operation targeted a hive whose source is currently unavailable.
+    HiveSourceUnavailable,
 }
 
 /// Standard result type for the LCS semantic core.
