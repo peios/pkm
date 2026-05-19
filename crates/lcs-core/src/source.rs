@@ -64,6 +64,17 @@ pub struct SourceRegistrationPlan {
     pub source_next_sequence: u64,
 }
 
+/// Planned global sequence-counter update for a source registration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceRegistrationSequencePlan {
+    pub previous_next_sequence: Option<u64>,
+    pub source_next_sequence: u64,
+    pub effective_next_sequence: u64,
+    pub initializes_counter: bool,
+    pub advances_existing_counter: bool,
+    pub source_may_be_made_active: bool,
+}
+
 /// Kernel-side effects when an active source connection is lost.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceDisconnectPlan {
@@ -205,6 +216,43 @@ pub fn plan_source_restart_key_fd_operation(
         affected_by_resume: true,
         dispatch_to_source: true,
     })
+}
+
+/// Plans the global sequence-counter effect of a source registration.
+pub fn plan_source_registration_sequence_update(
+    current_next_sequence: Option<u64>,
+    source_max_sequence: u64,
+) -> LcsResult<SourceRegistrationSequencePlan> {
+    let source_next_sequence = source_max_sequence
+        .checked_add(1)
+        .ok_or(LcsError::SequenceOverflow)?;
+    let effective_next_sequence = current_next_sequence
+        .map(|current| current.max(source_next_sequence))
+        .unwrap_or(source_next_sequence);
+
+    Ok(SourceRegistrationSequencePlan {
+        previous_next_sequence: current_next_sequence,
+        source_next_sequence,
+        effective_next_sequence,
+        initializes_counter: current_next_sequence.is_none(),
+        advances_existing_counter: current_next_sequence
+            .map(|current| effective_next_sequence > current)
+            .unwrap_or(false),
+        source_may_be_made_active: true,
+    })
+}
+
+/// Applies a source registration sequence update to an already initialized counter.
+pub fn apply_source_registration_sequence_update(
+    counter: &mut SequenceCounter,
+    source_max_sequence: u64,
+) -> LcsResult<SourceRegistrationSequencePlan> {
+    let plan = plan_source_registration_sequence_update(
+        Some(counter.next_sequence()),
+        source_max_sequence,
+    )?;
+    counter.advance_past_source_max(source_max_sequence)?;
+    Ok(plan)
 }
 
 /// Validates a REG_SRC_REGISTER request against existing source slots.
