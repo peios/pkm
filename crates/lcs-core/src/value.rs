@@ -7,6 +7,7 @@ use crate::constants::{
 use crate::error::{LcsError, LcsResult};
 use crate::path::{validate_layer_name_bytes, validate_value_name_bytes};
 use crate::resolution::Guid;
+use crate::sequence::SequenceCounter;
 use crate::source::NIL_GUID;
 
 /// User-visible Windows registry value types accepted by LCS.
@@ -71,6 +72,18 @@ pub struct ValueWriteRequest<'a> {
     pub expected_sequence: Option<u64>,
 }
 
+/// Caller-visible value write fields before LCS sequence allocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ValueWriteInput<'a> {
+    pub key_guid: Guid,
+    pub name: &'a str,
+    pub layer: &'a str,
+    pub value_type: u32,
+    pub data: &'a [u8],
+    pub explicit_tombstone_operation: bool,
+    pub expected_sequence: Option<u64>,
+}
+
 /// Validated value write fields.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ValidatedValueWrite<'a> {
@@ -81,6 +94,13 @@ pub struct ValidatedValueWrite<'a> {
     pub value_type: ValidatedValueType,
     pub data: &'a [u8],
     pub expected_sequence: Option<u64>,
+}
+
+/// Source-dispatch-ready value write plus direct key side effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlannedValueWrite<'a> {
+    pub write: ValidatedValueWrite<'a>,
+    pub updates_last_write_time: bool,
 }
 
 /// LCS-produced value delete before source dispatch.
@@ -145,6 +165,34 @@ pub fn validate_value_write_request<'a>(
         value_type,
         data: request.data,
         expected_sequence: request.expected_sequence,
+    })
+}
+
+/// Validates a caller value write and assigns the next global sequence number.
+pub fn plan_value_write<'a>(
+    limits: &LcsLimits,
+    sequence_counter: &mut SequenceCounter,
+    input: &ValueWriteInput<'a>,
+) -> LcsResult<PlannedValueWrite<'a>> {
+    let preallocation_request = ValueWriteRequest {
+        key_guid: input.key_guid,
+        name: input.name,
+        layer: input.layer,
+        sequence: 0,
+        value_type: input.value_type,
+        data: input.data,
+        explicit_tombstone_operation: input.explicit_tombstone_operation,
+        expected_sequence: input.expected_sequence,
+    };
+    let validated = validate_value_write_request(limits, &preallocation_request)?;
+    let sequence = sequence_counter.allocate()?;
+
+    Ok(PlannedValueWrite {
+        write: ValidatedValueWrite {
+            sequence,
+            ..validated
+        },
+        updates_last_write_time: true,
     })
 }
 

@@ -102,10 +102,11 @@ pub use symlink::{
     validate_symlink_target_bytes,
 };
 pub use value::{
-    BlanketTombstoneAction, BlanketTombstoneRequest, RegistryValueType, ValidatedBlanketTombstone,
-    ValidatedValueDelete, ValidatedValueType, ValidatedValueWrite, ValueDeleteRequest,
-    ValueWriteRequest, validate_blanket_tombstone_request, validate_value_data_len,
-    validate_value_delete_request, validate_value_write_request, validate_value_write_type,
+    BlanketTombstoneAction, BlanketTombstoneRequest, PlannedValueWrite, RegistryValueType,
+    ValidatedBlanketTombstone, ValidatedValueDelete, ValidatedValueType, ValidatedValueWrite,
+    ValueDeleteRequest, ValueWriteInput, ValueWriteRequest, plan_value_write,
+    validate_blanket_tombstone_request, validate_value_data_len, validate_value_delete_request,
+    validate_value_write_request, validate_value_write_type,
 };
 
 /// Returns a stable value from the staged crate so integration build steps can
