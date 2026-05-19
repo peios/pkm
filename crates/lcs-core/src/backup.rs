@@ -520,6 +520,21 @@ pub struct BackupStreamOrderingSummary {
     pub unknown_count: u64,
 }
 
+/// Restore dispatch disposition for one framed backup record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupRestoreRecordDispatchDisposition {
+    Known(BackupRecordKind),
+    SkipUnknown(BackupRestoreUnknownRecordSkipPlan),
+}
+
+/// Unknown backup record skipped by restore after common framing validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreUnknownRecordSkipPlan {
+    pub record_type: u16,
+    pub record_len: u32,
+    pub payload_len: usize,
+}
+
 /// Known backup record type vocabulary, preserving unknown extensions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupRecordKind {
@@ -582,6 +597,24 @@ pub fn parse_backup_record_frame(frame: &[u8]) -> LcsResult<BackupRecordFrame<'_
         kind: BackupRecordKind::from_code(header.record_type),
         payload: &frame[BACKUP_RECORD_HEADER_LEN..],
     })
+}
+
+/// Classifies one framed backup record for restore dispatch.
+pub fn plan_backup_restore_record_dispatch(
+    record: BackupRecordFrame<'_>,
+) -> BackupRestoreRecordDispatchDisposition {
+    match record.kind {
+        BackupRecordKind::Unknown(record_type) => {
+            BackupRestoreRecordDispatchDisposition::SkipUnknown(
+                BackupRestoreUnknownRecordSkipPlan {
+                    record_type,
+                    record_len: record.header.record_len,
+                    payload_len: record.payload.len(),
+                },
+            )
+        }
+        known => BackupRestoreRecordDispatchDisposition::Known(known),
+    }
 }
 
 /// Parses and validates the HEADER payload.
