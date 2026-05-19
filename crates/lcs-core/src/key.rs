@@ -1,11 +1,13 @@
 use crate::access::registry_fd_has_right;
 use crate::config::LcsLimits;
 use crate::constants::{
-    KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, REG_OPTION_CREATE_LINK, REG_OPTION_VOLATILE,
+    KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, REG_CREATED_NEW, REG_OPENED_EXISTING,
+    REG_OPTION_CREATE_LINK, REG_OPTION_VOLATILE,
 };
 use crate::error::{LcsError, LcsResult};
 use crate::path::validate_key_component_bytes;
 use crate::resolution::Guid;
+use crate::rsi::RsiStatus;
 use crate::source::NIL_GUID;
 
 const REG_CREATE_KEY_KNOWN_FLAGS: u32 = REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK;
@@ -54,6 +56,34 @@ pub struct KeyCreatePlan<'a> {
     pub parent_guid: Guid,
     pub volatile: bool,
     pub symlink: bool,
+}
+
+/// Result of resolving a `reg_create_key` target path before creation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegCreateKeyTarget {
+    Exists,
+    Missing,
+}
+
+/// High-level `reg_create_key` behavior selected after target resolution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegCreateKeyResolutionPlan {
+    OpenExisting {
+        disposition: u32,
+        ignore_layer_parameter: bool,
+    },
+    CreateMissing {
+        disposition: u32,
+        use_layer_parameter: bool,
+    },
+}
+
+/// Source create result handling for `reg_create_key`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegCreateKeySourceResultPlan {
+    CreatedNew { disposition: u32 },
+    RetryOpenExisting { disposition: u32 },
+    PropagateSourceStatus(RsiStatus),
 }
 
 /// Validates immutable source-returned key record metadata.
@@ -112,6 +142,33 @@ pub fn validate_key_create_request<'a>(
         volatile: options.volatile,
         symlink: options.symlink,
     })
+}
+
+/// Plans `reg_create_key` behavior after target path resolution.
+pub fn plan_reg_create_key_resolution(target: RegCreateKeyTarget) -> RegCreateKeyResolutionPlan {
+    match target {
+        RegCreateKeyTarget::Exists => RegCreateKeyResolutionPlan::OpenExisting {
+            disposition: REG_OPENED_EXISTING,
+            ignore_layer_parameter: true,
+        },
+        RegCreateKeyTarget::Missing => RegCreateKeyResolutionPlan::CreateMissing {
+            disposition: REG_CREATED_NEW,
+            use_layer_parameter: true,
+        },
+    }
+}
+
+/// Plans handling of the source create response for `reg_create_key`.
+pub fn plan_reg_create_key_source_result(status: RsiStatus) -> RegCreateKeySourceResultPlan {
+    match status {
+        RsiStatus::Ok => RegCreateKeySourceResultPlan::CreatedNew {
+            disposition: REG_CREATED_NEW,
+        },
+        RsiStatus::AlreadyExists => RegCreateKeySourceResultPlan::RetryOpenExisting {
+            disposition: REG_OPENED_EXISTING,
+        },
+        other => RegCreateKeySourceResultPlan::PropagateSourceStatus(other),
+    }
 }
 
 /// Validates the additional gates for creating a symlink key.

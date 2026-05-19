@@ -67,8 +67,9 @@ pub use ioctl::{
 };
 pub use key::{
     KeyCreateOptions, KeyCreatePlan, KeyCreateRequest, KeyParent, KeyRecordView,
-    validate_key_create_flags, validate_key_create_request, validate_key_record,
-    validate_symlink_create_authority,
+    RegCreateKeyResolutionPlan, RegCreateKeySourceResultPlan, RegCreateKeyTarget,
+    plan_reg_create_key_resolution, plan_reg_create_key_source_result, validate_key_create_flags,
+    validate_key_create_request, validate_key_record, validate_symlink_create_authority,
 };
 pub use key_path::{
     DeleteKeyInput, DerivedKeyPathMutation, HideKeyInput, KeyFdNamespaceView, KeyPathMutationInput,
