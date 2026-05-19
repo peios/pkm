@@ -10,7 +10,9 @@ use crate::constants::{
     RSI_WRITE_KEY,
 };
 use crate::error::{LcsError, LcsResult};
-use crate::path::{validate_key_component_bytes, validate_layer_name_bytes};
+use crate::path::{
+    validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
+};
 use crate::resolution::Guid;
 
 pub type RsiRequestId = u64;
@@ -1461,6 +1463,32 @@ pub fn validate_rsi_enum_children_path_response_names(
             validate_layer_name_bytes(entry.layer_name.data, limits)?;
             Ok(())
         })
+    })
+}
+
+/// Validates read-key response string fields before key metadata use.
+pub fn validate_rsi_read_key_response_names(
+    payload: &RsiReadKeySuccessResponsePayload<'_>,
+    limits: &LcsLimits,
+) -> LcsResult<()> {
+    validate_key_component_bytes(payload.name.data, limits)?;
+    Ok(())
+}
+
+/// Validates query-values response string fields before value resolution.
+pub fn validate_rsi_query_values_response_names(
+    payload: &RsiQueryValuesSuccessResponsePayload<'_>,
+    limits: &LcsLimits,
+) -> LcsResult<()> {
+    payload.for_each_value_entry(|entry| {
+        validate_value_name_bytes(entry.value_name.data, limits)?;
+        validate_layer_name_bytes(entry.layer_name.data, limits)?;
+        Ok(())
+    })?;
+
+    payload.for_each_blanket_entry(|entry| {
+        validate_layer_name_bytes(entry.layer_name.data, limits)?;
+        Ok(())
     })
 }
 
