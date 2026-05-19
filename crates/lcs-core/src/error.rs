@@ -463,6 +463,11 @@ pub enum LcsError {
         /// Colliding remapped key GUID.
         guid: [u8; 16],
     },
+    /// A restore PATH_ENTRY parent GUID did not refer to the remapped subtree.
+    BackupRestoreParentGuidOutsideSubtree {
+        /// Remapped parent GUID.
+        parent_guid: [u8; 16],
+    },
     /// A length-prefixed RSI payload field would overflow host arithmetic.
     RsiPayloadLengthOverflow,
     /// An RSI_WRITE_KEY request field mask contained bits not defined by PSD-005.

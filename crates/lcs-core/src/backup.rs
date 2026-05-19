@@ -98,6 +98,16 @@ pub struct BackupPathEntryPayload<'a> {
     pub sequence: u64,
 }
 
+/// Restore PATH_ENTRY after applying HEADER.RootGUID remapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestorePathEntry<'a> {
+    pub parent_guid: Guid,
+    pub child_name: &'a str,
+    pub target: PathTarget,
+    pub layer_name: &'a str,
+    pub sequence: u64,
+}
+
 /// Parsed VALUE record payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupValuePayload<'a> {
@@ -556,6 +566,43 @@ pub fn parse_backup_path_entry_record<'a>(
         });
     }
     parse_backup_path_entry_payload(limits, record.payload)
+}
+
+/// Remaps and validates a restore PATH_ENTRY parent before source dispatch.
+pub fn remap_backup_restore_path_entry<'a>(
+    entry: BackupPathEntryPayload<'a>,
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    processed_non_root_key_guids: &[Guid],
+) -> LcsResult<BackupRestorePathEntry<'a>> {
+    if header_root_guid == NIL_GUID || target_root_guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+
+    let parent_guid =
+        remap_backup_restore_guid(entry.parent_guid, header_root_guid, target_root_guid);
+    if parent_guid != target_root_guid
+        && !guid_slice_contains(processed_non_root_key_guids, parent_guid)
+    {
+        return Err(LcsError::BackupRestoreParentGuidOutsideSubtree { parent_guid });
+    }
+
+    let target = match entry.target {
+        PathTarget::Guid(guid) => PathTarget::Guid(remap_backup_restore_guid(
+            guid,
+            header_root_guid,
+            target_root_guid,
+        )),
+        PathTarget::Hidden => PathTarget::Hidden,
+    };
+
+    Ok(BackupRestorePathEntry {
+        parent_guid,
+        child_name: entry.child_name,
+        target,
+        layer_name: entry.layer_name,
+        sequence: entry.sequence,
+    })
 }
 
 /// Parses and validates one VALUE payload.
