@@ -126,3 +126,148 @@ type Kmes_emit_entry struct {
 	Payload_len    uint32
 	_              [4]uint8
 }
+type Reg_backup_args struct {
+	Output_fd int32
+}
+type Reg_blanket_tombstone_args struct {
+	Layer_len uint32
+	_         uint32
+	Layer_ptr uint64
+	Set       uint8
+	_         [3]uint8
+	Txn_fd    int32
+}
+type Reg_delete_key_args struct {
+	Layer_len uint32
+	_         uint32
+	Layer_ptr uint64
+	Txn_fd    int32
+	_         uint32
+}
+type Reg_delete_value_args struct {
+	Name_len  uint32
+	_         uint32
+	Name_ptr  uint64
+	Layer_len uint32
+	_         uint32
+	Layer_ptr uint64
+	Txn_fd    int32
+	_         uint32
+}
+type Reg_enum_subkey_args struct {
+	Index           uint32
+	Name_len        uint32
+	Name_ptr        uint64
+	Last_write_time uint64
+	Subkey_count    uint32
+	Value_count     uint32
+	Txn_fd          int32
+	_               uint32
+}
+type Reg_enum_value_args struct {
+	Index    uint32
+	Name_len uint32
+	Name_ptr uint64
+	Type     uint32
+	Data_len uint32
+	Data_ptr uint64
+	Txn_fd   int32
+	_        uint32
+}
+type Reg_get_security_args struct {
+	Security_info uint32
+	Sd_len        uint32
+	Sd_ptr        uint64
+}
+type Reg_hide_key_args struct {
+	Layer_len uint32
+	_         uint32
+	Layer_ptr uint64
+	Txn_fd    int32
+	_         uint32
+}
+type Reg_notify_args struct {
+	Filter  uint32
+	Subtree uint8
+	_       [3]uint8
+}
+type Reg_query_key_info_args struct {
+	Name_len            uint32
+	_                   uint32
+	Name_ptr            uint64
+	Last_write_time     uint64
+	Subkey_count        uint32
+	Value_count         uint32
+	Max_subkey_name_len uint32
+	Max_value_name_len  uint32
+	Max_value_data_size uint32
+	Sd_size             uint32
+	Volatile_key        uint8
+	Symlink             uint8
+	_                   [6]uint8
+	Hive_generation     uint64
+}
+type Reg_query_value_args struct {
+	Name_len      uint32
+	_             uint32
+	Name_ptr      uint64
+	Type          uint32
+	Data_len      uint32
+	Txn_fd        int32
+	Layer_buf_len uint32
+	Data_ptr      uint64
+	Sequence      uint64
+	Layer_len     uint32
+	_             uint32
+	Layer_ptr     uint64
+}
+type Reg_query_values_batch_args struct {
+	Buf_len uint32
+	Count   uint32
+	Buf_ptr uint64
+	Txn_fd  int32
+	_       uint32
+}
+type Reg_restore_args struct {
+	Input_fd int32
+}
+type Reg_set_security_args struct {
+	Security_info uint32
+	Sd_len        uint32
+	Sd_ptr        uint64
+	Txn_fd        int32
+	_             uint32
+}
+type Reg_set_value_args struct {
+	Name_len     uint32
+	_            uint32
+	Name_ptr     uint64
+	Type         uint32
+	Data_len     uint32
+	Data_ptr     uint64
+	Layer_len    uint32
+	_            uint32
+	Layer_ptr    uint64
+	Txn_fd       int32
+	_            uint32
+	Expected_seq uint64
+}
+type Reg_src_hive_entry struct {
+	Name_len   uint32
+	_          uint32
+	Name_ptr   uint64
+	Root_guid  [16]uint8
+	Flags      uint32
+	_          uint32
+	Scope_guid [16]uint8
+}
+type Reg_src_register_args struct {
+	Hive_count   uint32
+	_            uint32
+	Max_sequence uint64
+	Hives_ptr    uint64
+}
+type Reg_txn_status_args struct {
+	State          uint32
+	Terminal_errno int32
+}

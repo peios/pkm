@@ -439,3 +439,502 @@ const _: () = {
     ["Offset of field: kmes_emit_entry::_pad1"]
         [::core::mem::offset_of!(kmes_emit_entry, _pad1) - 28usize];
 };
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_query_value_args {
+    pub name_len: __u32,
+    pub _pad0: __u32,
+    pub name_ptr: __u64,
+    pub type_: __u32,
+    pub data_len: __u32,
+    pub txn_fd: __s32,
+    pub layer_buf_len: __u32,
+    pub data_ptr: __u64,
+    pub sequence: __u64,
+    pub layer_len: __u32,
+    pub _pad1: __u32,
+    pub layer_ptr: __u64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_query_value_args"][::core::mem::size_of::<reg_query_value_args>() - 64usize];
+    ["Alignment of reg_query_value_args"][::core::mem::align_of::<reg_query_value_args>() - 8usize];
+    ["Offset of field: reg_query_value_args::name_len"]
+        [::core::mem::offset_of!(reg_query_value_args, name_len) - 0usize];
+    ["Offset of field: reg_query_value_args::_pad0"]
+        [::core::mem::offset_of!(reg_query_value_args, _pad0) - 4usize];
+    ["Offset of field: reg_query_value_args::name_ptr"]
+        [::core::mem::offset_of!(reg_query_value_args, name_ptr) - 8usize];
+    ["Offset of field: reg_query_value_args::type_"]
+        [::core::mem::offset_of!(reg_query_value_args, type_) - 16usize];
+    ["Offset of field: reg_query_value_args::data_len"]
+        [::core::mem::offset_of!(reg_query_value_args, data_len) - 20usize];
+    ["Offset of field: reg_query_value_args::txn_fd"]
+        [::core::mem::offset_of!(reg_query_value_args, txn_fd) - 24usize];
+    ["Offset of field: reg_query_value_args::layer_buf_len"]
+        [::core::mem::offset_of!(reg_query_value_args, layer_buf_len) - 28usize];
+    ["Offset of field: reg_query_value_args::data_ptr"]
+        [::core::mem::offset_of!(reg_query_value_args, data_ptr) - 32usize];
+    ["Offset of field: reg_query_value_args::sequence"]
+        [::core::mem::offset_of!(reg_query_value_args, sequence) - 40usize];
+    ["Offset of field: reg_query_value_args::layer_len"]
+        [::core::mem::offset_of!(reg_query_value_args, layer_len) - 48usize];
+    ["Offset of field: reg_query_value_args::_pad1"]
+        [::core::mem::offset_of!(reg_query_value_args, _pad1) - 52usize];
+    ["Offset of field: reg_query_value_args::layer_ptr"]
+        [::core::mem::offset_of!(reg_query_value_args, layer_ptr) - 56usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_set_value_args {
+    pub name_len: __u32,
+    pub _pad0: __u32,
+    pub name_ptr: __u64,
+    pub type_: __u32,
+    pub data_len: __u32,
+    pub data_ptr: __u64,
+    pub layer_len: __u32,
+    pub _pad1: __u32,
+    pub layer_ptr: __u64,
+    pub txn_fd: __s32,
+    pub _pad2: __u32,
+    pub expected_seq: __u64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_set_value_args"][::core::mem::size_of::<reg_set_value_args>() - 64usize];
+    ["Alignment of reg_set_value_args"][::core::mem::align_of::<reg_set_value_args>() - 8usize];
+    ["Offset of field: reg_set_value_args::name_len"]
+        [::core::mem::offset_of!(reg_set_value_args, name_len) - 0usize];
+    ["Offset of field: reg_set_value_args::_pad0"]
+        [::core::mem::offset_of!(reg_set_value_args, _pad0) - 4usize];
+    ["Offset of field: reg_set_value_args::name_ptr"]
+        [::core::mem::offset_of!(reg_set_value_args, name_ptr) - 8usize];
+    ["Offset of field: reg_set_value_args::type_"]
+        [::core::mem::offset_of!(reg_set_value_args, type_) - 16usize];
+    ["Offset of field: reg_set_value_args::data_len"]
+        [::core::mem::offset_of!(reg_set_value_args, data_len) - 20usize];
+    ["Offset of field: reg_set_value_args::data_ptr"]
+        [::core::mem::offset_of!(reg_set_value_args, data_ptr) - 24usize];
+    ["Offset of field: reg_set_value_args::layer_len"]
+        [::core::mem::offset_of!(reg_set_value_args, layer_len) - 32usize];
+    ["Offset of field: reg_set_value_args::_pad1"]
+        [::core::mem::offset_of!(reg_set_value_args, _pad1) - 36usize];
+    ["Offset of field: reg_set_value_args::layer_ptr"]
+        [::core::mem::offset_of!(reg_set_value_args, layer_ptr) - 40usize];
+    ["Offset of field: reg_set_value_args::txn_fd"]
+        [::core::mem::offset_of!(reg_set_value_args, txn_fd) - 48usize];
+    ["Offset of field: reg_set_value_args::_pad2"]
+        [::core::mem::offset_of!(reg_set_value_args, _pad2) - 52usize];
+    ["Offset of field: reg_set_value_args::expected_seq"]
+        [::core::mem::offset_of!(reg_set_value_args, expected_seq) - 56usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_delete_value_args {
+    pub name_len: __u32,
+    pub _pad0: __u32,
+    pub name_ptr: __u64,
+    pub layer_len: __u32,
+    pub _pad1: __u32,
+    pub layer_ptr: __u64,
+    pub txn_fd: __s32,
+    pub _pad2: __u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_delete_value_args"][::core::mem::size_of::<reg_delete_value_args>() - 40usize];
+    ["Alignment of reg_delete_value_args"]
+        [::core::mem::align_of::<reg_delete_value_args>() - 8usize];
+    ["Offset of field: reg_delete_value_args::name_len"]
+        [::core::mem::offset_of!(reg_delete_value_args, name_len) - 0usize];
+    ["Offset of field: reg_delete_value_args::_pad0"]
+        [::core::mem::offset_of!(reg_delete_value_args, _pad0) - 4usize];
+    ["Offset of field: reg_delete_value_args::name_ptr"]
+        [::core::mem::offset_of!(reg_delete_value_args, name_ptr) - 8usize];
+    ["Offset of field: reg_delete_value_args::layer_len"]
+        [::core::mem::offset_of!(reg_delete_value_args, layer_len) - 16usize];
+    ["Offset of field: reg_delete_value_args::_pad1"]
+        [::core::mem::offset_of!(reg_delete_value_args, _pad1) - 20usize];
+    ["Offset of field: reg_delete_value_args::layer_ptr"]
+        [::core::mem::offset_of!(reg_delete_value_args, layer_ptr) - 24usize];
+    ["Offset of field: reg_delete_value_args::txn_fd"]
+        [::core::mem::offset_of!(reg_delete_value_args, txn_fd) - 32usize];
+    ["Offset of field: reg_delete_value_args::_pad2"]
+        [::core::mem::offset_of!(reg_delete_value_args, _pad2) - 36usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_blanket_tombstone_args {
+    pub layer_len: __u32,
+    pub _pad0: __u32,
+    pub layer_ptr: __u64,
+    pub set: __u8,
+    pub _pad1: [__u8; 3usize],
+    pub txn_fd: __s32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_blanket_tombstone_args"]
+        [::core::mem::size_of::<reg_blanket_tombstone_args>() - 24usize];
+    ["Alignment of reg_blanket_tombstone_args"]
+        [::core::mem::align_of::<reg_blanket_tombstone_args>() - 8usize];
+    ["Offset of field: reg_blanket_tombstone_args::layer_len"]
+        [::core::mem::offset_of!(reg_blanket_tombstone_args, layer_len) - 0usize];
+    ["Offset of field: reg_blanket_tombstone_args::_pad0"]
+        [::core::mem::offset_of!(reg_blanket_tombstone_args, _pad0) - 4usize];
+    ["Offset of field: reg_blanket_tombstone_args::layer_ptr"]
+        [::core::mem::offset_of!(reg_blanket_tombstone_args, layer_ptr) - 8usize];
+    ["Offset of field: reg_blanket_tombstone_args::set"]
+        [::core::mem::offset_of!(reg_blanket_tombstone_args, set) - 16usize];
+    ["Offset of field: reg_blanket_tombstone_args::_pad1"]
+        [::core::mem::offset_of!(reg_blanket_tombstone_args, _pad1) - 17usize];
+    ["Offset of field: reg_blanket_tombstone_args::txn_fd"]
+        [::core::mem::offset_of!(reg_blanket_tombstone_args, txn_fd) - 20usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_query_values_batch_args {
+    pub buf_len: __u32,
+    pub count: __u32,
+    pub buf_ptr: __u64,
+    pub txn_fd: __s32,
+    pub _pad: __u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_query_values_batch_args"]
+        [::core::mem::size_of::<reg_query_values_batch_args>() - 24usize];
+    ["Alignment of reg_query_values_batch_args"]
+        [::core::mem::align_of::<reg_query_values_batch_args>() - 8usize];
+    ["Offset of field: reg_query_values_batch_args::buf_len"]
+        [::core::mem::offset_of!(reg_query_values_batch_args, buf_len) - 0usize];
+    ["Offset of field: reg_query_values_batch_args::count"]
+        [::core::mem::offset_of!(reg_query_values_batch_args, count) - 4usize];
+    ["Offset of field: reg_query_values_batch_args::buf_ptr"]
+        [::core::mem::offset_of!(reg_query_values_batch_args, buf_ptr) - 8usize];
+    ["Offset of field: reg_query_values_batch_args::txn_fd"]
+        [::core::mem::offset_of!(reg_query_values_batch_args, txn_fd) - 16usize];
+    ["Offset of field: reg_query_values_batch_args::_pad"]
+        [::core::mem::offset_of!(reg_query_values_batch_args, _pad) - 20usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_enum_value_args {
+    pub index: __u32,
+    pub name_len: __u32,
+    pub name_ptr: __u64,
+    pub type_: __u32,
+    pub data_len: __u32,
+    pub data_ptr: __u64,
+    pub txn_fd: __s32,
+    pub _pad: __u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_enum_value_args"][::core::mem::size_of::<reg_enum_value_args>() - 40usize];
+    ["Alignment of reg_enum_value_args"][::core::mem::align_of::<reg_enum_value_args>() - 8usize];
+    ["Offset of field: reg_enum_value_args::index"]
+        [::core::mem::offset_of!(reg_enum_value_args, index) - 0usize];
+    ["Offset of field: reg_enum_value_args::name_len"]
+        [::core::mem::offset_of!(reg_enum_value_args, name_len) - 4usize];
+    ["Offset of field: reg_enum_value_args::name_ptr"]
+        [::core::mem::offset_of!(reg_enum_value_args, name_ptr) - 8usize];
+    ["Offset of field: reg_enum_value_args::type_"]
+        [::core::mem::offset_of!(reg_enum_value_args, type_) - 16usize];
+    ["Offset of field: reg_enum_value_args::data_len"]
+        [::core::mem::offset_of!(reg_enum_value_args, data_len) - 20usize];
+    ["Offset of field: reg_enum_value_args::data_ptr"]
+        [::core::mem::offset_of!(reg_enum_value_args, data_ptr) - 24usize];
+    ["Offset of field: reg_enum_value_args::txn_fd"]
+        [::core::mem::offset_of!(reg_enum_value_args, txn_fd) - 32usize];
+    ["Offset of field: reg_enum_value_args::_pad"]
+        [::core::mem::offset_of!(reg_enum_value_args, _pad) - 36usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_enum_subkey_args {
+    pub index: __u32,
+    pub name_len: __u32,
+    pub name_ptr: __u64,
+    pub last_write_time: __u64,
+    pub subkey_count: __u32,
+    pub value_count: __u32,
+    pub txn_fd: __s32,
+    pub _pad: __u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_enum_subkey_args"][::core::mem::size_of::<reg_enum_subkey_args>() - 40usize];
+    ["Alignment of reg_enum_subkey_args"][::core::mem::align_of::<reg_enum_subkey_args>() - 8usize];
+    ["Offset of field: reg_enum_subkey_args::index"]
+        [::core::mem::offset_of!(reg_enum_subkey_args, index) - 0usize];
+    ["Offset of field: reg_enum_subkey_args::name_len"]
+        [::core::mem::offset_of!(reg_enum_subkey_args, name_len) - 4usize];
+    ["Offset of field: reg_enum_subkey_args::name_ptr"]
+        [::core::mem::offset_of!(reg_enum_subkey_args, name_ptr) - 8usize];
+    ["Offset of field: reg_enum_subkey_args::last_write_time"]
+        [::core::mem::offset_of!(reg_enum_subkey_args, last_write_time) - 16usize];
+    ["Offset of field: reg_enum_subkey_args::subkey_count"]
+        [::core::mem::offset_of!(reg_enum_subkey_args, subkey_count) - 24usize];
+    ["Offset of field: reg_enum_subkey_args::value_count"]
+        [::core::mem::offset_of!(reg_enum_subkey_args, value_count) - 28usize];
+    ["Offset of field: reg_enum_subkey_args::txn_fd"]
+        [::core::mem::offset_of!(reg_enum_subkey_args, txn_fd) - 32usize];
+    ["Offset of field: reg_enum_subkey_args::_pad"]
+        [::core::mem::offset_of!(reg_enum_subkey_args, _pad) - 36usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_query_key_info_args {
+    pub name_len: __u32,
+    pub _pad0: __u32,
+    pub name_ptr: __u64,
+    pub last_write_time: __u64,
+    pub subkey_count: __u32,
+    pub value_count: __u32,
+    pub max_subkey_name_len: __u32,
+    pub max_value_name_len: __u32,
+    pub max_value_data_size: __u32,
+    pub sd_size: __u32,
+    pub volatile_key: __u8,
+    pub symlink: __u8,
+    pub _pad1: [__u8; 6usize],
+    pub hive_generation: __u64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_query_key_info_args"]
+        [::core::mem::size_of::<reg_query_key_info_args>() - 64usize];
+    ["Alignment of reg_query_key_info_args"]
+        [::core::mem::align_of::<reg_query_key_info_args>() - 8usize];
+    ["Offset of field: reg_query_key_info_args::name_len"]
+        [::core::mem::offset_of!(reg_query_key_info_args, name_len) - 0usize];
+    ["Offset of field: reg_query_key_info_args::_pad0"]
+        [::core::mem::offset_of!(reg_query_key_info_args, _pad0) - 4usize];
+    ["Offset of field: reg_query_key_info_args::name_ptr"]
+        [::core::mem::offset_of!(reg_query_key_info_args, name_ptr) - 8usize];
+    ["Offset of field: reg_query_key_info_args::last_write_time"]
+        [::core::mem::offset_of!(reg_query_key_info_args, last_write_time) - 16usize];
+    ["Offset of field: reg_query_key_info_args::subkey_count"]
+        [::core::mem::offset_of!(reg_query_key_info_args, subkey_count) - 24usize];
+    ["Offset of field: reg_query_key_info_args::value_count"]
+        [::core::mem::offset_of!(reg_query_key_info_args, value_count) - 28usize];
+    ["Offset of field: reg_query_key_info_args::max_subkey_name_len"]
+        [::core::mem::offset_of!(reg_query_key_info_args, max_subkey_name_len) - 32usize];
+    ["Offset of field: reg_query_key_info_args::max_value_name_len"]
+        [::core::mem::offset_of!(reg_query_key_info_args, max_value_name_len) - 36usize];
+    ["Offset of field: reg_query_key_info_args::max_value_data_size"]
+        [::core::mem::offset_of!(reg_query_key_info_args, max_value_data_size) - 40usize];
+    ["Offset of field: reg_query_key_info_args::sd_size"]
+        [::core::mem::offset_of!(reg_query_key_info_args, sd_size) - 44usize];
+    ["Offset of field: reg_query_key_info_args::volatile_key"]
+        [::core::mem::offset_of!(reg_query_key_info_args, volatile_key) - 48usize];
+    ["Offset of field: reg_query_key_info_args::symlink"]
+        [::core::mem::offset_of!(reg_query_key_info_args, symlink) - 49usize];
+    ["Offset of field: reg_query_key_info_args::_pad1"]
+        [::core::mem::offset_of!(reg_query_key_info_args, _pad1) - 50usize];
+    ["Offset of field: reg_query_key_info_args::hive_generation"]
+        [::core::mem::offset_of!(reg_query_key_info_args, hive_generation) - 56usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_delete_key_args {
+    pub layer_len: __u32,
+    pub _pad0: __u32,
+    pub layer_ptr: __u64,
+    pub txn_fd: __s32,
+    pub _pad1: __u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_delete_key_args"][::core::mem::size_of::<reg_delete_key_args>() - 24usize];
+    ["Alignment of reg_delete_key_args"][::core::mem::align_of::<reg_delete_key_args>() - 8usize];
+    ["Offset of field: reg_delete_key_args::layer_len"]
+        [::core::mem::offset_of!(reg_delete_key_args, layer_len) - 0usize];
+    ["Offset of field: reg_delete_key_args::_pad0"]
+        [::core::mem::offset_of!(reg_delete_key_args, _pad0) - 4usize];
+    ["Offset of field: reg_delete_key_args::layer_ptr"]
+        [::core::mem::offset_of!(reg_delete_key_args, layer_ptr) - 8usize];
+    ["Offset of field: reg_delete_key_args::txn_fd"]
+        [::core::mem::offset_of!(reg_delete_key_args, txn_fd) - 16usize];
+    ["Offset of field: reg_delete_key_args::_pad1"]
+        [::core::mem::offset_of!(reg_delete_key_args, _pad1) - 20usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_hide_key_args {
+    pub layer_len: __u32,
+    pub _pad0: __u32,
+    pub layer_ptr: __u64,
+    pub txn_fd: __s32,
+    pub _pad1: __u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_hide_key_args"][::core::mem::size_of::<reg_hide_key_args>() - 24usize];
+    ["Alignment of reg_hide_key_args"][::core::mem::align_of::<reg_hide_key_args>() - 8usize];
+    ["Offset of field: reg_hide_key_args::layer_len"]
+        [::core::mem::offset_of!(reg_hide_key_args, layer_len) - 0usize];
+    ["Offset of field: reg_hide_key_args::_pad0"]
+        [::core::mem::offset_of!(reg_hide_key_args, _pad0) - 4usize];
+    ["Offset of field: reg_hide_key_args::layer_ptr"]
+        [::core::mem::offset_of!(reg_hide_key_args, layer_ptr) - 8usize];
+    ["Offset of field: reg_hide_key_args::txn_fd"]
+        [::core::mem::offset_of!(reg_hide_key_args, txn_fd) - 16usize];
+    ["Offset of field: reg_hide_key_args::_pad1"]
+        [::core::mem::offset_of!(reg_hide_key_args, _pad1) - 20usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_get_security_args {
+    pub security_info: __u32,
+    pub sd_len: __u32,
+    pub sd_ptr: __u64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_get_security_args"][::core::mem::size_of::<reg_get_security_args>() - 16usize];
+    ["Alignment of reg_get_security_args"]
+        [::core::mem::align_of::<reg_get_security_args>() - 8usize];
+    ["Offset of field: reg_get_security_args::security_info"]
+        [::core::mem::offset_of!(reg_get_security_args, security_info) - 0usize];
+    ["Offset of field: reg_get_security_args::sd_len"]
+        [::core::mem::offset_of!(reg_get_security_args, sd_len) - 4usize];
+    ["Offset of field: reg_get_security_args::sd_ptr"]
+        [::core::mem::offset_of!(reg_get_security_args, sd_ptr) - 8usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_set_security_args {
+    pub security_info: __u32,
+    pub sd_len: __u32,
+    pub sd_ptr: __u64,
+    pub txn_fd: __s32,
+    pub _pad: __u32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_set_security_args"][::core::mem::size_of::<reg_set_security_args>() - 24usize];
+    ["Alignment of reg_set_security_args"]
+        [::core::mem::align_of::<reg_set_security_args>() - 8usize];
+    ["Offset of field: reg_set_security_args::security_info"]
+        [::core::mem::offset_of!(reg_set_security_args, security_info) - 0usize];
+    ["Offset of field: reg_set_security_args::sd_len"]
+        [::core::mem::offset_of!(reg_set_security_args, sd_len) - 4usize];
+    ["Offset of field: reg_set_security_args::sd_ptr"]
+        [::core::mem::offset_of!(reg_set_security_args, sd_ptr) - 8usize];
+    ["Offset of field: reg_set_security_args::txn_fd"]
+        [::core::mem::offset_of!(reg_set_security_args, txn_fd) - 16usize];
+    ["Offset of field: reg_set_security_args::_pad"]
+        [::core::mem::offset_of!(reg_set_security_args, _pad) - 20usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_notify_args {
+    pub filter: __u32,
+    pub subtree: __u8,
+    pub _pad: [__u8; 3usize],
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_notify_args"][::core::mem::size_of::<reg_notify_args>() - 8usize];
+    ["Alignment of reg_notify_args"][::core::mem::align_of::<reg_notify_args>() - 4usize];
+    ["Offset of field: reg_notify_args::filter"]
+        [::core::mem::offset_of!(reg_notify_args, filter) - 0usize];
+    ["Offset of field: reg_notify_args::subtree"]
+        [::core::mem::offset_of!(reg_notify_args, subtree) - 4usize];
+    ["Offset of field: reg_notify_args::_pad"]
+        [::core::mem::offset_of!(reg_notify_args, _pad) - 5usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_backup_args {
+    pub output_fd: __s32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_backup_args"][::core::mem::size_of::<reg_backup_args>() - 4usize];
+    ["Alignment of reg_backup_args"][::core::mem::align_of::<reg_backup_args>() - 4usize];
+    ["Offset of field: reg_backup_args::output_fd"]
+        [::core::mem::offset_of!(reg_backup_args, output_fd) - 0usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_restore_args {
+    pub input_fd: __s32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_restore_args"][::core::mem::size_of::<reg_restore_args>() - 4usize];
+    ["Alignment of reg_restore_args"][::core::mem::align_of::<reg_restore_args>() - 4usize];
+    ["Offset of field: reg_restore_args::input_fd"]
+        [::core::mem::offset_of!(reg_restore_args, input_fd) - 0usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_txn_status_args {
+    pub state: __u32,
+    pub terminal_errno: __s32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_txn_status_args"][::core::mem::size_of::<reg_txn_status_args>() - 8usize];
+    ["Alignment of reg_txn_status_args"][::core::mem::align_of::<reg_txn_status_args>() - 4usize];
+    ["Offset of field: reg_txn_status_args::state"]
+        [::core::mem::offset_of!(reg_txn_status_args, state) - 0usize];
+    ["Offset of field: reg_txn_status_args::terminal_errno"]
+        [::core::mem::offset_of!(reg_txn_status_args, terminal_errno) - 4usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_src_register_args {
+    pub hive_count: __u32,
+    pub _pad: __u32,
+    pub max_sequence: __u64,
+    pub hives_ptr: __u64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_src_register_args"][::core::mem::size_of::<reg_src_register_args>() - 24usize];
+    ["Alignment of reg_src_register_args"]
+        [::core::mem::align_of::<reg_src_register_args>() - 8usize];
+    ["Offset of field: reg_src_register_args::hive_count"]
+        [::core::mem::offset_of!(reg_src_register_args, hive_count) - 0usize];
+    ["Offset of field: reg_src_register_args::_pad"]
+        [::core::mem::offset_of!(reg_src_register_args, _pad) - 4usize];
+    ["Offset of field: reg_src_register_args::max_sequence"]
+        [::core::mem::offset_of!(reg_src_register_args, max_sequence) - 8usize];
+    ["Offset of field: reg_src_register_args::hives_ptr"]
+        [::core::mem::offset_of!(reg_src_register_args, hives_ptr) - 16usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_src_hive_entry {
+    pub name_len: __u32,
+    pub _pad0: __u32,
+    pub name_ptr: __u64,
+    pub root_guid: [__u8; 16usize],
+    pub flags: __u32,
+    pub _pad1: __u32,
+    pub scope_guid: [__u8; 16usize],
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_src_hive_entry"][::core::mem::size_of::<reg_src_hive_entry>() - 56usize];
+    ["Alignment of reg_src_hive_entry"][::core::mem::align_of::<reg_src_hive_entry>() - 8usize];
+    ["Offset of field: reg_src_hive_entry::name_len"]
+        [::core::mem::offset_of!(reg_src_hive_entry, name_len) - 0usize];
+    ["Offset of field: reg_src_hive_entry::_pad0"]
+        [::core::mem::offset_of!(reg_src_hive_entry, _pad0) - 4usize];
+    ["Offset of field: reg_src_hive_entry::name_ptr"]
+        [::core::mem::offset_of!(reg_src_hive_entry, name_ptr) - 8usize];
+    ["Offset of field: reg_src_hive_entry::root_guid"]
+        [::core::mem::offset_of!(reg_src_hive_entry, root_guid) - 16usize];
+    ["Offset of field: reg_src_hive_entry::flags"]
+        [::core::mem::offset_of!(reg_src_hive_entry, flags) - 32usize];
+    ["Offset of field: reg_src_hive_entry::_pad1"]
+        [::core::mem::offset_of!(reg_src_hive_entry, _pad1) - 36usize];
+    ["Offset of field: reg_src_hive_entry::scope_guid"]
+        [::core::mem::offset_of!(reg_src_hive_entry, scope_guid) - 40usize];
+};

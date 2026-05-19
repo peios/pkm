@@ -6,7 +6,17 @@
  * for the cgo -godefs binding generator and for any userspace consumer of
  * the PKM ABI. It is built by check-userspace-clean.sh.
  */
+#include <stddef.h>
+
 #include <pkm/pkm.h>
+
+#define ASSERT_STRUCT_SIZE(type, expected) \
+	_Static_assert(sizeof(struct type) == (expected), \
+		       #type " size disagrees with its header constant")
+
+#define ASSERT_FIELD_OFFSET(type, field, expected) \
+	_Static_assert(offsetof(struct type, field) == (expected), \
+		       #type "." #field " offset disagrees with PSD-005")
 
 /* The headers must be internally consistent: each declared size constant
  * must agree with the layout of the struct it describes. */
@@ -41,6 +51,154 @@ _Static_assert(KMES_EVENT_HEADER_BASE_SIZE
 	       "KMES event-header base size disagrees with its field offsets");
 _Static_assert(sizeof(struct kmes_emit_entry) == 32,
 	       "kmes_emit_entry must be 32 bytes");
+
+ASSERT_STRUCT_SIZE(reg_query_value_args, REG_QUERY_VALUE_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_query_value_args, name_len, 0);
+ASSERT_FIELD_OFFSET(reg_query_value_args, _pad0, 4);
+ASSERT_FIELD_OFFSET(reg_query_value_args, name_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_query_value_args, type, 16);
+ASSERT_FIELD_OFFSET(reg_query_value_args, data_len, 20);
+ASSERT_FIELD_OFFSET(reg_query_value_args, txn_fd, 24);
+ASSERT_FIELD_OFFSET(reg_query_value_args, layer_buf_len, 28);
+ASSERT_FIELD_OFFSET(reg_query_value_args, data_ptr, 32);
+ASSERT_FIELD_OFFSET(reg_query_value_args, sequence, 40);
+ASSERT_FIELD_OFFSET(reg_query_value_args, layer_len, 48);
+ASSERT_FIELD_OFFSET(reg_query_value_args, _pad1, 52);
+ASSERT_FIELD_OFFSET(reg_query_value_args, layer_ptr, 56);
+
+ASSERT_STRUCT_SIZE(reg_set_value_args, REG_SET_VALUE_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_set_value_args, name_len, 0);
+ASSERT_FIELD_OFFSET(reg_set_value_args, _pad0, 4);
+ASSERT_FIELD_OFFSET(reg_set_value_args, name_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_set_value_args, type, 16);
+ASSERT_FIELD_OFFSET(reg_set_value_args, data_len, 20);
+ASSERT_FIELD_OFFSET(reg_set_value_args, data_ptr, 24);
+ASSERT_FIELD_OFFSET(reg_set_value_args, layer_len, 32);
+ASSERT_FIELD_OFFSET(reg_set_value_args, _pad1, 36);
+ASSERT_FIELD_OFFSET(reg_set_value_args, layer_ptr, 40);
+ASSERT_FIELD_OFFSET(reg_set_value_args, txn_fd, 48);
+ASSERT_FIELD_OFFSET(reg_set_value_args, _pad2, 52);
+ASSERT_FIELD_OFFSET(reg_set_value_args, expected_seq, 56);
+
+ASSERT_STRUCT_SIZE(reg_delete_value_args, REG_DELETE_VALUE_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_delete_value_args, name_len, 0);
+ASSERT_FIELD_OFFSET(reg_delete_value_args, _pad0, 4);
+ASSERT_FIELD_OFFSET(reg_delete_value_args, name_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_delete_value_args, layer_len, 16);
+ASSERT_FIELD_OFFSET(reg_delete_value_args, _pad1, 20);
+ASSERT_FIELD_OFFSET(reg_delete_value_args, layer_ptr, 24);
+ASSERT_FIELD_OFFSET(reg_delete_value_args, txn_fd, 32);
+ASSERT_FIELD_OFFSET(reg_delete_value_args, _pad2, 36);
+
+ASSERT_STRUCT_SIZE(reg_blanket_tombstone_args,
+		   REG_BLANKET_TOMBSTONE_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_blanket_tombstone_args, layer_len, 0);
+ASSERT_FIELD_OFFSET(reg_blanket_tombstone_args, _pad0, 4);
+ASSERT_FIELD_OFFSET(reg_blanket_tombstone_args, layer_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_blanket_tombstone_args, set, 16);
+ASSERT_FIELD_OFFSET(reg_blanket_tombstone_args, _pad1, 17);
+ASSERT_FIELD_OFFSET(reg_blanket_tombstone_args, txn_fd, 20);
+
+ASSERT_STRUCT_SIZE(reg_query_values_batch_args,
+		   REG_QUERY_VALUES_BATCH_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_query_values_batch_args, buf_len, 0);
+ASSERT_FIELD_OFFSET(reg_query_values_batch_args, count, 4);
+ASSERT_FIELD_OFFSET(reg_query_values_batch_args, buf_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_query_values_batch_args, txn_fd, 16);
+ASSERT_FIELD_OFFSET(reg_query_values_batch_args, _pad, 20);
+
+ASSERT_STRUCT_SIZE(reg_enum_value_args, REG_ENUM_VALUE_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_enum_value_args, index, 0);
+ASSERT_FIELD_OFFSET(reg_enum_value_args, name_len, 4);
+ASSERT_FIELD_OFFSET(reg_enum_value_args, name_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_enum_value_args, type, 16);
+ASSERT_FIELD_OFFSET(reg_enum_value_args, data_len, 20);
+ASSERT_FIELD_OFFSET(reg_enum_value_args, data_ptr, 24);
+ASSERT_FIELD_OFFSET(reg_enum_value_args, txn_fd, 32);
+ASSERT_FIELD_OFFSET(reg_enum_value_args, _pad, 36);
+
+ASSERT_STRUCT_SIZE(reg_enum_subkey_args, REG_ENUM_SUBKEY_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_enum_subkey_args, index, 0);
+ASSERT_FIELD_OFFSET(reg_enum_subkey_args, name_len, 4);
+ASSERT_FIELD_OFFSET(reg_enum_subkey_args, name_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_enum_subkey_args, last_write_time, 16);
+ASSERT_FIELD_OFFSET(reg_enum_subkey_args, subkey_count, 24);
+ASSERT_FIELD_OFFSET(reg_enum_subkey_args, value_count, 28);
+ASSERT_FIELD_OFFSET(reg_enum_subkey_args, txn_fd, 32);
+ASSERT_FIELD_OFFSET(reg_enum_subkey_args, _pad, 36);
+
+ASSERT_STRUCT_SIZE(reg_query_key_info_args, REG_QUERY_KEY_INFO_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, name_len, 0);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, _pad0, 4);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, name_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, last_write_time, 16);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, subkey_count, 24);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, value_count, 28);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, max_subkey_name_len, 32);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, max_value_name_len, 36);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, max_value_data_size, 40);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, sd_size, 44);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, volatile_key, 48);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, symlink, 49);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, _pad1, 50);
+ASSERT_FIELD_OFFSET(reg_query_key_info_args, hive_generation, 56);
+
+ASSERT_STRUCT_SIZE(reg_delete_key_args, REG_DELETE_KEY_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_delete_key_args, layer_len, 0);
+ASSERT_FIELD_OFFSET(reg_delete_key_args, _pad0, 4);
+ASSERT_FIELD_OFFSET(reg_delete_key_args, layer_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_delete_key_args, txn_fd, 16);
+ASSERT_FIELD_OFFSET(reg_delete_key_args, _pad1, 20);
+
+ASSERT_STRUCT_SIZE(reg_hide_key_args, REG_HIDE_KEY_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_hide_key_args, layer_len, 0);
+ASSERT_FIELD_OFFSET(reg_hide_key_args, _pad0, 4);
+ASSERT_FIELD_OFFSET(reg_hide_key_args, layer_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_hide_key_args, txn_fd, 16);
+ASSERT_FIELD_OFFSET(reg_hide_key_args, _pad1, 20);
+
+ASSERT_STRUCT_SIZE(reg_get_security_args, REG_GET_SECURITY_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_get_security_args, security_info, 0);
+ASSERT_FIELD_OFFSET(reg_get_security_args, sd_len, 4);
+ASSERT_FIELD_OFFSET(reg_get_security_args, sd_ptr, 8);
+
+ASSERT_STRUCT_SIZE(reg_set_security_args, REG_SET_SECURITY_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_set_security_args, security_info, 0);
+ASSERT_FIELD_OFFSET(reg_set_security_args, sd_len, 4);
+ASSERT_FIELD_OFFSET(reg_set_security_args, sd_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_set_security_args, txn_fd, 16);
+ASSERT_FIELD_OFFSET(reg_set_security_args, _pad, 20);
+
+ASSERT_STRUCT_SIZE(reg_notify_args, REG_NOTIFY_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_notify_args, filter, 0);
+ASSERT_FIELD_OFFSET(reg_notify_args, subtree, 4);
+ASSERT_FIELD_OFFSET(reg_notify_args, _pad, 5);
+
+ASSERT_STRUCT_SIZE(reg_backup_args, REG_BACKUP_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_backup_args, output_fd, 0);
+
+ASSERT_STRUCT_SIZE(reg_restore_args, REG_RESTORE_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_restore_args, input_fd, 0);
+
+ASSERT_STRUCT_SIZE(reg_txn_status_args, REG_TXN_STATUS_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_txn_status_args, state, 0);
+ASSERT_FIELD_OFFSET(reg_txn_status_args, terminal_errno, 4);
+
+ASSERT_STRUCT_SIZE(reg_src_register_args, REG_SRC_REGISTER_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_src_register_args, hive_count, 0);
+ASSERT_FIELD_OFFSET(reg_src_register_args, _pad, 4);
+ASSERT_FIELD_OFFSET(reg_src_register_args, max_sequence, 8);
+ASSERT_FIELD_OFFSET(reg_src_register_args, hives_ptr, 16);
+
+ASSERT_STRUCT_SIZE(reg_src_hive_entry, REG_SRC_HIVE_ENTRY_SIZE);
+ASSERT_FIELD_OFFSET(reg_src_hive_entry, name_len, 0);
+ASSERT_FIELD_OFFSET(reg_src_hive_entry, _pad0, 4);
+ASSERT_FIELD_OFFSET(reg_src_hive_entry, name_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_src_hive_entry, root_guid, 16);
+ASSERT_FIELD_OFFSET(reg_src_hive_entry, flags, 32);
+ASSERT_FIELD_OFFSET(reg_src_hive_entry, _pad1, 36);
+ASSERT_FIELD_OFFSET(reg_src_hive_entry, scope_guid, 40);
+
 _Static_assert(_IOC_TYPE(REG_IOC_QUERY_VALUE) == REG_IOC_TYPE,
 	       "REG_IOC_QUERY_VALUE type disagrees with PSD-005");
 _Static_assert(_IOC_NR(REG_IOC_QUERY_VALUE) == REG_IOC_QUERY_VALUE_NR,
@@ -49,10 +207,45 @@ _Static_assert(_IOC_DIR(REG_IOC_QUERY_VALUE) == (_IOC_READ | _IOC_WRITE),
 	       "REG_IOC_QUERY_VALUE direction disagrees with PSD-005");
 _Static_assert(_IOC_SIZE(REG_IOC_QUERY_VALUE) == REG_QUERY_VALUE_ARGS_SIZE,
 	       "REG_IOC_QUERY_VALUE size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_SET_VALUE) == REG_SET_VALUE_ARGS_SIZE,
+	       "REG_IOC_SET_VALUE size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_DELETE_VALUE) == REG_DELETE_VALUE_ARGS_SIZE,
+	       "REG_IOC_DELETE_VALUE size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_BLANKET_TOMBSTONE)
+		       == REG_BLANKET_TOMBSTONE_ARGS_SIZE,
+	       "REG_IOC_BLANKET_TOMBSTONE size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_QUERY_VALUES_BATCH)
+		       == REG_QUERY_VALUES_BATCH_ARGS_SIZE,
+	       "REG_IOC_QUERY_VALUES_BATCH size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_ENUM_VALUES) == REG_ENUM_VALUE_ARGS_SIZE,
+	       "REG_IOC_ENUM_VALUES size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_ENUM_SUBKEYS) == REG_ENUM_SUBKEY_ARGS_SIZE,
+	       "REG_IOC_ENUM_SUBKEYS size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_QUERY_KEY_INFO)
+		       == REG_QUERY_KEY_INFO_ARGS_SIZE,
+	       "REG_IOC_QUERY_KEY_INFO size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_DELETE_KEY) == REG_DELETE_KEY_ARGS_SIZE,
+	       "REG_IOC_DELETE_KEY size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_HIDE_KEY) == REG_HIDE_KEY_ARGS_SIZE,
+	       "REG_IOC_HIDE_KEY size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_GET_SECURITY) == REG_GET_SECURITY_ARGS_SIZE,
+	       "REG_IOC_GET_SECURITY size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_SET_SECURITY) == REG_SET_SECURITY_ARGS_SIZE,
+	       "REG_IOC_SET_SECURITY size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_NOTIFY) == REG_NOTIFY_ARGS_SIZE,
+	       "REG_IOC_NOTIFY size disagrees with PSD-005");
 _Static_assert(_IOC_DIR(REG_IOC_FLUSH) == _IOC_NONE,
 	       "REG_IOC_FLUSH direction disagrees with PSD-005");
 _Static_assert(_IOC_SIZE(REG_IOC_FLUSH) == 0,
 	       "REG_IOC_FLUSH must not carry an argument");
+_Static_assert(_IOC_SIZE(REG_IOC_BACKUP) == REG_BACKUP_ARGS_SIZE,
+	       "REG_IOC_BACKUP size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_RESTORE) == REG_RESTORE_ARGS_SIZE,
+	       "REG_IOC_RESTORE size disagrees with PSD-005");
+_Static_assert(_IOC_SIZE(REG_IOC_COMMIT) == 0,
+	       "REG_IOC_COMMIT must not carry an argument");
+_Static_assert(_IOC_SIZE(REG_IOC_TXN_STATUS) == REG_TXN_STATUS_ARGS_SIZE,
+	       "REG_IOC_TXN_STATUS size disagrees with PSD-005");
 _Static_assert(_IOC_TYPE(REG_SRC_REGISTER) == REG_IOC_TYPE,
 	       "REG_SRC_REGISTER type disagrees with PSD-005");
 _Static_assert(_IOC_SIZE(REG_SRC_REGISTER) == REG_SRC_REGISTER_ARGS_SIZE,

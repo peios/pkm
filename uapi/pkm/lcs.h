@@ -8,9 +8,8 @@
 /*
  * LCS registry UAPI constants.
  *
- * The command macros below publish PSD-005 §11.1 ioctl type, number,
- * direction, and argument size without yet publishing the §11.2 argument
- * structs. Struct layouts are introduced under the ABI-layout slice.
+ * The structures below use natural C layout with fixed-width fields and
+ * explicit padding. Pointer fields are numeric userspace addresses.
  */
 
 /* Registry ioctl type byte. */
@@ -39,67 +38,230 @@
 #define REG_IOC_COMMIT_NR			16U
 #define REG_IOC_TXN_STATUS_NR			17U
 
+struct reg_query_value_args {
+	__u32 name_len;
+	__u32 _pad0;
+	__u64 name_ptr;
+	__u32 type;
+	__u32 data_len;
+	__s32 txn_fd;
+	__u32 layer_buf_len;
+	__u64 data_ptr;
+	__u64 sequence;
+	__u32 layer_len;
+	__u32 _pad1;
+	__u64 layer_ptr;
+};
+
+struct reg_set_value_args {
+	__u32 name_len;
+	__u32 _pad0;
+	__u64 name_ptr;
+	__u32 type;
+	__u32 data_len;
+	__u64 data_ptr;
+	__u32 layer_len;
+	__u32 _pad1;
+	__u64 layer_ptr;
+	__s32 txn_fd;
+	__u32 _pad2;
+	__u64 expected_seq;
+};
+
+struct reg_delete_value_args {
+	__u32 name_len;
+	__u32 _pad0;
+	__u64 name_ptr;
+	__u32 layer_len;
+	__u32 _pad1;
+	__u64 layer_ptr;
+	__s32 txn_fd;
+	__u32 _pad2;
+};
+
+struct reg_blanket_tombstone_args {
+	__u32 layer_len;
+	__u32 _pad0;
+	__u64 layer_ptr;
+	__u8 set;
+	__u8 _pad1[3];
+	__s32 txn_fd;
+};
+
+struct reg_query_values_batch_args {
+	__u32 buf_len;
+	__u32 count;
+	__u64 buf_ptr;
+	__s32 txn_fd;
+	__u32 _pad;
+};
+
+struct reg_enum_value_args {
+	__u32 index;
+	__u32 name_len;
+	__u64 name_ptr;
+	__u32 type;
+	__u32 data_len;
+	__u64 data_ptr;
+	__s32 txn_fd;
+	__u32 _pad;
+};
+
+struct reg_enum_subkey_args {
+	__u32 index;
+	__u32 name_len;
+	__u64 name_ptr;
+	__u64 last_write_time;
+	__u32 subkey_count;
+	__u32 value_count;
+	__s32 txn_fd;
+	__u32 _pad;
+};
+
+struct reg_query_key_info_args {
+	__u32 name_len;
+	__u32 _pad0;
+	__u64 name_ptr;
+	__u64 last_write_time;
+	__u32 subkey_count;
+	__u32 value_count;
+	__u32 max_subkey_name_len;
+	__u32 max_value_name_len;
+	__u32 max_value_data_size;
+	__u32 sd_size;
+	__u8 volatile_key;
+	__u8 symlink;
+	__u8 _pad1[6];
+	__u64 hive_generation;
+};
+
+struct reg_delete_key_args {
+	__u32 layer_len;
+	__u32 _pad0;
+	__u64 layer_ptr;
+	__s32 txn_fd;
+	__u32 _pad1;
+};
+
+struct reg_hide_key_args {
+	__u32 layer_len;
+	__u32 _pad0;
+	__u64 layer_ptr;
+	__s32 txn_fd;
+	__u32 _pad1;
+};
+
+struct reg_get_security_args {
+	__u32 security_info;
+	__u32 sd_len;
+	__u64 sd_ptr;
+};
+
+struct reg_set_security_args {
+	__u32 security_info;
+	__u32 sd_len;
+	__u64 sd_ptr;
+	__s32 txn_fd;
+	__u32 _pad;
+};
+
+struct reg_notify_args {
+	__u32 filter;
+	__u8 subtree;
+	__u8 _pad[3];
+};
+
+struct reg_backup_args {
+	__s32 output_fd;
+};
+
+struct reg_restore_args {
+	__s32 input_fd;
+};
+
+struct reg_txn_status_args {
+	__u32 state;
+	__s32 terminal_errno;
+};
+
+struct reg_src_register_args {
+	__u32 hive_count;
+	__u32 _pad;
+	__u64 max_sequence;
+	__u64 hives_ptr;
+};
+
+struct reg_src_hive_entry {
+	__u32 name_len;
+	__u32 _pad0;
+	__u64 name_ptr;
+	__u8 root_guid[16];
+	__u32 flags;
+	__u32 _pad1;
+	__u8 scope_guid[16];
+};
+
 /* PSD-005 §11.2 ioctl argument sizes. */
-#define REG_QUERY_VALUE_ARGS_SIZE		56U
-#define REG_SET_VALUE_ARGS_SIZE			56U
-#define REG_DELETE_VALUE_ARGS_SIZE		28U
-#define REG_BLANKET_TOMBSTONE_ARGS_SIZE		20U
-#define REG_QUERY_VALUES_BATCH_ARGS_SIZE		20U
-#define REG_ENUM_VALUE_ARGS_SIZE		36U
-#define REG_ENUM_SUBKEY_ARGS_SIZE		36U
-#define REG_QUERY_KEY_INFO_ARGS_SIZE		56U
-#define REG_DELETE_KEY_ARGS_SIZE		16U
-#define REG_HIDE_KEY_ARGS_SIZE			16U
+#define REG_QUERY_VALUE_ARGS_SIZE		64U
+#define REG_SET_VALUE_ARGS_SIZE			64U
+#define REG_DELETE_VALUE_ARGS_SIZE		40U
+#define REG_BLANKET_TOMBSTONE_ARGS_SIZE		24U
+#define REG_QUERY_VALUES_BATCH_ARGS_SIZE		24U
+#define REG_ENUM_VALUE_ARGS_SIZE		40U
+#define REG_ENUM_SUBKEY_ARGS_SIZE		40U
+#define REG_QUERY_KEY_INFO_ARGS_SIZE		64U
+#define REG_DELETE_KEY_ARGS_SIZE		24U
+#define REG_HIDE_KEY_ARGS_SIZE			24U
 #define REG_GET_SECURITY_ARGS_SIZE		16U
-#define REG_SET_SECURITY_ARGS_SIZE		20U
+#define REG_SET_SECURITY_ARGS_SIZE		24U
 #define REG_NOTIFY_ARGS_SIZE			8U
 #define REG_BACKUP_ARGS_SIZE			4U
 #define REG_RESTORE_ARGS_SIZE			4U
 #define REG_TXN_STATUS_ARGS_SIZE		8U
-#define REG_SRC_REGISTER_ARGS_SIZE		20U
-#define REG_SRC_HIVE_ENTRY_SIZE			48U
+#define REG_SRC_REGISTER_ARGS_SIZE		24U
+#define REG_SRC_HIVE_ENTRY_SIZE			56U
 
 /* Source registration ioctl. */
 #define REG_SRC_REGISTER \
-	_IOW(REG_IOC_TYPE, REG_SRC_REGISTER_NR, __u8[REG_SRC_REGISTER_ARGS_SIZE])
+	_IOW(REG_IOC_TYPE, REG_SRC_REGISTER_NR, struct reg_src_register_args)
 
 /* Key-fd ioctls. */
 #define REG_IOC_QUERY_VALUE \
-	_IOWR(REG_IOC_TYPE, REG_IOC_QUERY_VALUE_NR, __u8[REG_QUERY_VALUE_ARGS_SIZE])
+	_IOWR(REG_IOC_TYPE, REG_IOC_QUERY_VALUE_NR, struct reg_query_value_args)
 #define REG_IOC_SET_VALUE \
-	_IOW(REG_IOC_TYPE, REG_IOC_SET_VALUE_NR, __u8[REG_SET_VALUE_ARGS_SIZE])
+	_IOW(REG_IOC_TYPE, REG_IOC_SET_VALUE_NR, struct reg_set_value_args)
 #define REG_IOC_DELETE_VALUE \
-	_IOW(REG_IOC_TYPE, REG_IOC_DELETE_VALUE_NR, __u8[REG_DELETE_VALUE_ARGS_SIZE])
+	_IOW(REG_IOC_TYPE, REG_IOC_DELETE_VALUE_NR, struct reg_delete_value_args)
 #define REG_IOC_BLANKET_TOMBSTONE \
-	_IOW(REG_IOC_TYPE, REG_IOC_BLANKET_TOMBSTONE_NR, __u8[REG_BLANKET_TOMBSTONE_ARGS_SIZE])
+	_IOW(REG_IOC_TYPE, REG_IOC_BLANKET_TOMBSTONE_NR, struct reg_blanket_tombstone_args)
 #define REG_IOC_QUERY_VALUES_BATCH \
-	_IOWR(REG_IOC_TYPE, REG_IOC_QUERY_VALUES_BATCH_NR, __u8[REG_QUERY_VALUES_BATCH_ARGS_SIZE])
+	_IOWR(REG_IOC_TYPE, REG_IOC_QUERY_VALUES_BATCH_NR, struct reg_query_values_batch_args)
 #define REG_IOC_ENUM_VALUES \
-	_IOWR(REG_IOC_TYPE, REG_IOC_ENUM_VALUES_NR, __u8[REG_ENUM_VALUE_ARGS_SIZE])
+	_IOWR(REG_IOC_TYPE, REG_IOC_ENUM_VALUES_NR, struct reg_enum_value_args)
 #define REG_IOC_ENUM_SUBKEYS \
-	_IOWR(REG_IOC_TYPE, REG_IOC_ENUM_SUBKEYS_NR, __u8[REG_ENUM_SUBKEY_ARGS_SIZE])
+	_IOWR(REG_IOC_TYPE, REG_IOC_ENUM_SUBKEYS_NR, struct reg_enum_subkey_args)
 #define REG_IOC_QUERY_KEY_INFO \
-	_IOR(REG_IOC_TYPE, REG_IOC_QUERY_KEY_INFO_NR, __u8[REG_QUERY_KEY_INFO_ARGS_SIZE])
+	_IOR(REG_IOC_TYPE, REG_IOC_QUERY_KEY_INFO_NR, struct reg_query_key_info_args)
 #define REG_IOC_DELETE_KEY \
-	_IOW(REG_IOC_TYPE, REG_IOC_DELETE_KEY_NR, __u8[REG_DELETE_KEY_ARGS_SIZE])
+	_IOW(REG_IOC_TYPE, REG_IOC_DELETE_KEY_NR, struct reg_delete_key_args)
 #define REG_IOC_HIDE_KEY \
-	_IOW(REG_IOC_TYPE, REG_IOC_HIDE_KEY_NR, __u8[REG_HIDE_KEY_ARGS_SIZE])
+	_IOW(REG_IOC_TYPE, REG_IOC_HIDE_KEY_NR, struct reg_hide_key_args)
 #define REG_IOC_GET_SECURITY \
-	_IOWR(REG_IOC_TYPE, REG_IOC_GET_SECURITY_NR, __u8[REG_GET_SECURITY_ARGS_SIZE])
+	_IOWR(REG_IOC_TYPE, REG_IOC_GET_SECURITY_NR, struct reg_get_security_args)
 #define REG_IOC_SET_SECURITY \
-	_IOW(REG_IOC_TYPE, REG_IOC_SET_SECURITY_NR, __u8[REG_SET_SECURITY_ARGS_SIZE])
+	_IOW(REG_IOC_TYPE, REG_IOC_SET_SECURITY_NR, struct reg_set_security_args)
 #define REG_IOC_NOTIFY \
-	_IOW(REG_IOC_TYPE, REG_IOC_NOTIFY_NR, __u8[REG_NOTIFY_ARGS_SIZE])
+	_IOW(REG_IOC_TYPE, REG_IOC_NOTIFY_NR, struct reg_notify_args)
 #define REG_IOC_FLUSH			_IO(REG_IOC_TYPE, REG_IOC_FLUSH_NR)
 #define REG_IOC_BACKUP \
-	_IOW(REG_IOC_TYPE, REG_IOC_BACKUP_NR, __u8[REG_BACKUP_ARGS_SIZE])
+	_IOW(REG_IOC_TYPE, REG_IOC_BACKUP_NR, struct reg_backup_args)
 #define REG_IOC_RESTORE \
-	_IOW(REG_IOC_TYPE, REG_IOC_RESTORE_NR, __u8[REG_RESTORE_ARGS_SIZE])
+	_IOW(REG_IOC_TYPE, REG_IOC_RESTORE_NR, struct reg_restore_args)
 
 /* Transaction-fd ioctls. */
 #define REG_IOC_COMMIT			_IO(REG_IOC_TYPE, REG_IOC_COMMIT_NR)
 #define REG_IOC_TXN_STATUS \
-	_IOR(REG_IOC_TYPE, REG_IOC_TXN_STATUS_NR, __u8[REG_TXN_STATUS_ARGS_SIZE])
+	_IOR(REG_IOC_TYPE, REG_IOC_TXN_STATUS_NR, struct reg_txn_status_args)
 
 /* Transaction state codes. */
 #define REG_TXN_ACTIVE_UNBOUND			0U
