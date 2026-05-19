@@ -22,6 +22,7 @@ pub mod key_path;
 pub mod layers;
 pub mod maintenance;
 pub mod metadata;
+pub mod open;
 pub mod output_buffer;
 pub mod path;
 pub mod query;
@@ -38,8 +39,9 @@ pub mod watch;
 
 pub use access::{
     NormalizedRegistryAccess, REGISTRY_GENERIC_MAPPING, RegistryGenericMapping,
-    map_registry_generic_bits, registry_fd_has_right, validate_registry_ace_mask,
-    validate_registry_desired_access, validate_registry_granted_access,
+    map_registry_generic_bits, parse_registry_source_security_descriptor, registry_fd_has_right,
+    registry_kacs_generic_mapping, validate_registry_ace_mask, validate_registry_desired_access,
+    validate_registry_granted_access, validate_registry_source_security_descriptor,
 };
 pub use audit::{
     LCS_CONFIG_ROOT_PATH, LcsAuditEmissionFailurePolicy, LcsAuditEventKind,
@@ -138,6 +140,10 @@ pub use maintenance::{KeyFdHiveView, PlannedFlush, plan_flush_for_key_fd};
 pub use metadata::{
     HiveGenerationCounter, QueryKeyInfoInput, QueryKeyInfoOutputBufferDecision, QueryKeyInfoResult,
     query_key_info_result, validate_query_key_info_output_buffer,
+};
+pub use open::{
+    RegistryKeyOpenAccessInput, RegistryKeyOpenAccessPlan, RegistryOpenAccessDecision,
+    RegistryOpenAccessTarget, plan_registry_key_open_access, select_registry_open_access_target,
 };
 pub use output_buffer::{
     OutputBufferAggregate, OutputBufferDecision, OutputBufferRequest, OutputBufferShape,

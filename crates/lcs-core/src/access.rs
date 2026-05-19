@@ -5,6 +5,16 @@ use crate::constants::{
     REG_VALID_DESIRED_ACCESS_MASK, REG_VALID_MAPPED_ACCESS_MASK, WRITE_DAC, WRITE_OWNER,
 };
 use crate::error::{LcsError, LcsResult};
+use kacs_core::{
+    ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+    ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+    ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
+    ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE, Ace, AceKind,
+    SYSTEM_ALARM_ACE_TYPE, SYSTEM_ALARM_CALLBACK_ACE_TYPE, SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE,
+    SYSTEM_ALARM_OBJECT_ACE_TYPE, SYSTEM_AUDIT_ACE_TYPE, SYSTEM_AUDIT_CALLBACK_ACE_TYPE,
+    SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE, SYSTEM_AUDIT_OBJECT_ACE_TYPE,
+    SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, SecurityDescriptor,
+};
 
 const GENERIC_MASK: u32 = GENERIC_ALL | GENERIC_EXECUTE | GENERIC_WRITE | GENERIC_READ;
 
@@ -24,6 +34,16 @@ pub const REGISTRY_GENERIC_MAPPING: RegistryGenericMapping = RegistryGenericMapp
     execute: 0,
     all: KEY_ALL_ACCESS,
 };
+
+/// PSD-005 registry key `GenericMapping` in the shape consumed by KACS.
+pub fn registry_kacs_generic_mapping() -> kacs_core::GenericMapping {
+    kacs_core::GenericMapping {
+        read: REGISTRY_GENERIC_MAPPING.read,
+        write: REGISTRY_GENERIC_MAPPING.write,
+        execute: REGISTRY_GENERIC_MAPPING.execute,
+        all: REGISTRY_GENERIC_MAPPING.all,
+    }
+}
 
 /// A caller request after PSD-005 registry validation and generic mapping.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,6 +104,43 @@ pub fn validate_registry_ace_mask(mask: u32) -> LcsResult<u32> {
     Ok(mapped)
 }
 
+/// Parses and validates a source-returned registry SD before AccessCheck use.
+pub fn parse_registry_source_security_descriptor<'a>(
+    bytes: &'a [u8],
+    field: &'static str,
+) -> LcsResult<SecurityDescriptor<'a>> {
+    let sd = SecurityDescriptor::parse(bytes)
+        .map_err(|_| LcsError::MalformedSecurityDescriptor { field })?;
+    validate_registry_source_security_descriptor(&sd, field)?;
+    Ok(sd)
+}
+
+/// Validates source-returned registry SD fields that are specific to PSD-005.
+pub fn validate_registry_source_security_descriptor(
+    sd: &SecurityDescriptor<'_>,
+    field: &'static str,
+) -> LcsResult<()> {
+    if sd.owner().is_none() {
+        return Err(LcsError::MalformedSecurityDescriptor { field });
+    }
+
+    if let Some(dacl) = sd.dacl() {
+        for ace in dacl.entries() {
+            let ace = ace.map_err(|_| LcsError::MalformedSecurityDescriptor { field })?;
+            validate_registry_source_ace_mask(&ace, field)?;
+        }
+    }
+
+    if let Some(sacl) = sd.sacl() {
+        for ace in sacl.entries() {
+            let ace = ace.map_err(|_| LcsError::MalformedSecurityDescriptor { field })?;
+            validate_registry_source_ace_mask(&ace, field)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Checks a key fd's cached granted mask for one ioctl-required right.
 pub fn registry_fd_has_right(granted: u32, required: u32) -> bool {
     (granted & required) == required
@@ -109,6 +166,44 @@ fn validate_mapped_registry_mask(mask: u32) -> LcsResult<()> {
         return Err(LcsError::UnknownAccessBits(invalid));
     }
     Ok(())
+}
+
+fn validate_registry_source_ace_mask(ace: &Ace<'_>, field: &'static str) -> LcsResult<()> {
+    let Some(mask) = registry_access_mask_from_source_ace(ace) else {
+        return Ok(());
+    };
+    validate_registry_ace_mask(mask)
+        .map(|_| ())
+        .map_err(|_| LcsError::MalformedSecurityDescriptor { field })
+}
+
+fn registry_access_mask_from_source_ace(ace: &Ace<'_>) -> Option<u32> {
+    match ace.ace_type() {
+        ACCESS_ALLOWED_ACE_TYPE
+        | ACCESS_DENIED_ACE_TYPE
+        | ACCESS_ALLOWED_OBJECT_ACE_TYPE
+        | ACCESS_DENIED_OBJECT_ACE_TYPE
+        | ACCESS_ALLOWED_CALLBACK_ACE_TYPE
+        | ACCESS_DENIED_CALLBACK_ACE_TYPE
+        | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
+        | ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE
+        | SYSTEM_AUDIT_ACE_TYPE
+        | SYSTEM_ALARM_ACE_TYPE
+        | SYSTEM_AUDIT_OBJECT_ACE_TYPE
+        | SYSTEM_ALARM_OBJECT_ACE_TYPE
+        | SYSTEM_AUDIT_CALLBACK_ACE_TYPE
+        | SYSTEM_ALARM_CALLBACK_ACE_TYPE
+        | SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE
+        | SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE
+        | SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE => match ace.kind() {
+            AceKind::SingleSid { mask, .. }
+            | AceKind::Object { mask, .. }
+            | AceKind::Callback { mask, .. }
+            | AceKind::CallbackObject { mask, .. } => Some(mask),
+            AceKind::ResourceAttribute { .. } | AceKind::Opaque => None,
+        },
+        _ => None,
+    }
 }
 
 const _: () = {

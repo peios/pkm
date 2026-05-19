@@ -198,6 +198,15 @@ pub enum LcsError {
         /// Unknown flag bits.
         unknown: u32,
     },
+    /// A reg_open_key request contained unknown REG_OPEN_* bits.
+    UnknownOpenFlags {
+        /// Full flags value.
+        flags: u32,
+        /// Unknown flag bits.
+        unknown: u32,
+    },
+    /// KACS AccessCheck failed before producing an allow/deny decision.
+    AccessCheckEvaluationFailed,
     /// A non-volatile child was requested under a volatile parent key.
     NonVolatileChildUnderVolatile,
     /// Key creation was attempted without KEY_CREATE_SUB_KEY on the parent.
