@@ -68,6 +68,14 @@ pub struct KeyGuidAssignmentPlan {
     pub persist_in_key_record: bool,
 }
 
+/// Canonical path location for one non-root key GUID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyCanonicalPathLocation<'a> {
+    pub guid: Guid,
+    pub parent_guid: Guid,
+    pub child_name: &'a str,
+}
+
 /// Validated immutable key record fields for a new child key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyCreatePlan<'a> {
@@ -227,6 +235,30 @@ pub fn validate_key_create_request<'a>(
         volatile: options.volatile,
         symlink: options.symlink,
     })
+}
+
+/// Validates that no key GUID appears at multiple canonical path locations.
+pub fn validate_key_canonical_path_locations(
+    limits: &LcsLimits,
+    locations: &[KeyCanonicalPathLocation<'_>],
+) -> LcsResult<()> {
+    for (index, location) in locations.iter().enumerate() {
+        validate_key_guid(location.guid)?;
+        validate_parent_guid(location.parent_guid)?;
+        validate_key_component_bytes(location.child_name.as_bytes(), limits)?;
+
+        if locations[..index]
+            .iter()
+            .any(|previous| previous.guid == location.guid)
+        {
+            return Err(LcsError::DuplicateTrackedKeyGuid {
+                field: "canonical_key_locations",
+                index,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Plans the key record and path entry that `reg_create_key` must create.
