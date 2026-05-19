@@ -116,8 +116,10 @@ pub use fd::{
     plan_key_fd_close, plan_key_fd_delegation, validate_key_fd_open_view,
 };
 pub use hives::{
-    CurrentUserRewrite, HiveRoute, HiveScope, HiveStatus, HiveView, RoutedHive, SourceId,
-    for_each_routable_path_component, route_hive, validate_hive_table, validate_scope_guid_set,
+    CurrentUserRewrite, CurrentUserSidComponent, HiveRoute, HiveScope, HiveStatus, HiveView,
+    MAX_TEXTUAL_SID_COMPONENT_LEN, RoutedHive, SourceId,
+    current_user_sid_component_from_binary_sid, for_each_routable_path_component, route_hive,
+    validate_hive_table, validate_scope_guid_set,
 };
 pub use identity::sid_bytes_equal;
 pub use ioctl::{

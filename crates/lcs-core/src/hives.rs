@@ -6,8 +6,11 @@ use crate::path::{
     validate_key_component_bytes, validate_registry_path_str,
 };
 use crate::resolution::Guid;
+use core::fmt::{self, Write};
 
 const USERS_HIVE_NAME: &str = "Users";
+pub const MAX_TEXTUAL_SID_COMPONENT_LEN: usize =
+    2 + 3 + 1 + 14 + ((kacs_core::Sid::MAX_SUB_AUTHORITIES as usize) * 11);
 
 /// Opaque source identifier used by pure routing helpers.
 pub type SourceId = u32;
@@ -58,6 +61,58 @@ pub enum HiveRoute<'a> {
 pub enum CurrentUserRewrite<'a> {
     InitialCallerPath { user_sid_component: &'a str },
     Literal,
+}
+
+/// Fixed-capacity textual SID component used for `CurrentUser` rewriting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CurrentUserSidComponent {
+    bytes: [u8; MAX_TEXTUAL_SID_COMPONENT_LEN],
+    len: usize,
+}
+
+impl CurrentUserSidComponent {
+    fn new() -> Self {
+        Self {
+            bytes: [0; MAX_TEXTUAL_SID_COMPONENT_LEN],
+            len: 0,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len])
+            .expect("SID formatter only writes UTF-8 ASCII")
+    }
+}
+
+impl Write for CurrentUserSidComponent {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let end = self.len.checked_add(s.len()).ok_or(fmt::Error)?;
+        if end > self.bytes.len() {
+            return Err(fmt::Error);
+        }
+        self.bytes[self.len..end].copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+/// Converts a binary token user SID into the textual path component used by
+/// `CurrentUser` rewriting.
+pub fn current_user_sid_component_from_binary_sid(
+    limits: &LcsLimits,
+    sid_bytes: &[u8],
+) -> LcsResult<CurrentUserSidComponent> {
+    let sid = kacs_core::Sid::parse(sid_bytes).map_err(|_| LcsError::MalformedTokenSid {
+        field: "current_user_sid",
+    })?;
+    let mut component = CurrentUserSidComponent::new();
+    write!(&mut component, "{sid}").map_err(|_| LcsError::NameTooLong {
+        field: "current_user_sid",
+        len: MAX_TEXTUAL_SID_COMPONENT_LEN + 1,
+        max: MAX_TEXTUAL_SID_COMPONENT_LEN,
+    })?;
+    validate_key_component_bytes(component.as_str().as_bytes(), limits)?;
+    Ok(component)
 }
 
 /// Validates a published hive table snapshot.
