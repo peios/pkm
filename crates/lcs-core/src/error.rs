@@ -265,6 +265,15 @@ pub enum LcsError {
         /// Bytes following the status field.
         extra_len: usize,
     },
+    /// An operation-specific response parser was used for the wrong request op code.
+    RsiResponsePayloadParserMismatch {
+        /// Parser's expected request op code.
+        expected: u16,
+        /// Retained request op code supplied to the parser.
+        actual: u16,
+    },
+    /// A success-response payload parser received a non-success status.
+    RsiResponseStatusNotOk(u32),
     /// The per-source RSI request id allocator cannot advance without reusing an id.
     RsiRequestIdOverflow,
     /// A length-prefixed RSI payload field would overflow host arithmetic.

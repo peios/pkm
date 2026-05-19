@@ -224,6 +224,18 @@ pub struct RsiDropKeyRequestPayload {
     pub trailing: RsiTrailingOptionalFieldsPlan,
 }
 
+/// Parsed successful RSI_READ_KEY response payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiReadKeySuccessResponsePayload<'a> {
+    pub response: RsiValidatedResponse,
+    pub name: RsiLengthPrefixedField<'a>,
+    pub parent_guid: Guid,
+    pub sd: RsiLengthPrefixedField<'a>,
+    pub volatile: bool,
+    pub symlink: bool,
+    pub last_write_time: u64,
+}
+
 /// Parsed RSI_QUERY_VALUES request payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiQueryValuesRequestPayload<'a> {
@@ -1025,6 +1037,37 @@ pub fn validate_rsi_status_only_response_for_request(
     Ok(response)
 }
 
+/// Parses the successful RSI_READ_KEY response payload.
+pub fn parse_rsi_read_key_success_response_payload<'a>(
+    frame: &'a [u8],
+    retained: RsiRetainedRequest,
+) -> LcsResult<RsiReadKeySuccessResponsePayload<'a>> {
+    let response = validate_rsi_success_response_for_request(frame, retained, RSI_READ_KEY)?;
+    let mut cursor = RsiPayloadCursor::new(&frame[RSI_MIN_RESPONSE_LEN..]);
+    let name = cursor.read_length_prefixed()?;
+    let parent_guid = cursor.read_guid()?;
+    let sd = cursor.read_length_prefixed()?;
+    let volatile = cursor.read_bool("read_key.volatile")?;
+    let symlink = cursor.read_bool("read_key.symlink")?;
+    let last_write_time = cursor.read_u64_le()?;
+    if cursor.remaining_len() != 0 {
+        return Err(LcsError::RsiUnexpectedResponsePayload {
+            op_code: retained.op_code,
+            extra_len: cursor.remaining_len(),
+        });
+    }
+
+    Ok(RsiReadKeySuccessResponsePayload {
+        response,
+        name,
+        parent_guid,
+        sd,
+        volatile,
+        symlink,
+        last_write_time,
+    })
+}
+
 /// Plans one message-oriented source-fd read without splitting queued requests.
 pub fn plan_rsi_source_read(
     next_queued_request_len: Option<usize>,
@@ -1170,6 +1213,25 @@ fn validate_frame_len(frame: &[u8], min_len: usize) -> LcsResult<()> {
         });
     }
     Ok(())
+}
+
+fn validate_rsi_success_response_for_request(
+    frame: &[u8],
+    retained: RsiRetainedRequest,
+    expected_op_code: u16,
+) -> LcsResult<RsiValidatedResponse> {
+    if retained.op_code != expected_op_code {
+        return Err(LcsError::RsiResponsePayloadParserMismatch {
+            expected: expected_op_code,
+            actual: retained.op_code,
+        });
+    }
+
+    let response = validate_rsi_response_for_request(frame, retained)?;
+    if response.status != RsiStatus::Ok {
+        return Err(LcsError::RsiResponseStatusNotOk(response.status.code()));
+    }
+    Ok(response)
 }
 
 fn read_u16_le(frame: &[u8], offset: usize) -> u16 {
