@@ -290,6 +290,10 @@ pub enum LcsError {
     WatchChangedKeyNotLastAncestor,
     /// A maintenance operation targeted a hive whose source is currently unavailable.
     HiveSourceUnavailable,
+    /// Transaction ID zero is reserved for "no transaction" in RSI.
+    InvalidTransactionId,
+    /// The monotonic transaction ID allocator cannot advance without overflowing.
+    TransactionIdOverflow,
 }
 
 /// Standard result type for the LCS semantic core.

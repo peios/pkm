@@ -28,6 +28,7 @@ pub mod sequence;
 pub mod source;
 pub mod string;
 pub mod symlink;
+pub mod transaction;
 pub mod value;
 pub mod watch;
 
@@ -118,6 +119,12 @@ pub use string::validate_lcs_str;
 pub use symlink::{
     SymlinkDefaultValue, validate_symlink_default_value, validate_symlink_follow_depth,
     validate_symlink_target_bytes,
+};
+pub use transaction::{
+    StartedTransaction, TransactionBinding, TransactionCommitPlan, TransactionId,
+    TransactionIdCounter, TransactionState, TransactionStatusResult, TransactionTerminalErrno,
+    TransactionUseFailure, plan_begin_transaction, plan_transaction_commit, transaction_status,
+    transaction_terminal_failure,
 };
 pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,

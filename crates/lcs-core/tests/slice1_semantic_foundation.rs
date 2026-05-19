@@ -63,6 +63,7 @@ fn constants_match_psd_005_appendix_a() {
 #[test]
 fn compiled_in_limits_match_psd_005_defaults_and_ranges() {
     let limits = LcsLimits::default();
+    assert_eq!(limits.transaction_timeout_ms, 30_000);
     assert_eq!(limits.max_key_depth, 512);
     assert_eq!(limits.max_path_component_length, 255);
     assert_eq!(limits.max_total_path_length, 16_383);
@@ -70,6 +71,8 @@ fn compiled_in_limits_match_psd_005_defaults_and_ranges() {
     assert_eq!(limits.max_value_size, 1_048_576);
     assert_eq!(limits.max_layers_per_value, 128);
     assert_eq!(limits.max_total_layers, 1024);
+    assert_eq!(limits.max_bound_transactions_per_source, 16);
+    assert_eq!(limits.max_read_only_transactions_per_source, 16);
     assert_eq!(limits.max_registered_sources, 32);
     assert_eq!(limits.max_hives_per_source, 64);
     assert_eq!(limits.notification_queue_size, 256);

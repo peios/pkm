@@ -127,6 +127,7 @@ pub const MAX_PRIVATE_LAYERS_PER_TOKEN: ConfigRange = ConfigRange {
 /// Runtime LCS limits active for one operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LcsLimits {
+    pub transaction_timeout_ms: u32,
     pub max_key_depth: usize,
     pub max_path_component_length: usize,
     pub max_total_path_length: usize,
@@ -134,6 +135,8 @@ pub struct LcsLimits {
     pub max_value_size: usize,
     pub max_layers_per_value: usize,
     pub max_total_layers: usize,
+    pub max_bound_transactions_per_source: usize,
+    pub max_read_only_transactions_per_source: usize,
     pub max_registered_sources: usize,
     pub max_hives_per_source: usize,
     pub notification_queue_size: usize,
@@ -146,6 +149,7 @@ pub struct LcsLimits {
 impl LcsLimits {
     /// Compiled-in PSD-005 §11.4 defaults.
     pub const DEFAULT: Self = Self {
+        transaction_timeout_ms: TRANSACTION_TIMEOUT_MS.default,
         max_key_depth: MAX_KEY_DEPTH.default as usize,
         max_path_component_length: MAX_PATH_COMPONENT_LENGTH.default as usize,
         max_total_path_length: MAX_TOTAL_PATH_LENGTH.default as usize,
@@ -153,6 +157,9 @@ impl LcsLimits {
         max_value_size: MAX_VALUE_SIZE.default as usize,
         max_layers_per_value: MAX_LAYERS_PER_VALUE.default as usize,
         max_total_layers: MAX_TOTAL_LAYERS.default as usize,
+        max_bound_transactions_per_source: MAX_BOUND_TRANSACTIONS_PER_SOURCE.default as usize,
+        max_read_only_transactions_per_source: MAX_READ_ONLY_TRANSACTIONS_PER_SOURCE.default
+            as usize,
         max_registered_sources: MAX_REGISTERED_SOURCES.default as usize,
         max_hives_per_source: MAX_HIVES_PER_SOURCE.default as usize,
         notification_queue_size: NOTIFICATION_QUEUE_SIZE.default as usize,
