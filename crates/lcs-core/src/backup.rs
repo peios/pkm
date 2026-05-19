@@ -5,10 +5,12 @@ use crate::constants::{
     REG_BACKUP_MAGIC, REG_BACKUP_PATH_ENTRY, REG_BACKUP_TRAILER, REG_BACKUP_VALUE, REG_TOMBSTONE,
 };
 use crate::error::{LcsError, LcsResult};
+use crate::layers::validate_layer_views;
 use crate::path::{
     validate_hive_name_bytes, validate_key_component_bytes, validate_layer_name_bytes,
     validate_value_name_bytes,
 };
+use crate::resolution::LayerView;
 use crate::resolution::{Guid, PathTarget, validate_path_target};
 use crate::source::NIL_GUID;
 use crate::value::{ValidatedValueType, validate_value_data_len, validate_value_write_type};
@@ -60,6 +62,12 @@ pub struct BackupLayerManifestPayload<'a> {
 pub struct BackupLayerManifestSetSummary {
     pub manifest_count: usize,
     pub referenced_layer_count: usize,
+}
+
+/// Preflight plan for restore layer-precedence authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreLayerPrecedencePlan {
+    pub tcb_required_for_precedence: bool,
 }
 
 /// Parsed KEY record payload.
@@ -499,6 +507,39 @@ pub fn validate_backup_layer_manifest_set(
     Ok(BackupLayerManifestSetSummary {
         manifest_count: manifests.len(),
         referenced_layer_count: referenced_layers.len(),
+    })
+}
+
+/// Plans the restore preflight gate for high-precedence layer references.
+pub fn plan_backup_restore_layer_precedence_gate(
+    limits: &LcsLimits,
+    manifests: &[BackupLayerManifestPayload<'_>],
+    existing_cached_layers: &[LayerView<'_>],
+    caller_has_tcb: bool,
+) -> LcsResult<BackupRestoreLayerPrecedencePlan> {
+    validate_backup_layer_manifest_set(limits, manifests, &[])?;
+    validate_layer_views(limits, existing_cached_layers)?;
+
+    let mut tcb_required = false;
+    for manifest in manifests {
+        if manifest.precedence > 0
+            || existing_cached_layer_precedence_above_zero(
+                limits,
+                existing_cached_layers,
+                manifest.name,
+            )?
+        {
+            tcb_required = true;
+            break;
+        }
+    }
+
+    if tcb_required && !caller_has_tcb {
+        return Err(LcsError::MissingLayerPrecedenceTcb);
+    }
+
+    Ok(BackupRestoreLayerPrecedencePlan {
+        tcb_required_for_precedence: tcb_required,
     })
 }
 
@@ -1266,6 +1307,21 @@ fn backup_manifest_contains_layer(
         let manifest_name = validate_layer_name_bytes(manifest.name.as_bytes(), limits)?;
         if casefold_eq(manifest_name, referenced) {
             return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn existing_cached_layer_precedence_above_zero(
+    limits: &LcsLimits,
+    existing_cached_layers: &[LayerView<'_>],
+    manifest_name: &str,
+) -> LcsResult<bool> {
+    let manifest_name = validate_layer_name_bytes(manifest_name.as_bytes(), limits)?;
+    for layer in existing_cached_layers {
+        let layer_name = validate_layer_name_bytes(layer.name.as_bytes(), limits)?;
+        if casefold_eq(layer_name, manifest_name) {
+            return Ok(layer.precedence > 0);
         }
     }
     Ok(false)
