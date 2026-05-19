@@ -6,6 +6,7 @@ use crate::constants::{
 };
 use crate::error::{LcsError, LcsResult};
 use crate::resolution::Guid;
+use crate::source::NIL_GUID;
 
 const DIRECT_WATCH_EVENT_HEADER_LEN: usize = 8;
 const SUBTREE_WATCH_EVENT_DEPTH_LEN: usize = 2;
@@ -143,6 +144,47 @@ pub enum TransactionWatchBurstPlan {
     EmitOverflowOnly {
         attempted_event_count: usize,
         max_event_burst: usize,
+    },
+}
+
+/// Internal LCS watcher target for self-configuration and layer metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InternalWatchTarget {
+    SelfConfiguration,
+    LayerMetadata,
+    MachineRootFallback,
+}
+
+/// Kernel-internal watch registration shape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InternalWatchRegistration {
+    pub watched_guid: Guid,
+    pub target: InternalWatchTarget,
+    pub subtree: bool,
+    pub has_fd: bool,
+    pub has_granted_access_mask: bool,
+    pub has_filter: bool,
+    pub receives_all_event_types: bool,
+    pub subject_to_notification_queue_limit: bool,
+}
+
+/// Resolved GUIDs needed to arm LCS self-watch registrations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InternalSelfWatchRoots {
+    pub machine_root_guid: Guid,
+    pub registry_guid: Option<Guid>,
+    pub layers_guid: Option<Guid>,
+}
+
+/// Registration plan for the LCS internal self-watch mechanism.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InternalSelfWatchPlan {
+    Targeted {
+        registry: InternalWatchRegistration,
+        layers: InternalWatchRegistration,
+    },
+    MachineRootFallback {
+        root: InternalWatchRegistration,
     },
 }
 
@@ -420,6 +462,75 @@ pub fn plan_transaction_watch_burst(
         });
     }
     Ok(TransactionWatchBurstPlan::EmitIndividualEvents { event_count })
+}
+
+/// Plans internal LCS self-watch registrations after source registration.
+pub fn plan_internal_self_watch(roots: InternalSelfWatchRoots) -> LcsResult<InternalSelfWatchPlan> {
+    validate_internal_watch_guid(roots.machine_root_guid)?;
+
+    match (roots.registry_guid, roots.layers_guid) {
+        (Some(registry_guid), Some(layers_guid)) => {
+            validate_internal_watch_guid(registry_guid)?;
+            validate_internal_watch_guid(layers_guid)?;
+            Ok(InternalSelfWatchPlan::Targeted {
+                registry: internal_watch_registration(
+                    registry_guid,
+                    InternalWatchTarget::SelfConfiguration,
+                ),
+                layers: internal_watch_registration(
+                    layers_guid,
+                    InternalWatchTarget::LayerMetadata,
+                ),
+            })
+        }
+        (Some(registry_guid), None) => {
+            validate_internal_watch_guid(registry_guid)?;
+            Ok(InternalSelfWatchPlan::MachineRootFallback {
+                root: internal_watch_registration(
+                    roots.machine_root_guid,
+                    InternalWatchTarget::MachineRootFallback,
+                ),
+            })
+        }
+        (None, Some(layers_guid)) => {
+            validate_internal_watch_guid(layers_guid)?;
+            Ok(InternalSelfWatchPlan::MachineRootFallback {
+                root: internal_watch_registration(
+                    roots.machine_root_guid,
+                    InternalWatchTarget::MachineRootFallback,
+                ),
+            })
+        }
+        (None, None) => Ok(InternalSelfWatchPlan::MachineRootFallback {
+            root: internal_watch_registration(
+                roots.machine_root_guid,
+                InternalWatchTarget::MachineRootFallback,
+            ),
+        }),
+    }
+}
+
+fn internal_watch_registration(
+    watched_guid: Guid,
+    target: InternalWatchTarget,
+) -> InternalWatchRegistration {
+    InternalWatchRegistration {
+        watched_guid,
+        target,
+        subtree: true,
+        has_fd: false,
+        has_granted_access_mask: false,
+        has_filter: false,
+        receives_all_event_types: true,
+        subject_to_notification_queue_limit: false,
+    }
+}
+
+fn validate_internal_watch_guid(guid: Guid) -> LcsResult<()> {
+    if guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    Ok(())
 }
 
 fn validate_watch_mutation_context(mutation: &WatchMutationContext<'_>) -> LcsResult<()> {
