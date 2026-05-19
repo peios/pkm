@@ -1,9 +1,11 @@
+use crate::config::LcsLimits;
 use crate::constants::{
     REG_NOTIFY_ALL, REG_NOTIFY_SD, REG_NOTIFY_SUBKEY, REG_NOTIFY_VALUE, REG_WATCH_KEY_DELETED,
     REG_WATCH_OVERFLOW, REG_WATCH_SD_CHANGED, REG_WATCH_SUBKEY_CREATED, REG_WATCH_SUBKEY_DELETED,
     REG_WATCH_VALUE_DELETED, REG_WATCH_VALUE_SET,
 };
 use crate::error::{LcsError, LcsResult};
+use crate::resolution::Guid;
 
 const DIRECT_WATCH_EVENT_HEADER_LEN: usize = 8;
 const SUBTREE_WATCH_EVENT_DEPTH_LEN: usize = 2;
@@ -96,6 +98,39 @@ pub enum WatchQueueInsertPlan {
     QueueEvent,
     DropOldestAndQueueOverflow,
     DropOldestPreservingOverflowAndQueueEvent,
+}
+
+/// One armed watcher considered during dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatcherView {
+    pub watched_guid: Guid,
+    pub filter: u32,
+    pub subtree: bool,
+}
+
+/// Captured ancestry for the key being mutated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatchMutationContext<'a> {
+    pub changed_key_guid: Guid,
+    pub ancestor_guids: &'a [Guid],
+    pub path_components: &'a [&'a str],
+    pub event_type: u32,
+}
+
+/// A watch event delivery selected by dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatchDelivery<'a> {
+    pub event_type: u32,
+    pub subtree_record: bool,
+    pub relative_path_components: &'a [&'a str],
+}
+
+/// Dispatch decision for one watcher and one mutation event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchDispatchDecision<'a> {
+    Deliver(WatchDelivery<'a>),
+    NoMatch,
+    SuppressedByDepthLimit { depth: usize, max: usize },
 }
 
 /// Validates the REG_IOC_NOTIFY filter bitmask.
@@ -301,4 +336,67 @@ pub fn plan_watch_queue_insert(
     } else {
         Ok(WatchQueueInsertPlan::DropOldestAndQueueOverflow)
     }
+}
+
+/// Selects whether a watcher receives a mutation event using captured ancestry.
+pub fn plan_watch_dispatch<'a>(
+    limits: &LcsLimits,
+    watcher: WatcherView,
+    mutation: &WatchMutationContext<'a>,
+) -> LcsResult<WatchDispatchDecision<'a>> {
+    validate_watch_mutation_context(mutation)?;
+    if !watch_event_matches_filter(mutation.event_type, watcher.filter)? {
+        return Ok(WatchDispatchDecision::NoMatch);
+    }
+
+    let changed_index = mutation.ancestor_guids.len() - 1;
+    if watcher.watched_guid == mutation.changed_key_guid {
+        return Ok(WatchDispatchDecision::Deliver(WatchDelivery {
+            event_type: mutation.event_type,
+            subtree_record: watcher.subtree,
+            relative_path_components: &mutation.path_components[changed_index + 1..],
+        }));
+    }
+
+    if !watcher.subtree {
+        return Ok(WatchDispatchDecision::NoMatch);
+    }
+
+    let Some(watched_index) = mutation
+        .ancestor_guids
+        .iter()
+        .position(|guid| *guid == watcher.watched_guid)
+    else {
+        return Ok(WatchDispatchDecision::NoMatch);
+    };
+    if watched_index == changed_index {
+        return Ok(WatchDispatchDecision::NoMatch);
+    }
+
+    let depth = changed_index - watched_index;
+    if limits.max_subtree_watch_depth != 0 && depth > limits.max_subtree_watch_depth {
+        return Ok(WatchDispatchDecision::SuppressedByDepthLimit {
+            depth,
+            max: limits.max_subtree_watch_depth,
+        });
+    }
+
+    Ok(WatchDispatchDecision::Deliver(WatchDelivery {
+        event_type: mutation.event_type,
+        subtree_record: true,
+        relative_path_components: &mutation.path_components[watched_index + 1..=changed_index],
+    }))
+}
+
+fn validate_watch_mutation_context(mutation: &WatchMutationContext<'_>) -> LcsResult<()> {
+    if mutation.ancestor_guids.is_empty()
+        || mutation.ancestor_guids.len() != mutation.path_components.len()
+    {
+        return Err(LcsError::InvalidWatchAncestry);
+    }
+    if mutation.ancestor_guids[mutation.ancestor_guids.len() - 1] != mutation.changed_key_guid {
+        return Err(LcsError::WatchChangedKeyNotLastAncestor);
+    }
+    watch_event_category(mutation.event_type)?;
+    Ok(())
 }

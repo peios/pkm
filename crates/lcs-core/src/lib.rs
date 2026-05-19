@@ -127,12 +127,12 @@ pub use value::{
     validate_value_write_type,
 };
 pub use watch::{
-    KeyWatchState, QueuedWatchEvent, WatchEventCategory, WatchEventRecordPlan,
-    WatchEventRecordRequest, WatchEventRecordShape, WatchNotifyArgs, WatchNotifyPlan,
-    WatchQueueInsertPlan, WatchQueueState, WatchReadBatchPlan, plan_watch_event_record,
-    plan_watch_notify, plan_watch_queue_insert, plan_watch_read_batch, validate_abi_bool,
-    validate_notify_filter, validate_notify_reserved, watch_event_category,
-    watch_event_matches_filter,
+    KeyWatchState, QueuedWatchEvent, WatchDelivery, WatchDispatchDecision, WatchEventCategory,
+    WatchEventRecordPlan, WatchEventRecordRequest, WatchEventRecordShape, WatchMutationContext,
+    WatchNotifyArgs, WatchNotifyPlan, WatchQueueInsertPlan, WatchQueueState, WatchReadBatchPlan,
+    WatcherView, plan_watch_dispatch, plan_watch_event_record, plan_watch_notify,
+    plan_watch_queue_insert, plan_watch_read_batch, validate_abi_bool, validate_notify_filter,
+    validate_notify_reserved, watch_event_category, watch_event_matches_filter,
 };
 
 /// Returns a stable value from the staged crate so integration build steps can
