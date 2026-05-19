@@ -31,6 +31,8 @@ pub mod dacl;
 pub mod error;
 /// End-to-end security descriptor evaluation.
 pub mod evaluate_sd;
+/// Security descriptor inheritance construction.
+pub mod inheritance;
 /// Mandatory Integrity Control helpers.
 pub mod mic;
 /// Object-type tree parsing and traversal helpers.
@@ -115,6 +117,10 @@ pub use dacl::{
 };
 pub use error::{KacsError, KacsResult};
 pub use evaluate_sd::{evaluate_security_descriptor, EvaluateSecurityDescriptorState};
+pub use inheritance::{
+    inherit_registry_container_child_sd, RegistryContainerChildInheritance, CONTAINER_INHERIT_ACE,
+    INHERITED_ACE, INHERIT_ONLY_ACE, NO_PROPAGATE_INHERIT_ACE, OBJECT_INHERIT_ACE,
+};
 pub use mic::{
     apply_mic, resolve_mandatory_label, IntegrityLevel, MandatoryLabel, MicEnforcementState,
     SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP, SYSTEM_MANDATORY_LABEL_NO_READ_UP,

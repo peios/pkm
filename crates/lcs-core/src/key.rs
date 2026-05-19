@@ -1,8 +1,8 @@
-use crate::access::registry_fd_has_right;
+use crate::access::{REGISTRY_GENERIC_MAPPING, registry_fd_has_right};
 use crate::config::LcsLimits;
 use crate::constants::{
     KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, REG_CREATED_NEW, REG_OPENED_EXISTING,
-    REG_OPTION_CREATE_LINK, REG_OPTION_VOLATILE,
+    REG_OPTION_CREATE_LINK, REG_OPTION_VOLATILE, REG_VALID_MAPPED_ACCESS_MASK,
 };
 use crate::error::{LcsError, LcsResult};
 use crate::path::validate_key_component_bytes;
@@ -56,6 +56,15 @@ pub struct KeyCreatePlan<'a> {
     pub parent_guid: Guid,
     pub volatile: bool,
     pub symlink: bool,
+}
+
+/// Inputs required to compute a new registry key's initial SD.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegistryKeyInitialSecurityDescriptorInput<'a> {
+    pub parent_sd: &'a [u8],
+    pub token_owner_sid: &'a [u8],
+    pub token_primary_group_sid: &'a [u8],
+    pub token_default_dacl: Option<&'a [u8]>,
 }
 
 /// Result of resolving a `reg_create_key` target path before creation.
@@ -169,6 +178,48 @@ pub fn plan_reg_create_key_source_result(status: RsiStatus) -> RegCreateKeySourc
         },
         other => RegCreateKeySourceResultPlan::PropagateSourceStatus(other),
     }
+}
+
+/// Computes the initial SD for a newly created registry key by delegating to
+/// KACS inheritance rather than duplicating inheritance rules in LCS.
+pub fn compute_registry_key_initial_security_descriptor(
+    input: RegistryKeyInitialSecurityDescriptorInput<'_>,
+) -> LcsResult<kacs_core::PkmVec<u8>> {
+    let parent_sd = kacs_core::SecurityDescriptor::parse(input.parent_sd).map_err(|_| {
+        LcsError::MalformedSecurityDescriptor {
+            field: "reg_create_key.parent_sd",
+        }
+    })?;
+    let token_owner =
+        kacs_core::Sid::parse(input.token_owner_sid).map_err(|_| LcsError::MalformedTokenSid {
+            field: "token.owner_sid",
+        })?;
+    let token_primary_group =
+        kacs_core::Sid::parse(input.token_primary_group_sid).map_err(|_| {
+            LcsError::MalformedTokenSid {
+                field: "token.primary_group_sid",
+            }
+        })?;
+    let token_default_dacl = input
+        .token_default_dacl
+        .map(kacs_core::Acl::parse)
+        .transpose()
+        .map_err(|_| LcsError::MalformedTokenDefaultDacl)?;
+
+    kacs_core::inherit_registry_container_child_sd(kacs_core::RegistryContainerChildInheritance {
+        parent_sd,
+        token_owner,
+        token_primary_group,
+        token_default_dacl,
+        generic_mapping: kacs_core::GenericMapping {
+            read: REGISTRY_GENERIC_MAPPING.read,
+            write: REGISTRY_GENERIC_MAPPING.write,
+            execute: REGISTRY_GENERIC_MAPPING.execute,
+            all: REGISTRY_GENERIC_MAPPING.all,
+        },
+        valid_mapped_access_mask: REG_VALID_MAPPED_ACCESS_MASK,
+    })
+    .map_err(|_| LcsError::SecurityDescriptorInheritanceFailed)
 }
 
 /// Validates the additional gates for creating a symlink key.

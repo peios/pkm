@@ -302,6 +302,15 @@ pub enum LcsError {
         /// Logical source-response field.
         field: &'static str,
     },
+    /// A token SID needed for registry SD inheritance was malformed.
+    MalformedTokenSid {
+        /// Logical token field.
+        field: &'static str,
+    },
+    /// A token default DACL needed for registry SD inheritance was malformed.
+    MalformedTokenDefaultDacl,
+    /// KACS rejected or could not construct the inherited registry key SD.
+    SecurityDescriptorInheritanceFailed,
     /// RSI_DELETE_LAYER returned nil as an orphaned key GUID.
     RsiDeleteLayerOrphanedGuidNil,
     /// RSI_DELETE_LAYER returned the same orphaned key GUID more than once.

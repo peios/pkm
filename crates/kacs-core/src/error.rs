@@ -163,6 +163,8 @@ pub enum KacsError {
     ReservedAccessMaskBits(u32),
     /// `MAXIMUM_ALLOWED` appeared in an ACE mask.
     MaximumAllowedInAce(u32),
+    /// An inherited ACE mask mapped to rights outside the target object type.
+    MappedAccessMaskOutsideObjectRights(u32),
 }
 
 /// Standard result type for the slow-track semantic core.
