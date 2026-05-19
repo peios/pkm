@@ -226,6 +226,38 @@ pub enum LcsError {
     },
     /// A source response carried a status outside the defined RSI vocabulary.
     UnknownRsiStatus(u32),
+    /// An RSI message was shorter than the mandatory fixed header or status payload.
+    RsiMessageTooShort {
+        /// Actual frame length.
+        len: usize,
+        /// Minimum required length.
+        min: usize,
+    },
+    /// An RSI message's declared total length did not match the copied frame length.
+    RsiMessageLengthMismatch {
+        /// Header-declared total length.
+        total_len: u32,
+        /// Actual frame length copied from or to userspace.
+        actual_len: usize,
+    },
+    /// An RSI op code was outside the PSD-005 operation vocabulary.
+    UnknownRsiOpcode(u16),
+    /// A response request_id did not match the retained request record.
+    RsiRequestIdMismatch {
+        /// Retained request id.
+        expected: u64,
+        /// Response-provided request id.
+        actual: u64,
+    },
+    /// A response op code did not equal request op_code | RSI_RESPONSE_BIT.
+    RsiResponseOpcodeMismatch {
+        /// Expected response op code.
+        expected: u16,
+        /// Actual response op code.
+        actual: u16,
+    },
+    /// The per-source RSI request id allocator cannot advance without reusing an id.
+    RsiRequestIdOverflow,
     /// An ioctl command number is outside the PSD-005 registry ioctl vocabulary.
     UnknownRegistryIoctl(u8),
     /// A security descriptor component selector was zero.

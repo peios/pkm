@@ -137,6 +137,10 @@ pub const RSI_FLUSH: u16 = 0x40;
 pub const RSI_DELETE_LAYER: u16 = 0x50;
 
 pub const RSI_RESPONSE_BIT: u16 = 0x8000;
+pub const RSI_REQUEST_HEADER_LEN: usize = 22;
+pub const RSI_RESPONSE_HEADER_LEN: usize = 14;
+pub const RSI_STATUS_LEN: usize = 4;
+pub const RSI_MIN_RESPONSE_LEN: usize = RSI_RESPONSE_HEADER_LEN + RSI_STATUS_LEN;
 
 pub const RSI_OK: u32 = 0;
 pub const RSI_NOT_FOUND: u32 = 1;

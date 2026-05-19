@@ -115,8 +115,11 @@ pub use resolution::{
     resolve_value, validate_path_entry_write_request, validate_path_target,
 };
 pub use rsi::{
-    RsiMappedErrno, RsiStatus, RsiStatusOutcome, classify_rsi_status_code, map_rsi_status,
-    parse_rsi_status,
+    RsiMappedErrno, RsiRequestHeader, RsiRequestId, RsiRequestIdCounter, RsiResponseHeader,
+    RsiRetainedRequest, RsiStatus, RsiStatusOutcome, RsiValidatedResponse,
+    classify_rsi_status_code, map_rsi_status, parse_rsi_request_header, parse_rsi_response_header,
+    parse_rsi_status, rsi_response_op_code, validate_rsi_request_op_code,
+    validate_rsi_response_for_request,
 };
 pub use sequence::SequenceCounter;
 pub use source::{

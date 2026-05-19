@@ -1,8 +1,81 @@
 use crate::constants::{
-    RSI_ALREADY_EXISTS, RSI_CAS_FAILED, RSI_INVALID, RSI_NOT_EMPTY, RSI_NOT_FOUND, RSI_OK,
-    RSI_STORAGE_ERROR, RSI_TOO_LARGE, RSI_TXN_BUSY, RSI_TXN_NOT_SUPPORTED,
+    RSI_ABORT_TRANSACTION, RSI_ALREADY_EXISTS, RSI_BEGIN_TRANSACTION, RSI_CAS_FAILED,
+    RSI_COMMIT_TRANSACTION, RSI_CREATE_ENTRY, RSI_CREATE_KEY, RSI_DELETE_ENTRY, RSI_DELETE_LAYER,
+    RSI_DELETE_VALUE_ENTRY, RSI_DROP_KEY, RSI_ENUM_CHILDREN, RSI_FLUSH, RSI_HIDE_ENTRY,
+    RSI_INVALID, RSI_LOOKUP, RSI_MIN_RESPONSE_LEN, RSI_NOT_EMPTY, RSI_NOT_FOUND, RSI_OK,
+    RSI_QUERY_VALUES, RSI_READ_KEY, RSI_REQUEST_HEADER_LEN, RSI_RESPONSE_BIT,
+    RSI_RESPONSE_HEADER_LEN, RSI_SET_BLANKET_TOMBSTONE, RSI_SET_VALUE, RSI_STORAGE_ERROR,
+    RSI_TOO_LARGE, RSI_TXN_BUSY, RSI_TXN_NOT_SUPPORTED, RSI_WRITE_KEY,
 };
 use crate::error::{LcsError, LcsResult};
+
+pub type RsiRequestId = u64;
+
+/// Parsed common RSI request header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiRequestHeader {
+    pub total_len: u32,
+    pub request_id: RsiRequestId,
+    pub op_code: u16,
+    pub txn_id: u64,
+}
+
+/// Parsed common RSI response header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiResponseHeader {
+    pub total_len: u32,
+    pub request_id: RsiRequestId,
+    pub op_code: u16,
+}
+
+/// Retained request metadata needed to validate one response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiRetainedRequest {
+    pub request_id: RsiRequestId,
+    pub op_code: u16,
+}
+
+/// Validated response header and status field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiValidatedResponse {
+    pub header: RsiResponseHeader,
+    pub status: RsiStatus,
+}
+
+/// Per-source monotonic RSI request-id allocator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiRequestIdCounter {
+    next_request_id: RsiRequestId,
+}
+
+impl RsiRequestIdCounter {
+    pub const fn new() -> Self {
+        Self { next_request_id: 0 }
+    }
+
+    pub const fn from_next_request_id(next_request_id: RsiRequestId) -> Self {
+        Self { next_request_id }
+    }
+
+    pub const fn next_request_id(&self) -> RsiRequestId {
+        self.next_request_id
+    }
+
+    pub fn allocate(&mut self) -> LcsResult<RsiRequestId> {
+        let allocated = self.next_request_id;
+        self.next_request_id = self
+            .next_request_id
+            .checked_add(1)
+            .ok_or(LcsError::RsiRequestIdOverflow)?;
+        Ok(allocated)
+    }
+}
+
+impl Default for RsiRequestIdCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Defined RSI source response status vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,4 +160,126 @@ pub fn map_rsi_status(status: RsiStatus) -> RsiStatusOutcome {
 /// Parses and maps an RSI status code in one step.
 pub fn classify_rsi_status_code(code: u32) -> LcsResult<RsiStatusOutcome> {
     Ok(map_rsi_status(parse_rsi_status(code)?))
+}
+
+/// Validates that an op code is one of PSD-005's request op codes.
+pub fn validate_rsi_request_op_code(op_code: u16) -> LcsResult<u16> {
+    match op_code {
+        RSI_LOOKUP
+        | RSI_CREATE_ENTRY
+        | RSI_HIDE_ENTRY
+        | RSI_DELETE_ENTRY
+        | RSI_ENUM_CHILDREN
+        | RSI_CREATE_KEY
+        | RSI_READ_KEY
+        | RSI_WRITE_KEY
+        | RSI_DROP_KEY
+        | RSI_QUERY_VALUES
+        | RSI_SET_VALUE
+        | RSI_DELETE_VALUE_ENTRY
+        | RSI_SET_BLANKET_TOMBSTONE
+        | RSI_BEGIN_TRANSACTION
+        | RSI_COMMIT_TRANSACTION
+        | RSI_ABORT_TRANSACTION
+        | RSI_FLUSH
+        | RSI_DELETE_LAYER => Ok(op_code),
+        _ => Err(LcsError::UnknownRsiOpcode(op_code)),
+    }
+}
+
+/// Computes the response op code for a validated request op code.
+pub fn rsi_response_op_code(request_op_code: u16) -> LcsResult<u16> {
+    Ok(validate_rsi_request_op_code(request_op_code)? | RSI_RESPONSE_BIT)
+}
+
+/// Parses and validates the fixed request header from a complete RSI frame.
+pub fn parse_rsi_request_header(frame: &[u8]) -> LcsResult<RsiRequestHeader> {
+    validate_frame_len(frame, RSI_REQUEST_HEADER_LEN)?;
+    let header = RsiRequestHeader {
+        total_len: read_u32_le(frame, 0),
+        request_id: read_u64_le(frame, 4),
+        op_code: read_u16_le(frame, 12),
+        txn_id: read_u64_le(frame, 14),
+    };
+    validate_rsi_request_op_code(header.op_code)?;
+    Ok(header)
+}
+
+/// Parses the fixed response header from a complete RSI frame.
+pub fn parse_rsi_response_header(frame: &[u8]) -> LcsResult<RsiResponseHeader> {
+    validate_frame_len(frame, RSI_RESPONSE_HEADER_LEN)?;
+    Ok(RsiResponseHeader {
+        total_len: read_u32_le(frame, 0),
+        request_id: read_u64_le(frame, 4),
+        op_code: read_u16_le(frame, 12),
+    })
+}
+
+/// Validates a response against the retained request record it claims to answer.
+pub fn validate_rsi_response_for_request(
+    frame: &[u8],
+    retained: RsiRetainedRequest,
+) -> LcsResult<RsiValidatedResponse> {
+    validate_frame_len(frame, RSI_MIN_RESPONSE_LEN)?;
+    let header = parse_rsi_response_header(frame)?;
+    if header.request_id != retained.request_id {
+        return Err(LcsError::RsiRequestIdMismatch {
+            expected: retained.request_id,
+            actual: header.request_id,
+        });
+    }
+
+    let expected_op = rsi_response_op_code(retained.op_code)?;
+    if header.op_code != expected_op {
+        return Err(LcsError::RsiResponseOpcodeMismatch {
+            expected: expected_op,
+            actual: header.op_code,
+        });
+    }
+
+    let status = parse_rsi_status(read_u32_le(frame, RSI_RESPONSE_HEADER_LEN))?;
+    Ok(RsiValidatedResponse { header, status })
+}
+
+fn validate_frame_len(frame: &[u8], min_len: usize) -> LcsResult<()> {
+    if frame.len() < min_len {
+        return Err(LcsError::RsiMessageTooShort {
+            len: frame.len(),
+            min: min_len,
+        });
+    }
+    let total_len = read_u32_le(frame, 0);
+    if total_len as usize != frame.len() {
+        return Err(LcsError::RsiMessageLengthMismatch {
+            total_len,
+            actual_len: frame.len(),
+        });
+    }
+    Ok(())
+}
+
+fn read_u16_le(frame: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([frame[offset], frame[offset + 1]])
+}
+
+fn read_u32_le(frame: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        frame[offset],
+        frame[offset + 1],
+        frame[offset + 2],
+        frame[offset + 3],
+    ])
+}
+
+fn read_u64_le(frame: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        frame[offset],
+        frame[offset + 1],
+        frame[offset + 2],
+        frame[offset + 3],
+        frame[offset + 4],
+        frame[offset + 5],
+        frame[offset + 6],
+        frame[offset + 7],
+    ])
 }
