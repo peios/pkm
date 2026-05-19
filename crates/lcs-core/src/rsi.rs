@@ -18,6 +18,8 @@ pub const RSI_WRITE_KEY_FIELD_SD: u32 = 0x01;
 pub const RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME: u32 = 0x02;
 pub const RSI_WRITE_KEY_FIELD_KNOWN_MASK: u32 =
     RSI_WRITE_KEY_FIELD_SD | RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME;
+pub const RSI_PATH_TARGET_GUID: u8 = 0;
+pub const RSI_PATH_TARGET_HIDDEN: u8 = 1;
 
 /// Parsed common RSI request header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,6 +151,73 @@ pub struct RsiLookupRequestPayload<'a> {
     pub parent_guid: Guid,
     pub child_name: RsiLengthPrefixedField<'a>,
     pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Defined RSI path-entry target type vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RsiPathTargetType {
+    Guid = RSI_PATH_TARGET_GUID,
+    Hidden = RSI_PATH_TARGET_HIDDEN,
+}
+
+impl RsiPathTargetType {
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            RSI_PATH_TARGET_GUID => Some(Self::Guid),
+            RSI_PATH_TARGET_HIDDEN => Some(Self::Hidden),
+            _ => None,
+        }
+    }
+
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// One parsed path entry from an RSI_LOOKUP-style response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiLookupPathEntry<'a> {
+    pub layer_name: RsiLengthPrefixedField<'a>,
+    pub target_type: RsiPathTargetType,
+    pub target_guid: Guid,
+    pub sequence: u64,
+}
+
+/// One parsed key metadata entry from an RSI_LOOKUP-style response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiKeyMetadataResponseEntry<'a> {
+    pub guid: Guid,
+    pub sd: RsiLengthPrefixedField<'a>,
+    pub volatile: bool,
+    pub symlink: bool,
+    pub last_write_time: u64,
+}
+
+/// Parsed successful RSI_LOOKUP response payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiLookupSuccessResponsePayload<'a> {
+    pub response: RsiValidatedResponse,
+    pub entry_count: u32,
+    pub entries_bytes: &'a [u8],
+    pub metadata_count: u32,
+    pub metadata_bytes: &'a [u8],
+}
+
+impl<'a> RsiLookupSuccessResponsePayload<'a> {
+    pub fn for_each_path_entry<F>(&self, visitor: F) -> LcsResult<()>
+    where
+        F: FnMut(RsiLookupPathEntry<'a>) -> LcsResult<()>,
+    {
+        parse_rsi_lookup_path_entries(self.entry_count, self.entries_bytes, visitor)
+    }
+
+    pub fn for_each_key_metadata<F>(&self, visitor: F) -> LcsResult<()>
+    where
+        F: FnMut(RsiKeyMetadataResponseEntry<'a>) -> LcsResult<()>,
+    {
+        parse_rsi_key_metadata_entries(self.metadata_count, self.metadata_bytes, visitor)
+    }
 }
 
 /// Parsed RSI_CREATE_ENTRY request payload.
@@ -1198,6 +1267,38 @@ pub fn parse_rsi_query_values_success_response_payload<'a>(
     })
 }
 
+/// Parses the successful RSI_LOOKUP response payload.
+pub fn parse_rsi_lookup_success_response_payload<'a>(
+    frame: &'a [u8],
+    retained: RsiRetainedRequest,
+) -> LcsResult<RsiLookupSuccessResponsePayload<'a>> {
+    let response = validate_rsi_success_response_for_request(frame, retained, RSI_LOOKUP)?;
+    let mut cursor = RsiPayloadCursor::new(&frame[RSI_MIN_RESPONSE_LEN..]);
+    let entry_count = cursor.read_u32_le()?;
+    let entries_start = cursor.position();
+    skip_rsi_lookup_path_entries(&mut cursor, entry_count)?;
+    let entries_end = cursor.position();
+    let metadata_count = cursor.read_u32_le()?;
+    let metadata_start = cursor.position();
+    skip_rsi_key_metadata_entries(&mut cursor, metadata_count)?;
+    let metadata_end = cursor.position();
+    if cursor.remaining_len() != 0 {
+        return Err(LcsError::RsiUnexpectedResponsePayload {
+            op_code: retained.op_code,
+            extra_len: cursor.remaining_len(),
+        });
+    }
+
+    let payload = &frame[RSI_MIN_RESPONSE_LEN..];
+    Ok(RsiLookupSuccessResponsePayload {
+        response,
+        entry_count,
+        entries_bytes: &payload[entries_start..entries_end],
+        metadata_count,
+        metadata_bytes: &payload[metadata_start..metadata_end],
+    })
+}
+
 /// Plans one message-oriented source-fd read without splitting queued requests.
 pub fn plan_rsi_source_read(
     next_queued_request_len: Option<usize>,
@@ -1437,6 +1538,102 @@ where
             op_code: RSI_QUERY_VALUES,
             extra_len: cursor.remaining_len(),
         });
+    }
+    Ok(())
+}
+
+fn skip_rsi_lookup_path_entries(cursor: &mut RsiPayloadCursor<'_>, count: u32) -> LcsResult<()> {
+    for _ in 0..count {
+        cursor.read_length_prefixed()?;
+        let target_type = parse_rsi_path_target_type(cursor.read_u8()?)?;
+        let target_guid = cursor.read_guid()?;
+        validate_rsi_path_target_guid(target_type, target_guid)?;
+        cursor.read_u64_le()?;
+    }
+    Ok(())
+}
+
+fn skip_rsi_key_metadata_entries(cursor: &mut RsiPayloadCursor<'_>, count: u32) -> LcsResult<()> {
+    for _ in 0..count {
+        cursor.read_guid()?;
+        cursor.read_length_prefixed()?;
+        cursor.read_bool("key_metadata.volatile")?;
+        cursor.read_bool("key_metadata.symlink")?;
+        cursor.read_u64_le()?;
+    }
+    Ok(())
+}
+
+fn parse_rsi_lookup_path_entries<'a, F>(
+    count: u32,
+    bytes: &'a [u8],
+    mut visitor: F,
+) -> LcsResult<()>
+where
+    F: FnMut(RsiLookupPathEntry<'a>) -> LcsResult<()>,
+{
+    let mut cursor = RsiPayloadCursor::new(bytes);
+    for _ in 0..count {
+        let layer_name = cursor.read_length_prefixed()?;
+        let target_type = parse_rsi_path_target_type(cursor.read_u8()?)?;
+        let target_guid = cursor.read_guid()?;
+        validate_rsi_path_target_guid(target_type, target_guid)?;
+        let sequence = cursor.read_u64_le()?;
+        visitor(RsiLookupPathEntry {
+            layer_name,
+            target_type,
+            target_guid,
+            sequence,
+        })?;
+    }
+    if cursor.remaining_len() != 0 {
+        return Err(LcsError::RsiUnexpectedResponsePayload {
+            op_code: RSI_LOOKUP,
+            extra_len: cursor.remaining_len(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_rsi_key_metadata_entries<'a, F>(
+    count: u32,
+    bytes: &'a [u8],
+    mut visitor: F,
+) -> LcsResult<()>
+where
+    F: FnMut(RsiKeyMetadataResponseEntry<'a>) -> LcsResult<()>,
+{
+    let mut cursor = RsiPayloadCursor::new(bytes);
+    for _ in 0..count {
+        let guid = cursor.read_guid()?;
+        let sd = cursor.read_length_prefixed()?;
+        let volatile = cursor.read_bool("key_metadata.volatile")?;
+        let symlink = cursor.read_bool("key_metadata.symlink")?;
+        let last_write_time = cursor.read_u64_le()?;
+        visitor(RsiKeyMetadataResponseEntry {
+            guid,
+            sd,
+            volatile,
+            symlink,
+            last_write_time,
+        })?;
+    }
+    if cursor.remaining_len() != 0 {
+        return Err(LcsError::RsiUnexpectedResponsePayload {
+            op_code: RSI_LOOKUP,
+            extra_len: cursor.remaining_len(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_rsi_path_target_type(code: u8) -> LcsResult<RsiPathTargetType> {
+    RsiPathTargetType::from_code(code).ok_or(LcsError::InvalidRsiPathTargetType(code))
+}
+
+fn validate_rsi_path_target_guid(target_type: RsiPathTargetType, guid: Guid) -> LcsResult<()> {
+    if target_type == RsiPathTargetType::Hidden && guid != [0; 16] {
+        return Err(LcsError::RsiHiddenPathTargetGuidNotZero);
     }
     Ok(())
 }

@@ -274,6 +274,10 @@ pub enum LcsError {
     },
     /// A success-response payload parser received a non-success status.
     RsiResponseStatusNotOk(u32),
+    /// A path-entry response target_type was outside the RSI vocabulary.
+    InvalidRsiPathTargetType(u8),
+    /// A HIDDEN path-entry response target carried a non-zero GUID.
+    RsiHiddenPathTargetGuidNotZero,
     /// The per-source RSI request id allocator cannot advance without reusing an id.
     RsiRequestIdOverflow,
     /// A length-prefixed RSI payload field would overflow host arithmetic.
