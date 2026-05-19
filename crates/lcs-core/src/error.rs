@@ -316,6 +316,28 @@ pub enum LcsError {
         /// Required RSI frame length.
         required: usize,
     },
+    /// A backup record frame was shorter than the common 6-byte header.
+    BackupRecordHeaderTooShort {
+        /// Actual frame length.
+        len: usize,
+    },
+    /// An output buffer was too small for the backup record header being constructed.
+    BackupRecordHeaderBufferTooSmall {
+        /// Caller-provided output buffer length.
+        len: usize,
+    },
+    /// A backup record declared a length smaller than the common header.
+    BackupRecordTooSmall {
+        /// Header-declared record length.
+        record_len: u32,
+    },
+    /// A backup record's declared total length did not match the copied frame length.
+    BackupRecordLengthMismatch {
+        /// Header-declared record length.
+        record_len: u32,
+        /// Actual frame length copied from userspace/source stream.
+        actual_len: usize,
+    },
     /// A length-prefixed RSI payload field would overflow host arithmetic.
     RsiPayloadLengthOverflow,
     /// An RSI_WRITE_KEY request field mask contained bits not defined by PSD-005.

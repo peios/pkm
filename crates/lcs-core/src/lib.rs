@@ -8,6 +8,7 @@
 #![allow(unreachable_pub)]
 
 pub mod access;
+pub mod backup;
 pub mod casefold;
 pub mod config;
 pub mod constants;
@@ -37,6 +38,10 @@ pub use access::{
     NormalizedRegistryAccess, REGISTRY_GENERIC_MAPPING, RegistryGenericMapping,
     map_registry_generic_bits, registry_fd_has_right, validate_registry_ace_mask,
     validate_registry_desired_access, validate_registry_granted_access,
+};
+pub use backup::{
+    BACKUP_RECORD_HEADER_LEN, BackupRecordFrame, BackupRecordHeader, BackupRecordKind,
+    parse_backup_record_frame, parse_backup_record_header, write_backup_record_header,
 };
 pub use casefold::{
     casefold_cmp, casefold_eq, casefold_eq_bytes, casefold_is, unicode_simple_case_fold,
