@@ -92,6 +92,20 @@ pub struct SourceRegistrationLifecycleEffects {
     pub existing_fds_resume: bool,
 }
 
+/// Watch effect for a source slot that resumed from Down.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceRestartWatchPlan {
+    pub affected_by_resume: bool,
+    pub enqueue_overflow: bool,
+}
+
+/// First key-fd operation effect after its source slot resumed from Down.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceRestartKeyFdPlan {
+    pub affected_by_resume: bool,
+    pub dispatch_to_source: bool,
+}
+
 /// Validated source-device open plan before any registration ioctl is accepted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceDeviceOpenPlan {
@@ -152,6 +166,45 @@ pub fn plan_source_registration_lifecycle_effects(
             }
         }
     }
+}
+
+/// Plans whether a watch belongs to a source slot that just resumed.
+pub fn plan_source_restart_watch_overflow(
+    resumed_source_id: SourceId,
+    watch_source_id: SourceId,
+) -> SourceRestartWatchPlan {
+    let affected_by_resume = resumed_source_id == watch_source_id;
+    SourceRestartWatchPlan {
+        affected_by_resume,
+        enqueue_overflow: affected_by_resume,
+    }
+}
+
+/// Plans the first operation on an existing key fd after source re-registration.
+pub fn plan_source_restart_key_fd_operation(
+    resumed_source_id: SourceId,
+    fd_source_id: SourceId,
+    key_guid: Guid,
+    key_guid_exists_after_resume: bool,
+) -> LcsResult<SourceRestartKeyFdPlan> {
+    if key_guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+
+    let affected_by_resume = resumed_source_id == fd_source_id;
+    if !affected_by_resume {
+        return Ok(SourceRestartKeyFdPlan {
+            affected_by_resume: false,
+            dispatch_to_source: false,
+        });
+    }
+    if !key_guid_exists_after_resume {
+        return Err(LcsError::RestartedSourceKeyNotFound);
+    }
+    Ok(SourceRestartKeyFdPlan {
+        affected_by_resume: true,
+        dispatch_to_source: true,
+    })
 }
 
 /// Validates a REG_SRC_REGISTER request against existing source slots.

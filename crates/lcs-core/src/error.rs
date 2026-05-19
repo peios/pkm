@@ -702,6 +702,8 @@ pub enum LcsError {
     },
     /// A maintenance operation targeted a hive whose source is currently unavailable.
     HiveSourceUnavailable,
+    /// A key fd's GUID no longer exists after its source resumed from Down.
+    RestartedSourceKeyNotFound,
     /// Transaction ID zero is reserved for "no transaction" in RSI.
     InvalidTransactionId,
     /// The monotonic transaction ID allocator cannot advance without overflowing.
