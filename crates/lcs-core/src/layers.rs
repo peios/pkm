@@ -6,6 +6,7 @@ use crate::error::{LcsError, LcsResult};
 use crate::path::{is_base_layer_name, validate_layer_name_bytes, validate_value_name_bytes};
 use crate::resolution::{Guid, LayerResolutionContext, LayerView};
 use crate::source::NIL_GUID;
+use crate::transaction::TransactionTerminalErrno;
 
 /// Absolute registry path containing layer metadata keys.
 pub const LCS_LAYER_METADATA_ROOT_PATH: &str = "Machine\\System\\Registry\\Layers";
@@ -194,6 +195,23 @@ pub struct LayerDeletionPlan<'a> {
     pub preserve_security_descriptors: bool,
     pub recompute_effective_state: bool,
     pub dispatch_watch_events_for_effective_changes: bool,
+}
+
+/// Minimal transaction state needed before deleting a layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerDeletionTransactionView<'a> {
+    pub transaction_id: u64,
+    pub active_bound: bool,
+    pub written_layers: &'a [&'a str],
+}
+
+/// Planned transaction effects that must run before `RSI_DELETE_LAYER`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerDeletionAffectedTransactionsPlan {
+    pub inspected_transaction_count: usize,
+    pub affected_bound_transaction_count: usize,
+    pub abort_before_delete_layer_dispatch: bool,
+    pub affected_terminal_errno: TransactionTerminalErrno,
 }
 
 /// Planned kernel-side effects after an RSI_DELETE_LAYER success response.
@@ -409,6 +427,56 @@ pub fn plan_layer_deletion<'a>(
         preserve_security_descriptors: true,
         recompute_effective_state: true,
         dispatch_watch_events_for_effective_changes: true,
+    })
+}
+
+/// Selects bound transactions that have written to the layer being deleted.
+pub fn plan_layer_deletion_affected_transactions<'a, F>(
+    limits: &LcsLimits,
+    layer_name: &'a str,
+    transactions: &[LayerDeletionTransactionView<'a>],
+    mut emit_affected_transaction_id: F,
+) -> LcsResult<LayerDeletionAffectedTransactionsPlan>
+where
+    F: FnMut(u64) -> LcsResult<()>,
+{
+    let layer_name = validate_layer_name_bytes(layer_name.as_bytes(), limits)?;
+    if is_base_layer_name(layer_name) {
+        return Err(LcsError::BaseLayerDeletionNotAllowed);
+    }
+
+    let mut affected_bound_transaction_count = 0usize;
+    for transaction in transactions {
+        let mut transaction_matches = false;
+        for written_layer in transaction.written_layers {
+            let written_layer = validate_layer_name_bytes(written_layer.as_bytes(), limits)?;
+            if transaction.active_bound && casefold_eq(written_layer, layer_name) {
+                transaction_matches = true;
+            }
+        }
+        if transaction_matches {
+            affected_bound_transaction_count += 1;
+        }
+    }
+
+    for transaction in transactions {
+        let mut transaction_matches = false;
+        for written_layer in transaction.written_layers {
+            let written_layer = validate_layer_name_bytes(written_layer.as_bytes(), limits)?;
+            if transaction.active_bound && casefold_eq(written_layer, layer_name) {
+                transaction_matches = true;
+            }
+        }
+        if transaction_matches {
+            emit_affected_transaction_id(transaction.transaction_id)?;
+        }
+    }
+
+    Ok(LayerDeletionAffectedTransactionsPlan {
+        inspected_transaction_count: transactions.len(),
+        affected_bound_transaction_count,
+        abort_before_delete_layer_dispatch: affected_bound_transaction_count != 0,
+        affected_terminal_errno: TransactionTerminalErrno::Invalid,
     })
 }
 
