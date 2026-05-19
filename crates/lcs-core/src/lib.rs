@@ -42,9 +42,10 @@ pub use path::{
     validate_registry_path_bytes, validate_registry_path_str, validate_value_name_bytes,
 };
 pub use resolution::{
-    BlanketTombstoneEntry, Guid, LayerResolutionContext, LayerView, PathEntry, PathResolution,
-    PathTarget, ResolvedPathEntry, ResolvedValueEntry, ValueEntry, ValueResolution,
-    resolve_path_entry, resolve_value,
+    BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid, LayerResolutionContext,
+    LayerView, NamedPathEntry, NamedValueEntry, PathEntry, PathResolution, PathTarget,
+    ResolvedPathEntry, ResolvedValueEntry, ValueEntry, ValueResolution, for_each_effective_value,
+    for_each_visible_subkey, resolve_path_entry, resolve_value,
 };
 pub use sequence::SequenceCounter;
 pub use string::validate_lcs_str;

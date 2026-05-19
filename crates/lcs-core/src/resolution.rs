@@ -2,7 +2,9 @@ use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
 use crate::constants::REG_TOMBSTONE;
 use crate::error::{LcsError, LcsResult};
-use crate::path::validate_layer_name_bytes;
+use crate::path::{
+    validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
+};
 use crate::value::{RegistryValueType, ValidatedValueType, validate_value_write_type};
 
 /// LCS GUID bytes in canonical on-wire order.
@@ -89,6 +91,34 @@ pub enum ValueResolution<'a> {
     NotFound,
 }
 
+/// One source-returned value entry with its source-visible value name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NamedValueEntry<'a> {
+    pub name: &'a str,
+    pub entry: ValueEntry<'a>,
+}
+
+/// One source-returned child path entry with its source-visible child name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NamedPathEntry<'a> {
+    pub child_name: &'a str,
+    pub entry: PathEntry<'a>,
+}
+
+/// One effective value emitted by enumeration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnumeratedValue<'a> {
+    pub name: &'a str,
+    pub value: ResolvedValueEntry<'a>,
+}
+
+/// One effective visible child emitted by subkey enumeration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnumeratedSubkey<'a> {
+    pub child_name: &'a str,
+    pub path: ResolvedPathEntry<'a>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ActiveLayer<'a> {
     name: &'a str,
@@ -113,6 +143,22 @@ enum ValueCandidatePayload<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ValueCandidate<'a> {
+    layer: ActiveLayer<'a>,
+    sequence: u64,
+    payload: ValueCandidatePayload<'a>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NamedPathCandidate<'a> {
+    name: &'a str,
+    layer: ActiveLayer<'a>,
+    sequence: u64,
+    target: PathTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NamedValueCandidate<'a> {
+    name: Option<&'a str>,
     layer: ActiveLayer<'a>,
     sequence: u64,
     payload: ValueCandidatePayload<'a>,
@@ -213,6 +259,170 @@ pub fn resolve_value<'a>(
     }
 }
 
+/// Enumerates effective values from source-returned raw value entries.
+///
+/// This groups folded-equivalent names, resolves each group with blanket
+/// tombstones, and emits only visible effective values. Output order is the
+/// first-seen folded group order and is not an ABI guarantee.
+pub fn for_each_effective_value<'a, F>(
+    context: &LayerResolutionContext<'a>,
+    entries: &'a [NamedValueEntry<'a>],
+    blankets: &'a [BlanketTombstoneEntry<'a>],
+    mut emit: F,
+) -> LcsResult<usize>
+where
+    F: FnMut(EnumeratedValue<'a>) -> LcsResult<()>,
+{
+    prevalidate_value_enumeration_source(context, entries, blankets)?;
+
+    let mut emitted = 0usize;
+
+    for (index, entry) in entries.iter().enumerate() {
+        let current_name = validate_value_name_bytes(entry.name.as_bytes(), context.limits)?;
+        if value_name_seen_before(context, entries, index, current_name)? {
+            continue;
+        }
+
+        let mut best: Option<NamedValueCandidate<'a>> = None;
+        let mut duplicate_best = false;
+
+        for candidate_entry in entries {
+            let candidate_name =
+                validate_value_name_bytes(candidate_entry.name.as_bytes(), context.limits)?;
+            if !casefold_eq(candidate_name, current_name) {
+                continue;
+            }
+
+            let Some(layer) = active_layer_for_source_entry(context, candidate_entry.entry.layer)?
+            else {
+                continue;
+            };
+            validate_sequence(context, candidate_entry.entry.sequence)?;
+            let payload = validate_source_value_payload(&candidate_entry.entry)?;
+
+            let candidate = NamedValueCandidate {
+                name: Some(candidate_name),
+                layer,
+                sequence: candidate_entry.entry.sequence,
+                payload,
+            };
+            update_best_named_value(&mut best, &mut duplicate_best, candidate);
+        }
+
+        for blanket in blankets {
+            let Some(layer) = active_layer_for_source_entry(context, blanket.layer)? else {
+                continue;
+            };
+            validate_sequence(context, blanket.sequence)?;
+
+            let candidate = NamedValueCandidate {
+                name: None,
+                layer,
+                sequence: blanket.sequence,
+                payload: ValueCandidatePayload::Tombstone,
+            };
+            update_best_named_value(&mut best, &mut duplicate_best, candidate);
+        }
+
+        let Some(best) = best else {
+            continue;
+        };
+        reject_duplicate_winning_tie(duplicate_best, best.layer.precedence, best.sequence)?;
+
+        if let ValueCandidatePayload::Value { value_type, data } = best.payload {
+            let name = best
+                .name
+                .expect("visible enumerated value candidate carries its source name");
+            emit(EnumeratedValue {
+                name,
+                value: ResolvedValueEntry {
+                    value_type,
+                    data,
+                    layer: best.layer.name,
+                    precedence: best.layer.precedence,
+                    sequence: best.sequence,
+                },
+            })?;
+            emitted += 1;
+        }
+    }
+
+    Ok(emitted)
+}
+
+/// Enumerates visible subkeys from source-returned raw child path entries.
+///
+/// This groups folded-equivalent child names, resolves each group, and emits
+/// only effective GUID targets. Output order is the first-seen folded group
+/// order and is not an ABI guarantee.
+pub fn for_each_visible_subkey<'a, F>(
+    context: &LayerResolutionContext<'a>,
+    entries: &'a [NamedPathEntry<'a>],
+    mut emit: F,
+) -> LcsResult<usize>
+where
+    F: FnMut(EnumeratedSubkey<'a>) -> LcsResult<()>,
+{
+    prevalidate_subkey_enumeration_source(context, entries)?;
+
+    let mut emitted = 0usize;
+
+    for (index, entry) in entries.iter().enumerate() {
+        let current_name =
+            validate_key_component_bytes(entry.child_name.as_bytes(), context.limits)?;
+        if child_name_seen_before(context, entries, index, current_name)? {
+            continue;
+        }
+
+        let mut best: Option<NamedPathCandidate<'a>> = None;
+        let mut duplicate_best = false;
+
+        for candidate_entry in entries {
+            let candidate_name = validate_key_component_bytes(
+                candidate_entry.child_name.as_bytes(),
+                context.limits,
+            )?;
+            if !casefold_eq(candidate_name, current_name) {
+                continue;
+            }
+
+            let Some(layer) = active_layer_for_source_entry(context, candidate_entry.entry.layer)?
+            else {
+                continue;
+            };
+            validate_sequence(context, candidate_entry.entry.sequence)?;
+
+            let candidate = NamedPathCandidate {
+                name: candidate_name,
+                layer,
+                sequence: candidate_entry.entry.sequence,
+                target: candidate_entry.entry.target,
+            };
+            update_best_named_path(&mut best, &mut duplicate_best, candidate);
+        }
+
+        let Some(best) = best else {
+            continue;
+        };
+        reject_duplicate_winning_tie(duplicate_best, best.layer.precedence, best.sequence)?;
+
+        if let PathTarget::Guid(guid) = best.target {
+            emit(EnumeratedSubkey {
+                child_name: best.name,
+                path: ResolvedPathEntry {
+                    guid,
+                    layer: best.layer.name,
+                    precedence: best.layer.precedence,
+                    sequence: best.sequence,
+                },
+            })?;
+            emitted += 1;
+        }
+    }
+
+    Ok(emitted)
+}
+
 fn active_layer_for_source_entry<'a>(
     context: &LayerResolutionContext<'a>,
     source_layer: &'a str,
@@ -250,6 +460,76 @@ fn private_layer_attached(
     for private_layer in context.private_layers {
         validate_layer_name_bytes(private_layer.as_bytes(), context.limits)?;
         if casefold_eq(private_layer, layer_name) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn prevalidate_value_enumeration_source<'a>(
+    context: &LayerResolutionContext<'a>,
+    entries: &'a [NamedValueEntry<'a>],
+    blankets: &'a [BlanketTombstoneEntry<'a>],
+) -> LcsResult<()> {
+    for entry in entries {
+        validate_value_name_bytes(entry.name.as_bytes(), context.limits)?;
+        let Some(_) = active_layer_for_source_entry(context, entry.entry.layer)? else {
+            continue;
+        };
+        validate_sequence(context, entry.entry.sequence)?;
+        validate_source_value_payload(&entry.entry)?;
+    }
+
+    for blanket in blankets {
+        let Some(_) = active_layer_for_source_entry(context, blanket.layer)? else {
+            continue;
+        };
+        validate_sequence(context, blanket.sequence)?;
+    }
+
+    Ok(())
+}
+
+fn prevalidate_subkey_enumeration_source<'a>(
+    context: &LayerResolutionContext<'a>,
+    entries: &'a [NamedPathEntry<'a>],
+) -> LcsResult<()> {
+    for entry in entries {
+        validate_key_component_bytes(entry.child_name.as_bytes(), context.limits)?;
+        let Some(_) = active_layer_for_source_entry(context, entry.entry.layer)? else {
+            continue;
+        };
+        validate_sequence(context, entry.entry.sequence)?;
+    }
+
+    Ok(())
+}
+
+fn value_name_seen_before<'a>(
+    context: &LayerResolutionContext<'_>,
+    entries: &'a [NamedValueEntry<'a>],
+    index: usize,
+    current_name: &str,
+) -> LcsResult<bool> {
+    for previous in &entries[..index] {
+        let previous_name = validate_value_name_bytes(previous.name.as_bytes(), context.limits)?;
+        if casefold_eq(previous_name, current_name) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn child_name_seen_before<'a>(
+    context: &LayerResolutionContext<'_>,
+    entries: &'a [NamedPathEntry<'a>],
+    index: usize,
+    current_name: &str,
+) -> LcsResult<bool> {
+    for previous in &entries[..index] {
+        let previous_name =
+            validate_key_component_bytes(previous.child_name.as_bytes(), context.limits)?;
+        if casefold_eq(previous_name, current_name) {
             return Ok(true);
         }
     }
@@ -307,6 +587,48 @@ fn update_best_value<'a>(
     best: &mut Option<ValueCandidate<'a>>,
     duplicate_best: &mut bool,
     candidate: ValueCandidate<'a>,
+) {
+    match compare_candidate_tuple(
+        best.map(|item| (item.layer.precedence, item.sequence)),
+        candidate.layer.precedence,
+        candidate.sequence,
+    ) {
+        CandidateOrdering::First => {}
+        CandidateOrdering::Second => {
+            *best = Some(candidate);
+            *duplicate_best = false;
+        }
+        CandidateOrdering::Tie => {
+            *duplicate_best = true;
+        }
+    }
+}
+
+fn update_best_named_path<'a>(
+    best: &mut Option<NamedPathCandidate<'a>>,
+    duplicate_best: &mut bool,
+    candidate: NamedPathCandidate<'a>,
+) {
+    match compare_candidate_tuple(
+        best.map(|item| (item.layer.precedence, item.sequence)),
+        candidate.layer.precedence,
+        candidate.sequence,
+    ) {
+        CandidateOrdering::First => {}
+        CandidateOrdering::Second => {
+            *best = Some(candidate);
+            *duplicate_best = false;
+        }
+        CandidateOrdering::Tie => {
+            *duplicate_best = true;
+        }
+    }
+}
+
+fn update_best_named_value<'a>(
+    best: &mut Option<NamedValueCandidate<'a>>,
+    duplicate_best: &mut bool,
+    candidate: NamedValueCandidate<'a>,
 ) {
     match compare_candidate_tuple(
         best.map(|item| (item.layer.precedence, item.sequence)),
