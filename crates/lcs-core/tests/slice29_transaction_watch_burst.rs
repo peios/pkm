@@ -21,7 +21,6 @@ fn aborted_or_failed_transactions_discard_log_without_watch_events() {
         TransactionCompletionEvent::ExplicitAbort,
         TransactionCompletionEvent::TimeoutBeforeCommitDispatch,
         TransactionCompletionEvent::SourceDownCancellation,
-        TransactionCompletionEvent::CommitFailed,
         TransactionCompletionEvent::LateCommitFailed,
         TransactionCompletionEvent::SourceConnectionTornDownAfterCommitTimeout,
     ] {

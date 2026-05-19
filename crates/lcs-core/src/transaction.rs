@@ -86,7 +86,6 @@ pub enum TransactionCompletionEvent {
     ExplicitAbort,
     TimeoutBeforeCommitDispatch,
     SourceDownCancellation,
-    CommitFailed,
     CommitRequestTimedOutAfterDispatch,
     LateCommitSucceeded,
     LateCommitFailed,
@@ -98,7 +97,34 @@ pub enum TransactionCompletionEvent {
 pub enum TransactionKernelEffectsPlan {
     ApplyMutationLogAndEmitCommitEffects,
     DiscardMutationLogWithoutEvents,
+    RetainMutationLogForOpenTransaction,
     RetainMutationLogForLateResponse,
+}
+
+/// Synchronous source response to an in-flight REG_IOC_COMMIT request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionCommitSourceResponse {
+    Committed,
+    SourceBusy,
+    SourceFailed,
+}
+
+/// Caller-visible result class for a synchronous REG_IOC_COMMIT source response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionCommitReturnStatus {
+    Success,
+    Busy,
+    Io,
+}
+
+/// Planned transaction object effects for a synchronous source commit response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionCommitResponsePlan<'a> {
+    pub final_state: TransactionState<'a>,
+    pub state_changed: bool,
+    pub wake_poll_waiters: bool,
+    pub return_status: TransactionCommitReturnStatus,
+    pub kernel_effects: TransactionKernelEffectsPlan,
 }
 
 /// Monotonic non-zero transaction ID allocator.
@@ -402,11 +428,46 @@ pub fn plan_transaction_completion_effects(
         TransactionCompletionEvent::ExplicitAbort
         | TransactionCompletionEvent::TimeoutBeforeCommitDispatch
         | TransactionCompletionEvent::SourceDownCancellation
-        | TransactionCompletionEvent::CommitFailed
         | TransactionCompletionEvent::LateCommitFailed
         | TransactionCompletionEvent::SourceConnectionTornDownAfterCommitTimeout => {
             TransactionKernelEffectsPlan::DiscardMutationLogWithoutEvents
         }
+    }
+}
+
+/// Plans the synchronous response path for REG_IOC_COMMIT after source dispatch.
+pub fn plan_transaction_commit_response<'a>(
+    limits: &LcsLimits,
+    state: TransactionState<'a>,
+    response: TransactionCommitSourceResponse,
+) -> LcsResult<TransactionCommitResponsePlan<'a>> {
+    let TransactionState::ActiveBound(binding) = state else {
+        return Err(LcsError::InvalidTransactionRuntimeState);
+    };
+    validate_transaction_binding(limits, binding)?;
+
+    match response {
+        TransactionCommitSourceResponse::Committed => Ok(TransactionCommitResponsePlan {
+            final_state: TransactionState::Committed,
+            state_changed: true,
+            wake_poll_waiters: true,
+            return_status: TransactionCommitReturnStatus::Success,
+            kernel_effects: TransactionKernelEffectsPlan::ApplyMutationLogAndEmitCommitEffects,
+        }),
+        TransactionCommitSourceResponse::SourceBusy => Ok(TransactionCommitResponsePlan {
+            final_state: TransactionState::ActiveBound(binding),
+            state_changed: false,
+            wake_poll_waiters: false,
+            return_status: TransactionCommitReturnStatus::Busy,
+            kernel_effects: TransactionKernelEffectsPlan::RetainMutationLogForOpenTransaction,
+        }),
+        TransactionCommitSourceResponse::SourceFailed => Ok(TransactionCommitResponsePlan {
+            final_state: TransactionState::ActiveBound(binding),
+            state_changed: false,
+            wake_poll_waiters: false,
+            return_status: TransactionCommitReturnStatus::Io,
+            kernel_effects: TransactionKernelEffectsPlan::RetainMutationLogForOpenTransaction,
+        }),
     }
 }
 
