@@ -184,9 +184,28 @@ pub struct BackupValuePayload<'a> {
     pub sequence: u64,
 }
 
+/// Restore VALUE after applying GUID and sequence remapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreValue<'a> {
+    pub key_guid: Guid,
+    pub name: &'a str,
+    pub value_type: ValidatedValueType,
+    pub data: &'a [u8],
+    pub layer_name: &'a str,
+    pub sequence: u64,
+}
+
 /// Parsed BLANKET_TOMBSTONE record payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupBlanketTombstonePayload<'a> {
+    pub key_guid: Guid,
+    pub layer_name: &'a str,
+    pub sequence: u64,
+}
+
+/// Restore BLANKET_TOMBSTONE after applying GUID and sequence remapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreBlanketTombstone<'a> {
     pub key_guid: Guid,
     pub layer_name: &'a str,
     pub sequence: u64,
@@ -715,6 +734,32 @@ pub fn parse_backup_value_record<'a>(
     parse_backup_value_payload(limits, record.payload)
 }
 
+/// Remaps and validates a restore VALUE before source dispatch.
+pub fn remap_backup_restore_value<'a>(
+    value: BackupValuePayload<'a>,
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    processed_non_root_key_guids: &[Guid],
+    sequence_remapper: &mut BackupRestoreSequenceRemapper,
+) -> LcsResult<BackupRestoreValue<'a>> {
+    let key_guid = validate_restore_record_key_guid(
+        value.key_guid,
+        header_root_guid,
+        target_root_guid,
+        processed_non_root_key_guids,
+    )?;
+    let sequence = sequence_remapper.record_dispatched(value.sequence)?;
+
+    Ok(BackupRestoreValue {
+        key_guid,
+        name: value.name,
+        value_type: value.value_type,
+        data: value.data,
+        layer_name: value.layer_name,
+        sequence,
+    })
+}
+
 /// Parses and validates one BLANKET_TOMBSTONE payload.
 pub fn parse_backup_blanket_tombstone_payload<'a>(
     limits: &LcsLimits,
@@ -749,6 +794,29 @@ pub fn parse_backup_blanket_tombstone_record<'a>(
         });
     }
     parse_backup_blanket_tombstone_payload(limits, record.payload)
+}
+
+/// Remaps and validates a restore BLANKET_TOMBSTONE before source dispatch.
+pub fn remap_backup_restore_blanket_tombstone<'a>(
+    blanket: BackupBlanketTombstonePayload<'a>,
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    processed_non_root_key_guids: &[Guid],
+    sequence_remapper: &mut BackupRestoreSequenceRemapper,
+) -> LcsResult<BackupRestoreBlanketTombstone<'a>> {
+    let key_guid = validate_restore_record_key_guid(
+        blanket.key_guid,
+        header_root_guid,
+        target_root_guid,
+        processed_non_root_key_guids,
+    )?;
+    let sequence = sequence_remapper.record_dispatched(blanket.sequence)?;
+
+    Ok(BackupRestoreBlanketTombstone {
+        key_guid,
+        layer_name: blanket.layer_name,
+        sequence,
+    })
 }
 
 /// Parses and validates one TRAILER payload.
@@ -1204,6 +1272,28 @@ fn restore_key_guid_seen_before(
 
 fn guid_slice_contains(guids: &[Guid], needle: Guid) -> bool {
     guids.iter().any(|guid| *guid == needle)
+}
+
+fn validate_restore_record_key_guid(
+    key_guid: Guid,
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    processed_non_root_key_guids: &[Guid],
+) -> LcsResult<Guid> {
+    if header_root_guid == NIL_GUID || target_root_guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+
+    let remapped_key_guid = remap_backup_restore_guid(key_guid, header_root_guid, target_root_guid);
+    if remapped_key_guid != target_root_guid
+        && !guid_slice_contains(processed_non_root_key_guids, remapped_key_guid)
+    {
+        return Err(LcsError::BackupRestoreKeyGuidOutsideSubtree {
+            key_guid: remapped_key_guid,
+        });
+    }
+
+    Ok(remapped_key_guid)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

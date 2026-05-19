@@ -468,6 +468,11 @@ pub enum LcsError {
         /// Remapped parent GUID.
         parent_guid: [u8; 16],
     },
+    /// A restore VALUE or BLANKET_TOMBSTONE KeyGUID did not refer to the remapped subtree.
+    BackupRestoreKeyGuidOutsideSubtree {
+        /// Remapped key GUID.
+        key_guid: [u8; 16],
+    },
     /// A length-prefixed RSI payload field would overflow host arithmetic.
     RsiPayloadLengthOverflow,
     /// An RSI_WRITE_KEY request field mask contained bits not defined by PSD-005.
