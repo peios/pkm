@@ -108,6 +108,71 @@ pub struct BackupRestorePathEntry<'a> {
     pub sequence: u64,
 }
 
+/// Restore sequence remapper state while the allocation gate is held.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreSequenceRemapper {
+    restore_sequence_offset: u64,
+    max_dispatched_sequence: Option<u64>,
+    dispatched_count: u64,
+}
+
+impl BackupRestoreSequenceRemapper {
+    pub const fn new(restore_sequence_offset: u64) -> Self {
+        Self {
+            restore_sequence_offset,
+            max_dispatched_sequence: None,
+            dispatched_count: 0,
+        }
+    }
+
+    pub const fn restore_sequence_offset(self) -> u64 {
+        self.restore_sequence_offset
+    }
+
+    pub const fn max_dispatched_sequence(self) -> Option<u64> {
+        self.max_dispatched_sequence
+    }
+
+    pub const fn dispatched_count(self) -> u64 {
+        self.dispatched_count
+    }
+
+    /// Remaps a backup sequence and records it as dispatched.
+    pub fn record_dispatched(&mut self, backup_sequence: u64) -> LcsResult<u64> {
+        let new_sequence = self
+            .restore_sequence_offset
+            .checked_add(backup_sequence)
+            .ok_or(LcsError::SequenceOverflow)?;
+        new_sequence
+            .checked_add(1)
+            .ok_or(LcsError::SequenceOverflow)?;
+
+        self.dispatched_count = self
+            .dispatched_count
+            .checked_add(1)
+            .ok_or(LcsError::SequenceOverflow)?;
+        if self
+            .max_dispatched_sequence
+            .is_none_or(|max| new_sequence > max)
+        {
+            self.max_dispatched_sequence = Some(new_sequence);
+        }
+
+        Ok(new_sequence)
+    }
+
+    /// Computes the required next_sequence after commit, abort, failure, or cancellation.
+    pub fn terminal_next_sequence(self, current_next_sequence: u64) -> LcsResult<u64> {
+        let Some(max_dispatched_sequence) = self.max_dispatched_sequence else {
+            return Ok(current_next_sequence);
+        };
+        let required_next = max_dispatched_sequence
+            .checked_add(1)
+            .ok_or(LcsError::SequenceOverflow)?;
+        Ok(core::cmp::max(current_next_sequence, required_next))
+    }
+}
+
 /// Parsed VALUE record payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupValuePayload<'a> {
