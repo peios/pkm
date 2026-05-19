@@ -5,6 +5,10 @@ use crate::constants::{
 };
 use crate::error::{LcsError, LcsResult};
 
+const DIRECT_WATCH_EVENT_HEADER_LEN: usize = 8;
+const SUBTREE_WATCH_EVENT_DEPTH_LEN: usize = 2;
+const WATCH_COMPONENT_LEN_FIELD: usize = 2;
+
 /// Kernel watch state stored on a key fd before `REG_IOC_NOTIFY`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyWatchState {
@@ -40,6 +44,58 @@ pub enum WatchEventCategory {
     Subkey,
     SecurityDescriptor,
     Always,
+}
+
+/// Requested watch event record shape before byte serialization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatchEventRecordRequest<'a> {
+    pub event_type: u32,
+    pub name: &'a str,
+    pub subtree: bool,
+    pub path_components: &'a [&'a str],
+}
+
+/// Serializable watch event record metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatchEventRecordShape {
+    pub total_len: u32,
+    pub name_len: u16,
+    pub path_depth: Option<u16>,
+}
+
+/// Watch event record decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchEventRecordPlan {
+    Record(WatchEventRecordShape),
+    OverflowInstead,
+}
+
+/// Pending event length stored in a watch queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QueuedWatchEvent {
+    pub total_len: u32,
+}
+
+/// Watch read batching decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchReadBatchPlan {
+    WouldBlock,
+    Ready { event_count: usize, bytes: usize },
+}
+
+/// Minimal queue snapshot needed for overflow planning.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatchQueueState {
+    pub queued_events: usize,
+    pub contains_overflow: bool,
+}
+
+/// Queue insertion policy for one incoming watch event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchQueueInsertPlan {
+    QueueEvent,
+    DropOldestAndQueueOverflow,
+    DropOldestPreservingOverflowAndQueueEvent,
 }
 
 /// Validates the REG_IOC_NOTIFY filter bitmask.
@@ -118,5 +174,131 @@ pub fn watch_event_matches_filter(event_type: u32, filter: u32) -> LcsResult<boo
         WatchEventCategory::Subkey => Ok((filter & REG_NOTIFY_SUBKEY) != 0),
         WatchEventCategory::SecurityDescriptor => Ok((filter & REG_NOTIFY_SD) != 0),
         WatchEventCategory::Always => Ok(true),
+    }
+}
+
+/// Computes the record metadata for a direct or subtree watch event.
+pub fn plan_watch_event_record(
+    request: &WatchEventRecordRequest<'_>,
+) -> LcsResult<WatchEventRecordPlan> {
+    let category = watch_event_category(request.event_type)?;
+    if matches!(
+        category,
+        WatchEventCategory::SecurityDescriptor | WatchEventCategory::Always
+    ) && !request.name.is_empty()
+    {
+        return Err(LcsError::WatchNoNameEventCarriedName {
+            event_type: request.event_type,
+        });
+    }
+    if !request.subtree && !request.path_components.is_empty() {
+        return Err(LcsError::DirectWatchEventHasPath);
+    }
+
+    let name_len = match u16::try_from(request.name.len()) {
+        Ok(len) => len,
+        Err(_) => return Ok(WatchEventRecordPlan::OverflowInstead),
+    };
+    let mut total_len = match DIRECT_WATCH_EVENT_HEADER_LEN.checked_add(request.name.len()) {
+        Some(len) => len,
+        None => return Ok(WatchEventRecordPlan::OverflowInstead),
+    };
+
+    let path_depth = if request.subtree {
+        let path_depth = match u16::try_from(request.path_components.len()) {
+            Ok(depth) => depth,
+            Err(_) => return Ok(WatchEventRecordPlan::OverflowInstead),
+        };
+        total_len = match total_len.checked_add(SUBTREE_WATCH_EVENT_DEPTH_LEN) {
+            Some(len) => len,
+            None => return Ok(WatchEventRecordPlan::OverflowInstead),
+        };
+        for component in request.path_components {
+            if u16::try_from(component.len()).is_err() {
+                return Ok(WatchEventRecordPlan::OverflowInstead);
+            }
+            total_len = match total_len
+                .checked_add(WATCH_COMPONENT_LEN_FIELD)
+                .and_then(|len| len.checked_add(component.len()))
+            {
+                Some(len) => len,
+                None => return Ok(WatchEventRecordPlan::OverflowInstead),
+            };
+        }
+        Some(path_depth)
+    } else {
+        None
+    };
+
+    let total_len = match u32::try_from(total_len) {
+        Ok(len) => len,
+        Err(_) => return Ok(WatchEventRecordPlan::OverflowInstead),
+    };
+    Ok(WatchEventRecordPlan::Record(WatchEventRecordShape {
+        total_len,
+        name_len,
+        path_depth,
+    }))
+}
+
+/// Plans one read() batch without splitting variable-length watch records.
+pub fn plan_watch_read_batch(
+    pending: &[QueuedWatchEvent],
+    buffer_len: usize,
+) -> LcsResult<WatchReadBatchPlan> {
+    let Some(first) = pending.first() else {
+        return Ok(WatchReadBatchPlan::WouldBlock);
+    };
+    let first_len = validate_queued_event_len(*first)?;
+    if buffer_len < first_len {
+        return Err(LcsError::WatchReadBufferTooSmall {
+            buffer_len,
+            first_event_len: first_len,
+        });
+    }
+
+    let mut event_count = 0;
+    let mut bytes = 0usize;
+    for event in pending {
+        let event_len = validate_queued_event_len(*event)?;
+        let Some(next_bytes) = bytes.checked_add(event_len) else {
+            break;
+        };
+        if next_bytes > buffer_len {
+            break;
+        }
+        event_count += 1;
+        bytes = next_bytes;
+    }
+
+    Ok(WatchReadBatchPlan::Ready { event_count, bytes })
+}
+
+fn validate_queued_event_len(event: QueuedWatchEvent) -> LcsResult<usize> {
+    let total_len = event.total_len as usize;
+    if total_len < DIRECT_WATCH_EVENT_HEADER_LEN {
+        return Err(LcsError::InvalidWatchEventLength(event.total_len));
+    }
+    Ok(total_len)
+}
+
+/// Plans queue insertion when a watch event arrives.
+pub fn plan_watch_queue_insert(
+    queue_limit: usize,
+    state: WatchQueueState,
+) -> LcsResult<WatchQueueInsertPlan> {
+    if queue_limit == 0 {
+        return Err(LcsError::InvalidWatchQueueLimit);
+    }
+    if state.queued_events > queue_limit || (state.contains_overflow && state.queued_events == 0) {
+        return Err(LcsError::InvalidWatchQueueState);
+    }
+    if state.queued_events < queue_limit {
+        return Ok(WatchQueueInsertPlan::QueueEvent);
+    }
+    if state.contains_overflow {
+        Ok(WatchQueueInsertPlan::DropOldestPreservingOverflowAndQueueEvent)
+    } else {
+        Ok(WatchQueueInsertPlan::DropOldestAndQueueOverflow)
     }
 }

@@ -264,6 +264,26 @@ pub enum LcsError {
     OrphanedWatchArm,
     /// An internal or source-derived watch event type was outside PSD-005's vocabulary.
     UnknownWatchEventType(u32),
+    /// An event type whose name field must be empty carried a name.
+    WatchNoNameEventCarriedName {
+        /// Watch event type.
+        event_type: u32,
+    },
+    /// A direct watch event was asked to carry subtree path components.
+    DirectWatchEventHasPath,
+    /// A queued watch event length was smaller than the mandatory header.
+    InvalidWatchEventLength(u32),
+    /// A read buffer was too small to hold the first pending watch event.
+    WatchReadBufferTooSmall {
+        /// Caller-supplied read buffer length.
+        buffer_len: usize,
+        /// First queued event length.
+        first_event_len: usize,
+    },
+    /// A watch queue limit was zero.
+    InvalidWatchQueueLimit,
+    /// A watch queue snapshot was internally inconsistent.
+    InvalidWatchQueueState,
 }
 
 /// Standard result type for the LCS semantic core.
