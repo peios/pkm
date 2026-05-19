@@ -197,6 +197,15 @@ pub enum LcsError {
     MissingKeyCreateLink,
     /// Symlink creation was attempted without TCB privilege or Administrator membership.
     MissingSymlinkCreationAuthority,
+    /// A layer-targeted mutation was attempted without the required target key fd right.
+    MissingTargetKeyFdAccess {
+        /// Concrete registry access right required on the target key fd.
+        required: u32,
+    },
+    /// A layer-targeted mutation was attempted without KEY_SET_VALUE on the layer metadata key.
+    MissingLayerMetadataSetValue,
+    /// Establishing or elevating a layer above precedence 0 was attempted without SeTcbPrivilege.
+    MissingLayerPrecedenceTcb,
     /// A symlink key had no effective default value to interpret as REG_LINK.
     SymlinkDefaultValueMissing,
     /// A symlink key's effective default value was not REG_LINK.

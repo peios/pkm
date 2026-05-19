@@ -1,6 +1,7 @@
+use crate::access::{registry_fd_has_right, validate_registry_granted_access};
 use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
-use crate::constants::BASE_LAYER_NAME;
+use crate::constants::{BASE_LAYER_NAME, KEY_SET_VALUE};
 use crate::error::{LcsError, LcsResult};
 use crate::path::{is_base_layer_name, validate_layer_name_bytes};
 use crate::resolution::{LayerResolutionContext, LayerView};
@@ -18,6 +19,24 @@ pub struct LayerMetadataEntry<'a> {
     pub name: &'a str,
     pub precedence: Option<u32>,
     pub enabled: Option<bool>,
+}
+
+/// Inputs needed for layer-targeted write authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerWriteAuthorizationInput {
+    pub target_fd_granted_access: u32,
+    pub target_required_access: u32,
+    pub layer_metadata_granted_access: u32,
+    pub establishes_or_elevates_precedence_above_zero: bool,
+    pub caller_has_tcb: bool,
+}
+
+/// Successful layer-targeted write authorization plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerWriteAuthorizationPlan {
+    pub target_required_access: u32,
+    pub layer_metadata_required_access: u32,
+    pub tcb_required_for_precedence: bool,
 }
 
 /// Transactional read target affected by layer-precedence coherency.
@@ -149,6 +168,33 @@ pub fn validate_private_layer_set(limits: &LcsLimits, private_layers: &[&str]) -
     }
 
     Ok(())
+}
+
+/// Enforces the two-key authorization rule for writes targeting a layer.
+pub fn plan_layer_write_authorization(
+    input: LayerWriteAuthorizationInput,
+) -> LcsResult<LayerWriteAuthorizationPlan> {
+    validate_registry_granted_access(input.target_fd_granted_access)?;
+    validate_registry_granted_access(input.target_required_access)?;
+    validate_registry_granted_access(input.layer_metadata_granted_access)?;
+
+    if !registry_fd_has_right(input.target_fd_granted_access, input.target_required_access) {
+        return Err(LcsError::MissingTargetKeyFdAccess {
+            required: input.target_required_access,
+        });
+    }
+    if !registry_fd_has_right(input.layer_metadata_granted_access, KEY_SET_VALUE) {
+        return Err(LcsError::MissingLayerMetadataSetValue);
+    }
+    if input.establishes_or_elevates_precedence_above_zero && !input.caller_has_tcb {
+        return Err(LcsError::MissingLayerPrecedenceTcb);
+    }
+
+    Ok(LayerWriteAuthorizationPlan {
+        target_required_access: input.target_required_access,
+        layer_metadata_required_access: KEY_SET_VALUE,
+        tcb_required_for_precedence: input.establishes_or_elevates_precedence_above_zero,
+    })
 }
 
 /// Selects the read source for transactional layer-precedence-sensitive logic.
