@@ -1,4 +1,4 @@
-use crate::access::registry_fd_has_right;
+use crate::access::{registry_fd_has_right, validate_registry_granted_access};
 use crate::constants::{
     ACCESS_SYSTEM_SECURITY, DACL_SECURITY_INFORMATION, DELETE, GROUP_SECURITY_INFORMATION,
     KEY_ENUMERATE_SUB_KEYS, KEY_NOTIFY, KEY_QUERY_VALUE, KEY_SET_VALUE, OWNER_SECURITY_INFORMATION,
@@ -36,6 +36,26 @@ pub enum RegistryIoctlAccessRequirement {
     Privilege(RegistryIoctlPrivilege),
     /// The command is valid only on a transaction fd.
     TransactionFd,
+}
+
+/// Caller-visible errno for a cached key-fd ioctl access failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegistryIoctlFdAccessErrno {
+    Eacces,
+}
+
+/// Source-contact decision after checking a key fd's cached granted mask.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegistryIoctlFdAccessGatePlan {
+    Allowed {
+        required_access: u32,
+        source_contact_allowed: bool,
+    },
+    Denied {
+        required_access: u32,
+        errno: RegistryIoctlFdAccessErrno,
+        source_contact_allowed: bool,
+    },
 }
 
 /// Classifies a PSD-005 registry ioctl command number by its first access gate.
@@ -147,6 +167,22 @@ pub fn registry_ioctl_fixed_granted_mask_allows(
     }
 }
 
+/// Plans cached key-fd access gating for fixed-right ioctls.
+pub fn plan_registry_ioctl_fixed_fd_access_gate(
+    granted: u32,
+    ioctl_number: u8,
+) -> LcsResult<Option<RegistryIoctlFdAccessGatePlan>> {
+    validate_registry_granted_access(granted)?;
+    match registry_ioctl_access_requirement(ioctl_number)? {
+        RegistryIoctlAccessRequirement::KeyGrantedMask(required) => {
+            Ok(Some(registry_ioctl_fd_access_gate(granted, required)))
+        }
+        RegistryIoctlAccessRequirement::KeySecurityInfo(_)
+        | RegistryIoctlAccessRequirement::Privilege(_)
+        | RegistryIoctlAccessRequirement::TransactionFd => Ok(None),
+    }
+}
+
 /// Checks a security-info-derived key-fd ioctl against a cached granted mask.
 pub fn registry_security_info_granted_mask_allows(
     granted: u32,
@@ -155,4 +191,30 @@ pub fn registry_security_info_granted_mask_allows(
 ) -> LcsResult<bool> {
     let required = registry_security_info_required_access(operation, security_info)?;
     Ok(registry_fd_has_right(granted, required))
+}
+
+/// Plans cached key-fd access gating for security-info-derived ioctls.
+pub fn plan_registry_security_info_fd_access_gate(
+    granted: u32,
+    operation: RegistrySecurityOperation,
+    security_info: u32,
+) -> LcsResult<RegistryIoctlFdAccessGatePlan> {
+    validate_registry_granted_access(granted)?;
+    let required = registry_security_info_required_access(operation, security_info)?;
+    Ok(registry_ioctl_fd_access_gate(granted, required))
+}
+
+fn registry_ioctl_fd_access_gate(granted: u32, required: u32) -> RegistryIoctlFdAccessGatePlan {
+    if registry_fd_has_right(granted, required) {
+        RegistryIoctlFdAccessGatePlan::Allowed {
+            required_access: required,
+            source_contact_allowed: true,
+        }
+    } else {
+        RegistryIoctlFdAccessGatePlan::Denied {
+            required_access: required,
+            errno: RegistryIoctlFdAccessErrno::Eacces,
+            source_contact_allowed: false,
+        }
+    }
 }

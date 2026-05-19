@@ -127,10 +127,11 @@ pub use hives::{
 };
 pub use identity::sid_bytes_equal;
 pub use ioctl::{
-    RegistryIoctlAccessRequirement, RegistryIoctlPrivilege, RegistrySecurityOperation,
-    registry_ioctl_access_requirement, registry_ioctl_fixed_granted_mask_allows,
-    registry_security_info_granted_mask_allows, registry_security_info_required_access,
-    validate_registry_security_info,
+    RegistryIoctlAccessRequirement, RegistryIoctlFdAccessErrno, RegistryIoctlFdAccessGatePlan,
+    RegistryIoctlPrivilege, RegistrySecurityOperation, plan_registry_ioctl_fixed_fd_access_gate,
+    plan_registry_security_info_fd_access_gate, registry_ioctl_access_requirement,
+    registry_ioctl_fixed_granted_mask_allows, registry_security_info_granted_mask_allows,
+    registry_security_info_required_access, validate_registry_security_info,
 };
 pub use key::{
     KeyCanonicalPathLocation, KeyCreateOptions, KeyCreatePlan, KeyCreateRecordsPlan,
