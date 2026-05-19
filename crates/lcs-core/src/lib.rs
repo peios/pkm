@@ -141,7 +141,8 @@ pub use rsi::{
     parse_rsi_status, parse_rsi_write_key_request_payload, plan_rsi_dispatched_wait,
     plan_rsi_late_response_record, plan_rsi_malformed_source_data, plan_rsi_slot_reservation,
     plan_rsi_source_poll, plan_rsi_source_read, plan_rsi_transaction_begin_status,
-    rsi_response_op_code, validate_rsi_request_op_code, validate_rsi_response_for_request,
+    rsi_request_has_status_only_response, rsi_response_op_code, validate_rsi_request_op_code,
+    validate_rsi_response_for_request, validate_rsi_status_only_response_for_request,
     validate_rsi_write_key_field_mask,
 };
 pub use sequence::SequenceCounter;

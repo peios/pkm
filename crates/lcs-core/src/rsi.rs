@@ -983,6 +983,48 @@ pub fn validate_rsi_response_for_request(
     Ok(RsiValidatedResponse { header, status })
 }
 
+/// Reports whether a request op's successful response has only a status field.
+pub fn rsi_request_has_status_only_response(op_code: u16) -> LcsResult<bool> {
+    match validate_rsi_request_op_code(op_code)? {
+        RSI_CREATE_ENTRY
+        | RSI_HIDE_ENTRY
+        | RSI_DELETE_ENTRY
+        | RSI_CREATE_KEY
+        | RSI_WRITE_KEY
+        | RSI_DROP_KEY
+        | RSI_SET_VALUE
+        | RSI_DELETE_VALUE_ENTRY
+        | RSI_SET_BLANKET_TOMBSTONE
+        | RSI_BEGIN_TRANSACTION
+        | RSI_COMMIT_TRANSACTION
+        | RSI_ABORT_TRANSACTION
+        | RSI_FLUSH => Ok(true),
+        RSI_LOOKUP | RSI_ENUM_CHILDREN | RSI_READ_KEY | RSI_QUERY_VALUES | RSI_DELETE_LAYER => {
+            Ok(false)
+        }
+        _ => unreachable!("validate_rsi_request_op_code accepted an unknown RSI opcode"),
+    }
+}
+
+/// Validates a response for operations whose response payload is exactly status.
+pub fn validate_rsi_status_only_response_for_request(
+    frame: &[u8],
+    retained: RsiRetainedRequest,
+) -> LcsResult<RsiValidatedResponse> {
+    if !rsi_request_has_status_only_response(retained.op_code)? {
+        return Err(LcsError::RsiResponseRequiresPayloadParser(retained.op_code));
+    }
+
+    let response = validate_rsi_response_for_request(frame, retained)?;
+    if frame.len() != RSI_MIN_RESPONSE_LEN {
+        return Err(LcsError::RsiUnexpectedResponsePayload {
+            op_code: retained.op_code,
+            extra_len: frame.len() - RSI_MIN_RESPONSE_LEN,
+        });
+    }
+    Ok(response)
+}
+
 /// Plans one message-oriented source-fd read without splitting queued requests.
 pub fn plan_rsi_source_read(
     next_queued_request_len: Option<usize>,

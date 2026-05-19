@@ -256,6 +256,15 @@ pub enum LcsError {
         /// Actual response op code.
         actual: u16,
     },
+    /// A validator for status-only responses was used for an operation with a success payload.
+    RsiResponseRequiresPayloadParser(u16),
+    /// A status-only RSI response carried bytes after the status field.
+    RsiUnexpectedResponsePayload {
+        /// Request op code answered by the response.
+        op_code: u16,
+        /// Bytes following the status field.
+        extra_len: usize,
+    },
     /// The per-source RSI request id allocator cannot advance without reusing an id.
     RsiRequestIdOverflow,
     /// A length-prefixed RSI payload field would overflow host arithmetic.
