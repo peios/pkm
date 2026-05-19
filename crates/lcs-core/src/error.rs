@@ -221,6 +221,11 @@ pub enum LcsError {
         /// Unknown selector bits.
         unknown: u32,
     },
+    /// A variable-size output buffer had non-zero length but no pointer.
+    MissingOutputBufferPointer {
+        /// Requested output buffer length.
+        len: usize,
+    },
 }
 
 /// Standard result type for the LCS semantic core.

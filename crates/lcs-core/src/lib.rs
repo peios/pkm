@@ -16,6 +16,7 @@ pub mod hives;
 pub mod ioctl;
 pub mod key;
 pub mod layers;
+pub mod output_buffer;
 pub mod path;
 pub mod resolution;
 pub mod rsi;
@@ -61,6 +62,11 @@ pub use key::{
 pub use layers::{
     BASE_LAYER_VIEW, LayerMetadataEntry, for_each_effective_layer, normalize_layer_target,
     validate_layer_resolution_context, validate_layer_views, validate_private_layer_set,
+};
+pub use output_buffer::{
+    OutputBufferAggregate, OutputBufferDecision, OutputBufferRequest, OutputBufferShape,
+    aggregate_output_buffer_decisions, classify_output_buffer_request,
+    validate_output_buffer_required_size,
 };
 pub use path::{
     PathKind, PathSummary, is_base_layer_name, is_reserved_current_user_name,
