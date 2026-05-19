@@ -70,6 +70,8 @@ fn compiled_in_limits_match_psd_005_defaults_and_ranges() {
     assert_eq!(limits.max_value_size, 1_048_576);
     assert_eq!(limits.max_layers_per_value, 128);
     assert_eq!(limits.max_total_layers, 1024);
+    assert_eq!(limits.max_registered_sources, 32);
+    assert_eq!(limits.max_hives_per_source, 64);
     assert_eq!(limits.max_scope_guids_per_token, 8);
     assert_eq!(limits.max_private_layers_per_token, 16);
 

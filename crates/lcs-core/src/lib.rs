@@ -17,6 +17,7 @@ pub mod layers;
 pub mod path;
 pub mod resolution;
 pub mod sequence;
+pub mod source;
 pub mod string;
 pub mod value;
 
@@ -58,6 +59,12 @@ pub use resolution::{
     for_each_visible_subkey, resolve_path_entry, resolve_value,
 };
 pub use sequence::SequenceCounter;
+pub use source::{
+    NIL_GUID, RegisteredHiveIdentity, SourceRegistrationDecision, SourceRegistrationHive,
+    SourceRegistrationPlan, SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
+    source_registration_hive_scope, validate_source_registration,
+    validate_source_registration_hives,
+};
 pub use string::validate_lcs_str;
 pub use value::{
     RegistryValueType, ValidatedValueType, validate_value_data_len, validate_value_write_type,

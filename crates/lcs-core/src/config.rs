@@ -134,6 +134,8 @@ pub struct LcsLimits {
     pub max_value_size: usize,
     pub max_layers_per_value: usize,
     pub max_total_layers: usize,
+    pub max_registered_sources: usize,
+    pub max_hives_per_source: usize,
     pub max_scope_guids_per_token: usize,
     pub max_private_layers_per_token: usize,
 }
@@ -148,6 +150,8 @@ impl LcsLimits {
         max_value_size: MAX_VALUE_SIZE.default as usize,
         max_layers_per_value: MAX_LAYERS_PER_VALUE.default as usize,
         max_total_layers: MAX_TOTAL_LAYERS.default as usize,
+        max_registered_sources: MAX_REGISTERED_SOURCES.default as usize,
+        max_hives_per_source: MAX_HIVES_PER_SOURCE.default as usize,
         max_scope_guids_per_token: MAX_SCOPE_GUIDS_PER_TOKEN.default as usize,
         max_private_layers_per_token: MAX_PRIVATE_LAYERS_PER_TOKEN.default as usize,
     };

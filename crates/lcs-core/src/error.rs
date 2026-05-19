@@ -141,6 +141,43 @@ pub enum LcsError {
     },
     /// A private hive credential set contained duplicate scope GUIDs.
     DuplicateScopeGuid,
+    /// Source registration was attempted without SeTcbPrivilege.
+    MissingTcbPrivilege,
+    /// A source registration request contained no hives.
+    ZeroHiveCount,
+    /// A source registration request exceeded the configured hive cap.
+    TooManyHives {
+        /// Hive count.
+        count: usize,
+        /// Maximum permitted hive count.
+        max: usize,
+    },
+    /// A new source registration would exceed the configured source cap.
+    TooManyRegisteredSources {
+        /// Registered source slot count.
+        count: usize,
+        /// Maximum permitted source slot count.
+        max: usize,
+    },
+    /// A source registration hive contained unknown RSI_HIVE_* flags.
+    UnknownHiveFlags {
+        /// Full flags value.
+        flags: u32,
+        /// Unknown flag bits.
+        unknown: u32,
+    },
+    /// A global source registration hive carried a non-zero scope GUID.
+    GlobalHiveHasScopeGuid,
+    /// A source registration hive root GUID was nil.
+    NilHiveRootGuid,
+    /// A source registration request reused a root GUID within the request.
+    DuplicateHiveRootGuid,
+    /// A registration collided with an existing reserved hive identity.
+    HiveIdentityCollision,
+    /// A Down source slot was resumed with stale hive identity data.
+    StaleSourceHiveIdentity,
+    /// A Down source slot was only partially or incorrectly resumed.
+    PartialSourceResume,
 }
 
 /// Standard result type for the LCS semantic core.
