@@ -282,6 +282,8 @@ pub enum LcsError {
     },
     /// A layer-targeted mutation was attempted without KEY_SET_VALUE on the layer metadata key.
     MissingLayerMetadataSetValue,
+    /// A layer-targeted mutation named no currently published layer.
+    MissingLayerTarget,
     /// Establishing or elevating a layer above precedence 0 was attempted without SeTcbPrivilege.
     MissingLayerPrecedenceTcb,
     /// A non-base layer publication attempted to use the hardcoded base layer.

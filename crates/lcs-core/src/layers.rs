@@ -92,6 +92,12 @@ pub enum LayerCreationAdmissionErrno {
     Enospc,
 }
 
+/// Caller-facing errno class for layer-target admission failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayerTargetAdmissionErrno {
+    Enoent,
+}
+
 /// Current authoritative layer-table state before publishing a new layer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LayerCreationAdmissionInput {
@@ -103,6 +109,21 @@ pub struct LayerCreationAdmissionInput {
 pub struct LayerCreationAdmissionPlan {
     pub total_layers_after_create: usize,
     pub strict_admission_control: bool,
+}
+
+/// Input for validating a caller-requested layer target before mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerTargetAdmissionInput<'a> {
+    pub target_layer: &'a str,
+    pub layers: &'a [LayerView<'a>],
+    pub limits: &'a LcsLimits,
+}
+
+/// Published layer selected for a caller-requested layer target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerTargetAdmissionPlan<'a> {
+    pub target_layer: &'a str,
+    pub matched_layer: LayerView<'a>,
 }
 
 /// Source/cache layer metadata before PSD-005 defaults are applied.
@@ -285,6 +306,36 @@ pub fn plan_layer_creation_admission(
 pub fn layer_creation_admission_errno(error: &LcsError) -> Option<LayerCreationAdmissionErrno> {
     match error {
         LcsError::TooManyLayers { .. } => Some(LayerCreationAdmissionErrno::Enospc),
+        _ => None,
+    }
+}
+
+/// Validates that a caller-targeted layer exists in the current layer table.
+pub fn plan_layer_target_admission<'a>(
+    input: LayerTargetAdmissionInput<'a>,
+) -> LcsResult<LayerTargetAdmissionPlan<'a>> {
+    let target_layer = validate_layer_name_bytes(input.target_layer.as_bytes(), input.limits)?;
+    validate_layer_views(input.limits, input.layers)?;
+
+    let Some(matched_layer) = input
+        .layers
+        .iter()
+        .copied()
+        .find(|layer| casefold_eq(layer.name, target_layer))
+    else {
+        return Err(LcsError::MissingLayerTarget);
+    };
+
+    Ok(LayerTargetAdmissionPlan {
+        target_layer,
+        matched_layer,
+    })
+}
+
+/// Maps layer-target admission failures to caller-visible errno classes.
+pub fn layer_target_admission_errno(error: &LcsError) -> Option<LayerTargetAdmissionErrno> {
+    match error {
+        LcsError::MissingLayerTarget => Some(LayerTargetAdmissionErrno::Enoent),
         _ => None,
     }
 }
