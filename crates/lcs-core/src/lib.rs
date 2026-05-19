@@ -17,6 +17,7 @@ pub mod key;
 pub mod layers;
 pub mod path;
 pub mod resolution;
+pub mod rsi;
 pub mod sequence;
 pub mod source;
 pub mod string;
@@ -65,6 +66,10 @@ pub use resolution::{
     PathTarget, ResolvedPathEntry, ResolvedValueEntry, ValidatedPathEntryWrite, ValueEntry,
     ValueResolution, for_each_effective_value, for_each_visible_subkey, resolve_path_entry,
     resolve_value, validate_path_entry_write_request, validate_path_target,
+};
+pub use rsi::{
+    RsiMappedErrno, RsiStatus, RsiStatusOutcome, classify_rsi_status_code, map_rsi_status,
+    parse_rsi_status,
 };
 pub use sequence::SequenceCounter;
 pub use source::{

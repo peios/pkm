@@ -208,6 +208,8 @@ pub enum LcsError {
         /// Maximum permitted follow depth.
         max: usize,
     },
+    /// A source response carried a status outside the defined RSI vocabulary.
+    UnknownRsiStatus(u32),
 }
 
 /// Standard result type for the LCS semantic core.
