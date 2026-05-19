@@ -127,6 +127,7 @@ pub const MAX_PRIVATE_LAYERS_PER_TOKEN: ConfigRange = ConfigRange {
 /// Runtime LCS limits active for one operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LcsLimits {
+    pub request_timeout_ms: u32,
     pub transaction_timeout_ms: u32,
     pub max_key_depth: usize,
     pub max_path_component_length: usize,
@@ -139,6 +140,7 @@ pub struct LcsLimits {
     pub max_read_only_transactions_per_source: usize,
     pub max_registered_sources: usize,
     pub max_hives_per_source: usize,
+    pub max_concurrent_rsi_requests: usize,
     pub notification_queue_size: usize,
     pub max_subtree_watch_depth: usize,
     pub max_transaction_watch_event_burst: usize,
@@ -149,6 +151,7 @@ pub struct LcsLimits {
 impl LcsLimits {
     /// Compiled-in PSD-005 §11.4 defaults.
     pub const DEFAULT: Self = Self {
+        request_timeout_ms: REQUEST_TIMEOUT_MS.default,
         transaction_timeout_ms: TRANSACTION_TIMEOUT_MS.default,
         max_key_depth: MAX_KEY_DEPTH.default as usize,
         max_path_component_length: MAX_PATH_COMPONENT_LENGTH.default as usize,
@@ -162,6 +165,7 @@ impl LcsLimits {
             as usize,
         max_registered_sources: MAX_REGISTERED_SOURCES.default as usize,
         max_hives_per_source: MAX_HIVES_PER_SOURCE.default as usize,
+        max_concurrent_rsi_requests: MAX_CONCURRENT_RSI_REQUESTS.default as usize,
         notification_queue_size: NOTIFICATION_QUEUE_SIZE.default as usize,
         max_subtree_watch_depth: MAX_SUBTREE_WATCH_DEPTH.default as usize,
         max_transaction_watch_event_burst: MAX_TRANSACTION_WATCH_EVENT_BURST.default as usize,

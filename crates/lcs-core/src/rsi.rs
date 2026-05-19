@@ -1,3 +1,4 @@
+use crate::config::LcsLimits;
 use crate::constants::{
     RSI_ABORT_TRANSACTION, RSI_ALREADY_EXISTS, RSI_BEGIN_TRANSACTION, RSI_CAS_FAILED,
     RSI_COMMIT_TRANSACTION, RSI_CREATE_ENTRY, RSI_CREATE_KEY, RSI_DELETE_ENTRY, RSI_DELETE_LAYER,
@@ -65,6 +66,34 @@ pub struct RsiPollPlan {
     pub writable: bool,
     pub hangup: bool,
     pub error: bool,
+}
+
+/// Slot reservation result for a caller attempting to dispatch an RSI request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiSlotReservationPlan {
+    DispatchNow {
+        request_id: RsiRequestId,
+        remaining_timeout_ms: u32,
+        in_flight_after_dispatch: usize,
+    },
+    WaitForSlot {
+        remaining_timeout_ms: u32,
+    },
+    TimeoutBeforeDispatchNoRequest,
+}
+
+/// Wait result for a request that has already been dispatched to a source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiDispatchedWaitPlan {
+    ContinueWaiting {
+        remaining_timeout_ms: u32,
+    },
+    CallerTimedOutRetainRecord {
+        request_id: RsiRequestId,
+        retain_request_record: bool,
+        remains_in_flight: bool,
+        completion_may_still_occur: bool,
+    },
 }
 
 /// Per-source monotonic RSI request-id allocator.
@@ -320,6 +349,51 @@ pub fn plan_rsi_source_poll(
         writable: true,
         hangup: false,
         error: false,
+    }
+}
+
+/// Plans request dispatch against the per-source in-flight slot limit.
+pub fn plan_rsi_slot_reservation(
+    limits: &LcsLimits,
+    counter: &mut RsiRequestIdCounter,
+    in_flight_count: usize,
+    elapsed_ms_since_reservation_attempt: u32,
+) -> LcsResult<RsiSlotReservationPlan> {
+    if elapsed_ms_since_reservation_attempt >= limits.request_timeout_ms {
+        return Ok(RsiSlotReservationPlan::TimeoutBeforeDispatchNoRequest);
+    }
+
+    let remaining_timeout_ms = limits.request_timeout_ms - elapsed_ms_since_reservation_attempt;
+    if in_flight_count >= limits.max_concurrent_rsi_requests {
+        return Ok(RsiSlotReservationPlan::WaitForSlot {
+            remaining_timeout_ms,
+        });
+    }
+
+    let request_id = counter.allocate()?;
+    Ok(RsiSlotReservationPlan::DispatchNow {
+        request_id,
+        remaining_timeout_ms,
+        in_flight_after_dispatch: in_flight_count + 1,
+    })
+}
+
+/// Plans caller wait behavior for a request already dispatched to a source.
+pub fn plan_rsi_dispatched_wait(
+    request_id: RsiRequestId,
+    request_timeout_ms: u32,
+    elapsed_ms_since_reservation_attempt: u32,
+) -> RsiDispatchedWaitPlan {
+    if elapsed_ms_since_reservation_attempt < request_timeout_ms {
+        return RsiDispatchedWaitPlan::ContinueWaiting {
+            remaining_timeout_ms: request_timeout_ms - elapsed_ms_since_reservation_attempt,
+        };
+    }
+    RsiDispatchedWaitPlan::CallerTimedOutRetainRecord {
+        request_id,
+        retain_request_record: true,
+        remains_in_flight: true,
+        completion_may_still_occur: true,
     }
 }
 
