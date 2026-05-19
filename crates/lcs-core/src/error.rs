@@ -438,6 +438,31 @@ pub enum LcsError {
     DuplicateBackupLayerManifest,
     /// A backup layer-qualified record referenced a layer missing from the manifest.
     MissingBackupLayerManifest,
+    /// A backup restore stream did not contain a KEY for HEADER.RootGUID.
+    BackupRestoreRootKeyMissing,
+    /// A backup restore stream contained more than one KEY for HEADER.RootGUID.
+    BackupRestoreRootKeyDuplicate,
+    /// A backup root KEY immutable flag did not match the restore target key.
+    BackupRestoreRootImmutableFlagsConflict {
+        /// Backup root volatile flag.
+        backup_volatile: bool,
+        /// Restore target volatile flag.
+        target_volatile: bool,
+        /// Backup root symlink flag.
+        backup_symlink: bool,
+        /// Restore target symlink flag.
+        target_symlink: bool,
+    },
+    /// A backup restore stream contained duplicate remapped key GUIDs.
+    DuplicateBackupKeyGuid {
+        /// Duplicated remapped key GUID.
+        guid: [u8; 16],
+    },
+    /// A non-root backup GUID collided with an existing key outside the replaced subtree.
+    BackupGuidCollision {
+        /// Colliding remapped key GUID.
+        guid: [u8; 16],
+    },
     /// A length-prefixed RSI payload field would overflow host arithmetic.
     RsiPayloadLengthOverflow,
     /// An RSI_WRITE_KEY request field mask contained bits not defined by PSD-005.

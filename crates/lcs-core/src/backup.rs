@@ -72,6 +72,22 @@ pub struct BackupKeyPayload<'a> {
     pub last_write_time_ns: i64,
 }
 
+/// Restore target immutable key state used for backup root validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreTargetRoot {
+    pub guid: Guid,
+    pub volatile: bool,
+    pub symlink: bool,
+}
+
+/// Summary returned after validating restore key GUID invariants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreKeySetSummary<'a> {
+    pub root_key: BackupKeyPayload<'a>,
+    pub key_count: usize,
+    pub non_root_key_count: usize,
+}
+
 /// Parsed PATH_ENTRY record payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupPathEntryPayload<'a> {
@@ -424,6 +440,77 @@ pub fn parse_backup_key_record(frame: &[u8]) -> LcsResult<BackupKeyPayload<'_>> 
         });
     }
     parse_backup_key_payload(record.payload)
+}
+
+/// Maps HEADER.RootGUID references to the already-open restore target GUID.
+pub fn remap_backup_restore_guid(
+    guid: Guid,
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+) -> Guid {
+    if guid == header_root_guid {
+        target_root_guid
+    } else {
+        guid
+    }
+}
+
+/// Validates restore KEY-set invariants before source mutation.
+pub fn validate_backup_restore_key_set<'a>(
+    header_root_guid: Guid,
+    target_root: BackupRestoreTargetRoot,
+    keys: &'a [BackupKeyPayload<'a>],
+    existing_outside_subtree_guids: &[Guid],
+) -> LcsResult<BackupRestoreKeySetSummary<'a>> {
+    if header_root_guid == NIL_GUID || target_root.guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+
+    let mut root_key = None;
+    let mut non_root_key_count = 0usize;
+    for (index, key) in keys.iter().enumerate() {
+        let remapped_guid = remap_backup_restore_guid(key.guid, header_root_guid, target_root.guid);
+        if restore_key_guid_seen_before(
+            keys,
+            index,
+            header_root_guid,
+            target_root.guid,
+            remapped_guid,
+        ) {
+            if key.guid == header_root_guid && root_key.is_some() {
+                return Err(LcsError::BackupRestoreRootKeyDuplicate);
+            }
+            return Err(LcsError::DuplicateBackupKeyGuid {
+                guid: remapped_guid,
+            });
+        }
+
+        if key.guid == header_root_guid {
+            if key.volatile != target_root.volatile || key.symlink != target_root.symlink {
+                return Err(LcsError::BackupRestoreRootImmutableFlagsConflict {
+                    backup_volatile: key.volatile,
+                    target_volatile: target_root.volatile,
+                    backup_symlink: key.symlink,
+                    target_symlink: target_root.symlink,
+                });
+            }
+            root_key = Some(*key);
+        } else {
+            non_root_key_count += 1;
+            if guid_slice_contains(existing_outside_subtree_guids, remapped_guid) {
+                return Err(LcsError::BackupGuidCollision {
+                    guid: remapped_guid,
+                });
+            }
+        }
+    }
+
+    let root_key = root_key.ok_or(LcsError::BackupRestoreRootKeyMissing)?;
+    Ok(BackupRestoreKeySetSummary {
+        root_key,
+        key_count: keys.len(),
+        non_root_key_count,
+    })
 }
 
 /// Parses and validates one PATH_ENTRY payload.
@@ -984,6 +1071,27 @@ fn backup_manifest_contains_layer(
         }
     }
     Ok(false)
+}
+
+fn restore_key_guid_seen_before(
+    keys: &[BackupKeyPayload<'_>],
+    index: usize,
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    current_remapped_guid: Guid,
+) -> bool {
+    for previous in &keys[..index] {
+        if remap_backup_restore_guid(previous.guid, header_root_guid, target_root_guid)
+            == current_remapped_guid
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn guid_slice_contains(guids: &[Guid], needle: Guid) -> bool {
+    guids.iter().any(|guid| *guid == needle)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
