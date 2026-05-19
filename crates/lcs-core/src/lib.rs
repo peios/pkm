@@ -294,7 +294,8 @@ pub use transaction::{
     TransactionBoundCounterUpdate, TransactionCommitPlan, TransactionCommitResponsePlan,
     TransactionCommitReturnStatus, TransactionCommitSourceResponse, TransactionCompletionEvent,
     TransactionFdClosePlan, TransactionFdPublicationPlan, TransactionId, TransactionIdCounter,
-    TransactionKernelEffectsPlan, TransactionMutationBindingPlan, TransactionPollPlan,
+    TransactionKernelEffectsPlan, TransactionMutationAcceptanceFailure,
+    TransactionMutationAcceptancePlan, TransactionMutationBindingPlan, TransactionPollPlan,
     TransactionReadPlan, TransactionRuntimeTransitionPlan, TransactionState,
     TransactionStatusResult, TransactionTerminalErrno, TransactionUseFailure,
     plan_backup_read_only_snapshot_admission, plan_backup_read_only_snapshot_release,
@@ -302,8 +303,9 @@ pub use transaction::{
     plan_transaction_bound_counter_transition, plan_transaction_bound_counter_update,
     plan_transaction_bound_source_down, plan_transaction_commit, plan_transaction_commit_response,
     plan_transaction_completion_effects, plan_transaction_fd_close,
-    plan_transaction_mutation_binding, plan_transaction_poll, plan_transaction_read,
-    plan_transaction_timeout, transaction_status, transaction_terminal_failure,
+    plan_transaction_mutation_acceptance, plan_transaction_mutation_binding, plan_transaction_poll,
+    plan_transaction_read, plan_transaction_timeout, transaction_status,
+    transaction_terminal_failure,
 };
 pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,

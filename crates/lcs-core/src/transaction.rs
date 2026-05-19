@@ -8,6 +8,7 @@ use crate::error::{LcsError, LcsResult};
 use crate::hives::SourceId;
 use crate::path::validate_hive_name_bytes;
 use crate::resolution::Guid;
+use crate::sequence::SequenceCounter;
 use crate::source::NIL_GUID;
 
 /// Kernel-internal transaction identifier.
@@ -79,6 +80,23 @@ pub struct TransactionCommitPlan<'a> {
 pub enum TransactionMutationBindingPlan<'a> {
     BindNew(TransactionBinding<'a>),
     UseExisting(TransactionBinding<'a>),
+}
+
+/// Accepted transaction mutation with its globally allocated sequence number.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionMutationAcceptancePlan<'a> {
+    pub binding: TransactionMutationBindingPlan<'a>,
+    pub sequence: u64,
+    pub sequence_assigned_at_acceptance: bool,
+    pub commit_reuses_assigned_sequence: bool,
+    pub abort_leaves_sequence_gap: bool,
+}
+
+/// Failure while accepting a mutating operation into a transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionMutationAcceptanceFailure {
+    TransactionUse(TransactionUseFailure),
+    Sequence(LcsError),
 }
 
 /// Read context selected for a read ioctl with an optional transaction fd.
@@ -515,6 +533,37 @@ pub fn plan_transaction_mutation_binding<'a>(
         TransactionState::TimedOut => Err(TransactionUseFailure::TimedOut),
         TransactionState::SourceDown => Err(TransactionUseFailure::SourceDown),
     }
+}
+
+/// Plans acceptance of a mutating operation into a transaction and assigns its
+/// resolution sequence before commit-time source dispatch.
+pub fn plan_transaction_mutation_acceptance<'a>(
+    limits: &LcsLimits,
+    state: TransactionState<'a>,
+    target: TransactionBinding<'a>,
+    source_supports_transactions: bool,
+    current_bound_transactions_for_source: usize,
+    sequence_counter: &mut SequenceCounter,
+) -> Result<TransactionMutationAcceptancePlan<'a>, TransactionMutationAcceptanceFailure> {
+    let binding = plan_transaction_mutation_binding(
+        limits,
+        state,
+        target,
+        source_supports_transactions,
+        current_bound_transactions_for_source,
+    )
+    .map_err(TransactionMutationAcceptanceFailure::TransactionUse)?;
+    let sequence = sequence_counter
+        .allocate()
+        .map_err(TransactionMutationAcceptanceFailure::Sequence)?;
+
+    Ok(TransactionMutationAcceptancePlan {
+        binding,
+        sequence,
+        sequence_assigned_at_acceptance: true,
+        commit_reuses_assigned_sequence: true,
+        abort_leaves_sequence_gap: true,
+    })
 }
 
 /// Plans read behavior when a read ioctl is supplied a transaction fd.
