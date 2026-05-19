@@ -4,8 +4,11 @@ use crate::constants::{
     REG_BACKUP_MAGIC, REG_BACKUP_PATH_ENTRY, REG_BACKUP_TRAILER, REG_BACKUP_VALUE,
 };
 use crate::error::{LcsError, LcsResult};
-use crate::path::{validate_hive_name_bytes, validate_layer_name_bytes};
-use crate::resolution::Guid;
+use crate::path::{
+    validate_hive_name_bytes, validate_key_component_bytes, validate_layer_name_bytes,
+};
+use crate::resolution::{Guid, PathTarget, validate_path_target};
+use crate::source::NIL_GUID;
 
 pub const BACKUP_RECORD_HEADER_LEN: usize = 6;
 const BACKUP_HEADER_FIXED_PAYLOAD_LEN: usize = 8 + 4 + 4 + 8 + 16 + 4;
@@ -42,6 +45,16 @@ pub struct BackupLayerManifestPayload<'a> {
     pub precedence: u32,
     pub enabled: bool,
     pub owner_sid: &'a [u8],
+}
+
+/// Parsed PATH_ENTRY record payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupPathEntryPayload<'a> {
+    pub parent_guid: Guid,
+    pub child_name: &'a str,
+    pub target: PathTarget,
+    pub layer_name: &'a str,
+    pub sequence: u64,
 }
 
 /// Known backup record type vocabulary, preserving unknown extensions.
@@ -201,6 +214,51 @@ pub fn parse_backup_layer_manifest_record<'a>(
     parse_backup_layer_manifest_payload(limits, record.payload)
 }
 
+/// Parses and validates one PATH_ENTRY payload.
+pub fn parse_backup_path_entry_payload<'a>(
+    limits: &LcsLimits,
+    payload: &'a [u8],
+) -> LcsResult<BackupPathEntryPayload<'a>> {
+    let mut cursor = BackupPayloadCursor::new(payload);
+    let parent_guid = cursor.read_guid()?;
+    if parent_guid == NIL_GUID {
+        return Err(LcsError::NilParentGuid);
+    }
+    let child_name = cursor.read_length_prefixed_key_component(limits)?;
+    let child_guid = cursor.read_guid()?;
+    let target = if child_guid == NIL_GUID {
+        PathTarget::Hidden
+    } else {
+        validate_path_target(PathTarget::Guid(child_guid))?
+    };
+    let layer_name = cursor.read_length_prefixed_layer_name(limits)?;
+    let sequence = cursor.read_u64_le()?;
+    cursor.finish_exact(REG_BACKUP_PATH_ENTRY as u16)?;
+
+    Ok(BackupPathEntryPayload {
+        parent_guid,
+        child_name,
+        target,
+        layer_name,
+        sequence,
+    })
+}
+
+/// Parses a complete PATH_ENTRY record frame and validates the payload.
+pub fn parse_backup_path_entry_record<'a>(
+    limits: &LcsLimits,
+    frame: &'a [u8],
+) -> LcsResult<BackupPathEntryPayload<'a>> {
+    let record = parse_backup_record_frame(frame)?;
+    if record.kind != BackupRecordKind::PathEntry {
+        return Err(LcsError::BackupRecordKindMismatch {
+            expected: REG_BACKUP_PATH_ENTRY as u16,
+            actual: record.header.record_type,
+        });
+    }
+    parse_backup_path_entry_payload(limits, record.payload)
+}
+
 /// Writes the common backup record header into a caller-provided buffer.
 pub fn write_backup_record_header(
     dst: &mut [u8],
@@ -308,6 +366,65 @@ pub fn write_backup_layer_manifest_record_frame(
     Ok(total_len)
 }
 
+/// Writes a complete PATH_ENTRY record frame into a caller-provided buffer.
+pub fn write_backup_path_entry_record_frame(
+    limits: &LcsLimits,
+    dst: &mut [u8],
+    parent_guid: Guid,
+    child_name: &str,
+    target: PathTarget,
+    layer_name: &str,
+    sequence: u64,
+) -> LcsResult<usize> {
+    if parent_guid == NIL_GUID {
+        return Err(LcsError::NilParentGuid);
+    }
+    let child_name = validate_key_component_bytes(child_name.as_bytes(), limits)?;
+    let target = validate_path_target(target)?;
+    let layer_name = validate_layer_name_bytes(layer_name.as_bytes(), limits)?;
+    let payload_len = checked_add_len(16, 4 + child_name.len())?;
+    let payload_len = checked_add_len(payload_len, 16)?;
+    let payload_len = checked_add_len(payload_len, 4 + layer_name.len())?;
+    let payload_len = checked_add_len(payload_len, 8)?;
+    let total_len = checked_add_len(BACKUP_RECORD_HEADER_LEN, payload_len)?;
+    let record_len = u32::try_from(total_len).map_err(|_| LcsError::BackupPayloadLengthOverflow)?;
+    if dst.len() < total_len {
+        return Err(LcsError::BackupRecordFrameBufferTooSmall {
+            len: dst.len(),
+            required: total_len,
+        });
+    }
+
+    write_backup_record_header(
+        &mut dst[..BACKUP_RECORD_HEADER_LEN],
+        REG_BACKUP_PATH_ENTRY as u16,
+        record_len,
+    )?;
+    let payload = &mut dst[BACKUP_RECORD_HEADER_LEN..total_len];
+    let mut offset = 0usize;
+    write_fixed(payload, &mut offset, &parent_guid);
+    write_fixed(
+        payload,
+        &mut offset,
+        &(child_name.len() as u32).to_le_bytes(),
+    );
+    write_fixed(payload, &mut offset, child_name.as_bytes());
+    let child_guid = match target {
+        PathTarget::Guid(guid) => guid,
+        PathTarget::Hidden => NIL_GUID,
+    };
+    write_fixed(payload, &mut offset, &child_guid);
+    write_fixed(
+        payload,
+        &mut offset,
+        &(layer_name.len() as u32).to_le_bytes(),
+    );
+    write_fixed(payload, &mut offset, layer_name.as_bytes());
+    write_fixed(payload, &mut offset, &sequence.to_le_bytes());
+
+    Ok(total_len)
+}
+
 fn validate_backup_record_len(record_len: u32, actual_len: usize) -> LcsResult<()> {
     if record_len < BACKUP_RECORD_HEADER_LEN as u32 {
         return Err(LcsError::BackupRecordTooSmall { record_len });
@@ -353,6 +470,13 @@ impl<'a> BackupPayloadCursor<'a> {
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
+    fn read_u64_le(&mut self) -> LcsResult<u64> {
+        let bytes = self.read_fixed(8)?;
+        Ok(u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
     fn read_u8(&mut self) -> LcsResult<u8> {
         Ok(self.read_fixed(1)?[0])
     }
@@ -383,6 +507,12 @@ impl<'a> BackupPayloadCursor<'a> {
         let len = self.read_u32_le()?;
         let bytes = self.read_fixed(len as usize)?;
         validate_hive_name_bytes(bytes, limits)
+    }
+
+    fn read_length_prefixed_key_component(&mut self, limits: &LcsLimits) -> LcsResult<&'a str> {
+        let len = self.read_u32_le()?;
+        let bytes = self.read_fixed(len as usize)?;
+        validate_key_component_bytes(bytes, limits)
     }
 
     fn read_length_prefixed_layer_name(&mut self, limits: &LcsLimits) -> LcsResult<&'a str> {

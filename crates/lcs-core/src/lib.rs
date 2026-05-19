@@ -40,11 +40,13 @@ pub use access::{
     validate_registry_desired_access, validate_registry_granted_access,
 };
 pub use backup::{
-    BACKUP_RECORD_HEADER_LEN, BackupHeaderPayload, BackupLayerManifestPayload, BackupRecordFrame,
-    BackupRecordHeader, BackupRecordKind, parse_backup_header_payload, parse_backup_header_record,
-    parse_backup_layer_manifest_payload, parse_backup_layer_manifest_record,
-    parse_backup_record_frame, parse_backup_record_header, write_backup_header_record_frame,
-    write_backup_layer_manifest_record_frame, write_backup_record_header,
+    BACKUP_RECORD_HEADER_LEN, BackupHeaderPayload, BackupLayerManifestPayload,
+    BackupPathEntryPayload, BackupRecordFrame, BackupRecordHeader, BackupRecordKind,
+    parse_backup_header_payload, parse_backup_header_record, parse_backup_layer_manifest_payload,
+    parse_backup_layer_manifest_record, parse_backup_path_entry_payload,
+    parse_backup_path_entry_record, parse_backup_record_frame, parse_backup_record_header,
+    write_backup_header_record_frame, write_backup_layer_manifest_record_frame,
+    write_backup_path_entry_record_frame, write_backup_record_header,
 };
 pub use casefold::{
     casefold_cmp, casefold_eq, casefold_eq_bytes, casefold_is, unicode_simple_case_fold,
