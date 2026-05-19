@@ -70,6 +70,14 @@ pub struct BackupValuePayload<'a> {
     pub sequence: u64,
 }
 
+/// Parsed BLANKET_TOMBSTONE record payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupBlanketTombstonePayload<'a> {
+    pub key_guid: Guid,
+    pub layer_name: &'a str,
+    pub sequence: u64,
+}
+
 /// Known backup record type vocabulary, preserving unknown extensions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupRecordKind {
@@ -317,6 +325,42 @@ pub fn parse_backup_value_record<'a>(
     parse_backup_value_payload(limits, record.payload)
 }
 
+/// Parses and validates one BLANKET_TOMBSTONE payload.
+pub fn parse_backup_blanket_tombstone_payload<'a>(
+    limits: &LcsLimits,
+    payload: &'a [u8],
+) -> LcsResult<BackupBlanketTombstonePayload<'a>> {
+    let mut cursor = BackupPayloadCursor::new(payload);
+    let key_guid = cursor.read_guid()?;
+    if key_guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    let layer_name = cursor.read_length_prefixed_layer_name(limits)?;
+    let sequence = cursor.read_u64_le()?;
+    cursor.finish_exact(REG_BACKUP_BLANKET_TOMBSTONE as u16)?;
+
+    Ok(BackupBlanketTombstonePayload {
+        key_guid,
+        layer_name,
+        sequence,
+    })
+}
+
+/// Parses a complete BLANKET_TOMBSTONE record frame and validates the payload.
+pub fn parse_backup_blanket_tombstone_record<'a>(
+    limits: &LcsLimits,
+    frame: &'a [u8],
+) -> LcsResult<BackupBlanketTombstonePayload<'a>> {
+    let record = parse_backup_record_frame(frame)?;
+    if record.kind != BackupRecordKind::BlanketTombstone {
+        return Err(LcsError::BackupRecordKindMismatch {
+            expected: REG_BACKUP_BLANKET_TOMBSTONE as u16,
+            actual: record.header.record_type,
+        });
+    }
+    parse_backup_blanket_tombstone_payload(limits, record.payload)
+}
+
 /// Writes the common backup record header into a caller-provided buffer.
 pub fn write_backup_record_header(
     dst: &mut [u8],
@@ -527,6 +571,48 @@ pub fn write_backup_value_record_frame(
     write_fixed(payload, &mut offset, &value_type.to_le_bytes());
     write_fixed(payload, &mut offset, &(data.len() as u32).to_le_bytes());
     write_fixed(payload, &mut offset, data);
+    write_fixed(
+        payload,
+        &mut offset,
+        &(layer_name.len() as u32).to_le_bytes(),
+    );
+    write_fixed(payload, &mut offset, layer_name.as_bytes());
+    write_fixed(payload, &mut offset, &sequence.to_le_bytes());
+
+    Ok(total_len)
+}
+
+/// Writes a complete BLANKET_TOMBSTONE record frame into a caller-provided buffer.
+pub fn write_backup_blanket_tombstone_record_frame(
+    limits: &LcsLimits,
+    dst: &mut [u8],
+    key_guid: Guid,
+    layer_name: &str,
+    sequence: u64,
+) -> LcsResult<usize> {
+    if key_guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    let layer_name = validate_layer_name_bytes(layer_name.as_bytes(), limits)?;
+    let payload_len = checked_add_len(16, 4 + layer_name.len())?;
+    let payload_len = checked_add_len(payload_len, 8)?;
+    let total_len = checked_add_len(BACKUP_RECORD_HEADER_LEN, payload_len)?;
+    let record_len = u32::try_from(total_len).map_err(|_| LcsError::BackupPayloadLengthOverflow)?;
+    if dst.len() < total_len {
+        return Err(LcsError::BackupRecordFrameBufferTooSmall {
+            len: dst.len(),
+            required: total_len,
+        });
+    }
+
+    write_backup_record_header(
+        &mut dst[..BACKUP_RECORD_HEADER_LEN],
+        REG_BACKUP_BLANKET_TOMBSTONE as u16,
+        record_len,
+    )?;
+    let payload = &mut dst[BACKUP_RECORD_HEADER_LEN..total_len];
+    let mut offset = 0usize;
+    write_fixed(payload, &mut offset, &key_guid);
     write_fixed(
         payload,
         &mut offset,
