@@ -674,6 +674,13 @@ pub enum LcsError {
     InvalidWatchAncestry,
     /// The changed key GUID was not the last GUID in the captured mutation ancestry.
     WatchChangedKeyNotLastAncestor,
+    /// An effective value snapshot has duplicate folded value identities.
+    DuplicateEffectiveWatchValueName {
+        /// Snapshot label supplied by the caller.
+        snapshot: &'static str,
+        /// Index of the duplicate value.
+        index: usize,
+    },
     /// A known watch event type was not valid for the internal watch action being planned.
     UnexpectedInternalWatchEvent {
         /// Watch event type.

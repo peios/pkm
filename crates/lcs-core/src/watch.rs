@@ -1,3 +1,4 @@
+use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
 use crate::constants::{
     REG_NOTIFY_ALL, REG_NOTIFY_SD, REG_NOTIFY_SUBKEY, REG_NOTIFY_VALUE, REG_WATCH_KEY_DELETED,
@@ -6,8 +7,9 @@ use crate::constants::{
 };
 use crate::error::{LcsError, LcsResult};
 use crate::path::{validate_layer_name_bytes, validate_value_name_bytes};
-use crate::resolution::Guid;
+use crate::resolution::{EnumeratedValue, Guid};
 use crate::source::NIL_GUID;
+use crate::value::validate_value_data_len;
 
 const DIRECT_WATCH_EVENT_HEADER_LEN: usize = 8;
 const SUBTREE_WATCH_EVENT_DEPTH_LEN: usize = 2;
@@ -146,6 +148,22 @@ pub enum TransactionWatchBurstPlan {
         attempted_event_count: usize,
         max_event_burst: usize,
     },
+}
+
+/// Value-level effective-state watch event selected by snapshot diffing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectiveValueWatchEvent<'a> {
+    ValueSet { name: &'a str },
+    ValueDeleted { name: &'a str },
+}
+
+impl EffectiveValueWatchEvent<'_> {
+    pub fn event_type(self) -> u32 {
+        match self {
+            Self::ValueSet { .. } => REG_WATCH_VALUE_SET,
+            Self::ValueDeleted { .. } => REG_WATCH_VALUE_DELETED,
+        }
+    }
 }
 
 /// Internal LCS watcher target for self-configuration and layer metadata.
@@ -501,6 +519,48 @@ pub fn plan_transaction_watch_burst(
     Ok(TransactionWatchBurstPlan::EmitIndividualEvents { event_count })
 }
 
+/// Emits value watch events for the caller-visible effective-state difference.
+pub fn for_each_effective_value_watch_event<'a, F>(
+    limits: &LcsLimits,
+    before: &'a [EnumeratedValue<'a>],
+    after: &'a [EnumeratedValue<'a>],
+    mut emit: F,
+) -> LcsResult<usize>
+where
+    F: FnMut(EffectiveValueWatchEvent<'a>) -> LcsResult<()>,
+{
+    validate_effective_value_snapshot(limits, "before", before)?;
+    validate_effective_value_snapshot(limits, "after", after)?;
+
+    let mut emitted = 0usize;
+    for before_value in before {
+        let Some(after_value) = find_effective_value(after, before_value.name) else {
+            emit(EffectiveValueWatchEvent::ValueDeleted {
+                name: before_value.name,
+            })?;
+            emitted += 1;
+            continue;
+        };
+        if !same_effective_value(before_value, after_value) {
+            emit(EffectiveValueWatchEvent::ValueSet {
+                name: after_value.name,
+            })?;
+            emitted += 1;
+        }
+    }
+
+    for after_value in after {
+        if find_effective_value(before, after_value.name).is_none() {
+            emit(EffectiveValueWatchEvent::ValueSet {
+                name: after_value.name,
+            })?;
+            emitted += 1;
+        }
+    }
+
+    Ok(emitted)
+}
+
 /// Plans internal LCS self-watch registrations after source registration.
 pub fn plan_internal_self_watch(roots: InternalSelfWatchRoots) -> LcsResult<InternalSelfWatchPlan> {
     validate_internal_watch_guid(roots.machine_root_guid)?;
@@ -612,6 +672,55 @@ fn validate_internal_watch_guid(guid: Guid) -> LcsResult<()> {
         return Err(LcsError::NilKeyGuid);
     }
     Ok(())
+}
+
+fn validate_effective_value_snapshot(
+    limits: &LcsLimits,
+    snapshot: &'static str,
+    values: &[EnumeratedValue<'_>],
+) -> LcsResult<()> {
+    for (index, value) in values.iter().enumerate() {
+        validate_value_name_bytes(value.name.as_bytes(), limits)?;
+        validate_layer_name_bytes(value.value.layer.as_bytes(), limits)?;
+        validate_value_data_len(value.value.data.len(), limits)?;
+        if effective_value_seen_before(limits, values, index, value.name)? {
+            return Err(LcsError::DuplicateEffectiveWatchValueName { snapshot, index });
+        }
+    }
+    Ok(())
+}
+
+fn effective_value_seen_before(
+    limits: &LcsLimits,
+    values: &[EnumeratedValue<'_>],
+    index: usize,
+    current_name: &str,
+) -> LcsResult<bool> {
+    let current_name = validate_value_name_bytes(current_name.as_bytes(), limits)?;
+    for previous in &values[..index] {
+        let previous_name = validate_value_name_bytes(previous.name.as_bytes(), limits)?;
+        if casefold_eq(previous_name, current_name) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn find_effective_value<'a>(
+    values: &'a [EnumeratedValue<'a>],
+    name: &str,
+) -> Option<&'a EnumeratedValue<'a>> {
+    values
+        .iter()
+        .find(|candidate| casefold_eq(candidate.name, name))
+}
+
+fn same_effective_value(before: &EnumeratedValue<'_>, after: &EnumeratedValue<'_>) -> bool {
+    before.name == after.name
+        && before.value.value_type == after.value.value_type
+        && before.value.data == after.value.data
+        && before.value.layer == after.value.layer
+        && before.value.sequence == after.value.sequence
 }
 
 fn validate_watch_mutation_context(mutation: &WatchMutationContext<'_>) -> LcsResult<()> {
