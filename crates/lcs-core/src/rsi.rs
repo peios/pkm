@@ -15,7 +15,9 @@ use crate::path::{
 };
 use crate::resolution::{Guid, PathTarget, ValidatedPathEntryWrite};
 use crate::transaction::TransactionKernelEffectsPlan;
-use crate::value::{validate_value_data_len, validate_value_write_type};
+use crate::value::{
+    PlannedValueWrite, ValidatedValueType, validate_value_data_len, validate_value_write_type,
+};
 
 pub type RsiRequestId = u64;
 
@@ -1104,6 +1106,32 @@ pub fn write_rsi_set_value_request_frame(
             writer.write_u64_le(sequence)?;
             writer.write_u64_le(expected_sequence)
         },
+    )
+}
+
+/// Writes a complete RSI_SET_VALUE request frame from a planned value write.
+pub fn write_planned_rsi_set_value_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    planned: &PlannedValueWrite<'_>,
+) -> LcsResult<RsiBuiltRequest> {
+    let value_type = match planned.write.value_type {
+        ValidatedValueType::Normal(value_type) => value_type.code(),
+        ValidatedValueType::Tombstone => REG_TOMBSTONE,
+    };
+
+    write_rsi_set_value_request_frame(
+        dst,
+        request_id,
+        txn_id,
+        planned.write.key_guid,
+        planned.write.name.as_bytes(),
+        planned.write.layer.as_bytes(),
+        value_type,
+        planned.write.data,
+        planned.write.sequence,
+        planned.write.expected_sequence.unwrap_or(0),
     )
 }
 
