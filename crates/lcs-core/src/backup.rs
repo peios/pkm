@@ -123,6 +123,16 @@ pub struct BackupRestoreNonRootKeyTimestampWritePlan {
     pub last_write_time_ns: i64,
 }
 
+/// Root KEY-section PATH_ENTRY that is intentionally not restored.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreRootSectionPathEntrySkip<'a> {
+    pub parent_guid: Guid,
+    pub child_name: &'a str,
+    pub target: PathTarget,
+    pub layer_name: &'a str,
+    pub sequence: u64,
+}
+
 /// Parsed PATH_ENTRY record payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupPathEntryPayload<'a> {
@@ -940,6 +950,19 @@ pub fn plan_backup_restore_non_root_key_timestamp_write(
     })
 }
 
+/// Plans the required no-dispatch treatment for root-section PATH_ENTRY records.
+pub fn plan_backup_restore_root_section_path_entry_skip(
+    entry: BackupPathEntryPayload<'_>,
+) -> BackupRestoreRootSectionPathEntrySkip<'_> {
+    BackupRestoreRootSectionPathEntrySkip {
+        parent_guid: entry.parent_guid,
+        child_name: entry.child_name,
+        target: entry.target,
+        layer_name: entry.layer_name,
+        sequence: entry.sequence,
+    }
+}
+
 /// Parses and validates one PATH_ENTRY payload.
 pub fn parse_backup_path_entry_payload<'a>(
     limits: &LcsLimits,
@@ -1111,6 +1134,22 @@ pub fn remap_backup_restore_value<'a>(
     })
 }
 
+/// Remaps a root KEY-section VALUE before source dispatch.
+pub fn remap_backup_restore_root_section_value<'a>(
+    value: BackupValuePayload<'a>,
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    sequence_remapper: &mut BackupRestoreSequenceRemapper,
+) -> LcsResult<BackupRestoreValue<'a>> {
+    remap_backup_restore_value(
+        value,
+        header_root_guid,
+        target_root_guid,
+        &[],
+        sequence_remapper,
+    )
+}
+
 /// Parses and validates one BLANKET_TOMBSTONE payload.
 pub fn parse_backup_blanket_tombstone_payload<'a>(
     limits: &LcsLimits,
@@ -1168,6 +1207,22 @@ pub fn remap_backup_restore_blanket_tombstone<'a>(
         layer_name: blanket.layer_name,
         sequence,
     })
+}
+
+/// Remaps a root KEY-section BLANKET_TOMBSTONE before source dispatch.
+pub fn remap_backup_restore_root_section_blanket_tombstone<'a>(
+    blanket: BackupBlanketTombstonePayload<'a>,
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    sequence_remapper: &mut BackupRestoreSequenceRemapper,
+) -> LcsResult<BackupRestoreBlanketTombstone<'a>> {
+    remap_backup_restore_blanket_tombstone(
+        blanket,
+        header_root_guid,
+        target_root_guid,
+        &[],
+        sequence_remapper,
+    )
 }
 
 /// Parses and validates one TRAILER payload.
