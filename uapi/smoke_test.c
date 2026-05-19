@@ -51,6 +51,44 @@ _Static_assert(KMES_EVENT_HEADER_BASE_SIZE
 	       "KMES event-header base size disagrees with its field offsets");
 _Static_assert(sizeof(struct kmes_emit_entry) == 32,
 	       "kmes_emit_entry must be 32 bytes");
+_Static_assert(RSI_REQUEST_ID_OFFSET
+		       == RSI_REQUEST_TOTAL_LEN_OFFSET + sizeof(__u32),
+	       "RSI request-header offsets are not contiguous");
+_Static_assert(RSI_REQUEST_OP_CODE_OFFSET
+		       == RSI_REQUEST_ID_OFFSET + sizeof(__u64),
+	       "RSI request-header offsets are not contiguous");
+_Static_assert(RSI_REQUEST_TXN_ID_OFFSET
+		       == RSI_REQUEST_OP_CODE_OFFSET + sizeof(__u16),
+	       "RSI request-header offsets are not contiguous");
+_Static_assert(RSI_REQUEST_HEADER_SIZE
+		       == RSI_REQUEST_TXN_ID_OFFSET + sizeof(__u64),
+	       "RSI request-header size disagrees with PSD-005");
+_Static_assert(RSI_RESPONSE_ID_OFFSET
+		       == RSI_RESPONSE_TOTAL_LEN_OFFSET + sizeof(__u32),
+	       "RSI response-header offsets are not contiguous");
+_Static_assert(RSI_RESPONSE_OP_CODE_OFFSET
+		       == RSI_RESPONSE_ID_OFFSET + sizeof(__u64),
+	       "RSI response-header offsets are not contiguous");
+_Static_assert(RSI_RESPONSE_HEADER_SIZE
+		       == RSI_RESPONSE_OP_CODE_OFFSET + sizeof(__u16),
+	       "RSI response-header size disagrees with PSD-005");
+_Static_assert(RSI_RESPONSE_STATUS_OFFSET == RSI_RESPONSE_HEADER_SIZE,
+	       "RSI response status must be first payload field");
+_Static_assert(RSI_MIN_RESPONSE_SIZE
+		       == RSI_RESPONSE_STATUS_OFFSET + RSI_STATUS_SIZE,
+	       "RSI minimum response size disagrees with PSD-005");
+_Static_assert(RSI_LENGTH_PREFIX_SIZE == sizeof(__u32),
+	       "RSI length-prefixed fields use uint32 lengths");
+_Static_assert(RSI_GUID_SIZE == 16,
+	       "RSI GUID fields must be 16 raw bytes");
+_Static_assert(RSI_LOOKUP_RESPONSE == (RSI_LOOKUP | RSI_RESPONSE_BIT),
+	       "RSI response op-code high bit disagrees with PSD-005");
+_Static_assert(RSI_PATH_TARGET_GUID == 0 && RSI_PATH_TARGET_HIDDEN == 1,
+	       "RSI path target codes disagree with PSD-005");
+_Static_assert(RSI_WRITE_KEY_FIELD_KNOWN_MASK
+		       == (RSI_WRITE_KEY_FIELD_SD
+			   | RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME),
+	       "RSI_WRITE_KEY field mask disagrees with PSD-005");
 
 ASSERT_STRUCT_SIZE(reg_query_value_args, REG_QUERY_VALUE_ARGS_SIZE);
 ASSERT_FIELD_OFFSET(reg_query_value_args, name_len, 0);

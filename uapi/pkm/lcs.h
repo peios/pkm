@@ -344,6 +344,25 @@ struct reg_src_hive_entry {
 #define REG_NOTIFY_SD				0x04U
 #define REG_NOTIFY_ALL				0x07U
 
+/* RSI common wire layout. */
+#define RSI_REQUEST_TOTAL_LEN_OFFSET		0U
+#define RSI_REQUEST_ID_OFFSET			4U
+#define RSI_REQUEST_OP_CODE_OFFSET		12U
+#define RSI_REQUEST_TXN_ID_OFFSET		14U
+#define RSI_REQUEST_HEADER_SIZE		22U
+
+#define RSI_RESPONSE_TOTAL_LEN_OFFSET		0U
+#define RSI_RESPONSE_ID_OFFSET			4U
+#define RSI_RESPONSE_OP_CODE_OFFSET		12U
+#define RSI_RESPONSE_HEADER_SIZE		14U
+#define RSI_RESPONSE_STATUS_OFFSET		14U
+#define RSI_STATUS_SIZE			4U
+#define RSI_MIN_RESPONSE_SIZE			18U
+
+#define RSI_LENGTH_PREFIX_SIZE			4U
+#define RSI_GUID_SIZE				16U
+#define RSI_RESPONSE_BIT			0x8000U
+
 /* RSI op codes and response op codes. */
 #define RSI_LOOKUP				0x0001U
 #define RSI_CREATE_ENTRY			0x0002U
@@ -394,6 +413,16 @@ struct reg_src_hive_entry {
 #define RSI_INVALID				7U
 #define RSI_CAS_FAILED			8U
 #define RSI_TXN_NOT_SUPPORTED			9U
+
+/* RSI path target types. */
+#define RSI_PATH_TARGET_GUID			0U
+#define RSI_PATH_TARGET_HIDDEN			1U
+
+/* RSI_WRITE_KEY field mask bits. */
+#define RSI_WRITE_KEY_FIELD_SD			0x01U
+#define RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME	0x02U
+#define RSI_WRITE_KEY_FIELD_KNOWN_MASK \
+	(RSI_WRITE_KEY_FIELD_SD | RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME)
 
 /* RSI transaction modes and source-registration flags. */
 #define RSI_TXN_READ_WRITE			0U
