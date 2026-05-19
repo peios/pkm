@@ -245,6 +245,49 @@ pub struct RsiQueryValuesRequestPayload<'a> {
     pub trailing: RsiTrailingOptionalFieldsPlan,
 }
 
+/// One parsed value entry from a successful RSI_QUERY_VALUES response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiQueryValueResponseEntry<'a> {
+    pub value_name: RsiLengthPrefixedField<'a>,
+    pub layer_name: RsiLengthPrefixedField<'a>,
+    pub value_type: u32,
+    pub data: RsiLengthPrefixedField<'a>,
+    pub sequence: u64,
+}
+
+/// One parsed blanket tombstone entry from a successful RSI_QUERY_VALUES response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiQueryValuesBlanketResponseEntry<'a> {
+    pub layer_name: RsiLengthPrefixedField<'a>,
+    pub sequence: u64,
+}
+
+/// Parsed successful RSI_QUERY_VALUES response payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiQueryValuesSuccessResponsePayload<'a> {
+    pub response: RsiValidatedResponse,
+    pub entry_count: u32,
+    pub entries_bytes: &'a [u8],
+    pub blanket_count: u32,
+    pub blanket_bytes: &'a [u8],
+}
+
+impl<'a> RsiQueryValuesSuccessResponsePayload<'a> {
+    pub fn for_each_value_entry<F>(&self, visitor: F) -> LcsResult<()>
+    where
+        F: FnMut(RsiQueryValueResponseEntry<'a>) -> LcsResult<()>,
+    {
+        parse_rsi_query_value_entries(self.entry_count, self.entries_bytes, visitor)
+    }
+
+    pub fn for_each_blanket_entry<F>(&self, visitor: F) -> LcsResult<()>
+    where
+        F: FnMut(RsiQueryValuesBlanketResponseEntry<'a>) -> LcsResult<()>,
+    {
+        parse_rsi_query_values_blankets(self.blanket_count, self.blanket_bytes, visitor)
+    }
+}
+
 /// Parsed RSI_SET_VALUE request payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiSetValueRequestPayload<'a> {
@@ -1123,6 +1166,38 @@ pub fn parse_rsi_delete_layer_success_response_payload<'a>(
     })
 }
 
+/// Parses the successful RSI_QUERY_VALUES response payload.
+pub fn parse_rsi_query_values_success_response_payload<'a>(
+    frame: &'a [u8],
+    retained: RsiRetainedRequest,
+) -> LcsResult<RsiQueryValuesSuccessResponsePayload<'a>> {
+    let response = validate_rsi_success_response_for_request(frame, retained, RSI_QUERY_VALUES)?;
+    let mut cursor = RsiPayloadCursor::new(&frame[RSI_MIN_RESPONSE_LEN..]);
+    let entry_count = cursor.read_u32_le()?;
+    let entries_start = cursor.position();
+    skip_rsi_query_value_entries(&mut cursor, entry_count)?;
+    let entries_end = cursor.position();
+    let blanket_count = cursor.read_u32_le()?;
+    let blanket_start = cursor.position();
+    skip_rsi_query_values_blankets(&mut cursor, blanket_count)?;
+    let blanket_end = cursor.position();
+    if cursor.remaining_len() != 0 {
+        return Err(LcsError::RsiUnexpectedResponsePayload {
+            op_code: retained.op_code,
+            extra_len: cursor.remaining_len(),
+        });
+    }
+
+    let payload = &frame[RSI_MIN_RESPONSE_LEN..];
+    Ok(RsiQueryValuesSuccessResponsePayload {
+        response,
+        entry_count,
+        entries_bytes: &payload[entries_start..entries_end],
+        blanket_count,
+        blanket_bytes: &payload[blanket_start..blanket_end],
+    })
+}
+
 /// Plans one message-oriented source-fd read without splitting queued requests.
 pub fn plan_rsi_source_read(
     next_queued_request_len: Option<usize>,
@@ -1287,6 +1362,83 @@ fn validate_rsi_success_response_for_request(
         return Err(LcsError::RsiResponseStatusNotOk(response.status.code()));
     }
     Ok(response)
+}
+
+fn skip_rsi_query_value_entries(cursor: &mut RsiPayloadCursor<'_>, count: u32) -> LcsResult<()> {
+    for _ in 0..count {
+        cursor.read_length_prefixed()?;
+        cursor.read_length_prefixed()?;
+        cursor.read_u32_le()?;
+        cursor.read_length_prefixed()?;
+        cursor.read_u64_le()?;
+    }
+    Ok(())
+}
+
+fn skip_rsi_query_values_blankets(cursor: &mut RsiPayloadCursor<'_>, count: u32) -> LcsResult<()> {
+    for _ in 0..count {
+        cursor.read_length_prefixed()?;
+        cursor.read_u64_le()?;
+    }
+    Ok(())
+}
+
+fn parse_rsi_query_value_entries<'a, F>(
+    count: u32,
+    bytes: &'a [u8],
+    mut visitor: F,
+) -> LcsResult<()>
+where
+    F: FnMut(RsiQueryValueResponseEntry<'a>) -> LcsResult<()>,
+{
+    let mut cursor = RsiPayloadCursor::new(bytes);
+    for _ in 0..count {
+        let value_name = cursor.read_length_prefixed()?;
+        let layer_name = cursor.read_length_prefixed()?;
+        let value_type = cursor.read_u32_le()?;
+        let data = cursor.read_length_prefixed()?;
+        let sequence = cursor.read_u64_le()?;
+        visitor(RsiQueryValueResponseEntry {
+            value_name,
+            layer_name,
+            value_type,
+            data,
+            sequence,
+        })?;
+    }
+    if cursor.remaining_len() != 0 {
+        return Err(LcsError::RsiUnexpectedResponsePayload {
+            op_code: RSI_QUERY_VALUES,
+            extra_len: cursor.remaining_len(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_rsi_query_values_blankets<'a, F>(
+    count: u32,
+    bytes: &'a [u8],
+    mut visitor: F,
+) -> LcsResult<()>
+where
+    F: FnMut(RsiQueryValuesBlanketResponseEntry<'a>) -> LcsResult<()>,
+{
+    let mut cursor = RsiPayloadCursor::new(bytes);
+    for _ in 0..count {
+        let layer_name = cursor.read_length_prefixed()?;
+        let sequence = cursor.read_u64_le()?;
+        visitor(RsiQueryValuesBlanketResponseEntry {
+            layer_name,
+            sequence,
+        })?;
+    }
+    if cursor.remaining_len() != 0 {
+        return Err(LcsError::RsiUnexpectedResponsePayload {
+            op_code: RSI_QUERY_VALUES,
+            extra_len: cursor.remaining_len(),
+        });
+    }
+    Ok(())
 }
 
 fn read_u16_le(frame: &[u8], offset: usize) -> u16 {
