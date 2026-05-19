@@ -54,12 +54,12 @@ pub use backup::{
     parse_backup_path_entry_record, parse_backup_record_frame, parse_backup_record_header,
     parse_backup_trailer_payload, parse_backup_trailer_record, parse_backup_value_payload,
     parse_backup_value_record, remap_backup_restore_blanket_tombstone, remap_backup_restore_guid,
-    remap_backup_restore_path_entry, remap_backup_restore_value,
-    validate_backup_layer_manifest_set, validate_backup_restore_key_set,
-    write_backup_blanket_tombstone_record_frame, write_backup_header_record_frame,
-    write_backup_key_record_frame, write_backup_layer_manifest_record_frame,
-    write_backup_path_entry_record_frame, write_backup_record_header,
-    write_backup_trailer_record_frame, write_backup_value_record_frame,
+    remap_backup_restore_path_entry, remap_backup_restore_path_entry_for_dispatch,
+    remap_backup_restore_value, validate_backup_layer_manifest_set,
+    validate_backup_restore_key_set, write_backup_blanket_tombstone_record_frame,
+    write_backup_header_record_frame, write_backup_key_record_frame,
+    write_backup_layer_manifest_record_frame, write_backup_path_entry_record_frame,
+    write_backup_record_header, write_backup_trailer_record_frame, write_backup_value_record_frame,
 };
 pub use casefold::{
     casefold_cmp, casefold_eq, casefold_eq_bytes, casefold_is, unicode_simple_case_fold,

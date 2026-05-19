@@ -689,6 +689,24 @@ pub fn remap_backup_restore_path_entry<'a>(
     })
 }
 
+/// Remaps a restore PATH_ENTRY and applies restore sequence remapping.
+pub fn remap_backup_restore_path_entry_for_dispatch<'a>(
+    entry: BackupPathEntryPayload<'a>,
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    processed_non_root_key_guids: &[Guid],
+    sequence_remapper: &mut BackupRestoreSequenceRemapper,
+) -> LcsResult<BackupRestorePathEntry<'a>> {
+    let mut restored = remap_backup_restore_path_entry(
+        entry,
+        header_root_guid,
+        target_root_guid,
+        processed_non_root_key_guids,
+    )?;
+    restored.sequence = sequence_remapper.record_dispatched(entry.sequence)?;
+    Ok(restored)
+}
+
 /// Parses and validates one VALUE payload.
 pub fn parse_backup_value_payload<'a>(
     limits: &LcsLimits,
