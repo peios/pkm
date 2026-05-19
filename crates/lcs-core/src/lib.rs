@@ -75,12 +75,13 @@ pub use path::{
     validate_registry_path_bytes, validate_registry_path_str, validate_value_name_bytes,
 };
 pub use query::{
-    EnumValueOutcome, EnumValueOutputBufferDecision, EnumValueOutputBuffers, EnumValueResult,
+    EnumSubkeyOutcome, EnumSubkeyOutputBufferDecision, EnumSubkeyResult, EnumValueOutcome,
+    EnumValueOutputBufferDecision, EnumValueOutputBuffers, EnumValueResult, EnumeratedSubkeyInfo,
     QueryValueOutcome, QueryValueOutputBufferDecision, QueryValueOutputBuffers, QueryValueResult,
-    QueryValuesBatchOutputDecision, enum_value_result_at, packed_batch_value_len,
-    query_value_result_from_resolution, query_values_batch_required_len,
-    validate_enum_value_output_buffers, validate_query_value_output_buffers,
-    validate_query_values_batch_output,
+    QueryValuesBatchOutputDecision, enum_subkey_result_at, enum_value_result_at,
+    packed_batch_value_len, query_value_result_from_resolution, query_values_batch_required_len,
+    validate_enum_subkey_output_buffer, validate_enum_value_output_buffers,
+    validate_query_value_output_buffers, validate_query_values_batch_output,
 };
 pub use resolution::{
     BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid, LayerResolutionContext,

@@ -3,7 +3,7 @@ use crate::output_buffer::{
     OutputBufferAggregate, OutputBufferDecision, OutputBufferRequest,
     aggregate_output_buffer_decisions, validate_output_buffer_required_size,
 };
-use crate::resolution::{EnumeratedValue, ResolvedValueEntry, ValueResolution};
+use crate::resolution::{EnumeratedSubkey, EnumeratedValue, ResolvedValueEntry, ValueResolution};
 use crate::value::RegistryValueType;
 
 /// Caller-facing `REG_IOC_QUERY_VALUE` result after value resolution.
@@ -77,6 +77,39 @@ pub struct EnumValueOutputBuffers {
 pub struct EnumValueOutputBufferDecision {
     pub name: OutputBufferDecision,
     pub data: OutputBufferDecision,
+    pub aggregate: OutputBufferAggregate,
+}
+
+/// One visible subkey plus metadata required by `REG_IOC_ENUM_SUBKEYS`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnumeratedSubkeyInfo<'a> {
+    pub subkey: EnumeratedSubkey<'a>,
+    pub last_write_time: u64,
+    pub subkey_count: u32,
+    pub value_count: u32,
+}
+
+/// Caller-facing `REG_IOC_ENUM_SUBKEYS` result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnumSubkeyResult<'a> {
+    pub name: &'a str,
+    pub name_len: usize,
+    pub last_write_time: u64,
+    pub subkey_count: u32,
+    pub value_count: u32,
+}
+
+/// Indexed subkey enumeration outcome before integer errno mapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnumSubkeyOutcome<'a> {
+    Found(EnumSubkeyResult<'a>),
+    NotFound,
+}
+
+/// Required-size decision for `REG_IOC_ENUM_SUBKEYS` name output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnumSubkeyOutputBufferDecision {
+    pub name: OutputBufferDecision,
     pub aggregate: OutputBufferAggregate,
 }
 
@@ -174,6 +207,36 @@ pub fn validate_enum_value_output_buffers(
         data,
         aggregate,
     })
+}
+
+/// Selects one visible subkey by index for `REG_IOC_ENUM_SUBKEYS`.
+pub fn enum_subkey_result_at<'a>(
+    subkeys: &'a [EnumeratedSubkeyInfo<'a>],
+    index: usize,
+) -> EnumSubkeyOutcome<'a> {
+    let Some(subkey) = subkeys.get(index) else {
+        return EnumSubkeyOutcome::NotFound;
+    };
+
+    EnumSubkeyOutcome::Found(EnumSubkeyResult {
+        name: subkey.subkey.child_name,
+        name_len: subkey.subkey.child_name.len(),
+        last_write_time: subkey.last_write_time,
+        subkey_count: subkey.subkey_count,
+        value_count: subkey.value_count,
+    })
+}
+
+/// Computes subkey enumeration name-buffer decisions before output fills.
+pub fn validate_enum_subkey_output_buffer(
+    result: &EnumSubkeyResult<'_>,
+    name: OutputBufferRequest,
+) -> LcsResult<EnumSubkeyOutputBufferDecision> {
+    let name = validate_output_buffer_required_size(name, result.name_len)?;
+    let decisions = [name];
+    let aggregate = aggregate_output_buffer_decisions(&decisions);
+
+    Ok(EnumSubkeyOutputBufferDecision { name, aggregate })
 }
 
 fn query_value_result(value: ResolvedValueEntry<'_>) -> QueryValueResult<'_> {
