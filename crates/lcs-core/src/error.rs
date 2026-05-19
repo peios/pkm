@@ -226,6 +226,8 @@ pub enum LcsError {
         /// Requested output buffer length.
         len: usize,
     },
+    /// A computed userspace output payload length overflowed host arithmetic.
+    OutputSizeOverflow,
 }
 
 /// Standard result type for the LCS semantic core.
