@@ -147,7 +147,12 @@ pub fn validate_registry_acl_access_masks(acl: Acl<'_>, field: &'static str) -> 
 
 /// Checks a key fd's cached granted mask for one ioctl-required right.
 pub fn registry_fd_has_right(granted: u32, required: u32) -> bool {
-    (granted & required) == required
+    access_mask_includes(granted, required)
+}
+
+/// Applies PSD-005's raw bitwise access-mask inclusion rule.
+pub fn access_mask_includes(mask: u32, required: u32) -> bool {
+    (mask & required) == required
 }
 
 /// Validates a concrete granted mask stored on a key fd after AccessCheck.

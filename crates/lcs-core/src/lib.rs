@@ -41,10 +41,10 @@ pub mod watch;
 
 pub use access::{
     NormalizedRegistryAccess, REGISTRY_GENERIC_MAPPING, RegistryGenericMapping,
-    map_registry_generic_bits, parse_registry_source_security_descriptor, registry_fd_has_right,
-    registry_kacs_generic_mapping, validate_registry_ace_mask, validate_registry_acl_access_masks,
-    validate_registry_desired_access, validate_registry_granted_access,
-    validate_registry_source_security_descriptor,
+    access_mask_includes, map_registry_generic_bits, parse_registry_source_security_descriptor,
+    registry_fd_has_right, registry_kacs_generic_mapping, validate_registry_ace_mask,
+    validate_registry_acl_access_masks, validate_registry_desired_access,
+    validate_registry_granted_access, validate_registry_source_security_descriptor,
 };
 pub use audit::{
     LCS_CONFIG_ROOT_PATH, LCS_SACL_MATCH_FAILURE, LCS_SACL_MATCH_SUCCESS,
