@@ -10,6 +10,20 @@ pub struct SymlinkDefaultValue<'a> {
     pub data: &'a [u8],
 }
 
+/// Caller-facing errno category for symlink path-resolution failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SymlinkResolutionErrno {
+    Einval,
+    Eloop,
+}
+
+/// Symlink default-value resolution result before integer errno translation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SymlinkDefaultValueResolution<'a> {
+    Target(PathSummary<'a>),
+    Failed(SymlinkResolutionErrno),
+}
+
 /// Validates the effective default value of a symlink key and returns its target path.
 pub fn validate_symlink_default_value<'a>(
     limits: &LcsLimits,
@@ -26,6 +40,17 @@ pub fn validate_symlink_default_value<'a>(
     }
 
     validate_symlink_target_bytes(limits, default_value.data)
+}
+
+/// Classifies effective default-value validation for ordinary symlink opens.
+pub fn classify_symlink_default_value_resolution<'a>(
+    limits: &LcsLimits,
+    default_value: Option<SymlinkDefaultValue<'a>>,
+) -> SymlinkDefaultValueResolution<'a> {
+    match validate_symlink_default_value(limits, default_value) {
+        Ok(target) => SymlinkDefaultValueResolution::Target(target),
+        Err(_) => SymlinkDefaultValueResolution::Failed(SymlinkResolutionErrno::Einval),
+    }
 }
 
 /// Validates a REG_LINK payload as a length-delimited absolute registry path.
