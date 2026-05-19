@@ -271,8 +271,8 @@ pub use source::{
 pub use string::validate_lcs_str;
 pub use symlink::{
     SymlinkDefaultValue, SymlinkDefaultValueResolution, SymlinkResolutionErrno,
-    classify_symlink_default_value_resolution, validate_symlink_default_value,
-    validate_symlink_follow_depth, validate_symlink_target_bytes,
+    classify_symlink_default_value_resolution, route_symlink_target_hive,
+    validate_symlink_default_value, validate_symlink_follow_depth, validate_symlink_target_bytes,
 };
 pub use transaction::{
     BackupReadOnlySnapshotAdmissionPlan, BackupReadOnlySnapshotReleasePlan,

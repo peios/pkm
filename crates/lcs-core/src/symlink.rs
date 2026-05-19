@@ -1,5 +1,6 @@
 use crate::config::LcsLimits;
 use crate::error::{LcsError, LcsResult};
+use crate::hives::{CurrentUserRewrite, HiveRouteOutcome, HiveView, route_routable_path_hive};
 use crate::path::{PathKind, PathSummary, validate_registry_path_bytes};
 use crate::value::RegistryValueType;
 
@@ -59,6 +60,23 @@ pub fn validate_symlink_target_bytes<'a>(
     target: &'a [u8],
 ) -> LcsResult<PathSummary<'a>> {
     validate_registry_path_bytes(target, PathKind::SymlinkTarget, limits)
+}
+
+/// Validates a REG_LINK target and routes its first component as an absolute path.
+pub fn route_symlink_target_hive<'a>(
+    limits: &LcsLimits,
+    hives: &'a [HiveView<'a>],
+    target: &'a [u8],
+    scope_guids: &[crate::resolution::Guid],
+) -> LcsResult<HiveRouteOutcome<'a>> {
+    let target = validate_symlink_target_bytes(limits, target)?;
+    route_routable_path_hive(
+        limits,
+        hives,
+        target.raw,
+        CurrentUserRewrite::Literal,
+        scope_guids,
+    )
 }
 
 /// Validates and advances the symlink follow depth counter.
