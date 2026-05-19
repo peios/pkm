@@ -299,6 +299,25 @@ pub enum RsiTransactionBeginStatusPlan {
     Failed(RsiMappedErrno),
 }
 
+/// Source response content validation failure after protocol framing succeeded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiSourceDataValidationFailure {
+    MalformedSecurityDescriptor,
+    FutureSequenceNumber,
+    DuplicateWinningSequenceTie,
+    MalformedLayerMetadataSecurityDescriptor,
+}
+
+/// Failure policy for malformed but structurally parsed source response data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiMalformedSourceDataPlan {
+    pub failure: RsiSourceDataValidationFailure,
+    pub caller_errno: RsiMappedErrno,
+    pub emit_audit: bool,
+    pub keep_source_alive: bool,
+    pub retain_previous_layer_metadata_sd: bool,
+}
+
 /// Parses an RSI status code from a source response.
 pub fn parse_rsi_status(code: u32) -> LcsResult<RsiStatus> {
     RsiStatus::from_code(code).ok_or(LcsError::UnknownRsiStatus(code))
@@ -340,6 +359,22 @@ pub fn plan_rsi_transaction_begin_status(
             RsiStatusOutcome::Success => RsiTransactionBeginStatusPlan::Begun,
             RsiStatusOutcome::Failure(errno) => RsiTransactionBeginStatusPlan::Failed(errno),
         },
+    }
+}
+
+/// Plans the mandatory policy for malformed source data.
+pub fn plan_rsi_malformed_source_data(
+    failure: RsiSourceDataValidationFailure,
+) -> RsiMalformedSourceDataPlan {
+    RsiMalformedSourceDataPlan {
+        failure,
+        caller_errno: RsiMappedErrno::Eio,
+        emit_audit: true,
+        keep_source_alive: true,
+        retain_previous_layer_metadata_sd: matches!(
+            failure,
+            RsiSourceDataValidationFailure::MalformedLayerMetadataSecurityDescriptor
+        ),
     }
 }
 
