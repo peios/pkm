@@ -218,6 +218,24 @@ pub enum RsiStatusOutcome {
     Failure(RsiMappedErrno),
 }
 
+/// Caller-visible operation that attempted to bind an explicit source transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiTransactionBeginUse {
+    ReadWriteFirstBind,
+    ReadOnlyBackupSnapshot,
+}
+
+/// Source transaction-begin status handling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiTransactionBeginStatusPlan {
+    Begun,
+    NotSupported {
+        use_case: RsiTransactionBeginUse,
+        mapped_errno: RsiMappedErrno,
+    },
+    Failed(RsiMappedErrno),
+}
+
 /// Parses an RSI status code from a source response.
 pub fn parse_rsi_status(code: u32) -> LcsResult<RsiStatus> {
     RsiStatus::from_code(code).ok_or(LcsError::UnknownRsiStatus(code))
@@ -242,6 +260,24 @@ pub fn map_rsi_status(status: RsiStatus) -> RsiStatusOutcome {
 /// Parses and maps an RSI status code in one step.
 pub fn classify_rsi_status_code(code: u32) -> LcsResult<RsiStatusOutcome> {
     Ok(map_rsi_status(parse_rsi_status(code)?))
+}
+
+/// Maps RSI_BEGIN_TRANSACTION source status at the user-visible binding point.
+pub fn plan_rsi_transaction_begin_status(
+    use_case: RsiTransactionBeginUse,
+    status: RsiStatus,
+) -> RsiTransactionBeginStatusPlan {
+    match status {
+        RsiStatus::Ok => RsiTransactionBeginStatusPlan::Begun,
+        RsiStatus::TxnNotSupported => RsiTransactionBeginStatusPlan::NotSupported {
+            use_case,
+            mapped_errno: RsiMappedErrno::Enotsup,
+        },
+        other => match map_rsi_status(other) {
+            RsiStatusOutcome::Success => RsiTransactionBeginStatusPlan::Begun,
+            RsiStatusOutcome::Failure(errno) => RsiTransactionBeginStatusPlan::Failed(errno),
+        },
+    }
 }
 
 /// Validates that an op code is one of PSD-005's request op codes.
