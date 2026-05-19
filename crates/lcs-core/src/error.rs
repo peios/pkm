@@ -440,6 +440,13 @@ pub enum LcsError {
     MissingBackupLayerManifest,
     /// A backup restore stream did not contain a KEY for HEADER.RootGUID.
     BackupRestoreRootKeyMissing,
+    /// A restore root write was planned from a KEY other than HEADER.RootGUID.
+    BackupRestoreRootKeyGuidMismatch {
+        /// HEADER.RootGUID expected by the restore stream.
+        expected: [u8; 16],
+        /// KEY GUID supplied as the root KEY.
+        actual: [u8; 16],
+    },
     /// A backup restore stream contained more than one KEY for HEADER.RootGUID.
     BackupRestoreRootKeyDuplicate,
     /// A backup root KEY immutable flag did not match the restore target key.

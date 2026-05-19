@@ -96,6 +96,14 @@ pub struct BackupRestoreKeySetSummary<'a> {
     pub non_root_key_count: usize,
 }
 
+/// Restore root mutable fields to write to the already-open target key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreRootWritePlan<'a> {
+    pub target_guid: Guid,
+    pub security_descriptor: &'a [u8],
+    pub last_write_time_ns: i64,
+}
+
 /// Parsed PATH_ENTRY record payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupPathEntryPayload<'a> {
@@ -645,6 +653,38 @@ pub fn validate_backup_restore_key_set<'a>(
         root_key,
         key_count: keys.len(),
         non_root_key_count,
+    })
+}
+
+/// Plans the restore root KEY mutable-field write without replacing root identity.
+pub fn plan_backup_restore_root_write<'a>(
+    header_root_guid: Guid,
+    target_root: BackupRestoreTargetRoot,
+    root_key: BackupKeyPayload<'a>,
+) -> LcsResult<BackupRestoreRootWritePlan<'a>> {
+    if header_root_guid == NIL_GUID || target_root.guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    if root_key.guid != header_root_guid {
+        return Err(LcsError::BackupRestoreRootKeyGuidMismatch {
+            expected: header_root_guid,
+            actual: root_key.guid,
+        });
+    }
+    if root_key.volatile != target_root.volatile || root_key.symlink != target_root.symlink {
+        return Err(LcsError::BackupRestoreRootImmutableFlagsConflict {
+            backup_volatile: root_key.volatile,
+            target_volatile: target_root.volatile,
+            backup_symlink: root_key.symlink,
+            target_symlink: target_root.symlink,
+        });
+    }
+    validate_backup_security_descriptor(root_key.security_descriptor, "backup_key.sd")?;
+
+    Ok(BackupRestoreRootWritePlan {
+        target_guid: target_root.guid,
+        security_descriptor: root_key.security_descriptor,
+        last_write_time_ns: root_key.last_write_time_ns,
     })
 }
 
