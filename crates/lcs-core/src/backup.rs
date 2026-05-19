@@ -100,6 +100,64 @@ pub struct BackupRestoreKeySetSummary<'a> {
     pub non_root_key_count: usize,
 }
 
+/// Restore-time state for non-root KEY records already created in stream order.
+#[derive(Debug)]
+pub struct BackupRestoreProcessedKeySet<'a> {
+    storage: &'a mut [Guid],
+    len: usize,
+}
+
+impl<'a> BackupRestoreProcessedKeySet<'a> {
+    pub fn new(storage: &'a mut [Guid]) -> Self {
+        Self { storage, len: 0 }
+    }
+
+    pub fn as_slice(&self) -> &[Guid] {
+        &self.storage[..self.len]
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.storage.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn contains(&self, guid: Guid) -> bool {
+        guid_slice_contains(self.as_slice(), guid)
+    }
+
+    pub fn mark_non_root_key_processed(
+        &mut self,
+        target_root_guid: Guid,
+        key_guid: Guid,
+    ) -> LcsResult<()> {
+        if target_root_guid == NIL_GUID || key_guid == NIL_GUID {
+            return Err(LcsError::NilKeyGuid);
+        }
+        if key_guid == target_root_guid {
+            return Err(LcsError::BackupRestoreRootKeyCreateNotAllowed { guid: key_guid });
+        }
+        if self.contains(key_guid) {
+            return Err(LcsError::DuplicateBackupKeyGuid { guid: key_guid });
+        }
+        if self.len == self.storage.len() {
+            return Err(LcsError::BackupRestoreProcessedKeySetFull {
+                capacity: self.storage.len(),
+            });
+        }
+
+        self.storage[self.len] = key_guid;
+        self.len += 1;
+        Ok(())
+    }
+}
+
 /// Restore root mutable fields to write to the already-open target key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupRestoreRootWritePlan<'a> {

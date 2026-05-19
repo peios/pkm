@@ -46,7 +46,7 @@ pub use backup::{
     BackupRecordFrame, BackupRecordHeader, BackupRecordKind, BackupRestoreBlanketTombstone,
     BackupRestoreKeySetSummary, BackupRestoreLayerPrecedencePlan,
     BackupRestoreNonRootKeyCreatePlan, BackupRestoreNonRootKeyTimestampWritePlan,
-    BackupRestorePathEntry, BackupRestoreRecordDispatchDisposition,
+    BackupRestorePathEntry, BackupRestoreProcessedKeySet, BackupRestoreRecordDispatchDisposition,
     BackupRestoreRootSectionPathEntrySkip, BackupRestoreRootWritePlan,
     BackupRestoreSequenceRemapper, BackupRestoreTargetRoot, BackupRestoreTeardownDeleteBlanketPlan,
     BackupRestoreTeardownDeletePathEntryPlan, BackupRestoreTeardownDeleteValuePlan,

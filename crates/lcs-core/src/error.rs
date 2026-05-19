@@ -479,6 +479,11 @@ pub enum LcsError {
         /// Root KEY GUID supplied to the non-root create planner.
         guid: [u8; 16],
     },
+    /// Restore processed-key tracking ran out of caller-provided storage.
+    BackupRestoreProcessedKeySetFull {
+        /// Caller-provided processed-key storage capacity.
+        capacity: usize,
+    },
     /// A backup restore stream contained more than one KEY for HEADER.RootGUID.
     BackupRestoreRootKeyDuplicate,
     /// A backup root KEY immutable flag did not match the restore target key.
