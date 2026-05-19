@@ -13,7 +13,11 @@ use crate::path::{
 use crate::resolution::LayerView;
 use crate::resolution::{Guid, PathTarget, validate_path_target};
 use crate::source::NIL_GUID;
-use crate::value::{ValidatedValueType, validate_value_data_len, validate_value_write_type};
+use crate::value::{
+    BlanketTombstoneAction, BlanketTombstoneRequest, ValidatedValueType, ValueDeleteRequest,
+    validate_blanket_tombstone_request, validate_value_data_len, validate_value_delete_request,
+    validate_value_write_type,
+};
 
 pub const BACKUP_RECORD_HEADER_LEN: usize = 6;
 const BACKUP_HEADER_FIXED_PAYLOAD_LEN: usize = 8 + 4 + 4 + 8 + 16 + 4;
@@ -108,6 +112,21 @@ pub struct BackupRestoreRootWritePlan<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupRestoreTeardownDropKeyPlan {
     pub guid: Guid,
+}
+
+/// Restore teardown plan for purging one layer-qualified value entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreTeardownDeleteValuePlan<'a> {
+    pub key_guid: Guid,
+    pub name: &'a str,
+    pub layer_name: &'a str,
+}
+
+/// Restore teardown plan for purging one layer-qualified blanket tombstone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreTeardownDeleteBlanketPlan<'a> {
+    pub key_guid: Guid,
+    pub layer_name: &'a str,
 }
 
 /// Non-root KEY create plan derived from a buffered restore key section.
@@ -931,6 +950,50 @@ pub fn plan_backup_restore_teardown_drop_descendant_key(
 
     Ok(BackupRestoreTeardownDropKeyPlan {
         guid: descendant_guid,
+    })
+}
+
+/// Plans teardown of an existing value entry on the target root or a descendant.
+pub fn plan_backup_restore_teardown_delete_value<'a>(
+    limits: &LcsLimits,
+    key_guid: Guid,
+    name: &'a str,
+    layer_name: &'a str,
+) -> LcsResult<BackupRestoreTeardownDeleteValuePlan<'a>> {
+    let delete = validate_value_delete_request(
+        limits,
+        &ValueDeleteRequest {
+            key_guid,
+            name,
+            layer: layer_name,
+        },
+    )?;
+
+    Ok(BackupRestoreTeardownDeleteValuePlan {
+        key_guid: delete.key_guid,
+        name: delete.name,
+        layer_name: delete.layer,
+    })
+}
+
+/// Plans teardown of an existing blanket tombstone on the target root or a descendant.
+pub fn plan_backup_restore_teardown_delete_blanket<'a>(
+    limits: &LcsLimits,
+    key_guid: Guid,
+    layer_name: &'a str,
+) -> LcsResult<BackupRestoreTeardownDeleteBlanketPlan<'a>> {
+    let blanket = validate_blanket_tombstone_request(
+        limits,
+        &BlanketTombstoneRequest {
+            key_guid,
+            layer: layer_name,
+            action: BlanketTombstoneAction::Remove,
+        },
+    )?;
+
+    Ok(BackupRestoreTeardownDeleteBlanketPlan {
+        key_guid: blanket.key_guid,
+        layer_name: blanket.layer,
     })
 }
 
