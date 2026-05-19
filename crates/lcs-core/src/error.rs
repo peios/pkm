@@ -201,6 +201,35 @@ pub enum LcsError {
     PartialSourceResume,
     /// A key record or create request used nil as a key GUID.
     NilKeyGuid,
+    /// A key GUID reuse tracker contained a nil GUID.
+    NilTrackedKeyGuid {
+        /// Logical tracker field.
+        field: &'static str,
+        /// Index of the nil GUID.
+        index: usize,
+    },
+    /// A key GUID reuse tracker contained a duplicate GUID.
+    DuplicateTrackedKeyGuid {
+        /// Logical tracker field.
+        field: &'static str,
+        /// Index of the duplicate GUID.
+        index: usize,
+    },
+    /// A candidate key GUID collided with an active key GUID.
+    KeyGuidAlreadyExists {
+        /// Colliding GUID.
+        guid: [u8; 16],
+    },
+    /// A candidate key GUID attempted to reuse a retired key GUID.
+    RetiredKeyGuidReuse {
+        /// Reused GUID.
+        guid: [u8; 16],
+    },
+    /// Active and retired key GUID trackers overlapped.
+    KeyGuidTrackerOverlap {
+        /// Overlapping GUID.
+        guid: [u8; 16],
+    },
     /// A child key record or create request used nil as a parent GUID.
     NilParentGuid,
     /// A reg_create_key request contained unknown REG_OPTION_* bits.

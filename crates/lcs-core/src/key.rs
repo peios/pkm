@@ -48,6 +48,22 @@ pub struct KeyCreateRequest<'a> {
     pub caller_has_tcb_or_admin: bool,
 }
 
+/// Candidate GUID and reuse trackers for a new key before source dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyGuidAssignmentRequest<'a> {
+    pub candidate_guid: Guid,
+    pub active_key_guids: &'a [Guid],
+    pub retired_key_guids: &'a [Guid],
+}
+
+/// LCS-assigned immutable GUID plan for a new key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyGuidAssignmentPlan {
+    pub guid: Guid,
+    pub assigned_by_lcs: bool,
+    pub persist_in_key_record: bool,
+}
+
 /// Validated immutable key record fields for a new child key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyCreatePlan<'a> {
@@ -116,6 +132,39 @@ pub fn validate_key_create_flags(flags: u32) -> LcsResult<KeyCreateOptions> {
     Ok(KeyCreateOptions {
         volatile: (flags & REG_OPTION_VOLATILE) != 0,
         symlink: (flags & REG_OPTION_CREATE_LINK) != 0,
+    })
+}
+
+/// Validates that a candidate key GUID is a new LCS-assigned identity.
+pub fn plan_key_guid_assignment(
+    request: KeyGuidAssignmentRequest<'_>,
+) -> LcsResult<KeyGuidAssignmentPlan> {
+    validate_key_guid(request.candidate_guid)?;
+    validate_guid_tracker("active_key_guids", request.active_key_guids)?;
+    validate_guid_tracker("retired_key_guids", request.retired_key_guids)?;
+
+    if guid_slice_contains(request.active_key_guids, request.candidate_guid) {
+        return Err(LcsError::KeyGuidAlreadyExists {
+            guid: request.candidate_guid,
+        });
+    }
+
+    if guid_slice_contains(request.retired_key_guids, request.candidate_guid) {
+        return Err(LcsError::RetiredKeyGuidReuse {
+            guid: request.candidate_guid,
+        });
+    }
+
+    for guid in request.active_key_guids {
+        if guid_slice_contains(request.retired_key_guids, *guid) {
+            return Err(LcsError::KeyGuidTrackerOverlap { guid: *guid });
+        }
+    }
+
+    Ok(KeyGuidAssignmentPlan {
+        guid: request.candidate_guid,
+        assigned_by_lcs: true,
+        persist_in_key_record: true,
     })
 }
 
@@ -255,4 +304,20 @@ fn validate_parent_guid(guid: Guid) -> LcsResult<()> {
         return Err(LcsError::NilParentGuid);
     }
     Ok(())
+}
+
+fn validate_guid_tracker(field: &'static str, guids: &[Guid]) -> LcsResult<()> {
+    for (index, guid) in guids.iter().enumerate() {
+        if *guid == NIL_GUID {
+            return Err(LcsError::NilTrackedKeyGuid { field, index });
+        }
+        if guids[..index].iter().any(|previous| previous == guid) {
+            return Err(LcsError::DuplicateTrackedKeyGuid { field, index });
+        }
+    }
+    Ok(())
+}
+
+fn guid_slice_contains(guids: &[Guid], needle: Guid) -> bool {
+    guids.iter().any(|guid| *guid == needle)
 }
