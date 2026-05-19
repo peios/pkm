@@ -223,6 +223,47 @@ pub struct RsiDropKeyRequestPayload {
     pub trailing: RsiTrailingOptionalFieldsPlan,
 }
 
+/// Parsed RSI_QUERY_VALUES request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiQueryValuesRequestPayload<'a> {
+    pub guid: Guid,
+    pub value_name: RsiLengthPrefixedField<'a>,
+    pub query_all: bool,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_SET_VALUE request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiSetValueRequestPayload<'a> {
+    pub guid: Guid,
+    pub value_name: RsiLengthPrefixedField<'a>,
+    pub layer_name: RsiLengthPrefixedField<'a>,
+    pub value_type: u32,
+    pub data: RsiLengthPrefixedField<'a>,
+    pub sequence: u64,
+    pub expected_sequence: u64,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_DELETE_VALUE_ENTRY request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiDeleteValueEntryRequestPayload<'a> {
+    pub guid: Guid,
+    pub value_name: RsiLengthPrefixedField<'a>,
+    pub layer_name: RsiLengthPrefixedField<'a>,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_SET_BLANKET_TOMBSTONE request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiSetBlanketTombstoneRequestPayload<'a> {
+    pub guid: Guid,
+    pub layer_name: RsiLengthPrefixedField<'a>,
+    pub set: bool,
+    pub sequence: u64,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
 /// Retained-record lookup result for a late response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RsiLateResponseRecordState {
@@ -657,6 +698,84 @@ pub fn validate_rsi_write_key_field_mask(field_mask: u32) -> LcsResult<u32> {
         });
     }
     Ok(field_mask)
+}
+
+/// Parses the RSI_QUERY_VALUES request payload layout.
+pub fn parse_rsi_query_values_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiQueryValuesRequestPayload<'_>> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let guid = cursor.read_guid()?;
+    let value_name = cursor.read_length_prefixed()?;
+    let query_all = cursor.read_bool("rsi_query_values.query_all")?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiQueryValuesRequestPayload {
+        guid,
+        value_name,
+        query_all,
+        trailing,
+    })
+}
+
+/// Parses the RSI_SET_VALUE request payload layout.
+pub fn parse_rsi_set_value_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiSetValueRequestPayload<'_>> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let guid = cursor.read_guid()?;
+    let value_name = cursor.read_length_prefixed()?;
+    let layer_name = cursor.read_length_prefixed()?;
+    let value_type = cursor.read_u32_le()?;
+    let data = cursor.read_length_prefixed()?;
+    let sequence = cursor.read_u64_le()?;
+    let expected_sequence = cursor.read_u64_le()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiSetValueRequestPayload {
+        guid,
+        value_name,
+        layer_name,
+        value_type,
+        data,
+        sequence,
+        expected_sequence,
+        trailing,
+    })
+}
+
+/// Parses the RSI_DELETE_VALUE_ENTRY request payload layout.
+pub fn parse_rsi_delete_value_entry_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiDeleteValueEntryRequestPayload<'_>> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let guid = cursor.read_guid()?;
+    let value_name = cursor.read_length_prefixed()?;
+    let layer_name = cursor.read_length_prefixed()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiDeleteValueEntryRequestPayload {
+        guid,
+        value_name,
+        layer_name,
+        trailing,
+    })
+}
+
+/// Parses the RSI_SET_BLANKET_TOMBSTONE request payload layout.
+pub fn parse_rsi_set_blanket_tombstone_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiSetBlanketTombstoneRequestPayload<'_>> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let guid = cursor.read_guid()?;
+    let layer_name = cursor.read_length_prefixed()?;
+    let set = cursor.read_bool("rsi_set_blanket_tombstone.set")?;
+    let sequence = cursor.read_u64_le()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiSetBlanketTombstoneRequestPayload {
+        guid,
+        layer_name,
+        set,
+        sequence,
+        trailing,
+    })
 }
 
 /// Validates that an op code is one of PSD-005's request op codes.
