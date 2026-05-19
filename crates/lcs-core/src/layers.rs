@@ -86,6 +86,25 @@ pub struct LayerPublicationPlan<'a> {
     pub publish_atomically: bool,
 }
 
+/// Caller-facing errno class for layer creation admission failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayerCreationAdmissionErrno {
+    Enospc,
+}
+
+/// Current authoritative layer-table state before publishing a new layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerCreationAdmissionInput {
+    pub current_total_layers: usize,
+}
+
+/// Strict in-kernel layer-table cap admission plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerCreationAdmissionPlan {
+    pub total_layers_after_create: usize,
+    pub strict_admission_control: bool,
+}
+
 /// Source/cache layer metadata before PSD-005 defaults are applied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LayerMetadataEntry<'a> {
@@ -242,6 +261,32 @@ pub fn plan_layer_publication<'a>(
         metadata_security_descriptor: input.metadata_security_descriptor,
         publish_atomically: true,
     })
+}
+
+/// Applies MaxTotalLayers before publishing a newly created non-base layer.
+pub fn plan_layer_creation_admission(
+    limits: &LcsLimits,
+    input: LayerCreationAdmissionInput,
+) -> LcsResult<LayerCreationAdmissionPlan> {
+    if input.current_total_layers >= limits.max_total_layers {
+        return Err(LcsError::TooManyLayers {
+            count: input.current_total_layers,
+            max: limits.max_total_layers,
+        });
+    }
+
+    Ok(LayerCreationAdmissionPlan {
+        total_layers_after_create: input.current_total_layers + 1,
+        strict_admission_control: true,
+    })
+}
+
+/// Maps layer-creation admission failures to caller-visible errno classes.
+pub fn layer_creation_admission_errno(error: &LcsError) -> Option<LayerCreationAdmissionErrno> {
+    match error {
+        LcsError::TooManyLayers { .. } => Some(LayerCreationAdmissionErrno::Enospc),
+        _ => None,
+    }
 }
 
 /// Selects the informational Owner SID for layer metadata refresh.
