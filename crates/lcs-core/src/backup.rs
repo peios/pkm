@@ -173,6 +173,106 @@ impl<'a> BackupRestoreProcessedKeySet<'a> {
     }
 }
 
+/// Restore KEY-section topology state for parent-before-child stream validation.
+#[derive(Debug)]
+pub struct BackupRestoreTopologyState<'a> {
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    root_seen: bool,
+    processed_non_root_key_guids: BackupRestoreProcessedKeySet<'a>,
+}
+
+impl<'a> BackupRestoreTopologyState<'a> {
+    pub fn new(
+        header_root_guid: Guid,
+        target_root_guid: Guid,
+        processed_key_storage: &'a mut [Guid],
+    ) -> LcsResult<Self> {
+        if header_root_guid == NIL_GUID || target_root_guid == NIL_GUID {
+            return Err(LcsError::NilKeyGuid);
+        }
+
+        Ok(Self {
+            header_root_guid,
+            target_root_guid,
+            root_seen: false,
+            processed_non_root_key_guids: BackupRestoreProcessedKeySet::new(processed_key_storage),
+        })
+    }
+
+    pub const fn header_root_guid(&self) -> Guid {
+        self.header_root_guid
+    }
+
+    pub const fn target_root_guid(&self) -> Guid {
+        self.target_root_guid
+    }
+
+    pub const fn root_seen(&self) -> bool {
+        self.root_seen
+    }
+
+    pub fn processed_non_root_key_guids(&self) -> &[Guid] {
+        self.processed_non_root_key_guids.as_slice()
+    }
+
+    /// Observes one completed KEY section in stream order.
+    pub fn observe_key_section<'b>(
+        &mut self,
+        key: BackupKeyPayload<'b>,
+        path_entries: &[BackupPathEntryPayload<'b>],
+    ) -> LcsResult<BackupRestoreTopologyKeySectionPlan<'b>> {
+        if key.guid == NIL_GUID {
+            return Err(LcsError::NilKeyGuid);
+        }
+
+        if !self.root_seen {
+            if key.guid != self.header_root_guid {
+                return Err(LcsError::BackupRestoreFirstKeyNotRoot { key_guid: key.guid });
+            }
+            validate_backup_security_descriptor(key.security_descriptor, "backup_key.sd")?;
+            self.root_seen = true;
+            return Ok(BackupRestoreTopologyKeySectionPlan::Root {
+                header_root_guid: self.header_root_guid,
+                target_root_guid: self.target_root_guid,
+                security_descriptor: key.security_descriptor,
+                last_write_time_ns: key.last_write_time_ns,
+            });
+        }
+
+        if key.guid == self.header_root_guid {
+            return Err(LcsError::BackupRestoreRootKeyDuplicate);
+        }
+        if self.processed_non_root_key_guids.contains(key.guid) {
+            return Err(LcsError::DuplicateBackupKeyGuid { guid: key.guid });
+        }
+
+        let plan = plan_backup_restore_non_root_key_create(
+            self.header_root_guid,
+            self.target_root_guid,
+            key,
+            path_entries,
+            self.processed_non_root_key_guids.as_slice(),
+        )?;
+        self.processed_non_root_key_guids
+            .mark_non_root_key_processed(self.target_root_guid, plan.guid)?;
+
+        Ok(BackupRestoreTopologyKeySectionPlan::NonRoot(plan))
+    }
+}
+
+/// Restore action selected after validating one KEY section's stream topology.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupRestoreTopologyKeySectionPlan<'a> {
+    Root {
+        header_root_guid: Guid,
+        target_root_guid: Guid,
+        security_descriptor: &'a [u8],
+        last_write_time_ns: i64,
+    },
+    NonRoot(BackupRestoreNonRootKeyCreatePlan<'a>),
+}
+
 /// Restore root mutable fields to write to the already-open target key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupRestoreRootWritePlan<'a> {

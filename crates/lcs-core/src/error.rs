@@ -618,6 +618,11 @@ pub enum LcsError {
         /// Root KEY GUID supplied to the non-root create planner.
         guid: [u8; 16],
     },
+    /// The first KEY section in a backup restore stream was not HEADER.RootGUID.
+    BackupRestoreFirstKeyNotRoot {
+        /// GUID from the first observed KEY section.
+        key_guid: [u8; 16],
+    },
     /// Restore processed-key tracking ran out of caller-provided storage.
     BackupRestoreProcessedKeySetFull {
         /// Caller-provided processed-key storage capacity.
