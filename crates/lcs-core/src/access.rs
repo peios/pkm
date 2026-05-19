@@ -9,7 +9,7 @@ use kacs_core::{
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
     ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
     ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
-    ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE, Ace, AceKind,
+    ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE, Ace, AceKind, Acl,
     SYSTEM_ALARM_ACE_TYPE, SYSTEM_ALARM_CALLBACK_ACE_TYPE, SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE,
     SYSTEM_ALARM_OBJECT_ACE_TYPE, SYSTEM_AUDIT_ACE_TYPE, SYSTEM_AUDIT_CALLBACK_ACE_TYPE,
     SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE, SYSTEM_AUDIT_OBJECT_ACE_TYPE,
@@ -125,17 +125,21 @@ pub fn validate_registry_source_security_descriptor(
     }
 
     if let Some(dacl) = sd.dacl() {
-        for ace in dacl.entries() {
-            let ace = ace.map_err(|_| LcsError::MalformedSecurityDescriptor { field })?;
-            validate_registry_source_ace_mask(&ace, field)?;
-        }
+        validate_registry_acl_access_masks(dacl, field)?;
     }
 
     if let Some(sacl) = sd.sacl() {
-        for ace in sacl.entries() {
-            let ace = ace.map_err(|_| LcsError::MalformedSecurityDescriptor { field })?;
-            validate_registry_source_ace_mask(&ace, field)?;
-        }
+        validate_registry_acl_access_masks(sacl, field)?;
+    }
+
+    Ok(())
+}
+
+/// Validates registry access masks in one ACL without imposing whole-SD rules.
+pub fn validate_registry_acl_access_masks(acl: Acl<'_>, field: &'static str) -> LcsResult<()> {
+    for ace in acl.entries() {
+        let ace = ace.map_err(|_| LcsError::MalformedSecurityDescriptor { field })?;
+        validate_registry_source_ace_mask(&ace, field)?;
     }
 
     Ok(())

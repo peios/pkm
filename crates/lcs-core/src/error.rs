@@ -320,6 +320,16 @@ pub enum LcsError {
     MalformedTokenDefaultDacl,
     /// KACS rejected or could not construct the inherited registry key SD.
     SecurityDescriptorInheritanceFailed,
+    /// LCS could not construct a valid merged or subset security descriptor.
+    SecurityDescriptorConstructionFailed {
+        /// Logical output field.
+        field: &'static str,
+    },
+    /// A set-security merge would leave the key without an owner SID.
+    SecurityDescriptorMergeMissingOwner {
+        /// Logical operation field.
+        field: &'static str,
+    },
     /// RSI_DELETE_LAYER returned nil as an orphaned key GUID.
     RsiDeleteLayerOrphanedGuidNil,
     /// RSI_DELETE_LAYER returned the same orphaned key GUID more than once.

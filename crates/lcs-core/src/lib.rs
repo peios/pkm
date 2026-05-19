@@ -29,6 +29,7 @@ pub mod query;
 pub mod resolution;
 pub mod resource;
 pub mod rsi;
+pub mod security;
 pub mod sequence;
 pub mod source;
 pub mod string;
@@ -40,8 +41,9 @@ pub mod watch;
 pub use access::{
     NormalizedRegistryAccess, REGISTRY_GENERIC_MAPPING, RegistryGenericMapping,
     map_registry_generic_bits, parse_registry_source_security_descriptor, registry_fd_has_right,
-    registry_kacs_generic_mapping, validate_registry_ace_mask, validate_registry_desired_access,
-    validate_registry_granted_access, validate_registry_source_security_descriptor,
+    registry_kacs_generic_mapping, validate_registry_ace_mask, validate_registry_acl_access_masks,
+    validate_registry_desired_access, validate_registry_granted_access,
+    validate_registry_source_security_descriptor,
 };
 pub use audit::{
     LCS_CONFIG_ROOT_PATH, LcsAuditEmissionFailurePolicy, LcsAuditEventKind,
@@ -231,6 +233,10 @@ pub use rsi::{
     write_rsi_query_values_request_frame, write_rsi_read_key_request_frame,
     write_rsi_set_blanket_tombstone_request_frame, write_rsi_set_value_request_frame,
     write_rsi_write_key_request_frame,
+};
+pub use security::{
+    RegistryGetSecurityPlan, RegistrySetSecurityPlan, plan_registry_get_security,
+    plan_registry_set_security,
 };
 pub use sequence::SequenceCounter;
 pub use source::{
