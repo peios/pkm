@@ -2,7 +2,7 @@ use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
 use crate::constants::{
     REG_TXN_ABORTED, REG_TXN_ACTIVE_BOUND, REG_TXN_ACTIVE_UNBOUND, REG_TXN_COMMITTED,
-    REG_TXN_SOURCE_DOWN, REG_TXN_TIMED_OUT,
+    REG_TXN_SOURCE_DOWN, REG_TXN_TIMED_OUT, RSI_TXN_READ_ONLY,
 };
 use crate::error::{LcsError, LcsResult};
 use crate::hives::SourceId;
@@ -242,6 +242,53 @@ pub struct TransactionBoundCounterTransitionPlan<'a> {
     pub counter: TransactionBoundCounterPlan,
 }
 
+/// Per-source read-only snapshot transaction counter mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadOnlySnapshotCounterUpdate {
+    NoChange,
+    Increment,
+    Decrement,
+}
+
+/// Planned per-source read-only snapshot transaction counter result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadOnlySnapshotCounterPlan {
+    pub update: ReadOnlySnapshotCounterUpdate,
+    pub previous_count: usize,
+    pub next_count: usize,
+}
+
+/// Planned admission for REG_IOC_BACKUP's read-only source transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupReadOnlySnapshotAdmissionPlan {
+    pub transaction_id: TransactionId,
+    pub source_transaction_mode: u32,
+    pub dispatch_begin_transaction: bool,
+    pub release_with_abort_transaction: bool,
+    pub dispatch_commit_transaction: bool,
+    pub affects_bound_transaction_counter: bool,
+    pub counter: ReadOnlySnapshotCounterPlan,
+}
+
+/// Reason a reserved read-only backup snapshot slot is being released.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupReadOnlySnapshotReleaseReason {
+    SourceBeginFailed,
+    BackupCompleted,
+    BackupFailed,
+    SourceConnectionTornDown,
+}
+
+/// Planned release for a REG_IOC_BACKUP read-only source transaction reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupReadOnlySnapshotReleasePlan {
+    pub reason: BackupReadOnlySnapshotReleaseReason,
+    pub dispatch_abort_transaction: bool,
+    pub dispatch_commit_transaction: bool,
+    pub affects_bound_transaction_counter: bool,
+    pub counter: ReadOnlySnapshotCounterPlan,
+}
+
 /// Plans reg_begin_transaction without selecting a source.
 pub fn plan_begin_transaction(
     limits: &LcsLimits,
@@ -269,6 +316,52 @@ pub fn plan_begin_transaction_fd(
         start_timeout_timer: started.start_timeout_timer,
         source_contact_required: false,
         close_without_commit_aborts: true,
+    })
+}
+
+/// Plans REG_IOC_BACKUP admission before dispatching RSI_BEGIN_TRANSACTION.
+pub fn plan_backup_read_only_snapshot_admission(
+    limits: &LcsLimits,
+    counter: &mut TransactionIdCounter,
+    current_read_only_transactions_for_source: usize,
+) -> LcsResult<BackupReadOnlySnapshotAdmissionPlan> {
+    let counter_plan = plan_read_only_snapshot_counter_update(
+        limits,
+        current_read_only_transactions_for_source,
+        ReadOnlySnapshotCounterUpdate::Increment,
+    )?;
+    Ok(BackupReadOnlySnapshotAdmissionPlan {
+        transaction_id: counter.allocate()?,
+        source_transaction_mode: RSI_TXN_READ_ONLY,
+        dispatch_begin_transaction: true,
+        release_with_abort_transaction: true,
+        dispatch_commit_transaction: false,
+        affects_bound_transaction_counter: false,
+        counter: counter_plan,
+    })
+}
+
+/// Plans REG_IOC_BACKUP read-only snapshot reservation release.
+pub fn plan_backup_read_only_snapshot_release(
+    limits: &LcsLimits,
+    current_read_only_transactions_for_source: usize,
+    reason: BackupReadOnlySnapshotReleaseReason,
+) -> LcsResult<BackupReadOnlySnapshotReleasePlan> {
+    let counter_plan = plan_read_only_snapshot_counter_update(
+        limits,
+        current_read_only_transactions_for_source,
+        ReadOnlySnapshotCounterUpdate::Decrement,
+    )?;
+    Ok(BackupReadOnlySnapshotReleasePlan {
+        reason,
+        dispatch_abort_transaction: matches!(
+            reason,
+            BackupReadOnlySnapshotReleaseReason::BackupCompleted
+                | BackupReadOnlySnapshotReleaseReason::BackupFailed
+        ),
+        dispatch_commit_transaction: false,
+        affects_bound_transaction_counter: false,
+        counter: counter_plan,
     })
 }
 
@@ -641,6 +734,46 @@ pub fn plan_transaction_bound_counter_update(
             Ok(TransactionBoundCounterPlan {
                 update,
                 previous_count: current_bound_transactions_for_source,
+                next_count,
+            })
+        }
+    }
+}
+
+/// Plans mutation of the per-source count of read-only backup snapshot transactions.
+pub fn plan_read_only_snapshot_counter_update(
+    limits: &LcsLimits,
+    current_read_only_transactions_for_source: usize,
+    update: ReadOnlySnapshotCounterUpdate,
+) -> LcsResult<ReadOnlySnapshotCounterPlan> {
+    match update {
+        ReadOnlySnapshotCounterUpdate::NoChange => Ok(ReadOnlySnapshotCounterPlan {
+            update,
+            previous_count: current_read_only_transactions_for_source,
+            next_count: current_read_only_transactions_for_source,
+        }),
+        ReadOnlySnapshotCounterUpdate::Increment => {
+            if current_read_only_transactions_for_source
+                >= limits.max_read_only_transactions_per_source
+            {
+                return Err(LcsError::TooManyReadOnlyTransactions {
+                    count: current_read_only_transactions_for_source,
+                    max: limits.max_read_only_transactions_per_source,
+                });
+            }
+            Ok(ReadOnlySnapshotCounterPlan {
+                update,
+                previous_count: current_read_only_transactions_for_source,
+                next_count: current_read_only_transactions_for_source + 1,
+            })
+        }
+        ReadOnlySnapshotCounterUpdate::Decrement => {
+            let next_count = current_read_only_transactions_for_source
+                .checked_sub(1)
+                .ok_or(LcsError::InvalidTransactionRuntimeState)?;
+            Ok(ReadOnlySnapshotCounterPlan {
+                update,
+                previous_count: current_read_only_transactions_for_source,
                 next_count,
             })
         }

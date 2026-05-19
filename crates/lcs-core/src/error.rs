@@ -83,6 +83,13 @@ pub enum LcsError {
         /// Maximum permitted distinct layers for one value.
         max: usize,
     },
+    /// A backup would exceed MaxReadOnlyTransactionsPerSource admission control.
+    TooManyReadOnlyTransactions {
+        /// Active or reserved read-only snapshot transactions for the source.
+        count: usize,
+        /// Maximum permitted concurrent read-only snapshot transactions for one source.
+        max: usize,
+    },
     /// A configuration value was outside its ratified range.
     InvalidConfigValue {
         /// Parameter name.
