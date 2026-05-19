@@ -18,6 +18,11 @@ pub enum LcsError {
     },
     /// A registry path was empty.
     EmptyPath,
+    /// A copied syscall path did not include its terminating null byte.
+    MissingSyscallPathTerminator {
+        /// Logical input field.
+        field: &'static str,
+    },
     /// A path contained a leading, consecutive, or otherwise empty component.
     EmptyPathComponent,
     /// A path ended in a separator.

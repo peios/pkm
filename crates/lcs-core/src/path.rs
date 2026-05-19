@@ -36,6 +36,20 @@ pub fn validate_registry_path_bytes<'a>(
     validate_registry_path_str(path, kind, limits)
 }
 
+/// Validates a copied null-terminated syscall path, excluding the terminator.
+pub fn validate_syscall_path_c_string<'a>(
+    bytes: &'a [u8],
+    kind: PathKind,
+    limits: &LcsLimits,
+) -> LcsResult<PathSummary<'a>> {
+    let Some((&0, path_bytes)) = bytes.split_last() else {
+        return Err(LcsError::MissingSyscallPathTerminator {
+            field: "syscall_path",
+        });
+    };
+    validate_registry_path_bytes(path_bytes, kind, limits)
+}
+
 /// Validates a decoded registry path.
 pub fn validate_registry_path_str<'a>(
     path: &'a str,

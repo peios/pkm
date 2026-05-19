@@ -161,7 +161,8 @@ pub use output_buffer::{
 pub use path::{
     PathKind, PathSummary, is_base_layer_name, is_reserved_current_user_name,
     validate_hive_name_bytes, validate_key_component_bytes, validate_layer_name_bytes,
-    validate_registry_path_bytes, validate_registry_path_str, validate_value_name_bytes,
+    validate_registry_path_bytes, validate_registry_path_str, validate_syscall_path_c_string,
+    validate_value_name_bytes,
 };
 pub use query::{
     EnumSubkeyOutcome, EnumSubkeyOutputBufferDecision, EnumSubkeyResult, EnumValueOutcome,
