@@ -338,6 +338,48 @@ pub enum LcsError {
         /// Actual frame length copied from userspace/source stream.
         actual_len: usize,
     },
+    /// A backup record parser was used for the wrong record type.
+    BackupRecordKindMismatch {
+        /// Expected record type code.
+        expected: u16,
+        /// Actual record type code.
+        actual: u16,
+    },
+    /// A complete backup record writer was given an output buffer that was too small.
+    BackupRecordFrameBufferTooSmall {
+        /// Caller-provided output buffer length.
+        len: usize,
+        /// Required backup record frame length.
+        required: usize,
+    },
+    /// A backup payload field would overflow host or wire length arithmetic.
+    BackupPayloadLengthOverflow,
+    /// A backup record payload ended before a mandatory field was complete.
+    BackupPayloadTooShort {
+        /// Actual payload length.
+        len: usize,
+        /// Minimum payload length needed for the parsed fields.
+        min: usize,
+    },
+    /// A backup record payload carried bytes after its exact defined payload.
+    BackupUnexpectedPayload {
+        /// Record type being parsed.
+        record_type: u16,
+        /// Bytes left after the exact payload parser finished.
+        extra_len: usize,
+    },
+    /// A backup HEADER magic field did not match the PSD-005 magic bytes.
+    InvalidBackupMagic {
+        /// Actual eight-byte magic field.
+        actual: [u8; 8],
+    },
+    /// A backup HEADER requires a newer reader than this parser supports.
+    UnsupportedBackupMinReaderVersion {
+        /// Minimum reader version declared by the stream.
+        min_reader_version: u32,
+        /// Reader version supported by the caller.
+        supported_version: u32,
+    },
     /// A length-prefixed RSI payload field would overflow host arithmetic.
     RsiPayloadLengthOverflow,
     /// An RSI_WRITE_KEY request field mask contained bits not defined by PSD-005.
