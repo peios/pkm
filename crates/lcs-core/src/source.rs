@@ -64,6 +64,22 @@ pub struct SourceRegistrationPlan {
     pub source_next_sequence: u64,
 }
 
+/// Validated source-device open plan before any registration ioctl is accepted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceDeviceOpenPlan {
+    pub grants_source_fd: bool,
+}
+
+/// Validates `/dev/pkm_registry` open admission.
+pub fn plan_source_device_open(caller_has_tcb: bool) -> LcsResult<SourceDeviceOpenPlan> {
+    if !caller_has_tcb {
+        return Err(LcsError::MissingTcbPrivilege);
+    }
+    Ok(SourceDeviceOpenPlan {
+        grants_source_fd: true,
+    })
+}
+
 /// Validates a REG_SRC_REGISTER request against existing source slots.
 pub fn validate_source_registration(
     limits: &LcsLimits,

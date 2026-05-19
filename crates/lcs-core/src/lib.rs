@@ -120,10 +120,11 @@ pub use rsi::{
 };
 pub use sequence::SequenceCounter;
 pub use source::{
-    NIL_GUID, RegisteredHiveIdentity, SourceRegistrationDecision, SourceRegistrationHive,
-    SourceRegistrationPlan, SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
-    for_each_source_slot_hive, source_registration_hive_scope, source_slot_hive_status,
-    validate_source_registration, validate_source_registration_hives, validate_source_slots,
+    NIL_GUID, RegisteredHiveIdentity, SourceDeviceOpenPlan, SourceRegistrationDecision,
+    SourceRegistrationHive, SourceRegistrationPlan, SourceRegistrationRequest, SourceSlotStatus,
+    SourceSlotView, for_each_source_slot_hive, plan_source_device_open,
+    source_registration_hive_scope, source_slot_hive_status, validate_source_registration,
+    validate_source_registration_hives, validate_source_slots,
 };
 pub use string::validate_lcs_str;
 pub use symlink::{
