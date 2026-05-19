@@ -2,6 +2,7 @@ use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
 use crate::constants::REG_TOMBSTONE;
 use crate::error::{LcsError, LcsResult};
+use crate::layers::validate_layer_resolution_context;
 use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
 };
@@ -169,6 +170,8 @@ pub fn resolve_path_entry<'a>(
     context: &LayerResolutionContext<'a>,
     entries: &'a [PathEntry<'a>],
 ) -> LcsResult<PathResolution<'a>> {
+    validate_layer_resolution_context(context)?;
+
     let mut best: Option<PathCandidate<'a>> = None;
     let mut duplicate_best = false;
 
@@ -208,6 +211,8 @@ pub fn resolve_value<'a>(
     entries: &'a [ValueEntry<'a>],
     blankets: &'a [BlanketTombstoneEntry<'a>],
 ) -> LcsResult<ValueResolution<'a>> {
+    validate_layer_resolution_context(context)?;
+
     let mut best: Option<ValueCandidate<'a>> = None;
     let mut duplicate_best = false;
 
@@ -273,6 +278,7 @@ pub fn for_each_effective_value<'a, F>(
 where
     F: FnMut(EnumeratedValue<'a>) -> LcsResult<()>,
 {
+    validate_layer_resolution_context(context)?;
     prevalidate_value_enumeration_source(context, entries, blankets)?;
 
     let mut emitted = 0usize;
@@ -363,6 +369,7 @@ pub fn for_each_visible_subkey<'a, F>(
 where
     F: FnMut(EnumeratedSubkey<'a>) -> LcsResult<()>,
 {
+    validate_layer_resolution_context(context)?;
     prevalidate_subkey_enumeration_source(context, entries)?;
 
     let mut emitted = 0usize;

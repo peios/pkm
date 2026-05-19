@@ -105,6 +105,31 @@ pub enum LcsError {
     },
     /// The layer table contained duplicate folded identities.
     DuplicateLayerIdentity,
+    /// A resolution context did not contain the hardcoded base layer.
+    MissingBaseLayer,
+    /// The base layer entry was not canonical precedence 0 and enabled.
+    InvalidBaseLayerProperties {
+        /// Observed base-layer precedence.
+        precedence: u32,
+        /// Observed base-layer enabled flag.
+        enabled: bool,
+    },
+    /// The in-memory layer table exceeded the configured layer cap.
+    TooManyLayers {
+        /// Effective layer count.
+        count: usize,
+        /// Maximum permitted effective layer count.
+        max: usize,
+    },
+    /// A private-layer credential set exceeded the configured cap.
+    TooManyPrivateLayers {
+        /// Private layer count.
+        count: usize,
+        /// Maximum permitted private layer count.
+        max: usize,
+    },
+    /// A private-layer credential set contained duplicate folded identities.
+    DuplicatePrivateLayerIdentity,
 }
 
 /// Standard result type for the LCS semantic core.

@@ -70,6 +70,7 @@ fn compiled_in_limits_match_psd_005_defaults_and_ranges() {
     assert_eq!(limits.max_value_size, 1_048_576);
     assert_eq!(limits.max_layers_per_value, 128);
     assert_eq!(limits.max_total_layers, 1024);
+    assert_eq!(limits.max_private_layers_per_token, 16);
 
     assert_eq!(validate_config_value(MAX_PATH_COMPONENT_LENGTH, 64), Ok(64));
     assert_eq!(

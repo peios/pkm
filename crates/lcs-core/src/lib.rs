@@ -12,6 +12,7 @@ pub mod casefold;
 pub mod config;
 pub mod constants;
 pub mod error;
+pub mod layers;
 pub mod path;
 pub mod resolution;
 pub mod sequence;
@@ -36,6 +37,10 @@ pub use config::{
 };
 pub use constants::*;
 pub use error::{LcsError, LcsResult};
+pub use layers::{
+    BASE_LAYER_VIEW, LayerMetadataEntry, for_each_effective_layer, normalize_layer_target,
+    validate_layer_resolution_context, validate_layer_views, validate_private_layer_set,
+};
 pub use path::{
     PathKind, PathSummary, is_base_layer_name, is_reserved_current_user_name,
     validate_hive_name_bytes, validate_key_component_bytes, validate_layer_name_bytes,

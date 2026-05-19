@@ -134,6 +134,7 @@ pub struct LcsLimits {
     pub max_value_size: usize,
     pub max_layers_per_value: usize,
     pub max_total_layers: usize,
+    pub max_private_layers_per_token: usize,
 }
 
 impl LcsLimits {
@@ -146,6 +147,7 @@ impl LcsLimits {
         max_value_size: MAX_VALUE_SIZE.default as usize,
         max_layers_per_value: MAX_LAYERS_PER_VALUE.default as usize,
         max_total_layers: MAX_TOTAL_LAYERS.default as usize,
+        max_private_layers_per_token: MAX_PRIVATE_LAYERS_PER_TOKEN.default as usize,
     };
 }
 
