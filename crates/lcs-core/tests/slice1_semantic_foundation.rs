@@ -72,6 +72,9 @@ fn compiled_in_limits_match_psd_005_defaults_and_ranges() {
     assert_eq!(limits.max_total_layers, 1024);
     assert_eq!(limits.max_registered_sources, 32);
     assert_eq!(limits.max_hives_per_source, 64);
+    assert_eq!(limits.notification_queue_size, 256);
+    assert_eq!(limits.max_subtree_watch_depth, 0);
+    assert_eq!(limits.max_transaction_watch_event_burst, 4096);
     assert_eq!(limits.max_scope_guids_per_token, 8);
     assert_eq!(limits.max_private_layers_per_token, 16);
 

@@ -241,6 +241,29 @@ pub enum LcsError {
         /// Visible child count observed before delete.
         count: u32,
     },
+    /// A REG_IOC_NOTIFY filter contained bits PSD-005 does not define.
+    UnknownNotifyFilterFlags {
+        /// Full filter value.
+        flags: u32,
+        /// Unknown filter bits.
+        unknown: u32,
+    },
+    /// A one-byte boolean ABI field was not 0 or 1.
+    InvalidBooleanFlag {
+        /// Logical input field.
+        field: &'static str,
+        /// Received byte value.
+        value: u8,
+    },
+    /// A reserved ABI pad field was non-zero.
+    NonZeroReservedBytes {
+        /// Logical input field.
+        field: &'static str,
+    },
+    /// A new watch was armed on an already-orphaned key fd.
+    OrphanedWatchArm,
+    /// An internal or source-derived watch event type was outside PSD-005's vocabulary.
+    UnknownWatchEventType(u32),
 }
 
 /// Standard result type for the LCS semantic core.

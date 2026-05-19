@@ -28,6 +28,7 @@ pub mod source;
 pub mod string;
 pub mod symlink;
 pub mod value;
+pub mod watch;
 
 pub use access::{
     NormalizedRegistryAccess, REGISTRY_GENERIC_MAPPING, RegistryGenericMapping,
@@ -124,6 +125,11 @@ pub use value::{
     plan_value_delete, plan_value_write, validate_blanket_tombstone_request,
     validate_value_data_len, validate_value_delete_request, validate_value_write_request,
     validate_value_write_type,
+};
+pub use watch::{
+    KeyWatchState, WatchEventCategory, WatchNotifyArgs, WatchNotifyPlan, plan_watch_notify,
+    validate_abi_bool, validate_notify_filter, validate_notify_reserved, watch_event_category,
+    watch_event_matches_filter,
 };
 
 /// Returns a stable value from the staged crate so integration build steps can

@@ -136,6 +136,9 @@ pub struct LcsLimits {
     pub max_total_layers: usize,
     pub max_registered_sources: usize,
     pub max_hives_per_source: usize,
+    pub notification_queue_size: usize,
+    pub max_subtree_watch_depth: usize,
+    pub max_transaction_watch_event_burst: usize,
     pub max_scope_guids_per_token: usize,
     pub max_private_layers_per_token: usize,
 }
@@ -152,6 +155,9 @@ impl LcsLimits {
         max_total_layers: MAX_TOTAL_LAYERS.default as usize,
         max_registered_sources: MAX_REGISTERED_SOURCES.default as usize,
         max_hives_per_source: MAX_HIVES_PER_SOURCE.default as usize,
+        notification_queue_size: NOTIFICATION_QUEUE_SIZE.default as usize,
+        max_subtree_watch_depth: MAX_SUBTREE_WATCH_DEPTH.default as usize,
+        max_transaction_watch_event_burst: MAX_TRANSACTION_WATCH_EVENT_BURST.default as usize,
         max_scope_guids_per_token: MAX_SCOPE_GUIDS_PER_TOKEN.default as usize,
         max_private_layers_per_token: MAX_PRIVATE_LAYERS_PER_TOKEN.default as usize,
     };
