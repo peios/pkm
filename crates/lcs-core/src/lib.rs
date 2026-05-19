@@ -18,6 +18,7 @@ pub mod key;
 pub mod layers;
 pub mod output_buffer;
 pub mod path;
+pub mod query;
 pub mod resolution;
 pub mod rsi;
 pub mod sequence;
@@ -72,6 +73,10 @@ pub use path::{
     PathKind, PathSummary, is_base_layer_name, is_reserved_current_user_name,
     validate_hive_name_bytes, validate_key_component_bytes, validate_layer_name_bytes,
     validate_registry_path_bytes, validate_registry_path_str, validate_value_name_bytes,
+};
+pub use query::{
+    QueryValueOutcome, QueryValueOutputBufferDecision, QueryValueOutputBuffers, QueryValueResult,
+    query_value_result_from_resolution, validate_query_value_output_buffers,
 };
 pub use resolution::{
     BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid, LayerResolutionContext,
