@@ -670,6 +670,13 @@ pub enum LcsError {
     InvalidWatchQueueState,
     /// A transaction watch burst limit was zero.
     InvalidTransactionWatchBurstLimit,
+    /// Transaction watch batch entries were not in operation order.
+    InvalidTransactionWatchBatchOrder {
+        /// Index of the out-of-order entry.
+        index: usize,
+    },
+    /// Transaction watch batch event counting overflowed `usize`.
+    TransactionWatchBatchEventCountOverflow,
     /// Captured watch dispatch ancestry was empty or had mismatched GUID/path lengths.
     InvalidWatchAncestry,
     /// The changed key GUID was not the last GUID in the captured mutation ancestry.

@@ -285,15 +285,16 @@ pub use watch::{
     EffectiveSubkeyWatchEvent, EffectiveValueWatchEvent, InternalSelfWatchPlan,
     InternalSelfWatchRoots, InternalWatchCallbackPlan, InternalWatchDirtyPath,
     InternalWatchRegistration, InternalWatchTarget, KeyWatchState, QueuedWatchEvent,
-    TransactionWatchBurstPlan, WatchDelivery, WatchDispatchDecision, WatchEventCategory,
-    WatchEventRecordPlan, WatchEventRecordRequest, WatchEventRecordShape, WatchMutationContext,
-    WatchNotifyArgs, WatchNotifyPlan, WatchQueueInsertPlan, WatchQueueState, WatchReadBatchPlan,
+    TransactionWatchBatchMember, TransactionWatchBatchPlan, TransactionWatchBurstPlan,
+    WatchDelivery, WatchDispatchDecision, WatchEventCategory, WatchEventRecordPlan,
+    WatchEventRecordRequest, WatchEventRecordShape, WatchMutationContext, WatchNotifyArgs,
+    WatchNotifyPlan, WatchQueueInsertPlan, WatchQueueState, WatchReadBatchPlan,
     WatchedKeyVisibilityEvent, WatcherView, for_each_effective_subkey_watch_event,
     for_each_effective_value_watch_event, plan_internal_self_watch, plan_internal_watch_callback,
-    plan_transaction_watch_burst, plan_watch_dispatch, plan_watch_event_record, plan_watch_notify,
-    plan_watch_queue_insert, plan_watch_read_batch, plan_watched_key_visibility_event,
-    validate_abi_bool, validate_notify_filter, validate_notify_reserved, watch_event_category,
-    watch_event_matches_filter,
+    plan_transaction_watch_batch, plan_transaction_watch_burst, plan_watch_dispatch,
+    plan_watch_event_record, plan_watch_notify, plan_watch_queue_insert, plan_watch_read_batch,
+    plan_watched_key_visibility_event, validate_abi_bool, validate_notify_filter,
+    validate_notify_reserved, watch_event_category, watch_event_matches_filter,
 };
 
 /// Returns a stable value from the staged crate so integration build steps can
