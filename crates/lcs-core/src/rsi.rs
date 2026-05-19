@@ -1,10 +1,10 @@
 use crate::config::LcsLimits;
 use crate::constants::{
-    RSI_ABORT_TRANSACTION, RSI_ALREADY_EXISTS, RSI_BEGIN_TRANSACTION, RSI_CAS_FAILED,
-    RSI_COMMIT_TRANSACTION, RSI_CREATE_ENTRY, RSI_CREATE_KEY, RSI_DELETE_ENTRY, RSI_DELETE_LAYER,
-    RSI_DELETE_VALUE_ENTRY, RSI_DROP_KEY, RSI_ENUM_CHILDREN, RSI_FLUSH, RSI_HIDE_ENTRY,
-    RSI_INVALID, RSI_LOOKUP, RSI_MIN_RESPONSE_LEN, RSI_NOT_EMPTY, RSI_NOT_FOUND, RSI_OK,
-    RSI_QUERY_VALUES, RSI_READ_KEY, RSI_REQUEST_HEADER_LEN, RSI_RESPONSE_BIT,
+    REG_TOMBSTONE, RSI_ABORT_TRANSACTION, RSI_ALREADY_EXISTS, RSI_BEGIN_TRANSACTION,
+    RSI_CAS_FAILED, RSI_COMMIT_TRANSACTION, RSI_CREATE_ENTRY, RSI_CREATE_KEY, RSI_DELETE_ENTRY,
+    RSI_DELETE_LAYER, RSI_DELETE_VALUE_ENTRY, RSI_DROP_KEY, RSI_ENUM_CHILDREN, RSI_FLUSH,
+    RSI_HIDE_ENTRY, RSI_INVALID, RSI_LOOKUP, RSI_MIN_RESPONSE_LEN, RSI_NOT_EMPTY, RSI_NOT_FOUND,
+    RSI_OK, RSI_QUERY_VALUES, RSI_READ_KEY, RSI_REQUEST_HEADER_LEN, RSI_RESPONSE_BIT,
     RSI_RESPONSE_HEADER_LEN, RSI_SET_BLANKET_TOMBSTONE, RSI_SET_VALUE, RSI_STORAGE_ERROR,
     RSI_TOO_LARGE, RSI_TXN_BUSY, RSI_TXN_NOT_SUPPORTED, RSI_TXN_READ_ONLY, RSI_TXN_READ_WRITE,
     RSI_WRITE_KEY,
@@ -14,6 +14,7 @@ use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
 };
 use crate::resolution::Guid;
+use crate::value::{validate_value_data_len, validate_value_write_type};
 
 pub type RsiRequestId = u64;
 
@@ -1488,6 +1489,22 @@ pub fn validate_rsi_query_values_response_names(
 
     payload.for_each_blanket_entry(|entry| {
         validate_layer_name_bytes(entry.layer_name.data, limits)?;
+        Ok(())
+    })
+}
+
+/// Validates query-values response value type/data fields before resolution.
+pub fn validate_rsi_query_values_response_value_payloads(
+    payload: &RsiQueryValuesSuccessResponsePayload<'_>,
+    limits: &LcsLimits,
+) -> LcsResult<()> {
+    payload.for_each_value_entry(|entry| {
+        validate_value_data_len(entry.data.data.len(), limits)?;
+        validate_value_write_type(
+            entry.value_type,
+            entry.data.data.len(),
+            entry.value_type == REG_TOMBSTONE,
+        )?;
         Ok(())
     })
 }
