@@ -351,6 +351,165 @@ pub struct BackupStreamEnvelopeSummary {
     pub record_count: u64,
 }
 
+/// Stream-level backup restore ordering state for known semantic records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupStreamOrderingState {
+    records_seen: u64,
+    phase: BackupStreamOrderingPhase,
+    layer_manifest_count: u64,
+    key_count: u64,
+    path_entry_count: u64,
+    value_count: u64,
+    blanket_tombstone_count: u64,
+    unknown_count: u64,
+}
+
+impl BackupStreamOrderingState {
+    pub const fn new() -> Self {
+        Self {
+            records_seen: 0,
+            phase: BackupStreamOrderingPhase::BeforeKeyData,
+            layer_manifest_count: 0,
+            key_count: 0,
+            path_entry_count: 0,
+            value_count: 0,
+            blanket_tombstone_count: 0,
+            unknown_count: 0,
+        }
+    }
+
+    pub const fn phase(self) -> BackupStreamOrderingPhase {
+        self.phase
+    }
+
+    pub const fn summary(self) -> BackupStreamOrderingSummary {
+        BackupStreamOrderingSummary {
+            record_count: self.records_seen,
+            layer_manifest_count: self.layer_manifest_count,
+            key_count: self.key_count,
+            path_entry_count: self.path_entry_count,
+            value_count: self.value_count,
+            blanket_tombstone_count: self.blanket_tombstone_count,
+            unknown_count: self.unknown_count,
+        }
+    }
+
+    /// Records one parsed backup frame kind in stream order.
+    pub fn observe_record(&mut self, kind: BackupRecordKind) -> LcsResult<()> {
+        let index = self.records_seen;
+        self.validate_order(kind, index)?;
+
+        let records_seen = self
+            .records_seen
+            .checked_add(1)
+            .ok_or(LcsError::BackupStreamRecordCountOverflow)?;
+
+        match kind {
+            BackupRecordKind::LayerManifest => {
+                self.layer_manifest_count += 1;
+            }
+            BackupRecordKind::Key => {
+                self.key_count += 1;
+                self.phase = BackupStreamOrderingPhase::PathEntries;
+            }
+            BackupRecordKind::PathEntry => {
+                self.path_entry_count += 1;
+            }
+            BackupRecordKind::Value => {
+                self.value_count += 1;
+                self.phase = BackupStreamOrderingPhase::Values;
+            }
+            BackupRecordKind::BlanketTombstone => {
+                self.blanket_tombstone_count += 1;
+                self.phase = BackupStreamOrderingPhase::BlanketTombstones;
+            }
+            BackupRecordKind::Unknown(_) => {
+                self.unknown_count += 1;
+            }
+            BackupRecordKind::Header | BackupRecordKind::Trailer => {}
+        }
+
+        self.records_seen = records_seen;
+        Ok(())
+    }
+
+    fn validate_order(self, kind: BackupRecordKind, index: u64) -> LcsResult<()> {
+        match kind {
+            BackupRecordKind::LayerManifest => {
+                if self.phase != BackupStreamOrderingPhase::BeforeKeyData {
+                    return Err(LcsError::BackupStreamLayerManifestAfterKeyData { index });
+                }
+            }
+            BackupRecordKind::PathEntry => match self.phase {
+                BackupStreamOrderingPhase::BeforeKeyData => {
+                    return Err(LcsError::BackupStreamRecordOutsideKeySection {
+                        index,
+                        record_type: kind.code(),
+                    });
+                }
+                BackupStreamOrderingPhase::PathEntries => {}
+                BackupStreamOrderingPhase::Values
+                | BackupStreamOrderingPhase::BlanketTombstones => {
+                    return Err(LcsError::BackupStreamPathEntryAfterValueData { index });
+                }
+            },
+            BackupRecordKind::Value => match self.phase {
+                BackupStreamOrderingPhase::BeforeKeyData => {
+                    return Err(LcsError::BackupStreamRecordOutsideKeySection {
+                        index,
+                        record_type: kind.code(),
+                    });
+                }
+                BackupStreamOrderingPhase::PathEntries | BackupStreamOrderingPhase::Values => {}
+                BackupStreamOrderingPhase::BlanketTombstones => {
+                    return Err(LcsError::BackupStreamValueAfterBlanketData { index });
+                }
+            },
+            BackupRecordKind::BlanketTombstone => {
+                if self.phase == BackupStreamOrderingPhase::BeforeKeyData {
+                    return Err(LcsError::BackupStreamRecordOutsideKeySection {
+                        index,
+                        record_type: kind.code(),
+                    });
+                }
+            }
+            BackupRecordKind::Key
+            | BackupRecordKind::Header
+            | BackupRecordKind::Trailer
+            | BackupRecordKind::Unknown(_) => {}
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for BackupStreamOrderingState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Phase used to enforce record order inside KEY sections.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupStreamOrderingPhase {
+    BeforeKeyData,
+    PathEntries,
+    Values,
+    BlanketTombstones,
+}
+
+/// Successful stream-ordering observation summary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupStreamOrderingSummary {
+    pub record_count: u64,
+    pub layer_manifest_count: u64,
+    pub key_count: u64,
+    pub path_entry_count: u64,
+    pub value_count: u64,
+    pub blanket_tombstone_count: u64,
+    pub unknown_count: u64,
+}
+
 /// Known backup record type vocabulary, preserving unknown extensions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupRecordKind {

@@ -434,6 +434,28 @@ pub enum LcsError {
     },
     /// The backup stream record counter cannot advance without overflowing.
     BackupStreamRecordCountOverflow,
+    /// A LAYER manifest appeared after KEY data had started.
+    BackupStreamLayerManifestAfterKeyData {
+        /// Zero-based record index of the invalid LAYER manifest.
+        index: u64,
+    },
+    /// A KEY-section record appeared before any KEY record opened a section.
+    BackupStreamRecordOutsideKeySection {
+        /// Zero-based record index of the invalid record.
+        index: u64,
+        /// Invalid record type code.
+        record_type: u16,
+    },
+    /// A PATH_ENTRY appeared after VALUE or BLANKET_TOMBSTONE data in the same KEY section.
+    BackupStreamPathEntryAfterValueData {
+        /// Zero-based record index of the invalid PATH_ENTRY.
+        index: u64,
+    },
+    /// A VALUE appeared after BLANKET_TOMBSTONE data in the same KEY section.
+    BackupStreamValueAfterBlanketData {
+        /// Zero-based record index of the invalid VALUE.
+        index: u64,
+    },
     /// A backup stream contained duplicate folded LAYER manifest identities.
     DuplicateBackupLayerManifest,
     /// A backup layer-qualified record referenced a layer missing from the manifest.
