@@ -115,13 +115,14 @@ pub use resolution::{
     resolve_value, validate_path_entry_write_request, validate_path_target,
 };
 pub use rsi::{
-    RsiDispatchedWaitPlan, RsiMappedErrno, RsiPollPlan, RsiReadPlan, RsiRequestHeader,
+    RsiDispatchedWaitPlan, RsiLateResponseRecordPlan, RsiLateResponseRecordState,
+    RsiMalformedProtocolReason, RsiMappedErrno, RsiPollPlan, RsiReadPlan, RsiRequestHeader,
     RsiRequestId, RsiRequestIdCounter, RsiResponseHeader, RsiRetainedRequest,
     RsiSlotReservationPlan, RsiStatus, RsiStatusOutcome, RsiValidatedResponse,
     classify_rsi_status_code, map_rsi_status, parse_rsi_request_header, parse_rsi_response_header,
-    parse_rsi_status, plan_rsi_dispatched_wait, plan_rsi_slot_reservation, plan_rsi_source_poll,
-    plan_rsi_source_read, rsi_response_op_code, validate_rsi_request_op_code,
-    validate_rsi_response_for_request,
+    parse_rsi_status, plan_rsi_dispatched_wait, plan_rsi_late_response_record,
+    plan_rsi_slot_reservation, plan_rsi_source_poll, plan_rsi_source_read, rsi_response_op_code,
+    validate_rsi_request_op_code, validate_rsi_response_for_request,
 };
 pub use sequence::SequenceCounter;
 pub use source::{

@@ -43,6 +43,34 @@ pub struct RsiValidatedResponse {
     pub status: RsiStatus,
 }
 
+/// Retained-record lookup result for a late response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiLateResponseRecordState {
+    Retained(RsiRetainedRequest),
+    UnknownRequestId,
+    DuplicateResponse,
+    ReleasedRequestRecord,
+}
+
+/// Malformed protocol reason selected for unsafe late-response records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiMalformedProtocolReason {
+    UnknownRequestId,
+    DuplicateResponse,
+    ReleasedRequestRecord,
+}
+
+/// Late-response handling selected from retained-record state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiLateResponseRecordPlan {
+    ValidateNormally(RsiRetainedRequest),
+    MalformedProtocolTearDown {
+        reason: RsiMalformedProtocolReason,
+        tear_down_source: bool,
+        mark_source_down: bool,
+    },
+}
+
 /// Source fd read behavior selected from queue state and caller flags.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RsiReadPlan {
@@ -394,6 +422,34 @@ pub fn plan_rsi_dispatched_wait(
         retain_request_record: true,
         remains_in_flight: true,
         completion_may_still_occur: true,
+    }
+}
+
+/// Plans late-response retained-record disposition before payload validation.
+pub fn plan_rsi_late_response_record(
+    state: RsiLateResponseRecordState,
+) -> RsiLateResponseRecordPlan {
+    match state {
+        RsiLateResponseRecordState::Retained(request) => {
+            RsiLateResponseRecordPlan::ValidateNormally(request)
+        }
+        RsiLateResponseRecordState::UnknownRequestId => {
+            malformed_late_response_plan(RsiMalformedProtocolReason::UnknownRequestId)
+        }
+        RsiLateResponseRecordState::DuplicateResponse => {
+            malformed_late_response_plan(RsiMalformedProtocolReason::DuplicateResponse)
+        }
+        RsiLateResponseRecordState::ReleasedRequestRecord => {
+            malformed_late_response_plan(RsiMalformedProtocolReason::ReleasedRequestRecord)
+        }
+    }
+}
+
+fn malformed_late_response_plan(reason: RsiMalformedProtocolReason) -> RsiLateResponseRecordPlan {
+    RsiLateResponseRecordPlan::MalformedProtocolTearDown {
+        reason,
+        tear_down_source: true,
+        mark_source_down: true,
     }
 }
 
