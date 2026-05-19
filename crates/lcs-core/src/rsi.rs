@@ -42,6 +42,31 @@ pub struct RsiValidatedResponse {
     pub status: RsiStatus,
 }
 
+/// Source fd read behavior selected from queue state and caller flags.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiReadPlan {
+    ReturnOneCompleteRequest {
+        request_len: usize,
+        consume_request: bool,
+    },
+    WaitForRequestOrClose,
+    ReturnEagain,
+    ReturnEmsgsize {
+        required_len: usize,
+        consume_request: bool,
+    },
+    WakeForClose,
+}
+
+/// Source fd poll readiness bits expressed without platform poll constants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiPollPlan {
+    pub readable: bool,
+    pub writable: bool,
+    pub hangup: bool,
+    pub error: bool,
+}
+
 /// Per-source monotonic RSI request-id allocator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiRequestIdCounter {
@@ -239,6 +264,63 @@ pub fn validate_rsi_response_for_request(
 
     let status = parse_rsi_status(read_u32_le(frame, RSI_RESPONSE_HEADER_LEN))?;
     Ok(RsiValidatedResponse { header, status })
+}
+
+/// Plans one message-oriented source-fd read without splitting queued requests.
+pub fn plan_rsi_source_read(
+    next_queued_request_len: Option<usize>,
+    caller_buffer_len: usize,
+    nonblocking: bool,
+    fd_closing: bool,
+) -> LcsResult<RsiReadPlan> {
+    let Some(request_len) = next_queued_request_len else {
+        if fd_closing {
+            return Ok(RsiReadPlan::WakeForClose);
+        }
+        if nonblocking {
+            return Ok(RsiReadPlan::ReturnEagain);
+        }
+        return Ok(RsiReadPlan::WaitForRequestOrClose);
+    };
+
+    if request_len < RSI_REQUEST_HEADER_LEN {
+        return Err(LcsError::RsiMessageTooShort {
+            len: request_len,
+            min: RSI_REQUEST_HEADER_LEN,
+        });
+    }
+    if caller_buffer_len < request_len {
+        return Ok(RsiReadPlan::ReturnEmsgsize {
+            required_len: request_len,
+            consume_request: false,
+        });
+    }
+    Ok(RsiReadPlan::ReturnOneCompleteRequest {
+        request_len,
+        consume_request: true,
+    })
+}
+
+/// Plans source-fd poll readiness from live slot and queue state.
+pub fn plan_rsi_source_poll(
+    queued_request_count: usize,
+    source_slot_active: bool,
+    fd_closing: bool,
+) -> RsiPollPlan {
+    if !source_slot_active || fd_closing {
+        return RsiPollPlan {
+            readable: false,
+            writable: false,
+            hangup: true,
+            error: true,
+        };
+    }
+    RsiPollPlan {
+        readable: queued_request_count > 0,
+        writable: true,
+        hangup: false,
+        error: false,
+    }
 }
 
 fn validate_frame_len(frame: &[u8], min_len: usize) -> LcsResult<()> {
