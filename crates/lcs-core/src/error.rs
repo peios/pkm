@@ -178,6 +178,25 @@ pub enum LcsError {
     StaleSourceHiveIdentity,
     /// A Down source slot was only partially or incorrectly resumed.
     PartialSourceResume,
+    /// A key record or create request used nil as a key GUID.
+    NilKeyGuid,
+    /// A child key record or create request used nil as a parent GUID.
+    NilParentGuid,
+    /// A reg_create_key request contained unknown REG_OPTION_* bits.
+    UnknownCreateFlags {
+        /// Full flags value.
+        flags: u32,
+        /// Unknown flag bits.
+        unknown: u32,
+    },
+    /// A non-volatile child was requested under a volatile parent key.
+    NonVolatileChildUnderVolatile,
+    /// Key creation was attempted without KEY_CREATE_SUB_KEY on the parent.
+    MissingKeyCreateSubKey,
+    /// Symlink creation was attempted without KEY_CREATE_LINK on the parent.
+    MissingKeyCreateLink,
+    /// Symlink creation was attempted without TCB privilege or Administrator membership.
+    MissingSymlinkCreationAuthority,
 }
 
 /// Standard result type for the LCS semantic core.

@@ -13,6 +13,7 @@ pub mod config;
 pub mod constants;
 pub mod error;
 pub mod hives;
+pub mod key;
 pub mod layers;
 pub mod path;
 pub mod resolution;
@@ -42,6 +43,11 @@ pub use error::{LcsError, LcsResult};
 pub use hives::{
     CurrentUserRewrite, HiveRoute, HiveScope, HiveStatus, HiveView, RoutedHive, SourceId,
     for_each_routable_path_component, route_hive, validate_hive_table, validate_scope_guid_set,
+};
+pub use key::{
+    KeyCreateOptions, KeyCreatePlan, KeyCreateRequest, KeyParent, KeyRecordView,
+    validate_key_create_flags, validate_key_create_request, validate_key_record,
+    validate_symlink_create_authority,
 };
 pub use layers::{
     BASE_LAYER_VIEW, LayerMetadataEntry, for_each_effective_layer, normalize_layer_target,
