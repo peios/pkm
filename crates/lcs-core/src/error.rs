@@ -524,7 +524,7 @@ pub enum LcsError {
         /// Remapped child GUID, or nil for HIDDEN.
         child_guid: [u8; 16],
     },
-    /// A restore VALUE or BLANKET_TOMBSTONE KeyGUID did not refer to the remapped subtree.
+    /// A restore record target GUID did not refer to the remapped subtree.
     BackupRestoreKeyGuidOutsideSubtree {
         /// Remapped key GUID.
         key_guid: [u8; 16],

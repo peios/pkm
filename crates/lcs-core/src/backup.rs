@@ -1281,6 +1281,73 @@ pub fn remap_backup_restore_path_entry_for_dispatch<'a>(
     Ok(restored)
 }
 
+/// Validates that a remapped restore PATH_ENTRY target is inside the backup key set.
+pub fn validate_backup_restore_path_entry_target_in_key_set(
+    target: PathTarget,
+    target_root_guid: Guid,
+    remapped_non_root_key_guids: &[Guid],
+) -> LcsResult<()> {
+    if target_root_guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+
+    match target {
+        PathTarget::Hidden => Ok(()),
+        PathTarget::Guid(guid) if guid == NIL_GUID => Err(LcsError::NilKeyGuid),
+        PathTarget::Guid(guid)
+            if guid == target_root_guid
+                || guid_slice_contains(remapped_non_root_key_guids, guid) =>
+        {
+            Ok(())
+        }
+        PathTarget::Guid(guid) => {
+            Err(LcsError::BackupRestoreKeyGuidOutsideSubtree { key_guid: guid })
+        }
+    }
+}
+
+/// Remaps and validates restore PATH_ENTRY parent and target before source dispatch.
+pub fn remap_backup_restore_path_entry_with_key_set<'a>(
+    entry: BackupPathEntryPayload<'a>,
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    processed_non_root_key_guids: &[Guid],
+    remapped_non_root_key_guids: &[Guid],
+) -> LcsResult<BackupRestorePathEntry<'a>> {
+    let restored = remap_backup_restore_path_entry(
+        entry,
+        header_root_guid,
+        target_root_guid,
+        processed_non_root_key_guids,
+    )?;
+    validate_backup_restore_path_entry_target_in_key_set(
+        restored.target,
+        target_root_guid,
+        remapped_non_root_key_guids,
+    )?;
+    Ok(restored)
+}
+
+/// Remaps and validates a restore PATH_ENTRY against the key set, then remaps sequence.
+pub fn remap_backup_restore_path_entry_for_dispatch_with_key_set<'a>(
+    entry: BackupPathEntryPayload<'a>,
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    processed_non_root_key_guids: &[Guid],
+    remapped_non_root_key_guids: &[Guid],
+    sequence_remapper: &mut BackupRestoreSequenceRemapper,
+) -> LcsResult<BackupRestorePathEntry<'a>> {
+    let mut restored = remap_backup_restore_path_entry_with_key_set(
+        entry,
+        header_root_guid,
+        target_root_guid,
+        processed_non_root_key_guids,
+        remapped_non_root_key_guids,
+    )?;
+    restored.sequence = sequence_remapper.record_dispatched(entry.sequence)?;
+    Ok(restored)
+}
+
 /// Parses and validates one VALUE payload.
 pub fn parse_backup_value_payload<'a>(
     limits: &LcsLimits,
