@@ -38,6 +38,22 @@ pub struct DeleteKeyInput<'a> {
     pub visible_child_count: u32,
 }
 
+/// Visible-child counts considered before explicit key deletion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeleteVisibleChildGateInput {
+    pub global_enabled_visible_child_count: u32,
+    pub caller_private_visible_child_count: u32,
+}
+
+/// Successful visible-child admission for explicit key deletion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeleteVisibleChildGatePlan {
+    pub visible_child_count_used: u32,
+    pub evaluates_global_enabled_layers: bool,
+    pub ignores_caller_private_layer_set: bool,
+    pub recursive_delete_is_client_side: bool,
+}
+
 /// Kernel-side effect contract for explicit key deletion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyDeleteEffects {
@@ -128,6 +144,24 @@ pub fn plan_key_delete<'a>(
             preserves_key_data: true,
             preserves_other_layer_path_entries: true,
         },
+    })
+}
+
+/// Applies the visible-child gate for explicit key deletion.
+pub fn plan_delete_visible_child_gate(
+    input: DeleteVisibleChildGateInput,
+) -> LcsResult<DeleteVisibleChildGatePlan> {
+    if input.global_enabled_visible_child_count != 0 {
+        return Err(LcsError::KeyHasVisibleChildren {
+            count: input.global_enabled_visible_child_count,
+        });
+    }
+
+    Ok(DeleteVisibleChildGatePlan {
+        visible_child_count_used: input.global_enabled_visible_child_count,
+        evaluates_global_enabled_layers: true,
+        ignores_caller_private_layer_set: true,
+        recursive_delete_is_client_side: true,
     })
 }
 
