@@ -927,6 +927,133 @@ pub fn write_rsi_drop_key_request_frame(
     })
 }
 
+/// Writes a complete RSI_QUERY_VALUES request frame.
+pub fn write_rsi_query_values_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    guid: Guid,
+    value_name: &[u8],
+    query_all: bool,
+) -> LcsResult<RsiBuiltRequest> {
+    let payload_len = checked_add_len(
+        checked_add_len(16, checked_rsi_length_prefixed_len(value_name)?)?,
+        1,
+    )?;
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_QUERY_VALUES,
+        txn_id,
+        payload_len,
+        |writer| {
+            writer.write_guid(guid)?;
+            writer.write_length_prefixed(value_name)?;
+            writer.write_u8(u8::from(query_all))
+        },
+    )
+}
+
+/// Writes a complete RSI_SET_VALUE request frame.
+pub fn write_rsi_set_value_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    guid: Guid,
+    value_name: &[u8],
+    layer_name: &[u8],
+    value_type: u32,
+    data: &[u8],
+    sequence: u64,
+    expected_sequence: u64,
+) -> LcsResult<RsiBuiltRequest> {
+    let payload_len = checked_add_len(
+        checked_add_len(
+            checked_add_len(
+                checked_add_len(
+                    checked_add_len(16, checked_rsi_length_prefixed_len(value_name)?)?,
+                    checked_rsi_length_prefixed_len(layer_name)?,
+                )?,
+                4,
+            )?,
+            checked_rsi_length_prefixed_len(data)?,
+        )?,
+        16,
+    )?;
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_SET_VALUE,
+        txn_id,
+        payload_len,
+        |writer| {
+            writer.write_guid(guid)?;
+            writer.write_length_prefixed(value_name)?;
+            writer.write_length_prefixed(layer_name)?;
+            writer.write_u32_le(value_type)?;
+            writer.write_length_prefixed(data)?;
+            writer.write_u64_le(sequence)?;
+            writer.write_u64_le(expected_sequence)
+        },
+    )
+}
+
+/// Writes a complete RSI_DELETE_VALUE_ENTRY request frame.
+pub fn write_rsi_delete_value_entry_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    guid: Guid,
+    value_name: &[u8],
+    layer_name: &[u8],
+) -> LcsResult<RsiBuiltRequest> {
+    let payload_len = checked_add_len(
+        checked_add_len(16, checked_rsi_length_prefixed_len(value_name)?)?,
+        checked_rsi_length_prefixed_len(layer_name)?,
+    )?;
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_DELETE_VALUE_ENTRY,
+        txn_id,
+        payload_len,
+        |writer| {
+            writer.write_guid(guid)?;
+            writer.write_length_prefixed(value_name)?;
+            writer.write_length_prefixed(layer_name)
+        },
+    )
+}
+
+/// Writes a complete RSI_SET_BLANKET_TOMBSTONE request frame.
+pub fn write_rsi_set_blanket_tombstone_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    guid: Guid,
+    layer_name: &[u8],
+    set: bool,
+    sequence: u64,
+) -> LcsResult<RsiBuiltRequest> {
+    let payload_len = checked_add_len(
+        checked_add_len(16, checked_rsi_length_prefixed_len(layer_name)?)?,
+        9,
+    )?;
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_SET_BLANKET_TOMBSTONE,
+        txn_id,
+        payload_len,
+        |writer| {
+            writer.write_guid(guid)?;
+            writer.write_length_prefixed(layer_name)?;
+            writer.write_u8(u8::from(set))?;
+            writer.write_u64_le(sequence)
+        },
+    )
+}
+
 fn write_rsi_request_frame<F>(
     dst: &mut [u8],
     request_id: RsiRequestId,
