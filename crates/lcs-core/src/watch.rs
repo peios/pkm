@@ -105,6 +105,12 @@ pub enum WatchReadBatchPlan {
     Ready { event_count: usize, bytes: usize },
 }
 
+/// Watch fd poll readiness bits expressed without platform poll constants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatchQueuePollPlan {
+    pub readable: bool,
+}
+
 /// Minimal queue snapshot needed for overflow planning.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WatchQueueState {
@@ -142,6 +148,23 @@ pub struct WatchQueueMutationSummary {
 pub struct WatchQueueClearSummary {
     pub queued_events: usize,
     pub contains_overflow: bool,
+}
+
+/// Applied read-drain outcome for one key-fd watch queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatchQueueDrainSummary {
+    pub queued_events: usize,
+    pub contains_overflow: bool,
+    pub event_count: usize,
+    pub bytes: usize,
+    pub drained_overflow: bool,
+}
+
+/// Watch queue read-drain decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchQueueReadDrainPlan {
+    WouldBlock,
+    Drained(WatchQueueDrainSummary),
 }
 
 /// One armed watcher considered during dispatch.
@@ -684,6 +707,68 @@ pub fn clear_watch_queue(
     })
 }
 
+/// Plans poll readiness for an armed key-fd watch queue.
+pub fn plan_watch_queue_poll(
+    queue: &[WatchQueueEntry],
+    queued_events: usize,
+) -> LcsResult<WatchQueuePollPlan> {
+    watch_queue_snapshot(queue, queued_events)?;
+    Ok(WatchQueuePollPlan {
+        readable: queued_events != 0,
+    })
+}
+
+/// Drains as many complete watch events as fit in one key-fd read buffer.
+pub fn drain_watch_queue_read_batch(
+    queue: &mut [WatchQueueEntry],
+    queued_events: usize,
+    buffer_len: usize,
+) -> LcsResult<WatchQueueReadDrainPlan> {
+    let state = watch_queue_snapshot(queue, queued_events)?;
+    if queued_events == 0 {
+        return Ok(WatchQueueReadDrainPlan::WouldBlock);
+    }
+
+    let first_len = validate_watch_queue_entry_len(queue[0])?;
+    if buffer_len < first_len {
+        return Err(LcsError::WatchReadBufferTooSmall {
+            buffer_len,
+            first_event_len: first_len,
+        });
+    }
+
+    let mut event_count = 0usize;
+    let mut bytes = 0usize;
+    let mut drained_overflow = false;
+    for entry in &queue[..queued_events] {
+        let event_len = validate_watch_queue_entry_len(*entry)?;
+        let Some(next_bytes) = bytes.checked_add(event_len) else {
+            break;
+        };
+        if next_bytes > buffer_len {
+            break;
+        }
+        if entry.event_type == REG_WATCH_OVERFLOW {
+            drained_overflow = true;
+        }
+        event_count += 1;
+        bytes = next_bytes;
+    }
+
+    let remaining_events = queued_events - event_count;
+    for index in 0..remaining_events {
+        queue[index] = queue[event_count + index];
+    }
+
+    Ok(WatchQueueReadDrainPlan::Drained(WatchQueueDrainSummary {
+        queued_events: remaining_events,
+        contains_overflow: state.contains_overflow && !drained_overflow,
+        event_count,
+        bytes,
+        drained_overflow,
+    }))
+}
+
 fn validate_watch_queue_storage(queue_limit: usize, storage_len: usize) -> LcsResult<()> {
     if queue_limit == 0 {
         return Err(LcsError::InvalidWatchQueueLimit);
@@ -698,11 +783,15 @@ fn validate_watch_queue_storage(queue_limit: usize, storage_len: usize) -> LcsRe
 }
 
 fn validate_watch_queue_entry(entry: WatchQueueEntry) -> LcsResult<()> {
+    validate_watch_queue_entry_len(entry)?;
+    Ok(())
+}
+
+fn validate_watch_queue_entry_len(entry: WatchQueueEntry) -> LcsResult<usize> {
     watch_event_category(entry.event_type)?;
     validate_queued_event_len(QueuedWatchEvent {
         total_len: entry.total_len,
-    })?;
-    Ok(())
+    })
 }
 
 fn overflow_queue_entry() -> WatchQueueEntry {
