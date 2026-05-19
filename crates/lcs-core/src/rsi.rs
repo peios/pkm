@@ -1,3 +1,4 @@
+use crate::access::validate_registry_source_security_descriptor;
 use crate::config::LcsLimits;
 use crate::constants::{
     REG_TOMBSTONE, RSI_ABORT_TRANSACTION, RSI_ALREADY_EXISTS, RSI_BEGIN_TRANSACTION,
@@ -2810,10 +2811,7 @@ fn validate_rsi_path_metadata_guid(guid: Guid) -> LcsResult<()> {
 fn validate_rsi_source_security_descriptor(bytes: &[u8], field: &'static str) -> LcsResult<()> {
     let sd = kacs_core::SecurityDescriptor::parse(bytes)
         .map_err(|_| LcsError::MalformedSecurityDescriptor { field })?;
-    if sd.owner().is_none() {
-        return Err(LcsError::MalformedSecurityDescriptor { field });
-    }
-    Ok(())
+    validate_registry_source_security_descriptor(&sd, field)
 }
 
 fn validate_rsi_source_sequence(sequence: u64, next_sequence: u64) -> LcsResult<()> {
