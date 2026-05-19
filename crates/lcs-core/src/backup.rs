@@ -1,14 +1,16 @@
 use crate::config::LcsLimits;
 use crate::constants::{
     REG_BACKUP_BLANKET_TOMBSTONE, REG_BACKUP_HEADER, REG_BACKUP_KEY, REG_BACKUP_LAYER,
-    REG_BACKUP_MAGIC, REG_BACKUP_PATH_ENTRY, REG_BACKUP_TRAILER, REG_BACKUP_VALUE,
+    REG_BACKUP_MAGIC, REG_BACKUP_PATH_ENTRY, REG_BACKUP_TRAILER, REG_BACKUP_VALUE, REG_TOMBSTONE,
 };
 use crate::error::{LcsError, LcsResult};
 use crate::path::{
     validate_hive_name_bytes, validate_key_component_bytes, validate_layer_name_bytes,
+    validate_value_name_bytes,
 };
 use crate::resolution::{Guid, PathTarget, validate_path_target};
 use crate::source::NIL_GUID;
+use crate::value::{ValidatedValueType, validate_value_data_len, validate_value_write_type};
 
 pub const BACKUP_RECORD_HEADER_LEN: usize = 6;
 const BACKUP_HEADER_FIXED_PAYLOAD_LEN: usize = 8 + 4 + 4 + 8 + 16 + 4;
@@ -53,6 +55,17 @@ pub struct BackupPathEntryPayload<'a> {
     pub parent_guid: Guid,
     pub child_name: &'a str,
     pub target: PathTarget,
+    pub layer_name: &'a str,
+    pub sequence: u64,
+}
+
+/// Parsed VALUE record payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupValuePayload<'a> {
+    pub key_guid: Guid,
+    pub name: &'a str,
+    pub value_type: ValidatedValueType,
+    pub data: &'a [u8],
     pub layer_name: &'a str,
     pub sequence: u64,
 }
@@ -259,6 +272,51 @@ pub fn parse_backup_path_entry_record<'a>(
     parse_backup_path_entry_payload(limits, record.payload)
 }
 
+/// Parses and validates one VALUE payload.
+pub fn parse_backup_value_payload<'a>(
+    limits: &LcsLimits,
+    payload: &'a [u8],
+) -> LcsResult<BackupValuePayload<'a>> {
+    let mut cursor = BackupPayloadCursor::new(payload);
+    let key_guid = cursor.read_guid()?;
+    if key_guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    let name = cursor.read_length_prefixed_value_name(limits)?;
+    let raw_value_type = cursor.read_u32_le()?;
+    let data = cursor.read_length_prefixed_bytes()?;
+    validate_value_data_len(data.len(), limits)?;
+    let value_type =
+        validate_value_write_type(raw_value_type, data.len(), raw_value_type == REG_TOMBSTONE)?;
+    let layer_name = cursor.read_length_prefixed_layer_name(limits)?;
+    let sequence = cursor.read_u64_le()?;
+    cursor.finish_exact(REG_BACKUP_VALUE as u16)?;
+
+    Ok(BackupValuePayload {
+        key_guid,
+        name,
+        value_type,
+        data,
+        layer_name,
+        sequence,
+    })
+}
+
+/// Parses a complete VALUE record frame and validates the payload.
+pub fn parse_backup_value_record<'a>(
+    limits: &LcsLimits,
+    frame: &'a [u8],
+) -> LcsResult<BackupValuePayload<'a>> {
+    let record = parse_backup_record_frame(frame)?;
+    if record.kind != BackupRecordKind::Value {
+        return Err(LcsError::BackupRecordKindMismatch {
+            expected: REG_BACKUP_VALUE as u16,
+            actual: record.header.record_type,
+        });
+    }
+    parse_backup_value_payload(limits, record.payload)
+}
+
 /// Writes the common backup record header into a caller-provided buffer.
 pub fn write_backup_record_header(
     dst: &mut [u8],
@@ -425,6 +483,61 @@ pub fn write_backup_path_entry_record_frame(
     Ok(total_len)
 }
 
+/// Writes a complete VALUE record frame into a caller-provided buffer.
+pub fn write_backup_value_record_frame(
+    limits: &LcsLimits,
+    dst: &mut [u8],
+    key_guid: Guid,
+    name: &str,
+    value_type: u32,
+    data: &[u8],
+    layer_name: &str,
+    sequence: u64,
+) -> LcsResult<usize> {
+    if key_guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    let name = validate_value_name_bytes(name.as_bytes(), limits)?;
+    validate_value_data_len(data.len(), limits)?;
+    validate_value_write_type(value_type, data.len(), value_type == REG_TOMBSTONE)?;
+    let layer_name = validate_layer_name_bytes(layer_name.as_bytes(), limits)?;
+    let payload_len = checked_add_len(16, 4 + name.len())?;
+    let payload_len = checked_add_len(payload_len, 4 + 4 + data.len())?;
+    let payload_len = checked_add_len(payload_len, 4 + layer_name.len())?;
+    let payload_len = checked_add_len(payload_len, 8)?;
+    let total_len = checked_add_len(BACKUP_RECORD_HEADER_LEN, payload_len)?;
+    let record_len = u32::try_from(total_len).map_err(|_| LcsError::BackupPayloadLengthOverflow)?;
+    if dst.len() < total_len {
+        return Err(LcsError::BackupRecordFrameBufferTooSmall {
+            len: dst.len(),
+            required: total_len,
+        });
+    }
+
+    write_backup_record_header(
+        &mut dst[..BACKUP_RECORD_HEADER_LEN],
+        REG_BACKUP_VALUE as u16,
+        record_len,
+    )?;
+    let payload = &mut dst[BACKUP_RECORD_HEADER_LEN..total_len];
+    let mut offset = 0usize;
+    write_fixed(payload, &mut offset, &key_guid);
+    write_fixed(payload, &mut offset, &(name.len() as u32).to_le_bytes());
+    write_fixed(payload, &mut offset, name.as_bytes());
+    write_fixed(payload, &mut offset, &value_type.to_le_bytes());
+    write_fixed(payload, &mut offset, &(data.len() as u32).to_le_bytes());
+    write_fixed(payload, &mut offset, data);
+    write_fixed(
+        payload,
+        &mut offset,
+        &(layer_name.len() as u32).to_le_bytes(),
+    );
+    write_fixed(payload, &mut offset, layer_name.as_bytes());
+    write_fixed(payload, &mut offset, &sequence.to_le_bytes());
+
+    Ok(total_len)
+}
+
 fn validate_backup_record_len(record_len: u32, actual_len: usize) -> LcsResult<()> {
     if record_len < BACKUP_RECORD_HEADER_LEN as u32 {
         return Err(LcsError::BackupRecordTooSmall { record_len });
@@ -519,6 +632,12 @@ impl<'a> BackupPayloadCursor<'a> {
         let len = self.read_u32_le()?;
         let bytes = self.read_fixed(len as usize)?;
         validate_layer_name_bytes(bytes, limits)
+    }
+
+    fn read_length_prefixed_value_name(&mut self, limits: &LcsLimits) -> LcsResult<&'a str> {
+        let len = self.read_u32_le()?;
+        let bytes = self.read_fixed(len as usize)?;
+        validate_value_name_bytes(bytes, limits)
     }
 
     fn read_length_prefixed_bytes(&mut self) -> LcsResult<&'a [u8]> {

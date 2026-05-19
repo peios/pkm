@@ -42,11 +42,13 @@ pub use access::{
 pub use backup::{
     BACKUP_RECORD_HEADER_LEN, BackupHeaderPayload, BackupLayerManifestPayload,
     BackupPathEntryPayload, BackupRecordFrame, BackupRecordHeader, BackupRecordKind,
-    parse_backup_header_payload, parse_backup_header_record, parse_backup_layer_manifest_payload,
-    parse_backup_layer_manifest_record, parse_backup_path_entry_payload,
-    parse_backup_path_entry_record, parse_backup_record_frame, parse_backup_record_header,
+    BackupValuePayload, parse_backup_header_payload, parse_backup_header_record,
+    parse_backup_layer_manifest_payload, parse_backup_layer_manifest_record,
+    parse_backup_path_entry_payload, parse_backup_path_entry_record, parse_backup_record_frame,
+    parse_backup_record_header, parse_backup_value_payload, parse_backup_value_record,
     write_backup_header_record_frame, write_backup_layer_manifest_record_frame,
     write_backup_path_entry_record_frame, write_backup_record_header,
+    write_backup_value_record_frame,
 };
 pub use casefold::{
     casefold_cmp, casefold_eq, casefold_eq_bytes, casefold_is, unicode_simple_case_fold,
