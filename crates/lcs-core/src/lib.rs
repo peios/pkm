@@ -25,6 +25,7 @@ pub mod output_buffer;
 pub mod path;
 pub mod query;
 pub mod resolution;
+pub mod resource;
 pub mod rsi;
 pub mod sequence;
 pub mod source;
@@ -153,6 +154,9 @@ pub use resolution::{
     PathTarget, ResolvedPathEntry, ResolvedValueEntry, ValidatedPathEntryWrite, ValueEntry,
     ValueResolution, for_each_effective_value, for_each_visible_subkey, resolve_path_entry,
     resolve_value, validate_path_entry_write_request, validate_path_target,
+};
+pub use resource::{
+    RegistryMemoryBoundInputs, RegistryMemoryBoundPlan, plan_registry_memory_bounds,
 };
 pub use rsi::{
     RSI_PATH_TARGET_GUID, RSI_PATH_TARGET_HIDDEN, RSI_WRITE_KEY_FIELD_KNOWN_MASK,

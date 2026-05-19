@@ -560,6 +560,11 @@ pub enum LcsError {
     },
     /// A computed userspace output payload length overflowed host arithmetic.
     OutputSizeOverflow,
+    /// A registry memory-bound calculation overflowed host integer arithmetic.
+    MemoryBoundOverflow {
+        /// Logical calculated bound.
+        field: &'static str,
+    },
     /// A volatile per-hive generation counter cannot advance without overflowing.
     HiveGenerationOverflow,
     /// A key fd's resolved path and ancestor GUID metadata were inconsistent.
