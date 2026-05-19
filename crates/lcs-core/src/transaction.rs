@@ -148,6 +148,18 @@ pub struct StartedTransaction {
     pub start_timeout_timer: bool,
 }
 
+/// Planned transaction fd publication for `reg_begin_transaction`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionFdPublicationPlan {
+    pub transaction_id: TransactionId,
+    pub initial_state: TransactionState<'static>,
+    pub timeout_ms: u32,
+    pub publish_anonymous_fd: bool,
+    pub start_timeout_timer: bool,
+    pub source_contact_required: bool,
+    pub close_without_commit_aborts: bool,
+}
+
 /// Plans reg_begin_transaction without selecting a source.
 pub fn plan_begin_transaction(
     limits: &LcsLimits,
@@ -158,6 +170,23 @@ pub fn plan_begin_transaction(
         state: TransactionState::ActiveUnbound,
         timeout_ms: limits.transaction_timeout_ms,
         start_timeout_timer: true,
+    })
+}
+
+/// Plans the full semantic fd publication result of `reg_begin_transaction`.
+pub fn plan_begin_transaction_fd(
+    limits: &LcsLimits,
+    counter: &mut TransactionIdCounter,
+) -> LcsResult<TransactionFdPublicationPlan> {
+    let started = plan_begin_transaction(limits, counter)?;
+    Ok(TransactionFdPublicationPlan {
+        transaction_id: started.transaction_id,
+        initial_state: started.state,
+        timeout_ms: started.timeout_ms,
+        publish_anonymous_fd: true,
+        start_timeout_timer: started.start_timeout_timer,
+        source_contact_required: false,
+        close_without_commit_aborts: true,
     })
 }
 
