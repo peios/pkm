@@ -5,9 +5,13 @@ use crate::constants::{
     REG_OPTION_CREATE_LINK, REG_OPTION_VOLATILE, REG_VALID_MAPPED_ACCESS_MASK,
 };
 use crate::error::{LcsError, LcsResult};
-use crate::path::validate_key_component_bytes;
-use crate::resolution::Guid;
+use crate::path::{validate_key_component_bytes, validate_layer_name_bytes};
+use crate::resolution::{
+    Guid, PathEntryWriteRequest, PathTarget, ValidatedPathEntryWrite,
+    validate_path_entry_write_request,
+};
 use crate::rsi::RsiStatus;
+use crate::sequence::SequenceCounter;
 use crate::source::NIL_GUID;
 
 const REG_CREATE_KEY_KNOWN_FLAGS: u32 = REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK;
@@ -72,6 +76,29 @@ pub struct KeyCreatePlan<'a> {
     pub parent_guid: Guid,
     pub volatile: bool,
     pub symlink: bool,
+}
+
+/// Inputs for planning all source records created by `reg_create_key`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyCreateRecordsRequest<'a> {
+    pub parent_guid: Guid,
+    pub parent_is_volatile: bool,
+    pub parent_granted_access: u32,
+    pub child_name: &'a str,
+    pub candidate_guid: Guid,
+    pub active_key_guids: &'a [Guid],
+    pub retired_key_guids: &'a [Guid],
+    pub layer: &'a str,
+    pub flags: u32,
+    pub caller_has_tcb_or_admin: bool,
+}
+
+/// Source-record plan for creating a missing registry key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeyCreateRecordsPlan<'a> {
+    pub guid_assignment: KeyGuidAssignmentPlan,
+    pub key_record: KeyCreatePlan<'a>,
+    pub path_entry: ValidatedPathEntryWrite<'a>,
 }
 
 /// Inputs required to compute a new registry key's initial SD.
@@ -199,6 +226,50 @@ pub fn validate_key_create_request<'a>(
         parent_guid: request.parent_guid,
         volatile: options.volatile,
         symlink: options.symlink,
+    })
+}
+
+/// Plans the key record and path entry that `reg_create_key` must create.
+pub fn plan_key_create_records<'a>(
+    limits: &LcsLimits,
+    sequence_counter: &mut SequenceCounter,
+    request: &KeyCreateRecordsRequest<'a>,
+) -> LcsResult<KeyCreateRecordsPlan<'a>> {
+    let guid_assignment = plan_key_guid_assignment(KeyGuidAssignmentRequest {
+        candidate_guid: request.candidate_guid,
+        active_key_guids: request.active_key_guids,
+        retired_key_guids: request.retired_key_guids,
+    })?;
+    validate_layer_name_bytes(request.layer.as_bytes(), limits)?;
+
+    let key_record = validate_key_create_request(
+        limits,
+        &KeyCreateRequest {
+            parent_guid: request.parent_guid,
+            parent_is_volatile: request.parent_is_volatile,
+            parent_granted_access: request.parent_granted_access,
+            child_name: request.child_name,
+            child_guid: guid_assignment.guid,
+            flags: request.flags,
+            caller_has_tcb_or_admin: request.caller_has_tcb_or_admin,
+        },
+    )?;
+    let sequence = sequence_counter.allocate()?;
+    let path_entry = validate_path_entry_write_request(
+        limits,
+        &PathEntryWriteRequest {
+            parent_guid: key_record.parent_guid,
+            child_name: key_record.name,
+            layer: request.layer,
+            sequence,
+            target: PathTarget::Guid(key_record.guid),
+        },
+    )?;
+
+    Ok(KeyCreateRecordsPlan {
+        guid_assignment,
+        key_record,
+        path_entry,
     })
 }
 

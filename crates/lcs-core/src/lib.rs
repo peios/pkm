@@ -130,12 +130,13 @@ pub use ioctl::{
     validate_registry_security_info,
 };
 pub use key::{
-    KeyCreateOptions, KeyCreatePlan, KeyCreateRequest, KeyGuidAssignmentPlan,
-    KeyGuidAssignmentRequest, KeyParent, KeyRecordView, RegCreateKeyResolutionPlan,
-    RegCreateKeySourceResultPlan, RegCreateKeyTarget, RegistryKeyInitialSecurityDescriptorInput,
-    compute_registry_key_initial_security_descriptor, plan_key_guid_assignment,
-    plan_reg_create_key_resolution, plan_reg_create_key_source_result, validate_key_create_flags,
-    validate_key_create_request, validate_key_record, validate_symlink_create_authority,
+    KeyCreateOptions, KeyCreatePlan, KeyCreateRecordsPlan, KeyCreateRecordsRequest,
+    KeyCreateRequest, KeyGuidAssignmentPlan, KeyGuidAssignmentRequest, KeyParent, KeyRecordView,
+    RegCreateKeyResolutionPlan, RegCreateKeySourceResultPlan, RegCreateKeyTarget,
+    RegistryKeyInitialSecurityDescriptorInput, compute_registry_key_initial_security_descriptor,
+    plan_key_create_records, plan_key_guid_assignment, plan_reg_create_key_resolution,
+    plan_reg_create_key_source_result, validate_key_create_flags, validate_key_create_request,
+    validate_key_record, validate_symlink_create_authority,
 };
 pub use key_path::{
     DeleteKeyInput, DerivedKeyPathMutation, HideKeyInput, KeyFdNamespaceView, KeyPathMutationInput,
