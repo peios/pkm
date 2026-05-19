@@ -4,7 +4,8 @@ use crate::config::LcsLimits;
 use crate::constants::{BASE_LAYER_NAME, KEY_SET_VALUE, REG_BINARY, REG_DWORD};
 use crate::error::{LcsError, LcsResult};
 use crate::path::{is_base_layer_name, validate_layer_name_bytes, validate_value_name_bytes};
-use crate::resolution::{LayerResolutionContext, LayerView};
+use crate::resolution::{Guid, LayerResolutionContext, LayerView};
+use crate::source::NIL_GUID;
 
 /// Absolute registry path containing layer metadata keys.
 pub const LCS_LAYER_METADATA_ROOT_PATH: &str = "Machine\\System\\Registry\\Layers";
@@ -37,6 +38,25 @@ pub enum ParsedLayerMetadataValue<'a> {
     Precedence(u32),
     Enabled(bool),
     Owner(&'a [u8]),
+}
+
+/// Complete non-base layer metadata needed before publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerPublicationInput<'a> {
+    pub name: &'a str,
+    pub precedence: u32,
+    pub enabled: bool,
+    pub metadata_key_guid: Guid,
+    pub metadata_security_descriptor: &'a [u8],
+}
+
+/// Atomic non-base layer cache publication plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerPublicationPlan<'a> {
+    pub view: LayerView<'a>,
+    pub metadata_key_guid: Guid,
+    pub metadata_security_descriptor: &'a [u8],
+    pub publish_atomically: bool,
 }
 
 /// Source/cache layer metadata before PSD-005 defaults are applied.
@@ -169,6 +189,32 @@ pub fn parse_layer_metadata_value<'a>(
     }
 
     Ok(None)
+}
+
+/// Plans atomic publication of a non-base layer table entry plus key GUID/SD.
+pub fn plan_layer_publication<'a>(
+    limits: &LcsLimits,
+    input: LayerPublicationInput<'a>,
+) -> LcsResult<LayerPublicationPlan<'a>> {
+    let name = validate_layer_name_bytes(input.name.as_bytes(), limits)?;
+    if is_base_layer_name(name) {
+        return Err(LcsError::BaseLayerPublicationNotAllowed);
+    }
+    if input.metadata_key_guid == NIL_GUID {
+        return Err(LcsError::NilLayerMetadataKeyGuid);
+    }
+    validate_layer_metadata_security_descriptor(input.metadata_security_descriptor)?;
+
+    Ok(LayerPublicationPlan {
+        view: LayerView {
+            name,
+            precedence: input.precedence,
+            enabled: input.enabled,
+        },
+        metadata_key_guid: input.metadata_key_guid,
+        metadata_security_descriptor: input.metadata_security_descriptor,
+        publish_atomically: true,
+    })
 }
 
 /// Plans the kernel-side effects of deleting a layer metadata key.

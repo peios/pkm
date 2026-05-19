@@ -284,6 +284,10 @@ pub enum LcsError {
     MissingLayerMetadataSetValue,
     /// Establishing or elevating a layer above precedence 0 was attempted without SeTcbPrivilege.
     MissingLayerPrecedenceTcb,
+    /// A non-base layer publication attempted to use the hardcoded base layer.
+    BaseLayerPublicationNotAllowed,
+    /// A layer metadata publication carried an all-zero key GUID.
+    NilLayerMetadataKeyGuid,
     /// A well-known layer metadata value used the wrong registry value type.
     LayerMetadataValueTypeMismatch {
         /// Logical layer metadata value name.
