@@ -129,6 +129,14 @@ pub struct BackupRestoreTeardownDeleteBlanketPlan<'a> {
     pub layer_name: &'a str,
 }
 
+/// Restore teardown plan for purging one layer-qualified path entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupRestoreTeardownDeletePathEntryPlan<'a> {
+    pub parent_guid: Guid,
+    pub child_name: &'a str,
+    pub layer_name: &'a str,
+}
+
 /// Non-root KEY create plan derived from a buffered restore key section.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupRestoreNonRootKeyCreatePlan<'a> {
@@ -994,6 +1002,37 @@ pub fn plan_backup_restore_teardown_delete_blanket<'a>(
     Ok(BackupRestoreTeardownDeleteBlanketPlan {
         key_guid: blanket.key_guid,
         layer_name: blanket.layer,
+    })
+}
+
+/// Plans teardown of an existing outgoing path entry below the restore target.
+pub fn plan_backup_restore_teardown_delete_path_entry<'a>(
+    limits: &LcsLimits,
+    target_root_guid: Guid,
+    known_descendant_parent_guids: &[Guid],
+    parent_guid: Guid,
+    child_name: &'a str,
+    layer_name: &'a str,
+) -> LcsResult<BackupRestoreTeardownDeletePathEntryPlan<'a>> {
+    if target_root_guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    if parent_guid == NIL_GUID {
+        return Err(LcsError::NilParentGuid);
+    }
+
+    let child_name = validate_key_component_bytes(child_name.as_bytes(), limits)?;
+    let layer_name = validate_layer_name_bytes(layer_name.as_bytes(), limits)?;
+    if parent_guid != target_root_guid
+        && !guid_slice_contains(known_descendant_parent_guids, parent_guid)
+    {
+        return Err(LcsError::BackupRestoreParentGuidOutsideSubtree { parent_guid });
+    }
+
+    Ok(BackupRestoreTeardownDeletePathEntryPlan {
+        parent_guid,
+        child_name,
+        layer_name,
     })
 }
 
