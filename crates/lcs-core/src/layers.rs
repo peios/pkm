@@ -83,6 +83,19 @@ pub struct LayerDeletionPlan<'a> {
     pub dispatch_watch_events_for_effective_changes: bool,
 }
 
+/// Planned kernel-side effects after an RSI_DELETE_LAYER success response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LayerDeletionSourceCompletionPlan<'a> {
+    pub layer_name: &'a str,
+    pub orphaned_guid_count: usize,
+    pub mark_returned_guids_orphaned: bool,
+    pub retain_existing_key_fds: bool,
+    pub reject_new_namespace_ops_through_orphans: bool,
+    pub drop_orphans_on_last_fd_close: bool,
+    pub recompute_effective_state: bool,
+    pub dispatch_watch_events_for_effective_changes: bool,
+}
+
 /// Normalizes an optional caller-supplied layer target.
 pub fn normalize_layer_target<'a>(
     layer: Option<&'a str>,
@@ -115,6 +128,26 @@ pub fn plan_layer_deletion<'a>(
         recompute_effective_state: true,
         dispatch_watch_events_for_effective_changes: true,
     })
+}
+
+/// Plans orphan handling after a source confirms layer deletion.
+pub fn plan_layer_deletion_source_completion<'a>(
+    deletion: &LayerDeletionPlan<'a>,
+    orphaned_guid_count: usize,
+) -> LayerDeletionSourceCompletionPlan<'a> {
+    let has_orphans = orphaned_guid_count != 0;
+
+    LayerDeletionSourceCompletionPlan {
+        layer_name: deletion.layer_name,
+        orphaned_guid_count,
+        mark_returned_guids_orphaned: has_orphans,
+        retain_existing_key_fds: has_orphans,
+        reject_new_namespace_ops_through_orphans: has_orphans,
+        drop_orphans_on_last_fd_close: has_orphans,
+        recompute_effective_state: deletion.recompute_effective_state,
+        dispatch_watch_events_for_effective_changes: deletion
+            .dispatch_watch_events_for_effective_changes,
+    }
 }
 
 /// Emits the effective layer table from cached/source metadata.

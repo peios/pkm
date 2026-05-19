@@ -144,10 +144,11 @@ pub use key_path::{
     PlannedKeyDelete, PlannedKeyHide, derive_key_path_mutation, plan_key_delete, plan_key_hide,
 };
 pub use layers::{
-    BASE_LAYER_VIEW, LayerDeletionPlan, LayerMetadataCacheUpdatePlan, LayerMetadataEntry,
-    LayerMetadataMutationTiming, LayerWriteAuthorizationInput, LayerWriteAuthorizationPlan,
-    TransactionalLayerReadPlan, TransactionalLayerReadSubject, for_each_effective_layer,
-    normalize_layer_target, plan_layer_deletion, plan_layer_metadata_cache_update,
+    BASE_LAYER_VIEW, LayerDeletionPlan, LayerDeletionSourceCompletionPlan,
+    LayerMetadataCacheUpdatePlan, LayerMetadataEntry, LayerMetadataMutationTiming,
+    LayerWriteAuthorizationInput, LayerWriteAuthorizationPlan, TransactionalLayerReadPlan,
+    TransactionalLayerReadSubject, for_each_effective_layer, normalize_layer_target,
+    plan_layer_deletion, plan_layer_deletion_source_completion, plan_layer_metadata_cache_update,
     plan_layer_write_authorization, plan_transactional_layer_read,
     validate_layer_metadata_security_descriptor, validate_layer_resolution_context,
     validate_layer_views, validate_private_layer_set,
