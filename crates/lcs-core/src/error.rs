@@ -197,6 +197,17 @@ pub enum LcsError {
     MissingKeyCreateLink,
     /// Symlink creation was attempted without TCB privilege or Administrator membership.
     MissingSymlinkCreationAuthority,
+    /// A symlink key had no effective default value to interpret as REG_LINK.
+    SymlinkDefaultValueMissing,
+    /// A symlink key's effective default value was not REG_LINK.
+    SymlinkDefaultNotRegLink(u32),
+    /// Following another symlink would exceed SymlinkDepthLimit.
+    SymlinkDepthExceeded {
+        /// Attempted follow depth.
+        depth: usize,
+        /// Maximum permitted follow depth.
+        max: usize,
+    },
 }
 
 /// Standard result type for the LCS semantic core.

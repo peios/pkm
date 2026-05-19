@@ -20,6 +20,7 @@ pub mod resolution;
 pub mod sequence;
 pub mod source;
 pub mod string;
+pub mod symlink;
 pub mod value;
 
 pub use access::{
@@ -72,6 +73,10 @@ pub use source::{
     validate_source_registration, validate_source_registration_hives, validate_source_slots,
 };
 pub use string::validate_lcs_str;
+pub use symlink::{
+    SymlinkDefaultValue, validate_symlink_default_value, validate_symlink_follow_depth,
+    validate_symlink_target_bytes,
+};
 pub use value::{
     RegistryValueType, ValidatedValueType, validate_value_data_len, validate_value_write_type,
 };
