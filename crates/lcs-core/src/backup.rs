@@ -68,6 +68,21 @@ pub struct BackupLayerManifestSetSummary {
     pub referenced_layer_count: usize,
 }
 
+/// Restore authority boundary for one LAYER manifest record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupLayerManifestAuthorityPlan<'a> {
+    pub name: &'a str,
+    pub precedence_for_validation: u32,
+    pub enabled_for_validation: bool,
+    pub owner_sid_for_validation: &'a [u8],
+    pub creates_layer_metadata: bool,
+    pub updates_layer_metadata: bool,
+    pub deletes_layer_metadata: bool,
+    pub enables_or_disables_layer: bool,
+    pub authorizes_layer_metadata: bool,
+    pub ordinary_metadata_records_authoritative: bool,
+}
+
 /// Preflight plan for restore layer-precedence authorization.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupRestoreLayerPrecedencePlan {
@@ -827,6 +842,30 @@ pub fn validate_backup_layer_manifest_set(
     Ok(BackupLayerManifestSetSummary {
         manifest_count: manifests.len(),
         referenced_layer_count: referenced_layers.len(),
+    })
+}
+
+/// Plans restore-time authority for one backup LAYER manifest.
+pub fn plan_backup_layer_manifest_authority<'a>(
+    limits: &LcsLimits,
+    manifest: BackupLayerManifestPayload<'a>,
+) -> LcsResult<BackupLayerManifestAuthorityPlan<'a>> {
+    let name = validate_layer_name_bytes(manifest.name.as_bytes(), limits)?;
+    kacs_core::Sid::parse(manifest.owner_sid).map_err(|_| LcsError::MalformedBackupSid {
+        field: "backup_layer.owner",
+    })?;
+
+    Ok(BackupLayerManifestAuthorityPlan {
+        name,
+        precedence_for_validation: manifest.precedence,
+        enabled_for_validation: manifest.enabled,
+        owner_sid_for_validation: manifest.owner_sid,
+        creates_layer_metadata: false,
+        updates_layer_metadata: false,
+        deletes_layer_metadata: false,
+        enables_or_disables_layer: false,
+        authorizes_layer_metadata: false,
+        ordinary_metadata_records_authoritative: true,
     })
 }
 
