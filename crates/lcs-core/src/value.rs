@@ -119,12 +119,27 @@ pub struct ValidatedValueDelete<'a> {
     pub layer: &'a str,
 }
 
+/// Source-dispatch-ready value delete plus direct key side effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlannedValueDelete<'a> {
+    pub delete: ValidatedValueDelete<'a>,
+    pub updates_last_write_time: bool,
+}
+
 /// LCS-produced blanket tombstone mutation before source dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlanketTombstoneRequest<'a> {
     pub key_guid: Guid,
     pub layer: &'a str,
     pub action: BlanketTombstoneAction,
+}
+
+/// Caller-visible blanket tombstone mutation before sequence allocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlanketTombstoneInput<'a> {
+    pub key_guid: Guid,
+    pub layer: &'a str,
+    pub set: bool,
 }
 
 /// Blanket tombstone action.
@@ -140,6 +155,14 @@ pub struct ValidatedBlanketTombstone<'a> {
     pub key_guid: Guid,
     pub layer: &'a str,
     pub action: BlanketTombstoneAction,
+}
+
+/// Source-dispatch-ready blanket tombstone mutation plus side effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlannedBlanketTombstone<'a> {
+    pub blanket: ValidatedBlanketTombstone<'a>,
+    pub updates_last_write_time: bool,
+    pub recomputes_effective_value_events: bool,
 }
 
 /// Validates a value write before source dispatch.
@@ -212,6 +235,18 @@ pub fn validate_value_delete_request<'a>(
     })
 }
 
+/// Validates a value delete and records its direct key side effects.
+pub fn plan_value_delete<'a>(
+    limits: &LcsLimits,
+    request: &ValueDeleteRequest<'a>,
+) -> LcsResult<PlannedValueDelete<'a>> {
+    let delete = validate_value_delete_request(limits, request)?;
+    Ok(PlannedValueDelete {
+        delete,
+        updates_last_write_time: true,
+    })
+}
+
 /// Validates a blanket tombstone mutation before source dispatch.
 pub fn validate_blanket_tombstone_request<'a>(
     limits: &LcsLimits,
@@ -224,6 +259,40 @@ pub fn validate_blanket_tombstone_request<'a>(
         key_guid: request.key_guid,
         layer,
         action: request.action,
+    })
+}
+
+/// Validates a blanket tombstone mutation and assigns a sequence for set.
+pub fn plan_blanket_tombstone<'a>(
+    limits: &LcsLimits,
+    sequence_counter: &mut SequenceCounter,
+    input: &BlanketTombstoneInput<'a>,
+) -> LcsResult<PlannedBlanketTombstone<'a>> {
+    let preallocation_action = if input.set {
+        BlanketTombstoneAction::Set { sequence: 0 }
+    } else {
+        BlanketTombstoneAction::Remove
+    };
+    let preallocation_request = BlanketTombstoneRequest {
+        key_guid: input.key_guid,
+        layer: input.layer,
+        action: preallocation_action,
+    };
+    let validated = validate_blanket_tombstone_request(limits, &preallocation_request)?;
+    let action = match validated.action {
+        BlanketTombstoneAction::Set { .. } => BlanketTombstoneAction::Set {
+            sequence: sequence_counter.allocate()?,
+        },
+        BlanketTombstoneAction::Remove => BlanketTombstoneAction::Remove,
+    };
+
+    Ok(PlannedBlanketTombstone {
+        blanket: ValidatedBlanketTombstone {
+            action,
+            ..validated
+        },
+        updates_last_write_time: true,
+        recomputes_effective_value_events: true,
     })
 }
 
