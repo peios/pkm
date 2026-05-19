@@ -18,6 +18,16 @@
 	_Static_assert(offsetof(struct type, field) == (expected), \
 		       #type "." #field " offset disagrees with PSD-005")
 
+#define ASSERT_IOCTL_ENCODING(command, expected_nr, expected_dir, expected_size) \
+	_Static_assert(_IOC_TYPE(command) == REG_IOC_TYPE, \
+		       #command " type disagrees with PSD-005"); \
+	_Static_assert(_IOC_NR(command) == (expected_nr), \
+		       #command " number disagrees with PSD-005"); \
+	_Static_assert(_IOC_DIR(command) == (expected_dir), \
+		       #command " direction disagrees with PSD-005"); \
+	_Static_assert(_IOC_SIZE(command) == (expected_size), \
+		       #command " size disagrees with PSD-005")
+
 /* The headers must be internally consistent: each declared size constant
  * must agree with the layout of the struct it describes. */
 _Static_assert(sizeof(struct kacs_access_check_args)
@@ -237,57 +247,44 @@ ASSERT_FIELD_OFFSET(reg_src_hive_entry, flags, 32);
 ASSERT_FIELD_OFFSET(reg_src_hive_entry, _pad1, 36);
 ASSERT_FIELD_OFFSET(reg_src_hive_entry, scope_guid, 40);
 
-_Static_assert(_IOC_TYPE(REG_IOC_QUERY_VALUE) == REG_IOC_TYPE,
-	       "REG_IOC_QUERY_VALUE type disagrees with PSD-005");
-_Static_assert(_IOC_NR(REG_IOC_QUERY_VALUE) == REG_IOC_QUERY_VALUE_NR,
-	       "REG_IOC_QUERY_VALUE number disagrees with PSD-005");
-_Static_assert(_IOC_DIR(REG_IOC_QUERY_VALUE) == (_IOC_READ | _IOC_WRITE),
-	       "REG_IOC_QUERY_VALUE direction disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_QUERY_VALUE) == REG_QUERY_VALUE_ARGS_SIZE,
-	       "REG_IOC_QUERY_VALUE size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_SET_VALUE) == REG_SET_VALUE_ARGS_SIZE,
-	       "REG_IOC_SET_VALUE size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_DELETE_VALUE) == REG_DELETE_VALUE_ARGS_SIZE,
-	       "REG_IOC_DELETE_VALUE size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_BLANKET_TOMBSTONE)
-		       == REG_BLANKET_TOMBSTONE_ARGS_SIZE,
-	       "REG_IOC_BLANKET_TOMBSTONE size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_QUERY_VALUES_BATCH)
-		       == REG_QUERY_VALUES_BATCH_ARGS_SIZE,
-	       "REG_IOC_QUERY_VALUES_BATCH size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_ENUM_VALUES) == REG_ENUM_VALUE_ARGS_SIZE,
-	       "REG_IOC_ENUM_VALUES size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_ENUM_SUBKEYS) == REG_ENUM_SUBKEY_ARGS_SIZE,
-	       "REG_IOC_ENUM_SUBKEYS size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_QUERY_KEY_INFO)
-		       == REG_QUERY_KEY_INFO_ARGS_SIZE,
-	       "REG_IOC_QUERY_KEY_INFO size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_DELETE_KEY) == REG_DELETE_KEY_ARGS_SIZE,
-	       "REG_IOC_DELETE_KEY size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_HIDE_KEY) == REG_HIDE_KEY_ARGS_SIZE,
-	       "REG_IOC_HIDE_KEY size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_GET_SECURITY) == REG_GET_SECURITY_ARGS_SIZE,
-	       "REG_IOC_GET_SECURITY size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_SET_SECURITY) == REG_SET_SECURITY_ARGS_SIZE,
-	       "REG_IOC_SET_SECURITY size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_NOTIFY) == REG_NOTIFY_ARGS_SIZE,
-	       "REG_IOC_NOTIFY size disagrees with PSD-005");
-_Static_assert(_IOC_DIR(REG_IOC_FLUSH) == _IOC_NONE,
-	       "REG_IOC_FLUSH direction disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_FLUSH) == 0,
-	       "REG_IOC_FLUSH must not carry an argument");
-_Static_assert(_IOC_SIZE(REG_IOC_BACKUP) == REG_BACKUP_ARGS_SIZE,
-	       "REG_IOC_BACKUP size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_RESTORE) == REG_RESTORE_ARGS_SIZE,
-	       "REG_IOC_RESTORE size disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_IOC_COMMIT) == 0,
-	       "REG_IOC_COMMIT must not carry an argument");
-_Static_assert(_IOC_SIZE(REG_IOC_TXN_STATUS) == REG_TXN_STATUS_ARGS_SIZE,
-	       "REG_IOC_TXN_STATUS size disagrees with PSD-005");
-_Static_assert(_IOC_TYPE(REG_SRC_REGISTER) == REG_IOC_TYPE,
-	       "REG_SRC_REGISTER type disagrees with PSD-005");
-_Static_assert(_IOC_SIZE(REG_SRC_REGISTER) == REG_SRC_REGISTER_ARGS_SIZE,
-	       "REG_SRC_REGISTER size disagrees with PSD-005");
+ASSERT_IOCTL_ENCODING(REG_SRC_REGISTER, REG_SRC_REGISTER_NR, _IOC_WRITE,
+		      REG_SRC_REGISTER_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_QUERY_VALUE, REG_IOC_QUERY_VALUE_NR,
+		      _IOC_READ | _IOC_WRITE, REG_QUERY_VALUE_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_SET_VALUE, REG_IOC_SET_VALUE_NR, _IOC_WRITE,
+		      REG_SET_VALUE_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_DELETE_VALUE, REG_IOC_DELETE_VALUE_NR,
+		      _IOC_WRITE, REG_DELETE_VALUE_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_BLANKET_TOMBSTONE,
+		      REG_IOC_BLANKET_TOMBSTONE_NR, _IOC_WRITE,
+		      REG_BLANKET_TOMBSTONE_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_QUERY_VALUES_BATCH,
+		      REG_IOC_QUERY_VALUES_BATCH_NR, _IOC_READ | _IOC_WRITE,
+		      REG_QUERY_VALUES_BATCH_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_ENUM_VALUES, REG_IOC_ENUM_VALUES_NR,
+		      _IOC_READ | _IOC_WRITE, REG_ENUM_VALUE_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_ENUM_SUBKEYS, REG_IOC_ENUM_SUBKEYS_NR,
+		      _IOC_READ | _IOC_WRITE, REG_ENUM_SUBKEY_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_QUERY_KEY_INFO, REG_IOC_QUERY_KEY_INFO_NR,
+		      _IOC_READ, REG_QUERY_KEY_INFO_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_DELETE_KEY, REG_IOC_DELETE_KEY_NR, _IOC_WRITE,
+		      REG_DELETE_KEY_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_HIDE_KEY, REG_IOC_HIDE_KEY_NR, _IOC_WRITE,
+		      REG_HIDE_KEY_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_GET_SECURITY, REG_IOC_GET_SECURITY_NR,
+		      _IOC_READ | _IOC_WRITE, REG_GET_SECURITY_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_SET_SECURITY, REG_IOC_SET_SECURITY_NR,
+		      _IOC_WRITE, REG_SET_SECURITY_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_NOTIFY, REG_IOC_NOTIFY_NR, _IOC_WRITE,
+		      REG_NOTIFY_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_FLUSH, REG_IOC_FLUSH_NR, _IOC_NONE, 0);
+ASSERT_IOCTL_ENCODING(REG_IOC_BACKUP, REG_IOC_BACKUP_NR, _IOC_WRITE,
+		      REG_BACKUP_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_RESTORE, REG_IOC_RESTORE_NR, _IOC_WRITE,
+		      REG_RESTORE_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_IOC_COMMIT, REG_IOC_COMMIT_NR, _IOC_NONE, 0);
+ASSERT_IOCTL_ENCODING(REG_IOC_TXN_STATUS, REG_IOC_TXN_STATUS_NR, _IOC_READ,
+		      REG_TXN_STATUS_ARGS_SIZE);
 _Static_assert(sizeof(REG_BACKUP_MAGIC) - 1 == 8,
 	       "REG_BACKUP_MAGIC must be eight bytes");
 
