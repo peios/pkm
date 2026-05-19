@@ -177,8 +177,9 @@ pub use metadata::{
 pub use open::{
     RegistryKeyOpenAccessInput, RegistryKeyOpenAccessPlan, RegistryKeyOpenResolutionInput,
     RegistryKeyOpenResolutionPlan, RegistryOpenAccessDecision, RegistryOpenAccessTarget,
+    RegistryOpenPreResolutionAccessPlan, RegistryOpenPreResolutionErrno,
     plan_registry_key_open_access, plan_registry_key_open_resolution,
-    select_registry_open_access_target,
+    plan_registry_open_pre_resolution_access, select_registry_open_access_target,
 };
 pub use output_buffer::{
     OutputBufferAggregate, OutputBufferDecision, OutputBufferRequest, OutputBufferShape,

@@ -38,6 +38,27 @@ pub struct RegistryKeyOpenResolutionPlan {
     pub follows_symlink: bool,
 }
 
+/// Caller-visible errno for pre-resolution open access validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegistryOpenPreResolutionErrno {
+    Einval,
+}
+
+/// Pre-resolution decision for `reg_open_key` desired access.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegistryOpenPreResolutionAccessPlan {
+    Continue {
+        requested_access: u32,
+        mapped_desired_access: u32,
+        maximum_allowed: bool,
+        path_resolution_allowed: bool,
+    },
+    Reject {
+        errno: RegistryOpenPreResolutionErrno,
+        path_resolution_allowed: bool,
+    },
+}
+
 /// Scalar AccessCheck decision for a key-open operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegistryOpenAccessDecision {
@@ -96,6 +117,24 @@ pub fn select_registry_open_access_target(
         }
     } else {
         Ok(RegistryOpenAccessTarget::FinalKey)
+    }
+}
+
+/// Validates caller desired access before any path resolution is attempted.
+pub fn plan_registry_open_pre_resolution_access(
+    desired_access: u32,
+) -> RegistryOpenPreResolutionAccessPlan {
+    match validate_registry_desired_access(desired_access) {
+        Ok(normalized) => RegistryOpenPreResolutionAccessPlan::Continue {
+            requested_access: normalized.requested,
+            mapped_desired_access: normalized.mapped,
+            maximum_allowed: normalized.maximum_allowed,
+            path_resolution_allowed: true,
+        },
+        Err(_) => RegistryOpenPreResolutionAccessPlan::Reject {
+            errno: RegistryOpenPreResolutionErrno::Einval,
+            path_resolution_allowed: false,
+        },
     }
 }
 
