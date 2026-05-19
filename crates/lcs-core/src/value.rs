@@ -123,6 +123,12 @@ pub struct ValueLayerAdmissionPlan {
     pub best_effort_admission_control: bool,
 }
 
+/// Caller-facing errno class for per-value layer admission failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValueLayerAdmissionErrno {
+    Enospc,
+}
+
 /// LCS-produced value delete before source dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ValueDeleteRequest<'a> {
@@ -262,6 +268,14 @@ pub fn plan_value_layer_admission(
         distinct_layers_after_write: input.current_distinct_layers + 1,
         best_effort_admission_control: true,
     })
+}
+
+/// Maps per-value layer admission failures to caller-visible errno classes.
+pub fn value_layer_admission_errno(error: &LcsError) -> Option<ValueLayerAdmissionErrno> {
+    match error {
+        LcsError::TooManyLayersPerValue { .. } => Some(ValueLayerAdmissionErrno::Enospc),
+        _ => None,
+    }
 }
 
 /// Validates a value delete before source dispatch.
