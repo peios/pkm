@@ -681,6 +681,12 @@ pub enum RsiSlotReservationPlan {
     TimeoutBeforeDispatchNoRequest,
 }
 
+/// Caller-visible errno class for RSI request timeout outcomes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiRequestTimeoutErrno {
+    Etimedout,
+}
+
 /// Wait result for a request that has already been dispatched to a source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RsiDispatchedWaitPlan {
@@ -2402,6 +2408,20 @@ pub fn plan_rsi_slot_reservation(
     })
 }
 
+/// Maps pre-dispatch slot reservation timeout outcomes to caller errno.
+pub fn rsi_slot_reservation_timeout_errno(
+    plan: &RsiSlotReservationPlan,
+) -> Option<RsiRequestTimeoutErrno> {
+    match plan {
+        RsiSlotReservationPlan::TimeoutBeforeDispatchNoRequest => {
+            Some(RsiRequestTimeoutErrno::Etimedout)
+        }
+        RsiSlotReservationPlan::DispatchNow { .. } | RsiSlotReservationPlan::WaitForSlot { .. } => {
+            None
+        }
+    }
+}
+
 /// Plans caller wait behavior for a request already dispatched to a source.
 pub fn plan_rsi_dispatched_wait(
     request_id: RsiRequestId,
@@ -2418,6 +2438,18 @@ pub fn plan_rsi_dispatched_wait(
         retain_request_record: true,
         remains_in_flight: true,
         completion_may_still_occur: true,
+    }
+}
+
+/// Maps post-dispatch wait timeout outcomes to caller errno.
+pub fn rsi_dispatched_wait_timeout_errno(
+    plan: &RsiDispatchedWaitPlan,
+) -> Option<RsiRequestTimeoutErrno> {
+    match plan {
+        RsiDispatchedWaitPlan::CallerTimedOutRetainRecord { .. } => {
+            Some(RsiRequestTimeoutErrno::Etimedout)
+        }
+        RsiDispatchedWaitPlan::ContinueWaiting { .. } => None,
     }
 }
 
