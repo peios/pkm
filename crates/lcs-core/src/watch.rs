@@ -91,6 +91,13 @@ pub struct QueuedWatchEvent {
     pub total_len: u32,
 }
 
+/// Runtime watch queue entry retained until a key fd read drains it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatchQueueEntry {
+    pub event_type: u32,
+    pub total_len: u32,
+}
+
 /// Watch read batching decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WatchReadBatchPlan {
@@ -111,6 +118,30 @@ pub enum WatchQueueInsertPlan {
     QueueEvent,
     DropOldestAndQueueOverflow,
     DropOldestPreservingOverflowAndQueueEvent,
+}
+
+/// Applied queue mutation outcome for one incoming watch event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchQueuePushEffect {
+    QueuedEvent,
+    DropOldestAndQueueOverflow,
+    DropOldestPreservingOverflowAndQueueEvent,
+    PreservedExistingOverflow,
+}
+
+/// Summary returned after mutating caller-provided watch queue storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatchQueueMutationSummary {
+    pub queued_events: usize,
+    pub contains_overflow: bool,
+    pub effect: WatchQueuePushEffect,
+}
+
+/// Summary returned after clearing a watch queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatchQueueClearSummary {
+    pub queued_events: usize,
+    pub contains_overflow: bool,
 }
 
 /// One armed watcher considered during dispatch.
@@ -561,6 +592,146 @@ pub fn plan_watch_queue_insert(
     } else {
         Ok(WatchQueueInsertPlan::DropOldestAndQueueOverflow)
     }
+}
+
+/// Computes and validates a runtime queue snapshot from retained entries.
+pub fn watch_queue_snapshot(
+    queue: &[WatchQueueEntry],
+    queued_events: usize,
+) -> LcsResult<WatchQueueState> {
+    if queued_events > queue.len() {
+        return Err(LcsError::InvalidWatchQueueState);
+    }
+
+    let mut overflow_count = 0usize;
+    for entry in &queue[..queued_events] {
+        validate_watch_queue_entry(*entry)?;
+        if entry.event_type == REG_WATCH_OVERFLOW {
+            overflow_count += 1;
+            if overflow_count > 1 {
+                return Err(LcsError::DuplicateWatchOverflowEvent);
+            }
+        }
+    }
+
+    Ok(WatchQueueState {
+        queued_events,
+        contains_overflow: overflow_count != 0,
+    })
+}
+
+/// Applies PSD-005 watch queue overflow/drop rules to fixed queue storage.
+pub fn push_watch_queue_event(
+    queue_limit: usize,
+    queue: &mut [WatchQueueEntry],
+    queued_events: usize,
+    event: WatchQueueEntry,
+) -> LcsResult<WatchQueueMutationSummary> {
+    validate_watch_queue_storage(queue_limit, queue.len())?;
+    validate_watch_queue_entry(event)?;
+
+    let state = watch_queue_snapshot(queue, queued_events)?;
+    let plan = plan_watch_queue_insert(queue_limit, state)?;
+
+    if event.event_type == REG_WATCH_OVERFLOW && state.contains_overflow {
+        return Ok(WatchQueueMutationSummary {
+            queued_events,
+            contains_overflow: true,
+            effect: WatchQueuePushEffect::PreservedExistingOverflow,
+        });
+    }
+
+    match plan {
+        WatchQueueInsertPlan::QueueEvent => {
+            queue[queued_events] = event;
+            Ok(WatchQueueMutationSummary {
+                queued_events: queued_events + 1,
+                contains_overflow: state.contains_overflow
+                    || event.event_type == REG_WATCH_OVERFLOW,
+                effect: WatchQueuePushEffect::QueuedEvent,
+            })
+        }
+        WatchQueueInsertPlan::DropOldestAndQueueOverflow => {
+            drop_oldest(queue, queue_limit);
+            queue[queue_limit - 1] = overflow_queue_entry();
+            Ok(WatchQueueMutationSummary {
+                queued_events: queue_limit,
+                contains_overflow: true,
+                effect: WatchQueuePushEffect::DropOldestAndQueueOverflow,
+            })
+        }
+        WatchQueueInsertPlan::DropOldestPreservingOverflowAndQueueEvent => {
+            drop_oldest_preserving_overflow(queue, queue_limit)?;
+            queue[queue_limit - 1] = event;
+            Ok(WatchQueueMutationSummary {
+                queued_events: queue_limit,
+                contains_overflow: true,
+                effect: WatchQueuePushEffect::DropOldestPreservingOverflowAndQueueEvent,
+            })
+        }
+    }
+}
+
+/// Clears all retained watch events for disarm or fd-close cleanup.
+pub fn clear_watch_queue(
+    queue: &mut [WatchQueueEntry],
+    queued_events: usize,
+) -> LcsResult<WatchQueueClearSummary> {
+    watch_queue_snapshot(queue, queued_events)?;
+    Ok(WatchQueueClearSummary {
+        queued_events: 0,
+        contains_overflow: false,
+    })
+}
+
+fn validate_watch_queue_storage(queue_limit: usize, storage_len: usize) -> LcsResult<()> {
+    if queue_limit == 0 {
+        return Err(LcsError::InvalidWatchQueueLimit);
+    }
+    if storage_len < queue_limit {
+        return Err(LcsError::WatchQueueStorageTooSmall {
+            storage_len,
+            queue_limit,
+        });
+    }
+    Ok(())
+}
+
+fn validate_watch_queue_entry(entry: WatchQueueEntry) -> LcsResult<()> {
+    watch_event_category(entry.event_type)?;
+    validate_queued_event_len(QueuedWatchEvent {
+        total_len: entry.total_len,
+    })?;
+    Ok(())
+}
+
+fn overflow_queue_entry() -> WatchQueueEntry {
+    WatchQueueEntry {
+        event_type: REG_WATCH_OVERFLOW,
+        total_len: DIRECT_WATCH_EVENT_HEADER_LEN as u32,
+    }
+}
+
+fn drop_oldest(queue: &mut [WatchQueueEntry], len: usize) {
+    for index in 1..len {
+        queue[index - 1] = queue[index];
+    }
+}
+
+fn drop_oldest_preserving_overflow(queue: &mut [WatchQueueEntry], len: usize) -> LcsResult<()> {
+    if len <= 1 {
+        return Err(LcsError::InvalidWatchQueueState);
+    }
+
+    let drop_index = if queue[0].event_type == REG_WATCH_OVERFLOW {
+        1
+    } else {
+        0
+    };
+    for index in drop_index + 1..len {
+        queue[index - 1] = queue[index];
+    }
+    Ok(())
 }
 
 /// Selects whether a watcher receives a mutation event using captured ancestry.

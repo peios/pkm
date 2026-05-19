@@ -767,6 +767,15 @@ pub enum LcsError {
     InvalidWatchQueueLimit,
     /// A watch queue snapshot was internally inconsistent.
     InvalidWatchQueueState,
+    /// Caller-provided watch queue storage cannot represent the configured limit.
+    WatchQueueStorageTooSmall {
+        /// Caller-provided storage length.
+        storage_len: usize,
+        /// Configured queue limit.
+        queue_limit: usize,
+    },
+    /// A watch queue snapshot contained more than one pending OVERFLOW event.
+    DuplicateWatchOverflowEvent,
     /// A transaction watch burst limit was zero.
     InvalidTransactionWatchBurstLimit,
     /// Transaction watch batch entries were not in operation order.
