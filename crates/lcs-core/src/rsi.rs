@@ -220,6 +220,49 @@ impl<'a> RsiLookupSuccessResponsePayload<'a> {
     }
 }
 
+/// One parsed child record from an RSI_ENUM_CHILDREN response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiEnumChildResponseEntry<'a> {
+    pub child_name: RsiLengthPrefixedField<'a>,
+    pub path_entry_count: u32,
+    pub path_entries_bytes: &'a [u8],
+}
+
+impl<'a> RsiEnumChildResponseEntry<'a> {
+    pub fn for_each_path_entry<F>(&self, visitor: F) -> LcsResult<()>
+    where
+        F: FnMut(RsiLookupPathEntry<'a>) -> LcsResult<()>,
+    {
+        parse_rsi_lookup_path_entries(self.path_entry_count, self.path_entries_bytes, visitor)
+    }
+}
+
+/// Parsed successful RSI_ENUM_CHILDREN response payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiEnumChildrenSuccessResponsePayload<'a> {
+    pub response: RsiValidatedResponse,
+    pub child_count: u32,
+    pub children_bytes: &'a [u8],
+    pub metadata_count: u32,
+    pub metadata_bytes: &'a [u8],
+}
+
+impl<'a> RsiEnumChildrenSuccessResponsePayload<'a> {
+    pub fn for_each_child<F>(&self, visitor: F) -> LcsResult<()>
+    where
+        F: FnMut(RsiEnumChildResponseEntry<'a>) -> LcsResult<()>,
+    {
+        parse_rsi_enum_children_entries(self.child_count, self.children_bytes, visitor)
+    }
+
+    pub fn for_each_key_metadata<F>(&self, visitor: F) -> LcsResult<()>
+    where
+        F: FnMut(RsiKeyMetadataResponseEntry<'a>) -> LcsResult<()>,
+    {
+        parse_rsi_key_metadata_entries(self.metadata_count, self.metadata_bytes, visitor)
+    }
+}
+
 /// Parsed RSI_CREATE_ENTRY request payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiCreateEntryRequestPayload<'a> {
@@ -1299,6 +1342,38 @@ pub fn parse_rsi_lookup_success_response_payload<'a>(
     })
 }
 
+/// Parses the successful RSI_ENUM_CHILDREN response payload.
+pub fn parse_rsi_enum_children_success_response_payload<'a>(
+    frame: &'a [u8],
+    retained: RsiRetainedRequest,
+) -> LcsResult<RsiEnumChildrenSuccessResponsePayload<'a>> {
+    let response = validate_rsi_success_response_for_request(frame, retained, RSI_ENUM_CHILDREN)?;
+    let mut cursor = RsiPayloadCursor::new(&frame[RSI_MIN_RESPONSE_LEN..]);
+    let child_count = cursor.read_u32_le()?;
+    let children_start = cursor.position();
+    skip_rsi_enum_children_entries(&mut cursor, child_count)?;
+    let children_end = cursor.position();
+    let metadata_count = cursor.read_u32_le()?;
+    let metadata_start = cursor.position();
+    skip_rsi_key_metadata_entries(&mut cursor, metadata_count)?;
+    let metadata_end = cursor.position();
+    if cursor.remaining_len() != 0 {
+        return Err(LcsError::RsiUnexpectedResponsePayload {
+            op_code: retained.op_code,
+            extra_len: cursor.remaining_len(),
+        });
+    }
+
+    let payload = &frame[RSI_MIN_RESPONSE_LEN..];
+    Ok(RsiEnumChildrenSuccessResponsePayload {
+        response,
+        child_count,
+        children_bytes: &payload[children_start..children_end],
+        metadata_count,
+        metadata_bytes: &payload[metadata_start..metadata_end],
+    })
+}
+
 /// Plans one message-oriented source-fd read without splitting queued requests.
 pub fn plan_rsi_source_read(
     next_queued_request_len: Option<usize>,
@@ -1564,6 +1639,15 @@ fn skip_rsi_key_metadata_entries(cursor: &mut RsiPayloadCursor<'_>, count: u32) 
     Ok(())
 }
 
+fn skip_rsi_enum_children_entries(cursor: &mut RsiPayloadCursor<'_>, count: u32) -> LcsResult<()> {
+    for _ in 0..count {
+        cursor.read_length_prefixed()?;
+        let path_entry_count = cursor.read_u32_le()?;
+        skip_rsi_lookup_path_entries(cursor, path_entry_count)?;
+    }
+    Ok(())
+}
+
 fn parse_rsi_lookup_path_entries<'a, F>(
     count: u32,
     bytes: &'a [u8],
@@ -1589,6 +1673,36 @@ where
     if cursor.remaining_len() != 0 {
         return Err(LcsError::RsiUnexpectedResponsePayload {
             op_code: RSI_LOOKUP,
+            extra_len: cursor.remaining_len(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_rsi_enum_children_entries<'a, F>(
+    count: u32,
+    bytes: &'a [u8],
+    mut visitor: F,
+) -> LcsResult<()>
+where
+    F: FnMut(RsiEnumChildResponseEntry<'a>) -> LcsResult<()>,
+{
+    let mut cursor = RsiPayloadCursor::new(bytes);
+    for _ in 0..count {
+        let child_name = cursor.read_length_prefixed()?;
+        let path_entry_count = cursor.read_u32_le()?;
+        let entries_start = cursor.position();
+        skip_rsi_lookup_path_entries(&mut cursor, path_entry_count)?;
+        let entries_end = cursor.position();
+        visitor(RsiEnumChildResponseEntry {
+            child_name,
+            path_entry_count,
+            path_entries_bytes: &bytes[entries_start..entries_end],
+        })?;
+    }
+    if cursor.remaining_len() != 0 {
+        return Err(LcsError::RsiUnexpectedResponsePayload {
+            op_code: RSI_ENUM_CHILDREN,
             extra_len: cursor.remaining_len(),
         });
     }
