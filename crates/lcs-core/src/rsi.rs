@@ -13,7 +13,7 @@ use crate::error::{LcsError, LcsResult};
 use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
 };
-use crate::resolution::Guid;
+use crate::resolution::{Guid, PathTarget, ValidatedPathEntryWrite};
 use crate::transaction::TransactionKernelEffectsPlan;
 use crate::value::{validate_value_data_len, validate_value_write_type};
 
@@ -862,6 +862,36 @@ pub fn write_rsi_hide_entry_request_frame(
             writer.write_u64_le(sequence)
         },
     )
+}
+
+/// Writes the source request corresponding to a validated path-entry write.
+pub fn write_rsi_path_entry_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    path_entry: ValidatedPathEntryWrite<'_>,
+) -> LcsResult<RsiBuiltRequest> {
+    match path_entry.target {
+        PathTarget::Guid(child_guid) => write_rsi_create_entry_request_frame(
+            dst,
+            request_id,
+            txn_id,
+            path_entry.parent_guid,
+            path_entry.child_name.as_bytes(),
+            path_entry.layer.as_bytes(),
+            child_guid,
+            path_entry.sequence,
+        ),
+        PathTarget::Hidden => write_rsi_hide_entry_request_frame(
+            dst,
+            request_id,
+            txn_id,
+            path_entry.parent_guid,
+            path_entry.child_name.as_bytes(),
+            path_entry.layer.as_bytes(),
+            path_entry.sequence,
+        ),
+    }
 }
 
 /// Writes a complete RSI_DELETE_ENTRY request frame.

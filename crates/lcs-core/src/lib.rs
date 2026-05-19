@@ -249,9 +249,9 @@ pub use rsi::{
     write_rsi_delete_value_entry_request_frame, write_rsi_drop_key_request_frame,
     write_rsi_enum_children_request_frame, write_rsi_flush_request_frame,
     write_rsi_hide_entry_request_frame, write_rsi_lookup_request_frame,
-    write_rsi_query_values_request_frame, write_rsi_read_key_request_frame,
-    write_rsi_set_blanket_tombstone_request_frame, write_rsi_set_value_request_frame,
-    write_rsi_write_key_request_frame,
+    write_rsi_path_entry_request_frame, write_rsi_query_values_request_frame,
+    write_rsi_read_key_request_frame, write_rsi_set_blanket_tombstone_request_frame,
+    write_rsi_set_value_request_frame, write_rsi_write_key_request_frame,
 };
 pub use security::{
     RegistryGetSecurityPlan, RegistrySetSecurityPlan, plan_registry_get_security,
