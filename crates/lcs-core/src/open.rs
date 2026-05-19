@@ -4,6 +4,8 @@ use crate::access::{
 };
 use crate::constants::REG_OPEN_LINK;
 use crate::error::{LcsError, LcsResult};
+use crate::resolution::Guid;
+use crate::source::NIL_GUID;
 
 const REG_OPEN_KEY_KNOWN_FLAGS: u32 = REG_OPEN_LINK;
 
@@ -16,6 +18,24 @@ pub enum RegistryOpenAccessTarget {
     SymlinkTarget,
     /// `REG_OPEN_LINK`: evaluate the symlink key itself.
     SymlinkKey,
+}
+
+/// Inputs for final key-vs-symlink target binding after path resolution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegistryKeyOpenResolutionInput {
+    pub final_key_guid: Guid,
+    pub final_component_is_symlink: bool,
+    pub symlink_target_guid: Option<Guid>,
+    pub flags: u32,
+}
+
+/// Pure plan for the object checked and published by `reg_open_key`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegistryKeyOpenResolutionPlan {
+    pub access_target: RegistryOpenAccessTarget,
+    pub access_check_key_guid: Guid,
+    pub published_fd_key_guid: Guid,
+    pub follows_symlink: bool,
 }
 
 /// Scalar AccessCheck decision for a key-open operation.
@@ -76,6 +96,39 @@ pub fn select_registry_open_access_target(
         }
     } else {
         Ok(RegistryOpenAccessTarget::FinalKey)
+    }
+}
+
+/// Plans whether a final symlink is followed and which key GUID future fd
+/// publication must bind to.
+pub fn plan_registry_key_open_resolution(
+    input: RegistryKeyOpenResolutionInput,
+) -> LcsResult<RegistryKeyOpenResolutionPlan> {
+    validate_open_key_guid(input.final_key_guid)?;
+    let access_target =
+        select_registry_open_access_target(input.final_component_is_symlink, input.flags)?;
+
+    match access_target {
+        RegistryOpenAccessTarget::FinalKey | RegistryOpenAccessTarget::SymlinkKey => {
+            Ok(RegistryKeyOpenResolutionPlan {
+                access_target,
+                access_check_key_guid: input.final_key_guid,
+                published_fd_key_guid: input.final_key_guid,
+                follows_symlink: false,
+            })
+        }
+        RegistryOpenAccessTarget::SymlinkTarget => {
+            let target_guid = input
+                .symlink_target_guid
+                .ok_or(LcsError::SymlinkDefaultValueMissing)?;
+            validate_open_key_guid(target_guid)?;
+            Ok(RegistryKeyOpenResolutionPlan {
+                access_target,
+                access_check_key_guid: target_guid,
+                published_fd_key_guid: target_guid,
+                follows_symlink: true,
+            })
+        }
     }
 }
 
@@ -158,4 +211,11 @@ pub fn plan_registry_key_open_access(
         privilege_use_audit_required: !state.privilege_use_events.is_empty(),
         updated_privileges: state.updated_privileges,
     })
+}
+
+fn validate_open_key_guid(guid: Guid) -> LcsResult<()> {
+    if guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    Ok(())
 }

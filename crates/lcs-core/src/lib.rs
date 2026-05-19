@@ -156,8 +156,10 @@ pub use metadata::{
     query_key_info_result, validate_query_key_info_output_buffer,
 };
 pub use open::{
-    RegistryKeyOpenAccessInput, RegistryKeyOpenAccessPlan, RegistryOpenAccessDecision,
-    RegistryOpenAccessTarget, plan_registry_key_open_access, select_registry_open_access_target,
+    RegistryKeyOpenAccessInput, RegistryKeyOpenAccessPlan, RegistryKeyOpenResolutionInput,
+    RegistryKeyOpenResolutionPlan, RegistryOpenAccessDecision, RegistryOpenAccessTarget,
+    plan_registry_key_open_access, plan_registry_key_open_resolution,
+    select_registry_open_access_target,
 };
 pub use output_buffer::{
     OutputBufferAggregate, OutputBufferDecision, OutputBufferRequest, OutputBufferShape,
