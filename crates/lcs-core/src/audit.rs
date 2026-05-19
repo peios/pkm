@@ -15,6 +15,23 @@ pub const LCS_SACL_MATCH_SUCCESS: u32 = 0x1;
 pub const LCS_SACL_MATCH_FAILURE: u32 = 0x2;
 pub const LCS_SACL_MATCH_VALID_MASK: u32 = LCS_SACL_MATCH_SUCCESS | LCS_SACL_MATCH_FAILURE;
 
+const FIELD_CALLER: &str = "caller";
+const FIELD_KEY_GUID: &str = "key_guid";
+const FIELD_REQUESTED_ACCESS: &str = "requested_access";
+const FIELD_GRANTED_ACCESS: &str = "granted_access";
+const FIELD_DECISION: &str = "decision";
+const FIELD_SACL_MATCH_FLAGS: &str = "sacl_match_flags";
+
+const CALLER_FIELD_EFFECTIVE_TOKEN_GUID: &str = "effective_token_guid";
+const CALLER_FIELD_TRUE_TOKEN_GUID: &str = "true_token_guid";
+const CALLER_FIELD_PROCESS_GUID: &str = "process_guid";
+const CALLER_FIELD_USER_SID: &str = "user_sid";
+const CALLER_FIELD_AUTHENTICATION_ID: &str = "authentication_id";
+const CALLER_FIELD_TOKEN_ID: &str = "token_id";
+const CALLER_FIELD_TOKEN_TYPE: &str = "token_type";
+const CALLER_FIELD_IMPERSONATION_LEVEL: &str = "impersonation_level";
+const CALLER_FIELD_INTEGRITY_LEVEL: &str = "integrity_level";
+
 /// PSD-005 LCS KMES audit event names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LcsAuditEventKind {
@@ -90,6 +107,12 @@ pub struct LcsKeyOpenAuditRecord<'a> {
     pub granted_access: u32,
     pub decision: LcsKeyOpenAuditDecision,
     pub sacl_match_flags: u32,
+}
+
+/// Pure msgpack serialization result for an LCS audit payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LcsAuditPayloadWritePlan {
+    pub bytes: usize,
 }
 
 /// Pure payload plan for backup/restore start events.
@@ -260,6 +283,57 @@ pub fn validate_sacl_match_flags(flags: u32) -> LcsResult<u32> {
     Ok(flags)
 }
 
+pub fn key_open_audit_payload_len(record: &LcsKeyOpenAuditRecord<'_>) -> LcsResult<usize> {
+    validate_key_open_audit_record(record)?;
+
+    let mut len = msgpack_map_len(6);
+    add_len(&mut len, msgpack_str_len(FIELD_CALLER.len()))?;
+    add_len(&mut len, caller_summary_payload_len(&record.caller)?)?;
+    add_len(&mut len, msgpack_str_len(FIELD_KEY_GUID.len()))?;
+    add_len(&mut len, msgpack_bin_len(record.key_guid.len()))?;
+    add_len(&mut len, msgpack_str_len(FIELD_REQUESTED_ACCESS.len()))?;
+    add_len(&mut len, msgpack_uint_len(record.requested_access as u64))?;
+    add_len(&mut len, msgpack_str_len(FIELD_GRANTED_ACCESS.len()))?;
+    add_len(&mut len, msgpack_uint_len(record.granted_access as u64))?;
+    add_len(&mut len, msgpack_str_len(FIELD_DECISION.len()))?;
+    add_len(&mut len, msgpack_str_len(record.decision.as_str().len()))?;
+    add_len(&mut len, msgpack_str_len(FIELD_SACL_MATCH_FLAGS.len()))?;
+    add_len(&mut len, msgpack_uint_len(record.sacl_match_flags as u64))?;
+    Ok(len)
+}
+
+pub fn write_key_open_audit_payload(
+    record: &LcsKeyOpenAuditRecord<'_>,
+    output: &mut [u8],
+) -> LcsResult<LcsAuditPayloadWritePlan> {
+    let required_len = key_open_audit_payload_len(record)?;
+    if output.len() < required_len {
+        return Err(LcsError::AuditPayloadOutputBufferTooSmall {
+            buffer_len: output.len(),
+            required_len,
+        });
+    }
+
+    let mut writer = MsgpackWriter::new(&mut output[..required_len]);
+    writer.write_map_len(6)?;
+    writer.write_str(FIELD_CALLER)?;
+    write_caller_summary_payload(&mut writer, &record.caller)?;
+    writer.write_str(FIELD_KEY_GUID)?;
+    writer.write_bin(&record.key_guid)?;
+    writer.write_str(FIELD_REQUESTED_ACCESS)?;
+    writer.write_uint(record.requested_access as u64)?;
+    writer.write_str(FIELD_GRANTED_ACCESS)?;
+    writer.write_uint(record.granted_access as u64)?;
+    writer.write_str(FIELD_DECISION)?;
+    writer.write_str(record.decision.as_str())?;
+    writer.write_str(FIELD_SACL_MATCH_FLAGS)?;
+    writer.write_uint(record.sacl_match_flags as u64)?;
+
+    Ok(LcsAuditPayloadWritePlan {
+        bytes: writer.bytes_written(),
+    })
+}
+
 pub fn plan_key_open_audit_record<'a>(
     caller: LcsCallerTokenSummary<'a>,
     key_guid: [u8; 16],
@@ -270,6 +344,7 @@ pub fn plan_key_open_audit_record<'a>(
 ) -> LcsResult<LcsKeyOpenAuditRecord<'a>> {
     caller.validate()?;
     let sacl_match_flags = validate_sacl_match_flags(sacl_match_flags)?;
+    validate_key_open_audit_decision_grant(decision, granted_access)?;
     Ok(LcsKeyOpenAuditRecord {
         event_kind: LcsAuditEventKind::KeyOpenAudit,
         caller,
@@ -354,6 +429,253 @@ pub fn plan_source_validation_failure_audit_record<'a>(
         key_guid,
         validation_class: validation_failure.into(),
     })
+}
+
+fn validate_key_open_audit_record(record: &LcsKeyOpenAuditRecord<'_>) -> LcsResult<()> {
+    if record.event_kind != LcsAuditEventKind::KeyOpenAudit {
+        return Err(LcsError::AuditEventKindMismatch {
+            expected: LcsAuditEventKind::KeyOpenAudit,
+            actual: record.event_kind,
+        });
+    }
+    record.caller.validate()?;
+    validate_sacl_match_flags(record.sacl_match_flags)?;
+    validate_key_open_audit_decision_grant(record.decision, record.granted_access)
+}
+
+fn validate_key_open_audit_decision_grant(
+    decision: LcsKeyOpenAuditDecision,
+    granted_access: u32,
+) -> LcsResult<()> {
+    if decision == LcsKeyOpenAuditDecision::Denied && granted_access != 0 {
+        return Err(LcsError::DeniedKeyOpenAuditWithGrantedAccess { granted_access });
+    }
+    Ok(())
+}
+
+fn caller_summary_payload_len(caller: &LcsCallerTokenSummary<'_>) -> LcsResult<usize> {
+    let mut len = msgpack_map_len(9);
+    add_len(
+        &mut len,
+        msgpack_str_len(CALLER_FIELD_EFFECTIVE_TOKEN_GUID.len()),
+    )?;
+    add_len(&mut len, msgpack_bin_len(caller.effective_token_guid.len()))?;
+    add_len(
+        &mut len,
+        msgpack_str_len(CALLER_FIELD_TRUE_TOKEN_GUID.len()),
+    )?;
+    add_len(&mut len, msgpack_bin_len(caller.true_token_guid.len()))?;
+    add_len(&mut len, msgpack_str_len(CALLER_FIELD_PROCESS_GUID.len()))?;
+    add_len(&mut len, msgpack_bin_len(caller.process_guid.len()))?;
+    add_len(&mut len, msgpack_str_len(CALLER_FIELD_USER_SID.len()))?;
+    add_len(&mut len, msgpack_bin_len(caller.user_sid.len()))?;
+    add_len(
+        &mut len,
+        msgpack_str_len(CALLER_FIELD_AUTHENTICATION_ID.len()),
+    )?;
+    add_len(&mut len, msgpack_uint_len(caller.authentication_id))?;
+    add_len(&mut len, msgpack_str_len(CALLER_FIELD_TOKEN_ID.len()))?;
+    add_len(&mut len, msgpack_uint_len(caller.token_id))?;
+    add_len(&mut len, msgpack_str_len(CALLER_FIELD_TOKEN_TYPE.len()))?;
+    add_len(&mut len, msgpack_uint_len(caller.token_type as u64))?;
+    add_len(
+        &mut len,
+        msgpack_str_len(CALLER_FIELD_IMPERSONATION_LEVEL.len()),
+    )?;
+    add_len(
+        &mut len,
+        msgpack_uint_len(caller.impersonation_level as u64),
+    )?;
+    add_len(
+        &mut len,
+        msgpack_str_len(CALLER_FIELD_INTEGRITY_LEVEL.len()),
+    )?;
+    add_len(&mut len, msgpack_uint_len(caller.integrity_level as u64))?;
+    Ok(len)
+}
+
+fn write_caller_summary_payload(
+    writer: &mut MsgpackWriter<'_>,
+    caller: &LcsCallerTokenSummary<'_>,
+) -> LcsResult<()> {
+    writer.write_map_len(9)?;
+    writer.write_str(CALLER_FIELD_EFFECTIVE_TOKEN_GUID)?;
+    writer.write_bin(&caller.effective_token_guid)?;
+    writer.write_str(CALLER_FIELD_TRUE_TOKEN_GUID)?;
+    writer.write_bin(&caller.true_token_guid)?;
+    writer.write_str(CALLER_FIELD_PROCESS_GUID)?;
+    writer.write_bin(&caller.process_guid)?;
+    writer.write_str(CALLER_FIELD_USER_SID)?;
+    writer.write_bin(caller.user_sid)?;
+    writer.write_str(CALLER_FIELD_AUTHENTICATION_ID)?;
+    writer.write_uint(caller.authentication_id)?;
+    writer.write_str(CALLER_FIELD_TOKEN_ID)?;
+    writer.write_uint(caller.token_id)?;
+    writer.write_str(CALLER_FIELD_TOKEN_TYPE)?;
+    writer.write_uint(caller.token_type as u64)?;
+    writer.write_str(CALLER_FIELD_IMPERSONATION_LEVEL)?;
+    writer.write_uint(caller.impersonation_level as u64)?;
+    writer.write_str(CALLER_FIELD_INTEGRITY_LEVEL)?;
+    writer.write_uint(caller.integrity_level as u64)?;
+    Ok(())
+}
+
+fn add_len(total: &mut usize, value: usize) -> LcsResult<()> {
+    *total = total
+        .checked_add(value)
+        .ok_or(LcsError::OutputSizeOverflow)?;
+    Ok(())
+}
+
+fn msgpack_map_len(count: usize) -> usize {
+    if count <= 15 {
+        1
+    } else if count <= u16::MAX as usize {
+        3
+    } else {
+        5
+    }
+}
+
+fn msgpack_str_len(len: usize) -> usize {
+    if len <= 31 {
+        1 + len
+    } else if len <= u8::MAX as usize {
+        2 + len
+    } else if len <= u16::MAX as usize {
+        3 + len
+    } else {
+        5 + len
+    }
+}
+
+fn msgpack_bin_len(len: usize) -> usize {
+    if len <= u8::MAX as usize {
+        2 + len
+    } else if len <= u16::MAX as usize {
+        3 + len
+    } else {
+        5 + len
+    }
+}
+
+fn msgpack_uint_len(value: u64) -> usize {
+    if value <= 0x7f {
+        1
+    } else if value <= u8::MAX as u64 {
+        2
+    } else if value <= u16::MAX as u64 {
+        3
+    } else if value <= u32::MAX as u64 {
+        5
+    } else {
+        9
+    }
+}
+
+struct MsgpackWriter<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> MsgpackWriter<'a> {
+    fn new(buf: &'a mut [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    fn bytes_written(&self) -> usize {
+        self.pos
+    }
+
+    fn write_map_len(&mut self, count: usize) -> LcsResult<()> {
+        if count <= 15 {
+            self.write_byte(0x80 | count as u8)
+        } else if count <= u16::MAX as usize {
+            self.write_byte(0xde)?;
+            self.write_u16_be(count as u16)
+        } else {
+            self.write_byte(0xdf)?;
+            self.write_u32_be(count as u32)
+        }
+    }
+
+    fn write_str(&mut self, value: &str) -> LcsResult<()> {
+        let len = value.len();
+        if len <= 31 {
+            self.write_byte(0xa0 | len as u8)?;
+        } else if len <= u8::MAX as usize {
+            self.write_byte(0xd9)?;
+            self.write_byte(len as u8)?;
+        } else if len <= u16::MAX as usize {
+            self.write_byte(0xda)?;
+            self.write_u16_be(len as u16)?;
+        } else {
+            self.write_byte(0xdb)?;
+            self.write_u32_be(len as u32)?;
+        }
+        self.write_bytes(value.as_bytes())
+    }
+
+    fn write_bin(&mut self, value: &[u8]) -> LcsResult<()> {
+        let len = value.len();
+        if len <= u8::MAX as usize {
+            self.write_byte(0xc4)?;
+            self.write_byte(len as u8)?;
+        } else if len <= u16::MAX as usize {
+            self.write_byte(0xc5)?;
+            self.write_u16_be(len as u16)?;
+        } else {
+            self.write_byte(0xc6)?;
+            self.write_u32_be(len as u32)?;
+        }
+        self.write_bytes(value)
+    }
+
+    fn write_uint(&mut self, value: u64) -> LcsResult<()> {
+        if value <= 0x7f {
+            self.write_byte(value as u8)
+        } else if value <= u8::MAX as u64 {
+            self.write_byte(0xcc)?;
+            self.write_byte(value as u8)
+        } else if value <= u16::MAX as u64 {
+            self.write_byte(0xcd)?;
+            self.write_u16_be(value as u16)
+        } else if value <= u32::MAX as u64 {
+            self.write_byte(0xce)?;
+            self.write_u32_be(value as u32)
+        } else {
+            self.write_byte(0xcf)?;
+            self.write_bytes(&value.to_be_bytes())
+        }
+    }
+
+    fn write_byte(&mut self, value: u8) -> LcsResult<()> {
+        self.write_bytes(&[value])
+    }
+
+    fn write_u16_be(&mut self, value: u16) -> LcsResult<()> {
+        self.write_bytes(&value.to_be_bytes())
+    }
+
+    fn write_u32_be(&mut self, value: u32) -> LcsResult<()> {
+        self.write_bytes(&value.to_be_bytes())
+    }
+
+    fn write_bytes(&mut self, value: &[u8]) -> LcsResult<()> {
+        let end = self
+            .pos
+            .checked_add(value.len())
+            .ok_or(LcsError::OutputSizeOverflow)?;
+        if end > self.buf.len() {
+            return Err(LcsError::AuditPayloadOutputBufferTooSmall {
+                buffer_len: self.buf.len(),
+                required_len: end,
+            });
+        }
+        self.buf[self.pos..end].copy_from_slice(value);
+        self.pos = end;
+        Ok(())
+    }
 }
 
 fn plan_backup_restore_start_audit_record<'a>(

@@ -262,6 +262,25 @@ pub enum LcsError {
         /// Unknown flag bits.
         unknown: u32,
     },
+    /// An audit record carried the wrong event kind for its typed payload.
+    AuditEventKindMismatch {
+        /// Required event kind for the payload type.
+        expected: crate::audit::LcsAuditEventKind,
+        /// Supplied event kind.
+        actual: crate::audit::LcsAuditEventKind,
+    },
+    /// A denied key-open audit record carried a non-zero granted mask.
+    DeniedKeyOpenAuditWithGrantedAccess {
+        /// Invalid granted mask.
+        granted_access: u32,
+    },
+    /// An audit payload output buffer was too small for msgpack serialization.
+    AuditPayloadOutputBufferTooSmall {
+        /// Provided output buffer length.
+        buffer_len: usize,
+        /// Required serialized payload length.
+        required_len: usize,
+    },
     /// A backup/restore start audit record carried an invalid fd number.
     InvalidAuditFd {
         /// Invalid fd number.

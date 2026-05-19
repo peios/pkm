@@ -49,13 +49,15 @@ pub use access::{
 pub use audit::{
     LCS_CONFIG_ROOT_PATH, LCS_SACL_MATCH_FAILURE, LCS_SACL_MATCH_SUCCESS,
     LCS_SACL_MATCH_VALID_MASK, LcsAuditEmissionFailurePolicy, LcsAuditEventKind,
-    LcsBackupRestoreCompleteAuditRecord, LcsBackupRestoreStartAuditRecord, LcsCallerTokenSummary,
-    LcsKeyOpenAuditDecision, LcsKeyOpenAuditRecord, LcsSelfConfigInvalidAuditRecord,
-    LcsSelfConfigReceivedValue, LcsSourceValidationClass, LcsSourceValidationFailureAuditRecord,
+    LcsAuditPayloadWritePlan, LcsBackupRestoreCompleteAuditRecord,
+    LcsBackupRestoreStartAuditRecord, LcsCallerTokenSummary, LcsKeyOpenAuditDecision,
+    LcsKeyOpenAuditRecord, LcsSelfConfigInvalidAuditRecord, LcsSelfConfigReceivedValue,
+    LcsSourceValidationClass, LcsSourceValidationFailureAuditRecord, key_open_audit_payload_len,
     lcs_audit_emission_failure_policy, plan_backup_complete_audit_record,
     plan_backup_start_audit_record, plan_key_open_audit_record, plan_restore_complete_audit_record,
     plan_restore_start_audit_record, plan_self_config_invalid_audit_record,
     plan_source_validation_failure_audit_record, validate_sacl_match_flags,
+    write_key_open_audit_payload,
 };
 pub use backup::{
     BACKUP_RECORD_HEADER_LEN, BACKUP_TRAILER_CHECKSUM_LEN, BACKUP_TRAILER_PAYLOAD_LEN,
