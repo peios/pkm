@@ -1271,6 +1271,7 @@ pub enum RsiStatusOutcome {
 pub enum RsiTransactionBeginUse {
     ReadWriteFirstBind,
     ReadOnlyBackupSnapshot,
+    ReadWriteRestore,
 }
 
 /// Source transaction-begin status handling.
