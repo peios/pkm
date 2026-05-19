@@ -6,7 +6,8 @@ use crate::constants::{
     RSI_INVALID, RSI_LOOKUP, RSI_MIN_RESPONSE_LEN, RSI_NOT_EMPTY, RSI_NOT_FOUND, RSI_OK,
     RSI_QUERY_VALUES, RSI_READ_KEY, RSI_REQUEST_HEADER_LEN, RSI_RESPONSE_BIT,
     RSI_RESPONSE_HEADER_LEN, RSI_SET_BLANKET_TOMBSTONE, RSI_SET_VALUE, RSI_STORAGE_ERROR,
-    RSI_TOO_LARGE, RSI_TXN_BUSY, RSI_TXN_NOT_SUPPORTED, RSI_WRITE_KEY,
+    RSI_TOO_LARGE, RSI_TXN_BUSY, RSI_TXN_NOT_SUPPORTED, RSI_TXN_READ_ONLY, RSI_TXN_READ_WRITE,
+    RSI_WRITE_KEY,
 };
 use crate::error::{LcsError, LcsResult};
 use crate::resolution::Guid;
@@ -261,6 +262,64 @@ pub struct RsiSetBlanketTombstoneRequestPayload<'a> {
     pub layer_name: RsiLengthPrefixedField<'a>,
     pub set: bool,
     pub sequence: u64,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Defined RSI transaction mode vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RsiTransactionMode {
+    ReadWrite = RSI_TXN_READ_WRITE,
+    ReadOnly = RSI_TXN_READ_ONLY,
+}
+
+impl RsiTransactionMode {
+    pub fn from_code(code: u32) -> Option<Self> {
+        match code {
+            RSI_TXN_READ_WRITE => Some(Self::ReadWrite),
+            RSI_TXN_READ_ONLY => Some(Self::ReadOnly),
+            _ => None,
+        }
+    }
+
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+}
+
+/// Parsed RSI_BEGIN_TRANSACTION request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiBeginTransactionRequestPayload {
+    pub transaction_id: u64,
+    pub mode: RsiTransactionMode,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_COMMIT_TRANSACTION request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiCommitTransactionRequestPayload {
+    pub transaction_id: u64,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_ABORT_TRANSACTION request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiAbortTransactionRequestPayload {
+    pub transaction_id: u64,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_DELETE_LAYER request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiDeleteLayerRequestPayload<'a> {
+    pub layer_name: RsiLengthPrefixedField<'a>,
+    pub trailing: RsiTrailingOptionalFieldsPlan,
+}
+
+/// Parsed RSI_FLUSH request payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiFlushRequestPayload<'a> {
+    pub hive_name: RsiLengthPrefixedField<'a>,
     pub trailing: RsiTrailingOptionalFieldsPlan,
 }
 
@@ -774,6 +833,73 @@ pub fn parse_rsi_set_blanket_tombstone_request_payload(
         layer_name,
         set,
         sequence,
+        trailing,
+    })
+}
+
+/// Parses the RSI_BEGIN_TRANSACTION request payload layout.
+pub fn parse_rsi_begin_transaction_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiBeginTransactionRequestPayload> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let transaction_id = cursor.read_u64_le()?;
+    let mode_code = cursor.read_u32_le()?;
+    let mode = RsiTransactionMode::from_code(mode_code)
+        .ok_or(LcsError::UnknownRsiTransactionMode(mode_code))?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiBeginTransactionRequestPayload {
+        transaction_id,
+        mode,
+        trailing,
+    })
+}
+
+/// Parses the RSI_COMMIT_TRANSACTION request payload layout.
+pub fn parse_rsi_commit_transaction_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiCommitTransactionRequestPayload> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let transaction_id = cursor.read_u64_le()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiCommitTransactionRequestPayload {
+        transaction_id,
+        trailing,
+    })
+}
+
+/// Parses the RSI_ABORT_TRANSACTION request payload layout.
+pub fn parse_rsi_abort_transaction_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiAbortTransactionRequestPayload> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let transaction_id = cursor.read_u64_le()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiAbortTransactionRequestPayload {
+        transaction_id,
+        trailing,
+    })
+}
+
+/// Parses the RSI_DELETE_LAYER request payload layout.
+pub fn parse_rsi_delete_layer_request_payload(
+    payload: &[u8],
+) -> LcsResult<RsiDeleteLayerRequestPayload<'_>> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let layer_name = cursor.read_length_prefixed()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiDeleteLayerRequestPayload {
+        layer_name,
+        trailing,
+    })
+}
+
+/// Parses the RSI_FLUSH request payload layout.
+pub fn parse_rsi_flush_request_payload(payload: &[u8]) -> LcsResult<RsiFlushRequestPayload<'_>> {
+    let mut cursor = RsiPayloadCursor::new(payload);
+    let hive_name = cursor.read_length_prefixed()?;
+    let trailing = cursor.finish_allowing_trailing_optional_fields();
+    Ok(RsiFlushRequestPayload {
+        hive_name,
         trailing,
     })
 }

@@ -267,6 +267,8 @@ pub enum LcsError {
         /// Unknown field mask bits.
         unknown: u32,
     },
+    /// An RSI_BEGIN_TRANSACTION request mode was outside the PSD-005 vocabulary.
+    UnknownRsiTransactionMode(u32),
     /// An ioctl command number is outside the PSD-005 registry ioctl vocabulary.
     UnknownRegistryIoctl(u8),
     /// A security descriptor component selector was zero.
