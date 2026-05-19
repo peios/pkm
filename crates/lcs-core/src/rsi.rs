@@ -56,6 +56,13 @@ pub struct RsiValidatedResponse {
     pub status: RsiStatus,
 }
 
+/// Result of writing an RSI request frame into a caller-provided buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiBuiltRequest {
+    pub len: usize,
+    pub retained: RsiRetainedRequest,
+}
+
 /// One length-prefixed RSI string or byte-array field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiLengthPrefixedField<'a> {
@@ -638,6 +645,246 @@ impl Default for RsiRequestIdCounter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+struct RsiFrameWriter<'a> {
+    dst: &'a mut [u8],
+    offset: usize,
+}
+
+impl<'a> RsiFrameWriter<'a> {
+    fn new(dst: &'a mut [u8]) -> Self {
+        Self { dst, offset: 0 }
+    }
+
+    fn write_fixed(&mut self, bytes: &[u8]) -> LcsResult<()> {
+        let end = self
+            .offset
+            .checked_add(bytes.len())
+            .ok_or(LcsError::RsiPayloadLengthOverflow)?;
+        if end > self.dst.len() {
+            return Err(LcsError::RsiFrameBufferTooSmall {
+                len: self.dst.len(),
+                required: end,
+            });
+        }
+        self.dst[self.offset..end].copy_from_slice(bytes);
+        self.offset = end;
+        Ok(())
+    }
+
+    fn write_u16_le(&mut self, value: u16) -> LcsResult<()> {
+        self.write_fixed(&value.to_le_bytes())
+    }
+
+    fn write_u32_le(&mut self, value: u32) -> LcsResult<()> {
+        self.write_fixed(&value.to_le_bytes())
+    }
+
+    fn write_u64_le(&mut self, value: u64) -> LcsResult<()> {
+        self.write_fixed(&value.to_le_bytes())
+    }
+
+    fn write_guid(&mut self, value: Guid) -> LcsResult<()> {
+        self.write_fixed(&value)
+    }
+
+    fn write_length_prefixed(&mut self, bytes: &[u8]) -> LcsResult<()> {
+        let len = checked_rsi_field_len_u32(bytes)?;
+        self.write_u32_le(len)?;
+        self.write_fixed(bytes)
+    }
+
+    fn finish(self) -> usize {
+        self.offset
+    }
+}
+
+/// Writes a complete RSI_LOOKUP request frame.
+pub fn write_rsi_lookup_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    parent_guid: Guid,
+    child_name: &[u8],
+) -> LcsResult<RsiBuiltRequest> {
+    let payload_len = checked_add_len(16, checked_rsi_length_prefixed_len(child_name)?)?;
+    write_rsi_request_frame(dst, request_id, RSI_LOOKUP, txn_id, payload_len, |writer| {
+        writer.write_guid(parent_guid)?;
+        writer.write_length_prefixed(child_name)
+    })
+}
+
+/// Writes a complete RSI_CREATE_ENTRY request frame.
+pub fn write_rsi_create_entry_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    parent_guid: Guid,
+    child_name: &[u8],
+    layer_name: &[u8],
+    child_guid: Guid,
+    sequence: u64,
+) -> LcsResult<RsiBuiltRequest> {
+    let payload_len = checked_add_len(
+        checked_add_len(
+            checked_add_len(16, checked_rsi_length_prefixed_len(child_name)?)?,
+            checked_rsi_length_prefixed_len(layer_name)?,
+        )?,
+        24,
+    )?;
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_CREATE_ENTRY,
+        txn_id,
+        payload_len,
+        |writer| {
+            writer.write_guid(parent_guid)?;
+            writer.write_length_prefixed(child_name)?;
+            writer.write_length_prefixed(layer_name)?;
+            writer.write_guid(child_guid)?;
+            writer.write_u64_le(sequence)
+        },
+    )
+}
+
+/// Writes a complete RSI_HIDE_ENTRY request frame.
+pub fn write_rsi_hide_entry_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    parent_guid: Guid,
+    child_name: &[u8],
+    layer_name: &[u8],
+    sequence: u64,
+) -> LcsResult<RsiBuiltRequest> {
+    let payload_len = checked_add_len(
+        checked_add_len(
+            checked_add_len(16, checked_rsi_length_prefixed_len(child_name)?)?,
+            checked_rsi_length_prefixed_len(layer_name)?,
+        )?,
+        8,
+    )?;
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_HIDE_ENTRY,
+        txn_id,
+        payload_len,
+        |writer| {
+            writer.write_guid(parent_guid)?;
+            writer.write_length_prefixed(child_name)?;
+            writer.write_length_prefixed(layer_name)?;
+            writer.write_u64_le(sequence)
+        },
+    )
+}
+
+/// Writes a complete RSI_DELETE_ENTRY request frame.
+pub fn write_rsi_delete_entry_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    parent_guid: Guid,
+    child_name: &[u8],
+    layer_name: &[u8],
+) -> LcsResult<RsiBuiltRequest> {
+    let payload_len = checked_add_len(
+        checked_add_len(16, checked_rsi_length_prefixed_len(child_name)?)?,
+        checked_rsi_length_prefixed_len(layer_name)?,
+    )?;
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_DELETE_ENTRY,
+        txn_id,
+        payload_len,
+        |writer| {
+            writer.write_guid(parent_guid)?;
+            writer.write_length_prefixed(child_name)?;
+            writer.write_length_prefixed(layer_name)
+        },
+    )
+}
+
+/// Writes a complete RSI_ENUM_CHILDREN request frame.
+pub fn write_rsi_enum_children_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    parent_guid: Guid,
+) -> LcsResult<RsiBuiltRequest> {
+    write_rsi_request_frame(dst, request_id, RSI_ENUM_CHILDREN, txn_id, 16, |writer| {
+        writer.write_guid(parent_guid)
+    })
+}
+
+fn write_rsi_request_frame<F>(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    op_code: u16,
+    txn_id: u64,
+    payload_len: usize,
+    write_payload: F,
+) -> LcsResult<RsiBuiltRequest>
+where
+    F: FnOnce(&mut RsiFrameWriter<'_>) -> LcsResult<()>,
+{
+    let total_len = checked_rsi_request_frame_len(payload_len)?;
+    if dst.len() < total_len {
+        return Err(LcsError::RsiFrameBufferTooSmall {
+            len: dst.len(),
+            required: total_len,
+        });
+    }
+
+    let mut writer = RsiFrameWriter::new(dst);
+    writer.write_u32_le(total_len as u32)?;
+    writer.write_u64_le(request_id)?;
+    writer.write_u16_le(op_code)?;
+    writer.write_u64_le(txn_id)?;
+    write_payload(&mut writer)?;
+    let len = writer.finish();
+    if len != total_len {
+        return Err(LcsError::RsiMessageLengthMismatch {
+            total_len: total_len as u32,
+            actual_len: len,
+        });
+    }
+
+    Ok(RsiBuiltRequest {
+        len,
+        retained: RsiRetainedRequest {
+            request_id,
+            op_code,
+        },
+    })
+}
+
+fn checked_rsi_request_frame_len(payload_len: usize) -> LcsResult<usize> {
+    let total_len = checked_add_len(RSI_REQUEST_HEADER_LEN, payload_len)?;
+    if total_len > u32::MAX as usize {
+        return Err(LcsError::RsiPayloadLengthOverflow);
+    }
+    Ok(total_len)
+}
+
+fn checked_rsi_length_prefixed_len(bytes: &[u8]) -> LcsResult<usize> {
+    checked_rsi_field_len_u32(bytes)?;
+    checked_add_len(4, bytes.len())
+}
+
+fn checked_rsi_field_len_u32(bytes: &[u8]) -> LcsResult<u32> {
+    if bytes.len() > u32::MAX as usize {
+        return Err(LcsError::RsiPayloadLengthOverflow);
+    }
+    Ok(bytes.len() as u32)
+}
+
+fn checked_add_len(left: usize, right: usize) -> LcsResult<usize> {
+    left.checked_add(right)
+        .ok_or(LcsError::RsiPayloadLengthOverflow)
 }
 
 /// Defined RSI source response status vocabulary.

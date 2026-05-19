@@ -309,6 +309,13 @@ pub enum LcsError {
     },
     /// The per-source RSI request id allocator cannot advance without reusing an id.
     RsiRequestIdOverflow,
+    /// An output buffer was too small for the RSI request frame being constructed.
+    RsiFrameBufferTooSmall {
+        /// Caller-provided output buffer length.
+        len: usize,
+        /// Required RSI frame length.
+        required: usize,
+    },
     /// A length-prefixed RSI payload field would overflow host arithmetic.
     RsiPayloadLengthOverflow,
     /// An RSI_WRITE_KEY request field mask contained bits not defined by PSD-005.
