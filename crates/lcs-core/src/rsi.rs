@@ -1054,6 +1054,92 @@ pub fn write_rsi_set_blanket_tombstone_request_frame(
     )
 }
 
+/// Writes a complete RSI_BEGIN_TRANSACTION request frame.
+pub fn write_rsi_begin_transaction_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    transaction_id: u64,
+    mode: RsiTransactionMode,
+) -> LcsResult<RsiBuiltRequest> {
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_BEGIN_TRANSACTION,
+        txn_id,
+        12,
+        |writer| {
+            writer.write_u64_le(transaction_id)?;
+            writer.write_u32_le(mode.code())
+        },
+    )
+}
+
+/// Writes a complete RSI_COMMIT_TRANSACTION request frame.
+pub fn write_rsi_commit_transaction_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    transaction_id: u64,
+) -> LcsResult<RsiBuiltRequest> {
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_COMMIT_TRANSACTION,
+        txn_id,
+        8,
+        |writer| writer.write_u64_le(transaction_id),
+    )
+}
+
+/// Writes a complete RSI_ABORT_TRANSACTION request frame.
+pub fn write_rsi_abort_transaction_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    transaction_id: u64,
+) -> LcsResult<RsiBuiltRequest> {
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_ABORT_TRANSACTION,
+        txn_id,
+        8,
+        |writer| writer.write_u64_le(transaction_id),
+    )
+}
+
+/// Writes a complete RSI_DELETE_LAYER request frame.
+pub fn write_rsi_delete_layer_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    layer_name: &[u8],
+) -> LcsResult<RsiBuiltRequest> {
+    let payload_len = checked_rsi_length_prefixed_len(layer_name)?;
+    write_rsi_request_frame(
+        dst,
+        request_id,
+        RSI_DELETE_LAYER,
+        txn_id,
+        payload_len,
+        |writer| writer.write_length_prefixed(layer_name),
+    )
+}
+
+/// Writes a complete RSI_FLUSH request frame.
+pub fn write_rsi_flush_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    hive_name: &[u8],
+) -> LcsResult<RsiBuiltRequest> {
+    let payload_len = checked_rsi_length_prefixed_len(hive_name)?;
+    write_rsi_request_frame(dst, request_id, RSI_FLUSH, txn_id, payload_len, |writer| {
+        writer.write_length_prefixed(hive_name)
+    })
+}
+
 fn write_rsi_request_frame<F>(
     dst: &mut [u8],
     request_id: RsiRequestId,
