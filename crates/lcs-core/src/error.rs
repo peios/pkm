@@ -130,6 +130,17 @@ pub enum LcsError {
     },
     /// A private-layer credential set contained duplicate folded identities.
     DuplicatePrivateLayerIdentity,
+    /// A hive table contained duplicate folded identities in one namespace.
+    DuplicateHiveIdentity,
+    /// A private hive credential set exceeded the configured scope GUID cap.
+    TooManyScopeGuids {
+        /// Scope GUID count.
+        count: usize,
+        /// Maximum permitted scope GUID count.
+        max: usize,
+    },
+    /// A private hive credential set contained duplicate scope GUIDs.
+    DuplicateScopeGuid,
 }
 
 /// Standard result type for the LCS semantic core.

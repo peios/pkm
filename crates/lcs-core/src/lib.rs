@@ -12,6 +12,7 @@ pub mod casefold;
 pub mod config;
 pub mod constants;
 pub mod error;
+pub mod hives;
 pub mod layers;
 pub mod path;
 pub mod resolution;
@@ -37,6 +38,10 @@ pub use config::{
 };
 pub use constants::*;
 pub use error::{LcsError, LcsResult};
+pub use hives::{
+    CurrentUserRewrite, HiveRoute, HiveScope, HiveStatus, HiveView, RoutedHive, SourceId,
+    for_each_routable_path_component, route_hive, validate_hive_table, validate_scope_guid_set,
+};
 pub use layers::{
     BASE_LAYER_VIEW, LayerMetadataEntry, for_each_effective_layer, normalize_layer_target,
     validate_layer_resolution_context, validate_layer_views, validate_private_layer_set,
