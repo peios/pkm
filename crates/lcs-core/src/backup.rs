@@ -14,6 +14,9 @@ use crate::value::{ValidatedValueType, validate_value_data_len, validate_value_w
 
 pub const BACKUP_RECORD_HEADER_LEN: usize = 6;
 const BACKUP_HEADER_FIXED_PAYLOAD_LEN: usize = 8 + 4 + 4 + 8 + 16 + 4;
+const BACKUP_KEY_FLAG_VOLATILE: u32 = 0x01;
+const BACKUP_KEY_FLAG_SYMLINK: u32 = 0x02;
+const BACKUP_KEY_KNOWN_FLAGS: u32 = BACKUP_KEY_FLAG_VOLATILE | BACKUP_KEY_FLAG_SYMLINK;
 
 /// Parsed common backup record header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,6 +50,16 @@ pub struct BackupLayerManifestPayload<'a> {
     pub precedence: u32,
     pub enabled: bool,
     pub owner_sid: &'a [u8],
+}
+
+/// Parsed KEY record payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupKeyPayload<'a> {
+    pub guid: Guid,
+    pub volatile: bool,
+    pub symlink: bool,
+    pub security_descriptor: &'a [u8],
+    pub last_write_time_ns: i64,
 }
 
 /// Parsed PATH_ENTRY record payload.
@@ -233,6 +246,40 @@ pub fn parse_backup_layer_manifest_record<'a>(
         });
     }
     parse_backup_layer_manifest_payload(limits, record.payload)
+}
+
+/// Parses and validates one KEY payload.
+pub fn parse_backup_key_payload(payload: &[u8]) -> LcsResult<BackupKeyPayload<'_>> {
+    let mut cursor = BackupPayloadCursor::new(payload);
+    let guid = cursor.read_guid()?;
+    if guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    let flags = validate_backup_key_flags(cursor.read_u32_le()?)?;
+    let security_descriptor = cursor.read_length_prefixed_bytes()?;
+    validate_backup_security_descriptor(security_descriptor, "backup_key.sd")?;
+    let last_write_time_ns = cursor.read_i64_le()?;
+    cursor.finish_exact(REG_BACKUP_KEY as u16)?;
+
+    Ok(BackupKeyPayload {
+        guid,
+        volatile: (flags & BACKUP_KEY_FLAG_VOLATILE) != 0,
+        symlink: (flags & BACKUP_KEY_FLAG_SYMLINK) != 0,
+        security_descriptor,
+        last_write_time_ns,
+    })
+}
+
+/// Parses a complete KEY record frame and validates the payload.
+pub fn parse_backup_key_record(frame: &[u8]) -> LcsResult<BackupKeyPayload<'_>> {
+    let record = parse_backup_record_frame(frame)?;
+    if record.kind != BackupRecordKind::Key {
+        return Err(LcsError::BackupRecordKindMismatch {
+            expected: REG_BACKUP_KEY as u16,
+            actual: record.header.record_type,
+        });
+    }
+    parse_backup_key_payload(record.payload)
 }
 
 /// Parses and validates one PATH_ENTRY payload.
@@ -468,6 +515,57 @@ pub fn write_backup_layer_manifest_record_frame(
     Ok(total_len)
 }
 
+/// Writes a complete KEY record frame into a caller-provided buffer.
+pub fn write_backup_key_record_frame(
+    dst: &mut [u8],
+    guid: Guid,
+    volatile: bool,
+    symlink: bool,
+    security_descriptor: &[u8],
+    last_write_time_ns: i64,
+) -> LcsResult<usize> {
+    if guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+    validate_backup_security_descriptor(security_descriptor, "backup_key.sd")?;
+    let payload_len = checked_add_len(16, 4 + 4 + security_descriptor.len())?;
+    let payload_len = checked_add_len(payload_len, 8)?;
+    let total_len = checked_add_len(BACKUP_RECORD_HEADER_LEN, payload_len)?;
+    let record_len = u32::try_from(total_len).map_err(|_| LcsError::BackupPayloadLengthOverflow)?;
+    if dst.len() < total_len {
+        return Err(LcsError::BackupRecordFrameBufferTooSmall {
+            len: dst.len(),
+            required: total_len,
+        });
+    }
+
+    write_backup_record_header(
+        &mut dst[..BACKUP_RECORD_HEADER_LEN],
+        REG_BACKUP_KEY as u16,
+        record_len,
+    )?;
+    let payload = &mut dst[BACKUP_RECORD_HEADER_LEN..total_len];
+    let mut offset = 0usize;
+    let mut flags = 0u32;
+    if volatile {
+        flags |= BACKUP_KEY_FLAG_VOLATILE;
+    }
+    if symlink {
+        flags |= BACKUP_KEY_FLAG_SYMLINK;
+    }
+    write_fixed(payload, &mut offset, &guid);
+    write_fixed(payload, &mut offset, &flags.to_le_bytes());
+    write_fixed(
+        payload,
+        &mut offset,
+        &(security_descriptor.len() as u32).to_le_bytes(),
+    );
+    write_fixed(payload, &mut offset, security_descriptor);
+    write_fixed(payload, &mut offset, &last_write_time_ns.to_le_bytes());
+
+    Ok(total_len)
+}
+
 /// Writes a complete PATH_ENTRY record frame into a caller-provided buffer.
 pub fn write_backup_path_entry_record_frame(
     limits: &LcsLimits,
@@ -633,6 +731,23 @@ fn validate_backup_record_len(record_len: u32, actual_len: usize) -> LcsResult<(
             record_len,
             actual_len,
         });
+    }
+    Ok(())
+}
+
+fn validate_backup_key_flags(flags: u32) -> LcsResult<u32> {
+    let unknown = flags & !BACKUP_KEY_KNOWN_FLAGS;
+    if unknown != 0 {
+        return Err(LcsError::UnknownBackupKeyFlags { flags, unknown });
+    }
+    Ok(flags)
+}
+
+fn validate_backup_security_descriptor(bytes: &[u8], field: &'static str) -> LcsResult<()> {
+    let sd = kacs_core::SecurityDescriptor::parse(bytes)
+        .map_err(|_| LcsError::MalformedSecurityDescriptor { field })?;
+    if sd.owner().is_none() {
+        return Err(LcsError::MalformedSecurityDescriptor { field });
     }
     Ok(())
 }

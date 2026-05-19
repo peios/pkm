@@ -385,6 +385,13 @@ pub enum LcsError {
         /// Logical backup field.
         field: &'static str,
     },
+    /// A backup KEY record contained unknown flag bits.
+    UnknownBackupKeyFlags {
+        /// Full flags value.
+        flags: u32,
+        /// Unknown flag bits.
+        unknown: u32,
+    },
     /// A length-prefixed RSI payload field would overflow host arithmetic.
     RsiPayloadLengthOverflow,
     /// An RSI_WRITE_KEY request field mask contained bits not defined by PSD-005.
