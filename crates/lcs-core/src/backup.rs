@@ -4,7 +4,7 @@ use crate::constants::{
     REG_BACKUP_MAGIC, REG_BACKUP_PATH_ENTRY, REG_BACKUP_TRAILER, REG_BACKUP_VALUE,
 };
 use crate::error::{LcsError, LcsResult};
-use crate::path::validate_hive_name_bytes;
+use crate::path::{validate_hive_name_bytes, validate_layer_name_bytes};
 use crate::resolution::Guid;
 
 pub const BACKUP_RECORD_HEADER_LEN: usize = 6;
@@ -33,6 +33,15 @@ pub struct BackupHeaderPayload<'a> {
     pub timestamp_ns: i64,
     pub root_guid: Guid,
     pub hive_name: &'a str,
+}
+
+/// Parsed LAYER manifest record payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupLayerManifestPayload<'a> {
+    pub name: &'a str,
+    pub precedence: u32,
+    pub enabled: bool,
+    pub owner_sid: &'a [u8],
 }
 
 /// Known backup record type vocabulary, preserving unknown extensions.
@@ -154,6 +163,44 @@ pub fn parse_backup_header_record<'a>(
     parse_backup_header_payload(limits, record.payload, supported_version)
 }
 
+/// Parses and validates one LAYER manifest payload.
+pub fn parse_backup_layer_manifest_payload<'a>(
+    limits: &LcsLimits,
+    payload: &'a [u8],
+) -> LcsResult<BackupLayerManifestPayload<'a>> {
+    let mut cursor = BackupPayloadCursor::new(payload);
+    let name = cursor.read_length_prefixed_layer_name(limits)?;
+    let precedence = cursor.read_u32_le()?;
+    let enabled = cursor.read_bool("backup_layer.enabled")?;
+    let owner_sid = cursor.read_length_prefixed_bytes()?;
+    kacs_core::Sid::parse(owner_sid).map_err(|_| LcsError::MalformedBackupSid {
+        field: "backup_layer.owner",
+    })?;
+    cursor.finish_exact(REG_BACKUP_LAYER as u16)?;
+
+    Ok(BackupLayerManifestPayload {
+        name,
+        precedence,
+        enabled,
+        owner_sid,
+    })
+}
+
+/// Parses a complete LAYER manifest record frame and validates the payload.
+pub fn parse_backup_layer_manifest_record<'a>(
+    limits: &LcsLimits,
+    frame: &'a [u8],
+) -> LcsResult<BackupLayerManifestPayload<'a>> {
+    let record = parse_backup_record_frame(frame)?;
+    if record.kind != BackupRecordKind::LayerManifest {
+        return Err(LcsError::BackupRecordKindMismatch {
+            expected: REG_BACKUP_LAYER as u16,
+            actual: record.header.record_type,
+        });
+    }
+    parse_backup_layer_manifest_payload(limits, record.payload)
+}
+
 /// Writes the common backup record header into a caller-provided buffer.
 pub fn write_backup_record_header(
     dst: &mut [u8],
@@ -215,6 +262,52 @@ pub fn write_backup_header_record_frame(
     Ok(total_len)
 }
 
+/// Writes a complete LAYER manifest record frame into a caller-provided buffer.
+pub fn write_backup_layer_manifest_record_frame(
+    limits: &LcsLimits,
+    dst: &mut [u8],
+    name: &str,
+    precedence: u32,
+    enabled: bool,
+    owner_sid: &[u8],
+) -> LcsResult<usize> {
+    let name = validate_layer_name_bytes(name.as_bytes(), limits)?;
+    kacs_core::Sid::parse(owner_sid).map_err(|_| LcsError::MalformedBackupSid {
+        field: "backup_layer.owner",
+    })?;
+    let payload_len = checked_add_len(4, name.len())?;
+    let payload_len = checked_add_len(payload_len, 4 + 1 + 4)?;
+    let payload_len = checked_add_len(payload_len, owner_sid.len())?;
+    let total_len = checked_add_len(BACKUP_RECORD_HEADER_LEN, payload_len)?;
+    let record_len = u32::try_from(total_len).map_err(|_| LcsError::BackupPayloadLengthOverflow)?;
+    if dst.len() < total_len {
+        return Err(LcsError::BackupRecordFrameBufferTooSmall {
+            len: dst.len(),
+            required: total_len,
+        });
+    }
+
+    write_backup_record_header(
+        &mut dst[..BACKUP_RECORD_HEADER_LEN],
+        REG_BACKUP_LAYER as u16,
+        record_len,
+    )?;
+    let payload = &mut dst[BACKUP_RECORD_HEADER_LEN..total_len];
+    let mut offset = 0usize;
+    write_fixed(payload, &mut offset, &(name.len() as u32).to_le_bytes());
+    write_fixed(payload, &mut offset, name.as_bytes());
+    write_fixed(payload, &mut offset, &precedence.to_le_bytes());
+    write_fixed(payload, &mut offset, &[u8::from(enabled)]);
+    write_fixed(
+        payload,
+        &mut offset,
+        &(owner_sid.len() as u32).to_le_bytes(),
+    );
+    write_fixed(payload, &mut offset, owner_sid);
+
+    Ok(total_len)
+}
+
 fn validate_backup_record_len(record_len: u32, actual_len: usize) -> LcsResult<()> {
     if record_len < BACKUP_RECORD_HEADER_LEN as u32 {
         return Err(LcsError::BackupRecordTooSmall { record_len });
@@ -260,6 +353,18 @@ impl<'a> BackupPayloadCursor<'a> {
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
+    fn read_u8(&mut self) -> LcsResult<u8> {
+        Ok(self.read_fixed(1)?[0])
+    }
+
+    fn read_bool(&mut self, field: &'static str) -> LcsResult<bool> {
+        match self.read_u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            value => Err(LcsError::InvalidBooleanFlag { field, value }),
+        }
+    }
+
     fn read_i64_le(&mut self) -> LcsResult<i64> {
         let bytes = self.read_fixed(8)?;
         Ok(i64::from_le_bytes([
@@ -278,6 +383,17 @@ impl<'a> BackupPayloadCursor<'a> {
         let len = self.read_u32_le()?;
         let bytes = self.read_fixed(len as usize)?;
         validate_hive_name_bytes(bytes, limits)
+    }
+
+    fn read_length_prefixed_layer_name(&mut self, limits: &LcsLimits) -> LcsResult<&'a str> {
+        let len = self.read_u32_le()?;
+        let bytes = self.read_fixed(len as usize)?;
+        validate_layer_name_bytes(bytes, limits)
+    }
+
+    fn read_length_prefixed_bytes(&mut self) -> LcsResult<&'a [u8]> {
+        let len = self.read_u32_le()?;
+        self.read_fixed(len as usize)
     }
 
     fn finish_exact(&self, record_type: u16) -> LcsResult<()> {

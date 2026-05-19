@@ -380,6 +380,11 @@ pub enum LcsError {
         /// Reader version supported by the caller.
         supported_version: u32,
     },
+    /// A backup record carried a malformed binary SID field.
+    MalformedBackupSid {
+        /// Logical backup field.
+        field: &'static str,
+    },
     /// A length-prefixed RSI payload field would overflow host arithmetic.
     RsiPayloadLengthOverflow,
     /// An RSI_WRITE_KEY request field mask contained bits not defined by PSD-005.
