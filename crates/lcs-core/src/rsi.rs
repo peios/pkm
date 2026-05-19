@@ -1374,6 +1374,70 @@ pub fn parse_rsi_enum_children_success_response_payload<'a>(
     })
 }
 
+/// Validates lookup response metadata against returned GUID path targets.
+pub fn validate_rsi_lookup_metadata_completeness(
+    payload: &RsiLookupSuccessResponsePayload<'_>,
+) -> LcsResult<()> {
+    payload.for_each_path_entry(|entry| {
+        if entry.target_type == RsiPathTargetType::Guid
+            && !lookup_metadata_contains_guid(payload, entry.target_guid)?
+        {
+            return Err(LcsError::RsiPathMetadataMissing {
+                guid: entry.target_guid,
+            });
+        }
+        Ok(())
+    })?;
+
+    payload.for_each_key_metadata(|metadata| {
+        validate_rsi_path_metadata_guid(metadata.guid)?;
+        if lookup_metadata_guid_count(payload, metadata.guid)? > 1 {
+            return Err(LcsError::RsiPathMetadataDuplicate {
+                guid: metadata.guid,
+            });
+        }
+        if !lookup_path_references_guid(payload, metadata.guid)? {
+            return Err(LcsError::RsiPathMetadataUnreferenced {
+                guid: metadata.guid,
+            });
+        }
+        Ok(())
+    })
+}
+
+/// Validates enum-children response metadata against returned GUID path targets.
+pub fn validate_rsi_enum_children_metadata_completeness(
+    payload: &RsiEnumChildrenSuccessResponsePayload<'_>,
+) -> LcsResult<()> {
+    payload.for_each_child(|child| {
+        child.for_each_path_entry(|entry| {
+            if entry.target_type == RsiPathTargetType::Guid
+                && !enum_children_metadata_contains_guid(payload, entry.target_guid)?
+            {
+                return Err(LcsError::RsiPathMetadataMissing {
+                    guid: entry.target_guid,
+                });
+            }
+            Ok(())
+        })
+    })?;
+
+    payload.for_each_key_metadata(|metadata| {
+        validate_rsi_path_metadata_guid(metadata.guid)?;
+        if enum_children_metadata_guid_count(payload, metadata.guid)? > 1 {
+            return Err(LcsError::RsiPathMetadataDuplicate {
+                guid: metadata.guid,
+            });
+        }
+        if !enum_children_path_references_guid(payload, metadata.guid)? {
+            return Err(LcsError::RsiPathMetadataUnreferenced {
+                guid: metadata.guid,
+            });
+        }
+        Ok(())
+    })
+}
+
 /// Plans one message-oriented source-fd read without splitting queued requests.
 pub fn plan_rsi_source_read(
     next_queued_request_len: Option<usize>,
@@ -1739,6 +1803,99 @@ where
         });
     }
     Ok(())
+}
+
+fn validate_rsi_path_metadata_guid(guid: Guid) -> LcsResult<()> {
+    if guid == [0; 16] {
+        return Err(LcsError::RsiPathMetadataNilGuid);
+    }
+    Ok(())
+}
+
+fn lookup_metadata_contains_guid(
+    payload: &RsiLookupSuccessResponsePayload<'_>,
+    guid: Guid,
+) -> LcsResult<bool> {
+    let mut found = false;
+    payload.for_each_key_metadata(|metadata| {
+        if metadata.guid == guid {
+            found = true;
+        }
+        Ok(())
+    })?;
+    Ok(found)
+}
+
+fn lookup_metadata_guid_count(
+    payload: &RsiLookupSuccessResponsePayload<'_>,
+    guid: Guid,
+) -> LcsResult<u32> {
+    let mut count = 0u32;
+    payload.for_each_key_metadata(|metadata| {
+        if metadata.guid == guid {
+            count = count.saturating_add(1);
+        }
+        Ok(())
+    })?;
+    Ok(count)
+}
+
+fn lookup_path_references_guid(
+    payload: &RsiLookupSuccessResponsePayload<'_>,
+    guid: Guid,
+) -> LcsResult<bool> {
+    let mut found = false;
+    payload.for_each_path_entry(|entry| {
+        if entry.target_type == RsiPathTargetType::Guid && entry.target_guid == guid {
+            found = true;
+        }
+        Ok(())
+    })?;
+    Ok(found)
+}
+
+fn enum_children_metadata_contains_guid(
+    payload: &RsiEnumChildrenSuccessResponsePayload<'_>,
+    guid: Guid,
+) -> LcsResult<bool> {
+    let mut found = false;
+    payload.for_each_key_metadata(|metadata| {
+        if metadata.guid == guid {
+            found = true;
+        }
+        Ok(())
+    })?;
+    Ok(found)
+}
+
+fn enum_children_metadata_guid_count(
+    payload: &RsiEnumChildrenSuccessResponsePayload<'_>,
+    guid: Guid,
+) -> LcsResult<u32> {
+    let mut count = 0u32;
+    payload.for_each_key_metadata(|metadata| {
+        if metadata.guid == guid {
+            count = count.saturating_add(1);
+        }
+        Ok(())
+    })?;
+    Ok(count)
+}
+
+fn enum_children_path_references_guid(
+    payload: &RsiEnumChildrenSuccessResponsePayload<'_>,
+    guid: Guid,
+) -> LcsResult<bool> {
+    let mut found = false;
+    payload.for_each_child(|child| {
+        child.for_each_path_entry(|entry| {
+            if entry.target_type == RsiPathTargetType::Guid && entry.target_guid == guid {
+                found = true;
+            }
+            Ok(())
+        })
+    })?;
+    Ok(found)
 }
 
 fn parse_rsi_path_target_type(code: u8) -> LcsResult<RsiPathTargetType> {

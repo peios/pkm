@@ -278,6 +278,23 @@ pub enum LcsError {
     InvalidRsiPathTargetType(u8),
     /// A HIDDEN path-entry response target carried a non-zero GUID.
     RsiHiddenPathTargetGuidNotZero,
+    /// A GUID path target in a path response had no matching metadata entry.
+    RsiPathMetadataMissing {
+        /// GUID referenced by a returned path entry.
+        guid: [u8; 16],
+    },
+    /// A path response metadata block repeated the same key GUID.
+    RsiPathMetadataDuplicate {
+        /// Duplicated metadata GUID.
+        guid: [u8; 16],
+    },
+    /// A path response metadata entry did not correspond to any GUID path target.
+    RsiPathMetadataUnreferenced {
+        /// Metadata GUID not referenced by any path entry.
+        guid: [u8; 16],
+    },
+    /// A path response metadata block used nil as a key GUID.
+    RsiPathMetadataNilGuid,
     /// The per-source RSI request id allocator cannot advance without reusing an id.
     RsiRequestIdOverflow,
     /// A length-prefixed RSI payload field would overflow host arithmetic.
