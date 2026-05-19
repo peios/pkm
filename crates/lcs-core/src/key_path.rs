@@ -58,6 +58,14 @@ pub struct PlannedKeyHide<'a> {
     pub masks_lower_layers: bool,
 }
 
+/// Caller-visible errno class for namespace delete/hide planning failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyPathMutationErrno {
+    Einval,
+    Enoent,
+    Enotempty,
+}
+
 /// Derives and validates `(parent GUID, child name, layer)` from key fd state.
 pub fn derive_key_path_mutation<'a>(
     limits: &LcsLimits,
@@ -132,4 +140,14 @@ pub fn plan_key_hide<'a>(
         path_entry,
         masks_lower_layers: true,
     })
+}
+
+/// Maps key namespace mutation planning failures to their PSD-005 errno class.
+pub fn key_path_mutation_errno(error: &LcsError) -> Option<KeyPathMutationErrno> {
+    match error {
+        LcsError::HiveRootKeyOperation => Some(KeyPathMutationErrno::Einval),
+        LcsError::OrphanedKeyNamespaceOperation => Some(KeyPathMutationErrno::Enoent),
+        LcsError::KeyHasVisibleChildren { .. } => Some(KeyPathMutationErrno::Enotempty),
+        _ => None,
+    }
 }

@@ -140,8 +140,9 @@ pub use key::{
     validate_key_record, validate_symlink_create_authority,
 };
 pub use key_path::{
-    DeleteKeyInput, DerivedKeyPathMutation, HideKeyInput, KeyFdNamespaceView, KeyPathMutationInput,
-    PlannedKeyDelete, PlannedKeyHide, derive_key_path_mutation, plan_key_delete, plan_key_hide,
+    DeleteKeyInput, DerivedKeyPathMutation, HideKeyInput, KeyFdNamespaceView, KeyPathMutationErrno,
+    KeyPathMutationInput, PlannedKeyDelete, PlannedKeyHide, derive_key_path_mutation,
+    key_path_mutation_errno, plan_key_delete, plan_key_hide,
 };
 pub use layers::{
     BASE_LAYER_VIEW, LAYER_METADATA_ENABLED_VALUE_NAME, LAYER_METADATA_OWNER_VALUE_NAME,
