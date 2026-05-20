@@ -3880,6 +3880,20 @@ pub fn drain_rsi_request_queue_read<'a>(
     }
 }
 
+/// Applies source-fd poll readiness planning to concrete queued request storage.
+pub fn plan_rsi_source_poll_for_queue(
+    storage: &[Option<RsiQueuedRequest<'_>>],
+    source_active: bool,
+    fd_closing: bool,
+) -> LcsResult<RsiPollPlan> {
+    let summary = summarize_rsi_request_queue(storage)?;
+    Ok(plan_rsi_source_poll(
+        summary.entries,
+        source_active,
+        fd_closing,
+    ))
+}
+
 /// Plans one message-oriented source-fd read without splitting queued requests.
 pub fn plan_rsi_source_read(
     next_queued_request_len: Option<usize>,
