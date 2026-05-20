@@ -847,6 +847,15 @@ pub enum LcsError {
         /// Fixed slot capacity of the transaction mutation log.
         capacity: usize,
     },
+    /// Caller-provided replay snapshot storage was too small.
+    TransactionReplaySnapshotStorageFull {
+        /// Logical snapshot storage field.
+        field: &'static str,
+        /// Required entry count.
+        required: usize,
+        /// Caller-provided storage capacity.
+        capacity: usize,
+    },
     /// A transaction runtime transition was requested from an impossible state.
     InvalidTransactionRuntimeState,
 }

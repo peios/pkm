@@ -15,8 +15,10 @@ use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
 };
 use crate::resolution::{
-    BlanketTombstoneEntry, Guid, NamedPathEntry, NamedValueEntry, PathEntry, PathTarget,
-    ValidatedPathEntryWrite, ValueEntry,
+    BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid, LayerResolutionContext,
+    NamedPathEntry, NamedPathResolution, NamedValueEntry, PathEntry, PathTarget, ResolvedPathEntry,
+    ValidatedPathEntryWrite, ValueEntry, for_each_effective_value, for_each_visible_subkey,
+    resolve_named_path_entry,
 };
 use crate::security::RegistrySetSecurityPlan;
 use crate::transaction::TransactionKernelEffectsPlan;
@@ -422,6 +424,32 @@ impl<'a> RsiQueryValuesSuccessResponsePayload<'a> {
     {
         parse_rsi_query_values_blankets(self.blanket_count, self.blanket_bytes, visitor)
     }
+}
+
+/// Summary of effective-value snapshot materialization from RSI_QUERY_VALUES.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiEffectiveValueSnapshotProjectionSummary {
+    pub source_value_entries: usize,
+    pub source_blanket_entries: usize,
+    pub emitted_values: usize,
+    pub value_capacity: usize,
+    pub blanket_capacity: usize,
+}
+
+/// Summary of effective-subkey snapshot materialization from RSI_ENUM_CHILDREN.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiEffectiveSubkeySnapshotProjectionSummary {
+    pub source_path_entries: usize,
+    pub emitted_subkeys: usize,
+    pub path_capacity: usize,
+}
+
+/// Child-visibility snapshot materialized from RSI_LOOKUP.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiChildVisibilitySnapshotProjection<'a> {
+    pub source_path_entries: usize,
+    pub path_capacity: usize,
+    pub resolved: Option<ResolvedPathEntry<'a>>,
 }
 
 /// Parsed RSI_SET_VALUE request payload.
@@ -2517,11 +2545,157 @@ where
     Ok(emitted)
 }
 
+/// Resolves an RSI_QUERY_VALUES response into effective value snapshot entries.
+pub fn for_each_rsi_query_values_effective_snapshot_entry<'a, F>(
+    context: &LayerResolutionContext<'a>,
+    payload: &RsiQueryValuesSuccessResponsePayload<'a>,
+    value_storage: &'a mut [NamedValueEntry<'a>],
+    blanket_storage: &'a mut [BlanketTombstoneEntry<'a>],
+    emit: F,
+) -> LcsResult<RsiEffectiveValueSnapshotProjectionSummary>
+where
+    F: FnMut(EnumeratedValue<'a>) -> LcsResult<()>,
+{
+    let required_values = checked_snapshot_count(payload.entry_count)?;
+    require_replay_snapshot_storage(
+        "query_values.value_entries",
+        required_values,
+        value_storage.len(),
+    )?;
+    let required_blankets = checked_snapshot_count(payload.blanket_count)?;
+    require_replay_snapshot_storage(
+        "query_values.blanket_entries",
+        required_blankets,
+        blanket_storage.len(),
+    )?;
+
+    let mut value_count = 0usize;
+    for_each_rsi_query_values_source_value_entry(payload, context.limits, |entry| {
+        value_storage[value_count] = entry;
+        value_count += 1;
+        Ok(())
+    })?;
+
+    let mut blanket_count = 0usize;
+    for_each_rsi_query_values_source_blanket_entry(payload, context.limits, |entry| {
+        blanket_storage[blanket_count] = entry;
+        blanket_count += 1;
+        Ok(())
+    })?;
+
+    let emitted_values = for_each_effective_value(
+        context,
+        &value_storage[..value_count],
+        &blanket_storage[..blanket_count],
+        emit,
+    )?;
+    Ok(RsiEffectiveValueSnapshotProjectionSummary {
+        source_value_entries: value_count,
+        source_blanket_entries: blanket_count,
+        emitted_values,
+        value_capacity: value_storage.len(),
+        blanket_capacity: blanket_storage.len(),
+    })
+}
+
+/// Resolves an RSI_ENUM_CHILDREN response into effective subkey snapshot entries.
+pub fn for_each_rsi_enum_children_effective_subkey_snapshot_entry<'a, F>(
+    context: &LayerResolutionContext<'a>,
+    payload: &RsiEnumChildrenSuccessResponsePayload<'a>,
+    path_storage: &'a mut [NamedPathEntry<'a>],
+    emit: F,
+) -> LcsResult<RsiEffectiveSubkeySnapshotProjectionSummary>
+where
+    F: FnMut(EnumeratedSubkey<'a>) -> LcsResult<()>,
+{
+    let required_paths = rsi_enum_children_path_entry_count(payload)?;
+    require_replay_snapshot_storage(
+        "enum_children.path_entries",
+        required_paths,
+        path_storage.len(),
+    )?;
+
+    let mut path_count = 0usize;
+    for_each_rsi_enum_children_source_path_entry(payload, context.limits, |entry| {
+        path_storage[path_count] = entry;
+        path_count += 1;
+        Ok(())
+    })?;
+
+    let emitted_subkeys = for_each_visible_subkey(context, &path_storage[..path_count], emit)?;
+    Ok(RsiEffectiveSubkeySnapshotProjectionSummary {
+        source_path_entries: path_count,
+        emitted_subkeys,
+        path_capacity: path_storage.len(),
+    })
+}
+
+/// Resolves an RSI_LOOKUP response into an optional child-visibility snapshot.
+pub fn resolve_rsi_lookup_child_visibility_snapshot<'a>(
+    context: &LayerResolutionContext<'a>,
+    payload: &RsiLookupSuccessResponsePayload<'a>,
+    child_name: &'a str,
+    path_storage: &'a mut [NamedPathEntry<'a>],
+) -> LcsResult<RsiChildVisibilitySnapshotProjection<'a>> {
+    let required_paths = checked_snapshot_count(payload.entry_count)?;
+    require_replay_snapshot_storage("lookup.path_entries", required_paths, path_storage.len())?;
+
+    let mut path_count = 0usize;
+    for_each_rsi_lookup_source_path_entry(payload, context.limits, child_name, |entry| {
+        path_storage[path_count] = entry;
+        path_count += 1;
+        Ok(())
+    })?;
+
+    let resolved = match resolve_named_path_entry(context, child_name, &path_storage[..path_count])?
+    {
+        NamedPathResolution::Found(entry) => Some(entry.path),
+        NamedPathResolution::NotFound => None,
+    };
+    Ok(RsiChildVisibilitySnapshotProjection {
+        source_path_entries: path_count,
+        path_capacity: path_storage.len(),
+        resolved,
+    })
+}
+
 fn rsi_path_target_to_resolution(entry: RsiLookupPathEntry<'_>) -> PathTarget {
     match entry.target_type {
         RsiPathTargetType::Guid => PathTarget::Guid(entry.target_guid),
         RsiPathTargetType::Hidden => PathTarget::Hidden,
     }
+}
+
+fn checked_snapshot_count(count: u32) -> LcsResult<usize> {
+    usize::try_from(count).map_err(|_| LcsError::RsiPayloadLengthOverflow)
+}
+
+fn require_replay_snapshot_storage(
+    field: &'static str,
+    required: usize,
+    capacity: usize,
+) -> LcsResult<()> {
+    if required > capacity {
+        return Err(LcsError::TransactionReplaySnapshotStorageFull {
+            field,
+            required,
+            capacity,
+        });
+    }
+    Ok(())
+}
+
+fn rsi_enum_children_path_entry_count(
+    payload: &RsiEnumChildrenSuccessResponsePayload<'_>,
+) -> LcsResult<usize> {
+    let mut total = 0usize;
+    payload.for_each_child(|child| {
+        total = total
+            .checked_add(checked_snapshot_count(child.path_entry_count)?)
+            .ok_or(LcsError::RsiPayloadLengthOverflow)?;
+        Ok(())
+    })?;
+    Ok(total)
 }
 
 /// Plans one message-oriented source-fd read without splitting queued requests.
