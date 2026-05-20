@@ -96,6 +96,14 @@ pub struct RsiInFlightRequestTableSummary {
     pub full: bool,
 }
 
+/// Summary of releasing one source connection's in-flight request records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiInFlightRequestTeardownReleaseSummary {
+    pub released: usize,
+    pub remaining: usize,
+    pub capacity: usize,
+}
+
 /// Validated common response match for one in-flight source request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiSourceWriteResponseMatch {
@@ -1805,6 +1813,31 @@ pub fn release_rsi_in_flight_request_record(
     Err(LcsError::RsiInFlightRequestNotFound {
         source_connection_id: record.source_connection_id,
         request_id: record.retained.request_id,
+    })
+}
+
+/// Releases all in-flight request records owned by one torn-down source connection.
+pub fn release_rsi_in_flight_request_records_for_source(
+    storage: &mut [Option<RsiInFlightRequestRecord>],
+    source_connection_id: RsiSourceConnectionId,
+) -> LcsResult<RsiInFlightRequestTeardownReleaseSummary> {
+    let summary = summarize_rsi_in_flight_request_table(storage)?;
+    let mut released = 0usize;
+
+    for slot in storage.iter_mut() {
+        if slot
+            .as_ref()
+            .is_some_and(|record| record.source_connection_id == source_connection_id)
+        {
+            *slot = None;
+            released += 1;
+        }
+    }
+
+    Ok(RsiInFlightRequestTeardownReleaseSummary {
+        released,
+        remaining: summary.entries - released,
+        capacity: summary.capacity,
     })
 }
 
