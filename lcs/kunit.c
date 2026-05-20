@@ -3180,6 +3180,128 @@ static void pkm_lcs_kunit_source_write_maps_status_to_waiter_errno(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_waiter_retains_lookup_response_frame(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x73 };
+	static const u8 child_guid[RSI_GUID_SIZE] = {
+		0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+		0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+	};
+	struct pkm_lcs_source_response_result wait_result = { };
+	struct pkm_lcs_source_response_waiter waiter;
+	struct pkm_lcs_source_response_frame retained;
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	u8 expected[256];
+	u8 response[256];
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+	size_t response_len;
+	size_t offset;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_lookup_waitable_request_retaining_frame(
+				1, 0xf1f2f3f4f5f6f7f8ULL, parent_guid,
+				"Child", strlen("Child"), &waiter,
+				&retained, &enqueue),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+
+	pkm_lcs_kunit_rsi_response_begin(test, response, sizeof(response),
+					 enqueue.request_id,
+					 RSI_LOOKUP_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, response, sizeof(response), &offset, "base",
+		RSI_PATH_TARGET_GUID, child_guid, 0);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, response, sizeof(response), &offset, child_guid,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd));
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+	memcpy(expected, response, response_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_write_file(
+				&file, response, response_len, false, NULL),
+			(ssize_t)response_len);
+	memset(response, 0xcc, response_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_response_waiter_wait(&waiter,
+							    &wait_result),
+			0L);
+	KUNIT_EXPECT_EQ(test, retained.len, response_len);
+	KUNIT_ASSERT_NOT_NULL(test, retained.data);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(retained.data, expected, response_len), 0);
+	KUNIT_EXPECT_EQ(test, wait_result.request_id, enqueue.request_id);
+	KUNIT_EXPECT_EQ(test, wait_result.status, (u32)RSI_OK);
+
+	pkm_lcs_source_response_frame_destroy(&retained);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_waiter_does_not_retain_error_frame(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x74 };
+	struct pkm_lcs_source_response_result wait_result = { };
+	struct pkm_lcs_source_response_waiter waiter;
+	struct pkm_lcs_source_response_frame retained;
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+	size_t response_len;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_lookup_waitable_request_retaining_frame(
+				1, 0xf9fafbfcfdfeff01ULL, parent_guid,
+				"Missing", strlen("Missing"), &waiter,
+				&retained, &enqueue),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    enqueue.request_id, enqueue.op_code,
+					    RSI_NOT_FOUND, &response_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_write_file(
+				&file, response, response_len, false, NULL),
+			(ssize_t)response_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_response_waiter_wait(&waiter,
+							    &wait_result),
+			(long)-ENOENT);
+	KUNIT_EXPECT_PTR_EQ(test, retained.data, NULL);
+	KUNIT_EXPECT_EQ(test, retained.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, wait_result.status, (u32)RSI_NOT_FOUND);
+
+	pkm_lcs_source_response_frame_destroy(&retained);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_release_completes_waiter_with_eio(
 	struct kunit *test)
 {
@@ -3621,6 +3743,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_write_completes_waiting_lookup),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_maps_status_to_waiter_errno),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_waiter_retains_lookup_response_frame),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_waiter_does_not_retain_error_frame),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_release_completes_waiter_with_eio),
 	KUNIT_CASE(

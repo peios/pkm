@@ -163,6 +163,11 @@ struct pkm_lcs_source_response_result {
 	u8 _pad[2];
 };
 
+struct pkm_lcs_source_response_frame {
+	u8 *data;
+	size_t len;
+};
+
 struct pkm_lcs_source_response_waiter {
 	wait_queue_head_t wait;
 	bool completed;
@@ -173,6 +178,7 @@ struct pkm_lcs_source_response_waiter {
 	long response_errno;
 	u64 request_id;
 	struct pkm_lcs_source_response_result response;
+	struct pkm_lcs_source_response_frame *retained_frame;
 };
 
 long pkm_lcs_source_device_open_for_token(const void *token);
@@ -246,6 +252,12 @@ long pkm_lcs_source_dispatch_lookup_waitable_request(
 	const char *child_name, u32 child_name_len,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_lookup_waitable_request_retaining_frame(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_response_frame *frame,
+	struct pkm_lcs_source_enqueue_result *result);
 long pkm_lcs_source_lookup_round_trip(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
@@ -261,6 +273,10 @@ long pkm_lcs_source_accept_response_file(
 	struct pkm_lcs_source_response_result *result);
 void pkm_lcs_source_response_waiter_init(
 	struct pkm_lcs_source_response_waiter *waiter);
+void pkm_lcs_source_response_frame_init(
+	struct pkm_lcs_source_response_frame *frame);
+void pkm_lcs_source_response_frame_destroy(
+	struct pkm_lcs_source_response_frame *frame);
 long pkm_lcs_source_response_waiter_wait(
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_response_result *result);

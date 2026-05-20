@@ -176,6 +176,10 @@ extern int lcs_rust_plan_rsi_source_read(
 static void pkm_lcs_source_response_waiter_complete(
 	struct pkm_lcs_source_response_waiter *waiter, long response_errno,
 	const struct pkm_lcs_source_response_result *result);
+static void pkm_lcs_source_response_waiter_complete_with_frame(
+	struct pkm_lcs_source_response_waiter *waiter, long response_errno,
+	const struct pkm_lcs_source_response_result *result,
+	const u8 *frame, size_t frame_len);
 
 static long pkm_lcs_source_device_check_tcb(const void *token)
 {
@@ -599,12 +603,61 @@ void pkm_lcs_source_response_waiter_init(
 	init_waitqueue_head(&waiter->wait);
 }
 
-static void pkm_lcs_source_response_waiter_complete(
-	struct pkm_lcs_source_response_waiter *waiter, long response_errno,
-	const struct pkm_lcs_source_response_result *result)
+void pkm_lcs_source_response_frame_init(
+	struct pkm_lcs_source_response_frame *frame)
 {
+	if (!frame)
+		return;
+
+	memset(frame, 0, sizeof(*frame));
+}
+
+void pkm_lcs_source_response_frame_destroy(
+	struct pkm_lcs_source_response_frame *frame)
+{
+	if (!frame)
+		return;
+
+	kfree(frame->data);
+	memset(frame, 0, sizeof(*frame));
+}
+
+static long pkm_lcs_source_response_waiter_retain_frame(
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_response_frame *frame)
+{
+	if (!waiter || !frame)
+		return -EINVAL;
+
+	pkm_lcs_source_response_frame_init(frame);
+	waiter->retained_frame = frame;
+	return 0;
+}
+
+static void pkm_lcs_source_response_waiter_complete_with_frame(
+	struct pkm_lcs_source_response_waiter *waiter, long response_errno,
+	const struct pkm_lcs_source_response_result *result,
+	const u8 *frame, size_t frame_len)
+{
+	struct pkm_lcs_source_response_frame *retained_frame;
+
 	if (!waiter)
 		return;
+
+	retained_frame = waiter->retained_frame;
+	if (!response_errno && retained_frame) {
+		pkm_lcs_source_response_frame_destroy(retained_frame);
+		if (!frame || !frame_len) {
+			response_errno = -EIO;
+		} else {
+			retained_frame->data = kmemdup(frame, frame_len,
+						       GFP_KERNEL);
+			if (!retained_frame->data)
+				response_errno = -ENOMEM;
+			else
+				retained_frame->len = frame_len;
+		}
+	}
 
 	if (result)
 		waiter->response = *result;
@@ -614,6 +667,14 @@ static void pkm_lcs_source_response_waiter_complete(
 	WRITE_ONCE(waiter->attached, false);
 	WRITE_ONCE(waiter->completed, true);
 	wake_up_interruptible(&waiter->wait);
+}
+
+static void pkm_lcs_source_response_waiter_complete(
+	struct pkm_lcs_source_response_waiter *waiter, long response_errno,
+	const struct pkm_lcs_source_response_result *result)
+{
+	pkm_lcs_source_response_waiter_complete_with_frame(
+		waiter, response_errno, result, NULL, 0);
 }
 
 static bool pkm_lcs_source_response_waiter_detach(
@@ -1296,6 +1357,27 @@ long pkm_lcs_source_dispatch_lookup_waitable_request(
 		waiter, result);
 }
 
+long pkm_lcs_source_dispatch_lookup_waitable_request_retaining_frame(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_response_frame *frame,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	long ret;
+
+	if (!waiter || !frame)
+		return -EINVAL;
+
+	pkm_lcs_source_response_waiter_init(waiter);
+	ret = pkm_lcs_source_response_waiter_retain_frame(waiter, frame);
+	if (ret)
+		return ret;
+	return pkm_lcs_source_dispatch_lookup_request_with_waiter(
+		source_id, txn_id, parent_guid, child_name, child_name_len,
+		waiter, result);
+}
+
 long pkm_lcs_source_lookup_round_trip_timeout(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len, u32 timeout_ms,
@@ -1569,7 +1651,8 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 
 static long pkm_lcs_source_complete_waiter_file(
 	struct file *file, u64 request_id, long caller_errno,
-	struct pkm_lcs_source_response_result *result)
+	struct pkm_lcs_source_response_result *result,
+	const u8 *frame, size_t frame_len)
 {
 	struct pkm_lcs_source_in_flight_request *record;
 	struct pkm_lcs_source_response_waiter *waiter;
@@ -1598,8 +1681,8 @@ static long pkm_lcs_source_complete_waiter_file(
 	pkm_lcs_source_in_flight_release_locked(source_fd, record);
 	result->in_flight_count = source_fd->in_flight_request_count;
 	if (waiter) {
-		pkm_lcs_source_response_waiter_complete(waiter, caller_errno,
-							result);
+		pkm_lcs_source_response_waiter_complete_with_frame(
+			waiter, caller_errno, result, frame, frame_len);
 	}
 
 out_unlock_queue:
@@ -1655,10 +1738,11 @@ static ssize_t pkm_lcs_source_device_write_file_with_ops(
 		frame, count, result, &caller_errno);
 	if (ret && result->caller_waiter_attached)
 		pkm_lcs_source_complete_waiter_file(file, result->request_id,
-						    -EIO, result);
+						    -EIO, result, NULL, 0);
 	if (!ret && result->caller_waiter_attached)
 		ret = pkm_lcs_source_complete_waiter_file(
-			file, result->request_id, caller_errno, result);
+			file, result->request_id, caller_errno, result,
+			frame, count);
 	if (!ret)
 		ret = (ssize_t)count;
 
