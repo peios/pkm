@@ -34,6 +34,7 @@ use crate::value::{
 };
 
 pub type RsiRequestId = u64;
+pub type RsiSourceConnectionId = u64;
 
 pub const RSI_WRITE_KEY_FIELD_SD: u32 = 0x01;
 pub const RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME: u32 = 0x02;
@@ -78,6 +79,28 @@ pub struct RsiValidatedResponse {
 pub struct RsiBuiltRequest {
     pub len: usize,
     pub retained: RsiRetainedRequest,
+}
+
+/// One dispatched request retained for source response matching.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiInFlightRequestRecord {
+    pub source_connection_id: RsiSourceConnectionId,
+    pub retained: RsiRetainedRequest,
+}
+
+/// Summary of fixed-capacity in-flight request record storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiInFlightRequestTableSummary {
+    pub entries: usize,
+    pub capacity: usize,
+    pub full: bool,
+}
+
+/// Validated common response match for one in-flight source request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiSourceWriteResponseMatch {
+    pub record: RsiInFlightRequestRecord,
+    pub response: RsiValidatedResponse,
 }
 
 /// Retained RSI request metadata for one transaction replay snapshot query.
@@ -1658,6 +1681,96 @@ pub fn release_transaction_replay_snapshot_request_record<'a>(
         }
     }
     Err(LcsError::TransactionReplaySnapshotRequestNotFound { request_id })
+}
+
+/// Validates fixed-capacity in-flight request record storage.
+pub fn summarize_rsi_in_flight_request_table(
+    storage: &[Option<RsiInFlightRequestRecord>],
+) -> LcsResult<RsiInFlightRequestTableSummary> {
+    let mut entries = 0usize;
+
+    for (index, slot) in storage.iter().enumerate() {
+        let Some(record) = slot else {
+            continue;
+        };
+        validate_rsi_request_op_code(record.retained.op_code)?;
+        if storage[..index].iter().flatten().any(|prior| {
+            prior.source_connection_id == record.source_connection_id
+                && prior.retained.request_id == record.retained.request_id
+        }) {
+            return Err(LcsError::DuplicateRsiInFlightRequestRecord {
+                source_connection_id: record.source_connection_id,
+                request_id: record.retained.request_id,
+            });
+        }
+        entries += 1;
+    }
+
+    Ok(RsiInFlightRequestTableSummary {
+        entries,
+        capacity: storage.len(),
+        full: entries == storage.len(),
+    })
+}
+
+/// Matches one source write response to a retained in-flight request record.
+pub fn match_rsi_source_write_response_record(
+    storage: &[Option<RsiInFlightRequestRecord>],
+    source_connection_id: RsiSourceConnectionId,
+    frame: &[u8],
+) -> LcsResult<RsiSourceWriteResponseMatch> {
+    summarize_rsi_in_flight_request_table(storage)?;
+    validate_frame_len(frame, RSI_MIN_RESPONSE_LEN)?;
+    let header = parse_rsi_response_header(frame)?;
+    let mut other_connection = None;
+
+    for record in storage.iter().flatten() {
+        if record.retained.request_id != header.request_id {
+            continue;
+        }
+        if record.source_connection_id == source_connection_id {
+            let response = validate_rsi_response_for_request(frame, record.retained)?;
+            return Ok(RsiSourceWriteResponseMatch {
+                record: *record,
+                response,
+            });
+        }
+        other_connection = Some(record.source_connection_id);
+    }
+
+    match other_connection {
+        Some(actual_source_connection_id) => Err(LcsError::RsiSourceConnectionMismatch {
+            request_id: header.request_id,
+            expected_source_connection_id: source_connection_id,
+            actual_source_connection_id,
+        }),
+        None => Err(LcsError::RsiInFlightRequestNotFound {
+            source_connection_id,
+            request_id: header.request_id,
+        }),
+    }
+}
+
+/// Releases one already-processed in-flight request record.
+pub fn release_rsi_in_flight_request_record(
+    storage: &mut [Option<RsiInFlightRequestRecord>],
+    record: RsiInFlightRequestRecord,
+) -> LcsResult<RsiInFlightRequestRecord> {
+    summarize_rsi_in_flight_request_table(storage)?;
+
+    for slot in storage {
+        if slot.as_ref().is_some_and(|candidate| *candidate == record) {
+            return slot.take().ok_or(LcsError::RsiInFlightRequestNotFound {
+                source_connection_id: record.source_connection_id,
+                request_id: record.retained.request_id,
+            });
+        }
+    }
+
+    Err(LcsError::RsiInFlightRequestNotFound {
+        source_connection_id: record.source_connection_id,
+        request_id: record.retained.request_id,
+    })
 }
 
 /// Matches a response frame to a retained replay snapshot request without releasing it.

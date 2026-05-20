@@ -780,6 +780,29 @@ pub enum LcsError {
         /// Op code stored in retained metadata.
         retained_op_code: u16,
     },
+    /// An in-flight source request table contained a duplicate live record.
+    DuplicateRsiInFlightRequestRecord {
+        /// Source connection that owns both duplicate records.
+        source_connection_id: u64,
+        /// Duplicated request ID.
+        request_id: u64,
+    },
+    /// A source response did not match any live in-flight request.
+    RsiInFlightRequestNotFound {
+        /// Source connection that submitted the response.
+        source_connection_id: u64,
+        /// Response-provided request ID.
+        request_id: u64,
+    },
+    /// A source response named a request owned by another source connection.
+    RsiSourceConnectionMismatch {
+        /// Response-provided request ID.
+        request_id: u64,
+        /// Source connection that submitted the response.
+        expected_source_connection_id: u64,
+        /// Source connection that owns the retained request record.
+        actual_source_connection_id: u64,
+    },
     /// A read buffer was too small to hold the first pending watch event.
     WatchReadBufferTooSmall {
         /// Caller-supplied read buffer length.
