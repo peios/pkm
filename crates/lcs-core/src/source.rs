@@ -75,6 +75,17 @@ pub struct SourceRegistrationSequencePlan {
     pub source_may_be_made_active: bool,
 }
 
+/// Symbolic errno class for `/dev/pkm_registry` source registration failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceRegistrationErrno {
+    Eperm,
+    Eexist,
+    Einval,
+    Enospc,
+    Eoverflow,
+    Estale,
+}
+
 /// Kernel-side effects when an active source connection is lost.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceDisconnectPlan {
@@ -131,6 +142,36 @@ pub fn plan_source_device_open(caller_has_tcb: bool) -> LcsResult<SourceDeviceOp
     Ok(SourceDeviceOpenPlan {
         grants_source_fd: true,
     })
+}
+
+/// Maps caller-facing source registration/open validation errors to PSD-005 errno classes.
+///
+/// Live glue must classify kernel-owned source-slot corruption before using
+/// this helper for errors that can also arise from caller-supplied hive data.
+pub fn source_registration_error_errno(err: LcsError) -> Option<SourceRegistrationErrno> {
+    match err {
+        LcsError::MissingTcbPrivilege => Some(SourceRegistrationErrno::Eperm),
+        LcsError::HiveIdentityCollision => Some(SourceRegistrationErrno::Eexist),
+        LcsError::TooManyRegisteredSources { .. } | LcsError::TooManyHives { .. } => {
+            Some(SourceRegistrationErrno::Enospc)
+        }
+        LcsError::SequenceOverflow => Some(SourceRegistrationErrno::Eoverflow),
+        LcsError::StaleSourceHiveIdentity => Some(SourceRegistrationErrno::Estale),
+        LcsError::InvalidUtf8 { .. }
+        | LcsError::NullByte { .. }
+        | LcsError::EmptyString { .. }
+        | LcsError::NameContainsSeparator { .. }
+        | LcsError::NameTooLong { .. }
+        | LcsError::ReservedHiveName
+        | LcsError::ZeroHiveCount
+        | LcsError::UnknownHiveFlags { .. }
+        | LcsError::GlobalHiveHasScopeGuid
+        | LcsError::NilHiveRootGuid
+        | LcsError::DuplicateHiveRootGuid
+        | LcsError::DuplicateHiveIdentity
+        | LcsError::PartialSourceResume => Some(SourceRegistrationErrno::Einval),
+        _ => None,
+    }
 }
 
 /// Plans source crash/disconnect side effects.
