@@ -46,6 +46,7 @@
 #define PKM_KMES_DEFAULT_MAX_NESTING_DEPTH 32U
 #define PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS 10000U
 #define PKM_KMES_MAX_KERNEL_TYPE_LEN ((size_t)U16_MAX)
+#define PKM_KMES_EARLY_DMESG_TYPE_PREFIX 64U
 #define PKM_KMES_PRIVILEGE_SE_TCB (1ULL << 7)
 #define PKM_KMES_PRIVILEGE_SE_SECURITY (1ULL << 8)
 #define PKM_KMES_PRIVILEGE_SE_AUDIT (1ULL << 21)
@@ -553,6 +554,25 @@ static void pkm_kmes_write_event(struct pkm_kmes_cpu_state *cpu, u8 origin_class
 		*wake_needed_out = pkm_kmes_note_wake(cpu);
 }
 
+static void pkm_kmes_log_early_event(unsigned int cpu_id, u64 sequence,
+				     u8 origin_class, const void *event_type,
+				     size_t event_type_len, size_t payload_len,
+				     size_t event_size)
+{
+	size_t type_prefix_len;
+
+	if (system_state >= SYSTEM_RUNNING)
+		return;
+
+	type_prefix_len = min(event_type_len,
+			      (size_t)PKM_KMES_EARLY_DMESG_TYPE_PREFIX);
+	pr_info("pkm-kmes: early event cpu=%u seq=%llu origin=%u event_size=%zu type_len=%zu payload_len=%zu type=\"%.*s\"%s\n",
+		cpu_id, (unsigned long long)sequence, origin_class, event_size,
+		event_type_len, payload_len, (int)type_prefix_len,
+		(const char *)event_type,
+		event_type_len > type_prefix_len ? "..." : "");
+}
+
 static int pkm_kmes_runtime_capacity(u64 *capacity_out)
 {
 	unsigned int cpu;
@@ -734,6 +754,7 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 	u64 write_pos;
 	u64 tail_pos;
 	u64 sequence;
+	u64 first_sequence;
 	unsigned int cpu_id;
 	u32 index;
 	bool wake_needed = false;
@@ -773,6 +794,7 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 	write_pos = cpu->write_pos;
 	tail_pos = cpu->tail_pos;
 	sequence = cpu->sequence;
+	first_sequence = sequence + 1;
 
 	for (index = 0; index < count; index++) {
 		pkm_kmes_reserve_space_local(cpu, &tail_pos, write_pos,
@@ -793,6 +815,13 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 	wake_needed = pkm_kmes_note_wake(cpu);
 
 	preempt_enable();
+	for (index = 0; index < count; index++) {
+		pkm_kmes_log_early_event(cpu_id, first_sequence + index,
+					 origin_class, events[index].event_type,
+					 events[index].event_type_len,
+					 events[index].payload_len,
+					 events[index].event_size);
+	}
 	if (wake_needed)
 		pkm_kmes_futex_wake(cpu);
 
@@ -1472,6 +1501,7 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 	u64 sequence;
 	unsigned int cpu_id;
 	bool wake_needed = false;
+	bool emitted = false;
 
 	if (!pkm_kmes_ready)
 		return;
@@ -1504,12 +1534,17 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 	pkm_kmes_write_event(cpu, origin_class, event_type, event_type_len,
 			     payload, payload_len, timestamp, sequence,
 			     &wake_needed);
+	emitted = true;
 	goto out;
 
 drop:
 	pkm_kmes_drop_event(cpu);
 out:
 	preempt_enable();
+	if (emitted)
+		pkm_kmes_log_early_event(cpu_id, sequence, origin_class,
+					 event_type, event_type_len, payload_len,
+					 event_size);
 	if (wake_needed)
 		pkm_kmes_futex_wake(cpu);
 }
