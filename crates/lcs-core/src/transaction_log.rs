@@ -437,6 +437,30 @@ where
     Ok(summary)
 }
 
+/// Copies stored replay snapshot results into a contiguous caller-provided slice.
+pub fn copy_transaction_replay_snapshot_results<'a>(
+    storage: &[Option<TransactionReplaySnapshotResult<'a>>],
+    output: &mut [TransactionReplaySnapshotResult<'a>],
+) -> LcsResult<TransactionReplaySnapshotResultTableSummary> {
+    let summary = summarize_transaction_replay_snapshot_result_table(storage)?;
+    if output.len() < summary.entries {
+        return Err(LcsError::TransactionReplaySnapshotStorageFull {
+            field: "replay_snapshot.result_output",
+            required: summary.entries,
+            capacity: output.len(),
+        });
+    }
+    for (index, slot) in storage[..summary.entries].iter().enumerate() {
+        let Some(result) = slot else {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "replay_snapshot.result_table_dense_prefix",
+            });
+        };
+        output[index] = *result;
+    }
+    Ok(summary)
+}
+
 /// Appends one validated transaction mutation-log record before source dispatch.
 pub fn append_transaction_mutation_log_record<'a>(
     storage: &mut [Option<TransactionMutationLogRecord<'a>>],
