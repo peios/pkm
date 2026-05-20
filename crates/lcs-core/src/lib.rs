@@ -286,8 +286,9 @@ pub use rsi::{
     write_rsi_set_value_request_frame, write_rsi_write_key_request_frame,
 };
 pub use security::{
-    RegistryGetSecurityPlan, RegistrySetSecurityPlan, plan_registry_get_security,
-    plan_registry_set_security,
+    RegistryGetSecurityOutputBufferDecision, RegistryGetSecurityPlan, RegistrySetSecurityPlan,
+    plan_registry_get_security, plan_registry_set_security,
+    validate_registry_get_security_output_buffer,
 };
 pub use sequence::SequenceCounter;
 pub use source::{

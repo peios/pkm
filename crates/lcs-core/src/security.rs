@@ -7,6 +7,10 @@ use crate::constants::{
 };
 use crate::error::{LcsError, LcsResult};
 use crate::ioctl::validate_registry_security_info;
+use crate::output_buffer::{
+    OutputBufferAggregate, OutputBufferCopyPlan, OutputBufferDecision, OutputBufferRequest,
+    plan_output_buffer_copy, validate_output_buffer_required_size,
+};
 use kacs_core::{
     Acl, MAX_SECURITY_DESCRIPTOR_BYTES, PkmVec, SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERITED,
     SE_DACL_DEFAULTED, SE_DACL_PRESENT, SE_DACL_PROTECTED, SE_DACL_TRUSTED, SE_GROUP_DEFAULTED,
@@ -43,6 +47,14 @@ pub struct RegistryGetSecurityPlan {
     pub output_sd: PkmVec<u8>,
     /// Required output bytes for ERANGE/copyout plumbing.
     pub required_len: usize,
+}
+
+/// Required-size decision for the `REG_IOC_GET_SECURITY` SD output buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegistryGetSecurityOutputBufferDecision {
+    pub sd: OutputBufferDecision,
+    pub aggregate: OutputBufferAggregate,
+    pub copy_plan: OutputBufferCopyPlan,
 }
 
 /// Pure `REG_IOC_SET_SECURITY` payload plan.
@@ -109,6 +121,22 @@ pub fn plan_registry_get_security(
     Ok(RegistryGetSecurityPlan {
         output_sd,
         required_len,
+    })
+}
+
+/// Computes the GET_SECURITY SD output-buffer decision before copyout.
+pub fn validate_registry_get_security_output_buffer(
+    plan: &RegistryGetSecurityPlan,
+    sd: OutputBufferRequest,
+) -> LcsResult<RegistryGetSecurityOutputBufferDecision> {
+    let sd = validate_output_buffer_required_size(sd, plan.required_len)?;
+    let decisions = [sd];
+    let copy_plan = plan_output_buffer_copy(&decisions);
+
+    Ok(RegistryGetSecurityOutputBufferDecision {
+        sd,
+        aggregate: copy_plan.aggregate,
+        copy_plan,
     })
 }
 
