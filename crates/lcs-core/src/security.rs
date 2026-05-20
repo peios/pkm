@@ -3,7 +3,7 @@ use crate::access::{
 };
 use crate::constants::{
     DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    SACL_SECURITY_INFORMATION,
+    REG_WATCH_SD_CHANGED, SACL_SECURITY_INFORMATION,
 };
 use crate::error::{LcsError, LcsResult};
 use crate::ioctl::validate_registry_security_info;
@@ -11,6 +11,8 @@ use crate::output_buffer::{
     OutputBufferAggregate, OutputBufferCopyPlan, OutputBufferDecision, OutputBufferRequest,
     plan_output_buffer_copy, validate_output_buffer_required_size,
 };
+use crate::resolution::Guid;
+use crate::watch::{WatchMutationContext, validate_watch_mutation_context};
 use kacs_core::{
     Acl, MAX_SECURITY_DESCRIPTOR_BYTES, PkmVec, SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERITED,
     SE_DACL_DEFAULTED, SE_DACL_PRESENT, SE_DACL_PROTECTED, SE_DACL_TRUSTED, SE_GROUP_DEFAULTED,
@@ -72,6 +74,30 @@ pub struct RegistrySetSecurityPlan {
     pub affects_existing_fd_grants: bool,
     /// Future opens evaluate the newly persisted SD.
     pub affects_future_opens: bool,
+}
+
+/// Visibility phase for `REG_IOC_SET_SECURITY` kernel-side effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegistrySetSecurityEffectTiming {
+    /// A non-transactional source write has committed.
+    NonTransactionalCommitted,
+    /// A transaction-enlisted source write has succeeded but the transaction has not committed.
+    TransactionPending,
+    /// A transaction containing this SD write has committed.
+    TransactionCommitSucceeded,
+    /// The transaction or source write failed or aborted before committed visibility.
+    AbortedOrFailed,
+}
+
+/// Pure post-success effects for a validated `REG_IOC_SET_SECURITY` mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegistrySetSecurityCommitEffects<'a> {
+    pub update_hive_generation: bool,
+    pub dispatch_watch_events: bool,
+    pub record_transaction_mutation_log: bool,
+    pub commit_visible_last_write_time_update: bool,
+    pub retain_existing_fd_grants: bool,
+    pub watch_mutation: Option<WatchMutationContext<'a>>,
 }
 
 /// Builds the binary KACS SD subset returned by `REG_IOC_GET_SECURITY`.
@@ -201,6 +227,81 @@ pub fn plan_registry_set_security(
         affects_existing_fd_grants: false,
         affects_future_opens: true,
     })
+}
+
+/// Plans generation and watch effects for a completed or transaction-staged SD write.
+pub fn plan_registry_set_security_commit_effects<'a>(
+    plan: &RegistrySetSecurityPlan,
+    timing: RegistrySetSecurityEffectTiming,
+    changed_key_guid: Guid,
+    ancestor_guids: &'a [Guid],
+    path_components: &'a [&'a str],
+) -> LcsResult<RegistrySetSecurityCommitEffects<'a>> {
+    validate_registry_set_security_plan(plan)?;
+
+    let has_committed_visibility = matches!(
+        timing,
+        RegistrySetSecurityEffectTiming::NonTransactionalCommitted
+            | RegistrySetSecurityEffectTiming::TransactionCommitSucceeded
+    );
+    let record_transaction_mutation_log =
+        matches!(timing, RegistrySetSecurityEffectTiming::TransactionPending);
+    let needs_watch_mutation = has_committed_visibility || record_transaction_mutation_log;
+
+    let watch_mutation = if needs_watch_mutation {
+        let mutation = WatchMutationContext {
+            changed_key_guid,
+            ancestor_guids,
+            path_components,
+            event_type: REG_WATCH_SD_CHANGED,
+        };
+        validate_watch_mutation_context(&mutation)?;
+        Some(mutation)
+    } else {
+        None
+    };
+
+    Ok(RegistrySetSecurityCommitEffects {
+        update_hive_generation: has_committed_visibility,
+        dispatch_watch_events: has_committed_visibility,
+        record_transaction_mutation_log,
+        commit_visible_last_write_time_update: has_committed_visibility,
+        retain_existing_fd_grants: !plan.affects_existing_fd_grants,
+        watch_mutation,
+    })
+}
+
+fn validate_registry_set_security_plan(plan: &RegistrySetSecurityPlan) -> LcsResult<()> {
+    parse_registry_source_security_descriptor(
+        plan.merged_sd.as_slice(),
+        "reg_set_security.merged_sd",
+    )?;
+    if !plan.direct_key_mutation {
+        return Err(LcsError::InvalidRegistrySetSecurityPlan {
+            field: "direct_key_mutation",
+        });
+    }
+    if plan.layer_qualified {
+        return Err(LcsError::InvalidRegistrySetSecurityPlan {
+            field: "layer_qualified",
+        });
+    }
+    if !plan.updates_last_write_time {
+        return Err(LcsError::InvalidRegistrySetSecurityPlan {
+            field: "updates_last_write_time",
+        });
+    }
+    if plan.affects_existing_fd_grants {
+        return Err(LcsError::InvalidRegistrySetSecurityPlan {
+            field: "affects_existing_fd_grants",
+        });
+    }
+    if !plan.affects_future_opens {
+        return Err(LcsError::InvalidRegistrySetSecurityPlan {
+            field: "affects_future_opens",
+        });
+    }
+    Ok(())
 }
 
 fn selected_required_owner_component<'a>(

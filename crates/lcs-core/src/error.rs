@@ -439,6 +439,11 @@ pub enum LcsError {
         /// Logical operation field.
         field: &'static str,
     },
+    /// A set-security post-merge plan was internally inconsistent.
+    InvalidRegistrySetSecurityPlan {
+        /// Inconsistent plan field.
+        field: &'static str,
+    },
     /// RSI_DELETE_LAYER returned nil as an orphaned key GUID.
     RsiDeleteLayerOrphanedGuidNil,
     /// RSI_DELETE_LAYER returned the same orphaned key GUID more than once.

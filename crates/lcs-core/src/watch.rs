@@ -1409,7 +1409,9 @@ fn validate_watch_key_guid(guid: Guid) -> LcsResult<()> {
     Ok(())
 }
 
-fn validate_watch_mutation_context(mutation: &WatchMutationContext<'_>) -> LcsResult<()> {
+pub(crate) fn validate_watch_mutation_context(
+    mutation: &WatchMutationContext<'_>,
+) -> LcsResult<()> {
     if mutation.ancestor_guids.is_empty()
         || mutation.ancestor_guids.len() != mutation.path_components.len()
     {
