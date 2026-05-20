@@ -220,6 +220,17 @@ pub struct TransactionReplayWatchInputSummary {
     pub requires_after_commit_source_queries: bool,
 }
 
+/// Concrete event-stream summary for transaction replay before watcher dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionReplayWatchEventStreamSummary {
+    pub entries: usize,
+    pub capacity: usize,
+    pub direct_security_inputs: usize,
+    pub effective_value_inputs: usize,
+    pub effective_subkey_inputs: usize,
+    pub emitted_events: usize,
+}
+
 /// Transaction boundary at which replay snapshot queries must run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionReplaySnapshotPhase {
@@ -760,6 +771,55 @@ where
     Ok(summary)
 }
 
+/// Summarizes concrete transaction replay watch events after snapshot matching.
+pub fn summarize_transaction_replay_watch_event_stream<'a>(
+    limits: &LcsLimits,
+    storage: &[Option<TransactionMutationLogRecord<'a>>],
+    results: &'a [TransactionReplaySnapshotResult<'a>],
+) -> LcsResult<TransactionReplayWatchEventStreamSummary> {
+    summarize_transaction_replay_watch_event_stream_internal(limits, storage, results)
+}
+
+/// Emits concrete transaction replay watch events after full prevalidation.
+pub fn for_each_transaction_replay_watch_event_stream<'a, F>(
+    limits: &LcsLimits,
+    storage: &[Option<TransactionMutationLogRecord<'a>>],
+    results: &'a [TransactionReplaySnapshotResult<'a>],
+    mut emit: F,
+) -> LcsResult<TransactionReplayWatchEventStreamSummary>
+where
+    F: FnMut(TransactionReplayWatchEvent<'a>) -> LcsResult<()>,
+{
+    let summary =
+        summarize_transaction_replay_watch_event_stream_internal(limits, storage, results)?;
+    let storage_summary = summarize_transaction_mutation_log_internal(storage)?.summary;
+    let mut emitted_events = 0usize;
+
+    for slot in &storage[..storage_summary.entries] {
+        let Some(record) = slot else {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "transaction_log.dense_prefix",
+            });
+        };
+        let input = transaction_mutation_log_record_watch_replay_input(limits, record)?;
+        let snapshots = resolve_transaction_replay_watch_snapshots(limits, &input, results)?;
+        let emitted =
+            for_each_transaction_replay_watch_event(limits, &input, snapshots, |event| {
+                emit(event)
+            })?;
+        emitted_events = emitted_events
+            .checked_add(emitted)
+            .ok_or(LcsError::TransactionWatchBatchEventCountOverflow)?;
+    }
+    if emitted_events != summary.emitted_events {
+        return Err(LcsError::TransactionWatchEventCountMismatch {
+            expected: summary.emitted_events,
+            actual: emitted_events,
+        });
+    }
+    Ok(summary)
+}
+
 /// Matches retained before/after snapshot results to one replay input.
 pub fn resolve_transaction_replay_watch_snapshots<'a>(
     limits: &LcsLimits,
@@ -1205,6 +1265,51 @@ fn summarize_transaction_mutation_log_internal(
         },
         last_operation_index,
     })
+}
+
+fn summarize_transaction_replay_watch_event_stream_internal<'a>(
+    limits: &LcsLimits,
+    storage: &[Option<TransactionMutationLogRecord<'a>>],
+    results: &'a [TransactionReplaySnapshotResult<'a>],
+) -> LcsResult<TransactionReplayWatchEventStreamSummary> {
+    let storage_summary = summarize_transaction_mutation_log_internal(storage)?.summary;
+    let mut summary = TransactionReplayWatchEventStreamSummary {
+        entries: storage_summary.entries,
+        capacity: storage_summary.capacity,
+        direct_security_inputs: 0,
+        effective_value_inputs: 0,
+        effective_subkey_inputs: 0,
+        emitted_events: 0,
+    };
+
+    for slot in &storage[..storage_summary.entries] {
+        let Some(record) = slot else {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "transaction_log.dense_prefix",
+            });
+        };
+        let input = transaction_mutation_log_record_watch_replay_input(limits, record)?;
+        let snapshots = resolve_transaction_replay_watch_snapshots(limits, &input, results)?;
+        let emitted =
+            for_each_transaction_replay_watch_event(limits, &input, snapshots, |_| Ok(()))?;
+        summary.emitted_events = summary
+            .emitted_events
+            .checked_add(emitted)
+            .ok_or(LcsError::TransactionWatchBatchEventCountOverflow)?;
+        match input {
+            TransactionReplayWatchInput::DirectSecurity { .. } => {
+                summary.direct_security_inputs += 1;
+            }
+            TransactionReplayWatchInput::EffectiveValue { .. } => {
+                summary.effective_value_inputs += 1;
+            }
+            TransactionReplayWatchInput::EffectiveSubkey { .. } => {
+                summary.effective_subkey_inputs += 1;
+            }
+        }
+    }
+
+    Ok(summary)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
