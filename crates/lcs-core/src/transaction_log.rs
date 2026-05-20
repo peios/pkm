@@ -18,8 +18,10 @@ use crate::transaction::{
 use crate::value::TransactionValueMutationLogEntry;
 use crate::watch::{
     EffectiveSubkeyWatchEvent, EffectiveValueWatchEvent, TransactionWatchBatchMember,
-    WatchAncestryContext, WatchMutationContext, WatchedKeyVisibilityEvent,
+    WatchAncestryContext, WatchDispatchDecision, WatchEventRecordPlan, WatchEventRecordRequest,
+    WatchMutationContext, WatchQueueEntry, WatchedKeyVisibilityEvent, WatcherView,
     for_each_effective_subkey_watch_event, for_each_effective_value_watch_event,
+    overflow_queue_entry, plan_watch_dispatch, plan_watch_event_record,
     plan_watched_key_visibility_event, validate_watch_ancestry_context,
 };
 
@@ -192,6 +194,15 @@ pub struct TransactionReplayWatchEvent<'a> {
     pub operation_index: TransactionOperationIndex,
     pub mutation: WatchMutationContext<'a>,
     pub name: &'a str,
+}
+
+/// Per-watcher summary for dispatching a transaction replay event stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionReplayWatchDispatchSummary {
+    pub operation_count: usize,
+    pub delivered_event_count: usize,
+    pub suppressed_event_count: usize,
+    pub overflow_substitution_count: usize,
 }
 
 /// Aggregate source-query/watch-input work for one transaction mutation log.
@@ -681,6 +692,58 @@ where
     }
 }
 
+/// Summarizes per-watcher dispatch for a concrete transaction replay stream.
+pub fn summarize_transaction_replay_watch_dispatch(
+    limits: &LcsLimits,
+    watcher: WatcherView,
+    events: &[TransactionReplayWatchEvent<'_>],
+) -> LcsResult<TransactionReplayWatchDispatchSummary> {
+    summarize_transaction_replay_watch_dispatch_internal(limits, watcher, events)
+}
+
+/// Emits per-watcher transaction batch members and queue-entry shapes.
+pub fn for_each_transaction_replay_watch_dispatch<'a, FM, FE>(
+    limits: &LcsLimits,
+    watcher: WatcherView,
+    events: &'a [TransactionReplayWatchEvent<'a>],
+    mut emit_member: FM,
+    mut emit_entry: FE,
+) -> LcsResult<TransactionReplayWatchDispatchSummary>
+where
+    FM: FnMut(TransactionWatchBatchMember) -> LcsResult<()>,
+    FE: FnMut(WatchQueueEntry) -> LcsResult<()>,
+{
+    let summary = summarize_transaction_replay_watch_dispatch_internal(limits, watcher, events)?;
+    let mut current_operation_index = None;
+    let mut current_event_count = 0usize;
+
+    for event in events {
+        if current_operation_index != Some(event.operation_index) {
+            emit_replay_watch_batch_member(
+                current_operation_index,
+                current_event_count,
+                &mut emit_member,
+            )?;
+            current_operation_index = Some(event.operation_index);
+            current_event_count = 0;
+        }
+
+        if let Some((entry, _)) = replay_watch_queue_entry_for_watcher(limits, watcher, event)? {
+            emit_entry(entry)?;
+            current_event_count = current_event_count
+                .checked_add(1)
+                .ok_or(LcsError::TransactionWatchBatchEventCountOverflow)?;
+        }
+    }
+
+    emit_replay_watch_batch_member(
+        current_operation_index,
+        current_event_count,
+        &mut emit_member,
+    )?;
+    Ok(summary)
+}
+
 /// Plans whether transaction completion applies, discards, or retains the log.
 pub fn plan_transaction_mutation_log_disposition(
     effects: TransactionKernelEffectsPlan,
@@ -957,6 +1020,114 @@ fn subkey_replay_event_parts(event: EffectiveSubkeyWatchEvent<'_>) -> (u32, &str
         EffectiveSubkeyWatchEvent::SubkeyCreated { name }
         | EffectiveSubkeyWatchEvent::SubkeyDeleted { name } => (event.event_type(), name),
     }
+}
+
+fn summarize_transaction_replay_watch_dispatch_internal(
+    limits: &LcsLimits,
+    watcher: WatcherView,
+    events: &[TransactionReplayWatchEvent<'_>],
+) -> LcsResult<TransactionReplayWatchDispatchSummary> {
+    let mut summary = TransactionReplayWatchDispatchSummary {
+        operation_count: 0,
+        delivered_event_count: 0,
+        suppressed_event_count: 0,
+        overflow_substitution_count: 0,
+    };
+    let mut previous_operation_index = None;
+
+    for (index, event) in events.iter().enumerate() {
+        validate_replay_watch_event_order(index, event.operation_index, previous_operation_index)?;
+        if previous_operation_index != Some(event.operation_index) {
+            summary.operation_count = summary
+                .operation_count
+                .checked_add(1)
+                .ok_or(LcsError::TransactionWatchBatchEventCountOverflow)?;
+            previous_operation_index = Some(event.operation_index);
+        }
+
+        match replay_watch_queue_entry_for_watcher(limits, watcher, event)? {
+            Some((_, overflow_substitution)) => {
+                summary.delivered_event_count = summary
+                    .delivered_event_count
+                    .checked_add(1)
+                    .ok_or(LcsError::TransactionWatchBatchEventCountOverflow)?;
+                if overflow_substitution {
+                    summary.overflow_substitution_count = summary
+                        .overflow_substitution_count
+                        .checked_add(1)
+                        .ok_or(LcsError::TransactionWatchBatchEventCountOverflow)?;
+                }
+            }
+            None => {
+                summary.suppressed_event_count = summary
+                    .suppressed_event_count
+                    .checked_add(1)
+                    .ok_or(LcsError::TransactionWatchBatchEventCountOverflow)?;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+fn replay_watch_queue_entry_for_watcher(
+    limits: &LcsLimits,
+    watcher: WatcherView,
+    event: &TransactionReplayWatchEvent<'_>,
+) -> LcsResult<Option<(WatchQueueEntry, bool)>> {
+    let decision = plan_watch_dispatch(limits, watcher, &event.mutation)?;
+    let WatchDispatchDecision::Deliver(delivery) = decision else {
+        return Ok(None);
+    };
+    let request = WatchEventRecordRequest {
+        event_type: delivery.event_type,
+        name: event.name,
+        subtree: delivery.subtree_record,
+        path_components: delivery.relative_path_components,
+    };
+    match plan_watch_event_record(&request)? {
+        WatchEventRecordPlan::Record(shape) => Ok(Some((
+            WatchQueueEntry {
+                event_type: delivery.event_type,
+                total_len: shape.total_len,
+            },
+            false,
+        ))),
+        WatchEventRecordPlan::OverflowInstead => Ok(Some((overflow_queue_entry(), true))),
+    }
+}
+
+fn validate_replay_watch_event_order(
+    index: usize,
+    operation_index: TransactionOperationIndex,
+    previous_operation_index: Option<TransactionOperationIndex>,
+) -> LcsResult<()> {
+    if operation_index == 0 {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "watch_replay.operation_index",
+        });
+    }
+    if previous_operation_index.is_some_and(|previous| operation_index < previous) {
+        return Err(LcsError::InvalidTransactionWatchBatchOrder { index });
+    }
+    Ok(())
+}
+
+fn emit_replay_watch_batch_member<F>(
+    operation_index: Option<TransactionOperationIndex>,
+    event_count: usize,
+    emit_member: &mut F,
+) -> LcsResult<()>
+where
+    F: FnMut(TransactionWatchBatchMember) -> LcsResult<()>,
+{
+    if let Some(operation_index) = operation_index {
+        emit_member(TransactionWatchBatchMember {
+            operation_index,
+            event_count,
+        })?;
+    }
+    Ok(())
 }
 
 fn validate_replay_guid(field: &'static str, guid: Guid) -> LcsResult<()> {

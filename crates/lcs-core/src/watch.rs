@@ -834,7 +834,7 @@ fn validate_watch_queue_entry_len(entry: WatchQueueEntry) -> LcsResult<usize> {
     })
 }
 
-fn overflow_queue_entry() -> WatchQueueEntry {
+pub(crate) fn overflow_queue_entry() -> WatchQueueEntry {
     WatchQueueEntry {
         event_type: REG_WATCH_OVERFLOW,
         total_len: DIRECT_WATCH_EVENT_HEADER_LEN as u32,
