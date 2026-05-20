@@ -96,6 +96,14 @@ pub struct RsiTransactionReplaySnapshotRequestTableSummary {
     pub full: bool,
 }
 
+/// Result of writing and retaining one replay snapshot query request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiTransactionReplaySnapshotScheduledRequest<'a> {
+    pub built: RsiBuiltRequest,
+    pub record: RsiTransactionReplaySnapshotRequestRecord<'a>,
+    pub request_summary: RsiTransactionReplaySnapshotRequestTableSummary,
+}
+
 /// Validated response match for one retained transaction replay snapshot request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiTransactionReplaySnapshotResponseMatch<'a> {
@@ -1324,6 +1332,38 @@ pub fn insert_transaction_replay_snapshot_request_record<'a>(
     };
     *slot = Some(record);
     summarize_transaction_replay_snapshot_request_table(storage)
+}
+
+/// Writes one replay snapshot query request frame and retains its match record.
+pub fn schedule_transaction_replay_snapshot_query_request<'a>(
+    storage: &mut [Option<RsiTransactionReplaySnapshotRequestRecord<'a>>],
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    query: TransactionReplaySnapshotQuery<'a>,
+) -> LcsResult<RsiTransactionReplaySnapshotScheduledRequest<'a>> {
+    let summary = summarize_transaction_replay_snapshot_request_table_internal(storage)?;
+    if storage
+        .iter()
+        .flatten()
+        .any(|existing| existing.request_id == request_id)
+    {
+        return Err(LcsError::DuplicateTransactionReplaySnapshotRequest { request_id });
+    }
+    if summary.full {
+        return Err(LcsError::TransactionReplaySnapshotRequestTableFull {
+            capacity: summary.capacity,
+        });
+    }
+
+    let built = write_transaction_replay_snapshot_query_request_frame(dst, request_id, query)?;
+    let record = retain_transaction_replay_snapshot_request(request_id, query);
+    let request_summary = insert_transaction_replay_snapshot_request_record(storage, record)?;
+
+    Ok(RsiTransactionReplaySnapshotScheduledRequest {
+        built,
+        record,
+        request_summary,
+    })
 }
 
 /// Finds one retained replay snapshot request record by request ID.
