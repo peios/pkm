@@ -94,6 +94,13 @@ pub struct RsiTransactionReplaySnapshotRequestTableSummary {
     pub full: bool,
 }
 
+/// Validated response match for one retained transaction replay snapshot request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiTransactionReplaySnapshotResponseMatch<'a> {
+    pub record: RsiTransactionReplaySnapshotRequestRecord<'a>,
+    pub response: RsiValidatedResponse,
+}
+
 /// One length-prefixed RSI string or byte-array field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiLengthPrefixedField<'a> {
@@ -1295,6 +1302,19 @@ pub fn release_transaction_replay_snapshot_request_record<'a>(
         }
     }
     Err(LcsError::TransactionReplaySnapshotRequestNotFound { request_id })
+}
+
+/// Matches a response frame to a retained replay snapshot request without releasing it.
+pub fn match_transaction_replay_snapshot_response_record<'a>(
+    storage: &[Option<RsiTransactionReplaySnapshotRequestRecord<'a>>],
+    frame: &[u8],
+) -> LcsResult<RsiTransactionReplaySnapshotResponseMatch<'a>> {
+    summarize_transaction_replay_snapshot_request_table_internal(storage)?;
+    validate_frame_len(frame, RSI_MIN_RESPONSE_LEN)?;
+    let header = parse_rsi_response_header(frame)?;
+    let record = find_transaction_replay_snapshot_request_record(storage, header.request_id)?;
+    let response = validate_rsi_response_for_request(frame, record.retained)?;
+    Ok(RsiTransactionReplaySnapshotResponseMatch { record, response })
 }
 
 /// Writes an RSI request frame for a transaction replay snapshot query.
