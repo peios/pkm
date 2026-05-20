@@ -10,6 +10,7 @@ use crate::constants::{
     RSI_TOO_LARGE, RSI_TXN_BUSY, RSI_TXN_NOT_SUPPORTED, RSI_TXN_READ_ONLY, RSI_TXN_READ_WRITE,
     RSI_WRITE_KEY,
 };
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
@@ -4065,6 +4066,30 @@ pub fn drain_rsi_request_queue_read<'a>(
             consume_request,
         }),
         RsiReadPlan::WakeForClose => Ok(RsiRequestQueueReadDrain::WakeForClose),
+    }
+}
+
+/// Projects a symbolic source-fd read plan to a concrete Linux errno, if any.
+pub fn rsi_source_read_plan_errno(plan: RsiReadPlan) -> Option<LinuxErrno> {
+    match plan {
+        RsiReadPlan::ReturnEagain => Some(LinuxErrno::Eagain),
+        RsiReadPlan::ReturnEmsgsize { .. } => Some(LinuxErrno::Emsgsize),
+        RsiReadPlan::ReturnOneCompleteRequest { .. }
+        | RsiReadPlan::WaitForRequestOrClose
+        | RsiReadPlan::WakeForClose => None,
+    }
+}
+
+/// Projects a concrete request-queue read-drain result to a Linux errno, if any.
+pub fn rsi_request_queue_read_drain_errno(
+    plan: &RsiRequestQueueReadDrain<'_>,
+) -> Option<LinuxErrno> {
+    match plan {
+        RsiRequestQueueReadDrain::ReturnEagain => Some(LinuxErrno::Eagain),
+        RsiRequestQueueReadDrain::ReturnEmsgsize { .. } => Some(LinuxErrno::Emsgsize),
+        RsiRequestQueueReadDrain::Copied { .. }
+        | RsiRequestQueueReadDrain::WaitForRequestOrClose
+        | RsiRequestQueueReadDrain::WakeForClose => None,
     }
 }
 
