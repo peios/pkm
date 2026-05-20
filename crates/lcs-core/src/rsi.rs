@@ -14,6 +14,7 @@ use crate::error::{LcsError, LcsResult};
 use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
 };
+use crate::poll::linux_poll_mask_from_readiness;
 use crate::resolution::{
     BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid, LayerResolutionContext,
     NamedPathEntry, NamedPathResolution, NamedValueEntry, PathEntry, PathTarget, ResolvedPathEntry,
@@ -4081,6 +4082,19 @@ pub fn plan_rsi_source_poll_for_queue(
     ))
 }
 
+/// Applies source-fd poll mask planning to concrete queued request storage.
+pub fn plan_rsi_source_poll_mask_for_queue(
+    storage: &[Option<RsiQueuedRequest<'_>>],
+    source_active: bool,
+    fd_closing: bool,
+) -> LcsResult<u16> {
+    Ok(rsi_poll_plan_mask(plan_rsi_source_poll_for_queue(
+        storage,
+        source_active,
+        fd_closing,
+    )?))
+}
+
 /// Plans one message-oriented source-fd read without splitting queued requests.
 pub fn plan_rsi_source_read(
     next_queued_request_len: Option<usize>,
@@ -4136,6 +4150,24 @@ pub fn plan_rsi_source_poll(
         hangup: false,
         error: false,
     }
+}
+
+/// Projects symbolic source-fd poll readiness to Linux poll mask bits.
+pub fn rsi_poll_plan_mask(plan: RsiPollPlan) -> u16 {
+    linux_poll_mask_from_readiness(plan.readable, plan.writable, plan.hangup, plan.error)
+}
+
+/// Plans the Linux poll mask returned by a source fd poll hook.
+pub fn plan_rsi_source_poll_mask(
+    queued_request_count: usize,
+    source_slot_active: bool,
+    fd_closing: bool,
+) -> u16 {
+    rsi_poll_plan_mask(plan_rsi_source_poll(
+        queued_request_count,
+        source_slot_active,
+        fd_closing,
+    ))
 }
 
 /// Plans request dispatch against the per-source in-flight slot limit.

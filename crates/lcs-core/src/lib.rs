@@ -28,6 +28,7 @@ pub mod metadata;
 pub mod open;
 pub mod output_buffer;
 pub mod path;
+pub mod poll;
 pub mod query;
 pub mod resolution;
 pub mod resource;
@@ -210,6 +211,9 @@ pub use path::{
     validate_registry_path_bytes, validate_registry_path_str, validate_syscall_path_c_string,
     validate_value_name_bytes,
 };
+pub use poll::{
+    LINUX_POLLERR, LINUX_POLLHUP, LINUX_POLLIN, LINUX_POLLOUT, linux_poll_mask_from_readiness,
+};
 pub use query::{
     EnumSubkeyOutcome, EnumSubkeyOutputBufferDecision, EnumSubkeyResult, EnumValueOutcome,
     EnumValueOutputBufferDecision, EnumValueOutputBuffers, EnumValueResult, EnumeratedSubkeyInfo,
@@ -292,9 +296,9 @@ pub use rsi::{
     parse_transaction_replay_snapshot_response_payload, plan_rsi_dispatched_wait,
     plan_rsi_late_response_effects, plan_rsi_late_response_record,
     plan_rsi_late_success_by_op_code, plan_rsi_malformed_source_data, plan_rsi_slot_reservation,
-    plan_rsi_source_poll, plan_rsi_source_poll_for_queue, plan_rsi_source_read,
-    plan_rsi_source_write_response, plan_rsi_transaction_begin_status,
-    plan_transaction_replay_snapshot_failure_recovery,
+    plan_rsi_source_poll, plan_rsi_source_poll_for_queue, plan_rsi_source_poll_mask,
+    plan_rsi_source_poll_mask_for_queue, plan_rsi_source_read, plan_rsi_source_write_response,
+    plan_rsi_transaction_begin_status, plan_transaction_replay_snapshot_failure_recovery,
     process_transaction_replay_snapshot_source_error_response,
     process_transaction_replay_snapshot_success_response, release_rsi_in_flight_request_record,
     release_rsi_in_flight_request_records_for_source,
@@ -302,7 +306,7 @@ pub use rsi::{
     reserve_and_schedule_transaction_replay_snapshot_query_batch,
     reserve_and_schedule_transaction_replay_snapshot_query_request,
     resolve_rsi_lookup_child_visibility_snapshot, retain_transaction_replay_snapshot_request,
-    rsi_dispatched_wait_timeout_errno, rsi_queued_request_from_frame,
+    rsi_dispatched_wait_timeout_errno, rsi_poll_plan_mask, rsi_queued_request_from_frame,
     rsi_request_has_status_only_response, rsi_response_op_code, rsi_slot_reservation_timeout_errno,
     schedule_transaction_replay_snapshot_query_request, summarize_rsi_in_flight_request_table,
     summarize_rsi_request_queue, summarize_transaction_replay_snapshot_request_table,
@@ -361,9 +365,9 @@ pub use symlink::{
 };
 pub use transaction::{
     BackupReadOnlySnapshotAdmissionPlan, BackupReadOnlySnapshotReleasePlan,
-    BackupReadOnlySnapshotReleaseReason, LINUX_POLLERR, LINUX_POLLHUP, LINUX_POLLIN, LINUX_POLLOUT,
-    ReadOnlySnapshotCounterPlan, ReadOnlySnapshotCounterUpdate, StartedTransaction,
-    TransactionBinding, TransactionBoundCounterPlan, TransactionBoundCounterTransitionPlan,
+    BackupReadOnlySnapshotReleaseReason, ReadOnlySnapshotCounterPlan,
+    ReadOnlySnapshotCounterUpdate, StartedTransaction, TransactionBinding,
+    TransactionBoundCounterPlan, TransactionBoundCounterTransitionPlan,
     TransactionBoundCounterUpdate, TransactionCommitPlan, TransactionCommitResponsePlan,
     TransactionCommitReturnStatus, TransactionCommitSourceResponse, TransactionCompletionEvent,
     TransactionFdClosePlan, TransactionFdPublicationPlan, TransactionId, TransactionIdCounter,
