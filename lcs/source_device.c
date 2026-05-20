@@ -101,6 +101,8 @@ extern int lcs_rust_open_preflight(
 extern int lcs_rust_validate_syscall_relative_path(
 	const u8 *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);
+extern int lcs_rust_validate_relative_open_depth(
+	u32 parent_depth, u32 relative_component_count);
 
 static long pkm_lcs_source_device_check_tcb(const void *token)
 {
@@ -694,6 +696,16 @@ long pkm_lcs_validate_syscall_relative_path(
 						      path_len, result);
 }
 
+static long pkm_lcs_validate_relative_open_depth(
+	const struct pkm_lcs_relative_open_preflight *result)
+{
+	if (!result)
+		return -EINVAL;
+
+	return lcs_rust_validate_relative_open_depth(
+		result->parent.parent_depth, result->path.component_count);
+}
+
 long pkm_lcs_open_user_absolute_path_preflight_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	const char __user *upath, u32 desired_access, u32 flags,
@@ -742,6 +754,12 @@ long pkm_lcs_open_user_relative_path_preflight(
 		goto out_destroy_copy;
 
 	ret = pkm_lcs_key_fd_relative_base(parent_fd, &result->parent);
+	if (ret)
+		goto out_destroy_copy;
+
+	ret = pkm_lcs_validate_relative_open_depth(result);
+	if (ret)
+		memset(&result->parent, 0, sizeof(result->parent));
 
 out_destroy_copy:
 	pkm_lcs_syscall_path_copy_destroy(&copy);

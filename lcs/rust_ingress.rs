@@ -12,11 +12,12 @@ use crate::lcs_core::{
     registry_open_pre_resolution_linux_errno, route_hive, route_routable_path_hive,
     source_registration_error_linux_errno, source_registration_hive_scope,
     source_slot_hive_status, validate_key_fd_open_view, validate_registry_open_flags,
-    validate_source_registration, validate_source_slots, validate_syscall_path_c_string,
-    CurrentUserRewrite, HiveRouteOutcome, HiveView, KeyFdOpenView, KeyWatchState, LcsError,
-    LcsLimits, LinuxErrno, PathKind, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
-    RegistryOpenPreResolutionAccessPlan, SourceRegistrationDecision, SourceRegistrationHive,
-    SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
+    validate_resolved_relative_path_depth, validate_source_registration, validate_source_slots,
+    validate_syscall_path_c_string, CurrentUserRewrite, HiveRouteOutcome, HiveView,
+    KeyFdOpenView, KeyWatchState, LcsError, LcsLimits, LinuxErrno, PathKind,
+    RegisteredHiveIdentity, RegistryIoctlAccessRequirement, RegistryOpenPreResolutionAccessPlan,
+    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
+    SourceSlotStatus, SourceSlotView,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -254,6 +255,21 @@ pub unsafe extern "C" fn lcs_rust_validate_syscall_relative_path(
             }
             0
         }
+        Err(err) => absolute_route_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lcs_rust_validate_relative_open_depth(
+    parent_depth: u32,
+    relative_component_count: u32,
+) -> c_int {
+    match validate_resolved_relative_path_depth(
+        parent_depth as usize,
+        relative_component_count as usize,
+        &LcsLimits::DEFAULT,
+    ) {
+        Ok(_) => 0,
         Err(err) => absolute_route_error_return(err),
     }
 }

@@ -50,6 +50,29 @@ pub fn validate_syscall_path_c_string<'a>(
     validate_registry_path_bytes(path_bytes, kind, limits)
 }
 
+/// Validates the resolved depth of a parent-fd relative path.
+pub fn validate_resolved_relative_path_depth(
+    parent_depth: usize,
+    relative_component_count: usize,
+    limits: &LcsLimits,
+) -> LcsResult<usize> {
+    let depth =
+        parent_depth
+            .checked_add(relative_component_count)
+            .ok_or(LcsError::KeyDepthExceeded {
+                depth: usize::MAX,
+                max: limits.max_key_depth,
+            })?;
+    if depth > limits.max_key_depth {
+        return Err(LcsError::KeyDepthExceeded {
+            depth,
+            max: limits.max_key_depth,
+        });
+    }
+
+    Ok(depth)
+}
+
 /// Validates a decoded registry path.
 pub fn validate_registry_path_str<'a>(
     path: &'a str,

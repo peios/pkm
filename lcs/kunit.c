@@ -6,6 +6,7 @@
 #include <linux/fcntl.h>
 #include <linux/fdtable.h>
 #include <linux/fs.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 
 #include <pkm/token.h>
@@ -1436,6 +1437,47 @@ static long pkm_lcs_kunit_publish_key_fd_with_access(u32 granted_access)
 	return pkm_lcs_key_fd_publish(&input);
 }
 
+static long pkm_lcs_kunit_publish_key_fd_with_depth(u32 depth)
+{
+	const char **path;
+	u8 (*ancestors)[PKM_LCS_GUID_BYTES];
+	struct pkm_lcs_key_fd_publish_input input = {
+		.source_id = 12,
+		.granted_access = KEY_QUERY_VALUE,
+		.path_component_count = depth,
+	};
+	long fd;
+	u32 i;
+
+	if (!depth)
+		return -EINVAL;
+
+	path = kcalloc(depth, sizeof(*path), GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+	ancestors = kcalloc(depth, sizeof(*ancestors), GFP_KERNEL);
+	if (!ancestors) {
+		kfree(path);
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < depth; i++) {
+		path[i] = "A";
+		ancestors[i][0] = 0x70;
+		ancestors[i][14] = (u8)(i >> 8);
+		ancestors[i][15] = (u8)i;
+	}
+
+	input.resolved_path = path;
+	input.ancestor_guids = ancestors;
+	memcpy(input.key_guid, ancestors[depth - 1U], sizeof(input.key_guid));
+	fd = pkm_lcs_key_fd_publish(&input);
+
+	kfree(ancestors);
+	kfree(path);
+	return fd;
+}
+
 static void pkm_lcs_kunit_key_fd_fixed_ioctl_access_gates(
 	struct kunit *test)
 {
@@ -1689,6 +1731,39 @@ static void pkm_lcs_kunit_relative_open_preflight_rejects_orphan_parent(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_relative_open_preflight_checks_combined_depth(
+	struct kunit *test)
+{
+	const char exact_path[] = "Child";
+	const char over_path[] = "Child\\Sub";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_relative_open_preflight result = { };
+	long fd;
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_depth(511);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_relative_path_preflight(
+				&ops, (int)fd, (const char __user *)exact_path,
+				KEY_QUERY_VALUE, 0, &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.parent.parent_depth, 511U);
+	KUNIT_EXPECT_EQ(test, result.path.component_count, 1U);
+
+	memset(&result, 0, sizeof(result));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_relative_path_preflight(
+				&ops, (int)fd, (const char __user *)over_path,
+				KEY_QUERY_VALUE, 0, &result),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, result.path.component_count, 2U);
+	KUNIT_EXPECT_EQ(test, result.parent.source_id, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -1743,6 +1818,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_relative_open_preflight_validates_path_before_parent),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_rejects_bad_parent_fd),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_rejects_orphan_parent),
+	KUNIT_CASE(
+		pkm_lcs_kunit_relative_open_preflight_checks_combined_depth),
 	{ }
 };
 
