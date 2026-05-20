@@ -14,7 +14,10 @@ extern size_t lcs_rust_kunit_probe(void);
 
 struct pkm_lcs_kunit_usercopy_ctx {
 	const void *fault_src;
+	const void *fault_strlen_src;
+	const void *unterminated_src;
 	unsigned int reads;
+	unsigned int strnlens;
 };
 
 static bool pkm_lcs_kunit_usercopy_read(void *raw_ctx, void *dst,
@@ -31,11 +34,33 @@ static bool pkm_lcs_kunit_usercopy_read(void *raw_ctx, void *dst,
 	return true;
 }
 
+static size_t pkm_lcs_kunit_usercopy_strnlen(void *raw_ctx,
+					     const char __user *src,
+					     size_t max)
+{
+	struct pkm_lcs_kunit_usercopy_ctx *ctx = raw_ctx;
+	const char *ksrc = (const char *)(unsigned long)src;
+	size_t i;
+
+	ctx->strnlens++;
+	if (!ksrc || ksrc == ctx->fault_strlen_src)
+		return 0;
+	if (ksrc == ctx->unterminated_src)
+		return max + 1;
+
+	for (i = 0; i < max; i++) {
+		if (ksrc[i] == '\0')
+			return i + 1;
+	}
+	return max + 1;
+}
+
 static struct pkm_lcs_usercopy_ops pkm_lcs_kunit_usercopy_ops(
 	struct pkm_lcs_kunit_usercopy_ctx *ctx)
 {
 	return (struct pkm_lcs_usercopy_ops) {
 		.read = pkm_lcs_kunit_usercopy_read,
+		.strnlen = pkm_lcs_kunit_usercopy_strnlen,
 		.ctx = ctx,
 	};
 }
@@ -927,6 +952,120 @@ static void pkm_lcs_kunit_absolute_path_current_user_uses_token_sid(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_syscall_path_copy_bounds_and_faults(
+	struct kunit *test)
+{
+	const char path_src[] = "Machine\\Software";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_syscall_path_copy copy = { };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_syscall_path_copy_from_user(
+				&ops, (const char __user *)path_src, &copy),
+			0L);
+	KUNIT_ASSERT_NOT_NULL(test, copy.path);
+	KUNIT_EXPECT_EQ(test, copy.path_len, (u32)sizeof(path_src));
+	KUNIT_EXPECT_STREQ(test, copy.path, path_src);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	pkm_lcs_syscall_path_copy_destroy(&copy);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_syscall_path_copy_from_user(
+				&ops, NULL, &copy),
+			(long)-EFAULT);
+	KUNIT_EXPECT_PTR_EQ(test, copy.path, NULL);
+
+	ctx.unterminated_src = path_src;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_syscall_path_copy_from_user(
+				&ops, (const char __user *)path_src, &copy),
+			(long)-ENAMETOOLONG);
+	KUNIT_EXPECT_PTR_EQ(test, copy.path, NULL);
+	ctx.unterminated_src = NULL;
+
+	ctx.fault_strlen_src = path_src;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_syscall_path_copy_from_user(
+				&ops, (const char __user *)path_src, &copy),
+			(long)-EFAULT);
+	KUNIT_EXPECT_PTR_EQ(test, copy.path, NULL);
+	ctx.fault_strlen_src = NULL;
+
+	ctx.fault_src = path_src;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_syscall_path_copy_from_user(
+				&ops, (const char __user *)path_src, &copy),
+			(long)-EFAULT);
+	KUNIT_EXPECT_PTR_EQ(test, copy.path, NULL);
+}
+
+static void pkm_lcs_kunit_user_absolute_path_copy_routes_current_user(
+	struct kunit *test)
+{
+	const char name_src[] = "Users";
+	const char current_user_path[] = "CurrentUser\\Software";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct pkm_lcs_hive_route_result route = { };
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, name_src, 1, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_user_absolute_path_for_token(
+				token, &ops, (const char __user *)current_user_path,
+				true, NULL, 0, &route),
+			0L);
+	KUNIT_EXPECT_EQ(test, route.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, route.root_guid[0], 1U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 4U);
+
+	ctx.fault_src = current_user_path;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_user_absolute_path_for_token(
+				token, &ops, (const char __user *)current_user_path,
+				true, NULL, 0, &route),
+			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, route.source_id, 0U);
+	ctx.fault_src = NULL;
+
+	ctx.unterminated_src = current_user_path;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_user_absolute_path_for_token(
+				token, &ops, (const char __user *)current_user_path,
+				true, NULL, 0, &route),
+			(long)-ENAMETOOLONG);
+	KUNIT_EXPECT_EQ(test, route.source_id, 0U);
+	ctx.unterminated_src = NULL;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_user_absolute_path_for_token(
+				token, &ops, NULL, true, NULL, 0, &route),
+			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, route.source_id, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -959,6 +1098,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_absolute_path_current_user_rewrite_routes_users),
 	KUNIT_CASE(
 		pkm_lcs_kunit_absolute_path_current_user_uses_token_sid),
+	KUNIT_CASE(pkm_lcs_kunit_syscall_path_copy_bounds_and_faults),
+	KUNIT_CASE(
+		pkm_lcs_kunit_user_absolute_path_copy_routes_current_user),
 	{ }
 };
 

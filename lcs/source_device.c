@@ -25,6 +25,9 @@
 #include "source_device.h"
 
 #define PKM_LCS_MAX_HIVE_NAME_BYTES_HARD 1024U
+#define PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD 65535U
+#define PKM_LCS_MAX_SYSCALL_PATH_BYTES_HARD \
+	(PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD + 1U)
 #define PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT 32U
 #define PKM_LCS_MAX_HIVES_PER_SOURCE_DEFAULT 64U
 
@@ -52,8 +55,17 @@ static bool pkm_lcs_default_copy_from_user(void *ctx, void *dst,
 	return copy_from_user(dst, src, len) == 0;
 }
 
+static size_t pkm_lcs_default_strnlen_user(void *ctx,
+					   const char __user *src, size_t max)
+{
+	(void)ctx;
+
+	return strnlen_user(src, max);
+}
+
 static const struct pkm_lcs_usercopy_ops pkm_lcs_default_usercopy_ops = {
 	.read = pkm_lcs_default_copy_from_user,
+	.strnlen = pkm_lcs_default_strnlen_user,
 };
 
 extern int lcs_rust_validate_source_registration_empty(
@@ -250,6 +262,53 @@ void pkm_lcs_source_registration_copy_destroy(
 	pkm_lcs_source_hives_destroy(registration->hives,
 				     registration->hive_count);
 	memset(registration, 0, sizeof(*registration));
+}
+
+void pkm_lcs_syscall_path_copy_destroy(struct pkm_lcs_syscall_path_copy *copy)
+{
+	if (!copy)
+		return;
+
+	kfree(copy->path);
+	memset(copy, 0, sizeof(*copy));
+}
+
+long pkm_lcs_syscall_path_copy_from_user(
+	const struct pkm_lcs_usercopy_ops *ops, const char __user *upath,
+	struct pkm_lcs_syscall_path_copy *out)
+{
+	char *path;
+	size_t path_len;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	if (!ops)
+		ops = &pkm_lcs_default_usercopy_ops;
+	if (!ops->read || !ops->strnlen)
+		return -EINVAL;
+	if (!upath)
+		return -EFAULT;
+
+	path_len = ops->strnlen(ops->ctx, upath,
+				PKM_LCS_MAX_SYSCALL_PATH_BYTES_HARD);
+	if (!path_len)
+		return -EFAULT;
+	if (path_len > PKM_LCS_MAX_SYSCALL_PATH_BYTES_HARD)
+		return -ENAMETOOLONG;
+
+	path = kmalloc(path_len, GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+	if (!ops->read(ops->ctx, path, upath, path_len)) {
+		kfree(path);
+		return -EFAULT;
+	}
+
+	out->path = path;
+	out->path_len = (u32)path_len;
+	return 0;
 }
 
 static long pkm_lcs_source_registration_copy_hive_name(
@@ -581,6 +640,30 @@ long pkm_lcs_route_current_absolute_path(const char *path, u32 path_len,
 	return pkm_lcs_route_absolute_path_for_token(
 		pkm_kacs_current_effective_token_ptr(), path, path_len,
 		rewrite_current_user, scope_guids, scope_count, result);
+}
+
+long pkm_lcs_route_user_absolute_path_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const char __user *upath, bool rewrite_current_user,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	struct pkm_lcs_hive_route_result *result)
+{
+	struct pkm_lcs_syscall_path_copy copy = { };
+	long ret;
+
+	if (!result)
+		return -EINVAL;
+	memset(result, 0, sizeof(*result));
+
+	ret = pkm_lcs_syscall_path_copy_from_user(ops, upath, &copy);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_route_absolute_path_for_token(
+		token, copy.path, copy.path_len, rewrite_current_user,
+		scope_guids, scope_count, result);
+	pkm_lcs_syscall_path_copy_destroy(&copy);
+	return ret;
 }
 
 static int pkm_lcs_source_device_open(struct inode *inode, struct file *file)
