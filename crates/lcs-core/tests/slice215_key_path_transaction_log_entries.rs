@@ -2,8 +2,9 @@ use lcs_core::{
     DeleteKeyInput, Guid, HideKeyInput, KEY_CREATE_SUB_KEY, KeyCreateRecordsRequest,
     KeyFdNamespaceView, KeyPathMutationInput, LcsError, LcsLimits, PathTarget, REG_OPTION_VOLATILE,
     SequenceCounter, TransactionMutationLogKind, TransactionOperationIndexCounter,
-    plan_key_create_records, plan_key_create_transaction_log_entry, plan_key_delete,
-    plan_key_delete_transaction_log_entry, plan_key_hide, plan_key_hide_transaction_log_entry,
+    WatchAncestryContext, plan_key_create_records, plan_key_create_transaction_log_entry,
+    plan_key_delete, plan_key_delete_transaction_log_entry, plan_key_hide,
+    plan_key_hide_transaction_log_entry,
 };
 
 const ROOT_GUID: Guid = [0x10; 16];
@@ -11,6 +12,16 @@ const PARENT_GUID: Guid = [0x20; 16];
 const CHILD_GUID: Guid = [0x30; 16];
 const OTHER_GUID: Guid = [0x40; 16];
 static CHILD_ANCESTORS: [Guid; 3] = [ROOT_GUID, PARENT_GUID, CHILD_GUID];
+static PARENT_ANCESTORS: [Guid; 2] = [ROOT_GUID, PARENT_GUID];
+const PARENT_PATH: [&str; 2] = ["Machine", "Parent"];
+
+fn parent_watch_context() -> WatchAncestryContext<'static> {
+    WatchAncestryContext {
+        changed_key_guid: PARENT_GUID,
+        ancestor_guids: &PARENT_ANCESTORS,
+        path_components: &PARENT_PATH,
+    }
+}
 
 fn child_fd<'a>(path: &'a [&'a str]) -> KeyFdNamespaceView<'a> {
     KeyFdNamespaceView {
@@ -43,13 +54,20 @@ fn key_create_log_entry_preserves_path_target_sequence_and_commit_effects() {
         .expect("create record plan");
     let mut operation_counter = TransactionOperationIndexCounter::new();
 
-    let entry = plan_key_create_transaction_log_entry(&limits, &plan, &mut operation_counter)
-        .expect("create transaction log entry");
+    let entry = plan_key_create_transaction_log_entry(
+        &limits,
+        &plan,
+        parent_watch_context(),
+        &mut operation_counter,
+    )
+    .expect("create transaction log entry");
 
     assert_eq!(entry.operation_index, 1);
     assert_eq!(operation_counter.next_index(), 2);
     assert_eq!(entry.kind, TransactionMutationLogKind::CreateKey);
     assert_eq!(entry.parent_guid, PARENT_GUID);
+    assert_eq!(entry.parent_watch_context, parent_watch_context());
+    assert_eq!(entry.child_visibility_watch_context, None);
     assert_eq!(entry.child_name, "Child");
     assert_eq!(entry.layer, "policy");
     assert_eq!(entry.target_guid, Some(CHILD_GUID));
@@ -85,6 +103,11 @@ fn delete_and_hide_log_entries_capture_path_layer_sequence_and_orphan_shape() {
     assert_eq!(delete_entry.operation_index, 1);
     assert_eq!(delete_entry.kind, TransactionMutationLogKind::DeleteKey);
     assert_eq!(delete_entry.parent_guid, PARENT_GUID);
+    assert_eq!(delete_entry.parent_watch_context, parent_watch_context());
+    assert_eq!(
+        delete_entry.child_visibility_watch_context,
+        Some(delete.child_visibility_watch_context)
+    );
     assert_eq!(delete_entry.child_name, "Child");
     assert_eq!(delete_entry.layer, "base");
     assert_eq!(delete_entry.target_guid, None);
@@ -103,6 +126,11 @@ fn delete_and_hide_log_entries_capture_path_layer_sequence_and_orphan_shape() {
     assert_eq!(hide_entry.operation_index, 2);
     assert_eq!(hide_entry.kind, TransactionMutationLogKind::HideKey);
     assert_eq!(hide_entry.parent_guid, PARENT_GUID);
+    assert_eq!(hide_entry.parent_watch_context, parent_watch_context());
+    assert_eq!(
+        hide_entry.child_visibility_watch_context,
+        Some(hide.child_visibility_watch_context)
+    );
     assert_eq!(hide_entry.child_name, "Child");
     assert_eq!(hide_entry.layer, "base");
     assert_eq!(hide_entry.target_guid, None);
@@ -164,7 +192,12 @@ fn mismatched_create_records_fail_before_operation_index_allocation() {
     let mut operation_counter = TransactionOperationIndexCounter::new();
 
     assert_eq!(
-        plan_key_create_transaction_log_entry(&limits, &plan, &mut operation_counter),
+        plan_key_create_transaction_log_entry(
+            &limits,
+            &plan,
+            parent_watch_context(),
+            &mut operation_counter,
+        ),
         Err(LcsError::InvalidTransactionMutationLogEntry {
             field: "key_create.records",
         })

@@ -3,7 +3,7 @@ use lcs_core::{
     KeyFdNamespaceView, KeyPathMutationInput, LcsError, LcsLimits, REG_OPTION_VOLATILE, REG_SZ,
     REG_WATCH_SD_CHANGED, RegistrySetSecurityCommitEffects, SequenceCounter,
     TransactionMutationLogRecord, TransactionMutationReplaySummary,
-    TransactionOperationIndexCounter, ValueWriteInput, WatchMutationContext,
+    TransactionOperationIndexCounter, ValueWriteInput, WatchAncestryContext, WatchMutationContext,
     append_transaction_mutation_log_record, plan_key_create_records,
     plan_key_create_transaction_log_entry, plan_key_delete, plan_key_delete_transaction_log_entry,
     plan_key_hide, plan_key_hide_transaction_log_entry,
@@ -19,6 +19,24 @@ const SECURITY_ANCESTORS: [Guid; 2] = [ROOT_GUID, KEY_GUID];
 const SECURITY_PATH: [&str; 2] = ["Machine", "Policy"];
 const CHILD_ANCESTORS: [Guid; 3] = [ROOT_GUID, PARENT_GUID, CHILD_GUID];
 const CHILD_PATH: [&str; 3] = ["Machine", "Parent", "Child"];
+const PARENT_ANCESTORS: [Guid; 2] = [ROOT_GUID, PARENT_GUID];
+const PARENT_PATH: [&str; 2] = ["Machine", "Parent"];
+
+fn value_watch_context() -> WatchAncestryContext<'static> {
+    WatchAncestryContext {
+        changed_key_guid: KEY_GUID,
+        ancestor_guids: &SECURITY_ANCESTORS,
+        path_components: &SECURITY_PATH,
+    }
+}
+
+fn parent_watch_context() -> WatchAncestryContext<'static> {
+    WatchAncestryContext {
+        changed_key_guid: PARENT_GUID,
+        ancestor_guids: &PARENT_ANCESTORS,
+        path_components: &PARENT_PATH,
+    }
+}
 
 fn pending_set_security_effects<'a>() -> RegistrySetSecurityCommitEffects<'a> {
     RegistrySetSecurityCommitEffects {
@@ -88,7 +106,7 @@ fn value_record(
     )
     .expect("value write plan");
     TransactionMutationLogRecord::Value(
-        plan_value_write_transaction_log_entry(&limits, &planned, counter)
+        plan_value_write_transaction_log_entry(&limits, &planned, value_watch_context(), counter)
             .expect("value log entry"),
     )
 }
@@ -102,7 +120,7 @@ fn create_key_record(
         plan_key_create_records(&limits, &mut sequence_counter, &create_request("policy"))
             .expect("create records plan");
     TransactionMutationLogRecord::KeyPath(
-        plan_key_create_transaction_log_entry(&limits, &planned, counter)
+        plan_key_create_transaction_log_entry(&limits, &planned, parent_watch_context(), counter)
             .expect("create log entry"),
     )
 }

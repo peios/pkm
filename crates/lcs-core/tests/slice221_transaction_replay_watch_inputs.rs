@@ -4,8 +4,8 @@ use lcs_core::{
     NIL_GUID, REG_OPTION_VOLATILE, REG_SZ, REG_WATCH_SD_CHANGED, RegistrySetSecurityCommitEffects,
     SequenceCounter, TransactionMutationLogRecord, TransactionOperationIndexCounter,
     TransactionReplayValueWatchScope, TransactionReplayWatchInput,
-    TransactionReplayWatchInputSummary, ValueWriteInput, WatchMutationContext,
-    append_transaction_mutation_log_record, plan_blanket_tombstone,
+    TransactionReplayWatchInputSummary, ValueWriteInput, WatchAncestryContext,
+    WatchMutationContext, append_transaction_mutation_log_record, plan_blanket_tombstone,
     plan_blanket_tombstone_transaction_log_entry, plan_key_create_records,
     plan_key_create_transaction_log_entry, plan_key_delete, plan_key_delete_transaction_log_entry,
     plan_key_hide, plan_key_hide_transaction_log_entry,
@@ -22,6 +22,32 @@ const SECURITY_ANCESTORS: [Guid; 2] = [ROOT_GUID, KEY_GUID];
 const SECURITY_PATH: [&str; 2] = ["Machine", "Policy"];
 const CHILD_ANCESTORS: [Guid; 3] = [ROOT_GUID, PARENT_GUID, CHILD_GUID];
 const CHILD_PATH: [&str; 3] = ["Machine", "Parent", "Child"];
+const PARENT_ANCESTORS: [Guid; 2] = [ROOT_GUID, PARENT_GUID];
+const PARENT_PATH: [&str; 2] = ["Machine", "Parent"];
+
+fn value_watch_context() -> WatchAncestryContext<'static> {
+    WatchAncestryContext {
+        changed_key_guid: KEY_GUID,
+        ancestor_guids: &SECURITY_ANCESTORS,
+        path_components: &SECURITY_PATH,
+    }
+}
+
+fn parent_watch_context() -> WatchAncestryContext<'static> {
+    WatchAncestryContext {
+        changed_key_guid: PARENT_GUID,
+        ancestor_guids: &PARENT_ANCESTORS,
+        path_components: &PARENT_PATH,
+    }
+}
+
+fn child_visibility_watch_context() -> WatchAncestryContext<'static> {
+    WatchAncestryContext {
+        changed_key_guid: CHILD_GUID,
+        ancestor_guids: &CHILD_ANCESTORS,
+        path_components: &CHILD_PATH,
+    }
+}
 
 fn pending_set_security_effects<'a>() -> RegistrySetSecurityCommitEffects<'a> {
     RegistrySetSecurityCommitEffects {
@@ -91,7 +117,7 @@ fn named_value_record(
     )
     .expect("value write plan");
     TransactionMutationLogRecord::Value(
-        plan_value_write_transaction_log_entry(&limits, &planned, counter)
+        plan_value_write_transaction_log_entry(&limits, &planned, value_watch_context(), counter)
             .expect("value log entry"),
     )
 }
@@ -112,8 +138,13 @@ fn blanket_record(
     )
     .expect("blanket tombstone plan");
     TransactionMutationLogRecord::Value(
-        plan_blanket_tombstone_transaction_log_entry(&limits, &planned, counter)
-            .expect("blanket log entry"),
+        plan_blanket_tombstone_transaction_log_entry(
+            &limits,
+            &planned,
+            value_watch_context(),
+            counter,
+        )
+        .expect("blanket log entry"),
     )
 }
 
@@ -126,7 +157,7 @@ fn create_key_record(
         plan_key_create_records(&limits, &mut sequence_counter, &create_request("policy"))
             .expect("create records plan");
     TransactionMutationLogRecord::KeyPath(
-        plan_key_create_transaction_log_entry(&limits, &planned, counter)
+        plan_key_create_transaction_log_entry(&limits, &planned, parent_watch_context(), counter)
             .expect("create log entry"),
     )
 }
@@ -203,6 +234,7 @@ fn watch_replay_inputs_preserve_operation_order_and_query_shapes() {
             operation_index: 2,
             kind: lcs_core::TransactionMutationLogKind::SetValue,
             key_guid: KEY_GUID,
+            watch_context: value_watch_context(),
             scope: TransactionReplayValueWatchScope::NamedValue { name: "Setting" },
             layer: "base",
             sequence: Some(10),
@@ -216,6 +248,7 @@ fn watch_replay_inputs_preserve_operation_order_and_query_shapes() {
             operation_index: 3,
             kind: lcs_core::TransactionMutationLogKind::BlanketTombstone,
             key_guid: KEY_GUID,
+            watch_context: value_watch_context(),
             scope: TransactionReplayValueWatchScope::AllValues,
             layer: "base",
             sequence: Some(20),
@@ -229,6 +262,8 @@ fn watch_replay_inputs_preserve_operation_order_and_query_shapes() {
             operation_index: 4,
             kind: lcs_core::TransactionMutationLogKind::CreateKey,
             parent_guid: PARENT_GUID,
+            parent_watch_context: parent_watch_context(),
+            child_visibility_watch_context: None,
             child_name: "Child",
             layer: "policy",
             target_guid: Some(CHILD_GUID),
@@ -245,6 +280,8 @@ fn watch_replay_inputs_preserve_operation_order_and_query_shapes() {
             operation_index: 5,
             kind: lcs_core::TransactionMutationLogKind::DeleteKey,
             parent_guid: PARENT_GUID,
+            parent_watch_context: parent_watch_context(),
+            child_visibility_watch_context: Some(child_visibility_watch_context()),
             child_name: "Child",
             layer: "base",
             target_guid: None,
@@ -261,6 +298,8 @@ fn watch_replay_inputs_preserve_operation_order_and_query_shapes() {
             operation_index: 6,
             kind: lcs_core::TransactionMutationLogKind::HideKey,
             parent_guid: PARENT_GUID,
+            parent_watch_context: parent_watch_context(),
+            child_visibility_watch_context: Some(child_visibility_watch_context()),
             child_name: "Child",
             layer: "base",
             target_guid: None,

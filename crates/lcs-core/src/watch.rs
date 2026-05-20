@@ -178,6 +178,25 @@ pub struct WatcherView {
 
 /// Captured ancestry for the key being mutated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatchAncestryContext<'a> {
+    pub changed_key_guid: Guid,
+    pub ancestor_guids: &'a [Guid],
+    pub path_components: &'a [&'a str],
+}
+
+impl<'a> WatchAncestryContext<'a> {
+    pub const fn with_event(self, event_type: u32) -> WatchMutationContext<'a> {
+        WatchMutationContext {
+            changed_key_guid: self.changed_key_guid,
+            ancestor_guids: self.ancestor_guids,
+            path_components: self.path_components,
+            event_type,
+        }
+    }
+}
+
+/// Captured ancestry plus the concrete event being dispatched.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WatchMutationContext<'a> {
     pub changed_key_guid: Guid,
     pub ancestor_guids: &'a [Guid],
@@ -1412,14 +1431,44 @@ fn validate_watch_key_guid(guid: Guid) -> LcsResult<()> {
 pub(crate) fn validate_watch_mutation_context(
     mutation: &WatchMutationContext<'_>,
 ) -> LcsResult<()> {
-    if mutation.ancestor_guids.is_empty()
-        || mutation.ancestor_guids.len() != mutation.path_components.len()
+    validate_watch_ancestry_context(&WatchAncestryContext {
+        changed_key_guid: mutation.changed_key_guid,
+        ancestor_guids: mutation.ancestor_guids,
+        path_components: mutation.path_components,
+    })?;
+    watch_event_category(mutation.event_type)?;
+    Ok(())
+}
+
+pub(crate) fn validate_watch_ancestry_context(context: &WatchAncestryContext<'_>) -> LcsResult<()> {
+    if context.ancestor_guids.is_empty()
+        || context.ancestor_guids.len() != context.path_components.len()
     {
         return Err(LcsError::InvalidWatchAncestry);
     }
-    if mutation.ancestor_guids[mutation.ancestor_guids.len() - 1] != mutation.changed_key_guid {
+    if context.ancestor_guids[context.ancestor_guids.len() - 1] != context.changed_key_guid {
         return Err(LcsError::WatchChangedKeyNotLastAncestor);
     }
-    watch_event_category(mutation.event_type)?;
+    Ok(())
+}
+
+pub(crate) fn validate_watch_ancestry_payload(
+    limits: &LcsLimits,
+    field: &'static str,
+    context: &WatchAncestryContext<'_>,
+) -> LcsResult<()> {
+    validate_watch_ancestry_context(context)
+        .map_err(|_| LcsError::InvalidTransactionMutationLogEntry { field })?;
+    if context.changed_key_guid == NIL_GUID {
+        return Err(LcsError::InvalidTransactionMutationLogEntry { field });
+    }
+    for guid in context.ancestor_guids {
+        if *guid == NIL_GUID {
+            return Err(LcsError::InvalidTransactionMutationLogEntry { field });
+        }
+    }
+    for path_component in context.path_components {
+        validate_key_component_bytes(path_component.as_bytes(), limits)?;
+    }
     Ok(())
 }

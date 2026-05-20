@@ -12,6 +12,7 @@ use crate::source::NIL_GUID;
 use crate::transaction::{
     TransactionMutationLogKind, TransactionOperationIndex, TransactionOperationIndexCounter,
 };
+use crate::watch::{WatchAncestryContext, validate_watch_ancestry_payload};
 
 /// User-visible Windows registry value types accepted by LCS.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -200,6 +201,7 @@ pub struct TransactionValueMutationLogEntry<'a> {
     pub operation_index: TransactionOperationIndex,
     pub kind: TransactionMutationLogKind,
     pub key_guid: Guid,
+    pub watch_context: WatchAncestryContext<'a>,
     pub value_name: Option<&'a str>,
     pub layer: &'a str,
     pub sequence: Option<u64>,
@@ -376,13 +378,16 @@ pub fn plan_blanket_tombstone<'a>(
 pub fn plan_value_write_transaction_log_entry<'a>(
     limits: &LcsLimits,
     planned: &PlannedValueWrite<'a>,
+    watch_context: WatchAncestryContext<'a>,
     counter: &mut TransactionOperationIndexCounter,
 ) -> LcsResult<TransactionValueMutationLogEntry<'a>> {
     validate_planned_value_write_for_log(limits, planned)?;
+    validate_value_watch_context(limits, planned.write.key_guid, &watch_context)?;
     Ok(TransactionValueMutationLogEntry {
         operation_index: counter.allocate()?,
         kind: TransactionMutationLogKind::SetValue,
         key_guid: planned.write.key_guid,
+        watch_context,
         value_name: Some(planned.write.name),
         layer: planned.write.layer,
         sequence: Some(planned.write.sequence),
@@ -396,13 +401,16 @@ pub fn plan_value_write_transaction_log_entry<'a>(
 pub fn plan_value_delete_transaction_log_entry<'a>(
     limits: &LcsLimits,
     planned: &PlannedValueDelete<'a>,
+    watch_context: WatchAncestryContext<'a>,
     counter: &mut TransactionOperationIndexCounter,
 ) -> LcsResult<TransactionValueMutationLogEntry<'a>> {
     validate_planned_value_delete_for_log(limits, planned)?;
+    validate_value_watch_context(limits, planned.delete.key_guid, &watch_context)?;
     Ok(TransactionValueMutationLogEntry {
         operation_index: counter.allocate()?,
         kind: TransactionMutationLogKind::DeleteValue,
         key_guid: planned.delete.key_guid,
+        watch_context,
         value_name: Some(planned.delete.name),
         layer: planned.delete.layer,
         sequence: None,
@@ -416,9 +424,11 @@ pub fn plan_value_delete_transaction_log_entry<'a>(
 pub fn plan_blanket_tombstone_transaction_log_entry<'a>(
     limits: &LcsLimits,
     planned: &PlannedBlanketTombstone<'a>,
+    watch_context: WatchAncestryContext<'a>,
     counter: &mut TransactionOperationIndexCounter,
 ) -> LcsResult<TransactionValueMutationLogEntry<'a>> {
     validate_planned_blanket_tombstone_for_log(limits, planned)?;
+    validate_value_watch_context(limits, planned.blanket.key_guid, &watch_context)?;
     let sequence = match planned.blanket.action {
         BlanketTombstoneAction::Set { sequence } => Some(sequence),
         BlanketTombstoneAction::Remove => None,
@@ -428,6 +438,7 @@ pub fn plan_blanket_tombstone_transaction_log_entry<'a>(
         operation_index: counter.allocate()?,
         kind: TransactionMutationLogKind::BlanketTombstone,
         key_guid: planned.blanket.key_guid,
+        watch_context,
         value_name: None,
         layer: planned.blanket.layer,
         sequence,
@@ -532,6 +543,20 @@ fn validate_planned_blanket_tombstone_for_log(
     if !planned.recomputes_effective_value_events {
         return Err(LcsError::InvalidTransactionMutationLogEntry {
             field: "recomputes_effective_value_events",
+        });
+    }
+    Ok(())
+}
+
+fn validate_value_watch_context(
+    limits: &LcsLimits,
+    key_guid: Guid,
+    watch_context: &WatchAncestryContext<'_>,
+) -> LcsResult<()> {
+    validate_watch_ancestry_payload(limits, "value.watch_context", watch_context)?;
+    if watch_context.changed_key_guid != key_guid {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "value.watch_context.changed_key_guid",
         });
     }
     Ok(())

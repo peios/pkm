@@ -1,7 +1,10 @@
 use crate::config::LcsLimits;
 use crate::constants::REG_WATCH_SD_CHANGED;
 use crate::error::{LcsError, LcsResult};
-use crate::key_path::TransactionKeyPathMutationLogEntry;
+use crate::key_path::{
+    TransactionKeyPathMutationLogEntry, validate_child_visibility_watch_context,
+    validate_parent_watch_context,
+};
 use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
 };
@@ -10,7 +13,10 @@ use crate::transaction::{
     TransactionOperationIndex,
 };
 use crate::value::TransactionValueMutationLogEntry;
-use crate::watch::{TransactionWatchBatchMember, WatchMutationContext};
+use crate::watch::{
+    TransactionWatchBatchMember, WatchAncestryContext, WatchMutationContext,
+    validate_watch_ancestry_context,
+};
 
 use crate::resolution::Guid;
 use crate::source::NIL_GUID;
@@ -71,6 +77,7 @@ pub enum TransactionMutationCommitWork<'a> {
     Value {
         operation_index: TransactionOperationIndex,
         key_guid: Guid,
+        watch_context: WatchAncestryContext<'a>,
         value_name: Option<&'a str>,
         layer: &'a str,
         sequence: Option<u64>,
@@ -81,6 +88,8 @@ pub enum TransactionMutationCommitWork<'a> {
     KeyPath {
         operation_index: TransactionOperationIndex,
         parent_guid: Guid,
+        parent_watch_context: WatchAncestryContext<'a>,
+        child_visibility_watch_context: Option<WatchAncestryContext<'a>>,
         child_name: &'a str,
         layer: &'a str,
         target_guid: Option<Guid>,
@@ -127,6 +136,7 @@ pub enum TransactionReplayWatchInput<'a> {
         operation_index: TransactionOperationIndex,
         kind: TransactionMutationLogKind,
         key_guid: Guid,
+        watch_context: WatchAncestryContext<'a>,
         scope: TransactionReplayValueWatchScope<'a>,
         layer: &'a str,
         sequence: Option<u64>,
@@ -137,6 +147,8 @@ pub enum TransactionReplayWatchInput<'a> {
         operation_index: TransactionOperationIndex,
         kind: TransactionMutationLogKind,
         parent_guid: Guid,
+        parent_watch_context: WatchAncestryContext<'a>,
+        child_visibility_watch_context: Option<WatchAncestryContext<'a>>,
         child_name: &'a str,
         layer: &'a str,
         target_guid: Option<Guid>,
@@ -248,6 +260,7 @@ pub fn transaction_mutation_log_record_commit_work<'a>(
         TransactionMutationLogRecord::Value(entry) => TransactionMutationCommitWork::Value {
             operation_index: entry.operation_index,
             key_guid: entry.key_guid,
+            watch_context: entry.watch_context,
             value_name: entry.value_name,
             layer: entry.layer,
             sequence: entry.sequence,
@@ -258,6 +271,8 @@ pub fn transaction_mutation_log_record_commit_work<'a>(
         TransactionMutationLogRecord::KeyPath(entry) => TransactionMutationCommitWork::KeyPath {
             operation_index: entry.operation_index,
             parent_guid: entry.parent_guid,
+            parent_watch_context: entry.parent_watch_context,
+            child_visibility_watch_context: entry.child_visibility_watch_context,
             child_name: entry.child_name,
             layer: entry.layer,
             target_guid: entry.target_guid,
@@ -372,6 +387,7 @@ pub fn transaction_mutation_log_record_watch_replay_input<'a>(
         TransactionMutationCommitWork::Value {
             operation_index,
             key_guid,
+            watch_context,
             value_name,
             layer,
             sequence,
@@ -379,6 +395,12 @@ pub fn transaction_mutation_log_record_watch_replay_input<'a>(
             ..
         } => {
             validate_replay_guid("value.key_guid", key_guid)?;
+            validate_replay_watch_context(limits, "value.watch_context", &watch_context)?;
+            if watch_context.changed_key_guid != key_guid {
+                return Err(LcsError::InvalidTransactionMutationLogEntry {
+                    field: "value.watch_context.changed_key_guid",
+                });
+            }
             let layer = validate_layer_name_bytes(layer.as_bytes(), limits)?;
             let scope = match value_name {
                 Some(name) => TransactionReplayValueWatchScope::NamedValue {
@@ -390,6 +412,7 @@ pub fn transaction_mutation_log_record_watch_replay_input<'a>(
                 operation_index,
                 kind,
                 key_guid,
+                watch_context,
                 scope,
                 layer,
                 sequence,
@@ -400,6 +423,8 @@ pub fn transaction_mutation_log_record_watch_replay_input<'a>(
         TransactionMutationCommitWork::KeyPath {
             operation_index,
             parent_guid,
+            parent_watch_context,
+            child_visibility_watch_context,
             child_name,
             layer,
             target_guid,
@@ -410,6 +435,23 @@ pub fn transaction_mutation_log_record_watch_replay_input<'a>(
             ..
         } => {
             validate_replay_guid("key_path.parent_guid", parent_guid)?;
+            validate_replay_watch_context(
+                limits,
+                "key_path.parent_watch_context",
+                &parent_watch_context,
+            )?;
+            if parent_watch_context.changed_key_guid != parent_guid {
+                return Err(LcsError::InvalidTransactionMutationLogEntry {
+                    field: "key_path.parent_watch_context.changed_key_guid",
+                });
+            }
+            if let Some(child_context) = child_visibility_watch_context {
+                validate_replay_watch_context(
+                    limits,
+                    "key_path.child_visibility_watch_context",
+                    &child_context,
+                )?;
+            }
             if let Some(target_guid) = target_guid {
                 validate_replay_guid("key_path.target_guid", target_guid)?;
             }
@@ -419,6 +461,8 @@ pub fn transaction_mutation_log_record_watch_replay_input<'a>(
                 operation_index,
                 kind,
                 parent_guid,
+                parent_watch_context,
+                child_visibility_watch_context,
                 child_name,
                 layer,
                 target_guid,
@@ -628,11 +672,39 @@ fn validate_replay_watch_mutation(
     limits: &LcsLimits,
     mutation: &WatchMutationContext<'_>,
 ) -> LcsResult<()> {
+    let context = WatchAncestryContext {
+        changed_key_guid: mutation.changed_key_guid,
+        ancestor_guids: mutation.ancestor_guids,
+        path_components: mutation.path_components,
+    };
+    validate_watch_ancestry_context(&context).map_err(|_| {
+        LcsError::InvalidTransactionMutationLogEntry {
+            field: "watch_mutation",
+        }
+    })?;
     validate_replay_guid("watch_mutation.changed_key_guid", mutation.changed_key_guid)?;
     for guid in mutation.ancestor_guids {
         validate_replay_guid("watch_mutation.ancestor_guid", *guid)?;
     }
     for path_component in mutation.path_components {
+        validate_key_component_bytes(path_component.as_bytes(), limits)?;
+    }
+    crate::watch::watch_event_category(mutation.event_type)?;
+    Ok(())
+}
+
+fn validate_replay_watch_context(
+    limits: &LcsLimits,
+    field: &'static str,
+    context: &WatchAncestryContext<'_>,
+) -> LcsResult<()> {
+    validate_watch_ancestry_context(context)
+        .map_err(|_| LcsError::InvalidTransactionMutationLogEntry { field })?;
+    validate_replay_guid(field, context.changed_key_guid)?;
+    for guid in context.ancestor_guids {
+        validate_replay_guid(field, *guid)?;
+    }
+    for path_component in context.path_components {
         validate_key_component_bytes(path_component.as_bytes(), limits)?;
     }
     Ok(())
@@ -652,6 +724,17 @@ fn validate_value_log_entry(entry: &TransactionValueMutationLogEntry<'_>) -> Lcs
     {
         return Err(LcsError::InvalidTransactionMutationLogEntry {
             field: "value.commit_effects",
+        });
+    }
+    validate_replay_guid("value.key_guid", entry.key_guid)?;
+    validate_watch_ancestry_context(&entry.watch_context).map_err(|_| {
+        LcsError::InvalidTransactionMutationLogEntry {
+            field: "value.watch_context",
+        }
+    })?;
+    if entry.watch_context.changed_key_guid != entry.key_guid {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "value.watch_context.changed_key_guid",
         });
     }
 
@@ -694,6 +777,7 @@ fn validate_key_path_log_entry(entry: &TransactionKeyPathMutationLogEntry<'_>) -
             field: "key_path.commit_effects",
         });
     }
+    validate_parent_watch_context(entry.parent_guid, &entry.parent_watch_context)?;
 
     match entry.kind {
         TransactionMutationLogKind::CreateKey => {
@@ -702,6 +786,7 @@ fn validate_key_path_log_entry(entry: &TransactionKeyPathMutationLogEntry<'_>) -
                 || entry.update_parent_last_write_time_on_commit
                 || entry.evaluate_orphaning_on_commit
                 || !entry.publish_new_key_guid_on_commit
+                || entry.child_visibility_watch_context.is_some()
             {
                 return Err(LcsError::InvalidTransactionMutationLogEntry {
                     field: "create_key.shape",
@@ -714,10 +799,15 @@ fn validate_key_path_log_entry(entry: &TransactionKeyPathMutationLogEntry<'_>) -
                 || !entry.update_parent_last_write_time_on_commit
                 || !entry.evaluate_orphaning_on_commit
                 || entry.publish_new_key_guid_on_commit
+                || entry.child_visibility_watch_context.is_none()
             {
                 return Err(LcsError::InvalidTransactionMutationLogEntry {
                     field: "delete_key.shape",
                 });
+            }
+            if let Some(context) = entry.child_visibility_watch_context {
+                validate_child_visibility_watch_context(&context)?;
+                validate_child_visibility_context_extends_parent(entry, &context)?;
             }
         }
         TransactionMutationLogKind::HideKey => {
@@ -726,10 +816,15 @@ fn validate_key_path_log_entry(entry: &TransactionKeyPathMutationLogEntry<'_>) -
                 || entry.update_parent_last_write_time_on_commit
                 || entry.evaluate_orphaning_on_commit
                 || entry.publish_new_key_guid_on_commit
+                || entry.child_visibility_watch_context.is_none()
             {
                 return Err(LcsError::InvalidTransactionMutationLogEntry {
                     field: "hide_key.shape",
                 });
+            }
+            if let Some(context) = entry.child_visibility_watch_context {
+                validate_child_visibility_watch_context(&context)?;
+                validate_child_visibility_context_extends_parent(entry, &context)?;
             }
         }
         TransactionMutationLogKind::SetSecurity
@@ -738,6 +833,30 @@ fn validate_key_path_log_entry(entry: &TransactionKeyPathMutationLogEntry<'_>) -
         | TransactionMutationLogKind::BlanketTombstone => {
             return Err(LcsError::InvalidTransactionMutationLogEntry { field: "kind" });
         }
+    }
+    Ok(())
+}
+
+fn validate_child_visibility_context_extends_parent(
+    entry: &TransactionKeyPathMutationLogEntry<'_>,
+    child_context: &WatchAncestryContext<'_>,
+) -> LcsResult<()> {
+    let parent_depth = entry.parent_watch_context.ancestor_guids.len();
+    if child_context.ancestor_guids.len() != parent_depth + 1
+        || child_context.path_components.len() != parent_depth + 1
+    {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "key_path.child_visibility_watch_context",
+        });
+    }
+    if &child_context.ancestor_guids[..parent_depth] != entry.parent_watch_context.ancestor_guids
+        || &child_context.path_components[..parent_depth]
+            != entry.parent_watch_context.path_components
+        || child_context.path_components[parent_depth] != entry.child_name
+    {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "key_path.child_visibility_watch_context",
+        });
     }
     Ok(())
 }

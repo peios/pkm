@@ -3,7 +3,7 @@ use lcs_core::{
     KeyFdNamespaceView, KeyPathMutationInput, LcsError, LcsLimits, REG_OPTION_VOLATILE, REG_SZ,
     REG_WATCH_SD_CHANGED, RegistrySetSecurityCommitEffects, SequenceCounter,
     TransactionMutationCommitWork, TransactionMutationLogRecord, TransactionOperationIndexCounter,
-    ValueWriteInput, WatchMutationContext, plan_key_create_records,
+    ValueWriteInput, WatchAncestryContext, WatchMutationContext, plan_key_create_records,
     plan_key_create_transaction_log_entry, plan_key_delete, plan_key_delete_transaction_log_entry,
     plan_key_hide, plan_key_hide_transaction_log_entry,
     plan_registry_set_security_transaction_log_entry, plan_value_write,
@@ -18,6 +18,24 @@ const SECURITY_ANCESTORS: [Guid; 2] = [ROOT_GUID, KEY_GUID];
 const SECURITY_PATH: [&str; 2] = ["Machine", "Policy"];
 const CHILD_ANCESTORS: [Guid; 3] = [ROOT_GUID, PARENT_GUID, CHILD_GUID];
 const CHILD_PATH: [&str; 3] = ["Machine", "Parent", "Child"];
+const PARENT_ANCESTORS: [Guid; 2] = [ROOT_GUID, PARENT_GUID];
+const PARENT_PATH: [&str; 2] = ["Machine", "Parent"];
+
+fn value_watch_context() -> WatchAncestryContext<'static> {
+    WatchAncestryContext {
+        changed_key_guid: KEY_GUID,
+        ancestor_guids: &SECURITY_ANCESTORS,
+        path_components: &SECURITY_PATH,
+    }
+}
+
+fn parent_watch_context() -> WatchAncestryContext<'static> {
+    WatchAncestryContext {
+        changed_key_guid: PARENT_GUID,
+        ancestor_guids: &PARENT_ANCESTORS,
+        path_components: &PARENT_PATH,
+    }
+}
 
 fn pending_set_security_effects<'a>() -> RegistrySetSecurityCommitEffects<'a> {
     RegistrySetSecurityCommitEffects {
@@ -99,8 +117,13 @@ fn value_replay_work_preserves_value_layer_sequence_and_effect_intent() {
     )
     .expect("value write plan");
     let mut counter = TransactionOperationIndexCounter::new();
-    let entry = plan_value_write_transaction_log_entry(&limits, &planned, &mut counter)
-        .expect("value log entry");
+    let entry = plan_value_write_transaction_log_entry(
+        &limits,
+        &planned,
+        value_watch_context(),
+        &mut counter,
+    )
+    .expect("value log entry");
     let record = TransactionMutationLogRecord::Value(entry);
 
     assert_eq!(
@@ -108,6 +131,7 @@ fn value_replay_work_preserves_value_layer_sequence_and_effect_intent() {
         Ok(TransactionMutationCommitWork::Value {
             operation_index: 1,
             key_guid: KEY_GUID,
+            watch_context: value_watch_context(),
             value_name: Some("Setting"),
             layer: "base",
             sequence: Some(42),
@@ -126,14 +150,20 @@ fn key_path_replay_work_preserves_create_delete_and_hide_effect_shapes() {
     let create_plan =
         plan_key_create_records(&limits, &mut sequence_counter, &create_request("policy"))
             .expect("create records plan");
-    let create =
-        plan_key_create_transaction_log_entry(&limits, &create_plan, &mut operation_counter)
-            .expect("create log entry");
+    let create = plan_key_create_transaction_log_entry(
+        &limits,
+        &create_plan,
+        parent_watch_context(),
+        &mut operation_counter,
+    )
+    .expect("create log entry");
     assert_eq!(
         transaction_mutation_log_record_commit_work(&TransactionMutationLogRecord::KeyPath(create)),
         Ok(TransactionMutationCommitWork::KeyPath {
             operation_index: 1,
             parent_guid: PARENT_GUID,
+            parent_watch_context: parent_watch_context(),
+            child_visibility_watch_context: None,
             child_name: "Child",
             layer: "policy",
             target_guid: Some(CHILD_GUID),
@@ -164,6 +194,8 @@ fn key_path_replay_work_preserves_create_delete_and_hide_effect_shapes() {
         Ok(TransactionMutationCommitWork::KeyPath {
             operation_index: 2,
             parent_guid: PARENT_GUID,
+            parent_watch_context: delete.parent_watch_context,
+            child_visibility_watch_context: delete.child_visibility_watch_context,
             child_name: "Child",
             layer: "base",
             target_guid: None,
@@ -194,6 +226,8 @@ fn key_path_replay_work_preserves_create_delete_and_hide_effect_shapes() {
         Ok(TransactionMutationCommitWork::KeyPath {
             operation_index: 3,
             parent_guid: PARENT_GUID,
+            parent_watch_context: hide.parent_watch_context,
+            child_visibility_watch_context: hide.child_visibility_watch_context,
             child_name: "Child",
             layer: "base",
             target_guid: None,

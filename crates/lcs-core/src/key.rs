@@ -7,6 +7,7 @@ use crate::constants::{
 use crate::error::{LcsError, LcsResult};
 use crate::key_path::{
     DerivedKeyPathMutation, TransactionKeyPathMutationLogEntry, validate_derived_key_path_mutation,
+    validate_parent_watch_context_for_log,
 };
 use crate::path::{validate_key_component_bytes, validate_layer_name_bytes};
 use crate::resolution::{
@@ -17,6 +18,7 @@ use crate::rsi::RsiStatus;
 use crate::sequence::SequenceCounter;
 use crate::source::NIL_GUID;
 use crate::transaction::{TransactionMutationLogKind, TransactionOperationIndexCounter};
+use crate::watch::WatchAncestryContext;
 
 const REG_CREATE_KEY_KNOWN_FLAGS: u32 = REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK;
 
@@ -313,13 +315,21 @@ pub fn plan_key_create_records<'a>(
 pub fn plan_key_create_transaction_log_entry<'a>(
     limits: &LcsLimits,
     planned: &KeyCreateRecordsPlan<'a>,
+    parent_watch_context: WatchAncestryContext<'a>,
     counter: &mut TransactionOperationIndexCounter,
 ) -> LcsResult<TransactionKeyPathMutationLogEntry<'a>> {
     let child_guid = validate_planned_key_create_for_log(limits, planned)?;
+    validate_parent_watch_context_for_log(
+        limits,
+        planned.path_entry.parent_guid,
+        &parent_watch_context,
+    )?;
     Ok(TransactionKeyPathMutationLogEntry {
         operation_index: counter.allocate()?,
         kind: TransactionMutationLogKind::CreateKey,
         parent_guid: planned.path_entry.parent_guid,
+        parent_watch_context,
+        child_visibility_watch_context: None,
         child_name: planned.path_entry.child_name,
         layer: planned.path_entry.layer,
         target_guid: Some(child_guid),

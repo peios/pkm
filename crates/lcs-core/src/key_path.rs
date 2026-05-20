@@ -10,6 +10,9 @@ use crate::source::NIL_GUID;
 use crate::transaction::{
     TransactionMutationLogKind, TransactionOperationIndex, TransactionOperationIndexCounter,
 };
+use crate::watch::{
+    WatchAncestryContext, validate_watch_ancestry_context, validate_watch_ancestry_payload,
+};
 
 /// Namespace metadata stored on an open key fd.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,6 +72,8 @@ pub struct KeyDeleteEffects {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlannedKeyDelete<'a> {
     pub target: DerivedKeyPathMutation<'a>,
+    pub parent_watch_context: WatchAncestryContext<'a>,
+    pub child_visibility_watch_context: WatchAncestryContext<'a>,
     pub updates_parent_last_write_time: bool,
     pub effects: KeyDeleteEffects,
 }
@@ -83,6 +88,8 @@ pub struct HideKeyInput<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlannedKeyHide<'a> {
     pub path_entry: ValidatedPathEntryWrite<'a>,
+    pub parent_watch_context: WatchAncestryContext<'a>,
+    pub child_visibility_watch_context: WatchAncestryContext<'a>,
     pub masks_lower_layers: bool,
 }
 
@@ -92,6 +99,8 @@ pub struct TransactionKeyPathMutationLogEntry<'a> {
     pub operation_index: TransactionOperationIndex,
     pub kind: TransactionMutationLogKind,
     pub parent_guid: Guid,
+    pub parent_watch_context: WatchAncestryContext<'a>,
+    pub child_visibility_watch_context: Option<WatchAncestryContext<'a>>,
     pub child_name: &'a str,
     pub layer: &'a str,
     pub target_guid: Option<Guid>,
@@ -155,9 +164,13 @@ pub fn plan_key_delete<'a>(
             count: input.visible_child_count,
         });
     }
+    let (parent_watch_context, child_visibility_watch_context) =
+        derive_key_path_watch_contexts(limits, input.mutation.fd, target)?;
 
     Ok(PlannedKeyDelete {
         target,
+        parent_watch_context,
+        child_visibility_watch_context,
         updates_parent_last_write_time: true,
         effects: KeyDeleteEffects {
             removes_target_layer_path_entry: true,
@@ -192,6 +205,8 @@ pub fn plan_key_hide<'a>(
     input: &HideKeyInput<'a>,
 ) -> LcsResult<PlannedKeyHide<'a>> {
     let target = derive_key_path_mutation(limits, &input.mutation)?;
+    let (parent_watch_context, child_visibility_watch_context) =
+        derive_key_path_watch_contexts(limits, input.mutation.fd, target)?;
     let sequence = sequence_counter.allocate()?;
     let path_entry = validate_path_entry_write_request(
         limits,
@@ -206,6 +221,8 @@ pub fn plan_key_hide<'a>(
 
     Ok(PlannedKeyHide {
         path_entry,
+        parent_watch_context,
+        child_visibility_watch_context,
         masks_lower_layers: true,
     })
 }
@@ -221,6 +238,8 @@ pub fn plan_key_delete_transaction_log_entry<'a>(
         operation_index: counter.allocate()?,
         kind: TransactionMutationLogKind::DeleteKey,
         parent_guid: planned.target.parent_guid,
+        parent_watch_context: planned.parent_watch_context,
+        child_visibility_watch_context: Some(planned.child_visibility_watch_context),
         child_name: planned.target.child_name,
         layer: planned.target.layer,
         target_guid: None,
@@ -244,6 +263,8 @@ pub fn plan_key_hide_transaction_log_entry<'a>(
         operation_index: counter.allocate()?,
         kind: TransactionMutationLogKind::HideKey,
         parent_guid: planned.path_entry.parent_guid,
+        parent_watch_context: planned.parent_watch_context,
+        child_visibility_watch_context: Some(planned.child_visibility_watch_context),
         child_name: planned.path_entry.child_name,
         layer: planned.path_entry.layer,
         target_guid: None,
@@ -324,4 +345,67 @@ pub(crate) fn validate_derived_key_path_mutation(
     validate_key_component_bytes(target.child_name.as_bytes(), limits)?;
     validate_layer_name_bytes(target.layer.as_bytes(), limits)?;
     Ok(())
+}
+
+pub(crate) fn validate_parent_watch_context(
+    parent_guid: Guid,
+    context: &WatchAncestryContext<'_>,
+) -> LcsResult<()> {
+    validate_watch_ancestry_context(context)?;
+    if context.changed_key_guid != parent_guid {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "key_path.parent_watch_context.changed_key_guid",
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_parent_watch_context_for_log(
+    limits: &LcsLimits,
+    parent_guid: Guid,
+    context: &WatchAncestryContext<'_>,
+) -> LcsResult<()> {
+    validate_watch_ancestry_payload(limits, "key_path.parent_watch_context", context)?;
+    if context.changed_key_guid != parent_guid {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "key_path.parent_watch_context.changed_key_guid",
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_child_visibility_watch_context(
+    context: &WatchAncestryContext<'_>,
+) -> LcsResult<()> {
+    validate_watch_ancestry_context(context)?;
+    Ok(())
+}
+
+fn validate_child_visibility_watch_context_for_log(
+    limits: &LcsLimits,
+    context: &WatchAncestryContext<'_>,
+) -> LcsResult<()> {
+    validate_watch_ancestry_payload(limits, "key_path.child_visibility_watch_context", context)?;
+    Ok(())
+}
+
+fn derive_key_path_watch_contexts<'a>(
+    limits: &LcsLimits,
+    fd: KeyFdNamespaceView<'a>,
+    target: DerivedKeyPathMutation<'a>,
+) -> LcsResult<(WatchAncestryContext<'a>, WatchAncestryContext<'a>)> {
+    let path_len = fd.resolved_path.len();
+    let parent_watch_context = WatchAncestryContext {
+        changed_key_guid: target.parent_guid,
+        ancestor_guids: &fd.ancestor_guids[..path_len - 1],
+        path_components: &fd.resolved_path[..path_len - 1],
+    };
+    let child_visibility_watch_context = WatchAncestryContext {
+        changed_key_guid: fd.ancestor_guids[path_len - 1],
+        ancestor_guids: fd.ancestor_guids,
+        path_components: fd.resolved_path,
+    };
+    validate_parent_watch_context_for_log(limits, target.parent_guid, &parent_watch_context)?;
+    validate_child_visibility_watch_context_for_log(limits, &child_visibility_watch_context)?;
+    Ok((parent_watch_context, child_visibility_watch_context))
 }
