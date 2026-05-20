@@ -9,6 +9,7 @@ use crate::constants::{
     REG_IOC_SET_VALUE, REG_IOC_TXN_STATUS, REG_VALID_SECURITY_INFORMATION,
     SACL_SECURITY_INFORMATION, WRITE_DAC, WRITE_OWNER,
 };
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 
 /// Privilege-only LCS ioctl gates.
@@ -56,6 +57,16 @@ pub enum RegistryIoctlFdAccessGatePlan {
         errno: RegistryIoctlFdAccessErrno,
         source_contact_allowed: bool,
     },
+}
+
+/// Projects an ioctl key-fd access gate plan to the caller-visible Linux errno.
+pub fn registry_ioctl_fd_access_gate_errno(
+    plan: &RegistryIoctlFdAccessGatePlan,
+) -> Option<LinuxErrno> {
+    match plan {
+        RegistryIoctlFdAccessGatePlan::Allowed { .. } => None,
+        RegistryIoctlFdAccessGatePlan::Denied { errno, .. } => Some(LinuxErrno::from(*errno)),
+    }
 }
 
 /// Classifies a PSD-005 registry ioctl command number by its first access gate.
