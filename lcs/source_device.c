@@ -12,19 +12,25 @@
 #include <linux/init.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 
 #include <pkm/token.h>
 
 #include "../kacs/token_runtime.h"
 #include "source_device.h"
 
-long pkm_lcs_source_device_open_for_token(const void *token)
+static long pkm_lcs_source_device_check_tcb(const void *token)
 {
 	if (!token)
 		return -EPERM;
 	if (!kacs_rust_token_has_enabled_privilege(token,
 						  KACS_SE_TCB_PRIVILEGE))
 		return -EPERM;
+	return 0;
+}
+
+static long pkm_lcs_source_device_mark_tcb_used(const void *token)
+{
 	if (!kacs_rust_token_mark_privileges_used(token,
 						 KACS_SE_TCB_PRIVILEGE))
 		return -EPERM;
@@ -32,15 +38,73 @@ long pkm_lcs_source_device_open_for_token(const void *token)
 	return 0;
 }
 
+long pkm_lcs_source_device_open_for_token(const void *token)
+{
+	long ret;
+
+	ret = pkm_lcs_source_device_check_tcb(token);
+	if (ret)
+		return ret;
+
+	return pkm_lcs_source_device_mark_tcb_used(token);
+}
+
+long pkm_lcs_source_device_open_file_for_token(const void *token,
+					       struct file *file)
+{
+	struct pkm_lcs_source_fd *source_fd;
+	long ret;
+
+	if (!file || file->private_data)
+		return -EINVAL;
+
+	ret = pkm_lcs_source_device_check_tcb(token);
+	if (ret)
+		return ret;
+
+	source_fd = kzalloc(sizeof(*source_fd), GFP_KERNEL);
+	if (!source_fd)
+		return -ENOMEM;
+	source_fd->state = PKM_LCS_SOURCE_FD_UNREGISTERED;
+
+	ret = pkm_lcs_source_device_mark_tcb_used(token);
+	if (ret) {
+		kfree(source_fd);
+		return ret;
+	}
+
+	file->private_data = source_fd;
+	return 0;
+}
+
+int pkm_lcs_source_device_release_file(struct file *file)
+{
+	struct pkm_lcs_source_fd *source_fd;
+
+	if (!file)
+		return 0;
+
+	source_fd = file->private_data;
+	file->private_data = NULL;
+	kfree(source_fd);
+	return 0;
+}
+
 static int pkm_lcs_source_device_open(struct inode *inode, struct file *file)
 {
-	return pkm_lcs_source_device_open_for_token(
-		pkm_kacs_current_effective_token_ptr());
+	return pkm_lcs_source_device_open_file_for_token(
+		pkm_kacs_current_effective_token_ptr(), file);
+}
+
+static int pkm_lcs_source_device_release(struct inode *inode, struct file *file)
+{
+	return pkm_lcs_source_device_release_file(file);
 }
 
 static const struct file_operations pkm_lcs_source_device_fops = {
 	.owner = THIS_MODULE,
 	.open = pkm_lcs_source_device_open,
+	.release = pkm_lcs_source_device_release,
 	.llseek = noop_llseek,
 };
 
