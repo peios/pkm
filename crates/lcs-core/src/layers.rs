@@ -2,6 +2,7 @@ use crate::access::{registry_fd_has_right, validate_registry_granted_access};
 use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
 use crate::constants::{BASE_LAYER_NAME, KEY_SET_VALUE, REG_BINARY, REG_DWORD};
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 use crate::path::{is_base_layer_name, validate_layer_name_bytes, validate_value_name_bytes};
 use crate::resolution::{Guid, LayerResolutionContext, LayerView};
@@ -328,6 +329,11 @@ pub fn layer_creation_admission_errno(error: &LcsError) -> Option<LayerCreationA
     }
 }
 
+/// Projects layer-creation admission failures to Linux errno.
+pub fn layer_creation_admission_linux_errno(error: &LcsError) -> Option<LinuxErrno> {
+    layer_creation_admission_errno(error).map(LinuxErrno::from)
+}
+
 /// Validates that a caller-targeted layer exists in the current layer table.
 pub fn plan_layer_target_admission<'a>(
     input: LayerTargetAdmissionInput<'a>,
@@ -356,6 +362,11 @@ pub fn layer_target_admission_errno(error: &LcsError) -> Option<LayerTargetAdmis
         LcsError::MissingLayerTarget => Some(LayerTargetAdmissionErrno::Enoent),
         _ => None,
     }
+}
+
+/// Projects layer-target admission failures to Linux errno.
+pub fn layer_target_admission_linux_errno(error: &LcsError) -> Option<LinuxErrno> {
+    layer_target_admission_errno(error).map(LinuxErrno::from)
 }
 
 /// Selects the informational Owner SID for layer metadata refresh.
