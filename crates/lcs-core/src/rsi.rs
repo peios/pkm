@@ -194,6 +194,55 @@ pub struct RsiTransactionReplaySnapshotSourceErrorResponse<'a> {
     pub source_errno: RsiMappedErrno,
 }
 
+/// Failure class for post-commit transaction replay snapshot acquisition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionReplaySnapshotFailureKind {
+    SourceError {
+        source_errno: RsiMappedErrno,
+    },
+    TimeoutBeforeDispatch,
+    TimeoutAfterDispatch {
+        request_id: RsiRequestId,
+    },
+    MalformedData {
+        failure: RsiSourceDataValidationFailure,
+    },
+    MalformedProtocol,
+    SourceConnectionTornDown,
+}
+
+/// Source-level policy selected for failed post-commit replay snapshot recovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionReplaySnapshotRecoverySourcePolicy {
+    KeepSourceAlive,
+    TearDownAndMarkSourceDown,
+    SourceAlreadyTornDown,
+}
+
+/// Request-record disposition selected by failed replay snapshot recovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionReplaySnapshotRecoveryRequestDisposition {
+    NoRequestSent,
+    ReleaseFailedRequestRecord,
+    RetainTimedOutInFlightRequest { request_id: RsiRequestId },
+    ReleaseInFlightTableOnSourceTeardown,
+}
+
+/// Recovery policy when exact post-commit replay snapshots are unavailable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionReplaySnapshotFailureRecoveryPlan {
+    pub commit_remains_successful: bool,
+    pub caller_errno: Option<RsiMappedErrno>,
+    pub emit_normal_watch_events: bool,
+    pub queue_overflow_for_affected_watches: bool,
+    pub release_transaction_replay_state: bool,
+    pub late_response_must_not_resurrect_normal_events: bool,
+    pub source_errno: Option<RsiMappedErrno>,
+    pub malformed_data_plan: Option<RsiMalformedSourceDataPlan>,
+    pub source_policy: TransactionReplaySnapshotRecoverySourcePolicy,
+    pub request_disposition: TransactionReplaySnapshotRecoveryRequestDisposition,
+}
+
 /// One length-prefixed RSI string or byte-array field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiLengthPrefixedField<'a> {
@@ -2388,6 +2437,65 @@ pub fn plan_rsi_malformed_source_data(
             failure,
             RsiSourceDataValidationFailure::MalformedLayerMetadataSecurityDescriptor
         ),
+    }
+}
+
+/// Plans fail-closed watch recovery after committed replay snapshots fail.
+pub fn plan_transaction_replay_snapshot_failure_recovery(
+    failure: TransactionReplaySnapshotFailureKind,
+) -> TransactionReplaySnapshotFailureRecoveryPlan {
+    let (source_policy, request_disposition, source_errno, malformed_data_plan) = match failure {
+        TransactionReplaySnapshotFailureKind::SourceError { source_errno } => (
+            TransactionReplaySnapshotRecoverySourcePolicy::KeepSourceAlive,
+            TransactionReplaySnapshotRecoveryRequestDisposition::ReleaseFailedRequestRecord,
+            Some(source_errno),
+            None,
+        ),
+        TransactionReplaySnapshotFailureKind::TimeoutBeforeDispatch => (
+            TransactionReplaySnapshotRecoverySourcePolicy::KeepSourceAlive,
+            TransactionReplaySnapshotRecoveryRequestDisposition::NoRequestSent,
+            None,
+            None,
+        ),
+        TransactionReplaySnapshotFailureKind::TimeoutAfterDispatch { request_id } => (
+            TransactionReplaySnapshotRecoverySourcePolicy::KeepSourceAlive,
+            TransactionReplaySnapshotRecoveryRequestDisposition::RetainTimedOutInFlightRequest {
+                request_id,
+            },
+            None,
+            None,
+        ),
+        TransactionReplaySnapshotFailureKind::MalformedData { failure } => (
+            TransactionReplaySnapshotRecoverySourcePolicy::KeepSourceAlive,
+            TransactionReplaySnapshotRecoveryRequestDisposition::ReleaseFailedRequestRecord,
+            None,
+            Some(plan_rsi_malformed_source_data(failure)),
+        ),
+        TransactionReplaySnapshotFailureKind::MalformedProtocol => (
+            TransactionReplaySnapshotRecoverySourcePolicy::TearDownAndMarkSourceDown,
+            TransactionReplaySnapshotRecoveryRequestDisposition::ReleaseInFlightTableOnSourceTeardown,
+            None,
+            None,
+        ),
+        TransactionReplaySnapshotFailureKind::SourceConnectionTornDown => (
+            TransactionReplaySnapshotRecoverySourcePolicy::SourceAlreadyTornDown,
+            TransactionReplaySnapshotRecoveryRequestDisposition::ReleaseInFlightTableOnSourceTeardown,
+            None,
+            None,
+        ),
+    };
+
+    TransactionReplaySnapshotFailureRecoveryPlan {
+        commit_remains_successful: true,
+        caller_errno: None,
+        emit_normal_watch_events: false,
+        queue_overflow_for_affected_watches: true,
+        release_transaction_replay_state: true,
+        late_response_must_not_resurrect_normal_events: true,
+        source_errno,
+        malformed_data_plan,
+        source_policy,
+        request_disposition,
     }
 }
 
