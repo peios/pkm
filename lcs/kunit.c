@@ -363,6 +363,286 @@ static void pkm_lcs_kunit_source_registration_semantic_rejects_sequence_overflow
 	pkm_lcs_source_registration_copy_destroy(&copy);
 }
 
+static void pkm_lcs_kunit_build_register_args(
+	struct reg_src_register_args *args, struct reg_src_hive_entry *hive,
+	const char *name, u8 root_guid_first, u64 max_sequence)
+{
+	memset(args, 0, sizeof(*args));
+	memset(hive, 0, sizeof(*hive));
+	hive->name_len = strlen(name);
+	hive->name_ptr = (u64)(unsigned long)name;
+	hive->root_guid[0] = root_guid_first;
+	args->hive_count = 1;
+	args->max_sequence = max_sequence;
+	args->hives_ptr = (u64)(unsigned long)hive;
+}
+
+static void pkm_lcs_kunit_source_registration_ioctl_publishes_active_slot(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	struct pkm_lcs_source_fd *source_fd;
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, name_src, 1, 41);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+	source_fd = file.private_data;
+	KUNIT_ASSERT_NOT_NULL(test, source_fd);
+	KUNIT_EXPECT_EQ(test, source_fd->state, PKM_LCS_SOURCE_FD_ACTIVE);
+	KUNIT_EXPECT_EQ(test, source_fd->source_id, 1U);
+
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.occupied_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.active_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.down_count, 0U);
+	KUNIT_EXPECT_TRUE(test, snapshot.sequence_initialized);
+	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, 42ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.occupied_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.active_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.down_count, 1U);
+
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_registration_ioctl_rejects_active_collision(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry first_hive;
+	struct reg_src_register_args first_args;
+	struct reg_src_hive_entry second_hive;
+	struct reg_src_register_args second_args;
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	struct pkm_lcs_source_fd *second_fd;
+	struct file first_file = { };
+	struct file second_file = { };
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &first_file),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &second_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&first_args, &first_hive, name_src, 1,
+					  0);
+	pkm_lcs_kunit_build_register_args(&second_args, &second_hive, name_src,
+					  2, 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &first_file, &ops,
+				(const void __user *)&first_args),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &second_file, &ops,
+				(const void __user *)&second_args),
+			(long)-EEXIST);
+	second_fd = second_file.private_data;
+	KUNIT_ASSERT_NOT_NULL(test, second_fd);
+	KUNIT_EXPECT_EQ(test, second_fd->state,
+			PKM_LCS_SOURCE_FD_UNREGISTERED);
+
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.occupied_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.active_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.down_count, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&first_file),
+			0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&second_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_registration_ioctl_resumes_down_slot(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry first_hive;
+	struct reg_src_register_args first_args;
+	struct reg_src_hive_entry second_hive;
+	struct reg_src_register_args second_args;
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	struct pkm_lcs_source_fd *source_fd;
+	struct file first_file = { };
+	struct file second_file = { };
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &first_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&first_args, &first_hive, name_src, 1,
+					  0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &first_file, &ops,
+				(const void __user *)&first_args),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&first_file),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &second_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&second_args, &second_hive, name_src,
+					  1, 7);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &second_file, &ops,
+				(const void __user *)&second_args),
+			0L);
+	source_fd = second_file.private_data;
+	KUNIT_ASSERT_NOT_NULL(test, source_fd);
+	KUNIT_EXPECT_EQ(test, source_fd->state, PKM_LCS_SOURCE_FD_ACTIVE);
+	KUNIT_EXPECT_EQ(test, source_fd->source_id, 1U);
+
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.occupied_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.active_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.down_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, 8ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&second_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_registration_ioctl_rejects_stale_resume(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry first_hive;
+	struct reg_src_register_args first_args;
+	struct reg_src_hive_entry second_hive;
+	struct reg_src_register_args second_args;
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	struct pkm_lcs_source_fd *source_fd;
+	struct file first_file = { };
+	struct file second_file = { };
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &first_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&first_args, &first_hive, name_src, 1,
+					  0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &first_file, &ops,
+				(const void __user *)&first_args),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&first_file),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &second_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&second_args, &second_hive, name_src,
+					  2, 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &second_file, &ops,
+				(const void __user *)&second_args),
+			(long)-ESTALE);
+	source_fd = second_file.private_data;
+	KUNIT_ASSERT_NOT_NULL(test, source_fd);
+	KUNIT_EXPECT_EQ(test, source_fd->state,
+			PKM_LCS_SOURCE_FD_UNREGISTERED);
+
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.occupied_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.active_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.down_count, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&second_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_registration_ioctl_rejects_repeat_register(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, name_src, 1, 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			(long)-EINVAL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -379,6 +659,14 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_semantic_rejects_bad_hive),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_semantic_rejects_sequence_overflow),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_ioctl_publishes_active_slot),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_ioctl_rejects_active_collision),
+	KUNIT_CASE(pkm_lcs_kunit_source_registration_ioctl_resumes_down_slot),
+	KUNIT_CASE(pkm_lcs_kunit_source_registration_ioctl_rejects_stale_resume),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_ioctl_rejects_repeat_register),
 	{ }
 };
 

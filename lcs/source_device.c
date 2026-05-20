@@ -10,8 +10,10 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/lockdep.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/overflow.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -23,6 +25,24 @@
 #include "source_device.h"
 
 #define PKM_LCS_MAX_HIVE_NAME_BYTES_HARD 1024U
+#define PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT 32U
+#define PKM_LCS_MAX_HIVES_PER_SOURCE_DEFAULT 64U
+
+struct pkm_lcs_source_slot {
+	bool occupied;
+	u32 status;
+	u32 source_id;
+	u32 hive_count;
+	struct pkm_lcs_source_registration_hive_copy *hives;
+	struct pkm_lcs_source_fd *active_fd;
+	u64 source_next_sequence;
+};
+
+static DEFINE_MUTEX(pkm_lcs_source_table_lock);
+static struct pkm_lcs_source_slot
+	pkm_lcs_source_slots[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+static bool pkm_lcs_sequence_initialized;
+static u64 pkm_lcs_next_sequence;
 
 static bool pkm_lcs_default_copy_from_user(void *ctx, void *dst,
 					   const void __user *src, size_t len)
@@ -39,6 +59,12 @@ static const struct pkm_lcs_usercopy_ops pkm_lcs_default_usercopy_ops = {
 extern int lcs_rust_validate_source_registration_empty(
 	const struct pkm_lcs_source_registration_hive_copy *hives,
 	size_t hive_count, u64 max_sequence, bool caller_has_tcb,
+	struct pkm_lcs_source_registration_plan_copy *plan);
+extern int lcs_rust_validate_source_registration(
+	const struct pkm_lcs_source_registration_hive_copy *hives,
+	size_t hive_count, u64 max_sequence, bool caller_has_tcb,
+	const struct pkm_lcs_source_slot_view_copy *slots, size_t slot_count,
+	bool current_next_sequence_valid, u64 current_next_sequence,
 	struct pkm_lcs_source_registration_plan_copy *plan);
 
 static long pkm_lcs_source_device_check_tcb(const void *token)
@@ -58,6 +84,76 @@ static long pkm_lcs_source_device_mark_tcb_used(const void *token)
 		return -EPERM;
 
 	return 0;
+}
+
+static void pkm_lcs_source_hives_destroy(
+	struct pkm_lcs_source_registration_hive_copy *hives, u32 hive_count)
+{
+	u32 i;
+
+	if (!hives)
+		return;
+
+	for (i = 0; i < hive_count; i++)
+		kfree(hives[i].name);
+	kfree(hives);
+}
+
+static u32 pkm_lcs_source_table_views_locked(
+	struct pkm_lcs_source_slot_view_copy *views)
+{
+	u32 count = 0;
+	u32 i;
+
+	lockdep_assert_held(&pkm_lcs_source_table_lock);
+
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+		struct pkm_lcs_source_slot *slot = &pkm_lcs_source_slots[i];
+
+		if (!slot->occupied)
+			continue;
+
+		views[count].source_id = slot->source_id;
+		views[count].status = slot->status;
+		views[count].hive_count = slot->hive_count;
+		views[count]._pad = 0;
+		views[count].hives = slot->hives;
+		count++;
+	}
+	return count;
+}
+
+static struct pkm_lcs_source_slot *
+pkm_lcs_source_slot_find_locked(u32 source_id)
+{
+	u32 i;
+
+	lockdep_assert_held(&pkm_lcs_source_table_lock);
+
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+		if (pkm_lcs_source_slots[i].occupied &&
+		    pkm_lcs_source_slots[i].source_id == source_id)
+			return &pkm_lcs_source_slots[i];
+	}
+	return NULL;
+}
+
+static struct pkm_lcs_source_slot *pkm_lcs_source_slot_free_locked(void)
+{
+	u32 i;
+
+	lockdep_assert_held(&pkm_lcs_source_table_lock);
+
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+		if (!pkm_lcs_source_slots[i].occupied)
+			return &pkm_lcs_source_slots[i];
+	}
+	return NULL;
+}
+
+static u32 pkm_lcs_source_slot_id(const struct pkm_lcs_source_slot *slot)
+{
+	return (u32)(slot - pkm_lcs_source_slots) + 1U;
 }
 
 long pkm_lcs_source_device_open_for_token(const void *token)
@@ -88,6 +184,7 @@ long pkm_lcs_source_device_open_file_for_token(const void *token,
 	if (!source_fd)
 		return -ENOMEM;
 	source_fd->state = PKM_LCS_SOURCE_FD_UNREGISTERED;
+	source_fd->source_id = 0;
 
 	ret = pkm_lcs_source_device_mark_tcb_used(token);
 	if (ret) {
@@ -102,12 +199,27 @@ long pkm_lcs_source_device_open_file_for_token(const void *token,
 int pkm_lcs_source_device_release_file(struct file *file)
 {
 	struct pkm_lcs_source_fd *source_fd;
+	struct pkm_lcs_source_slot *slot;
 
 	if (!file)
 		return 0;
 
 	source_fd = file->private_data;
 	file->private_data = NULL;
+	if (!source_fd)
+		return 0;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	if (source_fd->state == PKM_LCS_SOURCE_FD_ACTIVE) {
+		slot = pkm_lcs_source_slot_find_locked(source_fd->source_id);
+		if (slot && slot->status == PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE &&
+		    slot->active_fd == source_fd) {
+			slot->status = PKM_LCS_SOURCE_SLOT_STATUS_DOWN;
+			slot->active_fd = NULL;
+		}
+	}
+	mutex_unlock(&pkm_lcs_source_table_lock);
+
 	kfree(source_fd);
 	return 0;
 }
@@ -115,16 +227,11 @@ int pkm_lcs_source_device_release_file(struct file *file)
 void pkm_lcs_source_registration_copy_destroy(
 	struct pkm_lcs_source_registration_copy *registration)
 {
-	u32 i;
-
 	if (!registration)
 		return;
 
-	if (registration->hives) {
-		for (i = 0; i < registration->hive_count; i++)
-			kfree(registration->hives[i].name);
-	}
-	kfree(registration->hives);
+	pkm_lcs_source_hives_destroy(registration->hives,
+				     registration->hive_count);
 	memset(registration, 0, sizeof(*registration));
 }
 
@@ -260,10 +367,128 @@ long pkm_lcs_source_registration_validate_copied(
 		registration->max_sequence, caller_has_tcb, plan);
 }
 
+static long pkm_lcs_source_registration_publish_locked(
+	struct pkm_lcs_source_fd *source_fd,
+	struct pkm_lcs_source_registration_copy *registration)
+{
+	struct pkm_lcs_source_slot_view_copy
+		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	struct pkm_lcs_source_registration_plan_copy plan = { };
+	struct pkm_lcs_source_slot *slot;
+	u32 slot_count;
+	long ret;
+
+	lockdep_assert_held(&pkm_lcs_source_table_lock);
+
+	if (!source_fd || !registration)
+		return -EINVAL;
+	if (source_fd->state != PKM_LCS_SOURCE_FD_UNREGISTERED)
+		return -EINVAL;
+
+	slot_count = pkm_lcs_source_table_views_locked(views);
+	ret = lcs_rust_validate_source_registration(
+		registration->hives, registration->hive_count,
+		registration->max_sequence, true, views, slot_count,
+		pkm_lcs_sequence_initialized, pkm_lcs_next_sequence, &plan);
+	if (ret)
+		return ret;
+
+	switch (plan.decision) {
+	case PKM_LCS_SOURCE_REGISTRATION_DECISION_NEW:
+		slot = pkm_lcs_source_slot_free_locked();
+		if (!slot)
+			return -ENOSPC;
+
+		slot->occupied = true;
+		slot->status = PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE;
+		slot->source_id = pkm_lcs_source_slot_id(slot);
+		slot->hive_count = registration->hive_count;
+		slot->hives = registration->hives;
+		slot->active_fd = source_fd;
+		slot->source_next_sequence = plan.source_next_sequence;
+		registration->hives = NULL;
+		registration->hive_count = 0;
+		break;
+	case PKM_LCS_SOURCE_REGISTRATION_DECISION_RESUME_DOWN:
+		slot = pkm_lcs_source_slot_find_locked(plan.source_id);
+		if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_DOWN)
+			return -EINVAL;
+
+		slot->status = PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE;
+		slot->active_fd = source_fd;
+		slot->source_next_sequence = plan.source_next_sequence;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	source_fd->state = PKM_LCS_SOURCE_FD_ACTIVE;
+	source_fd->source_id = slot->source_id;
+	pkm_lcs_next_sequence = plan.effective_next_sequence;
+	pkm_lcs_sequence_initialized = true;
+	return 0;
+}
+
+long pkm_lcs_source_register_file_for_token(
+	const void *token, struct file *file, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_src_register_args __user *uargs)
+{
+	struct pkm_lcs_source_registration_copy registration = { };
+	struct pkm_lcs_source_fd *source_fd;
+	long ret;
+
+	if (!file)
+		return -EINVAL;
+	source_fd = file->private_data;
+	if (!source_fd)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	if (source_fd->state != PKM_LCS_SOURCE_FD_UNREGISTERED) {
+		mutex_unlock(&pkm_lcs_source_table_lock);
+		return -EINVAL;
+	}
+	mutex_unlock(&pkm_lcs_source_table_lock);
+
+	ret = pkm_lcs_source_device_check_tcb(token);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_source_device_mark_tcb_used(token);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_registration_copy_from_user(
+		ops, uargs, PKM_LCS_MAX_HIVES_PER_SOURCE_DEFAULT,
+		&registration);
+	if (ret)
+		return ret;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	ret = pkm_lcs_source_registration_publish_locked(source_fd,
+							&registration);
+	mutex_unlock(&pkm_lcs_source_table_lock);
+
+	pkm_lcs_source_registration_copy_destroy(&registration);
+	return ret;
+}
+
 static int pkm_lcs_source_device_open(struct inode *inode, struct file *file)
 {
 	return pkm_lcs_source_device_open_file_for_token(
 		pkm_kacs_current_effective_token_ptr(), file);
+}
+
+static long pkm_lcs_source_device_ioctl(struct file *file, unsigned int cmd,
+					unsigned long arg)
+{
+	switch (cmd) {
+	case REG_SRC_REGISTER:
+		return pkm_lcs_source_register_file_for_token(
+			pkm_kacs_current_effective_token_ptr(), file, NULL,
+			(struct reg_src_register_args __user *)arg);
+	default:
+		return -ENOTTY;
+	}
 }
 
 static int pkm_lcs_source_device_release(struct inode *inode, struct file *file)
@@ -274,9 +499,54 @@ static int pkm_lcs_source_device_release(struct inode *inode, struct file *file)
 static const struct file_operations pkm_lcs_source_device_fops = {
 	.owner = THIS_MODULE,
 	.open = pkm_lcs_source_device_open,
+	.unlocked_ioctl = pkm_lcs_source_device_ioctl,
 	.release = pkm_lcs_source_device_release,
 	.llseek = noop_llseek,
 };
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+void pkm_lcs_kunit_reset_source_table(void)
+{
+	u32 i;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+		pkm_lcs_source_hives_destroy(pkm_lcs_source_slots[i].hives,
+					     pkm_lcs_source_slots[i].hive_count);
+		memset(&pkm_lcs_source_slots[i], 0,
+		       sizeof(pkm_lcs_source_slots[i]));
+	}
+	pkm_lcs_sequence_initialized = false;
+	pkm_lcs_next_sequence = 0;
+	mutex_unlock(&pkm_lcs_source_table_lock);
+}
+
+void pkm_lcs_kunit_source_table_snapshot(
+	struct pkm_lcs_source_table_snapshot *snapshot)
+{
+	u32 i;
+
+	if (!snapshot)
+		return;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	mutex_lock(&pkm_lcs_source_table_lock);
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+		struct pkm_lcs_source_slot *slot = &pkm_lcs_source_slots[i];
+
+		if (!slot->occupied)
+			continue;
+		snapshot->occupied_count++;
+		if (slot->status == PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE)
+			snapshot->active_count++;
+		if (slot->status == PKM_LCS_SOURCE_SLOT_STATUS_DOWN)
+			snapshot->down_count++;
+	}
+	snapshot->sequence_initialized = pkm_lcs_sequence_initialized;
+	snapshot->next_sequence = pkm_lcs_next_sequence;
+	mutex_unlock(&pkm_lcs_source_table_lock);
+}
+#endif
 
 static struct miscdevice pkm_lcs_source_device = {
 	.minor = MISC_DYNAMIC_MINOR,

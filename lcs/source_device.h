@@ -11,10 +11,12 @@ struct file;
 
 enum pkm_lcs_source_fd_state {
 	PKM_LCS_SOURCE_FD_UNREGISTERED = 0,
+	PKM_LCS_SOURCE_FD_ACTIVE = 1,
 };
 
 struct pkm_lcs_source_fd {
 	enum pkm_lcs_source_fd_state state;
+	u32 source_id;
 };
 
 struct pkm_lcs_usercopy_ops {
@@ -36,9 +38,34 @@ struct pkm_lcs_source_registration_copy {
 	struct pkm_lcs_source_registration_hive_copy *hives;
 };
 
+#define PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE 0U
+#define PKM_LCS_SOURCE_SLOT_STATUS_DOWN 1U
+
+#define PKM_LCS_SOURCE_REGISTRATION_DECISION_NEW 0U
+#define PKM_LCS_SOURCE_REGISTRATION_DECISION_RESUME_DOWN 1U
+
+struct pkm_lcs_source_slot_view_copy {
+	u32 source_id;
+	u32 status;
+	u32 hive_count;
+	u32 _pad;
+	const struct pkm_lcs_source_registration_hive_copy *hives;
+};
+
 struct pkm_lcs_source_registration_plan_copy {
 	u32 hive_count;
 	u64 source_next_sequence;
+	u64 effective_next_sequence;
+	u32 decision;
+	u32 source_id;
+};
+
+struct pkm_lcs_source_table_snapshot {
+	u32 occupied_count;
+	u32 active_count;
+	u32 down_count;
+	u64 next_sequence;
+	bool sequence_initialized;
 };
 
 long pkm_lcs_source_device_open_for_token(const void *token);
@@ -55,5 +82,14 @@ long pkm_lcs_source_registration_validate_copied(
 	const struct pkm_lcs_source_registration_copy *registration,
 	bool caller_has_tcb,
 	struct pkm_lcs_source_registration_plan_copy *plan);
+long pkm_lcs_source_register_file_for_token(
+	const void *token, struct file *file, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_src_register_args __user *uargs);
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+void pkm_lcs_kunit_reset_source_table(void);
+void pkm_lcs_kunit_source_table_snapshot(
+	struct pkm_lcs_source_table_snapshot *snapshot);
+#endif
 
 #endif /* _SECURITY_PKM_LCS_SOURCE_DEVICE_H */
