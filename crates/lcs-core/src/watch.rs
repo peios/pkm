@@ -5,6 +5,7 @@ use crate::constants::{
     REG_WATCH_OVERFLOW, REG_WATCH_SD_CHANGED, REG_WATCH_SUBKEY_CREATED, REG_WATCH_SUBKEY_DELETED,
     REG_WATCH_VALUE_DELETED, REG_WATCH_VALUE_SET,
 };
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
@@ -166,6 +167,14 @@ pub struct WatchQueueDrainSummary {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WatchQueueReadDrainPlan {
     WouldBlock,
+    Drained(WatchQueueDrainSummary),
+}
+
+/// Caller-visible result for a key-fd watch `read()`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchQueueReadReturnPlan {
+    WaitForEvent,
+    ReturnErrno(LinuxErrno),
     Drained(WatchQueueDrainSummary),
 }
 
@@ -824,6 +833,28 @@ pub fn drain_watch_queue_read_batch(
         bytes,
         drained_overflow,
     }))
+}
+
+/// Plans the caller-visible key-fd watch read result.
+pub fn plan_watch_queue_read_return(
+    queue: &mut [WatchQueueEntry],
+    queued_events: usize,
+    buffer_len: usize,
+    nonblocking: bool,
+) -> LcsResult<WatchQueueReadReturnPlan> {
+    match drain_watch_queue_read_batch(queue, queued_events, buffer_len) {
+        Ok(WatchQueueReadDrainPlan::WouldBlock) if nonblocking => {
+            Ok(WatchQueueReadReturnPlan::ReturnErrno(LinuxErrno::Eagain))
+        }
+        Ok(WatchQueueReadDrainPlan::WouldBlock) => Ok(WatchQueueReadReturnPlan::WaitForEvent),
+        Ok(WatchQueueReadDrainPlan::Drained(summary)) => {
+            Ok(WatchQueueReadReturnPlan::Drained(summary))
+        }
+        Err(LcsError::WatchReadBufferTooSmall { .. }) => {
+            Ok(WatchQueueReadReturnPlan::ReturnErrno(LinuxErrno::Einval))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn validate_watch_queue_storage(
