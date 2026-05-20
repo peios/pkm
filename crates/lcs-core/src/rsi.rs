@@ -111,6 +111,72 @@ pub struct RsiSourceWriteResponseMatch {
     pub response: RsiValidatedResponse,
 }
 
+/// Source-write validation failure that is returned to the source as `EINVAL`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiSourceWriteRejectReason {
+    ShortResponse {
+        len: usize,
+        min: usize,
+    },
+    LengthMismatch {
+        total_len: u32,
+        actual_len: usize,
+    },
+    UnknownOrDuplicateRequestId {
+        source_connection_id: RsiSourceConnectionId,
+        request_id: RsiRequestId,
+    },
+    ResponseForAnotherSourceConnection {
+        request_id: RsiRequestId,
+        expected_source_connection_id: RsiSourceConnectionId,
+        actual_source_connection_id: RsiSourceConnectionId,
+    },
+    ResponseOpcodeMismatch {
+        expected: u16,
+        actual: u16,
+    },
+}
+
+/// Fail-closed reason for kernel-side state corruption during source write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiSourceWriteFailClosedReason {
+    DuplicateInFlightRequestRecord {
+        source_connection_id: RsiSourceConnectionId,
+        request_id: RsiRequestId,
+    },
+    InvalidRetainedRequestOpcode {
+        op_code: u16,
+    },
+    UnexpectedValidationError,
+}
+
+/// Pure disposition for one source `write()` response attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiSourceWriteResponsePlan {
+    AcceptResponse {
+        matched: RsiSourceWriteResponseMatch,
+    },
+    RejectSourceWrite {
+        reason: RsiSourceWriteRejectReason,
+        source_write_errno: RsiMappedErrno,
+        release_request_record: bool,
+        tear_down_source: bool,
+        mark_source_down: bool,
+    },
+    MalformedSourceData {
+        record: RsiInFlightRequestRecord,
+        plan: RsiMalformedSourceDataPlan,
+        release_request_record: bool,
+    },
+    FailClosed {
+        reason: RsiSourceWriteFailClosedReason,
+        source_write_errno: RsiMappedErrno,
+        tear_down_source: bool,
+        mark_source_down: bool,
+        release_in_flight_table: bool,
+    },
+}
+
 /// Retained RSI request metadata for one transaction replay snapshot query.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiTransactionReplaySnapshotRequestRecord<'a> {
@@ -1794,6 +1860,126 @@ pub fn match_rsi_source_write_response_record(
     }
 }
 
+/// Plans the full common disposition for one source `write()` response frame.
+pub fn plan_rsi_source_write_response(
+    storage: &[Option<RsiInFlightRequestRecord>],
+    source_connection_id: RsiSourceConnectionId,
+    frame: &[u8],
+) -> RsiSourceWriteResponsePlan {
+    if let Err(err) = summarize_rsi_in_flight_request_table(storage) {
+        return fail_closed_source_write_plan(err);
+    }
+
+    if let Err(err) = validate_frame_len(frame, RSI_MIN_RESPONSE_LEN) {
+        return reject_source_write_plan(match err {
+            LcsError::RsiMessageTooShort { len, min } => {
+                RsiSourceWriteRejectReason::ShortResponse { len, min }
+            }
+            LcsError::RsiMessageLengthMismatch {
+                total_len,
+                actual_len,
+            } => RsiSourceWriteRejectReason::LengthMismatch {
+                total_len,
+                actual_len,
+            },
+            _ => return fail_closed_source_write_plan(err),
+        });
+    }
+
+    let header = match parse_rsi_response_header(frame) {
+        Ok(header) => header,
+        Err(err) => return fail_closed_source_write_plan(err),
+    };
+    let mut other_connection = None;
+
+    for record in storage.iter().flatten() {
+        if record.retained.request_id != header.request_id {
+            continue;
+        }
+        if record.source_connection_id != source_connection_id {
+            other_connection = Some(record.source_connection_id);
+            continue;
+        }
+
+        let expected_op = match rsi_response_op_code(record.retained.op_code) {
+            Ok(expected_op) => expected_op,
+            Err(err) => return fail_closed_source_write_plan(err),
+        };
+        if header.op_code != expected_op {
+            return reject_source_write_plan(RsiSourceWriteRejectReason::ResponseOpcodeMismatch {
+                expected: expected_op,
+                actual: header.op_code,
+            });
+        }
+
+        let status_code = read_u32_le(frame, RSI_RESPONSE_HEADER_LEN);
+        let Some(status) = RsiStatus::from_code(status_code) else {
+            return RsiSourceWriteResponsePlan::MalformedSourceData {
+                record: *record,
+                plan: plan_rsi_malformed_source_data(
+                    RsiSourceDataValidationFailure::UnknownRsiStatusCode,
+                ),
+                release_request_record: true,
+            };
+        };
+
+        return RsiSourceWriteResponsePlan::AcceptResponse {
+            matched: RsiSourceWriteResponseMatch {
+                record: *record,
+                response: RsiValidatedResponse { header, status },
+            },
+        };
+    }
+
+    match other_connection {
+        Some(actual_source_connection_id) => reject_source_write_plan(
+            RsiSourceWriteRejectReason::ResponseForAnotherSourceConnection {
+                request_id: header.request_id,
+                expected_source_connection_id: source_connection_id,
+                actual_source_connection_id,
+            },
+        ),
+        None => reject_source_write_plan(RsiSourceWriteRejectReason::UnknownOrDuplicateRequestId {
+            source_connection_id,
+            request_id: header.request_id,
+        }),
+    }
+}
+
+fn reject_source_write_plan(reason: RsiSourceWriteRejectReason) -> RsiSourceWriteResponsePlan {
+    RsiSourceWriteResponsePlan::RejectSourceWrite {
+        reason,
+        source_write_errno: RsiMappedErrno::Einval,
+        release_request_record: false,
+        tear_down_source: false,
+        mark_source_down: false,
+    }
+}
+
+fn fail_closed_source_write_plan(err: LcsError) -> RsiSourceWriteResponsePlan {
+    let reason = match err {
+        LcsError::DuplicateRsiInFlightRequestRecord {
+            source_connection_id,
+            request_id,
+        } => RsiSourceWriteFailClosedReason::DuplicateInFlightRequestRecord {
+            source_connection_id,
+            request_id,
+        },
+        LcsError::UnknownRsiOpcode(op_code) => {
+            RsiSourceWriteFailClosedReason::InvalidRetainedRequestOpcode { op_code }
+        }
+        _ => RsiSourceWriteFailClosedReason::UnexpectedValidationError,
+    };
+
+    RsiSourceWriteResponsePlan::FailClosed {
+        reason,
+        source_write_errno: RsiMappedErrno::Eio,
+        tear_down_source: true,
+        mark_source_down: true,
+        release_in_flight_table: true,
+    }
+}
+
 /// Releases one already-processed in-flight request record.
 pub fn release_rsi_in_flight_request_record(
     storage: &mut [Option<RsiInFlightRequestRecord>],
@@ -2578,6 +2764,7 @@ pub enum RsiTransactionBeginStatusPlan {
 pub enum RsiSourceDataValidationFailure {
     MalformedSecurityDescriptor,
     MalformedLayerName,
+    UnknownRsiStatusCode,
     FutureSequenceNumber,
     DuplicateWinningSequenceTie,
     MalformedLayerMetadataSecurityDescriptor,
