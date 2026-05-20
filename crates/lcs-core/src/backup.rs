@@ -339,6 +339,24 @@ pub struct BackupRestoreRootSectionPathEntrySkip<'a> {
     pub sequence: u64,
 }
 
+/// Export KEY-section placement for one PATH_ENTRY record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupExportPathEntrySectionPlan {
+    /// GUID-bearing path entries are incoming names for the child KEY section.
+    GuidBearingIncoming { section_key_guid: Guid },
+    /// HIDDEN path entries have no child KEY and are emitted in the parent section.
+    ParentOwnedHidden { section_key_guid: Guid },
+}
+
+/// Root KEY-section PATH_ENTRY treatment after applying restore root remapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupRestoreRootSectionPathEntryPlan<'a> {
+    /// GUID-bearing incoming aliases for HEADER.RootGUID are intentionally not restored.
+    SkipIncomingRoot(BackupRestoreRootSectionPathEntrySkip<'a>),
+    /// HIDDEN records in the root section are parent-owned and must be replayed.
+    RestoreHidden(BackupRestorePathEntry<'a>),
+}
+
 /// Parsed PATH_ENTRY record payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackupPathEntryPayload<'a> {
@@ -1250,16 +1268,37 @@ pub fn plan_backup_restore_non_root_key_create<'a>(
     validate_backup_security_descriptor(key.security_descriptor, "backup_key.sd")?;
 
     let mut anchor = None;
+    let mut saw_parent_owned_hidden = false;
     for (index, path_entry) in path_entries.iter().enumerate() {
+        if path_entry.target == PathTarget::Hidden {
+            let parent_guid = remap_backup_restore_guid(
+                path_entry.parent_guid,
+                header_root_guid,
+                target_root_guid,
+            );
+            if parent_guid == key.guid {
+                saw_parent_owned_hidden = true;
+                continue;
+            }
+            if parent_guid != target_root_guid
+                && !guid_slice_contains(processed_non_root_key_guids, parent_guid)
+            {
+                return Err(LcsError::BackupRestoreParentGuidOutsideSubtree { parent_guid });
+            }
+            return Err(LcsError::BackupRestoreKeyCreateAnchorTargetMismatch {
+                key_guid: key.guid,
+                child_guid: NIL_GUID,
+            });
+        }
+
         let restored = remap_backup_restore_path_entry(
             *path_entry,
             header_root_guid,
             target_root_guid,
             processed_non_root_key_guids,
         )?;
-        let child_guid = match restored.target {
-            PathTarget::Guid(child_guid) => child_guid,
-            PathTarget::Hidden => NIL_GUID,
+        let PathTarget::Guid(child_guid) = restored.target else {
+            unreachable!("HIDDEN path entries are handled before restore remapping");
         };
         if child_guid != key.guid {
             return Err(LcsError::BackupRestoreKeyCreateAnchorTargetMismatch {
@@ -1273,6 +1312,12 @@ pub fn plan_backup_restore_non_root_key_create<'a>(
     }
 
     let Some((anchor_path_entry_index, parent_guid, child_name)) = anchor else {
+        if saw_parent_owned_hidden {
+            return Err(LcsError::BackupRestoreKeyCreateAnchorTargetMismatch {
+                key_guid: key.guid,
+                child_guid: NIL_GUID,
+            });
+        }
         return Err(LcsError::BackupRestoreKeyCreateAnchorMissing { key_guid: key.guid });
     };
 
@@ -1317,6 +1362,69 @@ pub fn plan_backup_restore_root_section_path_entry_skip(
         target: entry.target,
         layer_name: entry.layer_name,
         sequence: entry.sequence,
+    }
+}
+
+/// Selects the export KEY section that owns one PATH_ENTRY record.
+pub fn plan_backup_export_path_entry_section(
+    entry: BackupPathEntryPayload<'_>,
+) -> LcsResult<BackupExportPathEntrySectionPlan> {
+    if entry.parent_guid == NIL_GUID {
+        return Err(LcsError::NilParentGuid);
+    }
+
+    match validate_path_target(entry.target)? {
+        PathTarget::Guid(section_key_guid) => {
+            Ok(BackupExportPathEntrySectionPlan::GuidBearingIncoming { section_key_guid })
+        }
+        PathTarget::Hidden => Ok(BackupExportPathEntrySectionPlan::ParentOwnedHidden {
+            section_key_guid: entry.parent_guid,
+        }),
+    }
+}
+
+/// Plans root-section PATH_ENTRY replay after applying root and sequence remapping.
+pub fn plan_backup_restore_root_section_path_entry_for_dispatch<'a>(
+    entry: BackupPathEntryPayload<'a>,
+    header_root_guid: Guid,
+    target_root_guid: Guid,
+    sequence_remapper: &mut BackupRestoreSequenceRemapper,
+) -> LcsResult<BackupRestoreRootSectionPathEntryPlan<'a>> {
+    if header_root_guid == NIL_GUID || target_root_guid == NIL_GUID {
+        return Err(LcsError::NilKeyGuid);
+    }
+
+    match entry.target {
+        PathTarget::Guid(child_guid) => {
+            let child_guid =
+                remap_backup_restore_guid(child_guid, header_root_guid, target_root_guid);
+            if child_guid != target_root_guid {
+                return Err(LcsError::BackupRestoreKeyCreateAnchorTargetMismatch {
+                    key_guid: header_root_guid,
+                    child_guid,
+                });
+            }
+            Ok(BackupRestoreRootSectionPathEntryPlan::SkipIncomingRoot(
+                plan_backup_restore_root_section_path_entry_skip(entry),
+            ))
+        }
+        PathTarget::Hidden => {
+            let parent_guid =
+                remap_backup_restore_guid(entry.parent_guid, header_root_guid, target_root_guid);
+            if parent_guid != target_root_guid {
+                return Err(LcsError::BackupRestoreParentGuidOutsideSubtree { parent_guid });
+            }
+            let sequence = sequence_remapper.record_dispatched(entry.sequence)?;
+            Ok(BackupRestoreRootSectionPathEntryPlan::RestoreHidden(
+                BackupRestorePathEntry {
+                    parent_guid,
+                    child_name: entry.child_name,
+                    target: PathTarget::Hidden,
+                    layer_name: entry.layer_name,
+                    sequence,
+                },
+            ))
+        }
     }
 }
 
