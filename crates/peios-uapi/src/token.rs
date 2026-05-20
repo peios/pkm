@@ -150,6 +150,7 @@ pub struct KacsRestrictArgs {
     pub flags: u32,
     pub data_ptr: u64,
     pub result_fd: i32,
+    pub _pad: u32,
 }
 
 /// On-wire layout of struct kacs_link_tokens_args.
