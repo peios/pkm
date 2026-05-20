@@ -220,6 +220,51 @@ pub struct TransactionReplayWatchInputSummary {
     pub requires_after_commit_source_queries: bool,
 }
 
+/// Transaction boundary at which replay snapshot queries must run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionReplaySnapshotPhase {
+    BeforeCommit,
+    AfterCommit,
+}
+
+/// Abstract source snapshot query needed for transaction watch replay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionReplaySnapshotQueryKind<'a> {
+    EffectiveValue {
+        key_guid: Guid,
+        scope: TransactionReplayValueWatchScope<'a>,
+    },
+    EffectiveSubkeys {
+        parent_guid: Guid,
+    },
+    ChildVisibility {
+        parent_guid: Guid,
+        child_name: &'a str,
+    },
+}
+
+/// One ordered snapshot query intent selected from the mutation log.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionReplaySnapshotQuery<'a> {
+    pub phase: TransactionReplaySnapshotPhase,
+    pub operation_index: TransactionOperationIndex,
+    pub kind: TransactionReplaySnapshotQueryKind<'a>,
+}
+
+/// Summary of snapshot query intents selected for one transaction phase.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionReplaySnapshotQuerySummary {
+    pub phase: TransactionReplaySnapshotPhase,
+    pub entries: usize,
+    pub capacity: usize,
+    pub emitted_queries: usize,
+    pub effective_value_queries: usize,
+    pub effective_subkey_queries: usize,
+    pub child_visibility_queries: usize,
+    pub direct_security_inputs: usize,
+    pub inputs_without_queries: usize,
+}
+
 impl TransactionMutationLogRecord<'_> {
     pub const fn operation_index(&self) -> TransactionOperationIndex {
         match self {
@@ -575,6 +620,112 @@ pub fn summarize_transaction_replay_watch_inputs(
                 summary.effective_subkey_snapshot_inputs += 1;
                 summary.requires_before_commit_source_queries |= requires_before_snapshot;
                 summary.requires_after_commit_source_queries |= requires_after_snapshot;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Emits abstract source snapshot queries for one transaction replay phase.
+pub fn for_each_transaction_replay_snapshot_query<'a, F>(
+    limits: &LcsLimits,
+    storage: &[Option<TransactionMutationLogRecord<'a>>],
+    phase: TransactionReplaySnapshotPhase,
+    mut emit: F,
+) -> LcsResult<TransactionReplaySnapshotQuerySummary>
+where
+    F: FnMut(TransactionReplaySnapshotQuery<'a>) -> LcsResult<()>,
+{
+    let storage_summary = summarize_transaction_mutation_log_internal(storage)?.summary;
+    let mut summary = TransactionReplaySnapshotQuerySummary {
+        phase,
+        entries: storage_summary.entries,
+        capacity: storage_summary.capacity,
+        emitted_queries: 0,
+        effective_value_queries: 0,
+        effective_subkey_queries: 0,
+        child_visibility_queries: 0,
+        direct_security_inputs: 0,
+        inputs_without_queries: 0,
+    };
+
+    for slot in &storage[..storage_summary.entries] {
+        let Some(record) = slot else {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "transaction_log.dense_prefix",
+            });
+        };
+        let input = transaction_mutation_log_record_watch_replay_input(limits, record)?;
+        match input {
+            TransactionReplayWatchInput::DirectSecurity { .. } => {
+                summary.direct_security_inputs += 1;
+                summary.inputs_without_queries += 1;
+            }
+            TransactionReplayWatchInput::EffectiveValue {
+                operation_index,
+                key_guid,
+                scope,
+                requires_before_snapshot,
+                requires_after_snapshot,
+                ..
+            } => {
+                if replay_snapshot_required_for_phase(
+                    phase,
+                    requires_before_snapshot,
+                    requires_after_snapshot,
+                ) {
+                    emit(TransactionReplaySnapshotQuery {
+                        phase,
+                        operation_index,
+                        kind: TransactionReplaySnapshotQueryKind::EffectiveValue {
+                            key_guid,
+                            scope,
+                        },
+                    })?;
+                    summary.emitted_queries += 1;
+                    summary.effective_value_queries += 1;
+                } else {
+                    summary.inputs_without_queries += 1;
+                }
+            }
+            TransactionReplayWatchInput::EffectiveSubkey {
+                operation_index,
+                parent_guid,
+                child_visibility_watch_context,
+                child_name,
+                requires_before_snapshot,
+                requires_after_snapshot,
+                ..
+            } => {
+                if replay_snapshot_required_for_phase(
+                    phase,
+                    requires_before_snapshot,
+                    requires_after_snapshot,
+                ) {
+                    emit(TransactionReplaySnapshotQuery {
+                        phase,
+                        operation_index,
+                        kind: TransactionReplaySnapshotQueryKind::EffectiveSubkeys { parent_guid },
+                    })?;
+                    summary.emitted_queries += 1;
+                    summary.effective_subkey_queries += 1;
+
+                    if child_visibility_watch_context.is_some() {
+                        emit(TransactionReplaySnapshotQuery {
+                            phase,
+                            operation_index,
+                            kind: TransactionReplaySnapshotQueryKind::ChildVisibility {
+                                parent_guid,
+                                child_name,
+                            },
+                        })?;
+                        summary.emitted_queries += 1;
+                        summary.child_visibility_queries += 1;
+                    }
+                } else {
+                    summary.inputs_without_queries += 1;
+                }
             }
         }
     }
@@ -1089,6 +1240,17 @@ fn subkey_replay_event_parts(event: EffectiveSubkeyWatchEvent<'_>) -> (u32, &str
     match event {
         EffectiveSubkeyWatchEvent::SubkeyCreated { name }
         | EffectiveSubkeyWatchEvent::SubkeyDeleted { name } => (event.event_type(), name),
+    }
+}
+
+fn replay_snapshot_required_for_phase(
+    phase: TransactionReplaySnapshotPhase,
+    requires_before_snapshot: bool,
+    requires_after_snapshot: bool,
+) -> bool {
+    match phase {
+        TransactionReplaySnapshotPhase::BeforeCommit => requires_before_snapshot,
+        TransactionReplaySnapshotPhase::AfterCommit => requires_after_snapshot,
     }
 }
 
