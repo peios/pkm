@@ -15,6 +15,7 @@ use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
 };
 use crate::resolution::{Guid, PathTarget, ValidatedPathEntryWrite};
+use crate::security::RegistrySetSecurityPlan;
 use crate::transaction::TransactionKernelEffectsPlan;
 use crate::value::{
     BlanketTombstoneAction, PlannedBlanketTombstone, PlannedValueWrite, ValidatedValueType,
@@ -1031,6 +1032,25 @@ pub fn write_rsi_write_key_request_frame(
             }
             Ok(())
         },
+    )
+}
+
+/// Writes the `RSI_WRITE_KEY` request for a validated `REG_IOC_SET_SECURITY`.
+pub fn write_registry_set_security_rsi_write_key_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    txn_id: u64,
+    guid: Guid,
+    last_write_time: u64,
+    plan: &RegistrySetSecurityPlan,
+) -> LcsResult<RsiBuiltRequest> {
+    write_rsi_write_key_request_frame(
+        dst,
+        request_id,
+        txn_id,
+        guid,
+        Some(plan.merged_sd.as_slice()),
+        Some(last_write_time),
     )
 }
 
