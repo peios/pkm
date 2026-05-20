@@ -330,6 +330,16 @@ struct pkm_kacs_task_security {
 	 * syscalls still see the EACCES the spec mandates.
 	 */
 	u8 internal_sd_read_depth;
+	/*
+	 * Write-side analogue of internal_sd_read_depth. KACS's own SD-xattr
+	 * write uses __vfs_setxattr_noperm to skip security_inode_setxattr,
+	 * but a stacking FS (overlayfs) routes the write back through
+	 * vfs_setxattr on the real lower/upper inode, re-entering the LSM
+	 * hook. inode_setxattr checks this counter and allows the canonical
+	 * SD xattr write iff it's > 0 — caller-originated syscalls still get
+	 * the EACCES the spec mandates.
+	 */
+	u8 internal_sd_write_depth;
 };
 
 struct pkm_kacs_socket_security {
@@ -1907,9 +1917,20 @@ static long pkm_kacs_inode_write_sd_xattr_locked(struct file *file,
 #endif
 
 	inode_lock(inode);
+	/*
+	 * __vfs_setxattr_noperm skips security_inode_setxattr for *us*, but
+	 * stacking FSes (overlayfs) re-enter vfs_setxattr on the real inode
+	 * inside their xattr handler, which fires our own hook again. Mark
+	 * the task so the hook recognises the internal write and allows the
+	 * canonical SD xattr.
+	 */
+	if (current && current->security)
+		pkm_kacs_task(current)->internal_sd_write_depth++;
 	ret = __vfs_setxattr_noperm(file_mnt_idmap(file), dentry,
 				    pkm_kacs_inode_sd_xattr_name(inode),
 				    sd_bytes, sd_len, 0);
+	if (current && current->security)
+		pkm_kacs_task(current)->internal_sd_write_depth--;
 	inode_unlock(inode);
 	return ret;
 }
@@ -2079,6 +2100,17 @@ static int pkm_kacs_inode_setxattr(struct mnt_idmap *idmap,
 	int ret;
 
 	if (dentry && pkm_kacs_is_canonical_sd_xattr(d_inode(dentry), name)) {
+		/*
+		 * Mirror inode_getxattr: KACS's own SD-xattr write
+		 * (__vfs_setxattr_noperm) can re-enter this hook through a
+		 * stacking FS (overlayfs forwards to vfs_setxattr on the real
+		 * inode). Allow the write iff we're inside one of those
+		 * internal writes — caller-originated syscalls still get
+		 * -EACCES.
+		 */
+		if (current && current->security &&
+		    pkm_kacs_task(current)->internal_sd_write_depth > 0)
+			return 0;
 		pkm_kacs_consume_file_metadata_decision(
 			d_inode(dentry), PKM_KACS_METADATA_OP_SETXATTR);
 		return -EACCES;
