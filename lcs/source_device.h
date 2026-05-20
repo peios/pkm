@@ -14,6 +14,7 @@
 #include "key_fd.h"
 
 struct file;
+struct pkm_lcs_source_response_waiter;
 
 enum pkm_lcs_source_fd_state {
 	PKM_LCS_SOURCE_FD_UNREGISTERED = 0,
@@ -25,9 +26,13 @@ enum pkm_lcs_source_fd_state {
 struct pkm_lcs_source_in_flight_request {
 	bool occupied;
 	bool delivered;
+	bool response_accepted;
+	u8 _pad0;
 	u64 request_id;
 	u64 txn_id;
 	u16 op_code;
+	u16 _pad1;
+	struct pkm_lcs_source_response_waiter *waiter;
 };
 
 struct pkm_lcs_source_fd {
@@ -153,7 +158,16 @@ struct pkm_lcs_source_response_result {
 	u32 status;
 	u32 in_flight_count;
 	bool malformed_source_data;
-	u8 _pad[3];
+	bool caller_waiter_attached;
+	u8 _pad[2];
+};
+
+struct pkm_lcs_source_response_waiter {
+	wait_queue_head_t wait;
+	bool completed;
+	u8 _pad[7];
+	long response_errno;
+	struct pkm_lcs_source_response_result response;
 };
 
 long pkm_lcs_source_device_open_for_token(const void *token);
@@ -222,8 +236,18 @@ long pkm_lcs_source_dispatch_lookup_request(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
 	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_lookup_waitable_request(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result);
 long pkm_lcs_source_accept_response_file(
 	struct file *file, const u8 *frame, size_t frame_len,
+	struct pkm_lcs_source_response_result *result);
+void pkm_lcs_source_response_waiter_init(
+	struct pkm_lcs_source_response_waiter *waiter);
+long pkm_lcs_source_response_waiter_wait(
+	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_response_result *result);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
