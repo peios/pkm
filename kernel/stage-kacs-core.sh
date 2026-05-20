@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-	echo "usage: $0 <kacs-core-src-dir> <kernel-dest-dir>" >&2
+if [[ $# -ne 2 && $# -ne 3 ]]; then
+	echo "usage: $0 <rust-core-src-dir> <kernel-dest-dir> [kernel-module-root]" >&2
 	exit 2
 fi
 
 src_dir=$1
 dest_dir=$2
+module_root=${3:-}
+
+if [[ -n "$module_root" && ! "$module_root" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+	echo "invalid kernel module root: $module_root" >&2
+	exit 2
+fi
 
 if [[ ! -d "$src_dir" ]]; then
-	echo "missing kacs-core source directory: $src_dir" >&2
+	echo "missing Rust core source directory: $src_dir" >&2
 	exit 1
 fi
 
@@ -33,11 +39,27 @@ for file in "${rs_files[@]}"; do
 	mkdir -p "$dest_parent"
 
 	if [[ "$rel_path" == "lib.rs" ]]; then
-		awk '
+		PKM_STAGE_MODULE_ROOT="$module_root" awk '
+			BEGIN { module_root = ENVIRON["PKM_STAGE_MODULE_ROOT"] }
 			/^#!\[/ { next }
 			/^extern crate alloc;$/ { next }
-			{ print }
+			{
+				if (module_root != "")
+					gsub(/crate::/, "crate::" module_root "::")
+				if (module_root != "")
+					gsub(/kacs_core::/, "crate::kacs_core::")
+				print
+			}
 		' "$file" > "$dest_dir/mod.rs"
+	elif [[ -n "$module_root" ]]; then
+		PKM_STAGE_MODULE_ROOT="$module_root" awk '
+			BEGIN { module_root = ENVIRON["PKM_STAGE_MODULE_ROOT"] }
+			{
+				gsub(/crate::/, "crate::" module_root "::")
+				gsub(/kacs_core::/, "crate::kacs_core::")
+				print
+			}
+		' "$file" > "$dest_path"
 	else
 		install -m 0644 "$file" "$dest_path"
 	fi

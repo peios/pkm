@@ -27,6 +27,7 @@ pkm_makefile="$linux_tree/security/pkm/Makefile"
 lcs_source_device="$linux_tree/security/pkm/lcs/source_device.c"
 lcs_source_device_h="$linux_tree/security/pkm/lcs/source_device.h"
 lcs_kunit="$linux_tree/security/pkm/lcs/kunit.c"
+lcs_core_mod="$linux_tree/security/pkm/lcs/lcs_core/mod.rs"
 ptrace_h="$linux_tree/include/linux/ptrace.h"
 cred_h="$linux_tree/include/linux/cred.h"
 pid="$linux_tree/kernel/pid.c"
@@ -91,6 +92,7 @@ for required_source in \
 	"$lcs_source_device" \
 	"$lcs_source_device_h" \
 	"$lcs_kunit" \
+	"$lcs_core_mod" \
 	"$ptrace_h" \
 	"$cred_h" \
 	"$pid" \
@@ -105,6 +107,11 @@ require_literal 'lcs/source_device.o' "$pkm_makefile" \
 	"generated PKM Makefile does not build the LCS source device"
 require_literal 'lcs/kunit.o' "$pkm_makefile" \
 	"generated PKM Makefile does not build the LCS KUnit suite"
+
+require_literal 'crate::lcs_core::error' "$linux_tree/security/pkm/lcs/lcs_core/abi.rs" \
+	"generated LCS core was not rewritten for nested kernel module paths"
+require_literal 'crate::kacs_core::Sid' "$linux_tree/security/pkm/lcs/lcs_core/audit.rs" \
+	"generated LCS core was not rewritten for kernel KACS core paths"
 
 require_literal \
 	'extern int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,' \

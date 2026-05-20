@@ -12,6 +12,8 @@
 mod access_check_ingress;
 mod caap_cache;
 mod kacs_core;
+#[path = "../lcs/lcs_core/mod.rs"]
+mod lcs_core;
 mod kmes_payload;
 #[path = "../kmes/kmes_validate.rs"]
 mod kmes_validate;
@@ -26,6 +28,7 @@ use core::ffi::c_int;
 /// Kernel-side PKM Rust init entry invoked by the built-in LSM scaffold.
 pub extern "C" fn kacs_rust_init() -> c_int {
     let _ = kacs_core::kernel_compile_probe();
+    let _ = lcs_core::kernel_compile_probe();
     0
 }
 
@@ -34,4 +37,11 @@ pub extern "C" fn kacs_rust_init() -> c_int {
 /// `kacs-core` tree is linked and callable.
 pub extern "C" fn kacs_rust_kunit_probe() -> usize {
     kacs_core::kernel_compile_probe()
+}
+
+#[no_mangle]
+/// Tiny Rust probe used by LCS KUnit scaffolding to prove the staged
+/// `lcs-core` tree is linked and callable.
+pub extern "C" fn lcs_rust_kunit_probe() -> usize {
+    lcs_core::kernel_compile_probe()
 }

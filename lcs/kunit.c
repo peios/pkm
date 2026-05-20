@@ -9,6 +9,13 @@
 #include "../kacs/token_runtime.h"
 #include "source_device.h"
 
+extern size_t lcs_rust_kunit_probe(void);
+
+static void pkm_lcs_kunit_rust_probe_links_lcs_core(struct kunit *test)
+{
+	KUNIT_ASSERT_GT(test, lcs_rust_kunit_probe(), (size_t)0);
+}
+
 static void pkm_lcs_kunit_source_device_open_rejects_null_token(
 	struct kunit *test)
 {
@@ -81,6 +88,7 @@ static void pkm_lcs_kunit_source_device_open_attaches_private_state(
 }
 
 static struct kunit_case pkm_lcs_kunit_cases[] = {
+	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_requires_tcb),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_marks_tcb_used),

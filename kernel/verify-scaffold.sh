@@ -45,6 +45,7 @@ done
 
 for required in \
 	"$repo_root/crates/kacs-core/src/lib.rs" \
+	"$repo_root/crates/lcs-core/src/lib.rs" \
 	"$repo_root/kacs/access_check.c" \
 	"$repo_root/kacs/access_check.h" \
 	"$repo_root/kacs/access_check.rs" \

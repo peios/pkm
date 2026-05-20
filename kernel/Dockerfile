@@ -181,6 +181,7 @@ COPY uapi/pkm/file.h /tmp/pkm-src/uapi/pkm/file.h
 COPY uapi/pkm/kmes.h /tmp/pkm-src/uapi/pkm/kmes.h
 COPY uapi/pkm/lcs.h /tmp/pkm-src/uapi/pkm/lcs.h
 COPY crates/kacs-core/src/ /tmp/pkm-src/crates/kacs-core/src/
+COPY crates/lcs-core/src/ /tmp/pkm-src/crates/lcs-core/src/
 COPY kernel/crypto/ /tmp/pkm-src/kernel/crypto/
 COPY kernel/scripts/update-ed25519-hacl.py /tmp/pkm-src/kernel/scripts/update-ed25519-hacl.py
 COPY kernel/scripts/generate-kacs-builtin-signing-keys.py /tmp/pkm-src/kernel/scripts/generate-kacs-builtin-signing-keys.py

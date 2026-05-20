@@ -228,6 +228,7 @@ require_file "$src_root/kernel/scripts/generate-kacs-builtin-signing-keys.py"
 require_file "$src_root/pkm_kconfig"
 require_file "$src_root/pkm_makefile"
 require_file "$src_root/kernel/stage-kacs-core.sh"
+require_file "$src_root/crates/lcs-core/src/lib.rs"
 require_file "$kernel_root/crypto/Kconfig"
 require_file "$kernel_root/crypto/Makefile"
 require_file "$kernel_root/crypto/testmgr.c"
@@ -318,6 +319,11 @@ python3 "$src_root/kernel/scripts/generate-kacs-builtin-signing-keys.py" \
 "$src_root/kernel/stage-kacs-core.sh" \
 	"$src_root/crates/kacs-core/src" \
 	"$pkm_dir/kacs/kacs_core"
+
+"$src_root/kernel/stage-kacs-core.sh" \
+	"$src_root/crates/lcs-core/src" \
+	"$pkm_dir/lcs/lcs_core" \
+	lcs_core
 
 append_line_once 'obj-$(CONFIG_SECURITY_PKM) += pkm/' "$kernel_root/security/Makefile"
 insert_source_kconfig "$kernel_root/security/Kconfig"
