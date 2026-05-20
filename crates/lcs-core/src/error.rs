@@ -842,6 +842,11 @@ pub enum LcsError {
         /// Logical input field.
         field: &'static str,
     },
+    /// A bounded transaction mutation log had no free entry slots.
+    TransactionMutationLogFull {
+        /// Fixed slot capacity of the transaction mutation log.
+        capacity: usize,
+    },
     /// A transaction runtime transition was requested from an impossible state.
     InvalidTransactionRuntimeState,
 }

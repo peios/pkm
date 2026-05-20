@@ -38,6 +38,7 @@ pub mod source;
 pub mod string;
 pub mod symlink;
 pub mod transaction;
+pub mod transaction_log;
 pub mod value;
 pub mod watch;
 
@@ -341,6 +342,12 @@ pub use transaction::{
     plan_transaction_read, plan_transaction_timeout, transaction_log_entry_watch_batch_member,
     transaction_status, transaction_terminal_failure, transaction_timeout_errno,
     transaction_use_failure_errno,
+};
+pub use transaction_log::{
+    TransactionMutationLogAppendPlan, TransactionMutationLogDispositionPlan,
+    TransactionMutationLogRecord, TransactionMutationLogStorageSummary,
+    append_transaction_mutation_log_record, clear_transaction_mutation_log,
+    plan_transaction_mutation_log_disposition, summarize_transaction_mutation_log,
 };
 pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,
