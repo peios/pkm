@@ -862,14 +862,20 @@ static u32 pkm_kacs_mount_policy_for_magic(unsigned long magic)
 		return KACS_MOUNT_POLICY_UNMANAGED;
 	case RAMFS_MAGIC:
 		/*
-		 * rootfs (the initial ramfs the kernel populates from a
-		 * builtin/external cpio), tmpfs, and squashfs have no on-disk
-		 * SD storage we care to consult: rootfs/tmpfs have no
-		 * persistent backing at all, and squashfs is read-only by
-		 * construction and shipped as part of the boot artifact.
-		 * Treat them like fat/nfs: synthesize an ephemeral SD from
-		 * the mount template. The trust chain is the same as the
-		 * kernel image they ship with.
+		 * rootfs / ramfs ONLY (RAMFS_MAGIC, 0x858458f6) — the initial
+		 * ramfs the kernel populates from the boot cpio and runs before
+		 * switch_root. It has no SD storage and its cpio-extracted
+		 * inodes are not stamped, so DENY_MISSING would block prelude
+		 * itself; synthesize an ephemeral SD from the mount template
+		 * instead. The trust chain is the kernel image it ships with.
+		 *
+		 * Deliberately NOT tmpfs or squashfs: those are distinct magics
+		 * (TMPFS_MAGIC 0x01021994, SQUASHFS_MAGIC 0x73717368) and fall
+		 * through to DENY_MISSING below — by design. The squashfs root
+		 * is SD-stamped at build time and the tmpfs overlay upper is
+		 * seed-sd'd and inherits, so a missing SD on either is a bug to
+		 * catch, not to paper over. Do NOT add TMPFS_MAGIC or
+		 * SQUASHFS_MAGIC to this case.
 		 */
 		return KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL;
 	case NFS_SUPER_MAGIC:
@@ -2165,6 +2171,26 @@ static int pkm_kacs_inode_listxattr(struct dentry *dentry)
 						PKM_KACS_METADATA_OP_NONE);
 
 	return 0;
+}
+
+/*
+ * On overlayfs copy-up, decline to copy the canonical SD xattr. The upper
+ * inode's SD is established by KACS inheritance when overlayfs creates it,
+ * so replicating the lower's SD is both redundant and impossible: the
+ * lower read and upper write would each hit the deny in inode_getxattr /
+ * inode_setxattr (canonical SD xattrs are not userspace-writable; SD
+ * mutation is the dedicated syscall's job), failing the whole copy-up.
+ *
+ * -ECANCELED is the overlayfs "discard this xattr" signal; -EOPNOTSUPP
+ * (the hook default) leaves every other xattr to the normal copy. This is
+ * the same pattern SELinux and Smack use for their own label xattrs.
+ */
+static int pkm_kacs_inode_copy_up_xattr(struct dentry *src, const char *name)
+{
+	if (src && pkm_kacs_is_canonical_sd_xattr(d_inode(src), name))
+		return -ECANCELED; /* discard: do not copy the SD up */
+
+	return -EOPNOTSUPP;
 }
 
 static int pkm_kacs_inode_follow_link(struct dentry *dentry,
@@ -3737,6 +3763,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_setxattr, pkm_kacs_inode_setxattr),
 	LSM_HOOK_INIT(inode_removexattr, pkm_kacs_inode_removexattr),
 	LSM_HOOK_INIT(inode_listxattr, pkm_kacs_inode_listxattr),
+	LSM_HOOK_INIT(inode_copy_up_xattr, pkm_kacs_inode_copy_up_xattr),
 	LSM_HOOK_INIT(inode_follow_link, pkm_kacs_inode_follow_link),
 	LSM_HOOK_INIT(inode_set_acl, pkm_kacs_inode_set_acl),
 	LSM_HOOK_INIT(inode_remove_acl, pkm_kacs_inode_remove_acl),
@@ -8963,7 +8990,6 @@ int pkm_kacs_inode_rename_flags(struct inode *old_dir,
 				struct dentry *new_dentry,
 				unsigned int flags)
 {
-	(void)old_dentry;
 	(void)new_dentry;
 
 	if ((flags & RENAME_WHITEOUT) == 0)
@@ -8973,17 +8999,24 @@ int pkm_kacs_inode_rename_flags(struct inode *old_dir,
 		return 0;
 
 	/*
-	 * Return -EINVAL (the VFS convention for an unsupported rename flag,
-	 * matching shmem_rename2:4072) rather than -EOPNOTSUPP. This routes
-	 * callers that probe-and-fall-back (overlayfs's ovl_check_rename_whiteout)
-	 * onto the explicit vfs_mknod path for whiteout creation, where
-	 * security_inode_mknod fires and KACS can authorize and audit each
-	 * chrdev sentinel. The native RENAME_WHITEOUT path inside the FS
-	 * (e.g. shmem_whiteout -> shmem_mknod) bypasses security_inode_mknod,
-	 * which would violate KACS's "every special-node creation is auditable"
-	 * invariant.
+	 * RENAME_WHITEOUT leaves a chrdev(0,0) whiteout sentinel at the source
+	 * name in old_dir once the renamed entry moves to new_dir. The native
+	 * in-FS path (e.g. shmem_whiteout -> shmem_mknod) creates that sentinel
+	 * without firing security_inode_mknod, so recover that hook's two
+	 * remaining duties here: authorize FILE_ADD_FILE on the source parent
+	 * and emit the special-node creation audit record. This fails closed,
+	 * so a caller lacking FILE_ADD_FILE on old_dir gets the whole rename
+	 * denied before any inode is touched.
+	 *
+	 * SD stamping needs no help: every in-tree filesystem that natively
+	 * implements RENAME_WHITEOUT allocates the whiteout as a real inode and
+	 * therefore still runs security_inode_init_security, where KACS stamps
+	 * the inherited SD like any other new node. A chrdev(0,0) addresses no
+	 * driver, so no device-creation privilege beyond FILE_ADD_FILE applies.
 	 */
-	return -EINVAL;
+	return (int)pkm_kacs_authorize_namespace_create_for_subject(
+		pkm_kacs_current_effective_token_ptr(), old_dir, old_dentry,
+		false);
 }
 
 static int pkm_kacs_inode_create(struct inode *dir, struct dentry *dentry,
@@ -17925,6 +17958,7 @@ int pkm_kacs_kunit_check_namespace_rename_flags(
 {
 	struct pkm_kacs_kunit_file_mount_state old_parent = {};
 	struct pkm_kacs_kunit_file_mount_state new_parent = {};
+	struct dentry source_dentry = {};
 	u32 policy;
 	u64 magic;
 	bool old_ready = false;
@@ -17954,7 +17988,15 @@ int pkm_kacs_kunit_check_namespace_rename_flags(
 		goto out;
 	new_ready = true;
 
-	ret = pkm_kacs_inode_rename_flags(&old_parent.inode, NULL,
+	/*
+	 * Mirror the real security_inode_rename call shape: old_dentry is the
+	 * source entry parented under old_dir, so RENAME_WHITEOUT authorization
+	 * can resolve old_dir's own dentry (the whiteout sentinel lands at this
+	 * name) and read its SD. Passing NULL would leave the access core with
+	 * no dentry alias to anchor on.
+	 */
+	source_dentry.d_parent = &old_parent.dentry;
+	ret = pkm_kacs_inode_rename_flags(&old_parent.inode, &source_dentry,
 					  &new_parent.inode, NULL, flags);
 out:
 	if (new_ready)

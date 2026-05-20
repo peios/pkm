@@ -14420,6 +14420,7 @@ static int pkm_kunit_namespace_readlink_op(const void *subject_token,
 
 static int pkm_kunit_namespace_rename_flags_op(const void *subject_token,
 					       u32 mount_policy,
+					       u32 old_parent_mask,
 					       unsigned int flags)
 {
 	struct pkm_kacs_kunit_namespace_args args = {
@@ -14434,8 +14435,13 @@ static int pkm_kunit_namespace_rename_flags_op(const void *subject_token,
 	size_t new_parent_sd_len = 0;
 	int ret;
 
+	/*
+	 * RENAME_WHITEOUT authorization checks FILE_ADD_FILE on the source
+	 * parent (where the whiteout sentinel lands), so old_parent_mask drives
+	 * the grant/deny outcome. The new parent is irrelevant to this hook.
+	 */
 	old_parent_sd = pkm_kunit_create_precise_file_sd(
-		subject_token, PKM_KUNIT_FILE_SD_ADMIN_MASK,
+		subject_token, old_parent_mask,
 		&old_parent_sd_len);
 	if (!old_parent_sd)
 		return -ENOMEM;
@@ -14736,28 +14742,45 @@ static void pkm_kunit_namespace_readlink_requires_read_data(struct kunit *test)
 			-EACCES);
 }
 
-static void pkm_kunit_namespace_whiteout_flags_fail_closed(
-	struct kunit *test)
+static void pkm_kunit_namespace_whiteout_flags_native(struct kunit *test)
 {
 	const void *subject_token;
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
+	/* A non-whiteout rename short-circuits to 0 in this hook. */
 	KUNIT_EXPECT_EQ(test,
 			pkm_kunit_namespace_rename_flags_op(
 				subject_token, KACS_MOUNT_POLICY_DENY_MISSING,
-				0),
+				PKM_KUNIT_FILE_SD_ADMIN_MASK, 0),
 			0);
+
+	/*
+	 * Managed RENAME_WHITEOUT is authorized natively (no longer refused):
+	 * FILE_ADD_FILE on the source parent grants the whiteout sentinel.
+	 */
 	KUNIT_EXPECT_EQ(test,
 			pkm_kunit_namespace_rename_flags_op(
 				subject_token, KACS_MOUNT_POLICY_DENY_MISSING,
-				RENAME_WHITEOUT),
-			-EINVAL);
+				PKM_KUNIT_FILE_ADD_FILE, RENAME_WHITEOUT),
+			0);
+
+	/*
+	 * Fail closed: without FILE_ADD_FILE on the source parent the whole
+	 * rename is denied before any inode is created.
+	 */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_namespace_rename_flags_op(
+				subject_token, KACS_MOUNT_POLICY_DENY_MISSING,
+				PKM_KUNIT_FILE_READ_DATA, RENAME_WHITEOUT),
+			-EACCES);
+
+	/* Unmanaged mounts remain outside FACS. */
 	KUNIT_EXPECT_EQ(test,
 			pkm_kunit_namespace_rename_flags_op(
 				subject_token, KACS_MOUNT_POLICY_UNMANAGED,
-				RENAME_WHITEOUT),
+				PKM_KUNIT_FILE_READ_DATA, RENAME_WHITEOUT),
 			0);
 }
 
@@ -41170,7 +41193,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_namespace_unlink_delete_duality),
 	KUNIT_CASE(pkm_kunit_namespace_rename_checks_required_edges),
 	KUNIT_CASE(pkm_kunit_namespace_readlink_requires_read_data),
-	KUNIT_CASE(pkm_kunit_namespace_whiteout_flags_fail_closed),
+	KUNIT_CASE(pkm_kunit_namespace_whiteout_flags_native),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_read_classified),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_write_classified),
 	KUNIT_CASE(pkm_kunit_file_ioctl_snapshot_fdlocal_fallback_unmanaged),
