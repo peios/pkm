@@ -4,6 +4,7 @@ use crate::constants::{
     REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD, REG_RESOURCE_LIST, REG_RESOURCE_REQUIREMENTS_LIST,
     REG_SZ, REG_TOMBSTONE,
 };
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 use crate::path::{validate_layer_name_bytes, validate_value_name_bytes};
 use crate::resolution::Guid;
@@ -130,6 +131,12 @@ pub struct ValueLayerAdmissionPlan {
 /// Caller-facing errno class for per-value layer admission failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueLayerAdmissionErrno {
+    Enospc,
+}
+
+/// Caller-facing errno class for value payload length failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValueDataLenErrno {
     Enospc,
 }
 
@@ -295,6 +302,11 @@ pub fn value_layer_admission_errno(error: &LcsError) -> Option<ValueLayerAdmissi
         LcsError::TooManyLayersPerValue { .. } => Some(ValueLayerAdmissionErrno::Enospc),
         _ => None,
     }
+}
+
+/// Projects per-value layer admission failures to Linux errno.
+pub fn value_layer_admission_linux_errno(error: &LcsError) -> Option<LinuxErrno> {
+    value_layer_admission_errno(error).map(LinuxErrno::from)
 }
 
 /// Validates a value delete before source dispatch.
@@ -479,6 +491,11 @@ pub fn value_type_validation_errno(error: &LcsError) -> Option<ValueTypeValidati
     }
 }
 
+/// Projects value-type validation failures to Linux errno.
+pub fn value_type_validation_linux_errno(error: &LcsError) -> Option<LinuxErrno> {
+    value_type_validation_errno(error).map(LinuxErrno::from)
+}
+
 /// Validates the configured maximum value payload length.
 pub fn validate_value_data_len(data_len: usize, limits: &LcsLimits) -> LcsResult<()> {
     if data_len > limits.max_value_size {
@@ -488,6 +505,19 @@ pub fn validate_value_data_len(data_len: usize, limits: &LcsLimits) -> LcsResult
         });
     }
     Ok(())
+}
+
+/// Maps value payload length failures to caller-visible errno classes.
+pub fn value_data_len_errno(error: &LcsError) -> Option<ValueDataLenErrno> {
+    match error {
+        LcsError::ValueDataTooLarge { .. } => Some(ValueDataLenErrno::Enospc),
+        _ => None,
+    }
+}
+
+/// Projects value payload length failures to Linux errno.
+pub fn value_data_len_linux_errno(error: &LcsError) -> Option<LinuxErrno> {
+    value_data_len_errno(error).map(LinuxErrno::from)
 }
 
 fn validate_planned_value_write_for_log(

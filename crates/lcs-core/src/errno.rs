@@ -9,7 +9,7 @@ use crate::rsi::{RsiMappedErrno, RsiRequestTimeoutErrno};
 use crate::source::{SourceLifecycleErrno, SourceRegistrationErrno};
 use crate::symlink::SymlinkResolutionErrno;
 use crate::transaction::{TransactionTerminalErrno, TransactionTimeoutErrno};
-use crate::value::{ValueLayerAdmissionErrno, ValueTypeValidationErrno};
+use crate::value::{ValueDataLenErrno, ValueLayerAdmissionErrno, ValueTypeValidationErrno};
 
 /// Linux errno values used by PSD-005 LCS syscall/ioctl contracts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -159,6 +159,14 @@ impl From<ValueLayerAdmissionErrno> for LinuxErrno {
     fn from(errno: ValueLayerAdmissionErrno) -> Self {
         match errno {
             ValueLayerAdmissionErrno::Enospc => Self::Enospc,
+        }
+    }
+}
+
+impl From<ValueDataLenErrno> for LinuxErrno {
+    fn from(errno: ValueDataLenErrno) -> Self {
+        match errno {
+            ValueDataLenErrno::Enospc => Self::Enospc,
         }
     }
 }
