@@ -6,12 +6,13 @@ use core::{slice, str};
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
     classify_hive_route, current_user_sid_component_from_binary_sid,
+    for_each_rsi_lookup_source_path_entry,
     parse_rsi_lookup_success_response_payload, plan_rsi_source_read,
     plan_registry_ioctl_fixed_fd_access_gate, plan_registry_open_pre_resolution_access,
     plan_registry_security_info_fd_access_gate, plan_source_registration_sequence_update,
     parse_rsi_request_header, registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
-    registry_open_pre_resolution_linux_errno, route_hive, route_routable_path_hive, RSI_LOOKUP,
-    rsi_queued_request_from_frame, rsi_status_code_errno,
+    registry_open_pre_resolution_linux_errno, resolve_named_path_entry, route_hive,
+    route_routable_path_hive, RSI_LOOKUP, rsi_queued_request_from_frame, rsi_status_code_errno,
     source_registration_error_linux_errno, source_registration_hive_scope,
     source_slot_hive_status, validate_key_component_bytes, validate_key_fd_open_view,
     validate_registry_open_flags, validate_resolved_relative_path_depth,
@@ -19,8 +20,9 @@ use crate::lcs_core::{
     validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,
     validate_rsi_lookup_path_response_sequences, validate_source_registration,
     validate_source_slots, validate_syscall_path_c_string, write_rsi_lookup_request_frame,
-    CurrentUserRewrite, HiveRouteOutcome, HiveView, KeyFdOpenView, KeyWatchState, LcsError,
-    LcsLimits, LinuxErrno, PathKind, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
+    CurrentUserRewrite, HiveRouteOutcome, HiveView, KeyFdOpenView, KeyWatchState,
+    LayerResolutionContext, LayerView, LcsError, LcsLimits, LinuxErrno, NamedPathEntry,
+    NamedPathResolution, PathKind, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
     RegistryOpenPreResolutionAccessPlan, RsiReadPlan, RsiRetainedRequest,
     SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest, SourceSlotStatus,
     SourceSlotView,
@@ -118,6 +120,36 @@ pub struct PkmLcsRsiLookupResponseSummaryCopy {
     pub _pad: [u8; 3],
 }
 
+#[repr(C)]
+pub struct PkmLcsRsiLayerViewCopy {
+    pub name: *const u8,
+    pub name_len: u32,
+    pub precedence: u32,
+    pub enabled: u8,
+    pub _pad: [u8; 3],
+}
+
+#[repr(C)]
+pub struct PkmLcsRsiPrivateLayerViewCopy {
+    pub name: *const u8,
+    pub name_len: u32,
+}
+
+#[repr(C)]
+pub struct PkmLcsRsiLookupChildResultCopy {
+    pub source_path_entry_count: u32,
+    pub sd_offset: u32,
+    pub sd_len: u32,
+    pub selected_precedence: u32,
+    pub selected_sequence: u64,
+    pub last_write_time: u64,
+    pub found: u8,
+    pub volatile_key: u8,
+    pub symlink: u8,
+    pub _pad: [u8; 5],
+    pub key_guid: [u8; 16],
+}
+
 fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
     source_registration_error_linux_errno(err)
         .unwrap_or(LinuxErrno::Einval)
@@ -167,6 +199,18 @@ fn rsi_lookup_response_error_return(err: LcsError) -> c_int {
             Err(_) => LinuxErrno::Eio.negated_return() as c_int,
         },
         _ => LinuxErrno::Eio.negated_return() as c_int,
+    }
+}
+
+fn rsi_lookup_materialization_error_return(err: LcsError) -> c_int {
+    match err {
+        LcsError::MissingBaseLayer
+        | LcsError::InvalidBaseLayerProperties { .. }
+        | LcsError::DuplicateLayerIdentity
+        | LcsError::TooManyLayers { .. }
+        | LcsError::TooManyPrivateLayers { .. }
+        | LcsError::DuplicatePrivateLayerIdentity => LinuxErrno::Einval.negated_return() as c_int,
+        _ => rsi_lookup_response_error_return(err),
     }
 }
 
@@ -506,6 +550,191 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_lookup_response_frame(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_child(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    child_name: *const u8,
+    child_name_len: u32,
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+    private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
+    private_layer_count: usize,
+    result_out: *mut PkmLcsRsiLookupChildResultCopy,
+) -> c_int {
+    if result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *result_out = PkmLcsRsiLookupChildResultCopy {
+            source_path_entry_count: 0,
+            sd_offset: 0,
+            sd_len: 0,
+            selected_precedence: 0,
+            selected_sequence: 0,
+            last_write_time: 0,
+            found: 0,
+            volatile_key: 0,
+            symlink: 0,
+            _pad: [0; 5],
+            key_guid: [0; 16],
+        };
+    }
+
+    if frame.is_null()
+        || child_name.is_null()
+        || (layer_count != 0 && layers.is_null())
+        || (private_layer_count != 0 && private_layers.is_null())
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let child_bytes = unsafe { slice::from_raw_parts(child_name, child_name_len as usize) };
+    let child_component = match str::from_utf8(child_bytes) {
+        Ok(child_component) => child_component,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    if validate_key_component_bytes(child_bytes, &LcsLimits::DEFAULT).is_err() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let layer_views = match parse_layer_views(layers, layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let private_layer_views = match parse_private_layer_views(private_layers, private_layer_count) {
+        Ok(private_layer_views) => private_layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let payload = match parse_rsi_lookup_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_LOOKUP,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_lookup_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_lookup_metadata_completeness(&payload) {
+        return rsi_lookup_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_lookup_path_response_names(&payload, &LcsLimits::DEFAULT) {
+        return rsi_lookup_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_lookup_metadata_security_descriptors(&payload) {
+        return rsi_lookup_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_lookup_path_response_sequences(&payload, next_sequence) {
+        return rsi_lookup_response_error_return(err);
+    }
+
+    let context = LayerResolutionContext {
+        layers: layer_views.as_slice(),
+        private_layers: private_layer_views.as_slice(),
+        limits: &LcsLimits::DEFAULT,
+        next_sequence,
+    };
+    let mut path_storage = match PkmVec::<NamedPathEntry<'_>>::with_capacity(
+        payload.entry_count as usize,
+    ) {
+        Ok(path_storage) => path_storage,
+        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+    };
+    let mut path_storage_allocation_failed = false;
+    if let Err(err) = for_each_rsi_lookup_source_path_entry(
+        &payload,
+        &LcsLimits::DEFAULT,
+        child_component,
+        |entry| {
+            if path_storage.push(entry).is_err() {
+                path_storage_allocation_failed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            Ok(())
+        },
+    ) {
+        if path_storage_allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_lookup_response_error_return(err);
+    }
+
+    let resolved = match resolve_named_path_entry(
+        &context,
+        child_component,
+        path_storage.as_slice(),
+    ) {
+        Ok(resolved) => resolved,
+        Err(err) => return rsi_lookup_materialization_error_return(err),
+    };
+
+    unsafe {
+        (*result_out).source_path_entry_count = path_storage.len() as u32;
+    }
+
+    let NamedPathResolution::Found(found) = resolved else {
+        return 0;
+    };
+
+    let base = frame_bytes.as_ptr() as usize;
+    let end = base.saturating_add(frame_len);
+    let mut matched = false;
+    let mut metadata_errno = LinuxErrno::Eio;
+
+    if let Err(err) = payload.for_each_key_metadata(|metadata| {
+        if metadata.guid != found.path.guid {
+            return Ok(());
+        }
+        let sd_ptr = metadata.sd.data.as_ptr() as usize;
+        let sd_len = metadata.sd.data.len();
+        let Some(sd_end) = sd_ptr.checked_add(sd_len) else {
+            metadata_errno = LinuxErrno::Eoverflow;
+            return Err(LcsError::RsiPayloadLengthOverflow);
+        };
+        if sd_ptr < base || sd_end > end {
+            return Err(LcsError::RsiPayloadLengthOverflow);
+        }
+        let sd_offset = sd_ptr - base;
+        if sd_offset > u32::MAX as usize || sd_len > u32::MAX as usize {
+            metadata_errno = LinuxErrno::Eoverflow;
+            return Err(LcsError::RsiPayloadLengthOverflow);
+        }
+
+        unsafe {
+            (*result_out).source_path_entry_count = path_storage.len() as u32;
+            (*result_out).sd_offset = sd_offset as u32;
+            (*result_out).sd_len = sd_len as u32;
+            (*result_out).selected_precedence = found.path.precedence;
+            (*result_out).selected_sequence = found.path.sequence;
+            (*result_out).last_write_time = metadata.last_write_time;
+            (*result_out).found = 1;
+            (*result_out).volatile_key = metadata.volatile as u8;
+            (*result_out).symlink = metadata.symlink as u8;
+            (*result_out).key_guid = found.path.guid;
+        }
+        matched = true;
+        Ok(())
+    }) {
+        return match metadata_errno {
+            LinuxErrno::Eoverflow => metadata_errno.negated_return() as c_int,
+            _ => rsi_lookup_response_error_return(err),
+        };
+    }
+
+    if !matched {
+        return LinuxErrno::Eio.negated_return() as c_int;
+    }
+
+    0
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lcs_rust_plan_rsi_source_read(
     has_next_request: bool,
     next_request_len: usize,
@@ -700,6 +929,56 @@ fn parse_current_user_rewrite<'a>(
     Ok(CurrentUserRewrite::InitialCallerPath {
         user_sid_component: sid_component,
     })
+}
+
+fn parse_layer_views<'a>(
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+) -> Result<PkmVec<LayerView<'a>>, LinuxErrno> {
+    let mut parsed = PkmVec::with_capacity(layer_count).map_err(|_| LinuxErrno::Enomem)?;
+
+    for index in 0..layer_count {
+        let raw = unsafe { &*layers.add(index) };
+        if raw.name.is_null() {
+            return Err(LinuxErrno::Einval);
+        }
+        let name_bytes = unsafe { slice::from_raw_parts(raw.name, raw.name_len as usize) };
+        let name = str::from_utf8(name_bytes).map_err(|_| LinuxErrno::Einval)?;
+        let enabled = match raw.enabled {
+            0 => false,
+            1 => true,
+            _ => return Err(LinuxErrno::Einval),
+        };
+        parsed
+            .push(LayerView {
+                name,
+                precedence: raw.precedence,
+                enabled,
+            })
+            .map_err(|_| LinuxErrno::Enomem)?;
+    }
+
+    Ok(parsed)
+}
+
+fn parse_private_layer_views<'a>(
+    private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
+    private_layer_count: usize,
+) -> Result<PkmVec<&'a str>, LinuxErrno> {
+    let mut parsed =
+        PkmVec::with_capacity(private_layer_count).map_err(|_| LinuxErrno::Enomem)?;
+
+    for index in 0..private_layer_count {
+        let raw = unsafe { &*private_layers.add(index) };
+        if raw.name.is_null() {
+            return Err(LinuxErrno::Einval);
+        }
+        let name_bytes = unsafe { slice::from_raw_parts(raw.name, raw.name_len as usize) };
+        let name = str::from_utf8(name_bytes).map_err(|_| LinuxErrno::Einval)?;
+        parsed.push(name).map_err(|_| LinuxErrno::Enomem)?;
+    }
+
+    Ok(parsed)
 }
 
 #[no_mangle]

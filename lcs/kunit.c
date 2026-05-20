@@ -2131,6 +2131,22 @@ static void pkm_lcs_kunit_rsi_append_lookup_metadata(
 	pkm_lcs_kunit_rsi_append_u64(test, frame, frame_len, offset, 1000);
 }
 
+static void pkm_lcs_kunit_rsi_append_lookup_metadata_ex(
+	struct kunit *test, u8 *frame, size_t frame_len, size_t *offset,
+	const u8 guid[RSI_GUID_SIZE], const u8 *sd, size_t sd_len,
+	u8 volatile_key, u8 symlink, u64 last_write_time)
+{
+	pkm_lcs_kunit_rsi_append_bytes(test, frame, frame_len, offset, guid,
+				       RSI_GUID_SIZE);
+	pkm_lcs_kunit_rsi_append_len_prefixed(test, frame, frame_len,
+					      offset, sd, sd_len);
+	pkm_lcs_kunit_rsi_append_u8(test, frame, frame_len, offset,
+				    volatile_key);
+	pkm_lcs_kunit_rsi_append_u8(test, frame, frame_len, offset, symlink);
+	pkm_lcs_kunit_rsi_append_u64(test, frame, frame_len, offset,
+				     last_write_time);
+}
+
 static void pkm_lcs_kunit_source_request_read_returns_complete_frame(
 	struct kunit *test)
 {
@@ -3651,6 +3667,170 @@ static void pkm_lcs_kunit_lookup_response_bridge_rejects_malformed_data(
 			(long)-EIO);
 }
 
+static void pkm_lcs_kunit_lookup_materializes_visible_child(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_rsi_layer_view layers[] = {
+		{ .name = "base", .name_len = 4, .precedence = 0,
+		  .enabled = 1 },
+	};
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8,
+		0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0,
+	};
+	struct pkm_lcs_rsi_lookup_child_result result = { };
+	u8 frame[256];
+	size_t offset;
+	size_t frame_len;
+
+	pkm_lcs_kunit_rsi_response_begin(test, frame, sizeof(frame), 901,
+					 RSI_LOOKUP_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     1);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, frame, sizeof(frame), &offset, "base",
+		RSI_PATH_TARGET_GUID, guid, 0);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     1);
+	pkm_lcs_kunit_rsi_append_lookup_metadata_ex(
+		test, frame, sizeof(frame), &offset, guid,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd), 1, 1, 4242);
+	pkm_lcs_kunit_rsi_finish_response(test, frame, offset, &frame_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_materialize_lookup_child(
+				frame, frame_len, 901, 1, "Child",
+				strlen("Child"), layers, ARRAY_SIZE(layers),
+				NULL, 0, &result),
+			0L);
+	KUNIT_EXPECT_TRUE(test, result.found);
+	KUNIT_EXPECT_EQ(test, result.source_path_entry_count, 1U);
+	KUNIT_EXPECT_EQ(test, memcmp(result.key_guid, guid, RSI_GUID_SIZE), 0);
+	KUNIT_EXPECT_EQ(test, result.selected_precedence, 0U);
+	KUNIT_EXPECT_EQ(test, result.selected_sequence, 0ULL);
+	KUNIT_EXPECT_TRUE(test, result.volatile_key);
+	KUNIT_EXPECT_TRUE(test, result.symlink);
+	KUNIT_EXPECT_EQ(test, result.last_write_time, 4242ULL);
+	KUNIT_EXPECT_EQ(test, result.sd_len,
+			(u32)sizeof(pkm_lcs_kunit_owner_only_sd));
+	KUNIT_ASSERT_LE(test,
+			(size_t)result.sd_offset +
+				(size_t)result.sd_len,
+			frame_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(frame + result.sd_offset,
+			       pkm_lcs_kunit_owner_only_sd,
+			       sizeof(pkm_lcs_kunit_owner_only_sd)),
+			0);
+}
+
+static void pkm_lcs_kunit_lookup_materializes_hidden_as_not_found(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_rsi_layer_view layers[] = {
+		{ .name = "base", .name_len = 4, .precedence = 0,
+		  .enabled = 1 },
+		{ .name = "overlay", .name_len = 7, .precedence = 10,
+		  .enabled = 1 },
+	};
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8,
+		0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0,
+	};
+	static const u8 hidden_guid[RSI_GUID_SIZE] = { };
+	struct pkm_lcs_rsi_lookup_child_result result = { };
+	u8 frame[256];
+	size_t offset;
+	size_t frame_len;
+
+	pkm_lcs_kunit_rsi_response_begin(test, frame, sizeof(frame), 902,
+					 RSI_LOOKUP_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     2);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, frame, sizeof(frame), &offset, "base",
+		RSI_PATH_TARGET_GUID, guid, 1);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, frame, sizeof(frame), &offset, "overlay",
+		RSI_PATH_TARGET_HIDDEN, hidden_guid, 2);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     1);
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, frame, sizeof(frame), &offset, guid,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd));
+	pkm_lcs_kunit_rsi_finish_response(test, frame, offset, &frame_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_materialize_lookup_child(
+				frame, frame_len, 902, 3, "Child",
+				strlen("Child"), layers, ARRAY_SIZE(layers),
+				NULL, 0, &result),
+			0L);
+	KUNIT_EXPECT_FALSE(test, result.found);
+	KUNIT_EXPECT_EQ(test, result.source_path_entry_count, 2U);
+	KUNIT_EXPECT_EQ(test, result.sd_len, 0U);
+}
+
+static void pkm_lcs_kunit_lookup_materialize_rejects_duplicate_tie(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_rsi_layer_view layers[] = {
+		{ .name = "base", .name_len = 4, .precedence = 0,
+		  .enabled = 1 },
+		{ .name = "layerA", .name_len = 6, .precedence = 10,
+		  .enabled = 1 },
+		{ .name = "layerB", .name_len = 6, .precedence = 10,
+		  .enabled = 1 },
+	};
+	static const u8 guid_a[RSI_GUID_SIZE] = {
+		0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8,
+		0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0,
+	};
+	static const u8 guid_b[RSI_GUID_SIZE] = {
+		0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8,
+		0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0,
+	};
+	struct pkm_lcs_rsi_lookup_child_result result = { };
+	u8 frame[384];
+	size_t offset;
+	size_t frame_len;
+
+	pkm_lcs_kunit_rsi_response_begin(test, frame, sizeof(frame), 903,
+					 RSI_LOOKUP_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     2);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, frame, sizeof(frame), &offset, "layerA",
+		RSI_PATH_TARGET_GUID, guid_a, 5);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, frame, sizeof(frame), &offset, "layerB",
+		RSI_PATH_TARGET_GUID, guid_b, 5);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     2);
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, frame, sizeof(frame), &offset, guid_a,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd));
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, frame, sizeof(frame), &offset, guid_b,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd));
+	pkm_lcs_kunit_rsi_finish_response(test, frame, offset, &frame_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_materialize_lookup_child(
+				frame, frame_len, 903, 6, "Child",
+				strlen("Child"), layers, ARRAY_SIZE(layers),
+				NULL, 0, &result),
+			(long)-EIO);
+	KUNIT_EXPECT_FALSE(test, result.found);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -3761,6 +3941,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_lookup_response_bridge_rejects_common_mismatches),
 	KUNIT_CASE(
 		pkm_lcs_kunit_lookup_response_bridge_rejects_malformed_data),
+	KUNIT_CASE(pkm_lcs_kunit_lookup_materializes_visible_child),
+	KUNIT_CASE(pkm_lcs_kunit_lookup_materializes_hidden_as_not_found),
+	KUNIT_CASE(pkm_lcs_kunit_lookup_materialize_rejects_duplicate_tie),
 	{ }
 };
 
