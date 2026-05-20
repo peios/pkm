@@ -1997,6 +1997,139 @@ static void pkm_lcs_kunit_build_status_response(struct kunit *test, u8 *frame,
 	*built_len = RSI_MIN_RESPONSE_SIZE;
 }
 
+static const u8 pkm_lcs_kunit_owner_only_sd[] = {
+	0x01, 0x00, 0x00, 0x80,
+	0x14, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00,
+	0x01, 0x01, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x05,
+	0x12, 0x00, 0x00, 0x00,
+};
+
+static void pkm_lcs_kunit_rsi_append_bytes(struct kunit *test, u8 *frame,
+					   size_t frame_len, size_t *offset,
+					   const void *bytes, size_t len)
+{
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	KUNIT_ASSERT_NOT_NULL(test, offset);
+	KUNIT_ASSERT_TRUE(test, len == 0 || bytes);
+	KUNIT_ASSERT_LE(test, len, frame_len);
+	KUNIT_ASSERT_LE(test, *offset, frame_len - len);
+
+	memcpy(frame + *offset, bytes, len);
+	*offset += len;
+}
+
+static void pkm_lcs_kunit_rsi_append_u8(struct kunit *test, u8 *frame,
+					size_t frame_len, size_t *offset,
+					u8 value)
+{
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	KUNIT_ASSERT_NOT_NULL(test, offset);
+	KUNIT_ASSERT_LE(test, (size_t)1, frame_len);
+	KUNIT_ASSERT_LE(test, *offset, frame_len - 1U);
+
+	frame[*offset] = value;
+	*offset += 1U;
+}
+
+static void pkm_lcs_kunit_rsi_append_u32(struct kunit *test, u8 *frame,
+					 size_t frame_len, size_t *offset,
+					 u32 value)
+{
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	KUNIT_ASSERT_NOT_NULL(test, offset);
+	KUNIT_ASSERT_LE(test, (size_t)sizeof(value), frame_len);
+	KUNIT_ASSERT_LE(test, *offset, frame_len - sizeof(value));
+
+	put_unaligned_le32(value, frame + *offset);
+	*offset += sizeof(value);
+}
+
+static void pkm_lcs_kunit_rsi_append_u64(struct kunit *test, u8 *frame,
+					 size_t frame_len, size_t *offset,
+					 u64 value)
+{
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	KUNIT_ASSERT_NOT_NULL(test, offset);
+	KUNIT_ASSERT_LE(test, (size_t)sizeof(value), frame_len);
+	KUNIT_ASSERT_LE(test, *offset, frame_len - sizeof(value));
+
+	put_unaligned_le64(value, frame + *offset);
+	*offset += sizeof(value);
+}
+
+static void pkm_lcs_kunit_rsi_append_len_prefixed(
+	struct kunit *test, u8 *frame, size_t frame_len, size_t *offset,
+	const void *bytes, size_t len)
+{
+	KUNIT_ASSERT_LE(test, len, (size_t)U32_MAX);
+
+	pkm_lcs_kunit_rsi_append_u32(test, frame, frame_len, offset,
+				     (u32)len);
+	pkm_lcs_kunit_rsi_append_bytes(test, frame, frame_len, offset,
+				       bytes, len);
+}
+
+static void pkm_lcs_kunit_rsi_response_begin(struct kunit *test, u8 *frame,
+					     size_t frame_len, u64 request_id,
+					     u16 response_op, u32 status,
+					     size_t *offset)
+{
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	KUNIT_ASSERT_NOT_NULL(test, offset);
+	KUNIT_ASSERT_GE(test, frame_len, (size_t)RSI_MIN_RESPONSE_SIZE);
+
+	memset(frame, 0, frame_len);
+	put_unaligned_le64(request_id, frame + RSI_RESPONSE_ID_OFFSET);
+	put_unaligned_le16(response_op, frame + RSI_RESPONSE_OP_CODE_OFFSET);
+	put_unaligned_le32(status, frame + RSI_RESPONSE_STATUS_OFFSET);
+	*offset = RSI_MIN_RESPONSE_SIZE;
+}
+
+static void pkm_lcs_kunit_rsi_finish_response(struct kunit *test, u8 *frame,
+					      size_t offset,
+					      size_t *built_len)
+{
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	KUNIT_ASSERT_NOT_NULL(test, built_len);
+	KUNIT_ASSERT_LE(test, offset, (size_t)U32_MAX);
+
+	put_unaligned_le32((u32)offset, frame + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	*built_len = offset;
+}
+
+static void pkm_lcs_kunit_rsi_append_lookup_path_entry(
+	struct kunit *test, u8 *frame, size_t frame_len, size_t *offset,
+	const char *layer_name, u8 target_type, const u8 guid[RSI_GUID_SIZE],
+	u64 sequence)
+{
+	pkm_lcs_kunit_rsi_append_len_prefixed(
+		test, frame, frame_len, offset, layer_name,
+		strlen(layer_name));
+	pkm_lcs_kunit_rsi_append_u8(test, frame, frame_len, offset,
+				    target_type);
+	pkm_lcs_kunit_rsi_append_bytes(test, frame, frame_len, offset, guid,
+				       RSI_GUID_SIZE);
+	pkm_lcs_kunit_rsi_append_u64(test, frame, frame_len, offset,
+				     sequence);
+}
+
+static void pkm_lcs_kunit_rsi_append_lookup_metadata(
+	struct kunit *test, u8 *frame, size_t frame_len, size_t *offset,
+	const u8 guid[RSI_GUID_SIZE], const u8 *sd, size_t sd_len)
+{
+	pkm_lcs_kunit_rsi_append_bytes(test, frame, frame_len, offset, guid,
+				       RSI_GUID_SIZE);
+	pkm_lcs_kunit_rsi_append_len_prefixed(test, frame, frame_len,
+					      offset, sd, sd_len);
+	pkm_lcs_kunit_rsi_append_u8(test, frame, frame_len, offset, 0);
+	pkm_lcs_kunit_rsi_append_u8(test, frame, frame_len, offset, 0);
+	pkm_lcs_kunit_rsi_append_u64(test, frame, frame_len, offset, 1000);
+}
+
 static void pkm_lcs_kunit_source_request_read_returns_complete_frame(
 	struct kunit *test)
 {
@@ -2641,6 +2774,210 @@ static void pkm_lcs_kunit_source_response_duplicate_after_release_rejected(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_lookup_response_bridge_accepts_valid_and_empty(
+	struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88,
+		0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90,
+	};
+	struct pkm_lcs_rsi_lookup_response_summary summary = { };
+	u8 frame[256];
+	size_t offset;
+	size_t frame_len;
+
+	pkm_lcs_kunit_rsi_response_begin(test, frame, sizeof(frame), 801,
+					 RSI_LOOKUP_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     1);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, frame, sizeof(frame), &offset, "base",
+		RSI_PATH_TARGET_GUID, guid, 20);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     1);
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, frame, sizeof(frame), &offset, guid,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd));
+	pkm_lcs_kunit_rsi_finish_response(test, frame, offset, &frame_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_validate_lookup_response(
+				frame, frame_len, 801, 21, &summary),
+			0L);
+	KUNIT_EXPECT_EQ(test, summary.path_entry_count, 1U);
+	KUNIT_EXPECT_EQ(test, summary.metadata_count, 1U);
+	KUNIT_EXPECT_FALSE(test, summary.child_absent);
+
+	memset(&summary, 0xaa, sizeof(summary));
+	pkm_lcs_kunit_rsi_response_begin(test, frame, sizeof(frame), 802,
+					 RSI_LOOKUP_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     0);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     0);
+	pkm_lcs_kunit_rsi_finish_response(test, frame, offset, &frame_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_validate_lookup_response(
+				frame, frame_len, 802, 21, &summary),
+			0L);
+	KUNIT_EXPECT_EQ(test, summary.path_entry_count, 0U);
+	KUNIT_EXPECT_EQ(test, summary.metadata_count, 0U);
+	KUNIT_EXPECT_TRUE(test, summary.child_absent);
+}
+
+static void pkm_lcs_kunit_lookup_response_bridge_maps_source_errors(
+	struct kunit *test)
+{
+	struct pkm_lcs_rsi_lookup_response_summary summary = { };
+	u8 frame[RSI_MIN_RESPONSE_SIZE];
+	size_t frame_len;
+
+	pkm_lcs_kunit_build_status_response(test, frame, sizeof(frame), 811,
+					    RSI_LOOKUP, RSI_NOT_FOUND,
+					    &frame_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_validate_lookup_response(
+				frame, frame_len, 811, 1, &summary),
+			(long)-ENOENT);
+	KUNIT_EXPECT_EQ(test, summary.path_entry_count, 0U);
+	KUNIT_EXPECT_EQ(test, summary.metadata_count, 0U);
+
+	pkm_lcs_kunit_build_status_response(test, frame, sizeof(frame), 812,
+					    RSI_LOOKUP, RSI_STORAGE_ERROR,
+					    &frame_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_validate_lookup_response(
+				frame, frame_len, 812, 1, &summary),
+			(long)-EIO);
+}
+
+static void pkm_lcs_kunit_lookup_response_bridge_rejects_common_mismatches(
+	struct kunit *test)
+{
+	struct pkm_lcs_rsi_lookup_response_summary summary = { };
+	u8 frame[RSI_MIN_RESPONSE_SIZE];
+	size_t frame_len;
+
+	pkm_lcs_kunit_build_status_response(test, frame, sizeof(frame), 821,
+					    RSI_LOOKUP, RSI_NOT_FOUND,
+					    &frame_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_validate_lookup_response(
+				frame, frame_len, 822, 1, &summary),
+			(long)-EINVAL);
+
+	pkm_lcs_kunit_build_status_response(test, frame, sizeof(frame), 823,
+					    RSI_QUERY_VALUES, RSI_NOT_FOUND,
+					    &frame_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_validate_lookup_response(
+				frame, frame_len, 823, 1, &summary),
+			(long)-EINVAL);
+
+	pkm_lcs_kunit_build_status_response(test, frame, sizeof(frame), 824,
+					    RSI_LOOKUP, RSI_NOT_FOUND,
+					    &frame_len);
+	put_unaligned_le32(RSI_MIN_RESPONSE_SIZE + 1U,
+			   frame + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_validate_lookup_response(
+				frame, frame_len, 824, 1, &summary),
+			(long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_lookup_response_bridge_rejects_malformed_data(
+	struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98,
+		0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0,
+	};
+	static const u8 bad_sd[] = { 0x01, 0x02, 0x03 };
+	struct pkm_lcs_rsi_lookup_response_summary summary = { };
+	u8 frame[256];
+	size_t offset;
+	size_t frame_len;
+
+	pkm_lcs_kunit_rsi_response_begin(test, frame, sizeof(frame), 831,
+					 RSI_LOOKUP_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     1);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, frame, sizeof(frame), &offset, "base",
+		RSI_PATH_TARGET_GUID, guid, 20);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     0);
+	pkm_lcs_kunit_rsi_finish_response(test, frame, offset, &frame_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_validate_lookup_response(
+				frame, frame_len, 831, 21, &summary),
+			(long)-EIO);
+
+	pkm_lcs_kunit_rsi_response_begin(test, frame, sizeof(frame), 832,
+					 RSI_LOOKUP_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     1);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, frame, sizeof(frame), &offset, "base",
+		RSI_PATH_TARGET_GUID, guid, 21);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     1);
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, frame, sizeof(frame), &offset, guid,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd));
+	pkm_lcs_kunit_rsi_finish_response(test, frame, offset, &frame_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_validate_lookup_response(
+				frame, frame_len, 832, 21, &summary),
+			(long)-EIO);
+
+	pkm_lcs_kunit_rsi_response_begin(test, frame, sizeof(frame), 833,
+					 RSI_LOOKUP_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     1);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, frame, sizeof(frame), &offset, "bad/layer",
+		RSI_PATH_TARGET_GUID, guid, 20);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     1);
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, frame, sizeof(frame), &offset, guid,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd));
+	pkm_lcs_kunit_rsi_finish_response(test, frame, offset, &frame_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_validate_lookup_response(
+				frame, frame_len, 833, 21, &summary),
+			(long)-EIO);
+
+	pkm_lcs_kunit_rsi_response_begin(test, frame, sizeof(frame), 834,
+					 RSI_LOOKUP_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     1);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, frame, sizeof(frame), &offset, "base",
+		RSI_PATH_TARGET_GUID, guid, 20);
+	pkm_lcs_kunit_rsi_append_u32(test, frame, sizeof(frame), &offset,
+				     1);
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, frame, sizeof(frame), &offset, guid, bad_sd,
+		sizeof(bad_sd));
+	pkm_lcs_kunit_rsi_finish_response(test, frame, offset, &frame_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_validate_lookup_response(
+				frame, frame_len, 834, 21, &summary),
+			(long)-EIO);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -2720,6 +3057,14 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_response_unknown_status_releases),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_response_duplicate_after_release_rejected),
+	KUNIT_CASE(
+		pkm_lcs_kunit_lookup_response_bridge_accepts_valid_and_empty),
+	KUNIT_CASE(
+		pkm_lcs_kunit_lookup_response_bridge_maps_source_errors),
+	KUNIT_CASE(
+		pkm_lcs_kunit_lookup_response_bridge_rejects_common_mismatches),
+	KUNIT_CASE(
+		pkm_lcs_kunit_lookup_response_bridge_rejects_malformed_data),
 	{ }
 };
 

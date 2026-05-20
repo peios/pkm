@@ -6,21 +6,24 @@ use core::{slice, str};
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
     classify_hive_route, current_user_sid_component_from_binary_sid,
-    plan_rsi_source_read,
+    parse_rsi_lookup_success_response_payload, plan_rsi_source_read,
     plan_registry_ioctl_fixed_fd_access_gate, plan_registry_open_pre_resolution_access,
     plan_registry_security_info_fd_access_gate, plan_source_registration_sequence_update,
     parse_rsi_request_header, registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
-    registry_open_pre_resolution_linux_errno, route_hive, route_routable_path_hive,
-    rsi_queued_request_from_frame,
+    registry_open_pre_resolution_linux_errno, route_hive, route_routable_path_hive, RSI_LOOKUP,
+    rsi_queued_request_from_frame, rsi_status_code_errno,
     source_registration_error_linux_errno, source_registration_hive_scope,
     source_slot_hive_status, validate_key_component_bytes, validate_key_fd_open_view,
     validate_registry_open_flags, validate_resolved_relative_path_depth,
-    validate_source_registration, validate_source_slots, validate_syscall_path_c_string,
-    write_rsi_lookup_request_frame, CurrentUserRewrite, HiveRouteOutcome, HiveView,
-    KeyFdOpenView, KeyWatchState, LcsError, LcsLimits, LinuxErrno, PathKind,
-    RegisteredHiveIdentity, RegistryIoctlAccessRequirement, RegistryOpenPreResolutionAccessPlan,
-    RsiReadPlan, SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
-    SourceSlotStatus, SourceSlotView,
+    validate_rsi_lookup_metadata_completeness,
+    validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,
+    validate_rsi_lookup_path_response_sequences, validate_source_registration,
+    validate_source_slots, validate_syscall_path_c_string, write_rsi_lookup_request_frame,
+    CurrentUserRewrite, HiveRouteOutcome, HiveView, KeyFdOpenView, KeyWatchState, LcsError,
+    LcsLimits, LinuxErrno, PathKind, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
+    RegistryOpenPreResolutionAccessPlan, RsiReadPlan, RsiRetainedRequest,
+    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest, SourceSlotStatus,
+    SourceSlotView,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -107,6 +110,14 @@ pub struct PkmLcsRsiReadPlanCopy {
     pub required_len: usize,
 }
 
+#[repr(C)]
+pub struct PkmLcsRsiLookupResponseSummaryCopy {
+    pub path_entry_count: u32,
+    pub metadata_count: u32,
+    pub child_absent: bool,
+    pub _pad: [u8; 3],
+}
+
 fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
     source_registration_error_linux_errno(err)
         .unwrap_or(LinuxErrno::Einval)
@@ -140,6 +151,23 @@ fn rsi_request_frame_error_return(err: LcsError) -> c_int {
         _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
+}
+
+fn rsi_lookup_response_error_return(err: LcsError) -> c_int {
+    match err {
+        LcsError::RsiRequestIdMismatch { .. }
+        | LcsError::RsiResponseOpcodeMismatch { .. }
+        | LcsError::RsiMessageLengthMismatch { .. }
+        | LcsError::RsiResponsePayloadParserMismatch { .. } => {
+            LinuxErrno::Einval.negated_return() as c_int
+        }
+        LcsError::RsiResponseStatusNotOk(status) => match rsi_status_code_errno(status) {
+            Ok(Some(errno)) => errno.negated_return() as c_int,
+            Ok(None) => 0,
+            Err(_) => LinuxErrno::Eio.negated_return() as c_int,
+        },
+        _ => LinuxErrno::Eio.negated_return() as c_int,
+    }
 }
 
 fn ioctl_access_gate_return(
@@ -417,6 +445,64 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_queued_request_frame(
         }
         Err(err) => rsi_request_frame_error_return(err),
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_rsi_lookup_response_frame(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    summary_out: *mut PkmLcsRsiLookupResponseSummaryCopy,
+) -> c_int {
+    if summary_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *summary_out = PkmLcsRsiLookupResponseSummaryCopy {
+            path_entry_count: 0,
+            metadata_count: 0,
+            child_absent: false,
+            _pad: [0; 3],
+        };
+    }
+
+    if frame.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let payload = match parse_rsi_lookup_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_LOOKUP,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_lookup_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_lookup_metadata_completeness(&payload) {
+        return rsi_lookup_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_lookup_path_response_names(&payload, &LcsLimits::DEFAULT) {
+        return rsi_lookup_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_lookup_metadata_security_descriptors(&payload) {
+        return rsi_lookup_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_lookup_path_response_sequences(&payload, next_sequence) {
+        return rsi_lookup_response_error_return(err);
+    }
+
+    unsafe {
+        (*summary_out).path_entry_count = payload.entry_count;
+        (*summary_out).metadata_count = payload.metadata_count;
+        (*summary_out).child_absent = payload.entry_count == 0;
+    }
+    0
 }
 
 #[no_mangle]
