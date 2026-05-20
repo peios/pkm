@@ -98,6 +98,9 @@ extern int lcs_rust_route_absolute_path_from_source_slots_with_token_sid(
 extern int lcs_rust_open_preflight(
 	u32 desired_access, u32 flags,
 	struct pkm_lcs_open_preflight_plan *plan);
+extern int lcs_rust_validate_syscall_relative_path(
+	const u8 *path, u32 path_len,
+	struct pkm_lcs_path_validation_result *result);
 
 static long pkm_lcs_source_device_check_tcb(const void *token)
 {
@@ -679,6 +682,18 @@ long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
 	return lcs_rust_open_preflight(desired_access, flags, plan);
 }
 
+long pkm_lcs_validate_syscall_relative_path(
+	const char *path, u32 path_len,
+	struct pkm_lcs_path_validation_result *result)
+{
+	if (!path || !result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	return lcs_rust_validate_syscall_relative_path((const u8 *)path,
+						      path_len, result);
+}
+
 long pkm_lcs_open_user_absolute_path_preflight_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	const char __user *upath, u32 desired_access, u32 flags,
@@ -699,6 +714,38 @@ long pkm_lcs_open_user_absolute_path_preflight_for_token(
 	return pkm_lcs_route_user_absolute_path_for_token(
 		token, ops, upath, rewrite_current_user, scope_guids,
 		scope_count, route);
+}
+
+long pkm_lcs_open_user_relative_path_preflight(
+	const struct pkm_lcs_usercopy_ops *ops, int parent_fd,
+	const char __user *upath, u32 desired_access, u32 flags,
+	struct pkm_lcs_relative_open_preflight *result)
+{
+	struct pkm_lcs_syscall_path_copy copy = { };
+	long ret;
+
+	if (!result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	ret = pkm_lcs_open_preflight(desired_access, flags, &result->access);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_syscall_path_copy_from_user(ops, upath, &copy);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_validate_syscall_relative_path(copy.path, copy.path_len,
+						     &result->path);
+	if (ret)
+		goto out_destroy_copy;
+
+	ret = pkm_lcs_key_fd_relative_base(parent_fd, &result->parent);
+
+out_destroy_copy:
+	pkm_lcs_syscall_path_copy_destroy(&copy);
+	return ret;
 }
 
 static int pkm_lcs_source_device_open(struct inode *inode, struct file *file)

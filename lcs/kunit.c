@@ -1539,6 +1539,156 @@ static void pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_relative_open_preflight_success(struct kunit *test)
+{
+	const char path_src[] = "Child/Sub";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_relative_open_preflight result = { };
+	long fd;
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_QUERY_VALUE);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_relative_path_preflight(
+				&ops, (int)fd, (const char __user *)path_src,
+				KEY_QUERY_VALUE, REG_OPEN_LINK, &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.access.requested_access,
+			KEY_QUERY_VALUE);
+	KUNIT_EXPECT_EQ(test, result.access.mapped_desired_access,
+			KEY_QUERY_VALUE);
+	KUNIT_EXPECT_EQ(test, result.access.path_resolution_allowed, 1U);
+	KUNIT_EXPECT_EQ(test, result.path.component_count, 2U);
+	KUNIT_EXPECT_TRUE(test, result.path.used_forward_separator);
+	KUNIT_EXPECT_EQ(test, result.parent.source_id, 11U);
+	KUNIT_EXPECT_EQ(test, result.parent.parent_depth, 2U);
+	KUNIT_EXPECT_FALSE(test, result.parent.orphaned);
+	KUNIT_EXPECT_EQ(test, result.parent.key_guid[0], 0x52U);
+	KUNIT_EXPECT_EQ(test, result.parent.root_guid[0], 0x51U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_relative_open_preflight_stops_bad_scalars(
+	struct kunit *test)
+{
+	const char path_src[] = "Child";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_relative_open_preflight result = {
+		.access = {
+			.requested_access = 0xffffffffU,
+			.path_resolution_allowed = 1,
+		},
+		.path = {
+			.component_count = 99,
+			.used_forward_separator = true,
+		},
+		.parent = {
+			.source_id = 88,
+		},
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_relative_path_preflight(
+				&ops, -1, (const char __user *)path_src, 0, 0,
+				&result),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, result.access.requested_access, 0U);
+	KUNIT_EXPECT_EQ(test, result.access.path_resolution_allowed, 0U);
+	KUNIT_EXPECT_EQ(test, result.path.component_count, 0U);
+	KUNIT_EXPECT_FALSE(test, result.path.used_forward_separator);
+	KUNIT_EXPECT_EQ(test, result.parent.source_id, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+}
+
+static void
+pkm_lcs_kunit_relative_open_preflight_validates_path_before_parent(
+	struct kunit *test)
+{
+	const char path_src[] = "Child\\";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_relative_open_preflight result = { };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_relative_path_preflight(
+				&ops, -1, (const char __user *)path_src,
+				KEY_QUERY_VALUE, 0, &result),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, result.access.requested_access,
+			KEY_QUERY_VALUE);
+	KUNIT_EXPECT_EQ(test, result.path.component_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.parent.source_id, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+}
+
+static void pkm_lcs_kunit_relative_open_preflight_rejects_bad_parent_fd(
+	struct kunit *test)
+{
+	const char path_src[] = "Child\\Sub";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_relative_open_preflight result = { };
+	int fd;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_relative_path_preflight(
+				&ops, -1, (const char __user *)path_src,
+				KEY_QUERY_VALUE, 0, &result),
+			(long)-EBADF);
+	KUNIT_EXPECT_EQ(test, result.path.component_count, 2U);
+	KUNIT_EXPECT_FALSE(test, result.path.used_forward_separator);
+	KUNIT_EXPECT_EQ(test, result.parent.source_id, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	memset(&result, 0, sizeof(result));
+	fd = anon_inode_getfd("lcs-not-key", &pkm_lcs_kunit_non_key_fops,
+			      NULL, O_CLOEXEC);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_relative_path_preflight(
+				&ops, fd, (const char __user *)path_src,
+				KEY_QUERY_VALUE, 0, &result),
+			(long)-EBADF);
+	KUNIT_EXPECT_EQ(test, result.parent.source_id, 0U);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_relative_open_preflight_rejects_orphan_parent(
+	struct kunit *test)
+{
+	const char path_src[] = "Child";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_relative_open_preflight result = { };
+	long fd;
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_QUERY_VALUE);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_set_orphaned((int)fd, true),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_relative_path_preflight(
+				&ops, (int)fd, (const char __user *)path_src,
+				KEY_QUERY_VALUE, 0, &result),
+			(long)-ENOENT);
+	KUNIT_EXPECT_EQ(test, result.path.component_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.parent.source_id, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -1587,6 +1737,12 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_fixed_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds),
+	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_success),
+	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_stops_bad_scalars),
+	KUNIT_CASE(
+		pkm_lcs_kunit_relative_open_preflight_validates_path_before_parent),
+	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_rejects_bad_parent_fd),
+	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_rejects_orphan_parent),
 	{ }
 };
 

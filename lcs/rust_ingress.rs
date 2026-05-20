@@ -73,6 +73,13 @@ pub struct PkmLcsKeyFdStringViewCopy {
     pub len: u32,
 }
 
+#[repr(C)]
+pub struct PkmLcsPathValidationResultCopy {
+    pub component_count: u32,
+    pub used_forward_separator: bool,
+    pub _pad: [u8; 3],
+}
+
 fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
     source_registration_error_linux_errno(err)
         .unwrap_or(LinuxErrno::Einval)
@@ -217,6 +224,37 @@ pub unsafe extern "C" fn lcs_rust_validate_key_fd_open_view(
     match validate_key_fd_open_view(&LcsLimits::DEFAULT, &fd) {
         Ok(()) => 0,
         Err(err) => key_fd_open_view_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_syscall_relative_path(
+    path: *const u8,
+    path_len: u32,
+    result_out: *mut PkmLcsPathValidationResultCopy,
+) -> c_int {
+    if path.is_null() || result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *result_out = PkmLcsPathValidationResultCopy {
+            component_count: 0,
+            used_forward_separator: false,
+            _pad: [0; 3],
+        };
+    }
+
+    let path_bytes = unsafe { slice::from_raw_parts(path, path_len as usize) };
+    match validate_syscall_path_c_string(path_bytes, PathKind::Relative, &LcsLimits::DEFAULT) {
+        Ok(summary) => {
+            unsafe {
+                (*result_out).component_count = summary.component_count as u32;
+                (*result_out).used_forward_separator = summary.used_forward_separator;
+            }
+            0
+        }
+        Err(err) => absolute_route_error_return(err),
     }
 }
 

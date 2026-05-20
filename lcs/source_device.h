@@ -7,6 +7,8 @@
 
 #include <pkm/lcs.h>
 
+#include "key_fd.h"
+
 struct file;
 
 enum pkm_lcs_source_fd_state {
@@ -87,6 +89,18 @@ struct pkm_lcs_open_preflight_plan {
 	u8 _pad[2];
 };
 
+struct pkm_lcs_path_validation_result {
+	u32 component_count;
+	bool used_forward_separator;
+	u8 _pad[3];
+};
+
+struct pkm_lcs_relative_open_preflight {
+	struct pkm_lcs_open_preflight_plan access;
+	struct pkm_lcs_path_validation_result path;
+	struct pkm_lcs_key_fd_relative_base parent;
+};
+
 long pkm_lcs_source_device_open_for_token(const void *token);
 long pkm_lcs_source_device_open_file_for_token(const void *token,
 					       struct file *file);
@@ -133,12 +147,19 @@ long pkm_lcs_route_user_absolute_path_for_token(
 	struct pkm_lcs_hive_route_result *result);
 long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
 			    struct pkm_lcs_open_preflight_plan *plan);
+long pkm_lcs_validate_syscall_relative_path(
+	const char *path, u32 path_len,
+	struct pkm_lcs_path_validation_result *result);
 long pkm_lcs_open_user_absolute_path_preflight_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	const char __user *upath, u32 desired_access, u32 flags,
 	bool rewrite_current_user, const u8 (*scope_guids)[16],
 	u32 scope_count, struct pkm_lcs_open_preflight_plan *plan,
 	struct pkm_lcs_hive_route_result *route);
+long pkm_lcs_open_user_relative_path_preflight(
+	const struct pkm_lcs_usercopy_ops *ops, int parent_fd,
+	const char __user *upath, u32 desired_access, u32 flags,
+	struct pkm_lcs_relative_open_preflight *result);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_lcs_kunit_reset_source_table(void);

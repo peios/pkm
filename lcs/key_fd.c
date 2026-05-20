@@ -280,6 +280,56 @@ long pkm_lcs_key_fd_check_security_ioctl_access(int fd, unsigned int cmd,
 		fd, cmd, NULL, security_info, true);
 }
 
+long pkm_lcs_key_fd_relative_base(int fd,
+				  struct pkm_lcs_key_fd_relative_base *out)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret) {
+		if (ret == -EINVAL)
+			return -EBADF;
+		return ret;
+	}
+
+	if (key_fd->orphaned) {
+		fdput(held);
+		return -ENOENT;
+	}
+
+	out->source_id = key_fd->source_id;
+	out->parent_depth = key_fd->path_component_count;
+	out->orphaned = key_fd->orphaned;
+	memcpy(out->key_guid, key_fd->key_guid, sizeof(out->key_guid));
+	memcpy(out->root_guid, key_fd->ancestor_guids[0], sizeof(out->root_guid));
+
+	fdput(held);
+	return 0;
+}
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	key_fd->orphaned = orphaned;
+	fdput(held);
+	return 0;
+}
+#endif
+
 static void pkm_lcs_key_fd_copy_component_snapshot(char *dst, u32 *len_out,
 						   const char *src)
 {

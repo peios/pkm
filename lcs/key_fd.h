@@ -32,10 +32,25 @@ struct pkm_lcs_key_fd_snapshot {
 	char last_component[PKM_LCS_KUNIT_SNAPSHOT_COMPONENT_BYTES];
 };
 
+struct pkm_lcs_key_fd_relative_base {
+	u32 source_id;
+	u32 parent_depth;
+	bool orphaned;
+	u8 _pad[3];
+	u8 key_guid[PKM_LCS_GUID_BYTES];
+	u8 root_guid[PKM_LCS_GUID_BYTES];
+};
+
 long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input);
 long pkm_lcs_key_fd_snapshot(int fd, struct pkm_lcs_key_fd_snapshot *out);
 long pkm_lcs_key_fd_check_fixed_ioctl_access(int fd, unsigned int cmd);
 long pkm_lcs_key_fd_check_security_ioctl_access(int fd, unsigned int cmd,
 						u32 security_info);
+long pkm_lcs_key_fd_relative_base(int fd,
+				  struct pkm_lcs_key_fd_relative_base *out);
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned);
+#endif
 
 #endif /* _SECURITY_PKM_LCS_KEY_FD_H */
