@@ -8,6 +8,7 @@ use crate::error::{LcsError, LcsResult};
 use crate::hives::SourceId;
 use crate::path::validate_hive_name_bytes;
 use crate::resolution::Guid;
+use crate::rsi::RsiMappedErrno;
 use crate::sequence::SequenceCounter;
 use crate::source::NIL_GUID;
 
@@ -481,6 +482,18 @@ pub fn transaction_timeout_errno(
         | TransactionUseFailure::CrossHive
         | TransactionUseFailure::Busy
         | TransactionUseFailure::NotSupported => None,
+    }
+}
+
+/// Maps transaction-use failures to their caller-visible errno class.
+pub fn transaction_use_failure_errno(failure: TransactionUseFailure) -> RsiMappedErrno {
+    match failure {
+        TransactionUseFailure::Invalid => RsiMappedErrno::Einval,
+        TransactionUseFailure::TimedOut => RsiMappedErrno::Etimedout,
+        TransactionUseFailure::SourceDown => RsiMappedErrno::Eio,
+        TransactionUseFailure::CrossHive => RsiMappedErrno::Exdev,
+        TransactionUseFailure::Busy => RsiMappedErrno::Ebusy,
+        TransactionUseFailure::NotSupported => RsiMappedErrno::Enotsup,
     }
 }
 

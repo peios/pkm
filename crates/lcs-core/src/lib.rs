@@ -330,7 +330,7 @@ pub use transaction::{
     plan_transaction_fd_close, plan_transaction_mutation_acceptance,
     plan_transaction_mutation_binding, plan_transaction_poll, plan_transaction_read,
     plan_transaction_timeout, transaction_status, transaction_terminal_failure,
-    transaction_timeout_errno,
+    transaction_timeout_errno, transaction_use_failure_errno,
 };
 pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,

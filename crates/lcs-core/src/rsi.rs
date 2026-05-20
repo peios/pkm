@@ -1425,6 +1425,8 @@ pub enum RsiMappedErrno {
     Einval,
     Eagain,
     Enotsup,
+    Etimedout,
+    Exdev,
 }
 
 /// Result of classifying a source status code.
