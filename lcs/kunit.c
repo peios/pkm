@@ -774,6 +774,110 @@ static void pkm_lcs_kunit_hive_route_private_scope_shadows_global(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_absolute_path_route_uses_first_component_and_errno(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	const char machine_path[] = "Machine\\Software\\App";
+	const char missing_path[] = "Users\\Default";
+	const char invalid_path[] = "Machine\\";
+	const char unterminated_path[] = "Machine\\Software";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct pkm_lcs_hive_route_result route = { };
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, name_src, 1, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_absolute_path(
+				machine_path, sizeof(machine_path), false, NULL,
+				0, NULL, 0, &route),
+			0L);
+	KUNIT_EXPECT_EQ(test, route.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, route.root_guid[0], 1U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_absolute_path(
+				missing_path, sizeof(missing_path), false, NULL,
+				0, NULL, 0, &route),
+			(long)-ENOENT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_absolute_path(
+				invalid_path, sizeof(invalid_path), false, NULL,
+				0, NULL, 0, &route),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_absolute_path(
+				unterminated_path, strlen(unterminated_path),
+				false, NULL, 0, NULL, 0, &route),
+			(long)-EINVAL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_absolute_path_current_user_rewrite_routes_users(
+	struct kunit *test)
+{
+	const char name_src[] = "Users";
+	const char current_user_path[] = "CurrentUser\\Software";
+	const char user_sid_component[] = "S-1-5-18";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct pkm_lcs_hive_route_result route = { };
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, name_src, 1, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_absolute_path(
+				current_user_path, sizeof(current_user_path),
+				false, NULL, 0, NULL, 0, &route),
+			(long)-ENOENT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_absolute_path(
+				current_user_path, sizeof(current_user_path),
+				true, user_sid_component,
+				strlen(user_sid_component), NULL, 0, &route),
+			0L);
+	KUNIT_EXPECT_EQ(test, route.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, route.root_guid[0], 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -800,6 +904,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_registration_ioctl_rejects_repeat_register),
 	KUNIT_CASE(pkm_lcs_kunit_hive_route_reflects_active_and_down_slots),
 	KUNIT_CASE(pkm_lcs_kunit_hive_route_private_scope_shadows_global),
+	KUNIT_CASE(
+		pkm_lcs_kunit_absolute_path_route_uses_first_component_and_errno),
+	KUNIT_CASE(
+		pkm_lcs_kunit_absolute_path_current_user_rewrite_routes_users),
 	{ }
 };
 

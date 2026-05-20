@@ -71,6 +71,12 @@ extern int lcs_rust_route_hive_from_source_slots(
 	const u8 *hive_name, u32 hive_name_len,
 	const u8 (*scope_guids)[16], size_t scope_count,
 	struct pkm_lcs_hive_route_result *result);
+extern int lcs_rust_route_absolute_path_from_source_slots(
+	const struct pkm_lcs_source_slot_view_copy *slots, size_t slot_count,
+	const u8 *path, u32 path_len, bool rewrite_current_user,
+	const u8 *current_user_sid_component,
+	u32 current_user_sid_component_len, const u8 (*scope_guids)[16],
+	size_t scope_count, struct pkm_lcs_hive_route_result *result);
 
 static long pkm_lcs_source_device_check_tcb(const void *token)
 {
@@ -495,6 +501,32 @@ long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,
 	ret = lcs_rust_route_hive_from_source_slots(
 		views, slot_count, hive_name, hive_name_len, scope_guids,
 		scope_count, result);
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
+long pkm_lcs_route_absolute_path(const char *path, u32 path_len,
+				 bool rewrite_current_user,
+				 const char *current_user_sid_component,
+				 u32 current_user_sid_component_len,
+				 const u8 (*scope_guids)[16], u32 scope_count,
+				 struct pkm_lcs_hive_route_result *result)
+{
+	struct pkm_lcs_source_slot_view_copy
+		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	u32 slot_count;
+	long ret;
+
+	if (!path || !result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot_count = pkm_lcs_source_table_views_locked(views);
+	ret = lcs_rust_route_absolute_path_from_source_slots(
+		views, slot_count, path, path_len, rewrite_current_user,
+		current_user_sid_component, current_user_sid_component_len,
+		scope_guids, scope_count, result);
 	mutex_unlock(&pkm_lcs_source_table_lock);
 	return ret;
 }

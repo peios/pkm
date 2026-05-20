@@ -6,10 +6,12 @@ use core::{slice, str};
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
     classify_hive_route, plan_source_registration_sequence_update, route_hive,
-    source_registration_error_linux_errno, source_registration_hive_scope, source_slot_hive_status,
-    validate_source_registration, validate_source_slots, HiveRouteOutcome, HiveView, LcsLimits,
-    LinuxErrno, RegisteredHiveIdentity, SourceRegistrationDecision, SourceRegistrationHive,
-    SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
+    route_routable_path_hive, source_registration_error_linux_errno,
+    source_registration_hive_scope, source_slot_hive_status, validate_source_registration,
+    validate_source_slots, validate_syscall_path_c_string, CurrentUserRewrite, HiveRouteOutcome,
+    HiveView, LcsError, LcsLimits, LinuxErrno, PathKind, RegisteredHiveIdentity,
+    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
+    SourceSlotStatus, SourceSlotView,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -55,6 +57,14 @@ fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
     source_registration_error_linux_errno(err)
         .unwrap_or(LinuxErrno::Einval)
         .negated_return() as c_int
+}
+
+fn absolute_route_error_return(err: LcsError) -> c_int {
+    match err {
+        LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => LinuxErrno::Enametoolong,
+        _ => LinuxErrno::Einval,
+    }
+    .negated_return() as c_int
 }
 
 fn parse_registration_hives<'a>(
@@ -127,6 +137,30 @@ fn parse_scope_guids<'a>(
         return Err(LinuxErrno::Einval);
     }
     Ok(unsafe { slice::from_raw_parts(scope_guids, scope_count) })
+}
+
+fn parse_current_user_rewrite<'a>(
+    rewrite_current_user: bool,
+    current_user_sid_component: *const u8,
+    current_user_sid_component_len: u32,
+) -> Result<CurrentUserRewrite<'a>, LinuxErrno> {
+    if !rewrite_current_user {
+        return Ok(CurrentUserRewrite::Literal);
+    }
+    if current_user_sid_component.is_null() || current_user_sid_component_len == 0 {
+        return Err(LinuxErrno::Einval);
+    }
+
+    let sid_bytes = unsafe {
+        slice::from_raw_parts(
+            current_user_sid_component,
+            current_user_sid_component_len as usize,
+        )
+    };
+    let sid_component = str::from_utf8(sid_bytes).map_err(|_| LinuxErrno::Einval)?;
+    Ok(CurrentUserRewrite::InitialCallerPath {
+        user_sid_component: sid_component,
+    })
 }
 
 #[no_mangle]
@@ -386,6 +420,135 @@ pub unsafe extern "C" fn lcs_rust_route_hive_from_source_slots(
         Err(err) => return source_registration_error_return(err),
     };
     match classify_hive_route(route) {
+        HiveRouteOutcome::Dispatch(hive) => unsafe {
+            (*result_out).source_id = hive.source_id;
+            (*result_out).root_guid = hive.root_guid;
+            0
+        },
+        HiveRouteOutcome::Failure(errno) => LinuxErrno::from(errno).negated_return() as c_int,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots(
+    slots: *const PkmLcsSourceSlotViewCopy,
+    slot_count: usize,
+    path: *const u8,
+    path_len: u32,
+    rewrite_current_user: bool,
+    current_user_sid_component: *const u8,
+    current_user_sid_component_len: u32,
+    scope_guids: *const [u8; 16],
+    scope_count: usize,
+    result_out: *mut PkmLcsHiveRouteResultCopy,
+) -> c_int {
+    if result_out.is_null() || path.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if slot_count != 0 && slots.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let path_bytes = unsafe { slice::from_raw_parts(path, path_len as usize) };
+    let path =
+        match validate_syscall_path_c_string(path_bytes, PathKind::Absolute, &LcsLimits::DEFAULT) {
+            Ok(summary) => summary.raw,
+            Err(err) => return absolute_route_error_return(err),
+        };
+    let rewrite = match parse_current_user_rewrite(
+        rewrite_current_user,
+        current_user_sid_component,
+        current_user_sid_component_len,
+    ) {
+        Ok(rewrite) => rewrite,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let scope_guids = match parse_scope_guids(scope_guids, scope_count) {
+        Ok(scopes) => scopes,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let mut slot_hive_storage =
+        match PkmVec::<PkmVec<RegisteredHiveIdentity<'_>>>::with_capacity(slot_count) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut total_hives = 0usize;
+    for index in 0..slot_count {
+        let raw_slot = unsafe { &*slots.add(index) };
+        if raw_slot.hive_count != 0 && raw_slot.hives.is_null() {
+            return LinuxErrno::Einval.negated_return() as c_int;
+        }
+        let parsed_hives = match parse_existing_hives(raw_slot.hives, raw_slot.hive_count as usize)
+        {
+            Ok(hives) => hives,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+        total_hives += parsed_hives.len();
+        if slot_hive_storage.push(parsed_hives).is_err() {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+    }
+
+    let mut existing_slots = match PkmVec::with_capacity(slot_count) {
+        Ok(slots) => slots,
+        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+    };
+    for index in 0..slot_count {
+        let raw_slot = unsafe { &*slots.add(index) };
+        let status = match source_slot_status_from_raw(raw_slot.status) {
+            Ok(status) => status,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+        if existing_slots
+            .push(SourceSlotView {
+                source_id: raw_slot.source_id,
+                status,
+                hives: slot_hive_storage[index].as_slice(),
+            })
+            .is_err()
+        {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+    }
+
+    if let Err(err) = validate_source_slots(&LcsLimits::DEFAULT, existing_slots.as_slice()) {
+        return source_registration_error_return(err);
+    }
+
+    let mut hive_views = match PkmVec::with_capacity(total_hives) {
+        Ok(hives) => hives,
+        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+    };
+    for slot in existing_slots.as_slice() {
+        let status = source_slot_hive_status(slot.status);
+        for hive in slot.hives {
+            if hive_views
+                .push(HiveView {
+                    name: hive.name,
+                    root_guid: hive.root_guid,
+                    source_id: slot.source_id,
+                    status,
+                    scope: hive.scope,
+                })
+                .is_err()
+            {
+                return LinuxErrno::Enomem.negated_return() as c_int;
+            }
+        }
+    }
+
+    let route = match route_routable_path_hive(
+        &LcsLimits::DEFAULT,
+        hive_views.as_slice(),
+        path,
+        rewrite,
+        scope_guids,
+    ) {
+        Ok(route) => route,
+        Err(err) => return absolute_route_error_return(err),
+    };
+    match route {
         HiveRouteOutcome::Dispatch(hive) => unsafe {
             (*result_out).source_id = hive.source_id;
             (*result_out).root_guid = hive.root_guid;

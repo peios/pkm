@@ -93,6 +93,12 @@ long pkm_lcs_source_register_file_for_token(
 long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,
 			     const u8 (*scope_guids)[16], u32 scope_count,
 			     struct pkm_lcs_hive_route_result *result);
+long pkm_lcs_route_absolute_path(const char *path, u32 path_len,
+				 bool rewrite_current_user,
+				 const char *current_user_sid_component,
+				 u32 current_user_sid_component_len,
+				 const u8 (*scope_guids)[16], u32 scope_count,
+				 struct pkm_lcs_hive_route_result *result);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_lcs_kunit_reset_source_table(void);
