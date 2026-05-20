@@ -61,6 +61,11 @@ struct pkm_lcs_source_copyout_ops {
 	void *ctx;
 };
 
+struct pkm_lcs_source_copyin_ops {
+	bool (*read)(void *ctx, void *dst, const void __user *src, size_t len);
+	void *ctx;
+};
+
 struct pkm_lcs_source_slot {
 	bool occupied;
 	u32 status;
@@ -96,6 +101,10 @@ static size_t pkm_lcs_default_strnlen_user(void *ctx,
 static const struct pkm_lcs_usercopy_ops pkm_lcs_default_usercopy_ops = {
 	.read = pkm_lcs_default_copy_from_user,
 	.strnlen = pkm_lcs_default_strnlen_user,
+};
+
+static const struct pkm_lcs_source_copyin_ops pkm_lcs_default_copyin_ops = {
+	.read = pkm_lcs_default_copy_from_user,
 };
 
 static bool pkm_lcs_default_copy_to_user(void *ctx, void __user *dst,
@@ -1143,6 +1152,104 @@ out_unlock_table:
 	return ret;
 }
 
+static long pkm_lcs_source_next_sequence_snapshot(u64 *next_sequence)
+{
+	if (!next_sequence)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	if (!pkm_lcs_sequence_initialized) {
+		mutex_unlock(&pkm_lcs_source_table_lock);
+		return -EIO;
+	}
+
+	*next_sequence = pkm_lcs_next_sequence;
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return 0;
+}
+
+static long pkm_lcs_source_validate_accepted_response_payload(
+	const u8 *frame, size_t frame_len,
+	struct pkm_lcs_source_response_result *result)
+{
+	struct pkm_lcs_rsi_lookup_response_summary lookup = { };
+	u64 next_sequence;
+	long ret;
+
+	if (!frame || !result)
+		return -EINVAL;
+	if (result->malformed_source_data || result->status != RSI_OK)
+		return 0;
+
+	switch (result->request_op_code) {
+	case RSI_LOOKUP:
+		ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+		if (ret)
+			return ret;
+		ret = pkm_lcs_rsi_validate_lookup_response(
+			frame, frame_len, result->request_id, next_sequence,
+			&lookup);
+		if (ret == -EIO) {
+			result->malformed_source_data = true;
+			return 0;
+		}
+		return ret;
+	default:
+		return 0;
+	}
+}
+
+static ssize_t pkm_lcs_source_device_write_file_with_ops(
+	struct file *file, const char __user *buf, size_t count,
+	const struct pkm_lcs_source_copyin_ops *ops,
+	struct pkm_lcs_source_response_result *result)
+{
+	struct pkm_lcs_source_response_result local_result = { };
+	u8 header[RSI_MIN_RESPONSE_SIZE];
+	u32 total_len;
+	u8 *frame;
+	long ret;
+
+	if (!file || !ops || !ops->read)
+		return -EINVAL;
+	if (result)
+		memset(result, 0, sizeof(*result));
+	else
+		result = &local_result;
+
+	if (count < RSI_MIN_RESPONSE_SIZE)
+		return -EINVAL;
+	if (!buf)
+		return -EFAULT;
+	if (!ops->read(ops->ctx, header, buf, sizeof(header)))
+		return -EFAULT;
+
+	total_len = get_unaligned_le32(header + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	if ((size_t)total_len != count)
+		return -EINVAL;
+
+	frame = kmalloc(count, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	if (!ops->read(ops->ctx, frame, buf, count)) {
+		ret = -EFAULT;
+		goto out_free;
+	}
+
+	ret = pkm_lcs_source_accept_response_file(file, frame, count, result);
+	if (ret)
+		goto out_free;
+
+	ret = pkm_lcs_source_validate_accepted_response_payload(
+		frame, count, result);
+	if (!ret)
+		ret = (ssize_t)count;
+
+out_free:
+	kfree(frame);
+	return ret;
+}
+
 long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,
 			     const u8 (*scope_guids)[16], u32 scope_count,
 			     struct pkm_lcs_hive_route_result *result)
@@ -1369,6 +1476,16 @@ static ssize_t pkm_lcs_source_device_read(struct file *file, char __user *buf,
 		&pkm_lcs_default_copyout_ops);
 }
 
+static ssize_t pkm_lcs_source_device_write(struct file *file,
+					   const char __user *buf,
+					   size_t count, loff_t *ppos)
+{
+	(void)ppos;
+
+	return pkm_lcs_source_device_write_file_with_ops(
+		file, buf, count, &pkm_lcs_default_copyin_ops, NULL);
+}
+
 static long pkm_lcs_source_device_ioctl(struct file *file, unsigned int cmd,
 					unsigned long arg)
 {
@@ -1391,6 +1508,7 @@ static const struct file_operations pkm_lcs_source_device_fops = {
 	.owner = THIS_MODULE,
 	.open = pkm_lcs_source_device_open,
 	.read = pkm_lcs_source_device_read,
+	.write = pkm_lcs_source_device_write,
 	.unlocked_ioctl = pkm_lcs_source_device_ioctl,
 	.release = pkm_lcs_source_device_release,
 	.llseek = noop_llseek,
@@ -1477,6 +1595,18 @@ static bool pkm_lcs_kunit_copy_to_kernel(void *ctx, void __user *dst,
 	return true;
 }
 
+static bool pkm_lcs_kunit_copy_from_kernel(void *ctx, void *dst,
+					   const void __user *src, size_t len)
+{
+	const void *ksrc = (const void *)(unsigned long)src;
+	bool fault = ctx ? *(bool *)ctx : false;
+
+	if (!ksrc || fault)
+		return false;
+	memcpy(dst, ksrc, len);
+	return true;
+}
+
 ssize_t pkm_lcs_kunit_source_device_read_file(
 	struct file *file, void *buf, size_t count, bool nonblocking)
 {
@@ -1486,6 +1616,19 @@ ssize_t pkm_lcs_kunit_source_device_read_file(
 
 	return pkm_lcs_source_device_read_file_with_ops(
 		file, (char __user *)buf, count, nonblocking, &ops);
+}
+
+ssize_t pkm_lcs_kunit_source_device_write_file(
+	struct file *file, const void *buf, size_t count, bool fault,
+	struct pkm_lcs_source_response_result *result)
+{
+	struct pkm_lcs_source_copyin_ops ops = {
+		.read = pkm_lcs_kunit_copy_from_kernel,
+		.ctx = &fault,
+	};
+
+	return pkm_lcs_source_device_write_file_with_ops(
+		file, (const char __user *)buf, count, &ops, result);
 }
 #endif
 

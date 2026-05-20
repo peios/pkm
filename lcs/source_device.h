@@ -233,6 +233,9 @@ void pkm_lcs_kunit_source_fd_snapshot(
 	struct file *file, struct pkm_lcs_source_fd_snapshot *snapshot);
 ssize_t pkm_lcs_kunit_source_device_read_file(
 	struct file *file, void *buf, size_t count, bool nonblocking);
+ssize_t pkm_lcs_kunit_source_device_write_file(
+	struct file *file, const void *buf, size_t count, bool fault,
+	struct pkm_lcs_source_response_result *result);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_SOURCE_DEVICE_H */
