@@ -62,6 +62,8 @@ for required in \
 	"$repo_root/kacs/token_runtime.rs" \
 	"$repo_root/lcs/key_fd.c" \
 	"$repo_root/lcs/key_fd.h" \
+	"$repo_root/lcs/rsi.c" \
+	"$repo_root/lcs/rsi.h" \
 	"$repo_root/lcs/source_device.c" \
 	"$repo_root/lcs/source_device.h" \
 	"$repo_root/lcs/kunit.c" \

@@ -11,9 +11,10 @@ use crate::lcs_core::{
     registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
     registry_open_pre_resolution_linux_errno, route_hive, route_routable_path_hive,
     source_registration_error_linux_errno, source_registration_hive_scope,
-    source_slot_hive_status, validate_key_fd_open_view, validate_registry_open_flags,
-    validate_resolved_relative_path_depth, validate_source_registration, validate_source_slots,
-    validate_syscall_path_c_string, CurrentUserRewrite, HiveRouteOutcome, HiveView,
+    source_slot_hive_status, validate_key_component_bytes, validate_key_fd_open_view,
+    validate_registry_open_flags, validate_resolved_relative_path_depth,
+    validate_source_registration, validate_source_slots, validate_syscall_path_c_string,
+    write_rsi_lookup_request_frame, CurrentUserRewrite, HiveRouteOutcome, HiveView,
     KeyFdOpenView, KeyWatchState, LcsError, LcsLimits, LinuxErrno, PathKind,
     RegisteredHiveIdentity, RegistryIoctlAccessRequirement, RegistryOpenPreResolutionAccessPlan,
     SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
@@ -81,6 +82,14 @@ pub struct PkmLcsPathValidationResultCopy {
     pub _pad: [u8; 3],
 }
 
+#[repr(C)]
+pub struct PkmLcsRsiBuiltRequestCopy {
+    pub len: usize,
+    pub request_id: u64,
+    pub op_code: u16,
+    pub _pad: [u8; 6],
+}
+
 fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
     source_registration_error_linux_errno(err)
         .unwrap_or(LinuxErrno::Einval)
@@ -97,6 +106,17 @@ fn absolute_route_error_return(err: LcsError) -> c_int {
 
 fn key_fd_open_view_error_return(err: LcsError) -> c_int {
     match err {
+        LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => {
+            LinuxErrno::Enametoolong
+        }
+        _ => LinuxErrno::Einval,
+    }
+    .negated_return() as c_int
+}
+
+fn rsi_request_frame_error_return(err: LcsError) -> c_int {
+    match err {
+        LcsError::RsiFrameBufferTooSmall { .. } => LinuxErrno::Emsgsize,
         LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => {
             LinuxErrno::Enametoolong
         }
@@ -271,6 +291,66 @@ pub extern "C" fn lcs_rust_validate_relative_open_depth(
     ) {
         Ok(_) => 0,
         Err(err) => absolute_route_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_rsi_lookup_request_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    request_id: u64,
+    txn_id: u64,
+    parent_guid: *const u8,
+    child_name: *const u8,
+    child_name_len: u32,
+    built_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if built_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *built_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if dst.is_null() || parent_guid.is_null() || child_name.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let parent_guid_bytes = unsafe { slice::from_raw_parts(parent_guid, 16) };
+    let mut parent_guid_copy = [0u8; 16];
+    parent_guid_copy.copy_from_slice(parent_guid_bytes);
+
+    let child_name_bytes = unsafe { slice::from_raw_parts(child_name, child_name_len as usize) };
+    if let Err(err) = validate_key_component_bytes(child_name_bytes, &LcsLimits::DEFAULT) {
+        return rsi_request_frame_error_return(err);
+    }
+
+    match write_rsi_lookup_request_frame(
+        dst_bytes,
+        request_id,
+        txn_id,
+        parent_guid_copy,
+        child_name_bytes,
+    ) {
+        Ok(built) => {
+            unsafe {
+                *built_out = PkmLcsRsiBuiltRequestCopy {
+                    len: built.len,
+                    request_id: built.retained.request_id,
+                    op_code: built.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
     }
 }
 

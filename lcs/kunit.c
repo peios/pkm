@@ -8,11 +8,13 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/unaligned.h>
 
 #include <pkm/token.h>
 
 #include "../kacs/token_runtime.h"
 #include "key_fd.h"
+#include "rsi.h"
 #include "source_device.h"
 
 extern size_t lcs_rust_kunit_probe(void);
@@ -1764,6 +1766,172 @@ static void pkm_lcs_kunit_relative_open_preflight_checks_combined_depth(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_rsi_lookup_request_frame_success(struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+	};
+	static const char child_name[] = "Child";
+	u8 frame[96];
+	struct pkm_lcs_rsi_built_request built = { };
+	size_t payload_offset;
+	size_t child_offset;
+	size_t expected_len;
+	size_t i;
+
+	memset(frame, 0xcc, sizeof(frame));
+	expected_len = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE +
+		       RSI_LENGTH_PREFIX_SIZE + strlen(child_name);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_lookup_request(
+				frame, sizeof(frame), 0x1112131415161718ULL, 99,
+				parent_guid, child_name, strlen(child_name),
+				&built),
+			0L);
+	KUNIT_EXPECT_EQ(test, built.len, expected_len);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0x1112131415161718ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)RSI_LOOKUP);
+
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(frame + RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)expected_len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(frame + RSI_REQUEST_ID_OFFSET),
+			0x1112131415161718ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(frame + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_LOOKUP);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(frame + RSI_REQUEST_TXN_ID_OFFSET),
+			99ULL);
+
+	payload_offset = RSI_REQUEST_HEADER_SIZE;
+	KUNIT_EXPECT_EQ(test, memcmp(frame + payload_offset, parent_guid,
+				     sizeof(parent_guid)),
+			0);
+	child_offset = payload_offset + RSI_GUID_SIZE;
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(frame + child_offset),
+			(u32)strlen(child_name));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(frame + child_offset + RSI_LENGTH_PREFIX_SIZE,
+			       child_name, strlen(child_name)),
+			0);
+	for (i = expected_len; i < sizeof(frame); i++)
+		KUNIT_EXPECT_EQ(test, frame[i], 0xccU);
+}
+
+static void pkm_lcs_kunit_rsi_lookup_request_frame_rejects_bad_inputs(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x21 };
+	static const char child_name[] = "Child";
+	u8 frame[96];
+	struct pkm_lcs_rsi_built_request built = {
+		.len = 77,
+		.request_id = 88,
+		.op_code = 99,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_lookup_request(
+				NULL, sizeof(frame), 1, 0, parent_guid,
+				child_name, strlen(child_name), &built),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, built.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)0);
+
+	built.len = 77;
+	built.request_id = 88;
+	built.op_code = 99;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_lookup_request(
+				frame, sizeof(frame), 1, 0, NULL, child_name,
+				strlen(child_name), &built),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, built.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)0);
+
+	built.len = 77;
+	built.request_id = 88;
+	built.op_code = 99;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_lookup_request(
+				frame, sizeof(frame), 1, 0, parent_guid, NULL,
+				strlen(child_name), &built),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, built.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_lookup_request(
+				frame, sizeof(frame), 1, 0, parent_guid,
+				child_name, strlen(child_name), NULL),
+			(long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_rsi_lookup_request_frame_validates_child(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x31 };
+	static const char bad_separator[] = "Bad\\Name";
+	char too_long[256];
+	u8 frame[96];
+	struct pkm_lcs_rsi_built_request built = {
+		.len = 55,
+		.request_id = 66,
+		.op_code = 77,
+	};
+
+	memset(frame, 0xaa, sizeof(frame));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_lookup_request(
+				frame, sizeof(frame), 2, 0, parent_guid,
+				bad_separator, strlen(bad_separator), &built),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, built.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)0);
+	KUNIT_EXPECT_EQ(test, frame[0], 0xaaU);
+
+	memset(too_long, 'A', sizeof(too_long));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_lookup_request(
+				frame, sizeof(frame), 2, 0, parent_guid,
+				too_long, sizeof(too_long), &built),
+			(long)-ENAMETOOLONG);
+}
+
+static void pkm_lcs_kunit_rsi_lookup_request_frame_rejects_short_buffer(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x41 };
+	static const char child_name[] = "Child";
+	u8 frame[RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE +
+		 RSI_LENGTH_PREFIX_SIZE + 4];
+	struct pkm_lcs_rsi_built_request built = {
+		.len = 11,
+		.request_id = 22,
+		.op_code = 33,
+	};
+	size_t i;
+
+	memset(frame, 0xaa, sizeof(frame));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_lookup_request(
+				frame, sizeof(frame), 3, 0, parent_guid,
+				child_name, strlen(child_name), &built),
+			(long)-EMSGSIZE);
+	KUNIT_EXPECT_EQ(test, built.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)0);
+	for (i = 0; i < sizeof(frame); i++)
+		KUNIT_EXPECT_EQ(test, frame[i], 0xaaU);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -1820,6 +1988,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_rejects_orphan_parent),
 	KUNIT_CASE(
 		pkm_lcs_kunit_relative_open_preflight_checks_combined_depth),
+	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_success),
+	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_rejects_bad_inputs),
+	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_validates_child),
+	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_rejects_short_buffer),
 	{ }
 };
 
