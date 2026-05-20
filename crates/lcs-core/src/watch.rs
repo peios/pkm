@@ -11,6 +11,7 @@ use crate::path::{
 };
 use crate::resolution::{EnumeratedSubkey, EnumeratedValue, Guid, ResolvedPathEntry};
 use crate::source::NIL_GUID;
+use crate::validate_abi_reserved_zero;
 use crate::value::validate_value_data_len;
 
 const DIRECT_WATCH_EVENT_HEADER_LEN: usize = 8;
@@ -418,12 +419,7 @@ pub fn validate_abi_bool(field: &'static str, value: u8) -> LcsResult<bool> {
 
 /// Validates that reserved REG_IOC_NOTIFY padding bytes are zero.
 pub fn validate_notify_reserved(reserved: [u8; 3]) -> LcsResult<()> {
-    if reserved.iter().any(|byte| *byte != 0) {
-        return Err(LcsError::NonZeroReservedBytes {
-            field: "reg_notify_args._pad",
-        });
-    }
-    Ok(())
+    validate_abi_reserved_zero("reg_notify_args._pad", &reserved)
 }
 
 /// Plans `REG_IOC_NOTIFY` arm, replace, or disarm behavior for a key fd.

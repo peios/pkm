@@ -7,6 +7,7 @@
 #![cfg_attr(feature = "kernel", no_std)]
 #![allow(unreachable_pub)]
 
+pub mod abi;
 pub mod access;
 pub mod audit;
 pub mod backup;
@@ -39,6 +40,7 @@ pub mod transaction;
 pub mod value;
 pub mod watch;
 
+pub use abi::{validate_abi_reserved_zero, zero_abi_reserved};
 pub use access::{
     NormalizedRegistryAccess, REGISTRY_GENERIC_MAPPING, RegistryGenericMapping,
     access_mask_includes, map_registry_generic_bits, parse_registry_source_security_descriptor,
