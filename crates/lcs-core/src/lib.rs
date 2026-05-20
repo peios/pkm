@@ -359,7 +359,8 @@ pub use source::{
     plan_source_disconnect, plan_source_registration_lifecycle_effects,
     plan_source_registration_sequence_update, plan_source_restart_key_fd_operation,
     plan_source_restart_watch_overflow, plan_source_round_trip, source_lifecycle_error_errno,
-    source_registration_error_errno, source_registration_hive_scope, source_slot_hive_status,
+    source_lifecycle_error_linux_errno, source_registration_error_errno,
+    source_registration_error_linux_errno, source_registration_hive_scope, source_slot_hive_status,
     validate_source_registration, validate_source_registration_hives, validate_source_slots,
 };
 pub use string::validate_lcs_str;

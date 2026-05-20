@@ -1,6 +1,7 @@
 use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
 use crate::constants::RSI_HIVE_PRIVATE;
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 use crate::hives::{HiveScope, HiveStatus, HiveView, SourceId};
 use crate::path::validate_hive_name_bytes;
@@ -181,6 +182,11 @@ pub fn source_registration_error_errno(err: LcsError) -> Option<SourceRegistrati
     }
 }
 
+/// Projects source registration/open validation errors to Linux errno.
+pub fn source_registration_error_linux_errno(err: LcsError) -> Option<LinuxErrno> {
+    source_registration_error_errno(err).map(LinuxErrno::from)
+}
+
 /// Maps source lifecycle operation errors to PSD-005 errno classes.
 pub fn source_lifecycle_error_errno(err: LcsError) -> Option<SourceLifecycleErrno> {
     match err {
@@ -188,6 +194,11 @@ pub fn source_lifecycle_error_errno(err: LcsError) -> Option<SourceLifecycleErrn
         LcsError::RestartedSourceKeyNotFound => Some(SourceLifecycleErrno::Enoent),
         _ => None,
     }
+}
+
+/// Projects source lifecycle operation errors to Linux errno.
+pub fn source_lifecycle_error_linux_errno(err: LcsError) -> Option<LinuxErrno> {
+    source_lifecycle_error_errno(err).map(LinuxErrno::from)
 }
 
 /// Plans source crash/disconnect side effects.
