@@ -78,6 +78,14 @@ pub struct RsiBuiltRequest {
     pub retained: RsiRetainedRequest,
 }
 
+/// Retained RSI request metadata for one transaction replay snapshot query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiTransactionReplaySnapshotRequestRecord<'a> {
+    pub request_id: RsiRequestId,
+    pub query: TransactionReplaySnapshotQuery<'a>,
+    pub retained: RsiRetainedRequest,
+}
+
 /// One length-prefixed RSI string or byte-array field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiLengthPrefixedField<'a> {
@@ -1198,6 +1206,21 @@ pub fn write_planned_rsi_set_value_request_frame(
     )
 }
 
+/// Retains response-matching metadata for one transaction replay snapshot query.
+pub fn retain_transaction_replay_snapshot_request<'a>(
+    request_id: RsiRequestId,
+    query: TransactionReplaySnapshotQuery<'a>,
+) -> RsiTransactionReplaySnapshotRequestRecord<'a> {
+    RsiTransactionReplaySnapshotRequestRecord {
+        request_id,
+        query,
+        retained: RsiRetainedRequest {
+            request_id,
+            op_code: transaction_replay_snapshot_query_op_code(query.kind),
+        },
+    }
+}
+
 /// Writes an RSI request frame for a transaction replay snapshot query.
 pub fn write_transaction_replay_snapshot_query_request_frame(
     dst: &mut [u8],
@@ -1245,6 +1268,14 @@ pub fn write_transaction_replay_snapshot_query_request_frame(
             parent_guid,
             child_name.as_bytes(),
         ),
+    }
+}
+
+fn transaction_replay_snapshot_query_op_code(query: TransactionReplaySnapshotQueryKind<'_>) -> u16 {
+    match query {
+        TransactionReplaySnapshotQueryKind::EffectiveValue { .. } => RSI_QUERY_VALUES,
+        TransactionReplaySnapshotQueryKind::EffectiveSubkeys { .. } => RSI_ENUM_CHILDREN,
+        TransactionReplaySnapshotQueryKind::ChildVisibility { .. } => RSI_LOOKUP,
     }
 }
 
