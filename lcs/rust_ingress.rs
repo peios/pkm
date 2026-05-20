@@ -5,9 +5,10 @@ use core::{slice, str};
 
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
-    plan_source_registration_sequence_update, source_registration_error_linux_errno,
-    source_registration_hive_scope, validate_source_registration, LcsLimits, LinuxErrno,
-    RegisteredHiveIdentity, SourceRegistrationDecision, SourceRegistrationHive,
+    classify_hive_route, plan_source_registration_sequence_update, route_hive,
+    source_registration_error_linux_errno, source_registration_hive_scope, source_slot_hive_status,
+    validate_source_registration, validate_source_slots, HiveRouteOutcome, HiveView, LcsLimits,
+    LinuxErrno, RegisteredHiveIdentity, SourceRegistrationDecision, SourceRegistrationHive,
     SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
 };
 
@@ -42,6 +43,12 @@ pub struct PkmLcsSourceRegistrationPlanCopy {
     pub effective_next_sequence: u64,
     pub decision: u32,
     pub source_id: u32,
+}
+
+#[repr(C)]
+pub struct PkmLcsHiveRouteResultCopy {
+    pub source_id: u32,
+    pub root_guid: [u8; 16],
 }
 
 fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
@@ -107,6 +114,19 @@ fn source_slot_status_from_raw(status: u32) -> Result<SourceSlotStatus, LinuxErr
         PKM_LCS_SOURCE_SLOT_STATUS_DOWN => Ok(SourceSlotStatus::Down),
         _ => Err(LinuxErrno::Einval),
     }
+}
+
+fn parse_scope_guids<'a>(
+    scope_guids: *const [u8; 16],
+    scope_count: usize,
+) -> Result<&'a [[u8; 16]], LinuxErrno> {
+    if scope_count == 0 {
+        return Ok(&[]);
+    }
+    if scope_guids.is_null() {
+        return Err(LinuxErrno::Einval);
+    }
+    Ok(unsafe { slice::from_raw_parts(scope_guids, scope_count) })
 }
 
 #[no_mangle]
@@ -257,4 +277,120 @@ pub unsafe extern "C" fn lcs_rust_validate_source_registration(
         }
     }
     0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_route_hive_from_source_slots(
+    slots: *const PkmLcsSourceSlotViewCopy,
+    slot_count: usize,
+    hive_name: *const u8,
+    hive_name_len: u32,
+    scope_guids: *const [u8; 16],
+    scope_count: usize,
+    result_out: *mut PkmLcsHiveRouteResultCopy,
+) -> c_int {
+    if result_out.is_null() || hive_name.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if slot_count != 0 && slots.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let name_bytes = unsafe { slice::from_raw_parts(hive_name, hive_name_len as usize) };
+    let hive_name = match str::from_utf8(name_bytes) {
+        Ok(name) => name,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    let scope_guids = match parse_scope_guids(scope_guids, scope_count) {
+        Ok(scopes) => scopes,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let mut slot_hive_storage =
+        match PkmVec::<PkmVec<RegisteredHiveIdentity<'_>>>::with_capacity(slot_count) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut total_hives = 0usize;
+    for index in 0..slot_count {
+        let raw_slot = unsafe { &*slots.add(index) };
+        if raw_slot.hive_count != 0 && raw_slot.hives.is_null() {
+            return LinuxErrno::Einval.negated_return() as c_int;
+        }
+        let parsed_hives = match parse_existing_hives(raw_slot.hives, raw_slot.hive_count as usize)
+        {
+            Ok(hives) => hives,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+        total_hives += parsed_hives.len();
+        if slot_hive_storage.push(parsed_hives).is_err() {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+    }
+
+    let mut existing_slots = match PkmVec::with_capacity(slot_count) {
+        Ok(slots) => slots,
+        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+    };
+    for index in 0..slot_count {
+        let raw_slot = unsafe { &*slots.add(index) };
+        let status = match source_slot_status_from_raw(raw_slot.status) {
+            Ok(status) => status,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+        if existing_slots
+            .push(SourceSlotView {
+                source_id: raw_slot.source_id,
+                status,
+                hives: slot_hive_storage[index].as_slice(),
+            })
+            .is_err()
+        {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+    }
+
+    if let Err(err) = validate_source_slots(&LcsLimits::DEFAULT, existing_slots.as_slice()) {
+        return source_registration_error_return(err);
+    }
+
+    let mut hive_views = match PkmVec::with_capacity(total_hives) {
+        Ok(hives) => hives,
+        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+    };
+    for slot in existing_slots.as_slice() {
+        let status = source_slot_hive_status(slot.status);
+        for hive in slot.hives {
+            if hive_views
+                .push(HiveView {
+                    name: hive.name,
+                    root_guid: hive.root_guid,
+                    source_id: slot.source_id,
+                    status,
+                    scope: hive.scope,
+                })
+                .is_err()
+            {
+                return LinuxErrno::Enomem.negated_return() as c_int;
+            }
+        }
+    }
+
+    let route = match route_hive(
+        &LcsLimits::DEFAULT,
+        hive_views.as_slice(),
+        hive_name,
+        scope_guids,
+    ) {
+        Ok(route) => route,
+        Err(err) => return source_registration_error_return(err),
+    };
+    match classify_hive_route(route) {
+        HiveRouteOutcome::Dispatch(hive) => unsafe {
+            (*result_out).source_id = hive.source_id;
+            (*result_out).root_guid = hive.root_guid;
+            0
+        },
+        HiveRouteOutcome::Failure(errno) => LinuxErrno::from(errno).negated_return() as c_int,
+    }
 }

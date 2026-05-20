@@ -68,6 +68,11 @@ struct pkm_lcs_source_table_snapshot {
 	bool sequence_initialized;
 };
 
+struct pkm_lcs_hive_route_result {
+	u32 source_id;
+	u8 root_guid[16];
+};
+
 long pkm_lcs_source_device_open_for_token(const void *token);
 long pkm_lcs_source_device_open_file_for_token(const void *token,
 					       struct file *file);
@@ -85,6 +90,9 @@ long pkm_lcs_source_registration_validate_copied(
 long pkm_lcs_source_register_file_for_token(
 	const void *token, struct file *file, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_src_register_args __user *uargs);
+long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,
+			     const u8 (*scope_guids)[16], u32 scope_count,
+			     struct pkm_lcs_hive_route_result *result);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_lcs_kunit_reset_source_table(void);

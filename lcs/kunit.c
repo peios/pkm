@@ -377,6 +377,15 @@ static void pkm_lcs_kunit_build_register_args(
 	args->hives_ptr = (u64)(unsigned long)hive;
 }
 
+static void pkm_lcs_kunit_build_private_register_args(
+	struct reg_src_register_args *args, struct reg_src_hive_entry *hive,
+	const char *name, u8 root_guid_first, u8 scope_guid_first)
+{
+	pkm_lcs_kunit_build_register_args(args, hive, name, root_guid_first, 0);
+	hive->flags = RSI_HIVE_PRIVATE;
+	hive->scope_guid[0] = scope_guid_first;
+}
+
 static void pkm_lcs_kunit_source_registration_ioctl_publishes_active_slot(
 	struct kunit *test)
 {
@@ -643,6 +652,128 @@ static void pkm_lcs_kunit_source_registration_ioctl_rejects_repeat_register(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_hive_route_reflects_active_and_down_slots(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct pkm_lcs_hive_route_result route = { };
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_hive_name(name_src, strlen(name_src), NULL,
+						0, &route),
+			(long)-ENOENT);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, name_src, 1, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_hive_name(name_src, strlen(name_src), NULL,
+						0, &route),
+			0L);
+	KUNIT_EXPECT_EQ(test, route.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, route.root_guid[0], 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_hive_name(name_src, strlen(name_src), NULL,
+						0, &route),
+			(long)-EIO);
+
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_hive_route_private_scope_shadows_global(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	const u8 matching_scope[1][16] = { { 9 } };
+	const u8 other_scope[1][16] = { { 7 } };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry global_hive;
+	struct reg_src_register_args global_args;
+	struct reg_src_hive_entry private_hive;
+	struct reg_src_register_args private_args;
+	struct pkm_lcs_hive_route_result route = { };
+	struct file global_file = { };
+	struct file private_file = { };
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &global_file),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &private_file),
+			0L);
+
+	pkm_lcs_kunit_build_register_args(&global_args, &global_hive, name_src,
+					  1, 0);
+	pkm_lcs_kunit_build_private_register_args(
+		&private_args, &private_hive, name_src, 2, 9);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &global_file, &ops,
+				(const void __user *)&global_args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &private_file, &ops,
+				(const void __user *)&private_args),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_hive_name(name_src, strlen(name_src), NULL,
+						0, &route),
+			0L);
+	KUNIT_EXPECT_EQ(test, route.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, route.root_guid[0], 1U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_hive_name(name_src, strlen(name_src),
+						other_scope, 1, &route),
+			0L);
+	KUNIT_EXPECT_EQ(test, route.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, route.root_guid[0], 1U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_hive_name(name_src, strlen(name_src),
+						matching_scope, 1, &route),
+			0L);
+	KUNIT_EXPECT_EQ(test, route.source_id, 2U);
+	KUNIT_EXPECT_EQ(test, route.root_guid[0], 2U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&global_file),
+			0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&private_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -667,6 +798,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_ioctl_rejects_stale_resume),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_ioctl_rejects_repeat_register),
+	KUNIT_CASE(pkm_lcs_kunit_hive_route_reflects_active_and_down_slots),
+	KUNIT_CASE(pkm_lcs_kunit_hive_route_private_scope_shadows_global),
 	{ }
 };
 
