@@ -14,7 +14,10 @@ use crate::error::{LcsError, LcsResult};
 use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
 };
-use crate::resolution::{Guid, PathTarget, ValidatedPathEntryWrite};
+use crate::resolution::{
+    BlanketTombstoneEntry, Guid, NamedPathEntry, NamedValueEntry, PathEntry, PathTarget,
+    ValidatedPathEntryWrite, ValueEntry,
+};
 use crate::security::RegistrySetSecurityPlan;
 use crate::transaction::TransactionKernelEffectsPlan;
 use crate::transaction_log::{
@@ -2399,6 +2402,126 @@ pub fn validate_rsi_query_values_response_value_payloads(
         )?;
         Ok(())
     })
+}
+
+/// Projects successful RSI_QUERY_VALUES value entries into resolution inputs.
+pub fn for_each_rsi_query_values_source_value_entry<'a, F>(
+    payload: &RsiQueryValuesSuccessResponsePayload<'a>,
+    limits: &LcsLimits,
+    mut visitor: F,
+) -> LcsResult<usize>
+where
+    F: FnMut(NamedValueEntry<'a>) -> LcsResult<()>,
+{
+    let mut emitted = 0usize;
+    payload.for_each_value_entry(|entry| {
+        let name = validate_value_name_bytes(entry.value_name.data, limits)?;
+        let layer = validate_layer_name_bytes(entry.layer_name.data, limits)?;
+        validate_value_data_len(entry.data.data.len(), limits)?;
+        validate_value_write_type(
+            entry.value_type,
+            entry.data.data.len(),
+            entry.value_type == REG_TOMBSTONE,
+        )?;
+        visitor(NamedValueEntry {
+            name,
+            entry: ValueEntry {
+                layer,
+                sequence: entry.sequence,
+                value_type: entry.value_type,
+                data: entry.data.data,
+            },
+        })?;
+        emitted += 1;
+        Ok(())
+    })?;
+    Ok(emitted)
+}
+
+/// Projects successful RSI_QUERY_VALUES blanket tombstones into resolution inputs.
+pub fn for_each_rsi_query_values_source_blanket_entry<'a, F>(
+    payload: &RsiQueryValuesSuccessResponsePayload<'a>,
+    limits: &LcsLimits,
+    mut visitor: F,
+) -> LcsResult<usize>
+where
+    F: FnMut(BlanketTombstoneEntry<'a>) -> LcsResult<()>,
+{
+    let mut emitted = 0usize;
+    payload.for_each_blanket_entry(|entry| {
+        let layer = validate_layer_name_bytes(entry.layer_name.data, limits)?;
+        visitor(BlanketTombstoneEntry {
+            layer,
+            sequence: entry.sequence,
+        })?;
+        emitted += 1;
+        Ok(())
+    })?;
+    Ok(emitted)
+}
+
+/// Projects successful RSI_LOOKUP path entries into resolution inputs.
+pub fn for_each_rsi_lookup_source_path_entry<'a, F>(
+    payload: &RsiLookupSuccessResponsePayload<'a>,
+    limits: &LcsLimits,
+    child_name: &'a str,
+    mut visitor: F,
+) -> LcsResult<usize>
+where
+    F: FnMut(NamedPathEntry<'a>) -> LcsResult<()>,
+{
+    let child_name = validate_key_component_bytes(child_name.as_bytes(), limits)?;
+    let mut emitted = 0usize;
+    payload.for_each_path_entry(|entry| {
+        let layer = validate_layer_name_bytes(entry.layer_name.data, limits)?;
+        visitor(NamedPathEntry {
+            child_name,
+            entry: PathEntry {
+                layer,
+                sequence: entry.sequence,
+                target: rsi_path_target_to_resolution(entry),
+            },
+        })?;
+        emitted += 1;
+        Ok(())
+    })?;
+    Ok(emitted)
+}
+
+/// Projects successful RSI_ENUM_CHILDREN path entries into resolution inputs.
+pub fn for_each_rsi_enum_children_source_path_entry<'a, F>(
+    payload: &RsiEnumChildrenSuccessResponsePayload<'a>,
+    limits: &LcsLimits,
+    mut visitor: F,
+) -> LcsResult<usize>
+where
+    F: FnMut(NamedPathEntry<'a>) -> LcsResult<()>,
+{
+    let mut emitted = 0usize;
+    payload.for_each_child(|child| {
+        let child_name = validate_key_component_bytes(child.child_name.data, limits)?;
+        child.for_each_path_entry(|entry| {
+            let layer = validate_layer_name_bytes(entry.layer_name.data, limits)?;
+            visitor(NamedPathEntry {
+                child_name,
+                entry: PathEntry {
+                    layer,
+                    sequence: entry.sequence,
+                    target: rsi_path_target_to_resolution(entry),
+                },
+            })?;
+            emitted += 1;
+            Ok(())
+        })
+    })?;
+    Ok(emitted)
+}
+
+fn rsi_path_target_to_resolution(entry: RsiLookupPathEntry<'_>) -> PathTarget {
+    match entry.target_type {
+        RsiPathTargetType::Guid => PathTarget::Guid(entry.target_guid),
+        RsiPathTargetType::Hidden => PathTarget::Hidden,
+    }
 }
 
 /// Plans one message-oriented source-fd read without splitting queued requests.
