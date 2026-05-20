@@ -65,6 +65,15 @@ pub struct TransactionPollPlan {
     pub error: bool,
 }
 
+/// Linux `POLLIN` from `include/uapi/asm-generic/poll.h`.
+pub const LINUX_POLLIN: u16 = 0x0001;
+/// Linux `POLLOUT` from `include/uapi/asm-generic/poll.h`.
+pub const LINUX_POLLOUT: u16 = 0x0004;
+/// Linux `POLLERR` from `include/uapi/asm-generic/poll.h`.
+pub const LINUX_POLLERR: u16 = 0x0008;
+/// Linux `POLLHUP` from `include/uapi/asm-generic/poll.h`.
+pub const LINUX_POLLHUP: u16 = 0x0010;
+
 /// Pre-dispatch failure class for operations using a transaction fd.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionUseFailure {
@@ -582,6 +591,29 @@ pub fn plan_transaction_poll(state: TransactionState<'_>) -> TransactionPollPlan
             error: true,
         },
     }
+}
+
+/// Projects symbolic transaction-fd poll readiness to Linux poll mask bits.
+pub fn transaction_poll_plan_mask(plan: TransactionPollPlan) -> u16 {
+    let mut mask = 0u16;
+    if plan.readable {
+        mask |= LINUX_POLLIN;
+    }
+    if plan.writable {
+        mask |= LINUX_POLLOUT;
+    }
+    if plan.error {
+        mask |= LINUX_POLLERR;
+    }
+    if plan.hangup {
+        mask |= LINUX_POLLHUP;
+    }
+    mask
+}
+
+/// Plans the Linux poll mask returned by a transaction fd poll hook.
+pub fn plan_transaction_poll_mask(state: TransactionState<'_>) -> u16 {
+    transaction_poll_plan_mask(plan_transaction_poll(state))
 }
 
 /// Prechecks REG_IOC_COMMIT before dispatching to the bound source.

@@ -361,9 +361,9 @@ pub use symlink::{
 };
 pub use transaction::{
     BackupReadOnlySnapshotAdmissionPlan, BackupReadOnlySnapshotReleasePlan,
-    BackupReadOnlySnapshotReleaseReason, ReadOnlySnapshotCounterPlan,
-    ReadOnlySnapshotCounterUpdate, StartedTransaction, TransactionBinding,
-    TransactionBoundCounterPlan, TransactionBoundCounterTransitionPlan,
+    BackupReadOnlySnapshotReleaseReason, LINUX_POLLERR, LINUX_POLLHUP, LINUX_POLLIN, LINUX_POLLOUT,
+    ReadOnlySnapshotCounterPlan, ReadOnlySnapshotCounterUpdate, StartedTransaction,
+    TransactionBinding, TransactionBoundCounterPlan, TransactionBoundCounterTransitionPlan,
     TransactionBoundCounterUpdate, TransactionCommitPlan, TransactionCommitResponsePlan,
     TransactionCommitReturnStatus, TransactionCommitSourceResponse, TransactionCompletionEvent,
     TransactionFdClosePlan, TransactionFdPublicationPlan, TransactionId, TransactionIdCounter,
@@ -379,9 +379,9 @@ pub use transaction::{
     plan_transaction_commit, plan_transaction_commit_response, plan_transaction_completion_effects,
     plan_transaction_fd_close, plan_transaction_mutation_acceptance,
     plan_transaction_mutation_binding, plan_transaction_mutation_log_entry, plan_transaction_poll,
-    plan_transaction_read, plan_transaction_timeout, transaction_log_entry_watch_batch_member,
-    transaction_status, transaction_terminal_failure, transaction_timeout_errno,
-    transaction_use_failure_errno,
+    plan_transaction_poll_mask, plan_transaction_read, plan_transaction_timeout,
+    transaction_log_entry_watch_batch_member, transaction_poll_plan_mask, transaction_status,
+    transaction_terminal_failure, transaction_timeout_errno, transaction_use_failure_errno,
 };
 pub use transaction_log::{
     TransactionMutationCommitWork, TransactionMutationLogAppendPlan,
