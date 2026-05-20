@@ -9,6 +9,7 @@ use crate::error::{LcsError, LcsResult};
 use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
 };
+use crate::poll::linux_poll_mask_from_readiness;
 use crate::resolution::{EnumeratedSubkey, EnumeratedValue, Guid, ResolvedPathEntry};
 use crate::source::NIL_GUID;
 use crate::validate_abi_reserved_zero;
@@ -756,6 +757,22 @@ pub fn plan_watch_queue_poll(
     Ok(WatchQueuePollPlan {
         readable: queued_events != 0,
     })
+}
+
+/// Projects symbolic watch queue poll readiness to Linux poll mask bits.
+pub fn watch_queue_poll_plan_mask(plan: WatchQueuePollPlan) -> u16 {
+    linux_poll_mask_from_readiness(plan.readable, false, false, false)
+}
+
+/// Plans the Linux poll mask returned by a key fd with an armed watch queue.
+pub fn plan_watch_queue_poll_mask(
+    queue: &[WatchQueueEntry],
+    queued_events: usize,
+) -> LcsResult<u16> {
+    Ok(watch_queue_poll_plan_mask(plan_watch_queue_poll(
+        queue,
+        queued_events,
+    )?))
 }
 
 /// Drains as many complete watch events as fit in one key-fd read buffer.
