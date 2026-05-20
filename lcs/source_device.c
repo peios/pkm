@@ -19,6 +19,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
+#include <linux/unaligned.h>
 
 #include <pkm/token.h>
 
@@ -328,6 +329,7 @@ static long pkm_lcs_source_in_flight_insert_locked(
 		if (record->occupied)
 			continue;
 		record->occupied = true;
+		record->delivered = false;
 		record->request_id = request_id;
 		record->txn_id = txn_id;
 		record->op_code = op_code;
@@ -336,6 +338,54 @@ static long pkm_lcs_source_in_flight_insert_locked(
 	}
 
 	return -EIO;
+}
+
+static struct pkm_lcs_source_in_flight_request *
+pkm_lcs_source_in_flight_find_locked(struct pkm_lcs_source_fd *source_fd,
+				     u64 request_id)
+{
+	u32 i;
+
+	lockdep_assert_held(&source_fd->queue_lock);
+
+	for (i = 0; i < PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT; i++) {
+		struct pkm_lcs_source_in_flight_request *record =
+			&source_fd->in_flight_requests[i];
+
+		if (record->occupied && record->request_id == request_id)
+			return record;
+	}
+
+	return NULL;
+}
+
+static long pkm_lcs_source_in_flight_set_delivered_locked(
+	struct pkm_lcs_source_fd *source_fd, u64 request_id, bool delivered)
+{
+	struct pkm_lcs_source_in_flight_request *record;
+
+	lockdep_assert_held(&source_fd->queue_lock);
+
+	record = pkm_lcs_source_in_flight_find_locked(source_fd, request_id);
+	if (!record)
+		return -EIO;
+
+	record->delivered = delivered;
+	return 0;
+}
+
+static void pkm_lcs_source_in_flight_release_locked(
+	struct pkm_lcs_source_fd *source_fd,
+	struct pkm_lcs_source_in_flight_request *record)
+{
+	lockdep_assert_held(&source_fd->queue_lock);
+
+	if (!record || !record->occupied)
+		return;
+
+	memset(record, 0, sizeof(*record));
+	if (source_fd->in_flight_request_count)
+		source_fd->in_flight_request_count--;
 }
 
 static void pkm_lcs_source_enqueue_result_fill_locked(
@@ -355,6 +405,25 @@ static void pkm_lcs_source_enqueue_result_fill_locked(
 	result->queue_depth = source_fd->queued_request_count;
 	result->in_flight_count = source_fd->in_flight_request_count;
 	result->next_request_id = source_fd->next_request_id;
+}
+
+static bool pkm_lcs_rsi_status_known(u32 status)
+{
+	switch (status) {
+	case RSI_OK:
+	case RSI_NOT_FOUND:
+	case RSI_ALREADY_EXISTS:
+	case RSI_STORAGE_ERROR:
+	case RSI_NOT_EMPTY:
+	case RSI_TOO_LARGE:
+	case RSI_TXN_BUSY:
+	case RSI_INVALID:
+	case RSI_CAS_FAILED:
+	case RSI_TXN_NOT_SUPPORTED:
+		return true;
+	default:
+		return false;
+	}
 }
 
 static bool pkm_lcs_source_read_ready(struct pkm_lcs_source_fd *source_fd)
@@ -945,8 +1014,16 @@ static ssize_t pkm_lcs_source_device_read_file_with_ops(
 				mutex_unlock(&source_fd->queue_lock);
 				return -EINVAL;
 			}
+			ret = pkm_lcs_source_in_flight_set_delivered_locked(
+				source_fd, request->request_id, true);
+			if (ret) {
+				mutex_unlock(&source_fd->queue_lock);
+				return ret;
+			}
 			if (!ops->write(ops->ctx, buf, request->frame,
 					request->len)) {
+				pkm_lcs_source_in_flight_set_delivered_locked(
+					source_fd, request->request_id, false);
 				mutex_unlock(&source_fd->queue_lock);
 				return -EFAULT;
 			}
@@ -979,6 +1056,91 @@ static ssize_t pkm_lcs_source_device_read_file_with_ops(
 			return -EINVAL;
 		}
 	}
+}
+
+long pkm_lcs_source_accept_response_file(
+	struct file *file, const u8 *frame, size_t frame_len,
+	struct pkm_lcs_source_response_result *result)
+{
+	struct pkm_lcs_source_in_flight_request *record;
+	struct pkm_lcs_source_fd *source_fd;
+	struct pkm_lcs_source_slot *slot;
+	u16 response_op_code;
+	u16 expected_op_code;
+	u64 request_id;
+	u32 total_len;
+	u32 status;
+	long ret = 0;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+	if (!file || !frame)
+		return -EINVAL;
+	if (frame_len < RSI_MIN_RESPONSE_SIZE)
+		return -EINVAL;
+
+	total_len = get_unaligned_le32(frame + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	if ((size_t)total_len != frame_len)
+		return -EINVAL;
+
+	request_id = get_unaligned_le64(frame + RSI_RESPONSE_ID_OFFSET);
+	response_op_code =
+		get_unaligned_le16(frame + RSI_RESPONSE_OP_CODE_OFFSET);
+	status = get_unaligned_le32(frame + RSI_RESPONSE_STATUS_OFFSET);
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	source_fd = file->private_data;
+	if (!source_fd) {
+		ret = -EINVAL;
+		goto out_unlock_table;
+	}
+
+	mutex_lock(&source_fd->queue_lock);
+	if (source_fd->closing ||
+	    source_fd->state != PKM_LCS_SOURCE_FD_ACTIVE) {
+		ret = -EINVAL;
+		goto out_unlock_queue;
+	}
+
+	slot = pkm_lcs_source_slot_find_locked(source_fd->source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE ||
+	    slot->active_fd != source_fd) {
+		ret = -EINVAL;
+		goto out_unlock_queue;
+	}
+
+	record = pkm_lcs_source_in_flight_find_locked(source_fd, request_id);
+	if (!record || !record->delivered) {
+		ret = -EINVAL;
+		goto out_unlock_queue;
+	}
+
+	expected_op_code = record->op_code | RSI_RESPONSE_BIT;
+	if (response_op_code != expected_op_code) {
+		ret = -EINVAL;
+		goto out_unlock_queue;
+	}
+
+	if (result) {
+		result->len = frame_len;
+		result->request_id = record->request_id;
+		result->txn_id = record->txn_id;
+		result->request_op_code = record->op_code;
+		result->response_op_code = response_op_code;
+		result->status = status;
+		result->malformed_source_data =
+			!pkm_lcs_rsi_status_known(status);
+	}
+
+	pkm_lcs_source_in_flight_release_locked(source_fd, record);
+	if (result)
+		result->in_flight_count = source_fd->in_flight_request_count;
+
+out_unlock_queue:
+	mutex_unlock(&source_fd->queue_lock);
+out_unlock_table:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
 }
 
 long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,

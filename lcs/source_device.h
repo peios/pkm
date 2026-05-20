@@ -23,6 +23,7 @@ enum pkm_lcs_source_fd_state {
 
 struct pkm_lcs_source_in_flight_request {
 	bool occupied;
+	bool delivered;
 	u64 request_id;
 	u64 txn_id;
 	u16 op_code;
@@ -142,6 +143,18 @@ struct pkm_lcs_source_enqueue_result {
 	u64 next_request_id;
 };
 
+struct pkm_lcs_source_response_result {
+	size_t len;
+	u64 request_id;
+	u64 txn_id;
+	u16 request_op_code;
+	u16 response_op_code;
+	u32 status;
+	u32 in_flight_count;
+	bool malformed_source_data;
+	u8 _pad[3];
+};
+
 long pkm_lcs_source_device_open_for_token(const void *token);
 long pkm_lcs_source_device_open_file_for_token(const void *token,
 					       struct file *file);
@@ -208,6 +221,9 @@ long pkm_lcs_source_dispatch_lookup_request(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
 	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_accept_response_file(
+	struct file *file, const u8 *frame, size_t frame_len,
+	struct pkm_lcs_source_response_result *result);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_lcs_kunit_reset_source_table(void);
