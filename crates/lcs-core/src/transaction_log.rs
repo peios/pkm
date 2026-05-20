@@ -1,3 +1,4 @@
+use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
 use crate::constants::REG_WATCH_SD_CHANGED;
 use crate::error::{LcsError, LcsResult};
@@ -8,18 +9,19 @@ use crate::key_path::{
 use crate::path::{
     validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
 };
+use crate::resolution::{EnumeratedSubkey, EnumeratedValue, Guid, ResolvedPathEntry};
+use crate::source::NIL_GUID;
 use crate::transaction::{
     TransactionKernelEffectsPlan, TransactionMutationLogEntry, TransactionMutationLogKind,
     TransactionOperationIndex,
 };
 use crate::value::TransactionValueMutationLogEntry;
 use crate::watch::{
-    TransactionWatchBatchMember, WatchAncestryContext, WatchMutationContext,
-    validate_watch_ancestry_context,
+    EffectiveSubkeyWatchEvent, EffectiveValueWatchEvent, TransactionWatchBatchMember,
+    WatchAncestryContext, WatchMutationContext, WatchedKeyVisibilityEvent,
+    for_each_effective_subkey_watch_event, for_each_effective_value_watch_event,
+    plan_watched_key_visibility_event, validate_watch_ancestry_context,
 };
-
-use crate::resolution::Guid;
-use crate::source::NIL_GUID;
 
 /// One kernel-owned transaction mutation-log record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +160,38 @@ pub enum TransactionReplayWatchInput<'a> {
         evaluate_orphaning: bool,
         publish_new_key_guid: bool,
     },
+}
+
+/// Source snapshots needed to derive concrete watch events from one replay input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionReplayWatchSnapshots<'a> {
+    DirectSecurity,
+    EffectiveValue(TransactionReplayValueSnapshots<'a>),
+    EffectiveSubkey(TransactionReplaySubkeySnapshots<'a>),
+}
+
+/// Before/after effective-value snapshots for one replay input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionReplayValueSnapshots<'a> {
+    pub before: &'a [EnumeratedValue<'a>],
+    pub after: &'a [EnumeratedValue<'a>],
+}
+
+/// Before/after effective-subkey snapshots for one replay input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionReplaySubkeySnapshots<'a> {
+    pub before_children: &'a [EnumeratedSubkey<'a>],
+    pub after_children: &'a [EnumeratedSubkey<'a>],
+    pub child_before: Option<ResolvedPathEntry<'a>>,
+    pub child_after: Option<ResolvedPathEntry<'a>>,
+}
+
+/// Concrete watch event selected during transaction replay before watcher scan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionReplayWatchEvent<'a> {
+    pub operation_index: TransactionOperationIndex,
+    pub mutation: WatchMutationContext<'a>,
+    pub name: &'a str,
 }
 
 /// Aggregate source-query/watch-input work for one transaction mutation log.
@@ -535,6 +569,118 @@ pub fn summarize_transaction_replay_watch_inputs(
     Ok(summary)
 }
 
+/// Derives concrete watch events for one committed transaction replay input.
+pub fn for_each_transaction_replay_watch_event<'a, F>(
+    limits: &LcsLimits,
+    input: &TransactionReplayWatchInput<'a>,
+    snapshots: TransactionReplayWatchSnapshots<'a>,
+    mut emit: F,
+) -> LcsResult<usize>
+where
+    F: FnMut(TransactionReplayWatchEvent<'a>) -> LcsResult<()>,
+{
+    match (input, snapshots) {
+        (
+            TransactionReplayWatchInput::DirectSecurity {
+                operation_index,
+                watch_mutation,
+                ..
+            },
+            TransactionReplayWatchSnapshots::DirectSecurity,
+        ) => {
+            validate_replay_watch_mutation(limits, watch_mutation)?;
+            emit(TransactionReplayWatchEvent {
+                operation_index: *operation_index,
+                mutation: *watch_mutation,
+                name: "",
+            })?;
+            Ok(1)
+        }
+        (
+            TransactionReplayWatchInput::EffectiveValue {
+                operation_index,
+                key_guid,
+                watch_context,
+                scope,
+                layer,
+                ..
+            },
+            TransactionReplayWatchSnapshots::EffectiveValue(snapshots),
+        ) => {
+            validate_effective_value_replay_input(
+                limits,
+                *key_guid,
+                *watch_context,
+                *scope,
+                layer,
+                snapshots,
+            )?;
+            for_each_effective_value_watch_event(
+                limits,
+                snapshots.before,
+                snapshots.after,
+                |event| {
+                    let (event_type, name) = value_replay_event_parts(event);
+                    emit(TransactionReplayWatchEvent {
+                        operation_index: *operation_index,
+                        mutation: watch_context.with_event(event_type),
+                        name,
+                    })
+                },
+            )
+        }
+        (
+            TransactionReplayWatchInput::EffectiveSubkey {
+                operation_index,
+                parent_guid,
+                parent_watch_context,
+                child_visibility_watch_context,
+                child_name,
+                layer,
+                ..
+            },
+            TransactionReplayWatchSnapshots::EffectiveSubkey(snapshots),
+        ) => {
+            let child_visibility_event = validate_effective_subkey_replay_input(
+                limits,
+                *parent_guid,
+                *parent_watch_context,
+                *child_visibility_watch_context,
+                child_name,
+                layer,
+                snapshots,
+            )?;
+            let mut emitted = for_each_effective_subkey_watch_event(
+                limits,
+                snapshots.before_children,
+                snapshots.after_children,
+                |event| {
+                    let (event_type, name) = subkey_replay_event_parts(event);
+                    emit(TransactionReplayWatchEvent {
+                        operation_index: *operation_index,
+                        mutation: parent_watch_context.with_event(event_type),
+                        name,
+                    })
+                },
+            )?;
+            if let Some((context, event)) = child_visibility_event {
+                emit(TransactionReplayWatchEvent {
+                    operation_index: *operation_index,
+                    mutation: context.with_event(event.event_type()),
+                    name: "",
+                })?;
+                emitted = emitted
+                    .checked_add(1)
+                    .ok_or(LcsError::TransactionWatchBatchEventCountOverflow)?;
+            }
+            Ok(emitted)
+        }
+        _ => Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "watch_replay.snapshot_kind",
+        }),
+    }
+}
+
 /// Plans whether transaction completion applies, discards, or retains the log.
 pub fn plan_transaction_mutation_log_disposition(
     effects: TransactionKernelEffectsPlan,
@@ -672,6 +818,11 @@ fn validate_replay_watch_mutation(
     limits: &LcsLimits,
     mutation: &WatchMutationContext<'_>,
 ) -> LcsResult<()> {
+    if mutation.event_type != REG_WATCH_SD_CHANGED {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "watch_mutation.event_type",
+        });
+    }
     let context = WatchAncestryContext {
         changed_key_guid: mutation.changed_key_guid,
         ancestor_guids: mutation.ancestor_guids,
@@ -708,6 +859,104 @@ fn validate_replay_watch_context(
         validate_key_component_bytes(path_component.as_bytes(), limits)?;
     }
     Ok(())
+}
+
+fn validate_effective_value_replay_input(
+    limits: &LcsLimits,
+    key_guid: Guid,
+    watch_context: WatchAncestryContext<'_>,
+    scope: TransactionReplayValueWatchScope<'_>,
+    layer: &str,
+    snapshots: TransactionReplayValueSnapshots<'_>,
+) -> LcsResult<()> {
+    validate_replay_guid("value.key_guid", key_guid)?;
+    validate_replay_watch_context(limits, "value.watch_context", &watch_context)?;
+    if watch_context.changed_key_guid != key_guid {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "value.watch_context.changed_key_guid",
+        });
+    }
+    validate_layer_name_bytes(layer.as_bytes(), limits)?;
+    if let TransactionReplayValueWatchScope::NamedValue { name } = scope {
+        validate_value_name_bytes(name.as_bytes(), limits)?;
+        validate_named_value_snapshot_scope(name, snapshots.before)?;
+        validate_named_value_snapshot_scope(name, snapshots.after)?;
+    }
+    Ok(())
+}
+
+fn validate_effective_subkey_replay_input<'a>(
+    limits: &LcsLimits,
+    parent_guid: Guid,
+    parent_context: WatchAncestryContext<'a>,
+    child_context: Option<WatchAncestryContext<'a>>,
+    child_name: &str,
+    layer: &str,
+    snapshots: TransactionReplaySubkeySnapshots<'a>,
+) -> LcsResult<Option<(WatchAncestryContext<'a>, WatchedKeyVisibilityEvent)>> {
+    validate_replay_guid("key_path.parent_guid", parent_guid)?;
+    validate_replay_watch_context(limits, "key_path.parent_watch_context", &parent_context)?;
+    if parent_context.changed_key_guid != parent_guid {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "key_path.parent_watch_context.changed_key_guid",
+        });
+    }
+    validate_key_component_bytes(child_name.as_bytes(), limits)?;
+    validate_layer_name_bytes(layer.as_bytes(), limits)?;
+
+    match child_context {
+        Some(context) => {
+            validate_replay_watch_context(
+                limits,
+                "key_path.child_visibility_watch_context",
+                &context,
+            )?;
+            validate_child_visibility_context_extends(&parent_context, &context, child_name)?;
+            let event = plan_watched_key_visibility_event(
+                limits,
+                context.changed_key_guid,
+                snapshots.child_before,
+                snapshots.child_after,
+            )?;
+            Ok(event.map(|event| (context, event)))
+        }
+        None => {
+            if snapshots.child_before.is_some() || snapshots.child_after.is_some() {
+                return Err(LcsError::InvalidTransactionMutationLogEntry {
+                    field: "key_path.child_visibility_snapshot",
+                });
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn validate_named_value_snapshot_scope(
+    expected_name: &str,
+    values: &[EnumeratedValue<'_>],
+) -> LcsResult<()> {
+    for value in values {
+        if !casefold_eq(value.name, expected_name) {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "value.snapshot_scope",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn value_replay_event_parts(event: EffectiveValueWatchEvent<'_>) -> (u32, &str) {
+    match event {
+        EffectiveValueWatchEvent::ValueSet { name }
+        | EffectiveValueWatchEvent::ValueDeleted { name } => (event.event_type(), name),
+    }
+}
+
+fn subkey_replay_event_parts(event: EffectiveSubkeyWatchEvent<'_>) -> (u32, &str) {
+    match event {
+        EffectiveSubkeyWatchEvent::SubkeyCreated { name }
+        | EffectiveSubkeyWatchEvent::SubkeyDeleted { name } => (event.event_type(), name),
+    }
 }
 
 fn validate_replay_guid(field: &'static str, guid: Guid) -> LcsResult<()> {
@@ -841,18 +1090,24 @@ fn validate_child_visibility_context_extends_parent(
     entry: &TransactionKeyPathMutationLogEntry<'_>,
     child_context: &WatchAncestryContext<'_>,
 ) -> LcsResult<()> {
-    let parent_depth = entry.parent_watch_context.ancestor_guids.len();
+    validate_child_visibility_context_extends(
+        &entry.parent_watch_context,
+        child_context,
+        entry.child_name,
+    )
+}
+
+fn validate_child_visibility_context_extends(
+    parent_context: &WatchAncestryContext<'_>,
+    child_context: &WatchAncestryContext<'_>,
+    child_name: &str,
+) -> LcsResult<()> {
+    let parent_depth = parent_context.ancestor_guids.len();
     if child_context.ancestor_guids.len() != parent_depth + 1
         || child_context.path_components.len() != parent_depth + 1
-    {
-        return Err(LcsError::InvalidTransactionMutationLogEntry {
-            field: "key_path.child_visibility_watch_context",
-        });
-    }
-    if &child_context.ancestor_guids[..parent_depth] != entry.parent_watch_context.ancestor_guids
-        || &child_context.path_components[..parent_depth]
-            != entry.parent_watch_context.path_components
-        || child_context.path_components[parent_depth] != entry.child_name
+        || &child_context.ancestor_guids[..parent_depth] != parent_context.ancestor_guids
+        || &child_context.path_components[..parent_depth] != parent_context.path_components
+        || child_context.path_components[parent_depth] != child_name
     {
         return Err(LcsError::InvalidTransactionMutationLogEntry {
             field: "key_path.child_visibility_watch_context",
