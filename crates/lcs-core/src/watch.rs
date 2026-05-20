@@ -809,7 +809,10 @@ pub fn drain_watch_queue_read_batch(
     }))
 }
 
-fn validate_watch_queue_storage(queue_limit: usize, storage_len: usize) -> LcsResult<()> {
+pub(crate) fn validate_watch_queue_storage(
+    queue_limit: usize,
+    storage_len: usize,
+) -> LcsResult<()> {
     if queue_limit == 0 {
         return Err(LcsError::InvalidWatchQueueLimit);
     }

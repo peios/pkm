@@ -18,11 +18,13 @@ use crate::transaction::{
 use crate::value::TransactionValueMutationLogEntry;
 use crate::watch::{
     EffectiveSubkeyWatchEvent, EffectiveValueWatchEvent, TransactionWatchBatchMember,
+    TransactionWatchBurstPlan, TransactionWatchQueueApplyPlan, TransactionWatchQueueApplySummary,
     WatchAncestryContext, WatchDispatchDecision, WatchEventRecordPlan, WatchEventRecordRequest,
     WatchMutationContext, WatchQueueEntry, WatchedKeyVisibilityEvent, WatcherView,
     for_each_effective_subkey_watch_event, for_each_effective_value_watch_event,
-    overflow_queue_entry, plan_watch_dispatch, plan_watch_event_record,
-    plan_watched_key_visibility_event, validate_watch_ancestry_context,
+    overflow_queue_entry, plan_transaction_watch_burst, plan_watch_dispatch,
+    plan_watch_event_record, plan_watched_key_visibility_event, push_watch_queue_event,
+    validate_watch_ancestry_context, validate_watch_queue_storage, watch_queue_snapshot,
 };
 
 /// One kernel-owned transaction mutation-log record.
@@ -742,6 +744,74 @@ where
         &mut emit_member,
     )?;
     Ok(summary)
+}
+
+/// Applies a concrete transaction replay event stream to one watch queue.
+pub fn apply_transaction_replay_watch_queue(
+    limits: &LcsLimits,
+    watcher: WatcherView,
+    queue: &mut [WatchQueueEntry],
+    queued_events: usize,
+    events: &[TransactionReplayWatchEvent<'_>],
+) -> LcsResult<TransactionWatchQueueApplyPlan> {
+    validate_watch_queue_storage(limits.notification_queue_size, queue.len())?;
+    let initial_state = watch_queue_snapshot(queue, queued_events)?;
+    let summary = summarize_transaction_replay_watch_dispatch_internal(limits, watcher, events)?;
+
+    match plan_transaction_watch_burst(limits, summary.delivered_event_count)? {
+        TransactionWatchBurstPlan::NoEvents => {
+            Ok(TransactionWatchQueueApplyPlan::NoEvents(initial_state))
+        }
+        TransactionWatchBurstPlan::EmitOverflowOnly {
+            attempted_event_count,
+            ..
+        } => {
+            let push = push_watch_queue_event(
+                limits.notification_queue_size,
+                queue,
+                queued_events,
+                overflow_queue_entry(),
+            )?;
+            Ok(TransactionWatchQueueApplyPlan::Applied(
+                TransactionWatchQueueApplySummary {
+                    queued_events: push.queued_events,
+                    contains_overflow: push.contains_overflow,
+                    attempted_event_count,
+                    queued_individual_events: 0,
+                    queued_overflow_only: true,
+                    dispatch_without_interleaving: true,
+                },
+            ))
+        }
+        TransactionWatchBurstPlan::EmitIndividualEvents { event_count } => {
+            let mut current_queued_events = queued_events;
+            let mut contains_overflow = initial_state.contains_overflow;
+            for event in events {
+                if let Some((entry, _)) =
+                    replay_watch_queue_entry_for_watcher(limits, watcher, event)?
+                {
+                    let push = push_watch_queue_event(
+                        limits.notification_queue_size,
+                        queue,
+                        current_queued_events,
+                        entry,
+                    )?;
+                    current_queued_events = push.queued_events;
+                    contains_overflow = push.contains_overflow;
+                }
+            }
+            Ok(TransactionWatchQueueApplyPlan::Applied(
+                TransactionWatchQueueApplySummary {
+                    queued_events: current_queued_events,
+                    contains_overflow,
+                    attempted_event_count: summary.delivered_event_count,
+                    queued_individual_events: event_count,
+                    queued_overflow_only: false,
+                    dispatch_without_interleaving: true,
+                },
+            ))
+        }
+    }
 }
 
 /// Plans whether transaction completion applies, discards, or retains the log.
