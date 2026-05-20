@@ -1066,6 +1066,81 @@ static void pkm_lcs_kunit_user_absolute_path_copy_routes_current_user(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_open_preflight_accepts_valid_masks(
+	struct kunit *test)
+{
+	struct pkm_lcs_open_preflight_plan plan = { };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_preflight(KEY_QUERY_VALUE, 0, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_QUERY_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.mapped_desired_access, KEY_QUERY_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.maximum_allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 1U);
+
+	memset(&plan, 0, sizeof(plan));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_preflight(GENERIC_READ, 0, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, GENERIC_READ);
+	KUNIT_EXPECT_EQ(test, plan.mapped_desired_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, plan.maximum_allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 1U);
+
+	memset(&plan, 0, sizeof(plan));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_preflight(MAXIMUM_ALLOWED |
+						       KEY_QUERY_VALUE,
+					       REG_OPEN_LINK, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.requested_access,
+			MAXIMUM_ALLOWED | KEY_QUERY_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.mapped_desired_access, KEY_QUERY_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.maximum_allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 1U);
+}
+
+static void pkm_lcs_kunit_open_preflight_rejects_fail_closed(
+	struct kunit *test)
+{
+	struct pkm_lcs_open_preflight_plan plan = {
+		.requested_access = 0xffffffffU,
+		.mapped_desired_access = 0xffffffffU,
+		.maximum_allowed = 1,
+		.path_resolution_allowed = 1,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_preflight(KEY_QUERY_VALUE, 0, NULL),
+			(long)-EINVAL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_open_preflight(0, 0, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, 0U);
+	KUNIT_EXPECT_EQ(test, plan.mapped_desired_access, 0U);
+	KUNIT_EXPECT_EQ(test, plan.maximum_allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 0U);
+
+	plan.path_resolution_allowed = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_preflight(0x00100000U, 0, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 0U);
+
+	plan.path_resolution_allowed = 1;
+	KUNIT_EXPECT_EQ(test, pkm_lcs_open_preflight(0x00000040U, 0, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 0U);
+
+	plan.path_resolution_allowed = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_preflight(KEY_QUERY_VALUE,
+					       REG_OPEN_LINK | 0x80U, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 0U);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -1101,6 +1176,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_syscall_path_copy_bounds_and_faults),
 	KUNIT_CASE(
 		pkm_lcs_kunit_user_absolute_path_copy_routes_current_user),
+	KUNIT_CASE(pkm_lcs_kunit_open_preflight_accepts_valid_masks),
+	KUNIT_CASE(pkm_lcs_kunit_open_preflight_rejects_fail_closed),
 	{ }
 };
 

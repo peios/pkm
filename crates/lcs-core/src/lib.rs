@@ -203,7 +203,7 @@ pub use open::{
     RegistryOpenPreResolutionAccessPlan, RegistryOpenPreResolutionErrno,
     plan_registry_key_open_access, plan_registry_key_open_resolution,
     plan_registry_open_pre_resolution_access, registry_open_pre_resolution_linux_errno,
-    select_registry_open_access_target,
+    select_registry_open_access_target, validate_registry_open_flags,
 };
 pub use output_buffer::{
     OutputBufferAggregate, OutputBufferCopyPlan, OutputBufferDecision, OutputBufferRequest,

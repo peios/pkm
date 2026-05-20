@@ -99,16 +99,23 @@ pub struct RegistryKeyOpenAccessPlan {
     pub updated_privileges: kacs_core::TokenPrivileges,
 }
 
+/// Validates `reg_open_key` flags before path resolution.
+pub fn validate_registry_open_flags(flags: u32) -> LcsResult<()> {
+    let unknown = flags & !REG_OPEN_KEY_KNOWN_FLAGS;
+    if unknown != 0 {
+        return Err(LcsError::UnknownOpenFlags { flags, unknown });
+    }
+
+    Ok(())
+}
+
 /// Validates `reg_open_key` flags and selects which SD path resolution must
 /// feed into AccessCheck.
 pub fn select_registry_open_access_target(
     final_component_is_symlink: bool,
     flags: u32,
 ) -> LcsResult<RegistryOpenAccessTarget> {
-    let unknown = flags & !REG_OPEN_KEY_KNOWN_FLAGS;
-    if unknown != 0 {
-        return Err(LcsError::UnknownOpenFlags { flags, unknown });
-    }
+    validate_registry_open_flags(flags)?;
 
     if final_component_is_symlink {
         if (flags & REG_OPEN_LINK) != 0 {

@@ -6,12 +6,14 @@ use core::{slice, str};
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
     classify_hive_route, current_user_sid_component_from_binary_sid,
-    plan_source_registration_sequence_update, route_hive, route_routable_path_hive,
+    plan_registry_open_pre_resolution_access, plan_source_registration_sequence_update,
+    registry_open_pre_resolution_linux_errno, route_hive, route_routable_path_hive,
     source_registration_error_linux_errno, source_registration_hive_scope,
-    source_slot_hive_status, validate_source_registration, validate_source_slots,
-    validate_syscall_path_c_string, CurrentUserRewrite, HiveRouteOutcome, HiveView, LcsError,
-    LcsLimits, LinuxErrno, PathKind, RegisteredHiveIdentity, SourceRegistrationDecision,
-    SourceRegistrationHive, SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
+    source_slot_hive_status, validate_registry_open_flags, validate_source_registration,
+    validate_source_slots, validate_syscall_path_c_string, CurrentUserRewrite, HiveRouteOutcome,
+    HiveView, LcsError, LcsLimits, LinuxErrno, PathKind, RegisteredHiveIdentity,
+    RegistryOpenPreResolutionAccessPlan, SourceRegistrationDecision, SourceRegistrationHive,
+    SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -53,6 +55,15 @@ pub struct PkmLcsHiveRouteResultCopy {
     pub root_guid: [u8; 16],
 }
 
+#[repr(C)]
+pub struct PkmLcsOpenPreflightPlanCopy {
+    pub requested_access: u32,
+    pub mapped_desired_access: u32,
+    pub maximum_allowed: u8,
+    pub path_resolution_allowed: u8,
+    pub _pad: [u8; 2],
+}
+
 fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
     source_registration_error_linux_errno(err)
         .unwrap_or(LinuxErrno::Einval)
@@ -65,6 +76,54 @@ fn absolute_route_error_return(err: LcsError) -> c_int {
         _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_open_preflight(
+    desired_access: u32,
+    flags: u32,
+    plan_out: *mut PkmLcsOpenPreflightPlanCopy,
+) -> c_int {
+    if plan_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *plan_out = PkmLcsOpenPreflightPlanCopy {
+            requested_access: 0,
+            mapped_desired_access: 0,
+            maximum_allowed: 0,
+            path_resolution_allowed: 0,
+            _pad: [0; 2],
+        };
+    }
+
+    if validate_registry_open_flags(flags).is_err() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let plan = plan_registry_open_pre_resolution_access(desired_access);
+    match plan {
+        RegistryOpenPreResolutionAccessPlan::Continue {
+            requested_access,
+            mapped_desired_access,
+            maximum_allowed,
+            path_resolution_allowed,
+        } => {
+            unsafe {
+                (*plan_out).requested_access = requested_access;
+                (*plan_out).mapped_desired_access = mapped_desired_access;
+                (*plan_out).maximum_allowed = maximum_allowed as u8;
+                (*plan_out).path_resolution_allowed = path_resolution_allowed as u8;
+            }
+            0
+        }
+        RegistryOpenPreResolutionAccessPlan::Reject { .. } => {
+            registry_open_pre_resolution_linux_errno(&plan)
+                .unwrap_or(LinuxErrno::Einval)
+                .negated_return() as c_int
+        }
+    }
 }
 
 fn parse_registration_hives<'a>(

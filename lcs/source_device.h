@@ -79,6 +79,14 @@ struct pkm_lcs_hive_route_result {
 	u8 root_guid[16];
 };
 
+struct pkm_lcs_open_preflight_plan {
+	u32 requested_access;
+	u32 mapped_desired_access;
+	u8 maximum_allowed;
+	u8 path_resolution_allowed;
+	u8 _pad[2];
+};
+
 long pkm_lcs_source_device_open_for_token(const void *token);
 long pkm_lcs_source_device_open_file_for_token(const void *token,
 					       struct file *file);
@@ -123,6 +131,8 @@ long pkm_lcs_route_user_absolute_path_for_token(
 	const char __user *upath, bool rewrite_current_user,
 	const u8 (*scope_guids)[16], u32 scope_count,
 	struct pkm_lcs_hive_route_result *result);
+long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
+			    struct pkm_lcs_open_preflight_plan *plan);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_lcs_kunit_reset_source_table(void);

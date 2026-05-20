@@ -95,6 +95,9 @@ extern int lcs_rust_route_absolute_path_from_source_slots_with_token_sid(
 	const u8 *current_user_sid, size_t current_user_sid_len,
 	const u8 (*scope_guids)[16], size_t scope_count,
 	struct pkm_lcs_hive_route_result *result);
+extern int lcs_rust_open_preflight(
+	u32 desired_access, u32 flags,
+	struct pkm_lcs_open_preflight_plan *plan);
 
 static long pkm_lcs_source_device_check_tcb(const void *token)
 {
@@ -664,6 +667,16 @@ long pkm_lcs_route_user_absolute_path_for_token(
 		scope_guids, scope_count, result);
 	pkm_lcs_syscall_path_copy_destroy(&copy);
 	return ret;
+}
+
+long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
+			    struct pkm_lcs_open_preflight_plan *plan)
+{
+	if (!plan)
+		return -EINVAL;
+
+	memset(plan, 0, sizeof(*plan));
+	return lcs_rust_open_preflight(desired_access, flags, plan);
 }
 
 static int pkm_lcs_source_device_open(struct inode *inode, struct file *file)
