@@ -759,6 +759,27 @@ pub enum LcsError {
     DirectWatchEventHasPath,
     /// A queued watch event length was smaller than the mandatory header.
     InvalidWatchEventLength(u32),
+    /// A source request queue snapshot was internally inconsistent.
+    InvalidRsiRequestQueue {
+        /// Index of the first non-dense entry.
+        index: usize,
+    },
+    /// A source request queue had no free entry slots.
+    RsiRequestQueueFull {
+        /// Fixed queue capacity.
+        capacity: usize,
+    },
+    /// A queued source request's retained metadata did not match its frame.
+    RsiQueuedRequestMetadataMismatch {
+        /// Request ID parsed from the queued frame header.
+        header_request_id: u64,
+        /// Request ID stored in retained metadata.
+        retained_request_id: u64,
+        /// Op code parsed from the queued frame header.
+        header_op_code: u16,
+        /// Op code stored in retained metadata.
+        retained_op_code: u16,
+    },
     /// A read buffer was too small to hold the first pending watch event.
     WatchReadBufferTooSmall {
         /// Caller-supplied read buffer length.

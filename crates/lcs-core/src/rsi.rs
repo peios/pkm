@@ -859,6 +859,38 @@ pub enum RsiReadPlan {
     WakeForClose,
 }
 
+/// Complete queued request frame visible to a source fd read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiQueuedRequest<'a> {
+    pub frame: &'a [u8],
+    pub retained: RsiRetainedRequest,
+}
+
+/// Summary of fixed-capacity source request queue storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiRequestQueueSummary {
+    pub entries: usize,
+    pub capacity: usize,
+    pub full: bool,
+}
+
+/// Applied source-fd read-drain outcome over fixed request queue storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiRequestQueueReadDrain<'a> {
+    Copied {
+        request: RsiQueuedRequest<'a>,
+        bytes: usize,
+        summary: RsiRequestQueueSummary,
+    },
+    WaitForRequestOrClose,
+    ReturnEagain,
+    ReturnEmsgsize {
+        required_len: usize,
+        consume_request: bool,
+    },
+    WakeForClose,
+}
+
 /// Source fd poll readiness bits expressed without platform poll constants.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiPollPlan {
@@ -3557,6 +3589,116 @@ fn rsi_enum_children_path_entry_count(
     Ok(total)
 }
 
+/// Validates a complete request frame as a source-visible queued request.
+pub fn rsi_queued_request_from_frame(frame: &[u8]) -> LcsResult<RsiQueuedRequest<'_>> {
+    let header = parse_rsi_request_header(frame)?;
+    Ok(RsiQueuedRequest {
+        frame,
+        retained: RsiRetainedRequest {
+            request_id: header.request_id,
+            op_code: header.op_code,
+        },
+    })
+}
+
+/// Validates and summarizes fixed-capacity source request queue storage.
+pub fn summarize_rsi_request_queue(
+    storage: &[Option<RsiQueuedRequest<'_>>],
+) -> LcsResult<RsiRequestQueueSummary> {
+    let mut entries = 0usize;
+    let mut seen_empty = false;
+
+    for (index, slot) in storage.iter().enumerate() {
+        match (seen_empty, slot) {
+            (false, Some(request)) => {
+                validate_rsi_queued_request(*request)?;
+                entries += 1;
+            }
+            (false, None) => seen_empty = true,
+            (true, Some(_)) => return Err(LcsError::InvalidRsiRequestQueue { index }),
+            (true, None) => {}
+        }
+    }
+
+    Ok(RsiRequestQueueSummary {
+        entries,
+        capacity: storage.len(),
+        full: entries == storage.len(),
+    })
+}
+
+/// Appends one complete request frame to a fixed-capacity FIFO source queue.
+pub fn insert_rsi_queued_request<'a>(
+    storage: &mut [Option<RsiQueuedRequest<'a>>],
+    frame: &'a [u8],
+) -> LcsResult<RsiRequestQueueSummary> {
+    let request = rsi_queued_request_from_frame(frame)?;
+    let summary = summarize_rsi_request_queue(storage)?;
+    if summary.full {
+        return Err(LcsError::RsiRequestQueueFull {
+            capacity: storage.len(),
+        });
+    }
+
+    storage[summary.entries] = Some(request);
+    Ok(RsiRequestQueueSummary {
+        entries: summary.entries + 1,
+        capacity: summary.capacity,
+        full: summary.entries + 1 == summary.capacity,
+    })
+}
+
+/// Copies and consumes one queued request when source read semantics allow it.
+pub fn drain_rsi_request_queue_read<'a>(
+    storage: &mut [Option<RsiQueuedRequest<'a>>],
+    dst: &mut [u8],
+    nonblocking: bool,
+    fd_closing: bool,
+) -> LcsResult<RsiRequestQueueReadDrain<'a>> {
+    let summary = summarize_rsi_request_queue(storage)?;
+    let next_request = if summary.entries == 0 {
+        None
+    } else {
+        storage[0]
+    };
+    let read_plan = plan_rsi_source_read(
+        next_request.map(|request| request.frame.len()),
+        dst.len(),
+        nonblocking,
+        fd_closing,
+    )?;
+
+    match read_plan {
+        RsiReadPlan::ReturnOneCompleteRequest { request_len, .. } => {
+            let request = next_request.ok_or(LcsError::InvalidRsiRequestQueue { index: 0 })?;
+            dst[..request_len].copy_from_slice(request.frame);
+            for index in 1..summary.entries {
+                storage[index - 1] = storage[index];
+            }
+            storage[summary.entries - 1] = None;
+            Ok(RsiRequestQueueReadDrain::Copied {
+                request,
+                bytes: request_len,
+                summary: RsiRequestQueueSummary {
+                    entries: summary.entries - 1,
+                    capacity: summary.capacity,
+                    full: false,
+                },
+            })
+        }
+        RsiReadPlan::WaitForRequestOrClose => Ok(RsiRequestQueueReadDrain::WaitForRequestOrClose),
+        RsiReadPlan::ReturnEagain => Ok(RsiRequestQueueReadDrain::ReturnEagain),
+        RsiReadPlan::ReturnEmsgsize {
+            required_len,
+            consume_request,
+        } => Ok(RsiRequestQueueReadDrain::ReturnEmsgsize {
+            required_len,
+            consume_request,
+        }),
+        RsiReadPlan::WakeForClose => Ok(RsiRequestQueueReadDrain::WakeForClose),
+    }
+}
+
 /// Plans one message-oriented source-fd read without splitting queued requests.
 pub fn plan_rsi_source_read(
     next_queued_request_len: Option<usize>,
@@ -3840,6 +3982,21 @@ fn validate_frame_len(frame: &[u8], min_len: usize) -> LcsResult<()> {
         return Err(LcsError::RsiMessageLengthMismatch {
             total_len,
             actual_len: frame.len(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_rsi_queued_request(request: RsiQueuedRequest<'_>) -> LcsResult<()> {
+    let header = parse_rsi_request_header(request.frame)?;
+    if header.request_id != request.retained.request_id
+        || header.op_code != request.retained.op_code
+    {
+        return Err(LcsError::RsiQueuedRequestMetadataMismatch {
+            header_request_id: header.request_id,
+            retained_request_id: request.retained.request_id,
+            header_op_code: header.op_code,
+            retained_op_code: request.retained.op_code,
         });
     }
     Ok(())
