@@ -25,7 +25,8 @@ use crate::transaction::TransactionKernelEffectsPlan;
 use crate::transaction_log::{
     TransactionReplaySnapshotQuery, TransactionReplaySnapshotQueryKind,
     TransactionReplaySnapshotResult, TransactionReplaySnapshotResultKind,
-    TransactionReplayValueWatchScope,
+    TransactionReplaySnapshotResultTableSummary, TransactionReplayValueWatchScope,
+    insert_transaction_replay_snapshot_result,
 };
 use crate::value::{
     BlanketTombstoneAction, PlannedBlanketTombstone, PlannedValueWrite, ValidatedValueType,
@@ -134,6 +135,15 @@ pub enum RsiTransactionReplaySnapshotMaterializedResponse<'a> {
         result: TransactionReplaySnapshotResult<'a>,
         summary: RsiChildVisibilitySnapshotProjection<'a>,
     },
+}
+
+/// Result of processing one successful replay snapshot response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiTransactionReplaySnapshotStoredResponse<'q, 'out> {
+    pub response: RsiValidatedResponse,
+    pub released_record: RsiTransactionReplaySnapshotRequestRecord<'q>,
+    pub materialized: RsiTransactionReplaySnapshotMaterializedResponse<'out>,
+    pub result_summary: TransactionReplaySnapshotResultTableSummary,
 }
 
 /// One length-prefixed RSI string or byte-array field.
@@ -1519,6 +1529,54 @@ where
             )
         }
     }
+}
+
+/// Processes one matched successful replay snapshot response and releases it.
+pub fn process_transaction_replay_snapshot_success_response<'q, 'f, 'out>(
+    request_storage: &mut [Option<RsiTransactionReplaySnapshotRequestRecord<'q>>],
+    result_storage: &mut [Option<TransactionReplaySnapshotResult<'out>>],
+    frame: &'f [u8],
+    context: &LayerResolutionContext<'out>,
+    value_entry_storage: &'out mut [NamedValueEntry<'out>],
+    blanket_storage: &'out mut [BlanketTombstoneEntry<'out>],
+    path_storage: &'out mut [NamedPathEntry<'out>],
+    value_result_storage: &'out mut [EnumeratedValue<'out>],
+    subkey_result_storage: &'out mut [EnumeratedSubkey<'out>],
+) -> LcsResult<RsiTransactionReplaySnapshotStoredResponse<'q, 'out>>
+where
+    'q: 'out,
+    'f: 'out,
+{
+    let matched = match_transaction_replay_snapshot_response_record(request_storage, frame)?;
+    let request_id = matched.record.request_id;
+    let response = matched.response;
+    let parsed = parse_transaction_replay_snapshot_response_payload(matched, frame)?;
+    let materialized = materialize_transaction_replay_snapshot_response(
+        context,
+        parsed,
+        value_entry_storage,
+        blanket_storage,
+        path_storage,
+        value_result_storage,
+        subkey_result_storage,
+    )?;
+    let result = match materialized {
+        RsiTransactionReplaySnapshotMaterializedResponse::EffectiveValue { result, .. }
+        | RsiTransactionReplaySnapshotMaterializedResponse::EffectiveSubkeys { result, .. }
+        | RsiTransactionReplaySnapshotMaterializedResponse::ChildVisibility { result, .. } => {
+            result
+        }
+    };
+    let result_summary = insert_transaction_replay_snapshot_result(result_storage, result)?;
+    let released_record =
+        release_transaction_replay_snapshot_request_record(request_storage, request_id)?;
+
+    Ok(RsiTransactionReplaySnapshotStoredResponse {
+        response,
+        released_record,
+        materialized,
+        result_summary,
+    })
 }
 
 /// Writes an RSI request frame for a transaction replay snapshot query.
