@@ -18,6 +18,7 @@ BUILDTREE        := pkm-new-kunit-buildtree
 # layer cache is busted from the COPY layers onward. Layers above
 # (package install, kernel clone, Rust toolchain) stay cached.
 PKM_SOURCES := $(shell find $(CURDIR)/../kacs $(CURDIR)/../kmes \
+	$(CURDIR)/../lcs \
 	$(CURDIR)/../crates/kacs-core/src \
 	$(CURDIR)/crypto $(CURDIR)/scripts \
 	$(CURDIR)/../README.md $(CURDIR)/../pkm_kconfig $(CURDIR)/../pkm_makefile \

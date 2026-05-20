@@ -23,6 +23,10 @@ xattr="$linux_tree/fs/xattr.c"
 io_uring_rw="$linux_tree/io_uring/rw.c"
 security_core="$linux_tree/security/security.c"
 commoncap="$linux_tree/security/commoncap.c"
+pkm_makefile="$linux_tree/security/pkm/Makefile"
+lcs_source_device="$linux_tree/security/pkm/lcs/source_device.c"
+lcs_source_device_h="$linux_tree/security/pkm/lcs/source_device.h"
+lcs_kunit="$linux_tree/security/pkm/lcs/kunit.c"
 ptrace_h="$linux_tree/include/linux/ptrace.h"
 cred_h="$linux_tree/include/linux/cred.h"
 pid="$linux_tree/kernel/pid.c"
@@ -83,6 +87,10 @@ for required_source in \
 	"$io_uring_rw" \
 	"$security_core" \
 	"$commoncap" \
+	"$pkm_makefile" \
+	"$lcs_source_device" \
+	"$lcs_source_device_h" \
+	"$lcs_kunit" \
 	"$ptrace_h" \
 	"$cred_h" \
 	"$pid" \
@@ -92,6 +100,11 @@ for required_source in \
 	"$sock"; do
 	require_file "$required_source"
 done
+
+require_literal 'lcs/source_device.o' "$pkm_makefile" \
+	"generated PKM Makefile does not build the LCS source device"
+require_literal 'lcs/kunit.o' "$pkm_makefile" \
+	"generated PKM Makefile does not build the LCS KUnit suite"
 
 require_literal \
 	'extern int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,' \

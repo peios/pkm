@@ -165,6 +165,9 @@ COPY kacs/token_fd.c /tmp/pkm-src/kacs/token_fd.c
 COPY kacs/token_fd.h /tmp/pkm-src/kacs/token_fd.h
 COPY kacs/token_runtime.h /tmp/pkm-src/kacs/token_runtime.h
 COPY kacs/token_runtime.rs /tmp/pkm-src/kacs/token_runtime.rs
+COPY lcs/source_device.c /tmp/pkm-src/lcs/source_device.c
+COPY lcs/source_device.h /tmp/pkm-src/lcs/source_device.h
+COPY lcs/kunit.c /tmp/pkm-src/lcs/kunit.c
 COPY kmes/kmes.c /tmp/pkm-src/kmes/kmes.c
 COPY kmes/kmes.h /tmp/pkm-src/kmes/kmes.h
 COPY kmes/kmes_validate.rs /tmp/pkm-src/kmes/kmes_validate.rs

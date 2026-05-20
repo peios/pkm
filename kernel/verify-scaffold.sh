@@ -59,6 +59,9 @@ for required in \
 	"$repo_root/kacs/token_fd.h" \
 	"$repo_root/kacs/token_runtime.h" \
 	"$repo_root/kacs/token_runtime.rs" \
+	"$repo_root/lcs/source_device.c" \
+	"$repo_root/lcs/source_device.h" \
+	"$repo_root/lcs/kunit.c" \
 	"$repo_root/kmes/kmes.c" \
 	"$repo_root/kmes/kmes.h" \
 	"$repo_root/kmes/kmes_validate.rs" \

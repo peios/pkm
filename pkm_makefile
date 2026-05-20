@@ -3,8 +3,8 @@
 obj-$(CONFIG_SECURITY_PKM) += pkm.o
 
 pkm-y := kacs/lsm.o kacs/access_check.o kacs/caap_cache.o kacs/token_fd.o \
-	kmes/kmes.o kacs/kacs_rust.o
-pkm-$(CONFIG_SECURITY_PKM_KUNIT) += kacs/kunit.o
+	kmes/kmes.o lcs/source_device.o kacs/kacs_rust.o
+pkm-$(CONFIG_SECURITY_PKM_KUNIT) += kacs/kunit.o lcs/kunit.o
 
 # Only explicit slow-track scaffolds live here today. New objects should be
 # added deliberately as their implementation slices are opened.
