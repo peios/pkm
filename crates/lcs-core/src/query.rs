@@ -1,3 +1,4 @@
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 use crate::output_buffer::{
     OutputBufferAggregate, OutputBufferCopyPlan, OutputBufferDecision, OutputBufferRequest,
@@ -136,6 +137,11 @@ pub fn query_value_not_found_errno(outcome: &QueryValueOutcome<'_>) -> Option<Rs
     }
 }
 
+/// Projects a query-value outcome to the caller-visible Linux errno, if any.
+pub fn query_value_outcome_errno(outcome: &QueryValueOutcome<'_>) -> Option<LinuxErrno> {
+    query_value_not_found_errno(outcome).map(LinuxErrno::from)
+}
+
 /// Computes output-buffer decisions for a found query-value result.
 pub fn validate_query_value_output_buffers(
     result: &QueryValueResult<'_>,
@@ -207,6 +213,14 @@ pub fn enum_value_result_at<'a>(
     })
 }
 
+/// Projects an indexed value-enumeration outcome to Linux errno, if any.
+pub fn enum_value_outcome_errno(outcome: &EnumValueOutcome<'_>) -> Option<LinuxErrno> {
+    match outcome {
+        EnumValueOutcome::Found(_) => None,
+        EnumValueOutcome::NotFound => Some(LinuxErrno::Enoent),
+    }
+}
+
 /// Computes indexed value output-buffer decisions before output fills.
 pub fn validate_enum_value_output_buffers(
     result: &EnumValueResult<'_>,
@@ -241,6 +255,14 @@ pub fn enum_subkey_result_at<'a>(
         subkey_count: subkey.subkey_count,
         value_count: subkey.value_count,
     })
+}
+
+/// Projects an indexed subkey-enumeration outcome to Linux errno, if any.
+pub fn enum_subkey_outcome_errno(outcome: &EnumSubkeyOutcome<'_>) -> Option<LinuxErrno> {
+    match outcome {
+        EnumSubkeyOutcome::Found(_) => None,
+        EnumSubkeyOutcome::NotFound => Some(LinuxErrno::Enoent),
+    }
 }
 
 /// Computes subkey enumeration name-buffer decisions before output fills.
