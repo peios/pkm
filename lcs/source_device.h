@@ -5,6 +5,7 @@
 #include <linux/compiler_types.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/poll.h>
 #include <linux/types.h>
 #include <linux/wait.h>
 
@@ -236,6 +237,7 @@ ssize_t pkm_lcs_kunit_source_device_read_file(
 ssize_t pkm_lcs_kunit_source_device_write_file(
 	struct file *file, const void *buf, size_t count, bool fault,
 	struct pkm_lcs_source_response_result *result);
+__poll_t pkm_lcs_kunit_source_device_poll_file(struct file *file);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_SOURCE_DEVICE_H */

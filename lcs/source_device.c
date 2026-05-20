@@ -16,6 +16,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/overflow.h>
+#include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
@@ -764,6 +765,7 @@ static long pkm_lcs_source_registration_publish_locked(
 	source_fd->source_id = slot->source_id;
 	pkm_lcs_next_sequence = plan.effective_next_sequence;
 	pkm_lcs_sequence_initialized = true;
+	wake_up_interruptible(&source_fd->read_wait);
 	return 0;
 }
 
@@ -1486,6 +1488,54 @@ static ssize_t pkm_lcs_source_device_write(struct file *file,
 		file, buf, count, &pkm_lcs_default_copyin_ops, NULL);
 }
 
+static __poll_t pkm_lcs_source_device_poll(struct file *file,
+					   struct poll_table_struct *wait)
+{
+	struct pkm_lcs_source_fd *source_fd;
+	struct pkm_lcs_source_slot *slot;
+	__poll_t mask = 0;
+	bool active = false;
+
+	if (!file)
+		return EPOLLERR | EPOLLHUP;
+
+	source_fd = file->private_data;
+	if (!source_fd)
+		return EPOLLERR | EPOLLHUP;
+
+	poll_wait(file, &source_fd->read_wait, wait);
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	mutex_lock(&source_fd->queue_lock);
+
+	if (source_fd->closing) {
+		mask = EPOLLERR | EPOLLHUP;
+		goto out_unlock;
+	}
+
+	if (source_fd->state == PKM_LCS_SOURCE_FD_ACTIVE) {
+		slot = pkm_lcs_source_slot_find_locked(source_fd->source_id);
+		active = slot &&
+			 slot->status == PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE &&
+			 slot->active_fd == source_fd;
+	}
+
+	if (!active) {
+		if (source_fd->state == PKM_LCS_SOURCE_FD_ACTIVE)
+			mask = EPOLLERR | EPOLLHUP;
+		goto out_unlock;
+	}
+
+	if (source_fd->queued_request_count)
+		mask |= EPOLLIN;
+	mask |= EPOLLOUT;
+
+out_unlock:
+	mutex_unlock(&source_fd->queue_lock);
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return mask;
+}
+
 static long pkm_lcs_source_device_ioctl(struct file *file, unsigned int cmd,
 					unsigned long arg)
 {
@@ -1509,6 +1559,7 @@ static const struct file_operations pkm_lcs_source_device_fops = {
 	.open = pkm_lcs_source_device_open,
 	.read = pkm_lcs_source_device_read,
 	.write = pkm_lcs_source_device_write,
+	.poll = pkm_lcs_source_device_poll,
 	.unlocked_ioctl = pkm_lcs_source_device_ioctl,
 	.release = pkm_lcs_source_device_release,
 	.llseek = noop_llseek,
@@ -1629,6 +1680,11 @@ ssize_t pkm_lcs_kunit_source_device_write_file(
 
 	return pkm_lcs_source_device_write_file_with_ops(
 		file, (const char __user *)buf, count, &ops, result);
+}
+
+__poll_t pkm_lcs_kunit_source_device_poll_file(struct file *file)
+{
+	return pkm_lcs_source_device_poll(file, NULL);
 }
 #endif
 

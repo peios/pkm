@@ -6,6 +6,7 @@
 #include <linux/fcntl.h>
 #include <linux/fdtable.h>
 #include <linux/fs.h>
+#include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
@@ -2983,6 +2984,77 @@ static void pkm_lcs_kunit_source_write_malformed_lookup_data_succeeds(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_poll_reports_active_readiness(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x7b };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_EXPECT_EQ(
+		test, (u32)pkm_lcs_kunit_source_device_poll_file(&file),
+		(u32)EPOLLOUT);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_lookup_request(
+				1, 0xa1a2a3a4a5a6a7a8ULL, parent_guid,
+				"Child", strlen("Child"), &enqueue),
+			0L);
+	KUNIT_EXPECT_EQ(
+		test, (u32)pkm_lcs_kunit_source_device_poll_file(&file),
+		(u32)(EPOLLIN | EPOLLOUT));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	KUNIT_EXPECT_EQ(
+		test, (u32)pkm_lcs_kunit_source_device_poll_file(&file),
+		(u32)EPOLLOUT);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_poll_reports_unregistered_and_closing(
+	struct kunit *test)
+{
+	struct file file = { };
+	struct pkm_lcs_source_fd *source_fd;
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	KUNIT_EXPECT_EQ(
+		test, (u32)pkm_lcs_kunit_source_device_poll_file(&file), 0U);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	kacs_rust_token_drop(token);
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	source_fd = file.private_data;
+	KUNIT_ASSERT_NOT_NULL(test, source_fd);
+	mutex_lock(&source_fd->queue_lock);
+	source_fd->closing = true;
+	mutex_unlock(&source_fd->queue_lock);
+	KUNIT_EXPECT_EQ(
+		test, (u32)pkm_lcs_kunit_source_device_poll_file(&file),
+		(u32)(EPOLLERR | EPOLLHUP));
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_lookup_response_bridge_accepts_valid_and_empty(
 	struct kunit *test)
 {
@@ -3273,6 +3345,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_write_fault_preserves_record),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_malformed_lookup_data_succeeds),
+	KUNIT_CASE(pkm_lcs_kunit_source_poll_reports_active_readiness),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_poll_reports_unregistered_and_closing),
 	KUNIT_CASE(
 		pkm_lcs_kunit_lookup_response_bridge_accepts_valid_and_empty),
 	KUNIT_CASE(
