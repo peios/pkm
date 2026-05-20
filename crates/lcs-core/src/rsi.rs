@@ -118,6 +118,24 @@ pub enum RsiTransactionReplaySnapshotReservationPlan<'a> {
     TimeoutBeforeDispatchNoRequest,
 }
 
+/// Reason a replay snapshot request batch stopped scheduling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiTransactionReplaySnapshotBatchScheduleStop {
+    AllScheduled,
+    WaitForSlot { remaining_timeout_ms: u32 },
+    TimeoutBeforeDispatchNoRequest,
+}
+
+/// Summary of scheduling a bounded replay snapshot request batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiTransactionReplaySnapshotBatchScheduleSummary {
+    pub planned_queries: usize,
+    pub scheduled_requests: usize,
+    pub request_summary: RsiTransactionReplaySnapshotRequestTableSummary,
+    pub in_flight_after_schedule: usize,
+    pub stop: RsiTransactionReplaySnapshotBatchScheduleStop,
+}
+
 /// Validated response match for one retained transaction replay snapshot request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiTransactionReplaySnapshotResponseMatch<'a> {
@@ -1436,6 +1454,100 @@ pub fn reserve_and_schedule_transaction_replay_snapshot_query_request<'a>(
     }
 }
 
+/// Schedules a bounded prefix of replay snapshot query requests.
+pub fn reserve_and_schedule_transaction_replay_snapshot_query_batch<'a>(
+    limits: &LcsLimits,
+    counter: &mut RsiRequestIdCounter,
+    in_flight_count: usize,
+    elapsed_ms_since_reservation_attempt: u32,
+    storage: &mut [Option<RsiTransactionReplaySnapshotRequestRecord<'a>>],
+    frames: &mut [&mut [u8]],
+    queries: &[TransactionReplaySnapshotQuery<'a>],
+) -> LcsResult<RsiTransactionReplaySnapshotBatchScheduleSummary> {
+    let request_summary = summarize_transaction_replay_snapshot_request_table_internal(storage)?;
+    if queries.is_empty() {
+        return Ok(RsiTransactionReplaySnapshotBatchScheduleSummary {
+            planned_queries: 0,
+            scheduled_requests: 0,
+            request_summary,
+            in_flight_after_schedule: in_flight_count,
+            stop: RsiTransactionReplaySnapshotBatchScheduleStop::AllScheduled,
+        });
+    }
+
+    if elapsed_ms_since_reservation_attempt >= limits.request_timeout_ms {
+        return Ok(RsiTransactionReplaySnapshotBatchScheduleSummary {
+            planned_queries: queries.len(),
+            scheduled_requests: 0,
+            request_summary,
+            in_flight_after_schedule: in_flight_count,
+            stop: RsiTransactionReplaySnapshotBatchScheduleStop::TimeoutBeforeDispatchNoRequest,
+        });
+    }
+
+    let remaining_timeout_ms = limits.request_timeout_ms - elapsed_ms_since_reservation_attempt;
+    if in_flight_count >= limits.max_concurrent_rsi_requests {
+        return Ok(RsiTransactionReplaySnapshotBatchScheduleSummary {
+            planned_queries: queries.len(),
+            scheduled_requests: 0,
+            request_summary,
+            in_flight_after_schedule: in_flight_count,
+            stop: RsiTransactionReplaySnapshotBatchScheduleStop::WaitForSlot {
+                remaining_timeout_ms,
+            },
+        });
+    }
+
+    let available_slots = limits.max_concurrent_rsi_requests - in_flight_count;
+    let schedule_count = queries.len().min(available_slots);
+    prevalidate_transaction_replay_snapshot_batch_schedule(
+        counter.next_request_id(),
+        storage,
+        frames,
+        queries,
+        schedule_count,
+        request_summary,
+    )?;
+
+    let mut in_flight_after_schedule = in_flight_count;
+    for (index, query) in queries[..schedule_count].iter().copied().enumerate() {
+        let plan = reserve_and_schedule_transaction_replay_snapshot_query_request(
+            limits,
+            counter,
+            in_flight_after_schedule,
+            elapsed_ms_since_reservation_attempt,
+            storage,
+            &mut *frames[index],
+            query,
+        )?;
+        let RsiTransactionReplaySnapshotReservationPlan::DispatchNow {
+            in_flight_after_dispatch,
+            ..
+        } = plan
+        else {
+            return Err(LcsError::InvalidTransactionRuntimeState);
+        };
+        in_flight_after_schedule = in_flight_after_dispatch;
+    }
+
+    let request_summary = summarize_transaction_replay_snapshot_request_table_internal(storage)?;
+    let stop = if schedule_count == queries.len() {
+        RsiTransactionReplaySnapshotBatchScheduleStop::AllScheduled
+    } else {
+        RsiTransactionReplaySnapshotBatchScheduleStop::WaitForSlot {
+            remaining_timeout_ms,
+        }
+    };
+
+    Ok(RsiTransactionReplaySnapshotBatchScheduleSummary {
+        planned_queries: queries.len(),
+        scheduled_requests: schedule_count,
+        request_summary,
+        in_flight_after_schedule,
+        stop,
+    })
+}
+
 /// Finds one retained replay snapshot request record by request ID.
 pub fn find_transaction_replay_snapshot_request_record<'a>(
     storage: &[Option<RsiTransactionReplaySnapshotRequestRecord<'a>>],
@@ -1801,6 +1913,57 @@ pub fn transaction_replay_snapshot_query_request_frame_len(
     };
 
     checked_rsi_request_frame_len(payload_len)
+}
+
+fn prevalidate_transaction_replay_snapshot_batch_schedule(
+    next_request_id: RsiRequestId,
+    storage: &[Option<RsiTransactionReplaySnapshotRequestRecord<'_>>],
+    frames: &[&mut [u8]],
+    queries: &[TransactionReplaySnapshotQuery<'_>],
+    schedule_count: usize,
+    request_summary: RsiTransactionReplaySnapshotRequestTableSummary,
+) -> LcsResult<()> {
+    let free_request_slots = request_summary.capacity - request_summary.entries;
+    if schedule_count > free_request_slots {
+        return Err(LcsError::TransactionReplaySnapshotRequestTableFull {
+            capacity: request_summary.capacity,
+        });
+    }
+    if frames.len() < schedule_count {
+        return Err(LcsError::TransactionReplaySnapshotStorageFull {
+            field: "transaction_replay_snapshot_request_frames",
+            required: schedule_count,
+            capacity: frames.len(),
+        });
+    }
+
+    let mut request_id = next_request_id;
+    for (index, query) in queries[..schedule_count].iter().copied().enumerate() {
+        if request_id == u64::MAX {
+            return Err(LcsError::RsiRequestIdOverflow);
+        }
+        if storage
+            .iter()
+            .flatten()
+            .any(|existing| existing.request_id == request_id)
+        {
+            return Err(LcsError::DuplicateTransactionReplaySnapshotRequest { request_id });
+        }
+
+        let required_frame_len = transaction_replay_snapshot_query_request_frame_len(query)?;
+        if frames[index].len() < required_frame_len {
+            return Err(LcsError::RsiFrameBufferTooSmall {
+                len: frames[index].len(),
+                required: required_frame_len,
+            });
+        }
+
+        request_id = request_id
+            .checked_add(1)
+            .ok_or(LcsError::RsiRequestIdOverflow)?;
+    }
+
+    Ok(())
 }
 
 fn transaction_replay_snapshot_query_op_code(query: TransactionReplaySnapshotQueryKind<'_>) -> u16 {
