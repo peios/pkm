@@ -6,15 +6,17 @@ use core::{slice, str};
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
     classify_hive_route, current_user_sid_component_from_binary_sid,
-    plan_registry_open_pre_resolution_access, plan_source_registration_sequence_update,
+    plan_registry_ioctl_fixed_fd_access_gate, plan_registry_open_pre_resolution_access,
+    plan_registry_security_info_fd_access_gate, plan_source_registration_sequence_update,
+    registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
     registry_open_pre_resolution_linux_errno, route_hive, route_routable_path_hive,
     source_registration_error_linux_errno, source_registration_hive_scope,
     source_slot_hive_status, validate_key_fd_open_view, validate_registry_open_flags,
     validate_source_registration, validate_source_slots, validate_syscall_path_c_string,
     CurrentUserRewrite, HiveRouteOutcome, HiveView, KeyFdOpenView, KeyWatchState, LcsError,
-    LcsLimits, LinuxErrno, PathKind, RegisteredHiveIdentity, RegistryOpenPreResolutionAccessPlan,
-    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
-    SourceSlotStatus, SourceSlotView,
+    LcsLimits, LinuxErrno, PathKind, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
+    RegistryOpenPreResolutionAccessPlan, SourceRegistrationDecision, SourceRegistrationHive,
+    SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -93,6 +95,15 @@ fn key_fd_open_view_error_return(err: LcsError) -> c_int {
         _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
+}
+
+fn ioctl_access_gate_return(
+    plan: crate::lcs_core::RegistryIoctlFdAccessGatePlan,
+) -> c_int {
+    match registry_ioctl_fd_access_gate_errno(&plan) {
+        Some(errno) => errno.negated_return() as c_int,
+        None => 0,
+    }
 }
 
 #[no_mangle]
@@ -206,6 +217,44 @@ pub unsafe extern "C" fn lcs_rust_validate_key_fd_open_view(
     match validate_key_fd_open_view(&LcsLimits::DEFAULT, &fd) {
         Ok(()) => 0,
         Err(err) => key_fd_open_view_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_key_fd_fixed_ioctl_access_gate(
+    granted_access: u32,
+    ioctl_number: u32,
+) -> c_int {
+    if ioctl_number > u8::MAX as u32 {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let ioctl_number = ioctl_number as u8;
+
+    match plan_registry_ioctl_fixed_fd_access_gate(granted_access, ioctl_number) {
+        Ok(Some(plan)) => ioctl_access_gate_return(plan),
+        Ok(None) | Err(_) => LinuxErrno::Einval.negated_return() as c_int,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_key_fd_security_ioctl_access_gate(
+    granted_access: u32,
+    ioctl_number: u32,
+    security_info: u32,
+) -> c_int {
+    if ioctl_number > u8::MAX as u32 {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let ioctl_number = ioctl_number as u8;
+
+    let operation = match registry_ioctl_access_requirement(ioctl_number) {
+        Ok(RegistryIoctlAccessRequirement::KeySecurityInfo(operation)) => operation,
+        Ok(_) | Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+
+    match plan_registry_security_info_fd_access_gate(granted_access, operation, security_info) {
+        Ok(plan) => ioctl_access_gate_return(plan),
+        Err(_) => LinuxErrno::Einval.negated_return() as c_int,
     }
 }
 

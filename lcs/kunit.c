@@ -1417,6 +1417,128 @@ static void pkm_lcs_kunit_key_fd_snapshot_rejects_non_key_fd(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static long pkm_lcs_kunit_publish_key_fd_with_access(u32 granted_access)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0x51 },
+		{ 0x52 },
+	};
+	struct pkm_lcs_key_fd_publish_input input = {
+		.source_id = 11,
+		.granted_access = granted_access,
+		.resolved_path = path,
+		.ancestor_guids = ancestors,
+		.path_component_count = 2,
+	};
+
+	memcpy(input.key_guid, ancestors[1], sizeof(input.key_guid));
+	return pkm_lcs_key_fd_publish(&input);
+}
+
+static void pkm_lcs_kunit_key_fd_fixed_ioctl_access_gates(
+	struct kunit *test)
+{
+	long fd;
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_QUERY_VALUE);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_fixed_ioctl_access(
+				(int)fd, REG_IOC_QUERY_VALUE),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_fixed_ioctl_access(
+				(int)fd, REG_IOC_SET_VALUE),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_fixed_ioctl_access(
+				(int)fd, REG_IOC_GET_SECURITY),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_fixed_ioctl_access(
+				(int)fd,
+				_IO('X', REG_IOC_QUERY_VALUE_NR)),
+			(long)-EINVAL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_key_fd_security_ioctl_access_gates(
+	struct kunit *test)
+{
+	long fd;
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(READ_CONTROL |
+						     ACCESS_SYSTEM_SECURITY |
+						     WRITE_DAC);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_security_ioctl_access(
+				(int)fd, REG_IOC_GET_SECURITY,
+				DACL_SECURITY_INFORMATION |
+					SACL_SECURITY_INFORMATION),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_security_ioctl_access(
+				(int)fd, REG_IOC_SET_SECURITY,
+				DACL_SECURITY_INFORMATION),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_security_ioctl_access(
+				(int)fd, REG_IOC_SET_SECURITY,
+				OWNER_SECURITY_INFORMATION),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_security_ioctl_access(
+				(int)fd, REG_IOC_GET_SECURITY, 0),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_security_ioctl_access(
+				(int)fd, REG_IOC_GET_SECURITY, 0x80U),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_security_ioctl_access(
+				(int)fd, REG_IOC_QUERY_VALUE,
+				DACL_SECURITY_INFORMATION),
+			(long)-EINVAL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds(
+	struct kunit *test)
+{
+	int fd;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_fixed_ioctl_access(
+				-1, REG_IOC_QUERY_VALUE),
+			(long)-EBADF);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_security_ioctl_access(
+				-1, REG_IOC_GET_SECURITY,
+				DACL_SECURITY_INFORMATION),
+			(long)-EBADF);
+
+	fd = anon_inode_getfd("lcs-not-key", &pkm_lcs_kunit_non_key_fops,
+			      NULL, O_CLOEXEC);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_fixed_ioctl_access(
+				fd, REG_IOC_QUERY_VALUE),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_check_security_ioctl_access(
+				fd, REG_IOC_GET_SECURITY,
+				DACL_SECURITY_INFORMATION),
+			(long)-EINVAL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -1462,6 +1584,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_deep_copies_input),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_rejects_malformed_state),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_snapshot_rejects_non_key_fd),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_fixed_ioctl_access_gates),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_gates),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds),
 	{ }
 };
 

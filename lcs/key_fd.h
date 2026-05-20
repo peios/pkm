@@ -34,5 +34,8 @@ struct pkm_lcs_key_fd_snapshot {
 
 long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input);
 long pkm_lcs_key_fd_snapshot(int fd, struct pkm_lcs_key_fd_snapshot *out);
+long pkm_lcs_key_fd_check_fixed_ioctl_access(int fd, unsigned int cmd);
+long pkm_lcs_key_fd_check_security_ioctl_access(int fd, unsigned int cmd,
+						u32 security_info);
 
 #endif /* _SECURITY_PKM_LCS_KEY_FD_H */

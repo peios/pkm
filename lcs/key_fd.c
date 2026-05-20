@@ -18,6 +18,8 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 
+#include <pkm/lcs.h>
+
 #include "key_fd.h"
 
 struct pkm_lcs_key_fd_string_view {
@@ -43,6 +45,11 @@ extern int lcs_rust_validate_key_fd_open_view(
 	const struct pkm_lcs_key_fd_string_view *path_components,
 	size_t path_component_count,
 	const u8 (*ancestor_guids)[PKM_LCS_GUID_BYTES], size_t ancestor_count);
+extern int lcs_rust_key_fd_fixed_ioctl_access_gate(u32 granted_access,
+						   u32 ioctl_number);
+extern int lcs_rust_key_fd_security_ioctl_access_gate(u32 granted_access,
+						      u32 ioctl_number,
+						      u32 security_info);
 
 static void pkm_lcs_key_fd_free(struct pkm_lcs_key_fd *key_fd)
 {
@@ -204,6 +211,73 @@ long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input)
 	}
 
 	return fd;
+}
+
+static long pkm_lcs_key_fd_get(int fd, struct fd *held,
+			       struct pkm_lcs_key_fd **key_fd_out)
+{
+	struct file *file;
+
+	if (!held || !key_fd_out)
+		return -EINVAL;
+	*key_fd_out = NULL;
+
+	*held = fdget(fd);
+	file = fd_file(*held);
+	if (!file)
+		return -EBADF;
+
+	if (file->f_op != &pkm_lcs_key_fd_fops) {
+		fdput(*held);
+		return -EINVAL;
+	}
+
+	*key_fd_out = file->private_data;
+	if (!*key_fd_out) {
+		fdput(*held);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static long pkm_lcs_key_fd_check_ioctl_common(
+	int fd, unsigned int cmd,
+	int (*gate)(u32 granted_access, u32 ioctl_number),
+	u32 security_info, bool has_security_info)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	if (_IOC_TYPE(cmd) != REG_IOC_TYPE)
+		return -EINVAL;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	if (has_security_info)
+		ret = lcs_rust_key_fd_security_ioctl_access_gate(
+			key_fd->granted_access, _IOC_NR(cmd), security_info);
+	else
+		ret = gate(key_fd->granted_access, _IOC_NR(cmd));
+
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_key_fd_check_fixed_ioctl_access(int fd, unsigned int cmd)
+{
+	return pkm_lcs_key_fd_check_ioctl_common(
+		fd, cmd, lcs_rust_key_fd_fixed_ioctl_access_gate, 0, false);
+}
+
+long pkm_lcs_key_fd_check_security_ioctl_access(int fd, unsigned int cmd,
+						u32 security_info)
+{
+	return pkm_lcs_key_fd_check_ioctl_common(
+		fd, cmd, NULL, security_info, true);
 }
 
 static void pkm_lcs_key_fd_copy_component_snapshot(char *dst, u32 *len_out,
