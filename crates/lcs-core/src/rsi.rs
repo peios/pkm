@@ -179,6 +179,20 @@ pub enum RsiSourceWriteResponsePlan {
     },
 }
 
+/// Projects a source fd `write()` response plan to a concrete Linux errno.
+pub fn rsi_source_write_response_errno(plan: &RsiSourceWriteResponsePlan) -> Option<LinuxErrno> {
+    match plan {
+        RsiSourceWriteResponsePlan::RejectSourceWrite {
+            source_write_errno, ..
+        }
+        | RsiSourceWriteResponsePlan::FailClosed {
+            source_write_errno, ..
+        } => Some(LinuxErrno::from(*source_write_errno)),
+        RsiSourceWriteResponsePlan::AcceptResponse { .. }
+        | RsiSourceWriteResponsePlan::MalformedSourceData { .. } => None,
+    }
+}
+
 /// Retained RSI request metadata for one transaction replay snapshot query.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiTransactionReplaySnapshotRequestRecord<'a> {
