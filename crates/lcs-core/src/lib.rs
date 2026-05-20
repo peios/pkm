@@ -291,7 +291,7 @@ pub use rsi::{
     write_rsi_lookup_request_frame, write_rsi_path_entry_request_frame,
     write_rsi_query_values_request_frame, write_rsi_read_key_request_frame,
     write_rsi_set_blanket_tombstone_request_frame, write_rsi_set_value_request_frame,
-    write_rsi_write_key_request_frame,
+    write_rsi_write_key_request_frame, write_transaction_replay_snapshot_query_request_frame,
 };
 pub use security::{
     RegistryGetSecurityOutputBufferDecision, RegistryGetSecurityPlan,

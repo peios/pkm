@@ -17,6 +17,10 @@ use crate::path::{
 use crate::resolution::{Guid, PathTarget, ValidatedPathEntryWrite};
 use crate::security::RegistrySetSecurityPlan;
 use crate::transaction::TransactionKernelEffectsPlan;
+use crate::transaction_log::{
+    TransactionReplaySnapshotQuery, TransactionReplaySnapshotQueryKind,
+    TransactionReplayValueWatchScope,
+};
 use crate::value::{
     BlanketTombstoneAction, PlannedBlanketTombstone, PlannedValueWrite, ValidatedValueType,
     validate_value_data_len, validate_value_write_type,
@@ -1161,6 +1165,56 @@ pub fn write_planned_rsi_set_value_request_frame(
         planned.write.sequence,
         planned.write.expected_sequence.unwrap_or(0),
     )
+}
+
+/// Writes an RSI request frame for a transaction replay snapshot query.
+pub fn write_transaction_replay_snapshot_query_request_frame(
+    dst: &mut [u8],
+    request_id: RsiRequestId,
+    query: TransactionReplaySnapshotQuery<'_>,
+) -> LcsResult<RsiBuiltRequest> {
+    const COMMITTED_STATE_TXN_ID: u64 = 0;
+
+    match query.kind {
+        TransactionReplaySnapshotQueryKind::EffectiveValue { key_guid, scope } => match scope {
+            TransactionReplayValueWatchScope::NamedValue { name } => {
+                write_rsi_query_values_request_frame(
+                    dst,
+                    request_id,
+                    COMMITTED_STATE_TXN_ID,
+                    key_guid,
+                    name.as_bytes(),
+                    false,
+                )
+            }
+            TransactionReplayValueWatchScope::AllValues => write_rsi_query_values_request_frame(
+                dst,
+                request_id,
+                COMMITTED_STATE_TXN_ID,
+                key_guid,
+                b"",
+                true,
+            ),
+        },
+        TransactionReplaySnapshotQueryKind::EffectiveSubkeys { parent_guid } => {
+            write_rsi_enum_children_request_frame(
+                dst,
+                request_id,
+                COMMITTED_STATE_TXN_ID,
+                parent_guid,
+            )
+        }
+        TransactionReplaySnapshotQueryKind::ChildVisibility {
+            parent_guid,
+            child_name,
+        } => write_rsi_lookup_request_frame(
+            dst,
+            request_id,
+            COMMITTED_STATE_TXN_ID,
+            parent_guid,
+            child_name.as_bytes(),
+        ),
+    }
 }
 
 /// Writes a complete RSI_DELETE_VALUE_ENTRY request frame.
