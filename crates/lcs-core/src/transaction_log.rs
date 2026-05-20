@@ -303,6 +303,16 @@ pub struct TransactionReplaySnapshotResult<'a> {
     pub kind: TransactionReplaySnapshotResultKind<'a>,
 }
 
+/// Summary of fixed-capacity replay snapshot result storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionReplaySnapshotResultTableSummary {
+    pub entries: usize,
+    pub capacity: usize,
+    pub effective_value_results: usize,
+    pub effective_subkey_results: usize,
+    pub child_visibility_results: usize,
+}
+
 impl TransactionMutationLogRecord<'_> {
     pub const fn operation_index(&self) -> TransactionOperationIndex {
         match self {
@@ -326,6 +336,105 @@ pub fn summarize_transaction_mutation_log(
     storage: &[Option<TransactionMutationLogRecord<'_>>],
 ) -> LcsResult<TransactionMutationLogStorageSummary> {
     Ok(summarize_transaction_mutation_log_internal(storage)?.summary)
+}
+
+/// Summarizes fixed-capacity replay snapshot result storage.
+pub fn summarize_transaction_replay_snapshot_result_table(
+    storage: &[Option<TransactionReplaySnapshotResult<'_>>],
+) -> LcsResult<TransactionReplaySnapshotResultTableSummary> {
+    let mut summary = TransactionReplaySnapshotResultTableSummary {
+        entries: 0,
+        capacity: storage.len(),
+        effective_value_results: 0,
+        effective_subkey_results: 0,
+        child_visibility_results: 0,
+    };
+    let mut seen_empty = false;
+
+    for (index, slot) in storage.iter().enumerate() {
+        let Some(result) = slot else {
+            seen_empty = true;
+            continue;
+        };
+        if seen_empty {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "replay_snapshot.result_table_dense_prefix",
+            });
+        }
+        validate_transaction_replay_snapshot_result(result)?;
+        for prior in &storage[..index] {
+            let Some(prior_result) = prior else {
+                continue;
+            };
+            if transaction_replay_snapshot_results_same_identity(result, prior_result) {
+                return Err(LcsError::InvalidTransactionMutationLogEntry {
+                    field: "replay_snapshot.result_duplicate",
+                });
+            }
+        }
+        summary.entries += 1;
+        match result.kind {
+            TransactionReplaySnapshotResultKind::EffectiveValue { .. } => {
+                summary.effective_value_results += 1;
+            }
+            TransactionReplaySnapshotResultKind::EffectiveSubkeys { .. } => {
+                summary.effective_subkey_results += 1;
+            }
+            TransactionReplaySnapshotResultKind::ChildVisibility { .. } => {
+                summary.child_visibility_results += 1;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Inserts one materialized replay snapshot result into fixed-capacity storage.
+pub fn insert_transaction_replay_snapshot_result<'a>(
+    storage: &mut [Option<TransactionReplaySnapshotResult<'a>>],
+    result: TransactionReplaySnapshotResult<'a>,
+) -> LcsResult<TransactionReplaySnapshotResultTableSummary> {
+    validate_transaction_replay_snapshot_result(&result)?;
+    let summary = summarize_transaction_replay_snapshot_result_table(storage)?;
+    for existing in storage[..summary.entries].iter().flatten() {
+        if transaction_replay_snapshot_results_same_identity(&result, existing) {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "replay_snapshot.result_duplicate",
+            });
+        }
+    }
+    if summary.entries == summary.capacity {
+        return Err(LcsError::TransactionReplaySnapshotStorageFull {
+            field: "replay_snapshot.results",
+            required: summary
+                .entries
+                .checked_add(1)
+                .ok_or(LcsError::RsiPayloadLengthOverflow)?,
+            capacity: summary.capacity,
+        });
+    }
+    storage[summary.entries] = Some(result);
+    summarize_transaction_replay_snapshot_result_table(storage)
+}
+
+/// Visits stored replay snapshot results in deterministic table order.
+pub fn for_each_transaction_replay_snapshot_result<'a, F>(
+    storage: &[Option<TransactionReplaySnapshotResult<'a>>],
+    mut visitor: F,
+) -> LcsResult<TransactionReplaySnapshotResultTableSummary>
+where
+    F: FnMut(TransactionReplaySnapshotResult<'a>) -> LcsResult<()>,
+{
+    let summary = summarize_transaction_replay_snapshot_result_table(storage)?;
+    for slot in &storage[..summary.entries] {
+        let Some(result) = slot else {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "replay_snapshot.result_table_dense_prefix",
+            });
+        };
+        visitor(*result)?;
+    }
+    Ok(summary)
 }
 
 /// Appends one validated transaction mutation-log record before source dispatch.
@@ -1330,6 +1439,71 @@ fn require_no_replay_snapshot_results(
         }
     }
     Ok(())
+}
+
+fn validate_transaction_replay_snapshot_result(
+    result: &TransactionReplaySnapshotResult<'_>,
+) -> LcsResult<()> {
+    if result.operation_index == 0 {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "replay_snapshot.operation_index",
+        });
+    }
+    match result.kind {
+        TransactionReplaySnapshotResultKind::EffectiveValue { key_guid, .. } => {
+            validate_replay_guid("replay_snapshot.key_guid", key_guid)
+        }
+        TransactionReplaySnapshotResultKind::EffectiveSubkeys { parent_guid, .. }
+        | TransactionReplaySnapshotResultKind::ChildVisibility { parent_guid, .. } => {
+            validate_replay_guid("replay_snapshot.parent_guid", parent_guid)
+        }
+    }
+}
+
+fn transaction_replay_snapshot_results_same_identity(
+    left: &TransactionReplaySnapshotResult<'_>,
+    right: &TransactionReplaySnapshotResult<'_>,
+) -> bool {
+    if left.phase != right.phase || left.operation_index != right.operation_index {
+        return false;
+    }
+    match (left.kind, right.kind) {
+        (
+            TransactionReplaySnapshotResultKind::EffectiveValue {
+                key_guid: left_guid,
+                scope: left_scope,
+                ..
+            },
+            TransactionReplaySnapshotResultKind::EffectiveValue {
+                key_guid: right_guid,
+                scope: right_scope,
+                ..
+            },
+        ) => left_guid == right_guid && left_scope == right_scope,
+        (
+            TransactionReplaySnapshotResultKind::EffectiveSubkeys {
+                parent_guid: left_guid,
+                ..
+            },
+            TransactionReplaySnapshotResultKind::EffectiveSubkeys {
+                parent_guid: right_guid,
+                ..
+            },
+        ) => left_guid == right_guid,
+        (
+            TransactionReplaySnapshotResultKind::ChildVisibility {
+                parent_guid: left_guid,
+                child_name: left_name,
+                ..
+            },
+            TransactionReplaySnapshotResultKind::ChildVisibility {
+                parent_guid: right_guid,
+                child_name: right_name,
+                ..
+            },
+        ) => left_guid == right_guid && casefold_eq(left_name, right_name),
+        _ => false,
+    }
 }
 
 fn require_replay_snapshot_result_categories(
