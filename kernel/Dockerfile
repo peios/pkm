@@ -122,6 +122,9 @@ RUN scripts/config \
         --set-val SATA_AHCI y \
         --set-val BLK_DEV_SR y \
         --set-val ISO9660_FS y \
+        --set-val FAT_FS y \
+        --set-val VFAT_FS y \
+        --set-val NLS_ISO8859_1 y \
         --set-val SQUASHFS y \
         --set-val SQUASHFS_ZSTD y && \
     make LLVM=1 olddefconfig
@@ -169,6 +172,10 @@ COPY lcs/source_device.c /tmp/pkm-src/lcs/source_device.c
 COPY lcs/source_device.h /tmp/pkm-src/lcs/source_device.h
 COPY lcs/kunit.c /tmp/pkm-src/lcs/kunit.c
 COPY lcs/rust_ingress.rs /tmp/pkm-src/lcs/rust_ingress.rs
+COPY lcs/key_fd.c /tmp/pkm-src/lcs/key_fd.c
+COPY lcs/key_fd.h /tmp/pkm-src/lcs/key_fd.h
+COPY lcs/rsi.c /tmp/pkm-src/lcs/rsi.c
+COPY lcs/rsi.h /tmp/pkm-src/lcs/rsi.h
 COPY kmes/kmes.c /tmp/pkm-src/kmes/kmes.c
 COPY kmes/kmes.h /tmp/pkm-src/kmes/kmes.h
 COPY kmes/kmes_validate.rs /tmp/pkm-src/kmes/kmes_validate.rs
