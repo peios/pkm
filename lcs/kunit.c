@@ -1141,6 +1141,122 @@ static void pkm_lcs_kunit_open_preflight_rejects_fail_closed(
 	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 0U);
 }
 
+static void pkm_lcs_kunit_open_preflight_route_success(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	const char path_src[] = "Machine\\Software";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct pkm_lcs_open_preflight_plan plan = { };
+	struct pkm_lcs_hive_route_result route = { };
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, name_src, 1, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_absolute_path_preflight_for_token(
+				token, &ops, (const char __user *)path_src,
+				KEY_QUERY_VALUE, REG_OPEN_LINK, false, NULL, 0,
+				&plan, &route),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_QUERY_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.mapped_desired_access, KEY_QUERY_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 1U);
+	KUNIT_EXPECT_EQ(test, route.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, route.root_guid[0], 1U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_open_preflight_route_stops_before_usercopy(
+	struct kunit *test)
+{
+	const char path_src[] = "Machine\\Software";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_open_preflight_plan plan = { };
+	struct pkm_lcs_hive_route_result route = {
+		.source_id = 99,
+		.root_guid = { 88 },
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_absolute_path_preflight_for_token(
+				NULL, &ops, (const char __user *)path_src, 0, 0,
+				false, NULL, 0, &plan, &route),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 0U);
+	KUNIT_EXPECT_EQ(test, route.source_id, 0U);
+	KUNIT_EXPECT_EQ(test, route.root_guid[0], 0U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_absolute_path_preflight_for_token(
+				NULL, &ops, (const char __user *)path_src,
+				KEY_QUERY_VALUE, REG_OPEN_LINK | 0x80U, false,
+				NULL, 0, &plan, &route),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 0U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_absolute_path_preflight_for_token(
+				NULL, &ops, (const char __user *)path_src,
+				KEY_QUERY_VALUE, 0, false, NULL, 0, NULL,
+				&route),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+}
+
+static void pkm_lcs_kunit_open_preflight_route_copy_fault_keeps_route_empty(
+	struct kunit *test)
+{
+	const char path_src[] = "Machine\\Software";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = {
+		.fault_strlen_src = path_src,
+	};
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_open_preflight_plan plan = { };
+	struct pkm_lcs_hive_route_result route = {
+		.source_id = 99,
+		.root_guid = { 88 },
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_absolute_path_preflight_for_token(
+				NULL, &ops, (const char __user *)path_src,
+				KEY_QUERY_VALUE, 0, false, NULL, 0, &plan,
+				&route),
+			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_QUERY_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 1U);
+	KUNIT_EXPECT_EQ(test, route.source_id, 0U);
+	KUNIT_EXPECT_EQ(test, route.root_guid[0], 0U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -1178,6 +1294,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_user_absolute_path_copy_routes_current_user),
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_accepts_valid_masks),
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_rejects_fail_closed),
+	KUNIT_CASE(pkm_lcs_kunit_open_preflight_route_success),
+	KUNIT_CASE(pkm_lcs_kunit_open_preflight_route_stops_before_usercopy),
+	KUNIT_CASE(
+		pkm_lcs_kunit_open_preflight_route_copy_fault_keeps_route_empty),
 	{ }
 };
 

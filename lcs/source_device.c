@@ -679,6 +679,28 @@ long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
 	return lcs_rust_open_preflight(desired_access, flags, plan);
 }
 
+long pkm_lcs_open_user_absolute_path_preflight_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const char __user *upath, u32 desired_access, u32 flags,
+	bool rewrite_current_user, const u8 (*scope_guids)[16],
+	u32 scope_count, struct pkm_lcs_open_preflight_plan *plan,
+	struct pkm_lcs_hive_route_result *route)
+{
+	long ret;
+
+	if (!plan || !route)
+		return -EINVAL;
+
+	memset(route, 0, sizeof(*route));
+	ret = pkm_lcs_open_preflight(desired_access, flags, plan);
+	if (ret)
+		return ret;
+
+	return pkm_lcs_route_user_absolute_path_for_token(
+		token, ops, upath, rewrite_current_user, scope_guids,
+		scope_count, route);
+}
+
 static int pkm_lcs_source_device_open(struct inode *inode, struct file *file)
 {
 	return pkm_lcs_source_device_open_file_for_token(

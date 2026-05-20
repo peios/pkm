@@ -133,6 +133,12 @@ long pkm_lcs_route_user_absolute_path_for_token(
 	struct pkm_lcs_hive_route_result *result);
 long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
 			    struct pkm_lcs_open_preflight_plan *plan);
+long pkm_lcs_open_user_absolute_path_preflight_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const char __user *upath, u32 desired_access, u32 flags,
+	bool rewrite_current_user, const u8 (*scope_guids)[16],
+	u32 scope_count, struct pkm_lcs_open_preflight_plan *plan,
+	struct pkm_lcs_hive_route_result *route);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_lcs_kunit_reset_source_table(void);
