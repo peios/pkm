@@ -348,10 +348,13 @@ pub use transaction_log::{
     TransactionMutationCommitWork, TransactionMutationLogAppendPlan,
     TransactionMutationLogDispositionPlan, TransactionMutationLogRecord,
     TransactionMutationLogStorageSummary, TransactionMutationReplaySummary,
-    append_transaction_mutation_log_record, clear_transaction_mutation_log,
-    plan_transaction_mutation_log_disposition, summarize_transaction_mutation_log,
-    summarize_transaction_mutation_log_replay, transaction_mutation_log_record_commit_work,
+    TransactionReplayValueWatchScope, TransactionReplayWatchInput,
+    TransactionReplayWatchInputSummary, append_transaction_mutation_log_record,
+    clear_transaction_mutation_log, plan_transaction_mutation_log_disposition,
+    summarize_transaction_mutation_log, summarize_transaction_mutation_log_replay,
+    summarize_transaction_replay_watch_inputs, transaction_mutation_log_record_commit_work,
     transaction_mutation_log_record_watch_batch_member,
+    transaction_mutation_log_record_watch_replay_input,
 };
 pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,

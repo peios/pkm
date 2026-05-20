@@ -1,6 +1,10 @@
+use crate::config::LcsLimits;
 use crate::constants::REG_WATCH_SD_CHANGED;
 use crate::error::{LcsError, LcsResult};
 use crate::key_path::TransactionKeyPathMutationLogEntry;
+use crate::path::{
+    validate_key_component_bytes, validate_layer_name_bytes, validate_value_name_bytes,
+};
 use crate::transaction::{
     TransactionKernelEffectsPlan, TransactionMutationLogEntry, TransactionMutationLogKind,
     TransactionOperationIndex,
@@ -9,6 +13,7 @@ use crate::value::TransactionValueMutationLogEntry;
 use crate::watch::{TransactionWatchBatchMember, WatchMutationContext};
 
 use crate::resolution::Guid;
+use crate::source::NIL_GUID;
 
 /// One kernel-owned transaction mutation-log record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,6 +106,59 @@ pub struct TransactionMutationReplaySummary {
     pub effective_subkey_recomputations: usize,
     pub orphan_evaluations: usize,
     pub new_key_publications: usize,
+}
+
+/// Effective-value source snapshot scope needed for transaction watch replay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionReplayValueWatchScope<'a> {
+    NamedValue { name: &'a str },
+    AllValues,
+}
+
+/// Ordered watch replay input selected from one mutation-log record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionReplayWatchInput<'a> {
+    DirectSecurity {
+        operation_index: TransactionOperationIndex,
+        changed_key_guid: Guid,
+        watch_mutation: WatchMutationContext<'a>,
+    },
+    EffectiveValue {
+        operation_index: TransactionOperationIndex,
+        kind: TransactionMutationLogKind,
+        key_guid: Guid,
+        scope: TransactionReplayValueWatchScope<'a>,
+        layer: &'a str,
+        sequence: Option<u64>,
+        requires_before_snapshot: bool,
+        requires_after_snapshot: bool,
+    },
+    EffectiveSubkey {
+        operation_index: TransactionOperationIndex,
+        kind: TransactionMutationLogKind,
+        parent_guid: Guid,
+        child_name: &'a str,
+        layer: &'a str,
+        target_guid: Option<Guid>,
+        sequence: Option<u64>,
+        requires_before_snapshot: bool,
+        requires_after_snapshot: bool,
+        evaluate_orphaning: bool,
+        publish_new_key_guid: bool,
+    },
+}
+
+/// Aggregate source-query/watch-input work for one transaction mutation log.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionReplayWatchInputSummary {
+    pub entries: usize,
+    pub capacity: usize,
+    pub direct_security_mutations: usize,
+    pub named_value_snapshot_inputs: usize,
+    pub all_value_snapshot_inputs: usize,
+    pub effective_subkey_snapshot_inputs: usize,
+    pub requires_before_commit_source_queries: bool,
+    pub requires_after_commit_source_queries: bool,
 }
 
 impl TransactionMutationLogRecord<'_> {
@@ -291,6 +349,148 @@ pub fn summarize_transaction_mutation_log_replay(
     Ok(replay_summary)
 }
 
+/// Converts one validated mutation-log record into commit-time watch replay input.
+pub fn transaction_mutation_log_record_watch_replay_input<'a>(
+    limits: &LcsLimits,
+    record: &TransactionMutationLogRecord<'a>,
+) -> LcsResult<TransactionReplayWatchInput<'a>> {
+    let kind = record.kind();
+    Ok(match transaction_mutation_log_record_commit_work(record)? {
+        TransactionMutationCommitWork::Security {
+            operation_index,
+            changed_key_guid,
+            watch_mutation,
+            ..
+        } => {
+            validate_replay_watch_mutation(limits, &watch_mutation)?;
+            TransactionReplayWatchInput::DirectSecurity {
+                operation_index,
+                changed_key_guid,
+                watch_mutation,
+            }
+        }
+        TransactionMutationCommitWork::Value {
+            operation_index,
+            key_guid,
+            value_name,
+            layer,
+            sequence,
+            recompute_effective_value_events,
+            ..
+        } => {
+            validate_replay_guid("value.key_guid", key_guid)?;
+            let layer = validate_layer_name_bytes(layer.as_bytes(), limits)?;
+            let scope = match value_name {
+                Some(name) => TransactionReplayValueWatchScope::NamedValue {
+                    name: validate_value_name_bytes(name.as_bytes(), limits)?,
+                },
+                None => TransactionReplayValueWatchScope::AllValues,
+            };
+            TransactionReplayWatchInput::EffectiveValue {
+                operation_index,
+                kind,
+                key_guid,
+                scope,
+                layer,
+                sequence,
+                requires_before_snapshot: recompute_effective_value_events,
+                requires_after_snapshot: recompute_effective_value_events,
+            }
+        }
+        TransactionMutationCommitWork::KeyPath {
+            operation_index,
+            parent_guid,
+            child_name,
+            layer,
+            target_guid,
+            sequence,
+            recompute_effective_subkey_events,
+            evaluate_orphaning,
+            publish_new_key_guid,
+            ..
+        } => {
+            validate_replay_guid("key_path.parent_guid", parent_guid)?;
+            if let Some(target_guid) = target_guid {
+                validate_replay_guid("key_path.target_guid", target_guid)?;
+            }
+            let child_name = validate_key_component_bytes(child_name.as_bytes(), limits)?;
+            let layer = validate_layer_name_bytes(layer.as_bytes(), limits)?;
+            TransactionReplayWatchInput::EffectiveSubkey {
+                operation_index,
+                kind,
+                parent_guid,
+                child_name,
+                layer,
+                target_guid,
+                sequence,
+                requires_before_snapshot: recompute_effective_subkey_events,
+                requires_after_snapshot: recompute_effective_subkey_events,
+                evaluate_orphaning,
+                publish_new_key_guid,
+            }
+        }
+    })
+}
+
+/// Summarizes ordered watch replay inputs after a successful transaction commit.
+pub fn summarize_transaction_replay_watch_inputs(
+    limits: &LcsLimits,
+    storage: &[Option<TransactionMutationLogRecord<'_>>],
+) -> LcsResult<TransactionReplayWatchInputSummary> {
+    let storage_summary = summarize_transaction_mutation_log_internal(storage)?.summary;
+    let mut summary = TransactionReplayWatchInputSummary {
+        entries: storage_summary.entries,
+        capacity: storage_summary.capacity,
+        direct_security_mutations: 0,
+        named_value_snapshot_inputs: 0,
+        all_value_snapshot_inputs: 0,
+        effective_subkey_snapshot_inputs: 0,
+        requires_before_commit_source_queries: false,
+        requires_after_commit_source_queries: false,
+    };
+
+    for slot in &storage[..storage_summary.entries] {
+        let Some(record) = slot else {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "transaction_log.dense_prefix",
+            });
+        };
+        match transaction_mutation_log_record_watch_replay_input(limits, record)? {
+            TransactionReplayWatchInput::DirectSecurity { .. } => {
+                summary.direct_security_mutations += 1;
+            }
+            TransactionReplayWatchInput::EffectiveValue {
+                scope,
+                requires_before_snapshot,
+                requires_after_snapshot,
+                ..
+            } => {
+                match scope {
+                    TransactionReplayValueWatchScope::NamedValue { .. } => {
+                        summary.named_value_snapshot_inputs += 1;
+                    }
+                    TransactionReplayValueWatchScope::AllValues => {
+                        summary.all_value_snapshot_inputs += 1;
+                    }
+                }
+                summary.requires_before_commit_source_queries |= requires_before_snapshot;
+                summary.requires_after_commit_source_queries |= requires_after_snapshot;
+            }
+            TransactionReplayWatchInput::EffectiveSubkey {
+                requires_before_snapshot,
+                requires_after_snapshot,
+                ..
+            } => {
+                summary.effective_subkey_snapshot_inputs += 1;
+                summary.requires_before_commit_source_queries |= requires_before_snapshot;
+                summary.requires_after_commit_source_queries |= requires_after_snapshot;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
 /// Plans whether transaction completion applies, discards, or retains the log.
 pub fn plan_transaction_mutation_log_disposition(
     effects: TransactionKernelEffectsPlan,
@@ -420,6 +620,27 @@ fn validate_security_log_entry(entry: &TransactionMutationLogEntry<'_>) -> LcsRe
         return Err(LcsError::InvalidTransactionMutationLogEntry {
             field: "watch_mutation",
         });
+    }
+    Ok(())
+}
+
+fn validate_replay_watch_mutation(
+    limits: &LcsLimits,
+    mutation: &WatchMutationContext<'_>,
+) -> LcsResult<()> {
+    validate_replay_guid("watch_mutation.changed_key_guid", mutation.changed_key_guid)?;
+    for guid in mutation.ancestor_guids {
+        validate_replay_guid("watch_mutation.ancestor_guid", *guid)?;
+    }
+    for path_component in mutation.path_components {
+        validate_key_component_bytes(path_component.as_bytes(), limits)?;
+    }
+    Ok(())
+}
+
+fn validate_replay_guid(field: &'static str, guid: Guid) -> LcsResult<()> {
+    if guid == NIL_GUID {
+        return Err(LcsError::InvalidTransactionMutationLogEntry { field });
     }
     Ok(())
 }
