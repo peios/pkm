@@ -3,6 +3,7 @@ use crate::access::{
     validate_registry_desired_access, validate_registry_granted_access,
 };
 use crate::constants::REG_OPEN_LINK;
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 use crate::resolution::Guid;
 use crate::source::NIL_GUID;
@@ -135,6 +136,16 @@ pub fn plan_registry_open_pre_resolution_access(
             errno: RegistryOpenPreResolutionErrno::Einval,
             path_resolution_allowed: false,
         },
+    }
+}
+
+/// Projects pre-resolution `reg_open_key` desired-access failures to Linux errno.
+pub fn registry_open_pre_resolution_linux_errno(
+    plan: &RegistryOpenPreResolutionAccessPlan,
+) -> Option<LinuxErrno> {
+    match plan {
+        RegistryOpenPreResolutionAccessPlan::Continue { .. } => None,
+        RegistryOpenPreResolutionAccessPlan::Reject { errno, .. } => Some(LinuxErrno::from(*errno)),
     }
 }
 
