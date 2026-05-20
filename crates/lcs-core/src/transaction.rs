@@ -4,6 +4,7 @@ use crate::constants::{
     REG_TXN_ABORTED, REG_TXN_ACTIVE_BOUND, REG_TXN_ACTIVE_UNBOUND, REG_TXN_COMMITTED,
     REG_TXN_SOURCE_DOWN, REG_TXN_TIMED_OUT, REG_WATCH_SD_CHANGED, RSI_TXN_READ_ONLY,
 };
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 use crate::hives::SourceId;
 use crate::path::validate_hive_name_bytes;
@@ -562,6 +563,11 @@ pub fn transaction_use_failure_errno(failure: TransactionUseFailure) -> RsiMappe
         TransactionUseFailure::Busy => RsiMappedErrno::Ebusy,
         TransactionUseFailure::NotSupported => RsiMappedErrno::Enotsup,
     }
+}
+
+/// Projects transaction-use failures to Linux errno.
+pub fn transaction_use_failure_linux_errno(failure: TransactionUseFailure) -> LinuxErrno {
+    LinuxErrno::from(transaction_use_failure_errno(failure))
 }
 
 /// Plans transaction-fd poll readiness from the transaction state.

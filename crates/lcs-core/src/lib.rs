@@ -393,6 +393,7 @@ pub use transaction::{
     plan_transaction_poll_mask, plan_transaction_read, plan_transaction_timeout,
     transaction_log_entry_watch_batch_member, transaction_poll_plan_mask, transaction_status,
     transaction_terminal_failure, transaction_timeout_errno, transaction_use_failure_errno,
+    transaction_use_failure_linux_errno,
 };
 pub use transaction_log::{
     TransactionMutationCommitWork, TransactionMutationLogAppendPlan,
