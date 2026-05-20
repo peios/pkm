@@ -6,7 +6,9 @@ use crate::transaction::{
     TransactionOperationIndex,
 };
 use crate::value::TransactionValueMutationLogEntry;
-use crate::watch::TransactionWatchBatchMember;
+use crate::watch::{TransactionWatchBatchMember, WatchMutationContext};
+
+use crate::resolution::Guid;
 
 /// One kernel-owned transaction mutation-log record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +51,41 @@ pub struct TransactionMutationLogDispositionPlan {
     pub emit_normal_watch_events: bool,
     pub clear_entries_after_effects: bool,
     pub retain_entries: bool,
+}
+
+/// Commit-time kernel work represented by one transaction mutation-log record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionMutationCommitWork<'a> {
+    Security {
+        operation_index: TransactionOperationIndex,
+        changed_key_guid: Guid,
+        watch_mutation: WatchMutationContext<'a>,
+        update_hive_generation: bool,
+        update_key_last_write_time: bool,
+    },
+    Value {
+        operation_index: TransactionOperationIndex,
+        key_guid: Guid,
+        value_name: Option<&'a str>,
+        layer: &'a str,
+        sequence: Option<u64>,
+        update_hive_generation: bool,
+        update_key_last_write_time: bool,
+        recompute_effective_value_events: bool,
+    },
+    KeyPath {
+        operation_index: TransactionOperationIndex,
+        parent_guid: Guid,
+        child_name: &'a str,
+        layer: &'a str,
+        target_guid: Option<Guid>,
+        sequence: Option<u64>,
+        update_hive_generation: bool,
+        update_parent_last_write_time: bool,
+        recompute_effective_subkey_events: bool,
+        evaluate_orphaning: bool,
+        publish_new_key_guid: bool,
+    },
 }
 
 impl TransactionMutationLogRecord<'_> {
@@ -119,6 +156,45 @@ pub fn transaction_mutation_log_record_watch_batch_member(
     Ok(TransactionWatchBatchMember {
         operation_index: record.operation_index(),
         event_count,
+    })
+}
+
+/// Projects one validated mutation-log record into commit-time replay work.
+pub fn transaction_mutation_log_record_commit_work<'a>(
+    record: &TransactionMutationLogRecord<'a>,
+) -> LcsResult<TransactionMutationCommitWork<'a>> {
+    validate_transaction_mutation_log_record(record)?;
+    Ok(match record {
+        TransactionMutationLogRecord::Security(entry) => TransactionMutationCommitWork::Security {
+            operation_index: entry.operation_index,
+            changed_key_guid: entry.watch_mutation.changed_key_guid,
+            watch_mutation: entry.watch_mutation,
+            update_hive_generation: entry.update_hive_generation_on_commit,
+            update_key_last_write_time: entry.update_last_write_time_on_commit,
+        },
+        TransactionMutationLogRecord::Value(entry) => TransactionMutationCommitWork::Value {
+            operation_index: entry.operation_index,
+            key_guid: entry.key_guid,
+            value_name: entry.value_name,
+            layer: entry.layer,
+            sequence: entry.sequence,
+            update_hive_generation: entry.update_hive_generation_on_commit,
+            update_key_last_write_time: entry.update_last_write_time_on_commit,
+            recompute_effective_value_events: entry.recompute_effective_value_events_on_commit,
+        },
+        TransactionMutationLogRecord::KeyPath(entry) => TransactionMutationCommitWork::KeyPath {
+            operation_index: entry.operation_index,
+            parent_guid: entry.parent_guid,
+            child_name: entry.child_name,
+            layer: entry.layer,
+            target_guid: entry.target_guid,
+            sequence: entry.sequence,
+            update_hive_generation: entry.update_hive_generation_on_commit,
+            update_parent_last_write_time: entry.update_parent_last_write_time_on_commit,
+            recompute_effective_subkey_events: entry.recompute_effective_subkey_events_on_commit,
+            evaluate_orphaning: entry.evaluate_orphaning_on_commit,
+            publish_new_key_guid: entry.publish_new_key_guid_on_commit,
+        },
     })
 }
 
