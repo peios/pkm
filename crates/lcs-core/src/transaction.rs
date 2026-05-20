@@ -69,6 +69,12 @@ pub enum TransactionUseFailure {
     NotSupported,
 }
 
+/// Caller-visible errno class for transaction timeout use failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionTimeoutErrno {
+    Etimedout,
+}
+
 /// Source-dispatch-ready commit precheck.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransactionCommitPlan<'a> {
@@ -461,6 +467,20 @@ pub fn transaction_terminal_failure(state: TransactionState<'_>) -> Option<Trans
         }
         TransactionState::TimedOut => Some(TransactionUseFailure::TimedOut),
         TransactionState::SourceDown => Some(TransactionUseFailure::SourceDown),
+    }
+}
+
+/// Maps transaction timeout use failures to their caller-visible errno class.
+pub fn transaction_timeout_errno(
+    failure: TransactionUseFailure,
+) -> Option<TransactionTimeoutErrno> {
+    match failure {
+        TransactionUseFailure::TimedOut => Some(TransactionTimeoutErrno::Etimedout),
+        TransactionUseFailure::Invalid
+        | TransactionUseFailure::SourceDown
+        | TransactionUseFailure::CrossHive
+        | TransactionUseFailure::Busy
+        | TransactionUseFailure::NotSupported => None,
     }
 }
 
