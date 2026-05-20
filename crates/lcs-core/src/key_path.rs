@@ -7,6 +7,9 @@ use crate::resolution::{
 };
 use crate::sequence::SequenceCounter;
 use crate::source::NIL_GUID;
+use crate::transaction::{
+    TransactionMutationLogKind, TransactionOperationIndex, TransactionOperationIndexCounter,
+};
 
 /// Namespace metadata stored on an open key fd.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +84,23 @@ pub struct HideKeyInput<'a> {
 pub struct PlannedKeyHide<'a> {
     pub path_entry: ValidatedPathEntryWrite<'a>,
     pub masks_lower_layers: bool,
+}
+
+/// Key path transaction mutation-log entry for commit-time kernel effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionKeyPathMutationLogEntry<'a> {
+    pub operation_index: TransactionOperationIndex,
+    pub kind: TransactionMutationLogKind,
+    pub parent_guid: Guid,
+    pub child_name: &'a str,
+    pub layer: &'a str,
+    pub target_guid: Option<Guid>,
+    pub sequence: Option<u64>,
+    pub update_hive_generation_on_commit: bool,
+    pub update_parent_last_write_time_on_commit: bool,
+    pub recompute_effective_subkey_events_on_commit: bool,
+    pub evaluate_orphaning_on_commit: bool,
+    pub publish_new_key_guid_on_commit: bool,
 }
 
 /// Caller-visible errno class for namespace delete/hide planning failures.
@@ -190,6 +210,52 @@ pub fn plan_key_hide<'a>(
     })
 }
 
+/// Plans a transaction mutation-log entry for a validated DELETE_KEY operation.
+pub fn plan_key_delete_transaction_log_entry<'a>(
+    limits: &LcsLimits,
+    planned: &PlannedKeyDelete<'a>,
+    counter: &mut TransactionOperationIndexCounter,
+) -> LcsResult<TransactionKeyPathMutationLogEntry<'a>> {
+    validate_planned_key_delete_for_log(limits, planned)?;
+    Ok(TransactionKeyPathMutationLogEntry {
+        operation_index: counter.allocate()?,
+        kind: TransactionMutationLogKind::DeleteKey,
+        parent_guid: planned.target.parent_guid,
+        child_name: planned.target.child_name,
+        layer: planned.target.layer,
+        target_guid: None,
+        sequence: None,
+        update_hive_generation_on_commit: true,
+        update_parent_last_write_time_on_commit: true,
+        recompute_effective_subkey_events_on_commit: true,
+        evaluate_orphaning_on_commit: true,
+        publish_new_key_guid_on_commit: false,
+    })
+}
+
+/// Plans a transaction mutation-log entry for a validated HIDE_KEY operation.
+pub fn plan_key_hide_transaction_log_entry<'a>(
+    limits: &LcsLimits,
+    planned: &PlannedKeyHide<'a>,
+    counter: &mut TransactionOperationIndexCounter,
+) -> LcsResult<TransactionKeyPathMutationLogEntry<'a>> {
+    validate_planned_key_hide_for_log(limits, planned)?;
+    Ok(TransactionKeyPathMutationLogEntry {
+        operation_index: counter.allocate()?,
+        kind: TransactionMutationLogKind::HideKey,
+        parent_guid: planned.path_entry.parent_guid,
+        child_name: planned.path_entry.child_name,
+        layer: planned.path_entry.layer,
+        target_guid: None,
+        sequence: Some(planned.path_entry.sequence),
+        update_hive_generation_on_commit: true,
+        update_parent_last_write_time_on_commit: false,
+        recompute_effective_subkey_events_on_commit: true,
+        evaluate_orphaning_on_commit: false,
+        publish_new_key_guid_on_commit: false,
+    })
+}
+
 /// Maps key namespace mutation planning failures to their PSD-005 errno class.
 pub fn key_path_mutation_errno(error: &LcsError) -> Option<KeyPathMutationErrno> {
     match error {
@@ -198,4 +264,64 @@ pub fn key_path_mutation_errno(error: &LcsError) -> Option<KeyPathMutationErrno>
         LcsError::KeyHasVisibleChildren { .. } => Some(KeyPathMutationErrno::Enotempty),
         _ => None,
     }
+}
+
+fn validate_planned_key_delete_for_log(
+    limits: &LcsLimits,
+    planned: &PlannedKeyDelete<'_>,
+) -> LcsResult<()> {
+    validate_derived_key_path_mutation(limits, planned.target)?;
+    if !planned.updates_parent_last_write_time {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "updates_parent_last_write_time",
+        });
+    }
+    if !planned.effects.removes_target_layer_path_entry
+        || !planned.effects.preserves_key_data
+        || !planned.effects.preserves_other_layer_path_entries
+    {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "delete_key.effects",
+        });
+    }
+    Ok(())
+}
+
+fn validate_planned_key_hide_for_log(
+    limits: &LcsLimits,
+    planned: &PlannedKeyHide<'_>,
+) -> LcsResult<()> {
+    validate_path_entry_write_request(
+        limits,
+        &PathEntryWriteRequest {
+            parent_guid: planned.path_entry.parent_guid,
+            child_name: planned.path_entry.child_name,
+            layer: planned.path_entry.layer,
+            sequence: planned.path_entry.sequence,
+            target: planned.path_entry.target,
+        },
+    )?;
+    if planned.path_entry.target != PathTarget::Hidden {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "path_entry.target",
+        });
+    }
+    if !planned.masks_lower_layers {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "masks_lower_layers",
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_derived_key_path_mutation(
+    limits: &LcsLimits,
+    target: DerivedKeyPathMutation<'_>,
+) -> LcsResult<()> {
+    if target.parent_guid == NIL_GUID {
+        return Err(LcsError::NilParentGuid);
+    }
+    validate_key_component_bytes(target.child_name.as_bytes(), limits)?;
+    validate_layer_name_bytes(target.layer.as_bytes(), limits)?;
+    Ok(())
 }

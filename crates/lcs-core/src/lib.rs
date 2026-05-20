@@ -150,7 +150,8 @@ pub use key::{
     KeyParent, KeyRecordView, RegCreateKeyResolutionPlan, RegCreateKeySourceResultPlan,
     RegCreateKeyTarget, RegistryKeyInitialSecurityDescriptorInput,
     compute_registry_key_initial_security_descriptor, plan_key_create_records,
-    plan_key_guid_assignment, plan_reg_create_key_resolution, plan_reg_create_key_source_result,
+    plan_key_create_transaction_log_entry, plan_key_guid_assignment,
+    plan_reg_create_key_resolution, plan_reg_create_key_source_result,
     validate_key_canonical_path_locations, validate_key_create_flags, validate_key_create_request,
     validate_key_record, validate_symlink_create_authority,
 };
@@ -158,8 +159,9 @@ pub use key_path::{
     DeleteKeyInput, DeleteVisibleChildGateInput, DeleteVisibleChildGatePlan,
     DerivedKeyPathMutation, HideKeyInput, KeyDeleteEffects, KeyFdNamespaceView,
     KeyPathMutationErrno, KeyPathMutationInput, PlannedKeyDelete, PlannedKeyHide,
-    derive_key_path_mutation, key_path_mutation_errno, plan_delete_visible_child_gate,
-    plan_key_delete, plan_key_hide,
+    TransactionKeyPathMutationLogEntry, derive_key_path_mutation, key_path_mutation_errno,
+    plan_delete_visible_child_gate, plan_key_delete, plan_key_delete_transaction_log_entry,
+    plan_key_hide, plan_key_hide_transaction_log_entry,
 };
 pub use layers::{
     BASE_LAYER_VIEW, LAYER_METADATA_ENABLED_VALUE_NAME, LAYER_METADATA_OWNER_VALUE_NAME,

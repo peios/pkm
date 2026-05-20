@@ -5,6 +5,9 @@ use crate::constants::{
     REG_OPTION_CREATE_LINK, REG_OPTION_VOLATILE, REG_VALID_MAPPED_ACCESS_MASK,
 };
 use crate::error::{LcsError, LcsResult};
+use crate::key_path::{
+    DerivedKeyPathMutation, TransactionKeyPathMutationLogEntry, validate_derived_key_path_mutation,
+};
 use crate::path::{validate_key_component_bytes, validate_layer_name_bytes};
 use crate::resolution::{
     Guid, PathEntryWriteRequest, PathTarget, ValidatedPathEntryWrite,
@@ -13,6 +16,7 @@ use crate::resolution::{
 use crate::rsi::RsiStatus;
 use crate::sequence::SequenceCounter;
 use crate::source::NIL_GUID;
+use crate::transaction::{TransactionMutationLogKind, TransactionOperationIndexCounter};
 
 const REG_CREATE_KEY_KNOWN_FLAGS: u32 = REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK;
 
@@ -305,6 +309,29 @@ pub fn plan_key_create_records<'a>(
     })
 }
 
+/// Plans a transaction mutation-log entry for a validated missing-key create.
+pub fn plan_key_create_transaction_log_entry<'a>(
+    limits: &LcsLimits,
+    planned: &KeyCreateRecordsPlan<'a>,
+    counter: &mut TransactionOperationIndexCounter,
+) -> LcsResult<TransactionKeyPathMutationLogEntry<'a>> {
+    let child_guid = validate_planned_key_create_for_log(limits, planned)?;
+    Ok(TransactionKeyPathMutationLogEntry {
+        operation_index: counter.allocate()?,
+        kind: TransactionMutationLogKind::CreateKey,
+        parent_guid: planned.path_entry.parent_guid,
+        child_name: planned.path_entry.child_name,
+        layer: planned.path_entry.layer,
+        target_guid: Some(child_guid),
+        sequence: Some(planned.path_entry.sequence),
+        update_hive_generation_on_commit: true,
+        update_parent_last_write_time_on_commit: false,
+        recompute_effective_subkey_events_on_commit: true,
+        evaluate_orphaning_on_commit: false,
+        publish_new_key_guid_on_commit: true,
+    })
+}
+
 /// Plans `reg_create_key` behavior after target path resolution.
 pub fn plan_reg_create_key_resolution(target: RegCreateKeyTarget) -> RegCreateKeyResolutionPlan {
     match target {
@@ -386,6 +413,56 @@ pub fn validate_symlink_create_authority(
         return Err(LcsError::MissingSymlinkCreationAuthority);
     }
     Ok(())
+}
+
+fn validate_planned_key_create_for_log(
+    limits: &LcsLimits,
+    planned: &KeyCreateRecordsPlan<'_>,
+) -> LcsResult<Guid> {
+    if !planned.guid_assignment.assigned_by_lcs || !planned.guid_assignment.persist_in_key_record {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "guid_assignment",
+        });
+    }
+    validate_key_guid(planned.guid_assignment.guid)?;
+    validate_key_guid(planned.key_record.guid)?;
+    validate_parent_guid(planned.key_record.parent_guid)?;
+    validate_key_component_bytes(planned.key_record.name.as_bytes(), limits)?;
+    validate_path_entry_write_request(
+        limits,
+        &PathEntryWriteRequest {
+            parent_guid: planned.path_entry.parent_guid,
+            child_name: planned.path_entry.child_name,
+            layer: planned.path_entry.layer,
+            sequence: planned.path_entry.sequence,
+            target: planned.path_entry.target,
+        },
+    )?;
+    validate_derived_key_path_mutation(
+        limits,
+        DerivedKeyPathMutation {
+            parent_guid: planned.path_entry.parent_guid,
+            child_name: planned.path_entry.child_name,
+            layer: planned.path_entry.layer,
+        },
+    )?;
+
+    let PathTarget::Guid(target_guid) = planned.path_entry.target else {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "path_entry.target",
+        });
+    };
+    if planned.guid_assignment.guid != planned.key_record.guid
+        || planned.key_record.guid != target_guid
+        || planned.key_record.parent_guid != planned.path_entry.parent_guid
+        || planned.key_record.name != planned.path_entry.child_name
+    {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "key_create.records",
+        });
+    }
+
+    Ok(target_guid)
 }
 
 fn validate_key_parent(parent: KeyParent) -> LcsResult<()> {

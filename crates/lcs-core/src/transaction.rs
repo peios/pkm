@@ -112,6 +112,9 @@ pub enum TransactionMutationLogKind {
     SetValue,
     DeleteValue,
     BlanketTombstone,
+    CreateKey,
+    DeleteKey,
+    HideKey,
 }
 
 /// Transaction mutation-log entry for kernel-owned commit effects.
@@ -1041,7 +1044,10 @@ fn validate_transaction_mutation_log_kind(
         }
         TransactionMutationLogKind::SetValue
         | TransactionMutationLogKind::DeleteValue
-        | TransactionMutationLogKind::BlanketTombstone => {
+        | TransactionMutationLogKind::BlanketTombstone
+        | TransactionMutationLogKind::CreateKey
+        | TransactionMutationLogKind::DeleteKey
+        | TransactionMutationLogKind::HideKey => {
             return Err(LcsError::InvalidTransactionMutationLogEntry { field: "kind" });
         }
     }
