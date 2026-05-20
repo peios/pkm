@@ -6,10 +6,12 @@ use core::{slice, str};
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
     classify_hive_route, current_user_sid_component_from_binary_sid,
+    plan_rsi_source_read,
     plan_registry_ioctl_fixed_fd_access_gate, plan_registry_open_pre_resolution_access,
     plan_registry_security_info_fd_access_gate, plan_source_registration_sequence_update,
     registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
     registry_open_pre_resolution_linux_errno, route_hive, route_routable_path_hive,
+    rsi_queued_request_from_frame,
     source_registration_error_linux_errno, source_registration_hive_scope,
     source_slot_hive_status, validate_key_component_bytes, validate_key_fd_open_view,
     validate_registry_open_flags, validate_resolved_relative_path_depth,
@@ -17,7 +19,7 @@ use crate::lcs_core::{
     write_rsi_lookup_request_frame, CurrentUserRewrite, HiveRouteOutcome, HiveView,
     KeyFdOpenView, KeyWatchState, LcsError, LcsLimits, LinuxErrno, PathKind,
     RegisteredHiveIdentity, RegistryIoctlAccessRequirement, RegistryOpenPreResolutionAccessPlan,
-    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
+    RsiReadPlan, SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
     SourceSlotStatus, SourceSlotView,
 };
 
@@ -26,6 +28,12 @@ const PKM_LCS_SOURCE_SLOT_STATUS_DOWN: u32 = 1;
 
 const PKM_LCS_SOURCE_REGISTRATION_DECISION_NEW: u32 = 0;
 const PKM_LCS_SOURCE_REGISTRATION_DECISION_RESUME_DOWN: u32 = 1;
+
+const PKM_LCS_RSI_READ_ACTION_COPY: u32 = 0;
+const PKM_LCS_RSI_READ_ACTION_WAIT: u32 = 1;
+const PKM_LCS_RSI_READ_ACTION_EAGAIN: u32 = 2;
+const PKM_LCS_RSI_READ_ACTION_EMSGSIZE: u32 = 3;
+const PKM_LCS_RSI_READ_ACTION_WAKE_CLOSE: u32 = 4;
 
 #[repr(C)]
 pub struct PkmLcsSourceRegistrationHiveCopy {
@@ -88,6 +96,14 @@ pub struct PkmLcsRsiBuiltRequestCopy {
     pub request_id: u64,
     pub op_code: u16,
     pub _pad: [u8; 6],
+}
+
+#[repr(C)]
+pub struct PkmLcsRsiReadPlanCopy {
+    pub action: u32,
+    pub _pad: u32,
+    pub request_len: usize,
+    pub required_len: usize,
 }
 
 fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
@@ -350,6 +366,109 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_lookup_request_frame(
             }
             0
         }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_rsi_queued_request_frame(
+    frame: *const u8,
+    frame_len: usize,
+    retained_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if retained_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *retained_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if frame.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    match rsi_queued_request_from_frame(frame_bytes) {
+        Ok(request) => {
+            unsafe {
+                *retained_out = PkmLcsRsiBuiltRequestCopy {
+                    len: request.frame.len(),
+                    request_id: request.retained.request_id,
+                    op_code: request.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_plan_rsi_source_read(
+    has_next_request: bool,
+    next_request_len: usize,
+    caller_buffer_len: usize,
+    nonblocking: bool,
+    fd_closing: bool,
+    plan_out: *mut PkmLcsRsiReadPlanCopy,
+) -> c_int {
+    if plan_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *plan_out = PkmLcsRsiReadPlanCopy {
+            action: PKM_LCS_RSI_READ_ACTION_WAIT,
+            _pad: 0,
+            request_len: 0,
+            required_len: 0,
+        };
+    }
+
+    let next_request = if has_next_request {
+        Some(next_request_len)
+    } else {
+        None
+    };
+
+    match plan_rsi_source_read(next_request, caller_buffer_len, nonblocking, fd_closing) {
+        Ok(RsiReadPlan::ReturnOneCompleteRequest { request_len, .. }) => unsafe {
+            *plan_out = PkmLcsRsiReadPlanCopy {
+                action: PKM_LCS_RSI_READ_ACTION_COPY,
+                _pad: 0,
+                request_len,
+                required_len: request_len,
+            };
+            0
+        },
+        Ok(RsiReadPlan::WaitForRequestOrClose) => unsafe {
+            (*plan_out).action = PKM_LCS_RSI_READ_ACTION_WAIT;
+            0
+        },
+        Ok(RsiReadPlan::ReturnEagain) => unsafe {
+            (*plan_out).action = PKM_LCS_RSI_READ_ACTION_EAGAIN;
+            0
+        },
+        Ok(RsiReadPlan::ReturnEmsgsize { required_len, .. }) => unsafe {
+            *plan_out = PkmLcsRsiReadPlanCopy {
+                action: PKM_LCS_RSI_READ_ACTION_EMSGSIZE,
+                _pad: 0,
+                request_len: 0,
+                required_len,
+            };
+            0
+        },
+        Ok(RsiReadPlan::WakeForClose) => unsafe {
+            (*plan_out).action = PKM_LCS_RSI_READ_ACTION_WAKE_CLOSE;
+            0
+        },
         Err(err) => rsi_request_frame_error_return(err),
     }
 }

@@ -1932,6 +1932,255 @@ static void pkm_lcs_kunit_rsi_lookup_request_frame_rejects_short_buffer(
 		KUNIT_EXPECT_EQ(test, frame[i], 0xaaU);
 }
 
+static void pkm_lcs_kunit_setup_registered_source(struct kunit *test,
+						  struct file *file,
+						  const void **token_out)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	const void *token;
+
+	KUNIT_ASSERT_NOT_NULL(test, token_out);
+	*token_out = NULL;
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	*token_out = token;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, name_src, 1, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, file, &ops, (const void __user *)&args),
+			0L);
+}
+
+static void pkm_lcs_kunit_build_lookup_frame(struct kunit *test, u8 *frame,
+					     size_t frame_len, u64 request_id,
+					     const char *child_name,
+					     size_t *built_len)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x51 };
+	struct pkm_lcs_rsi_built_request built = { };
+
+	KUNIT_ASSERT_NOT_NULL(test, built_len);
+	*built_len = 0;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_rsi_build_lookup_request(
+				frame, frame_len, request_id, 0, parent_guid,
+				child_name, strlen(child_name), &built),
+			0L);
+	*built_len = built.len;
+}
+
+static void pkm_lcs_kunit_source_request_read_returns_complete_frame(
+	struct kunit *test)
+{
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	u8 frame[96];
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+	size_t frame_len;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	pkm_lcs_kunit_build_lookup_frame(test, frame, sizeof(frame), 101,
+					 "Child", &frame_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, frame, frame_len,
+						       &enqueue),
+			0L);
+	KUNIT_EXPECT_EQ(test, enqueue.len, frame_len);
+	KUNIT_EXPECT_EQ(test, enqueue.request_id, 101ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.op_code, (u16)RSI_LOOKUP);
+	KUNIT_EXPECT_EQ(test, enqueue.queue_depth, 1U);
+
+	memset(out, 0xaa, sizeof(out));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)frame_len);
+	KUNIT_EXPECT_EQ(test, memcmp(out, frame, frame_len), 0);
+	KUNIT_EXPECT_EQ(test, out[frame_len], 0xaaU);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)-EAGAIN);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_request_read_preserves_fifo_order(
+	struct kunit *test)
+{
+	u8 frame1[96];
+	u8 frame2[96];
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+	size_t frame1_len;
+	size_t frame2_len;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	pkm_lcs_kunit_build_lookup_frame(test, frame1, sizeof(frame1), 201,
+					 "First", &frame1_len);
+	pkm_lcs_kunit_build_lookup_frame(test, frame2, sizeof(frame2), 202,
+					 "Second", &frame2_len);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, frame1, frame1_len,
+						       NULL),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, frame2, frame2_len,
+						       NULL),
+			0L);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)frame1_len);
+	KUNIT_EXPECT_EQ(test, memcmp(out, frame1, frame1_len), 0);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)frame2_len);
+	KUNIT_EXPECT_EQ(test, memcmp(out, frame2, frame2_len), 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_request_read_short_buffer_preserves_queue(
+	struct kunit *test)
+{
+	u8 frame[96];
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+	size_t frame_len;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	pkm_lcs_kunit_build_lookup_frame(test, frame, sizeof(frame), 301,
+					 "Child", &frame_len);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, frame, frame_len,
+						       NULL),
+			0L);
+
+	memset(out, 0xaa, sizeof(out));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      frame_len - 1,
+							      true),
+			(ssize_t)-EMSGSIZE);
+	KUNIT_EXPECT_EQ(test, out[0], 0xaaU);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)frame_len);
+	KUNIT_EXPECT_EQ(test, memcmp(out, frame, frame_len), 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_request_read_fault_preserves_queue(
+	struct kunit *test)
+{
+	u8 frame[96];
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+	size_t frame_len;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	pkm_lcs_kunit_build_lookup_frame(test, frame, sizeof(frame), 401,
+					 "Child", &frame_len);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, frame, frame_len,
+						       NULL),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, NULL,
+							      sizeof(out),
+							      true),
+			(ssize_t)-EFAULT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)frame_len);
+	KUNIT_EXPECT_EQ(test, memcmp(out, frame, frame_len), 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_request_enqueue_rejects_bad_state(
+	struct kunit *test)
+{
+	u8 frame[96];
+	u8 short_frame[4] = { };
+	struct pkm_lcs_source_enqueue_result enqueue = {
+		.len = 1,
+		.request_id = 2,
+		.op_code = 3,
+		.queue_depth = 4,
+	};
+	struct file file = { };
+	const void *token;
+	size_t frame_len;
+
+	pkm_lcs_kunit_build_lookup_frame(test, frame, sizeof(frame), 501,
+					 "Child", &frame_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, frame, frame_len,
+						       &enqueue),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, enqueue.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, enqueue.queue_depth, 0U);
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, short_frame,
+						       sizeof(short_frame),
+						       &enqueue),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, enqueue.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, enqueue.queue_depth, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, frame, frame_len,
+						       &enqueue),
+			(long)-EIO);
+
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -1992,6 +2241,12 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_rejects_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_validates_child),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_rejects_short_buffer),
+	KUNIT_CASE(pkm_lcs_kunit_source_request_read_returns_complete_frame),
+	KUNIT_CASE(pkm_lcs_kunit_source_request_read_preserves_fifo_order),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_request_read_short_buffer_preserves_queue),
+	KUNIT_CASE(pkm_lcs_kunit_source_request_read_fault_preserves_queue),
+	KUNIT_CASE(pkm_lcs_kunit_source_request_enqueue_rejects_bad_state),
 	{ }
 };
 

@@ -8,6 +8,7 @@
  */
 
 #include <linux/errno.h>
+#include <linux/fcntl.h>
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/lockdep.h>
@@ -22,6 +23,7 @@
 #include <pkm/token.h>
 
 #include "../kacs/token_runtime.h"
+#include "rsi.h"
 #include "source_device.h"
 
 #define PKM_LCS_MAX_HIVE_NAME_BYTES_HARD 1024U
@@ -30,6 +32,33 @@
 	(PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD + 1U)
 #define PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT 32U
 #define PKM_LCS_MAX_HIVES_PER_SOURCE_DEFAULT 64U
+#define PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT 256U
+
+#define PKM_LCS_RSI_READ_ACTION_COPY 0U
+#define PKM_LCS_RSI_READ_ACTION_WAIT 1U
+#define PKM_LCS_RSI_READ_ACTION_EAGAIN 2U
+#define PKM_LCS_RSI_READ_ACTION_EMSGSIZE 3U
+#define PKM_LCS_RSI_READ_ACTION_WAKE_CLOSE 4U
+
+struct pkm_lcs_rsi_read_plan_copy {
+	u32 action;
+	u32 _pad;
+	size_t request_len;
+	size_t required_len;
+};
+
+struct pkm_lcs_source_queued_request {
+	struct list_head link;
+	u8 *frame;
+	size_t len;
+	u64 request_id;
+	u16 op_code;
+};
+
+struct pkm_lcs_source_copyout_ops {
+	bool (*write)(void *ctx, void __user *dst, const void *src, size_t len);
+	void *ctx;
+};
 
 struct pkm_lcs_source_slot {
 	bool occupied;
@@ -68,6 +97,18 @@ static const struct pkm_lcs_usercopy_ops pkm_lcs_default_usercopy_ops = {
 	.strnlen = pkm_lcs_default_strnlen_user,
 };
 
+static bool pkm_lcs_default_copy_to_user(void *ctx, void __user *dst,
+					 const void *src, size_t len)
+{
+	(void)ctx;
+
+	return copy_to_user(dst, src, len) == 0;
+}
+
+static const struct pkm_lcs_source_copyout_ops pkm_lcs_default_copyout_ops = {
+	.write = pkm_lcs_default_copy_to_user,
+};
+
 extern int lcs_rust_validate_source_registration_empty(
 	const struct pkm_lcs_source_registration_hive_copy *hives,
 	size_t hive_count, u64 max_sequence, bool caller_has_tcb,
@@ -103,6 +144,13 @@ extern int lcs_rust_validate_syscall_relative_path(
 	struct pkm_lcs_path_validation_result *result);
 extern int lcs_rust_validate_relative_open_depth(
 	u32 parent_depth, u32 relative_component_count);
+extern int lcs_rust_validate_rsi_queued_request_frame(
+	const u8 *frame, size_t frame_len,
+	struct pkm_lcs_rsi_built_request *retained);
+extern int lcs_rust_plan_rsi_source_read(
+	bool has_next_request, size_t next_request_len, size_t caller_buffer_len,
+	bool nonblocking, bool fd_closing,
+	struct pkm_lcs_rsi_read_plan_copy *plan);
 
 static long pkm_lcs_source_device_check_tcb(const void *token)
 {
@@ -193,6 +241,49 @@ static u32 pkm_lcs_source_slot_id(const struct pkm_lcs_source_slot *slot)
 	return (u32)(slot - pkm_lcs_source_slots) + 1U;
 }
 
+static void pkm_lcs_source_fd_init(struct pkm_lcs_source_fd *source_fd)
+{
+	source_fd->state = PKM_LCS_SOURCE_FD_UNREGISTERED;
+	source_fd->source_id = 0;
+	mutex_init(&source_fd->queue_lock);
+	init_waitqueue_head(&source_fd->read_wait);
+	INIT_LIST_HEAD(&source_fd->request_queue);
+	source_fd->queued_request_count = 0;
+	source_fd->closing = false;
+}
+
+static void pkm_lcs_source_queued_request_free(
+	struct pkm_lcs_source_queued_request *request)
+{
+	if (!request)
+		return;
+
+	kfree(request->frame);
+	kfree(request);
+}
+
+static void pkm_lcs_source_queue_destroy_locked(
+	struct pkm_lcs_source_fd *source_fd)
+{
+	struct pkm_lcs_source_queued_request *request;
+	struct pkm_lcs_source_queued_request *next;
+
+	lockdep_assert_held(&source_fd->queue_lock);
+
+	list_for_each_entry_safe(request, next, &source_fd->request_queue,
+				 link) {
+		list_del(&request->link);
+		pkm_lcs_source_queued_request_free(request);
+	}
+	source_fd->queued_request_count = 0;
+}
+
+static bool pkm_lcs_source_read_ready(struct pkm_lcs_source_fd *source_fd)
+{
+	return READ_ONCE(source_fd->queued_request_count) > 0 ||
+	       READ_ONCE(source_fd->closing);
+}
+
 long pkm_lcs_source_device_open_for_token(const void *token)
 {
 	long ret;
@@ -220,8 +311,7 @@ long pkm_lcs_source_device_open_file_for_token(const void *token,
 	source_fd = kzalloc(sizeof(*source_fd), GFP_KERNEL);
 	if (!source_fd)
 		return -ENOMEM;
-	source_fd->state = PKM_LCS_SOURCE_FD_UNREGISTERED;
-	source_fd->source_id = 0;
+	pkm_lcs_source_fd_init(source_fd);
 
 	ret = pkm_lcs_source_device_mark_tcb_used(token);
 	if (ret) {
@@ -247,6 +337,12 @@ int pkm_lcs_source_device_release_file(struct file *file)
 		return 0;
 
 	mutex_lock(&pkm_lcs_source_table_lock);
+	mutex_lock(&source_fd->queue_lock);
+	source_fd->closing = true;
+	pkm_lcs_source_queue_destroy_locked(source_fd);
+	mutex_unlock(&source_fd->queue_lock);
+	wake_up_interruptible(&source_fd->read_wait);
+
 	if (source_fd->state == PKM_LCS_SOURCE_FD_ACTIVE) {
 		slot = pkm_lcs_source_slot_find_locked(source_fd->source_id);
 		if (slot && slot->status == PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE &&
@@ -556,6 +652,153 @@ long pkm_lcs_source_register_file_for_token(
 	return ret;
 }
 
+long pkm_lcs_source_enqueue_request(
+	u32 source_id, const u8 *frame, size_t frame_len,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	struct pkm_lcs_rsi_built_request retained = { };
+	struct pkm_lcs_source_queued_request *request;
+	struct pkm_lcs_source_slot *slot;
+	struct pkm_lcs_source_fd *source_fd;
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+	if (!frame)
+		return -EINVAL;
+
+	ret = lcs_rust_validate_rsi_queued_request_frame(frame, frame_len,
+							 &retained);
+	if (ret)
+		return ret;
+
+	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	if (!request)
+		return -ENOMEM;
+	request->frame = kmemdup(frame, frame_len, GFP_KERNEL);
+	if (!request->frame) {
+		kfree(request);
+		return -ENOMEM;
+	}
+	request->len = frame_len;
+	request->request_id = retained.request_id;
+	request->op_code = retained.op_code;
+	INIT_LIST_HEAD(&request->link);
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE ||
+	    !slot->active_fd) {
+		ret = -EIO;
+		goto out_unlock_table;
+	}
+
+	source_fd = slot->active_fd;
+	mutex_lock(&source_fd->queue_lock);
+	if (source_fd->closing ||
+	    source_fd->state != PKM_LCS_SOURCE_FD_ACTIVE ||
+	    source_fd->source_id != source_id) {
+		ret = -EIO;
+		goto out_unlock_queue;
+	}
+	if (source_fd->queued_request_count >=
+	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+		ret = -EAGAIN;
+		goto out_unlock_queue;
+	}
+
+	list_add_tail(&request->link, &source_fd->request_queue);
+	source_fd->queued_request_count++;
+	if (result) {
+		result->len = request->len;
+		result->request_id = request->request_id;
+		result->op_code = request->op_code;
+		result->queue_depth = source_fd->queued_request_count;
+	}
+	request = NULL;
+	ret = 0;
+
+out_unlock_queue:
+	mutex_unlock(&source_fd->queue_lock);
+	if (!ret)
+		wake_up_interruptible(&source_fd->read_wait);
+out_unlock_table:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	pkm_lcs_source_queued_request_free(request);
+	return ret;
+}
+
+static ssize_t pkm_lcs_source_device_read_file_with_ops(
+	struct file *file, char __user *buf, size_t count, bool nonblocking,
+	const struct pkm_lcs_source_copyout_ops *ops)
+{
+	struct pkm_lcs_source_queued_request *request;
+	struct pkm_lcs_rsi_read_plan_copy plan;
+	struct pkm_lcs_source_fd *source_fd;
+	long ret;
+
+	if (!file || !ops || !ops->write)
+		return -EINVAL;
+	source_fd = file->private_data;
+	if (!source_fd)
+		return -EINVAL;
+
+	for (;;) {
+		mutex_lock(&source_fd->queue_lock);
+		request = list_first_entry_or_null(
+			&source_fd->request_queue,
+			struct pkm_lcs_source_queued_request, link);
+		memset(&plan, 0, sizeof(plan));
+		ret = lcs_rust_plan_rsi_source_read(
+			request != NULL, request ? request->len : 0, count,
+			nonblocking, source_fd->closing, &plan);
+		if (ret) {
+			mutex_unlock(&source_fd->queue_lock);
+			return ret;
+		}
+
+		switch (plan.action) {
+		case PKM_LCS_RSI_READ_ACTION_COPY:
+			if (!request || plan.request_len != request->len) {
+				mutex_unlock(&source_fd->queue_lock);
+				return -EINVAL;
+			}
+			if (!ops->write(ops->ctx, buf, request->frame,
+					request->len)) {
+				mutex_unlock(&source_fd->queue_lock);
+				return -EFAULT;
+			}
+
+			list_del(&request->link);
+			source_fd->queued_request_count--;
+			mutex_unlock(&source_fd->queue_lock);
+			ret = (ssize_t)request->len;
+			pkm_lcs_source_queued_request_free(request);
+			return ret;
+		case PKM_LCS_RSI_READ_ACTION_EAGAIN:
+			mutex_unlock(&source_fd->queue_lock);
+			return -EAGAIN;
+		case PKM_LCS_RSI_READ_ACTION_EMSGSIZE:
+			mutex_unlock(&source_fd->queue_lock);
+			return -EMSGSIZE;
+		case PKM_LCS_RSI_READ_ACTION_WAKE_CLOSE:
+			mutex_unlock(&source_fd->queue_lock);
+			return 0;
+		case PKM_LCS_RSI_READ_ACTION_WAIT:
+			mutex_unlock(&source_fd->queue_lock);
+			ret = wait_event_interruptible(
+				source_fd->read_wait,
+				pkm_lcs_source_read_ready(source_fd));
+			if (ret)
+				return ret;
+			break;
+		default:
+			mutex_unlock(&source_fd->queue_lock);
+			return -EINVAL;
+		}
+	}
+}
+
 long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,
 			     const u8 (*scope_guids)[16], u32 scope_count,
 			     struct pkm_lcs_hive_route_result *result)
@@ -772,6 +1015,16 @@ static int pkm_lcs_source_device_open(struct inode *inode, struct file *file)
 		pkm_kacs_current_effective_token_ptr(), file);
 }
 
+static ssize_t pkm_lcs_source_device_read(struct file *file, char __user *buf,
+					  size_t count, loff_t *ppos)
+{
+	(void)ppos;
+
+	return pkm_lcs_source_device_read_file_with_ops(
+		file, buf, count, (file->f_flags & O_NONBLOCK) != 0,
+		&pkm_lcs_default_copyout_ops);
+}
+
 static long pkm_lcs_source_device_ioctl(struct file *file, unsigned int cmd,
 					unsigned long arg)
 {
@@ -793,6 +1046,7 @@ static int pkm_lcs_source_device_release(struct inode *inode, struct file *file)
 static const struct file_operations pkm_lcs_source_device_fops = {
 	.owner = THIS_MODULE,
 	.open = pkm_lcs_source_device_open,
+	.read = pkm_lcs_source_device_read,
 	.unlocked_ioctl = pkm_lcs_source_device_ioctl,
 	.release = pkm_lcs_source_device_release,
 	.llseek = noop_llseek,
@@ -839,6 +1093,28 @@ void pkm_lcs_kunit_source_table_snapshot(
 	snapshot->sequence_initialized = pkm_lcs_sequence_initialized;
 	snapshot->next_sequence = pkm_lcs_next_sequence;
 	mutex_unlock(&pkm_lcs_source_table_lock);
+}
+
+static bool pkm_lcs_kunit_copy_to_kernel(void *ctx, void __user *dst,
+					 const void *src, size_t len)
+{
+	(void)ctx;
+
+	if (!dst)
+		return false;
+	memcpy((void *)(unsigned long)dst, src, len);
+	return true;
+}
+
+ssize_t pkm_lcs_kunit_source_device_read_file(
+	struct file *file, void *buf, size_t count, bool nonblocking)
+{
+	static const struct pkm_lcs_source_copyout_ops ops = {
+		.write = pkm_lcs_kunit_copy_to_kernel,
+	};
+
+	return pkm_lcs_source_device_read_file_with_ops(
+		file, (char __user *)buf, count, nonblocking, &ops);
 }
 #endif
 

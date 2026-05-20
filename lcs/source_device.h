@@ -3,7 +3,10 @@
 #define _SECURITY_PKM_LCS_SOURCE_DEVICE_H
 
 #include <linux/compiler_types.h>
+#include <linux/list.h>
+#include <linux/mutex.h>
 #include <linux/types.h>
+#include <linux/wait.h>
 
 #include <pkm/lcs.h>
 
@@ -19,6 +22,11 @@ enum pkm_lcs_source_fd_state {
 struct pkm_lcs_source_fd {
 	enum pkm_lcs_source_fd_state state;
 	u32 source_id;
+	struct mutex queue_lock;
+	wait_queue_head_t read_wait;
+	struct list_head request_queue;
+	u32 queued_request_count;
+	bool closing;
 };
 
 struct pkm_lcs_usercopy_ops {
@@ -101,6 +109,14 @@ struct pkm_lcs_relative_open_preflight {
 	struct pkm_lcs_key_fd_relative_base parent;
 };
 
+struct pkm_lcs_source_enqueue_result {
+	size_t len;
+	u64 request_id;
+	u16 op_code;
+	u16 _pad0;
+	u32 queue_depth;
+};
+
 long pkm_lcs_source_device_open_for_token(const void *token);
 long pkm_lcs_source_device_open_file_for_token(const void *token,
 					       struct file *file);
@@ -160,11 +176,16 @@ long pkm_lcs_open_user_relative_path_preflight(
 	const struct pkm_lcs_usercopy_ops *ops, int parent_fd,
 	const char __user *upath, u32 desired_access, u32 flags,
 	struct pkm_lcs_relative_open_preflight *result);
+long pkm_lcs_source_enqueue_request(
+	u32 source_id, const u8 *frame, size_t frame_len,
+	struct pkm_lcs_source_enqueue_result *result);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_lcs_kunit_reset_source_table(void);
 void pkm_lcs_kunit_source_table_snapshot(
 	struct pkm_lcs_source_table_snapshot *snapshot);
+ssize_t pkm_lcs_kunit_source_device_read_file(
+	struct file *file, void *buf, size_t count, bool nonblocking);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_SOURCE_DEVICE_H */
