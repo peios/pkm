@@ -168,6 +168,7 @@ COPY kacs/token_runtime.rs /tmp/pkm-src/kacs/token_runtime.rs
 COPY lcs/source_device.c /tmp/pkm-src/lcs/source_device.c
 COPY lcs/source_device.h /tmp/pkm-src/lcs/source_device.h
 COPY lcs/kunit.c /tmp/pkm-src/lcs/kunit.c
+COPY lcs/rust_ingress.rs /tmp/pkm-src/lcs/rust_ingress.rs
 COPY kmes/kmes.c /tmp/pkm-src/kmes/kmes.c
 COPY kmes/kmes.h /tmp/pkm-src/kmes/kmes.h
 COPY kmes/kmes_validate.rs /tmp/pkm-src/kmes/kmes_validate.rs

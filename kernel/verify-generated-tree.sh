@@ -27,6 +27,7 @@ pkm_makefile="$linux_tree/security/pkm/Makefile"
 lcs_source_device="$linux_tree/security/pkm/lcs/source_device.c"
 lcs_source_device_h="$linux_tree/security/pkm/lcs/source_device.h"
 lcs_kunit="$linux_tree/security/pkm/lcs/kunit.c"
+lcs_rust_ingress="$linux_tree/security/pkm/lcs/rust_ingress.rs"
 lcs_core_mod="$linux_tree/security/pkm/lcs/lcs_core/mod.rs"
 ptrace_h="$linux_tree/include/linux/ptrace.h"
 cred_h="$linux_tree/include/linux/cred.h"
@@ -92,6 +93,7 @@ for required_source in \
 	"$lcs_source_device" \
 	"$lcs_source_device_h" \
 	"$lcs_kunit" \
+	"$lcs_rust_ingress" \
 	"$lcs_core_mod" \
 	"$ptrace_h" \
 	"$cred_h" \
@@ -112,6 +114,8 @@ require_literal 'crate::lcs_core::error' "$linux_tree/security/pkm/lcs/lcs_core/
 	"generated LCS core was not rewritten for nested kernel module paths"
 require_literal 'crate::kacs_core::Sid' "$linux_tree/security/pkm/lcs/lcs_core/audit.rs" \
 	"generated LCS core was not rewritten for kernel KACS core paths"
+require_literal 'lcs_rust_validate_source_registration_empty' "$lcs_rust_ingress" \
+	"generated LCS Rust ingress is missing source-registration validation"
 
 require_literal \
 	'extern int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,' \

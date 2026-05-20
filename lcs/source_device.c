@@ -36,6 +36,11 @@ static const struct pkm_lcs_usercopy_ops pkm_lcs_default_usercopy_ops = {
 	.read = pkm_lcs_default_copy_from_user,
 };
 
+extern int lcs_rust_validate_source_registration_empty(
+	const struct pkm_lcs_source_registration_hive_copy *hives,
+	size_t hive_count, u64 max_sequence, bool caller_has_tcb,
+	struct pkm_lcs_source_registration_plan_copy *plan);
+
 static long pkm_lcs_source_device_check_tcb(const void *token)
 {
 	if (!token)
@@ -237,6 +242,22 @@ out_destroy:
 out_free_wire:
 	kfree(wire_hives);
 	return ret;
+}
+
+long pkm_lcs_source_registration_validate_copied(
+	const struct pkm_lcs_source_registration_copy *registration,
+	bool caller_has_tcb,
+	struct pkm_lcs_source_registration_plan_copy *plan)
+{
+	if (!registration || !plan)
+		return -EINVAL;
+	if (registration->hive_count && !registration->hives)
+		return -EINVAL;
+
+	memset(plan, 0, sizeof(*plan));
+	return lcs_rust_validate_source_registration_empty(
+		registration->hives, registration->hive_count,
+		registration->max_sequence, caller_has_tcb, plan);
 }
 
 static int pkm_lcs_source_device_open(struct inode *inode, struct file *file)

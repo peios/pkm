@@ -63,6 +63,7 @@ for required in \
 	"$repo_root/lcs/source_device.c" \
 	"$repo_root/lcs/source_device.h" \
 	"$repo_root/lcs/kunit.c" \
+	"$repo_root/lcs/rust_ingress.rs" \
 	"$repo_root/kmes/kmes.c" \
 	"$repo_root/kmes/kmes.h" \
 	"$repo_root/kmes/kmes_validate.rs" \

@@ -36,6 +36,11 @@ struct pkm_lcs_source_registration_copy {
 	struct pkm_lcs_source_registration_hive_copy *hives;
 };
 
+struct pkm_lcs_source_registration_plan_copy {
+	u32 hive_count;
+	u64 source_next_sequence;
+};
+
 long pkm_lcs_source_device_open_for_token(const void *token);
 long pkm_lcs_source_device_open_file_for_token(const void *token,
 					       struct file *file);
@@ -46,5 +51,9 @@ long pkm_lcs_source_registration_copy_from_user(
 	const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_src_register_args __user *uargs, u32 max_hives,
 	struct pkm_lcs_source_registration_copy *out);
+long pkm_lcs_source_registration_validate_copied(
+	const struct pkm_lcs_source_registration_copy *registration,
+	bool caller_has_tcb,
+	struct pkm_lcs_source_registration_plan_copy *plan);
 
 #endif /* _SECURITY_PKM_LCS_SOURCE_DEVICE_H */

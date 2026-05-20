@@ -237,6 +237,132 @@ static void pkm_lcs_kunit_source_registration_copy_bounds_hive_count(
 	KUNIT_EXPECT_PTR_EQ(test, copy.hives, NULL);
 }
 
+static void pkm_lcs_kunit_source_registration_semantic_accepts_valid(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive = {
+		.name_len = 7,
+		.name_ptr = (u64)(unsigned long)name_src,
+		.root_guid = { 1 },
+	};
+	struct reg_src_register_args args = {
+		.hive_count = 1,
+		.max_sequence = 41,
+		.hives_ptr = (u64)(unsigned long)&hive,
+	};
+	struct pkm_lcs_source_registration_copy copy = { };
+	struct pkm_lcs_source_registration_plan_copy plan = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_registration_copy_from_user(
+				&ops, (const void __user *)&args, 64, &copy),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_registration_validate_copied(&copy, true,
+								    &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.hive_count, 1U);
+	KUNIT_EXPECT_EQ(test, plan.source_next_sequence, 42ULL);
+
+	pkm_lcs_source_registration_copy_destroy(&copy);
+}
+
+static void pkm_lcs_kunit_source_registration_semantic_requires_tcb(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive = {
+		.name_len = 7,
+		.name_ptr = (u64)(unsigned long)name_src,
+		.root_guid = { 1 },
+	};
+	struct reg_src_register_args args = {
+		.hive_count = 1,
+		.hives_ptr = (u64)(unsigned long)&hive,
+	};
+	struct pkm_lcs_source_registration_copy copy = { };
+	struct pkm_lcs_source_registration_plan_copy plan = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_registration_copy_from_user(
+				&ops, (const void __user *)&args, 64, &copy),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_registration_validate_copied(&copy, false,
+								    &plan),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test, plan.hive_count, 0U);
+
+	pkm_lcs_source_registration_copy_destroy(&copy);
+}
+
+static void pkm_lcs_kunit_source_registration_semantic_rejects_bad_hive(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive = {
+		.name_len = 7,
+		.name_ptr = (u64)(unsigned long)name_src,
+		.root_guid = { 1 },
+		.flags = 0x2,
+	};
+	struct reg_src_register_args args = {
+		.hive_count = 1,
+		.hives_ptr = (u64)(unsigned long)&hive,
+	};
+	struct pkm_lcs_source_registration_copy copy = { };
+	struct pkm_lcs_source_registration_plan_copy plan = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_registration_copy_from_user(
+				&ops, (const void __user *)&args, 64, &copy),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_registration_validate_copied(&copy, true,
+								    &plan),
+			(long)-EINVAL);
+
+	pkm_lcs_source_registration_copy_destroy(&copy);
+}
+
+static void pkm_lcs_kunit_source_registration_semantic_rejects_sequence_overflow(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive = {
+		.name_len = 7,
+		.name_ptr = (u64)(unsigned long)name_src,
+		.root_guid = { 1 },
+	};
+	struct reg_src_register_args args = {
+		.hive_count = 1,
+		.max_sequence = ~0ULL,
+		.hives_ptr = (u64)(unsigned long)&hive,
+	};
+	struct pkm_lcs_source_registration_copy copy = { };
+	struct pkm_lcs_source_registration_plan_copy plan = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_registration_copy_from_user(
+				&ops, (const void __user *)&args, 64, &copy),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_registration_validate_copied(&copy, true,
+								    &plan),
+			(long)-EOVERFLOW);
+
+	pkm_lcs_source_registration_copy_destroy(&copy);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -248,6 +374,11 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_copy_fails_closed_on_faults),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_copy_bounds_hive_count),
+	KUNIT_CASE(pkm_lcs_kunit_source_registration_semantic_accepts_valid),
+	KUNIT_CASE(pkm_lcs_kunit_source_registration_semantic_requires_tcb),
+	KUNIT_CASE(pkm_lcs_kunit_source_registration_semantic_rejects_bad_hive),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_semantic_rejects_sequence_overflow),
 	{ }
 };
 

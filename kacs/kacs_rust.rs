@@ -14,6 +14,8 @@ mod caap_cache;
 mod kacs_core;
 #[path = "../lcs/lcs_core/mod.rs"]
 mod lcs_core;
+#[path = "../lcs/rust_ingress.rs"]
+mod lcs_rust_ingress;
 mod kmes_payload;
 #[path = "../kmes/kmes_validate.rs"]
 mod kmes_validate;
