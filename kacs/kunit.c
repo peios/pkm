@@ -14753,7 +14753,7 @@ static void pkm_kunit_namespace_whiteout_flags_fail_closed(
 			pkm_kunit_namespace_rename_flags_op(
 				subject_token, KACS_MOUNT_POLICY_DENY_MISSING,
 				RENAME_WHITEOUT),
-			-EOPNOTSUPP);
+			-EINVAL);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kunit_namespace_rename_flags_op(
 				subject_token, KACS_MOUNT_POLICY_UNMANAGED,
@@ -19391,9 +19391,9 @@ static void pkm_kunit_inode_misc_hooks_match_matrix(struct kunit *test)
 	size_t written = 0;
 
 	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_check_inode_follow_link(), 0);
-	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_check_inode_set_acl(), -EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_check_inode_set_acl(), -EOPNOTSUPP);
 	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_check_inode_remove_acl(),
-			-EACCES);
+			-EOPNOTSUPP);
 
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_check_inode_getsecurity_sd(

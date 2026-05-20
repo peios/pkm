@@ -320,6 +320,16 @@ struct pkm_kacs_task_security {
 	u32 pending_exec_pip_type;
 	u32 pending_exec_pip_trust;
 	u8 pending_exec_pip_valid;
+	/*
+	 * Counter (not flag) so nested internal SD reads compose. KACS's
+	 * own SD-cache populate uses __vfs_getxattr to skip
+	 * security_inode_getxattr, but a stacking FS (overlayfs) can route
+	 * the call back through vfs_getxattr on the real lower/upper inode,
+	 * re-entering the LSM hook. inode_getxattr checks this counter and
+	 * allows the canonical SD xattr read iff it's > 0 — caller-originated
+	 * syscalls still see the EACCES the spec mandates.
+	 */
+	u8 internal_sd_read_depth;
 };
 
 struct pkm_kacs_socket_security {
@@ -851,8 +861,6 @@ static u32 pkm_kacs_mount_policy_for_magic(unsigned long magic)
 	case SYSFS_MAGIC:
 		return KACS_MOUNT_POLICY_UNMANAGED;
 	case RAMFS_MAGIC:
-	case TMPFS_MAGIC:
-	case SQUASHFS_MAGIC:
 		/*
 		 * rootfs (the initial ramfs the kernel populates from a
 		 * builtin/external cpio), tmpfs, and squashfs have no on-disk
@@ -1448,7 +1456,20 @@ static long pkm_kacs_inode_read_sd_xattr_locked(
 		len = pkm_kacs_kunit_fake_getxattr_locked(sec, NULL, 0);
 	else
 #endif
-	len = __vfs_getxattr(dentry, inode, name, NULL, 0);
+	{
+		/*
+		 * __vfs_getxattr skips security_inode_getxattr for *us*, but
+		 * stacking FSes (overlayfs) re-enter vfs_getxattr on the real
+		 * inode inside their xattr handler, which fires our own hook
+		 * again. Mark the task so the hook recognises the internal
+		 * read and allows the canonical SD xattr.
+		 */
+		if (current && current->security)
+			pkm_kacs_task(current)->internal_sd_read_depth++;
+		len = __vfs_getxattr(dentry, inode, name, NULL, 0);
+		if (current && current->security)
+			pkm_kacs_task(current)->internal_sd_read_depth--;
+	}
 	if (len == -ENODATA || len == -EOPNOTSUPP)
 		return pkm_kacs_missing_file_sd_policy_result(inode->i_sb,
 							      cache_out);
@@ -1467,7 +1488,13 @@ static long pkm_kacs_inode_read_sd_xattr_locked(
 		ret = pkm_kacs_kunit_fake_getxattr_locked(sec, bytes, len);
 	else
 #endif
-	ret = __vfs_getxattr(dentry, inode, name, bytes, len);
+	{
+		if (current && current->security)
+			pkm_kacs_task(current)->internal_sd_read_depth++;
+		ret = __vfs_getxattr(dentry, inode, name, bytes, len);
+		if (current && current->security)
+			pkm_kacs_task(current)->internal_sd_read_depth--;
+	}
 	if (ret < 0) {
 		pkm_kacs_free(bytes);
 		return ret;
@@ -2006,6 +2033,18 @@ static bool pkm_kacs_is_file_capability_xattr(const char *name)
 static int pkm_kacs_inode_getxattr(struct dentry *dentry, const char *name)
 {
 	if (dentry && pkm_kacs_is_canonical_sd_xattr(d_inode(dentry), name)) {
+		/*
+		 * KACS's own SD-cache populate path may re-enter this hook
+		 * through a stacking FS's xattr handler (overlayfs forwards
+		 * to vfs_getxattr on the real lower/upper inode). Allow the
+		 * read iff we're inside one of those internal reads — the
+		 * task counter is bumped by pkm_kacs_inode_read_sd_xattr_locked
+		 * around its __vfs_getxattr calls. Caller-originated syscalls
+		 * still get -EACCES.
+		 */
+		if (current && current->security &&
+		    pkm_kacs_task(current)->internal_sd_read_depth > 0)
+			return 0;
 		pkm_kacs_consume_file_metadata_decision(
 			d_inode(dentry), PKM_KACS_METADATA_OP_GETXATTR);
 		return -EACCES;
@@ -2145,7 +2184,13 @@ static int pkm_kacs_inode_set_acl(struct mnt_idmap *idmap,
 	(void)dentry;
 	(void)acl_name;
 	(void)kacl;
-	return -EACCES;
+	/*
+	 * Peios doesn't carry POSIX ACLs — the SD lives in security.peios.sd.
+	 * Return EOPNOTSUPP rather than EACCES so callers that defensively
+	 * probe-then-tolerate (e.g. overlayfs's workdir setup) treat us as
+	 * "this FS doesn't support ACLs" rather than as a permission failure.
+	 */
+	return -EOPNOTSUPP;
 }
 
 static int pkm_kacs_inode_remove_acl(struct mnt_idmap *idmap,
@@ -2155,7 +2200,8 @@ static int pkm_kacs_inode_remove_acl(struct mnt_idmap *idmap,
 	(void)idmap;
 	(void)dentry;
 	(void)acl_name;
-	return -EACCES;
+	/* See pkm_kacs_inode_set_acl above for the EOPNOTSUPP rationale. */
+	return -EOPNOTSUPP;
 }
 
 static int pkm_kacs_inode_getsecurity(struct mnt_idmap *idmap,
@@ -8482,6 +8528,7 @@ static long pkm_kacs_authorize_live_file_access_core(
 	u32 granted_access = 0;
 	u32 pip_type = 0;
 	u32 pip_trust = 0;
+	u8 cache_state = 0xff;
 	long ret;
 
 	if (!subject_token || !file || desired_access == 0)
@@ -8502,8 +8549,11 @@ static long pkm_kacs_authorize_live_file_access_core(
 	ret = pkm_kacs_inode_ensure_effective_cache(file, sec);
 	if (!ret) {
 		cache = pkm_kacs_inode_sd_cache_get_current(inode, sec);
-		if (!cache)
-			return -EACCES;
+		if (!cache) {
+			ret = -EACCES;
+			goto log;
+		}
+		cache_state = cache->state;
 		if (cache->state != PKM_KACS_INODE_SD_VALID || !cache->bytes ||
 		    cache->len == 0) {
 			ret = -EACCES;
@@ -8514,6 +8564,23 @@ static long pkm_kacs_authorize_live_file_access_core(
 				pip_trust, &granted_access);
 		}
 		pkm_kacs_inode_sd_cache_free(cache);
+	}
+log:
+	/* DEBUG: temporary instrumentation for DENY_MISSING boot failure */
+	if (ret && ret != -EOPNOTSUPP) {
+		const char *name = "?";
+		struct dentry *de = file_dentry(file);
+
+		if (de && de->d_name.name)
+			name = (const char *)de->d_name.name;
+		pr_warn_ratelimited(
+			"kacs: deny live_file_access ino=%lu sb_magic=0x%lx policy=%u cache_state=0x%x desired=0x%x name=%s comm=%s pid=%d ret=%ld\n",
+			inode->i_ino,
+			(unsigned long)inode->i_sb->s_magic,
+			pkm_kacs_superblock_mount_policy(inode->i_sb),
+			(unsigned)cache_state,
+			desired_access, name, current->comm,
+			current->pid, ret);
 	}
 	return ret;
 }
@@ -8570,15 +8637,38 @@ static long pkm_kacs_authorize_inode_file_access_core(
 	struct file file = {};
 	long ret;
 
-	if (!subject_token || !inode || desired_access == 0)
+	if (!subject_token || !inode || desired_access == 0) {
+		/* DEBUG */
+		if (inode)
+			pr_warn_ratelimited(
+				"kacs: deny inode_file_access EINVAL ino=%lu sb_magic=0x%lx desired=0x%x has_token=%d comm=%s pid=%d\n",
+				inode->i_ino,
+				(unsigned long)inode->i_sb->s_magic,
+				desired_access, subject_token != NULL,
+				current->comm, current->pid);
 		return -EINVAL;
-	if (!inode->i_security)
+	}
+	if (!inode->i_security) {
+		/* DEBUG */
+		pr_warn_ratelimited(
+			"kacs: deny inode_file_access NO_SEC ino=%lu sb_magic=0x%lx desired=0x%x comm=%s pid=%d\n",
+			inode->i_ino,
+			(unsigned long)inode->i_sb->s_magic,
+			desired_access, current->comm, current->pid);
 		return -EACCES;
+	}
 
 	if (!dentry) {
 		alias = d_find_any_alias(inode);
-		if (!alias)
+		if (!alias) {
+			/* DEBUG */
+			pr_warn_ratelimited(
+				"kacs: deny inode_file_access NO_ALIAS ino=%lu sb_magic=0x%lx desired=0x%x comm=%s pid=%d\n",
+				inode->i_ino,
+				(unsigned long)inode->i_sb->s_magic,
+				desired_access, current->comm, current->pid);
 			return -EACCES;
+		}
 		dentry = alias;
 	}
 
@@ -8675,8 +8765,15 @@ static long pkm_kacs_authorize_inode_namespace_access_for_subject(
 		return -EACCES;
 	if (pkm_kacs_inode_on_unmanaged_mount(inode))
 		return 0;
-	if (!subject_token)
+	if (!subject_token) {
+		/* DEBUG */
+		pr_warn_ratelimited(
+			"kacs: deny ns_access NO_TOKEN ino=%lu sb_magic=0x%lx desired=0x%x comm=%s pid=%d\n",
+			inode->i_ino,
+			(unsigned long)inode->i_sb->s_magic,
+			desired_access, current->comm, current->pid);
 		return -EACCES;
+	}
 
 	return pkm_kacs_authorize_inode_file_access_core(
 		subject_token, inode, dentry, desired_access);
@@ -8875,7 +8972,18 @@ int pkm_kacs_inode_rename_flags(struct inode *old_dir,
 	    pkm_kacs_inode_on_unmanaged_mount(new_dir))
 		return 0;
 
-	return -EOPNOTSUPP;
+	/*
+	 * Return -EINVAL (the VFS convention for an unsupported rename flag,
+	 * matching shmem_rename2:4072) rather than -EOPNOTSUPP. This routes
+	 * callers that probe-and-fall-back (overlayfs's ovl_check_rename_whiteout)
+	 * onto the explicit vfs_mknod path for whiteout creation, where
+	 * security_inode_mknod fires and KACS can authorize and audit each
+	 * chrdev sentinel. The native RENAME_WHITEOUT path inside the FS
+	 * (e.g. shmem_whiteout -> shmem_mknod) bypasses security_inode_mknod,
+	 * which would violate KACS's "every special-node creation is auditable"
+	 * invariant.
+	 */
+	return -EINVAL;
 }
 
 static int pkm_kacs_inode_create(struct inode *dir, struct dentry *dentry,
@@ -9274,17 +9382,39 @@ static int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 	if (!pkm_kacs_current_native_create_request_matches(
 		    dir, S_ISDIR(inode->i_mode), &sd_bytes, &sd_len)) {
 		subject_token = pkm_kacs_current_effective_token_ptr();
-		if (!subject_token)
+		if (!subject_token) {
+			/* DEBUG */
+			pr_warn_ratelimited(
+				"kacs: deny inode_init_security NO_TOKEN dir_ino=%lu sb_magic=0x%lx mode=0%o comm=%s pid=%d\n",
+				dir->i_ino,
+				(unsigned long)dir->i_sb->s_magic,
+				inode->i_mode, current->comm, current->pid);
 			return -EACCES;
+		}
 		ret = pkm_kacs_build_legacy_created_file_sd_for_subject(
 			subject_token, dir, NULL, S_ISDIR(inode->i_mode),
 			&sd_bytes, &sd_len);
-		if (ret)
+		if (ret) {
+			/* DEBUG */
+			pr_warn_ratelimited(
+				"kacs: deny inode_init_security BUILD_FAIL dir_ino=%lu sb_magic=0x%lx mode=0%o comm=%s pid=%d ret=%ld\n",
+				dir->i_ino,
+				(unsigned long)dir->i_sb->s_magic,
+				inode->i_mode, current->comm, current->pid, ret);
 			return ret;
+		}
 		allocated_sd = true;
 	}
-	if (!sd_bytes || sd_len == 0)
+	if (!sd_bytes || sd_len == 0) {
+		/* DEBUG */
+		if (allocated_sd)
+			pr_warn_ratelimited(
+				"kacs: deny inode_init_security NO_SD_BYTES dir_ino=%lu sb_magic=0x%lx mode=0%o comm=%s pid=%d\n",
+				dir->i_ino,
+				(unsigned long)dir->i_sb->s_magic,
+				inode->i_mode, current->comm, current->pid);
 		return allocated_sd ? -EACCES : -EOPNOTSUPP;
+	}
 
 	copied_bytes = kmemdup(sd_bytes, sd_len, GFP_NOFS);
 	if (allocated_sd)

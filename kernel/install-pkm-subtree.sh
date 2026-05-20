@@ -500,6 +500,108 @@ replace_line_after_anchor_once 'int security_inode_rename(struct inode *old_dir,
 
 	if (flags & RENAME_EXCHANGE) {' \
 	"$kernel_root/security/security.c"
+# Seed an Allow-SYSTEM-GenericAll SD on the rootfs root inode so the cpio
+# extractor can add files under DENY_MISSING. The kernel mounts rootfs (a
+# tmpfs when CONFIG_TMPFS=y) before any userspace, so nothing else is
+# positioned to plant the initial SD. SD is inheritable (OI|CI) so KACS
+# inode_init_security derives a child SD for every new file the unpacker
+# creates.
+insert_block_before_exact_once '	m = real_mount(mnt);' \
+	'pkm_rootfs_root_sd' \
+	'#ifdef CONFIG_SECURITY_PKM
+	{
+		/*
+		 * Self-relative SD, 72 bytes:
+		 *   header (20) | Owner=SYSTEM (12) | Group=SYSTEM (12) |
+		 *   DACL header (8) | ACE Allow SYSTEM GenericAll OI|CI (20)
+		 */
+		static const u8 pkm_rootfs_root_sd[72] = {
+			0x01, 0x00, 0x04, 0x80,
+			0x14, 0x00, 0x00, 0x00,
+			0x20, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00,
+			0x2c, 0x00, 0x00, 0x00,
+			0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+			0x12, 0x00, 0x00, 0x00,
+			0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+			0x12, 0x00, 0x00, 0x00,
+			0x02, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x00,
+			0x00, 0x03, 0x14, 0x00,
+			0x00, 0x00, 0x00, 0x10,
+			0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+			0x12, 0x00, 0x00, 0x00,
+		};
+		extern int __vfs_setxattr_noperm(struct mnt_idmap *,
+						 struct dentry *,
+						 const char *,
+						 const void *, size_t, int);
+		struct inode *pkm_root_inode = mnt->mnt_root->d_inode;
+		int pkm_xerr;
+
+		inode_lock(pkm_root_inode);
+		pkm_xerr = __vfs_setxattr_noperm(&nop_mnt_idmap,
+						 mnt->mnt_root,
+						 "security.peios.sd",
+						 pkm_rootfs_root_sd,
+						 sizeof(pkm_rootfs_root_sd),
+						 0);
+		inode_unlock(pkm_root_inode);
+		if (pkm_xerr)
+			pr_warn("pkm: seed rootfs root SD failed: %d\\n",
+				pkm_xerr);
+	}
+#endif
+' \
+	"$kernel_root/fs/namespace.c"
+# Same as rootfs above, but for the early devtmpfs mount. Without this,
+# kdevtmpfs cannot create device nodes (mknod returns EACCES) and any path
+# traversal that crosses /dev (e.g. mount looking up /dev/loop-control)
+# panics out on a MISSING SD.
+insert_block_before_exact_once '	err = devtmpfs_configure_context();' \
+	'pkm_devtmpfs_root_sd' \
+	'#ifdef CONFIG_SECURITY_PKM
+	{
+		/* Same SD layout as the rootfs seed; see fs/namespace.c. */
+		static const u8 pkm_devtmpfs_root_sd[72] = {
+			0x01, 0x00, 0x04, 0x80,
+			0x14, 0x00, 0x00, 0x00,
+			0x20, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00,
+			0x2c, 0x00, 0x00, 0x00,
+			0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+			0x12, 0x00, 0x00, 0x00,
+			0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+			0x12, 0x00, 0x00, 0x00,
+			0x02, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x00,
+			0x00, 0x03, 0x14, 0x00,
+			0x00, 0x00, 0x00, 0x10,
+			0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+			0x12, 0x00, 0x00, 0x00,
+		};
+		extern struct mnt_idmap nop_mnt_idmap;
+		extern int __vfs_setxattr_noperm(struct mnt_idmap *,
+						 struct dentry *,
+						 const char *,
+						 const void *, size_t, int);
+		struct inode *pkm_dev_inode = mnt->mnt_root->d_inode;
+		int pkm_xerr;
+
+		inode_lock(pkm_dev_inode);
+		pkm_xerr = __vfs_setxattr_noperm(&nop_mnt_idmap,
+						 mnt->mnt_root,
+						 "security.peios.sd",
+						 pkm_devtmpfs_root_sd,
+						 sizeof(pkm_devtmpfs_root_sd),
+						 0);
+		inode_unlock(pkm_dev_inode);
+		if (pkm_xerr)
+			pr_warn("pkm: seed devtmpfs root SD failed: %d\\n",
+				pkm_xerr);
+	}
+#endif
+' \
+	"$kernel_root/drivers/base/devtmpfs.c"
+
 insert_line_after_exact_once '#define PTRACE_MODE_REALCREDS	0x10' \
 	'#define PTRACE_MODE_GETFD	0x20' \
 	"$kernel_root/include/linux/ptrace.h"
