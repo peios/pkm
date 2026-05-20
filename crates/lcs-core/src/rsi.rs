@@ -101,6 +101,23 @@ pub struct RsiTransactionReplaySnapshotResponseMatch<'a> {
     pub response: RsiValidatedResponse,
 }
 
+/// Parsed successful response payload for one replay snapshot query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiTransactionReplaySnapshotParsedResponse<'q, 'f> {
+    EffectiveValue {
+        record: RsiTransactionReplaySnapshotRequestRecord<'q>,
+        payload: RsiQueryValuesSuccessResponsePayload<'f>,
+    },
+    EffectiveSubkeys {
+        record: RsiTransactionReplaySnapshotRequestRecord<'q>,
+        payload: RsiEnumChildrenSuccessResponsePayload<'f>,
+    },
+    ChildVisibility {
+        record: RsiTransactionReplaySnapshotRequestRecord<'q>,
+        payload: RsiLookupSuccessResponsePayload<'f>,
+    },
+}
+
 /// One length-prefixed RSI string or byte-array field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiLengthPrefixedField<'a> {
@@ -1315,6 +1332,43 @@ pub fn match_transaction_replay_snapshot_response_record<'a>(
     let record = find_transaction_replay_snapshot_request_record(storage, header.request_id)?;
     let response = validate_rsi_response_for_request(frame, record.retained)?;
     Ok(RsiTransactionReplaySnapshotResponseMatch { record, response })
+}
+
+/// Parses a matched successful replay snapshot response into its query-specific payload.
+pub fn parse_transaction_replay_snapshot_response_payload<'q, 'f>(
+    matched: RsiTransactionReplaySnapshotResponseMatch<'q>,
+    frame: &'f [u8],
+) -> LcsResult<RsiTransactionReplaySnapshotParsedResponse<'q, 'f>> {
+    match matched.record.query.kind {
+        TransactionReplaySnapshotQueryKind::EffectiveValue { .. } => {
+            let payload =
+                parse_rsi_query_values_success_response_payload(frame, matched.record.retained)?;
+            Ok(RsiTransactionReplaySnapshotParsedResponse::EffectiveValue {
+                record: matched.record,
+                payload,
+            })
+        }
+        TransactionReplaySnapshotQueryKind::EffectiveSubkeys { .. } => {
+            let payload =
+                parse_rsi_enum_children_success_response_payload(frame, matched.record.retained)?;
+            Ok(
+                RsiTransactionReplaySnapshotParsedResponse::EffectiveSubkeys {
+                    record: matched.record,
+                    payload,
+                },
+            )
+        }
+        TransactionReplaySnapshotQueryKind::ChildVisibility { .. } => {
+            let payload =
+                parse_rsi_lookup_success_response_payload(frame, matched.record.retained)?;
+            Ok(
+                RsiTransactionReplaySnapshotParsedResponse::ChildVisibility {
+                    record: matched.record,
+                    payload,
+                },
+            )
+        }
+    }
 }
 
 /// Writes an RSI request frame for a transaction replay snapshot query.
