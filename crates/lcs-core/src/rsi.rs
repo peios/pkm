@@ -104,6 +104,20 @@ pub struct RsiTransactionReplaySnapshotScheduledRequest<'a> {
     pub request_summary: RsiTransactionReplaySnapshotRequestTableSummary,
 }
 
+/// Result of reserving a source slot for one replay snapshot query request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiTransactionReplaySnapshotReservationPlan<'a> {
+    DispatchNow {
+        scheduled: RsiTransactionReplaySnapshotScheduledRequest<'a>,
+        remaining_timeout_ms: u32,
+        in_flight_after_dispatch: usize,
+    },
+    WaitForSlot {
+        remaining_timeout_ms: u32,
+    },
+    TimeoutBeforeDispatchNoRequest,
+}
+
 /// Validated response match for one retained transaction replay snapshot request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiTransactionReplaySnapshotResponseMatch<'a> {
@@ -1366,6 +1380,62 @@ pub fn schedule_transaction_replay_snapshot_query_request<'a>(
     })
 }
 
+/// Reserves a source slot, writes one replay snapshot request, and retains it.
+pub fn reserve_and_schedule_transaction_replay_snapshot_query_request<'a>(
+    limits: &LcsLimits,
+    counter: &mut RsiRequestIdCounter,
+    in_flight_count: usize,
+    elapsed_ms_since_reservation_attempt: u32,
+    storage: &mut [Option<RsiTransactionReplaySnapshotRequestRecord<'a>>],
+    dst: &mut [u8],
+    query: TransactionReplaySnapshotQuery<'a>,
+) -> LcsResult<RsiTransactionReplaySnapshotReservationPlan<'a>> {
+    let summary = summarize_transaction_replay_snapshot_request_table_internal(storage)?;
+    if summary.full {
+        return Err(LcsError::TransactionReplaySnapshotRequestTableFull {
+            capacity: summary.capacity,
+        });
+    }
+
+    let required_frame_len = transaction_replay_snapshot_query_request_frame_len(query)?;
+    if dst.len() < required_frame_len {
+        return Err(LcsError::RsiFrameBufferTooSmall {
+            len: dst.len(),
+            required: required_frame_len,
+        });
+    }
+
+    match plan_rsi_slot_reservation(
+        limits,
+        counter,
+        in_flight_count,
+        elapsed_ms_since_reservation_attempt,
+    )? {
+        RsiSlotReservationPlan::DispatchNow {
+            request_id,
+            remaining_timeout_ms,
+            in_flight_after_dispatch,
+        } => {
+            let scheduled = schedule_transaction_replay_snapshot_query_request(
+                storage, dst, request_id, query,
+            )?;
+            Ok(RsiTransactionReplaySnapshotReservationPlan::DispatchNow {
+                scheduled,
+                remaining_timeout_ms,
+                in_flight_after_dispatch,
+            })
+        }
+        RsiSlotReservationPlan::WaitForSlot {
+            remaining_timeout_ms,
+        } => Ok(RsiTransactionReplaySnapshotReservationPlan::WaitForSlot {
+            remaining_timeout_ms,
+        }),
+        RsiSlotReservationPlan::TimeoutBeforeDispatchNoRequest => {
+            Ok(RsiTransactionReplaySnapshotReservationPlan::TimeoutBeforeDispatchNoRequest)
+        }
+    }
+}
+
 /// Finds one retained replay snapshot request record by request ID.
 pub fn find_transaction_replay_snapshot_request_record<'a>(
     storage: &[Option<RsiTransactionReplaySnapshotRequestRecord<'a>>],
@@ -1707,6 +1777,30 @@ pub fn write_transaction_replay_snapshot_query_request_frame(
             child_name.as_bytes(),
         ),
     }
+}
+
+/// Computes the complete request-frame length for one replay snapshot query.
+pub fn transaction_replay_snapshot_query_request_frame_len(
+    query: TransactionReplaySnapshotQuery<'_>,
+) -> LcsResult<usize> {
+    let payload_len = match query.kind {
+        TransactionReplaySnapshotQueryKind::EffectiveValue { scope, .. } => {
+            let value_name = match scope {
+                TransactionReplayValueWatchScope::NamedValue { name } => name.as_bytes(),
+                TransactionReplayValueWatchScope::AllValues => b"",
+            };
+            checked_add_len(
+                checked_add_len(16, checked_rsi_length_prefixed_len(value_name)?)?,
+                1,
+            )?
+        }
+        TransactionReplaySnapshotQueryKind::EffectiveSubkeys { .. } => 16,
+        TransactionReplaySnapshotQueryKind::ChildVisibility { child_name, .. } => {
+            checked_add_len(16, checked_rsi_length_prefixed_len(child_name.as_bytes())?)?
+        }
+    };
+
+    checked_rsi_request_frame_len(payload_len)
 }
 
 fn transaction_replay_snapshot_query_op_code(query: TransactionReplaySnapshotQueryKind<'_>) -> u16 {
