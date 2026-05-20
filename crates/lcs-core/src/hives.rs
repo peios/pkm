@@ -1,5 +1,6 @@
 use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 use crate::path::{
     PathKind, is_reserved_current_user_name, validate_hive_name_bytes,
@@ -187,6 +188,14 @@ pub fn classify_hive_route(route: HiveRoute<'_>) -> HiveRouteOutcome<'_> {
         HiveRoute::Active(hive) => HiveRouteOutcome::Dispatch(hive),
         HiveRoute::Unavailable(_) => HiveRouteOutcome::Failure(HiveRouteErrno::Eio),
         HiveRoute::NotRegistered => HiveRouteOutcome::Failure(HiveRouteErrno::Enoent),
+    }
+}
+
+/// Projects a hive-route outcome to the caller-visible Linux errno.
+pub fn hive_route_outcome_errno(outcome: HiveRouteOutcome<'_>) -> Option<LinuxErrno> {
+    match outcome {
+        HiveRouteOutcome::Dispatch(_) => None,
+        HiveRouteOutcome::Failure(errno) => Some(LinuxErrno::from(errno)),
     }
 }
 

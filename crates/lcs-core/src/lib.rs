@@ -138,8 +138,8 @@ pub use hives::{
     CurrentUserRewrite, CurrentUserSidComponent, HiveRoute, HiveRouteErrno, HiveRouteOutcome,
     HiveScope, HiveStatus, HiveView, MAX_TEXTUAL_SID_COMPONENT_LEN, RoutedHive, SourceId,
     classify_hive_route, current_user_sid_component_from_binary_sid,
-    for_each_routable_path_component, route_hive, route_routable_path_hive, validate_hive_table,
-    validate_scope_guid_set,
+    for_each_routable_path_component, hive_route_outcome_errno, route_hive,
+    route_routable_path_hive, validate_hive_table, validate_scope_guid_set,
 };
 pub use identity::sid_bytes_equal;
 pub use ioctl::{
