@@ -787,6 +787,11 @@ pub enum LcsError {
         /// Duplicated request ID.
         request_id: u64,
     },
+    /// An in-flight source request table had no free entry slots.
+    RsiInFlightRequestTableFull {
+        /// Fixed table capacity.
+        capacity: usize,
+    },
     /// A source response did not match any live in-flight request.
     RsiInFlightRequestNotFound {
         /// Source connection that submitted the response.

@@ -1713,6 +1713,41 @@ pub fn summarize_rsi_in_flight_request_table(
     })
 }
 
+/// Inserts one already-dispatched request into fixed-capacity in-flight storage.
+pub fn insert_rsi_in_flight_request_record(
+    storage: &mut [Option<RsiInFlightRequestRecord>],
+    record: RsiInFlightRequestRecord,
+) -> LcsResult<RsiInFlightRequestTableSummary> {
+    validate_rsi_request_op_code(record.retained.op_code)?;
+    let summary = summarize_rsi_in_flight_request_table(storage)?;
+    if storage.iter().flatten().any(|candidate| {
+        candidate.source_connection_id == record.source_connection_id
+            && candidate.retained.request_id == record.retained.request_id
+    }) {
+        return Err(LcsError::DuplicateRsiInFlightRequestRecord {
+            source_connection_id: record.source_connection_id,
+            request_id: record.retained.request_id,
+        });
+    }
+    if summary.full {
+        return Err(LcsError::RsiInFlightRequestTableFull {
+            capacity: storage.len(),
+        });
+    }
+
+    let capacity = storage.len();
+    let slot = storage
+        .iter_mut()
+        .find(|slot| slot.is_none())
+        .ok_or(LcsError::RsiInFlightRequestTableFull { capacity })?;
+    *slot = Some(record);
+    Ok(RsiInFlightRequestTableSummary {
+        entries: summary.entries + 1,
+        capacity: summary.capacity,
+        full: summary.entries + 1 == summary.capacity,
+    })
+}
+
 /// Matches one source write response to a retained in-flight request record.
 pub fn match_rsi_source_write_response_record(
     storage: &[Option<RsiInFlightRequestRecord>],
