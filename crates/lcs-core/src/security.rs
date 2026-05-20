@@ -12,6 +12,10 @@ use crate::output_buffer::{
     plan_output_buffer_copy, validate_output_buffer_required_size,
 };
 use crate::resolution::Guid;
+use crate::transaction::{
+    TransactionMutationLogEntry, TransactionMutationLogKind, TransactionOperationIndexCounter,
+    plan_transaction_mutation_log_entry,
+};
 use crate::watch::{WatchMutationContext, validate_watch_mutation_context};
 use kacs_core::{
     Acl, MAX_SECURITY_DESCRIPTOR_BYTES, PkmVec, SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERITED,
@@ -269,6 +273,35 @@ pub fn plan_registry_set_security_commit_effects<'a>(
         retain_existing_fd_grants: !plan.affects_existing_fd_grants,
         watch_mutation,
     })
+}
+
+/// Plans a transaction mutation-log entry for a transaction-pending SET_SECURITY effect.
+pub fn plan_registry_set_security_transaction_log_entry<'a>(
+    effects: &RegistrySetSecurityCommitEffects<'a>,
+    counter: &mut TransactionOperationIndexCounter,
+) -> LcsResult<TransactionMutationLogEntry<'a>> {
+    if !effects.record_transaction_mutation_log
+        || effects.update_hive_generation
+        || effects.dispatch_watch_events
+        || effects.commit_visible_last_write_time_update
+    {
+        return Err(LcsError::InvalidRegistrySetSecurityPlan {
+            field: "reg_set_security.transaction_effects",
+        });
+    }
+    let Some(watch_mutation) = effects.watch_mutation else {
+        return Err(LcsError::InvalidRegistrySetSecurityPlan {
+            field: "reg_set_security.watch_mutation",
+        });
+    };
+
+    plan_transaction_mutation_log_entry(
+        counter,
+        TransactionMutationLogKind::SetSecurity,
+        watch_mutation,
+        true,
+        true,
+    )
 }
 
 fn validate_registry_set_security_plan(plan: &RegistrySetSecurityPlan) -> LcsResult<()> {

@@ -2,7 +2,7 @@ use crate::casefold::casefold_eq;
 use crate::config::LcsLimits;
 use crate::constants::{
     REG_TXN_ABORTED, REG_TXN_ACTIVE_BOUND, REG_TXN_ACTIVE_UNBOUND, REG_TXN_COMMITTED,
-    REG_TXN_SOURCE_DOWN, REG_TXN_TIMED_OUT, RSI_TXN_READ_ONLY,
+    REG_TXN_SOURCE_DOWN, REG_TXN_TIMED_OUT, REG_WATCH_SD_CHANGED, RSI_TXN_READ_ONLY,
 };
 use crate::error::{LcsError, LcsResult};
 use crate::hives::SourceId;
@@ -11,9 +11,15 @@ use crate::resolution::Guid;
 use crate::rsi::RsiMappedErrno;
 use crate::sequence::SequenceCounter;
 use crate::source::NIL_GUID;
+use crate::watch::{
+    TransactionWatchBatchMember, WatchMutationContext, validate_watch_mutation_context,
+};
 
 /// Kernel-internal transaction identifier.
 pub type TransactionId = u64;
+
+/// Kernel-internal operation index used to preserve transaction mutation order.
+pub type TransactionOperationIndex = u64;
 
 /// Source/hive binding selected by the first mutating operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,6 +105,22 @@ pub struct TransactionMutationAcceptancePlan<'a> {
     pub abort_leaves_sequence_gap: bool,
 }
 
+/// Transaction mutation-log entry class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionMutationLogKind {
+    SetSecurity,
+}
+
+/// Transaction mutation-log entry for kernel-owned commit effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionMutationLogEntry<'a> {
+    pub operation_index: TransactionOperationIndex,
+    pub kind: TransactionMutationLogKind,
+    pub watch_mutation: WatchMutationContext<'a>,
+    pub update_hive_generation_on_commit: bool,
+    pub update_last_write_time_on_commit: bool,
+}
+
 /// Failure while accepting a mutating operation into a transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionMutationAcceptanceFailure {
@@ -167,6 +189,12 @@ pub struct TransactionIdCounter {
     next_id: TransactionId,
 }
 
+/// Monotonic non-zero transaction mutation operation-index allocator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionOperationIndexCounter {
+    next_index: TransactionOperationIndex,
+}
+
 impl TransactionIdCounter {
     pub const fn new() -> Self {
         Self { next_id: 1 }
@@ -194,6 +222,38 @@ impl TransactionIdCounter {
 }
 
 impl Default for TransactionIdCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TransactionOperationIndexCounter {
+    pub const fn new() -> Self {
+        Self { next_index: 1 }
+    }
+
+    pub fn from_next_index(next_index: TransactionOperationIndex) -> LcsResult<Self> {
+        if next_index == 0 {
+            return Err(LcsError::InvalidTransactionOperationIndex);
+        }
+        Ok(Self { next_index })
+    }
+
+    pub const fn next_index(&self) -> TransactionOperationIndex {
+        self.next_index
+    }
+
+    pub fn allocate(&mut self) -> LcsResult<TransactionOperationIndex> {
+        if self.next_index == TransactionOperationIndex::MAX {
+            return Err(LcsError::TransactionOperationIndexOverflow);
+        }
+        let allocated = self.next_index;
+        self.next_index += 1;
+        Ok(allocated)
+    }
+}
+
+impl Default for TransactionOperationIndexCounter {
     fn default() -> Self {
         Self::new()
     }
@@ -599,6 +659,37 @@ pub fn plan_transaction_mutation_acceptance<'a>(
     })
 }
 
+/// Plans one transaction mutation-log entry before source dispatch.
+pub fn plan_transaction_mutation_log_entry<'a>(
+    counter: &mut TransactionOperationIndexCounter,
+    kind: TransactionMutationLogKind,
+    watch_mutation: WatchMutationContext<'a>,
+    update_hive_generation_on_commit: bool,
+    update_last_write_time_on_commit: bool,
+) -> LcsResult<TransactionMutationLogEntry<'a>> {
+    validate_transaction_mutation_log_kind(kind, watch_mutation)?;
+    validate_watch_mutation_context(&watch_mutation)?;
+
+    Ok(TransactionMutationLogEntry {
+        operation_index: counter.allocate()?,
+        kind,
+        watch_mutation,
+        update_hive_generation_on_commit,
+        update_last_write_time_on_commit,
+    })
+}
+
+/// Converts one committed mutation-log entry to an existing per-watcher batch member.
+pub fn transaction_log_entry_watch_batch_member(
+    entry: &TransactionMutationLogEntry<'_>,
+    event_count: usize,
+) -> TransactionWatchBatchMember {
+    TransactionWatchBatchMember {
+        operation_index: entry.operation_index,
+        event_count,
+    }
+}
+
 /// Plans read behavior when a read ioctl is supplied a transaction fd.
 pub fn plan_transaction_read<'a>(
     limits: &LcsLimits,
@@ -931,6 +1022,22 @@ fn same_transaction_binding(
     Ok(left.source_id == right.source_id
         && left.hive_root_guid == right.hive_root_guid
         && casefold_eq(left.hive_name, right.hive_name))
+}
+
+fn validate_transaction_mutation_log_kind(
+    kind: TransactionMutationLogKind,
+    watch_mutation: WatchMutationContext<'_>,
+) -> LcsResult<()> {
+    match kind {
+        TransactionMutationLogKind::SetSecurity => {
+            if watch_mutation.event_type != REG_WATCH_SD_CHANGED {
+                return Err(LcsError::InvalidTransactionMutationLogEntry {
+                    field: "event_type",
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_terminal_transaction_state(state: TransactionState<'_>) -> bool {

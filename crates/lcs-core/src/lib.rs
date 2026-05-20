@@ -293,7 +293,8 @@ pub use security::{
     RegistryGetSecurityOutputBufferDecision, RegistryGetSecurityPlan,
     RegistrySetSecurityCommitEffects, RegistrySetSecurityEffectTiming, RegistrySetSecurityPlan,
     plan_registry_get_security, plan_registry_set_security,
-    plan_registry_set_security_commit_effects, validate_registry_get_security_output_buffer,
+    plan_registry_set_security_commit_effects, plan_registry_set_security_transaction_log_entry,
+    validate_registry_get_security_output_buffer,
 };
 pub use sequence::SequenceCounter;
 pub use source::{
@@ -324,8 +325,9 @@ pub use transaction::{
     TransactionCommitReturnStatus, TransactionCommitSourceResponse, TransactionCompletionEvent,
     TransactionFdClosePlan, TransactionFdPublicationPlan, TransactionId, TransactionIdCounter,
     TransactionKernelEffectsPlan, TransactionMutationAcceptanceFailure,
-    TransactionMutationAcceptancePlan, TransactionMutationBindingPlan, TransactionPollPlan,
-    TransactionReadPlan, TransactionRuntimeTransitionPlan, TransactionState,
+    TransactionMutationAcceptancePlan, TransactionMutationBindingPlan, TransactionMutationLogEntry,
+    TransactionMutationLogKind, TransactionOperationIndex, TransactionOperationIndexCounter,
+    TransactionPollPlan, TransactionReadPlan, TransactionRuntimeTransitionPlan, TransactionState,
     TransactionStatusResult, TransactionTerminalErrno, TransactionTimeoutErrno,
     TransactionUseFailure, plan_backup_read_only_snapshot_admission,
     plan_backup_read_only_snapshot_release, plan_begin_transaction, plan_begin_transaction_fd,
@@ -333,9 +335,10 @@ pub use transaction::{
     plan_transaction_bound_counter_update, plan_transaction_bound_source_down,
     plan_transaction_commit, plan_transaction_commit_response, plan_transaction_completion_effects,
     plan_transaction_fd_close, plan_transaction_mutation_acceptance,
-    plan_transaction_mutation_binding, plan_transaction_poll, plan_transaction_read,
-    plan_transaction_timeout, transaction_status, transaction_terminal_failure,
-    transaction_timeout_errno, transaction_use_failure_errno,
+    plan_transaction_mutation_binding, plan_transaction_mutation_log_entry, plan_transaction_poll,
+    plan_transaction_read, plan_transaction_timeout, transaction_log_entry_watch_batch_member,
+    transaction_status, transaction_terminal_failure, transaction_timeout_errno,
+    transaction_use_failure_errno,
 };
 pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,

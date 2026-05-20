@@ -833,6 +833,15 @@ pub enum LcsError {
     InvalidTransactionId,
     /// The monotonic transaction ID allocator cannot advance without overflowing.
     TransactionIdOverflow,
+    /// Transaction operation index zero is reserved for invalid log state.
+    InvalidTransactionOperationIndex,
+    /// The monotonic transaction operation-index allocator cannot advance without overflowing.
+    TransactionOperationIndexOverflow,
+    /// A transaction mutation-log entry was internally inconsistent.
+    InvalidTransactionMutationLogEntry {
+        /// Logical input field.
+        field: &'static str,
+    },
     /// A transaction runtime transition was requested from an impossible state.
     InvalidTransactionRuntimeState,
 }
