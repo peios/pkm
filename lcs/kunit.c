@@ -3,6 +3,7 @@
 #include <kunit/test.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
+#include <linux/string.h>
 
 #include <pkm/token.h>
 
@@ -10,6 +11,34 @@
 #include "source_device.h"
 
 extern size_t lcs_rust_kunit_probe(void);
+
+struct pkm_lcs_kunit_usercopy_ctx {
+	const void *fault_src;
+	unsigned int reads;
+};
+
+static bool pkm_lcs_kunit_usercopy_read(void *raw_ctx, void *dst,
+					const void __user *src, size_t len)
+{
+	struct pkm_lcs_kunit_usercopy_ctx *ctx = raw_ctx;
+	const void *ksrc = (const void *)(unsigned long)src;
+
+	ctx->reads++;
+	if (!ksrc || ksrc == ctx->fault_src)
+		return false;
+
+	memcpy(dst, ksrc, len);
+	return true;
+}
+
+static struct pkm_lcs_usercopy_ops pkm_lcs_kunit_usercopy_ops(
+	struct pkm_lcs_kunit_usercopy_ctx *ctx)
+{
+	return (struct pkm_lcs_usercopy_ops) {
+		.read = pkm_lcs_kunit_usercopy_read,
+		.ctx = ctx,
+	};
+}
 
 static void pkm_lcs_kunit_rust_probe_links_lcs_core(struct kunit *test)
 {
@@ -87,12 +116,138 @@ static void pkm_lcs_kunit_source_device_open_attaches_private_state(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_registration_copy_success(struct kunit *test)
+{
+	const char name_src[] = { 'M', 'a', 'c', 'h', 'i', 'n', 'e', '!' };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive = {
+		.name_len = 7,
+		.name_ptr = (u64)(unsigned long)name_src,
+		.root_guid = { 1, 2, 3 },
+	};
+	struct reg_src_register_args args = {
+		.hive_count = 1,
+		.max_sequence = 41,
+		.hives_ptr = (u64)(unsigned long)&hive,
+	};
+	struct pkm_lcs_source_registration_copy copy = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_registration_copy_from_user(
+				&ops, (const void __user *)&args, 64, &copy),
+			0L);
+	KUNIT_EXPECT_EQ(test, copy.hive_count, 1U);
+	KUNIT_EXPECT_EQ(test, copy.max_sequence, 41ULL);
+	KUNIT_ASSERT_NOT_NULL(test, copy.hives);
+	KUNIT_ASSERT_NOT_NULL(test, copy.hives[0].name);
+	KUNIT_EXPECT_EQ(test, copy.hives[0].name_len, 7U);
+	KUNIT_EXPECT_STREQ(test, copy.hives[0].name, "Machine");
+	KUNIT_EXPECT_EQ(test, copy.hives[0].name[7], '\0');
+	KUNIT_EXPECT_EQ(test, copy.hives[0].root_guid[0], 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 3U);
+
+	pkm_lcs_source_registration_copy_destroy(&copy);
+}
+
+static void pkm_lcs_kunit_source_registration_copy_rejects_padding(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive = {
+		.name_len = 7,
+		.name_ptr = (u64)(unsigned long)name_src,
+		._pad1 = 1,
+	};
+	struct reg_src_register_args args = {
+		.hive_count = 1,
+		.hives_ptr = (u64)(unsigned long)&hive,
+	};
+	struct pkm_lcs_source_registration_copy copy = { };
+
+	args._pad = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_registration_copy_from_user(
+				&ops, (const void __user *)&args, 64, &copy),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	ctx.reads = 0;
+	args._pad = 0;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_registration_copy_from_user(
+				&ops, (const void __user *)&args, 64, &copy),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
+	KUNIT_EXPECT_PTR_EQ(test, copy.hives, NULL);
+}
+
+static void pkm_lcs_kunit_source_registration_copy_fails_closed_on_faults(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive = {
+		.name_len = 7,
+		.name_ptr = (u64)(unsigned long)name_src,
+	};
+	struct reg_src_register_args args = {
+		.hive_count = 1,
+		.hives_ptr = (u64)(unsigned long)&hive,
+	};
+	struct pkm_lcs_source_registration_copy copy = { };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_registration_copy_from_user(
+				&ops, (const void __user *)&args, 64, NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_registration_copy_from_user(
+				&ops, NULL, 64, &copy),
+			(long)-EFAULT);
+
+	ctx.fault_src = name_src;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_registration_copy_from_user(
+				&ops, (const void __user *)&args, 64, &copy),
+			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 3U);
+	KUNIT_EXPECT_PTR_EQ(test, copy.hives, NULL);
+}
+
+static void pkm_lcs_kunit_source_registration_copy_bounds_hive_count(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_register_args args = {
+		.hive_count = 65,
+		.hives_ptr = 0,
+	};
+	struct pkm_lcs_source_registration_copy copy = { };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_registration_copy_from_user(
+				&ops, (const void __user *)&args, 64, &copy),
+			(long)-ENOSPC);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_PTR_EQ(test, copy.hives, NULL);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_requires_tcb),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_marks_tcb_used),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_attaches_private_state),
+	KUNIT_CASE(pkm_lcs_kunit_source_registration_copy_success),
+	KUNIT_CASE(pkm_lcs_kunit_source_registration_copy_rejects_padding),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_copy_fails_closed_on_faults),
+	KUNIT_CASE(pkm_lcs_kunit_source_registration_copy_bounds_hive_count),
 	{ }
 };
 
