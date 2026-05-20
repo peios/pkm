@@ -1,4 +1,5 @@
 use crate::config::LcsLimits;
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 use crate::hives::{CurrentUserRewrite, HiveRouteOutcome, HiveView, route_routable_path_hive};
 use crate::path::{PathKind, PathSummary, validate_registry_path_bytes};
@@ -61,6 +62,16 @@ pub fn classify_symlink_default_value_resolution<'a>(
     }
 }
 
+/// Projects a symlink default-value resolution outcome to Linux errno.
+pub fn symlink_default_value_resolution_errno(
+    outcome: &SymlinkDefaultValueResolution<'_>,
+) -> Option<LinuxErrno> {
+    match outcome {
+        SymlinkDefaultValueResolution::Target(_) => None,
+        SymlinkDefaultValueResolution::Failed(errno) => Some(LinuxErrno::from(*errno)),
+    }
+}
+
 /// Validates a REG_LINK payload as a length-delimited absolute registry path.
 pub fn validate_symlink_target_bytes<'a>(
     limits: &LcsLimits,
@@ -109,5 +120,15 @@ pub fn classify_symlink_follow_depth(
             SymlinkFollowDepthResolution::Failed(SymlinkResolutionErrno::Eloop)
         }
         Err(_) => SymlinkFollowDepthResolution::Failed(SymlinkResolutionErrno::Einval),
+    }
+}
+
+/// Projects a symlink follow-depth resolution outcome to Linux errno.
+pub fn symlink_follow_depth_resolution_errno(
+    outcome: SymlinkFollowDepthResolution,
+) -> Option<LinuxErrno> {
+    match outcome {
+        SymlinkFollowDepthResolution::Advanced(_) => None,
+        SymlinkFollowDepthResolution::Failed(errno) => Some(LinuxErrno::from(errno)),
     }
 }

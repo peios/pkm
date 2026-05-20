@@ -364,8 +364,9 @@ pub use string::validate_lcs_str;
 pub use symlink::{
     SymlinkDefaultValue, SymlinkDefaultValueResolution, SymlinkFollowDepthResolution,
     SymlinkResolutionErrno, classify_symlink_default_value_resolution,
-    classify_symlink_follow_depth, route_symlink_target_hive, validate_symlink_default_value,
-    validate_symlink_follow_depth, validate_symlink_target_bytes,
+    classify_symlink_follow_depth, route_symlink_target_hive,
+    symlink_default_value_resolution_errno, symlink_follow_depth_resolution_errno,
+    validate_symlink_default_value, validate_symlink_follow_depth, validate_symlink_target_bytes,
 };
 pub use transaction::{
     BackupReadOnlySnapshotAdmissionPlan, BackupReadOnlySnapshotReleasePlan,
