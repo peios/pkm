@@ -36,6 +36,14 @@ pub enum OutputBufferAggregate {
     TooSmall,
 }
 
+/// Copyout policy selected before any variable output buffer is filled.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutputBufferCopyPlan {
+    pub aggregate: OutputBufferAggregate,
+    pub fill_output_buffers: bool,
+    pub report_required_sizes: bool,
+}
+
 /// Classifies one `(buffer_length, buffer_ptr)` pair under the uniform ABI.
 pub fn classify_output_buffer_request(
     request: OutputBufferRequest,
@@ -86,5 +94,23 @@ pub fn aggregate_output_buffer_decisions(
         OutputBufferAggregate::TooSmall
     } else {
         OutputBufferAggregate::AllFit
+    }
+}
+
+/// Plans all-or-none variable output-buffer copyout after size validation.
+pub fn plan_output_buffer_copy(decisions: &[OutputBufferDecision]) -> OutputBufferCopyPlan {
+    let aggregate = aggregate_output_buffer_decisions(decisions);
+
+    match aggregate {
+        OutputBufferAggregate::AllFit => OutputBufferCopyPlan {
+            aggregate,
+            fill_output_buffers: true,
+            report_required_sizes: false,
+        },
+        OutputBufferAggregate::TooSmall => OutputBufferCopyPlan {
+            aggregate,
+            fill_output_buffers: false,
+            report_required_sizes: true,
+        },
     }
 }

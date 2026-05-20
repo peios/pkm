@@ -191,9 +191,9 @@ pub use open::{
     plan_registry_open_pre_resolution_access, select_registry_open_access_target,
 };
 pub use output_buffer::{
-    OutputBufferAggregate, OutputBufferDecision, OutputBufferRequest, OutputBufferShape,
-    aggregate_output_buffer_decisions, classify_output_buffer_request,
-    validate_output_buffer_required_size,
+    OutputBufferAggregate, OutputBufferCopyPlan, OutputBufferDecision, OutputBufferRequest,
+    OutputBufferShape, aggregate_output_buffer_decisions, classify_output_buffer_request,
+    plan_output_buffer_copy, validate_output_buffer_required_size,
 };
 pub use path::{
     PathKind, PathSummary, is_base_layer_name, is_reserved_current_user_name,
