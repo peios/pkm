@@ -24,6 +24,7 @@ use crate::security::RegistrySetSecurityPlan;
 use crate::transaction::TransactionKernelEffectsPlan;
 use crate::transaction_log::{
     TransactionReplaySnapshotQuery, TransactionReplaySnapshotQueryKind,
+    TransactionReplaySnapshotResult, TransactionReplaySnapshotResultKind,
     TransactionReplayValueWatchScope,
 };
 use crate::value::{
@@ -115,6 +116,23 @@ pub enum RsiTransactionReplaySnapshotParsedResponse<'q, 'f> {
     ChildVisibility {
         record: RsiTransactionReplaySnapshotRequestRecord<'q>,
         payload: RsiLookupSuccessResponsePayload<'f>,
+    },
+}
+
+/// Materialized retained replay snapshot result plus projection summary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RsiTransactionReplaySnapshotMaterializedResponse<'a> {
+    EffectiveValue {
+        result: TransactionReplaySnapshotResult<'a>,
+        summary: RsiEffectiveValueSnapshotProjectionSummary,
+    },
+    EffectiveSubkeys {
+        result: TransactionReplaySnapshotResult<'a>,
+        summary: RsiEffectiveSubkeySnapshotProjectionSummary,
+    },
+    ChildVisibility {
+        result: TransactionReplaySnapshotResult<'a>,
+        summary: RsiChildVisibilitySnapshotProjection<'a>,
     },
 }
 
@@ -1365,6 +1383,138 @@ pub fn parse_transaction_replay_snapshot_response_payload<'q, 'f>(
                 RsiTransactionReplaySnapshotParsedResponse::ChildVisibility {
                     record: matched.record,
                     payload,
+                },
+            )
+        }
+    }
+}
+
+/// Materializes a parsed replay snapshot response into a retained snapshot result.
+pub fn materialize_transaction_replay_snapshot_response<'q, 'f, 'out>(
+    context: &LayerResolutionContext<'out>,
+    parsed: RsiTransactionReplaySnapshotParsedResponse<'q, 'f>,
+    value_entry_storage: &'out mut [NamedValueEntry<'out>],
+    blanket_storage: &'out mut [BlanketTombstoneEntry<'out>],
+    path_storage: &'out mut [NamedPathEntry<'out>],
+    value_result_storage: &'out mut [EnumeratedValue<'out>],
+    subkey_result_storage: &'out mut [EnumeratedSubkey<'out>],
+) -> LcsResult<RsiTransactionReplaySnapshotMaterializedResponse<'out>>
+where
+    'q: 'out,
+    'f: 'out,
+{
+    match parsed {
+        RsiTransactionReplaySnapshotParsedResponse::EffectiveValue { record, payload } => {
+            let TransactionReplaySnapshotQueryKind::EffectiveValue { key_guid, scope } =
+                record.query.kind
+            else {
+                return Err(LcsError::InvalidTransactionMutationLogEntry {
+                    field: "replay_snapshot.query_kind",
+                });
+            };
+            let max_effective_values = checked_snapshot_count(payload.entry_count)?;
+            require_replay_snapshot_storage(
+                "query_values.effective_values",
+                max_effective_values,
+                value_result_storage.len(),
+            )?;
+            let mut emitted = 0usize;
+            let summary = for_each_rsi_query_values_effective_snapshot_entry(
+                context,
+                &payload,
+                value_entry_storage,
+                blanket_storage,
+                |entry| {
+                    value_result_storage[emitted] = entry;
+                    emitted += 1;
+                    Ok(())
+                },
+            )?;
+            let result = TransactionReplaySnapshotResult {
+                phase: record.query.phase,
+                operation_index: record.query.operation_index,
+                kind: TransactionReplaySnapshotResultKind::EffectiveValue {
+                    key_guid,
+                    scope,
+                    values: &value_result_storage[..emitted],
+                },
+            };
+            Ok(
+                RsiTransactionReplaySnapshotMaterializedResponse::EffectiveValue {
+                    result,
+                    summary,
+                },
+            )
+        }
+        RsiTransactionReplaySnapshotParsedResponse::EffectiveSubkeys { record, payload } => {
+            let TransactionReplaySnapshotQueryKind::EffectiveSubkeys { parent_guid } =
+                record.query.kind
+            else {
+                return Err(LcsError::InvalidTransactionMutationLogEntry {
+                    field: "replay_snapshot.query_kind",
+                });
+            };
+            let max_effective_subkeys = checked_snapshot_count(payload.child_count)?;
+            require_replay_snapshot_storage(
+                "enum_children.effective_subkeys",
+                max_effective_subkeys,
+                subkey_result_storage.len(),
+            )?;
+            let mut emitted = 0usize;
+            let summary = for_each_rsi_enum_children_effective_subkey_snapshot_entry(
+                context,
+                &payload,
+                path_storage,
+                |entry| {
+                    subkey_result_storage[emitted] = entry;
+                    emitted += 1;
+                    Ok(())
+                },
+            )?;
+            let result = TransactionReplaySnapshotResult {
+                phase: record.query.phase,
+                operation_index: record.query.operation_index,
+                kind: TransactionReplaySnapshotResultKind::EffectiveSubkeys {
+                    parent_guid,
+                    children: &subkey_result_storage[..emitted],
+                },
+            };
+            Ok(
+                RsiTransactionReplaySnapshotMaterializedResponse::EffectiveSubkeys {
+                    result,
+                    summary,
+                },
+            )
+        }
+        RsiTransactionReplaySnapshotParsedResponse::ChildVisibility { record, payload } => {
+            let TransactionReplaySnapshotQueryKind::ChildVisibility {
+                parent_guid,
+                child_name,
+            } = record.query.kind
+            else {
+                return Err(LcsError::InvalidTransactionMutationLogEntry {
+                    field: "replay_snapshot.query_kind",
+                });
+            };
+            let summary = resolve_rsi_lookup_child_visibility_snapshot(
+                context,
+                &payload,
+                child_name,
+                path_storage,
+            )?;
+            let result = TransactionReplaySnapshotResult {
+                phase: record.query.phase,
+                operation_index: record.query.operation_index,
+                kind: TransactionReplaySnapshotResultKind::ChildVisibility {
+                    parent_guid,
+                    child_name,
+                    child: summary.resolved,
+                },
+            };
+            Ok(
+                RsiTransactionReplaySnapshotMaterializedResponse::ChildVisibility {
+                    result,
+                    summary,
                 },
             )
         }
