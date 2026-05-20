@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <kunit/test.h>
+#include <linux/anon_inodes.h>
 #include <linux/errno.h>
+#include <linux/fcntl.h>
+#include <linux/fdtable.h>
 #include <linux/fs.h>
 #include <linux/string.h>
 
 #include <pkm/token.h>
 
 #include "../kacs/token_runtime.h"
+#include "key_fd.h"
 #include "source_device.h"
 
 extern size_t lcs_rust_kunit_probe(void);
@@ -64,6 +68,8 @@ static struct pkm_lcs_usercopy_ops pkm_lcs_kunit_usercopy_ops(
 		.ctx = ctx,
 	};
 }
+
+static const struct file_operations pkm_lcs_kunit_non_key_fops = { };
 
 static void pkm_lcs_kunit_rust_probe_links_lcs_core(struct kunit *test)
 {
@@ -1257,6 +1263,160 @@ static void pkm_lcs_kunit_open_preflight_route_copy_fault_keeps_route_empty(
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 }
 
+static void pkm_lcs_kunit_key_fd_publish_snapshot_success(struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0x11 },
+		{ 0x22, 0x23 },
+	};
+	struct pkm_lcs_key_fd_publish_input input = {
+		.source_id = 7,
+		.granted_access = KEY_READ,
+		.resolved_path = path,
+		.ancestor_guids = ancestors,
+		.path_component_count = 2,
+	};
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	long fd;
+
+	memcpy(input.key_guid, ancestors[1], sizeof(input.key_guid));
+
+	fd = pkm_lcs_key_fd_publish(&input);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)fd, &snapshot), 0L);
+
+	KUNIT_EXPECT_EQ(test, snapshot.source_id, 7U);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, snapshot.path_component_count, 2U);
+	KUNIT_EXPECT_FALSE(test, snapshot.orphaned);
+	KUNIT_EXPECT_FALSE(test, snapshot.watch_armed);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.key_guid, ancestors[1],
+			       sizeof(snapshot.key_guid)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.first_ancestor_guid, ancestors[0],
+			       sizeof(snapshot.first_ancestor_guid)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.last_ancestor_guid, ancestors[1],
+			       sizeof(snapshot.last_ancestor_guid)),
+			0);
+	KUNIT_EXPECT_EQ(test, snapshot.first_component_len, 7U);
+	KUNIT_EXPECT_EQ(test, snapshot.last_component_len, 8U);
+	KUNIT_EXPECT_STREQ(test, snapshot.first_component, "Machine");
+	KUNIT_EXPECT_STREQ(test, snapshot.last_component, "Software");
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_key_fd_publish_deep_copies_input(struct kunit *test)
+{
+	char machine[] = "Machine";
+	char software[] = "Software";
+	const char *path[] = { machine, software };
+	u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0x41 },
+		{ 0x42 },
+	};
+	struct pkm_lcs_key_fd_publish_input input = {
+		.source_id = 5,
+		.granted_access = KEY_QUERY_VALUE,
+		.resolved_path = path,
+		.ancestor_guids = ancestors,
+		.path_component_count = 2,
+	};
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	long fd;
+
+	memcpy(input.key_guid, ancestors[1], sizeof(input.key_guid));
+
+	fd = pkm_lcs_key_fd_publish(&input);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	machine[0] = 'X';
+	software[0] = 'Y';
+	ancestors[0][0] = 0xff;
+	ancestors[1][0] = 0xee;
+	input.key_guid[0] = 0xdd;
+	input.granted_access = KEY_SET_VALUE;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)fd, &snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_QUERY_VALUE);
+	KUNIT_EXPECT_EQ(test, snapshot.key_guid[0], 0x42U);
+	KUNIT_EXPECT_EQ(test, snapshot.first_ancestor_guid[0], 0x41U);
+	KUNIT_EXPECT_EQ(test, snapshot.last_ancestor_guid[0], 0x42U);
+	KUNIT_EXPECT_STREQ(test, snapshot.first_component, "Machine");
+	KUNIT_EXPECT_STREQ(test, snapshot.last_component, "Software");
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_key_fd_publish_rejects_malformed_state(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const char * const bad_path[] = { "Machine", NULL };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0x31 },
+		{ 0x32 },
+	};
+	struct pkm_lcs_key_fd_publish_input input = {
+		.source_id = 3,
+		.granted_access = KEY_QUERY_VALUE,
+		.resolved_path = path,
+		.ancestor_guids = ancestors,
+		.path_component_count = 2,
+	};
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_key_fd_publish(NULL), (long)-EINVAL);
+
+	input.source_id = 0;
+	memcpy(input.key_guid, ancestors[1], sizeof(input.key_guid));
+	KUNIT_EXPECT_EQ(test, pkm_lcs_key_fd_publish(&input), (long)-EINVAL);
+
+	input.source_id = 3;
+	memset(input.key_guid, 0, sizeof(input.key_guid));
+	KUNIT_EXPECT_EQ(test, pkm_lcs_key_fd_publish(&input), (long)-EINVAL);
+
+	memcpy(input.key_guid, ancestors[1], sizeof(input.key_guid));
+	input.granted_access = GENERIC_READ;
+	KUNIT_EXPECT_EQ(test, pkm_lcs_key_fd_publish(&input), (long)-EINVAL);
+
+	input.granted_access = KEY_QUERY_VALUE;
+	input.key_guid[0] = 0x99;
+	KUNIT_EXPECT_EQ(test, pkm_lcs_key_fd_publish(&input), (long)-EINVAL);
+
+	memcpy(input.key_guid, ancestors[1], sizeof(input.key_guid));
+	input.resolved_path = bad_path;
+	KUNIT_EXPECT_EQ(test, pkm_lcs_key_fd_publish(&input), (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_snapshot_rejects_non_key_fd(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_fd_snapshot snapshot = {
+		.source_id = 99,
+	};
+	int fd;
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_key_fd_snapshot(-1, &snapshot),
+			(long)-EBADF);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_key_fd_snapshot(-1, NULL),
+			(long)-EINVAL);
+
+	fd = anon_inode_getfd("lcs-not-key", &pkm_lcs_kunit_non_key_fops,
+			      NULL, O_CLOEXEC);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_key_fd_snapshot(fd, &snapshot),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, snapshot.source_id, 0U);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -1298,6 +1458,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_route_stops_before_usercopy),
 	KUNIT_CASE(
 		pkm_lcs_kunit_open_preflight_route_copy_fault_keeps_route_empty),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_snapshot_success),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_deep_copies_input),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_rejects_malformed_state),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_snapshot_rejects_non_key_fd),
 	{ }
 };
 

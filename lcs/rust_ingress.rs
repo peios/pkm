@@ -9,11 +9,12 @@ use crate::lcs_core::{
     plan_registry_open_pre_resolution_access, plan_source_registration_sequence_update,
     registry_open_pre_resolution_linux_errno, route_hive, route_routable_path_hive,
     source_registration_error_linux_errno, source_registration_hive_scope,
-    source_slot_hive_status, validate_registry_open_flags, validate_source_registration,
-    validate_source_slots, validate_syscall_path_c_string, CurrentUserRewrite, HiveRouteOutcome,
-    HiveView, LcsError, LcsLimits, LinuxErrno, PathKind, RegisteredHiveIdentity,
-    RegistryOpenPreResolutionAccessPlan, SourceRegistrationDecision, SourceRegistrationHive,
-    SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
+    source_slot_hive_status, validate_key_fd_open_view, validate_registry_open_flags,
+    validate_source_registration, validate_source_slots, validate_syscall_path_c_string,
+    CurrentUserRewrite, HiveRouteOutcome, HiveView, KeyFdOpenView, KeyWatchState, LcsError,
+    LcsLimits, LinuxErrno, PathKind, RegisteredHiveIdentity, RegistryOpenPreResolutionAccessPlan,
+    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
+    SourceSlotStatus, SourceSlotView,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -64,6 +65,12 @@ pub struct PkmLcsOpenPreflightPlanCopy {
     pub _pad: [u8; 2],
 }
 
+#[repr(C)]
+pub struct PkmLcsKeyFdStringViewCopy {
+    pub bytes: *const u8,
+    pub len: u32,
+}
+
 fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
     source_registration_error_linux_errno(err)
         .unwrap_or(LinuxErrno::Einval)
@@ -73,6 +80,16 @@ fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
 fn absolute_route_error_return(err: LcsError) -> c_int {
     match err {
         LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => LinuxErrno::Enametoolong,
+        _ => LinuxErrno::Einval,
+    }
+    .negated_return() as c_int
+}
+
+fn key_fd_open_view_error_return(err: LcsError) -> c_int {
+    match err {
+        LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => {
+            LinuxErrno::Enametoolong
+        }
         _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
@@ -123,6 +140,72 @@ pub unsafe extern "C" fn lcs_rust_open_preflight(
                 .unwrap_or(LinuxErrno::Einval)
                 .negated_return() as c_int
         }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_key_fd_open_view(
+    key_guid: *const u8,
+    granted_access: u32,
+    path_components: *const PkmLcsKeyFdStringViewCopy,
+    path_component_count: usize,
+    ancestor_guids: *const [u8; 16],
+    ancestor_count: usize,
+) -> c_int {
+    if key_guid.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if path_component_count != 0 && path_components.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if ancestor_count != 0 && ancestor_guids.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let key_guid_bytes = unsafe { slice::from_raw_parts(key_guid, 16) };
+    let mut key_guid_copy = [0u8; 16];
+    key_guid_copy.copy_from_slice(key_guid_bytes);
+
+    let mut parsed_components = match PkmVec::with_capacity(path_component_count) {
+        Ok(parsed_components) => parsed_components,
+        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+    };
+
+    for index in 0..path_component_count {
+        let raw = unsafe { &*path_components.add(index) };
+        if raw.bytes.is_null() {
+            return LinuxErrno::Einval.negated_return() as c_int;
+        }
+
+        let bytes = unsafe { slice::from_raw_parts(raw.bytes, raw.len as usize) };
+        let component = match str::from_utf8(bytes) {
+            Ok(component) => component,
+            Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+        };
+        if parsed_components.push(component).is_err() {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+    }
+
+    let ancestors = if ancestor_count == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(ancestor_guids, ancestor_count) }
+    };
+    let fd = KeyFdOpenView {
+        key_guid: key_guid_copy,
+        granted_access,
+        resolved_path: parsed_components.as_slice(),
+        ancestor_guids: ancestors,
+        watch_state: KeyWatchState {
+            armed: false,
+            orphaned: false,
+        },
+    };
+
+    match validate_key_fd_open_view(&LcsLimits::DEFAULT, &fd) {
+        Ok(()) => 0,
+        Err(err) => key_fd_open_view_error_return(err),
     }
 }
 
