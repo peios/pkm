@@ -81,6 +81,35 @@ pub enum KeyFdOrphanOperationErrno {
     Enoent,
 }
 
+/// Backup/restore operation using an external Linux fd argument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupRestoreFdOperation {
+    BackupOutput,
+    RestoreInput,
+}
+
+/// Caller-visible errno class for backup/restore external fd-mode failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupRestoreFdModeErrno {
+    Ebadf,
+}
+
+/// Admission decision for a backup/restore external fd argument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupRestoreFdModePlan {
+    Allowed {
+        operation: BackupRestoreFdOperation,
+        requires_readable: bool,
+        requires_writable: bool,
+    },
+    Denied {
+        operation: BackupRestoreFdOperation,
+        requires_readable: bool,
+        requires_writable: bool,
+        errno: BackupRestoreFdModeErrno,
+    },
+}
+
 /// Successful orphaned-key fd admission result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyFdOrphanOperationPlan {
@@ -122,6 +151,41 @@ pub fn key_fd_granted_access_allows(fd_granted_access: u32, required: u32) -> Lc
     validate_registry_granted_access(fd_granted_access)?;
     validate_registry_granted_access(required)?;
     Ok(registry_fd_has_right(fd_granted_access, required))
+}
+
+/// Plans external-fd mode admission before backup or restore starts.
+pub fn plan_backup_restore_fd_mode(
+    operation: BackupRestoreFdOperation,
+    fd_readable: bool,
+    fd_writable: bool,
+) -> BackupRestoreFdModePlan {
+    let (requires_readable, requires_writable, allowed) = match operation {
+        BackupRestoreFdOperation::BackupOutput => (false, true, fd_writable),
+        BackupRestoreFdOperation::RestoreInput => (true, false, fd_readable),
+    };
+
+    if allowed {
+        BackupRestoreFdModePlan::Allowed {
+            operation,
+            requires_readable,
+            requires_writable,
+        }
+    } else {
+        BackupRestoreFdModePlan::Denied {
+            operation,
+            requires_readable,
+            requires_writable,
+            errno: BackupRestoreFdModeErrno::Ebadf,
+        }
+    }
+}
+
+/// Projects backup/restore external-fd mode admission to Linux errno.
+pub fn backup_restore_fd_mode_linux_errno(plan: &BackupRestoreFdModePlan) -> Option<LinuxErrno> {
+    match plan {
+        BackupRestoreFdModePlan::Allowed { .. } => None,
+        BackupRestoreFdModePlan::Denied { errno, .. } => Some(LinuxErrno::from(*errno)),
+    }
 }
 
 /// Plans explicit fd-capability delegation over SCM_RIGHTS.

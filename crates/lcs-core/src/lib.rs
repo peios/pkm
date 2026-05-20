@@ -128,10 +128,12 @@ pub use constants::*;
 pub use errno::{LinuxErrno, output_buffer_aggregate_errno, transaction_terminal_errno_raw};
 pub use error::{LcsError, LcsResult};
 pub use fd::{
-    KeyFdClosePlan, KeyFdDelegationPlan, KeyFdOpenView, KeyFdOperation, KeyFdOperationScope,
+    BackupRestoreFdModeErrno, BackupRestoreFdModePlan, BackupRestoreFdOperation, KeyFdClosePlan,
+    KeyFdDelegationPlan, KeyFdOpenView, KeyFdOperation, KeyFdOperationScope,
     KeyFdOrphanOperationErrno, KeyFdOrphanOperationPlan, OrphanedKeyLastFdClosePlan,
-    key_fd_granted_access_allows, key_fd_orphan_operation_errno,
-    key_fd_orphan_operation_linux_errno, plan_key_fd_close, plan_key_fd_delegation,
+    backup_restore_fd_mode_linux_errno, key_fd_granted_access_allows,
+    key_fd_orphan_operation_errno, key_fd_orphan_operation_linux_errno,
+    plan_backup_restore_fd_mode, plan_key_fd_close, plan_key_fd_delegation,
     plan_key_fd_orphan_operation, plan_orphaned_key_last_fd_close, validate_key_fd_open_view,
 };
 pub use hives::{

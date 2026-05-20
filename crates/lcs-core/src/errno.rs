@@ -1,4 +1,4 @@
-use crate::fd::KeyFdOrphanOperationErrno;
+use crate::fd::{BackupRestoreFdModeErrno, KeyFdOrphanOperationErrno};
 use crate::hives::HiveRouteErrno;
 use crate::ioctl::RegistryIoctlFdAccessErrno;
 use crate::key_path::KeyPathMutationErrno;
@@ -201,6 +201,14 @@ impl From<KeyFdOrphanOperationErrno> for LinuxErrno {
     fn from(errno: KeyFdOrphanOperationErrno) -> Self {
         match errno {
             KeyFdOrphanOperationErrno::Enoent => Self::Enoent,
+        }
+    }
+}
+
+impl From<BackupRestoreFdModeErrno> for LinuxErrno {
+    fn from(errno: BackupRestoreFdModeErrno) -> Self {
+        match errno {
+            BackupRestoreFdModeErrno::Ebadf => Self::Ebadf,
         }
     }
 }
