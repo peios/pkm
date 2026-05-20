@@ -346,9 +346,10 @@ pub use transaction::{
 pub use transaction_log::{
     TransactionMutationCommitWork, TransactionMutationLogAppendPlan,
     TransactionMutationLogDispositionPlan, TransactionMutationLogRecord,
-    TransactionMutationLogStorageSummary, append_transaction_mutation_log_record,
-    clear_transaction_mutation_log, plan_transaction_mutation_log_disposition,
-    summarize_transaction_mutation_log, transaction_mutation_log_record_commit_work,
+    TransactionMutationLogStorageSummary, TransactionMutationReplaySummary,
+    append_transaction_mutation_log_record, clear_transaction_mutation_log,
+    plan_transaction_mutation_log_disposition, summarize_transaction_mutation_log,
+    summarize_transaction_mutation_log_replay, transaction_mutation_log_record_commit_work,
     transaction_mutation_log_record_watch_batch_member,
 };
 pub use value::{

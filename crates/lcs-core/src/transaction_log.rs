@@ -88,6 +88,21 @@ pub enum TransactionMutationCommitWork<'a> {
     },
 }
 
+/// Aggregate commit-time replay work for one transaction mutation log.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionMutationReplaySummary {
+    pub entries: usize,
+    pub capacity: usize,
+    pub increment_hive_generation_once: bool,
+    pub key_last_write_updates: usize,
+    pub parent_last_write_updates: usize,
+    pub security_watch_mutations: usize,
+    pub effective_value_recomputations: usize,
+    pub effective_subkey_recomputations: usize,
+    pub orphan_evaluations: usize,
+    pub new_key_publications: usize,
+}
+
 impl TransactionMutationLogRecord<'_> {
     pub const fn operation_index(&self) -> TransactionOperationIndex {
         match self {
@@ -196,6 +211,84 @@ pub fn transaction_mutation_log_record_commit_work<'a>(
             publish_new_key_guid: entry.publish_new_key_guid_on_commit,
         },
     })
+}
+
+/// Summarizes the kernel work needed after a successful transaction commit.
+pub fn summarize_transaction_mutation_log_replay(
+    storage: &[Option<TransactionMutationLogRecord<'_>>],
+) -> LcsResult<TransactionMutationReplaySummary> {
+    let storage_summary = summarize_transaction_mutation_log_internal(storage)?.summary;
+    let mut replay_summary = TransactionMutationReplaySummary {
+        entries: storage_summary.entries,
+        capacity: storage_summary.capacity,
+        increment_hive_generation_once: false,
+        key_last_write_updates: 0,
+        parent_last_write_updates: 0,
+        security_watch_mutations: 0,
+        effective_value_recomputations: 0,
+        effective_subkey_recomputations: 0,
+        orphan_evaluations: 0,
+        new_key_publications: 0,
+    };
+
+    for slot in &storage[..storage_summary.entries] {
+        let Some(record) = slot else {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "transaction_log.dense_prefix",
+            });
+        };
+        match transaction_mutation_log_record_commit_work(record)? {
+            TransactionMutationCommitWork::Security {
+                update_hive_generation,
+                update_key_last_write_time,
+                ..
+            } => {
+                replay_summary.increment_hive_generation_once |= update_hive_generation;
+                replay_summary.security_watch_mutations += 1;
+                if update_key_last_write_time {
+                    replay_summary.key_last_write_updates += 1;
+                }
+            }
+            TransactionMutationCommitWork::Value {
+                update_hive_generation,
+                update_key_last_write_time,
+                recompute_effective_value_events,
+                ..
+            } => {
+                replay_summary.increment_hive_generation_once |= update_hive_generation;
+                if update_key_last_write_time {
+                    replay_summary.key_last_write_updates += 1;
+                }
+                if recompute_effective_value_events {
+                    replay_summary.effective_value_recomputations += 1;
+                }
+            }
+            TransactionMutationCommitWork::KeyPath {
+                update_hive_generation,
+                update_parent_last_write_time,
+                recompute_effective_subkey_events,
+                evaluate_orphaning,
+                publish_new_key_guid,
+                ..
+            } => {
+                replay_summary.increment_hive_generation_once |= update_hive_generation;
+                if update_parent_last_write_time {
+                    replay_summary.parent_last_write_updates += 1;
+                }
+                if recompute_effective_subkey_events {
+                    replay_summary.effective_subkey_recomputations += 1;
+                }
+                if evaluate_orphaning {
+                    replay_summary.orphan_evaluations += 1;
+                }
+                if publish_new_key_guid {
+                    replay_summary.new_key_publications += 1;
+                }
+            }
+        }
+    }
+
+    Ok(replay_summary)
 }
 
 /// Plans whether transaction completion applies, discards, or retains the log.
