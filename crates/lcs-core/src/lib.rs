@@ -343,13 +343,14 @@ pub use transaction::{
 pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,
     PlannedBlanketTombstone, PlannedValueDelete, PlannedValueWrite, RegistryValueType,
-    ValidatedBlanketTombstone, ValidatedValueDelete, ValidatedValueType, ValidatedValueWrite,
-    ValueDeleteRequest, ValueLayerAdmissionErrno, ValueLayerAdmissionInput,
-    ValueLayerAdmissionPlan, ValueTypeValidationErrno, ValueWriteInput, ValueWriteRequest,
-    plan_blanket_tombstone, plan_value_delete, plan_value_layer_admission, plan_value_write,
-    validate_blanket_tombstone_request, validate_value_data_len, validate_value_delete_request,
-    validate_value_write_request, validate_value_write_type, value_layer_admission_errno,
-    value_type_validation_errno,
+    TransactionValueMutationLogEntry, ValidatedBlanketTombstone, ValidatedValueDelete,
+    ValidatedValueType, ValidatedValueWrite, ValueDeleteRequest, ValueLayerAdmissionErrno,
+    ValueLayerAdmissionInput, ValueLayerAdmissionPlan, ValueTypeValidationErrno, ValueWriteInput,
+    ValueWriteRequest, plan_blanket_tombstone, plan_blanket_tombstone_transaction_log_entry,
+    plan_value_delete, plan_value_delete_transaction_log_entry, plan_value_layer_admission,
+    plan_value_write, plan_value_write_transaction_log_entry, validate_blanket_tombstone_request,
+    validate_value_data_len, validate_value_delete_request, validate_value_write_request,
+    validate_value_write_type, value_layer_admission_errno, value_type_validation_errno,
 };
 pub use watch::{
     EffectiveSubkeyWatchEvent, EffectiveValueWatchEvent, InternalLayerMetadataRefreshLockPlan,

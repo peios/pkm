@@ -109,6 +109,9 @@ pub struct TransactionMutationAcceptancePlan<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionMutationLogKind {
     SetSecurity,
+    SetValue,
+    DeleteValue,
+    BlanketTombstone,
 }
 
 /// Transaction mutation-log entry for kernel-owned commit effects.
@@ -1035,6 +1038,11 @@ fn validate_transaction_mutation_log_kind(
                     field: "event_type",
                 });
             }
+        }
+        TransactionMutationLogKind::SetValue
+        | TransactionMutationLogKind::DeleteValue
+        | TransactionMutationLogKind::BlanketTombstone => {
+            return Err(LcsError::InvalidTransactionMutationLogEntry { field: "kind" });
         }
     }
     Ok(())

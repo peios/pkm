@@ -9,6 +9,9 @@ use crate::path::{validate_layer_name_bytes, validate_value_name_bytes};
 use crate::resolution::Guid;
 use crate::sequence::SequenceCounter;
 use crate::source::NIL_GUID;
+use crate::transaction::{
+    TransactionMutationLogKind, TransactionOperationIndex, TransactionOperationIndexCounter,
+};
 
 /// User-visible Windows registry value types accepted by LCS.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -191,6 +194,20 @@ pub struct PlannedBlanketTombstone<'a> {
     pub recomputes_effective_value_events: bool,
 }
 
+/// Value-side transaction mutation-log entry for commit-time kernel effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionValueMutationLogEntry<'a> {
+    pub operation_index: TransactionOperationIndex,
+    pub kind: TransactionMutationLogKind,
+    pub key_guid: Guid,
+    pub value_name: Option<&'a str>,
+    pub layer: &'a str,
+    pub sequence: Option<u64>,
+    pub update_hive_generation_on_commit: bool,
+    pub update_last_write_time_on_commit: bool,
+    pub recompute_effective_value_events_on_commit: bool,
+}
+
 /// Validates a value write before source dispatch.
 pub fn validate_value_write_request<'a>(
     limits: &LcsLimits,
@@ -355,6 +372,71 @@ pub fn plan_blanket_tombstone<'a>(
     })
 }
 
+/// Plans a transaction mutation-log entry for a validated SET_VALUE operation.
+pub fn plan_value_write_transaction_log_entry<'a>(
+    limits: &LcsLimits,
+    planned: &PlannedValueWrite<'a>,
+    counter: &mut TransactionOperationIndexCounter,
+) -> LcsResult<TransactionValueMutationLogEntry<'a>> {
+    validate_planned_value_write_for_log(limits, planned)?;
+    Ok(TransactionValueMutationLogEntry {
+        operation_index: counter.allocate()?,
+        kind: TransactionMutationLogKind::SetValue,
+        key_guid: planned.write.key_guid,
+        value_name: Some(planned.write.name),
+        layer: planned.write.layer,
+        sequence: Some(planned.write.sequence),
+        update_hive_generation_on_commit: true,
+        update_last_write_time_on_commit: true,
+        recompute_effective_value_events_on_commit: true,
+    })
+}
+
+/// Plans a transaction mutation-log entry for a validated DELETE_VALUE operation.
+pub fn plan_value_delete_transaction_log_entry<'a>(
+    limits: &LcsLimits,
+    planned: &PlannedValueDelete<'a>,
+    counter: &mut TransactionOperationIndexCounter,
+) -> LcsResult<TransactionValueMutationLogEntry<'a>> {
+    validate_planned_value_delete_for_log(limits, planned)?;
+    Ok(TransactionValueMutationLogEntry {
+        operation_index: counter.allocate()?,
+        kind: TransactionMutationLogKind::DeleteValue,
+        key_guid: planned.delete.key_guid,
+        value_name: Some(planned.delete.name),
+        layer: planned.delete.layer,
+        sequence: None,
+        update_hive_generation_on_commit: true,
+        update_last_write_time_on_commit: true,
+        recompute_effective_value_events_on_commit: true,
+    })
+}
+
+/// Plans a transaction mutation-log entry for a validated BLANKET_TOMBSTONE operation.
+pub fn plan_blanket_tombstone_transaction_log_entry<'a>(
+    limits: &LcsLimits,
+    planned: &PlannedBlanketTombstone<'a>,
+    counter: &mut TransactionOperationIndexCounter,
+) -> LcsResult<TransactionValueMutationLogEntry<'a>> {
+    validate_planned_blanket_tombstone_for_log(limits, planned)?;
+    let sequence = match planned.blanket.action {
+        BlanketTombstoneAction::Set { sequence } => Some(sequence),
+        BlanketTombstoneAction::Remove => None,
+    };
+
+    Ok(TransactionValueMutationLogEntry {
+        operation_index: counter.allocate()?,
+        kind: TransactionMutationLogKind::BlanketTombstone,
+        key_guid: planned.blanket.key_guid,
+        value_name: None,
+        layer: planned.blanket.layer,
+        sequence,
+        update_hive_generation_on_commit: true,
+        update_last_write_time_on_commit: true,
+        recompute_effective_value_events_on_commit: true,
+    })
+}
+
 /// Validates the type/data shape for a value-write style operation.
 pub fn validate_value_write_type(
     value_type: u32,
@@ -392,6 +474,64 @@ pub fn validate_value_data_len(data_len: usize, limits: &LcsLimits) -> LcsResult
         return Err(LcsError::ValueDataTooLarge {
             len: data_len,
             max: limits.max_value_size,
+        });
+    }
+    Ok(())
+}
+
+fn validate_planned_value_write_for_log(
+    limits: &LcsLimits,
+    planned: &PlannedValueWrite<'_>,
+) -> LcsResult<()> {
+    validate_value_key_guid(planned.write.key_guid)?;
+    validate_value_name_bytes(planned.write.name.as_bytes(), limits)?;
+    validate_layer_name_bytes(planned.write.layer.as_bytes(), limits)?;
+    validate_value_data_len(planned.write.data.len(), limits)?;
+    match planned.write.value_type {
+        ValidatedValueType::Normal(value_type) => {
+            validate_value_write_type(value_type.code(), planned.write.data.len(), false)?;
+        }
+        ValidatedValueType::Tombstone => {
+            validate_value_write_type(REG_TOMBSTONE, planned.write.data.len(), true)?;
+        }
+    }
+    if !planned.updates_last_write_time {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "updates_last_write_time",
+        });
+    }
+    Ok(())
+}
+
+fn validate_planned_value_delete_for_log(
+    limits: &LcsLimits,
+    planned: &PlannedValueDelete<'_>,
+) -> LcsResult<()> {
+    validate_value_key_guid(planned.delete.key_guid)?;
+    validate_value_name_bytes(planned.delete.name.as_bytes(), limits)?;
+    validate_layer_name_bytes(planned.delete.layer.as_bytes(), limits)?;
+    if !planned.updates_last_write_time {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "updates_last_write_time",
+        });
+    }
+    Ok(())
+}
+
+fn validate_planned_blanket_tombstone_for_log(
+    limits: &LcsLimits,
+    planned: &PlannedBlanketTombstone<'_>,
+) -> LcsResult<()> {
+    validate_value_key_guid(planned.blanket.key_guid)?;
+    validate_layer_name_bytes(planned.blanket.layer.as_bytes(), limits)?;
+    if !planned.updates_last_write_time {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "updates_last_write_time",
+        });
+    }
+    if !planned.recomputes_effective_value_events {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "recomputes_effective_value_events",
         });
     }
     Ok(())
