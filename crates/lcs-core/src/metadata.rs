@@ -3,6 +3,7 @@ use crate::output_buffer::{
     OutputBufferAggregate, OutputBufferCopyPlan, OutputBufferDecision, OutputBufferRequest,
     plan_output_buffer_copy, validate_output_buffer_required_size,
 };
+use crate::transaction_log::TransactionMutationReplaySummary;
 
 /// Volatile LCS-owned per-hive generation number.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,6 +51,142 @@ impl Default for HiveGenerationCounter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Result of applying transaction replay generation work to one hive counter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionReplayGenerationApplyPlan {
+    pub previous_generation: u64,
+    pub current_generation: u64,
+    pub incremented: bool,
+}
+
+/// Applies transaction replay generation work to the affected hive counter.
+pub fn record_transaction_replay_generation(
+    counter: &mut HiveGenerationCounter,
+    summary: &TransactionMutationReplaySummary,
+) -> LcsResult<TransactionReplayGenerationApplyPlan> {
+    validate_transaction_replay_summary(summary)?;
+
+    let previous_generation = counter.current();
+    let (current_generation, incremented) = if summary.increment_hive_generation_once {
+        (
+            counter.record_committed_transaction_for_affected_hive()?,
+            true,
+        )
+    } else {
+        (previous_generation, false)
+    };
+
+    Ok(TransactionReplayGenerationApplyPlan {
+        previous_generation,
+        current_generation,
+        incremented,
+    })
+}
+
+fn validate_transaction_replay_summary(
+    summary: &TransactionMutationReplaySummary,
+) -> LcsResult<()> {
+    if summary.entries > summary.capacity {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "replay_summary.entries",
+        });
+    }
+    if summary.entries == 0 && summary.increment_hive_generation_once {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "replay_summary.generation",
+        });
+    }
+
+    validate_replay_summary_count(
+        "replay_summary.key_last_write_updates",
+        summary.key_last_write_updates,
+        summary.entries,
+    )?;
+    validate_replay_summary_count(
+        "replay_summary.parent_last_write_updates",
+        summary.parent_last_write_updates,
+        summary.entries,
+    )?;
+    validate_replay_summary_count(
+        "replay_summary.security_watch_mutations",
+        summary.security_watch_mutations,
+        summary.entries,
+    )?;
+    validate_replay_summary_count(
+        "replay_summary.effective_value_recomputations",
+        summary.effective_value_recomputations,
+        summary.entries,
+    )?;
+    validate_replay_summary_count(
+        "replay_summary.effective_subkey_recomputations",
+        summary.effective_subkey_recomputations,
+        summary.entries,
+    )?;
+    validate_replay_summary_count(
+        "replay_summary.orphan_evaluations",
+        summary.orphan_evaluations,
+        summary.entries,
+    )?;
+    validate_replay_summary_count(
+        "replay_summary.new_key_publications",
+        summary.new_key_publications,
+        summary.entries,
+    )?;
+
+    validate_replay_summary_sum(
+        "replay_summary.last_write_updates",
+        summary.key_last_write_updates,
+        summary.parent_last_write_updates,
+        summary.entries,
+    )?;
+    let value_and_subkey = validate_replay_summary_sum(
+        "replay_summary.effective_recomputations",
+        summary.effective_value_recomputations,
+        summary.effective_subkey_recomputations,
+        summary.entries,
+    )?;
+    validate_replay_summary_sum(
+        "replay_summary.watch_work",
+        summary.security_watch_mutations,
+        value_and_subkey,
+        summary.entries,
+    )?;
+    validate_replay_summary_count(
+        "replay_summary.orphan_evaluations",
+        summary.orphan_evaluations,
+        summary.effective_subkey_recomputations,
+    )?;
+    validate_replay_summary_count(
+        "replay_summary.new_key_publications",
+        summary.new_key_publications,
+        summary.effective_subkey_recomputations,
+    )
+}
+
+fn validate_replay_summary_count(
+    field: &'static str,
+    count: usize,
+    entries: usize,
+) -> LcsResult<()> {
+    if count > entries {
+        return Err(LcsError::InvalidTransactionMutationLogEntry { field });
+    }
+    Ok(())
+}
+
+fn validate_replay_summary_sum(
+    field: &'static str,
+    left: usize,
+    right: usize,
+    entries: usize,
+) -> LcsResult<usize> {
+    let sum = left
+        .checked_add(right)
+        .ok_or(LcsError::MemoryBoundOverflow { field })?;
+    validate_replay_summary_count(field, sum, entries)?;
+    Ok(sum)
 }
 
 /// Kernel/source metadata needed to answer `REG_IOC_QUERY_KEY_INFO`.

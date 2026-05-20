@@ -186,7 +186,8 @@ pub use layers::{
 pub use maintenance::{KeyFdHiveView, PlannedFlush, plan_flush_for_key_fd};
 pub use metadata::{
     HiveGenerationCounter, QueryKeyInfoInput, QueryKeyInfoOutputBufferDecision, QueryKeyInfoResult,
-    query_key_info_result, validate_query_key_info_output_buffer,
+    TransactionReplayGenerationApplyPlan, query_key_info_result,
+    record_transaction_replay_generation, validate_query_key_info_output_buffer,
 };
 pub use open::{
     RegistryKeyOpenAccessInput, RegistryKeyOpenAccessPlan, RegistryKeyOpenResolutionInput,
