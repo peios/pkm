@@ -1,7 +1,7 @@
 use crate::error::{LcsError, LcsResult};
 use crate::output_buffer::{
-    OutputBufferAggregate, OutputBufferDecision, OutputBufferRequest,
-    aggregate_output_buffer_decisions, validate_output_buffer_required_size,
+    OutputBufferAggregate, OutputBufferCopyPlan, OutputBufferDecision, OutputBufferRequest,
+    plan_output_buffer_copy, validate_output_buffer_required_size,
 };
 use crate::resolution::{EnumeratedSubkey, EnumeratedValue, ResolvedValueEntry, ValueResolution};
 use crate::rsi::RsiMappedErrno;
@@ -38,6 +38,7 @@ pub struct QueryValueOutputBufferDecision {
     pub data: OutputBufferDecision,
     pub layer: OutputBufferDecision,
     pub aggregate: OutputBufferAggregate,
+    pub copy_plan: OutputBufferCopyPlan,
 }
 
 /// Batch query output sizing plan.
@@ -47,6 +48,7 @@ pub struct QueryValuesBatchOutputDecision {
     pub required_len: usize,
     pub buffer: OutputBufferDecision,
     pub aggregate: OutputBufferAggregate,
+    pub copy_plan: OutputBufferCopyPlan,
 }
 
 /// Caller-facing `REG_IOC_ENUM_VALUES` result after effective enumeration.
@@ -79,6 +81,7 @@ pub struct EnumValueOutputBufferDecision {
     pub name: OutputBufferDecision,
     pub data: OutputBufferDecision,
     pub aggregate: OutputBufferAggregate,
+    pub copy_plan: OutputBufferCopyPlan,
 }
 
 /// One visible subkey plus metadata required by `REG_IOC_ENUM_SUBKEYS`.
@@ -112,6 +115,7 @@ pub enum EnumSubkeyOutcome<'a> {
 pub struct EnumSubkeyOutputBufferDecision {
     pub name: OutputBufferDecision,
     pub aggregate: OutputBufferAggregate,
+    pub copy_plan: OutputBufferCopyPlan,
 }
 
 /// Converts resolver output into the caller-facing query-value shape.
@@ -140,12 +144,13 @@ pub fn validate_query_value_output_buffers(
     let data = validate_output_buffer_required_size(buffers.data, result.data_len)?;
     let layer = validate_output_buffer_required_size(buffers.layer, result.layer_len)?;
     let decisions = [data, layer];
-    let aggregate = aggregate_output_buffer_decisions(&decisions);
+    let copy_plan = plan_output_buffer_copy(&decisions);
 
     Ok(QueryValueOutputBufferDecision {
         data,
         layer,
-        aggregate,
+        aggregate: copy_plan.aggregate,
+        copy_plan,
     })
 }
 
@@ -173,13 +178,14 @@ pub fn validate_query_values_batch_output(
     let required_len = query_values_batch_required_len(values)?;
     let buffer = validate_output_buffer_required_size(buffer, required_len)?;
     let decisions = [buffer];
-    let aggregate = aggregate_output_buffer_decisions(&decisions);
+    let copy_plan = plan_output_buffer_copy(&decisions);
 
     Ok(QueryValuesBatchOutputDecision {
         count: values.len(),
         required_len,
         buffer,
-        aggregate,
+        aggregate: copy_plan.aggregate,
+        copy_plan,
     })
 }
 
@@ -209,12 +215,13 @@ pub fn validate_enum_value_output_buffers(
     let name = validate_output_buffer_required_size(buffers.name, result.name_len)?;
     let data = validate_output_buffer_required_size(buffers.data, result.data_len)?;
     let decisions = [name, data];
-    let aggregate = aggregate_output_buffer_decisions(&decisions);
+    let copy_plan = plan_output_buffer_copy(&decisions);
 
     Ok(EnumValueOutputBufferDecision {
         name,
         data,
-        aggregate,
+        aggregate: copy_plan.aggregate,
+        copy_plan,
     })
 }
 
@@ -243,9 +250,13 @@ pub fn validate_enum_subkey_output_buffer(
 ) -> LcsResult<EnumSubkeyOutputBufferDecision> {
     let name = validate_output_buffer_required_size(name, result.name_len)?;
     let decisions = [name];
-    let aggregate = aggregate_output_buffer_decisions(&decisions);
+    let copy_plan = plan_output_buffer_copy(&decisions);
 
-    Ok(EnumSubkeyOutputBufferDecision { name, aggregate })
+    Ok(EnumSubkeyOutputBufferDecision {
+        name,
+        aggregate: copy_plan.aggregate,
+        copy_plan,
+    })
 }
 
 fn query_value_result(value: ResolvedValueEntry<'_>) -> QueryValueResult<'_> {

@@ -1,7 +1,7 @@
 use crate::error::{LcsError, LcsResult};
 use crate::output_buffer::{
-    OutputBufferAggregate, OutputBufferDecision, OutputBufferRequest,
-    aggregate_output_buffer_decisions, validate_output_buffer_required_size,
+    OutputBufferAggregate, OutputBufferCopyPlan, OutputBufferDecision, OutputBufferRequest,
+    plan_output_buffer_copy, validate_output_buffer_required_size,
 };
 
 /// Volatile LCS-owned per-hive generation number.
@@ -90,6 +90,7 @@ pub struct QueryKeyInfoResult<'a> {
 pub struct QueryKeyInfoOutputBufferDecision {
     pub name: OutputBufferDecision,
     pub aggregate: OutputBufferAggregate,
+    pub copy_plan: OutputBufferCopyPlan,
 }
 
 /// Shapes key metadata for `REG_IOC_QUERY_KEY_INFO`.
@@ -117,7 +118,11 @@ pub fn validate_query_key_info_output_buffer(
 ) -> LcsResult<QueryKeyInfoOutputBufferDecision> {
     let name = validate_output_buffer_required_size(name, result.name_len)?;
     let decisions = [name];
-    let aggregate = aggregate_output_buffer_decisions(&decisions);
+    let copy_plan = plan_output_buffer_copy(&decisions);
 
-    Ok(QueryKeyInfoOutputBufferDecision { name, aggregate })
+    Ok(QueryKeyInfoOutputBufferDecision {
+        name,
+        aggregate: copy_plan.aggregate,
+        copy_plan,
+    })
 }
