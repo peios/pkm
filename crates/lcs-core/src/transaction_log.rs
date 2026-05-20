@@ -265,6 +265,33 @@ pub struct TransactionReplaySnapshotQuerySummary {
     pub inputs_without_queries: usize,
 }
 
+/// Effective snapshot result retained for transaction watch replay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionReplaySnapshotResultKind<'a> {
+    EffectiveValue {
+        key_guid: Guid,
+        scope: TransactionReplayValueWatchScope<'a>,
+        values: &'a [EnumeratedValue<'a>],
+    },
+    EffectiveSubkeys {
+        parent_guid: Guid,
+        children: &'a [EnumeratedSubkey<'a>],
+    },
+    ChildVisibility {
+        parent_guid: Guid,
+        child_name: &'a str,
+        child: Option<ResolvedPathEntry<'a>>,
+    },
+}
+
+/// One retained source snapshot result selected by a replay snapshot query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransactionReplaySnapshotResult<'a> {
+    pub phase: TransactionReplaySnapshotPhase,
+    pub operation_index: TransactionOperationIndex,
+    pub kind: TransactionReplaySnapshotResultKind<'a>,
+}
+
 impl TransactionMutationLogRecord<'_> {
     pub const fn operation_index(&self) -> TransactionOperationIndex {
         match self {
@@ -733,6 +760,130 @@ where
     Ok(summary)
 }
 
+/// Matches retained before/after snapshot results to one replay input.
+pub fn resolve_transaction_replay_watch_snapshots<'a>(
+    limits: &LcsLimits,
+    input: &TransactionReplayWatchInput<'a>,
+    results: &'a [TransactionReplaySnapshotResult<'a>],
+) -> LcsResult<TransactionReplayWatchSnapshots<'a>> {
+    match input {
+        TransactionReplayWatchInput::DirectSecurity {
+            operation_index,
+            watch_mutation,
+            ..
+        } => {
+            validate_replay_watch_mutation(limits, watch_mutation)?;
+            require_no_replay_snapshot_results(results, *operation_index)?;
+            Ok(TransactionReplayWatchSnapshots::DirectSecurity)
+        }
+        TransactionReplayWatchInput::EffectiveValue {
+            operation_index,
+            key_guid,
+            watch_context,
+            scope,
+            layer,
+            requires_before_snapshot,
+            requires_after_snapshot,
+            ..
+        } => {
+            require_replay_snapshot_result_categories(
+                results,
+                *operation_index,
+                ReplaySnapshotInputCategory::EffectiveValue,
+            )?;
+            let before = select_effective_value_snapshot_result(
+                results,
+                TransactionReplaySnapshotPhase::BeforeCommit,
+                *operation_index,
+                *key_guid,
+                *scope,
+                *requires_before_snapshot,
+            )?;
+            let after = select_effective_value_snapshot_result(
+                results,
+                TransactionReplaySnapshotPhase::AfterCommit,
+                *operation_index,
+                *key_guid,
+                *scope,
+                *requires_after_snapshot,
+            )?;
+            let snapshots = TransactionReplayValueSnapshots { before, after };
+            validate_effective_value_replay_input(
+                limits,
+                *key_guid,
+                *watch_context,
+                *scope,
+                layer,
+                snapshots,
+            )?;
+            Ok(TransactionReplayWatchSnapshots::EffectiveValue(snapshots))
+        }
+        TransactionReplayWatchInput::EffectiveSubkey {
+            operation_index,
+            parent_guid,
+            parent_watch_context,
+            child_visibility_watch_context,
+            child_name,
+            layer,
+            requires_before_snapshot,
+            requires_after_snapshot,
+            ..
+        } => {
+            require_replay_snapshot_result_categories(
+                results,
+                *operation_index,
+                ReplaySnapshotInputCategory::EffectiveSubkey,
+            )?;
+            let before_children = select_effective_subkey_snapshot_result(
+                results,
+                TransactionReplaySnapshotPhase::BeforeCommit,
+                *operation_index,
+                *parent_guid,
+                *requires_before_snapshot,
+            )?;
+            let after_children = select_effective_subkey_snapshot_result(
+                results,
+                TransactionReplaySnapshotPhase::AfterCommit,
+                *operation_index,
+                *parent_guid,
+                *requires_after_snapshot,
+            )?;
+            let child_before = select_child_visibility_snapshot_result(
+                results,
+                TransactionReplaySnapshotPhase::BeforeCommit,
+                *operation_index,
+                *parent_guid,
+                child_name,
+                child_visibility_watch_context.is_some() && *requires_before_snapshot,
+            )?;
+            let child_after = select_child_visibility_snapshot_result(
+                results,
+                TransactionReplaySnapshotPhase::AfterCommit,
+                *operation_index,
+                *parent_guid,
+                child_name,
+                child_visibility_watch_context.is_some() && *requires_after_snapshot,
+            )?;
+            let snapshots = TransactionReplaySubkeySnapshots {
+                before_children,
+                after_children,
+                child_before,
+                child_after,
+            };
+            validate_effective_subkey_replay_input(
+                limits,
+                *parent_guid,
+                *parent_watch_context,
+                *child_visibility_watch_context,
+                child_name,
+                layer,
+                snapshots,
+            )?;
+            Ok(TransactionReplayWatchSnapshots::EffectiveSubkey(snapshots))
+        }
+    }
+}
+
 /// Derives concrete watch events for one committed transaction replay input.
 pub fn for_each_transaction_replay_watch_event<'a, F>(
     limits: &LcsLimits,
@@ -1054,6 +1205,185 @@ fn summarize_transaction_mutation_log_internal(
         },
         last_operation_index,
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplaySnapshotInputCategory {
+    EffectiveValue,
+    EffectiveSubkey,
+}
+
+fn require_no_replay_snapshot_results(
+    results: &[TransactionReplaySnapshotResult<'_>],
+    operation_index: TransactionOperationIndex,
+) -> LcsResult<()> {
+    for result in results {
+        if result.operation_index == operation_index {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "watch_replay.snapshot_unexpected",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn require_replay_snapshot_result_categories(
+    results: &[TransactionReplaySnapshotResult<'_>],
+    operation_index: TransactionOperationIndex,
+    category: ReplaySnapshotInputCategory,
+) -> LcsResult<()> {
+    for result in results {
+        if result.operation_index != operation_index {
+            continue;
+        }
+        match (category, result.kind) {
+            (
+                ReplaySnapshotInputCategory::EffectiveValue,
+                TransactionReplaySnapshotResultKind::EffectiveValue { .. },
+            )
+            | (
+                ReplaySnapshotInputCategory::EffectiveSubkey,
+                TransactionReplaySnapshotResultKind::EffectiveSubkeys { .. }
+                | TransactionReplaySnapshotResultKind::ChildVisibility { .. },
+            ) => {}
+            _ => {
+                return Err(LcsError::InvalidTransactionMutationLogEntry {
+                    field: "watch_replay.snapshot_kind",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn select_effective_value_snapshot_result<'a>(
+    results: &'a [TransactionReplaySnapshotResult<'a>],
+    phase: TransactionReplaySnapshotPhase,
+    operation_index: TransactionOperationIndex,
+    key_guid: Guid,
+    scope: TransactionReplayValueWatchScope<'a>,
+    required: bool,
+) -> LcsResult<&'a [EnumeratedValue<'a>]> {
+    let mut matched = None;
+    for result in results {
+        if result.phase != phase || result.operation_index != operation_index {
+            continue;
+        }
+        let TransactionReplaySnapshotResultKind::EffectiveValue {
+            key_guid: result_key_guid,
+            scope: result_scope,
+            values,
+        } = result.kind
+        else {
+            continue;
+        };
+        if result_key_guid != key_guid || result_scope != scope {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "watch_replay.snapshot_mismatch",
+            });
+        }
+        if matched.replace(values).is_some() {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "watch_replay.snapshot_duplicate",
+            });
+        }
+    }
+    match (required, matched) {
+        (true, Some(values)) => Ok(values),
+        (true, None) => Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "watch_replay.snapshot_missing",
+        }),
+        (false, Some(_)) => Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "watch_replay.snapshot_unexpected",
+        }),
+        (false, None) => Ok(&[]),
+    }
+}
+
+fn select_effective_subkey_snapshot_result<'a>(
+    results: &'a [TransactionReplaySnapshotResult<'a>],
+    phase: TransactionReplaySnapshotPhase,
+    operation_index: TransactionOperationIndex,
+    parent_guid: Guid,
+    required: bool,
+) -> LcsResult<&'a [EnumeratedSubkey<'a>]> {
+    let mut matched = None;
+    for result in results {
+        if result.phase != phase || result.operation_index != operation_index {
+            continue;
+        }
+        let TransactionReplaySnapshotResultKind::EffectiveSubkeys {
+            parent_guid: result_parent_guid,
+            children,
+        } = result.kind
+        else {
+            continue;
+        };
+        if result_parent_guid != parent_guid {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "watch_replay.snapshot_mismatch",
+            });
+        }
+        if matched.replace(children).is_some() {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "watch_replay.snapshot_duplicate",
+            });
+        }
+    }
+    match (required, matched) {
+        (true, Some(children)) => Ok(children),
+        (true, None) => Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "watch_replay.snapshot_missing",
+        }),
+        (false, Some(_)) => Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "watch_replay.snapshot_unexpected",
+        }),
+        (false, None) => Ok(&[]),
+    }
+}
+
+fn select_child_visibility_snapshot_result<'a>(
+    results: &'a [TransactionReplaySnapshotResult<'a>],
+    phase: TransactionReplaySnapshotPhase,
+    operation_index: TransactionOperationIndex,
+    parent_guid: Guid,
+    child_name: &str,
+    required: bool,
+) -> LcsResult<Option<ResolvedPathEntry<'a>>> {
+    let mut matched = None;
+    for result in results {
+        if result.phase != phase || result.operation_index != operation_index {
+            continue;
+        }
+        let TransactionReplaySnapshotResultKind::ChildVisibility {
+            parent_guid: result_parent_guid,
+            child_name: result_child_name,
+            child,
+        } = result.kind
+        else {
+            continue;
+        };
+        if result_parent_guid != parent_guid || !casefold_eq(result_child_name, child_name) {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "watch_replay.snapshot_mismatch",
+            });
+        }
+        if matched.replace(child).is_some() {
+            return Err(LcsError::InvalidTransactionMutationLogEntry {
+                field: "watch_replay.snapshot_duplicate",
+            });
+        }
+    }
+    match (required, matched) {
+        (true, Some(child)) => Ok(child),
+        (true, None) => Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "watch_replay.snapshot_missing",
+        }),
+        (false, Some(_)) => Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "watch_replay.snapshot_unexpected",
+        }),
+        (false, None) => Ok(None),
+    }
 }
 
 fn validate_transaction_mutation_log_record(
