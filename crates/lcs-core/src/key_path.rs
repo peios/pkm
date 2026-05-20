@@ -1,4 +1,5 @@
 use crate::config::LcsLimits;
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 use crate::path::{validate_key_component_bytes, validate_layer_name_bytes};
 use crate::resolution::{
@@ -285,6 +286,11 @@ pub fn key_path_mutation_errno(error: &LcsError) -> Option<KeyPathMutationErrno>
         LcsError::KeyHasVisibleChildren { .. } => Some(KeyPathMutationErrno::Enotempty),
         _ => None,
     }
+}
+
+/// Projects key namespace mutation failures to Linux errno.
+pub fn key_path_mutation_linux_errno(error: &LcsError) -> Option<LinuxErrno> {
+    key_path_mutation_errno(error).map(LinuxErrno::from)
 }
 
 fn validate_planned_key_delete_for_log(

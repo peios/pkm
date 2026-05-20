@@ -166,8 +166,8 @@ pub use key_path::{
     DerivedKeyPathMutation, HideKeyInput, KeyDeleteEffects, KeyFdNamespaceView,
     KeyPathMutationErrno, KeyPathMutationInput, PlannedKeyDelete, PlannedKeyHide,
     TransactionKeyPathMutationLogEntry, derive_key_path_mutation, key_path_mutation_errno,
-    plan_delete_visible_child_gate, plan_key_delete, plan_key_delete_transaction_log_entry,
-    plan_key_hide, plan_key_hide_transaction_log_entry,
+    key_path_mutation_linux_errno, plan_delete_visible_child_gate, plan_key_delete,
+    plan_key_delete_transaction_log_entry, plan_key_hide, plan_key_hide_transaction_log_entry,
 };
 pub use layers::{
     BASE_LAYER_VIEW, LAYER_METADATA_ENABLED_VALUE_NAME, LAYER_METADATA_OWNER_VALUE_NAME,
