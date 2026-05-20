@@ -612,6 +612,8 @@ const void *kacs_rust_token_deep_copy(const void *token);
 void kacs_rust_token_drop(const void *token);
 bool kacs_rust_token_is_primary(const void *token);
 bool kacs_rust_token_same_user_sid(const void *lhs, const void *rhs);
+int kacs_rust_token_user_sid(const void *token, const u8 **out_sid_ptr,
+			     size_t *out_sid_len);
 bool kacs_rust_token_has_enabled_privilege(const void *token, u64 privilege);
 int kacs_rust_token_is_remote_shutdown_origin(const void *token);
 bool kacs_rust_token_has_new_process_min(const void *token);

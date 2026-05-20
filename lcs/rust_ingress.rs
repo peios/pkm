@@ -5,13 +5,13 @@ use core::{slice, str};
 
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
-    classify_hive_route, plan_source_registration_sequence_update, route_hive,
-    route_routable_path_hive, source_registration_error_linux_errno,
-    source_registration_hive_scope, source_slot_hive_status, validate_source_registration,
-    validate_source_slots, validate_syscall_path_c_string, CurrentUserRewrite, HiveRouteOutcome,
-    HiveView, LcsError, LcsLimits, LinuxErrno, PathKind, RegisteredHiveIdentity,
-    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
-    SourceSlotStatus, SourceSlotView,
+    classify_hive_route, current_user_sid_component_from_binary_sid,
+    plan_source_registration_sequence_update, route_hive, route_routable_path_hive,
+    source_registration_error_linux_errno, source_registration_hive_scope,
+    source_slot_hive_status, validate_source_registration, validate_source_slots,
+    validate_syscall_path_c_string, CurrentUserRewrite, HiveRouteOutcome, HiveView, LcsError,
+    LcsLimits, LinuxErrno, PathKind, RegisteredHiveIdentity, SourceRegistrationDecision,
+    SourceRegistrationHive, SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -555,5 +555,64 @@ pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots(
             0
         },
         HiveRouteOutcome::Failure(errno) => LinuxErrno::from(errno).negated_return() as c_int,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots_with_token_sid(
+    slots: *const PkmLcsSourceSlotViewCopy,
+    slot_count: usize,
+    path: *const u8,
+    path_len: u32,
+    rewrite_current_user: bool,
+    current_user_sid: *const u8,
+    current_user_sid_len: usize,
+    scope_guids: *const [u8; 16],
+    scope_count: usize,
+    result_out: *mut PkmLcsHiveRouteResultCopy,
+) -> c_int {
+    if result_out.is_null() || path.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if !rewrite_current_user {
+        return unsafe {
+            lcs_rust_route_absolute_path_from_source_slots(
+                slots,
+                slot_count,
+                path,
+                path_len,
+                false,
+                core::ptr::null(),
+                0,
+                scope_guids,
+                scope_count,
+                result_out,
+            )
+        };
+    }
+    if current_user_sid.is_null() || current_user_sid_len == 0 {
+        return LinuxErrno::Eacces.negated_return() as c_int;
+    }
+
+    let sid_bytes = unsafe { slice::from_raw_parts(current_user_sid, current_user_sid_len) };
+    let sid_component =
+        match current_user_sid_component_from_binary_sid(&LcsLimits::DEFAULT, sid_bytes) {
+            Ok(component) => component,
+            Err(err) => return absolute_route_error_return(err),
+        };
+    let sid_component = sid_component.as_str();
+    unsafe {
+        lcs_rust_route_absolute_path_from_source_slots(
+            slots,
+            slot_count,
+            path,
+            path_len,
+            true,
+            sid_component.as_ptr(),
+            sid_component.len() as u32,
+            scope_guids,
+            scope_count,
+            result_out,
+        )
     }
 }

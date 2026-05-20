@@ -77,6 +77,12 @@ extern int lcs_rust_route_absolute_path_from_source_slots(
 	const u8 *current_user_sid_component,
 	u32 current_user_sid_component_len, const u8 (*scope_guids)[16],
 	size_t scope_count, struct pkm_lcs_hive_route_result *result);
+extern int lcs_rust_route_absolute_path_from_source_slots_with_token_sid(
+	const struct pkm_lcs_source_slot_view_copy *slots, size_t slot_count,
+	const u8 *path, u32 path_len, bool rewrite_current_user,
+	const u8 *current_user_sid, size_t current_user_sid_len,
+	const u8 (*scope_guids)[16], size_t scope_count,
+	struct pkm_lcs_hive_route_result *result);
 
 static long pkm_lcs_source_device_check_tcb(const void *token)
 {
@@ -529,6 +535,52 @@ long pkm_lcs_route_absolute_path(const char *path, u32 path_len,
 		scope_guids, scope_count, result);
 	mutex_unlock(&pkm_lcs_source_table_lock);
 	return ret;
+}
+
+long pkm_lcs_route_absolute_path_for_token(const void *token, const char *path,
+					   u32 path_len,
+					   bool rewrite_current_user,
+					   const u8 (*scope_guids)[16],
+					   u32 scope_count,
+					   struct pkm_lcs_hive_route_result *result)
+{
+	struct pkm_lcs_source_slot_view_copy
+		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	const u8 *current_user_sid = NULL;
+	size_t current_user_sid_len = 0;
+	u32 slot_count;
+	long ret;
+
+	if (!path || !result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	if (rewrite_current_user) {
+		ret = kacs_rust_token_user_sid(token, &current_user_sid,
+					       &current_user_sid_len);
+		if (ret)
+			return ret;
+	}
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot_count = pkm_lcs_source_table_views_locked(views);
+	ret = lcs_rust_route_absolute_path_from_source_slots_with_token_sid(
+		views, slot_count, path, path_len, rewrite_current_user,
+		current_user_sid, current_user_sid_len, scope_guids, scope_count,
+		result);
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
+long pkm_lcs_route_current_absolute_path(const char *path, u32 path_len,
+					 bool rewrite_current_user,
+					 const u8 (*scope_guids)[16],
+					 u32 scope_count,
+					 struct pkm_lcs_hive_route_result *result)
+{
+	return pkm_lcs_route_absolute_path_for_token(
+		pkm_kacs_current_effective_token_ptr(), path, path_len,
+		rewrite_current_user, scope_guids, scope_count, result);
 }
 
 static int pkm_lcs_source_device_open(struct inode *inode, struct file *file)

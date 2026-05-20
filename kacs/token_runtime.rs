@@ -8050,6 +8050,32 @@ pub extern "C" fn kacs_rust_token_same_user_sid(lhs: *const c_void, rhs: *const 
 }
 
 #[no_mangle]
+/// Borrows the immutable user SID bytes from a live token object.
+pub extern "C" fn kacs_rust_token_user_sid(
+    token: *const c_void,
+    out_sid_ptr: *mut *const u8,
+    out_sid_len: *mut usize,
+) -> i32 {
+    let Some(out_sid_ptr) = (unsafe { out_sid_ptr.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(out_sid_len) = (unsafe { out_sid_len.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    *out_sid_ptr = null();
+    *out_sid_len = 0;
+
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let sid_bytes = token.user_sid.as_bytes();
+    *out_sid_ptr = sid_bytes.as_ptr();
+    *out_sid_len = sid_bytes.len();
+    0
+}
+
+#[no_mangle]
 /// Returns whether the token has all requested standalone privilege bits
 /// present and enabled.
 pub extern "C" fn kacs_rust_token_has_enabled_privilege(
