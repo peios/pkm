@@ -162,6 +162,7 @@ pub const ENOTEMPTY: i32 = 39;
 pub const ELOOP: i32 = 40;
 pub const EOVERFLOW: i32 = 75;
 pub const EOPNOTSUPP: i32 = 95;
+pub const ENOTSUP: i32 = EOPNOTSUPP;
 pub const ETIMEDOUT: i32 = 110;
 
 // ---------------------------------------------------------------------------
@@ -219,5 +220,11 @@ mod tests {
         let e = Errno::new(EACCES);
         let s = alloc::format!("{e}");
         assert_eq!(s, "EACCES (13)");
+    }
+
+    #[test]
+    fn enotsup_aliases_linux_eopnotsupp() {
+        assert_eq!(ENOTSUP, EOPNOTSUPP);
+        assert_eq!(ENOTSUP, 95);
     }
 }

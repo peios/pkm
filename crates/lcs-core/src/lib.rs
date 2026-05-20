@@ -14,6 +14,7 @@ pub mod backup;
 pub mod casefold;
 pub mod config;
 pub mod constants;
+pub mod errno;
 pub mod error;
 pub mod fd;
 pub mod hives;
@@ -119,6 +120,7 @@ pub use config::{
     self_config_audit_intent, validate_config_value,
 };
 pub use constants::*;
+pub use errno::{LinuxErrno, output_buffer_aggregate_errno, transaction_terminal_errno_raw};
 pub use error::{LcsError, LcsResult};
 pub use fd::{
     KeyFdClosePlan, KeyFdDelegationPlan, KeyFdOpenView, KeyFdOperation, KeyFdOperationScope,
