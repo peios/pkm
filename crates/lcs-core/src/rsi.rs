@@ -2822,6 +2822,19 @@ pub fn classify_rsi_status_code(code: u32) -> LcsResult<RsiStatusOutcome> {
     Ok(map_rsi_status(parse_rsi_status(code)?))
 }
 
+/// Projects a validated RSI status outcome to the caller-visible Linux errno.
+pub fn rsi_status_outcome_errno(outcome: RsiStatusOutcome) -> Option<LinuxErrno> {
+    match outcome {
+        RsiStatusOutcome::Success => None,
+        RsiStatusOutcome::Failure(errno) => Some(LinuxErrno::from(errno)),
+    }
+}
+
+/// Parses an RSI status code and projects it to the caller-visible Linux errno.
+pub fn rsi_status_code_errno(code: u32) -> LcsResult<Option<LinuxErrno>> {
+    Ok(rsi_status_outcome_errno(classify_rsi_status_code(code)?))
+}
+
 /// Maps RSI_BEGIN_TRANSACTION source status at the user-visible binding point.
 pub fn plan_rsi_transaction_begin_status(
     use_case: RsiTransactionBeginUse,
