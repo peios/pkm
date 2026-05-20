@@ -146,6 +146,14 @@ pub struct RsiTransactionReplaySnapshotStoredResponse<'q, 'out> {
     pub result_summary: TransactionReplaySnapshotResultTableSummary,
 }
 
+/// Result of processing one replay snapshot source-error response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiTransactionReplaySnapshotSourceErrorResponse<'a> {
+    pub response: RsiValidatedResponse,
+    pub released_record: RsiTransactionReplaySnapshotRequestRecord<'a>,
+    pub source_errno: RsiMappedErrno,
+}
+
 /// One length-prefixed RSI string or byte-array field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiLengthPrefixedField<'a> {
@@ -1576,6 +1584,38 @@ where
         released_record,
         materialized,
         result_summary,
+    })
+}
+
+/// Processes one matched replay snapshot source-error response and releases it.
+pub fn process_transaction_replay_snapshot_source_error_response<'a>(
+    request_storage: &mut [Option<RsiTransactionReplaySnapshotRequestRecord<'a>>],
+    frame: &[u8],
+) -> LcsResult<RsiTransactionReplaySnapshotSourceErrorResponse<'a>> {
+    let matched = match_transaction_replay_snapshot_response_record(request_storage, frame)?;
+    let request_id = matched.record.request_id;
+    let response = matched.response;
+    if frame.len() != RSI_MIN_RESPONSE_LEN {
+        return Err(LcsError::RsiUnexpectedResponsePayload {
+            op_code: matched.record.retained.op_code,
+            extra_len: frame.len() - RSI_MIN_RESPONSE_LEN,
+        });
+    }
+    let source_errno = match map_rsi_status(response.status) {
+        RsiStatusOutcome::Success => {
+            return Err(LcsError::RsiResponseRequiresPayloadParser(
+                matched.record.retained.op_code,
+            ));
+        }
+        RsiStatusOutcome::Failure(source_errno) => source_errno,
+    };
+    let released_record =
+        release_transaction_replay_snapshot_request_record(request_storage, request_id)?;
+
+    Ok(RsiTransactionReplaySnapshotSourceErrorResponse {
+        response,
+        released_record,
+        source_errno,
     })
 }
 
