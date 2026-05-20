@@ -22,6 +22,7 @@ enum pkm_lcs_source_fd_state {
 };
 
 #define PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT 256U
+#define PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT 30000U
 
 struct pkm_lcs_source_in_flight_request {
 	bool occupied;
@@ -165,8 +166,12 @@ struct pkm_lcs_source_response_result {
 struct pkm_lcs_source_response_waiter {
 	wait_queue_head_t wait;
 	bool completed;
-	u8 _pad[7];
+	bool attached;
+	bool detached;
+	u8 _pad[5];
+	u32 source_id;
 	long response_errno;
+	u64 request_id;
 	struct pkm_lcs_source_response_result response;
 };
 
@@ -241,6 +246,16 @@ long pkm_lcs_source_dispatch_lookup_waitable_request(
 	const char *child_name, u32 child_name_len,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_lookup_round_trip(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_lookup_round_trip_timeout(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_accept_response_file(
 	struct file *file, const u8 *frame, size_t frame_len,
 	struct pkm_lcs_source_response_result *result);

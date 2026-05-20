@@ -8,9 +8,11 @@
  */
 
 #include <linux/errno.h>
+#include <linux/atomic.h>
 #include <linux/fcntl.h>
 #include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/jiffies.h>
 #include <linux/lockdep.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -82,6 +84,14 @@ static struct pkm_lcs_source_slot
 	pkm_lcs_source_slots[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
 static bool pkm_lcs_sequence_initialized;
 static u64 pkm_lcs_next_sequence;
+static DECLARE_WAIT_QUEUE_HEAD(pkm_lcs_source_slot_wait);
+static atomic64_t pkm_lcs_source_slot_epoch = ATOMIC64_INIT(0);
+
+static void pkm_lcs_source_slot_waiters_wake(void)
+{
+	atomic64_inc(&pkm_lcs_source_slot_epoch);
+	wake_up_interruptible(&pkm_lcs_source_slot_wait);
+}
 
 static bool pkm_lcs_default_copy_from_user(void *ctx, void *dst,
 					   const void __user *src, size_t len)
@@ -298,10 +308,12 @@ static void pkm_lcs_source_queue_destroy_locked(
 static void pkm_lcs_source_in_flight_destroy_locked(
 	struct pkm_lcs_source_fd *source_fd)
 {
+	bool had_in_flight;
 	u32 i;
 
 	lockdep_assert_held(&source_fd->queue_lock);
 
+	had_in_flight = source_fd->in_flight_request_count != 0;
 	for (i = 0; i < PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT; i++) {
 		struct pkm_lcs_source_in_flight_request *record =
 			&source_fd->in_flight_requests[i];
@@ -323,6 +335,8 @@ static void pkm_lcs_source_in_flight_destroy_locked(
 		memset(record, 0, sizeof(*record));
 	}
 	source_fd->in_flight_request_count = 0;
+	if (had_in_flight)
+		pkm_lcs_source_slot_waiters_wake();
 }
 
 static long pkm_lcs_source_request_id_successor(u64 request_id, u64 *next)
@@ -334,6 +348,83 @@ static long pkm_lcs_source_request_id_successor(u64 request_id, u64 *next)
 
 	*next = request_id + 1;
 	return 0;
+}
+
+static unsigned long pkm_lcs_source_deadline_from_timeout_ms(u32 timeout_ms)
+{
+	unsigned long delta = msecs_to_jiffies(timeout_ms);
+
+	if (timeout_ms && !delta)
+		delta = 1;
+	return jiffies + delta;
+}
+
+static long pkm_lcs_source_deadline_remaining(unsigned long deadline)
+{
+	unsigned long now = jiffies;
+
+	if (time_after_eq(now, deadline))
+		return 0;
+	return (long)(deadline - now);
+}
+
+static long pkm_lcs_source_slot_admission_state(u32 source_id)
+{
+	struct pkm_lcs_source_slot *slot;
+	struct pkm_lcs_source_fd *source_fd;
+	long ret = -EIO;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE ||
+	    !slot->active_fd)
+		goto out_unlock_table;
+
+	source_fd = slot->active_fd;
+	mutex_lock(&source_fd->queue_lock);
+	if (source_fd->closing ||
+	    source_fd->state != PKM_LCS_SOURCE_FD_ACTIVE ||
+	    source_fd->source_id != source_id) {
+		ret = -EIO;
+	} else if (source_fd->in_flight_request_count >=
+		   PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+		ret = -EAGAIN;
+	} else {
+		ret = 0;
+	}
+	mutex_unlock(&source_fd->queue_lock);
+
+out_unlock_table:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
+static long pkm_lcs_source_wait_for_slot(u32 source_id,
+					 unsigned long deadline)
+{
+	for (;;) {
+		s64 epoch = atomic64_read(&pkm_lcs_source_slot_epoch);
+		long remaining;
+		long wait_ret;
+		long ret;
+
+		ret = pkm_lcs_source_slot_admission_state(source_id);
+		if (ret != -EAGAIN)
+			return ret;
+
+		remaining = pkm_lcs_source_deadline_remaining(deadline);
+		if (!remaining)
+			return -ETIMEDOUT;
+
+		wait_ret = wait_event_interruptible_timeout(
+			pkm_lcs_source_slot_wait,
+			atomic64_read(&pkm_lcs_source_slot_epoch) != epoch,
+			remaining);
+		if (wait_ret < 0)
+			return wait_ret;
+		if (!wait_ret)
+			return -ETIMEDOUT;
+	}
 }
 
 static long pkm_lcs_source_in_flight_insert_locked(
@@ -369,6 +460,12 @@ static long pkm_lcs_source_in_flight_insert_locked(
 		record->txn_id = txn_id;
 		record->op_code = op_code;
 		record->waiter = waiter;
+		if (waiter) {
+			waiter->source_id = source_fd->source_id;
+			waiter->request_id = request_id;
+			WRITE_ONCE(waiter->attached, true);
+			WRITE_ONCE(waiter->detached, false);
+		}
 		source_fd->in_flight_request_count++;
 		return 0;
 	}
@@ -420,8 +517,10 @@ static void pkm_lcs_source_in_flight_release_locked(
 		return;
 
 	memset(record, 0, sizeof(*record));
-	if (source_fd->in_flight_request_count)
+	if (source_fd->in_flight_request_count) {
 		source_fd->in_flight_request_count--;
+		pkm_lcs_source_slot_waiters_wake();
+	}
 }
 
 static void pkm_lcs_source_enqueue_result_fill_locked(
@@ -512,8 +611,95 @@ static void pkm_lcs_source_response_waiter_complete(
 	else
 		memset(&waiter->response, 0, sizeof(waiter->response));
 	waiter->response_errno = response_errno;
+	WRITE_ONCE(waiter->attached, false);
 	WRITE_ONCE(waiter->completed, true);
 	wake_up_interruptible(&waiter->wait);
+}
+
+static bool pkm_lcs_source_response_waiter_detach(
+	struct pkm_lcs_source_response_waiter *waiter)
+{
+	struct pkm_lcs_source_in_flight_request *record;
+	struct pkm_lcs_source_fd *source_fd;
+	struct pkm_lcs_source_slot *slot;
+	bool detached = false;
+
+	if (!waiter || READ_ONCE(waiter->completed) ||
+	    !READ_ONCE(waiter->attached))
+		return false;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(waiter->source_id);
+	if (!slot || !slot->active_fd)
+		goto out_unlock_table;
+
+	source_fd = slot->active_fd;
+	mutex_lock(&source_fd->queue_lock);
+	if (READ_ONCE(waiter->completed))
+		goto out_unlock_queue;
+
+	record = pkm_lcs_source_in_flight_find_locked(source_fd,
+						      waiter->request_id);
+	if (record && record->waiter == waiter) {
+		record->waiter = NULL;
+		WRITE_ONCE(waiter->attached, false);
+		WRITE_ONCE(waiter->detached, true);
+		detached = true;
+	}
+
+out_unlock_queue:
+	mutex_unlock(&source_fd->queue_lock);
+out_unlock_table:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return detached;
+}
+
+static long pkm_lcs_source_response_waiter_wait_until(
+	struct pkm_lcs_source_response_waiter *waiter, unsigned long deadline,
+	struct pkm_lcs_source_response_result *result)
+{
+	long ret;
+
+	if (!waiter)
+		return -EINVAL;
+
+	for (;;) {
+		long remaining;
+
+		if (READ_ONCE(waiter->completed)) {
+			if (result)
+				*result = waiter->response;
+			return waiter->response_errno;
+		}
+
+		remaining = pkm_lcs_source_deadline_remaining(deadline);
+		if (!remaining)
+			break;
+
+		ret = wait_event_interruptible_timeout(
+			waiter->wait, READ_ONCE(waiter->completed),
+			remaining);
+		if (ret < 0) {
+			pkm_lcs_source_response_waiter_detach(waiter);
+			return ret;
+		}
+		if (!ret)
+			break;
+	}
+
+	if (READ_ONCE(waiter->completed)) {
+		if (result)
+			*result = waiter->response;
+		return waiter->response_errno;
+	}
+
+	pkm_lcs_source_response_waiter_detach(waiter);
+	if (READ_ONCE(waiter->completed)) {
+		if (result)
+			*result = waiter->response;
+		return waiter->response_errno;
+	}
+	return -ETIMEDOUT;
 }
 
 long pkm_lcs_source_response_waiter_wait(
@@ -1108,6 +1294,55 @@ long pkm_lcs_source_dispatch_lookup_waitable_request(
 	return pkm_lcs_source_dispatch_lookup_request_with_waiter(
 		source_id, txn_id, parent_guid, child_name, child_name_len,
 		waiter, result);
+}
+
+long pkm_lcs_source_lookup_round_trip_timeout(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_source_response_waiter waiter;
+	unsigned long deadline;
+	long ret;
+
+	if (response)
+		memset(response, 0, sizeof(*response));
+	if (enqueue)
+		memset(enqueue, 0, sizeof(*enqueue));
+
+	pkm_lcs_source_response_waiter_init(&waiter);
+	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+
+	for (;;) {
+		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		if (ret)
+			return ret;
+
+		ret = pkm_lcs_source_dispatch_lookup_request_with_waiter(
+			source_id, txn_id, parent_guid, child_name,
+			child_name_len, &waiter, enqueue);
+		if (ret != -EAGAIN)
+			break;
+		if (!pkm_lcs_source_deadline_remaining(deadline))
+			return -ETIMEDOUT;
+	}
+	if (ret)
+		return ret;
+
+	return pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
+							 response);
+}
+
+long pkm_lcs_source_lookup_round_trip(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_lookup_round_trip_timeout(
+		source_id, txn_id, parent_guid, child_name, child_name_len,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, response, enqueue);
 }
 
 static ssize_t pkm_lcs_source_device_read_file_with_ops(
