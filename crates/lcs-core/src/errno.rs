@@ -6,7 +6,7 @@ use crate::layers::{LayerCreationAdmissionErrno, LayerTargetAdmissionErrno};
 use crate::open::RegistryOpenPreResolutionErrno;
 use crate::output_buffer::OutputBufferAggregate;
 use crate::rsi::{RsiMappedErrno, RsiRequestTimeoutErrno};
-use crate::source::SourceRegistrationErrno;
+use crate::source::{SourceLifecycleErrno, SourceRegistrationErrno};
 use crate::symlink::SymlinkResolutionErrno;
 use crate::transaction::{TransactionTerminalErrno, TransactionTimeoutErrno};
 use crate::value::{ValueLayerAdmissionErrno, ValueTypeValidationErrno};
@@ -108,6 +108,15 @@ impl From<SourceRegistrationErrno> for LinuxErrno {
             SourceRegistrationErrno::Enospc => Self::Enospc,
             SourceRegistrationErrno::Eoverflow => Self::Eoverflow,
             SourceRegistrationErrno::Estale => Self::Estale,
+        }
+    }
+}
+
+impl From<SourceLifecycleErrno> for LinuxErrno {
+    fn from(errno: SourceLifecycleErrno) -> Self {
+        match errno {
+            SourceLifecycleErrno::Eio => Self::Eio,
+            SourceLifecycleErrno::Enoent => Self::Enoent,
         }
     }
 }

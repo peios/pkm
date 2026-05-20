@@ -86,6 +86,13 @@ pub enum SourceRegistrationErrno {
     Estale,
 }
 
+/// Symbolic errno class for source lifecycle failures after registration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceLifecycleErrno {
+    Eio,
+    Enoent,
+}
+
 /// Kernel-side effects when an active source connection is lost.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceDisconnectPlan {
@@ -170,6 +177,15 @@ pub fn source_registration_error_errno(err: LcsError) -> Option<SourceRegistrati
         | LcsError::DuplicateHiveRootGuid
         | LcsError::DuplicateHiveIdentity
         | LcsError::PartialSourceResume => Some(SourceRegistrationErrno::Einval),
+        _ => None,
+    }
+}
+
+/// Maps source lifecycle operation errors to PSD-005 errno classes.
+pub fn source_lifecycle_error_errno(err: LcsError) -> Option<SourceLifecycleErrno> {
+    match err {
+        LcsError::HiveSourceUnavailable => Some(SourceLifecycleErrno::Eio),
+        LcsError::RestartedSourceKeyNotFound => Some(SourceLifecycleErrno::Enoent),
         _ => None,
     }
 }
