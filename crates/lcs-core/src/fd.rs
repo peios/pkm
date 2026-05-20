@@ -1,5 +1,6 @@
 use crate::access::{registry_fd_has_right, validate_registry_granted_access};
 use crate::config::LcsLimits;
+use crate::errno::LinuxErrno;
 use crate::error::{LcsError, LcsResult};
 use crate::path::{validate_hive_name_bytes, validate_key_component_bytes};
 use crate::resolution::Guid;
@@ -167,6 +168,11 @@ pub fn key_fd_orphan_operation_errno(error: &LcsError) -> Option<KeyFdOrphanOper
         }
         _ => None,
     }
+}
+
+/// Projects orphaned-key fd admission failures to Linux errno.
+pub fn key_fd_orphan_operation_linux_errno(error: &LcsError) -> Option<LinuxErrno> {
+    key_fd_orphan_operation_errno(error).map(LinuxErrno::from)
 }
 
 /// Plans source cleanup for the last fd close on an already-orphaned key.
