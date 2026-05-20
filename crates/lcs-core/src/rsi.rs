@@ -86,6 +86,14 @@ pub struct RsiTransactionReplaySnapshotRequestRecord<'a> {
     pub retained: RsiRetainedRequest,
 }
 
+/// Summary of fixed-capacity transaction replay snapshot request records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiTransactionReplaySnapshotRequestTableSummary {
+    pub entries: usize,
+    pub capacity: usize,
+    pub full: bool,
+}
+
 /// One length-prefixed RSI string or byte-array field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RsiLengthPrefixedField<'a> {
@@ -1221,6 +1229,74 @@ pub fn retain_transaction_replay_snapshot_request<'a>(
     }
 }
 
+/// Summarizes replay snapshot request-table occupancy.
+pub fn summarize_transaction_replay_snapshot_request_table(
+    storage: &[Option<RsiTransactionReplaySnapshotRequestRecord<'_>>],
+) -> LcsResult<RsiTransactionReplaySnapshotRequestTableSummary> {
+    summarize_transaction_replay_snapshot_request_table_internal(storage)
+}
+
+/// Inserts one retained replay snapshot request record into fixed storage.
+pub fn insert_transaction_replay_snapshot_request_record<'a>(
+    storage: &mut [Option<RsiTransactionReplaySnapshotRequestRecord<'a>>],
+    record: RsiTransactionReplaySnapshotRequestRecord<'a>,
+) -> LcsResult<RsiTransactionReplaySnapshotRequestTableSummary> {
+    let summary = summarize_transaction_replay_snapshot_request_table_internal(storage)?;
+    if storage
+        .iter()
+        .flatten()
+        .any(|existing| existing.request_id == record.request_id)
+    {
+        return Err(LcsError::DuplicateTransactionReplaySnapshotRequest {
+            request_id: record.request_id,
+        });
+    }
+
+    if summary.full {
+        return Err(LcsError::TransactionReplaySnapshotRequestTableFull {
+            capacity: summary.capacity,
+        });
+    }
+    let Some(slot) = storage.iter_mut().find(|slot| slot.is_none()) else {
+        return Err(LcsError::TransactionReplaySnapshotRequestTableFull {
+            capacity: storage.len(),
+        });
+    };
+    *slot = Some(record);
+    summarize_transaction_replay_snapshot_request_table(storage)
+}
+
+/// Finds one retained replay snapshot request record by request ID.
+pub fn find_transaction_replay_snapshot_request_record<'a>(
+    storage: &[Option<RsiTransactionReplaySnapshotRequestRecord<'a>>],
+    request_id: RsiRequestId,
+) -> LcsResult<RsiTransactionReplaySnapshotRequestRecord<'a>> {
+    storage
+        .iter()
+        .flatten()
+        .find(|record| record.request_id == request_id)
+        .copied()
+        .ok_or(LcsError::TransactionReplaySnapshotRequestNotFound { request_id })
+}
+
+/// Removes one retained replay snapshot request record by request ID.
+pub fn release_transaction_replay_snapshot_request_record<'a>(
+    storage: &mut [Option<RsiTransactionReplaySnapshotRequestRecord<'a>>],
+    request_id: RsiRequestId,
+) -> LcsResult<RsiTransactionReplaySnapshotRequestRecord<'a>> {
+    for slot in storage {
+        if slot
+            .as_ref()
+            .is_some_and(|record| record.request_id == request_id)
+        {
+            return slot
+                .take()
+                .ok_or(LcsError::TransactionReplaySnapshotRequestNotFound { request_id });
+        }
+    }
+    Err(LcsError::TransactionReplaySnapshotRequestNotFound { request_id })
+}
+
 /// Writes an RSI request frame for a transaction replay snapshot query.
 pub fn write_transaction_replay_snapshot_query_request_frame(
     dst: &mut [u8],
@@ -1277,6 +1353,31 @@ fn transaction_replay_snapshot_query_op_code(query: TransactionReplaySnapshotQue
         TransactionReplaySnapshotQueryKind::EffectiveSubkeys { .. } => RSI_ENUM_CHILDREN,
         TransactionReplaySnapshotQueryKind::ChildVisibility { .. } => RSI_LOOKUP,
     }
+}
+
+fn summarize_transaction_replay_snapshot_request_table_internal(
+    storage: &[Option<RsiTransactionReplaySnapshotRequestRecord<'_>>],
+) -> LcsResult<RsiTransactionReplaySnapshotRequestTableSummary> {
+    let mut entries = 0usize;
+    for (index, record) in storage.iter().enumerate() {
+        if let Some(record) = record {
+            entries += 1;
+            if storage[..index]
+                .iter()
+                .flatten()
+                .any(|previous| previous.request_id == record.request_id)
+            {
+                return Err(LcsError::DuplicateTransactionReplaySnapshotRequest {
+                    request_id: record.request_id,
+                });
+            }
+        }
+    }
+    Ok(RsiTransactionReplaySnapshotRequestTableSummary {
+        entries,
+        capacity: storage.len(),
+        full: entries == storage.len(),
+    })
 }
 
 /// Writes a complete RSI_DELETE_VALUE_ENTRY request frame.

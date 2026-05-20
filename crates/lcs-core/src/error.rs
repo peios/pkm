@@ -856,6 +856,21 @@ pub enum LcsError {
         /// Caller-provided storage capacity.
         capacity: usize,
     },
+    /// A replay snapshot request table had no free slots.
+    TransactionReplaySnapshotRequestTableFull {
+        /// Fixed table capacity.
+        capacity: usize,
+    },
+    /// A replay snapshot request table already contained the request ID.
+    DuplicateTransactionReplaySnapshotRequest {
+        /// Duplicate request ID.
+        request_id: u64,
+    },
+    /// A replay snapshot request record was not present.
+    TransactionReplaySnapshotRequestNotFound {
+        /// Missing request ID.
+        request_id: u64,
+    },
     /// A transaction runtime transition was requested from an impossible state.
     InvalidTransactionRuntimeState,
 }
