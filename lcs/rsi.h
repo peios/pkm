@@ -9,6 +9,7 @@
 struct pkm_lcs_rsi_built_request {
 	size_t len;
 	u64 request_id;
+	u64 txn_id;
 	u16 op_code;
 	u8 _pad[6];
 };

@@ -19,6 +19,15 @@ enum pkm_lcs_source_fd_state {
 	PKM_LCS_SOURCE_FD_ACTIVE = 1,
 };
 
+#define PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT 256U
+
+struct pkm_lcs_source_in_flight_request {
+	bool occupied;
+	u64 request_id;
+	u64 txn_id;
+	u16 op_code;
+};
+
 struct pkm_lcs_source_fd {
 	enum pkm_lcs_source_fd_state state;
 	u32 source_id;
@@ -26,6 +35,10 @@ struct pkm_lcs_source_fd {
 	wait_queue_head_t read_wait;
 	struct list_head request_queue;
 	u32 queued_request_count;
+	u32 in_flight_request_count;
+	u64 next_request_id;
+	struct pkm_lcs_source_in_flight_request
+		in_flight_requests[PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT];
 	bool closing;
 };
 
@@ -84,6 +97,15 @@ struct pkm_lcs_source_table_snapshot {
 	bool sequence_initialized;
 };
 
+struct pkm_lcs_source_fd_snapshot {
+	enum pkm_lcs_source_fd_state state;
+	u32 source_id;
+	u32 queued_request_count;
+	u32 in_flight_request_count;
+	u64 next_request_id;
+	bool closing;
+};
+
 struct pkm_lcs_hive_route_result {
 	u32 source_id;
 	u8 root_guid[16];
@@ -112,9 +134,12 @@ struct pkm_lcs_relative_open_preflight {
 struct pkm_lcs_source_enqueue_result {
 	size_t len;
 	u64 request_id;
+	u64 txn_id;
 	u16 op_code;
 	u16 _pad0;
 	u32 queue_depth;
+	u32 in_flight_count;
+	u64 next_request_id;
 };
 
 long pkm_lcs_source_device_open_for_token(const void *token);
@@ -179,11 +204,17 @@ long pkm_lcs_open_user_relative_path_preflight(
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,
 	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_lookup_request(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	struct pkm_lcs_source_enqueue_result *result);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_lcs_kunit_reset_source_table(void);
 void pkm_lcs_kunit_source_table_snapshot(
 	struct pkm_lcs_source_table_snapshot *snapshot);
+void pkm_lcs_kunit_source_fd_snapshot(
+	struct file *file, struct pkm_lcs_source_fd_snapshot *snapshot);
 ssize_t pkm_lcs_kunit_source_device_read_file(
 	struct file *file, void *buf, size_t count, bool nonblocking);
 #endif

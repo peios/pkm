@@ -9,7 +9,7 @@ use crate::lcs_core::{
     plan_rsi_source_read,
     plan_registry_ioctl_fixed_fd_access_gate, plan_registry_open_pre_resolution_access,
     plan_registry_security_info_fd_access_gate, plan_source_registration_sequence_update,
-    registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
+    parse_rsi_request_header, registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
     registry_open_pre_resolution_linux_errno, route_hive, route_routable_path_hive,
     rsi_queued_request_from_frame,
     source_registration_error_linux_errno, source_registration_hive_scope,
@@ -94,6 +94,7 @@ pub struct PkmLcsPathValidationResultCopy {
 pub struct PkmLcsRsiBuiltRequestCopy {
     pub len: usize,
     pub request_id: u64,
+    pub txn_id: u64,
     pub op_code: u16,
     pub _pad: [u8; 6],
 }
@@ -329,6 +330,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_lookup_request_frame(
         *built_out = PkmLcsRsiBuiltRequestCopy {
             len: 0,
             request_id: 0,
+            txn_id: 0,
             op_code: 0,
             _pad: [0; 6],
         };
@@ -360,6 +362,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_lookup_request_frame(
                 *built_out = PkmLcsRsiBuiltRequestCopy {
                     len: built.len,
                     request_id: built.retained.request_id,
+                    txn_id,
                     op_code: built.retained.op_code,
                     _pad: [0; 6],
                 };
@@ -384,6 +387,7 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_queued_request_frame(
         *retained_out = PkmLcsRsiBuiltRequestCopy {
             len: 0,
             request_id: 0,
+            txn_id: 0,
             op_code: 0,
             _pad: [0; 6],
         };
@@ -396,10 +400,15 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_queued_request_frame(
     let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
     match rsi_queued_request_from_frame(frame_bytes) {
         Ok(request) => {
+            let header = match parse_rsi_request_header(frame_bytes) {
+                Ok(header) => header,
+                Err(err) => return rsi_request_frame_error_return(err),
+            };
             unsafe {
                 *retained_out = PkmLcsRsiBuiltRequestCopy {
                     len: request.frame.len(),
                     request_id: request.retained.request_id,
+                    txn_id: header.txn_id,
                     op_code: request.retained.op_code,
                     _pad: [0; 6],
                 };

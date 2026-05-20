@@ -2181,6 +2181,207 @@ static void pkm_lcs_kunit_source_request_enqueue_rejects_bad_state(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_dispatch_lookup_allocates_monotonic_ids(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x61 };
+	struct pkm_lcs_source_enqueue_result first = { };
+	struct pkm_lcs_source_enqueue_result second = { };
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_lookup_request(
+				1, 0x4445464748494a4bULL, parent_guid,
+				"First", strlen("First"), &first),
+			0L);
+	KUNIT_EXPECT_EQ(test, first.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, first.txn_id, 0x4445464748494a4bULL);
+	KUNIT_EXPECT_EQ(test, first.op_code, (u16)RSI_LOOKUP);
+	KUNIT_EXPECT_EQ(test, first.queue_depth, 1U);
+	KUNIT_EXPECT_EQ(test, first.in_flight_count, 1U);
+	KUNIT_EXPECT_EQ(test, first.next_request_id, 1ULL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_lookup_request(
+				1, 0x55565758595a5b5cULL, parent_guid,
+				"Second", strlen("Second"), &second),
+			0L);
+	KUNIT_EXPECT_EQ(test, second.request_id, 1ULL);
+	KUNIT_EXPECT_EQ(test, second.txn_id, 0x55565758595a5b5cULL);
+	KUNIT_EXPECT_EQ(test, second.op_code, (u16)RSI_LOOKUP);
+	KUNIT_EXPECT_EQ(test, second.queue_depth, 2U);
+	KUNIT_EXPECT_EQ(test, second.in_flight_count, 2U);
+	KUNIT_EXPECT_EQ(test, second.next_request_id, 2ULL);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 2U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 2U);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id, 2ULL);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)first.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_ID_OFFSET), 0ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_TXN_ID_OFFSET),
+			0x4445464748494a4bULL);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 2U);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id, 2ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_read_retains_in_flight_until_release(
+	struct kunit *test)
+{
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	u8 frame[96];
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+	size_t frame_len;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	pkm_lcs_kunit_build_lookup_frame(test, frame, sizeof(frame), 601,
+					 "Child", &frame_len);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, frame, frame_len,
+						       NULL),
+			0L);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id, 602ULL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)frame_len);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id, 602ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_enqueue_rejects_reused_request_id(
+	struct kunit *test)
+{
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	u8 frame[96];
+	u8 duplicate[96];
+	struct file file = { };
+	const void *token;
+	size_t frame_len;
+	size_t duplicate_len;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	pkm_lcs_kunit_build_lookup_frame(test, frame, sizeof(frame), 701,
+					 "Child", &frame_len);
+	pkm_lcs_kunit_build_lookup_frame(test, duplicate, sizeof(duplicate),
+					 701, "Other", &duplicate_len);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, frame, frame_len,
+						       NULL),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, duplicate,
+						       duplicate_len, NULL),
+			(long)-EINVAL);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id, 702ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_in_flight_full_blocks_after_read(
+	struct kunit *test)
+{
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	u8 frame[96];
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+	size_t frame_len;
+	u32 i;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	for (i = 0; i < PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT; i++) {
+		pkm_lcs_kunit_build_lookup_frame(test, frame, sizeof(frame),
+						 i, "Child", &frame_len);
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_source_enqueue_request(1, frame,
+							       frame_len,
+							       NULL),
+				0L);
+	}
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count,
+			PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count,
+			PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id,
+			(u64)PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)frame_len);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count,
+			PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT - 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count,
+			PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT);
+
+	pkm_lcs_kunit_build_lookup_frame(
+		test, frame, sizeof(frame),
+		PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT, "Next",
+		&frame_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, frame, frame_len,
+						       NULL),
+			(long)-EAGAIN);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count,
+			PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT - 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count,
+			PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id,
+			(u64)PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
@@ -2247,6 +2448,12 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_request_read_short_buffer_preserves_queue),
 	KUNIT_CASE(pkm_lcs_kunit_source_request_read_fault_preserves_queue),
 	KUNIT_CASE(pkm_lcs_kunit_source_request_enqueue_rejects_bad_state),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_dispatch_lookup_allocates_monotonic_ids),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_read_retains_in_flight_until_release),
+	KUNIT_CASE(pkm_lcs_kunit_source_enqueue_rejects_reused_request_id),
+	KUNIT_CASE(pkm_lcs_kunit_source_in_flight_full_blocks_after_read),
 	{ }
 };
 

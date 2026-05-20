@@ -32,7 +32,6 @@
 	(PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD + 1U)
 #define PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT 32U
 #define PKM_LCS_MAX_HIVES_PER_SOURCE_DEFAULT 64U
-#define PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT 256U
 
 #define PKM_LCS_RSI_READ_ACTION_COPY 0U
 #define PKM_LCS_RSI_READ_ACTION_WAIT 1U
@@ -52,6 +51,7 @@ struct pkm_lcs_source_queued_request {
 	u8 *frame;
 	size_t len;
 	u64 request_id;
+	u64 txn_id;
 	u16 op_code;
 };
 
@@ -249,6 +249,8 @@ static void pkm_lcs_source_fd_init(struct pkm_lcs_source_fd *source_fd)
 	init_waitqueue_head(&source_fd->read_wait);
 	INIT_LIST_HEAD(&source_fd->request_queue);
 	source_fd->queued_request_count = 0;
+	source_fd->in_flight_request_count = 0;
+	source_fd->next_request_id = 0;
 	source_fd->closing = false;
 }
 
@@ -276,6 +278,83 @@ static void pkm_lcs_source_queue_destroy_locked(
 		pkm_lcs_source_queued_request_free(request);
 	}
 	source_fd->queued_request_count = 0;
+}
+
+static void pkm_lcs_source_in_flight_destroy_locked(
+	struct pkm_lcs_source_fd *source_fd)
+{
+	lockdep_assert_held(&source_fd->queue_lock);
+
+	memset(source_fd->in_flight_requests, 0,
+	       sizeof(source_fd->in_flight_requests));
+	source_fd->in_flight_request_count = 0;
+}
+
+static long pkm_lcs_source_request_id_successor(u64 request_id, u64 *next)
+{
+	if (!next)
+		return -EINVAL;
+	if (request_id == ~0ULL)
+		return -EOVERFLOW;
+
+	*next = request_id + 1;
+	return 0;
+}
+
+static long pkm_lcs_source_in_flight_insert_locked(
+	struct pkm_lcs_source_fd *source_fd, u64 request_id, u64 txn_id,
+	u16 op_code)
+{
+	u32 i;
+
+	lockdep_assert_held(&source_fd->queue_lock);
+
+	if (source_fd->in_flight_request_count >=
+	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT)
+		return -EAGAIN;
+
+	for (i = 0; i < PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT; i++) {
+		struct pkm_lcs_source_in_flight_request *record =
+			&source_fd->in_flight_requests[i];
+
+		if (record->occupied && record->request_id == request_id)
+			return -EINVAL;
+	}
+
+	for (i = 0; i < PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT; i++) {
+		struct pkm_lcs_source_in_flight_request *record =
+			&source_fd->in_flight_requests[i];
+
+		if (record->occupied)
+			continue;
+		record->occupied = true;
+		record->request_id = request_id;
+		record->txn_id = txn_id;
+		record->op_code = op_code;
+		source_fd->in_flight_request_count++;
+		return 0;
+	}
+
+	return -EIO;
+}
+
+static void pkm_lcs_source_enqueue_result_fill_locked(
+	struct pkm_lcs_source_enqueue_result *result,
+	const struct pkm_lcs_source_queued_request *request,
+	const struct pkm_lcs_source_fd *source_fd)
+{
+	lockdep_assert_held(&source_fd->queue_lock);
+
+	if (!result)
+		return;
+
+	result->len = request->len;
+	result->request_id = request->request_id;
+	result->txn_id = request->txn_id;
+	result->op_code = request->op_code;
+	result->queue_depth = source_fd->queued_request_count;
+	result->in_flight_count = source_fd->in_flight_request_count;
+	result->next_request_id = source_fd->next_request_id;
 }
 
 static bool pkm_lcs_source_read_ready(struct pkm_lcs_source_fd *source_fd)
@@ -340,6 +419,7 @@ int pkm_lcs_source_device_release_file(struct file *file)
 	mutex_lock(&source_fd->queue_lock);
 	source_fd->closing = true;
 	pkm_lcs_source_queue_destroy_locked(source_fd);
+	pkm_lcs_source_in_flight_destroy_locked(source_fd);
 	mutex_unlock(&source_fd->queue_lock);
 	wake_up_interruptible(&source_fd->read_wait);
 
@@ -660,6 +740,7 @@ long pkm_lcs_source_enqueue_request(
 	struct pkm_lcs_source_queued_request *request;
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
+	u64 next_request_id;
 	long ret;
 
 	if (result)
@@ -682,6 +763,7 @@ long pkm_lcs_source_enqueue_request(
 	}
 	request->len = frame_len;
 	request->request_id = retained.request_id;
+	request->txn_id = retained.txn_id;
 	request->op_code = retained.op_code;
 	INIT_LIST_HEAD(&request->link);
 
@@ -701,20 +783,120 @@ long pkm_lcs_source_enqueue_request(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->queued_request_count >=
+	if (retained.request_id < source_fd->next_request_id) {
+		ret = -EINVAL;
+		goto out_unlock_queue;
+	}
+	ret = pkm_lcs_source_request_id_successor(retained.request_id,
+						  &next_request_id);
+	if (ret)
+		goto out_unlock_queue;
+	ret = pkm_lcs_source_in_flight_insert_locked(
+		source_fd, retained.request_id, retained.txn_id,
+		retained.op_code);
+	if (ret)
+		goto out_unlock_queue;
+
+	list_add_tail(&request->link, &source_fd->request_queue);
+	source_fd->queued_request_count++;
+	source_fd->next_request_id = next_request_id;
+	pkm_lcs_source_enqueue_result_fill_locked(result, request, source_fd);
+	request = NULL;
+	ret = 0;
+
+out_unlock_queue:
+	mutex_unlock(&source_fd->queue_lock);
+	if (!ret)
+		wake_up_interruptible(&source_fd->read_wait);
+out_unlock_table:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	pkm_lcs_source_queued_request_free(request);
+	return ret;
+}
+
+long pkm_lcs_source_dispatch_lookup_request(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_source_queued_request *request;
+	struct pkm_lcs_source_slot *slot;
+	struct pkm_lcs_source_fd *source_fd;
+	size_t frame_len;
+	u64 request_id;
+	u64 next_request_id;
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+	if (!parent_guid || !child_name)
+		return -EINVAL;
+	if (child_name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD)
+		return -ENAMETOOLONG;
+	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
+			       (size_t)RSI_GUID_SIZE, &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
+	    check_add_overflow(frame_len, (size_t)child_name_len, &frame_len))
+		return -EOVERFLOW;
+
+	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	if (!request)
+		return -ENOMEM;
+	request->frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!request->frame) {
+		kfree(request);
+		return -ENOMEM;
+	}
+	INIT_LIST_HEAD(&request->link);
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE ||
+	    !slot->active_fd) {
+		ret = -EIO;
+		goto out_unlock_table;
+	}
+
+	source_fd = slot->active_fd;
+	mutex_lock(&source_fd->queue_lock);
+	if (source_fd->closing ||
+	    source_fd->state != PKM_LCS_SOURCE_FD_ACTIVE ||
+	    source_fd->source_id != source_id) {
+		ret = -EIO;
+		goto out_unlock_queue;
+	}
+	if (source_fd->in_flight_request_count >=
 	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
 
+	request_id = source_fd->next_request_id;
+	ret = pkm_lcs_source_request_id_successor(request_id,
+						  &next_request_id);
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_rsi_build_lookup_request(
+		request->frame, frame_len, request_id, txn_id, parent_guid,
+		child_name, child_name_len, &built);
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_source_in_flight_insert_locked(
+		source_fd, built.request_id, built.txn_id, built.op_code);
+	if (ret)
+		goto out_unlock_queue;
+
+	request->len = built.len;
+	request->request_id = built.request_id;
+	request->txn_id = built.txn_id;
+	request->op_code = built.op_code;
 	list_add_tail(&request->link, &source_fd->request_queue);
 	source_fd->queued_request_count++;
-	if (result) {
-		result->len = request->len;
-		result->request_id = request->request_id;
-		result->op_code = request->op_code;
-		result->queue_depth = source_fd->queued_request_count;
-	}
+	source_fd->next_request_id = next_request_id;
+	pkm_lcs_source_enqueue_result_fill_locked(result, request, source_fd);
 	request = NULL;
 	ret = 0;
 
@@ -1093,6 +1275,33 @@ void pkm_lcs_kunit_source_table_snapshot(
 	snapshot->sequence_initialized = pkm_lcs_sequence_initialized;
 	snapshot->next_sequence = pkm_lcs_next_sequence;
 	mutex_unlock(&pkm_lcs_source_table_lock);
+}
+
+void pkm_lcs_kunit_source_fd_snapshot(
+	struct file *file, struct pkm_lcs_source_fd_snapshot *snapshot)
+{
+	struct pkm_lcs_source_fd *source_fd;
+
+	if (!snapshot)
+		return;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	if (!file)
+		return;
+
+	source_fd = file->private_data;
+	if (!source_fd)
+		return;
+
+	mutex_lock(&source_fd->queue_lock);
+	snapshot->state = source_fd->state;
+	snapshot->source_id = source_fd->source_id;
+	snapshot->queued_request_count = source_fd->queued_request_count;
+	snapshot->in_flight_request_count =
+		source_fd->in_flight_request_count;
+	snapshot->next_request_id = source_fd->next_request_id;
+	snapshot->closing = source_fd->closing;
+	mutex_unlock(&source_fd->queue_lock);
 }
 
 static bool pkm_lcs_kunit_copy_to_kernel(void *ctx, void __user *dst,
