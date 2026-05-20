@@ -6,6 +6,7 @@ use crate::transaction::{
     TransactionOperationIndex,
 };
 use crate::value::TransactionValueMutationLogEntry;
+use crate::watch::TransactionWatchBatchMember;
 
 /// One kernel-owned transaction mutation-log record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,6 +22,12 @@ pub struct TransactionMutationLogStorageSummary {
     pub entries: usize,
     pub capacity: usize,
     pub full: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InternalTransactionMutationLogStorageSummary {
+    summary: TransactionMutationLogStorageSummary,
+    last_operation_index: Option<TransactionOperationIndex>,
 }
 
 /// Result of appending one transaction mutation-log record.
@@ -66,12 +73,7 @@ impl TransactionMutationLogRecord<'_> {
 pub fn summarize_transaction_mutation_log(
     storage: &[Option<TransactionMutationLogRecord<'_>>],
 ) -> LcsResult<TransactionMutationLogStorageSummary> {
-    let entries = dense_prefix_len(storage)?;
-    Ok(TransactionMutationLogStorageSummary {
-        entries,
-        capacity: storage.len(),
-        full: entries == storage.len(),
-    })
+    Ok(summarize_transaction_mutation_log_internal(storage)?.summary)
 }
 
 /// Appends one validated transaction mutation-log record before source dispatch.
@@ -80,10 +82,19 @@ pub fn append_transaction_mutation_log_record<'a>(
     record: TransactionMutationLogRecord<'a>,
 ) -> LcsResult<TransactionMutationLogAppendPlan> {
     validate_transaction_mutation_log_record(&record)?;
-    let summary = summarize_transaction_mutation_log(storage)?;
+    let internal_summary = summarize_transaction_mutation_log_internal(storage)?;
+    let summary = internal_summary.summary;
     if summary.full {
         return Err(LcsError::TransactionMutationLogFull {
             capacity: summary.capacity,
+        });
+    }
+    if internal_summary
+        .last_operation_index
+        .is_some_and(|last_operation_index| record.operation_index() <= last_operation_index)
+    {
+        return Err(LcsError::InvalidTransactionMutationLogEntry {
+            field: "operation_index.order",
         });
     }
 
@@ -96,6 +107,18 @@ pub fn append_transaction_mutation_log_record<'a>(
         entries,
         capacity: summary.capacity,
         full: entries == summary.capacity,
+    })
+}
+
+/// Converts a stored transaction mutation-log record to a watch batch member.
+pub fn transaction_mutation_log_record_watch_batch_member(
+    record: &TransactionMutationLogRecord<'_>,
+    event_count: usize,
+) -> LcsResult<TransactionWatchBatchMember> {
+    validate_transaction_mutation_log_record(record)?;
+    Ok(TransactionWatchBatchMember {
+        operation_index: record.operation_index(),
+        event_count,
     })
 }
 
@@ -148,14 +171,24 @@ pub fn clear_transaction_mutation_log(
     })
 }
 
-fn dense_prefix_len(storage: &[Option<TransactionMutationLogRecord<'_>>]) -> LcsResult<usize> {
+fn summarize_transaction_mutation_log_internal(
+    storage: &[Option<TransactionMutationLogRecord<'_>>],
+) -> LcsResult<InternalTransactionMutationLogStorageSummary> {
     let mut entries = 0;
     let mut seen_empty = false;
+    let mut last_operation_index = None;
 
     for slot in storage {
         match (slot, seen_empty) {
             (Some(record), false) => {
                 validate_transaction_mutation_log_record(record)?;
+                if last_operation_index.is_some_and(|previous| record.operation_index() <= previous)
+                {
+                    return Err(LcsError::InvalidTransactionMutationLogEntry {
+                        field: "operation_index.order",
+                    });
+                }
+                last_operation_index = Some(record.operation_index());
                 entries += 1;
             }
             (None, false) => {
@@ -170,7 +203,14 @@ fn dense_prefix_len(storage: &[Option<TransactionMutationLogRecord<'_>>]) -> Lcs
         }
     }
 
-    Ok(entries)
+    Ok(InternalTransactionMutationLogStorageSummary {
+        summary: TransactionMutationLogStorageSummary {
+            entries,
+            capacity: storage.len(),
+            full: entries == storage.len(),
+        },
+        last_operation_index,
+    })
 }
 
 fn validate_transaction_mutation_log_record(

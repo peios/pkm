@@ -348,6 +348,7 @@ pub use transaction_log::{
     TransactionMutationLogRecord, TransactionMutationLogStorageSummary,
     append_transaction_mutation_log_record, clear_transaction_mutation_log,
     plan_transaction_mutation_log_disposition, summarize_transaction_mutation_log,
+    transaction_mutation_log_record_watch_batch_member,
 };
 pub use value::{
     BlanketTombstoneAction, BlanketTombstoneInput, BlanketTombstoneRequest,
