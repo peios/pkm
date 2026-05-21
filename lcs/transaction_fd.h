@@ -29,10 +29,23 @@ struct pkm_lcs_transaction_binding_plan {
 	u8 bound_root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 };
 
+struct pkm_lcs_transaction_read_plan {
+	u64 txn_id;
+	u32 state;
+	u32 bound_source_id;
+	bool use_transaction;
+	u8 _pad[3];
+	u8 bound_root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+};
+
 long pkm_lcs_transaction_fd_publish(u32 timeout_ms);
 long pkm_lcs_reg_begin_transaction(void);
 long pkm_lcs_transaction_fd_commit(int fd);
 long pkm_lcs_transaction_fd_status(int fd, struct reg_txn_status_args *out);
+long pkm_lcs_transaction_fd_prepare_read_context(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	struct pkm_lcs_transaction_read_plan *out);
 long pkm_lcs_transaction_fd_prepare_mutation_binding(
 	int fd, u32 source_id,
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],

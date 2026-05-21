@@ -5823,6 +5823,178 @@ static void pkm_lcs_kunit_transaction_binding_rejects_bad_inputs(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_transaction_read_context_active_states(
+	struct kunit *test)
+{
+	static const u8 machine_root[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x55
+	};
+	static const u8 users_root[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x66
+	};
+	struct pkm_lcs_transaction_read_plan read = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 7, machine_root, &read),
+			0L);
+	KUNIT_EXPECT_EQ(test, read.txn_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, read.state, REG_TXN_ACTIVE_UNBOUND);
+	KUNIT_EXPECT_EQ(test, read.bound_source_id, 0U);
+	KUNIT_EXPECT_FALSE(test, read.use_transaction);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.state, REG_TXN_ACTIVE_UNBOUND);
+	KUNIT_EXPECT_EQ(test, snapshot.bound_source_id, 0U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, snapshot.transaction_id, 7,
+				machine_root),
+			0L);
+	memset(&read, 0, sizeof(read));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 7, machine_root, &read),
+			0L);
+	KUNIT_EXPECT_EQ(test, read.txn_id, snapshot.transaction_id);
+	KUNIT_EXPECT_EQ(test, read.state, REG_TXN_ACTIVE_BOUND);
+	KUNIT_EXPECT_EQ(test, read.bound_source_id, 7U);
+	KUNIT_EXPECT_TRUE(test, read.use_transaction);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(read.bound_root_guid, machine_root,
+			       sizeof(read.bound_root_guid)),
+			0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 8, machine_root, &read),
+			(long)-EXDEV);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 7, users_root, &read),
+			(long)-EXDEV);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_read_context_terminal_failures(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x77
+	};
+	struct pkm_lcs_transaction_read_plan read = { };
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_COMMITTED, 0),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 7, root_guid, &read),
+			(long)-EINVAL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_ABORTED, 0),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 7, root_guid, &read),
+			(long)-EINVAL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_TIMED_OUT, 0),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 7, root_guid, &read),
+			(long)-ETIMEDOUT);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_SOURCE_DOWN, 7),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 7, root_guid, &read),
+			(long)-EIO);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_read_context_rejects_bad_inputs(
+	struct kunit *test)
+{
+	static const u8 nil_root[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = { };
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x88
+	};
+	struct pkm_lcs_transaction_read_plan read = {
+		.txn_id = 99,
+		.use_transaction = true,
+	};
+	long fd;
+	int not_txn_fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 0, root_guid, &read),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, read.txn_id, 0ULL);
+	KUNIT_EXPECT_FALSE(test, read.use_transaction);
+	read.txn_id = 99;
+	read.use_transaction = true;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 1, nil_root, &read),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, read.txn_id, 0ULL);
+	KUNIT_EXPECT_FALSE(test, read.use_transaction);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 1, NULL, &read),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 1, root_guid, NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				-1, 1, root_guid, &read),
+			(long)-EBADF);
+
+	not_txn_fd = anon_inode_getfd("lcs-not-transaction-read",
+				     &pkm_lcs_kunit_non_key_fops, NULL,
+				     O_CLOEXEC);
+	KUNIT_ASSERT_TRUE(test, not_txn_fd >= 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				not_txn_fd, 1, root_guid, &read),
+			(long)-EINVAL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)not_txn_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_relative_open_preflight_success(struct kunit *test)
 {
 	const char path_src[] = "Child/Sub";
@@ -14233,6 +14405,11 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_precheck_and_complete),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_terminal_failures),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_rejects_bad_inputs),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_read_context_active_states),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_read_context_terminal_failures),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_read_context_rejects_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_bind_for_mutation_success_and_reuse),
 	KUNIT_CASE(

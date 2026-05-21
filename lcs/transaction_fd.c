@@ -409,6 +409,90 @@ long pkm_lcs_transaction_fd_commit(int fd)
 	return ret;
 }
 
+static long pkm_lcs_transaction_fd_prepare_read_context_from_state(
+	struct pkm_lcs_transaction_fd *txn, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	struct pkm_lcs_transaction_read_plan *out)
+{
+	u32 state;
+	long ret;
+
+	if (!txn || !out || !source_id ||
+	    !pkm_lcs_transaction_root_guid_valid(root_guid))
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	spin_lock(&txn->lock);
+	state = txn->state;
+	out->state = state;
+	out->bound_source_id = txn->bound_source_id;
+	memcpy(out->bound_root_guid, txn->bound_root_guid,
+	       sizeof(out->bound_root_guid));
+	switch (state) {
+	case REG_TXN_ACTIVE_UNBOUND:
+		out->txn_id = 0;
+		out->use_transaction = false;
+		ret = 0;
+		break;
+	case REG_TXN_ACTIVE_BOUND:
+		if (txn->bound_source_id == source_id &&
+		    !memcmp(txn->bound_root_guid, root_guid,
+			    sizeof(txn->bound_root_guid))) {
+			out->txn_id = txn->transaction_id;
+			out->use_transaction = true;
+			ret = 0;
+		} else {
+			memset(out, 0, sizeof(*out));
+			ret = -EXDEV;
+		}
+		break;
+	case REG_TXN_TIMED_OUT:
+		memset(out, 0, sizeof(*out));
+		ret = -ETIMEDOUT;
+		break;
+	case REG_TXN_SOURCE_DOWN:
+		memset(out, 0, sizeof(*out));
+		ret = -EIO;
+		break;
+	case REG_TXN_COMMITTED:
+	case REG_TXN_ABORTED:
+		memset(out, 0, sizeof(*out));
+		ret = -EINVAL;
+		break;
+	default:
+		memset(out, 0, sizeof(*out));
+		ret = -EIO;
+		break;
+	}
+	spin_unlock(&txn->lock);
+	return ret;
+}
+
+long pkm_lcs_transaction_fd_prepare_read_context(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	struct pkm_lcs_transaction_read_plan *out)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+	if (!source_id || !pkm_lcs_transaction_root_guid_valid(root_guid))
+		return -EINVAL;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_transaction_fd_prepare_read_context_from_state(
+		txn, source_id, root_guid, out);
+	fdput(held);
+	return ret;
+}
+
 static long pkm_lcs_transaction_fd_prepare_mutation_binding_from_state(
 	struct pkm_lcs_transaction_fd *txn, u32 source_id,
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
