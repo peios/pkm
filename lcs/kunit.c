@@ -10053,6 +10053,288 @@ static void pkm_lcs_kunit_source_dispatch_transaction_rejects_bad_inputs(
 	kacs_rust_token_drop(token);
 }
 
+struct pkm_lcs_kunit_transaction_source_script {
+	struct file *file;
+	u16 expected_op_code;
+	u32 expected_mode;
+	u32 status;
+	u64 expected_header_txn_id;
+	u64 expected_payload_txn_id;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
+static int pkm_lcs_kunit_transaction_source_thread(void *data)
+{
+	struct pkm_lcs_kunit_transaction_source_script *script = data;
+	size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	u8 request[64];
+	size_t response_len;
+	ssize_t count;
+	u64 request_id;
+
+	if (!script || !script->file) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	for (;;) {
+		count = pkm_lcs_kunit_source_device_read_file(
+			script->file, request, sizeof(request), true);
+		if (count != -EAGAIN)
+			break;
+		if (kthread_should_stop()) {
+			script->result = -EINTR;
+			return script->result;
+		}
+		msleep(1);
+	}
+	if (count < 0) {
+		script->result = (int)count;
+		return script->result;
+	}
+	script->reads++;
+
+	if (count < RSI_REQUEST_HEADER_SIZE + (ssize_t)sizeof(u64)) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	if (get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET) !=
+	    script->expected_op_code) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	if (get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+	    script->expected_header_txn_id) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	if (get_unaligned_le64(request + payload_offset) !=
+	    script->expected_payload_txn_id) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	if (script->expected_op_code == RSI_BEGIN_TRANSACTION) {
+		if (count < RSI_REQUEST_HEADER_SIZE + (ssize_t)sizeof(u64) +
+			    (ssize_t)sizeof(u32)) {
+			script->result = -EINVAL;
+			return script->result;
+		}
+		if (get_unaligned_le32(request + payload_offset +
+				       sizeof(u64)) != script->expected_mode) {
+			script->result = -EINVAL;
+			return script->result;
+		}
+	}
+
+	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	memset(response, 0, sizeof(response));
+	put_unaligned_le32(RSI_MIN_RESPONSE_SIZE,
+			   response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
+	put_unaligned_le16(script->expected_op_code | RSI_RESPONSE_BIT,
+			   response + RSI_RESPONSE_OP_CODE_OFFSET);
+	put_unaligned_le32(script->status, response + RSI_RESPONSE_STATUS_OFFSET);
+	response_len = RSI_MIN_RESPONSE_SIZE;
+	count = pkm_lcs_kunit_source_device_write_file(
+		script->file, response, response_len, false, NULL);
+	if (count != (ssize_t)response_len) {
+		script->result = (int)count;
+		return script->result;
+	}
+	script->writes++;
+	script->result = 0;
+	return 0;
+}
+
+static void pkm_lcs_kunit_run_transaction_source_round_trip(
+	struct kunit *test,
+	struct pkm_lcs_kunit_transaction_source_script *script,
+	long (*round_trip)(u32 source_id, u64 transaction_id,
+			   struct pkm_lcs_source_response_result *response,
+			   struct pkm_lcs_source_enqueue_result *enqueue),
+	u64 transaction_id, long expected_ret,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct task_struct *task;
+	int thread_ret;
+	long ret;
+
+	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, script,
+			   "pkm-lcs-kunit-txn-src");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = round_trip(1, transaction_id, response, enqueue);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, expected_ret);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script->result, 0);
+	KUNIT_EXPECT_EQ(test, script->reads, 1U);
+	KUNIT_EXPECT_EQ(test, script->writes, 1U);
+}
+
+static long pkm_lcs_kunit_commit_round_trip_default(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_commit_transaction_round_trip(
+		source_id, transaction_id, response, enqueue);
+}
+
+static long pkm_lcs_kunit_begin_readwrite_round_trip_default(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_begin_transaction_round_trip(
+		source_id, transaction_id, RSI_TXN_READ_WRITE, response,
+		enqueue);
+}
+
+static long pkm_lcs_kunit_abort_round_trip_default(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_abort_transaction_round_trip(
+		source_id, transaction_id, response, enqueue);
+}
+
+static void pkm_lcs_kunit_source_transaction_round_trip_statuses(
+	struct kunit *test)
+{
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_kunit_transaction_source_script script = { };
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	script.file = &file;
+	script.expected_op_code = RSI_BEGIN_TRANSACTION;
+	script.expected_header_txn_id = 0;
+	script.expected_payload_txn_id = 0x0102030405060708ULL;
+	script.expected_mode = RSI_TXN_READ_WRITE;
+	script.status = RSI_OK;
+	pkm_lcs_kunit_run_transaction_source_round_trip(
+		test, &script, pkm_lcs_kunit_begin_readwrite_round_trip_default,
+		script.expected_payload_txn_id, 0L, &response, &enqueue);
+	KUNIT_EXPECT_EQ(test, response.request_op_code,
+			(u16)RSI_BEGIN_TRANSACTION);
+	KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_OK);
+	KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
+
+	memset(&script, 0, sizeof(script));
+	script.file = &file;
+	script.expected_op_code = RSI_COMMIT_TRANSACTION;
+	script.expected_header_txn_id = 0x1112131415161718ULL;
+	script.expected_payload_txn_id = script.expected_header_txn_id;
+	script.status = RSI_TXN_BUSY;
+	pkm_lcs_kunit_run_transaction_source_round_trip(
+		test, &script, pkm_lcs_kunit_commit_round_trip_default,
+		script.expected_payload_txn_id, (long)-EBUSY, &response,
+		&enqueue);
+	KUNIT_EXPECT_EQ(test, response.request_op_code,
+			(u16)RSI_COMMIT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_TXN_BUSY);
+	KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
+
+	memset(&script, 0, sizeof(script));
+	script.file = &file;
+	script.expected_op_code = RSI_ABORT_TRANSACTION;
+	script.expected_header_txn_id = 0x2122232425262728ULL;
+	script.expected_payload_txn_id = script.expected_header_txn_id;
+	script.status = RSI_TXN_NOT_SUPPORTED;
+	pkm_lcs_kunit_run_transaction_source_round_trip(
+		test, &script, pkm_lcs_kunit_abort_round_trip_default,
+		script.expected_payload_txn_id, (long)-EOPNOTSUPP,
+		&response, &enqueue);
+	KUNIT_EXPECT_EQ(test, response.request_op_code,
+			(u16)RSI_ABORT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_TXN_NOT_SUPPORTED);
+	KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_transaction_round_trip_failures(
+	struct kunit *test)
+{
+	struct pkm_lcs_source_response_result timeout_response = { };
+	struct pkm_lcs_source_response_result late_response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	u8 out[64];
+	struct file file = { };
+	const void *token;
+	size_t response_len;
+
+	pkm_lcs_kunit_reset_source_table();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_commit_transaction_round_trip_timeout(
+				1, 0x3132333435363738ULL, 1,
+				&timeout_response, &enqueue),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, enqueue.len, (size_t)0);
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_begin_transaction_round_trip_timeout(
+				1, 0x4142434445464748ULL, 0x80, 1,
+				&timeout_response, &enqueue),
+			(long)-EINVAL);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_begin_transaction_round_trip_timeout(
+				1, 0x5152535455565758ULL,
+				RSI_TXN_READ_WRITE, 1, &timeout_response,
+				&enqueue),
+			(long)-ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, enqueue.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.op_code,
+			(u16)RSI_BEGIN_TRANSACTION);
+	KUNIT_EXPECT_EQ(test, enqueue.queue_depth, 1U);
+	KUNIT_EXPECT_EQ(test, enqueue.in_flight_count, 1U);
+	KUNIT_EXPECT_EQ(test, timeout_response.len, (size_t)0);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(
+				&file, out, sizeof(out), true),
+			(ssize_t)enqueue.len);
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    enqueue.request_id, enqueue.op_code,
+					    RSI_OK, &response_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_write_file(
+				&file, response, response_len, false,
+				&late_response),
+			(ssize_t)response_len);
+	KUNIT_EXPECT_FALSE(test, late_response.caller_waiter_attached);
+	KUNIT_EXPECT_EQ(test, late_response.status, (u32)RSI_OK);
+	KUNIT_EXPECT_EQ(test, late_response.in_flight_count, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs(
 	struct kunit *test)
 {
@@ -13299,6 +13581,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_dispatch_transaction_control_frames),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_transaction_rejects_bad_inputs),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_transaction_round_trip_statuses),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_transaction_round_trip_failures),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_source_status_policy),

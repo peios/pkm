@@ -2399,6 +2399,103 @@ long pkm_lcs_source_dispatch_abort_transaction_waitable_request(
 		result);
 }
 
+static long pkm_lcs_source_transaction_round_trip_timeout(
+	u32 source_id, u16 op_code, u64 transaction_id, u32 mode,
+	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_source_response_waiter waiter;
+	unsigned long deadline;
+	long ret;
+
+	if (response)
+		memset(response, 0, sizeof(*response));
+	if (enqueue)
+		memset(enqueue, 0, sizeof(*enqueue));
+
+	pkm_lcs_source_response_waiter_init(&waiter);
+	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+
+	for (;;) {
+		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		if (ret)
+			return ret;
+
+		ret = pkm_lcs_source_dispatch_transaction_request_with_waiter(
+			source_id, op_code, transaction_id, mode, &waiter,
+			enqueue);
+		if (ret != -EAGAIN)
+			break;
+		if (!pkm_lcs_source_deadline_remaining(deadline))
+			return -ETIMEDOUT;
+	}
+	if (ret)
+		return ret;
+
+	return pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
+							 response);
+}
+
+long pkm_lcs_source_begin_transaction_round_trip_timeout(
+	u32 source_id, u64 transaction_id, u32 mode, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_transaction_round_trip_timeout(
+		source_id, RSI_BEGIN_TRANSACTION, transaction_id, mode,
+		timeout_ms, response, enqueue);
+}
+
+long pkm_lcs_source_begin_transaction_round_trip(
+	u32 source_id, u64 transaction_id, u32 mode,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_begin_transaction_round_trip_timeout(
+		source_id, transaction_id, mode,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, response, enqueue);
+}
+
+long pkm_lcs_source_commit_transaction_round_trip_timeout(
+	u32 source_id, u64 transaction_id, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_transaction_round_trip_timeout(
+		source_id, RSI_COMMIT_TRANSACTION, transaction_id, 0,
+		timeout_ms, response, enqueue);
+}
+
+long pkm_lcs_source_commit_transaction_round_trip(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_commit_transaction_round_trip_timeout(
+		source_id, transaction_id, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+		response, enqueue);
+}
+
+long pkm_lcs_source_abort_transaction_round_trip_timeout(
+	u32 source_id, u64 transaction_id, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_transaction_round_trip_timeout(
+		source_id, RSI_ABORT_TRANSACTION, transaction_id, 0,
+		timeout_ms, response, enqueue);
+}
+
+long pkm_lcs_source_abort_transaction_round_trip(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_abort_transaction_round_trip_timeout(
+		source_id, transaction_id, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+		response, enqueue);
+}
+
 long pkm_lcs_source_create_key_round_trip_timeout(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *name, u32 name_len,
