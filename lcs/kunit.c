@@ -2713,6 +2713,104 @@ static void pkm_lcs_kunit_create_disposition_copyout_bad_ops(
 	KUNIT_EXPECT_EQ(test, disposition, 0U);
 }
 
+static long pkm_lcs_kunit_publish_create_finish_fd(void)
+{
+	static const char * const path[] = { "Machine" };
+	static const u8 ancestors[1][PKM_LCS_GUID_BYTES] = {
+		{ 0x8a },
+	};
+	struct pkm_lcs_key_fd_publish_input input = {
+		.source_id = 1,
+		.granted_access = KEY_READ,
+		.resolved_path = path,
+		.ancestor_guids = ancestors,
+		.path_component_count = 1,
+	};
+
+	memcpy(input.key_guid, ancestors[0], sizeof(input.key_guid));
+	return pkm_lcs_key_fd_publish(&input);
+}
+
+static void pkm_lcs_kunit_create_finish_success_returns_fd(struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	u32 disposition = 0;
+	long fd;
+	long ret;
+
+	fd = pkm_lcs_kunit_publish_create_finish_fd();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	ret = pkm_lcs_reg_create_key_finish_success_to_user(
+		&ops, (u32 __user *)&disposition, fd, REG_OPENED_EXISTING);
+	KUNIT_EXPECT_EQ(test, ret, fd);
+	KUNIT_EXPECT_EQ(test, disposition, REG_OPENED_EXISTING);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)fd, &snapshot), 0L);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_create_finish_success_null_disposition(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	long fd;
+	long ret;
+
+	fd = pkm_lcs_kunit_publish_create_finish_fd();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	ret = pkm_lcs_reg_create_key_finish_success_to_user(
+		&ops, NULL, fd, REG_CREATED_NEW);
+	KUNIT_EXPECT_EQ(test, ret, fd);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_create_finish_fault_closes_fd(struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	u32 disposition = 0;
+	long fd;
+
+	fd = pkm_lcs_kunit_publish_create_finish_fd();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	ctx.fault_dst = &disposition;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_finish_success_to_user(
+				&ops, (u32 __user *)&disposition, fd,
+				REG_CREATED_NEW),
+			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, disposition, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			(long)-EBADF);
+}
+
+static void pkm_lcs_kunit_create_finish_rejects_invalid_fd(struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	u32 disposition = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_finish_success_to_user(
+				&ops, (u32 __user *)&disposition, -1,
+				REG_CREATED_NEW),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, disposition, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+}
+
 static void pkm_lcs_kunit_create_existing_rejects_flags_before_usercopy(
 	struct kunit *test)
 {
@@ -11004,6 +11102,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_create_disposition_copyout_null_is_noop),
 	KUNIT_CASE(pkm_lcs_kunit_create_disposition_copyout_faults),
 	KUNIT_CASE(pkm_lcs_kunit_create_disposition_copyout_bad_ops),
+	KUNIT_CASE(pkm_lcs_kunit_create_finish_success_returns_fd),
+	KUNIT_CASE(pkm_lcs_kunit_create_finish_success_null_disposition),
+	KUNIT_CASE(pkm_lcs_kunit_create_finish_fault_closes_fd),
+	KUNIT_CASE(pkm_lcs_kunit_create_finish_rejects_invalid_fd),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_existing_rejects_flags_before_usercopy),
 	KUNIT_CASE(

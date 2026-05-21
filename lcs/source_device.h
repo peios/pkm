@@ -458,6 +458,9 @@ long pkm_lcs_create_existing_user_path_for_token(
 long pkm_lcs_reg_create_key_copy_disposition_to_user(
 	const struct pkm_lcs_usercopy_ops *ops, u32 __user *udisposition,
 	u32 disposition);
+long pkm_lcs_reg_create_key_finish_success_to_user(
+	const struct pkm_lcs_usercopy_ops *ops, u32 __user *udisposition,
+	long fd, u32 disposition);
 void pkm_lcs_create_missing_parent_resolution_destroy(
 	struct pkm_lcs_create_missing_parent_resolution *resolution);
 long pkm_lcs_create_missing_absolute_parent_for_token(

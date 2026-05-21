@@ -10,6 +10,7 @@
 #include <linux/errno.h>
 #include <linux/atomic.h>
 #include <linux/fcntl.h>
+#include <linux/fdtable.h>
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/jiffies.h>
@@ -3680,6 +3681,25 @@ long pkm_lcs_reg_create_key_copy_disposition_to_user(
 			sizeof(disposition)))
 		return -EFAULT;
 	return 0;
+}
+
+long pkm_lcs_reg_create_key_finish_success_to_user(
+	const struct pkm_lcs_usercopy_ops *ops, u32 __user *udisposition,
+	long fd, u32 disposition)
+{
+	long ret;
+
+	if (fd < 0 || fd > INT_MAX)
+		return -EINVAL;
+
+	ret = pkm_lcs_reg_create_key_copy_disposition_to_user(
+		ops, udisposition, disposition);
+	if (ret) {
+		close_fd((unsigned int)fd);
+		return ret;
+	}
+
+	return fd;
 }
 
 void pkm_lcs_resolved_key_path_destroy(struct pkm_lcs_resolved_key_path *path)
