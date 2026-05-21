@@ -1492,6 +1492,105 @@ out_unlock_table:
 	return ret;
 }
 
+static long pkm_lcs_source_dispatch_query_values_request_with_waiter(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *value_name, u32 value_name_len, bool query_all,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_source_queued_request *request;
+	struct pkm_lcs_source_slot *slot;
+	struct pkm_lcs_source_fd *source_fd;
+	size_t frame_len;
+	u64 request_id;
+	u64 next_request_id;
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+	if (!guid || (value_name_len && !value_name))
+		return -EINVAL;
+	if (value_name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD)
+		return -ENAMETOOLONG;
+	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
+			       (size_t)RSI_GUID_SIZE, &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
+	    check_add_overflow(frame_len, (size_t)value_name_len, &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u8), &frame_len))
+		return -EOVERFLOW;
+
+	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	if (!request)
+		return -ENOMEM;
+	request->frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!request->frame) {
+		kfree(request);
+		return -ENOMEM;
+	}
+	INIT_LIST_HEAD(&request->link);
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE ||
+	    !slot->active_fd) {
+		ret = -EIO;
+		goto out_unlock_table;
+	}
+
+	source_fd = slot->active_fd;
+	mutex_lock(&source_fd->queue_lock);
+	if (source_fd->closing ||
+	    source_fd->state != PKM_LCS_SOURCE_FD_ACTIVE ||
+	    source_fd->source_id != source_id) {
+		ret = -EIO;
+		goto out_unlock_queue;
+	}
+	if (source_fd->in_flight_request_count >=
+	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+		ret = -EAGAIN;
+		goto out_unlock_queue;
+	}
+
+	request_id = source_fd->next_request_id;
+	ret = pkm_lcs_source_request_id_successor(request_id,
+						  &next_request_id);
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_rsi_build_query_values_request(
+		request->frame, frame_len, request_id, txn_id, guid,
+		value_name, value_name_len, query_all, &built);
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_source_in_flight_insert_locked(
+		source_fd, built.request_id, built.txn_id, built.op_code,
+		waiter);
+	if (ret)
+		goto out_unlock_queue;
+
+	request->len = built.len;
+	request->request_id = built.request_id;
+	request->txn_id = built.txn_id;
+	request->op_code = built.op_code;
+	list_add_tail(&request->link, &source_fd->request_queue);
+	source_fd->queued_request_count++;
+	source_fd->next_request_id = next_request_id;
+	pkm_lcs_source_enqueue_result_fill_locked(result, request, source_fd);
+	request = NULL;
+	ret = 0;
+
+out_unlock_queue:
+	mutex_unlock(&source_fd->queue_lock);
+	if (!ret)
+		wake_up_interruptible(&source_fd->read_wait);
+out_unlock_table:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	pkm_lcs_source_queued_request_free(request);
+	return ret;
+}
+
 long pkm_lcs_source_dispatch_lookup_request(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
@@ -1663,6 +1762,54 @@ long pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
 
 		ret = pkm_lcs_source_dispatch_read_key_request_with_waiter(
 			source_id, txn_id, guid, &waiter, enqueue);
+		if (ret != -EAGAIN)
+			break;
+		if (!pkm_lcs_source_deadline_remaining(deadline))
+			return -ETIMEDOUT;
+	}
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
+							response);
+	if (ret)
+		pkm_lcs_source_response_frame_destroy(frame);
+	return ret;
+}
+
+long pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *value_name, u32 value_name_len, bool query_all,
+	u32 timeout_ms, struct pkm_lcs_source_response_frame *frame,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_source_response_waiter waiter;
+	unsigned long deadline;
+	long ret;
+
+	if (!frame)
+		return -EINVAL;
+	if (response)
+		memset(response, 0, sizeof(*response));
+	if (enqueue)
+		memset(enqueue, 0, sizeof(*enqueue));
+
+	pkm_lcs_source_response_waiter_init(&waiter);
+	pkm_lcs_source_response_frame_init(frame);
+	ret = pkm_lcs_source_response_waiter_retain_frame(&waiter, frame);
+	if (ret)
+		return ret;
+	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+
+	for (;;) {
+		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		if (ret)
+			return ret;
+
+		ret = pkm_lcs_source_dispatch_query_values_request_with_waiter(
+			source_id, txn_id, guid, value_name, value_name_len,
+			query_all, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -1866,6 +2013,7 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 	struct pkm_lcs_source_response_result *result, long *caller_errno)
 {
 	struct pkm_lcs_rsi_lookup_response_summary lookup = { };
+	struct pkm_lcs_rsi_query_values_response_summary query_values = { };
 	struct pkm_lcs_rsi_read_key_result read_key = { };
 	u64 next_sequence;
 	long ret;
@@ -1886,6 +2034,22 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 		ret = pkm_lcs_rsi_validate_lookup_response(
 			frame, frame_len, result->request_id, next_sequence,
 			&lookup);
+		if (ret == -EIO) {
+			result->malformed_source_data = true;
+			*caller_errno = -EIO;
+			return 0;
+		}
+		if (ret)
+			return ret;
+		*caller_errno = 0;
+		return 0;
+	case RSI_QUERY_VALUES:
+		ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+		if (ret)
+			return ret;
+		ret = pkm_lcs_rsi_validate_query_values_response(
+			frame, frame_len, result->request_id, next_sequence,
+			&query_values);
 		if (ret == -EIO) {
 			result->malformed_source_data = true;
 			*caller_errno = -EIO;

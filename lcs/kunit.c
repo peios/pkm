@@ -127,11 +127,31 @@ struct pkm_lcs_kunit_read_key_source_script {
 	int result;
 };
 
+struct pkm_lcs_kunit_query_values_source_script {
+	struct file *file;
+	const u8 *expected_guid;
+	const char *expected_value_name;
+	const char *response_value_name;
+	const char *layer_name;
+	const u8 *data;
+	size_t data_len;
+	u32 value_type;
+	u64 sequence;
+	bool query_all;
+	bool include_blanket;
+	const char *blanket_layer_name;
+	u64 blanket_sequence;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
 static void pkm_lcs_kunit_setup_registered_source(struct kunit *test,
 						  struct file *file,
 						  const void **token_out);
 static int pkm_lcs_kunit_walk_source_thread(void *raw_script);
 static int pkm_lcs_kunit_read_key_source_thread(void *raw_script);
+static int pkm_lcs_kunit_query_values_source_thread(void *raw_script);
 
 static const struct file_operations pkm_lcs_kunit_non_key_fops = { };
 
@@ -3320,6 +3340,36 @@ static void pkm_lcs_kunit_rsi_append_lookup_metadata_ex(
 				     last_write_time);
 }
 
+static void pkm_lcs_kunit_rsi_append_query_value_entry(
+	struct kunit *test, u8 *frame, size_t frame_len, size_t *offset,
+	const char *value_name, const char *layer_name, u32 value_type,
+	const u8 *data, size_t data_len, u64 sequence)
+{
+	pkm_lcs_kunit_rsi_append_len_prefixed(
+		test, frame, frame_len, offset, value_name,
+		strlen(value_name));
+	pkm_lcs_kunit_rsi_append_len_prefixed(
+		test, frame, frame_len, offset, layer_name,
+		strlen(layer_name));
+	pkm_lcs_kunit_rsi_append_u32(test, frame, frame_len, offset,
+				     value_type);
+	pkm_lcs_kunit_rsi_append_len_prefixed(test, frame, frame_len,
+					      offset, data, data_len);
+	pkm_lcs_kunit_rsi_append_u64(test, frame, frame_len, offset,
+				     sequence);
+}
+
+static void pkm_lcs_kunit_rsi_append_query_blanket(
+	struct kunit *test, u8 *frame, size_t frame_len, size_t *offset,
+	const char *layer_name, u64 sequence)
+{
+	pkm_lcs_kunit_rsi_append_len_prefixed(
+		test, frame, frame_len, offset, layer_name,
+		strlen(layer_name));
+	pkm_lcs_kunit_rsi_append_u64(test, frame, frame_len, offset,
+				     sequence);
+}
+
 static int pkm_lcs_kunit_walk_source_append(void *dst, size_t dst_len,
 					    size_t *offset, const void *src,
 					    size_t src_len)
@@ -3673,6 +3723,175 @@ static int pkm_lcs_kunit_read_key_source_thread(void *raw_script)
 	return 0;
 }
 
+static int pkm_lcs_kunit_query_values_source_build_response(
+	const struct pkm_lcs_kunit_query_values_source_script *script,
+	u64 request_id, u8 *response, size_t response_len, size_t *built_len)
+{
+	const char *value_name;
+	const char *layer_name;
+	const u8 *data;
+	size_t data_len;
+	size_t offset = RSI_MIN_RESPONSE_SIZE;
+	u16 response_op = RSI_QUERY_VALUES | RSI_RESPONSE_BIT;
+	int ret;
+
+	if (!script || !response || !built_len)
+		return -EINVAL;
+	if (response_len < RSI_MIN_RESPONSE_SIZE)
+		return -EMSGSIZE;
+
+	value_name = script->response_value_name ?
+			     script->response_value_name :
+			     script->expected_value_name;
+	layer_name = script->layer_name ? script->layer_name : "base";
+	data = script->data ? script->data : (const u8 *)"Machine\\Target";
+	data_len = script->data ? script->data_len :
+				  strlen("Machine\\Target");
+
+	memset(response, 0, response_len);
+	put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
+	put_unaligned_le16(response_op, response + RSI_RESPONSE_OP_CODE_OFFSET);
+	put_unaligned_le32(RSI_OK, response + RSI_RESPONSE_STATUS_OFFSET);
+
+	ret = pkm_lcs_kunit_walk_source_append_u32(response, response_len,
+						   &offset, 1);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_walk_source_append_len_prefixed(
+		response, response_len, &offset, value_name,
+		strlen(value_name));
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_walk_source_append_len_prefixed(
+		response, response_len, &offset, layer_name,
+		strlen(layer_name));
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_walk_source_append_u32(
+		response, response_len, &offset, script->value_type);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_walk_source_append_len_prefixed(
+		response, response_len, &offset, data, data_len);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_walk_source_append_u64(
+		response, response_len, &offset, script->sequence);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_walk_source_append_u32(
+		response, response_len, &offset,
+		script->include_blanket ? 1U : 0U);
+	if (ret)
+		return ret;
+	if (script->include_blanket) {
+		const char *blanket_layer = script->blanket_layer_name ?
+						    script->blanket_layer_name :
+						    "overlay";
+
+		ret = pkm_lcs_kunit_walk_source_append_len_prefixed(
+			response, response_len, &offset, blanket_layer,
+			strlen(blanket_layer));
+		if (ret)
+			return ret;
+		ret = pkm_lcs_kunit_walk_source_append_u64(
+			response, response_len, &offset,
+			script->blanket_sequence);
+		if (ret)
+			return ret;
+	}
+
+	if (offset > U32_MAX)
+		return -EOVERFLOW;
+	put_unaligned_le32((u32)offset, response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	*built_len = offset;
+	return 0;
+}
+
+static int pkm_lcs_kunit_query_values_source_thread(void *raw_script)
+{
+	struct pkm_lcs_kunit_query_values_source_script *script = raw_script;
+	size_t value_offset = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
+	u8 request[128];
+	u8 response[256];
+	size_t response_len = 0;
+	ssize_t count;
+	u64 request_id;
+	u16 request_op;
+	u32 value_len;
+	int ret;
+
+	if (!script || !script->file || !script->expected_guid ||
+	    !script->expected_value_name) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	for (;;) {
+		count = pkm_lcs_kunit_source_device_read_file(
+			script->file, request, sizeof(request), true);
+		if (count != -EAGAIN)
+			break;
+		if (kthread_should_stop()) {
+			script->result = -EINTR;
+			return script->result;
+		}
+		msleep(1);
+	}
+	if (count < 0) {
+		script->result = (int)count;
+		return script->result;
+	}
+	script->reads++;
+	if ((size_t)count < value_offset + sizeof(u32) + sizeof(u8)) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+
+	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
+	if (request_op != RSI_QUERY_VALUES ||
+	    memcmp(request + RSI_REQUEST_HEADER_SIZE, script->expected_guid,
+		   RSI_GUID_SIZE)) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+
+	value_len = get_unaligned_le32(request + value_offset);
+	value_offset += sizeof(u32);
+	if (value_offset > (size_t)count ||
+	    value_len > (size_t)count - value_offset ||
+	    value_len != strlen(script->expected_value_name) ||
+	    memcmp(request + value_offset, script->expected_value_name,
+		   value_len)) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	value_offset += value_len;
+	if (value_offset >= (size_t)count ||
+	    request[value_offset] != (script->query_all ? 1 : 0)) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+
+	ret = pkm_lcs_kunit_query_values_source_build_response(
+		script, request_id, response, sizeof(response), &response_len);
+	if (ret) {
+		script->result = ret;
+		return script->result;
+	}
+	count = pkm_lcs_kunit_source_device_write_file(
+		script->file, response, response_len, false, NULL);
+	if (count != (ssize_t)response_len) {
+		script->result = count < 0 ? (int)count : -EIO;
+		return script->result;
+	}
+	script->writes++;
+	script->result = 0;
+	return 0;
+}
+
 static void pkm_lcs_kunit_rsi_read_key_bridge_accepts_valid(
 	struct kunit *test)
 {
@@ -3725,6 +3944,222 @@ static void pkm_lcs_kunit_rsi_read_key_bridge_accepts_valid(
 			       pkm_lcs_kunit_owner_only_sd,
 			       sizeof(pkm_lcs_kunit_owner_only_sd)),
 			0);
+}
+
+static void pkm_lcs_kunit_rsi_query_values_bridge_materializes_default_reg_link(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_rsi_layer_view layers[] = {
+		{ .name = "base", .name_len = 4, .precedence = 0,
+		  .enabled = 1 },
+	};
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+		0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+	};
+	static const u8 target[] = "Machine\\Target";
+	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_rsi_query_value_result result = { };
+	u8 request[RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE + sizeof(u32) +
+		   sizeof(u8)];
+	u8 response[256];
+	size_t offset;
+	size_t response_len;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_rsi_build_query_values_request(
+				request, sizeof(request), 43, 0, guid, "", 0,
+				false, &built),
+			0L);
+	KUNIT_EXPECT_EQ(test, built.len, sizeof(request));
+	KUNIT_EXPECT_EQ(test, built.request_id, 43ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)RSI_QUERY_VALUES);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(request + RSI_REQUEST_HEADER_SIZE, guid,
+			       RSI_GUID_SIZE),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(request + RSI_REQUEST_HEADER_SIZE +
+					   RSI_GUID_SIZE),
+			0U);
+	KUNIT_EXPECT_EQ(test, request[sizeof(request) - 1], 0U);
+
+	pkm_lcs_kunit_rsi_response_begin(test, response, sizeof(response),
+					 built.request_id,
+					 RSI_QUERY_VALUES_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_query_value_entry(
+		test, response, sizeof(response), &offset, "", "base",
+		REG_LINK, target, sizeof(target) - 1, 0);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 0);
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_rsi_materialize_query_value_response(
+				response, response_len, built.request_id, 1,
+				"", 0, layers, ARRAY_SIZE(layers), NULL, 0,
+				&result),
+			0L);
+	KUNIT_EXPECT_TRUE(test, result.found);
+	KUNIT_EXPECT_EQ(test, result.source_value_entry_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.source_blanket_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.value_type, (u32)REG_LINK);
+	KUNIT_EXPECT_EQ(test, result.selected_precedence, 0U);
+	KUNIT_EXPECT_EQ(test, result.selected_sequence, 0ULL);
+	KUNIT_EXPECT_EQ(test, result.data_len, (u32)(sizeof(target) - 1));
+	KUNIT_ASSERT_LE(test,
+			(size_t)result.data_offset +
+				(size_t)result.data_len,
+			response_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response + result.data_offset, target,
+			       sizeof(target) - 1),
+			0);
+}
+
+static void pkm_lcs_kunit_rsi_query_values_bridge_blanket_not_found(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_rsi_layer_view layers[] = {
+		{ .name = "base", .name_len = 4, .precedence = 0,
+		  .enabled = 1 },
+		{ .name = "overlay", .name_len = 7, .precedence = 10,
+		  .enabled = 1 },
+	};
+	static const u8 target[] = "Machine\\Target";
+	struct pkm_lcs_rsi_query_value_result result = { };
+	u8 response[256];
+	size_t offset;
+	size_t response_len;
+
+	pkm_lcs_kunit_rsi_response_begin(test, response, sizeof(response),
+					 44, RSI_QUERY_VALUES_RESPONSE,
+					 RSI_OK, &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_query_value_entry(
+		test, response, sizeof(response), &offset, "", "base",
+		REG_LINK, target, sizeof(target) - 1, 1);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_query_blanket(
+		test, response, sizeof(response), &offset, "overlay", 2);
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_materialize_query_value_response(
+				response, response_len, 44, 3, "", 0, layers,
+				ARRAY_SIZE(layers), NULL, 0, &result),
+			0L);
+	KUNIT_EXPECT_FALSE(test, result.found);
+	KUNIT_EXPECT_EQ(test, result.source_value_entry_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.source_blanket_count, 1U);
+}
+
+static void pkm_lcs_kunit_rsi_query_values_bridge_rejects_wrong_value(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_rsi_layer_view layers[] = {
+		{ .name = "base", .name_len = 4, .precedence = 0,
+		  .enabled = 1 },
+	};
+	static const u8 target[] = "Machine\\Target";
+	struct pkm_lcs_rsi_query_value_result result = { };
+	u8 response[256];
+	size_t offset;
+	size_t response_len;
+
+	pkm_lcs_kunit_rsi_response_begin(test, response, sizeof(response),
+					 45, RSI_QUERY_VALUES_RESPONSE,
+					 RSI_OK, &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_query_value_entry(
+		test, response, sizeof(response), &offset, "Other", "base",
+		REG_LINK, target, sizeof(target) - 1, 0);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 0);
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_materialize_query_value_response(
+				response, response_len, 45, 1, "", 0, layers,
+				ARRAY_SIZE(layers), NULL, 0, &result),
+			(long)-EIO);
+}
+
+static void pkm_lcs_kunit_source_query_values_round_trip_retains_frame(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_rsi_layer_view layers[] = {
+		{ .name = "base", .name_len = 4, .precedence = 0,
+		  .enabled = 1 },
+	};
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+		0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+	};
+	static const u8 target[] = "Machine\\RoundTrip";
+	struct pkm_lcs_kunit_query_values_source_script script = {
+		.expected_guid = guid,
+		.expected_value_name = "",
+		.value_type = REG_LINK,
+		.data = target,
+		.data_len = sizeof(target) - 1,
+	};
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_rsi_query_value_result result = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+			   "pkm-lcs-kunit-query-values");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+				1, 0, guid, "", 0, false,
+				PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame,
+				&response, &enqueue),
+			0L);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_QUERY_VALUES);
+	KUNIT_ASSERT_NOT_NULL(test, frame.data);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_rsi_materialize_query_value_response(
+				frame.data, frame.len, response.request_id, 1,
+				"", 0, layers, ARRAY_SIZE(layers), NULL, 0,
+				&result),
+			0L);
+	KUNIT_EXPECT_TRUE(test, result.found);
+	KUNIT_EXPECT_EQ(test, result.value_type, (u32)REG_LINK);
+	KUNIT_EXPECT_EQ(test, result.data_len, (u32)(sizeof(target) - 1));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(frame.data + result.data_offset, target,
+			       sizeof(target) - 1),
+			0);
+
+	pkm_lcs_source_response_frame_destroy(&frame);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
 }
 
 static void pkm_lcs_kunit_source_request_read_returns_complete_frame(
@@ -5724,6 +6159,14 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_validates_child),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_rejects_short_buffer),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_read_key_bridge_accepts_valid),
+	KUNIT_CASE(
+		pkm_lcs_kunit_rsi_query_values_bridge_materializes_default_reg_link),
+	KUNIT_CASE(
+		pkm_lcs_kunit_rsi_query_values_bridge_blanket_not_found),
+	KUNIT_CASE(
+		pkm_lcs_kunit_rsi_query_values_bridge_rejects_wrong_value),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_query_values_round_trip_retains_frame),
 	KUNIT_CASE(pkm_lcs_kunit_source_request_read_returns_complete_frame),
 	KUNIT_CASE(pkm_lcs_kunit_source_request_read_preserves_fifo_order),
 	KUNIT_CASE(

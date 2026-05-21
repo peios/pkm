@@ -355,6 +355,12 @@ long pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
 	u32 timeout_ms, struct pkm_lcs_source_response_frame *frame,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *value_name, u32 value_name_len, bool query_all,
+	u32 timeout_ms, struct pkm_lcs_source_response_frame *frame,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_walk_absolute_components(
 	u32 source_id, u64 txn_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,

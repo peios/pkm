@@ -5,31 +5,38 @@ use core::{slice, str};
 
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
-    classify_hive_route, current_user_sid_component_from_binary_sid,
+    casefold_eq, classify_hive_route, current_user_sid_component_from_binary_sid,
     for_each_routable_path_component, for_each_rsi_lookup_source_path_entry,
-    parse_rsi_lookup_success_response_payload, parse_rsi_read_key_success_response_payload,
+    parse_rsi_lookup_success_response_payload, parse_rsi_query_values_success_response_payload,
+    parse_rsi_read_key_success_response_payload,
     plan_rsi_source_read, plan_key_open_audit_record, plan_registry_ioctl_fixed_fd_access_gate,
     plan_registry_key_open_access, plan_registry_open_pre_resolution_access,
     plan_registry_security_info_fd_access_gate, plan_source_registration_sequence_update,
     parse_rsi_request_header, registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
-    registry_open_pre_resolution_linux_errno, resolve_named_path_entry, route_hive,
-    route_routable_path_hive, RSI_LOOKUP, RSI_READ_KEY, rsi_queued_request_from_frame,
+    registry_open_pre_resolution_linux_errno, resolve_named_path_entry, resolve_value, route_hive,
+    route_routable_path_hive, REG_TOMBSTONE, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
+    rsi_queued_request_from_frame,
     rsi_status_code_errno, source_registration_error_linux_errno, source_registration_hive_scope,
     source_slot_hive_status,
-    validate_key_component_bytes, validate_key_fd_open_view, validate_registry_open_flags,
-    validate_resolved_relative_path_depth,
+    validate_key_component_bytes, validate_key_fd_open_view, validate_layer_name_bytes,
+    validate_registry_open_flags, validate_resolved_relative_path_depth, validate_value_data_len,
+    validate_value_name_bytes, validate_value_write_type,
     validate_rsi_lookup_metadata_completeness,
     validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,
-    validate_rsi_lookup_path_response_sequences, validate_rsi_read_key_response_names,
+    validate_rsi_lookup_path_response_sequences, validate_rsi_query_values_response_names,
+    validate_rsi_query_values_response_sequences, validate_rsi_query_values_response_value_payloads,
+    validate_rsi_read_key_response_names,
     validate_rsi_read_key_response_security_descriptor, validate_source_registration,
     validate_source_slots, validate_syscall_path_c_string, write_rsi_lookup_request_frame,
-    write_rsi_read_key_request_frame, write_key_open_audit_payload, CurrentUserRewrite, HiveRouteOutcome, HiveView,
-    KeyFdOpenView, KeyWatchState, LayerResolutionContext, LayerView, LcsCallerTokenSummary,
-    LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry,
+    write_rsi_query_values_request_frame, write_rsi_read_key_request_frame,
+    write_key_open_audit_payload, BlanketTombstoneEntry, CurrentUserRewrite, HiveRouteOutcome,
+    HiveView, KeyFdOpenView, KeyWatchState, LayerResolutionContext, LayerView,
+    LcsCallerTokenSummary, LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno,
+    NamedPathEntry,
     NamedPathResolution, PathKind, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
     RegistryKeyOpenAccessInput, RegistryOpenAccessDecision, RegistryOpenPreResolutionAccessPlan,
     RsiReadPlan, RsiRetainedRequest, SourceRegistrationDecision, SourceRegistrationHive,
-    SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
+    SourceRegistrationRequest, SourceSlotStatus, SourceSlotView, ValueEntry, ValueResolution,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -207,6 +214,26 @@ pub struct PkmLcsRsiReadKeyResultCopy {
     pub parent_guid: [u8; 16],
 }
 
+#[repr(C)]
+pub struct PkmLcsRsiQueryValuesResponseSummaryCopy {
+    pub value_entry_count: u32,
+    pub blanket_count: u32,
+}
+
+#[repr(C)]
+pub struct PkmLcsRsiQueryValueResultCopy {
+    pub source_value_entry_count: u32,
+    pub source_blanket_count: u32,
+    pub data_offset: u32,
+    pub data_len: u32,
+    pub value_type: u32,
+    pub selected_precedence: u32,
+    pub _pad0: u32,
+    pub selected_sequence: u64,
+    pub found: u8,
+    pub _pad1: [u8; 7],
+}
+
 fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
     source_registration_error_linux_errno(err)
         .unwrap_or(LinuxErrno::Einval)
@@ -277,6 +304,10 @@ fn rsi_lookup_response_error_return(err: LcsError) -> c_int {
 }
 
 fn rsi_read_key_response_error_return(err: LcsError) -> c_int {
+    rsi_lookup_response_error_return(err)
+}
+
+fn rsi_query_values_response_error_return(err: LcsError) -> c_int {
     rsi_lookup_response_error_return(err)
 }
 
@@ -755,6 +786,76 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_read_key_request_frame(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_rsi_query_values_request_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    request_id: u64,
+    txn_id: u64,
+    guid: *const u8,
+    value_name: *const u8,
+    value_name_len: u32,
+    query_all: u8,
+    built_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if built_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *built_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            txn_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if dst.is_null() || guid.is_null() || (value_name_len != 0 && value_name.is_null()) {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if query_all > 1 {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
+    let mut guid_copy = [0u8; 16];
+    guid_copy.copy_from_slice(guid_bytes);
+    let value_name_bytes = if value_name_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(value_name, value_name_len as usize) }
+    };
+    if let Err(err) = validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT) {
+        return rsi_request_frame_error_return(err);
+    }
+
+    match write_rsi_query_values_request_frame(
+        dst_bytes,
+        request_id,
+        txn_id,
+        guid_copy,
+        value_name_bytes,
+        query_all != 0,
+    ) {
+        Ok(built) => {
+            unsafe {
+                *built_out = PkmLcsRsiBuiltRequestCopy {
+                    len: built.len,
+                    request_id: built.retained.request_id,
+                    txn_id,
+                    op_code: built.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lcs_rust_validate_rsi_queued_request_frame(
     frame: *const u8,
     frame_len: usize,
@@ -854,6 +955,61 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_lookup_response_frame(
         (*summary_out).path_entry_count = payload.entry_count;
         (*summary_out).metadata_count = payload.metadata_count;
         (*summary_out).child_absent = payload.entry_count == 0;
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    summary_out: *mut PkmLcsRsiQueryValuesResponseSummaryCopy,
+) -> c_int {
+    if summary_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *summary_out = PkmLcsRsiQueryValuesResponseSummaryCopy {
+            value_entry_count: 0,
+            blanket_count: 0,
+        };
+    }
+
+    if frame.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let payload = match parse_rsi_query_values_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_QUERY_VALUES,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_query_values_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_value_payloads(
+        &payload,
+        &LcsLimits::DEFAULT,
+    ) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
+        return rsi_query_values_response_error_return(err);
+    }
+
+    unsafe {
+        (*summary_out).value_entry_count = payload.entry_count;
+        (*summary_out).blanket_count = payload.blanket_count;
     }
     0
 }
@@ -1040,6 +1196,212 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_child(
         return LinuxErrno::Eio.negated_return() as c_int;
     }
 
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    value_name: *const u8,
+    value_name_len: u32,
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+    private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
+    private_layer_count: usize,
+    result_out: *mut PkmLcsRsiQueryValueResultCopy,
+) -> c_int {
+    if result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *result_out = PkmLcsRsiQueryValueResultCopy {
+            source_value_entry_count: 0,
+            source_blanket_count: 0,
+            data_offset: 0,
+            data_len: 0,
+            value_type: 0,
+            selected_precedence: 0,
+            _pad0: 0,
+            selected_sequence: 0,
+            found: 0,
+            _pad1: [0; 7],
+        };
+    }
+
+    if frame.is_null()
+        || (value_name_len != 0 && value_name.is_null())
+        || (layer_count != 0 && layers.is_null())
+        || (private_layer_count != 0 && private_layers.is_null())
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let value_name_bytes = if value_name_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(value_name, value_name_len as usize) }
+    };
+    let requested_name = match str::from_utf8(value_name_bytes) {
+        Ok(name) => name,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    if validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT).is_err() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let layer_views = match parse_layer_views(layers, layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let private_layer_views = match parse_private_layer_views(private_layers, private_layer_count) {
+        Ok(private_layer_views) => private_layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let payload = match parse_rsi_query_values_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_QUERY_VALUES,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_query_values_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_value_payloads(
+        &payload,
+        &LcsLimits::DEFAULT,
+    ) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let context = LayerResolutionContext {
+        layers: layer_views.as_slice(),
+        private_layers: private_layer_views.as_slice(),
+        limits: &LcsLimits::DEFAULT,
+        next_sequence,
+    };
+    let mut value_storage = match PkmVec::<ValueEntry<'_>>::with_capacity(
+        payload.entry_count as usize,
+    ) {
+        Ok(storage) => storage,
+        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+    };
+    let mut blanket_storage = match PkmVec::<BlanketTombstoneEntry<'_>>::with_capacity(
+        payload.blanket_count as usize,
+    ) {
+        Ok(storage) => storage,
+        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+    };
+
+    let mut allocation_failed = false;
+    let mut wrong_value_name = false;
+    if let Err(err) = payload.for_each_value_entry(|entry| {
+        let name = validate_value_name_bytes(entry.value_name.data, &LcsLimits::DEFAULT)?;
+        if !casefold_eq(name, requested_name) {
+            wrong_value_name = true;
+            return Err(LcsError::RsiPayloadLengthOverflow);
+        }
+        let layer = validate_layer_name_bytes(entry.layer_name.data, &LcsLimits::DEFAULT)?;
+        validate_value_data_len(entry.data.data.len(), &LcsLimits::DEFAULT)?;
+        validate_value_write_type(
+            entry.value_type,
+            entry.data.data.len(),
+            entry.value_type == REG_TOMBSTONE,
+        )?;
+        if value_storage
+            .push(ValueEntry {
+                layer,
+                sequence: entry.sequence,
+                value_type: entry.value_type,
+                data: entry.data.data,
+            })
+            .is_err()
+        {
+            allocation_failed = true;
+            return Err(LcsError::RsiPayloadLengthOverflow);
+        }
+        Ok(())
+    }) {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        if wrong_value_name {
+            return LinuxErrno::Eio.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+
+    if let Err(err) = payload.for_each_blanket_entry(|entry| {
+        let layer = validate_layer_name_bytes(entry.layer_name.data, &LcsLimits::DEFAULT)?;
+        if blanket_storage
+            .push(BlanketTombstoneEntry {
+                layer,
+                sequence: entry.sequence,
+            })
+            .is_err()
+        {
+            allocation_failed = true;
+            return Err(LcsError::RsiPayloadLengthOverflow);
+        }
+        Ok(())
+    }) {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+
+    unsafe {
+        (*result_out).source_value_entry_count = value_storage.len() as u32;
+        (*result_out).source_blanket_count = blanket_storage.len() as u32;
+    }
+
+    let resolved = match resolve_value(&context, value_storage.as_slice(), blanket_storage.as_slice())
+    {
+        Ok(resolved) => resolved,
+        Err(err) => return rsi_lookup_materialization_error_return(err),
+    };
+
+    let ValueResolution::Found(value) = resolved else {
+        return 0;
+    };
+
+    let base = frame_bytes.as_ptr() as usize;
+    let end = base.saturating_add(frame_len);
+    let data_ptr = value.data.as_ptr() as usize;
+    let data_len = value.data.len();
+    let Some(data_end) = data_ptr.checked_add(data_len) else {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    };
+    if data_ptr < base || data_end > end {
+        return LinuxErrno::Eio.negated_return() as c_int;
+    }
+    let data_offset = data_ptr - base;
+    if data_offset > u32::MAX as usize || data_len > u32::MAX as usize {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    }
+
+    unsafe {
+        (*result_out).data_offset = data_offset as u32;
+        (*result_out).data_len = data_len as u32;
+        (*result_out).value_type = value.value_type.code();
+        (*result_out).selected_precedence = value.precedence;
+        (*result_out).selected_sequence = value.sequence;
+        (*result_out).found = 1;
+    }
     0
 }
 
