@@ -13,6 +13,17 @@ typedef struct {
 	u8 bytes[KACS_UUID_BYTES];
 } kacs_uuid_t;
 
+struct pkm_kacs_token_audit_summary {
+	u8 token_guid[KACS_UUID_BYTES];
+	const u8 *user_sid_ptr;
+	size_t user_sid_len;
+	u64 auth_id;
+	u64 token_id;
+	u32 token_type;
+	u32 impersonation_level;
+	u32 integrity_level;
+};
+
 struct file;
 struct path;
 struct task_struct;
@@ -627,6 +638,8 @@ bool kacs_rust_token_same_user_sid(const void *lhs, const void *rhs);
 int kacs_rust_token_user_sid(const void *token, const u8 **out_sid_ptr,
 			     size_t *out_sid_len);
 int kacs_rust_token_guid(const void *token, u8 out[KACS_UUID_BYTES]);
+int kacs_rust_token_audit_summary(
+	const void *token, struct pkm_kacs_token_audit_summary *out);
 bool kacs_rust_token_has_enabled_privilege(const void *token, u64 privilege);
 int kacs_rust_token_is_remote_shutdown_origin(const void *token);
 bool kacs_rust_token_has_new_process_min(const void *token);

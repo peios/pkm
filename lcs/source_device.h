@@ -265,6 +265,9 @@ long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
 long pkm_lcs_key_open_access_check_for_token(
 	const void *token, const u8 *sd, size_t sd_len, u32 desired_access,
 	struct pkm_lcs_key_open_access_plan *plan);
+long pkm_lcs_emit_key_open_audit_for_token(
+	const void *token, const u8 key_guid[16],
+	const struct pkm_lcs_key_open_access_plan *plan);
 long pkm_lcs_validate_syscall_relative_path(
 	const char *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);

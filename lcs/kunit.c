@@ -17,11 +17,31 @@
 #include <pkm/token.h>
 
 #include "../kacs/token_runtime.h"
+#include "../kmes/kmes.h"
 #include "key_fd.h"
 #include "rsi.h"
 #include "source_device.h"
 
 extern size_t lcs_rust_kunit_probe(void);
+
+struct pkm_lcs_kunit_audit_caller_summary {
+	u8 effective_token_guid[16];
+	u8 true_token_guid[16];
+	u8 process_guid[16];
+	const u8 *user_sid;
+	size_t user_sid_len;
+	u64 authentication_id;
+	u64 token_id;
+	u32 token_type;
+	u32 impersonation_level;
+	u32 integrity_level;
+};
+
+extern int lcs_rust_key_open_audit_payload(
+	const struct pkm_lcs_kunit_audit_caller_summary *caller,
+	const u8 key_guid[16], u32 requested_access, u32 granted_access,
+	u8 allowed, u32 sacl_match_flags, u8 *output, size_t output_len,
+	size_t *written_out);
 
 struct pkm_lcs_kunit_usercopy_ctx {
 	const void *fault_src;
@@ -1385,6 +1405,123 @@ static void pkm_lcs_kunit_key_open_access_bridge_malformed_sd_eio(
 	KUNIT_EXPECT_EQ(test, plan.access_check_granted, 0U);
 
 	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_open_audit_not_required_no_event(
+	struct kunit *test)
+{
+	static const u8 key_guid[16] = {
+		0x30, 0x30, 0x03, 0x03, 0x30, 0x30, 0x03, 0x03,
+		0x30, 0x30, 0x03, 0x03, 0x30, 0x30, 0x03, 0x03,
+	};
+	struct pkm_lcs_key_open_access_plan plan = {
+		.mapped_desired_access = KEY_READ,
+		.fd_granted_access = KEY_READ,
+		.allowed = 1,
+	};
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u8 buffer[256];
+	size_t written = 0;
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kmes_kunit_reset_all();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_emit_key_open_audit_for_token(token, key_guid,
+							      &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, sizeof(buffer), &written, &snapshot),
+			-ENOENT);
+
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_open_audit_emits_lcs_kmes_event(
+	struct kunit *test)
+{
+	static const char event_type[] = "LCS_KEY_OPEN_AUDIT";
+	static const u8 key_guid[16] = {
+		0x30, 0x30, 0x03, 0x03, 0x30, 0x30, 0x03, 0x03,
+		0x30, 0x30, 0x03, 0x03, 0x30, 0x30, 0x03, 0x03,
+	};
+	struct pkm_lcs_key_open_access_plan plan = {
+		.requested_access = KEY_READ,
+		.mapped_desired_access = KEY_READ,
+		.fd_granted_access = KEY_READ,
+		.allowed = 1,
+		.key_open_sacl_audit_required = 1,
+		.audit_payload_failure_blocks_completion = 1,
+	};
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u8 buffer[2048];
+	size_t written = 0;
+	u32 header_size;
+	u16 type_len;
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kmes_kunit_reset_all();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_emit_key_open_audit_for_token(token, key_guid,
+							      &plan),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, sizeof(buffer), &written, &snapshot),
+			0);
+	KUNIT_ASSERT_GT(test, written, (size_t)KMES_EVENT_HEADER_BASE_SIZE);
+
+	type_len = get_unaligned_le16(buffer + KMES_EVENT_TYPE_LEN_OFFSET);
+	header_size = get_unaligned_le32(buffer + KMES_EVENT_HEADER_SIZE_OFFSET);
+	KUNIT_ASSERT_EQ(test, type_len, (u16)(sizeof(event_type) - 1));
+	KUNIT_ASSERT_TRUE(test, written > header_size);
+	KUNIT_EXPECT_EQ(test, buffer[KMES_EVENT_ORIGIN_CLASS_OFFSET],
+			(u8)KMES_ORIGIN_LCS);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
+			       type_len),
+			0);
+	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x86);
+
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_open_audit_payload_abi_rejects_bad_state(
+	struct kunit *test)
+{
+	static const u8 malformed_sid[] = { 0x01, 0x01 };
+	static const u8 key_guid[16] = {
+		0x30, 0x30, 0x03, 0x03, 0x30, 0x30, 0x03, 0x03,
+		0x30, 0x30, 0x03, 0x03, 0x30, 0x30, 0x03, 0x03,
+	};
+	struct pkm_lcs_kunit_audit_caller_summary caller = {
+		.effective_token_guid = { 1 },
+		.true_token_guid = { 2 },
+		.process_guid = { 3 },
+		.user_sid = malformed_sid,
+		.user_sid_len = sizeof(malformed_sid),
+		.authentication_id = 10,
+		.token_id = 11,
+		.token_type = 1,
+		.impersonation_level = 0,
+		.integrity_level = 8192,
+	};
+	size_t written = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			lcs_rust_key_open_audit_payload(
+				&caller, key_guid, KEY_READ, KEY_READ, 1, 1,
+				NULL, 0, &written),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, written, (size_t)0);
 }
 
 static void pkm_lcs_kunit_key_fd_publish_snapshot_success(struct kunit *test)
@@ -4436,6 +4573,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_key_open_access_bridge_denies_partial_grants),
 	KUNIT_CASE(pkm_lcs_kunit_key_open_access_bridge_maximum_allowed),
 	KUNIT_CASE(pkm_lcs_kunit_key_open_access_bridge_malformed_sd_eio),
+	KUNIT_CASE(pkm_lcs_kunit_key_open_audit_not_required_no_event),
+	KUNIT_CASE(pkm_lcs_kunit_key_open_audit_emits_lcs_kmes_event),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_open_audit_payload_abi_rejects_bad_state),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_snapshot_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_deep_copies_input),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_rejects_malformed_state),

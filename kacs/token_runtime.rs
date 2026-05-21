@@ -344,6 +344,20 @@ pub struct PkmKacsPrivilegeAdjustEntry {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// Bounded production token summary borrowed by LCS audit payload construction.
+pub struct PkmKacsTokenAuditSummary {
+    pub token_guid: [u8; KACS_UUID_BYTES],
+    pub user_sid_ptr: *const u8,
+    pub user_sid_len: usize,
+    pub auth_id: u64,
+    pub token_id: u64,
+    pub token_type: u32,
+    pub impersonation_level: u32,
+    pub integrity_level: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 /// C-visible snapshot of the boot Session 0 / SYSTEM token state exercised by
 /// Slice 21.
 pub struct PkmKacsBootSnapshot {
@@ -8107,6 +8121,47 @@ pub extern "C" fn kacs_rust_token_guid(token: *const c_void, out: *mut u8) -> i3
     };
 
     unsafe { core::ptr::copy_nonoverlapping(token.token_guid.as_ptr(), out, KACS_UUID_BYTES) };
+    0
+}
+
+#[no_mangle]
+/// Borrows bounded token identity fields for production audit payloads.
+pub extern "C" fn kacs_rust_token_audit_summary(
+    token: *const c_void,
+    out: *mut PkmKacsTokenAuditSummary,
+) -> i32 {
+    let Some(out) = (unsafe { out.as_mut() }) else {
+        return -EINVAL;
+    };
+    *out = PkmKacsTokenAuditSummary {
+        token_guid: [0; KACS_UUID_BYTES],
+        user_sid_ptr: null(),
+        user_sid_len: 0,
+        auth_id: 0,
+        token_id: 0,
+        token_type: 0,
+        impersonation_level: 0,
+        integrity_level: 0,
+    };
+
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let _guard = token.lock_mutation();
+    let Some(session) = token.session_ref() else {
+        return -EACCES;
+    };
+
+    *out = PkmKacsTokenAuditSummary {
+        token_guid: token.token_guid,
+        user_sid_ptr: token.user_sid.as_bytes().as_ptr(),
+        user_sid_len: token.user_sid.as_bytes().len(),
+        auth_id: session.session_id,
+        token_id: token.token_id,
+        token_type: token_type_abi(token.token_type),
+        impersonation_level: impersonation_level_abi(token.impersonation_level),
+        integrity_level: token.integrity_level as u32,
+    };
     0
 }
 

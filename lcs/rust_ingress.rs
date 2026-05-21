@@ -8,10 +8,10 @@ use crate::lcs_core::{
     classify_hive_route, current_user_sid_component_from_binary_sid,
     for_each_rsi_lookup_source_path_entry,
     parse_rsi_lookup_success_response_payload, plan_rsi_source_read,
-    plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
-    plan_registry_open_pre_resolution_access, plan_registry_security_info_fd_access_gate,
-    plan_source_registration_sequence_update, parse_rsi_request_header,
-    registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
+    plan_key_open_audit_record, plan_registry_ioctl_fixed_fd_access_gate,
+    plan_registry_key_open_access, plan_registry_open_pre_resolution_access,
+    plan_registry_security_info_fd_access_gate, plan_source_registration_sequence_update,
+    parse_rsi_request_header, registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
     registry_open_pre_resolution_linux_errno, resolve_named_path_entry, route_hive,
     route_routable_path_hive, RSI_LOOKUP, rsi_queued_request_from_frame, rsi_status_code_errno,
     source_registration_error_linux_errno, source_registration_hive_scope, source_slot_hive_status,
@@ -21,8 +21,9 @@ use crate::lcs_core::{
     validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,
     validate_rsi_lookup_path_response_sequences, validate_source_registration,
     validate_source_slots, validate_syscall_path_c_string, write_rsi_lookup_request_frame,
-    CurrentUserRewrite, HiveRouteOutcome, HiveView, KeyFdOpenView, KeyWatchState,
-    LayerResolutionContext, LayerView, LcsError, LcsLimits, LinuxErrno, NamedPathEntry,
+    write_key_open_audit_payload, CurrentUserRewrite, HiveRouteOutcome, HiveView,
+    KeyFdOpenView, KeyWatchState, LayerResolutionContext, LayerView, LcsCallerTokenSummary,
+    LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry,
     NamedPathResolution, PathKind, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
     RegistryKeyOpenAccessInput, RegistryOpenAccessDecision, RegistryOpenPreResolutionAccessPlan,
     RsiReadPlan, RsiRetainedRequest, SourceRegistrationDecision, SourceRegistrationHive,
@@ -95,6 +96,20 @@ pub struct PkmLcsKeyOpenAccessPlanCopy {
     pub audit_payload_failure_blocks_completion: u8,
     pub privilege_use_audit_required: u8,
     pub _pad: [u8; 3],
+}
+
+#[repr(C)]
+pub struct PkmLcsAuditCallerSummaryCopy {
+    pub effective_token_guid: [u8; 16],
+    pub true_token_guid: [u8; 16],
+    pub process_guid: [u8; 16],
+    pub user_sid: *const u8,
+    pub user_sid_len: usize,
+    pub authentication_id: u64,
+    pub token_id: u64,
+    pub token_type: u32,
+    pub impersonation_level: u32,
+    pub integrity_level: u32,
 }
 
 #[repr(C)]
@@ -194,6 +209,14 @@ fn key_open_access_error_return(err: LcsError) -> c_int {
         LcsError::MalformedSecurityDescriptor { .. } => LinuxErrno::Eio,
         LcsError::AccessCheckEvaluationFailed => LinuxErrno::Eio,
         _ => LinuxErrno::Einval,
+    }
+    .negated_return() as c_int
+}
+
+fn key_open_audit_error_return(err: LcsError) -> c_int {
+    match err {
+        LcsError::AuditPayloadOutputBufferTooSmall { .. } => LinuxErrno::Erange,
+        _ => LinuxErrno::Eio,
     }
     .negated_return() as c_int
 }
@@ -394,6 +417,86 @@ pub unsafe extern "C" fn lcs_rust_key_open_access_plan(
     }) {
         Ok(ret) => ret as c_int,
         Err(errno) => errno as c_int,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_key_open_audit_payload(
+    caller: *const PkmLcsAuditCallerSummaryCopy,
+    key_guid: *const u8,
+    requested_access: u32,
+    granted_access: u32,
+    allowed: u8,
+    sacl_match_flags: u32,
+    output: *mut u8,
+    output_len: usize,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out = 0;
+
+    let Some(caller) = (unsafe { caller.as_ref() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    if key_guid.is_null() || allowed > 1 || caller.user_sid.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let user_sid = unsafe { slice::from_raw_parts(caller.user_sid, caller.user_sid_len) };
+    let key_guid_bytes = unsafe { slice::from_raw_parts(key_guid, 16) };
+    let mut key_guid_copy = [0u8; 16];
+    key_guid_copy.copy_from_slice(key_guid_bytes);
+
+    let caller_summary = LcsCallerTokenSummary {
+        effective_token_guid: caller.effective_token_guid,
+        true_token_guid: caller.true_token_guid,
+        process_guid: caller.process_guid,
+        user_sid,
+        authentication_id: caller.authentication_id,
+        token_id: caller.token_id,
+        token_type: caller.token_type,
+        impersonation_level: caller.impersonation_level,
+        integrity_level: caller.integrity_level,
+    };
+    let decision = if allowed != 0 {
+        LcsKeyOpenAuditDecision::Allowed
+    } else {
+        LcsKeyOpenAuditDecision::Denied
+    };
+    let record = match plan_key_open_audit_record(
+        caller_summary,
+        key_guid_copy,
+        requested_access,
+        granted_access,
+        decision,
+        sacl_match_flags,
+    ) {
+        Ok(record) => record,
+        Err(err) => return key_open_audit_error_return(err),
+    };
+    let required_len = match crate::lcs_core::key_open_audit_payload_len(&record) {
+        Ok(len) => len,
+        Err(err) => return key_open_audit_error_return(err),
+    };
+    *written_out = required_len;
+
+    if output.is_null() {
+        return if output_len == 0 {
+            0
+        } else {
+            LinuxErrno::Einval.negated_return() as c_int
+        };
+    }
+
+    let output = unsafe { slice::from_raw_parts_mut(output, output_len) };
+    match write_key_open_audit_payload(&record, output) {
+        Ok(plan) => {
+            *written_out = plan.bytes;
+            0
+        }
+        Err(err) => key_open_audit_error_return(err),
     }
 }
 
