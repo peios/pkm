@@ -11087,6 +11087,64 @@ static void pkm_lcs_kunit_source_dispatch_transaction_control_frames(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_abort_response_releases_no_wait_record(
+	struct kunit *test)
+{
+	struct pkm_lcs_source_response_result response_result = { };
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	struct pkm_lcs_source_enqueue_result abort = { };
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	u8 out[64];
+	struct file file = { };
+	const void *token;
+	size_t response_len;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_abort_transaction_request(
+				1, 0x3132333435363738ULL, &abort),
+			0L);
+	KUNIT_EXPECT_EQ(test, abort.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, abort.txn_id, 0x3132333435363738ULL);
+	KUNIT_EXPECT_EQ(test, abort.op_code, (u16)RSI_ABORT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test, abort.in_flight_count, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)abort.len);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 1U);
+
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    abort.request_id, abort.op_code,
+					    RSI_OK, &response_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_write_file(
+				&file, response, response_len, false,
+				&response_result),
+			(ssize_t)response_len);
+	KUNIT_EXPECT_EQ(test, response_result.request_id, abort.request_id);
+	KUNIT_EXPECT_EQ(test, response_result.txn_id, abort.txn_id);
+	KUNIT_EXPECT_EQ(test, response_result.request_op_code,
+			(u16)RSI_ABORT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test, response_result.response_op_code,
+			(u16)RSI_ABORT_TRANSACTION_RESPONSE);
+	KUNIT_EXPECT_EQ(test, response_result.status, (u32)RSI_OK);
+	KUNIT_EXPECT_FALSE(test, response_result.malformed_source_data);
+	KUNIT_EXPECT_FALSE(test, response_result.caller_waiter_attached);
+	KUNIT_EXPECT_EQ(test, response_result.in_flight_count, 0U);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_dispatch_transaction_rejects_bad_inputs(
 	struct kunit *test)
 {
@@ -16069,6 +16127,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_create_key_frame),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_transaction_control_frames),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_abort_response_releases_no_wait_record),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_transaction_rejects_bad_inputs),
 	KUNIT_CASE(

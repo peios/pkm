@@ -909,8 +909,7 @@ static bool pkm_lcs_source_response_waiter_detach(
 	struct pkm_lcs_source_slot *slot;
 	bool detached = false;
 
-	if (!waiter || READ_ONCE(waiter->completed) ||
-	    !READ_ONCE(waiter->attached))
+	if (!waiter || READ_ONCE(waiter->completed))
 		return false;
 
 	mutex_lock(&pkm_lcs_source_table_lock);
@@ -921,6 +920,8 @@ static bool pkm_lcs_source_response_waiter_detach(
 	source_fd = slot->active_fd;
 	mutex_lock(&source_fd->queue_lock);
 	if (READ_ONCE(waiter->completed))
+		goto out_unlock_queue;
+	if (!READ_ONCE(waiter->attached))
 		goto out_unlock_queue;
 
 	record = pkm_lcs_source_in_flight_find_locked(source_fd,
