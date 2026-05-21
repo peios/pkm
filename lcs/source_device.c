@@ -13,6 +13,7 @@
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/jiffies.h>
+#include <linux/kernel.h>
 #include <linux/lockdep.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -95,11 +96,38 @@ static bool pkm_lcs_sequence_initialized;
 static u64 pkm_lcs_next_sequence;
 static DECLARE_WAIT_QUEUE_HEAD(pkm_lcs_source_slot_wait);
 static atomic64_t pkm_lcs_source_slot_epoch = ATOMIC64_INIT(0);
+static const char pkm_lcs_base_layer_name[] = "base";
+static const struct pkm_lcs_rsi_layer_view pkm_lcs_base_layer_snapshot[] = {
+	{
+		.name = pkm_lcs_base_layer_name,
+		.name_len = sizeof(pkm_lcs_base_layer_name) - 1,
+		.precedence = 0,
+		.enabled = 1,
+	},
+};
 
 static void pkm_lcs_source_slot_waiters_wake(void)
 {
 	atomic64_inc(&pkm_lcs_source_slot_epoch);
 	wake_up_interruptible(&pkm_lcs_source_slot_wait);
+}
+
+static long pkm_lcs_normalize_layer_inputs(
+	const struct pkm_lcs_rsi_layer_view **layers, u32 *layer_count,
+	const struct pkm_lcs_rsi_private_layer_view **private_layers,
+	u32 *private_layer_count)
+{
+	if (!layers || !layer_count || !private_layers || !private_layer_count)
+		return -EINVAL;
+	if (*layer_count && !*layers)
+		return -EINVAL;
+	if (*private_layer_count && !*private_layers)
+		return -EINVAL;
+	if (!*layer_count) {
+		*layers = pkm_lcs_base_layer_snapshot;
+		*layer_count = ARRAY_SIZE(pkm_lcs_base_layer_snapshot);
+	}
+	return 0;
 }
 
 static bool pkm_lcs_default_copy_from_user(void *ctx, void *dst,
@@ -2584,13 +2612,20 @@ long pkm_lcs_walk_absolute_components(
 	u64 next_sequence;
 	u32 i;
 	long ret;
+	const struct pkm_lcs_rsi_layer_view *active_layers = layers;
+	const struct pkm_lcs_rsi_private_layer_view *active_private_layers =
+		private_layers;
+	u32 active_layer_count = layer_count;
+	u32 active_private_layer_count = private_layer_count;
 
 	if (!result)
 		return -EINVAL;
 	memset(result, 0, sizeof(*result));
-	if ((layer_count && !layers) ||
-	    (private_layer_count && !private_layers))
-		return -EINVAL;
+	ret = pkm_lcs_normalize_layer_inputs(
+		&active_layers, &active_layer_count, &active_private_layers,
+		&active_private_layer_count);
+	if (ret)
+		return ret;
 
 	ret = pkm_lcs_resolved_key_path_prepare(source_id, root_guid,
 						components, component_count,
@@ -2616,8 +2651,9 @@ long pkm_lcs_walk_absolute_components(
 		ret = pkm_lcs_rsi_materialize_lookup_child(
 			frame.data, frame.len, response.request_id,
 			next_sequence, components[i].name,
-			components[i].name_len, layers, layer_count,
-			private_layers, private_layer_count, &child);
+			components[i].name_len, active_layers,
+			active_layer_count, active_private_layers,
+			active_private_layer_count, &child);
 		if (ret)
 			goto out_destroy_frame;
 		if (!child.found) {
@@ -2759,13 +2795,20 @@ long pkm_lcs_walk_relative_components(
 	u32 parent_count;
 	u32 i;
 	long ret;
+	const struct pkm_lcs_rsi_layer_view *active_layers = layers;
+	const struct pkm_lcs_rsi_private_layer_view *active_private_layers =
+		private_layers;
+	u32 active_layer_count = layer_count;
+	u32 active_private_layer_count = private_layer_count;
 
 	if (!result)
 		return -EINVAL;
 	memset(result, 0, sizeof(*result));
-	if ((layer_count && !layers) ||
-	    (private_layer_count && !private_layers))
-		return -EINVAL;
+	ret = pkm_lcs_normalize_layer_inputs(
+		&active_layers, &active_layer_count, &active_private_layers,
+		&active_private_layer_count);
+	if (ret)
+		return ret;
 
 	ret = pkm_lcs_resolved_key_path_prepare_relative(
 		parent, components, component_count, result);
@@ -2793,8 +2836,9 @@ long pkm_lcs_walk_relative_components(
 		ret = pkm_lcs_rsi_materialize_lookup_child(
 			frame.data, frame.len, response.request_id,
 			next_sequence, components[i].name,
-			components[i].name_len, layers, layer_count,
-			private_layers, private_layer_count, &child);
+			components[i].name_len, active_layers,
+			active_layer_count, active_private_layers,
+			active_private_layer_count, &child);
 		if (ret)
 			goto out_destroy_frame;
 		if (!child.found) {
