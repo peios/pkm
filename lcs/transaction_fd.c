@@ -27,6 +27,7 @@
 #include <linux/timer.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
 
 #include <pkm/lcs.h>
 
@@ -43,9 +44,12 @@ struct pkm_lcs_transaction_fd {
 	struct mutex bind_lock;
 	wait_queue_head_t wait;
 	struct timer_list timeout_timer;
+	struct work_struct timeout_work;
 	struct list_head mutation_log;
 	u32 mutation_log_entries;
 	u32 mutation_log_capacity;
+	bool commit_in_flight;
+	bool timeout_abort_pending;
 };
 
 struct pkm_lcs_transaction_key_create_log {
@@ -344,10 +348,18 @@ static void pkm_lcs_transaction_fd_timeout(struct timer_list *timer)
 	struct pkm_lcs_transaction_fd *txn =
 		container_of(timer, struct pkm_lcs_transaction_fd,
 			     timeout_timer);
+	bool schedule_cleanup = false;
 	bool terminal = false;
 
 	spin_lock(&txn->lock);
-	if (pkm_lcs_transaction_state_active(txn->state)) {
+	if (txn->state == REG_TXN_ACTIVE_BOUND) {
+		if (!txn->commit_in_flight) {
+			txn->timeout_abort_pending = true;
+			schedule_cleanup = true;
+		}
+		txn->state = REG_TXN_TIMED_OUT;
+		terminal = true;
+	} else if (txn->state == REG_TXN_ACTIVE_UNBOUND) {
 		txn->state = REG_TXN_TIMED_OUT;
 		terminal = true;
 	}
@@ -355,6 +367,38 @@ static void pkm_lcs_transaction_fd_timeout(struct timer_list *timer)
 
 	if (terminal)
 		wake_up_all(&txn->wait);
+	if (schedule_cleanup)
+		schedule_work(&txn->timeout_work);
+}
+
+static void pkm_lcs_transaction_fd_timeout_work(struct work_struct *work)
+{
+	struct pkm_lcs_transaction_fd *txn =
+		container_of(work, struct pkm_lcs_transaction_fd,
+			     timeout_work);
+	u64 transaction_id = 0;
+	u32 source_id = 0;
+	u32 count = 0;
+	bool cleanup = false;
+
+	mutex_lock(&txn->bind_lock);
+	spin_lock(&txn->lock);
+	if (txn->state == REG_TXN_TIMED_OUT && txn->timeout_abort_pending) {
+		transaction_id = txn->transaction_id;
+		source_id = txn->bound_source_id;
+		txn->timeout_abort_pending = false;
+		cleanup = transaction_id && source_id;
+	}
+	spin_unlock(&txn->lock);
+
+	if (cleanup) {
+		(void)pkm_lcs_source_dispatch_abort_transaction_request(
+			source_id, transaction_id, NULL);
+		(void)pkm_lcs_source_bound_transaction_release(source_id,
+							       &count);
+		pkm_lcs_transaction_log_clear(txn);
+	}
+	mutex_unlock(&txn->bind_lock);
 }
 
 static int pkm_lcs_transaction_fd_release(struct inode *inode,
@@ -373,6 +417,7 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 		return 0;
 
 	timer_delete_sync(&txn->timeout_timer);
+	cancel_work_sync(&txn->timeout_work);
 
 	spin_lock(&txn->lock);
 	if (txn->state == REG_TXN_ACTIVE_BOUND) {
@@ -385,6 +430,13 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 	} else if (txn->state == REG_TXN_ACTIVE_UNBOUND) {
 		txn->state = REG_TXN_ABORTED;
 		wake = true;
+	} else if (txn->state == REG_TXN_TIMED_OUT &&
+		   txn->timeout_abort_pending) {
+		transaction_id = txn->transaction_id;
+		source_id = txn->bound_source_id;
+		txn->timeout_abort_pending = false;
+		dispatch_abort = transaction_id && source_id;
+		release_counter = source_id != 0;
 	}
 	spin_unlock(&txn->lock);
 
@@ -467,12 +519,34 @@ static long pkm_lcs_transaction_fd_commit_from_state(
 		goto out_unlock;
 	}
 
-	ret = pkm_lcs_source_commit_transaction_round_trip(
-		source_id, transaction_id, NULL, NULL);
+	spin_lock(&txn->lock);
+	if (txn->state == REG_TXN_ACTIVE_BOUND &&
+	    txn->transaction_id == transaction_id &&
+	    txn->bound_source_id == source_id) {
+		txn->commit_in_flight = true;
+		ret = 0;
+	} else if (txn->state == REG_TXN_TIMED_OUT) {
+		ret = -ETIMEDOUT;
+	} else if (txn->state == REG_TXN_SOURCE_DOWN) {
+		ret = -EIO;
+	} else {
+		ret = -EINVAL;
+	}
+	spin_unlock(&txn->lock);
 	if (ret)
 		goto out_unlock;
 
+	ret = pkm_lcs_source_commit_transaction_round_trip(
+		source_id, transaction_id, NULL, NULL);
+	if (ret) {
+		spin_lock(&txn->lock);
+		txn->commit_in_flight = false;
+		spin_unlock(&txn->lock);
+		goto out_unlock;
+	}
+
 	spin_lock(&txn->lock);
+	txn->commit_in_flight = false;
 	if (txn->state == REG_TXN_ACTIVE_BOUND &&
 	    txn->transaction_id == transaction_id &&
 	    txn->bound_source_id == source_id) {
@@ -594,6 +668,7 @@ long pkm_lcs_transaction_fd_publish(u32 timeout_ms)
 	init_waitqueue_head(&txn->wait);
 	INIT_LIST_HEAD(&txn->mutation_log);
 	timer_setup(&txn->timeout_timer, pkm_lcs_transaction_fd_timeout, 0);
+	INIT_WORK(&txn->timeout_work, pkm_lcs_transaction_fd_timeout_work);
 
 	fd = anon_inode_getfd("lcs-transaction", &pkm_lcs_transaction_fd_fops,
 			      txn, O_CLOEXEC);
@@ -1250,6 +1325,40 @@ out_unlock:
 	mutex_unlock(&txn->bind_lock);
 	fdput(held);
 	return ret;
+}
+
+long pkm_lcs_kunit_transaction_fd_set_commit_in_flight(int fd,
+						       bool in_flight)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	spin_lock(&txn->lock);
+	txn->commit_in_flight = in_flight;
+	spin_unlock(&txn->lock);
+
+	fdput(held);
+	return 0;
+}
+
+long pkm_lcs_kunit_transaction_fd_flush_timeout_work(int fd)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	flush_work(&txn->timeout_work);
+	fdput(held);
+	return 0;
 }
 #endif
 
