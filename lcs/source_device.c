@@ -3638,6 +3638,34 @@ long pkm_lcs_layer_write_access_check_for_token(
 		token, metadata_sd, metadata_sd_len, KEY_SET_VALUE, plan);
 }
 
+long pkm_lcs_base_layer_write_access_check_for_token(
+	const void *token, bool base_metadata_present,
+	const u8 *base_metadata_sd, size_t base_metadata_sd_len,
+	struct pkm_lcs_key_open_access_plan *plan)
+{
+	const u8 *default_sd;
+	size_t default_sd_len = 0;
+	long ret;
+
+	if (!plan)
+		return -EINVAL;
+
+	memset(plan, 0, sizeof(*plan));
+	if (base_metadata_present)
+		return pkm_lcs_layer_write_access_check_for_token(
+			token, base_metadata_sd, base_metadata_sd_len, plan);
+
+	default_sd = kacs_rust_create_lcs_base_layer_default_sd(
+		&default_sd_len);
+	if (!default_sd || !default_sd_len)
+		return -ENOMEM;
+
+	ret = pkm_lcs_layer_write_access_check_for_token(
+		token, default_sd, default_sd_len, plan);
+	pkm_kacs_free((void *)default_sd);
+	return ret;
+}
+
 long pkm_lcs_create_missing_symlink_authority_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,

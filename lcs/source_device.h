@@ -428,6 +428,10 @@ long pkm_lcs_create_missing_parent_access_check_for_token(
 long pkm_lcs_layer_write_access_check_for_token(
 	const void *token, const u8 *metadata_sd, size_t metadata_sd_len,
 	struct pkm_lcs_key_open_access_plan *plan);
+long pkm_lcs_base_layer_write_access_check_for_token(
+	const void *token, bool base_metadata_present,
+	const u8 *base_metadata_sd, size_t base_metadata_sd_len,
+	struct pkm_lcs_key_open_access_plan *plan);
 long pkm_lcs_create_missing_symlink_authority_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,

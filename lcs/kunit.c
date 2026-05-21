@@ -5046,6 +5046,108 @@ static void pkm_lcs_kunit_base_layer_default_sd_denies_service(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_base_layer_write_present_sd_overrides_default(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_SET_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_base_layer_write_access_check_for_token(
+				token, true, sd, sd_len, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, KEY_SET_VALUE);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_base_layer_write_absent_uses_default(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+
+	token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_base_layer_write_access_check_for_token(
+				token, false, NULL, 0, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, KEY_SET_VALUE);
+
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_base_layer_write_absent_denies_service(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_base_layer_write_access_check_for_token(
+				token, false, NULL, 0, &plan),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, 0U);
+
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_base_layer_write_bad_inputs(struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan plan = {
+		.allowed = 1,
+		.fd_granted_access = KEY_SET_VALUE,
+	};
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_SET_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_base_layer_write_access_check_for_token(
+				token, true, NULL, sd_len, &plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_base_layer_write_access_check_for_token(
+				token, true, sd, 0, &plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_base_layer_write_access_check_for_token(
+				token, true, sd, sd_len, NULL),
+			(long)-EINVAL);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_create_symlink_authority_non_link_noop(
 	struct kunit *test)
 {
@@ -9004,6 +9106,11 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_base_layer_default_sd_allows_system_and_admin),
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_default_sd_denies_service),
+	KUNIT_CASE(
+		pkm_lcs_kunit_base_layer_write_present_sd_overrides_default),
+	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_absent_uses_default),
+	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_absent_denies_service),
+	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_non_link_noop),
 	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_tcb_marks_used),
 	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_admin_without_tcb),
