@@ -38,6 +38,18 @@
 #define REG_IOC_COMMIT_NR			16U
 #define REG_IOC_TXN_STATUS_NR			17U
 
+struct reg_create_key_args {
+	__s32 parent_fd;
+	__u32 _pad0;
+	__u64 path_ptr;
+	__u32 desired_access;
+	__u32 flags;
+	__u64 layer_ptr;
+	__s32 txn_fd;
+	__u32 _pad1;
+	__u64 disposition_ptr;
+};
+
 struct reg_query_value_args {
 	__u32 name_len;
 	__u32 _pad0;
@@ -201,7 +213,8 @@ struct reg_src_hive_entry {
 	__u8 scope_guid[16];
 };
 
-/* PSD-005 §11.2 ioctl argument sizes. */
+/* PSD-005 §11.2 syscall and ioctl argument sizes. */
+#define REG_CREATE_KEY_ARGS_SIZE		48U
 #define REG_QUERY_VALUE_ARGS_SIZE		64U
 #define REG_SET_VALUE_ARGS_SIZE			64U
 #define REG_DELETE_VALUE_ARGS_SIZE		40U

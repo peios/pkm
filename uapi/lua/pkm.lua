@@ -289,6 +289,7 @@ M.REG_BACKUP_VALUE = 5
 M.REG_BINARY = 3
 M.REG_BLANKET_TOMBSTONE_ARGS_SIZE = 24
 M.REG_CREATED_NEW = 1
+M.REG_CREATE_KEY_ARGS_SIZE = 48
 M.REG_DELETE_KEY_ARGS_SIZE = 24
 M.REG_DELETE_VALUE_ARGS_SIZE = 40
 M.REG_DWORD = 4
@@ -695,6 +696,20 @@ M.struct = {
       layer_ptr = {offset = 8, size = 8, signed = false, kind = "uint"},
       set = {offset = 16, size = 1, signed = false, kind = "uint"},
       txn_fd = {offset = 20, size = 4, signed = true, kind = "int"},
+    },
+  },
+  ["reg_create_key_args"] = {
+    size = 48,
+    pack = "<i4xxxxI8I4I4I8i4xxxxI8",
+    fields = {"parent_fd", "path_ptr", "desired_access", "flags", "layer_ptr", "txn_fd", "disposition_ptr"},
+    field = {
+      parent_fd = {offset = 0, size = 4, signed = true, kind = "int"},
+      path_ptr = {offset = 8, size = 8, signed = false, kind = "uint"},
+      desired_access = {offset = 16, size = 4, signed = false, kind = "uint"},
+      flags = {offset = 20, size = 4, signed = false, kind = "uint"},
+      layer_ptr = {offset = 24, size = 8, signed = false, kind = "uint"},
+      txn_fd = {offset = 32, size = 4, signed = true, kind = "int"},
+      disposition_ptr = {offset = 40, size = 8, signed = false, kind = "uint"},
     },
   },
   ["reg_delete_key_args"] = {

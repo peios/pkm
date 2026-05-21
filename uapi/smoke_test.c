@@ -109,6 +109,17 @@ _Static_assert(RSI_WRITE_KEY_FIELD_KNOWN_MASK
 			   | RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME),
 	       "RSI_WRITE_KEY field mask disagrees with PSD-005");
 
+ASSERT_STRUCT_SIZE(reg_create_key_args, REG_CREATE_KEY_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_create_key_args, parent_fd, 0);
+ASSERT_FIELD_OFFSET(reg_create_key_args, _pad0, 4);
+ASSERT_FIELD_OFFSET(reg_create_key_args, path_ptr, 8);
+ASSERT_FIELD_OFFSET(reg_create_key_args, desired_access, 16);
+ASSERT_FIELD_OFFSET(reg_create_key_args, flags, 20);
+ASSERT_FIELD_OFFSET(reg_create_key_args, layer_ptr, 24);
+ASSERT_FIELD_OFFSET(reg_create_key_args, txn_fd, 32);
+ASSERT_FIELD_OFFSET(reg_create_key_args, _pad1, 36);
+ASSERT_FIELD_OFFSET(reg_create_key_args, disposition_ptr, 40);
+
 ASSERT_STRUCT_SIZE(reg_query_value_args, REG_QUERY_VALUE_ARGS_SIZE);
 ASSERT_FIELD_OFFSET(reg_query_value_args, name_len, 0);
 ASSERT_FIELD_OFFSET(reg_query_value_args, _pad0, 4);

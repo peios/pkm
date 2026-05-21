@@ -441,6 +441,42 @@ const _: () = {
 };
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
+pub struct reg_create_key_args {
+    pub parent_fd: __s32,
+    pub _pad0: __u32,
+    pub path_ptr: __u64,
+    pub desired_access: __u32,
+    pub flags: __u32,
+    pub layer_ptr: __u64,
+    pub txn_fd: __s32,
+    pub _pad1: __u32,
+    pub disposition_ptr: __u64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of reg_create_key_args"][::core::mem::size_of::<reg_create_key_args>() - 48usize];
+    ["Alignment of reg_create_key_args"][::core::mem::align_of::<reg_create_key_args>() - 8usize];
+    ["Offset of field: reg_create_key_args::parent_fd"]
+        [::core::mem::offset_of!(reg_create_key_args, parent_fd) - 0usize];
+    ["Offset of field: reg_create_key_args::_pad0"]
+        [::core::mem::offset_of!(reg_create_key_args, _pad0) - 4usize];
+    ["Offset of field: reg_create_key_args::path_ptr"]
+        [::core::mem::offset_of!(reg_create_key_args, path_ptr) - 8usize];
+    ["Offset of field: reg_create_key_args::desired_access"]
+        [::core::mem::offset_of!(reg_create_key_args, desired_access) - 16usize];
+    ["Offset of field: reg_create_key_args::flags"]
+        [::core::mem::offset_of!(reg_create_key_args, flags) - 20usize];
+    ["Offset of field: reg_create_key_args::layer_ptr"]
+        [::core::mem::offset_of!(reg_create_key_args, layer_ptr) - 24usize];
+    ["Offset of field: reg_create_key_args::txn_fd"]
+        [::core::mem::offset_of!(reg_create_key_args, txn_fd) - 32usize];
+    ["Offset of field: reg_create_key_args::_pad1"]
+        [::core::mem::offset_of!(reg_create_key_args, _pad1) - 36usize];
+    ["Offset of field: reg_create_key_args::disposition_ptr"]
+        [::core::mem::offset_of!(reg_create_key_args, disposition_ptr) - 40usize];
+};
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
 pub struct reg_query_value_args {
     pub name_len: __u32,
     pub _pad0: __u32,

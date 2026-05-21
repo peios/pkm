@@ -271,6 +271,7 @@ const (
 	REG_BINARY                                    = 3
 	REG_BLANKET_TOMBSTONE_ARGS_SIZE               = 24
 	REG_CREATED_NEW                               = 1
+	REG_CREATE_KEY_ARGS_SIZE                      = 48
 	REG_DELETE_KEY_ARGS_SIZE                      = 24
 	REG_DELETE_VALUE_ARGS_SIZE                    = 40
 	REG_DWORD                                     = 4

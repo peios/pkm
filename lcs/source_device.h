@@ -645,6 +645,14 @@ long pkm_lcs_reg_create_key_for_token(
 	const char __user *ulayer, u32 flags,
 	const struct pkm_lcs_create_missing_runtime_inputs *inputs,
 	u32 __user *udisposition);
+long pkm_lcs_reg_create_key_args_copy_from_user(
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_create_key_args __user *uargs,
+	struct reg_create_key_args *out);
+long pkm_lcs_reg_create_key_args_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_create_key_args *args,
+	const struct pkm_lcs_create_missing_runtime_inputs *inputs);
 long pkm_lcs_allocate_sequence(u64 *sequence);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,

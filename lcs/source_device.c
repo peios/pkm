@@ -5715,13 +5715,64 @@ long pkm_lcs_reg_create_key_for_token(
 	return ret;
 }
 
-SYSCALL_DEFINE6(reg_create_key, int, parent_fd, const char __user *, path,
-		u32, desired_access, const char __user *, layer, u32, flags,
-		u32 __user *, disposition)
+long pkm_lcs_reg_create_key_args_copy_from_user(
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_create_key_args __user *uargs,
+	struct reg_create_key_args *out)
 {
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+	if (!ops)
+		ops = &pkm_lcs_default_usercopy_ops;
+	if (!ops->read)
+		return -EINVAL;
+	if (!uargs)
+		return -EFAULT;
+	if (!ops->read(ops->ctx, out, uargs, sizeof(*out)))
+		return -EFAULT;
+	return 0;
+}
+
+long pkm_lcs_reg_create_key_args_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_create_key_args *args,
+	const struct pkm_lcs_create_missing_runtime_inputs *inputs)
+{
+	struct pkm_lcs_create_preflight_plan preflight = { };
+	long ret;
+
+	if (!args)
+		return -EINVAL;
+	if (args->_pad0 || args->_pad1)
+		return -EINVAL;
+	ret = pkm_lcs_create_preflight(args->desired_access, args->flags,
+				       &preflight);
+	if (ret)
+		return ret;
+	if (args->txn_fd >= 0)
+		return -EOPNOTSUPP;
+
 	return pkm_lcs_reg_create_key_for_token(
-		pkm_kacs_current_effective_token_ptr(), NULL, parent_fd, path,
-		desired_access, layer, flags, NULL, disposition);
+		token, ops, args->parent_fd,
+		(const char __user *)(unsigned long)args->path_ptr,
+		args->desired_access,
+		(const char __user *)(unsigned long)args->layer_ptr,
+		args->flags, inputs,
+		(u32 __user *)(unsigned long)args->disposition_ptr);
+}
+
+SYSCALL_DEFINE1(reg_create_key, const struct reg_create_key_args __user *, args)
+{
+	struct reg_create_key_args copied;
+	long ret;
+
+	ret = pkm_lcs_reg_create_key_args_copy_from_user(NULL, args, &copied);
+	if (ret)
+		return ret;
+
+	return pkm_lcs_reg_create_key_args_for_token(
+		pkm_kacs_current_effective_token_ptr(), NULL, &copied, NULL);
 }
 
 static long pkm_lcs_resolved_key_path_prepare(

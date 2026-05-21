@@ -268,6 +268,7 @@ pub const REG_BACKUP_VALUE: u32 = 5;
 pub const REG_BINARY: u32 = 3;
 pub const REG_BLANKET_TOMBSTONE_ARGS_SIZE: u32 = 24;
 pub const REG_CREATED_NEW: u32 = 1;
+pub const REG_CREATE_KEY_ARGS_SIZE: u32 = 48;
 pub const REG_DELETE_KEY_ARGS_SIZE: u32 = 24;
 pub const REG_DELETE_VALUE_ARGS_SIZE: u32 = 40;
 pub const REG_DWORD: u32 = 4;

@@ -137,6 +137,17 @@ type Reg_blanket_tombstone_args struct {
 	_         [3]uint8
 	Txn_fd    int32
 }
+type Reg_create_key_args struct {
+	Parent_fd       int32
+	_               uint32
+	Path_ptr        uint64
+	Desired_access  uint32
+	Flags           uint32
+	Layer_ptr       uint64
+	Txn_fd          int32
+	_               uint32
+	Disposition_ptr uint64
+}
 type Reg_delete_key_args struct {
 	Layer_len uint32
 	_         uint32
