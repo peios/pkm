@@ -28,18 +28,19 @@ use crate::lcs_core::{
     validate_rsi_read_key_response_security_descriptor, validate_source_registration,
     validate_source_slots, validate_symlink_target_bytes, validate_syscall_path_c_string,
     validate_value_data_len, validate_value_name_bytes, validate_value_write_type,
-    write_key_open_audit_payload, write_rsi_create_entry_request_frame,
-    write_rsi_create_key_request_frame, write_rsi_lookup_request_frame,
-    write_rsi_query_values_request_frame, write_rsi_read_key_request_frame, BlanketTombstoneEntry,
-    CurrentUserRewrite, HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest,
-    KeyWatchState, LayerResolutionContext, LayerTargetAdmissionInput, LayerView,
-    LcsCallerTokenSummary, LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno,
-    NamedPathEntry, NamedPathResolution, PathKind, RegisteredHiveIdentity,
-    RegistryIoctlAccessRequirement, RegistryKeyOpenAccessInput, RegistryOpenAccessDecision,
-    RegistryOpenPreResolutionAccessPlan, RsiReadPlan, RsiRetainedRequest,
-    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
-    SourceSlotStatus, SourceSlotView, ValueEntry, ValueResolution, REG_TOMBSTONE, RSI_LOOKUP,
-    RSI_QUERY_VALUES, RSI_READ_KEY,
+    write_key_open_audit_payload, write_rsi_abort_transaction_request_frame,
+    write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
+    write_rsi_create_entry_request_frame, write_rsi_create_key_request_frame,
+    write_rsi_lookup_request_frame, write_rsi_query_values_request_frame,
+    write_rsi_read_key_request_frame, BlanketTombstoneEntry, CurrentUserRewrite,
+    HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest, KeyWatchState,
+    LayerResolutionContext, LayerTargetAdmissionInput, LayerView, LcsCallerTokenSummary,
+    LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry,
+    NamedPathResolution, PathKind, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
+    RegistryKeyOpenAccessInput, RegistryOpenAccessDecision, RegistryOpenPreResolutionAccessPlan,
+    RsiReadPlan, RsiRetainedRequest, RsiTransactionMode, SourceRegistrationDecision,
+    SourceRegistrationHive, SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
+    ValueEntry, ValueResolution, REG_TOMBSTONE, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -1232,6 +1233,162 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_create_key_request_frame(
         sd_bytes,
         volatile_key != 0,
         symlink != 0,
+    ) {
+        Ok(built) => {
+            unsafe {
+                *built_out = PkmLcsRsiBuiltRequestCopy {
+                    len: built.len,
+                    request_id: built.retained.request_id,
+                    txn_id,
+                    op_code: built.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_rsi_begin_transaction_request_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    request_id: u64,
+    txn_id: u64,
+    transaction_id: u64,
+    mode: u32,
+    built_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if built_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *built_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            txn_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if dst.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let Some(mode) = RsiTransactionMode::from_code(mode) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+
+    let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    match write_rsi_begin_transaction_request_frame(
+        dst_bytes,
+        request_id,
+        txn_id,
+        transaction_id,
+        mode,
+    ) {
+        Ok(built) => {
+            unsafe {
+                *built_out = PkmLcsRsiBuiltRequestCopy {
+                    len: built.len,
+                    request_id: built.retained.request_id,
+                    txn_id,
+                    op_code: built.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_rsi_commit_transaction_request_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    request_id: u64,
+    txn_id: u64,
+    transaction_id: u64,
+    built_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if built_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *built_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            txn_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if dst.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    match write_rsi_commit_transaction_request_frame(
+        dst_bytes,
+        request_id,
+        txn_id,
+        transaction_id,
+    ) {
+        Ok(built) => {
+            unsafe {
+                *built_out = PkmLcsRsiBuiltRequestCopy {
+                    len: built.len,
+                    request_id: built.retained.request_id,
+                    txn_id,
+                    op_code: built.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_rsi_abort_transaction_request_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    request_id: u64,
+    txn_id: u64,
+    transaction_id: u64,
+    built_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if built_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *built_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            txn_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if dst.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    match write_rsi_abort_transaction_request_frame(
+        dst_bytes,
+        request_id,
+        txn_id,
+        transaction_id,
     ) {
         Ok(built) => {
             unsafe {

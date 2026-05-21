@@ -7360,6 +7360,195 @@ static void pkm_lcs_kunit_rsi_lookup_request_frame_rejects_short_buffer(
 		KUNIT_EXPECT_EQ(test, frame[i], 0xaaU);
 }
 
+static void pkm_lcs_kunit_rsi_begin_transaction_request_frame_success(
+	struct kunit *test)
+{
+	u8 frame[64];
+	struct pkm_lcs_rsi_built_request built = { };
+	size_t expected_len = RSI_REQUEST_HEADER_SIZE + sizeof(u64) +
+			      sizeof(u32);
+	size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	size_t i;
+
+	memset(frame, 0xcc, sizeof(frame));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_begin_transaction_request(
+				frame, sizeof(frame), 0x2122232425262728ULL, 0,
+				0x0102030405060708ULL, RSI_TXN_READ_WRITE,
+				&built),
+			0L);
+	KUNIT_EXPECT_EQ(test, built.len, expected_len);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0x2122232425262728ULL);
+	KUNIT_EXPECT_EQ(test, built.txn_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)RSI_BEGIN_TRANSACTION);
+
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(frame + RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)expected_len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(frame + RSI_REQUEST_ID_OFFSET),
+			0x2122232425262728ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(frame + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_BEGIN_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(frame + RSI_REQUEST_TXN_ID_OFFSET),
+			0ULL);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(frame + payload_offset),
+			0x0102030405060708ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(frame + payload_offset + sizeof(u64)),
+			(u32)RSI_TXN_READ_WRITE);
+	for (i = expected_len; i < sizeof(frame); i++)
+		KUNIT_EXPECT_EQ(test, frame[i], 0xccU);
+}
+
+static void pkm_lcs_kunit_rsi_commit_abort_transaction_request_frames(
+	struct kunit *test)
+{
+	u8 commit[64];
+	u8 abort[64];
+	struct pkm_lcs_rsi_built_request built = { };
+	size_t expected_len = RSI_REQUEST_HEADER_SIZE + sizeof(u64);
+	size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	size_t i;
+
+	memset(commit, 0xcc, sizeof(commit));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_commit_transaction_request(
+				commit, sizeof(commit), 0x3132333435363738ULL,
+				77, 77, &built),
+			0L);
+	KUNIT_EXPECT_EQ(test, built.len, expected_len);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0x3132333435363738ULL);
+	KUNIT_EXPECT_EQ(test, built.txn_id, 77ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)RSI_COMMIT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(commit +
+					   RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)expected_len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(commit +
+					   RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_COMMIT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(commit + RSI_REQUEST_TXN_ID_OFFSET),
+			77ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(commit + payload_offset), 77ULL);
+	for (i = expected_len; i < sizeof(commit); i++)
+		KUNIT_EXPECT_EQ(test, commit[i], 0xccU);
+
+	memset(&built, 0, sizeof(built));
+	memset(abort, 0xdd, sizeof(abort));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_abort_transaction_request(
+				abort, sizeof(abort), 0x4142434445464748ULL,
+				88, 88, &built),
+			0L);
+	KUNIT_EXPECT_EQ(test, built.len, expected_len);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0x4142434445464748ULL);
+	KUNIT_EXPECT_EQ(test, built.txn_id, 88ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)RSI_ABORT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(abort + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_ABORT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(abort + RSI_REQUEST_TXN_ID_OFFSET),
+			88ULL);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(abort + payload_offset),
+			88ULL);
+	for (i = expected_len; i < sizeof(abort); i++)
+		KUNIT_EXPECT_EQ(test, abort[i], 0xddU);
+}
+
+static void pkm_lcs_kunit_rsi_transaction_request_frames_reject_bad_inputs(
+	struct kunit *test)
+{
+	u8 frame[64];
+	struct pkm_lcs_rsi_built_request built = {
+		.len = 11,
+		.request_id = 22,
+		.txn_id = 33,
+		.op_code = 44,
+	};
+	size_t i;
+
+	memset(frame, 0xaa, sizeof(frame));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_begin_transaction_request(
+				NULL, sizeof(frame), 1, 0, 2,
+				RSI_TXN_READ_WRITE, &built),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, built.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.txn_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)0);
+
+	built.len = 11;
+	built.request_id = 22;
+	built.txn_id = 33;
+	built.op_code = 44;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_begin_transaction_request(
+				frame, sizeof(frame), 1, 0, 2, 0x80, &built),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, built.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.txn_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)0);
+	for (i = 0; i < sizeof(frame); i++)
+		KUNIT_EXPECT_EQ(test, frame[i], 0xaaU);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_commit_transaction_request(
+				frame, sizeof(frame), 1, 1, 1, NULL),
+			(long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_rsi_transaction_request_frames_reject_short_buffer(
+	struct kunit *test)
+{
+	u8 begin[RSI_REQUEST_HEADER_SIZE + sizeof(u64) + sizeof(u32) - 1];
+	u8 commit[RSI_REQUEST_HEADER_SIZE + sizeof(u64) - 1];
+	struct pkm_lcs_rsi_built_request built = {
+		.len = 11,
+		.request_id = 22,
+		.txn_id = 33,
+		.op_code = 44,
+	};
+	size_t i;
+
+	memset(begin, 0xaa, sizeof(begin));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_begin_transaction_request(
+				begin, sizeof(begin), 1, 0, 2,
+				RSI_TXN_READ_ONLY, &built),
+			(long)-EMSGSIZE);
+	KUNIT_EXPECT_EQ(test, built.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.txn_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)0);
+	for (i = 0; i < sizeof(begin); i++)
+		KUNIT_EXPECT_EQ(test, begin[i], 0xaaU);
+
+	built.len = 11;
+	built.request_id = 22;
+	built.txn_id = 33;
+	built.op_code = 44;
+	memset(commit, 0xbb, sizeof(commit));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_commit_transaction_request(
+				commit, sizeof(commit), 1, 1, 1, &built),
+			(long)-EMSGSIZE);
+	KUNIT_EXPECT_EQ(test, built.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.txn_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)0);
+	for (i = 0; i < sizeof(commit); i++)
+		KUNIT_EXPECT_EQ(test, commit[i], 0xbbU);
+}
+
 static void pkm_lcs_kunit_setup_registered_source(struct kunit *test,
 						  struct file *file,
 						  const void **token_out)
@@ -12911,6 +13100,14 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_rejects_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_validates_child),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_rejects_short_buffer),
+	KUNIT_CASE(
+		pkm_lcs_kunit_rsi_begin_transaction_request_frame_success),
+	KUNIT_CASE(
+		pkm_lcs_kunit_rsi_commit_abort_transaction_request_frames),
+	KUNIT_CASE(
+		pkm_lcs_kunit_rsi_transaction_request_frames_reject_bad_inputs),
+	KUNIT_CASE(
+		pkm_lcs_kunit_rsi_transaction_request_frames_reject_short_buffer),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_read_key_bridge_accepts_valid),
 	KUNIT_CASE(
 		pkm_lcs_kunit_rsi_query_values_bridge_materializes_default_reg_link),
