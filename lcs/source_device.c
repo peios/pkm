@@ -4465,6 +4465,49 @@ long pkm_lcs_create_missing_publish_created_key_for_token(
 	return ret;
 }
 
+long pkm_lcs_create_missing_prepared_key_for_token(
+	const void *token,
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	const struct pkm_lcs_create_layer_target *target,
+	const u8 child_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_created_key_sd *created_sd, u32 desired_access,
+	bool volatile_key, bool symlink,
+	struct pkm_lcs_create_missing_prepared_result *result)
+{
+	struct pkm_lcs_create_missing_source_records_result source = { };
+	long fd;
+	long ret;
+
+	if (!result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	result->fd = -1;
+
+	ret = pkm_lcs_create_missing_source_records(
+		resolution, target, child_guid, created_sd, volatile_key,
+		symlink, &source);
+	if (ret)
+		return ret;
+
+	result->sequence = source.sequence;
+	result->disposition = source.disposition;
+	result->created_new = source.created_new;
+	result->retry_open_existing = source.retry_open_existing;
+	if (source.retry_open_existing)
+		return 0;
+	if (!source.created_new)
+		return -EIO;
+
+	fd = pkm_lcs_create_missing_publish_created_key_for_token(
+		token, resolution, child_guid, created_sd, desired_access);
+	if (fd < 0)
+		return fd;
+
+	result->fd = fd;
+	return 0;
+}
+
 static long pkm_lcs_resolved_key_path_prepare(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,
