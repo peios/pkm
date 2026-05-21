@@ -2316,6 +2316,10 @@ static void pkm_kunit_expect_boot_snapshot_eq_internal(
 	KUNIT_EXPECT_EQ(test, lhs->auth_id, rhs->auth_id);
 	if (compare_identity) {
 		KUNIT_EXPECT_EQ(test, lhs->token_id, rhs->token_id);
+		pkm_kunit_expect_bytes_eq(test, lhs->token_guid,
+					  sizeof(lhs->token_guid),
+					  rhs->token_guid,
+					  sizeof(rhs->token_guid));
 		KUNIT_EXPECT_EQ(test, lhs->modified_id, rhs->modified_id);
 	}
 	KUNIT_EXPECT_EQ(test, lhs->created_at, rhs->created_at);
@@ -2401,6 +2405,10 @@ static void pkm_kunit_expect_boot_snapshot_scalars_eq_internal(
 	KUNIT_EXPECT_EQ(test, lhs->auth_id, rhs->auth_id);
 	if (compare_identity) {
 		KUNIT_EXPECT_EQ(test, lhs->token_id, rhs->token_id);
+		pkm_kunit_expect_bytes_eq(test, lhs->token_guid,
+					  sizeof(lhs->token_guid),
+					  rhs->token_guid,
+					  sizeof(rhs->token_guid));
 		KUNIT_EXPECT_EQ(test, lhs->modified_id, rhs->modified_id);
 	}
 	KUNIT_EXPECT_EQ(test, lhs->created_at, rhs->created_at);
@@ -2454,6 +2462,41 @@ static void pkm_kunit_expect_boot_snapshot_scalars_eq_except_identity(
 	const struct pkm_kacs_boot_snapshot *rhs)
 {
 	pkm_kunit_expect_boot_snapshot_scalars_eq_internal(test, lhs, rhs, false);
+}
+
+static bool pkm_kunit_guid_is_zero(const u8 guid[KACS_UUID_BYTES])
+{
+	static const u8 zero[KACS_UUID_BYTES];
+
+	return memcmp(guid, zero, KACS_UUID_BYTES) == 0;
+}
+
+static bool pkm_kunit_guid_is_uuid_v4(const u8 guid[KACS_UUID_BYTES])
+{
+	return !pkm_kunit_guid_is_zero(guid) &&
+	       (guid[6] & 0xf0) == 0x40 &&
+	       (guid[8] & 0xc0) == 0x80;
+}
+
+static void pkm_kunit_expect_guid_v4(struct kunit *test,
+				     const u8 guid[KACS_UUID_BYTES])
+{
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_guid_is_uuid_v4(guid));
+}
+
+static void pkm_kunit_expect_guid_eq(struct kunit *test,
+				     const u8 lhs[KACS_UUID_BYTES],
+				     const u8 rhs[KACS_UUID_BYTES])
+{
+	pkm_kunit_expect_bytes_eq(test, lhs, KACS_UUID_BYTES, rhs,
+				  KACS_UUID_BYTES);
+}
+
+static void pkm_kunit_expect_guid_ne(struct kunit *test,
+				     const u8 lhs[KACS_UUID_BYTES],
+				     const u8 rhs[KACS_UUID_BYTES])
+{
+	KUNIT_EXPECT_NE(test, memcmp(lhs, rhs, KACS_UUID_BYTES), 0);
 }
 
 static size_t pkm_kunit_build_session_spec(u8 *dst, u8 logon_type,
@@ -4575,6 +4618,8 @@ static void pkm_kunit_boot_system_defaults(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, snapshot.session_id, 0ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.auth_id, 0ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.token_id, 0ULL);
+	pkm_kunit_expect_guid_v4(test, snapshot.token_guid);
+	pkm_kunit_expect_guid_v4(test, effective_snapshot.token_guid);
 	KUNIT_EXPECT_EQ(test, snapshot.modified_id, 0ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.logon_type, 5U);
 	pkm_kunit_expect_bytes_eq(test, snapshot.auth_pkg_ptr, snapshot.auth_pkg_len,
@@ -4674,6 +4719,7 @@ static void pkm_kunit_boot_anonymous_defaults(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, snapshot.token_ptr, anonymous_token);
 	KUNIT_EXPECT_EQ(test, snapshot.session_id, 998ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.auth_id, 998ULL);
+	pkm_kunit_expect_guid_v4(test, snapshot.token_guid);
 	KUNIT_EXPECT_EQ(test, snapshot.created_at, 0ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.logon_type,
 			(u32)PKM_KUNIT_LOGON_TYPE_NETWORK);
@@ -9278,6 +9324,9 @@ static void pkm_kunit_token_deep_copy_independent(struct kunit *test)
 	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(copy, &copied));
 
 	KUNIT_EXPECT_NE(test, copied.token_id, original.token_id);
+	pkm_kunit_expect_guid_v4(test, copied.token_guid);
+	pkm_kunit_expect_guid_ne(test, copied.token_guid,
+				 original.token_guid);
 	KUNIT_EXPECT_EQ(test, copied.modified_id, copied.token_id);
 	pkm_kunit_expect_boot_snapshot_eq_except_identity(test, &original,
 							  &copied);
@@ -9312,6 +9361,9 @@ static void pkm_kunit_token_lowered_impersonation_clone_gets_fresh_identity(
 	expected = source;
 	expected.impersonation_level = KACS_IMLEVEL_IDENTIFICATION;
 	KUNIT_EXPECT_NE(test, lowered_snapshot.token_id, source.token_id);
+	pkm_kunit_expect_guid_v4(test, lowered_snapshot.token_guid);
+	pkm_kunit_expect_guid_ne(test, lowered_snapshot.token_guid,
+				 source.token_guid);
 	KUNIT_EXPECT_EQ(test, lowered_snapshot.modified_id,
 			lowered_snapshot.token_id);
 	pkm_kunit_expect_boot_snapshot_eq_except_identity(
@@ -9354,6 +9406,9 @@ static void pkm_kunit_token_created_at_preserved_by_derivations(
 							 &duplicate_snapshot));
 	KUNIT_EXPECT_NE(test, duplicate_snapshot.token_id,
 			source_snapshot.token_id);
+	pkm_kunit_expect_guid_v4(test, duplicate_snapshot.token_guid);
+	pkm_kunit_expect_guid_ne(test, duplicate_snapshot.token_guid,
+				 source_snapshot.token_guid);
 	KUNIT_EXPECT_EQ(test, duplicate_snapshot.created_at,
 			source_snapshot.created_at);
 
@@ -9371,6 +9426,9 @@ static void pkm_kunit_token_created_at_preserved_by_derivations(
 							 &restricted_snapshot));
 	KUNIT_EXPECT_NE(test, restricted_snapshot.token_id,
 			source_snapshot.token_id);
+	pkm_kunit_expect_guid_v4(test, restricted_snapshot.token_guid);
+	pkm_kunit_expect_guid_ne(test, restricted_snapshot.token_guid,
+				 source_snapshot.token_guid);
 	KUNIT_EXPECT_EQ(test, restricted_snapshot.created_at,
 			source_snapshot.created_at);
 
@@ -9384,6 +9442,9 @@ static void pkm_kunit_token_created_at_preserved_by_derivations(
 							 &lowered_snapshot));
 	KUNIT_EXPECT_NE(test, lowered_snapshot.token_id,
 			source_snapshot.token_id);
+	pkm_kunit_expect_guid_v4(test, lowered_snapshot.token_guid);
+	pkm_kunit_expect_guid_ne(test, lowered_snapshot.token_guid,
+				 source_snapshot.token_guid);
 	KUNIT_EXPECT_EQ(test, lowered_snapshot.created_at,
 			source_snapshot.created_at);
 
@@ -10031,6 +10092,76 @@ static void pkm_kunit_open_self_token_invalid_flags(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
 }
 
+static void pkm_kunit_identity_guid_accessors(struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_state_view process_view = { };
+	struct pkm_kacs_boot_snapshot primary_snapshot = { };
+	struct pkm_kacs_boot_snapshot client_snapshot = { };
+	kacs_uuid_t effective_guid;
+	kacs_uuid_t primary_guid;
+	kacs_uuid_t process_guid;
+	const void *primary_token;
+	const void *client_token;
+	const void *state;
+	long fd;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	state = pkm_kacs_kunit_current_process_state_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+	KUNIT_ASSERT_NOT_NULL(test, state);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(primary_token,
+							 &primary_snapshot));
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_process_state_snapshot(state,
+							      &process_view),
+			0);
+
+	effective_guid = kacs_effective_token_guid();
+	primary_guid = kacs_primary_token_guid();
+	process_guid = kacs_process_guid();
+	pkm_kunit_expect_guid_v4(test, primary_snapshot.token_guid);
+	pkm_kunit_expect_guid_eq(test, effective_guid.bytes,
+				 primary_snapshot.token_guid);
+	pkm_kunit_expect_guid_eq(test, primary_guid.bytes,
+				 primary_snapshot.token_guid);
+	pkm_kunit_expect_guid_eq(test, process_guid.bytes,
+				 process_view.process_guid);
+
+	client_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_IMLEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, client_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(client_token,
+							 &client_snapshot));
+	pkm_kunit_expect_guid_v4(test, client_snapshot.token_guid);
+	pkm_kunit_expect_guid_ne(test, client_snapshot.token_guid,
+				 primary_snapshot.token_guid);
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		primary_token, client_token, KACS_TOKEN_IMPERSONATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_impersonate((int)fd,
+							   primary_token),
+			0L);
+
+	effective_guid = kacs_effective_token_guid();
+	primary_guid = kacs_primary_token_guid();
+	process_guid = kacs_process_guid();
+	pkm_kunit_expect_guid_eq(test, effective_guid.bytes,
+				 client_snapshot.token_guid);
+	pkm_kunit_expect_guid_eq(test, primary_guid.bytes,
+				 primary_snapshot.token_guid);
+	pkm_kunit_expect_guid_eq(test, process_guid.bytes,
+				 process_view.process_guid);
+
+	KUNIT_EXPECT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(client_token);
+}
+
 static void pkm_kunit_process_state_clone_thread_shares_live_object(
 	struct kunit *test)
 {
@@ -10058,6 +10189,9 @@ static void pkm_kunit_process_state_clone_thread_shares_live_object(
 			    current_view.rate_bucket_ptr);
 	KUNIT_EXPECT_PTR_EQ(test, shared_view.process_sd_ptr,
 			    current_view.process_sd_ptr);
+	pkm_kunit_expect_guid_v4(test, current_view.process_guid);
+	pkm_kunit_expect_guid_eq(test, shared_view.process_guid,
+				 current_view.process_guid);
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_set_current_process_mitigation_bits(
 				KACS_MIT_UI_ACCESS | KACS_MIT_WXP),
@@ -10117,6 +10251,10 @@ static void pkm_kunit_process_state_fork_gets_fresh_sd_and_rate_bucket(
 	KUNIT_EXPECT_TRUE(test,
 			  child_view.process_sd_ptr !=
 				  current_view.process_sd_ptr);
+	pkm_kunit_expect_guid_v4(test, current_view.process_guid);
+	pkm_kunit_expect_guid_v4(test, child_view.process_guid);
+	pkm_kunit_expect_guid_ne(test, child_view.process_guid,
+				 current_view.process_guid);
 	KUNIT_EXPECT_EQ(test, child_view.pip_type,
 			PKM_KUNIT_PIP_TYPE_PROTECTED);
 	KUNIT_EXPECT_EQ(test, child_view.pip_trust,
@@ -10191,6 +10329,7 @@ static void pkm_kunit_expect_process_state_snapshot_eq(
 	const struct pkm_kacs_kunit_process_state_view *rhs)
 {
 	KUNIT_EXPECT_PTR_EQ(test, rhs->state_ptr, lhs->state_ptr);
+	pkm_kunit_expect_guid_eq(test, rhs->process_guid, lhs->process_guid);
 	KUNIT_EXPECT_PTR_EQ(test, rhs->process_sd_ptr, lhs->process_sd_ptr);
 	KUNIT_EXPECT_EQ(test, rhs->process_sd_len, lhs->process_sd_len);
 	KUNIT_EXPECT_PTR_EQ(test, rhs->rate_bucket_ptr, lhs->rate_bucket_ptr);
@@ -41072,6 +41211,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_open_self_token_maximum_allowed),
 	KUNIT_CASE(pkm_kunit_token_fd_holds_ref_after_source_drop),
 	KUNIT_CASE(pkm_kunit_open_self_token_invalid_flags),
+	KUNIT_CASE(pkm_kunit_identity_guid_accessors),
 	KUNIT_CASE(pkm_kunit_process_state_clone_thread_shares_live_object),
 	KUNIT_CASE(pkm_kunit_process_state_fork_gets_fresh_sd_and_rate_bucket),
 	KUNIT_CASE(pkm_kunit_process_state_fork_inherits_no_child),

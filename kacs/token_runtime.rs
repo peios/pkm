@@ -271,6 +271,7 @@ const TOKEN_CLASS_IMPERSONATION_LEVEL: u32 = 0x15;
 const TOKEN_CLASS_USER_CLAIMS: u32 = 0x16;
 const TOKEN_CLASS_DEVICE_CLAIMS: u32 = 0x17;
 const TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS: u32 = 0x18;
+const KACS_UUID_BYTES: usize = 16;
 
 extern "C" {
     fn pkm_kacs_boot_system_token_ptr() -> *const c_void;
@@ -282,6 +283,7 @@ extern "C" {
     fn pkm_kacs_rcu_read_lock();
     fn pkm_kacs_rcu_read_unlock();
     fn pkm_kacs_free_after_rcu(ptr: *mut c_void);
+    fn pkm_kacs_fill_uuid_v4(out: *mut u8);
 }
 
 #[repr(C)]
@@ -355,6 +357,8 @@ pub struct PkmKacsBootSnapshot {
     pub auth_id: u64,
     /// Token instance LUID.
     pub token_id: u64,
+    /// Immutable token instance UUID.
+    pub token_guid: [u8; KACS_UUID_BYTES],
     /// Token modified-id LUID.
     pub modified_id: u64,
     /// Token creation timestamp.
@@ -513,6 +517,7 @@ struct PkmKacsBootToken {
     group_attributes: Vec<AtomicU32>,
     group_views: UnsafeCell<Vec<PkmKacsBootGroupView>>,
     group_runtime_views: UnsafeCell<Vec<SidAndAttributes<'static>>>,
+    token_guid: [u8; KACS_UUID_BYTES],
     token_id: u64,
     created_at: u64,
     modified_id: AtomicU64,
@@ -582,6 +587,13 @@ impl Drop for RcuReadGuard {
     fn drop(&mut self) {
         unsafe { pkm_kacs_rcu_read_unlock() };
     }
+}
+
+fn new_uuid_v4() -> [u8; KACS_UUID_BYTES] {
+    let mut uuid = [0u8; KACS_UUID_BYTES];
+
+    unsafe { pkm_kacs_fill_uuid_v4(uuid.as_mut_ptr()) };
+    uuid
 }
 
 struct DefaultDaclCopy {
@@ -4542,6 +4554,7 @@ impl PkmKacsBootToken {
             group_attributes,
             group_views: UnsafeCell::new(group_views),
             group_runtime_views: UnsafeCell::new(group_runtime_views),
+            token_guid: new_uuid_v4(),
             token_id,
             created_at: 0,
             modified_id: AtomicU64::new(modified_id),
@@ -4693,6 +4706,7 @@ impl PkmKacsBootToken {
             group_attributes,
             group_views: UnsafeCell::new(group_views),
             group_runtime_views: UnsafeCell::new(group_runtime_views),
+            token_guid: new_uuid_v4(),
             token_id: BOOT_SYSTEM_TOKEN_ID,
             created_at: 0,
             modified_id: AtomicU64::new(BOOT_SYSTEM_MODIFIED_ID),
@@ -5061,6 +5075,7 @@ impl PkmKacsBootToken {
             group_attributes,
             group_views: UnsafeCell::new(group_views),
             group_runtime_views: UnsafeCell::new(group_runtime_views),
+            token_guid: new_uuid_v4(),
             token_id,
             created_at: 0,
             modified_id: AtomicU64::new(token_id),
@@ -5453,6 +5468,7 @@ impl PkmKacsBootToken {
             group_attributes,
             group_views: UnsafeCell::new(group_views),
             group_runtime_views: UnsafeCell::new(group_runtime_views),
+            token_guid: new_uuid_v4(),
             token_id,
             created_at,
             modified_id: AtomicU64::new(modified_id),
@@ -5637,6 +5653,7 @@ impl PkmKacsBootToken {
             group_attributes: group_attributes_atoms,
             group_views: UnsafeCell::new(group_views),
             group_runtime_views: UnsafeCell::new(group_runtime_views),
+            token_guid: new_uuid_v4(),
             token_id,
             created_at: token.created_at,
             modified_id: AtomicU64::new(token_id),
@@ -5833,6 +5850,7 @@ impl PkmKacsBootToken {
             group_attributes: group_attributes_atoms,
             group_views: UnsafeCell::new(group_views),
             group_runtime_views: UnsafeCell::new(group_runtime_views),
+            token_guid: new_uuid_v4(),
             token_id,
             created_at: self.created_at,
             modified_id: AtomicU64::new(modified_id),
@@ -5958,6 +5976,7 @@ impl PkmKacsBootToken {
             group_attributes: group_attributes_atoms,
             group_views: UnsafeCell::new(group_views),
             group_runtime_views: UnsafeCell::new(group_runtime_views),
+            token_guid: new_uuid_v4(),
             token_id,
             created_at: self.created_at,
             modified_id: AtomicU64::new(token_id),
@@ -6055,6 +6074,7 @@ impl PkmKacsBootToken {
             session_id: session.session_id,
             auth_id: session.session_id,
             token_id: self.token_id,
+            token_guid: self.token_guid,
             modified_id: self.modified_id.load(Ordering::Relaxed),
             created_at: self.created_at,
             logon_type: session.logon_type,
@@ -6770,6 +6790,7 @@ impl PkmKacsBootToken {
             group_attributes: group_attributes_atoms,
             group_views: UnsafeCell::new(group_views),
             group_runtime_views: UnsafeCell::new(group_runtime_views),
+            token_guid: new_uuid_v4(),
             token_id,
             created_at: self.created_at,
             modified_id: AtomicU64::new(token_id),
@@ -8072,6 +8093,20 @@ pub extern "C" fn kacs_rust_token_user_sid(
     let sid_bytes = token.user_sid.as_bytes();
     *out_sid_ptr = sid_bytes.as_ptr();
     *out_sid_len = sid_bytes.len();
+    0
+}
+
+#[no_mangle]
+/// Copies the immutable token GUID from a live token object.
+pub extern "C" fn kacs_rust_token_guid(token: *const c_void, out: *mut u8) -> i32 {
+    if out.is_null() {
+        return -EINVAL;
+    }
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+
+    unsafe { core::ptr::copy_nonoverlapping(token.token_guid.as_ptr(), out, KACS_UUID_BYTES) };
     0
 }
 

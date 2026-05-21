@@ -49,6 +49,7 @@
 #include <linux/preempt.h>
 #include <linux/prctl.h>
 #include <linux/ptrace.h>
+#include <linux/random.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/sched/coredump.h>
@@ -168,6 +169,16 @@ static const u8 pkm_kacs_sysfs_write_gate_sd[] = {
 
 static atomic64_t pkm_kacs_native_supersede_tmp_counter = ATOMIC64_INIT(0);
 static atomic64_t pkm_kacs_kunit_native_identity_counter = ATOMIC64_INIT(0);
+
+void pkm_kacs_fill_uuid_v4(u8 out[KACS_UUID_BYTES])
+{
+	if (!out)
+		return;
+
+	get_random_bytes(out, KACS_UUID_BYTES);
+	out[6] = (out[6] & 0x0f) | 0x40;
+	out[8] = (out[8] & 0x3f) | 0x80;
+}
 
 struct pkm_kacs_native_open_request {
 	const struct dentry *expected_dentry;
@@ -297,6 +308,7 @@ struct pkm_kacs_process_state {
 	refcount_t refs;
 	spinlock_t mitigation_lock;
 	struct mutex sd_lock;
+	u8 process_guid[KACS_UUID_BYTES];
 	u32 pip_type;
 	u32 pip_trust;
 	u32 mitigation_bits;
@@ -2797,6 +2809,7 @@ static struct pkm_kacs_process_state *pkm_kacs_process_state_alloc(
 	refcount_set(&state->refs, 1);
 	spin_lock_init(&state->mitigation_lock);
 	mutex_init(&state->sd_lock);
+	pkm_kacs_fill_uuid_v4(state->process_guid);
 	state->pip_type = pip_type;
 	state->pip_trust = pip_trust;
 	state->mitigation_bits = mitigation_bits;
@@ -3963,6 +3976,55 @@ const void *pkm_kacs_current_effective_token_ptr(void)
 const void *pkm_kacs_current_primary_token_ptr(void)
 {
 	return pkm_kacs_cred(current_real_cred())->token;
+}
+
+static kacs_uuid_t pkm_kacs_null_uuid(void)
+{
+	kacs_uuid_t uuid = { };
+
+	return uuid;
+}
+
+static kacs_uuid_t pkm_kacs_token_guid_or_null(const void *token)
+{
+	kacs_uuid_t uuid = { };
+
+	if (!token)
+		return uuid;
+	if (kacs_rust_token_guid(token, uuid.bytes))
+		return pkm_kacs_null_uuid();
+	return uuid;
+}
+
+kacs_uuid_t kacs_effective_token_guid(void)
+{
+	return pkm_kacs_token_guid_or_null(
+		pkm_kacs_current_effective_token_ptr());
+}
+
+kacs_uuid_t kacs_primary_token_guid(void)
+{
+	const struct pkm_kacs_cred_security *sec;
+	const struct cred *cred;
+
+	if (!current || !in_task())
+		return pkm_kacs_null_uuid();
+
+	cred = current_real_cred();
+	sec = cred && cred->security ? pkm_kacs_cred(cred) : NULL;
+	return pkm_kacs_token_guid_or_null(sec ? sec->token : NULL);
+}
+
+kacs_uuid_t kacs_process_guid(void)
+{
+	struct pkm_kacs_process_state *state = pkm_kacs_current_process_state();
+	kacs_uuid_t uuid = { };
+
+	if (!state)
+		return uuid;
+
+	memcpy(uuid.bytes, state->process_guid, KACS_UUID_BYTES);
+	return uuid;
 }
 
 static long pkm_kacs_prepare_current_token_cred(const void *token,
@@ -13137,6 +13199,8 @@ int pkm_kacs_kunit_process_state_snapshot(
 		return -EINVAL;
 
 	out->state_ptr = state;
+	memcpy(out->process_guid, state->process_guid,
+	       sizeof(out->process_guid));
 	out->process_sd_ptr = state->process_sd ? state->process_sd->bytes : NULL;
 	out->process_sd_len = state->process_sd ? state->process_sd->len : 0;
 	out->rate_bucket_ptr = state->kmes_rate_bucket;

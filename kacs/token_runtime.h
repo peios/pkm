@@ -7,6 +7,12 @@
 #include <pkm/file.h>
 #include "access_check.h"
 
+#define KACS_UUID_BYTES 16U
+
+typedef struct {
+	u8 bytes[KACS_UUID_BYTES];
+} kacs_uuid_t;
+
 struct file;
 struct path;
 struct task_struct;
@@ -106,6 +112,7 @@ struct pkm_kacs_boot_snapshot {
 	u64 session_id;
 	u64 auth_id;
 	u64 token_id;
+	u8 token_guid[KACS_UUID_BYTES];
 	u64 modified_id;
 	u64 created_at;
 	u32 logon_type;
@@ -189,6 +196,7 @@ struct pkm_kacs_priv_adjust_entry {
 
 struct pkm_kacs_kunit_process_state_view {
 	const void *state_ptr;
+	u8 process_guid[KACS_UUID_BYTES];
 	const void *process_sd_ptr;
 	size_t process_sd_len;
 	const void *rate_bucket_ptr;
@@ -583,6 +591,10 @@ const void *pkm_kacs_current_primary_token_ptr(void);
 bool pkm_kacs_current_token_eval_context_allowed(void);
 const void *pkm_kacs_boot_system_token_ptr(void);
 const void *pkm_kacs_boot_anonymous_token_ptr(void);
+void pkm_kacs_fill_uuid_v4(u8 out[KACS_UUID_BYTES]);
+kacs_uuid_t kacs_effective_token_guid(void);
+kacs_uuid_t kacs_primary_token_guid(void);
+kacs_uuid_t kacs_process_guid(void);
 unsigned long pkm_kacs_local_irq_save(void);
 void pkm_kacs_local_irq_restore(unsigned long flags);
 void *pkm_kacs_zalloc(size_t size);
@@ -614,6 +626,7 @@ bool kacs_rust_token_is_primary(const void *token);
 bool kacs_rust_token_same_user_sid(const void *lhs, const void *rhs);
 int kacs_rust_token_user_sid(const void *token, const u8 **out_sid_ptr,
 			     size_t *out_sid_len);
+int kacs_rust_token_guid(const void *token, u8 out[KACS_UUID_BYTES]);
 bool kacs_rust_token_has_enabled_privilege(const void *token, u64 privilege);
 int kacs_rust_token_is_remote_shutdown_origin(const void *token);
 bool kacs_rust_token_has_new_process_min(const void *token);
