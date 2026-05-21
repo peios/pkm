@@ -707,6 +707,27 @@ long pkm_lcs_source_dispatch_create_key_waitable_request(
 	bool volatile_key, bool symlink,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_begin_transaction_request(
+	u32 source_id, u64 transaction_id, u32 mode,
+	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_begin_transaction_waitable_request(
+	u32 source_id, u64 transaction_id, u32 mode,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_commit_transaction_request(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_commit_transaction_waitable_request(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_abort_transaction_request(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_abort_transaction_waitable_request(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result);
 long pkm_lcs_source_create_key_round_trip_timeout(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *name, u32 name_len,

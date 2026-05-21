@@ -9890,6 +9890,169 @@ static void pkm_lcs_kunit_source_dispatch_create_key_frame(struct kunit *test)
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_dispatch_transaction_control_frames(
+	struct kunit *test)
+{
+	struct pkm_lcs_source_enqueue_result begin = { };
+	struct pkm_lcs_source_enqueue_result commit = { };
+	struct pkm_lcs_source_enqueue_result abort = { };
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	u8 out[64];
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_begin_transaction_request(
+				1, 0x0102030405060708ULL,
+				RSI_TXN_READ_WRITE, &begin),
+			0L);
+	KUNIT_EXPECT_EQ(test, begin.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, begin.txn_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, begin.op_code, (u16)RSI_BEGIN_TRANSACTION);
+	KUNIT_EXPECT_EQ(test, begin.queue_depth, 1U);
+	KUNIT_EXPECT_EQ(test, begin.in_flight_count, 1U);
+	KUNIT_EXPECT_EQ(test, begin.next_request_id, 1ULL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_commit_transaction_request(
+				1, 0x1112131415161718ULL, &commit),
+			0L);
+	KUNIT_EXPECT_EQ(test, commit.request_id, 1ULL);
+	KUNIT_EXPECT_EQ(test, commit.txn_id, 0x1112131415161718ULL);
+	KUNIT_EXPECT_EQ(test, commit.op_code, (u16)RSI_COMMIT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test, commit.queue_depth, 2U);
+	KUNIT_EXPECT_EQ(test, commit.in_flight_count, 2U);
+	KUNIT_EXPECT_EQ(test, commit.next_request_id, 2ULL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_abort_transaction_request(
+				1, 0x2122232425262728ULL, &abort),
+			0L);
+	KUNIT_EXPECT_EQ(test, abort.request_id, 2ULL);
+	KUNIT_EXPECT_EQ(test, abort.txn_id, 0x2122232425262728ULL);
+	KUNIT_EXPECT_EQ(test, abort.op_code, (u16)RSI_ABORT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test, abort.queue_depth, 3U);
+	KUNIT_EXPECT_EQ(test, abort.in_flight_count, 3U);
+	KUNIT_EXPECT_EQ(test, abort.next_request_id, 3ULL);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)begin.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(out + RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)(RSI_REQUEST_HEADER_SIZE + sizeof(u64) +
+			      sizeof(u32)));
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_ID_OFFSET), 0ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(out + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_BEGIN_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_TXN_ID_OFFSET),
+			0ULL);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(out + payload_offset),
+			0x0102030405060708ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(out + payload_offset + sizeof(u64)),
+			(u32)RSI_TXN_READ_WRITE);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)commit.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_ID_OFFSET), 1ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(out + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_COMMIT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_TXN_ID_OFFSET),
+			0x1112131415161718ULL);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(out + payload_offset),
+			0x1112131415161718ULL);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)abort.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_ID_OFFSET), 2ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(out + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_ABORT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_TXN_ID_OFFSET),
+			0x2122232425262728ULL);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(out + payload_offset),
+			0x2122232425262728ULL);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 3U);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id, 3ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_dispatch_transaction_rejects_bad_inputs(
+	struct kunit *test)
+{
+	struct pkm_lcs_source_enqueue_result enqueue = {
+		.len = 1,
+		.request_id = 2,
+		.txn_id = 3,
+		.op_code = 4,
+		.queue_depth = 5,
+	};
+	struct pkm_lcs_source_response_waiter waiter;
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	struct file file = { };
+	const void *token;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_begin_transaction_request(
+				1, 1, RSI_TXN_READ_WRITE, &enqueue),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, enqueue.len, (size_t)0);
+	KUNIT_EXPECT_EQ(test, enqueue.queue_depth, 0U);
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_begin_transaction_request(
+				1, 1, 0x80, &enqueue),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_commit_transaction_waitable_request(
+				1, 1, NULL, &enqueue),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_abort_transaction_waitable_request(
+				1, 1, &waiter, &enqueue),
+			0L);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id, 1ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs(
 	struct kunit *test)
 {
@@ -13132,6 +13295,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_dispatch_lookup_allocates_monotonic_ids),
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_create_entry_frame),
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_create_key_frame),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_dispatch_transaction_control_frames),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_dispatch_transaction_rejects_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_source_status_policy),

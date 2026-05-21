@@ -2012,6 +2012,128 @@ out_unlock_table:
 	return ret;
 }
 
+static long pkm_lcs_source_dispatch_transaction_request_with_waiter(
+	u32 source_id, u16 op_code, u64 transaction_id, u32 mode,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_source_queued_request *request;
+	struct pkm_lcs_source_slot *slot;
+	struct pkm_lcs_source_fd *source_fd;
+	size_t frame_len = RSI_REQUEST_HEADER_SIZE + sizeof(u64);
+	u64 header_txn_id;
+	u64 request_id;
+	u64 next_request_id;
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+
+	switch (op_code) {
+	case RSI_BEGIN_TRANSACTION:
+		if (mode != RSI_TXN_READ_WRITE && mode != RSI_TXN_READ_ONLY)
+			return -EINVAL;
+		if (check_add_overflow(frame_len, sizeof(u32), &frame_len))
+			return -EOVERFLOW;
+		header_txn_id = 0;
+		break;
+	case RSI_COMMIT_TRANSACTION:
+	case RSI_ABORT_TRANSACTION:
+		header_txn_id = transaction_id;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	if (!request)
+		return -ENOMEM;
+	request->frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!request->frame) {
+		kfree(request);
+		return -ENOMEM;
+	}
+	INIT_LIST_HEAD(&request->link);
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE ||
+	    !slot->active_fd) {
+		ret = -EIO;
+		goto out_unlock_table;
+	}
+
+	source_fd = slot->active_fd;
+	mutex_lock(&source_fd->queue_lock);
+	if (source_fd->closing ||
+	    source_fd->state != PKM_LCS_SOURCE_FD_ACTIVE ||
+	    source_fd->source_id != source_id) {
+		ret = -EIO;
+		goto out_unlock_queue;
+	}
+	if (source_fd->in_flight_request_count >=
+	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+		ret = -EAGAIN;
+		goto out_unlock_queue;
+	}
+
+	request_id = source_fd->next_request_id;
+	ret = pkm_lcs_source_request_id_successor(request_id,
+						  &next_request_id);
+	if (ret)
+		goto out_unlock_queue;
+
+	switch (op_code) {
+	case RSI_BEGIN_TRANSACTION:
+		ret = pkm_lcs_rsi_build_begin_transaction_request(
+			request->frame, frame_len, request_id, header_txn_id,
+			transaction_id, mode, &built);
+		break;
+	case RSI_COMMIT_TRANSACTION:
+		ret = pkm_lcs_rsi_build_commit_transaction_request(
+			request->frame, frame_len, request_id, header_txn_id,
+			transaction_id, &built);
+		break;
+	case RSI_ABORT_TRANSACTION:
+		ret = pkm_lcs_rsi_build_abort_transaction_request(
+			request->frame, frame_len, request_id, header_txn_id,
+			transaction_id, &built);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_source_in_flight_insert_locked(
+		source_fd, built.request_id, built.txn_id, built.op_code,
+		waiter);
+	if (ret)
+		goto out_unlock_queue;
+
+	request->len = built.len;
+	request->request_id = built.request_id;
+	request->txn_id = built.txn_id;
+	request->op_code = built.op_code;
+	list_add_tail(&request->link, &source_fd->request_queue);
+	source_fd->queued_request_count++;
+	source_fd->next_request_id = next_request_id;
+	pkm_lcs_source_enqueue_result_fill_locked(result, request, source_fd);
+	request = NULL;
+	ret = 0;
+
+out_unlock_queue:
+	mutex_unlock(&source_fd->queue_lock);
+	if (!ret)
+		wake_up_interruptible(&source_fd->read_wait);
+out_unlock_table:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	pkm_lcs_source_queued_request_free(request);
+	return ret;
+}
+
 long pkm_lcs_source_dispatch_lookup_request(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
@@ -2206,6 +2328,75 @@ long pkm_lcs_source_dispatch_create_key_waitable_request(
 	return pkm_lcs_source_dispatch_create_key_request_with_waiter(
 		source_id, txn_id, guid, name, name_len, parent_guid, sd,
 		sd_len, volatile_key, symlink, waiter, result);
+}
+
+long pkm_lcs_source_dispatch_begin_transaction_request(
+	u32 source_id, u64 transaction_id, u32 mode,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
+		source_id, RSI_BEGIN_TRANSACTION, transaction_id, mode, NULL,
+		result);
+}
+
+long pkm_lcs_source_dispatch_begin_transaction_waitable_request(
+	u32 source_id, u64 transaction_id, u32 mode,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	if (!waiter)
+		return -EINVAL;
+
+	pkm_lcs_source_response_waiter_init(waiter);
+	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
+		source_id, RSI_BEGIN_TRANSACTION, transaction_id, mode,
+		waiter, result);
+}
+
+long pkm_lcs_source_dispatch_commit_transaction_request(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
+		source_id, RSI_COMMIT_TRANSACTION, transaction_id, 0, NULL,
+		result);
+}
+
+long pkm_lcs_source_dispatch_commit_transaction_waitable_request(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	if (!waiter)
+		return -EINVAL;
+
+	pkm_lcs_source_response_waiter_init(waiter);
+	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
+		source_id, RSI_COMMIT_TRANSACTION, transaction_id, 0, waiter,
+		result);
+}
+
+long pkm_lcs_source_dispatch_abort_transaction_request(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
+		source_id, RSI_ABORT_TRANSACTION, transaction_id, 0, NULL,
+		result);
+}
+
+long pkm_lcs_source_dispatch_abort_transaction_waitable_request(
+	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	if (!waiter)
+		return -EINVAL;
+
+	pkm_lcs_source_response_waiter_init(waiter);
+	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
+		source_id, RSI_ABORT_TRANSACTION, transaction_id, 0, waiter,
+		result);
 }
 
 long pkm_lcs_source_create_key_round_trip_timeout(
