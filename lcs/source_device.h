@@ -246,6 +246,15 @@ struct pkm_lcs_source_response_result {
 	u8 _pad[2];
 };
 
+#define PKM_LCS_REG_CREATE_SOURCE_ACTION_CREATE_KEY 1U
+#define PKM_LCS_REG_CREATE_SOURCE_ACTION_RETRY_OPEN_EXISTING 2U
+#define PKM_LCS_REG_CREATE_SOURCE_ACTION_PUBLISH_CREATED_NEW 3U
+
+struct pkm_lcs_reg_create_source_response_plan {
+	u32 action;
+	u32 disposition;
+};
+
 struct pkm_lcs_source_response_frame {
 	u8 *data;
 	size_t len;
@@ -485,6 +494,9 @@ long pkm_lcs_create_missing_symlink_authority_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,
 	u32 flags, struct pkm_lcs_key_open_access_plan *link_plan);
+long pkm_lcs_reg_create_key_source_response_plan(
+	u16 request_op_code, u32 status,
+	struct pkm_lcs_reg_create_source_response_plan *plan);
 long pkm_lcs_allocate_sequence(u64 *sequence);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,

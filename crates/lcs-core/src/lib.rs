@@ -155,8 +155,8 @@ pub use ioctl::{
 pub use key::{
     KeyCanonicalPathLocation, KeyCreateOptions, KeyCreatePlan, KeyCreateRecordsPlan,
     KeyCreateRecordsRequest, KeyCreateRequest, KeyGuidAssignmentPlan, KeyGuidAssignmentRequest,
-    KeyParent, KeyRecordView, RegCreateKeyResolutionPlan, RegCreateKeySourceResultPlan,
-    RegCreateKeyTarget, RegistryKeyInitialSecurityDescriptorInput,
+    KeyParent, KeyRecordView, RegCreateKeyResolutionPlan, RegCreateKeySourceOperation,
+    RegCreateKeySourceResultPlan, RegCreateKeyTarget, RegistryKeyInitialSecurityDescriptorInput,
     compute_registry_key_initial_security_descriptor, plan_key_create_records,
     plan_key_create_transaction_log_entry, plan_key_guid_assignment,
     plan_reg_create_key_resolution, plan_reg_create_key_source_result,

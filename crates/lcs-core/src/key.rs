@@ -146,10 +146,19 @@ pub enum RegCreateKeyResolutionPlan {
 
 /// Source create result handling for `reg_create_key`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegCreateKeySourceOperation {
+    CreateEntry,
+    CreateKey,
+}
+
+/// Source create result handling for `reg_create_key`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegCreateKeySourceResultPlan {
+    ContinueCreateKey,
     CreatedNew { disposition: u32 },
     RetryOpenExisting { disposition: u32 },
     PropagateSourceStatus(RsiStatus),
+    SourceInconsistency,
 }
 
 /// Validates immutable source-returned key record metadata.
@@ -357,15 +366,25 @@ pub fn plan_reg_create_key_resolution(target: RegCreateKeyTarget) -> RegCreateKe
 }
 
 /// Plans handling of the source create response for `reg_create_key`.
-pub fn plan_reg_create_key_source_result(status: RsiStatus) -> RegCreateKeySourceResultPlan {
-    match status {
-        RsiStatus::Ok => RegCreateKeySourceResultPlan::CreatedNew {
-            disposition: REG_CREATED_NEW,
+pub fn plan_reg_create_key_source_result(
+    operation: RegCreateKeySourceOperation,
+    status: RsiStatus,
+) -> RegCreateKeySourceResultPlan {
+    match operation {
+        RegCreateKeySourceOperation::CreateEntry => match status {
+            RsiStatus::Ok => RegCreateKeySourceResultPlan::ContinueCreateKey,
+            RsiStatus::AlreadyExists => RegCreateKeySourceResultPlan::RetryOpenExisting {
+                disposition: REG_OPENED_EXISTING,
+            },
+            other => RegCreateKeySourceResultPlan::PropagateSourceStatus(other),
         },
-        RsiStatus::AlreadyExists => RegCreateKeySourceResultPlan::RetryOpenExisting {
-            disposition: REG_OPENED_EXISTING,
+        RegCreateKeySourceOperation::CreateKey => match status {
+            RsiStatus::Ok => RegCreateKeySourceResultPlan::CreatedNew {
+                disposition: REG_CREATED_NEW,
+            },
+            RsiStatus::AlreadyExists => RegCreateKeySourceResultPlan::SourceInconsistency,
+            other => RegCreateKeySourceResultPlan::PropagateSourceStatus(other),
         },
-        other => RegCreateKeySourceResultPlan::PropagateSourceStatus(other),
     }
 }
 

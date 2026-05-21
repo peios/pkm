@@ -1,6 +1,6 @@
 use lcs_core::{
-    REG_CREATED_NEW, REG_OPENED_EXISTING, RegCreateKeyResolutionPlan, RegCreateKeySourceResultPlan,
-    RegCreateKeyTarget, RsiStatus, plan_reg_create_key_resolution,
+    REG_CREATED_NEW, REG_OPENED_EXISTING, RegCreateKeyResolutionPlan, RegCreateKeySourceOperation,
+    RegCreateKeySourceResultPlan, RegCreateKeyTarget, RsiStatus, plan_reg_create_key_resolution,
     plan_reg_create_key_source_result,
 };
 
@@ -27,9 +27,17 @@ fn create_key_missing_target_uses_layer_and_reports_created() {
 }
 
 #[test]
-fn source_create_ok_reports_new_key_created() {
+fn create_entry_ok_proceeds_to_create_key() {
     assert_eq!(
-        plan_reg_create_key_source_result(RsiStatus::Ok),
+        plan_reg_create_key_source_result(RegCreateKeySourceOperation::CreateEntry, RsiStatus::Ok),
+        RegCreateKeySourceResultPlan::ContinueCreateKey
+    );
+}
+
+#[test]
+fn create_key_ok_reports_new_key_created() {
+    assert_eq!(
+        plan_reg_create_key_source_result(RegCreateKeySourceOperation::CreateKey, RsiStatus::Ok),
         RegCreateKeySourceResultPlan::CreatedNew {
             disposition: REG_CREATED_NEW,
         }
@@ -39,7 +47,10 @@ fn source_create_ok_reports_new_key_created() {
 #[test]
 fn source_already_exists_race_retries_as_open_existing() {
     assert_eq!(
-        plan_reg_create_key_source_result(RsiStatus::AlreadyExists),
+        plan_reg_create_key_source_result(
+            RegCreateKeySourceOperation::CreateEntry,
+            RsiStatus::AlreadyExists
+        ),
         RegCreateKeySourceResultPlan::RetryOpenExisting {
             disposition: REG_OPENED_EXISTING,
         }
@@ -47,7 +58,18 @@ fn source_already_exists_race_retries_as_open_existing() {
 }
 
 #[test]
-fn non_race_source_failures_are_not_recast_as_eexist() {
+fn create_key_already_exists_is_source_inconsistency() {
+    assert_eq!(
+        plan_reg_create_key_source_result(
+            RegCreateKeySourceOperation::CreateKey,
+            RsiStatus::AlreadyExists
+        ),
+        RegCreateKeySourceResultPlan::SourceInconsistency
+    );
+}
+
+#[test]
+fn non_duplicate_source_failures_are_not_recast_as_eexist() {
     for status in [
         RsiStatus::NotFound,
         RsiStatus::NotEmpty,
@@ -59,7 +81,11 @@ fn non_race_source_failures_are_not_recast_as_eexist() {
         RsiStatus::TxnNotSupported,
     ] {
         assert_eq!(
-            plan_reg_create_key_source_result(status),
+            plan_reg_create_key_source_result(RegCreateKeySourceOperation::CreateEntry, status),
+            RegCreateKeySourceResultPlan::PropagateSourceStatus(status)
+        );
+        assert_eq!(
+            plan_reg_create_key_source_result(RegCreateKeySourceOperation::CreateKey, status),
             RegCreateKeySourceResultPlan::PropagateSourceStatus(status)
         );
     }

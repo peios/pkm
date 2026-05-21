@@ -8155,6 +8155,85 @@ static void pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_reg_create_source_status_policy(struct kunit *test)
+{
+	struct pkm_lcs_reg_create_source_response_plan plan = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_reg_create_key_source_response_plan(
+				RSI_CREATE_ENTRY, RSI_OK, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.action,
+			PKM_LCS_REG_CREATE_SOURCE_ACTION_CREATE_KEY);
+	KUNIT_EXPECT_EQ(test, plan.disposition, 0U);
+
+	memset(&plan, 0xff, sizeof(plan));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_reg_create_key_source_response_plan(
+				RSI_CREATE_ENTRY, RSI_ALREADY_EXISTS, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.action,
+			PKM_LCS_REG_CREATE_SOURCE_ACTION_RETRY_OPEN_EXISTING);
+	KUNIT_EXPECT_EQ(test, plan.disposition, REG_OPENED_EXISTING);
+
+	memset(&plan, 0xff, sizeof(plan));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_reg_create_key_source_response_plan(
+				RSI_CREATE_KEY, RSI_OK, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.action,
+			PKM_LCS_REG_CREATE_SOURCE_ACTION_PUBLISH_CREATED_NEW);
+	KUNIT_EXPECT_EQ(test, plan.disposition, REG_CREATED_NEW);
+}
+
+static void pkm_lcs_kunit_reg_create_source_status_fails_closed(
+	struct kunit *test)
+{
+	struct pkm_lcs_reg_create_source_response_plan plan = {
+		.action = 99,
+		.disposition = 88,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_source_response_plan(
+				RSI_CREATE_KEY, RSI_ALREADY_EXISTS, &plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, plan.action, 0U);
+	KUNIT_EXPECT_EQ(test, plan.disposition, 0U);
+
+	plan.action = 99;
+	plan.disposition = 88;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_source_response_plan(
+				RSI_CREATE_ENTRY, RSI_NOT_FOUND, &plan),
+			(long)-ENOENT);
+	KUNIT_EXPECT_EQ(test, plan.action, 0U);
+	KUNIT_EXPECT_EQ(test, plan.disposition, 0U);
+
+	plan.action = 99;
+	plan.disposition = 88;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_source_response_plan(
+				RSI_CREATE_ENTRY, 0xffffffffU, &plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, plan.action, 0U);
+	KUNIT_EXPECT_EQ(test, plan.disposition, 0U);
+
+	plan.action = 99;
+	plan.disposition = 88;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_source_response_plan(
+				RSI_LOOKUP, RSI_OK, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, plan.action, 0U);
+	KUNIT_EXPECT_EQ(test, plan.disposition, 0U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_source_response_plan(
+				RSI_CREATE_ENTRY, RSI_OK, NULL),
+			(long)-EINVAL);
+}
+
 static void pkm_lcs_kunit_sequence_allocation_advances_global_counter(
 	struct kunit *test)
 {
@@ -10053,6 +10132,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_create_key_frame),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs),
+	KUNIT_CASE(pkm_lcs_kunit_reg_create_source_status_policy),
+	KUNIT_CASE(pkm_lcs_kunit_reg_create_source_status_fails_closed),
 	KUNIT_CASE(
 		pkm_lcs_kunit_sequence_allocation_advances_global_counter),
 	KUNIT_CASE(pkm_lcs_kunit_sequence_allocation_fails_closed),
