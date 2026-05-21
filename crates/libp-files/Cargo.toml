@@ -15,8 +15,11 @@ path = "src/lib.rs"
 default = ["std"]
 # Enables std-only conveniences: `FileHandle::as_fd()`,
 # `From<Error> for std::io::Error`.
-std = ["peios-uapi/std"]
+std = ["libp-errno/std", "libp-sd/std"]
 
 [dependencies]
-peios-uapi = { package = "peios-uapi-legacy", path = "../peios-uapi", default-features = false }
+peios-uapi = { workspace = true }
+libp-errno = { workspace = true }
+libp-sys = { workspace = true }
+libp-sd = { workspace = true }
 thiserror = { workspace = true }

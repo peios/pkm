@@ -15,6 +15,7 @@
 
 extern crate alloc;
 
+mod abi;
 mod error;
 mod open;
 pub mod raw;
@@ -23,13 +24,13 @@ pub use error::Error;
 pub use open::{Disposition, FileHandle, OpenOptions, OpenStatus};
 
 /// Re-exported access-mask + create-option constants for callers
-/// building `OpenOptions`.
+/// building `OpenOptions`: the full file ABI surface (file/directory rights,
+/// create dispositions/options, open flags, the `FILE_GENERIC_MAPPING`, and
+/// open-status words) from [`crate::abi`], plus the standard access bits
+/// from libp-sd. Values are sourced from the generated `peios-uapi` crate.
 pub mod consts {
-    pub use peios_uapi::file::{
-        KACS_BACKUP_INTENT, KACS_CREATE_OPT_DELETE_ON_CLOSE, KACS_CREATE_OPT_DIRECTORY,
-        KACS_RESTORE_INTENT,
-    };
-    pub use peios_uapi::sd::{
+    pub use crate::abi::*;
+    pub use libp_sd::consts::{
         ACCESS_DELETE, ACCESS_GENERIC_ALL, ACCESS_GENERIC_EXECUTE, ACCESS_GENERIC_READ,
         ACCESS_GENERIC_WRITE, ACCESS_READ_CONTROL, ACCESS_SYNCHRONIZE, ACCESS_WRITE_DAC,
         ACCESS_WRITE_OWNER,

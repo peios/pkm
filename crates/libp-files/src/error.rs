@@ -1,6 +1,6 @@
 // Errors from libp-files.
 
-use peios_uapi::Errno;
+use libp_errno::Errno;
 use thiserror::Error;
 
 /// Errors from libp-files' safe-API surface.

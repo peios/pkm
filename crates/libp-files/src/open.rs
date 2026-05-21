@@ -6,14 +6,14 @@ use crate::raw;
 use alloc::ffi::CString;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use peios_uapi::errno::{Errno, eintr_retry};
-use peios_uapi::file::{
+use crate::abi::{
     KACS_BACKUP_INTENT, KACS_CREATE_OPT_DELETE_ON_CLOSE, KACS_CREATE_OPT_DIRECTORY,
     KACS_FILE_CREATE, KACS_FILE_OPEN, KACS_FILE_OPEN_IF, KACS_FILE_OVERWRITE,
     KACS_FILE_OVERWRITE_IF, KACS_FILE_SUPERSEDE, KACS_RESTORE_INTENT, KACS_STATUS_CREATED,
     KACS_STATUS_OPENED, KACS_STATUS_OVERWRITTEN, KACS_STATUS_SUPERSEDED, KacsOpenHow,
 };
-use peios_uapi::sys;
+use libp_errno::Errno;
+use libp_sys::{self as sys, eintr_retry};
 
 /// How `kacs_open` should behave when the target does / doesn't exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

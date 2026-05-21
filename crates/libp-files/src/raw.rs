@@ -1,10 +1,13 @@
 // Raw `kacs_open` syscall wrapper.
 
-use peios_uapi::file::KacsOpenHow;
-use peios_uapi::sys::syscall5;
-use peios_uapi::syscall::SYS_KACS_OPEN;
+use crate::abi::KacsOpenHow;
+use libp_sys::syscall5;
 
-pub use peios_uapi::syscall::AT_FDCWD;
+const SYS_KACS_OPEN: i64 = peios_uapi::SYS_KACS_OPEN as i64;
+
+/// `AT_FDCWD` — dirfd value meaning "current working directory". A generic
+/// Linux at-family constant (-100), not part of the KACS ABI headers.
+pub const AT_FDCWD: i32 = -100;
 
 /// `kacs_open(dirfd, path, how, howsize, status_out)`.
 ///
