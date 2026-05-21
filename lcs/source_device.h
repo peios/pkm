@@ -130,6 +130,17 @@ struct pkm_lcs_open_preflight_plan {
 	u8 _pad[2];
 };
 
+struct pkm_lcs_key_create_options {
+	u8 volatile_key;
+	u8 symlink;
+	u8 _pad[2];
+};
+
+struct pkm_lcs_create_preflight_plan {
+	struct pkm_lcs_open_preflight_plan access;
+	struct pkm_lcs_key_create_options options;
+};
+
 struct pkm_lcs_key_open_access_plan {
 	u32 requested_access;
 	u32 mapped_desired_access;
@@ -285,6 +296,8 @@ long pkm_lcs_route_user_absolute_path_for_token(
 	struct pkm_lcs_hive_route_result *result);
 long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
 			    struct pkm_lcs_open_preflight_plan *plan);
+long pkm_lcs_create_preflight(u32 desired_access, u32 flags,
+			      struct pkm_lcs_create_preflight_plan *plan);
 long pkm_lcs_key_open_access_check_for_token(
 	const void *token, const u8 *sd, size_t sd_len, u32 desired_access,
 	struct pkm_lcs_key_open_access_plan *plan);

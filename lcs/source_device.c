@@ -241,6 +241,8 @@ extern int lcs_rust_materialize_relative_path_components(
 extern int lcs_rust_open_preflight(
 	u32 desired_access, u32 flags,
 	struct pkm_lcs_open_preflight_plan *plan);
+extern int lcs_rust_validate_key_create_flags(
+	u32 flags, struct pkm_lcs_key_create_options *options);
 extern int lcs_rust_key_open_access_plan(
 	const void *subject_token, const u8 *sd_ptr, size_t sd_len,
 	u32 desired_access, u32 pip_type, u32 pip_trust,
@@ -2325,6 +2327,27 @@ long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
 
 	memset(plan, 0, sizeof(*plan));
 	return lcs_rust_open_preflight(desired_access, flags, plan);
+}
+
+long pkm_lcs_create_preflight(u32 desired_access, u32 flags,
+			      struct pkm_lcs_create_preflight_plan *plan)
+{
+	long ret;
+
+	if (!plan)
+		return -EINVAL;
+
+	memset(plan, 0, sizeof(*plan));
+	ret = pkm_lcs_open_preflight(desired_access, 0, &plan->access);
+	if (ret) {
+		memset(plan, 0, sizeof(*plan));
+		return ret;
+	}
+
+	ret = lcs_rust_validate_key_create_flags(flags, &plan->options);
+	if (ret)
+		memset(plan, 0, sizeof(*plan));
+	return ret;
 }
 
 long pkm_lcs_key_open_access_check_for_token(

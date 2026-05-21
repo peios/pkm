@@ -19,9 +19,9 @@ use crate::lcs_core::{
     rsi_queued_request_from_frame,
     rsi_status_code_errno, source_registration_error_linux_errno, source_registration_hive_scope,
     source_slot_hive_status,
-    validate_key_component_bytes, validate_key_fd_open_view, validate_layer_name_bytes,
-    validate_registry_open_flags, validate_resolved_relative_path_depth, validate_value_data_len,
-    validate_value_name_bytes, validate_value_write_type,
+    validate_key_component_bytes, validate_key_create_flags, validate_key_fd_open_view,
+    validate_layer_name_bytes, validate_registry_open_flags, validate_resolved_relative_path_depth,
+    validate_value_data_len, validate_value_name_bytes, validate_value_write_type,
     validate_rsi_lookup_metadata_completeness,
     validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,
     validate_rsi_lookup_path_response_sequences, validate_rsi_query_values_response_names,
@@ -91,6 +91,13 @@ pub struct PkmLcsOpenPreflightPlanCopy {
     pub mapped_desired_access: u32,
     pub maximum_allowed: u8,
     pub path_resolution_allowed: u8,
+    pub _pad: [u8; 2],
+}
+
+#[repr(C)]
+pub struct PkmLcsKeyCreateOptionsCopy {
+    pub volatile_key: u8,
+    pub symlink: u8,
     pub _pad: [u8; 2],
 }
 
@@ -382,6 +389,35 @@ pub unsafe extern "C" fn lcs_rust_open_preflight(
                 .unwrap_or(LinuxErrno::Einval)
                 .negated_return() as c_int
         }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_key_create_flags(
+    flags: u32,
+    options_out: *mut PkmLcsKeyCreateOptionsCopy,
+) -> c_int {
+    if options_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *options_out = PkmLcsKeyCreateOptionsCopy {
+            volatile_key: 0,
+            symlink: 0,
+            _pad: [0; 2],
+        };
+    }
+
+    match validate_key_create_flags(flags) {
+        Ok(options) => {
+            unsafe {
+                (*options_out).volatile_key = options.volatile as u8;
+                (*options_out).symlink = options.symlink as u8;
+            }
+            0
+        }
+        Err(_) => LinuxErrno::Einval.negated_return() as c_int,
     }
 }
 

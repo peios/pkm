@@ -1271,6 +1271,84 @@ static void pkm_lcs_kunit_open_preflight_rejects_fail_closed(
 	KUNIT_EXPECT_EQ(test, plan.path_resolution_allowed, 0U);
 }
 
+static void pkm_lcs_kunit_create_preflight_accepts_valid_flags(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_preflight_plan plan = { };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_preflight(KEY_CREATE_SUB_KEY, 0,
+						 &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.access.requested_access,
+			KEY_CREATE_SUB_KEY);
+	KUNIT_EXPECT_EQ(test, plan.access.mapped_desired_access,
+			KEY_CREATE_SUB_KEY);
+	KUNIT_EXPECT_EQ(test, plan.access.maximum_allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.access.path_resolution_allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.options.volatile_key, 0U);
+	KUNIT_EXPECT_EQ(test, plan.options.symlink, 0U);
+
+	memset(&plan, 0, sizeof(plan));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_preflight(
+				MAXIMUM_ALLOWED | KEY_READ,
+				REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK,
+				&plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.access.requested_access,
+			MAXIMUM_ALLOWED | KEY_READ);
+	KUNIT_EXPECT_EQ(test, plan.access.mapped_desired_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, plan.access.maximum_allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.access.path_resolution_allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.options.volatile_key, 1U);
+	KUNIT_EXPECT_EQ(test, plan.options.symlink, 1U);
+}
+
+static void pkm_lcs_kunit_create_preflight_rejects_fail_closed(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_preflight_plan plan = {
+		.access = {
+			.requested_access = 0xffffffffU,
+			.mapped_desired_access = 0xffffffffU,
+			.maximum_allowed = 1,
+			.path_resolution_allowed = 1,
+		},
+		.options = {
+			.volatile_key = 1,
+			.symlink = 1,
+		},
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_preflight(KEY_CREATE_SUB_KEY, 0,
+						 NULL),
+			(long)-EINVAL);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_preflight(0, REG_OPTION_VOLATILE,
+						 &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, plan.access.requested_access, 0U);
+	KUNIT_EXPECT_EQ(test, plan.access.mapped_desired_access, 0U);
+	KUNIT_EXPECT_EQ(test, plan.access.maximum_allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.access.path_resolution_allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.options.volatile_key, 0U);
+	KUNIT_EXPECT_EQ(test, plan.options.symlink, 0U);
+
+	plan.access.path_resolution_allowed = 1;
+	plan.options.volatile_key = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_preflight(KEY_CREATE_SUB_KEY,
+						 REG_OPTION_VOLATILE | 0x04U,
+						 &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, plan.access.path_resolution_allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.options.volatile_key, 0U);
+	KUNIT_EXPECT_EQ(test, plan.options.symlink, 0U);
+}
+
 static void pkm_lcs_kunit_open_preflight_route_success(
 	struct kunit *test)
 {
@@ -7787,6 +7865,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_user_absolute_path_copy_routes_current_user),
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_accepts_valid_masks),
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_rejects_fail_closed),
+	KUNIT_CASE(pkm_lcs_kunit_create_preflight_accepts_valid_flags),
+	KUNIT_CASE(pkm_lcs_kunit_create_preflight_rejects_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_route_success),
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_route_stops_before_usercopy),
 	KUNIT_CASE(
