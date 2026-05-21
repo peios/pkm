@@ -848,6 +848,11 @@ int kacs_rust_build_created_file_sd(const void *subject_token_ptr,
 				    u32 child_is_directory,
 				    const u8 **out_sd_ptr,
 				    size_t *out_sd_len);
+int kacs_rust_build_created_container_sd(
+	const void *subject_token_ptr, const u8 *parent_sd_ptr,
+	size_t parent_sd_len, u32 generic_read, u32 generic_write,
+	u32 generic_execute, u32 generic_all, u32 valid_mapped_access_mask,
+	const u8 **out_sd_ptr, size_t *out_sd_len);
 int kacs_rust_synthesize_file_sd(const u8 *parent_sd_ptr, size_t parent_sd_len,
 				 const u8 *template_sd_ptr,
 				 size_t template_sd_len,

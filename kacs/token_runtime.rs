@@ -40,6 +40,7 @@ use crate::claims::{
 };
 use crate::condition::ConditionalContext;
 use crate::error::KacsError;
+use crate::inheritance::{inherit_registry_container_child_sd, RegistryContainerChildInheritance};
 use crate::kmes_payload::{
     emit_access_check_events_to_kmes, emit_continuous_audit_to_kmes,
     emit_logon_session_destroyed_to_kmes,
@@ -3105,6 +3106,46 @@ fn build_created_file_sd_bytes(
         sacl.as_deref(),
         dacl.as_deref(),
     )
+}
+
+fn container_inheritance_errno(error: KacsError) -> i32 {
+    match error {
+        KacsError::AllocationFailure => -ENOMEM,
+        KacsError::SecurityDescriptorTooLarge { .. } => -ERANGE,
+        _ => -EINVAL,
+    }
+}
+
+fn build_created_container_sd_bytes(
+    subject: &PkmKacsBootToken,
+    parent_sd_bytes: &[u8],
+    generic_mapping: GenericMapping,
+    valid_mapped_access_mask: u32,
+) -> Result<(*mut u8, usize), i32> {
+    let parent_sd = SecurityDescriptor::parse(parent_sd_bytes).map_err(sd_parse_errno)?;
+    let owner_sid = subject
+        .sid_by_index(subject.owner_sid_index.load(Ordering::Relaxed))
+        .ok_or(-EACCES)?;
+    let group_sid = subject
+        .sid_by_index(subject.primary_group_index.load(Ordering::Relaxed))
+        .ok_or(-EACCES)?;
+    let token_default_dacl_copy = subject.default_dacl_rcu_copy()?;
+    let token_default_dacl = if token_default_dacl_copy.is_empty() {
+        None
+    } else {
+        Some(Acl::parse(token_default_dacl_copy.as_slice()).map_err(sd_parse_errno)?)
+    };
+    let child_sd = inherit_registry_container_child_sd(RegistryContainerChildInheritance {
+        parent_sd,
+        token_owner: owner_sid,
+        token_primary_group: group_sid,
+        token_default_dacl,
+        generic_mapping,
+        valid_mapped_access_mask,
+    })
+    .map_err(container_inheritance_errno)?;
+
+    alloc_copy_bytes(child_sd.as_slice())
 }
 
 fn validate_sd_bytes(sd_bytes: &[u8]) -> Result<(), i32> {
@@ -10196,6 +10237,65 @@ pub extern "C" fn kacs_rust_build_created_file_sd(
         parent_sd_bytes,
         creator_sd_bytes,
         child_is_directory != 0,
+    ) {
+        Ok((ptr, len)) => {
+            *out_sd_ptr = ptr.cast_const();
+            *out_sd_len = len;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Builds one complete container-child SD from a parent SD, the caller token's
+/// default owner/group/DACL, and caller-supplied object generic mapping.
+pub extern "C" fn kacs_rust_build_created_container_sd(
+    subject_token_ptr: *const c_void,
+    parent_sd_ptr: *const u8,
+    parent_sd_len: usize,
+    generic_read: u32,
+    generic_write: u32,
+    generic_execute: u32,
+    generic_all: u32,
+    valid_mapped_access_mask: u32,
+    out_sd_ptr: *mut *const u8,
+    out_sd_len: *mut usize,
+) -> i32 {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token_ptr) }) else {
+        return -EACCES;
+    };
+    let Some(out_sd_ptr) = (unsafe { out_sd_ptr.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(out_sd_len) = (unsafe { out_sd_len.as_mut() }) else {
+        return -EINVAL;
+    };
+    let generic_mapping = GenericMapping {
+        read: generic_read,
+        write: generic_write,
+        execute: generic_execute,
+        all: generic_all,
+    };
+
+    *out_sd_ptr = null();
+    *out_sd_len = 0;
+
+    if parent_sd_ptr.is_null() || parent_sd_len == 0 || valid_mapped_access_mask == 0 {
+        return -EINVAL;
+    }
+    if ((generic_read | generic_write | generic_execute | generic_all) & !valid_mapped_access_mask)
+        != 0
+    {
+        return -EINVAL;
+    }
+
+    let parent_sd_bytes = unsafe { core::slice::from_raw_parts(parent_sd_ptr, parent_sd_len) };
+    match build_created_container_sd_bytes(
+        subject,
+        parent_sd_bytes,
+        generic_mapping,
+        valid_mapped_access_mask,
     ) {
         Ok((ptr, len)) => {
             *out_sd_ptr = ptr.cast_const();

@@ -278,6 +278,11 @@ struct pkm_lcs_create_missing_parent_resolution {
 	u32 child_depth;
 };
 
+struct pkm_lcs_created_key_sd {
+	const u8 *sd;
+	size_t sd_len;
+};
+
 struct pkm_lcs_symlink_target_resolution {
 	struct pkm_lcs_hive_route_result route;
 	struct pkm_lcs_materialized_path components;
@@ -453,6 +458,11 @@ long pkm_lcs_create_missing_parent_access_check_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,
 	struct pkm_lcs_key_open_access_plan *plan);
+void pkm_lcs_created_key_sd_destroy(struct pkm_lcs_created_key_sd *created);
+long pkm_lcs_create_missing_initial_sd_for_token(
+	const void *token,
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	struct pkm_lcs_created_key_sd *created);
 long pkm_lcs_layer_write_access_check_for_token(
 	const void *token, const u8 *metadata_sd, size_t metadata_sd_len,
 	struct pkm_lcs_key_open_access_plan *plan);

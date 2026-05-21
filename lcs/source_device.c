@@ -3633,6 +3633,56 @@ long pkm_lcs_create_missing_parent_access_check_for_token(
 		token, sd, sd_len, KEY_CREATE_SUB_KEY, plan);
 }
 
+void pkm_lcs_created_key_sd_destroy(struct pkm_lcs_created_key_sd *created)
+{
+	if (!created)
+		return;
+
+	pkm_kacs_free((void *)created->sd);
+	memset(created, 0, sizeof(*created));
+}
+
+long pkm_lcs_create_missing_initial_sd_for_token(
+	const void *token,
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	struct pkm_lcs_created_key_sd *created)
+{
+	const u8 *parent_sd;
+	const u8 *child_sd = NULL;
+	size_t parent_sd_len;
+	size_t child_sd_len = 0;
+	long ret;
+
+	if (!created)
+		return -EINVAL;
+
+	memset(created, 0, sizeof(*created));
+	if (!token)
+		return -EACCES;
+
+	ret = pkm_lcs_create_missing_parent_sd_view(resolution, &parent_sd,
+						    &parent_sd_len);
+	if (ret)
+		return ret;
+
+	ret = kacs_rust_build_created_container_sd(
+		token, parent_sd, parent_sd_len, KEY_READ, KEY_WRITE, 0,
+		KEY_ALL_ACCESS, REG_VALID_MAPPED_ACCESS_MASK, &child_sd,
+		&child_sd_len);
+	if (ret == -EINVAL || ret == -ERANGE)
+		return -EIO;
+	if (ret)
+		return ret;
+	if (!child_sd || !child_sd_len) {
+		pkm_kacs_free((void *)child_sd);
+		return -EIO;
+	}
+
+	created->sd = child_sd;
+	created->sd_len = child_sd_len;
+	return 0;
+}
+
 long pkm_lcs_layer_write_access_check_for_token(
 	const void *token, const u8 *metadata_sd, size_t metadata_sd_len,
 	struct pkm_lcs_key_open_access_plan *plan)
