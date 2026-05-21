@@ -53,8 +53,17 @@ _Static_assert(KMES_EVENT_CPU_ID_OFFSET
 _Static_assert(KMES_EVENT_ORIGIN_CLASS_OFFSET
 		       == KMES_EVENT_CPU_ID_OFFSET + sizeof(__u16),
 	       "KMES event-header offsets are not contiguous");
-_Static_assert(KMES_EVENT_TYPE_LEN_OFFSET
+_Static_assert(KMES_EVENT_EFFECTIVE_TOKEN_GUID_OFFSET
 		       == KMES_EVENT_ORIGIN_CLASS_OFFSET + sizeof(__u8),
+	       "KMES event-header offsets are not contiguous");
+_Static_assert(KMES_EVENT_TRUE_TOKEN_GUID_OFFSET
+		       == KMES_EVENT_EFFECTIVE_TOKEN_GUID_OFFSET + KMES_EVENT_GUID_SIZE,
+	       "KMES event-header offsets are not contiguous");
+_Static_assert(KMES_EVENT_PROCESS_GUID_OFFSET
+		       == KMES_EVENT_TRUE_TOKEN_GUID_OFFSET + KMES_EVENT_GUID_SIZE,
+	       "KMES event-header offsets are not contiguous");
+_Static_assert(KMES_EVENT_TYPE_LEN_OFFSET
+		       == KMES_EVENT_PROCESS_GUID_OFFSET + KMES_EVENT_GUID_SIZE,
 	       "KMES event-header offsets are not contiguous");
 _Static_assert(KMES_EVENT_HEADER_BASE_SIZE
 		       == KMES_EVENT_TYPE_LEN_OFFSET + sizeof(__u16),

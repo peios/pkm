@@ -507,6 +507,9 @@ struct pkm_kunit_kmes_event_view {
 	u64 sequence;
 	u16 cpu_id;
 	u8 origin_class;
+	const u8 *effective_token_guid;
+	const u8 *true_token_guid;
+	const u8 *process_guid;
 	u16 type_len;
 	const u8 *type_ptr;
 	const u8 *payload_ptr;
@@ -1495,6 +1498,36 @@ static int pkm_kunit_find_current_kmes_fd(struct kunit *test, int *fds, int coun
 	return -1;
 }
 
+/*
+ * v0.20 kmes_attach returns one fd per cpu_id; a consumer enumerates CPUs
+ * by attaching cpu_id 0, 1, ... until -EINVAL. This helper reproduces the
+ * old "attach every CPU at once" convenience for the tests: it fills
+ * fds[cpu_id], records the shared capacity, and reports the CPU count.
+ */
+static long pkm_kunit_kmes_attach_all(const void *token, int *fds, int *count,
+				      u64 *capacity)
+{
+	int n = 0;
+	long ret;
+
+	for (;;) {
+		int fd = -1;
+		u64 cap = 0;
+
+		ret = pkm_kmes_kunit_attach_for_token(token, (u32)n, &fd, &cap);
+		if (ret == -EINVAL)
+			break;
+		if (ret)
+			return ret;
+		fds[n] = fd;
+		*capacity = cap;
+		n++;
+	}
+
+	*count = n;
+	return 0;
+}
+
 static bool pkm_kunit_parse_kmes_event(
 	const u8 *bytes, size_t len, struct pkm_kunit_kmes_event_view *out)
 {
@@ -1502,25 +1535,29 @@ static bool pkm_kunit_parse_kmes_event(
 	u32 header_size;
 	u16 type_len;
 
-	if (!bytes || !out || len < 29)
+	if (!bytes || !out || len < KMES_EVENT_HEADER_BASE_SIZE)
 		return false;
 
-	event_size = pkm_kunit_read_u32(bytes, 0);
-	header_size = pkm_kunit_read_u32(bytes, 4);
-	type_len = pkm_kunit_read_u16(bytes, 27);
+	event_size = pkm_kunit_read_u32(bytes, KMES_EVENT_SIZE_OFFSET);
+	header_size = pkm_kunit_read_u32(bytes, KMES_EVENT_HEADER_SIZE_OFFSET);
+	type_len = pkm_kunit_read_u16(bytes, KMES_EVENT_TYPE_LEN_OFFSET);
 	if (event_size > len || header_size > event_size)
 		return false;
-	if (header_size != 29U + (u32)type_len)
+	if (header_size != KMES_EVENT_HEADER_BASE_SIZE + (u32)type_len)
 		return false;
 
 	out->event_size = event_size;
 	out->header_size = header_size;
-	out->timestamp = pkm_kunit_read_u64(bytes, 8);
-	out->sequence = pkm_kunit_read_u64(bytes, 16);
-	out->cpu_id = pkm_kunit_read_u16(bytes, 24);
-	out->origin_class = bytes[26];
+	out->timestamp = pkm_kunit_read_u64(bytes, KMES_EVENT_TIMESTAMP_NS_OFFSET);
+	out->sequence = pkm_kunit_read_u64(bytes, KMES_EVENT_SEQUENCE_OFFSET);
+	out->cpu_id = pkm_kunit_read_u16(bytes, KMES_EVENT_CPU_ID_OFFSET);
+	out->origin_class = bytes[KMES_EVENT_ORIGIN_CLASS_OFFSET];
+	out->effective_token_guid =
+		bytes + KMES_EVENT_EFFECTIVE_TOKEN_GUID_OFFSET;
+	out->true_token_guid = bytes + KMES_EVENT_TRUE_TOKEN_GUID_OFFSET;
+	out->process_guid = bytes + KMES_EVENT_PROCESS_GUID_OFFSET;
 	out->type_len = type_len;
-	out->type_ptr = bytes + 29;
+	out->type_ptr = bytes + KMES_EVENT_HEADER_BASE_SIZE;
 	out->payload_ptr = bytes + header_size;
 	out->payload_len = event_size - header_size;
 	return true;
@@ -3542,7 +3579,7 @@ static void pkm_kunit_kmes_attach_success_returns_cpu_fds(
 		fds[i] = -1;
 
 	pkm_kunit_reset_kmes();
-	ret = pkm_kmes_kunit_attach_for_token(token, fds, &count, &capacity);
+	ret = pkm_kunit_kmes_attach_all(token, fds, &count, &capacity);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
 	KUNIT_ASSERT_GT(test, count, 0);
 	KUNIT_EXPECT_EQ(test, capacity, (u64)PKM_KUNIT_KMES_DEFAULT_CAPACITY);
@@ -3579,22 +3616,26 @@ static void pkm_kunit_kmes_attach_success_returns_cpu_fds(
 	kacs_rust_token_drop(token);
 }
 
-static void pkm_kunit_kmes_attach_erange_sets_required_count(
+static void pkm_kunit_kmes_attach_einval_on_out_of_range_cpu(
 	struct kunit *test)
 {
 	const void *token;
-	int fds[1] = { -1 };
-	int count = 0;
+	int fd = 0x5a;
 	u64 capacity = 0xfeedfaceULL;
 	long ret;
 
 	token = kacs_rust_kunit_create_query_only_token();
 	KUNIT_ASSERT_NOT_NULL(test, token);
 
-	ret = pkm_kmes_kunit_attach_for_token(token, fds, &count, &capacity);
-	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
-	KUNIT_EXPECT_GT(test, count, 0);
-	KUNIT_EXPECT_EQ(test, fds[0], -1);
+	/*
+	 * A ring exists for every possible CPU, so nr_cpu_ids is the first
+	 * out-of-range index. Attaching to it fails with EINVAL and leaves the
+	 * caller's out-params untouched.
+	 */
+	ret = pkm_kmes_kunit_attach_for_token(token, (u32)nr_cpu_ids, &fd,
+					      &capacity);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, fd, 0x5a);
 	KUNIT_EXPECT_EQ(test, capacity, 0xfeedfaceULL);
 	kacs_rust_token_drop(token);
 }
@@ -3609,8 +3650,7 @@ static void pkm_kunit_kmes_attach_denies_without_security(
 		.attributes = 0,
 	};
 	u64 previous_enabled = 0;
-	int fds[1] = { -1 };
-	int count = 1;
+	int fd = -1;
 	u64 capacity = 0;
 	long ret;
 
@@ -3629,7 +3669,7 @@ static void pkm_kunit_kmes_attach_denies_without_security(
 		kacs_rust_token_has_enabled_privilege(token,
 						      PKM_KUNIT_SE_SECURITY_PRIVILEGE));
 
-	ret = pkm_kmes_kunit_attach_for_token(token, fds, &count, &capacity);
+	ret = pkm_kmes_kunit_attach_for_token(token, 0, &fd, &capacity);
 	KUNIT_EXPECT_EQ(test, ret, (long)-EPERM);
 	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
 	KUNIT_EXPECT_EQ(test,
@@ -3657,8 +3697,7 @@ static void pkm_kunit_kmes_attach_checks_privilege_before_usercopy(
 
 	KUNIT_EXPECT_EQ(test,
 			pkm_kmes_kunit_attach_user_for_token(
-				token, (int __user *)1, (int __user *)1,
-				(u64 __user *)1),
+				token, 0, (u64 __user *)1),
 			(long)-EPERM);
 	kacs_rust_token_drop(token);
 }
@@ -3673,8 +3712,8 @@ static void pkm_kunit_kmes_attach_mapping_view_tracks_emission(
 	int *fds;
 	int count = nr_cpu_ids;
 	u64 capacity = 0;
-	u8 event_bytes[64] = { 0 };
-	u8 mirror_bytes[64] = { 0 };
+	u8 event_bytes[128] = { 0 };
+	u8 mirror_bytes[128] = { 0 };
 	long ret;
 	int i;
 	int emitted_fd = -1;
@@ -3688,7 +3727,7 @@ static void pkm_kunit_kmes_attach_mapping_view_tracks_emission(
 		fds[i] = -1;
 
 	pkm_kunit_reset_kmes();
-	ret = pkm_kmes_kunit_attach_for_token(token, fds, &count, &capacity);
+	ret = pkm_kunit_kmes_attach_all(token, fds, &count, &capacity);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
 
 	for (i = 0; i < count; i++)
@@ -3723,6 +3762,10 @@ static void pkm_kunit_kmes_attach_mapping_view_tracks_emission(
 			  pkm_kunit_parse_kmes_event(event_bytes,
 						     sizeof(event_bytes), &event));
 	KUNIT_EXPECT_EQ(test, event.origin_class, KMES_ORIGIN_KACS);
+	/* v0.20 header carries the three identity GUIDs: payload sits at the
+	 * 77-byte base plus the type string. */
+	KUNIT_EXPECT_EQ(test, event.header_size,
+			(u32)(KMES_EVENT_HEADER_BASE_SIZE + event.type_len));
 	pkm_kunit_expect_bytes_eq(test, event.type_ptr, event.type_len,
 				  (const u8 *)PKM_KUNIT_KMES_DIRECT_TYPE,
 				  sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1);
@@ -3777,8 +3820,8 @@ static void pkm_kunit_kmes_swap_old_fd_freezes_and_new_attach_rebinds(
 
 	pkm_kunit_reset_kmes();
 	KUNIT_ASSERT_EQ(test,
-			pkm_kmes_kunit_attach_for_token(token, fds, &count,
-							&capacity),
+			pkm_kunit_kmes_attach_all(token, fds, &count,
+						  &capacity),
 			0L);
 	old_fd = pkm_kunit_find_current_kmes_fd(test, fds, count, NULL);
 	KUNIT_ASSERT_GE(test, old_fd, 0);
@@ -3816,8 +3859,8 @@ static void pkm_kunit_kmes_swap_old_fd_freezes_and_new_attach_rebinds(
 	KUNIT_EXPECT_EQ(test, first.payload_ptr[0], payload0[0]);
 
 	KUNIT_ASSERT_EQ(test,
-			pkm_kmes_kunit_attach_for_token(token, new_fds, &new_count,
-							&new_capacity),
+			pkm_kunit_kmes_attach_all(token, new_fds, &new_count,
+						  &new_capacity),
 			0L);
 	new_fd = pkm_kunit_find_current_kmes_fd(test, new_fds, new_count,
 						 &new_before_emit);
@@ -3905,8 +3948,8 @@ static void pkm_kunit_kmes_swap_wakes_old_generation_waiter(
 
 	pkm_kunit_reset_kmes();
 	KUNIT_ASSERT_EQ(test,
-			pkm_kmes_kunit_attach_for_token(token, fds, &count,
-							&capacity),
+			pkm_kunit_kmes_attach_all(token, fds, &count,
+						  &capacity),
 			0L);
 	fd = pkm_kunit_find_current_kmes_fd(test, fds, count, NULL);
 	KUNIT_ASSERT_GE(test, fd, 0);
@@ -4000,8 +4043,8 @@ static void pkm_kunit_kmes_swap_failed_allocation_keeps_live_ring(
 
 	pkm_kunit_reset_kmes();
 	KUNIT_ASSERT_EQ(test,
-			pkm_kmes_kunit_attach_for_token(token, fds, &count,
-							&capacity),
+			pkm_kunit_kmes_attach_all(token, fds, &count,
+						  &capacity),
 			0L);
 	fd = pkm_kunit_find_current_kmes_fd(test, fds, count, &before);
 	KUNIT_ASSERT_GE(test, fd, 0);
@@ -41077,7 +41120,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_direct_emit_writes_single_event),
 	KUNIT_CASE(pkm_kunit_kmes_direct_invalid_type_drops_structurally),
 	KUNIT_CASE(pkm_kunit_kmes_attach_success_returns_cpu_fds),
-	KUNIT_CASE(pkm_kunit_kmes_attach_erange_sets_required_count),
+	KUNIT_CASE(pkm_kunit_kmes_attach_einval_on_out_of_range_cpu),
 	KUNIT_CASE(pkm_kunit_kmes_attach_denies_without_security),
 	KUNIT_CASE(pkm_kunit_kmes_attach_checks_privilege_before_usercopy),
 	KUNIT_CASE(pkm_kunit_kmes_attach_mapping_view_tracks_emission),

@@ -18,8 +18,8 @@ int pkm_kmes_current_process_info(u64 *pid_out, u8 *name_out,
 long pkm_kmes_emit_user_for_token(const void *token, const void __user *event_type,
 				  u16 event_type_len,
 				  const void __user *payload, u32 payload_len);
-long pkm_kmes_attach_user_for_token(const void *token, int __user *fds,
-				    int __user *count, u64 __user *capacity);
+long pkm_kmes_attach_user_for_token(const void *token, u32 cpu_id,
+				    u64 __user *capacity);
 long pkm_kmes_emit_batch_user_for_token(
 	const void *token, const struct kmes_emit_entry __user *entries,
 	u32 count, u32 __user *emitted_out);
@@ -60,10 +60,9 @@ int pkm_kmes_kunit_copy_latest_matching_event(
 u16 pkm_kmes_kunit_current_cpu_id(void);
 int pkm_kmes_kunit_swap_capacity(u64 new_capacity);
 void pkm_kmes_kunit_fail_next_swap_alloc(void);
-long pkm_kmes_kunit_attach_for_token(const void *token, int *fds, int *count,
-				     u64 *capacity);
-long pkm_kmes_kunit_attach_user_for_token(const void *token, int __user *fds,
-					  int __user *count,
+long pkm_kmes_kunit_attach_for_token(const void *token, u32 cpu_id,
+				     int *fd_out, u64 *capacity);
+long pkm_kmes_kunit_attach_user_for_token(const void *token, u32 cpu_id,
 					  u64 __user *capacity);
 int pkm_kmes_kunit_fd_snapshot(int fd,
 			       struct pkm_kmes_kunit_fd_snapshot *out);

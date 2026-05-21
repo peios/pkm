@@ -544,7 +544,10 @@ static void pkm_kmes_reserve_space(struct pkm_kmes_cpu_state *cpu,
 }
 
 static void pkm_kmes_write_event_at(struct pkm_kmes_cpu_state *cpu, u64 pos,
-				    u8 origin_class, const void *event_type,
+				    u8 origin_class, const kacs_uuid_t *eff_guid,
+				    const kacs_uuid_t *true_guid,
+				    const kacs_uuid_t *proc_guid,
+				    const void *event_type,
 				    size_t event_type_len, const void *payload,
 				    size_t payload_len, u64 timestamp,
 				    u64 sequence)
@@ -564,6 +567,15 @@ static void pkm_kmes_write_event_at(struct pkm_kmes_cpu_state *cpu, u64 pos,
 	pos += sizeof(u16);
 	pkm_kmes_write_bytes_at(cpu->data, cpu->capacity, pos, &origin_class, 1);
 	pos += 1;
+	pkm_kmes_write_bytes_at(cpu->data, cpu->capacity, pos, eff_guid->bytes,
+				KMES_EVENT_GUID_SIZE);
+	pos += KMES_EVENT_GUID_SIZE;
+	pkm_kmes_write_bytes_at(cpu->data, cpu->capacity, pos, true_guid->bytes,
+				KMES_EVENT_GUID_SIZE);
+	pos += KMES_EVENT_GUID_SIZE;
+	pkm_kmes_write_bytes_at(cpu->data, cpu->capacity, pos, proc_guid->bytes,
+				KMES_EVENT_GUID_SIZE);
+	pos += KMES_EVENT_GUID_SIZE;
 	pkm_kmes_write_u16_at(cpu->data, cpu->capacity, pos,
 			      (u16)event_type_len);
 	pos += sizeof(u16);
@@ -575,6 +587,9 @@ static void pkm_kmes_write_event_at(struct pkm_kmes_cpu_state *cpu, u64 pos,
 }
 
 static void pkm_kmes_write_event(struct pkm_kmes_cpu_state *cpu, u8 origin_class,
+				 const kacs_uuid_t *eff_guid,
+				 const kacs_uuid_t *true_guid,
+				 const kacs_uuid_t *proc_guid,
 				 const void *event_type, size_t event_type_len,
 				 const void *payload, size_t payload_len,
 				 u64 timestamp, u64 sequence,
@@ -583,7 +598,8 @@ static void pkm_kmes_write_event(struct pkm_kmes_cpu_state *cpu, u8 origin_class
 	u32 event_size = KMES_EVENT_HEADER_BASE_SIZE + (u32)event_type_len +
 			 (u32)payload_len;
 
-	pkm_kmes_write_event_at(cpu, cpu->write_pos, origin_class, event_type,
+	pkm_kmes_write_event_at(cpu, cpu->write_pos, origin_class, eff_guid,
+				true_guid, proc_guid, event_type,
 				event_type_len, payload, payload_len, timestamp,
 				sequence);
 
@@ -794,6 +810,9 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 	u64 sequence;
 	u64 first_sequence;
 	unsigned int cpu_id;
+	kacs_uuid_t eff_guid;
+	kacs_uuid_t true_guid;
+	kacs_uuid_t proc_guid;
 	u32 index;
 	bool wake_needed = false;
 
@@ -829,6 +848,16 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 	}
 
 	timestamp = ktime_get_real_ns();
+	/*
+	 * Identity stamps are captured once and shared by every event in the
+	 * batch: the batch runs preempt-disabled on one CPU, so the emitting
+	 * thread's identity cannot change mid-batch. The three KACS accessors
+	 * are preempt-safe (RCU reads of current's creds plus a 16-byte copy)
+	 * and yield the null GUID when no identity is available.
+	 */
+	eff_guid = kacs_effective_token_guid();
+	true_guid = kacs_primary_token_guid();
+	proc_guid = kacs_process_guid();
 	write_pos = cpu->write_pos;
 	tail_pos = cpu->tail_pos;
 	sequence = cpu->sequence;
@@ -838,7 +867,8 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 		pkm_kmes_reserve_space_local(cpu, &tail_pos, write_pos,
 					     events[index].event_size);
 		sequence++;
-		pkm_kmes_write_event_at(cpu, write_pos, origin_class,
+		pkm_kmes_write_event_at(cpu, write_pos, origin_class, &eff_guid,
+					&true_guid, &proc_guid,
 					events[index].event_type,
 					events[index].event_type_len,
 					events[index].payload,
@@ -1342,120 +1372,65 @@ static int pkm_kmes_consumer_fd_create(struct pkm_kmes_cpu_state *cpu)
 	return fd;
 }
 
-static void pkm_kmes_close_fds(const int *fds, unsigned int count)
+static long pkm_kmes_attach_core(u32 cpu_id, int *fd_out, u64 *capacity_out)
 {
-	unsigned int i;
+	struct pkm_kmes_cpu_state *ring;
+	int fd;
 
-	for (i = 0; i < count; i++) {
-		if (fds[i] >= 0)
-			close_fd((unsigned int)fds[i]);
-	}
-}
-
-static long pkm_kmes_attach_core(int requested_count, int *fds_out,
-				 int *actual_count_out, u64 *capacity_out)
-{
-	unsigned int cpu;
-	unsigned int produced = 0;
-	int required;
-
-	if (!actual_count_out || !capacity_out)
+	if (!fd_out || !capacity_out)
 		return -EINVAL;
 	if (!pkm_kmes_ready || !pkm_kmes_cpus || pkm_kmes_cpu_count == 0)
 		return -ENOMEM;
-
-	required = (int)pkm_kmes_cpu_count;
-	if (requested_count < required) {
-		*actual_count_out = required;
-		return -ERANGE;
-	}
-	if (!fds_out)
-		return -EFAULT;
+	if (cpu_id >= pkm_kmes_cpu_count)
+		return -EINVAL;
 
 	mutex_lock(&pkm_kmes_topology_lock);
-	for (cpu = 0; cpu < pkm_kmes_cpu_slots; cpu++) {
-		int fd;
-		struct pkm_kmes_cpu_state *ring = pkm_kmes_cpus[cpu].live;
-
-		if (!ring || !ring->data)
-			continue;
-		fd = pkm_kmes_consumer_fd_create(ring);
-		if (fd < 0) {
-			mutex_unlock(&pkm_kmes_topology_lock);
-			pkm_kmes_close_fds(fds_out, produced);
-			return fd;
-		}
-		fds_out[produced++] = fd;
+	ring = pkm_kmes_cpus[cpu_id].live;
+	if (!ring || !ring->data) {
+		mutex_unlock(&pkm_kmes_topology_lock);
+		return -EINVAL;
 	}
-
-	*actual_count_out = required;
-	*capacity_out = pkm_kmes_cpus[0].live->capacity;
+	fd = pkm_kmes_consumer_fd_create(ring);
+	if (fd < 0) {
+		mutex_unlock(&pkm_kmes_topology_lock);
+		return fd;
+	}
+	*capacity_out = ring->capacity;
 	mutex_unlock(&pkm_kmes_topology_lock);
+
+	*fd_out = fd;
 	return 0;
 }
 
-long pkm_kmes_attach_user_for_token(const void *token, int __user *fds,
-				    int __user *count, u64 __user *capacity)
+long pkm_kmes_attach_user_for_token(const void *token, u32 cpu_id,
+				    u64 __user *capacity)
 {
-	int *fd_array = NULL;
-	int requested_count;
-	int actual_count = 0;
 	u64 cpu_capacity = 0;
+	int fd = -1;
 	long ret;
 
 	ret = pkm_kmes_require_security(token);
 	if (ret)
 		return ret;
-	if (!count)
-		return -EFAULT;
-	if (copy_from_user(&requested_count, count, sizeof(requested_count)))
-		return -EFAULT;
-	if (!pkm_kmes_ready || !pkm_kmes_cpus || pkm_kmes_cpu_count == 0)
-		return -ENOMEM;
-
-	actual_count = (int)pkm_kmes_cpu_count;
-	if (requested_count < actual_count) {
-		if (copy_to_user(count, &actual_count, sizeof(actual_count)))
-			return -EFAULT;
-		return -ERANGE;
-	}
-	if (!fds || !capacity)
+	if (!capacity)
 		return -EFAULT;
 
-	fd_array = kmalloc_array(actual_count, sizeof(*fd_array), GFP_KERNEL);
-	if (!fd_array)
-		return -ENOMEM;
-
-	ret = pkm_kmes_attach_core(requested_count, fd_array, &actual_count,
-				   &cpu_capacity);
+	ret = pkm_kmes_attach_core(cpu_id, &fd, &cpu_capacity);
 	if (ret)
-		goto out;
-	if (copy_to_user(capacity, &cpu_capacity, sizeof(cpu_capacity))) {
-		ret = -EFAULT;
-		goto out_close;
-	}
-	if (copy_to_user(fds, fd_array, actual_count * sizeof(*fd_array))) {
-		ret = -EFAULT;
-		goto out_close;
-	}
-	if (copy_to_user(count, &actual_count, sizeof(actual_count))) {
-		ret = -EFAULT;
-		goto out_close;
-	}
-	goto out;
+		return ret;
 
-out_close:
-	pkm_kmes_close_fds(fd_array, actual_count);
-out:
-	kfree(fd_array);
-	return ret;
+	if (copy_to_user(capacity, &cpu_capacity, sizeof(cpu_capacity))) {
+		close_fd((unsigned int)fd);
+		return -EFAULT;
+	}
+
+	return fd;
 }
 
-SYSCALL_DEFINE3(kmes_attach, int __user *, fds, int __user *, count,
-		u64 __user *, capacity)
+SYSCALL_DEFINE2(kmes_attach, unsigned int, cpu_id, u64 __user *, capacity)
 {
 	return pkm_kmes_attach_user_for_token(
-		pkm_kacs_current_effective_token_ptr(), fds, count, capacity);
+		pkm_kacs_current_effective_token_ptr(), cpu_id, capacity);
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
@@ -1538,6 +1513,9 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 	u64 timestamp;
 	u64 sequence;
 	unsigned int cpu_id;
+	kacs_uuid_t eff_guid;
+	kacs_uuid_t true_guid;
+	kacs_uuid_t proc_guid;
 	bool wake_needed = false;
 	bool emitted = false;
 
@@ -1556,6 +1534,16 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 	timestamp = ktime_get_real_ns();
 	sequence = ++cpu->sequence;
 
+	/*
+	 * Identity stamps reflect the thread at ring-write time. The three
+	 * KACS accessors are preempt-safe (RCU reads of current's creds plus a
+	 * 16-byte copy); they return the null GUID for kernel emission with no
+	 * process context or before KACS init.
+	 */
+	eff_guid = kacs_effective_token_guid();
+	true_guid = kacs_primary_token_guid();
+	proc_guid = kacs_process_guid();
+
 	if (event_type_len == 0 || event_type_len > PKM_KMES_MAX_KERNEL_TYPE_LEN)
 		goto drop;
 	if (check_add_overflow(KMES_EVENT_HEADER_BASE_SIZE, event_type_len,
@@ -1569,7 +1557,8 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 		goto drop;
 
 	pkm_kmes_reserve_space(cpu, event_size);
-	pkm_kmes_write_event(cpu, origin_class, event_type, event_type_len,
+	pkm_kmes_write_event(cpu, origin_class, &eff_guid, &true_guid,
+			     &proc_guid, event_type, event_type_len,
 			     payload, payload_len, timestamp, sequence,
 			     &wake_needed);
 	emitted = true;
@@ -2092,26 +2081,25 @@ void pkm_kmes_kunit_fail_next_swap_alloc(void)
 	WRITE_ONCE(pkm_kmes_kunit_fail_next_ring_alloc, true);
 }
 
-long pkm_kmes_kunit_attach_for_token(const void *token, int *fds, int *count,
-				     u64 *capacity)
+long pkm_kmes_kunit_attach_for_token(const void *token, u32 cpu_id,
+				     int *fd_out, u64 *capacity)
 {
 	long ret;
 
-	if (!count || !capacity)
+	if (!fd_out || !capacity)
 		return -EINVAL;
 
 	ret = pkm_kmes_require_security(token);
 	if (ret)
 		return ret;
 
-	return pkm_kmes_attach_core(*count, fds, count, capacity);
+	return pkm_kmes_attach_core(cpu_id, fd_out, capacity);
 }
 
-long pkm_kmes_kunit_attach_user_for_token(const void *token, int __user *fds,
-					  int __user *count,
+long pkm_kmes_kunit_attach_user_for_token(const void *token, u32 cpu_id,
 					  u64 __user *capacity)
 {
-	return pkm_kmes_attach_user_for_token(token, fds, count, capacity);
+	return pkm_kmes_attach_user_for_token(token, cpu_id, capacity);
 }
 
 static int pkm_kmes_fd_lookup(int fd, struct pkm_kmes_cpu_state **out_cpu)

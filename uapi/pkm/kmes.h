@@ -8,9 +8,11 @@
  * KMES — the Kernel-Mediated Event Stream.
  *
  * Events are emitted via SYS_KMES_EMIT / SYS_KMES_EMIT_BATCH and consumed
- * through per-CPU ring buffers attached with SYS_KMES_ATTACH (one mmap-able
- * fd per CPU). This header defines the emission ABI, the ring-buffer
- * metadata layout, and the on-wire event header a consumer parses.
+ * through per-CPU ring buffers. SYS_KMES_ATTACH(cpu_id, capacity) returns one
+ * mmap-able fd for a single CPU's ring; a consumer enumerates CPUs by calling
+ * it with cpu_id 0, 1, ... until it returns -EINVAL. This header defines the
+ * emission ABI, the ring-buffer metadata layout, and the on-wire event header
+ * a consumer parses.
  */
 
 /* Event origin class — kmes_event_header.origin_class. */
@@ -43,35 +45,49 @@ struct kmes_emit_entry {
 /*
  * On-wire event header.
  *
- * Every event in a ring begins with a fixed 29-byte header, followed by
+ * Every event in a ring begins with a fixed 77-byte header, followed by
  * event_type_len bytes of type string and then the msgpack payload. Events
  * abut at event_size stride, so a header is not generally aligned; it
  * crosses the ABI as raw bytes, not a C struct. Its fields, in order:
  *
- *   __u32  event_size      total event byte length (header + type + payload)
- *   __u32  header_size     byte offset from the event start to the payload
+ *   __u32  event_size            total event byte length (header + type + payload)
+ *   __u32  header_size           byte offset from the event start to the payload
  *   __u64  timestamp_ns
  *   __u64  sequence
  *   __u16  cpu_id
- *   __u8   origin_class    one of KMES_ORIGIN_* above
- *   __u16  event_type_len  length of the type string following the header
+ *   __u8   origin_class          one of KMES_ORIGIN_* above
+ *   __u8   effective_token_guid[16]
+ *   __u8   true_token_guid[16]
+ *   __u8   process_guid[16]
+ *   __u16  event_type_len        length of the type string following the header
+ *
+ * The three GUIDs are 16-byte Microsoft GUID binary values (Data1/Data2/Data3
+ * little-endian, Data4 raw), captured from KACS at emission time; the null GUID
+ * (16 zero bytes) means identity was unavailable (KACS not initialised, or no
+ * process context). KMES copies them opaquely.
  *
  * Read each field at its KMES_EVENT_*_OFFSET below. header_size locates the
- * payload: it is at least KMES_EVENT_HEADER_BASE_SIZE + event_type_len; a
- * future revision may insert reserved bytes, so consumers must use
- * header_size, not the end of the type string.
+ * payload: it is KMES_EVENT_HEADER_BASE_SIZE + event_type_len. A future
+ * revision may grow the header, so consumers must use header_size, not the
+ * end of the type string, to find the payload.
  */
-#define KMES_EVENT_SIZE_OFFSET		0U
-#define KMES_EVENT_HEADER_SIZE_OFFSET	4U
-#define KMES_EVENT_TIMESTAMP_NS_OFFSET	8U
-#define KMES_EVENT_SEQUENCE_OFFSET	16U
-#define KMES_EVENT_CPU_ID_OFFSET	24U
-#define KMES_EVENT_ORIGIN_CLASS_OFFSET	26U
-#define KMES_EVENT_TYPE_LEN_OFFSET	27U
+#define KMES_EVENT_SIZE_OFFSET			0U
+#define KMES_EVENT_HEADER_SIZE_OFFSET		4U
+#define KMES_EVENT_TIMESTAMP_NS_OFFSET		8U
+#define KMES_EVENT_SEQUENCE_OFFSET		16U
+#define KMES_EVENT_CPU_ID_OFFSET		24U
+#define KMES_EVENT_ORIGIN_CLASS_OFFSET		26U
+#define KMES_EVENT_EFFECTIVE_TOKEN_GUID_OFFSET	27U
+#define KMES_EVENT_TRUE_TOKEN_GUID_OFFSET	43U
+#define KMES_EVENT_PROCESS_GUID_OFFSET		59U
+#define KMES_EVENT_TYPE_LEN_OFFSET		75U
+
+/* Byte width of each identity GUID in the event header. */
+#define KMES_EVENT_GUID_SIZE			16U
 
 /* Byte size of the fixed event header — the offset at which the type
  * string begins. */
-#define KMES_EVENT_HEADER_BASE_SIZE	29U
+#define KMES_EVENT_HEADER_BASE_SIZE		77U
 
 /*
  * Ring-buffer metadata layout. An attached ring is mmap'd as:
