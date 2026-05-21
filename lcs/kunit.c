@@ -114,10 +114,24 @@ struct pkm_lcs_kunit_walk_source_script {
 	int result;
 };
 
+struct pkm_lcs_kunit_read_key_source_script {
+	struct file *file;
+	const u8 *expected_guid;
+	const char *name;
+	const u8 *parent_guid;
+	const u8 *sd;
+	size_t sd_len;
+	bool symlink;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
 static void pkm_lcs_kunit_setup_registered_source(struct kunit *test,
 						  struct file *file,
 						  const void **token_out);
 static int pkm_lcs_kunit_walk_source_thread(void *raw_script);
+static int pkm_lcs_kunit_read_key_source_thread(void *raw_script);
 
 static const struct file_operations pkm_lcs_kunit_non_key_fops = { };
 
@@ -1570,6 +1584,156 @@ static void pkm_lcs_kunit_open_absolute_uses_implicit_base_layer(
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_open_absolute_root_uses_read_key(struct kunit *test)
+{
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	const char path_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = root_guid,
+		.name = "Machine",
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	long fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	script.file = &file;
+	script.sd = sd;
+	script.sd_len = sd_len;
+
+	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+			   "pkm-lcs-kunit-open-root");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_open_user_absolute_path_for_token(
+		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
+		0, NULL, 0, NULL, 0);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)fd, &snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, snapshot.path_component_count, 1U);
+	KUNIT_EXPECT_EQ(test, memcmp(snapshot.key_guid, root_guid,
+				    RSI_GUID_SIZE), 0);
+	KUNIT_EXPECT_STREQ(test, snapshot.first_component, "Machine");
+	KUNIT_EXPECT_STREQ(test, snapshot.last_component, "Machine");
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_open_absolute_root_denied_publishes_no_fd(
+	struct kunit *test)
+{
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	const char path_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = root_guid,
+		.name = "Machine",
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_QUERY_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	script.file = &file;
+	script.sd = sd;
+	script.sd_len = sd_len;
+
+	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+			   "pkm-lcs-kunit-open-root-deny");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_open_user_absolute_path_for_token(
+		token, &ops, (const char __user *)path_src,
+		KEY_QUERY_VALUE | KEY_SET_VALUE, 0, NULL, 0, NULL, 0, NULL,
+		0);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_open_absolute_root_malformed_sd_fails_closed(
+	struct kunit *test)
+{
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	static const u8 bad_sd[] = { 0x01, 0x02, 0x03 };
+	const char path_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = root_guid,
+		.name = "Machine",
+		.sd = bad_sd,
+		.sd_len = sizeof(bad_sd),
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+
+	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+			   "pkm-lcs-kunit-open-root-bad-sd");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_open_user_absolute_path_for_token(
+		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
+		0, NULL, 0, NULL, 0);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
 	kacs_rust_token_drop(token);
@@ -3381,6 +3545,186 @@ static int pkm_lcs_kunit_walk_source_thread(void *raw_script)
 
 	script->result = 0;
 	return 0;
+}
+
+static int pkm_lcs_kunit_read_key_source_build_response(
+	const struct pkm_lcs_kunit_read_key_source_script *script,
+	u64 request_id, u8 *response, size_t response_len, size_t *built_len)
+{
+	static const u8 nil_guid[RSI_GUID_SIZE];
+	const char *name;
+	const u8 *parent_guid;
+	const u8 *sd;
+	size_t sd_len;
+	size_t offset = RSI_MIN_RESPONSE_SIZE;
+	u16 response_op = RSI_READ_KEY | RSI_RESPONSE_BIT;
+	int ret;
+
+	if (!script || !response || !built_len)
+		return -EINVAL;
+	if (response_len < RSI_MIN_RESPONSE_SIZE)
+		return -EMSGSIZE;
+
+	name = script->name ? script->name : "Machine";
+	parent_guid = script->parent_guid ? script->parent_guid : nil_guid;
+	sd = script->sd ? script->sd : pkm_lcs_kunit_owner_only_sd;
+	sd_len = script->sd ? script->sd_len :
+			      sizeof(pkm_lcs_kunit_owner_only_sd);
+
+	memset(response, 0, response_len);
+	put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
+	put_unaligned_le16(response_op, response + RSI_RESPONSE_OP_CODE_OFFSET);
+	put_unaligned_le32(RSI_OK, response + RSI_RESPONSE_STATUS_OFFSET);
+
+	ret = pkm_lcs_kunit_walk_source_append_len_prefixed(
+		response, response_len, &offset, name, strlen(name));
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_walk_source_append(response, response_len, &offset,
+					       parent_guid, RSI_GUID_SIZE);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_walk_source_append_len_prefixed(
+		response, response_len, &offset, sd, sd_len);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_walk_source_append_u8(response, response_len,
+						  &offset, 0);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_walk_source_append_u8(
+		response, response_len, &offset, script->symlink ? 1 : 0);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_walk_source_append_u64(response, response_len,
+						   &offset, 2000ULL);
+	if (ret)
+		return ret;
+
+	if (offset > U32_MAX)
+		return -EOVERFLOW;
+	put_unaligned_le32((u32)offset, response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	*built_len = offset;
+	return 0;
+}
+
+static int pkm_lcs_kunit_read_key_source_thread(void *raw_script)
+{
+	struct pkm_lcs_kunit_read_key_source_script *script = raw_script;
+	size_t expected_len = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
+	u8 request[64];
+	u8 response[256];
+	size_t response_len = 0;
+	ssize_t count;
+	u64 request_id;
+	u16 request_op;
+	int ret;
+
+	if (!script || !script->file || !script->expected_guid) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	for (;;) {
+		count = pkm_lcs_kunit_source_device_read_file(
+			script->file, request, sizeof(request), true);
+		if (count != -EAGAIN)
+			break;
+		if (kthread_should_stop()) {
+			script->result = -EINTR;
+			return script->result;
+		}
+		msleep(1);
+	}
+	if (count < 0) {
+		script->result = (int)count;
+		return script->result;
+	}
+	script->reads++;
+	if ((size_t)count != expected_len) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+
+	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
+	if (request_op != RSI_READ_KEY ||
+	    memcmp(request + RSI_REQUEST_HEADER_SIZE, script->expected_guid,
+		   RSI_GUID_SIZE)) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+
+	ret = pkm_lcs_kunit_read_key_source_build_response(
+		script, request_id, response, sizeof(response), &response_len);
+	if (ret) {
+		script->result = ret;
+		return script->result;
+	}
+	count = pkm_lcs_kunit_source_device_write_file(
+		script->file, response, response_len, false, NULL);
+	if (count != (ssize_t)response_len) {
+		script->result = count < 0 ? (int)count : -EIO;
+		return script->result;
+	}
+	script->writes++;
+	script->result = 0;
+	return 0;
+}
+
+static void pkm_lcs_kunit_rsi_read_key_bridge_accepts_valid(
+	struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+		0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+	};
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = guid,
+		.name = "Machine",
+	};
+	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_rsi_read_key_result result = { };
+	u8 request[RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE];
+	u8 response[256];
+	size_t response_len = 0;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_rsi_build_read_key_request(
+				request, sizeof(request), 42, 0, guid, &built),
+			0L);
+	KUNIT_EXPECT_EQ(test, built.len, sizeof(request));
+	KUNIT_EXPECT_EQ(test, built.request_id, 42ULL);
+	KUNIT_EXPECT_EQ(test, built.txn_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)RSI_READ_KEY);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(request + RSI_REQUEST_HEADER_SIZE, guid,
+			       RSI_GUID_SIZE),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_read_key_source_build_response(
+				&script, built.request_id, response,
+				sizeof(response), &response_len),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_rsi_materialize_read_key_response(
+				response, response_len, built.request_id,
+				&result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.name_len, 7U);
+	KUNIT_EXPECT_EQ(test,
+			result.sd_len,
+			(u32)sizeof(pkm_lcs_kunit_owner_only_sd));
+	KUNIT_EXPECT_EQ(test, result.last_write_time, 2000ULL);
+	KUNIT_EXPECT_EQ(test, result.volatile_key, 0U);
+	KUNIT_EXPECT_EQ(test, result.symlink, 0U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response + result.sd_offset,
+			       pkm_lcs_kunit_owner_only_sd,
+			       sizeof(pkm_lcs_kunit_owner_only_sd)),
+			0);
 }
 
 static void pkm_lcs_kunit_source_request_read_returns_complete_frame(
@@ -5334,6 +5678,11 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_open_path_components_rejects_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_composes_success),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_uses_implicit_base_layer),
+	KUNIT_CASE(pkm_lcs_kunit_open_absolute_root_uses_read_key),
+	KUNIT_CASE(
+		pkm_lcs_kunit_open_absolute_root_denied_publishes_no_fd),
+	KUNIT_CASE(
+		pkm_lcs_kunit_open_absolute_root_malformed_sd_fails_closed),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_denied_publishes_no_fd),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_malformed_sd_fails_closed),
 	KUNIT_CASE(
@@ -5374,6 +5723,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_rejects_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_validates_child),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_lookup_request_frame_rejects_short_buffer),
+	KUNIT_CASE(pkm_lcs_kunit_rsi_read_key_bridge_accepts_valid),
 	KUNIT_CASE(pkm_lcs_kunit_source_request_read_returns_complete_frame),
 	KUNIT_CASE(pkm_lcs_kunit_source_request_read_preserves_fifo_order),
 	KUNIT_CASE(

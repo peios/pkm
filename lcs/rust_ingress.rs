@@ -7,21 +7,23 @@ use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
     classify_hive_route, current_user_sid_component_from_binary_sid,
     for_each_routable_path_component, for_each_rsi_lookup_source_path_entry,
-    parse_rsi_lookup_success_response_payload, plan_rsi_source_read,
-    plan_key_open_audit_record, plan_registry_ioctl_fixed_fd_access_gate,
+    parse_rsi_lookup_success_response_payload, parse_rsi_read_key_success_response_payload,
+    plan_rsi_source_read, plan_key_open_audit_record, plan_registry_ioctl_fixed_fd_access_gate,
     plan_registry_key_open_access, plan_registry_open_pre_resolution_access,
     plan_registry_security_info_fd_access_gate, plan_source_registration_sequence_update,
     parse_rsi_request_header, registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
     registry_open_pre_resolution_linux_errno, resolve_named_path_entry, route_hive,
-    route_routable_path_hive, RSI_LOOKUP, rsi_queued_request_from_frame, rsi_status_code_errno,
-    source_registration_error_linux_errno, source_registration_hive_scope, source_slot_hive_status,
+    route_routable_path_hive, RSI_LOOKUP, RSI_READ_KEY, rsi_queued_request_from_frame,
+    rsi_status_code_errno, source_registration_error_linux_errno, source_registration_hive_scope,
+    source_slot_hive_status,
     validate_key_component_bytes, validate_key_fd_open_view, validate_registry_open_flags,
     validate_resolved_relative_path_depth,
     validate_rsi_lookup_metadata_completeness,
     validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,
-    validate_rsi_lookup_path_response_sequences, validate_source_registration,
+    validate_rsi_lookup_path_response_sequences, validate_rsi_read_key_response_names,
+    validate_rsi_read_key_response_security_descriptor, validate_source_registration,
     validate_source_slots, validate_syscall_path_c_string, write_rsi_lookup_request_frame,
-    write_key_open_audit_payload, CurrentUserRewrite, HiveRouteOutcome, HiveView,
+    write_rsi_read_key_request_frame, write_key_open_audit_payload, CurrentUserRewrite, HiveRouteOutcome, HiveView,
     KeyFdOpenView, KeyWatchState, LayerResolutionContext, LayerView, LcsCallerTokenSummary,
     LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry,
     NamedPathResolution, PathKind, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
@@ -192,6 +194,19 @@ pub struct PkmLcsRsiLookupChildResultCopy {
     pub key_guid: [u8; 16],
 }
 
+#[repr(C)]
+pub struct PkmLcsRsiReadKeyResultCopy {
+    pub sd_offset: u32,
+    pub sd_len: u32,
+    pub name_len: u32,
+    pub _pad0: u32,
+    pub last_write_time: u64,
+    pub volatile_key: u8,
+    pub symlink: u8,
+    pub _pad1: [u8; 6],
+    pub parent_guid: [u8; 16],
+}
+
 fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
     source_registration_error_linux_errno(err)
         .unwrap_or(LinuxErrno::Einval)
@@ -259,6 +274,10 @@ fn rsi_lookup_response_error_return(err: LcsError) -> c_int {
         },
         _ => LinuxErrno::Eio.negated_return() as c_int,
     }
+}
+
+fn rsi_read_key_response_error_return(err: LcsError) -> c_int {
+    rsi_lookup_response_error_return(err)
 }
 
 fn rsi_lookup_materialization_error_return(err: LcsError) -> c_int {
@@ -687,6 +706,55 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_lookup_request_frame(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_rsi_read_key_request_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    request_id: u64,
+    txn_id: u64,
+    guid: *const u8,
+    built_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if built_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *built_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            txn_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if dst.is_null() || guid.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
+    let mut guid_copy = [0u8; 16];
+    guid_copy.copy_from_slice(guid_bytes);
+
+    match write_rsi_read_key_request_frame(dst_bytes, request_id, txn_id, guid_copy) {
+        Ok(built) => {
+            unsafe {
+                *built_out = PkmLcsRsiBuiltRequestCopy {
+                    len: built.len,
+                    request_id: built.retained.request_id,
+                    txn_id,
+                    op_code: built.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lcs_rust_validate_rsi_queued_request_frame(
     frame: *const u8,
     frame_len: usize,
@@ -972,6 +1040,84 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_child(
         return LinuxErrno::Eio.negated_return() as c_int;
     }
 
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_rsi_read_key_response(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    result_out: *mut PkmLcsRsiReadKeyResultCopy,
+) -> c_int {
+    if result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *result_out = PkmLcsRsiReadKeyResultCopy {
+            sd_offset: 0,
+            sd_len: 0,
+            name_len: 0,
+            _pad0: 0,
+            last_write_time: 0,
+            volatile_key: 0,
+            symlink: 0,
+            _pad1: [0; 6],
+            parent_guid: [0; 16],
+        };
+    }
+
+    if frame.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let payload = match parse_rsi_read_key_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_READ_KEY,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_read_key_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_read_key_response_names(&payload, &LcsLimits::DEFAULT) {
+        return rsi_read_key_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_read_key_response_security_descriptor(&payload) {
+        return rsi_read_key_response_error_return(err);
+    }
+
+    let base = frame_bytes.as_ptr() as usize;
+    let end = base.saturating_add(frame_len);
+    let sd_ptr = payload.sd.data.as_ptr() as usize;
+    let sd_len = payload.sd.data.len();
+    let Some(sd_end) = sd_ptr.checked_add(sd_len) else {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    };
+    if sd_ptr < base || sd_end > end {
+        return LinuxErrno::Eio.negated_return() as c_int;
+    }
+    let sd_offset = sd_ptr - base;
+    if sd_offset > u32::MAX as usize
+        || sd_len > u32::MAX as usize
+        || payload.name.data.len() > u32::MAX as usize
+    {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    }
+
+    unsafe {
+        (*result_out).sd_offset = sd_offset as u32;
+        (*result_out).sd_len = sd_len as u32;
+        (*result_out).name_len = payload.name.data.len() as u32;
+        (*result_out).last_write_time = payload.last_write_time;
+        (*result_out).volatile_key = payload.volatile as u8;
+        (*result_out).symlink = payload.symlink as u8;
+        (*result_out).parent_guid = payload.parent_guid;
+    }
     0
 }
 

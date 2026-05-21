@@ -1403,6 +1403,95 @@ out_unlock_table:
 	return ret;
 }
 
+static long pkm_lcs_source_dispatch_read_key_request_with_waiter(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_source_queued_request *request;
+	struct pkm_lcs_source_slot *slot;
+	struct pkm_lcs_source_fd *source_fd;
+	size_t frame_len = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
+	u64 request_id;
+	u64 next_request_id;
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+	if (!guid)
+		return -EINVAL;
+
+	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	if (!request)
+		return -ENOMEM;
+	request->frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!request->frame) {
+		kfree(request);
+		return -ENOMEM;
+	}
+	INIT_LIST_HEAD(&request->link);
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE ||
+	    !slot->active_fd) {
+		ret = -EIO;
+		goto out_unlock_table;
+	}
+
+	source_fd = slot->active_fd;
+	mutex_lock(&source_fd->queue_lock);
+	if (source_fd->closing ||
+	    source_fd->state != PKM_LCS_SOURCE_FD_ACTIVE ||
+	    source_fd->source_id != source_id) {
+		ret = -EIO;
+		goto out_unlock_queue;
+	}
+	if (source_fd->in_flight_request_count >=
+	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+		ret = -EAGAIN;
+		goto out_unlock_queue;
+	}
+
+	request_id = source_fd->next_request_id;
+	ret = pkm_lcs_source_request_id_successor(request_id,
+						  &next_request_id);
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_rsi_build_read_key_request(
+		request->frame, frame_len, request_id, txn_id, guid, &built);
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_source_in_flight_insert_locked(
+		source_fd, built.request_id, built.txn_id, built.op_code,
+		waiter);
+	if (ret)
+		goto out_unlock_queue;
+
+	request->len = built.len;
+	request->request_id = built.request_id;
+	request->txn_id = built.txn_id;
+	request->op_code = built.op_code;
+	list_add_tail(&request->link, &source_fd->request_queue);
+	source_fd->queued_request_count++;
+	source_fd->next_request_id = next_request_id;
+	pkm_lcs_source_enqueue_result_fill_locked(result, request, source_fd);
+	request = NULL;
+	ret = 0;
+
+out_unlock_queue:
+	mutex_unlock(&source_fd->queue_lock);
+	if (!ret)
+		wake_up_interruptible(&source_fd->read_wait);
+out_unlock_table:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	pkm_lcs_source_queued_request_free(request);
+	return ret;
+}
+
 long pkm_lcs_source_dispatch_lookup_request(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
@@ -1528,6 +1617,52 @@ long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
 		ret = pkm_lcs_source_dispatch_lookup_waitable_request_retaining_frame(
 			source_id, txn_id, parent_guid, child_name,
 			child_name_len, &waiter, frame, enqueue);
+		if (ret != -EAGAIN)
+			break;
+		if (!pkm_lcs_source_deadline_remaining(deadline))
+			return -ETIMEDOUT;
+	}
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
+							response);
+	if (ret)
+		pkm_lcs_source_response_frame_destroy(frame);
+	return ret;
+}
+
+long pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	u32 timeout_ms, struct pkm_lcs_source_response_frame *frame,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_source_response_waiter waiter;
+	unsigned long deadline;
+	long ret;
+
+	if (!frame)
+		return -EINVAL;
+	if (response)
+		memset(response, 0, sizeof(*response));
+	if (enqueue)
+		memset(enqueue, 0, sizeof(*enqueue));
+
+	pkm_lcs_source_response_waiter_init(&waiter);
+	pkm_lcs_source_response_frame_init(frame);
+	ret = pkm_lcs_source_response_waiter_retain_frame(&waiter, frame);
+	if (ret)
+		return ret;
+	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+
+	for (;;) {
+		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		if (ret)
+			return ret;
+
+		ret = pkm_lcs_source_dispatch_read_key_request_with_waiter(
+			source_id, txn_id, guid, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -1731,6 +1866,7 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 	struct pkm_lcs_source_response_result *result, long *caller_errno)
 {
 	struct pkm_lcs_rsi_lookup_response_summary lookup = { };
+	struct pkm_lcs_rsi_read_key_result read_key = { };
 	u64 next_sequence;
 	long ret;
 
@@ -1750,6 +1886,18 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 		ret = pkm_lcs_rsi_validate_lookup_response(
 			frame, frame_len, result->request_id, next_sequence,
 			&lookup);
+		if (ret == -EIO) {
+			result->malformed_source_data = true;
+			*caller_errno = -EIO;
+			return 0;
+		}
+		if (ret)
+			return ret;
+		*caller_errno = 0;
+		return 0;
+	case RSI_READ_KEY:
+		ret = pkm_lcs_rsi_materialize_read_key_response(
+			frame, frame_len, result->request_id, &read_key);
 		if (ret == -EIO) {
 			result->malformed_source_data = true;
 			*caller_errno = -EIO;
@@ -2120,6 +2268,42 @@ long pkm_lcs_emit_key_open_audit_for_token(
 	return 0;
 }
 
+static long pkm_lcs_publish_open_key_for_token(
+	const void *token, u32 source_id, const u8 key_guid[RSI_GUID_SIZE],
+	const u8 *sd, size_t sd_len, u32 desired_access,
+	const char * const *resolved_path,
+	const u8 (*ancestor_guids)[RSI_GUID_SIZE], u32 path_component_count)
+{
+	struct pkm_lcs_key_fd_publish_input publish = { };
+	struct pkm_lcs_key_open_access_plan access = { };
+	long audit_ret;
+	long ret;
+
+	ret = pkm_lcs_key_open_access_check_for_token(
+		token, sd, sd_len, desired_access, &access);
+	if (ret) {
+		if (ret == -EACCES && access.key_open_sacl_audit_required) {
+			audit_ret = pkm_lcs_emit_key_open_audit_for_token(
+				token, key_guid, &access);
+			if (audit_ret)
+				ret = audit_ret;
+		}
+		return ret;
+	}
+
+	ret = pkm_lcs_emit_key_open_audit_for_token(token, key_guid, &access);
+	if (ret)
+		return ret;
+
+	publish.source_id = source_id;
+	memcpy(publish.key_guid, key_guid, sizeof(publish.key_guid));
+	publish.granted_access = access.fd_granted_access;
+	publish.resolved_path = resolved_path;
+	publish.ancestor_guids = ancestor_guids;
+	publish.path_component_count = path_component_count;
+	return pkm_lcs_key_fd_publish(&publish);
+}
+
 long pkm_lcs_validate_syscall_relative_path(
 	const char *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result)
@@ -2341,15 +2525,18 @@ long pkm_lcs_open_user_absolute_path_for_token(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count)
 {
-	struct pkm_lcs_key_fd_publish_input publish = { };
-	struct pkm_lcs_key_open_access_plan access = { };
 	struct pkm_lcs_materialized_path components = { };
 	struct pkm_lcs_open_preflight_plan preflight = { };
+	struct pkm_lcs_rsi_read_key_result read_key = { };
 	struct pkm_lcs_resolved_key_path resolved = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_source_response_frame root_frame;
+	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_hive_route_result route = { };
 	struct pkm_lcs_syscall_path_copy copy = { };
+	const char *root_path[1];
+	u8 root_ancestors[1][RSI_GUID_SIZE];
 	const u8 *final_sd;
-	long audit_ret;
 	long ret;
 
 	if (!token)
@@ -2377,6 +2564,45 @@ long pkm_lcs_open_user_absolute_path_for_token(
 	if (ret)
 		goto out_copy;
 
+	if (components.component_count == 1) {
+		ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+			route.source_id, 0, route.root_guid,
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &root_frame,
+			&response, &enqueue);
+		if (ret) {
+			pkm_lcs_source_response_frame_destroy(&root_frame);
+			goto out_components;
+		}
+
+		ret = pkm_lcs_rsi_materialize_read_key_response(
+			root_frame.data, root_frame.len, response.request_id,
+			&read_key);
+		if (ret)
+			goto out_root_frame;
+		if (!read_key.sd_len ||
+		    (size_t)read_key.sd_offset > root_frame.len ||
+		    (size_t)read_key.sd_len >
+			    root_frame.len - (size_t)read_key.sd_offset) {
+			ret = -EIO;
+			goto out_root_frame;
+		}
+		if (read_key.symlink && !(flags & REG_OPEN_LINK)) {
+			ret = -EOPNOTSUPP;
+			goto out_root_frame;
+		}
+
+		root_path[0] = components.components[0].name;
+		memcpy(root_ancestors[0], route.root_guid, RSI_GUID_SIZE);
+		final_sd = root_frame.data + read_key.sd_offset;
+		ret = pkm_lcs_publish_open_key_for_token(
+			token, route.source_id, route.root_guid, final_sd,
+			read_key.sd_len, desired_access, root_path,
+			root_ancestors, ARRAY_SIZE(root_path));
+out_root_frame:
+		pkm_lcs_source_response_frame_destroy(&root_frame);
+		goto out_components;
+	}
+
 	ret = pkm_lcs_walk_absolute_components(
 		route.source_id, 0, route.root_guid, components.components,
 		components.component_count, layers, layer_count,
@@ -2394,31 +2620,11 @@ long pkm_lcs_open_user_absolute_path_for_token(
 	}
 
 	final_sd = resolved.final_frame.data + resolved.final_sd_offset;
-	ret = pkm_lcs_key_open_access_check_for_token(
-		token, final_sd, resolved.final_sd_len, desired_access,
-		&access);
-	if (ret) {
-		if (ret == -EACCES && access.key_open_sacl_audit_required) {
-			audit_ret = pkm_lcs_emit_key_open_audit_for_token(
-				token, resolved.key_guid, &access);
-			if (audit_ret)
-				ret = audit_ret;
-		}
-		goto out_resolved;
-	}
-
-	ret = pkm_lcs_emit_key_open_audit_for_token(
-		token, resolved.key_guid, &access);
-	if (ret)
-		goto out_resolved;
-
-	publish.source_id = resolved.source_id;
-	memcpy(publish.key_guid, resolved.key_guid, sizeof(publish.key_guid));
-	publish.granted_access = access.fd_granted_access;
-	publish.resolved_path = (const char * const *)resolved.resolved_path;
-	publish.ancestor_guids = resolved.ancestor_guids;
-	publish.path_component_count = resolved.component_count;
-	ret = pkm_lcs_key_fd_publish(&publish);
+	ret = pkm_lcs_publish_open_key_for_token(
+		token, resolved.source_id, resolved.key_guid, final_sd,
+		resolved.final_sd_len, desired_access,
+		(const char * const *)resolved.resolved_path,
+		resolved.ancestor_guids, resolved.component_count);
 
 out_resolved:
 	pkm_lcs_resolved_key_path_destroy(&resolved);
@@ -2436,16 +2642,13 @@ long pkm_lcs_open_user_relative_path_for_token(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count)
 {
-	struct pkm_lcs_key_fd_publish_input publish = { };
 	struct pkm_lcs_key_fd_parent_snapshot parent = { };
-	struct pkm_lcs_key_open_access_plan access = { };
 	struct pkm_lcs_materialized_path components = { };
 	struct pkm_lcs_open_preflight_plan preflight = { };
 	struct pkm_lcs_path_validation_result path = { };
 	struct pkm_lcs_resolved_key_path resolved = { };
 	struct pkm_lcs_syscall_path_copy copy = { };
 	const u8 *final_sd;
-	long audit_ret;
 	long ret;
 
 	if (!token)
@@ -2498,31 +2701,11 @@ long pkm_lcs_open_user_relative_path_for_token(
 	}
 
 	final_sd = resolved.final_frame.data + resolved.final_sd_offset;
-	ret = pkm_lcs_key_open_access_check_for_token(
-		token, final_sd, resolved.final_sd_len, desired_access,
-		&access);
-	if (ret) {
-		if (ret == -EACCES && access.key_open_sacl_audit_required) {
-			audit_ret = pkm_lcs_emit_key_open_audit_for_token(
-				token, resolved.key_guid, &access);
-			if (audit_ret)
-				ret = audit_ret;
-		}
-		goto out_resolved;
-	}
-
-	ret = pkm_lcs_emit_key_open_audit_for_token(
-		token, resolved.key_guid, &access);
-	if (ret)
-		goto out_resolved;
-
-	publish.source_id = resolved.source_id;
-	memcpy(publish.key_guid, resolved.key_guid, sizeof(publish.key_guid));
-	publish.granted_access = access.fd_granted_access;
-	publish.resolved_path = (const char * const *)resolved.resolved_path;
-	publish.ancestor_guids = resolved.ancestor_guids;
-	publish.path_component_count = resolved.component_count;
-	ret = pkm_lcs_key_fd_publish(&publish);
+	ret = pkm_lcs_publish_open_key_for_token(
+		token, resolved.source_id, resolved.key_guid, final_sd,
+		resolved.final_sd_len, desired_access,
+		(const char * const *)resolved.resolved_path,
+		resolved.ancestor_guids, resolved.component_count);
 
 out_resolved:
 	pkm_lcs_resolved_key_path_destroy(&resolved);

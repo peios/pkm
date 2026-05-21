@@ -48,10 +48,25 @@ struct pkm_lcs_rsi_lookup_child_result {
 	u8 key_guid[RSI_GUID_SIZE];
 };
 
+struct pkm_lcs_rsi_read_key_result {
+	u32 sd_offset;
+	u32 sd_len;
+	u32 name_len;
+	u32 _pad0;
+	u64 last_write_time;
+	u8 volatile_key;
+	u8 symlink;
+	u8 _pad1[6];
+	u8 parent_guid[RSI_GUID_SIZE];
+};
+
 long pkm_lcs_rsi_build_lookup_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 parent_guid[RSI_GUID_SIZE], const char *child_name,
 	u32 child_name_len, struct pkm_lcs_rsi_built_request *built);
+long pkm_lcs_rsi_build_read_key_request(
+	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
+	const u8 guid[RSI_GUID_SIZE], struct pkm_lcs_rsi_built_request *built);
 long pkm_lcs_rsi_validate_lookup_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence,
@@ -63,5 +78,8 @@ long pkm_lcs_rsi_materialize_lookup_child(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
 	struct pkm_lcs_rsi_lookup_child_result *result);
+long pkm_lcs_rsi_materialize_read_key_response(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	struct pkm_lcs_rsi_read_key_result *result);
 
 #endif /* _SECURITY_PKM_LCS_RSI_H */
