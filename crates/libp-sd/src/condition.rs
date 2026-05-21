@@ -16,7 +16,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use peios_uapi::sid::Sid;
+use libp_wire::Sid;
 
 // ---------------------------------------------------------------------------
 // Bytecode alphabet (PSD-004 §3.11). Postfix token stream; all multibyte

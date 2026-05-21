@@ -6,14 +6,15 @@ use crate::raw;
 use alloc::ffi::CString;
 use alloc::vec;
 use alloc::vec::Vec;
-use peios_uapi::ParseError;
-use peios_uapi::errno::{Errno, eintr_retry};
-use peios_uapi::sd::{
+use crate::codec::{
     ACE_FLAG_INHERITED, Acl, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
     LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION,
     SD_HEADER_BYTES, SE_SELF_RELATIVE, SecurityDescriptor,
 };
-use peios_uapi::sid::SidRef;
+use libp_errno::Errno;
+use libp_sys::eintr_retry;
+use libp_wire::ParseError;
+use libp_wire::SidRef;
 
 /// Which parts of a security descriptor a get/set call should touch.
 ///
@@ -151,7 +152,7 @@ fn lower(target: &SdTarget<'_>) -> Result<(i32, CString, u32)> {
 ///
 /// Uses the kernel's probe protocol: a zero-length probe call learns
 /// the descriptor size, then a sized call fetches it. Returns the raw
-/// self-relative SD bytes — parse with `peios_uapi::sd::SecurityDescriptor`.
+/// self-relative SD bytes — parse with [`crate::SecurityDescriptor`].
 pub fn get_sd(target: &SdTarget<'_>, info: SecurityInfo) -> Result<Vec<u8>> {
     let (dirfd, path, flags) = lower(target)?;
     let path_ptr = path.as_ptr() as *const u8;
@@ -372,7 +373,7 @@ fn filter_acl(acl: &Acl<'_>) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::{AceBuilder, AclBuilder, SdBuilder, WellKnownSid};
-    use peios_uapi::sd::{
+    use crate::codec::{
         ACCESS_GENERIC_ALL, ACCESS_GENERIC_READ, ACCESS_GENERIC_WRITE, ACE_TYPE_ACCESS_ALLOWED,
         SE_DACL_PRESENT,
     };

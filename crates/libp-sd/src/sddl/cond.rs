@@ -728,7 +728,7 @@ impl<'a> ArtxDecoder<'a> {
                 }
                 TOK_SID => {
                     let bytes = self.take_lp_bytes()?;
-                    let (sid, _) = peios_uapi::sid::SidRef::parse(&bytes)
+                    let (sid, _) = libp_wire::SidRef::parse(&bytes)
                         .map_err(|_| CondError::Artx("malformed SID literal"))?;
                     self.stack.push(Item::Operand(Operand::Sid(sid.to_owned())));
                 }
@@ -895,7 +895,7 @@ impl<'a> ArtxDecoder<'a> {
                 TOK_OCTET => Operand::Octet(d.take_lp_bytes()?),
                 TOK_SID => {
                     let body = d.take_lp_bytes()?;
-                    let (sid, _) = peios_uapi::sid::SidRef::parse(&body)
+                    let (sid, _) = libp_wire::SidRef::parse(&body)
                         .map_err(|_| CondError::Artx("composite: malformed SID"))?;
                     Operand::Sid(sid.to_owned())
                 }

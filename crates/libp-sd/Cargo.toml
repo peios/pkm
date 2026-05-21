@@ -15,8 +15,11 @@ path = "src/lib.rs"
 default = ["std"]
 # Enables std-only conveniences (`From<Error> for std::io::Error`).
 # `alloc` is always required (builders allocate wire buffers).
-std = ["peios-uapi/std"]
+std = ["libp-errno/std", "libp-wire/std"]
 
 [dependencies]
-peios-uapi = { package = "peios-uapi-legacy", path = "../peios-uapi", default-features = false }
+peios-uapi = { workspace = true }
+libp-errno = { workspace = true }
+libp-sys = { workspace = true }
+libp-wire = { workspace = true }
 thiserror = { workspace = true }

@@ -13,21 +13,12 @@ use crate::claims::{ClaimAttribute, encode_claims_array};
 use crate::error::Error;
 use crate::object_tree::{ObjectTypeNode, encode_object_tree};
 use alloc::vec::Vec;
-use peios_uapi::access::{KACS_ACCESS_CHECK_ARGS_SIZE, KacsAccessCheckArgs, KacsNodeResult};
-use peios_uapi::errno::{EACCES, Errno, eintr_retry};
-use peios_uapi::sid::Sid;
-use peios_uapi::sys::{syscall1, syscall3};
-use peios_uapi::syscall::{SYS_KACS_ACCESS_CHECK, SYS_KACS_ACCESS_CHECK_LIST};
-
-/// Generic-access mapping: how the four generic bits (READ/WRITE/
-/// EXECUTE/ALL) expand to object-specific access bits.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GenericMapping {
-    pub read: u32,
-    pub write: u32,
-    pub execute: u32,
-    pub all: u32,
-}
+use crate::abi::{KACS_ACCESS_CHECK_ARGS_SIZE, KacsAccessCheckArgs, KacsNodeResult};
+use crate::codec::GenericMapping;
+use libp_errno::{EACCES, Errno};
+use libp_sys::{eintr_retry, syscall1, syscall3};
+use libp_wire::Sid;
+use peios_uapi::{SYS_KACS_ACCESS_CHECK, SYS_KACS_ACCESS_CHECK_LIST};
 
 /// The outcome of a scalar access check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,7 +183,7 @@ impl<'a> AccessCheckRequest<'a> {
         let mut granted: u32 = 0;
         let assembled = self.assemble(&mut granted)?;
         let args_ptr = &assembled.args as *const KacsAccessCheckArgs as u64;
-        let rc = eintr_retry(|| unsafe { syscall1(SYS_KACS_ACCESS_CHECK, args_ptr) });
+        let rc = eintr_retry(|| unsafe { syscall1(SYS_KACS_ACCESS_CHECK as i64, args_ptr) });
         // Keep the side buffers alive until the syscall has returned.
         drop(assembled);
         if rc == -(EACCES as i64) {
@@ -229,7 +220,7 @@ impl<'a> AccessCheckRequest<'a> {
         let args_ptr = &assembled.args as *const KacsAccessCheckArgs as u64;
         let rc = eintr_retry(|| unsafe {
             syscall3(
-                SYS_KACS_ACCESS_CHECK_LIST,
+                SYS_KACS_ACCESS_CHECK_LIST as i64,
                 args_ptr,
                 results.as_mut_ptr() as u64,
                 count as u64,

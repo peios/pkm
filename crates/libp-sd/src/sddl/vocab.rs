@@ -4,7 +4,7 @@
 // rest of the SDDL module can read them without these tables leaking
 // out of the crate.
 
-use peios_uapi::sd::{
+use crate::codec::{
     ACCESS_DELETE, ACCESS_GENERIC_ALL, ACCESS_GENERIC_EXECUTE, ACCESS_GENERIC_READ,
     ACCESS_GENERIC_WRITE, ACCESS_READ_CONTROL, ACCESS_WRITE_DAC, ACCESS_WRITE_OWNER,
     ACE_FLAG_CONTAINER_INHERIT, ACE_FLAG_FAILED_ACCESS, ACE_FLAG_INHERIT_ONLY, ACE_FLAG_INHERITED,
@@ -17,7 +17,7 @@ use peios_uapi::sd::{
     ACE_TYPE_SYSTEM_AUDIT_OBJECT, ACE_TYPE_SYSTEM_MANDATORY_LABEL,
     ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE, ACE_TYPE_SYSTEM_SCOPED_POLICY_ID,
 };
-use peios_uapi::sid::Sid;
+use libp_wire::Sid;
 
 use crate::wellknown::WellKnownSid;
 

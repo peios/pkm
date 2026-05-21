@@ -34,7 +34,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use thiserror::Error;
 
-use peios_uapi::sd::{
+use crate::codec::{
     ACE_FLAG_INHERITED, ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT,
     ACE_TYPE_ACCESS_ALLOWED, ACE_TYPE_ACCESS_ALLOWED_CALLBACK,
     ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT, ACE_TYPE_ACCESS_ALLOWED_OBJECT,
@@ -46,7 +46,7 @@ use peios_uapi::sd::{
     SE_DACL_PROTECTED, SE_SACL_AUTO_INHERITED, SE_SACL_PRESENT, SE_SACL_PROTECTED,
     SecurityDescriptor,
 };
-use peios_uapi::sid::{Sid, SidRef};
+use libp_wire::{Sid, SidRef};
 
 use crate::build::{AceBuilder, AclBuilder, SdBuilder};
 use crate::claims::{ClaimAttribute, ClaimValue};
@@ -1243,7 +1243,7 @@ fn format_claim_payload(bytes: &[u8]) -> Result<String> {
 /// `bytes`, the body following the (mask + Everyone-SID) prefix of a
 /// resource-attribute ACE.
 fn decode_claim_entry(bytes: &[u8]) -> Result<ClaimAttribute> {
-    use peios_uapi::access::{
+    use crate::abi::{
         CLAIM_TYPE_BOOLEAN, CLAIM_TYPE_INT64, CLAIM_TYPE_OCTET, CLAIM_TYPE_SID, CLAIM_TYPE_STRING,
         CLAIM_TYPE_UINT64,
     };

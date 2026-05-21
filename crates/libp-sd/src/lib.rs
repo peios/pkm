@@ -17,9 +17,11 @@
 
 extern crate alloc;
 
+mod abi;
 mod access_check;
 mod build;
 mod claims;
+mod codec;
 mod condition;
 mod error;
 mod inherit;
@@ -29,7 +31,7 @@ mod sd;
 pub mod sddl;
 mod wellknown;
 
-pub use access_check::{AccessCheckRequest, AccessDecision, GenericMapping, NodeDecision};
+pub use access_check::{AccessCheckRequest, AccessDecision, NodeDecision};
 pub use build::{AceBuilder, AclBuilder, SdBuilder};
 pub use claims::{ClaimAttribute, ClaimValue};
 pub use condition::{CompareOp, Condition, MemberOp, Operand};
@@ -40,23 +42,23 @@ pub use sd::{SdTarget, SecurityInfo, get_sd, set_sd, strip_inherited_aces};
 pub use sddl::{AclKind, ParsedAcl, SddlError};
 pub use wellknown::WellKnownSid;
 
-/// Re-exported SD parse types — the canonical shapes live in
-/// `peios-uapi`; libp-sd does not wrap them.
-pub use peios_uapi::sd::{Ace, AceIter, AceRef, Acl, SecurityDescriptor};
-pub use peios_uapi::sid::{Sid, SidRef};
+/// The SD parse types + decode helpers — the wire codec lives in libp-sd
+/// (`codec`), with constant values sourced from the generated `peios-uapi`
+/// crate. `GenericMapping` is the canonical generic-access mapping (also
+/// the builder-facing form for [`AccessCheckRequest`]).
+pub use codec::{
+    Ace, AceIter, AceRef, Acl, GenericMapping, SecurityDescriptor, ace_flag_names, ace_type_name,
+    ace_type_is_simple_mask_sid, access_mask_names, control_bit_names,
+};
+/// The SID types come from `libp-wire`, the shared on-wire-primitives crate.
+pub use libp_wire::{Sid, SidRef};
 
-/// Re-exported SD constants for callers building/inspecting descriptors.
+/// The full SD codec surface for callers building/inspecting descriptors:
+/// the `*_SECURITY_INFORMATION`, `SE_*` control, `ACCESS_*` mask, `ACE_TYPE_*`,
+/// and `ACE_FLAG_*` constants, plus the `*_names` decode helpers. Constant
+/// values are sourced from the generated `peios-uapi` crate.
 pub mod consts {
-    pub use peios_uapi::sd::{
-        ACCESS_DELETE, ACCESS_GENERIC_ALL, ACCESS_GENERIC_EXECUTE, ACCESS_GENERIC_READ,
-        ACCESS_GENERIC_WRITE, ACCESS_READ_CONTROL, ACCESS_SYNCHRONIZE, ACCESS_WRITE_DAC,
-        ACCESS_WRITE_OWNER, ACE_FLAG_CONTAINER_INHERIT, ACE_FLAG_INHERIT_ONLY, ACE_FLAG_INHERITED,
-        ACE_FLAG_NO_PROPAGATE_INHERIT, ACE_FLAG_OBJECT_INHERIT, ACE_TYPE_ACCESS_ALLOWED,
-        ACE_TYPE_ACCESS_DENIED, ACE_TYPE_SYSTEM_AUDIT, ACE_TYPE_SYSTEM_MANDATORY_LABEL,
-        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION,
-        OWNER_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION, SE_DACL_PRESENT, SE_DACL_PROTECTED,
-        SE_SACL_PRESENT, SE_SACL_PROTECTED, SE_SELF_RELATIVE,
-    };
+    pub use crate::codec::*;
 }
 
 /// Crate-local `Result<T, Error>` alias.

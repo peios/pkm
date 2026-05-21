@@ -14,13 +14,13 @@ use crate::Result;
 use crate::build::{AceBuilder, AclBuilder, SdBuilder};
 use crate::error::Error;
 use alloc::vec::Vec;
-use peios_uapi::ParseError;
-use peios_uapi::sd::{
+use crate::codec::{
     ACE_FLAG_CONTAINER_INHERIT, ACE_FLAG_INHERIT_ONLY, ACE_FLAG_INHERITED,
     ACE_FLAG_NO_PROPAGATE_INHERIT, ACE_FLAG_OBJECT_INHERIT, Acl, SE_DACL_AUTO_INHERITED,
     SE_DACL_PROTECTED, SE_SACL_AUTO_INHERITED, SE_SACL_PROTECTED, SE_SELF_RELATIVE,
     SecurityDescriptor,
 };
+use libp_wire::ParseError;
 
 /// All four inheritance-control flags as one mask — cleared on a child
 /// copy when the ACE is "consumed" (file child, or NP).
@@ -181,7 +181,7 @@ mod tests {
     use super::*;
     use crate::wellknown::WellKnownSid;
     use alloc::vec;
-    use peios_uapi::sd::{ACCESS_GENERIC_ALL, ACCESS_GENERIC_READ};
+    use crate::codec::{ACCESS_GENERIC_ALL, ACCESS_GENERIC_READ};
 
     fn build_parent_dacl(aces: Vec<AceBuilder>) -> Vec<u8> {
         let mut b = AclBuilder::new();

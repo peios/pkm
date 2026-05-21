@@ -5,7 +5,7 @@
 // type GUID; the tree structure is implied by the level sequence.
 
 use alloc::vec::Vec;
-use peios_uapi::access::KacsObjectTypeEntry;
+use crate::abi::KacsObjectTypeEntry;
 
 /// One node in an object-type tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

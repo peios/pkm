@@ -32,11 +32,11 @@ use crate::Result;
 use crate::error::Error;
 use alloc::string::String;
 use alloc::vec::Vec;
-use peios_uapi::access::{
+use crate::abi::{
     CLAIM_TYPE_BOOLEAN, CLAIM_TYPE_INT64, CLAIM_TYPE_OCTET, CLAIM_TYPE_SID, CLAIM_TYPE_STRING,
     CLAIM_TYPE_UINT64,
 };
-use peios_uapi::sid::Sid;
+use libp_wire::Sid;
 
 /// One value within a claim attribute. All values in a single
 /// [`ClaimAttribute`] must be the same variant.

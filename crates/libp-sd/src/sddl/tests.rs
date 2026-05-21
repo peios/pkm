@@ -6,10 +6,10 @@ use crate::condition::{CompareOp, Condition, MemberOp, Operand};
 use crate::wellknown::WellKnownSid;
 use alloc::string::{String, ToString};
 use alloc::vec;
-use peios_uapi::sd::{
+use crate::codec::{
     ACCESS_GENERIC_ALL, ACCESS_GENERIC_READ, ACE_FLAG_CONTAINER_INHERIT, SecurityDescriptor,
 };
-use peios_uapi::sid::Sid;
+use libp_wire::Sid;
 
 // Re-roll bytes through both pipelines and confirm the textual form is
 // stable.
@@ -108,7 +108,7 @@ fn unknown_rights_bits_become_hex_suffix() {
     // the formatter must emit GA plus the residue as hex.
     let mask = 0x1010_0000u32;
     let ace = AceBuilder::allow(WellKnownSid::LocalSystem, mask).build();
-    let aref = peios_uapi::sd::AceRef {
+    let aref = crate::codec::AceRef {
         ace_type: ace[0],
         flags: ace[1],
         size: u16::from_le_bytes([ace[2], ace[3]]),
@@ -228,8 +228,8 @@ fn resource_attribute_bool_round_trips() {
 #[test]
 fn parse_acl_extracts_flag_bits() {
     let parsed = parse_acl("P(A;;FA;;;BA)", AclKind::Dacl).expect("parse");
-    assert!(parsed.control & peios_uapi::sd::SE_DACL_PROTECTED != 0);
-    assert!(parsed.control & peios_uapi::sd::SE_DACL_PRESENT != 0);
+    assert!(parsed.control & crate::codec::SE_DACL_PROTECTED != 0);
+    assert!(parsed.control & crate::codec::SE_DACL_PRESENT != 0);
     let bytes = parsed.acl.build().expect("build");
     assert!(!bytes.is_empty());
 }
@@ -238,13 +238,13 @@ fn parse_acl_extracts_flag_bits() {
 fn parse_ace_basic() {
     let ace = parse_ace("A;;FA;;;BA").expect("parse");
     let bytes = ace.build();
-    assert_eq!(bytes[0], peios_uapi::sd::ACE_TYPE_ACCESS_ALLOWED);
+    assert_eq!(bytes[0], crate::codec::ACE_TYPE_ACCESS_ALLOWED);
 }
 
 #[test]
 fn format_ace_basic() {
     let bytes = AceBuilder::allow(WellKnownSid::BuiltinAdministrators, 0x001F_01FF).build();
-    let aref = peios_uapi::sd::AceRef {
+    let aref = crate::codec::AceRef {
         ace_type: bytes[0],
         flags: bytes[1],
         size: u16::from_le_bytes([bytes[2], bytes[3]]),

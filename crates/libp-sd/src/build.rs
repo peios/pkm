@@ -1,7 +1,7 @@
 // Fluent builders for SECURITY_DESCRIPTOR / ACL / ACE wire bytes.
 //
 // All three emit self-relative on-wire layouts matching the parsers in
-// `peios_uapi::sd`. The builders own the offset/size bookkeeping so
+// `crate::codec`. The builders own the offset/size bookkeeping so
 // callers describe intent ("allow Everyone GENERIC_READ") rather than
 // hand-assembling byte buffers.
 
@@ -11,7 +11,7 @@ use crate::condition::Condition;
 use crate::error::Error;
 use alloc::vec;
 use alloc::vec::Vec;
-use peios_uapi::sd::{
+use crate::codec::{
     ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, ACE_TYPE_ACCESS_ALLOWED,
     ACE_TYPE_ACCESS_ALLOWED_CALLBACK, ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT,
     ACE_TYPE_ACCESS_ALLOWED_OBJECT, ACE_TYPE_ACCESS_DENIED, ACE_TYPE_ACCESS_DENIED_CALLBACK,
@@ -21,7 +21,7 @@ use peios_uapi::sd::{
     ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE, Ace, AceRef, SE_DACL_PRESENT, SE_SACL_PRESENT,
     SE_SELF_RELATIVE,
 };
-use peios_uapi::sid::Sid;
+use libp_wire::Sid;
 
 /// Standard ACL revision — basic, label, resource-attribute, scoped-policy
 /// and process-trust-label ACE types.
@@ -585,7 +585,7 @@ mod tests {
     use crate::claims::ClaimValue;
     use crate::condition::Operand;
     use crate::wellknown::WellKnownSid;
-    use peios_uapi::sd::{
+    use crate::codec::{
         ACCESS_GENERIC_ALL, ACCESS_GENERIC_READ, ACE_FLAG_INHERITED,
         ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, ACE_TYPE_ACCESS_ALLOWED_OBJECT,
         SE_DACL_PROTECTED, SecurityDescriptor,

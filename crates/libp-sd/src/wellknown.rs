@@ -5,7 +5,7 @@
 // semantic layer on top — it lets callers pattern-match identity and
 // construct well-known SIDs without hand-assembling subauthority arrays.
 
-use peios_uapi::sid::Sid;
+use libp_wire::Sid;
 
 /// A well-known SID. Variant set covers the identities Peios uses for
 /// system principals and the integrity-level ladder.
