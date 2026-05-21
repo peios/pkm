@@ -184,6 +184,25 @@ struct pkm_lcs_kunit_symlink_sequence_source_script {
 	int result;
 };
 
+struct pkm_lcs_kunit_create_source_script {
+	struct file *file;
+	const u8 *parent_guid;
+	const u8 *child_guid;
+	const char *child_name;
+	const char *layer_name;
+	const u8 *sd;
+	size_t sd_len;
+	u64 expected_sequence;
+	u32 entry_status;
+	u32 key_status;
+	bool expect_key_request;
+	bool volatile_key;
+	bool symlink;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
 static void pkm_lcs_kunit_setup_registered_source(struct kunit *test,
 						  struct file *file,
 						  const void **token_out);
@@ -192,6 +211,7 @@ static int pkm_lcs_kunit_read_key_source_thread(void *raw_script);
 static int pkm_lcs_kunit_query_values_source_thread(void *raw_script);
 static int pkm_lcs_kunit_symlink_follow_source_thread(void *raw_script);
 static int pkm_lcs_kunit_symlink_sequence_source_thread(void *raw_script);
+static int pkm_lcs_kunit_create_source_thread(void *raw_script);
 
 static const struct file_operations pkm_lcs_kunit_non_key_fops = { };
 
@@ -6118,6 +6138,222 @@ static void pkm_lcs_kunit_build_status_response(struct kunit *test, u8 *frame,
 	*built_len = RSI_MIN_RESPONSE_SIZE;
 }
 
+static int pkm_lcs_kunit_create_source_read_request(
+	struct pkm_lcs_kunit_create_source_script *script, u8 *request,
+	size_t request_len, ssize_t *count)
+{
+	for (;;) {
+		*count = pkm_lcs_kunit_source_device_read_file(
+			script->file, request, request_len, true);
+		if (*count != -EAGAIN)
+			break;
+		if (kthread_should_stop()) {
+			script->result = -EINTR;
+			return script->result;
+		}
+		msleep(1);
+	}
+	if (*count < 0) {
+		script->result = (int)*count;
+		return script->result;
+	}
+	script->reads++;
+	return 0;
+}
+
+static int pkm_lcs_kunit_create_source_expect_bytes(
+	const u8 *request, size_t request_len, size_t *offset,
+	const void *expected, size_t expected_len)
+{
+	if (!request || !offset || !expected)
+		return -EINVAL;
+	if (*offset > request_len || expected_len > request_len - *offset)
+		return -EINVAL;
+	if (memcmp(request + *offset, expected, expected_len))
+		return -EINVAL;
+	*offset += expected_len;
+	return 0;
+}
+
+static int pkm_lcs_kunit_create_source_expect_string(
+	const u8 *request, size_t request_len, size_t *offset,
+	const char *expected)
+{
+	u32 actual_len;
+	u32 expected_len;
+
+	if (!request || !offset || !expected)
+		return -EINVAL;
+	if (*offset > request_len ||
+	    sizeof(actual_len) > request_len - *offset)
+		return -EINVAL;
+	actual_len = get_unaligned_le32(request + *offset);
+	*offset += sizeof(actual_len);
+
+	expected_len = (u32)strlen(expected);
+	if (actual_len != expected_len)
+		return -EINVAL;
+	return pkm_lcs_kunit_create_source_expect_bytes(
+		request, request_len, offset, expected, expected_len);
+}
+
+static int pkm_lcs_kunit_create_source_expect_entry_request(
+	struct pkm_lcs_kunit_create_source_script *script, const u8 *request,
+	size_t request_len, u64 *request_id)
+{
+	size_t offset = RSI_REQUEST_HEADER_SIZE;
+
+	if (!script || !request || !request_id ||
+	    request_len < RSI_REQUEST_HEADER_SIZE)
+		return -EINVAL;
+	if (get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET) !=
+	    RSI_CREATE_ENTRY)
+		return -EINVAL;
+
+	*request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	if (pkm_lcs_kunit_create_source_expect_bytes(
+		    request, request_len, &offset, script->parent_guid,
+		    RSI_GUID_SIZE))
+		return -EINVAL;
+	if (pkm_lcs_kunit_create_source_expect_string(
+		    request, request_len, &offset, script->child_name))
+		return -EINVAL;
+	if (pkm_lcs_kunit_create_source_expect_string(
+		    request, request_len, &offset, script->layer_name))
+		return -EINVAL;
+	if (pkm_lcs_kunit_create_source_expect_bytes(
+		    request, request_len, &offset, script->child_guid,
+		    RSI_GUID_SIZE))
+		return -EINVAL;
+	if (offset > request_len || sizeof(u64) > request_len - offset)
+		return -EINVAL;
+	if (get_unaligned_le64(request + offset) != script->expected_sequence)
+		return -EINVAL;
+	offset += sizeof(u64);
+	return offset == request_len ? 0 : -EINVAL;
+}
+
+static int pkm_lcs_kunit_create_source_expect_key_request(
+	struct pkm_lcs_kunit_create_source_script *script, const u8 *request,
+	size_t request_len, u64 *request_id)
+{
+	size_t offset = RSI_REQUEST_HEADER_SIZE;
+	u32 sd_len;
+
+	if (!script || !request || !request_id ||
+	    request_len < RSI_REQUEST_HEADER_SIZE)
+		return -EINVAL;
+	if (get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET) !=
+	    RSI_CREATE_KEY)
+		return -EINVAL;
+
+	*request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	if (pkm_lcs_kunit_create_source_expect_bytes(
+		    request, request_len, &offset, script->child_guid,
+		    RSI_GUID_SIZE))
+		return -EINVAL;
+	if (pkm_lcs_kunit_create_source_expect_string(
+		    request, request_len, &offset, script->child_name))
+		return -EINVAL;
+	if (pkm_lcs_kunit_create_source_expect_bytes(
+		    request, request_len, &offset, script->parent_guid,
+		    RSI_GUID_SIZE))
+		return -EINVAL;
+	if (offset > request_len || sizeof(sd_len) > request_len - offset)
+		return -EINVAL;
+	sd_len = get_unaligned_le32(request + offset);
+	offset += sizeof(sd_len);
+	if (sd_len != script->sd_len)
+		return -EINVAL;
+	if (pkm_lcs_kunit_create_source_expect_bytes(
+		    request, request_len, &offset, script->sd, script->sd_len))
+		return -EINVAL;
+	if (offset > request_len || 2U > request_len - offset)
+		return -EINVAL;
+	if (request[offset] != (script->volatile_key ? 1U : 0U) ||
+	    request[offset + 1U] != (script->symlink ? 1U : 0U))
+		return -EINVAL;
+	offset += 2U;
+	return offset == request_len ? 0 : -EINVAL;
+}
+
+static int pkm_lcs_kunit_create_source_write_status(
+	struct pkm_lcs_kunit_create_source_script *script, u64 request_id,
+	u16 request_op, u32 status)
+{
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	ssize_t count;
+
+	memset(response, 0, sizeof(response));
+	put_unaligned_le32(RSI_MIN_RESPONSE_SIZE,
+			   response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
+	put_unaligned_le16(request_op | RSI_RESPONSE_BIT,
+			   response + RSI_RESPONSE_OP_CODE_OFFSET);
+	put_unaligned_le32(status, response + RSI_RESPONSE_STATUS_OFFSET);
+	count = pkm_lcs_kunit_source_device_write_file(
+		script->file, response, sizeof(response), false, NULL);
+	if (count != (ssize_t)sizeof(response)) {
+		script->result = count < 0 ? (int)count : -EIO;
+		return script->result;
+	}
+	script->writes++;
+	return 0;
+}
+
+static int pkm_lcs_kunit_create_source_thread(void *raw_script)
+{
+	struct pkm_lcs_kunit_create_source_script *script = raw_script;
+	u8 request[256];
+	ssize_t count = 0;
+	u64 request_id = 0;
+	int ret;
+
+	if (!script || !script->file || !script->parent_guid ||
+	    !script->child_guid || !script->child_name ||
+	    !script->layer_name || !script->sd) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	ret = pkm_lcs_kunit_create_source_read_request(
+		script, request, sizeof(request), &count);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_create_source_expect_entry_request(
+		script, request, count, &request_id);
+	if (ret) {
+		script->result = ret;
+		return ret;
+	}
+	ret = pkm_lcs_kunit_create_source_write_status(
+		script, request_id, RSI_CREATE_ENTRY, script->entry_status);
+	if (ret || !script->expect_key_request) {
+		if (!ret)
+			script->result = 0;
+		return ret;
+	}
+
+	ret = pkm_lcs_kunit_create_source_read_request(
+		script, request, sizeof(request), &count);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_create_source_expect_key_request(
+		script, request, count, &request_id);
+	if (ret) {
+		script->result = ret;
+		return ret;
+	}
+	ret = pkm_lcs_kunit_create_source_write_status(
+		script, request_id, RSI_CREATE_KEY, script->key_status);
+	if (ret)
+		return ret;
+
+	script->result = 0;
+	return 0;
+}
+
 static const u8 pkm_lcs_kunit_owner_only_sd[] = {
 	0x01, 0x00, 0x00, 0x80,
 	0x14, 0x00, 0x00, 0x00,
@@ -8234,6 +8470,280 @@ static void pkm_lcs_kunit_reg_create_source_status_fails_closed(
 			(long)-EINVAL);
 }
 
+static void pkm_lcs_kunit_create_missing_source_records_created_new(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+		0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+	};
+	static const u8 child_guid[RSI_GUID_SIZE] = {
+		0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+		0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+	};
+	static const u8 sd[] = { 0x01, 0x00, 0x04, 0x80, 0x30, 0x00 };
+	struct pkm_lcs_create_missing_parent_resolution resolution = {
+		.parent.source_id = 1,
+		.child_name = "Created",
+		.child_name_len = strlen("Created"),
+	};
+	struct pkm_lcs_create_layer_target target = {
+		.name = "base",
+		.name_len = strlen("base"),
+		.implicit_base = 1,
+	};
+	struct pkm_lcs_created_key_sd created_sd = {
+		.sd = sd,
+		.sd_len = sizeof(sd),
+	};
+	struct pkm_lcs_create_missing_source_records_result result = { };
+	struct pkm_lcs_kunit_create_source_script script = {
+		.parent_guid = parent_guid,
+		.child_guid = child_guid,
+		.child_name = "Created",
+		.layer_name = "base",
+		.sd = sd,
+		.sd_len = sizeof(sd),
+		.expected_sequence = 1,
+		.entry_status = RSI_OK,
+		.key_status = RSI_OK,
+		.expect_key_request = true,
+		.volatile_key = true,
+	};
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long ret;
+	int thread_ret;
+
+	memcpy(resolution.parent.key_guid, parent_guid, RSI_GUID_SIZE);
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	task = kthread_run(pkm_lcs_kunit_create_source_thread, &script,
+			   "pkm-lcs-kunit-create-src");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_create_missing_source_records(
+		&resolution, &target, child_guid, &created_sd, true, false,
+		&result);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 2U);
+	KUNIT_EXPECT_EQ(test, script.writes, 2U);
+	KUNIT_EXPECT_TRUE(test, result.created_new);
+	KUNIT_EXPECT_FALSE(test, result.retry_open_existing);
+	KUNIT_EXPECT_EQ(test, result.disposition, REG_CREATED_NEW);
+	KUNIT_EXPECT_EQ(test, result.sequence, 1ULL);
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, 2ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_source_entry_race_retries(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x41 };
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0x42 };
+	static const u8 sd[] = { 0x01, 0x00, 0x04, 0x80 };
+	struct pkm_lcs_create_missing_parent_resolution resolution = {
+		.parent.source_id = 1,
+		.child_name = "Race",
+		.child_name_len = strlen("Race"),
+	};
+	struct pkm_lcs_create_layer_target target = {
+		.name = "base",
+		.name_len = strlen("base"),
+		.implicit_base = 1,
+	};
+	struct pkm_lcs_created_key_sd created_sd = {
+		.sd = sd,
+		.sd_len = sizeof(sd),
+	};
+	struct pkm_lcs_create_missing_source_records_result result = { };
+	struct pkm_lcs_kunit_create_source_script script = {
+		.parent_guid = parent_guid,
+		.child_guid = child_guid,
+		.child_name = "Race",
+		.layer_name = "base",
+		.sd = sd,
+		.sd_len = sizeof(sd),
+		.expected_sequence = 1,
+		.entry_status = RSI_ALREADY_EXISTS,
+		.expect_key_request = false,
+	};
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long ret;
+	int thread_ret;
+
+	memcpy(resolution.parent.key_guid, parent_guid, RSI_GUID_SIZE);
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	task = kthread_run(pkm_lcs_kunit_create_source_thread, &script,
+			   "pkm-lcs-kunit-create-race");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_create_missing_source_records(
+		&resolution, &target, child_guid, &created_sd, false, false,
+		&result);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_FALSE(test, result.created_new);
+	KUNIT_EXPECT_TRUE(test, result.retry_open_existing);
+	KUNIT_EXPECT_EQ(test, result.disposition, REG_OPENED_EXISTING);
+	KUNIT_EXPECT_EQ(test, result.sequence, 1ULL);
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, 2ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_source_key_duplicate_eio(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x51 };
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0x52 };
+	static const u8 sd[] = { 0x01, 0x00, 0x04, 0x80 };
+	struct pkm_lcs_create_missing_parent_resolution resolution = {
+		.parent.source_id = 1,
+		.child_name = "Duplicate",
+		.child_name_len = strlen("Duplicate"),
+	};
+	struct pkm_lcs_create_layer_target target = {
+		.name = "base",
+		.name_len = strlen("base"),
+		.implicit_base = 1,
+	};
+	struct pkm_lcs_created_key_sd created_sd = {
+		.sd = sd,
+		.sd_len = sizeof(sd),
+	};
+	struct pkm_lcs_create_missing_source_records_result result = {
+		.sequence = 99,
+		.disposition = 88,
+		.created_new = true,
+		.retry_open_existing = true,
+	};
+	struct pkm_lcs_kunit_create_source_script script = {
+		.parent_guid = parent_guid,
+		.child_guid = child_guid,
+		.child_name = "Duplicate",
+		.layer_name = "base",
+		.sd = sd,
+		.sd_len = sizeof(sd),
+		.expected_sequence = 1,
+		.entry_status = RSI_OK,
+		.key_status = RSI_ALREADY_EXISTS,
+		.expect_key_request = true,
+	};
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long ret;
+	int thread_ret;
+
+	memcpy(resolution.parent.key_guid, parent_guid, RSI_GUID_SIZE);
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	task = kthread_run(pkm_lcs_kunit_create_source_thread, &script,
+			   "pkm-lcs-kunit-create-dup");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_create_missing_source_records(
+		&resolution, &target, child_guid, &created_sd, false, false,
+		&result);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 2U);
+	KUNIT_EXPECT_EQ(test, script.writes, 2U);
+	KUNIT_EXPECT_FALSE(test, result.created_new);
+	KUNIT_EXPECT_FALSE(test, result.retry_open_existing);
+	KUNIT_EXPECT_EQ(test, result.disposition, 0U);
+	KUNIT_EXPECT_EQ(test, result.sequence, 1ULL);
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, 2ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_source_bad_inputs(
+	struct kunit *test)
+{
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0x61 };
+	static const u8 sd[] = { 0x01, 0x00, 0x04, 0x80 };
+	struct pkm_lcs_create_missing_parent_resolution resolution = {
+		.parent.source_id = 1,
+		.child_name = "Bad",
+		.child_name_len = strlen("Bad"),
+	};
+	struct pkm_lcs_create_layer_target target = {
+		.name = "base",
+		.name_len = strlen("base"),
+	};
+	struct pkm_lcs_created_key_sd created_sd = {
+		.sd = sd,
+		.sd_len = sizeof(sd),
+	};
+	struct pkm_lcs_create_missing_source_records_result result = {
+		.sequence = 99,
+		.disposition = 88,
+		.created_new = true,
+		.retry_open_existing = true,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_source_records(
+				NULL, &target, child_guid, &created_sd, false,
+				false, &result),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, result.sequence, 0ULL);
+	KUNIT_EXPECT_EQ(test, result.disposition, 0U);
+	KUNIT_EXPECT_FALSE(test, result.created_new);
+	KUNIT_EXPECT_FALSE(test, result.retry_open_existing);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_source_records(
+				&resolution, &target, child_guid, &created_sd,
+				false, false, NULL),
+			(long)-EINVAL);
+
+	result.sequence = 99;
+	result.disposition = 88;
+	result.created_new = true;
+	result.retry_open_existing = true;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_source_records(
+				&resolution, &target, child_guid, &created_sd,
+				false, false, &result),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, result.sequence, 0ULL);
+	KUNIT_EXPECT_EQ(test, result.disposition, 0U);
+	KUNIT_EXPECT_FALSE(test, result.created_new);
+	KUNIT_EXPECT_FALSE(test, result.retry_open_existing);
+}
+
 static void pkm_lcs_kunit_sequence_allocation_advances_global_counter(
 	struct kunit *test)
 {
@@ -10134,6 +10644,13 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_source_status_policy),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_source_status_fails_closed),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_source_records_created_new),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_source_entry_race_retries),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_source_key_duplicate_eio),
+	KUNIT_CASE(pkm_lcs_kunit_create_missing_source_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_sequence_allocation_advances_global_counter),
 	KUNIT_CASE(pkm_lcs_kunit_sequence_allocation_fails_closed),

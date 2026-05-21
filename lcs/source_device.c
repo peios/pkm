@@ -4275,6 +4275,87 @@ long pkm_lcs_create_missing_symlink_authority_for_token(
 	return 0;
 }
 
+static long pkm_lcs_create_missing_source_response_plan(
+	long round_trip_ret,
+	const struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_reg_create_source_response_plan *plan)
+{
+	if (!response || !plan)
+		return -EINVAL;
+	if (!response->len)
+		return round_trip_ret ? round_trip_ret : -EIO;
+
+	return pkm_lcs_reg_create_key_source_response_plan(
+		response->request_op_code, response->status, plan);
+}
+
+long pkm_lcs_create_missing_source_records(
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	const struct pkm_lcs_create_layer_target *target,
+	const u8 child_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_created_key_sd *created_sd,
+	bool volatile_key, bool symlink,
+	struct pkm_lcs_create_missing_source_records_result *result)
+{
+	struct pkm_lcs_source_response_result entry_response = { };
+	struct pkm_lcs_source_response_result key_response = { };
+	struct pkm_lcs_reg_create_source_response_plan plan = { };
+	u64 sequence = 0;
+	long ret;
+
+	if (!result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	if (!resolution || !target || !target->name || !child_guid ||
+	    !created_sd || !created_sd->sd || !created_sd->sd_len ||
+	    !resolution->parent.source_id || !resolution->child_name ||
+	    !resolution->child_name_len)
+		return -EINVAL;
+
+	ret = pkm_lcs_allocate_sequence(&sequence);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_create_entry_round_trip_timeout(
+		resolution->parent.source_id, 0, resolution->parent.key_guid,
+		resolution->child_name, resolution->child_name_len,
+		target->name, target->name_len, child_guid, sequence,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &entry_response, NULL);
+	ret = pkm_lcs_create_missing_source_response_plan(ret, &entry_response,
+							  &plan);
+	if (ret)
+		return ret;
+
+	result->sequence = sequence;
+	if (plan.action ==
+	    PKM_LCS_REG_CREATE_SOURCE_ACTION_RETRY_OPEN_EXISTING) {
+		result->disposition = plan.disposition;
+		result->retry_open_existing = true;
+		return 0;
+	}
+	if (plan.action != PKM_LCS_REG_CREATE_SOURCE_ACTION_CREATE_KEY)
+		return -EIO;
+
+	ret = pkm_lcs_source_create_key_round_trip_timeout(
+		resolution->parent.source_id, 0, child_guid,
+		resolution->child_name, resolution->child_name_len,
+		resolution->parent.key_guid, created_sd->sd, created_sd->sd_len,
+		volatile_key, symlink, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+		&key_response, NULL);
+	ret = pkm_lcs_create_missing_source_response_plan(ret, &key_response,
+							  &plan);
+	if (ret)
+		return ret;
+	if (plan.action !=
+	    PKM_LCS_REG_CREATE_SOURCE_ACTION_PUBLISH_CREATED_NEW)
+		return -EIO;
+
+	result->disposition = plan.disposition;
+	result->created_new = true;
+	return 0;
+}
+
 static long pkm_lcs_resolved_key_path_prepare(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,

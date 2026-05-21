@@ -255,6 +255,14 @@ struct pkm_lcs_reg_create_source_response_plan {
 	u32 disposition;
 };
 
+struct pkm_lcs_create_missing_source_records_result {
+	u64 sequence;
+	u32 disposition;
+	u8 created_new;
+	u8 retry_open_existing;
+	u8 _pad[2];
+};
+
 struct pkm_lcs_source_response_frame {
 	u8 *data;
 	size_t len;
@@ -497,6 +505,13 @@ long pkm_lcs_create_missing_symlink_authority_for_token(
 long pkm_lcs_reg_create_key_source_response_plan(
 	u16 request_op_code, u32 status,
 	struct pkm_lcs_reg_create_source_response_plan *plan);
+long pkm_lcs_create_missing_source_records(
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	const struct pkm_lcs_create_layer_target *target,
+	const u8 child_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_created_key_sd *created_sd,
+	bool volatile_key, bool symlink,
+	struct pkm_lcs_create_missing_source_records_result *result);
 long pkm_lcs_allocate_sequence(u64 *sequence);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,
