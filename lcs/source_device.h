@@ -129,6 +129,19 @@ struct pkm_lcs_open_preflight_plan {
 	u8 _pad[2];
 };
 
+struct pkm_lcs_key_open_access_plan {
+	u32 requested_access;
+	u32 mapped_desired_access;
+	u32 access_check_granted;
+	u32 fd_granted_access;
+	u8 allowed;
+	u8 maximum_allowed;
+	u8 key_open_sacl_audit_required;
+	u8 audit_failure_blocks_completion;
+	u8 privilege_use_audit_required;
+	u8 _pad[3];
+};
+
 struct pkm_lcs_path_validation_result {
 	u32 component_count;
 	bool used_forward_separator;
@@ -249,6 +262,9 @@ long pkm_lcs_route_user_absolute_path_for_token(
 	struct pkm_lcs_hive_route_result *result);
 long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
 			    struct pkm_lcs_open_preflight_plan *plan);
+long pkm_lcs_key_open_access_check_for_token(
+	const void *token, const u8 *sd, size_t sd_len, u32 desired_access,
+	struct pkm_lcs_key_open_access_plan *plan);
 long pkm_lcs_validate_syscall_relative_path(
 	const char *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);

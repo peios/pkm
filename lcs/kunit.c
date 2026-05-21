@@ -1270,6 +1270,123 @@ static void pkm_lcs_kunit_open_preflight_route_copy_fault_keeps_route_empty(
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 }
 
+static void pkm_lcs_kunit_key_open_access_bridge_allows_registry_rights(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_open_access_check_for_token(
+				token, sd, sd_len, KEY_READ, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, plan.mapped_desired_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, plan.access_check_granted, KEY_READ | WRITE_DAC);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, plan.maximum_allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.key_open_sacl_audit_required, 0U);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_open_access_bridge_denies_partial_grants(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	u32 desired = KEY_QUERY_VALUE | KEY_SET_VALUE;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_QUERY_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_open_access_check_for_token(
+				token, sd, sd_len, desired, &plan),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.mapped_desired_access, desired);
+	KUNIT_EXPECT_EQ(test, plan.access_check_granted,
+			KEY_QUERY_VALUE | READ_CONTROL | WRITE_DAC);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, 0U);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_open_access_bridge_maximum_allowed(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	u32 granted = KEY_QUERY_VALUE | KEY_SET_VALUE | READ_CONTROL;
+	u32 maximum_allowed = granted | WRITE_DAC;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, granted, 0, 0, 0, &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_open_access_check_for_token(
+				token, sd, sd_len, MAXIMUM_ALLOWED, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.maximum_allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.mapped_desired_access, 0U);
+	KUNIT_EXPECT_EQ(test, plan.access_check_granted, maximum_allowed);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, maximum_allowed);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_open_access_bridge_malformed_sd_eio(
+	struct kunit *test)
+{
+	static const u8 malformed_sd[] = { 0x01, 0x00, 0x00, 0x00 };
+	struct pkm_lcs_key_open_access_plan plan = {
+		.allowed = 1,
+		.fd_granted_access = KEY_READ,
+	};
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_open_access_check_for_token(
+				token, malformed_sd, sizeof(malformed_sd),
+				KEY_READ, &plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, 0U);
+	KUNIT_EXPECT_EQ(test, plan.access_check_granted, 0U);
+
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_key_fd_publish_snapshot_success(struct kunit *test)
 {
 	static const char * const path[] = { "Machine", "Software" };
@@ -4313,6 +4430,12 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_route_stops_before_usercopy),
 	KUNIT_CASE(
 		pkm_lcs_kunit_open_preflight_route_copy_fault_keeps_route_empty),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_open_access_bridge_allows_registry_rights),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_open_access_bridge_denies_partial_grants),
+	KUNIT_CASE(pkm_lcs_kunit_key_open_access_bridge_maximum_allowed),
+	KUNIT_CASE(pkm_lcs_kunit_key_open_access_bridge_malformed_sd_eio),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_snapshot_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_deep_copies_input),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_rejects_malformed_state),

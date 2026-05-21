@@ -26,6 +26,8 @@
 
 #include <pkm/token.h>
 
+#include "../kacs/access_check.h"
+#include "../kacs/caap_cache.h"
 #include "../kacs/token_runtime.h"
 #include "rsi.h"
 #include "source_device.h"
@@ -161,6 +163,11 @@ extern int lcs_rust_route_absolute_path_from_source_slots_with_token_sid(
 extern int lcs_rust_open_preflight(
 	u32 desired_access, u32 flags,
 	struct pkm_lcs_open_preflight_plan *plan);
+extern int lcs_rust_key_open_access_plan(
+	const void *subject_token, const u8 *sd_ptr, size_t sd_len,
+	u32 desired_access, u32 pip_type, u32 pip_trust,
+	const void *caap_cache,
+	struct pkm_lcs_key_open_access_plan *plan);
 extern int lcs_rust_validate_syscall_relative_path(
 	const u8 *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);
@@ -1923,6 +1930,38 @@ long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
 
 	memset(plan, 0, sizeof(*plan));
 	return lcs_rust_open_preflight(desired_access, flags, plan);
+}
+
+long pkm_lcs_key_open_access_check_for_token(
+	const void *token, const u8 *sd, size_t sd_len, u32 desired_access,
+	struct pkm_lcs_key_open_access_plan *plan)
+{
+	const void *caap_cache = NULL;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+	long ret;
+
+	if (!plan)
+		return -EINVAL;
+
+	memset(plan, 0, sizeof(*plan));
+	if (!token)
+		return -EACCES;
+	if (!sd || !sd_len || !desired_access)
+		return -EINVAL;
+
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		return ret;
+
+	ret = pkm_kacs_caap_cache_lock(&caap_cache);
+	if (ret)
+		return ret;
+	ret = lcs_rust_key_open_access_plan(token, sd, sd_len, desired_access,
+					    pip_type, pip_trust, caap_cache,
+					    plan);
+	pkm_kacs_caap_cache_unlock();
+	return ret;
 }
 
 long pkm_lcs_validate_syscall_relative_path(

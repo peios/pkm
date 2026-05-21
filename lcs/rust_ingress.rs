@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-use core::ffi::c_int;
+use core::ffi::{c_int, c_long, c_void};
 use core::{slice, str};
 
 use crate::kacs_core::PkmVec;
@@ -8,14 +8,15 @@ use crate::lcs_core::{
     classify_hive_route, current_user_sid_component_from_binary_sid,
     for_each_rsi_lookup_source_path_entry,
     parse_rsi_lookup_success_response_payload, plan_rsi_source_read,
-    plan_registry_ioctl_fixed_fd_access_gate, plan_registry_open_pre_resolution_access,
-    plan_registry_security_info_fd_access_gate, plan_source_registration_sequence_update,
-    parse_rsi_request_header, registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
+    plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
+    plan_registry_open_pre_resolution_access, plan_registry_security_info_fd_access_gate,
+    plan_source_registration_sequence_update, parse_rsi_request_header,
+    registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
     registry_open_pre_resolution_linux_errno, resolve_named_path_entry, route_hive,
     route_routable_path_hive, RSI_LOOKUP, rsi_queued_request_from_frame, rsi_status_code_errno,
-    source_registration_error_linux_errno, source_registration_hive_scope,
-    source_slot_hive_status, validate_key_component_bytes, validate_key_fd_open_view,
-    validate_registry_open_flags, validate_resolved_relative_path_depth,
+    source_registration_error_linux_errno, source_registration_hive_scope, source_slot_hive_status,
+    validate_key_component_bytes, validate_key_fd_open_view, validate_registry_open_flags,
+    validate_resolved_relative_path_depth,
     validate_rsi_lookup_metadata_completeness,
     validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,
     validate_rsi_lookup_path_response_sequences, validate_source_registration,
@@ -23,9 +24,9 @@ use crate::lcs_core::{
     CurrentUserRewrite, HiveRouteOutcome, HiveView, KeyFdOpenView, KeyWatchState,
     LayerResolutionContext, LayerView, LcsError, LcsLimits, LinuxErrno, NamedPathEntry,
     NamedPathResolution, PathKind, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
-    RegistryOpenPreResolutionAccessPlan, RsiReadPlan, RsiRetainedRequest,
-    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest, SourceSlotStatus,
-    SourceSlotView,
+    RegistryKeyOpenAccessInput, RegistryOpenAccessDecision, RegistryOpenPreResolutionAccessPlan,
+    RsiReadPlan, RsiRetainedRequest, SourceRegistrationDecision, SourceRegistrationHive,
+    SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -80,6 +81,20 @@ pub struct PkmLcsOpenPreflightPlanCopy {
     pub maximum_allowed: u8,
     pub path_resolution_allowed: u8,
     pub _pad: [u8; 2],
+}
+
+#[repr(C)]
+pub struct PkmLcsKeyOpenAccessPlanCopy {
+    pub requested_access: u32,
+    pub mapped_desired_access: u32,
+    pub access_check_granted: u32,
+    pub fd_granted_access: u32,
+    pub allowed: u8,
+    pub maximum_allowed: u8,
+    pub key_open_sacl_audit_required: u8,
+    pub audit_failure_blocks_completion: u8,
+    pub privilege_use_audit_required: u8,
+    pub _pad: [u8; 3],
 }
 
 #[repr(C)]
@@ -169,6 +184,15 @@ fn key_fd_open_view_error_return(err: LcsError) -> c_int {
         LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => {
             LinuxErrno::Enametoolong
         }
+        _ => LinuxErrno::Einval,
+    }
+    .negated_return() as c_int
+}
+
+fn key_open_access_error_return(err: LcsError) -> c_int {
+    match err {
+        LcsError::MalformedSecurityDescriptor { .. } => LinuxErrno::Eio,
+        LcsError::AccessCheckEvaluationFailed => LinuxErrno::Eio,
         _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
@@ -268,6 +292,108 @@ pub unsafe extern "C" fn lcs_rust_open_preflight(
                 .unwrap_or(LinuxErrno::Einval)
                 .negated_return() as c_int
         }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_key_open_access_plan(
+    subject_token: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired_access: u32,
+    pip_type: u32,
+    pip_trust: u32,
+    caap_cache: *const c_void,
+    plan_out: *mut PkmLcsKeyOpenAccessPlanCopy,
+) -> c_int {
+    if plan_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *plan_out = PkmLcsKeyOpenAccessPlanCopy {
+            requested_access: 0,
+            mapped_desired_access: 0,
+            access_check_granted: 0,
+            fd_granted_access: 0,
+            allowed: 0,
+            maximum_allowed: 0,
+            key_open_sacl_audit_required: 0,
+            audit_failure_blocks_completion: 0,
+            privilege_use_audit_required: 0,
+            _pad: [0; 3],
+        };
+    }
+
+    if subject_token.is_null() {
+        return LinuxErrno::Eacces.negated_return() as c_int;
+    }
+    if sd_ptr.is_null() || sd_len == 0 || desired_access == 0 || caap_cache.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let sd_bytes = unsafe { slice::from_raw_parts(sd_ptr, sd_len) };
+    let pip = crate::kacs_core::PipContext {
+        pip_type,
+        pip_trust,
+    };
+    match crate::caap_cache::with_caap_policies(caap_cache, |policies| {
+        crate::token_runtime::with_access_check_resolved_from_token(
+            subject_token,
+            pip,
+            policies,
+            |resolved| {
+                let conditional_context = crate::kacs_core::ConditionalContext {
+                    device_groups: resolved.device_groups,
+                    user_claims: resolved.user_claims,
+                    device_claims: resolved.device_claims,
+                    ..crate::kacs_core::ConditionalContext::default()
+                };
+                let plan = plan_registry_key_open_access(RegistryKeyOpenAccessInput {
+                    key_sd: sd_bytes,
+                    token: resolved.token,
+                    desired_access,
+                    pip,
+                    conditional_context,
+                    object_audit_context: None,
+                    privilege_intent: 0,
+                    caap_policies: resolved.policies,
+                })
+                .map_err(|err| key_open_access_error_return(err) as c_long)?;
+
+                if !crate::token_runtime::mark_token_privileges_used(
+                    subject_token,
+                    plan.updated_privileges.used,
+                ) {
+                    return Err(LinuxErrno::Eacces.negated_return() as c_long);
+                }
+
+                unsafe {
+                    (*plan_out).requested_access = plan.requested_access;
+                    (*plan_out).mapped_desired_access = plan.mapped_desired_access;
+                    (*plan_out).access_check_granted = plan.access_check_granted;
+                    (*plan_out).fd_granted_access = plan.fd_granted_access.unwrap_or(0);
+                    (*plan_out).allowed =
+                        u8::from(plan.decision == RegistryOpenAccessDecision::Allowed);
+                    (*plan_out).maximum_allowed = u8::from(plan.maximum_allowed);
+                    (*plan_out).key_open_sacl_audit_required =
+                        u8::from(plan.key_open_sacl_audit_required);
+                    (*plan_out).audit_failure_blocks_completion =
+                        u8::from(plan.audit_failure_blocks_completion);
+                    (*plan_out).privilege_use_audit_required =
+                        u8::from(plan.privilege_use_audit_required);
+                }
+
+                if plan.decision == RegistryOpenAccessDecision::Allowed {
+                    Ok(0)
+                } else {
+                    Ok(LinuxErrno::Eacces.negated_return() as c_long)
+                }
+            },
+        )
+    }) {
+        Ok(ret) => ret as c_int,
+        Err(errno) => errno as c_int,
     }
 }
 
