@@ -10650,6 +10650,204 @@ static void pkm_lcs_kunit_source_transaction_round_trip_failures(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_transaction_bind_for_mutation_success_and_reuse(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x51
+	};
+	struct pkm_lcs_kunit_transaction_source_script script = { };
+	struct pkm_lcs_transaction_binding_plan plan = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	int thread_ret;
+	long ret;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+
+	script.file = &file;
+	script.expected_op_code = RSI_BEGIN_TRANSACTION;
+	script.expected_header_txn_id = 0;
+	script.expected_payload_txn_id = snapshot.transaction_id;
+	script.expected_mode = RSI_TXN_READ_WRITE;
+	script.status = RSI_OK;
+
+	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+			   "pkm-lcs-kunit-bind-src");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_transaction_fd_bind_for_mutation((int)fd, 1, root_guid,
+						      &plan);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, plan.action, PKM_LCS_TRANSACTION_BIND_NEW);
+	KUNIT_EXPECT_EQ(test, plan.transaction_id, snapshot.transaction_id);
+	KUNIT_EXPECT_EQ(test, plan.state, REG_TXN_ACTIVE_BOUND);
+	KUNIT_EXPECT_EQ(test, plan.bound_source_id, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.state, REG_TXN_ACTIVE_BOUND);
+	KUNIT_EXPECT_EQ(test, snapshot.bound_source_id, 1U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.bound_root_guid, root_guid,
+			       sizeof(snapshot.bound_root_guid)),
+			0);
+
+	memset(&plan, 0, sizeof(plan));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_bind_for_mutation(
+				(int)fd, 1, root_guid, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.action, PKM_LCS_TRANSACTION_BIND_REUSE);
+	KUNIT_EXPECT_EQ(test, plan.transaction_id, snapshot.transaction_id);
+	KUNIT_EXPECT_EQ(test, plan.state, REG_TXN_ACTIVE_BOUND);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_transaction_bind_for_mutation_source_failure_rolls_back(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x52
+	};
+	struct pkm_lcs_kunit_transaction_source_script script = { };
+	struct pkm_lcs_transaction_binding_plan plan = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	int thread_ret;
+	long ret;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+
+	script.file = &file;
+	script.expected_op_code = RSI_BEGIN_TRANSACTION;
+	script.expected_header_txn_id = 0;
+	script.expected_payload_txn_id = snapshot.transaction_id;
+	script.expected_mode = RSI_TXN_READ_WRITE;
+	script.status = RSI_TXN_NOT_SUPPORTED;
+
+	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+			   "pkm-lcs-kunit-bind-unsupported");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_transaction_fd_bind_for_mutation((int)fd, 1, root_guid,
+						      &plan);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, plan.action, 0U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.state, REG_TXN_ACTIVE_UNBOUND);
+	KUNIT_EXPECT_EQ(test, snapshot.bound_source_id, 0U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_release(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_transaction_bind_for_mutation_counter_cap(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x53
+	};
+	struct pkm_lcs_transaction_binding_plan plan = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	u32 i;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	for (i = 0; i < 16U; i++)
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_source_bound_transaction_acquire(
+					1, &count),
+				0L);
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_bind_for_mutation(
+				(int)fd, 1, root_guid, &plan),
+			(long)-EBUSY);
+	KUNIT_EXPECT_EQ(test, plan.action, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.state, REG_TXN_ACTIVE_UNBOUND);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+
+	for (i = 0; i < 16U; i++)
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_source_bound_transaction_release(
+					1, &count),
+				0L);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs(
 	struct kunit *test)
 {
@@ -13854,6 +14052,11 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_precheck_and_complete),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_terminal_failures),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_rejects_bad_inputs),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_bind_for_mutation_success_and_reuse),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_bind_for_mutation_source_failure_rolls_back),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_bind_for_mutation_counter_cap),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_success),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_stops_bad_scalars),
 	KUNIT_CASE(

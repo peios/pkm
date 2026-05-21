@@ -29,6 +29,7 @@
 #include <pkm/lcs.h>
 
 #include "transaction_fd.h"
+#include "source_device.h"
 
 struct pkm_lcs_transaction_fd {
 	u64 transaction_id;
@@ -36,6 +37,7 @@ struct pkm_lcs_transaction_fd {
 	u32 bound_source_id;
 	u8 bound_root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 	spinlock_t lock;
+	struct mutex bind_lock;
 	wait_queue_head_t wait;
 	struct timer_list timeout_timer;
 };
@@ -297,6 +299,7 @@ long pkm_lcs_transaction_fd_publish(u32 timeout_ms)
 
 	txn->state = REG_TXN_ACTIVE_UNBOUND;
 	spin_lock_init(&txn->lock);
+	mutex_init(&txn->bind_lock);
 	init_waitqueue_head(&txn->wait);
 	timer_setup(&txn->timeout_timer, pkm_lcs_transaction_fd_timeout, 0);
 
@@ -489,21 +492,15 @@ long pkm_lcs_transaction_fd_prepare_mutation_binding(
 	return ret;
 }
 
-long pkm_lcs_transaction_fd_complete_first_bind(
-	int fd, u64 transaction_id, u32 source_id,
+static long pkm_lcs_transaction_fd_complete_first_bind_from_state(
+	struct pkm_lcs_transaction_fd *txn, u64 transaction_id, u32 source_id,
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES])
 {
-	struct pkm_lcs_transaction_fd *txn;
-	struct fd held;
 	long ret = 0;
 
-	if (!transaction_id || !source_id ||
+	if (!txn || !transaction_id || !source_id ||
 	    !pkm_lcs_transaction_root_guid_valid(root_guid))
 		return -EINVAL;
-
-	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
-	if (ret)
-		return ret;
 
 	spin_lock(&txn->lock);
 	switch (txn->state) {
@@ -535,6 +532,89 @@ long pkm_lcs_transaction_fd_complete_first_bind(
 	}
 	spin_unlock(&txn->lock);
 
+	return ret;
+}
+
+long pkm_lcs_transaction_fd_complete_first_bind(
+	int fd, u64 transaction_id, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES])
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_transaction_fd_complete_first_bind_from_state(
+		txn, transaction_id, source_id, root_guid);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_transaction_fd_bind_for_mutation(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	struct pkm_lcs_transaction_binding_plan *out)
+{
+	struct pkm_lcs_transaction_binding_plan plan = { };
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	u32 count = 0;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+	if (!source_id || !pkm_lcs_transaction_root_guid_valid(root_guid))
+		return -EINVAL;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	mutex_lock(&txn->bind_lock);
+
+	ret = pkm_lcs_transaction_fd_prepare_mutation_binding_from_state(
+		txn, source_id, root_guid, &plan);
+	if (ret)
+		goto out_unlock;
+
+	if (plan.action == PKM_LCS_TRANSACTION_BIND_REUSE) {
+		*out = plan;
+		goto out_unlock;
+	}
+
+	ret = pkm_lcs_source_bound_transaction_acquire(source_id, &count);
+	if (ret)
+		goto out_clear;
+
+	ret = pkm_lcs_source_begin_transaction_round_trip(
+		source_id, plan.transaction_id, RSI_TXN_READ_WRITE, NULL, NULL);
+	if (ret)
+		goto out_release_counter;
+
+	ret = pkm_lcs_transaction_fd_complete_first_bind_from_state(
+		txn, plan.transaction_id, source_id, root_guid);
+	if (ret) {
+		(void)pkm_lcs_source_dispatch_abort_transaction_request(
+			source_id, plan.transaction_id, NULL);
+		goto out_release_counter;
+	}
+
+	plan.state = REG_TXN_ACTIVE_BOUND;
+	plan.bound_source_id = source_id;
+	memcpy(plan.bound_root_guid, root_guid, sizeof(plan.bound_root_guid));
+	*out = plan;
+	goto out_unlock;
+
+out_release_counter:
+	(void)pkm_lcs_source_bound_transaction_release(source_id, &count);
+out_clear:
+	memset(out, 0, sizeof(*out));
+out_unlock:
+	mutex_unlock(&txn->bind_lock);
 	fdput(held);
 	return ret;
 }

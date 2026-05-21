@@ -40,6 +40,10 @@ long pkm_lcs_transaction_fd_prepare_mutation_binding(
 long pkm_lcs_transaction_fd_complete_first_bind(
 	int fd, u64 transaction_id, u32 source_id,
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES]);
+long pkm_lcs_transaction_fd_bind_for_mutation(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	struct pkm_lcs_transaction_binding_plan *out);
 long pkm_lcs_transaction_fd_snapshot(
 	int fd, struct pkm_lcs_transaction_fd_snapshot *out);
 
