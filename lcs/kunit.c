@@ -4867,6 +4867,123 @@ static void pkm_lcs_kunit_create_missing_parent_access_bad_inputs(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_layer_write_access_allows_key_set_value(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_SET_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_write_access_check_for_token(
+				token, sd, sd_len, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.mapped_desired_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, KEY_SET_VALUE);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_layer_write_access_denies_without_right(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_QUERY_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_write_access_check_for_token(
+				token, sd, sd_len, &plan),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.mapped_desired_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, 0U);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_layer_write_access_malformed_sd_eio(
+	struct kunit *test)
+{
+	static const u8 malformed_sd[] = { 0x01, 0x00, 0x00, 0x00 };
+	struct pkm_lcs_key_open_access_plan plan = {
+		.allowed = 1,
+		.fd_granted_access = KEY_SET_VALUE,
+	};
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_write_access_check_for_token(
+				token, malformed_sd, sizeof(malformed_sd),
+				&plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, 0U);
+	KUNIT_EXPECT_EQ(test, plan.access_check_granted, 0U);
+
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_layer_write_access_bad_inputs(struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_SET_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_write_access_check_for_token(
+				NULL, sd, sd_len, &plan),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_write_access_check_for_token(
+				token, NULL, sd_len, &plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_write_access_check_for_token(
+				token, sd, 0, &plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_write_access_check_for_token(
+				token, sd, sd_len, NULL),
+			(long)-EINVAL);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_create_symlink_authority_non_link_noop(
 	struct kunit *test)
 {
@@ -8818,6 +8935,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_parent_access_malformed_sd_eio),
 	KUNIT_CASE(pkm_lcs_kunit_create_missing_parent_access_bad_inputs),
+	KUNIT_CASE(pkm_lcs_kunit_layer_write_access_allows_key_set_value),
+	KUNIT_CASE(pkm_lcs_kunit_layer_write_access_denies_without_right),
+	KUNIT_CASE(pkm_lcs_kunit_layer_write_access_malformed_sd_eio),
+	KUNIT_CASE(pkm_lcs_kunit_layer_write_access_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_non_link_noop),
 	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_tcb_marks_used),
 	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_admin_without_tcb),

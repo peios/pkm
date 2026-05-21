@@ -3623,6 +3623,21 @@ long pkm_lcs_create_missing_parent_access_check_for_token(
 		token, sd, sd_len, KEY_CREATE_SUB_KEY, plan);
 }
 
+long pkm_lcs_layer_write_access_check_for_token(
+	const void *token, const u8 *metadata_sd, size_t metadata_sd_len,
+	struct pkm_lcs_key_open_access_plan *plan)
+{
+	if (!plan)
+		return -EINVAL;
+
+	memset(plan, 0, sizeof(*plan));
+	if (!metadata_sd || !metadata_sd_len)
+		return -EIO;
+
+	return pkm_lcs_key_open_access_check_for_token(
+		token, metadata_sd, metadata_sd_len, KEY_SET_VALUE, plan);
+}
+
 long pkm_lcs_create_missing_symlink_authority_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,
