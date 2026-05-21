@@ -152,6 +152,7 @@ const KACS_TOKEN_DEFAULT_SELF_ACCESS: u32 = KACS_TOKEN_QUERY
     | KACS_TOKEN_ADJUST_PRIVS
     | KACS_TOKEN_ADJUST_GROUPS
     | KACS_TOKEN_ADJUST_DEFAULT;
+const LCS_REGISTRY_KEY_ALL_ACCESS: u32 = 0x000F_003F;
 const TOKEN_MANDATORY_POLICY_ALLOWED_MASK: u32 =
     TOKEN_MANDATORY_POLICY_NO_WRITE_UP | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN;
 const TOKEN_AUDIT_POLICY_ALLOWED_MASK: u32 = AUDIT_POLICY_OBJECT_ACCESS_SUCCESS
@@ -4239,6 +4240,19 @@ fn build_read_only_socket_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8,
         None,
         None,
         Some(READ_CONTROL),
+    )
+}
+
+fn build_lcs_base_layer_default_sd_bytes() -> Result<(*mut u8, usize), i32> {
+    let system = Sid::parse(SYSTEM_SID_BYTES).map_err(|_| -EINVAL)?;
+
+    build_process_sd_bytes(
+        system,
+        system,
+        None,
+        Some(LCS_REGISTRY_KEY_ALL_ACCESS),
+        Some(LCS_REGISTRY_KEY_ALL_ACCESS),
+        None,
     )
 }
 
@@ -8631,6 +8645,21 @@ pub extern "C" fn kacs_rust_kunit_create_read_only_socket_sd(
         return null();
     };
     let Ok((ptr, len)) = build_read_only_socket_sd_bytes(token) else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
+/// Builds the PSD-005 first-boot base-layer metadata SD.
+pub extern "C" fn kacs_rust_create_lcs_base_layer_default_sd(
+    len_out: *mut usize,
+) -> *const u8 {
+    let Ok((ptr, len)) = build_lcs_base_layer_default_sd_bytes() else {
         return null();
     };
 

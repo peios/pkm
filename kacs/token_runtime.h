@@ -674,6 +674,7 @@ const u8 *kacs_rust_create_default_process_sd(const void *token_ptr,
 					      size_t *len_out);
 const u8 *kacs_rust_create_default_socket_sd(const void *token_ptr,
 					     size_t *len_out);
+const u8 *kacs_rust_create_lcs_base_layer_default_sd(size_t *len_out);
 const u8 *kacs_rust_kunit_create_query_limited_process_sd(const void *token_ptr,
 							  size_t *len_out);
 const u8 *kacs_rust_kunit_create_query_information_process_sd(
