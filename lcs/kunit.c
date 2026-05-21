@@ -5508,6 +5508,215 @@ static void pkm_lcs_kunit_transaction_commit_rejects_bad_fds(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_transaction_binding_precheck_and_complete(
+	struct kunit *test)
+{
+	static const u8 machine_root[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x11
+	};
+	static const u8 users_root[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x22
+	};
+	struct pkm_lcs_transaction_binding_plan plan = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				(int)fd, 7, machine_root, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.action, PKM_LCS_TRANSACTION_BIND_NEW);
+	KUNIT_EXPECT_EQ(test, plan.transaction_id, snapshot.transaction_id);
+	KUNIT_EXPECT_EQ(test, plan.state, REG_TXN_ACTIVE_UNBOUND);
+	KUNIT_EXPECT_EQ(test, plan.bound_source_id, 0U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, snapshot.transaction_id + 1, 7,
+				machine_root),
+			(long)-EINVAL);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.state, REG_TXN_ACTIVE_UNBOUND);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, snapshot.transaction_id, 7,
+				machine_root),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.state, REG_TXN_ACTIVE_BOUND);
+	KUNIT_EXPECT_EQ(test, snapshot.bound_source_id, 7U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.bound_root_guid, machine_root,
+			       sizeof(snapshot.bound_root_guid)),
+			0);
+
+	memset(&plan, 0, sizeof(plan));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				(int)fd, 7, machine_root, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.action, PKM_LCS_TRANSACTION_BIND_REUSE);
+	KUNIT_EXPECT_EQ(test, plan.transaction_id, snapshot.transaction_id);
+	KUNIT_EXPECT_EQ(test, plan.state, REG_TXN_ACTIVE_BOUND);
+	KUNIT_EXPECT_EQ(test, plan.bound_source_id, 7U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				(int)fd, 8, machine_root, &plan),
+			(long)-EXDEV);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				(int)fd, 7, users_root, &plan),
+			(long)-EXDEV);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_binding_terminal_failures(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x33
+	};
+	struct pkm_lcs_transaction_binding_plan plan = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_COMMITTED, 0),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				(int)fd, 7, root_guid, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, snapshot.transaction_id, 7,
+				root_guid),
+			(long)-EINVAL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_TIMED_OUT, 0),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				(int)fd, 7, root_guid, &plan),
+			(long)-ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, snapshot.transaction_id, 7,
+				root_guid),
+			(long)-ETIMEDOUT);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_SOURCE_DOWN, 7),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				(int)fd, 7, root_guid, &plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, snapshot.transaction_id, 7,
+				root_guid),
+			(long)-EIO);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_binding_rejects_bad_inputs(
+	struct kunit *test)
+{
+	static const u8 nil_root[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = { };
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x44
+	};
+	struct pkm_lcs_transaction_binding_plan plan = {
+		.action = 99,
+	};
+	long fd;
+	int not_txn_fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				(int)fd, 0, root_guid, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, plan.action, 0U);
+	plan.action = 99;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				(int)fd, 1, nil_root, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, plan.action, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				(int)fd, 1, NULL, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				(int)fd, 1, root_guid, NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, 0, 1, root_guid),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, 1, 0, root_guid),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, 1, 1, nil_root),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				-1, 1, root_guid, &plan),
+			(long)-EBADF);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				-1, 1, 1, root_guid),
+			(long)-EBADF);
+
+	not_txn_fd = anon_inode_getfd("lcs-not-transaction-binding",
+				     &pkm_lcs_kunit_non_key_fops, NULL,
+				     O_CLOEXEC);
+	KUNIT_ASSERT_TRUE(test, not_txn_fd >= 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_mutation_binding(
+				not_txn_fd, 1, root_guid, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				not_txn_fd, 1, 1, root_guid),
+			(long)-EINVAL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)not_txn_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_relative_open_preflight_success(struct kunit *test)
 {
 	const char path_src[] = "Child/Sub";
@@ -13533,6 +13742,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_precheck_bound_fails_closed),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_commit_rejects_bad_fds),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_precheck_and_complete),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_terminal_failures),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_rejects_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_success),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_stops_bad_scalars),
 	KUNIT_CASE(
