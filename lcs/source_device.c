@@ -34,6 +34,7 @@
 #define PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD 65535U
 #define PKM_LCS_MAX_SYSCALL_PATH_BYTES_HARD \
 	(PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD + 1U)
+#define PKM_LCS_MAX_KEY_DEPTH_HARD 4096U
 #define PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT 32U
 #define PKM_LCS_MAX_HIVES_PER_SOURCE_DEFAULT 64U
 
@@ -1427,6 +1428,51 @@ long pkm_lcs_source_lookup_round_trip(
 		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, response, enqueue);
 }
 
+long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len, u32 timeout_ms,
+	struct pkm_lcs_source_response_frame *frame,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_source_response_waiter waiter;
+	unsigned long deadline;
+	long ret;
+
+	if (!frame)
+		return -EINVAL;
+	if (response)
+		memset(response, 0, sizeof(*response));
+	if (enqueue)
+		memset(enqueue, 0, sizeof(*enqueue));
+
+	pkm_lcs_source_response_waiter_init(&waiter);
+	pkm_lcs_source_response_frame_init(frame);
+	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+
+	for (;;) {
+		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		if (ret)
+			return ret;
+
+		ret = pkm_lcs_source_dispatch_lookup_waitable_request_retaining_frame(
+			source_id, txn_id, parent_guid, child_name,
+			child_name_len, &waiter, frame, enqueue);
+		if (ret != -EAGAIN)
+			break;
+		if (!pkm_lcs_source_deadline_remaining(deadline))
+			return -ETIMEDOUT;
+	}
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
+							response);
+	if (ret)
+		pkm_lcs_source_response_frame_destroy(frame);
+	return ret;
+}
+
 static ssize_t pkm_lcs_source_device_read_file_with_ops(
 	struct file *file, char __user *buf, size_t count, bool nonblocking,
 	const struct pkm_lcs_source_copyout_ops *ops)
@@ -1958,6 +2004,155 @@ long pkm_lcs_open_user_relative_path_preflight(
 
 out_destroy_copy:
 	pkm_lcs_syscall_path_copy_destroy(&copy);
+	return ret;
+}
+
+void pkm_lcs_resolved_key_path_destroy(struct pkm_lcs_resolved_key_path *path)
+{
+	u32 i;
+
+	if (!path)
+		return;
+
+	if (path->resolved_path) {
+		for (i = 0; i < path->component_count; i++)
+			kfree(path->resolved_path[i]);
+		kfree(path->resolved_path);
+	}
+	kfree(path->ancestor_guids);
+	pkm_lcs_source_response_frame_destroy(&path->final_frame);
+	memset(path, 0, sizeof(*path));
+}
+
+static long pkm_lcs_resolved_key_path_prepare(
+	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_path_component_view *components,
+	u32 component_count, struct pkm_lcs_resolved_key_path *result)
+{
+	u32 i;
+
+	if (!source_id || !root_guid || !components || !result)
+		return -EINVAL;
+	if (component_count < 2)
+		return -EOPNOTSUPP;
+	if (component_count > PKM_LCS_MAX_KEY_DEPTH_HARD)
+		return -EINVAL;
+
+	result->resolved_path = kcalloc(component_count,
+					sizeof(*result->resolved_path),
+					GFP_KERNEL);
+	if (!result->resolved_path)
+		return -ENOMEM;
+	result->ancestor_guids = kcalloc(component_count,
+					 sizeof(*result->ancestor_guids),
+					 GFP_KERNEL);
+	if (!result->ancestor_guids)
+		return -ENOMEM;
+
+	for (i = 0; i < component_count; i++) {
+		if (!components[i].name || !components[i].name_len)
+			return -EINVAL;
+		if (components[i].name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD)
+			return -ENAMETOOLONG;
+		result->resolved_path[i] =
+			kmemdup_nul(components[i].name,
+				    components[i].name_len, GFP_KERNEL);
+		if (!result->resolved_path[i])
+			return -ENOMEM;
+	}
+
+	result->source_id = source_id;
+	result->component_count = component_count;
+	memcpy(result->ancestor_guids[0], root_guid, RSI_GUID_SIZE);
+	pkm_lcs_source_response_frame_init(&result->final_frame);
+	return 0;
+}
+
+long pkm_lcs_walk_absolute_components(
+	u32 source_id, u64 txn_id, const u8 root_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_path_component_view *components,
+	u32 component_count, const struct pkm_lcs_rsi_layer_view *layers,
+	u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
+{
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_rsi_lookup_child_result child = { };
+	struct pkm_lcs_source_response_frame frame;
+	u8 current_guid[RSI_GUID_SIZE];
+	u64 next_sequence;
+	u32 i;
+	long ret;
+
+	if (!result)
+		return -EINVAL;
+	memset(result, 0, sizeof(*result));
+	if ((layer_count && !layers) ||
+	    (private_layer_count && !private_layers))
+		return -EINVAL;
+
+	ret = pkm_lcs_resolved_key_path_prepare(source_id, root_guid,
+						components, component_count,
+						result);
+	if (ret)
+		goto out_destroy;
+
+	memcpy(current_guid, root_guid, sizeof(current_guid));
+	for (i = 1; i < component_count; i++) {
+		pkm_lcs_source_response_frame_init(&frame);
+		ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
+			source_id, txn_id, current_guid, components[i].name,
+			components[i].name_len,
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
+			&enqueue);
+		if (ret)
+			goto out_destroy_frame;
+
+		ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+		if (ret)
+			goto out_destroy_frame;
+
+		ret = pkm_lcs_rsi_materialize_lookup_child(
+			frame.data, frame.len, response.request_id,
+			next_sequence, components[i].name,
+			components[i].name_len, layers, layer_count,
+			private_layers, private_layer_count, &child);
+		if (ret)
+			goto out_destroy_frame;
+		if (!child.found) {
+			ret = -ENOENT;
+			goto out_destroy_frame;
+		}
+		if (child.symlink) {
+			ret = -EOPNOTSUPP;
+			goto out_destroy_frame;
+		}
+
+		memcpy(result->ancestor_guids[i], child.key_guid,
+		       RSI_GUID_SIZE);
+		memcpy(current_guid, child.key_guid, sizeof(current_guid));
+		if (i == component_count - 1U) {
+			memcpy(result->key_guid, child.key_guid,
+			       sizeof(result->key_guid));
+			result->final_sd_offset = child.sd_offset;
+			result->final_sd_len = child.sd_len;
+			result->final_volatile = child.volatile_key != 0;
+			result->final_symlink = child.symlink != 0;
+			result->final_last_write_time = child.last_write_time;
+			result->final_frame = frame;
+			pkm_lcs_source_response_frame_init(&frame);
+		}
+out_destroy_frame:
+		pkm_lcs_source_response_frame_destroy(&frame);
+		if (ret)
+			goto out_destroy;
+	}
+
+	return 0;
+
+out_destroy:
+	pkm_lcs_resolved_key_path_destroy(result);
 	return ret;
 }
 

@@ -14,6 +14,8 @@
 #include "key_fd.h"
 
 struct file;
+struct pkm_lcs_rsi_layer_view;
+struct pkm_lcs_rsi_private_layer_view;
 struct pkm_lcs_source_response_waiter;
 
 enum pkm_lcs_source_fd_state {
@@ -168,6 +170,26 @@ struct pkm_lcs_source_response_frame {
 	size_t len;
 };
 
+struct pkm_lcs_path_component_view {
+	const char *name;
+	u32 name_len;
+};
+
+struct pkm_lcs_resolved_key_path {
+	u32 source_id;
+	u32 component_count;
+	u32 final_sd_offset;
+	u32 final_sd_len;
+	bool final_volatile;
+	bool final_symlink;
+	u8 _pad[2];
+	u64 final_last_write_time;
+	u8 key_guid[RSI_GUID_SIZE];
+	char **resolved_path;
+	u8 (*ancestor_guids)[RSI_GUID_SIZE];
+	struct pkm_lcs_source_response_frame final_frame;
+};
+
 struct pkm_lcs_source_response_waiter {
 	wait_queue_head_t wait;
 	bool completed;
@@ -268,6 +290,21 @@ long pkm_lcs_source_lookup_round_trip_timeout(
 	const char *child_name, u32 child_name_len, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len, u32 timeout_ms,
+	struct pkm_lcs_source_response_frame *frame,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_walk_absolute_components(
+	u32 source_id, u64 txn_id, const u8 root_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_path_component_view *components,
+	u32 component_count, const struct pkm_lcs_rsi_layer_view *layers,
+	u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result);
+void pkm_lcs_resolved_key_path_destroy(
+	struct pkm_lcs_resolved_key_path *path);
 long pkm_lcs_source_accept_response_file(
 	struct file *file, const u8 *frame, size_t frame_len,
 	struct pkm_lcs_source_response_result *result);
