@@ -5306,6 +5306,118 @@ static void pkm_lcs_kunit_transaction_fd_rejects_bad_inputs(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_transaction_status_reports_active_state(
+	struct kunit *test)
+{
+	struct reg_txn_status_args status = { };
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_status((int)fd, &status), 0L);
+	KUNIT_EXPECT_EQ(test, status.state, REG_TXN_ACTIVE_UNBOUND);
+	KUNIT_EXPECT_EQ(test, status.terminal_errno, 0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_status_reports_timeout_errno(
+	struct kunit *test)
+{
+	struct reg_txn_status_args status = { };
+	long fd;
+
+	fd = pkm_lcs_transaction_fd_publish(1);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	msleep(20);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_status((int)fd, &status), 0L);
+	KUNIT_EXPECT_EQ(test, status.state, REG_TXN_TIMED_OUT);
+	KUNIT_EXPECT_EQ(test, status.terminal_errno, ETIMEDOUT);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_status_maps_terminal_errno(
+	struct kunit *test)
+{
+	struct reg_txn_status_args status = { };
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_ACTIVE_BOUND, 7),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_status((int)fd, &status), 0L);
+	KUNIT_EXPECT_EQ(test, status.state, REG_TXN_ACTIVE_BOUND);
+	KUNIT_EXPECT_EQ(test, status.terminal_errno, 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_COMMITTED, 7),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_status((int)fd, &status), 0L);
+	KUNIT_EXPECT_EQ(test, status.state, REG_TXN_COMMITTED);
+	KUNIT_EXPECT_EQ(test, status.terminal_errno, 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_ABORTED, 7),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_status((int)fd, &status), 0L);
+	KUNIT_EXPECT_EQ(test, status.state, REG_TXN_ABORTED);
+	KUNIT_EXPECT_EQ(test, status.terminal_errno, EINVAL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_SOURCE_DOWN, 7),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_status((int)fd, &status), 0L);
+	KUNIT_EXPECT_EQ(test, status.state, REG_TXN_SOURCE_DOWN);
+	KUNIT_EXPECT_EQ(test, status.terminal_errno, EIO);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, U32_MAX, 0),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_status_rejects_bad_inputs(
+	struct kunit *test)
+{
+	struct reg_txn_status_args status = {
+		.state = 99,
+		.terminal_errno = 99,
+	};
+	int fd;
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_status(-1, &status),
+			(long)-EBADF);
+	KUNIT_EXPECT_EQ(test, status.state, 0U);
+	KUNIT_EXPECT_EQ(test, status.terminal_errno, 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_status(-1, NULL),
+			(long)-EINVAL);
+
+	fd = anon_inode_getfd("lcs-not-transaction-status",
+			      &pkm_lcs_kunit_non_key_fops, NULL, O_CLOEXEC);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_status(fd, &status),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_relative_open_preflight_success(struct kunit *test)
 {
 	const char path_src[] = "Child/Sub";
@@ -12686,6 +12798,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_begin_transaction_ids_are_monotonic),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_timeout_marks_timed_out),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_fd_rejects_bad_inputs),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_status_reports_active_state),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_status_reports_timeout_errno),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_status_maps_terminal_errno),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_status_rejects_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_success),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_stops_bad_scalars),
 	KUNIT_CASE(

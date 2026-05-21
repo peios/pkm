@@ -23,6 +23,7 @@
 #include <linux/string.h>
 #include <linux/syscalls.h>
 #include <linux/timer.h>
+#include <linux/uaccess.h>
 #include <linux/wait.h>
 
 #include <pkm/lcs.h>
@@ -57,6 +58,32 @@ static bool pkm_lcs_transaction_state_active(u32 state)
 {
 	return state == REG_TXN_ACTIVE_UNBOUND ||
 	       state == REG_TXN_ACTIVE_BOUND;
+}
+
+static long pkm_lcs_transaction_terminal_errno(u32 state, s32 *errno_out)
+{
+	if (!errno_out)
+		return -EINVAL;
+
+	switch (state) {
+	case REG_TXN_ACTIVE_UNBOUND:
+	case REG_TXN_ACTIVE_BOUND:
+	case REG_TXN_COMMITTED:
+		*errno_out = 0;
+		return 0;
+	case REG_TXN_ABORTED:
+		*errno_out = EINVAL;
+		return 0;
+	case REG_TXN_TIMED_OUT:
+		*errno_out = ETIMEDOUT;
+		return 0;
+	case REG_TXN_SOURCE_DOWN:
+		*errno_out = EIO;
+		return 0;
+	default:
+		*errno_out = 0;
+		return -EIO;
+	}
 }
 
 static long pkm_lcs_transaction_id_allocate(u64 *transaction_id)
@@ -120,6 +147,29 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 	return 0;
 }
 
+static long pkm_lcs_transaction_fd_status_from_state(
+	struct pkm_lcs_transaction_fd *txn, struct reg_txn_status_args *out)
+{
+	u32 state;
+	long ret;
+
+	if (!txn || !out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	spin_lock(&txn->lock);
+	state = txn->state;
+	spin_unlock(&txn->lock);
+
+	ret = pkm_lcs_transaction_terminal_errno(state, &out->terminal_errno);
+	if (ret) {
+		memset(out, 0, sizeof(*out));
+		return ret;
+	}
+	out->state = state;
+	return 0;
+}
+
 static __poll_t pkm_lcs_transaction_fd_poll(struct file *file,
 					    struct poll_table_struct *wait)
 {
@@ -145,10 +195,40 @@ static __poll_t pkm_lcs_transaction_fd_poll(struct file *file,
 	return mask;
 }
 
+static long pkm_lcs_transaction_fd_ioctl(struct file *file, unsigned int cmd,
+					 unsigned long arg)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct reg_txn_status_args status;
+	long ret;
+
+	if (!file)
+		return -EBADF;
+
+	txn = file->private_data;
+	if (!txn)
+		return -EINVAL;
+
+	switch (cmd) {
+	case REG_IOC_TXN_STATUS:
+		if (!arg)
+			return -EFAULT;
+		ret = pkm_lcs_transaction_fd_status_from_state(txn, &status);
+		if (ret)
+			return ret;
+		if (copy_to_user((void __user *)arg, &status, sizeof(status)))
+			return -EFAULT;
+		return 0;
+	default:
+		return -ENOTTY;
+	}
+}
+
 static const struct file_operations pkm_lcs_transaction_fd_fops = {
 	.owner = THIS_MODULE,
 	.release = pkm_lcs_transaction_fd_release,
 	.poll = pkm_lcs_transaction_fd_poll,
+	.unlocked_ioctl = pkm_lcs_transaction_fd_ioctl,
 	.llseek = noop_llseek,
 };
 
@@ -243,6 +323,63 @@ long pkm_lcs_transaction_fd_snapshot(
 	fdput(held);
 	return 0;
 }
+
+long pkm_lcs_transaction_fd_status(int fd, struct reg_txn_status_args *out)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_transaction_fd_status_from_state(txn, out);
+	fdput(held);
+	return ret;
+}
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+static bool pkm_lcs_transaction_state_known(u32 state)
+{
+	return state == REG_TXN_ACTIVE_UNBOUND ||
+	       state == REG_TXN_ACTIVE_BOUND ||
+	       state == REG_TXN_COMMITTED ||
+	       state == REG_TXN_ABORTED ||
+	       state == REG_TXN_TIMED_OUT ||
+	       state == REG_TXN_SOURCE_DOWN;
+}
+
+long pkm_lcs_kunit_transaction_fd_set_state(int fd, u32 state,
+					    u32 bound_source_id)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	if (!pkm_lcs_transaction_state_known(state))
+		return -EINVAL;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	spin_lock(&txn->lock);
+	txn->state = state;
+	txn->bound_source_id = bound_source_id;
+	spin_unlock(&txn->lock);
+
+	if (!pkm_lcs_transaction_state_active(state))
+		wake_up_all(&txn->wait);
+
+	fdput(held);
+	return 0;
+}
+#endif
 
 long pkm_lcs_reg_begin_transaction(void)
 {
