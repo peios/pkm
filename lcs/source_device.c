@@ -246,6 +246,11 @@ extern int lcs_rust_open_preflight(
 	struct pkm_lcs_open_preflight_plan *plan);
 extern int lcs_rust_validate_key_create_flags(
 	u32 flags, struct pkm_lcs_key_create_options *options);
+extern int lcs_rust_plan_key_guid_assignment(
+	const u8 candidate_guid[16], const u8 (*active_key_guids)[16],
+	size_t active_key_guid_count, const u8 (*retired_key_guids)[16],
+	size_t retired_key_guid_count,
+	struct pkm_lcs_key_guid_assignment_plan *plan);
 extern int lcs_rust_admit_layer_target(
 	const u8 *layer_name, u32 layer_name_len,
 	const struct pkm_lcs_rsi_layer_view *layers, size_t layer_count,
@@ -3708,6 +3713,59 @@ long pkm_lcs_create_layer_write_access_check_for_token(
 	selected = &metadata[selection.index];
 	return pkm_lcs_layer_write_access_check_for_token(
 		token, selected->sd, selected->sd_len, plan);
+}
+
+static void pkm_lcs_default_key_guid_generate(void *ctx, u8 guid[16])
+{
+	(void)ctx;
+
+	pkm_kacs_fill_uuid_v4(guid);
+}
+
+long pkm_lcs_assign_new_key_guid(
+	const u8 (*active_key_guids)[16], u32 active_key_guid_count,
+	const u8 (*retired_key_guids)[16], u32 retired_key_guid_count,
+	const struct pkm_lcs_key_guid_generator *generator,
+	struct pkm_lcs_key_guid_assignment_plan *plan)
+{
+	pkm_lcs_key_guid_generator_fn generate =
+		pkm_lcs_default_key_guid_generate;
+	void *generate_ctx = NULL;
+	u8 candidate[16];
+	u32 attempt;
+	int ret = -EIO;
+
+	if (!plan)
+		return -EINVAL;
+
+	memset(plan, 0, sizeof(*plan));
+	if ((active_key_guid_count && !active_key_guids) ||
+	    (retired_key_guid_count && !retired_key_guids))
+		return -EINVAL;
+	if (generator) {
+		if (!generator->generate)
+			return -EINVAL;
+		generate = generator->generate;
+		generate_ctx = generator->ctx;
+	}
+
+	BUILD_BUG_ON(sizeof(candidate) != KACS_UUID_BYTES);
+
+	for (attempt = 0; attempt < PKM_LCS_KEY_GUID_ASSIGNMENT_MAX_ATTEMPTS;
+	     attempt++) {
+		memset(candidate, 0, sizeof(candidate));
+		generate(generate_ctx, candidate);
+		ret = lcs_rust_plan_key_guid_assignment(
+			candidate, active_key_guids, active_key_guid_count,
+			retired_key_guids, retired_key_guid_count, plan);
+		if (!ret)
+			return 0;
+		if (ret != -EIO)
+			return ret;
+	}
+
+	memset(plan, 0, sizeof(*plan));
+	return -EIO;
 }
 
 long pkm_lcs_create_missing_symlink_authority_for_token(

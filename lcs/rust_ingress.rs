@@ -9,8 +9,9 @@ use crate::lcs_core::{
     for_each_routable_path_component, for_each_rsi_lookup_source_path_entry,
     layer_target_admission_linux_errno, parse_rsi_lookup_success_response_payload,
     parse_rsi_query_values_success_response_payload, parse_rsi_read_key_success_response_payload,
-    parse_rsi_request_header, plan_key_open_audit_record, plan_layer_target_admission,
-    plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
+    parse_rsi_request_header, plan_key_guid_assignment, plan_key_open_audit_record,
+    plan_layer_target_admission, plan_registry_ioctl_fixed_fd_access_gate,
+    plan_registry_key_open_access,
     plan_registry_open_pre_resolution_access, plan_registry_security_info_fd_access_gate,
     plan_rsi_source_read, plan_source_registration_sequence_update,
     registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
@@ -29,14 +30,15 @@ use crate::lcs_core::{
     validate_value_data_len, validate_value_name_bytes, validate_value_write_type,
     write_key_open_audit_payload, write_rsi_lookup_request_frame,
     write_rsi_query_values_request_frame, write_rsi_read_key_request_frame, BlanketTombstoneEntry,
-    CurrentUserRewrite, HiveRouteOutcome, HiveView, KeyFdOpenView, KeyWatchState,
-    LayerResolutionContext, LayerTargetAdmissionInput, LayerView, LcsCallerTokenSummary, LcsError,
-    LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry, NamedPathResolution, PathKind,
-    RegisteredHiveIdentity, RegistryIoctlAccessRequirement, RegistryKeyOpenAccessInput,
-    RegistryOpenAccessDecision, RegistryOpenPreResolutionAccessPlan, RsiReadPlan,
-    RsiRetainedRequest, SourceRegistrationDecision, SourceRegistrationHive,
-    SourceRegistrationRequest, SourceSlotStatus, SourceSlotView, ValueEntry, ValueResolution,
-    REG_TOMBSTONE, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
+    CurrentUserRewrite, HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest,
+    KeyWatchState, LayerResolutionContext, LayerTargetAdmissionInput, LayerView,
+    LcsCallerTokenSummary, LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno,
+    NamedPathEntry, NamedPathResolution, PathKind, RegisteredHiveIdentity,
+    RegistryIoctlAccessRequirement, RegistryKeyOpenAccessInput, RegistryOpenAccessDecision,
+    RegistryOpenPreResolutionAccessPlan, RsiReadPlan, RsiRetainedRequest,
+    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
+    SourceSlotStatus, SourceSlotView, ValueEntry, ValueResolution, REG_TOMBSTONE, RSI_LOOKUP,
+    RSI_QUERY_VALUES, RSI_READ_KEY,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -97,6 +99,14 @@ pub struct PkmLcsOpenPreflightPlanCopy {
 pub struct PkmLcsKeyCreateOptionsCopy {
     pub volatile_key: u8,
     pub symlink: u8,
+    pub _pad: [u8; 2],
+}
+
+#[repr(C)]
+pub struct PkmLcsKeyGuidAssignmentPlanCopy {
+    pub guid: [u8; 16],
+    pub assigned_by_lcs: u8,
+    pub persist_in_key_record: u8,
     pub _pad: [u8; 2],
 }
 
@@ -433,6 +443,54 @@ pub unsafe extern "C" fn lcs_rust_validate_key_create_flags(
             0
         }
         Err(_) => LinuxErrno::Einval.negated_return() as c_int,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_plan_key_guid_assignment(
+    candidate_guid: *const [u8; 16],
+    active_key_guids: *const [u8; 16],
+    active_key_guid_count: usize,
+    retired_key_guids: *const [u8; 16],
+    retired_key_guid_count: usize,
+    plan_out: *mut PkmLcsKeyGuidAssignmentPlanCopy,
+) -> c_int {
+    let Some(plan_out) = (unsafe { plan_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *plan_out = PkmLcsKeyGuidAssignmentPlanCopy {
+        guid: [0; 16],
+        assigned_by_lcs: 0,
+        persist_in_key_record: 0,
+        _pad: [0; 2],
+    };
+
+    let Some(candidate_guid) = (unsafe { candidate_guid.as_ref() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    let active_key_guids =
+        match parse_key_guid_tracker(active_key_guids, active_key_guid_count) {
+            Ok(guids) => guids,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+    let retired_key_guids =
+        match parse_key_guid_tracker(retired_key_guids, retired_key_guid_count) {
+            Ok(guids) => guids,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+
+    match plan_key_guid_assignment(KeyGuidAssignmentRequest {
+        candidate_guid: *candidate_guid,
+        active_key_guids,
+        retired_key_guids,
+    }) {
+        Ok(plan) => {
+            plan_out.guid = plan.guid;
+            plan_out.assigned_by_lcs = plan.assigned_by_lcs as u8;
+            plan_out.persist_in_key_record = plan.persist_in_key_record as u8;
+            0
+        }
+        Err(_) => LinuxErrno::Eio.negated_return() as c_int,
     }
 }
 
@@ -1819,6 +1877,19 @@ fn parse_scope_guids<'a>(
         return Err(LinuxErrno::Einval);
     }
     Ok(unsafe { slice::from_raw_parts(scope_guids, scope_count) })
+}
+
+fn parse_key_guid_tracker<'a>(
+    guids: *const [u8; 16],
+    count: usize,
+) -> Result<&'a [[u8; 16]], LinuxErrno> {
+    if count == 0 {
+        return Ok(&[]);
+    }
+    if guids.is_null() {
+        return Err(LinuxErrno::Einval);
+    }
+    Ok(unsafe { slice::from_raw_parts(guids, count) })
 }
 
 fn parse_current_user_rewrite<'a>(

@@ -26,6 +26,7 @@ enum pkm_lcs_source_fd_state {
 #define PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT 256U
 #define PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT 30000U
 #define PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT 16U
+#define PKM_LCS_KEY_GUID_ASSIGNMENT_MAX_ATTEMPTS 8U
 
 struct pkm_lcs_source_in_flight_request {
 	bool occupied;
@@ -134,6 +135,20 @@ struct pkm_lcs_key_create_options {
 	u8 volatile_key;
 	u8 symlink;
 	u8 _pad[2];
+};
+
+struct pkm_lcs_key_guid_assignment_plan {
+	u8 guid[16];
+	u8 assigned_by_lcs;
+	u8 persist_in_key_record;
+	u8 _pad[2];
+};
+
+typedef void (*pkm_lcs_key_guid_generator_fn)(void *ctx, u8 guid[16]);
+
+struct pkm_lcs_key_guid_generator {
+	pkm_lcs_key_guid_generator_fn generate;
+	void *ctx;
 };
 
 struct pkm_lcs_create_preflight_plan {
@@ -451,6 +466,11 @@ long pkm_lcs_create_layer_write_access_check_for_token(
 	size_t base_metadata_sd_len,
 	const struct pkm_lcs_layer_metadata_sd_view *metadata,
 	u32 metadata_count, struct pkm_lcs_key_open_access_plan *plan);
+long pkm_lcs_assign_new_key_guid(
+	const u8 (*active_key_guids)[16], u32 active_key_guid_count,
+	const u8 (*retired_key_guids)[16], u32 retired_key_guid_count,
+	const struct pkm_lcs_key_guid_generator *generator,
+	struct pkm_lcs_key_guid_assignment_plan *plan);
 long pkm_lcs_create_missing_symlink_authority_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,

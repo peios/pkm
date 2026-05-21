@@ -5389,6 +5389,198 @@ static void pkm_lcs_kunit_create_layer_write_bad_inputs(struct kunit *test)
 	kacs_rust_token_drop(token);
 }
 
+struct pkm_lcs_kunit_guid_sequence {
+	const u8 (*guids)[16];
+	u32 count;
+	u32 calls;
+};
+
+static void pkm_lcs_kunit_guid_sequence_generate(void *raw_ctx, u8 guid[16])
+{
+	struct pkm_lcs_kunit_guid_sequence *ctx = raw_ctx;
+	u32 index;
+
+	if (!ctx || !ctx->guids || !ctx->count) {
+		memset(guid, 0, 16);
+		return;
+	}
+
+	index = ctx->calls < ctx->count ? ctx->calls : ctx->count - 1;
+	memcpy(guid, ctx->guids[index], 16);
+	ctx->calls++;
+}
+
+static struct pkm_lcs_key_guid_generator
+pkm_lcs_kunit_guid_generator(struct pkm_lcs_kunit_guid_sequence *sequence)
+{
+	return (struct pkm_lcs_key_guid_generator) {
+		.generate = pkm_lcs_kunit_guid_sequence_generate,
+		.ctx = sequence,
+	};
+}
+
+static void pkm_lcs_kunit_key_guid_assignment_fresh_succeeds(
+	struct kunit *test)
+{
+	static const u8 candidates[1][16] = { { 0x40 } };
+	static const u8 active[2][16] = { { 0x41 }, { 0x42 } };
+	static const u8 retired[1][16] = { { 0x50 } };
+	struct pkm_lcs_key_guid_assignment_plan plan = { };
+	struct pkm_lcs_kunit_guid_sequence sequence = {
+		.guids = candidates,
+		.count = ARRAY_SIZE(candidates),
+	};
+	struct pkm_lcs_key_guid_generator generator =
+		pkm_lcs_kunit_guid_generator(&sequence);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_assign_new_key_guid(
+				active, ARRAY_SIZE(active), retired,
+				ARRAY_SIZE(retired), &generator, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, sequence.calls, 1U);
+	KUNIT_EXPECT_EQ(test, memcmp(plan.guid, candidates[0], 16), 0);
+	KUNIT_EXPECT_EQ(test, plan.assigned_by_lcs, 1U);
+	KUNIT_EXPECT_EQ(test, plan.persist_in_key_record, 1U);
+}
+
+static void pkm_lcs_kunit_key_guid_assignment_retries_bad_candidates(
+	struct kunit *test)
+{
+	static const u8 nil_then_fresh[2][16] = { { 0 }, { 0x61 } };
+	static const u8 active_then_fresh[2][16] = { { 0x71 }, { 0x72 } };
+	static const u8 retired_then_fresh[2][16] = { { 0x81 }, { 0x82 } };
+	static const u8 active[1][16] = { { 0x71 } };
+	static const u8 retired[1][16] = { { 0x81 } };
+	struct pkm_lcs_key_guid_assignment_plan plan = { };
+	struct pkm_lcs_kunit_guid_sequence nil_sequence = {
+		.guids = nil_then_fresh,
+		.count = ARRAY_SIZE(nil_then_fresh),
+	};
+	struct pkm_lcs_kunit_guid_sequence active_sequence = {
+		.guids = active_then_fresh,
+		.count = ARRAY_SIZE(active_then_fresh),
+	};
+	struct pkm_lcs_kunit_guid_sequence retired_sequence = {
+		.guids = retired_then_fresh,
+		.count = ARRAY_SIZE(retired_then_fresh),
+	};
+	struct pkm_lcs_key_guid_generator generator =
+		pkm_lcs_kunit_guid_generator(&nil_sequence);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_assign_new_key_guid(NULL, 0, NULL, 0,
+						    &generator, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, nil_sequence.calls, 2U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(plan.guid, nil_then_fresh[1], 16),
+			0);
+
+	generator = pkm_lcs_kunit_guid_generator(&active_sequence);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_assign_new_key_guid(
+				active, ARRAY_SIZE(active), NULL, 0,
+				&generator, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, active_sequence.calls, 2U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(plan.guid, active_then_fresh[1], 16),
+			0);
+
+	generator = pkm_lcs_kunit_guid_generator(&retired_sequence);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_assign_new_key_guid(
+				NULL, 0, retired, ARRAY_SIZE(retired),
+				&generator, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, retired_sequence.calls, 2U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(plan.guid, retired_then_fresh[1], 16),
+			0);
+}
+
+static void pkm_lcs_kunit_key_guid_assignment_exhaustion_fails_closed(
+	struct kunit *test)
+{
+	static const u8 active[1][16] = { { 0x91 } };
+	struct pkm_lcs_key_guid_assignment_plan plan = {
+		.guid = { 0xff },
+		.assigned_by_lcs = 1,
+		.persist_in_key_record = 1,
+	};
+	struct pkm_lcs_kunit_guid_sequence sequence = {
+		.guids = active,
+		.count = ARRAY_SIZE(active),
+	};
+	struct pkm_lcs_key_guid_generator generator =
+		pkm_lcs_kunit_guid_generator(&sequence);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_assign_new_key_guid(
+				active, ARRAY_SIZE(active), NULL, 0,
+				&generator, &plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, sequence.calls,
+			PKM_LCS_KEY_GUID_ASSIGNMENT_MAX_ATTEMPTS);
+	KUNIT_EXPECT_EQ(test, plan.assigned_by_lcs, 0U);
+	KUNIT_EXPECT_EQ(test, plan.persist_in_key_record, 0U);
+	KUNIT_EXPECT_FALSE(test, memcmp(plan.guid, active[0], 16) == 0);
+}
+
+static void pkm_lcs_kunit_key_guid_assignment_bad_tracker_eio(
+	struct kunit *test)
+{
+	static const u8 candidate[1][16] = { { 0x93 } };
+	static const u8 bad_active[1][16] = { { 0 } };
+	struct pkm_lcs_key_guid_assignment_plan plan = { };
+	struct pkm_lcs_kunit_guid_sequence sequence = {
+		.guids = candidate,
+		.count = ARRAY_SIZE(candidate),
+	};
+	struct pkm_lcs_key_guid_generator generator =
+		pkm_lcs_kunit_guid_generator(&sequence);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_assign_new_key_guid(
+				bad_active, ARRAY_SIZE(bad_active), NULL, 0,
+				&generator, &plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, sequence.calls,
+			PKM_LCS_KEY_GUID_ASSIGNMENT_MAX_ATTEMPTS);
+	KUNIT_EXPECT_EQ(test, plan.assigned_by_lcs, 0U);
+}
+
+static void pkm_lcs_kunit_key_guid_assignment_bad_inputs(struct kunit *test)
+{
+	static const u8 candidate[1][16] = { { 0xa1 } };
+	struct pkm_lcs_key_guid_assignment_plan plan = { };
+	struct pkm_lcs_key_guid_generator bad_generator = { };
+	struct pkm_lcs_kunit_guid_sequence sequence = {
+		.guids = candidate,
+		.count = ARRAY_SIZE(candidate),
+	};
+	struct pkm_lcs_key_guid_generator generator =
+		pkm_lcs_kunit_guid_generator(&sequence);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_assign_new_key_guid(NULL, 0, NULL, 0,
+						    &generator, NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_assign_new_key_guid(NULL, 1, NULL, 0,
+						    &generator, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_assign_new_key_guid(NULL, 0, NULL, 1,
+						    &generator, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_assign_new_key_guid(NULL, 0, NULL, 0,
+						    &bad_generator, &plan),
+			(long)-EINVAL);
+}
+
 static void pkm_lcs_kunit_create_symlink_authority_non_link_noop(
 	struct kunit *test)
 {
@@ -9358,6 +9550,11 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_malformed_metadata_eio),
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_implicit_base_delegates),
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_bad_inputs),
+	KUNIT_CASE(pkm_lcs_kunit_key_guid_assignment_fresh_succeeds),
+	KUNIT_CASE(pkm_lcs_kunit_key_guid_assignment_retries_bad_candidates),
+	KUNIT_CASE(pkm_lcs_kunit_key_guid_assignment_exhaustion_fails_closed),
+	KUNIT_CASE(pkm_lcs_kunit_key_guid_assignment_bad_tracker_eio),
+	KUNIT_CASE(pkm_lcs_kunit_key_guid_assignment_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_non_link_noop),
 	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_tcb_marks_used),
 	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_admin_without_tcb),
