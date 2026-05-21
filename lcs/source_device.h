@@ -356,6 +356,10 @@ long pkm_lcs_open_user_relative_path_for_token(
 long pkm_lcs_reg_open_key_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	int parent_fd, const char __user *upath, u32 desired_access, u32 flags);
+long pkm_lcs_create_existing_user_path_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const char __user *upath, u32 desired_access, u32 flags,
+	u32 *disposition);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,
 	struct pkm_lcs_source_enqueue_result *result);

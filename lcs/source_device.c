@@ -3074,6 +3074,35 @@ SYSCALL_DEFINE4(reg_open_key, int, parent_fd, const char __user *, path,
 		desired_access, flags);
 }
 
+long pkm_lcs_create_existing_user_path_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const char __user *upath, u32 desired_access, u32 flags,
+	u32 *disposition)
+{
+	struct pkm_lcs_create_preflight_plan preflight = { };
+	long ret;
+
+	if (disposition)
+		*disposition = 0;
+
+	ret = pkm_lcs_create_preflight(desired_access, flags, &preflight);
+	if (ret)
+		return ret;
+
+	if (parent_fd == -1)
+		ret = pkm_lcs_open_user_absolute_path_for_token(
+			token, ops, upath, desired_access, 0, NULL, 0, NULL, 0,
+			NULL, 0);
+	else
+		ret = pkm_lcs_open_user_relative_path_for_token(
+			token, ops, parent_fd, upath, desired_access, 0, NULL, 0,
+			NULL, 0);
+
+	if (ret >= 0 && disposition)
+		*disposition = REG_OPENED_EXISTING;
+	return ret;
+}
+
 void pkm_lcs_resolved_key_path_destroy(struct pkm_lcs_resolved_key_path *path)
 {
 	u32 i;
