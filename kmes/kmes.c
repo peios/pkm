@@ -411,12 +411,30 @@ static void pkm_kmes_write_u64_at(u8 *data, u64 capacity, u64 pos, u64 value)
 	data[(pos + 7) & (capacity - 1)] = (u8)((value >> 56) & 0xff);
 }
 
+static u16 pkm_kmes_read_u16_at(const u8 *data, u64 capacity, u64 pos)
+{
+	return (u16)data[(pos + 0) & (capacity - 1)] |
+	       ((u16)data[(pos + 1) & (capacity - 1)] << 8);
+}
+
 static u32 pkm_kmes_read_u32_at(const u8 *data, u64 capacity, u64 pos)
 {
 	return (u32)data[(pos + 0) & (capacity - 1)] |
 	       ((u32)data[(pos + 1) & (capacity - 1)] << 8) |
 	       ((u32)data[(pos + 2) & (capacity - 1)] << 16) |
 	       ((u32)data[(pos + 3) & (capacity - 1)] << 24);
+}
+
+static u64 pkm_kmes_read_u64_at(const u8 *data, u64 capacity, u64 pos)
+{
+	return (u64)data[(pos + 0) & (capacity - 1)] |
+	       ((u64)data[(pos + 1) & (capacity - 1)] << 8) |
+	       ((u64)data[(pos + 2) & (capacity - 1)] << 16) |
+	       ((u64)data[(pos + 3) & (capacity - 1)] << 24) |
+	       ((u64)data[(pos + 4) & (capacity - 1)] << 32) |
+	       ((u64)data[(pos + 5) & (capacity - 1)] << 40) |
+	       ((u64)data[(pos + 6) & (capacity - 1)] << 48) |
+	       ((u64)data[(pos + 7) & (capacity - 1)] << 56);
 }
 
 static void pkm_kmes_write_bytes_at(u8 *data, u64 capacity, u64 pos,
@@ -449,6 +467,26 @@ static void pkm_kmes_copy_bytes_from_ring(const u8 *data, u64 capacity, u64 pos,
 	memcpy(dst, data + offset, first_len);
 	if (first_len < len)
 		memcpy((u8 *)dst + first_len, data, len - first_len);
+}
+
+static bool pkm_kmes_ring_bytes_equal(const u8 *data, u64 capacity, u64 pos,
+				      const void *expected, size_t len)
+{
+	size_t offset;
+	size_t first_len;
+
+	if (!len)
+		return true;
+
+	offset = (size_t)(pos & (capacity - 1));
+	first_len = min_t(size_t, len, (size_t)capacity - offset);
+	if (memcmp(data + offset, expected, first_len))
+		return false;
+	if (first_len < len &&
+	    memcmp(data, (const u8 *)expected + first_len, len - first_len))
+		return false;
+
+	return true;
 }
 
 static void pkm_kmes_drop_event(struct pkm_kmes_cpu_state *cpu)
@@ -1916,6 +1954,114 @@ int pkm_kmes_kunit_copy_single_buffer(u8 *out, size_t out_len,
 		out_snapshot->tail_pos = cpu->tail_pos;
 		out_snapshot->last_sequence = cpu->sequence;
 		out_snapshot->dropped_events = cpu->dropped_events;
+	}
+
+	return 0;
+}
+
+int pkm_kmes_kunit_copy_latest_matching_event(
+	u8 origin_class, const void *event_type, size_t event_type_len, u8 *out,
+	size_t out_len, size_t *written_out,
+	struct pkm_kmes_kunit_snapshot *out_snapshot)
+{
+	struct pkm_kmes_cpu_state *best_cpu = NULL;
+	u64 best_pos = 0;
+	u64 best_timestamp = 0;
+	u32 best_event_size = 0;
+	bool found = false;
+	unsigned int cpu_id;
+
+	if (!event_type || event_type_len > U16_MAX || !out || !written_out)
+		return -EINVAL;
+	if (!pkm_kmes_ready)
+		return -ENODEV;
+
+	for_each_possible_cpu(cpu_id) {
+		struct pkm_kmes_cpu_state *cpu = pkm_kmes_cpus[cpu_id].live;
+		u64 pos;
+		u64 write_pos;
+		u64 live_len;
+
+		if (!cpu || !cpu->data)
+			continue;
+
+		pos = cpu->tail_pos;
+		write_pos = cpu->write_pos;
+		live_len = write_pos - pos;
+		if (live_len > cpu->capacity)
+			return -ERANGE;
+
+		while (pos < write_pos) {
+			u64 remaining = write_pos - pos;
+			u32 event_size;
+			u32 header_size;
+			u16 type_len;
+			u64 timestamp;
+			u8 current_origin;
+
+			if (remaining < KMES_EVENT_HEADER_BASE_SIZE)
+				return -EIO;
+
+			event_size = pkm_kmes_read_u32_at(
+				cpu->data, cpu->capacity,
+				pos + KMES_EVENT_SIZE_OFFSET);
+			header_size = pkm_kmes_read_u32_at(
+				cpu->data, cpu->capacity,
+				pos + KMES_EVENT_HEADER_SIZE_OFFSET);
+			type_len = pkm_kmes_read_u16_at(
+				cpu->data, cpu->capacity,
+				pos + KMES_EVENT_TYPE_LEN_OFFSET);
+
+			if (event_size < KMES_EVENT_HEADER_BASE_SIZE ||
+			    event_size > remaining ||
+			    event_size > cpu->capacity ||
+			    header_size <
+				    KMES_EVENT_HEADER_BASE_SIZE + type_len ||
+			    header_size > event_size)
+				return -EIO;
+
+			current_origin = cpu->data[
+				(pos + KMES_EVENT_ORIGIN_CLASS_OFFSET) &
+				(cpu->capacity - 1)];
+			timestamp = pkm_kmes_read_u64_at(
+				cpu->data, cpu->capacity,
+				pos + KMES_EVENT_TIMESTAMP_NS_OFFSET);
+
+			if (current_origin == origin_class &&
+			    type_len == event_type_len &&
+			    pkm_kmes_ring_bytes_equal(
+				    cpu->data, cpu->capacity,
+				    pos + KMES_EVENT_HEADER_BASE_SIZE,
+				    event_type, event_type_len) &&
+			    (!found || timestamp >= best_timestamp)) {
+				best_cpu = cpu;
+				best_pos = pos;
+				best_timestamp = timestamp;
+				best_event_size = event_size;
+				found = true;
+			}
+
+			pos += event_size;
+		}
+	}
+
+	if (!found)
+		return -ENOENT;
+	if ((size_t)best_event_size > out_len)
+		return -ERANGE;
+
+	pkm_kmes_copy_bytes_from_ring(best_cpu->data, best_cpu->capacity,
+				      best_pos, out, best_event_size);
+	*written_out = best_event_size;
+
+	if (out_snapshot) {
+		out_snapshot->cpu_id = best_cpu->cpu_id;
+		out_snapshot->_reserved = 0;
+		out_snapshot->capacity = best_cpu->capacity;
+		out_snapshot->write_pos = best_cpu->write_pos;
+		out_snapshot->tail_pos = best_cpu->tail_pos;
+		out_snapshot->last_sequence = best_cpu->sequence;
+		out_snapshot->dropped_events = best_cpu->dropped_events;
 	}
 
 	return 0;

@@ -20184,8 +20184,10 @@ static void pkm_kunit_file_open_sacl_audit_emits_kmes(struct kunit *test)
 			0L);
 	KUNIT_EXPECT_NE(test, granted, 0U);
 	KUNIT_ASSERT_EQ(test,
-			pkm_kmes_kunit_copy_single_buffer(
-				buffer, PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
+			pkm_kmes_kunit_copy_latest_matching_event(
+				KMES_ORIGIN_KACS, "access-audit",
+				sizeof("access-audit") - 1, buffer,
+				PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
 				&snapshot),
 			0);
 	KUNIT_ASSERT_TRUE(test,

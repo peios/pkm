@@ -53,6 +53,10 @@ int pkm_kmes_kunit_snapshot_single_active(struct pkm_kmes_kunit_snapshot *out);
 int pkm_kmes_kunit_copy_single_buffer(u8 *out, size_t out_len,
 				      size_t *written_out,
 				      struct pkm_kmes_kunit_snapshot *out_snapshot);
+int pkm_kmes_kunit_copy_latest_matching_event(
+	u8 origin_class, const void *event_type, size_t event_type_len,
+	u8 *out, size_t out_len, size_t *written_out,
+	struct pkm_kmes_kunit_snapshot *out_snapshot);
 u16 pkm_kmes_kunit_current_cpu_id(void);
 int pkm_kmes_kunit_swap_capacity(u64 new_capacity);
 void pkm_kmes_kunit_fail_next_swap_alloc(void);
