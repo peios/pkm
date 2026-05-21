@@ -5857,6 +5857,104 @@ static void pkm_lcs_kunit_transaction_commit_rejects_bad_fds(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_transaction_close_active_unbound_no_source_abort(
+	struct kunit *test)
+{
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct file file = { };
+	const void *token;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	flush_delayed_fput();
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.next_request_id, 0ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_transaction_close_active_bound_aborts_source(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x75
+	};
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	u8 out[64];
+	struct file file = { };
+	const void *token;
+	ssize_t read_len;
+	u32 count = 0;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, txn_snapshot.transaction_id, 1,
+				root_guid),
+			0L);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	flush_delayed_fput();
+
+	read_len = pkm_lcs_kunit_source_device_read_file(&file, out,
+							 sizeof(out), true);
+	KUNIT_ASSERT_EQ(test, read_len,
+			(ssize_t)(RSI_REQUEST_HEADER_SIZE + sizeof(u64)));
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(out + RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)read_len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_ID_OFFSET), 0ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(out + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_ABORT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_TXN_ID_OFFSET),
+			txn_snapshot.transaction_id);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(out + payload_offset),
+			txn_snapshot.transaction_id);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.next_request_id, 1ULL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_release(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_transaction_binding_precheck_and_complete(
 	struct kunit *test)
 {
@@ -15655,6 +15753,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_sync_eio_retains_active_bound),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_commit_rejects_bad_fds),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_close_active_unbound_no_source_abort),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_close_active_bound_aborts_source),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_precheck_and_complete),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_terminal_failures),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_rejects_bad_inputs),

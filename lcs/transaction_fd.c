@@ -361,6 +361,12 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 					  struct file *file)
 {
 	struct pkm_lcs_transaction_fd *txn = file->private_data;
+	u64 transaction_id = 0;
+	u32 source_id = 0;
+	u32 count = 0;
+	bool dispatch_abort = false;
+	bool release_counter = false;
+	bool wake = false;
 
 	file->private_data = NULL;
 	if (!txn)
@@ -369,11 +375,27 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 	timer_delete_sync(&txn->timeout_timer);
 
 	spin_lock(&txn->lock);
-	if (pkm_lcs_transaction_state_active(txn->state))
+	if (txn->state == REG_TXN_ACTIVE_BOUND) {
+		transaction_id = txn->transaction_id;
+		source_id = txn->bound_source_id;
 		txn->state = REG_TXN_ABORTED;
+		dispatch_abort = transaction_id && source_id;
+		release_counter = source_id != 0;
+		wake = true;
+	} else if (txn->state == REG_TXN_ACTIVE_UNBOUND) {
+		txn->state = REG_TXN_ABORTED;
+		wake = true;
+	}
 	spin_unlock(&txn->lock);
 
-	wake_up_all(&txn->wait);
+	if (dispatch_abort)
+		(void)pkm_lcs_source_dispatch_abort_transaction_request(
+			source_id, transaction_id, NULL);
+	if (release_counter)
+		(void)pkm_lcs_source_bound_transaction_release(source_id,
+							       &count);
+	if (wake)
+		wake_up_all(&txn->wait);
 	pkm_lcs_transaction_log_clear(txn);
 	kfree(txn);
 	return 0;
