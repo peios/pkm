@@ -1349,6 +1349,154 @@ static void pkm_lcs_kunit_create_preflight_rejects_fail_closed(
 	KUNIT_EXPECT_EQ(test, plan.options.symlink, 0U);
 }
 
+static void pkm_lcs_kunit_create_layer_target_null_uses_base(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_create_layer_target target = { };
+	struct pkm_lcs_layer_target_admission_plan plan = { };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_target_prepare(
+				&ops, NULL, NULL, 0, &target, &plan),
+			0L);
+	KUNIT_EXPECT_STREQ(test, target.name, "base");
+	KUNIT_EXPECT_EQ(test, target.name_len, 4U);
+	KUNIT_EXPECT_EQ(test, target.implicit_base, 1U);
+	KUNIT_EXPECT_PTR_EQ(test, target.owned_name, NULL);
+	KUNIT_EXPECT_EQ(test, plan.precedence, 0U);
+	KUNIT_EXPECT_EQ(test, plan.enabled, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+
+	pkm_lcs_create_layer_target_destroy(&target);
+}
+
+static void pkm_lcs_kunit_create_layer_target_explicit_layer_admitted(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_rsi_layer_view layers[] = {
+		{ .name = "base", .name_len = 4, .precedence = 0,
+		  .enabled = 1 },
+		{ .name = "Policy", .name_len = 6, .precedence = 25,
+		  .enabled = 1 },
+	};
+	const char layer_src[] = "Policy";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_create_layer_target target = { };
+	struct pkm_lcs_layer_target_admission_plan plan = { };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_target_prepare(
+				&ops, (const char __user *)layer_src, layers,
+				ARRAY_SIZE(layers), &target, &plan),
+			0L);
+	KUNIT_EXPECT_STREQ(test, target.name, "Policy");
+	KUNIT_EXPECT_EQ(test, target.name_len, 6U);
+	KUNIT_EXPECT_EQ(test, target.implicit_base, 0U);
+	KUNIT_EXPECT_NOT_NULL(test, target.owned_name);
+	KUNIT_EXPECT_EQ(test, plan.precedence, 25U);
+	KUNIT_EXPECT_EQ(test, plan.enabled, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	pkm_lcs_create_layer_target_destroy(&target);
+}
+
+static void pkm_lcs_kunit_create_layer_target_absent_returns_enoent(
+	struct kunit *test)
+{
+	const char layer_src[] = "Policy";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_create_layer_target target = { };
+	struct pkm_lcs_layer_target_admission_plan plan = {
+		.precedence = 99,
+		.enabled = 1,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_target_prepare(
+				&ops, (const char __user *)layer_src, NULL, 0,
+				&target, &plan),
+			(long)-ENOENT);
+	KUNIT_EXPECT_PTR_EQ(test, target.name, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, target.owned_name, NULL);
+	KUNIT_EXPECT_EQ(test, plan.precedence, 0U);
+	KUNIT_EXPECT_EQ(test, plan.enabled, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+}
+
+static void pkm_lcs_kunit_create_layer_target_bad_name_fails_closed(
+	struct kunit *test)
+{
+	const char layer_src[] = "bad/layer";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_create_layer_target target = { };
+	struct pkm_lcs_layer_target_admission_plan plan = {
+		.precedence = 99,
+		.enabled = 1,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_target_prepare(
+				&ops, (const char __user *)layer_src, NULL, 0,
+				&target, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_PTR_EQ(test, target.name, NULL);
+	KUNIT_EXPECT_EQ(test, plan.precedence, 0U);
+	KUNIT_EXPECT_EQ(test, plan.enabled, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+}
+
+static void pkm_lcs_kunit_create_layer_target_copy_faults_fail_closed(
+	struct kunit *test)
+{
+	const char layer_src[] = "base";
+	struct pkm_lcs_create_layer_target target = { };
+	struct pkm_lcs_layer_target_admission_plan plan = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = {
+		.fault_strlen_src = layer_src,
+	};
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_target_prepare(
+				&ops, (const char __user *)layer_src, NULL, 0,
+				&target, &plan),
+			(long)-EFAULT);
+	KUNIT_EXPECT_PTR_EQ(test, target.name, NULL);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+
+	ctx.fault_strlen_src = NULL;
+	ctx.fault_src = layer_src;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_target_prepare(
+				&ops, (const char __user *)layer_src, NULL, 0,
+				&target, &plan),
+			(long)-EFAULT);
+	KUNIT_EXPECT_PTR_EQ(test, target.name, NULL);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 2U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	ctx.fault_src = NULL;
+	ctx.unterminated_src = layer_src;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_target_prepare(
+				&ops, (const char __user *)layer_src, NULL, 0,
+				&target, &plan),
+			(long)-ENAMETOOLONG);
+	KUNIT_EXPECT_PTR_EQ(test, target.name, NULL);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 3U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+}
+
 static void pkm_lcs_kunit_open_preflight_route_success(
 	struct kunit *test)
 {
@@ -8025,6 +8173,15 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_rejects_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_create_preflight_accepts_valid_flags),
 	KUNIT_CASE(pkm_lcs_kunit_create_preflight_rejects_fail_closed),
+	KUNIT_CASE(pkm_lcs_kunit_create_layer_target_null_uses_base),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_layer_target_explicit_layer_admitted),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_layer_target_absent_returns_enoent),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_layer_target_bad_name_fails_closed),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_layer_target_copy_faults_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_route_success),
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_route_stops_before_usercopy),
 	KUNIT_CASE(

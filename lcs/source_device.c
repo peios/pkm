@@ -36,9 +36,12 @@
 #include "source_device.h"
 
 #define PKM_LCS_MAX_HIVE_NAME_BYTES_HARD 1024U
+#define PKM_LCS_MAX_LAYER_NAME_BYTES_HARD 1024U
 #define PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD 65535U
 #define PKM_LCS_MAX_SYSCALL_PATH_BYTES_HARD \
 	(PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD + 1U)
+#define PKM_LCS_MAX_SYSCALL_LAYER_BYTES_HARD \
+	(PKM_LCS_MAX_LAYER_NAME_BYTES_HARD + 1U)
 #define PKM_LCS_MAX_KEY_DEPTH_HARD 4096U
 #define PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT 32U
 #define PKM_LCS_MAX_HIVES_PER_SOURCE_DEFAULT 64U
@@ -243,6 +246,10 @@ extern int lcs_rust_open_preflight(
 	struct pkm_lcs_open_preflight_plan *plan);
 extern int lcs_rust_validate_key_create_flags(
 	u32 flags, struct pkm_lcs_key_create_options *options);
+extern int lcs_rust_admit_layer_target(
+	const u8 *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_rsi_layer_view *layers, size_t layer_count,
+	struct pkm_lcs_layer_target_admission_plan *plan);
 extern int lcs_rust_key_open_access_plan(
 	const void *subject_token, const u8 *sd_ptr, size_t sd_len,
 	u32 desired_access, u32 pip_type, u32 pip_trust,
@@ -1005,6 +1012,114 @@ long pkm_lcs_syscall_path_copy_from_user(
 	out->path = path;
 	out->path_len = (u32)path_len;
 	return 0;
+}
+
+void pkm_lcs_create_layer_target_destroy(
+	struct pkm_lcs_create_layer_target *target)
+{
+	if (!target)
+		return;
+
+	kfree(target->owned_name);
+	memset(target, 0, sizeof(*target));
+}
+
+long pkm_lcs_create_layer_target_copy_from_user(
+	const struct pkm_lcs_usercopy_ops *ops, const char __user *ulayer,
+	struct pkm_lcs_create_layer_target *target)
+{
+	char *layer;
+	size_t user_len;
+
+	if (!target)
+		return -EINVAL;
+	memset(target, 0, sizeof(*target));
+
+	if (!ulayer) {
+		target->name = pkm_lcs_base_layer_name;
+		target->name_len = sizeof(pkm_lcs_base_layer_name) - 1;
+		target->implicit_base = 1;
+		return 0;
+	}
+
+	if (!ops)
+		ops = &pkm_lcs_default_usercopy_ops;
+	if (!ops->read || !ops->strnlen)
+		return -EINVAL;
+
+	user_len = ops->strnlen(ops->ctx, ulayer,
+				PKM_LCS_MAX_SYSCALL_LAYER_BYTES_HARD);
+	if (!user_len)
+		return -EFAULT;
+	if (user_len > PKM_LCS_MAX_SYSCALL_LAYER_BYTES_HARD)
+		return -ENAMETOOLONG;
+
+	layer = kmalloc(user_len, GFP_KERNEL);
+	if (!layer)
+		return -ENOMEM;
+	if (!ops->read(ops->ctx, layer, ulayer, user_len)) {
+		kfree(layer);
+		return -EFAULT;
+	}
+	if (layer[user_len - 1] != '\0') {
+		kfree(layer);
+		return -EFAULT;
+	}
+
+	target->owned_name = layer;
+	target->name = layer;
+	target->name_len = (u32)user_len - 1U;
+	return 0;
+}
+
+long pkm_lcs_create_layer_target_admit(
+	const struct pkm_lcs_create_layer_target *target,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	struct pkm_lcs_layer_target_admission_plan *plan)
+{
+	const struct pkm_lcs_rsi_layer_view *active_layers = layers;
+	const struct pkm_lcs_rsi_private_layer_view *private_layers = NULL;
+	u32 active_layer_count = layer_count;
+	u32 private_layer_count = 0;
+	long ret;
+
+	if (!target || !target->name || !plan)
+		return -EINVAL;
+	memset(plan, 0, sizeof(*plan));
+
+	ret = pkm_lcs_normalize_layer_inputs(
+		&active_layers, &active_layer_count, &private_layers,
+		&private_layer_count);
+	if (ret)
+		return ret;
+
+	return lcs_rust_admit_layer_target(
+		(const u8 *)target->name, target->name_len, active_layers,
+		active_layer_count, plan);
+}
+
+long pkm_lcs_create_layer_target_prepare(
+	const struct pkm_lcs_usercopy_ops *ops, const char __user *ulayer,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	struct pkm_lcs_create_layer_target *target,
+	struct pkm_lcs_layer_target_admission_plan *plan)
+{
+	long ret;
+
+	if (!target || !plan)
+		return -EINVAL;
+
+	ret = pkm_lcs_create_layer_target_copy_from_user(ops, ulayer, target);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_create_layer_target_admit(target, layers, layer_count,
+						plan);
+	if (ret) {
+		pkm_lcs_create_layer_target_destroy(target);
+		memset(plan, 0, sizeof(*plan));
+	}
+	return ret;
 }
 
 static long pkm_lcs_source_registration_copy_hive_name(

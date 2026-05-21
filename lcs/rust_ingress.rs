@@ -7,37 +7,36 @@ use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
     casefold_eq, classify_hive_route, current_user_sid_component_from_binary_sid,
     for_each_routable_path_component, for_each_rsi_lookup_source_path_entry,
-    parse_rsi_lookup_success_response_payload, parse_rsi_query_values_success_response_payload,
-    parse_rsi_read_key_success_response_payload,
-    plan_rsi_source_read, plan_key_open_audit_record, plan_registry_ioctl_fixed_fd_access_gate,
-    plan_registry_key_open_access, plan_registry_open_pre_resolution_access,
-    plan_registry_security_info_fd_access_gate, plan_source_registration_sequence_update,
-    parse_rsi_request_header, registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
+    layer_target_admission_linux_errno, parse_rsi_lookup_success_response_payload,
+    parse_rsi_query_values_success_response_payload, parse_rsi_read_key_success_response_payload,
+    parse_rsi_request_header, plan_key_open_audit_record, plan_layer_target_admission,
+    plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
+    plan_registry_open_pre_resolution_access, plan_registry_security_info_fd_access_gate,
+    plan_rsi_source_read, plan_source_registration_sequence_update,
+    registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
     registry_open_pre_resolution_linux_errno, resolve_named_path_entry, resolve_value, route_hive,
-    route_routable_path_hive, route_symlink_target_hive, validate_symlink_target_bytes,
-    REG_TOMBSTONE, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
-    rsi_queued_request_from_frame,
+    route_routable_path_hive, route_symlink_target_hive, rsi_queued_request_from_frame,
     rsi_status_code_errno, source_registration_error_linux_errno, source_registration_hive_scope,
-    source_slot_hive_status,
-    validate_key_component_bytes, validate_key_create_flags, validate_key_fd_open_view,
-    validate_layer_name_bytes, validate_registry_open_flags, validate_resolved_relative_path_depth,
-    validate_value_data_len, validate_value_name_bytes, validate_value_write_type,
-    validate_rsi_lookup_metadata_completeness,
+    source_slot_hive_status, validate_key_component_bytes, validate_key_create_flags,
+    validate_key_fd_open_view, validate_layer_name_bytes, validate_registry_open_flags,
+    validate_resolved_relative_path_depth, validate_rsi_lookup_metadata_completeness,
     validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,
     validate_rsi_lookup_path_response_sequences, validate_rsi_query_values_response_names,
-    validate_rsi_query_values_response_sequences, validate_rsi_query_values_response_value_payloads,
-    validate_rsi_read_key_response_names,
+    validate_rsi_query_values_response_sequences,
+    validate_rsi_query_values_response_value_payloads, validate_rsi_read_key_response_names,
     validate_rsi_read_key_response_security_descriptor, validate_source_registration,
-    validate_source_slots, validate_syscall_path_c_string, write_rsi_lookup_request_frame,
-    write_rsi_query_values_request_frame, write_rsi_read_key_request_frame,
-    write_key_open_audit_payload, BlanketTombstoneEntry, CurrentUserRewrite, HiveRouteOutcome,
-    HiveView, KeyFdOpenView, KeyWatchState, LayerResolutionContext, LayerView,
-    LcsCallerTokenSummary, LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno,
-    NamedPathEntry,
-    NamedPathResolution, PathKind, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
-    RegistryKeyOpenAccessInput, RegistryOpenAccessDecision, RegistryOpenPreResolutionAccessPlan,
-    RsiReadPlan, RsiRetainedRequest, SourceRegistrationDecision, SourceRegistrationHive,
+    validate_source_slots, validate_symlink_target_bytes, validate_syscall_path_c_string,
+    validate_value_data_len, validate_value_name_bytes, validate_value_write_type,
+    write_key_open_audit_payload, write_rsi_lookup_request_frame,
+    write_rsi_query_values_request_frame, write_rsi_read_key_request_frame, BlanketTombstoneEntry,
+    CurrentUserRewrite, HiveRouteOutcome, HiveView, KeyFdOpenView, KeyWatchState,
+    LayerResolutionContext, LayerTargetAdmissionInput, LayerView, LcsCallerTokenSummary, LcsError,
+    LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry, NamedPathResolution, PathKind,
+    RegisteredHiveIdentity, RegistryIoctlAccessRequirement, RegistryKeyOpenAccessInput,
+    RegistryOpenAccessDecision, RegistryOpenPreResolutionAccessPlan, RsiReadPlan,
+    RsiRetainedRequest, SourceRegistrationDecision, SourceRegistrationHive,
     SourceRegistrationRequest, SourceSlotStatus, SourceSlotView, ValueEntry, ValueResolution,
+    REG_TOMBSTONE, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -189,6 +188,13 @@ pub struct PkmLcsRsiLayerViewCopy {
 }
 
 #[repr(C)]
+pub struct PkmLcsLayerTargetAdmissionPlanCopy {
+    pub precedence: u32,
+    pub enabled: u8,
+    pub _pad: [u8; 3],
+}
+
+#[repr(C)]
 pub struct PkmLcsRsiPrivateLayerViewCopy {
     pub name: *const u8,
     pub name_len: u32,
@@ -262,9 +268,7 @@ fn symlink_target_error_return(_err: LcsError) -> c_int {
 
 fn key_fd_open_view_error_return(err: LcsError) -> c_int {
     match err {
-        LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => {
-            LinuxErrno::Enametoolong
-        }
+        LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => LinuxErrno::Enametoolong,
         _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
@@ -290,9 +294,7 @@ fn key_open_audit_error_return(err: LcsError) -> c_int {
 fn rsi_request_frame_error_return(err: LcsError) -> c_int {
     match err {
         LcsError::RsiFrameBufferTooSmall { .. } => LinuxErrno::Emsgsize,
-        LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => {
-            LinuxErrno::Enametoolong
-        }
+        LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => LinuxErrno::Enametoolong,
         _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
@@ -335,9 +337,7 @@ fn rsi_lookup_materialization_error_return(err: LcsError) -> c_int {
     }
 }
 
-fn ioctl_access_gate_return(
-    plan: crate::lcs_core::RegistryIoctlFdAccessGatePlan,
-) -> c_int {
+fn ioctl_access_gate_return(plan: crate::lcs_core::RegistryIoctlFdAccessGatePlan) -> c_int {
     match registry_ioctl_fd_access_gate_errno(&plan) {
         Some(errno) => errno.negated_return() as c_int,
         None => 0,
@@ -418,6 +418,56 @@ pub unsafe extern "C" fn lcs_rust_validate_key_create_flags(
             0
         }
         Err(_) => LinuxErrno::Einval.negated_return() as c_int,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_admit_layer_target(
+    layer_name: *const u8,
+    layer_name_len: u32,
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+    plan_out: *mut PkmLcsLayerTargetAdmissionPlanCopy,
+) -> c_int {
+    let Some(plan_out) = (unsafe { plan_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *plan_out = PkmLcsLayerTargetAdmissionPlanCopy {
+        precedence: 0,
+        enabled: 0,
+        _pad: [0; 3],
+    };
+
+    if layer_name.is_null() || (layer_count != 0 && layers.is_null()) {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
+    let target_layer = match str::from_utf8(layer_name_bytes) {
+        Ok(name) => name,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    let layer_views = match parse_layer_views(layers, layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    match plan_layer_target_admission(LayerTargetAdmissionInput {
+        target_layer,
+        layers: layer_views.as_slice(),
+        limits: &LcsLimits::DEFAULT,
+    }) {
+        Ok(plan) => {
+            plan_out.precedence = plan.matched_layer.precedence;
+            plan_out.enabled = plan.matched_layer.enabled as u8;
+            0
+        }
+        Err(err) => layer_target_admission_linux_errno(&err)
+            .unwrap_or_else(|| match err {
+                LcsError::NameTooLong { .. } => LinuxErrno::Enametoolong,
+                _ => LinuxErrno::Einval,
+            })
+            .negated_return() as c_int,
     }
 }
 
@@ -1038,10 +1088,9 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
     if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
         return rsi_query_values_response_error_return(err);
     }
-    if let Err(err) = validate_rsi_query_values_response_value_payloads(
-        &payload,
-        &LcsLimits::DEFAULT,
-    ) {
+    if let Err(err) =
+        validate_rsi_query_values_response_value_payloads(&payload, &LcsLimits::DEFAULT)
+    {
         return rsi_query_values_response_error_return(err);
     }
     if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
@@ -1146,12 +1195,11 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_child(
         limits: &LcsLimits::DEFAULT,
         next_sequence,
     };
-    let mut path_storage = match PkmVec::<NamedPathEntry<'_>>::with_capacity(
-        payload.entry_count as usize,
-    ) {
-        Ok(path_storage) => path_storage,
-        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
-    };
+    let mut path_storage =
+        match PkmVec::<NamedPathEntry<'_>>::with_capacity(payload.entry_count as usize) {
+            Ok(path_storage) => path_storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
     let mut path_storage_allocation_failed = false;
     if let Err(err) = for_each_rsi_lookup_source_path_entry(
         &payload,
@@ -1171,14 +1219,11 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_child(
         return rsi_lookup_response_error_return(err);
     }
 
-    let resolved = match resolve_named_path_entry(
-        &context,
-        child_component,
-        path_storage.as_slice(),
-    ) {
-        Ok(resolved) => resolved,
-        Err(err) => return rsi_lookup_materialization_error_return(err),
-    };
+    let resolved =
+        match resolve_named_path_entry(&context, child_component, path_storage.as_slice()) {
+            Ok(resolved) => resolved,
+            Err(err) => return rsi_lookup_materialization_error_return(err),
+        };
 
     unsafe {
         (*result_out).source_path_entry_count = path_storage.len() as u32;
@@ -1318,10 +1363,9 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
     if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
         return rsi_query_values_response_error_return(err);
     }
-    if let Err(err) = validate_rsi_query_values_response_value_payloads(
-        &payload,
-        &LcsLimits::DEFAULT,
-    ) {
+    if let Err(err) =
+        validate_rsi_query_values_response_value_payloads(&payload, &LcsLimits::DEFAULT)
+    {
         return rsi_query_values_response_error_return(err);
     }
     if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
@@ -1334,18 +1378,16 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
         limits: &LcsLimits::DEFAULT,
         next_sequence,
     };
-    let mut value_storage = match PkmVec::<ValueEntry<'_>>::with_capacity(
-        payload.entry_count as usize,
-    ) {
-        Ok(storage) => storage,
-        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
-    };
-    let mut blanket_storage = match PkmVec::<BlanketTombstoneEntry<'_>>::with_capacity(
-        payload.blanket_count as usize,
-    ) {
-        Ok(storage) => storage,
-        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
-    };
+    let mut value_storage =
+        match PkmVec::<ValueEntry<'_>>::with_capacity(payload.entry_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut blanket_storage =
+        match PkmVec::<BlanketTombstoneEntry<'_>>::with_capacity(payload.blanket_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
 
     let mut allocation_failed = false;
     let mut wrong_value_name = false;
@@ -1410,8 +1452,11 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
         (*result_out).source_blanket_count = blanket_storage.len() as u32;
     }
 
-    let resolved = match resolve_value(&context, value_storage.as_slice(), blanket_storage.as_slice())
-    {
+    let resolved = match resolve_value(
+        &context,
+        value_storage.as_slice(),
+        blanket_storage.as_slice(),
+    ) {
         Ok(resolved) => resolved,
         Err(err) => return rsi_lookup_materialization_error_return(err),
     };
@@ -1755,8 +1800,7 @@ fn parse_private_layer_views<'a>(
     private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
     private_layer_count: usize,
 ) -> Result<PkmVec<&'a str>, LinuxErrno> {
-    let mut parsed =
-        PkmVec::with_capacity(private_layer_count).map_err(|_| LinuxErrno::Enomem)?;
+    let mut parsed = PkmVec::with_capacity(private_layer_count).map_err(|_| LinuxErrno::Enomem)?;
 
     for index in 0..private_layer_count {
         let raw = unsafe { &*private_layers.add(index) };
@@ -2391,13 +2435,12 @@ pub unsafe extern "C" fn lcs_rust_materialize_absolute_path_components_with_toke
     let mut string_bytes = 0usize;
     if let Err(err) =
         for_each_routable_path_component(&LcsLimits::DEFAULT, path, rewrite, |component| {
-            component_count =
-                component_count
-                    .checked_add(1)
-                    .ok_or(LcsError::KeyDepthExceeded {
-                        depth: usize::MAX,
-                        max: LcsLimits::DEFAULT.max_key_depth,
-                    })?;
+            component_count = component_count
+                .checked_add(1)
+                .ok_or(LcsError::KeyDepthExceeded {
+                    depth: usize::MAX,
+                    max: LcsLimits::DEFAULT.max_key_depth,
+                })?;
             string_bytes =
                 string_bytes
                     .checked_add(component.len())
@@ -2422,7 +2465,10 @@ pub unsafe extern "C" fn lcs_rust_materialize_absolute_path_components_with_toke
         string_bytes: string_bytes_u32,
     };
 
-    if components.is_null() && component_capacity == 0 && string_buf.is_null() && string_capacity == 0
+    if components.is_null()
+        && component_capacity == 0
+        && string_buf.is_null()
+        && string_capacity == 0
     {
         return 0;
     }
@@ -2486,13 +2532,12 @@ pub unsafe extern "C" fn lcs_rust_materialize_symlink_target_components(
     let mut string_bytes = 0usize;
     if let Err(err) =
         for_each_routable_path_component(&LcsLimits::DEFAULT, path, rewrite, |component| {
-            component_count =
-                component_count
-                    .checked_add(1)
-                    .ok_or(LcsError::KeyDepthExceeded {
-                        depth: usize::MAX,
-                        max: LcsLimits::DEFAULT.max_key_depth,
-                    })?;
+            component_count = component_count
+                .checked_add(1)
+                .ok_or(LcsError::KeyDepthExceeded {
+                    depth: usize::MAX,
+                    max: LcsLimits::DEFAULT.max_key_depth,
+                })?;
             string_bytes =
                 string_bytes
                     .checked_add(component.len())
@@ -2517,7 +2562,10 @@ pub unsafe extern "C" fn lcs_rust_materialize_symlink_target_components(
         string_bytes: string_bytes_u32,
     };
 
-    if components.is_null() && component_capacity == 0 && string_buf.is_null() && string_capacity == 0
+    if components.is_null()
+        && component_capacity == 0
+        && string_buf.is_null()
+        && string_capacity == 0
     {
         return 0;
     }
@@ -2580,20 +2628,18 @@ pub unsafe extern "C" fn lcs_rust_materialize_relative_path_components(
     let mut component_count = 0usize;
     let mut string_bytes = 0usize;
     if let Err(err) = for_each_syscall_path_component(path, |component| {
-        component_count =
-            component_count
-                .checked_add(1)
-                .ok_or(LcsError::KeyDepthExceeded {
-                    depth: usize::MAX,
-                    max: LcsLimits::DEFAULT.max_key_depth,
-                })?;
-        string_bytes =
-            string_bytes
-                .checked_add(component.len())
-                .ok_or(LcsError::PathTooLong {
-                    len: usize::MAX,
-                    max: LcsLimits::DEFAULT.max_total_path_length,
-                })?;
+        component_count = component_count
+            .checked_add(1)
+            .ok_or(LcsError::KeyDepthExceeded {
+                depth: usize::MAX,
+                max: LcsLimits::DEFAULT.max_key_depth,
+            })?;
+        string_bytes = string_bytes
+            .checked_add(component.len())
+            .ok_or(LcsError::PathTooLong {
+                len: usize::MAX,
+                max: LcsLimits::DEFAULT.max_total_path_length,
+            })?;
         Ok(())
     }) {
         return absolute_route_error_return(err);
@@ -2610,7 +2656,10 @@ pub unsafe extern "C" fn lcs_rust_materialize_relative_path_components(
         string_bytes: string_bytes_u32,
     };
 
-    if components.is_null() && component_capacity == 0 && string_buf.is_null() && string_capacity == 0
+    if components.is_null()
+        && component_capacity == 0
+        && string_buf.is_null()
+        && string_capacity == 0
     {
         return 0;
     }

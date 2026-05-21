@@ -141,6 +141,20 @@ struct pkm_lcs_create_preflight_plan {
 	struct pkm_lcs_key_create_options options;
 };
 
+struct pkm_lcs_create_layer_target {
+	const char *name;
+	char *owned_name;
+	u32 name_len;
+	u8 implicit_base;
+	u8 _pad[3];
+};
+
+struct pkm_lcs_layer_target_admission_plan {
+	u32 precedence;
+	u8 enabled;
+	u8 _pad[3];
+};
+
 struct pkm_lcs_key_open_access_plan {
 	u32 requested_access;
 	u32 mapped_desired_access;
@@ -298,6 +312,20 @@ long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
 			    struct pkm_lcs_open_preflight_plan *plan);
 long pkm_lcs_create_preflight(u32 desired_access, u32 flags,
 			      struct pkm_lcs_create_preflight_plan *plan);
+void pkm_lcs_create_layer_target_destroy(
+	struct pkm_lcs_create_layer_target *target);
+long pkm_lcs_create_layer_target_copy_from_user(
+	const struct pkm_lcs_usercopy_ops *ops, const char __user *ulayer,
+	struct pkm_lcs_create_layer_target *target);
+long pkm_lcs_create_layer_target_admit(
+	const struct pkm_lcs_create_layer_target *target,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	struct pkm_lcs_layer_target_admission_plan *plan);
+long pkm_lcs_create_layer_target_prepare(
+	const struct pkm_lcs_usercopy_ops *ops, const char __user *ulayer,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	struct pkm_lcs_create_layer_target *target,
+	struct pkm_lcs_layer_target_admission_plan *plan);
 long pkm_lcs_key_open_access_check_for_token(
 	const void *token, const u8 *sd, size_t sd_len, u32 desired_access,
 	struct pkm_lcs_key_open_access_plan *plan);
