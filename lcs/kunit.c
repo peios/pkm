@@ -5148,6 +5148,247 @@ static void pkm_lcs_kunit_base_layer_write_bad_inputs(struct kunit *test)
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_create_layer_write_explicit_folded_match(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_layer_target target = {
+		.name = "Policy",
+		.name_len = 6,
+	};
+	struct pkm_lcs_key_open_access_plan plan = { };
+	struct pkm_lcs_layer_metadata_sd_view metadata[2] = {
+		{ .name = "other", .name_len = 5 },
+		{ .name = "policy", .name_len = 6 },
+	};
+	const void *token;
+	const u8 *other_sd;
+	const u8 *policy_sd;
+	size_t other_sd_len = 0;
+	size_t policy_sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	other_sd = kacs_rust_kunit_create_file_sd(token, KEY_QUERY_VALUE,
+						  0, 0, 0, &other_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, other_sd);
+	policy_sd = kacs_rust_kunit_create_file_sd(token, KEY_SET_VALUE,
+						   0, 0, 0, &policy_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, policy_sd);
+	metadata[0].sd = other_sd;
+	metadata[0].sd_len = other_sd_len;
+	metadata[1].sd = policy_sd;
+	metadata[1].sd_len = policy_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token(
+				token, &target, false, NULL, 0, metadata,
+				ARRAY_SIZE(metadata), &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, KEY_SET_VALUE);
+
+	pkm_kacs_free((void *)policy_sd);
+	pkm_kacs_free((void *)other_sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_layer_write_explicit_denied(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_layer_target target = {
+		.name = "policy",
+		.name_len = 6,
+	};
+	struct pkm_lcs_key_open_access_plan plan = { };
+	struct pkm_lcs_layer_metadata_sd_view metadata = {
+		.name = "policy",
+		.name_len = 6,
+	};
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_QUERY_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	metadata.sd = sd;
+	metadata.sd_len = sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token(
+				token, &target, false, NULL, 0, &metadata, 1,
+				&plan),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, 0U);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_layer_write_missing_metadata_eio(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_layer_target target = {
+		.name = "policy",
+		.name_len = 6,
+	};
+	struct pkm_lcs_key_open_access_plan plan = {
+		.allowed = 1,
+		.fd_granted_access = KEY_SET_VALUE,
+	};
+	struct pkm_lcs_layer_metadata_sd_view metadata = {
+		.name = "other",
+		.name_len = 5,
+	};
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_SET_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	metadata.sd = sd;
+	metadata.sd_len = sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token(
+				token, &target, false, NULL, 0, &metadata, 1,
+				&plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, 0U);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_layer_write_malformed_metadata_eio(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_layer_target target = {
+		.name = "policy",
+		.name_len = 6,
+	};
+	struct pkm_lcs_key_open_access_plan plan = { };
+	struct pkm_lcs_layer_metadata_sd_view missing_sd = {
+		.name = "policy",
+		.name_len = 6,
+	};
+	struct pkm_lcs_layer_metadata_sd_view duplicate[2] = {
+		{ .name = "Policy", .name_len = 6 },
+		{ .name = "policy", .name_len = 6 },
+	};
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_SET_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	duplicate[0].sd = sd;
+	duplicate[0].sd_len = sd_len;
+	duplicate[1].sd = sd;
+	duplicate[1].sd_len = sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token(
+				token, &target, false, NULL, 0, &missing_sd, 1,
+				&plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token(
+				token, &target, false, NULL, 0, duplicate,
+				ARRAY_SIZE(duplicate), &plan),
+			(long)-EIO);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_layer_write_implicit_base_delegates(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_layer_target target = {
+		.name = "base",
+		.name_len = 4,
+		.implicit_base = 1,
+	};
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+
+	token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token(
+				token, &target, false, NULL, 0, NULL, 0,
+				&plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, KEY_SET_VALUE);
+
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_layer_write_bad_inputs(struct kunit *test)
+{
+	struct pkm_lcs_create_layer_target target = {
+		.name = "policy",
+		.name_len = 6,
+	};
+	struct pkm_lcs_create_layer_target bad_target = { };
+	struct pkm_lcs_key_open_access_plan plan = {
+		.allowed = 1,
+		.fd_granted_access = KEY_SET_VALUE,
+	};
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token(
+				token, NULL, false, NULL, 0, NULL, 0, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token(
+				token, &bad_target, false, NULL, 0, NULL, 0,
+				&plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token(
+				token, &target, false, NULL, 0, NULL, 1,
+				&plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token(
+				token, &target, false, NULL, 0, NULL, 0,
+				&plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token(
+				token, &target, false, NULL, 0, NULL, 0, NULL),
+			(long)-EINVAL);
+
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_create_symlink_authority_non_link_noop(
 	struct kunit *test)
 {
@@ -9111,6 +9352,12 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_absent_uses_default),
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_absent_denies_service),
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_bad_inputs),
+	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_explicit_folded_match),
+	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_explicit_denied),
+	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_missing_metadata_eio),
+	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_malformed_metadata_eio),
+	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_implicit_base_delegates),
+	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_non_link_noop),
 	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_tcb_marks_used),
 	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_admin_without_tcb),

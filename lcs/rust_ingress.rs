@@ -195,6 +195,21 @@ pub struct PkmLcsLayerTargetAdmissionPlanCopy {
 }
 
 #[repr(C)]
+pub struct PkmLcsLayerMetadataSdViewCopy {
+    pub name: *const u8,
+    pub sd: *const u8,
+    pub sd_len: usize,
+    pub name_len: u32,
+    pub _pad: u32,
+}
+
+#[repr(C)]
+pub struct PkmLcsLayerMetadataSdSelectionCopy {
+    pub index: u32,
+    pub _pad: u32,
+}
+
+#[repr(C)]
 pub struct PkmLcsRsiPrivateLayerViewCopy {
     pub name: *const u8,
     pub name_len: u32,
@@ -469,6 +484,70 @@ pub unsafe extern "C" fn lcs_rust_admit_layer_target(
             })
             .negated_return() as c_int,
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_select_layer_metadata_sd(
+    layer_name: *const u8,
+    layer_name_len: u32,
+    metadata: *const PkmLcsLayerMetadataSdViewCopy,
+    metadata_count: usize,
+    selection_out: *mut PkmLcsLayerMetadataSdSelectionCopy,
+) -> c_int {
+    let Some(selection_out) = (unsafe { selection_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *selection_out = PkmLcsLayerMetadataSdSelectionCopy { index: 0, _pad: 0 };
+
+    if layer_name.is_null() || (metadata_count != 0 && metadata.is_null()) {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
+    let target_layer = match validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+        Ok(name) => name,
+        Err(LcsError::NameTooLong { .. }) => {
+            return LinuxErrno::Enametoolong.negated_return() as c_int
+        }
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+
+    let mut matched_index = None;
+    for index in 0..metadata_count {
+        let raw = unsafe { &*metadata.add(index) };
+        let name = match parse_layer_metadata_sd_view_name(raw) {
+            Ok(name) => name,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+
+        for previous_index in 0..index {
+            let previous = unsafe { &*metadata.add(previous_index) };
+            let previous_name = match parse_layer_metadata_sd_view_name(previous) {
+                Ok(name) => name,
+                Err(errno) => return errno.negated_return() as c_int,
+            };
+            if casefold_eq(previous_name, name) {
+                return LinuxErrno::Eio.negated_return() as c_int;
+            }
+        }
+
+        if casefold_eq(name, target_layer) {
+            if raw.sd.is_null() || raw.sd_len == 0 {
+                return LinuxErrno::Eio.negated_return() as c_int;
+            }
+            matched_index = Some(index);
+        }
+    }
+
+    let Some(index) = matched_index else {
+        return LinuxErrno::Eio.negated_return() as c_int;
+    };
+    if index > u32::MAX as usize {
+        return LinuxErrno::Eio.negated_return() as c_int;
+    }
+
+    selection_out.index = index as u32;
+    0
 }
 
 #[no_mangle]
@@ -1794,6 +1873,17 @@ fn parse_layer_views<'a>(
     }
 
     Ok(parsed)
+}
+
+fn parse_layer_metadata_sd_view_name<'a>(
+    raw: &PkmLcsLayerMetadataSdViewCopy,
+) -> Result<&'a str, LinuxErrno> {
+    if raw.name.is_null() {
+        return Err(LinuxErrno::Eio);
+    }
+
+    let name_bytes = unsafe { slice::from_raw_parts(raw.name, raw.name_len as usize) };
+    validate_layer_name_bytes(name_bytes, &LcsLimits::DEFAULT).map_err(|_| LinuxErrno::Eio)
 }
 
 fn parse_private_layer_views<'a>(

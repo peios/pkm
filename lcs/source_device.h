@@ -155,6 +155,19 @@ struct pkm_lcs_layer_target_admission_plan {
 	u8 _pad[3];
 };
 
+struct pkm_lcs_layer_metadata_sd_view {
+	const char *name;
+	const u8 *sd;
+	size_t sd_len;
+	u32 name_len;
+	u32 _pad;
+};
+
+struct pkm_lcs_layer_metadata_sd_selection {
+	u32 index;
+	u32 _pad;
+};
+
 struct pkm_lcs_key_open_access_plan {
 	u32 requested_access;
 	u32 mapped_desired_access;
@@ -432,6 +445,12 @@ long pkm_lcs_base_layer_write_access_check_for_token(
 	const void *token, bool base_metadata_present,
 	const u8 *base_metadata_sd, size_t base_metadata_sd_len,
 	struct pkm_lcs_key_open_access_plan *plan);
+long pkm_lcs_create_layer_write_access_check_for_token(
+	const void *token, const struct pkm_lcs_create_layer_target *target,
+	bool base_metadata_present, const u8 *base_metadata_sd,
+	size_t base_metadata_sd_len,
+	const struct pkm_lcs_layer_metadata_sd_view *metadata,
+	u32 metadata_count, struct pkm_lcs_key_open_access_plan *plan);
 long pkm_lcs_create_missing_symlink_authority_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,

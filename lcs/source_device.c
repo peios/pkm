@@ -250,6 +250,11 @@ extern int lcs_rust_admit_layer_target(
 	const u8 *layer_name, u32 layer_name_len,
 	const struct pkm_lcs_rsi_layer_view *layers, size_t layer_count,
 	struct pkm_lcs_layer_target_admission_plan *plan);
+extern int lcs_rust_select_layer_metadata_sd(
+	const u8 *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_layer_metadata_sd_view *metadata,
+	size_t metadata_count,
+	struct pkm_lcs_layer_metadata_sd_selection *selection);
 extern int lcs_rust_key_open_access_plan(
 	const void *subject_token, const u8 *sd_ptr, size_t sd_len,
 	u32 desired_access, u32 pip_type, u32 pip_trust,
@@ -3664,6 +3669,45 @@ long pkm_lcs_base_layer_write_access_check_for_token(
 		token, default_sd, default_sd_len, plan);
 	pkm_kacs_free((void *)default_sd);
 	return ret;
+}
+
+long pkm_lcs_create_layer_write_access_check_for_token(
+	const void *token, const struct pkm_lcs_create_layer_target *target,
+	bool base_metadata_present, const u8 *base_metadata_sd,
+	size_t base_metadata_sd_len,
+	const struct pkm_lcs_layer_metadata_sd_view *metadata,
+	u32 metadata_count, struct pkm_lcs_key_open_access_plan *plan)
+{
+	struct pkm_lcs_layer_metadata_sd_selection selection = { };
+	const struct pkm_lcs_layer_metadata_sd_view *selected;
+	long ret;
+
+	if (!plan)
+		return -EINVAL;
+
+	memset(plan, 0, sizeof(*plan));
+	if (!target || !target->name)
+		return -EINVAL;
+
+	if (target->implicit_base)
+		return pkm_lcs_base_layer_write_access_check_for_token(
+			token, base_metadata_present, base_metadata_sd,
+			base_metadata_sd_len, plan);
+
+	if (metadata_count && !metadata)
+		return -EINVAL;
+
+	ret = lcs_rust_select_layer_metadata_sd(
+		(const u8 *)target->name, target->name_len, metadata,
+		metadata_count, &selection);
+	if (ret)
+		return ret;
+	if (selection.index >= metadata_count)
+		return -EIO;
+
+	selected = &metadata[selection.index];
+	return pkm_lcs_layer_write_access_check_for_token(
+		token, selected->sd, selected->sd_len, plan);
 }
 
 long pkm_lcs_create_missing_symlink_authority_for_token(
