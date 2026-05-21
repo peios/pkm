@@ -4584,6 +4584,128 @@ long pkm_lcs_create_missing_created_result_finish_to_user(
 	return ret;
 }
 
+static void pkm_lcs_retry_open_components_destroy(
+	struct pkm_lcs_path_component_view *components)
+{
+	kfree(components);
+}
+
+static long pkm_lcs_retry_open_components_prepare(
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	struct pkm_lcs_path_component_view **components_out, u32 *count_out)
+{
+	struct pkm_lcs_path_component_view *components;
+	u32 parent_count;
+	u32 component_count;
+	u32 i;
+
+	if (!components_out || !count_out)
+		return -EINVAL;
+	*components_out = NULL;
+	*count_out = 0;
+
+	if (!resolution || !resolution->parent.source_id ||
+	    !resolution->parent.component_count ||
+	    !resolution->parent.resolved_path ||
+	    !resolution->parent.ancestor_guids ||
+	    !resolution->child_name || !resolution->child_name_len)
+		return -EINVAL;
+
+	parent_count = resolution->parent.component_count;
+	if (parent_count >= PKM_LCS_MAX_KEY_DEPTH_HARD)
+		return -EINVAL;
+	component_count = parent_count + 1U;
+	if (resolution->child_depth != component_count)
+		return -EINVAL;
+	if (resolution->child_name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD)
+		return -ENAMETOOLONG;
+
+	components = kcalloc(component_count, sizeof(*components), GFP_KERNEL);
+	if (!components)
+		return -ENOMEM;
+
+	for (i = 0; i < parent_count; i++) {
+		size_t len;
+
+		if (!resolution->parent.resolved_path[i]) {
+			pkm_lcs_retry_open_components_destroy(components);
+			return -EINVAL;
+		}
+		len = strlen(resolution->parent.resolved_path[i]);
+		if (!len || len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD ||
+		    len > U32_MAX) {
+			pkm_lcs_retry_open_components_destroy(components);
+			return -EINVAL;
+		}
+		components[i].name = resolution->parent.resolved_path[i];
+		components[i].name_len = (u32)len;
+	}
+
+	components[parent_count].name = resolution->child_name;
+	components[parent_count].name_len = resolution->child_name_len;
+	*components_out = components;
+	*count_out = component_count;
+	return 0;
+}
+
+long pkm_lcs_create_missing_retry_open_existing_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	u32 desired_access, const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, u32 __user *udisposition)
+{
+	struct pkm_lcs_path_component_view *components = NULL;
+	struct pkm_lcs_resolved_key_path resolved = { };
+	const u8 *final_sd;
+	u32 component_count = 0;
+	long fd;
+	long ret;
+
+	ret = pkm_lcs_retry_open_components_prepare(
+		resolution, &components, &component_count);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_walk_absolute_components_for_open(
+		resolution->parent.source_id, 0,
+		resolution->parent.ancestor_guids[0], components,
+		component_count, false, scope_guids, scope_count, layers,
+		layer_count, private_layers, private_layer_count, &resolved);
+	if (ret)
+		goto out_components;
+
+	if (!resolved.final_frame.data || !resolved.final_sd_len ||
+	    (size_t)resolved.final_sd_offset > resolved.final_frame.len ||
+	    (size_t)resolved.final_sd_len >
+		    resolved.final_frame.len -
+			    (size_t)resolved.final_sd_offset) {
+		ret = -EIO;
+		goto out_resolved;
+	}
+
+	final_sd = resolved.final_frame.data + resolved.final_sd_offset;
+	fd = pkm_lcs_publish_open_key_for_token(
+		token, resolved.source_id, resolved.key_guid, final_sd,
+		resolved.final_sd_len, desired_access,
+		(const char * const *)resolved.resolved_path,
+		resolved.ancestor_guids, resolved.component_count);
+	if (fd < 0) {
+		ret = fd;
+		goto out_resolved;
+	}
+
+	ret = pkm_lcs_reg_create_key_finish_success_to_user(
+		ops, udisposition, fd, REG_OPENED_EXISTING);
+
+out_resolved:
+	pkm_lcs_resolved_key_path_destroy(&resolved);
+out_components:
+	pkm_lcs_retry_open_components_destroy(components);
+	return ret;
+}
+
 static long pkm_lcs_resolved_key_path_prepare(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,

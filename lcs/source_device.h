@@ -548,6 +548,13 @@ long pkm_lcs_create_missing_prepared_key_for_token(
 long pkm_lcs_create_missing_created_result_finish_to_user(
 	const struct pkm_lcs_usercopy_ops *ops, u32 __user *udisposition,
 	struct pkm_lcs_create_missing_prepared_result *result);
+long pkm_lcs_create_missing_retry_open_existing_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	u32 desired_access, const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, u32 __user *udisposition);
 long pkm_lcs_allocate_sequence(u64 *sequence);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,
