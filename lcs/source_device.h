@@ -137,7 +137,7 @@ struct pkm_lcs_key_open_access_plan {
 	u8 allowed;
 	u8 maximum_allowed;
 	u8 key_open_sacl_audit_required;
-	u8 audit_failure_blocks_completion;
+	u8 audit_payload_failure_blocks_completion;
 	u8 privilege_use_audit_required;
 	u8 _pad[3];
 };

@@ -92,7 +92,7 @@ pub struct PkmLcsKeyOpenAccessPlanCopy {
     pub allowed: u8,
     pub maximum_allowed: u8,
     pub key_open_sacl_audit_required: u8,
-    pub audit_failure_blocks_completion: u8,
+    pub audit_payload_failure_blocks_completion: u8,
     pub privilege_use_audit_required: u8,
     pub _pad: [u8; 3],
 }
@@ -319,7 +319,7 @@ pub unsafe extern "C" fn lcs_rust_key_open_access_plan(
             allowed: 0,
             maximum_allowed: 0,
             key_open_sacl_audit_required: 0,
-            audit_failure_blocks_completion: 0,
+            audit_payload_failure_blocks_completion: 0,
             privilege_use_audit_required: 0,
             _pad: [0; 3],
         };
@@ -378,8 +378,8 @@ pub unsafe extern "C" fn lcs_rust_key_open_access_plan(
                     (*plan_out).maximum_allowed = u8::from(plan.maximum_allowed);
                     (*plan_out).key_open_sacl_audit_required =
                         u8::from(plan.key_open_sacl_audit_required);
-                    (*plan_out).audit_failure_blocks_completion =
-                        u8::from(plan.audit_failure_blocks_completion);
+                    (*plan_out).audit_payload_failure_blocks_completion =
+                        u8::from(plan.audit_payload_failure_blocks_completion);
                     (*plan_out).privilege_use_audit_required =
                         u8::from(plan.privilege_use_audit_required);
                 }

@@ -157,7 +157,7 @@ fn key_open_access_delegates_to_kacs_and_stores_requested_mask() {
     assert_eq!(plan.access_check_granted, KEY_READ);
     assert_eq!(plan.fd_granted_access, Some(KEY_READ));
     assert!(!plan.key_open_sacl_audit_required);
-    assert!(!plan.audit_failure_blocks_completion);
+    assert!(!plan.audit_payload_failure_blocks_completion);
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn maximum_allowed_open_uses_kacs_computed_granted_mask() {
 }
 
 #[test]
-fn key_open_sacl_audit_blocks_completion_until_kmes_emit_succeeds() {
+fn key_open_sacl_audit_blocks_completion_on_payload_failure_only() {
     let owner = sid(5, &[18]);
     let group = sid(5, &[32, 544]);
     let user = sid(5, &[21, 1000]);
@@ -222,7 +222,7 @@ fn key_open_sacl_audit_blocks_completion_until_kmes_emit_succeeds() {
     assert_eq!(plan.decision, RegistryOpenAccessDecision::Allowed);
     assert_eq!(plan.fd_granted_access, Some(KEY_READ));
     assert!(plan.key_open_sacl_audit_required);
-    assert!(plan.audit_failure_blocks_completion);
+    assert!(plan.audit_payload_failure_blocks_completion);
 }
 
 #[test]

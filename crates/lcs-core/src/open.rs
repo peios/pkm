@@ -64,7 +64,7 @@ pub enum RegistryOpenPreResolutionAccessPlan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegistryOpenAccessDecision {
     /// All requested rights were granted and fd publication may proceed after
-    /// any required synchronous audit emission succeeds.
+    /// any required audit payload is constructed and KMES enqueue is attempted.
     Allowed,
     /// AccessCheck denied at least one requested concrete right. No fd may be
     /// published.
@@ -94,7 +94,7 @@ pub struct RegistryKeyOpenAccessPlan {
     pub access_check_granted: u32,
     pub fd_granted_access: Option<u32>,
     pub key_open_sacl_audit_required: bool,
-    pub audit_failure_blocks_completion: bool,
+    pub audit_payload_failure_blocks_completion: bool,
     pub privilege_use_audit_required: bool,
     pub updated_privileges: kacs_core::TokenPrivileges,
 }
@@ -220,7 +220,7 @@ pub fn plan_registry_key_open_access(
                 access_check_granted: 0,
                 fd_granted_access: None,
                 key_open_sacl_audit_required: false,
-                audit_failure_blocks_completion: false,
+                audit_payload_failure_blocks_completion: false,
                 privilege_use_audit_required: false,
                 updated_privileges: input.token.privileges,
             });
@@ -264,7 +264,7 @@ pub fn plan_registry_key_open_access(
         access_check_granted,
         fd_granted_access,
         key_open_sacl_audit_required,
-        audit_failure_blocks_completion: key_open_sacl_audit_required,
+        audit_payload_failure_blocks_completion: key_open_sacl_audit_required,
         privilege_use_audit_required: !state.privilege_use_events.is_empty(),
         updated_privileges: state.updated_privileges,
     })

@@ -40,7 +40,7 @@ fn lcs_audit_event_names_match_psd_005() {
 fn lcs_audit_failure_policy_matches_psd_005() {
     assert_eq!(
         lcs_audit_emission_failure_policy(LcsAuditEventKind::KeyOpenAudit),
-        LcsAuditEmissionFailurePolicy::FailOperationWithEio
+        LcsAuditEmissionFailurePolicy::PreserveAlreadyDeterminedResult
     );
     assert_eq!(
         lcs_audit_emission_failure_policy(LcsAuditEventKind::BackupStart),

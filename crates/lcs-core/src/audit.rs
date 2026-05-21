@@ -206,7 +206,8 @@ pub struct LcsSourceValidationFailureAuditRecord<'a> {
     pub validation_class: LcsSourceValidationClass,
 }
 
-/// Policy to apply if synchronous KMES emission fails at the audit point.
+/// Policy to apply after a valid audit payload exists but KMES transport
+/// enqueue, retention, or consumption fails at the audit point.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LcsAuditEmissionFailurePolicy {
     FailOperationWithEio,
@@ -218,9 +219,12 @@ pub const fn lcs_audit_emission_failure_policy(
     kind: LcsAuditEventKind,
 ) -> LcsAuditEmissionFailurePolicy {
     match kind {
-        LcsAuditEventKind::KeyOpenAudit
-        | LcsAuditEventKind::BackupStart
-        | LcsAuditEventKind::RestoreStart => LcsAuditEmissionFailurePolicy::FailOperationWithEio,
+        LcsAuditEventKind::KeyOpenAudit => {
+            LcsAuditEmissionFailurePolicy::PreserveAlreadyDeterminedResult
+        }
+        LcsAuditEventKind::BackupStart | LcsAuditEventKind::RestoreStart => {
+            LcsAuditEmissionFailurePolicy::FailOperationWithEio
+        }
         LcsAuditEventKind::BackupComplete
         | LcsAuditEventKind::RestoreComplete
         | LcsAuditEventKind::SourceValidationFailure => {
