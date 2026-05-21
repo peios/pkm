@@ -22,6 +22,7 @@
 #include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <linux/unaligned.h>
 
@@ -3026,6 +3027,28 @@ out_parent:
 out_copy:
 	pkm_lcs_syscall_path_copy_destroy(&copy);
 	return ret;
+}
+
+long pkm_lcs_reg_open_key_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const char __user *upath, u32 desired_access, u32 flags)
+{
+	if (parent_fd == -1)
+		return pkm_lcs_open_user_absolute_path_for_token(
+			token, ops, upath, desired_access, flags, NULL, 0, NULL, 0,
+			NULL, 0);
+
+	return pkm_lcs_open_user_relative_path_for_token(
+		token, ops, parent_fd, upath, desired_access, flags, NULL, 0,
+		NULL, 0);
+}
+
+SYSCALL_DEFINE4(reg_open_key, int, parent_fd, const char __user *, path,
+		u32, desired_access, u32, flags)
+{
+	return pkm_lcs_reg_open_key_for_token(
+		pkm_kacs_current_effective_token_ptr(), NULL, parent_fd, path,
+		desired_access, flags);
 }
 
 void pkm_lcs_resolved_key_path_destroy(struct pkm_lcs_resolved_key_path *path)

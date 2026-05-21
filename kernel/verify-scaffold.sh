@@ -249,7 +249,8 @@ for syscall in \
 	"1024 kacs_access_check_list" \
 	"1025 kacs_set_caap" \
 	"1026 kacs_get_mount_policy" \
-	"1027 kacs_set_mount_policy"; do
+	"1027 kacs_set_mount_policy" \
+	"1100 reg_open_key"; do
 	number=${syscall%% *}
 	name=${syscall#* }
 	if ! rg -q "^[[:space:]]*${number}[[:space:]]+${name}\$" \
