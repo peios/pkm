@@ -1748,6 +1748,224 @@ out_unlock_table:
 	return ret;
 }
 
+static long pkm_lcs_source_dispatch_create_entry_request_with_waiter(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len,
+	const u8 child_guid[RSI_GUID_SIZE], u64 sequence,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_source_queued_request *request;
+	struct pkm_lcs_source_slot *slot;
+	struct pkm_lcs_source_fd *source_fd;
+	size_t frame_len;
+	u64 request_id;
+	u64 next_request_id;
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+	if (!parent_guid || !child_name || !layer_name || !child_guid)
+		return -EINVAL;
+	if (child_name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD ||
+	    layer_name_len > PKM_LCS_MAX_LAYER_NAME_BYTES_HARD)
+		return -ENAMETOOLONG;
+	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
+			       (size_t)RSI_GUID_SIZE, &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
+	    check_add_overflow(frame_len, (size_t)child_name_len,
+			       &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
+	    check_add_overflow(frame_len, (size_t)layer_name_len,
+			       &frame_len) ||
+	    check_add_overflow(frame_len, (size_t)RSI_GUID_SIZE,
+			       &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u64), &frame_len))
+		return -EOVERFLOW;
+
+	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	if (!request)
+		return -ENOMEM;
+	request->frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!request->frame) {
+		kfree(request);
+		return -ENOMEM;
+	}
+	INIT_LIST_HEAD(&request->link);
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE ||
+	    !slot->active_fd) {
+		ret = -EIO;
+		goto out_unlock_table;
+	}
+
+	source_fd = slot->active_fd;
+	mutex_lock(&source_fd->queue_lock);
+	if (source_fd->closing ||
+	    source_fd->state != PKM_LCS_SOURCE_FD_ACTIVE ||
+	    source_fd->source_id != source_id) {
+		ret = -EIO;
+		goto out_unlock_queue;
+	}
+	if (source_fd->in_flight_request_count >=
+	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+		ret = -EAGAIN;
+		goto out_unlock_queue;
+	}
+
+	request_id = source_fd->next_request_id;
+	ret = pkm_lcs_source_request_id_successor(request_id,
+						  &next_request_id);
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_rsi_build_create_entry_request(
+		request->frame, frame_len, request_id, txn_id, parent_guid,
+		child_name, child_name_len, layer_name, layer_name_len,
+		child_guid, sequence, &built);
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_source_in_flight_insert_locked(
+		source_fd, built.request_id, built.txn_id, built.op_code,
+		waiter);
+	if (ret)
+		goto out_unlock_queue;
+
+	request->len = built.len;
+	request->request_id = built.request_id;
+	request->txn_id = built.txn_id;
+	request->op_code = built.op_code;
+	list_add_tail(&request->link, &source_fd->request_queue);
+	source_fd->queued_request_count++;
+	source_fd->next_request_id = next_request_id;
+	pkm_lcs_source_enqueue_result_fill_locked(result, request, source_fd);
+	request = NULL;
+	ret = 0;
+
+out_unlock_queue:
+	mutex_unlock(&source_fd->queue_lock);
+	if (!ret)
+		wake_up_interruptible(&source_fd->read_wait);
+out_unlock_table:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	pkm_lcs_source_queued_request_free(request);
+	return ret;
+}
+
+static long pkm_lcs_source_dispatch_create_key_request_with_waiter(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *name, u32 name_len,
+	const u8 parent_guid[RSI_GUID_SIZE], const u8 *sd, size_t sd_len,
+	bool volatile_key, bool symlink,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_source_queued_request *request;
+	struct pkm_lcs_source_slot *slot;
+	struct pkm_lcs_source_fd *source_fd;
+	size_t frame_len;
+	u64 request_id;
+	u64 next_request_id;
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+	if (!guid || !name || !parent_guid || !sd || !sd_len)
+		return -EINVAL;
+	if (name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD)
+		return -ENAMETOOLONG;
+	if (sd_len > U32_MAX)
+		return -EOVERFLOW;
+	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
+			       (size_t)RSI_GUID_SIZE, &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
+	    check_add_overflow(frame_len, (size_t)name_len, &frame_len) ||
+	    check_add_overflow(frame_len, (size_t)RSI_GUID_SIZE,
+			       &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
+	    check_add_overflow(frame_len, sd_len, &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u8), &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u8), &frame_len))
+		return -EOVERFLOW;
+
+	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	if (!request)
+		return -ENOMEM;
+	request->frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!request->frame) {
+		kfree(request);
+		return -ENOMEM;
+	}
+	INIT_LIST_HEAD(&request->link);
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE ||
+	    !slot->active_fd) {
+		ret = -EIO;
+		goto out_unlock_table;
+	}
+
+	source_fd = slot->active_fd;
+	mutex_lock(&source_fd->queue_lock);
+	if (source_fd->closing ||
+	    source_fd->state != PKM_LCS_SOURCE_FD_ACTIVE ||
+	    source_fd->source_id != source_id) {
+		ret = -EIO;
+		goto out_unlock_queue;
+	}
+	if (source_fd->in_flight_request_count >=
+	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+		ret = -EAGAIN;
+		goto out_unlock_queue;
+	}
+
+	request_id = source_fd->next_request_id;
+	ret = pkm_lcs_source_request_id_successor(request_id,
+						  &next_request_id);
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_rsi_build_create_key_request(
+		request->frame, frame_len, request_id, txn_id, guid, name,
+		name_len, parent_guid, sd, sd_len, volatile_key, symlink,
+		&built);
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_source_in_flight_insert_locked(
+		source_fd, built.request_id, built.txn_id, built.op_code,
+		waiter);
+	if (ret)
+		goto out_unlock_queue;
+
+	request->len = built.len;
+	request->request_id = built.request_id;
+	request->txn_id = built.txn_id;
+	request->op_code = built.op_code;
+	list_add_tail(&request->link, &source_fd->request_queue);
+	source_fd->queued_request_count++;
+	source_fd->next_request_id = next_request_id;
+	pkm_lcs_source_enqueue_result_fill_locked(result, request, source_fd);
+	request = NULL;
+	ret = 0;
+
+out_unlock_queue:
+	mutex_unlock(&source_fd->queue_lock);
+	if (!ret)
+		wake_up_interruptible(&source_fd->read_wait);
+out_unlock_table:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	pkm_lcs_source_queued_request_free(request);
+	return ret;
+}
+
 long pkm_lcs_source_dispatch_lookup_request(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
@@ -1841,6 +2059,148 @@ long pkm_lcs_source_lookup_round_trip(
 	return pkm_lcs_source_lookup_round_trip_timeout(
 		source_id, txn_id, parent_guid, child_name, child_name_len,
 		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, response, enqueue);
+}
+
+long pkm_lcs_source_dispatch_create_entry_request(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len,
+	const u8 child_guid[RSI_GUID_SIZE], u64 sequence,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	return pkm_lcs_source_dispatch_create_entry_request_with_waiter(
+		source_id, txn_id, parent_guid, child_name, child_name_len,
+		layer_name, layer_name_len, child_guid, sequence, NULL,
+		result);
+}
+
+long pkm_lcs_source_dispatch_create_entry_waitable_request(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len,
+	const u8 child_guid[RSI_GUID_SIZE], u64 sequence,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	if (!waiter)
+		return -EINVAL;
+
+	pkm_lcs_source_response_waiter_init(waiter);
+	return pkm_lcs_source_dispatch_create_entry_request_with_waiter(
+		source_id, txn_id, parent_guid, child_name, child_name_len,
+		layer_name, layer_name_len, child_guid, sequence, waiter,
+		result);
+}
+
+long pkm_lcs_source_create_entry_round_trip_timeout(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len,
+	const u8 child_guid[RSI_GUID_SIZE], u64 sequence, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_source_response_waiter waiter;
+	unsigned long deadline;
+	long ret;
+
+	if (response)
+		memset(response, 0, sizeof(*response));
+	if (enqueue)
+		memset(enqueue, 0, sizeof(*enqueue));
+
+	pkm_lcs_source_response_waiter_init(&waiter);
+	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+
+	for (;;) {
+		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		if (ret)
+			return ret;
+
+		ret = pkm_lcs_source_dispatch_create_entry_request_with_waiter(
+			source_id, txn_id, parent_guid, child_name,
+			child_name_len, layer_name, layer_name_len,
+			child_guid, sequence, &waiter, enqueue);
+		if (ret != -EAGAIN)
+			break;
+		if (!pkm_lcs_source_deadline_remaining(deadline))
+			return -ETIMEDOUT;
+	}
+	if (ret)
+		return ret;
+
+	return pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
+							 response);
+}
+
+long pkm_lcs_source_dispatch_create_key_request(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *name, u32 name_len,
+	const u8 parent_guid[RSI_GUID_SIZE], const u8 *sd, size_t sd_len,
+	bool volatile_key, bool symlink,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	return pkm_lcs_source_dispatch_create_key_request_with_waiter(
+		source_id, txn_id, guid, name, name_len, parent_guid, sd,
+		sd_len, volatile_key, symlink, NULL, result);
+}
+
+long pkm_lcs_source_dispatch_create_key_waitable_request(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *name, u32 name_len,
+	const u8 parent_guid[RSI_GUID_SIZE], const u8 *sd, size_t sd_len,
+	bool volatile_key, bool symlink,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	if (!waiter)
+		return -EINVAL;
+
+	pkm_lcs_source_response_waiter_init(waiter);
+	return pkm_lcs_source_dispatch_create_key_request_with_waiter(
+		source_id, txn_id, guid, name, name_len, parent_guid, sd,
+		sd_len, volatile_key, symlink, waiter, result);
+}
+
+long pkm_lcs_source_create_key_round_trip_timeout(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *name, u32 name_len,
+	const u8 parent_guid[RSI_GUID_SIZE], const u8 *sd, size_t sd_len,
+	bool volatile_key, bool symlink, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_source_response_waiter waiter;
+	unsigned long deadline;
+	long ret;
+
+	if (response)
+		memset(response, 0, sizeof(*response));
+	if (enqueue)
+		memset(enqueue, 0, sizeof(*enqueue));
+
+	pkm_lcs_source_response_waiter_init(&waiter);
+	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+
+	for (;;) {
+		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		if (ret)
+			return ret;
+
+		ret = pkm_lcs_source_dispatch_create_key_request_with_waiter(
+			source_id, txn_id, guid, name, name_len,
+			parent_guid, sd, sd_len, volatile_key, symlink,
+			&waiter, enqueue);
+		if (ret != -EAGAIN)
+			break;
+		if (!pkm_lcs_source_deadline_remaining(deadline))
+			return -ETIMEDOUT;
+	}
+	if (ret)
+		return ret;
+
+	return pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
+							 response);
 }
 
 long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(

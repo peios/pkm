@@ -7924,6 +7924,237 @@ static void pkm_lcs_kunit_source_dispatch_lookup_allocates_monotonic_ids(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_dispatch_create_entry_frame(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88,
+		0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90,
+	};
+	static const u8 child_guid[RSI_GUID_SIZE] = {
+		0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98,
+		0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0,
+	};
+	static const char child_name[] = "Created";
+	static const char layer_name[] = "base";
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	size_t payload_offset;
+	size_t child_offset;
+	size_t layer_offset;
+	size_t guid_offset;
+	size_t sequence_offset;
+	u8 out[160];
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_create_entry_request(
+				1, 0x6162636465666768ULL, parent_guid,
+				child_name, strlen(child_name), layer_name,
+				strlen(layer_name), child_guid,
+				0x0102030405060708ULL, &enqueue),
+			0L);
+	KUNIT_EXPECT_EQ(test, enqueue.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.txn_id, 0x6162636465666768ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.op_code, (u16)RSI_CREATE_ENTRY);
+	KUNIT_EXPECT_EQ(test, enqueue.queue_depth, 1U);
+	KUNIT_EXPECT_EQ(test, enqueue.in_flight_count, 1U);
+	KUNIT_EXPECT_EQ(test, enqueue.next_request_id, 1ULL);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(out + RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)enqueue.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_ID_OFFSET), 0ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(out + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_CREATE_ENTRY);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_TXN_ID_OFFSET),
+			0x6162636465666768ULL);
+
+	payload_offset = RSI_REQUEST_HEADER_SIZE;
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + payload_offset, parent_guid,
+			       RSI_GUID_SIZE),
+			0);
+	child_offset = payload_offset + RSI_GUID_SIZE;
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(out + child_offset),
+			(u32)strlen(child_name));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + child_offset + RSI_LENGTH_PREFIX_SIZE,
+			       child_name, strlen(child_name)),
+			0);
+	layer_offset = child_offset + RSI_LENGTH_PREFIX_SIZE +
+		       strlen(child_name);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(out + layer_offset),
+			(u32)strlen(layer_name));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + layer_offset + RSI_LENGTH_PREFIX_SIZE,
+			       layer_name, strlen(layer_name)),
+			0);
+	guid_offset = layer_offset + RSI_LENGTH_PREFIX_SIZE +
+		      strlen(layer_name);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + guid_offset, child_guid, RSI_GUID_SIZE),
+			0);
+	sequence_offset = guid_offset + RSI_GUID_SIZE;
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(out + sequence_offset),
+			0x0102030405060708ULL);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_dispatch_create_key_frame(struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8,
+		0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0,
+	};
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8,
+		0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0,
+	};
+	static const char name[] = "Created";
+	static const u8 sd[] = { 0x01, 0x00, 0x04, 0x80, 0x30, 0x00 };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	size_t payload_offset;
+	size_t name_offset;
+	size_t parent_offset;
+	size_t sd_offset;
+	size_t flags_offset;
+	u8 out[160];
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_create_key_request(
+				1, 0x7172737475767778ULL, guid, name,
+				strlen(name), parent_guid, sd, sizeof(sd),
+				true, false, &enqueue),
+			0L);
+	KUNIT_EXPECT_EQ(test, enqueue.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.txn_id, 0x7172737475767778ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.op_code, (u16)RSI_CREATE_KEY);
+	KUNIT_EXPECT_EQ(test, enqueue.queue_depth, 1U);
+	KUNIT_EXPECT_EQ(test, enqueue.in_flight_count, 1U);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(out + RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)enqueue.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(out + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_CREATE_KEY);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_TXN_ID_OFFSET),
+			0x7172737475767778ULL);
+
+	payload_offset = RSI_REQUEST_HEADER_SIZE;
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + payload_offset, guid, RSI_GUID_SIZE),
+			0);
+	name_offset = payload_offset + RSI_GUID_SIZE;
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(out + name_offset),
+			(u32)strlen(name));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + name_offset + RSI_LENGTH_PREFIX_SIZE,
+			       name, strlen(name)),
+			0);
+	parent_offset = name_offset + RSI_LENGTH_PREFIX_SIZE + strlen(name);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + parent_offset, parent_guid,
+			       RSI_GUID_SIZE),
+			0);
+	sd_offset = parent_offset + RSI_GUID_SIZE;
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(out + sd_offset),
+			(u32)sizeof(sd));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + sd_offset + RSI_LENGTH_PREFIX_SIZE, sd,
+			       sizeof(sd)),
+			0);
+	flags_offset = sd_offset + RSI_LENGTH_PREFIX_SIZE + sizeof(sd);
+	KUNIT_EXPECT_EQ(test, out[flags_offset], 1U);
+	KUNIT_EXPECT_EQ(test, out[flags_offset + 1], 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs(
+	struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = { 0xc1 };
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0xc2 };
+	static const u8 sd[] = { 0x01, 0x00, 0x04, 0x80 };
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_create_entry_request(
+				1, 0, NULL, "Child", strlen("Child"),
+				"base", strlen("base"), guid, 1, &enqueue),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_create_entry_request(
+				1, 0, parent_guid, "", 0, "base",
+				strlen("base"), guid, 1, &enqueue),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_create_entry_request(
+				1, 0, parent_guid, "Child", strlen("Child"),
+				"bad/layer", strlen("bad/layer"), guid, 1,
+				&enqueue),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_create_key_request(
+				1, 0, guid, "", 0, parent_guid, sd,
+				sizeof(sd), false, false, &enqueue),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_create_key_request(
+				1, 0, guid, "Child", strlen("Child"),
+				parent_guid, NULL, sizeof(sd), false, false,
+				&enqueue),
+			(long)-EINVAL);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id, 0ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_read_retains_in_flight_until_release(
 	struct kunit *test)
 {
@@ -9763,6 +9994,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_request_enqueue_rejects_bad_state),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_lookup_allocates_monotonic_ids),
+	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_create_entry_frame),
+	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_create_key_frame),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_read_retains_in_flight_until_release),
 	KUNIT_CASE(pkm_lcs_kunit_source_enqueue_rejects_reused_request_id),
