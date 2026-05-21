@@ -421,6 +421,10 @@ long pkm_lcs_create_missing_parent_for_token(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
 	struct pkm_lcs_create_missing_parent_resolution *result);
+long pkm_lcs_create_missing_parent_access_check_for_token(
+	const void *token,
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	struct pkm_lcs_key_open_access_plan *plan);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,
 	struct pkm_lcs_source_enqueue_result *result);

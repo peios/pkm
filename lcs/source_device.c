@@ -3566,6 +3566,33 @@ long pkm_lcs_create_missing_parent_for_token(
 		layer_count, private_layers, private_layer_count, result);
 }
 
+long pkm_lcs_create_missing_parent_access_check_for_token(
+	const void *token,
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	struct pkm_lcs_key_open_access_plan *plan)
+{
+	const struct pkm_lcs_resolved_key_path *parent;
+	const u8 *sd;
+	size_t sd_offset;
+	size_t sd_len;
+
+	if (!resolution || !plan)
+		return -EINVAL;
+
+	memset(plan, 0, sizeof(*plan));
+	parent = &resolution->parent;
+	sd_offset = parent->final_sd_offset;
+	sd_len = parent->final_sd_len;
+	if (!parent->final_frame.data || !parent->final_frame.len ||
+	    !sd_len || sd_offset > parent->final_frame.len ||
+	    sd_len > parent->final_frame.len - sd_offset)
+		return -EIO;
+
+	sd = parent->final_frame.data + sd_offset;
+	return pkm_lcs_key_open_access_check_for_token(
+		token, sd, sd_len, KEY_CREATE_SUB_KEY, plan);
+}
+
 static long pkm_lcs_resolved_key_path_prepare(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,

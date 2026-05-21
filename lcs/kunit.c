@@ -4710,6 +4710,163 @@ static void pkm_lcs_kunit_create_missing_relative_checks_child_depth(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_create_missing_parent_resolution_set_sd(
+	struct kunit *test, struct pkm_lcs_create_missing_parent_resolution *result,
+	const u8 *sd, size_t sd_len)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x61 };
+	u8 *frame;
+
+	KUNIT_ASSERT_NOT_NULL(test, result);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	KUNIT_ASSERT_GT(test, sd_len, (size_t)0);
+
+	frame = kmalloc(sd_len + 3U, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	memset(frame, 0xa5, 3U);
+	memcpy(frame + 3U, sd, sd_len);
+
+	memcpy(result->parent.key_guid, parent_guid,
+	       sizeof(result->parent.key_guid));
+	result->parent.source_id = 1;
+	result->parent.component_count = 2;
+	result->parent.final_frame.data = frame;
+	result->parent.final_frame.len = sd_len + 3U;
+	result->parent.final_sd_offset = 3U;
+	result->parent.final_sd_len = sd_len;
+}
+
+static void pkm_lcs_kunit_create_missing_parent_access_allows_create_subkey(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_CREATE_SUB_KEY, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	pkm_lcs_kunit_create_missing_parent_resolution_set_sd(test, &result, sd,
+							      sd_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_parent_access_check_for_token(
+				token, &result, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_CREATE_SUB_KEY);
+	KUNIT_EXPECT_EQ(test, plan.mapped_desired_access, KEY_CREATE_SUB_KEY);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, KEY_CREATE_SUB_KEY);
+
+	pkm_lcs_create_missing_parent_resolution_destroy(&result);
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_parent_access_denies_without_right(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_QUERY_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	pkm_lcs_kunit_create_missing_parent_resolution_set_sd(test, &result, sd,
+							      sd_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_parent_access_check_for_token(
+				token, &result, &plan),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_CREATE_SUB_KEY);
+	KUNIT_EXPECT_EQ(test, plan.mapped_desired_access, KEY_CREATE_SUB_KEY);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, 0U);
+
+	pkm_lcs_create_missing_parent_resolution_destroy(&result);
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_parent_access_malformed_sd_eio(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_key_open_access_plan plan = {
+		.allowed = 1,
+		.fd_granted_access = KEY_CREATE_SUB_KEY,
+	};
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	result.parent.final_frame.data = kmalloc(4U, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, result.parent.final_frame.data);
+	memset(result.parent.final_frame.data, 0, 4U);
+	result.parent.final_frame.len = 4U;
+	result.parent.final_sd_offset = 3U;
+	result.parent.final_sd_len = 4U;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_parent_access_check_for_token(
+				token, &result, &plan),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, 0U);
+
+	pkm_lcs_create_missing_parent_resolution_destroy(&result);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_parent_access_bad_inputs(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_CREATE_SUB_KEY, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	pkm_lcs_kunit_create_missing_parent_resolution_set_sd(test, &result, sd,
+							      sd_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_parent_access_check_for_token(
+				NULL, &result, &plan),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_parent_access_check_for_token(
+				token, NULL, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_parent_access_check_for_token(
+				token, &result, NULL),
+			(long)-EINVAL);
+
+	pkm_lcs_create_missing_parent_resolution_destroy(&result);
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_rsi_lookup_request_frame_success(struct kunit *test)
 {
 	static const u8 parent_guid[RSI_GUID_SIZE] = {
@@ -8471,6 +8628,13 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_create_missing_relative_direct_parent_reads_sd),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_relative_checks_child_depth),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_parent_access_allows_create_subkey),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_parent_access_denies_without_right),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_parent_access_malformed_sd_eio),
+	KUNIT_CASE(pkm_lcs_kunit_create_missing_parent_access_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_open_absolute_root_denied_publishes_no_fd),
 	KUNIT_CASE(
