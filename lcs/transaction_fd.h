@@ -2,6 +2,7 @@
 #ifndef _SECURITY_PKM_LCS_TRANSACTION_FD_H
 #define _SECURITY_PKM_LCS_TRANSACTION_FD_H
 
+#include <linux/file.h>
 #include <linux/types.h>
 
 #define PKM_LCS_TRANSACTION_TIMEOUT_MS_DEFAULT 30000U
@@ -9,8 +10,12 @@
 
 #define PKM_LCS_TRANSACTION_BIND_NEW 1U
 #define PKM_LCS_TRANSACTION_BIND_REUSE 2U
+#define PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY 1U
+#define PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT 4096U
 
 struct reg_txn_status_args;
+struct pkm_lcs_transaction_fd;
+struct pkm_lcs_transaction_log_entry;
 
 struct pkm_lcs_transaction_fd_snapshot {
 	u64 transaction_id;
@@ -38,10 +43,52 @@ struct pkm_lcs_transaction_read_plan {
 	u8 bound_root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 };
 
+struct pkm_lcs_transaction_key_create_log_input {
+	const u8 *parent_guid;
+	const u8 *target_guid;
+	const char *child_name;
+	size_t child_name_len;
+	const char *layer;
+	size_t layer_len;
+	const char * const *parent_path;
+	const u8 (*parent_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u32 parent_depth;
+	u64 sequence;
+};
+
+struct pkm_lcs_transaction_mutation_handle {
+	struct fd held;
+	struct pkm_lcs_transaction_fd *txn;
+	struct pkm_lcs_transaction_log_entry *entry;
+	bool active;
+};
+
+struct pkm_lcs_transaction_mutation_log_snapshot {
+	u64 next_operation_index;
+	u64 last_operation_index;
+	u64 last_sequence;
+	u32 entry_count;
+	u32 capacity;
+	u32 last_kind;
+	u32 last_parent_depth;
+	char last_child_name[64];
+	char last_layer[64];
+};
+
 long pkm_lcs_transaction_fd_publish(u32 timeout_ms);
 long pkm_lcs_reg_begin_transaction(void);
 long pkm_lcs_transaction_fd_commit(int fd);
 long pkm_lcs_transaction_fd_status(int fd, struct reg_txn_status_args *out);
+long pkm_lcs_transaction_fd_begin_key_create_mutation(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const struct pkm_lcs_transaction_key_create_log_input *input,
+	struct pkm_lcs_transaction_mutation_handle *handle,
+	struct pkm_lcs_transaction_binding_plan *binding);
+long pkm_lcs_transaction_fd_commit_mutation(
+	struct pkm_lcs_transaction_mutation_handle *handle);
+void pkm_lcs_transaction_fd_cancel_mutation(
+	struct pkm_lcs_transaction_mutation_handle *handle);
 long pkm_lcs_transaction_fd_prepare_read_context(
 	int fd, u32 source_id,
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
@@ -59,10 +106,13 @@ long pkm_lcs_transaction_fd_bind_for_mutation(
 	struct pkm_lcs_transaction_binding_plan *out);
 long pkm_lcs_transaction_fd_snapshot(
 	int fd, struct pkm_lcs_transaction_fd_snapshot *out);
+long pkm_lcs_transaction_fd_log_snapshot(
+	int fd, struct pkm_lcs_transaction_mutation_log_snapshot *out);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 long pkm_lcs_kunit_transaction_fd_set_state(int fd, u32 state,
 					    u32 bound_source_id);
+long pkm_lcs_kunit_transaction_fd_set_log_capacity(int fd, u32 capacity);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_TRANSACTION_FD_H */

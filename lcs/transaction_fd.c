@@ -14,8 +14,10 @@
 #include <linux/fs.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
+#include <linux/list.h>
 #include <linux/limits.h>
 #include <linux/mutex.h>
+#include <linux/overflow.h>
 #include <linux/module.h>
 #include <linux/poll.h>
 #include <linux/slab.h>
@@ -33,6 +35,7 @@
 
 struct pkm_lcs_transaction_fd {
 	u64 transaction_id;
+	u64 next_operation_index;
 	u32 state;
 	u32 bound_source_id;
 	u8 bound_root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
@@ -40,12 +43,40 @@ struct pkm_lcs_transaction_fd {
 	struct mutex bind_lock;
 	wait_queue_head_t wait;
 	struct timer_list timeout_timer;
+	struct list_head mutation_log;
+	u32 mutation_log_entries;
+	u32 mutation_log_capacity;
+};
+
+struct pkm_lcs_transaction_key_create_log {
+	u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u8 target_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u64 sequence;
+	char *child_name;
+	char *layer;
+	char **parent_path;
+	u8 (*parent_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u32 child_name_len;
+	u32 layer_len;
+	u32 parent_depth;
+};
+
+struct pkm_lcs_transaction_log_entry {
+	struct list_head link;
+	u64 operation_index;
+	u32 kind;
+	union {
+		struct pkm_lcs_transaction_key_create_log create_key;
+	};
 };
 
 static DEFINE_MUTEX(pkm_lcs_transaction_id_lock);
 static u64 pkm_lcs_next_transaction_id = 1;
 
 static const struct file_operations pkm_lcs_transaction_fd_fops;
+static long pkm_lcs_transaction_fd_complete_first_bind_from_state(
+	struct pkm_lcs_transaction_fd *txn, u64 transaction_id, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES]);
 
 static unsigned long pkm_lcs_transaction_deadline_from_timeout_ms(
 	u32 timeout_ms)
@@ -126,6 +157,188 @@ static bool pkm_lcs_transaction_root_guid_valid(
 	return false;
 }
 
+static bool pkm_lcs_transaction_name_len_valid(size_t len)
+{
+	return len && len <= U16_MAX;
+}
+
+static void pkm_lcs_transaction_key_create_log_destroy(
+	struct pkm_lcs_transaction_key_create_log *entry)
+{
+	u32 i;
+
+	if (!entry)
+		return;
+
+	kfree(entry->child_name);
+	kfree(entry->layer);
+	if (entry->parent_path) {
+		for (i = 0; i < entry->parent_depth; i++)
+			kfree(entry->parent_path[i]);
+		kfree(entry->parent_path);
+	}
+	kfree(entry->parent_ancestor_guids);
+	memset(entry, 0, sizeof(*entry));
+}
+
+static void pkm_lcs_transaction_log_entry_destroy(
+	struct pkm_lcs_transaction_log_entry *entry)
+{
+	if (!entry)
+		return;
+
+	switch (entry->kind) {
+	case PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY:
+		pkm_lcs_transaction_key_create_log_destroy(
+			&entry->create_key);
+		break;
+	default:
+		break;
+	}
+	kfree(entry);
+}
+
+static void pkm_lcs_transaction_log_clear(
+	struct pkm_lcs_transaction_fd *txn)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+	struct pkm_lcs_transaction_log_entry *tmp;
+
+	if (!txn)
+		return;
+
+	list_for_each_entry_safe(entry, tmp, &txn->mutation_log, link) {
+		list_del(&entry->link);
+		pkm_lcs_transaction_log_entry_destroy(entry);
+	}
+	txn->mutation_log_entries = 0;
+}
+
+static long pkm_lcs_transaction_dup_path_components(
+	const char * const *src, u32 count, char ***out)
+{
+	char **copy;
+	u32 i;
+
+	if (!out || !count || !src)
+		return -EINVAL;
+	*out = NULL;
+
+	copy = kcalloc(count, sizeof(*copy), GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
+
+	for (i = 0; i < count; i++) {
+		size_t len;
+
+		if (!src[i])
+			goto out_inval;
+		len = strnlen(src[i], U16_MAX + 1UL);
+		if (!pkm_lcs_transaction_name_len_valid(len))
+			goto out_inval;
+		copy[i] = kstrndup(src[i], len, GFP_KERNEL);
+		if (!copy[i])
+			goto out_nomem;
+	}
+
+	*out = copy;
+	return 0;
+
+out_nomem:
+	for (i = 0; i < count; i++)
+		kfree(copy[i]);
+	kfree(copy);
+	return -ENOMEM;
+out_inval:
+	for (i = 0; i < count; i++)
+		kfree(copy[i]);
+	kfree(copy);
+	return -EINVAL;
+}
+
+static long pkm_lcs_transaction_key_create_log_alloc(
+	const struct pkm_lcs_transaction_key_create_log_input *input,
+	struct pkm_lcs_transaction_log_entry **out)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+	size_t guid_bytes;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+	*out = NULL;
+	if (!input || !input->parent_guid || !input->target_guid ||
+	    !input->child_name || !input->layer || !input->parent_path ||
+	    !input->parent_ancestor_guids || !input->parent_depth ||
+	    !input->sequence ||
+	    !pkm_lcs_transaction_name_len_valid(input->child_name_len) ||
+	    !pkm_lcs_transaction_name_len_valid(input->layer_len))
+		return -EINVAL;
+	if (input->parent_depth > PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT)
+		return -EINVAL;
+
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&entry->link);
+	entry->kind = PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY;
+	memcpy(entry->create_key.parent_guid, input->parent_guid,
+	       sizeof(entry->create_key.parent_guid));
+	memcpy(entry->create_key.target_guid, input->target_guid,
+	       sizeof(entry->create_key.target_guid));
+	entry->create_key.sequence = input->sequence;
+	entry->create_key.parent_depth = input->parent_depth;
+	entry->create_key.child_name_len = (u32)input->child_name_len;
+	entry->create_key.layer_len = (u32)input->layer_len;
+
+	entry->create_key.child_name =
+		kmemdup_nul(input->child_name, input->child_name_len,
+			    GFP_KERNEL);
+	if (!entry->create_key.child_name) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+	entry->create_key.layer =
+		kmemdup_nul(input->layer, input->layer_len, GFP_KERNEL);
+	if (!entry->create_key.layer) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+
+	ret = pkm_lcs_transaction_dup_path_components(
+		input->parent_path, input->parent_depth,
+		&entry->create_key.parent_path);
+	if (ret)
+		goto out_free;
+
+	if (check_mul_overflow((size_t)input->parent_depth,
+			       sizeof(*entry->create_key.parent_ancestor_guids),
+			       &guid_bytes)) {
+		ret = -EINVAL;
+		goto out_free;
+	}
+	entry->create_key.parent_ancestor_guids =
+		kmemdup(input->parent_ancestor_guids, guid_bytes, GFP_KERNEL);
+	if (!entry->create_key.parent_ancestor_guids) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+
+	if (memcmp(entry->create_key.parent_ancestor_guids[input->parent_depth - 1],
+		   entry->create_key.parent_guid,
+		   sizeof(entry->create_key.parent_guid))) {
+		ret = -EINVAL;
+		goto out_free;
+	}
+
+	*out = entry;
+	return 0;
+
+out_free:
+	pkm_lcs_transaction_log_entry_destroy(entry);
+	return ret;
+}
+
 static void pkm_lcs_transaction_fd_timeout(struct timer_list *timer)
 {
 	struct pkm_lcs_transaction_fd *txn =
@@ -161,6 +374,7 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 	spin_unlock(&txn->lock);
 
 	wake_up_all(&txn->wait);
+	pkm_lcs_transaction_log_clear(txn);
 	kfree(txn);
 	return 0;
 }
@@ -298,9 +512,13 @@ long pkm_lcs_transaction_fd_publish(u32 timeout_ms)
 		goto out_free;
 
 	txn->state = REG_TXN_ACTIVE_UNBOUND;
+	txn->next_operation_index = 1;
+	txn->mutation_log_capacity =
+		PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT;
 	spin_lock_init(&txn->lock);
 	mutex_init(&txn->bind_lock);
 	init_waitqueue_head(&txn->wait);
+	INIT_LIST_HEAD(&txn->mutation_log);
 	timer_setup(&txn->timeout_timer, pkm_lcs_transaction_fd_timeout, 0);
 
 	fd = anon_inode_getfd("lcs-transaction", &pkm_lcs_transaction_fd_fops,
@@ -347,6 +565,30 @@ static long pkm_lcs_transaction_fd_get(
 	return 0;
 }
 
+static void pkm_lcs_transaction_mutation_handle_release(
+	struct pkm_lcs_transaction_mutation_handle *handle)
+{
+	if (!handle || !handle->active)
+		return;
+
+	mutex_unlock(&handle->txn->bind_lock);
+	fdput(handle->held);
+	memset(handle, 0, sizeof(*handle));
+}
+
+static long pkm_lcs_transaction_log_capacity_check(
+	const struct pkm_lcs_transaction_fd *txn)
+{
+	if (!txn || !txn->mutation_log_capacity)
+		return -EINVAL;
+	if (txn->mutation_log_entries >= txn->mutation_log_capacity)
+		return -ENOMEM;
+	if (!txn->next_operation_index ||
+	    txn->next_operation_index == U64_MAX)
+		return -EOVERFLOW;
+	return 0;
+}
+
 long pkm_lcs_transaction_fd_snapshot(
 	int fd, struct pkm_lcs_transaction_fd_snapshot *out)
 {
@@ -373,6 +615,59 @@ long pkm_lcs_transaction_fd_snapshot(
 
 	fdput(held);
 	return 0;
+}
+
+long pkm_lcs_transaction_fd_log_snapshot(
+	int fd, struct pkm_lcs_transaction_mutation_log_snapshot *out)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+	struct pkm_lcs_transaction_log_entry *last = NULL;
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	mutex_lock(&txn->bind_lock);
+	out->next_operation_index = txn->next_operation_index;
+	out->entry_count = txn->mutation_log_entries;
+	out->capacity = txn->mutation_log_capacity;
+	list_for_each_entry(entry, &txn->mutation_log, link)
+		last = entry;
+
+	if (last) {
+		out->last_operation_index = last->operation_index;
+		out->last_kind = last->kind;
+		switch (last->kind) {
+		case PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY:
+			out->last_sequence = last->create_key.sequence;
+			out->last_parent_depth = last->create_key.parent_depth;
+			strscpy(out->last_child_name,
+				last->create_key.child_name,
+				sizeof(out->last_child_name));
+			strscpy(out->last_layer, last->create_key.layer,
+				sizeof(out->last_layer));
+			break;
+		default:
+			ret = -EIO;
+			goto out_unlock;
+		}
+	}
+
+	ret = 0;
+
+out_unlock:
+	mutex_unlock(&txn->bind_lock);
+	fdput(held);
+	if (ret)
+		memset(out, 0, sizeof(*out));
+	return ret;
 }
 
 long pkm_lcs_transaction_fd_status(int fd, struct reg_txn_status_args *out)
@@ -576,6 +871,124 @@ long pkm_lcs_transaction_fd_prepare_mutation_binding(
 	return ret;
 }
 
+long pkm_lcs_transaction_fd_begin_key_create_mutation(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const struct pkm_lcs_transaction_key_create_log_input *input,
+	struct pkm_lcs_transaction_mutation_handle *handle,
+	struct pkm_lcs_transaction_binding_plan *binding)
+{
+	struct pkm_lcs_transaction_binding_plan plan = { };
+	struct pkm_lcs_transaction_log_entry *entry = NULL;
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	u32 count = 0;
+	long ret;
+
+	if (!handle || !binding)
+		return -EINVAL;
+	memset(handle, 0, sizeof(*handle));
+	memset(binding, 0, sizeof(*binding));
+	if (!source_id || !pkm_lcs_transaction_root_guid_valid(root_guid))
+		return -EINVAL;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	mutex_lock(&txn->bind_lock);
+
+	ret = pkm_lcs_transaction_fd_prepare_mutation_binding_from_state(
+		txn, source_id, root_guid, &plan);
+	if (ret)
+		goto out_unlock;
+
+	ret = pkm_lcs_transaction_log_capacity_check(txn);
+	if (ret)
+		goto out_unlock;
+
+	ret = pkm_lcs_transaction_key_create_log_alloc(input, &entry);
+	if (ret)
+		goto out_unlock;
+
+	if (plan.action == PKM_LCS_TRANSACTION_BIND_NEW) {
+		ret = pkm_lcs_source_bound_transaction_acquire(source_id,
+							       &count);
+		if (ret)
+			goto out_free_entry;
+
+		ret = pkm_lcs_source_begin_transaction_round_trip(
+			source_id, plan.transaction_id, RSI_TXN_READ_WRITE,
+			NULL, NULL);
+		if (ret)
+			goto out_release_counter;
+
+		ret = pkm_lcs_transaction_fd_complete_first_bind_from_state(
+			txn, plan.transaction_id, source_id, root_guid);
+		if (ret) {
+			(void)pkm_lcs_source_dispatch_abort_transaction_request(
+				source_id, plan.transaction_id, NULL);
+			goto out_release_counter;
+		}
+
+		plan.state = REG_TXN_ACTIVE_BOUND;
+		plan.bound_source_id = source_id;
+		memcpy(plan.bound_root_guid, root_guid,
+		       sizeof(plan.bound_root_guid));
+	}
+
+	handle->held = held;
+	handle->txn = txn;
+	handle->entry = entry;
+	handle->active = true;
+	*binding = plan;
+	return 0;
+
+out_release_counter:
+	(void)pkm_lcs_source_bound_transaction_release(source_id, &count);
+out_free_entry:
+	pkm_lcs_transaction_log_entry_destroy(entry);
+out_unlock:
+	mutex_unlock(&txn->bind_lock);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_transaction_fd_commit_mutation(
+	struct pkm_lcs_transaction_mutation_handle *handle)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+	struct pkm_lcs_transaction_fd *txn;
+	long ret;
+
+	if (!handle || !handle->active || !handle->txn || !handle->entry)
+		return -EINVAL;
+
+	txn = handle->txn;
+	entry = handle->entry;
+	ret = pkm_lcs_transaction_log_capacity_check(txn);
+	if (ret)
+		return -EIO;
+
+	entry->operation_index = txn->next_operation_index++;
+	list_add_tail(&entry->link, &txn->mutation_log);
+	txn->mutation_log_entries++;
+	handle->entry = NULL;
+	pkm_lcs_transaction_mutation_handle_release(handle);
+	return 0;
+}
+
+void pkm_lcs_transaction_fd_cancel_mutation(
+	struct pkm_lcs_transaction_mutation_handle *handle)
+{
+	if (!handle || !handle->active)
+		return;
+
+	pkm_lcs_transaction_log_entry_destroy(handle->entry);
+	handle->entry = NULL;
+	pkm_lcs_transaction_mutation_handle_release(handle);
+}
+
 static long pkm_lcs_transaction_fd_complete_first_bind_from_state(
 	struct pkm_lcs_transaction_fd *txn, u64 transaction_id, u32 source_id,
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES])
@@ -739,6 +1152,30 @@ long pkm_lcs_kunit_transaction_fd_set_state(int fd, u32 state,
 
 	fdput(held);
 	return 0;
+}
+
+long pkm_lcs_kunit_transaction_fd_set_log_capacity(int fd, u32 capacity)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	mutex_lock(&txn->bind_lock);
+	if (!capacity || capacity < txn->mutation_log_entries) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+	txn->mutation_log_capacity = capacity;
+	ret = 0;
+
+out_unlock:
+	mutex_unlock(&txn->bind_lock);
+	fdput(held);
+	return ret;
 }
 #endif
 
