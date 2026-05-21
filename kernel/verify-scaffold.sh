@@ -62,6 +62,8 @@ for required in \
 	"$repo_root/kacs/token_runtime.rs" \
 	"$repo_root/lcs/key_fd.c" \
 	"$repo_root/lcs/key_fd.h" \
+	"$repo_root/lcs/transaction_fd.c" \
+	"$repo_root/lcs/transaction_fd.h" \
 	"$repo_root/lcs/rsi.c" \
 	"$repo_root/lcs/rsi.h" \
 	"$repo_root/lcs/source_device.c" \
@@ -250,7 +252,9 @@ for syscall in \
 	"1025 kacs_set_caap" \
 	"1026 kacs_get_mount_policy" \
 	"1027 kacs_set_mount_policy" \
-	"1100 reg_open_key"; do
+	"1100 reg_open_key" \
+	"1101 reg_create_key" \
+	"1102 reg_begin_transaction"; do
 	number=${syscall%% *}
 	name=${syscall#* }
 	if ! rg -q "^[[:space:]]*${number}[[:space:]]+${name}\$" \

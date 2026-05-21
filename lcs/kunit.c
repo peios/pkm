@@ -21,6 +21,7 @@
 #include "key_fd.h"
 #include "rsi.h"
 #include "source_device.h"
+#include "transaction_fd.h"
 
 extern size_t lcs_rust_kunit_probe(void);
 
@@ -5198,6 +5199,110 @@ static void pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds(
 				DACL_SECURITY_INFORMATION),
 			(long)-EINVAL);
 
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_begin_transaction_publishes_active_unbound(
+	struct kunit *test)
+{
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct pkm_lcs_source_table_snapshot source_snapshot = { };
+	long fd;
+
+	pkm_lcs_kunit_reset_source_table();
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_EXPECT_NE(test, txn_snapshot.transaction_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, txn_snapshot.state, REG_TXN_ACTIVE_UNBOUND);
+	KUNIT_EXPECT_EQ(test, txn_snapshot.bound_source_id, 0U);
+	KUNIT_EXPECT_TRUE(test, txn_snapshot.timer_pending);
+
+	pkm_lcs_kunit_source_table_snapshot(&source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.occupied_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.active_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.down_count, 0U);
+	KUNIT_EXPECT_FALSE(test, source_snapshot.sequence_initialized);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_reset_source_table();
+}
+
+static void pkm_lcs_kunit_begin_transaction_ids_are_monotonic(
+	struct kunit *test)
+{
+	struct pkm_lcs_transaction_fd_snapshot first = { };
+	struct pkm_lcs_transaction_fd_snapshot second = { };
+	long first_fd;
+	long second_fd;
+
+	first_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, first_fd >= 0);
+	second_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, second_fd >= 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)first_fd, &first),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)second_fd,
+							&second),
+			0L);
+	KUNIT_EXPECT_LT(test, first.transaction_id, second.transaction_id);
+	KUNIT_EXPECT_EQ(test, first.state, REG_TXN_ACTIVE_UNBOUND);
+	KUNIT_EXPECT_EQ(test, second.state, REG_TXN_ACTIVE_UNBOUND);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)second_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)first_fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_timeout_marks_timed_out(
+	struct kunit *test)
+{
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	long fd;
+
+	fd = pkm_lcs_transaction_fd_publish(1);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	msleep(20);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.state, REG_TXN_TIMED_OUT);
+	KUNIT_EXPECT_FALSE(test, snapshot.timer_pending);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_fd_rejects_bad_inputs(
+	struct kunit *test)
+{
+	struct pkm_lcs_transaction_fd_snapshot snapshot = {
+		.transaction_id = 99,
+	};
+	int fd;
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_publish(0),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot(-1, &snapshot),
+			(long)-EBADF);
+	KUNIT_EXPECT_EQ(test, snapshot.transaction_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_snapshot(-1, NULL),
+			(long)-EINVAL);
+
+	fd = anon_inode_getfd("lcs-not-transaction",
+			      &pkm_lcs_kunit_non_key_fops, NULL, O_CLOEXEC);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_snapshot(fd, &snapshot),
+			(long)-EINVAL);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
@@ -12576,6 +12681,11 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_fixed_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds),
+	KUNIT_CASE(
+		pkm_lcs_kunit_begin_transaction_publishes_active_unbound),
+	KUNIT_CASE(pkm_lcs_kunit_begin_transaction_ids_are_monotonic),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_timeout_marks_timed_out),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_fd_rejects_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_success),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_stops_bad_scalars),
 	KUNIT_CASE(

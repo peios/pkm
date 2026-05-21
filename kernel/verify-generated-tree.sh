@@ -24,6 +24,8 @@ io_uring_rw="$linux_tree/io_uring/rw.c"
 security_core="$linux_tree/security/security.c"
 commoncap="$linux_tree/security/commoncap.c"
 pkm_makefile="$linux_tree/security/pkm/Makefile"
+lcs_transaction_fd="$linux_tree/security/pkm/lcs/transaction_fd.c"
+lcs_transaction_fd_h="$linux_tree/security/pkm/lcs/transaction_fd.h"
 lcs_source_device="$linux_tree/security/pkm/lcs/source_device.c"
 lcs_source_device_h="$linux_tree/security/pkm/lcs/source_device.h"
 lcs_kunit="$linux_tree/security/pkm/lcs/kunit.c"
@@ -36,6 +38,7 @@ sys="$linux_tree/kernel/sys.c"
 sched_syscalls="$linux_tree/kernel/sched/syscalls.c"
 events_core="$linux_tree/kernel/events/core.c"
 sock="$linux_tree/net/core/sock.c"
+syscall_tbl="$linux_tree/arch/x86/entry/syscalls/syscall_64.tbl"
 
 die() {
 	echo "verify-generated-tree: $*" >&2
@@ -90,6 +93,8 @@ for required_source in \
 	"$security_core" \
 	"$commoncap" \
 	"$pkm_makefile" \
+	"$lcs_transaction_fd" \
+	"$lcs_transaction_fd_h" \
 	"$lcs_source_device" \
 	"$lcs_source_device_h" \
 	"$lcs_kunit" \
@@ -101,14 +106,27 @@ for required_source in \
 	"$sys" \
 	"$sched_syscalls" \
 	"$events_core" \
-	"$sock"; do
+	"$sock" \
+	"$syscall_tbl"; do
 	require_file "$required_source"
 done
 
+require_literal 'lcs/transaction_fd.o' "$pkm_makefile" \
+	"generated PKM Makefile does not build the LCS transaction fd"
 require_literal 'lcs/source_device.o' "$pkm_makefile" \
 	"generated PKM Makefile does not build the LCS source device"
 require_literal 'lcs/kunit.o' "$pkm_makefile" \
 	"generated PKM Makefile does not build the LCS KUnit suite"
+
+require_literal $'1100\tcommon\treg_open_key\t\tsys_reg_open_key' \
+	"$syscall_tbl" \
+	"generated syscall table does not register reg_open_key"
+require_literal $'1101\tcommon\treg_create_key\t\tsys_reg_create_key' \
+	"$syscall_tbl" \
+	"generated syscall table does not register reg_create_key"
+require_literal $'1102\tcommon\treg_begin_transaction\t\tsys_reg_begin_transaction' \
+	"$syscall_tbl" \
+	"generated syscall table does not register reg_begin_transaction"
 
 require_literal 'crate::lcs_core::error' "$linux_tree/security/pkm/lcs/lcs_core/abi.rs" \
 	"generated LCS core was not rewritten for nested kernel module paths"

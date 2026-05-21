@@ -207,6 +207,8 @@ require_file "$src_root/kacs/token_runtime.h"
 require_file "$src_root/kacs/token_runtime.rs"
 require_file "$src_root/lcs/key_fd.c"
 require_file "$src_root/lcs/key_fd.h"
+require_file "$src_root/lcs/transaction_fd.c"
+require_file "$src_root/lcs/transaction_fd.h"
 require_file "$src_root/lcs/rsi.c"
 require_file "$src_root/lcs/rsi.h"
 require_file "$src_root/lcs/source_device.c"
@@ -292,6 +294,8 @@ install -m 0644 "$src_root/kacs/token_runtime.h" "$pkm_dir/kacs/token_runtime.h"
 install -m 0644 "$src_root/kacs/token_runtime.rs" "$pkm_dir/kacs/token_runtime.rs"
 install -m 0644 "$src_root/lcs/key_fd.c" "$pkm_dir/lcs/key_fd.c"
 install -m 0644 "$src_root/lcs/key_fd.h" "$pkm_dir/lcs/key_fd.h"
+install -m 0644 "$src_root/lcs/transaction_fd.c" "$pkm_dir/lcs/transaction_fd.c"
+install -m 0644 "$src_root/lcs/transaction_fd.h" "$pkm_dir/lcs/transaction_fd.h"
 install -m 0644 "$src_root/lcs/rsi.c" "$pkm_dir/lcs/rsi.c"
 install -m 0644 "$src_root/lcs/rsi.h" "$pkm_dir/lcs/rsi.h"
 install -m 0644 "$src_root/lcs/source_device.c" "$pkm_dir/lcs/source_device.c"
@@ -2134,3 +2138,7 @@ insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl"
 	1091 kmes_attach
 insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
 	1100 reg_open_key
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1101 reg_create_key
+insert_x86_64_syscall_once "$kernel_root/arch/x86/entry/syscalls/syscall_64.tbl" \
+	1102 reg_begin_transaction
