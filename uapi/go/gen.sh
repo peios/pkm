@@ -67,7 +67,7 @@ trap 'rm -rf "$tmp"' EXIT
 # *implicit* hole — fails the build; that is how undeclared padding in a
 # header gets caught.
 structs="$(grep -hE '^struct[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\{' "$hdrs"/*.h \
-	| sed -E 's/^struct[ \t]+([A-Za-z_][A-Za-z0-9_]*).*/\1/' | sort -u)"
+	| sed -E 's/^struct[ \t]+([A-Za-z_][A-Za-z0-9_]*).*/\1/' | LC_ALL=C sort -u)"
 
 {
 	echo "//go:build ignore"
@@ -166,7 +166,7 @@ awk '
 	val = after; sub(/^[ \t]*/, "", val)
 	print name "\t" (val ~ /^"/ ? "STR" : "INT")
 }
-' "$hdrs"/*.h | sort -u > "$tmp/macros.txt"
+' "$hdrs"/*.h | LC_ALL=C sort -u > "$tmp/macros.txt"
 
 {
 	echo '#include <pkm/pkm.h>'
