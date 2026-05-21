@@ -5609,6 +5609,83 @@ static void pkm_lcs_kunit_create_missing_parent_access_bad_inputs(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_create_missing_volatile_parent_rejects_nonvolatile(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_create_preflight_plan plan = { };
+
+	result.parent.final_volatile = true;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_create_preflight(KEY_READ, 0, &plan),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_volatile_parent_check(&result,
+								     &plan),
+			(long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_create_missing_volatile_parent_allows_volatile(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_create_preflight_plan plan = { };
+
+	result.parent.final_volatile = true;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_create_preflight(KEY_READ, REG_OPTION_VOLATILE,
+						 &plan),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_volatile_parent_check(&result,
+								     &plan),
+			0L);
+}
+
+static void pkm_lcs_kunit_create_missing_volatile_parent_allows_nonvolatile_parent(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_create_preflight_plan plan = { };
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_create_preflight(KEY_READ, 0, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_volatile_parent_check(&result,
+								     &plan),
+			0L);
+
+	memset(&plan, 0, sizeof(plan));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_create_preflight(KEY_READ, REG_OPTION_VOLATILE,
+						 &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_volatile_parent_check(&result,
+								     &plan),
+			0L);
+}
+
+static void pkm_lcs_kunit_create_missing_volatile_parent_bad_inputs(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_create_preflight_plan plan = { };
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_create_preflight(KEY_READ, 0, &plan),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_volatile_parent_check(NULL,
+								     &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_volatile_parent_check(&result,
+								     NULL),
+			(long)-EINVAL);
+}
+
 static const u8 pkm_lcs_kunit_parent_sd_ci_generic_read[] = {
 	/* SECURITY_DESCRIPTOR_RELATIVE */
 	0x01, 0x00, 0x04, 0x80, 0x14, 0x00, 0x00, 0x00,
@@ -11690,6 +11767,12 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_parent_access_malformed_sd_eio),
 	KUNIT_CASE(pkm_lcs_kunit_create_missing_parent_access_bad_inputs),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_volatile_parent_rejects_nonvolatile),
+	KUNIT_CASE(pkm_lcs_kunit_create_missing_volatile_parent_allows_volatile),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_volatile_parent_allows_nonvolatile_parent),
+	KUNIT_CASE(pkm_lcs_kunit_create_missing_volatile_parent_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_initial_sd_inherits_registry_mapping),
 	KUNIT_CASE(pkm_lcs_kunit_create_initial_sd_malformed_parent_eio),

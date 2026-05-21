@@ -4113,6 +4113,20 @@ long pkm_lcs_create_missing_parent_access_check_for_token(
 		token, sd, sd_len, KEY_CREATE_SUB_KEY, plan);
 }
 
+long pkm_lcs_create_missing_volatile_parent_check(
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	const struct pkm_lcs_create_preflight_plan *preflight)
+{
+	if (!resolution || !preflight)
+		return -EINVAL;
+
+	if (resolution->parent.final_volatile &&
+	    !preflight->options.volatile_key)
+		return -EINVAL;
+
+	return 0;
+}
+
 void pkm_lcs_created_key_sd_destroy(struct pkm_lcs_created_key_sd *created)
 {
 	if (!created)

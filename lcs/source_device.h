@@ -495,6 +495,9 @@ long pkm_lcs_create_missing_parent_access_check_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,
 	struct pkm_lcs_key_open_access_plan *plan);
+long pkm_lcs_create_missing_volatile_parent_check(
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	const struct pkm_lcs_create_preflight_plan *preflight);
 void pkm_lcs_created_key_sd_destroy(struct pkm_lcs_created_key_sd *created);
 long pkm_lcs_create_missing_initial_sd_for_token(
 	const void *token,
