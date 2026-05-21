@@ -6,4 +6,3 @@ __pycache__/
 *.pyc
 kacs-tcb-dev.key
 kacs-tcb-dev.key.pub
-crates/libp-test/dist/

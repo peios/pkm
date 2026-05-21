@@ -4,20 +4,12 @@ members = [
     "crates/kacs-core",
     "crates/lcs-core",
     "uapi/rust",
-    "crates/msgpack",
-    "crates/libp-errno",
-    "crates/libp-sys",
-    "crates/libp-wire",
-    "crates/libp-token",
-    "crates/libp-sd",
-    "crates/libp-files",
-    "crates/libp-event",
-    "crates/libp-test",
 ]
 # uapi/rust is the generated `peios-uapi` — the canonical Rust binding,
-# mechanically mirrored from the C UAPI headers by gen.sh. The libp-* crates
-# consume it plus the libp-{errno,sys,wire} foundation crates. (The legacy
-# hand-written peios-uapi blend was retired once every crate had flipped.)
+# mechanically mirrored from the C UAPI headers by gen.sh. It stays here,
+# co-located with the headers. The hand-written userspace library that
+# consumes it (libp-{errno,sys,wire,sd,token,files,event}, msgpack) lives in
+# the sibling `libp-rs` repo, mirroring how libp-go consumes uapi/go.
 
 # Shared package metadata. Members opt-in via `field.workspace = true`.
 # Members with reasons to diverge (kacs-core stays on edition 2021 during
@@ -31,13 +23,3 @@ rust-version = "1.85"
 # the member has a version reason that diverges from the workspace pin.
 [workspace.dependencies]
 thiserror = { version = "2", default-features = false }
-
-peios-uapi = { path = "uapi/rust", default-features = false }
-msgpack    = { path = "crates/msgpack", default-features = false }
-libp-errno = { path = "crates/libp-errno", default-features = false }
-libp-sys   = { path = "crates/libp-sys", default-features = false }
-libp-wire  = { path = "crates/libp-wire", default-features = false }
-libp-token = { path = "crates/libp-token", default-features = false }
-libp-sd    = { path = "crates/libp-sd", default-features = false }
-libp-files = { path = "crates/libp-files", default-features = false }
-libp-event = { path = "crates/libp-event", default-features = false }
