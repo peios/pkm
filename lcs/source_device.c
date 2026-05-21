@@ -1049,6 +1049,7 @@ int pkm_lcs_source_device_release_file(struct file *file)
 {
 	struct pkm_lcs_source_fd *source_fd;
 	struct pkm_lcs_source_slot *slot;
+	u32 source_down_id = 0;
 
 	if (!file)
 		return 0;
@@ -1073,9 +1074,14 @@ int pkm_lcs_source_device_release_file(struct file *file)
 			slot->status = PKM_LCS_SOURCE_SLOT_STATUS_DOWN;
 			slot->active_fd = NULL;
 			slot->bound_transaction_count = 0;
+			source_down_id = source_fd->source_id;
 		}
 	}
 	mutex_unlock(&pkm_lcs_source_table_lock);
+
+	if (source_down_id)
+		(void)pkm_lcs_transaction_fd_mark_source_down(source_down_id,
+							      NULL);
 
 	kfree(source_fd);
 	return 0;

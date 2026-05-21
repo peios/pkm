@@ -5554,6 +5554,95 @@ static void pkm_lcs_kunit_transaction_timeout_commit_in_flight_no_abort(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_down_marks_bound_transaction(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x78
+	};
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct pkm_lcs_source_table_snapshot source_snapshot = { };
+	struct pkm_lcs_transaction_read_plan read_plan = { };
+	struct reg_txn_status_args status = { };
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	fd = pkm_lcs_transaction_fd_publish(30000);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, txn_snapshot.transaction_id, 1,
+				root_guid),
+			0L);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_source_table_snapshot(&source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.active_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.down_count, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, txn_snapshot.state, REG_TXN_SOURCE_DOWN);
+	KUNIT_EXPECT_FALSE(test, txn_snapshot.timer_pending);
+	KUNIT_EXPECT_EQ(test, txn_snapshot.bound_source_id, 1U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_status((int)fd, &status),
+			0L);
+	KUNIT_EXPECT_EQ(test, status.state, REG_TXN_SOURCE_DOWN);
+	KUNIT_EXPECT_EQ(test, status.terminal_errno, EIO);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_commit((int)fd), -EIO);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)fd, 1, root_guid, &read_plan),
+			-EIO);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	flush_delayed_fput();
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_down_ignores_unbound_transaction(
+	struct kunit *test)
+{
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct file file = { };
+	const void *token;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	fd = pkm_lcs_transaction_fd_publish(30000);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, txn_snapshot.state, REG_TXN_ACTIVE_UNBOUND);
+	KUNIT_EXPECT_TRUE(test, txn_snapshot.timer_pending);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_commit((int)fd),
+			-EINVAL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	flush_delayed_fput();
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_transaction_fd_rejects_bad_inputs(
 	struct kunit *test)
 {
@@ -15890,6 +15979,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_transaction_timeout_bound_aborts_source),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_timeout_commit_in_flight_no_abort),
+	KUNIT_CASE(pkm_lcs_kunit_source_down_marks_bound_transaction),
+	KUNIT_CASE(pkm_lcs_kunit_source_down_ignores_unbound_transaction),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_fd_rejects_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_status_reports_active_state),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_status_reports_timeout_errno),

@@ -104,6 +104,7 @@ long pkm_lcs_transaction_fd_bind_for_mutation(
 	int fd, u32 source_id,
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
 	struct pkm_lcs_transaction_binding_plan *out);
+long pkm_lcs_transaction_fd_mark_source_down(u32 source_id, u32 *marked_out);
 long pkm_lcs_transaction_fd_snapshot(
 	int fd, struct pkm_lcs_transaction_fd_snapshot *out);
 long pkm_lcs_transaction_fd_log_snapshot(
