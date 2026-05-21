@@ -160,8 +160,12 @@ static size_t pkm_lcs_default_strnlen_user(void *ctx,
 	return strnlen_user(src, max);
 }
 
+static bool pkm_lcs_default_copy_to_user(void *ctx, void __user *dst,
+					 const void *src, size_t len);
+
 static const struct pkm_lcs_usercopy_ops pkm_lcs_default_usercopy_ops = {
 	.read = pkm_lcs_default_copy_from_user,
+	.write = pkm_lcs_default_copy_to_user,
 	.strnlen = pkm_lcs_default_strnlen_user,
 };
 
@@ -3659,6 +3663,23 @@ long pkm_lcs_create_existing_user_path_for_token(
 	if (ret >= 0 && disposition)
 		*disposition = REG_OPENED_EXISTING;
 	return ret;
+}
+
+long pkm_lcs_reg_create_key_copy_disposition_to_user(
+	const struct pkm_lcs_usercopy_ops *ops, u32 __user *udisposition,
+	u32 disposition)
+{
+	if (!udisposition)
+		return 0;
+	if (!ops)
+		ops = &pkm_lcs_default_usercopy_ops;
+	if (!ops->write)
+		return -EINVAL;
+
+	if (!ops->write(ops->ctx, udisposition, &disposition,
+			sizeof(disposition)))
+		return -EFAULT;
+	return 0;
 }
 
 void pkm_lcs_resolved_key_path_destroy(struct pkm_lcs_resolved_key_path *path)

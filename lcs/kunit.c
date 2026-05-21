@@ -45,9 +45,11 @@ extern int lcs_rust_key_open_audit_payload(
 
 struct pkm_lcs_kunit_usercopy_ctx {
 	const void *fault_src;
+	const void *fault_dst;
 	const void *fault_strlen_src;
 	const void *unterminated_src;
 	unsigned int reads;
+	unsigned int writes;
 	unsigned int strnlens;
 };
 
@@ -62,6 +64,20 @@ static bool pkm_lcs_kunit_usercopy_read(void *raw_ctx, void *dst,
 		return false;
 
 	memcpy(dst, ksrc, len);
+	return true;
+}
+
+static bool pkm_lcs_kunit_usercopy_write(void *raw_ctx, void __user *dst,
+					 const void *src, size_t len)
+{
+	struct pkm_lcs_kunit_usercopy_ctx *ctx = raw_ctx;
+	void *kdst = (void *)(unsigned long)dst;
+
+	ctx->writes++;
+	if (!kdst || kdst == ctx->fault_dst)
+		return false;
+
+	memcpy(kdst, src, len);
 	return true;
 }
 
@@ -91,6 +107,7 @@ static struct pkm_lcs_usercopy_ops pkm_lcs_kunit_usercopy_ops(
 {
 	return (struct pkm_lcs_usercopy_ops) {
 		.read = pkm_lcs_kunit_usercopy_read,
+		.write = pkm_lcs_kunit_usercopy_write,
 		.strnlen = pkm_lcs_kunit_usercopy_strnlen,
 		.ctx = ctx,
 	};
@@ -2634,6 +2651,66 @@ static void pkm_lcs_kunit_create_existing_accepts_null_disposition(
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
 	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_disposition_copyout_success(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	u32 disposition = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_copy_disposition_to_user(
+				&ops, (u32 __user *)&disposition,
+				REG_CREATED_NEW),
+			0L);
+	KUNIT_EXPECT_EQ(test, disposition, REG_CREATED_NEW);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+}
+
+static void pkm_lcs_kunit_create_disposition_copyout_null_is_noop(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_copy_disposition_to_user(
+				&ops, NULL, REG_OPENED_EXISTING),
+			0L);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+}
+
+static void pkm_lcs_kunit_create_disposition_copyout_faults(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	u32 disposition = 0xaa55aa55U;
+
+	ctx.fault_dst = &disposition;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_copy_disposition_to_user(
+				&ops, (u32 __user *)&disposition,
+				REG_CREATED_NEW),
+			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, disposition, 0xaa55aa55U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+}
+
+static void pkm_lcs_kunit_create_disposition_copyout_bad_ops(
+	struct kunit *test)
+{
+	struct pkm_lcs_usercopy_ops ops = { };
+	u32 disposition = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_copy_disposition_to_user(
+				&ops, (u32 __user *)&disposition,
+				REG_CREATED_NEW),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, disposition, 0U);
 }
 
 static void pkm_lcs_kunit_create_existing_rejects_flags_before_usercopy(
@@ -10923,6 +11000,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_syscall_rejects_null_token),
 	KUNIT_CASE(pkm_lcs_kunit_create_existing_absolute_sets_disposition),
 	KUNIT_CASE(pkm_lcs_kunit_create_existing_accepts_null_disposition),
+	KUNIT_CASE(pkm_lcs_kunit_create_disposition_copyout_success),
+	KUNIT_CASE(pkm_lcs_kunit_create_disposition_copyout_null_is_noop),
+	KUNIT_CASE(pkm_lcs_kunit_create_disposition_copyout_faults),
+	KUNIT_CASE(pkm_lcs_kunit_create_disposition_copyout_bad_ops),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_existing_rejects_flags_before_usercopy),
 	KUNIT_CASE(
