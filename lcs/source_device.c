@@ -46,6 +46,7 @@
 #define PKM_LCS_MAX_KEY_DEPTH_HARD 4096U
 #define PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT 32U
 #define PKM_LCS_MAX_HIVES_PER_SOURCE_DEFAULT 64U
+#define PKM_LCS_MAX_BOUND_TRANSACTIONS_PER_SOURCE_DEFAULT 16U
 
 #define PKM_LCS_RSI_READ_ACTION_COPY 0U
 #define PKM_LCS_RSI_READ_ACTION_WAIT 1U
@@ -102,6 +103,7 @@ struct pkm_lcs_source_slot {
 	struct pkm_lcs_source_registration_hive_copy *hives;
 	struct pkm_lcs_source_fd *active_fd;
 	u64 source_next_sequence;
+	u32 bound_transaction_count;
 };
 
 static DEFINE_MUTEX(pkm_lcs_source_table_lock);
@@ -375,6 +377,61 @@ pkm_lcs_source_slot_find_locked(u32 source_id)
 			return &pkm_lcs_source_slots[i];
 	}
 	return NULL;
+}
+
+long pkm_lcs_source_bound_transaction_acquire(u32 source_id, u32 *count_out)
+{
+	struct pkm_lcs_source_slot *slot;
+	long ret = 0;
+
+	if (count_out)
+		*count_out = 0;
+	if (!source_id || !count_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+	if (slot->bound_transaction_count >=
+	    PKM_LCS_MAX_BOUND_TRANSACTIONS_PER_SOURCE_DEFAULT) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+
+	slot->bound_transaction_count++;
+	*count_out = slot->bound_transaction_count;
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
+long pkm_lcs_source_bound_transaction_release(u32 source_id, u32 *count_out)
+{
+	struct pkm_lcs_source_slot *slot;
+	long ret = 0;
+
+	if (count_out)
+		*count_out = 0;
+	if (!source_id || !count_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || !slot->occupied || !slot->bound_transaction_count) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+
+	slot->bound_transaction_count--;
+	*count_out = slot->bound_transaction_count;
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
 }
 
 static struct pkm_lcs_source_slot *pkm_lcs_source_slot_free_locked(void)
@@ -1014,6 +1071,7 @@ int pkm_lcs_source_device_release_file(struct file *file)
 		    slot->active_fd == source_fd) {
 			slot->status = PKM_LCS_SOURCE_SLOT_STATUS_DOWN;
 			slot->active_fd = NULL;
+			slot->bound_transaction_count = 0;
 		}
 	}
 	mutex_unlock(&pkm_lcs_source_table_lock);

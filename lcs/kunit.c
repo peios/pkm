@@ -856,6 +856,112 @@ static void pkm_lcs_kunit_source_registration_ioctl_rejects_repeat_register(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_bound_transaction_counter_limits(
+	struct kunit *test)
+{
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	u32 i;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	for (i = 0; i < 16U; i++) {
+		count = 0;
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_source_bound_transaction_acquire(
+					1, &count),
+				0L);
+		KUNIT_EXPECT_EQ(test, count, i + 1U);
+	}
+
+	count = 99U;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			(long)-EBUSY);
+	KUNIT_EXPECT_EQ(test, count, 0U);
+
+	for (i = 16U; i > 0U; i--) {
+		count = 99U;
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_source_bound_transaction_release(
+					1, &count),
+				0L);
+		KUNIT_EXPECT_EQ(test, count, i - 1U);
+	}
+
+	count = 99U;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_release(1, &count),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, count, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_bound_transaction_counter_source_down(
+	struct kunit *test)
+{
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+
+	count = 99U;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, count, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_release(1, &count),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, count, 0U);
+
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_bound_transaction_counter_bad_inputs(
+	struct kunit *test)
+{
+	u32 count = 99U;
+
+	pkm_lcs_kunit_reset_source_table();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(0, &count),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, count, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_release(0, &count),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, count, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_release(1, NULL),
+			(long)-EINVAL);
+
+	count = 99U;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, count, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_release(1, &count),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, count, 0U);
+}
+
 static void pkm_lcs_kunit_hive_route_reflects_active_and_down_slots(
 	struct kunit *test)
 {
@@ -13547,6 +13653,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_ioctl_rejects_stale_resume),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_ioctl_rejects_repeat_register),
+	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_limits),
+	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_source_down),
+	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_hive_route_reflects_active_and_down_slots),
 	KUNIT_CASE(pkm_lcs_kunit_hive_route_private_scope_shadows_global),
 	KUNIT_CASE(

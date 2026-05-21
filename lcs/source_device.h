@@ -707,6 +707,8 @@ long pkm_lcs_source_dispatch_create_key_waitable_request(
 	bool volatile_key, bool symlink,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_bound_transaction_acquire(u32 source_id, u32 *count_out);
+long pkm_lcs_source_bound_transaction_release(u32 source_id, u32 *count_out);
 long pkm_lcs_source_dispatch_begin_transaction_request(
 	u32 source_id, u64 transaction_id, u32 mode,
 	struct pkm_lcs_source_enqueue_result *result);
