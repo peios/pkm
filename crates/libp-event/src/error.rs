@@ -1,6 +1,7 @@
 // Errors from libp-event.
 
-use peios_uapi::{Errno, ParseError};
+use libp_errno::Errno;
+use libp_wire::ParseError;
 use thiserror::Error;
 
 /// Errors from libp-event's safe-API surface.

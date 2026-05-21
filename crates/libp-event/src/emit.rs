@@ -1,9 +1,9 @@
 // Userspace event emission: `kmes_emit` and `kmes_emit_batch`.
 
 use alloc::vec::Vec;
-use peios_uapi::Errno;
-use peios_uapi::errno::{self, eintr_retry};
-use peios_uapi::kmes::{KMES_MAX_BATCH, KmesEmitEntry};
+use crate::abi::{KMES_MAX_BATCH, KmesEmitEntry};
+use libp_errno::{self as errno, Errno};
+use libp_sys::eintr_retry;
 
 use crate::Result;
 use crate::error::Error;

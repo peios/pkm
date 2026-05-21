@@ -16,11 +16,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use peios_uapi::Errno;
-use peios_uapi::errno;
-use peios_uapi::kmes::{self, HDR_BASE};
-use peios_uapi::sys;
+use libp_errno::{self as errno, Errno};
+use libp_sys as sys;
 
+use crate::abi::{self as kmes, HDR_BASE};
 use crate::Result;
 use crate::error::Error;
 use crate::event::{Event, OwnedEvent};
@@ -28,7 +27,7 @@ use crate::raw;
 
 /// Ring buffer format version this crate understands (PSD-003 §8: v0.20
 /// uses version 1).
-const RING_VERSION: u32 = 1;
+const RING_VERSION: u32 = kmes::RING_VERSION;
 
 /// A consumer attached to one per-CPU KMES ring buffer.
 ///

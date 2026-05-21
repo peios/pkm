@@ -1,16 +1,16 @@
 // Event types: the borrowed `Event` view and the owned `OwnedEvent` copy.
 
+use crate::abi as kmes;
 use alloc::vec::Vec;
-use peios_uapi::kmes;
 
 /// A parsed KMES event borrowed directly from a ring buffer's mapped
 /// memory.
 ///
-/// This is [`peios_uapi::kmes::EventHeader`] — a zero-copy view whose
+/// This is [`libp_wire::EventHeader`] — a zero-copy view whose
 /// `event_type` and `payload` slices point into the ring. It is valid
 /// only until the read cursor advances; copy it with [`OwnedEvent::from`]
 /// to keep it longer or move it across a thread boundary.
-pub type Event<'a> = kmes::EventHeader<'a>;
+pub type Event<'a> = libp_wire::EventHeader<'a>;
 
 /// The subsystem an event originated from (`origin_class`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

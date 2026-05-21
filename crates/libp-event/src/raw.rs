@@ -5,10 +5,13 @@
 // builds on these. `KmesEmitEntry` is re-exported so callers building an
 // `emit_batch` array do not need a separate `peios-uapi` import.
 
-use peios_uapi::sys::{syscall3, syscall4};
-use peios_uapi::syscall::{SYS_KMES_ATTACH, SYS_KMES_EMIT, SYS_KMES_EMIT_BATCH};
+use libp_sys::{syscall3, syscall4};
 
-pub use peios_uapi::kmes::KmesEmitEntry;
+pub use crate::abi::KmesEmitEntry;
+
+const SYS_KMES_EMIT: i64 = peios_uapi::SYS_KMES_EMIT as i64;
+const SYS_KMES_ATTACH: i64 = peios_uapi::SYS_KMES_ATTACH as i64;
+const SYS_KMES_EMIT_BATCH: i64 = peios_uapi::SYS_KMES_EMIT_BATCH as i64;
 
 /// `kmes_emit(event_type, event_type_len, payload, payload_len)`.
 ///

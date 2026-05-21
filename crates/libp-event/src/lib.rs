@@ -32,6 +32,7 @@
 
 extern crate alloc;
 
+mod abi;
 mod emit;
 mod error;
 mod event;
@@ -46,9 +47,9 @@ pub use ring::Ring;
 /// Crate-local `Result<T, Error>` alias.
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Re-exported KMES constants for callers (origin classes, batch limit).
+/// Re-exported KMES ring + emit ABI surface for callers (origin classes,
+/// batch limit, ring-layout offsets). Values are sourced from the generated
+/// `peios-uapi` crate; see [`crate::abi`].
 pub mod consts {
-    pub use peios_uapi::kmes::{
-        KMES_MAX_BATCH, KMES_ORIGIN_KACS, KMES_ORIGIN_KMES, KMES_ORIGIN_LCS, KMES_ORIGIN_USERSPACE,
-    };
+    pub use crate::abi::*;
 }
