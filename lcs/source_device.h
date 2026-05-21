@@ -530,6 +530,28 @@ long pkm_lcs_create_missing_relative_parent(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
 	struct pkm_lcs_create_missing_parent_resolution *result);
+long pkm_lcs_create_missing_copied_absolute_parent_for_token(
+	const void *token, const struct pkm_lcs_syscall_path_copy *copy,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_create_missing_parent_resolution *result);
+long pkm_lcs_create_missing_copied_relative_parent(
+	int parent_fd, const struct pkm_lcs_syscall_path_copy *copy,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_create_missing_parent_resolution *result);
+long pkm_lcs_create_missing_copied_parent_for_token(
+	const void *token, int parent_fd,
+	const struct pkm_lcs_syscall_path_copy *copy,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_create_missing_parent_resolution *result);
 long pkm_lcs_create_missing_parent_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	int parent_fd, const char __user *upath,
@@ -609,6 +631,12 @@ long pkm_lcs_create_missing_user_path_finish_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	int parent_fd, const char __user *upath, u32 desired_access,
 	const char __user *ulayer, u32 flags,
+	const struct pkm_lcs_create_missing_runtime_inputs *inputs,
+	u32 __user *udisposition);
+long pkm_lcs_create_missing_copied_path_finish_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const struct pkm_lcs_syscall_path_copy *copy,
+	u32 desired_access, const char __user *ulayer, u32 flags,
 	const struct pkm_lcs_create_missing_runtime_inputs *inputs,
 	u32 __user *udisposition);
 long pkm_lcs_allocate_sequence(u64 *sequence);

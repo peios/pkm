@@ -4269,6 +4269,173 @@ out_copy:
 	return ret;
 }
 
+long pkm_lcs_create_missing_copied_absolute_parent_for_token(
+	const void *token, const struct pkm_lcs_syscall_path_copy *copy,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_create_missing_parent_resolution *result)
+{
+	struct pkm_lcs_materialized_path components = { };
+	struct pkm_lcs_hive_route_result route = { };
+	u32 parent_component_count;
+	long ret;
+
+	if (!token || !result)
+		return -EINVAL;
+	if (!copy || !copy->path || !copy->path_len)
+		return -EINVAL;
+	if ((layer_count && !layers) ||
+	    (private_layer_count && !private_layers))
+		return -EINVAL;
+	memset(result, 0, sizeof(*result));
+
+	ret = pkm_lcs_route_absolute_path_for_token(
+		token, copy->path, copy->path_len, true, scope_guids,
+		scope_count, &route);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_materialize_absolute_path_components_for_token(
+		token, copy->path, copy->path_len, true, &components);
+	if (ret)
+		return ret;
+	if (components.component_count < 2U) {
+		ret = -EINVAL;
+		goto out_components;
+	}
+
+	ret = pkm_lcs_create_missing_parent_copy_child(
+		&components.components[components.component_count - 1U],
+		result);
+	if (ret)
+		goto out_components;
+
+	parent_component_count = components.component_count - 1U;
+	ret = pkm_lcs_walk_absolute_components_for_open(
+		route.source_id, 0, route.root_guid, components.components,
+		parent_component_count, false, scope_guids, scope_count,
+		layers, layer_count, private_layers, private_layer_count,
+		&result->parent);
+	if (ret)
+		goto out_result;
+
+	ret = pkm_lcs_create_missing_validate_child_depth(result);
+	if (ret)
+		goto out_result;
+
+	pkm_lcs_materialized_path_destroy(&components);
+	return 0;
+
+out_result:
+	pkm_lcs_create_missing_parent_resolution_destroy(result);
+out_components:
+	pkm_lcs_materialized_path_destroy(&components);
+	return ret;
+}
+
+long pkm_lcs_create_missing_copied_relative_parent(
+	int parent_fd, const struct pkm_lcs_syscall_path_copy *copy,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_create_missing_parent_resolution *result)
+{
+	struct pkm_lcs_key_fd_parent_snapshot parent = { };
+	struct pkm_lcs_materialized_path components = { };
+	struct pkm_lcs_path_validation_result path = { };
+	long ret;
+
+	if (!result)
+		return -EINVAL;
+	if (!copy || !copy->path || !copy->path_len)
+		return -EINVAL;
+	if ((layer_count && !layers) ||
+	    (private_layer_count && !private_layers))
+		return -EINVAL;
+	memset(result, 0, sizeof(*result));
+
+	ret = pkm_lcs_validate_syscall_relative_path(copy->path,
+						     copy->path_len, &path);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_parent_snapshot(parent_fd, &parent);
+	if (ret)
+		return ret;
+
+	ret = lcs_rust_validate_relative_open_depth(
+		parent.path_component_count, path.component_count);
+	if (ret)
+		goto out_parent;
+
+	ret = pkm_lcs_materialize_relative_path_components(
+		copy->path, copy->path_len, &components);
+	if (ret)
+		goto out_parent;
+
+	ret = pkm_lcs_create_missing_parent_copy_child(
+		&components.components[components.component_count - 1U],
+		result);
+	if (ret)
+		goto out_components;
+
+	if (components.component_count == 1U) {
+		ret = pkm_lcs_resolved_parent_from_snapshot_prepare(
+			&parent, &result->parent);
+		if (ret)
+			goto out_result;
+		ret = pkm_lcs_create_missing_read_parent_key(
+			parent.source_id, 0, parent.key_guid, &result->parent);
+	} else {
+		ret = pkm_lcs_walk_relative_components_for_open(
+			&parent, 0, components.components,
+			components.component_count - 1U, false, scope_guids,
+			scope_count, layers, layer_count, private_layers,
+			private_layer_count, &result->parent);
+	}
+	if (ret)
+		goto out_result;
+
+	ret = pkm_lcs_create_missing_validate_child_depth(result);
+	if (ret)
+		goto out_result;
+
+	pkm_lcs_materialized_path_destroy(&components);
+	pkm_lcs_key_fd_parent_snapshot_destroy(&parent);
+	return 0;
+
+out_result:
+	pkm_lcs_create_missing_parent_resolution_destroy(result);
+out_components:
+	pkm_lcs_materialized_path_destroy(&components);
+out_parent:
+	pkm_lcs_key_fd_parent_snapshot_destroy(&parent);
+	return ret;
+}
+
+long pkm_lcs_create_missing_copied_parent_for_token(
+	const void *token, int parent_fd,
+	const struct pkm_lcs_syscall_path_copy *copy,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_create_missing_parent_resolution *result)
+{
+	if (parent_fd == -1)
+		return pkm_lcs_create_missing_copied_absolute_parent_for_token(
+			token, copy, scope_guids, scope_count, layers,
+			layer_count, private_layers, private_layer_count,
+			result);
+
+	return pkm_lcs_create_missing_copied_relative_parent(
+		parent_fd, copy, scope_guids, scope_count, layers,
+		layer_count, private_layers, private_layer_count, result);
+}
+
 long pkm_lcs_create_missing_parent_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	int parent_fd, const char __user *upath,
@@ -4994,6 +5161,111 @@ long pkm_lcs_create_missing_user_path_finish_for_token(
 
 	ret = pkm_lcs_create_missing_parent_for_token(
 		token, ops, parent_fd, upath, inputs->scope_guids,
+		inputs->scope_count, inputs->layers, inputs->layer_count,
+		inputs->private_layers, inputs->private_layer_count,
+		&resolution);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_create_missing_parent_access_check_for_token(
+		token, &resolution, &parent_plan);
+	if (ret)
+		goto out_resolution;
+	ret = pkm_lcs_create_missing_volatile_parent_check(&resolution,
+							   &preflight);
+	if (ret)
+		goto out_resolution;
+	ret = pkm_lcs_create_missing_symlink_authority_for_token(
+		token, &resolution, flags, &link_plan);
+	if (ret)
+		goto out_resolution;
+	ret = pkm_lcs_create_layer_target_prepare(
+		ops, ulayer, inputs->layers, inputs->layer_count, &target,
+		&target_plan);
+	if (ret)
+		goto out_resolution;
+	ret = pkm_lcs_create_layer_write_access_check_for_token(
+		token, &target, inputs->base_metadata_present,
+		inputs->base_metadata_sd, inputs->base_metadata_sd_len,
+		inputs->metadata, inputs->metadata_count, &layer_plan);
+	if (ret)
+		goto out_target;
+	ret = pkm_lcs_assign_new_key_guid(
+		inputs->active_key_guids, inputs->active_key_guid_count,
+		inputs->retired_key_guids, inputs->retired_key_guid_count,
+		inputs->generator, &guid_plan);
+	if (ret)
+		goto out_target;
+	ret = pkm_lcs_create_missing_initial_sd_for_token(
+		token, &resolution, &created_sd);
+	if (ret)
+		goto out_target;
+
+	ret = pkm_lcs_create_missing_prepared_key_for_token(
+		token, &resolution, &target, guid_plan.guid, &created_sd,
+		desired_access, preflight.options.volatile_key,
+		preflight.options.symlink, &prepared);
+	if (ret)
+		goto out_created_sd;
+
+	if (prepared.retry_open_existing) {
+		ret = pkm_lcs_create_missing_retry_open_existing_for_token(
+			token, ops, &resolution, desired_access,
+			inputs->scope_guids, inputs->scope_count,
+			inputs->layers, inputs->layer_count,
+			inputs->private_layers, inputs->private_layer_count,
+			udisposition);
+	} else {
+		ret = pkm_lcs_create_missing_created_result_finish_to_user(
+			ops, udisposition, &prepared);
+	}
+
+out_created_sd:
+	if (ret && prepared.fd >= 0) {
+		close_fd((unsigned int)prepared.fd);
+		prepared.fd = -1;
+	}
+	pkm_lcs_created_key_sd_destroy(&created_sd);
+out_target:
+	pkm_lcs_create_layer_target_destroy(&target);
+out_resolution:
+	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
+	return ret;
+}
+
+long pkm_lcs_create_missing_copied_path_finish_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const struct pkm_lcs_syscall_path_copy *copy,
+	u32 desired_access, const char __user *ulayer, u32 flags,
+	const struct pkm_lcs_create_missing_runtime_inputs *inputs,
+	u32 __user *udisposition)
+{
+	static const struct pkm_lcs_create_missing_runtime_inputs empty_inputs;
+	struct pkm_lcs_create_preflight_plan preflight = { };
+	struct pkm_lcs_create_layer_target target = { };
+	struct pkm_lcs_layer_target_admission_plan target_plan = { };
+	struct pkm_lcs_create_missing_parent_resolution resolution = { };
+	struct pkm_lcs_key_open_access_plan parent_plan = { };
+	struct pkm_lcs_key_open_access_plan link_plan = { };
+	struct pkm_lcs_key_open_access_plan layer_plan = { };
+	struct pkm_lcs_key_guid_assignment_plan guid_plan = { };
+	struct pkm_lcs_created_key_sd created_sd = { };
+	struct pkm_lcs_create_missing_prepared_result prepared = { };
+	long ret;
+
+	prepared.fd = -1;
+	if (!inputs)
+		inputs = &empty_inputs;
+
+	ret = pkm_lcs_create_preflight(desired_access, flags, &preflight);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_create_missing_runtime_inputs_validate(inputs);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_create_missing_copied_parent_for_token(
+		token, parent_fd, copy, inputs->scope_guids,
 		inputs->scope_count, inputs->layers, inputs->layer_count,
 		inputs->private_layers, inputs->private_layer_count,
 		&resolution);
