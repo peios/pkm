@@ -148,6 +148,20 @@ struct pkm_lcs_path_validation_result {
 	u8 _pad[3];
 };
 
+struct pkm_lcs_path_component_materialization {
+	u32 component_count;
+	u32 string_bytes;
+};
+
+struct pkm_lcs_path_component_view;
+
+struct pkm_lcs_materialized_path {
+	struct pkm_lcs_path_component_view *components;
+	char *strings;
+	u32 component_count;
+	u32 string_bytes;
+};
+
 struct pkm_lcs_relative_open_preflight {
 	struct pkm_lcs_open_preflight_plan access;
 	struct pkm_lcs_path_validation_result path;
@@ -281,6 +295,11 @@ long pkm_lcs_open_user_relative_path_preflight(
 	const struct pkm_lcs_usercopy_ops *ops, int parent_fd,
 	const char __user *upath, u32 desired_access, u32 flags,
 	struct pkm_lcs_relative_open_preflight *result);
+long pkm_lcs_materialize_absolute_path_components_for_token(
+	const void *token, const char *path, u32 path_len,
+	bool rewrite_current_user, struct pkm_lcs_materialized_path *result);
+void pkm_lcs_materialized_path_destroy(
+	struct pkm_lcs_materialized_path *path);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,
 	struct pkm_lcs_source_enqueue_result *result);

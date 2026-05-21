@@ -179,6 +179,12 @@ extern int lcs_rust_route_absolute_path_from_source_slots_with_token_sid(
 	const u8 *current_user_sid, size_t current_user_sid_len,
 	const u8 (*scope_guids)[16], size_t scope_count,
 	struct pkm_lcs_hive_route_result *result);
+extern int lcs_rust_materialize_absolute_path_components_with_token_sid(
+	const u8 *path, u32 path_len, bool rewrite_current_user,
+	const u8 *current_user_sid, size_t current_user_sid_len,
+	struct pkm_lcs_path_component_view *components,
+	size_t component_capacity, u8 *string_buf, size_t string_capacity,
+	struct pkm_lcs_path_component_materialization *result);
 extern int lcs_rust_open_preflight(
 	u32 desired_access, u32 flags,
 	struct pkm_lcs_open_preflight_plan *plan);
@@ -2160,6 +2166,83 @@ long pkm_lcs_open_user_relative_path_preflight(
 
 out_destroy_copy:
 	pkm_lcs_syscall_path_copy_destroy(&copy);
+	return ret;
+}
+
+void pkm_lcs_materialized_path_destroy(struct pkm_lcs_materialized_path *path)
+{
+	if (!path)
+		return;
+
+	kfree(path->components);
+	kfree(path->strings);
+	memset(path, 0, sizeof(*path));
+}
+
+long pkm_lcs_materialize_absolute_path_components_for_token(
+	const void *token, const char *path, u32 path_len,
+	bool rewrite_current_user, struct pkm_lcs_materialized_path *result)
+{
+	const u8 *current_user_sid = NULL;
+	size_t current_user_sid_len = 0;
+	struct pkm_lcs_path_component_materialization shape = { };
+	struct pkm_lcs_path_component_materialization filled = { };
+	struct pkm_lcs_path_component_view *components;
+	char *strings;
+	long ret;
+
+	if (!path || !result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	if (rewrite_current_user) {
+		ret = kacs_rust_token_user_sid(token, &current_user_sid,
+					       &current_user_sid_len);
+		if (ret)
+			return ret;
+	}
+
+	ret = lcs_rust_materialize_absolute_path_components_with_token_sid(
+		(const u8 *)path, path_len, rewrite_current_user,
+		current_user_sid, current_user_sid_len, NULL, 0, NULL, 0,
+		&shape);
+	if (ret)
+		return ret;
+	if (!shape.component_count || !shape.string_bytes)
+		return -EINVAL;
+
+	components = kcalloc(shape.component_count, sizeof(*components),
+			     GFP_KERNEL);
+	if (!components)
+		return -ENOMEM;
+	strings = kmalloc(shape.string_bytes, GFP_KERNEL);
+	if (!strings) {
+		kfree(components);
+		return -ENOMEM;
+	}
+
+	ret = lcs_rust_materialize_absolute_path_components_with_token_sid(
+		(const u8 *)path, path_len, rewrite_current_user,
+		current_user_sid, current_user_sid_len, components,
+		shape.component_count, (u8 *)strings, shape.string_bytes,
+		&filled);
+	if (ret)
+		goto out_free;
+	if (filled.component_count != shape.component_count ||
+	    filled.string_bytes != shape.string_bytes) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	result->components = components;
+	result->strings = strings;
+	result->component_count = filled.component_count;
+	result->string_bytes = filled.string_bytes;
+	return 0;
+
+out_free:
+	kfree(components);
+	kfree(strings);
 	return ret;
 }
 

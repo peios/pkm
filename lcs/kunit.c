@@ -1290,6 +1290,125 @@ static void pkm_lcs_kunit_open_preflight_route_copy_fault_keeps_route_empty(
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 }
 
+static void pkm_lcs_kunit_expect_materialized_component(
+	struct kunit *test, const struct pkm_lcs_materialized_path *path,
+	u32 index, const char *expected)
+{
+	size_t expected_len = strlen(expected);
+
+	KUNIT_ASSERT_NOT_NULL(test, path);
+	KUNIT_ASSERT_TRUE(test, index < path->component_count);
+	KUNIT_ASSERT_NOT_NULL(test, path->components[index].name);
+	KUNIT_ASSERT_EQ(test, path->components[index].name_len,
+			(u32)expected_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(path->components[index].name, expected,
+			       expected_len),
+			0);
+}
+
+static void pkm_lcs_kunit_open_path_components_absolute_success(
+	struct kunit *test)
+{
+	const char path_src[] = "Machine\\Software\\App";
+	struct pkm_lcs_materialized_path path = { };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_materialize_absolute_path_components_for_token(
+				NULL, path_src, sizeof(path_src), false, &path),
+			0L);
+	KUNIT_EXPECT_EQ(test, path.component_count, 3U);
+	KUNIT_ASSERT_NOT_NULL(test, path.components);
+	KUNIT_ASSERT_NOT_NULL(test, path.strings);
+	pkm_lcs_kunit_expect_materialized_component(test, &path, 0,
+						    "Machine");
+	pkm_lcs_kunit_expect_materialized_component(test, &path, 1,
+						    "Software");
+	pkm_lcs_kunit_expect_materialized_component(test, &path, 2, "App");
+	KUNIT_EXPECT_EQ(test, path.string_bytes,
+			(u32)(strlen("Machine") + strlen("Software") +
+			      strlen("App")));
+
+	pkm_lcs_materialized_path_destroy(&path);
+	KUNIT_EXPECT_PTR_EQ(test, path.components, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, path.strings, NULL);
+}
+
+static void pkm_lcs_kunit_open_path_components_normalizes_forward_slashes(
+	struct kunit *test)
+{
+	const char path_src[] = "Machine/Software/App";
+	struct pkm_lcs_materialized_path path = { };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_materialize_absolute_path_components_for_token(
+				NULL, path_src, sizeof(path_src), false, &path),
+			0L);
+	KUNIT_EXPECT_EQ(test, path.component_count, 3U);
+	pkm_lcs_kunit_expect_materialized_component(test, &path, 0,
+						    "Machine");
+	pkm_lcs_kunit_expect_materialized_component(test, &path, 1,
+						    "Software");
+	pkm_lcs_kunit_expect_materialized_component(test, &path, 2, "App");
+
+	pkm_lcs_materialized_path_destroy(&path);
+}
+
+static void pkm_lcs_kunit_open_path_components_rewrites_current_user(
+	struct kunit *test)
+{
+	const char path_src[] = "CurrentUser\\App";
+	struct pkm_lcs_materialized_path path = { };
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_materialize_absolute_path_components_for_token(
+				token, path_src, sizeof(path_src), true, &path),
+			0L);
+	KUNIT_EXPECT_EQ(test, path.component_count, 3U);
+	pkm_lcs_kunit_expect_materialized_component(test, &path, 0, "Users");
+	KUNIT_ASSERT_NOT_NULL(test, path.components[1].name);
+	KUNIT_ASSERT_GT(test, path.components[1].name_len, 2U);
+	KUNIT_EXPECT_EQ(test, memcmp(path.components[1].name, "S-", 2), 0);
+	pkm_lcs_kunit_expect_materialized_component(test, &path, 2, "App");
+
+	pkm_lcs_materialized_path_destroy(&path);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_open_path_components_rejects_fail_closed(
+	struct kunit *test)
+{
+	const char malformed_path[] = "Machine\\";
+	const char current_user_path[] = "CurrentUser\\App";
+	struct pkm_lcs_materialized_path path = {
+		.component_count = 99,
+		.string_bytes = 99,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_materialize_absolute_path_components_for_token(
+				NULL, malformed_path, sizeof(malformed_path),
+				false, &path),
+			(long)-EINVAL);
+	KUNIT_EXPECT_PTR_EQ(test, path.components, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, path.strings, NULL);
+	KUNIT_EXPECT_EQ(test, path.component_count, 0U);
+	KUNIT_EXPECT_EQ(test, path.string_bytes, 0U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_materialize_absolute_path_components_for_token(
+				NULL, current_user_path,
+				sizeof(current_user_path), true, &path),
+			(long)-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, path.components, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, path.strings, NULL);
+}
+
 static void pkm_lcs_kunit_key_open_access_bridge_allows_registry_rights(
 	struct kunit *test)
 {
@@ -4567,6 +4686,11 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_route_stops_before_usercopy),
 	KUNIT_CASE(
 		pkm_lcs_kunit_open_preflight_route_copy_fault_keeps_route_empty),
+	KUNIT_CASE(pkm_lcs_kunit_open_path_components_absolute_success),
+	KUNIT_CASE(
+		pkm_lcs_kunit_open_path_components_normalizes_forward_slashes),
+	KUNIT_CASE(pkm_lcs_kunit_open_path_components_rewrites_current_user),
+	KUNIT_CASE(pkm_lcs_kunit_open_path_components_rejects_fail_closed),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_open_access_bridge_allows_registry_rights),
 	KUNIT_CASE(

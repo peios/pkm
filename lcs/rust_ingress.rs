@@ -6,7 +6,7 @@ use core::{slice, str};
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
     classify_hive_route, current_user_sid_component_from_binary_sid,
-    for_each_rsi_lookup_source_path_entry,
+    for_each_routable_path_component, for_each_rsi_lookup_source_path_entry,
     parse_rsi_lookup_success_response_payload, plan_rsi_source_read,
     plan_key_open_audit_record, plan_registry_ioctl_fixed_fd_access_gate,
     plan_registry_key_open_access, plan_registry_open_pre_resolution_access,
@@ -82,6 +82,18 @@ pub struct PkmLcsOpenPreflightPlanCopy {
     pub maximum_allowed: u8,
     pub path_resolution_allowed: u8,
     pub _pad: [u8; 2],
+}
+
+#[repr(C)]
+pub struct PkmLcsPathComponentViewCopy {
+    pub name: *const u8,
+    pub name_len: u32,
+}
+
+#[repr(C)]
+pub struct PkmLcsPathComponentMaterializationCopy {
+    pub component_count: u32,
+    pub string_bytes: u32,
 }
 
 #[repr(C)]
@@ -1662,4 +1674,121 @@ pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots_with_tok
             result_out,
         )
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_absolute_path_components_with_token_sid(
+    path: *const u8,
+    path_len: u32,
+    rewrite_current_user: bool,
+    current_user_sid: *const u8,
+    current_user_sid_len: usize,
+    components: *mut PkmLcsPathComponentViewCopy,
+    component_capacity: usize,
+    string_buf: *mut u8,
+    string_capacity: usize,
+    result_out: *mut PkmLcsPathComponentMaterializationCopy,
+) -> c_int {
+    let Some(result_out) = (unsafe { result_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *result_out = PkmLcsPathComponentMaterializationCopy {
+        component_count: 0,
+        string_bytes: 0,
+    };
+    if path.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let path_bytes = unsafe { slice::from_raw_parts(path, path_len as usize) };
+    let path =
+        match validate_syscall_path_c_string(path_bytes, PathKind::Absolute, &LcsLimits::DEFAULT) {
+            Ok(summary) => summary.raw,
+            Err(err) => return absolute_route_error_return(err),
+        };
+
+    let sid_component_storage = if rewrite_current_user {
+        if current_user_sid.is_null() || current_user_sid_len == 0 {
+            return LinuxErrno::Eacces.negated_return() as c_int;
+        }
+        let sid_bytes = unsafe { slice::from_raw_parts(current_user_sid, current_user_sid_len) };
+        match current_user_sid_component_from_binary_sid(&LcsLimits::DEFAULT, sid_bytes) {
+            Ok(component) => Some(component),
+            Err(err) => return absolute_route_error_return(err),
+        }
+    } else {
+        None
+    };
+    let rewrite = match sid_component_storage.as_ref() {
+        Some(component) => CurrentUserRewrite::InitialCallerPath {
+            user_sid_component: component.as_str(),
+        },
+        None => CurrentUserRewrite::Literal,
+    };
+
+    let mut component_count = 0usize;
+    let mut string_bytes = 0usize;
+    if let Err(err) =
+        for_each_routable_path_component(&LcsLimits::DEFAULT, path, rewrite, |component| {
+            component_count =
+                component_count
+                    .checked_add(1)
+                    .ok_or(LcsError::KeyDepthExceeded {
+                        depth: usize::MAX,
+                        max: LcsLimits::DEFAULT.max_key_depth,
+                    })?;
+            string_bytes =
+                string_bytes
+                    .checked_add(component.len())
+                    .ok_or(LcsError::PathTooLong {
+                        len: usize::MAX,
+                        max: LcsLimits::DEFAULT.max_total_path_length,
+                    })?;
+            Ok(())
+        })
+    {
+        return absolute_route_error_return(err);
+    }
+
+    let Ok(component_count_u32) = u32::try_from(component_count) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    let Ok(string_bytes_u32) = u32::try_from(string_bytes) else {
+        return LinuxErrno::Enametoolong.negated_return() as c_int;
+    };
+    *result_out = PkmLcsPathComponentMaterializationCopy {
+        component_count: component_count_u32,
+        string_bytes: string_bytes_u32,
+    };
+
+    if components.is_null() && component_capacity == 0 && string_buf.is_null() && string_capacity == 0
+    {
+        return 0;
+    }
+    if components.is_null() || string_buf.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if component_capacity < component_count || string_capacity < string_bytes {
+        return LinuxErrno::Erange.negated_return() as c_int;
+    }
+
+    let component_out = unsafe { slice::from_raw_parts_mut(components, component_capacity) };
+    let string_out = unsafe { slice::from_raw_parts_mut(string_buf, string_capacity) };
+    let mut index = 0usize;
+    let mut offset = 0usize;
+    if let Err(err) =
+        for_each_routable_path_component(&LcsLimits::DEFAULT, path, rewrite, |component| {
+            let bytes = component.as_bytes();
+            let end = offset + bytes.len();
+            string_out[offset..end].copy_from_slice(bytes);
+            component_out[index].name = unsafe { string_buf.add(offset) as *const u8 };
+            component_out[index].name_len = bytes.len() as u32;
+            index += 1;
+            offset = end;
+            Ok(())
+        })
+    {
+        return absolute_route_error_return(err);
+    }
+    0
 }
