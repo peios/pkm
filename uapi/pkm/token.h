@@ -72,7 +72,10 @@
 #define KACS_LOGON_TYPE_NEW_CREDENTIALS		9
 
 /* Maximum number of groups a token may carry. */
-#define KACS_TOKEN_MAX_GROUPS		64U
+#define KACS_TOKEN_MAX_GROUPS		1024U
+
+/* Number of 64-bit words in a group enabled-state bitmask (KACS_TOKEN_MAX_GROUPS / 64). */
+#define KACS_TOKEN_GROUP_MASK_WORDS	16U
 
 /* ioctl argument structures. */
 
@@ -98,7 +101,7 @@ struct kacs_adjust_groups_args {
 	__u32 count;
 	__u32 _pad;
 	__u64 data_ptr;
-	__u64 previous_state;
+	__u64 previous_state[16]; /* KACS_TOKEN_GROUP_MASK_WORDS */
 };
 
 struct kacs_duplicate_args {

@@ -138,9 +138,11 @@
 #define PKM_KUNIT_ADJUSTABLE_GROUP4_DEFAULT 0xC0000007U
 #define PKM_KUNIT_ADJUSTABLE_GROUP_PREV_MASK 0x19ULL
 #define PKM_KUNIT_ADJUSTABLE_GROUP_MUTATED_MASK 0x1AULL
-#define PKM_KUNIT_MAX_TOKEN_GROUPS 64U
+#define PKM_KUNIT_MAX_TOKEN_GROUPS KACS_TOKEN_MAX_GROUPS
 #define PKM_KUNIT_MAX_CALLER_GROUPS (PKM_KUNIT_MAX_TOKEN_GROUPS - 1U)
-#define PKM_KUNIT_GROUP_LIMIT_TOKEN_SPEC_BYTES 2048U
+/* Sized to hold a full MAX_TOKEN_GROUPS spec (~20 bytes/group) under the
+ * 64 KiB MAX_TOKEN_SPEC_BYTES kernel limit. */
+#define PKM_KUNIT_GROUP_LIMIT_TOKEN_SPEC_BYTES 49152U
 #define PKM_KUNIT_KMES_PROCESS_NAME "kunit-ac"
 #define PKM_KUNIT_KMES_PROCESS_PATH "/kunit/access-check"
 #define PKM_KUNIT_KMES_PRIV_PROCESS_NAME "kunit-priv"
@@ -280,7 +282,7 @@ PKM_KUNIT_ASSERT_OFFSET(struct kacs_duplicate_args, token_type, 4);
 PKM_KUNIT_ASSERT_OFFSET(struct kacs_duplicate_args, impersonation_level, 8);
 PKM_KUNIT_ASSERT_OFFSET(struct kacs_duplicate_args, result_fd, 12);
 
-PKM_KUNIT_ASSERT_SIZE(struct kacs_adjust_groups_args, 24);
+PKM_KUNIT_ASSERT_SIZE(struct kacs_adjust_groups_args, 144);
 PKM_KUNIT_ASSERT_OFFSET(struct kacs_adjust_groups_args, count, 0);
 PKM_KUNIT_ASSERT_OFFSET(struct kacs_adjust_groups_args, _pad, 4);
 PKM_KUNIT_ASSERT_OFFSET(struct kacs_adjust_groups_args, data_ptr, 8);
@@ -10648,7 +10650,7 @@ static void pkm_kunit_shared_token_adjustment_mutations_visible(
 		struct pkm_kacs_boot_snapshot shared_after = { };
 		const void *source;
 		const void *shared;
-		u64 previous_state = 0;
+		u64 previous_state[KACS_TOKEN_GROUP_MASK_WORDS] = {0};
 
 		source = kacs_rust_kunit_create_adjustable_groups_token();
 		KUNIT_ASSERT_NOT_NULL(test, source);
@@ -10665,7 +10667,7 @@ static void pkm_kunit_shared_token_adjustment_mutations_visible(
 
 		KUNIT_ASSERT_EQ(test,
 				kacs_rust_token_adjust_groups(source, &entry, 1,
-							      &previous_state),
+							      previous_state),
 				0);
 		KUNIT_ASSERT_TRUE(test,
 				  kacs_rust_kunit_token_snapshot(
@@ -35355,7 +35357,7 @@ static void pkm_kunit_token_adjust_groups_updates_and_queries_live_state(
 			pkm_kacs_kunit_token_fd_adjust_groups((int)fd, &adjust,
 							     entries),
 			(long)0);
-	KUNIT_EXPECT_EQ(test, adjust.previous_state,
+	KUNIT_EXPECT_EQ(test, adjust.previous_state[0],
 			PKM_KUNIT_ADJUSTABLE_GROUP_PREV_MASK);
 
 	KUNIT_ASSERT_TRUE(test,
@@ -35566,7 +35568,7 @@ static void pkm_kunit_token_adjust_groups_reset_restores_defaults(
 			pkm_kacs_kunit_token_fd_adjust_groups((int)fd, &reset,
 							     &reset_entry),
 			(long)0);
-	KUNIT_EXPECT_EQ(test, reset.previous_state,
+	KUNIT_EXPECT_EQ(test, reset.previous_state[0],
 			PKM_KUNIT_ADJUSTABLE_GROUP_MUTATED_MASK);
 
 	KUNIT_ASSERT_TRUE(test,

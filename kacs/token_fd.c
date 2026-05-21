@@ -457,7 +457,7 @@ static long pkm_kacs_token_adjust_groups_core(
 	struct kacs_adjust_groups_args *args,
 	const struct kacs_group_entry *entries)
 {
-	u64 previous_state = 0;
+	u64 previous_state[KACS_TOKEN_GROUP_MASK_WORDS] = {0};
 	int ret;
 
 	if (!tf || !tf->token || !args)
@@ -475,11 +475,11 @@ static long pkm_kacs_token_adjust_groups_core(
 	ret = kacs_rust_token_adjust_groups(
 		tf->token,
 		(const struct pkm_kacs_group_adjust_entry *)entries,
-		args->count, &previous_state);
+		args->count, previous_state);
 	if (ret)
 		return ret;
 
-	args->previous_state = previous_state;
+	memcpy(args->previous_state, previous_state, sizeof(previous_state));
 	return 0;
 }
 

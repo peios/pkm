@@ -87,12 +87,12 @@ pub struct kacs_adjust_groups_args {
     pub count: __u32,
     pub _pad: __u32,
     pub data_ptr: __u64,
-    pub previous_state: __u64,
+    pub previous_state: [__u64; 16usize],
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of kacs_adjust_groups_args"]
-        [::core::mem::size_of::<kacs_adjust_groups_args>() - 24usize];
+        [::core::mem::size_of::<kacs_adjust_groups_args>() - 144usize];
     ["Alignment of kacs_adjust_groups_args"]
         [::core::mem::align_of::<kacs_adjust_groups_args>() - 8usize];
     ["Offset of field: kacs_adjust_groups_args::count"]

@@ -95,7 +95,7 @@ const (
 	KACS_IMLEVEL_IDENTIFICATION                   = 1
 	KACS_IMLEVEL_IMPERSONATION                    = 2
 	KACS_IOC_ADJUST_DEFAULT                       = 1074809609
-	KACS_IOC_ADJUST_GROUPS                        = 1075333895
+	KACS_IOC_ADJUST_GROUPS                        = 1083198215
 	KACS_IOC_ADJUST_PRIVS                         = 1075333889
 	KACS_IOC_ADJUST_SESSIONID                     = 1074023178
 	KACS_IOC_DUPLICATE                            = 3222293250
@@ -205,10 +205,11 @@ const (
 	KACS_TOKEN_CLASS_USER                         = 1
 	KACS_TOKEN_CLASS_USER_CLAIMS                  = 22
 	KACS_TOKEN_DUPLICATE                          = 2
+	KACS_TOKEN_GROUP_MASK_WORDS                   = 16
 	KACS_TOKEN_IMPERSONATE                        = 4
 	KACS_TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN   = 2
 	KACS_TOKEN_MANDATORY_POLICY_NO_WRITE_UP       = 1
-	KACS_TOKEN_MAX_GROUPS                         = 64
+	KACS_TOKEN_MAX_GROUPS                         = 1024
 	KACS_TOKEN_OPEN_REAL                          = 1
 	KACS_TOKEN_QUERY                              = 8
 	KACS_TOKEN_QUERY_SOURCE                       = 16

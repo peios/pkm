@@ -40,7 +40,7 @@ type Kacs_adjust_groups_args struct {
 	Count          uint32
 	_              uint32
 	Data_ptr       uint64
-	Previous_state uint64
+	Previous_state [16]uint64
 }
 type Kacs_adjust_privs_args struct {
 	Count            uint32

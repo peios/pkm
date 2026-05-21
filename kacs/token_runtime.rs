@@ -102,7 +102,8 @@ const MAX_DEFAULT_DACL_BYTES: usize = 65_536;
 const MAX_SESSION_SPEC_BYTES: usize = 4096;
 const MIN_SESSION_SPEC_BYTES: usize = 15;
 const MAX_BOOT_GROUPS: usize = 5;
-const MAX_TOKEN_GROUPS: usize = 64;
+const MAX_TOKEN_GROUPS: usize = 1024;
+const GROUP_MASK_WORDS: usize = MAX_TOKEN_GROUPS / 64;
 const TOKEN_INDEX_NO_CHANGE: u32 = u32::MAX;
 const MAX_PRIVILEGE_ADJUST_ENTRIES: usize = 64;
 const SD_HEADER_LEN: usize = 20;
@@ -6432,14 +6433,14 @@ impl PkmKacsBootToken {
         }
     }
 
-    fn current_group_enabled_mask_locked(&self) -> u64 {
-        let mut mask = 0u64;
+    fn current_group_enabled_mask_locked(&self) -> [u64; GROUP_MASK_WORDS] {
+        let mut mask = [0u64; GROUP_MASK_WORDS];
 
-        for index in 0..self.group_count.min(64) {
+        for index in 0..self.group_count.min(MAX_TOKEN_GROUPS) {
             let attributes = self.group_attributes[index].load(Ordering::Relaxed);
 
             if (attributes & SE_GROUP_ENABLED) == SE_GROUP_ENABLED {
-                mask |= 1u64 << index;
+                mask[index / 64] |= 1u64 << (index % 64);
             }
         }
 
@@ -6699,7 +6700,7 @@ fn write_sid_and_attributes_query(
 }
 
 impl PkmKacsBootToken {
-    fn adjust_groups(&self, entries: &[PkmKacsGroupAdjustEntry]) -> Result<u64, i32> {
+    fn adjust_groups(&self, entries: &[PkmKacsGroupAdjustEntry]) -> Result<[u64; GROUP_MASK_WORDS], i32> {
         let _guard = self.lock_mutation();
         let previous_state = self.current_group_enabled_mask_locked();
         let modified_id = self.modified_id.load(Ordering::Relaxed);
@@ -10593,9 +10594,9 @@ pub extern "C" fn kacs_rust_token_adjust_groups(
     let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
         return -EACCES;
     };
-    let Some(previous_state_out) = (unsafe { previous_state_out.as_mut() }) else {
+    if previous_state_out.is_null() {
         return -EINVAL;
-    };
+    }
     if count as usize > MAX_TOKEN_GROUPS {
         return -EINVAL;
     }
@@ -10609,7 +10610,13 @@ pub extern "C" fn kacs_rust_token_adjust_groups(
 
     match token.adjust_groups(entries) {
         Ok(previous_state) => {
-            *previous_state_out = previous_state;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    previous_state.as_ptr(),
+                    previous_state_out,
+                    GROUP_MASK_WORDS,
+                );
+            }
             0
         }
         Err(err) => err,

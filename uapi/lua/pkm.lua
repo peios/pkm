@@ -113,7 +113,7 @@ M.KACS_IMLEVEL_DELEGATION = 3
 M.KACS_IMLEVEL_IDENTIFICATION = 1
 M.KACS_IMLEVEL_IMPERSONATION = 2
 M.KACS_IOC_ADJUST_DEFAULT = 1074809609
-M.KACS_IOC_ADJUST_GROUPS = 1075333895
+M.KACS_IOC_ADJUST_GROUPS = 1083198215
 M.KACS_IOC_ADJUST_PRIVS = 1075333889
 M.KACS_IOC_ADJUST_SESSIONID = 1074023178
 M.KACS_IOC_DUPLICATE = 3222293250
@@ -223,10 +223,11 @@ M.KACS_TOKEN_CLASS_TYPE = 4
 M.KACS_TOKEN_CLASS_USER = 1
 M.KACS_TOKEN_CLASS_USER_CLAIMS = 22
 M.KACS_TOKEN_DUPLICATE = 2
+M.KACS_TOKEN_GROUP_MASK_WORDS = 16
 M.KACS_TOKEN_IMPERSONATE = 4
 M.KACS_TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN = 2
 M.KACS_TOKEN_MANDATORY_POLICY_NO_WRITE_UP = 1
-M.KACS_TOKEN_MAX_GROUPS = 64
+M.KACS_TOKEN_MAX_GROUPS = 1024
 M.KACS_TOKEN_OPEN_REAL = 1
 M.KACS_TOKEN_QUERY = 8
 M.KACS_TOKEN_QUERY_SOURCE = 16
@@ -518,13 +519,13 @@ M.struct = {
     },
   },
   ["kacs_adjust_groups_args"] = {
-    size = 24,
-    pack = "<I4xxxxI8I8",
+    size = 144,
+    pack = "<I4xxxxI8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8",
     fields = {"count", "data_ptr", "previous_state"},
     field = {
       count = {offset = 0, size = 4, signed = false, kind = "uint"},
       data_ptr = {offset = 8, size = 8, signed = false, kind = "uint"},
-      previous_state = {offset = 16, size = 8, signed = false, kind = "uint"},
+      previous_state = {offset = 16, size = 128, signed = false, kind = "uint", count = 16},
     },
   },
   ["kacs_adjust_privs_args"] = {
