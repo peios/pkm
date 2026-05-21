@@ -545,6 +545,9 @@ long pkm_lcs_create_missing_prepared_key_for_token(
 	const struct pkm_lcs_created_key_sd *created_sd, u32 desired_access,
 	bool volatile_key, bool symlink,
 	struct pkm_lcs_create_missing_prepared_result *result);
+long pkm_lcs_create_missing_created_result_finish_to_user(
+	const struct pkm_lcs_usercopy_ops *ops, u32 __user *udisposition,
+	struct pkm_lcs_create_missing_prepared_result *result);
 long pkm_lcs_allocate_sequence(u64 *sequence);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,

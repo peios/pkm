@@ -2964,6 +2964,136 @@ static void pkm_lcs_kunit_create_finish_rejects_invalid_fd(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
 }
 
+static void pkm_lcs_kunit_create_missing_created_finish_success(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_create_missing_prepared_result result = {
+		.disposition = REG_CREATED_NEW,
+		.created_new = true,
+	};
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	u32 disposition = 0;
+	long ret;
+
+	result.fd = pkm_lcs_kunit_publish_create_finish_fd();
+	KUNIT_ASSERT_TRUE(test, result.fd >= 0);
+
+	ret = pkm_lcs_create_missing_created_result_finish_to_user(
+		&ops, (u32 __user *)&disposition, &result);
+	KUNIT_EXPECT_TRUE(test, ret >= 0);
+	KUNIT_EXPECT_EQ(test, disposition, REG_CREATED_NEW);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+	KUNIT_EXPECT_EQ(test, result.fd, -1L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_key_fd_snapshot((int)ret, &snapshot),
+			0L);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)ret), 0);
+}
+
+static void pkm_lcs_kunit_create_missing_created_finish_null_disposition(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_create_missing_prepared_result result = {
+		.disposition = REG_CREATED_NEW,
+		.created_new = true,
+	};
+	long ret;
+
+	result.fd = pkm_lcs_kunit_publish_create_finish_fd();
+	KUNIT_ASSERT_TRUE(test, result.fd >= 0);
+
+	ret = pkm_lcs_create_missing_created_result_finish_to_user(
+		&ops, NULL, &result);
+	KUNIT_EXPECT_TRUE(test, ret >= 0);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	KUNIT_EXPECT_EQ(test, result.fd, -1L);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)ret), 0);
+}
+
+static void pkm_lcs_kunit_create_missing_created_finish_fault_closes_fd(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_create_missing_prepared_result result = {
+		.disposition = REG_CREATED_NEW,
+		.created_new = true,
+	};
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	u32 disposition = 0;
+	long fd;
+
+	result.fd = pkm_lcs_kunit_publish_create_finish_fd();
+	KUNIT_ASSERT_TRUE(test, result.fd >= 0);
+	fd = result.fd;
+	ctx.fault_dst = &disposition;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_created_result_finish_to_user(
+				&ops, (u32 __user *)&disposition, &result),
+			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, disposition, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+	KUNIT_EXPECT_EQ(test, result.fd, -1L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			(long)-EBADF);
+}
+
+static void pkm_lcs_kunit_create_missing_created_finish_rejects_retry(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_create_missing_prepared_result result = {
+		.fd = -1,
+		.disposition = REG_OPENED_EXISTING,
+		.retry_open_existing = true,
+	};
+	u32 disposition = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_created_result_finish_to_user(
+				&ops, (u32 __user *)&disposition, &result),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, disposition, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+}
+
+static void pkm_lcs_kunit_create_missing_created_finish_rejects_malformed(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_create_missing_prepared_result result = {
+		.fd = -1,
+		.disposition = REG_CREATED_NEW,
+		.created_new = true,
+	};
+	u32 disposition = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_created_result_finish_to_user(
+				&ops, (u32 __user *)&disposition, &result),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, disposition, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+
+	result.fd = pkm_lcs_kunit_publish_create_finish_fd();
+	KUNIT_ASSERT_TRUE(test, result.fd >= 0);
+	result.disposition = REG_OPENED_EXISTING;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_created_result_finish_to_user(
+				&ops, (u32 __user *)&disposition, &result),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)result.fd), 0);
+}
+
 static void pkm_lcs_kunit_create_existing_rejects_flags_before_usercopy(
 	struct kunit *test)
 {
@@ -11262,6 +11392,14 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_create_finish_success_null_disposition),
 	KUNIT_CASE(pkm_lcs_kunit_create_finish_fault_closes_fd),
 	KUNIT_CASE(pkm_lcs_kunit_create_finish_rejects_invalid_fd),
+	KUNIT_CASE(pkm_lcs_kunit_create_missing_created_finish_success),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_created_finish_null_disposition),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_created_finish_fault_closes_fd),
+	KUNIT_CASE(pkm_lcs_kunit_create_missing_created_finish_rejects_retry),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_created_finish_rejects_malformed),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_existing_rejects_flags_before_usercopy),
 	KUNIT_CASE(

@@ -4565,6 +4565,25 @@ long pkm_lcs_create_missing_prepared_key_for_token(
 	return 0;
 }
 
+long pkm_lcs_create_missing_created_result_finish_to_user(
+	const struct pkm_lcs_usercopy_ops *ops, u32 __user *udisposition,
+	struct pkm_lcs_create_missing_prepared_result *result)
+{
+	long fd;
+	long ret;
+
+	if (!result || !result->created_new || result->retry_open_existing ||
+	    result->disposition != REG_CREATED_NEW || result->fd < 0 ||
+	    result->fd > INT_MAX)
+		return -EINVAL;
+
+	fd = result->fd;
+	ret = pkm_lcs_reg_create_key_finish_success_to_user(
+		ops, udisposition, fd, REG_CREATED_NEW);
+	result->fd = -1;
+	return ret;
+}
+
 static long pkm_lcs_resolved_key_path_prepare(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,
