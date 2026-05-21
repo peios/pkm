@@ -1046,10 +1046,60 @@ long pkm_lcs_source_device_open_file_for_token(const void *token,
 	return 0;
 }
 
+static u32 pkm_lcs_source_fd_mark_down_locked(
+	struct pkm_lcs_source_fd *source_fd)
+{
+	struct pkm_lcs_source_slot *slot;
+	u32 source_down_id = 0;
+
+	lockdep_assert_held(&pkm_lcs_source_table_lock);
+	lockdep_assert_held(&source_fd->queue_lock);
+
+	source_fd->closing = true;
+	pkm_lcs_source_queue_destroy_locked(source_fd);
+	pkm_lcs_source_in_flight_destroy_locked(source_fd);
+
+	if (source_fd->state == PKM_LCS_SOURCE_FD_ACTIVE) {
+		slot = pkm_lcs_source_slot_find_locked(source_fd->source_id);
+		if (slot && slot->status == PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE &&
+		    slot->active_fd == source_fd) {
+			slot->status = PKM_LCS_SOURCE_SLOT_STATUS_DOWN;
+			slot->active_fd = NULL;
+			slot->bound_transaction_count = 0;
+			source_down_id = source_fd->source_id;
+		}
+	}
+
+	return source_down_id;
+}
+
+static void pkm_lcs_source_device_mark_down_file(struct file *file)
+{
+	struct pkm_lcs_source_fd *source_fd;
+	u32 source_down_id;
+
+	if (!file)
+		return;
+
+	source_fd = file->private_data;
+	if (!source_fd)
+		return;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	mutex_lock(&source_fd->queue_lock);
+	source_down_id = pkm_lcs_source_fd_mark_down_locked(source_fd);
+	mutex_unlock(&source_fd->queue_lock);
+	wake_up_interruptible(&source_fd->read_wait);
+	mutex_unlock(&pkm_lcs_source_table_lock);
+
+	if (source_down_id)
+		(void)pkm_lcs_transaction_fd_mark_source_down(source_down_id,
+							      NULL);
+}
+
 int pkm_lcs_source_device_release_file(struct file *file)
 {
 	struct pkm_lcs_source_fd *source_fd;
-	struct pkm_lcs_source_slot *slot;
 	u32 source_down_id = 0;
 
 	if (!file)
@@ -1062,22 +1112,9 @@ int pkm_lcs_source_device_release_file(struct file *file)
 
 	mutex_lock(&pkm_lcs_source_table_lock);
 	mutex_lock(&source_fd->queue_lock);
-	source_fd->closing = true;
-	pkm_lcs_source_queue_destroy_locked(source_fd);
-	pkm_lcs_source_in_flight_destroy_locked(source_fd);
+	source_down_id = pkm_lcs_source_fd_mark_down_locked(source_fd);
 	mutex_unlock(&source_fd->queue_lock);
 	wake_up_interruptible(&source_fd->read_wait);
-
-	if (source_fd->state == PKM_LCS_SOURCE_FD_ACTIVE) {
-		slot = pkm_lcs_source_slot_find_locked(source_fd->source_id);
-		if (slot && slot->status == PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE &&
-		    slot->active_fd == source_fd) {
-			slot->status = PKM_LCS_SOURCE_SLOT_STATUS_DOWN;
-			slot->active_fd = NULL;
-			slot->bound_transaction_count = 0;
-			source_down_id = source_fd->source_id;
-		}
-	}
 	mutex_unlock(&pkm_lcs_source_table_lock);
 
 	if (source_down_id)
@@ -2089,6 +2126,7 @@ static long pkm_lcs_source_dispatch_transaction_request_with_waiter(
 	struct pkm_lcs_source_fd *source_fd;
 	size_t frame_len = RSI_REQUEST_HEADER_SIZE + sizeof(u64);
 	u64 header_txn_id;
+	u64 retained_txn_id;
 	u64 request_id;
 	u64 next_request_id;
 	long ret;
@@ -2103,10 +2141,12 @@ static long pkm_lcs_source_dispatch_transaction_request_with_waiter(
 		if (check_add_overflow(frame_len, sizeof(u32), &frame_len))
 			return -EOVERFLOW;
 		header_txn_id = 0;
+		retained_txn_id = transaction_id;
 		break;
 	case RSI_COMMIT_TRANSACTION:
 	case RSI_ABORT_TRANSACTION:
 		header_txn_id = transaction_id;
+		retained_txn_id = transaction_id;
 		break;
 	default:
 		return -EINVAL;
@@ -2174,7 +2214,7 @@ static long pkm_lcs_source_dispatch_transaction_request_with_waiter(
 		goto out_unlock_queue;
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
-		source_fd, built.request_id, built.txn_id, built.op_code,
+		source_fd, built.request_id, retained_txn_id, built.op_code,
 		waiter);
 	if (ret)
 		goto out_unlock_queue;
@@ -2888,6 +2928,7 @@ long pkm_lcs_source_accept_response_file(
 		result->len = frame_len;
 		result->request_id = record->request_id;
 		result->txn_id = record->txn_id;
+		result->source_id = source_fd->source_id;
 		result->request_op_code = record->op_code;
 		result->response_op_code = response_op_code;
 		result->status = status;
@@ -2907,6 +2948,36 @@ out_unlock_queue:
 out_unlock_table:
 	mutex_unlock(&pkm_lcs_source_table_lock);
 	return ret;
+}
+
+static long pkm_lcs_source_handle_late_success_cleanup_file(
+	struct file *file, const struct pkm_lcs_source_response_result *result)
+{
+	long ret;
+
+	if (!file || !result)
+		return -EINVAL;
+	if (result->caller_waiter_attached || result->malformed_source_data ||
+	    result->status != RSI_OK)
+		return 0;
+
+	switch (result->request_op_code) {
+	case RSI_BEGIN_TRANSACTION:
+		if (!result->source_id || !result->txn_id) {
+			pkm_lcs_source_device_mark_down_file(file);
+			return -EIO;
+		}
+
+		ret = pkm_lcs_source_dispatch_abort_transaction_request(
+			result->source_id, result->txn_id, NULL);
+		if (ret) {
+			pkm_lcs_source_device_mark_down_file(file);
+			return ret;
+		}
+		return 0;
+	default:
+		return 0;
+	}
 }
 
 static long pkm_lcs_source_next_sequence_snapshot(u64 *next_sequence)
@@ -3110,6 +3181,9 @@ static ssize_t pkm_lcs_source_device_write_file_with_ops(
 		ret = pkm_lcs_source_complete_waiter_file(
 			file, result->request_id, caller_errno, result,
 			frame, count);
+	if (!ret)
+		ret = pkm_lcs_source_handle_late_success_cleanup_file(file,
+								      result);
 	if (!ret)
 		ret = (ssize_t)count;
 

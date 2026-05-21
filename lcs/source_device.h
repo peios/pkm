@@ -263,10 +263,11 @@ struct pkm_lcs_source_response_result {
 	size_t len;
 	u64 request_id;
 	u64 txn_id;
+	u32 source_id;
+	u32 in_flight_count;
 	u16 request_op_code;
 	u16 response_op_code;
 	u32 status;
-	u32 in_flight_count;
 	bool malformed_source_data;
 	bool caller_waiter_attached;
 	u8 _pad[2];
