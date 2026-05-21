@@ -4,7 +4,8 @@ use crate::Result;
 use crate::error::Error;
 use crate::query::ImpersonationLevel;
 use crate::raw;
-use peios_uapi::errno::{Errno, eintr_retry};
+use libp_errno::Errno;
+use libp_sys::eintr_retry;
 
 /// Restore the calling thread's effective token to its primary,
 /// dropping any active impersonation.

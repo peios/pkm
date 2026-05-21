@@ -6,7 +6,7 @@
 //
 // Layered as:
 //
-//   `raw::*`    — numeric-return wrappers over `peios_uapi::sys`. Caller
+//   `raw::*`    — numeric-return wrappers over `libp_sys`. Caller
 //                  inspects the return code, no EINTR retry, no RAII.
 //   crate root  — safe API: `Token` (owned fd with Drop), typed errors,
 //                  `Result<T, Error>` returns, EINTR retry on syscalls.
@@ -21,6 +21,7 @@
 
 extern crate alloc;
 
+mod abi;
 mod error;
 mod query;
 pub mod raw;
@@ -37,12 +38,14 @@ pub use free::{
     set_psb,
 };
 
-/// Re-exports from `peios-uapi` for callers that want the constants
-/// without an extra dependency.
+/// Re-exports of the KACS token ABI surface (constants, ioctl numbers, arg
+/// structs) plus the shared `Errno` / SID types, for callers that want them
+/// without an extra dependency. Values are sourced from the generated
+/// `peios-uapi` crate; see [`crate::abi`].
 pub mod uapi {
-    pub use peios_uapi::Errno;
-    pub use peios_uapi::sid::{Sid, SidRef};
-    pub use peios_uapi::token::*;
+    pub use crate::abi::*;
+    pub use libp_errno::Errno;
+    pub use libp_wire::{Sid, SidRef};
 }
 
 /// Crate-local `Result<T, Error>` alias.

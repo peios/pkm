@@ -13,14 +13,14 @@ use crate::query::{ElevationType, ImpersonationLevel, QueryClass, TokenType};
 use crate::raw;
 use alloc::vec;
 use alloc::vec::Vec;
-use peios_uapi::errno::{Errno, eintr_retry};
-use peios_uapi::sid::{Sid, SidRef};
-use peios_uapi::sys;
-use peios_uapi::token::{
+use crate::abi::{
     KACS_REAL_TOKEN, KacsAdjustDefaultArgs, KacsAdjustGroupsArgs, KacsAdjustPrivsArgs,
     KacsDuplicateArgs, KacsGetLinkedTokenArgs, KacsGroupEntry, KacsLinkTokensArgs, KacsPrivEntry,
     KacsQueryArgs, KacsRestrictArgs,
 };
+use libp_errno::Errno;
+use libp_sys::{self as sys, eintr_retry};
+use libp_wire::{Sid, SidRef};
 
 /// An owned KACS token handle.
 ///

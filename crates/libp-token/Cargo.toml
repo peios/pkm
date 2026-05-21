@@ -16,8 +16,12 @@ default = ["std"]
 # Enables std-only conveniences: `Token::as_fd() -> BorrowedFd<'_>`,
 # `From<Error> for std::io::Error`, etc. Disable for libc-free targets.
 # `alloc` is always required (query buffers, error contexts).
-std = ["peios-uapi/std"]
+std = ["libp-errno/std", "libp-sd/std", "libp-wire/std"]
 
 [dependencies]
-peios-uapi = { package = "peios-uapi-legacy", path = "../peios-uapi", default-features = false }
+peios-uapi = { workspace = true }
+libp-errno = { workspace = true }
+libp-sys = { workspace = true }
+libp-wire = { workspace = true }
+libp-sd = { workspace = true }
 thiserror = { workspace = true }

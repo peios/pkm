@@ -10,9 +10,23 @@
 //   - Validation tools that want direct control (e.g. whoami-token).
 //   - Tests that need to assert specific errno paths.
 
-use peios_uapi::sys::{ioctl, syscall1, syscall2, syscall3};
-use peios_uapi::syscall::*;
-use peios_uapi::token::*;
+use crate::abi::*;
+use libp_sys::{ioctl, syscall1, syscall2, syscall3};
+
+// KACS syscall numbers. `libp_sys::syscallN` take an `i64` number; the
+// generated `peios-uapi` constants are `u32`, so they are narrowed to `i64`
+// here once rather than at every call site.
+const SYS_KACS_OPEN_SELF_TOKEN: i64 = peios_uapi::SYS_KACS_OPEN_SELF_TOKEN as i64;
+const SYS_KACS_OPEN_PROCESS_TOKEN: i64 = peios_uapi::SYS_KACS_OPEN_PROCESS_TOKEN as i64;
+const SYS_KACS_OPEN_THREAD_TOKEN: i64 = peios_uapi::SYS_KACS_OPEN_THREAD_TOKEN as i64;
+const SYS_KACS_OPEN_PEER_TOKEN: i64 = peios_uapi::SYS_KACS_OPEN_PEER_TOKEN as i64;
+const SYS_KACS_CREATE_TOKEN: i64 = peios_uapi::SYS_KACS_CREATE_TOKEN as i64;
+const SYS_KACS_CREATE_SESSION: i64 = peios_uapi::SYS_KACS_CREATE_SESSION as i64;
+const SYS_KACS_DESTROY_EMPTY_SESSION: i64 = peios_uapi::SYS_KACS_DESTROY_EMPTY_SESSION as i64;
+const SYS_KACS_SET_PSB: i64 = peios_uapi::SYS_KACS_SET_PSB as i64;
+const SYS_KACS_IMPERSONATE_PEER: i64 = peios_uapi::SYS_KACS_IMPERSONATE_PEER as i64;
+const SYS_KACS_REVERT: i64 = peios_uapi::SYS_KACS_REVERT as i64;
+const SYS_KACS_SET_IMPERSONATION_LEVEL: i64 = peios_uapi::SYS_KACS_SET_IMPERSONATION_LEVEL as i64;
 
 // ---------------------------------------------------------------------------
 // Syscalls — token opens, creation, sessions, impersonation control.
@@ -132,7 +146,7 @@ pub unsafe fn impersonate_peer(sock_fd: i32) -> i64 {
 /// declared `unsafe` for ABI consistency with the rest of `raw::`.
 #[inline]
 pub unsafe fn revert() -> i64 {
-    unsafe { peios_uapi::sys::syscall0(SYS_KACS_REVERT) }
+    unsafe { libp_sys::syscall0(SYS_KACS_REVERT) }
 }
 
 /// `kacs_set_impersonation_level(sock_fd, level)`. Returns 0 or `-errno`.
@@ -285,8 +299,8 @@ pub unsafe fn adjust_session_id(fd: i32, arg: *mut u32) -> i64 {
 }
 
 // Re-exports for callers that want to construct the ioctl arg structs
-// without an extra `use peios_uapi::token::...` line.
-pub use peios_uapi::token::{
+// without an extra `use crate::abi::...` line.
+pub use crate::abi::{
     KacsAdjustDefaultArgs, KacsAdjustGroupsArgs, KacsAdjustPrivsArgs, KacsDuplicateArgs,
     KacsGetLinkedTokenArgs, KacsGroupEntry, KacsLinkTokensArgs, KacsPrivEntry, KacsQueryArgs,
     KacsRestrictArgs,

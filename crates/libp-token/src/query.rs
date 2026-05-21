@@ -2,7 +2,7 @@
 // queries (token type, impersonation level, elevation type).
 
 use crate::Error;
-use peios_uapi::token as uapi;
+use crate::abi as uapi;
 
 /// Token-information classes that can be passed to `Token::query`.
 ///

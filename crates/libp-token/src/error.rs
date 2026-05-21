@@ -1,6 +1,7 @@
 // Errors produced by the safe layer.
 
-use peios_uapi::{Errno, ParseError};
+use libp_errno::Errno;
+use libp_wire::ParseError;
 use thiserror::Error;
 
 /// Errors from libp-token's safe-API surface.
