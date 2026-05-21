@@ -16,3 +16,10 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 publish = false
 description = "Generated Rust bindings for the PKM kernel ABI (KACS, KMES)"
+
+[features]
+# This crate is pure #![no_std] type and constant definitions, so `std` is
+# a no-op. It exists only so dependents that unify a `std` feature across
+# the libp stack can forward `peios-uapi/std` without a special case.
+default = ["std"]
+std = []

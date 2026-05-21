@@ -3,20 +3,22 @@ resolver = "2"
 members = [
     "crates/kacs-core",
     "crates/lcs-core",
+    "uapi/rust",
     "crates/peios-uapi",
     "crates/msgpack",
     "crates/libp-errno",
     "crates/libp-sys",
+    "crates/libp-wire",
     "crates/libp-token",
     "crates/libp-sd",
     "crates/libp-files",
     "crates/libp-event",
     "crates/libp-test",
 ]
-# uapi/rust is the generated replacement for crates/peios-uapi. It shares
-# the package name `peios-uapi`, so it cannot be a workspace member
-# alongside the legacy crate; it is excluded until that crate is retired.
-exclude = ["uapi/rust"]
+# uapi/rust is the generated `peios-uapi` and is now the canonical binding.
+# crates/peios-uapi is the legacy hand-written blend, renamed to
+# `peios-uapi-legacy`; it is being strangled — domain crates flip off it
+# onto the generated crate one at a time, then it is deleted.
 
 # Shared package metadata. Members opt-in via `field.workspace = true`.
 # Members with reasons to diverge (kacs-core stays on edition 2021 during
@@ -31,10 +33,12 @@ rust-version = "1.85"
 [workspace.dependencies]
 thiserror = { version = "2", default-features = false }
 
-peios-uapi = { path = "crates/peios-uapi", default-features = false }
+peios-uapi        = { path = "uapi/rust", default-features = false }
+peios-uapi-legacy = { path = "crates/peios-uapi", default-features = false }
 msgpack    = { path = "crates/msgpack", default-features = false }
 libp-errno = { path = "crates/libp-errno", default-features = false }
 libp-sys   = { path = "crates/libp-sys", default-features = false }
+libp-wire  = { path = "crates/libp-wire", default-features = false }
 libp-token = { path = "crates/libp-token", default-features = false }
 libp-sd    = { path = "crates/libp-sd", default-features = false }
 libp-files = { path = "crates/libp-files", default-features = false }

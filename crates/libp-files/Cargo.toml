@@ -18,5 +18,5 @@ default = ["std"]
 std = ["peios-uapi/std"]
 
 [dependencies]
-peios-uapi = { workspace = true }
+peios-uapi = { package = "peios-uapi-legacy", path = "../peios-uapi", default-features = false }
 thiserror = { workspace = true }

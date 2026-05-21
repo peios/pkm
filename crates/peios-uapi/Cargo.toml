@@ -1,5 +1,5 @@
 [package]
-name = "peios-uapi"
+name = "peios-uapi-legacy"
 version = "0.19.8"
 edition.workspace = true
 rust-version.workspace = true
@@ -17,7 +17,7 @@ description = "Rust bindings for the Peios userspace kernel ABI (KACS, KMES, LCS
 # `From<Errno> for std::io::Error` and other std-only conveniences.
 
 [lib]
-name = "peios_uapi"
+name = "peios_uapi_legacy"
 path = "src/lib.rs"
 
 [features]

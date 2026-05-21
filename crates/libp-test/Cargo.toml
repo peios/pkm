@@ -16,7 +16,7 @@ libp-token = { workspace = true, features = ["std"] }
 libp-sd = { workspace = true, features = ["std"] }
 libp-files = { workspace = true, features = ["std"] }
 libp-event = { workspace = true, features = ["std"] }
-peios-uapi = { workspace = true, features = ["std"] }
+peios-uapi = { package = "peios-uapi-legacy", path = "../peios-uapi", features = ["std"], default-features = false }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
