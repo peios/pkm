@@ -174,6 +174,8 @@ COPY lcs/kunit.c /tmp/pkm-src/lcs/kunit.c
 COPY lcs/rust_ingress.rs /tmp/pkm-src/lcs/rust_ingress.rs
 COPY lcs/key_fd.c /tmp/pkm-src/lcs/key_fd.c
 COPY lcs/key_fd.h /tmp/pkm-src/lcs/key_fd.h
+COPY lcs/transaction_fd.c /tmp/pkm-src/lcs/transaction_fd.c
+COPY lcs/transaction_fd.h /tmp/pkm-src/lcs/transaction_fd.h
 COPY lcs/rsi.c /tmp/pkm-src/lcs/rsi.c
 COPY lcs/rsi.h /tmp/pkm-src/lcs/rsi.h
 COPY kmes/kmes.c /tmp/pkm-src/kmes/kmes.c
