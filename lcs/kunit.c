@@ -138,6 +138,7 @@ struct pkm_lcs_kunit_read_key_source_script {
 	const u8 *parent_guid;
 	const u8 *sd;
 	size_t sd_len;
+	bool volatile_key;
 	bool symlink;
 	u32 reads;
 	u32 writes;
@@ -215,6 +216,16 @@ struct pkm_lcs_kunit_create_source_script {
 	bool expect_key_request;
 	bool volatile_key;
 	bool symlink;
+	bool allow_any_sd;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
+struct pkm_lcs_kunit_read_then_create_source_script {
+	struct file *file;
+	struct pkm_lcs_kunit_read_key_source_script read_key;
+	struct pkm_lcs_kunit_create_source_script create;
 	u32 reads;
 	u32 writes;
 	int result;
@@ -5704,6 +5715,27 @@ static const u8 pkm_lcs_kunit_parent_sd_ci_generic_read[] = {
 	0x00, 0x00, 0x00, 0x00,
 };
 
+static const u8 pkm_lcs_kunit_parent_sd_create_subkey_ci_generic_read[] = {
+	/* SECURITY_DESCRIPTOR_RELATIVE */
+	0x01, 0x00, 0x04, 0x80, 0x14, 0x00, 0x00, 0x00,
+	0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x2c, 0x00, 0x00, 0x00,
+	/* Owner: S-1-5-18 */
+	0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+	0x12, 0x00, 0x00, 0x00,
+	/* Group: S-1-5-18 */
+	0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+	0x12, 0x00, 0x00, 0x00,
+	/* DACL: explicit create-subkey plus inheritable generic-read. */
+	0x02, 0x00, 0x30, 0x00, 0x02, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x14, 0x00, 0x04, 0x00, 0x00, 0x00,
+	0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+	0x00, 0x00, 0x00, 0x00,
+	0x00, 0x02, 0x14, 0x00, 0x00, 0x00, 0x00, 0x80,
+	0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+	0x00, 0x00, 0x00, 0x00,
+};
+
 static void pkm_lcs_kunit_create_initial_sd_inherits_registry_mapping(
 	struct kunit *test)
 {
@@ -7062,11 +7094,18 @@ static int pkm_lcs_kunit_create_source_expect_key_request(
 		return -EINVAL;
 	sd_len = get_unaligned_le32(request + offset);
 	offset += sizeof(sd_len);
-	if (sd_len != script->sd_len)
-		return -EINVAL;
-	if (pkm_lcs_kunit_create_source_expect_bytes(
-		    request, request_len, &offset, script->sd, script->sd_len))
-		return -EINVAL;
+	if (script->allow_any_sd) {
+		if (!sd_len || sd_len > request_len - offset)
+			return -EINVAL;
+		offset += sd_len;
+	} else {
+		if (sd_len != script->sd_len)
+			return -EINVAL;
+		if (pkm_lcs_kunit_create_source_expect_bytes(
+			    request, request_len, &offset, script->sd,
+			    script->sd_len))
+			return -EINVAL;
+	}
 	if (offset > request_len || 2U > request_len - offset)
 		return -EINVAL;
 	if (request[offset] != (script->volatile_key ? 1U : 0U) ||
@@ -7110,7 +7149,7 @@ static int pkm_lcs_kunit_create_source_thread(void *raw_script)
 
 	if (!script || !script->file || !script->parent_guid ||
 	    !script->child_guid || !script->child_name ||
-	    !script->layer_name || !script->sd) {
+	    !script->layer_name || (!script->sd && !script->allow_any_sd)) {
 		if (script)
 			script->result = -EINVAL;
 		return -EINVAL;
@@ -7600,8 +7639,8 @@ static int pkm_lcs_kunit_read_key_source_build_response(
 		response, response_len, &offset, sd, sd_len);
 	if (ret)
 		return ret;
-	ret = pkm_lcs_kunit_walk_source_append_u8(response, response_len,
-						  &offset, 0);
+	ret = pkm_lcs_kunit_walk_source_append_u8(
+		response, response_len, &offset, script->volatile_key ? 1 : 0);
 	if (ret)
 		return ret;
 	ret = pkm_lcs_kunit_walk_source_append_u8(
@@ -7683,6 +7722,35 @@ static int pkm_lcs_kunit_read_key_source_thread(void *raw_script)
 	script->writes++;
 	script->result = 0;
 	return 0;
+}
+
+static int pkm_lcs_kunit_read_then_create_source_thread(void *raw_script)
+{
+	struct pkm_lcs_kunit_read_then_create_source_script *script = raw_script;
+	int ret;
+
+	if (!script || !script->file) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	script->read_key.file = script->file;
+	script->create.file = script->file;
+
+	ret = pkm_lcs_kunit_read_key_source_thread(&script->read_key);
+	script->reads = script->read_key.reads;
+	script->writes = script->read_key.writes;
+	if (ret) {
+		script->result = ret;
+		return ret;
+	}
+
+	ret = pkm_lcs_kunit_create_source_thread(&script->create);
+	script->reads += script->create.reads;
+	script->writes += script->create.writes;
+	script->result = ret ? ret : script->create.result;
+	return script->result;
 }
 
 static int pkm_lcs_kunit_query_values_source_build_response(
@@ -9957,6 +10025,169 @@ static void pkm_lcs_kunit_create_missing_prepared_bad_inputs(struct kunit *test)
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_create_missing_branch_created_new_success(
+	struct kunit *test)
+{
+	static const char path_src[] = "Machine\\App";
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	static const u8 child_candidates[1][RSI_GUID_SIZE] = { { 0x91 } };
+	struct pkm_lcs_kunit_guid_sequence guid_sequence = {
+		.guids = child_candidates,
+		.count = 1,
+	};
+	struct pkm_lcs_key_guid_generator generator =
+		pkm_lcs_kunit_guid_generator(&guid_sequence);
+	struct pkm_lcs_create_missing_runtime_inputs inputs = {
+		.base_metadata_present = true,
+		.generator = &generator,
+	};
+	struct pkm_lcs_kunit_read_then_create_source_script script = {
+		.read_key = {
+			.expected_guid = root_guid,
+			.name = "Machine",
+		},
+		.create = {
+			.parent_guid = root_guid,
+			.child_guid = child_candidates[0],
+			.child_name = "App",
+			.layer_name = "base",
+			.expected_sequence = 1,
+			.entry_status = RSI_OK,
+			.key_status = RSI_OK,
+			.expect_key_request = true,
+			.allow_any_sd = true,
+		},
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *layer_sd;
+	size_t layer_sd_len = 0;
+	u32 disposition = 0;
+	long fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	layer_sd = kacs_rust_kunit_create_file_sd(
+		token, KEY_SET_VALUE, 0, 0, 0, &layer_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, layer_sd);
+
+	inputs.base_metadata_sd = layer_sd;
+	inputs.base_metadata_sd_len = layer_sd_len;
+	script.file = &file;
+	script.read_key.sd =
+		pkm_lcs_kunit_parent_sd_create_subkey_ci_generic_read;
+	script.read_key.sd_len =
+		sizeof(pkm_lcs_kunit_parent_sd_create_subkey_ci_generic_read);
+	task = kthread_run(pkm_lcs_kunit_read_then_create_source_thread,
+			   &script, "pkm-lcs-kunit-create-full");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_create_missing_user_path_finish_for_token(
+		token, &ops, -1, (const char __user *)path_src, KEY_READ,
+		NULL, 0, &inputs, (u32 __user *)&disposition);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_CREATED_NEW);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_EQ(test, guid_sequence.calls, 1U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+	KUNIT_EXPECT_STREQ(test, snapshot.last_component, "App");
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.key_guid, child_candidates[0],
+			       sizeof(snapshot.key_guid)),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kacs_free((void *)layer_sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_branch_volatile_parent_denies(
+	struct kunit *test)
+{
+	static const char path_src[] = "Machine\\Blocked";
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = root_guid,
+		.name = "Machine",
+		.volatile_key = true,
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *parent_sd;
+	size_t parent_sd_len = 0;
+	u32 disposition = 0xaaaaaaaaU;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	parent_sd = kacs_rust_kunit_create_file_sd(
+		token, KEY_CREATE_SUB_KEY, 0, 0, 0, &parent_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, parent_sd);
+
+	script.file = &file;
+	script.sd = parent_sd;
+	script.sd_len = parent_sd_len;
+	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+			   "pkm-lcs-kunit-create-vol");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_create_missing_user_path_finish_for_token(
+		token, &ops, -1, (const char __user *)path_src, KEY_READ,
+		NULL, 0, NULL, (u32 __user *)&disposition);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, disposition, 0xaaaaaaaaU);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+
+	pkm_kacs_free((void *)parent_sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_branch_rejects_bad_snapshots(
+	struct kunit *test)
+{
+	static const char path_src[] = "Machine\\App";
+	struct pkm_lcs_create_missing_runtime_inputs bad_inputs = {
+		.scope_count = 1,
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	u32 disposition = 0xaaaaaaaaU;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_user_path_finish_for_token(
+				NULL, &ops, -1, (const char __user *)path_src,
+				KEY_READ, NULL, 0, &bad_inputs,
+				(u32 __user *)&disposition),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, disposition, 0xaaaaaaaaU);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+}
+
 static void pkm_lcs_kunit_sequence_allocation_advances_global_counter(
 	struct kunit *test)
 {
@@ -11909,6 +12140,12 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_prepared_denies_after_source),
 	KUNIT_CASE(pkm_lcs_kunit_create_missing_prepared_bad_inputs),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_branch_created_new_success),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_branch_volatile_parent_denies),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_branch_rejects_bad_snapshots),
 	KUNIT_CASE(
 		pkm_lcs_kunit_sequence_allocation_advances_global_counter),
 	KUNIT_CASE(pkm_lcs_kunit_sequence_allocation_fails_closed),

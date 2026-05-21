@@ -4720,6 +4720,129 @@ out_components:
 	return ret;
 }
 
+static long pkm_lcs_create_missing_runtime_inputs_validate(
+	const struct pkm_lcs_create_missing_runtime_inputs *inputs)
+{
+	if (!inputs)
+		return 0;
+	if ((inputs->scope_count && !inputs->scope_guids) ||
+	    (inputs->layer_count && !inputs->layers) ||
+	    (inputs->private_layer_count && !inputs->private_layers) ||
+	    (inputs->metadata_count && !inputs->metadata) ||
+	    (inputs->active_key_guid_count && !inputs->active_key_guids) ||
+	    (inputs->retired_key_guid_count && !inputs->retired_key_guids))
+		return -EINVAL;
+	if (inputs->base_metadata_present &&
+	    (!inputs->base_metadata_sd || !inputs->base_metadata_sd_len))
+		return -EIO;
+	return 0;
+}
+
+long pkm_lcs_create_missing_user_path_finish_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const char __user *upath, u32 desired_access,
+	const char __user *ulayer, u32 flags,
+	const struct pkm_lcs_create_missing_runtime_inputs *inputs,
+	u32 __user *udisposition)
+{
+	static const struct pkm_lcs_create_missing_runtime_inputs empty_inputs;
+	struct pkm_lcs_create_preflight_plan preflight = { };
+	struct pkm_lcs_create_layer_target target = { };
+	struct pkm_lcs_layer_target_admission_plan target_plan = { };
+	struct pkm_lcs_create_missing_parent_resolution resolution = { };
+	struct pkm_lcs_key_open_access_plan parent_plan = { };
+	struct pkm_lcs_key_open_access_plan link_plan = { };
+	struct pkm_lcs_key_open_access_plan layer_plan = { };
+	struct pkm_lcs_key_guid_assignment_plan guid_plan = { };
+	struct pkm_lcs_created_key_sd created_sd = { };
+	struct pkm_lcs_create_missing_prepared_result prepared = { };
+	long ret;
+
+	prepared.fd = -1;
+	if (!inputs)
+		inputs = &empty_inputs;
+
+	ret = pkm_lcs_create_preflight(desired_access, flags, &preflight);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_create_missing_runtime_inputs_validate(inputs);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_create_missing_parent_for_token(
+		token, ops, parent_fd, upath, inputs->scope_guids,
+		inputs->scope_count, inputs->layers, inputs->layer_count,
+		inputs->private_layers, inputs->private_layer_count,
+		&resolution);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_create_missing_parent_access_check_for_token(
+		token, &resolution, &parent_plan);
+	if (ret)
+		goto out_resolution;
+	ret = pkm_lcs_create_missing_volatile_parent_check(&resolution,
+							   &preflight);
+	if (ret)
+		goto out_resolution;
+	ret = pkm_lcs_create_missing_symlink_authority_for_token(
+		token, &resolution, flags, &link_plan);
+	if (ret)
+		goto out_resolution;
+	ret = pkm_lcs_create_layer_target_prepare(
+		ops, ulayer, inputs->layers, inputs->layer_count, &target,
+		&target_plan);
+	if (ret)
+		goto out_resolution;
+	ret = pkm_lcs_create_layer_write_access_check_for_token(
+		token, &target, inputs->base_metadata_present,
+		inputs->base_metadata_sd, inputs->base_metadata_sd_len,
+		inputs->metadata, inputs->metadata_count, &layer_plan);
+	if (ret)
+		goto out_target;
+	ret = pkm_lcs_assign_new_key_guid(
+		inputs->active_key_guids, inputs->active_key_guid_count,
+		inputs->retired_key_guids, inputs->retired_key_guid_count,
+		inputs->generator, &guid_plan);
+	if (ret)
+		goto out_target;
+	ret = pkm_lcs_create_missing_initial_sd_for_token(
+		token, &resolution, &created_sd);
+	if (ret)
+		goto out_target;
+
+	ret = pkm_lcs_create_missing_prepared_key_for_token(
+		token, &resolution, &target, guid_plan.guid, &created_sd,
+		desired_access, preflight.options.volatile_key,
+		preflight.options.symlink, &prepared);
+	if (ret)
+		goto out_created_sd;
+
+	if (prepared.retry_open_existing) {
+		ret = pkm_lcs_create_missing_retry_open_existing_for_token(
+			token, ops, &resolution, desired_access,
+			inputs->scope_guids, inputs->scope_count,
+			inputs->layers, inputs->layer_count,
+			inputs->private_layers, inputs->private_layer_count,
+			udisposition);
+	} else {
+		ret = pkm_lcs_create_missing_created_result_finish_to_user(
+			ops, udisposition, &prepared);
+	}
+
+out_created_sd:
+	if (ret && prepared.fd >= 0) {
+		close_fd((unsigned int)prepared.fd);
+		prepared.fd = -1;
+	}
+	pkm_lcs_created_key_sd_destroy(&created_sd);
+out_target:
+	pkm_lcs_create_layer_target_destroy(&target);
+out_resolution:
+	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
+	return ret;
+}
+
 static long pkm_lcs_resolved_key_path_prepare(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,

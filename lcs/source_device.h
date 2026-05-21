@@ -179,6 +179,31 @@ struct pkm_lcs_layer_metadata_sd_view {
 	u32 _pad;
 };
 
+struct pkm_lcs_create_missing_runtime_inputs {
+	const u8 (*scope_guids)[16];
+	u32 scope_count;
+	u32 _pad0;
+	const struct pkm_lcs_rsi_layer_view *layers;
+	u32 layer_count;
+	u32 _pad1;
+	const struct pkm_lcs_rsi_private_layer_view *private_layers;
+	u32 private_layer_count;
+	bool base_metadata_present;
+	u8 _pad2[3];
+	const u8 *base_metadata_sd;
+	size_t base_metadata_sd_len;
+	const struct pkm_lcs_layer_metadata_sd_view *metadata;
+	u32 metadata_count;
+	u32 _pad3;
+	const u8 (*active_key_guids)[16];
+	u32 active_key_guid_count;
+	u32 _pad4;
+	const u8 (*retired_key_guids)[16];
+	u32 retired_key_guid_count;
+	u32 _pad5;
+	const struct pkm_lcs_key_guid_generator *generator;
+};
+
 struct pkm_lcs_layer_metadata_sd_selection {
 	u32 index;
 	u32 _pad;
@@ -558,6 +583,12 @@ long pkm_lcs_create_missing_retry_open_existing_for_token(
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count, u32 __user *udisposition);
+long pkm_lcs_create_missing_user_path_finish_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const char __user *upath, u32 desired_access,
+	const char __user *ulayer, u32 flags,
+	const struct pkm_lcs_create_missing_runtime_inputs *inputs,
+	u32 __user *udisposition);
 long pkm_lcs_allocate_sequence(u64 *sequence);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,
