@@ -3235,6 +3235,337 @@ void pkm_lcs_resolved_key_path_destroy(struct pkm_lcs_resolved_key_path *path)
 	memset(path, 0, sizeof(*path));
 }
 
+void pkm_lcs_create_missing_parent_resolution_destroy(
+	struct pkm_lcs_create_missing_parent_resolution *resolution)
+{
+	if (!resolution)
+		return;
+
+	pkm_lcs_resolved_key_path_destroy(&resolution->parent);
+	kfree(resolution->child_name);
+	memset(resolution, 0, sizeof(*resolution));
+}
+
+static long pkm_lcs_create_missing_parent_copy_child(
+	const struct pkm_lcs_path_component_view *component,
+	struct pkm_lcs_create_missing_parent_resolution *result)
+{
+	char *name;
+
+	if (!component || !component->name || !component->name_len || !result)
+		return -EINVAL;
+	if (component->name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD)
+		return -ENAMETOOLONG;
+
+	name = kmemdup_nul(component->name, component->name_len, GFP_KERNEL);
+	if (!name)
+		return -ENOMEM;
+
+	kfree(result->child_name);
+	result->child_name = name;
+	result->child_name_len = component->name_len;
+	return 0;
+}
+
+static long pkm_lcs_create_missing_validate_child_depth(
+	struct pkm_lcs_create_missing_parent_resolution *result)
+{
+	long ret;
+
+	if (!result || !result->parent.component_count)
+		return -EINVAL;
+
+	ret = lcs_rust_validate_relative_open_depth(
+		result->parent.component_count, 1);
+	if (ret)
+		return ret;
+
+	result->child_depth = result->parent.component_count + 1U;
+	return 0;
+}
+
+static long pkm_lcs_resolved_parent_from_snapshot_prepare(
+	const struct pkm_lcs_key_fd_parent_snapshot *parent,
+	struct pkm_lcs_resolved_key_path *result)
+{
+	size_t guid_bytes;
+	u32 i;
+
+	if (!parent || !result || !parent->source_id ||
+	    !parent->path_component_count || !parent->resolved_path ||
+	    !parent->ancestor_guids)
+		return -EINVAL;
+	if (parent->orphaned)
+		return -ENOENT;
+	if (parent->path_component_count > PKM_LCS_MAX_KEY_DEPTH_HARD)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	result->source_id = parent->source_id;
+	result->component_count = parent->path_component_count;
+	memcpy(result->key_guid, parent->key_guid, sizeof(result->key_guid));
+	pkm_lcs_source_response_frame_init(&result->final_frame);
+
+	result->resolved_path = kcalloc(parent->path_component_count,
+					sizeof(*result->resolved_path),
+					GFP_KERNEL);
+	if (!result->resolved_path)
+		return -ENOMEM;
+
+	if (check_mul_overflow((size_t)parent->path_component_count,
+			       sizeof(*result->ancestor_guids), &guid_bytes)) {
+		pkm_lcs_resolved_key_path_destroy(result);
+		return -EINVAL;
+	}
+	result->ancestor_guids = kmemdup(parent->ancestor_guids, guid_bytes,
+					GFP_KERNEL);
+	if (!result->ancestor_guids) {
+		pkm_lcs_resolved_key_path_destroy(result);
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < parent->path_component_count; i++) {
+		if (!parent->resolved_path[i]) {
+			pkm_lcs_resolved_key_path_destroy(result);
+			return -EINVAL;
+		}
+		result->resolved_path[i] = kstrdup(parent->resolved_path[i],
+						   GFP_KERNEL);
+		if (!result->resolved_path[i]) {
+			pkm_lcs_resolved_key_path_destroy(result);
+			return -ENOMEM;
+		}
+	}
+
+	return 0;
+}
+
+static long pkm_lcs_create_missing_read_parent_key(
+	u32 source_id, u64 txn_id, const u8 key_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_resolved_key_path *parent)
+{
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_rsi_read_key_result read_key = { };
+	struct pkm_lcs_source_response_frame frame;
+	long ret;
+
+	if (!source_id || !key_guid || !parent)
+		return -EINVAL;
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+		source_id, txn_id, key_guid, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+		&frame, &response, &enqueue);
+	if (ret)
+		goto out_destroy_frame;
+
+	ret = pkm_lcs_rsi_materialize_read_key_response(
+		frame.data, frame.len, response.request_id, &read_key);
+	if (ret)
+		goto out_destroy_frame;
+	if (!read_key.sd_len ||
+	    (size_t)read_key.sd_offset > frame.len ||
+	    (size_t)read_key.sd_len >
+		    frame.len - (size_t)read_key.sd_offset) {
+		ret = -EIO;
+		goto out_destroy_frame;
+	}
+
+	parent->final_sd_offset = read_key.sd_offset;
+	parent->final_sd_len = read_key.sd_len;
+	parent->final_volatile = read_key.volatile_key != 0;
+	parent->final_symlink = read_key.symlink != 0;
+	parent->final_last_write_time = read_key.last_write_time;
+	parent->final_frame = frame;
+	pkm_lcs_source_response_frame_init(&frame);
+
+out_destroy_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+	return ret;
+}
+
+long pkm_lcs_create_missing_absolute_parent_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const char __user *upath, const u8 (*scope_guids)[16],
+	u32 scope_count, const struct pkm_lcs_rsi_layer_view *layers,
+	u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_create_missing_parent_resolution *result)
+{
+	struct pkm_lcs_materialized_path components = { };
+	struct pkm_lcs_hive_route_result route = { };
+	struct pkm_lcs_syscall_path_copy copy = { };
+	u32 parent_component_count;
+	long ret;
+
+	if (!token || !result)
+		return -EINVAL;
+	if ((layer_count && !layers) ||
+	    (private_layer_count && !private_layers))
+		return -EINVAL;
+	memset(result, 0, sizeof(*result));
+
+	ret = pkm_lcs_syscall_path_copy_from_user(ops, upath, &copy);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_route_absolute_path_for_token(
+		token, copy.path, copy.path_len, true, scope_guids,
+		scope_count, &route);
+	if (ret)
+		goto out_copy;
+
+	ret = pkm_lcs_materialize_absolute_path_components_for_token(
+		token, copy.path, copy.path_len, true, &components);
+	if (ret)
+		goto out_copy;
+	if (components.component_count < 2U) {
+		ret = -EINVAL;
+		goto out_components;
+	}
+
+	ret = pkm_lcs_create_missing_parent_copy_child(
+		&components.components[components.component_count - 1U],
+		result);
+	if (ret)
+		goto out_components;
+
+	parent_component_count = components.component_count - 1U;
+	ret = pkm_lcs_walk_absolute_components_for_open(
+		route.source_id, 0, route.root_guid, components.components,
+		parent_component_count, false, scope_guids, scope_count,
+		layers, layer_count, private_layers, private_layer_count,
+		&result->parent);
+	if (ret)
+		goto out_result;
+
+	ret = pkm_lcs_create_missing_validate_child_depth(result);
+	if (ret)
+		goto out_result;
+
+	pkm_lcs_materialized_path_destroy(&components);
+	pkm_lcs_syscall_path_copy_destroy(&copy);
+	return 0;
+
+out_result:
+	pkm_lcs_create_missing_parent_resolution_destroy(result);
+out_components:
+	pkm_lcs_materialized_path_destroy(&components);
+out_copy:
+	pkm_lcs_syscall_path_copy_destroy(&copy);
+	return ret;
+}
+
+long pkm_lcs_create_missing_relative_parent(
+	const struct pkm_lcs_usercopy_ops *ops, int parent_fd,
+	const char __user *upath, const u8 (*scope_guids)[16],
+	u32 scope_count, const struct pkm_lcs_rsi_layer_view *layers,
+	u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_create_missing_parent_resolution *result)
+{
+	struct pkm_lcs_key_fd_parent_snapshot parent = { };
+	struct pkm_lcs_materialized_path components = { };
+	struct pkm_lcs_path_validation_result path = { };
+	struct pkm_lcs_syscall_path_copy copy = { };
+	long ret;
+
+	if (!result)
+		return -EINVAL;
+	if ((layer_count && !layers) ||
+	    (private_layer_count && !private_layers))
+		return -EINVAL;
+	memset(result, 0, sizeof(*result));
+
+	ret = pkm_lcs_syscall_path_copy_from_user(ops, upath, &copy);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_validate_syscall_relative_path(copy.path, copy.path_len,
+						     &path);
+	if (ret)
+		goto out_copy;
+
+	ret = pkm_lcs_key_fd_parent_snapshot(parent_fd, &parent);
+	if (ret)
+		goto out_copy;
+
+	ret = lcs_rust_validate_relative_open_depth(
+		parent.path_component_count, path.component_count);
+	if (ret)
+		goto out_parent;
+
+	ret = pkm_lcs_materialize_relative_path_components(
+		copy.path, copy.path_len, &components);
+	if (ret)
+		goto out_parent;
+
+	ret = pkm_lcs_create_missing_parent_copy_child(
+		&components.components[components.component_count - 1U],
+		result);
+	if (ret)
+		goto out_components;
+
+	if (components.component_count == 1U) {
+		ret = pkm_lcs_resolved_parent_from_snapshot_prepare(
+			&parent, &result->parent);
+		if (ret)
+			goto out_result;
+		ret = pkm_lcs_create_missing_read_parent_key(
+			parent.source_id, 0, parent.key_guid, &result->parent);
+	} else {
+		ret = pkm_lcs_walk_relative_components_for_open(
+			&parent, 0, components.components,
+			components.component_count - 1U, false, scope_guids,
+			scope_count, layers, layer_count, private_layers,
+			private_layer_count, &result->parent);
+	}
+	if (ret)
+		goto out_result;
+
+	ret = pkm_lcs_create_missing_validate_child_depth(result);
+	if (ret)
+		goto out_result;
+
+	pkm_lcs_materialized_path_destroy(&components);
+	pkm_lcs_key_fd_parent_snapshot_destroy(&parent);
+	pkm_lcs_syscall_path_copy_destroy(&copy);
+	return 0;
+
+out_result:
+	pkm_lcs_create_missing_parent_resolution_destroy(result);
+out_components:
+	pkm_lcs_materialized_path_destroy(&components);
+out_parent:
+	pkm_lcs_key_fd_parent_snapshot_destroy(&parent);
+out_copy:
+	pkm_lcs_syscall_path_copy_destroy(&copy);
+	return ret;
+}
+
+long pkm_lcs_create_missing_parent_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const char __user *upath,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_create_missing_parent_resolution *result)
+{
+	if (parent_fd == -1)
+		return pkm_lcs_create_missing_absolute_parent_for_token(
+			token, ops, upath, scope_guids, scope_count, layers,
+			layer_count, private_layers, private_layer_count,
+			result);
+
+	return pkm_lcs_create_missing_relative_parent(
+		ops, parent_fd, upath, scope_guids, scope_count, layers,
+		layer_count, private_layers, private_layer_count, result);
+}
+
 static long pkm_lcs_resolved_key_path_prepare(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,
@@ -3627,7 +3958,6 @@ static long pkm_lcs_walk_symlink_target(
 			result);
 	}
 
-out_destroy_walk:
 	pkm_lcs_symlink_follow_components_destroy(&walk);
 out_destroy_target:
 	pkm_lcs_symlink_target_resolution_destroy(&target);

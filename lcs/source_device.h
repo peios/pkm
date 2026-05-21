@@ -243,6 +243,13 @@ struct pkm_lcs_resolved_key_path {
 	struct pkm_lcs_source_response_frame final_frame;
 };
 
+struct pkm_lcs_create_missing_parent_resolution {
+	struct pkm_lcs_resolved_key_path parent;
+	char *child_name;
+	u32 child_name_len;
+	u32 child_depth;
+};
+
 struct pkm_lcs_symlink_target_resolution {
 	struct pkm_lcs_hive_route_result route;
 	struct pkm_lcs_materialized_path components;
@@ -388,6 +395,32 @@ long pkm_lcs_create_existing_user_path_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	int parent_fd, const char __user *upath, u32 desired_access, u32 flags,
 	u32 *disposition);
+void pkm_lcs_create_missing_parent_resolution_destroy(
+	struct pkm_lcs_create_missing_parent_resolution *resolution);
+long pkm_lcs_create_missing_absolute_parent_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const char __user *upath, const u8 (*scope_guids)[16],
+	u32 scope_count, const struct pkm_lcs_rsi_layer_view *layers,
+	u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_create_missing_parent_resolution *result);
+long pkm_lcs_create_missing_relative_parent(
+	const struct pkm_lcs_usercopy_ops *ops, int parent_fd,
+	const char __user *upath, const u8 (*scope_guids)[16],
+	u32 scope_count, const struct pkm_lcs_rsi_layer_view *layers,
+	u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_create_missing_parent_resolution *result);
+long pkm_lcs_create_missing_parent_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const char __user *upath,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_create_missing_parent_resolution *result);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,
 	struct pkm_lcs_source_enqueue_result *result);
