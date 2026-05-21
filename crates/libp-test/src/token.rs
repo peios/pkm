@@ -3,7 +3,7 @@
 use clap::Subcommand;
 use libp_token::uapi::{Sid, SidRef};
 use libp_token::{ImpersonationLevel, QueryClass, SelfOpenFlags, Token, TokenType};
-use peios_uapi::token::{
+use libp_token::uapi::{
     KACS_TOKEN_ADJUST_DEFAULT, KACS_TOKEN_ADJUST_GROUPS, KACS_TOKEN_ADJUST_PRIVS,
     KACS_TOKEN_ADJUST_SESSIONID, KACS_TOKEN_ALL_ACCESS, KACS_TOKEN_DUPLICATE,
     KACS_TOKEN_IMPERSONATE, KACS_TOKEN_QUERY, KacsGroupEntry, KacsPrivEntry, PRIVILEGES,
@@ -306,8 +306,8 @@ fn whoami() -> serde_json::Value {
     };
 
     ok(Whoami {
-        user_label: peios_uapi::sid::well_known_label(&user_sid.to_string()),
-        integrity_level_label: peios_uapi::sid::well_known_label(&il.to_string()),
+        user_label: libp_wire::well_known_label(&user_sid.to_string()),
+        integrity_level_label: libp_wire::well_known_label(&il.to_string()),
         user_sid: user_sid.to_string(),
         owner_sid: owner_sid.to_string(),
         primary_group_sid: primary_group_sid.to_string(),
@@ -376,7 +376,7 @@ fn query(class: u32) -> serde_json::Value {
 /// than transmuting — callers passing junk classes should get a clear
 /// message.
 fn query_dispatch(tok: &Token, class: u32) -> Result<Vec<u8>, libp_token::Error> {
-    use peios_uapi::token::*;
+    use libp_token::uapi::*;
     let c = match class {
         TOKEN_CLASS_USER => QueryClass::User,
         TOKEN_CLASS_GROUPS => QueryClass::Groups,
@@ -433,7 +433,7 @@ fn query_user_sid() -> serde_json::Value {
     };
     let owned: Sid = sref.to_owned();
     let text = owned.to_string();
-    let label = peios_uapi::sid::well_known_label(&text);
+    let label = libp_wire::well_known_label(&text);
     ok(UserSidResult {
         sid: text,
         well_known: label,
@@ -558,11 +558,11 @@ fn query_privileges() -> serde_json::Value {
 /// when a test wants `open_process_token` against itself without
 /// having to thread a real pidfd through.
 fn pidfd_self() -> std::io::Result<i32> {
-    use peios_uapi::sys::syscall2;
+    use libp_sys::syscall2;
     // SYS_pidfd_open on x86_64 = 434, SYS_getpid = 39.
     const SYS_PIDFD_OPEN: i64 = 434;
     const SYS_GETPID: i64 = 39;
-    let pid = unsafe { peios_uapi::sys::syscall0(SYS_GETPID) };
+    let pid = unsafe { libp_sys::syscall0(SYS_GETPID) };
     if pid < 0 {
         return Err(std::io::Error::from_raw_os_error(-pid as i32));
     }
@@ -586,7 +586,7 @@ fn open_process(pidfd: Option<i32>, pidfd_self_flag: bool, access: u32) -> serde
         (None, true) => match pidfd_self() {
             Ok(fd) => fd,
             Err(e) => {
-                return err(libp_token::Error::Syscall(peios_uapi::Errno::new(
+                return err(libp_token::Error::Syscall(libp_token::uapi::Errno::new(
                     e.raw_os_error().unwrap_or(0),
                 )));
             }
@@ -611,7 +611,7 @@ fn whoami_via_process() -> serde_json::Value {
     let pidfd = match pidfd_self() {
         Ok(fd) => fd,
         Err(e) => {
-            return err(libp_token::Error::Syscall(peios_uapi::Errno::new(
+            return err(libp_token::Error::Syscall(libp_token::uapi::Errno::new(
                 e.raw_os_error().unwrap_or(0),
             )));
         }
@@ -627,13 +627,13 @@ fn whoami_via_thread() -> serde_json::Value {
     let pidfd = match pidfd_self() {
         Ok(fd) => fd,
         Err(e) => {
-            return err(libp_token::Error::Syscall(peios_uapi::Errno::new(
+            return err(libp_token::Error::Syscall(libp_token::uapi::Errno::new(
                 e.raw_os_error().unwrap_or(0),
             )));
         }
     };
     // tid = 0 means "the main thread" for kacs_open_thread_token.
-    let tid = unsafe { peios_uapi::sys::syscall0(39) }; // getpid; main-thread tid == pid
+    let tid = unsafe { libp_sys::syscall0(39) }; // getpid; main-thread tid == pid
     let tid = if tid < 0 { 0 } else { tid as i32 };
     let tok = match Token::open_thread(pidfd, tid, KACS_TOKEN_QUERY) {
         Result::Ok(t) => t,
@@ -683,8 +683,8 @@ fn whoami_for(tok: &Token) -> serde_json::Value {
     };
 
     ok(Whoami {
-        user_label: peios_uapi::sid::well_known_label(&user_sid.to_string()),
-        integrity_level_label: peios_uapi::sid::well_known_label(&il.to_string()),
+        user_label: libp_wire::well_known_label(&user_sid.to_string()),
+        integrity_level_label: libp_wire::well_known_label(&il.to_string()),
         user_sid: user_sid.to_string(),
         owner_sid: owner_sid.to_string(),
         primary_group_sid: primary_group_sid.to_string(),
@@ -1088,7 +1088,7 @@ fn set_psb_self(mitigations: u32) -> serde_json::Value {
     let pidfd = match pidfd_self() {
         Ok(fd) => fd,
         Err(e) => {
-            return err(libp_token::Error::Syscall(peios_uapi::Errno::new(
+            return err(libp_token::Error::Syscall(libp_token::uapi::Errno::new(
                 e.raw_os_error().unwrap_or(0),
             )));
         }

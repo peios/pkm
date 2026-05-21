@@ -9,8 +9,8 @@ use libp_sd::{
     AccessCheckRequest, AclBuilder, ObjectTypeNode, SdBuilder, SdTarget, SecurityDescriptor,
     SecurityInfo, WellKnownSid,
 };
+use libp_token::uapi::KACS_TOKEN_QUERY;
 use libp_token::{SelfOpenFlags, Token};
-use peios_uapi::token::KACS_TOKEN_QUERY;
 use serde::Serialize;
 
 #[derive(Subcommand, Debug)]
@@ -186,7 +186,7 @@ fn parse(hex: &str) -> serde_json::Value {
 }
 
 fn parse_bytes(bytes: &[u8]) -> serde_json::Value {
-    use peios_uapi::sd::control_bit_names;
+    use libp_sd::control_bit_names;
     let sd = match SecurityDescriptor::parse(bytes) {
         Result::Ok(s) => s,
         Result::Err(e) => return err_sd(libp_sd::Error::Parse(e)),
@@ -208,7 +208,7 @@ fn parse_bytes(bytes: &[u8]) -> serde_json::Value {
                             };
                             aces.push(AceView {
                                 ace_type: ace.ace_type,
-                                ace_type_name: peios_uapi::sd::ace_type_name(ace.ace_type),
+                                ace_type_name: libp_sd::ace_type_name(ace.ace_type),
                                 flags: ace.flags,
                                 mask,
                                 sid,

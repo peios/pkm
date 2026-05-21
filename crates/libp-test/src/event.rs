@@ -93,7 +93,7 @@ fn event_json(ev: &OwnedEvent) -> serde_json::Value {
     json!({
         "sequence": ev.sequence,
         "cpu_id": ev.cpu_id,
-        "origin": peios_uapi::kmes::origin_name(ev.origin),
+        "origin": libp_wire::origin_name(ev.origin),
         "event_type": ev.event_type_str().unwrap_or("<non-utf8>"),
         "timestamp_ns": ev.timestamp_ns,
         "payload_nonce": decode_msgpack_u64(&ev.payload),
@@ -123,7 +123,7 @@ fn pin_cpu0() {
     const SYS_SCHED_SETAFFINITY: i64 = 203;
     let mask: u64 = 1; // bit 0 → CPU 0
     unsafe {
-        peios_uapi::sys::syscall3(
+        libp_sys::syscall3(
             SYS_SCHED_SETAFFINITY,
             0,
             core::mem::size_of::<u64>() as u64,
