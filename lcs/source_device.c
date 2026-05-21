@@ -5338,6 +5338,46 @@ out_resolution:
 	return ret;
 }
 
+long pkm_lcs_reg_create_key_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const char __user *upath, u32 desired_access,
+	const char __user *ulayer, u32 flags,
+	const struct pkm_lcs_create_missing_runtime_inputs *inputs,
+	u32 __user *udisposition)
+{
+	struct pkm_lcs_create_preflight_plan preflight = { };
+	struct pkm_lcs_syscall_path_copy copy = { };
+	long ret;
+
+	ret = pkm_lcs_create_preflight(desired_access, flags, &preflight);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_syscall_path_copy_from_user(ops, upath, &copy);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_create_existing_copied_path_finish_for_token(
+		token, ops, parent_fd, &copy, desired_access, flags,
+		udisposition);
+	if (ret == -ENOENT)
+		ret = pkm_lcs_create_missing_copied_path_finish_for_token(
+			token, ops, parent_fd, &copy, desired_access, ulayer,
+			flags, inputs, udisposition);
+
+	pkm_lcs_syscall_path_copy_destroy(&copy);
+	return ret;
+}
+
+SYSCALL_DEFINE6(reg_create_key, int, parent_fd, const char __user *, path,
+		u32, desired_access, const char __user *, layer, u32, flags,
+		u32 __user *, disposition)
+{
+	return pkm_lcs_reg_create_key_for_token(
+		pkm_kacs_current_effective_token_ptr(), NULL, parent_fd, path,
+		desired_access, layer, flags, NULL, disposition);
+}
+
 static long pkm_lcs_resolved_key_path_prepare(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,

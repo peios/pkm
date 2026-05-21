@@ -639,6 +639,12 @@ long pkm_lcs_create_missing_copied_path_finish_for_token(
 	u32 desired_access, const char __user *ulayer, u32 flags,
 	const struct pkm_lcs_create_missing_runtime_inputs *inputs,
 	u32 __user *udisposition);
+long pkm_lcs_reg_create_key_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const char __user *upath, u32 desired_access,
+	const char __user *ulayer, u32 flags,
+	const struct pkm_lcs_create_missing_runtime_inputs *inputs,
+	u32 __user *udisposition);
 long pkm_lcs_allocate_sequence(u64 *sequence);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,
