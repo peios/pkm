@@ -1,0 +1,19 @@
+[package]
+name = "libp-errno"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Errno newtype and Linux errno constants for the libp-rs stack"
+
+[lib]
+name = "libp_errno"
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+# Enables `From<Errno> for std::io::Error`. Disable for libc-free targets.
+std = []
+
+[dependencies]

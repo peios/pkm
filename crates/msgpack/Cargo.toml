@@ -1,0 +1,19 @@
+[package]
+name = "msgpack"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Minimal no_std MessagePack parser and encoder (general codec, not Peios-specific)"
+
+[lib]
+name = "msgpack"
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+# Enables `Value::render` (pretty-printing via println!) and the std Error impl.
+std = []
+
+[dependencies]

@@ -4,6 +4,9 @@ members = [
     "crates/kacs-core",
     "crates/lcs-core",
     "crates/peios-uapi",
+    "crates/msgpack",
+    "crates/libp-errno",
+    "crates/libp-sys",
     "crates/libp-token",
     "crates/libp-sd",
     "crates/libp-files",
@@ -29,6 +32,9 @@ rust-version = "1.85"
 thiserror = { version = "2", default-features = false }
 
 peios-uapi = { path = "crates/peios-uapi", default-features = false }
+msgpack    = { path = "crates/msgpack", default-features = false }
+libp-errno = { path = "crates/libp-errno", default-features = false }
+libp-sys   = { path = "crates/libp-sys", default-features = false }
 libp-token = { path = "crates/libp-token", default-features = false }
 libp-sd    = { path = "crates/libp-sd", default-features = false }
 libp-files = { path = "crates/libp-files", default-features = false }
