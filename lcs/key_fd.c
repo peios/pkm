@@ -313,6 +313,104 @@ long pkm_lcs_key_fd_relative_base(int fd,
 	return 0;
 }
 
+void pkm_lcs_key_fd_parent_snapshot_destroy(
+	struct pkm_lcs_key_fd_parent_snapshot *snapshot)
+{
+	u32 i;
+
+	if (!snapshot)
+		return;
+
+	if (snapshot->resolved_path) {
+		for (i = 0; i < snapshot->path_component_count; i++)
+			kfree(snapshot->resolved_path[i]);
+		kfree(snapshot->resolved_path);
+	}
+	kfree(snapshot->ancestor_guids);
+	memset(snapshot, 0, sizeof(*snapshot));
+}
+
+static long pkm_lcs_key_fd_copy_parent_snapshot(
+	const struct pkm_lcs_key_fd *key_fd,
+	struct pkm_lcs_key_fd_parent_snapshot *out)
+{
+	size_t guid_bytes;
+	u32 i;
+
+	if (!key_fd || !out || !key_fd->source_id ||
+	    !key_fd->path_component_count || !key_fd->resolved_path ||
+	    !key_fd->ancestor_guids)
+		return -EINVAL;
+
+	out->source_id = key_fd->source_id;
+	out->path_component_count = key_fd->path_component_count;
+	out->orphaned = key_fd->orphaned;
+	memcpy(out->key_guid, key_fd->key_guid, sizeof(out->key_guid));
+
+	out->resolved_path = kcalloc(key_fd->path_component_count,
+				     sizeof(*out->resolved_path),
+				     GFP_KERNEL);
+	if (!out->resolved_path)
+		return -ENOMEM;
+
+	if (check_mul_overflow((size_t)key_fd->path_component_count,
+			       sizeof(*out->ancestor_guids), &guid_bytes)) {
+		pkm_lcs_key_fd_parent_snapshot_destroy(out);
+		return -EINVAL;
+	}
+	out->ancestor_guids = kmemdup(key_fd->ancestor_guids, guid_bytes,
+				      GFP_KERNEL);
+	if (!out->ancestor_guids) {
+		pkm_lcs_key_fd_parent_snapshot_destroy(out);
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < key_fd->path_component_count; i++) {
+		if (!key_fd->resolved_path[i]) {
+			pkm_lcs_key_fd_parent_snapshot_destroy(out);
+			return -EINVAL;
+		}
+		out->resolved_path[i] = kstrdup(key_fd->resolved_path[i],
+						GFP_KERNEL);
+		if (!out->resolved_path[i]) {
+			pkm_lcs_key_fd_parent_snapshot_destroy(out);
+			return -ENOMEM;
+		}
+	}
+
+	return 0;
+}
+
+long pkm_lcs_key_fd_parent_snapshot(int fd,
+				    struct pkm_lcs_key_fd_parent_snapshot *out)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret) {
+		if (ret == -EINVAL)
+			return -EBADF;
+		return ret;
+	}
+
+	if (key_fd->orphaned) {
+		fdput(held);
+		return -ENOENT;
+	}
+
+	ret = pkm_lcs_key_fd_copy_parent_snapshot(key_fd, out);
+	fdput(held);
+	if (ret)
+		pkm_lcs_key_fd_parent_snapshot_destroy(out);
+	return ret;
+}
+
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned)
 {

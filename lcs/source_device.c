@@ -185,6 +185,11 @@ extern int lcs_rust_materialize_absolute_path_components_with_token_sid(
 	struct pkm_lcs_path_component_view *components,
 	size_t component_capacity, u8 *string_buf, size_t string_capacity,
 	struct pkm_lcs_path_component_materialization *result);
+extern int lcs_rust_materialize_relative_path_components(
+	const u8 *path, u32 path_len,
+	struct pkm_lcs_path_component_view *components,
+	size_t component_capacity, u8 *string_buf, size_t string_capacity,
+	struct pkm_lcs_path_component_materialization *result);
 extern int lcs_rust_open_preflight(
 	u32 desired_access, u32 flags,
 	struct pkm_lcs_open_preflight_plan *plan);
@@ -2246,6 +2251,60 @@ out_free:
 	return ret;
 }
 
+long pkm_lcs_materialize_relative_path_components(
+	const char *path, u32 path_len,
+	struct pkm_lcs_materialized_path *result)
+{
+	struct pkm_lcs_path_component_materialization shape = { };
+	struct pkm_lcs_path_component_materialization filled = { };
+	struct pkm_lcs_path_component_view *components;
+	char *strings;
+	long ret;
+
+	if (!path || !result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	ret = lcs_rust_materialize_relative_path_components(
+		(const u8 *)path, path_len, NULL, 0, NULL, 0, &shape);
+	if (ret)
+		return ret;
+	if (!shape.component_count || !shape.string_bytes)
+		return -EINVAL;
+
+	components = kcalloc(shape.component_count, sizeof(*components),
+			     GFP_KERNEL);
+	if (!components)
+		return -ENOMEM;
+	strings = kmalloc(shape.string_bytes, GFP_KERNEL);
+	if (!strings) {
+		kfree(components);
+		return -ENOMEM;
+	}
+
+	ret = lcs_rust_materialize_relative_path_components(
+		(const u8 *)path, path_len, components, shape.component_count,
+		(u8 *)strings, shape.string_bytes, &filled);
+	if (ret)
+		goto out_free;
+	if (filled.component_count != shape.component_count ||
+	    filled.string_bytes != shape.string_bytes) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	result->components = components;
+	result->strings = strings;
+	result->component_count = filled.component_count;
+	result->string_bytes = filled.string_bytes;
+	return 0;
+
+out_free:
+	kfree(components);
+	kfree(strings);
+	return ret;
+}
+
 long pkm_lcs_open_user_absolute_path_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	const char __user *upath, u32 desired_access, u32 flags,
@@ -2337,6 +2396,112 @@ out_resolved:
 	pkm_lcs_resolved_key_path_destroy(&resolved);
 out_components:
 	pkm_lcs_materialized_path_destroy(&components);
+out_copy:
+	pkm_lcs_syscall_path_copy_destroy(&copy);
+	return ret;
+}
+
+long pkm_lcs_open_user_relative_path_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const char __user *upath, u32 desired_access, u32 flags,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count)
+{
+	struct pkm_lcs_key_fd_publish_input publish = { };
+	struct pkm_lcs_key_fd_parent_snapshot parent = { };
+	struct pkm_lcs_key_open_access_plan access = { };
+	struct pkm_lcs_materialized_path components = { };
+	struct pkm_lcs_open_preflight_plan preflight = { };
+	struct pkm_lcs_path_validation_result path = { };
+	struct pkm_lcs_resolved_key_path resolved = { };
+	struct pkm_lcs_syscall_path_copy copy = { };
+	const u8 *final_sd;
+	long audit_ret;
+	long ret;
+
+	if (!token)
+		return -EACCES;
+	if ((layer_count && !layers) ||
+	    (private_layer_count && !private_layers))
+		return -EINVAL;
+
+	ret = pkm_lcs_open_preflight(desired_access, flags, &preflight);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_syscall_path_copy_from_user(ops, upath, &copy);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_validate_syscall_relative_path(copy.path, copy.path_len,
+						     &path);
+	if (ret)
+		goto out_copy;
+
+	ret = pkm_lcs_key_fd_parent_snapshot(parent_fd, &parent);
+	if (ret)
+		goto out_copy;
+
+	ret = lcs_rust_validate_relative_open_depth(
+		parent.path_component_count, path.component_count);
+	if (ret)
+		goto out_parent;
+
+	ret = pkm_lcs_materialize_relative_path_components(
+		copy.path, copy.path_len, &components);
+	if (ret)
+		goto out_parent;
+
+	ret = pkm_lcs_walk_relative_components(
+		&parent, 0, components.components, components.component_count,
+		layers, layer_count, private_layers, private_layer_count,
+		&resolved);
+	if (ret)
+		goto out_components;
+
+	if (!resolved.final_frame.data || !resolved.final_sd_len ||
+	    (size_t)resolved.final_sd_offset > resolved.final_frame.len ||
+	    (size_t)resolved.final_sd_len >
+		    resolved.final_frame.len -
+			    (size_t)resolved.final_sd_offset) {
+		ret = -EIO;
+		goto out_resolved;
+	}
+
+	final_sd = resolved.final_frame.data + resolved.final_sd_offset;
+	ret = pkm_lcs_key_open_access_check_for_token(
+		token, final_sd, resolved.final_sd_len, desired_access,
+		&access);
+	if (ret) {
+		if (ret == -EACCES && access.key_open_sacl_audit_required) {
+			audit_ret = pkm_lcs_emit_key_open_audit_for_token(
+				token, resolved.key_guid, &access);
+			if (audit_ret)
+				ret = audit_ret;
+		}
+		goto out_resolved;
+	}
+
+	ret = pkm_lcs_emit_key_open_audit_for_token(
+		token, resolved.key_guid, &access);
+	if (ret)
+		goto out_resolved;
+
+	publish.source_id = resolved.source_id;
+	memcpy(publish.key_guid, resolved.key_guid, sizeof(publish.key_guid));
+	publish.granted_access = access.fd_granted_access;
+	publish.resolved_path = (const char * const *)resolved.resolved_path;
+	publish.ancestor_guids = resolved.ancestor_guids;
+	publish.path_component_count = resolved.component_count;
+	ret = pkm_lcs_key_fd_publish(&publish);
+
+out_resolved:
+	pkm_lcs_resolved_key_path_destroy(&resolved);
+out_components:
+	pkm_lcs_materialized_path_destroy(&components);
+out_parent:
+	pkm_lcs_key_fd_parent_snapshot_destroy(&parent);
 out_copy:
 	pkm_lcs_syscall_path_copy_destroy(&copy);
 	return ret;
@@ -2465,6 +2630,183 @@ long pkm_lcs_walk_absolute_components(
 		}
 
 		memcpy(result->ancestor_guids[i], child.key_guid,
+		       RSI_GUID_SIZE);
+		memcpy(current_guid, child.key_guid, sizeof(current_guid));
+		if (i == component_count - 1U) {
+			memcpy(result->key_guid, child.key_guid,
+			       sizeof(result->key_guid));
+			result->final_sd_offset = child.sd_offset;
+			result->final_sd_len = child.sd_len;
+			result->final_volatile = child.volatile_key != 0;
+			result->final_symlink = child.symlink != 0;
+			result->final_last_write_time = child.last_write_time;
+			result->final_frame = frame;
+			pkm_lcs_source_response_frame_init(&frame);
+		}
+out_destroy_frame:
+		pkm_lcs_source_response_frame_destroy(&frame);
+		if (ret)
+			goto out_destroy;
+	}
+
+	return 0;
+
+out_destroy:
+	pkm_lcs_resolved_key_path_destroy(result);
+	return ret;
+}
+
+static long pkm_lcs_resolved_key_path_prepare_relative(
+	const struct pkm_lcs_key_fd_parent_snapshot *parent,
+	const struct pkm_lcs_path_component_view *components,
+	u32 component_count, struct pkm_lcs_resolved_key_path *result)
+{
+	size_t total_count;
+	size_t guid_bytes;
+	u32 parent_count;
+	u32 i;
+	long ret;
+
+	if (!parent || !components || !result || !parent->source_id ||
+	    !parent->path_component_count || !parent->resolved_path ||
+	    !parent->ancestor_guids || !component_count)
+		return -EINVAL;
+	if (parent->orphaned)
+		return -ENOENT;
+	if (check_add_overflow((size_t)parent->path_component_count,
+			       (size_t)component_count, &total_count))
+		return -EINVAL;
+	if (!total_count || total_count > PKM_LCS_MAX_KEY_DEPTH_HARD ||
+	    total_count > U32_MAX)
+		return -EINVAL;
+
+	parent_count = parent->path_component_count;
+	result->source_id = parent->source_id;
+	result->component_count = (u32)total_count;
+	pkm_lcs_source_response_frame_init(&result->final_frame);
+
+	result->resolved_path = kcalloc(total_count,
+					sizeof(*result->resolved_path),
+					GFP_KERNEL);
+	if (!result->resolved_path)
+		return -ENOMEM;
+	result->ancestor_guids = kcalloc(total_count,
+					 sizeof(*result->ancestor_guids),
+					 GFP_KERNEL);
+	if (!result->ancestor_guids)
+		goto out_nomem;
+
+	if (check_mul_overflow((size_t)parent_count,
+			       sizeof(*result->ancestor_guids), &guid_bytes)) {
+		ret = -EINVAL;
+		goto out_error;
+	}
+	memcpy(result->ancestor_guids, parent->ancestor_guids, guid_bytes);
+
+	for (i = 0; i < parent_count; i++) {
+		if (!parent->resolved_path[i]) {
+			ret = -EINVAL;
+			goto out_error;
+		}
+		result->resolved_path[i] =
+			kstrdup(parent->resolved_path[i], GFP_KERNEL);
+		if (!result->resolved_path[i])
+			goto out_nomem;
+	}
+
+	for (i = 0; i < component_count; i++) {
+		u32 path_index = parent_count + i;
+
+		if (!components[i].name || !components[i].name_len) {
+			ret = -EINVAL;
+			goto out_error;
+		}
+		if (components[i].name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD) {
+			ret = -ENAMETOOLONG;
+			goto out_error;
+		}
+		result->resolved_path[path_index] =
+			kmemdup_nul(components[i].name,
+				    components[i].name_len, GFP_KERNEL);
+		if (!result->resolved_path[path_index])
+			goto out_nomem;
+	}
+
+	return 0;
+
+out_nomem:
+	pkm_lcs_resolved_key_path_destroy(result);
+	return -ENOMEM;
+out_error:
+	pkm_lcs_resolved_key_path_destroy(result);
+	return ret;
+}
+
+long pkm_lcs_walk_relative_components(
+	const struct pkm_lcs_key_fd_parent_snapshot *parent, u64 txn_id,
+	const struct pkm_lcs_path_component_view *components,
+	u32 component_count, const struct pkm_lcs_rsi_layer_view *layers,
+	u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
+{
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_rsi_lookup_child_result child = { };
+	struct pkm_lcs_source_response_frame frame;
+	u8 current_guid[RSI_GUID_SIZE];
+	u64 next_sequence;
+	u32 parent_count;
+	u32 i;
+	long ret;
+
+	if (!result)
+		return -EINVAL;
+	memset(result, 0, sizeof(*result));
+	if ((layer_count && !layers) ||
+	    (private_layer_count && !private_layers))
+		return -EINVAL;
+
+	ret = pkm_lcs_resolved_key_path_prepare_relative(
+		parent, components, component_count, result);
+	if (ret)
+		goto out_destroy;
+
+	parent_count = parent->path_component_count;
+	memcpy(current_guid, parent->key_guid, sizeof(current_guid));
+	for (i = 0; i < component_count; i++) {
+		u32 path_index = parent_count + i;
+
+		pkm_lcs_source_response_frame_init(&frame);
+		ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
+			parent->source_id, txn_id, current_guid,
+			components[i].name, components[i].name_len,
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
+			&enqueue);
+		if (ret)
+			goto out_destroy_frame;
+
+		ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+		if (ret)
+			goto out_destroy_frame;
+
+		ret = pkm_lcs_rsi_materialize_lookup_child(
+			frame.data, frame.len, response.request_id,
+			next_sequence, components[i].name,
+			components[i].name_len, layers, layer_count,
+			private_layers, private_layer_count, &child);
+		if (ret)
+			goto out_destroy_frame;
+		if (!child.found) {
+			ret = -ENOENT;
+			goto out_destroy_frame;
+		}
+		if (child.symlink) {
+			ret = -EOPNOTSUPP;
+			goto out_destroy_frame;
+		}
+
+		memcpy(result->ancestor_guids[path_index], child.key_guid,
 		       RSI_GUID_SIZE);
 		memcpy(current_guid, child.key_guid, sizeof(current_guid));
 		if (i == component_count - 1U) {

@@ -305,8 +305,17 @@ long pkm_lcs_open_user_relative_path_preflight(
 long pkm_lcs_materialize_absolute_path_components_for_token(
 	const void *token, const char *path, u32 path_len,
 	bool rewrite_current_user, struct pkm_lcs_materialized_path *result);
+long pkm_lcs_materialize_relative_path_components(
+	const char *path, u32 path_len,
+	struct pkm_lcs_materialized_path *result);
 void pkm_lcs_materialized_path_destroy(
 	struct pkm_lcs_materialized_path *path);
+long pkm_lcs_open_user_relative_path_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const char __user *upath, u32 desired_access, u32 flags,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,
 	struct pkm_lcs_source_enqueue_result *result);
@@ -343,6 +352,13 @@ long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
 	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_walk_absolute_components(
 	u32 source_id, u64 txn_id, const u8 root_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_path_component_view *components,
+	u32 component_count, const struct pkm_lcs_rsi_layer_view *layers,
+	u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result);
+long pkm_lcs_walk_relative_components(
+	const struct pkm_lcs_key_fd_parent_snapshot *parent, u64 txn_id,
 	const struct pkm_lcs_path_component_view *components,
 	u32 component_count, const struct pkm_lcs_rsi_layer_view *layers,
 	u32 layer_count,
