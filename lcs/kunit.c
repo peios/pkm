@@ -5418,6 +5418,96 @@ static void pkm_lcs_kunit_transaction_status_rejects_bad_inputs(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_transaction_commit_precheck_unbound_terminal(
+	struct kunit *test)
+{
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_commit((int)fd),
+			(long)-EINVAL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_COMMITTED, 0),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_commit((int)fd),
+			(long)-EINVAL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_ABORTED, 0),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_commit((int)fd),
+			(long)-EINVAL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_commit_precheck_timeout_source_down(
+	struct kunit *test)
+{
+	long fd;
+
+	fd = pkm_lcs_transaction_fd_publish(1);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	msleep(20);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_commit((int)fd),
+			(long)-ETIMEDOUT);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_SOURCE_DOWN, 7),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_commit((int)fd),
+			(long)-EIO);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_commit_precheck_bound_fails_closed(
+	struct kunit *test)
+{
+	struct reg_txn_status_args status = { };
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_ACTIVE_BOUND, 11),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_commit((int)fd),
+			(long)-EIO);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_status((int)fd, &status), 0L);
+	KUNIT_EXPECT_EQ(test, status.state, REG_TXN_ACTIVE_BOUND);
+	KUNIT_EXPECT_EQ(test, status.terminal_errno, 0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_commit_rejects_bad_fds(
+	struct kunit *test)
+{
+	int fd;
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_commit(-1),
+			(long)-EBADF);
+
+	fd = anon_inode_getfd("lcs-not-transaction-commit",
+			      &pkm_lcs_kunit_non_key_fops, NULL, O_CLOEXEC);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_commit(fd),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_relative_open_preflight_success(struct kunit *test)
 {
 	const char path_src[] = "Child/Sub";
@@ -12802,6 +12892,13 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_transaction_status_reports_timeout_errno),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_status_maps_terminal_errno),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_status_rejects_bad_inputs),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_commit_precheck_unbound_terminal),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_commit_precheck_timeout_source_down),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_commit_precheck_bound_fails_closed),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_commit_rejects_bad_fds),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_success),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_stops_bad_scalars),
 	KUNIT_CASE(

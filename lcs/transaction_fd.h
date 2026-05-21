@@ -18,6 +18,7 @@ struct pkm_lcs_transaction_fd_snapshot {
 
 long pkm_lcs_transaction_fd_publish(u32 timeout_ms);
 long pkm_lcs_reg_begin_transaction(void);
+long pkm_lcs_transaction_fd_commit(int fd);
 long pkm_lcs_transaction_fd_status(int fd, struct reg_txn_status_args *out);
 long pkm_lcs_transaction_fd_snapshot(
 	int fd, struct pkm_lcs_transaction_fd_snapshot *out);

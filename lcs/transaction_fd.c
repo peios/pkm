@@ -170,6 +170,34 @@ static long pkm_lcs_transaction_fd_status_from_state(
 	return 0;
 }
 
+static long pkm_lcs_transaction_fd_commit_from_state(
+	struct pkm_lcs_transaction_fd *txn)
+{
+	u32 state;
+
+	if (!txn)
+		return -EINVAL;
+
+	spin_lock(&txn->lock);
+	state = txn->state;
+	spin_unlock(&txn->lock);
+
+	switch (state) {
+	case REG_TXN_ACTIVE_UNBOUND:
+	case REG_TXN_COMMITTED:
+	case REG_TXN_ABORTED:
+		return -EINVAL;
+	case REG_TXN_TIMED_OUT:
+		return -ETIMEDOUT;
+	case REG_TXN_SOURCE_DOWN:
+		return -EIO;
+	case REG_TXN_ACTIVE_BOUND:
+		return -EIO;
+	default:
+		return -EIO;
+	}
+}
+
 static __poll_t pkm_lcs_transaction_fd_poll(struct file *file,
 					    struct poll_table_struct *wait)
 {
@@ -210,6 +238,8 @@ static long pkm_lcs_transaction_fd_ioctl(struct file *file, unsigned int cmd,
 		return -EINVAL;
 
 	switch (cmd) {
+	case REG_IOC_COMMIT:
+		return pkm_lcs_transaction_fd_commit_from_state(txn);
 	case REG_IOC_TXN_STATUS:
 		if (!arg)
 			return -EFAULT;
@@ -339,6 +369,21 @@ long pkm_lcs_transaction_fd_status(int fd, struct reg_txn_status_args *out)
 		return ret;
 
 	ret = pkm_lcs_transaction_fd_status_from_state(txn, out);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_transaction_fd_commit(int fd)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_transaction_fd_commit_from_state(txn);
 	fdput(held);
 	return ret;
 }
