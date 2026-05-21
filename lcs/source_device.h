@@ -25,6 +25,7 @@ enum pkm_lcs_source_fd_state {
 
 #define PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT 256U
 #define PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT 30000U
+#define PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT 16U
 
 struct pkm_lcs_source_in_flight_request {
 	bool occupied;
