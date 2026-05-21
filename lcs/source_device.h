@@ -291,6 +291,13 @@ long pkm_lcs_open_user_absolute_path_preflight_for_token(
 	bool rewrite_current_user, const u8 (*scope_guids)[16],
 	u32 scope_count, struct pkm_lcs_open_preflight_plan *plan,
 	struct pkm_lcs_hive_route_result *route);
+long pkm_lcs_open_user_absolute_path_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const char __user *upath, u32 desired_access, u32 flags,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count);
 long pkm_lcs_open_user_relative_path_preflight(
 	const struct pkm_lcs_usercopy_ops *ops, int parent_fd,
 	const char __user *upath, u32 desired_access, u32 flags,
