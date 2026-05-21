@@ -405,29 +405,81 @@ static long pkm_lcs_transaction_fd_status_from_state(
 static long pkm_lcs_transaction_fd_commit_from_state(
 	struct pkm_lcs_transaction_fd *txn)
 {
+	u64 transaction_id;
+	u32 source_id;
 	u32 state;
+	long ret;
+	u32 count;
 
 	if (!txn)
 		return -EINVAL;
 
+	mutex_lock(&txn->bind_lock);
+
 	spin_lock(&txn->lock);
 	state = txn->state;
+	transaction_id = txn->transaction_id;
+	source_id = txn->bound_source_id;
 	spin_unlock(&txn->lock);
 
 	switch (state) {
 	case REG_TXN_ACTIVE_UNBOUND:
 	case REG_TXN_COMMITTED:
 	case REG_TXN_ABORTED:
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_unlock;
 	case REG_TXN_TIMED_OUT:
-		return -ETIMEDOUT;
+		ret = -ETIMEDOUT;
+		goto out_unlock;
 	case REG_TXN_SOURCE_DOWN:
-		return -EIO;
+		ret = -EIO;
+		goto out_unlock;
 	case REG_TXN_ACTIVE_BOUND:
-		return -EIO;
+		if (!transaction_id || !source_id) {
+			ret = -EIO;
+			goto out_unlock;
+		}
+		break;
 	default:
-		return -EIO;
+		ret = -EIO;
+		goto out_unlock;
 	}
+
+	ret = pkm_lcs_source_commit_transaction_round_trip(
+		source_id, transaction_id, NULL, NULL);
+	if (ret)
+		goto out_unlock;
+
+	spin_lock(&txn->lock);
+	if (txn->state == REG_TXN_ACTIVE_BOUND &&
+	    txn->transaction_id == transaction_id &&
+	    txn->bound_source_id == source_id) {
+		txn->state = REG_TXN_COMMITTED;
+		ret = 0;
+	} else if (txn->state == REG_TXN_TIMED_OUT) {
+		ret = -ETIMEDOUT;
+	} else if (txn->state == REG_TXN_SOURCE_DOWN) {
+		ret = -EIO;
+	} else {
+		ret = -EINVAL;
+	}
+	spin_unlock(&txn->lock);
+	if (ret)
+		goto out_unlock;
+
+	timer_delete_sync(&txn->timeout_timer);
+	pkm_lcs_transaction_log_clear(txn);
+	/*
+	 * The source has already committed durably. Counter-release failure is
+	 * an internal bookkeeping inconsistency, not a reason to report commit
+	 * failure to the caller.
+	 */
+	(void)pkm_lcs_source_bound_transaction_release(source_id, &count);
+	wake_up_all(&txn->wait);
+
+out_unlock:
+	mutex_unlock(&txn->bind_lock);
+	return ret;
 }
 
 static __poll_t pkm_lcs_transaction_fd_poll(struct file *file,
