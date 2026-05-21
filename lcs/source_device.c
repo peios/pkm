@@ -3702,6 +3702,22 @@ long pkm_lcs_reg_create_key_finish_success_to_user(
 	return fd;
 }
 
+long pkm_lcs_create_existing_user_path_finish_for_token(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const char __user *upath, u32 desired_access, u32 flags,
+	u32 __user *udisposition)
+{
+	long fd;
+
+	fd = pkm_lcs_create_existing_user_path_for_token(
+		token, ops, parent_fd, upath, desired_access, flags, NULL);
+	if (fd < 0)
+		return fd;
+
+	return pkm_lcs_reg_create_key_finish_success_to_user(
+		ops, udisposition, fd, REG_OPENED_EXISTING);
+}
+
 void pkm_lcs_resolved_key_path_destroy(struct pkm_lcs_resolved_key_path *path)
 {
 	u32 i;

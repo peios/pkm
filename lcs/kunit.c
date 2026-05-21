@@ -2653,6 +2653,159 @@ static void pkm_lcs_kunit_create_existing_accepts_null_disposition(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_create_existing_finish_copies_disposition(
+	struct kunit *test)
+{
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	const char path_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = root_guid,
+		.name = "Machine",
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	u32 disposition = 0;
+	long fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	script.file = &file;
+	script.sd = sd;
+	script.sd_len = sd_len;
+
+	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+			   "pkm-lcs-kunit-create-existing-finish");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_create_existing_user_path_finish_for_token(
+		token, &ops, -1, (const char __user *)path_src, KEY_READ,
+		REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK,
+		(u32 __user *)&disposition);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, disposition, REG_OPENED_EXISTING);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)fd, &snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_existing_finish_null_disposition(
+	struct kunit *test)
+{
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	const char path_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = root_guid,
+		.name = "Machine",
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	long fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	script.file = &file;
+	script.sd = sd;
+	script.sd_len = sd_len;
+
+	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+			   "pkm-lcs-kunit-create-existing-finish-null");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_create_existing_user_path_finish_for_token(
+		token, &ops, -1, (const char __user *)path_src, KEY_READ, 0,
+		NULL);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_existing_finish_faults_disposition(
+	struct kunit *test)
+{
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	const char path_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = root_guid,
+		.name = "Machine",
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	u32 disposition = 0;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	script.file = &file;
+	script.sd = sd;
+	script.sd_len = sd_len;
+	ctx.fault_dst = &disposition;
+
+	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+			   "pkm-lcs-kunit-create-existing-finish-fault");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_create_existing_user_path_finish_for_token(
+		token, &ops, -1, (const char __user *)path_src, KEY_READ, 0,
+		(u32 __user *)&disposition);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, disposition, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_create_disposition_copyout_success(
 	struct kunit *test)
 {
@@ -11098,6 +11251,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_syscall_rejects_null_token),
 	KUNIT_CASE(pkm_lcs_kunit_create_existing_absolute_sets_disposition),
 	KUNIT_CASE(pkm_lcs_kunit_create_existing_accepts_null_disposition),
+	KUNIT_CASE(pkm_lcs_kunit_create_existing_finish_copies_disposition),
+	KUNIT_CASE(pkm_lcs_kunit_create_existing_finish_null_disposition),
+	KUNIT_CASE(pkm_lcs_kunit_create_existing_finish_faults_disposition),
 	KUNIT_CASE(pkm_lcs_kunit_create_disposition_copyout_success),
 	KUNIT_CASE(pkm_lcs_kunit_create_disposition_copyout_null_is_noop),
 	KUNIT_CASE(pkm_lcs_kunit_create_disposition_copyout_faults),
