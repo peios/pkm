@@ -2949,7 +2949,7 @@ out_root_frame:
 	ret = pkm_lcs_walk_absolute_components_for_open(
 		route.source_id, 0, route.root_guid, components.components,
 		components.component_count, (flags & REG_OPEN_LINK) != 0,
-		layers, layer_count,
+		scope_guids, scope_count, layers, layer_count,
 		private_layers, private_layer_count, &resolved);
 	if (ret)
 		goto out_components;
@@ -3030,7 +3030,7 @@ long pkm_lcs_open_user_relative_path_for_token(
 
 	ret = pkm_lcs_walk_relative_components_for_open(
 		&parent, 0, components.components, components.component_count,
-		(flags & REG_OPEN_LINK) != 0, layers, layer_count,
+		(flags & REG_OPEN_LINK) != 0, NULL, 0, layers, layer_count,
 		private_layers, private_layer_count,
 		&resolved);
 	if (ret)
@@ -3127,7 +3127,50 @@ static long pkm_lcs_resolved_key_path_prepare(
 static long pkm_lcs_walk_absolute_components_impl(
 	u32 source_id, u64 txn_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,
-	u32 component_count, bool open_final_link,
+	u32 component_count, bool open_final_link, bool follow_final_symlink,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result);
+
+static long pkm_lcs_walk_final_symlink_target(
+	u32 source_id, u64 txn_id, const u8 link_guid[RSI_GUID_SIZE],
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
+{
+	struct pkm_lcs_symlink_target_resolution target = { };
+	long ret;
+
+	ret = pkm_lcs_resolve_symlink_target_for_key(
+		source_id, txn_id, link_guid, scope_guids, scope_count,
+		layers, layer_count, private_layers, private_layer_count,
+		&target);
+	if (ret)
+		return ret;
+	if (target.components.component_count < 2) {
+		ret = -EOPNOTSUPP;
+		goto out_destroy_target;
+	}
+
+	pkm_lcs_resolved_key_path_destroy(result);
+	ret = pkm_lcs_walk_absolute_components_impl(
+		target.route.source_id, txn_id, target.route.root_guid,
+		target.components.components, target.components.component_count,
+		false, false, scope_guids, scope_count, layers, layer_count,
+		private_layers, private_layer_count, result);
+
+out_destroy_target:
+	pkm_lcs_symlink_target_resolution_destroy(&target);
+	return ret;
+}
+
+static long pkm_lcs_walk_absolute_components_impl(
+	u32 source_id, u64 txn_id, const u8 root_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_path_component_view *components,
+	u32 component_count, bool open_final_link, bool follow_final_symlink,
+	const u8 (*scope_guids)[16], u32 scope_count,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
@@ -3188,10 +3231,22 @@ static long pkm_lcs_walk_absolute_components_impl(
 			ret = -ENOENT;
 			goto out_destroy_frame;
 		}
-		if (child.symlink &&
-		    !(open_final_link && i == component_count - 1U)) {
-			ret = -EOPNOTSUPP;
-			goto out_destroy_frame;
+		if (child.symlink) {
+			if (open_final_link && i == component_count - 1U) {
+				/* Open the link key itself. */
+			} else if (follow_final_symlink &&
+				   i == component_count - 1U) {
+				ret = pkm_lcs_walk_final_symlink_target(
+					source_id, txn_id, child.key_guid,
+					scope_guids, scope_count, active_layers,
+					active_layer_count,
+					active_private_layers,
+					active_private_layer_count, result);
+				goto out_destroy_frame;
+			} else {
+				ret = -EOPNOTSUPP;
+				goto out_destroy_frame;
+			}
 		}
 
 		memcpy(result->ancestor_guids[i], child.key_guid,
@@ -3225,14 +3280,15 @@ long pkm_lcs_walk_absolute_components_for_open(
 	u32 source_id, u64 txn_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,
 	u32 component_count, bool open_final_link,
+	const u8 (*scope_guids)[16], u32 scope_count,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
 {
 	return pkm_lcs_walk_absolute_components_impl(
 		source_id, txn_id, root_guid, components, component_count,
-		open_final_link, layers, layer_count, private_layers,
-		private_layer_count, result);
+		open_final_link, true, scope_guids, scope_count, layers,
+		layer_count, private_layers, private_layer_count, result);
 }
 
 long pkm_lcs_walk_absolute_components(
@@ -3245,8 +3301,8 @@ long pkm_lcs_walk_absolute_components(
 {
 	return pkm_lcs_walk_absolute_components_impl(
 		source_id, txn_id, root_guid, components, component_count,
-		false, layers, layer_count, private_layers, private_layer_count,
-		result);
+		false, false, NULL, 0, layers, layer_count, private_layers,
+		private_layer_count, result);
 }
 
 static long pkm_lcs_resolved_key_path_prepare_relative(
@@ -3338,7 +3394,8 @@ out_error:
 static long pkm_lcs_walk_relative_components_impl(
 	const struct pkm_lcs_key_fd_parent_snapshot *parent, u64 txn_id,
 	const struct pkm_lcs_path_component_view *components,
-	u32 component_count, bool open_final_link,
+	u32 component_count, bool open_final_link, bool follow_final_symlink,
+	const u8 (*scope_guids)[16], u32 scope_count,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
@@ -3402,10 +3459,23 @@ static long pkm_lcs_walk_relative_components_impl(
 			ret = -ENOENT;
 			goto out_destroy_frame;
 		}
-		if (child.symlink &&
-		    !(open_final_link && i == component_count - 1U)) {
-			ret = -EOPNOTSUPP;
-			goto out_destroy_frame;
+		if (child.symlink) {
+			if (open_final_link && i == component_count - 1U) {
+				/* Open the link key itself. */
+			} else if (follow_final_symlink &&
+				   i == component_count - 1U) {
+				ret = pkm_lcs_walk_final_symlink_target(
+					parent->source_id, txn_id,
+					child.key_guid, scope_guids,
+					scope_count, active_layers,
+					active_layer_count,
+					active_private_layers,
+					active_private_layer_count, result);
+				goto out_destroy_frame;
+			} else {
+				ret = -EOPNOTSUPP;
+				goto out_destroy_frame;
+			}
 		}
 
 		memcpy(result->ancestor_guids[path_index], child.key_guid,
@@ -3439,14 +3509,15 @@ long pkm_lcs_walk_relative_components_for_open(
 	const struct pkm_lcs_key_fd_parent_snapshot *parent, u64 txn_id,
 	const struct pkm_lcs_path_component_view *components,
 	u32 component_count, bool open_final_link,
+	const u8 (*scope_guids)[16], u32 scope_count,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
 {
 	return pkm_lcs_walk_relative_components_impl(
 		parent, txn_id, components, component_count, open_final_link,
-		layers, layer_count, private_layers, private_layer_count,
-		result);
+		true, scope_guids, scope_count, layers, layer_count,
+		private_layers, private_layer_count, result);
 }
 
 long pkm_lcs_walk_relative_components(
@@ -3458,8 +3529,9 @@ long pkm_lcs_walk_relative_components(
 	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
 {
 	return pkm_lcs_walk_relative_components_impl(
-		parent, txn_id, components, component_count, false, layers,
-		layer_count, private_layers, private_layer_count, result);
+		parent, txn_id, components, component_count, false, false, NULL,
+		0, layers, layer_count, private_layers, private_layer_count,
+		result);
 }
 
 static int pkm_lcs_source_device_open(struct inode *inode, struct file *file)

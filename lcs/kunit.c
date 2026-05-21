@@ -146,12 +146,26 @@ struct pkm_lcs_kunit_query_values_source_script {
 	int result;
 };
 
+struct pkm_lcs_kunit_symlink_follow_source_script {
+	struct file *file;
+	struct pkm_lcs_kunit_walk_source_step link_step;
+	struct pkm_lcs_kunit_walk_source_step target_step;
+	const u8 *target_data;
+	size_t target_data_len;
+	u32 target_value_type;
+	bool expect_target_lookup;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
 static void pkm_lcs_kunit_setup_registered_source(struct kunit *test,
 						  struct file *file,
 						  const void **token_out);
 static int pkm_lcs_kunit_walk_source_thread(void *raw_script);
 static int pkm_lcs_kunit_read_key_source_thread(void *raw_script);
 static int pkm_lcs_kunit_query_values_source_thread(void *raw_script);
+static int pkm_lcs_kunit_symlink_follow_source_thread(void *raw_script);
 
 static const struct file_operations pkm_lcs_kunit_non_key_fops = { };
 
@@ -1679,24 +1693,109 @@ static void pkm_lcs_kunit_open_absolute_final_symlink_open_link(
 	kacs_rust_token_drop(token);
 }
 
-static void
-pkm_lcs_kunit_open_absolute_final_symlink_without_open_link_fails_closed(
+static void pkm_lcs_kunit_open_absolute_final_symlink_follows_target(
 	struct kunit *test)
 {
 	static const u8 link_guid[RSI_GUID_SIZE] = {
 		0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c,
 		0x9d, 0x9e, 0x9f, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4,
 	};
+	static const u8 target_guid[RSI_GUID_SIZE] = {
+		0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac,
+		0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4,
+	};
+	static const u8 target_path[] = "Machine\\Target";
 	const char path_src[] = "Machine\\Link";
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
-	struct pkm_lcs_kunit_walk_source_step steps[1] = {
-		{ .expected_child = "Link", .guid = link_guid,
-		  .symlink = true },
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct pkm_lcs_kunit_symlink_follow_source_script script = {
+		.link_step = {
+			.expected_child = "Link",
+			.guid = link_guid,
+			.symlink = true,
+		},
+		.target_step = {
+			.expected_child = "Target",
+			.guid = target_guid,
+		},
+		.target_data = target_path,
+		.target_data_len = sizeof(target_path) - 1,
+		.target_value_type = REG_LINK,
+		.expect_target_lookup = true,
 	};
-	struct pkm_lcs_kunit_walk_source_script script = {
-		.steps = steps,
-		.step_count = ARRAY_SIZE(steps),
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	long fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	script.target_step.sd = sd;
+	script.target_step.sd_len = sd_len;
+	script.file = &file;
+
+	task = kthread_run(pkm_lcs_kunit_symlink_follow_source_thread, &script,
+			   "pkm-lcs-kunit-open-abs-link-follow");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_open_user_absolute_path_for_token(
+		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
+		0, NULL, 0, NULL, 0);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)fd, &snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, snapshot.path_component_count, 2U);
+	KUNIT_EXPECT_STREQ(test, snapshot.first_component, "Machine");
+	KUNIT_EXPECT_STREQ(test, snapshot.last_component, "Target");
+	KUNIT_EXPECT_EQ(test, memcmp(snapshot.key_guid, target_guid,
+				    RSI_GUID_SIZE), 0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.last_ancestor_guid, target_guid,
+			       RSI_GUID_SIZE),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_open_absolute_final_symlink_bad_target_einval(
+	struct kunit *test)
+{
+	static const u8 link_guid[RSI_GUID_SIZE] = {
+		0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc,
+		0xbd, 0xbe, 0xbf, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4,
+	};
+	static const u8 bad_target_path[] = "Machine\\\\Target";
+	const char path_src[] = "Machine\\Link";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_kunit_symlink_follow_source_script script = {
+		.link_step = {
+			.expected_child = "Link",
+			.guid = link_guid,
+			.symlink = true,
+		},
+		.target_data = bad_target_path,
+		.target_data_len = sizeof(bad_target_path) - 1,
+		.target_value_type = REG_LINK,
+		.expect_target_lookup = false,
 	};
 	struct task_struct *task;
 	struct file file = { };
@@ -1706,9 +1805,8 @@ pkm_lcs_kunit_open_absolute_final_symlink_without_open_link_fails_closed(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
-			   "pkm-lcs-kunit-open-abs-link-deny");
+	task = kthread_run(pkm_lcs_kunit_symlink_follow_source_thread, &script,
+			   "pkm-lcs-kunit-open-abs-link-bad");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_open_user_absolute_path_for_token(
@@ -1716,11 +1814,11 @@ pkm_lcs_kunit_open_absolute_final_symlink_without_open_link_fails_closed(
 		0, NULL, 0, NULL, 0);
 	thread_ret = kthread_stop(task);
 
-	KUNIT_EXPECT_EQ(test, ret, (long)-EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 1U);
-	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, script.reads, 2U);
+	KUNIT_EXPECT_EQ(test, script.writes, 2U);
 
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
@@ -2273,6 +2371,108 @@ static void pkm_lcs_kunit_open_relative_final_symlink_open_link(
 				    RSI_GUID_SIZE), 0);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(snapshot.last_ancestor_guid, link_guid,
+			       RSI_GUID_SIZE),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)parent_fd), 0);
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_open_relative_final_symlink_follows_target(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc,
+		0xcd, 0xce, 0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4,
+	};
+	static const u8 link_guid[RSI_GUID_SIZE] = {
+		0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc,
+		0xdd, 0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4,
+	};
+	static const u8 target_guid[RSI_GUID_SIZE] = {
+		0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec,
+		0xed, 0xee, 0xef, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4,
+	};
+	static const u8 target_path[] = "Machine\\Target";
+	const char * const parent_path[] = { "Machine", "Parent" };
+	u8 parent_ancestors[2][RSI_GUID_SIZE] = { { 1 } };
+	const char path_src[] = "Link";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_key_fd_publish_input parent_publish = { };
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct pkm_lcs_kunit_symlink_follow_source_script script = {
+		.link_step = {
+			.expected_child = "Link",
+			.guid = link_guid,
+			.symlink = true,
+		},
+		.target_step = {
+			.expected_child = "Target",
+			.guid = target_guid,
+		},
+		.target_data = target_path,
+		.target_data_len = sizeof(target_path) - 1,
+		.target_value_type = REG_LINK,
+		.expect_target_lookup = true,
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	long parent_fd;
+	long fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	script.target_step.sd = sd;
+	script.target_step.sd_len = sd_len;
+	script.file = &file;
+
+	memcpy(parent_ancestors[1], parent_guid, RSI_GUID_SIZE);
+	parent_publish.source_id = 1;
+	memcpy(parent_publish.key_guid, parent_guid,
+	       sizeof(parent_publish.key_guid));
+	parent_publish.granted_access = KEY_READ;
+	parent_publish.resolved_path = parent_path;
+	parent_publish.ancestor_guids = parent_ancestors;
+	parent_publish.path_component_count = ARRAY_SIZE(parent_path);
+	parent_fd = pkm_lcs_key_fd_publish(&parent_publish);
+	KUNIT_ASSERT_TRUE(test, parent_fd >= 0);
+
+	task = kthread_run(pkm_lcs_kunit_symlink_follow_source_thread, &script,
+			   "pkm-lcs-kunit-open-rel-link-follow");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_open_user_relative_path_for_token(
+		token, &ops, (int)parent_fd, (const char __user *)path_src,
+		KEY_READ, 0, NULL, 0, NULL, 0);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)fd, &snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, snapshot.path_component_count, 2U);
+	KUNIT_EXPECT_STREQ(test, snapshot.first_component, "Machine");
+	KUNIT_EXPECT_STREQ(test, snapshot.last_component, "Target");
+	KUNIT_EXPECT_EQ(test, memcmp(snapshot.key_guid, target_guid,
+				    RSI_GUID_SIZE), 0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.last_ancestor_guid, target_guid,
 			       RSI_GUID_SIZE),
 			0);
 
@@ -4098,6 +4298,166 @@ static int pkm_lcs_kunit_query_values_source_thread(void *raw_script)
 	script->writes++;
 	script->result = 0;
 	return 0;
+}
+
+static ssize_t pkm_lcs_kunit_symlink_follow_read_request(
+	struct pkm_lcs_kunit_symlink_follow_source_script *script,
+	u8 *request, size_t request_len)
+{
+	ssize_t count;
+
+	for (;;) {
+		count = pkm_lcs_kunit_source_device_read_file(
+			script->file, request, request_len, true);
+		if (count != -EAGAIN)
+			break;
+		if (kthread_should_stop()) {
+			script->result = -EINTR;
+			return script->result;
+		}
+		msleep(1);
+	}
+	if (count >= 0)
+		script->reads++;
+	return count;
+}
+
+static int pkm_lcs_kunit_symlink_follow_write_response(
+	struct pkm_lcs_kunit_symlink_follow_source_script *script,
+	const u8 *response, size_t response_len)
+{
+	ssize_t count;
+
+	count = pkm_lcs_kunit_source_device_write_file(
+		script->file, response, response_len, false, NULL);
+	if (count != (ssize_t)response_len)
+		return count < 0 ? (int)count : -EIO;
+	script->writes++;
+	return 0;
+}
+
+static int pkm_lcs_kunit_symlink_follow_handle_lookup(
+	struct pkm_lcs_kunit_symlink_follow_source_script *script,
+	const struct pkm_lcs_kunit_walk_source_step *step, u8 *request,
+	size_t request_len, u8 *response, size_t response_len)
+{
+	size_t child_offset = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
+	size_t built_len = 0;
+	ssize_t count;
+	u64 request_id;
+	u16 request_op;
+	u32 child_len;
+	int ret;
+
+	count = pkm_lcs_kunit_symlink_follow_read_request(
+		script, request, request_len);
+	if (count < 0)
+		return (int)count;
+	if ((size_t)count < child_offset + sizeof(u32))
+		return -EINVAL;
+
+	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
+	if (request_op != RSI_LOOKUP)
+		return -EINVAL;
+	child_len = get_unaligned_le32(request + child_offset);
+	child_offset += sizeof(u32);
+	if (child_offset > (size_t)count ||
+	    child_len > (size_t)count - child_offset ||
+	    child_len != strlen(step->expected_child) ||
+	    memcmp(request + child_offset, step->expected_child,
+		   child_len))
+		return -EINVAL;
+
+	ret = pkm_lcs_kunit_walk_source_build_response(
+		step, request_id, request_op, script->reads - 1U, response,
+		response_len, &built_len);
+	if (ret)
+		return ret;
+	return pkm_lcs_kunit_symlink_follow_write_response(
+		script, response, built_len);
+}
+
+static int pkm_lcs_kunit_symlink_follow_handle_query(
+	struct pkm_lcs_kunit_symlink_follow_source_script *script,
+	u8 *request, size_t request_len, u8 *response, size_t response_len)
+{
+	struct pkm_lcs_kunit_query_values_source_script query = {
+		.expected_guid = script->link_step.guid,
+		.expected_value_name = "",
+		.value_type = script->target_value_type,
+		.data = script->target_data,
+		.data_len = script->target_data_len,
+	};
+	size_t value_offset = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
+	size_t built_len = 0;
+	ssize_t count;
+	u64 request_id;
+	u16 request_op;
+	u32 value_len;
+	int ret;
+
+	count = pkm_lcs_kunit_symlink_follow_read_request(
+		script, request, request_len);
+	if (count < 0)
+		return (int)count;
+	if ((size_t)count < value_offset + sizeof(u32) + sizeof(u8))
+		return -EINVAL;
+
+	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
+	if (request_op != RSI_QUERY_VALUES ||
+	    memcmp(request + RSI_REQUEST_HEADER_SIZE, script->link_step.guid,
+		   RSI_GUID_SIZE))
+		return -EINVAL;
+
+	value_len = get_unaligned_le32(request + value_offset);
+	value_offset += sizeof(u32);
+	if (value_offset > (size_t)count ||
+	    value_len > (size_t)count - value_offset || value_len)
+		return -EINVAL;
+	value_offset += value_len;
+	if (value_offset >= (size_t)count || request[value_offset])
+		return -EINVAL;
+
+	ret = pkm_lcs_kunit_query_values_source_build_response(
+		&query, request_id, response, response_len, &built_len);
+	if (ret)
+		return ret;
+	return pkm_lcs_kunit_symlink_follow_write_response(
+		script, response, built_len);
+}
+
+static int pkm_lcs_kunit_symlink_follow_source_thread(void *raw_script)
+{
+	struct pkm_lcs_kunit_symlink_follow_source_script *script = raw_script;
+	u8 request[128];
+	u8 response[256];
+	int ret;
+
+	if (!script || !script->file || !script->link_step.expected_child ||
+	    !script->link_step.guid || !script->target_data) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	ret = pkm_lcs_kunit_symlink_follow_handle_lookup(
+		script, &script->link_step, request, sizeof(request),
+		response, sizeof(response));
+	if (ret)
+		goto out;
+	ret = pkm_lcs_kunit_symlink_follow_handle_query(
+		script, request, sizeof(request), response, sizeof(response));
+	if (ret || !script->expect_target_lookup)
+		goto out;
+	ret = pkm_lcs_kunit_symlink_follow_handle_lookup(
+		script, &script->target_step, request, sizeof(request),
+		response, sizeof(response));
+
+out:
+	script->result = ret;
+	return ret;
 }
 
 static void pkm_lcs_kunit_rsi_read_key_bridge_accepts_valid(
@@ -6509,8 +6869,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_composes_success),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_uses_implicit_base_layer),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_final_symlink_open_link),
+	KUNIT_CASE(pkm_lcs_kunit_open_absolute_final_symlink_follows_target),
 	KUNIT_CASE(
-		pkm_lcs_kunit_open_absolute_final_symlink_without_open_link_fails_closed),
+		pkm_lcs_kunit_open_absolute_final_symlink_bad_target_einval),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_root_uses_read_key),
 	KUNIT_CASE(
 		pkm_lcs_kunit_open_absolute_root_denied_publishes_no_fd),
@@ -6523,6 +6884,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_open_relative_composes_success),
 	KUNIT_CASE(pkm_lcs_kunit_open_relative_uses_implicit_base_layer),
 	KUNIT_CASE(pkm_lcs_kunit_open_relative_final_symlink_open_link),
+	KUNIT_CASE(pkm_lcs_kunit_open_relative_final_symlink_follows_target),
 	KUNIT_CASE(pkm_lcs_kunit_open_relative_denied_publishes_no_fd),
 	KUNIT_CASE(
 		pkm_lcs_kunit_open_relative_preflight_stops_before_usercopy),

@@ -395,6 +395,7 @@ long pkm_lcs_walk_absolute_components_for_open(
 	u32 source_id, u64 txn_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,
 	u32 component_count, bool open_final_link,
+	const u8 (*scope_guids)[16], u32 scope_count,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result);
@@ -409,6 +410,7 @@ long pkm_lcs_walk_relative_components_for_open(
 	const struct pkm_lcs_key_fd_parent_snapshot *parent, u64 txn_id,
 	const struct pkm_lcs_path_component_view *components,
 	u32 component_count, bool open_final_link,
+	const u8 (*scope_guids)[16], u32 scope_count,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result);
