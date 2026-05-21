@@ -14,7 +14,8 @@ use crate::lcs_core::{
     plan_registry_security_info_fd_access_gate, plan_source_registration_sequence_update,
     parse_rsi_request_header, registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
     registry_open_pre_resolution_linux_errno, resolve_named_path_entry, resolve_value, route_hive,
-    route_routable_path_hive, REG_TOMBSTONE, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
+    route_routable_path_hive, route_symlink_target_hive, validate_symlink_target_bytes,
+    REG_TOMBSTONE, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
     rsi_queued_request_from_frame,
     rsi_status_code_errno, source_registration_error_linux_errno, source_registration_hive_scope,
     source_slot_hive_status,
@@ -246,6 +247,10 @@ fn absolute_route_error_return(err: LcsError) -> c_int {
         _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
+}
+
+fn symlink_target_error_return(_err: LcsError) -> c_int {
+    LinuxErrno::Einval.negated_return() as c_int
 }
 
 fn key_fd_open_view_error_return(err: LcsError) -> c_int {
@@ -2185,6 +2190,118 @@ pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots_with_tok
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lcs_rust_route_symlink_target_from_source_slots(
+    slots: *const PkmLcsSourceSlotViewCopy,
+    slot_count: usize,
+    target: *const u8,
+    target_len: u32,
+    scope_guids: *const [u8; 16],
+    scope_count: usize,
+    result_out: *mut PkmLcsHiveRouteResultCopy,
+) -> c_int {
+    if result_out.is_null() || target.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if slot_count != 0 && slots.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let target_bytes = unsafe { slice::from_raw_parts(target, target_len as usize) };
+    let scope_guids = match parse_scope_guids(scope_guids, scope_count) {
+        Ok(scopes) => scopes,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let mut slot_hive_storage =
+        match PkmVec::<PkmVec<RegisteredHiveIdentity<'_>>>::with_capacity(slot_count) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut total_hives = 0usize;
+    for index in 0..slot_count {
+        let raw_slot = unsafe { &*slots.add(index) };
+        if raw_slot.hive_count != 0 && raw_slot.hives.is_null() {
+            return LinuxErrno::Einval.negated_return() as c_int;
+        }
+        let parsed_hives = match parse_existing_hives(raw_slot.hives, raw_slot.hive_count as usize)
+        {
+            Ok(hives) => hives,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+        total_hives += parsed_hives.len();
+        if slot_hive_storage.push(parsed_hives).is_err() {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+    }
+
+    let mut existing_slots = match PkmVec::with_capacity(slot_count) {
+        Ok(slots) => slots,
+        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+    };
+    for index in 0..slot_count {
+        let raw_slot = unsafe { &*slots.add(index) };
+        let status = match source_slot_status_from_raw(raw_slot.status) {
+            Ok(status) => status,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+        if existing_slots
+            .push(SourceSlotView {
+                source_id: raw_slot.source_id,
+                status,
+                hives: slot_hive_storage[index].as_slice(),
+            })
+            .is_err()
+        {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+    }
+
+    if let Err(err) = validate_source_slots(&LcsLimits::DEFAULT, existing_slots.as_slice()) {
+        return source_registration_error_return(err);
+    }
+
+    let mut hive_views = match PkmVec::with_capacity(total_hives) {
+        Ok(hives) => hives,
+        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+    };
+    for slot in existing_slots.as_slice() {
+        let status = source_slot_hive_status(slot.status);
+        for hive in slot.hives {
+            if hive_views
+                .push(HiveView {
+                    name: hive.name,
+                    root_guid: hive.root_guid,
+                    source_id: slot.source_id,
+                    status,
+                    scope: hive.scope,
+                })
+                .is_err()
+            {
+                return LinuxErrno::Enomem.negated_return() as c_int;
+            }
+        }
+    }
+
+    let route = match route_symlink_target_hive(
+        &LcsLimits::DEFAULT,
+        hive_views.as_slice(),
+        target_bytes,
+        scope_guids,
+    ) {
+        Ok(route) => route,
+        Err(err) => return symlink_target_error_return(err),
+    };
+    match route {
+        HiveRouteOutcome::Dispatch(hive) => unsafe {
+            (*result_out).source_id = hive.source_id;
+            (*result_out).root_guid = hive.root_guid;
+            0
+        },
+        HiveRouteOutcome::Failure(errno) => LinuxErrno::from(errno).negated_return() as c_int,
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lcs_rust_materialize_absolute_path_components_with_token_sid(
     path: *const u8,
     path_len: u32,
@@ -2297,6 +2414,101 @@ pub unsafe extern "C" fn lcs_rust_materialize_absolute_path_components_with_toke
         })
     {
         return absolute_route_error_return(err);
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_symlink_target_components(
+    target: *const u8,
+    target_len: u32,
+    components: *mut PkmLcsPathComponentViewCopy,
+    component_capacity: usize,
+    string_buf: *mut u8,
+    string_capacity: usize,
+    result_out: *mut PkmLcsPathComponentMaterializationCopy,
+) -> c_int {
+    let Some(result_out) = (unsafe { result_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *result_out = PkmLcsPathComponentMaterializationCopy {
+        component_count: 0,
+        string_bytes: 0,
+    };
+    if target.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let target_bytes = unsafe { slice::from_raw_parts(target, target_len as usize) };
+    let path = match validate_symlink_target_bytes(&LcsLimits::DEFAULT, target_bytes) {
+        Ok(summary) => summary.raw,
+        Err(err) => return symlink_target_error_return(err),
+    };
+    let rewrite = CurrentUserRewrite::Literal;
+
+    let mut component_count = 0usize;
+    let mut string_bytes = 0usize;
+    if let Err(err) =
+        for_each_routable_path_component(&LcsLimits::DEFAULT, path, rewrite, |component| {
+            component_count =
+                component_count
+                    .checked_add(1)
+                    .ok_or(LcsError::KeyDepthExceeded {
+                        depth: usize::MAX,
+                        max: LcsLimits::DEFAULT.max_key_depth,
+                    })?;
+            string_bytes =
+                string_bytes
+                    .checked_add(component.len())
+                    .ok_or(LcsError::PathTooLong {
+                        len: usize::MAX,
+                        max: LcsLimits::DEFAULT.max_total_path_length,
+                    })?;
+            Ok(())
+        })
+    {
+        return symlink_target_error_return(err);
+    }
+
+    let Ok(component_count_u32) = u32::try_from(component_count) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    let Ok(string_bytes_u32) = u32::try_from(string_bytes) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *result_out = PkmLcsPathComponentMaterializationCopy {
+        component_count: component_count_u32,
+        string_bytes: string_bytes_u32,
+    };
+
+    if components.is_null() && component_capacity == 0 && string_buf.is_null() && string_capacity == 0
+    {
+        return 0;
+    }
+    if components.is_null() || string_buf.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if component_capacity < component_count || string_capacity < string_bytes {
+        return LinuxErrno::Erange.negated_return() as c_int;
+    }
+
+    let component_out = unsafe { slice::from_raw_parts_mut(components, component_capacity) };
+    let string_out = unsafe { slice::from_raw_parts_mut(string_buf, string_capacity) };
+    let mut index = 0usize;
+    let mut offset = 0usize;
+    if let Err(err) =
+        for_each_routable_path_component(&LcsLimits::DEFAULT, path, rewrite, |component| {
+            let bytes = component.as_bytes();
+            let end = offset + bytes.len();
+            string_out[offset..end].copy_from_slice(bytes);
+            component_out[index].name = unsafe { string_buf.add(offset) as *const u8 };
+            component_out[index].name_len = bytes.len() as u32;
+            index += 1;
+            offset = end;
+            Ok(())
+        })
+    {
+        return symlink_target_error_return(err);
     }
     0
 }

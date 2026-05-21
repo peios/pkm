@@ -217,6 +217,14 @@ struct pkm_lcs_resolved_key_path {
 	struct pkm_lcs_source_response_frame final_frame;
 };
 
+struct pkm_lcs_symlink_target_resolution {
+	struct pkm_lcs_hive_route_result route;
+	struct pkm_lcs_materialized_path components;
+	u32 value_type;
+	u32 selected_precedence;
+	u64 selected_sequence;
+};
+
 struct pkm_lcs_source_response_waiter {
 	wait_queue_head_t wait;
 	bool completed;
@@ -308,6 +316,21 @@ long pkm_lcs_materialize_absolute_path_components_for_token(
 long pkm_lcs_materialize_relative_path_components(
 	const char *path, u32 path_len,
 	struct pkm_lcs_materialized_path *result);
+long pkm_lcs_route_symlink_target(
+	const char *target, u32 target_len, const u8 (*scope_guids)[16],
+	u32 scope_count, struct pkm_lcs_hive_route_result *result);
+long pkm_lcs_materialize_symlink_target_components(
+	const char *target, u32 target_len,
+	struct pkm_lcs_materialized_path *result);
+long pkm_lcs_resolve_symlink_target_for_key(
+	u32 source_id, u64 txn_id, const u8 key_guid[RSI_GUID_SIZE],
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_symlink_target_resolution *result);
+void pkm_lcs_symlink_target_resolution_destroy(
+	struct pkm_lcs_symlink_target_resolution *resolution);
 void pkm_lcs_materialized_path_destroy(
 	struct pkm_lcs_materialized_path *path);
 long pkm_lcs_open_user_relative_path_for_token(

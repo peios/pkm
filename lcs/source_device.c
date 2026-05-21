@@ -207,9 +207,18 @@ extern int lcs_rust_route_absolute_path_from_source_slots_with_token_sid(
 	const u8 *current_user_sid, size_t current_user_sid_len,
 	const u8 (*scope_guids)[16], size_t scope_count,
 	struct pkm_lcs_hive_route_result *result);
+extern int lcs_rust_route_symlink_target_from_source_slots(
+	const struct pkm_lcs_source_slot_view_copy *slots, size_t slot_count,
+	const u8 *target, u32 target_len, const u8 (*scope_guids)[16],
+	size_t scope_count, struct pkm_lcs_hive_route_result *result);
 extern int lcs_rust_materialize_absolute_path_components_with_token_sid(
 	const u8 *path, u32 path_len, bool rewrite_current_user,
 	const u8 *current_user_sid, size_t current_user_sid_len,
+	struct pkm_lcs_path_component_view *components,
+	size_t component_capacity, u8 *string_buf, size_t string_capacity,
+	struct pkm_lcs_path_component_materialization *result);
+extern int lcs_rust_materialize_symlink_target_components(
+	const u8 *target, u32 target_len,
 	struct pkm_lcs_path_component_view *components,
 	size_t component_capacity, u8 *string_buf, size_t string_capacity,
 	struct pkm_lcs_path_component_materialization *result);
@@ -2678,6 +2687,176 @@ long pkm_lcs_materialize_relative_path_components(
 out_free:
 	kfree(components);
 	kfree(strings);
+	return ret;
+}
+
+long pkm_lcs_route_symlink_target(
+	const char *target, u32 target_len, const u8 (*scope_guids)[16],
+	u32 scope_count, struct pkm_lcs_hive_route_result *result)
+{
+	struct pkm_lcs_source_slot_view_copy
+		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	u32 slot_count;
+	long ret;
+
+	if (!target || !result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot_count = pkm_lcs_source_table_views_locked(views);
+	ret = lcs_rust_route_symlink_target_from_source_slots(
+		views, slot_count, (const u8 *)target, target_len,
+		scope_guids, scope_count, result);
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
+long pkm_lcs_materialize_symlink_target_components(
+	const char *target, u32 target_len,
+	struct pkm_lcs_materialized_path *result)
+{
+	struct pkm_lcs_path_component_materialization shape = { };
+	struct pkm_lcs_path_component_materialization filled = { };
+	struct pkm_lcs_path_component_view *components;
+	char *strings;
+	long ret;
+
+	if (!target || !result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	ret = lcs_rust_materialize_symlink_target_components(
+		(const u8 *)target, target_len, NULL, 0, NULL, 0, &shape);
+	if (ret)
+		return ret;
+	if (!shape.component_count || !shape.string_bytes)
+		return -EINVAL;
+
+	components = kcalloc(shape.component_count, sizeof(*components),
+			     GFP_KERNEL);
+	if (!components)
+		return -ENOMEM;
+	strings = kmalloc(shape.string_bytes, GFP_KERNEL);
+	if (!strings) {
+		kfree(components);
+		return -ENOMEM;
+	}
+
+	ret = lcs_rust_materialize_symlink_target_components(
+		(const u8 *)target, target_len, components,
+		shape.component_count, (u8 *)strings, shape.string_bytes,
+		&filled);
+	if (ret)
+		goto out_free;
+	if (filled.component_count != shape.component_count ||
+	    filled.string_bytes != shape.string_bytes) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	result->components = components;
+	result->strings = strings;
+	result->component_count = filled.component_count;
+	result->string_bytes = filled.string_bytes;
+	return 0;
+
+out_free:
+	kfree(components);
+	kfree(strings);
+	return ret;
+}
+
+void pkm_lcs_symlink_target_resolution_destroy(
+	struct pkm_lcs_symlink_target_resolution *resolution)
+{
+	if (!resolution)
+		return;
+
+	pkm_lcs_materialized_path_destroy(&resolution->components);
+	memset(resolution, 0, sizeof(*resolution));
+}
+
+long pkm_lcs_resolve_symlink_target_for_key(
+	u32 source_id, u64 txn_id, const u8 key_guid[RSI_GUID_SIZE],
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_symlink_target_resolution *result)
+{
+	const struct pkm_lcs_rsi_layer_view *active_layers = layers;
+	const struct pkm_lcs_rsi_private_layer_view *active_private_layers =
+		private_layers;
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_rsi_query_value_result value = { };
+	struct pkm_lcs_source_response_frame frame;
+	const char *target;
+	u64 next_sequence;
+	long ret;
+	u32 active_layer_count = layer_count;
+	u32 active_private_layer_count = private_layer_count;
+
+	if (!source_id || !key_guid || !result)
+		return -EINVAL;
+	memset(result, 0, sizeof(*result));
+	pkm_lcs_source_response_frame_init(&frame);
+
+	ret = pkm_lcs_normalize_layer_inputs(
+		&active_layers, &active_layer_count, &active_private_layers,
+		&active_private_layer_count);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+		source_id, txn_id, key_guid, "", 0, false,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
+		&enqueue);
+	if (ret)
+		goto out_destroy;
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		goto out_destroy;
+
+	ret = pkm_lcs_rsi_materialize_query_value_response(
+		frame.data, frame.len, response.request_id, next_sequence,
+		"", 0, active_layers, active_layer_count,
+		active_private_layers, active_private_layer_count, &value);
+	if (ret)
+		goto out_destroy;
+	if (!value.found || value.value_type != REG_LINK) {
+		ret = -EINVAL;
+		goto out_destroy;
+	}
+	if ((size_t)value.data_offset > frame.len ||
+	    (size_t)value.data_len > frame.len - (size_t)value.data_offset) {
+		ret = -EIO;
+		goto out_destroy;
+	}
+
+	target = (const char *)(frame.data + value.data_offset);
+	ret = pkm_lcs_route_symlink_target(
+		target, value.data_len, scope_guids, scope_count,
+		&result->route);
+	if (ret)
+		goto out_destroy;
+
+	ret = pkm_lcs_materialize_symlink_target_components(
+		target, value.data_len, &result->components);
+	if (ret)
+		goto out_destroy;
+
+	result->value_type = value.value_type;
+	result->selected_precedence = value.selected_precedence;
+	result->selected_sequence = value.selected_sequence;
+	pkm_lcs_source_response_frame_destroy(&frame);
+	return 0;
+
+out_destroy:
+	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_symlink_target_resolution_destroy(result);
 	return ret;
 }
 
