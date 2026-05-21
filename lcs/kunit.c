@@ -126,6 +126,7 @@ struct pkm_lcs_kunit_walk_source_step {
 struct pkm_lcs_kunit_walk_source_script {
 	struct file *file;
 	const struct pkm_lcs_kunit_walk_source_step *steps;
+	u64 expected_txn_id;
 	u32 step_count;
 	u32 reads;
 	u32 writes;
@@ -139,6 +140,7 @@ struct pkm_lcs_kunit_read_key_source_script {
 	const u8 *parent_guid;
 	const u8 *sd;
 	size_t sd_len;
+	u64 expected_txn_id;
 	bool volatile_key;
 	bool symlink;
 	u32 reads;
@@ -8699,6 +8701,11 @@ static int pkm_lcs_kunit_walk_source_thread(void *raw_script)
 			script->result = -EINVAL;
 			return script->result;
 		}
+		if (get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+		    script->expected_txn_id) {
+			script->result = -EINVAL;
+			return script->result;
+		}
 		child_len = get_unaligned_le32(request + child_offset);
 		child_offset += sizeof(u32);
 		if (child_offset > (size_t)count ||
@@ -8833,6 +8840,8 @@ static int pkm_lcs_kunit_read_key_source_thread(void *raw_script)
 	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
 	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
 	if (request_op != RSI_READ_KEY ||
+	    get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+		    script->expected_txn_id ||
 	    memcmp(request + RSI_REQUEST_HEADER_SIZE, script->expected_guid,
 		   RSI_GUID_SIZE)) {
 		script->result = -EINVAL;
@@ -12372,29 +12381,248 @@ static void pkm_lcs_kunit_reg_create_key_args_rejects_padding(
 	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
 }
 
-static void pkm_lcs_kunit_reg_create_key_args_rejects_txn_fd(
+static void pkm_lcs_kunit_reg_create_key_args_existing_txn_reads(
 	struct kunit *test)
 {
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
 	static const char path_src[] = "Machine";
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = root_guid,
+		.name = "Machine",
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	u32 disposition = 0;
+	struct reg_create_key_args args = {
+		.parent_fd = -1,
+		.path_ptr = (u64)(unsigned long)path_src,
+		.desired_access = KEY_READ,
+		.txn_fd = -1,
+		.disposition_ptr = (u64)(unsigned long)&disposition,
+	};
+	long txn_fd;
+	long fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	script.file = &file;
+	script.sd = sd;
+	script.sd_len = sd_len;
+
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	args.txn_fd = (int)txn_fd;
+
+	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+			   "pkm-lcs-kunit-create-txn-unbound");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_reg_create_key_args_for_token(token, &ops, &args, NULL);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_OPENED_EXISTING);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, txn_snapshot.state, REG_TXN_ACTIVE_UNBOUND);
+	KUNIT_EXPECT_EQ(test, txn_snapshot.bound_source_id, 0U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)txn_fd, txn_snapshot.transaction_id, 1,
+				root_guid),
+			0L);
+
+	memset(&script, 0, sizeof(script));
+	script.file = &file;
+	script.expected_guid = root_guid;
+	script.name = "Machine";
+	script.sd = sd;
+	script.sd_len = sd_len;
+	script.expected_txn_id = txn_snapshot.transaction_id;
+	disposition = 0;
+
+	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+			   "pkm-lcs-kunit-create-txn-bound");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_reg_create_key_args_for_token(token, &ops, &args, NULL);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_OPENED_EXISTING);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_reg_create_key_args_txn_failures(
+	struct kunit *test)
+{
+	static const u8 other_root_guid[RSI_GUID_SIZE] = { 2 };
+	static const char path_src[] = "Machine";
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct file file = { };
+	const void *token;
 	u32 disposition = 0xaaaaaaaaU;
 	struct reg_create_key_args args = {
 		.parent_fd = -1,
 		.path_ptr = (u64)(unsigned long)path_src,
 		.desired_access = KEY_READ,
-		.txn_fd = 0,
 		.disposition_ptr = (u64)(unsigned long)&disposition,
 	};
+	long txn_fd;
+	int not_txn_fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)txn_fd, txn_snapshot.transaction_id, 1,
+				other_root_guid),
+			0L);
+	args.txn_fd = (int)txn_fd;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_args_for_token(token, &ops,
+							      &args, NULL),
+			(long)-EXDEV);
+	KUNIT_EXPECT_EQ(test, disposition, 0xaaaaaaaaU);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)txn_fd, REG_TXN_COMMITTED, 0),
+			0L);
+	args.txn_fd = (int)txn_fd;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_args_for_token(token, &ops,
+							      &args, NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+
+	not_txn_fd = anon_inode_getfd("lcs-not-create-txn",
+				     &pkm_lcs_kunit_non_key_fops, NULL,
+				     O_CLOEXEC);
+	KUNIT_ASSERT_TRUE(test, not_txn_fd >= 0);
+	args.txn_fd = not_txn_fd;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_args_for_token(token, &ops,
+							      &args, NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)not_txn_fd), 0);
+
+	args.txn_fd = INT_MAX;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_args_for_token(token, &ops,
+							      &args, NULL),
+			(long)-EBADF);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_reg_create_key_args_txn_missing_fails_closed(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_walk_source_step steps[] = {
+		{
+			.expected_child = "App",
+			.empty = true,
+		},
+	};
+	static const char path_src[] = "Machine\\App";
+	struct pkm_lcs_kunit_walk_source_script script = {
+		.steps = steps,
+		.step_count = ARRAY_SIZE(steps),
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 disposition = 0xaaaaaaaaU;
+	struct reg_create_key_args args = {
+		.parent_fd = -1,
+		.path_ptr = (u64)(unsigned long)path_src,
+		.desired_access = KEY_READ,
+		.txn_fd = -1,
+		.disposition_ptr = (u64)(unsigned long)&disposition,
+	};
+	long txn_fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	args.txn_fd = (int)txn_fd;
+	script.file = &file;
+
+	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+			   "pkm-lcs-kunit-create-txn-missing");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_reg_create_key_args_for_token(NULL, &ops, &args,
-							      NULL),
+			pkm_lcs_reg_create_key_args_for_token(token, &ops,
+							      &args, NULL),
 			(long)-EOPNOTSUPP);
+	thread_ret = kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
 	KUNIT_EXPECT_EQ(test, disposition, 0xaaaaaaaaU);
-	KUNIT_EXPECT_EQ(test, ctx.strnlens, 0U);
-	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
 }
 
 static void pkm_lcs_kunit_reg_create_key_args_bad_flags_before_txn(
@@ -14509,7 +14737,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_reg_create_key_args_copy_success_and_fault),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_rejects_padding),
-	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_rejects_txn_fd),
+	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_existing_txn_reads),
+	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_txn_failures),
+	KUNIT_CASE(
+		pkm_lcs_kunit_reg_create_key_args_txn_missing_fails_closed),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_bad_flags_before_txn),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_existing_success),
 	KUNIT_CASE(

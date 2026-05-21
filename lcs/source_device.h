@@ -800,7 +800,8 @@ long pkm_lcs_walk_absolute_components_for_open(
 	const u8 (*scope_guids)[16], u32 scope_count,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
-	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result);
+	u32 private_layer_count, int txn_fd,
+	struct pkm_lcs_resolved_key_path *result);
 long pkm_lcs_walk_relative_components(
 	const struct pkm_lcs_key_fd_parent_snapshot *parent, u64 txn_id,
 	const struct pkm_lcs_path_component_view *components,
@@ -815,7 +816,8 @@ long pkm_lcs_walk_relative_components_for_open(
 	const u8 (*scope_guids)[16], u32 scope_count,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
-	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result);
+	u32 private_layer_count, int txn_fd,
+	struct pkm_lcs_resolved_key_path *result);
 void pkm_lcs_resolved_key_path_destroy(
 	struct pkm_lcs_resolved_key_path *path);
 long pkm_lcs_source_accept_response_file(
