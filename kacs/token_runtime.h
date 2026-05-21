@@ -641,6 +641,7 @@ int kacs_rust_token_guid(const void *token, u8 out[KACS_UUID_BYTES]);
 int kacs_rust_token_audit_summary(
 	const void *token, struct pkm_kacs_token_audit_summary *out);
 bool kacs_rust_token_has_enabled_privilege(const void *token, u64 privilege);
+bool kacs_rust_token_has_enabled_administrators(const void *token);
 int kacs_rust_token_is_remote_shutdown_origin(const void *token);
 bool kacs_rust_token_has_new_process_min(const void *token);
 bool kacs_rust_token_mark_privileges_used(const void *token, u64 used_mask);

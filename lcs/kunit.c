@@ -4867,6 +4867,189 @@ static void pkm_lcs_kunit_create_missing_parent_access_bad_inputs(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_create_symlink_authority_non_link_noop(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan link_plan = {
+		.allowed = 1,
+		.fd_granted_access = KEY_CREATE_LINK,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_symlink_authority_for_token(
+				NULL, NULL, REG_OPTION_VOLATILE, &link_plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, link_plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, link_plan.fd_granted_access, 0U);
+}
+
+static void pkm_lcs_kunit_create_symlink_authority_tcb_marks_used(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_key_open_access_plan link_plan = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_CREATE_LINK, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	pkm_lcs_kunit_create_missing_parent_resolution_set_sd(test, &result, sd,
+							      sd_len);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &before));
+	KUNIT_EXPECT_EQ(test, before.privileges_used & KACS_SE_TCB_PRIVILEGE,
+			0ULL);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_symlink_authority_for_token(
+				token, &result, REG_OPTION_CREATE_LINK,
+				&link_plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, link_plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, link_plan.fd_granted_access, KEY_CREATE_LINK);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used & KACS_SE_TCB_PRIVILEGE,
+			KACS_SE_TCB_PRIVILEGE);
+
+	pkm_lcs_create_missing_parent_resolution_destroy(&result);
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_symlink_authority_admin_without_tcb(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_key_open_access_plan link_plan = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_token_has_enabled_administrators(token));
+	KUNIT_ASSERT_FALSE(test,
+			   kacs_rust_token_has_enabled_privilege(
+				   token, KACS_SE_TCB_PRIVILEGE));
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_CREATE_LINK, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	pkm_lcs_kunit_create_missing_parent_resolution_set_sd(test, &result, sd,
+							      sd_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_symlink_authority_for_token(
+				token, &result, REG_OPTION_CREATE_LINK,
+				&link_plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, link_plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, link_plan.fd_granted_access, KEY_CREATE_LINK);
+
+	pkm_lcs_create_missing_parent_resolution_destroy(&result);
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_symlink_authority_denies_missing_link_right(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_key_open_access_plan link_plan = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_CREATE_SUB_KEY, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	pkm_lcs_kunit_create_missing_parent_resolution_set_sd(test, &result, sd,
+							      sd_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_symlink_authority_for_token(
+				token, &result, REG_OPTION_CREATE_LINK,
+				&link_plan),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test, link_plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, link_plan.fd_granted_access, 0U);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used & KACS_SE_TCB_PRIVILEGE,
+			0ULL);
+
+	pkm_lcs_create_missing_parent_resolution_destroy(&result);
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_symlink_authority_denies_missing_identity(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_key_open_access_plan link_plan = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_FALSE(test,
+			   kacs_rust_token_has_enabled_administrators(token));
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_CREATE_LINK, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	pkm_lcs_kunit_create_missing_parent_resolution_set_sd(test, &result, sd,
+							      sd_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_symlink_authority_for_token(
+				token, &result, REG_OPTION_CREATE_LINK,
+				&link_plan),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test, link_plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, link_plan.fd_granted_access, KEY_CREATE_LINK);
+
+	pkm_lcs_create_missing_parent_resolution_destroy(&result);
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_symlink_authority_unknown_flags_einval(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_missing_parent_resolution result = { };
+	struct pkm_lcs_key_open_access_plan link_plan = {
+		.allowed = 1,
+		.fd_granted_access = KEY_CREATE_LINK,
+	};
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_symlink_authority_for_token(
+				token, &result, REG_OPTION_CREATE_LINK | 0x80U,
+				&link_plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, link_plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, link_plan.fd_granted_access, 0U);
+
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_rsi_lookup_request_frame_success(struct kunit *test)
 {
 	static const u8 parent_guid[RSI_GUID_SIZE] = {
@@ -8635,6 +8818,15 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_parent_access_malformed_sd_eio),
 	KUNIT_CASE(pkm_lcs_kunit_create_missing_parent_access_bad_inputs),
+	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_non_link_noop),
+	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_tcb_marks_used),
+	KUNIT_CASE(pkm_lcs_kunit_create_symlink_authority_admin_without_tcb),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_symlink_authority_denies_missing_link_right),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_symlink_authority_denies_missing_identity),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_symlink_authority_unknown_flags_einval),
 	KUNIT_CASE(
 		pkm_lcs_kunit_open_absolute_root_denied_publishes_no_fd),
 	KUNIT_CASE(

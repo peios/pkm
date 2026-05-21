@@ -6391,6 +6391,26 @@ impl PkmKacsBootToken {
         mask
     }
 
+    fn has_enabled_group_sid_bytes(&self, sid_bytes: &[u8]) -> bool {
+        let _guard = self.lock_mutation();
+
+        for index in 0..self.group_count {
+            let Some(group_sid) = self.group_sids.get(index) else {
+                continue;
+            };
+            let attributes = self.group_attributes[index].load(Ordering::Relaxed);
+
+            if (attributes & SE_GROUP_ENABLED) == SE_GROUP_ENABLED
+                && (attributes & SE_GROUP_USE_FOR_DENY_ONLY) == 0
+                && group_sid.as_bytes() == sid_bytes
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
     fn group_sid_at(&self, index: u32) -> Option<Sid<'static>> {
         if (index as usize) >= self.group_count {
             return None;
@@ -7156,6 +7176,14 @@ fn token_has_enabled_privilege(token_ptr: *const c_void, privilege: u64) -> bool
     let privileges = token.privileges_snapshot();
 
     (privileges.present & privilege) == privilege && (privileges.enabled & privilege) == privilege
+}
+
+fn token_has_enabled_administrators(token_ptr: *const c_void) -> bool {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return false;
+    };
+
+    token.has_enabled_group_sid_bytes(ADMINISTRATORS_SID_BYTES)
 }
 
 fn validate_link_role(token: &PkmKacsBootToken, expected: u32) -> Result<(), i32> {
@@ -8173,6 +8201,13 @@ pub extern "C" fn kacs_rust_token_has_enabled_privilege(
     privilege: u64,
 ) -> bool {
     token_has_enabled_privilege(token, privilege)
+}
+
+#[no_mangle]
+/// Returns whether the token has enabled, non-deny-only BUILTIN\Administrators
+/// membership.
+pub extern "C" fn kacs_rust_token_has_enabled_administrators(token: *const c_void) -> bool {
+    token_has_enabled_administrators(token)
 }
 
 #[no_mangle]

@@ -300,6 +300,16 @@ static long pkm_lcs_source_device_mark_tcb_used(const void *token)
 	return 0;
 }
 
+static bool pkm_lcs_token_has_tcb_or_admin_authority(const void *token)
+{
+	if (!token)
+		return false;
+	if (kacs_rust_token_has_enabled_privilege(token, KACS_SE_TCB_PRIVILEGE))
+		return pkm_lcs_source_device_mark_tcb_used(token) == 0;
+
+	return kacs_rust_token_has_enabled_administrators(token);
+}
+
 static void pkm_lcs_source_hives_destroy(
 	struct pkm_lcs_source_registration_hive_copy *hives, u32 hive_count)
 {
@@ -3566,31 +3576,85 @@ long pkm_lcs_create_missing_parent_for_token(
 		layer_count, private_layers, private_layer_count, result);
 }
 
+static long pkm_lcs_create_missing_parent_sd_view(
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	const u8 **sd, size_t *sd_len)
+{
+	const struct pkm_lcs_resolved_key_path *parent;
+	size_t sd_offset;
+	size_t local_sd_len;
+
+	if (!resolution || !sd || !sd_len)
+		return -EINVAL;
+
+	*sd = NULL;
+	*sd_len = 0;
+	parent = &resolution->parent;
+	sd_offset = parent->final_sd_offset;
+	local_sd_len = parent->final_sd_len;
+	if (!parent->final_frame.data || !parent->final_frame.len ||
+	    !local_sd_len || sd_offset > parent->final_frame.len ||
+	    local_sd_len > parent->final_frame.len - sd_offset)
+		return -EIO;
+
+	*sd = parent->final_frame.data + sd_offset;
+	*sd_len = local_sd_len;
+	return 0;
+}
+
 long pkm_lcs_create_missing_parent_access_check_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,
 	struct pkm_lcs_key_open_access_plan *plan)
 {
-	const struct pkm_lcs_resolved_key_path *parent;
 	const u8 *sd;
-	size_t sd_offset;
 	size_t sd_len;
+	long ret;
 
-	if (!resolution || !plan)
+	if (!plan)
 		return -EINVAL;
 
 	memset(plan, 0, sizeof(*plan));
-	parent = &resolution->parent;
-	sd_offset = parent->final_sd_offset;
-	sd_len = parent->final_sd_len;
-	if (!parent->final_frame.data || !parent->final_frame.len ||
-	    !sd_len || sd_offset > parent->final_frame.len ||
-	    sd_len > parent->final_frame.len - sd_offset)
-		return -EIO;
+	ret = pkm_lcs_create_missing_parent_sd_view(resolution, &sd, &sd_len);
+	if (ret)
+		return ret;
 
-	sd = parent->final_frame.data + sd_offset;
 	return pkm_lcs_key_open_access_check_for_token(
 		token, sd, sd_len, KEY_CREATE_SUB_KEY, plan);
+}
+
+long pkm_lcs_create_missing_symlink_authority_for_token(
+	const void *token,
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	u32 flags, struct pkm_lcs_key_open_access_plan *link_plan)
+{
+	const u32 known_flags = REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK;
+	const u8 *sd;
+	size_t sd_len;
+	long ret;
+
+	if (!link_plan)
+		return -EINVAL;
+
+	memset(link_plan, 0, sizeof(*link_plan));
+	if (flags & ~known_flags)
+		return -EINVAL;
+	if (!(flags & REG_OPTION_CREATE_LINK))
+		return 0;
+
+	ret = pkm_lcs_create_missing_parent_sd_view(resolution, &sd, &sd_len);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_open_access_check_for_token(
+		token, sd, sd_len, KEY_CREATE_LINK, link_plan);
+	if (ret)
+		return ret;
+
+	if (!pkm_lcs_token_has_tcb_or_admin_authority(token))
+		return -EPERM;
+
+	return 0;
 }
 
 static long pkm_lcs_resolved_key_path_prepare(
