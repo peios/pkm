@@ -485,6 +485,7 @@ long pkm_lcs_create_missing_symlink_authority_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,
 	u32 flags, struct pkm_lcs_key_open_access_plan *link_plan);
+long pkm_lcs_allocate_sequence(u64 *sequence);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,
 	struct pkm_lcs_source_enqueue_result *result);
@@ -617,6 +618,7 @@ long pkm_lcs_source_response_waiter_wait(
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_lcs_kunit_reset_source_table(void);
+void pkm_lcs_kunit_set_sequence_state(bool initialized, u64 next_sequence);
 void pkm_lcs_kunit_source_table_snapshot(
 	struct pkm_lcs_source_table_snapshot *snapshot);
 void pkm_lcs_kunit_source_fd_snapshot(

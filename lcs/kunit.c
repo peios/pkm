@@ -8155,6 +8155,61 @@ static void pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_sequence_allocation_advances_global_counter(
+	struct kunit *test)
+{
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	struct file file = { };
+	const void *token;
+	u64 first = 0;
+	u64 second = 0;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_TRUE(test, snapshot.sequence_initialized);
+	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, 1ULL);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&first), 0L);
+	KUNIT_EXPECT_EQ(test, first, 1ULL);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&second), 0L);
+	KUNIT_EXPECT_EQ(test, second, 2ULL);
+
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_TRUE(test, snapshot.sequence_initialized);
+	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, 3ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_sequence_allocation_fails_closed(struct kunit *test)
+{
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	u64 sequence = 1234;
+
+	pkm_lcs_kunit_reset_source_table();
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_allocate_sequence(NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_allocate_sequence(&sequence),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, sequence, 0ULL);
+
+	pkm_lcs_kunit_set_sequence_state(true, U64_MAX);
+	sequence = 1234;
+	KUNIT_EXPECT_EQ(test, pkm_lcs_allocate_sequence(&sequence),
+			(long)-EOVERFLOW);
+	KUNIT_EXPECT_EQ(test, sequence, 0ULL);
+
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_TRUE(test, snapshot.sequence_initialized);
+	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, U64_MAX);
+
+	pkm_lcs_kunit_reset_source_table();
+}
+
 static void pkm_lcs_kunit_source_read_retains_in_flight_until_release(
 	struct kunit *test)
 {
@@ -9998,6 +10053,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_create_key_frame),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs),
+	KUNIT_CASE(
+		pkm_lcs_kunit_sequence_allocation_advances_global_counter),
+	KUNIT_CASE(pkm_lcs_kunit_sequence_allocation_fails_closed),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_read_retains_in_flight_until_release),
 	KUNIT_CASE(pkm_lcs_kunit_source_enqueue_rejects_reused_request_id),

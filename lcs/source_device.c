@@ -2525,6 +2525,28 @@ static long pkm_lcs_source_next_sequence_snapshot(u64 *next_sequence)
 	return 0;
 }
 
+long pkm_lcs_allocate_sequence(u64 *sequence)
+{
+	if (!sequence)
+		return -EINVAL;
+
+	*sequence = 0;
+	mutex_lock(&pkm_lcs_source_table_lock);
+	if (!pkm_lcs_sequence_initialized) {
+		mutex_unlock(&pkm_lcs_source_table_lock);
+		return -EIO;
+	}
+	if (pkm_lcs_next_sequence == U64_MAX) {
+		mutex_unlock(&pkm_lcs_source_table_lock);
+		return -EOVERFLOW;
+	}
+
+	*sequence = pkm_lcs_next_sequence;
+	pkm_lcs_next_sequence++;
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return 0;
+}
+
 static long pkm_lcs_source_validate_accepted_response_payload(
 	const u8 *frame, size_t frame_len,
 	struct pkm_lcs_source_response_result *result, long *caller_errno)
@@ -5225,6 +5247,14 @@ void pkm_lcs_kunit_reset_source_table(void)
 	}
 	pkm_lcs_sequence_initialized = false;
 	pkm_lcs_next_sequence = 0;
+	mutex_unlock(&pkm_lcs_source_table_lock);
+}
+
+void pkm_lcs_kunit_set_sequence_state(bool initialized, u64 next_sequence)
+{
+	mutex_lock(&pkm_lcs_source_table_lock);
+	pkm_lcs_sequence_initialized = initialized;
+	pkm_lcs_next_sequence = next_sequence;
 	mutex_unlock(&pkm_lcs_source_table_lock);
 }
 
