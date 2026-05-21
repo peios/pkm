@@ -8744,6 +8744,178 @@ static void pkm_lcs_kunit_create_missing_source_bad_inputs(
 	KUNIT_EXPECT_FALSE(test, result.retry_open_existing);
 }
 
+static void pkm_lcs_kunit_create_missing_set_child_path(
+	struct kunit *test, struct pkm_lcs_create_missing_parent_resolution *res)
+{
+	static const u8 root_guid[RSI_GUID_SIZE] = { 0x21 };
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x22 };
+
+	KUNIT_ASSERT_NOT_NULL(test, res);
+
+	res->parent.resolved_path = kcalloc(2, sizeof(*res->parent.resolved_path),
+					   GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, res->parent.resolved_path);
+	res->parent.ancestor_guids = kcalloc(2, sizeof(*res->parent.ancestor_guids),
+					     GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, res->parent.ancestor_guids);
+	res->parent.resolved_path[0] = kstrdup("Machine", GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, res->parent.resolved_path[0]);
+	res->parent.resolved_path[1] = kstrdup("Software", GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, res->parent.resolved_path[1]);
+	res->child_name = kstrdup("App", GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, res->child_name);
+
+	res->parent.source_id = 1;
+	res->parent.component_count = 2;
+	memcpy(res->parent.key_guid, parent_guid, sizeof(res->parent.key_guid));
+	memcpy(res->parent.ancestor_guids[0], root_guid, RSI_GUID_SIZE);
+	memcpy(res->parent.ancestor_guids[1], parent_guid, RSI_GUID_SIZE);
+	res->child_name_len = 3;
+	res->child_depth = 3;
+}
+
+static void pkm_lcs_kunit_create_missing_publish_created_success(
+	struct kunit *test)
+{
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0x33 };
+	struct pkm_lcs_create_missing_parent_resolution resolution = { };
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct pkm_lcs_created_key_sd created = { };
+	const void *token;
+	long fd;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	created.sd = kacs_rust_kunit_create_file_sd(
+		token, KEY_READ, 0, 0, 0, &created.sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, created.sd);
+	pkm_lcs_kunit_create_missing_set_child_path(test, &resolution);
+
+	fd = pkm_lcs_create_missing_publish_created_key_for_token(
+		token, &resolution, child_guid, &created, KEY_READ);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)fd, &snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, snapshot.path_component_count, 3U);
+	KUNIT_EXPECT_STREQ(test, snapshot.first_component, "Machine");
+	KUNIT_EXPECT_STREQ(test, snapshot.last_component, "App");
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.key_guid, child_guid,
+			       sizeof(snapshot.key_guid)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.last_ancestor_guid, child_guid,
+			       sizeof(snapshot.last_ancestor_guid)),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
+	pkm_kacs_free((void *)created.sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_publish_created_denied(
+	struct kunit *test)
+{
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0x44 };
+	struct pkm_lcs_create_missing_parent_resolution resolution = { };
+	struct pkm_lcs_created_key_sd created = { };
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	created.sd = kacs_rust_kunit_create_file_sd(
+		token, KEY_QUERY_VALUE, 0, 0, 0, &created.sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, created.sd);
+	pkm_lcs_kunit_create_missing_set_child_path(test, &resolution);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_publish_created_key_for_token(
+				token, &resolution, child_guid, &created,
+				KEY_SET_VALUE),
+			(long)-EACCES);
+
+	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
+	pkm_kacs_free((void *)created.sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_publish_created_malformed_sd(
+	struct kunit *test)
+{
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0x55 };
+	static const u8 bad_sd[] = { 0x00, 0x01, 0x02, 0x03 };
+	struct pkm_lcs_create_missing_parent_resolution resolution = { };
+	struct pkm_lcs_created_key_sd created = {
+		.sd = bad_sd,
+		.sd_len = sizeof(bad_sd),
+	};
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	pkm_lcs_kunit_create_missing_set_child_path(test, &resolution);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_publish_created_key_for_token(
+				token, &resolution, child_guid, &created,
+				KEY_READ),
+			(long)-EIO);
+
+	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_publish_created_bad_inputs(
+	struct kunit *test)
+{
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0x66 };
+	struct pkm_lcs_create_missing_parent_resolution resolution = { };
+	struct pkm_lcs_created_key_sd created = { };
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	created.sd = kacs_rust_kunit_create_file_sd(
+		token, KEY_READ, 0, 0, 0, &created.sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, created.sd);
+	pkm_lcs_kunit_create_missing_set_child_path(test, &resolution);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_publish_created_key_for_token(
+				NULL, &resolution, child_guid, &created,
+				KEY_READ),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_publish_created_key_for_token(
+				token, NULL, child_guid, &created, KEY_READ),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_publish_created_key_for_token(
+				token, &resolution, NULL, &created, KEY_READ),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_publish_created_key_for_token(
+				token, &resolution, child_guid, NULL, KEY_READ),
+			(long)-EINVAL);
+	resolution.child_depth = 4;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_missing_publish_created_key_for_token(
+				token, &resolution, child_guid, &created,
+				KEY_READ),
+			(long)-EINVAL);
+
+	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
+	pkm_kacs_free((void *)created.sd);
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_sequence_allocation_advances_global_counter(
 	struct kunit *test)
 {
@@ -10651,6 +10823,14 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_source_key_duplicate_eio),
 	KUNIT_CASE(pkm_lcs_kunit_create_missing_source_bad_inputs),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_publish_created_success),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_publish_created_denied),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_publish_created_malformed_sd),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_publish_created_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_sequence_allocation_advances_global_counter),
 	KUNIT_CASE(pkm_lcs_kunit_sequence_allocation_fails_closed),

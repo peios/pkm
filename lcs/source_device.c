@@ -4356,6 +4356,115 @@ long pkm_lcs_create_missing_source_records(
 	return 0;
 }
 
+static long pkm_lcs_create_missing_child_path_prepare(
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	const u8 child_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_resolved_key_path *child)
+{
+	size_t guid_bytes;
+	u32 parent_count;
+	u32 child_index;
+	u32 i;
+	long ret;
+
+	if (!child)
+		return -EINVAL;
+
+	memset(child, 0, sizeof(*child));
+	if (!resolution || !child_guid || !resolution->parent.source_id ||
+	    !resolution->parent.component_count ||
+	    !resolution->parent.resolved_path ||
+	    !resolution->parent.ancestor_guids ||
+	    !resolution->child_name || !resolution->child_name_len)
+		return -EINVAL;
+
+	parent_count = resolution->parent.component_count;
+	if (parent_count >= PKM_LCS_MAX_KEY_DEPTH_HARD)
+		return -EINVAL;
+	if (resolution->child_depth != parent_count + 1U)
+		return -EINVAL;
+	if (resolution->child_name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD)
+		return -ENAMETOOLONG;
+
+	child->source_id = resolution->parent.source_id;
+	child->component_count = resolution->child_depth;
+	pkm_lcs_source_response_frame_init(&child->final_frame);
+	memcpy(child->key_guid, child_guid, sizeof(child->key_guid));
+
+	child->resolved_path = kcalloc(child->component_count,
+				       sizeof(*child->resolved_path),
+				       GFP_KERNEL);
+	if (!child->resolved_path)
+		return -ENOMEM;
+	child->ancestor_guids = kcalloc(child->component_count,
+					sizeof(*child->ancestor_guids),
+					GFP_KERNEL);
+	if (!child->ancestor_guids)
+		goto out_nomem;
+
+	if (check_mul_overflow((size_t)parent_count,
+			       sizeof(*child->ancestor_guids), &guid_bytes)) {
+		ret = -EINVAL;
+		goto out_error;
+	}
+	memcpy(child->ancestor_guids, resolution->parent.ancestor_guids,
+	       guid_bytes);
+
+	for (i = 0; i < parent_count; i++) {
+		if (!resolution->parent.resolved_path[i]) {
+			ret = -EINVAL;
+			goto out_error;
+		}
+		child->resolved_path[i] =
+			kstrdup(resolution->parent.resolved_path[i],
+				GFP_KERNEL);
+		if (!child->resolved_path[i])
+			goto out_nomem;
+	}
+
+	child_index = parent_count;
+	child->resolved_path[child_index] =
+		kmemdup_nul(resolution->child_name,
+			    resolution->child_name_len, GFP_KERNEL);
+	if (!child->resolved_path[child_index])
+		goto out_nomem;
+	memcpy(child->ancestor_guids[child_index], child_guid, RSI_GUID_SIZE);
+	return 0;
+
+out_nomem:
+	pkm_lcs_resolved_key_path_destroy(child);
+	return -ENOMEM;
+out_error:
+	pkm_lcs_resolved_key_path_destroy(child);
+	return ret;
+}
+
+long pkm_lcs_create_missing_publish_created_key_for_token(
+	const void *token,
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	const u8 child_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_created_key_sd *created_sd, u32 desired_access)
+{
+	struct pkm_lcs_resolved_key_path child = { };
+	long ret;
+
+	if (!created_sd || !created_sd->sd || !created_sd->sd_len)
+		return -EINVAL;
+
+	ret = pkm_lcs_create_missing_child_path_prepare(resolution, child_guid,
+						       &child);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_publish_open_key_for_token(
+		token, child.source_id, child.key_guid, created_sd->sd,
+		created_sd->sd_len, desired_access,
+		(const char * const *)child.resolved_path,
+		child.ancestor_guids, child.component_count);
+	pkm_lcs_resolved_key_path_destroy(&child);
+	return ret;
+}
+
 static long pkm_lcs_resolved_key_path_prepare(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *components,
