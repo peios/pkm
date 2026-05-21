@@ -162,11 +162,13 @@ struct pkm_lcs_kunit_symlink_follow_source_script {
 enum pkm_lcs_kunit_symlink_sequence_op_code {
 	PKM_LCS_KUNIT_SYMLINK_SEQ_LOOKUP = 1,
 	PKM_LCS_KUNIT_SYMLINK_SEQ_QUERY_DEFAULT = 2,
+	PKM_LCS_KUNIT_SYMLINK_SEQ_READ_KEY = 3,
 };
 
 struct pkm_lcs_kunit_symlink_sequence_op {
 	enum pkm_lcs_kunit_symlink_sequence_op_code op;
 	const struct pkm_lcs_kunit_walk_source_step *lookup_step;
+	const struct pkm_lcs_kunit_read_key_source_script *read_key;
 	const u8 *query_guid;
 	const u8 *query_data;
 	size_t query_data_len;
@@ -2268,6 +2270,199 @@ static void pkm_lcs_kunit_open_absolute_root_malformed_sd_fails_closed(
 	KUNIT_EXPECT_EQ(test, script.reads, 1U);
 	KUNIT_EXPECT_EQ(test, script.writes, 1U);
 
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_open_absolute_root_symlink_follows_target(
+	struct kunit *test)
+{
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	static const u8 target_guid[RSI_GUID_SIZE] = {
+		0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd,
+		0xce, 0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5,
+	};
+	static const u8 target_path[] = "Machine\\Target";
+	const char path_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct pkm_lcs_kunit_read_key_source_script root_read = {
+		.expected_guid = root_guid,
+		.name = "Machine",
+		.symlink = true,
+	};
+	struct pkm_lcs_kunit_walk_source_step target_step = {
+		.expected_child = "Target",
+		.guid = target_guid,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op sequence[] = {
+		{ .op = PKM_LCS_KUNIT_SYMLINK_SEQ_READ_KEY,
+		  .read_key = &root_read },
+		{ .op = PKM_LCS_KUNIT_SYMLINK_SEQ_QUERY_DEFAULT,
+		  .query_guid = root_guid, .query_data = target_path,
+		  .query_data_len = sizeof(target_path) - 1,
+		  .query_value_type = REG_LINK },
+		{ .op = PKM_LCS_KUNIT_SYMLINK_SEQ_LOOKUP,
+		  .lookup_step = &target_step },
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = sequence,
+		.op_count = ARRAY_SIZE(sequence),
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	long fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	target_step.sd = sd;
+	target_step.sd_len = sd_len;
+	script.file = &file;
+
+	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+			   &script, "pkm-lcs-kunit-open-root-link");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_open_user_absolute_path_for_token(
+		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
+		0, NULL, 0, NULL, 0);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.path_component_count, 2U);
+	KUNIT_EXPECT_STREQ(test, snapshot.first_component, "Machine");
+	KUNIT_EXPECT_STREQ(test, snapshot.last_component, "Target");
+	KUNIT_EXPECT_EQ(test, memcmp(snapshot.key_guid, target_guid,
+				    RSI_GUID_SIZE), 0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.last_ancestor_guid, target_guid,
+			       RSI_GUID_SIZE),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_open_absolute_symlink_target_hive_root(
+	struct kunit *test)
+{
+	static const u8 machine_root_guid[RSI_GUID_SIZE] = { 1 };
+	static const u8 users_root_guid[RSI_GUID_SIZE] = { 2 };
+	static const u8 link_guid[RSI_GUID_SIZE] = {
+		0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd,
+		0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5,
+	};
+	static const u8 target_path[] = "Users";
+	const char machine_name[] = "Machine";
+	const char users_name[] = "Users";
+	const char path_src[] = "Machine\\Link";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hives[2] = { };
+	struct reg_src_register_args args = { };
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct pkm_lcs_kunit_walk_source_step link_step = {
+		.expected_child = "Link",
+		.guid = link_guid,
+		.symlink = true,
+	};
+	struct pkm_lcs_kunit_read_key_source_script users_read = {
+		.expected_guid = users_root_guid,
+		.name = "Users",
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op sequence[] = {
+		{ .op = PKM_LCS_KUNIT_SYMLINK_SEQ_LOOKUP,
+		  .lookup_step = &link_step },
+		{ .op = PKM_LCS_KUNIT_SYMLINK_SEQ_QUERY_DEFAULT,
+		  .query_guid = link_guid, .query_data = target_path,
+		  .query_data_len = sizeof(target_path) - 1,
+		  .query_value_type = REG_LINK },
+		{ .op = PKM_LCS_KUNIT_SYMLINK_SEQ_READ_KEY,
+		  .read_key = &users_read },
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = sequence,
+		.op_count = ARRAY_SIZE(sequence),
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	long fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+
+	hives[0].name_len = strlen(machine_name);
+	hives[0].name_ptr = (u64)(unsigned long)machine_name;
+	memcpy(hives[0].root_guid, machine_root_guid, RSI_GUID_SIZE);
+	hives[1].name_len = strlen(users_name);
+	hives[1].name_ptr = (u64)(unsigned long)users_name;
+	memcpy(hives[1].root_guid, users_root_guid, RSI_GUID_SIZE);
+	args.hive_count = ARRAY_SIZE(hives);
+	args.hives_ptr = (u64)(unsigned long)hives;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	users_read.sd = sd;
+	users_read.sd_len = sd_len;
+	script.file = &file;
+
+	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+			   &script, "pkm-lcs-kunit-open-link-root-target");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_open_user_absolute_path_for_token(
+		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
+		0, NULL, 0, NULL, 0);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.path_component_count, 1U);
+	KUNIT_EXPECT_STREQ(test, snapshot.first_component, "Users");
+	KUNIT_EXPECT_STREQ(test, snapshot.last_component, "Users");
+	KUNIT_EXPECT_EQ(test, memcmp(snapshot.key_guid, users_root_guid,
+				    RSI_GUID_SIZE), 0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.last_ancestor_guid, users_root_guid,
+			       RSI_GUID_SIZE),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kacs_free((void *)sd);
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
 	kacs_rust_token_drop(token);
@@ -5010,6 +5205,45 @@ static int pkm_lcs_kunit_symlink_sequence_handle_query(
 		script, response, built_len);
 }
 
+static int pkm_lcs_kunit_symlink_sequence_handle_read_key(
+	struct pkm_lcs_kunit_symlink_sequence_source_script *script,
+	const struct pkm_lcs_kunit_symlink_sequence_op *op, u8 *request,
+	size_t request_len, u8 *response, size_t response_len)
+{
+	const struct pkm_lcs_kunit_read_key_source_script *read_key =
+		op->read_key;
+	size_t expected_len = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
+	size_t built_len = 0;
+	ssize_t count;
+	u64 request_id;
+	u16 request_op;
+	int ret;
+
+	if (!read_key || !read_key->expected_guid)
+		return -EINVAL;
+
+	count = pkm_lcs_kunit_symlink_sequence_read_request(
+		script, request, request_len);
+	if (count < 0)
+		return (int)count;
+	if ((size_t)count != expected_len)
+		return -EINVAL;
+
+	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
+	if (request_op != RSI_READ_KEY ||
+	    memcmp(request + RSI_REQUEST_HEADER_SIZE, read_key->expected_guid,
+		   RSI_GUID_SIZE))
+		return -EINVAL;
+
+	ret = pkm_lcs_kunit_read_key_source_build_response(
+		read_key, request_id, response, response_len, &built_len);
+	if (ret)
+		return ret;
+	return pkm_lcs_kunit_symlink_sequence_write_response(
+		script, response, built_len);
+}
+
 static int pkm_lcs_kunit_symlink_sequence_source_thread(void *raw_script)
 {
 	struct pkm_lcs_kunit_symlink_sequence_source_script *script =
@@ -5037,6 +5271,11 @@ static int pkm_lcs_kunit_symlink_sequence_source_thread(void *raw_script)
 			break;
 		case PKM_LCS_KUNIT_SYMLINK_SEQ_QUERY_DEFAULT:
 			ret = pkm_lcs_kunit_symlink_sequence_handle_query(
+				script, op, request, sizeof(request), response,
+				sizeof(response));
+			break;
+		case PKM_LCS_KUNIT_SYMLINK_SEQ_READ_KEY:
+			ret = pkm_lcs_kunit_symlink_sequence_handle_read_key(
 				script, op, request, sizeof(request), response,
 				sizeof(response));
 			break;
@@ -7474,6 +7713,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_open_absolute_root_denied_publishes_no_fd),
 	KUNIT_CASE(
 		pkm_lcs_kunit_open_absolute_root_malformed_sd_fails_closed),
+	KUNIT_CASE(pkm_lcs_kunit_open_absolute_root_symlink_follows_target),
+	KUNIT_CASE(pkm_lcs_kunit_open_absolute_symlink_target_hive_root),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_denied_publishes_no_fd),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_malformed_sd_fails_closed),
 	KUNIT_CASE(

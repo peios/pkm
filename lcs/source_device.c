@@ -74,6 +74,11 @@ struct pkm_lcs_symlink_follow_components {
 	u32 component_count;
 };
 
+struct pkm_lcs_owned_path_components {
+	struct pkm_lcs_path_component_view *components;
+	u32 component_count;
+};
+
 struct pkm_lcs_source_copyout_ops {
 	bool (*write)(void *ctx, void __user *dst, const void *src, size_t len);
 	void *ctx;
@@ -2875,15 +2880,9 @@ long pkm_lcs_open_user_absolute_path_for_token(
 {
 	struct pkm_lcs_materialized_path components = { };
 	struct pkm_lcs_open_preflight_plan preflight = { };
-	struct pkm_lcs_rsi_read_key_result read_key = { };
 	struct pkm_lcs_resolved_key_path resolved = { };
-	struct pkm_lcs_source_enqueue_result enqueue = { };
-	struct pkm_lcs_source_response_frame root_frame;
-	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_hive_route_result route = { };
 	struct pkm_lcs_syscall_path_copy copy = { };
-	const char *root_path[1];
-	u8 root_ancestors[1][RSI_GUID_SIZE];
 	const u8 *final_sd;
 	long ret;
 
@@ -2911,45 +2910,6 @@ long pkm_lcs_open_user_absolute_path_for_token(
 		token, copy.path, copy.path_len, true, &components);
 	if (ret)
 		goto out_copy;
-
-	if (components.component_count == 1) {
-		ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
-			route.source_id, 0, route.root_guid,
-			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &root_frame,
-			&response, &enqueue);
-		if (ret) {
-			pkm_lcs_source_response_frame_destroy(&root_frame);
-			goto out_components;
-		}
-
-		ret = pkm_lcs_rsi_materialize_read_key_response(
-			root_frame.data, root_frame.len, response.request_id,
-			&read_key);
-		if (ret)
-			goto out_root_frame;
-		if (!read_key.sd_len ||
-		    (size_t)read_key.sd_offset > root_frame.len ||
-		    (size_t)read_key.sd_len >
-			    root_frame.len - (size_t)read_key.sd_offset) {
-			ret = -EIO;
-			goto out_root_frame;
-		}
-		if (read_key.symlink && !(flags & REG_OPEN_LINK)) {
-			ret = -EOPNOTSUPP;
-			goto out_root_frame;
-		}
-
-		root_path[0] = components.components[0].name;
-		memcpy(root_ancestors[0], route.root_guid, RSI_GUID_SIZE);
-		final_sd = root_frame.data + read_key.sd_offset;
-		ret = pkm_lcs_publish_open_key_for_token(
-			token, route.source_id, route.root_guid, final_sd,
-			read_key.sd_len, desired_access, root_path,
-			root_ancestors, ARRAY_SIZE(root_path));
-out_root_frame:
-		pkm_lcs_source_response_frame_destroy(&root_frame);
-		goto out_components;
-	}
 
 	ret = pkm_lcs_walk_absolute_components_for_open(
 		route.source_id, 0, route.root_guid, components.components,
@@ -3094,8 +3054,8 @@ static long pkm_lcs_resolved_key_path_prepare(
 
 	if (!source_id || !root_guid || !components || !result)
 		return -EINVAL;
-	if (component_count < 2)
-		return -EOPNOTSUPP;
+	if (!component_count)
+		return -EINVAL;
 	if (component_count > PKM_LCS_MAX_KEY_DEPTH_HARD)
 		return -EINVAL;
 
@@ -3137,6 +3097,143 @@ static long pkm_lcs_walk_absolute_components_impl(
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result);
+
+static long pkm_lcs_walk_absolute_components_at_symlink_limit(
+	u32 source_id, u64 txn_id, const u8 root_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_path_component_view *components,
+	u32 component_count, bool open_final_link,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
+{
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_rsi_lookup_child_result child = { };
+	struct pkm_lcs_rsi_read_key_result read_key = { };
+	struct pkm_lcs_source_response_frame frame;
+	const struct pkm_lcs_rsi_layer_view *active_layers = layers;
+	const struct pkm_lcs_rsi_private_layer_view *active_private_layers =
+		private_layers;
+	u32 active_layer_count = layer_count;
+	u32 active_private_layer_count = private_layer_count;
+	u8 current_guid[RSI_GUID_SIZE];
+	u64 next_sequence;
+	u32 i;
+	long ret;
+
+	if (!result)
+		return -EINVAL;
+	memset(result, 0, sizeof(*result));
+	ret = pkm_lcs_normalize_layer_inputs(
+		&active_layers, &active_layer_count, &active_private_layers,
+		&active_private_layer_count);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_resolved_key_path_prepare(source_id, root_guid,
+						components, component_count,
+						result);
+	if (ret)
+		goto out_destroy;
+
+	if (component_count == 1) {
+		pkm_lcs_source_response_frame_init(&frame);
+		ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+			source_id, txn_id, root_guid,
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
+			&enqueue);
+		if (ret)
+			goto out_root_frame;
+
+		ret = pkm_lcs_rsi_materialize_read_key_response(
+			frame.data, frame.len, response.request_id, &read_key);
+		if (ret)
+			goto out_root_frame;
+		if (!read_key.sd_len ||
+		    (size_t)read_key.sd_offset > frame.len ||
+		    (size_t)read_key.sd_len >
+			    frame.len - (size_t)read_key.sd_offset) {
+			ret = -EIO;
+			goto out_root_frame;
+		}
+		if (read_key.symlink && !open_final_link) {
+			ret = -ELOOP;
+			goto out_root_frame;
+		}
+
+		memcpy(result->key_guid, root_guid, sizeof(result->key_guid));
+		result->final_sd_offset = read_key.sd_offset;
+		result->final_sd_len = read_key.sd_len;
+		result->final_volatile = read_key.volatile_key != 0;
+		result->final_symlink = read_key.symlink != 0;
+		result->final_last_write_time = read_key.last_write_time;
+		result->final_frame = frame;
+		pkm_lcs_source_response_frame_init(&frame);
+		pkm_lcs_source_response_frame_destroy(&frame);
+		return 0;
+	}
+
+	memcpy(current_guid, root_guid, sizeof(current_guid));
+	for (i = 1; i < component_count; i++) {
+		pkm_lcs_source_response_frame_init(&frame);
+		ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
+			source_id, txn_id, current_guid, components[i].name,
+			components[i].name_len,
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
+			&enqueue);
+		if (ret)
+			goto out_destroy_frame;
+
+		ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+		if (ret)
+			goto out_destroy_frame;
+
+		ret = pkm_lcs_rsi_materialize_lookup_child(
+			frame.data, frame.len, response.request_id,
+			next_sequence, components[i].name,
+			components[i].name_len, active_layers,
+			active_layer_count, active_private_layers,
+			active_private_layer_count, &child);
+		if (ret)
+			goto out_destroy_frame;
+		if (!child.found) {
+			ret = -ENOENT;
+			goto out_destroy_frame;
+		}
+		if (child.symlink && !(open_final_link &&
+				       i == component_count - 1U)) {
+			ret = -ELOOP;
+			goto out_destroy_frame;
+		}
+
+		memcpy(result->ancestor_guids[i], child.key_guid,
+		       RSI_GUID_SIZE);
+		memcpy(current_guid, child.key_guid, sizeof(current_guid));
+		if (i == component_count - 1U) {
+			memcpy(result->key_guid, child.key_guid,
+			       sizeof(result->key_guid));
+			result->final_sd_offset = child.sd_offset;
+			result->final_sd_len = child.sd_len;
+			result->final_volatile = child.volatile_key != 0;
+			result->final_symlink = child.symlink != 0;
+			result->final_last_write_time = child.last_write_time;
+			result->final_frame = frame;
+			pkm_lcs_source_response_frame_init(&frame);
+		}
+out_destroy_frame:
+		pkm_lcs_source_response_frame_destroy(&frame);
+		if (ret)
+			goto out_destroy;
+	}
+
+	return 0;
+
+out_root_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+out_destroy:
+	pkm_lcs_resolved_key_path_destroy(result);
+	return ret;
+}
 
 static void pkm_lcs_symlink_follow_components_destroy(
 	struct pkm_lcs_symlink_follow_components *components)
@@ -3181,6 +3278,121 @@ static long pkm_lcs_symlink_follow_components_prepare(
 	return 0;
 }
 
+static void
+pkm_lcs_owned_path_components_destroy(struct pkm_lcs_owned_path_components *path)
+{
+	u32 i;
+
+	if (!path)
+		return;
+	if (path->components) {
+		for (i = 0; i < path->component_count; i++)
+			kfree(path->components[i].name);
+		kfree(path->components);
+	}
+	memset(path, 0, sizeof(*path));
+}
+
+static long pkm_lcs_owned_path_component_copy(
+	struct pkm_lcs_path_component_view *dst,
+	const struct pkm_lcs_path_component_view *src)
+{
+	char *name;
+
+	if (!dst || !src || !src->name || !src->name_len)
+		return -EINVAL;
+	if (src->name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD)
+		return -ENAMETOOLONG;
+
+	name = kmemdup_nul(src->name, src->name_len, GFP_KERNEL);
+	if (!name)
+		return -ENOMEM;
+	dst->name = name;
+	dst->name_len = src->name_len;
+	return 0;
+}
+
+static long pkm_lcs_prepare_owned_symlink_follow_components(
+	const struct pkm_lcs_materialized_path *target,
+	const struct pkm_lcs_path_component_view *suffix, u32 suffix_count,
+	struct pkm_lcs_owned_path_components *result)
+{
+	size_t total_count;
+	u32 i;
+	long ret;
+
+	if (!target || !target->components || !target->component_count ||
+	    !result || (suffix_count && !suffix))
+		return -EINVAL;
+	if (check_add_overflow((size_t)target->component_count,
+			       (size_t)suffix_count, &total_count))
+		return -EINVAL;
+	if (!total_count || total_count > PKM_LCS_MAX_KEY_DEPTH_HARD ||
+	    total_count > U32_MAX)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	result->components = kcalloc(total_count, sizeof(*result->components),
+				     GFP_KERNEL);
+	if (!result->components)
+		return -ENOMEM;
+	result->component_count = (u32)total_count;
+
+	for (i = 0; i < target->component_count; i++) {
+		ret = pkm_lcs_owned_path_component_copy(
+			&result->components[i], &target->components[i]);
+		if (ret)
+			goto out_destroy;
+	}
+	for (i = 0; i < suffix_count; i++) {
+		ret = pkm_lcs_owned_path_component_copy(
+			&result->components[target->component_count + i],
+			&suffix[i]);
+		if (ret)
+			goto out_destroy;
+	}
+
+	return 0;
+
+out_destroy:
+	pkm_lcs_owned_path_components_destroy(result);
+	return ret;
+}
+
+static long pkm_lcs_prepare_absolute_symlink_restart(
+	u32 source_id, u64 txn_id, const u8 link_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_path_component_view *suffix, u32 suffix_count,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, u32 *next_source_id,
+	u8 next_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_owned_path_components *next_components)
+{
+	struct pkm_lcs_symlink_target_resolution target = { };
+	long ret;
+
+	if (!next_source_id || !next_root_guid || !next_components)
+		return -EINVAL;
+
+	ret = pkm_lcs_resolve_symlink_target_for_key(
+		source_id, txn_id, link_guid, scope_guids, scope_count,
+		layers, layer_count, private_layers, private_layer_count,
+		&target);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_prepare_owned_symlink_follow_components(
+		&target.components, suffix, suffix_count, next_components);
+	if (!ret) {
+		*next_source_id = target.route.source_id;
+		memcpy(next_root_guid, target.route.root_guid, RSI_GUID_SIZE);
+	}
+
+	pkm_lcs_symlink_target_resolution_destroy(&target);
+	return ret;
+}
+
 static long pkm_lcs_walk_symlink_target(
 	u32 source_id, u64 txn_id, const u8 link_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_path_component_view *suffix, u32 suffix_count,
@@ -3208,17 +3420,22 @@ static long pkm_lcs_walk_symlink_target(
 		&target.components, suffix, suffix_count, &walk);
 	if (ret)
 		goto out_destroy_target;
-	if (walk.component_count < 2) {
-		ret = -EOPNOTSUPP;
-		goto out_destroy_walk;
-	}
 
 	pkm_lcs_resolved_key_path_destroy(result);
-	ret = pkm_lcs_walk_absolute_components_impl(
-		target.route.source_id, txn_id, target.route.root_guid,
-		walk.components, walk.component_count, open_final_link, true,
-		symlink_depth + 1U, scope_guids, scope_count, layers,
-		layer_count, private_layers, private_layer_count, result);
+	if (symlink_depth + 1U >= PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT) {
+		ret = pkm_lcs_walk_absolute_components_at_symlink_limit(
+			target.route.source_id, txn_id, target.route.root_guid,
+			walk.components, walk.component_count, open_final_link,
+			layers, layer_count, private_layers, private_layer_count,
+			result);
+	} else {
+		ret = pkm_lcs_walk_absolute_components_impl(
+			target.route.source_id, txn_id, target.route.root_guid,
+			walk.components, walk.component_count, open_final_link,
+			true, symlink_depth + 1U, scope_guids, scope_count,
+			layers, layer_count, private_layers, private_layer_count,
+			result);
+	}
 
 out_destroy_walk:
 	pkm_lcs_symlink_follow_components_destroy(&walk);
@@ -3239,9 +3456,16 @@ static long pkm_lcs_walk_absolute_components_impl(
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_source_enqueue_result enqueue = { };
 	struct pkm_lcs_rsi_lookup_child_result child = { };
+	struct pkm_lcs_rsi_read_key_result read_key = { };
+	struct pkm_lcs_owned_path_components owned_components = { };
 	struct pkm_lcs_source_response_frame frame;
+	const struct pkm_lcs_path_component_view *walk_components = components;
+	u8 walk_root_guid[RSI_GUID_SIZE];
 	u8 current_guid[RSI_GUID_SIZE];
 	u64 next_sequence;
+	u32 walk_source_id = source_id;
+	u32 walk_component_count = component_count;
+	u32 walk_symlink_depth = symlink_depth;
 	u32 i;
 	long ret;
 	const struct pkm_lcs_rsi_layer_view *active_layers = layers;
@@ -3258,19 +3482,97 @@ static long pkm_lcs_walk_absolute_components_impl(
 		&active_private_layer_count);
 	if (ret)
 		return ret;
+	memcpy(walk_root_guid, root_guid, RSI_GUID_SIZE);
 
-	ret = pkm_lcs_resolved_key_path_prepare(source_id, root_guid,
-						components, component_count,
+restart:
+	ret = pkm_lcs_resolved_key_path_prepare(walk_source_id, walk_root_guid,
+						walk_components,
+						walk_component_count,
 						result);
 	if (ret)
 		goto out_destroy;
+	if (walk_component_count == 1) {
+		pkm_lcs_source_response_frame_init(&frame);
+		ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+			walk_source_id, txn_id, walk_root_guid,
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
+			&enqueue);
+		if (ret)
+			goto out_root_frame;
 
-	memcpy(current_guid, root_guid, sizeof(current_guid));
-	for (i = 1; i < component_count; i++) {
+		ret = pkm_lcs_rsi_materialize_read_key_response(
+			frame.data, frame.len, response.request_id, &read_key);
+		if (ret)
+			goto out_root_frame;
+		if (!read_key.sd_len ||
+		    (size_t)read_key.sd_offset > frame.len ||
+		    (size_t)read_key.sd_len >
+			    frame.len - (size_t)read_key.sd_offset) {
+			ret = -EIO;
+			goto out_root_frame;
+		}
+		if (read_key.symlink) {
+			if (open_final_link) {
+				/* Open the root link key itself. */
+			} else if (follow_symlinks) {
+				struct pkm_lcs_owned_path_components replacement =
+					{ };
+				u8 next_root_guid[RSI_GUID_SIZE];
+				u32 next_source_id = 0;
+
+				if (walk_symlink_depth >=
+				    PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT) {
+					ret = -ELOOP;
+					goto out_root_frame;
+				}
+				ret = pkm_lcs_prepare_absolute_symlink_restart(
+					walk_source_id, txn_id, walk_root_guid,
+					NULL, 0, scope_guids, scope_count,
+					active_layers, active_layer_count,
+					active_private_layers,
+					active_private_layer_count, &next_source_id,
+					next_root_guid, &replacement);
+				pkm_lcs_source_response_frame_destroy(&frame);
+				if (ret)
+					goto out_destroy;
+				pkm_lcs_resolved_key_path_destroy(result);
+				pkm_lcs_owned_path_components_destroy(
+					&owned_components);
+				owned_components = replacement;
+				walk_source_id = next_source_id;
+				memcpy(walk_root_guid, next_root_guid,
+				       RSI_GUID_SIZE);
+				walk_components = owned_components.components;
+				walk_component_count =
+					owned_components.component_count;
+				walk_symlink_depth++;
+				goto restart;
+			} else {
+				ret = -EOPNOTSUPP;
+				goto out_root_frame;
+			}
+		}
+
+		memcpy(result->key_guid, walk_root_guid,
+		       sizeof(result->key_guid));
+		result->final_sd_offset = read_key.sd_offset;
+		result->final_sd_len = read_key.sd_len;
+		result->final_volatile = read_key.volatile_key != 0;
+		result->final_symlink = read_key.symlink != 0;
+		result->final_last_write_time = read_key.last_write_time;
+		result->final_frame = frame;
+		pkm_lcs_source_response_frame_init(&frame);
+		pkm_lcs_source_response_frame_destroy(&frame);
+		pkm_lcs_owned_path_components_destroy(&owned_components);
+		return 0;
+	}
+
+	memcpy(current_guid, walk_root_guid, sizeof(current_guid));
+	for (i = 1; i < walk_component_count; i++) {
 		pkm_lcs_source_response_frame_init(&frame);
 		ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
-			source_id, txn_id, current_guid, components[i].name,
-			components[i].name_len,
+			walk_source_id, txn_id, current_guid,
+			walk_components[i].name, walk_components[i].name_len,
 			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
 			&enqueue);
 		if (ret)
@@ -3282,8 +3584,8 @@ static long pkm_lcs_walk_absolute_components_impl(
 
 		ret = pkm_lcs_rsi_materialize_lookup_child(
 			frame.data, frame.len, response.request_id,
-			next_sequence, components[i].name,
-			components[i].name_len, active_layers,
+			next_sequence, walk_components[i].name,
+			walk_components[i].name_len, active_layers,
 			active_layer_count, active_private_layers,
 			active_private_layer_count, &child);
 		if (ret)
@@ -3293,27 +3595,48 @@ static long pkm_lcs_walk_absolute_components_impl(
 			goto out_destroy_frame;
 		}
 		if (child.symlink) {
-			if (open_final_link && i == component_count - 1U) {
+			if (open_final_link && i == walk_component_count - 1U) {
 				/* Open the link key itself. */
 			} else if (follow_symlinks) {
 				const struct pkm_lcs_path_component_view *suffix =
 					NULL;
 				u32 suffix_count = 0;
+				struct pkm_lcs_owned_path_components replacement =
+					{ };
+				u8 next_root_guid[RSI_GUID_SIZE];
+				u32 next_source_id = 0;
 
-				if (i + 1U < component_count) {
-					suffix = &components[i + 1U];
-					suffix_count = component_count - i - 1U;
+				if (walk_symlink_depth >=
+				    PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT) {
+					ret = -ELOOP;
+					goto out_destroy_frame;
 				}
-				ret = pkm_lcs_walk_symlink_target(
-					source_id, txn_id, child.key_guid, suffix,
-					suffix_count, open_final_link, symlink_depth,
-					scope_guids, scope_count, active_layers,
-					active_layer_count, active_private_layers,
-					active_private_layer_count, result);
+				if (i + 1U < walk_component_count) {
+					suffix = &walk_components[i + 1U];
+					suffix_count = walk_component_count - i - 1U;
+				}
+				ret = pkm_lcs_prepare_absolute_symlink_restart(
+					walk_source_id, txn_id, child.key_guid,
+					suffix, suffix_count, scope_guids,
+					scope_count, active_layers, active_layer_count,
+					active_private_layers,
+					active_private_layer_count, &next_source_id,
+					next_root_guid, &replacement);
 				pkm_lcs_source_response_frame_destroy(&frame);
 				if (ret)
 					goto out_destroy;
-				return 0;
+				pkm_lcs_resolved_key_path_destroy(result);
+				pkm_lcs_owned_path_components_destroy(
+					&owned_components);
+				owned_components = replacement;
+				walk_source_id = next_source_id;
+				memcpy(walk_root_guid, next_root_guid,
+				       RSI_GUID_SIZE);
+				walk_components = owned_components.components;
+				walk_component_count =
+					owned_components.component_count;
+				walk_symlink_depth++;
+				goto restart;
 			} else {
 				ret = -EOPNOTSUPP;
 				goto out_destroy_frame;
@@ -3323,7 +3646,7 @@ static long pkm_lcs_walk_absolute_components_impl(
 		memcpy(result->ancestor_guids[i], child.key_guid,
 		       RSI_GUID_SIZE);
 		memcpy(current_guid, child.key_guid, sizeof(current_guid));
-		if (i == component_count - 1U) {
+		if (i == walk_component_count - 1U) {
 			memcpy(result->key_guid, child.key_guid,
 			       sizeof(result->key_guid));
 			result->final_sd_offset = child.sd_offset;
@@ -3340,9 +3663,13 @@ out_destroy_frame:
 			goto out_destroy;
 	}
 
+	pkm_lcs_owned_path_components_destroy(&owned_components);
 	return 0;
 
+out_root_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
 out_destroy:
+	pkm_lcs_owned_path_components_destroy(&owned_components);
 	pkm_lcs_resolved_key_path_destroy(result);
 	return ret;
 }
