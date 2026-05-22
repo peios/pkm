@@ -5324,6 +5324,266 @@ static void pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static u32 pkm_lcs_kunit_write_direct_watch_event(u8 *dst, size_t dst_len,
+						  u32 event_type,
+						  const char *name)
+{
+	size_t name_len = name ? strlen(name) : 0;
+	u32 total_len;
+
+	if (!dst || dst_len < 8 || name_len > U16_MAX ||
+	    name_len + 8 > dst_len)
+		return 0;
+
+	total_len = (u32)(8 + name_len);
+	put_unaligned_le32(total_len, dst);
+	put_unaligned_le16((u16)event_type, dst + 4);
+	put_unaligned_le16((u16)name_len, dst + 6);
+	if (name_len)
+		memcpy(dst + 8, name, name_len);
+	return total_len;
+}
+
+static void pkm_lcs_kunit_key_fd_notify_arm_replace_disarm(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_VALUE,
+		.subtree = 0,
+	};
+	long fd;
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_NOTIFY);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, snapshot.watch_armed);
+	KUNIT_EXPECT_FALSE(test, snapshot.watch_subtree);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_filter, REG_NOTIFY_VALUE);
+
+	args.filter = REG_NOTIFY_SUBKEY | REG_NOTIFY_SD;
+	args.subtree = 1;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, snapshot.watch_armed);
+	KUNIT_EXPECT_TRUE(test, snapshot.watch_subtree);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_filter,
+			REG_NOTIFY_SUBKEY | REG_NOTIFY_SD);
+
+	args.filter = 0;
+	args.subtree = 0;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_FALSE(test, snapshot.watch_armed);
+	KUNIT_EXPECT_FALSE(test, snapshot.watch_subtree);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_filter, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_key_fd_notify_fails_closed(struct kunit *test)
+{
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	long fd;
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_QUERY_VALUE);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_NOTIFY);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	args.filter = REG_NOTIFY_VALUE | 0x80U;
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			(long)-EINVAL);
+	args.filter = REG_NOTIFY_VALUE;
+	args.subtree = 2;
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			(long)-EINVAL);
+	args.subtree = 0;
+	args._pad[1] = 1;
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			(long)-EINVAL);
+	args._pad[1] = 0;
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_set_orphaned((int)fd, true),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			(long)-ENOENT);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_FALSE(test, snapshot.watch_armed);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_NOTIFY);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_set_orphaned((int)fd, true),
+			0L);
+	args.filter = REG_NOTIFY_SD;
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, snapshot.watch_armed);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_filter, REG_NOTIFY_SD);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_key_fd_watch_read_poll_drains_records(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	u8 record[16] = { };
+	u8 out[32] = { };
+	u32 record_len;
+	long fd;
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_NOTIFY);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, out,
+							sizeof(out), true),
+			(ssize_t)-EAGAIN);
+	KUNIT_EXPECT_EQ(test, (u32)pkm_lcs_kunit_key_fd_poll((int)fd), 0U);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	record_len = pkm_lcs_kunit_write_direct_watch_event(
+		record, sizeof(record), REG_WATCH_VALUE_SET, "abc");
+	KUNIT_ASSERT_EQ(test, record_len, 11U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_queue_watch_event(
+				(int)fd, REG_WATCH_VALUE_SET, record,
+				record_len),
+			0L);
+	KUNIT_EXPECT_EQ(test, (u32)pkm_lcs_kunit_key_fd_poll((int)fd),
+			(u32)EPOLLIN);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, out, 8, true),
+			(ssize_t)-EINVAL);
+	KUNIT_EXPECT_EQ(test, (u32)pkm_lcs_kunit_key_fd_poll((int)fd),
+			(u32)EPOLLIN);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, NULL,
+							sizeof(out), true),
+			(ssize_t)-EFAULT);
+	KUNIT_EXPECT_EQ(test, (u32)pkm_lcs_kunit_key_fd_poll((int)fd),
+			(u32)EPOLLIN);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, out,
+							sizeof(out), true),
+			(ssize_t)record_len);
+	KUNIT_EXPECT_EQ(test, memcmp(out, record, record_len), 0);
+	KUNIT_EXPECT_EQ(test, (u32)pkm_lcs_kunit_key_fd_poll((int)fd), 0U);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, out,
+							sizeof(out), true),
+			(ssize_t)-EAGAIN);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_pending_events, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_key_fd_watch_filter_disarm_and_overflow(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	const size_t out_len = PKM_LCS_KEY_FD_WATCH_QUEUE_LIMIT * 8U;
+	u8 record[8] = { };
+	u8 *out;
+	u32 record_len;
+	u32 last_type;
+	long fd;
+	u32 i;
+
+	out = kunit_kzalloc(test, out_len, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, out);
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_NOTIFY);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+
+	record_len = pkm_lcs_kunit_write_direct_watch_event(
+		record, sizeof(record), REG_WATCH_SD_CHANGED, NULL);
+	KUNIT_ASSERT_EQ(test, record_len, 8U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_queue_watch_event(
+				(int)fd, REG_WATCH_SD_CHANGED, record,
+				record_len),
+			0L);
+	KUNIT_EXPECT_EQ(test, (u32)pkm_lcs_kunit_key_fd_poll((int)fd), 0U);
+
+	record_len = pkm_lcs_kunit_write_direct_watch_event(
+		record, sizeof(record), REG_WATCH_KEY_DELETED, NULL);
+	KUNIT_ASSERT_EQ(test, record_len, 8U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_queue_watch_event(
+				(int)fd, REG_WATCH_KEY_DELETED, record,
+				record_len),
+			0L);
+	KUNIT_EXPECT_EQ(test, (u32)pkm_lcs_kunit_key_fd_poll((int)fd),
+			(u32)EPOLLIN);
+
+	args.filter = 0;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	KUNIT_EXPECT_EQ(test, (u32)pkm_lcs_kunit_key_fd_poll((int)fd), 0U);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, out,
+							out_len, true),
+			(ssize_t)-EAGAIN);
+
+	args.filter = REG_NOTIFY_VALUE;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	record_len = pkm_lcs_kunit_write_direct_watch_event(
+		record, sizeof(record), REG_WATCH_VALUE_SET, NULL);
+	KUNIT_ASSERT_EQ(test, record_len, 8U);
+	for (i = 0; i < PKM_LCS_KEY_FD_WATCH_QUEUE_LIMIT + 1U; i++) {
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_kunit_key_fd_queue_watch_event(
+					(int)fd, REG_WATCH_VALUE_SET, record,
+					record_len),
+				0L);
+	}
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_pending_events,
+			PKM_LCS_KEY_FD_WATCH_QUEUE_LIMIT);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, out,
+							out_len, true),
+			(ssize_t)out_len);
+	last_type = get_unaligned_le16(out + out_len - 4U);
+	KUNIT_EXPECT_EQ(test, last_type, REG_WATCH_OVERFLOW);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_begin_transaction_publishes_active_unbound(
 	struct kunit *test)
 {
@@ -16755,6 +17015,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_fixed_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_arm_replace_disarm),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_fails_closed),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_read_poll_drains_records),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_filter_disarm_and_overflow),
 	KUNIT_CASE(
 		pkm_lcs_kunit_begin_transaction_publishes_active_unbound),
 	KUNIT_CASE(pkm_lcs_kunit_begin_transaction_ids_are_monotonic),

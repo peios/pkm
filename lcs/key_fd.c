@@ -7,24 +7,56 @@
  */
 
 #include <linux/anon_inodes.h>
+#include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
+#include <linux/list.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/overflow.h>
+#include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/uaccess.h>
+#include <linux/unaligned.h>
+#include <linux/wait.h>
 
 #include <pkm/lcs.h>
 
 #include "key_fd.h"
 
+#define PKM_LCS_WATCH_NOTIFY_ACTION_ARM 1U
+#define PKM_LCS_WATCH_NOTIFY_ACTION_DISARM 2U
+#define PKM_LCS_WATCH_EVENT_HEADER_LEN 8U
+
 struct pkm_lcs_key_fd_string_view {
 	const u8 *bytes;
 	u32 len;
+};
+
+struct pkm_lcs_key_fd_copyout_ops {
+	bool (*write)(void *ctx, void __user *dst, const void *src, size_t len);
+	void *ctx;
+};
+
+struct pkm_lcs_watch_notify_plan_copy {
+	u32 action;
+	u32 filter;
+	u8 subtree;
+	u8 replaces_existing;
+	u8 discard_pending_events;
+	u8 _pad;
+};
+
+struct pkm_lcs_key_fd_watch_event {
+	struct list_head link;
+	u32 event_type;
+	u32 total_len;
+	u8 bytes[];
 };
 
 struct pkm_lcs_key_fd {
@@ -34,6 +66,13 @@ struct pkm_lcs_key_fd {
 	u32 path_component_count;
 	char **resolved_path;
 	u8 (*ancestor_guids)[PKM_LCS_GUID_BYTES];
+	struct mutex watch_lock;
+	wait_queue_head_t watch_wait;
+	struct list_head watch_events;
+	u32 watch_filter;
+	u32 watch_pending_events;
+	bool watch_has_overflow;
+	bool watch_subtree;
 	bool orphaned;
 	bool watch_armed;
 };
@@ -50,6 +89,188 @@ extern int lcs_rust_key_fd_fixed_ioctl_access_gate(u32 granted_access,
 extern int lcs_rust_key_fd_security_ioctl_access_gate(u32 granted_access,
 						      u32 ioctl_number,
 						      u32 security_info);
+extern int lcs_rust_plan_key_fd_watch_notify(
+	u8 armed, u8 orphaned, u32 filter, u8 subtree, const u8 *reserved,
+	struct pkm_lcs_watch_notify_plan_copy *plan_out);
+
+static bool pkm_lcs_key_fd_default_copyout_write(void *ctx, void __user *dst,
+						 const void *src, size_t len)
+{
+	(void)ctx;
+
+	if (!dst)
+		return false;
+	return copy_to_user(dst, src, len) == 0;
+}
+
+static const struct pkm_lcs_key_fd_copyout_ops
+	pkm_lcs_key_fd_default_copyout_ops = {
+		.write = pkm_lcs_key_fd_default_copyout_write,
+};
+
+static void pkm_lcs_key_fd_watch_event_free(
+	struct pkm_lcs_key_fd_watch_event *event)
+{
+	kfree(event);
+}
+
+static void pkm_lcs_key_fd_watch_queue_clear_locked(
+	struct pkm_lcs_key_fd *key_fd)
+{
+	struct pkm_lcs_key_fd_watch_event *event;
+	struct pkm_lcs_key_fd_watch_event *tmp;
+
+	list_for_each_entry_safe(event, tmp, &key_fd->watch_events, link) {
+		list_del(&event->link);
+		pkm_lcs_key_fd_watch_event_free(event);
+	}
+	key_fd->watch_pending_events = 0;
+	key_fd->watch_has_overflow = false;
+}
+
+static void pkm_lcs_key_fd_drop_watch_event_locked(
+	struct pkm_lcs_key_fd *key_fd,
+	struct pkm_lcs_key_fd_watch_event *event)
+{
+	if (event->event_type == REG_WATCH_OVERFLOW)
+		key_fd->watch_has_overflow = false;
+	list_del(&event->link);
+	key_fd->watch_pending_events--;
+	pkm_lcs_key_fd_watch_event_free(event);
+}
+
+static void pkm_lcs_key_fd_drop_oldest_watch_event_locked(
+	struct pkm_lcs_key_fd *key_fd)
+{
+	struct pkm_lcs_key_fd_watch_event *event;
+
+	if (!key_fd->watch_pending_events)
+		return;
+	event = list_first_entry(&key_fd->watch_events,
+				 struct pkm_lcs_key_fd_watch_event, link);
+	pkm_lcs_key_fd_drop_watch_event_locked(key_fd, event);
+}
+
+static void pkm_lcs_key_fd_drop_oldest_preserving_overflow_locked(
+	struct pkm_lcs_key_fd *key_fd)
+{
+	struct pkm_lcs_key_fd_watch_event *event;
+
+	if (!key_fd->watch_pending_events)
+		return;
+
+	event = list_first_entry(&key_fd->watch_events,
+				 struct pkm_lcs_key_fd_watch_event, link);
+	if (event->event_type == REG_WATCH_OVERFLOW &&
+	    key_fd->watch_pending_events > 1)
+		event = list_next_entry(event, link);
+	pkm_lcs_key_fd_drop_watch_event_locked(key_fd, event);
+}
+
+static long pkm_lcs_key_fd_watch_event_matches_filter(u32 event_type,
+						      u32 filter,
+						      bool *matches_out)
+{
+	if (!matches_out)
+		return -EINVAL;
+	*matches_out = false;
+
+	switch (event_type) {
+	case REG_WATCH_VALUE_SET:
+	case REG_WATCH_VALUE_DELETED:
+		*matches_out = (filter & REG_NOTIFY_VALUE) != 0;
+		return 0;
+	case REG_WATCH_SUBKEY_CREATED:
+	case REG_WATCH_SUBKEY_DELETED:
+		*matches_out = (filter & REG_NOTIFY_SUBKEY) != 0;
+		return 0;
+	case REG_WATCH_SD_CHANGED:
+		*matches_out = (filter & REG_NOTIFY_SD) != 0;
+		return 0;
+	case REG_WATCH_KEY_DELETED:
+	case REG_WATCH_OVERFLOW:
+		*matches_out = true;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+static struct pkm_lcs_key_fd_watch_event *
+pkm_lcs_key_fd_watch_event_alloc(u32 event_type, const u8 *record,
+				 u32 record_len)
+{
+	struct pkm_lcs_key_fd_watch_event *event;
+	size_t alloc_len;
+
+	if (!record || record_len < PKM_LCS_WATCH_EVENT_HEADER_LEN)
+		return ERR_PTR(-EINVAL);
+	if (get_unaligned_le32(record) != record_len ||
+	    get_unaligned_le16(record + 4) != event_type)
+		return ERR_PTR(-EINVAL);
+
+	if (check_add_overflow(sizeof(*event), (size_t)record_len, &alloc_len))
+		return ERR_PTR(-EOVERFLOW);
+	event = kzalloc(alloc_len, GFP_KERNEL);
+	if (!event)
+		return ERR_PTR(-ENOMEM);
+
+	INIT_LIST_HEAD(&event->link);
+	event->event_type = event_type;
+	event->total_len = record_len;
+	memcpy(event->bytes, record, record_len);
+	return event;
+}
+
+static struct pkm_lcs_key_fd_watch_event *
+pkm_lcs_key_fd_overflow_event_alloc(void)
+{
+	u8 record[PKM_LCS_WATCH_EVENT_HEADER_LEN] = { };
+
+	put_unaligned_le32(PKM_LCS_WATCH_EVENT_HEADER_LEN, record);
+	put_unaligned_le16(REG_WATCH_OVERFLOW, record + 4);
+	put_unaligned_le16(0, record + 6);
+	return pkm_lcs_key_fd_watch_event_alloc(REG_WATCH_OVERFLOW, record,
+						sizeof(record));
+}
+
+static long pkm_lcs_key_fd_queue_watch_event_locked(
+	struct pkm_lcs_key_fd *key_fd,
+	struct pkm_lcs_key_fd_watch_event *event)
+{
+	struct pkm_lcs_key_fd_watch_event *queued_event = event;
+
+	if (!key_fd || !event)
+		return -EINVAL;
+
+	if (event->event_type == REG_WATCH_OVERFLOW &&
+	    key_fd->watch_has_overflow) {
+		pkm_lcs_key_fd_watch_event_free(event);
+		return 0;
+	}
+
+	if (key_fd->watch_pending_events >= PKM_LCS_KEY_FD_WATCH_QUEUE_LIMIT) {
+		if (key_fd->watch_has_overflow) {
+			pkm_lcs_key_fd_drop_oldest_preserving_overflow_locked(
+				key_fd);
+		} else {
+			pkm_lcs_key_fd_drop_oldest_watch_event_locked(key_fd);
+			if (event->event_type != REG_WATCH_OVERFLOW) {
+				pkm_lcs_key_fd_watch_event_free(event);
+				queued_event =
+					pkm_lcs_key_fd_overflow_event_alloc();
+				if (IS_ERR(queued_event))
+					return PTR_ERR(queued_event);
+			}
+		}
+	}
+
+	list_add_tail(&queued_event->link, &key_fd->watch_events);
+	key_fd->watch_pending_events++;
+	if (queued_event->event_type == REG_WATCH_OVERFLOW)
+		key_fd->watch_has_overflow = true;
+	return 0;
+}
 
 static void pkm_lcs_key_fd_free(struct pkm_lcs_key_fd *key_fd)
 {
@@ -63,6 +284,7 @@ static void pkm_lcs_key_fd_free(struct pkm_lcs_key_fd *key_fd)
 			kfree(key_fd->resolved_path[i]);
 		kfree(key_fd->resolved_path);
 	}
+	pkm_lcs_key_fd_watch_queue_clear_locked(key_fd);
 	kfree(key_fd->ancestor_guids);
 	kfree(key_fd);
 }
@@ -76,8 +298,18 @@ static int pkm_lcs_key_fd_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static ssize_t pkm_lcs_key_fd_read(struct file *file, char __user *buf,
+				   size_t count, loff_t *ppos);
+static __poll_t pkm_lcs_key_fd_poll(struct file *file,
+				    struct poll_table_struct *wait);
+static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
+				 unsigned long arg);
+
 static const struct file_operations pkm_lcs_key_fd_fops = {
 	.owner = THIS_MODULE,
+	.read = pkm_lcs_key_fd_read,
+	.poll = pkm_lcs_key_fd_poll,
+	.unlocked_ioctl = pkm_lcs_key_fd_ioctl,
 	.release = pkm_lcs_key_fd_release,
 	.llseek = noop_llseek,
 };
@@ -149,6 +381,9 @@ static long pkm_lcs_key_fd_copy_input(
 	key_fd = kzalloc(sizeof(*key_fd), GFP_KERNEL);
 	if (!key_fd)
 		return -ENOMEM;
+	mutex_init(&key_fd->watch_lock);
+	init_waitqueue_head(&key_fd->watch_wait);
+	INIT_LIST_HEAD(&key_fd->watch_events);
 
 	key_fd->resolved_path = kcalloc(input->path_component_count,
 					sizeof(*key_fd->resolved_path),
@@ -211,6 +446,210 @@ long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input)
 	}
 
 	return fd;
+}
+
+static long pkm_lcs_key_fd_notify_from_args(
+	struct pkm_lcs_key_fd *key_fd, const struct reg_notify_args *args)
+{
+	struct pkm_lcs_watch_notify_plan_copy plan;
+	long ret;
+
+	if (!key_fd || !args)
+		return -EINVAL;
+
+	mutex_lock(&key_fd->watch_lock);
+	ret = lcs_rust_plan_key_fd_watch_notify(
+		key_fd->watch_armed ? 1 : 0, key_fd->orphaned ? 1 : 0,
+		args->filter, args->subtree, args->_pad, &plan);
+	if (ret)
+		goto out_unlock;
+
+	switch (plan.action) {
+	case PKM_LCS_WATCH_NOTIFY_ACTION_ARM:
+		key_fd->watch_filter = plan.filter;
+		key_fd->watch_subtree = plan.subtree != 0;
+		key_fd->watch_armed = true;
+		break;
+	case PKM_LCS_WATCH_NOTIFY_ACTION_DISARM:
+		key_fd->watch_filter = 0;
+		key_fd->watch_subtree = false;
+		key_fd->watch_armed = false;
+		if (plan.discard_pending_events)
+			pkm_lcs_key_fd_watch_queue_clear_locked(key_fd);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+out_unlock:
+	mutex_unlock(&key_fd->watch_lock);
+
+	wake_up_interruptible(&key_fd->watch_wait);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_queue_watch_record(
+	struct pkm_lcs_key_fd *key_fd, u32 event_type, const u8 *record,
+	u32 record_len)
+{
+	struct pkm_lcs_key_fd_watch_event *event;
+	bool matches;
+	long ret;
+
+	if (!key_fd)
+		return -EINVAL;
+
+	event = pkm_lcs_key_fd_watch_event_alloc(event_type, record,
+						record_len);
+	if (IS_ERR(event))
+		return PTR_ERR(event);
+
+	mutex_lock(&key_fd->watch_lock);
+	if (!key_fd->watch_armed) {
+		pkm_lcs_key_fd_watch_event_free(event);
+		mutex_unlock(&key_fd->watch_lock);
+		return 0;
+	}
+	ret = pkm_lcs_key_fd_watch_event_matches_filter(
+		event_type, key_fd->watch_filter, &matches);
+	if (ret || !matches) {
+		pkm_lcs_key_fd_watch_event_free(event);
+		mutex_unlock(&key_fd->watch_lock);
+		return ret;
+	}
+	ret = pkm_lcs_key_fd_queue_watch_event_locked(key_fd, event);
+	mutex_unlock(&key_fd->watch_lock);
+
+	if (!ret)
+		wake_up_interruptible(&key_fd->watch_wait);
+	return ret;
+}
+
+static ssize_t pkm_lcs_key_fd_read_file_with_ops(
+	struct file *file, char __user *buf, size_t count, bool nonblocking,
+	const struct pkm_lcs_key_fd_copyout_ops *ops)
+{
+	struct pkm_lcs_key_fd_watch_event *event;
+	struct pkm_lcs_key_fd *key_fd;
+	size_t bytes;
+	u32 event_count;
+	long ret;
+
+	if (!file)
+		return -EBADF;
+	key_fd = file->private_data;
+	if (!key_fd)
+		return -EINVAL;
+	if (!ops)
+		ops = &pkm_lcs_key_fd_default_copyout_ops;
+	if (!ops->write)
+		return -EINVAL;
+
+	for (;;) {
+		mutex_lock(&key_fd->watch_lock);
+		if (key_fd->watch_pending_events)
+			break;
+		mutex_unlock(&key_fd->watch_lock);
+
+		if (nonblocking)
+			return -EAGAIN;
+		ret = wait_event_interruptible(
+			key_fd->watch_wait,
+			READ_ONCE(key_fd->watch_pending_events) != 0);
+		if (ret)
+			return ret;
+	}
+
+	event = list_first_entry(&key_fd->watch_events,
+				 struct pkm_lcs_key_fd_watch_event, link);
+	if (count < event->total_len) {
+		mutex_unlock(&key_fd->watch_lock);
+		return -EINVAL;
+	}
+
+	bytes = 0;
+	event_count = 0;
+	list_for_each_entry(event, &key_fd->watch_events, link) {
+		if (event->total_len > count - bytes)
+			break;
+		if (!ops->write(ops->ctx, buf + bytes, event->bytes,
+				event->total_len)) {
+			mutex_unlock(&key_fd->watch_lock);
+			return -EFAULT;
+		}
+		bytes += event->total_len;
+		event_count++;
+	}
+
+	while (event_count--) {
+		event = list_first_entry(&key_fd->watch_events,
+					 struct pkm_lcs_key_fd_watch_event,
+					 link);
+		pkm_lcs_key_fd_drop_watch_event_locked(key_fd, event);
+	}
+	mutex_unlock(&key_fd->watch_lock);
+
+	return bytes;
+}
+
+static ssize_t pkm_lcs_key_fd_read(struct file *file, char __user *buf,
+				   size_t count, loff_t *ppos)
+{
+	(void)ppos;
+
+	return pkm_lcs_key_fd_read_file_with_ops(
+		file, buf, count, (file->f_flags & O_NONBLOCK) != 0,
+		&pkm_lcs_key_fd_default_copyout_ops);
+}
+
+static __poll_t pkm_lcs_key_fd_poll(struct file *file,
+				    struct poll_table_struct *wait)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	__poll_t mask = 0;
+
+	if (!file)
+		return EPOLLERR | EPOLLHUP;
+	key_fd = file->private_data;
+	if (!key_fd)
+		return EPOLLERR | EPOLLHUP;
+
+	poll_wait(file, &key_fd->watch_wait, wait);
+	mutex_lock(&key_fd->watch_lock);
+	if (key_fd->watch_pending_events)
+		mask |= EPOLLIN;
+	mutex_unlock(&key_fd->watch_lock);
+	return mask;
+}
+
+static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
+				 unsigned long arg)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct reg_notify_args args;
+	long ret;
+
+	if (!file)
+		return -EBADF;
+	key_fd = file->private_data;
+	if (!key_fd)
+		return -EINVAL;
+
+	switch (cmd) {
+	case REG_IOC_NOTIFY:
+		ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
+			key_fd->granted_access, _IOC_NR(cmd));
+		if (ret)
+			return ret;
+		if (!arg)
+			return -EFAULT;
+		if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
+			return -EFAULT;
+		return pkm_lcs_key_fd_notify_from_args(key_fd, &args);
+	default:
+		return -ENOTTY;
+	}
 }
 
 static long pkm_lcs_key_fd_get(int fd, struct fd *held,
@@ -422,9 +861,102 @@ long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned)
 	if (ret)
 		return ret;
 
+	mutex_lock(&key_fd->watch_lock);
 	key_fd->orphaned = orphaned;
+	mutex_unlock(&key_fd->watch_lock);
 	fdput(held);
 	return 0;
+}
+
+long pkm_lcs_kunit_key_fd_notify(int fd, const struct reg_notify_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
+		key_fd->granted_access, REG_IOC_NOTIFY_NR);
+	if (!ret)
+		ret = pkm_lcs_key_fd_notify_from_args(key_fd, args);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_queue_watch_event(int fd, u32 event_type,
+					    const u8 *record, u32 record_len)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_key_fd_queue_watch_record(key_fd, event_type, record,
+					       record_len);
+	fdput(held);
+	return ret;
+}
+
+static bool pkm_lcs_kunit_key_fd_copyout_write(void *ctx, void __user *dst,
+					       const void *src, size_t len)
+{
+	(void)ctx;
+
+	if (!dst)
+		return false;
+	memcpy((void *)(unsigned long)dst, src, len);
+	return true;
+}
+
+ssize_t pkm_lcs_kunit_key_fd_read(int fd, u8 *buf, size_t count,
+				  bool nonblocking)
+{
+	static const struct pkm_lcs_key_fd_copyout_ops ops = {
+		.write = pkm_lcs_kunit_key_fd_copyout_write,
+	};
+	struct file *file;
+	struct fd held;
+	ssize_t ret;
+
+	held = fdget(fd);
+	file = fd_file(held);
+	if (!file)
+		return -EBADF;
+	if (file->f_op != &pkm_lcs_key_fd_fops) {
+		fdput(held);
+		return -EINVAL;
+	}
+
+	ret = pkm_lcs_key_fd_read_file_with_ops(
+		file, (char __user *)(unsigned long)buf, count, nonblocking,
+		&ops);
+	fdput(held);
+	return ret;
+}
+
+__poll_t pkm_lcs_kunit_key_fd_poll(int fd)
+{
+	struct file *file;
+	struct fd held;
+	__poll_t ret;
+
+	held = fdget(fd);
+	file = fd_file(held);
+	if (!file)
+		return EPOLLERR | EPOLLHUP;
+	if (file->f_op != &pkm_lcs_key_fd_fops) {
+		fdput(held);
+		return EPOLLERR | EPOLLHUP;
+	}
+
+	ret = pkm_lcs_key_fd_poll(file, NULL);
+	fdput(held);
+	return ret;
 }
 #endif
 
@@ -471,8 +1003,6 @@ long pkm_lcs_key_fd_snapshot(int fd, struct pkm_lcs_key_fd_snapshot *out)
 	out->source_id = key_fd->source_id;
 	out->granted_access = key_fd->granted_access;
 	out->path_component_count = key_fd->path_component_count;
-	out->orphaned = key_fd->orphaned;
-	out->watch_armed = key_fd->watch_armed;
 	memcpy(out->key_guid, key_fd->key_guid, sizeof(out->key_guid));
 	memcpy(out->first_ancestor_guid, key_fd->ancestor_guids[0],
 	       sizeof(out->first_ancestor_guid));
@@ -484,6 +1014,13 @@ long pkm_lcs_key_fd_snapshot(int fd, struct pkm_lcs_key_fd_snapshot *out)
 	pkm_lcs_key_fd_copy_component_snapshot(out->last_component,
 					       &out->last_component_len,
 					       key_fd->resolved_path[last]);
+	mutex_lock(&key_fd->watch_lock);
+	out->orphaned = key_fd->orphaned;
+	out->watch_armed = key_fd->watch_armed;
+	out->watch_filter = key_fd->watch_filter;
+	out->watch_pending_events = key_fd->watch_pending_events;
+	out->watch_subtree = key_fd->watch_subtree;
+	mutex_unlock(&key_fd->watch_lock);
 
 	fdput(held);
 	return 0;

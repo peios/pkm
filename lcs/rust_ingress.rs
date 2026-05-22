@@ -18,11 +18,12 @@ use crate::lcs_core::{
     registry_open_pre_resolution_linux_errno, resolve_named_path_entry, resolve_value, route_hive,
     route_routable_path_hive, route_symlink_target_hive, rsi_queued_request_from_frame,
     rsi_status_code_errno, source_registration_error_linux_errno, source_registration_hive_scope,
-    source_slot_hive_status, validate_key_component_bytes, validate_key_create_flags,
-    validate_key_fd_open_view, validate_layer_name_bytes, validate_registry_open_flags,
-    validate_resolved_relative_path_depth, validate_rsi_lookup_metadata_completeness,
-    validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,
-    validate_rsi_lookup_path_response_sequences, validate_rsi_query_values_response_names,
+    source_slot_hive_status, plan_watch_notify, validate_key_component_bytes,
+    validate_key_create_flags, validate_key_fd_open_view, validate_layer_name_bytes,
+    validate_registry_open_flags, validate_resolved_relative_path_depth,
+    validate_rsi_lookup_metadata_completeness, validate_rsi_lookup_metadata_security_descriptors,
+    validate_rsi_lookup_path_response_names, validate_rsi_lookup_path_response_sequences,
+    validate_rsi_query_values_response_names,
     validate_rsi_query_values_response_sequences,
     validate_rsi_query_values_response_value_payloads, validate_rsi_read_key_response_names,
     validate_rsi_read_key_response_security_descriptor, validate_source_registration,
@@ -40,7 +41,8 @@ use crate::lcs_core::{
     RegistryKeyOpenAccessInput, RegistryOpenAccessDecision, RegistryOpenPreResolutionAccessPlan,
     RsiReadPlan, RsiRetainedRequest, RsiTransactionMode, SourceRegistrationDecision,
     SourceRegistrationHive, SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
-    ValueEntry, ValueResolution, REG_TOMBSTONE, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
+    ValueEntry, ValueResolution, WatchNotifyArgs, WatchNotifyPlan, REG_TOMBSTONE, RSI_LOOKUP,
+    RSI_QUERY_VALUES, RSI_READ_KEY,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -54,6 +56,9 @@ const PKM_LCS_RSI_READ_ACTION_WAIT: u32 = 1;
 const PKM_LCS_RSI_READ_ACTION_EAGAIN: u32 = 2;
 const PKM_LCS_RSI_READ_ACTION_EMSGSIZE: u32 = 3;
 const PKM_LCS_RSI_READ_ACTION_WAKE_CLOSE: u32 = 4;
+
+const PKM_LCS_WATCH_NOTIFY_ACTION_ARM: u32 = 1;
+const PKM_LCS_WATCH_NOTIFY_ACTION_DISARM: u32 = 2;
 
 #[repr(C)]
 pub struct PkmLcsSourceRegistrationHiveCopy {
@@ -164,6 +169,16 @@ pub struct PkmLcsPathValidationResultCopy {
     pub component_count: u32,
     pub used_forward_separator: bool,
     pub _pad: [u8; 3],
+}
+
+#[repr(C)]
+pub struct PkmLcsWatchNotifyPlanCopy {
+    pub action: u32,
+    pub filter: u32,
+    pub subtree: u8,
+    pub replaces_existing: u8,
+    pub discard_pending_events: u8,
+    pub _pad: u8,
 }
 
 #[repr(C)]
@@ -297,6 +312,17 @@ fn symlink_target_error_return(_err: LcsError) -> c_int {
 fn key_fd_open_view_error_return(err: LcsError) -> c_int {
     match err {
         LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => LinuxErrno::Enametoolong,
+        _ => LinuxErrno::Einval,
+    }
+    .negated_return() as c_int
+}
+
+fn watch_notify_error_return(err: LcsError) -> c_int {
+    match err {
+        LcsError::OrphanedWatchArm => LinuxErrno::Enoent,
+        LcsError::UnknownNotifyFilterFlags { .. }
+        | LcsError::InvalidBooleanFlag { .. }
+        | LcsError::NonZeroReservedBytes { .. } => LinuxErrno::Einval,
         _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
@@ -856,6 +882,85 @@ pub unsafe extern "C" fn lcs_rust_validate_key_fd_open_view(
     match validate_key_fd_open_view(&LcsLimits::DEFAULT, &fd) {
         Ok(()) => 0,
         Err(err) => key_fd_open_view_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_plan_key_fd_watch_notify(
+    armed: u8,
+    orphaned: u8,
+    filter: u32,
+    subtree: u8,
+    reserved: *const u8,
+    plan_out: *mut PkmLcsWatchNotifyPlanCopy,
+) -> c_int {
+    if reserved.is_null() || plan_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let armed = match armed {
+        0 => false,
+        1 => true,
+        _ => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    let orphaned = match orphaned {
+        0 => false,
+        1 => true,
+        _ => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+
+    let reserved = unsafe { slice::from_raw_parts(reserved, 3) };
+    let mut reserved_copy = [0u8; 3];
+    reserved_copy.copy_from_slice(reserved);
+
+    unsafe {
+        *plan_out = PkmLcsWatchNotifyPlanCopy {
+            action: 0,
+            filter: 0,
+            subtree: 0,
+            replaces_existing: 0,
+            discard_pending_events: 0,
+            _pad: 0,
+        };
+    }
+
+    let state = KeyWatchState { armed, orphaned };
+    let args = WatchNotifyArgs {
+        filter,
+        subtree,
+        reserved: reserved_copy,
+    };
+
+    match plan_watch_notify(state, &args) {
+        Ok(WatchNotifyPlan::Arm {
+            filter,
+            subtree,
+            replaces_existing,
+        }) => unsafe {
+            *plan_out = PkmLcsWatchNotifyPlanCopy {
+                action: PKM_LCS_WATCH_NOTIFY_ACTION_ARM,
+                filter,
+                subtree: subtree as u8,
+                replaces_existing: replaces_existing as u8,
+                discard_pending_events: 0,
+                _pad: 0,
+            };
+            0
+        },
+        Ok(WatchNotifyPlan::Disarm {
+            discard_pending_events,
+        }) => unsafe {
+            *plan_out = PkmLcsWatchNotifyPlanCopy {
+                action: PKM_LCS_WATCH_NOTIFY_ACTION_DISARM,
+                filter: 0,
+                subtree: 0,
+                replaces_existing: 0,
+                discard_pending_events: discard_pending_events as u8,
+                _pad: 0,
+            };
+            0
+        },
+        Err(err) => watch_notify_error_return(err),
     }
 }
 

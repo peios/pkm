@@ -2,10 +2,14 @@
 #ifndef _SECURITY_PKM_LCS_KEY_FD_H
 #define _SECURITY_PKM_LCS_KEY_FD_H
 
+#include <linux/poll.h>
 #include <linux/types.h>
+
+#include <pkm/lcs.h>
 
 #define PKM_LCS_GUID_BYTES 16U
 #define PKM_LCS_KUNIT_SNAPSHOT_COMPONENT_BYTES 32U
+#define PKM_LCS_KEY_FD_WATCH_QUEUE_LIMIT 256U
 
 struct pkm_lcs_key_fd_publish_input {
 	u32 source_id;
@@ -22,9 +26,12 @@ struct pkm_lcs_key_fd_snapshot {
 	u32 path_component_count;
 	u32 first_component_len;
 	u32 last_component_len;
+	u32 watch_filter;
+	u32 watch_pending_events;
 	bool orphaned;
 	bool watch_armed;
-	u8 _pad[2];
+	bool watch_subtree;
+	u8 _pad;
 	u8 key_guid[PKM_LCS_GUID_BYTES];
 	u8 first_ancestor_guid[PKM_LCS_GUID_BYTES];
 	u8 last_ancestor_guid[PKM_LCS_GUID_BYTES];
@@ -65,6 +72,12 @@ void pkm_lcs_key_fd_parent_snapshot_destroy(
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned);
+long pkm_lcs_kunit_key_fd_notify(int fd, const struct reg_notify_args *args);
+long pkm_lcs_kunit_key_fd_queue_watch_event(int fd, u32 event_type,
+					    const u8 *record, u32 record_len);
+ssize_t pkm_lcs_kunit_key_fd_read(int fd, u8 *buf, size_t count,
+				  bool nonblocking);
+__poll_t pkm_lcs_kunit_key_fd_poll(int fd);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_KEY_FD_H */
