@@ -1360,6 +1360,124 @@ out_name:
 	return ret;
 }
 
+static void pkm_lcs_key_fd_query_values_batch_reset_args(
+	struct reg_query_values_batch_args *args, u32 buf_len, u64 buf_ptr,
+	s32 txn_fd)
+{
+	memset(args, 0, sizeof(*args));
+	args->buf_len = buf_len;
+	args->buf_ptr = buf_ptr;
+	args->txn_fd = txn_fd;
+}
+
+static long pkm_lcs_key_fd_query_values_batch_from_args(
+	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct reg_query_values_batch_args *args)
+{
+	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_rsi_query_values_batch_result result = { };
+	struct pkm_lcs_rsi_query_values_batch_result written = { };
+	u64 next_sequence = 0;
+	u64 txn_id = 0;
+	u64 buf_ptr;
+	u32 buf_len;
+	u32 layer_count = 0;
+	s32 txn_fd;
+	u8 *output = NULL;
+	long ret;
+
+	if (!key_fd || !args)
+		return -EINVAL;
+	if (!ops)
+		ops = &pkm_lcs_key_fd_default_usercopy_ops;
+	if (!ops->write)
+		return -EINVAL;
+
+	buf_len = args->buf_len;
+	buf_ptr = args->buf_ptr;
+	txn_fd = args->txn_fd;
+
+	if (args->_pad)
+		return -EINVAL;
+	if (buf_len && !buf_ptr)
+		return -EFAULT;
+
+	ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
+		key_fd->granted_access, REG_IOC_QUERY_VALUES_BATCH_NR);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_query_value_prepare_read_context(key_fd, txn_fd,
+							      &txn_id);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+		key_fd->source_id, txn_id, key_fd->key_guid, "", 0, true,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+	if (ret)
+		goto out_frame;
+
+	ret = pkm_lcs_rsi_materialize_query_values_batch_response(
+		frame.data, frame.len, response.request_id, next_sequence,
+		layers, layer_count, NULL, 0, NULL, 0, &result);
+	if (ret)
+		goto out_frame;
+
+	if (buf_len < result.required_len) {
+		pkm_lcs_key_fd_query_values_batch_reset_args(
+			args, buf_len, buf_ptr, txn_fd);
+		args->buf_len = result.required_len;
+		ret = -ERANGE;
+		goto out_frame;
+	}
+
+	if (result.required_len) {
+		output = kmalloc(result.required_len, GFP_KERNEL);
+		if (!output) {
+			ret = -ENOMEM;
+			goto out_frame;
+		}
+		ret = pkm_lcs_rsi_materialize_query_values_batch_response(
+			frame.data, frame.len, response.request_id,
+			next_sequence, layers, layer_count, NULL, 0, output,
+			result.required_len, &written);
+		if (ret)
+			goto out_output;
+		if (written.required_len != result.required_len ||
+		    written.written_len != result.required_len ||
+		    written.count != result.count) {
+			ret = -EIO;
+			goto out_output;
+		}
+		if (!ops->write(ops->ctx, (void __user *)(unsigned long)buf_ptr,
+				output, result.required_len)) {
+			ret = -EFAULT;
+			goto out_output;
+		}
+	}
+
+	pkm_lcs_key_fd_query_values_batch_reset_args(args, buf_len, buf_ptr,
+						     txn_fd);
+	args->buf_len = result.required_len;
+	args->count = result.count;
+	ret = 0;
+
+out_output:
+	kfree(output);
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+	return ret;
+}
+
 static void pkm_lcs_key_fd_enum_value_reset_args(
 	struct reg_enum_value_args *args, u32 index, u32 name_len,
 	u64 name_ptr, u32 data_len, u64 data_ptr, s32 txn_fd)
@@ -1786,6 +1904,7 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	struct reg_get_security_args get_security_args;
 	struct reg_enum_subkey_args enum_subkey_args;
 	struct reg_enum_value_args enum_value_args;
+	struct reg_query_values_batch_args query_values_batch_args;
 	struct reg_query_key_info_args query_key_info_args;
 	struct reg_query_value_args query_value_args;
 	struct reg_set_security_args set_security_args;
@@ -1810,6 +1929,20 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 		if ((ret == 0 || ret == -ERANGE) &&
 		    copy_to_user((void __user *)arg, &query_value_args,
 				 sizeof(query_value_args)))
+			return -EFAULT;
+		return ret;
+	case REG_IOC_QUERY_VALUES_BATCH:
+		if (!arg)
+			return -EFAULT;
+		if (copy_from_user(&query_values_batch_args, (void __user *)arg,
+				   sizeof(query_values_batch_args)))
+			return -EFAULT;
+		ret = pkm_lcs_key_fd_query_values_batch_from_args(
+			key_fd, &pkm_lcs_key_fd_default_usercopy_ops,
+			&query_values_batch_args);
+		if ((ret == 0 || ret == -ERANGE) &&
+		    copy_to_user((void __user *)arg, &query_values_batch_args,
+				 sizeof(query_values_batch_args)))
 			return -EFAULT;
 		return ret;
 	case REG_IOC_ENUM_VALUES:
@@ -2548,6 +2681,22 @@ long pkm_lcs_kunit_key_fd_query_value(
 	if (ret)
 		return ret;
 	ret = pkm_lcs_key_fd_query_value_from_args(key_fd, ops, args);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_query_values_batch(
+	int fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct reg_query_values_batch_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_key_fd_query_values_batch_from_args(key_fd, ops, args);
 	fdput(held);
 	return ret;
 }

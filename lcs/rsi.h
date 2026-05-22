@@ -53,6 +53,15 @@ struct pkm_lcs_rsi_query_values_info_summary {
 	u32 _pad[3];
 };
 
+struct pkm_lcs_rsi_query_values_batch_result {
+	u32 required_len;
+	u32 count;
+	u32 written_len;
+	u32 source_value_entry_count;
+	u32 source_blanket_count;
+	u32 _pad[3];
+};
+
 struct pkm_lcs_rsi_layer_view {
 	const char *name;
 	u32 name_len;
@@ -191,6 +200,13 @@ long pkm_lcs_rsi_materialize_query_values_info_summary(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
 	struct pkm_lcs_rsi_query_values_info_summary *summary);
+long pkm_lcs_rsi_materialize_query_values_batch_response(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	u64 next_sequence, const struct pkm_lcs_rsi_layer_view *layers,
+	u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, u8 *output, size_t output_len,
+	struct pkm_lcs_rsi_query_values_batch_result *result);
 long pkm_lcs_rsi_materialize_lookup_child(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence, const char *child_name, u32 child_name_len,

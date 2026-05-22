@@ -120,6 +120,9 @@ long pkm_lcs_kunit_key_fd_get_security(
 long pkm_lcs_kunit_key_fd_query_value(
 	int fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_query_value_args *args);
+long pkm_lcs_kunit_key_fd_query_values_batch(
+	int fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct reg_query_values_batch_args *args);
 long pkm_lcs_kunit_key_fd_enum_value(
 	int fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_enum_value_args *args);
