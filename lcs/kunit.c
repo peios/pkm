@@ -11673,6 +11673,80 @@ static void pkm_lcs_kunit_source_dispatch_create_key_frame(struct kunit *test)
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_dispatch_write_key_frame(struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8,
+		0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0,
+	};
+	static const u8 sd[] = {
+		0x01, 0x00, 0x04, 0x80, 0x30, 0x00, 0x00, 0x00,
+		0x11, 0x22, 0x33, 0x44,
+	};
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	size_t payload_offset;
+	size_t field_mask_offset;
+	size_t sd_offset;
+	size_t last_write_offset;
+	u8 out[160];
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_write_key_request(
+				1, 0x8182838485868788ULL, guid, sd,
+				sizeof(sd), 0x1122334455667788ULL, &enqueue),
+			0L);
+	KUNIT_EXPECT_EQ(test, enqueue.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.txn_id, 0x8182838485868788ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.op_code, (u16)RSI_WRITE_KEY);
+	KUNIT_EXPECT_EQ(test, enqueue.queue_depth, 1U);
+	KUNIT_EXPECT_EQ(test, enqueue.in_flight_count, 1U);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(out + RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)enqueue.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_ID_OFFSET), 0ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(out + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_WRITE_KEY);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_TXN_ID_OFFSET),
+			0x8182838485868788ULL);
+
+	payload_offset = RSI_REQUEST_HEADER_SIZE;
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + payload_offset, guid, RSI_GUID_SIZE),
+			0);
+	field_mask_offset = payload_offset + RSI_GUID_SIZE;
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(out + field_mask_offset),
+			(u32)(RSI_WRITE_KEY_FIELD_SD |
+			      RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME));
+	sd_offset = field_mask_offset + sizeof(u32);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(out + sd_offset),
+			(u32)sizeof(sd));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + sd_offset + RSI_LENGTH_PREFIX_SIZE, sd,
+			       sizeof(sd)),
+			0);
+	last_write_offset = sd_offset + RSI_LENGTH_PREFIX_SIZE + sizeof(sd);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(out + last_write_offset),
+			0x1122334455667788ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_dispatch_transaction_control_frames(
 	struct kunit *test)
 {
@@ -13937,6 +14011,23 @@ static void pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs(
 				parent_guid, NULL, sizeof(sd), false, false,
 				&enqueue),
 			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_write_key_request(
+				1, 0, NULL, sd, sizeof(sd), 1, &enqueue),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_write_key_request(
+				1, 0, guid, NULL, sizeof(sd), 1, &enqueue),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_write_key_request(
+				1, 0, guid, sd, 0, 1, &enqueue),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_dispatch_write_key_request(
+				1, 0, guid, sd, (size_t)U32_MAX + 1, 1,
+				&enqueue),
+			(long)-EOVERFLOW);
 
 	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
 	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
@@ -18138,6 +18229,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_dispatch_lookup_allocates_monotonic_ids),
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_create_entry_frame),
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_create_key_frame),
+	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_write_key_frame),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_transaction_control_frames),
 	KUNIT_CASE(

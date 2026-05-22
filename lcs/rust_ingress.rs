@@ -34,7 +34,8 @@ use crate::lcs_core::{
     write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
     write_rsi_create_entry_request_frame, write_rsi_create_key_request_frame,
     write_rsi_lookup_request_frame, write_rsi_query_values_request_frame,
-    write_rsi_read_key_request_frame, BlanketTombstoneEntry, CurrentUserRewrite,
+    write_rsi_read_key_request_frame, write_rsi_write_key_request_frame,
+    BlanketTombstoneEntry, CurrentUserRewrite,
     HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest, KeyWatchState,
     LayerResolutionContext, LayerTargetAdmissionInput, LayerView, LcsCallerTokenSummary,
     LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry,
@@ -1461,6 +1462,66 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_create_key_request_frame(
         sd_bytes,
         volatile_key != 0,
         symlink != 0,
+    ) {
+        Ok(built) => {
+            unsafe {
+                *built_out = PkmLcsRsiBuiltRequestCopy {
+                    len: built.len,
+                    request_id: built.retained.request_id,
+                    txn_id,
+                    op_code: built.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_rsi_write_key_request_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    request_id: u64,
+    txn_id: u64,
+    guid: *const u8,
+    sd: *const u8,
+    sd_len: usize,
+    last_write_time: u64,
+    built_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if built_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *built_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            txn_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if dst.is_null() || guid.is_null() || sd.is_null() || sd_len == 0 {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
+    let mut guid_copy = [0u8; 16];
+    guid_copy.copy_from_slice(guid_bytes);
+    let sd_bytes = unsafe { slice::from_raw_parts(sd, sd_len) };
+
+    match write_rsi_write_key_request_frame(
+        dst_bytes,
+        request_id,
+        txn_id,
+        guid_copy,
+        Some(sd_bytes),
+        Some(last_write_time),
     ) {
         Ok(built) => {
             unsafe {
