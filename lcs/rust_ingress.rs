@@ -6,12 +6,16 @@ use core::{slice, str};
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
     casefold_eq, classify_hive_route, current_user_sid_component_from_binary_sid,
-    for_each_routable_path_component, for_each_rsi_lookup_source_path_entry,
+    for_each_effective_value, for_each_routable_path_component,
+    for_each_rsi_enum_children_source_path_entry, for_each_rsi_lookup_source_path_entry,
+    for_each_rsi_query_values_source_blanket_entry,
+    for_each_rsi_query_values_source_value_entry, for_each_visible_subkey,
     layer_target_admission_linux_errno, parse_rsi_lookup_success_response_payload,
+    parse_rsi_enum_children_success_response_payload,
     parse_rsi_query_values_success_response_payload, parse_rsi_read_key_success_response_payload,
     parse_rsi_request_header, plan_key_guid_assignment, plan_key_open_audit_record,
-    plan_layer_target_admission, plan_registry_ioctl_fixed_fd_access_gate,
-    plan_registry_get_security, plan_registry_key_open_access,
+    plan_layer_target_admission, plan_registry_get_security,
+    plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
     plan_registry_open_pre_resolution_access, plan_registry_security_info_fd_access_gate,
     plan_registry_set_security,
     plan_rsi_source_read, plan_source_registration_sequence_update,
@@ -23,8 +27,12 @@ use crate::lcs_core::{
     validate_key_component_bytes, validate_key_create_flags, validate_key_fd_open_view,
     validate_layer_name_bytes,
     validate_registry_open_flags, validate_resolved_relative_path_depth,
-    validate_rsi_lookup_metadata_completeness, validate_rsi_lookup_metadata_security_descriptors,
-    validate_rsi_lookup_path_response_names, validate_rsi_lookup_path_response_sequences,
+    validate_rsi_enum_children_metadata_completeness,
+    validate_rsi_enum_children_metadata_security_descriptors,
+    validate_rsi_enum_children_path_response_names,
+    validate_rsi_enum_children_path_response_sequences, validate_rsi_lookup_metadata_completeness,
+    validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,
+    validate_rsi_lookup_path_response_sequences,
     validate_rsi_query_values_response_names,
     validate_rsi_query_values_response_sequences,
     validate_rsi_query_values_response_value_payloads, validate_rsi_read_key_response_names,
@@ -34,19 +42,21 @@ use crate::lcs_core::{
     write_key_open_audit_payload, write_rsi_abort_transaction_request_frame,
     write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
     write_rsi_create_entry_request_frame, write_rsi_create_key_request_frame,
-    write_rsi_lookup_request_frame, write_rsi_query_values_request_frame,
+    write_rsi_enum_children_request_frame, write_rsi_lookup_request_frame,
+    write_rsi_query_values_request_frame,
     write_rsi_read_key_request_frame, write_rsi_write_key_request_frame,
     BlanketTombstoneEntry, CurrentUserRewrite,
     HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest, KeyWatchState,
     LayerResolutionContext, LayerTargetAdmissionInput, LayerView, LcsCallerTokenSummary,
     LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry,
-    NamedPathResolution, PathKind, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
-    RegistryKeyOpenAccessInput, RegistryOpenAccessDecision, RegistryOpenPreResolutionAccessPlan,
-    RsiReadPlan, RsiRetainedRequest, RsiTransactionMode, SourceRegistrationDecision,
-    SourceRegistrationHive, SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
-    ValueEntry, ValueResolution, WatchEventRecordPlan, WatchEventRecordRequest,
-    WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_TOMBSTONE, RSI_LOOKUP,
-    RSI_QUERY_VALUES, RSI_READ_KEY, write_watch_event_record,
+    NamedPathResolution, NamedValueEntry, PathKind, RegisteredHiveIdentity,
+    RegistryIoctlAccessRequirement, RegistryKeyOpenAccessInput, RegistryOpenAccessDecision,
+    RegistryOpenPreResolutionAccessPlan, RsiReadPlan, RsiRetainedRequest, RsiTransactionMode,
+    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
+    SourceSlotStatus, SourceSlotView, ValueEntry, ValueResolution, WatchEventRecordPlan,
+    WatchEventRecordRequest,
+    WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_TOMBSTONE,
+    RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY, write_watch_event_record,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -282,6 +292,24 @@ pub struct PkmLcsRsiQueryValuesResponseSummaryCopy {
 }
 
 #[repr(C)]
+pub struct PkmLcsRsiEnumChildrenInfoSummaryCopy {
+    pub subkey_count: u32,
+    pub max_subkey_name_len: u32,
+    pub source_path_entry_count: u32,
+    pub _pad: u32,
+}
+
+#[repr(C)]
+pub struct PkmLcsRsiQueryValuesInfoSummaryCopy {
+    pub value_count: u32,
+    pub max_value_name_len: u32,
+    pub max_value_data_size: u32,
+    pub source_value_entry_count: u32,
+    pub source_blanket_count: u32,
+    pub _pad: [u32; 3],
+}
+
+#[repr(C)]
 pub struct PkmLcsRsiQueryValueResultCopy {
     pub source_value_entry_count: u32,
     pub source_blanket_count: u32,
@@ -421,6 +449,10 @@ fn rsi_read_key_response_error_return(err: LcsError) -> c_int {
 }
 
 fn rsi_query_values_response_error_return(err: LcsError) -> c_int {
+    rsi_lookup_response_error_return(err)
+}
+
+fn rsi_enum_children_response_error_return(err: LcsError) -> c_int {
     rsi_lookup_response_error_return(err)
 }
 
@@ -1230,6 +1262,55 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_lookup_request_frame(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_rsi_enum_children_request_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    request_id: u64,
+    txn_id: u64,
+    parent_guid: *const u8,
+    built_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if built_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *built_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            txn_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if dst.is_null() || parent_guid.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let parent_guid_bytes = unsafe { slice::from_raw_parts(parent_guid, 16) };
+    let mut parent_guid_copy = [0u8; 16];
+    parent_guid_copy.copy_from_slice(parent_guid_bytes);
+
+    match write_rsi_enum_children_request_frame(dst_bytes, request_id, txn_id, parent_guid_copy) {
+        Ok(built) => {
+            unsafe {
+                *built_out = PkmLcsRsiBuiltRequestCopy {
+                    len: built.len,
+                    request_id: built.retained.request_id,
+                    txn_id,
+                    op_code: built.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lcs_rust_write_rsi_read_key_request_frame(
     dst: *mut u8,
     dst_len: usize,
@@ -1883,6 +1964,279 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
     unsafe {
         (*summary_out).value_entry_count = payload.entry_count;
         (*summary_out).blanket_count = payload.blanket_count;
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+    private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
+    private_layer_count: usize,
+    result_out: *mut PkmLcsRsiEnumChildrenInfoSummaryCopy,
+) -> c_int {
+    if result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *result_out = PkmLcsRsiEnumChildrenInfoSummaryCopy {
+            subkey_count: 0,
+            max_subkey_name_len: 0,
+            source_path_entry_count: 0,
+            _pad: 0,
+        };
+    }
+
+    if frame.is_null()
+        || (layer_count != 0 && layers.is_null())
+        || (private_layer_count != 0 && private_layers.is_null())
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let layer_views = match parse_layer_views(layers, layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let private_layer_views = match parse_private_layer_views(private_layers, private_layer_count) {
+        Ok(private_layer_views) => private_layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let payload = match parse_rsi_enum_children_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_ENUM_CHILDREN,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_enum_children_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_enum_children_metadata_completeness(&payload) {
+        return rsi_enum_children_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_enum_children_path_response_names(&payload, &LcsLimits::DEFAULT)
+    {
+        return rsi_enum_children_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_enum_children_metadata_security_descriptors(&payload) {
+        return rsi_enum_children_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_enum_children_path_response_sequences(&payload, next_sequence) {
+        return rsi_enum_children_response_error_return(err);
+    }
+
+    let mut path_storage =
+        match PkmVec::<NamedPathEntry<'_>>::with_capacity(payload.child_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut allocation_failed = false;
+    if let Err(err) =
+        for_each_rsi_enum_children_source_path_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+            if path_storage.push(entry).is_err() {
+                allocation_failed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            Ok(())
+        })
+    {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_enum_children_response_error_return(err);
+    }
+
+    let context = LayerResolutionContext {
+        layers: layer_views.as_slice(),
+        private_layers: private_layer_views.as_slice(),
+        limits: &LcsLimits::DEFAULT,
+        next_sequence,
+    };
+    let mut subkey_count = 0usize;
+    let mut max_subkey_name_len = 0usize;
+    if let Err(err) = for_each_visible_subkey(&context, path_storage.as_slice(), |subkey| {
+        subkey_count = subkey_count
+            .checked_add(1)
+            .ok_or(LcsError::RsiPayloadLengthOverflow)?;
+        max_subkey_name_len = max_subkey_name_len.max(subkey.child_name.len());
+        Ok(())
+    }) {
+        return rsi_lookup_materialization_error_return(err);
+    }
+
+    if subkey_count > u32::MAX as usize
+        || max_subkey_name_len > u32::MAX as usize
+        || path_storage.len() > u32::MAX as usize
+    {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    }
+
+    unsafe {
+        (*result_out).subkey_count = subkey_count as u32;
+        (*result_out).max_subkey_name_len = max_subkey_name_len as u32;
+        (*result_out).source_path_entry_count = path_storage.len() as u32;
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_values_info_summary(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+    private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
+    private_layer_count: usize,
+    result_out: *mut PkmLcsRsiQueryValuesInfoSummaryCopy,
+) -> c_int {
+    if result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *result_out = PkmLcsRsiQueryValuesInfoSummaryCopy {
+            value_count: 0,
+            max_value_name_len: 0,
+            max_value_data_size: 0,
+            source_value_entry_count: 0,
+            source_blanket_count: 0,
+            _pad: [0; 3],
+        };
+    }
+
+    if frame.is_null()
+        || (layer_count != 0 && layers.is_null())
+        || (private_layer_count != 0 && private_layers.is_null())
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let layer_views = match parse_layer_views(layers, layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let private_layer_views = match parse_private_layer_views(private_layers, private_layer_count) {
+        Ok(private_layer_views) => private_layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let payload = match parse_rsi_query_values_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_QUERY_VALUES,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_query_values_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) =
+        validate_rsi_query_values_response_value_payloads(&payload, &LcsLimits::DEFAULT)
+    {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let mut value_storage =
+        match PkmVec::<NamedValueEntry<'_>>::with_capacity(payload.entry_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut blanket_storage =
+        match PkmVec::<BlanketTombstoneEntry<'_>>::with_capacity(payload.blanket_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+
+    let mut allocation_failed = false;
+    if let Err(err) =
+        for_each_rsi_query_values_source_value_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+            if value_storage.push(entry).is_err() {
+                allocation_failed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            Ok(())
+        })
+    {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) =
+        for_each_rsi_query_values_source_blanket_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+            if blanket_storage.push(entry).is_err() {
+                allocation_failed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            Ok(())
+        })
+    {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let context = LayerResolutionContext {
+        layers: layer_views.as_slice(),
+        private_layers: private_layer_views.as_slice(),
+        limits: &LcsLimits::DEFAULT,
+        next_sequence,
+    };
+    let mut value_count = 0usize;
+    let mut max_value_name_len = 0usize;
+    let mut max_value_data_size = 0usize;
+    if let Err(err) = for_each_effective_value(
+        &context,
+        value_storage.as_slice(),
+        blanket_storage.as_slice(),
+        |value| {
+            value_count = value_count
+                .checked_add(1)
+                .ok_or(LcsError::RsiPayloadLengthOverflow)?;
+            max_value_name_len = max_value_name_len.max(value.name.len());
+            max_value_data_size = max_value_data_size.max(value.value.data.len());
+            Ok(())
+        },
+    ) {
+        return rsi_lookup_materialization_error_return(err);
+    }
+
+    if value_count > u32::MAX as usize
+        || max_value_name_len > u32::MAX as usize
+        || max_value_data_size > u32::MAX as usize
+        || value_storage.len() > u32::MAX as usize
+        || blanket_storage.len() > u32::MAX as usize
+    {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    }
+
+    unsafe {
+        (*result_out).value_count = value_count as u32;
+        (*result_out).max_value_name_len = max_value_name_len as u32;
+        (*result_out).max_value_data_size = max_value_data_size as u32;
+        (*result_out).source_value_entry_count = value_storage.len() as u32;
+        (*result_out).source_blanket_count = blanket_storage.len() as u32;
     }
     0
 }

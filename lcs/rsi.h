@@ -26,6 +26,22 @@ struct pkm_lcs_rsi_query_values_response_summary {
 	u32 blanket_count;
 };
 
+struct pkm_lcs_rsi_enum_children_info_summary {
+	u32 subkey_count;
+	u32 max_subkey_name_len;
+	u32 source_path_entry_count;
+	u32 _pad;
+};
+
+struct pkm_lcs_rsi_query_values_info_summary {
+	u32 value_count;
+	u32 max_value_name_len;
+	u32 max_value_data_size;
+	u32 source_value_entry_count;
+	u32 source_blanket_count;
+	u32 _pad[3];
+};
+
 struct pkm_lcs_rsi_layer_view {
 	const char *name;
 	u32 name_len;
@@ -82,6 +98,10 @@ long pkm_lcs_rsi_build_lookup_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 parent_guid[RSI_GUID_SIZE], const char *child_name,
 	u32 child_name_len, struct pkm_lcs_rsi_built_request *built);
+long pkm_lcs_rsi_build_enum_children_request(
+	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
+	const u8 parent_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_rsi_built_request *built);
 long pkm_lcs_rsi_build_read_key_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 guid[RSI_GUID_SIZE], struct pkm_lcs_rsi_built_request *built);
@@ -124,6 +144,20 @@ long pkm_lcs_rsi_validate_query_values_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence,
 	struct pkm_lcs_rsi_query_values_response_summary *summary);
+long pkm_lcs_rsi_materialize_enum_children_info_summary(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	u64 next_sequence, const struct pkm_lcs_rsi_layer_view *layers,
+	u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_rsi_enum_children_info_summary *summary);
+long pkm_lcs_rsi_materialize_query_values_info_summary(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	u64 next_sequence, const struct pkm_lcs_rsi_layer_view *layers,
+	u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_rsi_query_values_info_summary *summary);
 long pkm_lcs_rsi_materialize_lookup_child(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence, const char *child_name, u32 child_name_len,
