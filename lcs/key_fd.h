@@ -114,6 +114,9 @@ long pkm_lcs_key_fd_dispatch_watch_event(
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned);
+long pkm_lcs_kunit_key_fd_get_security(
+	int fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct reg_get_security_args *args);
 long pkm_lcs_kunit_key_fd_set_security(
 	int fd, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_security_args *args);

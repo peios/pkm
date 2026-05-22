@@ -94,6 +94,11 @@ struct pkm_lcs_key_fd {
 	bool watch_armed;
 };
 
+struct pkm_lcs_get_security_result {
+	u8 *sd;
+	size_t sd_len;
+};
+
 static const struct file_operations pkm_lcs_key_fd_fops;
 static DEFINE_MUTEX(pkm_lcs_watch_registry_lock);
 static DEFINE_HASHTABLE(pkm_lcs_watch_map, PKM_LCS_WATCH_REGISTRY_BITS);
@@ -110,6 +115,9 @@ extern int lcs_rust_key_fd_fixed_ioctl_access_gate(u32 granted_access,
 extern int lcs_rust_key_fd_security_ioctl_access_gate(u32 granted_access,
 						      u32 ioctl_number,
 						      u32 security_info);
+extern int lcs_rust_plan_registry_get_security(
+	const u8 *existing_sd, size_t existing_sd_len, u32 security_info,
+	u8 *output, size_t output_len, size_t *written_out);
 extern int lcs_rust_plan_registry_set_security(
 	const u8 *existing_sd, size_t existing_sd_len, const u8 *input_sd,
 	size_t input_sd_len, u32 security_info, u8 *output,
@@ -122,6 +130,12 @@ extern int lcs_rust_write_watch_event_record(
 	const struct pkm_lcs_key_fd_string_view *path_components,
 	size_t path_component_count, u8 *output, size_t output_len,
 	u32 *written_out, u8 *overflow_out);
+
+static void pkm_lcs_get_security_result_destroy(
+	struct pkm_lcs_get_security_result *result);
+static long pkm_lcs_key_fd_plan_get_security(
+	const u8 *existing_sd, size_t existing_sd_len, u32 security_info,
+	struct pkm_lcs_get_security_result *out);
 
 static u32 pkm_lcs_guid_hash(const u8 guid[PKM_LCS_GUID_BYTES])
 {
@@ -243,9 +257,20 @@ static bool pkm_lcs_key_fd_default_usercopy_read(void *ctx, void *dst,
 	return copy_from_user(dst, src, len) == 0;
 }
 
+static bool pkm_lcs_key_fd_default_usercopy_write(void *ctx, void __user *dst,
+						  const void *src, size_t len)
+{
+	(void)ctx;
+
+	if (!dst)
+		return false;
+	return copy_to_user(dst, src, len) == 0;
+}
+
 static const struct pkm_lcs_usercopy_ops
 	pkm_lcs_key_fd_default_usercopy_ops = {
 		.read = pkm_lcs_key_fd_default_usercopy_read,
+		.write = pkm_lcs_key_fd_default_usercopy_write,
 };
 
 static void pkm_lcs_key_fd_watch_event_free(
@@ -924,6 +949,66 @@ static void pkm_lcs_key_fd_publish_set_security_effects(
 	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
 }
 
+static long pkm_lcs_key_fd_get_security_from_args(
+	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct reg_get_security_args *args)
+{
+	struct pkm_lcs_get_security_result result = { };
+	struct pkm_lcs_source_response_frame existing_frame = { };
+	const u8 *existing_sd = NULL;
+	size_t existing_sd_len = 0;
+	size_t provided_len;
+	long ret;
+
+	if (!key_fd || !args)
+		return -EINVAL;
+	if (!ops)
+		ops = &pkm_lcs_key_fd_default_usercopy_ops;
+	if (!ops->write)
+		return -EINVAL;
+
+	ret = lcs_rust_key_fd_security_ioctl_access_gate(
+		key_fd->granted_access, REG_IOC_GET_SECURITY_NR,
+		args->security_info);
+	if (ret)
+		return ret;
+
+	provided_len = args->sd_len;
+	if (provided_len && !args->sd_ptr)
+		return -EFAULT;
+
+	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, 0, &existing_frame,
+					      &existing_sd, &existing_sd_len);
+	if (ret)
+		goto out_existing;
+
+	ret = pkm_lcs_key_fd_plan_get_security(existing_sd, existing_sd_len,
+					       args->security_info, &result);
+	if (ret)
+		goto out_existing;
+	if (result.sd_len > U32_MAX) {
+		ret = -EOVERFLOW;
+		goto out_result;
+	}
+
+	args->sd_len = (u32)result.sd_len;
+	if (provided_len < result.sd_len) {
+		ret = -ERANGE;
+		goto out_result;
+	}
+
+	if (result.sd_len &&
+	    !ops->write(ops->ctx, (void __user *)(unsigned long)args->sd_ptr,
+			result.sd, result.sd_len))
+		ret = -EFAULT;
+
+out_result:
+	pkm_lcs_get_security_result_destroy(&result);
+out_existing:
+	pkm_lcs_source_response_frame_destroy(&existing_frame);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_set_security_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_security_args *args)
@@ -1032,6 +1117,7 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 {
 	struct pkm_lcs_key_fd *key_fd;
 	struct reg_notify_args notify_args;
+	struct reg_get_security_args get_security_args;
 	struct reg_set_security_args set_security_args;
 	long ret;
 
@@ -1042,6 +1128,20 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 		return -EINVAL;
 
 	switch (cmd) {
+	case REG_IOC_GET_SECURITY:
+		if (!arg)
+			return -EFAULT;
+		if (copy_from_user(&get_security_args, (void __user *)arg,
+				   sizeof(get_security_args)))
+			return -EFAULT;
+		ret = pkm_lcs_key_fd_get_security_from_args(
+			key_fd, &pkm_lcs_key_fd_default_usercopy_ops,
+			&get_security_args);
+		if ((ret == 0 || ret == -ERANGE) &&
+		    copy_to_user((void __user *)arg, &get_security_args,
+				 sizeof(get_security_args)))
+			return -EFAULT;
+		return ret;
 	case REG_IOC_SET_SECURITY:
 		if (!arg)
 			return -EFAULT;
@@ -1489,6 +1589,61 @@ long pkm_lcs_key_fd_plan_set_security_merge(
 	return 0;
 }
 
+static void pkm_lcs_get_security_result_destroy(
+	struct pkm_lcs_get_security_result *result)
+{
+	if (!result)
+		return;
+	kfree(result->sd);
+	result->sd = NULL;
+	result->sd_len = 0;
+}
+
+static long pkm_lcs_key_fd_plan_get_security(
+	const u8 *existing_sd, size_t existing_sd_len, u32 security_info,
+	struct pkm_lcs_get_security_result *out)
+{
+	size_t required_len = 0;
+	size_t written = 0;
+	u8 *sd;
+	int ret;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	if (!existing_sd)
+		return -EINVAL;
+
+	ret = lcs_rust_plan_registry_get_security(existing_sd, existing_sd_len,
+						  security_info, NULL, 0,
+						  &required_len);
+	if (ret)
+		return ret;
+	if (!required_len || required_len > U32_MAX)
+		return -EOVERFLOW;
+
+	sd = kmalloc(required_len, GFP_KERNEL);
+	if (!sd)
+		return -ENOMEM;
+
+	ret = lcs_rust_plan_registry_get_security(existing_sd, existing_sd_len,
+						  security_info, sd,
+						  required_len, &written);
+	if (ret) {
+		kfree(sd);
+		return ret;
+	}
+	if (written != required_len) {
+		kfree(sd);
+		return -EIO;
+	}
+
+	out->sd = sd;
+	out->sd_len = written;
+	return 0;
+}
+
 long pkm_lcs_key_fd_relative_base(int fd,
 				  struct pkm_lcs_key_fd_relative_base *out)
 {
@@ -1636,6 +1791,23 @@ long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned)
 	mutex_unlock(&key_fd->watch_lock);
 	fdput(held);
 	return 0;
+}
+
+long pkm_lcs_kunit_key_fd_get_security(
+	int fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct reg_get_security_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_get_security_from_args(key_fd, ops, args);
+	fdput(held);
+	return ret;
 }
 
 long pkm_lcs_kunit_key_fd_set_security(
