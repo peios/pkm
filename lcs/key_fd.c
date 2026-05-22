@@ -105,6 +105,10 @@ extern int lcs_rust_key_fd_fixed_ioctl_access_gate(u32 granted_access,
 extern int lcs_rust_key_fd_security_ioctl_access_gate(u32 granted_access,
 						      u32 ioctl_number,
 						      u32 security_info);
+extern int lcs_rust_plan_registry_set_security(
+	const u8 *existing_sd, size_t existing_sd_len, const u8 *input_sd,
+	size_t input_sd_len, u32 security_info, u8 *output,
+	size_t output_len, size_t *written_out);
 extern int lcs_rust_plan_key_fd_watch_notify(
 	u8 armed, u8 orphaned, u32 filter, u8 subtree, const u8 *reserved,
 	struct pkm_lcs_watch_notify_plan_copy *plan_out);
@@ -1209,6 +1213,62 @@ long pkm_lcs_key_fd_check_security_ioctl_access(int fd, unsigned int cmd,
 {
 	return pkm_lcs_key_fd_check_ioctl_common(
 		fd, cmd, NULL, security_info, true);
+}
+
+void pkm_lcs_set_security_merge_result_destroy(
+	struct pkm_lcs_set_security_merge_result *result)
+{
+	if (!result)
+		return;
+	kfree(result->merged_sd);
+	result->merged_sd = NULL;
+	result->merged_sd_len = 0;
+}
+
+long pkm_lcs_key_fd_plan_set_security_merge(
+	const u8 *existing_sd, size_t existing_sd_len,
+	const u8 *input_sd, size_t input_sd_len, u32 security_info,
+	struct pkm_lcs_set_security_merge_result *out)
+{
+	size_t required_len = 0;
+	size_t written = 0;
+	u8 *merged_sd;
+	int ret;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	if (!existing_sd || !input_sd)
+		return -EINVAL;
+
+	ret = lcs_rust_plan_registry_set_security(
+		existing_sd, existing_sd_len, input_sd, input_sd_len,
+		security_info, NULL, 0, &required_len);
+	if (ret)
+		return ret;
+	if (!required_len || required_len > U32_MAX)
+		return -EOVERFLOW;
+
+	merged_sd = kmalloc(required_len, GFP_KERNEL);
+	if (!merged_sd)
+		return -ENOMEM;
+
+	ret = lcs_rust_plan_registry_set_security(
+		existing_sd, existing_sd_len, input_sd, input_sd_len,
+		security_info, merged_sd, required_len, &written);
+	if (ret) {
+		kfree(merged_sd);
+		return ret;
+	}
+	if (written != required_len) {
+		kfree(merged_sd);
+		return -EIO;
+	}
+
+	out->merged_sd = merged_sd;
+	out->merged_sd_len = written;
+	return 0;
 }
 
 long pkm_lcs_key_fd_relative_base(int fd,

@@ -13,6 +13,7 @@ use crate::lcs_core::{
     plan_layer_target_admission, plan_registry_ioctl_fixed_fd_access_gate,
     plan_registry_key_open_access,
     plan_registry_open_pre_resolution_access, plan_registry_security_info_fd_access_gate,
+    plan_registry_set_security,
     plan_rsi_source_read, plan_source_registration_sequence_update,
     registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
     registry_open_pre_resolution_linux_errno, resolve_named_path_entry, resolve_value, route_hive,
@@ -349,9 +350,28 @@ fn key_open_access_error_return(err: LcsError) -> c_int {
 }
 
 fn key_open_audit_error_return(err: LcsError) -> c_int {
+	match err {
+		LcsError::AuditPayloadOutputBufferTooSmall { .. } => LinuxErrno::Erange,
+		_ => LinuxErrno::Eio,
+	}
+	.negated_return() as c_int
+}
+
+fn set_security_merge_error_return(err: LcsError) -> c_int {
     match err {
-        LcsError::AuditPayloadOutputBufferTooSmall { .. } => LinuxErrno::Erange,
-        _ => LinuxErrno::Eio,
+        LcsError::MalformedSecurityDescriptor { field }
+            if field.contains("existing_sd") || field.contains("merged_sd") =>
+        {
+            LinuxErrno::Eio
+        }
+        LcsError::MalformedSecurityDescriptor { .. }
+        | LcsError::ZeroSecurityInfo
+        | LcsError::UnknownSecurityInfoFlags { .. }
+        | LcsError::SecurityDescriptorMergeMissingOwner { .. }
+        | LcsError::SecurityDescriptorConstructionFailed { .. }
+        | LcsError::MaximumAllowedInAce(_)
+        | LcsError::AceMaskMapsOutsideRegistryRights(_) => LinuxErrno::Einval,
+        _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
 }
@@ -2417,6 +2437,54 @@ pub unsafe extern "C" fn lcs_rust_key_fd_security_ioctl_access_gate(
         Ok(plan) => ioctl_access_gate_return(plan),
         Err(_) => LinuxErrno::Einval.negated_return() as c_int,
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_plan_registry_set_security(
+    existing_sd: *const u8,
+    existing_sd_len: usize,
+    input_sd: *const u8,
+    input_sd_len: usize,
+    security_info: u32,
+    output: *mut u8,
+    output_len: usize,
+    written_out: *mut usize,
+) -> c_int {
+    if written_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    unsafe {
+        *written_out = 0;
+    }
+
+    if existing_sd.is_null() || input_sd.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if output.is_null() && output_len != 0 {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let existing = unsafe { slice::from_raw_parts(existing_sd, existing_sd_len) };
+    let input = unsafe { slice::from_raw_parts(input_sd, input_sd_len) };
+    let plan = match plan_registry_set_security(existing, input, security_info) {
+        Ok(plan) => plan,
+        Err(err) => return set_security_merge_error_return(err),
+    };
+    let merged = plan.merged_sd.as_slice();
+    unsafe {
+        *written_out = merged.len();
+    }
+
+    if output.is_null() {
+        return 0;
+    }
+    if output_len < merged.len() {
+        return LinuxErrno::Erange.negated_return() as c_int;
+    }
+
+    let output_bytes = unsafe { slice::from_raw_parts_mut(output, output_len) };
+    output_bytes[..merged.len()].copy_from_slice(merged);
+    0
 }
 
 fn parse_registration_hives<'a>(

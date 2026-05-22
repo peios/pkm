@@ -80,11 +80,22 @@ struct pkm_lcs_watch_dispatch_context {
 	u32 name_len;
 };
 
+struct pkm_lcs_set_security_merge_result {
+	u8 *merged_sd;
+	size_t merged_sd_len;
+};
+
 long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input);
 long pkm_lcs_key_fd_snapshot(int fd, struct pkm_lcs_key_fd_snapshot *out);
 long pkm_lcs_key_fd_check_fixed_ioctl_access(int fd, unsigned int cmd);
 long pkm_lcs_key_fd_check_security_ioctl_access(int fd, unsigned int cmd,
 						u32 security_info);
+long pkm_lcs_key_fd_plan_set_security_merge(
+	const u8 *existing_sd, size_t existing_sd_len,
+	const u8 *input_sd, size_t input_sd_len, u32 security_info,
+	struct pkm_lcs_set_security_merge_result *out);
+void pkm_lcs_set_security_merge_result_destroy(
+	struct pkm_lcs_set_security_merge_result *result);
 long pkm_lcs_key_fd_relative_base(int fd,
 				  struct pkm_lcs_key_fd_relative_base *out);
 long pkm_lcs_key_fd_parent_snapshot(int fd,
