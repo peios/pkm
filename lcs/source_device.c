@@ -2950,19 +2950,20 @@ out_unlock_table:
 	return ret;
 }
 
-static long pkm_lcs_source_handle_late_success_cleanup_file(
+static long pkm_lcs_source_handle_late_response_effects_file(
 	struct file *file, const struct pkm_lcs_source_response_result *result)
 {
 	long ret;
 
 	if (!file || !result)
 		return -EINVAL;
-	if (result->caller_waiter_attached || result->malformed_source_data ||
-	    result->status != RSI_OK)
+	if (result->caller_waiter_attached || result->malformed_source_data)
 		return 0;
 
 	switch (result->request_op_code) {
 	case RSI_BEGIN_TRANSACTION:
+		if (result->status != RSI_OK)
+			return 0;
 		if (!result->source_id || !result->txn_id) {
 			pkm_lcs_source_device_mark_down_file(file);
 			return -EIO;
@@ -2970,6 +2971,14 @@ static long pkm_lcs_source_handle_late_success_cleanup_file(
 
 		ret = pkm_lcs_source_dispatch_abort_transaction_request(
 			result->source_id, result->txn_id, NULL);
+		if (ret) {
+			pkm_lcs_source_device_mark_down_file(file);
+			return ret;
+		}
+		return 0;
+	case RSI_COMMIT_TRANSACTION:
+		ret = pkm_lcs_transaction_fd_handle_late_commit_response(
+			result->source_id, result->txn_id, result->status);
 		if (ret) {
 			pkm_lcs_source_device_mark_down_file(file);
 			return ret;
@@ -3182,8 +3191,8 @@ static ssize_t pkm_lcs_source_device_write_file_with_ops(
 			file, result->request_id, caller_errno, result,
 			frame, count);
 	if (!ret)
-		ret = pkm_lcs_source_handle_late_success_cleanup_file(file,
-								      result);
+		ret = pkm_lcs_source_handle_late_response_effects_file(file,
+								       result);
 	if (!ret)
 		ret = (ssize_t)count;
 

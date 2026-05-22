@@ -470,6 +470,11 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 		txn->timeout_abort_pending = false;
 		dispatch_abort = transaction_id && source_id;
 		release_counter = source_id != 0;
+	} else if (txn->state == REG_TXN_TIMED_OUT &&
+		   txn->commit_in_flight) {
+		source_id = txn->bound_source_id;
+		txn->commit_in_flight = false;
+		release_counter = source_id != 0;
 	}
 	spin_unlock(&txn->lock);
 
@@ -509,14 +514,133 @@ static long pkm_lcs_transaction_fd_status_from_state(
 	return 0;
 }
 
-static long pkm_lcs_transaction_fd_commit_from_state(
-	struct pkm_lcs_transaction_fd *txn)
+static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
+	struct pkm_lcs_transaction_fd *txn, u64 transaction_id, u32 source_id,
+	u32 status, bool detached, u32 *final_state_out,
+	bool *release_counter_out)
 {
+	bool release_counter = false;
+	bool clear_log = false;
+	bool stop_timer = false;
+	bool wake = false;
+	u32 final_state = 0;
+	long ret = 0;
+
+	if (!txn || !transaction_id || !source_id || !final_state_out ||
+	    !release_counter_out)
+		return -EINVAL;
+	*final_state_out = 0;
+	*release_counter_out = false;
+
+	spin_lock(&txn->lock);
+	if (txn->transaction_id != transaction_id ||
+	    txn->bound_source_id != source_id || !txn->commit_in_flight) {
+		ret = -ENOENT;
+		goto out_unlock;
+	}
+
+	switch (txn->state) {
+	case REG_TXN_ACTIVE_BOUND:
+		txn->commit_in_flight = false;
+		txn->timeout_abort_pending = false;
+		if (status == RSI_OK) {
+			txn->state = REG_TXN_COMMITTED;
+			release_counter = true;
+			clear_log = true;
+			stop_timer = true;
+			wake = true;
+		} else if (detached) {
+			txn->state = REG_TXN_TIMED_OUT;
+			release_counter = true;
+			clear_log = true;
+			stop_timer = true;
+			wake = true;
+		}
+		final_state = txn->state;
+		break;
+	case REG_TXN_TIMED_OUT:
+		txn->commit_in_flight = false;
+		txn->timeout_abort_pending = false;
+		release_counter = true;
+		clear_log = true;
+		stop_timer = true;
+		final_state = txn->state;
+		break;
+	case REG_TXN_SOURCE_DOWN:
+		ret = -EIO;
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+out_unlock:
+	spin_unlock(&txn->lock);
+	if (ret)
+		return ret;
+
+	if (stop_timer)
+		timer_delete_sync(&txn->timeout_timer);
+	if (clear_log)
+		pkm_lcs_transaction_log_clear(txn);
+	if (wake)
+		wake_up_all(&txn->wait);
+
+	*final_state_out = final_state;
+	*release_counter_out = release_counter;
+	return 0;
+}
+
+static long pkm_lcs_transaction_fd_mark_commit_request_timeout(
+	struct pkm_lcs_transaction_fd *txn, u64 transaction_id, u32 source_id)
+{
+	bool stop_timer = false;
+	bool wake = false;
+	long ret = 0;
+
+	if (!txn || !transaction_id || !source_id)
+		return -EINVAL;
+
+	spin_lock(&txn->lock);
+	if (txn->transaction_id != transaction_id ||
+	    txn->bound_source_id != source_id || !txn->commit_in_flight) {
+		ret = -ENOENT;
+	} else if (txn->state == REG_TXN_ACTIVE_BOUND) {
+		txn->state = REG_TXN_TIMED_OUT;
+		txn->timeout_abort_pending = false;
+		stop_timer = true;
+		wake = true;
+	} else if (txn->state == REG_TXN_TIMED_OUT) {
+		txn->timeout_abort_pending = false;
+		stop_timer = true;
+	} else if (txn->state == REG_TXN_SOURCE_DOWN) {
+		ret = -EIO;
+	} else {
+		ret = -EINVAL;
+	}
+	spin_unlock(&txn->lock);
+	if (ret)
+		return ret;
+
+	if (stop_timer)
+		timer_delete_sync(&txn->timeout_timer);
+	if (wake)
+		wake_up_all(&txn->wait);
+	return 0;
+}
+
+static long pkm_lcs_transaction_fd_commit_from_state_timeout(
+	struct pkm_lcs_transaction_fd *txn, u32 timeout_ms)
+{
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
 	u64 transaction_id;
 	u32 source_id;
 	u32 state;
+	u32 final_state = 0;
 	long ret;
 	u32 count;
+	bool release_counter = false;
 
 	if (!txn)
 		return -EINVAL;
@@ -569,46 +693,63 @@ static long pkm_lcs_transaction_fd_commit_from_state(
 	if (ret)
 		goto out_unlock;
 
-	ret = pkm_lcs_source_commit_transaction_round_trip(
-		source_id, transaction_id, NULL, NULL);
+	ret = pkm_lcs_source_commit_transaction_round_trip_timeout(
+		source_id, transaction_id, timeout_ms, &response, &enqueue);
 	if (ret) {
+		if (ret == -ETIMEDOUT && enqueue.len) {
+			(void)pkm_lcs_transaction_fd_mark_commit_request_timeout(
+				txn, transaction_id, source_id);
+			goto out_unlock;
+		}
+
+		if (response.len) {
+			long apply_ret;
+
+			apply_ret =
+				pkm_lcs_transaction_fd_apply_commit_response_under_bind(
+					txn, transaction_id, source_id,
+					response.status, false, &final_state,
+					&release_counter);
+			if (!apply_ret) {
+				if (release_counter)
+					(void)pkm_lcs_source_bound_transaction_release(
+						source_id, &count);
+				if (final_state != REG_TXN_ACTIVE_BOUND)
+					ret = -ETIMEDOUT;
+				goto out_unlock;
+			}
+		}
+
 		spin_lock(&txn->lock);
 		txn->commit_in_flight = false;
 		spin_unlock(&txn->lock);
 		goto out_unlock;
 	}
 
-	spin_lock(&txn->lock);
-	txn->commit_in_flight = false;
-	if (txn->state == REG_TXN_ACTIVE_BOUND &&
-	    txn->transaction_id == transaction_id &&
-	    txn->bound_source_id == source_id) {
-		txn->state = REG_TXN_COMMITTED;
-		ret = 0;
-	} else if (txn->state == REG_TXN_TIMED_OUT) {
-		ret = -ETIMEDOUT;
-	} else if (txn->state == REG_TXN_SOURCE_DOWN) {
-		ret = -EIO;
-	} else {
-		ret = -EINVAL;
-	}
-	spin_unlock(&txn->lock);
+	ret = pkm_lcs_transaction_fd_apply_commit_response_under_bind(
+		txn, transaction_id, source_id, RSI_OK, false, &final_state,
+		&release_counter);
 	if (ret)
 		goto out_unlock;
 
-	timer_delete_sync(&txn->timeout_timer);
-	pkm_lcs_transaction_log_clear(txn);
-	/*
-	 * The source has already committed durably. Counter-release failure is
-	 * an internal bookkeeping inconsistency, not a reason to report commit
-	 * failure to the caller.
-	 */
-	(void)pkm_lcs_source_bound_transaction_release(source_id, &count);
-	wake_up_all(&txn->wait);
+	if (release_counter)
+		(void)pkm_lcs_source_bound_transaction_release(source_id,
+							       &count);
+	if (final_state == REG_TXN_COMMITTED)
+		ret = 0;
+	else
+		ret = -ETIMEDOUT;
 
 out_unlock:
 	mutex_unlock(&txn->bind_lock);
 	return ret;
+}
+
+static long pkm_lcs_transaction_fd_commit_from_state(
+	struct pkm_lcs_transaction_fd *txn)
+{
+	return pkm_lcs_transaction_fd_commit_from_state_timeout(
+		txn, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT);
 }
 
 static __poll_t pkm_lcs_transaction_fd_poll(struct file *file,
@@ -932,6 +1073,47 @@ long pkm_lcs_transaction_fd_mark_source_down(u32 source_id, u32 *marked_out)
 	if (marked_out)
 		*marked_out = marked;
 	return 0;
+}
+
+long pkm_lcs_transaction_fd_handle_late_commit_response(
+	u32 source_id, u64 transaction_id, u32 status)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	bool release_counter = false;
+	u32 final_state = 0;
+	u32 count = 0;
+	long ret = -ENOENT;
+
+	if (!source_id || !transaction_id)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_transaction_registry_lock);
+	list_for_each_entry(txn, &pkm_lcs_transaction_registry,
+			    registry_link) {
+		bool match;
+
+		mutex_lock(&txn->bind_lock);
+		spin_lock(&txn->lock);
+		match = txn->transaction_id == transaction_id &&
+			txn->bound_source_id == source_id;
+		spin_unlock(&txn->lock);
+		if (!match) {
+			mutex_unlock(&txn->bind_lock);
+			continue;
+		}
+
+		ret = pkm_lcs_transaction_fd_apply_commit_response_under_bind(
+			txn, transaction_id, source_id, status, true,
+			&final_state, &release_counter);
+		mutex_unlock(&txn->bind_lock);
+		break;
+	}
+	mutex_unlock(&pkm_lcs_transaction_registry_lock);
+
+	if (!ret && release_counter)
+		(void)pkm_lcs_source_bound_transaction_release(source_id,
+							       &count);
+	return ret;
 }
 
 static long pkm_lcs_transaction_fd_prepare_read_context_from_state(
@@ -1440,6 +1622,22 @@ long pkm_lcs_kunit_transaction_fd_flush_timeout_work(int fd)
 	flush_work(&txn->timeout_work);
 	fdput(held);
 	return 0;
+}
+
+long pkm_lcs_kunit_transaction_fd_commit_timeout(int fd, u32 timeout_ms)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_transaction_fd_commit_from_state_timeout(txn,
+							      timeout_ms);
+	fdput(held);
+	return ret;
 }
 #endif
 

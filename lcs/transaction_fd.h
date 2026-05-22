@@ -105,6 +105,8 @@ long pkm_lcs_transaction_fd_bind_for_mutation(
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
 	struct pkm_lcs_transaction_binding_plan *out);
 long pkm_lcs_transaction_fd_mark_source_down(u32 source_id, u32 *marked_out);
+long pkm_lcs_transaction_fd_handle_late_commit_response(
+	u32 source_id, u64 transaction_id, u32 status);
 long pkm_lcs_transaction_fd_snapshot(
 	int fd, struct pkm_lcs_transaction_fd_snapshot *out);
 long pkm_lcs_transaction_fd_log_snapshot(
@@ -117,6 +119,7 @@ long pkm_lcs_kunit_transaction_fd_set_log_capacity(int fd, u32 capacity);
 long pkm_lcs_kunit_transaction_fd_set_commit_in_flight(int fd,
 						       bool in_flight);
 long pkm_lcs_kunit_transaction_fd_flush_timeout_work(int fd);
+long pkm_lcs_kunit_transaction_fd_commit_timeout(int fd, u32 timeout_ms);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_TRANSACTION_FD_H */

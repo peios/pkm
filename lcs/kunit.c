@@ -11653,6 +11653,169 @@ static void pkm_lcs_kunit_late_begin_success_enqueues_abort_cleanup(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_append_one_create_log(struct kunit *test, int fd,
+						const u8 root_guid[16],
+						u64 sequence)
+{
+	static const u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0xa1
+	};
+	static const u8 child_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0xa2
+	};
+	static const char * const parent_path[] = { "Machine", "Software" };
+	static const u8 parent_ancestors[2][PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		{ 0xa0 },
+		{ 0xa1 },
+	};
+	struct pkm_lcs_transaction_mutation_handle handle = { };
+	struct pkm_lcs_transaction_key_create_log_input input = {
+		.parent_guid = parent_guid,
+		.target_guid = child_guid,
+		.child_name = "LateCommit",
+		.child_name_len = 10,
+		.layer = "base",
+		.layer_len = 4,
+		.parent_path = parent_path,
+		.parent_ancestor_guids = parent_ancestors,
+		.parent_depth = 2,
+		.sequence = sequence,
+	};
+	struct pkm_lcs_transaction_binding_plan binding = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_begin_key_create_mutation(
+				fd, 1, root_guid, &input, &handle, &binding),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_commit_mutation(&handle), 0L);
+}
+
+static void pkm_lcs_kunit_commit_timeout_late_response(
+	struct kunit *test, u32 status)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0xa4
+	};
+	struct pkm_lcs_transaction_mutation_log_snapshot log = { };
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct pkm_lcs_source_response_result response_result = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	u8 out[64];
+	struct file file = { };
+	const void *token;
+	u64 request_id;
+	size_t response_len;
+	size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	u32 count = 0;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, txn_snapshot.transaction_id, 1,
+				root_guid),
+			0L);
+	pkm_lcs_kunit_append_one_create_log(test, (int)fd, root_guid, 0xa5);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_commit_timeout((int)fd,
+								    1),
+			(long)-ETIMEDOUT);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, txn_snapshot.state, REG_TXN_TIMED_OUT);
+	KUNIT_EXPECT_FALSE(test, txn_snapshot.timer_pending);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_log_snapshot((int)fd, &log),
+			0L);
+	KUNIT_EXPECT_EQ(test, log.entry_count, 1U);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(
+				&file, out, sizeof(out), true),
+			(ssize_t)(RSI_REQUEST_HEADER_SIZE + sizeof(u64)));
+	request_id = get_unaligned_le64(out + RSI_REQUEST_ID_OFFSET);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(out + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_COMMIT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_TXN_ID_OFFSET),
+			txn_snapshot.transaction_id);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(out + payload_offset),
+			txn_snapshot.transaction_id);
+
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    request_id, RSI_COMMIT_TRANSACTION,
+					    status, &response_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_write_file(
+				&file, response, response_len, false,
+				&response_result),
+			(ssize_t)response_len);
+	KUNIT_EXPECT_EQ(test, response_result.request_id, request_id);
+	KUNIT_EXPECT_EQ(test, response_result.txn_id,
+			txn_snapshot.transaction_id);
+	KUNIT_EXPECT_EQ(test, response_result.request_op_code,
+			(u16)RSI_COMMIT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test, response_result.status, status);
+	KUNIT_EXPECT_FALSE(test, response_result.caller_waiter_attached);
+	KUNIT_EXPECT_EQ(test, response_result.in_flight_count, 0U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, txn_snapshot.state, REG_TXN_TIMED_OUT);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_log_snapshot((int)fd, &log),
+			0L);
+	KUNIT_EXPECT_EQ(test, log.entry_count, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_release(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	flush_delayed_fput();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_commit_timeout_late_success_consumes_log(
+	struct kunit *test)
+{
+	pkm_lcs_kunit_commit_timeout_late_response(test, RSI_OK);
+}
+
+static void pkm_lcs_kunit_commit_timeout_late_error_discards_log(
+	struct kunit *test)
+{
+	pkm_lcs_kunit_commit_timeout_late_response(test, RSI_STORAGE_ERROR);
+}
+
 static void pkm_lcs_kunit_transaction_bind_for_mutation_success_and_reuse(
 	struct kunit *test)
 {
@@ -16246,6 +16409,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_transaction_round_trip_failures),
 	KUNIT_CASE(
 		pkm_lcs_kunit_late_begin_success_enqueues_abort_cleanup),
+	KUNIT_CASE(
+		pkm_lcs_kunit_commit_timeout_late_success_consumes_log),
+	KUNIT_CASE(
+		pkm_lcs_kunit_commit_timeout_late_error_discards_log),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_source_status_policy),
