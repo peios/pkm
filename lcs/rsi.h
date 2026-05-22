@@ -96,6 +96,19 @@ struct pkm_lcs_rsi_query_value_result {
 	u8 _pad1[7];
 };
 
+struct pkm_lcs_rsi_enum_value_result {
+	u32 source_value_entry_count;
+	u32 source_blanket_count;
+	u32 name_offset;
+	u32 name_len;
+	u32 data_offset;
+	u32 data_len;
+	u32 value_type;
+	u32 _pad0;
+	u8 found;
+	u8 _pad1[7];
+};
+
 long pkm_lcs_rsi_build_lookup_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 parent_guid[RSI_GUID_SIZE], const char *child_name,
@@ -177,5 +190,12 @@ long pkm_lcs_rsi_materialize_query_value_response(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
 	struct pkm_lcs_rsi_query_value_result *result);
+long pkm_lcs_rsi_materialize_enum_value_response(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	u64 next_sequence, u32 index,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_rsi_enum_value_result *result);
 
 #endif /* _SECURITY_PKM_LCS_RSI_H */

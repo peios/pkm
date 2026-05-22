@@ -325,6 +325,20 @@ pub struct PkmLcsRsiQueryValueResultCopy {
     pub _pad1: [u8; 7],
 }
 
+#[repr(C)]
+pub struct PkmLcsRsiEnumValueResultCopy {
+    pub source_value_entry_count: u32,
+    pub source_blanket_count: u32,
+    pub name_offset: u32,
+    pub name_len: u32,
+    pub data_offset: u32,
+    pub data_len: u32,
+    pub value_type: u32,
+    pub _pad0: u32,
+    pub found: u8,
+    pub _pad1: [u8; 7],
+}
+
 fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
     source_registration_error_linux_errno(err)
         .unwrap_or(LinuxErrno::Einval)
@@ -2634,6 +2648,199 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
         (*result_out).value_type = value.value_type.code();
         (*result_out).selected_precedence = value.precedence;
         (*result_out).selected_sequence = value.sequence;
+        (*result_out).found = 1;
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_value_response(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    index: u32,
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+    private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
+    private_layer_count: usize,
+    result_out: *mut PkmLcsRsiEnumValueResultCopy,
+) -> c_int {
+    if result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *result_out = PkmLcsRsiEnumValueResultCopy {
+            source_value_entry_count: 0,
+            source_blanket_count: 0,
+            name_offset: 0,
+            name_len: 0,
+            data_offset: 0,
+            data_len: 0,
+            value_type: 0,
+            _pad0: 0,
+            found: 0,
+            _pad1: [0; 7],
+        };
+    }
+
+    if frame.is_null()
+        || (layer_count != 0 && layers.is_null())
+        || (private_layer_count != 0 && private_layers.is_null())
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let layer_views = match parse_layer_views(layers, layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let private_layer_views = match parse_private_layer_views(private_layers, private_layer_count) {
+        Ok(private_layer_views) => private_layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let payload = match parse_rsi_query_values_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_QUERY_VALUES,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_query_values_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) =
+        validate_rsi_query_values_response_value_payloads(&payload, &LcsLimits::DEFAULT)
+    {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let mut value_storage =
+        match PkmVec::<NamedValueEntry<'_>>::with_capacity(payload.entry_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut blanket_storage =
+        match PkmVec::<BlanketTombstoneEntry<'_>>::with_capacity(payload.blanket_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+
+    let mut allocation_failed = false;
+    if let Err(err) =
+        for_each_rsi_query_values_source_value_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+            if value_storage.push(entry).is_err() {
+                allocation_failed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            Ok(())
+        })
+    {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) =
+        for_each_rsi_query_values_source_blanket_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+            if blanket_storage.push(entry).is_err() {
+                allocation_failed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            Ok(())
+        })
+    {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+
+    unsafe {
+        (*result_out).source_value_entry_count = value_storage.len() as u32;
+        (*result_out).source_blanket_count = blanket_storage.len() as u32;
+    }
+
+    let context = LayerResolutionContext {
+        layers: layer_views.as_slice(),
+        private_layers: private_layer_views.as_slice(),
+        limits: &LcsLimits::DEFAULT,
+        next_sequence,
+    };
+    let mut current_index = 0usize;
+    let target_index = index as usize;
+    let mut found = false;
+    let mut selected_name: *const u8 = core::ptr::null();
+    let mut selected_name_len = 0usize;
+    let mut selected_data: *const u8 = core::ptr::null();
+    let mut selected_data_len = 0usize;
+    let mut selected_type = 0u32;
+    if let Err(err) = for_each_effective_value(
+        &context,
+        value_storage.as_slice(),
+        blanket_storage.as_slice(),
+        |value| {
+            if current_index == target_index {
+                selected_name = value.name.as_bytes().as_ptr();
+                selected_name_len = value.name.len();
+                selected_data = value.value.data.as_ptr();
+                selected_data_len = value.value.data.len();
+                selected_type = value.value.value_type.code();
+                found = true;
+            }
+            current_index = current_index
+                .checked_add(1)
+                .ok_or(LcsError::RsiPayloadLengthOverflow)?;
+            Ok(())
+        },
+    ) {
+        return rsi_lookup_materialization_error_return(err);
+    }
+
+    if !found {
+        return 0;
+    }
+
+    let base = frame_bytes.as_ptr() as usize;
+    let end = base.saturating_add(frame_len);
+    let name_ptr = selected_name as usize;
+    let Some(name_end) = name_ptr.checked_add(selected_name_len) else {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    };
+    let data_ptr = selected_data as usize;
+    let Some(data_end) = data_ptr.checked_add(selected_data_len) else {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    };
+    if name_ptr < base || name_end > end || data_ptr < base || data_end > end {
+        return LinuxErrno::Eio.negated_return() as c_int;
+    }
+
+    let name_offset = name_ptr - base;
+    let data_offset = data_ptr - base;
+    if name_offset > u32::MAX as usize
+        || selected_name_len > u32::MAX as usize
+        || data_offset > u32::MAX as usize
+        || selected_data_len > u32::MAX as usize
+    {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    }
+
+    unsafe {
+        (*result_out).name_offset = name_offset as u32;
+        (*result_out).name_len = selected_name_len as u32;
+        (*result_out).data_offset = data_offset as u32;
+        (*result_out).data_len = selected_data_len as u32;
+        (*result_out).value_type = selected_type;
         (*result_out).found = 1;
     }
     0
