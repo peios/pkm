@@ -1031,22 +1031,17 @@ static long pkm_lcs_key_fd_validate_dispatch_context(
 		});
 }
 
-long pkm_lcs_key_fd_dispatch_watch_event_context(
+static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 	const struct pkm_lcs_watch_dispatch_context *context)
 {
 	struct pkm_lcs_key_fd_string_view *path_views = NULL;
 	struct pkm_lcs_subtree_watch_entry *subtree;
 	struct pkm_lcs_key_fd *watcher;
-	long ret;
+	long ret = 0;
 	u32 changed_index;
 	u32 hash;
 	u32 i;
 
-	ret = pkm_lcs_key_fd_validate_dispatch_context(context);
-	if (ret)
-		return ret;
-
-	mutex_lock(&pkm_lcs_watch_registry_lock);
 	hash = pkm_lcs_guid_hash(context->changed_key_guid);
 	hash_for_each_possible(pkm_lcs_watch_map, watcher,
 			       watch_registry_node, hash) {
@@ -1098,6 +1093,48 @@ long pkm_lcs_key_fd_dispatch_watch_event_context(
 
 out_unlock:
 	pkm_lcs_key_fd_path_views_free(path_views);
+	return ret;
+}
+
+long pkm_lcs_key_fd_dispatch_watch_event_context(
+	const struct pkm_lcs_watch_dispatch_context *context)
+{
+	long ret;
+
+	ret = pkm_lcs_key_fd_validate_dispatch_context(context);
+	if (ret)
+		return ret;
+
+	mutex_lock(&pkm_lcs_watch_registry_lock);
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context_locked(context);
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
+	return ret;
+}
+
+long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
+	const struct pkm_lcs_watch_dispatch_context *contexts, u32 context_count)
+{
+	long ret = 0;
+	u32 i;
+
+	if (!context_count)
+		return 0;
+	if (!contexts)
+		return -EINVAL;
+
+	for (i = 0; i < context_count; i++) {
+		ret = pkm_lcs_key_fd_validate_dispatch_context(&contexts[i]);
+		if (ret)
+			return ret;
+	}
+
+	mutex_lock(&pkm_lcs_watch_registry_lock);
+	for (i = 0; i < context_count; i++) {
+		ret = pkm_lcs_key_fd_dispatch_watch_event_context_locked(
+			&contexts[i]);
+		if (ret)
+			break;
+	}
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 	return ret;
 }

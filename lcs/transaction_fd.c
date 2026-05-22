@@ -31,6 +31,7 @@
 
 #include <pkm/lcs.h>
 
+#include "key_fd.h"
 #include "transaction_fd.h"
 #include "source_device.h"
 
@@ -596,6 +597,56 @@ out_unlock:
 	return 0;
 }
 
+static long pkm_lcs_transaction_log_dispatch_watch_batch(
+	struct pkm_lcs_transaction_fd *txn)
+{
+	struct pkm_lcs_watch_dispatch_context *contexts;
+	struct pkm_lcs_transaction_log_entry *entry;
+	u32 index = 0;
+	long ret;
+
+	if (!txn)
+		return -EINVAL;
+	if (!txn->mutation_log_entries)
+		return 0;
+
+	contexts = kcalloc(txn->mutation_log_entries, sizeof(*contexts),
+			   GFP_KERNEL);
+	if (!contexts)
+		return -ENOMEM;
+
+	list_for_each_entry(entry, &txn->mutation_log, link) {
+		switch (entry->kind) {
+		case PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY:
+			contexts[index].changed_key_guid =
+				entry->create_key.parent_guid;
+			contexts[index].ancestor_guids =
+				entry->create_key.parent_ancestor_guids;
+			contexts[index].resolved_path =
+				(const char * const *)entry->create_key.parent_path;
+			contexts[index].path_component_count =
+				entry->create_key.parent_depth;
+			contexts[index].event_type = REG_WATCH_SUBKEY_CREATED;
+			contexts[index].name =
+				(const u8 *)entry->create_key.child_name;
+			contexts[index].name_len =
+				entry->create_key.child_name_len;
+			index++;
+			break;
+		default:
+			ret = -EIO;
+			goto out_free;
+		}
+	}
+
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(contexts,
+							       index);
+
+out_free:
+	kfree(contexts);
+	return ret;
+}
+
 static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 	struct pkm_lcs_transaction_fd *txn, u64 transaction_id, u32 source_id,
 	u32 status, bool detached, u32 *final_state_out,
@@ -622,6 +673,7 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 			*source_down_required_out = true;
 			return -EIO;
 		}
+		(void)pkm_lcs_transaction_log_dispatch_watch_batch(txn);
 	}
 
 	spin_lock(&txn->lock);

@@ -93,6 +93,9 @@ void pkm_lcs_key_fd_parent_snapshot_destroy(
 	struct pkm_lcs_key_fd_parent_snapshot *snapshot);
 long pkm_lcs_key_fd_dispatch_watch_event_context(
 	const struct pkm_lcs_watch_dispatch_context *context);
+long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
+	const struct pkm_lcs_watch_dispatch_context *contexts,
+	u32 context_count);
 long pkm_lcs_key_fd_dispatch_watch_event(
 	const struct pkm_lcs_watch_dispatch_input *input);
 
