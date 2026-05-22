@@ -62,6 +62,7 @@ pub struct PkmLcsSourceRegistrationHiveCopy {
     pub root_guid: [u8; 16],
     pub flags: u32,
     pub scope_guid: [u8; 16],
+    pub hive_generation: u64,
 }
 
 #[repr(C)]

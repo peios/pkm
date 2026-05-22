@@ -527,10 +527,79 @@ static long pkm_lcs_transaction_fd_status_from_state(
 	return 0;
 }
 
+static long pkm_lcs_transaction_log_requires_generation(
+	const struct pkm_lcs_transaction_fd *txn, bool *requires_generation)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+	bool required = false;
+
+	if (!txn || !requires_generation)
+		return -EINVAL;
+
+	list_for_each_entry(entry, &txn->mutation_log, link) {
+		switch (entry->kind) {
+		case PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY:
+			required = true;
+			break;
+		default:
+			return -EIO;
+		}
+	}
+
+	*requires_generation = required;
+	return 0;
+}
+
+static long pkm_lcs_transaction_fd_apply_success_generation_under_bind(
+	struct pkm_lcs_transaction_fd *txn, u64 transaction_id, u32 source_id)
+{
+	u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	bool requires_generation = false;
+	u64 generation = 0;
+	u32 state;
+	long ret;
+
+	if (!txn || !transaction_id || !source_id)
+		return -EINVAL;
+
+	spin_lock(&txn->lock);
+	if (txn->transaction_id != transaction_id ||
+	    txn->bound_source_id != source_id || !txn->commit_in_flight) {
+		ret = -ENOENT;
+		goto out_unlock;
+	}
+
+	state = txn->state;
+	if (state != REG_TXN_ACTIVE_BOUND && state != REG_TXN_TIMED_OUT) {
+		ret = state == REG_TXN_SOURCE_DOWN ? -EIO : -EINVAL;
+		goto out_unlock;
+	}
+	memcpy(root_guid, txn->bound_root_guid, sizeof(root_guid));
+	ret = 0;
+
+out_unlock:
+	spin_unlock(&txn->lock);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_transaction_log_requires_generation(
+		txn, &requires_generation);
+	if (ret)
+		return ret;
+	if (!requires_generation)
+		return 0;
+
+	ret = pkm_lcs_source_record_transaction_generation(
+		source_id, root_guid, &generation);
+	if (ret)
+		return -EIO;
+	return 0;
+}
+
 static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 	struct pkm_lcs_transaction_fd *txn, u64 transaction_id, u32 source_id,
 	u32 status, bool detached, u32 *final_state_out,
-	bool *release_counter_out)
+	bool *release_counter_out, bool *source_down_required_out)
 {
 	bool release_counter = false;
 	bool clear_log = false;
@@ -540,10 +609,20 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 	long ret = 0;
 
 	if (!txn || !transaction_id || !source_id || !final_state_out ||
-	    !release_counter_out)
+	    !release_counter_out || !source_down_required_out)
 		return -EINVAL;
 	*final_state_out = 0;
 	*release_counter_out = false;
+	*source_down_required_out = false;
+
+	if (status == RSI_OK) {
+		ret = pkm_lcs_transaction_fd_apply_success_generation_under_bind(
+			txn, transaction_id, source_id);
+		if (ret) {
+			*source_down_required_out = true;
+			return -EIO;
+		}
+	}
 
 	spin_lock(&txn->lock);
 	if (txn->transaction_id != transaction_id ||
@@ -654,6 +733,9 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 	long ret;
 	u32 count;
 	bool release_counter = false;
+	bool mark_source_down = false;
+	bool source_down_required = false;
+	u32 mark_source_down_id = 0;
 
 	if (!txn)
 		return -EINVAL;
@@ -718,17 +800,25 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 		if (response.len) {
 			long apply_ret;
 
+			source_down_required = false;
 			apply_ret =
 				pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 					txn, transaction_id, source_id,
 					response.status, false, &final_state,
-					&release_counter);
+					&release_counter,
+					&source_down_required);
 			if (!apply_ret) {
 				if (release_counter)
 					(void)pkm_lcs_source_bound_transaction_release(
 						source_id, &count);
 				if (final_state != REG_TXN_ACTIVE_BOUND)
 					ret = -ETIMEDOUT;
+				goto out_unlock;
+			}
+			if (source_down_required) {
+				mark_source_down = true;
+				mark_source_down_id = source_id;
+				ret = -EIO;
 				goto out_unlock;
 			}
 		}
@@ -739,11 +829,18 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 		goto out_unlock;
 	}
 
+	source_down_required = false;
 	ret = pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 		txn, transaction_id, source_id, RSI_OK, false, &final_state,
-		&release_counter);
-	if (ret)
+		&release_counter, &source_down_required);
+	if (ret) {
+		if (source_down_required) {
+			mark_source_down = true;
+			mark_source_down_id = source_id;
+			ret = -EIO;
+		}
 		goto out_unlock;
+	}
 
 	if (release_counter)
 		(void)pkm_lcs_source_bound_transaction_release(source_id,
@@ -755,6 +852,8 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 
 out_unlock:
 	mutex_unlock(&txn->bind_lock);
+	if (mark_source_down)
+		pkm_lcs_source_mark_down_by_id(mark_source_down_id);
 	return ret;
 }
 
@@ -1113,6 +1212,7 @@ long pkm_lcs_transaction_fd_handle_late_commit_response(
 	struct pkm_lcs_transaction_fd *txn;
 	struct pkm_lcs_transaction_fd *destroy_txn = NULL;
 	bool release_counter = false;
+	bool source_down_required = false;
 	u32 final_state = 0;
 	u32 count = 0;
 	long ret = -ENOENT;
@@ -1137,7 +1237,8 @@ long pkm_lcs_transaction_fd_handle_late_commit_response(
 
 		ret = pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 			txn, transaction_id, source_id, status, true,
-			&final_state, &release_counter);
+			&final_state, &release_counter,
+			&source_down_required);
 		if (!ret) {
 			bool destroy_detached;
 

@@ -72,6 +72,7 @@ struct pkm_lcs_source_registration_hive_copy {
 	u8 root_guid[16];
 	u32 flags;
 	u8 scope_guid[16];
+	u64 hive_generation;
 };
 
 struct pkm_lcs_source_registration_copy {
@@ -763,6 +764,10 @@ long pkm_lcs_source_abort_transaction_round_trip(
 	u32 source_id, u64 transaction_id,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_record_transaction_generation(
+	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
+	u64 *generation_out);
+void pkm_lcs_source_mark_down_by_id(u32 source_id);
 long pkm_lcs_source_create_key_round_trip_timeout(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *name, u32 name_len,
@@ -847,6 +852,11 @@ ssize_t pkm_lcs_kunit_source_device_write_file(
 	struct file *file, const void *buf, size_t count, bool fault,
 	struct pkm_lcs_source_response_result *result);
 __poll_t pkm_lcs_kunit_source_device_poll_file(struct file *file);
+long pkm_lcs_kunit_source_hive_generation_snapshot(
+	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
+	u64 *generation_out);
+long pkm_lcs_kunit_source_hive_generation_set(
+	u32 source_id, const u8 root_guid[RSI_GUID_SIZE], u64 generation);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_SOURCE_DEVICE_H */

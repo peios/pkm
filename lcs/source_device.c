@@ -380,6 +380,60 @@ pkm_lcs_source_slot_find_locked(u32 source_id)
 	return NULL;
 }
 
+static struct pkm_lcs_source_registration_hive_copy *
+pkm_lcs_source_slot_hive_find_locked(struct pkm_lcs_source_slot *slot,
+				     const u8 root_guid[RSI_GUID_SIZE])
+{
+	u32 i;
+
+	lockdep_assert_held(&pkm_lcs_source_table_lock);
+
+	if (!slot || !root_guid || !slot->hives)
+		return NULL;
+
+	for (i = 0; i < slot->hive_count; i++) {
+		if (!memcmp(slot->hives[i].root_guid, root_guid,
+			    sizeof(slot->hives[i].root_guid)))
+			return &slot->hives[i];
+	}
+	return NULL;
+}
+
+long pkm_lcs_source_record_transaction_generation(
+	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
+	u64 *generation_out)
+{
+	struct pkm_lcs_source_registration_hive_copy *hive;
+	struct pkm_lcs_source_slot *slot;
+	long ret = -EIO;
+
+	if (generation_out)
+		*generation_out = 0;
+	if (!source_id || !root_guid || !generation_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE)
+		goto out_unlock;
+
+	hive = pkm_lcs_source_slot_hive_find_locked(slot, root_guid);
+	if (!hive)
+		goto out_unlock;
+	if (hive->hive_generation == U64_MAX) {
+		ret = -EOVERFLOW;
+		goto out_unlock;
+	}
+
+	hive->hive_generation++;
+	*generation_out = hive->hive_generation;
+	ret = 0;
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
 long pkm_lcs_source_bound_transaction_acquire(u32 source_id, u32 *count_out)
 {
 	struct pkm_lcs_source_slot *slot;
@@ -1097,6 +1151,32 @@ static void pkm_lcs_source_device_mark_down_file(struct file *file)
 							      NULL);
 }
 
+void pkm_lcs_source_mark_down_by_id(u32 source_id)
+{
+	struct pkm_lcs_source_fd *source_fd = NULL;
+	struct pkm_lcs_source_slot *slot;
+	u32 source_down_id = 0;
+
+	if (!source_id)
+		return;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (slot && slot->status == PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE &&
+	    slot->active_fd) {
+		source_fd = slot->active_fd;
+		mutex_lock(&source_fd->queue_lock);
+		source_down_id = pkm_lcs_source_fd_mark_down_locked(source_fd);
+		mutex_unlock(&source_fd->queue_lock);
+		wake_up_interruptible(&source_fd->read_wait);
+	}
+	mutex_unlock(&pkm_lcs_source_table_lock);
+
+	if (source_down_id)
+		(void)pkm_lcs_transaction_fd_mark_source_down(source_down_id,
+							      NULL);
+}
+
 int pkm_lcs_source_device_release_file(struct file *file)
 {
 	struct pkm_lcs_source_fd *source_fd;
@@ -1432,6 +1512,7 @@ static long pkm_lcs_source_registration_publish_locked(
 	struct pkm_lcs_source_registration_plan_copy plan = { };
 	struct pkm_lcs_source_slot *slot;
 	u32 slot_count;
+	u32 i;
 	long ret;
 
 	lockdep_assert_held(&pkm_lcs_source_table_lock);
@@ -1454,6 +1535,10 @@ static long pkm_lcs_source_registration_publish_locked(
 		slot = pkm_lcs_source_slot_free_locked();
 		if (!slot)
 			return -ENOSPC;
+
+		for (i = 0; i < registration->hive_count; i++)
+			registration->hives[i].hive_generation =
+				registration->max_sequence;
 
 		slot->occupied = true;
 		slot->status = PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE;
@@ -7172,6 +7257,61 @@ void pkm_lcs_kunit_source_table_snapshot(
 	snapshot->sequence_initialized = pkm_lcs_sequence_initialized;
 	snapshot->next_sequence = pkm_lcs_next_sequence;
 	mutex_unlock(&pkm_lcs_source_table_lock);
+}
+
+long pkm_lcs_kunit_source_hive_generation_snapshot(
+	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
+	u64 *generation_out)
+{
+	struct pkm_lcs_source_registration_hive_copy *hive;
+	struct pkm_lcs_source_slot *slot;
+	long ret = -EIO;
+
+	if (generation_out)
+		*generation_out = 0;
+	if (!source_id || !root_guid || !generation_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE)
+		goto out_unlock;
+	hive = pkm_lcs_source_slot_hive_find_locked(slot, root_guid);
+	if (!hive)
+		goto out_unlock;
+
+	*generation_out = hive->hive_generation;
+	ret = 0;
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
+long pkm_lcs_kunit_source_hive_generation_set(
+	u32 source_id, const u8 root_guid[RSI_GUID_SIZE], u64 generation)
+{
+	struct pkm_lcs_source_registration_hive_copy *hive;
+	struct pkm_lcs_source_slot *slot;
+	long ret = -EIO;
+
+	if (!source_id || !root_guid)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE)
+		goto out_unlock;
+	hive = pkm_lcs_source_slot_hive_find_locked(slot, root_guid);
+	if (!hive)
+		goto out_unlock;
+
+	hive->hive_generation = generation;
+	ret = 0;
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
 }
 
 void pkm_lcs_kunit_source_fd_snapshot(
