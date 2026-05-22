@@ -59,6 +59,13 @@ extern int lcs_rust_materialize_rsi_enum_children_info_summary(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	size_t private_layer_count,
 	struct pkm_lcs_rsi_enum_children_info_summary *summary);
+extern int lcs_rust_materialize_rsi_enum_subkey_response(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	u64 next_sequence, u32 index,
+	const struct pkm_lcs_rsi_layer_view *layers, size_t layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	size_t private_layer_count,
+	struct pkm_lcs_rsi_enum_subkey_result *result);
 extern int lcs_rust_materialize_rsi_query_values_info_summary(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence, const struct pkm_lcs_rsi_layer_view *layers,
@@ -323,6 +330,32 @@ long pkm_lcs_rsi_materialize_enum_children_info_summary(
 	return lcs_rust_materialize_rsi_enum_children_info_summary(
 		frame, frame_len, request_id, next_sequence, layers,
 		layer_count, private_layers, private_layer_count, summary);
+}
+
+long pkm_lcs_rsi_materialize_enum_subkey_response(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	u64 next_sequence, u32 index,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_rsi_enum_subkey_result *result)
+{
+	if (!result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	if (!frame)
+		return -EINVAL;
+	if (frame_len < RSI_MIN_RESPONSE_SIZE)
+		return -EINVAL;
+	if (layer_count && !layers)
+		return -EINVAL;
+	if (private_layer_count && !private_layers)
+		return -EINVAL;
+
+	return lcs_rust_materialize_rsi_enum_subkey_response(
+		frame, frame_len, request_id, next_sequence, index, layers,
+		layer_count, private_layers, private_layer_count, result);
 }
 
 long pkm_lcs_rsi_materialize_query_values_info_summary(

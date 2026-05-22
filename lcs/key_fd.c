@@ -1494,6 +1494,187 @@ out_frame:
 	return ret;
 }
 
+static void pkm_lcs_key_fd_enum_subkey_reset_args(
+	struct reg_enum_subkey_args *args, u32 index, u32 name_len,
+	u64 name_ptr, s32 txn_fd)
+{
+	memset(args, 0, sizeof(*args));
+	args->index = index;
+	args->name_len = name_len;
+	args->name_ptr = name_ptr;
+	args->txn_fd = txn_fd;
+}
+
+static long pkm_lcs_key_fd_enum_subkey_read_metadata(
+	struct pkm_lcs_key_fd *key_fd, u64 txn_id, u64 next_sequence,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const u8 child_guid[RSI_GUID_SIZE],
+	struct reg_enum_subkey_args *args)
+{
+	struct pkm_lcs_source_response_frame read_frame = { };
+	struct pkm_lcs_source_response_frame enum_frame = { };
+	struct pkm_lcs_source_response_frame values_frame = { };
+	struct pkm_lcs_source_response_result read_response = { };
+	struct pkm_lcs_source_response_result enum_response = { };
+	struct pkm_lcs_source_response_result values_response = { };
+	struct pkm_lcs_rsi_enum_children_info_summary enum_summary = { };
+	struct pkm_lcs_rsi_query_values_info_summary values_summary = { };
+	struct pkm_lcs_rsi_read_key_result read_key = { };
+	long ret;
+
+	pkm_lcs_source_response_frame_init(&read_frame);
+	pkm_lcs_source_response_frame_init(&enum_frame);
+	pkm_lcs_source_response_frame_init(&values_frame);
+
+	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+		key_fd->source_id, txn_id, child_guid,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &read_frame,
+		&read_response, NULL);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_rsi_materialize_read_key_response(
+		read_frame.data, read_frame.len, read_response.request_id,
+		&read_key);
+	if (ret)
+		goto out_frames;
+
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
+		key_fd->source_id, txn_id, child_guid,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &enum_frame,
+		&enum_response, NULL);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
+		enum_frame.data, enum_frame.len, enum_response.request_id,
+		next_sequence, layers, layer_count, NULL, 0, &enum_summary);
+	if (ret)
+		goto out_frames;
+
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+		key_fd->source_id, txn_id, child_guid, "", 0, true,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &values_frame,
+		&values_response, NULL);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_rsi_materialize_query_values_info_summary(
+		values_frame.data, values_frame.len, values_response.request_id,
+		next_sequence, layers, layer_count, NULL, 0, &values_summary);
+	if (ret)
+		goto out_frames;
+
+	args->last_write_time = read_key.last_write_time;
+	args->subkey_count = enum_summary.subkey_count;
+	args->value_count = values_summary.value_count;
+	ret = 0;
+
+out_frames:
+	pkm_lcs_source_response_frame_destroy(&values_frame);
+	pkm_lcs_source_response_frame_destroy(&enum_frame);
+	pkm_lcs_source_response_frame_destroy(&read_frame);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_enum_subkey_from_args(
+	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct reg_enum_subkey_args *args)
+{
+	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_rsi_enum_subkey_result result = { };
+	const u8 *name;
+	u64 next_sequence = 0;
+	u64 txn_id = 0;
+	u64 name_ptr;
+	u32 index;
+	u32 name_buf_len;
+	u32 layer_count = 0;
+	s32 txn_fd;
+	long ret;
+
+	if (!key_fd || !args)
+		return -EINVAL;
+	if (!ops)
+		ops = &pkm_lcs_key_fd_default_usercopy_ops;
+	if (!ops->write)
+		return -EINVAL;
+
+	index = args->index;
+	name_buf_len = args->name_len;
+	name_ptr = args->name_ptr;
+	txn_fd = args->txn_fd;
+
+	if (args->_pad)
+		return -EINVAL;
+	if (name_buf_len && !name_ptr)
+		return -EFAULT;
+
+	ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
+		key_fd->granted_access, REG_IOC_ENUM_SUBKEYS_NR);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_query_value_prepare_read_context(key_fd, txn_fd,
+							      &txn_id);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
+		key_fd->source_id, txn_id, key_fd->key_guid,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+	if (ret)
+		goto out_frame;
+
+	ret = pkm_lcs_rsi_materialize_enum_subkey_response(
+		frame.data, frame.len, response.request_id, next_sequence,
+		index, layers, layer_count, NULL, 0, &result);
+	if (ret)
+		goto out_frame;
+	if (!result.found) {
+		ret = -ENOENT;
+		goto out_frame;
+	}
+	if ((size_t)result.name_offset > frame.len ||
+	    (size_t)result.name_len >
+		    frame.len - (size_t)result.name_offset) {
+		ret = -EIO;
+		goto out_frame;
+	}
+
+	if (name_buf_len < result.name_len) {
+		pkm_lcs_key_fd_enum_subkey_reset_args(
+			args, index, name_buf_len, name_ptr, txn_fd);
+		args->name_len = result.name_len;
+		ret = -ERANGE;
+		goto out_frame;
+	}
+
+	pkm_lcs_key_fd_enum_subkey_reset_args(args, index, name_buf_len,
+					      name_ptr, txn_fd);
+	args->name_len = result.name_len;
+	ret = pkm_lcs_key_fd_enum_subkey_read_metadata(
+		key_fd, txn_id, next_sequence, layers, layer_count,
+		result.child_guid, args);
+	if (ret)
+		goto out_frame;
+
+	name = frame.data + result.name_offset;
+	if (result.name_len &&
+	    !ops->write(ops->ctx, (void __user *)(unsigned long)name_ptr,
+			name, result.name_len))
+		ret = -EFAULT;
+
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_set_security_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_security_args *args)
@@ -1603,6 +1784,7 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	struct pkm_lcs_key_fd *key_fd;
 	struct reg_notify_args notify_args;
 	struct reg_get_security_args get_security_args;
+	struct reg_enum_subkey_args enum_subkey_args;
 	struct reg_enum_value_args enum_value_args;
 	struct reg_query_key_info_args query_key_info_args;
 	struct reg_query_value_args query_value_args;
@@ -1642,6 +1824,20 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 		if ((ret == 0 || ret == -ERANGE) &&
 		    copy_to_user((void __user *)arg, &enum_value_args,
 				 sizeof(enum_value_args)))
+			return -EFAULT;
+		return ret;
+	case REG_IOC_ENUM_SUBKEYS:
+		if (!arg)
+			return -EFAULT;
+		if (copy_from_user(&enum_subkey_args, (void __user *)arg,
+				   sizeof(enum_subkey_args)))
+			return -EFAULT;
+		ret = pkm_lcs_key_fd_enum_subkey_from_args(
+			key_fd, &pkm_lcs_key_fd_default_usercopy_ops,
+			&enum_subkey_args);
+		if ((ret == 0 || ret == -ERANGE) &&
+		    copy_to_user((void __user *)arg, &enum_subkey_args,
+				 sizeof(enum_subkey_args)))
 			return -EFAULT;
 		return ret;
 	case REG_IOC_QUERY_KEY_INFO:
@@ -2368,6 +2564,22 @@ long pkm_lcs_kunit_key_fd_enum_value(
 	if (ret)
 		return ret;
 	ret = pkm_lcs_key_fd_enum_value_from_args(key_fd, ops, args);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_enum_subkey(
+	int fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct reg_enum_subkey_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_key_fd_enum_subkey_from_args(key_fd, ops, args);
 	fdput(held);
 	return ret;
 }

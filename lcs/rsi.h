@@ -33,6 +33,17 @@ struct pkm_lcs_rsi_enum_children_info_summary {
 	u32 _pad;
 };
 
+struct pkm_lcs_rsi_enum_subkey_result {
+	u32 source_path_entry_count;
+	u32 name_offset;
+	u32 name_len;
+	u32 selected_precedence;
+	u64 selected_sequence;
+	u8 found;
+	u8 _pad[7];
+	u8 child_guid[RSI_GUID_SIZE];
+};
+
 struct pkm_lcs_rsi_query_values_info_summary {
 	u32 value_count;
 	u32 max_value_name_len;
@@ -166,6 +177,13 @@ long pkm_lcs_rsi_materialize_enum_children_info_summary(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
 	struct pkm_lcs_rsi_enum_children_info_summary *summary);
+long pkm_lcs_rsi_materialize_enum_subkey_response(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	u64 next_sequence, u32 index,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
+	struct pkm_lcs_rsi_enum_subkey_result *result);
 long pkm_lcs_rsi_materialize_query_values_info_summary(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence, const struct pkm_lcs_rsi_layer_view *layers,

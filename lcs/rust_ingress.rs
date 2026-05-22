@@ -300,6 +300,18 @@ pub struct PkmLcsRsiEnumChildrenInfoSummaryCopy {
 }
 
 #[repr(C)]
+pub struct PkmLcsRsiEnumSubkeyResultCopy {
+    pub source_path_entry_count: u32,
+    pub name_offset: u32,
+    pub name_len: u32,
+    pub selected_precedence: u32,
+    pub selected_sequence: u64,
+    pub found: u8,
+    pub _pad: [u8; 7],
+    pub child_guid: [u8; 16],
+}
+
+#[repr(C)]
 pub struct PkmLcsRsiQueryValuesInfoSummaryCopy {
     pub value_count: u32,
     pub max_value_name_len: u32,
@@ -2101,6 +2113,167 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
         (*result_out).subkey_count = subkey_count as u32;
         (*result_out).max_subkey_name_len = max_subkey_name_len as u32;
         (*result_out).source_path_entry_count = path_storage.len() as u32;
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_subkey_response(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    index: u32,
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+    private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
+    private_layer_count: usize,
+    result_out: *mut PkmLcsRsiEnumSubkeyResultCopy,
+) -> c_int {
+    if result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *result_out = PkmLcsRsiEnumSubkeyResultCopy {
+            source_path_entry_count: 0,
+            name_offset: 0,
+            name_len: 0,
+            selected_precedence: 0,
+            selected_sequence: 0,
+            found: 0,
+            _pad: [0; 7],
+            child_guid: [0; 16],
+        };
+    }
+
+    if frame.is_null()
+        || (layer_count != 0 && layers.is_null())
+        || (private_layer_count != 0 && private_layers.is_null())
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let layer_views = match parse_layer_views(layers, layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let private_layer_views = match parse_private_layer_views(private_layers, private_layer_count) {
+        Ok(private_layer_views) => private_layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let payload = match parse_rsi_enum_children_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_ENUM_CHILDREN,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_enum_children_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_enum_children_metadata_completeness(&payload) {
+        return rsi_enum_children_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_enum_children_path_response_names(&payload, &LcsLimits::DEFAULT)
+    {
+        return rsi_enum_children_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_enum_children_metadata_security_descriptors(&payload) {
+        return rsi_enum_children_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_enum_children_path_response_sequences(&payload, next_sequence) {
+        return rsi_enum_children_response_error_return(err);
+    }
+
+    let mut path_storage =
+        match PkmVec::<NamedPathEntry<'_>>::with_capacity(payload.child_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut allocation_failed = false;
+    if let Err(err) =
+        for_each_rsi_enum_children_source_path_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+            if path_storage.push(entry).is_err() {
+                allocation_failed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            Ok(())
+        })
+    {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_enum_children_response_error_return(err);
+    }
+
+    if path_storage.len() > u32::MAX as usize {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    }
+    unsafe {
+        (*result_out).source_path_entry_count = path_storage.len() as u32;
+    }
+
+    let context = LayerResolutionContext {
+        layers: layer_views.as_slice(),
+        private_layers: private_layer_views.as_slice(),
+        limits: &LcsLimits::DEFAULT,
+        next_sequence,
+    };
+    let target_index = index as usize;
+    let mut current_index = 0usize;
+    let mut found = false;
+    let mut selected_name: *const u8 = core::ptr::null();
+    let mut selected_name_len = 0usize;
+    let mut selected_guid = [0u8; 16];
+    let mut selected_precedence = 0u32;
+    let mut selected_sequence = 0u64;
+    if let Err(err) = for_each_visible_subkey(&context, path_storage.as_slice(), |subkey| {
+        if current_index == target_index {
+            selected_name = subkey.child_name.as_bytes().as_ptr();
+            selected_name_len = subkey.child_name.len();
+            selected_guid = subkey.path.guid;
+            selected_precedence = subkey.path.precedence;
+            selected_sequence = subkey.path.sequence;
+            found = true;
+        }
+        current_index = current_index
+            .checked_add(1)
+            .ok_or(LcsError::RsiPayloadLengthOverflow)?;
+        Ok(())
+    }) {
+        return rsi_lookup_materialization_error_return(err);
+    }
+
+    if !found {
+        return 0;
+    }
+
+    let base = frame_bytes.as_ptr() as usize;
+    let end = base.saturating_add(frame_len);
+    let name_ptr = selected_name as usize;
+    let Some(name_end) = name_ptr.checked_add(selected_name_len) else {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    };
+    if name_ptr < base || name_end > end {
+        return LinuxErrno::Eio.negated_return() as c_int;
+    }
+
+    let name_offset = name_ptr - base;
+    if name_offset > u32::MAX as usize || selected_name_len > u32::MAX as usize {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    }
+
+    unsafe {
+        (*result_out).name_offset = name_offset as u32;
+        (*result_out).name_len = selected_name_len as u32;
+        (*result_out).selected_precedence = selected_precedence;
+        (*result_out).selected_sequence = selected_sequence;
+        (*result_out).found = 1;
+        (*result_out).child_guid = selected_guid;
     }
     0
 }

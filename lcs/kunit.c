@@ -240,6 +240,7 @@ struct pkm_lcs_kunit_symlink_sequence_op {
 	const u8 *query_data;
 	size_t query_data_len;
 	u32 query_value_type;
+	u64 expected_txn_id;
 	bool query_all;
 };
 
@@ -6765,6 +6766,623 @@ static void pkm_lcs_kunit_key_fd_enum_value_malformed_source(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_key_fd_enum_subkey_success(struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x70 },
+	};
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x71 };
+	static const u8 grandchild_guid[PKM_LCS_GUID_BYTES] = { 0x72 };
+	static const u8 value_data[] = { 7 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_enum_subkey_args args = {
+		.index = 0,
+		.name_len = 16,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_enum_children_source_script parent_enum = {
+		.expected_parent_guid = ancestors[1],
+		.child_name = "Child",
+		.child_guid = child_guid,
+	};
+	struct pkm_lcs_kunit_read_key_source_script child_read = {
+		.expected_guid = child_guid,
+		.name = "Child",
+	};
+	struct pkm_lcs_kunit_enum_children_source_script child_enum = {
+		.expected_parent_guid = child_guid,
+		.child_name = "Grandchild",
+		.child_guid = grandchild_guid,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op ops_seq[] = {
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &parent_enum,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_READ_KEY,
+			.read_key = &child_read,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &child_enum,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_QUERY_DEFAULT,
+			.query_guid = child_guid,
+			.query_data = value_data,
+			.query_data_len = sizeof(value_data),
+			.query_value_type = REG_BINARY,
+			.query_all = true,
+		},
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = ops_seq,
+		.op_count = ARRAY_SIZE(ops_seq),
+	};
+	u8 name[16];
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	memset(name, 0xaa, sizeof(name));
+	args.name_ptr = (u64)(unsigned long)name;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+			   &script, "pkm-lcs-kunit-enum-subkey");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+	KUNIT_EXPECT_EQ(test, args.index, 0U);
+	KUNIT_EXPECT_EQ(test, args.name_len, 5U);
+	KUNIT_EXPECT_EQ(test, args.last_write_time, 2000ULL);
+	KUNIT_EXPECT_EQ(test, args.subkey_count, 1U);
+	KUNIT_EXPECT_EQ(test, args.value_count, 1U);
+	KUNIT_EXPECT_EQ(test, args._pad, 0U);
+	KUNIT_EXPECT_EQ(test, memcmp(name, "Child", 5), 0);
+	KUNIT_EXPECT_EQ(test, name[5], 0xaaU);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_enum_subkey_erange_all_or_none(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x73 },
+	};
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x74 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_enum_subkey_args args = {
+		.index = 0,
+		.name_len = 2,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_enum_children_source_script parent_enum = {
+		.expected_parent_guid = ancestors[1],
+		.child_name = "Child",
+		.child_guid = child_guid,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op ops_seq[] = {
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &parent_enum,
+		},
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = ops_seq,
+		.op_count = ARRAY_SIZE(ops_seq),
+	};
+	u8 name[2] = { 0xaa, 0xaa };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	args.name_ptr = (u64)(unsigned long)name;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+			   &script, "pkm-lcs-kunit-enum-subkey-erange");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	KUNIT_EXPECT_EQ(test, args.name_len, 5U);
+	KUNIT_EXPECT_EQ(test, args.last_write_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, args.subkey_count, 0U);
+	KUNIT_EXPECT_EQ(test, args.value_count, 0U);
+	KUNIT_EXPECT_EQ(test, name[0], 0xaaU);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_enum_subkey_index_past_end(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x75 },
+	};
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x76 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_enum_subkey_args args = {
+		.index = 1,
+		.name_len = 8,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_enum_children_source_script parent_enum = {
+		.expected_parent_guid = ancestors[1],
+		.child_name = "Child",
+		.child_guid = child_guid,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op ops_seq[] = {
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &parent_enum,
+		},
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = ops_seq,
+		.op_count = ARRAY_SIZE(ops_seq),
+	};
+	u8 name[8] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	args.name_ptr = (u64)(unsigned long)name;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+			   &script, "pkm-lcs-kunit-enum-subkey-missing");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-ENOENT);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_enum_subkey_transaction_context(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x77 },
+	};
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x78 };
+	static const u8 grandchild_guid[PKM_LCS_GUID_BYTES] = { 0x79 };
+	static const u8 value_data[] = { 8 };
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_enum_subkey_args args = {
+		.index = 0,
+		.name_len = 16,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_enum_children_source_script parent_enum = {
+		.expected_parent_guid = ancestors[1],
+		.child_name = "Child",
+		.child_guid = child_guid,
+	};
+	struct pkm_lcs_kunit_read_key_source_script child_read = {
+		.expected_guid = child_guid,
+		.name = "Child",
+	};
+	struct pkm_lcs_kunit_enum_children_source_script child_enum = {
+		.expected_parent_guid = child_guid,
+		.child_name = "Grandchild",
+		.child_guid = grandchild_guid,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op ops_seq[] = {
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &parent_enum,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_READ_KEY,
+			.read_key = &child_read,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &child_enum,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_QUERY_DEFAULT,
+			.query_guid = child_guid,
+			.query_data = value_data,
+			.query_data_len = sizeof(value_data),
+			.query_value_type = REG_BINARY,
+			.query_all = true,
+		},
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = ops_seq,
+		.op_count = ARRAY_SIZE(ops_seq),
+	};
+	u8 name[16] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long txn_fd;
+	long fd;
+	long ret;
+	int thread_ret;
+	u32 i;
+
+	args.name_ptr = (u64)(unsigned long)name;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)txn_fd, txn_snapshot.transaction_id, 1,
+				ancestors[0]),
+			0L);
+	args.txn_fd = (int)txn_fd;
+	for (i = 0; i < ARRAY_SIZE(ops_seq); i++)
+		ops_seq[i].expected_txn_id = txn_snapshot.transaction_id;
+	script.file = &file;
+
+	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+			   &script, "pkm-lcs-kunit-enum-subkey-txn");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+	KUNIT_EXPECT_EQ(test, memcmp(name, "Child", 5), 0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_enum_subkey_fails_before_source(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x7a },
+	};
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_enum_subkey_args args = {
+		.index = 0,
+		.name_len = 8,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	u8 name[8] = { };
+	struct file file = { };
+	const void *token;
+	long allowed_fd;
+	long denied_fd;
+	long txn_fd;
+
+	args.name_ptr = (u64)(unsigned long)name;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	allowed_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, allowed_fd >= 0);
+	denied_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, READ_CONTROL, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, denied_fd >= 0);
+
+	args._pad = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_enum_subkey((int)allowed_fd,
+							 &ops, &args),
+			(long)-EINVAL);
+	args._pad = 0;
+
+	args.name_ptr = 0;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_enum_subkey((int)allowed_fd,
+							 &ops, &args),
+			(long)-EFAULT);
+	args.name_ptr = (u64)(unsigned long)name;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_enum_subkey((int)denied_fd,
+							 &ops, &args),
+			(long)-EACCES);
+
+	args.txn_fd = -2;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_enum_subkey((int)allowed_fd,
+							 &ops, &args),
+			(long)-EINVAL);
+	args.txn_fd = -1;
+
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)txn_fd, txn_snapshot.transaction_id, 1,
+				(u8[RSI_GUID_SIZE]){ 2 }),
+			0L);
+	args.txn_fd = (int)txn_fd;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_enum_subkey((int)allowed_fd,
+							 &ops, &args),
+			(long)-EXDEV);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+	args.txn_fd = -1;
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.next_request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)allowed_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)denied_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_enum_subkey_copyout_fault(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x7b },
+	};
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x7c };
+	static const u8 grandchild_guid[PKM_LCS_GUID_BYTES] = { 0x7d };
+	static const u8 value_data[] = { 9 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_enum_subkey_args args = {
+		.index = 0,
+		.name_len = 16,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_enum_children_source_script parent_enum = {
+		.expected_parent_guid = ancestors[1],
+		.child_name = "Child",
+		.child_guid = child_guid,
+	};
+	struct pkm_lcs_kunit_read_key_source_script child_read = {
+		.expected_guid = child_guid,
+		.name = "Child",
+	};
+	struct pkm_lcs_kunit_enum_children_source_script child_enum = {
+		.expected_parent_guid = child_guid,
+		.child_name = "Grandchild",
+		.child_guid = grandchild_guid,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op ops_seq[] = {
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &parent_enum,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_READ_KEY,
+			.read_key = &child_read,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &child_enum,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_QUERY_DEFAULT,
+			.query_guid = child_guid,
+			.query_data = value_data,
+			.query_data_len = sizeof(value_data),
+			.query_value_type = REG_BINARY,
+			.query_all = true,
+		},
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = ops_seq,
+		.op_count = ARRAY_SIZE(ops_seq),
+	};
+	u8 name[16] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	args.name_ptr = (u64)(unsigned long)name;
+	ctx.fault_dst = name;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+			   &script, "pkm-lcs-kunit-enum-subkey-fault");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_enum_subkey_malformed_source(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x7e },
+	};
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x7f };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_enum_subkey_args args = {
+		.index = 0,
+		.name_len = 16,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_enum_children_source_script parent_enum = {
+		.expected_parent_guid = ancestors[1],
+		.child_name = "Future",
+		.child_guid = child_guid,
+		.sequence = U64_MAX,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op ops_seq[] = {
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &parent_enum,
+		},
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = ops_seq,
+		.op_count = ARRAY_SIZE(ops_seq),
+	};
+	u8 name[16] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	args.name_ptr = (u64)(unsigned long)name;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+			   &script, "pkm-lcs-kunit-enum-subkey-bad");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_key_fd_query_key_info_success(struct kunit *test)
 {
 	static const char * const path[] = { "Machine", "Software" };
@@ -13281,7 +13899,9 @@ static int pkm_lcs_kunit_symlink_sequence_handle_lookup(
 
 	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
 	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
-	if (request_op != RSI_LOOKUP)
+	if (request_op != RSI_LOOKUP ||
+	    get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+		    op->expected_txn_id)
 		return -EINVAL;
 	child_len = get_unaligned_le32(request + child_offset);
 	child_offset += sizeof(u32);
@@ -13334,6 +13954,8 @@ static int pkm_lcs_kunit_symlink_sequence_handle_query(
 	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
 	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
 	if (request_op != RSI_QUERY_VALUES ||
+	    get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+		    op->expected_txn_id ||
 	    memcmp(request + RSI_REQUEST_HEADER_SIZE, op->query_guid,
 		   RSI_GUID_SIZE))
 		return -EINVAL;
@@ -13383,6 +14005,8 @@ static int pkm_lcs_kunit_symlink_sequence_handle_read_key(
 	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
 	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
 	if (request_op != RSI_READ_KEY ||
+	    get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+		    op->expected_txn_id ||
 	    memcmp(request + RSI_REQUEST_HEADER_SIZE, read_key->expected_guid,
 		   RSI_GUID_SIZE))
 		return -EINVAL;
@@ -13422,6 +14046,8 @@ static int pkm_lcs_kunit_symlink_sequence_handle_enum_children(
 	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
 	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
 	if (request_op != RSI_ENUM_CHILDREN ||
+	    get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+		    op->expected_txn_id ||
 	    memcmp(request + RSI_REQUEST_HEADER_SIZE,
 		   enum_children->expected_parent_guid, RSI_GUID_SIZE))
 		return -EINVAL;
@@ -21084,6 +21710,13 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_value_fails_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_value_copyout_fault),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_value_malformed_source),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_success),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_erange_all_or_none),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_index_past_end),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_transaction_context),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_fails_before_source),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_copyout_fault),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_malformed_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_erange_probe),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_fails_before_source),
