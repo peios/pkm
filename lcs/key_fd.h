@@ -11,6 +11,8 @@
 #define PKM_LCS_KUNIT_SNAPSHOT_COMPONENT_BYTES 32U
 #define PKM_LCS_KEY_FD_WATCH_QUEUE_LIMIT 256U
 
+struct pkm_lcs_usercopy_ops;
+
 struct pkm_lcs_key_fd_publish_input {
 	u32 source_id;
 	u8 key_guid[PKM_LCS_GUID_BYTES];
@@ -112,6 +114,9 @@ long pkm_lcs_key_fd_dispatch_watch_event(
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned);
+long pkm_lcs_kunit_key_fd_set_security(
+	int fd, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_set_security_args *args);
 long pkm_lcs_kunit_key_fd_notify(int fd, const struct reg_notify_args *args);
 long pkm_lcs_kunit_key_fd_queue_watch_event(int fd, u32 event_type,
 					    const u8 *record, u32 record_len);

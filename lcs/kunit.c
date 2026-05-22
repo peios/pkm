@@ -150,6 +150,20 @@ struct pkm_lcs_kunit_read_key_source_script {
 	int result;
 };
 
+struct pkm_lcs_kunit_set_security_source_script {
+	struct file *file;
+	const u8 *expected_guid;
+	const u8 *existing_sd;
+	size_t existing_sd_len;
+	const u8 *expected_merged_sd;
+	size_t expected_merged_sd_len;
+	u64 expected_txn_id;
+	u64 observed_last_write_time;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
 struct pkm_lcs_kunit_query_values_source_script {
 	struct file *file;
 	const u8 *expected_guid;
@@ -255,6 +269,7 @@ static void pkm_lcs_kunit_setup_registered_source(struct kunit *test,
 						  const void **token_out);
 static int pkm_lcs_kunit_walk_source_thread(void *raw_script);
 static int pkm_lcs_kunit_read_key_source_thread(void *raw_script);
+static int pkm_lcs_kunit_set_security_source_thread(void *raw_script);
 static int pkm_lcs_kunit_query_values_source_thread(void *raw_script);
 static int pkm_lcs_kunit_symlink_follow_source_thread(void *raw_script);
 static int pkm_lcs_kunit_symlink_sequence_source_thread(void *raw_script);
@@ -5447,6 +5462,203 @@ static void pkm_lcs_kunit_set_security_merge_bridge_fails_closed(
 	KUNIT_EXPECT_EQ(test, result.merged_sd_len, (size_t)0);
 }
 
+static void pkm_lcs_kunit_key_fd_set_security_nontransactional_success(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x52 },
+	};
+	static const u8 input_owner_everyone_sd[] = {
+		0x01, 0x00, 0x00, 0x80, 0x14, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00,
+	};
+	static const u8 existing_owner_system_sd[] = {
+		0x01, 0x00, 0x00, 0x80, 0x14, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+		0x12, 0x00, 0x00, 0x00,
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_set_security_args args = {
+		.security_info = OWNER_SECURITY_INFORMATION,
+		.sd_len = sizeof(input_owner_everyone_sd),
+		.sd_ptr = (u64)(unsigned long)input_owner_everyone_sd,
+		.txn_fd = -1,
+	};
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_SD,
+	};
+	struct pkm_lcs_kunit_set_security_source_script script = {
+		.expected_guid = ancestors[1],
+		.existing_sd = existing_owner_system_sd,
+		.existing_sd_len = sizeof(existing_owner_system_sd),
+		.expected_merged_sd = input_owner_everyone_sd,
+		.expected_merged_sd_len = sizeof(input_owner_everyone_sd),
+	};
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct file file = { };
+	const void *token;
+	struct task_struct *task;
+	u8 event[16] = { };
+	u64 generation_before = 0;
+	u64 generation_after = 0;
+	long mutation_fd;
+	long watch_fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+
+	mutation_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, WRITE_OWNER, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, mutation_fd >= 0);
+	watch_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, watch_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)watch_fd, &notify),
+			0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_before),
+			0L);
+
+	task = kthread_run(pkm_lcs_kunit_set_security_source_thread, &script,
+			   "pkm-lcs-kunit-set-sd");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_set_security((int)mutation_fd, &ops,
+						&args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 2U);
+	KUNIT_EXPECT_EQ(test, script.writes, 2U);
+	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)mutation_fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, (u32)WRITE_OWNER);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_SD_CHANGED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_set_security_fails_before_source(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x53 },
+	};
+	static const u8 input_owner_everyone_sd[] = {
+		0x01, 0x00, 0x00, 0x80, 0x14, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00,
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_set_security_args args = {
+		.security_info = OWNER_SECURITY_INFORMATION,
+		.sd_len = sizeof(input_owner_everyone_sd),
+		.sd_ptr = (u64)(unsigned long)input_owner_everyone_sd,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct file file = { };
+	const void *token;
+	long allowed_fd;
+	long denied_fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	allowed_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, WRITE_OWNER, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, allowed_fd >= 0);
+	denied_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, READ_CONTROL, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, denied_fd >= 0);
+
+	args._pad = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_security((int)allowed_fd,
+							  &ops, &args),
+			(long)-EINVAL);
+	args._pad = 0;
+
+	args.security_info = 0;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_security((int)allowed_fd,
+							  &ops, &args),
+			(long)-EINVAL);
+	args.security_info = OWNER_SECURITY_INFORMATION;
+
+	args.txn_fd = 42;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_security((int)allowed_fd,
+							  &ops, &args),
+			(long)-EOPNOTSUPP);
+	args.txn_fd = -1;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_security((int)denied_fd,
+							  &ops, &args),
+			(long)-EACCES);
+
+	ctx.fault_src = input_owner_everyone_sd;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_security((int)allowed_fd,
+							  &ops, &args),
+			(long)-EFAULT);
+	ctx.fault_src = NULL;
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.next_request_id, 0ULL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)allowed_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)denied_fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds(
 	struct kunit *test)
 {
@@ -10244,6 +10456,167 @@ static int pkm_lcs_kunit_read_key_source_thread(void *raw_script)
 		script->result = ret;
 		return script->result;
 	}
+	count = pkm_lcs_kunit_source_device_write_file(
+		script->file, response, response_len, false, NULL);
+	if (count != (ssize_t)response_len) {
+		script->result = count < 0 ? (int)count : -EIO;
+		return script->result;
+	}
+	script->writes++;
+	script->result = 0;
+	return 0;
+}
+
+static int pkm_lcs_kunit_set_security_source_thread(void *raw_script)
+{
+	struct pkm_lcs_kunit_set_security_source_script *script = raw_script;
+	struct pkm_lcs_kunit_read_key_source_script read_script = { };
+	size_t read_expected_len = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
+	size_t write_expected_len;
+	size_t response_len = 0;
+	size_t payload_offset;
+	size_t field_mask_offset;
+	size_t sd_offset;
+	size_t last_write_offset;
+	u8 request[512];
+	u8 response[512];
+	ssize_t count;
+	u64 request_id;
+	u16 request_op;
+	int ret;
+
+	if (!script || !script->file || !script->expected_guid ||
+	    !script->existing_sd || !script->existing_sd_len ||
+	    !script->expected_merged_sd || !script->expected_merged_sd_len) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	for (;;) {
+		count = pkm_lcs_kunit_source_device_read_file(
+			script->file, request, sizeof(request), true);
+		if (count != -EAGAIN)
+			break;
+		if (kthread_should_stop()) {
+			script->result = -EINTR;
+			return script->result;
+		}
+		msleep(1);
+	}
+	if (count < 0) {
+		script->result = (int)count;
+		return script->result;
+	}
+	script->reads++;
+	if ((size_t)count != read_expected_len) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+
+	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
+	if (request_op != RSI_READ_KEY ||
+	    get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+		    script->expected_txn_id ||
+	    memcmp(request + RSI_REQUEST_HEADER_SIZE, script->expected_guid,
+		   RSI_GUID_SIZE)) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+
+	read_script.expected_guid = script->expected_guid;
+	read_script.name = "Software";
+	read_script.sd = script->existing_sd;
+	read_script.sd_len = script->existing_sd_len;
+	ret = pkm_lcs_kunit_read_key_source_build_response(
+		&read_script, request_id, response, sizeof(response),
+		&response_len);
+	if (ret) {
+		script->result = ret;
+		return script->result;
+	}
+	count = pkm_lcs_kunit_source_device_write_file(
+		script->file, response, response_len, false, NULL);
+	if (count != (ssize_t)response_len) {
+		script->result = count < 0 ? (int)count : -EIO;
+		return script->result;
+	}
+	script->writes++;
+
+	for (;;) {
+		count = pkm_lcs_kunit_source_device_read_file(
+			script->file, request, sizeof(request), true);
+		if (count != -EAGAIN)
+			break;
+		if (kthread_should_stop()) {
+			script->result = -EINTR;
+			return script->result;
+		}
+		msleep(1);
+	}
+	if (count < 0) {
+		script->result = (int)count;
+		return script->result;
+	}
+	script->reads++;
+
+	write_expected_len = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE +
+			     sizeof(u32) + RSI_LENGTH_PREFIX_SIZE +
+			     script->expected_merged_sd_len + sizeof(u64);
+	if ((size_t)count != write_expected_len) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+
+	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
+	if (request_op != RSI_WRITE_KEY ||
+	    get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+		    script->expected_txn_id) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+
+	payload_offset = RSI_REQUEST_HEADER_SIZE;
+	if (memcmp(request + payload_offset, script->expected_guid,
+		   RSI_GUID_SIZE)) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	field_mask_offset = payload_offset + RSI_GUID_SIZE;
+	if (get_unaligned_le32(request + field_mask_offset) !=
+	    (u32)(RSI_WRITE_KEY_FIELD_SD |
+		  RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME)) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	sd_offset = field_mask_offset + sizeof(u32);
+	if (get_unaligned_le32(request + sd_offset) !=
+	    script->expected_merged_sd_len ||
+	    memcmp(request + sd_offset + RSI_LENGTH_PREFIX_SIZE,
+		   script->expected_merged_sd,
+		   script->expected_merged_sd_len)) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	last_write_offset = sd_offset + RSI_LENGTH_PREFIX_SIZE +
+			    script->expected_merged_sd_len;
+	script->observed_last_write_time =
+		get_unaligned_le64(request + last_write_offset);
+	if (!script->observed_last_write_time) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+
+	memset(response, 0, sizeof(response));
+	put_unaligned_le32(RSI_MIN_RESPONSE_SIZE,
+			   response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
+	put_unaligned_le16(request_op | RSI_RESPONSE_BIT,
+			   response + RSI_RESPONSE_OP_CODE_OFFSET);
+	put_unaligned_le32(RSI_OK, response + RSI_RESPONSE_STATUS_OFFSET);
+	response_len = RSI_MIN_RESPONSE_SIZE;
 	count = pkm_lcs_kunit_source_device_write_file(
 		script->file, response, response_len, false, NULL);
 	if (count != (ssize_t)response_len) {
@@ -18243,6 +18616,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_set_security_merge_bridge_preserves_components),
 	KUNIT_CASE(pkm_lcs_kunit_set_security_merge_bridge_fails_closed),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_set_security_nontransactional_success),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_security_fails_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_arm_replace_disarm),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_fails_closed),
