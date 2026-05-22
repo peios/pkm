@@ -315,6 +315,8 @@ pub struct PkmLcsRsiQueryValueResultCopy {
     pub source_blanket_count: u32,
     pub data_offset: u32,
     pub data_len: u32,
+    pub layer: *const u8,
+    pub layer_len: u32,
     pub value_type: u32,
     pub selected_precedence: u32,
     pub _pad0: u32,
@@ -2446,6 +2448,8 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
             source_blanket_count: 0,
             data_offset: 0,
             data_len: 0,
+            layer: core::ptr::null(),
+            layer_len: 0,
             value_type: 0,
             selected_precedence: 0,
             _pad0: 0,
@@ -2613,13 +2617,20 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
         return LinuxErrno::Eio.negated_return() as c_int;
     }
     let data_offset = data_ptr - base;
-    if data_offset > u32::MAX as usize || data_len > u32::MAX as usize {
+    let layer_bytes = value.layer.as_bytes();
+    let layer_len = layer_bytes.len();
+    if data_offset > u32::MAX as usize
+        || data_len > u32::MAX as usize
+        || layer_len > u32::MAX as usize
+    {
         return LinuxErrno::Eoverflow.negated_return() as c_int;
     }
 
     unsafe {
         (*result_out).data_offset = data_offset as u32;
         (*result_out).data_len = data_len as u32;
+        (*result_out).layer = layer_bytes.as_ptr();
+        (*result_out).layer_len = layer_len as u32;
         (*result_out).value_type = value.value_type.code();
         (*result_out).selected_precedence = value.precedence;
         (*result_out).selected_sequence = value.sequence;

@@ -86,6 +86,8 @@ struct pkm_lcs_rsi_query_value_result {
 	u32 source_blanket_count;
 	u32 data_offset;
 	u32 data_len;
+	const u8 *layer;
+	u32 layer_len;
 	u32 value_type;
 	u32 selected_precedence;
 	u32 _pad0;

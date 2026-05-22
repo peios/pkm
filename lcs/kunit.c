@@ -188,6 +188,7 @@ struct pkm_lcs_kunit_query_values_source_script {
 	size_t data_len;
 	u32 value_type;
 	u64 sequence;
+	u64 expected_txn_id;
 	bool query_all;
 	bool include_blanket;
 	const char *blanket_layer_name;
@@ -5680,6 +5681,544 @@ static void pkm_lcs_kunit_key_fd_get_security_malformed_source_sd(
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_get_security((int)fd, &ops, &args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_query_value_success(struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x62 },
+	};
+	static const char value_name[] = "Answer";
+	static const u8 value_data[] = { 4, 3, 2, 1 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_query_value_args args = {
+		.name_len = sizeof(value_name) - 1,
+		.name_ptr = (u64)(unsigned long)value_name,
+		.data_len = 16,
+		.layer_buf_len = 16,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_query_values_source_script script = {
+		.expected_guid = ancestors[1],
+		.expected_value_name = value_name,
+		.layer_name = "base",
+		.data = value_data,
+		.data_len = sizeof(value_data),
+		.value_type = REG_BINARY,
+	};
+	u8 data[16];
+	u8 layer[16];
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	memset(data, 0xaa, sizeof(data));
+	memset(layer, 0xaa, sizeof(layer));
+	args.data_ptr = (u64)(unsigned long)data;
+	args.layer_ptr = (u64)(unsigned long)layer;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+			   "pkm-lcs-kunit-query-value");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 2U);
+	KUNIT_EXPECT_EQ(test, args.type, (u32)REG_BINARY);
+	KUNIT_EXPECT_EQ(test, args.data_len, (u32)sizeof(value_data));
+	KUNIT_EXPECT_EQ(test, args.sequence, 0ULL);
+	KUNIT_EXPECT_EQ(test, args.layer_len, 4U);
+	KUNIT_EXPECT_EQ(test, args._pad1, 0U);
+	KUNIT_EXPECT_EQ(test, memcmp(data, value_data, sizeof(value_data)), 0);
+	KUNIT_EXPECT_EQ(test, data[sizeof(value_data)], 0xaaU);
+	KUNIT_EXPECT_EQ(test, memcmp(layer, "base", 4), 0);
+	KUNIT_EXPECT_EQ(test, layer[4], 0xaaU);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_query_value_erange_all_or_none(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x63 },
+	};
+	static const char value_name[] = "Answer";
+	static const u8 value_data[] = { 1, 2, 3, 4 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_query_value_args args = {
+		.name_len = sizeof(value_name) - 1,
+		.name_ptr = (u64)(unsigned long)value_name,
+		.data_len = 2,
+		.layer_buf_len = 2,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_query_values_source_script script = {
+		.expected_guid = ancestors[1],
+		.expected_value_name = value_name,
+		.layer_name = "base",
+		.data = value_data,
+		.data_len = sizeof(value_data),
+		.value_type = REG_BINARY,
+	};
+	u8 data[2] = { 0xaa, 0xaa };
+	u8 layer[2] = { 0xaa, 0xaa };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	args.data_ptr = (u64)(unsigned long)data;
+	args.layer_ptr = (u64)(unsigned long)layer;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+			   "pkm-lcs-kunit-query-value-erange");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	KUNIT_EXPECT_EQ(test, args.data_len, (u32)sizeof(value_data));
+	KUNIT_EXPECT_EQ(test, args.layer_len, 4U);
+	KUNIT_EXPECT_EQ(test, args.type, 0U);
+	KUNIT_EXPECT_EQ(test, data[0], 0xaaU);
+	KUNIT_EXPECT_EQ(test, layer[0], 0xaaU);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_query_value_blanket_enoent(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x64 },
+	};
+	static const char value_name[] = "Answer";
+	static const u8 value_data[] = { 1 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_query_value_args args = {
+		.name_len = sizeof(value_name) - 1,
+		.name_ptr = (u64)(unsigned long)value_name,
+		.data_len = 8,
+		.layer_buf_len = 8,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_query_values_source_script script = {
+		.expected_guid = ancestors[1],
+		.expected_value_name = value_name,
+		.layer_name = "base",
+		.data = value_data,
+		.data_len = sizeof(value_data),
+		.value_type = REG_BINARY,
+		.include_blanket = true,
+		.blanket_layer_name = "base",
+	};
+	u8 data[8] = { };
+	u8 layer[8] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u64 value_sequence;
+	u64 blanket_sequence;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	args.data_ptr = (u64)(unsigned long)data;
+	args.layer_ptr = (u64)(unsigned long)layer;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&value_sequence), 0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&blanket_sequence), 0L);
+	script.sequence = value_sequence;
+	script.blanket_sequence = blanket_sequence;
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+			   "pkm-lcs-kunit-query-value-missing");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-ENOENT);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_query_value_transaction_context(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x65 },
+	};
+	static const char value_name[] = "Answer";
+	static const u8 value_data[] = { 9 };
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_query_value_args args = {
+		.name_len = sizeof(value_name) - 1,
+		.name_ptr = (u64)(unsigned long)value_name,
+		.data_len = 8,
+		.layer_buf_len = 8,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_query_values_source_script script = {
+		.expected_guid = ancestors[1],
+		.expected_value_name = value_name,
+		.layer_name = "base",
+		.data = value_data,
+		.data_len = sizeof(value_data),
+		.value_type = REG_BINARY,
+	};
+	u8 data[8] = { };
+	u8 layer[8] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long txn_fd;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	args.data_ptr = (u64)(unsigned long)data;
+	args.layer_ptr = (u64)(unsigned long)layer;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)txn_fd, txn_snapshot.transaction_id, 1,
+				ancestors[0]),
+			0L);
+	args.txn_fd = (int)txn_fd;
+	script.expected_txn_id = txn_snapshot.transaction_id;
+	script.file = &file;
+
+	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+			   "pkm-lcs-kunit-query-value-txn");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 2U);
+	KUNIT_EXPECT_EQ(test, args.sequence, 0ULL);
+	KUNIT_EXPECT_EQ(test, memcmp(data, value_data, sizeof(value_data)), 0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_query_value_fails_before_source(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x66 },
+	};
+	static const char value_name[] = "Answer";
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_query_value_args args = {
+		.name_len = sizeof(value_name) - 1,
+		.name_ptr = (u64)(unsigned long)value_name,
+		.data_len = 8,
+		.layer_buf_len = 8,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	u8 data[8] = { };
+	u8 layer[8] = { };
+	struct file file = { };
+	const void *token;
+	long allowed_fd;
+	long denied_fd;
+	long txn_fd;
+
+	args.data_ptr = (u64)(unsigned long)data;
+	args.layer_ptr = (u64)(unsigned long)layer;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	allowed_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, allowed_fd >= 0);
+	denied_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, READ_CONTROL, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, denied_fd >= 0);
+
+	args._pad0 = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_query_value((int)allowed_fd,
+							 &ops, &args),
+			(long)-EINVAL);
+	args._pad0 = 0;
+
+	args.data_ptr = 0;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_query_value((int)allowed_fd,
+							 &ops, &args),
+			(long)-EFAULT);
+	args.data_ptr = (u64)(unsigned long)data;
+
+	args.layer_ptr = 0;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_query_value((int)allowed_fd,
+							 &ops, &args),
+			(long)-EFAULT);
+	args.layer_ptr = (u64)(unsigned long)layer;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_query_value((int)denied_fd,
+							 &ops, &args),
+			(long)-EACCES);
+
+	args.name_ptr = 0;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_query_value((int)allowed_fd,
+							 &ops, &args),
+			(long)-EFAULT);
+	args.name_ptr = (u64)(unsigned long)value_name;
+
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)txn_fd, txn_snapshot.transaction_id, 1,
+				(u8[RSI_GUID_SIZE]){ 2 }),
+			0L);
+	args.txn_fd = (int)txn_fd;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_query_value((int)allowed_fd,
+							 &ops, &args),
+			(long)-EXDEV);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+	args.txn_fd = -1;
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.next_request_id, 0ULL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)allowed_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)denied_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_query_value_copyout_fault(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x67 },
+	};
+	static const char value_name[] = "Answer";
+	static const u8 value_data[] = { 1, 2 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_query_value_args args = {
+		.name_len = sizeof(value_name) - 1,
+		.name_ptr = (u64)(unsigned long)value_name,
+		.data_len = 8,
+		.layer_buf_len = 8,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_query_values_source_script script = {
+		.expected_guid = ancestors[1],
+		.expected_value_name = value_name,
+		.layer_name = "base",
+		.data = value_data,
+		.data_len = sizeof(value_data),
+		.value_type = REG_BINARY,
+	};
+	u8 data[8] = { };
+	u8 layer[8] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	args.data_ptr = (u64)(unsigned long)data;
+	args.layer_ptr = (u64)(unsigned long)layer;
+	ctx.fault_dst = data;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+			   "pkm-lcs-kunit-query-value-fault");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_query_value_malformed_source(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x68 },
+	};
+	static const char value_name[] = "Answer";
+	static const u8 value_data[] = { 1 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_query_value_args args = {
+		.name_len = sizeof(value_name) - 1,
+		.name_ptr = (u64)(unsigned long)value_name,
+		.data_len = 8,
+		.layer_buf_len = 8,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_query_values_source_script script = {
+		.expected_guid = ancestors[1],
+		.expected_value_name = value_name,
+		.response_value_name = "Other",
+		.layer_name = "base",
+		.data = value_data,
+		.data_len = sizeof(value_data),
+		.value_type = REG_BINARY,
+	};
+	u8 data[8] = { };
+	u8 layer[8] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	args.data_ptr = (u64)(unsigned long)data;
+	args.layer_ptr = (u64)(unsigned long)layer;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+			   "pkm-lcs-kunit-query-value-bad");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
 	thread_ret = kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
@@ -11801,6 +12340,8 @@ static int pkm_lcs_kunit_query_values_source_thread(void *raw_script)
 	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
 	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
 	if (request_op != RSI_QUERY_VALUES ||
+	    get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+		    script->expected_txn_id ||
 	    memcmp(request + RSI_REQUEST_HEADER_SIZE, script->expected_guid,
 		   RSI_GUID_SIZE)) {
 		script->result = -EINVAL;
@@ -12531,6 +13072,9 @@ static void pkm_lcs_kunit_rsi_query_values_bridge_materializes_default_reg_link(
 	KUNIT_EXPECT_EQ(test, result.value_type, (u32)REG_LINK);
 	KUNIT_EXPECT_EQ(test, result.selected_precedence, 0U);
 	KUNIT_EXPECT_EQ(test, result.selected_sequence, 0ULL);
+	KUNIT_EXPECT_EQ(test, result.layer_len, 4U);
+	KUNIT_ASSERT_NOT_NULL(test, result.layer);
+	KUNIT_EXPECT_EQ(test, memcmp(result.layer, "base", 4), 0);
 	KUNIT_EXPECT_EQ(test, result.data_len, (u32)(sizeof(target) - 1));
 	KUNIT_ASSERT_LE(test,
 			(size_t)result.data_offset +
@@ -12895,6 +13439,9 @@ static void pkm_lcs_kunit_source_query_values_round_trip_retains_frame(
 			0L);
 	KUNIT_EXPECT_TRUE(test, result.found);
 	KUNIT_EXPECT_EQ(test, result.value_type, (u32)REG_LINK);
+	KUNIT_EXPECT_EQ(test, result.layer_len, 4U);
+	KUNIT_ASSERT_NOT_NULL(test, result.layer);
+	KUNIT_EXPECT_EQ(test, memcmp(result.layer, "base", 4), 0);
 	KUNIT_EXPECT_EQ(test, result.data_len, (u32)(sizeof(target) - 1));
 	KUNIT_EXPECT_EQ(test,
 			memcmp(frame.data + result.data_offset, target,
@@ -19991,6 +20538,13 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_erange_probe),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_copyout_fault),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_malformed_source_sd),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_value_success),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_value_erange_all_or_none),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_value_blanket_enoent),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_value_transaction_context),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_value_fails_before_source),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_value_copyout_fault),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_value_malformed_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_erange_probe),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_fails_before_source),

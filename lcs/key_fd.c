@@ -1157,6 +1157,209 @@ out_frames:
 	return ret;
 }
 
+static long pkm_lcs_key_fd_copy_query_value_name(
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_query_value_args *args, char **name_out)
+{
+	char *name;
+	size_t alloc_len;
+
+	if (!name_out)
+		return -EINVAL;
+	*name_out = NULL;
+	if (!ops)
+		ops = &pkm_lcs_key_fd_default_usercopy_ops;
+	if (!ops->read || !args)
+		return -EINVAL;
+	if (args->name_len && !args->name_ptr)
+		return -EFAULT;
+	if (check_add_overflow((size_t)args->name_len, (size_t)1,
+			       &alloc_len))
+		return -EOVERFLOW;
+
+	name = kzalloc(alloc_len, GFP_KERNEL);
+	if (!name)
+		return -ENOMEM;
+	if (args->name_len &&
+	    !ops->read(ops->ctx, name,
+		       (const void __user *)(unsigned long)args->name_ptr,
+		       args->name_len)) {
+		kfree(name);
+		return -EFAULT;
+	}
+
+	*name_out = name;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_query_value_prepare_read_context(
+	const struct pkm_lcs_key_fd *key_fd, int txn_fd, u64 *txn_id_out)
+{
+	struct pkm_lcs_transaction_read_plan read = { };
+	long ret;
+
+	if (!key_fd || !txn_id_out)
+		return -EINVAL;
+	*txn_id_out = 0;
+
+	if (txn_fd == -1)
+		return 0;
+	if (txn_fd < -1)
+		return -EINVAL;
+
+	ret = pkm_lcs_transaction_fd_prepare_read_context(
+		txn_fd, key_fd->source_id, key_fd->ancestor_guids[0], &read);
+	if (ret)
+		return ret;
+	if (read.use_transaction)
+		*txn_id_out = read.txn_id;
+	return 0;
+}
+
+static void pkm_lcs_key_fd_query_value_reset_args(
+	struct reg_query_value_args *args, u32 name_len, u64 name_ptr,
+	u32 layer_buf_len, u64 data_ptr, u64 layer_ptr, s32 txn_fd)
+{
+	memset(args, 0, sizeof(*args));
+	args->name_len = name_len;
+	args->name_ptr = name_ptr;
+	args->layer_buf_len = layer_buf_len;
+	args->data_ptr = data_ptr;
+	args->layer_ptr = layer_ptr;
+	args->txn_fd = txn_fd;
+}
+
+static long pkm_lcs_key_fd_query_value_from_args(
+	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct reg_query_value_args *args)
+{
+	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_rsi_query_value_result result = { };
+	char *value_name = NULL;
+	const u8 *data;
+	const u8 *layer;
+	u64 next_sequence = 0;
+	u64 txn_id = 0;
+	u64 name_ptr;
+	u64 data_ptr;
+	u64 layer_ptr;
+	u32 name_len;
+	u32 data_buf_len;
+	u32 layer_buf_len;
+	u32 layer_count = 0;
+	s32 txn_fd;
+	long ret;
+
+	if (!key_fd || !args)
+		return -EINVAL;
+	if (!ops)
+		ops = &pkm_lcs_key_fd_default_usercopy_ops;
+	if (!ops->read || !ops->write)
+		return -EINVAL;
+
+	name_len = args->name_len;
+	name_ptr = args->name_ptr;
+	data_buf_len = args->data_len;
+	data_ptr = args->data_ptr;
+	layer_buf_len = args->layer_buf_len;
+	layer_ptr = args->layer_ptr;
+	txn_fd = args->txn_fd;
+
+	if (args->_pad0)
+		return -EINVAL;
+	if (data_buf_len && !data_ptr)
+		return -EFAULT;
+	if (layer_buf_len && !layer_ptr)
+		return -EFAULT;
+
+	ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
+		key_fd->granted_access, REG_IOC_QUERY_VALUE_NR);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_query_value_prepare_read_context(key_fd, txn_fd,
+							      &txn_id);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_copy_query_value_name(ops, args, &value_name);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		goto out_name;
+	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+		key_fd->source_id, txn_id, key_fd->key_guid, value_name,
+		name_len, false, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame,
+		&response, NULL);
+	if (ret)
+		goto out_frame;
+
+	ret = pkm_lcs_rsi_materialize_query_value_response(
+		frame.data, frame.len, response.request_id, next_sequence,
+		value_name, name_len, layers, layer_count, NULL, 0, &result);
+	if (ret)
+		goto out_frame;
+	if (!result.found) {
+		ret = -ENOENT;
+		goto out_frame;
+	}
+	if ((size_t)result.data_offset > frame.len ||
+	    (size_t)result.data_len >
+		    frame.len - (size_t)result.data_offset ||
+	    (result.layer_len && !result.layer)) {
+		ret = -EIO;
+		goto out_frame;
+	}
+
+	if (data_buf_len < result.data_len ||
+	    layer_buf_len < result.layer_len) {
+		pkm_lcs_key_fd_query_value_reset_args(args, name_len,
+						      name_ptr, layer_buf_len,
+						      data_ptr, layer_ptr,
+						      txn_fd);
+		args->data_len = result.data_len;
+		args->layer_len = result.layer_len;
+		ret = -ERANGE;
+		goto out_frame;
+	}
+
+	data = frame.data + result.data_offset;
+	layer = result.layer;
+	if (result.data_len &&
+	    !ops->write(ops->ctx, (void __user *)(unsigned long)data_ptr,
+			data, result.data_len)) {
+		ret = -EFAULT;
+		goto out_frame;
+	}
+	if (result.layer_len &&
+	    !ops->write(ops->ctx, (void __user *)(unsigned long)layer_ptr,
+			layer, result.layer_len)) {
+		ret = -EFAULT;
+		goto out_frame;
+	}
+
+	pkm_lcs_key_fd_query_value_reset_args(args, name_len, name_ptr,
+					      layer_buf_len, data_ptr,
+					      layer_ptr, txn_fd);
+	args->type = result.value_type;
+	args->data_len = result.data_len;
+	args->sequence = result.selected_sequence;
+	args->layer_len = result.layer_len;
+
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+out_name:
+	kfree(value_name);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_set_security_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_security_args *args)
@@ -1267,6 +1470,7 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	struct reg_notify_args notify_args;
 	struct reg_get_security_args get_security_args;
 	struct reg_query_key_info_args query_key_info_args;
+	struct reg_query_value_args query_value_args;
 	struct reg_set_security_args set_security_args;
 	long ret;
 
@@ -1277,6 +1481,20 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 		return -EINVAL;
 
 	switch (cmd) {
+	case REG_IOC_QUERY_VALUE:
+		if (!arg)
+			return -EFAULT;
+		if (copy_from_user(&query_value_args, (void __user *)arg,
+				   sizeof(query_value_args)))
+			return -EFAULT;
+		ret = pkm_lcs_key_fd_query_value_from_args(
+			key_fd, &pkm_lcs_key_fd_default_usercopy_ops,
+			&query_value_args);
+		if ((ret == 0 || ret == -ERANGE) &&
+		    copy_to_user((void __user *)arg, &query_value_args,
+				 sizeof(query_value_args)))
+			return -EFAULT;
+		return ret;
 	case REG_IOC_QUERY_KEY_INFO:
 		if (!arg)
 			return -EFAULT;
@@ -1969,6 +2187,22 @@ long pkm_lcs_kunit_key_fd_get_security(
 		return ret;
 
 	ret = pkm_lcs_key_fd_get_security_from_args(key_fd, ops, args);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_query_value(
+	int fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct reg_query_value_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_key_fd_query_value_from_args(key_fd, ops, args);
 	fdput(held);
 	return ret;
 }
