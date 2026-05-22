@@ -33,6 +33,7 @@
 #include "key_fd.h"
 #include "rsi.h"
 #include "source_device.h"
+#include "transaction_fd.h"
 
 #define PKM_LCS_MAX_SD_BYTES 65535U
 #define PKM_LCS_WATCH_NOTIFY_ACTION_ARM 1U
@@ -929,20 +930,22 @@ static long pkm_lcs_key_fd_set_security_from_args(
 {
 	struct pkm_lcs_set_security_merge_result merge = { };
 	struct pkm_lcs_source_response_frame existing_frame = { };
+	struct pkm_lcs_transaction_mutation_handle mutation = { };
+	struct pkm_lcs_transaction_binding_plan binding = { };
+	struct pkm_lcs_transaction_set_security_log_input log_input = { };
 	const u8 *existing_sd = NULL;
 	size_t existing_sd_len = 0;
 	u8 *input_sd = NULL;
 	size_t input_sd_len = 0;
 	u64 generation = 0;
 	u64 last_write_time;
+	u64 txn_id = 0;
 	long ret;
 
 	if (!key_fd || !args)
 		return -EINVAL;
 	if (args->_pad)
 		return -EINVAL;
-	if (args->txn_fd != -1)
-		return -EOPNOTSUPP;
 
 	ret = lcs_rust_key_fd_security_ioctl_access_gate(
 		key_fd->granted_access, REG_IOC_SET_SECURITY_NR,
@@ -955,24 +958,48 @@ static long pkm_lcs_key_fd_set_security_from_args(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, 0, &existing_frame,
+	if (args->txn_fd >= 0) {
+		log_input.key_guid = key_fd->key_guid;
+		log_input.path = (const char * const *)key_fd->resolved_path;
+		log_input.ancestor_guids =
+			(const u8 (*)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES])
+				key_fd->ancestor_guids;
+		log_input.depth = key_fd->path_component_count;
+
+		ret = pkm_lcs_transaction_fd_begin_set_security_mutation(
+			args->txn_fd, key_fd->source_id, key_fd->ancestor_guids[0],
+			&log_input, &mutation, &binding);
+		if (ret)
+			goto out_input;
+		txn_id = binding.transaction_id;
+	} else if (args->txn_fd != -1) {
+		ret = -EINVAL;
+		goto out_input;
+	}
+
+	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, txn_id, &existing_frame,
 					      &existing_sd, &existing_sd_len);
 	if (ret)
-		goto out_existing;
+		goto out_cancel_mutation;
 
 	ret = pkm_lcs_key_fd_plan_set_security_merge(
 		existing_sd, existing_sd_len, input_sd, input_sd_len,
 		args->security_info, &merge);
 	if (ret)
-		goto out_existing;
+		goto out_cancel_mutation;
 
 	last_write_time = (u64)ktime_get_real_ns();
 	ret = pkm_lcs_source_write_key_round_trip_timeout(
-		key_fd->source_id, 0, key_fd->key_guid, merge.merged_sd,
+		key_fd->source_id, txn_id, key_fd->key_guid, merge.merged_sd,
 		merge.merged_sd_len, last_write_time,
 		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, NULL, NULL);
 	if (ret)
+		goto out_cancel_merge;
+
+	if (args->txn_fd >= 0) {
+		ret = pkm_lcs_transaction_fd_commit_mutation(&mutation);
 		goto out_merge;
+	}
 
 	ret = pkm_lcs_source_record_transaction_generation(
 		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
@@ -984,8 +1011,15 @@ static long pkm_lcs_key_fd_set_security_from_args(
 
 	pkm_lcs_key_fd_publish_set_security_effects(key_fd);
 
+out_cancel_merge:
+	if (ret && mutation.active)
+		pkm_lcs_transaction_fd_cancel_mutation(&mutation);
 out_merge:
 	pkm_lcs_set_security_merge_result_destroy(&merge);
+	goto out_existing;
+out_cancel_mutation:
+	if (mutation.active)
+		pkm_lcs_transaction_fd_cancel_mutation(&mutation);
 out_existing:
 	pkm_lcs_source_response_frame_destroy(&existing_frame);
 out_input:
