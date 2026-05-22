@@ -18,8 +18,9 @@ use crate::lcs_core::{
     registry_open_pre_resolution_linux_errno, resolve_named_path_entry, resolve_value, route_hive,
     route_routable_path_hive, route_symlink_target_hive, rsi_queued_request_from_frame,
     rsi_status_code_errno, source_registration_error_linux_errno, source_registration_hive_scope,
-    source_slot_hive_status, plan_watch_notify, validate_key_component_bytes,
-    validate_key_create_flags, validate_key_fd_open_view, validate_layer_name_bytes,
+    source_slot_hive_status, plan_watch_event_record, plan_watch_notify,
+    validate_key_component_bytes, validate_key_create_flags, validate_key_fd_open_view,
+    validate_layer_name_bytes,
     validate_registry_open_flags, validate_resolved_relative_path_depth,
     validate_rsi_lookup_metadata_completeness, validate_rsi_lookup_metadata_security_descriptors,
     validate_rsi_lookup_path_response_names, validate_rsi_lookup_path_response_sequences,
@@ -41,8 +42,9 @@ use crate::lcs_core::{
     RegistryKeyOpenAccessInput, RegistryOpenAccessDecision, RegistryOpenPreResolutionAccessPlan,
     RsiReadPlan, RsiRetainedRequest, RsiTransactionMode, SourceRegistrationDecision,
     SourceRegistrationHive, SourceRegistrationRequest, SourceSlotStatus, SourceSlotView,
-    ValueEntry, ValueResolution, WatchNotifyArgs, WatchNotifyPlan, REG_TOMBSTONE, RSI_LOOKUP,
-    RSI_QUERY_VALUES, RSI_READ_KEY,
+    ValueEntry, ValueResolution, WatchEventRecordPlan, WatchEventRecordRequest,
+    WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_TOMBSTONE, RSI_LOOKUP,
+    RSI_QUERY_VALUES, RSI_READ_KEY, write_watch_event_record,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -323,6 +325,14 @@ fn watch_notify_error_return(err: LcsError) -> c_int {
         LcsError::UnknownNotifyFilterFlags { .. }
         | LcsError::InvalidBooleanFlag { .. }
         | LcsError::NonZeroReservedBytes { .. } => LinuxErrno::Einval,
+        _ => LinuxErrno::Einval,
+    }
+    .negated_return() as c_int
+}
+
+fn watch_event_record_error_return(err: LcsError) -> c_int {
+    match err {
+        LcsError::WatchEventOutputBufferTooSmall { .. } => LinuxErrno::Erange,
         _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
@@ -816,6 +826,118 @@ pub unsafe extern "C" fn lcs_rust_key_open_audit_payload(
             0
         }
         Err(err) => key_open_audit_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_watch_event_record(
+    event_type: u32,
+    name: *const u8,
+    name_len: usize,
+    subtree: u8,
+    path_components: *const PkmLcsKeyFdStringViewCopy,
+    path_component_count: usize,
+    output: *mut u8,
+    output_len: usize,
+    written_out: *mut u32,
+    overflow_out: *mut u8,
+) -> c_int {
+    if written_out.is_null() || overflow_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    unsafe {
+        *written_out = 0;
+        *overflow_out = 0;
+    }
+    if name_len != 0 && name.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if path_component_count != 0 && path_components.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if output.is_null() && output_len != 0 {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let subtree = match subtree {
+        0 => false,
+        1 => true,
+        _ => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+
+    let name_bytes = if name_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(name, name_len) }
+    };
+    let name = match str::from_utf8(name_bytes) {
+        Ok(name) => name,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+
+    let mut parsed_components = match PkmVec::with_capacity(path_component_count) {
+        Ok(parsed_components) => parsed_components,
+        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+    };
+    for index in 0..path_component_count {
+        let raw = unsafe { &*path_components.add(index) };
+        if raw.bytes.is_null() {
+            return LinuxErrno::Einval.negated_return() as c_int;
+        }
+        let bytes = unsafe { slice::from_raw_parts(raw.bytes, raw.len as usize) };
+        let component = match str::from_utf8(bytes) {
+            Ok(component) => component,
+            Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+        };
+        if parsed_components.push(component).is_err() {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+    }
+
+    let request = WatchEventRecordRequest {
+        event_type,
+        name,
+        subtree,
+        path_components: parsed_components.as_slice(),
+    };
+
+    let required_len = match plan_watch_event_record(&request) {
+        Ok(WatchEventRecordPlan::Record(shape)) => shape.total_len,
+        Ok(WatchEventRecordPlan::OverflowInstead) => {
+            unsafe {
+                *overflow_out = 1;
+            }
+            return 0;
+        }
+        Err(err) => return watch_event_record_error_return(err),
+    };
+    unsafe {
+        *written_out = required_len;
+    }
+
+    if output.is_null() {
+        return 0;
+    }
+
+    let output = unsafe { slice::from_raw_parts_mut(output, output_len) };
+    match write_watch_event_record(&request, output) {
+        Ok(WatchEventRecordWritePlan::Written { bytes }) => {
+            if bytes > u32::MAX as usize {
+                return LinuxErrno::Eoverflow.negated_return() as c_int;
+            }
+            unsafe {
+                *written_out = bytes as u32;
+            }
+            0
+        }
+        Ok(WatchEventRecordWritePlan::OverflowInstead) => {
+            unsafe {
+                *written_out = 0;
+                *overflow_out = 1;
+            }
+            0
+        }
+        Err(err) => watch_event_record_error_return(err),
     }
 }
 

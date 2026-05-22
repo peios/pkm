@@ -108,6 +108,11 @@ extern int lcs_rust_key_fd_security_ioctl_access_gate(u32 granted_access,
 extern int lcs_rust_plan_key_fd_watch_notify(
 	u8 armed, u8 orphaned, u32 filter, u8 subtree, const u8 *reserved,
 	struct pkm_lcs_watch_notify_plan_copy *plan_out);
+extern int lcs_rust_write_watch_event_record(
+	u32 event_type, const u8 *name, size_t name_len, u8 subtree,
+	const struct pkm_lcs_key_fd_string_view *path_components,
+	size_t path_component_count, u8 *output, size_t output_len,
+	u32 *written_out, u8 *overflow_out);
 
 static u32 pkm_lcs_guid_hash(const u8 guid[PKM_LCS_GUID_BYTES])
 {
@@ -344,6 +349,55 @@ pkm_lcs_key_fd_overflow_event_alloc(void)
 	put_unaligned_le16(0, record + 6);
 	return pkm_lcs_key_fd_watch_event_alloc(REG_WATCH_OVERFLOW, record,
 						sizeof(record));
+}
+
+static struct pkm_lcs_key_fd_watch_event *
+pkm_lcs_key_fd_build_watch_event(u32 event_type, const u8 *name, u32 name_len,
+				 bool subtree,
+				 const struct pkm_lcs_key_fd_string_view *path,
+				 u32 path_count)
+{
+	struct pkm_lcs_key_fd_watch_event *event;
+	u32 record_len = 0;
+	u32 written = 0;
+	u8 overflow = 0;
+	int ret;
+
+	if (name_len && !name)
+		return ERR_PTR(-EINVAL);
+	if (path_count && !path)
+		return ERR_PTR(-EINVAL);
+
+	ret = lcs_rust_write_watch_event_record(
+		event_type, name, name_len, subtree ? 1 : 0, path, path_count,
+		NULL, 0, &record_len, &overflow);
+	if (ret)
+		return ERR_PTR(ret);
+	if (overflow)
+		return pkm_lcs_key_fd_overflow_event_alloc();
+	if (record_len < PKM_LCS_WATCH_EVENT_HEADER_LEN)
+		return ERR_PTR(-EINVAL);
+
+	event = kzalloc(sizeof(*event) + record_len, GFP_KERNEL);
+	if (!event)
+		return ERR_PTR(-ENOMEM);
+	INIT_LIST_HEAD(&event->link);
+
+	ret = lcs_rust_write_watch_event_record(
+		event_type, name, name_len, subtree ? 1 : 0, path, path_count,
+		event->bytes, record_len, &written, &overflow);
+	if (ret) {
+		pkm_lcs_key_fd_watch_event_free(event);
+		return ERR_PTR(ret);
+	}
+	if (overflow || written != record_len) {
+		pkm_lcs_key_fd_watch_event_free(event);
+		return ERR_PTR(-EINVAL);
+	}
+
+	event->event_type = event_type;
+	event->total_len = record_len;
+	return event;
 }
 
 static long pkm_lcs_key_fd_queue_watch_event_locked(
@@ -817,6 +871,212 @@ static long pkm_lcs_key_fd_get(int fd, struct fd *held,
 	}
 
 	return 0;
+}
+
+static void pkm_lcs_key_fd_path_views_free(
+	struct pkm_lcs_key_fd_string_view *views)
+{
+	kfree(views);
+}
+
+static long pkm_lcs_key_fd_path_views_from_range(
+	const struct pkm_lcs_key_fd *key_fd, u32 start, u32 count,
+	struct pkm_lcs_key_fd_string_view **views_out)
+{
+	struct pkm_lcs_key_fd_string_view *views;
+	size_t len;
+	u32 i;
+
+	if (!key_fd || !views_out)
+		return -EINVAL;
+	*views_out = NULL;
+	if (!count)
+		return 0;
+	if (!key_fd->resolved_path || start > key_fd->path_component_count ||
+	    count > key_fd->path_component_count - start)
+		return -EINVAL;
+
+	views = kcalloc(count, sizeof(*views), GFP_KERNEL);
+	if (!views)
+		return -ENOMEM;
+
+	for (i = 0; i < count; i++) {
+		if (!key_fd->resolved_path[start + i]) {
+			pkm_lcs_key_fd_path_views_free(views);
+			return -EINVAL;
+		}
+		len = strlen(key_fd->resolved_path[start + i]);
+		if (len > U32_MAX) {
+			pkm_lcs_key_fd_path_views_free(views);
+			return -EINVAL;
+		}
+		views[i].bytes = key_fd->resolved_path[start + i];
+		views[i].len = (u32)len;
+	}
+
+	*views_out = views;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_queue_dispatch_event_locked(
+	struct pkm_lcs_key_fd *watcher, u32 event_type, const u8 *name,
+	u32 name_len, bool subtree_record,
+	const struct pkm_lcs_key_fd_string_view *path_components,
+	u32 path_component_count, bool *queued_out)
+{
+	struct pkm_lcs_key_fd_watch_event *event;
+	bool matches = false;
+	long ret;
+
+	if (!watcher || !queued_out)
+		return -EINVAL;
+	*queued_out = false;
+
+	mutex_lock(&watcher->watch_lock);
+	if (!watcher->watch_armed || !watcher->watch_registry_linked) {
+		mutex_unlock(&watcher->watch_lock);
+		return -EIO;
+	}
+	ret = pkm_lcs_key_fd_watch_event_matches_filter(
+		event_type, watcher->watch_filter, &matches);
+	if (ret || !matches) {
+		mutex_unlock(&watcher->watch_lock);
+		return ret;
+	}
+
+	event = pkm_lcs_key_fd_build_watch_event(
+		event_type, name, name_len, subtree_record, path_components,
+		path_component_count);
+	if (IS_ERR(event)) {
+		mutex_unlock(&watcher->watch_lock);
+		return PTR_ERR(event);
+	}
+
+	ret = pkm_lcs_key_fd_queue_watch_event_locked(watcher, event);
+	if (!ret)
+		*queued_out = true;
+	mutex_unlock(&watcher->watch_lock);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_dispatch_to_watcher_locked(
+	struct pkm_lcs_key_fd *watcher, u32 event_type, const u8 *name,
+	u32 name_len, bool subtree_record,
+	const struct pkm_lcs_key_fd_string_view *path_components,
+	u32 path_component_count)
+{
+	bool queued = false;
+	long ret;
+
+	ret = pkm_lcs_key_fd_queue_dispatch_event_locked(
+		watcher, event_type, name, name_len, subtree_record,
+		path_components, path_component_count, &queued);
+	if (queued)
+		wake_up_interruptible(&watcher->watch_wait);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_validate_dispatch_input(
+	const struct pkm_lcs_watch_dispatch_input *input)
+{
+	u32 written = 0;
+	u8 overflow = 0;
+	bool matches;
+	int ret;
+
+	if (!input)
+		return -EINVAL;
+	if (input->name_len && !input->name)
+		return -EINVAL;
+	ret = pkm_lcs_key_fd_watch_event_matches_filter(
+		input->event_type, REG_NOTIFY_ALL, &matches);
+	if (ret)
+		return ret;
+	return lcs_rust_write_watch_event_record(
+		input->event_type, input->name, input->name_len, 0, NULL, 0,
+		NULL, 0, &written, &overflow);
+}
+
+long pkm_lcs_key_fd_dispatch_watch_event(
+	const struct pkm_lcs_watch_dispatch_input *input)
+{
+	struct pkm_lcs_key_fd_string_view *path_views = NULL;
+	struct pkm_lcs_subtree_watch_entry *subtree;
+	struct pkm_lcs_key_fd *mutation_key;
+	struct pkm_lcs_key_fd *watcher;
+	struct fd held;
+	long ret;
+	u32 changed_index;
+	u32 hash;
+	u32 i;
+
+	ret = pkm_lcs_key_fd_validate_dispatch_input(input);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_get(input->mutation_fd, &held, &mutation_key);
+	if (ret)
+		return ret;
+	if (!mutation_key->path_component_count ||
+	    !mutation_key->ancestor_guids || !mutation_key->resolved_path) {
+		fdput(held);
+		return -EINVAL;
+	}
+
+	mutex_lock(&pkm_lcs_watch_registry_lock);
+	hash = pkm_lcs_guid_hash(mutation_key->key_guid);
+	hash_for_each_possible(pkm_lcs_watch_map, watcher,
+			       watch_registry_node, hash) {
+		if (!pkm_lcs_guid_equal(watcher->key_guid,
+					mutation_key->key_guid))
+			continue;
+		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
+			watcher, input->event_type, input->name, input->name_len,
+			watcher->watch_subtree, NULL, 0);
+		if (ret)
+			goto out_unlock;
+	}
+
+	changed_index = mutation_key->path_component_count - 1U;
+	for (i = changed_index; i > 0; i--) {
+		const u8 *ancestor_guid = mutation_key->ancestor_guids[i - 1U];
+		u32 path_count;
+
+		if (pkm_lcs_guid_equal(ancestor_guid, mutation_key->key_guid))
+			continue;
+		subtree = pkm_lcs_subtree_watch_find_locked(ancestor_guid);
+		if (!subtree)
+			continue;
+
+		path_count = changed_index - (i - 1U);
+		ret = pkm_lcs_key_fd_path_views_from_range(
+			mutation_key, i, path_count, &path_views);
+		if (ret)
+			goto out_unlock;
+
+		hash = pkm_lcs_guid_hash(ancestor_guid);
+		hash_for_each_possible(pkm_lcs_watch_map, watcher,
+				       watch_registry_node, hash) {
+			if (!pkm_lcs_guid_equal(watcher->key_guid,
+						ancestor_guid) ||
+			    !watcher->watch_subtree)
+				continue;
+			ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
+				watcher, input->event_type, input->name,
+				input->name_len, true, path_views, path_count);
+			if (ret)
+				goto out_unlock;
+		}
+
+		pkm_lcs_key_fd_path_views_free(path_views);
+		path_views = NULL;
+	}
+
+out_unlock:
+	pkm_lcs_key_fd_path_views_free(path_views);
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
+	fdput(held);
+	return ret;
 }
 
 static long pkm_lcs_key_fd_check_ioctl_common(

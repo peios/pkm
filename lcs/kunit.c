@@ -5193,6 +5193,24 @@ static long pkm_lcs_kunit_publish_key_fd_for_source(
 	return pkm_lcs_key_fd_publish(&input);
 }
 
+static long pkm_lcs_kunit_publish_key_fd_from_path(
+	u32 source_id, u32 granted_access, const char * const *path,
+	const u8 (*ancestors)[PKM_LCS_GUID_BYTES], u32 depth)
+{
+	struct pkm_lcs_key_fd_publish_input input = {
+		.source_id = source_id,
+		.granted_access = granted_access,
+		.resolved_path = path,
+		.ancestor_guids = ancestors,
+		.path_component_count = depth,
+	};
+
+	if (!depth)
+		return -EINVAL;
+	memcpy(input.key_guid, ancestors[depth - 1U], sizeof(input.key_guid));
+	return pkm_lcs_key_fd_publish(&input);
+}
+
 static long pkm_lcs_kunit_publish_key_fd_with_depth(u32 depth)
 {
 	const char **path;
@@ -5723,6 +5741,149 @@ static void pkm_lcs_kunit_key_fd_watch_registry_refcounts_close(
 	KUNIT_EXPECT_EQ(test, registry.subtree_watchers, 0U);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd1), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+}
+
+static void pkm_lcs_kunit_key_fd_live_dispatch_direct_and_subtree(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software", "App" };
+	static const u8 ancestors[3][PKM_LCS_GUID_BYTES] = {
+		{ 0x61 },
+		{ 0x62 },
+		{ 0x63 },
+	};
+	static const u8 setting[] = "Setting";
+	struct reg_notify_args direct_args = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct reg_notify_args subtree_args = {
+		.filter = REG_NOTIFY_VALUE,
+		.subtree = 1,
+	};
+	struct pkm_lcs_watch_dispatch_input dispatch = {
+		.event_type = REG_WATCH_VALUE_SET,
+		.name = setting,
+		.name_len = sizeof(setting) - 1U,
+	};
+	u8 direct[32] = { };
+	u8 subtree[64] = { };
+	long direct_fd;
+	long subtree_fd;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+
+	subtree_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		21, KEY_NOTIFY, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, subtree_fd >= 0);
+	direct_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		21, KEY_NOTIFY, path, ancestors, 3);
+	KUNIT_ASSERT_TRUE(test, direct_fd >= 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)direct_fd,
+						    &direct_args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)subtree_fd,
+						    &subtree_args),
+			0L);
+
+	dispatch.mutation_fd = (int)direct_fd;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_dispatch_watch_event(&dispatch),
+			0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)direct_fd, direct,
+						  sizeof(direct), true),
+			(ssize_t)15);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(direct), 15U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(direct + 4),
+			REG_WATCH_VALUE_SET);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(direct + 6), 7U);
+	KUNIT_EXPECT_EQ(test, memcmp(direct + 8, setting, sizeof(setting) - 1U),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)subtree_fd, subtree,
+						  sizeof(subtree), true),
+			(ssize_t)22);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(subtree), 22U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree + 4),
+			REG_WATCH_VALUE_SET);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree + 6), 7U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(subtree + 8, setting, sizeof(setting) - 1U),
+			0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree + 15), 1U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree + 17), 3U);
+	KUNIT_EXPECT_EQ(test, memcmp(subtree + 19, "App", 3), 0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)direct_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)subtree_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+}
+
+static void pkm_lcs_kunit_key_fd_live_dispatch_filter_bypass_and_zero_depth(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0x71 },
+		{ 0x72 },
+	};
+	static const u8 setting[] = "Setting";
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_SD,
+		.subtree = 1,
+	};
+	struct pkm_lcs_watch_dispatch_input dispatch = {
+		.name = setting,
+		.name_len = sizeof(setting) - 1U,
+	};
+	u8 record[32] = { };
+	long fd;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		22, KEY_NOTIFY, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+
+	dispatch.mutation_fd = (int)fd;
+	dispatch.event_type = REG_WATCH_VALUE_SET;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_dispatch_watch_event(&dispatch),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, record,
+							sizeof(record), true),
+			(ssize_t)-EAGAIN);
+
+	dispatch.event_type = REG_WATCH_SD_CHANGED;
+	dispatch.name = NULL;
+	dispatch.name_len = 0;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_dispatch_watch_event(&dispatch),
+			0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, record,
+							sizeof(record), true),
+			(ssize_t)10);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 4),
+			REG_WATCH_SD_CHANGED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 6), 0U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 8), 0U);
+
+	dispatch.event_type = REG_WATCH_KEY_DELETED;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_dispatch_watch_event(&dispatch),
+			0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, record,
+							sizeof(record), true),
+			(ssize_t)10);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 4),
+			REG_WATCH_KEY_DELETED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 8), 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 }
 
@@ -17163,6 +17324,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_filter_disarm_and_overflow),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_registry_arm_replace_disarm),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_registry_refcounts_close),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_live_dispatch_direct_and_subtree),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_live_dispatch_filter_bypass_and_zero_depth),
 	KUNIT_CASE(
 		pkm_lcs_kunit_begin_transaction_publishes_active_unbound),
 	KUNIT_CASE(pkm_lcs_kunit_begin_transaction_ids_are_monotonic),

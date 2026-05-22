@@ -63,6 +63,13 @@ struct pkm_lcs_key_fd_watch_registry_snapshot {
 	u32 subtree_watchers;
 };
 
+struct pkm_lcs_watch_dispatch_input {
+	int mutation_fd;
+	u32 event_type;
+	const u8 *name;
+	u32 name_len;
+};
+
 long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input);
 long pkm_lcs_key_fd_snapshot(int fd, struct pkm_lcs_key_fd_snapshot *out);
 long pkm_lcs_key_fd_check_fixed_ioctl_access(int fd, unsigned int cmd);
@@ -74,6 +81,8 @@ long pkm_lcs_key_fd_parent_snapshot(int fd,
 				    struct pkm_lcs_key_fd_parent_snapshot *out);
 void pkm_lcs_key_fd_parent_snapshot_destroy(
 	struct pkm_lcs_key_fd_parent_snapshot *snapshot);
+long pkm_lcs_key_fd_dispatch_watch_event(
+	const struct pkm_lcs_watch_dispatch_input *input);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned);
