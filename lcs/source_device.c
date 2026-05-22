@@ -2957,8 +2957,15 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 
 	if (!file || !result)
 		return -EINVAL;
-	if (result->caller_waiter_attached || result->malformed_source_data)
+	if (result->caller_waiter_attached)
 		return 0;
+	if (result->malformed_source_data) {
+		if (result->request_op_code == RSI_COMMIT_TRANSACTION) {
+			pkm_lcs_source_device_mark_down_file(file);
+			return -EIO;
+		}
+		return 0;
+	}
 
 	switch (result->request_op_code) {
 	case RSI_BEGIN_TRANSACTION:
