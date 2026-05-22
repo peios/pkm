@@ -11,6 +11,7 @@
 #define PKM_LCS_TRANSACTION_BIND_NEW 1U
 #define PKM_LCS_TRANSACTION_BIND_REUSE 2U
 #define PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY 1U
+#define PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY 2U
 #define PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT 4096U
 
 struct reg_txn_status_args;
@@ -56,6 +57,13 @@ struct pkm_lcs_transaction_key_create_log_input {
 	u64 sequence;
 };
 
+struct pkm_lcs_transaction_set_security_log_input {
+	const u8 *key_guid;
+	const char * const *path;
+	const u8 (*ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u32 depth;
+};
+
 struct pkm_lcs_transaction_mutation_handle {
 	struct fd held;
 	struct pkm_lcs_transaction_fd *txn;
@@ -83,6 +91,12 @@ long pkm_lcs_transaction_fd_begin_key_create_mutation(
 	int fd, u32 source_id,
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
 	const struct pkm_lcs_transaction_key_create_log_input *input,
+	struct pkm_lcs_transaction_mutation_handle *handle,
+	struct pkm_lcs_transaction_binding_plan *binding);
+long pkm_lcs_transaction_fd_begin_set_security_mutation(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const struct pkm_lcs_transaction_set_security_log_input *input,
 	struct pkm_lcs_transaction_mutation_handle *handle,
 	struct pkm_lcs_transaction_binding_plan *binding);
 long pkm_lcs_transaction_fd_commit_mutation(

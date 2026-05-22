@@ -69,12 +69,20 @@ struct pkm_lcs_transaction_key_create_log {
 	u32 parent_depth;
 };
 
+struct pkm_lcs_transaction_set_security_log {
+	u8 key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	char **path;
+	u8 (*ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u32 depth;
+};
+
 struct pkm_lcs_transaction_log_entry {
 	struct list_head link;
 	u64 operation_index;
 	u32 kind;
 	union {
 		struct pkm_lcs_transaction_key_create_log create_key;
+		struct pkm_lcs_transaction_set_security_log set_security;
 	};
 };
 
@@ -219,6 +227,23 @@ static void pkm_lcs_transaction_key_create_log_destroy(
 	memset(entry, 0, sizeof(*entry));
 }
 
+static void pkm_lcs_transaction_set_security_log_destroy(
+	struct pkm_lcs_transaction_set_security_log *entry)
+{
+	u32 i;
+
+	if (!entry)
+		return;
+
+	if (entry->path) {
+		for (i = 0; i < entry->depth; i++)
+			kfree(entry->path[i]);
+		kfree(entry->path);
+	}
+	kfree(entry->ancestor_guids);
+	memset(entry, 0, sizeof(*entry));
+}
+
 static void pkm_lcs_transaction_log_entry_destroy(
 	struct pkm_lcs_transaction_log_entry *entry)
 {
@@ -229,6 +254,10 @@ static void pkm_lcs_transaction_log_entry_destroy(
 	case PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY:
 		pkm_lcs_transaction_key_create_log_destroy(
 			&entry->create_key);
+		break;
+	case PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY:
+		pkm_lcs_transaction_set_security_log_destroy(
+			&entry->set_security);
 		break;
 	default:
 		break;
@@ -375,6 +404,65 @@ static long pkm_lcs_transaction_key_create_log_alloc(
 	if (memcmp(entry->create_key.parent_ancestor_guids[input->parent_depth - 1],
 		   entry->create_key.parent_guid,
 		   sizeof(entry->create_key.parent_guid))) {
+		ret = -EINVAL;
+		goto out_free;
+	}
+
+	*out = entry;
+	return 0;
+
+out_free:
+	pkm_lcs_transaction_log_entry_destroy(entry);
+	return ret;
+}
+
+static long pkm_lcs_transaction_set_security_log_alloc(
+	const struct pkm_lcs_transaction_set_security_log_input *input,
+	struct pkm_lcs_transaction_log_entry **out)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+	size_t guid_bytes;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+	*out = NULL;
+	if (!input || !input->key_guid || !input->path ||
+	    !input->ancestor_guids || !input->depth)
+		return -EINVAL;
+	if (input->depth > PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT)
+		return -EINVAL;
+
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&entry->link);
+	entry->kind = PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY;
+	memcpy(entry->set_security.key_guid, input->key_guid,
+	       sizeof(entry->set_security.key_guid));
+	entry->set_security.depth = input->depth;
+
+	ret = pkm_lcs_transaction_dup_path_components(
+		input->path, input->depth, &entry->set_security.path);
+	if (ret)
+		goto out_free;
+
+	if (check_mul_overflow((size_t)input->depth,
+			       sizeof(*entry->set_security.ancestor_guids),
+			       &guid_bytes)) {
+		ret = -EINVAL;
+		goto out_free;
+	}
+	entry->set_security.ancestor_guids =
+		kmemdup(input->ancestor_guids, guid_bytes, GFP_KERNEL);
+	if (!entry->set_security.ancestor_guids) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+
+	if (memcmp(entry->set_security.ancestor_guids[input->depth - 1],
+		   entry->set_security.key_guid,
+		   sizeof(entry->set_security.key_guid))) {
 		ret = -EINVAL;
 		goto out_free;
 	}
@@ -540,6 +628,7 @@ static long pkm_lcs_transaction_log_requires_generation(
 	list_for_each_entry(entry, &txn->mutation_log, link) {
 		switch (entry->kind) {
 		case PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY:
+		case PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY:
 			required = true;
 			break;
 		default:
@@ -631,6 +720,20 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 				(const u8 *)entry->create_key.child_name;
 			contexts[index].name_len =
 				entry->create_key.child_name_len;
+			index++;
+			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY:
+			contexts[index].changed_key_guid =
+				entry->set_security.key_guid;
+			contexts[index].ancestor_guids =
+				entry->set_security.ancestor_guids;
+			contexts[index].resolved_path =
+				(const char * const *)entry->set_security.path;
+			contexts[index].path_component_count =
+				entry->set_security.depth;
+			contexts[index].event_type = REG_WATCH_SD_CHANGED;
+			contexts[index].name = NULL;
+			contexts[index].name_len = 0;
 			index++;
 			break;
 		default:
@@ -1145,6 +1248,9 @@ long pkm_lcs_transaction_fd_log_snapshot(
 			strscpy(out->last_layer, last->create_key.layer,
 				sizeof(out->last_layer));
 			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY:
+			out->last_parent_depth = last->set_security.depth;
+			break;
 		default:
 			ret = -EIO;
 			goto out_unlock;
@@ -1521,6 +1627,89 @@ long pkm_lcs_transaction_fd_begin_key_create_mutation(
 		goto out_unlock;
 
 	ret = pkm_lcs_transaction_key_create_log_alloc(input, &entry);
+	if (ret)
+		goto out_unlock;
+
+	if (plan.action == PKM_LCS_TRANSACTION_BIND_NEW) {
+		ret = pkm_lcs_source_bound_transaction_acquire(source_id,
+							       &count);
+		if (ret)
+			goto out_free_entry;
+
+		ret = pkm_lcs_source_begin_transaction_round_trip(
+			source_id, plan.transaction_id, RSI_TXN_READ_WRITE,
+			NULL, NULL);
+		if (ret)
+			goto out_release_counter;
+
+		ret = pkm_lcs_transaction_fd_complete_first_bind_from_state(
+			txn, plan.transaction_id, source_id, root_guid);
+		if (ret) {
+			(void)pkm_lcs_source_dispatch_abort_transaction_request(
+				source_id, plan.transaction_id, NULL);
+			goto out_release_counter;
+		}
+
+		plan.state = REG_TXN_ACTIVE_BOUND;
+		plan.bound_source_id = source_id;
+		memcpy(plan.bound_root_guid, root_guid,
+		       sizeof(plan.bound_root_guid));
+	}
+
+	handle->held = held;
+	handle->txn = txn;
+	handle->entry = entry;
+	handle->active = true;
+	*binding = plan;
+	return 0;
+
+out_release_counter:
+	(void)pkm_lcs_source_bound_transaction_release(source_id, &count);
+out_free_entry:
+	pkm_lcs_transaction_log_entry_destroy(entry);
+out_unlock:
+	mutex_unlock(&txn->bind_lock);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_transaction_fd_begin_set_security_mutation(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const struct pkm_lcs_transaction_set_security_log_input *input,
+	struct pkm_lcs_transaction_mutation_handle *handle,
+	struct pkm_lcs_transaction_binding_plan *binding)
+{
+	struct pkm_lcs_transaction_binding_plan plan = { };
+	struct pkm_lcs_transaction_log_entry *entry = NULL;
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	u32 count = 0;
+	long ret;
+
+	if (!handle || !binding)
+		return -EINVAL;
+	memset(handle, 0, sizeof(*handle));
+	memset(binding, 0, sizeof(*binding));
+	if (!source_id || !pkm_lcs_transaction_root_guid_valid(root_guid))
+		return -EINVAL;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	mutex_lock(&txn->bind_lock);
+
+	ret = pkm_lcs_transaction_fd_prepare_mutation_binding_from_state(
+		txn, source_id, root_guid, &plan);
+	if (ret)
+		goto out_unlock;
+
+	ret = pkm_lcs_transaction_log_capacity_check(txn);
+	if (ret)
+		goto out_unlock;
+
+	ret = pkm_lcs_transaction_set_security_log_alloc(input, &entry);
 	if (ret)
 		goto out_unlock;
 
