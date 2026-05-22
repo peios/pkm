@@ -1009,6 +1009,154 @@ out_existing:
 	return ret;
 }
 
+static const char *pkm_lcs_key_fd_leaf_name(const struct pkm_lcs_key_fd *key_fd,
+					    size_t *name_len)
+{
+	const char *name;
+
+	if (name_len)
+		*name_len = 0;
+	if (!key_fd || !key_fd->resolved_path || !key_fd->path_component_count)
+		return NULL;
+
+	name = key_fd->resolved_path[key_fd->path_component_count - 1U];
+	if (!name)
+		return NULL;
+	if (name_len)
+		*name_len = strlen(name);
+	return name;
+}
+
+static long pkm_lcs_key_fd_query_key_info_from_args(
+	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct reg_query_key_info_args *args)
+{
+	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_source_response_frame read_frame = { };
+	struct pkm_lcs_source_response_frame enum_frame = { };
+	struct pkm_lcs_source_response_frame values_frame = { };
+	struct pkm_lcs_source_response_result read_response = { };
+	struct pkm_lcs_source_response_result enum_response = { };
+	struct pkm_lcs_source_response_result values_response = { };
+	struct pkm_lcs_rsi_enum_children_info_summary enum_summary = { };
+	struct pkm_lcs_rsi_query_values_info_summary values_summary = { };
+	struct pkm_lcs_rsi_read_key_result read_key = { };
+	const char *key_name;
+	size_t key_name_len;
+	u64 hive_generation = 0;
+	u64 next_sequence = 0;
+	u64 name_ptr;
+	u32 layer_count = 0;
+	u32 provided_len;
+	long ret;
+
+	if (!key_fd || !args)
+		return -EINVAL;
+	if (!ops)
+		ops = &pkm_lcs_key_fd_default_usercopy_ops;
+	if (!ops->write)
+		return -EINVAL;
+
+	provided_len = args->name_len;
+	name_ptr = args->name_ptr;
+	if (args->_pad0)
+		return -EINVAL;
+	if (provided_len && !name_ptr)
+		return -EFAULT;
+
+	ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
+		key_fd->granted_access, REG_IOC_QUERY_KEY_INFO_NR);
+	if (ret)
+		return ret;
+
+	key_name = pkm_lcs_key_fd_leaf_name(key_fd, &key_name_len);
+	if (!key_name || key_name_len > U32_MAX)
+		return -EIO;
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+
+	pkm_lcs_source_response_frame_init(&read_frame);
+	pkm_lcs_source_response_frame_init(&enum_frame);
+	pkm_lcs_source_response_frame_init(&values_frame);
+
+	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+		key_fd->source_id, 0, key_fd->key_guid,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &read_frame,
+		&read_response, NULL);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_rsi_materialize_read_key_response(
+		read_frame.data, read_frame.len, read_response.request_id,
+		&read_key);
+	if (ret)
+		goto out_frames;
+
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
+		key_fd->source_id, 0, key_fd->key_guid,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &enum_frame,
+		&enum_response, NULL);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
+		enum_frame.data, enum_frame.len, enum_response.request_id,
+		next_sequence, layers, layer_count, NULL, 0, &enum_summary);
+	if (ret)
+		goto out_frames;
+
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+		key_fd->source_id, 0, key_fd->key_guid, "", 0, true,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &values_frame,
+		&values_response, NULL);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_rsi_materialize_query_values_info_summary(
+		values_frame.data, values_frame.len, values_response.request_id,
+		next_sequence, layers, layer_count, NULL, 0, &values_summary);
+	if (ret)
+		goto out_frames;
+
+	ret = pkm_lcs_source_hive_generation_snapshot(
+		key_fd->source_id, key_fd->ancestor_guids[0], &hive_generation);
+	if (ret)
+		goto out_frames;
+
+	if (provided_len < key_name_len) {
+		memset(args, 0, sizeof(*args));
+		args->name_len = (u32)key_name_len;
+		args->name_ptr = name_ptr;
+		ret = -ERANGE;
+		goto out_frames;
+	}
+
+	memset(args, 0, sizeof(*args));
+	args->name_len = (u32)key_name_len;
+	args->name_ptr = name_ptr;
+	args->last_write_time = read_key.last_write_time;
+	args->subkey_count = enum_summary.subkey_count;
+	args->value_count = values_summary.value_count;
+	args->max_subkey_name_len = enum_summary.max_subkey_name_len;
+	args->max_value_name_len = values_summary.max_value_name_len;
+	args->max_value_data_size = values_summary.max_value_data_size;
+	args->sd_size = read_key.sd_len;
+	args->volatile_key = read_key.volatile_key ? 1 : 0;
+	args->symlink = read_key.symlink ? 1 : 0;
+	args->hive_generation = hive_generation;
+
+	if (key_name_len &&
+	    !ops->write(ops->ctx, (void __user *)(unsigned long)name_ptr,
+			key_name, key_name_len))
+		ret = -EFAULT;
+
+out_frames:
+	pkm_lcs_source_response_frame_destroy(&values_frame);
+	pkm_lcs_source_response_frame_destroy(&enum_frame);
+	pkm_lcs_source_response_frame_destroy(&read_frame);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_set_security_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_security_args *args)
@@ -1118,6 +1266,7 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	struct pkm_lcs_key_fd *key_fd;
 	struct reg_notify_args notify_args;
 	struct reg_get_security_args get_security_args;
+	struct reg_query_key_info_args query_key_info_args;
 	struct reg_set_security_args set_security_args;
 	long ret;
 
@@ -1128,6 +1277,20 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 		return -EINVAL;
 
 	switch (cmd) {
+	case REG_IOC_QUERY_KEY_INFO:
+		if (!arg)
+			return -EFAULT;
+		if (copy_from_user(&query_key_info_args, (void __user *)arg,
+				   sizeof(query_key_info_args)))
+			return -EFAULT;
+		ret = pkm_lcs_key_fd_query_key_info_from_args(
+			key_fd, &pkm_lcs_key_fd_default_usercopy_ops,
+			&query_key_info_args);
+		if ((ret == 0 || ret == -ERANGE) &&
+		    copy_to_user((void __user *)arg, &query_key_info_args,
+				 sizeof(query_key_info_args)))
+			return -EFAULT;
+		return ret;
 	case REG_IOC_GET_SECURITY:
 		if (!arg)
 			return -EFAULT;
@@ -1806,6 +1969,23 @@ long pkm_lcs_kunit_key_fd_get_security(
 		return ret;
 
 	ret = pkm_lcs_key_fd_get_security_from_args(key_fd, ops, args);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_query_key_info(
+	int fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct reg_query_key_info_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_query_key_info_from_args(key_fd, ops, args);
 	fdput(held);
 	return ret;
 }

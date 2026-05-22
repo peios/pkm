@@ -148,6 +148,15 @@ static long pkm_lcs_normalize_layer_inputs(
 	return 0;
 }
 
+void pkm_lcs_source_base_layer_snapshot(
+	const struct pkm_lcs_rsi_layer_view **layers, u32 *layer_count)
+{
+	if (layers)
+		*layers = pkm_lcs_base_layer_snapshot;
+	if (layer_count)
+		*layer_count = ARRAY_SIZE(pkm_lcs_base_layer_snapshot);
+}
+
 static bool pkm_lcs_default_copy_from_user(void *ctx, void *dst,
 					   const void __user *src, size_t len)
 {
@@ -426,6 +435,35 @@ long pkm_lcs_source_record_transaction_generation(
 	}
 
 	hive->hive_generation++;
+	*generation_out = hive->hive_generation;
+	ret = 0;
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
+long pkm_lcs_source_hive_generation_snapshot(
+	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
+	u64 *generation_out)
+{
+	struct pkm_lcs_source_registration_hive_copy *hive;
+	struct pkm_lcs_source_slot *slot;
+	long ret = -EIO;
+
+	if (generation_out)
+		*generation_out = 0;
+	if (!source_id || !root_guid || !generation_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE)
+		goto out_unlock;
+	hive = pkm_lcs_source_slot_hive_find_locked(slot, root_guid);
+	if (!hive)
+		goto out_unlock;
+
 	*generation_out = hive->hive_generation;
 	ret = 0;
 
@@ -3380,7 +3418,7 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 	}
 }
 
-static long pkm_lcs_source_next_sequence_snapshot(u64 *next_sequence)
+long pkm_lcs_source_next_sequence_snapshot(u64 *next_sequence)
 {
 	if (!next_sequence)
 		return -EINVAL;
