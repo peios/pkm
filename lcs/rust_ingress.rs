@@ -36,7 +36,8 @@ use crate::lcs_core::{
     validate_rsi_query_values_response_names,
     validate_rsi_query_values_response_sequences,
     validate_rsi_query_values_response_value_payloads, validate_rsi_read_key_response_names,
-    validate_rsi_read_key_response_security_descriptor, validate_source_registration,
+    validate_rsi_read_key_response_security_descriptor,
+    validate_rsi_status_only_response_for_request, validate_source_registration,
     validate_source_slots, validate_symlink_target_bytes, validate_syscall_path_c_string,
     validate_value_data_len, validate_value_name_bytes, validate_value_write_type,
     write_key_open_audit_payload, write_rsi_abort_transaction_request_frame,
@@ -44,7 +45,8 @@ use crate::lcs_core::{
     write_rsi_create_entry_request_frame, write_rsi_create_key_request_frame,
     write_rsi_enum_children_request_frame, write_rsi_lookup_request_frame,
     write_rsi_query_values_request_frame,
-    write_rsi_read_key_request_frame, write_rsi_write_key_request_frame,
+    write_rsi_read_key_request_frame, write_rsi_set_value_request_frame,
+    write_rsi_write_key_request_frame,
     BlanketTombstoneEntry, CurrentUserRewrite,
     HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest, KeyWatchState,
     LayerResolutionContext, LayerTargetAdmissionInput, LayerView, LcsCallerTokenSummary,
@@ -1468,6 +1470,104 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_query_values_request_frame(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_rsi_set_value_request_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    request_id: u64,
+    txn_id: u64,
+    guid: *const u8,
+    value_name: *const u8,
+    value_name_len: u32,
+    layer_name: *const u8,
+    layer_name_len: u32,
+    value_type: u32,
+    data: *const u8,
+    data_len: usize,
+    sequence: u64,
+    expected_sequence: u64,
+    built_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if built_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *built_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            txn_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if dst.is_null()
+        || guid.is_null()
+        || (value_name_len != 0 && value_name.is_null())
+        || layer_name.is_null()
+        || (data_len != 0 && data.is_null())
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
+    let mut guid_copy = [0u8; 16];
+    guid_copy.copy_from_slice(guid_bytes);
+    let value_name_bytes = if value_name_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(value_name, value_name_len as usize) }
+    };
+    let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
+    let data_bytes = if data_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(data, data_len) }
+    };
+
+    if let Err(err) = validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT) {
+        return rsi_request_frame_error_return(err);
+    }
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+        return rsi_request_frame_error_return(err);
+    }
+    if let Err(err) = validate_value_write_type(value_type, data_bytes.len(), true) {
+        return rsi_request_frame_error_return(err);
+    }
+    if let Err(err) = validate_value_data_len(data_bytes.len(), &LcsLimits::DEFAULT) {
+        return rsi_request_frame_error_return(err);
+    }
+
+    match write_rsi_set_value_request_frame(
+        dst_bytes,
+        request_id,
+        txn_id,
+        guid_copy,
+        value_name_bytes,
+        layer_name_bytes,
+        value_type,
+        data_bytes,
+        sequence,
+        expected_sequence,
+    ) {
+        Ok(built) => {
+            unsafe {
+                *built_out = PkmLcsRsiBuiltRequestCopy {
+                    len: built.len,
+                    request_id: built.retained.request_id,
+                    txn_id,
+                    op_code: built.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lcs_rust_write_rsi_create_entry_request_frame(
     dst: *mut u8,
     dst_len: usize,
@@ -2004,6 +2104,30 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
         (*summary_out).blanket_count = payload.blanket_count;
     }
     0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_rsi_status_only_response_frame(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    request_op_code: u16,
+) -> c_int {
+    if frame.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    match validate_rsi_status_only_response_for_request(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: request_op_code,
+        },
+    ) {
+        Ok(_) => 0,
+        Err(err) => rsi_lookup_response_error_return(err),
+    }
 }
 
 #[no_mangle]
