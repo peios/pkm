@@ -5578,6 +5578,28 @@ long pkm_lcs_create_missing_publish_created_key_for_token(
 	return ret;
 }
 
+static void pkm_lcs_create_missing_dispatch_subkey_created_best_effort(
+	const struct pkm_lcs_create_missing_parent_resolution *resolution)
+{
+	struct pkm_lcs_watch_dispatch_context context = { };
+
+	if (!resolution || !resolution->parent.ancestor_guids ||
+	    !resolution->parent.resolved_path ||
+	    !resolution->parent.component_count || !resolution->child_name ||
+	    !resolution->child_name_len)
+		return;
+
+	context.changed_key_guid = resolution->parent.key_guid;
+	context.ancestor_guids = resolution->parent.ancestor_guids;
+	context.resolved_path =
+		(const char * const *)resolution->parent.resolved_path;
+	context.path_component_count = resolution->parent.component_count;
+	context.event_type = REG_WATCH_SUBKEY_CREATED;
+	context.name = resolution->child_name;
+	context.name_len = resolution->child_name_len;
+	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
+}
+
 long pkm_lcs_create_missing_prepared_key_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,
@@ -5611,6 +5633,8 @@ long pkm_lcs_create_missing_prepared_key_for_token(
 		return 0;
 	if (!source.created_new)
 		return -EIO;
+
+	pkm_lcs_create_missing_dispatch_subkey_created_best_effort(resolution);
 
 	fd = pkm_lcs_create_missing_publish_created_key_for_token(
 		token, resolution, child_guid, created_sd, desired_access);
