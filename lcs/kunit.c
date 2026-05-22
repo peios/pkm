@@ -7,11 +7,13 @@
 #include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/fdtable.h>
+#include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/kthread.h>
 #include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/task_work.h>
 #include <linux/unaligned.h>
 
 #include <pkm/token.h>
@@ -5159,6 +5161,17 @@ static long pkm_lcs_kunit_publish_key_fd_with_access(u32 granted_access)
 	return pkm_lcs_key_fd_publish(&input);
 }
 
+static void pkm_lcs_kunit_flush_deferred_key_fd_release(void)
+{
+	/*
+	 * KUnit closes fds through close_fd(), which uses deferred fput in
+	 * kernel context. Flush it before tests assert release-time watch
+	 * registry effects.
+	 */
+	task_work_run();
+	flush_delayed_fput();
+}
+
 static long pkm_lcs_kunit_publish_key_fd_for_source(
 	u32 source_id, const u8 root_guid[PKM_LCS_GUID_BYTES],
 	const u8 key_guid[PKM_LCS_GUID_BYTES])
@@ -5582,6 +5595,135 @@ static void pkm_lcs_kunit_key_fd_watch_filter_disarm_and_overflow(
 	KUNIT_EXPECT_EQ(test, last_type, REG_WATCH_OVERFLOW);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_key_fd_watch_registry_arm_replace_disarm(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_fd_watch_registry_snapshot registry = { };
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	long fd;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_NOTIFY);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_watch_registry_snapshot(
+				(int)fd, &registry),
+			0L);
+	KUNIT_EXPECT_EQ(test, registry.direct_watchers, 0U);
+	KUNIT_EXPECT_EQ(test, registry.subtree_watchers, 0U);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_watch_registry_snapshot(
+				(int)fd, &registry),
+			0L);
+	KUNIT_EXPECT_EQ(test, registry.direct_watchers, 1U);
+	KUNIT_EXPECT_EQ(test, registry.subtree_watchers, 0U);
+
+	args.filter = REG_NOTIFY_SUBKEY;
+	args.subtree = 1;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_watch_registry_snapshot(
+				(int)fd, &registry),
+			0L);
+	KUNIT_EXPECT_EQ(test, registry.direct_watchers, 1U);
+	KUNIT_EXPECT_EQ(test, registry.subtree_watchers, 1U);
+
+	args.filter = REG_NOTIFY_SD;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_watch_registry_snapshot(
+				(int)fd, &registry),
+			0L);
+	KUNIT_EXPECT_EQ(test, registry.direct_watchers, 1U);
+	KUNIT_EXPECT_EQ(test, registry.subtree_watchers, 1U);
+
+	args.filter = REG_NOTIFY_VALUE;
+	args.subtree = 0;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_watch_registry_snapshot(
+				(int)fd, &registry),
+			0L);
+	KUNIT_EXPECT_EQ(test, registry.direct_watchers, 1U);
+	KUNIT_EXPECT_EQ(test, registry.subtree_watchers, 0U);
+
+	args.filter = 0;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_watch_registry_snapshot(
+				(int)fd, &registry),
+			0L);
+	KUNIT_EXPECT_EQ(test, registry.direct_watchers, 0U);
+	KUNIT_EXPECT_EQ(test, registry.subtree_watchers, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+}
+
+static void pkm_lcs_kunit_key_fd_watch_registry_refcounts_close(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_fd_watch_registry_snapshot registry = { };
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_VALUE,
+		.subtree = 1,
+	};
+	long fd1;
+	long fd2;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+
+	fd1 = pkm_lcs_kunit_publish_key_fd_with_access(KEY_NOTIFY);
+	KUNIT_ASSERT_TRUE(test, fd1 >= 0);
+	fd2 = pkm_lcs_kunit_publish_key_fd_with_access(KEY_NOTIFY);
+	KUNIT_ASSERT_TRUE(test, fd2 >= 0);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd1, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd2, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_watch_registry_snapshot(
+				(int)fd1, &registry),
+			0L);
+	KUNIT_EXPECT_EQ(test, registry.direct_watchers, 2U);
+	KUNIT_EXPECT_EQ(test, registry.subtree_watchers, 2U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd2), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_watch_registry_snapshot(
+				(int)fd1, &registry),
+			0L);
+	KUNIT_EXPECT_EQ(test, registry.direct_watchers, 1U);
+	KUNIT_EXPECT_EQ(test, registry.subtree_watchers, 1U);
+
+	args.filter = 0;
+	args.subtree = 0;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd1, &args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_watch_registry_snapshot(
+				(int)fd1, &registry),
+			0L);
+	KUNIT_EXPECT_EQ(test, registry.direct_watchers, 0U);
+	KUNIT_EXPECT_EQ(test, registry.subtree_watchers, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd1), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
 }
 
 static void pkm_lcs_kunit_begin_transaction_publishes_active_unbound(
@@ -17019,6 +17161,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_fails_closed),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_read_poll_drains_records),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_filter_disarm_and_overflow),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_registry_arm_replace_disarm),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_registry_refcounts_close),
 	KUNIT_CASE(
 		pkm_lcs_kunit_begin_transaction_publishes_active_unbound),
 	KUNIT_CASE(pkm_lcs_kunit_begin_transaction_ids_are_monotonic),

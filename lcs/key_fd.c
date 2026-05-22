@@ -13,6 +13,8 @@
 #include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/hashtable.h>
+#include <linux/jhash.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/module.h>
@@ -32,6 +34,7 @@
 #define PKM_LCS_WATCH_NOTIFY_ACTION_ARM 1U
 #define PKM_LCS_WATCH_NOTIFY_ACTION_DISARM 2U
 #define PKM_LCS_WATCH_EVENT_HEADER_LEN 8U
+#define PKM_LCS_WATCH_REGISTRY_BITS 8U
 
 struct pkm_lcs_key_fd_string_view {
 	const u8 *bytes;
@@ -59,6 +62,12 @@ struct pkm_lcs_key_fd_watch_event {
 	u8 bytes[];
 };
 
+struct pkm_lcs_subtree_watch_entry {
+	struct hlist_node link;
+	u8 guid[PKM_LCS_GUID_BYTES];
+	u32 refcount;
+};
+
 struct pkm_lcs_key_fd {
 	u32 source_id;
 	u8 key_guid[PKM_LCS_GUID_BYTES];
@@ -69,15 +78,22 @@ struct pkm_lcs_key_fd {
 	struct mutex watch_lock;
 	wait_queue_head_t watch_wait;
 	struct list_head watch_events;
+	struct hlist_node watch_registry_node;
 	u32 watch_filter;
 	u32 watch_pending_events;
 	bool watch_has_overflow;
 	bool watch_subtree;
+	bool watch_registry_linked;
+	bool watch_subtree_registered;
 	bool orphaned;
 	bool watch_armed;
 };
 
 static const struct file_operations pkm_lcs_key_fd_fops;
+static DEFINE_MUTEX(pkm_lcs_watch_registry_lock);
+static DEFINE_HASHTABLE(pkm_lcs_watch_map, PKM_LCS_WATCH_REGISTRY_BITS);
+static DEFINE_HASHTABLE(pkm_lcs_subtree_watch_set,
+			PKM_LCS_WATCH_REGISTRY_BITS);
 
 extern int lcs_rust_validate_key_fd_open_view(
 	const u8 *key_guid, u32 granted_access,
@@ -92,6 +108,102 @@ extern int lcs_rust_key_fd_security_ioctl_access_gate(u32 granted_access,
 extern int lcs_rust_plan_key_fd_watch_notify(
 	u8 armed, u8 orphaned, u32 filter, u8 subtree, const u8 *reserved,
 	struct pkm_lcs_watch_notify_plan_copy *plan_out);
+
+static u32 pkm_lcs_guid_hash(const u8 guid[PKM_LCS_GUID_BYTES])
+{
+	return jhash(guid, PKM_LCS_GUID_BYTES, 0);
+}
+
+static bool pkm_lcs_guid_equal(const u8 lhs[PKM_LCS_GUID_BYTES],
+			       const u8 rhs[PKM_LCS_GUID_BYTES])
+{
+	return memcmp(lhs, rhs, PKM_LCS_GUID_BYTES) == 0;
+}
+
+static struct pkm_lcs_subtree_watch_entry *
+pkm_lcs_subtree_watch_find_locked(const u8 guid[PKM_LCS_GUID_BYTES])
+{
+	struct pkm_lcs_subtree_watch_entry *entry;
+
+	hash_for_each_possible(pkm_lcs_subtree_watch_set, entry, link,
+			       pkm_lcs_guid_hash(guid)) {
+		if (pkm_lcs_guid_equal(entry->guid, guid))
+			return entry;
+	}
+	return NULL;
+}
+
+static long pkm_lcs_subtree_watch_get_locked(
+	const u8 guid[PKM_LCS_GUID_BYTES])
+{
+	struct pkm_lcs_subtree_watch_entry *entry;
+
+	entry = pkm_lcs_subtree_watch_find_locked(guid);
+	if (entry) {
+		if (entry->refcount == U32_MAX)
+			return -EOVERFLOW;
+		entry->refcount++;
+		return 0;
+	}
+
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+	memcpy(entry->guid, guid, sizeof(entry->guid));
+	entry->refcount = 1;
+	hash_add(pkm_lcs_subtree_watch_set, &entry->link,
+		 pkm_lcs_guid_hash(guid));
+	return 0;
+}
+
+static void pkm_lcs_subtree_watch_put_locked(
+	const u8 guid[PKM_LCS_GUID_BYTES])
+{
+	struct pkm_lcs_subtree_watch_entry *entry;
+
+	entry = pkm_lcs_subtree_watch_find_locked(guid);
+	if (!entry)
+		return;
+
+	entry->refcount--;
+	if (entry->refcount)
+		return;
+
+	hash_del(&entry->link);
+	kfree(entry);
+}
+
+static void pkm_lcs_key_fd_watch_map_link_locked(
+	struct pkm_lcs_key_fd *key_fd)
+{
+	if (key_fd->watch_registry_linked)
+		return;
+
+	hash_add(pkm_lcs_watch_map, &key_fd->watch_registry_node,
+		 pkm_lcs_guid_hash(key_fd->key_guid));
+	key_fd->watch_registry_linked = true;
+}
+
+static void pkm_lcs_key_fd_watch_map_unlink_locked(
+	struct pkm_lcs_key_fd *key_fd)
+{
+	if (!key_fd->watch_registry_linked)
+		return;
+
+	hash_del(&key_fd->watch_registry_node);
+	INIT_HLIST_NODE(&key_fd->watch_registry_node);
+	key_fd->watch_registry_linked = false;
+}
+
+static void pkm_lcs_key_fd_watch_registry_remove_locked(
+	struct pkm_lcs_key_fd *key_fd)
+{
+	pkm_lcs_key_fd_watch_map_unlink_locked(key_fd);
+	if (key_fd->watch_subtree_registered) {
+		pkm_lcs_subtree_watch_put_locked(key_fd->key_guid);
+		key_fd->watch_subtree_registered = false;
+	}
+}
 
 static bool pkm_lcs_key_fd_default_copyout_write(void *ctx, void __user *dst,
 						 const void *src, size_t len)
@@ -294,6 +406,17 @@ static int pkm_lcs_key_fd_release(struct inode *inode, struct file *file)
 	struct pkm_lcs_key_fd *key_fd = file->private_data;
 
 	file->private_data = NULL;
+	if (key_fd) {
+		mutex_lock(&pkm_lcs_watch_registry_lock);
+		mutex_lock(&key_fd->watch_lock);
+		pkm_lcs_key_fd_watch_registry_remove_locked(key_fd);
+		key_fd->watch_armed = false;
+		key_fd->watch_filter = 0;
+		key_fd->watch_subtree = false;
+		pkm_lcs_key_fd_watch_queue_clear_locked(key_fd);
+		mutex_unlock(&key_fd->watch_lock);
+		mutex_unlock(&pkm_lcs_watch_registry_lock);
+	}
 	pkm_lcs_key_fd_free(key_fd);
 	return 0;
 }
@@ -384,6 +507,7 @@ static long pkm_lcs_key_fd_copy_input(
 	mutex_init(&key_fd->watch_lock);
 	init_waitqueue_head(&key_fd->watch_wait);
 	INIT_LIST_HEAD(&key_fd->watch_events);
+	INIT_HLIST_NODE(&key_fd->watch_registry_node);
 
 	key_fd->resolved_path = kcalloc(input->path_component_count,
 					sizeof(*key_fd->resolved_path),
@@ -457,6 +581,7 @@ static long pkm_lcs_key_fd_notify_from_args(
 	if (!key_fd || !args)
 		return -EINVAL;
 
+	mutex_lock(&pkm_lcs_watch_registry_lock);
 	mutex_lock(&key_fd->watch_lock);
 	ret = lcs_rust_plan_key_fd_watch_notify(
 		key_fd->watch_armed ? 1 : 0, key_fd->orphaned ? 1 : 0,
@@ -466,11 +591,24 @@ static long pkm_lcs_key_fd_notify_from_args(
 
 	switch (plan.action) {
 	case PKM_LCS_WATCH_NOTIFY_ACTION_ARM:
+		if (plan.subtree && !key_fd->watch_subtree_registered) {
+			ret = pkm_lcs_subtree_watch_get_locked(
+				key_fd->key_guid);
+			if (ret)
+				goto out_unlock;
+			key_fd->watch_subtree_registered = true;
+		} else if (!plan.subtree &&
+			   key_fd->watch_subtree_registered) {
+			pkm_lcs_subtree_watch_put_locked(key_fd->key_guid);
+			key_fd->watch_subtree_registered = false;
+		}
+		pkm_lcs_key_fd_watch_map_link_locked(key_fd);
 		key_fd->watch_filter = plan.filter;
 		key_fd->watch_subtree = plan.subtree != 0;
 		key_fd->watch_armed = true;
 		break;
 	case PKM_LCS_WATCH_NOTIFY_ACTION_DISARM:
+		pkm_lcs_key_fd_watch_registry_remove_locked(key_fd);
 		key_fd->watch_filter = 0;
 		key_fd->watch_subtree = false;
 		key_fd->watch_armed = false;
@@ -484,6 +622,7 @@ static long pkm_lcs_key_fd_notify_from_args(
 
 out_unlock:
 	mutex_unlock(&key_fd->watch_lock);
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
 
 	wake_up_interruptible(&key_fd->watch_wait);
 	return ret;
@@ -957,6 +1096,48 @@ __poll_t pkm_lcs_kunit_key_fd_poll(int fd)
 	ret = pkm_lcs_key_fd_poll(file, NULL);
 	fdput(held);
 	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_watch_registry_snapshot(
+	int fd, struct pkm_lcs_key_fd_watch_registry_snapshot *out)
+{
+	struct pkm_lcs_subtree_watch_entry *subtree;
+	struct pkm_lcs_key_fd *cursor;
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	u32 hash;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	held = fdget(fd);
+	if (!fd_file(held))
+		return -EBADF;
+	if (fd_file(held)->f_op != &pkm_lcs_key_fd_fops) {
+		fdput(held);
+		return -EINVAL;
+	}
+	key_fd = fd_file(held)->private_data;
+	if (!key_fd) {
+		fdput(held);
+		return -EINVAL;
+	}
+
+	mutex_lock(&pkm_lcs_watch_registry_lock);
+	hash = pkm_lcs_guid_hash(key_fd->key_guid);
+	hash_for_each_possible(pkm_lcs_watch_map, cursor,
+			       watch_registry_node, hash) {
+		if (pkm_lcs_guid_equal(cursor->key_guid, key_fd->key_guid))
+			out->direct_watchers++;
+	}
+	subtree = pkm_lcs_subtree_watch_find_locked(key_fd->key_guid);
+	if (subtree)
+		out->subtree_watchers = subtree->refcount;
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
+
+	fdput(held);
+	return 0;
 }
 #endif
 

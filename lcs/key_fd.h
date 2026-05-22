@@ -58,6 +58,11 @@ struct pkm_lcs_key_fd_parent_snapshot {
 	u8 (*ancestor_guids)[PKM_LCS_GUID_BYTES];
 };
 
+struct pkm_lcs_key_fd_watch_registry_snapshot {
+	u32 direct_watchers;
+	u32 subtree_watchers;
+};
+
 long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input);
 long pkm_lcs_key_fd_snapshot(int fd, struct pkm_lcs_key_fd_snapshot *out);
 long pkm_lcs_key_fd_check_fixed_ioctl_access(int fd, unsigned int cmd);
@@ -78,6 +83,8 @@ long pkm_lcs_kunit_key_fd_queue_watch_event(int fd, u32 event_type,
 ssize_t pkm_lcs_kunit_key_fd_read(int fd, u8 *buf, size_t count,
 				  bool nonblocking);
 __poll_t pkm_lcs_kunit_key_fd_poll(int fd);
+long pkm_lcs_kunit_key_fd_watch_registry_snapshot(
+	int fd, struct pkm_lcs_key_fd_watch_registry_snapshot *out);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_KEY_FD_H */
