@@ -70,6 +70,16 @@ struct pkm_lcs_watch_dispatch_input {
 	u32 name_len;
 };
 
+struct pkm_lcs_watch_dispatch_context {
+	const u8 *changed_key_guid;
+	const u8 (*ancestor_guids)[PKM_LCS_GUID_BYTES];
+	const char * const *resolved_path;
+	u32 path_component_count;
+	u32 event_type;
+	const u8 *name;
+	u32 name_len;
+};
+
 long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input);
 long pkm_lcs_key_fd_snapshot(int fd, struct pkm_lcs_key_fd_snapshot *out);
 long pkm_lcs_key_fd_check_fixed_ioctl_access(int fd, unsigned int cmd);
@@ -81,6 +91,8 @@ long pkm_lcs_key_fd_parent_snapshot(int fd,
 				    struct pkm_lcs_key_fd_parent_snapshot *out);
 void pkm_lcs_key_fd_parent_snapshot_destroy(
 	struct pkm_lcs_key_fd_parent_snapshot *snapshot);
+long pkm_lcs_key_fd_dispatch_watch_event_context(
+	const struct pkm_lcs_watch_dispatch_context *context);
 long pkm_lcs_key_fd_dispatch_watch_event(
 	const struct pkm_lcs_watch_dispatch_input *input);
 

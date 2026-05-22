@@ -5887,6 +5887,114 @@ static void pkm_lcs_kunit_key_fd_live_dispatch_filter_bypass_and_zero_depth(
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 }
 
+static void pkm_lcs_kunit_key_fd_live_dispatch_context_subkey_created(
+	struct kunit *test)
+{
+	static const char * const root_path[] = { "Machine" };
+	static const char * const parent_path[] = { "Machine", "Parent" };
+	static const char * const malformed_path[] = { "Machine", NULL };
+	static const u8 root_ancestors[1][PKM_LCS_GUID_BYTES] = { { 0x81 } };
+	static const u8 parent_ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0x81 },
+		{ 0x82 },
+	};
+	static const u8 child[] = "Child";
+	struct reg_notify_args direct_args = {
+		.filter = REG_NOTIFY_SUBKEY,
+	};
+	struct reg_notify_args subtree_args = {
+		.filter = REG_NOTIFY_SUBKEY,
+		.subtree = 1,
+	};
+	struct pkm_lcs_watch_dispatch_context context = {
+		.changed_key_guid = parent_ancestors[1],
+		.ancestor_guids = parent_ancestors,
+		.resolved_path = parent_path,
+		.path_component_count = 2,
+		.event_type = REG_WATCH_SUBKEY_CREATED,
+		.name = child,
+		.name_len = sizeof(child) - 1U,
+	};
+	struct pkm_lcs_watch_dispatch_context bad_context;
+	u8 direct[32] = { };
+	u8 subtree[64] = { };
+	long root_fd;
+	long parent_fd;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+
+	root_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		23, KEY_NOTIFY, root_path, root_ancestors, 1);
+	KUNIT_ASSERT_TRUE(test, root_fd >= 0);
+	parent_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		23, KEY_NOTIFY, parent_path, parent_ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, parent_fd >= 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)parent_fd,
+						    &direct_args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)root_fd,
+						    &subtree_args),
+			0L);
+
+	bad_context = context;
+	bad_context.changed_key_guid = root_ancestors[0];
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_dispatch_watch_event_context(
+				&bad_context),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)parent_fd, direct,
+						  sizeof(direct), true),
+			(ssize_t)-EAGAIN);
+
+	bad_context = context;
+	bad_context.resolved_path = malformed_path;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_dispatch_watch_event_context(
+				&bad_context),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)root_fd, subtree,
+						  sizeof(subtree), true),
+			(ssize_t)-EAGAIN);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_dispatch_watch_event_context(&context),
+			0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)parent_fd, direct,
+						  sizeof(direct), true),
+			(ssize_t)13);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(direct), 13U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(direct + 4),
+			REG_WATCH_SUBKEY_CREATED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(direct + 6), 5U);
+	KUNIT_EXPECT_EQ(test, memcmp(direct + 8, child, sizeof(child) - 1U),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)root_fd, subtree,
+						  sizeof(subtree), true),
+			(ssize_t)23);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(subtree), 23U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree + 4),
+			REG_WATCH_SUBKEY_CREATED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree + 6), 5U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(subtree + 8, child, sizeof(child) - 1U), 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree + 13), 1U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree + 15), 6U);
+	KUNIT_EXPECT_EQ(test, memcmp(subtree + 17, "Parent", 6), 0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)parent_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)root_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+}
+
 static void pkm_lcs_kunit_begin_transaction_publishes_active_unbound(
 	struct kunit *test)
 {
@@ -17327,6 +17435,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_live_dispatch_direct_and_subtree),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_live_dispatch_filter_bypass_and_zero_depth),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_live_dispatch_context_subkey_created),
 	KUNIT_CASE(
 		pkm_lcs_kunit_begin_transaction_publishes_active_unbound),
 	KUNIT_CASE(pkm_lcs_kunit_begin_transaction_ids_are_monotonic),

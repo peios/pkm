@@ -879,21 +879,22 @@ static void pkm_lcs_key_fd_path_views_free(
 	kfree(views);
 }
 
-static long pkm_lcs_key_fd_path_views_from_range(
-	const struct pkm_lcs_key_fd *key_fd, u32 start, u32 count,
+static long pkm_lcs_key_fd_path_views_from_components(
+	const char * const *resolved_path, u32 component_count, u32 start,
+	u32 count,
 	struct pkm_lcs_key_fd_string_view **views_out)
 {
 	struct pkm_lcs_key_fd_string_view *views;
 	size_t len;
 	u32 i;
 
-	if (!key_fd || !views_out)
+	if (!views_out)
 		return -EINVAL;
 	*views_out = NULL;
 	if (!count)
 		return 0;
-	if (!key_fd->resolved_path || start > key_fd->path_component_count ||
-	    count > key_fd->path_component_count - start)
+	if (!resolved_path || start > component_count ||
+	    count > component_count - start)
 		return -EINVAL;
 
 	views = kcalloc(count, sizeof(*views), GFP_KERNEL);
@@ -901,16 +902,16 @@ static long pkm_lcs_key_fd_path_views_from_range(
 		return -ENOMEM;
 
 	for (i = 0; i < count; i++) {
-		if (!key_fd->resolved_path[start + i]) {
+		if (!resolved_path[start + i]) {
 			pkm_lcs_key_fd_path_views_free(views);
 			return -EINVAL;
 		}
-		len = strlen(key_fd->resolved_path[start + i]);
+		len = strlen(resolved_path[start + i]);
 		if (len > U32_MAX) {
 			pkm_lcs_key_fd_path_views_free(views);
 			return -EINVAL;
 		}
-		views[i].bytes = key_fd->resolved_path[start + i];
+		views[i].bytes = resolved_path[start + i];
 		views[i].len = (u32)len;
 	}
 
@@ -997,18 +998,117 @@ static long pkm_lcs_key_fd_validate_dispatch_input(
 		NULL, 0, &written, &overflow);
 }
 
-long pkm_lcs_key_fd_dispatch_watch_event(
-	const struct pkm_lcs_watch_dispatch_input *input)
+static long pkm_lcs_key_fd_validate_dispatch_context(
+	const struct pkm_lcs_watch_dispatch_context *context)
+{
+	size_t len;
+	u32 changed_index;
+	u32 i;
+
+	if (!context || !context->changed_key_guid ||
+	    !context->path_component_count || !context->ancestor_guids ||
+	    !context->resolved_path)
+		return -EINVAL;
+	if (context->name_len && !context->name)
+		return -EINVAL;
+	changed_index = context->path_component_count - 1U;
+	if (!pkm_lcs_guid_equal(context->ancestor_guids[changed_index],
+				context->changed_key_guid))
+		return -EINVAL;
+	for (i = 0; i < context->path_component_count; i++) {
+		if (!context->resolved_path[i])
+			return -EINVAL;
+		len = strlen(context->resolved_path[i]);
+		if (!len || len > U32_MAX)
+			return -EINVAL;
+	}
+	return pkm_lcs_key_fd_validate_dispatch_input(
+		&(struct pkm_lcs_watch_dispatch_input) {
+			.mutation_fd = -1,
+			.event_type = context->event_type,
+			.name = context->name,
+			.name_len = context->name_len,
+		});
+}
+
+long pkm_lcs_key_fd_dispatch_watch_event_context(
+	const struct pkm_lcs_watch_dispatch_context *context)
 {
 	struct pkm_lcs_key_fd_string_view *path_views = NULL;
 	struct pkm_lcs_subtree_watch_entry *subtree;
-	struct pkm_lcs_key_fd *mutation_key;
 	struct pkm_lcs_key_fd *watcher;
-	struct fd held;
 	long ret;
 	u32 changed_index;
 	u32 hash;
 	u32 i;
+
+	ret = pkm_lcs_key_fd_validate_dispatch_context(context);
+	if (ret)
+		return ret;
+
+	mutex_lock(&pkm_lcs_watch_registry_lock);
+	hash = pkm_lcs_guid_hash(context->changed_key_guid);
+	hash_for_each_possible(pkm_lcs_watch_map, watcher,
+			       watch_registry_node, hash) {
+		if (!pkm_lcs_guid_equal(watcher->key_guid,
+					context->changed_key_guid))
+			continue;
+		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
+			watcher, context->event_type, context->name,
+			context->name_len, watcher->watch_subtree, NULL, 0);
+		if (ret)
+			goto out_unlock;
+	}
+
+	changed_index = context->path_component_count - 1U;
+	for (i = changed_index; i > 0; i--) {
+		const u8 *ancestor_guid = context->ancestor_guids[i - 1U];
+		u32 path_count;
+
+		if (pkm_lcs_guid_equal(ancestor_guid, context->changed_key_guid))
+			continue;
+		subtree = pkm_lcs_subtree_watch_find_locked(ancestor_guid);
+		if (!subtree)
+			continue;
+
+		path_count = changed_index - (i - 1U);
+		ret = pkm_lcs_key_fd_path_views_from_components(
+			context->resolved_path, context->path_component_count, i,
+			path_count, &path_views);
+		if (ret)
+			goto out_unlock;
+
+		hash = pkm_lcs_guid_hash(ancestor_guid);
+		hash_for_each_possible(pkm_lcs_watch_map, watcher,
+				       watch_registry_node, hash) {
+			if (!pkm_lcs_guid_equal(watcher->key_guid,
+						ancestor_guid) ||
+			    !watcher->watch_subtree)
+				continue;
+			ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
+				watcher, context->event_type, context->name,
+				context->name_len, true, path_views, path_count);
+			if (ret)
+				goto out_unlock;
+		}
+
+		pkm_lcs_key_fd_path_views_free(path_views);
+		path_views = NULL;
+	}
+
+out_unlock:
+	pkm_lcs_key_fd_path_views_free(path_views);
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
+	return ret;
+}
+
+long pkm_lcs_key_fd_dispatch_watch_event(
+	const struct pkm_lcs_watch_dispatch_input *input)
+{
+	struct pkm_lcs_watch_dispatch_context context = { };
+	struct pkm_lcs_key_fd *mutation_key;
+	struct fd held;
+	long ret;
 
 	ret = pkm_lcs_key_fd_validate_dispatch_input(input);
 	if (ret)
@@ -1023,58 +1123,14 @@ long pkm_lcs_key_fd_dispatch_watch_event(
 		return -EINVAL;
 	}
 
-	mutex_lock(&pkm_lcs_watch_registry_lock);
-	hash = pkm_lcs_guid_hash(mutation_key->key_guid);
-	hash_for_each_possible(pkm_lcs_watch_map, watcher,
-			       watch_registry_node, hash) {
-		if (!pkm_lcs_guid_equal(watcher->key_guid,
-					mutation_key->key_guid))
-			continue;
-		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
-			watcher, input->event_type, input->name, input->name_len,
-			watcher->watch_subtree, NULL, 0);
-		if (ret)
-			goto out_unlock;
-	}
-
-	changed_index = mutation_key->path_component_count - 1U;
-	for (i = changed_index; i > 0; i--) {
-		const u8 *ancestor_guid = mutation_key->ancestor_guids[i - 1U];
-		u32 path_count;
-
-		if (pkm_lcs_guid_equal(ancestor_guid, mutation_key->key_guid))
-			continue;
-		subtree = pkm_lcs_subtree_watch_find_locked(ancestor_guid);
-		if (!subtree)
-			continue;
-
-		path_count = changed_index - (i - 1U);
-		ret = pkm_lcs_key_fd_path_views_from_range(
-			mutation_key, i, path_count, &path_views);
-		if (ret)
-			goto out_unlock;
-
-		hash = pkm_lcs_guid_hash(ancestor_guid);
-		hash_for_each_possible(pkm_lcs_watch_map, watcher,
-				       watch_registry_node, hash) {
-			if (!pkm_lcs_guid_equal(watcher->key_guid,
-						ancestor_guid) ||
-			    !watcher->watch_subtree)
-				continue;
-			ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
-				watcher, input->event_type, input->name,
-				input->name_len, true, path_views, path_count);
-			if (ret)
-				goto out_unlock;
-		}
-
-		pkm_lcs_key_fd_path_views_free(path_views);
-		path_views = NULL;
-	}
-
-out_unlock:
-	pkm_lcs_key_fd_path_views_free(path_views);
-	mutex_unlock(&pkm_lcs_watch_registry_lock);
+	context.changed_key_guid = mutation_key->key_guid;
+	context.ancestor_guids = mutation_key->ancestor_guids;
+	context.resolved_path = (const char * const *)mutation_key->resolved_path;
+	context.path_component_count = mutation_key->path_component_count;
+	context.event_type = input->event_type;
+	context.name = input->name;
+	context.name_len = input->name_len;
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context(&context);
 	fdput(held);
 	return ret;
 }
