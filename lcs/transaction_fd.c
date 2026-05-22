@@ -52,6 +52,7 @@ struct pkm_lcs_transaction_fd {
 	bool commit_in_flight;
 	bool timeout_abort_pending;
 	bool registry_linked;
+	bool fd_released;
 };
 
 struct pkm_lcs_transaction_key_create_log {
@@ -250,6 +251,16 @@ static void pkm_lcs_transaction_log_clear(
 	txn->mutation_log_entries = 0;
 }
 
+static void pkm_lcs_transaction_fd_destroy(
+	struct pkm_lcs_transaction_fd *txn)
+{
+	if (!txn)
+		return;
+
+	pkm_lcs_transaction_log_clear(txn);
+	kfree(txn);
+}
+
 static long pkm_lcs_transaction_dup_path_components(
 	const char * const *src, u32 count, char ***out)
 {
@@ -442,17 +453,18 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 	u32 count = 0;
 	bool dispatch_abort = false;
 	bool release_counter = false;
+	bool retain_detached_commit = false;
 	bool wake = false;
 
 	file->private_data = NULL;
 	if (!txn)
 		return 0;
 
-	pkm_lcs_transaction_fd_registry_remove(txn);
 	timer_delete_sync(&txn->timeout_timer);
 	cancel_work_sync(&txn->timeout_work);
 
 	spin_lock(&txn->lock);
+	txn->fd_released = true;
 	if (txn->state == REG_TXN_ACTIVE_BOUND) {
 		transaction_id = txn->transaction_id;
 		source_id = txn->bound_source_id;
@@ -472,12 +484,14 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 		release_counter = source_id != 0;
 	} else if (txn->state == REG_TXN_TIMED_OUT &&
 		   txn->commit_in_flight) {
-		source_id = txn->bound_source_id;
-		txn->commit_in_flight = false;
-		release_counter = source_id != 0;
+		retain_detached_commit = true;
 	}
 	spin_unlock(&txn->lock);
 
+	if (retain_detached_commit)
+		return 0;
+
+	pkm_lcs_transaction_fd_registry_remove(txn);
 	if (dispatch_abort)
 		(void)pkm_lcs_source_dispatch_abort_transaction_request(
 			source_id, transaction_id, NULL);
@@ -486,8 +500,7 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 							       &count);
 	if (wake)
 		wake_up_all(&txn->wait);
-	pkm_lcs_transaction_log_clear(txn);
-	kfree(txn);
+	pkm_lcs_transaction_fd_destroy(txn);
 	return 0;
 }
 
@@ -1034,6 +1047,7 @@ long pkm_lcs_transaction_fd_commit(int fd)
 long pkm_lcs_transaction_fd_mark_source_down(u32 source_id, u32 *marked_out)
 {
 	struct pkm_lcs_transaction_fd *txn;
+	struct pkm_lcs_transaction_fd *tmp;
 	u32 marked = 0;
 
 	if (marked_out)
@@ -1042,8 +1056,11 @@ long pkm_lcs_transaction_fd_mark_source_down(u32 source_id, u32 *marked_out)
 		return -EINVAL;
 
 	mutex_lock(&pkm_lcs_transaction_registry_lock);
-	list_for_each_entry(txn, &pkm_lcs_transaction_registry, registry_link) {
+	list_for_each_entry_safe(txn, tmp, &pkm_lcs_transaction_registry,
+				 registry_link) {
+		bool destroy_detached = false;
 		bool stop_timer = false;
+		bool clear_log = false;
 		bool wake = false;
 
 		mutex_lock(&txn->bind_lock);
@@ -1054,19 +1071,34 @@ long pkm_lcs_transaction_fd_mark_source_down(u32 source_id, u32 *marked_out)
 			txn->commit_in_flight = false;
 			txn->timeout_abort_pending = false;
 			stop_timer = true;
+			clear_log = true;
 			wake = true;
+			marked++;
+		} else if (txn->state == REG_TXN_TIMED_OUT &&
+			   txn->commit_in_flight &&
+			   txn->bound_source_id == source_id) {
+			txn->commit_in_flight = false;
+			txn->timeout_abort_pending = false;
+			clear_log = true;
+			destroy_detached = txn->fd_released;
 			marked++;
 		}
 		spin_unlock(&txn->lock);
 
-		if (stop_timer) {
+		if (stop_timer)
 			timer_delete_sync(&txn->timeout_timer);
+		if (clear_log)
 			pkm_lcs_transaction_log_clear(txn);
+		if (destroy_detached) {
+			list_del_init(&txn->registry_link);
+			txn->registry_linked = false;
 		}
 		mutex_unlock(&txn->bind_lock);
 
 		if (wake)
 			wake_up_all(&txn->wait);
+		if (destroy_detached)
+			pkm_lcs_transaction_fd_destroy(txn);
 	}
 	mutex_unlock(&pkm_lcs_transaction_registry_lock);
 
@@ -1079,6 +1111,7 @@ long pkm_lcs_transaction_fd_handle_late_commit_response(
 	u32 source_id, u64 transaction_id, u32 status)
 {
 	struct pkm_lcs_transaction_fd *txn;
+	struct pkm_lcs_transaction_fd *destroy_txn = NULL;
 	bool release_counter = false;
 	u32 final_state = 0;
 	u32 count = 0;
@@ -1105,6 +1138,19 @@ long pkm_lcs_transaction_fd_handle_late_commit_response(
 		ret = pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 			txn, transaction_id, source_id, status, true,
 			&final_state, &release_counter);
+		if (!ret) {
+			bool destroy_detached;
+
+			spin_lock(&txn->lock);
+			destroy_detached = txn->fd_released &&
+					   !txn->commit_in_flight;
+			spin_unlock(&txn->lock);
+			if (destroy_detached) {
+				list_del_init(&txn->registry_link);
+				txn->registry_linked = false;
+				destroy_txn = txn;
+			}
+		}
 		mutex_unlock(&txn->bind_lock);
 		break;
 	}
@@ -1113,6 +1159,8 @@ long pkm_lcs_transaction_fd_handle_late_commit_response(
 	if (!ret && release_counter)
 		(void)pkm_lcs_source_bound_transaction_release(source_id,
 							       &count);
+	if (destroy_txn)
+		pkm_lcs_transaction_fd_destroy(destroy_txn);
 	return ret;
 }
 
@@ -1638,6 +1686,23 @@ long pkm_lcs_kunit_transaction_fd_commit_timeout(int fd, u32 timeout_ms)
 							      timeout_ms);
 	fdput(held);
 	return ret;
+}
+
+u32 pkm_lcs_kunit_transaction_fd_retained_commit_count(void)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	u32 count = 0;
+
+	mutex_lock(&pkm_lcs_transaction_registry_lock);
+	list_for_each_entry(txn, &pkm_lcs_transaction_registry,
+			    registry_link) {
+		spin_lock(&txn->lock);
+		if (txn->fd_released && txn->commit_in_flight)
+			count++;
+		spin_unlock(&txn->lock);
+	}
+	mutex_unlock(&pkm_lcs_transaction_registry_lock);
+	return count;
 }
 #endif
 

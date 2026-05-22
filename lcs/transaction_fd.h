@@ -120,6 +120,7 @@ long pkm_lcs_kunit_transaction_fd_set_commit_in_flight(int fd,
 						       bool in_flight);
 long pkm_lcs_kunit_transaction_fd_flush_timeout_work(int fd);
 long pkm_lcs_kunit_transaction_fd_commit_timeout(int fd, u32 timeout_ms);
+u32 pkm_lcs_kunit_transaction_fd_retained_commit_count(void);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_TRANSACTION_FD_H */
