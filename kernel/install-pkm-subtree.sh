@@ -533,7 +533,15 @@ replace_line_after_anchor_once 'int security_inode_rename(struct inode *old_dir,
 # positioned to plant the initial SD. SD is inheritable (OI|CI) so KACS
 # inode_init_security derives a child SD for every new file the unpacker
 # creates.
-insert_block_before_exact_once '	m = real_mount(mnt);' \
+#
+# Linux 7.0 reworked init_mount_tree() to mount the mutable rootfs (mount
+# id 2) on top of an immutable, permanently-empty "nullfs" namespace root
+# (mount id 1); the old bare `m = real_mount(mnt);` line is gone. `mnt`
+# still refers to the mutable rootfs that set_fs_root() makes "/", so the
+# seed target is unchanged — re-anchor onto the surviving nullfs mount-id
+# assertion, where `mnt` is fully constructed but not yet used. (nullfs
+# itself can't hold an SD: see NULL_FS_MAGIC in pkm_kacs_mount_policy_for_magic.)
+insert_block_before_exact_once '	VFS_WARN_ON_ONCE(real_mount(nullfs_mnt)->mnt_id != 1);' \
 	'pkm_rootfs_root_sd' \
 	'#ifdef CONFIG_SECURITY_PKM
 	{
@@ -1365,9 +1373,9 @@ extern void pkm_kacs_path_end_metadata(const struct path *path);
 ' \
 	"$kernel_root/fs/file_attr.c"
 replace_line_after_anchor_once 'SYSCALL_DEFINE5(file_getattr, int, dfd, const char __user *, filename,' \
-	'	struct file_kattr fa;
+	'	struct file_kattr fa = { .flags_valid = true }; /* hint only */
 	int error;' \
-	'	struct file_kattr fa;
+	'	struct file_kattr fa = { .flags_valid = true }; /* hint only */
 #ifdef CONFIG_SECURITY_PKM
 	struct file *pkm_fileattr_file = NULL;
 #endif

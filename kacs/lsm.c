@@ -882,6 +882,21 @@ static u32 pkm_kacs_mount_policy_for_magic(unsigned long magic)
 	case PROC_SUPER_MAGIC:
 	case SYSFS_MAGIC:
 		return KACS_MOUNT_POLICY_UNMANAGED;
+	case NULL_FS_MAGIC:
+		/*
+		 * nullfs (NULL_FS_MAGIC, 0x4E554C4C) — the immutable,
+		 * permanently-empty namespace root that Linux 7.0+ mounts
+		 * unconditionally beneath the mutable rootfs (init_mount_tree
+		 * in fs/namespace.c). It sets s_xattr = NULL, so it can NEVER
+		 * store an SD, and its single root inode is S_IMMUTABLE +
+		 * make_empty_dir_inode (no children possible, SB_NOUSER,
+		 * NOEXEC, NODEV). DENY_MISSING here would be a permanent boot
+		 * landmine on an inode that is, by construction, incapable of
+		 * holding state. This is NOT a paper-over like tmpfs/squashfs
+		 * would be — there is nothing to stamp and nothing to protect,
+		 * exactly as for proc/sysfs above.
+		 */
+		return KACS_MOUNT_POLICY_UNMANAGED;
 	case RAMFS_MAGIC:
 		/*
 		 * rootfs / ramfs ONLY (RAMFS_MAGIC, 0x858458f6) — the initial

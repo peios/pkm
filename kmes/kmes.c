@@ -1214,7 +1214,7 @@ static int pkm_kmes_alloc_producer_page(struct pkm_kmes_cpu_state *cpu)
 	u8 *producer_shared_page;
 
 	/* The producer metadata page must be page-backed so shared futex wait works. */
-	producer_file = shmem_file_setup("pkm-kmes-producer", PAGE_SIZE, 0);
+	producer_file = shmem_file_setup("pkm-kmes-producer", PAGE_SIZE, EMPTY_VMA_FLAGS);
 	if (IS_ERR(producer_file))
 		return PTR_ERR(producer_file);
 

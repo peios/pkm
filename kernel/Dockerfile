@@ -26,7 +26,7 @@ RUN pacman -Syu --noconfirm && \
 ENV PATH="/usr/lib/llvm18/bin:/root/.cargo/bin:${PATH}"
 
 # Pinned kernel version — bump deliberately, not accidentally
-ARG KERNEL_VERSION=v6.19.6
+ARG KERNEL_VERSION=v7.0.9
 
 # Clone kernel source at the pinned version (shallow for speed)
 RUN git clone --depth 1 --branch ${KERNEL_VERSION} \
