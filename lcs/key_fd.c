@@ -2520,8 +2520,12 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 	struct pkm_lcs_effective_value_snapshot before = { };
 	struct pkm_lcs_effective_value_snapshot after = { };
 	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_transaction_mutation_handle mutation = { };
+	struct pkm_lcs_transaction_binding_plan binding = { };
+	struct pkm_lcs_transaction_delete_value_log_input log_input = { };
 	u64 generation = 0;
 	u64 last_write_time;
+	u64 txn_id = 0;
 	u32 event_type = 0;
 	long ret;
 
@@ -2538,8 +2542,6 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 		return -EINVAL;
 	if (args->txn_fd < -1)
 		return -EINVAL;
-	if (args->txn_fd >= 0)
-		return -EOPNOTSUPP;
 
 	ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
 		key_fd->granted_access, REG_IOC_DELETE_VALUE_NR);
@@ -2555,31 +2557,66 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 	if (ret)
 		goto out_input;
 
+	if (args->txn_fd >= 0) {
+		log_input.key_guid = key_fd->key_guid;
+		log_input.value_name = input.value_name;
+		log_input.value_name_len = args->name_len;
+		log_input.layer = input.target.name;
+		log_input.layer_len = input.target.name_len;
+		log_input.path = (const char * const *)key_fd->resolved_path;
+		log_input.ancestor_guids =
+			(const u8 (*)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES])
+				key_fd->ancestor_guids;
+		log_input.depth = key_fd->path_component_count;
+
+		ret = pkm_lcs_transaction_fd_begin_delete_value_mutation(
+			args->txn_fd, key_fd->source_id, key_fd->ancestor_guids[0],
+			&log_input, &mutation, &binding);
+		if (ret)
+			goto out_input;
+		txn_id = binding.transaction_id;
+	}
+
 	ret = pkm_lcs_key_fd_query_effective_value_snapshot(
-		key_fd, 0, input.value_name, args->name_len, &before);
+		key_fd, txn_id, input.value_name, args->name_len, &before);
 	if (ret)
-		goto out_input;
+		goto out_cancel_mutation;
 
 	ret = pkm_lcs_source_delete_value_entry_round_trip_timeout(
-		key_fd->source_id, 0, key_fd->key_guid, input.value_name,
+		key_fd->source_id, txn_id, key_fd->key_guid, input.value_name,
 		args->name_len, input.target.name, input.target.name_len,
 		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &response, NULL);
 	if (ret)
 		goto out_before;
 
 	ret = pkm_lcs_key_fd_query_effective_value_snapshot(
-		key_fd, 0, input.value_name, args->name_len, &after);
+		key_fd, txn_id, input.value_name, args->name_len, &after);
 	if (ret)
 		goto out_before;
 
 	last_write_time = (u64)ktime_get_real_ns();
 	ret = pkm_lcs_source_write_key_round_trip_timeout(
-		key_fd->source_id, 0, key_fd->key_guid, NULL, 0,
+		key_fd->source_id, txn_id, key_fd->key_guid, NULL, 0,
 		last_write_time, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, NULL,
 		NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
+		goto out_after;
+	}
+
+	ret = pkm_lcs_key_fd_delete_value_watch_event_type(&before, &after,
+							   &event_type);
+	if (ret)
+		goto out_after;
+	if (args->txn_fd >= 0) {
+		ret = pkm_lcs_transaction_fd_set_delete_value_event(
+			&mutation, event_type);
+		if (ret)
+			goto out_after;
+		ret = pkm_lcs_transaction_fd_commit_mutation(&mutation);
+		if (ret)
+			goto out_after;
 		goto out_after;
 	}
 
@@ -2591,10 +2628,6 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 		goto out_after;
 	}
 
-	ret = pkm_lcs_key_fd_delete_value_watch_event_type(&before, &after,
-							   &event_type);
-	if (ret)
-		goto out_after;
 	if (event_type)
 		pkm_lcs_key_fd_publish_value_effects(
 			key_fd, event_type, input.value_name, args->name_len);
@@ -2604,6 +2637,9 @@ out_after:
 	pkm_lcs_effective_value_snapshot_destroy(&after);
 out_before:
 	pkm_lcs_effective_value_snapshot_destroy(&before);
+out_cancel_mutation:
+	if (ret && mutation.active)
+		pkm_lcs_transaction_fd_cancel_mutation(&mutation);
 out_input:
 	pkm_lcs_delete_value_input_destroy(&input);
 	return ret;
