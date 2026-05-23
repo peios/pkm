@@ -106,6 +106,16 @@ struct pkm_lcs_set_value_input {
 	struct pkm_lcs_create_layer_target target;
 };
 
+struct pkm_lcs_delete_value_input {
+	char *value_name;
+	struct pkm_lcs_create_layer_target target;
+};
+
+struct pkm_lcs_effective_value_snapshot {
+	struct pkm_lcs_source_response_frame frame;
+	struct pkm_lcs_rsi_query_value_result result;
+};
+
 static const struct file_operations pkm_lcs_key_fd_fops;
 static DEFINE_MUTEX(pkm_lcs_watch_registry_lock);
 static DEFINE_HASHTABLE(pkm_lcs_watch_map, PKM_LCS_WATCH_REGISTRY_BITS);
@@ -956,9 +966,9 @@ static void pkm_lcs_key_fd_publish_set_security_effects(
 	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
 }
 
-static void pkm_lcs_key_fd_publish_set_value_effects(
-	struct pkm_lcs_key_fd *key_fd, const char *value_name,
-	u32 value_name_len)
+static void pkm_lcs_key_fd_publish_value_effects(
+	struct pkm_lcs_key_fd *key_fd, u32 event_type,
+	const char *value_name, u32 value_name_len)
 {
 	struct pkm_lcs_watch_dispatch_context context = { };
 
@@ -967,11 +977,132 @@ static void pkm_lcs_key_fd_publish_set_value_effects(
 		(const u8 (*)[PKM_LCS_GUID_BYTES])key_fd->ancestor_guids;
 	context.resolved_path = (const char * const *)key_fd->resolved_path;
 	context.path_component_count = key_fd->path_component_count;
-	context.event_type = REG_WATCH_VALUE_SET;
+	context.event_type = event_type;
 	context.name = (const u8 *)value_name;
 	context.name_len = value_name_len;
 
 	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
+}
+
+static void pkm_lcs_key_fd_publish_set_value_effects(
+	struct pkm_lcs_key_fd *key_fd, const char *value_name,
+	u32 value_name_len)
+{
+	pkm_lcs_key_fd_publish_value_effects(
+		key_fd, REG_WATCH_VALUE_SET, value_name, value_name_len);
+}
+
+static void pkm_lcs_effective_value_snapshot_destroy(
+	struct pkm_lcs_effective_value_snapshot *snapshot)
+{
+	if (!snapshot)
+		return;
+
+	pkm_lcs_source_response_frame_destroy(&snapshot->frame);
+	memset(snapshot, 0, sizeof(*snapshot));
+}
+
+static long pkm_lcs_effective_value_snapshot_validate(
+	const struct pkm_lcs_effective_value_snapshot *snapshot)
+{
+	const struct pkm_lcs_rsi_query_value_result *result;
+
+	if (!snapshot)
+		return -EINVAL;
+	result = &snapshot->result;
+	if (!result->found)
+		return 0;
+	if ((size_t)result->data_offset > snapshot->frame.len ||
+	    (size_t)result->data_len >
+		    snapshot->frame.len - (size_t)result->data_offset ||
+	    (result->layer_len && !result->layer))
+		return -EIO;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_query_effective_value_snapshot(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const char *value_name, u32 value_name_len,
+	struct pkm_lcs_effective_value_snapshot *snapshot)
+{
+	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_source_response_result response = { };
+	u64 next_sequence = 0;
+	u32 layer_count = 0;
+	long ret;
+
+	if (!key_fd || (value_name_len && !value_name) || !snapshot)
+		return -EINVAL;
+	memset(snapshot, 0, sizeof(*snapshot));
+	pkm_lcs_source_response_frame_init(&snapshot->frame);
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+		key_fd->source_id, txn_id, key_fd->key_guid, value_name,
+		value_name_len, false, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+		&snapshot->frame, &response, NULL);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_rsi_materialize_query_value_response(
+		snapshot->frame.data, snapshot->frame.len,
+		response.request_id, next_sequence, value_name, value_name_len,
+		layers, layer_count, NULL, 0, &snapshot->result);
+	if (ret)
+		return ret;
+	return pkm_lcs_effective_value_snapshot_validate(snapshot);
+}
+
+static bool pkm_lcs_effective_value_snapshots_same(
+	const struct pkm_lcs_effective_value_snapshot *before,
+	const struct pkm_lcs_effective_value_snapshot *after)
+{
+	const u8 *before_data;
+	const u8 *after_data;
+
+	if (!before || !after || !before->result.found || !after->result.found)
+		return false;
+	if (before->result.value_type != after->result.value_type ||
+	    before->result.data_len != after->result.data_len ||
+	    before->result.layer_len != after->result.layer_len ||
+	    before->result.selected_sequence != after->result.selected_sequence)
+		return false;
+	before_data = before->frame.data + before->result.data_offset;
+	after_data = after->frame.data + after->result.data_offset;
+	if (before->result.data_len &&
+	    memcmp(before_data, after_data, before->result.data_len))
+		return false;
+	if (before->result.layer_len &&
+	    memcmp(before->result.layer, after->result.layer,
+		   before->result.layer_len))
+		return false;
+	return true;
+}
+
+static long pkm_lcs_key_fd_delete_value_watch_event_type(
+	const struct pkm_lcs_effective_value_snapshot *before,
+	const struct pkm_lcs_effective_value_snapshot *after, u32 *event_type)
+{
+	if (!before || !after || !event_type)
+		return -EINVAL;
+
+	*event_type = 0;
+	if (before->result.found && !after->result.found) {
+		*event_type = REG_WATCH_VALUE_DELETED;
+		return 0;
+	}
+	if (!before->result.found && after->result.found) {
+		*event_type = REG_WATCH_VALUE_SET;
+		return 0;
+	}
+	if (before->result.found && after->result.found &&
+	    !pkm_lcs_effective_value_snapshots_same(before, after))
+		*event_type = REG_WATCH_VALUE_SET;
+	return 0;
 }
 
 static long pkm_lcs_key_fd_get_security_from_args(
@@ -1407,6 +1538,17 @@ static void pkm_lcs_set_value_input_destroy(
 	memset(input, 0, sizeof(*input));
 }
 
+static void pkm_lcs_delete_value_input_destroy(
+	struct pkm_lcs_delete_value_input *input)
+{
+	if (!input)
+		return;
+
+	kfree(input->value_name);
+	pkm_lcs_create_layer_target_destroy(&input->target);
+	memset(input, 0, sizeof(*input));
+}
+
 static long pkm_lcs_key_fd_copy_set_value_value_name(
 	const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_value_args *args,
@@ -1433,10 +1575,78 @@ static long pkm_lcs_key_fd_copy_set_value_value_name(
 	return 0;
 }
 
+static long pkm_lcs_key_fd_copy_delete_value_name(
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_value_args *args,
+	struct pkm_lcs_delete_value_input *input)
+{
+	size_t alloc_len;
+
+	if (!ops || !ops->read || !args || !input)
+		return -EINVAL;
+	if (args->name_len && !args->name_ptr)
+		return -EFAULT;
+	if (check_add_overflow((size_t)args->name_len, (size_t)1,
+			       &alloc_len))
+		return -EOVERFLOW;
+
+	input->value_name = kzalloc(alloc_len, GFP_KERNEL);
+	if (!input->value_name)
+		return -ENOMEM;
+	if (args->name_len &&
+	    !ops->read(ops->ctx, input->value_name,
+		       (const void __user *)(unsigned long)args->name_ptr,
+		       args->name_len))
+		return -EFAULT;
+	return 0;
+}
+
 static long pkm_lcs_key_fd_copy_set_value_layer(
 	const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_value_args *args,
 	struct pkm_lcs_set_value_input *input)
+{
+	char *layer;
+	size_t alloc_len;
+
+	if (!ops || !ops->read || !args || !input)
+		return -EINVAL;
+
+	if (!args->layer_len) {
+		if (args->layer_ptr)
+			return -EINVAL;
+		input->target.name = "base";
+		input->target.name_len = 4;
+		input->target.implicit_base = 1;
+		return 0;
+	}
+
+	if (!args->layer_ptr)
+		return -EFAULT;
+	if (check_add_overflow((size_t)args->layer_len, (size_t)1,
+			       &alloc_len))
+		return -EOVERFLOW;
+
+	layer = kzalloc(alloc_len, GFP_KERNEL);
+	if (!layer)
+		return -ENOMEM;
+	if (!ops->read(ops->ctx, layer,
+		       (const void __user *)(unsigned long)args->layer_ptr,
+		       args->layer_len)) {
+		kfree(layer);
+		return -EFAULT;
+	}
+
+	input->target.owned_name = layer;
+	input->target.name = layer;
+	input->target.name_len = args->layer_len;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_copy_delete_value_layer(
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_value_args *args,
+	struct pkm_lcs_delete_value_input *input)
 {
 	char *layer;
 	size_t alloc_len;
@@ -1530,8 +1740,31 @@ static long pkm_lcs_key_fd_copy_set_value_input(
 	return 0;
 }
 
-static long pkm_lcs_key_fd_set_value_authorize_layer(
-	const struct pkm_lcs_set_value_input *input, const void *token)
+static long pkm_lcs_key_fd_copy_delete_value_input(
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_value_args *args,
+	const struct pkm_lcs_key_fd *key_fd,
+	struct pkm_lcs_delete_value_input *input)
+{
+	long ret;
+
+	if (!ops || !ops->read || !args || !key_fd || !input)
+		return -EINVAL;
+	memset(input, 0, sizeof(*input));
+
+	ret = pkm_lcs_key_fd_copy_delete_value_name(ops, args, input);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_key_fd_copy_delete_value_layer(ops, args, input);
+	if (ret)
+		return ret;
+	return pkm_lcs_rsi_validate_delete_value_user_shape(
+		key_fd->key_guid, input->value_name, args->name_len,
+		input->target.name, input->target.name_len);
+}
+
+static long pkm_lcs_key_fd_authorize_value_layer_target(
+	const struct pkm_lcs_create_layer_target *target, const void *token)
 {
 	const struct pkm_lcs_rsi_layer_view *layers = NULL;
 	struct pkm_lcs_layer_target_admission_plan target_plan = { };
@@ -1539,16 +1772,36 @@ static long pkm_lcs_key_fd_set_value_authorize_layer(
 	u32 layer_count = 0;
 	long ret;
 
-	if (!input)
+	if (!target)
 		return -EINVAL;
 
 	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
-	ret = pkm_lcs_create_layer_target_admit(&input->target, layers,
-						layer_count, &target_plan);
+	ret = pkm_lcs_create_layer_target_admit(target, layers, layer_count,
+						&target_plan);
 	if (ret)
 		return ret;
 	return pkm_lcs_create_layer_write_access_check_for_token(
-		token, &input->target, false, NULL, 0, NULL, 0, &layer_plan);
+		token, target, false, NULL, 0, NULL, 0, &layer_plan);
+}
+
+static long pkm_lcs_key_fd_set_value_authorize_layer(
+	const struct pkm_lcs_set_value_input *input, const void *token)
+{
+	if (!input)
+		return -EINVAL;
+
+	return pkm_lcs_key_fd_authorize_value_layer_target(&input->target,
+							   token);
+}
+
+static long pkm_lcs_key_fd_delete_value_authorize_layer(
+	const struct pkm_lcs_delete_value_input *input, const void *token)
+{
+	if (!input)
+		return -EINVAL;
+
+	return pkm_lcs_key_fd_authorize_value_layer_target(&input->target,
+							   token);
 }
 
 static long pkm_lcs_key_fd_set_value_layer_cap_check(
@@ -2258,6 +2511,112 @@ static long pkm_lcs_key_fd_set_value_from_args(
 		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
 }
 
+static long pkm_lcs_key_fd_delete_value_from_args_for_token(
+	struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_value_args *args)
+{
+	struct pkm_lcs_delete_value_input input = { };
+	struct pkm_lcs_effective_value_snapshot before = { };
+	struct pkm_lcs_effective_value_snapshot after = { };
+	struct pkm_lcs_source_response_result response = { };
+	u64 generation = 0;
+	u64 last_write_time;
+	u32 event_type = 0;
+	long ret;
+
+	if (!key_fd || !args)
+		return -EINVAL;
+	if (!key_fd->path_component_count || !key_fd->ancestor_guids)
+		return -EINVAL;
+	if (!ops)
+		ops = &pkm_lcs_key_fd_default_usercopy_ops;
+	if (!ops->read)
+		return -EINVAL;
+
+	if (args->_pad0 || args->_pad1 || args->_pad2)
+		return -EINVAL;
+	if (args->txn_fd < -1)
+		return -EINVAL;
+	if (args->txn_fd >= 0)
+		return -EOPNOTSUPP;
+
+	ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
+		key_fd->granted_access, REG_IOC_DELETE_VALUE_NR);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_copy_delete_value_input(ops, args, key_fd,
+						     &input);
+	if (ret)
+		goto out_input;
+
+	ret = pkm_lcs_key_fd_delete_value_authorize_layer(&input, token);
+	if (ret)
+		goto out_input;
+
+	ret = pkm_lcs_key_fd_query_effective_value_snapshot(
+		key_fd, 0, input.value_name, args->name_len, &before);
+	if (ret)
+		goto out_input;
+
+	ret = pkm_lcs_source_delete_value_entry_round_trip_timeout(
+		key_fd->source_id, 0, key_fd->key_guid, input.value_name,
+		args->name_len, input.target.name, input.target.name_len,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &response, NULL);
+	if (ret)
+		goto out_before;
+
+	ret = pkm_lcs_key_fd_query_effective_value_snapshot(
+		key_fd, 0, input.value_name, args->name_len, &after);
+	if (ret)
+		goto out_before;
+
+	last_write_time = (u64)ktime_get_real_ns();
+	ret = pkm_lcs_source_write_key_round_trip_timeout(
+		key_fd->source_id, 0, key_fd->key_guid, NULL, 0,
+		last_write_time, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, NULL,
+		NULL);
+	if (ret) {
+		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+		ret = -EIO;
+		goto out_after;
+	}
+
+	ret = pkm_lcs_source_record_transaction_generation(
+		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
+	if (ret) {
+		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+		ret = -EIO;
+		goto out_after;
+	}
+
+	ret = pkm_lcs_key_fd_delete_value_watch_event_type(&before, &after,
+							   &event_type);
+	if (ret)
+		goto out_after;
+	if (event_type)
+		pkm_lcs_key_fd_publish_value_effects(
+			key_fd, event_type, input.value_name, args->name_len);
+	ret = 0;
+
+out_after:
+	pkm_lcs_effective_value_snapshot_destroy(&after);
+out_before:
+	pkm_lcs_effective_value_snapshot_destroy(&before);
+out_input:
+	pkm_lcs_delete_value_input_destroy(&input);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_delete_value_from_args(
+	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_value_args *args)
+{
+	return pkm_lcs_key_fd_delete_value_from_args_for_token(
+		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
+}
+
 static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 				 unsigned long arg)
 {
@@ -2271,6 +2630,7 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	struct reg_query_value_args query_value_args;
 	struct reg_set_security_args set_security_args;
 	struct reg_set_value_args set_value_args;
+	struct reg_delete_value_args delete_value_args;
 	long ret;
 
 	if (!file)
@@ -2289,6 +2649,15 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 		return pkm_lcs_key_fd_set_value_from_args(
 			key_fd, &pkm_lcs_key_fd_default_usercopy_ops,
 			&set_value_args);
+	case REG_IOC_DELETE_VALUE:
+		if (!arg)
+			return -EFAULT;
+		if (copy_from_user(&delete_value_args, (void __user *)arg,
+				   sizeof(delete_value_args)))
+			return -EFAULT;
+		return pkm_lcs_key_fd_delete_value_from_args(
+			key_fd, &pkm_lcs_key_fd_default_usercopy_ops,
+			&delete_value_args);
 	case REG_IOC_QUERY_VALUE:
 		if (!arg)
 			return -EFAULT;
@@ -3153,6 +3522,24 @@ long pkm_lcs_kunit_key_fd_set_value_for_token(
 
 	ret = pkm_lcs_key_fd_set_value_from_args_for_token(key_fd, token, ops,
 							    args);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_delete_value_for_token(
+	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_value_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_delete_value_from_args_for_token(
+		key_fd, token, ops, args);
 	fdput(held);
 	return ret;
 }

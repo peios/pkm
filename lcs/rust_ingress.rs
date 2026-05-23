@@ -1494,7 +1494,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_query_values_request_frame(
 
 #[no_mangle]
 pub unsafe extern "C" fn lcs_rust_validate_set_value_user_shape(
-    guid: *const u8,
+	guid: *const u8,
     value_name: *const u8,
     value_name_len: u32,
     layer_name: *const u8,
@@ -1532,6 +1532,42 @@ pub unsafe extern "C" fn lcs_rust_validate_set_value_user_shape(
     }
     if let Err(err) = validate_value_write_type(value_type, data_len, true) {
         return public_set_value_validation_error_return(err);
+    }
+
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_delete_value_user_shape(
+    guid: *const u8,
+    value_name: *const u8,
+    value_name_len: u32,
+    layer_name: *const u8,
+    layer_name_len: u32,
+) -> c_int {
+    if guid.is_null()
+        || (value_name_len != 0 && value_name.is_null())
+        || layer_name.is_null()
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
+    if guid_bytes.iter().all(|byte| *byte == 0) {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let value_name_bytes = if value_name_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(value_name, value_name_len as usize) }
+    };
+    let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
+
+    if let Err(err) = validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT) {
+        return rsi_request_frame_error_return(err);
+    }
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+        return rsi_request_frame_error_return(err);
     }
 
     0

@@ -166,6 +166,9 @@ long pkm_lcs_rsi_validate_set_value_user_shape(
 	const u8 guid[RSI_GUID_SIZE], const char *value_name,
 	u32 value_name_len, const char *layer_name, u32 layer_name_len,
 	u32 value_type, size_t data_len);
+long pkm_lcs_rsi_validate_delete_value_user_shape(
+	const u8 guid[RSI_GUID_SIZE], const char *value_name,
+	u32 value_name_len, const char *layer_name, u32 layer_name_len);
 long pkm_lcs_rsi_plan_set_value_layer_admission(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence, const char *value_name, u32 value_name_len,
