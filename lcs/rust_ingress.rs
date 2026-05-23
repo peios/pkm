@@ -17,7 +17,7 @@ use crate::lcs_core::{
     plan_layer_target_admission, plan_registry_get_security,
     plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
     plan_registry_open_pre_resolution_access, plan_registry_security_info_fd_access_gate,
-    plan_registry_set_security,
+    plan_registry_set_security, plan_value_layer_admission,
     plan_rsi_source_read, plan_source_registration_sequence_update,
     registry_ioctl_access_requirement, registry_ioctl_fd_access_gate_errno,
     registry_open_pre_resolution_linux_errno, resolve_named_path_entry, resolve_value, route_hive,
@@ -40,6 +40,8 @@ use crate::lcs_core::{
     validate_rsi_status_only_response_for_request, validate_source_registration,
     validate_source_slots, validate_symlink_target_bytes, validate_syscall_path_c_string,
     validate_value_data_len, validate_value_name_bytes, validate_value_write_type,
+    value_data_len_linux_errno, value_layer_admission_linux_errno,
+    value_type_validation_linux_errno,
     write_key_open_audit_payload, write_rsi_abort_transaction_request_frame,
     write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
     write_rsi_create_entry_request_frame, write_rsi_create_key_request_frame,
@@ -55,7 +57,8 @@ use crate::lcs_core::{
     RegistryIoctlAccessRequirement, RegistryKeyOpenAccessInput, RegistryOpenAccessDecision,
     RegistryOpenPreResolutionAccessPlan, RsiReadPlan, RsiRetainedRequest, RsiTransactionMode,
     SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
-    SourceSlotStatus, SourceSlotView, ValueEntry, ValueResolution, WatchEventRecordPlan,
+    SourceSlotStatus, SourceSlotView, ValueEntry, ValueLayerAdmissionInput, ValueResolution,
+    WatchEventRecordPlan,
     WatchEventRecordRequest,
     WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_TOMBSTONE,
     RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY, write_watch_event_record,
@@ -363,6 +366,13 @@ pub struct PkmLcsRsiEnumValueResultCopy {
     pub _pad1: [u8; 7],
 }
 
+#[repr(C)]
+pub struct PkmLcsValueLayerAdmissionResultCopy {
+    pub current_distinct_layers: u32,
+    pub replacing_existing_layer_entry: u8,
+    pub _pad: [u8; 3],
+}
+
 fn source_registration_error_return(err: crate::lcs_core::LcsError) -> c_int {
     source_registration_error_linux_errno(err)
         .unwrap_or(LinuxErrno::Einval)
@@ -465,6 +475,19 @@ fn rsi_request_frame_error_return(err: LcsError) -> c_int {
         _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
+}
+
+fn public_set_value_validation_error_return(err: LcsError) -> c_int {
+    value_type_validation_linux_errno(&err)
+        .or_else(|| value_data_len_linux_errno(&err))
+        .unwrap_or_else(|| match err {
+            LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => {
+                LinuxErrno::Enametoolong
+            }
+            LcsError::NilKeyGuid => LinuxErrno::Einval,
+            _ => LinuxErrno::Einval,
+        })
+        .negated_return() as c_int
 }
 
 fn rsi_lookup_response_error_return(err: LcsError) -> c_int {
@@ -1470,6 +1493,178 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_query_values_request_frame(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_set_value_user_shape(
+    guid: *const u8,
+    value_name: *const u8,
+    value_name_len: u32,
+    layer_name: *const u8,
+    layer_name_len: u32,
+    value_type: u32,
+    data_len: usize,
+) -> c_int {
+    if guid.is_null()
+        || (value_name_len != 0 && value_name.is_null())
+        || layer_name.is_null()
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
+    if guid_bytes.iter().all(|byte| *byte == 0) {
+        return public_set_value_validation_error_return(LcsError::NilKeyGuid);
+    }
+
+    let value_name_bytes = if value_name_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(value_name, value_name_len as usize) }
+    };
+    let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
+
+    if let Err(err) = validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT) {
+        return public_set_value_validation_error_return(err);
+    }
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+        return public_set_value_validation_error_return(err);
+    }
+    if let Err(err) = validate_value_data_len(data_len, &LcsLimits::DEFAULT) {
+        return public_set_value_validation_error_return(err);
+    }
+    if let Err(err) = validate_value_write_type(value_type, data_len, true) {
+        return public_set_value_validation_error_return(err);
+    }
+
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_plan_set_value_layer_admission(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    value_name: *const u8,
+    value_name_len: u32,
+    layer_name: *const u8,
+    layer_name_len: u32,
+    result_out: *mut PkmLcsValueLayerAdmissionResultCopy,
+) -> c_int {
+    let Some(result_out) = (unsafe { result_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *result_out = PkmLcsValueLayerAdmissionResultCopy {
+        current_distinct_layers: 0,
+        replacing_existing_layer_entry: 0,
+        _pad: [0; 3],
+    };
+
+    if frame.is_null()
+        || (value_name_len != 0 && value_name.is_null())
+        || layer_name.is_null()
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let value_name_bytes = if value_name_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(value_name, value_name_len as usize) }
+    };
+    let requested_name = match validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT) {
+        Ok(name) => name,
+        Err(err) => return public_set_value_validation_error_return(err),
+    };
+    let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
+    let target_layer = match validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+        Ok(layer) => layer,
+        Err(err) => return public_set_value_validation_error_return(err),
+    };
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let payload = match parse_rsi_query_values_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_QUERY_VALUES,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_query_values_response_error_return(err),
+    };
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) =
+        validate_rsi_query_values_response_value_payloads(&payload, &LcsLimits::DEFAULT)
+    {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let mut distinct_layers = match PkmVec::<&str>::with_capacity(payload.entry_count as usize) {
+        Ok(layers) => layers,
+        Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+    };
+    let mut replacing_existing_layer_entry = false;
+    let mut allocation_failed = false;
+    let mut malformed = false;
+
+    if let Err(err) =
+        for_each_rsi_query_values_source_value_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+            if !casefold_eq(entry.name, requested_name) {
+                malformed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            for existing in distinct_layers.as_slice() {
+                if casefold_eq(*existing, entry.entry.layer) {
+                    malformed = true;
+                    return Err(LcsError::RsiPayloadLengthOverflow);
+                }
+            }
+            if casefold_eq(entry.entry.layer, target_layer) {
+                replacing_existing_layer_entry = true;
+            }
+            if distinct_layers.push(entry.entry.layer).is_err() {
+                allocation_failed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            Ok(())
+        })
+    {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        if malformed {
+            return LinuxErrno::Eio.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let current_distinct_layers = distinct_layers.len();
+    if current_distinct_layers > u32::MAX as usize {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    }
+
+    if let Err(err) = plan_value_layer_admission(
+        &LcsLimits::DEFAULT,
+        ValueLayerAdmissionInput {
+            current_distinct_layers,
+            replacing_existing_layer_entry,
+        },
+    ) {
+        return value_layer_admission_linux_errno(&err)
+            .unwrap_or(LinuxErrno::Einval)
+            .negated_return() as c_int;
+    }
+
+    result_out.current_distinct_layers = current_distinct_layers as u32;
+    result_out.replacing_existing_layer_entry = replacing_existing_layer_entry as u8;
+    0
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lcs_rust_write_rsi_set_value_request_frame(
     dst: *mut u8,
     dst_len: usize,
@@ -1758,7 +1953,11 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_write_key_request_frame(
         };
     }
 
-    if dst.is_null() || guid.is_null() || sd.is_null() || sd_len == 0 {
+    if dst.is_null()
+        || guid.is_null()
+        || (sd_len != 0 && sd.is_null())
+        || (sd_len == 0 && !sd.is_null())
+    {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
 
@@ -1766,14 +1965,18 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_write_key_request_frame(
     let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
     let mut guid_copy = [0u8; 16];
     guid_copy.copy_from_slice(guid_bytes);
-    let sd_bytes = unsafe { slice::from_raw_parts(sd, sd_len) };
+    let sd_bytes = if sd_len == 0 {
+        None
+    } else {
+        Some(unsafe { slice::from_raw_parts(sd, sd_len) })
+    };
 
     match write_rsi_write_key_request_frame(
         dst_bytes,
         request_id,
         txn_id,
         guid_copy,
-        Some(sd_bytes),
+        sd_bytes,
         Some(last_write_time),
     ) {
         Ok(built) => {

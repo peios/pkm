@@ -2460,16 +2460,19 @@ static long pkm_lcs_source_dispatch_write_key_request_with_waiter(
 
 	if (result)
 		memset(result, 0, sizeof(*result));
-	if (!guid || !sd || !sd_len)
+	if (!guid || (sd_len && !sd) || (!sd_len && sd))
 		return -EINVAL;
 	if (sd_len > U32_MAX)
 		return -EOVERFLOW;
 	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
 			       (size_t)RSI_GUID_SIZE, &frame_len) ||
-	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
-	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
-	    check_add_overflow(frame_len, sd_len, &frame_len) ||
-	    check_add_overflow(frame_len, sizeof(u64), &frame_len))
+	    check_add_overflow(frame_len, sizeof(u32), &frame_len))
+		return -EOVERFLOW;
+	if (sd_len &&
+	    (check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
+	     check_add_overflow(frame_len, sd_len, &frame_len)))
+		return -EOVERFLOW;
+	if (check_add_overflow(frame_len, sizeof(u64), &frame_len))
 		return -EOVERFLOW;
 
 	request = kzalloc(sizeof(*request), GFP_KERNEL);

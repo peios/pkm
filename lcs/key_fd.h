@@ -135,6 +135,9 @@ long pkm_lcs_kunit_key_fd_query_key_info(
 long pkm_lcs_kunit_key_fd_set_security(
 	int fd, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_security_args *args);
+long pkm_lcs_kunit_key_fd_set_value_for_token(
+	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_set_value_args *args);
 long pkm_lcs_kunit_key_fd_notify(int fd, const struct reg_notify_args *args);
 long pkm_lcs_kunit_key_fd_queue_watch_event(int fd, u32 event_type,
 					    const u8 *record, u32 record_len);
