@@ -1553,7 +1553,7 @@ static long pkm_lcs_key_fd_set_value_authorize_layer(
 
 static long pkm_lcs_key_fd_set_value_layer_cap_check(
 	const struct pkm_lcs_key_fd *key_fd,
-	const struct pkm_lcs_set_value_input *input)
+	const struct pkm_lcs_set_value_input *input, u64 txn_id)
 {
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
@@ -1570,7 +1570,7 @@ static long pkm_lcs_key_fd_set_value_layer_cap_check(
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
-		key_fd->source_id, 0, key_fd->key_guid, input->value_name,
+		key_fd->source_id, txn_id, key_fd->key_guid, input->value_name,
 		(input->value_name ? (u32)strlen(input->value_name) : 0),
 		false, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
 		NULL);
@@ -2121,9 +2121,15 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 {
 	struct pkm_lcs_set_value_input input = { };
 	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_transaction_mutation_handle mutation = { };
+	struct pkm_lcs_transaction_binding_plan binding_probe = { };
+	struct pkm_lcs_transaction_binding_plan binding = { };
+	struct pkm_lcs_transaction_set_value_log_input log_input = { };
 	u64 generation = 0;
 	u64 last_write_time;
 	u64 sequence = 0;
+	u64 cap_txn_id = 0;
+	u64 txn_id = 0;
 	long ret;
 
 	if (!key_fd || !args)
@@ -2137,7 +2143,7 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 
 	if (args->_pad0 || args->_pad1 || args->_pad2)
 		return -EINVAL;
-	if (args->txn_fd != -1)
+	if (args->txn_fd < -1)
 		return -EINVAL;
 
 	ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
@@ -2153,7 +2159,18 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	if (ret)
 		goto out_input;
 
-	ret = pkm_lcs_key_fd_set_value_layer_cap_check(key_fd, &input);
+	if (args->txn_fd >= 0) {
+		ret = pkm_lcs_transaction_fd_prepare_mutation_binding(
+			args->txn_fd, key_fd->source_id, key_fd->ancestor_guids[0],
+			&binding_probe);
+		if (ret)
+			goto out_input;
+		if (binding_probe.action == PKM_LCS_TRANSACTION_BIND_REUSE)
+			cap_txn_id = binding_probe.transaction_id;
+	}
+
+	ret = pkm_lcs_key_fd_set_value_layer_cap_check(key_fd, &input,
+						       cap_txn_id);
 	if (ret)
 		goto out_input;
 
@@ -2165,23 +2182,51 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	if (ret)
 		goto out_input;
 
+	if (args->txn_fd >= 0) {
+		log_input.key_guid = key_fd->key_guid;
+		log_input.value_name = input.value_name;
+		log_input.value_name_len = args->name_len;
+		log_input.layer = input.target.name;
+		log_input.layer_len = input.target.name_len;
+		log_input.path = (const char * const *)key_fd->resolved_path;
+		log_input.ancestor_guids =
+			(const u8 (*)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES])
+				key_fd->ancestor_guids;
+		log_input.depth = key_fd->path_component_count;
+		log_input.sequence = sequence;
+
+		ret = pkm_lcs_transaction_fd_begin_set_value_mutation(
+			args->txn_fd, key_fd->source_id, key_fd->ancestor_guids[0],
+			&log_input, &mutation, &binding);
+		if (ret)
+			goto out_input;
+		txn_id = binding.transaction_id;
+	}
+
 	ret = pkm_lcs_source_set_value_round_trip_timeout(
-		key_fd->source_id, 0, key_fd->key_guid, input.value_name,
+		key_fd->source_id, txn_id, key_fd->key_guid, input.value_name,
 		args->name_len, input.target.name, input.target.name_len,
 		args->type, input.data, args->data_len, sequence,
 		args->expected_seq, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
 		&response, NULL);
 	if (ret)
-		goto out_input;
+		goto out_cancel_mutation;
 
 	last_write_time = (u64)ktime_get_real_ns();
 	ret = pkm_lcs_source_write_key_round_trip_timeout(
-		key_fd->source_id, 0, key_fd->key_guid, NULL, 0,
+		key_fd->source_id, txn_id, key_fd->key_guid, NULL, 0,
 		last_write_time, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, NULL,
 		NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
+		goto out_cancel_mutation;
+	}
+
+	if (args->txn_fd >= 0) {
+		ret = pkm_lcs_transaction_fd_commit_mutation(&mutation);
+		if (ret)
+			goto out_cancel_mutation;
 		goto out_input;
 	}
 
@@ -2197,6 +2242,9 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 						 args->name_len);
 	ret = 0;
 
+out_cancel_mutation:
+	if (ret && mutation.active)
+		pkm_lcs_transaction_fd_cancel_mutation(&mutation);
 out_input:
 	pkm_lcs_set_value_input_destroy(&input);
 	return ret;
