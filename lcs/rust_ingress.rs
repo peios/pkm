@@ -54,7 +54,7 @@ use crate::lcs_core::{
     HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest, KeyWatchState,
     LayerResolutionContext, LayerTargetAdmissionInput, LayerView, LcsCallerTokenSummary,
     LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry,
-    NamedPathResolution, NamedValueEntry, PathKind, RegisteredHiveIdentity,
+    NamedPathResolution, NamedValueEntry, PathKind, PathTarget, RegisteredHiveIdentity,
     RegistryIoctlAccessRequirement, RegistryKeyOpenAccessInput, RegistryOpenAccessDecision,
     RegistryOpenPreResolutionAccessPlan, RsiReadPlan, RsiRetainedRequest, RsiTransactionMode,
     SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
@@ -276,6 +276,13 @@ pub struct PkmLcsRsiLookupChildResultCopy {
     pub symlink: u8,
     pub _pad: [u8; 5],
     pub key_guid: [u8; 16],
+}
+
+#[repr(C)]
+pub struct PkmLcsRsiLookupGuidEntryResultCopy {
+    pub source_path_entry_count: u32,
+    pub present: u8,
+    pub _pad: [u8; 3],
 }
 
 #[repr(C)]
@@ -3502,6 +3509,101 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_child(
         return LinuxErrno::Eio.negated_return() as c_int;
     }
 
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_guid_entry(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    child_name: *const u8,
+    child_name_len: u32,
+    target_guid: *const u8,
+    result_out: *mut PkmLcsRsiLookupGuidEntryResultCopy,
+) -> c_int {
+    if result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *result_out = PkmLcsRsiLookupGuidEntryResultCopy {
+            source_path_entry_count: 0,
+            present: 0,
+            _pad: [0; 3],
+        };
+    }
+
+    if frame.is_null() || child_name.is_null() || target_guid.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let child_bytes = unsafe { slice::from_raw_parts(child_name, child_name_len as usize) };
+    let child_component = match str::from_utf8(child_bytes) {
+        Ok(child_component) => child_component,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    if validate_key_component_bytes(child_bytes, &LcsLimits::DEFAULT).is_err() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let mut target = [0u8; 16];
+    target.copy_from_slice(unsafe { slice::from_raw_parts(target_guid, 16) });
+
+    let payload = match parse_rsi_lookup_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_LOOKUP,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_lookup_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_lookup_metadata_completeness(&payload) {
+        return rsi_lookup_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_lookup_path_response_names(&payload, &LcsLimits::DEFAULT) {
+        return rsi_lookup_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_lookup_metadata_security_descriptors(&payload) {
+        return rsi_lookup_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_lookup_path_response_sequences(&payload, next_sequence) {
+        return rsi_lookup_response_error_return(err);
+    }
+
+    let mut source_path_entry_count = 0usize;
+    let mut present = false;
+    if let Err(err) = for_each_rsi_lookup_source_path_entry(
+        &payload,
+        &LcsLimits::DEFAULT,
+        child_component,
+        |entry| {
+            source_path_entry_count = source_path_entry_count
+                .checked_add(1)
+                .ok_or(LcsError::RsiPayloadLengthOverflow)?;
+            if let PathTarget::Guid(guid) = entry.entry.target {
+                if guid == target {
+                    present = true;
+                }
+            }
+            Ok(())
+        },
+    ) {
+        return rsi_lookup_response_error_return(err);
+    }
+    if source_path_entry_count > u32::MAX as usize {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    }
+
+    unsafe {
+        (*result_out).source_path_entry_count = source_path_entry_count as u32;
+        (*result_out).present = present as u8;
+    }
     0
 }
 

@@ -129,6 +129,10 @@ struct pkm_lcs_hide_key_input {
 	struct pkm_lcs_create_layer_target target;
 };
 
+struct pkm_lcs_delete_key_input {
+	struct pkm_lcs_create_layer_target target;
+};
+
 struct pkm_lcs_effective_value_snapshot {
 	struct pkm_lcs_source_response_frame frame;
 	struct pkm_lcs_rsi_query_value_result result;
@@ -1701,6 +1705,16 @@ static void pkm_lcs_hide_key_input_destroy(struct pkm_lcs_hide_key_input *input)
 	memset(input, 0, sizeof(*input));
 }
 
+static void pkm_lcs_delete_key_input_destroy(
+	struct pkm_lcs_delete_key_input *input)
+{
+	if (!input)
+		return;
+
+	pkm_lcs_create_layer_target_destroy(&input->target);
+	memset(input, 0, sizeof(*input));
+}
+
 static long pkm_lcs_key_fd_copy_set_value_value_name(
 	const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_value_args *args,
@@ -1879,6 +1893,48 @@ static long pkm_lcs_key_fd_copy_hide_key_layer(
 	return 0;
 }
 
+static long pkm_lcs_key_fd_copy_delete_key_layer(
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_key_args *args,
+	struct pkm_lcs_delete_key_input *input)
+{
+	char *layer;
+	size_t alloc_len;
+
+	if (!ops || !ops->read || !args || !input)
+		return -EINVAL;
+
+	if (!args->layer_len) {
+		if (args->layer_ptr)
+			return -EINVAL;
+		input->target.name = "base";
+		input->target.name_len = 4;
+		input->target.implicit_base = 1;
+		return 0;
+	}
+
+	if (!args->layer_ptr)
+		return -EFAULT;
+	if (check_add_overflow((size_t)args->layer_len, (size_t)1,
+			       &alloc_len))
+		return -EOVERFLOW;
+
+	layer = kzalloc(alloc_len, GFP_KERNEL);
+	if (!layer)
+		return -ENOMEM;
+	if (!ops->read(ops->ctx, layer,
+		       (const void __user *)(unsigned long)args->layer_ptr,
+		       args->layer_len)) {
+		kfree(layer);
+		return -EFAULT;
+	}
+
+	input->target.owned_name = layer;
+	input->target.name = layer;
+	input->target.name_len = args->layer_len;
+	return 0;
+}
+
 static long pkm_lcs_key_fd_copy_set_value_data(
 	const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_value_args *args,
@@ -1969,6 +2025,18 @@ static long pkm_lcs_key_fd_copy_hide_key_input(
 	return pkm_lcs_key_fd_copy_hide_key_layer(ops, args, input);
 }
 
+static long pkm_lcs_key_fd_copy_delete_key_input(
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_key_args *args,
+	struct pkm_lcs_delete_key_input *input)
+{
+	if (!ops || !ops->read || !args || !input)
+		return -EINVAL;
+	memset(input, 0, sizeof(*input));
+
+	return pkm_lcs_key_fd_copy_delete_key_layer(ops, args, input);
+}
+
 static long pkm_lcs_key_fd_authorize_value_layer_target(
 	const struct pkm_lcs_create_layer_target *target, const void *token)
 {
@@ -2020,7 +2088,17 @@ static long pkm_lcs_key_fd_hide_key_authorize_layer(
 							   token);
 }
 
-static long pkm_lcs_key_fd_hide_key_target(
+static long pkm_lcs_key_fd_delete_key_authorize_layer(
+	const struct pkm_lcs_delete_key_input *input, const void *token)
+{
+	if (!input)
+		return -EINVAL;
+
+	return pkm_lcs_key_fd_authorize_value_layer_target(&input->target,
+							   token);
+}
+
+static long pkm_lcs_key_fd_path_entry_target(
 	const struct pkm_lcs_key_fd *key_fd,
 	const u8 **parent_guid_out, const char **child_name_out,
 	u32 *child_name_len_out)
@@ -2074,6 +2152,100 @@ static long pkm_lcs_key_fd_validate_hide_key_request_shape(
 		frame, sizeof(frame), 1, 0, parent_guid, child_name,
 		child_name_len, input->target.name, input->target.name_len, 1,
 		&built);
+}
+
+static long pkm_lcs_key_fd_validate_delete_key_request_shape(
+	const u8 parent_guid[PKM_LCS_GUID_BYTES], const char *child_name,
+	u32 child_name_len, const struct pkm_lcs_delete_key_input *input)
+{
+	struct pkm_lcs_rsi_built_request built = { };
+	u8 frame[1024];
+
+	if (!parent_guid || !child_name || !input)
+		return -EINVAL;
+
+	return pkm_lcs_rsi_build_delete_entry_request(
+		frame, sizeof(frame), 1, 0, parent_guid, child_name,
+		child_name_len, input->target.name, input->target.name_len,
+		&built);
+}
+
+static long pkm_lcs_key_fd_delete_key_visible_child_gate(
+	const struct pkm_lcs_key_fd *key_fd)
+{
+	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_rsi_enum_children_info_summary summary = { };
+	u64 next_sequence = 0;
+	u32 layer_count = 0;
+	long ret;
+
+	if (!key_fd)
+		return -EINVAL;
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
+		key_fd->source_id, 0, key_fd->key_guid,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+	if (ret)
+		goto out_frame;
+
+	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
+		frame.data, frame.len, response.request_id, next_sequence,
+		layers, layer_count, NULL, 0, &summary);
+	if (ret)
+		goto out_frame;
+	if (summary.subkey_count)
+		ret = -ENOTEMPTY;
+
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_delete_key_guid_still_named(
+	const struct pkm_lcs_key_fd *key_fd,
+	const u8 parent_guid[PKM_LCS_GUID_BYTES], const char *child_name,
+	u32 child_name_len, bool *still_named_out)
+{
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_rsi_lookup_guid_entry_result result = { };
+	u64 next_sequence = 0;
+	long ret;
+
+	if (!key_fd || !parent_guid || !child_name || !still_named_out)
+		return -EINVAL;
+	*still_named_out = false;
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
+		key_fd->source_id, 0, parent_guid, child_name, child_name_len,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+	if (ret)
+		goto out_frame;
+
+	ret = pkm_lcs_rsi_materialize_lookup_guid_entry(
+		frame.data, frame.len, response.request_id, next_sequence,
+		child_name, child_name_len, key_fd->key_guid, &result);
+	if (ret)
+		goto out_frame;
+
+	*still_named_out = result.present != 0;
+
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+	return ret;
 }
 
 static long pkm_lcs_key_fd_set_value_layer_cap_check(
@@ -2925,6 +3097,118 @@ static long pkm_lcs_key_fd_delete_value_from_args(
 		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
 }
 
+static long pkm_lcs_key_fd_delete_key_from_args_for_token(
+	struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_key_args *args)
+{
+	struct pkm_lcs_delete_key_input input = { };
+	struct pkm_lcs_source_response_result response = { };
+	const u8 *parent_guid = NULL;
+	const char *child_name = NULL;
+	bool still_named = false;
+	u64 generation = 0;
+	u64 last_write_time;
+	u32 child_name_len = 0;
+	long ret;
+
+	if (!key_fd || !args)
+		return -EINVAL;
+	if (!ops)
+		ops = &pkm_lcs_key_fd_default_usercopy_ops;
+	if (!ops->read)
+		return -EINVAL;
+
+	if (args->_pad0 || args->_pad1)
+		return -EINVAL;
+	if (args->txn_fd < -1)
+		return -EINVAL;
+	if (args->txn_fd >= 0)
+		return -EOPNOTSUPP;
+
+	ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
+		key_fd->granted_access, REG_IOC_DELETE_KEY_NR);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_copy_delete_key_input(ops, args, &input);
+	if (ret)
+		goto out_input;
+
+	ret = pkm_lcs_key_fd_path_entry_target(key_fd, &parent_guid,
+					       &child_name, &child_name_len);
+	if (ret)
+		goto out_input;
+
+	ret = pkm_lcs_key_fd_validate_delete_key_request_shape(
+		parent_guid, child_name, child_name_len, &input);
+	if (ret)
+		goto out_input;
+
+	ret = pkm_lcs_key_fd_delete_key_authorize_layer(&input, token);
+	if (ret)
+		goto out_input;
+
+	ret = pkm_lcs_key_fd_delete_key_visible_child_gate(key_fd);
+	if (ret)
+		goto out_input;
+
+	ret = pkm_lcs_source_delete_entry_round_trip_timeout(
+		key_fd->source_id, 0, parent_guid, child_name, child_name_len,
+		input.target.name, input.target.name_len,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &response, NULL);
+	if (ret)
+		goto out_input;
+
+	ret = pkm_lcs_key_fd_delete_key_guid_still_named(
+		key_fd, parent_guid, child_name, child_name_len, &still_named);
+	if (ret) {
+		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+		ret = -EIO;
+		goto out_input;
+	}
+	if (!still_named) {
+		ret = pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
+			key_fd->source_id, key_fd->key_guid, NULL);
+		if (ret) {
+			pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+			ret = -EIO;
+			goto out_input;
+		}
+	}
+
+	last_write_time = (u64)ktime_get_real_ns();
+	ret = pkm_lcs_source_write_key_round_trip_timeout(
+		key_fd->source_id, 0, parent_guid, NULL, 0, last_write_time,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, NULL, NULL);
+	if (ret) {
+		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+		ret = -EIO;
+		goto out_input;
+	}
+
+	ret = pkm_lcs_source_record_transaction_generation(
+		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
+	if (ret) {
+		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+		ret = -EIO;
+		goto out_input;
+	}
+	ret = 0;
+
+out_input:
+	pkm_lcs_delete_key_input_destroy(&input);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_delete_key_from_args(
+	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_key_args *args)
+{
+	return pkm_lcs_key_fd_delete_key_from_args_for_token(
+		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
+}
+
 static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct pkm_lcs_usercopy_ops *ops,
@@ -2962,8 +3246,8 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 	if (ret)
 		goto out_input;
 
-	ret = pkm_lcs_key_fd_hide_key_target(key_fd, &parent_guid,
-					     &child_name, &child_name_len);
+	ret = pkm_lcs_key_fd_path_entry_target(key_fd, &parent_guid,
+					       &child_name, &child_name_len);
 	if (ret)
 		goto out_input;
 
@@ -3054,6 +3338,7 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	struct reg_set_security_args set_security_args;
 	struct reg_set_value_args set_value_args;
 	struct reg_delete_value_args delete_value_args;
+	struct reg_delete_key_args delete_key_args;
 	struct reg_hide_key_args hide_key_args;
 	long ret;
 
@@ -3082,6 +3367,15 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 		return pkm_lcs_key_fd_delete_value_from_args(
 			key_fd, &pkm_lcs_key_fd_default_usercopy_ops,
 			&delete_value_args);
+	case REG_IOC_DELETE_KEY:
+		if (!arg)
+			return -EFAULT;
+		if (copy_from_user(&delete_key_args, (void __user *)arg,
+				   sizeof(delete_key_args)))
+			return -EFAULT;
+		return pkm_lcs_key_fd_delete_key_from_args(
+			key_fd, &pkm_lcs_key_fd_default_usercopy_ops,
+			&delete_key_args);
 	case REG_IOC_HIDE_KEY:
 		if (!arg)
 			return -EFAULT;
@@ -4046,6 +4340,24 @@ long pkm_lcs_kunit_key_fd_delete_value_for_token(
 
 	ret = pkm_lcs_key_fd_delete_value_from_args_for_token(
 		key_fd, token, ops, args);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_delete_key_for_token(
+	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_key_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_delete_key_from_args_for_token(key_fd, token, ops,
+							    args);
 	fdput(held);
 	return ret;
 }

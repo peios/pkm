@@ -143,6 +143,9 @@ long pkm_lcs_kunit_key_fd_set_value_for_token(
 long pkm_lcs_kunit_key_fd_delete_value_for_token(
 	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_delete_value_args *args);
+long pkm_lcs_kunit_key_fd_delete_key_for_token(
+	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_key_args *args);
 long pkm_lcs_kunit_key_fd_hide_key_for_token(
 	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_hide_key_args *args);

@@ -89,6 +89,12 @@ struct pkm_lcs_rsi_lookup_child_result {
 	u8 key_guid[RSI_GUID_SIZE];
 };
 
+struct pkm_lcs_rsi_lookup_guid_entry_result {
+	u32 source_path_entry_count;
+	u8 present;
+	u8 _pad[3];
+};
+
 struct pkm_lcs_rsi_read_key_result {
 	u32 sd_offset;
 	u32 sd_len;
@@ -262,6 +268,11 @@ long pkm_lcs_rsi_materialize_lookup_child(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
 	struct pkm_lcs_rsi_lookup_child_result *result);
+long pkm_lcs_rsi_materialize_lookup_guid_entry(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	u64 next_sequence, const char *child_name, u32 child_name_len,
+	const u8 target_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_rsi_lookup_guid_entry_result *result);
 long pkm_lcs_rsi_materialize_read_key_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	struct pkm_lcs_rsi_read_key_result *result);

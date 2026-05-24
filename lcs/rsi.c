@@ -130,6 +130,11 @@ extern int lcs_rust_materialize_rsi_lookup_child(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	size_t private_layer_count,
 	struct pkm_lcs_rsi_lookup_child_result *result);
+extern int lcs_rust_materialize_rsi_lookup_guid_entry(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	u64 next_sequence, const u8 *child_name, u32 child_name_len,
+	const u8 *target_guid,
+	struct pkm_lcs_rsi_lookup_guid_entry_result *result);
 extern int lcs_rust_materialize_rsi_read_key_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	struct pkm_lcs_rsi_read_key_result *result);
@@ -658,6 +663,26 @@ long pkm_lcs_rsi_materialize_lookup_child(
 		frame, frame_len, request_id, next_sequence,
 		(const u8 *)child_name, child_name_len, layers, layer_count,
 		private_layers, private_layer_count, result);
+}
+
+long pkm_lcs_rsi_materialize_lookup_guid_entry(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	u64 next_sequence, const char *child_name, u32 child_name_len,
+	const u8 target_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_rsi_lookup_guid_entry_result *result)
+{
+	if (!result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	if (!frame || !child_name || !target_guid)
+		return -EINVAL;
+	if (frame_len < RSI_MIN_RESPONSE_SIZE)
+		return -EINVAL;
+
+	return lcs_rust_materialize_rsi_lookup_guid_entry(
+		frame, frame_len, request_id, next_sequence,
+		(const u8 *)child_name, child_name_len, target_guid, result);
 }
 
 long pkm_lcs_rsi_materialize_read_key_response(
