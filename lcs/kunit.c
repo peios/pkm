@@ -23373,6 +23373,132 @@ static void pkm_lcs_kunit_source_delete_layer_applies_orphans(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_delete_layer_broadcast_active_sources(
+	struct kunit *test)
+{
+	static const char layer_name[] = "role-broadcast";
+	static const char first_name[] = "Machine";
+	static const char second_name[] = "Users";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry first_hive;
+	struct reg_src_register_args first_args;
+	struct reg_src_hive_entry second_hive;
+	struct reg_src_register_args second_args;
+	struct pkm_lcs_delete_layer_broadcast_result result = { };
+	struct pkm_lcs_source_fd_snapshot first_snapshot = { };
+	struct pkm_lcs_source_fd_snapshot second_snapshot = { };
+	struct pkm_lcs_kunit_delete_layer_source_script first_script = { };
+	struct pkm_lcs_kunit_delete_layer_source_script second_script = { };
+	struct file first_file = { };
+	struct file second_file = { };
+	struct task_struct *first_task;
+	struct task_struct *second_task;
+	const void *token;
+	int first_thread_ret;
+	int second_thread_ret;
+	long ret;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &first_file),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &second_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&first_args, &first_hive,
+					  first_name, 1, 0);
+	pkm_lcs_kunit_build_register_args(&second_args, &second_hive,
+					  second_name, 2, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &first_file, &ops,
+				(const void __user *)&first_args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &second_file, &ops,
+				(const void __user *)&second_args),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
+				"base", strlen("base"), 1000, &result),
+			(long)-EINVAL);
+	pkm_lcs_kunit_source_fd_snapshot(&first_file, &first_snapshot);
+	pkm_lcs_kunit_source_fd_snapshot(&second_file, &second_snapshot);
+	KUNIT_EXPECT_EQ(test, first_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, first_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, second_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, second_snapshot.in_flight_request_count, 0U);
+
+	first_script.file = &first_file;
+	first_script.expected_layer_name = layer_name;
+	first_script.status = RSI_OK;
+	second_script.file = &second_file;
+	second_script.expected_layer_name = layer_name;
+	second_script.status = RSI_OK;
+	first_task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_layer_source_thread, &first_script,
+		"pkm-lcs-kunit-del-layer-src1");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(first_task));
+	second_task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_layer_source_thread, &second_script,
+		"pkm-lcs-kunit-del-layer-src2");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(second_task));
+	memset(&result, 0, sizeof(result));
+	ret = pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
+		layer_name, strlen(layer_name), 1000, &result);
+	first_thread_ret = pkm_lcs_kunit_kthread_stop(first_task);
+	second_thread_ret = pkm_lcs_kunit_kthread_stop(second_task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, first_thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, second_thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, first_script.result, 0);
+	KUNIT_EXPECT_EQ(test, second_script.result, 0);
+	KUNIT_EXPECT_EQ(test, first_script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, first_script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, second_script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, second_script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, result.active_source_count, 2U);
+	KUNIT_EXPECT_EQ(test, result.completed_source_count, 2U);
+	KUNIT_EXPECT_EQ(test, result.orphaned_guid_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.marked_fd_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.immediate_drop_count, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&first_file),
+			0);
+	memset(&second_script, 0, sizeof(second_script));
+	second_script.file = &second_file;
+	second_script.expected_layer_name = layer_name;
+	second_script.status = RSI_OK;
+	second_task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_layer_source_thread, &second_script,
+		"pkm-lcs-kunit-del-layer-src2");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(second_task));
+	memset(&result, 0, sizeof(result));
+	ret = pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
+		layer_name, strlen(layer_name), 1000, &result);
+	second_thread_ret = pkm_lcs_kunit_kthread_stop(second_task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, second_thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, second_script.result, 0);
+	KUNIT_EXPECT_EQ(test, second_script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, second_script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, result.active_source_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.completed_source_count, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&second_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_dispatch_transaction_control_frames(
 	struct kunit *test)
 {
@@ -31296,6 +31422,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_delete_layer_frame),
 	KUNIT_CASE(pkm_lcs_kunit_source_delete_layer_round_trip_statuses),
 	KUNIT_CASE(pkm_lcs_kunit_source_delete_layer_applies_orphans),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_delete_layer_broadcast_active_sources),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_transaction_control_frames),
 	KUNIT_CASE(

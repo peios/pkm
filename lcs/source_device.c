@@ -4142,6 +4142,18 @@ long pkm_lcs_source_apply_delete_layer_orphan_response(
 	return 0;
 }
 
+static long pkm_lcs_source_delete_layer_validate_request(
+	const char *layer_name, u32 layer_name_len)
+{
+	u8 request[RSI_REQUEST_HEADER_SIZE + RSI_LENGTH_PREFIX_SIZE +
+		   PKM_LCS_MAX_LAYER_NAME_BYTES_HARD];
+	struct pkm_lcs_rsi_built_request built;
+
+	return pkm_lcs_rsi_build_delete_layer_request(
+		request, sizeof(request), 0, 0, layer_name, layer_name_len,
+		&built);
+}
+
 long pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
 	u32 source_id, const char *layer_name, u32 layer_name_len,
 	u32 timeout_ms,
@@ -4168,6 +4180,60 @@ long pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
 		source_id, &frame, response->request_id, orphan_result);
 	pkm_lcs_source_response_frame_destroy(&frame);
 	return ret;
+}
+
+long pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
+	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	struct pkm_lcs_delete_layer_broadcast_result *result)
+{
+	u32 source_ids[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	u32 source_count = 0;
+	u32 i;
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+
+	ret = pkm_lcs_source_delete_layer_validate_request(layer_name,
+							   layer_name_len);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_active_ids_snapshot(
+		source_ids, ARRAY_SIZE(source_ids), &source_count);
+	if (ret)
+		return ret;
+
+	if (result)
+		result->active_source_count = source_count;
+
+	for (i = 0; i < source_count; i++) {
+		struct pkm_lcs_delete_layer_orphan_apply_result apply = { };
+
+		ret = pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
+			source_ids[i], layer_name, layer_name_len, timeout_ms,
+			&apply, NULL, NULL);
+		if (ret)
+			return ret;
+
+		if (result) {
+			result->completed_source_count++;
+			if (check_add_overflow(result->orphaned_guid_count,
+					       apply.orphaned_guid_count,
+					       &result->orphaned_guid_count))
+				return -EOVERFLOW;
+			if (check_add_overflow(result->marked_fd_count,
+					       apply.marked_fd_count,
+					       &result->marked_fd_count))
+				return -EOVERFLOW;
+			if (check_add_overflow(result->immediate_drop_count,
+					       apply.immediate_drop_count,
+					       &result->immediate_drop_count))
+				return -EOVERFLOW;
+		}
+	}
+
+	return 0;
 }
 
 long pkm_lcs_source_delete_layer_round_trip(
