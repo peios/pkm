@@ -559,6 +559,7 @@ long pkm_lcs_runtime_limits_publish(
 	const struct pkm_lcs_runtime_limits *limits);
 void pkm_lcs_runtime_limits_reset_defaults(void);
 u32 pkm_lcs_runtime_request_timeout_ms(void);
+u32 pkm_lcs_runtime_transaction_timeout_ms(void);
 long pkm_lcs_validate_syscall_relative_path(
 	const char *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);

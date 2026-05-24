@@ -6094,6 +6094,20 @@ static void pkm_lcs_kunit_runtime_request_timeout_uses_snapshot(
 	pkm_lcs_runtime_limits_reset_defaults();
 }
 
+static void pkm_lcs_kunit_runtime_transaction_timeout_uses_snapshot(
+	struct kunit *test)
+{
+	struct pkm_lcs_runtime_limits limits = { };
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_transaction_timeout_ms(), 30000U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.transaction_timeout_ms = 54321U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_transaction_timeout_ms(), 54321U);
+	pkm_lcs_runtime_limits_reset_defaults();
+}
+
 static bool pkm_lcs_kunit_buffer_contains_bytes(const u8 *buffer,
 						size_t buffer_len,
 						const u8 *needle,
@@ -38038,6 +38052,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_runtime_limits_publish_valid_snapshot),
 	KUNIT_CASE(pkm_lcs_kunit_runtime_limits_invalid_retains_previous),
 	KUNIT_CASE(pkm_lcs_kunit_runtime_request_timeout_uses_snapshot),
+	KUNIT_CASE(pkm_lcs_kunit_runtime_transaction_timeout_uses_snapshot),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_snapshot_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_deep_copies_input),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_rejects_malformed_state),

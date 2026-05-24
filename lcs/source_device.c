@@ -286,6 +286,15 @@ u32 pkm_lcs_runtime_request_timeout_ms(void)
 	return limits.request_timeout_ms;
 }
 
+u32 pkm_lcs_runtime_transaction_timeout_ms(void)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	if (pkm_lcs_runtime_limits_snapshot(&limits))
+		return PKM_LCS_TRANSACTION_TIMEOUT_MS_DEFAULT;
+	return limits.transaction_timeout_ms;
+}
+
 extern int lcs_rust_validate_layer_publication(
 	const u8 *layer_name, u32 layer_name_len,
 	const u8 metadata_key_guid[16], const u8 *metadata_security_descriptor,

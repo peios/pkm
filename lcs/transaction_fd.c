@@ -4406,7 +4406,7 @@ u32 pkm_lcs_kunit_transaction_fd_retained_commit_count(void)
 long pkm_lcs_reg_begin_transaction(void)
 {
 	return pkm_lcs_transaction_fd_publish(
-		PKM_LCS_TRANSACTION_TIMEOUT_MS_DEFAULT);
+		pkm_lcs_runtime_transaction_timeout_ms());
 }
 
 SYSCALL_DEFINE0(reg_begin_transaction)
