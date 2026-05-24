@@ -3290,6 +3290,85 @@ static void pkm_lcs_kunit_open_absolute_symlink_depth_limit_eloop(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_open_absolute_runtime_symlink_depth_limit_eloop(
+	struct kunit *test)
+{
+	static const u8 loop_guid[RSI_GUID_SIZE] = {
+		0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c,
+		0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94,
+	};
+	static const u8 loop_path[] = "Machine\\Loop";
+	const char path_src[] = "Machine\\Loop";
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_kunit_walk_source_step loop_step = {
+		.expected_child = "Loop",
+		.guid = loop_guid,
+		.symlink = true,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op sequence[5];
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = sequence,
+		.op_count = ARRAY_SIZE(sequence),
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 i;
+	long ret;
+	int thread_ret;
+
+	for (i = 0; i < 2U; i++) {
+		sequence[i * 2U] =
+			(struct pkm_lcs_kunit_symlink_sequence_op) {
+				.op = PKM_LCS_KUNIT_SYMLINK_SEQ_LOOKUP,
+				.lookup_step = &loop_step,
+			};
+		sequence[i * 2U + 1U] =
+			(struct pkm_lcs_kunit_symlink_sequence_op) {
+				.op = PKM_LCS_KUNIT_SYMLINK_SEQ_QUERY_DEFAULT,
+				.query_guid = loop_guid,
+				.query_data = loop_path,
+				.query_data_len = sizeof(loop_path) - 1,
+				.query_value_type = REG_LINK,
+			};
+	}
+	sequence[ARRAY_SIZE(sequence) - 1U] =
+		(struct pkm_lcs_kunit_symlink_sequence_op) {
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_LOOKUP,
+			.lookup_step = &loop_step,
+		};
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_symlink_sequence_source_thread, &script,
+		"pkm-lcs-kunit-open-runtime-link-eloop");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.symlink_depth_limit = 2U;
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	ret = pkm_lcs_open_user_absolute_path_for_token(
+		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
+		0, NULL, 0, NULL, 0);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-ELOOP);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_open_absolute_root_uses_read_key(struct kunit *test)
 {
 	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
@@ -6105,6 +6184,20 @@ static void pkm_lcs_kunit_runtime_transaction_timeout_uses_snapshot(
 	limits.transaction_timeout_ms = 54321U;
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
 	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_transaction_timeout_ms(), 54321U);
+	pkm_lcs_runtime_limits_reset_defaults();
+}
+
+static void pkm_lcs_kunit_runtime_symlink_depth_uses_snapshot(
+	struct kunit *test)
+{
+	struct pkm_lcs_runtime_limits limits = { };
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_symlink_depth_limit(), 16U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.symlink_depth_limit = 7U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_symlink_depth_limit(), 7U);
 	pkm_lcs_runtime_limits_reset_defaults();
 }
 
@@ -37912,6 +38005,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_open_absolute_recursive_symlink_follows_target),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_symlink_depth_limit_eloop),
+	KUNIT_CASE(
+		pkm_lcs_kunit_open_absolute_runtime_symlink_depth_limit_eloop),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_root_uses_read_key),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_syscall_dispatches_absolute),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_uses_live_layer_table),
@@ -38053,6 +38148,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_runtime_limits_invalid_retains_previous),
 	KUNIT_CASE(pkm_lcs_kunit_runtime_request_timeout_uses_snapshot),
 	KUNIT_CASE(pkm_lcs_kunit_runtime_transaction_timeout_uses_snapshot),
+	KUNIT_CASE(pkm_lcs_kunit_runtime_symlink_depth_uses_snapshot),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_snapshot_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_deep_copies_input),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_rejects_malformed_state),
