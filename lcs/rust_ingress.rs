@@ -308,11 +308,12 @@ pub struct PkmLcsRsiReadKeyResultCopy {
     pub sd_offset: u32,
     pub sd_len: u32,
     pub name_len: u32,
-    pub _pad0: u32,
+    pub source_validation_failure: u32,
     pub last_write_time: u64,
     pub volatile_key: u8,
     pub symlink: u8,
-    pub _pad1: [u8; 6],
+    pub source_validation_failure_present: u8,
+    pub _pad1: [u8; 5],
     pub parent_guid: [u8; 16],
 }
 
@@ -490,6 +491,17 @@ fn source_validation_failure_from_code(
         4 => Ok(RsiSourceDataValidationFailure::DuplicateWinningSequenceTie),
         5 => Ok(RsiSourceDataValidationFailure::MalformedLayerMetadataSecurityDescriptor),
         _ => Err(LinuxErrno::Einval),
+    }
+}
+
+fn source_validation_failure_code(failure: RsiSourceDataValidationFailure) -> u32 {
+    match failure {
+        RsiSourceDataValidationFailure::MalformedSecurityDescriptor => 0,
+        RsiSourceDataValidationFailure::MalformedLayerName => 1,
+        RsiSourceDataValidationFailure::UnknownRsiStatusCode => 2,
+        RsiSourceDataValidationFailure::FutureSequenceNumber => 3,
+        RsiSourceDataValidationFailure::DuplicateWinningSequenceTie => 4,
+        RsiSourceDataValidationFailure::MalformedLayerMetadataSecurityDescriptor => 5,
     }
 }
 
@@ -4852,11 +4864,12 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_read_key_response(
             sd_offset: 0,
             sd_len: 0,
             name_len: 0,
-            _pad0: 0,
+            source_validation_failure: 0,
             last_write_time: 0,
             volatile_key: 0,
             symlink: 0,
-            _pad1: [0; 6],
+            source_validation_failure_present: 0,
+            _pad1: [0; 5],
             parent_guid: [0; 16],
         };
     }
@@ -4881,6 +4894,14 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_read_key_response(
         return rsi_read_key_response_error_return(err);
     }
     if let Err(err) = validate_rsi_read_key_response_security_descriptor(&payload) {
+        if matches!(err, LcsError::MalformedSecurityDescriptor { .. }) {
+            unsafe {
+                (*result_out).source_validation_failure = source_validation_failure_code(
+                    RsiSourceDataValidationFailure::MalformedSecurityDescriptor,
+                );
+                (*result_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_read_key_response_error_return(err);
     }
 

@@ -34477,6 +34477,8 @@ out_release_source:
 static void pkm_lcs_kunit_source_write_read_key_payload_validation(
 	struct kunit *test)
 {
+	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
+	static const char validation_class[] = "malformed_security_descriptor";
 	static const u8 guid[RSI_GUID_SIZE] = {
 		0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8,
 		0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0,
@@ -34500,12 +34502,17 @@ static void pkm_lcs_kunit_source_write_read_key_payload_validation(
 		struct pkm_lcs_source_response_result response = { };
 		struct pkm_lcs_source_enqueue_result enqueue = { };
 		struct pkm_lcs_source_fd_snapshot snapshot = { };
+		struct pkm_kmes_kunit_snapshot kmes_snapshot = { };
 		struct pkm_lcs_rsi_read_key_result read_key = { };
 		struct task_struct *task;
+		u8 buffer[512];
 		struct file file = { };
 		const void *token;
+		size_t written = 0;
 		int thread_ret;
+		u32 header_size;
 		long ret;
+		u16 type_len;
 
 		pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 		script.file = &file;
@@ -34517,6 +34524,7 @@ static void pkm_lcs_kunit_source_write_read_key_payload_validation(
 			goto out_release_source;
 		}
 
+		pkm_kmes_kunit_reset_all();
 		ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
 			1, 0, guid, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
 			&frame, &response, &enqueue);
@@ -34537,6 +34545,45 @@ static void pkm_lcs_kunit_source_write_read_key_payload_validation(
 		if (malformed_cases[i]) {
 			KUNIT_EXPECT_PTR_EQ(test, frame.data, NULL);
 			KUNIT_EXPECT_EQ(test, frame.len, (size_t)0);
+			KUNIT_EXPECT_TRUE(
+				test,
+				response.source_validation_failure_present);
+			KUNIT_EXPECT_EQ(
+				test, response.source_validation_failure,
+				(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_SECURITY_DESCRIPTOR);
+			KUNIT_EXPECT_TRUE(test, response.key_guid_present);
+			KUNIT_EXPECT_EQ(test,
+					memcmp(response.key_guid, guid,
+					       sizeof(guid)),
+					0);
+			KUNIT_ASSERT_EQ(test,
+					pkm_kmes_kunit_copy_single_buffer(
+						buffer, sizeof(buffer), &written,
+						&kmes_snapshot),
+					0);
+			type_len = get_unaligned_le16(
+				buffer + KMES_EVENT_TYPE_LEN_OFFSET);
+			header_size = get_unaligned_le32(
+				buffer + KMES_EVENT_HEADER_SIZE_OFFSET);
+			KUNIT_ASSERT_EQ(test, type_len,
+					(u16)(sizeof(event_type) - 1));
+			KUNIT_EXPECT_EQ(test,
+					buffer[KMES_EVENT_ORIGIN_CLASS_OFFSET],
+					(u8)KMES_ORIGIN_LCS);
+			KUNIT_EXPECT_EQ(
+				test,
+				memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE,
+				       event_type, type_len),
+				0);
+			KUNIT_ASSERT_TRUE(test, written > header_size);
+			KUNIT_EXPECT_TRUE(
+				test,
+				pkm_lcs_kunit_buffer_contains(
+					buffer, written, validation_class));
+			KUNIT_EXPECT_TRUE(
+				test,
+				pkm_lcs_kunit_buffer_contains_bytes(
+					buffer, written, guid, sizeof(guid)));
 		} else {
 			KUNIT_ASSERT_NOT_NULL(test, frame.data);
 			KUNIT_EXPECT_EQ(test,

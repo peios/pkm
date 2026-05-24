@@ -115,11 +115,12 @@ struct pkm_lcs_rsi_read_key_result {
 	u32 sd_offset;
 	u32 sd_len;
 	u32 name_len;
-	u32 _pad0;
+	u32 source_validation_failure;
 	u64 last_write_time;
 	u8 volatile_key;
 	u8 symlink;
-	u8 _pad1[6];
+	u8 source_validation_failure_present;
+	u8 _pad1[5];
 	u8 parent_guid[RSI_GUID_SIZE];
 };
 
