@@ -6254,6 +6254,9 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 			result->request_op_code);
 		if (ret == -EIO) {
 			result->malformed_source_data = true;
+			result->source_validation_failure =
+				PKM_LCS_SOURCE_VALIDATION_MALFORMED_RESPONSE_PAYLOAD;
+			result->source_validation_failure_present = true;
 			*caller_errno = -EIO;
 			return 0;
 		}
@@ -6266,6 +6269,11 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 			frame, frame_len, result->request_id, &delete_layer);
 		if (ret == -EIO) {
 			result->malformed_source_data = true;
+			if (delete_layer.source_validation_failure_present) {
+				result->source_validation_failure =
+					delete_layer.source_validation_failure;
+				result->source_validation_failure_present = true;
+			}
 			*caller_errno = -EIO;
 			return 0;
 		}

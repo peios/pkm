@@ -2786,6 +2786,10 @@ pub enum RsiSourceDataValidationFailure {
     MalformedLayerMetadataSecurityDescriptor,
     MalformedKeyName,
     MalformedValueName,
+    MalformedResponsePayload,
+    MalformedKeyMetadata,
+    MalformedValuePayload,
+    MalformedDeleteLayerOrphanList,
 }
 
 /// Failure policy for malformed but structurally parsed source response data.

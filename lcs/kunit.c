@@ -34513,9 +34513,11 @@ static void pkm_lcs_kunit_expect_source_validation_audit(
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_lcs_kunit_buffer_contains(buffer, written,
 							validation_class));
-	KUNIT_EXPECT_TRUE(
-		test, pkm_lcs_kunit_buffer_contains_bytes(
-			      buffer, written, key_guid, RSI_GUID_SIZE));
+	if (key_guid) {
+		KUNIT_EXPECT_TRUE(
+			test, pkm_lcs_kunit_buffer_contains_bytes(
+				      buffer, written, key_guid, RSI_GUID_SIZE));
+	}
 }
 
 static void pkm_lcs_kunit_source_write_malformed_path_name_audits(
@@ -34807,6 +34809,291 @@ out_release_source:
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
 	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_write_remaining_validation_class_audits(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+		0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
+	};
+	static const u8 child_guid[RSI_GUID_SIZE] = {
+		0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7,
+		0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf,
+	};
+	static const u8 key_guid[RSI_GUID_SIZE] = { 0xa3 };
+	static const u8 value_guid[RSI_GUID_SIZE] = {
+		0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7,
+		0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef,
+	};
+	static const u8 orphan_guid[RSI_GUID_SIZE] = {
+		0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+		0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
+	};
+	static const u8 data[] = { 0x10, 0x20, 0x30 };
+
+	{
+		struct pkm_lcs_source_response_result response_result = { };
+		struct pkm_lcs_source_response_result waiter_result = { };
+		struct pkm_lcs_source_response_waiter waiter;
+		struct pkm_lcs_source_enqueue_result enqueue = { };
+		u8 response[RSI_MIN_RESPONSE_SIZE + 1];
+		u8 out[256];
+		struct file file = { };
+		const void *token;
+		size_t response_len;
+		ssize_t count;
+		long ret;
+
+		pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+		ret = pkm_lcs_kunit_dispatch_status_only_waitable_request(
+			RSI_SET_VALUE, &waiter, &enqueue);
+		KUNIT_EXPECT_EQ(test, ret, 0L);
+		if (ret)
+			goto out_release_status;
+
+		count = pkm_lcs_kunit_source_device_read_file(
+			&file, out, sizeof(out), true);
+		KUNIT_EXPECT_EQ(test, count, (ssize_t)enqueue.len);
+		if (count != (ssize_t)enqueue.len)
+			goto out_release_status;
+
+		pkm_lcs_kunit_build_status_response(test, response,
+						    sizeof(response),
+						    enqueue.request_id,
+						    enqueue.op_code, RSI_OK,
+						    &response_len);
+		response[response_len++] = 0xee;
+		put_unaligned_le32(response_len,
+				   response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+
+		pkm_kmes_kunit_reset_all();
+		count = pkm_lcs_kunit_source_device_write_file(
+			&file, response, response_len, false, &response_result);
+		KUNIT_EXPECT_EQ(test, count, (ssize_t)response_len);
+		if (count != (ssize_t)response_len)
+			goto out_release_status;
+		KUNIT_EXPECT_TRUE(test,
+				  response_result.malformed_source_data);
+		KUNIT_EXPECT_TRUE(
+			test,
+			response_result.source_validation_failure_present);
+		KUNIT_EXPECT_EQ(
+			test, response_result.source_validation_failure,
+			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_RESPONSE_PAYLOAD);
+		KUNIT_EXPECT_TRUE(test, response_result.key_guid_present);
+		KUNIT_EXPECT_EQ(test,
+				memcmp(response_result.key_guid, key_guid,
+				       sizeof(key_guid)),
+				0);
+
+		ret = pkm_lcs_source_response_waiter_wait(&waiter,
+							  &waiter_result);
+		KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+		KUNIT_EXPECT_TRUE(test, waiter_result.malformed_source_data);
+		KUNIT_EXPECT_TRUE(
+			test,
+			waiter_result.source_validation_failure_present);
+		KUNIT_EXPECT_EQ(
+			test, waiter_result.source_validation_failure,
+			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_RESPONSE_PAYLOAD);
+		pkm_lcs_kunit_expect_source_validation_audit(
+			test, "malformed_response_payload", key_guid);
+
+out_release_status:
+		KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file),
+				0);
+		pkm_lcs_kunit_reset_source_table();
+		kacs_rust_token_drop(token);
+	}
+
+	{
+		struct pkm_lcs_source_response_result response_result = { };
+		struct pkm_lcs_source_response_result waiter_result = { };
+		struct pkm_lcs_source_response_waiter waiter;
+		struct pkm_lcs_source_enqueue_result enqueue = { };
+		u8 response[256];
+		u8 out[128];
+		struct file file = { };
+		const void *token;
+		size_t response_len;
+		size_t offset;
+		ssize_t count;
+		long ret;
+
+		pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+		ret = pkm_lcs_source_dispatch_lookup_waitable_request(
+			1, 0x9192939495969798ULL, parent_guid, "Child",
+			strlen("Child"), &waiter, &enqueue);
+		KUNIT_EXPECT_EQ(test, ret, 0L);
+		if (ret)
+			goto out_release_lookup;
+
+		count = pkm_lcs_kunit_source_device_read_file(
+			&file, out, sizeof(out), true);
+		KUNIT_EXPECT_EQ(test, count, (ssize_t)enqueue.len);
+		if (count != (ssize_t)enqueue.len)
+			goto out_release_lookup;
+
+		pkm_lcs_kunit_rsi_response_begin(
+			test, response, sizeof(response), enqueue.request_id,
+			RSI_LOOKUP_RESPONSE, RSI_OK, &offset);
+		pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+					     &offset, 1);
+		pkm_lcs_kunit_rsi_append_lookup_path_entry(
+			test, response, sizeof(response), &offset, "base",
+			RSI_PATH_TARGET_GUID, child_guid, 0);
+		pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+					     &offset, 0);
+		pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+						  &response_len);
+
+		pkm_kmes_kunit_reset_all();
+		count = pkm_lcs_kunit_source_device_write_file(
+			&file, response, response_len, false,
+			&response_result);
+		KUNIT_EXPECT_EQ(test, count, (ssize_t)response_len);
+		if (count != (ssize_t)response_len)
+			goto out_release_lookup;
+		KUNIT_EXPECT_TRUE(test,
+				  response_result.malformed_source_data);
+		KUNIT_EXPECT_TRUE(
+			test,
+			response_result.source_validation_failure_present);
+		KUNIT_EXPECT_EQ(
+			test, response_result.source_validation_failure,
+			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_METADATA);
+
+		ret = pkm_lcs_source_response_waiter_wait(&waiter,
+							  &waiter_result);
+		KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+		KUNIT_EXPECT_TRUE(test, waiter_result.malformed_source_data);
+		KUNIT_EXPECT_EQ(
+			test, waiter_result.source_validation_failure,
+			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_METADATA);
+		pkm_lcs_kunit_expect_source_validation_audit(
+			test, "malformed_key_metadata", parent_guid);
+
+out_release_lookup:
+		KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file),
+				0);
+		pkm_lcs_kunit_reset_source_table();
+		kacs_rust_token_drop(token);
+	}
+
+	{
+		struct pkm_lcs_kunit_query_values_source_script script = {
+			.expected_guid = value_guid,
+			.expected_value_name = "Value",
+			.layer_name = "base",
+			.data = data,
+			.data_len = sizeof(data),
+			.value_type = 0xffffffffU,
+		};
+		struct pkm_lcs_source_response_frame frame = { };
+		struct pkm_lcs_source_response_result response = { };
+		struct pkm_lcs_source_enqueue_result enqueue = { };
+		struct task_struct *task;
+		struct file file = { };
+		const void *token;
+		int thread_ret;
+		long ret;
+
+		pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+		script.file = &file;
+		task = pkm_lcs_kunit_kthread_run(
+			pkm_lcs_kunit_query_values_source_thread, &script,
+			"pkm-lcs-kunit-value-payload");
+		if (IS_ERR(task)) {
+			KUNIT_FAIL(test, "failed to start query-values source");
+			goto out_release_query;
+		}
+
+		pkm_kmes_kunit_reset_all();
+		ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+			1, 0, value_guid, "Value", strlen("Value"), false,
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
+			&enqueue);
+		thread_ret = pkm_lcs_kunit_kthread_stop(task);
+		KUNIT_EXPECT_EQ(test, thread_ret, 0);
+		KUNIT_EXPECT_EQ(test, script.result, 0);
+		KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+		KUNIT_EXPECT_PTR_EQ(test, frame.data, NULL);
+		KUNIT_EXPECT_TRUE(test, response.malformed_source_data);
+		KUNIT_EXPECT_TRUE(
+			test,
+			response.source_validation_failure_present);
+		KUNIT_EXPECT_EQ(
+			test, response.source_validation_failure,
+			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_VALUE_PAYLOAD);
+		pkm_lcs_kunit_expect_source_validation_audit(
+			test, "malformed_value_payload", value_guid);
+		pkm_lcs_source_response_frame_destroy(&frame);
+
+out_release_query:
+		KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file),
+				0);
+		pkm_lcs_kunit_reset_source_table();
+		kacs_rust_token_drop(token);
+	}
+
+	{
+		struct pkm_lcs_kunit_delete_layer_source_script script = {
+			.file = NULL,
+			.expected_layer_name = "policy",
+			.orphaned_guid_a = orphan_guid,
+			.orphaned_guid_b = orphan_guid,
+			.status = RSI_OK,
+			.orphaned_guid_count = 2,
+		};
+		struct pkm_lcs_source_response_frame frame = { };
+		struct pkm_lcs_source_response_result response = { };
+		struct pkm_lcs_source_enqueue_result enqueue = { };
+		struct task_struct *task;
+		struct file file = { };
+		const void *token;
+		int thread_ret;
+		long ret;
+
+		pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+		script.file = &file;
+		task = pkm_lcs_kunit_kthread_run(
+			pkm_lcs_kunit_delete_layer_source_thread, &script,
+			"pkm-lcs-kunit-delete-layer-orphans");
+		if (IS_ERR(task)) {
+			KUNIT_FAIL(test, "failed to start delete-layer source");
+			goto out_release_delete_layer;
+		}
+
+		pkm_kmes_kunit_reset_all();
+		ret = pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout(
+			1, "policy", strlen("policy"),
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
+			&enqueue);
+		thread_ret = pkm_lcs_kunit_kthread_stop(task);
+		KUNIT_EXPECT_EQ(test, thread_ret, 0);
+		KUNIT_EXPECT_EQ(test, script.result, 0);
+		KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+		KUNIT_EXPECT_PTR_EQ(test, frame.data, NULL);
+		KUNIT_EXPECT_TRUE(test, response.malformed_source_data);
+		KUNIT_EXPECT_TRUE(
+			test,
+			response.source_validation_failure_present);
+		KUNIT_EXPECT_EQ(
+			test, response.source_validation_failure,
+			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_DELETE_LAYER_ORPHAN_LIST);
+		KUNIT_EXPECT_FALSE(test, response.key_guid_present);
+		pkm_lcs_kunit_expect_source_validation_audit(
+			test, "malformed_delete_layer_orphan_list", NULL);
+		pkm_lcs_source_response_frame_destroy(&frame);
+
+out_release_delete_layer:
+		KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file),
+				0);
+		pkm_lcs_kunit_reset_source_table();
+		kacs_rust_token_drop(token);
+	}
 }
 
 static void pkm_lcs_kunit_source_write_path_future_sequence_audits(
@@ -37987,6 +38274,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_write_malformed_path_name_audits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_key_value_name_audits),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_write_remaining_validation_class_audits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_path_future_sequence_audits),
 	KUNIT_CASE(

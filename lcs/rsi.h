@@ -33,7 +33,9 @@ struct pkm_lcs_rsi_query_values_response_summary {
 
 struct pkm_lcs_rsi_delete_layer_response_summary {
 	u32 orphaned_guid_count;
-	u32 _pad;
+	u32 source_validation_failure;
+	u8 source_validation_failure_present;
+	u8 _pad[3];
 };
 
 struct pkm_lcs_rsi_enum_children_info_summary {

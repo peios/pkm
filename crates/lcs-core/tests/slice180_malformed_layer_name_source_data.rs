@@ -75,6 +75,27 @@ fn malformed_key_and_value_names_map_to_source_data_eio_audit_policy() {
 }
 
 #[test]
+fn remaining_source_validation_classes_map_to_source_data_eio_audit_policy() {
+    for failure in [
+        RsiSourceDataValidationFailure::MalformedResponsePayload,
+        RsiSourceDataValidationFailure::MalformedKeyMetadata,
+        RsiSourceDataValidationFailure::MalformedValuePayload,
+        RsiSourceDataValidationFailure::MalformedDeleteLayerOrphanList,
+    ] {
+        assert_eq!(
+            plan_rsi_malformed_source_data(failure),
+            RsiMalformedSourceDataPlan {
+                failure,
+                caller_errno: RsiMappedErrno::Eio,
+                emit_audit: true,
+                keep_source_alive: true,
+                retain_previous_layer_metadata_sd: false,
+            }
+        );
+    }
+}
+
+#[test]
 fn source_validation_audit_vocabulary_names_malformed_layer_names() {
     let class = LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedLayerName);
 
@@ -93,6 +114,32 @@ fn source_validation_audit_vocabulary_names_malformed_key_and_value_names() {
     assert_eq!(key_class.as_str(), "malformed_key_name");
     assert_eq!(value_class, LcsSourceValidationClass::MalformedValueName);
     assert_eq!(value_class.as_str(), "malformed_value_name");
+}
+
+#[test]
+fn source_validation_audit_vocabulary_names_remaining_source_classes() {
+    assert_eq!(
+        LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedResponsePayload)
+            .as_str(),
+        "malformed_response_payload"
+    );
+    assert_eq!(
+        LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedKeyMetadata)
+            .as_str(),
+        "malformed_key_metadata"
+    );
+    assert_eq!(
+        LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedValuePayload)
+            .as_str(),
+        "malformed_value_payload"
+    );
+    assert_eq!(
+        LcsSourceValidationClass::from(
+            RsiSourceDataValidationFailure::MalformedDeleteLayerOrphanList,
+        )
+        .as_str(),
+        "malformed_delete_layer_orphan_list"
+    );
 }
 
 #[test]

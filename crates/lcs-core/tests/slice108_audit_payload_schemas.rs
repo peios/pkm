@@ -158,6 +158,28 @@ fn source_validation_failure_audit_record_maps_validation_classes() {
         LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedValueName).as_str(),
         "malformed_value_name"
     );
+    assert_eq!(
+        LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedResponsePayload)
+            .as_str(),
+        "malformed_response_payload"
+    );
+    assert_eq!(
+        LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedKeyMetadata)
+            .as_str(),
+        "malformed_key_metadata"
+    );
+    assert_eq!(
+        LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedValuePayload)
+            .as_str(),
+        "malformed_value_payload"
+    );
+    assert_eq!(
+        LcsSourceValidationClass::from(
+            RsiSourceDataValidationFailure::MalformedDeleteLayerOrphanList,
+        )
+        .as_str(),
+        "malformed_delete_layer_orphan_list"
+    );
 }
 
 #[test]

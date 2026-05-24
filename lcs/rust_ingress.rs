@@ -331,7 +331,9 @@ pub struct PkmLcsRsiQueryValuesResponseSummaryCopy {
 #[repr(C)]
 pub struct PkmLcsRsiDeleteLayerResponseSummaryCopy {
     pub orphaned_guid_count: u32,
-    pub _pad: u32,
+    pub source_validation_failure: u32,
+    pub source_validation_failure_present: u8,
+    pub _pad: [u8; 3],
 }
 
 #[repr(C)]
@@ -499,6 +501,10 @@ fn source_validation_failure_from_code(
         5 => Ok(RsiSourceDataValidationFailure::MalformedLayerMetadataSecurityDescriptor),
         6 => Ok(RsiSourceDataValidationFailure::MalformedKeyName),
         7 => Ok(RsiSourceDataValidationFailure::MalformedValueName),
+        8 => Ok(RsiSourceDataValidationFailure::MalformedResponsePayload),
+        9 => Ok(RsiSourceDataValidationFailure::MalformedKeyMetadata),
+        10 => Ok(RsiSourceDataValidationFailure::MalformedValuePayload),
+        11 => Ok(RsiSourceDataValidationFailure::MalformedDeleteLayerOrphanList),
         _ => Err(LinuxErrno::Einval),
     }
 }
@@ -513,6 +519,10 @@ fn source_validation_failure_code(failure: RsiSourceDataValidationFailure) -> u3
         RsiSourceDataValidationFailure::MalformedLayerMetadataSecurityDescriptor => 5,
         RsiSourceDataValidationFailure::MalformedKeyName => 6,
         RsiSourceDataValidationFailure::MalformedValueName => 7,
+        RsiSourceDataValidationFailure::MalformedResponsePayload => 8,
+        RsiSourceDataValidationFailure::MalformedKeyMetadata => 9,
+        RsiSourceDataValidationFailure::MalformedValuePayload => 10,
+        RsiSourceDataValidationFailure::MalformedDeleteLayerOrphanList => 11,
     }
 }
 
@@ -532,6 +542,60 @@ fn source_validation_failure_for_name_error(
         "layer_name" => Some(RsiSourceDataValidationFailure::MalformedLayerName),
         "key_component" => Some(RsiSourceDataValidationFailure::MalformedKeyName),
         "value_name" => Some(RsiSourceDataValidationFailure::MalformedValueName),
+        _ => None,
+    }
+}
+
+fn source_validation_failure_for_response_payload_error(
+    err: &LcsError,
+) -> Option<RsiSourceDataValidationFailure> {
+    match err {
+        LcsError::RsiUnexpectedResponsePayload { .. }
+        | LcsError::RsiPayloadLengthOverflow
+        | LcsError::InvalidRsiPathTargetType(_)
+        | LcsError::RsiHiddenPathTargetGuidNotZero => {
+            Some(RsiSourceDataValidationFailure::MalformedResponsePayload)
+        }
+        _ => None,
+    }
+}
+
+fn source_validation_failure_for_key_metadata_error(
+    err: &LcsError,
+) -> Option<RsiSourceDataValidationFailure> {
+    match err {
+        LcsError::RsiPathMetadataMissing { .. }
+        | LcsError::RsiPathMetadataDuplicate { .. }
+        | LcsError::RsiPathMetadataUnreferenced { .. }
+        | LcsError::RsiPathMetadataNilGuid => {
+            Some(RsiSourceDataValidationFailure::MalformedKeyMetadata)
+        }
+        _ => None,
+    }
+}
+
+fn source_validation_failure_for_value_payload_error(
+    err: &LcsError,
+) -> Option<RsiSourceDataValidationFailure> {
+    match err {
+        LcsError::UnknownValueType(_)
+        | LcsError::TombstoneNotExplicit
+        | LcsError::TombstoneDataMustBeEmpty { .. }
+        | LcsError::ValueDataTooLarge { .. } => {
+            Some(RsiSourceDataValidationFailure::MalformedValuePayload)
+        }
+        _ => None,
+    }
+}
+
+fn source_validation_failure_for_delete_layer_orphan_error(
+    err: &LcsError,
+) -> Option<RsiSourceDataValidationFailure> {
+    match err {
+        LcsError::RsiDeleteLayerOrphanedGuidNil
+        | LcsError::RsiDeleteLayerOrphanedGuidDuplicate { .. } => {
+            Some(RsiSourceDataValidationFailure::MalformedDeleteLayerOrphanList)
+        }
         _ => None,
     }
 }
@@ -3142,10 +3206,26 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_lookup_response_frame(
         },
     ) {
         Ok(payload) => payload,
-        Err(err) => return rsi_lookup_response_error_return(err),
+        Err(err) => {
+            if let Some(failure) = source_validation_failure_for_response_payload_error(&err) {
+                unsafe {
+                    (*summary_out).source_validation_failure =
+                        source_validation_failure_code(failure);
+                    (*summary_out).source_validation_failure_present = 1;
+                }
+            }
+            return rsi_lookup_response_error_return(err);
+        }
     };
 
     if let Err(err) = validate_rsi_lookup_metadata_completeness(&payload) {
+        if let Some(failure) = source_validation_failure_for_key_metadata_error(&err) {
+            unsafe {
+                (*summary_out).source_validation_failure =
+                    source_validation_failure_code(failure);
+                (*summary_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_lookup_response_error_return(err);
     }
     if let Err(err) = validate_rsi_lookup_path_response_names(&payload, &LcsLimits::DEFAULT) {
@@ -3223,7 +3303,16 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
         },
     ) {
         Ok(payload) => payload,
-        Err(err) => return rsi_query_values_response_error_return(err),
+        Err(err) => {
+            if let Some(failure) = source_validation_failure_for_response_payload_error(&err) {
+                unsafe {
+                    (*summary_out).source_validation_failure =
+                        source_validation_failure_code(failure);
+                    (*summary_out).source_validation_failure_present = 1;
+                }
+            }
+            return rsi_query_values_response_error_return(err);
+        }
     };
 
     if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
@@ -3238,6 +3327,13 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
     if let Err(err) =
         validate_rsi_query_values_response_value_payloads(&payload, &LcsLimits::DEFAULT)
     {
+        if let Some(failure) = source_validation_failure_for_value_payload_error(&err) {
+            unsafe {
+                (*summary_out).source_validation_failure =
+                    source_validation_failure_code(failure);
+                (*summary_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_query_values_response_error_return(err);
     }
     if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
@@ -3297,7 +3393,9 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_delete_layer_response_frame(
     unsafe {
         *summary_out = PkmLcsRsiDeleteLayerResponseSummaryCopy {
             orphaned_guid_count: 0,
-            _pad: 0,
+            source_validation_failure: 0,
+            source_validation_failure_present: 0,
+            _pad: [0; 3],
         };
     }
 
@@ -3314,10 +3412,26 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_delete_layer_response_frame(
         },
     ) {
         Ok(payload) => payload,
-        Err(err) => return rsi_lookup_response_error_return(err),
+        Err(err) => {
+            if let Some(failure) = source_validation_failure_for_response_payload_error(&err) {
+                unsafe {
+                    (*summary_out).source_validation_failure =
+                        source_validation_failure_code(failure);
+                    (*summary_out).source_validation_failure_present = 1;
+                }
+            }
+            return rsi_lookup_response_error_return(err);
+        }
     };
 
     if let Err(err) = validate_rsi_delete_layer_orphaned_guids(&payload) {
+        if let Some(failure) = source_validation_failure_for_delete_layer_orphan_error(&err) {
+            unsafe {
+                (*summary_out).source_validation_failure =
+                    source_validation_failure_code(failure);
+                (*summary_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_lookup_response_error_return(err);
     }
 
@@ -3379,10 +3493,26 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
         },
     ) {
         Ok(payload) => payload,
-        Err(err) => return rsi_enum_children_response_error_return(err),
+        Err(err) => {
+            if let Some(failure) = source_validation_failure_for_response_payload_error(&err) {
+                unsafe {
+                    (*result_out).source_validation_failure =
+                        source_validation_failure_code(failure);
+                    (*result_out).source_validation_failure_present = 1;
+                }
+            }
+            return rsi_enum_children_response_error_return(err);
+        }
     };
 
     if let Err(err) = validate_rsi_enum_children_metadata_completeness(&payload) {
+        if let Some(failure) = source_validation_failure_for_key_metadata_error(&err) {
+            unsafe {
+                (*result_out).source_validation_failure =
+                    source_validation_failure_code(failure);
+                (*result_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_enum_children_response_error_return(err);
     }
     if let Err(err) = validate_rsi_enum_children_path_response_names(&payload, &LcsLimits::DEFAULT)
@@ -4991,7 +5121,16 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_read_key_response(
         },
     ) {
         Ok(payload) => payload,
-        Err(err) => return rsi_read_key_response_error_return(err),
+        Err(err) => {
+            if let Some(failure) = source_validation_failure_for_response_payload_error(&err) {
+                unsafe {
+                    (*result_out).source_validation_failure =
+                        source_validation_failure_code(failure);
+                    (*result_out).source_validation_failure_present = 1;
+                }
+            }
+            return rsi_read_key_response_error_return(err);
+        }
     };
 
     if let Err(err) = validate_rsi_read_key_response_names(&payload, &LcsLimits::DEFAULT) {

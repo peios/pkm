@@ -160,6 +160,10 @@ pub enum LcsSourceValidationClass {
     MalformedLayerMetadataSecurityDescriptor,
     MalformedKeyName,
     MalformedValueName,
+    MalformedResponsePayload,
+    MalformedKeyMetadata,
+    MalformedValuePayload,
+    MalformedDeleteLayerOrphanList,
 }
 
 impl LcsSourceValidationClass {
@@ -175,6 +179,10 @@ impl LcsSourceValidationClass {
             }
             Self::MalformedKeyName => "malformed_key_name",
             Self::MalformedValueName => "malformed_value_name",
+            Self::MalformedResponsePayload => "malformed_response_payload",
+            Self::MalformedKeyMetadata => "malformed_key_metadata",
+            Self::MalformedValuePayload => "malformed_value_payload",
+            Self::MalformedDeleteLayerOrphanList => "malformed_delete_layer_orphan_list",
         }
     }
 }
@@ -196,6 +204,14 @@ impl From<RsiSourceDataValidationFailure> for LcsSourceValidationClass {
             }
             RsiSourceDataValidationFailure::MalformedKeyName => Self::MalformedKeyName,
             RsiSourceDataValidationFailure::MalformedValueName => Self::MalformedValueName,
+            RsiSourceDataValidationFailure::MalformedResponsePayload => {
+                Self::MalformedResponsePayload
+            }
+            RsiSourceDataValidationFailure::MalformedKeyMetadata => Self::MalformedKeyMetadata,
+            RsiSourceDataValidationFailure::MalformedValuePayload => Self::MalformedValuePayload,
+            RsiSourceDataValidationFailure::MalformedDeleteLayerOrphanList => {
+                Self::MalformedDeleteLayerOrphanList
+            }
         }
     }
 }
