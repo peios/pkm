@@ -15,8 +15,8 @@ use crate::lcs_core::{
     parse_rsi_lookup_success_response_payload, parse_rsi_enum_children_success_response_payload,
     parse_rsi_query_values_success_response_payload, parse_rsi_read_key_success_response_payload,
     parse_rsi_request_header, plan_key_guid_assignment, plan_key_open_audit_record,
-    plan_source_validation_failure_audit_record,
-    plan_layer_publication, plan_layer_target_admission, plan_registry_get_security,
+    plan_source_validation_failure_audit_record, plan_layer_publication,
+    plan_layer_target_admission, plan_registry_get_security,
     plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
     plan_registry_open_pre_resolution_access, plan_registry_security_info_fd_access_gate,
     plan_registry_set_security, plan_value_layer_admission,
@@ -58,7 +58,8 @@ use crate::lcs_core::{
     write_rsi_set_value_request_frame, write_rsi_write_key_request_frame,
     BlanketTombstoneEntry, CurrentUserRewrite,
     HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest, KeyWatchState,
-    LayerPublicationInput, LayerResolutionContext, LayerTargetAdmissionInput, LayerView,
+    LayerOwnerSelectionInput, LayerOwnerSource, LayerPublicationInput, LayerResolutionContext,
+    LayerTargetAdmissionInput, LayerView,
     LcsCallerTokenSummary, LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry,
     NamedPathResolution, NamedValueEntry, PathKind, PathTarget, RegisteredHiveIdentity,
     RegistryIoctlAccessRequirement, RegistryKeyOpenAccessInput, RegistryOpenAccessDecision,
@@ -70,7 +71,7 @@ use crate::lcs_core::{
     WatchEventRecordRequest,
     WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_TOMBSTONE,
     RSI_DELETE_LAYER, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
-    write_watch_event_record,
+    select_layer_owner, write_watch_event_record,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -263,6 +264,15 @@ pub struct PkmLcsLayerMetadataSdViewCopy {
 pub struct PkmLcsLayerMetadataSdSelectionCopy {
     pub index: u32,
     pub _pad: u32,
+}
+
+#[repr(C)]
+pub struct PkmLcsLayerOwnerSelectionCopy {
+    pub owner_sid: *const u8,
+    pub owner_sid_len: usize,
+    pub source: u32,
+    pub informational_only: u8,
+    pub _pad: [u8; 3],
 }
 
 #[repr(C)]
@@ -878,6 +888,106 @@ pub unsafe extern "C" fn lcs_rust_validate_layer_publication(
         Ok(_) => 0,
         Err(LcsError::NameTooLong { .. }) => LinuxErrno::Enametoolong.negated_return() as c_int,
         Err(LcsError::NilLayerMetadataKeyGuid)
+        | Err(LcsError::MalformedSecurityDescriptor { .. }) => {
+            LinuxErrno::Eio.negated_return() as c_int
+        }
+        Err(_) => LinuxErrno::Einval.negated_return() as c_int,
+    }
+}
+
+fn optional_layer_owner_slice<'a>(
+    ptr: *const u8,
+    len: usize,
+    present: bool,
+) -> Result<Option<&'a [u8]>, LinuxErrno> {
+    if !present {
+        return Ok(None);
+    }
+    if ptr.is_null() || len == 0 {
+        return Err(LinuxErrno::Einval);
+    }
+    Ok(Some(unsafe { slice::from_raw_parts(ptr, len) }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_select_layer_owner(
+    metadata_owner_sid: *const u8,
+    metadata_owner_sid_len: usize,
+    metadata_owner_present: bool,
+    creator_sid: *const u8,
+    creator_sid_len: usize,
+    creator_present: bool,
+    previous_owner_sid: *const u8,
+    previous_owner_sid_len: usize,
+    previous_owner_present: bool,
+    metadata_security_descriptor: *const u8,
+    metadata_security_descriptor_len: usize,
+    metadata_security_descriptor_present: bool,
+    is_new_layer: bool,
+    selection_out: *mut PkmLcsLayerOwnerSelectionCopy,
+) -> c_int {
+    let Some(selection_out) = (unsafe { selection_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *selection_out = PkmLcsLayerOwnerSelectionCopy {
+        owner_sid: core::ptr::null(),
+        owner_sid_len: 0,
+        source: 0,
+        informational_only: 0,
+        _pad: [0; 3],
+    };
+
+    let metadata_owner_sid = match optional_layer_owner_slice(
+        metadata_owner_sid,
+        metadata_owner_sid_len,
+        metadata_owner_present,
+    ) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let creator_sid = match optional_layer_owner_slice(creator_sid, creator_sid_len, creator_present)
+    {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let previous_known_good_owner_sid = match optional_layer_owner_slice(
+        previous_owner_sid,
+        previous_owner_sid_len,
+        previous_owner_present,
+    ) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let metadata_security_descriptor = match optional_layer_owner_slice(
+        metadata_security_descriptor,
+        metadata_security_descriptor_len,
+        metadata_security_descriptor_present,
+    ) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    match select_layer_owner(LayerOwnerSelectionInput {
+        metadata_owner_sid,
+        creator_sid,
+        previous_known_good_owner_sid,
+        metadata_security_descriptor,
+        is_new_layer,
+    }) {
+        Ok(selection) => {
+            selection_out.owner_sid = selection.owner_sid.as_ptr();
+            selection_out.owner_sid_len = selection.owner_sid.len();
+            selection_out.source = match selection.source {
+                LayerOwnerSource::MetadataValue => 1,
+                LayerOwnerSource::CreatorToken => 2,
+                LayerOwnerSource::PreviousKnownGood => 3,
+                LayerOwnerSource::MetadataSecurityDescriptorOwner => 4,
+            };
+            selection_out.informational_only = selection.informational_only as u8;
+            0
+        }
+        Err(LcsError::MalformedLayerOwnerSid)
+        | Err(LcsError::LayerOwnerUnavailable)
         | Err(LcsError::MalformedSecurityDescriptor { .. }) => {
             LinuxErrno::Eio.negated_return() as c_int
         }

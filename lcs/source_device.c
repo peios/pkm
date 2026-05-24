@@ -122,6 +122,8 @@ struct pkm_lcs_layer_table_entry {
 	u8 metadata_key_guid[RSI_GUID_SIZE];
 	u8 *metadata_sd;
 	size_t metadata_sd_len;
+	u8 *owner_sid;
+	size_t owner_sid_len;
 };
 
 static DEFINE_MUTEX(pkm_lcs_source_table_lock);
@@ -148,6 +150,15 @@ extern int lcs_rust_validate_layer_publication(
 	const u8 *layer_name, u32 layer_name_len,
 	const u8 metadata_key_guid[16], const u8 *metadata_security_descriptor,
 	size_t metadata_security_descriptor_len, u32 precedence, u8 enabled);
+extern int lcs_rust_select_layer_owner(
+	const u8 *metadata_owner_sid, size_t metadata_owner_sid_len,
+	bool metadata_owner_present, const u8 *creator_sid,
+	size_t creator_sid_len, bool creator_present,
+	const u8 *previous_owner_sid, size_t previous_owner_sid_len,
+	bool previous_owner_present, const u8 *metadata_security_descriptor,
+	size_t metadata_security_descriptor_len,
+	bool metadata_security_descriptor_present, bool is_new_layer,
+	struct pkm_lcs_layer_owner_selection_copy *selection_out);
 extern int lcs_rust_layer_name_casefold_eq(
 	const u8 *left, u32 left_len, const u8 *right, u32 right_len,
 	u8 *equal_out);
@@ -187,6 +198,7 @@ static void pkm_lcs_layer_table_entry_destroy(
 	struct pkm_lcs_layer_table_entry *entry)
 {
 	kfree(entry->metadata_sd);
+	kfree(entry->owner_sid);
 	memset(entry, 0, sizeof(*entry));
 }
 
@@ -219,7 +231,9 @@ static long pkm_lcs_layer_table_shape_locked(u32 *count_out,
 		if (!pkm_lcs_layer_table[i].occupied)
 			continue;
 		if (!pkm_lcs_layer_table[i].metadata_sd ||
-		    !pkm_lcs_layer_table[i].metadata_sd_len)
+		    !pkm_lcs_layer_table[i].metadata_sd_len ||
+		    !pkm_lcs_layer_table[i].owner_sid ||
+		    !pkm_lcs_layer_table[i].owner_sid_len)
 			return -EIO;
 		count++;
 		if (check_add_overflow(
@@ -369,7 +383,8 @@ static long pkm_lcs_source_layer_snapshot_copy_full(
 
 		if (!entry->occupied)
 			continue;
-		if (!entry->metadata_sd || !entry->metadata_sd_len) {
+		if (!entry->metadata_sd || !entry->metadata_sd_len ||
+		    !entry->owner_sid || !entry->owner_sid_len) {
 			mutex_unlock(&pkm_lcs_layer_table_lock);
 			return -EIO;
 		}
@@ -515,18 +530,112 @@ void pkm_lcs_source_layer_snapshot_release(
 	memset(snapshot, 0, sizeof(*snapshot));
 }
 
+long pkm_lcs_layer_table_owner_snapshot(
+	const char *layer_name, u32 layer_name_len, u8 **owner_sid_out,
+	size_t *owner_sid_len_out, bool *present_out)
+{
+	u8 *owner_copy = NULL;
+	u32 i;
+	long ret = 0;
+
+	if (!layer_name || !owner_sid_out || !owner_sid_len_out ||
+	    !present_out)
+		return -EINVAL;
+	*owner_sid_out = NULL;
+	*owner_sid_len_out = 0;
+	*present_out = false;
+
+	mutex_lock(&pkm_lcs_layer_table_lock);
+	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+		struct pkm_lcs_layer_table_entry *entry =
+			&pkm_lcs_layer_table[i];
+		bool equal = false;
+
+		if (!entry->occupied)
+			continue;
+		ret = pkm_lcs_layer_name_casefold_equal(
+			layer_name, layer_name_len, entry->name,
+			entry->name_len, &equal);
+		if (ret)
+			break;
+		if (!equal)
+			continue;
+		if (!entry->owner_sid || !entry->owner_sid_len) {
+			ret = -EIO;
+			break;
+		}
+		owner_copy = kmemdup(entry->owner_sid, entry->owner_sid_len,
+				     GFP_KERNEL);
+		if (!owner_copy) {
+			ret = -ENOMEM;
+			break;
+		}
+		*owner_sid_out = owner_copy;
+		*owner_sid_len_out = entry->owner_sid_len;
+		*present_out = true;
+		break;
+	}
+	mutex_unlock(&pkm_lcs_layer_table_lock);
+	return ret;
+}
+
+long pkm_lcs_layer_owner_select_copy(
+	const u8 *metadata_owner_sid, size_t metadata_owner_sid_len,
+	bool metadata_owner_present, const u8 *creator_sid,
+	size_t creator_sid_len, bool creator_present,
+	const u8 *previous_owner_sid, size_t previous_owner_sid_len,
+	bool previous_owner_present, const u8 *metadata_sd,
+	size_t metadata_sd_len, bool metadata_sd_present, bool is_new_layer,
+	u8 **owner_sid_out, size_t *owner_sid_len_out, u32 *source_out)
+{
+	struct pkm_lcs_layer_owner_selection_copy selection = { };
+	u8 *copy;
+	int ret;
+
+	if (!owner_sid_out || !owner_sid_len_out)
+		return -EINVAL;
+	*owner_sid_out = NULL;
+	*owner_sid_len_out = 0;
+	if (source_out)
+		*source_out = 0;
+
+	ret = lcs_rust_select_layer_owner(
+		metadata_owner_sid, metadata_owner_sid_len,
+		metadata_owner_present, creator_sid, creator_sid_len,
+		creator_present, previous_owner_sid, previous_owner_sid_len,
+		previous_owner_present, metadata_sd, metadata_sd_len,
+		metadata_sd_present, is_new_layer, &selection);
+	if (ret)
+		return ret;
+	if (!selection.owner_sid || !selection.owner_sid_len ||
+	    !selection.informational_only)
+		return -EIO;
+
+	copy = kmemdup(selection.owner_sid, selection.owner_sid_len,
+		      GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
+	*owner_sid_out = copy;
+	*owner_sid_len_out = selection.owner_sid_len;
+	if (source_out)
+		*source_out = selection.source;
+	return 0;
+}
+
 long pkm_lcs_layer_table_publish(
 	const char *layer_name, u32 layer_name_len, u32 precedence,
 	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],
-	const u8 *metadata_sd, size_t metadata_sd_len)
+	const u8 *metadata_sd, size_t metadata_sd_len,
+	const u8 *owner_sid, size_t owner_sid_len)
 {
 	struct pkm_lcs_layer_table_entry *target = NULL;
 	u8 *metadata_sd_copy;
+	u8 *owner_sid_copy;
 	u32 i;
 	int ret;
 
 	if (!layer_name || !metadata_key_guid || !metadata_sd ||
-	    !metadata_sd_len)
+	    !metadata_sd_len || !owner_sid || !owner_sid_len)
 		return -EINVAL;
 	if (layer_name_len > PKM_LCS_MAX_LAYER_NAME_BYTES_HARD)
 		return -ENAMETOOLONG;
@@ -540,6 +649,11 @@ long pkm_lcs_layer_table_publish(
 	metadata_sd_copy = kmemdup(metadata_sd, metadata_sd_len, GFP_KERNEL);
 	if (!metadata_sd_copy)
 		return -ENOMEM;
+	owner_sid_copy = kmemdup(owner_sid, owner_sid_len, GFP_KERNEL);
+	if (!owner_sid_copy) {
+		kfree(metadata_sd_copy);
+		return -ENOMEM;
+	}
 
 	mutex_lock(&pkm_lcs_layer_table_lock);
 	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
@@ -556,6 +670,7 @@ long pkm_lcs_layer_table_publish(
 		if (ret) {
 			mutex_unlock(&pkm_lcs_layer_table_lock);
 			kfree(metadata_sd_copy);
+			kfree(owner_sid_copy);
 			return ret;
 		}
 		if (equal) {
@@ -566,10 +681,12 @@ long pkm_lcs_layer_table_publish(
 	if (!target) {
 		mutex_unlock(&pkm_lcs_layer_table_lock);
 		kfree(metadata_sd_copy);
+		kfree(owner_sid_copy);
 		return -ENOSPC;
 	}
 
 	kfree(target->metadata_sd);
+	kfree(target->owner_sid);
 	memset(target, 0, sizeof(*target));
 	target->occupied = true;
 	target->enabled = enabled;
@@ -580,6 +697,8 @@ long pkm_lcs_layer_table_publish(
 	memcpy(target->metadata_key_guid, metadata_key_guid, RSI_GUID_SIZE);
 	target->metadata_sd = metadata_sd_copy;
 	target->metadata_sd_len = metadata_sd_len;
+	target->owner_sid = owner_sid_copy;
+	target->owner_sid_len = owner_sid_len;
 	mutex_unlock(&pkm_lcs_layer_table_lock);
 
 	return 0;
@@ -8173,10 +8292,13 @@ static void pkm_lcs_create_missing_dispatch_subkey_created_best_effort(
 }
 
 static long pkm_lcs_create_missing_refresh_layer_metadata_if_needed(
+	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,
 	const u8 child_guid[RSI_GUID_SIZE])
 {
 	struct pkm_lcs_resolved_key_path child = { };
+	const u8 *creator_sid = NULL;
+	size_t creator_sid_len = 0;
 	long ret;
 
 	ret = pkm_lcs_create_missing_child_path_prepare(resolution, child_guid,
@@ -8184,10 +8306,15 @@ static long pkm_lcs_create_missing_refresh_layer_metadata_if_needed(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_key_path_refresh_layer_metadata(
+	ret = kacs_rust_token_user_sid(token, &creator_sid, &creator_sid_len);
+	if (ret)
+		goto out_child;
+
+	ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context(
 		child.source_id, child.key_guid,
 		(const char * const *)child.resolved_path,
-		child.component_count);
+		child.component_count, creator_sid, creator_sid_len, true);
+out_child:
 	pkm_lcs_resolved_key_path_destroy(&child);
 	return ret;
 }
@@ -8227,7 +8354,7 @@ long pkm_lcs_create_missing_prepared_key_for_token(
 		return -EIO;
 
 	ret = pkm_lcs_create_missing_refresh_layer_metadata_if_needed(
-		resolution, child_guid);
+		token, resolution, child_guid);
 	if (ret)
 		return ret;
 
@@ -8543,6 +8670,8 @@ static long pkm_lcs_create_missing_copied_path_finish_for_token_with_txn(
 	struct pkm_lcs_transaction_binding_plan binding = { };
 	struct pkm_lcs_transaction_mutation_handle mutation = { };
 	struct pkm_lcs_transaction_key_create_log_input log_input = { };
+	const u8 *creator_sid = NULL;
+	size_t creator_sid_len = 0;
 	u64 sequence = 0;
 	long ret;
 
@@ -8603,6 +8732,10 @@ static long pkm_lcs_create_missing_copied_path_finish_for_token_with_txn(
 		ret = pkm_lcs_allocate_sequence(&sequence);
 		if (ret)
 			goto out_created_sd;
+		ret = kacs_rust_token_user_sid(token, &creator_sid,
+					       &creator_sid_len);
+		if (ret)
+			goto out_created_sd;
 
 		log_input.parent_guid = resolution.parent.key_guid;
 		log_input.target_guid = guid_plan.guid;
@@ -8614,6 +8747,8 @@ static long pkm_lcs_create_missing_copied_path_finish_for_token_with_txn(
 			(const char * const *)resolution.parent.resolved_path;
 		log_input.parent_ancestor_guids =
 			resolution.parent.ancestor_guids;
+		log_input.creator_sid = creator_sid;
+		log_input.creator_sid_len = creator_sid_len;
 		log_input.parent_depth = resolution.parent.component_count;
 		log_input.sequence = sequence;
 

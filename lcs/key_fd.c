@@ -2832,6 +2832,49 @@ out:
 	return ret;
 }
 
+static long pkm_lcs_key_fd_query_layer_metadata_owner(
+	const struct pkm_lcs_key_fd *key_fd, const char *value_name,
+	u32 value_name_len, struct pkm_lcs_effective_value_snapshot *snapshot,
+	bool *found_out, const u8 **owner_sid_out, size_t *owner_sid_len_out)
+{
+	long ret;
+
+	if (!snapshot || !found_out || !owner_sid_out || !owner_sid_len_out)
+		return -EINVAL;
+	*found_out = false;
+	*owner_sid_out = NULL;
+	*owner_sid_len_out = 0;
+
+	ret = pkm_lcs_key_fd_query_effective_value_snapshot(
+		key_fd, 0, value_name, value_name_len, snapshot);
+	if (ret) {
+		pkm_lcs_effective_value_snapshot_destroy(snapshot);
+		return ret;
+	}
+	if (!snapshot->result.found)
+		return 0;
+	if (snapshot->result.value_type != REG_BINARY ||
+	    !snapshot->result.data_len) {
+		ret = -EIO;
+		goto out;
+	}
+	if ((size_t)snapshot->result.data_offset > snapshot->frame.len ||
+	    (size_t)snapshot->result.data_len >
+		    snapshot->frame.len - (size_t)snapshot->result.data_offset) {
+		ret = -EIO;
+		goto out;
+	}
+
+	*found_out = true;
+	*owner_sid_out = snapshot->frame.data + snapshot->result.data_offset;
+	*owner_sid_len_out = snapshot->result.data_len;
+	return 0;
+
+out:
+	pkm_lcs_effective_value_snapshot_destroy(snapshot);
+	return ret;
+}
+
 static void pkm_lcs_key_fd_emit_layer_metadata_sd_validation_failure(
 	const struct pkm_lcs_key_fd *key_fd,
 	const struct pkm_lcs_source_response_result *response)
@@ -2856,23 +2899,35 @@ static void pkm_lcs_key_fd_emit_layer_metadata_sd_validation_failure(
 		PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_METADATA_SD);
 }
 
-static long pkm_lcs_key_fd_refresh_layer_metadata(
-	const struct pkm_lcs_key_fd *key_fd)
+static long pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context(
+	const struct pkm_lcs_key_fd *key_fd, const u8 *creator_sid,
+	size_t creator_sid_len, bool is_new_layer)
 {
 	static const char precedence_name[] = "Precedence";
 	static const char enabled_name[] = "Enabled";
+	static const char owner_name[] = "Owner";
 	static const char base_name[] = "base";
 	struct pkm_lcs_source_response_frame read_frame = { };
 	struct pkm_lcs_source_response_result read_response = { };
+	struct pkm_lcs_effective_value_snapshot owner_snapshot = { };
 	const char *layer_name = NULL;
 	const u8 *sd = NULL;
+	const u8 *owner_sid = NULL;
+	u8 *selected_owner_sid = NULL;
+	u8 *previous_owner_sid = NULL;
 	size_t sd_len = 0;
+	size_t owner_sid_len = 0;
+	size_t selected_owner_sid_len = 0;
+	size_t previous_owner_sid_len = 0;
+	u32 owner_source = 0;
 	u32 layer_name_len = 0;
 	u32 precedence = 0;
 	u32 enabled_raw = 1;
 	bool matches = false;
 	bool is_base = false;
 	bool found = false;
+	bool owner_found = false;
+	bool previous_owner_present = false;
 	u8 enabled = 1;
 	long ret;
 
@@ -2921,21 +2976,65 @@ static long pkm_lcs_key_fd_refresh_layer_metadata(
 		goto out_read_frame;
 	}
 
+	ret = pkm_lcs_key_fd_query_layer_metadata_owner(
+		key_fd, owner_name, sizeof(owner_name) - 1, &owner_snapshot,
+		&owner_found, &owner_sid, &owner_sid_len);
+	if (ret)
+		goto out_read_frame;
+
+	ret = pkm_lcs_layer_table_owner_snapshot(
+		layer_name, layer_name_len, &previous_owner_sid,
+		&previous_owner_sid_len, &previous_owner_present);
+	if (ret)
+		goto out_owner_snapshot;
+
+	ret = pkm_lcs_layer_owner_select_copy(
+		owner_sid, owner_sid_len, owner_found, creator_sid,
+		creator_sid_len, creator_sid && creator_sid_len,
+		previous_owner_sid, previous_owner_sid_len,
+		previous_owner_present, sd, sd_len, true, is_new_layer,
+		&selected_owner_sid, &selected_owner_sid_len, &owner_source);
+	if (ret)
+		goto out_previous_owner;
+
 	ret = pkm_lcs_layer_table_publish(
 		layer_name, layer_name_len, precedence, enabled,
-		key_fd->key_guid, sd, sd_len);
+		key_fd->key_guid, sd, sd_len, selected_owner_sid,
+		selected_owner_sid_len);
 	if (ret == -EIO)
 		pkm_lcs_key_fd_emit_layer_metadata_sd_validation_failure(
 			key_fd, &read_response);
 
+out_previous_owner:
+	kfree(previous_owner_sid);
+out_owner_snapshot:
+	kfree(selected_owner_sid);
+	pkm_lcs_effective_value_snapshot_destroy(&owner_snapshot);
 out_read_frame:
 	pkm_lcs_source_response_frame_destroy(&read_frame);
 	return ret;
 }
 
+static long pkm_lcs_key_fd_refresh_layer_metadata(
+	const struct pkm_lcs_key_fd *key_fd)
+{
+	return pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context(
+		key_fd, NULL, 0, false);
+}
+
 long pkm_lcs_key_path_refresh_layer_metadata(
 	u32 source_id, const u8 key_guid[PKM_LCS_GUID_BYTES],
 	const char * const *resolved_path, u32 path_component_count)
+{
+	return pkm_lcs_key_path_refresh_layer_metadata_with_owner_context(
+		source_id, key_guid, resolved_path, path_component_count, NULL,
+		0, false);
+}
+
+long pkm_lcs_key_path_refresh_layer_metadata_with_owner_context(
+	u32 source_id, const u8 key_guid[PKM_LCS_GUID_BYTES],
+	const char * const *resolved_path, u32 path_component_count,
+	const u8 *creator_sid, size_t creator_sid_len, bool is_new_layer)
 {
 	struct pkm_lcs_key_fd key_fd = { };
 
@@ -2946,7 +3045,8 @@ long pkm_lcs_key_path_refresh_layer_metadata(
 	memcpy(key_fd.key_guid, key_guid, sizeof(key_fd.key_guid));
 	key_fd.resolved_path = (char **)resolved_path;
 	key_fd.path_component_count = path_component_count;
-	return pkm_lcs_key_fd_refresh_layer_metadata(&key_fd);
+	return pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context(
+		&key_fd, creator_sid, creator_sid_len, is_new_layer);
 }
 
 static long pkm_lcs_key_fd_query_values_batch_from_args(

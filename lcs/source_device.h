@@ -283,6 +283,14 @@ struct pkm_lcs_source_response_result {
 	u8 _pad[2];
 };
 
+struct pkm_lcs_layer_owner_selection_copy {
+	const u8 *owner_sid;
+	size_t owner_sid_len;
+	u32 source;
+	u8 informational_only;
+	u8 _pad[3];
+};
+
 #define PKM_LCS_REG_CREATE_SOURCE_ACTION_CREATE_KEY 1U
 #define PKM_LCS_REG_CREATE_SOURCE_ACTION_RETRY_OPEN_EXISTING 2U
 #define PKM_LCS_REG_CREATE_SOURCE_ACTION_PUBLISH_CREATED_NEW 3U
@@ -980,7 +988,19 @@ void pkm_lcs_source_layer_snapshot_release(
 long pkm_lcs_layer_table_publish(
 	const char *layer_name, u32 layer_name_len, u32 precedence,
 	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],
-	const u8 *metadata_sd, size_t metadata_sd_len);
+	const u8 *metadata_sd, size_t metadata_sd_len,
+	const u8 *owner_sid, size_t owner_sid_len);
+long pkm_lcs_layer_table_owner_snapshot(
+	const char *layer_name, u32 layer_name_len, u8 **owner_sid_out,
+	size_t *owner_sid_len_out, bool *present_out);
+long pkm_lcs_layer_owner_select_copy(
+	const u8 *metadata_owner_sid, size_t metadata_owner_sid_len,
+	bool metadata_owner_present, const u8 *creator_sid,
+	size_t creator_sid_len, bool creator_present,
+	const u8 *previous_owner_sid, size_t previous_owner_sid_len,
+	bool previous_owner_present, const u8 *metadata_sd,
+	size_t metadata_sd_len, bool metadata_sd_present, bool is_new_layer,
+	u8 **owner_sid_out, size_t *owner_sid_len_out, u32 *source_out);
 long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
 				bool *removed_out);
 long pkm_lcs_layer_table_metadata_key_guid_present(

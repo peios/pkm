@@ -70,6 +70,8 @@ struct pkm_lcs_transaction_key_create_log {
 	char *layer;
 	char **parent_path;
 	u8 (*parent_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u8 *creator_sid;
+	size_t creator_sid_len;
 	u32 child_name_len;
 	u32 layer_len;
 	u32 parent_depth;
@@ -437,6 +439,7 @@ static void pkm_lcs_transaction_key_create_log_destroy(
 		kfree(entry->parent_path);
 	}
 	kfree(entry->parent_ancestor_guids);
+	kfree(entry->creator_sid);
 	memset(entry, 0, sizeof(*entry));
 }
 
@@ -677,6 +680,8 @@ static long pkm_lcs_transaction_key_create_log_alloc(
 	    !pkm_lcs_transaction_name_len_valid(input->child_name_len) ||
 	    !pkm_lcs_transaction_name_len_valid(input->layer_len))
 		return -EINVAL;
+	if (input->creator_sid_len && !input->creator_sid)
+		return -EINVAL;
 	if (input->parent_depth > PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT)
 		return -EINVAL;
 	ret = pkm_lcs_transaction_layer_name_validate(
@@ -697,6 +702,7 @@ static long pkm_lcs_transaction_key_create_log_alloc(
 	entry->create_key.parent_depth = input->parent_depth;
 	entry->create_key.child_name_len = (u32)input->child_name_len;
 	entry->create_key.layer_len = (u32)input->layer_len;
+	entry->create_key.creator_sid_len = input->creator_sid_len;
 
 	entry->create_key.child_name =
 		kmemdup_nul(input->child_name, input->child_name_len,
@@ -710,6 +716,15 @@ static long pkm_lcs_transaction_key_create_log_alloc(
 	if (!entry->create_key.layer) {
 		ret = -ENOMEM;
 		goto out_free;
+	}
+	if (input->creator_sid_len) {
+		entry->create_key.creator_sid =
+			kmemdup(input->creator_sid, input->creator_sid_len,
+				GFP_KERNEL);
+		if (!entry->create_key.creator_sid) {
+			ret = -ENOMEM;
+			goto out_free;
+		}
 	}
 
 	ret = pkm_lcs_transaction_dup_path_components(
@@ -1881,8 +1896,10 @@ static long pkm_lcs_transaction_log_refresh_layer_metadata(
 			for (i = 0; i < depth; i++)
 				created_path[i] = path[i];
 			created_path[depth] = layer_name;
-			ret = pkm_lcs_key_path_refresh_layer_metadata(
-				source_id, key_guid, created_path, depth + 1U);
+			ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context(
+				source_id, key_guid, created_path, depth + 1U,
+				entry->create_key.creator_sid,
+				entry->create_key.creator_sid_len, true);
 		} else {
 			ret = pkm_lcs_key_path_refresh_layer_metadata(
 				source_id, key_guid,

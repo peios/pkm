@@ -28,6 +28,18 @@
 
 extern size_t lcs_rust_kunit_probe(void);
 
+static const u8 pkm_lcs_kunit_system_sid[] = {
+	0x01, 0x01, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x05,
+	0x12, 0x00, 0x00, 0x00,
+};
+
+static const u8 pkm_lcs_kunit_everyone_sid[] = {
+	0x01, 0x01, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x01,
+	0x00, 0x00, 0x00, 0x00,
+};
+
 struct pkm_lcs_kunit_audit_caller_summary {
 	u8 effective_token_guid[16];
 	u8 true_token_guid[16];
@@ -359,8 +371,11 @@ struct pkm_lcs_kunit_layer_metadata_refresh_source_script {
 	size_t sd_len;
 	u32 precedence;
 	u32 enabled;
+	const u8 *owner_sid;
+	size_t owner_sid_len;
 	bool precedence_present;
 	bool enabled_present;
+	bool owner_present;
 	bool stop_after_read_key;
 	u32 reads;
 	u32 writes;
@@ -3127,7 +3142,9 @@ static void pkm_lcs_kunit_reg_open_key_uses_live_layer_table(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_layer_table_publish(
 				"policy", strlen("policy"), 10, 1,
-				policy_layer_guid, layer_sd, layer_sd_len),
+				policy_layer_guid, layer_sd, layer_sd_len,
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
 			0L);
 	base_sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
 						 &base_sd_len);
@@ -9453,8 +9470,8 @@ static void pkm_lcs_kunit_expect_set_value_layer_refresh_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 6U);
-	KUNIT_EXPECT_EQ(test, script.writes, 6U);
+	KUNIT_EXPECT_EQ(test, script.reads, 7U);
+	KUNIT_EXPECT_EQ(test, script.writes, 7U);
 	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
 }
 
@@ -10056,7 +10073,9 @@ static void pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate(
 			pkm_lcs_layer_table_publish(
 				"Policy", strlen("Policy"), 0, 1,
 				metadata_ancestors[ARRAY_SIZE(metadata_ancestors) - 1],
-				layer_sd, layer_sd_len),
+				layer_sd, layer_sd_len,
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
 			0L);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_source_next_sequence_snapshot(&sequence_before),
@@ -19328,6 +19347,47 @@ static int pkm_lcs_kunit_layer_metadata_refresh_write_query_response(
 		script, response, offset);
 }
 
+static int pkm_lcs_kunit_layer_metadata_refresh_write_binary_query_response(
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script *script,
+	u64 request_id, const char *value_name, bool present, const u8 *data,
+	size_t data_len)
+{
+	u8 response[256];
+	size_t offset = RSI_MIN_RESPONSE_SIZE;
+	int ret;
+
+	if (present && (!data || !data_len))
+		return -EINVAL;
+
+	memset(response, 0, sizeof(response));
+	put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
+	put_unaligned_le16(RSI_QUERY_VALUES_RESPONSE,
+			   response + RSI_RESPONSE_OP_CODE_OFFSET);
+	put_unaligned_le32(RSI_OK, response + RSI_RESPONSE_STATUS_OFFSET);
+
+	ret = pkm_lcs_kunit_walk_source_append_u32(
+		response, sizeof(response), &offset, present ? 1U : 0U);
+	if (ret)
+		return ret;
+	if (present) {
+		ret = pkm_lcs_kunit_query_values_source_append_value(
+			response, sizeof(response), &offset, value_name, "base",
+			REG_BINARY, data, data_len, 0);
+		if (ret)
+			return ret;
+	}
+	ret = pkm_lcs_kunit_walk_source_append_u32(
+		response, sizeof(response), &offset, 0);
+	if (ret)
+		return ret;
+	if (offset > U32_MAX)
+		return -EOVERFLOW;
+	put_unaligned_le32((u32)offset,
+			   response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	return pkm_lcs_kunit_layer_metadata_refresh_write_frame(
+		script, response, offset);
+}
+
 static int pkm_lcs_kunit_layer_metadata_refresh_handle_query(
 	struct pkm_lcs_kunit_layer_metadata_refresh_source_script *script,
 	u8 *request, size_t request_len, const char *expected_value_name,
@@ -19372,6 +19432,57 @@ static int pkm_lcs_kunit_layer_metadata_refresh_handle_query(
 		script, request_id, expected_value_name, present, value);
 }
 
+static int pkm_lcs_kunit_layer_metadata_refresh_handle_owner_query(
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script *script,
+	u8 *request, size_t request_len)
+{
+	size_t offset = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
+	static const char expected_value_name[] = "Owner";
+	ssize_t count;
+	u64 request_id;
+	u16 request_op;
+	u32 value_len;
+	int ret;
+
+	ret = pkm_lcs_kunit_layer_metadata_refresh_source_read(
+		script, request, request_len, &count);
+	if (ret)
+		return ret;
+	if ((size_t)count < offset + sizeof(u32) + sizeof(u8))
+		return -EINVAL;
+
+	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
+	if (request_op != RSI_QUERY_VALUES ||
+	    get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) != 0 ||
+	    memcmp(request + RSI_REQUEST_HEADER_SIZE, script->expected_guid,
+		   RSI_GUID_SIZE))
+		return -EINVAL;
+
+	value_len = get_unaligned_le32(request + offset);
+	offset += sizeof(u32);
+	if (offset > (size_t)count || value_len > (size_t)count - offset ||
+	    value_len != strlen(expected_value_name) ||
+	    memcmp(request + offset, expected_value_name, value_len))
+		return -EINVAL;
+	offset += value_len;
+	if (offset >= (size_t)count || request[offset] != 0)
+		return -EINVAL;
+	offset++;
+	if (offset != (size_t)count)
+		return -EINVAL;
+
+	return pkm_lcs_kunit_layer_metadata_refresh_write_binary_query_response(
+		script, request_id, expected_value_name, script->owner_present,
+		script->owner_sid, script->owner_sid_len);
+}
+
+static bool pkm_lcs_kunit_layer_metadata_refresh_stops_after_enabled(
+	const struct pkm_lcs_kunit_layer_metadata_refresh_source_script *script)
+{
+	return script && script->enabled_present && script->enabled > 1U;
+}
+
 static int pkm_lcs_kunit_layer_metadata_refresh_source_thread(void *raw_script)
 {
 	struct pkm_lcs_kunit_layer_metadata_refresh_source_script *script =
@@ -19399,6 +19510,12 @@ static int pkm_lcs_kunit_layer_metadata_refresh_source_thread(void *raw_script)
 	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
 		script, request, sizeof(request), "Enabled",
 		script->enabled_present, script->enabled);
+	if (ret)
+		goto out;
+	if (pkm_lcs_kunit_layer_metadata_refresh_stops_after_enabled(script))
+		goto out;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_owner_query(
+		script, request, sizeof(request));
 
 out:
 	script->result = ret;
@@ -19442,6 +19559,13 @@ static int pkm_lcs_kunit_set_security_layer_refresh_source_thread(
 	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
 		&script->refresh, request, sizeof(request), "Enabled",
 		script->refresh.enabled_present, script->refresh.enabled);
+	if (ret)
+		goto out_refresh;
+	if (pkm_lcs_kunit_layer_metadata_refresh_stops_after_enabled(
+		    &script->refresh))
+		goto out_refresh;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_owner_query(
+		&script->refresh, request, sizeof(request));
 
 out_refresh:
 	script->reads += script->refresh.reads;
@@ -19486,6 +19610,13 @@ static int pkm_lcs_kunit_create_layer_refresh_source_thread(void *raw_script)
 	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
 		&script->refresh, request, sizeof(request), "Enabled",
 		script->refresh.enabled_present, script->refresh.enabled);
+	if (ret)
+		goto out_refresh;
+	if (pkm_lcs_kunit_layer_metadata_refresh_stops_after_enabled(
+		    &script->refresh))
+		goto out_refresh;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_owner_query(
+		&script->refresh, request, sizeof(request));
 
 out_refresh:
 	script->reads += script->refresh.reads;
@@ -19553,7 +19684,9 @@ static void pkm_lcs_kunit_key_fd_query_value_uses_live_layer_table(
 			pkm_lcs_layer_table_publish(
 				"policy", strlen("policy"), 10, 1, policy_guid,
 				pkm_lcs_kunit_owner_only_sd,
-				sizeof(pkm_lcs_kunit_owner_only_sd)),
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
 			0L);
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
@@ -20242,6 +20375,12 @@ static int pkm_lcs_kunit_set_value_ioctl_source_handle_layer_refresh(
 	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
 		&refresh, request, request_len, "Enabled",
 		refresh.enabled_present, refresh.enabled);
+	if (ret)
+		goto out;
+	if (pkm_lcs_kunit_layer_metadata_refresh_stops_after_enabled(&refresh))
+		goto out;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_owner_query(
+		&refresh, request, request_len);
 
 out:
 	script->reads += refresh.reads;
@@ -24577,13 +24716,17 @@ static void pkm_lcs_kunit_layer_table_publish_snapshot_remove(struct kunit *test
 			pkm_lcs_layer_table_publish(
 				"Policy", strlen("Policy"), 7, 1, policy_guid,
 				pkm_lcs_kunit_owner_only_sd,
-				sizeof(pkm_lcs_kunit_owner_only_sd)),
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
 			0L);
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_layer_table_publish(
 				"policy", strlen("policy"), 11, 0,
 				replacement_guid, pkm_lcs_kunit_owner_only_sd,
-				sizeof(pkm_lcs_kunit_owner_only_sd)),
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_everyone_sid,
+				sizeof(pkm_lcs_kunit_everyone_sid)),
 			0L);
 	memset(layers, 0, sizeof(layers));
 	memset(names, 0, sizeof(names));
@@ -24624,24 +24767,32 @@ static void pkm_lcs_kunit_layer_table_publish_snapshot_remove(struct kunit *test
 			pkm_lcs_layer_table_publish(
 				"base", strlen("base"), 0, 1, policy_guid,
 				pkm_lcs_kunit_owner_only_sd,
-				sizeof(pkm_lcs_kunit_owner_only_sd)),
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
 			(long)-EINVAL);
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_layer_table_publish(
 				"bad/layer", strlen("bad/layer"), 0, 1,
 				policy_guid, pkm_lcs_kunit_owner_only_sd,
-				sizeof(pkm_lcs_kunit_owner_only_sd)),
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
 			(long)-EINVAL);
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_layer_table_publish(
 				"Other", strlen("Other"), 0, 1, nil_guid,
 				pkm_lcs_kunit_owner_only_sd,
-				sizeof(pkm_lcs_kunit_owner_only_sd)),
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
 			(long)-EIO);
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_layer_table_publish("Other", strlen("Other"),
 						    0, 1, policy_guid,
-						    (const u8 *)"bad", 3),
+						    (const u8 *)"bad", 3,
+						    pkm_lcs_kunit_system_sid,
+						    sizeof(pkm_lcs_kunit_system_sid)),
 			(long)-EIO);
 
 	pkm_lcs_kunit_reset_layer_table();
@@ -24675,7 +24826,10 @@ static void pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains(
 	struct task_struct *task;
 	struct file file = { };
 	const void *token;
+	u8 *owner_sid = NULL;
+	size_t owner_sid_len = 0;
 	u32 count = 0;
+	bool owner_present = false;
 	long fd;
 	long ret;
 	int thread_ret;
@@ -24700,8 +24854,8 @@ static void pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 3U);
-	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_source_layer_snapshot_copy(
 				layers, ARRAY_SIZE(layers), names, sizeof(names),
@@ -24711,6 +24865,144 @@ static void pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains(
 	KUNIT_EXPECT_STREQ(test, layers[1].name, "Policy");
 	KUNIT_EXPECT_EQ(test, layers[1].precedence, 9U);
 	KUNIT_EXPECT_EQ(test, layers[1].enabled, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_owner_snapshot(
+				"policy", strlen("policy"), &owner_sid,
+				&owner_sid_len, &owner_present),
+			0L);
+	KUNIT_ASSERT_TRUE(test, owner_present);
+	KUNIT_ASSERT_EQ(test, owner_sid_len,
+			sizeof(pkm_lcs_kunit_system_sid));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(owner_sid, pkm_lcs_kunit_system_sid,
+			       owner_sid_len),
+			0);
+	kfree(owner_sid);
+	owner_sid = NULL;
+	owner_sid_len = 0;
+	owner_present = false;
+
+	memset(&script, 0, sizeof(script));
+	script.file = &file;
+	script.expected_guid = metadata_ancestors[4];
+	script.name = "Policy";
+	script.sd = pkm_lcs_kunit_owner_only_sd;
+	script.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd);
+	script.precedence = 13;
+	script.enabled = 1;
+	script.owner_sid = pkm_lcs_kunit_everyone_sid;
+	script.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid);
+	script.precedence_present = true;
+	script.enabled_present = true;
+	script.owner_present = true;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_source_thread, &script,
+		"pkm-lcs-kunit-layer-refresh-owner");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_kunit_key_fd_refresh_layer_metadata((int)fd);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_owner_snapshot(
+				"POLICY", strlen("POLICY"), &owner_sid,
+				&owner_sid_len, &owner_present),
+			0L);
+	KUNIT_ASSERT_TRUE(test, owner_present);
+	KUNIT_ASSERT_EQ(test, owner_sid_len,
+			sizeof(pkm_lcs_kunit_everyone_sid));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(owner_sid, pkm_lcs_kunit_everyone_sid,
+			       owner_sid_len),
+			0);
+	kfree(owner_sid);
+	owner_sid = NULL;
+	owner_sid_len = 0;
+	owner_present = false;
+
+	memset(&script, 0, sizeof(script));
+	script.file = &file;
+	script.expected_guid = metadata_ancestors[4];
+	script.name = "Policy";
+	script.sd = pkm_lcs_kunit_owner_only_sd;
+	script.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd);
+	script.precedence = 15;
+	script.enabled = 0;
+	script.precedence_present = true;
+	script.enabled_present = true;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_source_thread, &script,
+		"pkm-lcs-kunit-layer-refresh-owner-retain");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_kunit_key_fd_refresh_layer_metadata((int)fd);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	memset(layers, 0, sizeof(layers));
+	memset(names, 0, sizeof(names));
+	count = 0;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 2U);
+	KUNIT_EXPECT_STREQ(test, layers[1].name, "Policy");
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 15U);
+	KUNIT_EXPECT_EQ(test, layers[1].enabled, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_owner_snapshot(
+				"policy", strlen("policy"), &owner_sid,
+				&owner_sid_len, &owner_present),
+			0L);
+	KUNIT_ASSERT_TRUE(test, owner_present);
+	KUNIT_ASSERT_EQ(test, owner_sid_len,
+			sizeof(pkm_lcs_kunit_everyone_sid));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(owner_sid, pkm_lcs_kunit_everyone_sid,
+			       owner_sid_len),
+			0);
+	kfree(owner_sid);
+	owner_sid = NULL;
+	owner_sid_len = 0;
+	owner_present = false;
+
+	memset(&script, 0, sizeof(script));
+	script.file = &file;
+	script.expected_guid = metadata_ancestors[4];
+	script.name = "Policy";
+	script.sd = pkm_lcs_kunit_owner_only_sd;
+	script.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd);
+	script.precedence = 16;
+	script.enabled = 1;
+	script.owner_sid = (const u8 *)"bad";
+	script.owner_sid_len = 3;
+	script.precedence_present = true;
+	script.enabled_present = true;
+	script.owner_present = true;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_source_thread, &script,
+		"pkm-lcs-kunit-layer-refresh-owner-bad");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_kunit_key_fd_refresh_layer_metadata((int)fd);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
 
 	memset(&script, 0, sizeof(script));
 	script.file = &file;
@@ -24745,8 +25037,21 @@ static void pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains(
 			0L);
 	KUNIT_ASSERT_EQ(test, count, 2U);
 	KUNIT_EXPECT_STREQ(test, layers[1].name, "Policy");
-	KUNIT_EXPECT_EQ(test, layers[1].precedence, 9U);
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 15U);
 	KUNIT_EXPECT_EQ(test, layers[1].enabled, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_owner_snapshot(
+				"Policy", strlen("Policy"), &owner_sid,
+				&owner_sid_len, &owner_present),
+			0L);
+	KUNIT_ASSERT_TRUE(test, owner_present);
+	KUNIT_ASSERT_EQ(test, owner_sid_len,
+			sizeof(pkm_lcs_kunit_everyone_sid));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(owner_sid, pkm_lcs_kunit_everyone_sid,
+			       owner_sid_len),
+			0);
+	kfree(owner_sid);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
@@ -24804,7 +25109,9 @@ static void pkm_lcs_kunit_layer_metadata_refresh_malformed_sd_audits(
 				"Policy", strlen("Policy"), 9, 1,
 				metadata_ancestors[4],
 				pkm_lcs_kunit_owner_only_sd,
-				sizeof(pkm_lcs_kunit_owner_only_sd)),
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
 			0L);
 
 	fd = pkm_lcs_kunit_publish_key_fd_from_path(
@@ -24927,7 +25234,9 @@ static void pkm_lcs_kunit_layer_metadata_set_security_refreshes_sd(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_layer_table_publish(
 				"Policy", strlen("Policy"), 9, 1,
-				metadata_ancestors[4], old_sd, sizeof(old_sd)),
+				metadata_ancestors[4], old_sd, sizeof(old_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
 			0L);
 
 	fd = pkm_lcs_kunit_publish_key_fd_from_path(
@@ -24945,8 +25254,8 @@ static void pkm_lcs_kunit_layer_metadata_set_security_refreshes_sd(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 5U);
-	KUNIT_EXPECT_EQ(test, script.writes, 5U);
+	KUNIT_EXPECT_EQ(test, script.reads, 6U);
+	KUNIT_EXPECT_EQ(test, script.writes, 6U);
 	KUNIT_EXPECT_NE(test,
 			script.set_security.observed_last_write_time, 0ULL);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
@@ -25000,7 +25309,9 @@ static void pkm_lcs_kunit_delete_layer_orchestration_aborts_before_broadcast(
 			pkm_lcs_layer_table_publish(
 				"Policy", strlen("Policy"), 9, 1, layer_guid,
 				pkm_lcs_kunit_owner_only_sd,
-				sizeof(pkm_lcs_kunit_owner_only_sd)),
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
 			0L);
 
 	txn_fd = pkm_lcs_reg_begin_transaction();
@@ -25423,6 +25734,13 @@ static int pkm_lcs_kunit_transaction_source_thread(void *data)
 		ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
 			refresh, request, sizeof(request), "Enabled",
 			refresh->enabled_present, refresh->enabled);
+		if (ret)
+			goto out_refresh;
+		if (pkm_lcs_kunit_layer_metadata_refresh_stops_after_enabled(
+			    refresh))
+			goto out_refresh;
+		ret = pkm_lcs_kunit_layer_metadata_refresh_handle_owner_query(
+			refresh, request, sizeof(request));
 
 out_refresh:
 		script->reads += refresh->reads - refresh_reads;
@@ -26082,11 +26400,11 @@ static void pkm_lcs_kunit_transaction_commit_refreshes_layer_metadata_once(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 4U);
-	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_EQ(test, refresh.result, 0);
-	KUNIT_EXPECT_EQ(test, refresh.reads, 3U);
-	KUNIT_EXPECT_EQ(test, refresh.writes, 3U);
+	KUNIT_EXPECT_EQ(test, refresh.reads, 4U);
+	KUNIT_EXPECT_EQ(test, refresh.writes, 4U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_transaction_fd_log_snapshot((int)fd, &log),
 			0L);
@@ -26218,11 +26536,11 @@ static void pkm_lcs_kunit_transaction_commit_refreshes_set_security_layer(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 4U);
-	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_EQ(test, refresh.result, 0);
-	KUNIT_EXPECT_EQ(test, refresh.reads, 3U);
-	KUNIT_EXPECT_EQ(test, refresh.writes, 3U);
+	KUNIT_EXPECT_EQ(test, refresh.reads, 4U);
+	KUNIT_EXPECT_EQ(test, refresh.writes, 4U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_transaction_fd_log_snapshot((int)fd, &log),
 			0L);
@@ -26288,6 +26606,8 @@ static void pkm_lcs_kunit_transaction_commit_refreshes_created_layer(
 		.layer_len = 4,
 		.parent_path = metadata_root_path,
 		.parent_ancestor_guids = metadata_root_ancestors,
+		.creator_sid = pkm_lcs_kunit_system_sid,
+		.creator_sid_len = sizeof(pkm_lcs_kunit_system_sid),
 		.parent_depth = ARRAY_SIZE(metadata_root_ancestors),
 		.sequence = 71,
 	};
@@ -26295,7 +26615,10 @@ static void pkm_lcs_kunit_transaction_commit_refreshes_created_layer(
 	struct task_struct *task;
 	struct file file = { };
 	const void *token;
+	u8 *owner_sid = NULL;
+	size_t owner_sid_len = 0;
 	u32 count = 0;
+	bool owner_present = false;
 	long fd;
 	long ret;
 	int thread_ret;
@@ -26340,11 +26663,11 @@ static void pkm_lcs_kunit_transaction_commit_refreshes_created_layer(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 4U);
-	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_EQ(test, refresh.result, 0);
-	KUNIT_EXPECT_EQ(test, refresh.reads, 3U);
-	KUNIT_EXPECT_EQ(test, refresh.writes, 3U);
+	KUNIT_EXPECT_EQ(test, refresh.reads, 4U);
+	KUNIT_EXPECT_EQ(test, refresh.writes, 4U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_transaction_fd_log_snapshot((int)fd, &log),
 			0L);
@@ -26358,6 +26681,19 @@ static void pkm_lcs_kunit_transaction_commit_refreshes_created_layer(
 	KUNIT_EXPECT_STREQ(test, layers[1].name, child_name);
 	KUNIT_EXPECT_EQ(test, layers[1].precedence, 0U);
 	KUNIT_EXPECT_EQ(test, layers[1].enabled, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_owner_snapshot(
+				child_name, sizeof(child_name) - 1, &owner_sid,
+				&owner_sid_len, &owner_present),
+			0L);
+	KUNIT_ASSERT_TRUE(test, owner_present);
+	KUNIT_ASSERT_EQ(test, owner_sid_len,
+			sizeof(pkm_lcs_kunit_system_sid));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(owner_sid, pkm_lcs_kunit_system_sid,
+			       owner_sid_len),
+			0);
+	kfree(owner_sid);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
@@ -29964,7 +30300,12 @@ static void pkm_lcs_kunit_create_missing_prepared_layer_refreshes(
 	struct task_struct *task;
 	struct file file = { };
 	const void *token;
+	const u8 *expected_owner_sid = NULL;
+	u8 *owner_sid = NULL;
+	size_t expected_owner_sid_len = 0;
+	size_t owner_sid_len = 0;
 	u32 count = 0;
+	bool owner_present = false;
 	long ret;
 	int thread_ret;
 
@@ -29994,11 +30335,11 @@ static void pkm_lcs_kunit_create_missing_prepared_layer_refreshes(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 5U);
-	KUNIT_EXPECT_EQ(test, script.writes, 5U);
+	KUNIT_EXPECT_EQ(test, script.reads, 6U);
+	KUNIT_EXPECT_EQ(test, script.writes, 6U);
 	KUNIT_EXPECT_EQ(test, script.refresh.result, 0);
-	KUNIT_EXPECT_EQ(test, script.refresh.reads, 3U);
-	KUNIT_EXPECT_EQ(test, script.refresh.writes, 3U);
+	KUNIT_EXPECT_EQ(test, script.refresh.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.refresh.writes, 4U);
 	KUNIT_EXPECT_TRUE(test, result.created_new);
 	KUNIT_EXPECT_FALSE(test, result.retry_open_existing);
 	KUNIT_EXPECT_EQ(test, result.disposition, REG_CREATED_NEW);
@@ -30019,6 +30360,21 @@ static void pkm_lcs_kunit_create_missing_prepared_layer_refreshes(
 	KUNIT_EXPECT_STREQ(test, layers[1].name, "Policy");
 	KUNIT_EXPECT_EQ(test, layers[1].precedence, 0U);
 	KUNIT_EXPECT_EQ(test, layers[1].enabled, 1U);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_token_user_sid(token, &expected_owner_sid,
+						 &expected_owner_sid_len),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_owner_snapshot(
+				"Policy", strlen("Policy"), &owner_sid,
+				&owner_sid_len, &owner_present),
+			0L);
+	KUNIT_ASSERT_TRUE(test, owner_present);
+	KUNIT_ASSERT_EQ(test, owner_sid_len, expected_owner_sid_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(owner_sid, expected_owner_sid, owner_sid_len),
+			0);
+	kfree(owner_sid);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)result.fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
@@ -30715,7 +31071,9 @@ static void pkm_lcs_kunit_reg_create_key_missing_uses_live_layer_table(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_layer_table_publish(
 				layer_src, strlen(layer_src), 10, 1,
-				policy_layer_guid, layer_sd, layer_sd_len),
+				policy_layer_guid, layer_sd, layer_sd_len,
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
 			0L);
 
 	script.file = &file;

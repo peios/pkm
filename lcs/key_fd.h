@@ -125,6 +125,10 @@ long pkm_lcs_key_fd_mark_orphaned_no_watch(
 long pkm_lcs_key_path_refresh_layer_metadata(
 	u32 source_id, const u8 key_guid[PKM_LCS_GUID_BYTES],
 	const char * const *resolved_path, u32 path_component_count);
+long pkm_lcs_key_path_refresh_layer_metadata_with_owner_context(
+	u32 source_id, const u8 key_guid[PKM_LCS_GUID_BYTES],
+	const char * const *resolved_path, u32 path_component_count,
+	const u8 *creator_sid, size_t creator_sid_len, bool is_new_layer);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned);

@@ -58,6 +58,8 @@ struct pkm_lcs_transaction_key_create_log_input {
 	size_t layer_len;
 	const char * const *parent_path;
 	const u8 (*parent_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	const u8 *creator_sid;
+	size_t creator_sid_len;
 	u32 parent_depth;
 	u64 sequence;
 };
