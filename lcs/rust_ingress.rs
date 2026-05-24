@@ -45,8 +45,9 @@ use crate::lcs_core::{
     write_key_open_audit_payload, write_rsi_abort_transaction_request_frame,
     write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
     write_rsi_create_entry_request_frame, write_rsi_create_key_request_frame,
-    write_rsi_delete_value_entry_request_frame, write_rsi_enum_children_request_frame,
-    write_rsi_drop_key_request_frame, write_rsi_flush_request_frame,
+    write_rsi_delete_entry_request_frame, write_rsi_delete_value_entry_request_frame,
+    write_rsi_enum_children_request_frame, write_rsi_drop_key_request_frame,
+    write_rsi_flush_request_frame, write_rsi_hide_entry_request_frame,
     write_rsi_lookup_request_frame, write_rsi_query_values_request_frame,
     write_rsi_read_key_request_frame, write_rsi_set_value_request_frame,
     write_rsi_write_key_request_frame, BlanketTombstoneEntry, CurrentUserRewrite,
@@ -1939,6 +1940,146 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_create_entry_request_frame(
         layer_name_bytes,
         child_guid_copy,
         sequence,
+    ) {
+        Ok(built) => {
+            unsafe {
+                *built_out = PkmLcsRsiBuiltRequestCopy {
+                    len: built.len,
+                    request_id: built.retained.request_id,
+                    txn_id,
+                    op_code: built.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_rsi_hide_entry_request_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    request_id: u64,
+    txn_id: u64,
+    parent_guid: *const u8,
+    child_name: *const u8,
+    child_name_len: u32,
+    layer_name: *const u8,
+    layer_name_len: u32,
+    sequence: u64,
+    built_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if built_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *built_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            txn_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if dst.is_null() || parent_guid.is_null() || child_name.is_null() || layer_name.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let parent_guid_bytes = unsafe { slice::from_raw_parts(parent_guid, 16) };
+    let mut parent_guid_copy = [0u8; 16];
+    parent_guid_copy.copy_from_slice(parent_guid_bytes);
+
+    let child_name_bytes = unsafe { slice::from_raw_parts(child_name, child_name_len as usize) };
+    if let Err(err) = validate_key_component_bytes(child_name_bytes, &LcsLimits::DEFAULT) {
+        return rsi_request_frame_error_return(err);
+    }
+    let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+        return rsi_request_frame_error_return(err);
+    }
+
+    match write_rsi_hide_entry_request_frame(
+        dst_bytes,
+        request_id,
+        txn_id,
+        parent_guid_copy,
+        child_name_bytes,
+        layer_name_bytes,
+        sequence,
+    ) {
+        Ok(built) => {
+            unsafe {
+                *built_out = PkmLcsRsiBuiltRequestCopy {
+                    len: built.len,
+                    request_id: built.retained.request_id,
+                    txn_id,
+                    op_code: built.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_rsi_delete_entry_request_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    request_id: u64,
+    txn_id: u64,
+    parent_guid: *const u8,
+    child_name: *const u8,
+    child_name_len: u32,
+    layer_name: *const u8,
+    layer_name_len: u32,
+    built_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if built_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *built_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            txn_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if dst.is_null() || parent_guid.is_null() || child_name.is_null() || layer_name.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let parent_guid_bytes = unsafe { slice::from_raw_parts(parent_guid, 16) };
+    let mut parent_guid_copy = [0u8; 16];
+    parent_guid_copy.copy_from_slice(parent_guid_bytes);
+
+    let child_name_bytes = unsafe { slice::from_raw_parts(child_name, child_name_len as usize) };
+    if let Err(err) = validate_key_component_bytes(child_name_bytes, &LcsLimits::DEFAULT) {
+        return rsi_request_frame_error_return(err);
+    }
+    let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+        return rsi_request_frame_error_return(err);
+    }
+
+    match write_rsi_delete_entry_request_frame(
+        dst_bytes,
+        request_id,
+        txn_id,
+        parent_guid_copy,
+        child_name_bytes,
+        layer_name_bytes,
     ) {
         Ok(built) => {
             unsafe {

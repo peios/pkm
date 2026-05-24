@@ -704,6 +704,40 @@ long pkm_lcs_source_create_entry_round_trip_timeout(
 	const u8 child_guid[RSI_GUID_SIZE], u64 sequence, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_dispatch_hide_entry_request(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len, u64 sequence,
+	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_hide_entry_waitable_request(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len, u64 sequence,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_delete_entry_request(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len,
+	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_delete_entry_waitable_request(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_hide_entry_round_trip_timeout(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len, u64 sequence,
+	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_delete_entry_round_trip_timeout(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_dispatch_create_key_request(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *name, u32 name_len,
