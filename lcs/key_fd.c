@@ -3216,10 +3216,15 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 {
 	struct pkm_lcs_hide_key_input input = { };
 	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_transaction_mutation_handle mutation = { };
+	struct pkm_lcs_transaction_binding_plan binding_probe = { };
+	struct pkm_lcs_transaction_binding_plan binding = { };
+	struct pkm_lcs_transaction_hide_key_log_input log_input = { };
 	const u8 *parent_guid = NULL;
 	const char *child_name = NULL;
 	u64 generation = 0;
 	u64 sequence = 0;
+	u64 txn_id = 0;
 	u32 child_name_len = 0;
 	long ret;
 
@@ -3234,8 +3239,6 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 		return -EINVAL;
 	if (args->txn_fd < -1)
 		return -EINVAL;
-	if (args->txn_fd >= 0)
-		return -EOPNOTSUPP;
 
 	ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
 		key_fd->granted_access, REG_IOC_HIDE_KEY_NR);
@@ -3260,16 +3263,54 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 	if (ret)
 		goto out_input;
 
+	if (args->txn_fd >= 0) {
+		ret = pkm_lcs_transaction_fd_prepare_mutation_binding(
+			args->txn_fd, key_fd->source_id, key_fd->ancestor_guids[0],
+			&binding_probe);
+		if (ret)
+			goto out_input;
+	}
+
 	ret = pkm_lcs_allocate_sequence(&sequence);
 	if (ret)
 		goto out_input;
 
+	if (args->txn_fd >= 0) {
+		log_input.parent_guid = parent_guid;
+		log_input.child_name = child_name;
+		log_input.child_name_len = child_name_len;
+		log_input.layer = input.target.name;
+		log_input.layer_len = input.target.name_len;
+		log_input.parent_path =
+			(const char * const *)key_fd->resolved_path;
+		log_input.parent_ancestor_guids =
+			(const u8 (*)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES])
+				key_fd->ancestor_guids;
+		log_input.parent_depth = key_fd->path_component_count - 1;
+		log_input.sequence = sequence;
+
+		ret = pkm_lcs_transaction_fd_begin_hide_key_mutation(
+			args->txn_fd, key_fd->source_id, key_fd->ancestor_guids[0],
+			&log_input, &mutation, &binding);
+		if (ret)
+			goto out_input;
+		txn_id = binding.transaction_id;
+	}
+
 	ret = pkm_lcs_source_hide_entry_round_trip_timeout(
-		key_fd->source_id, 0, parent_guid, child_name, child_name_len,
+		key_fd->source_id, txn_id, parent_guid, child_name, child_name_len,
 		input.target.name, input.target.name_len, sequence,
 		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &response, NULL);
 	if (ret)
+		goto out_cancel_mutation;
+
+	if (args->txn_fd >= 0) {
+		ret = pkm_lcs_transaction_fd_commit_mutation(&mutation);
+		if (ret)
+			goto out_cancel_mutation;
+		ret = 0;
 		goto out_input;
+	}
 
 	ret = pkm_lcs_source_record_transaction_generation(
 		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
@@ -3280,6 +3321,9 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 	}
 	ret = 0;
 
+out_cancel_mutation:
+	if (ret && mutation.active)
+		pkm_lcs_transaction_fd_cancel_mutation(&mutation);
 out_input:
 	pkm_lcs_hide_key_input_destroy(&input);
 	return ret;
