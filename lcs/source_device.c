@@ -628,6 +628,29 @@ long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
 	return 0;
 }
 
+long pkm_lcs_layer_table_metadata_key_guid_present(
+	const u8 metadata_key_guid[RSI_GUID_SIZE], bool *present_out)
+{
+	u32 i;
+
+	if (!metadata_key_guid || !present_out)
+		return -EINVAL;
+
+	*present_out = false;
+	mutex_lock(&pkm_lcs_layer_table_lock);
+	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+		if (!pkm_lcs_layer_table[i].occupied)
+			continue;
+		if (!memcmp(pkm_lcs_layer_table[i].metadata_key_guid,
+			    metadata_key_guid, RSI_GUID_SIZE)) {
+			*present_out = true;
+			break;
+		}
+	}
+	mutex_unlock(&pkm_lcs_layer_table_lock);
+	return 0;
+}
+
 static bool pkm_lcs_default_copy_from_user(void *ctx, void *dst,
 					   const void __user *src, size_t len)
 {

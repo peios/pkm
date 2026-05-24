@@ -969,6 +969,8 @@ long pkm_lcs_layer_table_publish(
 	const u8 *metadata_sd, size_t metadata_sd_len);
 long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
 				bool *removed_out);
+long pkm_lcs_layer_table_metadata_key_guid_present(
+	const u8 metadata_key_guid[RSI_GUID_SIZE], bool *present_out);
 long pkm_lcs_source_active_ids_snapshot(u32 *source_ids,
 					u32 max_source_ids,
 					u32 *count_out);

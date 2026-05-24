@@ -29,6 +29,7 @@
 #include <linux/wait.h>
 
 #include <pkm/lcs.h>
+#include <pkm/token.h>
 
 #include "../kacs/token_runtime.h"
 #include "key_fd.h"
@@ -197,6 +198,9 @@ extern int lcs_rust_write_watch_event_record(
 	const struct pkm_lcs_key_fd_string_view *path_components,
 	size_t path_component_count, u8 *output, size_t output_len,
 	u32 *written_out, u8 *overflow_out);
+extern int lcs_rust_value_name_casefold_eq(
+	const u8 *left, u32 left_len, const u8 *right, u32 right_len,
+	u8 *equal_out);
 
 static void pkm_lcs_get_security_result_destroy(
 	struct pkm_lcs_get_security_result *result);
@@ -2630,6 +2634,78 @@ out_frame:
 	return ret;
 }
 
+static long pkm_lcs_key_fd_value_name_casefold_equal(
+	const char *left, u32 left_len, const char *right, u32 right_len,
+	bool *equal)
+{
+	u8 raw_equal = 0;
+	int ret;
+
+	if (!equal)
+		return -EINVAL;
+	*equal = false;
+	if (!left || !right)
+		return -EINVAL;
+
+	ret = lcs_rust_value_name_casefold_eq((const u8 *)left, left_len,
+					      (const u8 *)right, right_len,
+					      &raw_equal);
+	if (ret)
+		return ret;
+	*equal = raw_equal != 0;
+	return 0;
+}
+
+static bool pkm_lcs_set_value_data_is_positive_dword(
+	const struct pkm_lcs_set_value_input *input,
+	const struct reg_set_value_args *args)
+{
+	if (!input || !args)
+		return false;
+	if (args->type != REG_DWORD || args->data_len != sizeof(u32) ||
+	    !input->data)
+		return false;
+
+	return get_unaligned_le32(input->data) > 0;
+}
+
+static long pkm_lcs_key_fd_set_value_precedence_tcb_gate(
+	const struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct pkm_lcs_set_value_input *input,
+	const struct reg_set_value_args *args)
+{
+	static const char precedence_name[] = "Precedence";
+	bool is_layer_metadata_key = false;
+	bool is_precedence = false;
+	long ret;
+
+	if (!key_fd || !input || !args)
+		return -EINVAL;
+	if (!pkm_lcs_set_value_data_is_positive_dword(input, args))
+		return 0;
+
+	ret = pkm_lcs_layer_table_metadata_key_guid_present(
+		key_fd->key_guid, &is_layer_metadata_key);
+	if (ret)
+		return ret;
+	if (!is_layer_metadata_key)
+		return 0;
+
+	ret = pkm_lcs_key_fd_value_name_casefold_equal(
+		input->value_name, args->name_len, precedence_name,
+		sizeof(precedence_name) - 1, &is_precedence);
+	if (ret)
+		return ret;
+	if (!is_precedence)
+		return 0;
+
+	if (!token ||
+	    !kacs_rust_token_has_enabled_privilege(token,
+						  KACS_SE_TCB_PRIVILEGE))
+		return -EPERM;
+	return 0;
+}
+
 static long pkm_lcs_key_fd_query_values_batch_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_query_values_batch_args *args)
@@ -3211,6 +3287,15 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	if (ret)
 		goto out_input;
 
+	ret = pkm_lcs_key_fd_copy_set_value_data(ops, args, &input);
+	if (ret)
+		goto out_input;
+
+	ret = pkm_lcs_key_fd_set_value_precedence_tcb_gate(key_fd, token,
+							   &input, args);
+	if (ret)
+		goto out_input;
+
 	if (args->txn_fd >= 0) {
 		ret = pkm_lcs_transaction_fd_prepare_mutation_binding(
 			args->txn_fd, key_fd->source_id, key_fd->ancestor_guids[0],
@@ -3223,10 +3308,6 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 
 	ret = pkm_lcs_key_fd_set_value_layer_cap_check(key_fd, &input,
 						       cap_txn_id);
-	if (ret)
-		goto out_input;
-
-	ret = pkm_lcs_key_fd_copy_set_value_data(ops, args, &input);
 	if (ret)
 		goto out_input;
 

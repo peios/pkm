@@ -9275,6 +9275,49 @@ static void pkm_lcs_kunit_key_fd_set_security_fails_before_source(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_expect_set_value_success(
+	struct kunit *test, struct file *file, int fd, const void *token,
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_set_value_args *args,
+	const u8 guid[RSI_GUID_SIZE], const char *value_name,
+	const u8 *data, size_t data_len, u32 value_type)
+{
+	struct pkm_lcs_kunit_set_value_ioctl_source_script script = {
+		.file = file,
+		.expected_guid = guid,
+		.expected_value_name = value_name,
+		.expected_layer_name = "base",
+		.expected_data = data,
+		.expected_data_len = data_len,
+		.expected_value_type = value_type,
+		.expected_expected_sequence = args->expected_seq,
+		.set_value_status = RSI_OK,
+	};
+	struct task_struct *task;
+	u64 sequence_before = 0;
+	long ret;
+	int thread_ret;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_before),
+			0L);
+	script.expected_sequence = sequence_before;
+
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_set_value_ioctl_source_thread,
+			   &script, "pkm-lcs-kunit-set-value-success");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_set_value_for_token(fd, token, ops, args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
+}
+
 static void pkm_lcs_kunit_key_fd_set_value_nontransactional_success(
 	struct kunit *test)
 {
@@ -9798,6 +9841,129 @@ static void pkm_lcs_kunit_key_fd_set_value_fails_before_source(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)denied_fd), 0);
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate(
+	struct kunit *test)
+{
+	static const char * const metadata_path[] = {
+		"Machine", "System", "Registry", "Layers", "Policy"
+	};
+	static const u8 metadata_ancestors[5][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xe1, 0x10 },
+		{ 0xe1, 0x11 },
+		{ 0xe1, 0x12 },
+		{ 0xe1 },
+	};
+	static const char * const ordinary_path[] = { "Machine", "Software" };
+	static const u8 ordinary_ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xe2 },
+	};
+	static const char precedence_name[] = "pReCeDeNcE";
+	static const u8 one_data[] = { 1, 0, 0, 0 };
+	static const u8 zero_data[] = { 0, 0, 0, 0 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_set_value_args args = {
+		.name_len = strlen(precedence_name),
+		.name_ptr = (u64)(unsigned long)precedence_name,
+		.type = REG_DWORD,
+		.data_len = sizeof(one_data),
+		.data_ptr = (u64)(unsigned long)one_data,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	const void *tcb_token;
+	const u8 *layer_sd;
+	size_t layer_sd_len = 0;
+	u64 sequence_before = 0;
+	u64 sequence_after = 0;
+	long metadata_fd;
+	long ordinary_fd;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	tcb_token = kacs_rust_kunit_create_privilege_audit_token();
+	KUNIT_ASSERT_NOT_NULL(test, tcb_token);
+	layer_sd = kacs_rust_kunit_create_file_sd(admin_token, KEY_SET_VALUE,
+						  0, 0, 0, &layer_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, layer_sd);
+
+	metadata_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, metadata_path, metadata_ancestors,
+		ARRAY_SIZE(metadata_ancestors));
+	KUNIT_ASSERT_TRUE(test, metadata_fd >= 0);
+	ordinary_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, ordinary_path, ordinary_ancestors,
+		ARRAY_SIZE(ordinary_ancestors));
+	KUNIT_ASSERT_TRUE(test, ordinary_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"Policy", strlen("Policy"), 0, 1,
+				metadata_ancestors[ARRAY_SIZE(metadata_ancestors) - 1],
+				layer_sd, layer_sd_len),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_before),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_value_for_token(
+				(int)metadata_fd, admin_token, &ops, &args),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.next_request_id, 0ULL);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, sequence_after, sequence_before);
+
+	args.data_ptr = (u64)(unsigned long)zero_data;
+	pkm_lcs_kunit_expect_set_value_success(
+		test, &file, (int)metadata_fd, admin_token, &ops, &args,
+		metadata_ancestors[ARRAY_SIZE(metadata_ancestors) - 1],
+		precedence_name, zero_data, sizeof(zero_data), REG_DWORD);
+
+	args.data_ptr = (u64)(unsigned long)one_data;
+	pkm_lcs_kunit_expect_set_value_success(
+		test, &file, (int)ordinary_fd, admin_token, &ops, &args,
+		ordinary_ancestors[ARRAY_SIZE(ordinary_ancestors) - 1],
+		precedence_name, one_data, sizeof(one_data), REG_DWORD);
+
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(tcb_token,
+							       &before));
+	pkm_lcs_kunit_expect_set_value_success(
+		test, &file, (int)metadata_fd, tcb_token, &ops, &args,
+		metadata_ancestors[ARRAY_SIZE(metadata_ancestors) - 1],
+		precedence_name, one_data, sizeof(one_data), REG_DWORD);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(tcb_token,
+							       &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used & KACS_SE_TCB_PRIVILEGE,
+			before.privileges_used & KACS_SE_TCB_PRIVILEGE);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)metadata_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)ordinary_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_kacs_free((void *)layer_sd);
+	kacs_rust_token_drop(tcb_token);
 	kacs_rust_token_drop(admin_token);
 	kacs_rust_token_drop(source_token);
 }
@@ -32179,6 +32345,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_transactional_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_cas_failure_no_effects),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_fails_before_source),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_delete_value_nontransactional_deletes_effective),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_delete_value_transactional_success),
