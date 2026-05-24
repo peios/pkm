@@ -35031,6 +35031,170 @@ static void pkm_lcs_kunit_source_release_completes_waiter_with_eio(
 	kacs_rust_token_drop(token);
 }
 
+struct pkm_lcs_kunit_slot_wait_round_trip_script {
+	struct pkm_lcs_source_response_result response;
+	struct pkm_lcs_source_enqueue_result enqueue;
+	struct completion started;
+	struct completion done;
+	long ret;
+};
+
+static int pkm_lcs_kunit_slot_wait_round_trip_thread(void *raw_script)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x81 };
+	struct pkm_lcs_kunit_slot_wait_round_trip_script *script = raw_script;
+
+	complete(&script->started);
+	script->ret = pkm_lcs_source_lookup_round_trip_timeout(
+		1, 0xf1f2f3f4f5f6f7f8ULL, parent_guid, "Blocked",
+		strlen("Blocked"), 1000, &script->response, &script->enqueue);
+	complete(&script->done);
+	return 0;
+}
+
+static void pkm_lcs_kunit_source_slot_wait_wakes_on_response(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x82 };
+	struct pkm_lcs_kunit_slot_wait_round_trip_script script = { };
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	struct task_struct *task;
+	u8 request[128];
+	struct file file = { };
+	const void *token;
+	size_t response_len;
+	u64 request_id = 0;
+	u16 op_code = 0;
+	ssize_t count;
+	bool released = false;
+	long ret;
+	u32 i;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	for (i = 0; i < PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT; i++) {
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_source_dispatch_lookup_request(
+					1, i, parent_guid, "Held",
+					strlen("Held"), NULL),
+				0L);
+	}
+
+	for (i = 0; i < PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT; i++) {
+		count = pkm_lcs_kunit_source_device_read_file(
+			&file, request, sizeof(request), true);
+		KUNIT_ASSERT_GE(test, count,
+				(ssize_t)RSI_REQUEST_HEADER_SIZE);
+		if (!i) {
+			request_id = get_unaligned_le64(
+				request + RSI_REQUEST_ID_OFFSET);
+			op_code = get_unaligned_le16(
+				request + RSI_REQUEST_OP_CODE_OFFSET);
+		}
+	}
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count,
+			PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id,
+			(u64)PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT);
+
+	init_completion(&script.started);
+	init_completion(&script.done);
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_slot_wait_round_trip_thread, &script,
+		"pkm-lcs-slot-wait");
+	if (IS_ERR(task)) {
+		KUNIT_FAIL(test, "failed to start source slot-wait worker");
+		goto out_release_source;
+	}
+	if (!wait_for_completion_timeout(&script.started, HZ)) {
+		KUNIT_FAIL(test, "source slot-wait worker did not start");
+		goto out_stop_task;
+	}
+	KUNIT_EXPECT_EQ(test,
+			wait_for_completion_timeout(&script.done,
+						    msecs_to_jiffies(20)),
+			0UL);
+	KUNIT_EXPECT_EQ(test, script.enqueue.len, (size_t)0);
+
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    request_id, op_code, RSI_NOT_FOUND,
+					    &response_len);
+	count = pkm_lcs_kunit_source_device_write_file(
+		&file, response, response_len, false, NULL);
+	KUNIT_EXPECT_EQ(test, count, (ssize_t)response_len);
+	if (count != (ssize_t)response_len)
+		goto out_stop_task;
+
+	for (i = 0; i < 100 && !completion_done(&script.done); i++) {
+		count = pkm_lcs_kunit_source_device_read_file(
+			&file, request, sizeof(request), true);
+		if (count == -EAGAIN) {
+			msleep(1);
+			continue;
+		}
+		KUNIT_EXPECT_GE(test, count,
+				(ssize_t)RSI_REQUEST_HEADER_SIZE);
+		if (count < (ssize_t)RSI_REQUEST_HEADER_SIZE)
+			goto out_stop_task;
+		request_id = get_unaligned_le64(
+			request + RSI_REQUEST_ID_OFFSET);
+		op_code = get_unaligned_le16(
+			request + RSI_REQUEST_OP_CODE_OFFSET);
+		pkm_lcs_kunit_build_status_response(test, response,
+						    sizeof(response),
+						    request_id, op_code,
+						    RSI_NOT_FOUND,
+						    &response_len);
+		count = pkm_lcs_kunit_source_device_write_file(
+			&file, response, response_len, false, NULL);
+		KUNIT_EXPECT_EQ(test, count, (ssize_t)response_len);
+		if (count != (ssize_t)response_len)
+			goto out_stop_task;
+	}
+	if (!wait_for_completion_timeout(&script.done, HZ))
+		KUNIT_FAIL(test, "source slot waiter did not complete");
+
+out_stop_task:
+	if (!completion_done(&script.done) && !released) {
+		KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file),
+				0);
+		released = true;
+		wait_for_completion_timeout(&script.done, HZ);
+	}
+	ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	if (!completion_done(&script.done))
+		goto out_release_source;
+	if (released)
+		goto out_release_source;
+
+	KUNIT_EXPECT_EQ(test, script.ret, (long)-ENOENT);
+	KUNIT_EXPECT_EQ(test, script.enqueue.request_id,
+			(u64)PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT);
+	KUNIT_EXPECT_EQ(test, script.enqueue.op_code, (u16)RSI_LOOKUP);
+	KUNIT_EXPECT_EQ(test, script.enqueue.queue_depth, 1U);
+	KUNIT_EXPECT_EQ(test, script.enqueue.in_flight_count,
+			PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT);
+	KUNIT_EXPECT_EQ(test, script.response.status, (u32)RSI_NOT_FOUND);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count,
+			PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT - 1);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id,
+			(u64)PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT + 1);
+
+out_release_source:
+	if (!released)
+		KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file),
+				0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_slot_timeout_sends_no_request(
 	struct kunit *test)
 {
@@ -36446,6 +36610,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_waiter_does_not_retain_error_frame),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_release_completes_waiter_with_eio),
+	KUNIT_CASE(pkm_lcs_kunit_source_slot_wait_wakes_on_response),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_slot_timeout_sends_no_request),
 	KUNIT_CASE(
