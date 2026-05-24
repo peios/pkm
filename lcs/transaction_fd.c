@@ -1693,6 +1693,57 @@ static long pkm_lcs_transaction_log_apply_orphan_effects(
 	return 0;
 }
 
+static long pkm_lcs_transaction_entry_layer_metadata_path(
+	const struct pkm_lcs_transaction_log_entry *entry,
+	const u8 **key_guid_out, char ***path_out, u32 *depth_out,
+	const char **layer_name_out, u32 *layer_name_len_out,
+	bool *matches_path_out)
+{
+	const u8 *key_guid = NULL;
+	char **path = NULL;
+	u32 depth = 0;
+	long ret;
+
+	if (!layer_name_out || !layer_name_len_out || !matches_path_out)
+		return -EINVAL;
+	if (key_guid_out)
+		*key_guid_out = NULL;
+	if (path_out)
+		*path_out = NULL;
+	if (depth_out)
+		*depth_out = 0;
+
+	switch (entry->kind) {
+	case PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY:
+		key_guid = entry->set_security.key_guid;
+		path = entry->set_security.path;
+		depth = entry->set_security.depth;
+		break;
+	case PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE:
+		key_guid = entry->set_value.key_guid;
+		path = entry->set_value.path;
+		depth = entry->set_value.depth;
+		break;
+	default:
+		*matches_path_out = false;
+		return 0;
+	}
+
+	ret = pkm_lcs_transaction_layer_metadata_path(
+		path, depth, layer_name_out, layer_name_len_out,
+		matches_path_out);
+	if (ret || !*matches_path_out)
+		return ret;
+
+	if (key_guid_out)
+		*key_guid_out = key_guid;
+	if (path_out)
+		*path_out = path;
+	if (depth_out)
+		*depth_out = depth;
+	return 0;
+}
+
 static long pkm_lcs_transaction_layer_metadata_seen_before(
 	struct pkm_lcs_transaction_fd *txn,
 	const struct pkm_lcs_transaction_log_entry *current_entry,
@@ -1713,12 +1764,10 @@ static long pkm_lcs_transaction_layer_metadata_seen_before(
 
 		if (entry == current_entry)
 			return 0;
-		if (entry->kind != PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE)
-			continue;
 
-		ret = pkm_lcs_transaction_layer_metadata_path(
-			entry->set_value.path, entry->set_value.depth,
-			&entry_layer, &entry_layer_len, &matches_path);
+		ret = pkm_lcs_transaction_entry_layer_metadata_path(
+			entry, NULL, NULL, NULL, &entry_layer, &entry_layer_len,
+			&matches_path);
 		if (ret)
 			return ret;
 		if (!matches_path)
@@ -1747,18 +1796,18 @@ static long pkm_lcs_transaction_log_refresh_layer_metadata(
 		return -EINVAL;
 
 	list_for_each_entry(entry, &txn->mutation_log, link) {
+		const u8 *key_guid = NULL;
+		char **path = NULL;
 		const char *layer_name = NULL;
 		u32 layer_name_len = 0;
+		u32 depth = 0;
 		bool matches_path = false;
 		bool seen = false;
 		long ret;
 
-		if (entry->kind != PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE)
-			continue;
-
-		ret = pkm_lcs_transaction_layer_metadata_path(
-			entry->set_value.path, entry->set_value.depth,
-			&layer_name, &layer_name_len, &matches_path);
+		ret = pkm_lcs_transaction_entry_layer_metadata_path(
+			entry, &key_guid, &path, &depth, &layer_name,
+			&layer_name_len, &matches_path);
 		if (ret)
 			return ret;
 		if (!matches_path)
@@ -1772,9 +1821,7 @@ static long pkm_lcs_transaction_log_refresh_layer_metadata(
 			continue;
 
 		ret = pkm_lcs_key_path_refresh_layer_metadata(
-			source_id, entry->set_value.key_guid,
-			(const char * const *)entry->set_value.path,
-			entry->set_value.depth);
+			source_id, key_guid, (const char * const *)path, depth);
 		if (ret)
 			return ret;
 	}
