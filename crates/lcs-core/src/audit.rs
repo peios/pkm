@@ -158,6 +158,8 @@ pub enum LcsSourceValidationClass {
     FutureSequenceNumber,
     DuplicateWinningSequenceTie,
     MalformedLayerMetadataSecurityDescriptor,
+    MalformedKeyName,
+    MalformedValueName,
 }
 
 impl LcsSourceValidationClass {
@@ -171,6 +173,8 @@ impl LcsSourceValidationClass {
             Self::MalformedLayerMetadataSecurityDescriptor => {
                 "malformed_layer_metadata_security_descriptor"
             }
+            Self::MalformedKeyName => "malformed_key_name",
+            Self::MalformedValueName => "malformed_value_name",
         }
     }
 }
@@ -190,6 +194,8 @@ impl From<RsiSourceDataValidationFailure> for LcsSourceValidationClass {
             RsiSourceDataValidationFailure::MalformedLayerMetadataSecurityDescriptor => {
                 Self::MalformedLayerMetadataSecurityDescriptor
             }
+            RsiSourceDataValidationFailure::MalformedKeyName => Self::MalformedKeyName,
+            RsiSourceDataValidationFailure::MalformedValueName => Self::MalformedValueName,
         }
     }
 }

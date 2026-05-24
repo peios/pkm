@@ -150,6 +150,14 @@ fn source_validation_failure_audit_record_maps_validation_classes() {
             .as_str(),
         "future_sequence_number"
     );
+    assert_eq!(
+        LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedKeyName).as_str(),
+        "malformed_key_name"
+    );
+    assert_eq!(
+        LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedValueName).as_str(),
+        "malformed_value_name"
+    );
 }
 
 #[test]

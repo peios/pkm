@@ -19919,7 +19919,7 @@ static int pkm_lcs_kunit_query_values_source_thread(void *raw_script)
 	struct pkm_lcs_kunit_query_values_source_script *script = raw_script;
 	size_t value_offset = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
 	u8 request[128];
-	u8 response[256];
+	u8 response[512];
 	size_t response_len = 0;
 	ssize_t count;
 	u64 request_id;
@@ -34485,6 +34485,330 @@ out_release_source:
 	}
 }
 
+static void pkm_lcs_kunit_expect_source_validation_audit(
+	struct kunit *test, const char *validation_class,
+	const u8 key_guid[RSI_GUID_SIZE])
+{
+	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
+	struct pkm_kmes_kunit_snapshot kmes_snapshot = { };
+	u8 buffer[512];
+	size_t written = 0;
+	u32 header_size;
+	u16 type_len;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, sizeof(buffer), &written, &kmes_snapshot),
+			0);
+	type_len = get_unaligned_le16(buffer + KMES_EVENT_TYPE_LEN_OFFSET);
+	header_size = get_unaligned_le32(buffer + KMES_EVENT_HEADER_SIZE_OFFSET);
+	KUNIT_ASSERT_EQ(test, type_len, (u16)(sizeof(event_type) - 1));
+	KUNIT_EXPECT_EQ(test, buffer[KMES_EVENT_ORIGIN_CLASS_OFFSET],
+			(u8)KMES_ORIGIN_LCS);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
+			       type_len),
+			0);
+	KUNIT_ASSERT_TRUE(test, written > header_size);
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_lcs_kunit_buffer_contains(buffer, written,
+							validation_class));
+	KUNIT_EXPECT_TRUE(
+		test, pkm_lcs_kunit_buffer_contains_bytes(
+			      buffer, written, key_guid, RSI_GUID_SIZE));
+}
+
+static void pkm_lcs_kunit_source_write_malformed_path_name_audits(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+		0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+	};
+	static const u8 child_guid[RSI_GUID_SIZE] = {
+		0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7,
+		0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+	};
+	static const struct {
+		u16 request_op;
+		u16 response_op;
+		u64 txn_id;
+		const char *child_name;
+		const char *layer_name;
+		const char *validation_class;
+		u32 validation_failure;
+	} cases[] = {
+		{ RSI_LOOKUP, RSI_LOOKUP_RESPONSE, 0xa1a2a3a4a5a6a7a8ULL,
+		  "Child", "bad/layer", "malformed_layer_name",
+		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME },
+		{ RSI_ENUM_CHILDREN, RSI_ENUM_CHILDREN_RESPONSE,
+		  0xb1b2b3b4b5b6b7b8ULL, "Bad/Child", "base",
+		  "malformed_key_name",
+		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_NAME },
+		{ RSI_ENUM_CHILDREN, RSI_ENUM_CHILDREN_RESPONSE,
+		  0xc1c2c3c4c5c6c7c8ULL, "Child", "bad/layer",
+		  "malformed_layer_name",
+		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME },
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		struct pkm_lcs_source_response_result response_result = { };
+		struct pkm_lcs_source_response_result waiter_result = { };
+		struct pkm_lcs_source_fd_snapshot snapshot = { };
+		struct pkm_lcs_source_response_waiter waiter;
+		struct pkm_lcs_source_enqueue_result enqueue = { };
+		u8 response[256];
+		u8 out[128];
+		struct file file = { };
+		const void *token;
+		size_t response_len;
+		size_t offset;
+		ssize_t count;
+		long ret;
+
+		pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+		if (cases[i].request_op == RSI_LOOKUP) {
+			ret = pkm_lcs_source_dispatch_lookup_waitable_request(
+				1, cases[i].txn_id, parent_guid, "Child",
+				strlen("Child"), &waiter, &enqueue);
+		} else {
+			ret = pkm_lcs_kunit_source_dispatch_enum_children_waitable_request(
+				1, cases[i].txn_id, parent_guid, &waiter,
+				&enqueue);
+		}
+		KUNIT_EXPECT_EQ(test, ret, 0L);
+		if (ret)
+			goto out_release_source;
+
+		count = pkm_lcs_kunit_source_device_read_file(
+			&file, out, sizeof(out), true);
+		KUNIT_EXPECT_EQ(test, count, (ssize_t)enqueue.len);
+		if (count != (ssize_t)enqueue.len)
+			goto out_release_source;
+
+		pkm_lcs_kunit_rsi_response_begin(
+			test, response, sizeof(response), enqueue.request_id,
+			cases[i].response_op, RSI_OK, &offset);
+		if (cases[i].request_op == RSI_LOOKUP) {
+			pkm_lcs_kunit_rsi_append_u32(test, response,
+						     sizeof(response),
+						     &offset, 1);
+		} else {
+			pkm_lcs_kunit_rsi_append_u32(test, response,
+						     sizeof(response),
+						     &offset, 1);
+			pkm_lcs_kunit_rsi_append_len_prefixed(
+				test, response, sizeof(response), &offset,
+				cases[i].child_name,
+				strlen(cases[i].child_name));
+			pkm_lcs_kunit_rsi_append_u32(test, response,
+						     sizeof(response),
+						     &offset, 1);
+		}
+		pkm_lcs_kunit_rsi_append_lookup_path_entry(
+			test, response, sizeof(response), &offset,
+			cases[i].layer_name, RSI_PATH_TARGET_GUID, child_guid,
+			0);
+		pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+					     &offset, 1);
+		pkm_lcs_kunit_rsi_append_lookup_metadata(
+			test, response, sizeof(response), &offset, child_guid,
+			pkm_lcs_kunit_owner_only_sd,
+			sizeof(pkm_lcs_kunit_owner_only_sd));
+		pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+						  &response_len);
+
+		pkm_kmes_kunit_reset_all();
+		count = pkm_lcs_kunit_source_device_write_file(
+			&file, response, response_len, false,
+			&response_result);
+		KUNIT_EXPECT_EQ(test, count, (ssize_t)response_len);
+		if (count != (ssize_t)response_len)
+			goto out_release_source;
+		KUNIT_EXPECT_EQ(test, response_result.request_op_code,
+				cases[i].request_op);
+		KUNIT_EXPECT_EQ(test, response_result.status, (u32)RSI_OK);
+		KUNIT_EXPECT_TRUE(test,
+				  response_result.malformed_source_data);
+		KUNIT_EXPECT_TRUE(
+			test,
+			response_result.source_validation_failure_present);
+		KUNIT_EXPECT_EQ(test, response_result.source_validation_failure,
+				cases[i].validation_failure);
+		KUNIT_EXPECT_TRUE(test, response_result.key_guid_present);
+		KUNIT_EXPECT_EQ(test,
+				memcmp(response_result.key_guid, parent_guid,
+				       sizeof(parent_guid)),
+				0);
+
+		ret = pkm_lcs_source_response_waiter_wait(&waiter,
+							  &waiter_result);
+		KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+		KUNIT_EXPECT_TRUE(test, waiter_result.malformed_source_data);
+		KUNIT_EXPECT_TRUE(
+			test,
+			waiter_result.source_validation_failure_present);
+		KUNIT_EXPECT_EQ(test, waiter_result.source_validation_failure,
+				cases[i].validation_failure);
+		KUNIT_EXPECT_TRUE(test, waiter_result.key_guid_present);
+		KUNIT_EXPECT_EQ(test,
+				memcmp(waiter_result.key_guid, parent_guid,
+				       sizeof(parent_guid)),
+				0);
+
+		pkm_lcs_kunit_expect_source_validation_audit(
+			test, cases[i].validation_class, parent_guid);
+
+		pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+		KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+		KUNIT_EXPECT_FALSE(test, snapshot.closing);
+
+out_release_source:
+		KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file),
+				0);
+		pkm_lcs_kunit_reset_source_table();
+		kacs_rust_token_drop(token);
+	}
+}
+
+static void pkm_lcs_kunit_source_write_key_value_name_audits(
+	struct kunit *test)
+{
+	static const char long_value_name[] =
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7,
+		0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf,
+	};
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7,
+		0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef,
+	};
+	static const u8 data[] = { 0x10, 0x20, 0x30 };
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	{
+		struct pkm_lcs_kunit_read_key_source_script script = {
+			.file = &file,
+			.expected_guid = guid,
+			.name = "Bad/Key",
+			.parent_guid = parent_guid,
+		};
+		struct pkm_lcs_source_response_frame frame = { };
+		struct pkm_lcs_source_response_result response = { };
+		struct pkm_lcs_source_enqueue_result enqueue = { };
+		struct task_struct *task;
+		int thread_ret;
+		long ret;
+
+		task = pkm_lcs_kunit_kthread_run(
+			pkm_lcs_kunit_read_key_source_thread, &script,
+			"pkm-lcs-kunit-read-key-name");
+		if (IS_ERR(task)) {
+			KUNIT_FAIL(test, "failed to start read-key source");
+			goto out_release_source;
+		}
+
+		pkm_kmes_kunit_reset_all();
+		ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+			1, 0, guid, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+			&frame, &response, &enqueue);
+		thread_ret = pkm_lcs_kunit_kthread_stop(task);
+		KUNIT_EXPECT_EQ(test, thread_ret, 0);
+		KUNIT_EXPECT_EQ(test, script.result, 0);
+		KUNIT_EXPECT_EQ(test, script.reads, 1U);
+		KUNIT_EXPECT_EQ(test, script.writes, 1U);
+		KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+		KUNIT_EXPECT_PTR_EQ(test, frame.data, NULL);
+		KUNIT_EXPECT_EQ(test, frame.len, (size_t)0);
+		KUNIT_EXPECT_TRUE(test, response.malformed_source_data);
+		KUNIT_EXPECT_TRUE(
+			test,
+			response.source_validation_failure_present);
+		KUNIT_EXPECT_EQ(
+			test, response.source_validation_failure,
+			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_NAME);
+		KUNIT_EXPECT_TRUE(test, response.key_guid_present);
+		KUNIT_EXPECT_EQ(test,
+				memcmp(response.key_guid, guid, sizeof(guid)),
+				0);
+		pkm_lcs_kunit_expect_source_validation_audit(
+			test, "malformed_key_name", guid);
+		pkm_lcs_source_response_frame_destroy(&frame);
+	}
+
+	{
+		struct pkm_lcs_kunit_query_values_source_script script = {
+			.file = &file,
+			.expected_guid = guid,
+			.expected_value_name = "Value",
+			.response_value_name = long_value_name,
+			.layer_name = "base",
+			.data = data,
+			.data_len = sizeof(data),
+			.value_type = REG_BINARY,
+		};
+		struct pkm_lcs_source_response_frame frame = { };
+		struct pkm_lcs_source_response_result response = { };
+		struct pkm_lcs_source_enqueue_result enqueue = { };
+		struct task_struct *task;
+		int thread_ret;
+		long ret;
+
+		task = pkm_lcs_kunit_kthread_run(
+			pkm_lcs_kunit_query_values_source_thread, &script,
+			"pkm-lcs-kunit-query-value-name");
+		if (IS_ERR(task)) {
+			KUNIT_FAIL(test, "failed to start query-values source");
+			goto out_release_source;
+		}
+
+		pkm_kmes_kunit_reset_all();
+		ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+			1, 0, guid, "Value", strlen("Value"), false,
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
+			&enqueue);
+		thread_ret = pkm_lcs_kunit_kthread_stop(task);
+		KUNIT_EXPECT_EQ(test, thread_ret, 0);
+		KUNIT_EXPECT_EQ(test, script.result, 0);
+		KUNIT_EXPECT_EQ(test, script.reads, 1U);
+		KUNIT_EXPECT_EQ(test, script.writes, 1U);
+		KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+		KUNIT_EXPECT_PTR_EQ(test, frame.data, NULL);
+		KUNIT_EXPECT_EQ(test, frame.len, (size_t)0);
+		KUNIT_EXPECT_TRUE(test, response.malformed_source_data);
+		KUNIT_EXPECT_TRUE(
+			test,
+			response.source_validation_failure_present);
+		KUNIT_EXPECT_EQ(
+			test, response.source_validation_failure,
+			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_VALUE_NAME);
+		KUNIT_EXPECT_TRUE(test, response.key_guid_present);
+		KUNIT_EXPECT_EQ(test,
+				memcmp(response.key_guid, guid, sizeof(guid)),
+				0);
+		pkm_lcs_kunit_expect_source_validation_audit(
+			test, "malformed_value_name", guid);
+		pkm_lcs_source_response_frame_destroy(&frame);
+	}
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_FALSE(test, snapshot.closing);
+
+out_release_source:
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_write_path_future_sequence_audits(
 	struct kunit *test)
 {
@@ -37659,6 +37983,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_write_status_only_payload_exactness),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_enum_children_payload_validation),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_write_malformed_path_name_audits),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_write_key_value_name_audits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_path_future_sequence_audits),
 	KUNIT_CASE(

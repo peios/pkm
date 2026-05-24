@@ -497,6 +497,8 @@ fn source_validation_failure_from_code(
         3 => Ok(RsiSourceDataValidationFailure::FutureSequenceNumber),
         4 => Ok(RsiSourceDataValidationFailure::DuplicateWinningSequenceTie),
         5 => Ok(RsiSourceDataValidationFailure::MalformedLayerMetadataSecurityDescriptor),
+        6 => Ok(RsiSourceDataValidationFailure::MalformedKeyName),
+        7 => Ok(RsiSourceDataValidationFailure::MalformedValueName),
         _ => Err(LinuxErrno::Einval),
     }
 }
@@ -509,6 +511,28 @@ fn source_validation_failure_code(failure: RsiSourceDataValidationFailure) -> u3
         RsiSourceDataValidationFailure::FutureSequenceNumber => 3,
         RsiSourceDataValidationFailure::DuplicateWinningSequenceTie => 4,
         RsiSourceDataValidationFailure::MalformedLayerMetadataSecurityDescriptor => 5,
+        RsiSourceDataValidationFailure::MalformedKeyName => 6,
+        RsiSourceDataValidationFailure::MalformedValueName => 7,
+    }
+}
+
+fn source_validation_failure_for_name_error(
+    err: &LcsError,
+) -> Option<RsiSourceDataValidationFailure> {
+    let field = match err {
+        LcsError::InvalidUtf8 { field }
+        | LcsError::NullByte { field }
+        | LcsError::EmptyString { field }
+        | LcsError::NameContainsSeparator { field }
+        | LcsError::NameTooLong { field, .. } => *field,
+        _ => return None,
+    };
+
+    match field {
+        "layer_name" => Some(RsiSourceDataValidationFailure::MalformedLayerName),
+        "key_component" => Some(RsiSourceDataValidationFailure::MalformedKeyName),
+        "value_name" => Some(RsiSourceDataValidationFailure::MalformedValueName),
+        _ => None,
     }
 }
 
@@ -3125,6 +3149,12 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_lookup_response_frame(
         return rsi_lookup_response_error_return(err);
     }
     if let Err(err) = validate_rsi_lookup_path_response_names(&payload, &LcsLimits::DEFAULT) {
+        if let Some(failure) = source_validation_failure_for_name_error(&err) {
+            unsafe {
+                (*summary_out).source_validation_failure = source_validation_failure_code(failure);
+                (*summary_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_lookup_response_error_return(err);
     }
     if let Err(err) = validate_rsi_lookup_metadata_security_descriptors(&payload) {
@@ -3197,6 +3227,12 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
     };
 
     if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
+        if let Some(failure) = source_validation_failure_for_name_error(&err) {
+            unsafe {
+                (*summary_out).source_validation_failure = source_validation_failure_code(failure);
+                (*summary_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_query_values_response_error_return(err);
     }
     if let Err(err) =
@@ -3351,6 +3387,12 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
     }
     if let Err(err) = validate_rsi_enum_children_path_response_names(&payload, &LcsLimits::DEFAULT)
     {
+        if let Some(failure) = source_validation_failure_for_name_error(&err) {
+            unsafe {
+                (*result_out).source_validation_failure = source_validation_failure_code(failure);
+                (*result_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_enum_children_response_error_return(err);
     }
     if let Err(err) = validate_rsi_enum_children_metadata_security_descriptors(&payload) {
@@ -4953,6 +4995,12 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_read_key_response(
     };
 
     if let Err(err) = validate_rsi_read_key_response_names(&payload, &LcsLimits::DEFAULT) {
+        if let Some(failure) = source_validation_failure_for_name_error(&err) {
+            unsafe {
+                (*result_out).source_validation_failure = source_validation_failure_code(failure);
+                (*result_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_read_key_response_error_return(err);
     }
     if let Err(err) = validate_rsi_read_key_response_security_descriptor(&payload) {

@@ -51,11 +51,48 @@ fn malformed_layer_name_maps_to_source_data_eio_audit_policy() {
 }
 
 #[test]
+fn malformed_key_and_value_names_map_to_source_data_eio_audit_policy() {
+    assert_eq!(
+        plan_rsi_malformed_source_data(RsiSourceDataValidationFailure::MalformedKeyName),
+        RsiMalformedSourceDataPlan {
+            failure: RsiSourceDataValidationFailure::MalformedKeyName,
+            caller_errno: RsiMappedErrno::Eio,
+            emit_audit: true,
+            keep_source_alive: true,
+            retain_previous_layer_metadata_sd: false,
+        }
+    );
+    assert_eq!(
+        plan_rsi_malformed_source_data(RsiSourceDataValidationFailure::MalformedValueName),
+        RsiMalformedSourceDataPlan {
+            failure: RsiSourceDataValidationFailure::MalformedValueName,
+            caller_errno: RsiMappedErrno::Eio,
+            emit_audit: true,
+            keep_source_alive: true,
+            retain_previous_layer_metadata_sd: false,
+        }
+    );
+}
+
+#[test]
 fn source_validation_audit_vocabulary_names_malformed_layer_names() {
     let class = LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedLayerName);
 
     assert_eq!(class, LcsSourceValidationClass::MalformedLayerName);
     assert_eq!(class.as_str(), "malformed_layer_name");
+}
+
+#[test]
+fn source_validation_audit_vocabulary_names_malformed_key_and_value_names() {
+    let key_class =
+        LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedKeyName);
+    let value_class =
+        LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedValueName);
+
+    assert_eq!(key_class, LcsSourceValidationClass::MalformedKeyName);
+    assert_eq!(key_class.as_str(), "malformed_key_name");
+    assert_eq!(value_class, LcsSourceValidationClass::MalformedValueName);
+    assert_eq!(value_class.as_str(), "malformed_value_name");
 }
 
 #[test]

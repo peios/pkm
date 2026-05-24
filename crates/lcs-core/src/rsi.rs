@@ -2784,6 +2784,8 @@ pub enum RsiSourceDataValidationFailure {
     FutureSequenceNumber,
     DuplicateWinningSequenceTie,
     MalformedLayerMetadataSecurityDescriptor,
+    MalformedKeyName,
+    MalformedValueName,
 }
 
 /// Failure policy for malformed but structurally parsed source response data.
