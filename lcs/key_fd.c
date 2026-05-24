@@ -201,6 +201,9 @@ extern int lcs_rust_write_watch_event_record(
 extern int lcs_rust_value_name_casefold_eq(
 	const u8 *left, u32 left_len, const u8 *right, u32 right_len,
 	u8 *equal_out);
+extern int lcs_rust_layer_name_casefold_eq(
+	const u8 *left, u32 left_len, const u8 *right, u32 right_len,
+	u8 *equal_out);
 
 static void pkm_lcs_get_security_result_destroy(
 	struct pkm_lcs_get_security_result *result);
@@ -2704,6 +2707,192 @@ static long pkm_lcs_key_fd_set_value_precedence_tcb_gate(
 						  KACS_SE_TCB_PRIVILEGE))
 		return -EPERM;
 	return 0;
+}
+
+static long pkm_lcs_key_fd_layer_name_casefold_equal(
+	const char *left, u32 left_len, const char *right, u32 right_len,
+	bool *equal)
+{
+	u8 raw_equal = 0;
+	int ret;
+
+	if (!equal)
+		return -EINVAL;
+	*equal = false;
+	if (!left || !right)
+		return -EINVAL;
+
+	ret = lcs_rust_layer_name_casefold_eq((const u8 *)left, left_len,
+					      (const u8 *)right, right_len,
+					      &raw_equal);
+	if (ret)
+		return ret;
+	*equal = raw_equal != 0;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_path_component_casefold_equal(
+	const char *component, const char *expected, bool *equal)
+{
+	size_t component_len;
+	size_t expected_len;
+
+	if (!component || !expected || !equal)
+		return -EINVAL;
+	component_len = strlen(component);
+	expected_len = strlen(expected);
+	if (component_len > U32_MAX || expected_len > U32_MAX)
+		return -EOVERFLOW;
+	return pkm_lcs_key_fd_value_name_casefold_equal(
+		component, (u32)component_len, expected, (u32)expected_len,
+		equal);
+}
+
+static long pkm_lcs_key_fd_layer_metadata_path(
+	const struct pkm_lcs_key_fd *key_fd, const char **layer_name_out,
+	u32 *layer_name_len_out, bool *matches_out)
+{
+	static const char * const prefix[] = {
+		"Machine", "System", "Registry", "Layers"
+	};
+	const char *layer_name;
+	u32 i;
+
+	if (!layer_name_out || !layer_name_len_out || !matches_out)
+		return -EINVAL;
+	*layer_name_out = NULL;
+	*layer_name_len_out = 0;
+	*matches_out = false;
+	if (!key_fd || !key_fd->resolved_path)
+		return -EINVAL;
+	if (key_fd->path_component_count != ARRAY_SIZE(prefix) + 1U)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(prefix); i++) {
+		bool equal = false;
+		long ret;
+
+		if (!key_fd->resolved_path[i])
+			return -EINVAL;
+		ret = pkm_lcs_key_fd_path_component_casefold_equal(
+			key_fd->resolved_path[i], prefix[i], &equal);
+		if (ret)
+			return ret;
+		if (!equal)
+			return 0;
+	}
+
+	layer_name = key_fd->resolved_path[ARRAY_SIZE(prefix)];
+	if (!layer_name)
+		return -EINVAL;
+	if (strlen(layer_name) > U32_MAX)
+		return -EOVERFLOW;
+
+	*layer_name_out = layer_name;
+	*layer_name_len_out = (u32)strlen(layer_name);
+	*matches_out = true;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_query_layer_metadata_dword(
+	const struct pkm_lcs_key_fd *key_fd, const char *value_name,
+	u32 value_name_len, bool *found_out, u32 *value_out)
+{
+	struct pkm_lcs_effective_value_snapshot snapshot = { };
+	const u8 *data;
+	long ret;
+
+	if (!found_out || !value_out)
+		return -EINVAL;
+	*found_out = false;
+	*value_out = 0;
+
+	ret = pkm_lcs_key_fd_query_effective_value_snapshot(
+		key_fd, 0, value_name, value_name_len, &snapshot);
+	if (ret)
+		return ret;
+	if (!snapshot.result.found)
+		goto out;
+	if (snapshot.result.value_type != REG_DWORD ||
+	    snapshot.result.data_len != sizeof(u32)) {
+		ret = -EIO;
+		goto out;
+	}
+	data = snapshot.frame.data + snapshot.result.data_offset;
+	*found_out = true;
+	*value_out = get_unaligned_le32(data);
+
+out:
+	pkm_lcs_effective_value_snapshot_destroy(&snapshot);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_refresh_layer_metadata(
+	const struct pkm_lcs_key_fd *key_fd)
+{
+	static const char precedence_name[] = "Precedence";
+	static const char enabled_name[] = "Enabled";
+	static const char base_name[] = "base";
+	struct pkm_lcs_source_response_frame read_frame = { };
+	const char *layer_name = NULL;
+	const u8 *sd = NULL;
+	size_t sd_len = 0;
+	u32 layer_name_len = 0;
+	u32 precedence = 0;
+	u32 enabled_raw = 1;
+	bool matches = false;
+	bool is_base = false;
+	bool found = false;
+	u8 enabled = 1;
+	long ret;
+
+	ret = pkm_lcs_key_fd_layer_metadata_path(
+		key_fd, &layer_name, &layer_name_len, &matches);
+	if (ret || !matches)
+		return ret;
+
+	ret = pkm_lcs_key_fd_layer_name_casefold_equal(
+		layer_name, layer_name_len, base_name, sizeof(base_name) - 1,
+		&is_base);
+	if (ret)
+		return ret;
+	if (is_base)
+		return 0;
+
+	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, 0, &read_frame, &sd,
+					      &sd_len);
+	if (ret)
+		goto out_read_frame;
+
+	ret = pkm_lcs_key_fd_query_layer_metadata_dword(
+		key_fd, precedence_name, sizeof(precedence_name) - 1, &found,
+		&precedence);
+	if (ret)
+		goto out_read_frame;
+	if (!found)
+		precedence = 0;
+
+	ret = pkm_lcs_key_fd_query_layer_metadata_dword(
+		key_fd, enabled_name, sizeof(enabled_name) - 1, &found,
+		&enabled_raw);
+	if (ret)
+		goto out_read_frame;
+	if (!found) {
+		enabled = 1;
+	} else if (enabled_raw <= 1) {
+		enabled = (u8)enabled_raw;
+	} else {
+		ret = -EIO;
+		goto out_read_frame;
+	}
+
+	ret = pkm_lcs_layer_table_publish(
+		layer_name, layer_name_len, precedence, enabled,
+		key_fd->key_guid, sd, sd_len);
+
+out_read_frame:
+	pkm_lcs_source_response_frame_destroy(&read_frame);
+	return ret;
 }
 
 static long pkm_lcs_key_fd_query_values_batch_from_args(
@@ -5284,6 +5473,21 @@ long pkm_lcs_kunit_key_fd_set_value_for_token(
 
 	ret = pkm_lcs_key_fd_set_value_from_args_for_token(key_fd, token, ops,
 							    args);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_refresh_layer_metadata(int fd)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_refresh_layer_metadata(key_fd);
 	fdput(held);
 	return ret;
 }

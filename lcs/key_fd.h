@@ -149,6 +149,7 @@ long pkm_lcs_kunit_key_fd_set_security(
 long pkm_lcs_kunit_key_fd_set_value_for_token(
 	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_value_args *args);
+long pkm_lcs_kunit_key_fd_refresh_layer_metadata(int fd);
 long pkm_lcs_kunit_key_fd_delete_value_for_token(
 	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_delete_value_args *args);
