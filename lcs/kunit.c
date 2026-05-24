@@ -34325,6 +34325,190 @@ out_release_source:
 	}
 }
 
+static void pkm_lcs_kunit_source_write_read_key_payload_validation(
+	struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8,
+		0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0,
+	};
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0xd1 };
+	static const u8 bad_sd[] = { 0x01, 0x02, 0x03 };
+	static const bool malformed_cases[] = { false, true };
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(malformed_cases); i++) {
+		struct pkm_lcs_kunit_read_key_source_script script = {
+			.expected_guid = guid,
+			.name = "Machine",
+			.parent_guid = parent_guid,
+			.sd = malformed_cases[i] ? bad_sd :
+						 pkm_lcs_kunit_owner_only_sd,
+			.sd_len = malformed_cases[i] ? sizeof(bad_sd) :
+							 sizeof(pkm_lcs_kunit_owner_only_sd),
+		};
+		struct pkm_lcs_source_response_frame frame = { };
+		struct pkm_lcs_source_response_result response = { };
+		struct pkm_lcs_source_enqueue_result enqueue = { };
+		struct pkm_lcs_source_fd_snapshot snapshot = { };
+		struct pkm_lcs_rsi_read_key_result read_key = { };
+		struct task_struct *task;
+		struct file file = { };
+		const void *token;
+		int thread_ret;
+		long ret;
+
+		pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+		script.file = &file;
+		task = pkm_lcs_kunit_kthread_run(
+			pkm_lcs_kunit_read_key_source_thread, &script,
+			"pkm-lcs-kunit-read-key-write");
+		if (IS_ERR(task)) {
+			KUNIT_FAIL(test, "failed to start read-key source");
+			goto out_release_source;
+		}
+
+		ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+			1, 0, guid, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+			&frame, &response, &enqueue);
+		thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+		KUNIT_EXPECT_EQ(test, thread_ret, 0);
+		KUNIT_EXPECT_EQ(test, script.result, 0);
+		KUNIT_EXPECT_EQ(test, script.reads, 1U);
+		KUNIT_EXPECT_EQ(test, script.writes, 1U);
+		KUNIT_EXPECT_EQ(test, response.request_op_code,
+				(u16)RSI_READ_KEY);
+		KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_OK);
+		KUNIT_EXPECT_EQ(test, response.malformed_source_data,
+				malformed_cases[i]);
+		KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
+		KUNIT_EXPECT_EQ(test, ret,
+				malformed_cases[i] ? (long)-EIO : 0L);
+		if (malformed_cases[i]) {
+			KUNIT_EXPECT_PTR_EQ(test, frame.data, NULL);
+			KUNIT_EXPECT_EQ(test, frame.len, (size_t)0);
+		} else {
+			KUNIT_ASSERT_NOT_NULL(test, frame.data);
+			KUNIT_EXPECT_EQ(test,
+					pkm_lcs_rsi_materialize_read_key_response(
+						frame.data, frame.len,
+						response.request_id, &read_key),
+					0L);
+			KUNIT_EXPECT_EQ(test, read_key.sd_len,
+					(u32)sizeof(pkm_lcs_kunit_owner_only_sd));
+			KUNIT_EXPECT_EQ(test, read_key.name_len,
+					(u32)strlen("Machine"));
+		}
+
+		pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+		KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+		KUNIT_EXPECT_FALSE(test, snapshot.closing);
+		pkm_lcs_source_response_frame_destroy(&frame);
+
+out_release_source:
+		KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file),
+				0);
+		pkm_lcs_kunit_reset_source_table();
+		kacs_rust_token_drop(token);
+	}
+}
+
+static void pkm_lcs_kunit_source_write_query_values_payload_validation(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_rsi_layer_view layers[] = {
+		{ .name = "base", .name_len = 4, .precedence = 0,
+		  .enabled = 1 },
+	};
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8,
+		0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0,
+	};
+	static const u8 data[] = { 0x10, 0x20, 0x30 };
+	static const bool malformed_cases[] = { false, true };
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(malformed_cases); i++) {
+		struct pkm_lcs_kunit_query_values_source_script script = {
+			.expected_guid = guid,
+			.expected_value_name = "Value",
+			.layer_name = "base",
+			.data = data,
+			.data_len = sizeof(data),
+			.value_type = REG_BINARY,
+			.sequence = malformed_cases[i] ? 1 : 0,
+		};
+		struct pkm_lcs_source_response_frame frame = { };
+		struct pkm_lcs_source_response_result response = { };
+		struct pkm_lcs_source_enqueue_result enqueue = { };
+		struct pkm_lcs_source_fd_snapshot snapshot = { };
+		struct pkm_lcs_rsi_query_value_result value = { };
+		struct task_struct *task;
+		struct file file = { };
+		const void *token;
+		int thread_ret;
+		long ret;
+
+		pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+		script.file = &file;
+		task = pkm_lcs_kunit_kthread_run(
+			pkm_lcs_kunit_query_values_source_thread, &script,
+			"pkm-lcs-kunit-query-write");
+		if (IS_ERR(task)) {
+			KUNIT_FAIL(test, "failed to start query-values source");
+			goto out_release_source;
+		}
+
+		ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+			1, 0, guid, "Value", strlen("Value"), false,
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
+			&enqueue);
+		thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+		KUNIT_EXPECT_EQ(test, thread_ret, 0);
+		KUNIT_EXPECT_EQ(test, script.result, 0);
+		KUNIT_EXPECT_EQ(test, script.reads, 1U);
+		KUNIT_EXPECT_EQ(test, script.writes, 1U);
+		KUNIT_EXPECT_EQ(test, response.request_op_code,
+				(u16)RSI_QUERY_VALUES);
+		KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_OK);
+		KUNIT_EXPECT_EQ(test, response.malformed_source_data,
+				malformed_cases[i]);
+		KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
+		KUNIT_EXPECT_EQ(test, ret,
+				malformed_cases[i] ? (long)-EIO : 0L);
+		if (malformed_cases[i]) {
+			KUNIT_EXPECT_PTR_EQ(test, frame.data, NULL);
+			KUNIT_EXPECT_EQ(test, frame.len, (size_t)0);
+		} else {
+			KUNIT_ASSERT_NOT_NULL(test, frame.data);
+			KUNIT_EXPECT_EQ(test,
+					pkm_lcs_rsi_materialize_query_value_response(
+						frame.data, frame.len,
+						response.request_id, 1,
+						"Value", strlen("Value"),
+						layers, ARRAY_SIZE(layers),
+						NULL, 0, &value),
+					0L);
+			KUNIT_EXPECT_TRUE(test, value.found);
+			KUNIT_EXPECT_EQ(test, value.value_type, (u32)REG_BINARY);
+			KUNIT_EXPECT_EQ(test, value.data_len, (u32)sizeof(data));
+		}
+
+		pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+		KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+		KUNIT_EXPECT_FALSE(test, snapshot.closing);
+		pkm_lcs_source_response_frame_destroy(&frame);
+
+out_release_source:
+		KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file),
+				0);
+		pkm_lcs_kunit_reset_source_table();
+		kacs_rust_token_drop(token);
+	}
+}
+
 static void pkm_lcs_kunit_source_write_accepts_complete_lookup_response(
 	struct kunit *test)
 {
@@ -36725,6 +36909,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_write_status_only_payload_exactness),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_enum_children_payload_validation),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_write_read_key_payload_validation),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_write_query_values_payload_validation),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_accepts_complete_lookup_response),
 	KUNIT_CASE(
