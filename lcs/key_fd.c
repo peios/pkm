@@ -132,6 +132,11 @@ struct pkm_lcs_delete_value_input {
 	struct pkm_lcs_create_layer_target target;
 };
 
+struct pkm_lcs_blanket_tombstone_input {
+	struct pkm_lcs_create_layer_target target;
+	bool set;
+};
+
 struct pkm_lcs_hide_key_input {
 	struct pkm_lcs_create_layer_target target;
 };
@@ -145,10 +150,19 @@ struct pkm_lcs_effective_value_snapshot {
 	struct pkm_lcs_rsi_query_value_result result;
 };
 
+struct pkm_lcs_value_watch_event_bytes {
+	u8 *data;
+	u32 len;
+	u32 count;
+};
+
 struct pkm_lcs_delete_key_post_lookup {
 	bool target_still_named;
 	bool replacement_visible;
 };
+
+static void pkm_lcs_value_watch_event_bytes_destroy(
+	struct pkm_lcs_value_watch_event_bytes *events);
 
 static const struct file_operations pkm_lcs_key_fd_fops;
 static DEFINE_MUTEX(pkm_lcs_watch_registry_lock);
@@ -1325,6 +1339,118 @@ static long pkm_lcs_key_fd_delete_value_watch_event_type(
 	return 0;
 }
 
+static long pkm_lcs_key_fd_query_effective_values_frame(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	struct pkm_lcs_source_response_frame *frame,
+	struct pkm_lcs_source_response_result *response)
+{
+	if (!key_fd || !frame || !response)
+		return -EINVAL;
+
+	pkm_lcs_source_response_frame_init(frame);
+	return pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+		key_fd->source_id, txn_id, key_fd->key_guid, "", 0, true,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, frame, response, NULL);
+}
+
+static long pkm_lcs_key_fd_materialize_value_watch_events(
+	const struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_source_response_frame *before_frame,
+	const struct pkm_lcs_source_response_result *before_response,
+	const struct pkm_lcs_source_response_frame *after_frame,
+	const struct pkm_lcs_source_response_result *after_response,
+	struct pkm_lcs_value_watch_event_bytes *events)
+{
+	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_rsi_value_watch_events_result result = { };
+	struct pkm_lcs_rsi_value_watch_events_result written = { };
+	u64 next_sequence = 0;
+	u32 layer_count = 0;
+	long ret;
+
+	if (!key_fd || !before_frame || !before_response || !after_frame ||
+	    !after_response || !events)
+		return -EINVAL;
+	memset(events, 0, sizeof(*events));
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+
+	ret = pkm_lcs_rsi_materialize_query_values_watch_events(
+		before_frame->data, before_frame->len,
+		before_response->request_id, after_frame->data, after_frame->len,
+		after_response->request_id, next_sequence, layers, layer_count,
+		NULL, 0, NULL, 0, &result);
+	if (ret)
+		return ret;
+	if (!result.required_len) {
+		events->count = result.count;
+		return result.count ? -EIO : 0;
+	}
+
+	events->data = kmalloc(result.required_len, GFP_KERNEL);
+	if (!events->data)
+		return -ENOMEM;
+	ret = pkm_lcs_rsi_materialize_query_values_watch_events(
+		before_frame->data, before_frame->len,
+		before_response->request_id, after_frame->data, after_frame->len,
+		after_response->request_id, next_sequence, layers, layer_count,
+		NULL, 0, events->data, result.required_len, &written);
+	if (ret)
+		goto out_events;
+	if (written.required_len != result.required_len ||
+	    written.written_len != result.required_len ||
+	    written.count != result.count) {
+		ret = -EIO;
+		goto out_events;
+	}
+
+	events->len = written.written_len;
+	events->count = written.count;
+	return 0;
+
+out_events:
+	pkm_lcs_value_watch_event_bytes_destroy(events);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_publish_value_watch_event_bytes(
+	struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_value_watch_event_bytes *events)
+{
+	size_t offset = 0;
+	u32 i;
+
+	if (!key_fd || !events)
+		return -EINVAL;
+	if (!events->count)
+		return events->data || events->len ? -EINVAL : 0;
+	if (!events->data || !events->len)
+		return -EINVAL;
+
+	for (i = 0; i < events->count; i++) {
+		u32 event_type;
+		u32 name_len;
+
+		if (offset > events->len || events->len - offset < 8U)
+			return -EIO;
+		event_type = get_unaligned_le32(events->data + offset);
+		name_len = get_unaligned_le32(events->data + offset + 4U);
+		offset += 8U;
+		if ((event_type != REG_WATCH_VALUE_SET &&
+		     event_type != REG_WATCH_VALUE_DELETED) ||
+		    offset > events->len || name_len > events->len - offset)
+			return -EIO;
+		pkm_lcs_key_fd_publish_value_effects(
+			key_fd, event_type, (const char *)events->data + offset,
+			name_len);
+		offset += name_len;
+	}
+	return offset == events->len ? 0 : -EIO;
+}
+
 static long pkm_lcs_key_fd_get_security_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_get_security_args *args)
@@ -1769,6 +1895,26 @@ static void pkm_lcs_delete_value_input_destroy(
 	memset(input, 0, sizeof(*input));
 }
 
+static void pkm_lcs_blanket_tombstone_input_destroy(
+	struct pkm_lcs_blanket_tombstone_input *input)
+{
+	if (!input)
+		return;
+
+	pkm_lcs_create_layer_target_destroy(&input->target);
+	memset(input, 0, sizeof(*input));
+}
+
+static void pkm_lcs_value_watch_event_bytes_destroy(
+	struct pkm_lcs_value_watch_event_bytes *events)
+{
+	if (!events)
+		return;
+
+	kfree(events->data);
+	memset(events, 0, sizeof(*events));
+}
+
 static void pkm_lcs_hide_key_input_destroy(struct pkm_lcs_hide_key_input *input)
 {
 	if (!input)
@@ -1886,6 +2032,48 @@ static long pkm_lcs_key_fd_copy_delete_value_layer(
 	const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_delete_value_args *args,
 	struct pkm_lcs_delete_value_input *input)
+{
+	char *layer;
+	size_t alloc_len;
+
+	if (!ops || !ops->read || !args || !input)
+		return -EINVAL;
+
+	if (!args->layer_len) {
+		if (args->layer_ptr)
+			return -EINVAL;
+		input->target.name = "base";
+		input->target.name_len = 4;
+		input->target.implicit_base = 1;
+		return 0;
+	}
+
+	if (!args->layer_ptr)
+		return -EFAULT;
+	if (check_add_overflow((size_t)args->layer_len, (size_t)1,
+			       &alloc_len))
+		return -EOVERFLOW;
+
+	layer = kzalloc(alloc_len, GFP_KERNEL);
+	if (!layer)
+		return -ENOMEM;
+	if (!ops->read(ops->ctx, layer,
+		       (const void __user *)(unsigned long)args->layer_ptr,
+		       args->layer_len)) {
+		kfree(layer);
+		return -EFAULT;
+	}
+
+	input->target.owned_name = layer;
+	input->target.name = layer;
+	input->target.name_len = args->layer_len;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_copy_blanket_tombstone_layer(
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_blanket_tombstone_args *args,
+	struct pkm_lcs_blanket_tombstone_input *input)
 {
 	char *layer;
 	size_t alloc_len;
@@ -2086,6 +2274,33 @@ static long pkm_lcs_key_fd_copy_delete_value_input(
 		input->target.name, input->target.name_len);
 }
 
+static long pkm_lcs_key_fd_copy_blanket_tombstone_input(
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_blanket_tombstone_args *args,
+	const struct pkm_lcs_key_fd *key_fd,
+	struct pkm_lcs_blanket_tombstone_input *input)
+{
+	struct pkm_lcs_rsi_built_request built = { };
+	u8 frame[128];
+	long ret;
+
+	if (!ops || !ops->read || !args || !key_fd || !input)
+		return -EINVAL;
+	memset(input, 0, sizeof(*input));
+	if (args->set != 0 && args->set != 1)
+		return -EINVAL;
+
+	ret = pkm_lcs_key_fd_copy_blanket_tombstone_layer(ops, args, input);
+	if (ret)
+		return ret;
+	input->set = args->set != 0;
+
+	return pkm_lcs_rsi_build_set_blanket_tombstone_request(
+		frame, sizeof(frame), 1, 0, key_fd->key_guid,
+		input->target.name, input->target.name_len, input->set,
+		input->set ? 1ULL : 0ULL, &built);
+}
+
 static long pkm_lcs_key_fd_copy_hide_key_input(
 	const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_hide_key_args *args,
@@ -2143,6 +2358,17 @@ static long pkm_lcs_key_fd_set_value_authorize_layer(
 
 static long pkm_lcs_key_fd_delete_value_authorize_layer(
 	const struct pkm_lcs_delete_value_input *input, const void *token)
+{
+	if (!input)
+		return -EINVAL;
+
+	return pkm_lcs_key_fd_authorize_value_layer_target(&input->target,
+							   token);
+}
+
+static long pkm_lcs_key_fd_blanket_tombstone_authorize_layer(
+	const struct pkm_lcs_blanket_tombstone_input *input,
+	const void *token)
 {
 	if (!input)
 		return -EINVAL;
@@ -3184,6 +3410,156 @@ static long pkm_lcs_key_fd_delete_value_from_args(
 		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
 }
 
+static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
+	struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_blanket_tombstone_args *args)
+{
+	struct pkm_lcs_blanket_tombstone_input input = { };
+	struct pkm_lcs_source_response_frame before_frame = { };
+	struct pkm_lcs_source_response_frame after_frame = { };
+	struct pkm_lcs_source_response_result before_response = { };
+	struct pkm_lcs_source_response_result after_response = { };
+	struct pkm_lcs_source_response_result mutation_response = { };
+	struct pkm_lcs_transaction_mutation_handle mutation = { };
+	struct pkm_lcs_transaction_binding_plan binding = { };
+	struct pkm_lcs_transaction_blanket_tombstone_log_input log_input = { };
+	struct pkm_lcs_value_watch_event_bytes events = { };
+	u64 generation = 0;
+	u64 last_write_time;
+	u64 sequence = 0;
+	u64 txn_id = 0;
+	long ret;
+
+	if (!key_fd || !args)
+		return -EINVAL;
+	if (!key_fd->path_component_count || !key_fd->ancestor_guids)
+		return -EINVAL;
+	if (!ops)
+		ops = &pkm_lcs_key_fd_default_usercopy_ops;
+	if (!ops->read)
+		return -EINVAL;
+
+	if (args->_pad0 || memchr_inv(args->_pad1, 0, sizeof(args->_pad1)))
+		return -EINVAL;
+	if (args->txn_fd < -1)
+		return -EINVAL;
+
+	ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
+		key_fd->granted_access, REG_IOC_BLANKET_TOMBSTONE_NR);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_copy_blanket_tombstone_input(ops, args, key_fd,
+							  &input);
+	if (ret)
+		goto out_input;
+
+	ret = pkm_lcs_key_fd_blanket_tombstone_authorize_layer(&input, token);
+	if (ret)
+		goto out_input;
+
+	if (input.set) {
+		ret = pkm_lcs_allocate_sequence(&sequence);
+		if (ret)
+			goto out_input;
+	}
+
+	if (args->txn_fd >= 0) {
+		log_input.key_guid = key_fd->key_guid;
+		log_input.layer = input.target.name;
+		log_input.layer_len = input.target.name_len;
+		log_input.path = (const char * const *)key_fd->resolved_path;
+		log_input.ancestor_guids =
+			(const u8 (*)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES])
+				key_fd->ancestor_guids;
+		log_input.depth = key_fd->path_component_count;
+		log_input.sequence = sequence;
+		log_input.set = input.set;
+
+		ret = pkm_lcs_transaction_fd_begin_blanket_tombstone_mutation(
+			args->txn_fd, key_fd->source_id, key_fd->ancestor_guids[0],
+			&log_input, &mutation, &binding);
+		if (ret)
+			goto out_input;
+		txn_id = binding.transaction_id;
+	}
+
+	ret = pkm_lcs_key_fd_query_effective_values_frame(
+		key_fd, txn_id, &before_frame, &before_response);
+	if (ret)
+		goto out_cancel_mutation;
+
+	ret = pkm_lcs_source_set_blanket_tombstone_round_trip_timeout(
+		key_fd->source_id, txn_id, key_fd->key_guid,
+		input.target.name, input.target.name_len, input.set, sequence,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &mutation_response, NULL);
+	if (ret)
+		goto out_before;
+
+	ret = pkm_lcs_key_fd_query_effective_values_frame(
+		key_fd, txn_id, &after_frame, &after_response);
+	if (ret)
+		goto out_before;
+
+	last_write_time = (u64)ktime_get_real_ns();
+	ret = pkm_lcs_source_write_key_round_trip_timeout(
+		key_fd->source_id, txn_id, key_fd->key_guid, NULL, 0,
+		last_write_time, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, NULL,
+		NULL);
+	if (ret) {
+		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+		ret = -EIO;
+		goto out_after;
+	}
+
+	ret = pkm_lcs_key_fd_materialize_value_watch_events(
+		key_fd, &before_frame, &before_response, &after_frame,
+		&after_response, &events);
+	if (ret)
+		goto out_after;
+
+	if (args->txn_fd >= 0) {
+		ret = pkm_lcs_transaction_fd_set_blanket_tombstone_events(
+			&mutation, events.data, events.len, events.count);
+		if (ret)
+			goto out_events;
+		ret = pkm_lcs_transaction_fd_commit_mutation(&mutation);
+		goto out_events;
+	}
+
+	ret = pkm_lcs_source_record_transaction_generation(
+		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
+	if (ret) {
+		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+		ret = -EIO;
+		goto out_events;
+	}
+
+	ret = pkm_lcs_key_fd_publish_value_watch_event_bytes(key_fd, &events);
+
+out_events:
+	pkm_lcs_value_watch_event_bytes_destroy(&events);
+out_after:
+	pkm_lcs_source_response_frame_destroy(&after_frame);
+out_before:
+	pkm_lcs_source_response_frame_destroy(&before_frame);
+out_cancel_mutation:
+	if (ret && mutation.active)
+		pkm_lcs_transaction_fd_cancel_mutation(&mutation);
+out_input:
+	pkm_lcs_blanket_tombstone_input_destroy(&input);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_blanket_tombstone_from_args(
+	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_blanket_tombstone_args *args)
+{
+	return pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
+		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
+}
+
 static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct pkm_lcs_usercopy_ops *ops,
@@ -3520,6 +3896,7 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	struct reg_set_security_args set_security_args;
 	struct reg_set_value_args set_value_args;
 	struct reg_delete_value_args delete_value_args;
+	struct reg_blanket_tombstone_args blanket_tombstone_args;
 	struct reg_delete_key_args delete_key_args;
 	struct reg_hide_key_args hide_key_args;
 	long ret;
@@ -3549,6 +3926,15 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 		return pkm_lcs_key_fd_delete_value_from_args(
 			key_fd, &pkm_lcs_key_fd_default_usercopy_ops,
 			&delete_value_args);
+	case REG_IOC_BLANKET_TOMBSTONE:
+		if (!arg)
+			return -EFAULT;
+		if (copy_from_user(&blanket_tombstone_args, (void __user *)arg,
+				   sizeof(blanket_tombstone_args)))
+			return -EFAULT;
+		return pkm_lcs_key_fd_blanket_tombstone_from_args(
+			key_fd, &pkm_lcs_key_fd_default_usercopy_ops,
+			&blanket_tombstone_args);
 	case REG_IOC_DELETE_KEY:
 		if (!arg)
 			return -EFAULT;
@@ -4783,6 +5169,24 @@ long pkm_lcs_kunit_key_fd_delete_value_for_token(
 		return ret;
 
 	ret = pkm_lcs_key_fd_delete_value_from_args_for_token(
+		key_fd, token, ops, args);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_blanket_tombstone_for_token(
+	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_blanket_tombstone_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 		key_fd, token, ops, args);
 	fdput(held);
 	return ret;

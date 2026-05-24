@@ -6,7 +6,8 @@ use core::{slice, str};
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
     casefold_eq, classify_hive_route, current_user_sid_component_from_binary_sid,
-    for_each_effective_value, for_each_routable_path_component,
+    for_each_effective_value, for_each_effective_value_watch_event,
+    for_each_routable_path_component,
     for_each_rsi_enum_children_source_path_entry, for_each_rsi_lookup_source_path_entry,
     for_each_rsi_query_values_source_blanket_entry,
     for_each_rsi_query_values_source_value_entry, for_each_visible_subkey,
@@ -60,7 +61,7 @@ use crate::lcs_core::{
     RegistryOpenPreResolutionAccessPlan, RsiReadPlan, RsiRetainedRequest, RsiTransactionMode,
     SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
     SourceSlotStatus, SourceSlotView, ValueEntry, ValueLayerAdmissionInput, ValueResolution,
-    WatchEventRecordPlan,
+    EffectiveValueWatchEvent, EnumeratedValue, WatchEventRecordPlan,
     WatchEventRecordRequest,
     WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_TOMBSTONE,
     RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY, write_watch_event_record,
@@ -343,6 +344,18 @@ pub struct PkmLcsRsiQueryValuesBatchResultCopy {
     pub source_value_entry_count: u32,
     pub source_blanket_count: u32,
     pub _pad: [u32; 3],
+}
+
+#[repr(C)]
+pub struct PkmLcsRsiValueWatchEventsResultCopy {
+    pub required_len: u32,
+    pub count: u32,
+    pub written_len: u32,
+    pub before_source_value_entry_count: u32,
+    pub before_source_blanket_count: u32,
+    pub after_source_value_entry_count: u32,
+    pub after_source_blanket_count: u32,
+    pub _pad: u32,
 }
 
 #[repr(C)]
@@ -3383,6 +3396,273 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_values_batch_response(
             offset += 4;
             output_bytes[offset..offset + data.len()].copy_from_slice(data);
             offset += data.len();
+            Ok(())
+        },
+    ) {
+        return rsi_lookup_materialization_error_return(err);
+    }
+
+    if offset != required_len {
+        return LinuxErrno::Eio.negated_return() as c_int;
+    }
+    unsafe {
+        (*result_out).written_len = offset as u32;
+    }
+    0
+}
+
+fn materialize_effective_value_watch_snapshot<'a>(
+    frame_bytes: &'a [u8],
+    request_id: u64,
+    next_sequence: u64,
+    layer_views: &'a [LayerView<'a>],
+    private_layer_views: &'a [&'a str],
+) -> Result<(PkmVec<EnumeratedValue<'a>>, usize, usize), c_int> {
+    let payload = match parse_rsi_query_values_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_QUERY_VALUES,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return Err(rsi_query_values_response_error_return(err)),
+    };
+
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
+        return Err(rsi_query_values_response_error_return(err));
+    }
+    if let Err(err) =
+        validate_rsi_query_values_response_value_payloads(&payload, &LcsLimits::DEFAULT)
+    {
+        return Err(rsi_query_values_response_error_return(err));
+    }
+    if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
+        return Err(rsi_query_values_response_error_return(err));
+    }
+
+    let mut value_storage =
+        PkmVec::<NamedValueEntry<'a>>::with_capacity(payload.entry_count as usize)
+            .map_err(|_| LinuxErrno::Enomem.negated_return() as c_int)?;
+    let mut blanket_storage =
+        PkmVec::<BlanketTombstoneEntry<'a>>::with_capacity(payload.blanket_count as usize)
+            .map_err(|_| LinuxErrno::Enomem.negated_return() as c_int)?;
+
+    let mut allocation_failed = false;
+    if let Err(err) =
+        for_each_rsi_query_values_source_value_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+            if value_storage.push(entry).is_err() {
+                allocation_failed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            Ok(())
+        })
+    {
+        if allocation_failed {
+            return Err(LinuxErrno::Enomem.negated_return() as c_int);
+        }
+        return Err(rsi_query_values_response_error_return(err));
+    }
+    if let Err(err) =
+        for_each_rsi_query_values_source_blanket_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+            if blanket_storage.push(entry).is_err() {
+                allocation_failed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            Ok(())
+        })
+    {
+        if allocation_failed {
+            return Err(LinuxErrno::Enomem.negated_return() as c_int);
+        }
+        return Err(rsi_query_values_response_error_return(err));
+    }
+
+    let context = LayerResolutionContext {
+        layers: layer_views,
+        private_layers: private_layer_views,
+        limits: &LcsLimits::DEFAULT,
+        next_sequence,
+    };
+    let mut effective =
+        PkmVec::<EnumeratedValue<'a>>::with_capacity(value_storage.len())
+            .map_err(|_| LinuxErrno::Enomem.negated_return() as c_int)?;
+
+    allocation_failed = false;
+    if let Err(err) = for_each_effective_value(
+        &context,
+        value_storage.as_slice(),
+        blanket_storage.as_slice(),
+        |value| {
+            if effective.push(value).is_err() {
+                allocation_failed = true;
+                return Err(LcsError::OutputSizeOverflow);
+            }
+            Ok(())
+        },
+    ) {
+        if allocation_failed {
+            return Err(LinuxErrno::Enomem.negated_return() as c_int);
+        }
+        return Err(rsi_lookup_materialization_error_return(err));
+    }
+
+    Ok((effective, value_storage.len(), blanket_storage.len()))
+}
+
+fn effective_value_watch_event_name(event: EffectiveValueWatchEvent<'_>) -> &str {
+    match event {
+        EffectiveValueWatchEvent::ValueSet { name }
+        | EffectiveValueWatchEvent::ValueDeleted { name } => name,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_values_watch_events(
+    before_frame: *const u8,
+    before_frame_len: usize,
+    before_request_id: u64,
+    after_frame: *const u8,
+    after_frame_len: usize,
+    after_request_id: u64,
+    next_sequence: u64,
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+    private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
+    private_layer_count: usize,
+    output: *mut u8,
+    output_len: usize,
+    result_out: *mut PkmLcsRsiValueWatchEventsResultCopy,
+) -> c_int {
+    if result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *result_out = PkmLcsRsiValueWatchEventsResultCopy {
+            required_len: 0,
+            count: 0,
+            written_len: 0,
+            before_source_value_entry_count: 0,
+            before_source_blanket_count: 0,
+            after_source_value_entry_count: 0,
+            after_source_blanket_count: 0,
+            _pad: 0,
+        };
+    }
+
+    if before_frame.is_null()
+        || after_frame.is_null()
+        || (layer_count != 0 && layers.is_null())
+        || (private_layer_count != 0 && private_layers.is_null())
+        || (output.is_null() && output_len != 0)
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let before_bytes = unsafe { slice::from_raw_parts(before_frame, before_frame_len) };
+    let after_bytes = unsafe { slice::from_raw_parts(after_frame, after_frame_len) };
+    let layer_views = match parse_layer_views(layers, layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let private_layer_views = match parse_private_layer_views(private_layers, private_layer_count) {
+        Ok(private_layer_views) => private_layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let (before_values, before_source_values, before_source_blankets) =
+        match materialize_effective_value_watch_snapshot(
+            before_bytes,
+            before_request_id,
+            next_sequence,
+            layer_views.as_slice(),
+            private_layer_views.as_slice(),
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(errno) => return errno,
+        };
+    let (after_values, after_source_values, after_source_blankets) =
+        match materialize_effective_value_watch_snapshot(
+            after_bytes,
+            after_request_id,
+            next_sequence,
+            layer_views.as_slice(),
+            private_layer_views.as_slice(),
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(errno) => return errno,
+        };
+
+    let mut count = 0usize;
+    let mut required_len = 0usize;
+    if let Err(err) = for_each_effective_value_watch_event(
+        &LcsLimits::DEFAULT,
+        before_values.as_slice(),
+        after_values.as_slice(),
+        |event| {
+            let name = effective_value_watch_event_name(event).as_bytes();
+            let record_len = 8usize
+                .checked_add(name.len())
+                .ok_or(LcsError::OutputSizeOverflow)?;
+            required_len = required_len
+                .checked_add(record_len)
+                .ok_or(LcsError::OutputSizeOverflow)?;
+            count = count
+                .checked_add(1)
+                .ok_or(LcsError::OutputSizeOverflow)?;
+            Ok(())
+        },
+    ) {
+        return rsi_lookup_materialization_error_return(err);
+    }
+
+    if count > u32::MAX as usize
+        || required_len > u32::MAX as usize
+        || before_source_values > u32::MAX as usize
+        || before_source_blankets > u32::MAX as usize
+        || after_source_values > u32::MAX as usize
+        || after_source_blankets > u32::MAX as usize
+    {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    }
+
+    unsafe {
+        (*result_out).required_len = required_len as u32;
+        (*result_out).count = count as u32;
+        (*result_out).before_source_value_entry_count = before_source_values as u32;
+        (*result_out).before_source_blanket_count = before_source_blankets as u32;
+        (*result_out).after_source_value_entry_count = after_source_values as u32;
+        (*result_out).after_source_blanket_count = after_source_blankets as u32;
+    }
+
+    if output.is_null() {
+        return 0;
+    }
+    if output_len < required_len {
+        return LinuxErrno::Erange.negated_return() as c_int;
+    }
+
+    let output_bytes = unsafe { slice::from_raw_parts_mut(output, output_len) };
+    let mut offset = 0usize;
+    if let Err(err) = for_each_effective_value_watch_event(
+        &LcsLimits::DEFAULT,
+        before_values.as_slice(),
+        after_values.as_slice(),
+        |event| {
+            let name = effective_value_watch_event_name(event).as_bytes();
+            let record_len = 8usize
+                .checked_add(name.len())
+                .ok_or(LcsError::OutputSizeOverflow)?;
+            if offset > output_bytes.len() || record_len > output_bytes.len() - offset {
+                return Err(LcsError::OutputSizeOverflow);
+            }
+            output_bytes[offset..offset + 4].copy_from_slice(&event.event_type().to_le_bytes());
+            offset += 4;
+            output_bytes[offset..offset + 4].copy_from_slice(&(name.len() as u32).to_le_bytes());
+            offset += 4;
+            output_bytes[offset..offset + name.len()].copy_from_slice(name);
+            offset += name.len();
             Ok(())
         },
     ) {

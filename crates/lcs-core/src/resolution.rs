@@ -203,7 +203,7 @@ struct NamedValueCandidate<'a> {
 /// Resolves one source-returned path-entry candidate set.
 pub fn resolve_path_entry<'a>(
     context: &LayerResolutionContext<'a>,
-    entries: &'a [PathEntry<'a>],
+    entries: &[PathEntry<'a>],
 ) -> LcsResult<PathResolution<'a>> {
     validate_layer_resolution_context(context)?;
 
@@ -276,7 +276,7 @@ pub fn validate_path_target(target: PathTarget) -> LcsResult<PathTarget> {
 pub fn resolve_named_path_entry<'a>(
     context: &LayerResolutionContext<'a>,
     requested_child_name: &str,
-    entries: &'a [NamedPathEntry<'a>],
+    entries: &[NamedPathEntry<'a>],
 ) -> LcsResult<NamedPathResolution<'a>> {
     validate_layer_resolution_context(context)?;
     let requested_name =
@@ -331,8 +331,8 @@ pub fn resolve_named_path_entry<'a>(
 /// Resolves one source-returned value candidate set.
 pub fn resolve_value<'a>(
     context: &LayerResolutionContext<'a>,
-    entries: &'a [ValueEntry<'a>],
-    blankets: &'a [BlanketTombstoneEntry<'a>],
+    entries: &[ValueEntry<'a>],
+    blankets: &[BlanketTombstoneEntry<'a>],
 ) -> LcsResult<ValueResolution<'a>> {
     validate_layer_resolution_context(context)?;
 
@@ -394,8 +394,8 @@ pub fn resolve_value<'a>(
 /// first-seen folded group order and is not an ABI guarantee.
 pub fn for_each_effective_value<'a, F>(
     context: &LayerResolutionContext<'a>,
-    entries: &'a [NamedValueEntry<'a>],
-    blankets: &'a [BlanketTombstoneEntry<'a>],
+    entries: &[NamedValueEntry<'a>],
+    blankets: &[BlanketTombstoneEntry<'a>],
     mut emit: F,
 ) -> LcsResult<usize>
 where
@@ -486,7 +486,7 @@ where
 /// order and is not an ABI guarantee.
 pub fn for_each_visible_subkey<'a, F>(
     context: &LayerResolutionContext<'a>,
-    entries: &'a [NamedPathEntry<'a>],
+    entries: &[NamedPathEntry<'a>],
     mut emit: F,
 ) -> LcsResult<usize>
 where
@@ -556,7 +556,7 @@ where
 
 fn active_layer_for_source_entry<'a>(
     context: &LayerResolutionContext<'a>,
-    source_layer: &'a str,
+    source_layer: &str,
 ) -> LcsResult<Option<ActiveLayer<'a>>> {
     validate_layer_name_bytes(source_layer.as_bytes(), context.limits)?;
 
@@ -599,8 +599,8 @@ fn private_layer_attached(
 
 fn prevalidate_value_enumeration_source<'a>(
     context: &LayerResolutionContext<'a>,
-    entries: &'a [NamedValueEntry<'a>],
-    blankets: &'a [BlanketTombstoneEntry<'a>],
+    entries: &[NamedValueEntry<'a>],
+    blankets: &[BlanketTombstoneEntry<'a>],
 ) -> LcsResult<()> {
     for entry in entries {
         validate_value_name_bytes(entry.name.as_bytes(), context.limits)?;
@@ -623,7 +623,7 @@ fn prevalidate_value_enumeration_source<'a>(
 
 fn prevalidate_subkey_enumeration_source<'a>(
     context: &LayerResolutionContext<'a>,
-    entries: &'a [NamedPathEntry<'a>],
+    entries: &[NamedPathEntry<'a>],
 ) -> LcsResult<()> {
     for entry in entries {
         validate_key_component_bytes(entry.child_name.as_bytes(), context.limits)?;
@@ -639,7 +639,7 @@ fn prevalidate_subkey_enumeration_source<'a>(
 
 fn value_name_seen_before<'a>(
     context: &LayerResolutionContext<'_>,
-    entries: &'a [NamedValueEntry<'a>],
+    entries: &[NamedValueEntry<'a>],
     index: usize,
     current_name: &str,
 ) -> LcsResult<bool> {
@@ -654,7 +654,7 @@ fn value_name_seen_before<'a>(
 
 fn child_name_seen_before<'a>(
     context: &LayerResolutionContext<'_>,
-    entries: &'a [NamedPathEntry<'a>],
+    entries: &[NamedPathEntry<'a>],
     index: usize,
     current_name: &str,
 ) -> LcsResult<bool> {
@@ -679,7 +679,7 @@ fn validate_sequence(context: &LayerResolutionContext<'_>, sequence: u64) -> Lcs
 }
 
 fn validate_source_value_payload<'a>(
-    entry: &'a ValueEntry<'a>,
+    entry: &ValueEntry<'a>,
 ) -> LcsResult<ValueCandidatePayload<'a>> {
     match validate_value_write_type(
         entry.value_type,

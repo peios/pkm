@@ -16,6 +16,7 @@
 #define PKM_LCS_TRANSACTION_LOG_KIND_DELETE_VALUE 4U
 #define PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY 5U
 #define PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY 6U
+#define PKM_LCS_TRANSACTION_LOG_KIND_BLANKET_TOMBSTONE 7U
 #define PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT 4096U
 
 struct reg_txn_status_args;
@@ -91,6 +92,17 @@ struct pkm_lcs_transaction_delete_value_log_input {
 	u32 depth;
 };
 
+struct pkm_lcs_transaction_blanket_tombstone_log_input {
+	const u8 *key_guid;
+	const char *layer;
+	size_t layer_len;
+	const char * const *path;
+	const u8 (*ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u32 depth;
+	u64 sequence;
+	bool set;
+};
+
 struct pkm_lcs_transaction_delete_key_log_input {
 	const u8 *key_guid;
 	const u8 *parent_guid;
@@ -164,6 +176,12 @@ long pkm_lcs_transaction_fd_begin_delete_value_mutation(
 	const struct pkm_lcs_transaction_delete_value_log_input *input,
 	struct pkm_lcs_transaction_mutation_handle *handle,
 	struct pkm_lcs_transaction_binding_plan *binding);
+long pkm_lcs_transaction_fd_begin_blanket_tombstone_mutation(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const struct pkm_lcs_transaction_blanket_tombstone_log_input *input,
+	struct pkm_lcs_transaction_mutation_handle *handle,
+	struct pkm_lcs_transaction_binding_plan *binding);
 long pkm_lcs_transaction_fd_begin_delete_key_mutation(
 	int fd, u32 source_id,
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
@@ -178,6 +196,9 @@ long pkm_lcs_transaction_fd_begin_hide_key_mutation(
 	struct pkm_lcs_transaction_binding_plan *binding);
 long pkm_lcs_transaction_fd_set_delete_value_event(
 	struct pkm_lcs_transaction_mutation_handle *handle, u32 event_type);
+long pkm_lcs_transaction_fd_set_blanket_tombstone_events(
+	struct pkm_lcs_transaction_mutation_handle *handle,
+	const u8 *events, size_t events_len, u32 event_count);
 long pkm_lcs_transaction_fd_commit_mutation(
 	struct pkm_lcs_transaction_mutation_handle *handle);
 void pkm_lcs_transaction_fd_cancel_mutation(
