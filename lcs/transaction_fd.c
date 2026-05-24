@@ -175,6 +175,8 @@ struct pkm_lcs_transaction_layer_delete_effect {
 	struct list_head link;
 	char *layer_name;
 	u32 layer_name_len;
+	u32 skip_generation_source_id;
+	u8 skip_generation_root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 };
 
 static DEFINE_MUTEX(pkm_lcs_transaction_id_lock);
@@ -445,11 +447,14 @@ static void pkm_lcs_transaction_layer_delete_effects_destroy(
 }
 
 static long pkm_lcs_transaction_layer_delete_effect_append(
-	struct list_head *effects, const char *layer_name, u32 layer_name_len)
+	struct list_head *effects, const char *layer_name, u32 layer_name_len,
+	u32 skip_generation_source_id,
+	const u8 skip_generation_root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES])
 {
 	struct pkm_lcs_transaction_layer_delete_effect *effect;
 
-	if (!effects || !layer_name || !layer_name_len)
+	if (!effects || !layer_name || !layer_name_len ||
+	    !skip_generation_source_id || !skip_generation_root_guid)
 		return -EINVAL;
 
 	list_for_each_entry(effect, effects, link) {
@@ -476,6 +481,9 @@ static long pkm_lcs_transaction_layer_delete_effect_append(
 		return -ENOMEM;
 	}
 	effect->layer_name_len = layer_name_len;
+	effect->skip_generation_source_id = skip_generation_source_id;
+	memcpy(effect->skip_generation_root_guid, skip_generation_root_guid,
+	       sizeof(effect->skip_generation_root_guid));
 	list_add_tail(&effect->link, effects);
 	return 0;
 }
@@ -491,9 +499,11 @@ static long pkm_lcs_transaction_layer_delete_effects_apply(
 	list_for_each_entry(effect, effects, link) {
 		long ret;
 
-		ret = pkm_lcs_source_delete_layer_orchestrate_timeout(
+		ret = pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
 			effect->layer_name, effect->layer_name_len,
-			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, NULL);
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+			effect->skip_generation_source_id,
+			effect->skip_generation_root_guid, NULL);
 		if (ret)
 			return ret;
 	}
@@ -1965,9 +1975,18 @@ static long pkm_lcs_transaction_log_apply_layer_metadata_effects(
 	struct list_head *layer_delete_effects)
 {
 	struct pkm_lcs_transaction_log_entry *entry;
+	u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 
 	if (!txn || !source_id || !layer_delete_effects)
 		return -EINVAL;
+
+	spin_lock(&txn->lock);
+	if (txn->bound_source_id != source_id) {
+		spin_unlock(&txn->lock);
+		return -EIO;
+	}
+	memcpy(root_guid, txn->bound_root_guid, sizeof(root_guid));
+	spin_unlock(&txn->lock);
 
 	list_for_each_entry(entry, &txn->mutation_log, link) {
 		const u8 *key_guid = NULL;
@@ -2029,7 +2048,8 @@ static long pkm_lcs_transaction_log_apply_layer_metadata_effects(
 			if (is_base)
 				break;
 			ret = pkm_lcs_transaction_layer_delete_effect_append(
-				layer_delete_effects, layer_name, layer_name_len);
+				layer_delete_effects, layer_name, layer_name_len,
+				source_id, root_guid);
 			break;
 		}
 		default:

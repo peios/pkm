@@ -3016,7 +3016,7 @@ out_read_frame:
 }
 
 static long pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
-	const struct pkm_lcs_key_fd *key_fd)
+	const struct pkm_lcs_key_fd *key_fd, bool *orchestrated_out)
 {
 	static const char base_name[] = "base";
 	const char *layer_name = NULL;
@@ -3024,6 +3024,11 @@ static long pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
 	bool matches = false;
 	bool is_base = false;
 	long ret;
+
+	if (orchestrated_out)
+		*orchestrated_out = false;
+	if (!orchestrated_out)
+		return -EINVAL;
 
 	ret = pkm_lcs_key_fd_layer_metadata_path(
 		key_fd, &layer_name, &layer_name_len, &matches);
@@ -3038,9 +3043,12 @@ static long pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
 	if (is_base)
 		return 0;
 
-	return pkm_lcs_source_delete_layer_orchestrate_timeout(
+	ret = pkm_lcs_source_delete_layer_orchestrate_timeout(
 		layer_name, layer_name_len, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
 		NULL);
+	if (!ret)
+		*orchestrated_out = true;
+	return ret;
 }
 
 static long pkm_lcs_key_fd_refresh_layer_metadata(
@@ -4081,6 +4089,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	u64 txn_id = 0;
 	u32 child_name_len = 0;
 	u32 parent_depth = 0;
+	bool layer_delete_orchestrated = false;
 	long ret;
 
 	if (!key_fd || !args)
@@ -4197,8 +4206,11 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 		goto out_input;
 	}
 
-	ret = pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(key_fd);
+	ret = pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
+		key_fd, &layer_delete_orchestrated);
 	if (ret)
+		goto out_cancel_mutation;
+	if (layer_delete_orchestrated)
 		goto out_cancel_mutation;
 
 	ret = pkm_lcs_source_record_transaction_generation(
@@ -5102,6 +5114,42 @@ long pkm_lcs_key_fd_dispatch_overflow_context(
 		&overflow_context);
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 	return ret;
+}
+
+long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
+					     u32 *watch_count_out)
+{
+	struct pkm_lcs_key_fd *watcher;
+	u32 queued = 0;
+	int bucket;
+	long ret = 0;
+
+	if (watch_count_out)
+		*watch_count_out = 0;
+	if (!source_id || !watch_count_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_watch_registry_lock);
+	hash_for_each(pkm_lcs_watch_map, bucket, watcher,
+		      watch_registry_node) {
+		if (watcher->source_id != source_id)
+			continue;
+		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
+			watcher, REG_WATCH_OVERFLOW, NULL, 0, false, NULL, 0);
+		if (ret)
+			break;
+		if (queued == U32_MAX) {
+			ret = -EOVERFLOW;
+			break;
+		}
+		queued++;
+	}
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
+
+	if (ret)
+		return ret;
+	*watch_count_out = queued;
+	return 0;
 }
 
 static long pkm_lcs_key_fd_dispatch_key_deleted_direct(

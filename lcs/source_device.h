@@ -335,6 +335,8 @@ struct pkm_lcs_delete_layer_broadcast_result {
 	u32 orphaned_guid_count;
 	u32 marked_fd_count;
 	u32 immediate_drop_count;
+	u32 generation_hive_count;
+	u32 watch_overflow_count;
 };
 
 struct pkm_lcs_delete_layer_orchestration_result {
@@ -347,6 +349,8 @@ struct pkm_lcs_delete_layer_orchestration_result {
 	u32 orphaned_guid_count;
 	u32 marked_fd_count;
 	u32 immediate_drop_count;
+	u32 generation_hive_count;
+	u32 watch_overflow_count;
 };
 
 struct pkm_lcs_layer_snapshot {
@@ -952,6 +956,10 @@ long pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
 	struct pkm_lcs_delete_layer_broadcast_result *result);
 long pkm_lcs_source_delete_layer_orchestrate_timeout(
 	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	struct pkm_lcs_delete_layer_orchestration_result *result);
+long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
+	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	u32 skip_source_id, const u8 skip_root_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_delete_layer_orchestration_result *result);
 long pkm_lcs_source_flush_round_trip_timeout(
 	u32 source_id, const char *hive_name, u32 hive_name_len,

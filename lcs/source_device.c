@@ -1029,6 +1029,108 @@ pkm_lcs_source_slot_hive_find_locked(struct pkm_lcs_source_slot *slot,
 	return NULL;
 }
 
+static bool pkm_lcs_source_generation_skip_matches(
+	u32 source_id, const u8 root_guid[RSI_GUID_SIZE], u32 skip_source_id,
+	const u8 skip_root_guid[RSI_GUID_SIZE])
+{
+	return skip_source_id && skip_root_guid && source_id == skip_source_id &&
+	       !memcmp(root_guid, skip_root_guid, RSI_GUID_SIZE);
+}
+
+static long pkm_lcs_source_preflight_layer_delete_generations(
+	const u32 *source_ids, u32 source_count, u32 skip_source_id,
+	const u8 skip_root_guid[RSI_GUID_SIZE])
+{
+	u32 i;
+	long ret = 0;
+
+	if (source_count && !source_ids)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	for (i = 0; i < source_count; i++) {
+		struct pkm_lcs_source_slot *slot;
+		u32 j;
+
+		slot = pkm_lcs_source_slot_find_locked(source_ids[i]);
+		if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE) {
+			ret = -EIO;
+			goto out_unlock;
+		}
+
+		for (j = 0; j < slot->hive_count; j++) {
+			struct pkm_lcs_source_registration_hive_copy *hive =
+				&slot->hives[j];
+
+			if (pkm_lcs_source_generation_skip_matches(
+				    slot->source_id, hive->root_guid,
+				    skip_source_id, skip_root_guid))
+				continue;
+			if (hive->hive_generation == U64_MAX) {
+				ret = -EOVERFLOW;
+				goto out_unlock;
+			}
+		}
+	}
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
+static long pkm_lcs_source_record_layer_delete_generations(
+	u32 source_id, u32 skip_source_id,
+	const u8 skip_root_guid[RSI_GUID_SIZE], u32 *hive_count_out)
+{
+	struct pkm_lcs_source_slot *slot;
+	u32 hive_count = 0;
+	u32 i;
+	long ret = 0;
+
+	if (hive_count_out)
+		*hive_count_out = 0;
+	if (!source_id || !hive_count_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+
+	for (i = 0; i < slot->hive_count; i++) {
+		struct pkm_lcs_source_registration_hive_copy *hive =
+			&slot->hives[i];
+
+		if (pkm_lcs_source_generation_skip_matches(
+			    slot->source_id, hive->root_guid, skip_source_id,
+			    skip_root_guid))
+			continue;
+		if (hive->hive_generation == U64_MAX) {
+			ret = -EOVERFLOW;
+			goto out_unlock;
+		}
+	}
+
+	for (i = 0; i < slot->hive_count; i++) {
+		struct pkm_lcs_source_registration_hive_copy *hive =
+			&slot->hives[i];
+
+		if (pkm_lcs_source_generation_skip_matches(
+			    slot->source_id, hive->root_guid, skip_source_id,
+			    skip_root_guid))
+			continue;
+		hive->hive_generation++;
+		hive_count++;
+	}
+	*hive_count_out = hive_count;
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
 long pkm_lcs_source_record_transaction_generation(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	u64 *generation_out)
@@ -4794,8 +4896,10 @@ long pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
 	return ret;
 }
 
-long pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
+static long
+pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
 	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	u32 skip_source_id, const u8 skip_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_delete_layer_broadcast_result *result)
 {
 	u32 source_ids[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
@@ -4816,17 +4920,39 @@ long pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
 	if (ret)
 		return ret;
 
+	ret = pkm_lcs_source_preflight_layer_delete_generations(
+		source_ids, source_count, skip_source_id, skip_root_guid);
+	if (ret)
+		return ret;
+
 	if (result)
 		result->active_source_count = source_count;
 
 	for (i = 0; i < source_count; i++) {
 		struct pkm_lcs_delete_layer_orphan_apply_result apply = { };
+		u32 generation_hive_count = 0;
+		u32 watch_overflow_count = 0;
 
 		ret = pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
 			source_ids[i], layer_name, layer_name_len, timeout_ms,
 			&apply, NULL, NULL);
 		if (ret)
 			return ret;
+
+		ret = pkm_lcs_source_record_layer_delete_generations(
+			source_ids[i], skip_source_id, skip_root_guid,
+			&generation_hive_count);
+		if (ret) {
+			pkm_lcs_source_mark_down_by_id(source_ids[i]);
+			return -EIO;
+		}
+
+		ret = pkm_lcs_key_fd_dispatch_source_overflow(
+			source_ids[i], &watch_overflow_count);
+		if (ret) {
+			pkm_lcs_source_mark_down_by_id(source_ids[i]);
+			return -EIO;
+		}
 
 		if (result) {
 			result->completed_source_count++;
@@ -4842,14 +4968,31 @@ long pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
 					       apply.immediate_drop_count,
 					       &result->immediate_drop_count))
 				return -EOVERFLOW;
+			if (check_add_overflow(result->generation_hive_count,
+					       generation_hive_count,
+					       &result->generation_hive_count))
+				return -EOVERFLOW;
+			if (check_add_overflow(result->watch_overflow_count,
+					       watch_overflow_count,
+					       &result->watch_overflow_count))
+				return -EOVERFLOW;
 		}
 	}
 
 	return 0;
 }
 
-long pkm_lcs_source_delete_layer_orchestrate_timeout(
+long pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
 	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	struct pkm_lcs_delete_layer_broadcast_result *result)
+{
+	return pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
+		layer_name, layer_name_len, timeout_ms, 0, NULL, result);
+}
+
+long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
+	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	u32 skip_source_id, const u8 skip_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_delete_layer_orchestration_result *result)
 {
 	struct pkm_lcs_transaction_layer_abort_result abort_result = { };
@@ -4879,8 +5022,9 @@ long pkm_lcs_source_delete_layer_orchestrate_timeout(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
-		layer_name, layer_name_len, timeout_ms, &broadcast_result);
+	ret = pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
+		layer_name, layer_name_len, timeout_ms, skip_source_id,
+		skip_root_guid, &broadcast_result);
 	if (result) {
 		result->active_source_count = broadcast_result.active_source_count;
 		result->completed_source_count =
@@ -4890,8 +5034,20 @@ long pkm_lcs_source_delete_layer_orchestrate_timeout(
 		result->marked_fd_count = broadcast_result.marked_fd_count;
 		result->immediate_drop_count =
 			broadcast_result.immediate_drop_count;
+		result->generation_hive_count =
+			broadcast_result.generation_hive_count;
+		result->watch_overflow_count =
+			broadcast_result.watch_overflow_count;
 	}
 	return ret;
+}
+
+long pkm_lcs_source_delete_layer_orchestrate_timeout(
+	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	struct pkm_lcs_delete_layer_orchestration_result *result)
+{
+	return pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
+		layer_name, layer_name_len, timeout_ms, 0, NULL, result);
 }
 
 long pkm_lcs_source_delete_layer_round_trip(

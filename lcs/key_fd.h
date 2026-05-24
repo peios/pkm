@@ -112,6 +112,8 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
 	u32 context_count);
 long pkm_lcs_key_fd_dispatch_overflow_context(
 	const struct pkm_lcs_watch_dispatch_context *context);
+long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
+					     u32 *watch_count_out);
 long pkm_lcs_key_fd_dispatch_watch_event(
 	const struct pkm_lcs_watch_dispatch_input *input);
 long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
