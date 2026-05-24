@@ -3965,6 +3965,80 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
 	return ret;
 }
 
+static long pkm_lcs_key_fd_dispatch_overflow_context_locked(
+	const struct pkm_lcs_watch_dispatch_context *context)
+{
+	struct pkm_lcs_subtree_watch_entry *subtree;
+	struct pkm_lcs_key_fd *watcher;
+	u32 changed_index;
+	u32 hash;
+	u32 i;
+	long ret = 0;
+
+	hash = pkm_lcs_guid_hash(context->changed_key_guid);
+	hash_for_each_possible(pkm_lcs_watch_map, watcher,
+			       watch_registry_node, hash) {
+		if (!pkm_lcs_guid_equal(watcher->key_guid,
+					context->changed_key_guid))
+			continue;
+		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
+			watcher, REG_WATCH_OVERFLOW, NULL, 0, false, NULL, 0);
+		if (ret)
+			return ret;
+	}
+
+	changed_index = context->path_component_count - 1U;
+	for (i = changed_index; i > 0; i--) {
+		const u8 *ancestor_guid = context->ancestor_guids[i - 1U];
+
+		if (pkm_lcs_guid_equal(ancestor_guid, context->changed_key_guid))
+			continue;
+		subtree = pkm_lcs_subtree_watch_find_locked(ancestor_guid);
+		if (!subtree)
+			continue;
+
+		hash = pkm_lcs_guid_hash(ancestor_guid);
+		hash_for_each_possible(pkm_lcs_watch_map, watcher,
+				       watch_registry_node, hash) {
+			if (!pkm_lcs_guid_equal(watcher->key_guid,
+						ancestor_guid) ||
+			    !watcher->watch_subtree)
+				continue;
+			ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
+				watcher, REG_WATCH_OVERFLOW, NULL, 0, false,
+				NULL, 0);
+			if (ret)
+				return ret;
+		}
+	}
+
+	return 0;
+}
+
+long pkm_lcs_key_fd_dispatch_overflow_context(
+	const struct pkm_lcs_watch_dispatch_context *context)
+{
+	struct pkm_lcs_watch_dispatch_context overflow_context;
+	long ret;
+
+	if (!context)
+		return -EINVAL;
+
+	overflow_context = *context;
+	overflow_context.event_type = REG_WATCH_OVERFLOW;
+	overflow_context.name = NULL;
+	overflow_context.name_len = 0;
+	ret = pkm_lcs_key_fd_validate_dispatch_context(&overflow_context);
+	if (ret)
+		return ret;
+
+	mutex_lock(&pkm_lcs_watch_registry_lock);
+	ret = pkm_lcs_key_fd_dispatch_overflow_context_locked(
+		&overflow_context);
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_dispatch_key_deleted_direct(
 	const u8 guid[PKM_LCS_GUID_BYTES])
 {

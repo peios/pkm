@@ -1189,6 +1189,72 @@ out_unlock:
 	return 0;
 }
 
+static long pkm_lcs_transaction_dispatch_key_path_overflow(
+	const u8 key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	char **parent_path,
+	u8 (*parent_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	u32 parent_depth, const char *child_name)
+{
+	struct pkm_lcs_watch_dispatch_context parent_context = { };
+	struct pkm_lcs_watch_dispatch_context child_context = { };
+	u8 (*child_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	const char **child_path;
+	u32 child_depth;
+	size_t child_ancestor_bytes;
+	size_t child_path_bytes;
+	long ret;
+
+	if (!key_guid || !parent_guid || !parent_path ||
+	    !parent_ancestor_guids || !parent_depth || !child_name)
+		return -EINVAL;
+	if (check_add_overflow(parent_depth, 1U, &child_depth))
+		return -EOVERFLOW;
+	if (check_mul_overflow((size_t)child_depth, sizeof(*child_path),
+			       &child_path_bytes) ||
+	    check_mul_overflow((size_t)child_depth,
+			       sizeof(*child_ancestor_guids),
+			       &child_ancestor_bytes))
+		return -EOVERFLOW;
+
+	child_path = kzalloc(child_path_bytes, GFP_KERNEL);
+	if (!child_path)
+		return -ENOMEM;
+	child_ancestor_guids = kzalloc(child_ancestor_bytes, GFP_KERNEL);
+	if (!child_ancestor_guids) {
+		kfree(child_path);
+		return -ENOMEM;
+	}
+
+	memcpy(child_path, parent_path, (size_t)parent_depth * sizeof(*child_path));
+	child_path[parent_depth] = child_name;
+	memcpy(child_ancestor_guids, parent_ancestor_guids,
+	       (size_t)parent_depth * sizeof(*child_ancestor_guids));
+	memcpy(child_ancestor_guids[parent_depth], key_guid,
+	       sizeof(child_ancestor_guids[parent_depth]));
+
+	parent_context.changed_key_guid = parent_guid;
+	parent_context.ancestor_guids =
+		(const u8 (*)[PKM_LCS_GUID_BYTES])parent_ancestor_guids;
+	parent_context.resolved_path = (const char * const *)parent_path;
+	parent_context.path_component_count = parent_depth;
+	ret = pkm_lcs_key_fd_dispatch_overflow_context(&parent_context);
+	if (ret)
+		goto out_free;
+
+	child_context.changed_key_guid = key_guid;
+	child_context.ancestor_guids =
+		(const u8 (*)[PKM_LCS_GUID_BYTES])child_ancestor_guids;
+	child_context.resolved_path = (const char * const *)child_path;
+	child_context.path_component_count = child_depth;
+	ret = pkm_lcs_key_fd_dispatch_overflow_context(&child_context);
+
+out_free:
+	kfree(child_ancestor_guids);
+	kfree(child_path);
+	return ret;
+}
+
 static long pkm_lcs_transaction_log_dispatch_watch_batch(
 	struct pkm_lcs_transaction_fd *txn)
 {
@@ -1275,13 +1341,40 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 			index++;
 			break;
 		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
+			if (index) {
+				ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(
+					contexts, index);
+				if (ret)
+					goto out_free;
+				index = 0;
+			}
+			ret = pkm_lcs_transaction_dispatch_key_path_overflow(
+				entry->delete_key.key_guid,
+				entry->delete_key.parent_guid,
+				entry->delete_key.parent_path,
+				entry->delete_key.parent_ancestor_guids,
+				entry->delete_key.parent_depth,
+				entry->delete_key.child_name);
+			if (ret)
+				goto out_free;
+			break;
 		case PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY:
-			/*
-			 * Exact key-path watch emission needs commit-replay
-			 * snapshots to distinguish masking, revealing, and
-			 * orphaning. The log kind is retained for generation
-			 * and later replay but must not emit speculative events.
-			 */
+			if (index) {
+				ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(
+					contexts, index);
+				if (ret)
+					goto out_free;
+				index = 0;
+			}
+			ret = pkm_lcs_transaction_dispatch_key_path_overflow(
+				entry->hide_key.key_guid,
+				entry->hide_key.parent_guid,
+				entry->hide_key.parent_path,
+				entry->hide_key.parent_ancestor_guids,
+				entry->hide_key.parent_depth,
+				entry->hide_key.child_name);
+			if (ret)
+				goto out_free;
 			break;
 		default:
 			ret = -EIO;
