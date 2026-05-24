@@ -11,6 +11,7 @@
 #include <linux/fs.h>
 #include <linux/kthread.h>
 #include <linux/poll.h>
+#include <linux/sched/task.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/task_work.h>
@@ -165,6 +166,17 @@ struct pkm_lcs_kunit_transaction_source_script {
 struct pkm_lcs_kunit_flush_source_script {
 	struct file *file;
 	const char *expected_hive_name;
+	u32 status;
+	bool extra_response_payload;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
+struct pkm_lcs_kunit_drop_key_source_script {
+	struct file *file;
+	const u8 *expected_guid;
+	u64 expected_txn_id;
 	u32 status;
 	bool extra_response_payload;
 	u32 reads;
@@ -378,6 +390,10 @@ struct pkm_lcs_kunit_read_then_create_source_script {
 static void pkm_lcs_kunit_setup_registered_source(struct kunit *test,
 						  struct file *file,
 						  const void **token_out);
+static struct task_struct *pkm_lcs_kunit_kthread_run(int (*threadfn)(void *),
+						     void *data,
+						     const char *name);
+static int pkm_lcs_kunit_kthread_stop(struct task_struct *task);
 static int pkm_lcs_kunit_walk_source_thread(void *raw_script);
 static int pkm_lcs_kunit_read_key_source_thread(void *raw_script);
 static int pkm_lcs_kunit_set_security_source_thread(void *raw_script);
@@ -392,6 +408,7 @@ static int pkm_lcs_kunit_symlink_sequence_source_thread(void *raw_script);
 static int pkm_lcs_kunit_create_source_thread(void *raw_script);
 static int pkm_lcs_kunit_transaction_source_thread(void *data);
 static int pkm_lcs_kunit_flush_source_thread(void *data);
+static int pkm_lcs_kunit_drop_key_source_thread(void *data);
 
 static const struct file_operations pkm_lcs_kunit_non_key_fops = { };
 
@@ -2080,14 +2097,14 @@ static void pkm_lcs_kunit_open_absolute_composes_success(struct kunit *test)
 	steps[1].sd_len = sd_len;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-open-abs");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
 		0, layers, ARRAY_SIZE(layers), NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -2153,14 +2170,14 @@ static void pkm_lcs_kunit_open_absolute_uses_implicit_base_layer(
 	steps[0].sd_len = sd_len;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-open-abs-base");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
 		0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -2216,14 +2233,14 @@ static void pkm_lcs_kunit_open_absolute_final_symlink_open_link(
 	steps[0].sd_len = sd_len;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-open-abs-link");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ,
 		REG_OPEN_LINK, NULL, 0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -2298,14 +2315,14 @@ static void pkm_lcs_kunit_open_absolute_final_symlink_follows_target(
 	script.target_step.sd_len = sd_len;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_symlink_follow_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_follow_source_thread, &script,
 			   "pkm-lcs-kunit-open-abs-link-follow");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
 		0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -2363,14 +2380,14 @@ static void pkm_lcs_kunit_open_absolute_final_symlink_bad_target_einval(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_symlink_follow_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_follow_source_thread, &script,
 			   "pkm-lcs-kunit-open-abs-link-bad");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
 		0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -2448,14 +2465,14 @@ static void pkm_lcs_kunit_open_absolute_intermediate_symlink_follows_suffix(
 	leaf_step.sd_len = sd_len;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-open-abs-link-mid");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
 		0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -2551,14 +2568,14 @@ static void pkm_lcs_kunit_open_absolute_recursive_symlink_follows_target(
 	target_step.sd_len = sd_len;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-open-abs-link-rec");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
 		0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -2635,14 +2652,14 @@ static void pkm_lcs_kunit_open_absolute_symlink_depth_limit_eloop(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-open-abs-link-eloop");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
 		0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-ELOOP);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -2684,14 +2701,14 @@ static void pkm_lcs_kunit_open_absolute_root_uses_read_key(struct kunit *test)
 	script.sd = sd;
 	script.sd_len = sd_len;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-open-root");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
 		0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -2743,13 +2760,13 @@ static void pkm_lcs_kunit_reg_open_key_syscall_dispatches_absolute(
 	script.sd = sd;
 	script.sd_len = sd_len;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-reg-open-abs");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_reg_open_key_for_token(
 		token, &ops, -1, (const char __user *)path_src, KEY_READ, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -2843,14 +2860,14 @@ static void pkm_lcs_kunit_create_existing_absolute_sets_disposition(
 	script.sd = sd;
 	script.sd_len = sd_len;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-create-existing");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_create_existing_user_path_for_token(
 		token, &ops, -1, (const char __user *)path_src, KEY_READ,
 		REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK, &disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -2900,14 +2917,14 @@ static void pkm_lcs_kunit_create_existing_accepts_null_disposition(
 	script.sd = sd;
 	script.sd_len = sd_len;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-create-existing-null-disp");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_create_existing_user_path_for_token(
 		token, &ops, -1, (const char __user *)path_src, KEY_READ, 0,
 		NULL);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -2951,7 +2968,7 @@ static void pkm_lcs_kunit_create_existing_finish_copies_disposition(
 	script.sd = sd;
 	script.sd_len = sd_len;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-create-existing-finish");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
@@ -2959,7 +2976,7 @@ static void pkm_lcs_kunit_create_existing_finish_copies_disposition(
 		token, &ops, -1, (const char __user *)path_src, KEY_READ,
 		REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK,
 		(u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -3004,14 +3021,14 @@ static void pkm_lcs_kunit_create_existing_finish_null_disposition(
 	script.sd = sd;
 	script.sd_len = sd_len;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-create-existing-finish-null");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_create_existing_user_path_finish_for_token(
 		token, &ops, -1, (const char __user *)path_src, KEY_READ, 0,
 		NULL);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -3054,14 +3071,14 @@ static void pkm_lcs_kunit_create_existing_finish_faults_disposition(
 	script.sd_len = sd_len;
 	ctx.fault_dst = &disposition;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-create-existing-finish-fault");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_existing_user_path_finish_for_token(
 		token, &ops, -1, (const char __user *)path_src, KEY_READ, 0,
 		(u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -3108,7 +3125,7 @@ static void pkm_lcs_kunit_create_existing_copied_finish_success(
 	script.sd = sd;
 	script.sd_len = sd_len;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-create-copied");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
@@ -3116,7 +3133,7 @@ static void pkm_lcs_kunit_create_existing_copied_finish_success(
 		token, &ops, -1, &copy, KEY_READ,
 		REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK,
 		(u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -3172,14 +3189,14 @@ static void pkm_lcs_kunit_create_existing_copied_finish_fault_closes_fd(
 	script.sd_len = sd_len;
 	ctx.fault_dst = &disposition;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-create-copied-fault");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_existing_copied_path_finish_for_token(
 		token, &ops, -1, &copy, KEY_READ, 0,
 		(u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -3588,14 +3605,14 @@ static void pkm_lcs_kunit_create_missing_retry_open_success(struct kunit *test)
 	steps[0].sd = sd;
 	steps[0].sd_len = sd_len;
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-create-retry-open");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_create_missing_retry_open_existing_for_token(
 		token, &ops, &resolution, KEY_READ, NULL, 0, NULL, 0, NULL, 0,
 		(u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -3667,14 +3684,14 @@ static void pkm_lcs_kunit_create_missing_retry_open_fault_closes(
 	steps[0].sd_len = sd_len;
 	script.file = &file;
 	ctx.fault_dst = &disposition;
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-create-retry-fault");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_missing_retry_open_existing_for_token(
 		token, &ops, &resolution, KEY_READ, NULL, 0, NULL, 0, NULL, 0,
 		(u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -3726,14 +3743,14 @@ static void pkm_lcs_kunit_create_missing_retry_open_denied_no_copyout(
 	steps[0].sd = sd;
 	steps[0].sd_len = sd_len;
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-create-retry-deny");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_missing_retry_open_existing_for_token(
 		token, &ops, &resolution, KEY_SET_VALUE, NULL, 0, NULL, 0,
 		NULL, 0, (u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -3853,7 +3870,7 @@ static void pkm_lcs_kunit_open_absolute_root_denied_publishes_no_fd(
 	script.sd = sd;
 	script.sd_len = sd_len;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-open-root-deny");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
@@ -3861,7 +3878,7 @@ static void pkm_lcs_kunit_open_absolute_root_denied_publishes_no_fd(
 		token, &ops, (const char __user *)path_src,
 		KEY_QUERY_VALUE | KEY_SET_VALUE, 0, NULL, 0, NULL, 0, NULL,
 		0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -3898,14 +3915,14 @@ static void pkm_lcs_kunit_open_absolute_root_malformed_sd_fails_closed(
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-open-root-bad-sd");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
 		0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -3970,14 +3987,14 @@ static void pkm_lcs_kunit_open_absolute_root_symlink_follows_target(
 	target_step.sd_len = sd_len;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-open-root-link");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
 		0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -4079,14 +4096,14 @@ static void pkm_lcs_kunit_open_absolute_symlink_target_hive_root(
 	users_read.sd_len = sd_len;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-open-link-root-target");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
 		0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -4148,7 +4165,7 @@ static void pkm_lcs_kunit_open_absolute_denied_publishes_no_fd(
 	steps[0].sd_len = sd_len;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-open-deny");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
@@ -4156,7 +4173,7 @@ static void pkm_lcs_kunit_open_absolute_denied_publishes_no_fd(
 		token, &ops, (const char __user *)path_src,
 		KEY_QUERY_VALUE | KEY_SET_VALUE, 0, NULL, 0, layers,
 		ARRAY_SIZE(layers), NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -4201,14 +4218,14 @@ static void pkm_lcs_kunit_open_absolute_malformed_sd_fails_closed(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-open-bad-sd");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_open_user_absolute_path_for_token(
 		token, &ops, (const char __user *)path_src, KEY_READ, 0, NULL,
 		0, layers, ARRAY_SIZE(layers), NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -4305,14 +4322,14 @@ static void pkm_lcs_kunit_open_relative_composes_success(struct kunit *test)
 	parent_fd = pkm_lcs_key_fd_publish(&parent_publish);
 	KUNIT_ASSERT_TRUE(test, parent_fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-open-rel");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_relative_path_for_token(
 		token, &ops, (int)parent_fd, (const char __user *)path_src,
 		KEY_READ, 0, layers, ARRAY_SIZE(layers), NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -4398,14 +4415,14 @@ static void pkm_lcs_kunit_open_relative_uses_implicit_base_layer(
 	parent_fd = pkm_lcs_key_fd_publish(&parent_publish);
 	KUNIT_ASSERT_TRUE(test, parent_fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-open-rel-base");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_relative_path_for_token(
 		token, &ops, (int)parent_fd, (const char __user *)path_src,
 		KEY_READ, 0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -4482,14 +4499,14 @@ static void pkm_lcs_kunit_open_relative_final_symlink_open_link(
 	parent_fd = pkm_lcs_key_fd_publish(&parent_publish);
 	KUNIT_ASSERT_TRUE(test, parent_fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-open-rel-link");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_relative_path_for_token(
 		token, &ops, (int)parent_fd, (const char __user *)path_src,
 		KEY_READ, REG_OPEN_LINK, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -4584,14 +4601,14 @@ static void pkm_lcs_kunit_open_relative_final_symlink_follows_target(
 	parent_fd = pkm_lcs_key_fd_publish(&parent_publish);
 	KUNIT_ASSERT_TRUE(test, parent_fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_symlink_follow_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_follow_source_thread, &script,
 			   "pkm-lcs-kunit-open-rel-link-follow");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_relative_path_for_token(
 		token, &ops, (int)parent_fd, (const char __user *)path_src,
 		KEY_READ, 0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -4704,14 +4721,14 @@ static void pkm_lcs_kunit_open_relative_intermediate_symlink_follows_suffix(
 	parent_fd = pkm_lcs_key_fd_publish(&parent_publish);
 	KUNIT_ASSERT_TRUE(test, parent_fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-open-rel-link-mid");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_open_user_relative_path_for_token(
 		token, &ops, (int)parent_fd, (const char __user *)path_src,
 		KEY_READ, 0, NULL, 0, NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -4793,7 +4810,7 @@ static void pkm_lcs_kunit_open_relative_denied_publishes_no_fd(
 	parent_fd = pkm_lcs_key_fd_publish(&parent_publish);
 	KUNIT_ASSERT_TRUE(test, parent_fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-open-rel-deny");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
@@ -4801,7 +4818,7 @@ static void pkm_lcs_kunit_open_relative_denied_publishes_no_fd(
 		token, &ops, (int)parent_fd, (const char __user *)path_src,
 		KEY_QUERY_VALUE | KEY_SET_VALUE, 0, layers,
 		ARRAY_SIZE(layers), NULL, 0);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -5501,12 +5518,12 @@ static void pkm_lcs_kunit_key_fd_get_security_success(struct kunit *test)
 		1, READ_CONTROL, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-get-sd");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_get_security((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -5648,12 +5665,12 @@ static void pkm_lcs_kunit_key_fd_get_security_erange_probe(
 		1, READ_CONTROL, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-get-sd-probe");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_get_security((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -5714,12 +5731,12 @@ static void pkm_lcs_kunit_key_fd_get_security_copyout_fault(
 		1, READ_CONTROL, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-get-sd-fault");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_get_security((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -5773,12 +5790,12 @@ static void pkm_lcs_kunit_key_fd_get_security_malformed_source_sd(
 		1, READ_CONTROL, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-get-sd-bad");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_get_security((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -5838,12 +5855,12 @@ static void pkm_lcs_kunit_key_fd_query_value_success(struct kunit *test)
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-query-value");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -5914,12 +5931,12 @@ static void pkm_lcs_kunit_key_fd_query_value_erange_all_or_none(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-query-value-erange");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -5992,12 +6009,12 @@ static void pkm_lcs_kunit_key_fd_query_value_blanket_enoent(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-query-value-missing");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-ENOENT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -6073,12 +6090,12 @@ static void pkm_lcs_kunit_key_fd_query_value_transaction_context(
 	script.expected_txn_id = txn_snapshot.transaction_id;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-query-value-txn");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -6245,12 +6262,12 @@ static void pkm_lcs_kunit_key_fd_query_value_copyout_fault(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-query-value-fault");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -6311,12 +6328,12 @@ static void pkm_lcs_kunit_key_fd_query_value_malformed_source(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-query-value-bad");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -6374,12 +6391,12 @@ static void pkm_lcs_kunit_key_fd_query_values_batch_success(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-value-batch");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_values_batch((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -6469,12 +6486,12 @@ static void pkm_lcs_kunit_key_fd_query_values_batch_empty_effective_set(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-value-batch-empty");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_values_batch((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -6533,12 +6550,12 @@ static void pkm_lcs_kunit_key_fd_query_values_batch_erange_all_or_none(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-value-batch-erange");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_values_batch((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -6615,12 +6632,12 @@ static void pkm_lcs_kunit_key_fd_query_values_batch_transaction_context(
 	script.expected_txn_id = txn_snapshot.transaction_id;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-value-batch-txn");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_values_batch((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -6772,12 +6789,12 @@ static void pkm_lcs_kunit_key_fd_query_values_batch_copyout_fault(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-value-batch-fault");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_values_batch((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -6835,12 +6852,12 @@ static void pkm_lcs_kunit_key_fd_query_values_batch_malformed_source(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-value-batch-bad");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_values_batch((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -6901,12 +6918,12 @@ static void pkm_lcs_kunit_key_fd_enum_value_success(struct kunit *test)
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-enum-value");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_enum_value((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -6978,12 +6995,12 @@ static void pkm_lcs_kunit_key_fd_enum_value_erange_all_or_none(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-enum-value-erange");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_enum_value((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -7049,12 +7066,12 @@ static void pkm_lcs_kunit_key_fd_enum_value_index_past_end(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-enum-value-missing");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_enum_value((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-ENOENT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -7130,12 +7147,12 @@ static void pkm_lcs_kunit_key_fd_enum_value_transaction_context(
 	script.expected_txn_id = txn_snapshot.transaction_id;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-enum-value-txn");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_enum_value((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -7301,12 +7318,12 @@ static void pkm_lcs_kunit_key_fd_enum_value_copyout_fault(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-enum-value-fault");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_enum_value((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -7367,12 +7384,12 @@ static void pkm_lcs_kunit_key_fd_enum_value_malformed_source(
 		1, KEY_QUERY_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-enum-value-bad");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_enum_value((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -7460,12 +7477,12 @@ static void pkm_lcs_kunit_key_fd_enum_subkey_success(struct kunit *test)
 		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-enum-subkey");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -7536,12 +7553,12 @@ static void pkm_lcs_kunit_key_fd_enum_subkey_erange_all_or_none(
 		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-enum-subkey-erange");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -7609,12 +7626,12 @@ static void pkm_lcs_kunit_key_fd_enum_subkey_index_past_end(
 		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-enum-subkey-missing");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-ENOENT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -7722,12 +7739,12 @@ static void pkm_lcs_kunit_key_fd_enum_subkey_transaction_context(
 		ops_seq[i].expected_txn_id = txn_snapshot.transaction_id;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-enum-subkey-txn");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -7913,12 +7930,12 @@ static void pkm_lcs_kunit_key_fd_enum_subkey_copyout_fault(
 		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-enum-subkey-fault");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -7982,12 +7999,12 @@ static void pkm_lcs_kunit_key_fd_enum_subkey_malformed_source(
 		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-enum-subkey-bad");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -8081,12 +8098,12 @@ static void pkm_lcs_kunit_key_fd_query_key_info_success(struct kunit *test)
 		1, READ_CONTROL, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-query-info");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_key_info((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -8183,12 +8200,12 @@ static void pkm_lcs_kunit_key_fd_query_key_info_erange_probe(
 		1, READ_CONTROL, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-query-info-erange");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_key_info((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -8333,12 +8350,12 @@ static void pkm_lcs_kunit_key_fd_query_key_info_copyout_fault(
 		1, READ_CONTROL, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-query-info-fault");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_key_info((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EFAULT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -8407,12 +8424,12 @@ static void pkm_lcs_kunit_key_fd_query_key_info_malformed_enum(
 		1, READ_CONTROL, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
 			   &script, "pkm-lcs-kunit-query-info-bad");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_query_key_info((int)fd, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -8621,13 +8638,13 @@ static void pkm_lcs_kunit_key_fd_set_security_nontransactional_success(
 				1, ancestors[0], &generation_before),
 			0L);
 
-	task = kthread_run(pkm_lcs_kunit_set_security_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_set_security_source_thread, &script,
 			   "pkm-lcs-kunit-set-sd");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_set_security((int)mutation_fd, &ops,
 						&args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -8756,13 +8773,13 @@ static void pkm_lcs_kunit_key_fd_set_security_transactional_success(
 				1, ancestors[0], &generation_before),
 			0L);
 
-	task = kthread_run(pkm_lcs_kunit_set_security_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_set_security_source_thread, &script,
 			   "pkm-lcs-kunit-set-sd-txn");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_set_security((int)mutation_fd, &ops,
 						&args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -8799,12 +8816,12 @@ static void pkm_lcs_kunit_key_fd_set_security_transactional_success(
 	commit_script.file = &file;
 	commit_script.expected_header_txn_id = txn_snapshot.transaction_id;
 	commit_script.expected_payload_txn_id = txn_snapshot.transaction_id;
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread,
 			   &commit_script, "pkm-lcs-kunit-set-sd-commit");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_commit((int)txn_fd);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -8987,13 +9004,13 @@ static void pkm_lcs_kunit_key_fd_set_value_nontransactional_success(
 			0L);
 	script.expected_sequence = sequence_before;
 
-	task = kthread_run(pkm_lcs_kunit_set_value_ioctl_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_set_value_ioctl_source_thread,
 			   &script, "pkm-lcs-kunit-set-value-ioctl");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_set_value_for_token(
 		(int)mutation_fd, admin_token, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -9125,13 +9142,13 @@ static void pkm_lcs_kunit_key_fd_set_value_transactional_success(
 			0L);
 	script.expected_sequence = sequence_before;
 
-	task = kthread_run(pkm_lcs_kunit_set_value_ioctl_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_set_value_ioctl_source_thread,
 			   &script, "pkm-lcs-kunit-set-value-txn");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_set_value_for_token(
 		(int)mutation_fd, admin_token, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -9171,12 +9188,12 @@ static void pkm_lcs_kunit_key_fd_set_value_transactional_success(
 	commit_script.file = &file;
 	commit_script.expected_header_txn_id = txn_snapshot.transaction_id;
 	commit_script.expected_payload_txn_id = txn_snapshot.transaction_id;
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread,
 			   &commit_script, "pkm-lcs-kunit-set-value-commit");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_commit((int)txn_fd);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -9283,13 +9300,13 @@ static void pkm_lcs_kunit_key_fd_set_value_cas_failure_no_effects(
 			0L);
 	script.expected_sequence = sequence_before;
 
-	task = kthread_run(pkm_lcs_kunit_set_value_ioctl_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_set_value_ioctl_source_thread,
 			   &script, "pkm-lcs-kunit-set-value-cas");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_set_value_for_token(
 		(int)mutation_fd, admin_token, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EAGAIN);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -9513,13 +9530,13 @@ static void pkm_lcs_kunit_key_fd_delete_value_nontransactional_deletes_effective
 	KUNIT_ASSERT_GT(test, next_sequence, 0ULL);
 	script.before_sequence = next_sequence - 1;
 
-	task = kthread_run(pkm_lcs_kunit_delete_value_ioctl_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_delete_value_ioctl_source_thread,
 			   &script, "pkm-lcs-kunit-delete-value");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_delete_value_for_token(
 		(int)mutation_fd, admin_token, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -9653,13 +9670,13 @@ static void pkm_lcs_kunit_key_fd_delete_value_transactional_success(
 	KUNIT_ASSERT_GT(test, next_sequence, 0ULL);
 	script.before_sequence = next_sequence - 1;
 
-	task = kthread_run(pkm_lcs_kunit_delete_value_ioctl_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_delete_value_ioctl_source_thread,
 			   &script, "pkm-lcs-kunit-delete-value-txn");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_delete_value_for_token(
 		(int)mutation_fd, admin_token, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -9699,12 +9716,12 @@ static void pkm_lcs_kunit_key_fd_delete_value_transactional_success(
 	commit_script.file = &file;
 	commit_script.expected_header_txn_id = txn_snapshot.transaction_id;
 	commit_script.expected_payload_txn_id = txn_snapshot.transaction_id;
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread,
 			   &commit_script, "pkm-lcs-kunit-delete-commit");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_commit((int)txn_fd);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -9824,13 +9841,13 @@ pkm_lcs_kunit_key_fd_delete_value_transactional_idempotent_no_event(
 				1, ancestors[0], &generation_before),
 			0L);
 
-	task = kthread_run(pkm_lcs_kunit_delete_value_ioctl_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_delete_value_ioctl_source_thread,
 			   &script, "pkm-lcs-kunit-delete-txn-idem");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_delete_value_for_token(
 		(int)mutation_fd, admin_token, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -9860,12 +9877,12 @@ pkm_lcs_kunit_key_fd_delete_value_transactional_idempotent_no_event(
 	commit_script.file = &file;
 	commit_script.expected_header_txn_id = txn_snapshot.transaction_id;
 	commit_script.expected_payload_txn_id = txn_snapshot.transaction_id;
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread,
 			   &commit_script, "pkm-lcs-kunit-delete-idem-commit");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_commit((int)txn_fd);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -9949,13 +9966,13 @@ static void pkm_lcs_kunit_key_fd_delete_value_idempotent_no_value_event(
 				1, ancestors[0], &generation_before),
 			0L);
 
-	task = kthread_run(pkm_lcs_kunit_delete_value_ioctl_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_delete_value_ioctl_source_thread,
 			   &script, "pkm-lcs-kunit-delete-idem");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_delete_value_for_token(
 		(int)mutation_fd, admin_token, &ops, &args);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -10100,12 +10117,12 @@ static void pkm_lcs_kunit_key_fd_flush_success(struct kunit *test)
 		1, KEY_SET_VALUE, path, ancestors, 2);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
-	task = kthread_run(pkm_lcs_kunit_flush_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_flush_source_thread, &script,
 			   "pkm-lcs-kunit-key-flush");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_kunit_key_fd_flush((int)fd);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -11415,12 +11432,12 @@ static void pkm_lcs_kunit_transaction_commit_active_bound_success(
 	script.expected_payload_txn_id = snapshot.transaction_id;
 	script.status = RSI_OK;
 
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
 			   "pkm-lcs-kunit-commit-ok");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_commit((int)fd);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -11496,12 +11513,12 @@ static void pkm_lcs_kunit_transaction_commit_busy_retains_active_bound(
 	script.expected_payload_txn_id = snapshot.transaction_id;
 	script.status = RSI_TXN_BUSY;
 
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
 			   "pkm-lcs-kunit-commit-busy");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_commit((int)fd);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EBUSY);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -11573,12 +11590,12 @@ static void pkm_lcs_kunit_transaction_commit_sync_eio_retains_active_bound(
 	script.expected_payload_txn_id = snapshot.transaction_id;
 	script.status = RSI_STORAGE_ERROR;
 
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
 			   "pkm-lcs-kunit-commit-eio");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_commit((int)fd);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -12308,14 +12325,14 @@ static void pkm_lcs_kunit_create_missing_absolute_resolves_parent_only(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-create-parent");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_missing_absolute_parent_for_token(
 		token, &ops, (const char __user *)path_src, NULL, 0,
 		layers, ARRAY_SIZE(layers), NULL, 0, &result);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -12373,14 +12390,14 @@ static void pkm_lcs_kunit_create_missing_absolute_missing_parent_enoent(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-create-missing-parent");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_missing_absolute_parent_for_token(
 		token, &ops, (const char __user *)path_src, NULL, 0,
 		layers, ARRAY_SIZE(layers), NULL, 0, &result);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-ENOENT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -12448,14 +12465,14 @@ static void pkm_lcs_kunit_create_missing_relative_direct_parent_reads_sd(
 						     parent_guid);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-create-parent-read");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_missing_relative_parent(
 		&ops, (int)fd, (const char __user *)path_src, NULL, 0,
 		NULL, 0, NULL, 0, &result);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -14091,6 +14108,46 @@ static void pkm_lcs_kunit_rsi_flush_request_frame_success(struct kunit *test)
 		KUNIT_EXPECT_EQ(test, frame[i], 0xeeU);
 }
 
+static void pkm_lcs_kunit_rsi_drop_key_request_frame_success(struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+	};
+	u8 frame[RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE + 8];
+	struct pkm_lcs_rsi_built_request built = { };
+	size_t expected_len = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
+	size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	size_t i;
+
+	memset(frame, 0xaa, sizeof(frame));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_drop_key_request(
+				frame, sizeof(frame), 0x4142434445464748ULL,
+				0x1011121314151617ULL, guid, &built),
+			0L);
+	KUNIT_EXPECT_EQ(test, built.len, expected_len);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0x4142434445464748ULL);
+	KUNIT_EXPECT_EQ(test, built.txn_id, 0x1011121314151617ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)RSI_DROP_KEY);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(frame + RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)expected_len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(frame + RSI_REQUEST_ID_OFFSET),
+			0x4142434445464748ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(frame + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_DROP_KEY);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(frame + RSI_REQUEST_TXN_ID_OFFSET),
+			0x1011121314151617ULL);
+	KUNIT_EXPECT_EQ(test, memcmp(frame + payload_offset, guid,
+				    RSI_GUID_SIZE), 0);
+	for (i = expected_len; i < sizeof(frame); i++)
+		KUNIT_EXPECT_EQ(test, frame[i], 0xaaU);
+}
+
 static void pkm_lcs_kunit_rsi_transaction_request_frames_reject_bad_inputs(
 	struct kunit *test)
 {
@@ -14204,6 +14261,31 @@ static void pkm_lcs_kunit_setup_registered_source(struct kunit *test,
 			pkm_lcs_source_register_file_for_token(
 				token, file, &ops, (const void __user *)&args),
 			0L);
+}
+
+static struct task_struct *pkm_lcs_kunit_kthread_run(int (*threadfn)(void *),
+						     void *data,
+						     const char *name)
+{
+	struct task_struct *task;
+
+	task = kthread_create(threadfn, data, "%s", name);
+	if (IS_ERR(task))
+		return task;
+
+	/*
+	 * Several source scripts are one-shot responders. Hold a task
+	 * reference before wake so kthread_stop_put() remains valid even if
+	 * the worker serves the response and exits before the test stops it.
+	 */
+	get_task_struct(task);
+	wake_up_process(task);
+	return task;
+}
+
+static int pkm_lcs_kunit_kthread_stop(struct task_struct *task)
+{
+	return kthread_stop_put(task);
 }
 
 static void pkm_lcs_kunit_build_lookup_frame(struct kunit *test, u8 *frame,
@@ -14369,6 +14451,91 @@ static int pkm_lcs_kunit_flush_source_thread(void *data)
 	put_unaligned_le32(script->status, response + RSI_RESPONSE_STATUS_OFFSET);
 	if (script->extra_response_payload) {
 		put_unaligned_le32(0xfeedf00d,
+				   response + RSI_MIN_RESPONSE_SIZE);
+		response_len += sizeof(u32);
+		put_unaligned_le32(response_len,
+				   response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	}
+
+	count = pkm_lcs_kunit_source_device_write_file(
+		script->file, response, response_len, false, NULL);
+	if (count != (ssize_t)response_len) {
+		script->result = (int)count;
+		return script->result;
+	}
+	script->writes++;
+	script->result = 0;
+	return 0;
+}
+
+static int pkm_lcs_kunit_drop_key_source_thread(void *data)
+{
+	struct pkm_lcs_kunit_drop_key_source_script *script = data;
+	u8 response[RSI_MIN_RESPONSE_SIZE + sizeof(u32)];
+	u8 request[128];
+	size_t response_len = RSI_MIN_RESPONSE_SIZE;
+	size_t offset = RSI_REQUEST_HEADER_SIZE;
+	ssize_t count;
+	u64 request_id;
+
+	if (!script || !script->file || !script->expected_guid) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	for (;;) {
+		count = pkm_lcs_kunit_source_device_read_file(
+			script->file, request, sizeof(request), true);
+		if (count != -EAGAIN)
+			break;
+		if (kthread_should_stop()) {
+			script->result = -EINTR;
+			return script->result;
+		}
+		msleep(1);
+	}
+	if (count < 0) {
+		script->result = (int)count;
+		return script->result;
+	}
+	script->reads++;
+
+	if (count < RSI_REQUEST_HEADER_SIZE) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	if (get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET) !=
+	    RSI_DROP_KEY) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	if (get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+	    script->expected_txn_id) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	if (pkm_lcs_kunit_create_source_expect_bytes(
+		    request, (size_t)count, &offset, script->expected_guid,
+		    RSI_GUID_SIZE)) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	if (offset != (size_t)count) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+
+	memset(response, 0, sizeof(response));
+	put_unaligned_le32(RSI_MIN_RESPONSE_SIZE,
+			   response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
+	put_unaligned_le16(RSI_DROP_KEY_RESPONSE,
+			   response + RSI_RESPONSE_OP_CODE_OFFSET);
+	put_unaligned_le32(script->status, response + RSI_RESPONSE_STATUS_OFFSET);
+	if (script->extra_response_payload) {
+		put_unaligned_le32(0x0ddba11,
 				   response + RSI_MIN_RESPONSE_SIZE);
 		response_len += sizeof(u32);
 		put_unaligned_le32(response_len,
@@ -17346,7 +17513,7 @@ static void pkm_lcs_kunit_source_enum_children_round_trip_retains_frame(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_enum_children_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_enum_children_source_thread,
 			   &script, "pkm-lcs-kunit-enum-children");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
@@ -17356,7 +17523,7 @@ static void pkm_lcs_kunit_source_enum_children_round_trip_retains_frame(
 				PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame,
 				&response, &enqueue),
 			0L);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
@@ -17411,7 +17578,7 @@ static void pkm_lcs_kunit_source_query_values_round_trip_retains_frame(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-query-values");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
@@ -17421,7 +17588,7 @@ static void pkm_lcs_kunit_source_query_values_round_trip_retains_frame(
 				PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame,
 				&response, &enqueue),
 			0L);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
@@ -17504,14 +17671,14 @@ static void pkm_lcs_kunit_symlink_target_resolution_success(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-symlink-target");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_resolve_symlink_target_for_key(
 		1, 0, link_guid, NULL, 0, layers, ARRAY_SIZE(layers), NULL,
 		0, &resolution);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -17569,14 +17736,14 @@ static void pkm_lcs_kunit_symlink_target_resolution_non_link_einval(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-symlink-nonlink");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_resolve_symlink_target_for_key(
 		1, 0, link_guid, NULL, 0, layers, ARRAY_SIZE(layers), NULL,
 		0, &resolution);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -17618,14 +17785,14 @@ static void pkm_lcs_kunit_symlink_target_resolution_bad_target_einval(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread, &script,
 			   "pkm-lcs-kunit-symlink-badtarget");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_resolve_symlink_target_for_key(
 		1, 0, link_guid, NULL, 0, layers, ARRAY_SIZE(layers), NULL,
 		0, &resolution);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -18290,7 +18457,7 @@ static void pkm_lcs_kunit_source_set_value_round_trip_statuses(
 	script.expected_sequence = 0xb1b2b3b4b5b6b7b8ULL;
 	script.expected_expected_sequence = 0xc1c2c3c4c5c6c7c8ULL;
 	script.status = RSI_OK;
-	task = kthread_run(pkm_lcs_kunit_set_value_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_set_value_source_thread, &script,
 			   "pkm-lcs-kunit-set-value-src");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 	ret = pkm_lcs_source_set_value_round_trip_timeout(
@@ -18298,7 +18465,7 @@ static void pkm_lcs_kunit_source_set_value_round_trip_statuses(
 		strlen(value_name), layer_name, strlen(layer_name),
 		REG_BINARY, data, sizeof(data), script.expected_sequence,
 		script.expected_expected_sequence, 1000, &response, &enqueue);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
@@ -18323,7 +18490,7 @@ static void pkm_lcs_kunit_source_set_value_round_trip_statuses(
 	script.expected_sequence = 0xe1e2e3e4e5e6e7e8ULL;
 	script.expected_expected_sequence = 0xf1f2f3f4f5f6f7f8ULL;
 	script.status = RSI_CAS_FAILED;
-	task = kthread_run(pkm_lcs_kunit_set_value_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_set_value_source_thread, &script,
 			   "pkm-lcs-kunit-set-value-src");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 	ret = pkm_lcs_source_set_value_round_trip_timeout(
@@ -18331,7 +18498,7 @@ static void pkm_lcs_kunit_source_set_value_round_trip_statuses(
 		strlen(value_name), layer_name, strlen(layer_name),
 		REG_BINARY, data, sizeof(data), script.expected_sequence,
 		script.expected_expected_sequence, 1000, &response, &enqueue);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, ret, (long)-EAGAIN);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
@@ -18353,7 +18520,7 @@ static void pkm_lcs_kunit_source_set_value_round_trip_statuses(
 	script.expected_expected_sequence = 0x0303030303030303ULL;
 	script.status = RSI_OK;
 	script.extra_response_payload = true;
-	task = kthread_run(pkm_lcs_kunit_set_value_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_set_value_source_thread, &script,
 			   "pkm-lcs-kunit-set-value-src");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 	ret = pkm_lcs_source_set_value_round_trip_timeout(
@@ -18361,7 +18528,7 @@ static void pkm_lcs_kunit_source_set_value_round_trip_statuses(
 		strlen(layer_name), REG_TOMBSTONE, NULL, 0,
 		script.expected_sequence, script.expected_expected_sequence,
 		1000, &response, &enqueue);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
@@ -18477,14 +18644,14 @@ static void pkm_lcs_kunit_source_delete_value_entry_round_trip_statuses(
 	script.expected_layer_name = layer_name;
 	script.expected_txn_id = 0xb1b2b3b4b5b6b7b8ULL;
 	script.status = RSI_OK;
-	task = kthread_run(pkm_lcs_kunit_delete_value_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_delete_value_source_thread,
 			   &script, "pkm-lcs-kunit-del-value-src");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 	ret = pkm_lcs_source_delete_value_entry_round_trip_timeout(
 		1, script.expected_txn_id, guid, value_name,
 		strlen(value_name), layer_name, strlen(layer_name), 1000,
 		&response, &enqueue);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
@@ -18505,14 +18672,14 @@ static void pkm_lcs_kunit_source_delete_value_entry_round_trip_statuses(
 	script.expected_layer_name = layer_name;
 	script.expected_txn_id = 0xc1c2c3c4c5c6c7c8ULL;
 	script.status = RSI_STORAGE_ERROR;
-	task = kthread_run(pkm_lcs_kunit_delete_value_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_delete_value_source_thread,
 			   &script, "pkm-lcs-kunit-del-value-src");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 	ret = pkm_lcs_source_delete_value_entry_round_trip_timeout(
 		1, script.expected_txn_id, guid, value_name,
 		strlen(value_name), layer_name, strlen(layer_name), 1000,
 		&response, &enqueue);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
@@ -18532,13 +18699,13 @@ static void pkm_lcs_kunit_source_delete_value_entry_round_trip_statuses(
 	script.expected_txn_id = 0xd1d2d3d4d5d6d7d8ULL;
 	script.status = RSI_OK;
 	script.extra_response_payload = true;
-	task = kthread_run(pkm_lcs_kunit_delete_value_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_delete_value_source_thread,
 			   &script, "pkm-lcs-kunit-del-value-src");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 	ret = pkm_lcs_source_delete_value_entry_round_trip_timeout(
 		1, script.expected_txn_id, guid, "", 0, layer_name,
 		strlen(layer_name), 1000, &response, &enqueue);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
@@ -18624,12 +18791,12 @@ static void pkm_lcs_kunit_source_flush_round_trip_statuses(struct kunit *test)
 	script.file = &file;
 	script.expected_hive_name = hive_name;
 	script.status = RSI_OK;
-	task = kthread_run(pkm_lcs_kunit_flush_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_flush_source_thread, &script,
 			   "pkm-lcs-kunit-flush-src");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 	ret = pkm_lcs_source_flush_round_trip_timeout(
 		1, hive_name, strlen(hive_name), 1000, &response, &enqueue);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
@@ -18646,12 +18813,12 @@ static void pkm_lcs_kunit_source_flush_round_trip_statuses(struct kunit *test)
 	script.file = &file;
 	script.expected_hive_name = hive_name;
 	script.status = RSI_STORAGE_ERROR;
-	task = kthread_run(pkm_lcs_kunit_flush_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_flush_source_thread, &script,
 			   "pkm-lcs-kunit-flush-src");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 	ret = pkm_lcs_source_flush_round_trip_timeout(
 		1, hive_name, strlen(hive_name), 1000, &response, &enqueue);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
@@ -18667,16 +18834,150 @@ static void pkm_lcs_kunit_source_flush_round_trip_statuses(struct kunit *test)
 	script.expected_hive_name = hive_name;
 	script.status = RSI_OK;
 	script.extra_response_payload = true;
-	task = kthread_run(pkm_lcs_kunit_flush_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_flush_source_thread, &script,
 			   "pkm-lcs-kunit-flush-src");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 	ret = pkm_lcs_source_flush_round_trip_timeout(
 		1, hive_name, strlen(hive_name), 1000, &response, &enqueue);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
 	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_FLUSH);
+	KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_OK);
+	KUNIT_EXPECT_TRUE(test, response.malformed_source_data);
+	KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_dispatch_drop_key_frame(struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+		0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
+	};
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_drop_key_request(
+				1, 0x3132333435363738ULL, guid, &enqueue),
+			0L);
+	KUNIT_EXPECT_EQ(test, enqueue.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.txn_id, 0x3132333435363738ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.op_code, (u16)RSI_DROP_KEY);
+	KUNIT_EXPECT_EQ(test, enqueue.queue_depth, 1U);
+	KUNIT_EXPECT_EQ(test, enqueue.in_flight_count, 1U);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(out + RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)enqueue.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_ID_OFFSET), 0ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(out + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_DROP_KEY);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_TXN_ID_OFFSET),
+			0x3132333435363738ULL);
+	KUNIT_EXPECT_EQ(test, memcmp(out + payload_offset, guid,
+				    RSI_GUID_SIZE), 0);
+	KUNIT_EXPECT_EQ(test, payload_offset + RSI_GUID_SIZE, enqueue.len);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_drop_key_round_trip_statuses(struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+		0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+	};
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_kunit_drop_key_source_script script = { };
+	struct file file = { };
+	struct task_struct *task;
+	const void *token;
+	int thread_ret;
+	long ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	script.file = &file;
+	script.expected_guid = guid;
+	script.expected_txn_id = 0;
+	script.status = RSI_OK;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_drop_key_source_thread, &script,
+			   "pkm-lcs-kunit-drop-key-src");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_drop_key_round_trip_timeout(
+		1, 0, guid, 1000, &response, &enqueue);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_DROP_KEY);
+	KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_OK);
+	KUNIT_EXPECT_FALSE(test, response.malformed_source_data);
+	KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
+
+	memset(&script, 0, sizeof(script));
+	memset(&response, 0, sizeof(response));
+	memset(&enqueue, 0, sizeof(enqueue));
+	script.file = &file;
+	script.expected_guid = guid;
+	script.expected_txn_id = 0x7172737475767778ULL;
+	script.status = RSI_STORAGE_ERROR;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_drop_key_source_thread, &script,
+			   "pkm-lcs-kunit-drop-key-src");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_drop_key_round_trip_timeout(
+		1, 0x7172737475767778ULL, guid, 1000, &response, &enqueue);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_DROP_KEY);
+	KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_STORAGE_ERROR);
+	KUNIT_EXPECT_FALSE(test, response.malformed_source_data);
+	KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
+
+	memset(&script, 0, sizeof(script));
+	memset(&response, 0, sizeof(response));
+	memset(&enqueue, 0, sizeof(enqueue));
+	script.file = &file;
+	script.expected_guid = guid;
+	script.status = RSI_OK;
+	script.extra_response_payload = true;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_drop_key_source_thread, &script,
+			   "pkm-lcs-kunit-drop-key-src");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_drop_key_round_trip_timeout(
+		1, 0, guid, 1000, &response, &enqueue);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_DROP_KEY);
 	KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_OK);
 	KUNIT_EXPECT_TRUE(test, response.malformed_source_data);
 	KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
@@ -19088,12 +19389,12 @@ static void pkm_lcs_kunit_run_transaction_source_round_trip(
 	int thread_ret;
 	long ret;
 
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread, script,
 			   "pkm-lcs-kunit-txn-src");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = round_trip(1, transaction_id, response, enqueue);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, expected_ret);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -19454,12 +19755,12 @@ static void pkm_lcs_kunit_transaction_commit_generation_success(
 	script.expected_payload_txn_id = snapshot.transaction_id;
 	script.status = RSI_OK;
 
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
 			   "pkm-lcs-kunit-commit-gen");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_commit((int)fd);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -19596,12 +19897,12 @@ static void pkm_lcs_kunit_transaction_commit_dispatches_create_watch(
 	script.expected_payload_txn_id = snapshot.transaction_id;
 	script.status = RSI_OK;
 
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
 			   "pkm-lcs-kunit-commit-watch");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_commit((int)txn_fd);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -19744,12 +20045,12 @@ static void pkm_lcs_kunit_transaction_commit_dispatches_sd_watch(
 	script.expected_payload_txn_id = snapshot.transaction_id;
 	script.status = RSI_OK;
 
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
 			   "pkm-lcs-kunit-commit-sd-watch");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_commit((int)txn_fd);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -19834,12 +20135,12 @@ static void pkm_lcs_kunit_transaction_commit_generation_overflow_downs_source(
 	script.expected_payload_txn_id = snapshot.transaction_id;
 	script.status = RSI_OK;
 
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
 			   "pkm-lcs-kunit-commit-gen-oflow");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_commit((int)fd);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -20307,13 +20608,13 @@ static void pkm_lcs_kunit_transaction_bind_for_mutation_success_and_reuse(
 	script.expected_mode = RSI_TXN_READ_WRITE;
 	script.status = RSI_OK;
 
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
 			   "pkm-lcs-kunit-bind-src");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_bind_for_mutation((int)fd, 1, root_guid,
 						      &plan);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -20386,13 +20687,13 @@ static void pkm_lcs_kunit_transaction_bind_for_mutation_source_failure_rolls_bac
 	script.expected_mode = RSI_TXN_READ_WRITE;
 	script.status = RSI_TXN_NOT_SUPPORTED;
 
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
 			   "pkm-lcs-kunit-bind-unsupported");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_bind_for_mutation((int)fd, 1, root_guid,
 						      &plan);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EOPNOTSUPP);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -20529,13 +20830,13 @@ static void pkm_lcs_kunit_transaction_log_key_create_first_bind_and_reuse(
 	script.expected_mode = RSI_TXN_READ_WRITE;
 	script.status = RSI_OK;
 
-	task = kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
 			   "pkm-lcs-kunit-log-bind");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_begin_key_create_mutation(
 		(int)fd, 1, root_guid, &input, &handle, &binding);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -21338,14 +21639,14 @@ static void pkm_lcs_kunit_create_missing_source_records_created_new(
 	memcpy(resolution.parent.key_guid, parent_guid, RSI_GUID_SIZE);
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_create_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_create_source_thread, &script,
 			   "pkm-lcs-kunit-create-src");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_missing_source_records(
 		&resolution, &target, child_guid, &created_sd, true, false,
 		&result);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -21406,14 +21707,14 @@ static void pkm_lcs_kunit_create_missing_source_entry_race_retries(
 	memcpy(resolution.parent.key_guid, parent_guid, RSI_GUID_SIZE);
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_create_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_create_source_thread, &script,
 			   "pkm-lcs-kunit-create-race");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_missing_source_records(
 		&resolution, &target, child_guid, &created_sd, false, false,
 		&result);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -21480,14 +21781,14 @@ static void pkm_lcs_kunit_create_missing_source_key_duplicate_eio(
 	memcpy(resolution.parent.key_guid, parent_guid, RSI_GUID_SIZE);
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_create_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_create_source_thread, &script,
 			   "pkm-lcs-kunit-create-dup");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_missing_source_records(
 		&resolution, &target, child_guid, &created_sd, false, false,
 		&result);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -21772,14 +22073,14 @@ static void pkm_lcs_kunit_create_missing_prepared_created_new_success(
 	script.sd_len = created.sd_len;
 	script.file = &file;
 	pkm_lcs_kunit_create_missing_set_child_path(test, &resolution);
-	task = kthread_run(pkm_lcs_kunit_create_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_create_source_thread, &script,
 			   "pkm-lcs-kunit-prepared-create");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_missing_prepared_key_for_token(
 		token, &resolution, &target, child_guid, &created, KEY_READ,
 		false, false, &result);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -21843,14 +22144,14 @@ static void pkm_lcs_kunit_create_missing_prepared_entry_race_retries(
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
 	pkm_lcs_kunit_create_missing_set_child_path(test, &resolution);
-	task = kthread_run(pkm_lcs_kunit_create_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_create_source_thread, &script,
 			   "pkm-lcs-kunit-prepared-race");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_missing_prepared_key_for_token(
 		token, &resolution, &target, child_guid, &created, KEY_READ,
 		false, false, &result);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -21904,14 +22205,14 @@ static void pkm_lcs_kunit_create_missing_prepared_denies_after_source(
 	script.sd_len = created.sd_len;
 	script.file = &file;
 	pkm_lcs_kunit_create_missing_set_child_path(test, &resolution);
-	task = kthread_run(pkm_lcs_kunit_create_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_create_source_thread, &script,
 			   "pkm-lcs-kunit-prepared-deny");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_missing_prepared_key_for_token(
 		token, &resolution, &target, child_guid, &created,
 		KEY_SET_VALUE, false, false, &result);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -22033,14 +22334,14 @@ static void pkm_lcs_kunit_create_missing_branch_created_new_success(
 		pkm_lcs_kunit_parent_sd_create_subkey_ci_generic_read;
 	script.read_key.sd_len =
 		sizeof(pkm_lcs_kunit_parent_sd_create_subkey_ci_generic_read);
-	task = kthread_run(pkm_lcs_kunit_read_then_create_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_then_create_source_thread,
 			   &script, "pkm-lcs-kunit-create-full");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_create_missing_user_path_finish_for_token(
 		token, &ops, -1, (const char __user *)path_src, KEY_READ,
 		NULL, 0, &inputs, (u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_CREATED_NEW);
@@ -22094,14 +22395,14 @@ static void pkm_lcs_kunit_create_missing_branch_volatile_parent_denies(
 	script.file = &file;
 	script.sd = parent_sd;
 	script.sd_len = parent_sd_len;
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-create-vol");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_create_missing_user_path_finish_for_token(
 		token, &ops, -1, (const char __user *)path_src, KEY_READ,
 		NULL, 0, NULL, (u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
 	KUNIT_EXPECT_EQ(test, disposition, 0xaaaaaaaaU);
@@ -22200,14 +22501,14 @@ static void pkm_lcs_kunit_create_missing_copied_path_success(
 		pkm_lcs_kunit_parent_sd_create_subkey_ci_generic_read;
 	script.read_key.sd_len =
 		sizeof(pkm_lcs_kunit_parent_sd_create_subkey_ci_generic_read);
-	task = kthread_run(pkm_lcs_kunit_read_then_create_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_then_create_source_thread,
 			   &script, "pkm-lcs-kunit-create-copy-full");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_create_missing_copied_path_finish_for_token(
 		token, &ops, -1, &copy, KEY_READ, NULL, 0, &inputs,
 		(u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_CREATED_NEW);
@@ -22296,7 +22597,7 @@ static void pkm_lcs_kunit_reg_create_key_existing_ignores_layer(
 	script.sd = sd;
 	script.sd_len = sd_len;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-reg-create-existing");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
@@ -22305,7 +22606,7 @@ static void pkm_lcs_kunit_reg_create_key_existing_ignores_layer(
 		(const char __user *)layer_src,
 		REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK, NULL,
 		(u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_OPENED_EXISTING);
@@ -22395,14 +22696,14 @@ static void pkm_lcs_kunit_reg_create_key_missing_fallback_success(
 	script.create.read_key.sd_len =
 		sizeof(pkm_lcs_kunit_parent_sd_create_subkey_ci_generic_read);
 
-	task = kthread_run(pkm_lcs_kunit_walk_then_read_create_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_then_read_create_source_thread,
 			   &script, "pkm-lcs-kunit-reg-create-missing");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_reg_create_key_for_token(
 		token, &ops, -1, (const char __user *)path_src, KEY_READ,
 		NULL, 0, &inputs, (u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_CREATED_NEW);
@@ -22542,14 +22843,14 @@ static void pkm_lcs_kunit_reg_create_key_missing_dispatches_watch(
 	inputs.base_metadata_sd_len = layer_sd_len;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_walk_then_read_create_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_then_read_create_source_thread,
 			   &script, "pkm-lcs-kunit-create-watch");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_reg_create_key_for_token(
 		token, &ops, -1, (const char __user *)path_src, KEY_READ,
 		NULL, 0, &inputs, (u32 __user *)&disposition);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
@@ -22717,12 +23018,12 @@ static void pkm_lcs_kunit_reg_create_key_args_existing_txn_reads(
 	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
 	args.txn_fd = (int)txn_fd;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-create-txn-unbound");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_reg_create_key_args_for_token(token, &ops, &args, NULL);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_OPENED_EXISTING);
@@ -22760,12 +23061,12 @@ static void pkm_lcs_kunit_reg_create_key_args_existing_txn_reads(
 	script.expected_txn_id = txn_snapshot.transaction_id;
 	disposition = 0;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-create-txn-bound");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_reg_create_key_args_for_token(token, &ops, &args, NULL);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_OPENED_EXISTING);
@@ -22958,13 +23259,13 @@ static void pkm_lcs_kunit_reg_create_key_args_txn_missing_success(
 	args.txn_fd = (int)txn_fd;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_txn_create_flow_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_txn_create_flow_source_thread, &script,
 			   "pkm-lcs-kunit-create-txn-missing");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_reg_create_key_args_for_token(token, &ops, &args,
 						   &inputs);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_CREATED_NEW);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -23117,13 +23418,13 @@ static void pkm_lcs_kunit_reg_create_key_args_txn_missing_full_log(
 	args.txn_fd = (int)txn_fd;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_txn_create_flow_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_txn_create_flow_source_thread,
 			   &script, "pkm-lcs-kunit-create-txn-full-log");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_reg_create_key_args_for_token(token, &ops, &args,
 						    &inputs);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, ret, (long)-ENOMEM);
 	KUNIT_EXPECT_EQ(test, disposition, 0xaaaaaaaaU);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -23261,13 +23562,13 @@ static void pkm_lcs_kunit_reg_create_key_args_txn_missing_entry_race(
 	args.txn_fd = (int)txn_fd;
 	script.file = &file;
 
-	task = kthread_run(pkm_lcs_kunit_txn_create_flow_source_thread,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_txn_create_flow_source_thread,
 			   &script, "pkm-lcs-kunit-create-txn-race");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_reg_create_key_args_for_token(token, &ops, &args,
 						   &inputs);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_OPENED_EXISTING);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -23367,12 +23668,12 @@ static void pkm_lcs_kunit_reg_create_key_args_existing_success(
 	script.sd = sd;
 	script.sd_len = sd_len;
 
-	task = kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
 			   "pkm-lcs-kunit-reg-create-args");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	fd = pkm_lcs_reg_create_key_args_for_token(token, &ops, &args, NULL);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_OPENED_EXISTING);
@@ -24902,14 +25203,14 @@ static void pkm_lcs_kunit_open_component_walk_collects_ancestors(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-walk");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_walk_absolute_components(
 		1, 0, root_guid, components, ARRAY_SIZE(components), layers,
 		ARRAY_SIZE(layers), NULL, 0, &result);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -24985,14 +25286,14 @@ static void pkm_lcs_kunit_open_component_walk_empty_child_enoent(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-walk-missing");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_walk_absolute_components(
 		1, 0, root_guid, components, ARRAY_SIZE(components), layers,
 		ARRAY_SIZE(layers), NULL, 0, &result);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-ENOENT);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -25062,14 +25363,14 @@ static void pkm_lcs_kunit_open_component_walk_symlink_fails_closed(
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
-	task = kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread, &script,
 			   "pkm-lcs-kunit-walk-link");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_walk_absolute_components(
 		1, 0, root_guid, components, ARRAY_SIZE(components), layers,
 		ARRAY_SIZE(layers), NULL, 0, &result);
-	thread_ret = kthread_stop(task);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EOPNOTSUPP);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
@@ -25435,6 +25736,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_rsi_commit_abort_transaction_request_frames),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_flush_request_frame_success),
+	KUNIT_CASE(pkm_lcs_kunit_rsi_drop_key_request_frame_success),
 	KUNIT_CASE(
 		pkm_lcs_kunit_rsi_transaction_request_frames_reject_bad_inputs),
 	KUNIT_CASE(
@@ -25478,6 +25780,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_delete_value_entry_round_trip_statuses),
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_flush_frame),
 	KUNIT_CASE(pkm_lcs_kunit_source_flush_round_trip_statuses),
+	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_drop_key_frame),
+	KUNIT_CASE(pkm_lcs_kunit_source_drop_key_round_trip_statuses),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_transaction_control_frames),
 	KUNIT_CASE(

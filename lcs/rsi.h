@@ -190,6 +190,9 @@ long pkm_lcs_rsi_build_write_key_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 guid[RSI_GUID_SIZE], const u8 *sd, size_t sd_len,
 	u64 last_write_time, struct pkm_lcs_rsi_built_request *built);
+long pkm_lcs_rsi_build_drop_key_request(
+	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
+	const u8 guid[RSI_GUID_SIZE], struct pkm_lcs_rsi_built_request *built);
 long pkm_lcs_rsi_build_begin_transaction_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	u64 transaction_id, u32 mode,

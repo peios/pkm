@@ -71,6 +71,9 @@ extern int lcs_rust_write_rsi_flush_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 *hive_name, u32 hive_name_len,
 	struct pkm_lcs_rsi_built_request *built);
+extern int lcs_rust_write_rsi_drop_key_request_frame(
+	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
+	const u8 *guid, struct pkm_lcs_rsi_built_request *built);
 extern int lcs_rust_validate_rsi_lookup_response_frame(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence,
@@ -346,6 +349,21 @@ long pkm_lcs_rsi_build_write_key_request(
 	return lcs_rust_write_rsi_write_key_request_frame(
 		dst, dst_len, request_id, txn_id, guid, sd, sd_len,
 		last_write_time, built);
+}
+
+long pkm_lcs_rsi_build_drop_key_request(
+	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
+	const u8 guid[RSI_GUID_SIZE], struct pkm_lcs_rsi_built_request *built)
+{
+	if (!built)
+		return -EINVAL;
+
+	memset(built, 0, sizeof(*built));
+	if (!dst || !guid)
+		return -EINVAL;
+
+	return lcs_rust_write_rsi_drop_key_request_frame(
+		dst, dst_len, request_id, txn_id, guid, built);
 }
 
 long pkm_lcs_rsi_build_begin_transaction_request(
