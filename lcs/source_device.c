@@ -8172,6 +8172,26 @@ static void pkm_lcs_create_missing_dispatch_subkey_created_best_effort(
 	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
 }
 
+static long pkm_lcs_create_missing_refresh_layer_metadata_if_needed(
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	const u8 child_guid[RSI_GUID_SIZE])
+{
+	struct pkm_lcs_resolved_key_path child = { };
+	long ret;
+
+	ret = pkm_lcs_create_missing_child_path_prepare(resolution, child_guid,
+						       &child);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_path_refresh_layer_metadata(
+		child.source_id, child.key_guid,
+		(const char * const *)child.resolved_path,
+		child.component_count);
+	pkm_lcs_resolved_key_path_destroy(&child);
+	return ret;
+}
+
 long pkm_lcs_create_missing_prepared_key_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,
@@ -8205,6 +8225,11 @@ long pkm_lcs_create_missing_prepared_key_for_token(
 		return 0;
 	if (!source.created_new)
 		return -EIO;
+
+	ret = pkm_lcs_create_missing_refresh_layer_metadata_if_needed(
+		resolution, child_guid);
+	if (ret)
+		return ret;
 
 	pkm_lcs_create_missing_dispatch_subkey_created_best_effort(resolution);
 
