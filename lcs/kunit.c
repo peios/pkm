@@ -34835,6 +34835,151 @@ out_release_source:
 	}
 }
 
+static void pkm_lcs_kunit_source_write_enum_duplicate_tie_audits(
+	struct kunit *test)
+{
+	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
+	static const char validation_class[] = "duplicate_winning_sequence_tie";
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8,
+		0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0,
+	};
+	static const u8 child_guid_a[RSI_GUID_SIZE] = {
+		0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8,
+		0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0,
+	};
+	static const u8 child_guid_b[RSI_GUID_SIZE] = {
+		0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8,
+		0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef, 0xf0,
+	};
+	struct pkm_lcs_source_response_result response_result = { };
+	struct pkm_lcs_source_response_result waiter_result = { };
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	struct pkm_lcs_source_response_waiter waiter;
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_kmes_kunit_snapshot kmes_snapshot = { };
+	u8 response[384];
+	u8 buffer[512];
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+	size_t response_len;
+	size_t written = 0;
+	size_t offset;
+	ssize_t count;
+	u32 header_size;
+	long ret;
+	u16 type_len;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	ret = pkm_lcs_kunit_source_dispatch_enum_children_waitable_request(
+		1, 0xe1e2e3e4e5e6e7e8ULL, parent_guid, &waiter, &enqueue);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	if (ret)
+		goto out_release_source;
+
+	count = pkm_lcs_kunit_source_device_read_file(
+		&file, out, sizeof(out), true);
+	KUNIT_EXPECT_EQ(test, count, (ssize_t)enqueue.len);
+	if (count != (ssize_t)enqueue.len)
+		goto out_release_source;
+
+	pkm_lcs_kunit_rsi_response_begin(
+		test, response, sizeof(response), enqueue.request_id,
+		RSI_ENUM_CHILDREN_RESPONSE, RSI_OK, &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_len_prefixed(test, response,
+					      sizeof(response), &offset,
+					      "Child", strlen("Child"));
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 2);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, response, sizeof(response), &offset, "base",
+		RSI_PATH_TARGET_GUID, child_guid_a, 0);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, response, sizeof(response), &offset, "base",
+		RSI_PATH_TARGET_GUID, child_guid_b, 0);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 2);
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, response, sizeof(response), &offset, child_guid_a,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd));
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, response, sizeof(response), &offset, child_guid_b,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd));
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+
+	pkm_kmes_kunit_reset_all();
+	count = pkm_lcs_kunit_source_device_write_file(
+		&file, response, response_len, false, &response_result);
+	KUNIT_EXPECT_EQ(test, count, (ssize_t)response_len);
+	if (count != (ssize_t)response_len)
+		goto out_release_source;
+	KUNIT_EXPECT_EQ(test, response_result.request_op_code,
+			(u16)RSI_ENUM_CHILDREN);
+	KUNIT_EXPECT_EQ(test, response_result.status, (u32)RSI_OK);
+	KUNIT_EXPECT_TRUE(test, response_result.malformed_source_data);
+	KUNIT_EXPECT_TRUE(test,
+			  response_result.source_validation_failure_present);
+	KUNIT_EXPECT_EQ(
+		test, response_result.source_validation_failure,
+		(u32)PKM_LCS_SOURCE_VALIDATION_DUPLICATE_WINNING_SEQUENCE_TIE);
+	KUNIT_EXPECT_TRUE(test, response_result.key_guid_present);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response_result.key_guid, parent_guid,
+			       sizeof(parent_guid)),
+			0);
+
+	ret = pkm_lcs_source_response_waiter_wait(&waiter, &waiter_result);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_TRUE(test, waiter_result.malformed_source_data);
+	KUNIT_EXPECT_TRUE(test,
+			  waiter_result.source_validation_failure_present);
+	KUNIT_EXPECT_EQ(
+		test, waiter_result.source_validation_failure,
+		(u32)PKM_LCS_SOURCE_VALIDATION_DUPLICATE_WINNING_SEQUENCE_TIE);
+	KUNIT_EXPECT_TRUE(test, waiter_result.key_guid_present);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(waiter_result.key_guid, parent_guid,
+			       sizeof(parent_guid)),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, sizeof(buffer), &written, &kmes_snapshot),
+			0);
+	type_len = get_unaligned_le16(buffer + KMES_EVENT_TYPE_LEN_OFFSET);
+	header_size = get_unaligned_le32(buffer + KMES_EVENT_HEADER_SIZE_OFFSET);
+	KUNIT_ASSERT_EQ(test, type_len, (u16)(sizeof(event_type) - 1));
+	KUNIT_EXPECT_EQ(test, buffer[KMES_EVENT_ORIGIN_CLASS_OFFSET],
+			(u8)KMES_ORIGIN_LCS);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
+			       type_len),
+			0);
+	KUNIT_ASSERT_TRUE(test, written > header_size);
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_lcs_kunit_buffer_contains(
+				  buffer, written, validation_class));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_lcs_kunit_buffer_contains_bytes(
+				  buffer, written, parent_guid,
+				  sizeof(parent_guid)));
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_FALSE(test, snapshot.closing);
+
+out_release_source:
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_write_read_key_payload_validation(
 	struct kunit *test)
 {
@@ -37518,6 +37663,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_write_path_future_sequence_audits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_path_metadata_sd_audits),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_write_enum_duplicate_tie_audits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_read_key_payload_validation),
 	KUNIT_CASE(

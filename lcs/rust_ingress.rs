@@ -3412,6 +3412,14 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
         max_subkey_name_len = max_subkey_name_len.max(subkey.child_name.len());
         Ok(())
     }) {
+        if matches!(err, LcsError::DuplicateWinningSequenceTie { .. }) {
+            unsafe {
+                (*result_out).source_validation_failure = source_validation_failure_code(
+                    RsiSourceDataValidationFailure::DuplicateWinningSequenceTie,
+                );
+                (*result_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_lookup_materialization_error_return(err);
     }
 
