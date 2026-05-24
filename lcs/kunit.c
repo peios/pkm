@@ -337,6 +337,14 @@ struct pkm_lcs_kunit_set_value_ioctl_source_script {
 	u32 reads;
 	u32 writes;
 	bool expect_begin;
+	bool expect_layer_refresh;
+	const char *refresh_layer_name;
+	const u8 *refresh_sd;
+	size_t refresh_sd_len;
+	u32 refresh_precedence;
+	u32 refresh_enabled;
+	bool refresh_precedence_present;
+	bool refresh_enabled_present;
 	int result;
 };
 
@@ -9334,6 +9342,60 @@ static void pkm_lcs_kunit_expect_set_value_success(
 	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
 }
 
+static void pkm_lcs_kunit_expect_set_value_layer_refresh_success(
+	struct kunit *test, struct file *file, int fd, const void *token,
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_set_value_args *args,
+	const u8 guid[RSI_GUID_SIZE], const char *value_name,
+	const u8 *data, size_t data_len, u32 value_type,
+	const char *layer_name, const u8 *metadata_sd, size_t metadata_sd_len,
+	u32 refresh_precedence, u32 refresh_enabled)
+{
+	struct pkm_lcs_kunit_set_value_ioctl_source_script script = {
+		.file = file,
+		.expected_guid = guid,
+		.expected_value_name = value_name,
+		.expected_layer_name = "base",
+		.expected_data = data,
+		.expected_data_len = data_len,
+		.expected_value_type = value_type,
+		.expected_expected_sequence = args->expected_seq,
+		.set_value_status = RSI_OK,
+		.expect_layer_refresh = true,
+		.refresh_layer_name = layer_name,
+		.refresh_sd = metadata_sd,
+		.refresh_sd_len = metadata_sd_len,
+		.refresh_precedence = refresh_precedence,
+		.refresh_enabled = refresh_enabled,
+		.refresh_precedence_present = true,
+		.refresh_enabled_present = true,
+	};
+	struct task_struct *task;
+	u64 sequence_before = 0;
+	long ret;
+	int thread_ret;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_before),
+			0L);
+	script.expected_sequence = sequence_before;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_set_value_ioctl_source_thread, &script,
+		"pkm-lcs-kunit-set-value-layer-refresh");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_set_value_for_token(fd, token, ops, args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 6U);
+	KUNIT_EXPECT_EQ(test, script.writes, 6U);
+	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
+}
+
 static void pkm_lcs_kunit_key_fd_set_value_nontransactional_success(
 	struct kunit *test)
 {
@@ -9895,11 +9957,14 @@ static void pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate(
 	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
 	struct pkm_kacs_boot_snapshot before = { };
 	struct pkm_kacs_boot_snapshot after = { };
+	struct pkm_lcs_rsi_layer_view layers[3] = { };
 	struct file file = { };
 	const void *source_token;
 	const void *admin_token;
 	const void *tcb_token;
 	const u8 *layer_sd;
+	char names[64] = { };
+	u32 count = 0;
 	size_t layer_sd_len = 0;
 	u64 sequence_before = 0;
 	u64 sequence_after = 0;
@@ -9950,10 +10015,11 @@ static void pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate(
 	KUNIT_EXPECT_EQ(test, sequence_after, sequence_before);
 
 	args.data_ptr = (u64)(unsigned long)zero_data;
-	pkm_lcs_kunit_expect_set_value_success(
+	pkm_lcs_kunit_expect_set_value_layer_refresh_success(
 		test, &file, (int)metadata_fd, admin_token, &ops, &args,
 		metadata_ancestors[ARRAY_SIZE(metadata_ancestors) - 1],
-		precedence_name, zero_data, sizeof(zero_data), REG_DWORD);
+		precedence_name, zero_data, sizeof(zero_data), REG_DWORD,
+		"Policy", layer_sd, layer_sd_len, 0, 1);
 
 	args.data_ptr = (u64)(unsigned long)one_data;
 	pkm_lcs_kunit_expect_set_value_success(
@@ -9963,14 +10029,24 @@ static void pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate(
 
 	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(tcb_token,
 							       &before));
-	pkm_lcs_kunit_expect_set_value_success(
+	pkm_lcs_kunit_expect_set_value_layer_refresh_success(
 		test, &file, (int)metadata_fd, tcb_token, &ops, &args,
 		metadata_ancestors[ARRAY_SIZE(metadata_ancestors) - 1],
-		precedence_name, one_data, sizeof(one_data), REG_DWORD);
+		precedence_name, one_data, sizeof(one_data), REG_DWORD,
+		"Policy", layer_sd, layer_sd_len, 1, 1);
 	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(tcb_token,
 							       &after));
 	KUNIT_EXPECT_EQ(test, after.privileges_used & KACS_SE_TCB_PRIVILEGE,
 			before.privileges_used & KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 2U);
+	KUNIT_EXPECT_STREQ(test, layers[1].name, "Policy");
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 1U);
+	KUNIT_EXPECT_EQ(test, layers[1].enabled, 1U);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)metadata_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)ordinary_fd), 0);
@@ -19984,6 +20060,42 @@ static int pkm_lcs_kunit_set_value_ioctl_source_handle_write_key(
 	return 0;
 }
 
+static int pkm_lcs_kunit_set_value_ioctl_source_handle_layer_refresh(
+	struct pkm_lcs_kunit_set_value_ioctl_source_script *script,
+	u8 *request, size_t request_len)
+{
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script refresh = {
+		.file = script->file,
+		.expected_guid = script->expected_guid,
+		.name = script->refresh_layer_name,
+		.sd = script->refresh_sd,
+		.sd_len = script->refresh_sd_len,
+		.precedence = script->refresh_precedence,
+		.enabled = script->refresh_enabled,
+		.precedence_present = script->refresh_precedence_present,
+		.enabled_present = script->refresh_enabled_present,
+	};
+	int ret;
+
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_read_key(
+		&refresh, request, request_len);
+	if (ret)
+		goto out;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
+		&refresh, request, request_len, "Precedence",
+		refresh.precedence_present, refresh.precedence);
+	if (ret)
+		goto out;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
+		&refresh, request, request_len, "Enabled",
+		refresh.enabled_present, refresh.enabled);
+
+out:
+	script->reads += refresh.reads;
+	script->writes += refresh.writes;
+	return ret;
+}
+
 static int pkm_lcs_kunit_set_value_ioctl_source_thread(void *raw_script)
 {
 	struct pkm_lcs_kunit_set_value_ioctl_source_script *script = raw_script;
@@ -20016,6 +20128,10 @@ static int pkm_lcs_kunit_set_value_ioctl_source_thread(void *raw_script)
 	if (ret || !continue_after_set)
 		goto out;
 	ret = pkm_lcs_kunit_set_value_ioctl_source_handle_write_key(
+		script, request, sizeof(request));
+	if (ret || !script->expect_layer_refresh)
+		goto out;
+	ret = pkm_lcs_kunit_set_value_ioctl_source_handle_layer_refresh(
 		script, request, sizeof(request));
 
 out:
