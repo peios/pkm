@@ -10607,7 +10607,7 @@ ssize_t pkm_lcs_kunit_source_device_write_file(
 
 __poll_t pkm_lcs_kunit_source_device_poll_file(struct file *file)
 {
-	return pkm_lcs_source_device_poll(file, NULL);
+	return pkm_lcs_source_device_fops.poll(file, NULL);
 }
 #endif
 
