@@ -890,7 +890,7 @@ static long pkm_lcs_key_fd_revalidate_after_source_restart(
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
 		key_fd->source_id, 0, key_fd->key_guid,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
 	if (ret == -ENOENT) {
 		u32 marked = 0;
 
@@ -1196,7 +1196,7 @@ static long pkm_lcs_key_fd_read_existing_sd(
 	pkm_lcs_source_response_frame_init(frame);
 	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, frame, &response, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), frame, &response, NULL);
 	if (response_out)
 		*response_out = response;
 	if (ret)
@@ -1367,7 +1367,7 @@ static long pkm_lcs_key_fd_query_effective_value_snapshot(
 
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, value_name,
-		value_name_len, false, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+		value_name_len, false, pkm_lcs_runtime_request_timeout_ms(),
 		&snapshot->frame, &response, NULL);
 	if (ret)
 		goto out_layer_snapshot;
@@ -1445,7 +1445,7 @@ static long pkm_lcs_key_fd_query_effective_values_frame(
 	pkm_lcs_source_response_frame_init(frame);
 	return pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, "", 0, true,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, frame, response, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), frame, response, NULL);
 }
 
 static long pkm_lcs_key_fd_materialize_value_watch_events(
@@ -1691,7 +1691,7 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 
 	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
 		key_fd->source_id, 0, key_fd->key_guid,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &read_frame,
+		pkm_lcs_runtime_request_timeout_ms(), &read_frame,
 		&read_response, NULL);
 	if (ret)
 		goto out_frames;
@@ -1703,7 +1703,7 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
 		key_fd->source_id, 0, key_fd->key_guid,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &enum_frame,
+		pkm_lcs_runtime_request_timeout_ms(), &enum_frame,
 		&enum_response, NULL);
 	if (ret)
 		goto out_frames;
@@ -1716,7 +1716,7 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
 		key_fd->source_id, 0, key_fd->key_guid, "", 0, true,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &values_frame,
+		pkm_lcs_runtime_request_timeout_ms(), &values_frame,
 		&values_response, NULL);
 	if (ret)
 		goto out_frames;
@@ -1907,7 +1907,7 @@ static long pkm_lcs_key_fd_query_value_from_args(
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, value_name,
-		name_len, false, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame,
+		name_len, false, pkm_lcs_runtime_request_timeout_ms(), &frame,
 		&response, NULL);
 	if (ret)
 		goto out_frame;
@@ -2612,7 +2612,7 @@ static long pkm_lcs_key_fd_delete_key_visible_child_gate(
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -2658,7 +2658,7 @@ static long pkm_lcs_key_fd_delete_key_post_lookup(
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
 		key_fd->source_id, 0, parent_guid, child_name, child_name_len,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -2707,7 +2707,7 @@ static long pkm_lcs_key_fd_set_value_layer_cap_check(
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, input->value_name,
 		(input->value_name ? (u32)strlen(input->value_name) : 0),
-		false, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response,
+		false, pkm_lcs_runtime_request_timeout_ms(), &frame, &response,
 		NULL);
 	if (ret)
 		goto out_frame;
@@ -3137,7 +3137,7 @@ static long pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
 		return 0;
 
 	ret = pkm_lcs_source_delete_layer_orchestrate_timeout(
-		layer_name, layer_name_len, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+		layer_name, layer_name_len, pkm_lcs_runtime_request_timeout_ms(),
 		NULL);
 	if (!ret)
 		*orchestrated_out = true;
@@ -3260,7 +3260,7 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, "", 0, true,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -3393,7 +3393,7 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, "", 0, true,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -3490,7 +3490,7 @@ static long pkm_lcs_key_fd_enum_subkey_read_metadata(
 
 	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, child_guid,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &read_frame,
+		pkm_lcs_runtime_request_timeout_ms(), &read_frame,
 		&read_response, NULL);
 	if (ret)
 		goto out_frames;
@@ -3502,7 +3502,7 @@ static long pkm_lcs_key_fd_enum_subkey_read_metadata(
 
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, child_guid,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &enum_frame,
+		pkm_lcs_runtime_request_timeout_ms(), &enum_frame,
 		&enum_response, NULL);
 	if (ret)
 		goto out_frames;
@@ -3514,7 +3514,7 @@ static long pkm_lcs_key_fd_enum_subkey_read_metadata(
 
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, child_guid, "", 0, true,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &values_frame,
+		pkm_lcs_runtime_request_timeout_ms(), &values_frame,
 		&values_response, NULL);
 	if (ret)
 		goto out_frames;
@@ -3590,7 +3590,7 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -3709,7 +3709,7 @@ static long pkm_lcs_key_fd_set_security_from_args(
 	ret = pkm_lcs_source_write_key_round_trip_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, merge.merged_sd,
 		merge.merged_sd_len, last_write_time,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, NULL, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), NULL, NULL);
 	if (ret)
 		goto out_cancel_merge;
 
@@ -3847,7 +3847,7 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 		key_fd->source_id, txn_id, key_fd->key_guid, input.value_name,
 		args->name_len, input.target.name, input.target.name_len,
 		args->type, input.data, args->data_len, sequence,
-		args->expected_seq, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+		args->expected_seq, pkm_lcs_runtime_request_timeout_ms(),
 		&response, NULL);
 	if (ret)
 		goto out_cancel_mutation;
@@ -3855,7 +3855,7 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	last_write_time = (u64)ktime_get_real_ns();
 	ret = pkm_lcs_source_write_key_round_trip_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, NULL, 0,
-		last_write_time, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, NULL,
+		last_write_time, pkm_lcs_runtime_request_timeout_ms(), NULL,
 		NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
@@ -3990,7 +3990,7 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 	ret = pkm_lcs_source_delete_value_entry_round_trip_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, input.value_name,
 		args->name_len, input.target.name, input.target.name_len,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &response, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), &response, NULL);
 	if (ret)
 		goto out_before;
 
@@ -4002,7 +4002,7 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 	last_write_time = (u64)ktime_get_real_ns();
 	ret = pkm_lcs_source_write_key_round_trip_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, NULL, 0,
-		last_write_time, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, NULL,
+		last_write_time, pkm_lcs_runtime_request_timeout_ms(), NULL,
 		NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
@@ -4141,7 +4141,7 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 	ret = pkm_lcs_source_set_blanket_tombstone_round_trip_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid,
 		input.target.name, input.target.name_len, input.set, sequence,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &mutation_response, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), &mutation_response, NULL);
 	if (ret)
 		goto out_before;
 
@@ -4153,7 +4153,7 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 	last_write_time = (u64)ktime_get_real_ns();
 	ret = pkm_lcs_source_write_key_round_trip_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, NULL, 0,
-		last_write_time, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, NULL,
+		last_write_time, pkm_lcs_runtime_request_timeout_ms(), NULL,
 		NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
@@ -4294,7 +4294,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	ret = pkm_lcs_source_delete_entry_round_trip_timeout(
 		key_fd->source_id, txn_id, parent_guid, child_name,
 		child_name_len, input.target.name, input.target.name_len,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &response, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), &response, NULL);
 	if (ret)
 		goto out_cancel_mutation;
 
@@ -4329,7 +4329,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	last_write_time = (u64)ktime_get_real_ns();
 	ret = pkm_lcs_source_write_key_round_trip_timeout(
 		key_fd->source_id, txn_id, parent_guid, NULL, 0, last_write_time,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, NULL, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), NULL, NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
@@ -4467,7 +4467,7 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 	ret = pkm_lcs_source_hide_entry_round_trip_timeout(
 		key_fd->source_id, txn_id, parent_guid, child_name, child_name_len,
 		input.target.name, input.target.name_len, sequence,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &response, NULL);
+		pkm_lcs_runtime_request_timeout_ms(), &response, NULL);
 	if (ret)
 		goto out_cancel_mutation;
 

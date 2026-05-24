@@ -501,7 +501,7 @@ static long pkm_lcs_transaction_layer_delete_effects_apply(
 
 		ret = pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
 			effect->layer_name, effect->layer_name_len,
-			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+			pkm_lcs_runtime_request_timeout_ms(),
 			effect->skip_generation_source_id,
 			effect->skip_generation_root_guid, NULL);
 		if (ret)
@@ -1729,7 +1729,7 @@ static long pkm_lcs_transaction_delete_key_post_lookup(
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
 		source_id, 0, entry->parent_guid, entry->child_name,
-		entry->child_name_len, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+		entry->child_name_len, pkm_lcs_runtime_request_timeout_ms(),
 		&frame, &response, NULL);
 	if (ret)
 		goto out_frame;
@@ -2642,7 +2642,7 @@ static long pkm_lcs_transaction_fd_commit_from_state(
 	struct pkm_lcs_transaction_fd *txn)
 {
 	return pkm_lcs_transaction_fd_commit_from_state_timeout(
-		txn, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT);
+		txn, pkm_lcs_runtime_request_timeout_ms());
 }
 
 static __poll_t pkm_lcs_transaction_fd_poll(struct file *file,
