@@ -15,6 +15,7 @@ use crate::lcs_core::{
     parse_rsi_lookup_success_response_payload, parse_rsi_enum_children_success_response_payload,
     parse_rsi_query_values_success_response_payload, parse_rsi_read_key_success_response_payload,
     parse_rsi_request_header, plan_key_guid_assignment, plan_key_open_audit_record,
+    plan_source_validation_failure_audit_record,
     plan_layer_publication, plan_layer_target_admission, plan_registry_get_security,
     plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
     plan_registry_open_pre_resolution_access, plan_registry_security_info_fd_access_gate,
@@ -44,7 +45,8 @@ use crate::lcs_core::{
     validate_value_data_len, validate_value_name_bytes, validate_value_write_type,
     value_data_len_linux_errno, value_layer_admission_linux_errno,
     value_type_validation_linux_errno,
-    write_key_open_audit_payload, write_rsi_abort_transaction_request_frame,
+    source_validation_failure_audit_payload_len, write_key_open_audit_payload,
+    write_source_validation_failure_audit_payload, write_rsi_abort_transaction_request_frame,
     write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
     write_rsi_create_entry_request_frame, write_rsi_create_key_request_frame,
     write_rsi_delete_entry_request_frame, write_rsi_delete_layer_request_frame,
@@ -61,6 +63,7 @@ use crate::lcs_core::{
     NamedPathResolution, NamedValueEntry, PathKind, PathTarget, RegisteredHiveIdentity,
     RegistryIoctlAccessRequirement, RegistryKeyOpenAccessInput, RegistryOpenAccessDecision,
     RegistryOpenPreResolutionAccessPlan, RsiReadPlan, RsiRetainedRequest, RsiTransactionMode,
+    RsiSourceDataValidationFailure,
     SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
     SourceSlotStatus, SourceSlotView, ValueEntry, ValueLayerAdmissionInput, ValueResolution,
     EffectiveValueWatchEvent, EnumeratedValue, WatchEventRecordPlan,
@@ -464,6 +467,28 @@ fn key_open_audit_error_return(err: LcsError) -> c_int {
 		_ => LinuxErrno::Eio,
 	}
 	.negated_return() as c_int
+}
+
+fn source_validation_failure_from_code(
+    code: u32,
+) -> Result<RsiSourceDataValidationFailure, LinuxErrno> {
+    match code {
+        0 => Ok(RsiSourceDataValidationFailure::MalformedSecurityDescriptor),
+        1 => Ok(RsiSourceDataValidationFailure::MalformedLayerName),
+        2 => Ok(RsiSourceDataValidationFailure::UnknownRsiStatusCode),
+        3 => Ok(RsiSourceDataValidationFailure::FutureSequenceNumber),
+        4 => Ok(RsiSourceDataValidationFailure::DuplicateWinningSequenceTie),
+        5 => Ok(RsiSourceDataValidationFailure::MalformedLayerMetadataSecurityDescriptor),
+        _ => Err(LinuxErrno::Einval),
+    }
+}
+
+fn source_validation_audit_error_return(err: LcsError) -> c_int {
+    match err {
+        LcsError::AuditPayloadOutputBufferTooSmall { .. } => LinuxErrno::Erange,
+        _ => LinuxErrno::Eio,
+    }
+    .negated_return() as c_int
 }
 
 fn set_security_merge_error_return(err: LcsError) -> c_int {
@@ -1115,6 +1140,113 @@ pub unsafe extern "C" fn lcs_rust_key_open_audit_payload(
             0
         }
         Err(err) => key_open_audit_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_source_validation_failure_audit_payload(
+    source_slot: u32,
+    hive_name: *const u8,
+    hive_name_len: usize,
+    hive_name_present: u8,
+    request_id: u64,
+    request_id_present: u8,
+    op_code: u16,
+    op_code_present: u8,
+    key_guid: *const u8,
+    key_guid_present: u8,
+    validation_failure: u32,
+    output: *mut u8,
+    output_len: usize,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out = 0;
+
+    if hive_name_present > 1
+        || request_id_present > 1
+        || op_code_present > 1
+        || key_guid_present > 1
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let hive_name = if hive_name_present != 0 {
+        if hive_name.is_null() || hive_name_len == 0 {
+            return LinuxErrno::Einval.negated_return() as c_int;
+        }
+        let bytes = unsafe { slice::from_raw_parts(hive_name, hive_name_len) };
+        match str::from_utf8(bytes) {
+            Ok(value) => Some(value),
+            Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+        }
+    } else {
+        if !hive_name.is_null() || hive_name_len != 0 {
+            return LinuxErrno::Einval.negated_return() as c_int;
+        }
+        None
+    };
+
+    let key_guid = if key_guid_present != 0 {
+        if key_guid.is_null() {
+            return LinuxErrno::Einval.negated_return() as c_int;
+        }
+        let bytes = unsafe { slice::from_raw_parts(key_guid, 16) };
+        let mut copy = [0u8; 16];
+        copy.copy_from_slice(bytes);
+        Some(copy)
+    } else {
+        None
+    };
+
+    let validation_failure = match source_validation_failure_from_code(validation_failure) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let record = match plan_source_validation_failure_audit_record(
+        &LcsLimits::default(),
+        source_slot,
+        hive_name,
+        if request_id_present != 0 {
+            Some(request_id)
+        } else {
+            None
+        },
+        if op_code_present != 0 {
+            Some(op_code)
+        } else {
+            None
+        },
+        key_guid,
+        validation_failure,
+    ) {
+        Ok(record) => record,
+        Err(err) => return source_validation_audit_error_return(err),
+    };
+    let required_len = match source_validation_failure_audit_payload_len(&record) {
+        Ok(len) => len,
+        Err(err) => return source_validation_audit_error_return(err),
+    };
+    *written_out = required_len;
+
+    if output.is_null() {
+        return if output_len == 0 {
+            0
+        } else {
+            LinuxErrno::Einval.negated_return() as c_int
+        };
+    }
+
+    let output = unsafe { slice::from_raw_parts_mut(output, output_len) };
+    match write_source_validation_failure_audit_payload(&record, output) {
+        Ok(plan) => {
+            *written_out = plan.bytes;
+            0
+        }
+        Err(err) => source_validation_audit_error_return(err),
     }
 }
 

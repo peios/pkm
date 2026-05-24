@@ -361,6 +361,7 @@ struct pkm_lcs_kunit_layer_metadata_refresh_source_script {
 	u32 enabled;
 	bool precedence_present;
 	bool enabled_present;
+	bool stop_after_read_key;
 	u32 reads;
 	u32 writes;
 	int result;
@@ -5506,6 +5507,46 @@ static void pkm_lcs_kunit_key_open_audit_payload_abi_rejects_bad_state(
 				NULL, 0, &written),
 			(long)-EIO);
 	KUNIT_EXPECT_EQ(test, written, (size_t)0);
+}
+
+static void pkm_lcs_kunit_source_validation_audit_emits_lcs_kmes_event(
+	struct kunit *test)
+{
+	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
+	static const u8 key_guid[16] = {
+		0x45, 0x25, 0x04, 0x25, 0x45, 0x25, 0x04, 0x25,
+		0x45, 0x25, 0x04, 0x25, 0x45, 0x25, 0x04, 0x25,
+	};
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u8 buffer[512];
+	size_t written = 0;
+	u32 header_size;
+	u16 type_len;
+
+	pkm_kmes_kunit_reset_all();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_emit_source_validation_failure_audit(
+				7, NULL, 0, false, 44, true, RSI_READ_KEY,
+				true, key_guid, true,
+				PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_METADATA_SD),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, sizeof(buffer), &written, &snapshot),
+			0);
+	KUNIT_ASSERT_GT(test, written, (size_t)KMES_EVENT_HEADER_BASE_SIZE);
+
+	type_len = get_unaligned_le16(buffer + KMES_EVENT_TYPE_LEN_OFFSET);
+	header_size = get_unaligned_le32(buffer + KMES_EVENT_HEADER_SIZE_OFFSET);
+	KUNIT_ASSERT_EQ(test, type_len, (u16)(sizeof(event_type) - 1));
+	KUNIT_ASSERT_TRUE(test, written > header_size);
+	KUNIT_EXPECT_EQ(test, buffer[KMES_EVENT_ORIGIN_CLASS_OFFSET],
+			(u8)KMES_ORIGIN_LCS);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
+			       type_len),
+			0);
+	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x86);
 }
 
 static void pkm_lcs_kunit_key_fd_publish_snapshot_success(struct kunit *test)
@@ -19330,6 +19371,8 @@ static int pkm_lcs_kunit_layer_metadata_refresh_source_thread(void *raw_script)
 		script, request, sizeof(request));
 	if (ret)
 		goto out;
+	if (script->stop_after_read_key)
+		goto out;
 	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
 		script, request, sizeof(request), "Precedence",
 		script->precedence_present, script->precedence);
@@ -24603,6 +24646,108 @@ static void pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains(
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
 	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_layer_metadata_refresh_malformed_sd_audits(
+	struct kunit *test)
+{
+	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
+	static const char * const metadata_path[] = {
+		"Machine", "System", "Registry", "Layers", "Policy"
+	};
+	static const u8 metadata_ancestors[5][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xf5, 0x10 },
+		{ 0xf5, 0x11 },
+		{ 0xf5, 0x12 },
+		{ 0xf5 },
+	};
+	static const u8 malformed_sd[] = { 0x01, 0x02, 0x03 };
+	struct pkm_lcs_rsi_layer_view layers[3] = { };
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script script = {
+		.expected_guid = metadata_ancestors[4],
+		.name = "Policy",
+		.sd = malformed_sd,
+		.sd_len = sizeof(malformed_sd),
+		.stop_after_read_key = true,
+	};
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	char names[64] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u8 *buffer;
+	size_t written = 0;
+	u32 header_size;
+	u32 count = 0;
+	u16 type_len;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	buffer = kzalloc(2048, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"Policy", strlen("Policy"), 9, 1,
+				metadata_ancestors[4],
+				pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd)),
+			0L);
+
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, metadata_path, metadata_ancestors,
+		ARRAY_SIZE(metadata_ancestors));
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	pkm_kmes_kunit_reset_all();
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_source_thread, &script,
+		"pkm-lcs-kunit-layer-refresh-sd-bad");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_kunit_key_fd_refresh_layer_metadata((int)fd);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, 2048, &written, &snapshot),
+			0);
+	type_len = get_unaligned_le16(buffer + KMES_EVENT_TYPE_LEN_OFFSET);
+	header_size = get_unaligned_le32(buffer + KMES_EVENT_HEADER_SIZE_OFFSET);
+	KUNIT_ASSERT_EQ(test, type_len, (u16)(sizeof(event_type) - 1));
+	KUNIT_ASSERT_TRUE(test, written > header_size);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
+			       type_len),
+			0);
+	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x86);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 2U);
+	KUNIT_EXPECT_STREQ(test, layers[1].name, "Policy");
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 9U);
+	KUNIT_EXPECT_EQ(test, layers[1].enabled, 1U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kfree(buffer);
 	kacs_rust_token_drop(token);
 }
 
@@ -32907,6 +33052,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_open_audit_emits_lcs_kmes_event),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_open_audit_payload_abi_rejects_bad_state),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_validation_audit_emits_lcs_kmes_event),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_snapshot_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_deep_copies_input),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_rejects_malformed_state),
@@ -33171,6 +33318,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_snapshot_remove),
 	KUNIT_CASE(
 		pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains),
+	KUNIT_CASE(
+		pkm_lcs_kunit_layer_metadata_refresh_malformed_sd_audits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_delete_layer_orchestration_aborts_before_broadcast),
 	KUNIT_CASE(

@@ -223,6 +223,15 @@ struct pkm_lcs_key_open_access_plan {
 	u8 _pad[3];
 };
 
+enum pkm_lcs_source_validation_failure {
+	PKM_LCS_SOURCE_VALIDATION_MALFORMED_SECURITY_DESCRIPTOR = 0,
+	PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME = 1,
+	PKM_LCS_SOURCE_VALIDATION_UNKNOWN_RSI_STATUS_CODE = 2,
+	PKM_LCS_SOURCE_VALIDATION_FUTURE_SEQUENCE_NUMBER = 3,
+	PKM_LCS_SOURCE_VALIDATION_DUPLICATE_WINNING_SEQUENCE_TIE = 4,
+	PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_METADATA_SD = 5,
+};
+
 struct pkm_lcs_path_validation_result {
 	u32 component_count;
 	bool used_forward_separator;
@@ -464,6 +473,11 @@ long pkm_lcs_key_open_access_check_for_token(
 long pkm_lcs_emit_key_open_audit_for_token(
 	const void *token, const u8 key_guid[16],
 	const struct pkm_lcs_key_open_access_plan *plan);
+long pkm_lcs_emit_source_validation_failure_audit(
+	u32 source_id, const char *hive_name, u32 hive_name_len,
+	bool hive_name_present, u64 request_id, bool request_id_present,
+	u16 op_code, bool op_code_present, const u8 key_guid[16],
+	bool key_guid_present, u32 validation_failure);
 long pkm_lcs_validate_syscall_relative_path(
 	const char *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);

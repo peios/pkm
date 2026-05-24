@@ -1102,7 +1102,7 @@ static long pkm_lcs_key_fd_copy_set_security_sd(
 static long pkm_lcs_key_fd_read_existing_sd(
 	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
 	struct pkm_lcs_source_response_frame *frame, const u8 **sd_out,
-	size_t *sd_len_out)
+	size_t *sd_len_out, struct pkm_lcs_source_response_result *response_out)
 {
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_read_key_result read_key = { };
@@ -1112,11 +1112,15 @@ static long pkm_lcs_key_fd_read_existing_sd(
 		return -EINVAL;
 	*sd_out = NULL;
 	*sd_len_out = 0;
+	if (response_out)
+		memset(response_out, 0, sizeof(*response_out));
 
 	pkm_lcs_source_response_frame_init(frame);
 	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid,
 		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, frame, &response, NULL);
+	if (response_out)
+		*response_out = response;
 	if (ret)
 		return ret;
 
@@ -1501,7 +1505,8 @@ static long pkm_lcs_key_fd_get_security_from_args(
 		return -EFAULT;
 
 	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, 0, &existing_frame,
-					      &existing_sd, &existing_sd_len);
+					      &existing_sd, &existing_sd_len,
+					      NULL);
 	if (ret)
 		goto out_existing;
 
@@ -2827,6 +2832,30 @@ out:
 	return ret;
 }
 
+static void pkm_lcs_key_fd_emit_layer_metadata_sd_validation_failure(
+	const struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_source_response_result *response)
+{
+	u64 request_id = 0;
+	u16 op_code = RSI_READ_KEY;
+	bool request_id_present = false;
+
+	if (!key_fd)
+		return;
+	if (response) {
+		if (response->request_op_code) {
+			request_id = response->request_id;
+			request_id_present = true;
+			op_code = response->request_op_code;
+		}
+	}
+
+	(void)pkm_lcs_emit_source_validation_failure_audit(
+		key_fd->source_id, NULL, 0, false, request_id,
+		request_id_present, op_code, true, key_fd->key_guid, true,
+		PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_METADATA_SD);
+}
+
 static long pkm_lcs_key_fd_refresh_layer_metadata(
 	const struct pkm_lcs_key_fd *key_fd)
 {
@@ -2834,6 +2863,7 @@ static long pkm_lcs_key_fd_refresh_layer_metadata(
 	static const char enabled_name[] = "Enabled";
 	static const char base_name[] = "base";
 	struct pkm_lcs_source_response_frame read_frame = { };
+	struct pkm_lcs_source_response_result read_response = { };
 	const char *layer_name = NULL;
 	const u8 *sd = NULL;
 	size_t sd_len = 0;
@@ -2860,9 +2890,14 @@ static long pkm_lcs_key_fd_refresh_layer_metadata(
 		return 0;
 
 	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, 0, &read_frame, &sd,
-					      &sd_len);
-	if (ret)
+					      &sd_len, &read_response);
+	if (ret) {
+		if (ret == -EIO && read_response.request_op_code &&
+		    read_response.status == RSI_OK)
+			pkm_lcs_key_fd_emit_layer_metadata_sd_validation_failure(
+				key_fd, &read_response);
 		goto out_read_frame;
+	}
 
 	ret = pkm_lcs_key_fd_query_layer_metadata_dword(
 		key_fd, precedence_name, sizeof(precedence_name) - 1, &found,
@@ -2889,6 +2924,9 @@ static long pkm_lcs_key_fd_refresh_layer_metadata(
 	ret = pkm_lcs_layer_table_publish(
 		layer_name, layer_name_len, precedence, enabled,
 		key_fd->key_guid, sd, sd_len);
+	if (ret == -EIO)
+		pkm_lcs_key_fd_emit_layer_metadata_sd_validation_failure(
+			key_fd, &read_response);
 
 out_read_frame:
 	pkm_lcs_source_response_frame_destroy(&read_frame);
@@ -3398,7 +3436,8 @@ static long pkm_lcs_key_fd_set_security_from_args(
 	}
 
 	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, txn_id, &existing_frame,
-					      &existing_sd, &existing_sd_len);
+					      &existing_sd, &existing_sd_len,
+					      NULL);
 	if (ret)
 		goto out_cancel_mutation;
 
