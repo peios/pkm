@@ -23560,6 +23560,15 @@ static int pkm_lcs_kunit_blocking_source_read_thread(void *raw_script)
 	return 0;
 }
 
+static void pkm_lcs_kunit_source_fd_force_closing(
+	struct pkm_lcs_source_fd *source_fd)
+{
+	mutex_lock(&source_fd->queue_lock);
+	source_fd->closing = true;
+	mutex_unlock(&source_fd->queue_lock);
+	wake_up_interruptible(&source_fd->read_wait);
+}
+
 static void pkm_lcs_kunit_source_request_blocking_read_wakes_on_enqueue(
 	struct kunit *test)
 {
@@ -23594,10 +23603,7 @@ static void pkm_lcs_kunit_source_request_blocking_read_wakes_on_enqueue(
 		goto out_release_source;
 	}
 	if (!wait_for_completion_timeout(&script.started, HZ)) {
-		mutex_lock(&source_fd->queue_lock);
-		source_fd->closing = true;
-		mutex_unlock(&source_fd->queue_lock);
-		wake_up_interruptible(&source_fd->read_wait);
+		pkm_lcs_kunit_source_fd_force_closing(source_fd);
 		KUNIT_FAIL(test, "blocking source-read worker did not start");
 		goto out_stop_task;
 	}
@@ -23609,17 +23615,11 @@ static void pkm_lcs_kunit_source_request_blocking_read_wakes_on_enqueue(
 	ret = pkm_lcs_source_enqueue_request(1, frame, frame_len, NULL);
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	if (ret) {
-		mutex_lock(&source_fd->queue_lock);
-		source_fd->closing = true;
-		mutex_unlock(&source_fd->queue_lock);
-		wake_up_interruptible(&source_fd->read_wait);
+		pkm_lcs_kunit_source_fd_force_closing(source_fd);
 		goto out_stop_task;
 	}
 	if (!wait_for_completion_timeout(&script.done, HZ)) {
-		mutex_lock(&source_fd->queue_lock);
-		source_fd->closing = true;
-		mutex_unlock(&source_fd->queue_lock);
-		wake_up_interruptible(&source_fd->read_wait);
+		pkm_lcs_kunit_source_fd_force_closing(source_fd);
 		KUNIT_FAIL(test, "blocking source read did not wake on enqueue");
 	}
 
@@ -23637,6 +23637,64 @@ out_stop_task:
 							      sizeof(out),
 							      true),
 			(ssize_t)-EAGAIN);
+
+out_release_source:
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_request_blocking_read_wakes_on_closing(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_blocking_source_read_script script = { };
+	struct task_struct *task;
+	struct pkm_lcs_source_fd *source_fd;
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+	long ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	source_fd = file.private_data;
+	KUNIT_ASSERT_NOT_NULL(test, source_fd);
+
+	memset(out, 0xaa, sizeof(out));
+	init_completion(&script.started);
+	init_completion(&script.done);
+	script.file = &file;
+	script.buf = out;
+	script.buf_len = sizeof(out);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_blocking_source_read_thread, &script,
+		"pkm-lcs-closing-source-read");
+	if (IS_ERR(task)) {
+		KUNIT_FAIL(test, "failed to start closing source-read worker");
+		goto out_release_source;
+	}
+	if (!wait_for_completion_timeout(&script.started, HZ)) {
+		pkm_lcs_kunit_source_fd_force_closing(source_fd);
+		KUNIT_FAIL(test, "closing source-read worker did not start");
+		goto out_stop_task;
+	}
+	KUNIT_EXPECT_EQ(test,
+			wait_for_completion_timeout(&script.done,
+						    msecs_to_jiffies(20)),
+			0UL);
+
+	pkm_lcs_kunit_source_fd_force_closing(source_fd);
+	if (!wait_for_completion_timeout(&script.done, HZ))
+		KUNIT_FAIL(test, "blocking source read did not wake on close");
+
+out_stop_task:
+	ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	if (!completion_done(&script.done))
+		goto out_release_source;
+
+	KUNIT_EXPECT_EQ(test, script.ret, (ssize_t)0);
+	KUNIT_EXPECT_EQ(test, out[0], 0xaaU);
 
 out_release_source:
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
@@ -36019,6 +36077,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_request_read_fault_preserves_queue),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_request_blocking_read_wakes_on_enqueue),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_request_blocking_read_wakes_on_closing),
 	KUNIT_CASE(pkm_lcs_kunit_source_request_enqueue_rejects_bad_state),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_lookup_allocates_monotonic_ids),
