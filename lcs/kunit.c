@@ -34083,6 +34083,16 @@ static long pkm_lcs_kunit_dispatch_status_only_waitable_request(
 			1, 0x0102030405060708ULL, parent_guid, "Child",
 			strlen("Child"), "base", strlen("base"), child_guid,
 			0x1112131415161718ULL, waiter, enqueue);
+	case RSI_HIDE_ENTRY:
+		return pkm_lcs_source_dispatch_hide_entry_waitable_request(
+			1, 0x1213141516171819ULL, parent_guid, "Child",
+			strlen("Child"), "base", strlen("base"),
+			0x1a1b1c1d1e1f2021ULL, waiter, enqueue);
+	case RSI_DELETE_ENTRY:
+		return pkm_lcs_source_dispatch_delete_entry_waitable_request(
+			1, 0x2223242526272829ULL, parent_guid, "Child",
+			strlen("Child"), "base", strlen("base"), waiter,
+			enqueue);
 	case RSI_CREATE_KEY:
 		return pkm_lcs_source_dispatch_create_key_waitable_request(
 			1, 0x2122232425262728ULL, key_guid, "Child",
@@ -34092,6 +34102,25 @@ static long pkm_lcs_kunit_dispatch_status_only_waitable_request(
 		return pkm_lcs_source_dispatch_write_key_waitable_request(
 			1, 0x3132333435363738ULL, key_guid, sd, sizeof(sd),
 			0x4142434445464748ULL, waiter, enqueue);
+	case RSI_DROP_KEY:
+		return pkm_lcs_source_dispatch_drop_key_waitable_request(
+			1, 0x494a4b4c4d4e4f50ULL, key_guid, waiter, enqueue);
+	case RSI_SET_VALUE:
+		return pkm_lcs_source_dispatch_set_value_waitable_request(
+			1, 0x5152535455565758ULL, key_guid, "Value",
+			strlen("Value"), "base", strlen("base"), REG_BINARY,
+			sd, sizeof(sd), 0x595a5b5c5d5e5f60ULL, 0, waiter,
+			enqueue);
+	case RSI_DELETE_VALUE_ENTRY:
+		return pkm_lcs_source_dispatch_delete_value_entry_waitable_request(
+			1, 0x6162636465666768ULL, key_guid, "Value",
+			strlen("Value"), "base", strlen("base"), waiter,
+			enqueue);
+	case RSI_SET_BLANKET_TOMBSTONE:
+		return pkm_lcs_source_dispatch_set_blanket_tombstone_waitable_request(
+			1, 0x696a6b6c6d6e6f70ULL, key_guid, "base",
+			strlen("base"), true, 0x7172737475767778ULL, waiter,
+			enqueue);
 	case RSI_BEGIN_TRANSACTION:
 		return pkm_lcs_source_dispatch_begin_transaction_waitable_request(
 			1, 0x5152535455565758ULL, RSI_TXN_READ_WRITE, waiter,
@@ -34102,6 +34131,9 @@ static long pkm_lcs_kunit_dispatch_status_only_waitable_request(
 	case RSI_ABORT_TRANSACTION:
 		return pkm_lcs_source_dispatch_abort_transaction_waitable_request(
 			1, 0x7172737475767778ULL, waiter, enqueue);
+	case RSI_FLUSH:
+		return pkm_lcs_source_dispatch_flush_waitable_request(
+			1, "Machine", strlen("Machine"), waiter, enqueue);
 	default:
 		return -EINVAL;
 	}
@@ -34112,11 +34144,18 @@ static void pkm_lcs_kunit_source_write_status_only_payload_exactness(
 {
 	static const u16 op_codes[] = {
 		RSI_CREATE_ENTRY,
+		RSI_HIDE_ENTRY,
+		RSI_DELETE_ENTRY,
 		RSI_CREATE_KEY,
 		RSI_WRITE_KEY,
+		RSI_DROP_KEY,
+		RSI_SET_VALUE,
+		RSI_DELETE_VALUE_ENTRY,
+		RSI_SET_BLANKET_TOMBSTONE,
 		RSI_BEGIN_TRANSACTION,
 		RSI_COMMIT_TRANSACTION,
 		RSI_ABORT_TRANSACTION,
+		RSI_FLUSH,
 	};
 	size_t i;
 
