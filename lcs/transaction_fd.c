@@ -4268,6 +4268,22 @@ static bool pkm_lcs_transaction_state_known(u32 state)
 	       state == REG_TXN_SOURCE_DOWN;
 }
 
+u32 pkm_lcs_kunit_transaction_fd_poll_mask(int fd)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	u32 mask;
+	long ret;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return (u32)(EPOLLERR | EPOLLHUP);
+
+	mask = (u32)pkm_lcs_transaction_fd_poll(fd_file(held), NULL);
+	fdput(held);
+	return mask;
+}
+
 long pkm_lcs_kunit_transaction_fd_set_state(int fd, u32 state,
 					    u32 bound_source_id)
 {

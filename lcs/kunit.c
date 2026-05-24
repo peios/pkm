@@ -14524,6 +14524,96 @@ static void pkm_lcs_kunit_transaction_timeout_marks_timed_out(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_transaction_poll_reports_active_and_terminal_masks(
+	struct kunit *test)
+{
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_transaction_fd_poll_mask((int)fd),
+			0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_ACTIVE_BOUND, 7),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_transaction_fd_poll_mask((int)fd),
+			0U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_COMMITTED, 7),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_transaction_fd_poll_mask((int)fd),
+			(u32)(EPOLLERR | EPOLLHUP));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_ABORTED, 7),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_transaction_fd_poll_mask((int)fd),
+			(u32)(EPOLLERR | EPOLLHUP));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_TIMED_OUT, 7),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_transaction_fd_poll_mask((int)fd),
+			(u32)(EPOLLERR | EPOLLHUP));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_SOURCE_DOWN, 7),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_transaction_fd_poll_mask((int)fd),
+			(u32)(EPOLLERR | EPOLLHUP));
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_poll_reports_runtime_terminals(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x81
+	};
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	u32 marked = 0;
+	long fd;
+
+	fd = pkm_lcs_transaction_fd_publish(1);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_transaction_fd_poll_mask((int)fd),
+			0U);
+
+	msleep(20);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_transaction_fd_poll_mask((int)fd),
+			(u32)(EPOLLERR | EPOLLHUP));
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, snapshot.transaction_id, 1,
+				root_guid),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_transaction_fd_poll_mask((int)fd),
+			0U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_transaction_fd_mark_source_down(1,
+								     &marked),
+			0L);
+	KUNIT_EXPECT_EQ(test, marked, 1U);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_transaction_fd_poll_mask((int)fd),
+			(u32)(EPOLLERR | EPOLLHUP));
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_transaction_timeout_bound_aborts_source(
 	struct kunit *test)
 {
@@ -14998,6 +15088,7 @@ static void pkm_lcs_kunit_transaction_commit_active_bound_success(
 	u64 generation_before = 0;
 	u64 generation_after = 0;
 	u32 count = 0;
+	u32 poll_mask = 0;
 	int thread_ret;
 	long ret;
 	long fd;
@@ -15050,6 +15141,8 @@ static void pkm_lcs_kunit_transaction_commit_active_bound_success(
 			pkm_lcs_transaction_fd_status((int)fd, &status), 0L);
 	KUNIT_EXPECT_EQ(test, status.state, REG_TXN_COMMITTED);
 	KUNIT_EXPECT_EQ(test, status.terminal_errno, 0);
+	poll_mask = pkm_lcs_kunit_transaction_fd_poll_mask((int)fd);
+	KUNIT_EXPECT_EQ(test, poll_mask, (u32)(EPOLLERR | EPOLLHUP));
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_source_hive_generation_snapshot(
 				1, root_guid, &generation_after),
@@ -35463,6 +35556,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_begin_transaction_publishes_active_unbound),
 	KUNIT_CASE(pkm_lcs_kunit_begin_transaction_ids_are_monotonic),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_timeout_marks_timed_out),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_poll_reports_active_and_terminal_masks),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_poll_reports_runtime_terminals),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_timeout_bound_aborts_source),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_timeout_commit_in_flight_no_abort),

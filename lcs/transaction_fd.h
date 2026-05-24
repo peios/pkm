@@ -238,6 +238,7 @@ long pkm_lcs_transaction_fd_log_snapshot(
 	int fd, struct pkm_lcs_transaction_mutation_log_snapshot *out);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
+u32 pkm_lcs_kunit_transaction_fd_poll_mask(int fd);
 long pkm_lcs_kunit_transaction_fd_set_state(int fd, u32 state,
 					    u32 bound_source_id);
 long pkm_lcs_kunit_transaction_fd_set_log_capacity(int fd, u32 capacity);
