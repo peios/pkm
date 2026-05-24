@@ -1165,6 +1165,8 @@ ssize_t pkm_lcs_kunit_source_device_write_file(
 	struct file *file, const void *buf, size_t count, bool fault,
 	struct pkm_lcs_source_response_result *result);
 __poll_t pkm_lcs_kunit_source_device_poll_file(struct file *file);
+__poll_t pkm_lcs_kunit_source_device_poll_file_with_table(
+	struct file *file, struct poll_table_struct *wait);
 long pkm_lcs_kunit_source_hive_generation_snapshot(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	u64 *generation_out);

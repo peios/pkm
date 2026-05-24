@@ -10655,6 +10655,12 @@ __poll_t pkm_lcs_kunit_source_device_poll_file(struct file *file)
 {
 	return pkm_lcs_source_device_fops.poll(file, NULL);
 }
+
+__poll_t pkm_lcs_kunit_source_device_poll_file_with_table(
+	struct file *file, struct poll_table_struct *wait)
+{
+	return pkm_lcs_source_device_fops.poll(file, wait);
+}
 #endif
 
 static struct miscdevice pkm_lcs_source_device = {

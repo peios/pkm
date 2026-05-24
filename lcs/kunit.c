@@ -34634,6 +34634,54 @@ static void pkm_lcs_kunit_source_write_malformed_lookup_data_succeeds(
 	kacs_rust_token_drop(token);
 }
 
+struct pkm_lcs_kunit_poll_capture {
+	poll_table table;
+	struct file *file;
+	wait_queue_head_t *wait_address;
+	unsigned int calls;
+};
+
+static void pkm_lcs_kunit_poll_capture_queue(
+	struct file *file, wait_queue_head_t *wait_address,
+	struct poll_table_struct *table)
+{
+	struct pkm_lcs_kunit_poll_capture *capture =
+		container_of(table, struct pkm_lcs_kunit_poll_capture, table);
+
+	capture->file = file;
+	capture->wait_address = wait_address;
+	capture->calls++;
+}
+
+static void pkm_lcs_kunit_source_poll_registers_read_wait_queue(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_poll_capture capture = { };
+	struct pkm_lcs_source_fd *source_fd;
+	struct file file = { };
+	const void *token;
+	__poll_t mask;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	source_fd = file.private_data;
+	KUNIT_ASSERT_NOT_NULL(test, source_fd);
+
+	init_poll_funcptr(&capture.table,
+			  pkm_lcs_kunit_poll_capture_queue);
+	mask = pkm_lcs_kunit_source_device_poll_file_with_table(
+		&file, &capture.table);
+
+	KUNIT_EXPECT_EQ(test, (u32)mask, (u32)EPOLLOUT);
+	KUNIT_EXPECT_EQ(test, capture.calls, 1U);
+	KUNIT_EXPECT_PTR_EQ(test, capture.file, &file);
+	KUNIT_EXPECT_PTR_EQ(test, capture.wait_address,
+			    &source_fd->read_wait);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_poll_reports_active_readiness(
 	struct kunit *test)
 {
@@ -36385,6 +36433,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_write_fault_preserves_record),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_malformed_lookup_data_succeeds),
+	KUNIT_CASE(pkm_lcs_kunit_source_poll_registers_read_wait_queue),
 	KUNIT_CASE(pkm_lcs_kunit_source_poll_reports_active_readiness),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_poll_reports_unregistered_and_closing),
