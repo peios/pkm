@@ -166,6 +166,9 @@ struct pkm_lcs_kunit_transaction_source_script {
 	struct file *file;
 	struct pkm_lcs_kunit_delete_key_ioctl_source_script
 		*delete_key_lookup_after;
+	bool expect_layer_refresh;
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script
+		*layer_refresh_after;
 	u16 expected_op_code;
 	u32 expected_mode;
 	u32 status;
@@ -25027,6 +25030,41 @@ static int pkm_lcs_kunit_transaction_source_thread(void *data)
 			return ret;
 		}
 	}
+	if (script->expect_layer_refresh) {
+		struct pkm_lcs_kunit_layer_metadata_refresh_source_script *refresh =
+			script->layer_refresh_after;
+		u32 refresh_reads;
+		u32 refresh_writes;
+
+		if (!refresh) {
+			script->result = -EINVAL;
+			return script->result;
+		}
+		refresh->file = script->file;
+		refresh_reads = refresh->reads;
+		refresh_writes = refresh->writes;
+		ret = pkm_lcs_kunit_layer_metadata_refresh_handle_read_key(
+			refresh, request, sizeof(request));
+		if (ret)
+			goto out_refresh;
+		ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
+			refresh, request, sizeof(request), "Precedence",
+			refresh->precedence_present, refresh->precedence);
+		if (ret)
+			goto out_refresh;
+		ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
+			refresh, request, sizeof(request), "Enabled",
+			refresh->enabled_present, refresh->enabled);
+
+out_refresh:
+		script->reads += refresh->reads - refresh_reads;
+		script->writes += refresh->writes - refresh_writes;
+		refresh->result = ret;
+		if (ret) {
+			script->result = ret;
+			return ret;
+		}
+	}
 	script->result = 0;
 	return 0;
 }
@@ -25557,6 +25595,148 @@ static void pkm_lcs_kunit_transaction_commit_generation_success(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_transaction_commit_refreshes_layer_metadata_once(
+	struct kunit *test)
+{
+	static const char * const metadata_path[] = {
+		"Machine", "System", "Registry", "Layers", "Policy"
+	};
+	static const u8 metadata_ancestors[5][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xf4, 0x10 },
+		{ 0xf4, 0x11 },
+		{ 0xf4, 0x12 },
+		{ 0xf4 },
+	};
+	static const char precedence_name[] = "Precedence";
+	static const char enabled_name[] = "Enabled";
+	struct pkm_lcs_transaction_mutation_handle first_handle = { };
+	struct pkm_lcs_transaction_mutation_handle second_handle = { };
+	struct pkm_lcs_transaction_binding_plan binding = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	struct pkm_lcs_transaction_mutation_log_snapshot log = { };
+	struct pkm_lcs_rsi_layer_view layers[3] = { };
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script refresh = {
+		.expected_guid = metadata_ancestors[4],
+		.name = "Policy",
+		.sd = pkm_lcs_kunit_owner_only_sd,
+		.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+		.precedence = 12,
+		.enabled = 1,
+		.precedence_present = true,
+		.enabled_present = true,
+	};
+	struct pkm_lcs_kunit_transaction_source_script script = {
+		.expected_op_code = RSI_COMMIT_TRANSACTION,
+		.status = RSI_OK,
+		.expect_layer_refresh = true,
+		.layer_refresh_after = &refresh,
+	};
+	struct pkm_lcs_transaction_set_value_log_input first_input = {
+		.key_guid = metadata_ancestors[4],
+		.value_name = precedence_name,
+		.value_name_len = sizeof(precedence_name) - 1,
+		.layer = "base",
+		.layer_len = 4,
+		.path = metadata_path,
+		.ancestor_guids = metadata_ancestors,
+		.depth = ARRAY_SIZE(metadata_ancestors),
+		.sequence = 51,
+	};
+	struct pkm_lcs_transaction_set_value_log_input second_input = {
+		.key_guid = metadata_ancestors[4],
+		.value_name = enabled_name,
+		.value_name_len = sizeof(enabled_name) - 1,
+		.layer = "base",
+		.layer_len = 4,
+		.path = metadata_path,
+		.ancestor_guids = metadata_ancestors,
+		.depth = ARRAY_SIZE(metadata_ancestors),
+		.sequence = 52,
+	};
+	char names[64] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, snapshot.transaction_id, 1,
+				metadata_ancestors[0]),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_begin_set_value_mutation(
+				(int)fd, 1, metadata_ancestors[0],
+				&first_input, &first_handle, &binding),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_commit_mutation(&first_handle),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_begin_set_value_mutation(
+				(int)fd, 1, metadata_ancestors[0],
+				&second_input, &second_handle, &binding),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_commit_mutation(&second_handle),
+			0L);
+
+	script.file = &file;
+	script.expected_header_txn_id = snapshot.transaction_id;
+	script.expected_payload_txn_id = snapshot.transaction_id;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_transaction_source_thread, &script,
+		"pkm-lcs-kunit-commit-layer-refresh");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_transaction_fd_commit((int)fd);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, refresh.result, 0);
+	KUNIT_EXPECT_EQ(test, refresh.reads, 3U);
+	KUNIT_EXPECT_EQ(test, refresh.writes, 3U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_log_snapshot((int)fd, &log),
+			0L);
+	KUNIT_EXPECT_EQ(test, log.entry_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 2U);
+	KUNIT_EXPECT_STREQ(test, layers[1].name, "Policy");
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 12U);
+	KUNIT_EXPECT_EQ(test, layers[1].enabled, 1U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
 	kacs_rust_token_drop(token);
 }
 
@@ -33015,6 +33195,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_late_begin_success_enqueues_abort_cleanup),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_generation_success),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_commit_refreshes_layer_metadata_once),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_dispatches_create_watch),
 	KUNIT_CASE(

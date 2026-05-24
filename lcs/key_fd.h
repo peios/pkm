@@ -122,6 +122,9 @@ long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted_with_refs(
 long pkm_lcs_key_fd_mark_orphaned_no_watch(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
 	u32 *live_refs_out);
+long pkm_lcs_key_path_refresh_layer_metadata(
+	u32 source_id, const u8 key_guid[PKM_LCS_GUID_BYTES],
+	const char * const *resolved_path, u32 path_component_count);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned);

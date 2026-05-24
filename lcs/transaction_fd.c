@@ -329,6 +329,67 @@ static long pkm_lcs_transaction_layer_name_validate(
 		layer_name, layer_name_len, layer_name, layer_name_len, &equal);
 }
 
+static long pkm_lcs_transaction_path_component_casefold_eq(
+	const char *component, const char *expected, bool *equal)
+{
+	size_t component_len;
+	size_t expected_len;
+
+	if (!component || !expected || !equal)
+		return -EINVAL;
+	component_len = strlen(component);
+	expected_len = strlen(expected);
+	if (component_len > U32_MAX || expected_len > U32_MAX)
+		return -EOVERFLOW;
+	return pkm_lcs_transaction_layer_name_casefold_eq(
+		component, (u32)component_len, expected, (u32)expected_len,
+		equal);
+}
+
+static long pkm_lcs_transaction_layer_metadata_path(
+	char **path, u32 depth, const char **layer_name_out,
+	u32 *layer_name_len_out, bool *matches_out)
+{
+	static const char * const prefix[] = {
+		"Machine", "System", "Registry", "Layers"
+	};
+	const char *layer_name;
+	u32 i;
+
+	if (!layer_name_out || !layer_name_len_out || !matches_out)
+		return -EINVAL;
+	*layer_name_out = NULL;
+	*layer_name_len_out = 0;
+	*matches_out = false;
+	if (!path)
+		return -EINVAL;
+	if (depth != ARRAY_SIZE(prefix) + 1U)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(prefix); i++) {
+		bool equal = false;
+		long ret;
+
+		ret = pkm_lcs_transaction_path_component_casefold_eq(
+			path[i], prefix[i], &equal);
+		if (ret)
+			return ret;
+		if (!equal)
+			return 0;
+	}
+
+	layer_name = path[ARRAY_SIZE(prefix)];
+	if (!layer_name)
+		return -EINVAL;
+	if (strlen(layer_name) > U32_MAX)
+		return -EOVERFLOW;
+
+	*layer_name_out = layer_name;
+	*layer_name_len_out = (u32)strlen(layer_name);
+	*matches_out = true;
+	return 0;
+}
+
 static long pkm_lcs_transaction_layer_name_is_base(
 	const char *layer_name, u32 layer_name_len, bool *is_base)
 {
@@ -1632,6 +1693,95 @@ static long pkm_lcs_transaction_log_apply_orphan_effects(
 	return 0;
 }
 
+static long pkm_lcs_transaction_layer_metadata_seen_before(
+	struct pkm_lcs_transaction_fd *txn,
+	const struct pkm_lcs_transaction_log_entry *current_entry,
+	const char *layer_name, u32 layer_name_len, bool *seen_out)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+
+	if (!txn || !current_entry || !layer_name || !seen_out)
+		return -EINVAL;
+	*seen_out = false;
+
+	list_for_each_entry(entry, &txn->mutation_log, link) {
+		const char *entry_layer = NULL;
+		u32 entry_layer_len = 0;
+		bool matches_path = false;
+		bool matches_layer = false;
+		long ret;
+
+		if (entry == current_entry)
+			return 0;
+		if (entry->kind != PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE)
+			continue;
+
+		ret = pkm_lcs_transaction_layer_metadata_path(
+			entry->set_value.path, entry->set_value.depth,
+			&entry_layer, &entry_layer_len, &matches_path);
+		if (ret)
+			return ret;
+		if (!matches_path)
+			continue;
+
+		ret = pkm_lcs_transaction_layer_name_casefold_eq(
+			entry_layer, entry_layer_len, layer_name,
+			layer_name_len, &matches_layer);
+		if (ret)
+			return ret;
+		if (matches_layer) {
+			*seen_out = true;
+			return 0;
+		}
+	}
+
+	return -EIO;
+}
+
+static long pkm_lcs_transaction_log_refresh_layer_metadata(
+	struct pkm_lcs_transaction_fd *txn, u32 source_id)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+
+	if (!txn || !source_id)
+		return -EINVAL;
+
+	list_for_each_entry(entry, &txn->mutation_log, link) {
+		const char *layer_name = NULL;
+		u32 layer_name_len = 0;
+		bool matches_path = false;
+		bool seen = false;
+		long ret;
+
+		if (entry->kind != PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE)
+			continue;
+
+		ret = pkm_lcs_transaction_layer_metadata_path(
+			entry->set_value.path, entry->set_value.depth,
+			&layer_name, &layer_name_len, &matches_path);
+		if (ret)
+			return ret;
+		if (!matches_path)
+			continue;
+
+		ret = pkm_lcs_transaction_layer_metadata_seen_before(
+			txn, entry, layer_name, layer_name_len, &seen);
+		if (ret)
+			return ret;
+		if (seen)
+			continue;
+
+		ret = pkm_lcs_key_path_refresh_layer_metadata(
+			source_id, entry->set_value.key_guid,
+			(const char * const *)entry->set_value.path,
+			entry->set_value.depth);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 static long pkm_lcs_transaction_append_delete_key_exact(
 	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry,
 	struct pkm_lcs_watch_dispatch_context *contexts, u32 context_capacity,
@@ -1893,6 +2043,12 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 	*source_down_required_out = false;
 
 	if (status == RSI_OK) {
+		ret = pkm_lcs_transaction_log_refresh_layer_metadata(txn,
+								     source_id);
+		if (ret) {
+			*source_down_required_out = true;
+			return -EIO;
+		}
 		ret = pkm_lcs_transaction_fd_apply_success_generation_under_bind(
 			txn, transaction_id, source_id);
 		if (ret) {

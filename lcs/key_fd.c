@@ -2895,6 +2895,22 @@ out_read_frame:
 	return ret;
 }
 
+long pkm_lcs_key_path_refresh_layer_metadata(
+	u32 source_id, const u8 key_guid[PKM_LCS_GUID_BYTES],
+	const char * const *resolved_path, u32 path_component_count)
+{
+	struct pkm_lcs_key_fd key_fd = { };
+
+	if (!source_id || !key_guid || !resolved_path || !path_component_count)
+		return -EINVAL;
+
+	key_fd.source_id = source_id;
+	memcpy(key_fd.key_guid, key_guid, sizeof(key_fd.key_guid));
+	key_fd.resolved_path = (char **)resolved_path;
+	key_fd.path_component_count = path_component_count;
+	return pkm_lcs_key_fd_refresh_layer_metadata(&key_fd);
+}
+
 static long pkm_lcs_key_fd_query_values_batch_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_query_values_batch_args *args)
