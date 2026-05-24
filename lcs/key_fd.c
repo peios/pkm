@@ -177,6 +177,9 @@ static void pkm_lcs_get_security_result_destroy(
 static long pkm_lcs_key_fd_plan_get_security(
 	const u8 *existing_sd, size_t existing_sd_len, u32 security_info,
 	struct pkm_lcs_get_security_result *out);
+static long pkm_lcs_key_fd_mark_orphaned_internal(
+	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
+	bool dispatch_direct_deleted);
 
 static u32 pkm_lcs_guid_hash(const u8 guid[PKM_LCS_GUID_BYTES])
 {
@@ -1127,6 +1130,46 @@ static void pkm_lcs_key_fd_publish_value_effects(
 	context.event_type = event_type;
 	context.name = (const u8 *)value_name;
 	context.name_len = value_name_len;
+
+	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
+}
+
+static void pkm_lcs_key_fd_publish_parent_subkey_deleted(
+	struct pkm_lcs_key_fd *key_fd, const u8 *parent_guid,
+	const char *child_name, u32 child_name_len)
+{
+	struct pkm_lcs_watch_dispatch_context context = { };
+
+	if (!key_fd || !parent_guid || !child_name || !child_name_len ||
+	    key_fd->path_component_count < 2)
+		return;
+
+	context.changed_key_guid = parent_guid;
+	context.ancestor_guids =
+		(const u8 (*)[PKM_LCS_GUID_BYTES])key_fd->ancestor_guids;
+	context.resolved_path = (const char * const *)key_fd->resolved_path;
+	context.path_component_count = key_fd->path_component_count - 1U;
+	context.event_type = REG_WATCH_SUBKEY_DELETED;
+	context.name = (const u8 *)child_name;
+	context.name_len = child_name_len;
+
+	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
+}
+
+static void pkm_lcs_key_fd_publish_key_deleted_context(
+	struct pkm_lcs_key_fd *key_fd)
+{
+	struct pkm_lcs_watch_dispatch_context context = { };
+
+	if (!key_fd)
+		return;
+
+	context.changed_key_guid = key_fd->key_guid;
+	context.ancestor_guids =
+		(const u8 (*)[PKM_LCS_GUID_BYTES])key_fd->ancestor_guids;
+	context.resolved_path = (const char * const *)key_fd->resolved_path;
+	context.path_component_count = key_fd->path_component_count;
+	context.event_type = REG_WATCH_KEY_DELETED;
 
 	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
 }
@@ -3195,8 +3238,12 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 			goto out_cancel_mutation;
 		}
 		if (!still_named) {
-			ret = pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
-				key_fd->source_id, key_fd->key_guid, NULL);
+			pkm_lcs_key_fd_publish_parent_subkey_deleted(
+				key_fd, parent_guid, child_name, child_name_len);
+			pkm_lcs_key_fd_publish_key_deleted_context(key_fd);
+			ret = pkm_lcs_key_fd_mark_orphaned_internal(
+				key_fd->source_id, key_fd->key_guid, NULL,
+				false);
 			if (ret) {
 				pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 				ret = -EIO;
@@ -3357,6 +3404,9 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 		ret = -EIO;
 		goto out_input;
 	}
+	pkm_lcs_key_fd_publish_parent_subkey_deleted(
+		key_fd, parent_guid, child_name, child_name_len);
+	pkm_lcs_key_fd_publish_key_deleted_context(key_fd);
 	ret = 0;
 
 out_cancel_mutation:
@@ -3898,8 +3948,9 @@ static long pkm_lcs_key_fd_dispatch_key_deleted_direct(
 	return ret;
 }
 
-long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
-	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out)
+static long pkm_lcs_key_fd_mark_orphaned_internal(
+	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
+	bool dispatch_direct_deleted)
 {
 	struct pkm_lcs_key_ref_entry *entry;
 	struct pkm_lcs_key_fd *key_fd;
@@ -3932,11 +3983,18 @@ long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
 	}
 	mutex_unlock(&pkm_lcs_key_ref_lock);
 
-	if (!already_orphaned)
+	if (!already_orphaned && dispatch_direct_deleted)
 		(void)pkm_lcs_key_fd_dispatch_key_deleted_direct(guid);
 	if (marked_out)
 		*marked_out = marked;
 	return 0;
+}
+
+long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
+	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out)
+{
+	return pkm_lcs_key_fd_mark_orphaned_internal(source_id, guid,
+						    marked_out, true);
 }
 
 long pkm_lcs_key_fd_dispatch_watch_event(
