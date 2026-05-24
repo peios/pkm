@@ -536,6 +536,53 @@ out_unlock:
 	return ret;
 }
 
+long pkm_lcs_source_active_ids_snapshot(u32 *source_ids, u32 max_source_ids,
+					u32 *count_out)
+{
+	u32 active_count = 0;
+	u32 written = 0;
+	u32 i;
+	long ret = 0;
+
+	if (count_out)
+		*count_out = 0;
+	if (!source_ids || !max_source_ids || !count_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+		struct pkm_lcs_source_slot *slot = &pkm_lcs_source_slots[i];
+
+		if (!slot->occupied ||
+		    slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE)
+			continue;
+		if (!slot->active_fd) {
+			ret = -EIO;
+			goto out_unlock;
+		}
+		active_count++;
+	}
+
+	*count_out = active_count;
+	if (active_count > max_source_ids) {
+		ret = -ENOSPC;
+		goto out_unlock;
+	}
+
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+		struct pkm_lcs_source_slot *slot = &pkm_lcs_source_slots[i];
+
+		if (!slot->occupied ||
+		    slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE)
+			continue;
+		source_ids[written++] = slot->source_id;
+	}
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
 static struct pkm_lcs_source_slot *pkm_lcs_source_slot_free_locked(void)
 {
 	u32 i;

@@ -916,6 +916,9 @@ long pkm_lcs_source_hive_generation_snapshot(
 long pkm_lcs_source_next_sequence_snapshot(u64 *next_sequence);
 void pkm_lcs_source_base_layer_snapshot(
 	const struct pkm_lcs_rsi_layer_view **layers, u32 *layer_count);
+long pkm_lcs_source_active_ids_snapshot(u32 *source_ids,
+					u32 max_source_ids,
+					u32 *count_out);
 void pkm_lcs_source_mark_down_by_id(u32 source_id);
 long pkm_lcs_source_create_key_round_trip_timeout(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
