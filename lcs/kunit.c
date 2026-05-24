@@ -173,12 +173,16 @@ struct pkm_lcs_kunit_read_key_source_script {
 };
 
 struct pkm_lcs_kunit_delete_key_ioctl_source_script;
+struct pkm_lcs_kunit_delete_layer_source_script;
 
 struct pkm_lcs_kunit_transaction_source_script {
 	struct file *file;
 	struct pkm_lcs_kunit_delete_key_ioctl_source_script
 		*delete_key_lookup_after;
+	struct pkm_lcs_kunit_delete_layer_source_script
+		*delete_layer_after;
 	bool expect_layer_refresh;
+	bool expect_delete_layer;
 	struct pkm_lcs_kunit_layer_metadata_refresh_source_script
 		*layer_refresh_after;
 	u16 expected_op_code;
@@ -25876,6 +25880,27 @@ out_refresh:
 			return ret;
 		}
 	}
+	if (script->expect_delete_layer) {
+		struct pkm_lcs_kunit_delete_layer_source_script *delete_layer =
+			script->delete_layer_after;
+		u32 delete_reads;
+		u32 delete_writes;
+
+		if (!delete_layer) {
+			script->result = -EINVAL;
+			return script->result;
+		}
+		delete_layer->file = script->file;
+		delete_reads = delete_layer->reads;
+		delete_writes = delete_layer->writes;
+		ret = pkm_lcs_kunit_delete_layer_source_thread(delete_layer);
+		script->reads += delete_layer->reads - delete_reads;
+		script->writes += delete_layer->writes - delete_writes;
+		if (ret) {
+			script->result = ret;
+			return ret;
+		}
+	}
 	script->result = 0;
 	return 0;
 }
@@ -26821,6 +26846,155 @@ static void pkm_lcs_kunit_transaction_commit_refreshes_created_layer(
 	kfree(owner_sid);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_transaction_commit_deletes_layer_metadata(
+	struct kunit *test)
+{
+	static const char child_name[] = "Policy";
+	static const char * const metadata_root_path[] = {
+		"Machine", "System", "Registry", "Layers"
+	};
+	static const char * const metadata_path[] = {
+		"Machine", "System", "Registry", "Layers", "Policy"
+	};
+	static const u8 metadata_root_ancestors[4][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xfd, 0x10 },
+		{ 0xfd, 0x11 },
+		{ 0xfd, 0x12 },
+	};
+	static const u8 metadata_ancestors[5][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xfd, 0x10 },
+		{ 0xfd, 0x11 },
+		{ 0xfd, 0x12 },
+		{ 0xfd, 0x13 },
+	};
+	struct pkm_lcs_transaction_mutation_handle handle = { };
+	struct pkm_lcs_transaction_binding_plan binding = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	struct pkm_lcs_transaction_mutation_log_snapshot log = { };
+	struct pkm_lcs_rsi_layer_view layers[2] = { };
+	struct pkm_lcs_kunit_delete_key_ioctl_source_script lookup = {
+		.expected_parent_guid = metadata_root_ancestors[3],
+		.expected_key_guid = metadata_ancestors[4],
+		.expected_child_name = child_name,
+		.expected_layer_name = "base",
+		.remaining_path_found = false,
+	};
+	struct pkm_lcs_kunit_delete_layer_source_script delete_layer = {
+		.expected_layer_name = child_name,
+		.status = RSI_OK,
+	};
+	struct pkm_lcs_kunit_transaction_source_script script = {
+		.expected_op_code = RSI_COMMIT_TRANSACTION,
+		.status = RSI_OK,
+		.delete_key_lookup_after = &lookup,
+		.expect_delete_layer = true,
+		.delete_layer_after = &delete_layer,
+	};
+	struct pkm_lcs_transaction_delete_key_log_input input = {
+		.key_guid = metadata_ancestors[4],
+		.parent_guid = metadata_root_ancestors[3],
+		.child_name = child_name,
+		.child_name_len = sizeof(child_name) - 1U,
+		.layer = "base",
+		.layer_len = 4,
+		.parent_path = metadata_root_path,
+		.parent_ancestor_guids = metadata_root_ancestors,
+		.parent_depth = ARRAY_SIZE(metadata_root_ancestors),
+	};
+	char names[32] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	long metadata_fd;
+	long txn_fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				child_name, sizeof(child_name) - 1U, 7, 1,
+				metadata_ancestors[4],
+				pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+	metadata_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, metadata_path, metadata_ancestors,
+		ARRAY_SIZE(metadata_ancestors));
+	KUNIT_ASSERT_TRUE(test, metadata_fd >= 0);
+
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)txn_fd, snapshot.transaction_id, 1,
+				metadata_root_ancestors[0]),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_begin_delete_key_mutation(
+				(int)txn_fd, 1, metadata_root_ancestors[0],
+				&input, &handle, &binding),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_commit_mutation(&handle),
+			0L);
+
+	script.file = &file;
+	script.expected_header_txn_id = snapshot.transaction_id;
+	script.expected_payload_txn_id = snapshot.transaction_id;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_transaction_source_thread, &script,
+		"pkm-lcs-kunit-commit-delete-layer");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_transaction_fd_commit((int)txn_fd);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, lookup.result, 0);
+	KUNIT_EXPECT_EQ(test, delete_layer.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_log_snapshot((int)txn_fd, &log),
+			0L);
+	KUNIT_EXPECT_EQ(test, log.entry_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 1U);
+	KUNIT_EXPECT_STREQ(test, layers[0].name, "base");
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)metadata_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_expect_drop_key_request(test, &file,
+					      metadata_ancestors[4]);
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
 	pkm_lcs_kunit_reset_layer_table();
@@ -34463,6 +34637,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_transaction_commit_refreshes_set_security_layer),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_refreshes_created_layer),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_commit_deletes_layer_metadata),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_dispatches_create_watch),
 	KUNIT_CASE(
