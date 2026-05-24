@@ -589,6 +589,15 @@ struct pkm_lcs_kunit_read_then_create_source_script {
 	int result;
 };
 
+struct pkm_lcs_kunit_walk_then_read_source_script {
+	struct file *file;
+	struct pkm_lcs_kunit_walk_source_script walk;
+	struct pkm_lcs_kunit_read_key_source_script read_key;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
 static void pkm_lcs_kunit_setup_registered_source(struct kunit *test,
 						  struct file *file,
 						  const void **token_out);
@@ -597,6 +606,7 @@ static struct task_struct *pkm_lcs_kunit_kthread_run(int (*threadfn)(void *),
 						     const char *name);
 static int pkm_lcs_kunit_kthread_stop(struct task_struct *task);
 static int pkm_lcs_kunit_walk_source_thread(void *raw_script);
+static int pkm_lcs_kunit_walk_then_read_source_thread(void *raw_script);
 static int pkm_lcs_kunit_read_key_source_thread(void *raw_script);
 static int pkm_lcs_kunit_set_security_source_thread(void *raw_script);
 static int pkm_lcs_kunit_query_values_source_thread(void *raw_script);
@@ -16474,6 +16484,56 @@ static void pkm_lcs_kunit_base_layer_write_bad_inputs(struct kunit *test)
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_live_base_layer_write_uses_cached_sd(
+	struct kunit *test)
+{
+	static const u8 base_metadata_guid[RSI_GUID_SIZE] = { 0x4b, 0x36 };
+	struct pkm_lcs_create_layer_target target = {
+		.name = "base",
+		.name_len = 4,
+		.implicit_base = 1,
+	};
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *admin_token;
+	const void *service_token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	pkm_lcs_kunit_reset_layer_table();
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	service_token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, 0);
+	KUNIT_ASSERT_NOT_NULL(test, service_token);
+	sd = kacs_rust_kunit_create_file_sd(service_token, KEY_QUERY_VALUE, 0,
+					    0, 0, &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_base_layer_metadata_publish(
+				base_metadata_guid, sd, sd_len),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_live_layer_write_access_check_for_token(
+				admin_token, &target, &plan),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+
+	pkm_lcs_kunit_reset_layer_table();
+	memset(&plan, 0, sizeof(plan));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_live_layer_write_access_check_for_token(
+				admin_token, &target, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, KEY_SET_VALUE);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(service_token);
+	kacs_rust_token_drop(admin_token);
+	pkm_lcs_kunit_reset_layer_table();
+}
+
 static void pkm_lcs_kunit_create_layer_write_explicit_folded_match(
 	struct kunit *test)
 {
@@ -19197,6 +19257,34 @@ static int pkm_lcs_kunit_read_then_create_source_thread(void *raw_script)
 	script->reads += script->create.reads;
 	script->writes += script->create.writes;
 	script->result = ret ? ret : script->create.result;
+	return script->result;
+}
+
+static int pkm_lcs_kunit_walk_then_read_source_thread(void *raw_script)
+{
+	struct pkm_lcs_kunit_walk_then_read_source_script *script = raw_script;
+	int ret;
+
+	if (!script || !script->file) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	script->walk.file = script->file;
+	ret = pkm_lcs_kunit_walk_source_thread(&script->walk);
+	script->reads = script->walk.reads;
+	script->writes = script->walk.writes;
+	if (ret) {
+		script->result = ret;
+		return ret;
+	}
+
+	script->read_key.file = script->file;
+	ret = pkm_lcs_kunit_read_key_source_thread(&script->read_key);
+	script->reads += script->read_key.reads;
+	script->writes += script->read_key.writes;
+	script->result = ret ? ret : script->read_key.result;
 	return script->result;
 }
 
@@ -25329,6 +25417,86 @@ static void pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains(
 			       owner_sid_len),
 			0);
 	kfree(owner_sid);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_base_layer_metadata_refresh_caches_sd(
+	struct kunit *test)
+{
+	static const char * const metadata_path[] = {
+		"Machine", "System", "Registry", "Layers", "base"
+	};
+	static const u8 metadata_ancestors[5][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xb6, 0x10 },
+		{ 0xb6, 0x11 },
+		{ 0xb6, 0x12 },
+		{ 0xb6 },
+	};
+	struct pkm_lcs_layer_snapshot snapshot = { };
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script script = {
+		.expected_guid = metadata_ancestors[4],
+		.name = "base",
+		.sd = pkm_lcs_kunit_owner_only_sd,
+		.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+		.stop_after_read_key = true,
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	bool present = false;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, metadata_path, metadata_ancestors,
+		ARRAY_SIZE(metadata_ancestors));
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_source_thread, &script,
+		"pkm-lcs-kunit-base-layer-refresh");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_kunit_key_fd_refresh_layer_metadata((int)fd);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_source_layer_snapshot_acquire(&snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.layer_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.metadata_count, 0U);
+	KUNIT_ASSERT_TRUE(test, snapshot.base_metadata_present);
+	KUNIT_ASSERT_EQ(test, snapshot.base_metadata_sd_len,
+			sizeof(pkm_lcs_kunit_owner_only_sd));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.base_metadata_sd,
+			       pkm_lcs_kunit_owner_only_sd,
+			       snapshot.base_metadata_sd_len),
+			0);
+	pkm_lcs_source_layer_snapshot_release(&snapshot);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_metadata_key_guid_present(
+				metadata_ancestors[4], &present),
+			0L);
+	KUNIT_EXPECT_TRUE(test, present);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
@@ -31846,6 +32014,96 @@ static void pkm_lcs_kunit_reg_create_key_missing_uses_live_layer_table(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_reg_create_key_missing_uses_live_base_metadata(
+	struct kunit *test)
+{
+	static const char path_src[] = "Machine\\App";
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	static const u8 base_metadata_guid[RSI_GUID_SIZE] = { 0x43, 0x6b };
+	static const struct pkm_lcs_kunit_walk_source_step steps[] = {
+		{
+			.expected_child = "App",
+			.empty = true,
+		},
+	};
+	struct pkm_lcs_kunit_walk_then_read_source_script script = {
+		.walk = {
+			.steps = steps,
+			.step_count = ARRAY_SIZE(steps),
+		},
+		.read_key = {
+			.expected_guid = root_guid,
+			.name = "Machine",
+		},
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct task_struct *task;
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	const void *service_token;
+	const u8 *base_sd;
+	const u8 *parent_sd;
+	size_t base_sd_len = 0;
+	size_t parent_sd_len = 0;
+	u32 disposition = 0xccccccccU;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	service_token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, 0);
+	KUNIT_ASSERT_NOT_NULL(test, service_token);
+	base_sd = kacs_rust_kunit_create_file_sd(service_token,
+						 KEY_QUERY_VALUE, 0, 0, 0,
+						 &base_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, base_sd);
+	parent_sd = kacs_rust_kunit_create_file_sd(
+		admin_token, KEY_CREATE_SUB_KEY | KEY_READ, 0, 0, 0,
+		&parent_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, parent_sd);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_base_layer_metadata_publish(
+				base_metadata_guid, base_sd, base_sd_len),
+			0L);
+
+	script.file = &file;
+	script.read_key.sd = parent_sd;
+	script.read_key.sd_len = parent_sd_len;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_walk_then_read_source_thread, &script,
+		"pkm-lcs-kunit-create-live-base");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_reg_create_key_for_token(
+		admin_token, &ops, -1, (const char __user *)path_src,
+		KEY_READ, NULL, 0, NULL, (u32 __user *)&disposition);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_EXPECT_EQ(test, disposition, 0xccccccccU);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 2U);
+	KUNIT_EXPECT_EQ(test, script.writes, 2U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+
+	pkm_kacs_free((void *)parent_sd);
+	pkm_kacs_free((void *)base_sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(service_token);
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
 static void pkm_lcs_kunit_reg_create_key_missing_dispatches_watch(
 	struct kunit *test)
 {
@@ -34716,6 +34974,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_absent_uses_default),
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_absent_denies_service),
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_bad_inputs),
+	KUNIT_CASE(pkm_lcs_kunit_live_base_layer_write_uses_cached_sd),
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_explicit_folded_match),
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_explicit_denied),
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_missing_metadata_eio),
@@ -35037,6 +35296,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains),
 	KUNIT_CASE(
+		pkm_lcs_kunit_base_layer_metadata_refresh_caches_sd),
+	KUNIT_CASE(
 		pkm_lcs_kunit_layer_metadata_refresh_malformed_sd_audits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_layer_metadata_set_security_refreshes_sd),
@@ -35141,6 +35402,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_missing_fallback_success),
 	KUNIT_CASE(
 		pkm_lcs_kunit_reg_create_key_missing_uses_live_layer_table),
+	KUNIT_CASE(
+		pkm_lcs_kunit_reg_create_key_missing_uses_live_base_metadata),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_missing_dispatches_watch),
 	KUNIT_CASE(
 		pkm_lcs_kunit_reg_create_key_bad_flags_before_usercopy),

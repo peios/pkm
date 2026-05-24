@@ -126,12 +126,21 @@ struct pkm_lcs_layer_table_entry {
 	size_t owner_sid_len;
 };
 
+struct pkm_lcs_base_layer_metadata_entry {
+	bool present;
+	u8 metadata_key_guid[RSI_GUID_SIZE];
+	u8 *metadata_sd;
+	size_t metadata_sd_len;
+};
+
 static DEFINE_MUTEX(pkm_lcs_source_table_lock);
 static struct pkm_lcs_source_slot
 	pkm_lcs_source_slots[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
 static DEFINE_MUTEX(pkm_lcs_layer_table_lock);
 static struct pkm_lcs_layer_table_entry
 	pkm_lcs_layer_table[PKM_LCS_MAX_DYNAMIC_LAYERS_DEFAULT];
+static struct pkm_lcs_base_layer_metadata_entry
+	pkm_lcs_base_layer_metadata;
 static bool pkm_lcs_sequence_initialized;
 static u64 pkm_lcs_next_sequence;
 static DECLARE_WAIT_QUEUE_HEAD(pkm_lcs_source_slot_wait);
@@ -202,6 +211,15 @@ static void pkm_lcs_layer_table_entry_destroy(
 	memset(entry, 0, sizeof(*entry));
 }
 
+static void pkm_lcs_base_layer_metadata_destroy_locked(void)
+{
+	lockdep_assert_held(&pkm_lcs_layer_table_lock);
+
+	kfree(pkm_lcs_base_layer_metadata.metadata_sd);
+	memset(&pkm_lcs_base_layer_metadata, 0,
+	       sizeof(pkm_lcs_base_layer_metadata));
+}
+
 static u32 pkm_lcs_layer_table_count_locked(void)
 {
 	u32 count = 1U;
@@ -226,6 +244,17 @@ static long pkm_lcs_layer_table_shape_locked(u32 *count_out,
 	u32 i;
 
 	lockdep_assert_held(&pkm_lcs_layer_table_lock);
+
+	if (pkm_lcs_base_layer_metadata.present) {
+		if (!pkm_lcs_base_layer_metadata.metadata_sd ||
+		    !pkm_lcs_base_layer_metadata.metadata_sd_len)
+			return -EIO;
+		if (check_add_overflow(
+			    metadata_sd_bytes,
+			    pkm_lcs_base_layer_metadata.metadata_sd_len,
+			    &metadata_sd_bytes))
+			return -EOVERFLOW;
+	}
 
 	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
 		if (!pkm_lcs_layer_table[i].occupied)
@@ -346,7 +375,8 @@ static long pkm_lcs_source_layer_snapshot_copy_full(
 	char *name_buf, size_t name_buf_len,
 	struct pkm_lcs_layer_metadata_sd_view *metadata, u32 max_metadata,
 	u8 *metadata_sd_buf, size_t metadata_sd_buf_len, u32 *count_out,
-	u32 *metadata_count_out)
+	bool *base_metadata_present_out, const u8 **base_metadata_sd_out,
+	size_t *base_metadata_sd_len_out, u32 *metadata_count_out)
 {
 	size_t name_offset = 0;
 	size_t metadata_sd_offset = 0;
@@ -356,8 +386,13 @@ static long pkm_lcs_source_layer_snapshot_copy_full(
 	u32 required_metadata;
 	u32 i;
 
-	if (!layers || !count_out || !metadata_count_out)
+	if (!layers || !count_out || !base_metadata_present_out ||
+	    !base_metadata_sd_out || !base_metadata_sd_len_out ||
+	    !metadata_count_out)
 		return -EINVAL;
+	*base_metadata_present_out = false;
+	*base_metadata_sd_out = NULL;
+	*base_metadata_sd_len_out = 0;
 
 	mutex_lock(&pkm_lcs_layer_table_lock);
 	required = pkm_lcs_layer_table_count_locked();
@@ -373,8 +408,30 @@ static long pkm_lcs_source_layer_snapshot_copy_full(
 		mutex_unlock(&pkm_lcs_layer_table_lock);
 		return -ENOSPC;
 	}
+	if (pkm_lcs_base_layer_metadata.present &&
+	    (!metadata_sd_buf ||
+	     pkm_lcs_base_layer_metadata.metadata_sd_len >
+		     metadata_sd_buf_len)) {
+		mutex_unlock(&pkm_lcs_layer_table_lock);
+		return -ENOSPC;
+	}
 
 	layers[written++] = pkm_lcs_base_layer_snapshot[0];
+	if (pkm_lcs_base_layer_metadata.present) {
+		if (!pkm_lcs_base_layer_metadata.metadata_sd ||
+		    !pkm_lcs_base_layer_metadata.metadata_sd_len) {
+			mutex_unlock(&pkm_lcs_layer_table_lock);
+			return -EIO;
+		}
+		memcpy(metadata_sd_buf, pkm_lcs_base_layer_metadata.metadata_sd,
+		       pkm_lcs_base_layer_metadata.metadata_sd_len);
+		*base_metadata_present_out = true;
+		*base_metadata_sd_out = metadata_sd_buf;
+		*base_metadata_sd_len_out =
+			pkm_lcs_base_layer_metadata.metadata_sd_len;
+		metadata_sd_offset +=
+			pkm_lcs_base_layer_metadata.metadata_sd_len;
+	}
 	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
 		struct pkm_lcs_layer_table_entry *entry =
 			&pkm_lcs_layer_table[i];
@@ -430,10 +487,13 @@ long pkm_lcs_source_layer_snapshot_acquire(
 {
 	struct pkm_lcs_layer_metadata_sd_view *metadata = NULL;
 	struct pkm_lcs_rsi_layer_view *layers = NULL;
+	const u8 *base_metadata_sd = NULL;
 	size_t metadata_sd_bytes = 0;
+	size_t base_metadata_sd_len = 0;
 	size_t name_bytes = 0;
 	u8 *metadata_sds = NULL;
 	char *names = NULL;
+	bool base_metadata_present = false;
 	u32 metadata_count = 0;
 	u32 metadata_written = 0;
 	u32 count = 0;
@@ -489,10 +549,16 @@ long pkm_lcs_source_layer_snapshot_acquire(
 		ret = pkm_lcs_source_layer_snapshot_copy_full(
 			layers, count, names, name_bytes, metadata,
 			metadata_count, metadata_sds, metadata_sd_bytes,
-			&written, &metadata_written);
+			&written, &base_metadata_present, &base_metadata_sd,
+			&base_metadata_sd_len, &metadata_written);
 		if (!ret) {
 			snapshot->layers = layers;
 			snapshot->layer_count = written;
+			snapshot->base_metadata_present =
+				base_metadata_present;
+			snapshot->base_metadata_sd = base_metadata_sd;
+			snapshot->base_metadata_sd_len =
+				base_metadata_sd_len;
 			snapshot->metadata = metadata;
 			snapshot->metadata_count = metadata_written;
 			snapshot->owned_layers = layers;
@@ -749,6 +815,37 @@ long pkm_lcs_layer_table_publish(
 		owner_sid_len, NULL);
 }
 
+long pkm_lcs_base_layer_metadata_publish(
+	const u8 metadata_key_guid[RSI_GUID_SIZE],
+	const u8 *metadata_sd, size_t metadata_sd_len)
+{
+	u8 *metadata_sd_copy;
+	int ret;
+
+	if (!metadata_key_guid || !metadata_sd || !metadata_sd_len)
+		return -EINVAL;
+	if (!memchr_inv(metadata_key_guid, 0, RSI_GUID_SIZE))
+		return -EIO;
+
+	ret = kacs_rust_validate_stored_sd_bytes(metadata_sd, metadata_sd_len);
+	if (ret)
+		return -EIO;
+
+	metadata_sd_copy = kmemdup(metadata_sd, metadata_sd_len, GFP_KERNEL);
+	if (!metadata_sd_copy)
+		return -ENOMEM;
+
+	mutex_lock(&pkm_lcs_layer_table_lock);
+	pkm_lcs_base_layer_metadata_destroy_locked();
+	pkm_lcs_base_layer_metadata.present = true;
+	memcpy(pkm_lcs_base_layer_metadata.metadata_key_guid, metadata_key_guid,
+	       RSI_GUID_SIZE);
+	pkm_lcs_base_layer_metadata.metadata_sd = metadata_sd_copy;
+	pkm_lcs_base_layer_metadata.metadata_sd_len = metadata_sd_len;
+	mutex_unlock(&pkm_lcs_layer_table_lock);
+	return 0;
+}
+
 long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
 				bool *removed_out)
 {
@@ -804,6 +901,13 @@ long pkm_lcs_layer_table_metadata_key_guid_present(
 
 	*present_out = false;
 	mutex_lock(&pkm_lcs_layer_table_lock);
+	if (pkm_lcs_base_layer_metadata.present &&
+	    !memcmp(pkm_lcs_base_layer_metadata.metadata_key_guid,
+		    metadata_key_guid, RSI_GUID_SIZE)) {
+		*present_out = true;
+		mutex_unlock(&pkm_lcs_layer_table_lock);
+		return 0;
+	}
 	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
 		if (!pkm_lcs_layer_table[i].occupied)
 			continue;
@@ -8187,11 +8291,9 @@ long pkm_lcs_live_layer_write_access_check_for_token(
 	const void *token, const struct pkm_lcs_create_layer_target *target,
 	struct pkm_lcs_key_open_access_plan *plan)
 {
-	u8 *metadata_sd = NULL;
-	size_t metadata_sd_len = 0;
-	bool found = false;
-	long ret = -ENOENT;
-	u32 i;
+	struct pkm_lcs_layer_target_admission_plan target_plan = { };
+	struct pkm_lcs_layer_snapshot snapshot = { };
+	long ret;
 
 	if (!plan)
 		return -EINVAL;
@@ -8199,55 +8301,20 @@ long pkm_lcs_live_layer_write_access_check_for_token(
 	if (!target || !target->name)
 		return -EINVAL;
 
-	if (target->implicit_base)
-		return pkm_lcs_base_layer_write_access_check_for_token(
-			token, false, NULL, 0, plan);
-
-	mutex_lock(&pkm_lcs_layer_table_lock);
-	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
-		struct pkm_lcs_layer_table_entry *entry =
-			&pkm_lcs_layer_table[i];
-		bool equal = false;
-
-		if (!entry->occupied)
-			continue;
-		ret = pkm_lcs_layer_name_casefold_equal(
-			entry->name, entry->name_len, target->name,
-			target->name_len, &equal);
-		if (ret)
-			break;
-		if (!equal)
-			continue;
-
-		if (!entry->metadata_sd || !entry->metadata_sd_len) {
-			ret = -EIO;
-			break;
-		}
-		metadata_sd = kmemdup(entry->metadata_sd,
-				      entry->metadata_sd_len, GFP_KERNEL);
-		if (!metadata_sd) {
-			ret = -ENOMEM;
-			break;
-		}
-		metadata_sd_len = entry->metadata_sd_len;
-		found = true;
-		ret = 0;
-		break;
-	}
-	mutex_unlock(&pkm_lcs_layer_table_lock);
-
+	ret = pkm_lcs_source_layer_snapshot_acquire(&snapshot);
 	if (ret)
-		goto out_free;
-	if (!found) {
-		ret = -ENOENT;
-		goto out_free;
-	}
+		return ret;
+	ret = pkm_lcs_create_layer_target_admit(
+		target, snapshot.layers, snapshot.layer_count, &target_plan);
+	if (ret)
+		goto out_snapshot;
+	ret = pkm_lcs_create_layer_write_access_check_for_token(
+		token, target, snapshot.base_metadata_present,
+		snapshot.base_metadata_sd, snapshot.base_metadata_sd_len,
+		snapshot.metadata, snapshot.metadata_count, plan);
 
-	ret = pkm_lcs_layer_write_access_check_for_token(
-		token, metadata_sd, metadata_sd_len, plan);
-
-out_free:
-	kfree(metadata_sd);
+out_snapshot:
+	pkm_lcs_source_layer_snapshot_release(&snapshot);
 	return ret;
 }
 
@@ -9175,6 +9242,11 @@ static long pkm_lcs_reg_create_key_for_token_with_txn(
 			goto out_copy;
 		live_inputs.layers = snapshot.layers;
 		live_inputs.layer_count = snapshot.layer_count;
+		live_inputs.base_metadata_present =
+			snapshot.base_metadata_present;
+		live_inputs.base_metadata_sd = snapshot.base_metadata_sd;
+		live_inputs.base_metadata_sd_len =
+			snapshot.base_metadata_sd_len;
 		live_inputs.metadata = snapshot.metadata;
 		live_inputs.metadata_count = snapshot.metadata_count;
 		active_inputs = &live_inputs;
@@ -10300,6 +10372,7 @@ void pkm_lcs_kunit_reset_layer_table(void)
 	u32 i;
 
 	mutex_lock(&pkm_lcs_layer_table_lock);
+	pkm_lcs_base_layer_metadata_destroy_locked();
 	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++)
 		pkm_lcs_layer_table_entry_destroy(&pkm_lcs_layer_table[i]);
 	mutex_unlock(&pkm_lcs_layer_table_lock);

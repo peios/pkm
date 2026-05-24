@@ -2377,8 +2377,11 @@ static long pkm_lcs_key_fd_authorize_value_layer_target(
 		&target_plan);
 	if (ret)
 		goto out_snapshot;
-	ret = pkm_lcs_live_layer_write_access_check_for_token(
-		token, target, &layer_plan);
+	ret = pkm_lcs_create_layer_write_access_check_for_token(
+		token, target, layer_snapshot.base_metadata_present,
+		layer_snapshot.base_metadata_sd,
+		layer_snapshot.base_metadata_sd_len, layer_snapshot.metadata,
+		layer_snapshot.metadata_count, &layer_plan);
 
 out_snapshot:
 	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
@@ -2945,14 +2948,20 @@ static long pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context(
 		&is_base);
 	if (ret)
 		return ret;
-	if (is_base)
-		return 0;
 
 	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, 0, &read_frame, &sd,
 					      &sd_len, &read_response);
 	if (ret) {
 		if (ret == -EIO && read_response.request_op_code &&
 		    read_response.status == RSI_OK)
+			pkm_lcs_key_fd_emit_layer_metadata_sd_validation_failure(
+				key_fd, &read_response);
+		goto out_read_frame;
+	}
+	if (is_base) {
+		ret = pkm_lcs_base_layer_metadata_publish(key_fd->key_guid,
+							  sd, sd_len);
+		if (ret == -EIO)
 			pkm_lcs_key_fd_emit_layer_metadata_sd_validation_failure(
 				key_fd, &read_response);
 		goto out_read_frame;
