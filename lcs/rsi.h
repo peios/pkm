@@ -200,6 +200,10 @@ long pkm_lcs_rsi_build_commit_transaction_request(
 long pkm_lcs_rsi_build_abort_transaction_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	u64 transaction_id, struct pkm_lcs_rsi_built_request *built);
+long pkm_lcs_rsi_build_flush_request(
+	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
+	const char *hive_name, u32 hive_name_len,
+	struct pkm_lcs_rsi_built_request *built);
 long pkm_lcs_rsi_validate_lookup_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence,

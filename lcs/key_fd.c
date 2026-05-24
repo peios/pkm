@@ -2653,6 +2653,37 @@ static long pkm_lcs_key_fd_delete_value_from_args(
 		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
 }
 
+static long pkm_lcs_key_fd_flush(struct pkm_lcs_key_fd *key_fd)
+{
+	struct pkm_lcs_source_response_result response = { };
+	const char *hive_name;
+	size_t hive_name_len;
+	long ret;
+
+	if (!key_fd)
+		return -EINVAL;
+
+	ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
+		key_fd->granted_access, REG_IOC_FLUSH_NR);
+	if (ret)
+		return ret;
+
+	if (!key_fd->source_id || !key_fd->path_component_count ||
+	    !key_fd->resolved_path)
+		return -EIO;
+
+	hive_name = key_fd->resolved_path[0];
+	if (!hive_name)
+		return -EIO;
+	hive_name_len = strlen(hive_name);
+	if (!hive_name_len || hive_name_len > U32_MAX)
+		return -EIO;
+
+	return pkm_lcs_source_flush_round_trip(
+		key_fd->source_id, hive_name, (u32)hive_name_len, &response,
+		NULL);
+}
+
 static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 				 unsigned long arg)
 {
@@ -2787,6 +2818,8 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 		return pkm_lcs_key_fd_set_security_from_args(
 			key_fd, &pkm_lcs_key_fd_default_usercopy_ops,
 			&set_security_args);
+	case REG_IOC_FLUSH:
+		return pkm_lcs_key_fd_flush(key_fd);
 	case REG_IOC_NOTIFY:
 		ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
 			key_fd->granted_access, _IOC_NR(cmd));
@@ -3576,6 +3609,21 @@ long pkm_lcs_kunit_key_fd_delete_value_for_token(
 
 	ret = pkm_lcs_key_fd_delete_value_from_args_for_token(
 		key_fd, token, ops, args);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_flush(int fd)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_flush(key_fd);
 	fdput(held);
 	return ret;
 }

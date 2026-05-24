@@ -773,6 +773,13 @@ long pkm_lcs_source_dispatch_abort_transaction_waitable_request(
 	u32 source_id, u64 transaction_id,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_flush_request(
+	u32 source_id, const char *hive_name, u32 hive_name_len,
+	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_flush_waitable_request(
+	u32 source_id, const char *hive_name, u32 hive_name_len,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result);
 long pkm_lcs_source_begin_transaction_round_trip_timeout(
 	u32 source_id, u64 transaction_id, u32 mode, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
@@ -795,6 +802,14 @@ long pkm_lcs_source_abort_transaction_round_trip_timeout(
 	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_abort_transaction_round_trip(
 	u32 source_id, u64 transaction_id,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_flush_round_trip_timeout(
+	u32 source_id, const char *hive_name, u32 hive_name_len,
+	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_flush_round_trip(
+	u32 source_id, const char *hive_name, u32 hive_name_len,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_record_transaction_generation(

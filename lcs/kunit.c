@@ -162,6 +162,16 @@ struct pkm_lcs_kunit_transaction_source_script {
 	int result;
 };
 
+struct pkm_lcs_kunit_flush_source_script {
+	struct file *file;
+	const char *expected_hive_name;
+	u32 status;
+	bool extra_response_payload;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
 struct pkm_lcs_kunit_set_security_source_script {
 	struct file *file;
 	struct pkm_lcs_kunit_transaction_source_script begin;
@@ -381,6 +391,7 @@ static int pkm_lcs_kunit_symlink_follow_source_thread(void *raw_script);
 static int pkm_lcs_kunit_symlink_sequence_source_thread(void *raw_script);
 static int pkm_lcs_kunit_create_source_thread(void *raw_script);
 static int pkm_lcs_kunit_transaction_source_thread(void *data);
+static int pkm_lcs_kunit_flush_source_thread(void *data);
 
 static const struct file_operations pkm_lcs_kunit_non_key_fops = { };
 
@@ -10064,6 +10075,91 @@ static void pkm_lcs_kunit_key_fd_delete_value_fails_before_source(
 	kacs_rust_token_drop(source_token);
 }
 
+static void pkm_lcs_kunit_key_fd_flush_success(struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x7c },
+	};
+	struct pkm_lcs_kunit_flush_source_script script = {
+		.expected_hive_name = "Machine",
+		.status = RSI_OK,
+	};
+	struct file file = { };
+	struct task_struct *task;
+	const void *source_token;
+	int thread_ret;
+	long ret;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	script.file = &file;
+
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = kthread_run(pkm_lcs_kunit_flush_source_thread, &script,
+			   "pkm-lcs-kunit-key-flush");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_flush((int)fd);
+	thread_ret = kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_flush_fails_before_source(struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x7d },
+	};
+	struct file file = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	const void *source_token;
+	long denied_fd;
+	long allowed_fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+
+	denied_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, denied_fd >= 0);
+	allowed_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, allowed_fd >= 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_flush((int)denied_fd),
+			(long)-EACCES);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.next_request_id, 0ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_flush((int)allowed_fd),
+			(long)-EIO);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)denied_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)allowed_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	kacs_rust_token_drop(source_token);
+}
+
 static void pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds(
 	struct kunit *test)
 {
@@ -13952,6 +14048,49 @@ static void pkm_lcs_kunit_rsi_commit_abort_transaction_request_frames(
 		KUNIT_EXPECT_EQ(test, abort[i], 0xddU);
 }
 
+static void pkm_lcs_kunit_rsi_flush_request_frame_success(struct kunit *test)
+{
+	static const char hive_name[] = "Machine";
+	u8 frame[RSI_REQUEST_HEADER_SIZE + RSI_LENGTH_PREFIX_SIZE +
+		 sizeof(hive_name) - 1 + 8];
+	struct pkm_lcs_rsi_built_request built = { };
+	size_t expected_len = RSI_REQUEST_HEADER_SIZE + RSI_LENGTH_PREFIX_SIZE +
+			      sizeof(hive_name) - 1;
+	size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	size_t i;
+
+	memset(frame, 0xee, sizeof(frame));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_flush_request(
+				frame, sizeof(frame), 0x5152535455565758ULL, 0,
+				hive_name, strlen(hive_name), &built),
+			0L);
+	KUNIT_EXPECT_EQ(test, built.len, expected_len);
+	KUNIT_EXPECT_EQ(test, built.request_id, 0x5152535455565758ULL);
+	KUNIT_EXPECT_EQ(test, built.txn_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)RSI_FLUSH);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(frame + RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)expected_len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(frame + RSI_REQUEST_ID_OFFSET),
+			0x5152535455565758ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(frame + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_FLUSH);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(frame + RSI_REQUEST_TXN_ID_OFFSET),
+			0ULL);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(frame + payload_offset),
+			(u32)strlen(hive_name));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(frame + payload_offset + RSI_LENGTH_PREFIX_SIZE,
+			       hive_name, strlen(hive_name)),
+			0);
+	for (i = expected_len; i < sizeof(frame); i++)
+		KUNIT_EXPECT_EQ(test, frame[i], 0xeeU);
+}
+
 static void pkm_lcs_kunit_rsi_transaction_request_frames_reject_bad_inputs(
 	struct kunit *test)
 {
@@ -14161,6 +14300,90 @@ static int pkm_lcs_kunit_create_source_expect_string(
 		return -EINVAL;
 	return pkm_lcs_kunit_create_source_expect_bytes(
 		request, request_len, offset, expected, expected_len);
+}
+
+static int pkm_lcs_kunit_flush_source_thread(void *data)
+{
+	struct pkm_lcs_kunit_flush_source_script *script = data;
+	u8 response[RSI_MIN_RESPONSE_SIZE + sizeof(u32)];
+	u8 request[128];
+	size_t response_len = RSI_MIN_RESPONSE_SIZE;
+	size_t offset = RSI_REQUEST_HEADER_SIZE;
+	ssize_t count;
+	u64 request_id;
+
+	if (!script || !script->file || !script->expected_hive_name) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	for (;;) {
+		count = pkm_lcs_kunit_source_device_read_file(
+			script->file, request, sizeof(request), true);
+		if (count != -EAGAIN)
+			break;
+		if (kthread_should_stop()) {
+			script->result = -EINTR;
+			return script->result;
+		}
+		msleep(1);
+	}
+	if (count < 0) {
+		script->result = (int)count;
+		return script->result;
+	}
+	script->reads++;
+
+	if (count < RSI_REQUEST_HEADER_SIZE) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	if (get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET) !=
+	    RSI_FLUSH) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	if (get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) != 0) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	if (pkm_lcs_kunit_create_source_expect_string(
+		    request, (size_t)count, &offset,
+		    script->expected_hive_name)) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+	if (offset != (size_t)count) {
+		script->result = -EINVAL;
+		return script->result;
+	}
+
+	memset(response, 0, sizeof(response));
+	put_unaligned_le32(RSI_MIN_RESPONSE_SIZE,
+			   response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
+	put_unaligned_le16(RSI_FLUSH_RESPONSE,
+			   response + RSI_RESPONSE_OP_CODE_OFFSET);
+	put_unaligned_le32(script->status, response + RSI_RESPONSE_STATUS_OFFSET);
+	if (script->extra_response_payload) {
+		put_unaligned_le32(0xfeedf00d,
+				   response + RSI_MIN_RESPONSE_SIZE);
+		response_len += sizeof(u32);
+		put_unaligned_le32(response_len,
+				   response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+	}
+
+	count = pkm_lcs_kunit_source_device_write_file(
+		script->file, response, response_len, false, NULL);
+	if (count != (ssize_t)response_len) {
+		script->result = (int)count;
+		return script->result;
+	}
+	script->writes++;
+	script->result = 0;
+	return 0;
 }
 
 static int pkm_lcs_kunit_create_source_expect_entry_request(
@@ -18321,6 +18544,139 @@ static void pkm_lcs_kunit_source_delete_value_entry_round_trip_statuses(
 	KUNIT_EXPECT_EQ(test, script.result, 0);
 	KUNIT_EXPECT_EQ(test, response.request_op_code,
 			(u16)RSI_DELETE_VALUE_ENTRY);
+	KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_OK);
+	KUNIT_EXPECT_TRUE(test, response.malformed_source_data);
+	KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_dispatch_flush_frame(struct kunit *test)
+{
+	static const char hive_name[] = "Machine";
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_flush_request(
+				1, hive_name, strlen(hive_name), &enqueue),
+			0L);
+	KUNIT_EXPECT_EQ(test, enqueue.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.txn_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.op_code, (u16)RSI_FLUSH);
+	KUNIT_EXPECT_EQ(test, enqueue.queue_depth, 1U);
+	KUNIT_EXPECT_EQ(test, enqueue.in_flight_count, 1U);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(out + RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)enqueue.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_ID_OFFSET), 0ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(out + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_FLUSH);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_TXN_ID_OFFSET),
+			0ULL);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(out + payload_offset),
+			(u32)strlen(hive_name));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + payload_offset + RSI_LENGTH_PREFIX_SIZE,
+			       hive_name, strlen(hive_name)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			payload_offset + RSI_LENGTH_PREFIX_SIZE +
+				strlen(hive_name),
+			enqueue.len);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_flush_round_trip_statuses(struct kunit *test)
+{
+	static const char hive_name[] = "Machine";
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_kunit_flush_source_script script = { };
+	struct file file = { };
+	struct task_struct *task;
+	const void *token;
+	int thread_ret;
+	long ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	script.file = &file;
+	script.expected_hive_name = hive_name;
+	script.status = RSI_OK;
+	task = kthread_run(pkm_lcs_kunit_flush_source_thread, &script,
+			   "pkm-lcs-kunit-flush-src");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_flush_round_trip_timeout(
+		1, hive_name, strlen(hive_name), 1000, &response, &enqueue);
+	thread_ret = kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_FLUSH);
+	KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_OK);
+	KUNIT_EXPECT_FALSE(test, response.malformed_source_data);
+	KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
+
+	memset(&script, 0, sizeof(script));
+	memset(&response, 0, sizeof(response));
+	memset(&enqueue, 0, sizeof(enqueue));
+	script.file = &file;
+	script.expected_hive_name = hive_name;
+	script.status = RSI_STORAGE_ERROR;
+	task = kthread_run(pkm_lcs_kunit_flush_source_thread, &script,
+			   "pkm-lcs-kunit-flush-src");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_flush_round_trip_timeout(
+		1, hive_name, strlen(hive_name), 1000, &response, &enqueue);
+	thread_ret = kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_FLUSH);
+	KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_STORAGE_ERROR);
+	KUNIT_EXPECT_FALSE(test, response.malformed_source_data);
+	KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
+
+	memset(&script, 0, sizeof(script));
+	memset(&response, 0, sizeof(response));
+	memset(&enqueue, 0, sizeof(enqueue));
+	script.file = &file;
+	script.expected_hive_name = hive_name;
+	script.status = RSI_OK;
+	script.extra_response_payload = true;
+	task = kthread_run(pkm_lcs_kunit_flush_source_thread, &script,
+			   "pkm-lcs-kunit-flush-src");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_flush_round_trip_timeout(
+		1, hive_name, strlen(hive_name), 1000, &response, &enqueue);
+	thread_ret = kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_FLUSH);
 	KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_OK);
 	KUNIT_EXPECT_TRUE(test, response.malformed_source_data);
 	KUNIT_EXPECT_EQ(test, response.in_flight_count, 0U);
@@ -24989,6 +25345,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_delete_value_idempotent_no_value_event),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_delete_value_fails_before_source),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_flush_success),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_flush_fails_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_arm_replace_disarm),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_fails_closed),
@@ -25076,6 +25434,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_rsi_begin_transaction_request_frame_success),
 	KUNIT_CASE(
 		pkm_lcs_kunit_rsi_commit_abort_transaction_request_frames),
+	KUNIT_CASE(pkm_lcs_kunit_rsi_flush_request_frame_success),
 	KUNIT_CASE(
 		pkm_lcs_kunit_rsi_transaction_request_frames_reject_bad_inputs),
 	KUNIT_CASE(
@@ -25117,6 +25476,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_dispatch_delete_value_entry_frame),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_delete_value_entry_round_trip_statuses),
+	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_flush_frame),
+	KUNIT_CASE(pkm_lcs_kunit_source_flush_round_trip_statuses),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_transaction_control_frames),
 	KUNIT_CASE(
