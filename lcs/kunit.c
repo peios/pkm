@@ -10330,6 +10330,132 @@ static void pkm_lcs_kunit_key_fd_notify_fails_closed(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_expect_drop_key_request(
+	struct kunit *test, struct file *file,
+	const u8 guid[PKM_LCS_GUID_BYTES])
+{
+	size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	u8 request[128];
+	ssize_t count;
+
+	memset(request, 0, sizeof(request));
+	count = pkm_lcs_kunit_source_device_read_file(file, request,
+						      sizeof(request), true);
+	KUNIT_ASSERT_EQ(test, count,
+			(ssize_t)(RSI_REQUEST_HEADER_SIZE +
+				  PKM_LCS_GUID_BYTES));
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(request +
+					   RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)count);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_DROP_KEY);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET),
+			0ULL);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(request + payload_offset, guid,
+			       PKM_LCS_GUID_BYTES),
+			0);
+}
+
+static void pkm_lcs_kunit_key_fd_orphan_last_close_sends_drop(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0x91 },
+		{ 0x92 },
+	};
+	struct file file = { };
+	const void *token;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(1, KEY_QUERY_VALUE, path,
+						    ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_set_orphaned((int)fd, true),
+			0L);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_expect_drop_key_request(test, &file, ancestors[1]);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_orphan_nonfinal_close_defers_drop(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0x93 },
+		{ 0x94 },
+	};
+	u8 request[128];
+	struct file file = { };
+	const void *token;
+	long fd1;
+	long fd2;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	fd1 = pkm_lcs_kunit_publish_key_fd_from_path(1, KEY_QUERY_VALUE, path,
+						     ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd1 >= 0);
+	fd2 = pkm_lcs_kunit_publish_key_fd_from_path(1, KEY_QUERY_VALUE, path,
+						     ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd2 >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_orphaned((int)fd1, true),
+			0L);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd1), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(
+				&file, request, sizeof(request), true),
+			(ssize_t)-EAGAIN);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd2), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_expect_drop_key_request(test, &file, ancestors[1]);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_orphan_close_down_source_no_error(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0x95 },
+		{ 0x96 },
+	};
+	struct file file = { };
+	const void *token;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(1, KEY_QUERY_VALUE, path,
+						    ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_set_orphaned((int)fd, true),
+			0L);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_key_fd_watch_read_poll_drains_records(
 	struct kunit *test)
 {
@@ -25651,6 +25777,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_arm_replace_disarm),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_fails_closed),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_last_close_sends_drop),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_nonfinal_close_defers_drop),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_close_down_source_no_error),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_read_poll_drains_records),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_filter_disarm_and_overflow),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_registry_arm_replace_disarm),
