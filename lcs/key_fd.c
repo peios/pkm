@@ -138,6 +138,11 @@ struct pkm_lcs_effective_value_snapshot {
 	struct pkm_lcs_rsi_query_value_result result;
 };
 
+struct pkm_lcs_delete_key_post_lookup {
+	bool target_still_named;
+	bool replacement_visible;
+};
+
 static const struct file_operations pkm_lcs_key_fd_fops;
 static DEFINE_MUTEX(pkm_lcs_watch_registry_lock);
 static DEFINE_HASHTABLE(pkm_lcs_watch_map, PKM_LCS_WATCH_REGISTRY_BITS);
@@ -1134,9 +1139,9 @@ static void pkm_lcs_key_fd_publish_value_effects(
 	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
 }
 
-static void pkm_lcs_key_fd_publish_parent_subkey_deleted(
+static void pkm_lcs_key_fd_publish_parent_subkey_event(
 	struct pkm_lcs_key_fd *key_fd, const u8 *parent_guid,
-	const char *child_name, u32 child_name_len)
+	const char *child_name, u32 child_name_len, u32 event_type)
 {
 	struct pkm_lcs_watch_dispatch_context context = { };
 
@@ -1149,11 +1154,29 @@ static void pkm_lcs_key_fd_publish_parent_subkey_deleted(
 		(const u8 (*)[PKM_LCS_GUID_BYTES])key_fd->ancestor_guids;
 	context.resolved_path = (const char * const *)key_fd->resolved_path;
 	context.path_component_count = key_fd->path_component_count - 1U;
-	context.event_type = REG_WATCH_SUBKEY_DELETED;
+	context.event_type = event_type;
 	context.name = (const u8 *)child_name;
 	context.name_len = child_name_len;
 
 	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
+}
+
+static void pkm_lcs_key_fd_publish_parent_subkey_deleted(
+	struct pkm_lcs_key_fd *key_fd, const u8 *parent_guid,
+	const char *child_name, u32 child_name_len)
+{
+	pkm_lcs_key_fd_publish_parent_subkey_event(
+		key_fd, parent_guid, child_name, child_name_len,
+		REG_WATCH_SUBKEY_DELETED);
+}
+
+static void pkm_lcs_key_fd_publish_parent_subkey_created(
+	struct pkm_lcs_key_fd *key_fd, const u8 *parent_guid,
+	const char *child_name, u32 child_name_len)
+{
+	pkm_lcs_key_fd_publish_parent_subkey_event(
+		key_fd, parent_guid, child_name, child_name_len,
+		REG_WATCH_SUBKEY_CREATED);
 }
 
 static void pkm_lcs_key_fd_publish_key_deleted_context(
@@ -2252,24 +2275,28 @@ out_frame:
 	return ret;
 }
 
-static long pkm_lcs_key_fd_delete_key_guid_still_named(
+static long pkm_lcs_key_fd_delete_key_post_lookup(
 	const struct pkm_lcs_key_fd *key_fd,
 	const u8 parent_guid[PKM_LCS_GUID_BYTES], const char *child_name,
-	u32 child_name_len, bool *still_named_out)
+	u32 child_name_len, struct pkm_lcs_delete_key_post_lookup *out)
 {
+	const struct pkm_lcs_rsi_layer_view *layers = NULL;
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
-	struct pkm_lcs_rsi_lookup_guid_entry_result result = { };
+	struct pkm_lcs_rsi_lookup_guid_entry_result target = { };
+	struct pkm_lcs_rsi_lookup_child_result effective = { };
 	u64 next_sequence = 0;
+	u32 layer_count = 0;
 	long ret;
 
-	if (!key_fd || !parent_guid || !child_name || !still_named_out)
+	if (!key_fd || !parent_guid || !child_name || !out)
 		return -EINVAL;
-	*still_named_out = false;
+	memset(out, 0, sizeof(*out));
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
 		return ret;
+	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
@@ -2280,11 +2307,21 @@ static long pkm_lcs_key_fd_delete_key_guid_still_named(
 
 	ret = pkm_lcs_rsi_materialize_lookup_guid_entry(
 		frame.data, frame.len, response.request_id, next_sequence,
-		child_name, child_name_len, key_fd->key_guid, &result);
+		child_name, child_name_len, key_fd->key_guid, &target);
+	if (ret)
+		goto out_frame;
+	out->target_still_named = target.present != 0;
+
+	ret = pkm_lcs_rsi_materialize_lookup_child(
+		frame.data, frame.len, response.request_id, next_sequence,
+		child_name, child_name_len, layers, layer_count, NULL, 0,
+		&effective);
 	if (ret)
 		goto out_frame;
 
-	*still_named_out = result.present != 0;
+	if (effective.found &&
+	    !pkm_lcs_guid_equal(effective.key_guid, key_fd->key_guid))
+		out->replacement_visible = true;
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
@@ -3150,9 +3187,9 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	struct pkm_lcs_transaction_mutation_handle mutation = { };
 	struct pkm_lcs_transaction_binding_plan binding = { };
 	struct pkm_lcs_transaction_delete_key_log_input log_input = { };
+	struct pkm_lcs_delete_key_post_lookup post_lookup = { };
 	const u8 *parent_guid = NULL;
 	const char *child_name = NULL;
-	bool still_named = false;
 	u64 generation = 0;
 	u64 last_write_time;
 	u64 txn_id = 0;
@@ -3229,17 +3266,21 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 		goto out_cancel_mutation;
 
 	if (args->txn_fd < 0) {
-		ret = pkm_lcs_key_fd_delete_key_guid_still_named(
+		ret = pkm_lcs_key_fd_delete_key_post_lookup(
 			key_fd, parent_guid, child_name, child_name_len,
-			&still_named);
+			&post_lookup);
 		if (ret) {
 			pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 			ret = -EIO;
 			goto out_cancel_mutation;
 		}
-		if (!still_named) {
+		if (!post_lookup.target_still_named) {
 			pkm_lcs_key_fd_publish_parent_subkey_deleted(
 				key_fd, parent_guid, child_name, child_name_len);
+			if (post_lookup.replacement_visible)
+				pkm_lcs_key_fd_publish_parent_subkey_created(
+					key_fd, parent_guid, child_name,
+					child_name_len);
 			pkm_lcs_key_fd_publish_key_deleted_context(key_fd);
 			ret = pkm_lcs_key_fd_mark_orphaned_internal(
 				key_fd->source_id, key_fd->key_guid, NULL,

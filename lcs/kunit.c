@@ -10939,6 +10939,133 @@ static void pkm_lcs_kunit_key_fd_delete_key_dispatches_visibility_watches(
 	kacs_rust_token_drop(source_token);
 }
 
+static void pkm_lcs_kunit_key_fd_delete_key_replacement_dispatches_create(
+	struct kunit *test)
+{
+	static const char * const parent_path[] = { "Machine", "Parent" };
+	static const char * const path[] = { "Machine", "Parent", "Child" };
+	static const u8 parent_ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xa5 },
+	};
+	static const u8 ancestors[3][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xa5 },
+		{ 0xa6 },
+	};
+	static const u8 replacement_guid[PKM_LCS_GUID_BYTES] = { 0xa7 };
+	struct reg_notify_args subkey_args = {
+		.filter = REG_NOTIFY_SUBKEY,
+	};
+	struct reg_notify_args value_args = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_delete_key_args args = {
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_delete_key_ioctl_source_script script = {
+		.expected_parent_guid = ancestors[1],
+		.expected_key_guid = ancestors[2],
+		.expected_child_name = "Child",
+		.expected_layer_name = "base",
+		.remaining_path_found = true,
+		.remaining_guid = replacement_guid,
+		.delete_status = RSI_OK,
+	};
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	u8 parent_record[16] = { };
+	u8 child_record[8] = { };
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	struct task_struct *task;
+	long parent_fd;
+	long mutation_fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	script.file = &file;
+
+	parent_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, parent_path, parent_ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, parent_fd >= 0);
+	mutation_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, DELETE | KEY_NOTIFY, path, ancestors, 3);
+	KUNIT_ASSERT_TRUE(test, mutation_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)parent_fd,
+						    &subkey_args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)mutation_fd,
+						    &value_args),
+			0L);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_key_ioctl_source_thread, &script,
+		"pkm-lcs-kunit-delete-key-replace");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_delete_key_for_token(
+		(int)mutation_fd, admin_token, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)parent_fd,
+						  parent_record, 13, true),
+			(ssize_t)13);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(parent_record), 13U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(parent_record + 4),
+			REG_WATCH_SUBKEY_DELETED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(parent_record + 6), 5U);
+	KUNIT_EXPECT_EQ(test, memcmp(parent_record + 8, "Child", 5), 0);
+	memset(parent_record, 0, sizeof(parent_record));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)parent_fd,
+						  parent_record, 13, true),
+			(ssize_t)13);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(parent_record), 13U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(parent_record + 4),
+			REG_WATCH_SUBKEY_CREATED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(parent_record + 6), 5U);
+	KUNIT_EXPECT_EQ(test, memcmp(parent_record + 8, "Child", 5), 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)mutation_fd,
+						  child_record,
+						  sizeof(child_record), true),
+			(ssize_t)8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(child_record), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(child_record + 4),
+			REG_WATCH_KEY_DELETED);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)mutation_fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, snapshot.orphaned);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)parent_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_expect_drop_key_request(test, &file, ancestors[2]);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
 static void pkm_lcs_kunit_key_fd_delete_key_visible_child_denied(
 	struct kunit *test)
 {
@@ -28365,6 +28492,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_delete_key_orphans_missing_guid),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_delete_key_dispatches_visibility_watches),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_delete_key_replacement_dispatches_create),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_delete_key_visible_child_denied),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_delete_key_transactional_success),
 	KUNIT_CASE(
