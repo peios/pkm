@@ -10147,6 +10147,118 @@ static void pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate(
 	kacs_rust_token_drop(source_token);
 }
 
+static void pkm_lcs_kunit_key_fd_set_value_layer_precedence_overflows_watches(
+	struct kunit *test)
+{
+	static const char * const metadata_path[] = {
+		"Machine", "System", "Registry", "Layers", "Policy"
+	};
+	static const u8 metadata_ancestors[5][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xe3, 0x10 },
+		{ 0xe3, 0x11 },
+		{ 0xe3, 0x12 },
+		{ 0xe3 },
+	};
+	static const char * const watch_path[] = { "Machine", "Software" };
+	static const u8 watch_ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xe4 },
+	};
+	static const char precedence_name[] = "Precedence";
+	static const u8 one_data[] = { 1, 0, 0, 0 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_set_value_args args = {
+		.name_len = strlen(precedence_name),
+		.name_ptr = (u64)(unsigned long)precedence_name,
+		.type = REG_DWORD,
+		.data_len = sizeof(one_data),
+		.data_ptr = (u64)(unsigned long)one_data,
+		.txn_fd = -1,
+	};
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	const void *tcb_token;
+	const u8 *layer_sd;
+	u8 event[16] = { };
+	size_t layer_sd_len = 0;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
+	long metadata_fd;
+	long watch_fd;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	tcb_token = kacs_rust_kunit_create_privilege_audit_token();
+	KUNIT_ASSERT_NOT_NULL(test, tcb_token);
+	layer_sd = kacs_rust_kunit_create_file_sd(admin_token, KEY_SET_VALUE,
+						  0, 0, 0, &layer_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, layer_sd);
+
+	metadata_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, metadata_path, metadata_ancestors,
+		ARRAY_SIZE(metadata_ancestors));
+	KUNIT_ASSERT_TRUE(test, metadata_fd >= 0);
+	watch_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, watch_path, watch_ancestors,
+		ARRAY_SIZE(watch_ancestors));
+	KUNIT_ASSERT_TRUE(test, watch_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)watch_fd, &notify),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"Policy", strlen("Policy"), 0, 1,
+				metadata_ancestors[ARRAY_SIZE(metadata_ancestors) - 1],
+				layer_sd, layer_sd_len,
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, metadata_ancestors[0], &generation_before),
+			0L);
+
+	pkm_lcs_kunit_expect_set_value_layer_refresh_success(
+		test, &file, (int)metadata_fd, tcb_token, &ops, &args,
+		metadata_ancestors[ARRAY_SIZE(metadata_ancestors) - 1],
+		precedence_name, one_data, sizeof(one_data), REG_DWORD,
+		"Policy", layer_sd, layer_sd_len, 1, 1);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, metadata_ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_OVERFLOW);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)metadata_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_kacs_free((void *)layer_sd);
+	kacs_rust_token_drop(tcb_token);
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
 static void pkm_lcs_kunit_key_fd_delete_value_nontransactional_deletes_effective(
 	struct kunit *test)
 {
@@ -24840,6 +24952,7 @@ static void pkm_lcs_kunit_layer_table_publish_snapshot_remove(struct kunit *test
 	static const u8 policy_guid[RSI_GUID_SIZE] = { 0xa1 };
 	static const u8 replacement_guid[RSI_GUID_SIZE] = { 0xb2 };
 	static const u8 nil_guid[RSI_GUID_SIZE] = { 0 };
+	struct pkm_lcs_layer_table_publish_result publish = { };
 	struct pkm_lcs_rsi_layer_view layers[3] = { };
 	char names[64] = { };
 	bool removed = true;
@@ -24857,21 +24970,41 @@ static void pkm_lcs_kunit_layer_table_publish_snapshot_remove(struct kunit *test
 	KUNIT_EXPECT_EQ(test, layers[0].enabled, 1U);
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_layer_table_publish(
+			pkm_lcs_layer_table_publish_with_result(
 				"Policy", strlen("Policy"), 7, 1, policy_guid,
 				pkm_lcs_kunit_owner_only_sd,
 				sizeof(pkm_lcs_kunit_owner_only_sd),
 				pkm_lcs_kunit_system_sid,
-				sizeof(pkm_lcs_kunit_system_sid)),
+				sizeof(pkm_lcs_kunit_system_sid), &publish),
 			0L);
+	KUNIT_EXPECT_FALSE(test, publish.existed_before);
+	KUNIT_EXPECT_TRUE(test, publish.effective_changed);
+	KUNIT_EXPECT_EQ(test, publish.new_precedence, 7U);
+	KUNIT_EXPECT_EQ(test, publish.new_enabled, 1U);
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_layer_table_publish(
+			pkm_lcs_layer_table_publish_with_result(
 				"policy", strlen("policy"), 11, 0,
 				replacement_guid, pkm_lcs_kunit_owner_only_sd,
 				sizeof(pkm_lcs_kunit_owner_only_sd),
 				pkm_lcs_kunit_everyone_sid,
-				sizeof(pkm_lcs_kunit_everyone_sid)),
+				sizeof(pkm_lcs_kunit_everyone_sid), &publish),
 			0L);
+	KUNIT_EXPECT_TRUE(test, publish.existed_before);
+	KUNIT_EXPECT_TRUE(test, publish.effective_changed);
+	KUNIT_EXPECT_EQ(test, publish.previous_precedence, 7U);
+	KUNIT_EXPECT_EQ(test, publish.new_precedence, 11U);
+	KUNIT_EXPECT_EQ(test, publish.previous_enabled, 1U);
+	KUNIT_EXPECT_EQ(test, publish.new_enabled, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_publish_with_result(
+				"policy", strlen("policy"), 12, 0,
+				replacement_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid), &publish),
+			0L);
+	KUNIT_EXPECT_TRUE(test, publish.existed_before);
+	KUNIT_EXPECT_FALSE(test, publish.effective_changed);
 	memset(layers, 0, sizeof(layers));
 	memset(names, 0, sizeof(names));
 	count = 0;
@@ -24882,7 +25015,7 @@ static void pkm_lcs_kunit_layer_table_publish_snapshot_remove(struct kunit *test
 			0L);
 	KUNIT_EXPECT_EQ(test, count, 2U);
 	KUNIT_EXPECT_STREQ(test, layers[1].name, "policy");
-	KUNIT_EXPECT_EQ(test, layers[1].precedence, 11U);
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 12U);
 	KUNIT_EXPECT_EQ(test, layers[1].enabled, 0U);
 
 	KUNIT_EXPECT_EQ(test,
@@ -26544,12 +26677,17 @@ static void pkm_lcs_kunit_transaction_commit_refreshes_layer_metadata_once(
 	static const char * const metadata_path[] = {
 		"Machine", "System", "Registry", "Layers", "Policy"
 	};
+	static const char * const watch_path[] = { "Machine", "Software" };
 	static const u8 metadata_ancestors[5][PKM_LCS_GUID_BYTES] = {
 		{ 1 },
 		{ 0xf4, 0x10 },
 		{ 0xf4, 0x11 },
 		{ 0xf4, 0x12 },
 		{ 0xf4 },
+	};
+	static const u8 watch_ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xf4, 0x20 },
 	};
 	static const char precedence_name[] = "Precedence";
 	static const char enabled_name[] = "Enabled";
@@ -26597,18 +26735,32 @@ static void pkm_lcs_kunit_transaction_commit_refreshes_layer_metadata_once(
 		.depth = ARRAY_SIZE(metadata_ancestors),
 		.sequence = 52,
 	};
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	u8 event[16] = { };
 	char names[64] = { };
 	struct task_struct *task;
 	struct file file = { };
 	const void *token;
 	u32 count = 0;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
 	long fd;
+	long watch_fd;
 	long ret;
 	int thread_ret;
 
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 	pkm_lcs_kunit_reset_layer_table();
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	watch_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, watch_path, watch_ancestors,
+		ARRAY_SIZE(watch_ancestors));
+	KUNIT_ASSERT_TRUE(test, watch_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)watch_fd, &notify),
+			0L);
 
 	fd = pkm_lcs_reg_begin_transaction();
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
@@ -26638,6 +26790,10 @@ static void pkm_lcs_kunit_transaction_commit_refreshes_layer_metadata_once(
 			0L);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_transaction_fd_commit_mutation(&second_handle),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, metadata_ancestors[0], &generation_before),
 			0L);
 
 	script.file = &file;
@@ -26672,8 +26828,22 @@ static void pkm_lcs_kunit_transaction_commit_refreshes_layer_metadata_once(
 	KUNIT_EXPECT_STREQ(test, layers[1].name, "Policy");
 	KUNIT_EXPECT_EQ(test, layers[1].precedence, 12U);
 	KUNIT_EXPECT_EQ(test, layers[1].enabled, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, metadata_ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_OVERFLOW);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
 	pkm_lcs_kunit_reset_layer_table();
@@ -30684,6 +30854,11 @@ static void pkm_lcs_kunit_create_missing_prepared_layer_refreshes(
 {
 	static const u8 layers_guid[RSI_GUID_SIZE] = { 0xa8, 0x13 };
 	static const u8 policy_guid[RSI_GUID_SIZE] = { 0xa8, 0x14 };
+	static const char * const watch_path[] = { "Machine", "Software" };
+	static const u8 watch_ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xa8, 0x15 },
+	};
 	struct pkm_lcs_create_missing_parent_resolution resolution = { };
 	struct pkm_lcs_create_layer_target target = {
 		.name = "base",
@@ -30712,6 +30887,10 @@ static void pkm_lcs_kunit_create_missing_prepared_layer_refreshes(
 			.enabled_present = false,
 		},
 	};
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	u8 event[16] = { };
 	char names[64] = { };
 	struct task_struct *task;
 	struct file file = { };
@@ -30722,7 +30901,10 @@ static void pkm_lcs_kunit_create_missing_prepared_layer_refreshes(
 	size_t owner_sid_len = 0;
 	u32 count = 0;
 	bool owner_present = false;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
 	long ret;
+	long watch_fd;
 	int thread_ret;
 
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
@@ -30736,6 +30918,17 @@ static void pkm_lcs_kunit_create_missing_prepared_layer_refreshes(
 	script.refresh.sd = created.sd;
 	script.refresh.sd_len = created.sd_len;
 	script.file = &file;
+	watch_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, watch_path, watch_ancestors,
+		ARRAY_SIZE(watch_ancestors));
+	KUNIT_ASSERT_TRUE(test, watch_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)watch_fd, &notify),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, watch_ancestors[0], &generation_before),
+			0L);
 	pkm_lcs_kunit_create_missing_set_layer_metadata_child_path(test,
 								  &resolution);
 	task = pkm_lcs_kunit_kthread_run(
@@ -30791,8 +30984,22 @@ static void pkm_lcs_kunit_create_missing_prepared_layer_refreshes(
 			memcmp(owner_sid, expected_owner_sid, owner_sid_len),
 			0);
 	kfree(owner_sid);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, watch_ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_OVERFLOW);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)result.fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
 	pkm_kacs_free((void *)created.sd);
@@ -34512,6 +34719,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_cas_failure_no_effects),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_fails_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_set_value_layer_precedence_overflows_watches),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_delete_value_nontransactional_deletes_effective),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_delete_value_transactional_success),

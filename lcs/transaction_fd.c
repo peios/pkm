@@ -1972,13 +1972,16 @@ static long pkm_lcs_transaction_layer_metadata_seen_after(
 
 static long pkm_lcs_transaction_log_apply_layer_metadata_effects(
 	struct pkm_lcs_transaction_fd *txn, u32 source_id,
-	struct list_head *layer_delete_effects)
+	struct list_head *layer_delete_effects,
+	bool *layer_recovery_required_out)
 {
 	struct pkm_lcs_transaction_log_entry *entry;
 	u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 
-	if (!txn || !source_id || !layer_delete_effects)
+	if (!txn || !source_id || !layer_delete_effects ||
+	    !layer_recovery_required_out)
 		return -EINVAL;
+	*layer_recovery_required_out = false;
 
 	spin_lock(&txn->lock);
 	if (txn->bound_source_id != source_id) {
@@ -2018,6 +2021,7 @@ static long pkm_lcs_transaction_log_apply_layer_metadata_effects(
 			const char *created_path[
 				ARRAY_SIZE(pkm_lcs_transaction_layer_metadata_prefix) +
 				1U];
+			bool effective_changed = false;
 			u32 i;
 
 			if (depth !=
@@ -2026,18 +2030,31 @@ static long pkm_lcs_transaction_log_apply_layer_metadata_effects(
 			for (i = 0; i < depth; i++)
 				created_path[i] = path[i];
 			created_path[depth] = layer_name;
-			ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context(
+			ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result(
 				source_id, key_guid, created_path, depth + 1U,
 				entry->create_key.creator_sid,
-				entry->create_key.creator_sid_len, true);
+				entry->create_key.creator_sid_len, true,
+				&effective_changed);
+			if (!ret && effective_changed)
+				*layer_recovery_required_out = true;
 			break;
 		}
 		case PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY:
-		case PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE:
 			ret = pkm_lcs_key_path_refresh_layer_metadata(
 				source_id, key_guid,
 				(const char * const *)path, depth);
 			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE: {
+			bool effective_changed = false;
+
+			ret = pkm_lcs_key_path_refresh_layer_metadata_result(
+				source_id, key_guid,
+				(const char * const *)path, depth,
+				&effective_changed);
+			if (!ret && effective_changed)
+				*layer_recovery_required_out = true;
+			break;
+		}
 		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY: {
 			bool is_base = false;
 
@@ -2314,7 +2331,9 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 	bool clear_log = false;
 	bool stop_timer = false;
 	bool wake = false;
+	bool layer_recovery_required = false;
 	u32 final_state = 0;
+	u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = { };
 	long ret = 0;
 
 	if (!txn || !transaction_id || !source_id || !final_state_out ||
@@ -2326,8 +2345,18 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 	*source_down_required_out = false;
 
 	if (status == RSI_OK) {
+		spin_lock(&txn->lock);
+		if (txn->bound_source_id != source_id) {
+			spin_unlock(&txn->lock);
+			*source_down_required_out = true;
+			return -EIO;
+		}
+		memcpy(root_guid, txn->bound_root_guid, sizeof(root_guid));
+		spin_unlock(&txn->lock);
+
 		ret = pkm_lcs_transaction_log_apply_layer_metadata_effects(
-			txn, source_id, layer_delete_effects);
+			txn, source_id, layer_delete_effects,
+			&layer_recovery_required);
 		if (ret) {
 			*source_down_required_out = true;
 			return -EIO;
@@ -2337,6 +2366,16 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 		if (ret) {
 			*source_down_required_out = true;
 			return -EIO;
+		}
+		if (layer_recovery_required) {
+			struct pkm_lcs_layer_operation_recovery_result recovery = { };
+
+			ret = pkm_lcs_source_layer_operation_recover_skip_generation(
+				source_id, root_guid, &recovery);
+			if (ret) {
+				*source_down_required_out = true;
+				return -EIO;
+			}
 		}
 		ret = pkm_lcs_transaction_log_apply_orphan_effects(
 			txn, source_id);

@@ -353,6 +353,22 @@ struct pkm_lcs_delete_layer_orchestration_result {
 	u32 watch_overflow_count;
 };
 
+struct pkm_lcs_layer_operation_recovery_result {
+	u32 active_source_count;
+	u32 completed_source_count;
+	u32 generation_hive_count;
+	u32 watch_overflow_count;
+};
+
+struct pkm_lcs_layer_table_publish_result {
+	bool existed_before;
+	bool effective_changed;
+	u8 previous_enabled;
+	u8 new_enabled;
+	u32 previous_precedence;
+	u32 new_precedence;
+};
+
 struct pkm_lcs_layer_snapshot {
 	const struct pkm_lcs_rsi_layer_view *layers;
 	u32 layer_count;
@@ -961,6 +977,11 @@ long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
 	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
 	u32 skip_source_id, const u8 skip_root_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_delete_layer_orchestration_result *result);
+long pkm_lcs_source_layer_operation_recover_skip_generation(
+	u32 skip_source_id, const u8 skip_root_guid[PKM_LCS_GUID_BYTES],
+	struct pkm_lcs_layer_operation_recovery_result *result);
+long pkm_lcs_source_layer_operation_recover(
+	struct pkm_lcs_layer_operation_recovery_result *result);
 long pkm_lcs_source_flush_round_trip_timeout(
 	u32 source_id, const char *hive_name, u32 hive_name_len,
 	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
@@ -998,6 +1019,12 @@ long pkm_lcs_layer_table_publish(
 	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],
 	const u8 *metadata_sd, size_t metadata_sd_len,
 	const u8 *owner_sid, size_t owner_sid_len);
+long pkm_lcs_layer_table_publish_with_result(
+	const char *layer_name, u32 layer_name_len, u32 precedence,
+	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],
+	const u8 *metadata_sd, size_t metadata_sd_len,
+	const u8 *owner_sid, size_t owner_sid_len,
+	struct pkm_lcs_layer_table_publish_result *result);
 long pkm_lcs_layer_table_owner_snapshot(
 	const char *layer_name, u32 layer_name_len, u8 **owner_sid_out,
 	size_t *owner_sid_len_out, bool *present_out);

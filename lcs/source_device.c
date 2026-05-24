@@ -622,18 +622,37 @@ long pkm_lcs_layer_owner_select_copy(
 	return 0;
 }
 
-long pkm_lcs_layer_table_publish(
+static bool pkm_lcs_layer_table_effective_changed(bool existed_before,
+						  u8 previous_enabled,
+						  u32 previous_precedence,
+						  u8 new_enabled,
+						  u32 new_precedence)
+{
+	if (!existed_before)
+		return new_enabled != 0;
+	if (previous_enabled != new_enabled)
+		return true;
+	return new_enabled && previous_precedence != new_precedence;
+}
+
+long pkm_lcs_layer_table_publish_with_result(
 	const char *layer_name, u32 layer_name_len, u32 precedence,
 	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],
 	const u8 *metadata_sd, size_t metadata_sd_len,
-	const u8 *owner_sid, size_t owner_sid_len)
+	const u8 *owner_sid, size_t owner_sid_len,
+	struct pkm_lcs_layer_table_publish_result *result)
 {
 	struct pkm_lcs_layer_table_entry *target = NULL;
 	u8 *metadata_sd_copy;
 	u8 *owner_sid_copy;
+	bool existed_before;
+	u8 previous_enabled;
+	u32 previous_precedence;
 	u32 i;
 	int ret;
 
+	if (result)
+		memset(result, 0, sizeof(*result));
 	if (!layer_name || !metadata_key_guid || !metadata_sd ||
 	    !metadata_sd_len || !owner_sid || !owner_sid_len)
 		return -EINVAL;
@@ -685,6 +704,9 @@ long pkm_lcs_layer_table_publish(
 		return -ENOSPC;
 	}
 
+	existed_before = target->occupied;
+	previous_enabled = target->enabled;
+	previous_precedence = target->precedence;
 	kfree(target->metadata_sd);
 	kfree(target->owner_sid);
 	memset(target, 0, sizeof(*target));
@@ -699,9 +721,32 @@ long pkm_lcs_layer_table_publish(
 	target->metadata_sd_len = metadata_sd_len;
 	target->owner_sid = owner_sid_copy;
 	target->owner_sid_len = owner_sid_len;
+	if (result) {
+		result->existed_before = existed_before;
+		result->effective_changed =
+			pkm_lcs_layer_table_effective_changed(
+				existed_before, previous_enabled,
+				previous_precedence, enabled, precedence);
+		result->previous_enabled = previous_enabled;
+		result->new_enabled = enabled;
+		result->previous_precedence = previous_precedence;
+		result->new_precedence = precedence;
+	}
 	mutex_unlock(&pkm_lcs_layer_table_lock);
 
 	return 0;
+}
+
+long pkm_lcs_layer_table_publish(
+	const char *layer_name, u32 layer_name_len, u32 precedence,
+	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],
+	const u8 *metadata_sd, size_t metadata_sd_len,
+	const u8 *owner_sid, size_t owner_sid_len)
+{
+	return pkm_lcs_layer_table_publish_with_result(
+		layer_name, layer_name_len, precedence, enabled,
+		metadata_key_guid, metadata_sd, metadata_sd_len, owner_sid,
+		owner_sid_len, NULL);
 }
 
 long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
@@ -1037,7 +1082,7 @@ static bool pkm_lcs_source_generation_skip_matches(
 	       !memcmp(root_guid, skip_root_guid, RSI_GUID_SIZE);
 }
 
-static long pkm_lcs_source_preflight_layer_delete_generations(
+static long pkm_lcs_source_preflight_layer_operation_generations(
 	const u32 *source_ids, u32 source_count, u32 skip_source_id,
 	const u8 skip_root_guid[RSI_GUID_SIZE])
 {
@@ -1078,7 +1123,7 @@ out_unlock:
 	return ret;
 }
 
-static long pkm_lcs_source_record_layer_delete_generations(
+static long pkm_lcs_source_record_layer_operation_generations(
 	u32 source_id, u32 skip_source_id,
 	const u8 skip_root_guid[RSI_GUID_SIZE], u32 *hive_count_out)
 {
@@ -4920,7 +4965,7 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_source_preflight_layer_delete_generations(
+	ret = pkm_lcs_source_preflight_layer_operation_generations(
 		source_ids, source_count, skip_source_id, skip_root_guid);
 	if (ret)
 		return ret;
@@ -4939,7 +4984,7 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
 		if (ret)
 			return ret;
 
-		ret = pkm_lcs_source_record_layer_delete_generations(
+		ret = pkm_lcs_source_record_layer_operation_generations(
 			source_ids[i], skip_source_id, skip_root_guid,
 			&generation_hive_count);
 		if (ret) {
@@ -4988,6 +5033,89 @@ long pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
 {
 	return pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
 		layer_name, layer_name_len, timeout_ms, 0, NULL, result);
+}
+
+static void pkm_lcs_source_mark_ids_down(const u32 *source_ids,
+					 u32 source_count)
+{
+	u32 i;
+
+	if (!source_ids)
+		return;
+
+	for (i = 0; i < source_count; i++)
+		pkm_lcs_source_mark_down_by_id(source_ids[i]);
+}
+
+long pkm_lcs_source_layer_operation_recover_skip_generation(
+	u32 skip_source_id, const u8 skip_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_layer_operation_recovery_result *result)
+{
+	u32 source_ids[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	u32 source_count = 0;
+	u32 i;
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+	if (skip_source_id && !skip_root_guid)
+		return -EINVAL;
+
+	ret = pkm_lcs_source_active_ids_snapshot(
+		source_ids, ARRAY_SIZE(source_ids), &source_count);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_preflight_layer_operation_generations(
+		source_ids, source_count, skip_source_id, skip_root_guid);
+	if (ret) {
+		pkm_lcs_source_mark_ids_down(source_ids, source_count);
+		return -EIO;
+	}
+
+	if (result)
+		result->active_source_count = source_count;
+
+	for (i = 0; i < source_count; i++) {
+		u32 generation_hive_count = 0;
+		u32 watch_overflow_count = 0;
+
+		ret = pkm_lcs_source_record_layer_operation_generations(
+			source_ids[i], skip_source_id, skip_root_guid,
+			&generation_hive_count);
+		if (ret) {
+			pkm_lcs_source_mark_down_by_id(source_ids[i]);
+			return -EIO;
+		}
+
+		ret = pkm_lcs_key_fd_dispatch_source_overflow(
+			source_ids[i], &watch_overflow_count);
+		if (ret) {
+			pkm_lcs_source_mark_down_by_id(source_ids[i]);
+			return -EIO;
+		}
+
+		if (result) {
+			result->completed_source_count++;
+			if (check_add_overflow(result->generation_hive_count,
+					       generation_hive_count,
+					       &result->generation_hive_count))
+				return -EOVERFLOW;
+			if (check_add_overflow(result->watch_overflow_count,
+					       watch_overflow_count,
+					       &result->watch_overflow_count))
+				return -EOVERFLOW;
+		}
+	}
+
+	return 0;
+}
+
+long pkm_lcs_source_layer_operation_recover(
+	struct pkm_lcs_layer_operation_recovery_result *result)
+{
+	return pkm_lcs_source_layer_operation_recover_skip_generation(0, NULL,
+								     result);
 }
 
 long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
@@ -8450,12 +8578,15 @@ static void pkm_lcs_create_missing_dispatch_subkey_created_best_effort(
 static long pkm_lcs_create_missing_refresh_layer_metadata_if_needed(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,
-	const u8 child_guid[RSI_GUID_SIZE])
+	const u8 child_guid[RSI_GUID_SIZE], bool *effective_changed_out)
 {
 	struct pkm_lcs_resolved_key_path child = { };
 	const u8 *creator_sid = NULL;
 	size_t creator_sid_len = 0;
 	long ret;
+
+	if (effective_changed_out)
+		*effective_changed_out = false;
 
 	ret = pkm_lcs_create_missing_child_path_prepare(resolution, child_guid,
 						       &child);
@@ -8466,10 +8597,11 @@ static long pkm_lcs_create_missing_refresh_layer_metadata_if_needed(
 	if (ret)
 		goto out_child;
 
-	ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context(
+	ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result(
 		child.source_id, child.key_guid,
 		(const char * const *)child.resolved_path,
-		child.component_count, creator_sid, creator_sid_len, true);
+		child.component_count, creator_sid, creator_sid_len, true,
+		effective_changed_out);
 out_child:
 	pkm_lcs_resolved_key_path_destroy(&child);
 	return ret;
@@ -8485,6 +8617,7 @@ long pkm_lcs_create_missing_prepared_key_for_token(
 	struct pkm_lcs_create_missing_prepared_result *result)
 {
 	struct pkm_lcs_create_missing_source_records_result source = { };
+	bool layer_effective_changed = false;
 	long fd;
 	long ret;
 
@@ -8510,9 +8643,15 @@ long pkm_lcs_create_missing_prepared_key_for_token(
 		return -EIO;
 
 	ret = pkm_lcs_create_missing_refresh_layer_metadata_if_needed(
-		token, resolution, child_guid);
+		token, resolution, child_guid, &layer_effective_changed);
 	if (ret)
 		return ret;
+
+	if (layer_effective_changed) {
+		ret = pkm_lcs_source_layer_operation_recover(NULL);
+		if (ret)
+			return -EIO;
+	}
 
 	pkm_lcs_create_missing_dispatch_subkey_created_best_effort(resolution);
 
