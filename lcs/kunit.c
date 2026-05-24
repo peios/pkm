@@ -23561,12 +23561,108 @@ static void pkm_lcs_kunit_source_delete_layer_broadcast_active_sources(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_layer_table_publish_snapshot_remove(struct kunit *test)
+{
+	static const u8 policy_guid[RSI_GUID_SIZE] = { 0xa1 };
+	static const u8 replacement_guid[RSI_GUID_SIZE] = { 0xb2 };
+	static const u8 nil_guid[RSI_GUID_SIZE] = { 0 };
+	struct pkm_lcs_rsi_layer_view layers[3] = { };
+	char names[64] = { };
+	bool removed = true;
+	u32 count = 0;
+
+	pkm_lcs_kunit_reset_layer_table();
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+	KUNIT_EXPECT_STREQ(test, layers[0].name, "base");
+	KUNIT_EXPECT_EQ(test, layers[0].precedence, 0U);
+	KUNIT_EXPECT_EQ(test, layers[0].enabled, 1U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"Policy", strlen("Policy"), 7, 1, policy_guid,
+				pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd)),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"policy", strlen("policy"), 11, 0,
+				replacement_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd)),
+			0L);
+	memset(layers, 0, sizeof(layers));
+	memset(names, 0, sizeof(names));
+	count = 0;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 2U);
+	KUNIT_EXPECT_STREQ(test, layers[1].name, "policy");
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 11U);
+	KUNIT_EXPECT_EQ(test, layers[1].enabled, 0U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_remove("POLICY", strlen("POLICY"),
+						   &removed),
+			0L);
+	KUNIT_EXPECT_TRUE(test, removed);
+	memset(layers, 0, sizeof(layers));
+	memset(names, 0, sizeof(names));
+	count = 0;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+	KUNIT_EXPECT_STREQ(test, layers[0].name, "base");
+
+	removed = true;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_remove("base", strlen("base"),
+						   &removed),
+			(long)-EINVAL);
+	KUNIT_EXPECT_FALSE(test, removed);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"base", strlen("base"), 0, 1, policy_guid,
+				pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd)),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"bad/layer", strlen("bad/layer"), 0, 1,
+				policy_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd)),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"Other", strlen("Other"), 0, 1, nil_guid,
+				pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd)),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_publish("Other", strlen("Other"),
+						    0, 1, policy_guid,
+						    (const u8 *)"bad", 3),
+			(long)-EIO);
+
+	pkm_lcs_kunit_reset_layer_table();
+}
+
 static void pkm_lcs_kunit_delete_layer_orchestration_aborts_before_broadcast(
 	struct kunit *test)
 {
 	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
 		1
 	};
+	static const u8 layer_guid[RSI_GUID_SIZE] = { 0xc3 };
 	struct pkm_lcs_delete_layer_orchestration_result result = { };
 	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
 	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
@@ -23580,7 +23676,14 @@ static void pkm_lcs_kunit_delete_layer_orchestration_aborts_before_broadcast(
 	long txn_fd;
 	long ret;
 
+	pkm_lcs_kunit_reset_layer_table();
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"Policy", strlen("Policy"), 9, 1, layer_guid,
+				pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd)),
+			0L);
 
 	txn_fd = pkm_lcs_reg_begin_transaction();
 	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
@@ -23635,6 +23738,7 @@ static void pkm_lcs_kunit_delete_layer_orchestration_aborts_before_broadcast(
 	KUNIT_EXPECT_EQ(test, result.inspected_transaction_count, 1U);
 	KUNIT_EXPECT_EQ(test, result.affected_bound_transaction_count, 1U);
 	KUNIT_EXPECT_EQ(test, result.abort_dispatched_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.layer_table_entry_removed, 1U);
 	KUNIT_EXPECT_EQ(test, result.active_source_count, 1U);
 	KUNIT_EXPECT_EQ(test, result.completed_source_count, 1U);
 	KUNIT_EXPECT_EQ(test, result.orphaned_guid_count, 0U);
@@ -23651,6 +23755,7 @@ static void pkm_lcs_kunit_delete_layer_orchestration_aborts_before_broadcast(
 	flush_delayed_fput();
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
 	kacs_rust_token_drop(token);
 }
 
@@ -26787,6 +26892,7 @@ static void pkm_lcs_kunit_transaction_log_key_path_records_context(
 	KUNIT_EXPECT_STREQ(test, log.last_layer, "policy");
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	flush_delayed_fput();
 }
 
 static void pkm_lcs_kunit_transaction_log_key_path_first_bind(
@@ -26829,6 +26935,7 @@ static void pkm_lcs_kunit_transaction_log_key_path_first_bind(
 	long ret;
 	long fd;
 
+	flush_delayed_fput();
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 
 	fd = pkm_lcs_reg_begin_transaction();
@@ -26876,6 +26983,7 @@ static void pkm_lcs_kunit_transaction_log_key_path_first_bind(
 	KUNIT_EXPECT_STREQ(test, log.last_child_name, "Victim");
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	flush_delayed_fput();
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
 	kacs_rust_token_drop(token);
@@ -31822,6 +31930,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_delete_layer_applies_orphans),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_delete_layer_broadcast_active_sources),
+	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_snapshot_remove),
 	KUNIT_CASE(
 		pkm_lcs_kunit_delete_layer_orchestration_aborts_before_broadcast),
 	KUNIT_CASE(

@@ -48,6 +48,9 @@
 #define PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT 32U
 #define PKM_LCS_MAX_HIVES_PER_SOURCE_DEFAULT 64U
 #define PKM_LCS_MAX_BOUND_TRANSACTIONS_PER_SOURCE_DEFAULT 16U
+#define PKM_LCS_MAX_TOTAL_LAYERS_DEFAULT 1024U
+#define PKM_LCS_MAX_DYNAMIC_LAYERS_DEFAULT \
+	(PKM_LCS_MAX_TOTAL_LAYERS_DEFAULT - 1U)
 
 #define PKM_LCS_RSI_READ_ACTION_COPY 0U
 #define PKM_LCS_RSI_READ_ACTION_WAIT 1U
@@ -107,9 +110,24 @@ struct pkm_lcs_source_slot {
 	u32 bound_transaction_count;
 };
 
+struct pkm_lcs_layer_table_entry {
+	bool occupied;
+	u8 enabled;
+	u8 _pad[2];
+	u32 name_len;
+	u32 precedence;
+	char name[PKM_LCS_MAX_LAYER_NAME_BYTES_HARD + 1U];
+	u8 metadata_key_guid[RSI_GUID_SIZE];
+	u8 *metadata_sd;
+	size_t metadata_sd_len;
+};
+
 static DEFINE_MUTEX(pkm_lcs_source_table_lock);
 static struct pkm_lcs_source_slot
 	pkm_lcs_source_slots[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+static DEFINE_MUTEX(pkm_lcs_layer_table_lock);
+static struct pkm_lcs_layer_table_entry
+	pkm_lcs_layer_table[PKM_LCS_MAX_DYNAMIC_LAYERS_DEFAULT];
 static bool pkm_lcs_sequence_initialized;
 static u64 pkm_lcs_next_sequence;
 static DECLARE_WAIT_QUEUE_HEAD(pkm_lcs_source_slot_wait);
@@ -124,6 +142,14 @@ static const struct pkm_lcs_rsi_layer_view pkm_lcs_base_layer_snapshot[] = {
 	},
 };
 
+extern int lcs_rust_validate_layer_publication(
+	const u8 *layer_name, u32 layer_name_len,
+	const u8 metadata_key_guid[16], const u8 *metadata_security_descriptor,
+	size_t metadata_security_descriptor_len, u32 precedence, u8 enabled);
+extern int lcs_rust_layer_name_casefold_eq(
+	const u8 *left, u32 left_len, const u8 *right, u32 right_len,
+	u8 *equal_out);
+
 static bool pkm_lcs_layer_name_is_base(const char *layer_name,
 				       u32 layer_name_len)
 {
@@ -131,6 +157,49 @@ static bool pkm_lcs_layer_name_is_base(const char *layer_name,
 	       layer_name_len == sizeof(pkm_lcs_base_layer_name) - 1 &&
 	       !strncasecmp(layer_name, pkm_lcs_base_layer_name,
 			    layer_name_len);
+}
+
+static long pkm_lcs_layer_name_casefold_equal(const char *left, u32 left_len,
+					      const char *right, u32 right_len,
+					      bool *equal)
+{
+	u8 raw_equal = 0;
+	int ret;
+
+	if (!equal)
+		return -EINVAL;
+	*equal = false;
+	if (!left || !right)
+		return -EINVAL;
+
+	ret = lcs_rust_layer_name_casefold_eq((const u8 *)left, left_len,
+					      (const u8 *)right, right_len,
+					      &raw_equal);
+	if (ret)
+		return ret;
+	*equal = raw_equal != 0;
+	return 0;
+}
+
+static void pkm_lcs_layer_table_entry_destroy(
+	struct pkm_lcs_layer_table_entry *entry)
+{
+	kfree(entry->metadata_sd);
+	memset(entry, 0, sizeof(*entry));
+}
+
+static u32 pkm_lcs_layer_table_count_locked(void)
+{
+	u32 count = 1U;
+	u32 i;
+
+	lockdep_assert_held(&pkm_lcs_layer_table_lock);
+
+	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+		if (pkm_lcs_layer_table[i].occupied)
+			count++;
+	}
+	return count;
 }
 
 static void pkm_lcs_source_slot_waiters_wake(void)
@@ -164,6 +233,172 @@ void pkm_lcs_source_base_layer_snapshot(
 		*layers = pkm_lcs_base_layer_snapshot;
 	if (layer_count)
 		*layer_count = ARRAY_SIZE(pkm_lcs_base_layer_snapshot);
+}
+
+long pkm_lcs_source_layer_snapshot_copy(
+	struct pkm_lcs_rsi_layer_view *layers, u32 max_layers,
+	char *name_buf, size_t name_buf_len, u32 *count_out)
+{
+	size_t name_offset = 0;
+	u32 written = 0;
+	u32 required;
+	u32 i;
+
+	if (!layers || !count_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_layer_table_lock);
+	required = pkm_lcs_layer_table_count_locked();
+	*count_out = required;
+	if (max_layers < required) {
+		mutex_unlock(&pkm_lcs_layer_table_lock);
+		return -ENOSPC;
+	}
+
+	layers[written++] = pkm_lcs_base_layer_snapshot[0];
+	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+		struct pkm_lcs_layer_table_entry *entry =
+			&pkm_lcs_layer_table[i];
+		char *name_dst;
+
+		if (!entry->occupied)
+			continue;
+		if (!name_buf ||
+		    name_offset + entry->name_len + 1U > name_buf_len) {
+			mutex_unlock(&pkm_lcs_layer_table_lock);
+			return -ENOSPC;
+		}
+
+		name_dst = name_buf + name_offset;
+		memcpy(name_dst, entry->name, entry->name_len);
+		name_dst[entry->name_len] = '\0';
+		name_offset += entry->name_len + 1U;
+
+		layers[written].name = name_dst;
+		layers[written].name_len = entry->name_len;
+		layers[written].precedence = entry->precedence;
+		layers[written].enabled = entry->enabled;
+		memset(layers[written]._pad, 0, sizeof(layers[written]._pad));
+		written++;
+	}
+	mutex_unlock(&pkm_lcs_layer_table_lock);
+
+	return 0;
+}
+
+long pkm_lcs_layer_table_publish(
+	const char *layer_name, u32 layer_name_len, u32 precedence,
+	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],
+	const u8 *metadata_sd, size_t metadata_sd_len)
+{
+	struct pkm_lcs_layer_table_entry *target = NULL;
+	u8 *metadata_sd_copy;
+	u32 i;
+	int ret;
+
+	if (!layer_name || !metadata_key_guid || !metadata_sd ||
+	    !metadata_sd_len)
+		return -EINVAL;
+	if (layer_name_len > PKM_LCS_MAX_LAYER_NAME_BYTES_HARD)
+		return -ENAMETOOLONG;
+
+	ret = lcs_rust_validate_layer_publication(
+		(const u8 *)layer_name, layer_name_len, metadata_key_guid,
+		metadata_sd, metadata_sd_len, precedence, enabled);
+	if (ret)
+		return ret;
+
+	metadata_sd_copy = kmemdup(metadata_sd, metadata_sd_len, GFP_KERNEL);
+	if (!metadata_sd_copy)
+		return -ENOMEM;
+
+	mutex_lock(&pkm_lcs_layer_table_lock);
+	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+		bool equal = false;
+
+		if (!pkm_lcs_layer_table[i].occupied) {
+			if (!target)
+				target = &pkm_lcs_layer_table[i];
+			continue;
+		}
+		ret = pkm_lcs_layer_name_casefold_equal(
+			layer_name, layer_name_len, pkm_lcs_layer_table[i].name,
+			pkm_lcs_layer_table[i].name_len, &equal);
+		if (ret) {
+			mutex_unlock(&pkm_lcs_layer_table_lock);
+			kfree(metadata_sd_copy);
+			return ret;
+		}
+		if (equal) {
+			target = &pkm_lcs_layer_table[i];
+			break;
+		}
+	}
+	if (!target) {
+		mutex_unlock(&pkm_lcs_layer_table_lock);
+		kfree(metadata_sd_copy);
+		return -ENOSPC;
+	}
+
+	kfree(target->metadata_sd);
+	memset(target, 0, sizeof(*target));
+	target->occupied = true;
+	target->enabled = enabled;
+	target->name_len = layer_name_len;
+	target->precedence = precedence;
+	memcpy(target->name, layer_name, layer_name_len);
+	target->name[layer_name_len] = '\0';
+	memcpy(target->metadata_key_guid, metadata_key_guid, RSI_GUID_SIZE);
+	target->metadata_sd = metadata_sd_copy;
+	target->metadata_sd_len = metadata_sd_len;
+	mutex_unlock(&pkm_lcs_layer_table_lock);
+
+	return 0;
+}
+
+long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
+				bool *removed_out)
+{
+	bool is_base = false;
+	u32 i;
+	int ret;
+
+	if (removed_out)
+		*removed_out = false;
+	if (!layer_name)
+		return -EINVAL;
+
+	ret = pkm_lcs_layer_name_casefold_equal(
+		layer_name, layer_name_len, pkm_lcs_base_layer_name,
+		sizeof(pkm_lcs_base_layer_name) - 1, &is_base);
+	if (ret)
+		return ret;
+	if (is_base)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_layer_table_lock);
+	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+		bool equal = false;
+
+		if (!pkm_lcs_layer_table[i].occupied)
+			continue;
+		ret = pkm_lcs_layer_name_casefold_equal(
+			layer_name, layer_name_len, pkm_lcs_layer_table[i].name,
+			pkm_lcs_layer_table[i].name_len, &equal);
+		if (ret) {
+			mutex_unlock(&pkm_lcs_layer_table_lock);
+			return ret;
+		}
+		if (!equal)
+			continue;
+
+		pkm_lcs_layer_table_entry_destroy(&pkm_lcs_layer_table[i]);
+		if (removed_out)
+			*removed_out = true;
+		break;
+	}
+	mutex_unlock(&pkm_lcs_layer_table_lock);
+	return 0;
 }
 
 static bool pkm_lcs_default_copy_from_user(void *ctx, void *dst,
@@ -4242,6 +4477,7 @@ long pkm_lcs_source_delete_layer_orchestrate_timeout(
 {
 	struct pkm_lcs_transaction_layer_abort_result abort_result = { };
 	struct pkm_lcs_delete_layer_broadcast_result broadcast_result = { };
+	bool removed = false;
 	long ret;
 
 	if (result)
@@ -4257,6 +4493,12 @@ long pkm_lcs_source_delete_layer_orchestrate_timeout(
 		result->abort_dispatched_count =
 			abort_result.abort_dispatched_count;
 	}
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_layer_table_remove(layer_name, layer_name_len, &removed);
+	if (result)
+		result->layer_table_entry_removed = removed ? 1U : 0U;
 	if (ret)
 		return ret;
 
@@ -9157,6 +9399,16 @@ static const struct file_operations pkm_lcs_source_device_fops = {
 };
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
+void pkm_lcs_kunit_reset_layer_table(void)
+{
+	u32 i;
+
+	mutex_lock(&pkm_lcs_layer_table_lock);
+	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++)
+		pkm_lcs_layer_table_entry_destroy(&pkm_lcs_layer_table[i]);
+	mutex_unlock(&pkm_lcs_layer_table_lock);
+}
+
 void pkm_lcs_kunit_reset_source_table(void)
 {
 	u32 i;

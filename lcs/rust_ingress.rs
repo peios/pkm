@@ -15,7 +15,7 @@ use crate::lcs_core::{
     parse_rsi_lookup_success_response_payload, parse_rsi_enum_children_success_response_payload,
     parse_rsi_query_values_success_response_payload, parse_rsi_read_key_success_response_payload,
     parse_rsi_request_header, plan_key_guid_assignment, plan_key_open_audit_record,
-    plan_layer_target_admission, plan_registry_get_security,
+    plan_layer_publication, plan_layer_target_admission, plan_registry_get_security,
     plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
     plan_registry_open_pre_resolution_access, plan_registry_security_info_fd_access_gate,
     plan_registry_set_security, plan_value_layer_admission,
@@ -56,8 +56,8 @@ use crate::lcs_core::{
     write_rsi_set_value_request_frame, write_rsi_write_key_request_frame,
     BlanketTombstoneEntry, CurrentUserRewrite,
     HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest, KeyWatchState,
-    LayerResolutionContext, LayerTargetAdmissionInput, LayerView, LcsCallerTokenSummary,
-    LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry,
+    LayerPublicationInput, LayerResolutionContext, LayerTargetAdmissionInput, LayerView,
+    LcsCallerTokenSummary, LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry,
     NamedPathResolution, NamedValueEntry, PathKind, PathTarget, RegisteredHiveIdentity,
     RegistryIoctlAccessRequirement, RegistryKeyOpenAccessInput, RegistryOpenAccessDecision,
     RegistryOpenPreResolutionAccessPlan, RsiReadPlan, RsiRetainedRequest, RsiTransactionMode,
@@ -806,6 +806,58 @@ pub unsafe extern "C" fn lcs_rust_select_layer_metadata_sd(
 
     selection_out.index = index as u32;
     0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_layer_publication(
+    layer_name: *const u8,
+    layer_name_len: u32,
+    metadata_key_guid: *const u8,
+    metadata_security_descriptor: *const u8,
+    metadata_security_descriptor_len: usize,
+    precedence: u32,
+    enabled: u8,
+) -> c_int {
+    if layer_name.is_null()
+        || metadata_key_guid.is_null()
+        || metadata_security_descriptor.is_null()
+        || metadata_security_descriptor_len == 0
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if enabled > 1 {
+        return LinuxErrno::Eio.negated_return() as c_int;
+    }
+
+    let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
+    let name = match str::from_utf8(layer_name_bytes) {
+        Ok(name) => name,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    let mut guid = [0u8; 16];
+    guid.copy_from_slice(unsafe { slice::from_raw_parts(metadata_key_guid, 16) });
+    let sd = unsafe {
+        slice::from_raw_parts(metadata_security_descriptor, metadata_security_descriptor_len)
+    };
+
+    match plan_layer_publication(
+        &LcsLimits::DEFAULT,
+        LayerPublicationInput {
+            name,
+            precedence,
+            enabled: enabled != 0,
+            metadata_key_guid: guid,
+            metadata_security_descriptor: sd,
+        },
+    ) {
+        Ok(_) => 0,
+        Err(LcsError::NameTooLong { .. }) => LinuxErrno::Enametoolong.negated_return() as c_int,
+        Err(LcsError::NilLayerMetadataKeyGuid)
+        | Err(LcsError::MalformedSecurityDescriptor { .. }) => {
+            LinuxErrno::Eio.negated_return() as c_int
+        }
+        Err(_) => LinuxErrno::Einval.negated_return() as c_int,
+    }
 }
 
 #[no_mangle]

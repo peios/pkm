@@ -324,6 +324,7 @@ struct pkm_lcs_delete_layer_orchestration_result {
 	u32 inspected_transaction_count;
 	u32 affected_bound_transaction_count;
 	u32 abort_dispatched_count;
+	u32 layer_table_entry_removed;
 	u32 active_source_count;
 	u32 completed_source_count;
 	u32 orphaned_guid_count;
@@ -941,6 +942,15 @@ long pkm_lcs_source_hive_generation_snapshot(
 long pkm_lcs_source_next_sequence_snapshot(u64 *next_sequence);
 void pkm_lcs_source_base_layer_snapshot(
 	const struct pkm_lcs_rsi_layer_view **layers, u32 *layer_count);
+long pkm_lcs_source_layer_snapshot_copy(
+	struct pkm_lcs_rsi_layer_view *layers, u32 max_layers,
+	char *name_buf, size_t name_buf_len, u32 *count_out);
+long pkm_lcs_layer_table_publish(
+	const char *layer_name, u32 layer_name_len, u32 precedence,
+	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],
+	const u8 *metadata_sd, size_t metadata_sd_len);
+long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
+				bool *removed_out);
 long pkm_lcs_source_active_ids_snapshot(u32 *source_ids,
 					u32 max_source_ids,
 					u32 *count_out);
@@ -1046,6 +1056,7 @@ long pkm_lcs_source_response_waiter_wait(
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_lcs_kunit_reset_source_table(void);
+void pkm_lcs_kunit_reset_layer_table(void);
 void pkm_lcs_kunit_set_sequence_state(bool initialized, u64 next_sequence);
 void pkm_lcs_kunit_source_table_snapshot(
 	struct pkm_lcs_source_table_snapshot *snapshot);
