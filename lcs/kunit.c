@@ -367,6 +367,15 @@ struct pkm_lcs_kunit_layer_metadata_refresh_source_script {
 	int result;
 };
 
+struct pkm_lcs_kunit_set_security_layer_refresh_source_script {
+	struct file *file;
+	struct pkm_lcs_kunit_set_security_source_script set_security;
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script refresh;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
 struct pkm_lcs_kunit_delete_value_ioctl_source_script {
 	struct file *file;
 	struct pkm_lcs_kunit_transaction_source_script begin;
@@ -19389,6 +19398,51 @@ out:
 	return ret;
 }
 
+static int pkm_lcs_kunit_set_security_layer_refresh_source_thread(
+	void *raw_script)
+{
+	struct pkm_lcs_kunit_set_security_layer_refresh_source_script *script =
+		raw_script;
+	u8 request[256];
+	int ret;
+
+	if (!script || !script->file) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	script->set_security.file = script->file;
+	ret = pkm_lcs_kunit_set_security_source_thread(&script->set_security);
+	script->reads += script->set_security.reads;
+	script->writes += script->set_security.writes;
+	if (ret)
+		goto out;
+
+	script->refresh.file = script->file;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_read_key(
+		&script->refresh, request, sizeof(request));
+	if (ret)
+		goto out_refresh;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
+		&script->refresh, request, sizeof(request), "Precedence",
+		script->refresh.precedence_present,
+		script->refresh.precedence);
+	if (ret)
+		goto out_refresh;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
+		&script->refresh, request, sizeof(request), "Enabled",
+		script->refresh.enabled_present, script->refresh.enabled);
+
+out_refresh:
+	script->reads += script->refresh.reads;
+	script->writes += script->refresh.writes;
+	script->refresh.result = ret;
+out:
+	script->result = ret;
+	return ret;
+}
+
 static void pkm_lcs_kunit_key_fd_query_value_uses_live_layer_table(
 	struct kunit *test)
 {
@@ -24748,6 +24802,122 @@ static void pkm_lcs_kunit_layer_metadata_refresh_malformed_sd_audits(
 	pkm_lcs_kunit_reset_source_table();
 	pkm_lcs_kunit_reset_layer_table();
 	kfree(buffer);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_layer_metadata_set_security_refreshes_sd(
+	struct kunit *test)
+{
+	static const char * const metadata_path[] = {
+		"Machine", "System", "Registry", "Layers", "Policy"
+	};
+	static const u8 metadata_ancestors[5][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xf6, 0x10 },
+		{ 0xf6, 0x11 },
+		{ 0xf6, 0x12 },
+		{ 0xf6 },
+	};
+	static const u8 old_sd[] = {
+		0x01, 0x00, 0x00, 0x80, 0x14, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+		0x12, 0x00, 0x00, 0x00,
+	};
+	static const u8 new_sd[] = {
+		0x01, 0x00, 0x00, 0x80, 0x14, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00,
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_set_security_args args = {
+		.security_info = OWNER_SECURITY_INFORMATION,
+		.sd_len = sizeof(new_sd),
+		.sd_ptr = (u64)(unsigned long)new_sd,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_set_security_layer_refresh_source_script script = {
+		.set_security = {
+			.expected_guid = metadata_ancestors[4],
+			.existing_sd = old_sd,
+			.existing_sd_len = sizeof(old_sd),
+			.expected_merged_sd = new_sd,
+			.expected_merged_sd_len = sizeof(new_sd),
+		},
+		.refresh = {
+			.expected_guid = metadata_ancestors[4],
+			.name = "Policy",
+			.sd = new_sd,
+			.sd_len = sizeof(new_sd),
+			.precedence = 17,
+			.enabled = 0,
+			.precedence_present = true,
+			.enabled_present = true,
+		},
+	};
+	struct pkm_lcs_layer_snapshot snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"Policy", strlen("Policy"), 9, 1,
+				metadata_ancestors[4], old_sd, sizeof(old_sd)),
+			0L);
+
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, WRITE_OWNER, metadata_path, metadata_ancestors,
+		ARRAY_SIZE(metadata_ancestors));
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_set_security_layer_refresh_source_thread,
+		&script, "pkm-lcs-kunit-set-sd-layer-refresh");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_kunit_key_fd_set_security((int)fd, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
+	KUNIT_EXPECT_NE(test,
+			script.set_security.observed_last_write_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_acquire(&snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test, snapshot.layer_count, 2U);
+	KUNIT_ASSERT_EQ(test, snapshot.metadata_count, 1U);
+	KUNIT_EXPECT_STREQ(test, snapshot.layers[1].name, "Policy");
+	KUNIT_EXPECT_EQ(test, snapshot.layers[1].precedence, 17U);
+	KUNIT_EXPECT_EQ(test, snapshot.layers[1].enabled, 0U);
+	KUNIT_EXPECT_STREQ(test, snapshot.metadata[0].name, "Policy");
+	KUNIT_EXPECT_EQ(test, snapshot.metadata[0].sd_len, sizeof(new_sd));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.metadata[0].sd, new_sd, sizeof(new_sd)),
+			0);
+	pkm_lcs_source_layer_snapshot_release(&snapshot);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
 	kacs_rust_token_drop(token);
 }
 
@@ -33320,6 +33490,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains),
 	KUNIT_CASE(
 		pkm_lcs_kunit_layer_metadata_refresh_malformed_sd_audits),
+	KUNIT_CASE(
+		pkm_lcs_kunit_layer_metadata_set_security_refreshes_sd),
 	KUNIT_CASE(
 		pkm_lcs_kunit_delete_layer_orchestration_aborts_before_broadcast),
 	KUNIT_CASE(

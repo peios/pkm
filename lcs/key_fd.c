@@ -3460,6 +3460,10 @@ static long pkm_lcs_key_fd_set_security_from_args(
 		goto out_merge;
 	}
 
+	ret = pkm_lcs_key_fd_refresh_layer_metadata(key_fd);
+	if (ret)
+		goto out_merge;
+
 	ret = pkm_lcs_source_record_transaction_generation(
 		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
 	if (ret) {
