@@ -231,8 +231,10 @@ pub struct PkmLcsRsiReadPlanCopy {
 pub struct PkmLcsRsiLookupResponseSummaryCopy {
     pub path_entry_count: u32,
     pub metadata_count: u32,
+    pub source_validation_failure: u32,
     pub child_absent: bool,
-    pub _pad: [u8; 3],
+    pub source_validation_failure_present: u8,
+    pub _pad: [u8; 2],
 }
 
 #[repr(C)]
@@ -337,7 +339,9 @@ pub struct PkmLcsRsiEnumChildrenInfoSummaryCopy {
     pub subkey_count: u32,
     pub max_subkey_name_len: u32,
     pub source_path_entry_count: u32,
-    pub _pad: u32,
+    pub source_validation_failure: u32,
+    pub source_validation_failure_present: u8,
+    pub _pad: [u8; 3],
 }
 
 #[repr(C)]
@@ -3094,8 +3098,10 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_lookup_response_frame(
         *summary_out = PkmLcsRsiLookupResponseSummaryCopy {
             path_entry_count: 0,
             metadata_count: 0,
+            source_validation_failure: 0,
             child_absent: false,
-            _pad: [0; 3],
+            source_validation_failure_present: 0,
+            _pad: [0; 2],
         };
     }
 
@@ -3125,6 +3131,14 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_lookup_response_frame(
         return rsi_lookup_response_error_return(err);
     }
     if let Err(err) = validate_rsi_lookup_path_response_sequences(&payload, next_sequence) {
+        if matches!(err, LcsError::FutureSequence { .. }) {
+            unsafe {
+                (*summary_out).source_validation_failure = source_validation_failure_code(
+                    RsiSourceDataValidationFailure::FutureSequenceNumber,
+                );
+                (*summary_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_lookup_response_error_return(err);
     }
 
@@ -3290,7 +3304,9 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
             subkey_count: 0,
             max_subkey_name_len: 0,
             source_path_entry_count: 0,
-            _pad: 0,
+            source_validation_failure: 0,
+            source_validation_failure_present: 0,
+            _pad: [0; 3],
         };
     }
 
@@ -3333,6 +3349,14 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
         return rsi_enum_children_response_error_return(err);
     }
     if let Err(err) = validate_rsi_enum_children_path_response_sequences(&payload, next_sequence) {
+        if matches!(err, LcsError::FutureSequence { .. }) {
+            unsafe {
+                (*result_out).source_validation_failure = source_validation_failure_code(
+                    RsiSourceDataValidationFailure::FutureSequenceNumber,
+                );
+                (*result_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_enum_children_response_error_return(err);
     }
 

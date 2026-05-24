@@ -17,8 +17,10 @@ struct pkm_lcs_rsi_built_request {
 struct pkm_lcs_rsi_lookup_response_summary {
 	u32 path_entry_count;
 	u32 metadata_count;
+	u32 source_validation_failure;
 	bool child_absent;
-	u8 _pad[3];
+	u8 source_validation_failure_present;
+	u8 _pad[2];
 };
 
 struct pkm_lcs_rsi_query_values_response_summary {
@@ -38,7 +40,9 @@ struct pkm_lcs_rsi_enum_children_info_summary {
 	u32 subkey_count;
 	u32 max_subkey_name_len;
 	u32 source_path_entry_count;
-	u32 _pad;
+	u32 source_validation_failure;
+	u8 source_validation_failure_present;
+	u8 _pad[3];
 };
 
 struct pkm_lcs_rsi_enum_subkey_result {

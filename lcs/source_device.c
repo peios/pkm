@@ -6160,6 +6160,11 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 			&lookup);
 		if (ret == -EIO) {
 			result->malformed_source_data = true;
+			if (lookup.source_validation_failure_present) {
+				result->source_validation_failure =
+					lookup.source_validation_failure;
+				result->source_validation_failure_present = true;
+			}
 			*caller_errno = -EIO;
 			return 0;
 		}
@@ -6202,6 +6207,11 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 		pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 		if (ret == -EIO) {
 			result->malformed_source_data = true;
+			if (enum_children.source_validation_failure_present) {
+				result->source_validation_failure =
+					enum_children.source_validation_failure;
+				result->source_validation_failure_present = true;
+			}
 			*caller_errno = -EIO;
 			return 0;
 		}
