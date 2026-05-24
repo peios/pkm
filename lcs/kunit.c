@@ -5981,6 +5981,105 @@ static void pkm_lcs_kunit_self_config_invalid_audit_rejects_bad_shape(
 			-ENOENT);
 }
 
+static void pkm_lcs_kunit_expect_runtime_limits_defaults(
+	struct kunit *test, const struct pkm_lcs_runtime_limits *limits)
+{
+	KUNIT_ASSERT_NOT_NULL(test, limits);
+	KUNIT_EXPECT_EQ(test, limits->request_timeout_ms, 30000U);
+	KUNIT_EXPECT_EQ(test, limits->transaction_timeout_ms, 30000U);
+	KUNIT_EXPECT_EQ(test, limits->notification_queue_size, 256U);
+	KUNIT_EXPECT_EQ(test, limits->symlink_depth_limit, 16U);
+	KUNIT_EXPECT_EQ(test, limits->max_value_size, 1048576U);
+	KUNIT_EXPECT_EQ(test, limits->max_key_depth, 512U);
+	KUNIT_EXPECT_EQ(test, limits->max_path_component_length, 255U);
+	KUNIT_EXPECT_EQ(test, limits->max_total_path_length, 16383U);
+	KUNIT_EXPECT_EQ(test, limits->max_layers_per_value, 128U);
+	KUNIT_EXPECT_EQ(test, limits->max_bound_transactions_per_source, 16U);
+	KUNIT_EXPECT_EQ(test, limits->max_read_only_transactions_per_source,
+			16U);
+	KUNIT_EXPECT_EQ(test, limits->max_total_layers, 1024U);
+	KUNIT_EXPECT_EQ(test, limits->max_registered_sources, 32U);
+	KUNIT_EXPECT_EQ(test, limits->max_hives_per_source, 64U);
+	KUNIT_EXPECT_EQ(test, limits->max_concurrent_rsi_requests, 256U);
+	KUNIT_EXPECT_EQ(test, limits->max_scope_guids_per_token, 8U);
+	KUNIT_EXPECT_EQ(test, limits->max_private_layers_per_token, 16U);
+	KUNIT_EXPECT_EQ(test, limits->max_subtree_watch_depth, 0U);
+	KUNIT_EXPECT_EQ(test, limits->max_transaction_watch_event_burst, 4096U);
+}
+
+static void pkm_lcs_kunit_runtime_limits_default_snapshot(struct kunit *test)
+{
+	struct pkm_lcs_runtime_limits limits = { };
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_limits_snapshot(&limits), 0L);
+	pkm_lcs_kunit_expect_runtime_limits_defaults(test, &limits);
+}
+
+static void pkm_lcs_kunit_runtime_limits_publish_valid_snapshot(
+	struct kunit *test)
+{
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_runtime_limits snapshot = { };
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.request_timeout_ms = 600000U;
+	limits.transaction_timeout_ms = 1000U;
+	limits.notification_queue_size = 65536U;
+	limits.symlink_depth_limit = 64U;
+	limits.max_value_size = 67108864U;
+	limits.max_key_depth = 4096U;
+	limits.max_path_component_length = 1024U;
+	limits.max_total_path_length = 65535U;
+	limits.max_layers_per_value = 1024U;
+	limits.max_bound_transactions_per_source = 256U;
+	limits.max_read_only_transactions_per_source = 256U;
+	limits.max_total_layers = 65536U;
+	limits.max_registered_sources = 256U;
+	limits.max_hives_per_source = 1024U;
+	limits.max_concurrent_rsi_requests = 4096U;
+	limits.max_scope_guids_per_token = 256U;
+	limits.max_private_layers_per_token = 256U;
+	limits.max_subtree_watch_depth = 4096U;
+	limits.max_transaction_watch_event_burst = 65536U;
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_limits_validate(&limits), 0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, memcmp(&snapshot, &limits, sizeof(limits)), 0);
+	pkm_lcs_runtime_limits_reset_defaults();
+}
+
+static void pkm_lcs_kunit_runtime_limits_invalid_retains_previous(
+	struct kunit *test)
+{
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_runtime_limits invalid = { };
+	struct pkm_lcs_runtime_limits snapshot = { };
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.request_timeout_ms = 45000U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	invalid = limits;
+	invalid.max_value_size = 4095U;
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_limits_publish(&invalid),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, memcmp(&snapshot, &limits, sizeof(limits)), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_limits_defaults(NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_limits_validate(NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_limits_snapshot(NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_limits_publish(NULL),
+			(long)-EINVAL);
+	pkm_lcs_runtime_limits_reset_defaults();
+}
+
 static bool pkm_lcs_kunit_buffer_contains_bytes(const u8 *buffer,
 						size_t buffer_len,
 						const u8 *needle,
@@ -37921,6 +38020,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_self_config_invalid_audit_emits_lcs_kmes_event),
 	KUNIT_CASE(
 		pkm_lcs_kunit_self_config_invalid_audit_rejects_bad_shape),
+	KUNIT_CASE(pkm_lcs_kunit_runtime_limits_default_snapshot),
+	KUNIT_CASE(pkm_lcs_kunit_runtime_limits_publish_valid_snapshot),
+	KUNIT_CASE(pkm_lcs_kunit_runtime_limits_invalid_retains_previous),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_snapshot_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_deep_copies_input),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_rejects_malformed_state),

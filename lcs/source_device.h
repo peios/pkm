@@ -245,6 +245,28 @@ enum pkm_lcs_self_config_received_kind {
 	PKM_LCS_SELF_CONFIG_RECEIVED_DWORD_OUT_OF_RANGE = 2,
 };
 
+struct pkm_lcs_runtime_limits {
+	u32 request_timeout_ms;
+	u32 transaction_timeout_ms;
+	u32 notification_queue_size;
+	u32 symlink_depth_limit;
+	u32 max_value_size;
+	u32 max_key_depth;
+	u32 max_path_component_length;
+	u32 max_total_path_length;
+	u32 max_layers_per_value;
+	u32 max_bound_transactions_per_source;
+	u32 max_read_only_transactions_per_source;
+	u32 max_total_layers;
+	u32 max_registered_sources;
+	u32 max_hives_per_source;
+	u32 max_concurrent_rsi_requests;
+	u32 max_scope_guids_per_token;
+	u32 max_private_layers_per_token;
+	u32 max_subtree_watch_depth;
+	u32 max_transaction_watch_event_burst;
+};
+
 struct pkm_lcs_path_validation_result {
 	u32 component_count;
 	bool used_forward_separator;
@@ -529,6 +551,13 @@ long pkm_lcs_emit_self_config_invalid_audit(
 	const char *configuration_name, u32 configuration_name_len,
 	u32 received_kind, u32 received_type, u32 received_u32,
 	u32 retained_value);
+long pkm_lcs_runtime_limits_defaults(struct pkm_lcs_runtime_limits *limits);
+long pkm_lcs_runtime_limits_validate(
+	const struct pkm_lcs_runtime_limits *limits);
+long pkm_lcs_runtime_limits_snapshot(struct pkm_lcs_runtime_limits *limits);
+long pkm_lcs_runtime_limits_publish(
+	const struct pkm_lcs_runtime_limits *limits);
+void pkm_lcs_runtime_limits_reset_defaults(void);
 long pkm_lcs_validate_syscall_relative_path(
 	const char *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);

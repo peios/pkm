@@ -21,6 +21,7 @@
 #include <linux/mutex.h>
 #include <linux/overflow.h>
 #include <linux/poll.h>
+#include <linux/seqlock.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/syscalls.h>
@@ -59,6 +60,29 @@
 #define PKM_LCS_RSI_READ_ACTION_WAKE_CLOSE 4U
 #define PKM_LCS_SACL_MATCH_SUCCESS 0x1U
 #define PKM_LCS_SACL_MATCH_FAILURE 0x2U
+
+#define PKM_LCS_RUNTIME_LIMITS_DEFAULT_INITIALIZER             \
+	{                                                      \
+		.request_timeout_ms = 30000U,                  \
+		.transaction_timeout_ms = 30000U,              \
+		.notification_queue_size = 256U,               \
+		.symlink_depth_limit = 16U,                    \
+		.max_value_size = 1048576U,                    \
+		.max_key_depth = 512U,                         \
+		.max_path_component_length = 255U,             \
+		.max_total_path_length = 16383U,               \
+		.max_layers_per_value = 128U,                  \
+		.max_bound_transactions_per_source = 16U,      \
+		.max_read_only_transactions_per_source = 16U,  \
+		.max_total_layers = 1024U,                     \
+		.max_registered_sources = 32U,                 \
+		.max_hives_per_source = 64U,                   \
+		.max_concurrent_rsi_requests = 256U,           \
+		.max_scope_guids_per_token = 8U,               \
+		.max_private_layers_per_token = 16U,           \
+		.max_subtree_watch_depth = 0U,                 \
+		.max_transaction_watch_event_burst = 4096U,    \
+	}
 
 static const char pkm_lcs_key_open_audit_event_type[] =
 	"LCS_KEY_OPEN_AUDIT";
@@ -148,6 +172,12 @@ static bool pkm_lcs_sequence_initialized;
 static u64 pkm_lcs_next_sequence;
 static DECLARE_WAIT_QUEUE_HEAD(pkm_lcs_source_slot_wait);
 static atomic64_t pkm_lcs_source_slot_epoch = ATOMIC64_INIT(0);
+static seqlock_t pkm_lcs_runtime_limits_lock =
+	__SEQLOCK_UNLOCKED(pkm_lcs_runtime_limits_lock);
+static const struct pkm_lcs_runtime_limits pkm_lcs_runtime_limits_default =
+	PKM_LCS_RUNTIME_LIMITS_DEFAULT_INITIALIZER;
+static struct pkm_lcs_runtime_limits pkm_lcs_runtime_limits_current =
+	PKM_LCS_RUNTIME_LIMITS_DEFAULT_INITIALIZER;
 static const char pkm_lcs_base_layer_name[] = "base";
 static const struct pkm_lcs_rsi_layer_view pkm_lcs_base_layer_snapshot[] = {
 	{
@@ -157,6 +187,95 @@ static const struct pkm_lcs_rsi_layer_view pkm_lcs_base_layer_snapshot[] = {
 		.enabled = 1,
 	},
 };
+
+long pkm_lcs_runtime_limits_defaults(struct pkm_lcs_runtime_limits *limits)
+{
+	if (!limits)
+		return -EINVAL;
+
+	*limits = pkm_lcs_runtime_limits_default;
+	return 0;
+}
+
+static bool pkm_lcs_runtime_limits_in_range(u32 value, u32 min, u32 max)
+{
+	return value >= min && value <= max;
+}
+
+long pkm_lcs_runtime_limits_validate(
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	if (!limits)
+		return -EINVAL;
+
+#define PKM_LCS_CHECK_LIMIT(_field, _min, _max)                         \
+	do {                                                            \
+		if (!pkm_lcs_runtime_limits_in_range(limits->_field,    \
+						     (_min), (_max)))       \
+			return -EINVAL;                                  \
+	} while (0)
+
+	PKM_LCS_CHECK_LIMIT(request_timeout_ms, 1000U, 600000U);
+	PKM_LCS_CHECK_LIMIT(transaction_timeout_ms, 1000U, 600000U);
+	PKM_LCS_CHECK_LIMIT(notification_queue_size, 16U, 65536U);
+	PKM_LCS_CHECK_LIMIT(symlink_depth_limit, 1U, 64U);
+	PKM_LCS_CHECK_LIMIT(max_value_size, 4096U, 67108864U);
+	PKM_LCS_CHECK_LIMIT(max_key_depth, 32U, 4096U);
+	PKM_LCS_CHECK_LIMIT(max_path_component_length, 64U, 1024U);
+	PKM_LCS_CHECK_LIMIT(max_total_path_length, 1024U, 65535U);
+	PKM_LCS_CHECK_LIMIT(max_layers_per_value, 1U, 1024U);
+	PKM_LCS_CHECK_LIMIT(max_bound_transactions_per_source, 1U, 256U);
+	PKM_LCS_CHECK_LIMIT(max_read_only_transactions_per_source, 1U, 256U);
+	PKM_LCS_CHECK_LIMIT(max_total_layers, 16U, 65536U);
+	PKM_LCS_CHECK_LIMIT(max_registered_sources, 1U, 256U);
+	PKM_LCS_CHECK_LIMIT(max_hives_per_source, 1U, 1024U);
+	PKM_LCS_CHECK_LIMIT(max_concurrent_rsi_requests, 8U, 4096U);
+	PKM_LCS_CHECK_LIMIT(max_scope_guids_per_token, 1U, 256U);
+	PKM_LCS_CHECK_LIMIT(max_private_layers_per_token, 1U, 256U);
+	PKM_LCS_CHECK_LIMIT(max_subtree_watch_depth, 0U, 4096U);
+	PKM_LCS_CHECK_LIMIT(max_transaction_watch_event_burst, 256U, 65536U);
+
+#undef PKM_LCS_CHECK_LIMIT
+
+	return 0;
+}
+
+long pkm_lcs_runtime_limits_snapshot(struct pkm_lcs_runtime_limits *limits)
+{
+	unsigned int seq;
+
+	if (!limits)
+		return -EINVAL;
+
+	do {
+		seq = read_seqbegin(&pkm_lcs_runtime_limits_lock);
+		*limits = pkm_lcs_runtime_limits_current;
+	} while (read_seqretry(&pkm_lcs_runtime_limits_lock, seq));
+
+	return 0;
+}
+
+long pkm_lcs_runtime_limits_publish(
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	long ret;
+
+	ret = pkm_lcs_runtime_limits_validate(limits);
+	if (ret)
+		return ret;
+
+	write_seqlock(&pkm_lcs_runtime_limits_lock);
+	pkm_lcs_runtime_limits_current = *limits;
+	write_sequnlock(&pkm_lcs_runtime_limits_lock);
+	return 0;
+}
+
+void pkm_lcs_runtime_limits_reset_defaults(void)
+{
+	write_seqlock(&pkm_lcs_runtime_limits_lock);
+	pkm_lcs_runtime_limits_current = pkm_lcs_runtime_limits_default;
+	write_sequnlock(&pkm_lcs_runtime_limits_lock);
+}
 
 extern int lcs_rust_validate_layer_publication(
 	const u8 *layer_name, u32 layer_name_len,
