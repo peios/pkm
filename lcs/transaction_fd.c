@@ -111,6 +111,9 @@ struct pkm_lcs_transaction_delete_key_log {
 	u32 child_name_len;
 	u32 layer_len;
 	u32 parent_depth;
+	bool post_lookup_valid;
+	bool target_still_named;
+	bool replacement_visible;
 };
 
 struct pkm_lcs_transaction_hide_key_log {
@@ -1256,41 +1259,56 @@ out_free:
 	return ret;
 }
 
-static long pkm_lcs_transaction_delete_key_still_named(
-	u32 source_id,
-	const u8 key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
-	const u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
-	const char *child_name, u32 child_name_len, bool *still_named)
+static long pkm_lcs_transaction_delete_key_post_lookup(
+	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry)
 {
+	const struct pkm_lcs_rsi_layer_view *layers = NULL;
 	struct pkm_lcs_rsi_lookup_guid_entry_result result = { };
+	struct pkm_lcs_rsi_lookup_child_result effective = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
+	u32 layer_count = 0;
 	u64 next_sequence = 0;
 	long ret;
 
-	if (!source_id || !key_guid || !parent_guid || !child_name ||
-	    !child_name_len || !still_named)
+	if (!source_id || !entry)
 		return -EINVAL;
-	*still_named = false;
+	if (entry->post_lookup_valid)
+		return 0;
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
 		return ret;
+	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
-		source_id, 0, parent_guid, child_name, child_name_len,
-		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+		source_id, 0, entry->parent_guid, entry->child_name,
+		entry->child_name_len, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+		&frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
 	ret = pkm_lcs_rsi_materialize_lookup_guid_entry(
 		frame.data, frame.len, response.request_id, next_sequence,
-		child_name, child_name_len, key_guid, &result);
+		entry->child_name, entry->child_name_len, entry->key_guid,
+		&result);
 	if (ret)
 		goto out_frame;
 
-	*still_named = result.present != 0;
+	ret = pkm_lcs_rsi_materialize_lookup_child(
+		frame.data, frame.len, response.request_id, next_sequence,
+		entry->child_name, entry->child_name_len, layers, layer_count,
+		NULL, 0, &effective);
+	if (ret)
+		goto out_frame;
+
+	entry->target_still_named = result.present != 0;
+	entry->replacement_visible =
+		effective.found &&
+		memcmp(effective.key_guid, entry->key_guid,
+		       sizeof(entry->key_guid)) != 0;
+	entry->post_lookup_valid = true;
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
@@ -1298,9 +1316,8 @@ out_frame:
 }
 
 static long pkm_lcs_transaction_apply_delete_key_orphan_effects(
-	u32 source_id, const struct pkm_lcs_transaction_delete_key_log *entry)
+	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry)
 {
-	bool still_named = false;
 	u32 live_refs = 0;
 	u32 marked = 0;
 	long ret;
@@ -1308,12 +1325,10 @@ static long pkm_lcs_transaction_apply_delete_key_orphan_effects(
 	if (!source_id || !entry)
 		return -EINVAL;
 
-	ret = pkm_lcs_transaction_delete_key_still_named(
-		source_id, entry->key_guid, entry->parent_guid,
-		entry->child_name, entry->child_name_len, &still_named);
+	ret = pkm_lcs_transaction_delete_key_post_lookup(source_id, entry);
 	if (ret)
 		return ret;
-	if (still_named)
+	if (entry->target_still_named)
 		return 0;
 
 	ret = pkm_lcs_key_fd_mark_orphaned_no_watch(
@@ -1357,8 +1372,87 @@ static long pkm_lcs_transaction_log_apply_orphan_effects(
 	return 0;
 }
 
+static long pkm_lcs_transaction_dispatch_delete_key_exact(
+	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry)
+{
+	struct pkm_lcs_watch_dispatch_context contexts[3] = { };
+	u8 (*child_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	const char **child_path;
+	u32 child_depth;
+	u32 index = 0;
+	size_t child_ancestor_bytes;
+	size_t child_path_bytes;
+	long ret;
+
+	if (!source_id || !entry)
+		return -EINVAL;
+
+	ret = pkm_lcs_transaction_delete_key_post_lookup(source_id, entry);
+	if (ret)
+		return ret;
+	if (entry->target_still_named)
+		return 0;
+
+	if (check_add_overflow(entry->parent_depth, 1U, &child_depth))
+		return -EOVERFLOW;
+	if (check_mul_overflow((size_t)child_depth, sizeof(*child_path),
+			       &child_path_bytes) ||
+	    check_mul_overflow((size_t)child_depth,
+			       sizeof(*child_ancestor_guids),
+			       &child_ancestor_bytes))
+		return -EOVERFLOW;
+
+	child_path = kzalloc(child_path_bytes, GFP_KERNEL);
+	if (!child_path)
+		return -ENOMEM;
+	child_ancestor_guids = kzalloc(child_ancestor_bytes, GFP_KERNEL);
+	if (!child_ancestor_guids) {
+		kfree(child_path);
+		return -ENOMEM;
+	}
+
+	memcpy(child_path, entry->parent_path,
+	       (size_t)entry->parent_depth * sizeof(*child_path));
+	child_path[entry->parent_depth] = entry->child_name;
+	memcpy(child_ancestor_guids, entry->parent_ancestor_guids,
+	       (size_t)entry->parent_depth * sizeof(*child_ancestor_guids));
+	memcpy(child_ancestor_guids[entry->parent_depth], entry->key_guid,
+	       sizeof(child_ancestor_guids[entry->parent_depth]));
+
+	contexts[index].changed_key_guid = entry->parent_guid;
+	contexts[index].ancestor_guids =
+		(const u8 (*)[PKM_LCS_GUID_BYTES])entry->parent_ancestor_guids;
+	contexts[index].resolved_path =
+		(const char * const *)entry->parent_path;
+	contexts[index].path_component_count = entry->parent_depth;
+	contexts[index].event_type = REG_WATCH_SUBKEY_DELETED;
+	contexts[index].name = (const u8 *)entry->child_name;
+	contexts[index].name_len = entry->child_name_len;
+	index++;
+
+	if (entry->replacement_visible) {
+		contexts[index] = contexts[index - 1U];
+		contexts[index].event_type = REG_WATCH_SUBKEY_CREATED;
+		index++;
+	}
+
+	contexts[index].changed_key_guid = entry->key_guid;
+	contexts[index].ancestor_guids =
+		(const u8 (*)[PKM_LCS_GUID_BYTES])child_ancestor_guids;
+	contexts[index].resolved_path = (const char * const *)child_path;
+	contexts[index].path_component_count = child_depth;
+	contexts[index].event_type = REG_WATCH_KEY_DELETED;
+	index++;
+
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(contexts, index);
+
+	kfree(child_ancestor_guids);
+	kfree(child_path);
+	return ret;
+}
+
 static long pkm_lcs_transaction_log_dispatch_watch_batch(
-	struct pkm_lcs_transaction_fd *txn)
+	struct pkm_lcs_transaction_fd *txn, u32 source_id)
 {
 	struct pkm_lcs_watch_dispatch_context *contexts;
 	struct pkm_lcs_transaction_log_entry *entry;
@@ -1442,24 +1536,6 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 				entry->delete_value.value_name_len;
 			index++;
 			break;
-		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
-			if (index) {
-				ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(
-					contexts, index);
-				if (ret)
-					goto out_free;
-				index = 0;
-			}
-			ret = pkm_lcs_transaction_dispatch_key_path_overflow(
-				entry->delete_key.key_guid,
-				entry->delete_key.parent_guid,
-				entry->delete_key.parent_path,
-				entry->delete_key.parent_ancestor_guids,
-				entry->delete_key.parent_depth,
-				entry->delete_key.child_name);
-			if (ret)
-				goto out_free;
-			break;
 		case PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY:
 			if (index) {
 				ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(
@@ -1475,6 +1551,19 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 				entry->hide_key.parent_ancestor_guids,
 				entry->hide_key.parent_depth,
 				entry->hide_key.child_name);
+			if (ret)
+				goto out_free;
+			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
+			if (index) {
+				ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(
+					contexts, index);
+				if (ret)
+					goto out_free;
+				index = 0;
+			}
+			ret = pkm_lcs_transaction_dispatch_delete_key_exact(
+				source_id, &entry->delete_key);
 			if (ret)
 				goto out_free;
 			break;
@@ -1524,7 +1613,8 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 			*source_down_required_out = true;
 			return -EIO;
 		}
-		(void)pkm_lcs_transaction_log_dispatch_watch_batch(txn);
+		(void)pkm_lcs_transaction_log_dispatch_watch_batch(txn,
+								   source_id);
 	}
 
 	spin_lock(&txn->lock);
