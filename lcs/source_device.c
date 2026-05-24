@@ -124,6 +124,15 @@ static const struct pkm_lcs_rsi_layer_view pkm_lcs_base_layer_snapshot[] = {
 	},
 };
 
+static bool pkm_lcs_layer_name_is_base(const char *layer_name,
+				       u32 layer_name_len)
+{
+	return layer_name &&
+	       layer_name_len == sizeof(pkm_lcs_base_layer_name) - 1 &&
+	       !strncasecmp(layer_name, pkm_lcs_base_layer_name,
+			    layer_name_len);
+}
+
 static void pkm_lcs_source_slot_waiters_wake(void)
 {
 	atomic64_inc(&pkm_lcs_source_slot_epoch);
@@ -3176,6 +3185,104 @@ out_unlock_table:
 	return ret;
 }
 
+static long pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
+	u32 source_id, const char *layer_name, u32 layer_name_len,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_source_queued_request *request;
+	struct pkm_lcs_source_slot *slot;
+	struct pkm_lcs_source_fd *source_fd;
+	size_t frame_len;
+	u64 request_id;
+	u64 next_request_id;
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+	if (!layer_name || !layer_name_len)
+		return -EINVAL;
+	if (pkm_lcs_layer_name_is_base(layer_name, layer_name_len))
+		return -EINVAL;
+	if (layer_name_len > PKM_LCS_MAX_LAYER_NAME_BYTES_HARD)
+		return -ENAMETOOLONG;
+	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
+			       sizeof(u32), &frame_len) ||
+	    check_add_overflow(frame_len, (size_t)layer_name_len, &frame_len))
+		return -EOVERFLOW;
+
+	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	if (!request)
+		return -ENOMEM;
+	request->frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!request->frame) {
+		kfree(request);
+		return -ENOMEM;
+	}
+	INIT_LIST_HEAD(&request->link);
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE ||
+	    !slot->active_fd) {
+		ret = -EIO;
+		goto out_unlock_table;
+	}
+
+	source_fd = slot->active_fd;
+	mutex_lock(&source_fd->queue_lock);
+	if (source_fd->closing ||
+	    source_fd->state != PKM_LCS_SOURCE_FD_ACTIVE ||
+	    source_fd->source_id != source_id) {
+		ret = -EIO;
+		goto out_unlock_queue;
+	}
+	if (source_fd->in_flight_request_count >=
+	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+		ret = -EAGAIN;
+		goto out_unlock_queue;
+	}
+
+	request_id = source_fd->next_request_id;
+	ret = pkm_lcs_source_request_id_successor(request_id,
+						  &next_request_id);
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_rsi_build_delete_layer_request(
+		request->frame, frame_len, request_id, 0, layer_name,
+		layer_name_len, &built);
+	if (ret)
+		goto out_unlock_queue;
+
+	ret = pkm_lcs_source_in_flight_insert_locked(
+		source_fd, built.request_id, built.txn_id, built.op_code,
+		waiter);
+	if (ret)
+		goto out_unlock_queue;
+
+	request->len = built.len;
+	request->request_id = built.request_id;
+	request->txn_id = built.txn_id;
+	request->op_code = built.op_code;
+	list_add_tail(&request->link, &source_fd->request_queue);
+	source_fd->queued_request_count++;
+	source_fd->next_request_id = next_request_id;
+	pkm_lcs_source_enqueue_result_fill_locked(result, request, source_fd);
+	request = NULL;
+	ret = 0;
+
+out_unlock_queue:
+	mutex_unlock(&source_fd->queue_lock);
+	if (!ret)
+		wake_up_interruptible(&source_fd->read_wait);
+out_unlock_table:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	pkm_lcs_source_queued_request_free(request);
+	return ret;
+}
+
 long pkm_lcs_source_dispatch_lookup_request(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
@@ -3708,6 +3815,27 @@ long pkm_lcs_source_dispatch_abort_transaction_waitable_request(
 		result);
 }
 
+long pkm_lcs_source_dispatch_delete_layer_request(
+	u32 source_id, const char *layer_name, u32 layer_name_len,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	return pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
+		source_id, layer_name, layer_name_len, NULL, result);
+}
+
+long pkm_lcs_source_dispatch_delete_layer_waitable_request(
+	u32 source_id, const char *layer_name, u32 layer_name_len,
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	if (!waiter)
+		return -EINVAL;
+
+	pkm_lcs_source_response_waiter_init(waiter);
+	return pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
+		source_id, layer_name, layer_name_len, waiter, result);
+}
+
 long pkm_lcs_source_dispatch_flush_request(
 	u32 source_id, const char *hive_name, u32 hive_name_len,
 	struct pkm_lcs_source_enqueue_result *result)
@@ -3824,6 +3952,53 @@ long pkm_lcs_source_abort_transaction_round_trip(
 	return pkm_lcs_source_abort_transaction_round_trip_timeout(
 		source_id, transaction_id, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
 		response, enqueue);
+}
+
+long pkm_lcs_source_delete_layer_round_trip_timeout(
+	u32 source_id, const char *layer_name, u32 layer_name_len,
+	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_source_response_waiter waiter;
+	unsigned long deadline;
+	long ret;
+
+	if (response)
+		memset(response, 0, sizeof(*response));
+	if (enqueue)
+		memset(enqueue, 0, sizeof(*enqueue));
+
+	pkm_lcs_source_response_waiter_init(&waiter);
+	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+
+	for (;;) {
+		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		if (ret)
+			return ret;
+
+		ret = pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
+			source_id, layer_name, layer_name_len, &waiter,
+			enqueue);
+		if (ret != -EAGAIN)
+			break;
+		if (!pkm_lcs_source_deadline_remaining(deadline))
+			return -ETIMEDOUT;
+	}
+	if (ret)
+		return ret;
+
+	return pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
+							 response);
+}
+
+long pkm_lcs_source_delete_layer_round_trip(
+	u32 source_id, const char *layer_name, u32 layer_name_len,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_delete_layer_round_trip_timeout(
+		source_id, layer_name, layer_name_len,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, response, enqueue);
 }
 
 long pkm_lcs_source_flush_round_trip_timeout(
@@ -4558,6 +4733,7 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 {
 	struct pkm_lcs_rsi_lookup_response_summary lookup = { };
 	struct pkm_lcs_rsi_query_values_response_summary query_values = { };
+	struct pkm_lcs_rsi_delete_layer_response_summary delete_layer = { };
 	struct pkm_lcs_rsi_read_key_result read_key = { };
 	u64 next_sequence;
 	long ret;
@@ -4625,6 +4801,18 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 		ret = pkm_lcs_rsi_validate_status_only_response(
 			frame, frame_len, result->request_id,
 			result->request_op_code);
+		if (ret == -EIO) {
+			result->malformed_source_data = true;
+			*caller_errno = -EIO;
+			return 0;
+		}
+		if (ret)
+			return ret;
+		*caller_errno = 0;
+		return 0;
+	case RSI_DELETE_LAYER:
+		ret = pkm_lcs_rsi_validate_delete_layer_response(
+			frame, frame_len, result->request_id, &delete_layer);
 		if (ret == -EIO) {
 			result->malformed_source_data = true;
 			*caller_errno = -EIO;

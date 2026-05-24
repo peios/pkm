@@ -81,6 +81,10 @@ extern int lcs_rust_write_rsi_commit_transaction_request_frame(
 extern int lcs_rust_write_rsi_abort_transaction_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	u64 transaction_id, struct pkm_lcs_rsi_built_request *built);
+extern int lcs_rust_write_rsi_delete_layer_request_frame(
+	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
+	const u8 *layer_name, u32 layer_name_len,
+	struct pkm_lcs_rsi_built_request *built);
 extern int lcs_rust_write_rsi_flush_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 *hive_name, u32 hive_name_len,
@@ -99,6 +103,9 @@ extern int lcs_rust_validate_rsi_query_values_response_frame(
 extern int lcs_rust_validate_rsi_status_only_response_frame(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u16 request_op_code);
+extern int lcs_rust_validate_rsi_delete_layer_response_frame(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	struct pkm_lcs_rsi_delete_layer_response_summary *summary);
 extern int lcs_rust_materialize_rsi_enum_children_info_summary(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence, const struct pkm_lcs_rsi_layer_view *layers,
@@ -497,6 +504,23 @@ long pkm_lcs_rsi_build_abort_transaction_request(
 		dst, dst_len, request_id, txn_id, transaction_id, built);
 }
 
+long pkm_lcs_rsi_build_delete_layer_request(
+	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
+	const char *layer_name, u32 layer_name_len,
+	struct pkm_lcs_rsi_built_request *built)
+{
+	if (!built)
+		return -EINVAL;
+
+	memset(built, 0, sizeof(*built));
+	if (!dst || !layer_name)
+		return -EINVAL;
+
+	return lcs_rust_write_rsi_delete_layer_request_frame(
+		dst, dst_len, request_id, txn_id, (const u8 *)layer_name,
+		layer_name_len, built);
+}
+
 long pkm_lcs_rsi_build_flush_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const char *hive_name, u32 hive_name_len,
@@ -560,6 +584,23 @@ long pkm_lcs_rsi_validate_status_only_response(
 
 	return lcs_rust_validate_rsi_status_only_response_frame(
 		frame, frame_len, request_id, request_op_code);
+}
+
+long pkm_lcs_rsi_validate_delete_layer_response(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	struct pkm_lcs_rsi_delete_layer_response_summary *summary)
+{
+	if (!summary)
+		return -EINVAL;
+
+	memset(summary, 0, sizeof(*summary));
+	if (!frame)
+		return -EINVAL;
+	if (frame_len < RSI_MIN_RESPONSE_SIZE)
+		return -EINVAL;
+
+	return lcs_rust_validate_rsi_delete_layer_response_frame(
+		frame, frame_len, request_id, summary);
 }
 
 long pkm_lcs_rsi_materialize_enum_children_info_summary(

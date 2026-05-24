@@ -11,8 +11,8 @@ use crate::lcs_core::{
     for_each_rsi_enum_children_source_path_entry, for_each_rsi_lookup_source_path_entry,
     for_each_rsi_query_values_source_blanket_entry,
     for_each_rsi_query_values_source_value_entry, for_each_visible_subkey,
-    layer_target_admission_linux_errno, parse_rsi_lookup_success_response_payload,
-    parse_rsi_enum_children_success_response_payload,
+    layer_target_admission_linux_errno, parse_rsi_delete_layer_success_response_payload,
+    parse_rsi_lookup_success_response_payload, parse_rsi_enum_children_success_response_payload,
     parse_rsi_query_values_success_response_payload, parse_rsi_read_key_success_response_payload,
     parse_rsi_request_header, plan_key_guid_assignment, plan_key_open_audit_record,
     plan_layer_target_admission, plan_registry_get_security,
@@ -35,6 +35,7 @@ use crate::lcs_core::{
     validate_rsi_lookup_metadata_security_descriptors, validate_rsi_lookup_path_response_names,
     validate_rsi_lookup_path_response_sequences,
     validate_rsi_query_values_response_names,
+    validate_rsi_delete_layer_orphaned_guids,
     validate_rsi_query_values_response_sequences,
     validate_rsi_query_values_response_value_payloads, validate_rsi_read_key_response_names,
     validate_rsi_read_key_response_security_descriptor,
@@ -46,8 +47,9 @@ use crate::lcs_core::{
     write_key_open_audit_payload, write_rsi_abort_transaction_request_frame,
     write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
     write_rsi_create_entry_request_frame, write_rsi_create_key_request_frame,
-    write_rsi_delete_entry_request_frame, write_rsi_delete_value_entry_request_frame,
-    write_rsi_enum_children_request_frame, write_rsi_drop_key_request_frame,
+    write_rsi_delete_entry_request_frame, write_rsi_delete_layer_request_frame,
+    write_rsi_delete_value_entry_request_frame, write_rsi_enum_children_request_frame,
+    write_rsi_drop_key_request_frame,
     write_rsi_flush_request_frame, write_rsi_hide_entry_request_frame,
     write_rsi_lookup_request_frame, write_rsi_query_values_request_frame,
     write_rsi_read_key_request_frame, write_rsi_set_blanket_tombstone_request_frame,
@@ -64,7 +66,8 @@ use crate::lcs_core::{
     EffectiveValueWatchEvent, EnumeratedValue, WatchEventRecordPlan,
     WatchEventRecordRequest,
     WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_TOMBSTONE,
-    RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY, write_watch_event_record,
+    RSI_DELETE_LAYER, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
+    write_watch_event_record,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -304,6 +307,12 @@ pub struct PkmLcsRsiReadKeyResultCopy {
 pub struct PkmLcsRsiQueryValuesResponseSummaryCopy {
     pub value_entry_count: u32,
     pub blanket_count: u32,
+}
+
+#[repr(C)]
+pub struct PkmLcsRsiDeleteLayerResponseSummaryCopy {
+    pub orphaned_guid_count: u32,
+    pub _pad: u32,
 }
 
 #[repr(C)]
@@ -2493,6 +2502,57 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_abort_transaction_request_frame(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_rsi_delete_layer_request_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    request_id: u64,
+    txn_id: u64,
+    layer_name: *const u8,
+    layer_name_len: u32,
+    built_out: *mut PkmLcsRsiBuiltRequestCopy,
+) -> c_int {
+    if built_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *built_out = PkmLcsRsiBuiltRequestCopy {
+            len: 0,
+            request_id: 0,
+            txn_id: 0,
+            op_code: 0,
+            _pad: [0; 6],
+        };
+    }
+
+    if dst.is_null() || layer_name.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+        return rsi_request_frame_error_return(err);
+    }
+
+    match write_rsi_delete_layer_request_frame(dst_bytes, request_id, txn_id, layer_name_bytes) {
+        Ok(built) => {
+            unsafe {
+                *built_out = PkmLcsRsiBuiltRequestCopy {
+                    len: built.len,
+                    request_id: built.retained.request_id,
+                    txn_id,
+                    op_code: built.retained.op_code,
+                    _pad: [0; 6],
+                };
+            }
+            0
+        }
+        Err(err) => rsi_request_frame_error_return(err),
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lcs_rust_write_rsi_flush_request_frame(
     dst: *mut u8,
     dst_len: usize,
@@ -2767,6 +2827,50 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_status_only_response_frame(
         Ok(_) => 0,
         Err(err) => rsi_lookup_response_error_return(err),
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_rsi_delete_layer_response_frame(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    summary_out: *mut PkmLcsRsiDeleteLayerResponseSummaryCopy,
+) -> c_int {
+    if summary_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    unsafe {
+        *summary_out = PkmLcsRsiDeleteLayerResponseSummaryCopy {
+            orphaned_guid_count: 0,
+            _pad: 0,
+        };
+    }
+
+    if frame.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let payload = match parse_rsi_delete_layer_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_DELETE_LAYER,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_lookup_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_delete_layer_orphaned_guids(&payload) {
+        return rsi_lookup_response_error_return(err);
+    }
+
+    unsafe {
+        (*summary_out).orphaned_guid_count = payload.orphaned_guids.count;
+    }
+    0
 }
 
 #[no_mangle]

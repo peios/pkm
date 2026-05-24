@@ -26,6 +26,11 @@ struct pkm_lcs_rsi_query_values_response_summary {
 	u32 blanket_count;
 };
 
+struct pkm_lcs_rsi_delete_layer_response_summary {
+	u32 orphaned_guid_count;
+	u32 _pad;
+};
+
 struct pkm_lcs_rsi_enum_children_info_summary {
 	u32 subkey_count;
 	u32 max_subkey_name_len;
@@ -235,6 +240,10 @@ long pkm_lcs_rsi_build_commit_transaction_request(
 long pkm_lcs_rsi_build_abort_transaction_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	u64 transaction_id, struct pkm_lcs_rsi_built_request *built);
+long pkm_lcs_rsi_build_delete_layer_request(
+	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
+	const char *layer_name, u32 layer_name_len,
+	struct pkm_lcs_rsi_built_request *built);
 long pkm_lcs_rsi_build_flush_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const char *hive_name, u32 hive_name_len,
@@ -249,6 +258,9 @@ long pkm_lcs_rsi_validate_query_values_response(
 	struct pkm_lcs_rsi_query_values_response_summary *summary);
 long pkm_lcs_rsi_validate_status_only_response(
 	const u8 *frame, size_t frame_len, u64 request_id, u16 request_op_code);
+long pkm_lcs_rsi_validate_delete_layer_response(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	struct pkm_lcs_rsi_delete_layer_response_summary *summary);
 long pkm_lcs_rsi_materialize_enum_children_info_summary(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence, const struct pkm_lcs_rsi_layer_view *layers,
