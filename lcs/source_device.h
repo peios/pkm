@@ -332,6 +332,13 @@ struct pkm_lcs_delete_layer_orchestration_result {
 	u32 immediate_drop_count;
 };
 
+struct pkm_lcs_layer_snapshot {
+	const struct pkm_lcs_rsi_layer_view *layers;
+	u32 layer_count;
+	struct pkm_lcs_rsi_layer_view *owned_layers;
+	char *owned_names;
+};
+
 struct pkm_lcs_path_component_view {
 	const char *name;
 	u32 name_len;
@@ -614,6 +621,9 @@ long pkm_lcs_create_layer_write_access_check_for_token(
 	size_t base_metadata_sd_len,
 	const struct pkm_lcs_layer_metadata_sd_view *metadata,
 	u32 metadata_count, struct pkm_lcs_key_open_access_plan *plan);
+long pkm_lcs_live_layer_write_access_check_for_token(
+	const void *token, const struct pkm_lcs_create_layer_target *target,
+	struct pkm_lcs_key_open_access_plan *plan);
 long pkm_lcs_assign_new_key_guid(
 	const u8 (*active_key_guids)[16], u32 active_key_guid_count,
 	const u8 (*retired_key_guids)[16], u32 retired_key_guid_count,
@@ -945,6 +955,10 @@ void pkm_lcs_source_base_layer_snapshot(
 long pkm_lcs_source_layer_snapshot_copy(
 	struct pkm_lcs_rsi_layer_view *layers, u32 max_layers,
 	char *name_buf, size_t name_buf_len, u32 *count_out);
+long pkm_lcs_source_layer_snapshot_acquire(
+	struct pkm_lcs_layer_snapshot *snapshot);
+void pkm_lcs_source_layer_snapshot_release(
+	struct pkm_lcs_layer_snapshot *snapshot);
 long pkm_lcs_layer_table_publish(
 	const char *layer_name, u32 layer_name_len, u32 precedence,
 	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],

@@ -1259,10 +1259,9 @@ static long pkm_lcs_key_fd_query_effective_value_snapshot(
 	const char *value_name, u32 value_name_len,
 	struct pkm_lcs_effective_value_snapshot *snapshot)
 {
-	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_source_response_result response = { };
 	u64 next_sequence = 0;
-	u32 layer_count = 0;
 	long ret;
 
 	if (!key_fd || (value_name_len && !value_name) || !snapshot)
@@ -1273,22 +1272,29 @@ static long pkm_lcs_key_fd_query_effective_value_snapshot(
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
 		return ret;
-	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		return ret;
 
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, value_name,
 		value_name_len, false, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
 		&snapshot->frame, &response, NULL);
 	if (ret)
-		return ret;
+		goto out_layer_snapshot;
 
 	ret = pkm_lcs_rsi_materialize_query_value_response(
 		snapshot->frame.data, snapshot->frame.len,
 		response.request_id, next_sequence, value_name, value_name_len,
-		layers, layer_count, NULL, 0, &snapshot->result);
+		layer_snapshot.layers, layer_snapshot.layer_count, NULL, 0,
+		&snapshot->result);
 	if (ret)
-		return ret;
-	return pkm_lcs_effective_value_snapshot_validate(snapshot);
+		goto out_layer_snapshot;
+	ret = pkm_lcs_effective_value_snapshot_validate(snapshot);
+
+out_layer_snapshot:
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
+	return ret;
 }
 
 static bool pkm_lcs_effective_value_snapshots_same(
@@ -1361,11 +1367,10 @@ static long pkm_lcs_key_fd_materialize_value_watch_events(
 	const struct pkm_lcs_source_response_result *after_response,
 	struct pkm_lcs_value_watch_event_bytes *events)
 {
-	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_rsi_value_watch_events_result result = { };
 	struct pkm_lcs_rsi_value_watch_events_result written = { };
 	u64 next_sequence = 0;
-	u32 layer_count = 0;
 	long ret;
 
 	if (!key_fd || !before_frame || !before_response || !after_frame ||
@@ -1376,28 +1381,34 @@ static long pkm_lcs_key_fd_materialize_value_watch_events(
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
 		return ret;
-	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		return ret;
 
 	ret = pkm_lcs_rsi_materialize_query_values_watch_events(
 		before_frame->data, before_frame->len,
 		before_response->request_id, after_frame->data, after_frame->len,
-		after_response->request_id, next_sequence, layers, layer_count,
-		NULL, 0, NULL, 0, &result);
+		after_response->request_id, next_sequence, layer_snapshot.layers,
+		layer_snapshot.layer_count, NULL, 0, NULL, 0, &result);
 	if (ret)
-		return ret;
+		goto out_layer_snapshot;
 	if (!result.required_len) {
 		events->count = result.count;
-		return result.count ? -EIO : 0;
+		ret = result.count ? -EIO : 0;
+		goto out_layer_snapshot;
 	}
 
 	events->data = kmalloc(result.required_len, GFP_KERNEL);
-	if (!events->data)
-		return -ENOMEM;
+	if (!events->data) {
+		ret = -ENOMEM;
+		goto out_layer_snapshot;
+	}
 	ret = pkm_lcs_rsi_materialize_query_values_watch_events(
 		before_frame->data, before_frame->len,
 		before_response->request_id, after_frame->data, after_frame->len,
-		after_response->request_id, next_sequence, layers, layer_count,
-		NULL, 0, events->data, result.required_len, &written);
+		after_response->request_id, next_sequence, layer_snapshot.layers,
+		layer_snapshot.layer_count, NULL, 0, events->data,
+		result.required_len, &written);
 	if (ret)
 		goto out_events;
 	if (written.required_len != result.required_len ||
@@ -1409,10 +1420,13 @@ static long pkm_lcs_key_fd_materialize_value_watch_events(
 
 	events->len = written.written_len;
 	events->count = written.count;
-	return 0;
+	ret = 0;
+	goto out_layer_snapshot;
 
 out_events:
 	pkm_lcs_value_watch_event_bytes_destroy(events);
+out_layer_snapshot:
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }
 
@@ -1533,7 +1547,7 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_query_key_info_args *args)
 {
-	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_source_response_frame read_frame = { };
 	struct pkm_lcs_source_response_frame enum_frame = { };
 	struct pkm_lcs_source_response_frame values_frame = { };
@@ -1548,7 +1562,6 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	u64 hive_generation = 0;
 	u64 next_sequence = 0;
 	u64 name_ptr;
-	u32 layer_count = 0;
 	u32 provided_len;
 	long ret;
 
@@ -1578,7 +1591,9 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
 		return ret;
-	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		return ret;
 
 	pkm_lcs_source_response_frame_init(&read_frame);
 	pkm_lcs_source_response_frame_init(&enum_frame);
@@ -1604,7 +1619,8 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 		goto out_frames;
 	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
 		enum_frame.data, enum_frame.len, enum_response.request_id,
-		next_sequence, layers, layer_count, NULL, 0, &enum_summary);
+		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
+		NULL, 0, &enum_summary);
 	if (ret)
 		goto out_frames;
 
@@ -1616,7 +1632,8 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 		goto out_frames;
 	ret = pkm_lcs_rsi_materialize_query_values_info_summary(
 		values_frame.data, values_frame.len, values_response.request_id,
-		next_sequence, layers, layer_count, NULL, 0, &values_summary);
+		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
+		NULL, 0, &values_summary);
 	if (ret)
 		goto out_frames;
 
@@ -1656,6 +1673,7 @@ out_frames:
 	pkm_lcs_source_response_frame_destroy(&values_frame);
 	pkm_lcs_source_response_frame_destroy(&enum_frame);
 	pkm_lcs_source_response_frame_destroy(&read_frame);
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }
 
@@ -1735,7 +1753,7 @@ static long pkm_lcs_key_fd_query_value_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_query_value_args *args)
 {
-	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_query_value_result result = { };
@@ -1750,7 +1768,6 @@ static long pkm_lcs_key_fd_query_value_from_args(
 	u32 name_len;
 	u32 data_buf_len;
 	u32 layer_buf_len;
-	u32 layer_count = 0;
 	s32 txn_fd;
 	long ret;
 
@@ -1793,7 +1810,9 @@ static long pkm_lcs_key_fd_query_value_from_args(
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
 		goto out_name;
-	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		goto out_name;
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
@@ -1805,7 +1824,8 @@ static long pkm_lcs_key_fd_query_value_from_args(
 
 	ret = pkm_lcs_rsi_materialize_query_value_response(
 		frame.data, frame.len, response.request_id, next_sequence,
-		value_name, name_len, layers, layer_count, NULL, 0, &result);
+		value_name, name_len, layer_snapshot.layers,
+		layer_snapshot.layer_count, NULL, 0, &result);
 	if (ret)
 		goto out_frame;
 	if (!result.found) {
@@ -1857,6 +1877,7 @@ static long pkm_lcs_key_fd_query_value_from_args(
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 out_name:
 	kfree(value_name);
 	return ret;
@@ -2328,22 +2349,28 @@ static long pkm_lcs_key_fd_copy_delete_key_input(
 static long pkm_lcs_key_fd_authorize_value_layer_target(
 	const struct pkm_lcs_create_layer_target *target, const void *token)
 {
-	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_layer_target_admission_plan target_plan = { };
 	struct pkm_lcs_key_open_access_plan layer_plan = { };
-	u32 layer_count = 0;
 	long ret;
 
 	if (!target)
 		return -EINVAL;
 
-	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
-	ret = pkm_lcs_create_layer_target_admit(target, layers, layer_count,
-						&target_plan);
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
 	if (ret)
 		return ret;
-	return pkm_lcs_create_layer_write_access_check_for_token(
-		token, target, false, NULL, 0, NULL, 0, &layer_plan);
+	ret = pkm_lcs_create_layer_target_admit(
+		target, layer_snapshot.layers, layer_snapshot.layer_count,
+		&target_plan);
+	if (ret)
+		goto out_snapshot;
+	ret = pkm_lcs_live_layer_write_access_check_for_token(
+		token, target, &layer_plan);
+
+out_snapshot:
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
+	return ret;
 }
 
 static long pkm_lcs_key_fd_set_value_authorize_layer(
@@ -2472,12 +2499,11 @@ static long pkm_lcs_key_fd_validate_delete_key_request_shape(
 static long pkm_lcs_key_fd_delete_key_visible_child_gate(
 	const struct pkm_lcs_key_fd *key_fd, u64 txn_id)
 {
-	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_enum_children_info_summary summary = { };
 	u64 next_sequence = 0;
-	u32 layer_count = 0;
 	long ret;
 
 	if (!key_fd)
@@ -2486,7 +2512,9 @@ static long pkm_lcs_key_fd_delete_key_visible_child_gate(
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
 		return ret;
-	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
@@ -2497,7 +2525,8 @@ static long pkm_lcs_key_fd_delete_key_visible_child_gate(
 
 	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
 		frame.data, frame.len, response.request_id, next_sequence,
-		layers, layer_count, NULL, 0, &summary);
+		layer_snapshot.layers, layer_snapshot.layer_count, NULL, 0,
+		&summary);
 	if (ret)
 		goto out_frame;
 	if (summary.subkey_count)
@@ -2505,6 +2534,7 @@ static long pkm_lcs_key_fd_delete_key_visible_child_gate(
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }
 
@@ -2513,13 +2543,12 @@ static long pkm_lcs_key_fd_delete_key_post_lookup(
 	const u8 parent_guid[PKM_LCS_GUID_BYTES], const char *child_name,
 	u32 child_name_len, struct pkm_lcs_delete_key_post_lookup *out)
 {
-	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_lookup_guid_entry_result target = { };
 	struct pkm_lcs_rsi_lookup_child_result effective = { };
 	u64 next_sequence = 0;
-	u32 layer_count = 0;
 	long ret;
 
 	if (!key_fd || !parent_guid || !child_name || !out)
@@ -2529,7 +2558,9 @@ static long pkm_lcs_key_fd_delete_key_post_lookup(
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
 		return ret;
-	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
@@ -2547,8 +2578,8 @@ static long pkm_lcs_key_fd_delete_key_post_lookup(
 
 	ret = pkm_lcs_rsi_materialize_lookup_child(
 		frame.data, frame.len, response.request_id, next_sequence,
-		child_name, child_name_len, layers, layer_count, NULL, 0,
-		&effective);
+		child_name, child_name_len, layer_snapshot.layers,
+		layer_snapshot.layer_count, NULL, 0, &effective);
 	if (ret)
 		goto out_frame;
 
@@ -2558,6 +2589,7 @@ static long pkm_lcs_key_fd_delete_key_post_lookup(
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }
 
@@ -2602,7 +2634,7 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_query_values_batch_args *args)
 {
-	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_query_values_batch_result result = { };
@@ -2611,7 +2643,6 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 	u64 txn_id = 0;
 	u64 buf_ptr;
 	u32 buf_len;
-	u32 layer_count = 0;
 	s32 txn_fd;
 	u8 *output = NULL;
 	long ret;
@@ -2645,7 +2676,9 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
 		return ret;
-	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
@@ -2656,7 +2689,8 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 
 	ret = pkm_lcs_rsi_materialize_query_values_batch_response(
 		frame.data, frame.len, response.request_id, next_sequence,
-		layers, layer_count, NULL, 0, NULL, 0, &result);
+		layer_snapshot.layers, layer_snapshot.layer_count, NULL, 0,
+		NULL, 0, &result);
 	if (ret)
 		goto out_frame;
 
@@ -2676,7 +2710,8 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 		}
 		ret = pkm_lcs_rsi_materialize_query_values_batch_response(
 			frame.data, frame.len, response.request_id,
-			next_sequence, layers, layer_count, NULL, 0, output,
+			next_sequence, layer_snapshot.layers,
+			layer_snapshot.layer_count, NULL, 0, output,
 			result.required_len, &written);
 		if (ret)
 			goto out_output;
@@ -2703,6 +2738,7 @@ out_output:
 	kfree(output);
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }
 
@@ -2723,7 +2759,7 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_enum_value_args *args)
 {
-	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_enum_value_result result = { };
@@ -2736,7 +2772,6 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 	u32 index;
 	u32 name_buf_len;
 	u32 data_buf_len;
-	u32 layer_count = 0;
 	s32 txn_fd;
 	long ret;
 
@@ -2774,7 +2809,9 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
 		return ret;
-	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
@@ -2785,7 +2822,8 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 
 	ret = pkm_lcs_rsi_materialize_enum_value_response(
 		frame.data, frame.len, response.request_id, next_sequence,
-		index, layers, layer_count, NULL, 0, &result);
+		index, layer_snapshot.layers, layer_snapshot.layer_count, NULL,
+		0, &result);
 	if (ret)
 		goto out_frame;
 	if (!result.found) {
@@ -2837,6 +2875,7 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }
 
@@ -2924,7 +2963,7 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_enum_subkey_args *args)
 {
-	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_enum_subkey_result result = { };
@@ -2934,7 +2973,6 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 	u64 name_ptr;
 	u32 index;
 	u32 name_buf_len;
-	u32 layer_count = 0;
 	s32 txn_fd;
 	long ret;
 
@@ -2968,7 +3006,9 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
 		return ret;
-	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
@@ -2979,7 +3019,8 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 
 	ret = pkm_lcs_rsi_materialize_enum_subkey_response(
 		frame.data, frame.len, response.request_id, next_sequence,
-		index, layers, layer_count, NULL, 0, &result);
+		index, layer_snapshot.layers, layer_snapshot.layer_count, NULL,
+		0, &result);
 	if (ret)
 		goto out_frame;
 	if (!result.found) {
@@ -3005,8 +3046,8 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 					      name_ptr, txn_fd);
 	args->name_len = result.name_len;
 	ret = pkm_lcs_key_fd_enum_subkey_read_metadata(
-		key_fd, txn_id, next_sequence, layers, layer_count,
-		result.child_guid, args);
+		key_fd, txn_id, next_sequence, layer_snapshot.layers,
+		layer_snapshot.layer_count, result.child_guid, args);
 	if (ret)
 		goto out_frame;
 
@@ -3018,6 +3059,7 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }
 

@@ -202,6 +202,33 @@ static u32 pkm_lcs_layer_table_count_locked(void)
 	return count;
 }
 
+static long pkm_lcs_layer_table_shape_locked(u32 *count_out,
+					     size_t *name_bytes_out)
+{
+	size_t name_bytes = 0;
+	u32 count = 1U;
+	u32 i;
+
+	lockdep_assert_held(&pkm_lcs_layer_table_lock);
+
+	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+		if (!pkm_lcs_layer_table[i].occupied)
+			continue;
+		count++;
+		if (check_add_overflow(
+			    name_bytes,
+			    (size_t)pkm_lcs_layer_table[i].name_len + 1U,
+			    &name_bytes))
+			return -EOVERFLOW;
+	}
+
+	if (count_out)
+		*count_out = count;
+	if (name_bytes_out)
+		*name_bytes_out = name_bytes;
+	return 0;
+}
+
 static void pkm_lcs_source_slot_waiters_wake(void)
 {
 	atomic64_inc(&pkm_lcs_source_slot_epoch);
@@ -284,6 +311,74 @@ long pkm_lcs_source_layer_snapshot_copy(
 	mutex_unlock(&pkm_lcs_layer_table_lock);
 
 	return 0;
+}
+
+long pkm_lcs_source_layer_snapshot_acquire(
+	struct pkm_lcs_layer_snapshot *snapshot)
+{
+	struct pkm_lcs_rsi_layer_view *layers = NULL;
+	size_t name_bytes = 0;
+	char *names = NULL;
+	u32 count = 0;
+	u32 written = 0;
+	u32 attempt;
+	long ret;
+
+	if (!snapshot)
+		return -EINVAL;
+	memset(snapshot, 0, sizeof(*snapshot));
+
+	for (attempt = 0; attempt < 3; attempt++) {
+		mutex_lock(&pkm_lcs_layer_table_lock);
+		ret = pkm_lcs_layer_table_shape_locked(&count, &name_bytes);
+		mutex_unlock(&pkm_lcs_layer_table_lock);
+		if (ret)
+			return ret;
+
+		if (!count || count > PKM_LCS_MAX_TOTAL_LAYERS_DEFAULT)
+			return -EIO;
+
+		layers = kvcalloc(count, sizeof(*layers), GFP_KERNEL);
+		if (!layers)
+			return -ENOMEM;
+		if (name_bytes) {
+			names = kvmalloc(name_bytes, GFP_KERNEL);
+			if (!names) {
+				kvfree(layers);
+				return -ENOMEM;
+			}
+		}
+
+		ret = pkm_lcs_source_layer_snapshot_copy(layers, count, names,
+							 name_bytes, &written);
+		if (!ret) {
+			snapshot->layers = layers;
+			snapshot->layer_count = written;
+			snapshot->owned_layers = layers;
+			snapshot->owned_names = names;
+			return 0;
+		}
+
+		kvfree(names);
+		kvfree(layers);
+		names = NULL;
+		layers = NULL;
+		if (ret != -ENOSPC)
+			return ret;
+	}
+
+	return -ENOSPC;
+}
+
+void pkm_lcs_source_layer_snapshot_release(
+	struct pkm_lcs_layer_snapshot *snapshot)
+{
+	if (!snapshot)
+		return;
+
+	kvfree(snapshot->owned_names);
+	kvfree(snapshot->owned_layers);
+	memset(snapshot, 0, sizeof(*snapshot));
 }
 
 long pkm_lcs_layer_table_publish(
@@ -7440,6 +7535,74 @@ long pkm_lcs_create_layer_write_access_check_for_token(
 	selected = &metadata[selection.index];
 	return pkm_lcs_layer_write_access_check_for_token(
 		token, selected->sd, selected->sd_len, plan);
+}
+
+long pkm_lcs_live_layer_write_access_check_for_token(
+	const void *token, const struct pkm_lcs_create_layer_target *target,
+	struct pkm_lcs_key_open_access_plan *plan)
+{
+	u8 *metadata_sd = NULL;
+	size_t metadata_sd_len = 0;
+	bool found = false;
+	long ret = -ENOENT;
+	u32 i;
+
+	if (!plan)
+		return -EINVAL;
+	memset(plan, 0, sizeof(*plan));
+	if (!target || !target->name)
+		return -EINVAL;
+
+	if (target->implicit_base)
+		return pkm_lcs_base_layer_write_access_check_for_token(
+			token, false, NULL, 0, plan);
+
+	mutex_lock(&pkm_lcs_layer_table_lock);
+	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+		struct pkm_lcs_layer_table_entry *entry =
+			&pkm_lcs_layer_table[i];
+		bool equal = false;
+
+		if (!entry->occupied)
+			continue;
+		ret = pkm_lcs_layer_name_casefold_equal(
+			entry->name, entry->name_len, target->name,
+			target->name_len, &equal);
+		if (ret)
+			break;
+		if (!equal)
+			continue;
+
+		if (!entry->metadata_sd || !entry->metadata_sd_len) {
+			ret = -EIO;
+			break;
+		}
+		metadata_sd = kmemdup(entry->metadata_sd,
+				      entry->metadata_sd_len, GFP_KERNEL);
+		if (!metadata_sd) {
+			ret = -ENOMEM;
+			break;
+		}
+		metadata_sd_len = entry->metadata_sd_len;
+		found = true;
+		ret = 0;
+		break;
+	}
+	mutex_unlock(&pkm_lcs_layer_table_lock);
+
+	if (ret)
+		goto out_free;
+	if (!found) {
+		ret = -ENOENT;
+		goto out_free;
+	}
+
+	ret = pkm_lcs_layer_write_access_check_for_token(
+		token, metadata_sd, metadata_sd_len, plan);
+
+out_free:
+	kfree(metadata_sd);
+	return ret;
 }
 
 static void pkm_lcs_default_key_guid_generate(void *ctx, u8 guid[16])

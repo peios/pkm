@@ -1519,12 +1519,11 @@ static long pkm_lcs_transaction_append_key_path_invisible_exact(
 static long pkm_lcs_transaction_delete_key_post_lookup(
 	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry)
 {
-	const struct pkm_lcs_rsi_layer_view *layers = NULL;
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_rsi_lookup_guid_entry_result result = { };
 	struct pkm_lcs_rsi_lookup_child_result effective = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
-	u32 layer_count = 0;
 	u64 next_sequence = 0;
 	long ret;
 
@@ -1536,7 +1535,9 @@ static long pkm_lcs_transaction_delete_key_post_lookup(
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
 		return ret;
-	pkm_lcs_source_base_layer_snapshot(&layers, &layer_count);
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
@@ -1555,8 +1556,8 @@ static long pkm_lcs_transaction_delete_key_post_lookup(
 
 	ret = pkm_lcs_rsi_materialize_lookup_child(
 		frame.data, frame.len, response.request_id, next_sequence,
-		entry->child_name, entry->child_name_len, layers, layer_count,
-		NULL, 0, &effective);
+		entry->child_name, entry->child_name_len, layer_snapshot.layers,
+		layer_snapshot.layer_count, NULL, 0, &effective);
 	if (ret)
 		goto out_frame;
 
@@ -1569,6 +1570,7 @@ static long pkm_lcs_transaction_delete_key_post_lookup(
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }
 
