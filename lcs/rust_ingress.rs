@@ -6,6 +6,7 @@ use core::{slice, str};
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
     casefold_eq, classify_hive_route, current_user_sid_component_from_binary_sid,
+    find_config_range,
     for_each_effective_value, for_each_effective_value_watch_event,
     for_each_routable_path_component,
     for_each_rsi_enum_children_source_path_entry, for_each_rsi_lookup_source_path_entry,
@@ -45,7 +46,8 @@ use crate::lcs_core::{
     validate_value_data_len, validate_value_name_bytes, validate_value_write_type,
     value_data_len_linux_errno, value_layer_admission_linux_errno,
     value_type_validation_linux_errno,
-    source_validation_failure_audit_payload_len, write_key_open_audit_payload,
+    self_config_invalid_audit_payload_len, source_validation_failure_audit_payload_len,
+    write_key_open_audit_payload, write_self_config_invalid_audit_payload,
     write_source_validation_failure_audit_payload, write_rsi_abort_transaction_request_frame,
     write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
     write_rsi_create_entry_request_frame, write_rsi_create_key_request_frame,
@@ -60,16 +62,17 @@ use crate::lcs_core::{
     HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest, KeyWatchState,
     LayerOwnerSelectionInput, LayerOwnerSource, LayerPublicationInput, LayerResolutionContext,
     LayerTargetAdmissionInput, LayerView,
-    LcsCallerTokenSummary, LcsError, LcsKeyOpenAuditDecision, LcsLimits, LinuxErrno, NamedPathEntry,
-    NamedPathResolution, NamedValueEntry, PathKind, PathTarget, RegisteredHiveIdentity,
-    RegistryIoctlAccessRequirement, RegistryKeyOpenAccessInput, RegistryOpenAccessDecision,
-    RegistryOpenPreResolutionAccessPlan, RsiReadPlan, RsiRetainedRequest, RsiTransactionMode,
-    RsiSourceDataValidationFailure,
+    LCS_CONFIG_ROOT_PATH, LcsAuditEventKind, LcsCallerTokenSummary, LcsError,
+    LcsKeyOpenAuditDecision, LcsLimits, LcsSelfConfigInvalidAuditRecord,
+    LcsSelfConfigReceivedValue, LinuxErrno, NamedPathEntry, NamedPathResolution, NamedValueEntry,
+    PathKind, PathTarget, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
+    RegistryKeyOpenAccessInput, RegistryOpenAccessDecision, RegistryOpenPreResolutionAccessPlan,
+    RsiReadPlan, RsiRetainedRequest, RsiTransactionMode, RsiSourceDataValidationFailure,
     SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
     SourceSlotStatus, SourceSlotView, ValueEntry, ValueLayerAdmissionInput, ValueResolution,
     EffectiveValueWatchEvent, EnumeratedValue, WatchEventRecordPlan,
     WatchEventRecordRequest,
-    WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_TOMBSTONE,
+    WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_DWORD, REG_TOMBSTONE,
     RSI_DELETE_LAYER, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
     select_layer_owner, write_watch_event_record,
 };
@@ -88,6 +91,10 @@ const PKM_LCS_RSI_READ_ACTION_WAKE_CLOSE: u32 = 4;
 
 const PKM_LCS_WATCH_NOTIFY_ACTION_ARM: u32 = 1;
 const PKM_LCS_WATCH_NOTIFY_ACTION_DISARM: u32 = 2;
+
+const PKM_LCS_SELF_CONFIG_RECEIVED_MISSING: u32 = 0;
+const PKM_LCS_SELF_CONFIG_RECEIVED_WRONG_TYPE: u32 = 1;
+const PKM_LCS_SELF_CONFIG_RECEIVED_DWORD_OUT_OF_RANGE: u32 = 2;
 
 #[repr(C)]
 pub struct PkmLcsSourceRegistrationHiveCopy {
@@ -601,6 +608,14 @@ fn source_validation_failure_for_delete_layer_orphan_error(
 }
 
 fn source_validation_audit_error_return(err: LcsError) -> c_int {
+    match err {
+        LcsError::AuditPayloadOutputBufferTooSmall { .. } => LinuxErrno::Erange,
+        _ => LinuxErrno::Eio,
+    }
+    .negated_return() as c_int
+}
+
+fn self_config_invalid_audit_error_return(err: LcsError) -> c_int {
     match err {
         LcsError::AuditPayloadOutputBufferTooSmall { .. } => LinuxErrno::Erange,
         _ => LinuxErrno::Eio,
@@ -1464,6 +1479,98 @@ pub unsafe extern "C" fn lcs_rust_source_validation_failure_audit_payload(
             0
         }
         Err(err) => source_validation_audit_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_self_config_invalid_audit_payload(
+    configuration_name: *const u8,
+    configuration_name_len: usize,
+    received_kind: u32,
+    received_type: u32,
+    received_u32: u32,
+    retained_value: u32,
+    output: *mut u8,
+    output_len: usize,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out = 0;
+
+    if configuration_name.is_null() || configuration_name_len == 0 {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let name_bytes = unsafe { slice::from_raw_parts(configuration_name, configuration_name_len) };
+    let name = match str::from_utf8(name_bytes) {
+        Ok(value) => value,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    let Some(range) = find_config_range(name) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    if retained_value < range.min || retained_value > range.max {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let received = match received_kind {
+        PKM_LCS_SELF_CONFIG_RECEIVED_MISSING => {
+            if received_type != 0 || received_u32 != 0 {
+                return LinuxErrno::Einval.negated_return() as c_int;
+            }
+            LcsSelfConfigReceivedValue::Missing
+        }
+        PKM_LCS_SELF_CONFIG_RECEIVED_WRONG_TYPE => {
+            if received_type == REG_DWORD || received_u32 != 0 {
+                return LinuxErrno::Einval.negated_return() as c_int;
+            }
+            LcsSelfConfigReceivedValue::WrongType {
+                actual_type: received_type,
+            }
+        }
+        PKM_LCS_SELF_CONFIG_RECEIVED_DWORD_OUT_OF_RANGE => {
+            if received_type != 0 || (received_u32 >= range.min && received_u32 <= range.max) {
+                return LinuxErrno::Einval.negated_return() as c_int;
+            }
+            LcsSelfConfigReceivedValue::DwordOutOfRange {
+                value: received_u32,
+            }
+        }
+        _ => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+
+    let record = LcsSelfConfigInvalidAuditRecord {
+        event_kind: LcsAuditEventKind::SelfConfigInvalid,
+        configuration_parent_path: LCS_CONFIG_ROOT_PATH,
+        configuration_name: range.name,
+        expected_type: REG_DWORD,
+        expected_min: range.min,
+        expected_max: range.max,
+        received,
+        retained_value,
+    };
+    let required_len = match self_config_invalid_audit_payload_len(&record) {
+        Ok(len) => len,
+        Err(err) => return self_config_invalid_audit_error_return(err),
+    };
+    *written_out = required_len;
+
+    if output.is_null() {
+        return if output_len == 0 {
+            0
+        } else {
+            LinuxErrno::Einval.negated_return() as c_int
+        };
+    }
+
+    let output = unsafe { slice::from_raw_parts_mut(output, output_len) };
+    match write_self_config_invalid_audit_payload(&record, output) {
+        Ok(plan) => {
+            *written_out = plan.bytes;
+            0
+        }
+        Err(err) => self_config_invalid_audit_error_return(err),
     }
 }
 

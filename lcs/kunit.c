@@ -5917,6 +5917,70 @@ static bool pkm_lcs_kunit_buffer_contains(const u8 *buffer, size_t buffer_len,
 	return false;
 }
 
+static void pkm_lcs_kunit_self_config_invalid_audit_emits_lcs_kmes_event(
+	struct kunit *test)
+{
+	static const char event_type[] = "LCS_SELF_CONFIG_INVALID";
+	static const char config_parent[] = "Machine\\System\\Registry";
+	static const char config_name[] = "RequestTimeoutMs";
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u8 buffer[512];
+	size_t written = 0;
+	u32 header_size;
+	u16 type_len;
+
+	pkm_kmes_kunit_reset_all();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_emit_self_config_invalid_audit(
+				config_name, sizeof(config_name) - 1,
+				PKM_LCS_SELF_CONFIG_RECEIVED_WRONG_TYPE,
+				REG_SZ, 0, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, sizeof(buffer), &written, &snapshot),
+			0);
+	KUNIT_ASSERT_GT(test, written, (size_t)KMES_EVENT_HEADER_BASE_SIZE);
+
+	type_len = get_unaligned_le16(buffer + KMES_EVENT_TYPE_LEN_OFFSET);
+	header_size = get_unaligned_le32(buffer + KMES_EVENT_HEADER_SIZE_OFFSET);
+	KUNIT_ASSERT_EQ(test, type_len, (u16)(sizeof(event_type) - 1));
+	KUNIT_ASSERT_TRUE(test, written > header_size);
+	KUNIT_EXPECT_EQ(test, buffer[KMES_EVENT_ORIGIN_CLASS_OFFSET],
+			(u8)KMES_ORIGIN_LCS);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
+			       type_len),
+			0);
+	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x89);
+	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+				      buffer, written, config_parent));
+	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+				      buffer, written, config_name));
+	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+				      buffer, written, "wrong_type"));
+}
+
+static void pkm_lcs_kunit_self_config_invalid_audit_rejects_bad_shape(
+	struct kunit *test)
+{
+	static const char config_name[] = "RequestTimeoutMs";
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u8 buffer[256];
+	size_t written = 0;
+
+	pkm_kmes_kunit_reset_all();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_emit_self_config_invalid_audit(
+				config_name, sizeof(config_name) - 1, 99,
+				0, 0, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, sizeof(buffer), &written, &snapshot),
+			-ENOENT);
+}
+
 static bool pkm_lcs_kunit_buffer_contains_bytes(const u8 *buffer,
 						size_t buffer_len,
 						const u8 *needle,
@@ -37853,6 +37917,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_key_open_audit_payload_abi_rejects_bad_state),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_validation_audit_emits_lcs_kmes_event),
+	KUNIT_CASE(
+		pkm_lcs_kunit_self_config_invalid_audit_emits_lcs_kmes_event),
+	KUNIT_CASE(
+		pkm_lcs_kunit_self_config_invalid_audit_rejects_bad_shape),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_snapshot_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_deep_copies_input),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_rejects_malformed_state),

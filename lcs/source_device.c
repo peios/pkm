@@ -64,6 +64,8 @@ static const char pkm_lcs_key_open_audit_event_type[] =
 	"LCS_KEY_OPEN_AUDIT";
 static const char pkm_lcs_source_validation_failure_event_type[] =
 	"LCS_SOURCE_VALIDATION_FAILURE";
+static const char pkm_lcs_self_config_invalid_event_type[] =
+	"LCS_SELF_CONFIG_INVALID";
 
 struct pkm_lcs_rsi_read_plan_copy {
 	u32 action;
@@ -1058,6 +1060,11 @@ extern int lcs_rust_source_validation_failure_audit_payload(
 	u16 op_code, u8 op_code_present, const u8 key_guid[16],
 	u8 key_guid_present, u32 validation_failure, u8 *output,
 	size_t output_len, size_t *written_out);
+extern int lcs_rust_self_config_invalid_audit_payload(
+	const u8 *configuration_name, size_t configuration_name_len,
+	u32 received_kind, u32 received_type, u32 received_u32,
+	u32 retained_value, u8 *output, size_t output_len,
+	size_t *written_out);
 extern int lcs_rust_validate_syscall_relative_path(
 	const u8 *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);
@@ -6727,6 +6734,65 @@ long pkm_lcs_emit_source_validation_failure_audit(
 		KMES_ORIGIN_LCS, pkm_lcs_source_validation_failure_event_type,
 		sizeof(pkm_lcs_source_validation_failure_event_type) - 1,
 		payload, written);
+	kfree(payload);
+	return 0;
+}
+
+long pkm_lcs_emit_self_config_invalid_audit(
+	const char *configuration_name, u32 configuration_name_len,
+	u32 received_kind, u32 received_type, u32 received_u32,
+	u32 retained_value)
+{
+	size_t payload_len = 0;
+	size_t written = 0;
+	u8 *payload;
+	int ret;
+
+	if (!configuration_name || !configuration_name_len)
+		return -EINVAL;
+	switch (received_kind) {
+	case PKM_LCS_SELF_CONFIG_RECEIVED_MISSING:
+		if (received_type || received_u32)
+			return -EINVAL;
+		break;
+	case PKM_LCS_SELF_CONFIG_RECEIVED_WRONG_TYPE:
+		if (received_type == REG_DWORD || received_u32)
+			return -EINVAL;
+		break;
+	case PKM_LCS_SELF_CONFIG_RECEIVED_DWORD_OUT_OF_RANGE:
+		if (received_type)
+			return -EINVAL;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = lcs_rust_self_config_invalid_audit_payload(
+		(const u8 *)configuration_name, configuration_name_len,
+		received_kind, received_type, received_u32, retained_value,
+		NULL, 0, &payload_len);
+	if (ret)
+		return ret == -EINVAL ? -EINVAL : -EIO;
+	if (!payload_len || payload_len > U32_MAX)
+		return -EIO;
+
+	payload = kmalloc(payload_len, GFP_KERNEL);
+	if (!payload)
+		return -EIO;
+
+	ret = lcs_rust_self_config_invalid_audit_payload(
+		(const u8 *)configuration_name, configuration_name_len,
+		received_kind, received_type, received_u32, retained_value,
+		payload, payload_len, &written);
+	if (ret || written != payload_len) {
+		kfree(payload);
+		return ret == -EINVAL ? -EINVAL : -EIO;
+	}
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS,
+			     pkm_lcs_self_config_invalid_event_type,
+			     sizeof(pkm_lcs_self_config_invalid_event_type) - 1,
+			     payload, written);
 	kfree(payload);
 	return 0;
 }

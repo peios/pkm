@@ -239,6 +239,12 @@ enum pkm_lcs_source_validation_failure {
 	PKM_LCS_SOURCE_VALIDATION_MALFORMED_DELETE_LAYER_ORPHAN_LIST = 11,
 };
 
+enum pkm_lcs_self_config_received_kind {
+	PKM_LCS_SELF_CONFIG_RECEIVED_MISSING = 0,
+	PKM_LCS_SELF_CONFIG_RECEIVED_WRONG_TYPE = 1,
+	PKM_LCS_SELF_CONFIG_RECEIVED_DWORD_OUT_OF_RANGE = 2,
+};
+
 struct pkm_lcs_path_validation_result {
 	u32 component_count;
 	bool used_forward_separator;
@@ -519,6 +525,10 @@ long pkm_lcs_emit_source_validation_failure_audit(
 	bool hive_name_present, u64 request_id, bool request_id_present,
 	u16 op_code, bool op_code_present, const u8 key_guid[16],
 	bool key_guid_present, u32 validation_failure);
+long pkm_lcs_emit_self_config_invalid_audit(
+	const char *configuration_name, u32 configuration_name_len,
+	u32 received_kind, u32 received_type, u32 received_u32,
+	u32 retained_value);
 long pkm_lcs_validate_syscall_relative_path(
 	const char *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);
