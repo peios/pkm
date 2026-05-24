@@ -3015,6 +3015,34 @@ out_read_frame:
 	return ret;
 }
 
+static long pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
+	const struct pkm_lcs_key_fd *key_fd)
+{
+	static const char base_name[] = "base";
+	const char *layer_name = NULL;
+	u32 layer_name_len = 0;
+	bool matches = false;
+	bool is_base = false;
+	long ret;
+
+	ret = pkm_lcs_key_fd_layer_metadata_path(
+		key_fd, &layer_name, &layer_name_len, &matches);
+	if (ret || !matches)
+		return ret;
+
+	ret = pkm_lcs_key_fd_layer_name_casefold_equal(
+		layer_name, layer_name_len, base_name, sizeof(base_name) - 1,
+		&is_base);
+	if (ret)
+		return ret;
+	if (is_base)
+		return 0;
+
+	return pkm_lcs_source_delete_layer_orchestrate_timeout(
+		layer_name, layer_name_len, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+		NULL);
+}
+
 static long pkm_lcs_key_fd_refresh_layer_metadata(
 	const struct pkm_lcs_key_fd *key_fd)
 {
@@ -4168,6 +4196,10 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 			goto out_cancel_mutation;
 		goto out_input;
 	}
+
+	ret = pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(key_fd);
+	if (ret)
+		goto out_cancel_mutation;
 
 	ret = pkm_lcs_source_record_transaction_generation(
 		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
