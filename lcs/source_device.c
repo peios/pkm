@@ -278,12 +278,18 @@ void pkm_lcs_runtime_limits_reset_defaults(void)
 	write_sequnlock(&pkm_lcs_runtime_limits_lock);
 }
 
+static void pkm_lcs_runtime_limits_snapshot_or_default(
+	struct pkm_lcs_runtime_limits *limits)
+{
+	if (pkm_lcs_runtime_limits_snapshot(limits))
+		*limits = pkm_lcs_runtime_limits_default;
+}
+
 u32 pkm_lcs_runtime_request_timeout_ms(void)
 {
 	struct pkm_lcs_runtime_limits limits;
 
-	if (pkm_lcs_runtime_limits_snapshot(&limits))
-		return PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT;
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	return limits.request_timeout_ms;
 }
 
@@ -291,8 +297,7 @@ u32 pkm_lcs_runtime_transaction_timeout_ms(void)
 {
 	struct pkm_lcs_runtime_limits limits;
 
-	if (pkm_lcs_runtime_limits_snapshot(&limits))
-		return PKM_LCS_TRANSACTION_TIMEOUT_MS_DEFAULT;
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	return limits.transaction_timeout_ms;
 }
 
@@ -300,8 +305,7 @@ u32 pkm_lcs_runtime_symlink_depth_limit(void)
 {
 	struct pkm_lcs_runtime_limits limits;
 
-	if (pkm_lcs_runtime_limits_snapshot(&limits))
-		return PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT;
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	return limits.symlink_depth_limit;
 }
 
@@ -309,8 +313,7 @@ u32 pkm_lcs_runtime_max_key_depth(void)
 {
 	struct pkm_lcs_runtime_limits limits;
 
-	if (pkm_lcs_runtime_limits_snapshot(&limits))
-		return PKM_LCS_MAX_KEY_DEPTH_DEFAULT;
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	return limits.max_key_depth;
 }
 
@@ -1154,13 +1157,15 @@ extern int lcs_rust_route_absolute_path_from_source_slots(
 	const u8 *path, u32 path_len, bool rewrite_current_user,
 	const u8 *current_user_sid_component,
 	u32 current_user_sid_component_len, const u8 (*scope_guids)[16],
-	size_t scope_count, struct pkm_lcs_hive_route_result *result);
+	size_t scope_count, struct pkm_lcs_hive_route_result *result,
+	const struct pkm_lcs_runtime_limits *limits);
 extern int lcs_rust_route_absolute_path_from_source_slots_with_token_sid(
 	const struct pkm_lcs_source_slot_view_copy *slots, size_t slot_count,
 	const u8 *path, u32 path_len, bool rewrite_current_user,
 	const u8 *current_user_sid, size_t current_user_sid_len,
 	const u8 (*scope_guids)[16], size_t scope_count,
-	struct pkm_lcs_hive_route_result *result);
+	struct pkm_lcs_hive_route_result *result,
+	const struct pkm_lcs_runtime_limits *limits);
 extern int lcs_rust_route_symlink_target_from_source_slots(
 	const struct pkm_lcs_source_slot_view_copy *slots, size_t slot_count,
 	const u8 *target, u32 target_len, const u8 (*scope_guids)[16],
@@ -1170,7 +1175,8 @@ extern int lcs_rust_materialize_absolute_path_components_with_token_sid(
 	const u8 *current_user_sid, size_t current_user_sid_len,
 	struct pkm_lcs_path_component_view *components,
 	size_t component_capacity, u8 *string_buf, size_t string_capacity,
-	struct pkm_lcs_path_component_materialization *result);
+	struct pkm_lcs_path_component_materialization *result,
+	const struct pkm_lcs_runtime_limits *limits);
 extern int lcs_rust_materialize_symlink_target_components(
 	const u8 *target, u32 target_len,
 	struct pkm_lcs_path_component_view *components,
@@ -1180,7 +1186,8 @@ extern int lcs_rust_materialize_relative_path_components(
 	const u8 *path, u32 path_len,
 	struct pkm_lcs_path_component_view *components,
 	size_t component_capacity, u8 *string_buf, size_t string_capacity,
-	struct pkm_lcs_path_component_materialization *result);
+	struct pkm_lcs_path_component_materialization *result,
+	const struct pkm_lcs_runtime_limits *limits);
 extern int lcs_rust_open_preflight(
 	u32 desired_access, u32 flags,
 	struct pkm_lcs_open_preflight_plan *plan);
@@ -1223,7 +1230,8 @@ extern int lcs_rust_self_config_invalid_audit_payload(
 	size_t *written_out);
 extern int lcs_rust_validate_syscall_relative_path(
 	const u8 *path, u32 path_len,
-	struct pkm_lcs_path_validation_result *result);
+	struct pkm_lcs_path_validation_result *result,
+	const struct pkm_lcs_runtime_limits *limits);
 extern int lcs_rust_validate_rsi_queued_request_frame(
 	const u8 *frame, size_t frame_len,
 	struct pkm_lcs_rsi_built_request *retained);
@@ -6593,29 +6601,30 @@ long pkm_lcs_route_absolute_path(const char *path, u32 path_len,
 {
 	struct pkm_lcs_source_slot_view_copy
 		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	struct pkm_lcs_runtime_limits limits;
 	u32 slot_count;
 	long ret;
 
 	if (!path || !result)
 		return -EINVAL;
 
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	memset(result, 0, sizeof(*result));
 	mutex_lock(&pkm_lcs_source_table_lock);
 	slot_count = pkm_lcs_source_table_views_locked(views);
 	ret = lcs_rust_route_absolute_path_from_source_slots(
 		views, slot_count, path, path_len, rewrite_current_user,
 		current_user_sid_component, current_user_sid_component_len,
-		scope_guids, scope_count, result);
+		scope_guids, scope_count, result, &limits);
 	mutex_unlock(&pkm_lcs_source_table_lock);
 	return ret;
 }
 
-long pkm_lcs_route_absolute_path_for_token(const void *token, const char *path,
-					   u32 path_len,
-					   bool rewrite_current_user,
-					   const u8 (*scope_guids)[16],
-					   u32 scope_count,
-					   struct pkm_lcs_hive_route_result *result)
+static long pkm_lcs_route_absolute_path_for_token_with_limits(
+	const void *token, const char *path, u32 path_len,
+	bool rewrite_current_user, const u8 (*scope_guids)[16],
+	u32 scope_count, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_hive_route_result *result)
 {
 	struct pkm_lcs_source_slot_view_copy
 		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
@@ -6624,7 +6633,7 @@ long pkm_lcs_route_absolute_path_for_token(const void *token, const char *path,
 	u32 slot_count;
 	long ret;
 
-	if (!path || !result)
+	if (!path || !result || !limits)
 		return -EINVAL;
 
 	memset(result, 0, sizeof(*result));
@@ -6640,9 +6649,24 @@ long pkm_lcs_route_absolute_path_for_token(const void *token, const char *path,
 	ret = lcs_rust_route_absolute_path_from_source_slots_with_token_sid(
 		views, slot_count, path, path_len, rewrite_current_user,
 		current_user_sid, current_user_sid_len, scope_guids, scope_count,
-		result);
+		result, limits);
 	mutex_unlock(&pkm_lcs_source_table_lock);
 	return ret;
+}
+
+long pkm_lcs_route_absolute_path_for_token(const void *token, const char *path,
+					   u32 path_len,
+					   bool rewrite_current_user,
+					   const u8 (*scope_guids)[16],
+					   u32 scope_count,
+					   struct pkm_lcs_hive_route_result *result)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_route_absolute_path_for_token_with_limits(
+		token, path, path_len, rewrite_current_user, scope_guids,
+		scope_count, &limits, result);
 }
 
 long pkm_lcs_route_current_absolute_path(const char *path, u32 path_len,
@@ -6663,6 +6687,7 @@ long pkm_lcs_route_user_absolute_path_for_token(
 	struct pkm_lcs_hive_route_result *result)
 {
 	struct pkm_lcs_syscall_path_copy copy = { };
+	struct pkm_lcs_runtime_limits limits;
 	long ret;
 
 	if (!result)
@@ -6673,9 +6698,10 @@ long pkm_lcs_route_user_absolute_path_for_token(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_route_absolute_path_for_token(
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_route_absolute_path_for_token_with_limits(
 		token, copy.path, copy.path_len, rewrite_current_user,
-		scope_guids, scope_count, result);
+		scope_guids, scope_count, &limits, result);
 	pkm_lcs_syscall_path_copy_destroy(&copy);
 	return ret;
 }
@@ -6987,16 +7013,42 @@ static long pkm_lcs_publish_open_key_for_token(
 	return pkm_lcs_key_fd_publish(&publish);
 }
 
+static long pkm_lcs_validate_syscall_relative_path_with_limits(
+	const char *path, u32 path_len,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_path_validation_result *result);
+static long pkm_lcs_materialize_absolute_path_components_for_token_with_limits(
+	const void *token, const char *path, u32 path_len,
+	bool rewrite_current_user, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_materialized_path *result);
+static long pkm_lcs_materialize_relative_path_components_with_limits(
+	const char *path, u32 path_len,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_materialized_path *result);
+
 long pkm_lcs_validate_syscall_relative_path(
 	const char *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result)
 {
-	if (!path || !result)
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_validate_syscall_relative_path_with_limits(
+		path, path_len, &limits, result);
+}
+
+static long pkm_lcs_validate_syscall_relative_path_with_limits(
+	const char *path, u32 path_len,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_path_validation_result *result)
+{
+	if (!path || !result || !limits)
 		return -EINVAL;
 
 	memset(result, 0, sizeof(*result));
 	return lcs_rust_validate_syscall_relative_path((const u8 *)path,
-						      path_len, result);
+						      path_len, result,
+						      limits);
 }
 
 static long pkm_lcs_validate_relative_open_depth_counts(
@@ -7009,17 +7061,6 @@ static long pkm_lcs_validate_relative_open_depth_counts(
 	if (depth > max_key_depth)
 		return -EINVAL;
 	return 0;
-}
-
-static long pkm_lcs_validate_relative_open_depth(
-	const struct pkm_lcs_relative_open_preflight *result)
-{
-	if (!result)
-		return -EINVAL;
-
-	return pkm_lcs_validate_relative_open_depth_counts(
-		result->parent.parent_depth, result->path.component_count,
-		pkm_lcs_runtime_max_key_depth());
 }
 
 static long pkm_lcs_transaction_read_txn_id_for_target(
@@ -7057,6 +7098,7 @@ static long pkm_lcs_open_copied_absolute_path_after_preflight_for_token(
 	struct pkm_lcs_materialized_path components = { };
 	struct pkm_lcs_resolved_key_path resolved = { };
 	struct pkm_lcs_hive_route_result route = { };
+	struct pkm_lcs_runtime_limits limits;
 	const u8 *final_sd;
 	long ret;
 
@@ -7068,14 +7110,15 @@ static long pkm_lcs_open_copied_absolute_path_after_preflight_for_token(
 	    (private_layer_count && !private_layers))
 		return -EINVAL;
 
-	ret = pkm_lcs_route_absolute_path_for_token(
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_route_absolute_path_for_token_with_limits(
 		token, copy->path, copy->path_len, true, scope_guids,
-		scope_count, &route);
+		scope_count, &limits, &route);
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_materialize_absolute_path_components_for_token(
-		token, copy->path, copy->path_len, true, &components);
+	ret = pkm_lcs_materialize_absolute_path_components_for_token_with_limits(
+		token, copy->path, copy->path_len, true, &limits, &components);
 	if (ret)
 		return ret;
 
@@ -7122,6 +7165,7 @@ static long pkm_lcs_open_copied_relative_path_after_preflight(
 	struct pkm_lcs_materialized_path components = { };
 	struct pkm_lcs_path_validation_result path = { };
 	struct pkm_lcs_resolved_key_path resolved = { };
+	struct pkm_lcs_runtime_limits limits;
 	const u8 *final_sd;
 	long ret;
 
@@ -7133,8 +7177,9 @@ static long pkm_lcs_open_copied_relative_path_after_preflight(
 	    (private_layer_count && !private_layers))
 		return -EINVAL;
 
-	ret = pkm_lcs_validate_syscall_relative_path(copy->path,
-						     copy->path_len, &path);
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_validate_syscall_relative_path_with_limits(
+		copy->path, copy->path_len, &limits, &path);
 	if (ret)
 		return ret;
 
@@ -7144,12 +7189,12 @@ static long pkm_lcs_open_copied_relative_path_after_preflight(
 
 	ret = pkm_lcs_validate_relative_open_depth_counts(
 		parent.path_component_count, path.component_count,
-		pkm_lcs_runtime_max_key_depth());
+		limits.max_key_depth);
 	if (ret)
 		goto out_parent;
 
-	ret = pkm_lcs_materialize_relative_path_components(
-		copy->path, copy->path_len, &components);
+	ret = pkm_lcs_materialize_relative_path_components_with_limits(
+		copy->path, copy->path_len, &limits, &components);
 	if (ret)
 		goto out_parent;
 
@@ -7253,6 +7298,7 @@ long pkm_lcs_open_user_relative_path_preflight(
 	struct pkm_lcs_relative_open_preflight *result)
 {
 	struct pkm_lcs_syscall_path_copy copy = { };
+	struct pkm_lcs_runtime_limits limits;
 	long ret;
 
 	if (!result)
@@ -7267,8 +7313,9 @@ long pkm_lcs_open_user_relative_path_preflight(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_validate_syscall_relative_path(copy.path, copy.path_len,
-						     &result->path);
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_validate_syscall_relative_path_with_limits(
+		copy.path, copy.path_len, &limits, &result->path);
 	if (ret)
 		goto out_destroy_copy;
 
@@ -7276,7 +7323,9 @@ long pkm_lcs_open_user_relative_path_preflight(
 	if (ret)
 		goto out_destroy_copy;
 
-	ret = pkm_lcs_validate_relative_open_depth(result);
+	ret = pkm_lcs_validate_relative_open_depth_counts(
+		result->parent.parent_depth, result->path.component_count,
+		limits.max_key_depth);
 	if (ret)
 		memset(&result->parent, 0, sizeof(result->parent));
 
@@ -7295,9 +7344,10 @@ void pkm_lcs_materialized_path_destroy(struct pkm_lcs_materialized_path *path)
 	memset(path, 0, sizeof(*path));
 }
 
-long pkm_lcs_materialize_absolute_path_components_for_token(
+static long pkm_lcs_materialize_absolute_path_components_for_token_with_limits(
 	const void *token, const char *path, u32 path_len,
-	bool rewrite_current_user, struct pkm_lcs_materialized_path *result)
+	bool rewrite_current_user, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_materialized_path *result)
 {
 	const u8 *current_user_sid = NULL;
 	size_t current_user_sid_len = 0;
@@ -7307,7 +7357,7 @@ long pkm_lcs_materialize_absolute_path_components_for_token(
 	char *strings;
 	long ret;
 
-	if (!path || !result)
+	if (!path || !result || !limits)
 		return -EINVAL;
 
 	memset(result, 0, sizeof(*result));
@@ -7321,7 +7371,7 @@ long pkm_lcs_materialize_absolute_path_components_for_token(
 	ret = lcs_rust_materialize_absolute_path_components_with_token_sid(
 		(const u8 *)path, path_len, rewrite_current_user,
 		current_user_sid, current_user_sid_len, NULL, 0, NULL, 0,
-		&shape);
+		&shape, limits);
 	if (ret)
 		return ret;
 	if (!shape.component_count || !shape.string_bytes)
@@ -7340,8 +7390,74 @@ long pkm_lcs_materialize_absolute_path_components_for_token(
 	ret = lcs_rust_materialize_absolute_path_components_with_token_sid(
 		(const u8 *)path, path_len, rewrite_current_user,
 		current_user_sid, current_user_sid_len, components,
-		shape.component_count, (u8 *)strings, shape.string_bytes,
-		&filled);
+		shape.component_count, (u8 *)strings, shape.string_bytes, &filled,
+		limits);
+	if (ret)
+		goto out_free;
+	if (filled.component_count != shape.component_count ||
+	    filled.string_bytes != shape.string_bytes) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	result->components = components;
+	result->strings = strings;
+	result->component_count = filled.component_count;
+	result->string_bytes = filled.string_bytes;
+	return 0;
+
+out_free:
+	kfree(components);
+	kfree(strings);
+	return ret;
+}
+
+long pkm_lcs_materialize_absolute_path_components_for_token(
+	const void *token, const char *path, u32 path_len,
+	bool rewrite_current_user, struct pkm_lcs_materialized_path *result)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_materialize_absolute_path_components_for_token_with_limits(
+		token, path, path_len, rewrite_current_user, &limits, result);
+}
+
+static long pkm_lcs_materialize_relative_path_components_with_limits(
+	const char *path, u32 path_len,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_materialized_path *result)
+{
+	struct pkm_lcs_path_component_materialization shape = { };
+	struct pkm_lcs_path_component_materialization filled = { };
+	struct pkm_lcs_path_component_view *components;
+	char *strings;
+	long ret;
+
+	if (!path || !result || !limits)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+	ret = lcs_rust_materialize_relative_path_components(
+		(const u8 *)path, path_len, NULL, 0, NULL, 0, &shape, limits);
+	if (ret)
+		return ret;
+	if (!shape.component_count || !shape.string_bytes)
+		return -EINVAL;
+
+	components = kcalloc(shape.component_count, sizeof(*components),
+			     GFP_KERNEL);
+	if (!components)
+		return -ENOMEM;
+	strings = kmalloc(shape.string_bytes, GFP_KERNEL);
+	if (!strings) {
+		kfree(components);
+		return -ENOMEM;
+	}
+
+	ret = lcs_rust_materialize_relative_path_components(
+		(const u8 *)path, path_len, components, shape.component_count,
+		(u8 *)strings, shape.string_bytes, &filled, limits);
 	if (ret)
 		goto out_free;
 	if (filled.component_count != shape.component_count ||
@@ -7366,54 +7482,11 @@ long pkm_lcs_materialize_relative_path_components(
 	const char *path, u32 path_len,
 	struct pkm_lcs_materialized_path *result)
 {
-	struct pkm_lcs_path_component_materialization shape = { };
-	struct pkm_lcs_path_component_materialization filled = { };
-	struct pkm_lcs_path_component_view *components;
-	char *strings;
-	long ret;
+	struct pkm_lcs_runtime_limits limits;
 
-	if (!path || !result)
-		return -EINVAL;
-
-	memset(result, 0, sizeof(*result));
-	ret = lcs_rust_materialize_relative_path_components(
-		(const u8 *)path, path_len, NULL, 0, NULL, 0, &shape);
-	if (ret)
-		return ret;
-	if (!shape.component_count || !shape.string_bytes)
-		return -EINVAL;
-
-	components = kcalloc(shape.component_count, sizeof(*components),
-			     GFP_KERNEL);
-	if (!components)
-		return -ENOMEM;
-	strings = kmalloc(shape.string_bytes, GFP_KERNEL);
-	if (!strings) {
-		kfree(components);
-		return -ENOMEM;
-	}
-
-	ret = lcs_rust_materialize_relative_path_components(
-		(const u8 *)path, path_len, components, shape.component_count,
-		(u8 *)strings, shape.string_bytes, &filled);
-	if (ret)
-		goto out_free;
-	if (filled.component_count != shape.component_count ||
-	    filled.string_bytes != shape.string_bytes) {
-		ret = -EIO;
-		goto out_free;
-	}
-
-	result->components = components;
-	result->strings = strings;
-	result->component_count = filled.component_count;
-	result->string_bytes = filled.string_bytes;
-	return 0;
-
-out_free:
-	kfree(components);
-	kfree(strings);
-	return ret;
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_materialize_relative_path_components_with_limits(
+		path, path_len, &limits, result);
 }
 
 long pkm_lcs_route_symlink_target(
@@ -7598,6 +7671,7 @@ long pkm_lcs_open_user_absolute_path_for_token(
 	struct pkm_lcs_open_preflight_plan preflight = { };
 	struct pkm_lcs_resolved_key_path resolved = { };
 	struct pkm_lcs_hive_route_result route = { };
+	struct pkm_lcs_runtime_limits limits;
 	struct pkm_lcs_syscall_path_copy copy = { };
 	const u8 *final_sd;
 	long ret;
@@ -7616,14 +7690,15 @@ long pkm_lcs_open_user_absolute_path_for_token(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_route_absolute_path_for_token(
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_route_absolute_path_for_token_with_limits(
 		token, copy.path, copy.path_len, true, scope_guids,
-		scope_count, &route);
+		scope_count, &limits, &route);
 	if (ret)
 		goto out_copy;
 
-	ret = pkm_lcs_materialize_absolute_path_components_for_token(
-		token, copy.path, copy.path_len, true, &components);
+	ret = pkm_lcs_materialize_absolute_path_components_for_token_with_limits(
+		token, copy.path, copy.path_len, true, &limits, &components);
 	if (ret)
 		goto out_copy;
 
@@ -7672,6 +7747,7 @@ long pkm_lcs_open_user_relative_path_for_token(
 	struct pkm_lcs_open_preflight_plan preflight = { };
 	struct pkm_lcs_path_validation_result path = { };
 	struct pkm_lcs_resolved_key_path resolved = { };
+	struct pkm_lcs_runtime_limits limits;
 	struct pkm_lcs_syscall_path_copy copy = { };
 	const u8 *final_sd;
 	long ret;
@@ -7690,8 +7766,9 @@ long pkm_lcs_open_user_relative_path_for_token(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_validate_syscall_relative_path(copy.path, copy.path_len,
-						     &path);
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_validate_syscall_relative_path_with_limits(
+		copy.path, copy.path_len, &limits, &path);
 	if (ret)
 		goto out_copy;
 
@@ -7701,12 +7778,12 @@ long pkm_lcs_open_user_relative_path_for_token(
 
 	ret = pkm_lcs_validate_relative_open_depth_counts(
 		parent.path_component_count, path.component_count,
-		pkm_lcs_runtime_max_key_depth());
+		limits.max_key_depth);
 	if (ret)
 		goto out_parent;
 
-	ret = pkm_lcs_materialize_relative_path_components(
-		copy.path, copy.path_len, &components);
+	ret = pkm_lcs_materialize_relative_path_components_with_limits(
+		copy.path, copy.path_len, &limits, &components);
 	if (ret)
 		goto out_parent;
 
@@ -8121,6 +8198,7 @@ long pkm_lcs_create_missing_absolute_parent_for_token(
 {
 	struct pkm_lcs_materialized_path components = { };
 	struct pkm_lcs_hive_route_result route = { };
+	struct pkm_lcs_runtime_limits limits;
 	struct pkm_lcs_syscall_path_copy copy = { };
 	u32 parent_component_count;
 	long ret;
@@ -8136,14 +8214,15 @@ long pkm_lcs_create_missing_absolute_parent_for_token(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_route_absolute_path_for_token(
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_route_absolute_path_for_token_with_limits(
 		token, copy.path, copy.path_len, true, scope_guids,
-		scope_count, &route);
+		scope_count, &limits, &route);
 	if (ret)
 		goto out_copy;
 
-	ret = pkm_lcs_materialize_absolute_path_components_for_token(
-		token, copy.path, copy.path_len, true, &components);
+	ret = pkm_lcs_materialize_absolute_path_components_for_token_with_limits(
+		token, copy.path, copy.path_len, true, &limits, &components);
 	if (ret)
 		goto out_copy;
 	if (components.component_count < 2U) {
@@ -8166,9 +8245,11 @@ long pkm_lcs_create_missing_absolute_parent_for_token(
 	if (ret)
 		goto out_result;
 
-	ret = pkm_lcs_create_missing_validate_child_depth(result);
+	ret = pkm_lcs_validate_relative_open_depth_counts(
+		result->parent.component_count, 1, limits.max_key_depth);
 	if (ret)
 		goto out_result;
+	result->child_depth = result->parent.component_count + 1U;
 
 	pkm_lcs_materialized_path_destroy(&components);
 	pkm_lcs_syscall_path_copy_destroy(&copy);
@@ -8195,6 +8276,7 @@ long pkm_lcs_create_missing_relative_parent(
 	struct pkm_lcs_key_fd_parent_snapshot parent = { };
 	struct pkm_lcs_materialized_path components = { };
 	struct pkm_lcs_path_validation_result path = { };
+	struct pkm_lcs_runtime_limits limits;
 	struct pkm_lcs_syscall_path_copy copy = { };
 	long ret;
 
@@ -8209,8 +8291,9 @@ long pkm_lcs_create_missing_relative_parent(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_validate_syscall_relative_path(copy.path, copy.path_len,
-						     &path);
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_validate_syscall_relative_path_with_limits(
+		copy.path, copy.path_len, &limits, &path);
 	if (ret)
 		goto out_copy;
 
@@ -8220,12 +8303,12 @@ long pkm_lcs_create_missing_relative_parent(
 
 	ret = pkm_lcs_validate_relative_open_depth_counts(
 		parent.path_component_count, path.component_count,
-		pkm_lcs_runtime_max_key_depth());
+		limits.max_key_depth);
 	if (ret)
 		goto out_parent;
 
-	ret = pkm_lcs_materialize_relative_path_components(
-		copy.path, copy.path_len, &components);
+	ret = pkm_lcs_materialize_relative_path_components_with_limits(
+		copy.path, copy.path_len, &limits, &components);
 	if (ret)
 		goto out_parent;
 
@@ -8252,9 +8335,11 @@ long pkm_lcs_create_missing_relative_parent(
 	if (ret)
 		goto out_result;
 
-	ret = pkm_lcs_create_missing_validate_child_depth(result);
+	ret = pkm_lcs_validate_relative_open_depth_counts(
+		result->parent.component_count, 1, limits.max_key_depth);
 	if (ret)
 		goto out_result;
+	result->child_depth = result->parent.component_count + 1U;
 
 	pkm_lcs_materialized_path_destroy(&components);
 	pkm_lcs_key_fd_parent_snapshot_destroy(&parent);
@@ -8282,6 +8367,7 @@ static long pkm_lcs_create_missing_copied_absolute_parent_for_token_with_txn(
 {
 	struct pkm_lcs_materialized_path components = { };
 	struct pkm_lcs_hive_route_result route = { };
+	struct pkm_lcs_runtime_limits limits;
 	u32 parent_component_count;
 	long ret;
 
@@ -8294,14 +8380,15 @@ static long pkm_lcs_create_missing_copied_absolute_parent_for_token_with_txn(
 		return -EINVAL;
 	memset(result, 0, sizeof(*result));
 
-	ret = pkm_lcs_route_absolute_path_for_token(
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_route_absolute_path_for_token_with_limits(
 		token, copy->path, copy->path_len, true, scope_guids,
-		scope_count, &route);
+		scope_count, &limits, &route);
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_materialize_absolute_path_components_for_token(
-		token, copy->path, copy->path_len, true, &components);
+	ret = pkm_lcs_materialize_absolute_path_components_for_token_with_limits(
+		token, copy->path, copy->path_len, true, &limits, &components);
 	if (ret)
 		return ret;
 	if (components.component_count < 2U) {
@@ -8324,9 +8411,11 @@ static long pkm_lcs_create_missing_copied_absolute_parent_for_token_with_txn(
 	if (ret)
 		goto out_result;
 
-	ret = pkm_lcs_create_missing_validate_child_depth(result);
+	ret = pkm_lcs_validate_relative_open_depth_counts(
+		result->parent.component_count, 1, limits.max_key_depth);
 	if (ret)
 		goto out_result;
+	result->child_depth = result->parent.component_count + 1U;
 
 	pkm_lcs_materialized_path_destroy(&components);
 	return 0;
@@ -8362,6 +8451,7 @@ static long pkm_lcs_create_missing_copied_relative_parent_with_txn(
 	struct pkm_lcs_key_fd_parent_snapshot parent = { };
 	struct pkm_lcs_materialized_path components = { };
 	struct pkm_lcs_path_validation_result path = { };
+	struct pkm_lcs_runtime_limits limits;
 	long ret;
 
 	if (!result)
@@ -8373,8 +8463,9 @@ static long pkm_lcs_create_missing_copied_relative_parent_with_txn(
 		return -EINVAL;
 	memset(result, 0, sizeof(*result));
 
-	ret = pkm_lcs_validate_syscall_relative_path(copy->path,
-						     copy->path_len, &path);
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_validate_syscall_relative_path_with_limits(
+		copy->path, copy->path_len, &limits, &path);
 	if (ret)
 		return ret;
 
@@ -8384,12 +8475,12 @@ static long pkm_lcs_create_missing_copied_relative_parent_with_txn(
 
 	ret = pkm_lcs_validate_relative_open_depth_counts(
 		parent.path_component_count, path.component_count,
-		pkm_lcs_runtime_max_key_depth());
+		limits.max_key_depth);
 	if (ret)
 		goto out_parent;
 
-	ret = pkm_lcs_materialize_relative_path_components(
-		copy->path, copy->path_len, &components);
+	ret = pkm_lcs_materialize_relative_path_components_with_limits(
+		copy->path, copy->path_len, &limits, &components);
 	if (ret)
 		goto out_parent;
 
@@ -8424,9 +8515,11 @@ static long pkm_lcs_create_missing_copied_relative_parent_with_txn(
 	if (ret)
 		goto out_result;
 
-	ret = pkm_lcs_create_missing_validate_child_depth(result);
+	ret = pkm_lcs_validate_relative_open_depth_counts(
+		result->parent.component_count, 1, limits.max_key_depth);
 	if (ret)
 		goto out_result;
+	result->child_depth = result->parent.component_count + 1U;
 
 	pkm_lcs_materialized_path_destroy(&components);
 	pkm_lcs_key_fd_parent_snapshot_destroy(&parent);

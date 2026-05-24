@@ -208,6 +208,29 @@ pub struct PkmLcsPathValidationResultCopy {
 }
 
 #[repr(C)]
+pub struct PkmLcsRuntimeLimitsCopy {
+    pub request_timeout_ms: u32,
+    pub transaction_timeout_ms: u32,
+    pub notification_queue_size: u32,
+    pub symlink_depth_limit: u32,
+    pub max_value_size: u32,
+    pub max_key_depth: u32,
+    pub max_path_component_length: u32,
+    pub max_total_path_length: u32,
+    pub max_layers_per_value: u32,
+    pub max_bound_transactions_per_source: u32,
+    pub max_read_only_transactions_per_source: u32,
+    pub max_total_layers: u32,
+    pub max_registered_sources: u32,
+    pub max_hives_per_source: u32,
+    pub max_concurrent_rsi_requests: u32,
+    pub max_scope_guids_per_token: u32,
+    pub max_private_layers_per_token: u32,
+    pub max_subtree_watch_depth: u32,
+    pub max_transaction_watch_event_burst: u32,
+}
+
+#[repr(C)]
 pub struct PkmLcsWatchNotifyPlanCopy {
     pub action: u32,
     pub filter: u32,
@@ -450,6 +473,34 @@ fn absolute_route_error_return(err: LcsError) -> c_int {
 
 fn symlink_target_error_return(_err: LcsError) -> c_int {
     LinuxErrno::Einval.negated_return() as c_int
+}
+
+fn lcs_limits_from_copy(raw: *const PkmLcsRuntimeLimitsCopy) -> Result<LcsLimits, LinuxErrno> {
+    let Some(raw) = (unsafe { raw.as_ref() }) else {
+        return Err(LinuxErrno::Einval);
+    };
+
+    Ok(LcsLimits {
+        request_timeout_ms: raw.request_timeout_ms,
+        transaction_timeout_ms: raw.transaction_timeout_ms,
+        max_key_depth: raw.max_key_depth as usize,
+        max_path_component_length: raw.max_path_component_length as usize,
+        max_total_path_length: raw.max_total_path_length as usize,
+        symlink_depth_limit: raw.symlink_depth_limit as usize,
+        max_value_size: raw.max_value_size as usize,
+        max_layers_per_value: raw.max_layers_per_value as usize,
+        max_total_layers: raw.max_total_layers as usize,
+        max_bound_transactions_per_source: raw.max_bound_transactions_per_source as usize,
+        max_read_only_transactions_per_source: raw.max_read_only_transactions_per_source as usize,
+        max_registered_sources: raw.max_registered_sources as usize,
+        max_hives_per_source: raw.max_hives_per_source as usize,
+        max_concurrent_rsi_requests: raw.max_concurrent_rsi_requests as usize,
+        notification_queue_size: raw.notification_queue_size as usize,
+        max_subtree_watch_depth: raw.max_subtree_watch_depth as usize,
+        max_transaction_watch_event_burst: raw.max_transaction_watch_event_burst as usize,
+        max_scope_guids_per_token: raw.max_scope_guids_per_token as usize,
+        max_private_layers_per_token: raw.max_private_layers_per_token as usize,
+    })
 }
 
 fn key_fd_open_view_error_return(err: LcsError) -> c_int {
@@ -1836,10 +1887,15 @@ pub unsafe extern "C" fn lcs_rust_validate_syscall_relative_path(
     path: *const u8,
     path_len: u32,
     result_out: *mut PkmLcsPathValidationResultCopy,
+    limits: *const PkmLcsRuntimeLimitsCopy,
 ) -> c_int {
     if path.is_null() || result_out.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
 
     unsafe {
         *result_out = PkmLcsPathValidationResultCopy {
@@ -1850,7 +1906,7 @@ pub unsafe extern "C" fn lcs_rust_validate_syscall_relative_path(
     }
 
     let path_bytes = unsafe { slice::from_raw_parts(path, path_len as usize) };
-    match validate_syscall_path_c_string(path_bytes, PathKind::Relative, &LcsLimits::DEFAULT) {
+    match validate_syscall_path_c_string(path_bytes, PathKind::Relative, &limits) {
         Ok(summary) => {
             unsafe {
                 (*result_out).component_count = summary.component_count as u32;
@@ -5932,6 +5988,7 @@ pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots(
     scope_guids: *const [u8; 16],
     scope_count: usize,
     result_out: *mut PkmLcsHiveRouteResultCopy,
+    limits: *const PkmLcsRuntimeLimitsCopy,
 ) -> c_int {
     if result_out.is_null() || path.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
@@ -5939,13 +5996,16 @@ pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots(
     if slot_count != 0 && slots.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
 
     let path_bytes = unsafe { slice::from_raw_parts(path, path_len as usize) };
-    let path =
-        match validate_syscall_path_c_string(path_bytes, PathKind::Absolute, &LcsLimits::DEFAULT) {
-            Ok(summary) => summary.raw,
-            Err(err) => return absolute_route_error_return(err),
-        };
+    let path = match validate_syscall_path_c_string(path_bytes, PathKind::Absolute, &limits) {
+        Ok(summary) => summary.raw,
+        Err(err) => return absolute_route_error_return(err),
+    };
     let rewrite = match parse_current_user_rewrite(
         rewrite_current_user,
         current_user_sid_component,
@@ -6003,7 +6063,7 @@ pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots(
         }
     }
 
-    if let Err(err) = validate_source_slots(&LcsLimits::DEFAULT, existing_slots.as_slice()) {
+    if let Err(err) = validate_source_slots(&limits, existing_slots.as_slice()) {
         return source_registration_error_return(err);
     }
 
@@ -6030,7 +6090,7 @@ pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots(
     }
 
     let route = match route_routable_path_hive(
-        &LcsLimits::DEFAULT,
+        &limits,
         hive_views.as_slice(),
         path,
         rewrite,
@@ -6061,10 +6121,15 @@ pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots_with_tok
     scope_guids: *const [u8; 16],
     scope_count: usize,
     result_out: *mut PkmLcsHiveRouteResultCopy,
+    limits: *const PkmLcsRuntimeLimitsCopy,
 ) -> c_int {
     if result_out.is_null() || path.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let parsed_limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
     if !rewrite_current_user {
         return unsafe {
             lcs_rust_route_absolute_path_from_source_slots(
@@ -6078,6 +6143,7 @@ pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots_with_tok
                 scope_guids,
                 scope_count,
                 result_out,
+                limits,
             )
         };
     }
@@ -6087,7 +6153,7 @@ pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots_with_tok
 
     let sid_bytes = unsafe { slice::from_raw_parts(current_user_sid, current_user_sid_len) };
     let sid_component =
-        match current_user_sid_component_from_binary_sid(&LcsLimits::DEFAULT, sid_bytes) {
+        match current_user_sid_component_from_binary_sid(&parsed_limits, sid_bytes) {
             Ok(component) => component,
             Err(err) => return absolute_route_error_return(err),
         };
@@ -6104,6 +6170,7 @@ pub unsafe extern "C" fn lcs_rust_route_absolute_path_from_source_slots_with_tok
             scope_guids,
             scope_count,
             result_out,
+            limits,
         )
     }
 }
@@ -6232,6 +6299,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_absolute_path_components_with_toke
     string_buf: *mut u8,
     string_capacity: usize,
     result_out: *mut PkmLcsPathComponentMaterializationCopy,
+    limits: *const PkmLcsRuntimeLimitsCopy,
 ) -> c_int {
     let Some(result_out) = (unsafe { result_out.as_mut() }) else {
         return LinuxErrno::Einval.negated_return() as c_int;
@@ -6243,20 +6311,23 @@ pub unsafe extern "C" fn lcs_rust_materialize_absolute_path_components_with_toke
     if path.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
 
     let path_bytes = unsafe { slice::from_raw_parts(path, path_len as usize) };
-    let path =
-        match validate_syscall_path_c_string(path_bytes, PathKind::Absolute, &LcsLimits::DEFAULT) {
-            Ok(summary) => summary.raw,
-            Err(err) => return absolute_route_error_return(err),
-        };
+    let path = match validate_syscall_path_c_string(path_bytes, PathKind::Absolute, &limits) {
+        Ok(summary) => summary.raw,
+        Err(err) => return absolute_route_error_return(err),
+    };
 
     let sid_component_storage = if rewrite_current_user {
         if current_user_sid.is_null() || current_user_sid_len == 0 {
             return LinuxErrno::Eacces.negated_return() as c_int;
         }
         let sid_bytes = unsafe { slice::from_raw_parts(current_user_sid, current_user_sid_len) };
-        match current_user_sid_component_from_binary_sid(&LcsLimits::DEFAULT, sid_bytes) {
+        match current_user_sid_component_from_binary_sid(&limits, sid_bytes) {
             Ok(component) => Some(component),
             Err(err) => return absolute_route_error_return(err),
         }
@@ -6273,19 +6344,19 @@ pub unsafe extern "C" fn lcs_rust_materialize_absolute_path_components_with_toke
     let mut component_count = 0usize;
     let mut string_bytes = 0usize;
     if let Err(err) =
-        for_each_routable_path_component(&LcsLimits::DEFAULT, path, rewrite, |component| {
+        for_each_routable_path_component(&limits, path, rewrite, |component| {
             component_count = component_count
                 .checked_add(1)
                 .ok_or(LcsError::KeyDepthExceeded {
                     depth: usize::MAX,
-                    max: LcsLimits::DEFAULT.max_key_depth,
+                    max: limits.max_key_depth,
                 })?;
             string_bytes =
                 string_bytes
                     .checked_add(component.len())
                     .ok_or(LcsError::PathTooLong {
                         len: usize::MAX,
-                        max: LcsLimits::DEFAULT.max_total_path_length,
+                        max: limits.max_total_path_length,
                     })?;
             Ok(())
         })
@@ -6323,7 +6394,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_absolute_path_components_with_toke
     let mut index = 0usize;
     let mut offset = 0usize;
     if let Err(err) =
-        for_each_routable_path_component(&LcsLimits::DEFAULT, path, rewrite, |component| {
+        for_each_routable_path_component(&limits, path, rewrite, |component| {
             let bytes = component.as_bytes();
             let end = offset + bytes.len();
             string_out[offset..end].copy_from_slice(bytes);
@@ -6445,6 +6516,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_relative_path_components(
     string_buf: *mut u8,
     string_capacity: usize,
     result_out: *mut PkmLcsPathComponentMaterializationCopy,
+    limits: *const PkmLcsRuntimeLimitsCopy,
 ) -> c_int {
     let Some(result_out) = (unsafe { result_out.as_mut() }) else {
         return LinuxErrno::Einval.negated_return() as c_int;
@@ -6456,13 +6528,16 @@ pub unsafe extern "C" fn lcs_rust_materialize_relative_path_components(
     if path.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
 
     let path_bytes = unsafe { slice::from_raw_parts(path, path_len as usize) };
-    let path =
-        match validate_syscall_path_c_string(path_bytes, PathKind::Relative, &LcsLimits::DEFAULT) {
-            Ok(summary) => summary.raw,
-            Err(err) => return absolute_route_error_return(err),
-        };
+    let path = match validate_syscall_path_c_string(path_bytes, PathKind::Relative, &limits) {
+        Ok(summary) => summary.raw,
+        Err(err) => return absolute_route_error_return(err),
+    };
 
     let mut component_count = 0usize;
     let mut string_bytes = 0usize;
@@ -6471,13 +6546,13 @@ pub unsafe extern "C" fn lcs_rust_materialize_relative_path_components(
             .checked_add(1)
             .ok_or(LcsError::KeyDepthExceeded {
                 depth: usize::MAX,
-                max: LcsLimits::DEFAULT.max_key_depth,
+                max: limits.max_key_depth,
             })?;
         string_bytes = string_bytes
             .checked_add(component.len())
             .ok_or(LcsError::PathTooLong {
                 len: usize::MAX,
-                max: LcsLimits::DEFAULT.max_total_path_length,
+                max: limits.max_total_path_length,
             })?;
         Ok(())
     }) {

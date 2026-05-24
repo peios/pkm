@@ -6271,6 +6271,67 @@ static void pkm_lcs_kunit_create_missing_runtime_max_key_depth(
 	pkm_lcs_runtime_limits_reset_defaults();
 }
 
+static void pkm_lcs_kunit_runtime_path_component_limit_relative(
+	struct kunit *test)
+{
+	static const char path_src[] =
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_relative_open_preflight result = { };
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = 64U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_open_user_relative_path_preflight(
+				&ops, -1, (const char __user *)path_src,
+				KEY_QUERY_VALUE, 0, &result),
+			(long)-ENAMETOOLONG);
+	KUNIT_EXPECT_EQ(test, result.path.component_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.parent.source_id, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	pkm_lcs_runtime_limits_reset_defaults();
+}
+
+static void pkm_lcs_kunit_runtime_total_path_limit_absolute(
+	struct kunit *test)
+{
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_materialized_path path = { };
+	char path_src[1026];
+	size_t offset;
+
+	memcpy(path_src, "Machine", sizeof("Machine") - 1);
+	offset = sizeof("Machine") - 1;
+	while (offset < sizeof(path_src) - 1) {
+		path_src[offset++] = '\\';
+		if (offset < sizeof(path_src) - 1)
+			path_src[offset++] = 'a';
+	}
+	path_src[sizeof(path_src) - 1] = '\0';
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_total_path_length = 1024U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_materialize_absolute_path_components_for_token(
+				NULL, path_src, sizeof(path_src), false, &path),
+			(long)-ENAMETOOLONG);
+	KUNIT_EXPECT_PTR_EQ(test, path.components, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, path.strings, NULL);
+	KUNIT_EXPECT_EQ(test, path.component_count, 0U);
+	KUNIT_EXPECT_EQ(test, path.string_bytes, 0U);
+	pkm_lcs_runtime_limits_reset_defaults();
+}
+
 static bool pkm_lcs_kunit_buffer_contains_bytes(const u8 *buffer,
 						size_t buffer_len,
 						const u8 *needle,
@@ -38222,6 +38283,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_runtime_max_key_depth_uses_snapshot),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_runtime_max_key_depth),
 	KUNIT_CASE(pkm_lcs_kunit_create_missing_runtime_max_key_depth),
+	KUNIT_CASE(pkm_lcs_kunit_runtime_path_component_limit_relative),
+	KUNIT_CASE(pkm_lcs_kunit_runtime_total_path_limit_absolute),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_snapshot_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_deep_copies_input),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_rejects_malformed_state),
