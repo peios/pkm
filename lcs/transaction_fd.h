@@ -92,6 +92,7 @@ struct pkm_lcs_transaction_delete_value_log_input {
 };
 
 struct pkm_lcs_transaction_delete_key_log_input {
+	const u8 *key_guid;
 	const u8 *parent_guid;
 	const char *child_name;
 	size_t child_name_len;
@@ -103,6 +104,7 @@ struct pkm_lcs_transaction_delete_key_log_input {
 };
 
 struct pkm_lcs_transaction_hide_key_log_input {
+	const u8 *key_guid;
 	const u8 *parent_guid;
 	const char *child_name;
 	size_t child_name_len;
@@ -129,6 +131,7 @@ struct pkm_lcs_transaction_mutation_log_snapshot {
 	u32 capacity;
 	u32 last_kind;
 	u32 last_parent_depth;
+	u8 last_key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 	char last_child_name[64];
 	char last_layer[64];
 };

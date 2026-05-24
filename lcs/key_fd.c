@@ -3234,6 +3234,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 
 	if (args->txn_fd >= 0) {
 		parent_depth = key_fd->path_component_count - 1;
+		log_input.key_guid = key_fd->key_guid;
 		log_input.parent_guid = parent_guid;
 		log_input.child_name = child_name;
 		log_input.child_name_len = child_name_len;
@@ -3402,6 +3403,7 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 		goto out_input;
 
 	if (args->txn_fd >= 0) {
+		log_input.key_guid = key_fd->key_guid;
 		log_input.parent_guid = parent_guid;
 		log_input.child_name = child_name;
 		log_input.child_name_len = child_name_len;

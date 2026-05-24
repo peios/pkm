@@ -101,6 +101,7 @@ struct pkm_lcs_transaction_delete_value_log {
 };
 
 struct pkm_lcs_transaction_delete_key_log {
+	u8 key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 	u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 	char *child_name;
 	char *layer;
@@ -112,6 +113,7 @@ struct pkm_lcs_transaction_delete_key_log {
 };
 
 struct pkm_lcs_transaction_hide_key_log {
+	u8 key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 	u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 	u64 sequence;
 	char *child_name;
@@ -805,11 +807,15 @@ static long pkm_lcs_transaction_delete_key_log_alloc(
 	if (!out)
 		return -EINVAL;
 	*out = NULL;
-	if (!input || !input->parent_guid || !input->child_name ||
+	if (!input || !input->key_guid || !input->parent_guid ||
+	    !input->child_name ||
 	    !input->layer || !input->parent_path ||
 	    !input->parent_ancestor_guids || !input->parent_depth ||
 	    !pkm_lcs_transaction_name_len_valid(input->child_name_len) ||
 	    !pkm_lcs_transaction_name_len_valid(input->layer_len))
+		return -EINVAL;
+	if (!memchr_inv(input->key_guid, 0,
+			PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES))
 		return -EINVAL;
 	if (input->parent_depth >
 	    PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT)
@@ -820,6 +826,8 @@ static long pkm_lcs_transaction_delete_key_log_alloc(
 		return -ENOMEM;
 	INIT_LIST_HEAD(&entry->link);
 	entry->kind = PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY;
+	memcpy(entry->delete_key.key_guid, input->key_guid,
+	       sizeof(entry->delete_key.key_guid));
 	memcpy(entry->delete_key.parent_guid, input->parent_guid,
 	       sizeof(entry->delete_key.parent_guid));
 	entry->delete_key.child_name_len = (u32)input->child_name_len;
@@ -887,12 +895,16 @@ static long pkm_lcs_transaction_hide_key_log_alloc(
 	if (!out)
 		return -EINVAL;
 	*out = NULL;
-	if (!input || !input->parent_guid || !input->child_name ||
+	if (!input || !input->key_guid || !input->parent_guid ||
+	    !input->child_name ||
 	    !input->layer || !input->parent_path ||
 	    !input->parent_ancestor_guids || !input->parent_depth ||
 	    !input->sequence ||
 	    !pkm_lcs_transaction_name_len_valid(input->child_name_len) ||
 	    !pkm_lcs_transaction_name_len_valid(input->layer_len))
+		return -EINVAL;
+	if (!memchr_inv(input->key_guid, 0,
+			PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES))
 		return -EINVAL;
 	if (input->parent_depth >
 	    PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT)
@@ -903,6 +915,8 @@ static long pkm_lcs_transaction_hide_key_log_alloc(
 		return -ENOMEM;
 	INIT_LIST_HEAD(&entry->link);
 	entry->kind = PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY;
+	memcpy(entry->hide_key.key_guid, input->key_guid,
+	       sizeof(entry->hide_key.key_guid));
 	memcpy(entry->hide_key.parent_guid, input->parent_guid,
 	       sizeof(entry->hide_key.parent_guid));
 	entry->hide_key.sequence = input->sequence;
@@ -1803,6 +1817,8 @@ long pkm_lcs_transaction_fd_log_snapshot(
 			break;
 		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
 			out->last_parent_depth = last->delete_key.parent_depth;
+			memcpy(out->last_key_guid, last->delete_key.key_guid,
+			       sizeof(out->last_key_guid));
 			strscpy(out->last_child_name,
 				last->delete_key.child_name,
 				sizeof(out->last_child_name));
@@ -1812,6 +1828,8 @@ long pkm_lcs_transaction_fd_log_snapshot(
 		case PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY:
 			out->last_sequence = last->hide_key.sequence;
 			out->last_parent_depth = last->hide_key.parent_depth;
+			memcpy(out->last_key_guid, last->hide_key.key_guid,
+			       sizeof(out->last_key_guid));
 			strscpy(out->last_child_name, last->hide_key.child_name,
 				sizeof(out->last_child_name));
 			strscpy(out->last_layer, last->hide_key.layer,
