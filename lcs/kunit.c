@@ -33969,10 +33969,11 @@ static void pkm_lcs_kunit_source_write_accepts_complete_lookup_response(
 	kacs_rust_token_drop(token);
 }
 
-static void pkm_lcs_kunit_source_write_rejects_bad_framing_without_release(
+static void pkm_lcs_kunit_source_write_malformed_framing_downs_source(
 	struct kunit *test)
 {
 	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x78 };
+	struct pkm_lcs_source_table_snapshot table_snapshot = { };
 	struct pkm_lcs_source_fd_snapshot snapshot = { };
 	struct pkm_lcs_source_enqueue_result enqueue = { };
 	u8 response[RSI_MIN_RESPONSE_SIZE + 1];
@@ -34001,6 +34002,40 @@ static void pkm_lcs_kunit_source_write_rejects_bad_framing_without_release(
 				&file, response, RSI_MIN_RESPONSE_SIZE - 1U,
 				false, NULL),
 			(ssize_t)-EINVAL);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_TRUE(test, snapshot.closing);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+	pkm_lcs_kunit_source_table_snapshot(&table_snapshot);
+	KUNIT_EXPECT_EQ(test, table_snapshot.active_count, 0U);
+	KUNIT_EXPECT_EQ(test, table_snapshot.down_count, 1U);
+	KUNIT_EXPECT_EQ(
+		test, (u32)pkm_lcs_kunit_source_device_poll_file(&file),
+		(u32)(EPOLLERR | EPOLLHUP));
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+
+	memset(&snapshot, 0, sizeof(snapshot));
+	memset(&table_snapshot, 0, sizeof(table_snapshot));
+	memset(&enqueue, 0, sizeof(enqueue));
+	memset(&file, 0, sizeof(file));
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_lookup_request(
+				1, 0x7172737475767779ULL, parent_guid,
+				"Child", strlen("Child"), &enqueue),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    enqueue.request_id, enqueue.op_code,
+					    RSI_NOT_FOUND, &response_len);
 
 	put_unaligned_le32(RSI_MIN_RESPONSE_SIZE + 1U,
 			   response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
@@ -34009,7 +34044,64 @@ static void pkm_lcs_kunit_source_write_rejects_bad_framing_without_release(
 				&file, response, response_len, false, NULL),
 			(ssize_t)-EINVAL);
 	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
-	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 1U);
+	KUNIT_EXPECT_TRUE(test, snapshot.closing);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+	pkm_lcs_kunit_source_table_snapshot(&table_snapshot);
+	KUNIT_EXPECT_EQ(test, table_snapshot.active_count, 0U);
+	KUNIT_EXPECT_EQ(test, table_snapshot.down_count, 1U);
+	KUNIT_EXPECT_EQ(
+		test, (u32)pkm_lcs_kunit_source_device_poll_file(&file),
+		(u32)(EPOLLERR | EPOLLHUP));
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_write_unknown_id_downs_source(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x78 };
+	struct pkm_lcs_source_table_snapshot table_snapshot = { };
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+	size_t response_len;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_lookup_request(
+				1, 0x7172737475767780ULL, parent_guid,
+				"Child", strlen("Child"), &enqueue),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    enqueue.request_id + 1U,
+					    enqueue.op_code, RSI_NOT_FOUND,
+					    &response_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_write_file(
+				&file, response, response_len, false, NULL),
+			(ssize_t)-EINVAL);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_TRUE(test, snapshot.closing);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+	pkm_lcs_kunit_source_table_snapshot(&table_snapshot);
+	KUNIT_EXPECT_EQ(test, table_snapshot.active_count, 0U);
+	KUNIT_EXPECT_EQ(test, table_snapshot.down_count, 1U);
+	KUNIT_EXPECT_EQ(
+		test, (u32)pkm_lcs_kunit_source_device_poll_file(&file),
+		(u32)(EPOLLERR | EPOLLHUP));
 
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
@@ -35846,7 +35938,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_accepts_complete_lookup_response),
 	KUNIT_CASE(
-		pkm_lcs_kunit_source_write_rejects_bad_framing_without_release),
+		pkm_lcs_kunit_source_write_malformed_framing_downs_source),
+	KUNIT_CASE(pkm_lcs_kunit_source_write_unknown_id_downs_source),
 	KUNIT_CASE(pkm_lcs_kunit_source_write_fault_preserves_record),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_malformed_lookup_data_succeeds),

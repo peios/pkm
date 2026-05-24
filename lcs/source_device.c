@@ -2134,6 +2134,39 @@ static void pkm_lcs_source_device_mark_down_file(struct file *file)
 							      NULL);
 }
 
+static void pkm_lcs_source_device_mark_malformed_protocol_file(
+	struct file *file)
+{
+	struct pkm_lcs_source_fd *source_fd;
+	struct pkm_lcs_source_slot *slot;
+	u32 source_down_id = 0;
+
+	if (!file)
+		return;
+
+	source_fd = file->private_data;
+	if (!source_fd)
+		return;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	mutex_lock(&source_fd->queue_lock);
+	if (source_fd->state == PKM_LCS_SOURCE_FD_ACTIVE) {
+		slot = pkm_lcs_source_slot_find_locked(source_fd->source_id);
+		if (slot && slot->status == PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE &&
+		    slot->active_fd == source_fd)
+			source_down_id =
+				pkm_lcs_source_fd_mark_down_locked(source_fd);
+	}
+	mutex_unlock(&source_fd->queue_lock);
+	if (source_down_id)
+		wake_up_interruptible(&source_fd->read_wait);
+	mutex_unlock(&pkm_lcs_source_table_lock);
+
+	if (source_down_id)
+		(void)pkm_lcs_transaction_fd_mark_source_down(source_down_id,
+							      NULL);
+}
+
 void pkm_lcs_source_mark_down_by_id(u32 source_id)
 {
 	struct pkm_lcs_source_fd *source_fd = NULL;
@@ -6229,16 +6262,20 @@ static ssize_t pkm_lcs_source_device_write_file_with_ops(
 	else
 		result = &local_result;
 
-	if (count < RSI_MIN_RESPONSE_SIZE)
+	if (count < RSI_MIN_RESPONSE_SIZE) {
+		pkm_lcs_source_device_mark_malformed_protocol_file(file);
 		return -EINVAL;
+	}
 	if (!buf)
 		return -EFAULT;
 	if (!ops->read(ops->ctx, header, buf, sizeof(header)))
 		return -EFAULT;
 
 	total_len = get_unaligned_le32(header + RSI_RESPONSE_TOTAL_LEN_OFFSET);
-	if ((size_t)total_len != count)
+	if ((size_t)total_len != count) {
+		pkm_lcs_source_device_mark_malformed_protocol_file(file);
 		return -EINVAL;
+	}
 
 	frame = kmalloc(count, GFP_KERNEL);
 	if (!frame)
@@ -6249,8 +6286,11 @@ static ssize_t pkm_lcs_source_device_write_file_with_ops(
 	}
 
 	ret = pkm_lcs_source_accept_response_file(file, frame, count, result);
-	if (ret)
+	if (ret) {
+		if (ret == -EINVAL)
+			pkm_lcs_source_device_mark_malformed_protocol_file(file);
 		goto out_free;
+	}
 
 	ret = pkm_lcs_source_validate_accepted_response_payload(
 		frame, count, result, &caller_errno);
