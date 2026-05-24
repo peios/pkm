@@ -111,6 +111,8 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
 	u32 context_count);
 long pkm_lcs_key_fd_dispatch_watch_event(
 	const struct pkm_lcs_watch_dispatch_input *input);
+long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
+	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned);

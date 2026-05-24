@@ -10456,6 +10456,100 @@ static void pkm_lcs_kunit_key_fd_orphan_close_down_source_no_error(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_key_fd_orphan_transition_marks_and_notifies(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0xa1 },
+		{ 0xa2 },
+	};
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	u8 record[16] = { };
+	u32 marked = U32_MAX;
+	long fd1;
+	long fd2;
+	long fd_other_source;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+
+	fd1 = pkm_lcs_kunit_publish_key_fd_from_path(31, KEY_NOTIFY, path,
+						     ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd1 >= 0);
+	fd2 = pkm_lcs_kunit_publish_key_fd_from_path(31, KEY_NOTIFY, path,
+						     ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd2 >= 0);
+	fd_other_source = pkm_lcs_kunit_publish_key_fd_from_path(
+		32, KEY_NOTIFY, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd_other_source >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd1, &args),
+			0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
+				31, ancestors[1], &marked),
+			0L);
+	KUNIT_EXPECT_EQ(test, marked, 2U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd1, &snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, snapshot.orphaned);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd2, &snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, snapshot.orphaned);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)fd_other_source,
+						&snapshot),
+			0L);
+	KUNIT_EXPECT_FALSE(test, snapshot.orphaned);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd1, record,
+							sizeof(record), true),
+			(ssize_t)8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(record), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 4),
+			REG_WATCH_KEY_DELETED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 6), 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd2, &args),
+			(long)-ENOENT);
+
+	marked = U32_MAX;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
+				31, ancestors[1], &marked),
+			0L);
+	KUNIT_EXPECT_EQ(test, marked, 0U);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd1, record,
+							sizeof(record), true),
+			(ssize_t)-EAGAIN);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd1), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd2), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd_other_source), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+}
+
+static void pkm_lcs_kunit_key_fd_orphan_transition_no_live_refs_noops(
+	struct kunit *test)
+{
+	static const u8 guid[PKM_LCS_GUID_BYTES] = { 0xb1 };
+	static const u8 nil_guid[PKM_LCS_GUID_BYTES] = { };
+	u32 marked = U32_MAX;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
+				44, guid, &marked),
+			0L);
+	KUNIT_EXPECT_EQ(test, marked, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
+				44, nil_guid, &marked),
+			(long)-EINVAL);
+}
+
 static void pkm_lcs_kunit_key_fd_watch_read_poll_drains_records(
 	struct kunit *test)
 {
@@ -25780,6 +25874,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_last_close_sends_drop),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_nonfinal_close_defers_drop),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_close_down_source_no_error),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_transition_marks_and_notifies),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_orphan_transition_no_live_refs_noops),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_read_poll_drains_records),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_filter_disarm_and_overflow),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_registry_arm_replace_disarm),

@@ -77,6 +77,7 @@ struct pkm_lcs_subtree_watch_entry {
 
 struct pkm_lcs_key_ref_entry {
 	struct hlist_node link;
+	struct list_head fds;
 	u32 source_id;
 	u32 refcount;
 	bool orphaned;
@@ -93,6 +94,7 @@ struct pkm_lcs_key_fd {
 	struct mutex watch_lock;
 	wait_queue_head_t watch_wait;
 	struct list_head watch_events;
+	struct list_head key_ref_node;
 	struct hlist_node watch_registry_node;
 	struct pkm_lcs_key_ref_entry *key_ref;
 	u32 watch_filter;
@@ -103,6 +105,7 @@ struct pkm_lcs_key_fd {
 	bool watch_subtree_registered;
 	bool orphaned;
 	bool watch_armed;
+	bool key_ref_linked;
 	bool published;
 };
 
@@ -198,25 +201,27 @@ static struct pkm_lcs_key_ref_entry *pkm_lcs_key_ref_find_locked(
 	return NULL;
 }
 
-static long pkm_lcs_key_ref_get(u32 source_id,
-				const u8 guid[PKM_LCS_GUID_BYTES],
-				struct pkm_lcs_key_ref_entry **entry_out)
+static long pkm_lcs_key_ref_attach(struct pkm_lcs_key_fd *key_fd)
 {
 	struct pkm_lcs_key_ref_entry *entry;
+	u32 source_id;
 
-	if (!source_id || !guid || !entry_out)
+	if (!key_fd || !key_fd->source_id)
 		return -EINVAL;
-	*entry_out = NULL;
+	source_id = key_fd->source_id;
 
+retry:
 	mutex_lock(&pkm_lcs_key_ref_lock);
-	entry = pkm_lcs_key_ref_find_locked(source_id, guid);
+	entry = pkm_lcs_key_ref_find_locked(source_id, key_fd->key_guid);
 	if (entry) {
 		if (entry->refcount == U32_MAX) {
 			mutex_unlock(&pkm_lcs_key_ref_lock);
 			return -EOVERFLOW;
 		}
 		entry->refcount++;
-		*entry_out = entry;
+		key_fd->key_ref = entry;
+		key_fd->key_ref_linked = true;
+		list_add_tail(&key_fd->key_ref_node, &entry->fds);
 		mutex_unlock(&pkm_lcs_key_ref_lock);
 		return 0;
 	}
@@ -226,19 +231,22 @@ static long pkm_lcs_key_ref_get(u32 source_id,
 	if (!entry)
 		return -ENOMEM;
 	INIT_HLIST_NODE(&entry->link);
+	INIT_LIST_HEAD(&entry->fds);
 	entry->source_id = source_id;
 	entry->refcount = 1;
-	memcpy(entry->guid, guid, sizeof(entry->guid));
+	memcpy(entry->guid, key_fd->key_guid, sizeof(entry->guid));
 
 	mutex_lock(&pkm_lcs_key_ref_lock);
-	if (pkm_lcs_key_ref_find_locked(source_id, guid)) {
+	if (pkm_lcs_key_ref_find_locked(source_id, key_fd->key_guid)) {
 		mutex_unlock(&pkm_lcs_key_ref_lock);
 		kfree(entry);
-		return pkm_lcs_key_ref_get(source_id, guid, entry_out);
+		goto retry;
 	}
 	hash_add(pkm_lcs_key_ref_map, &entry->link,
-		 pkm_lcs_key_ref_hash(source_id, guid));
-	*entry_out = entry;
+		 pkm_lcs_key_ref_hash(source_id, key_fd->key_guid));
+	key_fd->key_ref = entry;
+	key_fd->key_ref_linked = true;
+	list_add_tail(&key_fd->key_ref_node, &entry->fds);
 	mutex_unlock(&pkm_lcs_key_ref_lock);
 	return 0;
 }
@@ -256,6 +264,10 @@ static void pkm_lcs_key_ref_put_for_key_fd(struct pkm_lcs_key_fd *key_fd,
 	mutex_lock(&pkm_lcs_key_ref_lock);
 	entry = key_fd->key_ref;
 	key_fd->key_ref = NULL;
+	if (key_fd->key_ref_linked) {
+		list_del_init(&key_fd->key_ref_node);
+		key_fd->key_ref_linked = false;
+	}
 	if (!entry->refcount) {
 		mutex_unlock(&pkm_lcs_key_ref_lock);
 		return;
@@ -741,6 +753,7 @@ static long pkm_lcs_key_fd_copy_input(
 	mutex_init(&key_fd->watch_lock);
 	init_waitqueue_head(&key_fd->watch_wait);
 	INIT_LIST_HEAD(&key_fd->watch_events);
+	INIT_LIST_HEAD(&key_fd->key_ref_node);
 	INIT_HLIST_NODE(&key_fd->watch_registry_node);
 
 	key_fd->resolved_path = kcalloc(input->path_component_count,
@@ -767,8 +780,7 @@ static long pkm_lcs_key_fd_copy_input(
 
 	key_fd->source_id = input->source_id;
 	memcpy(key_fd->key_guid, input->key_guid, sizeof(key_fd->key_guid));
-	ret = pkm_lcs_key_ref_get(key_fd->source_id, key_fd->key_guid,
-				  &key_fd->key_ref);
+	ret = pkm_lcs_key_ref_attach(key_fd);
 	if (ret)
 		goto out_nomem;
 	key_fd->granted_access = input->granted_access;
@@ -3250,6 +3262,73 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
 	return ret;
 }
 
+static long pkm_lcs_key_fd_dispatch_key_deleted_direct(
+	const u8 guid[PKM_LCS_GUID_BYTES])
+{
+	struct pkm_lcs_key_fd *watcher;
+	u32 hash;
+	long ret = 0;
+
+	if (!guid)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_watch_registry_lock);
+	hash = pkm_lcs_guid_hash(guid);
+	hash_for_each_possible(pkm_lcs_watch_map, watcher,
+			       watch_registry_node, hash) {
+		if (!pkm_lcs_guid_equal(watcher->key_guid, guid))
+			continue;
+		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
+			watcher, REG_WATCH_KEY_DELETED, NULL, 0,
+			watcher->watch_subtree, NULL, 0);
+		if (ret)
+			break;
+	}
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
+	return ret;
+}
+
+long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
+	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out)
+{
+	struct pkm_lcs_key_ref_entry *entry;
+	struct pkm_lcs_key_fd *key_fd;
+	bool already_orphaned;
+	u32 marked = 0;
+
+	if (marked_out)
+		*marked_out = 0;
+	if (!source_id || !guid || !memchr_inv(guid, 0, PKM_LCS_GUID_BYTES))
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_key_ref_lock);
+	entry = pkm_lcs_key_ref_find_locked(source_id, guid);
+	if (!entry) {
+		mutex_unlock(&pkm_lcs_key_ref_lock);
+		return 0;
+	}
+
+	already_orphaned = entry->orphaned;
+	if (!already_orphaned) {
+		entry->orphaned = true;
+		list_for_each_entry(key_fd, &entry->fds, key_ref_node) {
+			mutex_lock(&key_fd->watch_lock);
+			if (!key_fd->orphaned) {
+				key_fd->orphaned = true;
+				marked++;
+			}
+			mutex_unlock(&key_fd->watch_lock);
+		}
+	}
+	mutex_unlock(&pkm_lcs_key_ref_lock);
+
+	if (!already_orphaned)
+		(void)pkm_lcs_key_fd_dispatch_key_deleted_direct(guid);
+	if (marked_out)
+		*marked_out = marked;
+	return 0;
+}
+
 long pkm_lcs_key_fd_dispatch_watch_event(
 	const struct pkm_lcs_watch_dispatch_input *input)
 {
@@ -3575,13 +3654,13 @@ long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned)
 	if (ret)
 		return ret;
 
-	mutex_lock(&key_fd->watch_lock);
-	key_fd->orphaned = orphaned;
-	mutex_unlock(&key_fd->watch_lock);
 	mutex_lock(&pkm_lcs_key_ref_lock);
 	if (key_fd->key_ref)
 		key_fd->key_ref->orphaned = orphaned;
 	mutex_unlock(&pkm_lcs_key_ref_lock);
+	mutex_lock(&key_fd->watch_lock);
+	key_fd->orphaned = orphaned;
+	mutex_unlock(&key_fd->watch_lock);
 	fdput(held);
 	return 0;
 }
