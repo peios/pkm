@@ -2462,7 +2462,8 @@ long pkm_lcs_source_registration_validate_copied(
 
 static long pkm_lcs_source_registration_publish_locked(
 	struct pkm_lcs_source_fd *source_fd,
-	struct pkm_lcs_source_registration_copy *registration)
+	struct pkm_lcs_source_registration_copy *registration,
+	u32 *resumed_source_id)
 {
 	struct pkm_lcs_source_slot_view_copy
 		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
@@ -2478,6 +2479,8 @@ static long pkm_lcs_source_registration_publish_locked(
 		return -EINVAL;
 	if (source_fd->state != PKM_LCS_SOURCE_FD_UNREGISTERED)
 		return -EINVAL;
+	if (resumed_source_id)
+		*resumed_source_id = 0;
 
 	slot_count = pkm_lcs_source_table_views_locked(views);
 	ret = lcs_rust_validate_source_registration(
@@ -2515,6 +2518,8 @@ static long pkm_lcs_source_registration_publish_locked(
 		slot->status = PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE;
 		slot->active_fd = source_fd;
 		slot->source_next_sequence = plan.source_next_sequence;
+		if (resumed_source_id)
+			*resumed_source_id = slot->source_id;
 		break;
 	default:
 		return -EINVAL;
@@ -2534,6 +2539,7 @@ long pkm_lcs_source_register_file_for_token(
 {
 	struct pkm_lcs_source_registration_copy registration = { };
 	struct pkm_lcs_source_fd *source_fd;
+	u32 resumed_source_id = 0;
 	long ret;
 
 	if (!file)
@@ -2564,8 +2570,20 @@ long pkm_lcs_source_register_file_for_token(
 
 	mutex_lock(&pkm_lcs_source_table_lock);
 	ret = pkm_lcs_source_registration_publish_locked(source_fd,
-							&registration);
+							&registration,
+							&resumed_source_id);
 	mutex_unlock(&pkm_lcs_source_table_lock);
+
+	if (!ret && resumed_source_id) {
+		u32 watch_count = 0;
+
+		ret = pkm_lcs_key_fd_dispatch_source_overflow(
+			resumed_source_id, &watch_count);
+		if (ret) {
+			pkm_lcs_source_mark_down_by_id(resumed_source_id);
+			ret = -EIO;
+		}
+	}
 
 	pkm_lcs_source_registration_copy_destroy(&registration);
 	return ret;

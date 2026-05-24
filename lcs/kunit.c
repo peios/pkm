@@ -601,6 +601,7 @@ struct pkm_lcs_kunit_walk_then_read_source_script {
 static void pkm_lcs_kunit_setup_registered_source(struct kunit *test,
 						  struct file *file,
 						  const void **token_out);
+static void pkm_lcs_kunit_flush_deferred_key_fd_release(void);
 static struct task_struct *pkm_lcs_kunit_kthread_run(int (*threadfn)(void *),
 						     void *data,
 						     const char *name);
@@ -1243,6 +1244,102 @@ static void pkm_lcs_kunit_source_registration_ioctl_resumes_down_slot(
 	KUNIT_EXPECT_EQ(test, snapshot.down_count, 0U);
 	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, 8ULL);
 
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&second_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_registration_resume_dispatches_overflow(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x44 },
+	};
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_key_fd_publish_input watch_input = {
+		.source_id = 1,
+		.granted_access = KEY_NOTIFY,
+		.resolved_path = path,
+		.ancestor_guids = ancestors,
+		.path_component_count = ARRAY_SIZE(path),
+	};
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct reg_src_hive_entry first_hive;
+	struct reg_src_register_args first_args;
+	struct reg_src_hive_entry second_hive;
+	struct reg_src_register_args second_args;
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	struct file first_file = { };
+	struct file second_file = { };
+	const void *token;
+	u8 event[8] = { };
+	long watch_fd;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &first_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&first_args, &first_hive, name_src, 1,
+					  0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &first_file, &ops,
+				(const void __user *)&first_args),
+			0L);
+
+	memcpy(watch_input.key_guid, ancestors[1], sizeof(watch_input.key_guid));
+	watch_fd = pkm_lcs_key_fd_publish(&watch_input);
+	KUNIT_ASSERT_TRUE(test, watch_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)watch_fd, &notify),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)-EAGAIN);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&first_file),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &second_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&second_args, &second_hive, name_src,
+					  1, 7);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &second_file, &ops,
+				(const void __user *)&second_args),
+			0L);
+
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.occupied_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.active_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.down_count, 0U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)sizeof(event));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_OVERFLOW);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&second_file),
 			0);
 	pkm_lcs_kunit_reset_source_table();
@@ -34846,6 +34943,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_ioctl_rejects_active_collision),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_ioctl_resumes_down_slot),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_resume_dispatches_overflow),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_ioctl_rejects_stale_resume),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_ioctl_rejects_repeat_register),
