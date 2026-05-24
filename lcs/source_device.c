@@ -5990,6 +5990,8 @@ long pkm_lcs_source_accept_response_file(
 	}
 
 	if (result) {
+		bool status_known = pkm_lcs_rsi_status_known(status);
+
 		result->len = frame_len;
 		result->request_id = record->request_id;
 		result->txn_id = record->txn_id;
@@ -5997,8 +5999,12 @@ long pkm_lcs_source_accept_response_file(
 		result->request_op_code = record->op_code;
 		result->response_op_code = response_op_code;
 		result->status = status;
-		result->malformed_source_data =
-			!pkm_lcs_rsi_status_known(status);
+		result->source_validation_failure = 0;
+		result->malformed_source_data = !status_known;
+		result->source_validation_failure_present = !status_known;
+		if (!status_known)
+			result->source_validation_failure =
+				PKM_LCS_SOURCE_VALIDATION_UNKNOWN_RSI_STATUS_CODE;
 		result->caller_waiter_attached = record->waiter != NULL;
 	}
 
@@ -6013,6 +6019,19 @@ out_unlock_queue:
 out_unlock_table:
 	mutex_unlock(&pkm_lcs_source_table_lock);
 	return ret;
+}
+
+static void pkm_lcs_source_emit_validation_failure_for_result(
+	const struct pkm_lcs_source_response_result *result)
+{
+	if (!result || !result->malformed_source_data ||
+	    !result->source_validation_failure_present)
+		return;
+
+	pkm_lcs_emit_source_validation_failure_audit(
+		result->source_id, NULL, 0, false, result->request_id, true,
+		result->request_op_code, true, NULL, false,
+		result->source_validation_failure);
 }
 
 static long pkm_lcs_source_handle_late_response_effects_file(
@@ -6323,6 +6342,8 @@ static ssize_t pkm_lcs_source_device_write_file_with_ops(
 
 	ret = pkm_lcs_source_validate_accepted_response_payload(
 		frame, count, result, &caller_errno);
+	if (!ret)
+		pkm_lcs_source_emit_validation_failure_for_result(result);
 	if (ret && result->caller_waiter_attached)
 		pkm_lcs_source_complete_waiter_file(file, result->request_id,
 						    -EIO, result, NULL, 0);

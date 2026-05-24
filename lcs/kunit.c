@@ -5896,6 +5896,27 @@ static void pkm_lcs_kunit_source_validation_audit_emits_lcs_kmes_event(
 	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x86);
 }
 
+static bool pkm_lcs_kunit_buffer_contains(const u8 *buffer, size_t buffer_len,
+					  const char *needle)
+{
+	size_t needle_len;
+	size_t i;
+
+	if (!buffer || !needle)
+		return false;
+
+	needle_len = strlen(needle);
+	if (!needle_len || needle_len > buffer_len)
+		return false;
+
+	for (i = 0; i <= buffer_len - needle_len; i++) {
+		if (!memcmp(buffer + i, needle, needle_len))
+			return true;
+	}
+
+	return false;
+}
+
 static void pkm_lcs_kunit_key_fd_publish_snapshot_success(struct kunit *test)
 {
 	static const char * const path[] = { "Machine", "Software" };
@@ -34022,6 +34043,97 @@ static void pkm_lcs_kunit_source_response_unknown_status_releases(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_write_unknown_status_audits(
+	struct kunit *test)
+{
+	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
+	static const char validation_class[] = "unknown_rsi_status_code";
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x75 };
+	struct pkm_lcs_source_response_result response_result = { };
+	struct pkm_lcs_source_response_result waiter_result = { };
+	struct pkm_lcs_source_response_waiter waiter;
+	struct pkm_lcs_source_fd_snapshot fd_snapshot = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_kmes_kunit_snapshot kmes_snapshot = { };
+	u8 buffer[512];
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	u8 out[128];
+	struct file file = { };
+	const void *token;
+	size_t response_len;
+	size_t written = 0;
+	u32 header_size;
+	u16 type_len;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_lookup_waitable_request(
+				1, 0x4142434445464750ULL, parent_guid,
+				"Child", strlen("Child"), &waiter,
+				&enqueue),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    enqueue.request_id, enqueue.op_code,
+					    0xffffffffU, &response_len);
+
+	pkm_kmes_kunit_reset_all();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_write_file(
+				&file, response, response_len, false,
+				&response_result),
+			(ssize_t)response_len);
+	KUNIT_EXPECT_TRUE(test, response_result.malformed_source_data);
+	KUNIT_EXPECT_TRUE(test,
+			  response_result.source_validation_failure_present);
+	KUNIT_EXPECT_EQ(
+		test, response_result.source_validation_failure,
+		(u32)PKM_LCS_SOURCE_VALIDATION_UNKNOWN_RSI_STATUS_CODE);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_response_waiter_wait(&waiter,
+							    &waiter_result),
+			(long)-EIO);
+	KUNIT_EXPECT_TRUE(test, waiter_result.malformed_source_data);
+	KUNIT_EXPECT_TRUE(test,
+			  waiter_result.source_validation_failure_present);
+	KUNIT_EXPECT_EQ(
+		test, waiter_result.source_validation_failure,
+		(u32)PKM_LCS_SOURCE_VALIDATION_UNKNOWN_RSI_STATUS_CODE);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, sizeof(buffer), &written,
+				&kmes_snapshot),
+			0);
+	KUNIT_ASSERT_GT(test, written, (size_t)KMES_EVENT_HEADER_BASE_SIZE);
+	type_len = get_unaligned_le16(buffer + KMES_EVENT_TYPE_LEN_OFFSET);
+	header_size = get_unaligned_le32(buffer + KMES_EVENT_HEADER_SIZE_OFFSET);
+	KUNIT_ASSERT_EQ(test, type_len, (u16)(sizeof(event_type) - 1));
+	KUNIT_EXPECT_EQ(test, buffer[KMES_EVENT_ORIGIN_CLASS_OFFSET],
+			(u8)KMES_ORIGIN_LCS);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
+			       type_len),
+			0);
+	KUNIT_ASSERT_TRUE(test, written > header_size);
+	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x86);
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_lcs_kunit_buffer_contains(
+				  buffer, written, validation_class));
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &fd_snapshot);
+	KUNIT_EXPECT_EQ(test, fd_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_FALSE(test, fd_snapshot.closing);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_response_duplicate_after_release_rejected(
 	struct kunit *test)
 {
@@ -36904,6 +37016,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_response_rejects_common_mismatches),
 	KUNIT_CASE(pkm_lcs_kunit_source_response_unknown_status_releases),
+	KUNIT_CASE(pkm_lcs_kunit_source_write_unknown_status_audits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_response_duplicate_after_release_rejected),
 	KUNIT_CASE(pkm_lcs_kunit_source_write_status_only_payload_exactness),

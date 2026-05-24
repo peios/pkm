@@ -278,9 +278,11 @@ struct pkm_lcs_source_response_result {
 	u16 request_op_code;
 	u16 response_op_code;
 	u32 status;
+	u32 source_validation_failure;
 	bool malformed_source_data;
+	bool source_validation_failure_present;
 	bool caller_waiter_attached;
-	u8 _pad[2];
+	u8 _pad[1];
 };
 
 struct pkm_lcs_layer_owner_selection_copy {
