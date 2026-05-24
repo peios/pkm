@@ -24,6 +24,9 @@ struct pkm_lcs_rsi_lookup_response_summary {
 struct pkm_lcs_rsi_query_values_response_summary {
 	u32 value_entry_count;
 	u32 blanket_count;
+	u32 source_validation_failure;
+	u8 source_validation_failure_present;
+	u8 _pad[3];
 };
 
 struct pkm_lcs_rsi_delete_layer_response_summary {

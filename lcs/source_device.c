@@ -6176,6 +6176,11 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 			&query_values);
 		if (ret == -EIO) {
 			result->malformed_source_data = true;
+			if (query_values.source_validation_failure_present) {
+				result->source_validation_failure =
+					query_values.source_validation_failure;
+				result->source_validation_failure_present = true;
+			}
 			*caller_errno = -EIO;
 			return 0;
 		}

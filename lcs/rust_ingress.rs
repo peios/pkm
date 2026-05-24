@@ -321,6 +321,9 @@ pub struct PkmLcsRsiReadKeyResultCopy {
 pub struct PkmLcsRsiQueryValuesResponseSummaryCopy {
     pub value_entry_count: u32,
     pub blanket_count: u32,
+    pub source_validation_failure: u32,
+    pub source_validation_failure_present: u8,
+    pub _pad: [u8; 3],
 }
 
 #[repr(C)]
@@ -3149,6 +3152,9 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
         *summary_out = PkmLcsRsiQueryValuesResponseSummaryCopy {
             value_entry_count: 0,
             blanket_count: 0,
+            source_validation_failure: 0,
+            source_validation_failure_present: 0,
+            _pad: [0; 3],
         };
     }
 
@@ -3177,6 +3183,14 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
         return rsi_query_values_response_error_return(err);
     }
     if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
+        if matches!(err, LcsError::FutureSequence { .. }) {
+            unsafe {
+                (*summary_out).source_validation_failure = source_validation_failure_code(
+                    RsiSourceDataValidationFailure::FutureSequenceNumber,
+                );
+                (*summary_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_query_values_response_error_return(err);
     }
 
