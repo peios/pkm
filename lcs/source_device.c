@@ -6105,8 +6105,10 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 {
 	struct pkm_lcs_rsi_lookup_response_summary lookup = { };
 	struct pkm_lcs_rsi_query_values_response_summary query_values = { };
+	struct pkm_lcs_rsi_enum_children_info_summary enum_children = { };
 	struct pkm_lcs_rsi_delete_layer_response_summary delete_layer = { };
 	struct pkm_lcs_rsi_read_key_result read_key = { };
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	u64 next_sequence;
 	long ret;
 
@@ -6142,6 +6144,27 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 		ret = pkm_lcs_rsi_validate_query_values_response(
 			frame, frame_len, result->request_id, next_sequence,
 			&query_values);
+		if (ret == -EIO) {
+			result->malformed_source_data = true;
+			*caller_errno = -EIO;
+			return 0;
+		}
+		if (ret)
+			return ret;
+		*caller_errno = 0;
+		return 0;
+	case RSI_ENUM_CHILDREN:
+		ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+		if (ret)
+			return ret;
+		ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+		if (ret)
+			return ret;
+		ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
+			frame, frame_len, result->request_id, next_sequence,
+			layer_snapshot.layers, layer_snapshot.layer_count, NULL,
+			0, &enum_children);
+		pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 		if (ret == -EIO) {
 			result->malformed_source_data = true;
 			*caller_errno = -EIO;
@@ -10660,6 +10683,16 @@ __poll_t pkm_lcs_kunit_source_device_poll_file_with_table(
 	struct file *file, struct poll_table_struct *wait)
 {
 	return pkm_lcs_source_device_fops.poll(file, wait);
+}
+
+long pkm_lcs_kunit_source_dispatch_enum_children_waitable_request(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_source_response_waiter *waiter,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	pkm_lcs_source_response_waiter_init(waiter);
+	return pkm_lcs_source_dispatch_enum_children_request_with_waiter(
+		source_id, txn_id, parent_guid, waiter, result);
 }
 #endif
 
