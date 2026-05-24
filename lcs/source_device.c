@@ -203,9 +203,11 @@ static u32 pkm_lcs_layer_table_count_locked(void)
 }
 
 static long pkm_lcs_layer_table_shape_locked(u32 *count_out,
-					     size_t *name_bytes_out)
+					     size_t *name_bytes_out,
+					     size_t *metadata_sd_bytes_out)
 {
 	size_t name_bytes = 0;
+	size_t metadata_sd_bytes = 0;
 	u32 count = 1U;
 	u32 i;
 
@@ -214,11 +216,19 @@ static long pkm_lcs_layer_table_shape_locked(u32 *count_out,
 	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
 		if (!pkm_lcs_layer_table[i].occupied)
 			continue;
+		if (!pkm_lcs_layer_table[i].metadata_sd ||
+		    !pkm_lcs_layer_table[i].metadata_sd_len)
+			return -EIO;
 		count++;
 		if (check_add_overflow(
 			    name_bytes,
 			    (size_t)pkm_lcs_layer_table[i].name_len + 1U,
 			    &name_bytes))
+			return -EOVERFLOW;
+		if (check_add_overflow(
+			    metadata_sd_bytes,
+			    pkm_lcs_layer_table[i].metadata_sd_len,
+			    &metadata_sd_bytes))
 			return -EOVERFLOW;
 	}
 
@@ -226,6 +236,8 @@ static long pkm_lcs_layer_table_shape_locked(u32 *count_out,
 		*count_out = count;
 	if (name_bytes_out)
 		*name_bytes_out = name_bytes;
+	if (metadata_sd_bytes_out)
+		*metadata_sd_bytes_out = metadata_sd_bytes;
 	return 0;
 }
 
@@ -313,12 +325,100 @@ long pkm_lcs_source_layer_snapshot_copy(
 	return 0;
 }
 
+static long pkm_lcs_source_layer_snapshot_copy_full(
+	struct pkm_lcs_rsi_layer_view *layers, u32 max_layers,
+	char *name_buf, size_t name_buf_len,
+	struct pkm_lcs_layer_metadata_sd_view *metadata, u32 max_metadata,
+	u8 *metadata_sd_buf, size_t metadata_sd_buf_len, u32 *count_out,
+	u32 *metadata_count_out)
+{
+	size_t name_offset = 0;
+	size_t metadata_sd_offset = 0;
+	u32 metadata_written = 0;
+	u32 written = 0;
+	u32 required;
+	u32 required_metadata;
+	u32 i;
+
+	if (!layers || !count_out || !metadata_count_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_layer_table_lock);
+	required = pkm_lcs_layer_table_count_locked();
+	required_metadata = required - 1U;
+	*count_out = required;
+	*metadata_count_out = required_metadata;
+	if (max_layers < required || max_metadata < required_metadata) {
+		mutex_unlock(&pkm_lcs_layer_table_lock);
+		return -ENOSPC;
+	}
+	if (required_metadata &&
+	    (!metadata || !name_buf || !metadata_sd_buf)) {
+		mutex_unlock(&pkm_lcs_layer_table_lock);
+		return -ENOSPC;
+	}
+
+	layers[written++] = pkm_lcs_base_layer_snapshot[0];
+	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+		struct pkm_lcs_layer_table_entry *entry =
+			&pkm_lcs_layer_table[i];
+		char *name_dst;
+		u8 *sd_dst;
+
+		if (!entry->occupied)
+			continue;
+		if (!entry->metadata_sd || !entry->metadata_sd_len) {
+			mutex_unlock(&pkm_lcs_layer_table_lock);
+			return -EIO;
+		}
+		if (name_offset + entry->name_len + 1U > name_buf_len ||
+		    metadata_sd_offset + entry->metadata_sd_len >
+			    metadata_sd_buf_len) {
+			mutex_unlock(&pkm_lcs_layer_table_lock);
+			return -ENOSPC;
+		}
+
+		name_dst = name_buf + name_offset;
+		memcpy(name_dst, entry->name, entry->name_len);
+		name_dst[entry->name_len] = '\0';
+		name_offset += entry->name_len + 1U;
+
+		sd_dst = metadata_sd_buf + metadata_sd_offset;
+		memcpy(sd_dst, entry->metadata_sd, entry->metadata_sd_len);
+		metadata_sd_offset += entry->metadata_sd_len;
+
+		layers[written].name = name_dst;
+		layers[written].name_len = entry->name_len;
+		layers[written].precedence = entry->precedence;
+		layers[written].enabled = entry->enabled;
+		memset(layers[written]._pad, 0, sizeof(layers[written]._pad));
+		written++;
+
+		metadata[metadata_written].name = name_dst;
+		metadata[metadata_written].sd = sd_dst;
+		metadata[metadata_written].sd_len = entry->metadata_sd_len;
+		metadata[metadata_written].name_len = entry->name_len;
+		metadata[metadata_written]._pad = 0;
+		metadata_written++;
+	}
+	mutex_unlock(&pkm_lcs_layer_table_lock);
+
+	*count_out = written;
+	*metadata_count_out = metadata_written;
+	return 0;
+}
+
 long pkm_lcs_source_layer_snapshot_acquire(
 	struct pkm_lcs_layer_snapshot *snapshot)
 {
+	struct pkm_lcs_layer_metadata_sd_view *metadata = NULL;
 	struct pkm_lcs_rsi_layer_view *layers = NULL;
+	size_t metadata_sd_bytes = 0;
 	size_t name_bytes = 0;
+	u8 *metadata_sds = NULL;
 	char *names = NULL;
+	u32 metadata_count = 0;
+	u32 metadata_written = 0;
 	u32 count = 0;
 	u32 written = 0;
 	u32 attempt;
@@ -330,38 +430,68 @@ long pkm_lcs_source_layer_snapshot_acquire(
 
 	for (attempt = 0; attempt < 3; attempt++) {
 		mutex_lock(&pkm_lcs_layer_table_lock);
-		ret = pkm_lcs_layer_table_shape_locked(&count, &name_bytes);
+		ret = pkm_lcs_layer_table_shape_locked(
+			&count, &name_bytes, &metadata_sd_bytes);
 		mutex_unlock(&pkm_lcs_layer_table_lock);
 		if (ret)
 			return ret;
 
 		if (!count || count > PKM_LCS_MAX_TOTAL_LAYERS_DEFAULT)
 			return -EIO;
+		metadata_count = count - 1U;
 
 		layers = kvcalloc(count, sizeof(*layers), GFP_KERNEL);
 		if (!layers)
 			return -ENOMEM;
+		if (metadata_count) {
+			metadata = kvcalloc(metadata_count, sizeof(*metadata),
+					    GFP_KERNEL);
+			if (!metadata) {
+				kvfree(layers);
+				return -ENOMEM;
+			}
+		}
 		if (name_bytes) {
 			names = kvmalloc(name_bytes, GFP_KERNEL);
 			if (!names) {
+				kvfree(metadata);
+				kvfree(layers);
+				return -ENOMEM;
+			}
+		}
+		if (metadata_sd_bytes) {
+			metadata_sds = kvmalloc(metadata_sd_bytes, GFP_KERNEL);
+			if (!metadata_sds) {
+				kvfree(names);
+				kvfree(metadata);
 				kvfree(layers);
 				return -ENOMEM;
 			}
 		}
 
-		ret = pkm_lcs_source_layer_snapshot_copy(layers, count, names,
-							 name_bytes, &written);
+		ret = pkm_lcs_source_layer_snapshot_copy_full(
+			layers, count, names, name_bytes, metadata,
+			metadata_count, metadata_sds, metadata_sd_bytes,
+			&written, &metadata_written);
 		if (!ret) {
 			snapshot->layers = layers;
 			snapshot->layer_count = written;
+			snapshot->metadata = metadata;
+			snapshot->metadata_count = metadata_written;
 			snapshot->owned_layers = layers;
 			snapshot->owned_names = names;
+			snapshot->owned_metadata = metadata;
+			snapshot->owned_metadata_sds = metadata_sds;
 			return 0;
 		}
 
+		kvfree(metadata_sds);
 		kvfree(names);
+		kvfree(metadata);
 		kvfree(layers);
+		metadata_sds = NULL;
 		names = NULL;
+		metadata = NULL;
 		layers = NULL;
 		if (ret != -ENOSPC)
 			return ret;
@@ -376,6 +506,8 @@ void pkm_lcs_source_layer_snapshot_release(
 	if (!snapshot)
 		return;
 
+	kvfree(snapshot->owned_metadata_sds);
+	kvfree(snapshot->owned_metadata);
 	kvfree(snapshot->owned_names);
 	kvfree(snapshot->owned_layers);
 	memset(snapshot, 0, sizeof(*snapshot));
@@ -6610,14 +6742,31 @@ long pkm_lcs_reg_open_key_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	int parent_fd, const char __user *upath, u32 desired_access, u32 flags)
 {
-	if (parent_fd == -1)
-		return pkm_lcs_open_user_absolute_path_for_token(
-			token, ops, upath, desired_access, flags, NULL, 0, NULL, 0,
-			NULL, 0);
+	struct pkm_lcs_layer_snapshot snapshot = { };
+	struct pkm_lcs_open_preflight_plan preflight = { };
+	long ret;
 
-	return pkm_lcs_open_user_relative_path_for_token(
-		token, ops, parent_fd, upath, desired_access, flags, NULL, 0,
-		NULL, 0);
+	if (!token)
+		return -EACCES;
+
+	ret = pkm_lcs_open_preflight(desired_access, flags, &preflight);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_source_layer_snapshot_acquire(&snapshot);
+	if (ret)
+		return ret;
+
+	if (parent_fd == -1)
+		ret = pkm_lcs_open_user_absolute_path_for_token(
+			token, ops, upath, desired_access, flags, NULL, 0,
+			snapshot.layers, snapshot.layer_count, NULL, 0);
+	else
+		ret = pkm_lcs_open_user_relative_path_for_token(
+			token, ops, parent_fd, upath, desired_access, flags,
+			snapshot.layers, snapshot.layer_count, NULL, 0);
+
+	pkm_lcs_source_layer_snapshot_release(&snapshot);
+	return ret;
 }
 
 SYSCALL_DEFINE4(reg_open_key, int, parent_fd, const char __user *, path,
@@ -6660,7 +6809,10 @@ long pkm_lcs_create_existing_user_path_for_token(
 static long pkm_lcs_create_existing_copied_path_for_token_with_txn(
 	const void *token, int parent_fd,
 	const struct pkm_lcs_syscall_path_copy *copy, u32 desired_access,
-	u32 flags, int txn_fd, u32 *disposition)
+	u32 flags, const struct pkm_lcs_rsi_layer_view *layers,
+	u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, int txn_fd, u32 *disposition)
 {
 	struct pkm_lcs_create_preflight_plan preflight = { };
 	long ret;
@@ -6674,12 +6826,12 @@ static long pkm_lcs_create_existing_copied_path_for_token_with_txn(
 
 	if (parent_fd == -1)
 		ret = pkm_lcs_open_copied_absolute_path_after_preflight_for_token(
-			token, copy, desired_access, 0, NULL, 0, NULL, 0,
-			NULL, 0, txn_fd);
+			token, copy, desired_access, 0, NULL, 0, layers,
+			layer_count, private_layers, private_layer_count, txn_fd);
 	else
 		ret = pkm_lcs_open_copied_relative_path_after_preflight(
-			token, parent_fd, copy, desired_access, 0, NULL, 0,
-			NULL, 0, txn_fd);
+			token, parent_fd, copy, desired_access, 0, layers,
+			layer_count, private_layers, private_layer_count, txn_fd);
 
 	if (ret >= 0 && disposition)
 		*disposition = REG_OPENED_EXISTING;
@@ -6692,7 +6844,7 @@ long pkm_lcs_create_existing_copied_path_for_token(
 	u32 flags, u32 *disposition)
 {
 	return pkm_lcs_create_existing_copied_path_for_token_with_txn(
-		token, parent_fd, copy, desired_access, flags, -1,
+		token, parent_fd, copy, desired_access, flags, NULL, 0, NULL, 0, -1,
 		disposition);
 }
 
@@ -6767,12 +6919,16 @@ long pkm_lcs_create_existing_copied_path_finish_for_token(
 static long pkm_lcs_create_existing_copied_path_finish_for_token_with_txn(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	int parent_fd, const struct pkm_lcs_syscall_path_copy *copy,
-	u32 desired_access, u32 flags, int txn_fd, u32 __user *udisposition)
+	u32 desired_access, u32 flags,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, int txn_fd, u32 __user *udisposition)
 {
 	long fd;
 
 	fd = pkm_lcs_create_existing_copied_path_for_token_with_txn(
-		token, parent_fd, copy, desired_access, flags, txn_fd, NULL);
+		token, parent_fd, copy, desired_access, flags, layers,
+		layer_count, private_layers, private_layer_count, txn_fd, NULL);
 	if (fd < 0)
 		return fd;
 
@@ -8441,6 +8597,10 @@ static long pkm_lcs_reg_create_key_for_token_with_txn(
 {
 	struct pkm_lcs_create_preflight_plan preflight = { };
 	struct pkm_lcs_syscall_path_copy copy = { };
+	struct pkm_lcs_create_missing_runtime_inputs live_inputs = { };
+	struct pkm_lcs_layer_snapshot snapshot = { };
+	const struct pkm_lcs_create_missing_runtime_inputs *active_inputs =
+		inputs;
 	long ret;
 
 	ret = pkm_lcs_create_preflight(desired_access, flags, &preflight);
@@ -8451,14 +8611,29 @@ static long pkm_lcs_reg_create_key_for_token_with_txn(
 	if (ret)
 		return ret;
 
+	if (!active_inputs) {
+		ret = pkm_lcs_source_layer_snapshot_acquire(&snapshot);
+		if (ret)
+			goto out_copy;
+		live_inputs.layers = snapshot.layers;
+		live_inputs.layer_count = snapshot.layer_count;
+		live_inputs.metadata = snapshot.metadata;
+		live_inputs.metadata_count = snapshot.metadata_count;
+		active_inputs = &live_inputs;
+	}
+
 	ret = pkm_lcs_create_existing_copied_path_finish_for_token_with_txn(
 		token, ops, parent_fd, &copy, desired_access, flags,
+		active_inputs->layers, active_inputs->layer_count,
+		active_inputs->private_layers, active_inputs->private_layer_count,
 		txn_fd, udisposition);
 	if (ret == -ENOENT) {
 		ret = pkm_lcs_create_missing_copied_path_finish_for_token_with_txn(
 			token, ops, parent_fd, &copy, desired_access, ulayer,
-			flags, inputs, txn_fd, udisposition);
+			flags, active_inputs, txn_fd, udisposition);
 	}
+	pkm_lcs_source_layer_snapshot_release(&snapshot);
+out_copy:
 	pkm_lcs_syscall_path_copy_destroy(&copy);
 	return ret;
 }

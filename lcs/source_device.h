@@ -335,8 +335,12 @@ struct pkm_lcs_delete_layer_orchestration_result {
 struct pkm_lcs_layer_snapshot {
 	const struct pkm_lcs_rsi_layer_view *layers;
 	u32 layer_count;
+	const struct pkm_lcs_layer_metadata_sd_view *metadata;
+	u32 metadata_count;
 	struct pkm_lcs_rsi_layer_view *owned_layers;
 	char *owned_names;
+	struct pkm_lcs_layer_metadata_sd_view *owned_metadata;
+	u8 *owned_metadata_sds;
 };
 
 struct pkm_lcs_path_component_view {
