@@ -1193,24 +1193,26 @@ out_unlock:
 	return 0;
 }
 
-static long pkm_lcs_transaction_dispatch_key_path_overflow(
+static long pkm_lcs_transaction_dispatch_key_path_invisible_exact(
 	const u8 key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
 	const u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
 	char **parent_path,
 	u8 (*parent_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
-	u32 parent_depth, const char *child_name)
+	u32 parent_depth, const char *child_name, u32 child_name_len,
+	bool replacement_visible)
 {
-	struct pkm_lcs_watch_dispatch_context parent_context = { };
-	struct pkm_lcs_watch_dispatch_context child_context = { };
+	struct pkm_lcs_watch_dispatch_context contexts[3] = { };
 	u8 (*child_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 	const char **child_path;
 	u32 child_depth;
+	u32 index = 0;
 	size_t child_ancestor_bytes;
 	size_t child_path_bytes;
 	long ret;
 
 	if (!key_guid || !parent_guid || !parent_path ||
-	    !parent_ancestor_guids || !parent_depth || !child_name)
+	    !parent_ancestor_guids || !parent_depth || !child_name ||
+	    !child_name_len)
 		return -EINVAL;
 	if (check_add_overflow(parent_depth, 1U, &child_depth))
 		return -EOVERFLOW;
@@ -1237,23 +1239,32 @@ static long pkm_lcs_transaction_dispatch_key_path_overflow(
 	memcpy(child_ancestor_guids[parent_depth], key_guid,
 	       sizeof(child_ancestor_guids[parent_depth]));
 
-	parent_context.changed_key_guid = parent_guid;
-	parent_context.ancestor_guids =
+	contexts[index].changed_key_guid = parent_guid;
+	contexts[index].ancestor_guids =
 		(const u8 (*)[PKM_LCS_GUID_BYTES])parent_ancestor_guids;
-	parent_context.resolved_path = (const char * const *)parent_path;
-	parent_context.path_component_count = parent_depth;
-	ret = pkm_lcs_key_fd_dispatch_overflow_context(&parent_context);
-	if (ret)
-		goto out_free;
+	contexts[index].resolved_path = (const char * const *)parent_path;
+	contexts[index].path_component_count = parent_depth;
+	contexts[index].event_type = REG_WATCH_SUBKEY_DELETED;
+	contexts[index].name = (const u8 *)child_name;
+	contexts[index].name_len = child_name_len;
+	index++;
 
-	child_context.changed_key_guid = key_guid;
-	child_context.ancestor_guids =
+	if (replacement_visible) {
+		contexts[index] = contexts[index - 1U];
+		contexts[index].event_type = REG_WATCH_SUBKEY_CREATED;
+		index++;
+	}
+
+	contexts[index].changed_key_guid = key_guid;
+	contexts[index].ancestor_guids =
 		(const u8 (*)[PKM_LCS_GUID_BYTES])child_ancestor_guids;
-	child_context.resolved_path = (const char * const *)child_path;
-	child_context.path_component_count = child_depth;
-	ret = pkm_lcs_key_fd_dispatch_overflow_context(&child_context);
+	contexts[index].resolved_path = (const char * const *)child_path;
+	contexts[index].path_component_count = child_depth;
+	contexts[index].event_type = REG_WATCH_KEY_DELETED;
+	index++;
 
-out_free:
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(contexts, index);
+
 	kfree(child_ancestor_guids);
 	kfree(child_path);
 	return ret;
@@ -1375,13 +1386,6 @@ static long pkm_lcs_transaction_log_apply_orphan_effects(
 static long pkm_lcs_transaction_dispatch_delete_key_exact(
 	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry)
 {
-	struct pkm_lcs_watch_dispatch_context contexts[3] = { };
-	u8 (*child_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
-	const char **child_path;
-	u32 child_depth;
-	u32 index = 0;
-	size_t child_ancestor_bytes;
-	size_t child_path_bytes;
 	long ret;
 
 	if (!source_id || !entry)
@@ -1393,62 +1397,23 @@ static long pkm_lcs_transaction_dispatch_delete_key_exact(
 	if (entry->target_still_named)
 		return 0;
 
-	if (check_add_overflow(entry->parent_depth, 1U, &child_depth))
-		return -EOVERFLOW;
-	if (check_mul_overflow((size_t)child_depth, sizeof(*child_path),
-			       &child_path_bytes) ||
-	    check_mul_overflow((size_t)child_depth,
-			       sizeof(*child_ancestor_guids),
-			       &child_ancestor_bytes))
-		return -EOVERFLOW;
+	return pkm_lcs_transaction_dispatch_key_path_invisible_exact(
+		entry->key_guid, entry->parent_guid, entry->parent_path,
+		entry->parent_ancestor_guids, entry->parent_depth,
+		entry->child_name, entry->child_name_len,
+		entry->replacement_visible);
+}
 
-	child_path = kzalloc(child_path_bytes, GFP_KERNEL);
-	if (!child_path)
-		return -ENOMEM;
-	child_ancestor_guids = kzalloc(child_ancestor_bytes, GFP_KERNEL);
-	if (!child_ancestor_guids) {
-		kfree(child_path);
-		return -ENOMEM;
-	}
+static long pkm_lcs_transaction_dispatch_hide_key_exact(
+	const struct pkm_lcs_transaction_hide_key_log *entry)
+{
+	if (!entry)
+		return -EINVAL;
 
-	memcpy(child_path, entry->parent_path,
-	       (size_t)entry->parent_depth * sizeof(*child_path));
-	child_path[entry->parent_depth] = entry->child_name;
-	memcpy(child_ancestor_guids, entry->parent_ancestor_guids,
-	       (size_t)entry->parent_depth * sizeof(*child_ancestor_guids));
-	memcpy(child_ancestor_guids[entry->parent_depth], entry->key_guid,
-	       sizeof(child_ancestor_guids[entry->parent_depth]));
-
-	contexts[index].changed_key_guid = entry->parent_guid;
-	contexts[index].ancestor_guids =
-		(const u8 (*)[PKM_LCS_GUID_BYTES])entry->parent_ancestor_guids;
-	contexts[index].resolved_path =
-		(const char * const *)entry->parent_path;
-	contexts[index].path_component_count = entry->parent_depth;
-	contexts[index].event_type = REG_WATCH_SUBKEY_DELETED;
-	contexts[index].name = (const u8 *)entry->child_name;
-	contexts[index].name_len = entry->child_name_len;
-	index++;
-
-	if (entry->replacement_visible) {
-		contexts[index] = contexts[index - 1U];
-		contexts[index].event_type = REG_WATCH_SUBKEY_CREATED;
-		index++;
-	}
-
-	contexts[index].changed_key_guid = entry->key_guid;
-	contexts[index].ancestor_guids =
-		(const u8 (*)[PKM_LCS_GUID_BYTES])child_ancestor_guids;
-	contexts[index].resolved_path = (const char * const *)child_path;
-	contexts[index].path_component_count = child_depth;
-	contexts[index].event_type = REG_WATCH_KEY_DELETED;
-	index++;
-
-	ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(contexts, index);
-
-	kfree(child_ancestor_guids);
-	kfree(child_path);
-	return ret;
+	return pkm_lcs_transaction_dispatch_key_path_invisible_exact(
+		entry->key_guid, entry->parent_guid, entry->parent_path,
+		entry->parent_ancestor_guids, entry->parent_depth,
+		entry->child_name, entry->child_name_len, false);
 }
 
 static long pkm_lcs_transaction_log_dispatch_watch_batch(
@@ -1544,13 +1509,8 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 					goto out_free;
 				index = 0;
 			}
-			ret = pkm_lcs_transaction_dispatch_key_path_overflow(
-				entry->hide_key.key_guid,
-				entry->hide_key.parent_guid,
-				entry->hide_key.parent_path,
-				entry->hide_key.parent_ancestor_guids,
-				entry->hide_key.parent_depth,
-				entry->hide_key.child_name);
+			ret = pkm_lcs_transaction_dispatch_hide_key_exact(
+				&entry->hide_key);
 			if (ret)
 				goto out_free;
 			break;

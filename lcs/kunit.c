@@ -22920,7 +22920,7 @@ static void pkm_lcs_kunit_transaction_commit_delete_key_dispatches_exact_watches
 	kacs_rust_token_drop(token);
 }
 
-static void pkm_lcs_kunit_transaction_commit_hide_key_overflows_watchers(
+static void pkm_lcs_kunit_transaction_commit_hide_key_dispatches_exact_watches(
 	struct kunit *test)
 {
 	static const char child_name[] = "Hidden";
@@ -22979,7 +22979,8 @@ static void pkm_lcs_kunit_transaction_commit_hide_key_overflows_watchers(
 	};
 	u8 parent_record[16] = { };
 	u8 child_record[16] = { };
-	u8 subtree_record[16] = { };
+	u8 subtree_record[32] = { };
+	struct pkm_lcs_key_fd_snapshot child_snapshot = { };
 	struct task_struct *task;
 	struct file file = { };
 	const void *token;
@@ -23047,7 +23048,7 @@ static void pkm_lcs_kunit_transaction_commit_hide_key_overflows_watchers(
 
 	task = pkm_lcs_kunit_kthread_run(
 		pkm_lcs_kunit_transaction_source_thread, &script,
-		"pkm-lcs-kunit-commit-hide-overflow");
+		"pkm-lcs-kunit-commit-hide-exact");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
 	ret = pkm_lcs_transaction_fd_commit((int)txn_fd);
@@ -23061,16 +23062,22 @@ static void pkm_lcs_kunit_transaction_commit_hide_key_overflows_watchers(
 							    &log),
 			0L);
 	KUNIT_EXPECT_EQ(test, log.entry_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)child_fd, &child_snapshot),
+			0L);
+	KUNIT_EXPECT_FALSE(test, child_snapshot.orphaned);
 
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_key_fd_read((int)parent_fd,
 						  parent_record,
 						  sizeof(parent_record), true),
-			(ssize_t)8);
-	KUNIT_EXPECT_EQ(test, get_unaligned_le32(parent_record), 8U);
+			(ssize_t)14);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(parent_record), 14U);
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(parent_record + 4),
-			REG_WATCH_OVERFLOW);
-	KUNIT_EXPECT_EQ(test, get_unaligned_le16(parent_record + 6), 0U);
+			REG_WATCH_SUBKEY_DELETED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(parent_record + 6), 6U);
+	KUNIT_EXPECT_EQ(test, memcmp(parent_record + 8, child_name,
+				     sizeof(child_name) - 1U), 0);
 
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_key_fd_read((int)child_fd, child_record,
@@ -23078,17 +23085,51 @@ static void pkm_lcs_kunit_transaction_commit_hide_key_overflows_watchers(
 			(ssize_t)8);
 	KUNIT_EXPECT_EQ(test, get_unaligned_le32(child_record), 8U);
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(child_record + 4),
-			REG_WATCH_OVERFLOW);
+			REG_WATCH_KEY_DELETED);
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(child_record + 6), 0U);
 
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_key_fd_read((int)root_fd, subtree_record,
 						  sizeof(subtree_record), true),
-			(ssize_t)8);
-	KUNIT_EXPECT_EQ(test, get_unaligned_le32(subtree_record), 8U);
+			(ssize_t)24);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(subtree_record), 24U);
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree_record + 4),
-			REG_WATCH_OVERFLOW);
+			REG_WATCH_SUBKEY_DELETED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree_record + 6), 6U);
+	KUNIT_EXPECT_EQ(test, memcmp(subtree_record + 8, child_name,
+				     sizeof(child_name) - 1U), 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree_record + 14), 1U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree_record + 16), 6U);
+	KUNIT_EXPECT_EQ(test, memcmp(subtree_record + 18, "Parent", 6), 0);
+	memset(subtree_record, 0, sizeof(subtree_record));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)root_fd, subtree_record,
+						  sizeof(subtree_record), true),
+			(ssize_t)26);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(subtree_record), 26U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree_record + 4),
+			REG_WATCH_KEY_DELETED);
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree_record + 6), 0U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree_record + 8), 2U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree_record + 10), 6U);
+	KUNIT_EXPECT_EQ(test, memcmp(subtree_record + 12, "Parent", 6), 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(subtree_record + 18), 6U);
+	KUNIT_EXPECT_EQ(test, memcmp(subtree_record + 20, child_name,
+				     sizeof(child_name) - 1U), 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)parent_fd,
+						  parent_record,
+						  sizeof(parent_record), true),
+			(ssize_t)-EAGAIN);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)child_fd, child_record,
+						  sizeof(child_record), true),
+			(ssize_t)-EAGAIN);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)root_fd, subtree_record,
+						  sizeof(subtree_record), true),
+			(ssize_t)-EAGAIN);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)child_fd), 0);
@@ -29351,7 +29392,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_delete_key_dispatches_exact_watches),
 	KUNIT_CASE(
-		pkm_lcs_kunit_transaction_commit_hide_key_overflows_watchers),
+		pkm_lcs_kunit_transaction_commit_hide_key_dispatches_exact_watches),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_delete_key_orphan_no_live_ref_drops),
 	KUNIT_CASE(
