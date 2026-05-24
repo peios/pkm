@@ -48,6 +48,13 @@ struct pkm_lcs_key_fd_string_view {
 	u32 len;
 };
 
+struct pkm_lcs_key_fd_transaction_burst_entry {
+	struct list_head link;
+	struct pkm_lcs_key_fd *watcher;
+	u32 event_count;
+	bool overflow;
+};
+
 struct pkm_lcs_key_fd_copyout_ops {
 	bool (*write)(void *ctx, void __user *dst, const void *src, size_t len);
 	void *ctx;
@@ -3857,8 +3864,151 @@ static long pkm_lcs_key_fd_validate_dispatch_context(
 		});
 }
 
+static void pkm_lcs_key_fd_transaction_burst_counts_free(
+	struct list_head *counts)
+{
+	struct pkm_lcs_key_fd_transaction_burst_entry *entry;
+	struct pkm_lcs_key_fd_transaction_burst_entry *tmp;
+
+	if (!counts)
+		return;
+	list_for_each_entry_safe(entry, tmp, counts, link) {
+		list_del(&entry->link);
+		kfree(entry);
+	}
+}
+
+static struct pkm_lcs_key_fd_transaction_burst_entry *
+pkm_lcs_key_fd_transaction_burst_find(
+	struct list_head *counts, const struct pkm_lcs_key_fd *watcher)
+{
+	struct pkm_lcs_key_fd_transaction_burst_entry *entry;
+
+	if (!counts || !watcher)
+		return NULL;
+	list_for_each_entry(entry, counts, link) {
+		if (entry->watcher == watcher)
+			return entry;
+	}
+	return NULL;
+}
+
+static long pkm_lcs_key_fd_transaction_burst_count_watcher(
+	struct list_head *counts, struct pkm_lcs_key_fd *watcher,
+	u32 event_type, u32 limit)
+{
+	struct pkm_lcs_key_fd_transaction_burst_entry *entry;
+	bool matches = false;
+	long ret;
+
+	if (!counts || !watcher || !limit)
+		return -EINVAL;
+
+	ret = pkm_lcs_key_fd_watch_event_matches_filter(
+		event_type, watcher->watch_filter, &matches);
+	if (ret || !matches)
+		return ret;
+
+	entry = pkm_lcs_key_fd_transaction_burst_find(counts, watcher);
+	if (!entry) {
+		entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+		if (!entry)
+			return -ENOMEM;
+		INIT_LIST_HEAD(&entry->link);
+		entry->watcher = watcher;
+		list_add_tail(&entry->link, counts);
+	}
+
+	if (entry->event_count == U32_MAX)
+		return -EOVERFLOW;
+	entry->event_count++;
+	if (entry->event_count > limit)
+		entry->overflow = true;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_transaction_burst_count_context_locked(
+	const struct pkm_lcs_watch_dispatch_context *context,
+	struct list_head *counts, u32 limit)
+{
+	struct pkm_lcs_subtree_watch_entry *subtree;
+	struct pkm_lcs_key_fd *watcher;
+	u32 changed_index;
+	u32 hash;
+	u32 i;
+	long ret;
+
+	hash = pkm_lcs_guid_hash(context->changed_key_guid);
+	hash_for_each_possible(pkm_lcs_watch_map, watcher,
+			       watch_registry_node, hash) {
+		if (!pkm_lcs_guid_equal(watcher->key_guid,
+					context->changed_key_guid))
+			continue;
+		ret = pkm_lcs_key_fd_transaction_burst_count_watcher(
+			counts, watcher, context->event_type, limit);
+		if (ret)
+			return ret;
+	}
+
+	changed_index = context->path_component_count - 1U;
+	for (i = changed_index; i > 0; i--) {
+		const u8 *ancestor_guid = context->ancestor_guids[i - 1U];
+
+		if (pkm_lcs_guid_equal(ancestor_guid, context->changed_key_guid))
+			continue;
+		subtree = pkm_lcs_subtree_watch_find_locked(ancestor_guid);
+		if (!subtree)
+			continue;
+
+		hash = pkm_lcs_guid_hash(ancestor_guid);
+		hash_for_each_possible(pkm_lcs_watch_map, watcher,
+				       watch_registry_node, hash) {
+			if (!pkm_lcs_guid_equal(watcher->key_guid,
+						ancestor_guid) ||
+			    !watcher->watch_subtree)
+				continue;
+			ret = pkm_lcs_key_fd_transaction_burst_count_watcher(
+				counts, watcher, context->event_type, limit);
+			if (ret)
+				return ret;
+		}
+	}
+
+	return 0;
+}
+
+static bool pkm_lcs_key_fd_transaction_burst_suppresses_watcher(
+	struct list_head *counts, const struct pkm_lcs_key_fd *watcher)
+{
+	struct pkm_lcs_key_fd_transaction_burst_entry *entry;
+
+	entry = pkm_lcs_key_fd_transaction_burst_find(counts, watcher);
+	return entry && entry->overflow;
+}
+
+static long pkm_lcs_key_fd_transaction_burst_dispatch_overflows_locked(
+	struct list_head *counts)
+{
+	struct pkm_lcs_key_fd_transaction_burst_entry *entry;
+	long ret;
+
+	if (!counts)
+		return 0;
+	list_for_each_entry(entry, counts, link) {
+		if (!entry->overflow)
+			continue;
+		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
+			entry->watcher, REG_WATCH_OVERFLOW, NULL, 0, false,
+			NULL, 0);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
-	const struct pkm_lcs_watch_dispatch_context *context)
+	const struct pkm_lcs_watch_dispatch_context *context,
+	struct list_head *transaction_burst_counts)
 {
 	struct pkm_lcs_key_fd_string_view *path_views = NULL;
 	struct pkm_lcs_subtree_watch_entry *subtree;
@@ -3873,6 +4023,9 @@ static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 			       watch_registry_node, hash) {
 		if (!pkm_lcs_guid_equal(watcher->key_guid,
 					context->changed_key_guid))
+			continue;
+		if (pkm_lcs_key_fd_transaction_burst_suppresses_watcher(
+			    transaction_burst_counts, watcher))
 			continue;
 		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
 			watcher, context->event_type, context->name,
@@ -3906,6 +4059,9 @@ static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 						ancestor_guid) ||
 			    !watcher->watch_subtree)
 				continue;
+			if (pkm_lcs_key_fd_transaction_burst_suppresses_watcher(
+				    transaction_burst_counts, watcher))
+				continue;
 			ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
 				watcher, context->event_type, context->name,
 				context->name_len, true, path_views, path_count);
@@ -3932,7 +4088,8 @@ long pkm_lcs_key_fd_dispatch_watch_event_context(
 		return ret;
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
-	ret = pkm_lcs_key_fd_dispatch_watch_event_context_locked(context);
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context_locked(context,
+								NULL);
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 	return ret;
 }
@@ -3940,6 +4097,7 @@ long pkm_lcs_key_fd_dispatch_watch_event_context(
 long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
 	const struct pkm_lcs_watch_dispatch_context *contexts, u32 context_count)
 {
+	LIST_HEAD(transaction_burst_counts);
 	long ret = 0;
 	u32 i;
 
@@ -3956,12 +4114,26 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	for (i = 0; i < context_count; i++) {
+		ret = pkm_lcs_key_fd_transaction_burst_count_context_locked(
+			&contexts[i], &transaction_burst_counts,
+			PKM_LCS_KEY_FD_TRANSACTION_WATCH_BURST_LIMIT);
+		if (ret)
+			goto out_unlock;
+	}
+	ret = pkm_lcs_key_fd_transaction_burst_dispatch_overflows_locked(
+		&transaction_burst_counts);
+	if (ret)
+		goto out_unlock;
+	for (i = 0; i < context_count; i++) {
 		ret = pkm_lcs_key_fd_dispatch_watch_event_context_locked(
-			&contexts[i]);
+			&contexts[i], &transaction_burst_counts);
 		if (ret)
 			break;
 	}
+out_unlock:
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
+	pkm_lcs_key_fd_transaction_burst_counts_free(
+		&transaction_burst_counts);
 	return ret;
 }
 

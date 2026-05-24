@@ -143,6 +143,12 @@ struct pkm_lcs_transaction_log_entry {
 	};
 };
 
+struct pkm_lcs_transaction_watch_context_owner {
+	struct list_head link;
+	const char **path;
+	u8 (*ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+};
+
 static DEFINE_MUTEX(pkm_lcs_transaction_id_lock);
 static u64 pkm_lcs_next_transaction_id = 1;
 static DEFINE_MUTEX(pkm_lcs_transaction_registry_lock);
@@ -1193,7 +1199,25 @@ out_unlock:
 	return 0;
 }
 
-static long pkm_lcs_transaction_dispatch_key_path_invisible_exact(
+static void pkm_lcs_transaction_watch_context_owners_free(
+	struct list_head *owners)
+{
+	struct pkm_lcs_transaction_watch_context_owner *owner;
+	struct pkm_lcs_transaction_watch_context_owner *tmp;
+
+	if (!owners)
+		return;
+	list_for_each_entry_safe(owner, tmp, owners, link) {
+		list_del(&owner->link);
+		kfree(owner->ancestor_guids);
+		kfree(owner->path);
+		kfree(owner);
+	}
+}
+
+static long pkm_lcs_transaction_append_key_path_invisible_exact(
+	struct pkm_lcs_watch_dispatch_context *contexts, u32 context_capacity,
+	u32 *index, struct list_head *owners,
 	const u8 key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
 	const u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
 	char **parent_path,
@@ -1201,19 +1225,22 @@ static long pkm_lcs_transaction_dispatch_key_path_invisible_exact(
 	u32 parent_depth, const char *child_name, u32 child_name_len,
 	bool replacement_visible)
 {
-	struct pkm_lcs_watch_dispatch_context contexts[3] = { };
+	struct pkm_lcs_transaction_watch_context_owner *owner;
 	u8 (*child_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 	const char **child_path;
 	u32 child_depth;
-	u32 index = 0;
+	u32 required_contexts = replacement_visible ? 3U : 2U;
 	size_t child_ancestor_bytes;
 	size_t child_path_bytes;
-	long ret;
 
-	if (!key_guid || !parent_guid || !parent_path ||
+	if (!contexts || !index || !owners || !key_guid || !parent_guid ||
+	    !parent_path ||
 	    !parent_ancestor_guids || !parent_depth || !child_name ||
 	    !child_name_len)
 		return -EINVAL;
+	if (*index > context_capacity ||
+	    context_capacity - *index < required_contexts)
+		return -EOVERFLOW;
 	if (check_add_overflow(parent_depth, 1U, &child_depth))
 		return -EOVERFLOW;
 	if (check_mul_overflow((size_t)child_depth, sizeof(*child_path),
@@ -1231,6 +1258,12 @@ static long pkm_lcs_transaction_dispatch_key_path_invisible_exact(
 		kfree(child_path);
 		return -ENOMEM;
 	}
+	owner = kzalloc(sizeof(*owner), GFP_KERNEL);
+	if (!owner) {
+		kfree(child_ancestor_guids);
+		kfree(child_path);
+		return -ENOMEM;
+	}
 
 	memcpy(child_path, parent_path, (size_t)parent_depth * sizeof(*child_path));
 	child_path[parent_depth] = child_name;
@@ -1238,36 +1271,35 @@ static long pkm_lcs_transaction_dispatch_key_path_invisible_exact(
 	       (size_t)parent_depth * sizeof(*child_ancestor_guids));
 	memcpy(child_ancestor_guids[parent_depth], key_guid,
 	       sizeof(child_ancestor_guids[parent_depth]));
+	INIT_LIST_HEAD(&owner->link);
+	owner->path = child_path;
+	owner->ancestor_guids = child_ancestor_guids;
+	list_add_tail(&owner->link, owners);
 
-	contexts[index].changed_key_guid = parent_guid;
-	contexts[index].ancestor_guids =
+	contexts[*index].changed_key_guid = parent_guid;
+	contexts[*index].ancestor_guids =
 		(const u8 (*)[PKM_LCS_GUID_BYTES])parent_ancestor_guids;
-	contexts[index].resolved_path = (const char * const *)parent_path;
-	contexts[index].path_component_count = parent_depth;
-	contexts[index].event_type = REG_WATCH_SUBKEY_DELETED;
-	contexts[index].name = (const u8 *)child_name;
-	contexts[index].name_len = child_name_len;
-	index++;
+	contexts[*index].resolved_path = (const char * const *)parent_path;
+	contexts[*index].path_component_count = parent_depth;
+	contexts[*index].event_type = REG_WATCH_SUBKEY_DELETED;
+	contexts[*index].name = (const u8 *)child_name;
+	contexts[*index].name_len = child_name_len;
+	(*index)++;
 
 	if (replacement_visible) {
-		contexts[index] = contexts[index - 1U];
-		contexts[index].event_type = REG_WATCH_SUBKEY_CREATED;
-		index++;
+		contexts[*index] = contexts[*index - 1U];
+		contexts[*index].event_type = REG_WATCH_SUBKEY_CREATED;
+		(*index)++;
 	}
 
-	contexts[index].changed_key_guid = key_guid;
-	contexts[index].ancestor_guids =
+	contexts[*index].changed_key_guid = key_guid;
+	contexts[*index].ancestor_guids =
 		(const u8 (*)[PKM_LCS_GUID_BYTES])child_ancestor_guids;
-	contexts[index].resolved_path = (const char * const *)child_path;
-	contexts[index].path_component_count = child_depth;
-	contexts[index].event_type = REG_WATCH_KEY_DELETED;
-	index++;
-
-	ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(contexts, index);
-
-	kfree(child_ancestor_guids);
-	kfree(child_path);
-	return ret;
+	contexts[*index].resolved_path = (const char * const *)child_path;
+	contexts[*index].path_component_count = child_depth;
+	contexts[*index].event_type = REG_WATCH_KEY_DELETED;
+	(*index)++;
+	return 0;
 }
 
 static long pkm_lcs_transaction_delete_key_post_lookup(
@@ -1383,8 +1415,10 @@ static long pkm_lcs_transaction_log_apply_orphan_effects(
 	return 0;
 }
 
-static long pkm_lcs_transaction_dispatch_delete_key_exact(
-	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry)
+static long pkm_lcs_transaction_append_delete_key_exact(
+	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry,
+	struct pkm_lcs_watch_dispatch_context *contexts, u32 context_capacity,
+	u32 *index, struct list_head *owners)
 {
 	long ret;
 
@@ -1397,20 +1431,24 @@ static long pkm_lcs_transaction_dispatch_delete_key_exact(
 	if (entry->target_still_named)
 		return 0;
 
-	return pkm_lcs_transaction_dispatch_key_path_invisible_exact(
+	return pkm_lcs_transaction_append_key_path_invisible_exact(
+		contexts, context_capacity, index, owners,
 		entry->key_guid, entry->parent_guid, entry->parent_path,
 		entry->parent_ancestor_guids, entry->parent_depth,
 		entry->child_name, entry->child_name_len,
 		entry->replacement_visible);
 }
 
-static long pkm_lcs_transaction_dispatch_hide_key_exact(
-	const struct pkm_lcs_transaction_hide_key_log *entry)
+static long pkm_lcs_transaction_append_hide_key_exact(
+	const struct pkm_lcs_transaction_hide_key_log *entry,
+	struct pkm_lcs_watch_dispatch_context *contexts, u32 context_capacity,
+	u32 *index, struct list_head *owners)
 {
 	if (!entry)
 		return -EINVAL;
 
-	return pkm_lcs_transaction_dispatch_key_path_invisible_exact(
+	return pkm_lcs_transaction_append_key_path_invisible_exact(
+		contexts, context_capacity, index, owners,
 		entry->key_guid, entry->parent_guid, entry->parent_path,
 		entry->parent_ancestor_guids, entry->parent_depth,
 		entry->child_name, entry->child_name_len, false);
@@ -1421,6 +1459,9 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 {
 	struct pkm_lcs_watch_dispatch_context *contexts;
 	struct pkm_lcs_transaction_log_entry *entry;
+	LIST_HEAD(context_owners);
+	size_t context_capacity_size;
+	u32 context_capacity;
 	u32 index = 0;
 	long ret;
 
@@ -1429,8 +1470,12 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 	if (!txn->mutation_log_entries)
 		return 0;
 
-	contexts = kcalloc(txn->mutation_log_entries, sizeof(*contexts),
-			   GFP_KERNEL);
+	if (check_mul_overflow((size_t)txn->mutation_log_entries, 3UL,
+			       &context_capacity_size) ||
+	    context_capacity_size > U32_MAX)
+		return -EOVERFLOW;
+	context_capacity = (u32)context_capacity_size;
+	contexts = kcalloc(context_capacity, sizeof(*contexts), GFP_KERNEL);
 	if (!contexts)
 		return -ENOMEM;
 
@@ -1502,28 +1547,16 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 			index++;
 			break;
 		case PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY:
-			if (index) {
-				ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(
-					contexts, index);
-				if (ret)
-					goto out_free;
-				index = 0;
-			}
-			ret = pkm_lcs_transaction_dispatch_hide_key_exact(
-				&entry->hide_key);
+			ret = pkm_lcs_transaction_append_hide_key_exact(
+				&entry->hide_key, contexts, context_capacity,
+				&index, &context_owners);
 			if (ret)
 				goto out_free;
 			break;
 		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
-			if (index) {
-				ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(
-					contexts, index);
-				if (ret)
-					goto out_free;
-				index = 0;
-			}
-			ret = pkm_lcs_transaction_dispatch_delete_key_exact(
-				source_id, &entry->delete_key);
+			ret = pkm_lcs_transaction_append_delete_key_exact(
+				source_id, &entry->delete_key, contexts,
+				context_capacity, &index, &context_owners);
 			if (ret)
 				goto out_free;
 			break;
@@ -1537,6 +1570,7 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 							       index);
 
 out_free:
+	pkm_lcs_transaction_watch_context_owners_free(&context_owners);
 	kfree(contexts);
 	return ret;
 }
