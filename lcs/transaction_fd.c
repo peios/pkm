@@ -32,6 +32,7 @@
 #include <pkm/lcs.h>
 
 #include "key_fd.h"
+#include "rsi.h"
 #include "transaction_fd.h"
 #include "source_device.h"
 
@@ -1255,6 +1256,107 @@ out_free:
 	return ret;
 }
 
+static long pkm_lcs_transaction_delete_key_still_named(
+	u32 source_id,
+	const u8 key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const char *child_name, u32 child_name_len, bool *still_named)
+{
+	struct pkm_lcs_rsi_lookup_guid_entry_result result = { };
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	u64 next_sequence = 0;
+	long ret;
+
+	if (!source_id || !key_guid || !parent_guid || !child_name ||
+	    !child_name_len || !still_named)
+		return -EINVAL;
+	*still_named = false;
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
+		source_id, 0, parent_guid, child_name, child_name_len,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+	if (ret)
+		goto out_frame;
+
+	ret = pkm_lcs_rsi_materialize_lookup_guid_entry(
+		frame.data, frame.len, response.request_id, next_sequence,
+		child_name, child_name_len, key_guid, &result);
+	if (ret)
+		goto out_frame;
+
+	*still_named = result.present != 0;
+
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+	return ret;
+}
+
+static long pkm_lcs_transaction_apply_delete_key_orphan_effects(
+	u32 source_id, const struct pkm_lcs_transaction_delete_key_log *entry)
+{
+	bool still_named = false;
+	u32 live_refs = 0;
+	u32 marked = 0;
+	long ret;
+
+	if (!source_id || !entry)
+		return -EINVAL;
+
+	ret = pkm_lcs_transaction_delete_key_still_named(
+		source_id, entry->key_guid, entry->parent_guid,
+		entry->child_name, entry->child_name_len, &still_named);
+	if (ret)
+		return ret;
+	if (still_named)
+		return 0;
+
+	ret = pkm_lcs_key_fd_mark_orphaned_no_watch(
+		source_id, entry->key_guid, &marked, &live_refs);
+	if (ret)
+		return ret;
+
+	if (!live_refs)
+		(void)pkm_lcs_source_dispatch_drop_key_request(
+			source_id, 0, entry->key_guid, NULL);
+	return 0;
+}
+
+static long pkm_lcs_transaction_log_apply_orphan_effects(
+	struct pkm_lcs_transaction_fd *txn, u32 source_id)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+	long ret;
+
+	if (!txn || !source_id)
+		return -EINVAL;
+
+	list_for_each_entry(entry, &txn->mutation_log, link) {
+		switch (entry->kind) {
+		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
+			ret = pkm_lcs_transaction_apply_delete_key_orphan_effects(
+				source_id, &entry->delete_key);
+			if (ret)
+				return ret;
+			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY:
+		case PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY:
+		case PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE:
+		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_VALUE:
+		case PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY:
+			break;
+		default:
+			return -EIO;
+		}
+	}
+	return 0;
+}
+
 static long pkm_lcs_transaction_log_dispatch_watch_batch(
 	struct pkm_lcs_transaction_fd *txn)
 {
@@ -1412,6 +1514,12 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 	if (status == RSI_OK) {
 		ret = pkm_lcs_transaction_fd_apply_success_generation_under_bind(
 			txn, transaction_id, source_id);
+		if (ret) {
+			*source_down_required_out = true;
+			return -EIO;
+		}
+		ret = pkm_lcs_transaction_log_apply_orphan_effects(
+			txn, source_id);
 		if (ret) {
 			*source_down_required_out = true;
 			return -EIO;

@@ -184,7 +184,7 @@ static long pkm_lcs_key_fd_plan_get_security(
 	struct pkm_lcs_get_security_result *out);
 static long pkm_lcs_key_fd_mark_orphaned_internal(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
-	bool dispatch_direct_deleted);
+	u32 *live_refs_out, bool dispatch_direct_deleted);
 
 static u32 pkm_lcs_guid_hash(const u8 guid[PKM_LCS_GUID_BYTES])
 {
@@ -3285,7 +3285,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 			pkm_lcs_key_fd_publish_key_deleted_context(key_fd);
 			ret = pkm_lcs_key_fd_mark_orphaned_internal(
 				key_fd->source_id, key_fd->key_guid, NULL,
-				false);
+				NULL, false);
 			if (ret) {
 				pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 				ret = -EIO;
@@ -4067,15 +4067,18 @@ static long pkm_lcs_key_fd_dispatch_key_deleted_direct(
 
 static long pkm_lcs_key_fd_mark_orphaned_internal(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
-	bool dispatch_direct_deleted)
+	u32 *live_refs_out, bool dispatch_direct_deleted)
 {
 	struct pkm_lcs_key_ref_entry *entry;
 	struct pkm_lcs_key_fd *key_fd;
 	bool already_orphaned;
+	u32 live_refs = 0;
 	u32 marked = 0;
 
 	if (marked_out)
 		*marked_out = 0;
+	if (live_refs_out)
+		*live_refs_out = 0;
 	if (!source_id || !guid || !memchr_inv(guid, 0, PKM_LCS_GUID_BYTES))
 		return -EINVAL;
 
@@ -4086,6 +4089,7 @@ static long pkm_lcs_key_fd_mark_orphaned_internal(
 		return 0;
 	}
 
+	live_refs = entry->refcount;
 	already_orphaned = entry->orphaned;
 	if (!already_orphaned) {
 		entry->orphaned = true;
@@ -4104,6 +4108,8 @@ static long pkm_lcs_key_fd_mark_orphaned_internal(
 		(void)pkm_lcs_key_fd_dispatch_key_deleted_direct(guid);
 	if (marked_out)
 		*marked_out = marked;
+	if (live_refs_out)
+		*live_refs_out = live_refs;
 	return 0;
 }
 
@@ -4111,7 +4117,16 @@ long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out)
 {
 	return pkm_lcs_key_fd_mark_orphaned_internal(source_id, guid,
-						    marked_out, true);
+						    marked_out, NULL, true);
+}
+
+long pkm_lcs_key_fd_mark_orphaned_no_watch(
+	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
+	u32 *live_refs_out)
+{
+	return pkm_lcs_key_fd_mark_orphaned_internal(source_id, guid,
+						    marked_out, live_refs_out,
+						    false);
 }
 
 long pkm_lcs_key_fd_dispatch_watch_event(
