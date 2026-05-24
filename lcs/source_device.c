@@ -6165,9 +6165,15 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 		return 0;
 	case RSI_HIDE_ENTRY:
 	case RSI_DELETE_ENTRY:
+	case RSI_CREATE_ENTRY:
+	case RSI_CREATE_KEY:
+	case RSI_WRITE_KEY:
 	case RSI_SET_VALUE:
 	case RSI_DELETE_VALUE_ENTRY:
 	case RSI_SET_BLANKET_TOMBSTONE:
+	case RSI_BEGIN_TRANSACTION:
+	case RSI_COMMIT_TRANSACTION:
+	case RSI_ABORT_TRANSACTION:
 	case RSI_FLUSH:
 	case RSI_DROP_KEY:
 		ret = pkm_lcs_rsi_validate_status_only_response(
