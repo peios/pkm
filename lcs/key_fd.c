@@ -4678,6 +4678,15 @@ long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
 						    marked_out, NULL, true);
 }
 
+long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted_with_refs(
+	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
+	u32 *live_refs_out)
+{
+	return pkm_lcs_key_fd_mark_orphaned_internal(source_id, guid,
+						    marked_out, live_refs_out,
+						    true);
+}
+
 long pkm_lcs_key_fd_mark_orphaned_no_watch(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
 	u32 *live_refs_out)

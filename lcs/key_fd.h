@@ -116,6 +116,9 @@ long pkm_lcs_key_fd_dispatch_watch_event(
 	const struct pkm_lcs_watch_dispatch_input *input);
 long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out);
+long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted_with_refs(
+	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
+	u32 *live_refs_out);
 long pkm_lcs_key_fd_mark_orphaned_no_watch(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
 	u32 *live_refs_out);

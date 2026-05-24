@@ -23190,6 +23190,92 @@ static void pkm_lcs_kunit_source_delete_layer_round_trip_statuses(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_delete_layer_applies_orphans(
+	struct kunit *test)
+{
+	static const char layer_name[] = "role-beta";
+	static const char * const path[] = { "Machine", "RoleKey" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0x61 },
+		{
+			0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
+			0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80,
+		},
+	};
+	static const u8 no_live_guid[PKM_LCS_GUID_BYTES] = {
+		0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88,
+		0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90,
+	};
+	struct pkm_lcs_delete_layer_orphan_apply_result apply = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_kunit_delete_layer_source_script script = { };
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	u8 record[16] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	int thread_ret;
+	long fd;
+	long ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(1, KEY_NOTIFY, path,
+						    ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &notify),
+			0L);
+
+	script.file = &file;
+	script.expected_layer_name = layer_name;
+	script.status = RSI_OK;
+	script.orphaned_guid_count = 2;
+	script.orphaned_guid_a = ancestors[1];
+	script.orphaned_guid_b = no_live_guid;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_layer_source_thread, &script,
+		"pkm-lcs-kunit-del-layer-src");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
+		1, layer_name, strlen(layer_name), 1000, &apply, &response,
+		&enqueue);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, apply.orphaned_guid_count, 2U);
+	KUNIT_EXPECT_EQ(test, apply.marked_fd_count, 1U);
+	KUNIT_EXPECT_EQ(test, apply.immediate_drop_count, 1U);
+	KUNIT_EXPECT_EQ(test, response.request_op_code,
+			(u16)RSI_DELETE_LAYER);
+	KUNIT_EXPECT_EQ(test, response.status, (u32)RSI_OK);
+	KUNIT_EXPECT_FALSE(test, response.malformed_source_data);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, snapshot.orphaned);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, record,
+							sizeof(record), true),
+			(ssize_t)8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(record), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 4),
+			REG_WATCH_KEY_DELETED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 6), 0U);
+
+	pkm_lcs_kunit_expect_drop_key_request(test, &file, no_live_guid);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_expect_drop_key_request(test, &file, ancestors[1]);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_dispatch_transaction_control_frames(
 	struct kunit *test)
 {
@@ -31111,6 +31197,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_drop_key_round_trip_statuses),
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_delete_layer_frame),
 	KUNIT_CASE(pkm_lcs_kunit_source_delete_layer_round_trip_statuses),
+	KUNIT_CASE(pkm_lcs_kunit_source_delete_layer_applies_orphans),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_transaction_control_frames),
 	KUNIT_CASE(

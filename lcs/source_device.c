@@ -3991,6 +3991,138 @@ long pkm_lcs_source_delete_layer_round_trip_timeout(
 							 response);
 }
 
+long pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout(
+	u32 source_id, const char *layer_name, u32 layer_name_len,
+	u32 timeout_ms, struct pkm_lcs_source_response_frame *frame,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_source_response_waiter waiter;
+	unsigned long deadline;
+	long ret;
+
+	if (!frame)
+		return -EINVAL;
+	if (response)
+		memset(response, 0, sizeof(*response));
+	if (enqueue)
+		memset(enqueue, 0, sizeof(*enqueue));
+
+	pkm_lcs_source_response_waiter_init(&waiter);
+	pkm_lcs_source_response_frame_init(frame);
+	ret = pkm_lcs_source_response_waiter_retain_frame(&waiter, frame);
+	if (ret)
+		return ret;
+	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+
+	for (;;) {
+		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		if (ret)
+			return ret;
+
+		ret = pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
+			source_id, layer_name, layer_name_len, &waiter,
+			enqueue);
+		if (ret != -EAGAIN)
+			break;
+		if (!pkm_lcs_source_deadline_remaining(deadline))
+			return -ETIMEDOUT;
+	}
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
+							response);
+	if (ret)
+		pkm_lcs_source_response_frame_destroy(frame);
+	return ret;
+}
+
+long pkm_lcs_source_apply_delete_layer_orphan_response(
+	u32 source_id, const struct pkm_lcs_source_response_frame *frame,
+	u64 request_id,
+	struct pkm_lcs_delete_layer_orphan_apply_result *result)
+{
+	struct pkm_lcs_rsi_delete_layer_response_summary summary = { };
+	u32 immediate_drop_count = 0;
+	u32 marked_fd_count = 0;
+	size_t guid_offset;
+	u8 guid[RSI_GUID_SIZE];
+	u32 i;
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+	if (!source_id || !frame || !frame->data)
+		return -EINVAL;
+
+	ret = pkm_lcs_rsi_validate_delete_layer_response(
+		frame->data, frame->len, request_id, &summary);
+	if (ret)
+		return ret;
+
+	guid_offset = RSI_MIN_RESPONSE_SIZE + sizeof(u32);
+	for (i = 0; i < summary.orphaned_guid_count; i++) {
+		u32 marked = 0;
+		u32 live_refs = 0;
+
+		if (guid_offset > frame->len ||
+		    frame->len - guid_offset < RSI_GUID_SIZE)
+			return -EIO;
+		memcpy(guid, frame->data + guid_offset, sizeof(guid));
+		guid_offset += RSI_GUID_SIZE;
+
+		ret = pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted_with_refs(
+			source_id, guid, &marked, &live_refs);
+		if (ret)
+			return ret;
+		if (check_add_overflow(marked_fd_count, marked,
+				       &marked_fd_count))
+			return -EOVERFLOW;
+		if (!live_refs) {
+			ret = pkm_lcs_source_dispatch_drop_key_request(
+				source_id, 0, guid, NULL);
+			if (!ret)
+				immediate_drop_count++;
+		}
+	}
+
+	if (result) {
+		result->orphaned_guid_count = summary.orphaned_guid_count;
+		result->marked_fd_count = marked_fd_count;
+		result->immediate_drop_count = immediate_drop_count;
+	}
+	return 0;
+}
+
+long pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
+	u32 source_id, const char *layer_name, u32 layer_name_len,
+	u32 timeout_ms,
+	struct pkm_lcs_delete_layer_orphan_apply_result *orphan_result,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_source_response_result local_response = { };
+	struct pkm_lcs_source_response_frame frame;
+	long ret;
+
+	if (!response)
+		response = &local_response;
+
+	ret = pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout(
+		source_id, layer_name, layer_name_len, timeout_ms, &frame,
+		response, enqueue);
+	if (ret) {
+		pkm_lcs_source_response_frame_destroy(&frame);
+		return ret;
+	}
+
+	ret = pkm_lcs_source_apply_delete_layer_orphan_response(
+		source_id, &frame, response->request_id, orphan_result);
+	pkm_lcs_source_response_frame_destroy(&frame);
+	return ret;
+}
+
 long pkm_lcs_source_delete_layer_round_trip(
 	u32 source_id, const char *layer_name, u32 layer_name_len,
 	struct pkm_lcs_source_response_result *response,
