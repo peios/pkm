@@ -46,6 +46,7 @@
 #define PKM_LCS_MAX_SYSCALL_LAYER_BYTES_HARD \
 	(PKM_LCS_MAX_LAYER_NAME_BYTES_HARD + 1U)
 #define PKM_LCS_MAX_KEY_DEPTH_HARD 4096U
+#define PKM_LCS_MAX_KEY_DEPTH_DEFAULT 512U
 #define PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT 32U
 #define PKM_LCS_MAX_HIVES_PER_SOURCE_DEFAULT 64U
 #define PKM_LCS_MAX_BOUND_TRANSACTIONS_PER_SOURCE_DEFAULT 16U
@@ -68,7 +69,7 @@
 		.notification_queue_size = 256U,               \
 		.symlink_depth_limit = 16U,                    \
 		.max_value_size = 1048576U,                    \
-		.max_key_depth = 512U,                         \
+		.max_key_depth = PKM_LCS_MAX_KEY_DEPTH_DEFAULT, \
 		.max_path_component_length = 255U,             \
 		.max_total_path_length = 16383U,               \
 		.max_layers_per_value = 128U,                  \
@@ -302,6 +303,15 @@ u32 pkm_lcs_runtime_symlink_depth_limit(void)
 	if (pkm_lcs_runtime_limits_snapshot(&limits))
 		return PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT;
 	return limits.symlink_depth_limit;
+}
+
+u32 pkm_lcs_runtime_max_key_depth(void)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	if (pkm_lcs_runtime_limits_snapshot(&limits))
+		return PKM_LCS_MAX_KEY_DEPTH_DEFAULT;
+	return limits.max_key_depth;
 }
 
 extern int lcs_rust_validate_layer_publication(
@@ -1214,8 +1224,6 @@ extern int lcs_rust_self_config_invalid_audit_payload(
 extern int lcs_rust_validate_syscall_relative_path(
 	const u8 *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);
-extern int lcs_rust_validate_relative_open_depth(
-	u32 parent_depth, u32 relative_component_count);
 extern int lcs_rust_validate_rsi_queued_request_frame(
 	const u8 *frame, size_t frame_len,
 	struct pkm_lcs_rsi_built_request *retained);
@@ -6991,14 +6999,27 @@ long pkm_lcs_validate_syscall_relative_path(
 						      path_len, result);
 }
 
+static long pkm_lcs_validate_relative_open_depth_counts(
+	u32 parent_depth, u32 relative_component_count, u32 max_key_depth)
+{
+	u32 depth;
+
+	if (check_add_overflow(parent_depth, relative_component_count, &depth))
+		return -EINVAL;
+	if (depth > max_key_depth)
+		return -EINVAL;
+	return 0;
+}
+
 static long pkm_lcs_validate_relative_open_depth(
 	const struct pkm_lcs_relative_open_preflight *result)
 {
 	if (!result)
 		return -EINVAL;
 
-	return lcs_rust_validate_relative_open_depth(
-		result->parent.parent_depth, result->path.component_count);
+	return pkm_lcs_validate_relative_open_depth_counts(
+		result->parent.parent_depth, result->path.component_count,
+		pkm_lcs_runtime_max_key_depth());
 }
 
 static long pkm_lcs_transaction_read_txn_id_for_target(
@@ -7121,8 +7142,9 @@ static long pkm_lcs_open_copied_relative_path_after_preflight(
 	if (ret)
 		return ret;
 
-	ret = lcs_rust_validate_relative_open_depth(
-		parent.path_component_count, path.component_count);
+	ret = pkm_lcs_validate_relative_open_depth_counts(
+		parent.path_component_count, path.component_count,
+		pkm_lcs_runtime_max_key_depth());
 	if (ret)
 		goto out_parent;
 
@@ -7677,8 +7699,9 @@ long pkm_lcs_open_user_relative_path_for_token(
 	if (ret)
 		goto out_copy;
 
-	ret = lcs_rust_validate_relative_open_depth(
-		parent.path_component_count, path.component_count);
+	ret = pkm_lcs_validate_relative_open_depth_counts(
+		parent.path_component_count, path.component_count,
+		pkm_lcs_runtime_max_key_depth());
 	if (ret)
 		goto out_parent;
 
@@ -7976,8 +7999,9 @@ static long pkm_lcs_create_missing_validate_child_depth(
 	if (!result || !result->parent.component_count)
 		return -EINVAL;
 
-	ret = lcs_rust_validate_relative_open_depth(
-		result->parent.component_count, 1);
+	ret = pkm_lcs_validate_relative_open_depth_counts(
+		result->parent.component_count, 1,
+		pkm_lcs_runtime_max_key_depth());
 	if (ret)
 		return ret;
 
@@ -8194,8 +8218,9 @@ long pkm_lcs_create_missing_relative_parent(
 	if (ret)
 		goto out_copy;
 
-	ret = lcs_rust_validate_relative_open_depth(
-		parent.path_component_count, path.component_count);
+	ret = pkm_lcs_validate_relative_open_depth_counts(
+		parent.path_component_count, path.component_count,
+		pkm_lcs_runtime_max_key_depth());
 	if (ret)
 		goto out_parent;
 
@@ -8357,8 +8382,9 @@ static long pkm_lcs_create_missing_copied_relative_parent_with_txn(
 	if (ret)
 		return ret;
 
-	ret = lcs_rust_validate_relative_open_depth(
-		parent.path_component_count, path.component_count);
+	ret = pkm_lcs_validate_relative_open_depth_counts(
+		parent.path_component_count, path.component_count,
+		pkm_lcs_runtime_max_key_depth());
 	if (ret)
 		goto out_parent;
 
@@ -10876,6 +10902,21 @@ long pkm_lcs_kunit_source_hive_generation_set(
 
 out_unlock:
 	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
+long pkm_lcs_kunit_create_missing_child_depth(u32 parent_depth,
+					      u32 *child_depth_out)
+{
+	struct pkm_lcs_create_missing_parent_resolution resolution = { };
+	long ret;
+
+	if (!child_depth_out)
+		return -EINVAL;
+
+	resolution.parent.component_count = parent_depth;
+	ret = pkm_lcs_create_missing_validate_child_depth(&resolution);
+	*child_depth_out = ret ? 0 : resolution.child_depth;
 	return ret;
 }
 

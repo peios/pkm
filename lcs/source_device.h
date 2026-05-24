@@ -561,6 +561,7 @@ void pkm_lcs_runtime_limits_reset_defaults(void);
 u32 pkm_lcs_runtime_request_timeout_ms(void);
 u32 pkm_lcs_runtime_transaction_timeout_ms(void);
 u32 pkm_lcs_runtime_symlink_depth_limit(void);
+u32 pkm_lcs_runtime_max_key_depth(void);
 long pkm_lcs_validate_syscall_relative_path(
 	const char *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);
@@ -1228,6 +1229,8 @@ long pkm_lcs_kunit_source_hive_generation_snapshot(
 	u64 *generation_out);
 long pkm_lcs_kunit_source_hive_generation_set(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE], u64 generation);
+long pkm_lcs_kunit_create_missing_child_depth(u32 parent_depth,
+					      u32 *child_depth_out);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_SOURCE_DEVICE_H */
