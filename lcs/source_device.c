@@ -1653,7 +1653,8 @@ static long pkm_lcs_source_wait_for_slot(u32 source_id,
 
 static long pkm_lcs_source_in_flight_insert_locked(
 	struct pkm_lcs_source_fd *source_fd, u64 request_id, u64 txn_id,
-	u16 op_code, struct pkm_lcs_source_response_waiter *waiter)
+	u16 op_code, const u8 key_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_source_response_waiter *waiter)
 {
 	u32 i;
 
@@ -1683,6 +1684,10 @@ static long pkm_lcs_source_in_flight_insert_locked(
 		record->request_id = request_id;
 		record->txn_id = txn_id;
 		record->op_code = op_code;
+		record->key_guid_present = key_guid != NULL;
+		if (key_guid)
+			memcpy(record->key_guid, key_guid,
+			       sizeof(record->key_guid));
 		record->waiter = waiter;
 		if (waiter) {
 			waiter->source_id = source_fd->source_id;
@@ -2713,7 +2718,7 @@ long pkm_lcs_source_enqueue_request(
 		goto out_unlock_queue;
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, retained.request_id, retained.txn_id,
-		retained.op_code, NULL);
+		retained.op_code, NULL, NULL);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -2807,7 +2812,7 @@ static long pkm_lcs_source_dispatch_lookup_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		parent_guid, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -2896,7 +2901,7 @@ static long pkm_lcs_source_dispatch_read_key_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		guid, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -2986,7 +2991,7 @@ static long pkm_lcs_source_dispatch_enum_children_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		parent_guid, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -3085,7 +3090,7 @@ static long pkm_lcs_source_dispatch_query_values_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		guid, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -3200,7 +3205,7 @@ static long pkm_lcs_source_dispatch_set_value_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		guid, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -3305,7 +3310,7 @@ static long pkm_lcs_source_dispatch_delete_value_entry_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		guid, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -3406,7 +3411,7 @@ static long pkm_lcs_source_dispatch_set_blanket_tombstone_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		guid, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -3495,7 +3500,7 @@ static long pkm_lcs_source_dispatch_drop_key_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		guid, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -3604,7 +3609,7 @@ static long pkm_lcs_source_dispatch_create_entry_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		child_guid, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -3718,7 +3723,7 @@ static long pkm_lcs_source_dispatch_hide_delete_entry_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		parent_guid, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -3827,7 +3832,7 @@ static long pkm_lcs_source_dispatch_create_key_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		guid, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -3930,7 +3935,7 @@ static long pkm_lcs_source_dispatch_write_key_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		guid, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -4055,7 +4060,7 @@ static long pkm_lcs_source_dispatch_transaction_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, retained_txn_id, built.op_code,
-		waiter);
+		NULL, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -4151,7 +4156,7 @@ static long pkm_lcs_source_dispatch_flush_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		NULL, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -4249,7 +4254,7 @@ static long pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		waiter);
+		NULL, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -5999,6 +6004,10 @@ long pkm_lcs_source_accept_response_file(
 		result->request_op_code = record->op_code;
 		result->response_op_code = response_op_code;
 		result->status = status;
+		result->key_guid_present = record->key_guid_present;
+		if (record->key_guid_present)
+			memcpy(result->key_guid, record->key_guid,
+			       sizeof(result->key_guid));
 		result->source_validation_failure = 0;
 		result->malformed_source_data = !status_known;
 		result->source_validation_failure_present = !status_known;
@@ -6030,7 +6039,9 @@ static void pkm_lcs_source_emit_validation_failure_for_result(
 
 	pkm_lcs_emit_source_validation_failure_audit(
 		result->source_id, NULL, 0, false, result->request_id, true,
-		result->request_op_code, true, NULL, false,
+		result->request_op_code, true,
+		result->key_guid_present ? result->key_guid : NULL,
+		result->key_guid_present,
 		result->source_validation_failure);
 }
 

@@ -32,11 +32,12 @@ struct pkm_lcs_source_in_flight_request {
 	bool occupied;
 	bool delivered;
 	bool response_accepted;
-	u8 _pad0;
+	bool key_guid_present;
 	u64 request_id;
 	u64 txn_id;
 	u16 op_code;
 	u16 _pad1;
+	u8 key_guid[RSI_GUID_SIZE];
 	struct pkm_lcs_source_response_waiter *waiter;
 };
 
@@ -278,11 +279,12 @@ struct pkm_lcs_source_response_result {
 	u16 request_op_code;
 	u16 response_op_code;
 	u32 status;
+	u8 key_guid[RSI_GUID_SIZE];
 	u32 source_validation_failure;
 	bool malformed_source_data;
 	bool source_validation_failure_present;
 	bool caller_waiter_attached;
-	u8 _pad[1];
+	bool key_guid_present;
 };
 
 struct pkm_lcs_layer_owner_selection_copy {

@@ -5917,6 +5917,26 @@ static bool pkm_lcs_kunit_buffer_contains(const u8 *buffer, size_t buffer_len,
 	return false;
 }
 
+static bool pkm_lcs_kunit_buffer_contains_bytes(const u8 *buffer,
+						size_t buffer_len,
+						const u8 *needle,
+						size_t needle_len)
+{
+	size_t i;
+
+	if (!buffer || !needle)
+		return false;
+	if (!needle_len || needle_len > buffer_len)
+		return false;
+
+	for (i = 0; i <= buffer_len - needle_len; i++) {
+		if (!memcmp(buffer + i, needle, needle_len))
+			return true;
+	}
+
+	return false;
+}
+
 static void pkm_lcs_kunit_key_fd_publish_snapshot_success(struct kunit *test)
 {
 	static const char * const path[] = { "Machine", "Software" };
@@ -34048,7 +34068,10 @@ static void pkm_lcs_kunit_source_write_unknown_status_audits(
 {
 	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
 	static const char validation_class[] = "unknown_rsi_status_code";
-	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x75 };
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c,
+		0x7d, 0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83, 0x84,
+	};
 	struct pkm_lcs_source_response_result response_result = { };
 	struct pkm_lcs_source_response_result waiter_result = { };
 	struct pkm_lcs_source_response_waiter waiter;
@@ -34093,6 +34116,11 @@ static void pkm_lcs_kunit_source_write_unknown_status_audits(
 	KUNIT_EXPECT_EQ(
 		test, response_result.source_validation_failure,
 		(u32)PKM_LCS_SOURCE_VALIDATION_UNKNOWN_RSI_STATUS_CODE);
+	KUNIT_EXPECT_TRUE(test, response_result.key_guid_present);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response_result.key_guid, parent_guid,
+			       sizeof(parent_guid)),
+			0);
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_source_response_waiter_wait(&waiter,
 							    &waiter_result),
@@ -34103,6 +34131,11 @@ static void pkm_lcs_kunit_source_write_unknown_status_audits(
 	KUNIT_EXPECT_EQ(
 		test, waiter_result.source_validation_failure,
 		(u32)PKM_LCS_SOURCE_VALIDATION_UNKNOWN_RSI_STATUS_CODE);
+	KUNIT_EXPECT_TRUE(test, waiter_result.key_guid_present);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(waiter_result.key_guid, parent_guid,
+			       sizeof(parent_guid)),
+			0);
 
 	KUNIT_ASSERT_EQ(test,
 			pkm_kmes_kunit_copy_single_buffer(
@@ -34124,6 +34157,10 @@ static void pkm_lcs_kunit_source_write_unknown_status_audits(
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_lcs_kunit_buffer_contains(
 				  buffer, written, validation_class));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_lcs_kunit_buffer_contains_bytes(
+				  buffer, written, parent_guid,
+				  sizeof(parent_guid)));
 
 	pkm_lcs_kunit_source_fd_snapshot(&file, &fd_snapshot);
 	KUNIT_EXPECT_EQ(test, fd_snapshot.in_flight_request_count, 0U);
