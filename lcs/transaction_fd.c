@@ -174,6 +174,9 @@ static u64 pkm_lcs_next_transaction_id = 1;
 static DEFINE_MUTEX(pkm_lcs_transaction_registry_lock);
 static LIST_HEAD(pkm_lcs_transaction_registry);
 static const char pkm_lcs_transaction_base_layer_name[] = "base";
+static const char * const pkm_lcs_transaction_layer_metadata_prefix[] = {
+	"Machine", "System", "Registry", "Layers"
+};
 
 static const struct file_operations pkm_lcs_transaction_fd_fops;
 static long pkm_lcs_transaction_fd_complete_first_bind_from_state(
@@ -346,39 +349,59 @@ static long pkm_lcs_transaction_path_component_casefold_eq(
 		equal);
 }
 
-static long pkm_lcs_transaction_layer_metadata_path(
-	char **path, u32 depth, const char **layer_name_out,
-	u32 *layer_name_len_out, bool *matches_out)
+static long pkm_lcs_transaction_layer_metadata_prefix_matches(
+	char **path, u32 depth, bool *matches_out)
 {
-	static const char * const prefix[] = {
-		"Machine", "System", "Registry", "Layers"
-	};
-	const char *layer_name;
 	u32 i;
 
-	if (!layer_name_out || !layer_name_len_out || !matches_out)
+	if (!matches_out)
 		return -EINVAL;
-	*layer_name_out = NULL;
-	*layer_name_len_out = 0;
 	*matches_out = false;
 	if (!path)
 		return -EINVAL;
-	if (depth != ARRAY_SIZE(prefix) + 1U)
+	if (depth < ARRAY_SIZE(pkm_lcs_transaction_layer_metadata_prefix))
 		return 0;
 
-	for (i = 0; i < ARRAY_SIZE(prefix); i++) {
+	for (i = 0; i < ARRAY_SIZE(pkm_lcs_transaction_layer_metadata_prefix);
+	     i++) {
 		bool equal = false;
 		long ret;
 
 		ret = pkm_lcs_transaction_path_component_casefold_eq(
-			path[i], prefix[i], &equal);
+			path[i], pkm_lcs_transaction_layer_metadata_prefix[i],
+			&equal);
 		if (ret)
 			return ret;
 		if (!equal)
 			return 0;
 	}
 
-	layer_name = path[ARRAY_SIZE(prefix)];
+	*matches_out = true;
+	return 0;
+}
+
+static long pkm_lcs_transaction_layer_metadata_path(
+	char **path, u32 depth, const char **layer_name_out,
+	u32 *layer_name_len_out, bool *matches_out)
+{
+	const char *layer_name;
+	bool prefix_matches = false;
+	long ret;
+
+	if (!layer_name_out || !layer_name_len_out || !matches_out)
+		return -EINVAL;
+	*layer_name_out = NULL;
+	*layer_name_len_out = 0;
+	*matches_out = false;
+	if (depth != ARRAY_SIZE(pkm_lcs_transaction_layer_metadata_prefix) + 1U)
+		return 0;
+
+	ret = pkm_lcs_transaction_layer_metadata_prefix_matches(
+		path, depth, &prefix_matches);
+	if (ret || !prefix_matches)
+		return ret;
+
+	layer_name = path[ARRAY_SIZE(pkm_lcs_transaction_layer_metadata_prefix)];
 	if (!layer_name)
 		return -EINVAL;
 	if (strlen(layer_name) > U32_MAX)
@@ -1714,6 +1737,32 @@ static long pkm_lcs_transaction_entry_layer_metadata_path(
 		*depth_out = 0;
 
 	switch (entry->kind) {
+	case PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY:
+		if (entry->create_key.parent_depth !=
+		    ARRAY_SIZE(pkm_lcs_transaction_layer_metadata_prefix)) {
+			*matches_path_out = false;
+			return 0;
+		}
+		ret = pkm_lcs_transaction_layer_metadata_prefix_matches(
+			entry->create_key.parent_path,
+			entry->create_key.parent_depth, matches_path_out);
+		if (ret || !*matches_path_out)
+			return ret;
+		if (!entry->create_key.child_name ||
+		    !entry->create_key.child_name_len)
+			return -EIO;
+		key_guid = entry->create_key.target_guid;
+		path = entry->create_key.parent_path;
+		depth = entry->create_key.parent_depth;
+		*layer_name_out = entry->create_key.child_name;
+		*layer_name_len_out = entry->create_key.child_name_len;
+		if (key_guid_out)
+			*key_guid_out = key_guid;
+		if (path_out)
+			*path_out = path;
+		if (depth_out)
+			*depth_out = depth;
+		return 0;
 	case PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY:
 		key_guid = entry->set_security.key_guid;
 		path = entry->set_security.path;
@@ -1820,8 +1869,25 @@ static long pkm_lcs_transaction_log_refresh_layer_metadata(
 		if (seen)
 			continue;
 
-		ret = pkm_lcs_key_path_refresh_layer_metadata(
-			source_id, key_guid, (const char * const *)path, depth);
+		if (entry->kind == PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY) {
+			const char *created_path[
+				ARRAY_SIZE(pkm_lcs_transaction_layer_metadata_prefix) +
+				1U];
+			u32 i;
+
+			if (depth !=
+			    ARRAY_SIZE(pkm_lcs_transaction_layer_metadata_prefix))
+				return -EIO;
+			for (i = 0; i < depth; i++)
+				created_path[i] = path[i];
+			created_path[depth] = layer_name;
+			ret = pkm_lcs_key_path_refresh_layer_metadata(
+				source_id, key_guid, created_path, depth + 1U);
+		} else {
+			ret = pkm_lcs_key_path_refresh_layer_metadata(
+				source_id, key_guid,
+				(const char * const *)path, depth);
+		}
 		if (ret)
 			return ret;
 	}

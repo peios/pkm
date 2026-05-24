@@ -26244,6 +26244,128 @@ static void pkm_lcs_kunit_transaction_commit_refreshes_set_security_layer(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_transaction_commit_refreshes_created_layer(
+	struct kunit *test)
+{
+	static const char child_name[] = "Policy";
+	static const char * const metadata_root_path[] = {
+		"Machine", "System", "Registry", "Layers"
+	};
+	static const u8 metadata_root_ancestors[4][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xfb, 0x10 },
+		{ 0xfb, 0x11 },
+		{ 0xfb, 0x12 },
+	};
+	static const u8 policy_guid[PKM_LCS_GUID_BYTES] = {
+		0xfb, 0x13
+	};
+	struct pkm_lcs_transaction_mutation_handle handle = { };
+	struct pkm_lcs_transaction_binding_plan binding = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	struct pkm_lcs_transaction_mutation_log_snapshot log = { };
+	struct pkm_lcs_rsi_layer_view layers[3] = { };
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script refresh = {
+		.expected_guid = policy_guid,
+		.name = child_name,
+		.sd = pkm_lcs_kunit_owner_only_sd,
+		.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+		.precedence_present = false,
+		.enabled_present = false,
+	};
+	struct pkm_lcs_kunit_transaction_source_script script = {
+		.expected_op_code = RSI_COMMIT_TRANSACTION,
+		.status = RSI_OK,
+		.expect_layer_refresh = true,
+		.layer_refresh_after = &refresh,
+	};
+	struct pkm_lcs_transaction_key_create_log_input input = {
+		.parent_guid = metadata_root_ancestors[3],
+		.target_guid = policy_guid,
+		.child_name = child_name,
+		.child_name_len = sizeof(child_name) - 1U,
+		.layer = "base",
+		.layer_len = 4,
+		.parent_path = metadata_root_path,
+		.parent_ancestor_guids = metadata_root_ancestors,
+		.parent_depth = ARRAY_SIZE(metadata_root_ancestors),
+		.sequence = 71,
+	};
+	char names[64] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, snapshot.transaction_id, 1,
+				metadata_root_ancestors[0]),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_begin_key_create_mutation(
+				(int)fd, 1, metadata_root_ancestors[0],
+				&input, &handle, &binding),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_commit_mutation(&handle),
+			0L);
+
+	script.file = &file;
+	script.expected_header_txn_id = snapshot.transaction_id;
+	script.expected_payload_txn_id = snapshot.transaction_id;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_transaction_source_thread, &script,
+		"pkm-lcs-kunit-commit-create-layer-refresh");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_transaction_fd_commit((int)fd);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, refresh.result, 0);
+	KUNIT_EXPECT_EQ(test, refresh.reads, 3U);
+	KUNIT_EXPECT_EQ(test, refresh.writes, 3U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_log_snapshot((int)fd, &log),
+			0L);
+	KUNIT_EXPECT_EQ(test, log.entry_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 2U);
+	KUNIT_EXPECT_STREQ(test, layers[1].name, child_name);
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 0U);
+	KUNIT_EXPECT_EQ(test, layers[1].enabled, 1U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_transaction_commit_dispatches_create_watch(
 	struct kunit *test)
 {
@@ -33855,6 +33977,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_transaction_commit_refreshes_layer_metadata_once),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_refreshes_set_security_layer),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_commit_refreshes_created_layer),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_dispatches_create_watch),
 	KUNIT_CASE(
