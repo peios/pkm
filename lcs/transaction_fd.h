@@ -14,6 +14,8 @@
 #define PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY 2U
 #define PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE 3U
 #define PKM_LCS_TRANSACTION_LOG_KIND_DELETE_VALUE 4U
+#define PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY 5U
+#define PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY 6U
 #define PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT 4096U
 
 struct reg_txn_status_args;
@@ -89,6 +91,29 @@ struct pkm_lcs_transaction_delete_value_log_input {
 	u32 depth;
 };
 
+struct pkm_lcs_transaction_delete_key_log_input {
+	const u8 *parent_guid;
+	const char *child_name;
+	size_t child_name_len;
+	const char *layer;
+	size_t layer_len;
+	const char * const *parent_path;
+	const u8 (*parent_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u32 parent_depth;
+};
+
+struct pkm_lcs_transaction_hide_key_log_input {
+	const u8 *parent_guid;
+	const char *child_name;
+	size_t child_name_len;
+	const char *layer;
+	size_t layer_len;
+	const char * const *parent_path;
+	const u8 (*parent_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u32 parent_depth;
+	u64 sequence;
+};
+
 struct pkm_lcs_transaction_mutation_handle {
 	struct fd held;
 	struct pkm_lcs_transaction_fd *txn;
@@ -134,6 +159,18 @@ long pkm_lcs_transaction_fd_begin_delete_value_mutation(
 	int fd, u32 source_id,
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
 	const struct pkm_lcs_transaction_delete_value_log_input *input,
+	struct pkm_lcs_transaction_mutation_handle *handle,
+	struct pkm_lcs_transaction_binding_plan *binding);
+long pkm_lcs_transaction_fd_begin_delete_key_mutation(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const struct pkm_lcs_transaction_delete_key_log_input *input,
+	struct pkm_lcs_transaction_mutation_handle *handle,
+	struct pkm_lcs_transaction_binding_plan *binding);
+long pkm_lcs_transaction_fd_begin_hide_key_mutation(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const struct pkm_lcs_transaction_hide_key_log_input *input,
 	struct pkm_lcs_transaction_mutation_handle *handle,
 	struct pkm_lcs_transaction_binding_plan *binding);
 long pkm_lcs_transaction_fd_set_delete_value_event(

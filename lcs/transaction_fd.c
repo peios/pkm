@@ -100,6 +100,29 @@ struct pkm_lcs_transaction_delete_value_log {
 	u32 depth;
 };
 
+struct pkm_lcs_transaction_delete_key_log {
+	u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	char *child_name;
+	char *layer;
+	char **parent_path;
+	u8 (*parent_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u32 child_name_len;
+	u32 layer_len;
+	u32 parent_depth;
+};
+
+struct pkm_lcs_transaction_hide_key_log {
+	u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u64 sequence;
+	char *child_name;
+	char *layer;
+	char **parent_path;
+	u8 (*parent_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	u32 child_name_len;
+	u32 layer_len;
+	u32 parent_depth;
+};
+
 struct pkm_lcs_transaction_log_entry {
 	struct list_head link;
 	u64 operation_index;
@@ -109,6 +132,8 @@ struct pkm_lcs_transaction_log_entry {
 		struct pkm_lcs_transaction_set_security_log set_security;
 		struct pkm_lcs_transaction_set_value_log set_value;
 		struct pkm_lcs_transaction_delete_value_log delete_value;
+		struct pkm_lcs_transaction_delete_key_log delete_key;
+		struct pkm_lcs_transaction_hide_key_log hide_key;
 	};
 };
 
@@ -313,6 +338,44 @@ static void pkm_lcs_transaction_delete_value_log_destroy(
 	memset(entry, 0, sizeof(*entry));
 }
 
+static void pkm_lcs_transaction_delete_key_log_destroy(
+	struct pkm_lcs_transaction_delete_key_log *entry)
+{
+	u32 i;
+
+	if (!entry)
+		return;
+
+	kfree(entry->child_name);
+	kfree(entry->layer);
+	if (entry->parent_path) {
+		for (i = 0; i < entry->parent_depth; i++)
+			kfree(entry->parent_path[i]);
+		kfree(entry->parent_path);
+	}
+	kfree(entry->parent_ancestor_guids);
+	memset(entry, 0, sizeof(*entry));
+}
+
+static void pkm_lcs_transaction_hide_key_log_destroy(
+	struct pkm_lcs_transaction_hide_key_log *entry)
+{
+	u32 i;
+
+	if (!entry)
+		return;
+
+	kfree(entry->child_name);
+	kfree(entry->layer);
+	if (entry->parent_path) {
+		for (i = 0; i < entry->parent_depth; i++)
+			kfree(entry->parent_path[i]);
+		kfree(entry->parent_path);
+	}
+	kfree(entry->parent_ancestor_guids);
+	memset(entry, 0, sizeof(*entry));
+}
+
 static void pkm_lcs_transaction_log_entry_destroy(
 	struct pkm_lcs_transaction_log_entry *entry)
 {
@@ -334,6 +397,13 @@ static void pkm_lcs_transaction_log_entry_destroy(
 	case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_VALUE:
 		pkm_lcs_transaction_delete_value_log_destroy(
 			&entry->delete_value);
+		break;
+	case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
+		pkm_lcs_transaction_delete_key_log_destroy(
+			&entry->delete_key);
+		break;
+	case PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY:
+		pkm_lcs_transaction_hide_key_log_destroy(&entry->hide_key);
 		break;
 	default:
 		break;
@@ -724,6 +794,172 @@ out_free:
 	return ret;
 }
 
+static long pkm_lcs_transaction_delete_key_log_alloc(
+	const struct pkm_lcs_transaction_delete_key_log_input *input,
+	struct pkm_lcs_transaction_log_entry **out)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+	size_t guid_bytes;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+	*out = NULL;
+	if (!input || !input->parent_guid || !input->child_name ||
+	    !input->layer || !input->parent_path ||
+	    !input->parent_ancestor_guids || !input->parent_depth ||
+	    !pkm_lcs_transaction_name_len_valid(input->child_name_len) ||
+	    !pkm_lcs_transaction_name_len_valid(input->layer_len))
+		return -EINVAL;
+	if (input->parent_depth >
+	    PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT)
+		return -EINVAL;
+
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&entry->link);
+	entry->kind = PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY;
+	memcpy(entry->delete_key.parent_guid, input->parent_guid,
+	       sizeof(entry->delete_key.parent_guid));
+	entry->delete_key.child_name_len = (u32)input->child_name_len;
+	entry->delete_key.layer_len = (u32)input->layer_len;
+	entry->delete_key.parent_depth = input->parent_depth;
+
+	entry->delete_key.child_name =
+		kmemdup_nul(input->child_name, input->child_name_len,
+			    GFP_KERNEL);
+	if (!entry->delete_key.child_name) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+	entry->delete_key.layer =
+		kmemdup_nul(input->layer, input->layer_len, GFP_KERNEL);
+	if (!entry->delete_key.layer) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+
+	ret = pkm_lcs_transaction_dup_path_components(
+		input->parent_path, input->parent_depth,
+		&entry->delete_key.parent_path);
+	if (ret)
+		goto out_free;
+
+	if (check_mul_overflow(
+		    (size_t)input->parent_depth,
+		    sizeof(*entry->delete_key.parent_ancestor_guids),
+		    &guid_bytes)) {
+		ret = -EINVAL;
+		goto out_free;
+	}
+	entry->delete_key.parent_ancestor_guids =
+		kmemdup(input->parent_ancestor_guids, guid_bytes, GFP_KERNEL);
+	if (!entry->delete_key.parent_ancestor_guids) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+
+	if (memcmp(entry->delete_key.parent_ancestor_guids[
+			   input->parent_depth - 1],
+		   entry->delete_key.parent_guid,
+		   sizeof(entry->delete_key.parent_guid))) {
+		ret = -EINVAL;
+		goto out_free;
+	}
+
+	*out = entry;
+	return 0;
+
+out_free:
+	pkm_lcs_transaction_log_entry_destroy(entry);
+	return ret;
+}
+
+static long pkm_lcs_transaction_hide_key_log_alloc(
+	const struct pkm_lcs_transaction_hide_key_log_input *input,
+	struct pkm_lcs_transaction_log_entry **out)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+	size_t guid_bytes;
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+	*out = NULL;
+	if (!input || !input->parent_guid || !input->child_name ||
+	    !input->layer || !input->parent_path ||
+	    !input->parent_ancestor_guids || !input->parent_depth ||
+	    !input->sequence ||
+	    !pkm_lcs_transaction_name_len_valid(input->child_name_len) ||
+	    !pkm_lcs_transaction_name_len_valid(input->layer_len))
+		return -EINVAL;
+	if (input->parent_depth >
+	    PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT)
+		return -EINVAL;
+
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&entry->link);
+	entry->kind = PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY;
+	memcpy(entry->hide_key.parent_guid, input->parent_guid,
+	       sizeof(entry->hide_key.parent_guid));
+	entry->hide_key.sequence = input->sequence;
+	entry->hide_key.child_name_len = (u32)input->child_name_len;
+	entry->hide_key.layer_len = (u32)input->layer_len;
+	entry->hide_key.parent_depth = input->parent_depth;
+
+	entry->hide_key.child_name =
+		kmemdup_nul(input->child_name, input->child_name_len,
+			    GFP_KERNEL);
+	if (!entry->hide_key.child_name) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+	entry->hide_key.layer =
+		kmemdup_nul(input->layer, input->layer_len, GFP_KERNEL);
+	if (!entry->hide_key.layer) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+
+	ret = pkm_lcs_transaction_dup_path_components(
+		input->parent_path, input->parent_depth,
+		&entry->hide_key.parent_path);
+	if (ret)
+		goto out_free;
+
+	if (check_mul_overflow(
+		    (size_t)input->parent_depth,
+		    sizeof(*entry->hide_key.parent_ancestor_guids),
+		    &guid_bytes)) {
+		ret = -EINVAL;
+		goto out_free;
+	}
+	entry->hide_key.parent_ancestor_guids =
+		kmemdup(input->parent_ancestor_guids, guid_bytes, GFP_KERNEL);
+	if (!entry->hide_key.parent_ancestor_guids) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+
+	if (memcmp(entry->hide_key.parent_ancestor_guids[
+			   input->parent_depth - 1],
+		   entry->hide_key.parent_guid,
+		   sizeof(entry->hide_key.parent_guid))) {
+		ret = -EINVAL;
+		goto out_free;
+	}
+
+	*out = entry;
+	return 0;
+
+out_free:
+	pkm_lcs_transaction_log_entry_destroy(entry);
+	return ret;
+}
+
 static void pkm_lcs_transaction_fd_timeout(struct timer_list *timer)
 {
 	struct pkm_lcs_transaction_fd *txn =
@@ -880,6 +1116,8 @@ static long pkm_lcs_transaction_log_requires_generation(
 		case PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY:
 		case PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE:
 		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_VALUE:
+		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
+		case PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY:
 			required = true;
 			break;
 		default:
@@ -1021,6 +1259,15 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 			contexts[index].name_len =
 				entry->delete_value.value_name_len;
 			index++;
+			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
+		case PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY:
+			/*
+			 * Exact key-path watch emission needs commit-replay
+			 * snapshots to distinguish masking, revealing, and
+			 * orphaning. The log kind is retained for generation
+			 * and later replay but must not emit speculative events.
+			 */
 			break;
 		default:
 			ret = -EIO;
@@ -1552,6 +1799,22 @@ long pkm_lcs_transaction_fd_log_snapshot(
 				last->delete_value.value_name,
 				sizeof(out->last_child_name));
 			strscpy(out->last_layer, last->delete_value.layer,
+				sizeof(out->last_layer));
+			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
+			out->last_parent_depth = last->delete_key.parent_depth;
+			strscpy(out->last_child_name,
+				last->delete_key.child_name,
+				sizeof(out->last_child_name));
+			strscpy(out->last_layer, last->delete_key.layer,
+				sizeof(out->last_layer));
+			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY:
+			out->last_sequence = last->hide_key.sequence;
+			out->last_parent_depth = last->hide_key.parent_depth;
+			strscpy(out->last_child_name, last->hide_key.child_name,
+				sizeof(out->last_child_name));
+			strscpy(out->last_layer, last->hide_key.layer,
 				sizeof(out->last_layer));
 			break;
 		default:
@@ -2179,6 +2442,172 @@ long pkm_lcs_transaction_fd_begin_delete_value_mutation(
 		goto out_unlock;
 
 	ret = pkm_lcs_transaction_delete_value_log_alloc(input, &entry);
+	if (ret)
+		goto out_unlock;
+
+	if (plan.action == PKM_LCS_TRANSACTION_BIND_NEW) {
+		ret = pkm_lcs_source_bound_transaction_acquire(source_id,
+							       &count);
+		if (ret)
+			goto out_free_entry;
+
+		ret = pkm_lcs_source_begin_transaction_round_trip(
+			source_id, plan.transaction_id, RSI_TXN_READ_WRITE,
+			NULL, NULL);
+		if (ret)
+			goto out_release_counter;
+
+		ret = pkm_lcs_transaction_fd_complete_first_bind_from_state(
+			txn, plan.transaction_id, source_id, root_guid);
+		if (ret) {
+			(void)pkm_lcs_source_dispatch_abort_transaction_request(
+				source_id, plan.transaction_id, NULL);
+			goto out_release_counter;
+		}
+
+		plan.state = REG_TXN_ACTIVE_BOUND;
+		plan.bound_source_id = source_id;
+		memcpy(plan.bound_root_guid, root_guid,
+		       sizeof(plan.bound_root_guid));
+	}
+
+	handle->held = held;
+	handle->txn = txn;
+	handle->entry = entry;
+	handle->active = true;
+	*binding = plan;
+	return 0;
+
+out_release_counter:
+	(void)pkm_lcs_source_bound_transaction_release(source_id, &count);
+out_free_entry:
+	pkm_lcs_transaction_log_entry_destroy(entry);
+out_unlock:
+	mutex_unlock(&txn->bind_lock);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_transaction_fd_begin_delete_key_mutation(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const struct pkm_lcs_transaction_delete_key_log_input *input,
+	struct pkm_lcs_transaction_mutation_handle *handle,
+	struct pkm_lcs_transaction_binding_plan *binding)
+{
+	struct pkm_lcs_transaction_binding_plan plan = { };
+	struct pkm_lcs_transaction_log_entry *entry = NULL;
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	u32 count = 0;
+	long ret;
+
+	if (!handle || !binding)
+		return -EINVAL;
+	memset(handle, 0, sizeof(*handle));
+	memset(binding, 0, sizeof(*binding));
+	if (!source_id || !pkm_lcs_transaction_root_guid_valid(root_guid))
+		return -EINVAL;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	mutex_lock(&txn->bind_lock);
+
+	ret = pkm_lcs_transaction_fd_prepare_mutation_binding_from_state(
+		txn, source_id, root_guid, &plan);
+	if (ret)
+		goto out_unlock;
+
+	ret = pkm_lcs_transaction_log_capacity_check(txn);
+	if (ret)
+		goto out_unlock;
+
+	ret = pkm_lcs_transaction_delete_key_log_alloc(input, &entry);
+	if (ret)
+		goto out_unlock;
+
+	if (plan.action == PKM_LCS_TRANSACTION_BIND_NEW) {
+		ret = pkm_lcs_source_bound_transaction_acquire(source_id,
+							       &count);
+		if (ret)
+			goto out_free_entry;
+
+		ret = pkm_lcs_source_begin_transaction_round_trip(
+			source_id, plan.transaction_id, RSI_TXN_READ_WRITE,
+			NULL, NULL);
+		if (ret)
+			goto out_release_counter;
+
+		ret = pkm_lcs_transaction_fd_complete_first_bind_from_state(
+			txn, plan.transaction_id, source_id, root_guid);
+		if (ret) {
+			(void)pkm_lcs_source_dispatch_abort_transaction_request(
+				source_id, plan.transaction_id, NULL);
+			goto out_release_counter;
+		}
+
+		plan.state = REG_TXN_ACTIVE_BOUND;
+		plan.bound_source_id = source_id;
+		memcpy(plan.bound_root_guid, root_guid,
+		       sizeof(plan.bound_root_guid));
+	}
+
+	handle->held = held;
+	handle->txn = txn;
+	handle->entry = entry;
+	handle->active = true;
+	*binding = plan;
+	return 0;
+
+out_release_counter:
+	(void)pkm_lcs_source_bound_transaction_release(source_id, &count);
+out_free_entry:
+	pkm_lcs_transaction_log_entry_destroy(entry);
+out_unlock:
+	mutex_unlock(&txn->bind_lock);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_transaction_fd_begin_hide_key_mutation(
+	int fd, u32 source_id,
+	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const struct pkm_lcs_transaction_hide_key_log_input *input,
+	struct pkm_lcs_transaction_mutation_handle *handle,
+	struct pkm_lcs_transaction_binding_plan *binding)
+{
+	struct pkm_lcs_transaction_binding_plan plan = { };
+	struct pkm_lcs_transaction_log_entry *entry = NULL;
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	u32 count = 0;
+	long ret;
+
+	if (!handle || !binding)
+		return -EINVAL;
+	memset(handle, 0, sizeof(*handle));
+	memset(binding, 0, sizeof(*binding));
+	if (!source_id || !pkm_lcs_transaction_root_guid_valid(root_guid))
+		return -EINVAL;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	mutex_lock(&txn->bind_lock);
+
+	ret = pkm_lcs_transaction_fd_prepare_mutation_binding_from_state(
+		txn, source_id, root_guid, &plan);
+	if (ret)
+		goto out_unlock;
+
+	ret = pkm_lcs_transaction_log_capacity_check(txn);
+	if (ret)
+		goto out_unlock;
+
+	ret = pkm_lcs_transaction_hide_key_log_alloc(input, &entry);
 	if (ret)
 		goto out_unlock;
 
