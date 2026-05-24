@@ -24235,6 +24235,40 @@ static void pkm_lcs_kunit_append_one_create_log(struct kunit *test, int fd,
 				fd, 1, root_guid, &input, &handle, &binding),
 			0L);
 	KUNIT_ASSERT_EQ(test,
+				pkm_lcs_transaction_fd_commit_mutation(&handle), 0L);
+}
+
+static void pkm_lcs_kunit_append_set_value_log_for_layer(
+	struct kunit *test, int fd, const u8 root_guid[16],
+	const char *layer, u64 sequence)
+{
+	static const u8 key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0xb8
+	};
+	static const char * const path[] = { "Machine", "LayerAbort" };
+	static const u8 ancestors[2][PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		{ 1 },
+		{ 0xb8 },
+	};
+	struct pkm_lcs_transaction_mutation_handle handle = { };
+	struct pkm_lcs_transaction_set_value_log_input input = {
+		.key_guid = key_guid,
+		.value_name = "Value",
+		.value_name_len = 5,
+		.layer = layer,
+		.layer_len = strlen(layer),
+		.path = path,
+		.ancestor_guids = ancestors,
+		.depth = 2,
+		.sequence = sequence,
+	};
+	struct pkm_lcs_transaction_binding_plan binding = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_begin_set_value_mutation(
+				fd, 1, root_guid, &input, &handle, &binding),
+			0L);
+	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_transaction_fd_commit_mutation(&handle), 0L);
 }
 
@@ -26791,6 +26825,209 @@ static void pkm_lcs_kunit_transaction_log_key_path_rejects_bad_shape(
 	KUNIT_EXPECT_EQ(test, log.next_operation_index, 1ULL);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_transaction_log_rejects_malformed_layer_name(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		1
+	};
+	static const u8 key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0xba
+	};
+	static const char * const path[] = { "Machine", "BadLayer" };
+	static const u8 ancestors[2][PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		{ 1 },
+		{ 0xba },
+	};
+	struct pkm_lcs_transaction_mutation_log_snapshot log = { };
+	struct pkm_lcs_transaction_mutation_handle handle = { };
+	struct pkm_lcs_transaction_set_value_log_input input = {
+		.key_guid = key_guid,
+		.value_name = "Value",
+		.value_name_len = 5,
+		.layer = "bad/layer",
+		.layer_len = 9,
+		.path = path,
+		.ancestor_guids = ancestors,
+		.depth = 2,
+		.sequence = 41,
+	};
+	struct pkm_lcs_transaction_binding_plan binding = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, snapshot.transaction_id, 1, root_guid),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_begin_set_value_mutation(
+				(int)fd, 1, root_guid, &input, &handle,
+				&binding),
+			(long)-EINVAL);
+	KUNIT_EXPECT_FALSE(test, handle.active);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_log_snapshot((int)fd, &log),
+			0L);
+	KUNIT_EXPECT_EQ(test, log.entry_count, 0U);
+	KUNIT_EXPECT_EQ(test, log.next_operation_index, 1ULL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_layer_delete_aborts_matching_bound_transactions(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		1
+	};
+	struct pkm_lcs_transaction_layer_abort_result result = { };
+	struct pkm_lcs_transaction_fd_snapshot policy_snapshot = { };
+	struct pkm_lcs_transaction_fd_snapshot other_snapshot = { };
+	struct pkm_lcs_transaction_fd_snapshot unbound_snapshot = { };
+	struct pkm_lcs_transaction_read_plan read_plan = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct reg_txn_status_args status = { };
+	u8 abort_frame[RSI_REQUEST_HEADER_SIZE + sizeof(u64)];
+	struct file file = { };
+	const void *token;
+	ssize_t read_len;
+	u32 count = 0;
+	long policy_fd;
+	long other_fd;
+	long unbound_fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	policy_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, policy_fd >= 0);
+	other_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, other_fd >= 0);
+	unbound_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, unbound_fd >= 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)policy_fd,
+							&policy_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)other_fd,
+							&other_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)policy_fd, policy_snapshot.transaction_id, 1,
+				root_guid),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)other_fd, other_snapshot.transaction_id, 1,
+				root_guid),
+			0L);
+	pkm_lcs_kunit_append_set_value_log_for_layer(
+		test, (int)policy_fd, root_guid, "Policy", 42);
+	pkm_lcs_kunit_append_set_value_log_for_layer(
+		test, (int)other_fd, root_guid, "Other", 43);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_abort_layer_writers(
+				"bad/layer", strlen("bad/layer"), &result),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_abort_layer_writers(
+				"base", strlen("base"), &result),
+			(long)-EINVAL);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)policy_fd,
+							&policy_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, policy_snapshot.state, REG_TXN_ACTIVE_BOUND);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_abort_layer_writers(
+				"policy", strlen("policy"), &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.inspected_transaction_count, 3U);
+	KUNIT_EXPECT_EQ(test, result.affected_bound_transaction_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.abort_dispatched_count, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)policy_fd,
+							&policy_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, policy_snapshot.state, REG_TXN_ABORTED);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_status((int)policy_fd, &status),
+			0L);
+	KUNIT_EXPECT_EQ(test, status.state, REG_TXN_ABORTED);
+	KUNIT_EXPECT_EQ(test, status.terminal_errno, EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_transaction_fd_commit((int)policy_fd),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_transaction_fd_prepare_read_context(
+				(int)policy_fd, 1, root_guid, &read_plan),
+			(long)-EINVAL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)other_fd,
+							&other_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, other_snapshot.state, REG_TXN_ACTIVE_BOUND);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)unbound_fd,
+							&unbound_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, unbound_snapshot.state, REG_TXN_ACTIVE_UNBOUND);
+
+	read_len = pkm_lcs_kunit_source_device_read_file(&file, abort_frame,
+							 sizeof(abort_frame),
+							 true);
+	KUNIT_ASSERT_EQ(test, read_len, (ssize_t)sizeof(abort_frame));
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(abort_frame +
+					   RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_ABORT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(abort_frame +
+					   RSI_REQUEST_TXN_ID_OFFSET),
+			policy_snapshot.transaction_id);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(abort_frame + RSI_REQUEST_HEADER_SIZE),
+			policy_snapshot.transaction_id);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 2U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_release(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)unbound_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)other_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)policy_fd), 0);
+	flush_delayed_fput();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
 }
 
 static void pkm_lcs_kunit_source_dispatch_create_rejects_bad_inputs(
@@ -31346,6 +31583,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_transaction_log_key_path_first_bind),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_log_key_path_rejects_bad_shape),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_log_rejects_malformed_layer_name),
+	KUNIT_CASE(
+		pkm_lcs_kunit_layer_delete_aborts_matching_bound_transactions),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_success),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_stops_bad_scalars),
 	KUNIT_CASE(

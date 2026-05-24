@@ -148,10 +148,19 @@ struct pkm_lcs_transaction_mutation_log_snapshot {
 	char last_layer[64];
 };
 
+struct pkm_lcs_transaction_layer_abort_result {
+	u32 inspected_transaction_count;
+	u32 affected_bound_transaction_count;
+	u32 abort_dispatched_count;
+};
+
 long pkm_lcs_transaction_fd_publish(u32 timeout_ms);
 long pkm_lcs_reg_begin_transaction(void);
 long pkm_lcs_transaction_fd_commit(int fd);
 long pkm_lcs_transaction_fd_status(int fd, struct reg_txn_status_args *out);
+long pkm_lcs_transaction_fd_abort_layer_writers(
+	const char *layer_name, u32 layer_name_len,
+	struct pkm_lcs_transaction_layer_abort_result *result);
 long pkm_lcs_transaction_fd_begin_key_create_mutation(
 	int fd, u32 source_id,
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],

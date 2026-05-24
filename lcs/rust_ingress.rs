@@ -809,6 +809,44 @@ pub unsafe extern "C" fn lcs_rust_select_layer_metadata_sd(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lcs_rust_layer_name_casefold_eq(
+    left: *const u8,
+    left_len: u32,
+    right: *const u8,
+    right_len: u32,
+    equal_out: *mut u8,
+) -> c_int {
+    let Some(equal_out) = (unsafe { equal_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *equal_out = 0;
+
+    if left.is_null() || right.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let left_bytes = unsafe { slice::from_raw_parts(left, left_len as usize) };
+    let right_bytes = unsafe { slice::from_raw_parts(right, right_len as usize) };
+    let left_name = match validate_layer_name_bytes(left_bytes, &LcsLimits::DEFAULT) {
+        Ok(name) => name,
+        Err(LcsError::NameTooLong { .. }) => {
+            return LinuxErrno::Enametoolong.negated_return() as c_int
+        }
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    let right_name = match validate_layer_name_bytes(right_bytes, &LcsLimits::DEFAULT) {
+        Ok(name) => name,
+        Err(LcsError::NameTooLong { .. }) => {
+            return LinuxErrno::Enametoolong.negated_return() as c_int
+        }
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+
+    *equal_out = u8::from(casefold_eq(left_name, right_name));
+    0
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lcs_rust_key_open_access_plan(
     subject_token: *const c_void,
     sd_ptr: *const u8,

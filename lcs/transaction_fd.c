@@ -37,6 +37,10 @@
 #include "transaction_fd.h"
 #include "source_device.h"
 
+extern int lcs_rust_layer_name_casefold_eq(const u8 *left, u32 left_len,
+					   const u8 *right, u32 right_len,
+					   u8 *equal_out);
+
 struct pkm_lcs_transaction_fd {
 	u64 transaction_id;
 	u64 next_operation_index;
@@ -169,6 +173,7 @@ static DEFINE_MUTEX(pkm_lcs_transaction_id_lock);
 static u64 pkm_lcs_next_transaction_id = 1;
 static DEFINE_MUTEX(pkm_lcs_transaction_registry_lock);
 static LIST_HEAD(pkm_lcs_transaction_registry);
+static const char pkm_lcs_transaction_base_layer_name[] = "base";
 
 static const struct file_operations pkm_lcs_transaction_fd_fops;
 static long pkm_lcs_transaction_fd_complete_first_bind_from_state(
@@ -290,6 +295,46 @@ static bool pkm_lcs_transaction_name_len_valid(size_t len)
 static bool pkm_lcs_transaction_value_name_len_valid(size_t len)
 {
 	return len <= U16_MAX;
+}
+
+static long pkm_lcs_transaction_layer_name_casefold_eq(
+	const char *left, u32 left_len, const char *right, u32 right_len,
+	bool *equal)
+{
+	u8 raw_equal = 0;
+	int ret;
+
+	if (!equal)
+		return -EINVAL;
+	*equal = false;
+	if (!left || !right)
+		return -EINVAL;
+
+	ret = lcs_rust_layer_name_casefold_eq((const u8 *)left, left_len,
+					      (const u8 *)right, right_len,
+					      &raw_equal);
+	if (ret)
+		return ret;
+
+	*equal = raw_equal != 0;
+	return 0;
+}
+
+static long pkm_lcs_transaction_layer_name_validate(
+	const char *layer_name, u32 layer_name_len)
+{
+	bool equal;
+
+	return pkm_lcs_transaction_layer_name_casefold_eq(
+		layer_name, layer_name_len, layer_name, layer_name_len, &equal);
+}
+
+static long pkm_lcs_transaction_layer_name_is_base(
+	const char *layer_name, u32 layer_name_len, bool *is_base)
+{
+	return pkm_lcs_transaction_layer_name_casefold_eq(
+		layer_name, layer_name_len, pkm_lcs_transaction_base_layer_name,
+		sizeof(pkm_lcs_transaction_base_layer_name) - 1, is_base);
 }
 
 static void pkm_lcs_transaction_key_create_log_destroy(
@@ -550,6 +595,10 @@ static long pkm_lcs_transaction_key_create_log_alloc(
 		return -EINVAL;
 	if (input->parent_depth > PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT)
 		return -EINVAL;
+	ret = pkm_lcs_transaction_layer_name_validate(
+		input->layer, (u32)input->layer_len);
+	if (ret)
+		return ret;
 
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry)
@@ -692,6 +741,10 @@ static long pkm_lcs_transaction_set_value_log_alloc(
 		return -EINVAL;
 	if (input->depth > PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT)
 		return -EINVAL;
+	ret = pkm_lcs_transaction_layer_name_validate(
+		input->layer, (u32)input->layer_len);
+	if (ret)
+		return ret;
 
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry)
@@ -817,6 +870,10 @@ static long pkm_lcs_transaction_delete_value_log_alloc(
 		return -EINVAL;
 	if (input->depth > PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT)
 		return -EINVAL;
+	ret = pkm_lcs_transaction_layer_name_validate(
+		input->layer, (u32)input->layer_len);
+	if (ret)
+		return ret;
 
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry)
@@ -978,6 +1035,10 @@ static long pkm_lcs_transaction_delete_key_log_alloc(
 	if (input->parent_depth >
 	    PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT)
 		return -EINVAL;
+	ret = pkm_lcs_transaction_layer_name_validate(
+		input->layer, (u32)input->layer_len);
+	if (ret)
+		return ret;
 
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry)
@@ -1067,6 +1128,10 @@ static long pkm_lcs_transaction_hide_key_log_alloc(
 	if (input->parent_depth >
 	    PKM_LCS_TRANSACTION_MUTATION_LOG_CAPACITY_DEFAULT)
 		return -EINVAL;
+	ret = pkm_lcs_transaction_layer_name_validate(
+		input->layer, (u32)input->layer_len);
+	if (ret)
+		return ret;
 
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry)
@@ -2410,6 +2475,196 @@ long pkm_lcs_transaction_fd_commit(int fd)
 
 	ret = pkm_lcs_transaction_fd_commit_from_state(txn);
 	fdput(held);
+	return ret;
+}
+
+static long pkm_lcs_transaction_log_entry_layer_matches(
+	const struct pkm_lcs_transaction_log_entry *entry,
+	const char *target_layer, u32 target_layer_len, bool *matches)
+{
+	const char *entry_layer = NULL;
+	u32 entry_layer_len = 0;
+
+	if (!entry || !target_layer || !matches)
+		return -EINVAL;
+	*matches = false;
+
+	switch (entry->kind) {
+	case PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY:
+		entry_layer = entry->create_key.layer;
+		entry_layer_len = entry->create_key.layer_len;
+		break;
+	case PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY:
+		return 0;
+	case PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE:
+		entry_layer = entry->set_value.layer;
+		entry_layer_len = entry->set_value.layer_len;
+		break;
+	case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_VALUE:
+		entry_layer = entry->delete_value.layer;
+		entry_layer_len = entry->delete_value.layer_len;
+		break;
+	case PKM_LCS_TRANSACTION_LOG_KIND_BLANKET_TOMBSTONE:
+		entry_layer = entry->blanket_tombstone.layer;
+		entry_layer_len = entry->blanket_tombstone.layer_len;
+		break;
+	case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
+		entry_layer = entry->delete_key.layer;
+		entry_layer_len = entry->delete_key.layer_len;
+		break;
+	case PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY:
+		entry_layer = entry->hide_key.layer;
+		entry_layer_len = entry->hide_key.layer_len;
+		break;
+	default:
+		return -EIO;
+	}
+
+	return pkm_lcs_transaction_layer_name_casefold_eq(
+		entry_layer, entry_layer_len, target_layer, target_layer_len,
+		matches);
+}
+
+static long pkm_lcs_transaction_log_touches_layer(
+	const struct pkm_lcs_transaction_fd *txn, const char *layer_name,
+	u32 layer_name_len, bool *touches)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+	bool found = false;
+	long ret;
+
+	if (!txn || !layer_name || !touches)
+		return -EINVAL;
+	*touches = false;
+
+	list_for_each_entry(entry, &txn->mutation_log, link) {
+		bool matches = false;
+
+		ret = pkm_lcs_transaction_log_entry_layer_matches(
+			entry, layer_name, layer_name_len, &matches);
+		if (ret)
+			return ret;
+		if (matches)
+			found = true;
+	}
+
+	*touches = found;
+	return 0;
+}
+
+long pkm_lcs_transaction_fd_abort_layer_writers(
+	const char *layer_name, u32 layer_name_len,
+	struct pkm_lcs_transaction_layer_abort_result *result)
+{
+	struct pkm_lcs_transaction_layer_abort_result local = { };
+	struct pkm_lcs_transaction_fd *txn;
+	bool is_base = false;
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+	if (!layer_name || !layer_name_len)
+		return -EINVAL;
+
+	ret = pkm_lcs_transaction_layer_name_is_base(layer_name, layer_name_len,
+						    &is_base);
+	if (ret)
+		return ret;
+	if (is_base)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_transaction_registry_lock);
+	list_for_each_entry(txn, &pkm_lcs_transaction_registry, registry_link) {
+		bool release_counter = false;
+		bool dispatch_abort = false;
+		bool clear_log = false;
+		bool stop_timer = false;
+		bool wake = false;
+		u64 transaction_id = 0;
+		u32 source_id = 0;
+		u32 count = 0;
+
+		if (local.inspected_transaction_count == U32_MAX) {
+			ret = -EOVERFLOW;
+			break;
+		}
+		local.inspected_transaction_count++;
+
+		mutex_lock(&txn->bind_lock);
+		spin_lock(&txn->lock);
+		if (txn->state == REG_TXN_ACTIVE_BOUND) {
+			transaction_id = txn->transaction_id;
+			source_id = txn->bound_source_id;
+		}
+		spin_unlock(&txn->lock);
+
+		if (transaction_id && source_id) {
+			bool touches = false;
+
+			ret = pkm_lcs_transaction_log_touches_layer(
+				txn, layer_name, layer_name_len, &touches);
+			if (ret) {
+				mutex_unlock(&txn->bind_lock);
+				break;
+			}
+
+			if (touches) {
+				spin_lock(&txn->lock);
+				if (txn->state == REG_TXN_ACTIVE_BOUND &&
+				    txn->transaction_id == transaction_id &&
+				    txn->bound_source_id == source_id) {
+					txn->state = REG_TXN_ABORTED;
+					txn->commit_in_flight = false;
+					txn->timeout_abort_pending = false;
+					stop_timer = true;
+					clear_log = true;
+					wake = true;
+					release_counter = true;
+					dispatch_abort = true;
+				}
+				spin_unlock(&txn->lock);
+			}
+		}
+
+		if (stop_timer)
+			timer_delete_sync(&txn->timeout_timer);
+		if (clear_log)
+			pkm_lcs_transaction_log_clear(txn);
+		mutex_unlock(&txn->bind_lock);
+
+		if (dispatch_abort) {
+			long dispatch_ret;
+
+			if (local.affected_bound_transaction_count == U32_MAX) {
+				ret = -EOVERFLOW;
+				break;
+			}
+			local.affected_bound_transaction_count++;
+			dispatch_ret =
+				pkm_lcs_source_dispatch_abort_transaction_request(
+					source_id, transaction_id, NULL);
+			if (!dispatch_ret)
+				local.abort_dispatched_count++;
+			else if (!ret)
+				ret = dispatch_ret;
+		}
+		if (release_counter) {
+			long release_ret;
+
+			release_ret = pkm_lcs_source_bound_transaction_release(
+				source_id, &count);
+			if (release_ret && !ret)
+				ret = release_ret;
+		}
+		if (wake)
+			wake_up_all(&txn->wait);
+		if (ret)
+			break;
+	}
+	mutex_unlock(&pkm_lcs_transaction_registry_lock);
+
+	if (result)
+		*result = local;
 	return ret;
 }
 
