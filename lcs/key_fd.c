@@ -96,6 +96,7 @@ struct pkm_lcs_key_fd {
 	u32 source_id;
 	u8 key_guid[PKM_LCS_GUID_BYTES];
 	u32 granted_access;
+	u64 source_restart_generation_seen;
 	u32 path_component_count;
 	char **resolved_path;
 	u8 (*ancestor_guids)[PKM_LCS_GUID_BYTES];
@@ -114,6 +115,7 @@ struct pkm_lcs_key_fd {
 	bool orphaned;
 	bool watch_armed;
 	bool key_ref_linked;
+	bool source_restart_generation_tracked;
 	bool published;
 };
 
@@ -847,6 +849,77 @@ out_nomem:
 	return ret ?: -ENOMEM;
 }
 
+static void pkm_lcs_key_fd_capture_source_restart_generation(
+	struct pkm_lcs_key_fd *key_fd)
+{
+	u64 generation;
+
+	if (!key_fd)
+		return;
+	if (pkm_lcs_source_restart_generation_snapshot(
+		    key_fd->source_id, &generation))
+		return;
+
+	key_fd->source_restart_generation_seen = generation;
+	key_fd->source_restart_generation_tracked = true;
+}
+
+static long pkm_lcs_key_fd_revalidate_after_source_restart(
+	struct pkm_lcs_key_fd *key_fd)
+{
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_rsi_read_key_result read_key = { };
+	u64 generation;
+	long ret;
+
+	if (!key_fd)
+		return -EINVAL;
+	if (!READ_ONCE(key_fd->source_restart_generation_tracked))
+		return 0;
+
+	ret = pkm_lcs_source_restart_generation_snapshot(key_fd->source_id,
+							 &generation);
+	if (ret)
+		return 0;
+	if (generation == READ_ONCE(key_fd->source_restart_generation_seen))
+		return 0;
+	if (READ_ONCE(key_fd->orphaned))
+		return -ENOENT;
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+		key_fd->source_id, 0, key_fd->key_guid,
+		PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame, &response, NULL);
+	if (ret == -ENOENT) {
+		u32 marked = 0;
+
+		pkm_lcs_source_response_frame_destroy(&frame);
+		(void)pkm_lcs_key_fd_mark_orphaned_no_watch(
+			key_fd->source_id, key_fd->key_guid, &marked, NULL);
+		return -ENOENT;
+	}
+	if (ret)
+		goto out_frame;
+
+	ret = pkm_lcs_rsi_materialize_read_key_response(
+		frame.data, frame.len, response.request_id, &read_key);
+	if (ret)
+		goto out_frame;
+	if (!read_key.sd_len || (size_t)read_key.sd_offset > frame.len ||
+	    (size_t)read_key.sd_len >
+		    frame.len - (size_t)read_key.sd_offset) {
+		ret = -EIO;
+		goto out_frame;
+	}
+
+	WRITE_ONCE(key_fd->source_restart_generation_seen, generation);
+
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+	return ret;
+}
+
 long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input)
 {
 	struct pkm_lcs_key_fd_string_view *views = NULL;
@@ -862,6 +935,7 @@ long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input)
 	kfree(views);
 	if (ret)
 		return ret;
+	pkm_lcs_key_fd_capture_source_restart_generation(key_fd);
 
 	fd = anon_inode_getfd("lcs-key", &pkm_lcs_key_fd_fops, key_fd,
 			      O_CLOEXEC);
@@ -882,6 +956,10 @@ static long pkm_lcs_key_fd_notify_from_args(
 
 	if (!key_fd || !args)
 		return -EINVAL;
+
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd);
+	if (ret)
+		return ret;
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	mutex_lock(&key_fd->watch_lock);
@@ -4460,6 +4538,29 @@ static long pkm_lcs_key_fd_flush(struct pkm_lcs_key_fd *key_fd)
 		NULL);
 }
 
+static bool pkm_lcs_key_fd_ioctl_revalidates_restart(unsigned int cmd)
+{
+	switch (cmd) {
+	case REG_IOC_SET_VALUE:
+	case REG_IOC_DELETE_VALUE:
+	case REG_IOC_BLANKET_TOMBSTONE:
+	case REG_IOC_DELETE_KEY:
+	case REG_IOC_HIDE_KEY:
+	case REG_IOC_QUERY_VALUE:
+	case REG_IOC_QUERY_VALUES_BATCH:
+	case REG_IOC_ENUM_VALUES:
+	case REG_IOC_ENUM_SUBKEYS:
+	case REG_IOC_QUERY_KEY_INFO:
+	case REG_IOC_GET_SECURITY:
+	case REG_IOC_SET_SECURITY:
+	case REG_IOC_FLUSH:
+	case REG_IOC_NOTIFY:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 				 unsigned long arg)
 {
@@ -4484,6 +4585,12 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	key_fd = file->private_data;
 	if (!key_fd)
 		return -EINVAL;
+
+	if (pkm_lcs_key_fd_ioctl_revalidates_restart(cmd)) {
+		ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd);
+		if (ret)
+			return ret;
+	}
 
 	switch (cmd) {
 	case REG_IOC_SET_VALUE:
@@ -5516,6 +5623,12 @@ long pkm_lcs_key_fd_relative_base(int fd,
 		return -ENOENT;
 	}
 
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd);
+	if (ret) {
+		fdput(held);
+		return ret;
+	}
+
 	out->source_id = key_fd->source_id;
 	out->parent_depth = key_fd->path_component_count;
 	out->orphaned = key_fd->orphaned;
@@ -5615,6 +5728,12 @@ long pkm_lcs_key_fd_parent_snapshot(int fd,
 	if (key_fd->orphaned) {
 		fdput(held);
 		return -ENOENT;
+	}
+
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd);
+	if (ret) {
+		fdput(held);
+		return ret;
 	}
 
 	ret = pkm_lcs_key_fd_copy_parent_snapshot(key_fd, out);

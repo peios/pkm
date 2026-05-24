@@ -109,6 +109,7 @@ struct pkm_lcs_source_slot {
 	struct pkm_lcs_source_registration_hive_copy *hives;
 	struct pkm_lcs_source_fd *active_fd;
 	u64 source_next_sequence;
+	u64 restart_generation;
 	u32 bound_transaction_count;
 };
 
@@ -1446,6 +1447,31 @@ out_unlock:
 	return ret;
 }
 
+long pkm_lcs_source_restart_generation_snapshot(u32 source_id,
+						u64 *generation_out)
+{
+	struct pkm_lcs_source_slot *slot;
+	long ret = 0;
+
+	if (generation_out)
+		*generation_out = 0;
+	if (!source_id || !generation_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || !slot->occupied) {
+		ret = -ENOENT;
+		goto out_unlock;
+	}
+
+	*generation_out = slot->restart_generation;
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
 static struct pkm_lcs_source_slot *pkm_lcs_source_slot_free_locked(void)
 {
 	u32 i;
@@ -2507,6 +2533,7 @@ static long pkm_lcs_source_registration_publish_locked(
 		slot->hives = registration->hives;
 		slot->active_fd = source_fd;
 		slot->source_next_sequence = plan.source_next_sequence;
+		slot->restart_generation = 0;
 		registration->hives = NULL;
 		registration->hive_count = 0;
 		break;
@@ -2514,10 +2541,13 @@ static long pkm_lcs_source_registration_publish_locked(
 		slot = pkm_lcs_source_slot_find_locked(plan.source_id);
 		if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_DOWN)
 			return -EINVAL;
+		if (slot->restart_generation == U64_MAX)
+			return -EOVERFLOW;
 
 		slot->status = PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE;
 		slot->active_fd = source_fd;
 		slot->source_next_sequence = plan.source_next_sequence;
+		slot->restart_generation++;
 		if (resumed_source_id)
 			*resumed_source_id = slot->source_id;
 		break;

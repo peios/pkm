@@ -1049,6 +1049,8 @@ long pkm_lcs_layer_table_metadata_key_guid_present(
 long pkm_lcs_source_active_ids_snapshot(u32 *source_ids,
 					u32 max_source_ids,
 					u32 *count_out);
+long pkm_lcs_source_restart_generation_snapshot(u32 source_id,
+						u64 *generation_out);
 void pkm_lcs_source_mark_down_by_id(u32 source_id);
 long pkm_lcs_source_create_key_round_trip_timeout(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],

@@ -165,6 +165,7 @@ struct pkm_lcs_kunit_read_key_source_script {
 	const u8 *sd;
 	size_t sd_len;
 	u64 expected_txn_id;
+	u32 status;
 	bool volatile_key;
 	bool symlink;
 	u32 reads;
@@ -1340,6 +1341,203 @@ static void pkm_lcs_kunit_source_registration_resume_dispatches_overflow(
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&second_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_registration_resume_revalidates_key_fd(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x55 },
+	};
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_key_fd_publish_input key_input = {
+		.source_id = 1,
+		.granted_access = KEY_NOTIFY,
+		.resolved_path = path,
+		.ancestor_guids = ancestors,
+		.path_component_count = ARRAY_SIZE(path),
+	};
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.file = NULL,
+		.expected_guid = ancestors[1],
+	};
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct reg_src_hive_entry first_hive;
+	struct reg_src_register_args first_args;
+	struct reg_src_hive_entry second_hive;
+	struct reg_src_register_args second_args;
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct task_struct *task;
+	struct file first_file = { };
+	struct file second_file = { };
+	const void *token;
+	long fd;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &first_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&first_args, &first_hive, name_src, 1,
+					  0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &first_file, &ops,
+				(const void __user *)&first_args),
+			0L);
+
+	memcpy(key_input.key_guid, ancestors[1], sizeof(key_input.key_guid));
+	fd = pkm_lcs_key_fd_publish(&key_input);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&first_file),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &second_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&second_args, &second_hive, name_src,
+					  1, 7);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &second_file, &ops,
+				(const void __user *)&second_args),
+			0L);
+
+	script.file = &second_file;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread,
+					 &script,
+					 "pkm-lcs-kunit-revalidate-ok");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &notify),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_kthread_stop(task), 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_FALSE(test, snapshot.orphaned);
+
+	notify.filter = 0;
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &notify),
+			0L);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&second_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_registration_resume_missing_guid_enoent(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x66 },
+	};
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_key_fd_publish_input key_input = {
+		.source_id = 1,
+		.granted_access = KEY_NOTIFY,
+		.resolved_path = path,
+		.ancestor_guids = ancestors,
+		.path_component_count = ARRAY_SIZE(path),
+	};
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.file = NULL,
+		.expected_guid = ancestors[1],
+		.status = RSI_NOT_FOUND,
+	};
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct reg_src_hive_entry first_hive;
+	struct reg_src_register_args first_args;
+	struct reg_src_hive_entry second_hive;
+	struct reg_src_register_args second_args;
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct task_struct *task;
+	struct file first_file = { };
+	struct file second_file = { };
+	const void *token;
+	u8 event[8] = { };
+	long fd;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &first_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&first_args, &first_hive, name_src, 1,
+					  0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &first_file, &ops,
+				(const void __user *)&first_args),
+			0L);
+
+	memcpy(key_input.key_guid, ancestors[1], sizeof(key_input.key_guid));
+	fd = pkm_lcs_key_fd_publish(&key_input);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&first_file),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &second_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&second_args, &second_hive, name_src,
+					  1, 7);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &second_file, &ops,
+				(const void __user *)&second_args),
+			0L);
+
+	script.file = &second_file;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread,
+					 &script,
+					 "pkm-lcs-kunit-revalidate-missing");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &notify),
+			(long)-ENOENT);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_kthread_stop(task), 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, snapshot.orphaned);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, event,
+							sizeof(event), true),
+			(ssize_t)-EAGAIN);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&second_file),
 			0);
 	pkm_lcs_kunit_reset_source_table();
@@ -19043,6 +19241,18 @@ static int pkm_lcs_kunit_read_key_source_build_response(
 		return -EINVAL;
 	if (response_len < RSI_MIN_RESPONSE_SIZE)
 		return -EMSGSIZE;
+	if (script->status) {
+		memset(response, 0, response_len);
+		put_unaligned_le32(RSI_MIN_RESPONSE_SIZE,
+				   response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+		put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
+		put_unaligned_le16(response_op,
+				   response + RSI_RESPONSE_OP_CODE_OFFSET);
+		put_unaligned_le32(script->status,
+				   response + RSI_RESPONSE_STATUS_OFFSET);
+		*built_len = RSI_MIN_RESPONSE_SIZE;
+		return 0;
+	}
 
 	name = script->name ? script->name : "Machine";
 	parent_guid = script->parent_guid ? script->parent_guid : nil_guid;
@@ -34945,6 +35155,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_ioctl_resumes_down_slot),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_resume_dispatches_overflow),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_resume_revalidates_key_fd),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_resume_missing_guid_enoent),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_ioctl_rejects_stale_resume),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_ioctl_rejects_repeat_register),
