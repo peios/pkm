@@ -3128,6 +3128,14 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_lookup_response_frame(
         return rsi_lookup_response_error_return(err);
     }
     if let Err(err) = validate_rsi_lookup_metadata_security_descriptors(&payload) {
+        if matches!(err, LcsError::MalformedSecurityDescriptor { .. }) {
+            unsafe {
+                (*summary_out).source_validation_failure = source_validation_failure_code(
+                    RsiSourceDataValidationFailure::MalformedSecurityDescriptor,
+                );
+                (*summary_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_lookup_response_error_return(err);
     }
     if let Err(err) = validate_rsi_lookup_path_response_sequences(&payload, next_sequence) {
@@ -3346,6 +3354,14 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
         return rsi_enum_children_response_error_return(err);
     }
     if let Err(err) = validate_rsi_enum_children_metadata_security_descriptors(&payload) {
+        if matches!(err, LcsError::MalformedSecurityDescriptor { .. }) {
+            unsafe {
+                (*result_out).source_validation_failure = source_validation_failure_code(
+                    RsiSourceDataValidationFailure::MalformedSecurityDescriptor,
+                );
+                (*result_out).source_validation_failure_present = 1;
+            }
+        }
         return rsi_enum_children_response_error_return(err);
     }
     if let Err(err) = validate_rsi_enum_children_path_response_sequences(&payload, next_sequence) {
