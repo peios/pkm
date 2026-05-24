@@ -30565,7 +30565,7 @@ static void pkm_lcs_kunit_create_missing_source_bad_inputs(
 static void pkm_lcs_kunit_create_missing_set_child_path(
 	struct kunit *test, struct pkm_lcs_create_missing_parent_resolution *res)
 {
-	static const u8 root_guid[RSI_GUID_SIZE] = { 0x21 };
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
 	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x22 };
 
 	KUNIT_ASSERT_NOT_NULL(test, res);
@@ -30599,7 +30599,7 @@ static void pkm_lcs_kunit_create_missing_set_layer_metadata_child_path(
 		"Machine", "System", "Registry", "Layers"
 	};
 	static const u8 ancestor_guids[ARRAY_SIZE(components)][RSI_GUID_SIZE] = {
-		{ 0xa8, 0x10 },
+		{ 1 },
 		{ 0xa8, 0x11 },
 		{ 0xa8, 0x12 },
 		{ 0xa8, 0x13 },
@@ -30780,6 +30780,7 @@ static void pkm_lcs_kunit_create_missing_publish_created_bad_inputs(
 static void pkm_lcs_kunit_create_missing_prepared_created_new_success(
 	struct kunit *test)
 {
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
 	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x22 };
 	static const u8 child_guid[RSI_GUID_SIZE] = { 0x77 };
 	struct pkm_lcs_create_missing_parent_resolution resolution = { };
@@ -30804,6 +30805,8 @@ static void pkm_lcs_kunit_create_missing_prepared_created_new_success(
 	struct task_struct *task;
 	struct file file = { };
 	const void *token;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
 	long ret;
 	int thread_ret;
 
@@ -30815,6 +30818,10 @@ static void pkm_lcs_kunit_create_missing_prepared_created_new_success(
 	script.sd_len = created.sd_len;
 	script.file = &file;
 	pkm_lcs_kunit_create_missing_set_child_path(test, &resolution);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, root_guid, &generation_before),
+			0L);
 	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_create_source_thread, &script,
 			   "pkm-lcs-kunit-prepared-create");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
@@ -30840,8 +30847,84 @@ static void pkm_lcs_kunit_create_missing_prepared_created_new_success(
 			memcmp(snapshot.key_guid, child_guid,
 			       sizeof(snapshot.key_guid)),
 			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, root_guid, &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)result.fd), 0);
+	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
+	pkm_kacs_free((void *)created.sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_prepared_gen_overflow(
+	struct kunit *test)
+{
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x22 };
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0x7a };
+	struct pkm_lcs_create_missing_parent_resolution resolution = { };
+	struct pkm_lcs_create_layer_target target = {
+		.name = "base",
+		.name_len = strlen("base"),
+		.implicit_base = 1,
+	};
+	struct pkm_lcs_created_key_sd created = { };
+	struct pkm_lcs_create_missing_prepared_result result = { };
+	struct pkm_lcs_kunit_create_source_script script = {
+		.parent_guid = parent_guid,
+		.child_guid = child_guid,
+		.child_name = "App",
+		.layer_name = "base",
+		.expected_sequence = 1,
+		.entry_status = RSI_OK,
+		.key_status = RSI_OK,
+		.expect_key_request = true,
+	};
+	struct pkm_lcs_source_table_snapshot table_snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_set(
+				1, root_guid, U64_MAX),
+			0L);
+	created.sd = kacs_rust_kunit_create_file_sd(
+		token, KEY_READ, 0, 0, 0, &created.sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, created.sd);
+	script.sd = created.sd;
+	script.sd_len = created.sd_len;
+	script.file = &file;
+	pkm_lcs_kunit_create_missing_set_child_path(test, &resolution);
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_create_source_thread, &script,
+			   "pkm-lcs-kunit-prepared-create-gen-overflow");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_create_missing_prepared_key_for_token(
+		token, &resolution, &target, child_guid, &created, KEY_READ,
+		false, false, &result);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_TRUE(test, result.created_new);
+	KUNIT_EXPECT_FALSE(test, result.retry_open_existing);
+	KUNIT_EXPECT_EQ(test, result.disposition, REG_CREATED_NEW);
+	KUNIT_EXPECT_EQ(test, result.sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, result.fd, -1L);
+	pkm_lcs_kunit_source_table_snapshot(&table_snapshot);
+	KUNIT_EXPECT_EQ(test, table_snapshot.active_count, 0U);
+	KUNIT_EXPECT_EQ(test, table_snapshot.down_count, 1U);
+
 	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
 	pkm_kacs_free((void *)created.sd);
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
@@ -31012,6 +31095,7 @@ static void pkm_lcs_kunit_create_missing_prepared_layer_refreshes(
 static void pkm_lcs_kunit_create_missing_prepared_entry_race_retries(
 	struct kunit *test)
 {
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
 	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x22 };
 	static const u8 child_guid[RSI_GUID_SIZE] = { 0x78 };
 	static const u8 sd[] = { 0x01, 0x00, 0x04, 0x80 };
@@ -31040,12 +31124,18 @@ static void pkm_lcs_kunit_create_missing_prepared_entry_race_retries(
 	struct task_struct *task;
 	struct file file = { };
 	const void *token;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
 	long ret;
 	int thread_ret;
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
 	pkm_lcs_kunit_create_missing_set_child_path(test, &resolution);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, root_guid, &generation_before),
+			0L);
 	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_create_source_thread, &script,
 			   "pkm-lcs-kunit-prepared-race");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
@@ -31063,6 +31153,11 @@ static void pkm_lcs_kunit_create_missing_prepared_entry_race_retries(
 	KUNIT_EXPECT_EQ(test, result.disposition, REG_OPENED_EXISTING);
 	KUNIT_EXPECT_EQ(test, result.sequence, 1ULL);
 	KUNIT_EXPECT_EQ(test, result.fd, -1L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, root_guid, &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before);
 
 	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
@@ -31073,6 +31168,7 @@ static void pkm_lcs_kunit_create_missing_prepared_entry_race_retries(
 static void pkm_lcs_kunit_create_missing_prepared_denies_after_source(
 	struct kunit *test)
 {
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
 	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x22 };
 	static const u8 child_guid[RSI_GUID_SIZE] = { 0x79 };
 	struct pkm_lcs_create_missing_parent_resolution resolution = { };
@@ -31096,6 +31192,8 @@ static void pkm_lcs_kunit_create_missing_prepared_denies_after_source(
 	struct task_struct *task;
 	struct file file = { };
 	const void *token;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
 	long ret;
 	int thread_ret;
 
@@ -31107,6 +31205,10 @@ static void pkm_lcs_kunit_create_missing_prepared_denies_after_source(
 	script.sd_len = created.sd_len;
 	script.file = &file;
 	pkm_lcs_kunit_create_missing_set_child_path(test, &resolution);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, root_guid, &generation_before),
+			0L);
 	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_create_source_thread, &script,
 			   "pkm-lcs-kunit-prepared-deny");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
@@ -31124,6 +31226,11 @@ static void pkm_lcs_kunit_create_missing_prepared_denies_after_source(
 	KUNIT_EXPECT_EQ(test, result.disposition, REG_CREATED_NEW);
 	KUNIT_EXPECT_EQ(test, result.sequence, 1ULL);
 	KUNIT_EXPECT_EQ(test, result.fd, -1L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, root_guid, &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
 
 	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
 	pkm_kacs_free((void *)created.sd);
@@ -35012,6 +35119,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_create_missing_publish_created_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_prepared_created_new_success),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_prepared_gen_overflow),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_prepared_layer_refreshes),
 	KUNIT_CASE(

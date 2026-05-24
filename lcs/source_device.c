@@ -8618,6 +8618,7 @@ long pkm_lcs_create_missing_prepared_key_for_token(
 {
 	struct pkm_lcs_create_missing_source_records_result source = { };
 	bool layer_effective_changed = false;
+	u64 generation = 0;
 	long fd;
 	long ret;
 
@@ -8647,10 +8648,25 @@ long pkm_lcs_create_missing_prepared_key_for_token(
 	if (ret)
 		return ret;
 
+	ret = pkm_lcs_source_record_transaction_generation(
+		resolution->parent.source_id, resolution->parent.ancestor_guids[0],
+		&generation);
+	if (ret) {
+		pkm_lcs_source_mark_down_by_id(resolution->parent.source_id);
+		return -EIO;
+	}
+
 	if (layer_effective_changed) {
-		ret = pkm_lcs_source_layer_operation_recover(NULL);
-		if (ret)
+		struct pkm_lcs_layer_operation_recovery_result recovery = { };
+
+		ret = pkm_lcs_source_layer_operation_recover_skip_generation(
+			resolution->parent.source_id,
+			resolution->parent.ancestor_guids[0], &recovery);
+		if (ret) {
+			pkm_lcs_source_mark_down_by_id(
+				resolution->parent.source_id);
 			return -EIO;
+		}
 	}
 
 	pkm_lcs_create_missing_dispatch_subkey_created_best_effort(resolution);
