@@ -193,9 +193,11 @@ struct pkm_lcs_kunit_delete_layer_source_script {
 	const char *expected_layer_name;
 	const u8 *orphaned_guid_a;
 	const u8 *orphaned_guid_b;
+	u64 expected_abort_txn_id;
 	u32 status;
 	u32 orphaned_guid_count;
 	bool extra_response_payload;
+	bool abort_before_delete_observed;
 	u32 reads;
 	u32 writes;
 	int result;
@@ -215,6 +217,10 @@ struct pkm_lcs_kunit_path_entry_source_script {
 	u32 writes;
 	int result;
 };
+
+static void pkm_lcs_kunit_append_set_value_log_for_layer(
+	struct kunit *test, int fd, const u8 root_guid[16],
+	const char *layer, u64 sequence);
 
 struct pkm_lcs_kunit_set_security_source_script {
 	struct file *file;
@@ -17213,6 +17219,62 @@ static int pkm_lcs_kunit_delete_layer_source_thread(void *data)
 		return -EINVAL;
 	}
 
+	if (script->expected_abort_txn_id) {
+		for (;;) {
+			count = pkm_lcs_kunit_source_device_read_file(
+				script->file, request, sizeof(request), true);
+			if (count != -EAGAIN)
+				break;
+			if (kthread_should_stop()) {
+				script->result = -EINTR;
+				return script->result;
+			}
+			msleep(1);
+		}
+		if (count < 0) {
+			script->result = (int)count;
+			return script->result;
+		}
+		script->reads++;
+
+		if (count != RSI_REQUEST_HEADER_SIZE + sizeof(u64)) {
+			script->result = -EINVAL;
+			return script->result;
+		}
+		if (get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET) !=
+		    RSI_ABORT_TRANSACTION) {
+			script->result = -EINVAL;
+			return script->result;
+		}
+		if (get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+		    script->expected_abort_txn_id ||
+		    get_unaligned_le64(request + RSI_REQUEST_HEADER_SIZE) !=
+			    script->expected_abort_txn_id) {
+			script->result = -EINVAL;
+			return script->result;
+		}
+
+		request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+		memset(response, 0, sizeof(response));
+		put_unaligned_le32(RSI_MIN_RESPONSE_SIZE,
+				   response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+		put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
+		put_unaligned_le16(RSI_ABORT_TRANSACTION_RESPONSE,
+				   response + RSI_RESPONSE_OP_CODE_OFFSET);
+		put_unaligned_le32(RSI_OK,
+				   response + RSI_RESPONSE_STATUS_OFFSET);
+
+		count = pkm_lcs_kunit_source_device_write_file(
+			script->file, response, RSI_MIN_RESPONSE_SIZE, false,
+			NULL);
+		if (count != (ssize_t)RSI_MIN_RESPONSE_SIZE) {
+			script->result = (int)count;
+			return script->result;
+		}
+		script->writes++;
+		script->abort_before_delete_observed = true;
+	}
+
 	for (;;) {
 		count = pkm_lcs_kunit_source_device_read_file(
 			script->file, request, sizeof(request), true);
@@ -23499,6 +23561,99 @@ static void pkm_lcs_kunit_source_delete_layer_broadcast_active_sources(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_delete_layer_orchestration_aborts_before_broadcast(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		1
+	};
+	struct pkm_lcs_delete_layer_orchestration_result result = { };
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct pkm_lcs_kunit_delete_layer_source_script script = { };
+	struct reg_txn_status_args status = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	int thread_ret;
+	long txn_fd;
+	long ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)txn_fd, txn_snapshot.transaction_id, 1,
+				root_guid),
+			0L);
+	pkm_lcs_kunit_append_set_value_log_for_layer(test, (int)txn_fd,
+						     root_guid, "Policy",
+						     77);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_delete_layer_orchestrate_timeout(
+				"base", strlen("base"), 1000, &result),
+			(long)-EINVAL);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, txn_snapshot.state, REG_TXN_ACTIVE_BOUND);
+
+	script.file = &file;
+	script.expected_layer_name = "policy";
+	script.expected_abort_txn_id = txn_snapshot.transaction_id;
+	script.status = RSI_OK;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_layer_source_thread, &script,
+		"pkm-lcs-kunit-layer-orch");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	memset(&result, 0, sizeof(result));
+	ret = pkm_lcs_source_delete_layer_orchestrate_timeout(
+		"policy", strlen("policy"), 1000, &result);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_TRUE(test, script.abort_before_delete_observed);
+	KUNIT_EXPECT_EQ(test, script.reads, 2U);
+	KUNIT_EXPECT_EQ(test, script.writes, 2U);
+	KUNIT_EXPECT_EQ(test, result.inspected_transaction_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.affected_bound_transaction_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.abort_dispatched_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.active_source_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.completed_source_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.orphaned_guid_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.marked_fd_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.immediate_drop_count, 0U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_status((int)txn_fd, &status),
+			0L);
+	KUNIT_EXPECT_EQ(test, status.state, REG_TXN_ABORTED);
+	KUNIT_EXPECT_EQ(test, status.terminal_errno, EINVAL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+	flush_delayed_fput();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_dispatch_transaction_control_frames(
 	struct kunit *test)
 {
@@ -26881,6 +27036,7 @@ static void pkm_lcs_kunit_transaction_log_rejects_malformed_layer_name(
 	KUNIT_EXPECT_EQ(test, log.next_operation_index, 1ULL);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	flush_delayed_fput();
 }
 
 static void pkm_lcs_kunit_layer_delete_aborts_matching_bound_transactions(
@@ -26905,6 +27061,7 @@ static void pkm_lcs_kunit_layer_delete_aborts_matching_bound_transactions(
 	long other_fd;
 	long unbound_fd;
 
+	flush_delayed_fput();
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 
 	policy_fd = pkm_lcs_reg_begin_transaction();
@@ -31665,6 +31822,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_delete_layer_applies_orphans),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_delete_layer_broadcast_active_sources),
+	KUNIT_CASE(
+		pkm_lcs_kunit_delete_layer_orchestration_aborts_before_broadcast),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_transaction_control_frames),
 	KUNIT_CASE(

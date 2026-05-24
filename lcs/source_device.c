@@ -4236,6 +4236,45 @@ long pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
 	return 0;
 }
 
+long pkm_lcs_source_delete_layer_orchestrate_timeout(
+	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	struct pkm_lcs_delete_layer_orchestration_result *result)
+{
+	struct pkm_lcs_transaction_layer_abort_result abort_result = { };
+	struct pkm_lcs_delete_layer_broadcast_result broadcast_result = { };
+	long ret;
+
+	if (result)
+		memset(result, 0, sizeof(*result));
+
+	ret = pkm_lcs_transaction_fd_abort_layer_writers(
+		layer_name, layer_name_len, &abort_result);
+	if (result) {
+		result->inspected_transaction_count =
+			abort_result.inspected_transaction_count;
+		result->affected_bound_transaction_count =
+			abort_result.affected_bound_transaction_count;
+		result->abort_dispatched_count =
+			abort_result.abort_dispatched_count;
+	}
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
+		layer_name, layer_name_len, timeout_ms, &broadcast_result);
+	if (result) {
+		result->active_source_count = broadcast_result.active_source_count;
+		result->completed_source_count =
+			broadcast_result.completed_source_count;
+		result->orphaned_guid_count =
+			broadcast_result.orphaned_guid_count;
+		result->marked_fd_count = broadcast_result.marked_fd_count;
+		result->immediate_drop_count =
+			broadcast_result.immediate_drop_count;
+	}
+	return ret;
+}
+
 long pkm_lcs_source_delete_layer_round_trip(
 	u32 source_id, const char *layer_name, u32 layer_name_len,
 	struct pkm_lcs_source_response_result *response,
