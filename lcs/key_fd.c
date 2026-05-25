@@ -5046,6 +5046,20 @@ struct pkm_lcs_backup_layer_manifest_frames {
 	u32 count;
 };
 
+struct pkm_lcs_backup_record_frames {
+	u8 **frames;
+	size_t *frame_lens;
+	u32 count;
+	u32 capacity;
+};
+
+struct pkm_lcs_backup_root_section_summary {
+	u32 hidden_path_count;
+	u32 value_count;
+	u32 blanket_count;
+	bool needs_child_traversal;
+};
+
 static void pkm_lcs_backup_output_init(struct pkm_lcs_backup_output *output,
 				       struct file *file)
 {
@@ -5692,6 +5706,64 @@ static long pkm_lcs_backup_manifest_frame_matches_layer(
 	return 0;
 }
 
+static void pkm_lcs_backup_record_frames_destroy(
+	struct pkm_lcs_backup_record_frames *frames)
+{
+	u32 i;
+
+	if (!frames)
+		return;
+	if (frames->frames) {
+		for (i = 0; i < frames->count; i++)
+			kfree(frames->frames[i]);
+	}
+	kfree(frames->frame_lens);
+	kfree(frames->frames);
+	frames->frames = NULL;
+	frames->frame_lens = NULL;
+	frames->count = 0;
+	frames->capacity = 0;
+}
+
+static long pkm_lcs_backup_record_frames_init(
+	struct pkm_lcs_backup_record_frames *frames, u32 capacity)
+{
+	if (!frames)
+		return -EINVAL;
+	memset(frames, 0, sizeof(*frames));
+	if (!capacity)
+		return 0;
+
+	frames->frames = kcalloc(capacity, sizeof(*frames->frames),
+				 GFP_KERNEL);
+	if (!frames->frames)
+		return -ENOMEM;
+	frames->frame_lens = kcalloc(capacity, sizeof(*frames->frame_lens),
+				     GFP_KERNEL);
+	if (!frames->frame_lens) {
+		pkm_lcs_backup_record_frames_destroy(frames);
+		return -ENOMEM;
+	}
+	frames->capacity = capacity;
+	return 0;
+}
+
+static long pkm_lcs_backup_record_frames_append(
+	struct pkm_lcs_backup_record_frames *frames, u8 **frame,
+	size_t frame_len)
+{
+	if (!frames || !frame || !*frame || !frame_len)
+		return -EINVAL;
+	if (frames->count >= frames->capacity)
+		return -EOVERFLOW;
+
+	frames->frames[frames->count] = *frame;
+	frames->frame_lens[frames->count] = frame_len;
+	frames->count++;
+	*frame = NULL;
+	return 0;
+}
+
 static long pkm_lcs_backup_alloc_path_entry_frame(
 	const struct pkm_lcs_runtime_limits *limits,
 	const u8 parent_guid[PKM_LCS_GUID_BYTES], const char *child_name,
@@ -5832,6 +5904,291 @@ out_free:
 	return ret;
 }
 
+static long pkm_lcs_backup_materialize_path_entries(
+	const struct pkm_lcs_runtime_limits *limits, const u8 *frame,
+	size_t frame_len, u64 request_id, u64 next_sequence,
+	struct pkm_lcs_backup_path_entry_view **entries_out,
+	u32 *entry_count_out)
+{
+	struct pkm_lcs_backup_path_entry_view *entries = NULL;
+	u32 entry_count = 0;
+	u32 actual_count = 0;
+	long ret;
+
+	if (!limits || !entries_out || !entry_count_out)
+		return -EINVAL;
+	*entries_out = NULL;
+	*entry_count_out = 0;
+
+	ret = lcs_rust_materialize_rsi_enum_children_backup_path_entries(
+		frame, frame_len, request_id, next_sequence, limits, NULL, 0,
+		&entry_count);
+	if (ret && ret != -ERANGE)
+		return ret;
+	if (!entry_count)
+		return 0;
+
+	entries = kcalloc(entry_count, sizeof(*entries), GFP_KERNEL);
+	if (!entries)
+		return -ENOMEM;
+	actual_count = entry_count;
+	ret = lcs_rust_materialize_rsi_enum_children_backup_path_entries(
+		frame, frame_len, request_id, next_sequence, limits, entries,
+		entry_count, &actual_count);
+	if (ret)
+		goto out_free;
+	if (actual_count != entry_count) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	*entries_out = entries;
+	*entry_count_out = entry_count;
+	return 0;
+
+out_free:
+	kfree(entries);
+	return ret;
+}
+
+static long pkm_lcs_backup_materialize_value_entries(
+	const struct pkm_lcs_runtime_limits *limits, const u8 *frame,
+	size_t frame_len, u64 request_id, u64 next_sequence,
+	struct pkm_lcs_backup_value_entry_view **values_out,
+	u32 *value_count_out,
+	struct pkm_lcs_backup_blanket_entry_view **blankets_out,
+	u32 *blanket_count_out)
+{
+	struct pkm_lcs_backup_value_entry_view *values = NULL;
+	struct pkm_lcs_backup_blanket_entry_view *blankets = NULL;
+	u32 value_count = 0;
+	u32 blanket_count = 0;
+	u32 actual_value_count = 0;
+	u32 actual_blanket_count = 0;
+	long ret;
+
+	if (!limits || !values_out || !value_count_out || !blankets_out ||
+	    !blanket_count_out)
+		return -EINVAL;
+	*values_out = NULL;
+	*value_count_out = 0;
+	*blankets_out = NULL;
+	*blanket_count_out = 0;
+
+	ret = lcs_rust_materialize_rsi_query_values_backup_entries(
+		frame, frame_len, request_id, next_sequence, limits, NULL, 0,
+		NULL, 0, &value_count, &blanket_count);
+	if (ret && ret != -ERANGE)
+		return ret;
+	if (value_count) {
+		values = kcalloc(value_count, sizeof(*values), GFP_KERNEL);
+		if (!values)
+			return -ENOMEM;
+	}
+	if (blanket_count) {
+		blankets = kcalloc(blanket_count, sizeof(*blankets),
+				   GFP_KERNEL);
+		if (!blankets) {
+			ret = -ENOMEM;
+			goto out_free;
+		}
+	}
+
+	actual_value_count = value_count;
+	actual_blanket_count = blanket_count;
+	ret = lcs_rust_materialize_rsi_query_values_backup_entries(
+		frame, frame_len, request_id, next_sequence, limits, values,
+		value_count, blankets, blanket_count, &actual_value_count,
+		&actual_blanket_count);
+	if (ret)
+		goto out_free;
+	if (actual_value_count != value_count ||
+	    actual_blanket_count != blanket_count) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	*values_out = values;
+	*value_count_out = value_count;
+	*blankets_out = blankets;
+	*blanket_count_out = blanket_count;
+	return 0;
+
+out_free:
+	kfree(blankets);
+	kfree(values);
+	return ret;
+}
+
+static long pkm_lcs_backup_alloc_root_section_frames(
+	const struct pkm_lcs_runtime_limits *limits,
+	const u8 key_guid[PKM_LCS_GUID_BYTES], const u8 *enum_frame,
+	size_t enum_frame_len, u64 enum_request_id, const u8 *values_frame,
+	size_t values_frame_len, u64 values_request_id, u64 next_sequence,
+	struct pkm_lcs_backup_record_frames *frames,
+	struct pkm_lcs_backup_root_section_summary *summary)
+{
+	struct pkm_lcs_backup_path_entry_view *entries = NULL;
+	struct pkm_lcs_backup_value_entry_view *values = NULL;
+	struct pkm_lcs_backup_blanket_entry_view *blankets = NULL;
+	u32 entry_count = 0;
+	u32 value_count = 0;
+	u32 blanket_count = 0;
+	u32 capacity = 0;
+	u32 i;
+	long ret;
+
+	if (!limits || !key_guid || !frames || !summary)
+		return -EINVAL;
+	memset(summary, 0, sizeof(*summary));
+
+	ret = pkm_lcs_backup_materialize_path_entries(
+		limits, enum_frame, enum_frame_len, enum_request_id,
+		next_sequence, &entries, &entry_count);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_backup_materialize_value_entries(
+		limits, values_frame, values_frame_len, values_request_id,
+		next_sequence, &values, &value_count, &blankets,
+		&blanket_count);
+	if (ret)
+		goto out_free_views;
+
+	for (i = 0; i < entry_count; i++) {
+		if (entries[i].hidden)
+			summary->hidden_path_count++;
+		else
+			summary->needs_child_traversal = true;
+	}
+	summary->value_count = value_count;
+	summary->blanket_count = blanket_count;
+
+	if (summary->needs_child_traversal) {
+		ret = pkm_lcs_backup_record_frames_init(frames, 0);
+		goto out_free_views;
+	}
+
+	if (check_add_overflow(summary->hidden_path_count, value_count,
+			       &capacity) ||
+	    check_add_overflow(capacity, blanket_count, &capacity)) {
+		ret = -EOVERFLOW;
+		goto out_free_views;
+	}
+	ret = pkm_lcs_backup_record_frames_init(frames, capacity);
+	if (ret)
+		goto out_free_views;
+
+	for (i = 0; i < entry_count; i++) {
+		const char *child_name = NULL;
+		const char *layer_name = NULL;
+		u32 child_name_len = 0;
+		u32 layer_name_len = 0;
+		size_t frame_len = 0;
+		u8 *frame = NULL;
+
+		if (!entries[i].hidden)
+			continue;
+		ret = pkm_lcs_backup_frame_field(
+			enum_frame, enum_frame_len, entries[i].child_name_offset,
+			entries[i].child_name_len, &child_name,
+			&child_name_len);
+		if (ret)
+			goto out_destroy_frames;
+		ret = pkm_lcs_backup_frame_field(
+			enum_frame, enum_frame_len, entries[i].layer_offset,
+			entries[i].layer_len, &layer_name, &layer_name_len);
+		if (ret)
+			goto out_destroy_frames;
+		ret = pkm_lcs_backup_alloc_path_entry_frame(
+			limits, key_guid, child_name, child_name_len, NULL,
+			true, layer_name, layer_name_len, entries[i].sequence,
+			&frame, &frame_len);
+		if (ret)
+			goto out_destroy_frames;
+		ret = pkm_lcs_backup_record_frames_append(frames, &frame,
+							  frame_len);
+		if (ret) {
+			kfree(frame);
+			goto out_destroy_frames;
+		}
+	}
+
+	for (i = 0; i < value_count; i++) {
+		const char *name = NULL;
+		const char *data = NULL;
+		const char *layer_name = NULL;
+		u32 name_len = 0;
+		u32 data_len = 0;
+		u32 layer_name_len = 0;
+		size_t frame_len = 0;
+		u8 *frame = NULL;
+
+		ret = pkm_lcs_backup_frame_field(
+			values_frame, values_frame_len, values[i].name_offset,
+			values[i].name_len, &name, &name_len);
+		if (ret)
+			goto out_destroy_frames;
+		ret = pkm_lcs_backup_frame_field(
+			values_frame, values_frame_len, values[i].data_offset,
+			values[i].data_len, &data, &data_len);
+		if (ret)
+			goto out_destroy_frames;
+		ret = pkm_lcs_backup_frame_field(
+			values_frame, values_frame_len, values[i].layer_offset,
+			values[i].layer_len, &layer_name, &layer_name_len);
+		if (ret)
+			goto out_destroy_frames;
+		ret = pkm_lcs_backup_alloc_value_frame(
+			limits, key_guid, name, name_len,
+			values[i].value_type, (const u8 *)data, data_len,
+			layer_name, layer_name_len, values[i].sequence, &frame,
+			&frame_len);
+		if (ret)
+			goto out_destroy_frames;
+		ret = pkm_lcs_backup_record_frames_append(frames, &frame,
+							  frame_len);
+		if (ret) {
+			kfree(frame);
+			goto out_destroy_frames;
+		}
+	}
+
+	for (i = 0; i < blanket_count; i++) {
+		const char *layer_name = NULL;
+		u32 layer_name_len = 0;
+		size_t frame_len = 0;
+		u8 *frame = NULL;
+
+		ret = pkm_lcs_backup_frame_field(
+			values_frame, values_frame_len, blankets[i].layer_offset,
+			blankets[i].layer_len, &layer_name, &layer_name_len);
+		if (ret)
+			goto out_destroy_frames;
+		ret = pkm_lcs_backup_alloc_blanket_tombstone_frame(
+			limits, key_guid, layer_name, layer_name_len,
+			blankets[i].sequence, &frame, &frame_len);
+		if (ret)
+			goto out_destroy_frames;
+		ret = pkm_lcs_backup_record_frames_append(frames, &frame,
+							  frame_len);
+		if (ret) {
+			kfree(frame);
+			goto out_destroy_frames;
+		}
+	}
+
+out_free_views:
+	kfree(blankets);
+	kfree(values);
+	kfree(entries);
+	return ret;
+
+out_destroy_frames:
+	pkm_lcs_backup_record_frames_destroy(frames);
+	memset(summary, 0, sizeof(*summary));
+	goto out_free_views;
+}
+
 static long pkm_lcs_backup_alloc_key_frame(
 	const u8 guid[16], bool volatile_key, bool symlink, const u8 *sd,
 	size_t sd_len, s64 last_write_time_ns, u8 **frame_out,
@@ -5944,10 +6301,10 @@ static long pkm_lcs_key_fd_backup_export_empty_subtree(
 	struct pkm_lcs_source_response_result enum_response = { };
 	struct pkm_lcs_source_response_result values_response = { };
 	struct pkm_lcs_rsi_read_key_result read_key = { };
-	struct pkm_lcs_rsi_enum_children_info_summary enum_summary = { };
-	struct pkm_lcs_rsi_query_values_info_summary values_summary = { };
 	struct pkm_lcs_backup_referenced_layers referenced_layers = { };
 	struct pkm_lcs_backup_layer_manifest_frames layer_manifests = { };
+	struct pkm_lcs_backup_record_frames root_section_frames = { };
+	struct pkm_lcs_backup_root_section_summary root_section = { };
 	struct pkm_lcs_backup_output output;
 	const char *hive_name;
 	u8 *header_frame = NULL;
@@ -5958,6 +6315,7 @@ static long pkm_lcs_key_fd_backup_export_empty_subtree(
 	size_t trailer_frame_len = 0;
 	u64 next_sequence = 0;
 	const u8 *sd;
+	u32 i;
 	long ret;
 
 	if (!key_fd || !output_file || !limits || !transaction_id)
@@ -6003,23 +6361,11 @@ static long pkm_lcs_key_fd_backup_export_empty_subtree(
 		NULL);
 	if (ret)
 		goto out_frames;
-	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
-		enum_frame.data, enum_frame.len, enum_response.request_id,
-		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
-		NULL, 0, &enum_response.limits, &enum_summary);
-	if (ret)
-		goto out_frames;
 
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, transaction_id, key_fd->key_guid, "", 0,
 		true, limits, limits->request_timeout_ms, &values_frame,
 		&values_response, NULL);
-	if (ret)
-		goto out_frames;
-	ret = pkm_lcs_rsi_materialize_query_values_info_summary(
-		values_frame.data, values_frame.len, values_response.request_id,
-		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
-		NULL, 0, &values_response.limits, &values_summary);
 	if (ret)
 		goto out_frames;
 
@@ -6036,9 +6382,15 @@ static long pkm_lcs_key_fd_backup_export_empty_subtree(
 	if (ret)
 		goto out_frames;
 
-	if (enum_summary.source_path_entry_count ||
-	    values_summary.source_value_entry_count ||
-	    values_summary.source_blanket_count) {
+	ret = pkm_lcs_backup_alloc_root_section_frames(
+		limits, key_fd->key_guid, enum_frame.data, enum_frame.len,
+		enum_response.request_id, values_frame.data, values_frame.len,
+		values_response.request_id, next_sequence, &root_section_frames,
+		&root_section);
+	if (ret)
+		goto out_frames;
+
+	if (root_section.needs_child_traversal) {
 		ret = -EOPNOTSUPP;
 		goto out_frames;
 	}
@@ -6060,10 +6412,24 @@ static long pkm_lcs_key_fd_backup_export_empty_subtree(
 						 header_frame_len);
 	if (ret)
 		goto out_output;
+	for (i = 0; i < layer_manifests.count; i++) {
+		ret = pkm_lcs_backup_write_hashed_record(
+			&output, layer_manifests.frames[i],
+			layer_manifests.frame_lens[i]);
+		if (ret)
+			goto out_output;
+	}
 	ret = pkm_lcs_backup_write_hashed_record(&output, key_frame,
 						 key_frame_len);
 	if (ret)
 		goto out_output;
+	for (i = 0; i < root_section_frames.count; i++) {
+		ret = pkm_lcs_backup_write_hashed_record(
+			&output, root_section_frames.frames[i],
+			root_section_frames.frame_lens[i]);
+		if (ret)
+			goto out_output;
+	}
 	ret = pkm_lcs_backup_alloc_trailer_frame(&output, &trailer_frame,
 						 &trailer_frame_len);
 	if (ret)
@@ -6074,6 +6440,7 @@ static long pkm_lcs_key_fd_backup_export_empty_subtree(
 out_output:
 	pkm_lcs_backup_output_finish(&output);
 out_frames:
+	pkm_lcs_backup_record_frames_destroy(&root_section_frames);
 	pkm_lcs_backup_layer_manifest_frames_destroy(&layer_manifests);
 	pkm_lcs_backup_referenced_layers_destroy(&referenced_layers);
 	kfree(trailer_frame);
@@ -8570,6 +8937,54 @@ long pkm_lcs_kunit_backup_layer_manifest_frame_set(
 out:
 	pkm_lcs_backup_layer_manifest_frames_destroy(&frames);
 	kfree(referenced.layers);
+	return ret;
+}
+
+long pkm_lcs_kunit_backup_root_section_frames(
+	const u8 key_guid[PKM_LCS_GUID_BYTES], const u8 *enum_frame,
+	size_t enum_frame_len, u64 enum_request_id, const u8 *values_frame,
+	size_t values_frame_len, u64 values_request_id, u64 next_sequence,
+	struct pkm_lcs_backup_root_section_frame_summary *summary_out)
+{
+	struct pkm_lcs_backup_record_frames frames = { };
+	struct pkm_lcs_backup_root_section_summary summary = { };
+	struct pkm_lcs_runtime_limits limits;
+	size_t total_len = 0;
+	u32 i;
+	long ret;
+
+	if (!summary_out)
+		return -EINVAL;
+	memset(summary_out, 0, sizeof(*summary_out));
+
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_backup_alloc_root_section_frames(
+		&limits, key_guid, enum_frame, enum_frame_len,
+		enum_request_id, values_frame, values_frame_len,
+		values_request_id, next_sequence, &frames, &summary);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < frames.count; i++) {
+		if (check_add_overflow(total_len, frames.frame_lens[i],
+				       &total_len)) {
+			ret = -EOVERFLOW;
+			goto out;
+		}
+	}
+
+	summary_out->frame_count = frames.count;
+	summary_out->hidden_path_count = summary.hidden_path_count;
+	summary_out->value_count = summary.value_count;
+	summary_out->blanket_count = summary.blanket_count;
+	summary_out->needs_child_traversal = summary.needs_child_traversal ? 1 :
+									  0;
+	summary_out->total_len = total_len;
+
+out:
+	pkm_lcs_backup_record_frames_destroy(&frames);
+	if (ret)
+		memset(summary_out, 0, sizeof(*summary_out));
 	return ret;
 }
 
