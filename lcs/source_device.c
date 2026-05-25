@@ -4924,9 +4924,10 @@ long pkm_lcs_source_dispatch_lookup_waitable_request_retaining_frame(
 		NULL, waiter, result);
 }
 
-long pkm_lcs_source_lookup_round_trip_timeout(
+long pkm_lcs_source_lookup_round_trip_timeout_with_limits(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
-	const char *child_name, u32 child_name_len, u32 timeout_ms,
+	const char *child_name, u32 child_name_len,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
@@ -4943,13 +4944,13 @@ long pkm_lcs_source_lookup_round_trip_timeout(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, NULL, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
 		ret = pkm_lcs_source_dispatch_lookup_request_with_waiter(
 			source_id, txn_id, parent_guid, child_name,
-			child_name_len, NULL, &waiter, enqueue);
+			child_name_len, limits, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -4962,15 +4963,29 @@ long pkm_lcs_source_lookup_round_trip_timeout(
 							 response);
 }
 
+long pkm_lcs_source_lookup_round_trip_timeout(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_lookup_round_trip_timeout_with_limits(
+		source_id, txn_id, parent_guid, child_name, child_name_len,
+		NULL, timeout_ms, response, enqueue);
+}
+
 long pkm_lcs_source_lookup_round_trip(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
-	return pkm_lcs_source_lookup_round_trip_timeout(
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_lookup_round_trip_timeout_with_limits(
 		source_id, txn_id, parent_guid, child_name, child_name_len,
-		pkm_lcs_runtime_request_timeout_ms(), response, enqueue);
+		&limits, limits.request_timeout_ms, response, enqueue);
 }
 
 long pkm_lcs_source_dispatch_create_entry_request(
@@ -8205,9 +8220,10 @@ out_frame:
 	return ret;
 }
 
-long pkm_lcs_layer_metadata_child_lookup_from_root(
+long pkm_lcs_layer_metadata_child_lookup_from_root_with_limits(
 	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
 	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	u8 child_guid_out[RSI_GUID_SIZE], bool *present_out)
 {
 	struct pkm_lcs_source_response_frame frame = { };
@@ -8222,7 +8238,7 @@ long pkm_lcs_layer_metadata_child_lookup_from_root(
 	if (present_out)
 		*present_out = false;
 	if (!source_id || !layers_root_guid || !layer_name || !layer_name_len ||
-	    !child_guid_out || !present_out)
+	    !limits || !child_guid_out || !present_out)
 		return -EINVAL;
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
@@ -8233,9 +8249,9 @@ long pkm_lcs_layer_metadata_child_lookup_from_root(
 		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
-	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
+	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
 		source_id, 0, layers_root_guid, layer_name, layer_name_len,
-		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
+		limits, limits->request_timeout_ms, &frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -8254,6 +8270,19 @@ out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
 	pkm_lcs_source_layer_snapshot_release(&layers);
 	return ret;
+}
+
+long pkm_lcs_layer_metadata_child_lookup_from_root(
+	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
+	const char *layer_name, u32 layer_name_len,
+	u8 child_guid_out[RSI_GUID_SIZE], bool *present_out)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_layer_metadata_child_lookup_from_root_with_limits(
+		source_id, layers_root_guid, layer_name, layer_name_len,
+		&limits, child_guid_out, present_out);
 }
 
 static long pkm_lcs_layer_metadata_refresh_all_admit_children(

@@ -994,16 +994,23 @@ static void pkm_lcs_key_fd_capture_source_restart_generation(
 }
 
 static long pkm_lcs_key_fd_revalidate_after_source_restart(
-	struct pkm_lcs_key_fd *key_fd)
+	struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_rsi_read_key_result read_key = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	u64 generation;
 	long ret;
 
 	if (!key_fd)
 		return -EINVAL;
+	if (!limits) {
+		pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
+			&effective_limits);
+		limits = &effective_limits;
+	}
 	if (!READ_ONCE(key_fd->source_restart_generation_tracked))
 		return 0;
 
@@ -1017,9 +1024,9 @@ static long pkm_lcs_key_fd_revalidate_after_source_restart(
 		return -ENOENT;
 
 	pkm_lcs_source_response_frame_init(&frame);
-	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
-		key_fd->source_id, 0, key_fd->key_guid,
-		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
+	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, 0, key_fd->key_guid, limits,
+		limits->request_timeout_ms, &frame, &response, NULL);
 	if (ret == -ENOENT) {
 		u32 marked = 0;
 
@@ -1031,8 +1038,9 @@ static long pkm_lcs_key_fd_revalidate_after_source_restart(
 	if (ret)
 		goto out_frame;
 
-	ret = pkm_lcs_rsi_materialize_read_key_response(
-		frame.data, frame.len, response.request_id, &read_key);
+	ret = pkm_lcs_rsi_materialize_read_key_response_with_limits(
+		frame.data, frame.len, response.request_id, &response.limits,
+		&read_key);
 	if (ret)
 		goto out_frame;
 	if (!read_key.sd_len || (size_t)read_key.sd_offset > frame.len ||
@@ -1086,7 +1094,7 @@ static long pkm_lcs_key_fd_notify_from_args(
 	if (!key_fd || !args)
 		return -EINVAL;
 
-	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd);
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd, NULL);
 	if (ret)
 		return ret;
 
@@ -4887,6 +4895,7 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	struct reg_blanket_tombstone_args blanket_tombstone_args;
 	struct reg_delete_key_args delete_key_args;
 	struct reg_hide_key_args hide_key_args;
+	struct pkm_lcs_runtime_limits restart_limits;
 	long ret;
 
 	if (!file)
@@ -4896,7 +4905,10 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 		return -EINVAL;
 
 	if (pkm_lcs_key_fd_ioctl_revalidates_restart(cmd)) {
-		ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd);
+		pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
+			&restart_limits);
+		ret = pkm_lcs_key_fd_revalidate_after_source_restart(
+			key_fd, &restart_limits);
 		if (ret)
 			return ret;
 	}
@@ -5499,15 +5511,18 @@ static void pkm_lcs_internal_watch_recover_layer_change(
 static void pkm_lcs_internal_watch_deliver_layer_metadata_refresh(
 	const struct pkm_lcs_internal_watch_event *event)
 {
+	struct pkm_lcs_runtime_limits limits;
 	bool effective_changed = false;
 
 	if (!event)
 		return;
 
-	if (!pkm_lcs_key_path_refresh_layer_metadata_result(
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	if (!pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result_with_limits(
 		    event->source_id, event->guid,
 		    (const char * const *)event->resolved_path,
-		    event->path_component_count, &effective_changed) &&
+		    event->path_component_count, NULL, 0, false, &limits,
+		    &effective_changed) &&
 	    effective_changed)
 		pkm_lcs_internal_watch_recover_layer_change(event);
 }
@@ -5519,6 +5534,7 @@ static void pkm_lcs_internal_watch_deliver_layer_create(
 		"Machine", "System", "Registry", "Layers",
 	};
 	const char *resolved_path[ARRAY_SIZE(path_prefix) + 1];
+	struct pkm_lcs_runtime_limits limits;
 	u8 child_guid[PKM_LCS_GUID_BYTES];
 	bool effective_changed = false;
 	bool present = false;
@@ -5528,16 +5544,18 @@ static void pkm_lcs_internal_watch_deliver_layer_create(
 
 	memcpy(resolved_path, path_prefix, sizeof(path_prefix));
 	resolved_path[ARRAY_SIZE(path_prefix)] = event->name;
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
 
-	if (pkm_lcs_layer_metadata_child_lookup_from_root(
+	if (pkm_lcs_layer_metadata_child_lookup_from_root_with_limits(
 		    event->source_id, event->guid, event->name,
-		    event->name_len, child_guid, &present) ||
+		    event->name_len, &limits, child_guid, &present) ||
 	    !present)
 		return;
 
-	if (!pkm_lcs_key_path_refresh_layer_metadata_result(
+	if (!pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result_with_limits(
 		    event->source_id, child_guid, resolved_path,
-		    ARRAY_SIZE(resolved_path), &effective_changed) &&
+		    ARRAY_SIZE(resolved_path), NULL, 0, false, &limits,
+		    &effective_changed) &&
 	    effective_changed)
 		pkm_lcs_internal_watch_recover_layer_change(event);
 }
@@ -6494,7 +6512,7 @@ long pkm_lcs_key_fd_relative_base(int fd,
 		return -ENOENT;
 	}
 
-	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd);
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd, NULL);
 	if (ret) {
 		fdput(held);
 		return ret;
@@ -6601,7 +6619,7 @@ long pkm_lcs_key_fd_parent_snapshot(int fd,
 		return -ENOENT;
 	}
 
-	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd);
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd, NULL);
 	if (ret) {
 		fdput(held);
 		return ret;
