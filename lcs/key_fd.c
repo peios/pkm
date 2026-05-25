@@ -5318,6 +5318,8 @@ static bool pkm_lcs_internal_watch_event_deliverable(
 		       (event_type == REG_WATCH_VALUE_SET ||
 			event_type == REG_WATCH_VALUE_DELETED ||
 			event_type == REG_WATCH_SD_CHANGED);
+	case PKM_LCS_INTERNAL_WATCH_MACHINE_ROOT_FALLBACK:
+		return event_type == REG_WATCH_SUBKEY_CREATED;
 	default:
 		return false;
 	}
@@ -5500,6 +5502,23 @@ static void pkm_lcs_internal_watch_deliver_layer_event(
 	}
 }
 
+static void pkm_lcs_internal_watch_deliver_machine_root_fallback(
+	const struct pkm_lcs_internal_watch_event *event)
+{
+	struct pkm_lcs_source_bootstrap_refresh_result result = { };
+
+	if (!event)
+		return;
+
+	/*
+	 * The fallback watch exists only while Registry or Layers is missing.
+	 * Reusing the bootstrap refresh path keeps first-source and seed-restore
+	 * re-arm policy identical.
+	 */
+	pkm_lcs_source_bootstrap_refresh_machine_hive(event->source_id,
+						     event->guid, &result);
+}
+
 static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
 						  u32 *internal_effects)
 {
@@ -5522,6 +5541,10 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
 			   PKM_LCS_INTERNAL_WATCH_LAYER_METADATA) {
 			pkm_lcs_internal_watch_deliver_layer_event(
 				event, internal_effects);
+		} else if (event->target ==
+			   PKM_LCS_INTERNAL_WATCH_MACHINE_ROOT_FALLBACK) {
+			pkm_lcs_internal_watch_deliver_machine_root_fallback(
+				event);
 		}
 		list_del(&event->link);
 		pkm_lcs_internal_watch_event_path_destroy(event);
