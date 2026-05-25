@@ -34,6 +34,10 @@ extern int lcs_rust_write_backup_key_record_frame(
 	u8 *dst, size_t dst_len, const u8 *guid, u8 volatile_key, u8 symlink,
 	const u8 *security_descriptor, size_t security_descriptor_len,
 	s64 last_write_time_ns, size_t *written_out);
+extern int lcs_rust_write_backup_layer_manifest_record_frame(
+	u8 *dst, size_t dst_len, const struct pkm_lcs_runtime_limits *limits,
+	const u8 *name, size_t name_len, u32 precedence, u8 enabled,
+	const u8 *owner_sid, size_t owner_sid_len, size_t *written_out);
 
 static const u8 pkm_lcs_kunit_system_sid[] = {
 	0x01, 0x01, 0x00, 0x00,
@@ -18174,6 +18178,37 @@ static int pkm_lcs_kunit_restore_stream_append_key_record(
 	return pkm_lcs_kunit_restore_stream_append(input, frame, written);
 }
 
+struct pkm_lcs_kunit_restore_layer_record {
+	const char *name;
+	u32 precedence;
+	u8 enabled;
+	const u8 *owner_sid;
+	size_t owner_sid_len;
+};
+
+static int pkm_lcs_kunit_restore_stream_append_layer_record(
+	struct pkm_lcs_kunit_restore_input_file *input,
+	const struct pkm_lcs_kunit_restore_layer_record *layer)
+{
+	struct pkm_lcs_runtime_limits limits = { };
+	u8 frame[256];
+	size_t written = 0;
+	int ret;
+
+	if (!input || !layer || !layer->name || !layer->owner_sid)
+		return -EINVAL;
+	ret = pkm_lcs_runtime_limits_defaults(&limits);
+	if (ret)
+		return ret;
+	ret = lcs_rust_write_backup_layer_manifest_record_frame(
+		frame, sizeof(frame), &limits, (const u8 *)layer->name,
+		strlen(layer->name), layer->precedence, layer->enabled,
+		layer->owner_sid, layer->owner_sid_len, &written);
+	if (ret)
+		return ret;
+	return pkm_lcs_kunit_restore_stream_append(input, frame, written);
+}
+
 static int pkm_lcs_kunit_restore_stream_build_with_root_keys(
 	struct pkm_lcs_kunit_restore_input_file *input, bool include_unknown,
 	u32 root_key_count, bool root_volatile, bool root_symlink);
@@ -18253,6 +18288,103 @@ static int pkm_lcs_kunit_restore_stream_build_with_root_keys(
 			root_volatile, root_symlink);
 		if (ret)
 			return ret;
+	}
+
+	trailer_offset = input->len;
+	ret = pkm_lcs_kunit_restore_stream_append_record_header(
+		input, REG_BACKUP_TRAILER,
+		6 + sizeof(u64) + SHA256_DIGEST_SIZE);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_u64(input, record_count);
+	if (ret)
+		return ret;
+	memset(checksum, 0, sizeof(checksum));
+	ret = pkm_lcs_kunit_restore_stream_append(input, checksum,
+						  sizeof(checksum));
+	if (ret)
+		return ret;
+
+	sha256_init(&checksum_ctx);
+	sha256_update(&checksum_ctx, input->data,
+		      trailer_offset + 6 + sizeof(u64));
+	sha256_final(&checksum_ctx, checksum);
+	memcpy(input->data + trailer_offset + 6 + sizeof(u64), checksum,
+	       sizeof(checksum));
+	return 0;
+}
+
+static int pkm_lcs_kunit_restore_stream_build_with_layers(
+	struct pkm_lcs_kunit_restore_input_file *input,
+	const struct pkm_lcs_kunit_restore_layer_record *layers,
+	u32 layer_count, bool layer_after_key)
+{
+	static const char hive_name[] = "Machine";
+	struct sha256_ctx checksum_ctx;
+	u8 checksum[SHA256_DIGEST_SIZE];
+	size_t trailer_offset;
+	u64 record_count = 2 + 1 + layer_count;
+	u32 header_len = 6 + 8 + 4 + 4 + 8 + PKM_LCS_GUID_BYTES + 4 +
+			 sizeof(hive_name) - 1;
+	u32 i;
+	int ret;
+
+	if (!input || (!layers && layer_count))
+		return -EINVAL;
+	memset(input, 0, sizeof(*input));
+
+	ret = pkm_lcs_kunit_restore_stream_append_record_header(
+		input, REG_BACKUP_HEADER, header_len);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append(
+		input, REG_BACKUP_MAGIC, sizeof(REG_BACKUP_MAGIC) - 1);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_u32(input, 21U);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_u32(input, 21U);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_s64(input, 1234);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append(
+		input, pkm_lcs_kunit_restore_header_root_guid,
+		sizeof(pkm_lcs_kunit_restore_header_root_guid));
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_u32(
+		input, sizeof(hive_name) - 1);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append(
+		input, hive_name, sizeof(hive_name) - 1);
+	if (ret)
+		return ret;
+
+	if (!layer_after_key) {
+		for (i = 0; i < layer_count; i++) {
+			ret = pkm_lcs_kunit_restore_stream_append_layer_record(
+				input, &layers[i]);
+			if (ret)
+				return ret;
+		}
+	}
+
+	ret = pkm_lcs_kunit_restore_stream_append_key_record(
+		input, pkm_lcs_kunit_restore_header_root_guid, false, false);
+	if (ret)
+		return ret;
+
+	if (layer_after_key) {
+		for (i = 0; i < layer_count; i++) {
+			ret = pkm_lcs_kunit_restore_stream_append_layer_record(
+				input, &layers[i]);
+			if (ret)
+				return ret;
+		}
 	}
 
 	trailer_offset = input->len;
@@ -20375,6 +20507,174 @@ static void pkm_lcs_kunit_key_fd_restore_stream_root_flags_conflict(
 			0);
 	pkm_lcs_kunit_expect_restore_root_flag_result(
 		test, &input, (long)-EINVAL, false, false);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_layer_duplicate_manifest(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_restore_layer_record layers[] = {
+		{ .name = "Policy", .precedence = 0, .enabled = 1,
+		  .owner_sid = pkm_lcs_kunit_everyone_sid,
+		  .owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid) },
+		{ .name = "policy", .precedence = 0, .enabled = 1,
+		  .owner_sid = pkm_lcs_kunit_everyone_sid,
+		  .owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid) },
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_layers(
+				&input, layers, ARRAY_SIZE(layers), false),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_layer_after_key_denied(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "Policy",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_layers(
+				&input, &layer, 1, true),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_layer_high_precedence_requires_tcb(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "Policy",
+		.precedence = 42,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_layers(
+				&input, &layer, 1, false),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EPERM);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_layer_existing_high_requires_tcb(
+	struct kunit *test)
+{
+	static const u8 metadata_guid[PKM_LCS_GUID_BYTES] = { 0x71 };
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "policy",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	pkm_lcs_kunit_reset_layer_table();
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"Policy", strlen("Policy"), 7, 1,
+				metadata_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_everyone_sid,
+				sizeof(pkm_lcs_kunit_everyone_sid)),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_layers(
+				&input, &layer, 1, false),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EPERM);
+	pkm_lcs_kunit_reset_layer_table();
+}
+
+static void pkm_lcs_kunit_key_fd_restore_layer_tcb_marks_used(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "Policy",
+		.precedence = 42,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	struct pkm_kacs_boot_snapshot after = { };
+	struct reg_restore_args args = { };
+	struct pkm_lcs_kunit_restore_txn_source_script script = {
+		.begin_status = RSI_OK,
+		.abort_status = RSI_OK,
+		.expect_read_key = true,
+		.read_key = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.name = "Software",
+		},
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const void *source_token;
+	long key_fd;
+	int input_fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE,
+		KACS_SE_RESTORE_PRIVILEGE | KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_layers(
+				&input, &layer, 1, false),
+			0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(&input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+	args.input_fd = input_fd;
+
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_restore_txn_source_thread, &script,
+		"pkm-lcs-kunit-restore-layer-tcb");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, token, &args),
+			(long)-EOPNOTSUPP);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_TRUE(test, script.saw_abort);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used &
+				      KACS_SE_RESTORE_PRIVILEGE,
+			KACS_SE_RESTORE_PRIVILEGE);
+	KUNIT_EXPECT_EQ(test, after.privileges_used & KACS_SE_TCB_PRIVILEGE,
+			KACS_SE_TCB_PRIVILEGE);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(source_token);
 }
 
 static void pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream(
@@ -48296,6 +48596,11 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_missing_root_key),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_duplicate_root_key),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_root_flags_conflict),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_duplicate_manifest),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_after_key_denied),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_high_precedence_requires_tcb),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_existing_high_requires_tcb),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_tcb_marks_used),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_fails_before_source),

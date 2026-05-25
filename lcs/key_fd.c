@@ -250,6 +250,26 @@ struct pkm_lcs_backup_key_record_view {
 	u8 _pad[6];
 };
 
+struct pkm_lcs_backup_layer_manifest_record_view {
+	u32 name_offset;
+	u32 name_len;
+	u32 owner_offset;
+	u32 owner_len;
+	u32 precedence;
+	u8 enabled;
+	u8 _pad[3];
+};
+
+struct pkm_lcs_backup_layer_manifest_view {
+	const char *name;
+	const u8 *owner_sid;
+	u32 name_len;
+	u32 owner_sid_len;
+	u32 precedence;
+	u8 enabled;
+	u8 _pad[3];
+};
+
 extern int lcs_rust_validate_key_fd_open_view(
 	const u8 *key_guid, u32 granted_access,
 	const struct pkm_lcs_key_fd_string_view *path_components,
@@ -303,6 +323,15 @@ extern int lcs_rust_validate_backup_trailer_record(
 extern int lcs_rust_parse_backup_key_record(
 	const u8 *frame, size_t frame_len,
 	struct pkm_lcs_backup_key_record_view *result_out);
+extern int lcs_rust_parse_backup_layer_manifest_record(
+	const struct pkm_lcs_runtime_limits *limits, const u8 *frame,
+	size_t frame_len,
+	struct pkm_lcs_backup_layer_manifest_record_view *result_out);
+extern int lcs_rust_plan_backup_restore_layer_precedence_gate(
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_backup_layer_manifest_view *manifests,
+	size_t manifest_count, const struct pkm_lcs_rsi_layer_view *layers,
+	size_t layer_count, u8 caller_has_tcb, u8 *tcb_required_out);
 extern int lcs_rust_security_descriptor_owner_sid(
 	const u8 *security_descriptor, size_t security_descriptor_len,
 	const u8 **owner_sid_out, size_t *owner_sid_len_out);
@@ -5142,12 +5171,115 @@ struct pkm_lcs_backup_child_sections {
 	u32 capacity;
 };
 
+struct pkm_lcs_restore_layer_manifest {
+	char *name;
+	u8 *owner_sid;
+	u32 name_len;
+	u32 owner_sid_len;
+	u32 precedence;
+	u8 enabled;
+	u8 _pad[3];
+};
+
+struct pkm_lcs_restore_layer_manifest_set {
+	struct pkm_lcs_restore_layer_manifest *entries;
+	u32 count;
+	u32 capacity;
+};
+
 struct pkm_lcs_restore_root_key_summary {
 	u8 header_root_guid[PKM_LCS_GUID_BYTES];
+	struct pkm_lcs_restore_layer_manifest_set layer_manifests;
 	bool root_key_seen;
+	bool key_data_started;
 	u8 root_volatile;
 	u8 root_symlink;
 };
+
+static void pkm_lcs_restore_layer_manifest_set_destroy(
+	struct pkm_lcs_restore_layer_manifest_set *set)
+{
+	u32 i;
+
+	if (!set)
+		return;
+	for (i = 0; i < set->count; i++) {
+		kfree(set->entries[i].name);
+		kfree(set->entries[i].owner_sid);
+	}
+	kfree(set->entries);
+	memset(set, 0, sizeof(*set));
+}
+
+static void pkm_lcs_restore_root_key_summary_destroy(
+	struct pkm_lcs_restore_root_key_summary *summary)
+{
+	if (!summary)
+		return;
+	pkm_lcs_restore_layer_manifest_set_destroy(&summary->layer_manifests);
+}
+
+static long pkm_lcs_restore_layer_manifest_set_append(
+	struct pkm_lcs_restore_layer_manifest_set *set,
+	const struct pkm_lcs_runtime_limits *limits, const u8 *frame,
+	u32 record_len,
+	const struct pkm_lcs_backup_layer_manifest_record_view *view)
+{
+	struct pkm_lcs_restore_layer_manifest *entries;
+	struct pkm_lcs_restore_layer_manifest *entry;
+	size_t name_end;
+	size_t owner_end;
+	char *name;
+	u8 *owner_sid;
+
+	if (!set || !limits || !frame || !view)
+		return -EINVAL;
+	if (set->count >= limits->max_total_layers)
+		return -ENOSPC;
+	if (check_add_overflow((size_t)view->name_offset,
+			       (size_t)view->name_len, &name_end) ||
+	    name_end > record_len)
+		return -EINVAL;
+	if (check_add_overflow((size_t)view->owner_offset,
+			       (size_t)view->owner_len, &owner_end) ||
+	    owner_end > record_len)
+		return -EINVAL;
+
+	if (set->count == set->capacity) {
+		u32 new_capacity = set->capacity ? set->capacity * 2U : 4U;
+
+		if (new_capacity < set->capacity ||
+		    new_capacity > limits->max_total_layers)
+			new_capacity = limits->max_total_layers;
+		entries = krealloc_array(set->entries, new_capacity,
+					 sizeof(*entries), GFP_KERNEL);
+		if (!entries)
+			return -ENOMEM;
+		set->entries = entries;
+		set->capacity = new_capacity;
+	}
+
+	name = kmemdup_nul(frame + view->name_offset, view->name_len,
+			   GFP_KERNEL);
+	if (!name)
+		return -ENOMEM;
+	owner_sid = kmemdup(frame + view->owner_offset, view->owner_len,
+			    GFP_KERNEL);
+	if (!owner_sid) {
+		kfree(name);
+		return -ENOMEM;
+	}
+
+	entry = &set->entries[set->count++];
+	entry->name = name;
+	entry->owner_sid = owner_sid;
+	entry->name_len = view->name_len;
+	entry->owner_sid_len = view->owner_len;
+	entry->precedence = view->precedence;
+	entry->enabled = view->enabled ? 1 : 0;
+	memset(entry->_pad, 0, sizeof(entry->_pad));
+	return 0;
+}
 
 static long pkm_lcs_restore_read_exact(struct file *file, loff_t *posp,
 				       u8 *buf, size_t len)
@@ -5295,6 +5427,78 @@ static long pkm_lcs_restore_key_frame_max_len(size_t *max_len_out)
 	return 0;
 }
 
+static long pkm_lcs_restore_layer_frame_max_len(
+	const struct pkm_lcs_runtime_limits *limits, size_t *max_len_out)
+{
+	size_t max_len;
+
+	if (!limits || !max_len_out)
+		return -EINVAL;
+	if (check_add_overflow((size_t)PKM_LCS_BACKUP_RECORD_HEADER_LEN,
+			       (size_t)4, &max_len))
+		return -EOVERFLOW;
+	if (check_add_overflow(max_len,
+			       (size_t)limits->max_path_component_length,
+			       &max_len))
+		return -EOVERFLOW;
+	if (check_add_overflow(max_len, (size_t)sizeof(u32) + 1U +
+			       sizeof(u32) + PKM_LCS_MAX_SD_BYTES,
+			       &max_len))
+		return -EOVERFLOW;
+	*max_len_out = max_len;
+	return 0;
+}
+
+static long pkm_lcs_restore_validate_layer_record(
+	struct file *file, loff_t *posp, struct sha256_ctx *checksum,
+	const u8 common_header[6], u32 record_len,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_restore_root_key_summary *summary)
+{
+	struct pkm_lcs_backup_layer_manifest_record_view manifest = { };
+	size_t max_frame_len = 0;
+	size_t payload_len;
+	u8 *frame;
+	long ret;
+
+	if (!file || !checksum || !limits || !summary)
+		return -EINVAL;
+	if (summary->key_data_started)
+		return -EINVAL;
+
+	ret = pkm_lcs_restore_layer_frame_max_len(limits, &max_frame_len);
+	if (ret)
+		return ret;
+	if ((size_t)record_len > max_frame_len)
+		return -EINVAL;
+	payload_len = (size_t)record_len - PKM_LCS_BACKUP_RECORD_HEADER_LEN;
+
+	frame = kmalloc(record_len, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	memcpy(frame, common_header, PKM_LCS_BACKUP_RECORD_HEADER_LEN);
+
+	ret = pkm_lcs_restore_read_exact(
+		file, posp, frame + PKM_LCS_BACKUP_RECORD_HEADER_LEN,
+		payload_len);
+	if (ret)
+		goto out_free;
+
+	sha256_update(checksum, frame, record_len);
+	ret = lcs_rust_parse_backup_layer_manifest_record(
+		limits, frame, record_len, &manifest);
+	if (ret)
+		goto out_free;
+
+	ret = pkm_lcs_restore_layer_manifest_set_append(
+		&summary->layer_manifests, limits, frame, record_len,
+		&manifest);
+
+out_free:
+	kfree(frame);
+	return ret;
+}
+
 static long pkm_lcs_restore_validate_key_record(
 	struct file *file, loff_t *posp, struct sha256_ctx *checksum,
 	const u8 common_header[6], u32 record_len,
@@ -5331,6 +5535,7 @@ static long pkm_lcs_restore_validate_key_record(
 	ret = lcs_rust_parse_backup_key_record(frame, record_len, &key);
 	if (ret)
 		goto out_free;
+	summary->key_data_started = true;
 
 	if (!memcmp(key.guid, summary->header_root_guid, PKM_LCS_GUID_BYTES)) {
 		if (summary->root_key_seen) {
@@ -5495,6 +5700,15 @@ static long pkm_lcs_restore_validate_stream_file(
 			continue;
 		}
 
+		if (record_type == REG_BACKUP_LAYER) {
+			ret = pkm_lcs_restore_validate_layer_record(
+				file, posp, &checksum, common_header,
+				record_len, limits, summary);
+			if (ret)
+				goto out_finish;
+			continue;
+		}
+
 		sha256_update(&checksum, common_header,
 			      PKM_LCS_BACKUP_RECORD_HEADER_LEN);
 		ret = pkm_lcs_restore_hash_and_skip_body(file, posp,
@@ -5528,6 +5742,139 @@ static long pkm_lcs_key_fd_restore_validate_input_stream(
 		return ret;
 	ret = pkm_lcs_restore_validate_stream_file(file, limits, summary);
 	fdput_pos(held);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_restore_layer_manifest_views(
+	const struct pkm_lcs_restore_layer_manifest_set *set,
+	struct pkm_lcs_backup_layer_manifest_view **views_out)
+{
+	struct pkm_lcs_backup_layer_manifest_view *views;
+	u32 i;
+
+	if (!set || !views_out)
+		return -EINVAL;
+	*views_out = NULL;
+	if (!set->count)
+		return 0;
+
+	views = kcalloc(set->count, sizeof(*views), GFP_KERNEL);
+	if (!views)
+		return -ENOMEM;
+	for (i = 0; i < set->count; i++) {
+		views[i].name = set->entries[i].name;
+		views[i].owner_sid = set->entries[i].owner_sid;
+		views[i].name_len = set->entries[i].name_len;
+		views[i].owner_sid_len = set->entries[i].owner_sid_len;
+		views[i].precedence = set->entries[i].precedence;
+		views[i].enabled = set->entries[i].enabled;
+	}
+	*views_out = views;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_restore_snapshot_layers(
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_rsi_layer_view **layers_out, char **name_buf_out,
+	u32 *layer_count_out)
+{
+	struct pkm_lcs_rsi_layer_view *layers;
+	char *name_buf = NULL;
+	size_t name_stride;
+	size_t name_buf_len;
+	u32 layer_count = 0;
+	long ret;
+
+	if (!limits || !layers_out || !name_buf_out || !layer_count_out)
+		return -EINVAL;
+	*layers_out = NULL;
+	*name_buf_out = NULL;
+	*layer_count_out = 0;
+	if (!limits->max_total_layers)
+		return -ENOSPC;
+
+	layers = kcalloc(limits->max_total_layers, sizeof(*layers),
+			 GFP_KERNEL);
+	if (!layers)
+		return -ENOMEM;
+	if (check_add_overflow((size_t)limits->max_path_component_length,
+			       (size_t)1, &name_stride) ||
+	    check_mul_overflow((size_t)limits->max_total_layers,
+			       name_stride, &name_buf_len)) {
+		ret = -EOVERFLOW;
+		goto out_layers;
+	}
+	if (name_buf_len) {
+		name_buf = kzalloc(name_buf_len, GFP_KERNEL);
+		if (!name_buf) {
+			ret = -ENOMEM;
+			goto out_layers;
+		}
+	}
+
+	ret = pkm_lcs_source_layer_snapshot_copy(
+		layers, limits->max_total_layers, name_buf, name_buf_len,
+		&layer_count);
+	if (ret)
+		goto out_name_buf;
+
+	*layers_out = layers;
+	*name_buf_out = name_buf;
+	*layer_count_out = layer_count;
+	return 0;
+
+out_name_buf:
+	kfree(name_buf);
+out_layers:
+	kfree(layers);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_restore_validate_layer_precedence(
+	const void *token, const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_restore_layer_manifest_set *set)
+{
+	struct pkm_lcs_backup_layer_manifest_view *manifests = NULL;
+	struct pkm_lcs_rsi_layer_view *layers = NULL;
+	char *name_buf = NULL;
+	u32 layer_count = 0;
+	u8 caller_has_tcb;
+	u8 tcb_required = 0;
+	long ret;
+
+	if (!limits || !set)
+		return -EINVAL;
+	if (!set->count)
+		return 0;
+
+	ret = pkm_lcs_key_fd_restore_layer_manifest_views(set, &manifests);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_key_fd_restore_snapshot_layers(limits, &layers,
+						    &name_buf, &layer_count);
+	if (ret)
+		goto out_manifests;
+
+	caller_has_tcb = token &&
+			 kacs_rust_token_has_enabled_privilege(
+				 token, KACS_SE_TCB_PRIVILEGE) ? 1 : 0;
+	ret = lcs_rust_plan_backup_restore_layer_precedence_gate(
+		limits, manifests, set->count, layers, layer_count,
+		caller_has_tcb, &tcb_required);
+	if (ret)
+		goto out_layers;
+	if (tcb_required) {
+		ret = pkm_lcs_key_fd_mark_privilege_used(
+			token, KACS_SE_TCB_PRIVILEGE);
+		if (ret)
+			goto out_layers;
+	}
+
+out_layers:
+	kfree(name_buf);
+	kfree(layers);
+out_manifests:
+	kfree(manifests);
 	return ret;
 }
 
@@ -7598,7 +7945,7 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 	const struct reg_restore_args *args)
 {
 	struct pkm_lcs_runtime_limits limits;
-	struct pkm_lcs_restore_root_key_summary root_summary;
+	struct pkm_lcs_restore_root_key_summary root_summary = { };
 	u64 transaction_id = 0;
 	bool restore_started = false;
 	bool start_audit_failed = false;
@@ -7648,6 +7995,11 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 	if (ret)
 		goto out_abort_transaction;
 
+	ret = pkm_lcs_key_fd_restore_validate_layer_precedence(
+		token, &limits, &root_summary.layer_manifests);
+	if (ret)
+		goto out_abort_transaction;
+
 	ret = pkm_lcs_key_fd_restore_validate_root_flags(
 		key_fd, transaction_id, &limits, &root_summary);
 	if (ret)
@@ -7656,6 +8008,7 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 	ret = -EOPNOTSUPP;
 
 out_abort_transaction:
+	pkm_lcs_restore_root_key_summary_destroy(&root_summary);
 	{
 		long abort_ret;
 

@@ -17,7 +17,8 @@ use crate::lcs_core::{
     parse_rsi_lookup_success_response_payload, parse_rsi_enum_children_success_response_payload,
     parse_rsi_query_values_success_response_payload, parse_rsi_read_key_success_response_payload,
     parse_rsi_request_header, plan_backup_complete_audit_record, plan_backup_restore_fd_mode,
-    plan_backup_start_audit_record, plan_key_guid_assignment, plan_key_open_audit_record,
+    plan_backup_restore_layer_precedence_gate, plan_backup_start_audit_record,
+    plan_key_guid_assignment, plan_key_open_audit_record,
     plan_restore_complete_audit_record, plan_restore_start_audit_record,
     plan_source_validation_failure_audit_record, plan_layer_publication,
     plan_layer_target_admission, plan_registry_get_security,
@@ -52,7 +53,8 @@ use crate::lcs_core::{
     self_config_audit_intent, self_config_invalid_audit_payload_len,
     source_validation_failure_audit_payload_len, validate_config_value,
     write_backup_restore_complete_audit_payload, write_backup_restore_start_audit_payload,
-    parse_backup_header_record, parse_backup_key_record, parse_backup_trailer_record,
+    parse_backup_header_record, parse_backup_key_record, parse_backup_layer_manifest_record,
+    parse_backup_trailer_record,
     write_backup_blanket_tombstone_record_frame, write_backup_header_record_frame,
     write_backup_key_record_frame, write_backup_layer_manifest_record_frame,
     write_backup_path_entry_record_frame, write_backup_trailer_record_frame,
@@ -68,7 +70,8 @@ use crate::lcs_core::{
     write_rsi_lookup_request_frame, write_rsi_query_values_request_frame,
     write_rsi_read_key_request_frame, write_rsi_set_blanket_tombstone_request_frame,
     write_rsi_set_value_request_frame, write_rsi_write_key_request_frame,
-    BackupRestoreFdOperation, BlanketTombstoneEntry, CurrentUserRewrite,
+    BackupLayerManifestPayload, BackupRestoreFdOperation, BlanketTombstoneEntry,
+    CurrentUserRewrite,
     HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest, KeyWatchState,
     LayerOwnerSelectionInput, LayerOwnerSource, LayerPublicationInput, LayerResolutionContext,
     LayerTargetAdmissionInput, LayerView,
@@ -415,6 +418,28 @@ pub struct PkmLcsBackupKeyRecordViewCopy {
     pub volatile_key: u8,
     pub symlink: u8,
     pub _pad: [u8; 6],
+}
+
+#[repr(C)]
+pub struct PkmLcsBackupLayerManifestRecordViewCopy {
+    pub name_offset: u32,
+    pub name_len: u32,
+    pub owner_offset: u32,
+    pub owner_len: u32,
+    pub precedence: u32,
+    pub enabled: u8,
+    pub _pad: [u8; 3],
+}
+
+#[repr(C)]
+pub struct PkmLcsBackupLayerManifestViewCopy {
+    pub name: *const u8,
+    pub owner_sid: *const u8,
+    pub name_len: u32,
+    pub owner_sid_len: u32,
+    pub precedence: u32,
+    pub enabled: u8,
+    pub _pad: [u8; 3],
 }
 
 #[repr(C)]
@@ -2227,6 +2252,115 @@ pub unsafe extern "C" fn lcs_rust_parse_backup_key_record(
             0
         }
         Err(err) => backup_restore_reader_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_parse_backup_layer_manifest_record(
+    limits_raw: *const PkmLcsRuntimeLimitsCopy,
+    frame: *const u8,
+    frame_len: usize,
+    result_out: *mut PkmLcsBackupLayerManifestRecordViewCopy,
+) -> c_int {
+    if frame.is_null() || result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let limits = match lcs_limits_from_copy(limits_raw) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let frame = unsafe { slice::from_raw_parts(frame, frame_len) };
+    match parse_backup_layer_manifest_record(&limits, frame) {
+        Ok(manifest) => {
+            let (name_offset, name_len) =
+                match retained_frame_slice_offset(frame, manifest.name.as_bytes()) {
+                    Ok(value) => value,
+                    Err(errno) => return errno.negated_return() as c_int,
+                };
+            let (owner_offset, owner_len) =
+                match retained_frame_slice_offset(frame, manifest.owner_sid) {
+                    Ok(value) => value,
+                    Err(errno) => return errno.negated_return() as c_int,
+                };
+            unsafe {
+                *result_out = PkmLcsBackupLayerManifestRecordViewCopy {
+                    name_offset,
+                    name_len,
+                    owner_offset,
+                    owner_len,
+                    precedence: manifest.precedence,
+                    enabled: if manifest.enabled { 1 } else { 0 },
+                    _pad: [0; 3],
+                };
+            }
+            0
+        }
+        Err(err) => backup_restore_reader_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_plan_backup_restore_layer_precedence_gate(
+    limits_raw: *const PkmLcsRuntimeLimitsCopy,
+    manifests: *const PkmLcsBackupLayerManifestViewCopy,
+    manifest_count: usize,
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+    caller_has_tcb: u8,
+    tcb_required_out: *mut u8,
+) -> c_int {
+    if tcb_required_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    unsafe {
+        *tcb_required_out = 0;
+    }
+    if manifest_count != 0 && manifests.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if layer_count != 0 && layers.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let limits = match lcs_limits_from_copy(limits_raw) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let parsed_manifests = match parse_backup_layer_manifest_views(manifests, manifest_count) {
+        Ok(parsed) => parsed,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let parsed_layers = match parse_layer_views(layers, layer_count) {
+        Ok(parsed) => parsed,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let caller_has_tcb = match caller_has_tcb {
+        0 => false,
+        1 => true,
+        _ => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+
+    match plan_backup_restore_layer_precedence_gate(
+        &limits,
+        parsed_manifests.as_slice(),
+        parsed_layers.as_slice(),
+        caller_has_tcb,
+    ) {
+        Ok(plan) => {
+            unsafe {
+                *tcb_required_out = if plan.tcb_required_for_precedence {
+                    1
+                } else {
+                    0
+                };
+            }
+            0
+        }
+        Err(LcsError::MissingLayerPrecedenceTcb) => {
+            LinuxErrno::Eperm.negated_return() as c_int
+        }
+        Err(_) => LinuxErrno::Einval.negated_return() as c_int,
     }
 }
 
@@ -7586,6 +7720,41 @@ fn parse_layer_views<'a>(
                 name,
                 precedence: raw.precedence,
                 enabled,
+            })
+            .map_err(|_| LinuxErrno::Enomem)?;
+    }
+
+    Ok(parsed)
+}
+
+fn parse_backup_layer_manifest_views<'a>(
+    manifests: *const PkmLcsBackupLayerManifestViewCopy,
+    manifest_count: usize,
+) -> Result<PkmVec<BackupLayerManifestPayload<'a>>, LinuxErrno> {
+    let mut parsed = PkmVec::with_capacity(manifest_count).map_err(|_| LinuxErrno::Enomem)?;
+
+    for index in 0..manifest_count {
+        let raw = unsafe { &*manifests.add(index) };
+        if raw.name.is_null() || raw.owner_sid.is_null() {
+            return Err(LinuxErrno::Einval);
+        }
+
+        let name_bytes = unsafe { slice::from_raw_parts(raw.name, raw.name_len as usize) };
+        let owner_sid =
+            unsafe { slice::from_raw_parts(raw.owner_sid, raw.owner_sid_len as usize) };
+        let name = str::from_utf8(name_bytes).map_err(|_| LinuxErrno::Einval)?;
+        let enabled = match raw.enabled {
+            0 => false,
+            1 => true,
+            _ => return Err(LinuxErrno::Einval),
+        };
+
+        parsed
+            .push(BackupLayerManifestPayload {
+                name,
+                precedence: raw.precedence,
+                enabled,
+                owner_sid,
             })
             .map_err(|_| LinuxErrno::Enomem)?;
     }
