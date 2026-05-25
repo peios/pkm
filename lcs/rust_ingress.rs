@@ -72,7 +72,7 @@ use crate::lcs_core::{
     write_rsi_read_key_request_frame, write_rsi_set_blanket_tombstone_request_frame,
     write_rsi_set_value_request_frame, write_rsi_write_key_request_frame,
     BackupLayerManifestPayload, BackupRestoreFdOperation, BlanketTombstoneEntry,
-    CurrentUserRewrite,
+    CurrentUserRewrite, ValidatedValueType,
     HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest, KeyWatchState,
     LayerOwnerSelectionInput, LayerOwnerSource, LayerPublicationInput, LayerResolutionContext,
     LayerTargetAdmissionInput, LayerView,
@@ -441,6 +441,43 @@ pub struct PkmLcsBackupLayerManifestViewCopy {
     pub precedence: u32,
     pub enabled: u8,
     pub _pad: [u8; 3],
+}
+
+#[repr(C)]
+pub struct PkmLcsBackupPathEntryRecordViewCopy {
+    pub parent_guid: [u8; 16],
+    pub child_guid: [u8; 16],
+    pub child_name_offset: u32,
+    pub child_name_len: u32,
+    pub layer_offset: u32,
+    pub layer_len: u32,
+    pub sequence: u64,
+    pub hidden: u8,
+    pub _pad: [u8; 7],
+}
+
+#[repr(C)]
+pub struct PkmLcsBackupValueRecordViewCopy {
+    pub key_guid: [u8; 16],
+    pub name_offset: u32,
+    pub name_len: u32,
+    pub data_offset: u32,
+    pub data_len: u32,
+    pub layer_offset: u32,
+    pub layer_len: u32,
+    pub value_type: u32,
+    pub _pad: u32,
+    pub sequence: u64,
+}
+
+#[repr(C)]
+pub struct PkmLcsBackupBlanketTombstoneRecordViewCopy {
+    pub key_guid: [u8; 16],
+    pub layer_offset: u32,
+    pub layer_len: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub sequence: u64,
 }
 
 #[repr(C)]
@@ -2402,6 +2439,57 @@ pub unsafe extern "C" fn lcs_rust_validate_backup_path_entry_record_layer_manife
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lcs_rust_parse_backup_path_entry_record(
+    limits_raw: *const PkmLcsRuntimeLimitsCopy,
+    frame: *const u8,
+    frame_len: usize,
+    result_out: *mut PkmLcsBackupPathEntryRecordViewCopy,
+) -> c_int {
+    let limits = match lcs_limits_from_copy(limits_raw) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    if frame.is_null() || result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame = unsafe { slice::from_raw_parts(frame, frame_len) };
+    match parse_backup_path_entry_record(&limits, frame) {
+        Ok(record) => {
+            let (child_name_offset, child_name_len) =
+                match retained_frame_slice_offset(frame, record.child_name.as_bytes()) {
+                    Ok(value) => value,
+                    Err(errno) => return errno.negated_return() as c_int,
+                };
+            let (layer_offset, layer_len) =
+                match retained_frame_slice_offset(frame, record.layer_name.as_bytes()) {
+                    Ok(value) => value,
+                    Err(errno) => return errno.negated_return() as c_int,
+                };
+            let (child_guid, hidden) = match record.target {
+                PathTarget::Guid(guid) => (guid, 0),
+                PathTarget::Hidden => ([0; 16], 1),
+            };
+            unsafe {
+                *result_out = PkmLcsBackupPathEntryRecordViewCopy {
+                    parent_guid: record.parent_guid,
+                    child_guid,
+                    child_name_offset,
+                    child_name_len,
+                    layer_offset,
+                    layer_len,
+                    sequence: record.sequence,
+                    hidden,
+                    _pad: [0; 7],
+                };
+            }
+            0
+        }
+        Err(err) => backup_restore_reader_error_return(err),
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lcs_rust_validate_backup_value_record_layer_manifest(
     limits_raw: *const PkmLcsRuntimeLimitsCopy,
     manifests: *const PkmLcsBackupLayerManifestViewCopy,
@@ -2438,6 +2526,61 @@ pub unsafe extern "C" fn lcs_rust_validate_backup_value_record_layer_manifest(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lcs_rust_parse_backup_value_record(
+    limits_raw: *const PkmLcsRuntimeLimitsCopy,
+    frame: *const u8,
+    frame_len: usize,
+    result_out: *mut PkmLcsBackupValueRecordViewCopy,
+) -> c_int {
+    let limits = match lcs_limits_from_copy(limits_raw) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    if frame.is_null() || result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame = unsafe { slice::from_raw_parts(frame, frame_len) };
+    match parse_backup_value_record(&limits, frame) {
+        Ok(record) => {
+            let (name_offset, name_len) =
+                match retained_frame_slice_offset(frame, record.name.as_bytes()) {
+                    Ok(value) => value,
+                    Err(errno) => return errno.negated_return() as c_int,
+                };
+            let (data_offset, data_len) = match retained_frame_slice_offset(frame, record.data) {
+                Ok(value) => value,
+                Err(errno) => return errno.negated_return() as c_int,
+            };
+            let (layer_offset, layer_len) =
+                match retained_frame_slice_offset(frame, record.layer_name.as_bytes()) {
+                    Ok(value) => value,
+                    Err(errno) => return errno.negated_return() as c_int,
+                };
+            unsafe {
+                *result_out = PkmLcsBackupValueRecordViewCopy {
+                    key_guid: record.key_guid,
+                    name_offset,
+                    name_len,
+                    data_offset,
+                    data_len,
+                    layer_offset,
+                    layer_len,
+                    value_type: match record.value_type {
+                        ValidatedValueType::Normal(value_type) => value_type.code(),
+                        ValidatedValueType::Tombstone => REG_TOMBSTONE,
+                    },
+                    _pad: 0,
+                    sequence: record.sequence,
+                };
+            }
+            0
+        }
+        Err(err) => backup_restore_reader_error_return(err),
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lcs_rust_validate_backup_blanket_tombstone_record_layer_manifest(
     limits_raw: *const PkmLcsRuntimeLimitsCopy,
     manifests: *const PkmLcsBackupLayerManifestViewCopy,
@@ -2468,6 +2611,45 @@ pub unsafe extern "C" fn lcs_rust_validate_backup_blanket_tombstone_record_layer
                 Ok(_) => 0,
                 Err(err) => backup_restore_reader_error_return(err),
             }
+        }
+        Err(err) => backup_restore_reader_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_parse_backup_blanket_tombstone_record(
+    limits_raw: *const PkmLcsRuntimeLimitsCopy,
+    frame: *const u8,
+    frame_len: usize,
+    result_out: *mut PkmLcsBackupBlanketTombstoneRecordViewCopy,
+) -> c_int {
+    let limits = match lcs_limits_from_copy(limits_raw) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    if frame.is_null() || result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame = unsafe { slice::from_raw_parts(frame, frame_len) };
+    match parse_backup_blanket_tombstone_record(&limits, frame) {
+        Ok(record) => {
+            let (layer_offset, layer_len) =
+                match retained_frame_slice_offset(frame, record.layer_name.as_bytes()) {
+                    Ok(value) => value,
+                    Err(errno) => return errno.negated_return() as c_int,
+                };
+            unsafe {
+                *result_out = PkmLcsBackupBlanketTombstoneRecordViewCopy {
+                    key_guid: record.key_guid,
+                    layer_offset,
+                    layer_len,
+                    _pad0: 0,
+                    _pad1: 0,
+                    sequence: record.sequence,
+                };
+            }
+            0
         }
         Err(err) => backup_restore_reader_error_return(err),
     }

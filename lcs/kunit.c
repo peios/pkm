@@ -18282,7 +18282,13 @@ static int pkm_lcs_kunit_restore_stream_append_layer_record(
 struct pkm_lcs_kunit_restore_data_record {
 	u16 record_type;
 	const char *layer_name;
+	const u8 *parent_guid;
+	const u8 *child_guid;
+	const u8 *key_guid;
+	const char *child_name;
+	const char *value_name;
 	bool before_key;
+	bool hidden;
 };
 
 static int pkm_lcs_kunit_restore_stream_append_data_record(
@@ -18291,6 +18297,19 @@ static int pkm_lcs_kunit_restore_stream_append_data_record(
 {
 	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x62 };
 	static const u8 value_data[] = { 0x2a };
+	const u8 *effective_parent_guid = record->parent_guid ?
+						  record->parent_guid :
+						  pkm_lcs_kunit_restore_header_root_guid;
+	const u8 *effective_child_guid = record->child_guid ?
+						 record->child_guid :
+						 child_guid;
+	const u8 *effective_key_guid = record->key_guid ?
+					       record->key_guid :
+					       pkm_lcs_kunit_restore_header_root_guid;
+	const char *child_name = record->child_name ? record->child_name :
+						       "Child";
+	const char *value_name = record->value_name ? record->value_name :
+						       "Answer";
 	u8 *frame = NULL;
 	size_t frame_len = 0;
 	long ret;
@@ -18301,24 +18320,25 @@ static int pkm_lcs_kunit_restore_stream_append_data_record(
 	switch (record->record_type) {
 	case REG_BACKUP_PATH_ENTRY:
 		ret = pkm_lcs_kunit_backup_path_entry_frame(
-			pkm_lcs_kunit_restore_header_root_guid, "Child",
-			strlen("Child"), child_guid, false, record->layer_name,
-			strlen(record->layer_name), sequence, &frame,
+			effective_parent_guid, child_name, strlen(child_name),
+			effective_child_guid, record->hidden,
+			record->layer_name, strlen(record->layer_name), sequence,
+			&frame,
 			&frame_len);
 		break;
 	case REG_BACKUP_VALUE:
 		ret = pkm_lcs_kunit_backup_value_frame(
-			pkm_lcs_kunit_restore_header_root_guid, "Answer",
-			strlen("Answer"), REG_BINARY, value_data,
-			sizeof(value_data), record->layer_name,
+			effective_key_guid, value_name, strlen(value_name),
+			REG_BINARY, value_data, sizeof(value_data),
+			record->layer_name,
 			strlen(record->layer_name), sequence, &frame,
 			&frame_len);
 		break;
 	case REG_BACKUP_BLANKET_TOMBSTONE:
 		ret = pkm_lcs_kunit_backup_blanket_tombstone_frame(
-			pkm_lcs_kunit_restore_header_root_guid,
-			record->layer_name, strlen(record->layer_name),
-			sequence, &frame, &frame_len);
+			effective_key_guid, record->layer_name,
+			strlen(record->layer_name), sequence, &frame,
+			&frame_len);
 		break;
 	default:
 		return -EINVAL;
@@ -20862,7 +20882,8 @@ static void pkm_lcs_kunit_key_fd_restore_data_records_accept_manifest(
 		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
 	};
 	static const struct pkm_lcs_kunit_restore_data_record records[] = {
-		{ .record_type = REG_BACKUP_PATH_ENTRY, .layer_name = "base" },
+		{ .record_type = REG_BACKUP_PATH_ENTRY, .layer_name = "base",
+		  .hidden = true },
 		{ .record_type = REG_BACKUP_VALUE, .layer_name = "base" },
 		{ .record_type = REG_BACKUP_BLANKET_TOMBSTONE,
 		  .layer_name = "base" },
@@ -20882,7 +20903,8 @@ static void pkm_lcs_kunit_key_fd_restore_data_records_require_manifest(
 	struct kunit *test)
 {
 	static const struct pkm_lcs_kunit_restore_data_record records[] = {
-		{ .record_type = REG_BACKUP_PATH_ENTRY, .layer_name = "base" },
+		{ .record_type = REG_BACKUP_PATH_ENTRY, .layer_name = "base",
+		  .hidden = true },
 		{ .record_type = REG_BACKUP_VALUE, .layer_name = "base" },
 		{ .record_type = REG_BACKUP_BLANKET_TOMBSTONE,
 		  .layer_name = "base" },
@@ -20972,6 +20994,232 @@ static void pkm_lcs_kunit_key_fd_restore_data_value_after_blanket_denied(
 			pkm_lcs_kunit_restore_stream_build_with_data_records(
 				&input, &layer, 1, records,
 				ARRAY_SIZE(records)),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_topology_first_key_must_be_root(
+	struct kunit *test)
+{
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x64 };
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_restore_stream_append_header(&input),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, child_guid, false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_trailer(&input, 3),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_topology_duplicate_non_root_guid(
+	struct kunit *test)
+{
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x64 };
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record anchor = {
+		.record_type = REG_BACKUP_PATH_ENTRY,
+		.layer_name = "base",
+		.child_guid = child_guid,
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_restore_stream_append_header(&input),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_layer_record(
+				&input, &layer),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, pkm_lcs_kunit_restore_header_root_guid,
+				false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, child_guid, false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_data_record(
+				&input, &anchor, 1),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, child_guid, false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_data_record(
+				&input, &anchor, 2),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_trailer(&input, 7),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_topology_non_root_requires_anchor(
+	struct kunit *test)
+{
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x64 };
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_restore_stream_append_header(&input),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, pkm_lcs_kunit_restore_header_root_guid,
+				false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, child_guid, false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_trailer(&input, 4),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_topology_non_root_anchor_target(
+	struct kunit *test)
+{
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x64 };
+	static const u8 other_guid[PKM_LCS_GUID_BYTES] = { 0x65 };
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record wrong_anchor = {
+		.record_type = REG_BACKUP_PATH_ENTRY,
+		.layer_name = "base",
+		.child_guid = other_guid,
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_restore_stream_append_header(&input),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_layer_record(
+				&input, &layer),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, pkm_lcs_kunit_restore_header_root_guid,
+				false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, child_guid, false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_data_record(
+				&input, &wrong_anchor, 1),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_trailer(&input, 5),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_topology_parent_must_precede_child(
+	struct kunit *test)
+{
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x64 };
+	static const u8 outside_parent_guid[PKM_LCS_GUID_BYTES] = { 0x66 };
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record bad_parent = {
+		.record_type = REG_BACKUP_PATH_ENTRY,
+		.layer_name = "base",
+		.parent_guid = outside_parent_guid,
+		.child_guid = child_guid,
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_restore_stream_append_header(&input),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_layer_record(
+				&input, &layer),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, pkm_lcs_kunit_restore_header_root_guid,
+				false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, child_guid, false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_data_record(
+				&input, &bad_parent, 1),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_trailer(&input, 5),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_topology_value_scoped_to_section(
+	struct kunit *test)
+{
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x64 };
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record bad_value = {
+		.record_type = REG_BACKUP_VALUE,
+		.layer_name = "base",
+		.key_guid = child_guid,
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_restore_stream_append_header(&input),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_layer_record(
+				&input, &layer),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, pkm_lcs_kunit_restore_header_root_guid,
+				false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_data_record(
+				&input, &bad_value, 1),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_trailer(&input, 5),
 			0);
 	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
 						   (long)-EINVAL);
@@ -48906,6 +49154,12 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_data_before_key_denied),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_data_path_after_value_denied),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_data_value_after_blanket_denied),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_topology_first_key_must_be_root),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_topology_duplicate_non_root_guid),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_topology_non_root_requires_anchor),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_topology_non_root_anchor_target),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_topology_parent_must_precede_child),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_topology_value_scoped_to_section),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_fails_before_source),
