@@ -14,6 +14,7 @@
 
 struct pkm_lcs_usercopy_ops;
 struct pkm_lcs_runtime_limits;
+struct pkm_lcs_rsi_layer_view;
 
 struct pkm_lcs_key_fd_publish_input {
 	u32 source_id;
@@ -73,6 +74,11 @@ struct pkm_lcs_backup_path_entry_view {
 	u8 hidden;
 	u8 _pad[7];
 	u64 sequence;
+};
+
+struct pkm_lcs_backup_layer_ref_view {
+	u32 layer_index;
+	u32 _pad;
 };
 
 struct pkm_lcs_key_fd_relative_base {
@@ -302,6 +308,13 @@ long pkm_lcs_kunit_backup_enum_children_path_entries(
 	const u8 *frame, size_t frame_len, u64 request_id, u64 next_sequence,
 	struct pkm_lcs_backup_path_entry_view *entries, size_t entry_capacity,
 	u32 *entry_count_out);
+long pkm_lcs_kunit_backup_collect_referenced_layers(
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const u8 *enum_frame, size_t enum_frame_len, u64 enum_request_id,
+	const u8 *values_frame, size_t values_frame_len,
+	u64 values_request_id, u64 next_sequence,
+	struct pkm_lcs_backup_layer_ref_view *refs, size_t ref_capacity,
+	u32 *ref_count_out);
 long pkm_lcs_kunit_key_fd_restore_for_token(
 	int fd, const void *token, const struct reg_restore_args *args);
 long pkm_lcs_kunit_key_fd_flush(int fd);

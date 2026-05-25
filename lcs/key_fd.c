@@ -5035,6 +5035,11 @@ struct pkm_lcs_backup_output {
 	bool positional;
 };
 
+struct pkm_lcs_backup_referenced_layers {
+	const struct pkm_lcs_rsi_layer_view **layers;
+	u32 count;
+};
+
 static void pkm_lcs_backup_output_init(struct pkm_lcs_backup_output *output,
 				       struct file *file)
 {
@@ -5292,6 +5297,288 @@ out_owner:
 	return ret;
 }
 
+static void pkm_lcs_backup_referenced_layers_destroy(
+	struct pkm_lcs_backup_referenced_layers *refs)
+{
+	if (!refs)
+		return;
+	kfree(refs->layers);
+	refs->layers = NULL;
+	refs->count = 0;
+}
+
+static long pkm_lcs_backup_referenced_layers_init(
+	const struct pkm_lcs_layer_snapshot *snapshot,
+	struct pkm_lcs_backup_referenced_layers *refs)
+{
+	if (!snapshot || !refs)
+		return -EINVAL;
+	memset(refs, 0, sizeof(*refs));
+	if (!snapshot->layers || !snapshot->layer_count)
+		return -EIO;
+
+	refs->layers = kcalloc(snapshot->layer_count, sizeof(*refs->layers),
+			       GFP_KERNEL);
+	if (!refs->layers)
+		return -ENOMEM;
+	return 0;
+}
+
+static long pkm_lcs_backup_frame_field(const u8 *frame, size_t frame_len,
+				       u32 offset, u32 len,
+				       const char **field_out,
+				       u32 *field_len_out)
+{
+	if (!frame || !field_out || !field_len_out)
+		return -EINVAL;
+	if ((size_t)offset > frame_len ||
+	    (size_t)len > frame_len - (size_t)offset)
+		return -EIO;
+
+	*field_out = (const char *)frame + offset;
+	*field_len_out = len;
+	return 0;
+}
+
+static long pkm_lcs_backup_find_snapshot_layer(
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_layer_snapshot *snapshot, const char *name,
+	u32 name_len, const struct pkm_lcs_rsi_layer_view **layer_out)
+{
+	u32 i;
+
+	if (!limits || !snapshot || !snapshot->layers || !name || !name_len ||
+	    !layer_out)
+		return -EINVAL;
+	*layer_out = NULL;
+
+	for (i = 0; i < snapshot->layer_count; i++) {
+		const struct pkm_lcs_rsi_layer_view *layer =
+			&snapshot->layers[i];
+		bool equal = false;
+		long ret;
+
+		if (!layer->name || !layer->name_len)
+			return -EIO;
+		ret = pkm_lcs_key_fd_layer_name_casefold_equal_with_limits(
+			name, name_len, layer->name, layer->name_len, limits,
+			&equal);
+		if (ret)
+			return ret;
+		if (equal) {
+			*layer_out = layer;
+			return 0;
+		}
+	}
+
+	return -ENOENT;
+}
+
+static long pkm_lcs_backup_referenced_layers_add(
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_layer_snapshot *snapshot,
+	struct pkm_lcs_backup_referenced_layers *refs, const char *name,
+	u32 name_len)
+{
+	const struct pkm_lcs_rsi_layer_view *layer = NULL;
+	u32 i;
+	long ret;
+
+	if (!refs || !refs->layers)
+		return -EINVAL;
+
+	ret = pkm_lcs_backup_find_snapshot_layer(limits, snapshot, name,
+						 name_len, &layer);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < refs->count; i++) {
+		if (refs->layers[i] == layer)
+			return 0;
+	}
+	if (refs->count >= snapshot->layer_count)
+		return -EOVERFLOW;
+
+	refs->layers[refs->count++] = layer;
+	return 0;
+}
+
+static long pkm_lcs_backup_collect_enum_child_layers(
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_layer_snapshot *snapshot,
+	struct pkm_lcs_backup_referenced_layers *refs, const u8 *frame,
+	size_t frame_len, u64 request_id, u64 next_sequence)
+{
+	struct pkm_lcs_backup_path_entry_view *entries = NULL;
+	u32 entry_count = 0;
+	u32 actual_count = 0;
+	u32 i;
+	long ret;
+
+	ret = lcs_rust_materialize_rsi_enum_children_backup_path_entries(
+		frame, frame_len, request_id, next_sequence, limits, NULL, 0,
+		&entry_count);
+	if (ret && ret != -ERANGE)
+		return ret;
+	if (!entry_count)
+		return 0;
+
+	entries = kcalloc(entry_count, sizeof(*entries), GFP_KERNEL);
+	if (!entries)
+		return -ENOMEM;
+	actual_count = entry_count;
+	ret = lcs_rust_materialize_rsi_enum_children_backup_path_entries(
+		frame, frame_len, request_id, next_sequence, limits, entries,
+		entry_count, &actual_count);
+	if (ret)
+		goto out;
+	if (actual_count != entry_count) {
+		ret = -EIO;
+		goto out;
+	}
+
+	for (i = 0; i < entry_count; i++) {
+		const char *layer_name = NULL;
+		u32 layer_name_len = 0;
+
+		ret = pkm_lcs_backup_frame_field(
+			frame, frame_len, entries[i].layer_offset,
+			entries[i].layer_len, &layer_name, &layer_name_len);
+		if (ret)
+			goto out;
+		ret = pkm_lcs_backup_referenced_layers_add(
+			limits, snapshot, refs, layer_name, layer_name_len);
+		if (ret)
+			goto out;
+	}
+
+out:
+	kfree(entries);
+	return ret;
+}
+
+static long pkm_lcs_backup_collect_query_value_layers(
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_layer_snapshot *snapshot,
+	struct pkm_lcs_backup_referenced_layers *refs, const u8 *frame,
+	size_t frame_len, u64 request_id, u64 next_sequence)
+{
+	struct pkm_lcs_backup_value_entry_view *values = NULL;
+	struct pkm_lcs_backup_blanket_entry_view *blankets = NULL;
+	u32 value_count = 0;
+	u32 blanket_count = 0;
+	u32 actual_value_count = 0;
+	u32 actual_blanket_count = 0;
+	u32 i;
+	long ret;
+
+	ret = lcs_rust_materialize_rsi_query_values_backup_entries(
+		frame, frame_len, request_id, next_sequence, limits, NULL, 0,
+		NULL, 0, &value_count, &blanket_count);
+	if (ret && ret != -ERANGE)
+		return ret;
+	if (!value_count && !blanket_count)
+		return 0;
+
+	if (value_count) {
+		values = kcalloc(value_count, sizeof(*values), GFP_KERNEL);
+		if (!values)
+			return -ENOMEM;
+	}
+	if (blanket_count) {
+		blankets = kcalloc(blanket_count, sizeof(*blankets),
+				   GFP_KERNEL);
+		if (!blankets) {
+			ret = -ENOMEM;
+			goto out;
+		}
+	}
+
+	actual_value_count = value_count;
+	actual_blanket_count = blanket_count;
+	ret = lcs_rust_materialize_rsi_query_values_backup_entries(
+		frame, frame_len, request_id, next_sequence, limits, values,
+		value_count, blankets, blanket_count, &actual_value_count,
+		&actual_blanket_count);
+	if (ret)
+		goto out;
+	if (actual_value_count != value_count ||
+	    actual_blanket_count != blanket_count) {
+		ret = -EIO;
+		goto out;
+	}
+
+	for (i = 0; i < value_count; i++) {
+		const char *layer_name = NULL;
+		u32 layer_name_len = 0;
+
+		ret = pkm_lcs_backup_frame_field(
+			frame, frame_len, values[i].layer_offset,
+			values[i].layer_len, &layer_name, &layer_name_len);
+		if (ret)
+			goto out;
+		ret = pkm_lcs_backup_referenced_layers_add(
+			limits, snapshot, refs, layer_name, layer_name_len);
+		if (ret)
+			goto out;
+	}
+
+	for (i = 0; i < blanket_count; i++) {
+		const char *layer_name = NULL;
+		u32 layer_name_len = 0;
+
+		ret = pkm_lcs_backup_frame_field(
+			frame, frame_len, blankets[i].layer_offset,
+			blankets[i].layer_len, &layer_name, &layer_name_len);
+		if (ret)
+			goto out;
+		ret = pkm_lcs_backup_referenced_layers_add(
+			limits, snapshot, refs, layer_name, layer_name_len);
+		if (ret)
+			goto out;
+	}
+
+out:
+	kfree(blankets);
+	kfree(values);
+	return ret;
+}
+
+static long pkm_lcs_backup_collect_referenced_layers(
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_layer_snapshot *snapshot, const u8 *enum_frame,
+	size_t enum_frame_len, u64 enum_request_id, const u8 *values_frame,
+	size_t values_frame_len, u64 values_request_id, u64 next_sequence,
+	struct pkm_lcs_backup_referenced_layers *refs)
+{
+	long ret;
+
+	if (!limits || !snapshot || !refs)
+		return -EINVAL;
+
+	ret = pkm_lcs_backup_referenced_layers_init(snapshot, refs);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_backup_collect_enum_child_layers(
+		limits, snapshot, refs, enum_frame, enum_frame_len,
+		enum_request_id, next_sequence);
+	if (ret)
+		goto out_destroy;
+
+	ret = pkm_lcs_backup_collect_query_value_layers(
+		limits, snapshot, refs, values_frame, values_frame_len,
+		values_request_id, next_sequence);
+	if (ret)
+		goto out_destroy;
+
+	return 0;
+
+out_destroy:
+	pkm_lcs_backup_referenced_layers_destroy(refs);
+	return ret;
+}
+
 static long pkm_lcs_backup_alloc_path_entry_frame(
 	const struct pkm_lcs_runtime_limits *limits,
 	const u8 parent_guid[PKM_LCS_GUID_BYTES], const char *child_name,
@@ -5546,6 +5833,7 @@ static long pkm_lcs_key_fd_backup_export_empty_subtree(
 	struct pkm_lcs_rsi_read_key_result read_key = { };
 	struct pkm_lcs_rsi_enum_children_info_summary enum_summary = { };
 	struct pkm_lcs_rsi_query_values_info_summary values_summary = { };
+	struct pkm_lcs_backup_referenced_layers referenced_layers = { };
 	struct pkm_lcs_backup_output output;
 	const char *hive_name;
 	u8 *header_frame = NULL;
@@ -5621,6 +5909,13 @@ static long pkm_lcs_key_fd_backup_export_empty_subtree(
 	if (ret)
 		goto out_frames;
 
+	ret = pkm_lcs_backup_collect_referenced_layers(
+		limits, &layer_snapshot, enum_frame.data, enum_frame.len,
+		enum_response.request_id, values_frame.data, values_frame.len,
+		values_response.request_id, next_sequence, &referenced_layers);
+	if (ret)
+		goto out_frames;
+
 	if (enum_summary.source_path_entry_count ||
 	    values_summary.source_value_entry_count ||
 	    values_summary.source_blanket_count) {
@@ -5659,6 +5954,7 @@ static long pkm_lcs_key_fd_backup_export_empty_subtree(
 out_output:
 	pkm_lcs_backup_output_finish(&output);
 out_frames:
+	pkm_lcs_backup_referenced_layers_destroy(&referenced_layers);
 	kfree(trailer_frame);
 	kfree(key_frame);
 	kfree(header_frame);
@@ -8025,6 +8321,64 @@ long pkm_lcs_kunit_backup_enum_children_path_entries(
 	return lcs_rust_materialize_rsi_enum_children_backup_path_entries(
 		frame, frame_len, request_id, next_sequence, &limits, entries,
 		entry_capacity, entry_count_out);
+}
+
+long pkm_lcs_kunit_backup_collect_referenced_layers(
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const u8 *enum_frame, size_t enum_frame_len, u64 enum_request_id,
+	const u8 *values_frame, size_t values_frame_len,
+	u64 values_request_id, u64 next_sequence,
+	struct pkm_lcs_backup_layer_ref_view *refs, size_t ref_capacity,
+	u32 *ref_count_out)
+{
+	struct pkm_lcs_layer_snapshot snapshot = {
+		.layers = layers,
+		.layer_count = layer_count,
+	};
+	struct pkm_lcs_backup_referenced_layers collected = { };
+	struct pkm_lcs_runtime_limits limits;
+	u32 i;
+	long ret;
+
+	if (!ref_count_out || (ref_capacity && !refs))
+		return -EINVAL;
+	*ref_count_out = 0;
+
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_backup_collect_referenced_layers(
+		&limits, &snapshot, enum_frame, enum_frame_len,
+		enum_request_id, values_frame, values_frame_len,
+		values_request_id, next_sequence, &collected);
+	if (ret)
+		return ret;
+
+	*ref_count_out = collected.count;
+	if (ref_capacity < collected.count) {
+		ret = -ERANGE;
+		goto out;
+	}
+
+	for (i = 0; i < collected.count; i++) {
+		u32 j;
+		bool found = false;
+
+		for (j = 0; j < layer_count; j++) {
+			if (collected.layers[i] != &layers[j])
+				continue;
+			refs[i].layer_index = j;
+			refs[i]._pad = 0;
+			found = true;
+			break;
+		}
+		if (!found) {
+			ret = -EIO;
+			goto out;
+		}
+	}
+
+out:
+	pkm_lcs_backup_referenced_layers_destroy(&collected);
+	return ret;
 }
 
 long pkm_lcs_kunit_key_fd_restore_for_token(
