@@ -642,6 +642,10 @@ void pkm_lcs_layer_metadata_child_list_destroy(
 long pkm_lcs_layer_metadata_children_enumerate_from_root(
 	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_layer_metadata_child_list *children_out);
+long pkm_lcs_layer_metadata_child_lookup_from_root(
+	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
+	const char *layer_name, u32 layer_name_len,
+	u8 child_guid_out[RSI_GUID_SIZE], bool *present_out);
 long pkm_lcs_layer_metadata_refresh_all_from_root(
 	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_layer_metadata_refresh_all_result *result_out);

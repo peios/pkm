@@ -114,9 +114,11 @@ struct pkm_lcs_internal_watch_event {
 	u8 guid[PKM_LCS_GUID_BYTES];
 	u8 root_guid[PKM_LCS_GUID_BYTES];
 	char **resolved_path;
+	char *name;
 	u32 source_id;
 	u32 event_type;
 	u32 path_component_count;
+	u32 name_len;
 	enum pkm_lcs_internal_watch_target target;
 };
 
@@ -5207,6 +5209,32 @@ static void pkm_lcs_internal_watch_event_path_destroy(
 	event->path_component_count = 0;
 }
 
+static void pkm_lcs_internal_watch_event_name_destroy(
+	struct pkm_lcs_internal_watch_event *event)
+{
+	if (!event)
+		return;
+
+	kfree(event->name);
+	event->name = NULL;
+	event->name_len = 0;
+}
+
+static long pkm_lcs_internal_watch_event_name_copy(
+	struct pkm_lcs_internal_watch_event *event,
+	const struct pkm_lcs_watch_dispatch_context *context)
+{
+	if (!event || !context || !context->name || !context->name_len)
+		return -EINVAL;
+
+	event->name = kmemdup_nul(context->name, context->name_len,
+				  GFP_KERNEL);
+	if (!event->name)
+		return -ENOMEM;
+	event->name_len = context->name_len;
+	return 0;
+}
+
 static long pkm_lcs_internal_watch_event_path_copy(
 	struct pkm_lcs_internal_watch_event *event,
 	const struct pkm_lcs_watch_dispatch_context *context)
@@ -5259,6 +5287,8 @@ static bool pkm_lcs_internal_watch_event_deliverable(
 		       (event_type == REG_WATCH_VALUE_SET ||
 			event_type == REG_WATCH_VALUE_DELETED);
 	case PKM_LCS_INTERNAL_WATCH_LAYER_METADATA:
+		if (relative_path_count == 0)
+			return event_type == REG_WATCH_SUBKEY_CREATED;
 		return relative_path_count == 1 &&
 		       (event_type == REG_WATCH_VALUE_SET ||
 			event_type == REG_WATCH_VALUE_DELETED ||
@@ -5300,14 +5330,30 @@ static long pkm_lcs_internal_watch_collect_locked(
 	event->target = watch->target;
 	event->event_type = context->event_type;
 	if (event->target == PKM_LCS_INTERNAL_WATCH_LAYER_METADATA) {
-		memcpy(event->guid, context->changed_key_guid,
-		       sizeof(event->guid));
 		memcpy(event->root_guid, context->ancestor_guids[0],
 		       sizeof(event->root_guid));
-		ret = pkm_lcs_internal_watch_event_path_copy(event, context);
-		if (ret) {
-			kfree(event);
-			return ret;
+		if (relative_path_count == 0) {
+			if (!context->name || !context->name_len) {
+				kfree(event);
+				return 0;
+			}
+			memcpy(event->guid, watch->registry.guid,
+			       sizeof(event->guid));
+			ret = pkm_lcs_internal_watch_event_name_copy(event,
+								     context);
+			if (ret) {
+				kfree(event);
+				return ret;
+			}
+		} else {
+			memcpy(event->guid, context->changed_key_guid,
+			       sizeof(event->guid));
+			ret = pkm_lcs_internal_watch_event_path_copy(event,
+								     context);
+			if (ret) {
+				kfree(event);
+				return ret;
+			}
 		}
 	} else {
 		memcpy(event->guid, watch->registry.guid,
@@ -5315,6 +5361,89 @@ static long pkm_lcs_internal_watch_collect_locked(
 	}
 	list_add_tail(&event->link, events);
 	return 0;
+}
+
+static void pkm_lcs_internal_watch_recover_layer_change(
+	const struct pkm_lcs_internal_watch_event *event)
+{
+	struct pkm_lcs_layer_operation_recovery_result recovery = { };
+
+	if (!event)
+		return;
+
+	/*
+	 * The watched source mutation already committed; recovery failures
+	 * retain the last known-good local state or mark faulty sources down in
+	 * the recovery helper.
+	 */
+	pkm_lcs_source_layer_operation_recover_skip_generation(
+		event->source_id, event->root_guid, &recovery);
+}
+
+static void pkm_lcs_internal_watch_deliver_layer_metadata_refresh(
+	const struct pkm_lcs_internal_watch_event *event)
+{
+	bool effective_changed = false;
+
+	if (!event)
+		return;
+
+	if (!pkm_lcs_key_path_refresh_layer_metadata_result(
+		    event->source_id, event->guid,
+		    (const char * const *)event->resolved_path,
+		    event->path_component_count, &effective_changed) &&
+	    effective_changed)
+		pkm_lcs_internal_watch_recover_layer_change(event);
+}
+
+static void pkm_lcs_internal_watch_deliver_layer_create(
+	const struct pkm_lcs_internal_watch_event *event)
+{
+	static const char * const path_prefix[] = {
+		"Machine", "System", "Registry", "Layers",
+	};
+	const char *resolved_path[ARRAY_SIZE(path_prefix) + 1];
+	u8 child_guid[PKM_LCS_GUID_BYTES];
+	bool effective_changed = false;
+	bool present = false;
+
+	if (!event || !event->name || !event->name_len)
+		return;
+
+	memcpy(resolved_path, path_prefix, sizeof(path_prefix));
+	resolved_path[ARRAY_SIZE(path_prefix)] = event->name;
+
+	if (pkm_lcs_layer_metadata_child_lookup_from_root(
+		    event->source_id, event->guid, event->name,
+		    event->name_len, child_guid, &present) ||
+	    !present)
+		return;
+
+	if (!pkm_lcs_key_path_refresh_layer_metadata_result(
+		    event->source_id, child_guid, resolved_path,
+		    ARRAY_SIZE(resolved_path), &effective_changed) &&
+	    effective_changed)
+		pkm_lcs_internal_watch_recover_layer_change(event);
+}
+
+static void pkm_lcs_internal_watch_deliver_layer_event(
+	const struct pkm_lcs_internal_watch_event *event)
+{
+	if (!event)
+		return;
+
+	switch (event->event_type) {
+	case REG_WATCH_VALUE_SET:
+	case REG_WATCH_VALUE_DELETED:
+	case REG_WATCH_SD_CHANGED:
+		pkm_lcs_internal_watch_deliver_layer_metadata_refresh(event);
+		break;
+	case REG_WATCH_SUBKEY_CREATED:
+		pkm_lcs_internal_watch_deliver_layer_create(event);
+		break;
+	default:
+		break;
+	}
 }
 
 static void pkm_lcs_internal_watch_events_deliver(struct list_head *events)
@@ -5336,30 +5465,11 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events)
 				event->source_id, event->guid, NULL);
 		} else if (event->target ==
 			   PKM_LCS_INTERNAL_WATCH_LAYER_METADATA) {
-			bool effective_changed = false;
-
-			if (!pkm_lcs_key_path_refresh_layer_metadata_result(
-				    event->source_id, event->guid,
-				    (const char * const *)event->resolved_path,
-				    event->path_component_count,
-				    &effective_changed) &&
-			    effective_changed) {
-				struct pkm_lcs_layer_operation_recovery_result
-					recovery = { };
-
-				/*
-				 * The watched source mutation already committed;
-				 * recovery failures retain the last known-good
-				 * local state or mark faulty sources down in the
-				 * recovery helper.
-				 */
-				pkm_lcs_source_layer_operation_recover_skip_generation(
-					event->source_id, event->root_guid,
-					&recovery);
-			}
+			pkm_lcs_internal_watch_deliver_layer_event(event);
 		}
 		list_del(&event->link);
 		pkm_lcs_internal_watch_event_path_destroy(event);
+		pkm_lcs_internal_watch_event_name_destroy(event);
 		kfree(event);
 	}
 }

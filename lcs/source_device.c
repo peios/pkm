@@ -7348,7 +7348,7 @@ long pkm_lcs_runtime_limits_refresh_self_config_from_key(
 		source_id, 0, registry_guid, "", 0, true, &active_limits,
 		active_limits.request_timeout_ms, &frame, &response, NULL);
 	if (ret)
-		goto out_layers;
+		goto out_frame;
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
@@ -7366,7 +7366,6 @@ long pkm_lcs_runtime_limits_refresh_self_config_from_key(
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
-out_layers:
 	pkm_lcs_source_layer_snapshot_release(&layers);
 	return ret;
 }
@@ -7532,7 +7531,7 @@ long pkm_lcs_layer_metadata_children_enumerate_from_root(
 		source_id, 0, layers_root_guid, &active_limits,
 		active_limits.request_timeout_ms, &frame, &response, NULL);
 	if (ret)
-		goto out_layers;
+		goto out_frame;
 
 	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
 		frame.data, frame.len, response.request_id, next_sequence,
@@ -7597,7 +7596,57 @@ out_result:
 	pkm_lcs_layer_metadata_child_list_destroy(&result);
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
-out_layers:
+	pkm_lcs_source_layer_snapshot_release(&layers);
+	return ret;
+}
+
+long pkm_lcs_layer_metadata_child_lookup_from_root(
+	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
+	const char *layer_name, u32 layer_name_len,
+	u8 child_guid_out[RSI_GUID_SIZE], bool *present_out)
+{
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_rsi_lookup_child_result child = { };
+	struct pkm_lcs_layer_snapshot layers = { };
+	u64 next_sequence = 0;
+	long ret;
+
+	if (child_guid_out)
+		memset(child_guid_out, 0, RSI_GUID_SIZE);
+	if (present_out)
+		*present_out = false;
+	if (!source_id || !layers_root_guid || !layer_name || !layer_name_len ||
+	    !child_guid_out || !present_out)
+		return -EINVAL;
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layers);
+	if (ret)
+		return ret;
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
+		source_id, 0, layers_root_guid, layer_name, layer_name_len,
+		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
+	if (ret)
+		goto out_frame;
+
+	ret = pkm_lcs_rsi_materialize_lookup_child(
+		frame.data, frame.len, response.request_id, next_sequence,
+		layer_name, layer_name_len, layers.layers, layers.layer_count,
+		NULL, 0, &response.limits, &child);
+	if (ret)
+		goto out_frame;
+	if (child.found) {
+		memcpy(child_guid_out, child.key_guid, RSI_GUID_SIZE);
+		*present_out = true;
+	}
+
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
 	pkm_lcs_source_layer_snapshot_release(&layers);
 	return ret;
 }
