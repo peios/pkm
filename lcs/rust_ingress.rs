@@ -444,6 +444,18 @@ pub struct PkmLcsRsiEnumSubkeyResultCopy {
 }
 
 #[repr(C)]
+pub struct PkmLcsRsiBackupPathEntryCopy {
+    pub child_name_offset: u32,
+    pub child_name_len: u32,
+    pub layer_offset: u32,
+    pub layer_len: u32,
+    pub child_guid: [u8; 16],
+    pub hidden: u8,
+    pub _pad: [u8; 7],
+    pub sequence: u64,
+}
+
+#[repr(C)]
 pub struct PkmLcsRsiQueryValuesInfoSummaryCopy {
     pub value_count: u32,
     pub max_value_name_len: u32,
@@ -5121,6 +5133,111 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
         (*result_out).max_subkey_name_len = max_subkey_name_len as u32;
         (*result_out).source_path_entry_count = path_storage.len() as u32;
     }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_backup_path_entries(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    limits: *const PkmLcsRuntimeLimitsCopy,
+    entries: *mut PkmLcsRsiBackupPathEntryCopy,
+    entry_capacity: usize,
+    entry_count_out: *mut u32,
+) -> c_int {
+    let Some(entry_count_out_ref) = (unsafe { entry_count_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *entry_count_out_ref = 0;
+
+    if frame.is_null() || (entry_capacity != 0 && entries.is_null()) {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let payload = match parse_rsi_enum_children_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_ENUM_CHILDREN,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_enum_children_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_enum_children_metadata_completeness(&payload) {
+        return rsi_enum_children_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_enum_children_path_response_names(&payload, &limits) {
+        return rsi_enum_children_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_enum_children_metadata_security_descriptors(&payload) {
+        return rsi_enum_children_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_enum_children_path_response_sequences(&payload, next_sequence) {
+        return rsi_enum_children_response_error_return(err);
+    }
+
+    let mut entry_count = 0usize;
+    if let Err(err) = for_each_rsi_enum_children_source_path_entry(&payload, &limits, |_| {
+        entry_count = entry_count
+            .checked_add(1)
+            .ok_or(LcsError::RsiPayloadLengthOverflow)?;
+        Ok(())
+    }) {
+        return rsi_enum_children_response_error_return(err);
+    }
+    if entry_count > u32::MAX as usize {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    }
+    *entry_count_out_ref = entry_count as u32;
+    if entry_capacity < entry_count {
+        return LinuxErrno::Erange.negated_return() as c_int;
+    }
+
+    let path_entries = if entry_count == 0 {
+        &mut []
+    } else {
+        unsafe { slice::from_raw_parts_mut(entries, entry_count) }
+    };
+    let mut entry_index = 0usize;
+    if let Err(err) = for_each_rsi_enum_children_source_path_entry(&payload, &limits, |entry| {
+        let (child_name_offset, child_name_len) =
+            retained_frame_slice_offset(frame_bytes, entry.child_name.as_bytes())
+                .map_err(|_| LcsError::RsiPayloadLengthOverflow)?;
+        let (layer_offset, layer_len) =
+            retained_frame_slice_offset(frame_bytes, entry.entry.layer.as_bytes())
+                .map_err(|_| LcsError::RsiPayloadLengthOverflow)?;
+        let (child_guid, hidden) = match entry.entry.target {
+            PathTarget::Guid(guid) => (guid, 0),
+            PathTarget::Hidden => ([0; 16], 1),
+        };
+        path_entries[entry_index] = PkmLcsRsiBackupPathEntryCopy {
+            child_name_offset,
+            child_name_len,
+            layer_offset,
+            layer_len,
+            child_guid,
+            hidden,
+            _pad: [0; 7],
+            sequence: entry.entry.sequence,
+        };
+        entry_index += 1;
+        Ok(())
+    }) {
+        return rsi_enum_children_response_error_return(err);
+    }
+
     0
 }
 

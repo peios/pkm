@@ -64,6 +64,17 @@ struct pkm_lcs_backup_blanket_entry_view {
 	u64 sequence;
 };
 
+struct pkm_lcs_backup_path_entry_view {
+	u32 child_name_offset;
+	u32 child_name_len;
+	u32 layer_offset;
+	u32 layer_len;
+	u8 child_guid[PKM_LCS_GUID_BYTES];
+	u8 hidden;
+	u8 _pad[7];
+	u64 sequence;
+};
+
 struct pkm_lcs_key_fd_relative_base {
 	u32 source_id;
 	u32 parent_depth;
@@ -287,6 +298,10 @@ long pkm_lcs_kunit_backup_query_values_entries(
 	struct pkm_lcs_backup_blanket_entry_view *blankets,
 	size_t blanket_capacity, u32 *value_count_out,
 	u32 *blanket_count_out);
+long pkm_lcs_kunit_backup_enum_children_path_entries(
+	const u8 *frame, size_t frame_len, u64 request_id, u64 next_sequence,
+	struct pkm_lcs_backup_path_entry_view *entries, size_t entry_capacity,
+	u32 *entry_count_out);
 long pkm_lcs_kunit_key_fd_restore_for_token(
 	int fd, const void *token, const struct reg_restore_args *args);
 long pkm_lcs_kunit_key_fd_flush(int fd);

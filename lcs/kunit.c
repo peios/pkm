@@ -29719,6 +29719,174 @@ static void pkm_lcs_kunit_rsi_enum_children_info_summary(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, summary.max_subkey_name_len, 5U);
 }
 
+static void pkm_lcs_kunit_backup_enum_children_path_entries_materialize(
+	struct kunit *test)
+{
+	static const u8 alpha_guid[RSI_GUID_SIZE] = { 0xa1 };
+	static const u8 hidden_guid[RSI_GUID_SIZE] = { };
+	struct pkm_lcs_backup_path_entry_view entries[2] = { };
+	u8 response[512];
+	size_t offset;
+	size_t response_len;
+	u32 entry_count = 0;
+
+	pkm_lcs_kunit_rsi_response_begin(test, response, sizeof(response),
+					 523, RSI_ENUM_CHILDREN_RESPONSE,
+					 RSI_OK, &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 2);
+	pkm_lcs_kunit_rsi_append_len_prefixed(
+		test, response, sizeof(response), &offset, "Alpha", 5);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, response, sizeof(response), &offset, "base",
+		RSI_PATH_TARGET_GUID, alpha_guid, 1);
+	pkm_lcs_kunit_rsi_append_len_prefixed(
+		test, response, sizeof(response), &offset, "Masked", 6);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, response, sizeof(response), &offset, "Overlay",
+		RSI_PATH_TARGET_HIDDEN, hidden_guid, 2);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, response, sizeof(response), &offset, alpha_guid,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd));
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_enum_children_path_entries(
+				response, response_len, 523, 3, entries,
+				ARRAY_SIZE(entries), &entry_count),
+			0L);
+	KUNIT_EXPECT_EQ(test, entry_count, 2U);
+
+	KUNIT_ASSERT_LE(test,
+			(size_t)entries[0].child_name_offset +
+				entries[0].child_name_len,
+			response_len);
+	KUNIT_ASSERT_LE(test,
+			(size_t)entries[0].layer_offset + entries[0].layer_len,
+			response_len);
+	KUNIT_EXPECT_EQ(test, entries[0].child_name_len, 5U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response + entries[0].child_name_offset,
+			       "Alpha", 5),
+			0);
+	KUNIT_EXPECT_EQ(test, entries[0].layer_len, 4U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response + entries[0].layer_offset, "base", 4),
+			0);
+	KUNIT_EXPECT_EQ(test, memcmp(entries[0].child_guid, alpha_guid,
+				    RSI_GUID_SIZE), 0);
+	KUNIT_EXPECT_EQ(test, entries[0].hidden, 0U);
+	KUNIT_EXPECT_EQ(test, entries[0].sequence, 1ULL);
+
+	KUNIT_ASSERT_LE(test,
+			(size_t)entries[1].child_name_offset +
+				entries[1].child_name_len,
+			response_len);
+	KUNIT_ASSERT_LE(test,
+			(size_t)entries[1].layer_offset + entries[1].layer_len,
+			response_len);
+	KUNIT_EXPECT_EQ(test, entries[1].child_name_len, 6U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response + entries[1].child_name_offset,
+			       "Masked", 6),
+			0);
+	KUNIT_EXPECT_EQ(test, entries[1].layer_len, 7U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response + entries[1].layer_offset, "Overlay",
+			       7),
+			0);
+	KUNIT_EXPECT_EQ(test, memcmp(entries[1].child_guid, hidden_guid,
+				    RSI_GUID_SIZE), 0);
+	KUNIT_EXPECT_EQ(test, entries[1].hidden, 1U);
+	KUNIT_EXPECT_EQ(test, entries[1].sequence, 2ULL);
+}
+
+static void pkm_lcs_kunit_backup_enum_children_path_entries_short_array(
+	struct kunit *test)
+{
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0xc1 };
+	struct pkm_lcs_backup_path_entry_view entries[1] = { };
+	u8 response[256];
+	size_t offset;
+	size_t response_len;
+	u32 entry_count = 0;
+
+	pkm_lcs_kunit_rsi_response_begin(test, response, sizeof(response),
+					 524, RSI_ENUM_CHILDREN_RESPONSE,
+					 RSI_OK, &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_len_prefixed(
+		test, response, sizeof(response), &offset, "Child", 5);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, response, sizeof(response), &offset, "base",
+		RSI_PATH_TARGET_GUID, child_guid, 1);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, response, sizeof(response), &offset, child_guid,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd));
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_enum_children_path_entries(
+				response, response_len, 524, 2, entries, 0,
+				&entry_count),
+			(long)-ERANGE);
+	KUNIT_EXPECT_EQ(test, entry_count, 1U);
+}
+
+static void pkm_lcs_kunit_backup_enum_children_path_entries_malformed(
+	struct kunit *test)
+{
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0xd1 };
+	struct pkm_lcs_backup_path_entry_view entries[1] = { };
+	u8 response[256];
+	size_t offset;
+	size_t response_len;
+	u32 entry_count = 0;
+
+	pkm_lcs_kunit_rsi_response_begin(test, response, sizeof(response),
+					 525, RSI_ENUM_CHILDREN_RESPONSE,
+					 RSI_OK, &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_len_prefixed(
+		test, response, sizeof(response), &offset, "Future", 6);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_lookup_path_entry(
+		test, response, sizeof(response), &offset, "base",
+		RSI_PATH_TARGET_GUID, child_guid, 10);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_lookup_metadata(
+		test, response, sizeof(response), &offset, child_guid,
+		pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd));
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_enum_children_path_entries(
+				response, response_len, 525, 10, entries,
+				ARRAY_SIZE(entries), &entry_count),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, entry_count, 0U);
+}
+
 static void pkm_lcs_kunit_rsi_query_values_info_summary(struct kunit *test)
 {
 	static const struct pkm_lcs_rsi_layer_view layers[] = {
@@ -46717,6 +46885,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_set_value_layer_cap_uses_runtime_limit),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_delete_layer_response_validation),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_enum_children_info_summary),
+	KUNIT_CASE(pkm_lcs_kunit_backup_enum_children_path_entries_materialize),
+	KUNIT_CASE(pkm_lcs_kunit_backup_enum_children_path_entries_short_array),
+	KUNIT_CASE(pkm_lcs_kunit_backup_enum_children_path_entries_malformed),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_query_values_info_summary),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_query_values_batch_uses_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_enum_value_uses_runtime_limits),
