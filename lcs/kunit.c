@@ -2168,6 +2168,147 @@ static void pkm_lcs_kunit_internal_self_watch_bad_inputs_fail_closed(
 	pkm_lcs_internal_self_watch_disarm();
 }
 
+static void pkm_lcs_kunit_internal_self_watch_value_event_refreshes_config(
+	struct kunit *test)
+{
+	static const char * const registry_path[] = {
+		"Machine", "System", "Registry",
+	};
+	static const u8 ancestors[3][RSI_GUID_SIZE] = {
+		{ 0xc1 }, { 0xc2 }, { 0xc3 },
+	};
+	static const u8 layers_guid[RSI_GUID_SIZE] = { 0xc4 };
+	static const char value_name[] = "RequestTimeoutMs";
+	u8 data[sizeof(u32)];
+	struct pkm_lcs_watch_dispatch_context context = {
+		.changed_key_guid = ancestors[2],
+		.ancestor_guids = ancestors,
+		.resolved_path = registry_path,
+		.path_component_count = ARRAY_SIZE(registry_path),
+		.event_type = REG_WATCH_VALUE_SET,
+		.name = (const u8 *)value_name,
+		.name_len = sizeof(value_name) - 1U,
+	};
+	struct pkm_lcs_kunit_query_values_source_script script = {
+		.expected_guid = ancestors[2],
+		.expected_value_name = "",
+		.response_value_name = value_name,
+		.layer_name = "base",
+		.data = data,
+		.data_len = sizeof(data),
+		.value_type = REG_DWORD,
+		.query_all = true,
+	};
+	struct pkm_lcs_runtime_limits snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long ret;
+	int thread_ret;
+
+	put_unaligned_le32(1000U, data);
+	pkm_kmes_kunit_reset_all();
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_internal_self_watch_disarm();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				1, ancestors[0], true, ancestors[2], true,
+				layers_guid, NULL),
+			0L);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_query_values_source_thread, &script,
+		"pkm-lcs-kunit-self-watch-refresh");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context(&context);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms, 1000U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_internal_self_watch_disarm();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_internal_self_watch_non_value_event_noop(
+	struct kunit *test)
+{
+	static const char * const registry_path[] = {
+		"Machine", "System", "Registry",
+	};
+	static const u8 ancestors[3][RSI_GUID_SIZE] = {
+		{ 0xd1 }, { 0xd2 }, { 0xd3 },
+	};
+	static const u8 layers_guid[RSI_GUID_SIZE] = { 0xd4 };
+	static const char value_name[] = "RequestTimeoutMs";
+	u8 data[sizeof(u32)];
+	struct pkm_lcs_watch_dispatch_context context = {
+		.changed_key_guid = ancestors[2],
+		.ancestor_guids = ancestors,
+		.resolved_path = registry_path,
+		.path_component_count = ARRAY_SIZE(registry_path),
+		.event_type = REG_WATCH_SD_CHANGED,
+	};
+	struct pkm_lcs_kunit_query_values_source_script script = {
+		.expected_guid = ancestors[2],
+		.expected_value_name = "",
+		.response_value_name = value_name,
+		.layer_name = "base",
+		.data = data,
+		.data_len = sizeof(data),
+		.value_type = REG_DWORD,
+		.query_all = true,
+	};
+	struct pkm_lcs_runtime_limits snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long ret;
+	int thread_ret;
+
+	put_unaligned_le32(1000U, data);
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_internal_self_watch_disarm();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				1, ancestors[0], true, ancestors[2], true,
+				layers_guid, NULL),
+			0L);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_query_values_source_thread, &script,
+		"pkm-lcs-kunit-self-watch-noop");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context(&context);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, -EINTR);
+	KUNIT_EXPECT_EQ(test, script.reads, 0U);
+	KUNIT_EXPECT_EQ(test, script.writes, 0U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms,
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_internal_self_watch_disarm();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_bound_transaction_counter_limits(
 	struct kunit *test)
 {
@@ -40787,6 +40928,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_internal_self_watch_arm_targeted_and_fallback),
 	KUNIT_CASE(
 		pkm_lcs_kunit_internal_self_watch_bad_inputs_fail_closed),
+	KUNIT_CASE(
+		pkm_lcs_kunit_internal_self_watch_value_event_refreshes_config),
+	KUNIT_CASE(pkm_lcs_kunit_internal_self_watch_non_value_event_noop),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_limits),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_source_down),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_bad_inputs),
