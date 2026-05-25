@@ -4211,6 +4211,59 @@ static void pkm_lcs_kunit_create_layer_target_explicit_layer_admitted(
 	pkm_lcs_create_layer_target_destroy(&target);
 }
 
+static void pkm_lcs_kunit_create_layer_target_uses_runtime_limits(
+	struct kunit *test)
+{
+	static const bool widened_cases[] = { false, true };
+	enum { LONG_NAME_LEN = 300 };
+	char layer_src[LONG_NAME_LEN + 1];
+	size_t i;
+
+	memset(layer_src, 'P', LONG_NAME_LEN);
+	layer_src[LONG_NAME_LEN] = '\0';
+	for (i = 0; i < ARRAY_SIZE(widened_cases); i++) {
+		struct pkm_lcs_rsi_layer_view layers[] = {
+			{ .name = "base", .name_len = 4, .precedence = 0,
+			  .enabled = 1 },
+			{ .name = layer_src, .name_len = LONG_NAME_LEN,
+			  .precedence = 25, .enabled = 1 },
+		};
+		struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+		struct pkm_lcs_usercopy_ops ops =
+			pkm_lcs_kunit_usercopy_ops(&ctx);
+		struct pkm_lcs_create_layer_target target = { };
+		struct pkm_lcs_layer_target_admission_plan plan = { };
+		struct pkm_lcs_runtime_limits limits = { };
+		long ret;
+
+		KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits),
+				0L);
+		if (widened_cases[i])
+			limits.max_path_component_length = LONG_NAME_LEN;
+
+		ret = pkm_lcs_create_layer_target_prepare_with_limits(
+			&ops, (const char __user *)layer_src, layers,
+			ARRAY_SIZE(layers), &limits, &target, &plan);
+		KUNIT_EXPECT_EQ(test, ret,
+				widened_cases[i] ? 0L : (long)-ENAMETOOLONG);
+		if (widened_cases[i]) {
+			KUNIT_EXPECT_EQ(test, target.name_len,
+					(u32)LONG_NAME_LEN);
+			KUNIT_EXPECT_NOT_NULL(test, target.owned_name);
+			KUNIT_EXPECT_EQ(test, plan.precedence, 25U);
+			KUNIT_EXPECT_EQ(test, plan.enabled, 1U);
+		} else {
+			KUNIT_EXPECT_PTR_EQ(test, target.name, NULL);
+			KUNIT_EXPECT_EQ(test, plan.precedence, 0U);
+			KUNIT_EXPECT_EQ(test, plan.enabled, 0U);
+		}
+		KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+		KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+		pkm_lcs_create_layer_target_destroy(&target);
+	}
+}
+
 static void pkm_lcs_kunit_create_layer_target_absent_returns_enoent(
 	struct kunit *test)
 {
@@ -42907,6 +42960,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_target_null_uses_base),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_layer_target_explicit_layer_admitted),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_layer_target_uses_runtime_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_layer_target_absent_returns_enoent),
 	KUNIT_CASE(

@@ -1196,6 +1196,7 @@ pub unsafe extern "C" fn lcs_rust_admit_layer_target(
     layer_name_len: u32,
     layers: *const PkmLcsRsiLayerViewCopy,
     layer_count: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     plan_out: *mut PkmLcsLayerTargetAdmissionPlanCopy,
 ) -> c_int {
     let Some(plan_out) = (unsafe { plan_out.as_mut() }) else {
@@ -1210,6 +1211,10 @@ pub unsafe extern "C" fn lcs_rust_admit_layer_target(
     if layer_name.is_null() || (layer_count != 0 && layers.is_null()) {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
 
     let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
     let target_layer = match str::from_utf8(layer_name_bytes) {
@@ -1224,7 +1229,7 @@ pub unsafe extern "C" fn lcs_rust_admit_layer_target(
     match plan_layer_target_admission(LayerTargetAdmissionInput {
         target_layer,
         layers: layer_views.as_slice(),
-        limits: &LcsLimits::DEFAULT,
+        limits: &limits,
     }) {
         Ok(plan) => {
             plan_out.precedence = plan.matched_layer.precedence;

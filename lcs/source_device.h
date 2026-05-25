@@ -595,9 +595,20 @@ long pkm_lcs_create_layer_target_admit(
 	const struct pkm_lcs_create_layer_target *target,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	struct pkm_lcs_layer_target_admission_plan *plan);
+long pkm_lcs_create_layer_target_admit_with_limits(
+	const struct pkm_lcs_create_layer_target *target,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_layer_target_admission_plan *plan);
 long pkm_lcs_create_layer_target_prepare(
 	const struct pkm_lcs_usercopy_ops *ops, const char __user *ulayer,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	struct pkm_lcs_create_layer_target *target,
+	struct pkm_lcs_layer_target_admission_plan *plan);
+long pkm_lcs_create_layer_target_prepare_with_limits(
+	const struct pkm_lcs_usercopy_ops *ops, const char __user *ulayer,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_create_layer_target *target,
 	struct pkm_lcs_layer_target_admission_plan *plan);
 long pkm_lcs_key_open_access_check_for_token(

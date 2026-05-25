@@ -1298,6 +1298,7 @@ extern int lcs_rust_plan_key_guid_assignment(
 extern int lcs_rust_admit_layer_target(
 	const u8 *layer_name, u32 layer_name_len,
 	const struct pkm_lcs_rsi_layer_view *layers, size_t layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_layer_target_admission_plan *plan);
 extern int lcs_rust_select_layer_metadata_sd(
 	const u8 *layer_name, u32 layer_name_len,
@@ -2693,13 +2694,26 @@ long pkm_lcs_create_layer_target_admit(
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	struct pkm_lcs_layer_target_admission_plan *plan)
 {
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_create_layer_target_admit_with_limits(
+		target, layers, layer_count, &limits, plan);
+}
+
+long pkm_lcs_create_layer_target_admit_with_limits(
+	const struct pkm_lcs_create_layer_target *target,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_layer_target_admission_plan *plan)
+{
 	const struct pkm_lcs_rsi_layer_view *active_layers = layers;
 	const struct pkm_lcs_rsi_private_layer_view *private_layers = NULL;
 	u32 active_layer_count = layer_count;
 	u32 private_layer_count = 0;
 	long ret;
 
-	if (!target || !target->name || !plan)
+	if (!target || !target->name || !limits || !plan)
 		return -EINVAL;
 	memset(plan, 0, sizeof(*plan));
 
@@ -2711,7 +2725,7 @@ long pkm_lcs_create_layer_target_admit(
 
 	return lcs_rust_admit_layer_target(
 		(const u8 *)target->name, target->name_len, active_layers,
-		active_layer_count, plan);
+		active_layer_count, limits, plan);
 }
 
 long pkm_lcs_create_layer_target_prepare(
@@ -2720,17 +2734,31 @@ long pkm_lcs_create_layer_target_prepare(
 	struct pkm_lcs_create_layer_target *target,
 	struct pkm_lcs_layer_target_admission_plan *plan)
 {
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_create_layer_target_prepare_with_limits(
+		ops, ulayer, layers, layer_count, &limits, target, plan);
+}
+
+long pkm_lcs_create_layer_target_prepare_with_limits(
+	const struct pkm_lcs_usercopy_ops *ops, const char __user *ulayer,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_create_layer_target *target,
+	struct pkm_lcs_layer_target_admission_plan *plan)
+{
 	long ret;
 
-	if (!target || !plan)
+	if (!limits || !target || !plan)
 		return -EINVAL;
 
 	ret = pkm_lcs_create_layer_target_copy_from_user(ops, ulayer, target);
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_create_layer_target_admit(target, layers, layer_count,
-						plan);
+	ret = pkm_lcs_create_layer_target_admit_with_limits(
+		target, layers, layer_count, limits, plan);
 	if (ret) {
 		pkm_lcs_create_layer_target_destroy(target);
 		memset(plan, 0, sizeof(*plan));
