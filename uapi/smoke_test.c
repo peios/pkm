@@ -108,6 +108,25 @@ _Static_assert(RSI_WRITE_KEY_FIELD_KNOWN_MASK
 		       == (RSI_WRITE_KEY_FIELD_SD
 			   | RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME),
 	       "RSI_WRITE_KEY field mask disagrees with PSD-005");
+_Static_assert(REG_WATCH_EVENT_TYPE_OFFSET
+		       == REG_WATCH_EVENT_TOTAL_LEN_OFFSET + sizeof(__u32),
+	       "watch event offsets are not contiguous");
+_Static_assert(REG_WATCH_EVENT_NAME_LEN_OFFSET
+		       == REG_WATCH_EVENT_TYPE_OFFSET + sizeof(__u16),
+	       "watch event offsets are not contiguous");
+_Static_assert(REG_WATCH_EVENT_NAME_OFFSET
+		       == REG_WATCH_EVENT_NAME_LEN_OFFSET + sizeof(__u16),
+	       "watch event offsets are not contiguous");
+_Static_assert(REG_WATCH_EVENT_MIN_SIZE == REG_WATCH_EVENT_NAME_OFFSET,
+	       "watch event minimum size disagrees with PSD-005");
+_Static_assert(REG_WATCH_SUBTREE_PATH_DEPTH_SIZE == sizeof(__u16),
+	       "watch subtree path_depth size disagrees with PSD-005");
+_Static_assert(REG_WATCH_SUBTREE_PATH_COMPONENTS_REL_OFFSET
+		       == REG_WATCH_SUBTREE_PATH_DEPTH_REL_OFFSET
+				  + REG_WATCH_SUBTREE_PATH_DEPTH_SIZE,
+	       "watch subtree extension offsets are not contiguous");
+_Static_assert(REG_WATCH_PATH_COMPONENT_LEN_SIZE == sizeof(__u16),
+	       "watch subtree component length size disagrees with PSD-005");
 
 ASSERT_STRUCT_SIZE(reg_create_key_args, REG_CREATE_KEY_ARGS_SIZE);
 ASSERT_FIELD_OFFSET(reg_create_key_args, parent_fd, 0);

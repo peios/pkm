@@ -40,7 +40,6 @@
 #define PKM_LCS_MAX_SD_BYTES 65535U
 #define PKM_LCS_WATCH_NOTIFY_ACTION_ARM 1U
 #define PKM_LCS_WATCH_NOTIFY_ACTION_DISARM 2U
-#define PKM_LCS_WATCH_EVENT_HEADER_LEN 8U
 #define PKM_LCS_WATCH_REGISTRY_BITS 8U
 #define PKM_LCS_KEY_REF_BITS 8U
 
@@ -674,10 +673,12 @@ pkm_lcs_key_fd_watch_event_alloc(u32 event_type, const u8 *record,
 	struct pkm_lcs_key_fd_watch_event *event;
 	size_t alloc_len;
 
-	if (!record || record_len < PKM_LCS_WATCH_EVENT_HEADER_LEN)
+	if (!record || record_len < REG_WATCH_EVENT_MIN_SIZE)
 		return ERR_PTR(-EINVAL);
-	if (get_unaligned_le32(record) != record_len ||
-	    get_unaligned_le16(record + 4) != event_type)
+	if (get_unaligned_le32(record + REG_WATCH_EVENT_TOTAL_LEN_OFFSET) !=
+		    record_len ||
+	    get_unaligned_le16(record + REG_WATCH_EVENT_TYPE_OFFSET) !=
+		    event_type)
 		return ERR_PTR(-EINVAL);
 
 	if (check_add_overflow(sizeof(*event), (size_t)record_len, &alloc_len))
@@ -696,11 +697,13 @@ pkm_lcs_key_fd_watch_event_alloc(u32 event_type, const u8 *record,
 static struct pkm_lcs_key_fd_watch_event *
 pkm_lcs_key_fd_overflow_event_alloc(void)
 {
-	u8 record[PKM_LCS_WATCH_EVENT_HEADER_LEN] = { };
+	u8 record[REG_WATCH_EVENT_MIN_SIZE] = { };
 
-	put_unaligned_le32(PKM_LCS_WATCH_EVENT_HEADER_LEN, record);
-	put_unaligned_le16(REG_WATCH_OVERFLOW, record + 4);
-	put_unaligned_le16(0, record + 6);
+	put_unaligned_le32(REG_WATCH_EVENT_MIN_SIZE,
+			   record + REG_WATCH_EVENT_TOTAL_LEN_OFFSET);
+	put_unaligned_le16(REG_WATCH_OVERFLOW,
+			   record + REG_WATCH_EVENT_TYPE_OFFSET);
+	put_unaligned_le16(0, record + REG_WATCH_EVENT_NAME_LEN_OFFSET);
 	return pkm_lcs_key_fd_watch_event_alloc(REG_WATCH_OVERFLOW, record,
 						sizeof(record));
 }
@@ -729,7 +732,7 @@ pkm_lcs_key_fd_build_watch_event(u32 event_type, const u8 *name, u32 name_len,
 		return ERR_PTR(ret);
 	if (overflow)
 		return pkm_lcs_key_fd_overflow_event_alloc();
-	if (record_len < PKM_LCS_WATCH_EVENT_HEADER_LEN)
+	if (record_len < REG_WATCH_EVENT_MIN_SIZE)
 		return ERR_PTR(-EINVAL);
 
 	event = kzalloc(sizeof(*event) + record_len, GFP_KERNEL);
