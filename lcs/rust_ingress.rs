@@ -52,7 +52,7 @@ use crate::lcs_core::{
     self_config_audit_intent, self_config_invalid_audit_payload_len,
     source_validation_failure_audit_payload_len, validate_config_value,
     write_backup_restore_complete_audit_payload, write_backup_restore_start_audit_payload,
-    parse_backup_header_record, parse_backup_trailer_record,
+    parse_backup_header_record, parse_backup_key_record, parse_backup_trailer_record,
     write_backup_blanket_tombstone_record_frame, write_backup_header_record_frame,
     write_backup_key_record_frame, write_backup_layer_manifest_record_frame,
     write_backup_path_entry_record_frame, write_backup_trailer_record_frame,
@@ -404,6 +404,17 @@ pub struct PkmLcsRsiReadKeyResultCopy {
     pub source_validation_failure_present: u8,
     pub _pad1: [u8; 5],
     pub parent_guid: [u8; 16],
+}
+
+#[repr(C)]
+pub struct PkmLcsBackupKeyRecordViewCopy {
+    pub guid: [u8; 16],
+    pub sd_offset: u32,
+    pub sd_len: u32,
+    pub last_write_time_ns: i64,
+    pub volatile_key: u8,
+    pub symlink: u8,
+    pub _pad: [u8; 6],
 }
 
 #[repr(C)]
@@ -2178,6 +2189,41 @@ pub unsafe extern "C" fn lcs_rust_validate_backup_trailer_record(
             }
             let checksum_out = unsafe { slice::from_raw_parts_mut(checksum_out, 32) };
             checksum_out.copy_from_slice(&trailer.checksum);
+            0
+        }
+        Err(err) => backup_restore_reader_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_parse_backup_key_record(
+    frame: *const u8,
+    frame_len: usize,
+    result_out: *mut PkmLcsBackupKeyRecordViewCopy,
+) -> c_int {
+    if frame.is_null() || result_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame = unsafe { slice::from_raw_parts(frame, frame_len) };
+    match parse_backup_key_record(frame) {
+        Ok(key) => {
+            let (sd_offset, sd_len) =
+                match retained_frame_slice_offset(frame, key.security_descriptor) {
+                    Ok(value) => value,
+                    Err(errno) => return errno.negated_return() as c_int,
+                };
+            unsafe {
+                *result_out = PkmLcsBackupKeyRecordViewCopy {
+                    guid: key.guid,
+                    sd_offset,
+                    sd_len,
+                    last_write_time_ns: key.last_write_time_ns,
+                    volatile_key: if key.volatile { 1 } else { 0 },
+                    symlink: if key.symlink { 1 } else { 0 },
+                    _pad: [0; 6],
+                };
+            }
             0
         }
         Err(err) => backup_restore_reader_error_return(err),

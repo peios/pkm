@@ -240,6 +240,16 @@ static DEFINE_MUTEX(pkm_lcs_key_ref_lock);
 static DEFINE_HASHTABLE(pkm_lcs_key_ref_map, PKM_LCS_KEY_REF_BITS);
 static struct pkm_lcs_internal_self_watch_state pkm_lcs_internal_self_watch;
 
+struct pkm_lcs_backup_key_record_view {
+	u8 guid[PKM_LCS_GUID_BYTES];
+	u32 sd_offset;
+	u32 sd_len;
+	s64 last_write_time_ns;
+	u8 volatile_key;
+	u8 symlink;
+	u8 _pad[6];
+};
+
 extern int lcs_rust_validate_key_fd_open_view(
 	const u8 *key_guid, u32 granted_access,
 	const struct pkm_lcs_key_fd_string_view *path_components,
@@ -290,6 +300,9 @@ extern int lcs_rust_validate_backup_header_record(
 extern int lcs_rust_validate_backup_trailer_record(
 	const u8 *frame, size_t frame_len, u64 *record_count_out,
 	u8 *checksum_out);
+extern int lcs_rust_parse_backup_key_record(
+	const u8 *frame, size_t frame_len,
+	struct pkm_lcs_backup_key_record_view *result_out);
 extern int lcs_rust_security_descriptor_owner_sid(
 	const u8 *security_descriptor, size_t security_descriptor_len,
 	const u8 **owner_sid_out, size_t *owner_sid_len_out);
@@ -5129,6 +5142,13 @@ struct pkm_lcs_backup_child_sections {
 	u32 capacity;
 };
 
+struct pkm_lcs_restore_root_key_summary {
+	u8 header_root_guid[PKM_LCS_GUID_BYTES];
+	bool root_key_seen;
+	u8 root_volatile;
+	u8 root_symlink;
+};
+
 static long pkm_lcs_restore_read_exact(struct file *file, loff_t *posp,
 				       u8 *buf, size_t len)
 {
@@ -5261,6 +5281,72 @@ out_free:
 	return ret;
 }
 
+static long pkm_lcs_restore_key_frame_max_len(size_t *max_len_out)
+{
+	size_t max_len;
+
+	if (!max_len_out)
+		return -EINVAL;
+
+	max_len = PKM_LCS_BACKUP_RECORD_HEADER_LEN + PKM_LCS_GUID_BYTES +
+		  sizeof(u32) + sizeof(u32) + PKM_LCS_MAX_SD_BYTES +
+		  sizeof(s64);
+	*max_len_out = max_len;
+	return 0;
+}
+
+static long pkm_lcs_restore_validate_key_record(
+	struct file *file, loff_t *posp, struct sha256_ctx *checksum,
+	const u8 common_header[6], u32 record_len,
+	struct pkm_lcs_restore_root_key_summary *summary)
+{
+	struct pkm_lcs_backup_key_record_view key = { };
+	size_t max_frame_len = 0;
+	size_t payload_len;
+	u8 *frame;
+	long ret;
+
+	if (!file || !checksum || !summary)
+		return -EINVAL;
+
+	ret = pkm_lcs_restore_key_frame_max_len(&max_frame_len);
+	if (ret)
+		return ret;
+	if ((size_t)record_len > max_frame_len)
+		return -EINVAL;
+	payload_len = (size_t)record_len - PKM_LCS_BACKUP_RECORD_HEADER_LEN;
+
+	frame = kmalloc(record_len, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	memcpy(frame, common_header, PKM_LCS_BACKUP_RECORD_HEADER_LEN);
+
+	ret = pkm_lcs_restore_read_exact(
+		file, posp, frame + PKM_LCS_BACKUP_RECORD_HEADER_LEN,
+		payload_len);
+	if (ret)
+		goto out_free;
+
+	sha256_update(checksum, frame, record_len);
+	ret = lcs_rust_parse_backup_key_record(frame, record_len, &key);
+	if (ret)
+		goto out_free;
+
+	if (!memcmp(key.guid, summary->header_root_guid, PKM_LCS_GUID_BYTES)) {
+		if (summary->root_key_seen) {
+			ret = -EINVAL;
+			goto out_free;
+		}
+		summary->root_key_seen = true;
+		summary->root_volatile = key.volatile_key ? 1 : 0;
+		summary->root_symlink = key.symlink ? 1 : 0;
+	}
+
+out_free:
+	kfree(frame);
+	return ret;
+}
+
 static long pkm_lcs_restore_validate_trailer_record(
 	struct file *file, loff_t *posp, struct sha256_ctx *checksum,
 	const u8 common_header[6], u32 record_len, u64 observed_record_count)
@@ -5313,10 +5399,10 @@ static long pkm_lcs_restore_expect_eof(struct file *file, loff_t *posp)
 }
 
 static long pkm_lcs_restore_validate_stream_file(
-	struct file *file, const struct pkm_lcs_runtime_limits *limits)
+	struct file *file, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_restore_root_key_summary *summary)
 {
 	struct sha256_ctx checksum;
-	u8 root_guid[PKM_LCS_GUID_BYTES];
 	u64 record_count = 0;
 	loff_t pos = 0;
 	loff_t *posp = NULL;
@@ -5325,8 +5411,9 @@ static long pkm_lcs_restore_validate_stream_file(
 	bool trailer_seen = false;
 	long ret;
 
-	if (!file || !limits)
+	if (!file || !limits || !summary)
 		return -EINVAL;
+	memset(summary, 0, sizeof(*summary));
 
 	positional = !(file->f_mode & FMODE_STREAM);
 	if (positional) {
@@ -5379,7 +5466,7 @@ static long pkm_lcs_restore_validate_stream_file(
 			}
 			ret = pkm_lcs_restore_validate_header_record(
 				file, posp, limits, &checksum, common_header,
-				record_len, root_guid);
+				record_len, summary->header_root_guid);
 			if (ret)
 				goto out_finish;
 			header_seen = true;
@@ -5394,7 +5481,18 @@ static long pkm_lcs_restore_validate_stream_file(
 				goto out_finish;
 			trailer_seen = true;
 			ret = pkm_lcs_restore_expect_eof(file, posp);
+			if (!ret && !summary->root_key_seen)
+				ret = -EINVAL;
 			goto out_finish;
+		}
+
+		if (record_type == REG_BACKUP_KEY) {
+			ret = pkm_lcs_restore_validate_key_record(
+				file, posp, &checksum, common_header,
+				record_len, summary);
+			if (ret)
+				goto out_finish;
+			continue;
 		}
 
 		sha256_update(&checksum, common_header,
@@ -5413,13 +5511,14 @@ out_finish:
 }
 
 static long pkm_lcs_key_fd_restore_validate_input_stream(
-	int input_fd, const struct pkm_lcs_runtime_limits *limits)
+	int input_fd, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_restore_root_key_summary *summary)
 {
 	struct file *file;
 	struct fd held;
 	long ret;
 
-	if (!limits)
+	if (!limits || !summary)
 		return -EINVAL;
 
 	ret = pkm_lcs_key_fd_external_fd_get_mode_checked(
@@ -5427,7 +5526,7 @@ static long pkm_lcs_key_fd_restore_validate_input_stream(
 		&file);
 	if (ret)
 		return ret;
-	ret = pkm_lcs_restore_validate_stream_file(file, limits);
+	ret = pkm_lcs_restore_validate_stream_file(file, limits, summary);
 	fdput_pos(held);
 	return ret;
 }
@@ -7430,11 +7529,76 @@ static long pkm_lcs_key_fd_backup_from_args(
 		key_fd, pkm_kacs_current_effective_token_ptr(), args);
 }
 
+static long pkm_lcs_key_fd_restore_read_target_root_flags(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits, u8 *volatile_out,
+	u8 *symlink_out)
+{
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_rsi_read_key_result read_key = { };
+	long ret;
+
+	if (!key_fd || !limits || !volatile_out || !symlink_out)
+		return -EINVAL;
+	*volatile_out = 0;
+	*symlink_out = 0;
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, txn_id, key_fd->key_guid, limits,
+		limits->request_timeout_ms, &frame, &response, NULL);
+	if (ret)
+		goto out_frame;
+
+	ret = pkm_lcs_rsi_materialize_read_key_response_with_limits(
+		frame.data, frame.len, response.request_id, &response.limits,
+		&read_key);
+	if (ret)
+		goto out_frame;
+	if (!read_key.sd_len || (size_t)read_key.sd_offset > frame.len ||
+	    (size_t)read_key.sd_len >
+		    frame.len - (size_t)read_key.sd_offset) {
+		ret = -EIO;
+		goto out_frame;
+	}
+
+	*volatile_out = read_key.volatile_key ? 1 : 0;
+	*symlink_out = read_key.symlink ? 1 : 0;
+
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_restore_validate_root_flags(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_restore_root_key_summary *summary)
+{
+	u8 target_volatile = 0;
+	u8 target_symlink = 0;
+	long ret;
+
+	if (!key_fd || !limits || !summary || !summary->root_key_seen)
+		return -EINVAL;
+
+	ret = pkm_lcs_key_fd_restore_read_target_root_flags(
+		key_fd, txn_id, limits, &target_volatile, &target_symlink);
+	if (ret)
+		return ret;
+	if (summary->root_volatile != target_volatile ||
+	    summary->root_symlink != target_symlink)
+		return -EINVAL;
+	return 0;
+}
+
 static long pkm_lcs_key_fd_restore_from_args_for_token(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct reg_restore_args *args)
 {
 	struct pkm_lcs_runtime_limits limits;
+	struct pkm_lcs_restore_root_key_summary root_summary;
 	u64 transaction_id = 0;
 	bool restore_started = false;
 	bool start_audit_failed = false;
@@ -7479,8 +7643,13 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 	if (ret)
 		goto out_abort_transaction;
 
-	ret = pkm_lcs_key_fd_restore_validate_input_stream(args->input_fd,
-							   &limits);
+	ret = pkm_lcs_key_fd_restore_validate_input_stream(
+		args->input_fd, &limits, &root_summary);
+	if (ret)
+		goto out_abort_transaction;
+
+	ret = pkm_lcs_key_fd_restore_validate_root_flags(
+		key_fd, transaction_id, &limits, &root_summary);
 	if (ret)
 		goto out_abort_transaction;
 

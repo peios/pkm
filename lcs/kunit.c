@@ -30,6 +30,10 @@
 #include "transaction_fd.h"
 
 extern size_t lcs_rust_kunit_probe(void);
+extern int lcs_rust_write_backup_key_record_frame(
+	u8 *dst, size_t dst_len, const u8 *guid, u8 volatile_key, u8 symlink,
+	const u8 *security_descriptor, size_t security_descriptor_len,
+	s64 last_write_time_ns, size_t *written_out);
 
 static const u8 pkm_lcs_kunit_system_sid[] = {
 	0x01, 0x01, 0x00, 0x00,
@@ -18061,6 +18065,13 @@ static void pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static const u8 pkm_lcs_kunit_restore_header_root_guid[PKM_LCS_GUID_BYTES] = {
+	0x61,
+};
+static const u8 pkm_lcs_kunit_restore_target_guid[PKM_LCS_GUID_BYTES] = {
+	0x52,
+};
+
 static int pkm_lcs_kunit_external_fd(unsigned int flags)
 {
 	return anon_inode_getfd("lcs-external", &pkm_lcs_kunit_non_key_fops,
@@ -18146,19 +18157,48 @@ static int pkm_lcs_kunit_restore_stream_append_record_header(
 	return pkm_lcs_kunit_restore_stream_append_u32(input, record_len);
 }
 
+static int pkm_lcs_kunit_restore_stream_append_key_record(
+	struct pkm_lcs_kunit_restore_input_file *input,
+	const u8 guid[PKM_LCS_GUID_BYTES], bool volatile_key, bool symlink)
+{
+	u8 frame[128];
+	size_t written = 0;
+	int ret;
+
+	ret = lcs_rust_write_backup_key_record_frame(
+		frame, sizeof(frame), guid, volatile_key ? 1 : 0,
+		symlink ? 1 : 0, pkm_lcs_kunit_owner_only_sd,
+		sizeof(pkm_lcs_kunit_owner_only_sd), 5678, &written);
+	if (ret)
+		return ret;
+	return pkm_lcs_kunit_restore_stream_append(input, frame, written);
+}
+
+static int pkm_lcs_kunit_restore_stream_build_with_root_keys(
+	struct pkm_lcs_kunit_restore_input_file *input, bool include_unknown,
+	u32 root_key_count, bool root_volatile, bool root_symlink);
+
 static int pkm_lcs_kunit_restore_stream_build_valid(
 	struct pkm_lcs_kunit_restore_input_file *input, bool include_unknown)
 {
-	static const u8 root_guid[PKM_LCS_GUID_BYTES] = { 0x52 };
+	return pkm_lcs_kunit_restore_stream_build_with_root_keys(
+		input, include_unknown, 1, false, false);
+}
+
+static int pkm_lcs_kunit_restore_stream_build_with_root_keys(
+	struct pkm_lcs_kunit_restore_input_file *input, bool include_unknown,
+	u32 root_key_count, bool root_volatile, bool root_symlink)
+{
 	static const char hive_name[] = "Machine";
 	static const u8 unknown_payload[] = { 'o', 'p', 't' };
 	struct sha256_ctx checksum_ctx;
 	u8 checksum[SHA256_DIGEST_SIZE];
 	size_t trailer_offset;
-	u64 record_count = include_unknown ? 3 : 2;
+	u64 record_count = 2 + root_key_count + (include_unknown ? 1 : 0);
 	u32 header_len = 6 + 8 + 4 + 4 + 8 + PKM_LCS_GUID_BYTES + 4 +
 			 sizeof(hive_name) - 1;
 	u32 unknown_len = 6 + sizeof(unknown_payload);
+	u32 i;
 	int ret;
 
 	if (!input)
@@ -18182,8 +18222,9 @@ static int pkm_lcs_kunit_restore_stream_build_valid(
 	ret = pkm_lcs_kunit_restore_stream_append_s64(input, 1234);
 	if (ret)
 		return ret;
-	ret = pkm_lcs_kunit_restore_stream_append(input, root_guid,
-						  sizeof(root_guid));
+	ret = pkm_lcs_kunit_restore_stream_append(
+		input, pkm_lcs_kunit_restore_header_root_guid,
+		sizeof(pkm_lcs_kunit_restore_header_root_guid));
 	if (ret)
 		return ret;
 	ret = pkm_lcs_kunit_restore_stream_append_u32(
@@ -18202,6 +18243,14 @@ static int pkm_lcs_kunit_restore_stream_build_valid(
 			return ret;
 		ret = pkm_lcs_kunit_restore_stream_append(
 			input, unknown_payload, sizeof(unknown_payload));
+		if (ret)
+			return ret;
+	}
+
+	for (i = 0; i < root_key_count; i++) {
+		ret = pkm_lcs_kunit_restore_stream_append_key_record(
+			input, pkm_lcs_kunit_restore_header_root_guid,
+			root_volatile, root_symlink);
 		if (ret)
 			return ret;
 	}
@@ -18233,9 +18282,9 @@ static int pkm_lcs_kunit_restore_stream_build_valid(
 static long pkm_lcs_kunit_publish_source_one_backup_key_fd(void)
 {
 	static const u8 root_guid[PKM_LCS_GUID_BYTES] = { 1 };
-	static const u8 key_guid[PKM_LCS_GUID_BYTES] = { 0x52 };
 
-	return pkm_lcs_kunit_publish_key_fd_for_source(1, root_guid, key_guid);
+	return pkm_lcs_kunit_publish_key_fd_for_source(
+		1, root_guid, pkm_lcs_kunit_restore_target_guid);
 }
 
 static ssize_t pkm_lcs_kunit_backup_snapshot_read_source_request(
@@ -19820,12 +19869,14 @@ static void pkm_lcs_kunit_key_fd_backup_pre_start_failure_does_not_audit(
 
 struct pkm_lcs_kunit_restore_txn_source_script {
 	struct file *file;
+	struct pkm_lcs_kunit_read_key_source_script read_key;
 	u32 begin_status;
 	u32 abort_status;
 	u64 transaction_id;
 	u32 reads;
 	u32 writes;
 	bool saw_abort;
+	bool expect_read_key;
 	int result;
 };
 
@@ -19901,6 +19952,20 @@ static int pkm_lcs_kunit_restore_txn_source_thread(void *raw_script)
 		return 0;
 	}
 
+	if (script->expect_read_key) {
+		int ret;
+
+		script->read_key.file = script->file;
+		script->read_key.expected_txn_id = script->transaction_id;
+		ret = pkm_lcs_kunit_read_key_source_thread(&script->read_key);
+		script->reads += script->read_key.reads;
+		script->writes += script->read_key.writes;
+		if (ret) {
+			script->result = ret;
+			return ret;
+		}
+	}
+
 	for (;;) {
 		count = pkm_lcs_kunit_source_device_read_file(
 			script->file, request, sizeof(request), true);
@@ -19961,6 +20026,11 @@ static void pkm_lcs_kunit_key_fd_restore_admission(struct kunit *test)
 	struct pkm_lcs_kunit_restore_txn_source_script script = {
 		.begin_status = RSI_OK,
 		.abort_status = RSI_OK,
+		.expect_read_key = true,
+		.read_key = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.name = "Software",
+		},
 	};
 	struct pkm_lcs_kunit_restore_input_file input = { };
 	struct task_struct *task;
@@ -20000,8 +20070,8 @@ static void pkm_lcs_kunit_key_fd_restore_admission(struct kunit *test)
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 2U);
-	KUNIT_EXPECT_EQ(test, script.writes, 2U);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
 	KUNIT_EXPECT_TRUE(test, script.saw_abort);
 	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
 	KUNIT_EXPECT_EQ(test, after.privileges_used &
@@ -20203,6 +20273,108 @@ static void pkm_lcs_kunit_key_fd_restore_stream_after_trailer_denied(
 			0);
 	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
 						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_stream_missing_root_key(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_root_keys(
+				&input, true, 0, false, false),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_stream_duplicate_root_key(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_root_keys(
+				&input, true, 2, false, false),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void
+pkm_lcs_kunit_expect_restore_root_flag_result(
+	struct kunit *test, struct pkm_lcs_kunit_restore_input_file *input,
+	long expected_ret, bool target_volatile, bool target_symlink)
+{
+	struct reg_restore_args args = { };
+	struct pkm_lcs_kunit_restore_txn_source_script script = {
+		.begin_status = RSI_OK,
+		.abort_status = RSI_OK,
+		.expect_read_key = true,
+		.read_key = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.name = "Software",
+			.volatile_key = target_volatile,
+			.symlink = target_symlink,
+		},
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const void *source_token;
+	long key_fd;
+	int input_fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_RESTORE_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+	args.input_fd = input_fd;
+
+	script.file = &file;
+	pkm_kmes_kunit_reset_all();
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_restore_txn_source_thread, &script,
+		"pkm-lcs-kunit-restore-root-flags");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, token, &args),
+			expected_ret);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_TRUE(test, script.saw_abort);
+	pkm_lcs_kunit_expect_latest_lcs_event(
+		test, "LCS_RESTORE_COMPLETE", "result_errno");
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_stream_root_flags_conflict(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_root_keys(
+				&input, true, 1, true, false),
+			0);
+	pkm_lcs_kunit_expect_restore_root_flag_result(
+		test, &input, (long)-EINVAL, false, false);
 }
 
 static void pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream(
@@ -48121,6 +48293,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_min_reader_denied),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_checksum_mismatch),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_after_trailer_denied),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_missing_root_key),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_duplicate_root_key),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_root_flags_conflict),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_fails_before_source),
