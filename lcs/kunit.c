@@ -508,6 +508,18 @@ struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script {
 	int result;
 };
 
+struct pkm_lcs_kunit_source_bootstrap_source_script {
+	struct file *file;
+	struct pkm_lcs_kunit_walk_source_script self_config_walk;
+	struct pkm_lcs_kunit_query_values_source_script self_config_query;
+	struct pkm_lcs_kunit_walk_source_script layers_walk;
+	struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script layers_refresh;
+	bool expect_layers_refresh;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
 struct pkm_lcs_kunit_symlink_follow_source_script {
 	struct file *file;
 	struct pkm_lcs_kunit_walk_source_step link_step;
@@ -649,6 +661,7 @@ static int pkm_lcs_kunit_hide_key_ioctl_source_thread(void *raw_script);
 static int pkm_lcs_kunit_enum_children_source_thread(void *raw_script);
 static int
 pkm_lcs_kunit_layer_metadata_refresh_all_source_thread(void *raw_script);
+static int pkm_lcs_kunit_source_bootstrap_source_thread(void *raw_script);
 static int pkm_lcs_kunit_symlink_follow_source_thread(void *raw_script);
 static int pkm_lcs_kunit_symlink_sequence_source_thread(void *raw_script);
 static int pkm_lcs_kunit_create_source_thread(void *raw_script);
@@ -1663,6 +1676,335 @@ static void pkm_lcs_kunit_source_registration_ioctl_rejects_repeat_register(
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
 	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
+	struct kunit *test)
+{
+	static const u8 machine_root_guid[RSI_GUID_SIZE] = { 0x81 };
+	static const u8 system_guid[RSI_GUID_SIZE] = { 0x82 };
+	static const u8 registry_guid[RSI_GUID_SIZE] = { 0x83 };
+	static const u8 layers_root_guid[RSI_GUID_SIZE] = { 0x84 };
+	static const u8 policy_guid[RSI_GUID_SIZE] = { 0x85 };
+	static const char value_name[] = "RequestTimeoutMs";
+	static const struct pkm_lcs_kunit_walk_source_step self_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "Registry", .guid = registry_guid },
+	};
+	static const struct pkm_lcs_kunit_walk_source_step layer_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "Registry", .guid = registry_guid },
+		{ .expected_child = "Layers", .guid = layers_root_guid },
+	};
+	static const u8 owner_only_sd[] = {
+		0x01, 0x00, 0x00, 0x80,
+		0x14, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x01, 0x01, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x05,
+		0x12, 0x00, 0x00, 0x00,
+	};
+	u8 data[sizeof(u32)];
+	struct pkm_lcs_kunit_source_bootstrap_source_script script = {
+		.self_config_walk = {
+			.steps = self_steps,
+			.step_count = ARRAY_SIZE(self_steps),
+		},
+		.self_config_query = {
+			.expected_guid = registry_guid,
+			.expected_value_name = "",
+			.response_value_name = value_name,
+			.layer_name = "base",
+			.data = data,
+			.data_len = sizeof(data),
+			.value_type = REG_DWORD,
+			.query_all = true,
+		},
+		.layers_walk = {
+			.steps = layer_steps,
+			.step_count = ARRAY_SIZE(layer_steps),
+		},
+		.layers_refresh = {
+			.enum_children = {
+				.expected_parent_guid = layers_root_guid,
+				.child_name = "Policy",
+				.layer_name = "base",
+				.child_guid = policy_guid,
+			},
+			.refresh = {
+				.expected_guid = policy_guid,
+				.name = "Policy",
+				.sd = owner_only_sd,
+				.sd_len = sizeof(owner_only_sd),
+				.precedence = 7,
+				.enabled = 1,
+				.precedence_present = true,
+				.enabled_present = true,
+			},
+			.expect_refresh = true,
+		},
+		.expect_layers_refresh = true,
+	};
+	struct pkm_lcs_source_bootstrap_refresh_result result = { };
+	struct pkm_lcs_runtime_limits snapshot = { };
+	struct pkm_lcs_rsi_layer_view layers[3] = { };
+	char names[64] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	long ret;
+	int thread_ret;
+
+	put_unaligned_le32(1000U, data);
+	pkm_kmes_kunit_reset_all();
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_source_bootstrap_source_thread, &script,
+		"pkm-lcs-kunit-bootstrap-refresh");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_source_bootstrap_refresh_machine_hive(
+		1, machine_root_guid, &result);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 11U);
+	KUNIT_EXPECT_EQ(test, script.writes, 11U);
+	KUNIT_EXPECT_EQ(test, result.self_config.applied_count, 1U);
+	KUNIT_EXPECT_TRUE(test, result.layers_root_present);
+	KUNIT_EXPECT_EQ(test, result.layers.enumerated_child_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.layers.refreshed_child_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.layers.effective_changed_count, 1U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms, 1000U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 2U);
+	KUNIT_EXPECT_STREQ(test, layers[1].name, "Policy");
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 7U);
+	KUNIT_EXPECT_EQ(test, layers[1].enabled, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
+	struct kunit *test)
+{
+	static const u8 system_guid[RSI_GUID_SIZE] = { 0x87 };
+	static const u8 registry_guid[RSI_GUID_SIZE] = { 0x88 };
+	static const u8 layers_root_guid[RSI_GUID_SIZE] = { 0x89 };
+	static const u8 policy_guid[RSI_GUID_SIZE] = { 0x8a };
+	static const char name_src[] = "Machine";
+	static const char value_name[] = "RequestTimeoutMs";
+	static const struct pkm_lcs_kunit_walk_source_step self_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "Registry", .guid = registry_guid },
+	};
+	static const struct pkm_lcs_kunit_walk_source_step layer_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "Registry", .guid = registry_guid },
+		{ .expected_child = "Layers", .guid = layers_root_guid },
+	};
+	static const u8 owner_only_sd[] = {
+		0x01, 0x00, 0x00, 0x80,
+		0x14, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x01, 0x01, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x05,
+		0x12, 0x00, 0x00, 0x00,
+	};
+	u8 data[sizeof(u32)];
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct pkm_lcs_kunit_source_bootstrap_source_script script = {
+		.self_config_walk = {
+			.steps = self_steps,
+			.step_count = ARRAY_SIZE(self_steps),
+		},
+		.self_config_query = {
+			.expected_guid = registry_guid,
+			.expected_value_name = "",
+			.response_value_name = value_name,
+			.layer_name = "base",
+			.data = data,
+			.data_len = sizeof(data),
+			.value_type = REG_DWORD,
+			.query_all = true,
+		},
+		.layers_walk = {
+			.steps = layer_steps,
+			.step_count = ARRAY_SIZE(layer_steps),
+		},
+		.layers_refresh = {
+			.enum_children = {
+				.expected_parent_guid = layers_root_guid,
+				.child_name = "Policy",
+				.layer_name = "base",
+				.child_guid = policy_guid,
+			},
+			.refresh = {
+				.expected_guid = policy_guid,
+				.name = "Policy",
+				.sd = owner_only_sd,
+				.sd_len = sizeof(owner_only_sd),
+				.precedence = 9,
+				.enabled = 1,
+				.precedence_present = true,
+				.enabled_present = true,
+			},
+			.expect_refresh = true,
+		},
+		.expect_layers_refresh = true,
+	};
+	struct pkm_lcs_runtime_limits snapshot = { };
+	struct pkm_lcs_source_table_snapshot table = { };
+	struct pkm_lcs_rsi_layer_view layers[3] = { };
+	char names[64] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	long ret;
+	int thread_ret;
+
+	put_unaligned_le32(1000U, data);
+	pkm_kmes_kunit_reset_all();
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_source_bootstrap_source_thread, &script,
+		"pkm-lcs-kunit-register-bootstrap");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	pkm_lcs_kunit_build_register_args(&args, &hive, name_src, 0x86, 0);
+	ret = pkm_lcs_kunit_source_register_file_for_token_with_bootstrap(
+		token, &file, &ops, (const void __user *)&args);
+	pkm_lcs_kunit_flush_source_bootstrap_work();
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 11U);
+	KUNIT_EXPECT_EQ(test, script.writes, 11U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms, 1000U);
+	pkm_lcs_kunit_source_table_snapshot(&table);
+	KUNIT_EXPECT_EQ(test, table.occupied_count, 1U);
+	KUNIT_EXPECT_EQ(test, table.active_count, 1U);
+	KUNIT_EXPECT_TRUE(test, table.sequence_initialized);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 2U);
+	KUNIT_EXPECT_STREQ(test, layers[1].name, "Policy");
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 9U);
+	KUNIT_EXPECT_EQ(test, layers[1].enabled, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_registration_bootstrap_ignores_non_machine(
+	struct kunit *test)
+{
+	static const char name_src[] = "Users";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct pkm_lcs_source_fd_snapshot fd_snapshot = { };
+	struct pkm_lcs_runtime_limits snapshot = { };
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, name_src, 0x91, 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_register_file_for_token_with_bootstrap(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+	pkm_lcs_kunit_flush_source_bootstrap_work();
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &fd_snapshot);
+	KUNIT_EXPECT_EQ(test, fd_snapshot.state, PKM_LCS_SOURCE_FD_ACTIVE);
+	KUNIT_EXPECT_EQ(test, fd_snapshot.queued_request_count, 0U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms,
+			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_bootstrap_refresh_bad_inputs_fail_closed(
+	struct kunit *test)
+{
+	static const u8 machine_root_guid[RSI_GUID_SIZE] = { 0x92 };
+	struct pkm_lcs_source_bootstrap_refresh_result result = {
+		.layers_root_present = true,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bootstrap_refresh_machine_hive(
+				0, machine_root_guid, &result),
+			(long)-EINVAL);
+	KUNIT_EXPECT_FALSE(test, result.layers_root_present);
+
+	result.layers_root_present = true;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bootstrap_refresh_machine_hive(
+				1, NULL, &result),
+			(long)-EINVAL);
+	KUNIT_EXPECT_FALSE(test, result.layers_root_present);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bootstrap_refresh_machine_hive(
+				1, machine_root_guid, NULL),
+			(long)-EINVAL);
 }
 
 static void pkm_lcs_kunit_source_bound_transaction_counter_limits(
@@ -24030,6 +24372,99 @@ out:
 	return ret;
 }
 
+static int pkm_lcs_kunit_source_bootstrap_handle_layer_refresh_all(
+	struct pkm_lcs_kunit_source_bootstrap_source_script *script)
+{
+	struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script *refresh =
+		&script->layers_refresh;
+	u8 request[256];
+	int ret;
+
+	refresh->enum_children.file = script->file;
+	ret = pkm_lcs_kunit_enum_children_source_thread(
+		&refresh->enum_children);
+	refresh->reads = refresh->enum_children.reads;
+	refresh->writes = refresh->enum_children.writes;
+	if (ret)
+		goto out;
+	if (!refresh->expect_refresh)
+		goto out;
+
+	refresh->refresh.file = script->file;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_read_key(
+		&refresh->refresh, request, sizeof(request));
+	if (ret)
+		goto out_refresh;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
+		&refresh->refresh, request, sizeof(request), "Precedence",
+		refresh->refresh.precedence_present,
+		refresh->refresh.precedence);
+	if (ret)
+		goto out_refresh;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
+		&refresh->refresh, request, sizeof(request), "Enabled",
+		refresh->refresh.enabled_present, refresh->refresh.enabled);
+	if (ret)
+		goto out_refresh;
+	if (pkm_lcs_kunit_layer_metadata_refresh_stops_after_enabled(
+		    &refresh->refresh))
+		goto out_refresh;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_owner_query(
+		&refresh->refresh, request, sizeof(request));
+
+out_refresh:
+	refresh->reads += refresh->refresh.reads;
+	refresh->writes += refresh->refresh.writes;
+out:
+	refresh->result = ret;
+	return ret;
+}
+
+static int pkm_lcs_kunit_source_bootstrap_source_thread(void *raw_script)
+{
+	struct pkm_lcs_kunit_source_bootstrap_source_script *script =
+		raw_script;
+	int ret;
+
+	if (!script || !script->file) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	script->self_config_walk.file = script->file;
+	ret = pkm_lcs_kunit_walk_source_thread(&script->self_config_walk);
+	script->reads += script->self_config_walk.reads;
+	script->writes += script->self_config_walk.writes;
+	if (ret)
+		goto out;
+
+	script->self_config_query.file = script->file;
+	ret = pkm_lcs_kunit_query_values_source_thread(
+		&script->self_config_query);
+	script->reads += script->self_config_query.reads;
+	script->writes += script->self_config_query.writes;
+	if (ret)
+		goto out;
+
+	script->layers_walk.file = script->file;
+	ret = pkm_lcs_kunit_walk_source_thread(&script->layers_walk);
+	script->reads += script->layers_walk.reads;
+	script->writes += script->layers_walk.writes;
+	if (ret || !script->expect_layers_refresh)
+		goto out;
+
+	ret = pkm_lcs_kunit_source_bootstrap_handle_layer_refresh_all(script);
+	script->reads += script->layers_refresh.reads;
+	script->writes += script->layers_refresh.writes;
+
+out:
+	script->result = ret;
+	while (!kthread_should_stop())
+		msleep(1);
+	return ret;
+}
+
 static ssize_t pkm_lcs_kunit_delete_key_ioctl_source_read(
 	struct pkm_lcs_kunit_delete_key_ioctl_source_script *script,
 	u8 *request, size_t request_len)
@@ -40179,6 +40614,14 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_ioctl_rejects_stale_resume),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_ioctl_rejects_repeat_register),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_bootstrap_ignores_non_machine),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_bootstrap_refresh_bad_inputs_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_limits),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_source_down),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_bad_inputs),

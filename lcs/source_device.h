@@ -321,6 +321,13 @@ struct pkm_lcs_layer_metadata_refresh_all_result {
 	u32 effective_changed_count;
 };
 
+struct pkm_lcs_source_bootstrap_refresh_result {
+	struct pkm_lcs_self_config_apply_plan self_config;
+	struct pkm_lcs_layer_metadata_refresh_all_result layers;
+	bool layers_root_present;
+	u8 _pad[3];
+};
+
 struct pkm_lcs_path_validation_result {
 	u32 component_count;
 	bool used_forward_separator;
@@ -633,6 +640,9 @@ long pkm_lcs_layer_metadata_children_enumerate_from_root(
 long pkm_lcs_layer_metadata_refresh_all_from_root(
 	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_layer_metadata_refresh_all_result *result_out);
+long pkm_lcs_source_bootstrap_refresh_machine_hive(
+	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_source_bootstrap_refresh_result *result_out);
 u32 pkm_lcs_runtime_request_timeout_ms(void);
 u32 pkm_lcs_runtime_transaction_timeout_ms(void);
 u32 pkm_lcs_runtime_symlink_depth_limit(void);
@@ -1348,6 +1358,10 @@ long pkm_lcs_kunit_source_hive_generation_set(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE], u64 generation);
 long pkm_lcs_kunit_create_missing_child_depth(u32 parent_depth,
 					      u32 *child_depth_out);
+long pkm_lcs_kunit_source_register_file_for_token_with_bootstrap(
+	const void *token, struct file *file, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_src_register_args __user *uargs);
+void pkm_lcs_kunit_flush_source_bootstrap_work(void);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_SOURCE_DEVICE_H */

@@ -27,6 +27,7 @@
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <linux/unaligned.h>
+#include <linux/workqueue.h>
 
 #include <pkm/token.h>
 
@@ -140,6 +141,17 @@ struct pkm_lcs_source_slot {
 	u32 bound_transaction_count;
 };
 
+struct pkm_lcs_source_registration_result {
+	u32 source_id;
+	u32 resumed_source_id;
+};
+
+struct pkm_lcs_source_bootstrap_work {
+	struct work_struct work;
+	u32 source_id;
+	u8 machine_root_guid[RSI_GUID_SIZE];
+};
+
 struct pkm_lcs_layer_table_entry {
 	bool occupied;
 	u8 enabled;
@@ -188,6 +200,8 @@ static const struct pkm_lcs_rsi_layer_view pkm_lcs_base_layer_snapshot[] = {
 		.enabled = 1,
 	},
 };
+
+static void pkm_lcs_source_bootstrap_workfn(struct work_struct *work);
 
 long pkm_lcs_runtime_limits_defaults(struct pkm_lcs_runtime_limits *limits)
 {
@@ -2714,7 +2728,7 @@ long pkm_lcs_source_registration_validate_copied(
 static long pkm_lcs_source_registration_publish_locked(
 	struct pkm_lcs_source_fd *source_fd,
 	struct pkm_lcs_source_registration_copy *registration,
-	u32 *resumed_source_id)
+	struct pkm_lcs_source_registration_result *result)
 {
 	struct pkm_lcs_source_slot_view_copy
 		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
@@ -2730,8 +2744,8 @@ static long pkm_lcs_source_registration_publish_locked(
 		return -EINVAL;
 	if (source_fd->state != PKM_LCS_SOURCE_FD_UNREGISTERED)
 		return -EINVAL;
-	if (resumed_source_id)
-		*resumed_source_id = 0;
+	if (result)
+		memset(result, 0, sizeof(*result));
 
 	slot_count = pkm_lcs_source_table_views_locked(views);
 	ret = lcs_rust_validate_source_registration(
@@ -2773,8 +2787,8 @@ static long pkm_lcs_source_registration_publish_locked(
 		slot->active_fd = source_fd;
 		slot->source_next_sequence = plan.source_next_sequence;
 		slot->restart_generation++;
-		if (resumed_source_id)
-			*resumed_source_id = slot->source_id;
+		if (result)
+			result->resumed_source_id = slot->source_id;
 		break;
 	default:
 		return -EINVAL;
@@ -2782,19 +2796,79 @@ static long pkm_lcs_source_registration_publish_locked(
 
 	source_fd->state = PKM_LCS_SOURCE_FD_ACTIVE;
 	source_fd->source_id = slot->source_id;
+	if (result)
+		result->source_id = slot->source_id;
 	pkm_lcs_next_sequence = plan.effective_next_sequence;
 	pkm_lcs_sequence_initialized = true;
 	wake_up_interruptible(&source_fd->read_wait);
 	return 0;
 }
 
-long pkm_lcs_source_register_file_for_token(
+static bool pkm_lcs_source_registration_hive_is_global_machine(
+	const struct pkm_lcs_source_registration_hive_copy *hive)
+{
+	static const char machine_name[] = "Machine";
+
+	if (!hive || !hive->name)
+		return false;
+	if (hive->flags)
+		return false;
+	if (hive->name_len != sizeof(machine_name) - 1)
+		return false;
+
+	return !strncasecmp(hive->name, machine_name, sizeof(machine_name) - 1);
+}
+
+static const struct pkm_lcs_source_registration_hive_copy *
+pkm_lcs_source_registration_find_global_machine(
+	const struct pkm_lcs_source_registration_copy *registration)
+{
+	u32 i;
+
+	if (!registration || !registration->hives)
+		return NULL;
+
+	for (i = 0; i < registration->hive_count; i++) {
+		if (pkm_lcs_source_registration_hive_is_global_machine(
+			    &registration->hives[i]))
+			return &registration->hives[i];
+	}
+	return NULL;
+}
+
+static long pkm_lcs_source_bootstrap_work_prepare(
+	const struct pkm_lcs_source_registration_copy *registration,
+	struct pkm_lcs_source_bootstrap_work **work_out)
+{
+	const struct pkm_lcs_source_registration_hive_copy *machine;
+	struct pkm_lcs_source_bootstrap_work *work;
+
+	if (!work_out)
+		return -EINVAL;
+	*work_out = NULL;
+
+	machine = pkm_lcs_source_registration_find_global_machine(registration);
+	if (!machine)
+		return 0;
+
+	work = kmalloc(sizeof(*work), GFP_KERNEL);
+	if (!work)
+		return -ENOMEM;
+	memcpy(work->machine_root_guid, machine->root_guid,
+	       sizeof(work->machine_root_guid));
+	work->source_id = 0;
+	*work_out = work;
+	return 0;
+}
+
+static long pkm_lcs_source_register_file_for_token_core(
 	const void *token, struct file *file, const struct pkm_lcs_usercopy_ops *ops,
-	const struct reg_src_register_args __user *uargs)
+	const struct reg_src_register_args __user *uargs, bool queue_bootstrap)
 {
 	struct pkm_lcs_source_registration_copy registration = { };
+	struct pkm_lcs_source_registration_result publish = { };
+	struct pkm_lcs_source_bootstrap_work *bootstrap_work = NULL;
 	struct pkm_lcs_source_fd *source_fd;
-	u32 resumed_source_id = 0;
 	long ret;
 
 	if (!file)
@@ -2823,25 +2897,61 @@ long pkm_lcs_source_register_file_for_token(
 	if (ret)
 		return ret;
 
+	if (queue_bootstrap) {
+		ret = pkm_lcs_source_bootstrap_work_prepare(&registration,
+							    &bootstrap_work);
+		if (ret)
+			goto out_registration;
+	}
+
 	mutex_lock(&pkm_lcs_source_table_lock);
 	ret = pkm_lcs_source_registration_publish_locked(source_fd,
 							&registration,
-							&resumed_source_id);
+							&publish);
 	mutex_unlock(&pkm_lcs_source_table_lock);
+	if (ret)
+		goto out_bootstrap;
 
-	if (!ret && resumed_source_id) {
+	if (publish.resumed_source_id) {
 		u32 watch_count = 0;
 
 		ret = pkm_lcs_key_fd_dispatch_source_overflow(
-			resumed_source_id, &watch_count);
+			publish.resumed_source_id, &watch_count);
 		if (ret) {
-			pkm_lcs_source_mark_down_by_id(resumed_source_id);
+			pkm_lcs_source_mark_down_by_id(publish.resumed_source_id);
 			ret = -EIO;
+			goto out_bootstrap;
 		}
 	}
 
+	if (bootstrap_work) {
+		bootstrap_work->source_id = publish.source_id;
+		INIT_WORK(&bootstrap_work->work, pkm_lcs_source_bootstrap_workfn);
+		schedule_work(&bootstrap_work->work);
+		bootstrap_work = NULL;
+	}
+
+out_bootstrap:
+	kfree(bootstrap_work);
+out_registration:
 	pkm_lcs_source_registration_copy_destroy(&registration);
 	return ret;
+}
+
+long pkm_lcs_source_register_file_for_token(
+	const void *token, struct file *file, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_src_register_args __user *uargs)
+{
+	return pkm_lcs_source_register_file_for_token_core(token, file, ops,
+							   uargs, false);
+}
+
+static long pkm_lcs_source_register_file_for_token_with_bootstrap(
+	const void *token, struct file *file, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_src_register_args __user *uargs)
+{
+	return pkm_lcs_source_register_file_for_token_core(token, file, ops,
+							   uargs, true);
 }
 
 long pkm_lcs_source_enqueue_request(
@@ -7555,6 +7665,55 @@ out_children:
 	return ret;
 }
 
+long pkm_lcs_source_bootstrap_refresh_machine_hive(
+	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_source_bootstrap_refresh_result *result_out)
+{
+	struct pkm_lcs_source_bootstrap_refresh_result result = { };
+	u8 layers_root_guid[RSI_GUID_SIZE] = { };
+	bool layers_root_present = false;
+	long ret;
+
+	if (result_out)
+		memset(result_out, 0, sizeof(*result_out));
+	if (!source_id || !machine_root_guid || !result_out)
+		return -EINVAL;
+
+	ret = pkm_lcs_runtime_limits_refresh_self_config_from_machine_hive(
+		source_id, machine_root_guid, &result.self_config);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_layer_metadata_root_discover_from_machine_hive(
+		source_id, machine_root_guid, &layers_root_present,
+		layers_root_guid);
+	if (ret)
+		return ret;
+	result.layers_root_present = layers_root_present;
+
+	if (layers_root_present) {
+		ret = pkm_lcs_layer_metadata_refresh_all_from_root(
+			source_id, layers_root_guid, &result.layers);
+		if (ret)
+			return ret;
+	}
+
+	*result_out = result;
+	return 0;
+}
+
+static void pkm_lcs_source_bootstrap_workfn(struct work_struct *work)
+{
+	struct pkm_lcs_source_bootstrap_work *bootstrap_work =
+		container_of(work, struct pkm_lcs_source_bootstrap_work, work);
+	struct pkm_lcs_source_bootstrap_refresh_result result = { };
+
+	(void)pkm_lcs_source_bootstrap_refresh_machine_hive(
+		bootstrap_work->source_id, bootstrap_work->machine_root_guid,
+		&result);
+	kfree(bootstrap_work);
+}
+
 static long pkm_lcs_publish_open_key_for_token(
 	const void *token, u32 source_id, const u8 key_guid[RSI_GUID_SIZE],
 	const u8 *sd, size_t sd_len, u32 desired_access,
@@ -11513,7 +11672,7 @@ static long pkm_lcs_source_device_ioctl(struct file *file, unsigned int cmd,
 {
 	switch (cmd) {
 	case REG_SRC_REGISTER:
-		return pkm_lcs_source_register_file_for_token(
+		return pkm_lcs_source_register_file_for_token_with_bootstrap(
 			pkm_kacs_current_effective_token_ptr(), file, NULL,
 			(struct reg_src_register_args __user *)arg);
 	default:
@@ -11652,6 +11811,19 @@ long pkm_lcs_kunit_source_hive_generation_set(
 out_unlock:
 	mutex_unlock(&pkm_lcs_source_table_lock);
 	return ret;
+}
+
+long pkm_lcs_kunit_source_register_file_for_token_with_bootstrap(
+	const void *token, struct file *file, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_src_register_args __user *uargs)
+{
+	return pkm_lcs_source_register_file_for_token_with_bootstrap(
+		token, file, ops, uargs);
+}
+
+void pkm_lcs_kunit_flush_source_bootstrap_work(void)
+{
+	flush_scheduled_work();
 }
 
 long pkm_lcs_kunit_create_missing_child_depth(u32 parent_depth,
