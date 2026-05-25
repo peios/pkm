@@ -28,6 +28,28 @@ enum pkm_lcs_source_fd_state {
 #define PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT 16U
 #define PKM_LCS_KEY_GUID_ASSIGNMENT_MAX_ATTEMPTS 8U
 
+struct pkm_lcs_runtime_limits {
+	u32 request_timeout_ms;
+	u32 transaction_timeout_ms;
+	u32 notification_queue_size;
+	u32 symlink_depth_limit;
+	u32 max_value_size;
+	u32 max_key_depth;
+	u32 max_path_component_length;
+	u32 max_total_path_length;
+	u32 max_layers_per_value;
+	u32 max_bound_transactions_per_source;
+	u32 max_read_only_transactions_per_source;
+	u32 max_total_layers;
+	u32 max_registered_sources;
+	u32 max_hives_per_source;
+	u32 max_concurrent_rsi_requests;
+	u32 max_scope_guids_per_token;
+	u32 max_private_layers_per_token;
+	u32 max_subtree_watch_depth;
+	u32 max_transaction_watch_event_burst;
+};
+
 struct pkm_lcs_source_in_flight_request {
 	bool occupied;
 	bool delivered;
@@ -38,6 +60,7 @@ struct pkm_lcs_source_in_flight_request {
 	u16 op_code;
 	u16 _pad1;
 	u8 key_guid[RSI_GUID_SIZE];
+	struct pkm_lcs_runtime_limits limits;
 	struct pkm_lcs_source_response_waiter *waiter;
 };
 
@@ -245,28 +268,6 @@ enum pkm_lcs_self_config_received_kind {
 	PKM_LCS_SELF_CONFIG_RECEIVED_DWORD_OUT_OF_RANGE = 2,
 };
 
-struct pkm_lcs_runtime_limits {
-	u32 request_timeout_ms;
-	u32 transaction_timeout_ms;
-	u32 notification_queue_size;
-	u32 symlink_depth_limit;
-	u32 max_value_size;
-	u32 max_key_depth;
-	u32 max_path_component_length;
-	u32 max_total_path_length;
-	u32 max_layers_per_value;
-	u32 max_bound_transactions_per_source;
-	u32 max_read_only_transactions_per_source;
-	u32 max_total_layers;
-	u32 max_registered_sources;
-	u32 max_hives_per_source;
-	u32 max_concurrent_rsi_requests;
-	u32 max_scope_guids_per_token;
-	u32 max_private_layers_per_token;
-	u32 max_subtree_watch_depth;
-	u32 max_transaction_watch_event_burst;
-};
-
 struct pkm_lcs_path_validation_result {
 	u32 component_count;
 	bool used_forward_separator;
@@ -314,6 +315,7 @@ struct pkm_lcs_source_response_result {
 	u16 response_op_code;
 	u32 status;
 	u8 key_guid[RSI_GUID_SIZE];
+	struct pkm_lcs_runtime_limits limits;
 	u32 source_validation_failure;
 	bool malformed_source_data;
 	bool source_validation_failure_present;

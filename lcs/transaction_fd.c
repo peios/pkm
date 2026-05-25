@@ -1737,14 +1737,15 @@ static long pkm_lcs_transaction_delete_key_post_lookup(
 	ret = pkm_lcs_rsi_materialize_lookup_guid_entry(
 		frame.data, frame.len, response.request_id, next_sequence,
 		entry->child_name, entry->child_name_len, entry->key_guid,
-		&result);
+		&response.limits, &result);
 	if (ret)
 		goto out_frame;
 
 	ret = pkm_lcs_rsi_materialize_lookup_child(
 		frame.data, frame.len, response.request_id, next_sequence,
 		entry->child_name, entry->child_name_len, layer_snapshot.layers,
-		layer_snapshot.layer_count, NULL, 0, &effective);
+		layer_snapshot.layer_count, NULL, 0, &response.limits,
+		&effective);
 	if (ret)
 		goto out_frame;
 

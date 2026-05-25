@@ -1947,6 +1947,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_lookup_request_frame(
     parent_guid: *const u8,
     child_name: *const u8,
     child_name_len: u32,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     built_out: *mut PkmLcsRsiBuiltRequestCopy,
 ) -> c_int {
     if built_out.is_null() {
@@ -1973,7 +1974,15 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_lookup_request_frame(
     parent_guid_copy.copy_from_slice(parent_guid_bytes);
 
     let child_name_bytes = unsafe { slice::from_raw_parts(child_name, child_name_len as usize) };
-    if let Err(err) = validate_key_component_bytes(child_name_bytes, &LcsLimits::DEFAULT) {
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
+    if let Err(err) = validate_key_component_bytes(child_name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
 
@@ -3389,6 +3398,7 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_lookup_response_frame(
     frame_len: usize,
     request_id: u64,
     next_sequence: u64,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     summary_out: *mut PkmLcsRsiLookupResponseSummaryCopy,
 ) -> c_int {
     if summary_out.is_null() {
@@ -3409,6 +3419,14 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_lookup_response_frame(
     if frame.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
 
     let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
     let payload = match parse_rsi_lookup_success_response_payload(
@@ -3441,7 +3459,7 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_lookup_response_frame(
         }
         return rsi_lookup_response_error_return(err);
     }
-    if let Err(err) = validate_rsi_lookup_path_response_names(&payload, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_rsi_lookup_path_response_names(&payload, &limits) {
         if let Some(failure) = source_validation_failure_for_name_error(&err) {
             unsafe {
                 (*summary_out).source_validation_failure = source_validation_failure_code(failure);
@@ -3664,6 +3682,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
     layer_count: usize,
     private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
     private_layer_count: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     result_out: *mut PkmLcsRsiEnumChildrenInfoSummaryCopy,
 ) -> c_int {
     if result_out.is_null() {
@@ -3687,6 +3706,14 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
     {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
 
     let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
     let layer_views = match parse_layer_views(layers, layer_count) {
@@ -3728,8 +3755,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
         }
         return rsi_enum_children_response_error_return(err);
     }
-    if let Err(err) = validate_rsi_enum_children_path_response_names(&payload, &LcsLimits::DEFAULT)
-    {
+    if let Err(err) = validate_rsi_enum_children_path_response_names(&payload, &limits) {
         if let Some(failure) = source_validation_failure_for_name_error(&err) {
             unsafe {
                 (*result_out).source_validation_failure = source_validation_failure_code(failure);
@@ -3767,8 +3793,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
             Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
         };
     let mut allocation_failed = false;
-    if let Err(err) =
-        for_each_rsi_enum_children_source_path_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+    if let Err(err) = for_each_rsi_enum_children_source_path_entry(&payload, &limits, |entry| {
             if path_storage.push(entry).is_err() {
                 allocation_failed = true;
                 return Err(LcsError::RsiPayloadLengthOverflow);
@@ -3785,7 +3810,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_children_info_summary(
     let context = LayerResolutionContext {
         layers: layer_views.as_slice(),
         private_layers: private_layer_views.as_slice(),
-        limits: &LcsLimits::DEFAULT,
+        limits: &limits,
         next_sequence,
     };
     let mut subkey_count = 0usize;
@@ -3834,6 +3859,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_subkey_response(
     layer_count: usize,
     private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
     private_layer_count: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     result_out: *mut PkmLcsRsiEnumSubkeyResultCopy,
 ) -> c_int {
     if result_out.is_null() {
@@ -3859,6 +3885,14 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_subkey_response(
     {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
 
     let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
     let layer_views = match parse_layer_views(layers, layer_count) {
@@ -3884,8 +3918,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_subkey_response(
     if let Err(err) = validate_rsi_enum_children_metadata_completeness(&payload) {
         return rsi_enum_children_response_error_return(err);
     }
-    if let Err(err) = validate_rsi_enum_children_path_response_names(&payload, &LcsLimits::DEFAULT)
-    {
+    if let Err(err) = validate_rsi_enum_children_path_response_names(&payload, &limits) {
         return rsi_enum_children_response_error_return(err);
     }
     if let Err(err) = validate_rsi_enum_children_metadata_security_descriptors(&payload) {
@@ -3901,8 +3934,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_subkey_response(
             Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
         };
     let mut allocation_failed = false;
-    if let Err(err) =
-        for_each_rsi_enum_children_source_path_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+    if let Err(err) = for_each_rsi_enum_children_source_path_entry(&payload, &limits, |entry| {
             if path_storage.push(entry).is_err() {
                 allocation_failed = true;
                 return Err(LcsError::RsiPayloadLengthOverflow);
@@ -3926,7 +3958,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_subkey_response(
     let context = LayerResolutionContext {
         layers: layer_views.as_slice(),
         private_layers: private_layer_views.as_slice(),
-        limits: &LcsLimits::DEFAULT,
+        limits: &limits,
         next_sequence,
     };
     let target_index = index as usize;
@@ -4623,6 +4655,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_child(
     layer_count: usize,
     private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
     private_layer_count: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     result_out: *mut PkmLcsRsiLookupChildResultCopy,
 ) -> c_int {
     if result_out.is_null() {
@@ -4652,6 +4685,14 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_child(
     {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
 
     let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
     let child_bytes = unsafe { slice::from_raw_parts(child_name, child_name_len as usize) };
@@ -4659,7 +4700,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_child(
         Ok(child_component) => child_component,
         Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
     };
-    if validate_key_component_bytes(child_bytes, &LcsLimits::DEFAULT).is_err() {
+    if validate_key_component_bytes(child_bytes, &limits).is_err() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
 
@@ -4686,7 +4727,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_child(
     if let Err(err) = validate_rsi_lookup_metadata_completeness(&payload) {
         return rsi_lookup_response_error_return(err);
     }
-    if let Err(err) = validate_rsi_lookup_path_response_names(&payload, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_rsi_lookup_path_response_names(&payload, &limits) {
         return rsi_lookup_response_error_return(err);
     }
     if let Err(err) = validate_rsi_lookup_metadata_security_descriptors(&payload) {
@@ -4699,7 +4740,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_child(
     let context = LayerResolutionContext {
         layers: layer_views.as_slice(),
         private_layers: private_layer_views.as_slice(),
-        limits: &LcsLimits::DEFAULT,
+        limits: &limits,
         next_sequence,
     };
     let mut path_storage =
@@ -4710,7 +4751,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_child(
     let mut path_storage_allocation_failed = false;
     if let Err(err) = for_each_rsi_lookup_source_path_entry(
         &payload,
-        &LcsLimits::DEFAULT,
+        &limits,
         child_component,
         |entry| {
             if path_storage.push(entry).is_err() {
@@ -4801,6 +4842,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_guid_entry(
     child_name: *const u8,
     child_name_len: u32,
     target_guid: *const u8,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     result_out: *mut PkmLcsRsiLookupGuidEntryResultCopy,
 ) -> c_int {
     if result_out.is_null() {
@@ -4818,6 +4860,14 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_guid_entry(
     if frame.is_null() || child_name.is_null() || target_guid.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
 
     let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
     let child_bytes = unsafe { slice::from_raw_parts(child_name, child_name_len as usize) };
@@ -4825,7 +4875,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_guid_entry(
         Ok(child_component) => child_component,
         Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
     };
-    if validate_key_component_bytes(child_bytes, &LcsLimits::DEFAULT).is_err() {
+    if validate_key_component_bytes(child_bytes, &limits).is_err() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
 
@@ -4846,7 +4896,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_guid_entry(
     if let Err(err) = validate_rsi_lookup_metadata_completeness(&payload) {
         return rsi_lookup_response_error_return(err);
     }
-    if let Err(err) = validate_rsi_lookup_path_response_names(&payload, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_rsi_lookup_path_response_names(&payload, &limits) {
         return rsi_lookup_response_error_return(err);
     }
     if let Err(err) = validate_rsi_lookup_metadata_security_descriptors(&payload) {
@@ -4860,7 +4910,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_guid_entry(
     let mut present = false;
     if let Err(err) = for_each_rsi_lookup_source_path_entry(
         &payload,
-        &LcsLimits::DEFAULT,
+        &limits,
         child_component,
         |entry| {
             source_path_entry_count = source_path_entry_count

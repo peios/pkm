@@ -172,7 +172,8 @@ struct pkm_lcs_value_layer_admission_result {
 long pkm_lcs_rsi_build_lookup_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 parent_guid[RSI_GUID_SIZE], const char *child_name,
-	u32 child_name_len, struct pkm_lcs_rsi_built_request *built);
+	u32 child_name_len, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_rsi_built_request *built);
 long pkm_lcs_rsi_build_enum_children_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 parent_guid[RSI_GUID_SIZE],
@@ -271,7 +272,7 @@ long pkm_lcs_rsi_build_flush_request(
 	struct pkm_lcs_rsi_built_request *built);
 long pkm_lcs_rsi_validate_lookup_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
-	u64 next_sequence,
+	u64 next_sequence, const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_lookup_response_summary *summary);
 long pkm_lcs_rsi_validate_query_values_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
@@ -288,6 +289,7 @@ long pkm_lcs_rsi_materialize_enum_children_info_summary(
 	u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_enum_children_info_summary *summary);
 long pkm_lcs_rsi_materialize_enum_subkey_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
@@ -295,6 +297,7 @@ long pkm_lcs_rsi_materialize_enum_subkey_response(
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_enum_subkey_result *result);
 long pkm_lcs_rsi_materialize_query_values_info_summary(
 	const u8 *frame, size_t frame_len, u64 request_id,
@@ -324,11 +327,13 @@ long pkm_lcs_rsi_materialize_lookup_child(
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_lookup_child_result *result);
 long pkm_lcs_rsi_materialize_lookup_guid_entry(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence, const char *child_name, u32 child_name_len,
 	const u8 target_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_lookup_guid_entry_result *result);
 long pkm_lcs_rsi_materialize_read_key_response(
 	const u8 *frame, size_t frame_len, u64 request_id,

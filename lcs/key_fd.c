@@ -1742,7 +1742,7 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
 		enum_frame.data, enum_frame.len, enum_response.request_id,
 		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
-		NULL, 0, &enum_summary);
+		NULL, 0, &enum_response.limits, &enum_summary);
 	if (ret)
 		goto out_frames;
 
@@ -2702,7 +2702,7 @@ static long pkm_lcs_key_fd_delete_key_visible_child_gate(
 	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
 		frame.data, frame.len, response.request_id, next_sequence,
 		layer_snapshot.layers, layer_snapshot.layer_count, NULL, 0,
-		&summary);
+		&response.limits, &summary);
 	if (ret)
 		goto out_frame;
 	if (summary.subkey_count)
@@ -2747,7 +2747,8 @@ static long pkm_lcs_key_fd_delete_key_post_lookup(
 
 	ret = pkm_lcs_rsi_materialize_lookup_guid_entry(
 		frame.data, frame.len, response.request_id, next_sequence,
-		child_name, child_name_len, key_fd->key_guid, &target);
+		child_name, child_name_len, key_fd->key_guid,
+		&response.limits, &target);
 	if (ret)
 		goto out_frame;
 	out->target_still_named = target.present != 0;
@@ -2755,7 +2756,8 @@ static long pkm_lcs_key_fd_delete_key_post_lookup(
 	ret = pkm_lcs_rsi_materialize_lookup_child(
 		frame.data, frame.len, response.request_id, next_sequence,
 		child_name, child_name_len, layer_snapshot.layers,
-		layer_snapshot.layer_count, NULL, 0, &effective);
+		layer_snapshot.layer_count, NULL, 0, &response.limits,
+		&effective);
 	if (ret)
 		goto out_frame;
 
@@ -3592,7 +3594,8 @@ static long pkm_lcs_key_fd_enum_subkey_read_metadata(
 		goto out_frames;
 	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
 		enum_frame.data, enum_frame.len, enum_response.request_id,
-		next_sequence, layers, layer_count, NULL, 0, &enum_summary);
+		next_sequence, layers, layer_count, NULL, 0,
+		&enum_response.limits, &enum_summary);
 	if (ret)
 		goto out_frames;
 
@@ -3681,7 +3684,7 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 	ret = pkm_lcs_rsi_materialize_enum_subkey_response(
 		frame.data, frame.len, response.request_id, next_sequence,
 		index, layer_snapshot.layers, layer_snapshot.layer_count, NULL,
-		0, &result);
+		0, &response.limits, &result);
 	if (ret)
 		goto out_frame;
 	if (!result.found) {
