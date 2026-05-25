@@ -41,6 +41,17 @@ static const u8 pkm_lcs_kunit_everyone_sid[] = {
 	0x00, 0x00, 0x00, 0x00,
 };
 
+static const u8 pkm_lcs_kunit_owner_only_sd[] = {
+	0x01, 0x00, 0x00, 0x80,
+	0x14, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00,
+	0x01, 0x01, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x05,
+	0x12, 0x00, 0x00, 0x00,
+};
+
 struct pkm_lcs_kunit_audit_caller_summary {
 	u8 effective_token_guid[16];
 	u8 true_token_guid[16];
@@ -2305,6 +2316,159 @@ static void pkm_lcs_kunit_internal_self_watch_non_value_event_noop(
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
 	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_internal_self_watch_disarm();
+	kacs_rust_token_drop(token);
+}
+
+static void
+pkm_lcs_kunit_internal_layer_watch_value_event_refreshes_metadata(
+	struct kunit *test)
+{
+	static const char * const metadata_path[] = {
+		"Machine", "System", "Registry", "Layers", "Policy"
+	};
+	static const u8 ancestors[5][RSI_GUID_SIZE] = {
+		{ 1 }, { 0xe4, 0x10 }, { 0xe4, 0x11 },
+		{ 0xe4, 0x12 }, { 0xe4 },
+	};
+	static const char value_name[] = "Enabled";
+	struct pkm_lcs_watch_dispatch_context context = {
+		.changed_key_guid = ancestors[4],
+		.ancestor_guids = ancestors,
+		.resolved_path = metadata_path,
+		.path_component_count = ARRAY_SIZE(metadata_path),
+		.event_type = REG_WATCH_VALUE_SET,
+		.name = (const u8 *)value_name,
+		.name_len = sizeof(value_name) - 1U,
+	};
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script script = {
+		.expected_guid = ancestors[4],
+		.name = "Policy",
+		.sd = pkm_lcs_kunit_owner_only_sd,
+		.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+		.precedence = 11,
+		.enabled = 1,
+		.precedence_present = true,
+		.enabled_present = true,
+	};
+	struct pkm_lcs_rsi_layer_view layers[3] = { };
+	char names[64] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_internal_self_watch_disarm();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				1, ancestors[0], true, ancestors[2], true,
+				ancestors[3], NULL),
+			0L);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_source_thread, &script,
+		"pkm-lcs-kunit-layer-watch-refresh");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context(&context);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 2U);
+	KUNIT_EXPECT_STREQ(test, layers[1].name, "Policy");
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 11U);
+	KUNIT_EXPECT_EQ(test, layers[1].enabled, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_internal_self_watch_disarm();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_internal_layer_watch_lifecycle_event_noop(
+	struct kunit *test)
+{
+	static const char * const metadata_path[] = {
+		"Machine", "System", "Registry", "Layers", "Policy"
+	};
+	static const u8 ancestors[5][RSI_GUID_SIZE] = {
+		{ 1 }, { 0xe5, 0x10 }, { 0xe5, 0x11 },
+		{ 0xe5, 0x12 }, { 0xe5 },
+	};
+	static const char value_name[] = "Child";
+	struct pkm_lcs_watch_dispatch_context context = {
+		.changed_key_guid = ancestors[4],
+		.ancestor_guids = ancestors,
+		.resolved_path = metadata_path,
+		.path_component_count = ARRAY_SIZE(metadata_path),
+		.event_type = REG_WATCH_SUBKEY_CREATED,
+		.name = (const u8 *)value_name,
+		.name_len = sizeof(value_name) - 1U,
+	};
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script script = {
+		.expected_guid = ancestors[4],
+		.name = "Policy",
+		.sd = pkm_lcs_kunit_owner_only_sd,
+		.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+		.precedence = 11,
+		.enabled = 1,
+		.precedence_present = true,
+		.enabled_present = true,
+	};
+	struct pkm_lcs_rsi_layer_view layers[2] = { };
+	char names[32] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_internal_self_watch_disarm();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				1, ancestors[0], true, ancestors[2], true,
+				ancestors[3], NULL),
+			0L);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_source_thread, &script,
+		"pkm-lcs-kunit-layer-watch-noop");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context(&context);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, -EINTR);
+	KUNIT_EXPECT_EQ(test, script.reads, 0U);
+	KUNIT_EXPECT_EQ(test, script.writes, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
 	pkm_lcs_internal_self_watch_disarm();
 	kacs_rust_token_drop(token);
 }
@@ -21470,17 +21634,6 @@ static int pkm_lcs_kunit_create_source_thread(void *raw_script)
 	script->result = 0;
 	return 0;
 }
-
-static const u8 pkm_lcs_kunit_owner_only_sd[] = {
-	0x01, 0x00, 0x00, 0x80,
-	0x14, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00,
-	0x01, 0x01, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x05,
-	0x12, 0x00, 0x00, 0x00,
-};
 
 static void pkm_lcs_kunit_rsi_append_bytes(struct kunit *test, u8 *frame,
 					   size_t frame_len, size_t *offset,
@@ -40931,6 +41084,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_internal_self_watch_value_event_refreshes_config),
 	KUNIT_CASE(pkm_lcs_kunit_internal_self_watch_non_value_event_noop),
+	KUNIT_CASE(
+		pkm_lcs_kunit_internal_layer_watch_value_event_refreshes_metadata),
+	KUNIT_CASE(pkm_lcs_kunit_internal_layer_watch_lifecycle_event_noop),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_limits),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_source_down),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_bad_inputs),

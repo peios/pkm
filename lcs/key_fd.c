@@ -112,8 +112,11 @@ struct pkm_lcs_internal_watch {
 struct pkm_lcs_internal_watch_event {
 	struct list_head link;
 	u8 guid[PKM_LCS_GUID_BYTES];
+	u8 root_guid[PKM_LCS_GUID_BYTES];
+	char **resolved_path;
 	u32 source_id;
 	u32 event_type;
+	u32 path_component_count;
 	enum pkm_lcs_internal_watch_target target;
 };
 
@@ -5189,16 +5192,77 @@ static long pkm_lcs_key_fd_transaction_burst_count_watcher(
 	return 0;
 }
 
+static void pkm_lcs_internal_watch_event_path_destroy(
+	struct pkm_lcs_internal_watch_event *event)
+{
+	u32 i;
+
+	if (!event || !event->resolved_path)
+		return;
+
+	for (i = 0; i < event->path_component_count; i++)
+		kfree(event->resolved_path[i]);
+	kfree(event->resolved_path);
+	event->resolved_path = NULL;
+	event->path_component_count = 0;
+}
+
+static long pkm_lcs_internal_watch_event_path_copy(
+	struct pkm_lcs_internal_watch_event *event,
+	const struct pkm_lcs_watch_dispatch_context *context)
+{
+	size_t len;
+	u32 i;
+
+	if (!event || !context || !context->resolved_path ||
+	    !context->path_component_count)
+		return -EINVAL;
+
+	event->resolved_path = kcalloc(context->path_component_count,
+				       sizeof(*event->resolved_path),
+				       GFP_KERNEL);
+	if (!event->resolved_path)
+		return -ENOMEM;
+
+	for (i = 0; i < context->path_component_count; i++) {
+		if (!context->resolved_path[i]) {
+			pkm_lcs_internal_watch_event_path_destroy(event);
+			return -EINVAL;
+		}
+		len = strlen(context->resolved_path[i]);
+		if (!len || len > U32_MAX) {
+			pkm_lcs_internal_watch_event_path_destroy(event);
+			return -EINVAL;
+		}
+		event->resolved_path[i] = kstrdup(context->resolved_path[i],
+						  GFP_KERNEL);
+		if (!event->resolved_path[i]) {
+			pkm_lcs_internal_watch_event_path_destroy(event);
+			return -ENOMEM;
+		}
+	}
+
+	event->path_component_count = context->path_component_count;
+	return 0;
+}
+
 static bool pkm_lcs_internal_watch_event_deliverable(
-	const struct pkm_lcs_internal_watch *watch, u32 event_type)
+	const struct pkm_lcs_internal_watch *watch, u32 event_type,
+	u32 relative_path_count)
 {
 	if (!watch)
 		return false;
 
 	switch (watch->target) {
 	case PKM_LCS_INTERNAL_WATCH_SELF_CONFIGURATION:
-		return event_type == REG_WATCH_VALUE_SET ||
-		       event_type == REG_WATCH_VALUE_DELETED;
+		return relative_path_count == 0 &&
+		       (event_type == REG_WATCH_VALUE_SET ||
+			event_type == REG_WATCH_VALUE_DELETED);
+	case PKM_LCS_INTERNAL_WATCH_LAYER_METADATA:
+		return relative_path_count == 1 &&
+		       (event_type == REG_WATCH_VALUE_SET ||
+			event_type == REG_WATCH_VALUE_DELETED ||
+			event_type == REG_WATCH_SD_CHANGED);
 	default:
 		return false;
 	}
@@ -5206,13 +5270,25 @@ static bool pkm_lcs_internal_watch_event_deliverable(
 
 static long pkm_lcs_internal_watch_collect_locked(
 	struct list_head *events, const struct pkm_lcs_internal_watch *watch,
-	u32 event_type)
+	const struct pkm_lcs_watch_dispatch_context *context,
+	u32 watched_path_index)
 {
 	struct pkm_lcs_internal_watch_event *event;
+	u32 changed_index;
+	u32 relative_path_count;
+	long ret;
 
-	if (!events || !watch || !watch->registry.linked)
+	if (!events || !watch || !watch->registry.linked || !context ||
+	    !context->path_component_count ||
+	    watched_path_index >= context->path_component_count)
 		return -EINVAL;
-	if (!pkm_lcs_internal_watch_event_deliverable(watch, event_type))
+
+	changed_index = context->path_component_count - 1U;
+	if (watched_path_index > changed_index)
+		return -EINVAL;
+	relative_path_count = changed_index - watched_path_index;
+	if (!pkm_lcs_internal_watch_event_deliverable(
+		    watch, context->event_type, relative_path_count))
 		return 0;
 
 	event = kzalloc(sizeof(*event), GFP_KERNEL);
@@ -5222,8 +5298,21 @@ static long pkm_lcs_internal_watch_collect_locked(
 	INIT_LIST_HEAD(&event->link);
 	event->source_id = watch->registry.source_id;
 	event->target = watch->target;
-	event->event_type = event_type;
-	memcpy(event->guid, watch->registry.guid, sizeof(event->guid));
+	event->event_type = context->event_type;
+	if (event->target == PKM_LCS_INTERNAL_WATCH_LAYER_METADATA) {
+		memcpy(event->guid, context->changed_key_guid,
+		       sizeof(event->guid));
+		memcpy(event->root_guid, context->ancestor_guids[0],
+		       sizeof(event->root_guid));
+		ret = pkm_lcs_internal_watch_event_path_copy(event, context);
+		if (ret) {
+			kfree(event);
+			return ret;
+		}
+	} else {
+		memcpy(event->guid, watch->registry.guid,
+		       sizeof(event->guid));
+	}
 	list_add_tail(&event->link, events);
 	return 0;
 }
@@ -5245,8 +5334,32 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events)
 			 */
 			pkm_lcs_runtime_limits_refresh_self_config_from_key(
 				event->source_id, event->guid, NULL);
+		} else if (event->target ==
+			   PKM_LCS_INTERNAL_WATCH_LAYER_METADATA) {
+			bool effective_changed = false;
+
+			if (!pkm_lcs_key_path_refresh_layer_metadata_result(
+				    event->source_id, event->guid,
+				    (const char * const *)event->resolved_path,
+				    event->path_component_count,
+				    &effective_changed) &&
+			    effective_changed) {
+				struct pkm_lcs_layer_operation_recovery_result
+					recovery = { };
+
+				/*
+				 * The watched source mutation already committed;
+				 * recovery failures retain the last known-good
+				 * local state or mark faulty sources down in the
+				 * recovery helper.
+				 */
+				pkm_lcs_source_layer_operation_recover_skip_generation(
+					event->source_id, event->root_guid,
+					&recovery);
+			}
 		}
 		list_del(&event->link);
+		pkm_lcs_internal_watch_event_path_destroy(event);
 		kfree(event);
 	}
 }
@@ -5353,8 +5466,8 @@ static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 		    !pkm_lcs_guid_equal(entry->guid, context->changed_key_guid))
 			continue;
 		ret = pkm_lcs_internal_watch_collect_locked(
-			internal_events, entry->owner.internal,
-			context->event_type);
+			internal_events, entry->owner.internal, context,
+			context->path_component_count - 1U);
 		if (ret)
 			goto out_unlock;
 	}
@@ -5377,6 +5490,7 @@ static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 	changed_index = context->path_component_count - 1U;
 	for (i = changed_index; i > 0; i--) {
 		const u8 *ancestor_guid = context->ancestor_guids[i - 1U];
+		u32 watched_index = i - 1U;
 		u32 path_count;
 
 		if (pkm_lcs_guid_equal(ancestor_guid, context->changed_key_guid))
@@ -5385,14 +5499,27 @@ static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 		if (!subtree)
 			continue;
 
-		path_count = changed_index - (i - 1U);
+		path_count = changed_index - watched_index;
+		hash = pkm_lcs_guid_hash(ancestor_guid);
+		hash_for_each_possible(pkm_lcs_watch_map, entry, link, hash) {
+			if (entry->kind != PKM_LCS_WATCH_REGISTRY_INTERNAL ||
+			    !pkm_lcs_guid_equal(entry->guid, ancestor_guid))
+				continue;
+			if (!entry->subtree)
+				continue;
+			ret = pkm_lcs_internal_watch_collect_locked(
+				internal_events, entry->owner.internal, context,
+				watched_index);
+			if (ret)
+				goto out_unlock;
+		}
+
 		ret = pkm_lcs_key_fd_path_views_from_components(
 			context->resolved_path, context->path_component_count, i,
 			path_count, &path_views);
 		if (ret)
 			goto out_unlock;
 
-		hash = pkm_lcs_guid_hash(ancestor_guid);
 		hash_for_each_possible(pkm_lcs_watch_map, entry, link, hash) {
 			if (entry->kind != PKM_LCS_WATCH_REGISTRY_KEY_FD ||
 			    !pkm_lcs_guid_equal(entry->guid, ancestor_guid))
