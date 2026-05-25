@@ -27558,6 +27558,96 @@ static void pkm_lcs_kunit_rsi_enum_value_uses_runtime_limits(
 				    sizeof(data)), 0);
 }
 
+static void pkm_lcs_kunit_rsi_value_watch_uses_runtime_limits(
+	struct kunit *test)
+{
+	enum { LONG_NAME_LEN = 300, RESPONSE_LEN = 2048, OUTPUT_LEN = 512 };
+	char *value_name;
+	char *layer_name;
+	struct pkm_lcs_rsi_layer_view layers[2];
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_rsi_value_watch_events_result result = { };
+	static const u8 data[] = { 0x90 };
+	u8 *before;
+	u8 *after;
+	u8 *output;
+	size_t offset;
+	size_t before_len;
+	size_t after_len;
+
+	value_name = kunit_kzalloc(test, LONG_NAME_LEN + 1, GFP_KERNEL);
+	layer_name = kunit_kzalloc(test, LONG_NAME_LEN + 1, GFP_KERNEL);
+	before = kunit_kzalloc(test, RESPONSE_LEN, GFP_KERNEL);
+	after = kunit_kzalloc(test, RESPONSE_LEN, GFP_KERNEL);
+	output = kunit_kzalloc(test, OUTPUT_LEN, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, value_name);
+	KUNIT_ASSERT_NOT_NULL(test, layer_name);
+	KUNIT_ASSERT_NOT_NULL(test, before);
+	KUNIT_ASSERT_NOT_NULL(test, after);
+	KUNIT_ASSERT_NOT_NULL(test, output);
+
+	memset(value_name, 'w', LONG_NAME_LEN);
+	value_name[LONG_NAME_LEN] = '\0';
+	memset(layer_name, 'l', LONG_NAME_LEN);
+	layer_name[LONG_NAME_LEN] = '\0';
+	layers[0] = (struct pkm_lcs_rsi_layer_view){
+		.name = "base",
+		.name_len = 4,
+		.precedence = 0,
+		.enabled = 1,
+	};
+	layers[1] = (struct pkm_lcs_rsi_layer_view){
+		.name = layer_name,
+		.name_len = LONG_NAME_LEN,
+		.precedence = 10,
+		.enabled = 1,
+	};
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = LONG_NAME_LEN;
+
+	pkm_lcs_kunit_rsi_response_begin(test, before, RESPONSE_LEN, 498,
+					 RSI_QUERY_VALUES_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, before, RESPONSE_LEN, &offset, 0);
+	pkm_lcs_kunit_rsi_append_u32(test, before, RESPONSE_LEN, &offset, 0);
+	pkm_lcs_kunit_rsi_finish_response(test, before, offset, &before_len);
+
+	pkm_lcs_kunit_rsi_response_begin(test, after, RESPONSE_LEN, 499,
+					 RSI_QUERY_VALUES_RESPONSE, RSI_OK,
+					 &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, after, RESPONSE_LEN, &offset, 1);
+	pkm_lcs_kunit_rsi_append_query_value_entry(
+		test, after, RESPONSE_LEN, &offset, value_name, layer_name,
+		REG_BINARY, data, sizeof(data), 1);
+	pkm_lcs_kunit_rsi_append_u32(test, after, RESPONSE_LEN, &offset, 0);
+	pkm_lcs_kunit_rsi_finish_response(test, after, offset, &after_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_materialize_query_values_watch_events(
+				before, before_len, 498, after, after_len, 499,
+				2, layers, ARRAY_SIZE(layers), NULL, 0, NULL,
+				NULL, 0, &result),
+			(long)-EIO);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_rsi_materialize_query_values_watch_events(
+				before, before_len, 498, after, after_len, 499,
+				2, layers, ARRAY_SIZE(layers), NULL, 0,
+				&limits, output, OUTPUT_LEN, &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.count, 1U);
+	KUNIT_EXPECT_EQ(test, result.required_len, (u32)(8 + LONG_NAME_LEN));
+	KUNIT_EXPECT_EQ(test, result.written_len, result.required_len);
+	KUNIT_ASSERT_LE(test, (size_t)result.written_len,
+			(size_t)OUTPUT_LEN);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(output),
+			(u32)REG_WATCH_VALUE_SET);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(output + sizeof(u32)),
+			(u32)LONG_NAME_LEN);
+	KUNIT_EXPECT_EQ(test, memcmp(output + 2 * sizeof(u32), value_name,
+				    LONG_NAME_LEN), 0);
+}
+
 static void pkm_lcs_kunit_rsi_enum_children_info_rejects_bad_metadata(
 	struct kunit *test)
 {
@@ -43169,6 +43259,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rsi_query_values_info_summary),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_query_values_batch_uses_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_enum_value_uses_runtime_limits),
+	KUNIT_CASE(pkm_lcs_kunit_rsi_value_watch_uses_runtime_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_rsi_enum_children_info_rejects_bad_metadata),
 	KUNIT_CASE(

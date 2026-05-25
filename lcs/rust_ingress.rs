@@ -4947,6 +4947,7 @@ fn materialize_effective_value_watch_snapshot<'a>(
     next_sequence: u64,
     layer_views: &'a [LayerView<'a>],
     private_layer_views: &'a [&'a str],
+    limits: &'a LcsLimits,
 ) -> Result<(PkmVec<EnumeratedValue<'a>>, usize, usize), c_int> {
     let payload = match parse_rsi_query_values_success_response_payload(
         frame_bytes,
@@ -4959,12 +4960,10 @@ fn materialize_effective_value_watch_snapshot<'a>(
         Err(err) => return Err(rsi_query_values_response_error_return(err)),
     };
 
-    if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, limits) {
         return Err(rsi_query_values_response_error_return(err));
     }
-    if let Err(err) =
-        validate_rsi_query_values_response_value_payloads(&payload, &LcsLimits::DEFAULT)
-    {
+    if let Err(err) = validate_rsi_query_values_response_value_payloads(&payload, limits) {
         return Err(rsi_query_values_response_error_return(err));
     }
     if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
@@ -4980,7 +4979,7 @@ fn materialize_effective_value_watch_snapshot<'a>(
 
     let mut allocation_failed = false;
     if let Err(err) =
-        for_each_rsi_query_values_source_value_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+        for_each_rsi_query_values_source_value_entry(&payload, limits, |entry| {
             if value_storage.push(entry).is_err() {
                 allocation_failed = true;
                 return Err(LcsError::RsiPayloadLengthOverflow);
@@ -4994,7 +4993,7 @@ fn materialize_effective_value_watch_snapshot<'a>(
         return Err(rsi_query_values_response_error_return(err));
     }
     if let Err(err) =
-        for_each_rsi_query_values_source_blanket_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+        for_each_rsi_query_values_source_blanket_entry(&payload, limits, |entry| {
             if blanket_storage.push(entry).is_err() {
                 allocation_failed = true;
                 return Err(LcsError::RsiPayloadLengthOverflow);
@@ -5011,7 +5010,7 @@ fn materialize_effective_value_watch_snapshot<'a>(
     let context = LayerResolutionContext {
         layers: layer_views,
         private_layers: private_layer_views,
-        limits: &LcsLimits::DEFAULT,
+        limits,
         next_sequence,
     };
     let mut effective =
@@ -5060,6 +5059,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_values_watch_events(
     layer_count: usize,
     private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
     private_layer_count: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     output: *mut u8,
     output_len: usize,
     result_out: *mut PkmLcsRsiValueWatchEventsResultCopy,
@@ -5089,6 +5089,14 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_values_watch_events(
     {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(err) => return err.negated_return() as c_int,
+        }
+    };
 
     let before_bytes = unsafe { slice::from_raw_parts(before_frame, before_frame_len) };
     let after_bytes = unsafe { slice::from_raw_parts(after_frame, after_frame_len) };
@@ -5108,6 +5116,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_values_watch_events(
             next_sequence,
             layer_views.as_slice(),
             private_layer_views.as_slice(),
+            &limits,
         ) {
             Ok(snapshot) => snapshot,
             Err(errno) => return errno,
@@ -5119,6 +5128,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_values_watch_events(
             next_sequence,
             layer_views.as_slice(),
             private_layer_views.as_slice(),
+            &limits,
         ) {
             Ok(snapshot) => snapshot,
             Err(errno) => return errno,
@@ -5127,7 +5137,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_values_watch_events(
     let mut count = 0usize;
     let mut required_len = 0usize;
     if let Err(err) = for_each_effective_value_watch_event(
-        &LcsLimits::DEFAULT,
+        &limits,
         before_values.as_slice(),
         after_values.as_slice(),
         |event| {
@@ -5176,7 +5186,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_values_watch_events(
     let output_bytes = unsafe { slice::from_raw_parts_mut(output, output_len) };
     let mut offset = 0usize;
     if let Err(err) = for_each_effective_value_watch_event(
-        &LcsLimits::DEFAULT,
+        &limits,
         before_values.as_slice(),
         after_values.as_slice(),
         |event| {

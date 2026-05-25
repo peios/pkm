@@ -1584,16 +1584,18 @@ static long pkm_lcs_key_fd_delete_value_watch_event_type(
 
 static long pkm_lcs_key_fd_query_effective_values_frame(
 	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_frame *frame,
 	struct pkm_lcs_source_response_result *response)
 {
-	if (!key_fd || !frame || !response)
+	if (!key_fd || !limits || !frame || !response)
 		return -EINVAL;
 
 	pkm_lcs_source_response_frame_init(frame);
-	return pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+	return pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, "", 0, true,
-		pkm_lcs_runtime_request_timeout_ms(), frame, response, NULL);
+		limits, pkm_lcs_runtime_request_timeout_ms(), frame, response,
+		NULL);
 }
 
 static long pkm_lcs_key_fd_materialize_value_watch_events(
@@ -1602,6 +1604,7 @@ static long pkm_lcs_key_fd_materialize_value_watch_events(
 	const struct pkm_lcs_source_response_result *before_response,
 	const struct pkm_lcs_source_response_frame *after_frame,
 	const struct pkm_lcs_source_response_result *after_response,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_value_watch_event_bytes *events)
 {
 	struct pkm_lcs_layer_snapshot layer_snapshot = { };
@@ -1611,7 +1614,7 @@ static long pkm_lcs_key_fd_materialize_value_watch_events(
 	long ret;
 
 	if (!key_fd || !before_frame || !before_response || !after_frame ||
-	    !after_response || !events)
+	    !after_response || !limits || !events)
 		return -EINVAL;
 	memset(events, 0, sizeof(*events));
 
@@ -1626,7 +1629,7 @@ static long pkm_lcs_key_fd_materialize_value_watch_events(
 		before_frame->data, before_frame->len,
 		before_response->request_id, after_frame->data, after_frame->len,
 		after_response->request_id, next_sequence, layer_snapshot.layers,
-		layer_snapshot.layer_count, NULL, 0, NULL, 0, &result);
+		layer_snapshot.layer_count, NULL, 0, limits, NULL, 0, &result);
 	if (ret)
 		goto out_layer_snapshot;
 	if (!result.required_len) {
@@ -1644,7 +1647,7 @@ static long pkm_lcs_key_fd_materialize_value_watch_events(
 		before_frame->data, before_frame->len,
 		before_response->request_id, after_frame->data, after_frame->len,
 		after_response->request_id, next_sequence, layer_snapshot.layers,
-		layer_snapshot.layer_count, NULL, 0, events->data,
+		layer_snapshot.layer_count, NULL, 0, limits, events->data,
 		result.required_len, &written);
 	if (ret)
 		goto out_events;
@@ -4341,7 +4344,7 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 	}
 
 	ret = pkm_lcs_key_fd_query_effective_values_frame(
-		key_fd, txn_id, &before_frame, &before_response);
+		key_fd, txn_id, &input.limits, &before_frame, &before_response);
 	if (ret)
 		goto out_cancel_mutation;
 
@@ -4354,7 +4357,7 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 		goto out_before;
 
 	ret = pkm_lcs_key_fd_query_effective_values_frame(
-		key_fd, txn_id, &after_frame, &after_response);
+		key_fd, txn_id, &input.limits, &after_frame, &after_response);
 	if (ret)
 		goto out_before;
 
@@ -4371,7 +4374,7 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 
 	ret = pkm_lcs_key_fd_materialize_value_watch_events(
 		key_fd, &before_frame, &before_response, &after_frame,
-		&after_response, &events);
+		&after_response, &input.limits, &events);
 	if (ret)
 		goto out_after;
 
