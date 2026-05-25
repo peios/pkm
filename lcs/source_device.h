@@ -140,6 +140,8 @@ struct pkm_lcs_source_fd_snapshot {
 	u32 source_id;
 	u32 queued_request_count;
 	u32 in_flight_request_count;
+	u32 bound_transaction_count;
+	u32 read_only_transaction_count;
 	u64 next_request_id;
 	bool closing;
 };
@@ -676,6 +678,7 @@ u32 pkm_lcs_runtime_transaction_timeout_ms(void);
 u32 pkm_lcs_runtime_symlink_depth_limit(void);
 u32 pkm_lcs_runtime_max_key_depth(void);
 u32 pkm_lcs_runtime_max_bound_transactions_per_source(void);
+u32 pkm_lcs_runtime_max_read_only_transactions_per_source(void);
 u32 pkm_lcs_runtime_max_registered_sources(void);
 u32 pkm_lcs_runtime_max_hives_per_source(void);
 u32 pkm_lcs_runtime_max_concurrent_rsi_requests(void);
@@ -1120,6 +1123,13 @@ long pkm_lcs_source_dispatch_drop_key_waitable_request(
 	struct pkm_lcs_source_enqueue_result *result);
 long pkm_lcs_source_bound_transaction_acquire(u32 source_id, u32 *count_out);
 long pkm_lcs_source_bound_transaction_release(u32 source_id, u32 *count_out);
+long pkm_lcs_source_read_only_transaction_acquire_with_limits(
+	u32 source_id, const struct pkm_lcs_runtime_limits *limits,
+	u32 *count_out);
+long pkm_lcs_source_read_only_transaction_acquire(u32 source_id,
+						  u32 *count_out);
+long pkm_lcs_source_read_only_transaction_release(u32 source_id,
+						 u32 *count_out);
 long pkm_lcs_source_dispatch_begin_transaction_request(
 	u32 source_id, u64 transaction_id, u32 mode,
 	struct pkm_lcs_source_enqueue_result *result);

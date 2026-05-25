@@ -140,6 +140,7 @@ struct pkm_lcs_source_slot {
 	u64 source_next_sequence;
 	u64 restart_generation;
 	u32 bound_transaction_count;
+	u32 read_only_transaction_count;
 };
 
 struct pkm_lcs_source_slot_view_buffer {
@@ -359,6 +360,14 @@ u32 pkm_lcs_runtime_max_bound_transactions_per_source(void)
 
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	return limits.max_bound_transactions_per_source;
+}
+
+u32 pkm_lcs_runtime_max_read_only_transactions_per_source(void)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return limits.max_read_only_transactions_per_source;
 }
 
 u32 pkm_lcs_runtime_max_registered_sources(void)
@@ -1773,6 +1782,75 @@ out_unlock:
 	return ret;
 }
 
+long pkm_lcs_source_read_only_transaction_acquire_with_limits(
+	u32 source_id, const struct pkm_lcs_runtime_limits *limits,
+	u32 *count_out)
+{
+	struct pkm_lcs_source_slot *slot;
+	long ret = 0;
+
+	if (count_out)
+		*count_out = 0;
+	if (!source_id || !limits || !count_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+	if (slot->read_only_transaction_count >=
+	    limits->max_read_only_transactions_per_source) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+
+	slot->read_only_transaction_count++;
+	*count_out = slot->read_only_transaction_count;
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
+long pkm_lcs_source_read_only_transaction_acquire(u32 source_id,
+						  u32 *count_out)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_read_only_transaction_acquire_with_limits(
+		source_id, &limits, count_out);
+}
+
+long pkm_lcs_source_read_only_transaction_release(u32 source_id,
+						 u32 *count_out)
+{
+	struct pkm_lcs_source_slot *slot;
+	long ret = 0;
+
+	if (count_out)
+		*count_out = 0;
+	if (!source_id || !count_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || !slot->occupied ||
+	    !slot->read_only_transaction_count) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+
+	slot->read_only_transaction_count--;
+	*count_out = slot->read_only_transaction_count;
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
 long pkm_lcs_source_active_ids_snapshot(u32 *source_ids, u32 max_source_ids,
 					u32 *count_out)
 {
@@ -2500,6 +2578,7 @@ static u32 pkm_lcs_source_fd_mark_down_locked(
 			slot->status = PKM_LCS_SOURCE_SLOT_STATUS_DOWN;
 			slot->active_fd = NULL;
 			slot->bound_transaction_count = 0;
+			slot->read_only_transaction_count = 0;
 			source_down_id = source_fd->source_id;
 		}
 	}
@@ -12720,6 +12799,7 @@ long pkm_lcs_kunit_create_missing_child_depth(u32 parent_depth,
 void pkm_lcs_kunit_source_fd_snapshot(
 	struct file *file, struct pkm_lcs_source_fd_snapshot *snapshot)
 {
+	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
 
 	if (!snapshot)
@@ -12733,6 +12813,7 @@ void pkm_lcs_kunit_source_fd_snapshot(
 	if (!source_fd)
 		return;
 
+	mutex_lock(&pkm_lcs_source_table_lock);
 	mutex_lock(&source_fd->queue_lock);
 	snapshot->state = source_fd->state;
 	snapshot->source_id = source_fd->source_id;
@@ -12741,7 +12822,15 @@ void pkm_lcs_kunit_source_fd_snapshot(
 		source_fd->in_flight_request_count;
 	snapshot->next_request_id = source_fd->next_request_id;
 	snapshot->closing = source_fd->closing;
+	slot = pkm_lcs_source_slot_find_locked(source_fd->source_id);
+	if (slot && slot->occupied) {
+		snapshot->bound_transaction_count =
+			slot->bound_transaction_count;
+		snapshot->read_only_transaction_count =
+			slot->read_only_transaction_count;
+	}
 	mutex_unlock(&source_fd->queue_lock);
+	mutex_unlock(&pkm_lcs_source_table_lock);
 }
 
 long pkm_lcs_kunit_source_slot_admission_state(

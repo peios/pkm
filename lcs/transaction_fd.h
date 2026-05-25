@@ -50,6 +50,8 @@ struct pkm_lcs_transaction_read_plan {
 	u8 bound_root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 };
 
+long pkm_lcs_transaction_id_allocate(u64 *transaction_id);
+
 struct pkm_lcs_transaction_key_create_log_input {
 	const u8 *parent_guid;
 	const u8 *target_guid;

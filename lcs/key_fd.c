@@ -4888,10 +4888,73 @@ static long pkm_lcs_key_fd_external_fd_mode_gate(int fd, u32 operation)
 	return ret;
 }
 
+static long pkm_lcs_key_fd_backup_begin_read_only_snapshot(
+	struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_runtime_limits *limits, u64 *transaction_id_out)
+{
+	u64 transaction_id = 0;
+	u32 count = 0;
+	long release_ret;
+	long ret;
+
+	if (transaction_id_out)
+		*transaction_id_out = 0;
+	if (!key_fd || !limits || !transaction_id_out)
+		return -EINVAL;
+
+	ret = pkm_lcs_source_read_only_transaction_acquire_with_limits(
+		key_fd->source_id, limits, &count);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_transaction_id_allocate(&transaction_id);
+	if (ret)
+		goto out_release_counter;
+
+	ret = pkm_lcs_source_begin_transaction_round_trip_timeout_with_limits(
+		key_fd->source_id, transaction_id, RSI_TXN_READ_ONLY, limits,
+		limits->request_timeout_ms, NULL, NULL);
+	if (ret)
+		goto out_release_counter;
+
+	*transaction_id_out = transaction_id;
+	return 0;
+
+out_release_counter:
+	release_ret = pkm_lcs_source_read_only_transaction_release(
+		key_fd->source_id, &count);
+	if (!ret)
+		ret = release_ret;
+	return ret;
+}
+
+static long pkm_lcs_key_fd_backup_release_read_only_snapshot(
+	struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_runtime_limits *limits, u64 transaction_id)
+{
+	u32 count = 0;
+	long release_ret;
+	long ret;
+
+	if (!key_fd || !limits || !transaction_id)
+		return -EINVAL;
+
+	ret = pkm_lcs_source_abort_transaction_round_trip_timeout_with_limits(
+		key_fd->source_id, transaction_id, limits,
+		limits->request_timeout_ms, NULL, NULL);
+	release_ret = pkm_lcs_source_read_only_transaction_release(
+		key_fd->source_id, &count);
+	if (!ret)
+		ret = release_ret;
+	return ret;
+}
+
 static long pkm_lcs_key_fd_backup_from_args_for_token(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct reg_backup_args *args)
 {
+	struct pkm_lcs_runtime_limits limits;
+	u64 transaction_id = 0;
 	long ret;
 
 	if (!key_fd || !args)
@@ -4910,12 +4973,32 @@ static long pkm_lcs_key_fd_backup_from_args_for_token(
 	if (READ_ONCE(key_fd->orphaned))
 		return -ENOENT;
 
-	ret = pkm_lcs_key_fd_mark_privilege_used(token,
-						 KACS_SE_BACKUP_PRIVILEGE);
+	ret = pkm_lcs_runtime_limits_snapshot(&limits);
 	if (ret)
 		return ret;
 
-	return -EOPNOTSUPP;
+	ret = pkm_lcs_key_fd_backup_begin_read_only_snapshot(
+		key_fd, &limits, &transaction_id);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_mark_privilege_used(token,
+						 KACS_SE_BACKUP_PRIVILEGE);
+	if (ret)
+		goto out_release_snapshot;
+
+	ret = -EOPNOTSUPP;
+
+out_release_snapshot:
+	{
+		long release_ret;
+
+		release_ret = pkm_lcs_key_fd_backup_release_read_only_snapshot(
+			key_fd, &limits, transaction_id);
+		if (release_ret)
+			ret = release_ret;
+	}
+	return ret;
 }
 
 static long pkm_lcs_key_fd_backup_from_args(

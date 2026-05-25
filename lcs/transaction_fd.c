@@ -236,7 +236,7 @@ static long pkm_lcs_transaction_terminal_errno(u32 state, s32 *errno_out)
 	}
 }
 
-static long pkm_lcs_transaction_id_allocate(u64 *transaction_id)
+long pkm_lcs_transaction_id_allocate(u64 *transaction_id)
 {
 	long ret = 0;
 
