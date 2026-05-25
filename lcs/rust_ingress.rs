@@ -668,6 +668,129 @@ fn write_self_config_audit_intent(
     Ok(true)
 }
 
+#[derive(Clone, Copy)]
+struct ObservedSelfConfigValue<'a> {
+    name: &'a str,
+    value: SelfConfigValue,
+}
+
+fn effective_value_to_self_config(value: EnumeratedValue<'_>) -> SelfConfigValue {
+    let actual_type = value.value.value_type.code();
+    let data = value.value.data;
+
+    if actual_type == REG_DWORD && data.len() == core::mem::size_of::<u32>() {
+        return SelfConfigValue::Dword(u32::from_le_bytes([
+            data[0], data[1], data[2], data[3],
+        ]));
+    }
+
+    SelfConfigValue::WrongType { actual_type }
+}
+
+fn observed_self_config_value(
+    values: &[ObservedSelfConfigValue<'_>],
+    name: &str,
+) -> Option<SelfConfigValue> {
+    values
+        .iter()
+        .find(|entry| casefold_eq(entry.name, name))
+        .map(|entry| entry.value)
+}
+
+fn write_self_config_plan_from_observed(
+    current: LcsLimits,
+    observed_values: &[ObservedSelfConfigValue<'_>],
+    plan_out: &mut PkmLcsSelfConfigApplyPlanCopy,
+) -> Result<(), LinuxErrno> {
+    let mut limits = current;
+    let mut applied_count = 0u32;
+    let mut retained_missing_count = 0u32;
+    let mut retained_invalid_count = 0u32;
+    let mut ignored_unknown_count = 0u32;
+    let mut audit_count = 0usize;
+    let mut audits = [PkmLcsSelfConfigAuditIntentCopy::ZERO; PKM_LCS_SELF_CONFIG_MAX_AUDITS];
+
+    for entry in observed_values {
+        if find_config_range(entry.name).is_none() {
+            ignored_unknown_count = ignored_unknown_count
+                .checked_add(1)
+                .ok_or(LinuxErrno::Einval)?;
+        }
+    }
+
+    for range in LCS_CONFIG_RANGES {
+        let observed = observed_self_config_value(observed_values, range.name);
+
+        match observed {
+            Some(SelfConfigValue::Dword(value)) => match validate_config_value(range, value) {
+                Ok(value) => {
+                    apply_config_value(&mut limits, range, value);
+                    applied_count = applied_count.checked_add(1).ok_or(LinuxErrno::Einval)?;
+                }
+                Err(_) => {
+                    retained_invalid_count = retained_invalid_count
+                        .checked_add(1)
+                        .ok_or(LinuxErrno::Einval)?;
+                    if audit_count >= audits.len()
+                        || !write_self_config_audit_intent(
+                            &current,
+                            range,
+                            observed,
+                            &mut audits[audit_count],
+                        )?
+                    {
+                        return Err(LinuxErrno::Einval);
+                    }
+                    audit_count += 1;
+                }
+            },
+            Some(SelfConfigValue::WrongType { .. }) => {
+                retained_invalid_count = retained_invalid_count
+                    .checked_add(1)
+                    .ok_or(LinuxErrno::Einval)?;
+                if audit_count >= audits.len()
+                    || !write_self_config_audit_intent(
+                        &current,
+                        range,
+                        observed,
+                        &mut audits[audit_count],
+                    )?
+                {
+                    return Err(LinuxErrno::Einval);
+                }
+                audit_count += 1;
+            }
+            None => {
+                retained_missing_count = retained_missing_count
+                    .checked_add(1)
+                    .ok_or(LinuxErrno::Einval)?;
+                if audit_count >= audits.len()
+                    || !write_self_config_audit_intent(
+                        &current,
+                        range,
+                        None,
+                        &mut audits[audit_count],
+                    )?
+                {
+                    return Err(LinuxErrno::Einval);
+                }
+                audit_count += 1;
+            }
+        }
+    }
+
+    *plan_out = PkmLcsSelfConfigApplyPlanCopy {
+        limits: lcs_limits_to_copy(limits),
+        applied_count,
+        retained_missing_count,
+        retained_invalid_count,
+        ignored_unknown_count,
+        audit_count: audit_count as u32,
+        audits,
+    };
+    Ok(())
+}
+
 fn key_fd_open_view_error_return(err: LcsError) -> c_int {
     match err {
         LcsError::NameTooLong { .. } | LcsError::PathTooLong { .. } => LinuxErrno::Enametoolong,
@@ -1821,6 +1944,144 @@ pub unsafe extern "C" fn lcs_rust_plan_self_config_apply(
         audits,
     };
     0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_plan_self_config_apply_from_query_values(
+    current_limits: *const PkmLcsRuntimeLimitsCopy,
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+    private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
+    private_layer_count: usize,
+    plan_out: *mut PkmLcsSelfConfigApplyPlanCopy,
+) -> c_int {
+    let Some(plan_out) = (unsafe { plan_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *plan_out = empty_self_config_apply_plan();
+
+    if frame.is_null()
+        || (layer_count != 0 && layers.is_null())
+        || (private_layer_count != 0 && private_layers.is_null())
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let current = match lcs_limits_from_copy(current_limits) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let layer_views = match parse_layer_views(layers, layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let private_layer_views = match parse_private_layer_views(private_layers, private_layer_count) {
+        Ok(private_layer_views) => private_layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let payload = match parse_rsi_query_values_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_QUERY_VALUES,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_query_values_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &current) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_value_payloads(&payload, &current) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let mut value_storage =
+        match PkmVec::<NamedValueEntry<'_>>::with_capacity(payload.entry_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut blanket_storage =
+        match PkmVec::<BlanketTombstoneEntry<'_>>::with_capacity(payload.blanket_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut observed_storage =
+        match PkmVec::<ObservedSelfConfigValue<'_>>::with_capacity(payload.entry_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+
+    let mut allocation_failed = false;
+    if let Err(err) = for_each_rsi_query_values_source_value_entry(&payload, &current, |entry| {
+        if value_storage.push(entry).is_err() {
+            allocation_failed = true;
+            return Err(LcsError::RsiPayloadLengthOverflow);
+        }
+        Ok(())
+    }) {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = for_each_rsi_query_values_source_blanket_entry(&payload, &current, |entry| {
+        if blanket_storage.push(entry).is_err() {
+            allocation_failed = true;
+            return Err(LcsError::RsiPayloadLengthOverflow);
+        }
+        Ok(())
+    }) {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let context = LayerResolutionContext {
+        layers: layer_views.as_slice(),
+        private_layers: private_layer_views.as_slice(),
+        limits: &current,
+        next_sequence,
+    };
+    if let Err(err) = for_each_effective_value(
+        &context,
+        value_storage.as_slice(),
+        blanket_storage.as_slice(),
+        |value| {
+            if observed_storage
+                .push(ObservedSelfConfigValue {
+                    name: value.name,
+                    value: effective_value_to_self_config(value),
+                })
+                .is_err()
+            {
+                allocation_failed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            Ok(())
+        },
+    ) {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_lookup_materialization_error_return(err);
+    }
+
+    match write_self_config_plan_from_observed(current, observed_storage.as_slice(), plan_out) {
+        Ok(()) => 0,
+        Err(errno) => errno.negated_return() as c_int,
+    }
 }
 
 #[no_mangle]

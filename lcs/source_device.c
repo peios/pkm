@@ -1232,6 +1232,13 @@ extern int lcs_rust_plan_self_config_apply(
 	const struct pkm_lcs_runtime_limits *current_limits,
 	const struct pkm_lcs_self_config_entry *entries, size_t entry_count,
 	struct pkm_lcs_self_config_apply_plan *plan_out);
+extern int lcs_rust_plan_self_config_apply_from_query_values(
+	const struct pkm_lcs_runtime_limits *current_limits, const u8 *frame,
+	size_t frame_len, u64 request_id, u64 next_sequence,
+	const struct pkm_lcs_rsi_layer_view *layers, size_t layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	size_t private_layer_count,
+	struct pkm_lcs_self_config_apply_plan *plan_out);
 extern int lcs_rust_validate_syscall_relative_path(
 	const u8 *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result,
@@ -7137,33 +7144,22 @@ long pkm_lcs_emit_self_config_invalid_audit(
 	return 0;
 }
 
-long pkm_lcs_runtime_limits_apply_self_config(
-	const struct pkm_lcs_self_config_entry *entries, u32 entry_count,
+static long pkm_lcs_runtime_limits_publish_self_config_plan(
+	const struct pkm_lcs_self_config_apply_plan *plan,
 	struct pkm_lcs_self_config_apply_plan *result_out)
 {
-	struct pkm_lcs_self_config_apply_plan plan = { };
-	struct pkm_lcs_runtime_limits active_limits = { };
 	long ret;
 	u32 i;
 
-	if (entry_count && !entries)
+	if (!plan)
 		return -EINVAL;
 
-	ret = pkm_lcs_runtime_limits_snapshot(&active_limits);
-	if (ret)
-		return ret;
-
-	ret = lcs_rust_plan_self_config_apply(&active_limits, entries, entry_count,
-					      &plan);
-	if (ret)
-		return ret;
-
-	if (plan.audit_count > PKM_LCS_SELF_CONFIG_MAX_AUDITS)
+	if (plan->audit_count > PKM_LCS_SELF_CONFIG_MAX_AUDITS)
 		return -EIO;
 
-	for (i = 0; i < plan.audit_count; i++) {
+	for (i = 0; i < plan->audit_count; i++) {
 		const struct pkm_lcs_self_config_audit_intent *audit =
-			&plan.audits[i];
+			&plan->audits[i];
 
 		if (!audit->configuration_name_len ||
 		    audit->configuration_name_len >
@@ -7181,13 +7177,88 @@ long pkm_lcs_runtime_limits_apply_self_config(
 			audit->received_u32, audit->retained_value);
 	}
 
-	ret = pkm_lcs_runtime_limits_publish(&plan.limits);
+	ret = pkm_lcs_runtime_limits_publish(&plan->limits);
 	if (ret)
 		return ret;
 
 	if (result_out)
-		*result_out = plan;
+		*result_out = *plan;
 	return 0;
+}
+
+long pkm_lcs_runtime_limits_apply_self_config(
+	const struct pkm_lcs_self_config_entry *entries, u32 entry_count,
+	struct pkm_lcs_self_config_apply_plan *result_out)
+{
+	struct pkm_lcs_self_config_apply_plan plan = { };
+	struct pkm_lcs_runtime_limits active_limits = { };
+	long ret;
+
+	if (entry_count && !entries)
+		return -EINVAL;
+
+	ret = pkm_lcs_runtime_limits_snapshot(&active_limits);
+	if (ret)
+		return ret;
+
+	ret = lcs_rust_plan_self_config_apply(&active_limits, entries, entry_count,
+					      &plan);
+	if (ret)
+		return ret;
+
+	return pkm_lcs_runtime_limits_publish_self_config_plan(&plan,
+							      result_out);
+}
+
+long pkm_lcs_runtime_limits_refresh_self_config_from_key(
+	u32 source_id, const u8 registry_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_self_config_apply_plan *result_out)
+{
+	struct pkm_lcs_self_config_apply_plan plan = { };
+	struct pkm_lcs_runtime_limits active_limits = { };
+	struct pkm_lcs_source_response_frame frame;
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_layer_snapshot layers = { };
+	u64 next_sequence = 0;
+	long ret;
+
+	if (!source_id || !registry_guid)
+		return -EINVAL;
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_runtime_limits_snapshot(&active_limits);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layers);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
+		source_id, 0, registry_guid, "", 0, true, &active_limits,
+		active_limits.request_timeout_ms, &frame, &response, NULL);
+	if (ret)
+		goto out_layers;
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		goto out_frame;
+
+	ret = lcs_rust_plan_self_config_apply_from_query_values(
+		&active_limits, frame.data, frame.len, response.request_id,
+		next_sequence, layers.layers, layers.layer_count, NULL, 0,
+		&plan);
+	if (ret)
+		goto out_frame;
+
+	ret = pkm_lcs_runtime_limits_publish_self_config_plan(&plan,
+							      result_out);
+
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+out_layers:
+	pkm_lcs_source_layer_snapshot_release(&layers);
+	return ret;
 }
 
 static long pkm_lcs_publish_open_key_for_token(

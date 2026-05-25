@@ -599,6 +599,9 @@ void pkm_lcs_runtime_limits_reset_defaults(void);
 long pkm_lcs_runtime_limits_apply_self_config(
 	const struct pkm_lcs_self_config_entry *entries, u32 entry_count,
 	struct pkm_lcs_self_config_apply_plan *result_out);
+long pkm_lcs_runtime_limits_refresh_self_config_from_key(
+	u32 source_id, const u8 registry_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_self_config_apply_plan *result_out);
 u32 pkm_lcs_runtime_request_timeout_ms(void);
 u32 pkm_lcs_runtime_transaction_timeout_ms(void);
 u32 pkm_lcs_runtime_symlink_depth_limit(void);
