@@ -2671,6 +2671,61 @@ static void pkm_lcs_kunit_internal_layer_watch_lifecycle_event_noop(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_internal_layer_watch_descendant_event_noop(
+	struct kunit *test)
+{
+	static const char * const descendant_path[] = {
+		"Machine", "System", "Registry", "Layers", "Policy", "Child"
+	};
+	static const u8 ancestors[6][RSI_GUID_SIZE] = {
+		{ 1 }, { 0xe5, 0x20 }, { 0xe5, 0x21 },
+		{ 0xe5, 0x22 }, { 0xe5, 0x23 }, { 0xe5, 0x24 },
+	};
+	static const char value_name[] = "Enabled";
+	struct pkm_lcs_watch_dispatch_context context = {
+		.changed_key_guid = ancestors[5],
+		.ancestor_guids = ancestors,
+		.resolved_path = descendant_path,
+		.path_component_count = ARRAY_SIZE(descendant_path),
+		.event_type = REG_WATCH_VALUE_SET,
+		.name = (const u8 *)value_name,
+		.name_len = sizeof(value_name) - 1U,
+	};
+	struct pkm_lcs_source_fd_snapshot fd_snapshot = { };
+	struct pkm_lcs_rsi_layer_view layers[2] = { };
+	char names[32] = { };
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_internal_self_watch_disarm();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				1, ancestors[0], true, ancestors[2], true,
+				ancestors[3], NULL),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_dispatch_watch_event_context(&context),
+			0L);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &fd_snapshot);
+	KUNIT_EXPECT_EQ(test, fd_snapshot.queued_request_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_internal_self_watch_disarm();
+	kacs_rust_token_drop(token);
+}
+
 static void
 pkm_lcs_kunit_internal_layer_watch_create_event_refreshes_metadata(
 	struct kunit *test)
@@ -41659,6 +41714,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_internal_layer_watch_value_event_refreshes_metadata),
 	KUNIT_CASE(pkm_lcs_kunit_internal_layer_watch_lifecycle_event_noop),
+	KUNIT_CASE(pkm_lcs_kunit_internal_layer_watch_descendant_event_noop),
 	KUNIT_CASE(
 		pkm_lcs_kunit_internal_layer_watch_create_event_refreshes_metadata),
 	KUNIT_CASE(
