@@ -51,6 +51,8 @@ use crate::lcs_core::{
     self_config_audit_intent, self_config_invalid_audit_payload_len,
     source_validation_failure_audit_payload_len, validate_config_value,
     write_backup_restore_complete_audit_payload, write_backup_restore_start_audit_payload,
+    write_backup_header_record_frame, write_backup_key_record_frame,
+    write_backup_trailer_record_frame,
     write_key_open_audit_payload, write_self_config_invalid_audit_payload,
     write_source_validation_failure_audit_payload, write_rsi_abort_transaction_request_frame,
     write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
@@ -844,6 +846,38 @@ fn backup_audit_error_return(err: LcsError) -> c_int {
         _ => LinuxErrno::Eio,
     }
     .negated_return() as c_int
+}
+
+fn backup_writer_error_return(err: LcsError, written_out: *mut usize) -> c_int {
+    if let LcsError::BackupRecordFrameBufferTooSmall { required, .. } = err {
+        unsafe {
+            if !written_out.is_null() {
+                *written_out = required;
+            }
+        }
+        return LinuxErrno::Erange.negated_return() as c_int;
+    }
+
+    match err {
+        LcsError::BackupPayloadLengthOverflow => LinuxErrno::Eoverflow,
+        LcsError::MalformedSecurityDescriptor { .. } => LinuxErrno::Eio,
+        _ => LinuxErrno::Einval,
+    }
+    .negated_return() as c_int
+}
+
+unsafe fn backup_writer_dst<'a>(
+    dst: *mut u8,
+    dst_len: usize,
+) -> Result<&'a mut [u8], LinuxErrno> {
+    if dst.is_null() {
+        if dst_len != 0 {
+            return Err(LinuxErrno::Einval);
+        }
+        Ok(&mut [])
+    } else {
+        Ok(unsafe { slice::from_raw_parts_mut(dst, dst_len) })
+    }
 }
 
 fn audit_caller_summary_from_copy<'a>(
@@ -1884,6 +1918,148 @@ pub unsafe extern "C" fn lcs_rust_backup_complete_audit_payload(
             0
         }
         Err(err) => backup_audit_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_backup_header_record_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
+    format_version: u32,
+    min_reader_version: u32,
+    timestamp_ns: i64,
+    root_guid: *const u8,
+    hive_name: *const u8,
+    hive_name_len: usize,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out_ref) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out_ref = 0;
+    if root_guid.is_null() || (hive_name_len != 0 && hive_name.is_null()) {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
+    let dst_bytes = match unsafe { backup_writer_dst(dst, dst_len) } {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let mut root_guid_copy = [0u8; 16];
+    root_guid_copy.copy_from_slice(unsafe { slice::from_raw_parts(root_guid, 16) });
+    let hive_name = if hive_name_len == 0 {
+        ""
+    } else {
+        match str::from_utf8(unsafe { slice::from_raw_parts(hive_name, hive_name_len) }) {
+            Ok(value) => value,
+            Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+        }
+    };
+
+    match write_backup_header_record_frame(
+        &limits,
+        dst_bytes,
+        format_version,
+        min_reader_version,
+        timestamp_ns,
+        root_guid_copy,
+        hive_name,
+    ) {
+        Ok(written) => {
+            *written_out_ref = written;
+            0
+        }
+        Err(err) => backup_writer_error_return(err, written_out),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_backup_key_record_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    guid: *const u8,
+    volatile_key: u8,
+    symlink: u8,
+    security_descriptor: *const u8,
+    security_descriptor_len: usize,
+    last_write_time_ns: i64,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out_ref) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out_ref = 0;
+    if guid.is_null()
+        || security_descriptor.is_null()
+        || security_descriptor_len == 0
+        || volatile_key > 1
+        || symlink > 1
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = match unsafe { backup_writer_dst(dst, dst_len) } {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let mut guid_copy = [0u8; 16];
+    guid_copy.copy_from_slice(unsafe { slice::from_raw_parts(guid, 16) });
+    let sd = unsafe { slice::from_raw_parts(security_descriptor, security_descriptor_len) };
+
+    match write_backup_key_record_frame(
+        dst_bytes,
+        guid_copy,
+        volatile_key != 0,
+        symlink != 0,
+        sd,
+        last_write_time_ns,
+    ) {
+        Ok(written) => {
+            *written_out_ref = written;
+            0
+        }
+        Err(err) => backup_writer_error_return(err, written_out),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_backup_trailer_record_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    record_count: u64,
+    checksum: *const u8,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out_ref) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out_ref = 0;
+    if checksum.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let dst_bytes = match unsafe { backup_writer_dst(dst, dst_len) } {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let mut checksum_copy = [0u8; 32];
+    checksum_copy.copy_from_slice(unsafe { slice::from_raw_parts(checksum, 32) });
+
+    match write_backup_trailer_record_frame(dst_bytes, record_count, checksum_copy) {
+        Ok(written) => {
+            *written_out_ref = written;
+            0
+        }
+        Err(err) => backup_writer_error_return(err, written_out),
     }
 }
 

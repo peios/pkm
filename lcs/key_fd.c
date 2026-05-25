@@ -6,6 +6,7 @@
  * once on an anonymous fd and later operations consult that stored mask.
  */
 
+#include <crypto/sha2.h>
 #include <linux/anon_inodes.h>
 #include <linux/err.h>
 #include <linux/errno.h>
@@ -38,6 +39,9 @@
 #include "transaction_fd.h"
 
 #define PKM_LCS_MAX_SD_BYTES 65535U
+#define PKM_LCS_BACKUP_FORMAT_VERSION 21U
+#define PKM_LCS_BACKUP_MIN_READER_VERSION 21U
+#define PKM_LCS_BACKUP_TRAILER_PREFIX_LEN 14U
 #define PKM_LCS_WATCH_NOTIFY_ACTION_ARM 1U
 #define PKM_LCS_WATCH_NOTIFY_ACTION_DISARM 2U
 #define PKM_LCS_WATCH_REGISTRY_BITS 8U
@@ -246,6 +250,18 @@ extern int lcs_rust_key_fd_security_ioctl_access_gate(u32 granted_access,
 extern int lcs_rust_backup_restore_fd_mode_gate(u32 operation,
 						u8 fd_readable,
 						u8 fd_writable);
+extern int lcs_rust_write_backup_header_record_frame(
+	u8 *dst, size_t dst_len, const struct pkm_lcs_runtime_limits *limits,
+	u32 format_version, u32 min_reader_version, s64 timestamp_ns,
+	const u8 *root_guid, const u8 *hive_name, size_t hive_name_len,
+	size_t *written_out);
+extern int lcs_rust_write_backup_key_record_frame(
+	u8 *dst, size_t dst_len, const u8 *guid, u8 volatile_key, u8 symlink,
+	const u8 *security_descriptor, size_t security_descriptor_len,
+	s64 last_write_time_ns, size_t *written_out);
+extern int lcs_rust_write_backup_trailer_record_frame(
+	u8 *dst, size_t dst_len, u64 record_count, const u8 *checksum,
+	size_t *written_out);
 extern int lcs_rust_plan_registry_get_security(
 	const u8 *existing_sd, size_t existing_sd_len, u32 security_info,
 	u8 *output, size_t output_len, size_t *written_out);
@@ -4867,16 +4883,19 @@ static long pkm_lcs_key_fd_mark_privilege_used(const void *token, u64 privilege)
 	return 0;
 }
 
-static long pkm_lcs_key_fd_external_fd_mode_gate(int fd, u32 operation)
+static long pkm_lcs_key_fd_external_fd_get_mode_checked(int fd, u32 operation,
+							struct fd *held,
+							struct file **file_out)
 {
 	struct file *file;
-	struct fd held;
 	u8 readable;
 	u8 writable;
 	long ret;
 
-	held = fdget(fd);
-	file = fd_file(held);
+	if (!held || !file_out)
+		return -EINVAL;
+	*held = fdget_pos(fd);
+	file = fd_file(*held);
 	if (!file)
 		return -EBADF;
 
@@ -4884,7 +4903,26 @@ static long pkm_lcs_key_fd_external_fd_mode_gate(int fd, u32 operation)
 	writable = (file->f_mode & FMODE_WRITE) ? 1 : 0;
 	ret = lcs_rust_backup_restore_fd_mode_gate(operation, readable,
 						   writable);
-	fdput(held);
+	if (ret) {
+		fdput_pos(*held);
+		*held = (struct fd) { };
+		return ret;
+	}
+
+	*file_out = file;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_external_fd_mode_gate(int fd, u32 operation)
+{
+	struct file *file = NULL;
+	struct fd held = { };
+	long ret;
+
+	ret = pkm_lcs_key_fd_external_fd_get_mode_checked(fd, operation,
+							  &held, &file);
+	if (!ret)
+		fdput_pos(held);
 	return ret;
 }
 
@@ -4956,11 +4994,357 @@ static u32 pkm_lcs_key_fd_audit_result_errno(long ret)
 	return (u32)ret;
 }
 
+struct pkm_lcs_backup_output {
+	struct file *file;
+	struct sha256_ctx checksum;
+	loff_t pos;
+	u64 record_count;
+	bool positional;
+};
+
+static void pkm_lcs_backup_output_init(struct pkm_lcs_backup_output *output,
+				       struct file *file)
+{
+	memset(output, 0, sizeof(*output));
+	output->file = file;
+	output->positional = !(file->f_mode & FMODE_STREAM);
+	if (output->positional)
+		output->pos = file->f_pos;
+	sha256_init(&output->checksum);
+}
+
+static void pkm_lcs_backup_output_finish(struct pkm_lcs_backup_output *output)
+{
+	if (output && output->file && output->positional)
+		output->file->f_pos = output->pos;
+}
+
+static long pkm_lcs_backup_write_all(struct pkm_lcs_backup_output *output,
+				     const u8 *buf, size_t len)
+{
+	const u8 *cursor = buf;
+	size_t remaining = len;
+
+	if (!output || !output->file || (!buf && len))
+		return -EINVAL;
+
+	while (remaining) {
+		loff_t *ppos = output->positional ? &output->pos : NULL;
+		ssize_t written = kernel_write(output->file, cursor, remaining,
+					       ppos);
+
+		if (written < 0)
+			return written;
+		if (!written)
+			return -EIO;
+		cursor += written;
+		remaining -= written;
+	}
+	return 0;
+}
+
+static long pkm_lcs_backup_write_hashed_record(
+	struct pkm_lcs_backup_output *output, const u8 *frame, size_t frame_len)
+{
+	long ret;
+
+	ret = pkm_lcs_backup_write_all(output, frame, frame_len);
+	if (ret)
+		return ret;
+	sha256_update(&output->checksum, frame, frame_len);
+	output->record_count++;
+	return 0;
+}
+
+static long pkm_lcs_backup_alloc_header_frame(
+	const struct pkm_lcs_runtime_limits *limits, const u8 root_guid[16],
+	const char *hive_name, size_t hive_name_len, s64 timestamp_ns,
+	u8 **frame_out, size_t *frame_len_out)
+{
+	size_t frame_len = 0;
+	size_t written = 0;
+	u8 *frame;
+	long ret;
+
+	if (!limits || !root_guid || !hive_name || !frame_out ||
+	    !frame_len_out)
+		return -EINVAL;
+	*frame_out = NULL;
+	*frame_len_out = 0;
+
+	ret = lcs_rust_write_backup_header_record_frame(
+		NULL, 0, limits, PKM_LCS_BACKUP_FORMAT_VERSION,
+		PKM_LCS_BACKUP_MIN_READER_VERSION, timestamp_ns, root_guid,
+		(const u8 *)hive_name, hive_name_len, &frame_len);
+	if (ret != -ERANGE || !frame_len)
+		return ret ? ret : -EIO;
+	frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	ret = lcs_rust_write_backup_header_record_frame(
+		frame, frame_len, limits, PKM_LCS_BACKUP_FORMAT_VERSION,
+		PKM_LCS_BACKUP_MIN_READER_VERSION, timestamp_ns, root_guid,
+		(const u8 *)hive_name, hive_name_len, &written);
+	if (ret)
+		goto out_free;
+	if (written != frame_len) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	*frame_out = frame;
+	*frame_len_out = frame_len;
+	return 0;
+
+out_free:
+	kfree(frame);
+	return ret;
+}
+
+static long pkm_lcs_backup_alloc_key_frame(
+	const u8 guid[16], bool volatile_key, bool symlink, const u8 *sd,
+	size_t sd_len, s64 last_write_time_ns, u8 **frame_out,
+	size_t *frame_len_out)
+{
+	size_t frame_len = 0;
+	size_t written = 0;
+	u8 *frame;
+	long ret;
+
+	if (!guid || !sd || !sd_len || !frame_out || !frame_len_out)
+		return -EINVAL;
+	*frame_out = NULL;
+	*frame_len_out = 0;
+
+	ret = lcs_rust_write_backup_key_record_frame(
+		NULL, 0, guid, volatile_key ? 1 : 0, symlink ? 1 : 0, sd,
+		sd_len, last_write_time_ns, &frame_len);
+	if (ret != -ERANGE || !frame_len)
+		return ret ? ret : -EIO;
+	frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	ret = lcs_rust_write_backup_key_record_frame(
+		frame, frame_len, guid, volatile_key ? 1 : 0,
+		symlink ? 1 : 0, sd, sd_len, last_write_time_ns, &written);
+	if (ret)
+		goto out_free;
+	if (written != frame_len) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	*frame_out = frame;
+	*frame_len_out = frame_len;
+	return 0;
+
+out_free:
+	kfree(frame);
+	return ret;
+}
+
+static long pkm_lcs_backup_alloc_trailer_frame(
+	struct pkm_lcs_backup_output *output, u8 **frame_out,
+	size_t *frame_len_out)
+{
+	u8 zero_checksum[SHA256_DIGEST_SIZE] = { };
+	u8 checksum[SHA256_DIGEST_SIZE];
+	size_t frame_len = 0;
+	size_t written = 0;
+	u64 record_count;
+	u8 *frame;
+	long ret;
+
+	if (!output || !frame_out || !frame_len_out)
+		return -EINVAL;
+	*frame_out = NULL;
+	*frame_len_out = 0;
+	if (check_add_overflow(output->record_count, 1ULL, &record_count))
+		return -EOVERFLOW;
+
+	ret = lcs_rust_write_backup_trailer_record_frame(
+		NULL, 0, record_count, zero_checksum, &frame_len);
+	if (ret != -ERANGE || !frame_len)
+		return ret ? ret : -EIO;
+	if (frame_len < PKM_LCS_BACKUP_TRAILER_PREFIX_LEN)
+		return -EIO;
+	frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	ret = lcs_rust_write_backup_trailer_record_frame(
+		frame, frame_len, record_count, zero_checksum, &written);
+	if (ret)
+		goto out_free;
+	if (written != frame_len) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	sha256_update(&output->checksum, frame,
+		      PKM_LCS_BACKUP_TRAILER_PREFIX_LEN);
+	sha256_final(&output->checksum, checksum);
+	ret = lcs_rust_write_backup_trailer_record_frame(
+		frame, frame_len, record_count, checksum, &written);
+	if (ret)
+		goto out_free;
+	if (written != frame_len) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	*frame_out = frame;
+	*frame_len_out = frame_len;
+	return 0;
+
+out_free:
+	kfree(frame);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_backup_export_empty_subtree(
+	struct pkm_lcs_key_fd *key_fd, struct file *output_file,
+	const struct pkm_lcs_runtime_limits *limits, u64 transaction_id)
+{
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
+	struct pkm_lcs_source_response_frame read_frame = { };
+	struct pkm_lcs_source_response_frame enum_frame = { };
+	struct pkm_lcs_source_response_frame values_frame = { };
+	struct pkm_lcs_source_response_result read_response = { };
+	struct pkm_lcs_source_response_result enum_response = { };
+	struct pkm_lcs_source_response_result values_response = { };
+	struct pkm_lcs_rsi_read_key_result read_key = { };
+	struct pkm_lcs_rsi_enum_children_info_summary enum_summary = { };
+	struct pkm_lcs_rsi_query_values_info_summary values_summary = { };
+	struct pkm_lcs_backup_output output;
+	const char *hive_name;
+	u8 *header_frame = NULL;
+	u8 *key_frame = NULL;
+	u8 *trailer_frame = NULL;
+	size_t header_frame_len = 0;
+	size_t key_frame_len = 0;
+	size_t trailer_frame_len = 0;
+	u64 next_sequence = 0;
+	const u8 *sd;
+	long ret;
+
+	if (!key_fd || !output_file || !limits || !transaction_id)
+		return -EINVAL;
+	if (!key_fd->resolved_path || !key_fd->path_component_count ||
+	    !key_fd->resolved_path[0])
+		return -EIO;
+	hive_name = key_fd->resolved_path[0];
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		return ret;
+
+	pkm_lcs_source_response_frame_init(&read_frame);
+	pkm_lcs_source_response_frame_init(&enum_frame);
+	pkm_lcs_source_response_frame_init(&values_frame);
+
+	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, transaction_id, key_fd->key_guid, limits,
+		limits->request_timeout_ms, &read_frame, &read_response,
+		NULL);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_rsi_materialize_read_key_response_with_limits(
+		read_frame.data, read_frame.len, read_response.request_id,
+		&read_response.limits, &read_key);
+	if (ret)
+		goto out_frames;
+	if (!read_key.sd_len || (size_t)read_key.sd_offset > read_frame.len ||
+	    (size_t)read_key.sd_len >
+		    read_frame.len - (size_t)read_key.sd_offset) {
+		ret = -EIO;
+		goto out_frames;
+	}
+	sd = read_frame.data + read_key.sd_offset;
+
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, transaction_id, key_fd->key_guid, limits,
+		limits->request_timeout_ms, &enum_frame, &enum_response,
+		NULL);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
+		enum_frame.data, enum_frame.len, enum_response.request_id,
+		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
+		NULL, 0, &enum_response.limits, &enum_summary);
+	if (ret)
+		goto out_frames;
+
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, transaction_id, key_fd->key_guid, "", 0,
+		true, limits, limits->request_timeout_ms, &values_frame,
+		&values_response, NULL);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_rsi_materialize_query_values_info_summary(
+		values_frame.data, values_frame.len, values_response.request_id,
+		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
+		NULL, 0, &values_response.limits, &values_summary);
+	if (ret)
+		goto out_frames;
+
+	if (enum_summary.source_path_entry_count ||
+	    values_summary.source_value_entry_count ||
+	    values_summary.source_blanket_count) {
+		ret = -EOPNOTSUPP;
+		goto out_frames;
+	}
+
+	ret = pkm_lcs_backup_alloc_header_frame(
+		limits, key_fd->key_guid, hive_name, strlen(hive_name),
+		ktime_get_real_ns(), &header_frame, &header_frame_len);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_backup_alloc_key_frame(
+		key_fd->key_guid, read_key.volatile_key != 0,
+		read_key.symlink != 0, sd, read_key.sd_len,
+		(s64)read_key.last_write_time, &key_frame, &key_frame_len);
+	if (ret)
+		goto out_frames;
+
+	pkm_lcs_backup_output_init(&output, output_file);
+	ret = pkm_lcs_backup_write_hashed_record(&output, header_frame,
+						 header_frame_len);
+	if (ret)
+		goto out_output;
+	ret = pkm_lcs_backup_write_hashed_record(&output, key_frame,
+						 key_frame_len);
+	if (ret)
+		goto out_output;
+	ret = pkm_lcs_backup_alloc_trailer_frame(&output, &trailer_frame,
+						 &trailer_frame_len);
+	if (ret)
+		goto out_output;
+	ret = pkm_lcs_backup_write_all(&output, trailer_frame,
+				       trailer_frame_len);
+
+out_output:
+	pkm_lcs_backup_output_finish(&output);
+out_frames:
+	kfree(trailer_frame);
+	kfree(key_frame);
+	kfree(header_frame);
+	pkm_lcs_source_response_frame_destroy(&values_frame);
+	pkm_lcs_source_response_frame_destroy(&enum_frame);
+	pkm_lcs_source_response_frame_destroy(&read_frame);
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_backup_from_args_for_token(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct reg_backup_args *args)
 {
 	struct pkm_lcs_runtime_limits limits;
+	struct file *output_file = NULL;
+	struct fd output_held = { };
 	u64 transaction_id = 0;
 	bool backup_started = false;
 	bool start_audit_failed = false;
@@ -4974,22 +5358,25 @@ static long pkm_lcs_key_fd_backup_from_args_for_token(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_key_fd_external_fd_mode_gate(
-		args->output_fd, PKM_LCS_BACKUP_RESTORE_FD_OP_BACKUP_OUTPUT);
+	ret = pkm_lcs_key_fd_external_fd_get_mode_checked(
+		args->output_fd, PKM_LCS_BACKUP_RESTORE_FD_OP_BACKUP_OUTPUT,
+		&output_held, &output_file);
 	if (ret)
 		return ret;
 
-	if (READ_ONCE(key_fd->orphaned))
-		return -ENOENT;
+	if (READ_ONCE(key_fd->orphaned)) {
+		ret = -ENOENT;
+		goto out_output_fd;
+	}
 
 	ret = pkm_lcs_runtime_limits_snapshot(&limits);
 	if (ret)
-		return ret;
+		goto out_output_fd;
 
 	ret = pkm_lcs_key_fd_backup_begin_read_only_snapshot(
 		key_fd, &limits, &transaction_id);
 	if (ret)
-		return ret;
+		goto out_output_fd;
 
 	ret = pkm_lcs_emit_backup_start_audit_for_token(
 		token, key_fd->key_guid, args->output_fd);
@@ -5005,7 +5392,8 @@ static long pkm_lcs_key_fd_backup_from_args_for_token(
 	if (ret)
 		goto out_release_snapshot;
 
-	ret = -EOPNOTSUPP;
+	ret = pkm_lcs_key_fd_backup_export_empty_subtree(
+		key_fd, output_file, &limits, transaction_id);
 
 out_release_snapshot:
 	{
@@ -5020,6 +5408,8 @@ out_release_snapshot:
 		(void)pkm_lcs_emit_backup_complete_audit_for_token(
 			token, key_fd->key_guid,
 			pkm_lcs_key_fd_audit_result_errno(ret));
+out_output_fd:
+	fdput_pos(output_held);
 	return ret;
 }
 
