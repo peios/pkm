@@ -5040,6 +5040,12 @@ struct pkm_lcs_backup_referenced_layers {
 	u32 count;
 };
 
+struct pkm_lcs_backup_layer_manifest_frames {
+	u8 **frames;
+	size_t *frame_lens;
+	u32 count;
+};
+
 static void pkm_lcs_backup_output_init(struct pkm_lcs_backup_output *output,
 				       struct file *file)
 {
@@ -5579,6 +5585,113 @@ out_destroy:
 	return ret;
 }
 
+static void pkm_lcs_backup_layer_manifest_frames_destroy(
+	struct pkm_lcs_backup_layer_manifest_frames *frames)
+{
+	u32 i;
+
+	if (!frames)
+		return;
+	if (frames->frames) {
+		for (i = 0; i < frames->count; i++)
+			kfree(frames->frames[i]);
+	}
+	kfree(frames->frame_lens);
+	kfree(frames->frames);
+	frames->frames = NULL;
+	frames->frame_lens = NULL;
+	frames->count = 0;
+}
+
+static long pkm_lcs_backup_alloc_layer_manifest_frames(
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_layer_snapshot *snapshot,
+	const struct pkm_lcs_backup_referenced_layers *refs,
+	struct pkm_lcs_backup_layer_manifest_frames *frames)
+{
+	u32 i;
+	long ret;
+
+	if (!limits || !snapshot || !refs || !frames)
+		return -EINVAL;
+	memset(frames, 0, sizeof(*frames));
+	if (!refs->count)
+		return 0;
+	if (!refs->layers)
+		return -EINVAL;
+
+	frames->frames = kcalloc(refs->count, sizeof(*frames->frames),
+				 GFP_KERNEL);
+	if (!frames->frames)
+		return -ENOMEM;
+	frames->frame_lens = kcalloc(refs->count, sizeof(*frames->frame_lens),
+				     GFP_KERNEL);
+	if (!frames->frame_lens) {
+		ret = -ENOMEM;
+		goto out_destroy;
+	}
+
+	for (i = 0; i < refs->count; i++) {
+		if (!refs->layers[i]) {
+			ret = -EINVAL;
+			goto out_destroy;
+		}
+		ret = pkm_lcs_backup_alloc_layer_manifest_frame(
+			limits, snapshot, refs->layers[i],
+			&frames->frames[i], &frames->frame_lens[i]);
+		if (ret)
+			goto out_destroy;
+		frames->count++;
+	}
+
+	return 0;
+
+out_destroy:
+	pkm_lcs_backup_layer_manifest_frames_destroy(frames);
+	return ret;
+}
+
+static long pkm_lcs_backup_manifest_frame_matches_layer(
+	const u8 *frame, size_t frame_len,
+	const struct pkm_lcs_rsi_layer_view *layer)
+{
+	size_t offset = 6;
+	u32 record_len;
+	u32 name_len;
+
+	if (!frame || !layer || !layer->name || !layer->name_len)
+		return -EINVAL;
+	if (frame_len < 6)
+		return -EIO;
+	if (get_unaligned_le16(frame) != REG_BACKUP_LAYER)
+		return -EIO;
+	record_len = get_unaligned_le32(frame + 2);
+	if ((size_t)record_len != frame_len)
+		return -EIO;
+
+	if (offset > frame_len || sizeof(u32) > frame_len - offset)
+		return -EIO;
+	name_len = get_unaligned_le32(frame + offset);
+	offset += sizeof(u32);
+	if (name_len != layer->name_len)
+		return -EIO;
+	if (offset > frame_len || name_len > frame_len - offset)
+		return -EIO;
+	if (memcmp(frame + offset, layer->name, name_len))
+		return -EIO;
+	offset += name_len;
+	if (offset > frame_len || sizeof(u32) > frame_len - offset)
+		return -EIO;
+	if (get_unaligned_le32(frame + offset) != layer->precedence)
+		return -EIO;
+	offset += sizeof(u32);
+	if (offset >= frame_len)
+		return -EIO;
+	if (frame[offset] != layer->enabled)
+		return -EIO;
+	return 0;
+}
+
 static long pkm_lcs_backup_alloc_path_entry_frame(
 	const struct pkm_lcs_runtime_limits *limits,
 	const u8 parent_guid[PKM_LCS_GUID_BYTES], const char *child_name,
@@ -5834,6 +5947,7 @@ static long pkm_lcs_key_fd_backup_export_empty_subtree(
 	struct pkm_lcs_rsi_enum_children_info_summary enum_summary = { };
 	struct pkm_lcs_rsi_query_values_info_summary values_summary = { };
 	struct pkm_lcs_backup_referenced_layers referenced_layers = { };
+	struct pkm_lcs_backup_layer_manifest_frames layer_manifests = { };
 	struct pkm_lcs_backup_output output;
 	const char *hive_name;
 	u8 *header_frame = NULL;
@@ -5916,6 +6030,12 @@ static long pkm_lcs_key_fd_backup_export_empty_subtree(
 	if (ret)
 		goto out_frames;
 
+	ret = pkm_lcs_backup_alloc_layer_manifest_frames(
+		limits, &layer_snapshot, &referenced_layers,
+		&layer_manifests);
+	if (ret)
+		goto out_frames;
+
 	if (enum_summary.source_path_entry_count ||
 	    values_summary.source_value_entry_count ||
 	    values_summary.source_blanket_count) {
@@ -5954,6 +6074,7 @@ static long pkm_lcs_key_fd_backup_export_empty_subtree(
 out_output:
 	pkm_lcs_backup_output_finish(&output);
 out_frames:
+	pkm_lcs_backup_layer_manifest_frames_destroy(&layer_manifests);
 	pkm_lcs_backup_referenced_layers_destroy(&referenced_layers);
 	kfree(trailer_frame);
 	kfree(key_frame);
@@ -8378,6 +8499,77 @@ long pkm_lcs_kunit_backup_collect_referenced_layers(
 
 out:
 	pkm_lcs_backup_referenced_layers_destroy(&collected);
+	return ret;
+}
+
+long pkm_lcs_kunit_backup_layer_manifest_frame_set(
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_backup_layer_ref_view *refs, size_t ref_count,
+	bool base_metadata_present, const u8 *base_metadata_sd,
+	size_t base_metadata_sd_len,
+	struct pkm_lcs_backup_manifest_frame_summary *summary_out)
+{
+	struct pkm_lcs_layer_snapshot snapshot = {
+		.layers = layers,
+		.layer_count = layer_count,
+		.base_metadata_present = base_metadata_present,
+		.base_metadata_sd = base_metadata_sd,
+		.base_metadata_sd_len = base_metadata_sd_len,
+	};
+	struct pkm_lcs_backup_referenced_layers referenced = { };
+	struct pkm_lcs_backup_layer_manifest_frames frames = { };
+	struct pkm_lcs_runtime_limits limits;
+	size_t total_len = 0;
+	u32 i;
+	long ret = 0;
+
+	if (!summary_out || (ref_count && (!layers || !refs)))
+		return -EINVAL;
+	memset(summary_out, 0, sizeof(*summary_out));
+	if (ref_count > U32_MAX)
+		return -EOVERFLOW;
+
+	if (ref_count) {
+		referenced.layers = kcalloc(ref_count,
+					    sizeof(*referenced.layers),
+					    GFP_KERNEL);
+		if (!referenced.layers)
+			return -ENOMEM;
+		referenced.count = (u32)ref_count;
+	}
+	for (i = 0; i < ref_count; i++) {
+		if (refs[i].layer_index >= layer_count) {
+			ret = -EINVAL;
+			goto out;
+		}
+		referenced.layers[i] = &layers[refs[i].layer_index];
+	}
+
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_backup_alloc_layer_manifest_frames(
+		&limits, &snapshot, &referenced, &frames);
+	if (ret)
+		goto out;
+
+	for (i = 0; i < frames.count; i++) {
+		ret = pkm_lcs_backup_manifest_frame_matches_layer(
+			frames.frames[i], frames.frame_lens[i],
+			referenced.layers[i]);
+		if (ret)
+			goto out;
+		if (check_add_overflow(total_len, frames.frame_lens[i],
+				       &total_len)) {
+			ret = -EOVERFLOW;
+			goto out;
+		}
+	}
+
+	summary_out->frame_count = frames.count;
+	summary_out->total_len = total_len;
+
+out:
+	pkm_lcs_backup_layer_manifest_frames_destroy(&frames);
+	kfree(referenced.layers);
 	return ret;
 }
 

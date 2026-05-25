@@ -81,6 +81,12 @@ struct pkm_lcs_backup_layer_ref_view {
 	u32 _pad;
 };
 
+struct pkm_lcs_backup_manifest_frame_summary {
+	u32 frame_count;
+	u32 _pad;
+	size_t total_len;
+};
+
 struct pkm_lcs_key_fd_relative_base {
 	u32 source_id;
 	u32 parent_depth;
@@ -315,6 +321,12 @@ long pkm_lcs_kunit_backup_collect_referenced_layers(
 	u64 values_request_id, u64 next_sequence,
 	struct pkm_lcs_backup_layer_ref_view *refs, size_t ref_capacity,
 	u32 *ref_count_out);
+long pkm_lcs_kunit_backup_layer_manifest_frame_set(
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_backup_layer_ref_view *refs, size_t ref_count,
+	bool base_metadata_present, const u8 *base_metadata_sd,
+	size_t base_metadata_sd_len,
+	struct pkm_lcs_backup_manifest_frame_summary *summary_out);
 long pkm_lcs_kunit_key_fd_restore_for_token(
 	int fd, const void *token, const struct reg_restore_args *args);
 long pkm_lcs_kunit_key_fd_flush(int fd);

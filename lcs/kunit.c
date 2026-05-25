@@ -18424,6 +18424,77 @@ static void pkm_lcs_kunit_backup_layer_manifest_fails_closed(
 	KUNIT_EXPECT_EQ(test, frame_len, (size_t)0);
 }
 
+static void pkm_lcs_kunit_backup_layer_manifest_frame_set_order(
+	struct kunit *test)
+{
+	static const u8 metadata_guid[PKM_LCS_GUID_BYTES] = { 0xaa };
+	static const struct pkm_lcs_rsi_layer_view layers[] = {
+		{ .name = "base", .name_len = 4, .precedence = 0,
+		  .enabled = 1 },
+		{ .name = "Policy", .name_len = 6, .precedence = 42,
+		  .enabled = 1 },
+	};
+	static const struct pkm_lcs_backup_layer_ref_view refs[] = {
+		{ .layer_index = 0 },
+		{ .layer_index = 1 },
+	};
+	struct pkm_lcs_backup_manifest_frame_summary summary = { };
+
+	pkm_lcs_kunit_reset_layer_table();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"Policy", strlen("Policy"), 42, 1,
+				metadata_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_everyone_sid,
+				sizeof(pkm_lcs_kunit_everyone_sid)),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_layer_manifest_frame_set(
+				layers, ARRAY_SIZE(layers), refs,
+				ARRAY_SIZE(refs), false, NULL, 0, &summary),
+			0L);
+	KUNIT_EXPECT_EQ(test, summary.frame_count, 2U);
+	KUNIT_EXPECT_GT(test, summary.total_len, (size_t)0);
+	pkm_lcs_kunit_reset_layer_table();
+}
+
+static void pkm_lcs_kunit_backup_layer_manifest_frame_set_fail_closed(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_rsi_layer_view layers[] = {
+		{ .name = "Policy", .name_len = 6, .precedence = 42,
+		  .enabled = 1 },
+	};
+	static const struct pkm_lcs_backup_layer_ref_view missing_owner[] = {
+		{ .layer_index = 0 },
+	};
+	static const struct pkm_lcs_backup_layer_ref_view bad_index[] = {
+		{ .layer_index = 1 },
+	};
+	struct pkm_lcs_backup_manifest_frame_summary summary = { };
+
+	pkm_lcs_kunit_reset_layer_table();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_layer_manifest_frame_set(
+				layers, ARRAY_SIZE(layers), missing_owner,
+				ARRAY_SIZE(missing_owner), false, NULL, 0,
+				&summary),
+			(long)-ENOENT);
+	KUNIT_EXPECT_EQ(test, summary.frame_count, 0U);
+	KUNIT_EXPECT_EQ(test, summary.total_len, (size_t)0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_layer_manifest_frame_set(
+				layers, ARRAY_SIZE(layers), bad_index,
+				ARRAY_SIZE(bad_index), false, NULL, 0,
+				&summary),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, summary.frame_count, 0U);
+	KUNIT_EXPECT_EQ(test, summary.total_len, (size_t)0);
+}
+
 static void pkm_lcs_kunit_expect_path_entry_record(
 	struct kunit *test, const u8 *frame, size_t frame_len,
 	const u8 expected_parent[PKM_LCS_GUID_BYTES],
@@ -46830,6 +46901,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_backup_layer_manifest_non_base_cached_owner),
 	KUNIT_CASE(pkm_lcs_kunit_backup_layer_manifest_fails_closed),
+	KUNIT_CASE(pkm_lcs_kunit_backup_layer_manifest_frame_set_order),
+	KUNIT_CASE(pkm_lcs_kunit_backup_layer_manifest_frame_set_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_backup_path_entry_frames),
 	KUNIT_CASE(pkm_lcs_kunit_backup_value_frames),
 	KUNIT_CASE(pkm_lcs_kunit_backup_blanket_tombstone_record),
