@@ -7350,6 +7350,123 @@ out_layers:
 	return ret;
 }
 
+void pkm_lcs_layer_metadata_child_list_destroy(
+	struct pkm_lcs_layer_metadata_child_list *list)
+{
+	u32 i;
+
+	if (!list)
+		return;
+	for (i = 0; i < list->child_count; i++)
+		kfree(list->children[i].name);
+	kvfree(list->children);
+	memset(list, 0, sizeof(*list));
+}
+
+long pkm_lcs_layer_metadata_children_enumerate_from_root(
+	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_layer_metadata_child_list *children_out)
+{
+	struct pkm_lcs_layer_metadata_child_list result = { };
+	struct pkm_lcs_rsi_enum_children_info_summary summary = { };
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_runtime_limits active_limits = { };
+	struct pkm_lcs_layer_snapshot layers = { };
+	u64 next_sequence = 0;
+	u32 i;
+	long ret;
+
+	if (children_out)
+		memset(children_out, 0, sizeof(*children_out));
+	if (!source_id || !layers_root_guid || !children_out)
+		return -EINVAL;
+
+	ret = pkm_lcs_runtime_limits_snapshot(&active_limits);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layers);
+	if (ret)
+		return ret;
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
+		source_id, 0, layers_root_guid, &active_limits,
+		active_limits.request_timeout_ms, &frame, &response, NULL);
+	if (ret)
+		goto out_layers;
+
+	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
+		frame.data, frame.len, response.request_id, next_sequence,
+		layers.layers, layers.layer_count, NULL, 0, &response.limits,
+		&summary);
+	if (ret)
+		goto out_frame;
+	if (summary.subkey_count > active_limits.max_total_layers) {
+		ret = -ENOSPC;
+		goto out_frame;
+	}
+	if (!summary.subkey_count) {
+		*children_out = result;
+		ret = 0;
+		goto out_frame;
+	}
+
+	result.children = kvcalloc(summary.subkey_count,
+				   sizeof(*result.children), GFP_KERNEL);
+	if (!result.children) {
+		ret = -ENOMEM;
+		goto out_frame;
+	}
+
+	for (i = 0; i < summary.subkey_count; i++) {
+		struct pkm_lcs_rsi_enum_subkey_result subkey = { };
+		char *name;
+
+		ret = pkm_lcs_rsi_materialize_enum_subkey_response(
+			frame.data, frame.len, response.request_id,
+			next_sequence, i, layers.layers, layers.layer_count,
+			NULL, 0, &response.limits, &subkey);
+		if (ret)
+			goto out_result;
+		if (!subkey.found ||
+		    (size_t)subkey.name_offset > frame.len ||
+		    (size_t)subkey.name_len >
+			    frame.len - (size_t)subkey.name_offset) {
+			ret = -EIO;
+			goto out_result;
+		}
+
+		name = kmemdup_nul(frame.data + subkey.name_offset,
+				   subkey.name_len, GFP_KERNEL);
+		if (!name) {
+			ret = -ENOMEM;
+			goto out_result;
+		}
+
+		result.children[result.child_count].name = name;
+		result.children[result.child_count].name_len = subkey.name_len;
+		memcpy(result.children[result.child_count].guid,
+		       subkey.child_guid, RSI_GUID_SIZE);
+		result.child_count++;
+	}
+
+	*children_out = result;
+	memset(&result, 0, sizeof(result));
+	ret = 0;
+
+out_result:
+	pkm_lcs_layer_metadata_child_list_destroy(&result);
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+out_layers:
+	pkm_lcs_source_layer_snapshot_release(&layers);
+	return ret;
+}
+
 static long pkm_lcs_publish_open_key_for_token(
 	const void *token, u32 source_id, const u8 key_guid[RSI_GUID_SIZE],
 	const u8 *sd, size_t sd_len, u32 desired_access,

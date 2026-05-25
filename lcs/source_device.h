@@ -304,6 +304,17 @@ struct pkm_lcs_self_config_apply_plan {
 		audits[PKM_LCS_SELF_CONFIG_MAX_AUDITS];
 };
 
+struct pkm_lcs_layer_metadata_child {
+	char *name;
+	u32 name_len;
+	u8 guid[RSI_GUID_SIZE];
+};
+
+struct pkm_lcs_layer_metadata_child_list {
+	struct pkm_lcs_layer_metadata_child *children;
+	u32 child_count;
+};
+
 struct pkm_lcs_path_validation_result {
 	u32 component_count;
 	bool used_forward_separator;
@@ -608,6 +619,11 @@ long pkm_lcs_runtime_limits_refresh_self_config_from_machine_hive(
 long pkm_lcs_layer_metadata_root_discover_from_machine_hive(
 	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
 	bool *present_out, u8 layers_root_guid_out[RSI_GUID_SIZE]);
+void pkm_lcs_layer_metadata_child_list_destroy(
+	struct pkm_lcs_layer_metadata_child_list *list);
+long pkm_lcs_layer_metadata_children_enumerate_from_root(
+	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_layer_metadata_child_list *children_out);
 u32 pkm_lcs_runtime_request_timeout_ms(void);
 u32 pkm_lcs_runtime_transaction_timeout_ms(void);
 u32 pkm_lcs_runtime_symlink_depth_limit(void);
