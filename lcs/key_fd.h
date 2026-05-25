@@ -68,6 +68,36 @@ struct pkm_lcs_key_fd_watch_registry_snapshot {
 	u32 subtree_watchers;
 };
 
+enum pkm_lcs_internal_watch_target {
+	PKM_LCS_INTERNAL_WATCH_SELF_CONFIGURATION = 1,
+	PKM_LCS_INTERNAL_WATCH_LAYER_METADATA = 2,
+	PKM_LCS_INTERNAL_WATCH_MACHINE_ROOT_FALLBACK = 3,
+};
+
+enum pkm_lcs_internal_self_watch_mode {
+	PKM_LCS_INTERNAL_SELF_WATCH_DISARMED = 0,
+	PKM_LCS_INTERNAL_SELF_WATCH_TARGETED = 1,
+	PKM_LCS_INTERNAL_SELF_WATCH_MACHINE_ROOT_FALLBACK = 2,
+};
+
+struct pkm_lcs_internal_self_watch_arm_result {
+	u32 source_id;
+	u32 watch_count;
+	u32 mode;
+	u8 registry_guid[PKM_LCS_GUID_BYTES];
+	u8 layers_guid[PKM_LCS_GUID_BYTES];
+	u8 fallback_guid[PKM_LCS_GUID_BYTES];
+};
+
+struct pkm_lcs_internal_self_watch_snapshot {
+	u32 source_id;
+	u32 watch_count;
+	u32 mode;
+	u8 registry_guid[PKM_LCS_GUID_BYTES];
+	u8 layers_guid[PKM_LCS_GUID_BYTES];
+	u8 fallback_guid[PKM_LCS_GUID_BYTES];
+};
+
 struct pkm_lcs_watch_dispatch_input {
 	int mutation_fd;
 	u32 event_type;
@@ -118,6 +148,13 @@ long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
 					     u32 *watch_count_out);
 long pkm_lcs_key_fd_dispatch_watch_event(
 	const struct pkm_lcs_watch_dispatch_input *input);
+long pkm_lcs_internal_self_watch_arm(
+	u32 source_id, const u8 machine_root_guid[PKM_LCS_GUID_BYTES],
+	bool registry_present,
+	const u8 registry_guid[PKM_LCS_GUID_BYTES],
+	bool layers_present, const u8 layers_guid[PKM_LCS_GUID_BYTES],
+	struct pkm_lcs_internal_self_watch_arm_result *result_out);
+void pkm_lcs_internal_self_watch_disarm(void);
 long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out);
 long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted_with_refs(
@@ -191,6 +228,8 @@ ssize_t pkm_lcs_kunit_key_fd_read(int fd, u8 *buf, size_t count,
 __poll_t pkm_lcs_kunit_key_fd_poll(int fd);
 long pkm_lcs_kunit_key_fd_watch_registry_snapshot(
 	int fd, struct pkm_lcs_key_fd_watch_registry_snapshot *out);
+long pkm_lcs_kunit_internal_self_watch_snapshot(
+	struct pkm_lcs_internal_self_watch_snapshot *out);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_KEY_FD_H */

@@ -324,8 +324,10 @@ struct pkm_lcs_layer_metadata_refresh_all_result {
 struct pkm_lcs_source_bootstrap_refresh_result {
 	struct pkm_lcs_self_config_apply_plan self_config;
 	struct pkm_lcs_layer_metadata_refresh_all_result layers;
+	struct pkm_lcs_internal_self_watch_arm_result self_watch;
+	bool registry_root_present;
 	bool layers_root_present;
-	u8 _pad[3];
+	u8 _pad[2];
 };
 
 struct pkm_lcs_path_validation_result {
@@ -626,6 +628,9 @@ long pkm_lcs_runtime_limits_apply_self_config(
 long pkm_lcs_runtime_limits_refresh_self_config_from_key(
 	u32 source_id, const u8 registry_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_self_config_apply_plan *result_out);
+long pkm_lcs_self_config_registry_root_discover_from_machine_hive(
+	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
+	bool *present_out, u8 registry_guid_out[RSI_GUID_SIZE]);
 long pkm_lcs_runtime_limits_refresh_self_config_from_machine_hive(
 	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_self_config_apply_plan *result_out);

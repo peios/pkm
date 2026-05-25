@@ -83,6 +83,41 @@ struct pkm_lcs_subtree_watch_entry {
 	u32 refcount;
 };
 
+struct pkm_lcs_key_fd;
+struct pkm_lcs_internal_watch;
+
+enum pkm_lcs_watch_registry_entry_kind {
+	PKM_LCS_WATCH_REGISTRY_KEY_FD = 1,
+	PKM_LCS_WATCH_REGISTRY_INTERNAL = 2,
+};
+
+struct pkm_lcs_watch_registry_entry {
+	struct hlist_node link;
+	u8 guid[PKM_LCS_GUID_BYTES];
+	u32 source_id;
+	enum pkm_lcs_watch_registry_entry_kind kind;
+	bool subtree;
+	bool linked;
+	union {
+		struct pkm_lcs_key_fd *key_fd;
+		struct pkm_lcs_internal_watch *internal;
+	} owner;
+};
+
+struct pkm_lcs_internal_watch {
+	struct pkm_lcs_watch_registry_entry registry;
+	enum pkm_lcs_internal_watch_target target;
+};
+
+struct pkm_lcs_internal_self_watch_state {
+	struct pkm_lcs_internal_watch registry;
+	struct pkm_lcs_internal_watch layers;
+	struct pkm_lcs_internal_watch fallback;
+	u32 source_id;
+	enum pkm_lcs_internal_self_watch_mode mode;
+	u32 watch_count;
+};
+
 struct pkm_lcs_key_ref_entry {
 	struct hlist_node link;
 	struct list_head fds;
@@ -104,7 +139,7 @@ struct pkm_lcs_key_fd {
 	wait_queue_head_t watch_wait;
 	struct list_head watch_events;
 	struct list_head key_ref_node;
-	struct hlist_node watch_registry_node;
+	struct pkm_lcs_watch_registry_entry watch_registry_entry;
 	struct pkm_lcs_key_ref_entry *key_ref;
 	u32 watch_filter;
 	u32 watch_pending_events;
@@ -181,6 +216,7 @@ static DEFINE_HASHTABLE(pkm_lcs_subtree_watch_set,
 			PKM_LCS_WATCH_REGISTRY_BITS);
 static DEFINE_MUTEX(pkm_lcs_key_ref_lock);
 static DEFINE_HASHTABLE(pkm_lcs_key_ref_map, PKM_LCS_KEY_REF_BITS);
+static struct pkm_lcs_internal_self_watch_state pkm_lcs_internal_self_watch;
 
 extern int lcs_rust_validate_key_fd_open_view(
 	const u8 *key_guid, u32 granted_access,
@@ -403,14 +439,69 @@ static void pkm_lcs_subtree_watch_put_locked(
 	kfree(entry);
 }
 
+static void pkm_lcs_watch_registry_entry_init_key_fd(
+	struct pkm_lcs_key_fd *key_fd)
+{
+	struct pkm_lcs_watch_registry_entry *entry;
+
+	entry = &key_fd->watch_registry_entry;
+	INIT_HLIST_NODE(&entry->link);
+	memcpy(entry->guid, key_fd->key_guid, sizeof(entry->guid));
+	entry->source_id = key_fd->source_id;
+	entry->kind = PKM_LCS_WATCH_REGISTRY_KEY_FD;
+	entry->subtree = key_fd->watch_subtree;
+	entry->linked = false;
+	entry->owner.key_fd = key_fd;
+}
+
+static void pkm_lcs_watch_registry_entry_init_internal(
+	struct pkm_lcs_internal_watch *watch, u32 source_id,
+	const u8 guid[PKM_LCS_GUID_BYTES],
+	enum pkm_lcs_internal_watch_target target)
+{
+	struct pkm_lcs_watch_registry_entry *entry;
+
+	entry = &watch->registry;
+	INIT_HLIST_NODE(&entry->link);
+	memcpy(entry->guid, guid, sizeof(entry->guid));
+	entry->source_id = source_id;
+	entry->kind = PKM_LCS_WATCH_REGISTRY_INTERNAL;
+	entry->subtree = true;
+	entry->linked = false;
+	entry->owner.internal = watch;
+	watch->target = target;
+}
+
+static void pkm_lcs_watch_registry_entry_link_locked(
+	struct pkm_lcs_watch_registry_entry *entry)
+{
+	if (entry->linked)
+		return;
+
+	hash_add(pkm_lcs_watch_map, &entry->link,
+		 pkm_lcs_guid_hash(entry->guid));
+	entry->linked = true;
+}
+
+static void pkm_lcs_watch_registry_entry_unlink_locked(
+	struct pkm_lcs_watch_registry_entry *entry)
+{
+	if (!entry->linked)
+		return;
+
+	hash_del(&entry->link);
+	INIT_HLIST_NODE(&entry->link);
+	entry->linked = false;
+}
+
 static void pkm_lcs_key_fd_watch_map_link_locked(
 	struct pkm_lcs_key_fd *key_fd)
 {
 	if (key_fd->watch_registry_linked)
 		return;
 
-	hash_add(pkm_lcs_watch_map, &key_fd->watch_registry_node,
-		 pkm_lcs_guid_hash(key_fd->key_guid));
+	pkm_lcs_watch_registry_entry_init_key_fd(key_fd);
+	pkm_lcs_watch_registry_entry_link_locked(&key_fd->watch_registry_entry);
 	key_fd->watch_registry_linked = true;
 }
 
@@ -420,8 +511,7 @@ static void pkm_lcs_key_fd_watch_map_unlink_locked(
 	if (!key_fd->watch_registry_linked)
 		return;
 
-	hash_del(&key_fd->watch_registry_node);
-	INIT_HLIST_NODE(&key_fd->watch_registry_node);
+	pkm_lcs_watch_registry_entry_unlink_locked(&key_fd->watch_registry_entry);
 	key_fd->watch_registry_linked = false;
 }
 
@@ -823,7 +913,7 @@ static long pkm_lcs_key_fd_copy_input(
 	init_waitqueue_head(&key_fd->watch_wait);
 	INIT_LIST_HEAD(&key_fd->watch_events);
 	INIT_LIST_HEAD(&key_fd->key_ref_node);
-	INIT_HLIST_NODE(&key_fd->watch_registry_node);
+	INIT_HLIST_NODE(&key_fd->watch_registry_entry.link);
 
 	key_fd->resolved_path = kcalloc(input->path_component_count,
 					sizeof(*key_fd->resolved_path),
@@ -5096,6 +5186,7 @@ static long pkm_lcs_key_fd_transaction_burst_count_context_locked(
 	struct list_head *counts, u32 limit)
 {
 	struct pkm_lcs_subtree_watch_entry *subtree;
+	struct pkm_lcs_watch_registry_entry *entry;
 	struct pkm_lcs_key_fd *watcher;
 	u32 changed_index;
 	u32 hash;
@@ -5103,11 +5194,12 @@ static long pkm_lcs_key_fd_transaction_burst_count_context_locked(
 	long ret;
 
 	hash = pkm_lcs_guid_hash(context->changed_key_guid);
-	hash_for_each_possible(pkm_lcs_watch_map, watcher,
-			       watch_registry_node, hash) {
-		if (!pkm_lcs_guid_equal(watcher->key_guid,
+	hash_for_each_possible(pkm_lcs_watch_map, entry, link, hash) {
+		if (entry->kind != PKM_LCS_WATCH_REGISTRY_KEY_FD ||
+		    !pkm_lcs_guid_equal(entry->guid,
 					context->changed_key_guid))
 			continue;
+		watcher = entry->owner.key_fd;
 		ret = pkm_lcs_key_fd_transaction_burst_count_watcher(
 			counts, watcher, context->event_type, limit);
 		if (ret)
@@ -5125,11 +5217,12 @@ static long pkm_lcs_key_fd_transaction_burst_count_context_locked(
 			continue;
 
 		hash = pkm_lcs_guid_hash(ancestor_guid);
-		hash_for_each_possible(pkm_lcs_watch_map, watcher,
-				       watch_registry_node, hash) {
-			if (!pkm_lcs_guid_equal(watcher->key_guid,
-						ancestor_guid) ||
-			    !watcher->watch_subtree)
+		hash_for_each_possible(pkm_lcs_watch_map, entry, link, hash) {
+			if (entry->kind != PKM_LCS_WATCH_REGISTRY_KEY_FD ||
+			    !pkm_lcs_guid_equal(entry->guid, ancestor_guid))
+				continue;
+			watcher = entry->owner.key_fd;
+			if (!watcher->watch_subtree)
 				continue;
 			ret = pkm_lcs_key_fd_transaction_burst_count_watcher(
 				counts, watcher, context->event_type, limit);
@@ -5176,6 +5269,7 @@ static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 {
 	struct pkm_lcs_key_fd_string_view *path_views = NULL;
 	struct pkm_lcs_subtree_watch_entry *subtree;
+	struct pkm_lcs_watch_registry_entry *entry;
 	struct pkm_lcs_key_fd *watcher;
 	long ret = 0;
 	u32 changed_index;
@@ -5183,11 +5277,12 @@ static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 	u32 i;
 
 	hash = pkm_lcs_guid_hash(context->changed_key_guid);
-	hash_for_each_possible(pkm_lcs_watch_map, watcher,
-			       watch_registry_node, hash) {
-		if (!pkm_lcs_guid_equal(watcher->key_guid,
+	hash_for_each_possible(pkm_lcs_watch_map, entry, link, hash) {
+		if (entry->kind != PKM_LCS_WATCH_REGISTRY_KEY_FD ||
+		    !pkm_lcs_guid_equal(entry->guid,
 					context->changed_key_guid))
 			continue;
+		watcher = entry->owner.key_fd;
 		if (pkm_lcs_key_fd_transaction_burst_suppresses_watcher(
 			    transaction_burst_counts, watcher))
 			continue;
@@ -5217,11 +5312,12 @@ static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 			goto out_unlock;
 
 		hash = pkm_lcs_guid_hash(ancestor_guid);
-		hash_for_each_possible(pkm_lcs_watch_map, watcher,
-				       watch_registry_node, hash) {
-			if (!pkm_lcs_guid_equal(watcher->key_guid,
-						ancestor_guid) ||
-			    !watcher->watch_subtree)
+		hash_for_each_possible(pkm_lcs_watch_map, entry, link, hash) {
+			if (entry->kind != PKM_LCS_WATCH_REGISTRY_KEY_FD ||
+			    !pkm_lcs_guid_equal(entry->guid, ancestor_guid))
+				continue;
+			watcher = entry->owner.key_fd;
+			if (!watcher->watch_subtree)
 				continue;
 			if (pkm_lcs_key_fd_transaction_burst_suppresses_watcher(
 				    transaction_burst_counts, watcher))
@@ -5305,6 +5401,7 @@ static long pkm_lcs_key_fd_dispatch_overflow_context_locked(
 	const struct pkm_lcs_watch_dispatch_context *context)
 {
 	struct pkm_lcs_subtree_watch_entry *subtree;
+	struct pkm_lcs_watch_registry_entry *entry;
 	struct pkm_lcs_key_fd *watcher;
 	u32 changed_index;
 	u32 hash;
@@ -5312,11 +5409,12 @@ static long pkm_lcs_key_fd_dispatch_overflow_context_locked(
 	long ret = 0;
 
 	hash = pkm_lcs_guid_hash(context->changed_key_guid);
-	hash_for_each_possible(pkm_lcs_watch_map, watcher,
-			       watch_registry_node, hash) {
-		if (!pkm_lcs_guid_equal(watcher->key_guid,
+	hash_for_each_possible(pkm_lcs_watch_map, entry, link, hash) {
+		if (entry->kind != PKM_LCS_WATCH_REGISTRY_KEY_FD ||
+		    !pkm_lcs_guid_equal(entry->guid,
 					context->changed_key_guid))
 			continue;
+		watcher = entry->owner.key_fd;
 		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
 			watcher, REG_WATCH_OVERFLOW, NULL, 0, false, NULL, 0);
 		if (ret)
@@ -5334,11 +5432,12 @@ static long pkm_lcs_key_fd_dispatch_overflow_context_locked(
 			continue;
 
 		hash = pkm_lcs_guid_hash(ancestor_guid);
-		hash_for_each_possible(pkm_lcs_watch_map, watcher,
-				       watch_registry_node, hash) {
-			if (!pkm_lcs_guid_equal(watcher->key_guid,
-						ancestor_guid) ||
-			    !watcher->watch_subtree)
+		hash_for_each_possible(pkm_lcs_watch_map, entry, link, hash) {
+			if (entry->kind != PKM_LCS_WATCH_REGISTRY_KEY_FD ||
+			    !pkm_lcs_guid_equal(entry->guid, ancestor_guid))
+				continue;
+			watcher = entry->owner.key_fd;
+			if (!watcher->watch_subtree)
 				continue;
 			ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
 				watcher, REG_WATCH_OVERFLOW, NULL, 0, false,
@@ -5378,6 +5477,7 @@ long pkm_lcs_key_fd_dispatch_overflow_context(
 long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
 					     u32 *watch_count_out)
 {
+	struct pkm_lcs_watch_registry_entry *entry;
 	struct pkm_lcs_key_fd *watcher;
 	u32 queued = 0;
 	int bucket;
@@ -5389,10 +5489,11 @@ long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
 		return -EINVAL;
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
-	hash_for_each(pkm_lcs_watch_map, bucket, watcher,
-		      watch_registry_node) {
-		if (watcher->source_id != source_id)
+	hash_for_each(pkm_lcs_watch_map, bucket, entry, link) {
+		if (entry->kind != PKM_LCS_WATCH_REGISTRY_KEY_FD ||
+		    entry->source_id != source_id)
 			continue;
+		watcher = entry->owner.key_fd;
 		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
 			watcher, REG_WATCH_OVERFLOW, NULL, 0, false, NULL, 0);
 		if (ret)
@@ -5414,6 +5515,7 @@ long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
 static long pkm_lcs_key_fd_dispatch_key_deleted_direct(
 	const u8 guid[PKM_LCS_GUID_BYTES])
 {
+	struct pkm_lcs_watch_registry_entry *entry;
 	struct pkm_lcs_key_fd *watcher;
 	u32 hash;
 	long ret = 0;
@@ -5423,10 +5525,11 @@ static long pkm_lcs_key_fd_dispatch_key_deleted_direct(
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	hash = pkm_lcs_guid_hash(guid);
-	hash_for_each_possible(pkm_lcs_watch_map, watcher,
-			       watch_registry_node, hash) {
-		if (!pkm_lcs_guid_equal(watcher->key_guid, guid))
+	hash_for_each_possible(pkm_lcs_watch_map, entry, link, hash) {
+		if (entry->kind != PKM_LCS_WATCH_REGISTRY_KEY_FD ||
+		    !pkm_lcs_guid_equal(entry->guid, guid))
 			continue;
+		watcher = entry->owner.key_fd;
 		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
 			watcher, REG_WATCH_KEY_DELETED, NULL, 0,
 			watcher->watch_subtree, NULL, 0);
@@ -5541,6 +5644,143 @@ long pkm_lcs_key_fd_dispatch_watch_event(
 	ret = pkm_lcs_key_fd_dispatch_watch_event_context(&context);
 	fdput(held);
 	return ret;
+}
+
+static bool pkm_lcs_internal_watch_guid_valid(
+	const u8 guid[PKM_LCS_GUID_BYTES])
+{
+	return guid && memchr_inv(guid, 0, PKM_LCS_GUID_BYTES);
+}
+
+static void pkm_lcs_internal_watch_remove_locked(
+	struct pkm_lcs_internal_watch *watch)
+{
+	if (!watch->registry.linked)
+		return;
+
+	pkm_lcs_watch_registry_entry_unlink_locked(&watch->registry);
+	if (watch->registry.subtree)
+		pkm_lcs_subtree_watch_put_locked(watch->registry.guid);
+	memset(watch, 0, sizeof(*watch));
+}
+
+static void pkm_lcs_internal_self_watch_disarm_locked(void)
+{
+	pkm_lcs_internal_watch_remove_locked(
+		&pkm_lcs_internal_self_watch.registry);
+	pkm_lcs_internal_watch_remove_locked(&pkm_lcs_internal_self_watch.layers);
+	pkm_lcs_internal_watch_remove_locked(
+		&pkm_lcs_internal_self_watch.fallback);
+	pkm_lcs_internal_self_watch.source_id = 0;
+	pkm_lcs_internal_self_watch.mode =
+		PKM_LCS_INTERNAL_SELF_WATCH_DISARMED;
+	pkm_lcs_internal_self_watch.watch_count = 0;
+}
+
+static long pkm_lcs_internal_watch_add_locked(
+	struct pkm_lcs_internal_watch *watch, u32 source_id,
+	const u8 guid[PKM_LCS_GUID_BYTES],
+	enum pkm_lcs_internal_watch_target target)
+{
+	long ret;
+
+	ret = pkm_lcs_subtree_watch_get_locked(guid);
+	if (ret)
+		return ret;
+	pkm_lcs_watch_registry_entry_init_internal(watch, source_id, guid,
+						   target);
+	pkm_lcs_watch_registry_entry_link_locked(&watch->registry);
+	return 0;
+}
+
+static void pkm_lcs_internal_self_watch_fill_result_locked(
+	struct pkm_lcs_internal_self_watch_arm_result *out)
+{
+	if (!out)
+		return;
+	memset(out, 0, sizeof(*out));
+	out->source_id = pkm_lcs_internal_self_watch.source_id;
+	out->watch_count = pkm_lcs_internal_self_watch.watch_count;
+	out->mode = pkm_lcs_internal_self_watch.mode;
+	if (pkm_lcs_internal_self_watch.registry.registry.linked)
+		memcpy(out->registry_guid,
+		       pkm_lcs_internal_self_watch.registry.registry.guid,
+		       sizeof(out->registry_guid));
+	if (pkm_lcs_internal_self_watch.layers.registry.linked)
+		memcpy(out->layers_guid,
+		       pkm_lcs_internal_self_watch.layers.registry.guid,
+		       sizeof(out->layers_guid));
+	if (pkm_lcs_internal_self_watch.fallback.registry.linked)
+		memcpy(out->fallback_guid,
+		       pkm_lcs_internal_self_watch.fallback.registry.guid,
+		       sizeof(out->fallback_guid));
+}
+
+long pkm_lcs_internal_self_watch_arm(
+	u32 source_id, const u8 machine_root_guid[PKM_LCS_GUID_BYTES],
+	bool registry_present,
+	const u8 registry_guid[PKM_LCS_GUID_BYTES],
+	bool layers_present, const u8 layers_guid[PKM_LCS_GUID_BYTES],
+	struct pkm_lcs_internal_self_watch_arm_result *result_out)
+{
+	long ret;
+
+	if (result_out)
+		memset(result_out, 0, sizeof(*result_out));
+	if (!source_id || !pkm_lcs_internal_watch_guid_valid(machine_root_guid))
+		return -EINVAL;
+	if (registry_present &&
+	    !pkm_lcs_internal_watch_guid_valid(registry_guid))
+		return -EINVAL;
+	if (layers_present && !pkm_lcs_internal_watch_guid_valid(layers_guid))
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_watch_registry_lock);
+	pkm_lcs_internal_self_watch_disarm_locked();
+
+	if (registry_present && layers_present) {
+		ret = pkm_lcs_internal_watch_add_locked(
+			&pkm_lcs_internal_self_watch.registry, source_id,
+			registry_guid,
+			PKM_LCS_INTERNAL_WATCH_SELF_CONFIGURATION);
+		if (ret)
+			goto out_rollback;
+		ret = pkm_lcs_internal_watch_add_locked(
+			&pkm_lcs_internal_self_watch.layers, source_id,
+			layers_guid, PKM_LCS_INTERNAL_WATCH_LAYER_METADATA);
+		if (ret)
+			goto out_rollback;
+		pkm_lcs_internal_self_watch.mode =
+			PKM_LCS_INTERNAL_SELF_WATCH_TARGETED;
+		pkm_lcs_internal_self_watch.watch_count = 2;
+	} else {
+		ret = pkm_lcs_internal_watch_add_locked(
+			&pkm_lcs_internal_self_watch.fallback, source_id,
+			machine_root_guid,
+			PKM_LCS_INTERNAL_WATCH_MACHINE_ROOT_FALLBACK);
+		if (ret)
+			goto out_rollback;
+		pkm_lcs_internal_self_watch.mode =
+			PKM_LCS_INTERNAL_SELF_WATCH_MACHINE_ROOT_FALLBACK;
+		pkm_lcs_internal_self_watch.watch_count = 1;
+	}
+
+	pkm_lcs_internal_self_watch.source_id = source_id;
+	pkm_lcs_internal_self_watch_fill_result_locked(result_out);
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
+	return 0;
+
+out_rollback:
+	pkm_lcs_internal_self_watch_disarm_locked();
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
+	return ret;
+}
+
+void pkm_lcs_internal_self_watch_disarm(void)
+{
+	mutex_lock(&pkm_lcs_watch_registry_lock);
+	pkm_lcs_internal_self_watch_disarm_locked();
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
 }
 
 static long pkm_lcs_key_fd_check_ioctl_common(
@@ -6188,7 +6428,7 @@ long pkm_lcs_kunit_key_fd_watch_registry_snapshot(
 	int fd, struct pkm_lcs_key_fd_watch_registry_snapshot *out)
 {
 	struct pkm_lcs_subtree_watch_entry *subtree;
-	struct pkm_lcs_key_fd *cursor;
+	struct pkm_lcs_watch_registry_entry *entry;
 	struct pkm_lcs_key_fd *key_fd;
 	struct fd held;
 	u32 hash;
@@ -6212,9 +6452,9 @@ long pkm_lcs_kunit_key_fd_watch_registry_snapshot(
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	hash = pkm_lcs_guid_hash(key_fd->key_guid);
-	hash_for_each_possible(pkm_lcs_watch_map, cursor,
-			       watch_registry_node, hash) {
-		if (pkm_lcs_guid_equal(cursor->key_guid, key_fd->key_guid))
+	hash_for_each_possible(pkm_lcs_watch_map, entry, link, hash) {
+		if (entry->kind == PKM_LCS_WATCH_REGISTRY_KEY_FD &&
+		    pkm_lcs_guid_equal(entry->guid, key_fd->key_guid))
 			out->direct_watchers++;
 	}
 	subtree = pkm_lcs_subtree_watch_find_locked(key_fd->key_guid);
@@ -6223,6 +6463,33 @@ long pkm_lcs_kunit_key_fd_watch_registry_snapshot(
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 
 	fdput(held);
+	return 0;
+}
+
+long pkm_lcs_kunit_internal_self_watch_snapshot(
+	struct pkm_lcs_internal_self_watch_snapshot *out)
+{
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	mutex_lock(&pkm_lcs_watch_registry_lock);
+	out->source_id = pkm_lcs_internal_self_watch.source_id;
+	out->watch_count = pkm_lcs_internal_self_watch.watch_count;
+	out->mode = pkm_lcs_internal_self_watch.mode;
+	if (pkm_lcs_internal_self_watch.registry.registry.linked)
+		memcpy(out->registry_guid,
+		       pkm_lcs_internal_self_watch.registry.registry.guid,
+		       sizeof(out->registry_guid));
+	if (pkm_lcs_internal_self_watch.layers.registry.linked)
+		memcpy(out->layers_guid,
+		       pkm_lcs_internal_self_watch.layers.registry.guid,
+		       sizeof(out->layers_guid));
+	if (pkm_lcs_internal_self_watch.fallback.registry.linked)
+		memcpy(out->fallback_guid,
+		       pkm_lcs_internal_self_watch.fallback.registry.guid,
+		       sizeof(out->fallback_guid));
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
 	return 0;
 }
 #endif

@@ -1748,6 +1748,7 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 		.expect_layers_refresh = true,
 	};
 	struct pkm_lcs_source_bootstrap_refresh_result result = { };
+	struct pkm_lcs_internal_self_watch_snapshot watch_snapshot = { };
 	struct pkm_lcs_runtime_limits snapshot = { };
 	struct pkm_lcs_rsi_layer_view layers[3] = { };
 	char names[64] = { };
@@ -1761,6 +1762,7 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 	put_unaligned_le32(1000U, data);
 	pkm_kmes_kunit_reset_all();
 	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_internal_self_watch_disarm();
 	pkm_lcs_kunit_reset_layer_table();
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
@@ -1779,11 +1781,30 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 	KUNIT_EXPECT_EQ(test, script.result, 0);
 	KUNIT_EXPECT_EQ(test, script.reads, 11U);
 	KUNIT_EXPECT_EQ(test, script.writes, 11U);
+	KUNIT_EXPECT_TRUE(test, result.registry_root_present);
 	KUNIT_EXPECT_EQ(test, result.self_config.applied_count, 1U);
 	KUNIT_EXPECT_TRUE(test, result.layers_root_present);
 	KUNIT_EXPECT_EQ(test, result.layers.enumerated_child_count, 1U);
 	KUNIT_EXPECT_EQ(test, result.layers.refreshed_child_count, 1U);
 	KUNIT_EXPECT_EQ(test, result.layers.effective_changed_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.self_watch.mode,
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
+	KUNIT_EXPECT_EQ(test, result.self_watch.watch_count, 2U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.self_watch.registry_guid, registry_guid,
+			       sizeof(registry_guid)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.self_watch.layers_guid, layers_root_guid,
+			       sizeof(layers_root_guid)),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_internal_self_watch_snapshot(
+				&watch_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.mode,
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 2U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
 	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms, 1000U);
 	KUNIT_ASSERT_EQ(test,
@@ -1800,6 +1821,7 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 	pkm_lcs_kunit_reset_source_table();
 	pkm_lcs_kunit_reset_layer_table();
 	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_internal_self_watch_disarm();
 	kacs_rust_token_drop(token);
 }
 
@@ -1877,6 +1899,7 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 		.expect_layers_refresh = true,
 	};
 	struct pkm_lcs_runtime_limits snapshot = { };
+	struct pkm_lcs_internal_self_watch_snapshot watch_snapshot = { };
 	struct pkm_lcs_source_table_snapshot table = { };
 	struct pkm_lcs_rsi_layer_view layers[3] = { };
 	char names[64] = { };
@@ -1890,6 +1913,7 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 	put_unaligned_le32(1000U, data);
 	pkm_kmes_kunit_reset_all();
 	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_internal_self_watch_disarm();
 	pkm_lcs_kunit_reset_source_table();
 	pkm_lcs_kunit_reset_layer_table();
 	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
@@ -1922,6 +1946,22 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 	KUNIT_EXPECT_EQ(test, table.active_count, 1U);
 	KUNIT_EXPECT_TRUE(test, table.sequence_initialized);
 	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_internal_self_watch_snapshot(
+				&watch_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.mode,
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 2U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(watch_snapshot.registry_guid, registry_guid,
+			       sizeof(registry_guid)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(watch_snapshot.layers_guid, layers_root_guid,
+			       sizeof(layers_root_guid)),
+			0);
+	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_source_layer_snapshot_copy(
 				layers, ARRAY_SIZE(layers), names, sizeof(names),
 				&count),
@@ -1935,6 +1975,7 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 	pkm_lcs_kunit_reset_source_table();
 	pkm_lcs_kunit_reset_layer_table();
 	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_internal_self_watch_disarm();
 	kacs_rust_token_drop(token);
 }
 
@@ -1947,11 +1988,13 @@ static void pkm_lcs_kunit_source_registration_bootstrap_ignores_non_machine(
 	struct reg_src_hive_entry hive;
 	struct reg_src_register_args args;
 	struct pkm_lcs_source_fd_snapshot fd_snapshot = { };
+	struct pkm_lcs_internal_self_watch_snapshot watch_snapshot = { };
 	struct pkm_lcs_runtime_limits snapshot = { };
 	struct file file = { };
 	const void *token;
 
 	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_internal_self_watch_disarm();
 	pkm_lcs_kunit_reset_source_table();
 	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
 							KACS_SE_TCB_PRIVILEGE);
@@ -1970,6 +2013,13 @@ static void pkm_lcs_kunit_source_registration_bootstrap_ignores_non_machine(
 	pkm_lcs_kunit_source_fd_snapshot(&file, &fd_snapshot);
 	KUNIT_EXPECT_EQ(test, fd_snapshot.state, PKM_LCS_SOURCE_FD_ACTIVE);
 	KUNIT_EXPECT_EQ(test, fd_snapshot.queued_request_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_internal_self_watch_snapshot(
+				&watch_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.mode,
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_DISARMED);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 0U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
 	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms,
 			PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT);
@@ -1977,6 +2027,7 @@ static void pkm_lcs_kunit_source_registration_bootstrap_ignores_non_machine(
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
 	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_internal_self_watch_disarm();
 	kacs_rust_token_drop(token);
 }
 
@@ -2005,6 +2056,116 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_bad_inputs_fail_closed(
 			pkm_lcs_source_bootstrap_refresh_machine_hive(
 				1, machine_root_guid, NULL),
 			(long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_internal_self_watch_arm_targeted_and_fallback(
+	struct kunit *test)
+{
+	static const u8 machine_root_guid[RSI_GUID_SIZE] = { 0xa1 };
+	static const u8 registry_guid[RSI_GUID_SIZE] = { 0xa2 };
+	static const u8 layers_guid[RSI_GUID_SIZE] = { 0xa3 };
+	static const u8 replacement_root_guid[RSI_GUID_SIZE] = { 0xa4 };
+	struct pkm_lcs_internal_self_watch_arm_result result = { };
+	struct pkm_lcs_internal_self_watch_snapshot snapshot = { };
+
+	pkm_lcs_internal_self_watch_disarm();
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				7, machine_root_guid, true, registry_guid, true,
+				layers_guid, &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.source_id, 7U);
+	KUNIT_EXPECT_EQ(test, result.mode,
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
+	KUNIT_EXPECT_EQ(test, result.watch_count, 2U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.registry_guid, registry_guid,
+			       sizeof(registry_guid)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.layers_guid, layers_guid,
+			       sizeof(layers_guid)),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				8, replacement_root_guid, true, registry_guid,
+				false, NULL, &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.source_id, 8U);
+	KUNIT_EXPECT_EQ(test, result.mode,
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_MACHINE_ROOT_FALLBACK);
+	KUNIT_EXPECT_EQ(test, result.watch_count, 1U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.fallback_guid, replacement_root_guid,
+			       sizeof(replacement_root_guid)),
+			0);
+	KUNIT_EXPECT_FALSE(test,
+			   memchr_inv(result.registry_guid, 0,
+				      sizeof(result.registry_guid)));
+	KUNIT_EXPECT_FALSE(test,
+			   memchr_inv(result.layers_guid, 0,
+				      sizeof(result.layers_guid)));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_internal_self_watch_snapshot(&snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.source_id, 8U);
+	KUNIT_EXPECT_EQ(test, snapshot.mode,
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_MACHINE_ROOT_FALLBACK);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_count, 1U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.fallback_guid, replacement_root_guid,
+			       sizeof(replacement_root_guid)),
+			0);
+	pkm_lcs_internal_self_watch_disarm();
+}
+
+static void pkm_lcs_kunit_internal_self_watch_bad_inputs_fail_closed(
+	struct kunit *test)
+{
+	static const u8 machine_root_guid[RSI_GUID_SIZE] = { 0xb1 };
+	static const u8 registry_guid[RSI_GUID_SIZE] = { 0xb2 };
+	static const u8 layers_guid[RSI_GUID_SIZE] = { 0xb3 };
+	static const u8 nil_guid[RSI_GUID_SIZE] = { 0 };
+	struct pkm_lcs_internal_self_watch_snapshot snapshot = { };
+
+	pkm_lcs_internal_self_watch_disarm();
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				9, machine_root_guid, true, registry_guid, true,
+				layers_guid, NULL),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				0, machine_root_guid, true, registry_guid, true,
+				layers_guid, NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				9, nil_guid, true, registry_guid, true,
+				layers_guid, NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				9, machine_root_guid, true, nil_guid, true,
+				layers_guid, NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				9, machine_root_guid, true, registry_guid, true,
+				nil_guid, NULL),
+			(long)-EINVAL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_internal_self_watch_snapshot(&snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.source_id, 9U);
+	KUNIT_EXPECT_EQ(test, snapshot.mode,
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_count, 2U);
+	pkm_lcs_internal_self_watch_disarm();
 }
 
 static void pkm_lcs_kunit_source_bound_transaction_counter_limits(
@@ -40622,6 +40783,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_registration_bootstrap_ignores_non_machine),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_bootstrap_refresh_bad_inputs_fail_closed),
+	KUNIT_CASE(
+		pkm_lcs_kunit_internal_self_watch_arm_targeted_and_fallback),
+	KUNIT_CASE(
+		pkm_lcs_kunit_internal_self_watch_bad_inputs_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_limits),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_source_down),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_bad_inputs),

@@ -7371,23 +7371,25 @@ out_layers:
 	return ret;
 }
 
-long pkm_lcs_runtime_limits_refresh_self_config_from_machine_hive(
+long pkm_lcs_self_config_registry_root_discover_from_machine_hive(
 	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
-	struct pkm_lcs_self_config_apply_plan *result_out)
+	bool *present_out, u8 registry_guid_out[RSI_GUID_SIZE])
 {
 	static const struct pkm_lcs_path_component_view registry_path[] = {
 		{ .name = "Machine", .name_len = sizeof("Machine") - 1 },
 		{ .name = "System", .name_len = sizeof("System") - 1 },
 		{ .name = "Registry", .name_len = sizeof("Registry") - 1 },
 	};
-	struct pkm_lcs_self_config_apply_plan empty_plan = { };
 	struct pkm_lcs_resolved_key_path registry = { };
 	struct pkm_lcs_layer_snapshot layers = { };
 	long ret;
 
-	if (result_out)
-		*result_out = empty_plan;
-	if (!source_id || !machine_root_guid)
+	if (present_out)
+		*present_out = false;
+	if (registry_guid_out)
+		memset(registry_guid_out, 0, RSI_GUID_SIZE);
+	if (!source_id || !machine_root_guid || !present_out ||
+	    !registry_guid_out)
 		return -EINVAL;
 
 	ret = pkm_lcs_source_layer_snapshot_acquire(&layers);
@@ -7405,13 +7407,36 @@ long pkm_lcs_runtime_limits_refresh_self_config_from_machine_hive(
 	if (ret)
 		goto out_layers;
 
-	ret = pkm_lcs_runtime_limits_refresh_self_config_from_key(
-		source_id, registry.key_guid, result_out);
+	memcpy(registry_guid_out, registry.key_guid, RSI_GUID_SIZE);
+	*present_out = true;
 
 	pkm_lcs_resolved_key_path_destroy(&registry);
 out_layers:
 	pkm_lcs_source_layer_snapshot_release(&layers);
 	return ret;
+}
+
+long pkm_lcs_runtime_limits_refresh_self_config_from_machine_hive(
+	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_self_config_apply_plan *result_out)
+{
+	struct pkm_lcs_self_config_apply_plan empty_plan = { };
+	u8 registry_guid[RSI_GUID_SIZE] = { };
+	bool present = false;
+	long ret;
+
+	if (result_out)
+		*result_out = empty_plan;
+	if (!source_id || !machine_root_guid)
+		return -EINVAL;
+
+	ret = pkm_lcs_self_config_registry_root_discover_from_machine_hive(
+		source_id, machine_root_guid, &present, registry_guid);
+	if (ret || !present)
+		return ret;
+
+	return pkm_lcs_runtime_limits_refresh_self_config_from_key(
+		source_id, registry_guid, result_out);
 }
 
 long pkm_lcs_layer_metadata_root_discover_from_machine_hive(
@@ -7670,7 +7695,9 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 	struct pkm_lcs_source_bootstrap_refresh_result *result_out)
 {
 	struct pkm_lcs_source_bootstrap_refresh_result result = { };
+	u8 registry_guid[RSI_GUID_SIZE] = { };
 	u8 layers_root_guid[RSI_GUID_SIZE] = { };
+	bool registry_root_present = false;
 	bool layers_root_present = false;
 	long ret;
 
@@ -7679,10 +7706,19 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 	if (!source_id || !machine_root_guid || !result_out)
 		return -EINVAL;
 
-	ret = pkm_lcs_runtime_limits_refresh_self_config_from_machine_hive(
-		source_id, machine_root_guid, &result.self_config);
+	ret = pkm_lcs_self_config_registry_root_discover_from_machine_hive(
+		source_id, machine_root_guid, &registry_root_present,
+		registry_guid);
 	if (ret)
 		return ret;
+	result.registry_root_present = registry_root_present;
+
+	if (registry_root_present) {
+		ret = pkm_lcs_runtime_limits_refresh_self_config_from_key(
+			source_id, registry_guid, &result.self_config);
+		if (ret)
+			return ret;
+	}
 
 	ret = pkm_lcs_layer_metadata_root_discover_from_machine_hive(
 		source_id, machine_root_guid, &layers_root_present,
@@ -7697,6 +7733,13 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 		if (ret)
 			return ret;
 	}
+
+	ret = pkm_lcs_internal_self_watch_arm(
+		source_id, machine_root_guid, registry_root_present,
+		registry_guid, layers_root_present, layers_root_guid,
+		&result.self_watch);
+	if (ret)
+		return ret;
 
 	*result_out = result;
 	return 0;
