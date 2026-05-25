@@ -498,6 +498,16 @@ struct pkm_lcs_kunit_enum_children_source_script {
 	int result;
 };
 
+struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script {
+	struct file *file;
+	struct pkm_lcs_kunit_enum_children_source_script enum_children;
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script refresh;
+	bool expect_refresh;
+	u32 reads;
+	u32 writes;
+	int result;
+};
+
 struct pkm_lcs_kunit_symlink_follow_source_script {
 	struct file *file;
 	struct pkm_lcs_kunit_walk_source_step link_step;
@@ -637,6 +647,8 @@ pkm_lcs_kunit_blanket_tombstone_ioctl_source_thread(void *raw_script);
 static int pkm_lcs_kunit_delete_key_ioctl_source_thread(void *raw_script);
 static int pkm_lcs_kunit_hide_key_ioctl_source_thread(void *raw_script);
 static int pkm_lcs_kunit_enum_children_source_thread(void *raw_script);
+static int
+pkm_lcs_kunit_layer_metadata_refresh_all_source_thread(void *raw_script);
 static int pkm_lcs_kunit_symlink_follow_source_thread(void *raw_script);
 static int pkm_lcs_kunit_symlink_sequence_source_thread(void *raw_script);
 static int pkm_lcs_kunit_create_source_thread(void *raw_script);
@@ -7046,6 +7058,231 @@ static void pkm_lcs_kunit_layer_metadata_children_bad_inputs_fail_closed(
 
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_layer_metadata_children_enumerate_from_root(
+				1, layers_root_guid, NULL),
+			(long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_layer_metadata_refresh_all_publishes_children(
+	struct kunit *test)
+{
+	static const u8 layers_root_guid[RSI_GUID_SIZE] = { 0x75 };
+	static const u8 policy_guid[RSI_GUID_SIZE] = { 0x76 };
+	static const u8 owner_only_sd[] = {
+		0x01, 0x00, 0x00, 0x80,
+		0x14, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x01, 0x01, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x05,
+		0x12, 0x00, 0x00, 0x00,
+	};
+	struct pkm_lcs_layer_metadata_refresh_all_result result = { };
+	struct pkm_lcs_rsi_layer_view layers[3] = { };
+	struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script script = {
+		.enum_children = {
+			.expected_parent_guid = layers_root_guid,
+			.child_name = "Policy",
+			.layer_name = "base",
+			.child_guid = policy_guid,
+		},
+		.refresh = {
+			.expected_guid = policy_guid,
+			.name = "Policy",
+			.sd = owner_only_sd,
+			.sd_len = sizeof(owner_only_sd),
+			.precedence = 7,
+			.enabled = 1,
+			.precedence_present = true,
+			.enabled_present = true,
+		},
+		.expect_refresh = true,
+	};
+	char names[64] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_all_source_thread,
+		&script, "pkm-lcs-kunit-layers-refresh-all");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_layer_metadata_refresh_all_from_root(
+		1, layers_root_guid, &result);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
+	KUNIT_EXPECT_EQ(test, result.enumerated_child_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.refreshed_child_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.effective_changed_count, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 2U);
+	KUNIT_EXPECT_STREQ(test, layers[1].name, "Policy");
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 7U);
+	KUNIT_EXPECT_EQ(test, layers[1].enabled, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_layer_metadata_refresh_all_empty_noops(
+	struct kunit *test)
+{
+	static const u8 layers_root_guid[RSI_GUID_SIZE] = { 0x77 };
+	struct pkm_lcs_layer_metadata_refresh_all_result result = { };
+	struct pkm_lcs_rsi_layer_view layers[2] = { };
+	struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script script = {
+		.enum_children = {
+			.expected_parent_guid = layers_root_guid,
+			.child_name = "HiddenPolicy",
+			.layer_name = "base",
+			.hidden = true,
+		},
+	};
+	char names[16] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_all_source_thread,
+		&script, "pkm-lcs-kunit-layers-refresh-empty");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_layer_metadata_refresh_all_from_root(
+		1, layers_root_guid, &result);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, result.enumerated_child_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.refreshed_child_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.effective_changed_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_layer_metadata_refresh_all_respects_total_layer_cap(
+	struct kunit *test)
+{
+	static const u8 layers_root_guid[RSI_GUID_SIZE] = { 0x78 };
+	struct pkm_lcs_layer_metadata_refresh_all_result result = { };
+	struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script script = {
+		.enum_children = {
+			.expected_parent_guid = layers_root_guid,
+			.layer_name = "base",
+			.repeated_child_count = 16U,
+		},
+	};
+	struct pkm_lcs_runtime_limits limits = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_total_layers = 16U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_all_source_thread,
+		&script, "pkm-lcs-kunit-layers-refresh-cap");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_layer_metadata_refresh_all_from_root(
+		1, layers_root_guid, &result);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-ENOSPC);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, script.refresh.reads, 0U);
+	KUNIT_EXPECT_EQ(test, script.refresh.writes, 0U);
+	KUNIT_EXPECT_EQ(test, result.enumerated_child_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.refreshed_child_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.effective_changed_count, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(token);
+	pkm_lcs_runtime_limits_reset_defaults();
+}
+
+static void pkm_lcs_kunit_layer_metadata_refresh_all_bad_inputs_fail_closed(
+	struct kunit *test)
+{
+	static const u8 layers_root_guid[RSI_GUID_SIZE] = { 0x79 };
+	struct pkm_lcs_layer_metadata_refresh_all_result result = {
+		.enumerated_child_count = 99U,
+		.refreshed_child_count = 99U,
+		.effective_changed_count = 99U,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_metadata_refresh_all_from_root(
+				0, layers_root_guid, &result),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, result.enumerated_child_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.refreshed_child_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.effective_changed_count, 0U);
+
+	result.enumerated_child_count = 99U;
+	result.refreshed_child_count = 99U;
+	result.effective_changed_count = 99U;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_metadata_refresh_all_from_root(
+				1, NULL, &result),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, result.enumerated_child_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.refreshed_child_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.effective_changed_count, 0U);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_metadata_refresh_all_from_root(
 				1, layers_root_guid, NULL),
 			(long)-EINVAL);
 }
@@ -23738,6 +23975,61 @@ static int pkm_lcs_kunit_enum_children_source_thread(void *raw_script)
 	return 0;
 }
 
+static int pkm_lcs_kunit_layer_metadata_refresh_all_source_thread(
+	void *raw_script)
+{
+	struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script *script =
+		raw_script;
+	u8 request[256];
+	int ret;
+
+	if (!script || !script->file) {
+		if (script)
+			script->result = -EINVAL;
+		return -EINVAL;
+	}
+
+	script->enum_children.file = script->file;
+	ret = pkm_lcs_kunit_enum_children_source_thread(&script->enum_children);
+	script->reads = script->enum_children.reads;
+	script->writes = script->enum_children.writes;
+	if (ret)
+		goto out;
+	if (!script->expect_refresh)
+		goto out;
+
+	script->refresh.file = script->file;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_read_key(
+		&script->refresh, request, sizeof(request));
+	if (ret)
+		goto out_refresh;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
+		&script->refresh, request, sizeof(request), "Precedence",
+		script->refresh.precedence_present,
+		script->refresh.precedence);
+	if (ret)
+		goto out_refresh;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
+		&script->refresh, request, sizeof(request), "Enabled",
+		script->refresh.enabled_present, script->refresh.enabled);
+	if (ret)
+		goto out_refresh;
+	if (pkm_lcs_kunit_layer_metadata_refresh_stops_after_enabled(
+		    &script->refresh))
+		goto out_refresh;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_owner_query(
+		&script->refresh, request, sizeof(request));
+
+out_refresh:
+	script->reads += script->refresh.reads;
+	script->writes += script->refresh.writes;
+out:
+	script->result = ret;
+	while (!kthread_should_stop())
+		msleep(1);
+	return ret;
+}
+
 static ssize_t pkm_lcs_kunit_delete_key_ioctl_source_read(
 	struct pkm_lcs_kunit_delete_key_ioctl_source_script *script,
 	u8 *request, size_t request_len)
@@ -40101,6 +40393,13 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_layer_metadata_children_respects_total_layer_cap),
 	KUNIT_CASE(
 		pkm_lcs_kunit_layer_metadata_children_bad_inputs_fail_closed),
+	KUNIT_CASE(
+		pkm_lcs_kunit_layer_metadata_refresh_all_publishes_children),
+	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_refresh_all_empty_noops),
+	KUNIT_CASE(
+		pkm_lcs_kunit_layer_metadata_refresh_all_respects_total_layer_cap),
+	KUNIT_CASE(
+		pkm_lcs_kunit_layer_metadata_refresh_all_bad_inputs_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_runtime_request_timeout_uses_snapshot),
 	KUNIT_CASE(pkm_lcs_kunit_runtime_transaction_timeout_uses_snapshot),
 	KUNIT_CASE(pkm_lcs_kunit_runtime_symlink_depth_uses_snapshot),

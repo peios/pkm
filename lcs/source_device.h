@@ -315,6 +315,12 @@ struct pkm_lcs_layer_metadata_child_list {
 	u32 child_count;
 };
 
+struct pkm_lcs_layer_metadata_refresh_all_result {
+	u32 enumerated_child_count;
+	u32 refreshed_child_count;
+	u32 effective_changed_count;
+};
+
 struct pkm_lcs_path_validation_result {
 	u32 component_count;
 	bool used_forward_separator;
@@ -624,6 +630,9 @@ void pkm_lcs_layer_metadata_child_list_destroy(
 long pkm_lcs_layer_metadata_children_enumerate_from_root(
 	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_layer_metadata_child_list *children_out);
+long pkm_lcs_layer_metadata_refresh_all_from_root(
+	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_layer_metadata_refresh_all_result *result_out);
 u32 pkm_lcs_runtime_request_timeout_ms(void);
 u32 pkm_lcs_runtime_transaction_timeout_ms(void);
 u32 pkm_lcs_runtime_symlink_depth_limit(void);

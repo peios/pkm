@@ -7467,6 +7467,94 @@ out_layers:
 	return ret;
 }
 
+static long pkm_lcs_layer_metadata_refresh_all_admit_children(
+	const struct pkm_lcs_layer_metadata_child_list *children,
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	u32 non_base_count = 0;
+	u32 i;
+
+	if (!children || !limits)
+		return -EINVAL;
+
+	for (i = 0; i < children->child_count; i++) {
+		bool is_base = false;
+		long ret;
+
+		ret = pkm_lcs_layer_name_casefold_equal(
+			children->children[i].name, children->children[i].name_len,
+			pkm_lcs_base_layer_name,
+			sizeof(pkm_lcs_base_layer_name) - 1, &is_base);
+		if (ret)
+			return ret;
+		if (is_base)
+			continue;
+		non_base_count++;
+		if (non_base_count >= limits->max_total_layers)
+			return -ENOSPC;
+	}
+
+	return 0;
+}
+
+long pkm_lcs_layer_metadata_refresh_all_from_root(
+	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_layer_metadata_refresh_all_result *result_out)
+{
+	static const char * const path_prefix[] = {
+		"Machine", "System", "Registry", "Layers",
+	};
+	struct pkm_lcs_layer_metadata_refresh_all_result result = { };
+	struct pkm_lcs_layer_metadata_child_list children = { };
+	struct pkm_lcs_runtime_limits active_limits = { };
+	u32 i;
+	long ret;
+
+	if (result_out)
+		memset(result_out, 0, sizeof(*result_out));
+	if (!source_id || !layers_root_guid || !result_out)
+		return -EINVAL;
+
+	ret = pkm_lcs_runtime_limits_snapshot(&active_limits);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_layer_metadata_children_enumerate_from_root(
+		source_id, layers_root_guid, &children);
+	if (ret)
+		goto out_children;
+	result.enumerated_child_count = children.child_count;
+
+	ret = pkm_lcs_layer_metadata_refresh_all_admit_children(
+		&children, &active_limits);
+	if (ret)
+		goto out_children;
+
+	for (i = 0; i < children.child_count; i++) {
+		const char *resolved_path[] = {
+			path_prefix[0], path_prefix[1], path_prefix[2],
+			path_prefix[3], children.children[i].name,
+		};
+		bool effective_changed = false;
+
+		ret = pkm_lcs_key_path_refresh_layer_metadata_result(
+			source_id, children.children[i].guid, resolved_path,
+			ARRAY_SIZE(resolved_path), &effective_changed);
+		if (ret)
+			goto out_children;
+		result.refreshed_child_count++;
+		if (effective_changed)
+			result.effective_changed_count++;
+	}
+
+	*result_out = result;
+	ret = 0;
+
+out_children:
+	pkm_lcs_layer_metadata_child_list_destroy(&children);
+	return ret;
+}
+
 static long pkm_lcs_publish_open_key_for_token(
 	const void *token, u32 source_id, const u8 key_guid[RSI_GUID_SIZE],
 	const u8 *sd, size_t sd_len, u32 desired_access,
