@@ -587,8 +587,10 @@ struct pkm_lcs_kunit_symlink_sequence_source_script {
 	struct file *file;
 	const struct pkm_lcs_kunit_symlink_sequence_op *ops;
 	u32 op_count;
+	u32 reset_limits_after_write_index;
 	u32 reads;
 	u32 writes;
+	bool reset_limits_after_write;
 	int result;
 };
 
@@ -12442,6 +12444,105 @@ static void pkm_lcs_kunit_key_fd_query_key_info_success(struct kunit *test)
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_query_key_info_retains_runtime_limits(
+	struct kunit *test)
+{
+	enum { LONG_NAME_LEN = 300 };
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x63 },
+	};
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x64 };
+	static const u8 value_data[] = { 1 };
+	char child_name[LONG_NAME_LEN + 1];
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_query_key_info_args args = {
+		.name_len = 32,
+	};
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_kunit_read_key_source_script read_key = {
+		.expected_guid = ancestors[1],
+		.name = "SourceName",
+	};
+	struct pkm_lcs_kunit_enum_children_source_script enum_children = {
+		.expected_parent_guid = ancestors[1],
+		.child_name = child_name,
+		.child_guid = child_guid,
+		.sequence = 0,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op ops_seq[] = {
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_READ_KEY,
+			.read_key = &read_key,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &enum_children,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_QUERY_DEFAULT,
+			.query_guid = ancestors[1],
+			.query_data = value_data,
+			.query_data_len = sizeof(value_data),
+			.query_value_type = REG_BINARY,
+			.query_all = true,
+		},
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = ops_seq,
+		.op_count = ARRAY_SIZE(ops_seq),
+		.reset_limits_after_write = true,
+		.reset_limits_after_write_index = 0,
+	};
+	u8 name[32] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	memset(child_name, 'C', LONG_NAME_LEN);
+	child_name[LONG_NAME_LEN] = '\0';
+	args.name_ptr = (u64)(unsigned long)name;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = LONG_NAME_LEN;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, READ_CONTROL, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+			   &script, "pkm-lcs-kunit-query-info-limits");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_key_info((int)fd, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+	KUNIT_EXPECT_EQ(test, args.max_subkey_name_len, (u32)LONG_NAME_LEN);
+	KUNIT_EXPECT_EQ(test, args.value_count, 1U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
 	kacs_rust_token_drop(token);
 }
 
@@ -27101,7 +27202,7 @@ static int pkm_lcs_kunit_symlink_sequence_source_thread(void *raw_script)
 	struct pkm_lcs_kunit_symlink_sequence_source_script *script =
 		raw_script;
 	u8 request[128];
-	u8 response[256];
+	u8 response[1024];
 	u32 i;
 	int ret = 0;
 
@@ -27142,6 +27243,9 @@ static int pkm_lcs_kunit_symlink_sequence_source_thread(void *raw_script)
 		}
 		if (ret)
 			break;
+		if (script->reset_limits_after_write &&
+		    i == script->reset_limits_after_write_index)
+			pkm_lcs_runtime_limits_reset_defaults();
 	}
 
 	script->result = ret;
@@ -44115,6 +44219,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_copyout_fault),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_malformed_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_success),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_query_key_info_retains_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_erange_probe),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_fails_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_copyout_fault),

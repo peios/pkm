@@ -1804,6 +1804,7 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	struct pkm_lcs_rsi_enum_children_info_summary enum_summary = { };
 	struct pkm_lcs_rsi_query_values_info_summary values_summary = { };
 	struct pkm_lcs_rsi_read_key_result read_key = { };
+	struct pkm_lcs_runtime_limits limits;
 	const char *key_name;
 	size_t key_name_len;
 	u64 hive_generation = 0;
@@ -1834,6 +1835,7 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	key_name = pkm_lcs_key_fd_leaf_name(key_fd, &key_name_len);
 	if (!key_name || key_name_len > U32_MAX)
 		return -EIO;
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
@@ -1846,21 +1848,21 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	pkm_lcs_source_response_frame_init(&enum_frame);
 	pkm_lcs_source_response_frame_init(&values_frame);
 
-	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
-		key_fd->source_id, 0, key_fd->key_guid,
-		pkm_lcs_runtime_request_timeout_ms(), &read_frame,
+	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, 0, key_fd->key_guid, &limits,
+		limits.request_timeout_ms, &read_frame,
 		&read_response, NULL);
 	if (ret)
 		goto out_frames;
-	ret = pkm_lcs_rsi_materialize_read_key_response(
+	ret = pkm_lcs_rsi_materialize_read_key_response_with_limits(
 		read_frame.data, read_frame.len, read_response.request_id,
-		&read_key);
+		&limits, &read_key);
 	if (ret)
 		goto out_frames;
 
-	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
-		key_fd->source_id, 0, key_fd->key_guid,
-		pkm_lcs_runtime_request_timeout_ms(), &enum_frame,
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, 0, key_fd->key_guid, &limits,
+		limits.request_timeout_ms, &enum_frame,
 		&enum_response, NULL);
 	if (ret)
 		goto out_frames;
@@ -1871,9 +1873,9 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	if (ret)
 		goto out_frames;
 
-	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, 0, key_fd->key_guid, "", 0, true,
-		pkm_lcs_runtime_request_timeout_ms(), &values_frame,
+		&limits, limits.request_timeout_ms, &values_frame,
 		&values_response, NULL);
 	if (ret)
 		goto out_frames;
@@ -3477,6 +3479,7 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_query_values_batch_result result = { };
 	struct pkm_lcs_rsi_query_values_batch_result written = { };
+	struct pkm_lcs_runtime_limits limits;
 	u64 next_sequence = 0;
 	u64 txn_id = 0;
 	u64 buf_ptr;
@@ -3510,6 +3513,7 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 							      &txn_id);
 	if (ret)
 		return ret;
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
@@ -3519,9 +3523,9 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
-	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, "", 0, true,
-		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
+		&limits, limits.request_timeout_ms, &frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -3601,6 +3605,7 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_enum_value_result result = { };
+	struct pkm_lcs_runtime_limits limits;
 	const u8 *name;
 	const u8 *data;
 	u64 next_sequence = 0;
@@ -3643,6 +3648,7 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 							      &txn_id);
 	if (ret)
 		return ret;
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
@@ -3652,9 +3658,9 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
-	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, "", 0, true,
-		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
+		&limits, limits.request_timeout_ms, &frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -3731,6 +3737,7 @@ static void pkm_lcs_key_fd_enum_subkey_reset_args(
 static long pkm_lcs_key_fd_enum_subkey_read_metadata(
 	struct pkm_lcs_key_fd *key_fd, u64 txn_id, u64 next_sequence,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	const u8 child_guid[RSI_GUID_SIZE],
 	struct reg_enum_subkey_args *args)
 {
@@ -3745,25 +3752,28 @@ static long pkm_lcs_key_fd_enum_subkey_read_metadata(
 	struct pkm_lcs_rsi_read_key_result read_key = { };
 	long ret;
 
+	if (!limits)
+		return -EINVAL;
+
 	pkm_lcs_source_response_frame_init(&read_frame);
 	pkm_lcs_source_response_frame_init(&enum_frame);
 	pkm_lcs_source_response_frame_init(&values_frame);
 
-	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
-		key_fd->source_id, txn_id, child_guid,
-		pkm_lcs_runtime_request_timeout_ms(), &read_frame,
+	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, txn_id, child_guid, limits,
+		limits->request_timeout_ms, &read_frame,
 		&read_response, NULL);
 	if (ret)
 		goto out_frames;
-	ret = pkm_lcs_rsi_materialize_read_key_response(
+	ret = pkm_lcs_rsi_materialize_read_key_response_with_limits(
 		read_frame.data, read_frame.len, read_response.request_id,
-		&read_key);
+		limits, &read_key);
 	if (ret)
 		goto out_frames;
 
-	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
-		key_fd->source_id, txn_id, child_guid,
-		pkm_lcs_runtime_request_timeout_ms(), &enum_frame,
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, txn_id, child_guid, limits,
+		limits->request_timeout_ms, &enum_frame,
 		&enum_response, NULL);
 	if (ret)
 		goto out_frames;
@@ -3774,9 +3784,9 @@ static long pkm_lcs_key_fd_enum_subkey_read_metadata(
 	if (ret)
 		goto out_frames;
 
-	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, txn_id, child_guid, "", 0, true,
-		pkm_lcs_runtime_request_timeout_ms(), &values_frame,
+		limits, limits->request_timeout_ms, &values_frame,
 		&values_response, NULL);
 	if (ret)
 		goto out_frames;
@@ -3807,6 +3817,7 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_enum_subkey_result result = { };
+	struct pkm_lcs_runtime_limits limits;
 	const u8 *name;
 	u64 next_sequence = 0;
 	u64 txn_id = 0;
@@ -3842,6 +3853,7 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 							      &txn_id);
 	if (ret)
 		return ret;
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
@@ -3851,9 +3863,9 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
-	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
-		key_fd->source_id, txn_id, key_fd->key_guid,
-		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, txn_id, key_fd->key_guid, &limits,
+		limits.request_timeout_ms, &frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -3887,7 +3899,7 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 	args->name_len = result.name_len;
 	ret = pkm_lcs_key_fd_enum_subkey_read_metadata(
 		key_fd, txn_id, next_sequence, layer_snapshot.layers,
-		layer_snapshot.layer_count, result.child_guid, args);
+		layer_snapshot.layer_count, &limits, result.child_guid, args);
 	if (ret)
 		goto out_frame;
 
