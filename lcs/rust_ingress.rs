@@ -5,7 +5,7 @@ use core::{slice, str};
 
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
-    apply_config_value, casefold_eq, classify_hive_route,
+    apply_config_value, backup_restore_fd_mode_linux_errno, casefold_eq, classify_hive_route,
     current_user_sid_component_from_binary_sid, find_config_range,
     for_each_effective_value, for_each_effective_value_watch_event,
     for_each_routable_path_component,
@@ -15,7 +15,7 @@ use crate::lcs_core::{
     layer_target_admission_linux_errno, parse_rsi_delete_layer_success_response_payload,
     parse_rsi_lookup_success_response_payload, parse_rsi_enum_children_success_response_payload,
     parse_rsi_query_values_success_response_payload, parse_rsi_read_key_success_response_payload,
-    parse_rsi_request_header, plan_key_guid_assignment, plan_key_open_audit_record,
+    parse_rsi_request_header, plan_backup_restore_fd_mode, plan_key_guid_assignment, plan_key_open_audit_record,
     plan_source_validation_failure_audit_record, plan_layer_publication,
     plan_layer_target_admission, plan_registry_get_security,
     plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
@@ -59,7 +59,7 @@ use crate::lcs_core::{
     write_rsi_lookup_request_frame, write_rsi_query_values_request_frame,
     write_rsi_read_key_request_frame, write_rsi_set_blanket_tombstone_request_frame,
     write_rsi_set_value_request_frame, write_rsi_write_key_request_frame,
-    BlanketTombstoneEntry, CurrentUserRewrite,
+    BackupRestoreFdOperation, BlanketTombstoneEntry, CurrentUserRewrite,
     HiveRouteOutcome, HiveView, KeyFdOpenView, KeyGuidAssignmentRequest, KeyWatchState,
     LayerOwnerSelectionInput, LayerOwnerSource, LayerPublicationInput, LayerResolutionContext,
     LayerTargetAdmissionInput, LayerView,
@@ -6175,6 +6175,26 @@ pub unsafe extern "C" fn lcs_rust_key_fd_fixed_ioctl_access_gate(
     match plan_registry_ioctl_fixed_fd_access_gate(granted_access, ioctl_number) {
         Ok(Some(plan)) => ioctl_access_gate_return(plan),
         Ok(None) | Err(_) => LinuxErrno::Einval.negated_return() as c_int,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_backup_restore_fd_mode_gate(
+    operation: u32,
+    fd_readable: u8,
+    fd_writable: u8,
+) -> c_int {
+    let operation = match operation {
+        0 => BackupRestoreFdOperation::BackupOutput,
+        1 => BackupRestoreFdOperation::RestoreInput,
+        _ => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+
+    let plan =
+        plan_backup_restore_fd_mode(operation, fd_readable != 0, fd_writable != 0);
+    match backup_restore_fd_mode_linux_errno(&plan) {
+        Some(errno) => errno.negated_return() as c_int,
+        None => 0,
     }
 }
 

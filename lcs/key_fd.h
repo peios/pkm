@@ -241,6 +241,10 @@ long pkm_lcs_kunit_key_fd_delete_key_for_token(
 long pkm_lcs_kunit_key_fd_hide_key_for_token(
 	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_hide_key_args *args);
+long pkm_lcs_kunit_key_fd_backup_for_token(
+	int fd, const void *token, const struct reg_backup_args *args);
+long pkm_lcs_kunit_key_fd_restore_for_token(
+	int fd, const void *token, const struct reg_restore_args *args);
 long pkm_lcs_kunit_key_fd_flush(int fd);
 long pkm_lcs_kunit_key_fd_notify(int fd, const struct reg_notify_args *args);
 long pkm_lcs_kunit_key_fd_queue_watch_event(int fd, u32 event_type,

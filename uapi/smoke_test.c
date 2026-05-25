@@ -333,6 +333,7 @@ int main(void)
 	 * compiler resolves real symbols, not merely the #include lines. */
 	return (int)(SYS_KACS_OPEN
 		     + KACS_TOKEN_QUERY
+		     + KACS_SE_BACKUP_PRIVILEGE
 		     + KACS_SD_DACL_PRESENT
 		     + KMES_ORIGIN_KACS
 		     + SYS_REG_OPEN_KEY

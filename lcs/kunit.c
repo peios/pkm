@@ -17769,6 +17769,169 @@ static void pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static int pkm_lcs_kunit_external_fd(unsigned int flags)
+{
+	return anon_inode_getfd("lcs-external", &pkm_lcs_kunit_non_key_fops,
+				NULL, flags | O_CLOEXEC);
+}
+
+static void pkm_lcs_kunit_key_fd_backup_admission(struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	struct reg_backup_args args = { };
+	const void *token;
+	long key_fd;
+	int output_fd;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_BACKUP_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_QUERY_VALUE);
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	output_fd = pkm_lcs_kunit_external_fd(O_WRONLY);
+	KUNIT_ASSERT_TRUE(test, output_fd >= 0);
+	args.output_fd = output_fd;
+
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &before));
+	KUNIT_EXPECT_EQ(test, before.privileges_used & KACS_SE_BACKUP_PRIVILEGE,
+			0ULL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_backup_for_token(
+				(int)key_fd, token, &args),
+			(long)-EOPNOTSUPP);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used & KACS_SE_BACKUP_PRIVILEGE,
+			KACS_SE_BACKUP_PRIVILEGE);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)output_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_admission(struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	struct reg_restore_args args = { };
+	const void *token;
+	long key_fd;
+	int input_fd;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_RESTORE_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_QUERY_VALUE);
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	input_fd = pkm_lcs_kunit_external_fd(O_RDONLY);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+	args.input_fd = input_fd;
+
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &before));
+	KUNIT_EXPECT_EQ(test, before.privileges_used & KACS_SE_RESTORE_PRIVILEGE,
+			0ULL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, token, &args),
+			(long)-EOPNOTSUPP);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_EQ(test, after.privileges_used &
+				      KACS_SE_RESTORE_PRIVILEGE,
+			KACS_SE_RESTORE_PRIVILEGE);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream(
+	struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot snapshot = { };
+	struct reg_backup_args backup_args = { .output_fd = -1 };
+	struct reg_restore_args restore_args = { .input_fd = -1 };
+	const void *backup_token;
+	const void *restore_token;
+	const void *plain_token;
+	long key_fd;
+	int read_fd;
+	int write_fd;
+
+	plain_token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, 0);
+	KUNIT_ASSERT_NOT_NULL(test, plain_token);
+	backup_token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_BACKUP_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, backup_token);
+	restore_token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_RESTORE_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, restore_token);
+	key_fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_QUERY_VALUE);
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	read_fd = pkm_lcs_kunit_external_fd(O_RDONLY);
+	KUNIT_ASSERT_TRUE(test, read_fd >= 0);
+	write_fd = pkm_lcs_kunit_external_fd(O_WRONLY);
+	KUNIT_ASSERT_TRUE(test, write_fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_backup_for_token(
+				(int)key_fd, plain_token, &backup_args),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, plain_token, &restore_args),
+			(long)-EPERM);
+
+	backup_args.output_fd = read_fd;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_backup_for_token(
+				(int)key_fd, backup_token, &backup_args),
+			(long)-EBADF);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(backup_token,
+							 &snapshot));
+	KUNIT_EXPECT_EQ(test, snapshot.privileges_used &
+				      KACS_SE_BACKUP_PRIVILEGE,
+			0ULL);
+
+	restore_args.input_fd = write_fd;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, restore_token, &restore_args),
+			(long)-EBADF);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(restore_token,
+							 &snapshot));
+	KUNIT_EXPECT_EQ(test, snapshot.privileges_used &
+				      KACS_SE_RESTORE_PRIVILEGE,
+			0ULL);
+
+	backup_args.output_fd = write_fd;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_orphaned((int)key_fd, true),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_backup_for_token(
+				(int)key_fd, backup_token, &backup_args),
+			(long)-ENOENT);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(backup_token,
+							 &snapshot));
+	KUNIT_EXPECT_EQ(test, snapshot.privileges_used &
+				      KACS_SE_BACKUP_PRIVILEGE,
+			0ULL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)read_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)write_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	kacs_rust_token_drop(plain_token);
+	kacs_rust_token_drop(backup_token);
+	kacs_rust_token_drop(restore_token);
+}
+
 static u32 pkm_lcs_kunit_write_direct_watch_event(u8 *dst, size_t dst_len,
 						  u32 event_type,
 						  const char *name)
@@ -44834,6 +44997,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_snapshot_rejects_non_key_fd),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_fixed_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_gates),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_admission),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_admission),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_fails_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_erange_probe),

@@ -42,6 +42,8 @@
 #define PKM_LCS_WATCH_NOTIFY_ACTION_DISARM 2U
 #define PKM_LCS_WATCH_REGISTRY_BITS 8U
 #define PKM_LCS_KEY_REF_BITS 8U
+#define PKM_LCS_BACKUP_RESTORE_FD_OP_BACKUP_OUTPUT 0U
+#define PKM_LCS_BACKUP_RESTORE_FD_OP_RESTORE_INPUT 1U
 
 struct pkm_lcs_key_fd_string_view {
 	const u8 *bytes;
@@ -241,6 +243,9 @@ extern int lcs_rust_key_fd_fixed_ioctl_access_gate(u32 granted_access,
 extern int lcs_rust_key_fd_security_ioctl_access_gate(u32 granted_access,
 						      u32 ioctl_number,
 						      u32 security_info);
+extern int lcs_rust_backup_restore_fd_mode_gate(u32 operation,
+						u8 fd_readable,
+						u8 fd_writable);
 extern int lcs_rust_plan_registry_get_security(
 	const u8 *existing_sd, size_t existing_sd_len, u32 security_info,
 	u8 *output, size_t output_len, size_t *written_out);
@@ -4844,6 +4849,116 @@ static long pkm_lcs_key_fd_hide_key_from_args(
 		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
 }
 
+static long pkm_lcs_key_fd_require_privilege(const void *token, u64 privilege)
+{
+	if (!token)
+		return -EPERM;
+	if (!kacs_rust_token_has_enabled_privilege(token, privilege))
+		return -EPERM;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_mark_privilege_used(const void *token, u64 privilege)
+{
+	if (!token)
+		return -EPERM;
+	if (!kacs_rust_token_mark_privileges_used(token, privilege))
+		return -EPERM;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_external_fd_mode_gate(int fd, u32 operation)
+{
+	struct file *file;
+	struct fd held;
+	u8 readable;
+	u8 writable;
+	long ret;
+
+	held = fdget(fd);
+	file = fd_file(held);
+	if (!file)
+		return -EBADF;
+
+	readable = (file->f_mode & FMODE_READ) ? 1 : 0;
+	writable = (file->f_mode & FMODE_WRITE) ? 1 : 0;
+	ret = lcs_rust_backup_restore_fd_mode_gate(operation, readable,
+						   writable);
+	fdput(held);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_backup_from_args_for_token(
+	struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct reg_backup_args *args)
+{
+	long ret;
+
+	if (!key_fd || !args)
+		return -EINVAL;
+
+	ret = pkm_lcs_key_fd_require_privilege(token,
+					       KACS_SE_BACKUP_PRIVILEGE);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_external_fd_mode_gate(
+		args->output_fd, PKM_LCS_BACKUP_RESTORE_FD_OP_BACKUP_OUTPUT);
+	if (ret)
+		return ret;
+
+	if (READ_ONCE(key_fd->orphaned))
+		return -ENOENT;
+
+	ret = pkm_lcs_key_fd_mark_privilege_used(token,
+						 KACS_SE_BACKUP_PRIVILEGE);
+	if (ret)
+		return ret;
+
+	return -EOPNOTSUPP;
+}
+
+static long pkm_lcs_key_fd_backup_from_args(
+	struct pkm_lcs_key_fd *key_fd, const struct reg_backup_args *args)
+{
+	return pkm_lcs_key_fd_backup_from_args_for_token(
+		key_fd, pkm_kacs_current_effective_token_ptr(), args);
+}
+
+static long pkm_lcs_key_fd_restore_from_args_for_token(
+	struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct reg_restore_args *args)
+{
+	long ret;
+
+	if (!key_fd || !args)
+		return -EINVAL;
+
+	ret = pkm_lcs_key_fd_require_privilege(token,
+					       KACS_SE_RESTORE_PRIVILEGE);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_external_fd_mode_gate(
+		args->input_fd, PKM_LCS_BACKUP_RESTORE_FD_OP_RESTORE_INPUT);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_mark_privilege_used(token,
+						 KACS_SE_RESTORE_PRIVILEGE);
+	if (ret)
+		return ret;
+
+	return -EOPNOTSUPP;
+}
+
+static long pkm_lcs_key_fd_restore_from_args(
+	struct pkm_lcs_key_fd *key_fd, const struct reg_restore_args *args)
+{
+	return pkm_lcs_key_fd_restore_from_args_for_token(
+		key_fd, pkm_kacs_current_effective_token_ptr(), args);
+}
+
 static long pkm_lcs_key_fd_flush(struct pkm_lcs_key_fd *key_fd)
 {
 	struct pkm_lcs_source_response_result response = { };
@@ -4893,6 +5008,8 @@ static bool pkm_lcs_key_fd_ioctl_revalidates_restart(unsigned int cmd)
 	case REG_IOC_GET_SECURITY:
 	case REG_IOC_SET_SECURITY:
 	case REG_IOC_FLUSH:
+	case REG_IOC_BACKUP:
+	case REG_IOC_RESTORE:
 	case REG_IOC_NOTIFY:
 		return true;
 	default:
@@ -4911,6 +5028,8 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	struct reg_query_values_batch_args query_values_batch_args;
 	struct reg_query_key_info_args query_key_info_args;
 	struct reg_query_value_args query_value_args;
+	struct reg_backup_args backup_args;
+	struct reg_restore_args restore_args;
 	struct reg_set_security_args set_security_args;
 	struct reg_set_value_args set_value_args;
 	struct reg_delete_value_args delete_value_args;
@@ -5076,6 +5195,20 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 			&set_security_args);
 	case REG_IOC_FLUSH:
 		return pkm_lcs_key_fd_flush(key_fd);
+	case REG_IOC_BACKUP:
+		if (!arg)
+			return -EFAULT;
+		if (copy_from_user(&backup_args, (void __user *)arg,
+				   sizeof(backup_args)))
+			return -EFAULT;
+		return pkm_lcs_key_fd_backup_from_args(key_fd, &backup_args);
+	case REG_IOC_RESTORE:
+		if (!arg)
+			return -EFAULT;
+		if (copy_from_user(&restore_args, (void __user *)arg,
+				   sizeof(restore_args)))
+			return -EFAULT;
+		return pkm_lcs_key_fd_restore_from_args(key_fd, &restore_args);
 	case REG_IOC_NOTIFY:
 		ret = lcs_rust_key_fd_fixed_ioctl_access_gate(
 			key_fd->granted_access, _IOC_NR(cmd));
@@ -6953,6 +7086,38 @@ long pkm_lcs_kunit_key_fd_hide_key_for_token(
 
 	ret = pkm_lcs_key_fd_hide_key_from_args_for_token(key_fd, token, ops,
 							  args);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_backup_for_token(
+	int fd, const void *token, const struct reg_backup_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_backup_from_args_for_token(key_fd, token, args);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_restore_for_token(
+	int fd, const void *token, const struct reg_restore_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_restore_from_args_for_token(key_fd, token, args);
 	fdput(held);
 	return ret;
 }
