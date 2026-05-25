@@ -3602,7 +3602,7 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 	ret = pkm_lcs_rsi_materialize_enum_value_response(
 		frame.data, frame.len, response.request_id, next_sequence,
 		index, layer_snapshot.layers, layer_snapshot.layer_count, NULL,
-		0, &result);
+		0, &response.limits, &result);
 	if (ret)
 		goto out_frame;
 	if (!result.found) {

@@ -5735,6 +5735,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_value_response(
     layer_count: usize,
     private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
     private_layer_count: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     result_out: *mut PkmLcsRsiEnumValueResultCopy,
 ) -> c_int {
     if result_out.is_null() {
@@ -5762,6 +5763,14 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_value_response(
     {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(err) => return err.negated_return() as c_int,
+        }
+    };
 
     let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
     let layer_views = match parse_layer_views(layers, layer_count) {
@@ -5784,12 +5793,10 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_value_response(
         Err(err) => return rsi_query_values_response_error_return(err),
     };
 
-    if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &limits) {
         return rsi_query_values_response_error_return(err);
     }
-    if let Err(err) =
-        validate_rsi_query_values_response_value_payloads(&payload, &LcsLimits::DEFAULT)
-    {
+    if let Err(err) = validate_rsi_query_values_response_value_payloads(&payload, &limits) {
         return rsi_query_values_response_error_return(err);
     }
     if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
@@ -5809,7 +5816,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_value_response(
 
     let mut allocation_failed = false;
     if let Err(err) =
-        for_each_rsi_query_values_source_value_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+        for_each_rsi_query_values_source_value_entry(&payload, &limits, |entry| {
             if value_storage.push(entry).is_err() {
                 allocation_failed = true;
                 return Err(LcsError::RsiPayloadLengthOverflow);
@@ -5823,7 +5830,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_value_response(
         return rsi_query_values_response_error_return(err);
     }
     if let Err(err) =
-        for_each_rsi_query_values_source_blanket_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+        for_each_rsi_query_values_source_blanket_entry(&payload, &limits, |entry| {
             if blanket_storage.push(entry).is_err() {
                 allocation_failed = true;
                 return Err(LcsError::RsiPayloadLengthOverflow);
@@ -5845,7 +5852,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_enum_value_response(
     let context = LayerResolutionContext {
         layers: layer_views.as_slice(),
         private_layers: private_layer_views.as_slice(),
-        limits: &LcsLimits::DEFAULT,
+        limits: &limits,
         next_sequence,
     };
     let mut current_index = 0usize;

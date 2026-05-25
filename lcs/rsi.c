@@ -187,6 +187,7 @@ extern int lcs_rust_materialize_rsi_enum_value_response(
 	const struct pkm_lcs_rsi_layer_view *layers, size_t layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	size_t private_layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_enum_value_result *result);
 
 long pkm_lcs_rsi_build_lookup_request(
@@ -882,6 +883,7 @@ long pkm_lcs_rsi_materialize_enum_value_response(
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_enum_value_result *result)
 {
 	if (!result)
@@ -899,5 +901,6 @@ long pkm_lcs_rsi_materialize_enum_value_response(
 
 	return lcs_rust_materialize_rsi_enum_value_response(
 		frame, frame_len, request_id, next_sequence, index, layers,
-		layer_count, private_layers, private_layer_count, result);
+		layer_count, private_layers, private_layer_count, limits,
+		result);
 }
