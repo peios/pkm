@@ -4042,10 +4042,12 @@ static long pkm_lcs_source_dispatch_create_entry_request_with_waiter(
 	const char *child_name, u32 child_name_len,
 	const char *layer_name, u32 layer_name_len,
 	const u8 child_guid[RSI_GUID_SIZE], u64 sequence,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	struct pkm_lcs_source_queued_request *request;
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
@@ -4061,6 +4063,10 @@ static long pkm_lcs_source_dispatch_create_entry_request_with_waiter(
 	if (child_name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD ||
 	    layer_name_len > PKM_LCS_MAX_LAYER_NAME_BYTES_HARD)
 		return -ENAMETOOLONG;
+	if (!limits) {
+		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
 			       (size_t)RSI_GUID_SIZE, &frame_len) ||
 	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
@@ -4100,7 +4106,7 @@ static long pkm_lcs_source_dispatch_create_entry_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4114,13 +4120,13 @@ static long pkm_lcs_source_dispatch_create_entry_request_with_waiter(
 	ret = pkm_lcs_rsi_build_create_entry_request(
 		request->frame, frame_len, request_id, txn_id, parent_guid,
 		child_name, child_name_len, layer_name, layer_name_len,
-		child_guid, sequence, &built);
+		child_guid, sequence, limits, &built);
 	if (ret)
 		goto out_unlock_queue;
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		child_guid, NULL, waiter);
+		child_guid, limits, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -4269,10 +4275,12 @@ static long pkm_lcs_source_dispatch_create_key_request_with_waiter(
 	const char *name, u32 name_len,
 	const u8 parent_guid[RSI_GUID_SIZE], const u8 *sd, size_t sd_len,
 	bool volatile_key, bool symlink,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	struct pkm_lcs_source_queued_request *request;
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
@@ -4289,6 +4297,10 @@ static long pkm_lcs_source_dispatch_create_key_request_with_waiter(
 		return -ENAMETOOLONG;
 	if (sd_len > U32_MAX)
 		return -EOVERFLOW;
+	if (!limits) {
+		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
 			       (size_t)RSI_GUID_SIZE, &frame_len) ||
 	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
@@ -4327,7 +4339,7 @@ static long pkm_lcs_source_dispatch_create_key_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4341,13 +4353,13 @@ static long pkm_lcs_source_dispatch_create_key_request_with_waiter(
 	ret = pkm_lcs_rsi_build_create_key_request(
 		request->frame, frame_len, request_id, txn_id, guid, name,
 		name_len, parent_guid, sd, sd_len, volatile_key, symlink,
-		&built);
+		limits, &built);
 	if (ret)
 		goto out_unlock_queue;
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		guid, NULL, waiter);
+		guid, limits, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -4892,9 +4904,22 @@ long pkm_lcs_source_dispatch_create_entry_request(
 	const u8 child_guid[RSI_GUID_SIZE], u64 sequence,
 	struct pkm_lcs_source_enqueue_result *result)
 {
+	return pkm_lcs_source_dispatch_create_entry_request_with_limits(
+		source_id, txn_id, parent_guid, child_name, child_name_len,
+		layer_name, layer_name_len, child_guid, sequence, NULL, result);
+}
+
+long pkm_lcs_source_dispatch_create_entry_request_with_limits(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len,
+	const u8 child_guid[RSI_GUID_SIZE], u64 sequence,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_source_enqueue_result *result)
+{
 	return pkm_lcs_source_dispatch_create_entry_request_with_waiter(
 		source_id, txn_id, parent_guid, child_name, child_name_len,
-		layer_name, layer_name_len, child_guid, sequence, NULL,
+		layer_name, layer_name_len, child_guid, sequence, limits, NULL,
 		result);
 }
 
@@ -4912,7 +4937,7 @@ long pkm_lcs_source_dispatch_create_entry_waitable_request(
 	pkm_lcs_source_response_waiter_init(waiter);
 	return pkm_lcs_source_dispatch_create_entry_request_with_waiter(
 		source_id, txn_id, parent_guid, child_name, child_name_len,
-		layer_name, layer_name_len, child_guid, sequence, waiter,
+		layer_name, layer_name_len, child_guid, sequence, NULL, waiter,
 		result);
 }
 
@@ -4982,6 +5007,21 @@ long pkm_lcs_source_create_entry_round_trip_timeout(
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
+	return pkm_lcs_source_create_entry_round_trip_timeout_with_limits(
+		source_id, txn_id, parent_guid, child_name, child_name_len,
+		layer_name, layer_name_len, child_guid, sequence, NULL,
+		timeout_ms, response, enqueue);
+}
+
+long pkm_lcs_source_create_entry_round_trip_timeout_with_limits(
+	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
+	const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len,
+	const u8 child_guid[RSI_GUID_SIZE], u64 sequence,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
 	struct pkm_lcs_source_response_waiter waiter;
 	unsigned long deadline;
 	long ret;
@@ -5002,7 +5042,7 @@ long pkm_lcs_source_create_entry_round_trip_timeout(
 		ret = pkm_lcs_source_dispatch_create_entry_request_with_waiter(
 			source_id, txn_id, parent_guid, child_name,
 			child_name_len, layer_name, layer_name_len,
-			child_guid, sequence, &waiter, enqueue);
+			child_guid, sequence, limits, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -5129,9 +5169,22 @@ long pkm_lcs_source_dispatch_create_key_request(
 	bool volatile_key, bool symlink,
 	struct pkm_lcs_source_enqueue_result *result)
 {
-	return pkm_lcs_source_dispatch_create_key_request_with_waiter(
+	return pkm_lcs_source_dispatch_create_key_request_with_limits(
 		source_id, txn_id, guid, name, name_len, parent_guid, sd,
 		sd_len, volatile_key, symlink, NULL, result);
+}
+
+long pkm_lcs_source_dispatch_create_key_request_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *name, u32 name_len,
+	const u8 parent_guid[RSI_GUID_SIZE], const u8 *sd, size_t sd_len,
+	bool volatile_key, bool symlink,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	return pkm_lcs_source_dispatch_create_key_request_with_waiter(
+		source_id, txn_id, guid, name, name_len, parent_guid, sd,
+		sd_len, volatile_key, symlink, limits, NULL, result);
 }
 
 long pkm_lcs_source_dispatch_create_key_waitable_request(
@@ -5148,7 +5201,7 @@ long pkm_lcs_source_dispatch_create_key_waitable_request(
 	pkm_lcs_source_response_waiter_init(waiter);
 	return pkm_lcs_source_dispatch_create_key_request_with_waiter(
 		source_id, txn_id, guid, name, name_len, parent_guid, sd,
-		sd_len, volatile_key, symlink, waiter, result);
+		sd_len, volatile_key, symlink, NULL, waiter, result);
 }
 
 long pkm_lcs_source_dispatch_write_key_request(
@@ -6016,6 +6069,21 @@ long pkm_lcs_source_create_key_round_trip_timeout(
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
+	return pkm_lcs_source_create_key_round_trip_timeout_with_limits(
+		source_id, txn_id, guid, name, name_len, parent_guid, sd,
+		sd_len, volatile_key, symlink, NULL, timeout_ms, response,
+		enqueue);
+}
+
+long pkm_lcs_source_create_key_round_trip_timeout_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *name, u32 name_len,
+	const u8 parent_guid[RSI_GUID_SIZE], const u8 *sd, size_t sd_len,
+	bool volatile_key, bool symlink,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
 	struct pkm_lcs_source_response_waiter waiter;
 	unsigned long deadline;
 	long ret;
@@ -6036,7 +6104,7 @@ long pkm_lcs_source_create_key_round_trip_timeout(
 		ret = pkm_lcs_source_dispatch_create_key_request_with_waiter(
 			source_id, txn_id, guid, name, name_len,
 			parent_guid, sd, sd_len, volatile_key, symlink,
-			&waiter, enqueue);
+			limits, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -9301,6 +9369,8 @@ long pkm_lcs_create_missing_absolute_parent_for_token(
 		return ret;
 
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	result->limits = limits;
+	result->limits_present = true;
 	ret = pkm_lcs_route_absolute_path_for_token_with_limits(
 		token, copy.path, copy.path_len, true, scope_guids,
 		scope_count, &limits, &route);
@@ -9378,6 +9448,8 @@ long pkm_lcs_create_missing_relative_parent(
 		return ret;
 
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	result->limits = limits;
+	result->limits_present = true;
 	ret = pkm_lcs_validate_syscall_relative_path_with_limits(
 		copy.path, copy.path_len, &limits, &path);
 	if (ret)
@@ -9467,6 +9539,8 @@ static long pkm_lcs_create_missing_copied_absolute_parent_for_token_with_txn(
 	memset(result, 0, sizeof(*result));
 
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	result->limits = limits;
+	result->limits_present = true;
 	ret = pkm_lcs_route_absolute_path_for_token_with_limits(
 		token, copy->path, copy->path_len, true, scope_guids,
 		scope_count, &limits, &route);
@@ -9550,6 +9624,8 @@ static long pkm_lcs_create_missing_copied_relative_parent_with_txn(
 	memset(result, 0, sizeof(*result));
 
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	result->limits = limits;
+	result->limits_present = true;
 	ret = pkm_lcs_validate_syscall_relative_path_with_limits(
 		copy->path, copy->path_len, &limits, &path);
 	if (ret)
@@ -10024,6 +10100,8 @@ static long pkm_lcs_create_missing_source_records_with_sequence(
 	struct pkm_lcs_source_response_result entry_response = { };
 	struct pkm_lcs_source_response_result key_response = { };
 	struct pkm_lcs_reg_create_source_response_plan plan = { };
+	struct pkm_lcs_runtime_limits fallback_limits;
+	const struct pkm_lcs_runtime_limits *limits;
 	long ret;
 
 	if (!result)
@@ -10035,13 +10113,20 @@ static long pkm_lcs_create_missing_source_records_with_sequence(
 	    !resolution->parent.source_id || !resolution->child_name ||
 	    !resolution->child_name_len || !sequence)
 		return -EINVAL;
+	if (resolution->limits_present) {
+		limits = &resolution->limits;
+	} else {
+		pkm_lcs_runtime_limits_snapshot_or_default(&fallback_limits);
+		limits = &fallback_limits;
+	}
 
-	ret = pkm_lcs_source_create_entry_round_trip_timeout(
+	ret = pkm_lcs_source_create_entry_round_trip_timeout_with_limits(
 		resolution->parent.source_id, txn_id,
 		resolution->parent.key_guid, resolution->child_name,
 		resolution->child_name_len,
 		target->name, target->name_len, child_guid, sequence,
-		pkm_lcs_runtime_request_timeout_ms(), &entry_response, NULL);
+		limits, pkm_lcs_runtime_request_timeout_ms(), &entry_response,
+		NULL);
 	ret = pkm_lcs_create_missing_source_response_plan(ret, &entry_response,
 							  &plan);
 	if (ret)
@@ -10057,11 +10142,11 @@ static long pkm_lcs_create_missing_source_records_with_sequence(
 	if (plan.action != PKM_LCS_REG_CREATE_SOURCE_ACTION_CREATE_KEY)
 		return -EIO;
 
-	ret = pkm_lcs_source_create_key_round_trip_timeout(
+	ret = pkm_lcs_source_create_key_round_trip_timeout_with_limits(
 		resolution->parent.source_id, txn_id, child_guid,
 		resolution->child_name, resolution->child_name_len,
 		resolution->parent.key_guid, created_sd->sd, created_sd->sd_len,
-		volatile_key, symlink, pkm_lcs_runtime_request_timeout_ms(),
+		volatile_key, symlink, limits, pkm_lcs_runtime_request_timeout_ms(),
 		&key_response, NULL);
 	ret = pkm_lcs_create_missing_source_response_plan(ret, &key_response,
 							  &plan);
@@ -10566,8 +10651,9 @@ long pkm_lcs_create_missing_user_path_finish_for_token(
 		token, &resolution, flags, &link_plan);
 	if (ret)
 		goto out_resolution;
-	ret = pkm_lcs_create_layer_target_prepare(
-		ops, ulayer, inputs->layers, inputs->layer_count, &target,
+	ret = pkm_lcs_create_layer_target_prepare_with_limits(
+		ops, ulayer, inputs->layers, inputs->layer_count,
+		resolution.limits_present ? &resolution.limits : NULL, &target,
 		&target_plan);
 	if (ret)
 		goto out_resolution;

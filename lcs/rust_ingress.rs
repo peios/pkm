@@ -3230,6 +3230,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_create_entry_request_frame(
     layer_name_len: u32,
     child_guid: *const u8,
     sequence: u64,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     built_out: *mut PkmLcsRsiBuiltRequestCopy,
 ) -> c_int {
     if built_out.is_null() {
@@ -3254,6 +3255,10 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_create_entry_request_frame(
     {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(err) => return err.negated_return() as c_int,
+    };
 
     let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
     let parent_guid_bytes = unsafe { slice::from_raw_parts(parent_guid, 16) };
@@ -3264,11 +3269,11 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_create_entry_request_frame(
     child_guid_copy.copy_from_slice(child_guid_bytes);
 
     let child_name_bytes = unsafe { slice::from_raw_parts(child_name, child_name_len as usize) };
-    if let Err(err) = validate_key_component_bytes(child_name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_key_component_bytes(child_name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
     let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
-    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
 
@@ -3462,6 +3467,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_create_key_request_frame(
     sd_len: usize,
     volatile_key: u8,
     symlink: u8,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     built_out: *mut PkmLcsRsiBuiltRequestCopy,
 ) -> c_int {
     if built_out.is_null() {
@@ -3490,6 +3496,10 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_create_key_request_frame(
     if volatile_key > 1 || symlink > 1 {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(err) => return err.negated_return() as c_int,
+    };
 
     let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
     let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
@@ -3500,7 +3510,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_create_key_request_frame(
     parent_guid_copy.copy_from_slice(parent_guid_bytes);
 
     let name_bytes = unsafe { slice::from_raw_parts(name, name_len as usize) };
-    if let Err(err) = validate_key_component_bytes(name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_key_component_bytes(name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
     let sd_bytes = unsafe { slice::from_raw_parts(sd, sd_len) };

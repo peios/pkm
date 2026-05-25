@@ -28911,6 +28911,64 @@ static void pkm_lcs_kunit_source_dispatch_create_key_frame(struct kunit *test)
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_create_frames_use_runtime_limits(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x5a };
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0x5b };
+	static const u8 sd[] = { 0x01, 0x00, 0x04, 0x80 };
+	enum { LONG_NAME_LEN = 300 };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_rsi_built_request built = { };
+	char long_child[LONG_NAME_LEN + 1];
+	char long_layer[LONG_NAME_LEN + 1];
+	u8 frame[1024];
+
+	memset(long_child, 'C', LONG_NAME_LEN);
+	long_child[LONG_NAME_LEN] = '\0';
+	memset(long_layer, 'L', LONG_NAME_LEN);
+	long_layer[LONG_NAME_LEN] = '\0';
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_create_entry_request(
+				frame, sizeof(frame), 1, 0, parent_guid,
+				long_child, LONG_NAME_LEN, "base",
+				strlen("base"), child_guid, 7, &limits, &built),
+			(long)-ENAMETOOLONG);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_create_entry_request(
+				frame, sizeof(frame), 1, 0, parent_guid,
+				"Child", strlen("Child"), long_layer,
+				LONG_NAME_LEN, child_guid, 7, &limits, &built),
+			(long)-ENAMETOOLONG);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_create_key_request(
+				frame, sizeof(frame), 2, 0, child_guid,
+				long_child, LONG_NAME_LEN, parent_guid, sd,
+				sizeof(sd), false, false, &limits, &built),
+			(long)-ENAMETOOLONG);
+
+	limits.max_path_component_length = LONG_NAME_LEN;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_rsi_build_create_entry_request(
+				frame, sizeof(frame), 3, 0, parent_guid,
+				long_child, LONG_NAME_LEN, long_layer,
+				LONG_NAME_LEN, child_guid, 9, &limits, &built),
+			0L);
+	KUNIT_EXPECT_EQ(test, built.request_id, 3ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)RSI_CREATE_ENTRY);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_rsi_build_create_key_request(
+				frame, sizeof(frame), 4, 0, child_guid,
+				long_child, LONG_NAME_LEN, parent_guid, sd,
+				sizeof(sd), true, false, &limits, &built),
+			0L);
+	KUNIT_EXPECT_EQ(test, built.request_id, 4ULL);
+	KUNIT_EXPECT_EQ(test, built.op_code, (u16)RSI_CREATE_KEY);
+}
+
 static void pkm_lcs_kunit_source_dispatch_write_key_frame(struct kunit *test)
 {
 	static const u8 guid[RSI_GUID_SIZE] = {
@@ -35862,6 +35920,84 @@ static void pkm_lcs_kunit_create_missing_source_records_created_new(
 	KUNIT_EXPECT_EQ(test, result.sequence, 1ULL);
 	pkm_lcs_kunit_source_table_snapshot(&snapshot);
 	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, 2ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_source_records_runtime_limits(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x9a };
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0x9b };
+	static const u8 sd[] = { 0x01, 0x00, 0x04, 0x80 };
+	enum { LONG_NAME_LEN = 300 };
+	char child_name[LONG_NAME_LEN + 1];
+	char layer_name[LONG_NAME_LEN + 1];
+	struct pkm_lcs_create_missing_parent_resolution resolution = {
+		.parent.source_id = 1,
+		.child_name = child_name,
+		.child_name_len = LONG_NAME_LEN,
+		.limits_present = true,
+	};
+	struct pkm_lcs_create_layer_target target = {
+		.name = layer_name,
+		.name_len = LONG_NAME_LEN,
+	};
+	struct pkm_lcs_created_key_sd created_sd = {
+		.sd = sd,
+		.sd_len = sizeof(sd),
+	};
+	struct pkm_lcs_create_missing_source_records_result result = { };
+	struct pkm_lcs_kunit_create_source_script script = {
+		.parent_guid = parent_guid,
+		.child_guid = child_guid,
+		.child_name = child_name,
+		.layer_name = layer_name,
+		.sd = sd,
+		.sd_len = sizeof(sd),
+		.expected_sequence = 1,
+		.entry_status = RSI_OK,
+		.key_status = RSI_OK,
+		.expect_key_request = true,
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long ret;
+	int thread_ret;
+
+	memset(child_name, 'C', LONG_NAME_LEN);
+	child_name[LONG_NAME_LEN] = '\0';
+	memset(layer_name, 'L', LONG_NAME_LEN);
+	layer_name[LONG_NAME_LEN] = '\0';
+	memcpy(resolution.parent.key_guid, parent_guid, RSI_GUID_SIZE);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_runtime_limits_defaults(&resolution.limits),
+			0L);
+	resolution.limits.max_path_component_length = LONG_NAME_LEN;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_create_source_thread,
+					 &script,
+					 "pkm-lcs-kunit-create-src-limits");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_create_missing_source_records(
+		&resolution, &target, child_guid, &created_sd, false, false,
+		&result);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 2U);
+	KUNIT_EXPECT_EQ(test, script.writes, 2U);
+	KUNIT_EXPECT_TRUE(test, result.created_new);
+	KUNIT_EXPECT_EQ(test, result.disposition, REG_CREATED_NEW);
+	KUNIT_EXPECT_EQ(test, result.sequence, 1ULL);
 
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
@@ -43441,6 +43577,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_hide_delete_entry_runtime_limits_layer_frame),
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_create_key_frame),
+	KUNIT_CASE(pkm_lcs_kunit_source_create_frames_use_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_write_key_frame),
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_set_value_frame),
 	KUNIT_CASE(pkm_lcs_kunit_source_set_value_round_trip_statuses),
@@ -43536,6 +43673,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_source_status_fails_closed),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_source_records_created_new),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_source_records_runtime_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_source_entry_race_retries),
 	KUNIT_CASE(

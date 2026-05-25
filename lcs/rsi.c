@@ -57,7 +57,8 @@ extern int lcs_rust_write_rsi_create_entry_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 *parent_guid, const u8 *child_name, u32 child_name_len,
 	const u8 *layer_name, u32 layer_name_len, const u8 *child_guid,
-	u64 sequence, struct pkm_lcs_rsi_built_request *built);
+	u64 sequence, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_rsi_built_request *built);
 extern int lcs_rust_write_rsi_hide_entry_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 *parent_guid, const u8 *child_name, u32 child_name_len,
@@ -74,7 +75,7 @@ extern int lcs_rust_write_rsi_create_key_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 *guid, const u8 *name, u32 name_len,
 	const u8 *parent_guid, const u8 *sd, size_t sd_len,
-	u8 volatile_key, u8 symlink,
+	u8 volatile_key, u8 symlink, const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built);
 extern int lcs_rust_write_rsi_write_key_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
@@ -383,20 +384,22 @@ long pkm_lcs_rsi_build_create_entry_request(
 	const u8 parent_guid[RSI_GUID_SIZE], const char *child_name,
 	u32 child_name_len, const char *layer_name, u32 layer_name_len,
 	const u8 child_guid[RSI_GUID_SIZE], u64 sequence,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built)
 {
 	if (!built)
 		return -EINVAL;
 
 	memset(built, 0, sizeof(*built));
-	if (!dst || !parent_guid || !child_name || !layer_name || !child_guid)
+	if (!dst || !parent_guid || !child_name || !layer_name || !child_guid ||
+	    !limits)
 		return -EINVAL;
 
 	return lcs_rust_write_rsi_create_entry_request_frame(
 		dst, dst_len, request_id, txn_id, parent_guid,
 		(const u8 *)child_name, child_name_len,
 		(const u8 *)layer_name, layer_name_len, child_guid, sequence,
-		built);
+		limits, built);
 }
 
 long pkm_lcs_rsi_build_hide_entry_request(
@@ -445,19 +448,21 @@ long pkm_lcs_rsi_build_create_key_request(
 	const u8 guid[RSI_GUID_SIZE], const char *name, u32 name_len,
 	const u8 parent_guid[RSI_GUID_SIZE], const u8 *sd, size_t sd_len,
 	bool volatile_key, bool symlink,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built)
 {
 	if (!built)
 		return -EINVAL;
 
 	memset(built, 0, sizeof(*built));
-	if (!dst || !guid || !name || !parent_guid || !sd || !sd_len)
+	if (!dst || !guid || !name || !parent_guid || !sd || !sd_len ||
+	    !limits)
 		return -EINVAL;
 
 	return lcs_rust_write_rsi_create_key_request_frame(
 		dst, dst_len, request_id, txn_id, guid, (const u8 *)name,
 		name_len, parent_guid, sd, sd_len, volatile_key ? 1 : 0,
-		symlink ? 1 : 0, built);
+		symlink ? 1 : 0, limits, built);
 }
 
 long pkm_lcs_rsi_build_write_key_request(

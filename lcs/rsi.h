@@ -226,6 +226,7 @@ long pkm_lcs_rsi_build_create_entry_request(
 	const u8 parent_guid[RSI_GUID_SIZE], const char *child_name,
 	u32 child_name_len, const char *layer_name, u32 layer_name_len,
 	const u8 child_guid[RSI_GUID_SIZE], u64 sequence,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built);
 long pkm_lcs_rsi_build_hide_entry_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
@@ -244,6 +245,7 @@ long pkm_lcs_rsi_build_create_key_request(
 	const u8 guid[RSI_GUID_SIZE], const char *name, u32 name_len,
 	const u8 parent_guid[RSI_GUID_SIZE], const u8 *sd, size_t sd_len,
 	bool volatile_key, bool symlink,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built);
 long pkm_lcs_rsi_build_write_key_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
