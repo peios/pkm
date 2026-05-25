@@ -345,6 +345,14 @@ u32 pkm_lcs_runtime_max_key_depth(void)
 	return limits.max_key_depth;
 }
 
+u32 pkm_lcs_runtime_max_bound_transactions_per_source(void)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return limits.max_bound_transactions_per_source;
+}
+
 u32 pkm_lcs_runtime_max_concurrent_rsi_requests(void)
 {
 	struct pkm_lcs_runtime_limits limits;
@@ -1602,7 +1610,7 @@ long pkm_lcs_source_bound_transaction_acquire(u32 source_id, u32 *count_out)
 		goto out_unlock;
 	}
 	if (slot->bound_transaction_count >=
-	    PKM_LCS_MAX_BOUND_TRANSACTIONS_PER_SOURCE_DEFAULT) {
+	    pkm_lcs_runtime_max_bound_transactions_per_source()) {
 		ret = -EBUSY;
 		goto out_unlock;
 	}
