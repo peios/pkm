@@ -94,6 +94,7 @@ extern int lcs_rust_write_rsi_abort_transaction_request_frame(
 extern int lcs_rust_write_rsi_delete_layer_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built);
 extern int lcs_rust_write_rsi_flush_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
@@ -175,6 +176,7 @@ extern int lcs_rust_materialize_rsi_lookup_guid_entry(
 	struct pkm_lcs_rsi_lookup_guid_entry_result *result);
 extern int lcs_rust_materialize_rsi_read_key_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_read_key_result *result);
 extern int lcs_rust_materialize_rsi_query_value_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
@@ -549,6 +551,17 @@ long pkm_lcs_rsi_build_delete_layer_request(
 	const char *layer_name, u32 layer_name_len,
 	struct pkm_lcs_rsi_built_request *built)
 {
+	return pkm_lcs_rsi_build_delete_layer_request_with_limits(
+		dst, dst_len, request_id, txn_id, layer_name, layer_name_len,
+		NULL, built);
+}
+
+long pkm_lcs_rsi_build_delete_layer_request_with_limits(
+	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
+	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_rsi_built_request *built)
+{
 	if (!built)
 		return -EINVAL;
 
@@ -558,7 +571,7 @@ long pkm_lcs_rsi_build_delete_layer_request(
 
 	return lcs_rust_write_rsi_delete_layer_request_frame(
 		dst, dst_len, request_id, txn_id, (const u8 *)layer_name,
-		layer_name_len, built);
+		layer_name_len, limits, built);
 }
 
 long pkm_lcs_rsi_build_flush_request(
@@ -846,6 +859,15 @@ long pkm_lcs_rsi_materialize_read_key_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	struct pkm_lcs_rsi_read_key_result *result)
 {
+	return pkm_lcs_rsi_materialize_read_key_response_with_limits(
+		frame, frame_len, request_id, NULL, result);
+}
+
+long pkm_lcs_rsi_materialize_read_key_response_with_limits(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_rsi_read_key_result *result)
+{
 	if (!result)
 		return -EINVAL;
 
@@ -856,7 +878,7 @@ long pkm_lcs_rsi_materialize_read_key_response(
 		return -EINVAL;
 
 	return lcs_rust_materialize_rsi_read_key_response(
-		frame, frame_len, request_id, result);
+		frame, frame_len, request_id, limits, result);
 }
 
 long pkm_lcs_rsi_materialize_query_value_response(

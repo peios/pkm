@@ -22027,6 +22027,45 @@ static void pkm_lcs_kunit_rsi_delete_layer_request_frame_success(
 		KUNIT_EXPECT_EQ(test, frame[i], 0xbbU);
 }
 
+static void pkm_lcs_kunit_rsi_delete_layer_request_uses_runtime_limits(
+	struct kunit *test)
+{
+	char long_name[301];
+	u8 frame[RSI_REQUEST_HEADER_SIZE + RSI_LENGTH_PREFIX_SIZE + 301];
+	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	size_t expected_len = RSI_REQUEST_HEADER_SIZE + RSI_LENGTH_PREFIX_SIZE +
+			      sizeof(long_name) - 1;
+
+	memset(long_name, 'd', sizeof(long_name) - 1);
+	long_name[sizeof(long_name) - 1] = '\0';
+	memset(frame, 0xdd, sizeof(frame));
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_delete_layer_request_with_limits(
+				frame, sizeof(frame), 1, 0, long_name,
+				sizeof(long_name) - 1, &limits, &built),
+			(long)-ENAMETOOLONG);
+	KUNIT_EXPECT_EQ(test, built.len, (size_t)0);
+
+	limits.max_path_component_length = sizeof(long_name) - 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_build_delete_layer_request_with_limits(
+				frame, sizeof(frame), 1, 0, long_name,
+				sizeof(long_name) - 1, &limits, &built),
+			0L);
+	KUNIT_EXPECT_EQ(test, built.len, expected_len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(frame + RSI_REQUEST_HEADER_SIZE),
+			(u32)(sizeof(long_name) - 1));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(frame + RSI_REQUEST_HEADER_SIZE +
+				       RSI_LENGTH_PREFIX_SIZE,
+			       long_name, sizeof(long_name) - 1),
+			0);
+}
+
 static void pkm_lcs_kunit_rsi_transaction_request_frames_reject_bad_inputs(
 	struct kunit *test)
 {
@@ -27090,6 +27129,49 @@ static void pkm_lcs_kunit_rsi_read_key_bridge_accepts_valid(
 			       pkm_lcs_kunit_owner_only_sd,
 			       sizeof(pkm_lcs_kunit_owner_only_sd)),
 			0);
+}
+
+static void pkm_lcs_kunit_rsi_read_key_bridge_uses_runtime_limits(
+	struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+		0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+	};
+	char long_name[301];
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = guid,
+		.name = long_name,
+	};
+	struct pkm_lcs_rsi_read_key_result result = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	u8 response[512];
+	size_t response_len = 0;
+
+	memset(long_name, 'r', sizeof(long_name) - 1);
+	long_name[sizeof(long_name) - 1] = '\0';
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_read_key_source_build_response(
+				&script, 9, response, sizeof(response),
+				&response_len),
+			0);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_materialize_read_key_response_with_limits(
+				response, response_len, 9, &limits, &result),
+			(long)-EIO);
+	KUNIT_EXPECT_TRUE(test, result.source_validation_failure_present);
+
+	limits.max_path_component_length = sizeof(long_name) - 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_materialize_read_key_response_with_limits(
+				response, response_len, 9, &limits, &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.name_len, (u32)(sizeof(long_name) - 1));
+	KUNIT_EXPECT_EQ(test,
+			result.sd_len,
+			(u32)sizeof(pkm_lcs_kunit_owner_only_sd));
 }
 
 static void pkm_lcs_kunit_rsi_query_values_bridge_materializes_default_reg_link(
@@ -43622,10 +43704,13 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rsi_drop_key_request_frame_success),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_delete_layer_request_frame_success),
 	KUNIT_CASE(
+		pkm_lcs_kunit_rsi_delete_layer_request_uses_runtime_limits),
+	KUNIT_CASE(
 		pkm_lcs_kunit_rsi_transaction_request_frames_reject_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_rsi_transaction_request_frames_reject_short_buffer),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_read_key_bridge_accepts_valid),
+	KUNIT_CASE(pkm_lcs_kunit_rsi_read_key_bridge_uses_runtime_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_rsi_query_values_bridge_materializes_default_reg_link),
 	KUNIT_CASE(

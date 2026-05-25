@@ -4738,6 +4738,7 @@ out_unlock_table:
 
 static long pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
 	u32 source_id, const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
@@ -4752,7 +4753,7 @@ static long pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
 
 	if (result)
 		memset(result, 0, sizeof(*result));
-	if (!layer_name || !layer_name_len)
+	if (!layer_name || !layer_name_len || !limits)
 		return -EINVAL;
 	if (pkm_lcs_layer_name_is_base(layer_name, layer_name_len))
 		return -EINVAL;
@@ -4800,9 +4801,9 @@ static long pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
 	if (ret)
 		goto out_unlock_queue;
 
-	ret = pkm_lcs_rsi_build_delete_layer_request(
+	ret = pkm_lcs_rsi_build_delete_layer_request_with_limits(
 		request->frame, frame_len, request_id, 0, layer_name,
-		layer_name_len, &built);
+		layer_name_len, limits, &built);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -5437,8 +5438,11 @@ long pkm_lcs_source_dispatch_delete_layer_request(
 	u32 source_id, const char *layer_name, u32 layer_name_len,
 	struct pkm_lcs_source_enqueue_result *result)
 {
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	return pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
-		source_id, layer_name, layer_name_len, NULL, result);
+		source_id, layer_name, layer_name_len, &limits, NULL, result);
 }
 
 long pkm_lcs_source_dispatch_delete_layer_waitable_request(
@@ -5446,12 +5450,16 @@ long pkm_lcs_source_dispatch_delete_layer_waitable_request(
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
+	struct pkm_lcs_runtime_limits limits;
+
 	if (!waiter)
 		return -EINVAL;
 
 	pkm_lcs_source_response_waiter_init(waiter);
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	return pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
-		source_id, layer_name, layer_name_len, waiter, result);
+		source_id, layer_name, layer_name_len, &limits, waiter,
+		result);
 }
 
 long pkm_lcs_source_dispatch_flush_request(
@@ -5572,9 +5580,10 @@ long pkm_lcs_source_abort_transaction_round_trip(
 		response, enqueue);
 }
 
-long pkm_lcs_source_delete_layer_round_trip_timeout(
+static long pkm_lcs_source_delete_layer_round_trip_timeout_with_limits(
 	u32 source_id, const char *layer_name, u32 layer_name_len,
-	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
 	struct pkm_lcs_source_response_waiter waiter;
@@ -5585,6 +5594,8 @@ long pkm_lcs_source_delete_layer_round_trip_timeout(
 		memset(response, 0, sizeof(*response));
 	if (enqueue)
 		memset(enqueue, 0, sizeof(*enqueue));
+	if (!limits)
+		return -EINVAL;
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
@@ -5595,7 +5606,7 @@ long pkm_lcs_source_delete_layer_round_trip_timeout(
 			return ret;
 
 		ret = pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
-			source_id, layer_name, layer_name_len, &waiter,
+			source_id, layer_name, layer_name_len, limits, &waiter,
 			enqueue);
 		if (ret != -EAGAIN)
 			break;
@@ -5609,9 +5620,23 @@ long pkm_lcs_source_delete_layer_round_trip_timeout(
 							 response);
 }
 
-long pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout(
+long pkm_lcs_source_delete_layer_round_trip_timeout(
 	u32 source_id, const char *layer_name, u32 layer_name_len,
-	u32 timeout_ms, struct pkm_lcs_source_response_frame *frame,
+	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_delete_layer_round_trip_timeout_with_limits(
+		source_id, layer_name, layer_name_len, &limits, timeout_ms,
+		response, enqueue);
+}
+
+static long pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout_with_limits(
+	u32 source_id, const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_frame *frame,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
@@ -5620,6 +5645,8 @@ long pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout(
 	long ret;
 
 	if (!frame)
+		return -EINVAL;
+	if (!limits)
 		return -EINVAL;
 	if (response)
 		memset(response, 0, sizeof(*response));
@@ -5639,7 +5666,7 @@ long pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout(
 			return ret;
 
 		ret = pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
-			source_id, layer_name, layer_name_len, &waiter,
+			source_id, layer_name, layer_name_len, limits, &waiter,
 			enqueue);
 		if (ret != -EAGAIN)
 			break;
@@ -5714,20 +5741,21 @@ long pkm_lcs_source_apply_delete_layer_orphan_response(
 }
 
 static long pkm_lcs_source_delete_layer_validate_request(
-	const char *layer_name, u32 layer_name_len)
+	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	u8 request[RSI_REQUEST_HEADER_SIZE + RSI_LENGTH_PREFIX_SIZE +
 		   PKM_LCS_MAX_LAYER_NAME_BYTES_HARD];
 	struct pkm_lcs_rsi_built_request built;
 
-	return pkm_lcs_rsi_build_delete_layer_request(
+	return pkm_lcs_rsi_build_delete_layer_request_with_limits(
 		request, sizeof(request), 0, 0, layer_name, layer_name_len,
-		&built);
+		limits, &built);
 }
 
-long pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
+static long pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout_with_limits(
 	u32 source_id, const char *layer_name, u32 layer_name_len,
-	u32 timeout_ms,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
 	struct pkm_lcs_delete_layer_orphan_apply_result *orphan_result,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
@@ -5738,10 +5766,12 @@ long pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
 
 	if (!response)
 		response = &local_response;
+	if (!limits)
+		return -EINVAL;
 
-	ret = pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout(
-		source_id, layer_name, layer_name_len, timeout_ms, &frame,
-		response, enqueue);
+	ret = pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout_with_limits(
+		source_id, layer_name, layer_name_len, limits, timeout_ms,
+		&frame, response, enqueue);
 	if (ret) {
 		pkm_lcs_source_response_frame_destroy(&frame);
 		return ret;
@@ -5753,6 +5783,21 @@ long pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
 	return ret;
 }
 
+long pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
+	u32 source_id, const char *layer_name, u32 layer_name_len,
+	u32 timeout_ms,
+	struct pkm_lcs_delete_layer_orphan_apply_result *orphan_result,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout_with_limits(
+		source_id, layer_name, layer_name_len, &limits, timeout_ms,
+		orphan_result, response, enqueue);
+}
+
 static long
 pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
 	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
@@ -5761,14 +5806,17 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
 {
 	u32 source_ids[PKM_LCS_MAX_REGISTERED_SOURCES_HARD];
 	u32 source_count = 0;
+	struct pkm_lcs_runtime_limits limits;
 	u32 i;
 	long ret;
 
 	if (result)
 		memset(result, 0, sizeof(*result));
 
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	ret = pkm_lcs_source_delete_layer_validate_request(layer_name,
-							   layer_name_len);
+							   layer_name_len,
+							   &limits);
 	if (ret)
 		return ret;
 
@@ -5790,9 +5838,9 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
 		u32 generation_hive_count = 0;
 		u32 watch_overflow_count = 0;
 
-		ret = pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
-			source_ids[i], layer_name, layer_name_len, timeout_ms,
-			&apply, NULL, NULL);
+		ret = pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout_with_limits(
+			source_ids[i], layer_name, layer_name_len, &limits,
+			timeout_ms, &apply, NULL, NULL);
 		if (ret)
 			return ret;
 
@@ -6034,6 +6082,20 @@ long pkm_lcs_source_flush_round_trip_timeout(
 
 	return pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
 							 response);
+}
+
+long pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout(
+	u32 source_id, const char *layer_name, u32 layer_name_len,
+	u32 timeout_ms, struct pkm_lcs_source_response_frame *frame,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout_with_limits(
+		source_id, layer_name, layer_name_len, &limits, timeout_ms,
+		frame, response, enqueue);
 }
 
 long pkm_lcs_source_flush_round_trip(
@@ -6942,8 +7004,9 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 		*caller_errno = 0;
 		return 0;
 	case RSI_READ_KEY:
-		ret = pkm_lcs_rsi_materialize_read_key_response(
-			frame, frame_len, result->request_id, &read_key);
+		ret = pkm_lcs_rsi_materialize_read_key_response_with_limits(
+			frame, frame_len, result->request_id, &result->limits,
+			&read_key);
 		if (ret == -EIO) {
 			result->malformed_source_data = true;
 			if (read_key.source_validation_failure_present) {
@@ -9329,6 +9392,7 @@ static long pkm_lcs_resolved_parent_from_snapshot_prepare(
 
 static long pkm_lcs_create_missing_read_parent_key(
 	u32 source_id, u64 txn_id, const u8 key_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_resolved_key_path *parent)
 {
 	struct pkm_lcs_source_response_result response = { };
@@ -9337,7 +9401,7 @@ static long pkm_lcs_create_missing_read_parent_key(
 	struct pkm_lcs_source_response_frame frame;
 	long ret;
 
-	if (!source_id || !key_guid || !parent)
+	if (!source_id || !key_guid || !limits || !parent)
 		return -EINVAL;
 
 	pkm_lcs_source_response_frame_init(&frame);
@@ -9347,8 +9411,8 @@ static long pkm_lcs_create_missing_read_parent_key(
 	if (ret)
 		goto out_destroy_frame;
 
-	ret = pkm_lcs_rsi_materialize_read_key_response(
-		frame.data, frame.len, response.request_id, &read_key);
+	ret = pkm_lcs_rsi_materialize_read_key_response_with_limits(
+		frame.data, frame.len, response.request_id, limits, &read_key);
 	if (ret)
 		goto out_destroy_frame;
 	if (!read_key.sd_len ||
@@ -9513,7 +9577,8 @@ long pkm_lcs_create_missing_relative_parent(
 		if (ret)
 			goto out_result;
 		ret = pkm_lcs_create_missing_read_parent_key(
-			parent.source_id, 0, parent.key_guid, &result->parent);
+			parent.source_id, 0, parent.key_guid, &limits,
+			&result->parent);
 	} else {
 		ret = pkm_lcs_walk_relative_components_for_open_with_limits(
 			&parent, 0, components.components,
@@ -9697,7 +9762,7 @@ static long pkm_lcs_create_missing_copied_relative_parent_with_txn(
 			goto out_result;
 		ret = pkm_lcs_create_missing_read_parent_key(
 			parent.source_id, effective_txn_id, parent.key_guid,
-			&result->parent);
+			&limits, &result->parent);
 	} else {
 		ret = pkm_lcs_walk_relative_components_for_open_with_limits(
 			&parent, 0, components.components,
@@ -11183,8 +11248,9 @@ static long pkm_lcs_walk_absolute_components_at_symlink_limit(
 		if (ret)
 			goto out_root_frame;
 
-		ret = pkm_lcs_rsi_materialize_read_key_response(
-			frame.data, frame.len, response.request_id, &read_key);
+		ret = pkm_lcs_rsi_materialize_read_key_response_with_limits(
+			frame.data, frame.len, response.request_id, limits,
+			&read_key);
 		if (ret)
 			goto out_root_frame;
 		if (!read_key.sd_len ||
@@ -11551,8 +11617,9 @@ restart:
 		if (ret)
 			goto out_root_frame;
 
-		ret = pkm_lcs_rsi_materialize_read_key_response(
-			frame.data, frame.len, response.request_id, &read_key);
+		ret = pkm_lcs_rsi_materialize_read_key_response_with_limits(
+			frame.data, frame.len, response.request_id, limits,
+			&read_key);
 		if (ret)
 			goto out_root_frame;
 		if (!read_key.sd_len ||

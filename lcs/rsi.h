@@ -268,6 +268,11 @@ long pkm_lcs_rsi_build_delete_layer_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const char *layer_name, u32 layer_name_len,
 	struct pkm_lcs_rsi_built_request *built);
+long pkm_lcs_rsi_build_delete_layer_request_with_limits(
+	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
+	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_rsi_built_request *built);
 long pkm_lcs_rsi_build_flush_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const char *hive_name, u32 hive_name_len,
@@ -344,6 +349,10 @@ long pkm_lcs_rsi_materialize_lookup_guid_entry(
 	struct pkm_lcs_rsi_lookup_guid_entry_result *result);
 long pkm_lcs_rsi_materialize_read_key_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
+	struct pkm_lcs_rsi_read_key_result *result);
+long pkm_lcs_rsi_materialize_read_key_response_with_limits(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_read_key_result *result);
 long pkm_lcs_rsi_materialize_query_value_response(
 	const u8 *frame, size_t frame_len, u64 request_id,

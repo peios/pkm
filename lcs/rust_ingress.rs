@@ -3789,6 +3789,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_delete_layer_request_frame(
     txn_id: u64,
     layer_name: *const u8,
     layer_name_len: u32,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     built_out: *mut PkmLcsRsiBuiltRequestCopy,
 ) -> c_int {
     if built_out.is_null() {
@@ -3811,7 +3812,15 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_delete_layer_request_frame(
 
     let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
     let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
-    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
 
@@ -5978,6 +5987,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_read_key_response(
     frame: *const u8,
     frame_len: usize,
     request_id: u64,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     result_out: *mut PkmLcsRsiReadKeyResultCopy,
 ) -> c_int {
     if result_out.is_null() {
@@ -6002,6 +6012,14 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_read_key_response(
     if frame.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
 
     let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
     let payload = match parse_rsi_read_key_success_response_payload(
@@ -6024,7 +6042,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_read_key_response(
         }
     };
 
-    if let Err(err) = validate_rsi_read_key_response_names(&payload, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_rsi_read_key_response_names(&payload, &limits) {
         if let Some(failure) = source_validation_failure_for_name_error(&err) {
             unsafe {
                 (*result_out).source_validation_failure = source_validation_failure_code(failure);
