@@ -9348,19 +9348,34 @@ static long pkm_lcs_create_missing_parent_copy_child(
 static long pkm_lcs_create_missing_validate_child_depth(
 	struct pkm_lcs_create_missing_parent_resolution *result)
 {
+	const struct pkm_lcs_runtime_limits *limits;
 	long ret;
 
 	if (!result || !result->parent.component_count)
 		return -EINVAL;
+	limits = result->limits_present ? &result->limits : NULL;
 
 	ret = pkm_lcs_validate_relative_open_depth_counts(
 		result->parent.component_count, 1,
-		pkm_lcs_runtime_max_key_depth());
+		limits ? limits->max_key_depth : pkm_lcs_runtime_max_key_depth());
 	if (ret)
 		return ret;
 
 	result->child_depth = result->parent.component_count + 1U;
 	return 0;
+}
+
+static const struct pkm_lcs_runtime_limits *
+pkm_lcs_create_missing_resolution_limits_or_snapshot(
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	struct pkm_lcs_runtime_limits *fallback)
+{
+	if (resolution && resolution->limits_present)
+		return &resolution->limits;
+	if (!fallback)
+		return NULL;
+	pkm_lcs_runtime_limits_snapshot_or_default(fallback);
+	return fallback;
 }
 
 static long pkm_lcs_resolved_parent_from_snapshot_prepare(
@@ -10424,9 +10439,17 @@ long pkm_lcs_create_missing_publish_created_key_for_token(
 	const struct pkm_lcs_created_key_sd *created_sd, u32 desired_access)
 {
 	struct pkm_lcs_resolved_key_path child = { };
+	struct pkm_lcs_runtime_limits fallback_limits;
+	const struct pkm_lcs_runtime_limits *limits;
 	long ret;
 
 	if (!created_sd || !created_sd->sd || !created_sd->sd_len)
+		return -EINVAL;
+	if (!resolution)
+		return -EINVAL;
+	limits = pkm_lcs_create_missing_resolution_limits_or_snapshot(
+		resolution, &fallback_limits);
+	if (!limits)
 		return -EINVAL;
 
 	ret = pkm_lcs_create_missing_child_path_prepare(resolution, child_guid,
@@ -10438,7 +10461,7 @@ long pkm_lcs_create_missing_publish_created_key_for_token(
 		token, child.source_id, child.key_guid, created_sd->sd,
 		created_sd->sd_len, desired_access,
 		(const char * const *)child.resolved_path,
-		child.ancestor_guids, child.component_count, NULL);
+		child.ancestor_guids, child.component_count, limits);
 	pkm_lcs_resolved_key_path_destroy(&child);
 	return ret;
 }
@@ -10471,12 +10494,20 @@ static long pkm_lcs_create_missing_refresh_layer_metadata_if_needed(
 	const u8 child_guid[RSI_GUID_SIZE], bool *effective_changed_out)
 {
 	struct pkm_lcs_resolved_key_path child = { };
+	struct pkm_lcs_runtime_limits fallback_limits;
+	const struct pkm_lcs_runtime_limits *limits;
 	const u8 *creator_sid = NULL;
 	size_t creator_sid_len = 0;
 	long ret;
 
 	if (effective_changed_out)
 		*effective_changed_out = false;
+	if (!resolution)
+		return -EINVAL;
+	limits = pkm_lcs_create_missing_resolution_limits_or_snapshot(
+		resolution, &fallback_limits);
+	if (!limits)
+		return -EINVAL;
 
 	ret = pkm_lcs_create_missing_child_path_prepare(resolution, child_guid,
 						       &child);
@@ -10487,10 +10518,10 @@ static long pkm_lcs_create_missing_refresh_layer_metadata_if_needed(
 	if (ret)
 		goto out_child;
 
-	ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result(
+	ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result_with_limits(
 		child.source_id, child.key_guid,
 		(const char * const *)child.resolved_path,
-		child.component_count, creator_sid, creator_sid_len, true,
+		child.component_count, creator_sid, creator_sid_len, true, limits,
 		effective_changed_out);
 out_child:
 	pkm_lcs_resolved_key_path_destroy(&child);
@@ -10663,22 +10694,31 @@ static long pkm_lcs_create_missing_retry_open_existing_for_token_with_txn(
 {
 	struct pkm_lcs_path_component_view *components = NULL;
 	struct pkm_lcs_resolved_key_path resolved = { };
+	struct pkm_lcs_runtime_limits fallback_limits;
+	const struct pkm_lcs_runtime_limits *limits;
 	const u8 *final_sd;
 	u32 component_count = 0;
 	long fd;
 	long ret;
+
+	if (!resolution)
+		return -EINVAL;
+	limits = pkm_lcs_create_missing_resolution_limits_or_snapshot(
+		resolution, &fallback_limits);
+	if (!limits)
+		return -EINVAL;
 
 	ret = pkm_lcs_retry_open_components_prepare(
 		resolution, &components, &component_count);
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_walk_absolute_components_for_open(
+	ret = pkm_lcs_walk_absolute_components_for_open_with_limits(
 		resolution->parent.source_id, 0,
 		resolution->parent.ancestor_guids[0], components,
 		component_count, false, scope_guids, scope_count, layers,
 		layer_count, private_layers, private_layer_count, txn_fd,
-		&resolved);
+		limits, &resolved);
 	if (ret)
 		goto out_components;
 
@@ -10696,7 +10736,7 @@ static long pkm_lcs_create_missing_retry_open_existing_for_token_with_txn(
 		token, resolved.source_id, resolved.key_guid, final_sd,
 		resolved.final_sd_len, desired_access,
 		(const char * const *)resolved.resolved_path,
-		resolved.ancestor_guids, resolved.component_count, NULL);
+		resolved.ancestor_guids, resolved.component_count, limits);
 	if (fd < 0) {
 		ret = fd;
 		goto out_resolved;

@@ -6365,6 +6365,77 @@ static void pkm_lcs_kunit_create_missing_retry_open_success(struct kunit *test)
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_create_missing_retry_open_retains_limits(
+	struct kunit *test)
+{
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	static const u8 app_guid[RSI_GUID_SIZE] = { 0xb2 };
+	enum { LONG_NAME_LEN = 300 };
+	char child_name[LONG_NAME_LEN + 1];
+	struct pkm_lcs_create_missing_parent_resolution resolution = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_kunit_walk_source_step steps[1] = {
+		{ .expected_child = child_name, .guid = app_guid },
+	};
+	struct pkm_lcs_kunit_walk_source_script script = {
+		.steps = steps,
+		.step_count = ARRAY_SIZE(steps),
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	u32 disposition = 0;
+	long fd;
+	int thread_ret;
+
+	memset(child_name, 'R', LONG_NAME_LEN);
+	child_name[LONG_NAME_LEN] = '\0';
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_retry_open_resolution_prepare(
+				&resolution, root_guid, child_name),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_runtime_limits_defaults(&resolution.limits),
+			0L);
+	resolution.limits.max_path_component_length = LONG_NAME_LEN;
+	resolution.limits_present = true;
+
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	steps[0].sd = sd;
+	steps[0].sd_len = sd_len;
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_walk_source_thread, &script,
+		"pkm-lcs-kunit-create-retry-retains-limits");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_create_missing_retry_open_existing_for_token(
+		token, &ops, &resolution, KEY_READ, NULL, 0, NULL, 0, NULL, 0,
+		(u32 __user *)&disposition);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, disposition, REG_OPENED_EXISTING);
+	if (fd >= 0)
+		KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+
+	pkm_kacs_free((void *)sd);
+	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_create_missing_retry_open_fault_closes(
 	struct kunit *test)
 {
@@ -23355,7 +23426,7 @@ static int pkm_lcs_kunit_walk_source_build_response(
 static int pkm_lcs_kunit_walk_source_thread(void *raw_script)
 {
 	struct pkm_lcs_kunit_walk_source_script *script = raw_script;
-	u8 request[128];
+	u8 request[512];
 	u8 response[512];
 	u32 i;
 
@@ -24165,7 +24236,7 @@ static int pkm_lcs_kunit_layer_metadata_refresh_handle_read_key(
 		.sd = script->sd,
 		.sd_len = script->sd_len,
 	};
-	u8 response[256];
+	u8 response[512];
 	size_t response_len = 0;
 	ssize_t count;
 	u64 request_id;
@@ -30812,6 +30883,77 @@ static void pkm_lcs_kunit_layer_metadata_refresh_uses_runtime_limits(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_layer_path_refresh_uses_supplied_limits(
+	struct kunit *test)
+{
+	static const u8 metadata_guid[PKM_LCS_GUID_BYTES] = { 0xf2, 0x23 };
+	struct pkm_lcs_layer_snapshot snapshot = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script script = {
+		.expected_guid = metadata_guid,
+		.sd = pkm_lcs_kunit_owner_only_sd,
+		.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+		.precedence = 21,
+		.enabled = 1,
+		.precedence_present = true,
+		.enabled_present = true,
+	};
+	char long_layer[301];
+	const char *metadata_path[] = {
+		"Machine", "System", "Registry", "Layers", long_layer
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	bool effective_changed = false;
+	long ret;
+	int thread_ret;
+
+	memset(long_layer, 'S', sizeof(long_layer) - 1);
+	long_layer[sizeof(long_layer) - 1] = '\0';
+	script.name = long_layer;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_kunit_reset_layer_table();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = sizeof(long_layer) - 1;
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_source_thread, &script,
+		"pkm-lcs-kunit-path-refresh-retains-limits");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result_with_limits(
+		1, metadata_guid, metadata_path, ARRAY_SIZE(metadata_path),
+		NULL, 0, true, &limits, &effective_changed);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_TRUE(test, effective_changed);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_source_layer_snapshot_acquire(&snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.layer_count, 2U);
+	if (snapshot.layer_count > 1) {
+		KUNIT_EXPECT_EQ(test, snapshot.layers[1].name_len,
+				(u32)(sizeof(long_layer) - 1));
+		KUNIT_EXPECT_EQ(test,
+				memcmp(snapshot.layers[1].name, long_layer,
+				       sizeof(long_layer) - 1),
+				0);
+		KUNIT_EXPECT_EQ(test, snapshot.layers[1].precedence, 21U);
+	}
+	pkm_lcs_source_layer_snapshot_release(&snapshot);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains(
 	struct kunit *test)
 {
@@ -36651,6 +36793,50 @@ static void pkm_lcs_kunit_create_missing_publish_created_success(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
 	pkm_kacs_free((void *)created.sd);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_create_missing_publish_created_retains_limits(
+	struct kunit *test)
+{
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0x34 };
+	enum { LONG_NAME_LEN = 300 };
+	char child_name[LONG_NAME_LEN + 1];
+	struct pkm_lcs_create_missing_parent_resolution resolution = { };
+	struct pkm_lcs_created_key_sd created = { };
+	const void *token;
+	long fd;
+
+	memset(child_name, 'C', LONG_NAME_LEN);
+	child_name[LONG_NAME_LEN] = '\0';
+	pkm_lcs_runtime_limits_reset_defaults();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	created.sd = kacs_rust_kunit_create_file_sd(
+		token, KEY_READ, 0, 0, 0, &created.sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, created.sd);
+	pkm_lcs_kunit_create_missing_set_child_path(test, &resolution);
+	kfree(resolution.child_name);
+	resolution.child_name = kstrdup(child_name, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, resolution.child_name);
+	resolution.child_name_len = LONG_NAME_LEN;
+	resolution.child_depth = resolution.parent.component_count + 1U;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_runtime_limits_defaults(&resolution.limits),
+			0L);
+	resolution.limits.max_path_component_length = LONG_NAME_LEN;
+	resolution.limits_present = true;
+
+	fd = pkm_lcs_create_missing_publish_created_key_for_token(
+		token, &resolution, child_guid, &created, KEY_READ);
+	KUNIT_EXPECT_TRUE(test, fd >= 0);
+	if (fd >= 0)
+		KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+
+	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
+	pkm_kacs_free((void *)created.sd);
+	pkm_lcs_runtime_limits_reset_defaults();
 	kacs_rust_token_drop(token);
 }
 
@@ -43493,6 +43679,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_created_finish_rejects_malformed),
 	KUNIT_CASE(pkm_lcs_kunit_create_missing_retry_open_success),
+	KUNIT_CASE(pkm_lcs_kunit_create_missing_retry_open_retains_limits),
 	KUNIT_CASE(pkm_lcs_kunit_create_missing_retry_open_fault_closes),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_retry_open_denied_no_copyout),
@@ -43944,6 +44131,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_snapshot_remove),
 	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_uses_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_refresh_uses_runtime_limits),
+	KUNIT_CASE(pkm_lcs_kunit_layer_path_refresh_uses_supplied_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains),
 	KUNIT_CASE(
@@ -44025,6 +44213,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_create_missing_source_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_publish_created_success),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_missing_publish_created_retains_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_missing_publish_created_denied),
 	KUNIT_CASE(
