@@ -1251,6 +1251,7 @@ pub unsafe extern "C" fn lcs_rust_select_layer_metadata_sd(
     layer_name_len: u32,
     metadata: *const PkmLcsLayerMetadataSdViewCopy,
     metadata_count: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     selection_out: *mut PkmLcsLayerMetadataSdSelectionCopy,
 ) -> c_int {
     let Some(selection_out) = (unsafe { selection_out.as_mut() }) else {
@@ -1261,9 +1262,13 @@ pub unsafe extern "C" fn lcs_rust_select_layer_metadata_sd(
     if layer_name.is_null() || (metadata_count != 0 && metadata.is_null()) {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
 
     let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
-    let target_layer = match validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+    let target_layer = match validate_layer_name_bytes(layer_name_bytes, &limits) {
         Ok(name) => name,
         Err(LcsError::NameTooLong { .. }) => {
             return LinuxErrno::Enametoolong.negated_return() as c_int
@@ -1274,14 +1279,14 @@ pub unsafe extern "C" fn lcs_rust_select_layer_metadata_sd(
     let mut matched_index = None;
     for index in 0..metadata_count {
         let raw = unsafe { &*metadata.add(index) };
-        let name = match parse_layer_metadata_sd_view_name(raw) {
+        let name = match parse_layer_metadata_sd_view_name(raw, &limits) {
             Ok(name) => name,
             Err(errno) => return errno.negated_return() as c_int,
         };
 
         for previous_index in 0..index {
             let previous = unsafe { &*metadata.add(previous_index) };
-            let previous_name = match parse_layer_metadata_sd_view_name(previous) {
+            let previous_name = match parse_layer_metadata_sd_view_name(previous, &limits) {
                 Ok(name) => name,
                 Err(errno) => return errno.negated_return() as c_int,
             };
@@ -1318,6 +1323,7 @@ pub unsafe extern "C" fn lcs_rust_validate_layer_publication(
     metadata_security_descriptor_len: usize,
     precedence: u32,
     enabled: u8,
+    limits: *const PkmLcsRuntimeLimitsCopy,
 ) -> c_int {
     if layer_name.is_null()
         || metadata_key_guid.is_null()
@@ -1329,6 +1335,10 @@ pub unsafe extern "C" fn lcs_rust_validate_layer_publication(
     if enabled > 1 {
         return LinuxErrno::Eio.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
 
     let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
     let name = match str::from_utf8(layer_name_bytes) {
@@ -1342,7 +1352,7 @@ pub unsafe extern "C" fn lcs_rust_validate_layer_publication(
     };
 
     match plan_layer_publication(
-        &LcsLimits::DEFAULT,
+        &limits,
         LayerPublicationInput {
             name,
             precedence,
@@ -1467,6 +1477,7 @@ pub unsafe extern "C" fn lcs_rust_layer_name_casefold_eq(
     left_len: u32,
     right: *const u8,
     right_len: u32,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     equal_out: *mut u8,
 ) -> c_int {
     let Some(equal_out) = (unsafe { equal_out.as_mut() }) else {
@@ -1477,17 +1488,21 @@ pub unsafe extern "C" fn lcs_rust_layer_name_casefold_eq(
     if left.is_null() || right.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
 
     let left_bytes = unsafe { slice::from_raw_parts(left, left_len as usize) };
     let right_bytes = unsafe { slice::from_raw_parts(right, right_len as usize) };
-    let left_name = match validate_layer_name_bytes(left_bytes, &LcsLimits::DEFAULT) {
+    let left_name = match validate_layer_name_bytes(left_bytes, &limits) {
         Ok(name) => name,
         Err(LcsError::NameTooLong { .. }) => {
             return LinuxErrno::Enametoolong.negated_return() as c_int
         }
         Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
     };
-    let right_name = match validate_layer_name_bytes(right_bytes, &LcsLimits::DEFAULT) {
+    let right_name = match validate_layer_name_bytes(right_bytes, &limits) {
         Ok(name) => name,
         Err(LcsError::NameTooLong { .. }) => {
             return LinuxErrno::Enametoolong.negated_return() as c_int
@@ -6395,13 +6410,14 @@ fn parse_layer_views<'a>(
 
 fn parse_layer_metadata_sd_view_name<'a>(
     raw: &PkmLcsLayerMetadataSdViewCopy,
+    limits: &LcsLimits,
 ) -> Result<&'a str, LinuxErrno> {
     if raw.name.is_null() {
         return Err(LinuxErrno::Eio);
     }
 
     let name_bytes = unsafe { slice::from_raw_parts(raw.name, raw.name_len as usize) };
-    validate_layer_name_bytes(name_bytes, &LcsLimits::DEFAULT).map_err(|_| LinuxErrno::Eio)
+    validate_layer_name_bytes(name_bytes, limits).map_err(|_| LinuxErrno::Eio)
 }
 
 fn parse_private_layer_views<'a>(

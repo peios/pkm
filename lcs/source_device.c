@@ -412,7 +412,8 @@ u32 pkm_lcs_runtime_max_transaction_watch_event_burst(void)
 extern int lcs_rust_validate_layer_publication(
 	const u8 *layer_name, u32 layer_name_len,
 	const u8 metadata_key_guid[16], const u8 *metadata_security_descriptor,
-	size_t metadata_security_descriptor_len, u32 precedence, u8 enabled);
+	size_t metadata_security_descriptor_len, u32 precedence, u8 enabled,
+	const struct pkm_lcs_runtime_limits *limits);
 extern int lcs_rust_select_layer_owner(
 	const u8 *metadata_owner_sid, size_t metadata_owner_sid_len,
 	bool metadata_owner_present, const u8 *creator_sid,
@@ -424,6 +425,7 @@ extern int lcs_rust_select_layer_owner(
 	struct pkm_lcs_layer_owner_selection_copy *selection_out);
 extern int lcs_rust_layer_name_casefold_eq(
 	const u8 *left, u32 left_len, const u8 *right, u32 right_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	u8 *equal_out);
 
 static bool pkm_lcs_layer_name_is_base(const char *layer_name,
@@ -435,9 +437,9 @@ static bool pkm_lcs_layer_name_is_base(const char *layer_name,
 			    layer_name_len);
 }
 
-static long pkm_lcs_layer_name_casefold_equal(const char *left, u32 left_len,
-					      const char *right, u32 right_len,
-					      bool *equal)
+static long pkm_lcs_layer_name_casefold_equal_with_limits(
+	const char *left, u32 left_len, const char *right, u32 right_len,
+	const struct pkm_lcs_runtime_limits *limits, bool *equal)
 {
 	u8 raw_equal = 0;
 	int ret;
@@ -445,16 +447,27 @@ static long pkm_lcs_layer_name_casefold_equal(const char *left, u32 left_len,
 	if (!equal)
 		return -EINVAL;
 	*equal = false;
-	if (!left || !right)
+	if (!left || !right || !limits)
 		return -EINVAL;
 
 	ret = lcs_rust_layer_name_casefold_eq((const u8 *)left, left_len,
 					      (const u8 *)right, right_len,
-					      &raw_equal);
+					      limits, &raw_equal);
 	if (ret)
 		return ret;
 	*equal = raw_equal != 0;
 	return 0;
+}
+
+static long pkm_lcs_layer_name_casefold_equal(const char *left, u32 left_len,
+					      const char *right, u32 right_len,
+					      bool *equal)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_layer_name_casefold_equal_with_limits(
+		left, left_len, right, right_len, &limits, equal);
 }
 
 static void pkm_lcs_layer_table_entry_destroy(
@@ -955,11 +968,12 @@ static bool pkm_lcs_layer_table_effective_changed(bool existed_before,
 	return new_enabled && previous_precedence != new_precedence;
 }
 
-long pkm_lcs_layer_table_publish_with_result(
+long pkm_lcs_layer_table_publish_with_result_with_limits(
 	const char *layer_name, u32 layer_name_len, u32 precedence,
 	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],
 	const u8 *metadata_sd, size_t metadata_sd_len,
 	const u8 *owner_sid, size_t owner_sid_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_layer_table_publish_result *result)
 {
 	struct pkm_lcs_layer_table_entry *target = NULL;
@@ -974,14 +988,14 @@ long pkm_lcs_layer_table_publish_with_result(
 	if (result)
 		memset(result, 0, sizeof(*result));
 	if (!layer_name || !metadata_key_guid || !metadata_sd ||
-	    !metadata_sd_len || !owner_sid || !owner_sid_len)
+	    !metadata_sd_len || !owner_sid || !owner_sid_len || !limits)
 		return -EINVAL;
 	if (layer_name_len > PKM_LCS_MAX_LAYER_NAME_BYTES_HARD)
 		return -ENAMETOOLONG;
 
 	ret = lcs_rust_validate_layer_publication(
 		(const u8 *)layer_name, layer_name_len, metadata_key_guid,
-		metadata_sd, metadata_sd_len, precedence, enabled);
+		metadata_sd, metadata_sd_len, precedence, enabled, limits);
 	if (ret)
 		return ret;
 
@@ -1003,9 +1017,9 @@ long pkm_lcs_layer_table_publish_with_result(
 				target = &pkm_lcs_layer_table[i];
 			continue;
 		}
-		ret = pkm_lcs_layer_name_casefold_equal(
+		ret = pkm_lcs_layer_name_casefold_equal_with_limits(
 			layer_name, layer_name_len, pkm_lcs_layer_table[i].name,
-			pkm_lcs_layer_table[i].name_len, &equal);
+			pkm_lcs_layer_table[i].name_len, limits, &equal);
 		if (ret) {
 			mutex_unlock(&pkm_lcs_layer_table_lock);
 			kfree(metadata_sd_copy);
@@ -1055,6 +1069,22 @@ long pkm_lcs_layer_table_publish_with_result(
 	mutex_unlock(&pkm_lcs_layer_table_lock);
 
 	return 0;
+}
+
+long pkm_lcs_layer_table_publish_with_result(
+	const char *layer_name, u32 layer_name_len, u32 precedence,
+	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],
+	const u8 *metadata_sd, size_t metadata_sd_len,
+	const u8 *owner_sid, size_t owner_sid_len,
+	struct pkm_lcs_layer_table_publish_result *result)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_layer_table_publish_with_result_with_limits(
+		layer_name, layer_name_len, precedence, enabled,
+		metadata_key_guid, metadata_sd, metadata_sd_len, owner_sid,
+		owner_sid_len, &limits, result);
 }
 
 long pkm_lcs_layer_table_publish(
@@ -1304,6 +1334,7 @@ extern int lcs_rust_select_layer_metadata_sd(
 	const u8 *layer_name, u32 layer_name_len,
 	const struct pkm_lcs_layer_metadata_sd_view *metadata,
 	size_t metadata_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_layer_metadata_sd_selection *selection);
 extern int lcs_rust_key_open_access_plan(
 	const void *subject_token, const u8 *sd_ptr, size_t sd_len,
@@ -9918,12 +9949,13 @@ long pkm_lcs_base_layer_write_access_check_for_token(
 	return ret;
 }
 
-long pkm_lcs_create_layer_write_access_check_for_token(
+long pkm_lcs_create_layer_write_access_check_for_token_with_limits(
 	const void *token, const struct pkm_lcs_create_layer_target *target,
 	bool base_metadata_present, const u8 *base_metadata_sd,
 	size_t base_metadata_sd_len,
 	const struct pkm_lcs_layer_metadata_sd_view *metadata,
-	u32 metadata_count, struct pkm_lcs_key_open_access_plan *plan)
+	u32 metadata_count, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_key_open_access_plan *plan)
 {
 	struct pkm_lcs_layer_metadata_sd_selection selection = { };
 	const struct pkm_lcs_layer_metadata_sd_view *selected;
@@ -9933,7 +9965,7 @@ long pkm_lcs_create_layer_write_access_check_for_token(
 		return -EINVAL;
 
 	memset(plan, 0, sizeof(*plan));
-	if (!target || !target->name)
+	if (!target || !target->name || !limits)
 		return -EINVAL;
 
 	if (target->implicit_base)
@@ -9946,7 +9978,7 @@ long pkm_lcs_create_layer_write_access_check_for_token(
 
 	ret = lcs_rust_select_layer_metadata_sd(
 		(const u8 *)target->name, target->name_len, metadata,
-		metadata_count, &selection);
+		metadata_count, limits, &selection);
 	if (ret)
 		return ret;
 	if (selection.index >= metadata_count)
@@ -9957,12 +9989,28 @@ long pkm_lcs_create_layer_write_access_check_for_token(
 		token, selected->sd, selected->sd_len, plan);
 }
 
+long pkm_lcs_create_layer_write_access_check_for_token(
+	const void *token, const struct pkm_lcs_create_layer_target *target,
+	bool base_metadata_present, const u8 *base_metadata_sd,
+	size_t base_metadata_sd_len,
+	const struct pkm_lcs_layer_metadata_sd_view *metadata,
+	u32 metadata_count, struct pkm_lcs_key_open_access_plan *plan)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_create_layer_write_access_check_for_token_with_limits(
+		token, target, base_metadata_present, base_metadata_sd,
+		base_metadata_sd_len, metadata, metadata_count, &limits, plan);
+}
+
 long pkm_lcs_live_layer_write_access_check_for_token(
 	const void *token, const struct pkm_lcs_create_layer_target *target,
 	struct pkm_lcs_key_open_access_plan *plan)
 {
 	struct pkm_lcs_layer_target_admission_plan target_plan = { };
 	struct pkm_lcs_layer_snapshot snapshot = { };
+	struct pkm_lcs_runtime_limits limits;
 	long ret;
 
 	if (!plan)
@@ -9974,14 +10022,16 @@ long pkm_lcs_live_layer_write_access_check_for_token(
 	ret = pkm_lcs_source_layer_snapshot_acquire(&snapshot);
 	if (ret)
 		return ret;
-	ret = pkm_lcs_create_layer_target_admit(
-		target, snapshot.layers, snapshot.layer_count, &target_plan);
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_create_layer_target_admit_with_limits(
+		target, snapshot.layers, snapshot.layer_count, &limits,
+		&target_plan);
 	if (ret)
 		goto out_snapshot;
-	ret = pkm_lcs_create_layer_write_access_check_for_token(
+	ret = pkm_lcs_create_layer_write_access_check_for_token_with_limits(
 		token, target, snapshot.base_metadata_present,
 		snapshot.base_metadata_sd, snapshot.base_metadata_sd_len,
-		snapshot.metadata, snapshot.metadata_count, plan);
+		snapshot.metadata, snapshot.metadata_count, &limits, plan);
 
 out_snapshot:
 	pkm_lcs_source_layer_snapshot_release(&snapshot);
@@ -10657,10 +10707,12 @@ long pkm_lcs_create_missing_user_path_finish_for_token(
 		&target_plan);
 	if (ret)
 		goto out_resolution;
-	ret = pkm_lcs_create_layer_write_access_check_for_token(
+	ret = pkm_lcs_create_layer_write_access_check_for_token_with_limits(
 		token, &target, inputs->base_metadata_present,
 		inputs->base_metadata_sd, inputs->base_metadata_sd_len,
-		inputs->metadata, inputs->metadata_count, &layer_plan);
+		inputs->metadata, inputs->metadata_count,
+		resolution.limits_present ? &resolution.limits : NULL,
+		&layer_plan);
 	if (ret)
 		goto out_target;
 	ret = pkm_lcs_assign_new_key_guid(
@@ -10764,15 +10816,18 @@ static long pkm_lcs_create_missing_copied_path_finish_for_token_with_txn(
 		token, &resolution, flags, &link_plan);
 	if (ret)
 		goto out_resolution;
-	ret = pkm_lcs_create_layer_target_prepare(
-		ops, ulayer, inputs->layers, inputs->layer_count, &target,
+	ret = pkm_lcs_create_layer_target_prepare_with_limits(
+		ops, ulayer, inputs->layers, inputs->layer_count,
+		resolution.limits_present ? &resolution.limits : NULL, &target,
 		&target_plan);
 	if (ret)
 		goto out_resolution;
-	ret = pkm_lcs_create_layer_write_access_check_for_token(
+	ret = pkm_lcs_create_layer_write_access_check_for_token_with_limits(
 		token, &target, inputs->base_metadata_present,
 		inputs->base_metadata_sd, inputs->base_metadata_sd_len,
-		inputs->metadata, inputs->metadata_count, &layer_plan);
+		inputs->metadata, inputs->metadata_count,
+		resolution.limits_present ? &resolution.limits : NULL,
+		&layer_plan);
 	if (ret)
 		goto out_target;
 	ret = pkm_lcs_assign_new_key_guid(

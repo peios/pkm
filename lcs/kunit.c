@@ -21010,6 +21010,57 @@ static void pkm_lcs_kunit_create_layer_write_explicit_folded_match(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_create_layer_write_uses_runtime_limits(
+	struct kunit *test)
+{
+	char long_name[301];
+	struct pkm_lcs_create_layer_target target = { };
+	struct pkm_lcs_layer_metadata_sd_view metadata = { };
+	struct pkm_lcs_key_open_access_plan plan = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	memset(long_name, 'p', sizeof(long_name) - 1);
+	long_name[sizeof(long_name) - 1] = '\0';
+	target.name = long_name;
+	target.name_len = sizeof(long_name) - 1;
+	metadata.name = long_name;
+	metadata.name_len = sizeof(long_name) - 1;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							0);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_SET_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	metadata.sd = sd;
+	metadata.sd_len = sd_len;
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token_with_limits(
+				token, &target, false, NULL, 0, &metadata, 1,
+				&limits, &plan),
+			(long)-ENAMETOOLONG);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, 0U);
+
+	limits.max_path_component_length = target.name_len;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token_with_limits(
+				token, &target, false, NULL, 0, &metadata, 1,
+				&limits, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, KEY_SET_VALUE);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_create_layer_write_explicit_denied(
 	struct kunit *test)
 {
@@ -30542,6 +30593,49 @@ static void pkm_lcs_kunit_layer_table_publish_snapshot_remove(struct kunit *test
 						    pkm_lcs_kunit_system_sid,
 						    sizeof(pkm_lcs_kunit_system_sid)),
 			(long)-EIO);
+
+	pkm_lcs_kunit_reset_layer_table();
+}
+
+static void pkm_lcs_kunit_layer_table_publish_uses_runtime_limits(
+	struct kunit *test)
+{
+	static const u8 layer_guid[RSI_GUID_SIZE] = { 0xc5 };
+	struct pkm_lcs_layer_table_publish_result publish = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	char long_name[301];
+
+	memset(long_name, 'l', sizeof(long_name) - 1);
+	long_name[sizeof(long_name) - 1] = '\0';
+
+	pkm_lcs_kunit_reset_layer_table();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_publish_with_result_with_limits(
+				long_name, sizeof(long_name) - 1, 4, 1,
+				layer_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid), &limits,
+				&publish),
+			(long)-ENAMETOOLONG);
+	KUNIT_EXPECT_FALSE(test, publish.existed_before);
+	KUNIT_EXPECT_FALSE(test, publish.effective_changed);
+
+	limits.max_path_component_length = sizeof(long_name) - 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_publish_with_result_with_limits(
+				long_name, sizeof(long_name) - 1, 4, 1,
+				layer_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid), &limits,
+				&publish),
+			0L);
+	KUNIT_EXPECT_FALSE(test, publish.existed_before);
+	KUNIT_EXPECT_TRUE(test, publish.effective_changed);
+	KUNIT_EXPECT_EQ(test, publish.new_precedence, 4U);
+	KUNIT_EXPECT_EQ(test, publish.new_enabled, 1U);
 
 	pkm_lcs_kunit_reset_layer_table();
 }
@@ -43206,6 +43300,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_live_base_layer_write_uses_cached_sd),
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_explicit_folded_match),
+	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_uses_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_explicit_denied),
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_missing_metadata_eio),
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_malformed_metadata_eio),
@@ -43601,6 +43696,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_delete_layer_broadcast_active_sources),
 	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_snapshot_remove),
+	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_uses_runtime_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains),
 	KUNIT_CASE(

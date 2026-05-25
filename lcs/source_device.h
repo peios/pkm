@@ -839,6 +839,13 @@ long pkm_lcs_create_layer_write_access_check_for_token(
 	size_t base_metadata_sd_len,
 	const struct pkm_lcs_layer_metadata_sd_view *metadata,
 	u32 metadata_count, struct pkm_lcs_key_open_access_plan *plan);
+long pkm_lcs_create_layer_write_access_check_for_token_with_limits(
+	const void *token, const struct pkm_lcs_create_layer_target *target,
+	bool base_metadata_present, const u8 *base_metadata_sd,
+	size_t base_metadata_sd_len,
+	const struct pkm_lcs_layer_metadata_sd_view *metadata,
+	u32 metadata_count, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_key_open_access_plan *plan);
 long pkm_lcs_live_layer_write_access_check_for_token(
 	const void *token, const struct pkm_lcs_create_layer_target *target,
 	struct pkm_lcs_key_open_access_plan *plan);
@@ -1232,6 +1239,13 @@ long pkm_lcs_layer_table_publish_with_result(
 	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],
 	const u8 *metadata_sd, size_t metadata_sd_len,
 	const u8 *owner_sid, size_t owner_sid_len,
+	struct pkm_lcs_layer_table_publish_result *result);
+long pkm_lcs_layer_table_publish_with_result_with_limits(
+	const char *layer_name, u32 layer_name_len, u32 precedence,
+	u8 enabled, const u8 metadata_key_guid[RSI_GUID_SIZE],
+	const u8 *metadata_sd, size_t metadata_sd_len,
+	const u8 *owner_sid, size_t owner_sid_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_layer_table_publish_result *result);
 long pkm_lcs_base_layer_metadata_publish(
 	const u8 metadata_key_guid[RSI_GUID_SIZE],
