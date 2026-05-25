@@ -5078,6 +5078,7 @@ struct pkm_lcs_backup_child_section {
 struct pkm_lcs_backup_child_sections {
 	struct pkm_lcs_backup_child_section *children;
 	u32 count;
+	u32 capacity;
 };
 
 static void pkm_lcs_backup_output_init(struct pkm_lcs_backup_output *output,
@@ -5830,6 +5831,39 @@ static void pkm_lcs_backup_child_sections_destroy(
 	kfree(sections->children);
 	sections->children = NULL;
 	sections->count = 0;
+	sections->capacity = 0;
+}
+
+static long pkm_lcs_backup_child_sections_append(
+	struct pkm_lcs_backup_child_sections *sections,
+	const u8 guid[PKM_LCS_GUID_BYTES],
+	struct pkm_lcs_backup_child_section **child_out)
+{
+	struct pkm_lcs_backup_child_section *grown;
+	u32 new_capacity;
+
+	if (!sections || !guid || !child_out)
+		return -EINVAL;
+	*child_out = NULL;
+
+	if (sections->count == sections->capacity) {
+		new_capacity = sections->capacity ? sections->capacity * 2 : 4;
+		if (new_capacity < sections->capacity)
+			return -EOVERFLOW;
+		grown = krealloc_array(sections->children, new_capacity,
+				       sizeof(*sections->children),
+				       GFP_KERNEL);
+		if (!grown)
+			return -ENOMEM;
+		sections->children = grown;
+		sections->capacity = new_capacity;
+	}
+
+	pkm_lcs_backup_child_section_init(&sections->children[sections->count],
+					  guid);
+	*child_out = &sections->children[sections->count];
+	sections->count++;
+	return 0;
 }
 
 static long pkm_lcs_backup_alloc_path_entry_frame(
@@ -6252,67 +6286,21 @@ out_destroy_frames:
 	goto out_free_views;
 }
 
-static long pkm_lcs_backup_collect_visible_child_sections(
-	const struct pkm_lcs_runtime_limits *limits, const u8 *enum_frame,
-	size_t enum_frame_len, u64 enum_request_id, u64 next_sequence,
-	struct pkm_lcs_backup_child_sections *sections)
+static bool pkm_lcs_backup_child_sections_contains(
+	const struct pkm_lcs_backup_child_sections *sections,
+	const u8 guid[PKM_LCS_GUID_BYTES])
 {
-	struct pkm_lcs_backup_path_entry_view *entries = NULL;
-	u32 entry_count = 0;
 	u32 i;
-	long ret;
 
-	if (!limits || !sections)
-		return -EINVAL;
-	memset(sections, 0, sizeof(*sections));
+	if (!sections || !guid)
+		return false;
 
-	ret = pkm_lcs_backup_materialize_path_entries(
-		limits, enum_frame, enum_frame_len, enum_request_id,
-		next_sequence, &entries, &entry_count);
-	if (ret)
-		return ret;
-	if (!entry_count)
-		return 0;
-
-	sections->children = kcalloc(entry_count, sizeof(*sections->children),
-				     GFP_KERNEL);
-	if (!sections->children) {
-		ret = -ENOMEM;
-		goto out_free_entries;
+	for (i = 0; i < sections->count; i++) {
+		if (pkm_lcs_backup_guid_equal(sections->children[i].guid,
+					      guid))
+			return true;
 	}
-
-	for (i = 0; i < entry_count; i++) {
-		u32 j;
-		bool seen = false;
-
-		if (entries[i].hidden)
-			continue;
-		for (j = 0; j < sections->count; j++) {
-			if (pkm_lcs_backup_guid_equal(
-				    sections->children[j].guid,
-				    entries[i].child_guid)) {
-				seen = true;
-				break;
-			}
-		}
-		if (seen)
-			continue;
-		pkm_lcs_backup_child_section_init(
-			&sections->children[sections->count],
-			entries[i].child_guid);
-		sections->count++;
-	}
-
-	if (!sections->count) {
-		kfree(sections->children);
-		sections->children = NULL;
-	}
-
-out_free_entries:
-	kfree(entries);
-	if (ret)
-		pkm_lcs_backup_child_sections_destroy(sections);
-	return ret;
+	return false;
 }
 
 static long pkm_lcs_backup_alloc_child_section_frames(
@@ -6591,10 +6579,11 @@ out_free:
 	return ret;
 }
 
-static long pkm_lcs_backup_stage_leaf_child_section(
+static long pkm_lcs_backup_stage_child_section(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_runtime_limits *limits,
 	u64 transaction_id, u64 next_sequence,
 	const struct pkm_lcs_layer_snapshot *layer_snapshot,
+	const u8 parent_guid[PKM_LCS_GUID_BYTES],
 	const u8 *parent_enum_frame, size_t parent_enum_frame_len,
 	u64 parent_enum_request_id, struct pkm_lcs_backup_referenced_layers *refs,
 	struct pkm_lcs_backup_child_section *child)
@@ -6603,7 +6592,7 @@ static long pkm_lcs_backup_stage_leaf_child_section(
 	long ret;
 
 	if (!key_fd || !limits || !transaction_id || !layer_snapshot ||
-	    !parent_enum_frame || !refs || !child)
+	    !parent_guid || !parent_enum_frame || !refs || !child)
 		return -EINVAL;
 
 	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
@@ -6654,7 +6643,7 @@ static long pkm_lcs_backup_stage_leaf_child_section(
 		return ret;
 
 	ret = pkm_lcs_backup_alloc_child_section_frames(
-		limits, key_fd->key_guid, child->guid, parent_enum_frame,
+		limits, parent_guid, child->guid, parent_enum_frame,
 		parent_enum_frame_len, parent_enum_request_id,
 		child->enum_frame.data, child->enum_frame.len,
 		child->enum_response.request_id, child->values_frame.data,
@@ -6663,14 +6652,94 @@ static long pkm_lcs_backup_stage_leaf_child_section(
 		&child->section_summary);
 	if (ret)
 		return ret;
-	if (child->section_summary.needs_child_traversal)
-		return -EOPNOTSUPP;
 
 	return pkm_lcs_backup_alloc_key_frame(
 		child->guid, child->read_key.volatile_key != 0,
 		child->read_key.symlink != 0, sd, child->read_key.sd_len,
 		(s64)child->read_key.last_write_time, &child->key_frame,
 		&child->key_frame_len);
+}
+
+static bool pkm_lcs_backup_visible_entry_seen_before(
+	const struct pkm_lcs_backup_path_entry_view *entries, u32 index,
+	const u8 guid[PKM_LCS_GUID_BYTES])
+{
+	u32 i;
+
+	if (!entries || !guid)
+		return false;
+	for (i = 0; i < index; i++) {
+		if (!entries[i].hidden &&
+		    pkm_lcs_backup_guid_equal(entries[i].child_guid, guid))
+			return true;
+	}
+	return false;
+}
+
+static long pkm_lcs_backup_stage_descendants(
+	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_runtime_limits *limits,
+	u64 transaction_id, u64 next_sequence,
+	const struct pkm_lcs_layer_snapshot *layer_snapshot,
+	const u8 root_guid[PKM_LCS_GUID_BYTES],
+	const u8 parent_guid[PKM_LCS_GUID_BYTES],
+	const u8 *parent_enum_frame, size_t parent_enum_frame_len,
+	u64 parent_enum_request_id, struct pkm_lcs_backup_referenced_layers *refs,
+	struct pkm_lcs_backup_child_sections *sections)
+{
+	struct pkm_lcs_backup_path_entry_view *entries = NULL;
+	struct pkm_lcs_backup_child_section *child = NULL;
+	u32 entry_count = 0;
+	u32 i;
+	long ret;
+
+	if (!key_fd || !limits || !transaction_id || !layer_snapshot ||
+	    !root_guid || !parent_guid || !parent_enum_frame || !refs ||
+	    !sections)
+		return -EINVAL;
+
+	ret = pkm_lcs_backup_materialize_path_entries(
+		limits, parent_enum_frame, parent_enum_frame_len,
+		parent_enum_request_id, next_sequence, &entries, &entry_count);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < entry_count; i++) {
+		if (entries[i].hidden)
+			continue;
+		if (pkm_lcs_backup_visible_entry_seen_before(
+			    entries, i, entries[i].child_guid))
+			continue;
+		if (pkm_lcs_backup_guid_equal(entries[i].child_guid,
+					      root_guid) ||
+		    pkm_lcs_backup_child_sections_contains(
+			    sections, entries[i].child_guid)) {
+			ret = -EOPNOTSUPP;
+			goto out_free_entries;
+		}
+
+		ret = pkm_lcs_backup_child_sections_append(
+			sections, entries[i].child_guid, &child);
+		if (ret)
+			goto out_free_entries;
+		ret = pkm_lcs_backup_stage_child_section(
+			key_fd, limits, transaction_id, next_sequence,
+			layer_snapshot, parent_guid, parent_enum_frame,
+			parent_enum_frame_len, parent_enum_request_id, refs,
+			child);
+		if (ret)
+			goto out_free_entries;
+		ret = pkm_lcs_backup_stage_descendants(
+			key_fd, limits, transaction_id, next_sequence,
+			layer_snapshot, root_guid, child->guid,
+			child->enum_frame.data, child->enum_frame.len,
+			child->enum_response.request_id, refs, sections);
+		if (ret)
+			goto out_free_entries;
+	}
+
+out_free_entries:
+	kfree(entries);
+	return ret;
 }
 
 static long pkm_lcs_backup_alloc_trailer_frame(
@@ -6836,24 +6905,13 @@ static long pkm_lcs_key_fd_backup_export_subtree_snapshot(
 	if (ret)
 		goto out_frames;
 
-	ret = pkm_lcs_backup_collect_visible_child_sections(
-		limits, enum_frame.data, enum_frame.len,
-		enum_response.request_id, next_sequence, &child_sections);
+	ret = pkm_lcs_backup_stage_descendants(
+		key_fd, limits, transaction_id, next_sequence, &layer_snapshot,
+		key_fd->key_guid, key_fd->key_guid, enum_frame.data,
+		enum_frame.len, enum_response.request_id, &referenced_layers,
+		&child_sections);
 	if (ret)
 		goto out_frames;
-	for (i = 0; i < child_sections.count; i++) {
-		ret = pkm_lcs_backup_stage_leaf_child_section(
-			key_fd, limits, transaction_id, next_sequence,
-			&layer_snapshot, enum_frame.data, enum_frame.len,
-			enum_response.request_id, &referenced_layers,
-			&child_sections.children[i]);
-		if (ret)
-			goto out_frames;
-	}
-	if (root_section.needs_child_traversal && !child_sections.count) {
-		ret = -EIO;
-		goto out_frames;
-	}
 
 	ret = pkm_lcs_backup_alloc_layer_manifest_frames(
 		limits, &layer_snapshot, &referenced_layers,
