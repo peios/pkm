@@ -1871,7 +1871,7 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	ret = pkm_lcs_rsi_materialize_query_values_info_summary(
 		values_frame.data, values_frame.len, values_response.request_id,
 		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
-		NULL, 0, &values_summary);
+		NULL, 0, &values_response.limits, &values_summary);
 	if (ret)
 		goto out_frames;
 
@@ -3469,7 +3469,7 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 	ret = pkm_lcs_rsi_materialize_query_values_batch_response(
 		frame.data, frame.len, response.request_id, next_sequence,
 		layer_snapshot.layers, layer_snapshot.layer_count, NULL, 0,
-		NULL, 0, &result);
+		&response.limits, NULL, 0, &result);
 	if (ret)
 		goto out_frame;
 
@@ -3490,8 +3490,8 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 		ret = pkm_lcs_rsi_materialize_query_values_batch_response(
 			frame.data, frame.len, response.request_id,
 			next_sequence, layer_snapshot.layers,
-			layer_snapshot.layer_count, NULL, 0, output,
-			result.required_len, &written);
+			layer_snapshot.layer_count, NULL, 0, &response.limits,
+			output, result.required_len, &written);
 		if (ret)
 			goto out_output;
 		if (written.required_len != result.required_len ||
@@ -3723,7 +3723,8 @@ static long pkm_lcs_key_fd_enum_subkey_read_metadata(
 		goto out_frames;
 	ret = pkm_lcs_rsi_materialize_query_values_info_summary(
 		values_frame.data, values_frame.len, values_response.request_id,
-		next_sequence, layers, layer_count, NULL, 0, &values_summary);
+		next_sequence, layers, layer_count, NULL, 0,
+		&values_response.limits, &values_summary);
 	if (ret)
 		goto out_frames;
 

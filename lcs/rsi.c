@@ -137,13 +137,16 @@ extern int lcs_rust_materialize_rsi_query_values_info_summary(
 	size_t layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	size_t private_layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_query_values_info_summary *summary);
 extern int lcs_rust_materialize_rsi_query_values_batch_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence, const struct pkm_lcs_rsi_layer_view *layers,
 	size_t layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
-	size_t private_layer_count, u8 *output, size_t output_len,
+	size_t private_layer_count,
+	const struct pkm_lcs_runtime_limits *limits, u8 *output,
+	size_t output_len,
 	struct pkm_lcs_rsi_query_values_batch_result *result);
 extern int lcs_rust_materialize_rsi_query_values_watch_events(
 	const u8 *before_frame, size_t before_frame_len,
@@ -694,6 +697,7 @@ long pkm_lcs_rsi_materialize_query_values_info_summary(
 	u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_query_values_info_summary *summary)
 {
 	if (!summary)
@@ -711,7 +715,8 @@ long pkm_lcs_rsi_materialize_query_values_info_summary(
 
 	return lcs_rust_materialize_rsi_query_values_info_summary(
 		frame, frame_len, request_id, next_sequence, layers,
-		layer_count, private_layers, private_layer_count, summary);
+		layer_count, private_layers, private_layer_count, limits,
+		summary);
 }
 
 long pkm_lcs_rsi_materialize_query_values_batch_response(
@@ -719,7 +724,9 @@ long pkm_lcs_rsi_materialize_query_values_batch_response(
 	u64 next_sequence, const struct pkm_lcs_rsi_layer_view *layers,
 	u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
-	u32 private_layer_count, u8 *output, size_t output_len,
+	u32 private_layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
+	u8 *output, size_t output_len,
 	struct pkm_lcs_rsi_query_values_batch_result *result)
 {
 	if (!result)
@@ -739,8 +746,8 @@ long pkm_lcs_rsi_materialize_query_values_batch_response(
 
 	return lcs_rust_materialize_rsi_query_values_batch_response(
 		frame, frame_len, request_id, next_sequence, layers,
-		layer_count, private_layers, private_layer_count, output,
-		output_len, result);
+		layer_count, private_layers, private_layer_count, limits,
+		output, output_len, result);
 }
 
 long pkm_lcs_rsi_materialize_query_values_watch_events(

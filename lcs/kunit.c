@@ -27372,13 +27372,96 @@ static void pkm_lcs_kunit_rsi_query_values_info_summary(struct kunit *test)
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_rsi_materialize_query_values_info_summary(
 				response, response_len, 52, 3, layers,
-				ARRAY_SIZE(layers), NULL, 0, &summary),
+				ARRAY_SIZE(layers), NULL, 0, NULL, &summary),
 			0L);
 	KUNIT_EXPECT_EQ(test, summary.source_value_entry_count, 3U);
 	KUNIT_EXPECT_EQ(test, summary.source_blanket_count, 0U);
 	KUNIT_EXPECT_EQ(test, summary.value_count, 1U);
 	KUNIT_EXPECT_EQ(test, summary.max_value_name_len, 3U);
 	KUNIT_EXPECT_EQ(test, summary.max_value_data_size, (u32)sizeof(data));
+}
+
+static void pkm_lcs_kunit_rsi_query_values_batch_uses_runtime_limits(
+	struct kunit *test)
+{
+	enum { LONG_NAME_LEN = 300 };
+	char value_name[LONG_NAME_LEN + 1];
+	char layer_name[LONG_NAME_LEN + 1];
+	struct pkm_lcs_rsi_layer_view layers[2];
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_rsi_query_values_info_summary summary = { };
+	struct pkm_lcs_rsi_query_values_batch_result result = { };
+	static const u8 data[] = { 0x7b };
+	u8 response[2048];
+	u8 output[512];
+	size_t offset;
+	size_t response_len;
+
+	memset(value_name, 'q', LONG_NAME_LEN);
+	value_name[LONG_NAME_LEN] = '\0';
+	memset(layer_name, 'r', LONG_NAME_LEN);
+	layer_name[LONG_NAME_LEN] = '\0';
+	layers[0] = (struct pkm_lcs_rsi_layer_view){
+		.name = "base",
+		.name_len = 4,
+		.precedence = 0,
+		.enabled = 1,
+	};
+	layers[1] = (struct pkm_lcs_rsi_layer_view){
+		.name = layer_name,
+		.name_len = LONG_NAME_LEN,
+		.precedence = 10,
+		.enabled = 1,
+	};
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = LONG_NAME_LEN;
+
+	pkm_lcs_kunit_rsi_response_begin(test, response, sizeof(response),
+					 496, RSI_QUERY_VALUES_RESPONSE,
+					 RSI_OK, &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_query_value_entry(
+		test, response, sizeof(response), &offset, value_name,
+		layer_name, REG_BINARY, data, sizeof(data), 1);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 0);
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_materialize_query_values_info_summary(
+				response, response_len, 496, 2, layers,
+				ARRAY_SIZE(layers), NULL, 0, NULL, &summary),
+			(long)-EIO);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_rsi_materialize_query_values_info_summary(
+				response, response_len, 496, 2, layers,
+				ARRAY_SIZE(layers), NULL, 0, &limits,
+				&summary),
+			0L);
+	KUNIT_EXPECT_EQ(test, summary.source_value_entry_count, 1U);
+	KUNIT_EXPECT_EQ(test, summary.source_blanket_count, 0U);
+	KUNIT_EXPECT_EQ(test, summary.value_count, 1U);
+	KUNIT_EXPECT_EQ(test, summary.max_value_name_len, (u32)LONG_NAME_LEN);
+	KUNIT_EXPECT_EQ(test, summary.max_value_data_size, (u32)sizeof(data));
+
+	memset(output, 0xaa, sizeof(output));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_rsi_materialize_query_values_batch_response(
+				response, response_len, 496, 2, layers,
+				ARRAY_SIZE(layers), NULL, 0, &limits, output,
+				sizeof(output), &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.count, 1U);
+	KUNIT_EXPECT_EQ(test, result.required_len,
+			(u32)(12 + LONG_NAME_LEN + sizeof(data)));
+	KUNIT_EXPECT_EQ(test, result.written_len, result.required_len);
+	KUNIT_ASSERT_LE(test, (size_t)result.written_len, sizeof(output));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(output), (u32)LONG_NAME_LEN);
+	KUNIT_EXPECT_EQ(test, memcmp(output + sizeof(u32), value_name,
+				    LONG_NAME_LEN), 0);
 }
 
 static void pkm_lcs_kunit_rsi_enum_children_info_rejects_bad_metadata(
@@ -42990,6 +43073,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rsi_delete_layer_response_validation),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_enum_children_info_summary),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_query_values_info_summary),
+	KUNIT_CASE(pkm_lcs_kunit_rsi_query_values_batch_uses_runtime_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_rsi_enum_children_info_rejects_bad_metadata),
 	KUNIT_CASE(
