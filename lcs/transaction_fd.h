@@ -22,6 +22,7 @@
 struct reg_txn_status_args;
 struct pkm_lcs_transaction_fd;
 struct pkm_lcs_transaction_log_entry;
+struct pkm_lcs_runtime_limits;
 
 struct pkm_lcs_transaction_fd_snapshot {
 	u64 transaction_id;
@@ -162,6 +163,10 @@ long pkm_lcs_transaction_fd_commit(int fd);
 long pkm_lcs_transaction_fd_status(int fd, struct reg_txn_status_args *out);
 long pkm_lcs_transaction_fd_abort_layer_writers(
 	const char *layer_name, u32 layer_name_len,
+	struct pkm_lcs_transaction_layer_abort_result *result);
+long pkm_lcs_transaction_fd_abort_layer_writers_with_limits(
+	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_transaction_layer_abort_result *result);
 long pkm_lcs_transaction_fd_begin_key_create_mutation(
 	int fd, u32 source_id,

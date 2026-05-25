@@ -39,6 +39,7 @@
 
 extern int lcs_rust_layer_name_casefold_eq(const u8 *left, u32 left_len,
 					   const u8 *right, u32 right_len,
+					   const struct pkm_lcs_runtime_limits *limits,
 					   u8 *equal_out);
 
 struct pkm_lcs_transaction_fd {
@@ -310,9 +311,19 @@ static bool pkm_lcs_transaction_value_name_len_valid(size_t len)
 	return len <= U16_MAX;
 }
 
-static long pkm_lcs_transaction_layer_name_casefold_eq(
+static void pkm_lcs_transaction_runtime_limits_snapshot_or_default(
+	struct pkm_lcs_runtime_limits *limits)
+{
+	if (!limits)
+		return;
+	if (pkm_lcs_runtime_limits_snapshot(limits) &&
+	    pkm_lcs_runtime_limits_defaults(limits))
+		memset(limits, 0, sizeof(*limits));
+}
+
+static long pkm_lcs_transaction_layer_name_casefold_eq_with_limits(
 	const char *left, u32 left_len, const char *right, u32 right_len,
-	bool *equal)
+	const struct pkm_lcs_runtime_limits *limits, bool *equal)
 {
 	u8 raw_equal = 0;
 	int ret;
@@ -320,17 +331,28 @@ static long pkm_lcs_transaction_layer_name_casefold_eq(
 	if (!equal)
 		return -EINVAL;
 	*equal = false;
-	if (!left || !right)
+	if (!left || !right || !limits)
 		return -EINVAL;
 
 	ret = lcs_rust_layer_name_casefold_eq((const u8 *)left, left_len,
 					      (const u8 *)right, right_len,
-					      &raw_equal);
+					      limits, &raw_equal);
 	if (ret)
 		return ret;
 
 	*equal = raw_equal != 0;
 	return 0;
+}
+
+static long pkm_lcs_transaction_layer_name_casefold_eq(
+	const char *left, u32 left_len, const char *right, u32 right_len,
+	bool *equal)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_transaction_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_transaction_layer_name_casefold_eq_with_limits(
+		left, left_len, right, right_len, &limits, equal);
 }
 
 static long pkm_lcs_transaction_layer_name_validate(
@@ -2988,14 +3010,15 @@ long pkm_lcs_transaction_fd_commit(int fd)
 	return ret;
 }
 
-static long pkm_lcs_transaction_log_entry_layer_matches(
+static long pkm_lcs_transaction_log_entry_layer_matches_with_limits(
 	const struct pkm_lcs_transaction_log_entry *entry,
-	const char *target_layer, u32 target_layer_len, bool *matches)
+	const char *target_layer, u32 target_layer_len,
+	const struct pkm_lcs_runtime_limits *limits, bool *matches)
 {
 	const char *entry_layer = NULL;
 	u32 entry_layer_len = 0;
 
-	if (!entry || !target_layer || !matches)
+	if (!entry || !target_layer || !limits || !matches)
 		return -EINVAL;
 	*matches = false;
 
@@ -3030,28 +3053,29 @@ static long pkm_lcs_transaction_log_entry_layer_matches(
 		return -EIO;
 	}
 
-	return pkm_lcs_transaction_layer_name_casefold_eq(
+	return pkm_lcs_transaction_layer_name_casefold_eq_with_limits(
 		entry_layer, entry_layer_len, target_layer, target_layer_len,
-		matches);
+		limits, matches);
 }
 
-static long pkm_lcs_transaction_log_touches_layer(
+static long pkm_lcs_transaction_log_touches_layer_with_limits(
 	const struct pkm_lcs_transaction_fd *txn, const char *layer_name,
-	u32 layer_name_len, bool *touches)
+	u32 layer_name_len, const struct pkm_lcs_runtime_limits *limits,
+	bool *touches)
 {
 	struct pkm_lcs_transaction_log_entry *entry;
 	bool found = false;
 	long ret;
 
-	if (!txn || !layer_name || !touches)
+	if (!txn || !layer_name || !limits || !touches)
 		return -EINVAL;
 	*touches = false;
 
 	list_for_each_entry(entry, &txn->mutation_log, link) {
 		bool matches = false;
 
-		ret = pkm_lcs_transaction_log_entry_layer_matches(
-			entry, layer_name, layer_name_len, &matches);
+		ret = pkm_lcs_transaction_log_entry_layer_matches_with_limits(
+			entry, layer_name, layer_name_len, limits, &matches);
 		if (ret)
 			return ret;
 		if (matches)
@@ -3062,8 +3086,9 @@ static long pkm_lcs_transaction_log_touches_layer(
 	return 0;
 }
 
-long pkm_lcs_transaction_fd_abort_layer_writers(
+long pkm_lcs_transaction_fd_abort_layer_writers_with_limits(
 	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_transaction_layer_abort_result *result)
 {
 	struct pkm_lcs_transaction_layer_abort_result local = { };
@@ -3073,11 +3098,13 @@ long pkm_lcs_transaction_fd_abort_layer_writers(
 
 	if (result)
 		memset(result, 0, sizeof(*result));
-	if (!layer_name || !layer_name_len)
+	if (!layer_name || !layer_name_len || !limits)
 		return -EINVAL;
 
-	ret = pkm_lcs_transaction_layer_name_is_base(layer_name, layer_name_len,
-						    &is_base);
+	ret = pkm_lcs_transaction_layer_name_casefold_eq_with_limits(
+		layer_name, layer_name_len, pkm_lcs_transaction_base_layer_name,
+		sizeof(pkm_lcs_transaction_base_layer_name) - 1, limits,
+		&is_base);
 	if (ret)
 		return ret;
 	if (is_base)
@@ -3111,8 +3138,9 @@ long pkm_lcs_transaction_fd_abort_layer_writers(
 		if (transaction_id && source_id) {
 			bool touches = false;
 
-			ret = pkm_lcs_transaction_log_touches_layer(
-				txn, layer_name, layer_name_len, &touches);
+			ret = pkm_lcs_transaction_log_touches_layer_with_limits(
+				txn, layer_name, layer_name_len, limits,
+				&touches);
 			if (ret) {
 				mutex_unlock(&txn->bind_lock);
 				break;
@@ -3176,6 +3204,17 @@ long pkm_lcs_transaction_fd_abort_layer_writers(
 	if (result)
 		*result = local;
 	return ret;
+}
+
+long pkm_lcs_transaction_fd_abort_layer_writers(
+	const char *layer_name, u32 layer_name_len,
+	struct pkm_lcs_transaction_layer_abort_result *result)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_transaction_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_transaction_fd_abort_layer_writers_with_limits(
+		layer_name, layer_name_len, &limits, result);
 }
 
 long pkm_lcs_transaction_fd_mark_source_down(u32 source_id, u32 *marked_out)

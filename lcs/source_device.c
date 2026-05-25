@@ -1130,8 +1130,9 @@ long pkm_lcs_base_layer_metadata_publish(
 	return 0;
 }
 
-long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
-				bool *removed_out)
+long pkm_lcs_layer_table_remove_with_limits(
+	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits, bool *removed_out)
 {
 	bool is_base = false;
 	u32 i;
@@ -1139,12 +1140,12 @@ long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
 
 	if (removed_out)
 		*removed_out = false;
-	if (!layer_name)
+	if (!layer_name || !limits)
 		return -EINVAL;
 
-	ret = pkm_lcs_layer_name_casefold_equal(
+	ret = pkm_lcs_layer_name_casefold_equal_with_limits(
 		layer_name, layer_name_len, pkm_lcs_base_layer_name,
-		sizeof(pkm_lcs_base_layer_name) - 1, &is_base);
+		sizeof(pkm_lcs_base_layer_name) - 1, limits, &is_base);
 	if (ret)
 		return ret;
 	if (is_base)
@@ -1156,9 +1157,9 @@ long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
 
 		if (!pkm_lcs_layer_table[i].occupied)
 			continue;
-		ret = pkm_lcs_layer_name_casefold_equal(
+		ret = pkm_lcs_layer_name_casefold_equal_with_limits(
 			layer_name, layer_name_len, pkm_lcs_layer_table[i].name,
-			pkm_lcs_layer_table[i].name_len, &equal);
+			pkm_lcs_layer_table[i].name_len, limits, &equal);
 		if (ret) {
 			mutex_unlock(&pkm_lcs_layer_table_lock);
 			return ret;
@@ -1173,6 +1174,16 @@ long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
 	}
 	mutex_unlock(&pkm_lcs_layer_table_lock);
 	return 0;
+}
+
+long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
+				bool *removed_out)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_layer_table_remove_with_limits(
+		layer_name, layer_name_len, &limits, removed_out);
 }
 
 long pkm_lcs_layer_table_metadata_key_guid_present(
@@ -5799,24 +5810,25 @@ long pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
 }
 
 static long
-pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
+pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout_with_limits(
 	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
 	u32 skip_source_id, const u8 skip_root_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_delete_layer_broadcast_result *result)
 {
 	u32 source_ids[PKM_LCS_MAX_REGISTERED_SOURCES_HARD];
 	u32 source_count = 0;
-	struct pkm_lcs_runtime_limits limits;
 	u32 i;
 	long ret;
 
 	if (result)
 		memset(result, 0, sizeof(*result));
 
-	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	if (!limits)
+		return -EINVAL;
 	ret = pkm_lcs_source_delete_layer_validate_request(layer_name,
 							   layer_name_len,
-							   &limits);
+							   limits);
 	if (ret)
 		return ret;
 
@@ -5839,7 +5851,7 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
 		u32 watch_overflow_count = 0;
 
 		ret = pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout_with_limits(
-			source_ids[i], layer_name, layer_name_len, &limits,
+			source_ids[i], layer_name, layer_name_len, limits,
 			timeout_ms, &apply, NULL, NULL);
 		if (ret)
 			return ret;
@@ -5885,6 +5897,20 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
 	}
 
 	return 0;
+}
+
+static long
+pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
+	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	u32 skip_source_id, const u8 skip_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_delete_layer_broadcast_result *result)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout_with_limits(
+		layer_name, layer_name_len, timeout_ms, skip_source_id,
+		skip_root_guid, &limits, result);
 }
 
 long pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
@@ -5985,14 +6011,16 @@ long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
 {
 	struct pkm_lcs_transaction_layer_abort_result abort_result = { };
 	struct pkm_lcs_delete_layer_broadcast_result broadcast_result = { };
+	struct pkm_lcs_runtime_limits limits;
 	bool removed = false;
 	long ret;
 
 	if (result)
 		memset(result, 0, sizeof(*result));
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 
-	ret = pkm_lcs_transaction_fd_abort_layer_writers(
-		layer_name, layer_name_len, &abort_result);
+	ret = pkm_lcs_transaction_fd_abort_layer_writers_with_limits(
+		layer_name, layer_name_len, &limits, &abort_result);
 	if (result) {
 		result->inspected_transaction_count =
 			abort_result.inspected_transaction_count;
@@ -6004,15 +6032,16 @@ long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_layer_table_remove(layer_name, layer_name_len, &removed);
+	ret = pkm_lcs_layer_table_remove_with_limits(layer_name, layer_name_len,
+						     &limits, &removed);
 	if (result)
 		result->layer_table_entry_removed = removed ? 1U : 0U;
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
+	ret = pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout_with_limits(
 		layer_name, layer_name_len, timeout_ms, skip_source_id,
-		skip_root_guid, &broadcast_result);
+		skip_root_guid, &limits, &broadcast_result);
 	if (result) {
 		result->active_source_count = broadcast_result.active_source_count;
 		result->completed_source_count =

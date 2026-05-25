@@ -1520,6 +1520,7 @@ pub unsafe extern "C" fn lcs_rust_value_name_casefold_eq(
     left_len: u32,
     right: *const u8,
     right_len: u32,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     equal_out: *mut u8,
 ) -> c_int {
     let Some(equal_out) = (unsafe { equal_out.as_mut() }) else {
@@ -1531,16 +1532,21 @@ pub unsafe extern "C" fn lcs_rust_value_name_casefold_eq(
         return LinuxErrno::Einval.negated_return() as c_int;
     }
 
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
     let left_bytes = unsafe { slice::from_raw_parts(left, left_len as usize) };
     let right_bytes = unsafe { slice::from_raw_parts(right, right_len as usize) };
-    let left_name = match validate_value_name_bytes(left_bytes, &LcsLimits::DEFAULT) {
+    let left_name = match validate_value_name_bytes(left_bytes, &limits) {
         Ok(name) => name,
         Err(LcsError::NameTooLong { .. }) => {
             return LinuxErrno::Enametoolong.negated_return() as c_int
         }
         Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
     };
-    let right_name = match validate_value_name_bytes(right_bytes, &LcsLimits::DEFAULT) {
+    let right_name = match validate_value_name_bytes(right_bytes, &limits) {
         Ok(name) => name,
         Err(LcsError::NameTooLong { .. }) => {
             return LinuxErrno::Enametoolong.negated_return() as c_int

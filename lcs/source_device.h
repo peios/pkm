@@ -1263,6 +1263,9 @@ long pkm_lcs_layer_owner_select_copy(
 	u8 **owner_sid_out, size_t *owner_sid_len_out, u32 *source_out);
 long pkm_lcs_layer_table_remove(const char *layer_name, u32 layer_name_len,
 				bool *removed_out);
+long pkm_lcs_layer_table_remove_with_limits(
+	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits, bool *removed_out);
 long pkm_lcs_layer_table_metadata_key_guid_present(
 	const u8 metadata_key_guid[RSI_GUID_SIZE], bool *present_out);
 long pkm_lcs_source_active_ids_snapshot(u32 *source_ids,

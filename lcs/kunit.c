@@ -30686,6 +30686,7 @@ static void pkm_lcs_kunit_layer_table_publish_uses_runtime_limits(
 	struct pkm_lcs_layer_table_publish_result publish = { };
 	struct pkm_lcs_runtime_limits limits = { };
 	char long_name[301];
+	bool removed = false;
 
 	memset(long_name, 'l', sizeof(long_name) - 1);
 	long_name[sizeof(long_name) - 1] = '\0';
@@ -30718,8 +30719,97 @@ static void pkm_lcs_kunit_layer_table_publish_uses_runtime_limits(
 	KUNIT_EXPECT_TRUE(test, publish.effective_changed);
 	KUNIT_EXPECT_EQ(test, publish.new_precedence, 4U);
 	KUNIT_EXPECT_EQ(test, publish.new_enabled, 1U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_remove_with_limits(
+				long_name, sizeof(long_name) - 1, &limits,
+				&removed),
+			0L);
+	KUNIT_EXPECT_TRUE(test, removed);
 
 	pkm_lcs_kunit_reset_layer_table();
+}
+
+static void pkm_lcs_kunit_layer_metadata_refresh_uses_runtime_limits(
+	struct kunit *test)
+{
+	static const u8 metadata_ancestors[5][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xf1, 0x20 },
+		{ 0xf1, 0x21 },
+		{ 0xf1, 0x22 },
+		{ 0xf1, 0x23 },
+	};
+	struct pkm_lcs_layer_snapshot snapshot = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script script = {
+		.expected_guid = metadata_ancestors[4],
+		.sd = pkm_lcs_kunit_owner_only_sd,
+		.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+		.precedence = 19,
+		.enabled = 1,
+		.precedence_present = true,
+		.enabled_present = true,
+	};
+	char long_layer[301];
+	const char *metadata_path[] = {
+		"Machine", "System", "Registry", "Layers", long_layer
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	memset(long_layer, 'R', sizeof(long_layer) - 1);
+	long_layer[sizeof(long_layer) - 1] = '\0';
+	script.name = long_layer;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_kunit_reset_layer_table();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = sizeof(long_layer) - 1;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, metadata_path, metadata_ancestors,
+		ARRAY_SIZE(metadata_ancestors));
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_source_thread, &script,
+		"pkm-lcs-kunit-long-layer-refresh");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_kunit_key_fd_refresh_layer_metadata((int)fd);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_source_layer_snapshot_acquire(&snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.layer_count, 2U);
+	if (snapshot.layer_count > 1) {
+		KUNIT_EXPECT_EQ(test, snapshot.layers[1].name_len,
+				(u32)(sizeof(long_layer) - 1));
+		KUNIT_EXPECT_EQ(test,
+				memcmp(snapshot.layers[1].name, long_layer,
+				       sizeof(long_layer) - 1),
+				0);
+		KUNIT_EXPECT_EQ(test, snapshot.layers[1].precedence, 19U);
+	}
+	pkm_lcs_source_layer_snapshot_release(&snapshot);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	flush_delayed_fput();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
 }
 
 static void pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains(
@@ -35705,6 +35795,76 @@ static void pkm_lcs_kunit_layer_delete_aborts_matching_bound_transactions(
 	flush_delayed_fput();
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_layer_delete_abort_uses_runtime_limits(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		1
+	};
+	struct pkm_lcs_transaction_layer_abort_result result = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	u8 abort_frame[RSI_REQUEST_HEADER_SIZE + sizeof(u64)];
+	struct file file = { };
+	const void *token;
+	char long_layer[301];
+	ssize_t read_len;
+	u32 count = 0;
+	long fd;
+
+	memset(long_layer, 'T', sizeof(long_layer) - 1);
+	long_layer[sizeof(long_layer) - 1] = '\0';
+
+	flush_delayed_fput();
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = sizeof(long_layer) - 1;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, snapshot.transaction_id, 1, root_guid),
+			0L);
+
+	pkm_lcs_kunit_append_set_value_log_for_layer(
+		test, (int)fd, root_guid, long_layer, 77);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_abort_layer_writers(
+				long_layer, sizeof(long_layer) - 1, &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.inspected_transaction_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.affected_bound_transaction_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.abort_dispatched_count, 1U);
+
+	read_len = pkm_lcs_kunit_source_device_read_file(&file, abort_frame,
+							 sizeof(abort_frame),
+							 true);
+	KUNIT_ASSERT_EQ(test, read_len, (ssize_t)sizeof(abort_frame));
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(abort_frame +
+					   RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_ABORT_TRANSACTION);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	flush_delayed_fput();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
 	kacs_rust_token_drop(token);
 }
 
@@ -43684,6 +43844,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_transaction_log_rejects_malformed_layer_name),
 	KUNIT_CASE(
 		pkm_lcs_kunit_layer_delete_aborts_matching_bound_transactions),
+	KUNIT_CASE(pkm_lcs_kunit_layer_delete_abort_uses_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_success),
 	KUNIT_CASE(pkm_lcs_kunit_relative_open_preflight_stops_bad_scalars),
 	KUNIT_CASE(
@@ -43782,6 +43943,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_delete_layer_broadcast_active_sources),
 	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_snapshot_remove),
 	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_uses_runtime_limits),
+	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_refresh_uses_runtime_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains),
 	KUNIT_CASE(

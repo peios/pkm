@@ -259,10 +259,10 @@ extern int lcs_rust_write_watch_event_record(
 	u32 *written_out, u8 *overflow_out);
 extern int lcs_rust_value_name_casefold_eq(
 	const u8 *left, u32 left_len, const u8 *right, u32 right_len,
-	u8 *equal_out);
+	const struct pkm_lcs_runtime_limits *limits, u8 *equal_out);
 extern int lcs_rust_layer_name_casefold_eq(
 	const u8 *left, u32 left_len, const u8 *right, u32 right_len,
-	u8 *equal_out);
+	const struct pkm_lcs_runtime_limits *limits, u8 *equal_out);
 
 static void pkm_lcs_get_security_result_destroy(
 	struct pkm_lcs_get_security_result *result);
@@ -2928,9 +2928,9 @@ out_frame:
 	return ret;
 }
 
-static long pkm_lcs_key_fd_value_name_casefold_equal(
+static long pkm_lcs_key_fd_value_name_casefold_equal_with_limits(
 	const char *left, u32 left_len, const char *right, u32 right_len,
-	bool *equal)
+	const struct pkm_lcs_runtime_limits *limits, bool *equal)
 {
 	u8 raw_equal = 0;
 	int ret;
@@ -2938,12 +2938,12 @@ static long pkm_lcs_key_fd_value_name_casefold_equal(
 	if (!equal)
 		return -EINVAL;
 	*equal = false;
-	if (!left || !right)
+	if (!left || !right || !limits)
 		return -EINVAL;
 
 	ret = lcs_rust_value_name_casefold_eq((const u8 *)left, left_len,
 					      (const u8 *)right, right_len,
-					      &raw_equal);
+					      limits, &raw_equal);
 	if (ret)
 		return ret;
 	*equal = raw_equal != 0;
@@ -2985,9 +2985,9 @@ static long pkm_lcs_key_fd_set_value_precedence_tcb_gate(
 	if (!is_layer_metadata_key)
 		return 0;
 
-	ret = pkm_lcs_key_fd_value_name_casefold_equal(
+	ret = pkm_lcs_key_fd_value_name_casefold_equal_with_limits(
 		input->value_name, args->name_len, precedence_name,
-		sizeof(precedence_name) - 1, &is_precedence);
+		sizeof(precedence_name) - 1, &input->limits, &is_precedence);
 	if (ret)
 		return ret;
 	if (!is_precedence)
@@ -3000,9 +3000,9 @@ static long pkm_lcs_key_fd_set_value_precedence_tcb_gate(
 	return 0;
 }
 
-static long pkm_lcs_key_fd_layer_name_casefold_equal(
+static long pkm_lcs_key_fd_layer_name_casefold_equal_with_limits(
 	const char *left, u32 left_len, const char *right, u32 right_len,
-	bool *equal)
+	const struct pkm_lcs_runtime_limits *limits, bool *equal)
 {
 	u8 raw_equal = 0;
 	int ret;
@@ -3010,38 +3010,51 @@ static long pkm_lcs_key_fd_layer_name_casefold_equal(
 	if (!equal)
 		return -EINVAL;
 	*equal = false;
-	if (!left || !right)
+	if (!left || !right || !limits)
 		return -EINVAL;
 
 	ret = lcs_rust_layer_name_casefold_eq((const u8 *)left, left_len,
 					      (const u8 *)right, right_len,
-					      &raw_equal);
+					      limits, &raw_equal);
 	if (ret)
 		return ret;
 	*equal = raw_equal != 0;
 	return 0;
 }
 
-static long pkm_lcs_key_fd_path_component_casefold_equal(
-	const char *component, const char *expected, bool *equal)
+static long pkm_lcs_key_fd_layer_name_casefold_equal(
+	const char *left, u32 left_len, const char *right, u32 right_len,
+	bool *equal)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_key_fd_layer_name_casefold_equal_with_limits(
+		left, left_len, right, right_len, &limits, equal);
+}
+
+static long pkm_lcs_key_fd_path_component_casefold_equal_with_limits(
+	const char *component, const char *expected,
+	const struct pkm_lcs_runtime_limits *limits, bool *equal)
 {
 	size_t component_len;
 	size_t expected_len;
 
-	if (!component || !expected || !equal)
+	if (!component || !expected || !limits || !equal)
 		return -EINVAL;
 	component_len = strlen(component);
 	expected_len = strlen(expected);
 	if (component_len > U32_MAX || expected_len > U32_MAX)
 		return -EOVERFLOW;
-	return pkm_lcs_key_fd_value_name_casefold_equal(
+	return pkm_lcs_key_fd_value_name_casefold_equal_with_limits(
 		component, (u32)component_len, expected, (u32)expected_len,
-		equal);
+		limits, equal);
 }
 
-static long pkm_lcs_key_fd_layer_metadata_path(
+static long pkm_lcs_key_fd_layer_metadata_path_with_limits(
 	const struct pkm_lcs_key_fd *key_fd, const char **layer_name_out,
-	u32 *layer_name_len_out, bool *matches_out)
+	u32 *layer_name_len_out, const struct pkm_lcs_runtime_limits *limits,
+	bool *matches_out)
 {
 	static const char * const prefix[] = {
 		"Machine", "System", "Registry", "Layers"
@@ -3054,7 +3067,7 @@ static long pkm_lcs_key_fd_layer_metadata_path(
 	*layer_name_out = NULL;
 	*layer_name_len_out = 0;
 	*matches_out = false;
-	if (!key_fd || !key_fd->resolved_path)
+	if (!key_fd || !key_fd->resolved_path || !limits)
 		return -EINVAL;
 	if (key_fd->path_component_count != ARRAY_SIZE(prefix) + 1U)
 		return 0;
@@ -3065,8 +3078,8 @@ static long pkm_lcs_key_fd_layer_metadata_path(
 
 		if (!key_fd->resolved_path[i])
 			return -EINVAL;
-		ret = pkm_lcs_key_fd_path_component_casefold_equal(
-			key_fd->resolved_path[i], prefix[i], &equal);
+		ret = pkm_lcs_key_fd_path_component_casefold_equal_with_limits(
+			key_fd->resolved_path[i], prefix[i], limits, &equal);
 		if (ret)
 			return ret;
 		if (!equal)
@@ -3085,21 +3098,22 @@ static long pkm_lcs_key_fd_layer_metadata_path(
 	return 0;
 }
 
-static long pkm_lcs_key_fd_query_layer_metadata_dword(
+static long pkm_lcs_key_fd_query_layer_metadata_dword_with_limits(
 	const struct pkm_lcs_key_fd *key_fd, const char *value_name,
-	u32 value_name_len, bool *found_out, u32 *value_out)
+	u32 value_name_len, const struct pkm_lcs_runtime_limits *limits,
+	bool *found_out, u32 *value_out)
 {
 	struct pkm_lcs_effective_value_snapshot snapshot = { };
 	const u8 *data;
 	long ret;
 
-	if (!found_out || !value_out)
+	if (!limits || !found_out || !value_out)
 		return -EINVAL;
 	*found_out = false;
 	*value_out = 0;
 
-	ret = pkm_lcs_key_fd_query_effective_value_snapshot(
-		key_fd, 0, value_name, value_name_len, &snapshot);
+	ret = pkm_lcs_key_fd_query_effective_value_snapshot_with_limits(
+		key_fd, 0, value_name, value_name_len, limits, &snapshot);
 	if (ret)
 		return ret;
 	if (!snapshot.result.found)
@@ -3118,21 +3132,23 @@ out:
 	return ret;
 }
 
-static long pkm_lcs_key_fd_query_layer_metadata_owner(
+static long pkm_lcs_key_fd_query_layer_metadata_owner_with_limits(
 	const struct pkm_lcs_key_fd *key_fd, const char *value_name,
-	u32 value_name_len, struct pkm_lcs_effective_value_snapshot *snapshot,
+	u32 value_name_len, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_effective_value_snapshot *snapshot,
 	bool *found_out, const u8 **owner_sid_out, size_t *owner_sid_len_out)
 {
 	long ret;
 
-	if (!snapshot || !found_out || !owner_sid_out || !owner_sid_len_out)
+	if (!limits || !snapshot || !found_out || !owner_sid_out ||
+	    !owner_sid_len_out)
 		return -EINVAL;
 	*found_out = false;
 	*owner_sid_out = NULL;
 	*owner_sid_len_out = 0;
 
-	ret = pkm_lcs_key_fd_query_effective_value_snapshot(
-		key_fd, 0, value_name, value_name_len, snapshot);
+	ret = pkm_lcs_key_fd_query_effective_value_snapshot_with_limits(
+		key_fd, 0, value_name, value_name_len, limits, snapshot);
 	if (ret) {
 		pkm_lcs_effective_value_snapshot_destroy(snapshot);
 		return ret;
@@ -3197,6 +3213,7 @@ static long pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context(
 	struct pkm_lcs_source_response_frame read_frame = { };
 	struct pkm_lcs_source_response_result read_response = { };
 	struct pkm_lcs_effective_value_snapshot owner_snapshot = { };
+	struct pkm_lcs_runtime_limits limits;
 	const char *layer_name = NULL;
 	const u8 *sd = NULL;
 	const u8 *owner_sid = NULL;
@@ -3220,15 +3237,16 @@ static long pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context(
 
 	if (effective_changed_out)
 		*effective_changed_out = false;
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
 
-	ret = pkm_lcs_key_fd_layer_metadata_path(
-		key_fd, &layer_name, &layer_name_len, &matches);
+	ret = pkm_lcs_key_fd_layer_metadata_path_with_limits(
+		key_fd, &layer_name, &layer_name_len, &limits, &matches);
 	if (ret || !matches)
 		return ret;
 
-	ret = pkm_lcs_key_fd_layer_name_casefold_equal(
+	ret = pkm_lcs_key_fd_layer_name_casefold_equal_with_limits(
 		layer_name, layer_name_len, base_name, sizeof(base_name) - 1,
-		&is_base);
+		&limits, &is_base);
 	if (ret)
 		return ret;
 
@@ -3250,17 +3268,17 @@ static long pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context(
 		goto out_read_frame;
 	}
 
-	ret = pkm_lcs_key_fd_query_layer_metadata_dword(
-		key_fd, precedence_name, sizeof(precedence_name) - 1, &found,
-		&precedence);
+	ret = pkm_lcs_key_fd_query_layer_metadata_dword_with_limits(
+		key_fd, precedence_name, sizeof(precedence_name) - 1, &limits,
+		&found, &precedence);
 	if (ret)
 		goto out_read_frame;
 	if (!found)
 		precedence = 0;
 
-	ret = pkm_lcs_key_fd_query_layer_metadata_dword(
-		key_fd, enabled_name, sizeof(enabled_name) - 1, &found,
-		&enabled_raw);
+	ret = pkm_lcs_key_fd_query_layer_metadata_dword_with_limits(
+		key_fd, enabled_name, sizeof(enabled_name) - 1, &limits,
+		&found, &enabled_raw);
 	if (ret)
 		goto out_read_frame;
 	if (!found) {
@@ -3272,9 +3290,9 @@ static long pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context(
 		goto out_read_frame;
 	}
 
-	ret = pkm_lcs_key_fd_query_layer_metadata_owner(
-		key_fd, owner_name, sizeof(owner_name) - 1, &owner_snapshot,
-		&owner_found, &owner_sid, &owner_sid_len);
+	ret = pkm_lcs_key_fd_query_layer_metadata_owner_with_limits(
+		key_fd, owner_name, sizeof(owner_name) - 1, &limits,
+		&owner_snapshot, &owner_found, &owner_sid, &owner_sid_len);
 	if (ret)
 		goto out_read_frame;
 
@@ -3293,10 +3311,10 @@ static long pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context(
 	if (ret)
 		goto out_previous_owner;
 
-	ret = pkm_lcs_layer_table_publish_with_result(
+	ret = pkm_lcs_layer_table_publish_with_result_with_limits(
 		layer_name, layer_name_len, precedence, enabled,
 		key_fd->key_guid, sd, sd_len, selected_owner_sid,
-		selected_owner_sid_len, &publish_result);
+		selected_owner_sid_len, &limits, &publish_result);
 	if (ret == -EIO)
 		pkm_lcs_key_fd_emit_layer_metadata_sd_validation_failure(
 			key_fd, &read_response);
@@ -3317,6 +3335,7 @@ static long pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
 	const struct pkm_lcs_key_fd *key_fd, bool *orchestrated_out)
 {
 	static const char base_name[] = "base";
+	struct pkm_lcs_runtime_limits limits;
 	const char *layer_name = NULL;
 	u32 layer_name_len = 0;
 	bool matches = false;
@@ -3327,15 +3346,16 @@ static long pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
 		*orchestrated_out = false;
 	if (!orchestrated_out)
 		return -EINVAL;
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
 
-	ret = pkm_lcs_key_fd_layer_metadata_path(
-		key_fd, &layer_name, &layer_name_len, &matches);
+	ret = pkm_lcs_key_fd_layer_metadata_path_with_limits(
+		key_fd, &layer_name, &layer_name_len, &limits, &matches);
 	if (ret || !matches)
 		return ret;
 
-	ret = pkm_lcs_key_fd_layer_name_casefold_equal(
+	ret = pkm_lcs_key_fd_layer_name_casefold_equal_with_limits(
 		layer_name, layer_name_len, base_name, sizeof(base_name) - 1,
-		&is_base);
+		&limits, &is_base);
 	if (ret)
 		return ret;
 	if (is_base)
