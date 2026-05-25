@@ -18,6 +18,7 @@ use crate::lcs_core::{
     parse_rsi_query_values_success_response_payload, parse_rsi_read_key_success_response_payload,
     parse_rsi_request_header, plan_backup_complete_audit_record, plan_backup_restore_fd_mode,
     plan_backup_start_audit_record, plan_key_guid_assignment, plan_key_open_audit_record,
+    plan_restore_complete_audit_record, plan_restore_start_audit_record,
     plan_source_validation_failure_audit_record, plan_layer_publication,
     plan_layer_target_admission, plan_registry_get_security,
     plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
@@ -1984,6 +1985,121 @@ pub unsafe extern "C" fn lcs_rust_backup_complete_audit_payload(
 
     let record =
         match plan_backup_complete_audit_record(caller_summary, key_guid_copy, result_errno) {
+            Ok(record) => record,
+            Err(err) => return backup_audit_error_return(err),
+        };
+    let required_len = match backup_restore_complete_audit_payload_len(&record) {
+        Ok(len) => len,
+        Err(err) => return backup_audit_error_return(err),
+    };
+    *written_out = required_len;
+
+    if output.is_null() {
+        return if output_len == 0 {
+            0
+        } else {
+            LinuxErrno::Einval.negated_return() as c_int
+        };
+    }
+
+    let output = unsafe { slice::from_raw_parts_mut(output, output_len) };
+    match write_backup_restore_complete_audit_payload(&record, output) {
+        Ok(plan) => {
+            *written_out = plan.bytes;
+            0
+        }
+        Err(err) => backup_audit_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_restore_start_audit_payload(
+    caller: *const PkmLcsAuditCallerSummaryCopy,
+    key_guid: *const u8,
+    input_fd: i32,
+    output: *mut u8,
+    output_len: usize,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out = 0;
+
+    let Some(caller) = (unsafe { caller.as_ref() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    if key_guid.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let caller_summary = match audit_caller_summary_from_copy(caller) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let key_guid_bytes = unsafe { slice::from_raw_parts(key_guid, 16) };
+    let mut key_guid_copy = [0u8; 16];
+    key_guid_copy.copy_from_slice(key_guid_bytes);
+
+    let record = match plan_restore_start_audit_record(caller_summary, key_guid_copy, input_fd) {
+        Ok(record) => record,
+        Err(err) => return backup_audit_error_return(err),
+    };
+    let required_len = match backup_restore_start_audit_payload_len(&record) {
+        Ok(len) => len,
+        Err(err) => return backup_audit_error_return(err),
+    };
+    *written_out = required_len;
+
+    if output.is_null() {
+        return if output_len == 0 {
+            0
+        } else {
+            LinuxErrno::Einval.negated_return() as c_int
+        };
+    }
+
+    let output = unsafe { slice::from_raw_parts_mut(output, output_len) };
+    match write_backup_restore_start_audit_payload(&record, output) {
+        Ok(plan) => {
+            *written_out = plan.bytes;
+            0
+        }
+        Err(err) => backup_audit_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_restore_complete_audit_payload(
+    caller: *const PkmLcsAuditCallerSummaryCopy,
+    key_guid: *const u8,
+    result_errno: u32,
+    output: *mut u8,
+    output_len: usize,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out = 0;
+
+    let Some(caller) = (unsafe { caller.as_ref() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    if key_guid.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let caller_summary = match audit_caller_summary_from_copy(caller) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let key_guid_bytes = unsafe { slice::from_raw_parts(key_guid, 16) };
+    let mut key_guid_copy = [0u8; 16];
+    key_guid_copy.copy_from_slice(key_guid_bytes);
+
+    let record =
+        match plan_restore_complete_audit_record(caller_summary, key_guid_copy, result_errno) {
             Ok(record) => record,
             Err(err) => return backup_audit_error_return(err),
         };

@@ -93,6 +93,10 @@ static const char pkm_lcs_backup_start_event_type[] =
 	"LCS_BACKUP_START";
 static const char pkm_lcs_backup_complete_event_type[] =
 	"LCS_BACKUP_COMPLETE";
+static const char pkm_lcs_restore_start_event_type[] =
+	"LCS_RESTORE_START";
+static const char pkm_lcs_restore_complete_event_type[] =
+	"LCS_RESTORE_COMPLETE";
 static const char pkm_lcs_source_validation_failure_event_type[] =
 	"LCS_SOURCE_VALIDATION_FAILURE";
 static const char pkm_lcs_self_config_invalid_event_type[] =
@@ -1375,6 +1379,14 @@ extern int lcs_rust_backup_start_audit_payload(
 	const u8 key_guid[16], s32 output_fd, u8 *output, size_t output_len,
 	size_t *written_out);
 extern int lcs_rust_backup_complete_audit_payload(
+	const struct pkm_lcs_audit_caller_summary *caller,
+	const u8 key_guid[16], u32 result_errno, u8 *output,
+	size_t output_len, size_t *written_out);
+extern int lcs_rust_restore_start_audit_payload(
+	const struct pkm_lcs_audit_caller_summary *caller,
+	const u8 key_guid[16], s32 input_fd, u8 *output, size_t output_len,
+	size_t *written_out);
+extern int lcs_rust_restore_complete_audit_payload(
 	const struct pkm_lcs_audit_caller_summary *caller,
 	const u8 key_guid[16], u32 result_errno, u8 *output,
 	size_t output_len, size_t *written_out);
@@ -7938,6 +7950,90 @@ long pkm_lcs_emit_backup_complete_audit_for_token(
 	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS,
 			     pkm_lcs_backup_complete_event_type,
 			     sizeof(pkm_lcs_backup_complete_event_type) - 1,
+			     payload, written);
+	kfree(payload);
+	return 0;
+}
+
+long pkm_lcs_emit_restore_start_audit_for_token(
+	const void *token, const u8 key_guid[16], int input_fd)
+{
+	struct pkm_lcs_audit_caller_summary caller = { };
+	size_t payload_len = 0;
+	size_t written = 0;
+	u8 *payload;
+	long ret;
+
+	if (!token || !key_guid)
+		return -EINVAL;
+
+	ret = pkm_lcs_build_audit_caller_summary(token, &caller);
+	if (ret)
+		return ret;
+
+	ret = lcs_rust_restore_start_audit_payload(
+		&caller, key_guid, input_fd, NULL, 0, &payload_len);
+	if (ret)
+		return -EIO;
+	if (!payload_len || payload_len > U32_MAX)
+		return -EIO;
+
+	payload = kmalloc(payload_len, GFP_KERNEL);
+	if (!payload)
+		return -EIO;
+
+	ret = lcs_rust_restore_start_audit_payload(
+		&caller, key_guid, input_fd, payload, payload_len, &written);
+	if (ret || written != payload_len) {
+		kfree(payload);
+		return -EIO;
+	}
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS, pkm_lcs_restore_start_event_type,
+			     sizeof(pkm_lcs_restore_start_event_type) - 1,
+			     payload, written);
+	kfree(payload);
+	return 0;
+}
+
+long pkm_lcs_emit_restore_complete_audit_for_token(
+	const void *token, const u8 key_guid[16], u32 result_errno)
+{
+	struct pkm_lcs_audit_caller_summary caller = { };
+	size_t payload_len = 0;
+	size_t written = 0;
+	u8 *payload;
+	long ret;
+
+	if (!token || !key_guid)
+		return -EINVAL;
+
+	ret = pkm_lcs_build_audit_caller_summary(token, &caller);
+	if (ret)
+		return ret;
+
+	ret = lcs_rust_restore_complete_audit_payload(
+		&caller, key_guid, result_errno, NULL, 0, &payload_len);
+	if (ret)
+		return -EIO;
+	if (!payload_len || payload_len > U32_MAX)
+		return -EIO;
+
+	payload = kmalloc(payload_len, GFP_KERNEL);
+	if (!payload)
+		return -EIO;
+
+	ret = lcs_rust_restore_complete_audit_payload(
+		&caller, key_guid, result_errno, payload, payload_len,
+		&written);
+	if (ret || written != payload_len) {
+		kfree(payload);
+		return -EIO;
+	}
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS,
+			     pkm_lcs_restore_complete_event_type,
+			     sizeof(pkm_lcs_restore_complete_event_type) - 1,
 			     payload, written);
 	kfree(payload);
 	return 0;

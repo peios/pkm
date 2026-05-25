@@ -5020,6 +5020,44 @@ static long pkm_lcs_key_fd_backup_release_read_only_snapshot(
 	return ret;
 }
 
+static long pkm_lcs_key_fd_restore_begin_read_write_transaction(
+	struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_runtime_limits *limits, u64 *transaction_id_out)
+{
+	u64 transaction_id = 0;
+	long ret;
+
+	if (transaction_id_out)
+		*transaction_id_out = 0;
+	if (!key_fd || !limits || !transaction_id_out)
+		return -EINVAL;
+
+	ret = pkm_lcs_transaction_id_allocate(&transaction_id);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_source_begin_transaction_round_trip_timeout_with_limits(
+		key_fd->source_id, transaction_id, RSI_TXN_READ_WRITE, limits,
+		limits->request_timeout_ms, NULL, NULL);
+	if (ret)
+		return ret;
+
+	*transaction_id_out = transaction_id;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_restore_abort_read_write_transaction(
+	struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_runtime_limits *limits, u64 transaction_id)
+{
+	if (!key_fd || !limits || !transaction_id)
+		return -EINVAL;
+
+	return pkm_lcs_source_abort_transaction_round_trip_timeout_with_limits(
+		key_fd->source_id, transaction_id, limits,
+		limits->request_timeout_ms, NULL, NULL);
+}
+
 static u32 pkm_lcs_key_fd_audit_result_errno(long ret)
 {
 	if (ret < 0)
@@ -7083,6 +7121,10 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct reg_restore_args *args)
 {
+	struct pkm_lcs_runtime_limits limits;
+	u64 transaction_id = 0;
+	bool restore_started = false;
+	bool start_audit_failed = false;
 	long ret;
 
 	if (!key_fd || !args)
@@ -7098,12 +7140,48 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_key_fd_mark_privilege_used(token,
-						 KACS_SE_RESTORE_PRIVILEGE);
+	if (READ_ONCE(key_fd->orphaned))
+		return -ENOENT;
+
+	ret = pkm_lcs_runtime_limits_snapshot(&limits);
 	if (ret)
 		return ret;
 
-	return -EOPNOTSUPP;
+	ret = pkm_lcs_key_fd_restore_begin_read_write_transaction(
+		key_fd, &limits, &transaction_id);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_emit_restore_start_audit_for_token(
+		token, key_fd->key_guid, args->input_fd);
+	if (ret) {
+		start_audit_failed = true;
+		ret = -EIO;
+		goto out_abort_transaction;
+	}
+	restore_started = true;
+
+	ret = pkm_lcs_key_fd_mark_privilege_used(token,
+						 KACS_SE_RESTORE_PRIVILEGE);
+	if (ret)
+		goto out_abort_transaction;
+
+	ret = -EOPNOTSUPP;
+
+out_abort_transaction:
+	{
+		long abort_ret;
+
+		abort_ret = pkm_lcs_key_fd_restore_abort_read_write_transaction(
+			key_fd, &limits, transaction_id);
+		if (abort_ret && !start_audit_failed)
+			ret = abort_ret;
+	}
+	if (restore_started)
+		(void)pkm_lcs_emit_restore_complete_audit_for_token(
+			token, key_fd->key_guid,
+			pkm_lcs_key_fd_audit_result_errno(ret));
+	return ret;
 }
 
 static long pkm_lcs_key_fd_restore_from_args(
