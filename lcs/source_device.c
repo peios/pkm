@@ -3415,10 +3415,12 @@ static long pkm_lcs_source_dispatch_delete_value_entry_request_with_waiter(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *value_name, u32 value_name_len,
 	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	struct pkm_lcs_source_queued_request *request;
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
@@ -3434,6 +3436,10 @@ static long pkm_lcs_source_dispatch_delete_value_entry_request_with_waiter(
 	if (value_name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD ||
 	    layer_name_len > PKM_LCS_MAX_LAYER_NAME_BYTES_HARD)
 		return -ENAMETOOLONG;
+	if (!limits) {
+		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
 			       (size_t)RSI_GUID_SIZE, &frame_len) ||
 	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
@@ -3485,7 +3491,7 @@ static long pkm_lcs_source_dispatch_delete_value_entry_request_with_waiter(
 	ret = pkm_lcs_rsi_build_delete_value_entry_request(
 		request->frame, frame_len, request_id, txn_id, guid,
 		value_name, value_name_len, layer_name, layer_name_len,
-		&built);
+		limits, &built);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -3519,10 +3525,12 @@ out_unlock_table:
 static long pkm_lcs_source_dispatch_set_blanket_tombstone_request_with_waiter(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *layer_name, u32 layer_name_len, bool set, u64 sequence,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	struct pkm_lcs_source_queued_request *request;
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
@@ -3537,6 +3545,10 @@ static long pkm_lcs_source_dispatch_set_blanket_tombstone_request_with_waiter(
 		return -EINVAL;
 	if (layer_name_len > PKM_LCS_MAX_LAYER_NAME_BYTES_HARD)
 		return -ENAMETOOLONG;
+	if (!limits) {
+		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
 			       (size_t)RSI_GUID_SIZE, &frame_len) ||
 	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
@@ -3586,7 +3598,7 @@ static long pkm_lcs_source_dispatch_set_blanket_tombstone_request_with_waiter(
 
 	ret = pkm_lcs_rsi_build_set_blanket_tombstone_request(
 		request->frame, frame_len, request_id, txn_id, guid,
-		layer_name, layer_name_len, set, sequence, &built);
+		layer_name, layer_name_len, set, sequence, limits, &built);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -4858,7 +4870,7 @@ long pkm_lcs_source_dispatch_delete_value_entry_request(
 {
 	return pkm_lcs_source_dispatch_delete_value_entry_request_with_waiter(
 		source_id, txn_id, guid, value_name, value_name_len,
-		layer_name, layer_name_len, NULL, result);
+		layer_name, layer_name_len, NULL, NULL, result);
 }
 
 long pkm_lcs_source_dispatch_delete_value_entry_waitable_request(
@@ -4874,7 +4886,7 @@ long pkm_lcs_source_dispatch_delete_value_entry_waitable_request(
 	pkm_lcs_source_response_waiter_init(waiter);
 	return pkm_lcs_source_dispatch_delete_value_entry_request_with_waiter(
 		source_id, txn_id, guid, value_name, value_name_len,
-		layer_name, layer_name_len, waiter, result);
+		layer_name, layer_name_len, NULL, waiter, result);
 }
 
 long pkm_lcs_source_dispatch_set_blanket_tombstone_request(
@@ -4884,7 +4896,7 @@ long pkm_lcs_source_dispatch_set_blanket_tombstone_request(
 {
 	return pkm_lcs_source_dispatch_set_blanket_tombstone_request_with_waiter(
 		source_id, txn_id, guid, layer_name, layer_name_len, set,
-		sequence, NULL, result);
+		sequence, NULL, NULL, result);
 }
 
 long pkm_lcs_source_dispatch_set_blanket_tombstone_waitable_request(
@@ -4899,7 +4911,7 @@ long pkm_lcs_source_dispatch_set_blanket_tombstone_waitable_request(
 	pkm_lcs_source_response_waiter_init(waiter);
 	return pkm_lcs_source_dispatch_set_blanket_tombstone_request_with_waiter(
 		source_id, txn_id, guid, layer_name, layer_name_len, set,
-		sequence, waiter, result);
+		sequence, NULL, waiter, result);
 }
 
 long pkm_lcs_source_dispatch_drop_key_request(
@@ -5787,10 +5799,11 @@ long pkm_lcs_source_set_value_round_trip_timeout(
 		enqueue);
 }
 
-long pkm_lcs_source_delete_value_entry_round_trip_timeout(
+long pkm_lcs_source_delete_value_entry_round_trip_timeout_with_limits(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *value_name, u32 value_name_len,
-	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
@@ -5813,7 +5826,7 @@ long pkm_lcs_source_delete_value_entry_round_trip_timeout(
 
 		ret = pkm_lcs_source_dispatch_delete_value_entry_request_with_waiter(
 			source_id, txn_id, guid, value_name, value_name_len,
-			layer_name, layer_name_len, &waiter, enqueue);
+			layer_name, layer_name_len, limits, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -5826,10 +5839,23 @@ long pkm_lcs_source_delete_value_entry_round_trip_timeout(
 							 response);
 }
 
-long pkm_lcs_source_set_blanket_tombstone_round_trip_timeout(
+long pkm_lcs_source_delete_value_entry_round_trip_timeout(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *value_name, u32 value_name_len,
+	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_delete_value_entry_round_trip_timeout_with_limits(
+		source_id, txn_id, guid, value_name, value_name_len,
+		layer_name, layer_name_len, NULL, timeout_ms, response, enqueue);
+}
+
+long pkm_lcs_source_set_blanket_tombstone_round_trip_timeout_with_limits(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *layer_name, u32 layer_name_len, bool set, u64 sequence,
-	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
 	struct pkm_lcs_source_response_waiter waiter;
@@ -5851,7 +5877,7 @@ long pkm_lcs_source_set_blanket_tombstone_round_trip_timeout(
 
 		ret = pkm_lcs_source_dispatch_set_blanket_tombstone_request_with_waiter(
 			source_id, txn_id, guid, layer_name, layer_name_len,
-			set, sequence, &waiter, enqueue);
+			set, sequence, limits, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -5862,6 +5888,17 @@ long pkm_lcs_source_set_blanket_tombstone_round_trip_timeout(
 
 	return pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
 							 response);
+}
+
+long pkm_lcs_source_set_blanket_tombstone_round_trip_timeout(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *layer_name, u32 layer_name_len, bool set, u64 sequence,
+	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_set_blanket_tombstone_round_trip_timeout_with_limits(
+		source_id, txn_id, guid, layer_name, layer_name_len, set,
+		sequence, NULL, timeout_ms, response, enqueue);
 }
 
 long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
@@ -7663,7 +7700,7 @@ long pkm_lcs_resolve_symlink_target_for_key(
 	ret = pkm_lcs_rsi_materialize_query_value_response(
 		frame.data, frame.len, response.request_id, next_sequence,
 		"", 0, active_layers, active_layer_count,
-		active_private_layers, active_private_layer_count, &value);
+		active_private_layers, active_private_layer_count, NULL, &value);
 	if (ret)
 		goto out_destroy;
 	if (!value.found || value.value_type != REG_LINK) {

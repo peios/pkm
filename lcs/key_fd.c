@@ -134,10 +134,12 @@ struct pkm_lcs_set_value_input {
 struct pkm_lcs_delete_value_input {
 	char *value_name;
 	struct pkm_lcs_create_layer_target target;
+	struct pkm_lcs_runtime_limits limits;
 };
 
 struct pkm_lcs_blanket_tombstone_input {
 	struct pkm_lcs_create_layer_target target;
+	struct pkm_lcs_runtime_limits limits;
 	bool set;
 };
 
@@ -167,6 +169,8 @@ struct pkm_lcs_delete_key_post_lookup {
 
 static void pkm_lcs_value_watch_event_bytes_destroy(
 	struct pkm_lcs_value_watch_event_bytes *events);
+static void pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
+	struct pkm_lcs_runtime_limits *limits);
 
 static const struct file_operations pkm_lcs_key_fd_fops;
 static DEFINE_MUTEX(pkm_lcs_watch_registry_lock);
@@ -1344,13 +1348,15 @@ static long pkm_lcs_effective_value_snapshot_validate(
 	return 0;
 }
 
-static long pkm_lcs_key_fd_query_effective_value_snapshot(
+static long pkm_lcs_key_fd_query_effective_value_snapshot_with_limits(
 	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
 	const char *value_name, u32 value_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_effective_value_snapshot *snapshot)
 {
 	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	u64 next_sequence = 0;
 	long ret;
 
@@ -1358,6 +1364,10 @@ static long pkm_lcs_key_fd_query_effective_value_snapshot(
 		return -EINVAL;
 	memset(snapshot, 0, sizeof(*snapshot));
 	pkm_lcs_source_response_frame_init(&snapshot->frame);
+	if (!limits) {
+		pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
@@ -1366,10 +1376,11 @@ static long pkm_lcs_key_fd_query_effective_value_snapshot(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, value_name,
-		value_name_len, false, pkm_lcs_runtime_request_timeout_ms(),
-		&snapshot->frame, &response, NULL);
+		value_name_len, false, limits,
+		pkm_lcs_runtime_request_timeout_ms(), &snapshot->frame,
+		&response, NULL);
 	if (ret)
 		goto out_layer_snapshot;
 
@@ -1377,7 +1388,7 @@ static long pkm_lcs_key_fd_query_effective_value_snapshot(
 		snapshot->frame.data, snapshot->frame.len,
 		response.request_id, next_sequence, value_name, value_name_len,
 		layer_snapshot.layers, layer_snapshot.layer_count, NULL, 0,
-		&snapshot->result);
+		limits, &snapshot->result);
 	if (ret)
 		goto out_layer_snapshot;
 	ret = pkm_lcs_effective_value_snapshot_validate(snapshot);
@@ -1385,6 +1396,15 @@ static long pkm_lcs_key_fd_query_effective_value_snapshot(
 out_layer_snapshot:
 	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
+}
+
+static long pkm_lcs_key_fd_query_effective_value_snapshot(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const char *value_name, u32 value_name_len,
+	struct pkm_lcs_effective_value_snapshot *snapshot)
+{
+	return pkm_lcs_key_fd_query_effective_value_snapshot_with_limits(
+		key_fd, txn_id, value_name, value_name_len, NULL, snapshot);
 }
 
 static bool pkm_lcs_effective_value_snapshots_same(
@@ -1848,6 +1868,7 @@ static long pkm_lcs_key_fd_query_value_from_args(
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_query_value_result result = { };
+	struct pkm_lcs_runtime_limits limits;
 	char *value_name = NULL;
 	const u8 *data;
 	const u8 *layer;
@@ -1888,6 +1909,7 @@ static long pkm_lcs_key_fd_query_value_from_args(
 		key_fd->granted_access, REG_IOC_QUERY_VALUE_NR);
 	if (ret)
 		return ret;
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
 
 	ret = pkm_lcs_key_fd_query_value_prepare_read_context(key_fd, txn_fd,
 							      &txn_id);
@@ -1906,17 +1928,17 @@ static long pkm_lcs_key_fd_query_value_from_args(
 		goto out_name;
 
 	pkm_lcs_source_response_frame_init(&frame);
-	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, value_name,
-		name_len, false, pkm_lcs_runtime_request_timeout_ms(), &frame,
-		&response, NULL);
+		name_len, false, &limits, pkm_lcs_runtime_request_timeout_ms(),
+		&frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
 	ret = pkm_lcs_rsi_materialize_query_value_response(
 		frame.data, frame.len, response.request_id, next_sequence,
 		value_name, name_len, layer_snapshot.layers,
-		layer_snapshot.layer_count, NULL, 0, &result);
+		layer_snapshot.layer_count, NULL, 0, &limits, &result);
 	if (ret)
 		goto out_frame;
 	if (!result.found) {
@@ -2385,6 +2407,7 @@ static long pkm_lcs_key_fd_copy_delete_value_input(
 	if (!ops || !ops->read || !args || !key_fd || !input)
 		return -EINVAL;
 	memset(input, 0, sizeof(*input));
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&input->limits);
 
 	ret = pkm_lcs_key_fd_copy_delete_value_name(ops, args, input);
 	if (ret)
@@ -2394,7 +2417,7 @@ static long pkm_lcs_key_fd_copy_delete_value_input(
 		return ret;
 	return pkm_lcs_rsi_validate_delete_value_user_shape(
 		key_fd->key_guid, input->value_name, args->name_len,
-		input->target.name, input->target.name_len);
+		input->target.name, input->target.name_len, &input->limits);
 }
 
 static long pkm_lcs_key_fd_copy_blanket_tombstone_input(
@@ -2404,12 +2427,14 @@ static long pkm_lcs_key_fd_copy_blanket_tombstone_input(
 	struct pkm_lcs_blanket_tombstone_input *input)
 {
 	struct pkm_lcs_rsi_built_request built = { };
-	u8 frame[128];
+	u8 frame[RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE + sizeof(u32) +
+		 1024U + sizeof(u8) + sizeof(u64)];
 	long ret;
 
 	if (!ops || !ops->read || !args || !key_fd || !input)
 		return -EINVAL;
 	memset(input, 0, sizeof(*input));
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&input->limits);
 	if (args->set != 0 && args->set != 1)
 		return -EINVAL;
 
@@ -2421,7 +2446,7 @@ static long pkm_lcs_key_fd_copy_blanket_tombstone_input(
 	return pkm_lcs_rsi_build_set_blanket_tombstone_request(
 		frame, sizeof(frame), 1, 0, key_fd->key_guid,
 		input->target.name, input->target.name_len, input->set,
-		input->set ? 1ULL : 0ULL, &built);
+		input->set ? 1ULL : 0ULL, &input->limits, &built);
 }
 
 static long pkm_lcs_key_fd_copy_hide_key_input(
@@ -3995,20 +4020,23 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 		txn_id = binding.transaction_id;
 	}
 
-	ret = pkm_lcs_key_fd_query_effective_value_snapshot(
-		key_fd, txn_id, input.value_name, args->name_len, &before);
+	ret = pkm_lcs_key_fd_query_effective_value_snapshot_with_limits(
+		key_fd, txn_id, input.value_name, args->name_len,
+		&input.limits, &before);
 	if (ret)
 		goto out_cancel_mutation;
 
-	ret = pkm_lcs_source_delete_value_entry_round_trip_timeout(
+	ret = pkm_lcs_source_delete_value_entry_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, input.value_name,
 		args->name_len, input.target.name, input.target.name_len,
-		pkm_lcs_runtime_request_timeout_ms(), &response, NULL);
+		&input.limits, pkm_lcs_runtime_request_timeout_ms(), &response,
+		NULL);
 	if (ret)
 		goto out_before;
 
-	ret = pkm_lcs_key_fd_query_effective_value_snapshot(
-		key_fd, txn_id, input.value_name, args->name_len, &after);
+	ret = pkm_lcs_key_fd_query_effective_value_snapshot_with_limits(
+		key_fd, txn_id, input.value_name, args->name_len,
+		&input.limits, &after);
 	if (ret)
 		goto out_before;
 
@@ -4151,10 +4179,11 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 	if (ret)
 		goto out_cancel_mutation;
 
-	ret = pkm_lcs_source_set_blanket_tombstone_round_trip_timeout(
+	ret = pkm_lcs_source_set_blanket_tombstone_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid,
 		input.target.name, input.target.name_len, input.set, sequence,
-		pkm_lcs_runtime_request_timeout_ms(), &mutation_response, NULL);
+		&input.limits, pkm_lcs_runtime_request_timeout_ms(),
+		&mutation_response, NULL);
 	if (ret)
 		goto out_before;
 

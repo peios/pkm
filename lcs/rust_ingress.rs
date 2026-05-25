@@ -2225,6 +2225,7 @@ pub unsafe extern "C" fn lcs_rust_validate_delete_value_user_shape(
     value_name_len: u32,
     layer_name: *const u8,
     layer_name_len: u32,
+    limits: *const PkmLcsRuntimeLimitsCopy,
 ) -> c_int {
     if guid.is_null()
         || (value_name_len != 0 && value_name.is_null())
@@ -2232,6 +2233,10 @@ pub unsafe extern "C" fn lcs_rust_validate_delete_value_user_shape(
     {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(err) => return err.negated_return() as c_int,
+    };
 
     let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
     if guid_bytes.iter().all(|byte| *byte == 0) {
@@ -2244,10 +2249,10 @@ pub unsafe extern "C" fn lcs_rust_validate_delete_value_user_shape(
     };
     let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
 
-    if let Err(err) = validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_value_name_bytes(value_name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
-    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
 
@@ -2500,6 +2505,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_delete_value_entry_request_frame(
     value_name_len: u32,
     layer_name: *const u8,
     layer_name_len: u32,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     built_out: *mut PkmLcsRsiBuiltRequestCopy,
 ) -> c_int {
     if built_out.is_null() {
@@ -2523,6 +2529,10 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_delete_value_entry_request_frame(
     {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(err) => return err.negated_return() as c_int,
+    };
 
     let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
     let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
@@ -2535,10 +2545,10 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_delete_value_entry_request_frame(
     };
     let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
 
-    if let Err(err) = validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_value_name_bytes(value_name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
-    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
 
@@ -2577,6 +2587,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_set_blanket_tombstone_request_frame(
     layer_name_len: u32,
     set: u8,
     sequence: u64,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     built_out: *mut PkmLcsRsiBuiltRequestCopy,
 ) -> c_int {
     if built_out.is_null() {
@@ -2596,6 +2607,10 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_set_blanket_tombstone_request_frame(
     if dst.is_null() || guid.is_null() || layer_name.is_null() || set > 1 {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(err) => return err.negated_return() as c_int,
+    };
 
     let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
     let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
@@ -2603,7 +2618,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_set_blanket_tombstone_request_frame(
     guid_copy.copy_from_slice(guid_bytes);
     let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
 
-    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
 
@@ -4869,6 +4884,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
     layer_count: usize,
     private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
     private_layer_count: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     result_out: *mut PkmLcsRsiQueryValueResultCopy,
 ) -> c_int {
     if result_out.is_null() {
@@ -4899,6 +4915,14 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
     {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(err) => return err.negated_return() as c_int,
+        }
+    };
 
     let value_name_bytes = if value_name_len == 0 {
         &[]
@@ -4909,7 +4933,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
         Ok(name) => name,
         Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
     };
-    if validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT).is_err() {
+    if validate_value_name_bytes(value_name_bytes, &limits).is_err() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
 
@@ -4934,12 +4958,10 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
         Err(err) => return rsi_query_values_response_error_return(err),
     };
 
-    if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &limits) {
         return rsi_query_values_response_error_return(err);
     }
-    if let Err(err) =
-        validate_rsi_query_values_response_value_payloads(&payload, &LcsLimits::DEFAULT)
-    {
+    if let Err(err) = validate_rsi_query_values_response_value_payloads(&payload, &limits) {
         return rsi_query_values_response_error_return(err);
     }
     if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {

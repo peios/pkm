@@ -11713,6 +11713,83 @@ static void pkm_lcs_kunit_key_fd_delete_value_idempotent_no_value_event(
 	kacs_rust_token_drop(source_token);
 }
 
+static void pkm_lcs_kunit_key_fd_delete_value_runtime_limits_source_frames(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x7d },
+	};
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_delete_value_args args = {
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_delete_value_ioctl_source_script script = {
+		.expected_guid = ancestors[1],
+		.expected_layer_name = "base",
+		.before_found = false,
+		.after_found = false,
+		.delete_status = RSI_OK,
+	};
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	struct task_struct *task;
+	char value_name[301];
+	long mutation_fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = 300U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	memset(value_name, 'd', sizeof(value_name) - 1);
+	value_name[sizeof(value_name) - 1] = '\0';
+	args.name_len = sizeof(value_name) - 1;
+	args.name_ptr = (u64)(unsigned long)value_name;
+	script.expected_value_name = value_name;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	script.file = &file;
+
+	mutation_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, mutation_fd >= 0);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_value_ioctl_source_thread, &script,
+		"pkm-lcs-kunit-delete-limits");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_delete_value_for_token(
+		(int)mutation_fd, admin_token, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
 static void pkm_lcs_kunit_key_fd_delete_value_fails_before_source(
 	struct kunit *test)
 {
@@ -21830,7 +21907,7 @@ static int pkm_lcs_kunit_delete_value_ioctl_source_write_query_response(
 				 script->before_value_type;
 	u64 sequence = after ? script->after_sequence : script->before_sequence;
 	bool found = after ? script->after_found : script->before_found;
-	u8 response[256];
+	u8 response[1024];
 	size_t offset = RSI_MIN_RESPONSE_SIZE;
 	ssize_t count;
 
@@ -22031,7 +22108,7 @@ static int pkm_lcs_kunit_delete_value_ioctl_source_thread(void *raw_script)
 	struct pkm_lcs_kunit_delete_value_ioctl_source_script *script =
 		raw_script;
 	bool continue_after_delete = false;
-	u8 request[256];
+	u8 request[1024];
 	int ret;
 
 	if (!script || !script->file || !script->expected_guid ||
@@ -22136,7 +22213,7 @@ pkm_lcs_kunit_blanket_tombstone_ioctl_source_write_query_response(
 				     script->before_blanket_found;
 	u64 blanket_sequence = after ? script->after_blanket_sequence :
 				       script->before_blanket_sequence;
-	u8 response[320];
+	u8 response[1024];
 	size_t offset = RSI_MIN_RESPONSE_SIZE;
 	ssize_t count;
 
@@ -22347,7 +22424,7 @@ pkm_lcs_kunit_blanket_tombstone_ioctl_source_thread(void *raw_script)
 	struct pkm_lcs_kunit_blanket_tombstone_ioctl_source_script *script =
 		raw_script;
 	bool continue_after_blanket = false;
-	u8 request[256];
+	u8 request[1024];
 	int ret;
 
 	if (!script || !script->file || !script->expected_guid ||
@@ -23409,10 +23486,10 @@ static void pkm_lcs_kunit_rsi_query_values_bridge_materializes_default_reg_link(
 					  &response_len);
 
 	KUNIT_ASSERT_EQ(test,
-			pkm_lcs_rsi_materialize_query_value_response(
-				response, response_len, built.request_id, 1,
-				"", 0, layers, ARRAY_SIZE(layers), NULL, 0,
-				&result),
+				pkm_lcs_rsi_materialize_query_value_response(
+					response, response_len, built.request_id, 1,
+					"", 0, layers, ARRAY_SIZE(layers), NULL, 0,
+					NULL, &result),
 			0L);
 	KUNIT_EXPECT_TRUE(test, result.found);
 	KUNIT_EXPECT_EQ(test, result.source_value_entry_count, 1U);
@@ -23465,9 +23542,9 @@ static void pkm_lcs_kunit_rsi_query_values_bridge_blanket_not_found(
 					  &response_len);
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_rsi_materialize_query_value_response(
-				response, response_len, 44, 3, "", 0, layers,
-				ARRAY_SIZE(layers), NULL, 0, &result),
+				pkm_lcs_rsi_materialize_query_value_response(
+					response, response_len, 44, 3, "", 0, layers,
+					ARRAY_SIZE(layers), NULL, 0, NULL, &result),
 			0L);
 	KUNIT_EXPECT_FALSE(test, result.found);
 	KUNIT_EXPECT_EQ(test, result.source_value_entry_count, 1U);
@@ -23501,9 +23578,9 @@ static void pkm_lcs_kunit_rsi_query_values_bridge_rejects_wrong_value(
 					  &response_len);
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_rsi_materialize_query_value_response(
-				response, response_len, 45, 1, "", 0, layers,
-				ARRAY_SIZE(layers), NULL, 0, &result),
+				pkm_lcs_rsi_materialize_query_value_response(
+					response, response_len, 45, 1, "", 0, layers,
+					ARRAY_SIZE(layers), NULL, 0, NULL, &result),
 			(long)-EIO);
 }
 
@@ -23826,10 +23903,10 @@ static void pkm_lcs_kunit_source_query_values_round_trip_retains_frame(
 	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_QUERY_VALUES);
 	KUNIT_ASSERT_NOT_NULL(test, frame.data);
 	KUNIT_ASSERT_EQ(test,
-			pkm_lcs_rsi_materialize_query_value_response(
-				frame.data, frame.len, response.request_id, 1,
-				"", 0, layers, ARRAY_SIZE(layers), NULL, 0,
-				&result),
+				pkm_lcs_rsi_materialize_query_value_response(
+					frame.data, frame.len, response.request_id, 1,
+					"", 0, layers, ARRAY_SIZE(layers), NULL, 0,
+					NULL, &result),
 			0L);
 	KUNIT_EXPECT_TRUE(test, result.found);
 	KUNIT_EXPECT_EQ(test, result.value_type, (u32)REG_LINK);
@@ -25427,6 +25504,91 @@ static void pkm_lcs_kunit_source_dispatch_set_blanket_tombstone_frame(
 
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void
+pkm_lcs_kunit_source_dispatch_set_blanket_tombstone_runtime_limits_frame(
+	struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
+		0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x81,
+	};
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	size_t payload_offset;
+	size_t layer_offset;
+	size_t set_offset;
+	size_t sequence_offset;
+	struct file file = { };
+	const void *token;
+	char layer_name[301];
+	u8 out[512];
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = 300U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	memset(layer_name, 'l', sizeof(layer_name) - 1);
+	layer_name[sizeof(layer_name) - 1] = '\0';
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_set_blanket_tombstone_request(
+				1, 0xb9b8b7b6b5b4b3b3ULL, guid,
+				layer_name, sizeof(layer_name) - 1, true,
+				0x0102030405060709ULL, &enqueue),
+			0L);
+	KUNIT_EXPECT_EQ(test, enqueue.request_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.txn_id, 0xb9b8b7b6b5b4b3b3ULL);
+	KUNIT_EXPECT_EQ(test, enqueue.op_code,
+			(u16)RSI_SET_BLANKET_TOMBSTONE);
+	KUNIT_EXPECT_EQ(test, enqueue.queue_depth, 1U);
+	KUNIT_EXPECT_EQ(test, enqueue.in_flight_count, 1U);
+
+	memset(out, 0, sizeof(out));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(out + RSI_REQUEST_TOTAL_LEN_OFFSET),
+			(u32)enqueue.len);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_ID_OFFSET), 0ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(out + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_SET_BLANKET_TOMBSTONE);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(out + RSI_REQUEST_TXN_ID_OFFSET),
+			0xb9b8b7b6b5b4b3b3ULL);
+
+	payload_offset = RSI_REQUEST_HEADER_SIZE;
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + payload_offset, guid, RSI_GUID_SIZE),
+			0);
+	layer_offset = payload_offset + RSI_GUID_SIZE;
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(out + layer_offset),
+			(u32)(sizeof(layer_name) - 1));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(out + layer_offset + RSI_LENGTH_PREFIX_SIZE,
+			       layer_name, sizeof(layer_name) - 1),
+			0);
+	set_offset = layer_offset + RSI_LENGTH_PREFIX_SIZE +
+		     sizeof(layer_name) - 1;
+	KUNIT_EXPECT_EQ(test, out[set_offset], (u8)1);
+	sequence_offset = set_offset + sizeof(u8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(out + sequence_offset),
+			0x0102030405060709ULL);
+	KUNIT_EXPECT_EQ(test, sequence_offset + sizeof(u64), enqueue.len);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
 	kacs_rust_token_drop(token);
 }
 
@@ -36458,12 +36620,12 @@ static void pkm_lcs_kunit_source_write_query_values_payload_validation(
 		} else {
 			KUNIT_ASSERT_NOT_NULL(test, frame.data);
 			KUNIT_EXPECT_EQ(test,
-					pkm_lcs_rsi_materialize_query_value_response(
-						frame.data, frame.len,
-						response.request_id, 1,
-						"Value", strlen("Value"),
-						layers, ARRAY_SIZE(layers),
-						NULL, 0, &value),
+						pkm_lcs_rsi_materialize_query_value_response(
+							frame.data, frame.len,
+							response.request_id, 1,
+							"Value", strlen("Value"),
+							layers, ARRAY_SIZE(layers),
+							NULL, 0, NULL, &value),
 					0L);
 			KUNIT_EXPECT_TRUE(test, value.found);
 			KUNIT_EXPECT_EQ(test, value.value_type, (u32)REG_BINARY);
@@ -38554,6 +38716,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_key_fd_delete_value_transactional_idempotent_no_event),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_delete_value_idempotent_no_value_event),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_delete_value_runtime_limits_source_frames),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_delete_value_fails_before_source),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_blanket_tombstone_set_deletes_effective_values),
@@ -38749,6 +38913,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_delete_value_entry_round_trip_statuses),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_dispatch_set_blanket_tombstone_frame),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_dispatch_set_blanket_tombstone_runtime_limits_frame),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_set_blanket_tombstone_round_trip_statuses),
 	KUNIT_CASE(pkm_lcs_kunit_source_dispatch_flush_frame),

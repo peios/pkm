@@ -31,18 +31,21 @@ extern int lcs_rust_write_rsi_delete_value_entry_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 *guid, const u8 *value_name, u32 value_name_len,
 	const u8 *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built);
 extern int lcs_rust_write_rsi_set_blanket_tombstone_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 *guid, const u8 *layer_name, u32 layer_name_len, u8 set,
-	u64 sequence, struct pkm_lcs_rsi_built_request *built);
+	u64 sequence, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_rsi_built_request *built);
 extern int lcs_rust_validate_set_value_user_shape(
 	const u8 *guid, const u8 *value_name, u32 value_name_len,
 	const u8 *layer_name, u32 layer_name_len, u32 value_type,
 	size_t data_len, const struct pkm_lcs_runtime_limits *limits);
 extern int lcs_rust_validate_delete_value_user_shape(
 	const u8 *guid, const u8 *value_name, u32 value_name_len,
-	const u8 *layer_name, u32 layer_name_len);
+	const u8 *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits);
 extern int lcs_rust_plan_set_value_layer_admission(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence, const u8 *value_name, u32 value_name_len,
@@ -166,6 +169,7 @@ extern int lcs_rust_materialize_rsi_query_value_response(
 	const struct pkm_lcs_rsi_layer_view *layers, size_t layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	size_t private_layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_query_value_result *result);
 extern int lcs_rust_materialize_rsi_enum_value_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
@@ -270,38 +274,41 @@ long pkm_lcs_rsi_build_delete_value_entry_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 guid[RSI_GUID_SIZE], const char *value_name,
 	u32 value_name_len, const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built)
 {
 	if (!built)
 		return -EINVAL;
 
 	memset(built, 0, sizeof(*built));
-	if (!dst || !guid || (value_name_len && !value_name) || !layer_name)
+	if (!dst || !guid || (value_name_len && !value_name) || !layer_name ||
+	    !limits)
 		return -EINVAL;
 
 	return lcs_rust_write_rsi_delete_value_entry_request_frame(
 		dst, dst_len, request_id, txn_id, guid,
 		(const u8 *)value_name, value_name_len,
-		(const u8 *)layer_name, layer_name_len, built);
+		(const u8 *)layer_name, layer_name_len, limits, built);
 }
 
 long pkm_lcs_rsi_build_set_blanket_tombstone_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 guid[RSI_GUID_SIZE], const char *layer_name,
 	u32 layer_name_len, bool set, u64 sequence,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built)
 {
 	if (!built)
 		return -EINVAL;
 
 	memset(built, 0, sizeof(*built));
-	if (!dst || !guid || !layer_name)
+	if (!dst || !guid || !layer_name || !limits)
 		return -EINVAL;
 
 	return lcs_rust_write_rsi_set_blanket_tombstone_request_frame(
 		dst, dst_len, request_id, txn_id, guid,
 		(const u8 *)layer_name, layer_name_len, set ? 1 : 0,
-		sequence, built);
+		sequence, limits, built);
 }
 
 long pkm_lcs_rsi_validate_set_value_user_shape(
@@ -322,14 +329,16 @@ long pkm_lcs_rsi_validate_set_value_user_shape(
 
 long pkm_lcs_rsi_validate_delete_value_user_shape(
 	const u8 guid[RSI_GUID_SIZE], const char *value_name,
-	u32 value_name_len, const char *layer_name, u32 layer_name_len)
+	u32 value_name_len, const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits)
 {
-	if (!guid || (value_name_len && !value_name) || !layer_name)
+	if (!guid || (value_name_len && !value_name) || !layer_name ||
+	    !limits)
 		return -EINVAL;
 
 	return lcs_rust_validate_delete_value_user_shape(
 		guid, (const u8 *)value_name, value_name_len,
-		(const u8 *)layer_name, layer_name_len);
+		(const u8 *)layer_name, layer_name_len, limits);
 }
 
 long pkm_lcs_rsi_plan_set_value_layer_admission(
@@ -820,7 +829,7 @@ long pkm_lcs_rsi_materialize_query_value_response(
 	u64 next_sequence, const char *value_name, u32 value_name_len,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
-	u32 private_layer_count,
+	u32 private_layer_count, const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_query_value_result *result)
 {
 	if (!result)
@@ -839,7 +848,7 @@ long pkm_lcs_rsi_materialize_query_value_response(
 	return lcs_rust_materialize_rsi_query_value_response(
 		frame, frame_len, request_id, next_sequence,
 		(const u8 *)value_name, value_name_len, layers, layer_count,
-		private_layers, private_layer_count, result);
+		private_layers, private_layer_count, limits, result);
 }
 
 long pkm_lcs_rsi_materialize_enum_value_response(

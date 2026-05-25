@@ -1138,10 +1138,23 @@ long pkm_lcs_source_delete_value_entry_round_trip_timeout(
 	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_delete_value_entry_round_trip_timeout_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *value_name, u32 value_name_len,
+	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_set_blanket_tombstone_round_trip_timeout(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *layer_name, u32 layer_name_len, bool set, u64 sequence,
 	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_set_blanket_tombstone_round_trip_timeout_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *layer_name, u32 layer_name_len, bool set, u64 sequence,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
