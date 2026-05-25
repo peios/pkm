@@ -1228,6 +1228,10 @@ extern int lcs_rust_self_config_invalid_audit_payload(
 	u32 received_kind, u32 received_type, u32 received_u32,
 	u32 retained_value, u8 *output, size_t output_len,
 	size_t *written_out);
+extern int lcs_rust_plan_self_config_apply(
+	const struct pkm_lcs_runtime_limits *current_limits,
+	const struct pkm_lcs_self_config_entry *entries, size_t entry_count,
+	struct pkm_lcs_self_config_apply_plan *plan_out);
 extern int lcs_rust_validate_syscall_relative_path(
 	const u8 *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result,
@@ -7130,6 +7134,59 @@ long pkm_lcs_emit_self_config_invalid_audit(
 			     sizeof(pkm_lcs_self_config_invalid_event_type) - 1,
 			     payload, written);
 	kfree(payload);
+	return 0;
+}
+
+long pkm_lcs_runtime_limits_apply_self_config(
+	const struct pkm_lcs_self_config_entry *entries, u32 entry_count,
+	struct pkm_lcs_self_config_apply_plan *result_out)
+{
+	struct pkm_lcs_self_config_apply_plan plan = { };
+	struct pkm_lcs_runtime_limits active_limits = { };
+	long ret;
+	u32 i;
+
+	if (entry_count && !entries)
+		return -EINVAL;
+
+	ret = pkm_lcs_runtime_limits_snapshot(&active_limits);
+	if (ret)
+		return ret;
+
+	ret = lcs_rust_plan_self_config_apply(&active_limits, entries, entry_count,
+					      &plan);
+	if (ret)
+		return ret;
+
+	if (plan.audit_count > PKM_LCS_SELF_CONFIG_MAX_AUDITS)
+		return -EIO;
+
+	for (i = 0; i < plan.audit_count; i++) {
+		const struct pkm_lcs_self_config_audit_intent *audit =
+			&plan.audits[i];
+
+		if (!audit->configuration_name_len ||
+		    audit->configuration_name_len >
+			    PKM_LCS_SELF_CONFIG_MAX_PARAMETER_NAME_LEN)
+			return -EIO;
+
+		/*
+		 * PSD-005 §3.1 makes self-config audit emission best-effort
+		 * after payload construction. A failed KMES attempt must not
+		 * roll back valid hot-swaps or alter retained invalid values.
+		 */
+		pkm_lcs_emit_self_config_invalid_audit(
+			audit->configuration_name, audit->configuration_name_len,
+			audit->received_kind, audit->received_type,
+			audit->received_u32, audit->retained_value);
+	}
+
+	ret = pkm_lcs_runtime_limits_publish(&plan.limits);
+	if (ret)
+		return ret;
+
+	if (result_out)
+		*result_out = plan;
 	return 0;
 }
 

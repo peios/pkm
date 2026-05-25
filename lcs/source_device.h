@@ -268,6 +268,42 @@ enum pkm_lcs_self_config_received_kind {
 	PKM_LCS_SELF_CONFIG_RECEIVED_DWORD_OUT_OF_RANGE = 2,
 };
 
+enum pkm_lcs_self_config_value_kind {
+	PKM_LCS_SELF_CONFIG_VALUE_DWORD = 1,
+	PKM_LCS_SELF_CONFIG_VALUE_WRONG_TYPE = 2,
+};
+
+#define PKM_LCS_SELF_CONFIG_MAX_AUDITS 19U
+#define PKM_LCS_SELF_CONFIG_MAX_PARAMETER_NAME_LEN 64U
+
+struct pkm_lcs_self_config_entry {
+	const char *name;
+	u32 name_len;
+	u32 value_kind;
+	u32 value_type;
+	u32 value_u32;
+};
+
+struct pkm_lcs_self_config_audit_intent {
+	char configuration_name[PKM_LCS_SELF_CONFIG_MAX_PARAMETER_NAME_LEN];
+	u32 configuration_name_len;
+	u32 received_kind;
+	u32 received_type;
+	u32 received_u32;
+	u32 retained_value;
+};
+
+struct pkm_lcs_self_config_apply_plan {
+	struct pkm_lcs_runtime_limits limits;
+	u32 applied_count;
+	u32 retained_missing_count;
+	u32 retained_invalid_count;
+	u32 ignored_unknown_count;
+	u32 audit_count;
+	struct pkm_lcs_self_config_audit_intent
+		audits[PKM_LCS_SELF_CONFIG_MAX_AUDITS];
+};
+
 struct pkm_lcs_path_validation_result {
 	u32 component_count;
 	bool used_forward_separator;
@@ -560,6 +596,9 @@ long pkm_lcs_runtime_limits_snapshot(struct pkm_lcs_runtime_limits *limits);
 long pkm_lcs_runtime_limits_publish(
 	const struct pkm_lcs_runtime_limits *limits);
 void pkm_lcs_runtime_limits_reset_defaults(void);
+long pkm_lcs_runtime_limits_apply_self_config(
+	const struct pkm_lcs_self_config_entry *entries, u32 entry_count,
+	struct pkm_lcs_self_config_apply_plan *result_out);
 u32 pkm_lcs_runtime_request_timeout_ms(void);
 u32 pkm_lcs_runtime_transaction_timeout_ms(void);
 u32 pkm_lcs_runtime_symlink_depth_limit(void);

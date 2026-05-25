@@ -121,8 +121,8 @@ pub use config::{
     MAX_TOTAL_PATH_LENGTH, MAX_TRANSACTION_WATCH_EVENT_BURST, MAX_VALUE_SIZE,
     NOTIFICATION_QUEUE_SIZE, REQUEST_TIMEOUT_MS, SYMLINK_DEPTH_LIMIT, SelfConfigAuditIntent,
     SelfConfigEntry, SelfConfigPlan, SelfConfigRetentionReason, SelfConfigValue,
-    TRANSACTION_TIMEOUT_MS, find_config_range, plan_self_configuration, retained_config_value,
-    self_config_audit_intent, validate_config_value,
+    TRANSACTION_TIMEOUT_MS, apply_config_value, find_config_range, plan_self_configuration,
+    retained_config_value, self_config_audit_intent, validate_config_value,
 };
 pub use constants::*;
 pub use errno::{LinuxErrno, output_buffer_aggregate_errno, transaction_terminal_errno_raw};

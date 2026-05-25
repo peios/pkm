@@ -5,8 +5,8 @@ use core::{slice, str};
 
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
-    casefold_eq, classify_hive_route, current_user_sid_component_from_binary_sid,
-    find_config_range,
+    apply_config_value, casefold_eq, classify_hive_route,
+    current_user_sid_component_from_binary_sid, find_config_range,
     for_each_effective_value, for_each_effective_value_watch_event,
     for_each_routable_path_component,
     for_each_rsi_enum_children_source_path_entry, for_each_rsi_lookup_source_path_entry,
@@ -46,7 +46,8 @@ use crate::lcs_core::{
     validate_value_data_len, validate_value_name_bytes, validate_value_write_type,
     value_data_len_linux_errno, value_layer_admission_linux_errno,
     value_type_validation_linux_errno,
-    self_config_invalid_audit_payload_len, source_validation_failure_audit_payload_len,
+    self_config_audit_intent, self_config_invalid_audit_payload_len,
+    source_validation_failure_audit_payload_len, validate_config_value,
     write_key_open_audit_payload, write_self_config_invalid_audit_payload,
     write_source_validation_failure_audit_payload, write_rsi_abort_transaction_request_frame,
     write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
@@ -63,12 +64,12 @@ use crate::lcs_core::{
     LayerOwnerSelectionInput, LayerOwnerSource, LayerPublicationInput, LayerResolutionContext,
     LayerTargetAdmissionInput, LayerView,
     LCS_CONFIG_ROOT_PATH, LcsAuditEventKind, LcsCallerTokenSummary, LcsError,
-    LcsKeyOpenAuditDecision, LcsLimits, LcsSelfConfigInvalidAuditRecord,
+    LCS_CONFIG_RANGES, LcsKeyOpenAuditDecision, LcsLimits, LcsSelfConfigInvalidAuditRecord,
     LcsSelfConfigReceivedValue, LinuxErrno, NamedPathEntry, NamedPathResolution, NamedValueEntry,
     PathKind, PathTarget, RegisteredHiveIdentity, RegistryIoctlAccessRequirement,
     RegistryKeyOpenAccessInput, RegistryOpenAccessDecision, RegistryOpenPreResolutionAccessPlan,
     RsiReadPlan, RsiRetainedRequest, RsiTransactionMode, RsiSourceDataValidationFailure,
-    SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
+    SelfConfigRetentionReason, SelfConfigValue, SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationRequest,
     SourceSlotStatus, SourceSlotView, ValueEntry, ValueLayerAdmissionInput, ValueResolution,
     EffectiveValueWatchEvent, EnumeratedValue, WatchEventRecordPlan,
     WatchEventRecordRequest,
@@ -95,6 +96,10 @@ const PKM_LCS_WATCH_NOTIFY_ACTION_DISARM: u32 = 2;
 const PKM_LCS_SELF_CONFIG_RECEIVED_MISSING: u32 = 0;
 const PKM_LCS_SELF_CONFIG_RECEIVED_WRONG_TYPE: u32 = 1;
 const PKM_LCS_SELF_CONFIG_RECEIVED_DWORD_OUT_OF_RANGE: u32 = 2;
+const PKM_LCS_SELF_CONFIG_VALUE_DWORD: u32 = 1;
+const PKM_LCS_SELF_CONFIG_VALUE_WRONG_TYPE: u32 = 2;
+const PKM_LCS_SELF_CONFIG_MAX_AUDITS: usize = 19;
+const PKM_LCS_SELF_CONFIG_MAX_PARAMETER_NAME_LEN: usize = 64;
 
 #[repr(C)]
 pub struct PkmLcsSourceRegistrationHiveCopy {
@@ -228,6 +233,49 @@ pub struct PkmLcsRuntimeLimitsCopy {
     pub max_private_layers_per_token: u32,
     pub max_subtree_watch_depth: u32,
     pub max_transaction_watch_event_burst: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PkmLcsSelfConfigEntryCopy {
+    pub name: *const u8,
+    pub name_len: u32,
+    pub value_kind: u32,
+    pub value_type: u32,
+    pub value_u32: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PkmLcsSelfConfigAuditIntentCopy {
+    pub configuration_name: [u8; PKM_LCS_SELF_CONFIG_MAX_PARAMETER_NAME_LEN],
+    pub configuration_name_len: u32,
+    pub received_kind: u32,
+    pub received_type: u32,
+    pub received_u32: u32,
+    pub retained_value: u32,
+}
+
+impl PkmLcsSelfConfigAuditIntentCopy {
+    const ZERO: Self = Self {
+        configuration_name: [0; PKM_LCS_SELF_CONFIG_MAX_PARAMETER_NAME_LEN],
+        configuration_name_len: 0,
+        received_kind: 0,
+        received_type: 0,
+        received_u32: 0,
+        retained_value: 0,
+    };
+}
+
+#[repr(C)]
+pub struct PkmLcsSelfConfigApplyPlanCopy {
+    pub limits: PkmLcsRuntimeLimitsCopy,
+    pub applied_count: u32,
+    pub retained_missing_count: u32,
+    pub retained_invalid_count: u32,
+    pub ignored_unknown_count: u32,
+    pub audit_count: u32,
+    pub audits: [PkmLcsSelfConfigAuditIntentCopy; PKM_LCS_SELF_CONFIG_MAX_AUDITS],
 }
 
 #[repr(C)]
@@ -501,6 +549,123 @@ fn lcs_limits_from_copy(raw: *const PkmLcsRuntimeLimitsCopy) -> Result<LcsLimits
         max_scope_guids_per_token: raw.max_scope_guids_per_token as usize,
         max_private_layers_per_token: raw.max_private_layers_per_token as usize,
     })
+}
+
+fn lcs_limits_to_copy(limits: LcsLimits) -> PkmLcsRuntimeLimitsCopy {
+    PkmLcsRuntimeLimitsCopy {
+        request_timeout_ms: limits.request_timeout_ms,
+        transaction_timeout_ms: limits.transaction_timeout_ms,
+        notification_queue_size: limits.notification_queue_size as u32,
+        symlink_depth_limit: limits.symlink_depth_limit as u32,
+        max_value_size: limits.max_value_size as u32,
+        max_key_depth: limits.max_key_depth as u32,
+        max_path_component_length: limits.max_path_component_length as u32,
+        max_total_path_length: limits.max_total_path_length as u32,
+        max_layers_per_value: limits.max_layers_per_value as u32,
+        max_bound_transactions_per_source: limits.max_bound_transactions_per_source as u32,
+        max_read_only_transactions_per_source: limits.max_read_only_transactions_per_source as u32,
+        max_total_layers: limits.max_total_layers as u32,
+        max_registered_sources: limits.max_registered_sources as u32,
+        max_hives_per_source: limits.max_hives_per_source as u32,
+        max_concurrent_rsi_requests: limits.max_concurrent_rsi_requests as u32,
+        max_scope_guids_per_token: limits.max_scope_guids_per_token as u32,
+        max_private_layers_per_token: limits.max_private_layers_per_token as u32,
+        max_subtree_watch_depth: limits.max_subtree_watch_depth as u32,
+        max_transaction_watch_event_burst: limits.max_transaction_watch_event_burst as u32,
+    }
+}
+
+fn empty_self_config_apply_plan() -> PkmLcsSelfConfigApplyPlanCopy {
+    PkmLcsSelfConfigApplyPlanCopy {
+        limits: lcs_limits_to_copy(LcsLimits::DEFAULT),
+        applied_count: 0,
+        retained_missing_count: 0,
+        retained_invalid_count: 0,
+        ignored_unknown_count: 0,
+        audit_count: 0,
+        audits: [PkmLcsSelfConfigAuditIntentCopy::ZERO; PKM_LCS_SELF_CONFIG_MAX_AUDITS],
+    }
+}
+
+fn self_config_entry_name<'a>(
+    entry: &'a PkmLcsSelfConfigEntryCopy,
+) -> Result<&'a str, LinuxErrno> {
+    if entry.name_len == 0 {
+        return Ok("");
+    }
+    if entry.name.is_null() {
+        return Err(LinuxErrno::Einval);
+    }
+    let name_bytes = unsafe { slice::from_raw_parts(entry.name, entry.name_len as usize) };
+    str::from_utf8(name_bytes).map_err(|_| LinuxErrno::Einval)
+}
+
+fn self_config_entry_value(
+    entry: &PkmLcsSelfConfigEntryCopy,
+) -> Result<SelfConfigValue, LinuxErrno> {
+    match entry.value_kind {
+        PKM_LCS_SELF_CONFIG_VALUE_DWORD => {
+            if entry.value_type != REG_DWORD {
+                return Err(LinuxErrno::Einval);
+            }
+            Ok(SelfConfigValue::Dword(entry.value_u32))
+        }
+        PKM_LCS_SELF_CONFIG_VALUE_WRONG_TYPE => {
+            if entry.value_type == REG_DWORD || entry.value_u32 != 0 {
+                return Err(LinuxErrno::Einval);
+            }
+            Ok(SelfConfigValue::WrongType {
+                actual_type: entry.value_type,
+            })
+        }
+        _ => Err(LinuxErrno::Einval),
+    }
+}
+
+fn self_config_observed_value(
+    entries: &[PkmLcsSelfConfigEntryCopy],
+    name: &str,
+) -> Result<Option<SelfConfigValue>, LinuxErrno> {
+    for entry in entries {
+        if casefold_eq(self_config_entry_name(entry)?, name) {
+            return self_config_entry_value(entry).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn write_self_config_audit_intent(
+    current: &LcsLimits,
+    range: crate::lcs_core::ConfigRange,
+    value: Option<SelfConfigValue>,
+    output: &mut PkmLcsSelfConfigAuditIntentCopy,
+) -> Result<bool, LinuxErrno> {
+    let Some(intent) = self_config_audit_intent(current, range, value) else {
+        return Ok(false);
+    };
+    let name = intent.parameter.as_bytes();
+    if name.len() > output.configuration_name.len() {
+        return Err(LinuxErrno::Einval);
+    }
+
+    *output = PkmLcsSelfConfigAuditIntentCopy::ZERO;
+    output.configuration_name[..name.len()].copy_from_slice(name);
+    output.configuration_name_len = name.len() as u32;
+    output.retained_value = intent.retained_value;
+    match intent.reason {
+        SelfConfigRetentionReason::Missing => {
+            output.received_kind = PKM_LCS_SELF_CONFIG_RECEIVED_MISSING;
+        }
+        SelfConfigRetentionReason::WrongType { actual_type } => {
+            output.received_kind = PKM_LCS_SELF_CONFIG_RECEIVED_WRONG_TYPE;
+            output.received_type = actual_type;
+        }
+        SelfConfigRetentionReason::OutOfRange { value, .. } => {
+            output.received_kind = PKM_LCS_SELF_CONFIG_RECEIVED_DWORD_OUT_OF_RANGE;
+            output.received_u32 = value;
+        }
+    }
+    Ok(true)
 }
 
 fn key_fd_open_view_error_return(err: LcsError) -> c_int {
@@ -1531,6 +1696,131 @@ pub unsafe extern "C" fn lcs_rust_source_validation_failure_audit_payload(
         }
         Err(err) => source_validation_audit_error_return(err),
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_plan_self_config_apply(
+    current_limits: *const PkmLcsRuntimeLimitsCopy,
+    entries: *const PkmLcsSelfConfigEntryCopy,
+    entry_count: usize,
+    plan_out: *mut PkmLcsSelfConfigApplyPlanCopy,
+) -> c_int {
+    let Some(plan_out) = (unsafe { plan_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *plan_out = empty_self_config_apply_plan();
+
+    let current = match lcs_limits_from_copy(current_limits) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    if entry_count > isize::MAX as usize {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if entry_count > 0 && entries.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let entries = if entry_count == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(entries, entry_count) }
+    };
+
+    let mut limits = current;
+    let mut applied_count = 0u32;
+    let mut retained_missing_count = 0u32;
+    let mut retained_invalid_count = 0u32;
+    let mut ignored_unknown_count = 0u32;
+    let mut audit_count = 0usize;
+    let mut audits = [PkmLcsSelfConfigAuditIntentCopy::ZERO; PKM_LCS_SELF_CONFIG_MAX_AUDITS];
+
+    for entry in entries {
+        let name = match self_config_entry_name(entry) {
+            Ok(value) => value,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+        if find_config_range(name).is_none() {
+            ignored_unknown_count = match ignored_unknown_count.checked_add(1) {
+                Some(value) => value,
+                None => return LinuxErrno::Einval.negated_return() as c_int,
+            };
+        }
+    }
+
+    for range in LCS_CONFIG_RANGES {
+        let observed = match self_config_observed_value(entries, range.name) {
+            Ok(value) => value,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+
+        match observed {
+            Some(SelfConfigValue::Dword(value)) => match validate_config_value(range, value) {
+                Ok(value) => {
+                    apply_config_value(&mut limits, range, value);
+                    applied_count += 1;
+                }
+                Err(_) => {
+                    retained_invalid_count += 1;
+                    if audit_count >= audits.len() {
+                        return LinuxErrno::Einval.negated_return() as c_int;
+                    }
+                    match write_self_config_audit_intent(
+                        &current,
+                        range,
+                        observed,
+                        &mut audits[audit_count],
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) | Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+                    }
+                    audit_count += 1;
+                }
+            },
+            Some(SelfConfigValue::WrongType { .. }) => {
+                retained_invalid_count += 1;
+                if audit_count >= audits.len() {
+                    return LinuxErrno::Einval.negated_return() as c_int;
+                }
+                match write_self_config_audit_intent(
+                    &current,
+                    range,
+                    observed,
+                    &mut audits[audit_count],
+                ) {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+                }
+                audit_count += 1;
+            }
+            None => {
+                retained_missing_count += 1;
+                if audit_count >= audits.len() {
+                    return LinuxErrno::Einval.negated_return() as c_int;
+                }
+                match write_self_config_audit_intent(
+                    &current,
+                    range,
+                    None,
+                    &mut audits[audit_count],
+                ) {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+                }
+                audit_count += 1;
+            }
+        }
+    }
+
+    *plan_out = PkmLcsSelfConfigApplyPlanCopy {
+        limits: lcs_limits_to_copy(limits),
+        applied_count,
+        retained_missing_count,
+        retained_invalid_count,
+        ignored_unknown_count,
+        audit_count: audit_count as u32,
+        audits,
+    };
+    0
 }
 
 #[no_mangle]

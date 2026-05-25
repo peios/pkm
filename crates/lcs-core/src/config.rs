@@ -291,7 +291,7 @@ pub fn retained_config_value(limits: &LcsLimits, range: ConfigRange) -> u32 {
     }
 }
 
-fn apply_config_value(limits: &mut LcsLimits, range: ConfigRange, value: u32) {
+pub fn apply_config_value(limits: &mut LcsLimits, range: ConfigRange, value: u32) {
     match range.name {
         "RequestTimeoutMs" => limits.request_timeout_ms = value,
         "TransactionTimeoutMs" => limits.transaction_timeout_ms = value,
