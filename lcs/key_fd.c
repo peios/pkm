@@ -332,6 +332,18 @@ extern int lcs_rust_plan_backup_restore_layer_precedence_gate(
 	const struct pkm_lcs_backup_layer_manifest_view *manifests,
 	size_t manifest_count, const struct pkm_lcs_rsi_layer_view *layers,
 	size_t layer_count, u8 caller_has_tcb, u8 *tcb_required_out);
+extern int lcs_rust_validate_backup_path_entry_record_layer_manifest(
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_backup_layer_manifest_view *manifests,
+	size_t manifest_count, const u8 *frame, size_t frame_len);
+extern int lcs_rust_validate_backup_value_record_layer_manifest(
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_backup_layer_manifest_view *manifests,
+	size_t manifest_count, const u8 *frame, size_t frame_len);
+extern int lcs_rust_validate_backup_blanket_tombstone_record_layer_manifest(
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_backup_layer_manifest_view *manifests,
+	size_t manifest_count, const u8 *frame, size_t frame_len);
 extern int lcs_rust_security_descriptor_owner_sid(
 	const u8 *security_descriptor, size_t security_descriptor_len,
 	const u8 **owner_sid_out, size_t *owner_sid_len_out);
@@ -5187,14 +5199,25 @@ struct pkm_lcs_restore_layer_manifest_set {
 	u32 capacity;
 };
 
+enum pkm_lcs_restore_key_section_phase {
+	PKM_LCS_RESTORE_SECTION_PATH_ENTRY = 0,
+	PKM_LCS_RESTORE_SECTION_VALUE = 1,
+	PKM_LCS_RESTORE_SECTION_BLANKET = 2,
+};
+
 struct pkm_lcs_restore_root_key_summary {
 	u8 header_root_guid[PKM_LCS_GUID_BYTES];
 	struct pkm_lcs_restore_layer_manifest_set layer_manifests;
+	enum pkm_lcs_restore_key_section_phase section_phase;
 	bool root_key_seen;
 	bool key_data_started;
 	u8 root_volatile;
 	u8 root_symlink;
 };
+
+static long pkm_lcs_key_fd_restore_layer_manifest_views(
+	const struct pkm_lcs_restore_layer_manifest_set *set,
+	struct pkm_lcs_backup_layer_manifest_view **views_out);
 
 static void pkm_lcs_restore_layer_manifest_set_destroy(
 	struct pkm_lcs_restore_layer_manifest_set *set)
@@ -5449,6 +5472,167 @@ static long pkm_lcs_restore_layer_frame_max_len(
 	return 0;
 }
 
+static long pkm_lcs_restore_data_frame_max_len(
+	const struct pkm_lcs_runtime_limits *limits, u16 record_type,
+	size_t *max_len_out)
+{
+	size_t max_len;
+
+	if (!limits || !max_len_out)
+		return -EINVAL;
+
+	max_len = PKM_LCS_BACKUP_RECORD_HEADER_LEN;
+	switch (record_type) {
+	case REG_BACKUP_PATH_ENTRY:
+		if (check_add_overflow(max_len,
+				       (size_t)PKM_LCS_GUID_BYTES +
+					       sizeof(u32),
+				       &max_len) ||
+		    check_add_overflow(max_len,
+				       (size_t)limits->max_path_component_length,
+				       &max_len) ||
+		    check_add_overflow(max_len,
+				       (size_t)PKM_LCS_GUID_BYTES +
+					       sizeof(u32),
+				       &max_len) ||
+		    check_add_overflow(max_len,
+				       (size_t)limits->max_path_component_length +
+					       sizeof(u64),
+				       &max_len))
+			return -EOVERFLOW;
+		break;
+	case REG_BACKUP_VALUE:
+		if (check_add_overflow(max_len,
+				       (size_t)PKM_LCS_GUID_BYTES +
+					       sizeof(u32),
+				       &max_len) ||
+		    check_add_overflow(max_len,
+				       (size_t)limits->max_path_component_length +
+					       sizeof(u32) + sizeof(u32),
+				       &max_len) ||
+		    check_add_overflow(max_len,
+				       (size_t)limits->max_value_size +
+					       sizeof(u32),
+				       &max_len) ||
+		    check_add_overflow(max_len,
+				       (size_t)limits->max_path_component_length +
+					       sizeof(u64),
+				       &max_len))
+			return -EOVERFLOW;
+		break;
+	case REG_BACKUP_BLANKET_TOMBSTONE:
+		if (check_add_overflow(max_len,
+				       (size_t)PKM_LCS_GUID_BYTES +
+					       sizeof(u32),
+				       &max_len) ||
+		    check_add_overflow(max_len,
+				       (size_t)limits->max_path_component_length +
+					       sizeof(u64),
+				       &max_len))
+			return -EOVERFLOW;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	*max_len_out = max_len;
+	return 0;
+}
+
+static long pkm_lcs_restore_note_data_record_order(
+	struct pkm_lcs_restore_root_key_summary *summary, u16 record_type)
+{
+	if (!summary || !summary->key_data_started)
+		return -EINVAL;
+
+	switch (record_type) {
+	case REG_BACKUP_PATH_ENTRY:
+		if (summary->section_phase != PKM_LCS_RESTORE_SECTION_PATH_ENTRY)
+			return -EINVAL;
+		return 0;
+	case REG_BACKUP_VALUE:
+		if (summary->section_phase == PKM_LCS_RESTORE_SECTION_BLANKET)
+			return -EINVAL;
+		summary->section_phase = PKM_LCS_RESTORE_SECTION_VALUE;
+		return 0;
+	case REG_BACKUP_BLANKET_TOMBSTONE:
+		summary->section_phase = PKM_LCS_RESTORE_SECTION_BLANKET;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+static long pkm_lcs_restore_validate_data_record(
+	struct file *file, loff_t *posp, struct sha256_ctx *checksum,
+	const u8 common_header[6], u16 record_type, u32 record_len,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_restore_root_key_summary *summary)
+{
+	struct pkm_lcs_backup_layer_manifest_view *manifests = NULL;
+	size_t max_frame_len = 0;
+	size_t payload_len;
+	u8 *frame;
+	long ret;
+
+	if (!file || !checksum || !limits || !summary)
+		return -EINVAL;
+
+	ret = pkm_lcs_restore_note_data_record_order(summary, record_type);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_restore_data_frame_max_len(limits, record_type,
+						&max_frame_len);
+	if (ret)
+		return ret;
+	if ((size_t)record_len > max_frame_len)
+		return -EINVAL;
+	payload_len = (size_t)record_len - PKM_LCS_BACKUP_RECORD_HEADER_LEN;
+
+	frame = kmalloc(record_len, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	memcpy(frame, common_header, PKM_LCS_BACKUP_RECORD_HEADER_LEN);
+
+	ret = pkm_lcs_restore_read_exact(
+		file, posp, frame + PKM_LCS_BACKUP_RECORD_HEADER_LEN,
+		payload_len);
+	if (ret)
+		goto out_free;
+
+	sha256_update(checksum, frame, record_len);
+	ret = pkm_lcs_key_fd_restore_layer_manifest_views(
+		&summary->layer_manifests, &manifests);
+	if (ret)
+		goto out_free;
+
+	switch (record_type) {
+	case REG_BACKUP_PATH_ENTRY:
+		ret = lcs_rust_validate_backup_path_entry_record_layer_manifest(
+			limits, manifests, summary->layer_manifests.count, frame,
+			record_len);
+		break;
+	case REG_BACKUP_VALUE:
+		ret = lcs_rust_validate_backup_value_record_layer_manifest(
+			limits, manifests, summary->layer_manifests.count, frame,
+			record_len);
+		break;
+	case REG_BACKUP_BLANKET_TOMBSTONE:
+		ret = lcs_rust_validate_backup_blanket_tombstone_record_layer_manifest(
+			limits, manifests, summary->layer_manifests.count, frame,
+			record_len);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	kfree(manifests);
+out_free:
+	kfree(frame);
+	return ret;
+}
+
 static long pkm_lcs_restore_validate_layer_record(
 	struct file *file, loff_t *posp, struct sha256_ctx *checksum,
 	const u8 common_header[6], u32 record_len,
@@ -5536,6 +5720,7 @@ static long pkm_lcs_restore_validate_key_record(
 	if (ret)
 		goto out_free;
 	summary->key_data_started = true;
+	summary->section_phase = PKM_LCS_RESTORE_SECTION_PATH_ENTRY;
 
 	if (!memcmp(key.guid, summary->header_root_guid, PKM_LCS_GUID_BYTES)) {
 		if (summary->root_key_seen) {
@@ -5704,6 +5889,17 @@ static long pkm_lcs_restore_validate_stream_file(
 			ret = pkm_lcs_restore_validate_layer_record(
 				file, posp, &checksum, common_header,
 				record_len, limits, summary);
+			if (ret)
+				goto out_finish;
+			continue;
+		}
+
+		if (record_type == REG_BACKUP_PATH_ENTRY ||
+		    record_type == REG_BACKUP_VALUE ||
+		    record_type == REG_BACKUP_BLANKET_TOMBSTONE) {
+			ret = pkm_lcs_restore_validate_data_record(
+				file, posp, &checksum, common_header,
+				record_type, record_len, limits, summary);
 			if (ret)
 				goto out_finish;
 			continue;

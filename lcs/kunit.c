@@ -776,7 +776,7 @@ struct pkm_lcs_kunit_backup_output_file {
 };
 
 struct pkm_lcs_kunit_restore_input_file {
-	u8 data[256];
+	u8 data[512];
 	size_t len;
 };
 
@@ -18178,6 +18178,76 @@ static int pkm_lcs_kunit_restore_stream_append_key_record(
 	return pkm_lcs_kunit_restore_stream_append(input, frame, written);
 }
 
+static int pkm_lcs_kunit_restore_stream_append_header(
+	struct pkm_lcs_kunit_restore_input_file *input)
+{
+	static const char hive_name[] = "Machine";
+	u32 header_len = 6 + 8 + 4 + 4 + 8 + PKM_LCS_GUID_BYTES + 4 +
+			 sizeof(hive_name) - 1;
+	int ret;
+
+	ret = pkm_lcs_kunit_restore_stream_append_record_header(
+		input, REG_BACKUP_HEADER, header_len);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append(
+		input, REG_BACKUP_MAGIC, sizeof(REG_BACKUP_MAGIC) - 1);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_u32(input, 21U);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_u32(input, 21U);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_s64(input, 1234);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append(
+		input, pkm_lcs_kunit_restore_header_root_guid,
+		sizeof(pkm_lcs_kunit_restore_header_root_guid));
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_u32(
+		input, sizeof(hive_name) - 1);
+	if (ret)
+		return ret;
+	return pkm_lcs_kunit_restore_stream_append(
+		input, hive_name, sizeof(hive_name) - 1);
+}
+
+static int pkm_lcs_kunit_restore_stream_append_trailer(
+	struct pkm_lcs_kunit_restore_input_file *input, u64 record_count)
+{
+	struct sha256_ctx checksum_ctx;
+	u8 checksum[SHA256_DIGEST_SIZE];
+	size_t trailer_offset;
+	int ret;
+
+	trailer_offset = input->len;
+	ret = pkm_lcs_kunit_restore_stream_append_record_header(
+		input, REG_BACKUP_TRAILER,
+		6 + sizeof(u64) + SHA256_DIGEST_SIZE);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_u64(input, record_count);
+	if (ret)
+		return ret;
+	memset(checksum, 0, sizeof(checksum));
+	ret = pkm_lcs_kunit_restore_stream_append(input, checksum,
+						  sizeof(checksum));
+	if (ret)
+		return ret;
+
+	sha256_init(&checksum_ctx);
+	sha256_update(&checksum_ctx, input->data,
+		      trailer_offset + 6 + sizeof(u64));
+	sha256_final(&checksum_ctx, checksum);
+	memcpy(input->data + trailer_offset + 6 + sizeof(u64), checksum,
+	       sizeof(checksum));
+	return 0;
+}
+
 struct pkm_lcs_kunit_restore_layer_record {
 	const char *name;
 	u32 precedence;
@@ -18207,6 +18277,57 @@ static int pkm_lcs_kunit_restore_stream_append_layer_record(
 	if (ret)
 		return ret;
 	return pkm_lcs_kunit_restore_stream_append(input, frame, written);
+}
+
+struct pkm_lcs_kunit_restore_data_record {
+	u16 record_type;
+	const char *layer_name;
+	bool before_key;
+};
+
+static int pkm_lcs_kunit_restore_stream_append_data_record(
+	struct pkm_lcs_kunit_restore_input_file *input,
+	const struct pkm_lcs_kunit_restore_data_record *record, u64 sequence)
+{
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x62 };
+	static const u8 value_data[] = { 0x2a };
+	u8 *frame = NULL;
+	size_t frame_len = 0;
+	long ret;
+
+	if (!input || !record || !record->layer_name)
+		return -EINVAL;
+
+	switch (record->record_type) {
+	case REG_BACKUP_PATH_ENTRY:
+		ret = pkm_lcs_kunit_backup_path_entry_frame(
+			pkm_lcs_kunit_restore_header_root_guid, "Child",
+			strlen("Child"), child_guid, false, record->layer_name,
+			strlen(record->layer_name), sequence, &frame,
+			&frame_len);
+		break;
+	case REG_BACKUP_VALUE:
+		ret = pkm_lcs_kunit_backup_value_frame(
+			pkm_lcs_kunit_restore_header_root_guid, "Answer",
+			strlen("Answer"), REG_BINARY, value_data,
+			sizeof(value_data), record->layer_name,
+			strlen(record->layer_name), sequence, &frame,
+			&frame_len);
+		break;
+	case REG_BACKUP_BLANKET_TOMBSTONE:
+		ret = pkm_lcs_kunit_backup_blanket_tombstone_frame(
+			pkm_lcs_kunit_restore_header_root_guid,
+			record->layer_name, strlen(record->layer_name),
+			sequence, &frame, &frame_len);
+		break;
+	default:
+		return -EINVAL;
+	}
+	if (ret)
+		return (int)ret;
+	ret = pkm_lcs_kunit_restore_stream_append(input, frame, frame_len);
+	kfree(frame);
+	return (int)ret;
 }
 
 static int pkm_lcs_kunit_restore_stream_build_with_root_keys(
@@ -18409,6 +18530,59 @@ static int pkm_lcs_kunit_restore_stream_build_with_layers(
 	memcpy(input->data + trailer_offset + 6 + sizeof(u64), checksum,
 	       sizeof(checksum));
 	return 0;
+}
+
+static int pkm_lcs_kunit_restore_stream_build_with_data_records(
+	struct pkm_lcs_kunit_restore_input_file *input,
+	const struct pkm_lcs_kunit_restore_layer_record *layers,
+	u32 layer_count,
+	const struct pkm_lcs_kunit_restore_data_record *records,
+	u32 record_count)
+{
+	u64 total_record_count = 2 + 1 + layer_count + record_count;
+	u32 i;
+	int ret;
+
+	if (!input || (!layers && layer_count) || (!records && record_count))
+		return -EINVAL;
+	memset(input, 0, sizeof(*input));
+
+	ret = pkm_lcs_kunit_restore_stream_append_header(input);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < layer_count; i++) {
+		ret = pkm_lcs_kunit_restore_stream_append_layer_record(
+			input, &layers[i]);
+		if (ret)
+			return ret;
+	}
+
+	for (i = 0; i < record_count; i++) {
+		if (!records[i].before_key)
+			continue;
+		ret = pkm_lcs_kunit_restore_stream_append_data_record(
+			input, &records[i], i + 1);
+		if (ret)
+			return ret;
+	}
+
+	ret = pkm_lcs_kunit_restore_stream_append_key_record(
+		input, pkm_lcs_kunit_restore_header_root_guid, false, false);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < record_count; i++) {
+		if (records[i].before_key)
+			continue;
+		ret = pkm_lcs_kunit_restore_stream_append_data_record(
+			input, &records[i], i + 1);
+		if (ret)
+			return ret;
+	}
+
+	return pkm_lcs_kunit_restore_stream_append_trailer(
+		input, total_record_count);
 }
 
 static long pkm_lcs_kunit_publish_source_one_backup_key_fd(void)
@@ -20675,6 +20849,132 @@ static void pkm_lcs_kunit_key_fd_restore_layer_tcb_marks_used(
 	pkm_lcs_kunit_reset_source_table();
 	kacs_rust_token_drop(token);
 	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_data_records_accept_manifest(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record records[] = {
+		{ .record_type = REG_BACKUP_PATH_ENTRY, .layer_name = "base" },
+		{ .record_type = REG_BACKUP_VALUE, .layer_name = "base" },
+		{ .record_type = REG_BACKUP_BLANKET_TOMBSTONE,
+		  .layer_name = "base" },
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_data_records(
+				&input, &layer, 1, records,
+				ARRAY_SIZE(records)),
+			0);
+	pkm_lcs_kunit_expect_restore_root_flag_result(
+		test, &input, (long)-EOPNOTSUPP, false, false);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_data_records_require_manifest(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_restore_data_record records[] = {
+		{ .record_type = REG_BACKUP_PATH_ENTRY, .layer_name = "base" },
+		{ .record_type = REG_BACKUP_VALUE, .layer_name = "base" },
+		{ .record_type = REG_BACKUP_BLANKET_TOMBSTONE,
+		  .layer_name = "base" },
+	};
+	u32 i;
+
+	for (i = 0; i < ARRAY_SIZE(records); i++) {
+		struct pkm_lcs_kunit_restore_input_file input = { };
+
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_kunit_restore_stream_build_with_data_records(
+					&input, NULL, 0, &records[i], 1),
+				0);
+		pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+							   (long)-EINVAL);
+	}
+}
+
+static void pkm_lcs_kunit_key_fd_restore_data_before_key_denied(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record record = {
+		.record_type = REG_BACKUP_VALUE,
+		.layer_name = "base",
+		.before_key = true,
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_data_records(
+				&input, &layer, 1, &record, 1),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_data_path_after_value_denied(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record records[] = {
+		{ .record_type = REG_BACKUP_VALUE, .layer_name = "base" },
+		{ .record_type = REG_BACKUP_PATH_ENTRY, .layer_name = "base" },
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_data_records(
+				&input, &layer, 1, records,
+				ARRAY_SIZE(records)),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_data_value_after_blanket_denied(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record records[] = {
+		{ .record_type = REG_BACKUP_BLANKET_TOMBSTONE,
+		  .layer_name = "base" },
+		{ .record_type = REG_BACKUP_VALUE, .layer_name = "base" },
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_data_records(
+				&input, &layer, 1, records,
+				ARRAY_SIZE(records)),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
 }
 
 static void pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream(
@@ -48601,6 +48901,11 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_high_precedence_requires_tcb),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_existing_high_requires_tcb),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_tcb_marks_used),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_data_records_accept_manifest),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_data_records_require_manifest),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_data_before_key_denied),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_data_path_after_value_denied),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_data_value_after_blanket_denied),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_fails_before_source),

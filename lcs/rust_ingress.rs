@@ -53,8 +53,9 @@ use crate::lcs_core::{
     self_config_audit_intent, self_config_invalid_audit_payload_len,
     source_validation_failure_audit_payload_len, validate_config_value,
     write_backup_restore_complete_audit_payload, write_backup_restore_start_audit_payload,
-    parse_backup_header_record, parse_backup_key_record, parse_backup_layer_manifest_record,
-    parse_backup_trailer_record,
+    parse_backup_blanket_tombstone_record, parse_backup_header_record, parse_backup_key_record,
+    parse_backup_layer_manifest_record, parse_backup_path_entry_record,
+    parse_backup_trailer_record, parse_backup_value_record, validate_backup_layer_manifest_set,
     write_backup_blanket_tombstone_record_frame, write_backup_header_record_frame,
     write_backup_key_record_frame, write_backup_layer_manifest_record_frame,
     write_backup_path_entry_record_frame, write_backup_trailer_record_frame,
@@ -2361,6 +2362,114 @@ pub unsafe extern "C" fn lcs_rust_plan_backup_restore_layer_precedence_gate(
             LinuxErrno::Eperm.negated_return() as c_int
         }
         Err(_) => LinuxErrno::Einval.negated_return() as c_int,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_backup_path_entry_record_layer_manifest(
+    limits_raw: *const PkmLcsRuntimeLimitsCopy,
+    manifests: *const PkmLcsBackupLayerManifestViewCopy,
+    manifest_count: usize,
+    frame: *const u8,
+    frame_len: usize,
+) -> c_int {
+    let limits = match lcs_limits_from_copy(limits_raw) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let parsed_manifests = match parse_backup_layer_manifest_views(manifests, manifest_count) {
+        Ok(parsed) => parsed,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    if frame.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame = unsafe { slice::from_raw_parts(frame, frame_len) };
+    match parse_backup_path_entry_record(&limits, frame) {
+        Ok(record) => {
+            match validate_backup_layer_manifest_set(
+                &limits,
+                parsed_manifests.as_slice(),
+                &[record.layer_name],
+            ) {
+                Ok(_) => 0,
+                Err(err) => backup_restore_reader_error_return(err),
+            }
+        }
+        Err(err) => backup_restore_reader_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_backup_value_record_layer_manifest(
+    limits_raw: *const PkmLcsRuntimeLimitsCopy,
+    manifests: *const PkmLcsBackupLayerManifestViewCopy,
+    manifest_count: usize,
+    frame: *const u8,
+    frame_len: usize,
+) -> c_int {
+    let limits = match lcs_limits_from_copy(limits_raw) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let parsed_manifests = match parse_backup_layer_manifest_views(manifests, manifest_count) {
+        Ok(parsed) => parsed,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    if frame.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame = unsafe { slice::from_raw_parts(frame, frame_len) };
+    match parse_backup_value_record(&limits, frame) {
+        Ok(record) => {
+            match validate_backup_layer_manifest_set(
+                &limits,
+                parsed_manifests.as_slice(),
+                &[record.layer_name],
+            ) {
+                Ok(_) => 0,
+                Err(err) => backup_restore_reader_error_return(err),
+            }
+        }
+        Err(err) => backup_restore_reader_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_backup_blanket_tombstone_record_layer_manifest(
+    limits_raw: *const PkmLcsRuntimeLimitsCopy,
+    manifests: *const PkmLcsBackupLayerManifestViewCopy,
+    manifest_count: usize,
+    frame: *const u8,
+    frame_len: usize,
+) -> c_int {
+    let limits = match lcs_limits_from_copy(limits_raw) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let parsed_manifests = match parse_backup_layer_manifest_views(manifests, manifest_count) {
+        Ok(parsed) => parsed,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    if frame.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame = unsafe { slice::from_raw_parts(frame, frame_len) };
+    match parse_backup_blanket_tombstone_record(&limits, frame) {
+        Ok(record) => {
+            match validate_backup_layer_manifest_set(
+                &limits,
+                parsed_manifests.as_slice(),
+                &[record.layer_name],
+            ) {
+                Ok(_) => 0,
+                Err(err) => backup_restore_reader_error_return(err),
+            }
+        }
+        Err(err) => backup_restore_reader_error_return(err),
     }
 }
 
@@ -7731,6 +7840,10 @@ fn parse_backup_layer_manifest_views<'a>(
     manifests: *const PkmLcsBackupLayerManifestViewCopy,
     manifest_count: usize,
 ) -> Result<PkmVec<BackupLayerManifestPayload<'a>>, LinuxErrno> {
+    if manifest_count != 0 && manifests.is_null() {
+        return Err(LinuxErrno::Einval);
+    }
+
     let mut parsed = PkmVec::with_capacity(manifest_count).map_err(|_| LinuxErrno::Enomem)?;
 
     for index in 0..manifest_count {
