@@ -1308,11 +1308,13 @@ static long pkm_lcs_key_fd_copy_set_security_sd(
 
 static long pkm_lcs_key_fd_read_existing_sd(
 	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_frame *frame, const u8 **sd_out,
 	size_t *sd_len_out, struct pkm_lcs_source_response_result *response_out)
 {
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_read_key_result read_key = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	long ret;
 
 	if (!key_fd || !frame || !sd_out || !sd_len_out)
@@ -1322,17 +1324,23 @@ static long pkm_lcs_key_fd_read_existing_sd(
 	if (response_out)
 		memset(response_out, 0, sizeof(*response_out));
 
+	if (!limits) {
+		pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
+			&effective_limits);
+		limits = &effective_limits;
+	}
 	pkm_lcs_source_response_frame_init(frame);
-	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
-		key_fd->source_id, txn_id, key_fd->key_guid,
-		pkm_lcs_runtime_request_timeout_ms(), frame, &response, NULL);
+	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, txn_id, key_fd->key_guid, limits,
+		limits->request_timeout_ms, frame, &response, NULL);
 	if (response_out)
 		*response_out = response;
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_rsi_materialize_read_key_response(
-		frame->data, frame->len, response.request_id, &read_key);
+	ret = pkm_lcs_rsi_materialize_read_key_response_with_limits(
+		frame->data, frame->len, response.request_id, limits,
+		&read_key);
 	if (ret)
 		return ret;
 	if (!read_key.sd_len || (size_t)read_key.sd_offset > frame->len ||
@@ -1731,7 +1739,7 @@ static long pkm_lcs_key_fd_get_security_from_args(
 	if (provided_len && !args->sd_ptr)
 		return -EFAULT;
 
-	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, 0, &existing_frame,
+	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, 0, NULL, &existing_frame,
 					      &existing_sd, &existing_sd_len,
 					      NULL);
 	if (ret)
@@ -3250,8 +3258,8 @@ static long pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context_limits(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, 0, &read_frame, &sd,
-					      &sd_len, &read_response);
+	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, 0, limits, &read_frame,
+					      &sd, &sd_len, &read_response);
 	if (ret) {
 		if (ret == -EIO && read_response.request_op_code &&
 		    read_response.status == RSI_OK)
@@ -3948,9 +3956,9 @@ static long pkm_lcs_key_fd_set_security_from_args(
 		goto out_input;
 	}
 
-	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, txn_id, &existing_frame,
-					      &existing_sd, &existing_sd_len,
-					      NULL);
+	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, txn_id, NULL,
+					      &existing_frame, &existing_sd,
+					      &existing_sd_len, NULL);
 	if (ret)
 		goto out_cancel_mutation;
 

@@ -1984,7 +1984,8 @@ static long pkm_lcs_source_deadline_remaining(unsigned long deadline)
 	return (long)(deadline - now);
 }
 
-static long pkm_lcs_source_slot_admission_state(u32 source_id)
+static long pkm_lcs_source_slot_admission_state(
+	u32 source_id, const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
@@ -2002,7 +2003,8 @@ static long pkm_lcs_source_slot_admission_state(u32 source_id)
 	    source_fd->state != PKM_LCS_SOURCE_FD_ACTIVE ||
 	    source_fd->source_id != source_id) {
 		ret = -EIO;
-	} else if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
+	} else if (pkm_lcs_source_in_flight_at_limit_locked(source_fd,
+							    limits)) {
 		ret = -EAGAIN;
 	} else {
 		ret = 0;
@@ -2014,8 +2016,9 @@ out_unlock_table:
 	return ret;
 }
 
-static long pkm_lcs_source_wait_for_slot(u32 source_id,
-					 unsigned long deadline)
+static long pkm_lcs_source_wait_for_slot(
+	u32 source_id, const struct pkm_lcs_runtime_limits *limits,
+	unsigned long deadline)
 {
 	for (;;) {
 		s64 epoch = atomic64_read(&pkm_lcs_source_slot_epoch);
@@ -2023,7 +2026,7 @@ static long pkm_lcs_source_wait_for_slot(u32 source_id,
 		long wait_ret;
 		long ret;
 
-		ret = pkm_lcs_source_slot_admission_state(source_id);
+		ret = pkm_lcs_source_slot_admission_state(source_id, limits);
 		if (ret != -EAGAIN)
 			return ret;
 
@@ -4916,7 +4919,7 @@ long pkm_lcs_source_lookup_round_trip_timeout(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, NULL, deadline);
 		if (ret)
 			return ret;
 
@@ -5084,7 +5087,7 @@ long pkm_lcs_source_create_entry_round_trip_timeout_with_limits(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -5125,7 +5128,7 @@ long pkm_lcs_source_hide_entry_round_trip_timeout_with_limits(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -5179,7 +5182,7 @@ long pkm_lcs_source_delete_entry_round_trip_timeout_with_limits(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -5518,7 +5521,7 @@ static long pkm_lcs_source_transaction_round_trip_timeout(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, NULL, deadline);
 		if (ret)
 			return ret;
 
@@ -5618,7 +5621,7 @@ static long pkm_lcs_source_delete_layer_round_trip_timeout_with_limits(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -5678,7 +5681,7 @@ static long pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout_with_
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -6101,7 +6104,7 @@ long pkm_lcs_source_flush_round_trip_timeout(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, NULL, deadline);
 		if (ret)
 			return ret;
 
@@ -6161,7 +6164,7 @@ long pkm_lcs_source_drop_key_round_trip_timeout(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, NULL, deadline);
 		if (ret)
 			return ret;
 
@@ -6225,7 +6228,7 @@ long pkm_lcs_source_create_key_round_trip_timeout_with_limits(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -6264,7 +6267,7 @@ long pkm_lcs_source_write_key_round_trip_timeout(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, NULL, deadline);
 		if (ret)
 			return ret;
 
@@ -6305,7 +6308,7 @@ long pkm_lcs_source_set_value_round_trip_timeout_with_limits(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -6361,7 +6364,7 @@ long pkm_lcs_source_delete_value_entry_round_trip_timeout_with_limits(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -6412,7 +6415,7 @@ long pkm_lcs_source_set_blanket_tombstone_round_trip_timeout_with_limits(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -6469,7 +6472,7 @@ long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -6530,7 +6533,7 @@ pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -6589,7 +6592,7 @@ long pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -6648,7 +6651,7 @@ long pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
@@ -11926,11 +11929,14 @@ long pkm_lcs_walk_absolute_components(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
 {
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	return pkm_lcs_walk_absolute_components_impl(
 		source_id, txn_id, root_guid, components, component_count,
 		false, false, 0, PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT, NULL, 0,
 		layers, layer_count, private_layers, private_layer_count, -1,
-		NULL, result);
+		&limits, result);
 }
 
 static long pkm_lcs_resolved_key_path_prepare_relative(
@@ -12206,10 +12212,13 @@ long pkm_lcs_walk_relative_components(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
 {
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	return pkm_lcs_walk_relative_components_impl(
 		parent, txn_id, components, component_count, false, false, 0,
 		PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT, NULL, 0, layers,
-		layer_count, private_layers, private_layer_count, -1, NULL,
+		layer_count, private_layers, private_layer_count, -1, &limits,
 		result);
 }
 
@@ -12486,6 +12495,12 @@ void pkm_lcs_kunit_source_fd_snapshot(
 	snapshot->next_request_id = source_fd->next_request_id;
 	snapshot->closing = source_fd->closing;
 	mutex_unlock(&source_fd->queue_lock);
+}
+
+long pkm_lcs_kunit_source_slot_admission_state(
+	u32 source_id, const struct pkm_lcs_runtime_limits *limits)
+{
+	return pkm_lcs_source_slot_admission_state(source_id, limits);
 }
 
 static bool pkm_lcs_kunit_copy_to_kernel(void *ctx, void __user *dst,

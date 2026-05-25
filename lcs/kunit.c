@@ -22992,7 +22992,7 @@ static int pkm_lcs_kunit_create_source_write_status(
 static int pkm_lcs_kunit_create_source_thread(void *raw_script)
 {
 	struct pkm_lcs_kunit_create_source_script *script = raw_script;
-	u8 request[256];
+	u8 request[1024];
 	ssize_t count = 0;
 	u64 request_id = 0;
 	int ret;
@@ -30926,7 +30926,8 @@ static void pkm_lcs_kunit_layer_path_refresh_uses_supplied_limits(
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 	ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result_with_limits(
 		1, metadata_guid, metadata_path, ARRAY_SIZE(metadata_path),
-		NULL, 0, true, &limits, &effective_changed);
+		pkm_lcs_kunit_system_sid, sizeof(pkm_lcs_kunit_system_sid),
+		true, &limits, &effective_changed);
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
@@ -39355,6 +39356,75 @@ static void pkm_lcs_kunit_source_in_flight_raised_runtime_limit(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_slot_admission_uses_supplied_limits(
+	struct kunit *test)
+{
+	const u32 live_limit = 8U;
+	const u32 supplied_limit = live_limit + 1U;
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0xd0 };
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0xd1 };
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_runtime_limits supplied = { };
+	struct file file = { };
+	const void *token;
+	size_t frame_len;
+	u8 frame[96];
+	u32 i;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_concurrent_rsi_requests = live_limit;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+	supplied = limits;
+	supplied.max_concurrent_rsi_requests = supplied_limit;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	for (i = 0; i < live_limit; i++) {
+		pkm_lcs_kunit_build_lookup_frame(test, frame, sizeof(frame),
+						 i, "Child", &frame_len);
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_source_enqueue_request(1, frame,
+							       frame_len,
+							       NULL),
+				0L);
+	}
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, live_limit);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, live_limit);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_slot_admission_state(1, NULL),
+			(long)-EAGAIN);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_slot_admission_state(1, &supplied),
+			0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_create_entry_request_with_limits(
+				1, 0, parent_guid, "Next", strlen("Next"),
+				"base", strlen("base"), child_guid, 101,
+				&supplied, &enqueue),
+			0L);
+	KUNIT_EXPECT_EQ(test, enqueue.request_id, (u64)live_limit);
+	KUNIT_EXPECT_EQ(test, enqueue.in_flight_count, supplied_limit);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_slot_admission_state(1, &supplied),
+			(long)-EAGAIN);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, supplied_limit);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count,
+			supplied_limit);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id, (u64)supplied_limit);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_response_rejects_before_read(struct kunit *test)
 {
 	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x72 };
@@ -44446,6 +44516,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_in_flight_full_blocks_after_read),
 	KUNIT_CASE(pkm_lcs_kunit_source_in_flight_uses_runtime_limit),
 	KUNIT_CASE(pkm_lcs_kunit_source_in_flight_raised_runtime_limit),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_slot_admission_uses_supplied_limits),
 	KUNIT_CASE(pkm_lcs_kunit_source_response_rejects_before_read),
 	KUNIT_CASE(pkm_lcs_kunit_source_response_releases_after_read),
 	KUNIT_CASE(

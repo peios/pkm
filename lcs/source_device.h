@@ -1444,6 +1444,8 @@ ssize_t pkm_lcs_kunit_source_device_write_file(
 __poll_t pkm_lcs_kunit_source_device_poll_file(struct file *file);
 __poll_t pkm_lcs_kunit_source_device_poll_file_with_table(
 	struct file *file, struct poll_table_struct *wait);
+long pkm_lcs_kunit_source_slot_admission_state(
+	u32 source_id, const struct pkm_lcs_runtime_limits *limits);
 long pkm_lcs_kunit_source_dispatch_enum_children_waitable_request(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_source_response_waiter *waiter,
