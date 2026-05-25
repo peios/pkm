@@ -3375,10 +3375,12 @@ out_unlock_table:
 
 static long pkm_lcs_source_dispatch_read_key_request_with_waiter(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	struct pkm_lcs_source_queued_request *request;
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
@@ -3391,6 +3393,10 @@ static long pkm_lcs_source_dispatch_read_key_request_with_waiter(
 		memset(result, 0, sizeof(*result));
 	if (!guid)
 		return -EINVAL;
+	if (!limits) {
+		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 
 	request = kzalloc(sizeof(*request), GFP_KERNEL);
 	if (!request)
@@ -3418,7 +3424,7 @@ static long pkm_lcs_source_dispatch_read_key_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -3436,7 +3442,7 @@ static long pkm_lcs_source_dispatch_read_key_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		guid, NULL, waiter);
+		guid, limits, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -6436,7 +6442,7 @@ long pkm_lcs_source_set_blanket_tombstone_round_trip_timeout(
 		sequence, NULL, timeout_ms, response, enqueue);
 }
 
-static long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
+long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
 	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
@@ -6497,7 +6503,7 @@ long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
 		NULL, timeout_ms, frame, response, enqueue);
 }
 
-static long
+long
 pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
@@ -6557,9 +6563,10 @@ long pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
 		response, enqueue);
 }
 
-long pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+long pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
-	u32 timeout_ms, struct pkm_lcs_source_response_frame *frame,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_frame *frame,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
@@ -6587,7 +6594,7 @@ long pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
 			return ret;
 
 		ret = pkm_lcs_source_dispatch_read_key_request_with_waiter(
-			source_id, txn_id, guid, &waiter, enqueue);
+			source_id, txn_id, guid, limits, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -6601,6 +6608,17 @@ long pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
 	if (ret)
 		pkm_lcs_source_response_frame_destroy(frame);
 	return ret;
+}
+
+long pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	u32 timeout_ms, struct pkm_lcs_source_response_frame *frame,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
+		source_id, txn_id, guid, NULL, timeout_ms, frame, response,
+		enqueue);
 }
 
 long pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
@@ -8886,8 +8904,7 @@ long pkm_lcs_resolve_symlink_target_for_key(
 
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		source_id, txn_id, key_guid, "", 0, false, limits,
-		pkm_lcs_runtime_request_timeout_ms(), &frame, &response,
-		&enqueue);
+		limits->request_timeout_ms, &frame, &response, &enqueue);
 	if (ret)
 		goto out_destroy;
 
@@ -9449,9 +9466,9 @@ static long pkm_lcs_create_missing_read_parent_key(
 		return -EINVAL;
 
 	pkm_lcs_source_response_frame_init(&frame);
-	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
-		source_id, txn_id, key_guid, pkm_lcs_runtime_request_timeout_ms(),
-		&frame, &response, &enqueue);
+	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
+		source_id, txn_id, key_guid, limits,
+		limits->request_timeout_ms, &frame, &response, &enqueue);
 	if (ret)
 		goto out_destroy_frame;
 
@@ -10284,8 +10301,7 @@ static long pkm_lcs_create_missing_source_records_with_sequence(
 		resolution->parent.key_guid, resolution->child_name,
 		resolution->child_name_len,
 		target->name, target->name_len, child_guid, sequence,
-		limits, pkm_lcs_runtime_request_timeout_ms(), &entry_response,
-		NULL);
+		limits, limits->request_timeout_ms, &entry_response, NULL);
 	ret = pkm_lcs_create_missing_source_response_plan(ret, &entry_response,
 							  &plan);
 	if (ret)
@@ -10305,7 +10321,7 @@ static long pkm_lcs_create_missing_source_records_with_sequence(
 		resolution->parent.source_id, txn_id, child_guid,
 		resolution->child_name, resolution->child_name_len,
 		resolution->parent.key_guid, created_sd->sd, created_sd->sd_len,
-		volatile_key, symlink, limits, pkm_lcs_runtime_request_timeout_ms(),
+		volatile_key, symlink, limits, limits->request_timeout_ms,
 		&key_response, NULL);
 	ret = pkm_lcs_create_missing_source_response_plan(ret, &key_response,
 							  &plan);
@@ -11310,10 +11326,9 @@ static long pkm_lcs_walk_absolute_components_at_symlink_limit(
 
 	if (component_count == 1) {
 		pkm_lcs_source_response_frame_init(&frame);
-		ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
-			source_id, effective_txn_id, root_guid,
-			pkm_lcs_runtime_request_timeout_ms(), &frame, &response,
-			&enqueue);
+		ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
+			source_id, effective_txn_id, root_guid, limits,
+			limits->request_timeout_ms, &frame, &response, &enqueue);
 		if (ret)
 			goto out_root_frame;
 
@@ -11352,8 +11367,8 @@ static long pkm_lcs_walk_absolute_components_at_symlink_limit(
 		ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
 			source_id, effective_txn_id, current_guid,
 			components[i].name, components[i].name_len,
-			limits, pkm_lcs_runtime_request_timeout_ms(), &frame,
-			&response, &enqueue);
+			limits, limits->request_timeout_ms, &frame, &response,
+			&enqueue);
 		if (ret)
 			goto out_destroy_frame;
 
@@ -11679,10 +11694,9 @@ restart:
 		goto out_destroy;
 	if (walk_component_count == 1) {
 		pkm_lcs_source_response_frame_init(&frame);
-		ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
-			walk_source_id, walk_txn_id, walk_root_guid,
-			pkm_lcs_runtime_request_timeout_ms(), &frame, &response,
-			&enqueue);
+		ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
+			walk_source_id, walk_txn_id, walk_root_guid, limits,
+			limits->request_timeout_ms, &frame, &response, &enqueue);
 		if (ret)
 			goto out_root_frame;
 
@@ -11760,8 +11774,8 @@ restart:
 		ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
 			walk_source_id, walk_txn_id, current_guid,
 			walk_components[i].name, walk_components[i].name_len,
-			limits, pkm_lcs_runtime_request_timeout_ms(), &frame,
-			&response, &enqueue);
+			limits, limits->request_timeout_ms, &frame, &response,
+			&enqueue);
 		if (ret)
 			goto out_destroy_frame;
 
@@ -12062,8 +12076,8 @@ static long pkm_lcs_walk_relative_components_impl(
 		ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
 			parent->source_id, effective_txn_id, current_guid,
 			components[i].name, components[i].name_len,
-			limits, pkm_lcs_runtime_request_timeout_ms(), &frame,
-			&response, &enqueue);
+			limits, limits->request_timeout_ms, &frame, &response,
+			&enqueue);
 		if (ret)
 			goto out_destroy_frame;
 

@@ -23588,7 +23588,7 @@ static int pkm_lcs_kunit_read_key_source_thread(void *raw_script)
 	struct pkm_lcs_kunit_read_key_source_script *script = raw_script;
 	size_t expected_len = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
 	u8 request[64];
-	u8 response[256];
+	u8 response[1024];
 	size_t response_len = 0;
 	ssize_t count;
 	u64 request_id;
@@ -40282,6 +40282,180 @@ out_release_source:
 	}
 }
 
+static void pkm_lcs_kunit_source_lookup_round_trip_supplied_limits(
+	struct kunit *test)
+{
+	enum { LONG_NAME_LEN = 300 };
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0xa1 };
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0xa2 };
+	char layer_name[LONG_NAME_LEN + 1];
+	struct pkm_lcs_kunit_walk_source_step step = {
+		.expected_child = "Child",
+		.layer_name = layer_name,
+		.guid = child_guid,
+		.sd = pkm_lcs_kunit_owner_only_sd,
+		.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+	};
+	struct pkm_lcs_kunit_walk_source_script script = {
+		.steps = &step,
+		.step_count = 1,
+	};
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	int thread_ret;
+	long ret;
+
+	pkm_lcs_kunit_fill_name(layer_name, LONG_NAME_LEN, 'L');
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = LONG_NAME_LEN;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread,
+					 &script,
+					 "pkm-lcs-kunit-lookup-supplied");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
+		1, 0, parent_guid, "Child", strlen("Child"), &limits,
+		limits.request_timeout_ms, &frame, &response, &enqueue);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_LOOKUP);
+	KUNIT_EXPECT_FALSE(test, response.malformed_source_data);
+	KUNIT_EXPECT_EQ(test, response.limits.max_path_component_length,
+			(u32)LONG_NAME_LEN);
+
+	pkm_lcs_source_response_frame_destroy(&frame);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_enum_children_round_trip_supplied_limits(
+	struct kunit *test)
+{
+	enum { LONG_NAME_LEN = 300 };
+	static const u8 parent_guid[RSI_GUID_SIZE] = { 0xb1 };
+	static const u8 child_guid[RSI_GUID_SIZE] = { 0xb2 };
+	char child_name[LONG_NAME_LEN + 1];
+	struct pkm_lcs_kunit_enum_children_source_script script = {
+		.expected_parent_guid = parent_guid,
+		.child_name = child_name,
+		.layer_name = "base",
+		.child_guid = child_guid,
+	};
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	int thread_ret;
+	long ret;
+
+	pkm_lcs_kunit_fill_name(child_name, LONG_NAME_LEN, 'C');
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = LONG_NAME_LEN;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_enum_children_source_thread, &script,
+		"pkm-lcs-kunit-enum-supplied");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
+		1, 0, parent_guid, &limits, limits.request_timeout_ms, &frame,
+		&response, &enqueue);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, response.request_op_code,
+			(u16)RSI_ENUM_CHILDREN);
+	KUNIT_EXPECT_FALSE(test, response.malformed_source_data);
+	KUNIT_EXPECT_EQ(test, response.limits.max_path_component_length,
+			(u32)LONG_NAME_LEN);
+
+	pkm_lcs_source_response_frame_destroy(&frame);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_read_key_round_trip_supplied_limits(
+	struct kunit *test)
+{
+	enum { LONG_NAME_LEN = 300 };
+	static const u8 guid[RSI_GUID_SIZE] = { 0xc1 };
+	char key_name[LONG_NAME_LEN + 1];
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = guid,
+		.name = key_name,
+	};
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	int thread_ret;
+	long ret;
+
+	pkm_lcs_kunit_fill_name(key_name, LONG_NAME_LEN, 'K');
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = LONG_NAME_LEN;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_read_key_source_thread, &script,
+		"pkm-lcs-kunit-read-key-supplied");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
+		1, 0, guid, &limits, limits.request_timeout_ms, &frame,
+		&response, &enqueue);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_READ_KEY);
+	KUNIT_EXPECT_FALSE(test, response.malformed_source_data);
+	KUNIT_EXPECT_EQ(test, response.limits.max_path_component_length,
+			(u32)LONG_NAME_LEN);
+
+	pkm_lcs_source_response_frame_destroy(&frame);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_expect_source_validation_audit(
 	struct kunit *test, const char *validation_class,
 	const u8 key_guid[RSI_GUID_SIZE])
@@ -44289,6 +44463,12 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_write_enum_children_runtime_limits_child_names),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_query_values_runtime_limits_names),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_lookup_round_trip_supplied_limits),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_enum_children_round_trip_supplied_limits),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_read_key_round_trip_supplied_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_malformed_path_name_audits),
 	KUNIT_CASE(

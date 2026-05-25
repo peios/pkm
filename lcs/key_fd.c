@@ -1505,9 +1505,8 @@ static long pkm_lcs_key_fd_query_effective_value_snapshot_with_limits(
 
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, value_name,
-		value_name_len, false, limits,
-		pkm_lcs_runtime_request_timeout_ms(), &snapshot->frame,
-		&response, NULL);
+		value_name_len, false, limits, limits->request_timeout_ms,
+		&snapshot->frame, &response, NULL);
 	if (ret)
 		goto out_layer_snapshot;
 
@@ -1594,8 +1593,7 @@ static long pkm_lcs_key_fd_query_effective_values_frame(
 	pkm_lcs_source_response_frame_init(frame);
 	return pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, "", 0, true,
-		limits, pkm_lcs_runtime_request_timeout_ms(), frame, response,
-		NULL);
+		limits, limits->request_timeout_ms, frame, response, NULL);
 }
 
 static long pkm_lcs_key_fd_materialize_value_watch_events(
@@ -2060,8 +2058,8 @@ static long pkm_lcs_key_fd_query_value_from_args(
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, value_name,
-		name_len, false, &limits, pkm_lcs_runtime_request_timeout_ms(),
-		&frame, &response, NULL);
+		name_len, false, &limits, limits.request_timeout_ms, &frame,
+		&response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -2911,8 +2909,8 @@ static long pkm_lcs_key_fd_set_value_layer_cap_check(
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, input->value_name,
 		(input->value_name ? (u32)strlen(input->value_name) : 0),
-		false, &input->limits, pkm_lcs_runtime_request_timeout_ms(),
-		&frame, &response, NULL);
+		false, &input->limits, input->limits.request_timeout_ms, &frame,
+		&response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -3376,8 +3374,7 @@ static long pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
 		return 0;
 
 	ret = pkm_lcs_source_delete_layer_orchestrate_timeout(
-		layer_name, layer_name_len, pkm_lcs_runtime_request_timeout_ms(),
-		NULL);
+		layer_name, layer_name_len, limits.request_timeout_ms, NULL);
 	if (!ret)
 		*orchestrated_out = true;
 	return ret;
@@ -4106,15 +4103,14 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 		args->name_len, input.target.name, input.target.name_len,
 		args->type, input.data, args->data_len, sequence,
 		args->expected_seq, &input.limits,
-		pkm_lcs_runtime_request_timeout_ms(), &response, NULL);
+		input.limits.request_timeout_ms, &response, NULL);
 	if (ret)
 		goto out_cancel_mutation;
 
 	last_write_time = (u64)ktime_get_real_ns();
 	ret = pkm_lcs_source_write_key_round_trip_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, NULL, 0,
-		last_write_time, pkm_lcs_runtime_request_timeout_ms(), NULL,
-		NULL);
+		last_write_time, input.limits.request_timeout_ms, NULL, NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
@@ -4249,8 +4245,7 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 	ret = pkm_lcs_source_delete_value_entry_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, input.value_name,
 		args->name_len, input.target.name, input.target.name_len,
-		&input.limits, pkm_lcs_runtime_request_timeout_ms(), &response,
-		NULL);
+		&input.limits, input.limits.request_timeout_ms, &response, NULL);
 	if (ret)
 		goto out_before;
 
@@ -4263,8 +4258,7 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 	last_write_time = (u64)ktime_get_real_ns();
 	ret = pkm_lcs_source_write_key_round_trip_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, NULL, 0,
-		last_write_time, pkm_lcs_runtime_request_timeout_ms(), NULL,
-		NULL);
+		last_write_time, input.limits.request_timeout_ms, NULL, NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
@@ -4402,8 +4396,8 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 	ret = pkm_lcs_source_set_blanket_tombstone_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid,
 		input.target.name, input.target.name_len, input.set, sequence,
-		&input.limits, pkm_lcs_runtime_request_timeout_ms(),
-		&mutation_response, NULL);
+		&input.limits, input.limits.request_timeout_ms, &mutation_response,
+		NULL);
 	if (ret)
 		goto out_before;
 
@@ -4415,8 +4409,7 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 	last_write_time = (u64)ktime_get_real_ns();
 	ret = pkm_lcs_source_write_key_round_trip_timeout(
 		key_fd->source_id, txn_id, key_fd->key_guid, NULL, 0,
-		last_write_time, pkm_lcs_runtime_request_timeout_ms(), NULL,
-		NULL);
+		last_write_time, input.limits.request_timeout_ms, NULL, NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
@@ -4559,8 +4552,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	ret = pkm_lcs_source_delete_entry_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, parent_guid, child_name,
 		child_name_len, input.target.name, input.target.name_len,
-		&input.limits, pkm_lcs_runtime_request_timeout_ms(), &response,
-		NULL);
+		&input.limits, input.limits.request_timeout_ms, &response, NULL);
 	if (ret)
 		goto out_cancel_mutation;
 
@@ -4590,7 +4582,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	last_write_time = (u64)ktime_get_real_ns();
 	ret = pkm_lcs_source_write_key_round_trip_timeout(
 		key_fd->source_id, txn_id, parent_guid, NULL, 0, last_write_time,
-		pkm_lcs_runtime_request_timeout_ms(), NULL, NULL);
+		input.limits.request_timeout_ms, NULL, NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
@@ -4746,8 +4738,7 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 	ret = pkm_lcs_source_hide_entry_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, parent_guid, child_name, child_name_len,
 		input.target.name, input.target.name_len, sequence,
-		&input.limits, pkm_lcs_runtime_request_timeout_ms(), &response,
-		NULL);
+		&input.limits, input.limits.request_timeout_ms, &response, NULL);
 	if (ret)
 		goto out_cancel_mutation;
 
