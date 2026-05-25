@@ -5587,7 +5587,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
     let context = LayerResolutionContext {
         layers: layer_views.as_slice(),
         private_layers: private_layer_views.as_slice(),
-        limits: &LcsLimits::DEFAULT,
+        limits: &limits,
         next_sequence,
     };
     let mut value_storage =
@@ -5604,13 +5604,13 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
     let mut allocation_failed = false;
     let mut wrong_value_name = false;
     if let Err(err) = payload.for_each_value_entry(|entry| {
-        let name = validate_value_name_bytes(entry.value_name.data, &LcsLimits::DEFAULT)?;
+        let name = validate_value_name_bytes(entry.value_name.data, &limits)?;
         if !casefold_eq(name, requested_name) {
             wrong_value_name = true;
             return Err(LcsError::RsiPayloadLengthOverflow);
         }
-        let layer = validate_layer_name_bytes(entry.layer_name.data, &LcsLimits::DEFAULT)?;
-        validate_value_data_len(entry.data.data.len(), &LcsLimits::DEFAULT)?;
+        let layer = validate_layer_name_bytes(entry.layer_name.data, &limits)?;
+        validate_value_data_len(entry.data.data.len(), &limits)?;
         validate_value_write_type(
             entry.value_type,
             entry.data.data.len(),
@@ -5640,7 +5640,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_value_response(
     }
 
     if let Err(err) = payload.for_each_blanket_entry(|entry| {
-        let layer = validate_layer_name_bytes(entry.layer_name.data, &LcsLimits::DEFAULT)?;
+        let layer = validate_layer_name_bytes(entry.layer_name.data, &limits)?;
         if blanket_storage
             .push(BlanketTombstoneEntry {
                 layer,
