@@ -7261,6 +7261,49 @@ out_layers:
 	return ret;
 }
 
+long pkm_lcs_runtime_limits_refresh_self_config_from_machine_hive(
+	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_self_config_apply_plan *result_out)
+{
+	static const struct pkm_lcs_path_component_view registry_path[] = {
+		{ .name = "Machine", .name_len = sizeof("Machine") - 1 },
+		{ .name = "System", .name_len = sizeof("System") - 1 },
+		{ .name = "Registry", .name_len = sizeof("Registry") - 1 },
+	};
+	struct pkm_lcs_self_config_apply_plan empty_plan = { };
+	struct pkm_lcs_resolved_key_path registry = { };
+	struct pkm_lcs_layer_snapshot layers = { };
+	long ret;
+
+	if (result_out)
+		*result_out = empty_plan;
+	if (!source_id || !machine_root_guid)
+		return -EINVAL;
+
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layers);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_walk_absolute_components(
+		source_id, 0, machine_root_guid, registry_path,
+		ARRAY_SIZE(registry_path), layers.layers, layers.layer_count,
+		NULL, 0, &registry);
+	if (ret == -ENOENT) {
+		ret = 0;
+		goto out_layers;
+	}
+	if (ret)
+		goto out_layers;
+
+	ret = pkm_lcs_runtime_limits_refresh_self_config_from_key(
+		source_id, registry.key_guid, result_out);
+
+	pkm_lcs_resolved_key_path_destroy(&registry);
+out_layers:
+	pkm_lcs_source_layer_snapshot_release(&layers);
+	return ret;
+}
+
 static long pkm_lcs_publish_open_key_for_token(
 	const void *token, u32 source_id, const u8 key_guid[RSI_GUID_SIZE],
 	const u8 *sd, size_t sd_len, u32 desired_access,
