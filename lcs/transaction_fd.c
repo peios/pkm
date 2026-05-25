@@ -2162,6 +2162,7 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 	size_t context_capacity_size;
 	u32 context_capacity;
 	u32 index = 0;
+	u32 i;
 	long ret;
 
 	if (internal_watch_effects_out)
@@ -2348,6 +2349,8 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 			goto out_free;
 		}
 	}
+	for (i = 0; i < index; i++)
+		contexts[i].limits = limits;
 
 	ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch_effects(
 		contexts, index, internal_watch_effects_out);
@@ -2411,8 +2414,8 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 		if (layer_recovery_required) {
 			struct pkm_lcs_layer_operation_recovery_result recovery = { };
 
-			ret = pkm_lcs_source_layer_operation_recover_skip_generation(
-				source_id, root_guid, &recovery);
+			ret = pkm_lcs_source_layer_operation_recover_skip_generation_with_limits(
+				source_id, root_guid, limits, &recovery);
 			if (ret) {
 				*source_down_required_out = true;
 				return -EIO;

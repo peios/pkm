@@ -18403,6 +18403,122 @@ static void pkm_lcs_kunit_key_fd_watch_runtime_subtree_depth(
 	pkm_lcs_runtime_limits_reset_defaults();
 }
 
+static void pkm_lcs_kunit_key_fd_watch_context_retains_queue_limit(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "RetainedQueue" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0xb1 },
+		{ 0xb2 },
+	};
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct pkm_lcs_runtime_limits retained = { };
+	struct pkm_lcs_runtime_limits live = { };
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_SD,
+	};
+	struct pkm_lcs_watch_dispatch_context context = {
+		.changed_key_guid = ancestors[1],
+		.ancestor_guids = ancestors,
+		.resolved_path = path,
+		.limits = &retained,
+		.path_component_count = 2,
+		.event_type = REG_WATCH_SD_CHANGED,
+	};
+	long fd;
+	u32 i;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&retained), 0L);
+	retained.notification_queue_size = 20U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&retained), 0L);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		26, KEY_NOTIFY, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&live), 0L);
+	live.notification_queue_size = 16U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&live), 0L);
+
+	for (i = 0; i < 17U; i++) {
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_key_fd_dispatch_watch_event_context(
+					&context),
+				0L);
+	}
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_pending_events, 17U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_runtime_limits_reset_defaults();
+}
+
+static void pkm_lcs_kunit_key_fd_watch_context_retains_subtree_depth(
+	struct kunit *test)
+{
+	static const char * const root_path[] = { "Machine" };
+	static const char * const child_path[] = { "Machine", "Parent", "Child" };
+	static const u8 ancestors[3][PKM_LCS_GUID_BYTES] = {
+		{ 0xc1 },
+		{ 0xc2 },
+		{ 0xc3 },
+	};
+	struct pkm_lcs_runtime_limits retained = { };
+	struct pkm_lcs_runtime_limits live = { };
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_SD,
+		.subtree = 1,
+	};
+	struct pkm_lcs_watch_dispatch_context context = {
+		.changed_key_guid = ancestors[2],
+		.ancestor_guids = ancestors,
+		.resolved_path = child_path,
+		.limits = &retained,
+		.path_component_count = 3,
+		.event_type = REG_WATCH_SD_CHANGED,
+	};
+	u8 record[32] = { };
+	long root_fd;
+	ssize_t read_len;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&retained), 0L);
+	retained.max_subtree_watch_depth = 0U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&retained), 0L);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+
+	root_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		27, KEY_NOTIFY, root_path, ancestors, 1);
+	KUNIT_ASSERT_TRUE(test, root_fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)root_fd,
+							  &args),
+			0L);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&live), 0L);
+	live.max_subtree_watch_depth = 1U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&live), 0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_dispatch_watch_event_context(&context),
+			0L);
+	read_len = pkm_lcs_kunit_key_fd_read((int)root_fd, record,
+					    sizeof(record), true);
+	KUNIT_ASSERT_TRUE(test, read_len > 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 4),
+			REG_WATCH_SD_CHANGED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 8), 2U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)root_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_runtime_limits_reset_defaults();
+}
+
 static void pkm_lcs_kunit_key_fd_watch_registry_arm_replace_disarm(
 	struct kunit *test)
 {
@@ -18878,6 +18994,68 @@ static void pkm_lcs_kunit_transaction_watch_burst_over_limit_overflows_once(
 	kfree(contexts);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)single_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)burst_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_runtime_limits_reset_defaults();
+}
+
+static void pkm_lcs_kunit_transaction_watch_batch_retains_runtime_limits(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "BatchRetained" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0xd1 },
+		{ 0xd2 },
+	};
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_SD,
+	};
+	struct pkm_lcs_runtime_limits retained = { };
+	struct pkm_lcs_runtime_limits live = { };
+	struct pkm_lcs_watch_dispatch_context *contexts;
+	u32 context_count = 257U;
+	long fd;
+	u32 i;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&retained), 0L);
+	retained.notification_queue_size = 300U;
+	retained.max_transaction_watch_event_burst = 257U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&retained), 0L);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		28, KEY_NOTIFY, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args),
+			0L);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&live), 0L);
+	live.notification_queue_size = 16U;
+	live.max_transaction_watch_event_burst = 256U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&live), 0L);
+
+	contexts = kcalloc(context_count, sizeof(*contexts), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, contexts);
+	for (i = 0; i < context_count; i++) {
+		contexts[i].changed_key_guid = ancestors[1];
+		contexts[i].ancestor_guids = ancestors;
+		contexts[i].resolved_path = path;
+		contexts[i].limits = &retained;
+		contexts[i].path_component_count = 2;
+		contexts[i].event_type = REG_WATCH_SD_CHANGED;
+	}
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_dispatch_watch_event_context_batch(
+				contexts, context_count),
+			0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_pending_events, context_count);
+
+	kfree(contexts);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 	pkm_lcs_runtime_limits_reset_defaults();
 }
@@ -44772,6 +44950,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_read_poll_drains_records),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_filter_disarm_and_overflow),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_runtime_queue_limit),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_watch_context_retains_queue_limit),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_registry_arm_replace_disarm),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_registry_refcounts_close),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_live_dispatch_direct_and_subtree),
@@ -44781,7 +44961,11 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_key_fd_live_dispatch_context_subkey_created),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_runtime_subtree_depth),
 	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_watch_context_retains_subtree_depth),
+	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_watch_burst_over_limit_overflows_once),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_watch_batch_retains_runtime_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_begin_transaction_publishes_active_unbound),
 	KUNIT_CASE(pkm_lcs_kunit_begin_transaction_ids_are_monotonic),

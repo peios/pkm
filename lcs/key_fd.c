@@ -271,7 +271,8 @@ static long pkm_lcs_key_fd_plan_get_security(
 	struct pkm_lcs_get_security_result *out);
 static long pkm_lcs_key_fd_mark_orphaned_internal(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
-	u32 *live_refs_out, bool dispatch_direct_deleted);
+	u32 *live_refs_out, bool dispatch_direct_deleted,
+	const struct pkm_lcs_runtime_limits *limits);
 
 static u32 pkm_lcs_guid_hash(const u8 guid[PKM_LCS_GUID_BYTES])
 {
@@ -761,14 +762,12 @@ static bool pkm_lcs_key_fd_subtree_depth_suppressed(u32 path_count,
 
 static long pkm_lcs_key_fd_queue_watch_event_locked(
 	struct pkm_lcs_key_fd *key_fd,
-	struct pkm_lcs_key_fd_watch_event *event)
+	struct pkm_lcs_key_fd_watch_event *event, u32 queue_limit)
 {
 	struct pkm_lcs_key_fd_watch_event *queued_event = event;
-	u32 queue_limit;
 
 	if (!key_fd || !event)
 		return -EINVAL;
-	queue_limit = pkm_lcs_runtime_notification_queue_size();
 	if (!queue_limit)
 		return -EINVAL;
 
@@ -1150,6 +1149,7 @@ static long pkm_lcs_key_fd_queue_watch_record(
 	u32 record_len)
 {
 	struct pkm_lcs_key_fd_watch_event *event;
+	struct pkm_lcs_runtime_limits limits;
 	bool matches;
 	long ret;
 
@@ -1174,7 +1174,9 @@ static long pkm_lcs_key_fd_queue_watch_record(
 		mutex_unlock(&key_fd->watch_lock);
 		return ret;
 	}
-	ret = pkm_lcs_key_fd_queue_watch_event_locked(key_fd, event);
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_key_fd_queue_watch_event_locked(
+		key_fd, event, limits.notification_queue_size);
 	mutex_unlock(&key_fd->watch_lock);
 
 	if (!ret)
@@ -1362,7 +1364,8 @@ static long pkm_lcs_key_fd_read_existing_sd(
 }
 
 static void pkm_lcs_key_fd_publish_set_security_effects(
-	struct pkm_lcs_key_fd *key_fd)
+	struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_watch_dispatch_context context = { };
 
@@ -1370,6 +1373,7 @@ static void pkm_lcs_key_fd_publish_set_security_effects(
 	context.ancestor_guids =
 		(const u8 (*)[PKM_LCS_GUID_BYTES])key_fd->ancestor_guids;
 	context.resolved_path = (const char * const *)key_fd->resolved_path;
+	context.limits = limits;
 	context.path_component_count = key_fd->path_component_count;
 	context.event_type = REG_WATCH_SD_CHANGED;
 
@@ -1378,7 +1382,8 @@ static void pkm_lcs_key_fd_publish_set_security_effects(
 
 static void pkm_lcs_key_fd_publish_value_effects(
 	struct pkm_lcs_key_fd *key_fd, u32 event_type,
-	const char *value_name, u32 value_name_len)
+	const char *value_name, u32 value_name_len,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_watch_dispatch_context context = { };
 
@@ -1386,6 +1391,7 @@ static void pkm_lcs_key_fd_publish_value_effects(
 	context.ancestor_guids =
 		(const u8 (*)[PKM_LCS_GUID_BYTES])key_fd->ancestor_guids;
 	context.resolved_path = (const char * const *)key_fd->resolved_path;
+	context.limits = limits;
 	context.path_component_count = key_fd->path_component_count;
 	context.event_type = event_type;
 	context.name = (const u8 *)value_name;
@@ -1396,7 +1402,8 @@ static void pkm_lcs_key_fd_publish_value_effects(
 
 static u32 pkm_lcs_key_fd_publish_parent_subkey_event(
 	struct pkm_lcs_key_fd *key_fd, const u8 *parent_guid,
-	const char *child_name, u32 child_name_len, u32 event_type)
+	const char *child_name, u32 child_name_len, u32 event_type,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_watch_dispatch_context context = { };
 	u32 internal_effects = 0;
@@ -1409,6 +1416,7 @@ static u32 pkm_lcs_key_fd_publish_parent_subkey_event(
 	context.ancestor_guids =
 		(const u8 (*)[PKM_LCS_GUID_BYTES])key_fd->ancestor_guids;
 	context.resolved_path = (const char * const *)key_fd->resolved_path;
+	context.limits = limits;
 	context.path_component_count = key_fd->path_component_count - 1U;
 	context.event_type = event_type;
 	context.name = (const u8 *)child_name;
@@ -1421,24 +1429,27 @@ static u32 pkm_lcs_key_fd_publish_parent_subkey_event(
 
 static u32 pkm_lcs_key_fd_publish_parent_subkey_deleted(
 	struct pkm_lcs_key_fd *key_fd, const u8 *parent_guid,
-	const char *child_name, u32 child_name_len)
+	const char *child_name, u32 child_name_len,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	return pkm_lcs_key_fd_publish_parent_subkey_event(
 		key_fd, parent_guid, child_name, child_name_len,
-		REG_WATCH_SUBKEY_DELETED);
+		REG_WATCH_SUBKEY_DELETED, limits);
 }
 
 static u32 pkm_lcs_key_fd_publish_parent_subkey_created(
 	struct pkm_lcs_key_fd *key_fd, const u8 *parent_guid,
-	const char *child_name, u32 child_name_len)
+	const char *child_name, u32 child_name_len,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	return pkm_lcs_key_fd_publish_parent_subkey_event(
 		key_fd, parent_guid, child_name, child_name_len,
-		REG_WATCH_SUBKEY_CREATED);
+		REG_WATCH_SUBKEY_CREATED, limits);
 }
 
 static void pkm_lcs_key_fd_publish_key_deleted_context(
-	struct pkm_lcs_key_fd *key_fd)
+	struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_watch_dispatch_context context = { };
 
@@ -1449,6 +1460,7 @@ static void pkm_lcs_key_fd_publish_key_deleted_context(
 	context.ancestor_guids =
 		(const u8 (*)[PKM_LCS_GUID_BYTES])key_fd->ancestor_guids;
 	context.resolved_path = (const char * const *)key_fd->resolved_path;
+	context.limits = limits;
 	context.path_component_count = key_fd->path_component_count;
 	context.event_type = REG_WATCH_KEY_DELETED;
 
@@ -1457,10 +1469,11 @@ static void pkm_lcs_key_fd_publish_key_deleted_context(
 
 static void pkm_lcs_key_fd_publish_set_value_effects(
 	struct pkm_lcs_key_fd *key_fd, const char *value_name,
-	u32 value_name_len)
+	u32 value_name_len, const struct pkm_lcs_runtime_limits *limits)
 {
 	pkm_lcs_key_fd_publish_value_effects(
-		key_fd, REG_WATCH_VALUE_SET, value_name, value_name_len);
+		key_fd, REG_WATCH_VALUE_SET, value_name, value_name_len,
+		limits);
 }
 
 static void pkm_lcs_effective_value_snapshot_destroy(
@@ -1686,7 +1699,8 @@ out_layer_snapshot:
 
 static long pkm_lcs_key_fd_publish_value_watch_event_bytes(
 	struct pkm_lcs_key_fd *key_fd,
-	const struct pkm_lcs_value_watch_event_bytes *events)
+	const struct pkm_lcs_value_watch_event_bytes *events,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	size_t offset = 0;
 	u32 i;
@@ -1713,7 +1727,7 @@ static long pkm_lcs_key_fd_publish_value_watch_event_bytes(
 			return -EIO;
 		pkm_lcs_key_fd_publish_value_effects(
 			key_fd, event_type, (const char *)events->data + offset,
-			name_len);
+			name_len, limits);
 		offset += name_len;
 	}
 	return offset == events->len ? 0 : -EIO;
@@ -4019,7 +4033,7 @@ static long pkm_lcs_key_fd_set_security_from_args(
 		goto out_merge;
 	}
 
-	pkm_lcs_key_fd_publish_set_security_effects(key_fd);
+	pkm_lcs_key_fd_publish_set_security_effects(key_fd, &limits);
 
 out_cancel_merge:
 	if (ret && mutation.active)
@@ -4176,9 +4190,9 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	if (layer_effective_changed) {
 		struct pkm_lcs_layer_operation_recovery_result recovery = { };
 
-		ret = pkm_lcs_source_layer_operation_recover_skip_generation(
+		ret = pkm_lcs_source_layer_operation_recover_skip_generation_with_limits(
 			key_fd->source_id, key_fd->ancestor_guids[0],
-			&recovery);
+			&input.limits, &recovery);
 		if (ret) {
 			pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 			ret = -EIO;
@@ -4187,7 +4201,7 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	}
 
 	pkm_lcs_key_fd_publish_set_value_effects(key_fd, input.value_name,
-						 args->name_len);
+						 args->name_len, &input.limits);
 	ret = 0;
 
 out_cancel_mutation:
@@ -4327,7 +4341,8 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 
 	if (event_type)
 		pkm_lcs_key_fd_publish_value_effects(
-			key_fd, event_type, input.value_name, args->name_len);
+			key_fd, event_type, input.value_name, args->name_len,
+			&input.limits);
 	ret = 0;
 
 out_after:
@@ -4477,7 +4492,8 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 		goto out_events;
 	}
 
-	ret = pkm_lcs_key_fd_publish_value_watch_event_bytes(key_fd, &events);
+	ret = pkm_lcs_key_fd_publish_value_watch_event_bytes(key_fd, &events,
+							    &input.limits);
 
 out_events:
 	pkm_lcs_value_watch_event_bytes_destroy(&events);
@@ -4609,7 +4625,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 			publish_created = post_lookup.replacement_visible;
 			ret = pkm_lcs_key_fd_mark_orphaned_internal(
 				key_fd->source_id, key_fd->key_guid, NULL,
-				NULL, false);
+				NULL, false, &input.limits);
 			if (ret) {
 				pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 				ret = -EIO;
@@ -4638,13 +4654,15 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	if (publish_deleted) {
 		internal_watch_effects =
 			pkm_lcs_key_fd_publish_parent_subkey_deleted(
-				key_fd, parent_guid, child_name, child_name_len);
+				key_fd, parent_guid, child_name, child_name_len,
+				&input.limits);
 		if (publish_created)
 			internal_watch_effects |=
 				pkm_lcs_key_fd_publish_parent_subkey_created(
 					key_fd, parent_guid, child_name,
-					child_name_len);
-		pkm_lcs_key_fd_publish_key_deleted_context(key_fd);
+					child_name_len, &input.limits);
+		pkm_lcs_key_fd_publish_key_deleted_context(key_fd,
+							   &input.limits);
 	}
 
 	if (!(internal_watch_effects &
@@ -4790,8 +4808,9 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 	}
 
 	internal_watch_effects = pkm_lcs_key_fd_publish_parent_subkey_deleted(
-		key_fd, parent_guid, child_name, child_name_len);
-	pkm_lcs_key_fd_publish_key_deleted_context(key_fd);
+		key_fd, parent_guid, child_name, child_name_len,
+		&input.limits);
+	pkm_lcs_key_fd_publish_key_deleted_context(key_fd, &input.limits);
 
 	if (!(internal_watch_effects &
 	      PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE)) {
@@ -5148,7 +5167,7 @@ static long pkm_lcs_key_fd_queue_dispatch_event_locked(
 	struct pkm_lcs_key_fd *watcher, u32 event_type, const u8 *name,
 	u32 name_len, bool subtree_record,
 	const struct pkm_lcs_key_fd_string_view *path_components,
-	u32 path_component_count, bool *queued_out)
+	u32 path_component_count, u32 queue_limit, bool *queued_out)
 {
 	struct pkm_lcs_key_fd_watch_event *event;
 	bool matches = false;
@@ -5178,7 +5197,8 @@ static long pkm_lcs_key_fd_queue_dispatch_event_locked(
 		return PTR_ERR(event);
 	}
 
-	ret = pkm_lcs_key_fd_queue_watch_event_locked(watcher, event);
+	ret = pkm_lcs_key_fd_queue_watch_event_locked(watcher, event,
+						      queue_limit);
 	if (!ret)
 		*queued_out = true;
 	mutex_unlock(&watcher->watch_lock);
@@ -5189,14 +5209,14 @@ static long pkm_lcs_key_fd_dispatch_to_watcher_locked(
 	struct pkm_lcs_key_fd *watcher, u32 event_type, const u8 *name,
 	u32 name_len, bool subtree_record,
 	const struct pkm_lcs_key_fd_string_view *path_components,
-	u32 path_component_count)
+	u32 path_component_count, u32 queue_limit)
 {
 	bool queued = false;
 	long ret;
 
 	ret = pkm_lcs_key_fd_queue_dispatch_event_locked(
 		watcher, event_type, name, name_len, subtree_record,
-		path_components, path_component_count, &queued);
+		path_components, path_component_count, queue_limit, &queued);
 	if (queued)
 		wake_up_interruptible(&watcher->watch_wait);
 	return ret;
@@ -5729,7 +5749,7 @@ static bool pkm_lcs_key_fd_transaction_burst_suppresses_watcher(
 }
 
 static long pkm_lcs_key_fd_transaction_burst_dispatch_overflows_locked(
-	struct list_head *counts)
+	struct list_head *counts, u32 queue_limit)
 {
 	struct pkm_lcs_key_fd_transaction_burst_entry *entry;
 	long ret;
@@ -5741,7 +5761,7 @@ static long pkm_lcs_key_fd_transaction_burst_dispatch_overflows_locked(
 			continue;
 		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
 			entry->watcher, REG_WATCH_OVERFLOW, NULL, 0, false,
-			NULL, 0);
+			NULL, 0, queue_limit);
 		if (ret)
 			return ret;
 	}
@@ -5751,7 +5771,8 @@ static long pkm_lcs_key_fd_transaction_burst_dispatch_overflows_locked(
 static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 	const struct pkm_lcs_watch_dispatch_context *context,
 	struct list_head *transaction_burst_counts,
-	struct list_head *internal_events, u32 max_subtree_depth)
+	struct list_head *internal_events, u32 max_subtree_depth,
+	u32 queue_limit)
 {
 	struct pkm_lcs_key_fd_string_view *path_views = NULL;
 	struct pkm_lcs_subtree_watch_entry *subtree;
@@ -5784,7 +5805,8 @@ static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 			continue;
 		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
 			watcher, context->event_type, context->name,
-			context->name_len, watcher->watch_subtree, NULL, 0);
+			context->name_len, watcher->watch_subtree, NULL, 0,
+			queue_limit);
 		if (ret)
 			goto out_unlock;
 	}
@@ -5838,7 +5860,8 @@ static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 				continue;
 			ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
 				watcher, context->event_type, context->name,
-				context->name_len, true, path_views, path_count);
+				context->name_len, true, path_views, path_count,
+				queue_limit);
 			if (ret)
 				goto out_unlock;
 		}
@@ -5857,7 +5880,8 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_effects(
 	u32 *internal_effects_out)
 {
 	LIST_HEAD(internal_events);
-	u32 max_subtree_depth;
+	struct pkm_lcs_runtime_limits fallback_limits;
+	const struct pkm_lcs_runtime_limits *limits;
 	long ret;
 
 	if (internal_effects_out)
@@ -5865,13 +5889,19 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_effects(
 	ret = pkm_lcs_key_fd_validate_dispatch_context(context);
 	if (ret)
 		return ret;
-	max_subtree_depth = pkm_lcs_runtime_max_subtree_watch_depth();
+	limits = context->limits;
+	if (!limits) {
+		pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
+			&fallback_limits);
+		limits = &fallback_limits;
+	}
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	ret = pkm_lcs_key_fd_dispatch_watch_event_context_locked(context,
 								NULL,
 								&internal_events,
-								max_subtree_depth);
+								limits->max_subtree_watch_depth,
+								limits->notification_queue_size);
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 	pkm_lcs_internal_watch_events_deliver(&internal_events,
 					      internal_effects_out);
@@ -5891,8 +5921,8 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch_effects(
 {
 	LIST_HEAD(internal_events);
 	LIST_HEAD(transaction_burst_counts);
-	u32 burst_limit;
-	u32 max_subtree_depth;
+	struct pkm_lcs_runtime_limits fallback_limits;
+	const struct pkm_lcs_runtime_limits *limits;
 	long ret = 0;
 	u32 i;
 
@@ -5908,25 +5938,31 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch_effects(
 		if (ret)
 			return ret;
 	}
-	burst_limit = pkm_lcs_runtime_max_transaction_watch_event_burst();
-	max_subtree_depth = pkm_lcs_runtime_max_subtree_watch_depth();
+	limits = contexts[0].limits;
+	if (!limits) {
+		pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
+			&fallback_limits);
+		limits = &fallback_limits;
+	}
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	for (i = 0; i < context_count; i++) {
 		ret = pkm_lcs_key_fd_transaction_burst_count_context_locked(
-			&contexts[i], &transaction_burst_counts, burst_limit,
-			max_subtree_depth);
+			&contexts[i], &transaction_burst_counts,
+			limits->max_transaction_watch_event_burst,
+			limits->max_subtree_watch_depth);
 		if (ret)
 			goto out_unlock;
 	}
 	ret = pkm_lcs_key_fd_transaction_burst_dispatch_overflows_locked(
-		&transaction_burst_counts);
+		&transaction_burst_counts, limits->notification_queue_size);
 	if (ret)
 		goto out_unlock;
 	for (i = 0; i < context_count; i++) {
 		ret = pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 			&contexts[i], &transaction_burst_counts,
-			&internal_events, max_subtree_depth);
+			&internal_events, limits->max_subtree_watch_depth,
+			limits->notification_queue_size);
 		if (ret)
 			break;
 	}
@@ -5948,7 +5984,7 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
 
 static long pkm_lcs_key_fd_dispatch_overflow_context_locked(
 	const struct pkm_lcs_watch_dispatch_context *context,
-	u32 max_subtree_depth)
+	u32 max_subtree_depth, u32 queue_limit)
 {
 	struct pkm_lcs_subtree_watch_entry *subtree;
 	struct pkm_lcs_watch_registry_entry *entry;
@@ -5966,7 +6002,8 @@ static long pkm_lcs_key_fd_dispatch_overflow_context_locked(
 			continue;
 		watcher = entry->owner.key_fd;
 		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
-			watcher, REG_WATCH_OVERFLOW, NULL, 0, false, NULL, 0);
+			watcher, REG_WATCH_OVERFLOW, NULL, 0, false, NULL, 0,
+			queue_limit);
 		if (ret)
 			return ret;
 	}
@@ -5995,7 +6032,7 @@ static long pkm_lcs_key_fd_dispatch_overflow_context_locked(
 				continue;
 			ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
 				watcher, REG_WATCH_OVERFLOW, NULL, 0, false,
-				NULL, 0);
+				NULL, 0, queue_limit);
 			if (ret)
 				return ret;
 		}
@@ -6008,7 +6045,8 @@ long pkm_lcs_key_fd_dispatch_overflow_context(
 	const struct pkm_lcs_watch_dispatch_context *context)
 {
 	struct pkm_lcs_watch_dispatch_context overflow_context;
-	u32 max_subtree_depth;
+	struct pkm_lcs_runtime_limits fallback_limits;
+	const struct pkm_lcs_runtime_limits *limits;
 	long ret;
 
 	if (!context)
@@ -6021,20 +6059,28 @@ long pkm_lcs_key_fd_dispatch_overflow_context(
 	ret = pkm_lcs_key_fd_validate_dispatch_context(&overflow_context);
 	if (ret)
 		return ret;
-	max_subtree_depth = pkm_lcs_runtime_max_subtree_watch_depth();
+	limits = overflow_context.limits;
+	if (!limits) {
+		pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
+			&fallback_limits);
+		limits = &fallback_limits;
+	}
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	ret = pkm_lcs_key_fd_dispatch_overflow_context_locked(
-		&overflow_context, max_subtree_depth);
+		&overflow_context, limits->max_subtree_watch_depth,
+		limits->notification_queue_size);
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 	return ret;
 }
 
-long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
-					     u32 *watch_count_out)
+long pkm_lcs_key_fd_dispatch_source_overflow_with_limits(
+	u32 source_id, const struct pkm_lcs_runtime_limits *limits,
+	u32 *watch_count_out)
 {
 	struct pkm_lcs_watch_registry_entry *entry;
 	struct pkm_lcs_key_fd *watcher;
+	struct pkm_lcs_runtime_limits fallback_limits;
 	u32 queued = 0;
 	int bucket;
 	long ret = 0;
@@ -6043,6 +6089,11 @@ long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
 		*watch_count_out = 0;
 	if (!source_id || !watch_count_out)
 		return -EINVAL;
+	if (!limits) {
+		pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
+			&fallback_limits);
+		limits = &fallback_limits;
+	}
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	hash_for_each(pkm_lcs_watch_map, bucket, entry, link) {
@@ -6051,7 +6102,8 @@ long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
 			continue;
 		watcher = entry->owner.key_fd;
 		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
-			watcher, REG_WATCH_OVERFLOW, NULL, 0, false, NULL, 0);
+			watcher, REG_WATCH_OVERFLOW, NULL, 0, false, NULL, 0,
+			limits->notification_queue_size);
 		if (ret)
 			break;
 		if (queued == U32_MAX) {
@@ -6068,16 +6120,30 @@ long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
 	return 0;
 }
 
+long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
+					     u32 *watch_count_out)
+{
+	return pkm_lcs_key_fd_dispatch_source_overflow_with_limits(
+		source_id, NULL, watch_count_out);
+}
+
 static long pkm_lcs_key_fd_dispatch_key_deleted_direct(
-	const u8 guid[PKM_LCS_GUID_BYTES])
+	const u8 guid[PKM_LCS_GUID_BYTES],
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_watch_registry_entry *entry;
+	struct pkm_lcs_runtime_limits fallback_limits;
 	struct pkm_lcs_key_fd *watcher;
 	u32 hash;
 	long ret = 0;
 
 	if (!guid)
 		return -EINVAL;
+	if (!limits) {
+		pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
+			&fallback_limits);
+		limits = &fallback_limits;
+	}
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	hash = pkm_lcs_guid_hash(guid);
@@ -6088,7 +6154,8 @@ static long pkm_lcs_key_fd_dispatch_key_deleted_direct(
 		watcher = entry->owner.key_fd;
 		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
 			watcher, REG_WATCH_KEY_DELETED, NULL, 0,
-			watcher->watch_subtree, NULL, 0);
+			watcher->watch_subtree, NULL, 0,
+			limits->notification_queue_size);
 		if (ret)
 			break;
 	}
@@ -6098,7 +6165,8 @@ static long pkm_lcs_key_fd_dispatch_key_deleted_direct(
 
 static long pkm_lcs_key_fd_mark_orphaned_internal(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
-	u32 *live_refs_out, bool dispatch_direct_deleted)
+	u32 *live_refs_out, bool dispatch_direct_deleted,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_key_ref_entry *entry;
 	struct pkm_lcs_key_fd *key_fd;
@@ -6136,7 +6204,8 @@ static long pkm_lcs_key_fd_mark_orphaned_internal(
 	mutex_unlock(&pkm_lcs_key_ref_lock);
 
 	if (!already_orphaned && dispatch_direct_deleted)
-		(void)pkm_lcs_key_fd_dispatch_key_deleted_direct(guid);
+		(void)pkm_lcs_key_fd_dispatch_key_deleted_direct(guid,
+								 limits);
 	if (marked_out)
 		*marked_out = marked;
 	if (live_refs_out)
@@ -6148,7 +6217,8 @@ long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out)
 {
 	return pkm_lcs_key_fd_mark_orphaned_internal(source_id, guid,
-						    marked_out, NULL, true);
+						    marked_out, NULL, true,
+						    NULL);
 }
 
 long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted_with_refs(
@@ -6157,7 +6227,17 @@ long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted_with_refs(
 {
 	return pkm_lcs_key_fd_mark_orphaned_internal(source_id, guid,
 						    marked_out, live_refs_out,
-						    true);
+						    true, NULL);
+}
+
+long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted_with_refs_limits(
+	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES],
+	const struct pkm_lcs_runtime_limits *limits, u32 *marked_out,
+	u32 *live_refs_out)
+{
+	return pkm_lcs_key_fd_mark_orphaned_internal(source_id, guid,
+						    marked_out, live_refs_out,
+						    true, limits);
 }
 
 long pkm_lcs_key_fd_mark_orphaned_no_watch(
@@ -6166,7 +6246,7 @@ long pkm_lcs_key_fd_mark_orphaned_no_watch(
 {
 	return pkm_lcs_key_fd_mark_orphaned_internal(source_id, guid,
 						    marked_out, live_refs_out,
-						    false);
+						    false, NULL);
 }
 
 long pkm_lcs_key_fd_dispatch_watch_event(

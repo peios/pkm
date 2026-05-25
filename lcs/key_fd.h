@@ -109,6 +109,7 @@ struct pkm_lcs_watch_dispatch_context {
 	const u8 *changed_key_guid;
 	const u8 (*ancestor_guids)[PKM_LCS_GUID_BYTES];
 	const char * const *resolved_path;
+	const struct pkm_lcs_runtime_limits *limits;
 	u32 path_component_count;
 	u32 event_type;
 	const u8 *name;
@@ -154,6 +155,9 @@ long pkm_lcs_key_fd_dispatch_overflow_context(
 	const struct pkm_lcs_watch_dispatch_context *context);
 long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
 					     u32 *watch_count_out);
+long pkm_lcs_key_fd_dispatch_source_overflow_with_limits(
+	u32 source_id, const struct pkm_lcs_runtime_limits *limits,
+	u32 *watch_count_out);
 long pkm_lcs_key_fd_dispatch_watch_event(
 	const struct pkm_lcs_watch_dispatch_input *input);
 long pkm_lcs_internal_self_watch_arm(
@@ -167,6 +171,10 @@ long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out);
 long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted_with_refs(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,
+	u32 *live_refs_out);
+long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted_with_refs_limits(
+	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES],
+	const struct pkm_lcs_runtime_limits *limits, u32 *marked_out,
 	u32 *live_refs_out);
 long pkm_lcs_key_fd_mark_orphaned_no_watch(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out,

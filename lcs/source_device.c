@@ -3152,8 +3152,8 @@ static long pkm_lcs_source_register_file_for_token_core(
 	if (publish.resumed_source_id) {
 		u32 watch_count = 0;
 
-		ret = pkm_lcs_key_fd_dispatch_source_overflow(
-			publish.resumed_source_id, &watch_count);
+		ret = pkm_lcs_key_fd_dispatch_source_overflow_with_limits(
+			publish.resumed_source_id, &limits, &watch_count);
 		if (ret) {
 			pkm_lcs_source_mark_down_by_id(publish.resumed_source_id);
 			ret = -EIO;
@@ -5861,8 +5861,8 @@ static long pkm_lcs_source_apply_delete_layer_orphan_response_with_limits(
 		memcpy(guid, frame->data + guid_offset, sizeof(guid));
 		guid_offset += RSI_GUID_SIZE;
 
-		ret = pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted_with_refs(
-			source_id, guid, &marked, &live_refs);
+		ret = pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted_with_refs_limits(
+			source_id, guid, limits, &marked, &live_refs);
 		if (ret)
 			return ret;
 		if (check_add_overflow(marked_fd_count, marked,
@@ -6010,8 +6010,8 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout_with
 			return -EIO;
 		}
 
-		ret = pkm_lcs_key_fd_dispatch_source_overflow(
-			source_ids[i], &watch_overflow_count);
+		ret = pkm_lcs_key_fd_dispatch_source_overflow_with_limits(
+			source_ids[i], limits, &watch_overflow_count);
 		if (ret) {
 			pkm_lcs_source_mark_down_by_id(source_ids[i]);
 			return -EIO;
@@ -6079,8 +6079,9 @@ static void pkm_lcs_source_mark_ids_down(const u32 *source_ids,
 		pkm_lcs_source_mark_down_by_id(source_ids[i]);
 }
 
-long pkm_lcs_source_layer_operation_recover_skip_generation(
+long pkm_lcs_source_layer_operation_recover_skip_generation_with_limits(
 	u32 skip_source_id, const u8 skip_root_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_layer_operation_recovery_result *result)
 {
 	u32 source_ids[PKM_LCS_MAX_REGISTERED_SOURCES_HARD];
@@ -6120,8 +6121,8 @@ long pkm_lcs_source_layer_operation_recover_skip_generation(
 			return -EIO;
 		}
 
-		ret = pkm_lcs_key_fd_dispatch_source_overflow(
-			source_ids[i], &watch_overflow_count);
+		ret = pkm_lcs_key_fd_dispatch_source_overflow_with_limits(
+			source_ids[i], limits, &watch_overflow_count);
 		if (ret) {
 			pkm_lcs_source_mark_down_by_id(source_ids[i]);
 			return -EIO;
@@ -6143,11 +6144,19 @@ long pkm_lcs_source_layer_operation_recover_skip_generation(
 	return 0;
 }
 
+long pkm_lcs_source_layer_operation_recover_skip_generation(
+	u32 skip_source_id, const u8 skip_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_layer_operation_recovery_result *result)
+{
+	return pkm_lcs_source_layer_operation_recover_skip_generation_with_limits(
+		skip_source_id, skip_root_guid, NULL, result);
+}
+
 long pkm_lcs_source_layer_operation_recover(
 	struct pkm_lcs_layer_operation_recovery_result *result)
 {
-	return pkm_lcs_source_layer_operation_recover_skip_generation(0, NULL,
-								     result);
+	return pkm_lcs_source_layer_operation_recover_skip_generation_with_limits(
+		0, NULL, NULL, result);
 }
 
 long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout_with_limits(
@@ -10714,17 +10723,24 @@ static void pkm_lcs_create_missing_dispatch_subkey_created_best_effort(
 	const struct pkm_lcs_create_missing_parent_resolution *resolution)
 {
 	struct pkm_lcs_watch_dispatch_context context = { };
+	struct pkm_lcs_runtime_limits fallback_limits;
+	const struct pkm_lcs_runtime_limits *limits;
 
 	if (!resolution || !resolution->parent.ancestor_guids ||
 	    !resolution->parent.resolved_path ||
 	    !resolution->parent.component_count || !resolution->child_name ||
 	    !resolution->child_name_len)
 		return;
+	limits = pkm_lcs_create_missing_resolution_limits_or_snapshot(
+		resolution, &fallback_limits);
+	if (!limits)
+		return;
 
 	context.changed_key_guid = resolution->parent.key_guid;
 	context.ancestor_guids = resolution->parent.ancestor_guids;
 	context.resolved_path =
 		(const char * const *)resolution->parent.resolved_path;
+	context.limits = limits;
 	context.path_component_count = resolution->parent.component_count;
 	context.event_type = REG_WATCH_SUBKEY_CREATED;
 	context.name = resolution->child_name;
@@ -10782,12 +10798,18 @@ long pkm_lcs_create_missing_prepared_key_for_token(
 	struct pkm_lcs_create_missing_prepared_result *result)
 {
 	struct pkm_lcs_create_missing_source_records_result source = { };
+	struct pkm_lcs_runtime_limits fallback_limits;
+	const struct pkm_lcs_runtime_limits *limits;
 	bool layer_effective_changed = false;
 	u64 generation = 0;
 	long fd;
 	long ret;
 
 	if (!result)
+		return -EINVAL;
+	limits = pkm_lcs_create_missing_resolution_limits_or_snapshot(
+		resolution, &fallback_limits);
+	if (!limits)
 		return -EINVAL;
 
 	memset(result, 0, sizeof(*result));
@@ -10824,9 +10846,9 @@ long pkm_lcs_create_missing_prepared_key_for_token(
 	if (layer_effective_changed) {
 		struct pkm_lcs_layer_operation_recovery_result recovery = { };
 
-		ret = pkm_lcs_source_layer_operation_recover_skip_generation(
+		ret = pkm_lcs_source_layer_operation_recover_skip_generation_with_limits(
 			resolution->parent.source_id,
-			resolution->parent.ancestor_guids[0], &recovery);
+			resolution->parent.ancestor_guids[0], limits, &recovery);
 		if (ret) {
 			pkm_lcs_source_mark_down_by_id(
 				resolution->parent.source_id);

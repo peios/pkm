@@ -1244,6 +1244,10 @@ long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout_with_limits
 long pkm_lcs_source_layer_operation_recover_skip_generation(
 	u32 skip_source_id, const u8 skip_root_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_layer_operation_recovery_result *result);
+long pkm_lcs_source_layer_operation_recover_skip_generation_with_limits(
+	u32 skip_source_id, const u8 skip_root_guid[PKM_LCS_GUID_BYTES],
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_layer_operation_recovery_result *result);
 long pkm_lcs_source_layer_operation_recover(
 	struct pkm_lcs_layer_operation_recovery_result *result);
 long pkm_lcs_source_flush_round_trip_timeout(
