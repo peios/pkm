@@ -283,6 +283,13 @@ extern int lcs_rust_write_backup_trailer_record_frame(
 extern int lcs_rust_security_descriptor_owner_sid(
 	const u8 *security_descriptor, size_t security_descriptor_len,
 	const u8 **owner_sid_out, size_t *owner_sid_len_out);
+extern int lcs_rust_materialize_rsi_query_values_backup_entries(
+	const u8 *frame, size_t frame_len, u64 request_id, u64 next_sequence,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_backup_value_entry_view *values, size_t value_capacity,
+	struct pkm_lcs_backup_blanket_entry_view *blankets,
+	size_t blanket_capacity, u32 *value_count_out,
+	u32 *blanket_count_out);
 extern int lcs_rust_plan_registry_get_security(
 	const u8 *existing_sd, size_t existing_sd_len, u32 security_info,
 	u8 *output, size_t output_len, size_t *written_out);
@@ -7984,6 +7991,22 @@ long pkm_lcs_kunit_backup_blanket_tombstone_frame(
 	return pkm_lcs_backup_alloc_blanket_tombstone_frame(
 		&limits, key_guid, layer_name, layer_name_len, sequence,
 		frame_out, frame_len_out);
+}
+
+long pkm_lcs_kunit_backup_query_values_entries(
+	const u8 *frame, size_t frame_len, u64 request_id, u64 next_sequence,
+	struct pkm_lcs_backup_value_entry_view *values, size_t value_capacity,
+	struct pkm_lcs_backup_blanket_entry_view *blankets,
+	size_t blanket_capacity, u32 *value_count_out,
+	u32 *blanket_count_out)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	return lcs_rust_materialize_rsi_query_values_backup_entries(
+		frame, frame_len, request_id, next_sequence, &limits, values,
+		value_capacity, blankets, blanket_capacity, value_count_out,
+		blanket_count_out);
 }
 
 long pkm_lcs_kunit_key_fd_restore_for_token(

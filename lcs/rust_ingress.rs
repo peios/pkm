@@ -454,6 +454,28 @@ pub struct PkmLcsRsiQueryValuesInfoSummaryCopy {
 }
 
 #[repr(C)]
+pub struct PkmLcsRsiBackupValueEntryCopy {
+    pub name_offset: u32,
+    pub name_len: u32,
+    pub data_offset: u32,
+    pub data_len: u32,
+    pub layer_offset: u32,
+    pub layer_len: u32,
+    pub value_type: u32,
+    pub _pad: u32,
+    pub sequence: u64,
+}
+
+#[repr(C)]
+pub struct PkmLcsRsiBackupBlanketEntryCopy {
+    pub layer_offset: u32,
+    pub layer_len: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub sequence: u64,
+}
+
+#[repr(C)]
 pub struct PkmLcsRsiQueryValuesBatchResultCopy {
     pub required_len: u32,
     pub count: u32,
@@ -880,6 +902,26 @@ unsafe fn backup_writer_dst<'a>(
     } else {
         Ok(unsafe { slice::from_raw_parts_mut(dst, dst_len) })
     }
+}
+
+fn retained_frame_slice_offset(frame: &[u8], field: &[u8]) -> Result<(u32, u32), LinuxErrno> {
+    let base = frame.as_ptr() as usize;
+    let end = base
+        .checked_add(frame.len())
+        .ok_or(LinuxErrno::Eoverflow)?;
+    let ptr = field.as_ptr() as usize;
+    let field_end = ptr
+        .checked_add(field.len())
+        .ok_or(LinuxErrno::Eoverflow)?;
+
+    if ptr < base || ptr > end || field_end > end {
+        return Err(LinuxErrno::Eio);
+    }
+    let offset = ptr.checked_sub(base).ok_or(LinuxErrno::Eio)?;
+    if offset > u32::MAX as usize || field.len() > u32::MAX as usize {
+        return Err(LinuxErrno::Eoverflow);
+    }
+    Ok((offset as u32, field.len() as u32))
 }
 
 fn audit_caller_summary_from_copy<'a>(
@@ -5406,6 +5448,140 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_values_info_summary(
         (*result_out).source_value_entry_count = value_storage.len() as u32;
         (*result_out).source_blanket_count = blanket_storage.len() as u32;
     }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_rsi_query_values_backup_entries(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    limits: *const PkmLcsRuntimeLimitsCopy,
+    values: *mut PkmLcsRsiBackupValueEntryCopy,
+    value_capacity: usize,
+    blankets: *mut PkmLcsRsiBackupBlanketEntryCopy,
+    blanket_capacity: usize,
+    value_count_out: *mut u32,
+    blanket_count_out: *mut u32,
+) -> c_int {
+    let Some(value_count_out_ref) = (unsafe { value_count_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    let Some(blanket_count_out_ref) = (unsafe { blanket_count_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *value_count_out_ref = 0;
+    *blanket_count_out_ref = 0;
+
+    if frame.is_null()
+        || (value_capacity != 0 && values.is_null())
+        || (blanket_capacity != 0 && blankets.is_null())
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(err) => return err.negated_return() as c_int,
+        }
+    };
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let payload = match parse_rsi_query_values_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_QUERY_VALUES,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_query_values_response_error_return(err),
+    };
+
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &limits) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_value_payloads(&payload, &limits) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let value_count = payload.entry_count as usize;
+    let blanket_count = payload.blanket_count as usize;
+    if value_count > u32::MAX as usize || blanket_count > u32::MAX as usize {
+        return LinuxErrno::Eoverflow.negated_return() as c_int;
+    }
+    *value_count_out_ref = value_count as u32;
+    *blanket_count_out_ref = blanket_count as u32;
+    if value_capacity < value_count || blanket_capacity < blanket_count {
+        return LinuxErrno::Erange.negated_return() as c_int;
+    }
+
+    let value_entries = if value_count == 0 {
+        &mut []
+    } else {
+        unsafe { slice::from_raw_parts_mut(values, value_count) }
+    };
+    let blanket_entries = if blanket_count == 0 {
+        &mut []
+    } else {
+        unsafe { slice::from_raw_parts_mut(blankets, blanket_count) }
+    };
+
+    let mut value_index = 0usize;
+    if let Err(err) =
+        for_each_rsi_query_values_source_value_entry(&payload, &limits, |entry| {
+            let (name_offset, name_len) =
+                retained_frame_slice_offset(frame_bytes, entry.name.as_bytes())
+                    .map_err(|_| LcsError::RsiPayloadLengthOverflow)?;
+            let (data_offset, data_len) =
+                retained_frame_slice_offset(frame_bytes, entry.entry.data)
+                    .map_err(|_| LcsError::RsiPayloadLengthOverflow)?;
+            let (layer_offset, layer_len) =
+                retained_frame_slice_offset(frame_bytes, entry.entry.layer.as_bytes())
+                    .map_err(|_| LcsError::RsiPayloadLengthOverflow)?;
+            value_entries[value_index] = PkmLcsRsiBackupValueEntryCopy {
+                name_offset,
+                name_len,
+                data_offset,
+                data_len,
+                layer_offset,
+                layer_len,
+                value_type: entry.entry.value_type,
+                _pad: 0,
+                sequence: entry.entry.sequence,
+            };
+            value_index += 1;
+            Ok(())
+        })
+    {
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let mut blanket_index = 0usize;
+    if let Err(err) =
+        for_each_rsi_query_values_source_blanket_entry(&payload, &limits, |entry| {
+            let (layer_offset, layer_len) =
+                retained_frame_slice_offset(frame_bytes, entry.layer.as_bytes())
+                    .map_err(|_| LcsError::RsiPayloadLengthOverflow)?;
+            blanket_entries[blanket_index] = PkmLcsRsiBackupBlanketEntryCopy {
+                layer_offset,
+                layer_len,
+                _pad0: 0,
+                _pad1: 0,
+                sequence: entry.sequence,
+            };
+            blanket_index += 1;
+            Ok(())
+        })
+    {
+        return rsi_query_values_response_error_return(err);
+    }
+
     0
 }
 

@@ -29425,6 +29425,175 @@ static void pkm_lcs_kunit_rsi_query_values_bridge_rejects_wrong_value(
 			(long)-EIO);
 }
 
+static void pkm_lcs_kunit_backup_query_values_entries_materialize(
+	struct kunit *test)
+{
+	static const u8 data[] = { 0xde, 0xad };
+	struct pkm_lcs_backup_value_entry_view values[2] = { };
+	struct pkm_lcs_backup_blanket_entry_view blankets[1] = { };
+	u8 response[256];
+	size_t offset;
+	size_t response_len;
+	u32 value_count = 0;
+	u32 blanket_count = 0;
+
+	pkm_lcs_kunit_rsi_response_begin(test, response, sizeof(response),
+					 520, RSI_QUERY_VALUES_RESPONSE,
+					 RSI_OK, &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 2);
+	pkm_lcs_kunit_rsi_append_query_value_entry(
+		test, response, sizeof(response), &offset, "Alpha", "base",
+		REG_BINARY, data, sizeof(data), 1);
+	pkm_lcs_kunit_rsi_append_query_value_entry(
+		test, response, sizeof(response), &offset, "", "Overlay",
+		REG_TOMBSTONE, NULL, 0, 2);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_query_blanket(
+		test, response, sizeof(response), &offset, "Overlay", 3);
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_query_values_entries(
+				response, response_len, 520, 4, values,
+				ARRAY_SIZE(values), blankets,
+				ARRAY_SIZE(blankets), &value_count,
+				&blanket_count),
+			0L);
+	KUNIT_EXPECT_EQ(test, value_count, 2U);
+	KUNIT_EXPECT_EQ(test, blanket_count, 1U);
+
+	KUNIT_ASSERT_LE(test,
+			(size_t)values[0].name_offset + values[0].name_len,
+			response_len);
+	KUNIT_ASSERT_LE(test,
+			(size_t)values[0].data_offset + values[0].data_len,
+			response_len);
+	KUNIT_ASSERT_LE(test,
+			(size_t)values[0].layer_offset + values[0].layer_len,
+			response_len);
+	KUNIT_EXPECT_EQ(test, values[0].name_len, 5U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response + values[0].name_offset, "Alpha", 5),
+			0);
+	KUNIT_EXPECT_EQ(test, values[0].data_len, (u32)sizeof(data));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response + values[0].data_offset, data,
+			       sizeof(data)),
+			0);
+	KUNIT_EXPECT_EQ(test, values[0].layer_len, 4U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response + values[0].layer_offset, "base", 4),
+			0);
+	KUNIT_EXPECT_EQ(test, values[0].value_type, (u32)REG_BINARY);
+	KUNIT_EXPECT_EQ(test, values[0].sequence, 1ULL);
+
+	KUNIT_ASSERT_LE(test,
+			(size_t)values[1].name_offset + values[1].name_len,
+			response_len);
+	KUNIT_ASSERT_LE(test,
+			(size_t)values[1].data_offset + values[1].data_len,
+			response_len);
+	KUNIT_ASSERT_LE(test,
+			(size_t)values[1].layer_offset + values[1].layer_len,
+			response_len);
+	KUNIT_EXPECT_EQ(test, values[1].name_len, 0U);
+	KUNIT_EXPECT_EQ(test, values[1].data_len, 0U);
+	KUNIT_EXPECT_EQ(test, values[1].layer_len, 7U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response + values[1].layer_offset, "Overlay",
+			       7),
+			0);
+	KUNIT_EXPECT_EQ(test, values[1].value_type, (u32)REG_TOMBSTONE);
+	KUNIT_EXPECT_EQ(test, values[1].sequence, 2ULL);
+
+	KUNIT_ASSERT_LE(test,
+			(size_t)blankets[0].layer_offset +
+				blankets[0].layer_len,
+			response_len);
+	KUNIT_EXPECT_EQ(test, blankets[0].layer_len, 7U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(response + blankets[0].layer_offset, "Overlay",
+			       7),
+			0);
+	KUNIT_EXPECT_EQ(test, blankets[0].sequence, 3ULL);
+}
+
+static void pkm_lcs_kunit_backup_query_values_entries_short_arrays(
+	struct kunit *test)
+{
+	static const u8 data[] = { 0x7a };
+	struct pkm_lcs_backup_value_entry_view values[1] = { };
+	struct pkm_lcs_backup_blanket_entry_view blankets[1] = { };
+	u8 response[256];
+	size_t offset;
+	size_t response_len;
+	u32 value_count = 0;
+	u32 blanket_count = 0;
+
+	pkm_lcs_kunit_rsi_response_begin(test, response, sizeof(response),
+					 521, RSI_QUERY_VALUES_RESPONSE,
+					 RSI_OK, &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_query_value_entry(
+		test, response, sizeof(response), &offset, "One", "base",
+		REG_BINARY, data, sizeof(data), 1);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_query_blanket(
+		test, response, sizeof(response), &offset, "base", 2);
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_query_values_entries(
+				response, response_len, 521, 3, values, 0,
+				blankets, ARRAY_SIZE(blankets), &value_count,
+				&blanket_count),
+			(long)-ERANGE);
+	KUNIT_EXPECT_EQ(test, value_count, 1U);
+	KUNIT_EXPECT_EQ(test, blanket_count, 1U);
+}
+
+static void pkm_lcs_kunit_backup_query_values_entries_malformed(
+	struct kunit *test)
+{
+	static const u8 data[] = { 0x11 };
+	struct pkm_lcs_backup_value_entry_view values[1] = { };
+	struct pkm_lcs_backup_blanket_entry_view blankets[1] = { };
+	u8 response[256];
+	size_t offset;
+	size_t response_len;
+	u32 value_count = 0;
+	u32 blanket_count = 0;
+
+	pkm_lcs_kunit_rsi_response_begin(test, response, sizeof(response),
+					 522, RSI_QUERY_VALUES_RESPONSE,
+					 RSI_OK, &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_query_value_entry(
+		test, response, sizeof(response), &offset, "Future", "base",
+		REG_BINARY, data, sizeof(data), 10);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 0);
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_query_values_entries(
+				response, response_len, 522, 10, values,
+				ARRAY_SIZE(values), blankets,
+				ARRAY_SIZE(blankets), &value_count,
+				&blanket_count),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, value_count, 0U);
+	KUNIT_EXPECT_EQ(test, blanket_count, 0U);
+}
+
 static void pkm_lcs_kunit_set_value_layer_cap_uses_runtime_limit(
 	struct kunit *test)
 {
@@ -46542,6 +46711,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_rsi_query_values_bridge_blanket_not_found),
 	KUNIT_CASE(
 		pkm_lcs_kunit_rsi_query_values_bridge_rejects_wrong_value),
+	KUNIT_CASE(pkm_lcs_kunit_backup_query_values_entries_materialize),
+	KUNIT_CASE(pkm_lcs_kunit_backup_query_values_entries_short_arrays),
+	KUNIT_CASE(pkm_lcs_kunit_backup_query_values_entries_malformed),
 	KUNIT_CASE(pkm_lcs_kunit_set_value_layer_cap_uses_runtime_limit),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_delete_layer_response_validation),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_enum_children_info_summary),
