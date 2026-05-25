@@ -37747,6 +37747,105 @@ static void pkm_lcs_kunit_source_in_flight_full_blocks_after_read(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_in_flight_uses_runtime_limit(
+	struct kunit *test)
+{
+	const u32 limit = 8U;
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	u8 frame[96];
+	struct file file = { };
+	const void *token;
+	size_t frame_len;
+	u32 i;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_concurrent_rsi_requests = limit;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_max_concurrent_rsi_requests(),
+			limit);
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	for (i = 0; i < limit; i++) {
+		pkm_lcs_kunit_build_lookup_frame(test, frame, sizeof(frame),
+						 i, "Child", &frame_len);
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_source_enqueue_request(1, frame,
+							       frame_len,
+							       NULL),
+				0L);
+	}
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, limit);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, limit);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id, (u64)limit);
+
+	pkm_lcs_kunit_build_lookup_frame(test, frame, sizeof(frame), limit,
+					 "Next", &frame_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, frame, frame_len,
+						       NULL),
+			(long)-EAGAIN);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, limit);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, limit);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id, (u64)limit);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_in_flight_raised_runtime_limit(
+	struct kunit *test)
+{
+	const u32 limit = PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT + 4U;
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	u8 frame[96];
+	struct file file = { };
+	const void *token;
+	size_t frame_len;
+	u32 i;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_concurrent_rsi_requests = limit;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	for (i = 0; i < limit; i++) {
+		pkm_lcs_kunit_build_lookup_frame(test, frame, sizeof(frame),
+						 i, "Child", &frame_len);
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_source_enqueue_request(1, frame,
+							       frame_len,
+							       NULL),
+				0L);
+	}
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, limit);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, limit);
+	KUNIT_EXPECT_EQ(test, snapshot.next_request_id, (u64)limit);
+
+	pkm_lcs_kunit_build_lookup_frame(test, frame, sizeof(frame), limit,
+					 "Next", &frame_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_enqueue_request(1, frame, frame_len,
+						       NULL),
+			(long)-EAGAIN);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_response_rejects_before_read(struct kunit *test)
 {
 	static const u8 parent_guid[RSI_GUID_SIZE] = { 0x72 };
@@ -42534,6 +42633,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_read_retains_in_flight_until_release),
 	KUNIT_CASE(pkm_lcs_kunit_source_enqueue_rejects_reused_request_id),
 	KUNIT_CASE(pkm_lcs_kunit_source_in_flight_full_blocks_after_read),
+	KUNIT_CASE(pkm_lcs_kunit_source_in_flight_uses_runtime_limit),
+	KUNIT_CASE(pkm_lcs_kunit_source_in_flight_raised_runtime_limit),
 	KUNIT_CASE(pkm_lcs_kunit_source_response_rejects_before_read),
 	KUNIT_CASE(pkm_lcs_kunit_source_response_releases_after_read),
 	KUNIT_CASE(

@@ -51,6 +51,7 @@ struct pkm_lcs_runtime_limits {
 };
 
 struct pkm_lcs_source_in_flight_request {
+	struct list_head link;
 	bool occupied;
 	bool delivered;
 	bool response_accepted;
@@ -73,8 +74,7 @@ struct pkm_lcs_source_fd {
 	u32 queued_request_count;
 	u32 in_flight_request_count;
 	u64 next_request_id;
-	struct pkm_lcs_source_in_flight_request
-		in_flight_requests[PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT];
+	struct list_head in_flight_requests;
 	bool closing;
 };
 
@@ -656,6 +656,7 @@ u32 pkm_lcs_runtime_request_timeout_ms(void);
 u32 pkm_lcs_runtime_transaction_timeout_ms(void);
 u32 pkm_lcs_runtime_symlink_depth_limit(void);
 u32 pkm_lcs_runtime_max_key_depth(void);
+u32 pkm_lcs_runtime_max_concurrent_rsi_requests(void);
 u32 pkm_lcs_runtime_notification_queue_size(void);
 u32 pkm_lcs_runtime_max_subtree_watch_depth(void);
 u32 pkm_lcs_runtime_max_transaction_watch_event_burst(void);

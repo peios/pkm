@@ -191,6 +191,8 @@ static const struct pkm_lcs_runtime_limits pkm_lcs_runtime_limits_default =
 	PKM_LCS_RUNTIME_LIMITS_DEFAULT_INITIALIZER;
 static struct pkm_lcs_runtime_limits pkm_lcs_runtime_limits_current =
 	PKM_LCS_RUNTIME_LIMITS_DEFAULT_INITIALIZER;
+
+static void pkm_lcs_source_slot_waiters_wake(void);
 static const char pkm_lcs_base_layer_name[] = "base";
 static const struct pkm_lcs_rsi_layer_view pkm_lcs_base_layer_snapshot[] = {
 	{
@@ -273,6 +275,7 @@ long pkm_lcs_runtime_limits_snapshot(struct pkm_lcs_runtime_limits *limits)
 long pkm_lcs_runtime_limits_publish(
 	const struct pkm_lcs_runtime_limits *limits)
 {
+	u32 previous_max_concurrent;
 	long ret;
 
 	ret = pkm_lcs_runtime_limits_validate(limits);
@@ -280,16 +283,27 @@ long pkm_lcs_runtime_limits_publish(
 		return ret;
 
 	write_seqlock(&pkm_lcs_runtime_limits_lock);
+	previous_max_concurrent =
+		pkm_lcs_runtime_limits_current.max_concurrent_rsi_requests;
 	pkm_lcs_runtime_limits_current = *limits;
 	write_sequnlock(&pkm_lcs_runtime_limits_lock);
+	if (previous_max_concurrent != limits->max_concurrent_rsi_requests)
+		pkm_lcs_source_slot_waiters_wake();
 	return 0;
 }
 
 void pkm_lcs_runtime_limits_reset_defaults(void)
 {
+	u32 previous_max_concurrent;
+
 	write_seqlock(&pkm_lcs_runtime_limits_lock);
+	previous_max_concurrent =
+		pkm_lcs_runtime_limits_current.max_concurrent_rsi_requests;
 	pkm_lcs_runtime_limits_current = pkm_lcs_runtime_limits_default;
 	write_sequnlock(&pkm_lcs_runtime_limits_lock);
+	if (previous_max_concurrent !=
+	    pkm_lcs_runtime_limits_default.max_concurrent_rsi_requests)
+		pkm_lcs_source_slot_waiters_wake();
 }
 
 static void pkm_lcs_runtime_limits_snapshot_or_default(
@@ -329,6 +343,14 @@ u32 pkm_lcs_runtime_max_key_depth(void)
 
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	return limits.max_key_depth;
+}
+
+u32 pkm_lcs_runtime_max_concurrent_rsi_requests(void)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return limits.max_concurrent_rsi_requests;
 }
 
 u32 pkm_lcs_runtime_notification_queue_size(void)
@@ -1718,6 +1740,7 @@ static void pkm_lcs_source_fd_init(struct pkm_lcs_source_fd *source_fd)
 	source_fd->queued_request_count = 0;
 	source_fd->in_flight_request_count = 0;
 	source_fd->next_request_id = 0;
+	INIT_LIST_HEAD(&source_fd->in_flight_requests);
 	source_fd->closing = false;
 }
 
@@ -1751,15 +1774,14 @@ static void pkm_lcs_source_in_flight_destroy_locked(
 	struct pkm_lcs_source_fd *source_fd)
 {
 	bool had_in_flight;
-	u32 i;
+	struct pkm_lcs_source_in_flight_request *record;
+	struct pkm_lcs_source_in_flight_request *next;
 
 	lockdep_assert_held(&source_fd->queue_lock);
 
 	had_in_flight = source_fd->in_flight_request_count != 0;
-	for (i = 0; i < PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT; i++) {
-		struct pkm_lcs_source_in_flight_request *record =
-			&source_fd->in_flight_requests[i];
-
+	list_for_each_entry_safe(record, next, &source_fd->in_flight_requests,
+				 link) {
 		if (record->occupied && record->waiter) {
 			struct pkm_lcs_source_response_result result = {
 				.request_id = record->request_id,
@@ -1774,11 +1796,30 @@ static void pkm_lcs_source_in_flight_destroy_locked(
 								-EIO,
 								&result);
 		}
-		memset(record, 0, sizeof(*record));
+		list_del(&record->link);
+		kfree(record);
 	}
 	source_fd->in_flight_request_count = 0;
 	if (had_in_flight)
 		pkm_lcs_source_slot_waiters_wake();
+}
+
+static u32 pkm_lcs_source_in_flight_limit(
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	if (limits)
+		return limits->max_concurrent_rsi_requests;
+	return pkm_lcs_runtime_max_concurrent_rsi_requests();
+}
+
+static bool pkm_lcs_source_in_flight_at_limit_locked(
+	const struct pkm_lcs_source_fd *source_fd,
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	lockdep_assert_held(&source_fd->queue_lock);
+
+	return source_fd->in_flight_request_count >=
+	       pkm_lcs_source_in_flight_limit(limits);
 }
 
 static long pkm_lcs_source_request_id_successor(u64 request_id, u64 *next)
@@ -1828,8 +1869,7 @@ static long pkm_lcs_source_slot_admission_state(u32 source_id)
 	    source_fd->state != PKM_LCS_SOURCE_FD_ACTIVE ||
 	    source_fd->source_id != source_id) {
 		ret = -EIO;
-	} else if (source_fd->in_flight_request_count >=
-		   PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	} else if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
 		ret = -EAGAIN;
 	} else {
 		ret = 0;
@@ -1876,69 +1916,59 @@ static long pkm_lcs_source_in_flight_insert_locked(
 	struct pkm_lcs_source_response_waiter *waiter)
 {
 	struct pkm_lcs_runtime_limits effective_limits;
-	u32 i;
+	struct pkm_lcs_source_in_flight_request *record;
 
 	lockdep_assert_held(&source_fd->queue_lock);
 
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT)
-		return -EAGAIN;
 	if (limits)
 		effective_limits = *limits;
 	else
 		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd,
+						    &effective_limits))
+		return -EAGAIN;
 
-	for (i = 0; i < PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT; i++) {
-		struct pkm_lcs_source_in_flight_request *record =
-			&source_fd->in_flight_requests[i];
-
+	list_for_each_entry(record, &source_fd->in_flight_requests, link) {
 		if (record->occupied && record->request_id == request_id)
 			return -EINVAL;
 	}
 
-	for (i = 0; i < PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT; i++) {
-		struct pkm_lcs_source_in_flight_request *record =
-			&source_fd->in_flight_requests[i];
+	record = kzalloc(sizeof(*record), GFP_KERNEL);
+	if (!record)
+		return -ENOMEM;
 
-		if (record->occupied)
-			continue;
-		record->occupied = true;
-		record->delivered = false;
-		record->response_accepted = false;
-		record->request_id = request_id;
-		record->txn_id = txn_id;
-		record->op_code = op_code;
-		record->key_guid_present = key_guid != NULL;
-		if (key_guid)
-			memcpy(record->key_guid, key_guid,
-			       sizeof(record->key_guid));
-		record->limits = effective_limits;
-		record->waiter = waiter;
-		if (waiter) {
-			waiter->source_id = source_fd->source_id;
-			waiter->request_id = request_id;
-			WRITE_ONCE(waiter->attached, true);
-			WRITE_ONCE(waiter->detached, false);
-		}
-		source_fd->in_flight_request_count++;
-		return 0;
+	INIT_LIST_HEAD(&record->link);
+	record->occupied = true;
+	record->delivered = false;
+	record->response_accepted = false;
+	record->request_id = request_id;
+	record->txn_id = txn_id;
+	record->op_code = op_code;
+	record->key_guid_present = key_guid != NULL;
+	if (key_guid)
+		memcpy(record->key_guid, key_guid, sizeof(record->key_guid));
+	record->limits = effective_limits;
+	record->waiter = waiter;
+	if (waiter) {
+		waiter->source_id = source_fd->source_id;
+		waiter->request_id = request_id;
+		WRITE_ONCE(waiter->attached, true);
+		WRITE_ONCE(waiter->detached, false);
 	}
-
-	return -EIO;
+	list_add_tail(&record->link, &source_fd->in_flight_requests);
+	source_fd->in_flight_request_count++;
+	return 0;
 }
 
 static struct pkm_lcs_source_in_flight_request *
 pkm_lcs_source_in_flight_find_locked(struct pkm_lcs_source_fd *source_fd,
 				     u64 request_id)
 {
-	u32 i;
+	struct pkm_lcs_source_in_flight_request *record;
 
 	lockdep_assert_held(&source_fd->queue_lock);
 
-	for (i = 0; i < PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT; i++) {
-		struct pkm_lcs_source_in_flight_request *record =
-			&source_fd->in_flight_requests[i];
-
+	list_for_each_entry(record, &source_fd->in_flight_requests, link) {
 		if (record->occupied && record->request_id == request_id)
 			return record;
 	}
@@ -1970,7 +2000,8 @@ static void pkm_lcs_source_in_flight_release_locked(
 	if (!record || !record->occupied)
 		return;
 
-	memset(record, 0, sizeof(*record));
+	list_del(&record->link);
+	kfree(record);
 	if (source_fd->in_flight_request_count) {
 		source_fd->in_flight_request_count--;
 		pkm_lcs_source_slot_waiters_wake();
@@ -3119,8 +3150,7 @@ static long pkm_lcs_source_dispatch_lookup_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -3209,8 +3239,7 @@ static long pkm_lcs_source_dispatch_read_key_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -3299,8 +3328,7 @@ static long pkm_lcs_source_dispatch_enum_children_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -3404,8 +3432,7 @@ static long pkm_lcs_source_dispatch_query_values_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -3523,8 +3550,7 @@ static long pkm_lcs_source_dispatch_set_value_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -3635,8 +3661,7 @@ static long pkm_lcs_source_dispatch_delete_value_entry_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -3743,8 +3768,7 @@ static long pkm_lcs_source_dispatch_set_blanket_tombstone_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -3833,8 +3857,7 @@ static long pkm_lcs_source_dispatch_drop_key_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -3940,8 +3963,7 @@ static long pkm_lcs_source_dispatch_create_entry_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4054,8 +4076,7 @@ static long pkm_lcs_source_dispatch_hide_delete_entry_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4169,8 +4190,7 @@ static long pkm_lcs_source_dispatch_create_key_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4273,8 +4293,7 @@ static long pkm_lcs_source_dispatch_write_key_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4381,8 +4400,7 @@ static long pkm_lcs_source_dispatch_transaction_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4494,8 +4512,7 @@ static long pkm_lcs_source_dispatch_flush_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4592,8 +4609,7 @@ static long pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (source_fd->in_flight_request_count >=
-	    PKM_LCS_MAX_CONCURRENT_RSI_REQUESTS_DEFAULT) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
