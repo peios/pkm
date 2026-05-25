@@ -1106,6 +1106,7 @@ static void pkm_lcs_kunit_source_registration_runtime_raised_source_limit(
 	struct file extra_file = { };
 	struct reg_src_hive_entry extra_hive;
 	struct reg_src_register_args extra_args;
+	struct pkm_lcs_hive_route_result route = { };
 	const char extra_name[] = "Extra";
 	const void *token = NULL;
 	u32 opened_count = 0;
@@ -1161,6 +1162,13 @@ static void pkm_lcs_kunit_source_registration_runtime_raised_source_limit(
 	pkm_lcs_kunit_source_table_snapshot(&snapshot);
 	KUNIT_EXPECT_EQ(test, snapshot.occupied_count, (u32)SOURCE_COUNT);
 	KUNIT_EXPECT_EQ(test, snapshot.active_count, (u32)SOURCE_COUNT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_hive_name(names[SOURCE_COUNT - 1],
+						strlen(names[SOURCE_COUNT - 1]),
+						NULL, 0, &route),
+			0L);
+	KUNIT_EXPECT_EQ(test, route.source_id, (u32)SOURCE_COUNT);
+	KUNIT_EXPECT_EQ(test, route.root_guid[0], (u8)SOURCE_COUNT);
 
 	pkm_lcs_kunit_build_register_args(&extra_args, &extra_hive, extra_name,
 					  200U, 0);
@@ -3664,6 +3672,67 @@ static void pkm_lcs_kunit_hive_route_private_scope_shadows_global(
 			0);
 	pkm_lcs_kunit_reset_source_table();
 	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_route_runtime_reduced_scope_limit(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	const char target[] = "Machine\\Target";
+	const u8 scopes[2][16] = { { 1 }, { 2 } };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_hive_route_result route = { };
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_scope_guids_per_token = 1U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_hive_name(name_src, strlen(name_src),
+						scopes, ARRAY_SIZE(scopes),
+						&route),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_symlink_target(
+				target, strlen(target), scopes,
+				ARRAY_SIZE(scopes), &route),
+			(long)-EINVAL);
+
+	pkm_lcs_runtime_limits_reset_defaults();
+}
+
+static void pkm_lcs_kunit_route_runtime_raised_scope_limit(
+	struct kunit *test)
+{
+	enum { SCOPE_COUNT = 9 };
+	const char name_src[] = "Machine";
+	const char target[] = "Machine\\Target";
+	u8 scopes[SCOPE_COUNT][16] = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_hive_route_result route = { };
+	u32 i;
+
+	for (i = 0; i < SCOPE_COUNT; i++)
+		scopes[i][0] = (u8)(i + 1U);
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_scope_guids_per_token = SCOPE_COUNT;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_hive_name(name_src, strlen(name_src),
+						scopes, ARRAY_SIZE(scopes),
+						&route),
+			(long)-ENOENT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_symlink_target(
+				target, strlen(target), scopes,
+				ARRAY_SIZE(scopes), &route),
+			(long)-ENOENT);
+
+	pkm_lcs_runtime_limits_reset_defaults();
 }
 
 static void pkm_lcs_kunit_absolute_path_route_uses_first_component_and_errno(
@@ -27471,7 +27540,7 @@ static void pkm_lcs_kunit_symlink_target_resolution_success(
 
 	ret = pkm_lcs_resolve_symlink_target_for_key(
 		1, 0, link_guid, NULL, 0, layers, ARRAY_SIZE(layers), NULL,
-		0, &resolution);
+		0, NULL, &resolution);
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, 0L);
@@ -27536,7 +27605,7 @@ static void pkm_lcs_kunit_symlink_target_resolution_non_link_einval(
 
 	ret = pkm_lcs_resolve_symlink_target_for_key(
 		1, 0, link_guid, NULL, 0, layers, ARRAY_SIZE(layers), NULL,
-		0, &resolution);
+		0, NULL, &resolution);
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
@@ -27585,7 +27654,7 @@ static void pkm_lcs_kunit_symlink_target_resolution_bad_target_einval(
 
 	ret = pkm_lcs_resolve_symlink_target_for_key(
 		1, 0, link_guid, NULL, 0, layers, ARRAY_SIZE(layers), NULL,
-		0, &resolution);
+		0, NULL, &resolution);
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 
 	KUNIT_EXPECT_EQ(test, ret, (long)-EINVAL);
@@ -42390,6 +42459,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_hive_route_reflects_active_and_down_slots),
 	KUNIT_CASE(pkm_lcs_kunit_hive_route_private_scope_shadows_global),
+	KUNIT_CASE(pkm_lcs_kunit_route_runtime_reduced_scope_limit),
+	KUNIT_CASE(pkm_lcs_kunit_route_runtime_raised_scope_limit),
 	KUNIT_CASE(
 		pkm_lcs_kunit_absolute_path_route_uses_first_component_and_errno),
 	KUNIT_CASE(

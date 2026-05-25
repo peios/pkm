@@ -6537,6 +6537,7 @@ pub unsafe extern "C" fn lcs_rust_route_hive_from_source_slots(
     scope_guids: *const [u8; 16],
     scope_count: usize,
     result_out: *mut PkmLcsHiveRouteResultCopy,
+    limits: *const PkmLcsRuntimeLimitsCopy,
 ) -> c_int {
     if result_out.is_null() || hive_name.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
@@ -6544,6 +6545,10 @@ pub unsafe extern "C" fn lcs_rust_route_hive_from_source_slots(
     if slot_count != 0 && slots.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
 
     let name_bytes = unsafe { slice::from_raw_parts(hive_name, hive_name_len as usize) };
     let hive_name = match str::from_utf8(name_bytes) {
@@ -6599,7 +6604,7 @@ pub unsafe extern "C" fn lcs_rust_route_hive_from_source_slots(
         }
     }
 
-    if let Err(err) = validate_source_slots(&LcsLimits::DEFAULT, existing_slots.as_slice()) {
+    if let Err(err) = validate_source_slots(&limits, existing_slots.as_slice()) {
         return source_registration_error_return(err);
     }
 
@@ -6626,7 +6631,7 @@ pub unsafe extern "C" fn lcs_rust_route_hive_from_source_slots(
     }
 
     let route = match route_hive(
-        &LcsLimits::DEFAULT,
+        &limits,
         hive_views.as_slice(),
         hive_name,
         scope_guids,
@@ -6852,6 +6857,7 @@ pub unsafe extern "C" fn lcs_rust_route_symlink_target_from_source_slots(
     scope_guids: *const [u8; 16],
     scope_count: usize,
     result_out: *mut PkmLcsHiveRouteResultCopy,
+    limits: *const PkmLcsRuntimeLimitsCopy,
 ) -> c_int {
     if result_out.is_null() || target.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
@@ -6859,6 +6865,10 @@ pub unsafe extern "C" fn lcs_rust_route_symlink_target_from_source_slots(
     if slot_count != 0 && slots.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
 
     let target_bytes = unsafe { slice::from_raw_parts(target, target_len as usize) };
     let scope_guids = match parse_scope_guids(scope_guids, scope_count) {
@@ -6910,7 +6920,7 @@ pub unsafe extern "C" fn lcs_rust_route_symlink_target_from_source_slots(
         }
     }
 
-    if let Err(err) = validate_source_slots(&LcsLimits::DEFAULT, existing_slots.as_slice()) {
+    if let Err(err) = validate_source_slots(&limits, existing_slots.as_slice()) {
         return source_registration_error_return(err);
     }
 
@@ -6937,7 +6947,7 @@ pub unsafe extern "C" fn lcs_rust_route_symlink_target_from_source_slots(
     }
 
     let route = match route_symlink_target_hive(
-        &LcsLimits::DEFAULT,
+        &limits,
         hive_views.as_slice(),
         target_bytes,
         scope_guids,
@@ -7087,6 +7097,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_symlink_target_components(
     string_buf: *mut u8,
     string_capacity: usize,
     result_out: *mut PkmLcsPathComponentMaterializationCopy,
+    limits: *const PkmLcsRuntimeLimitsCopy,
 ) -> c_int {
     let Some(result_out) = (unsafe { result_out.as_mut() }) else {
         return LinuxErrno::Einval.negated_return() as c_int;
@@ -7098,9 +7109,13 @@ pub unsafe extern "C" fn lcs_rust_materialize_symlink_target_components(
     if target.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
 
     let target_bytes = unsafe { slice::from_raw_parts(target, target_len as usize) };
-    let path = match validate_symlink_target_bytes(&LcsLimits::DEFAULT, target_bytes) {
+    let path = match validate_symlink_target_bytes(&limits, target_bytes) {
         Ok(summary) => summary.raw,
         Err(err) => return symlink_target_error_return(err),
     };
@@ -7109,19 +7124,19 @@ pub unsafe extern "C" fn lcs_rust_materialize_symlink_target_components(
     let mut component_count = 0usize;
     let mut string_bytes = 0usize;
     if let Err(err) =
-        for_each_routable_path_component(&LcsLimits::DEFAULT, path, rewrite, |component| {
+        for_each_routable_path_component(&limits, path, rewrite, |component| {
             component_count = component_count
                 .checked_add(1)
                 .ok_or(LcsError::KeyDepthExceeded {
                     depth: usize::MAX,
-                    max: LcsLimits::DEFAULT.max_key_depth,
+                    max: limits.max_key_depth,
                 })?;
             string_bytes =
                 string_bytes
                     .checked_add(component.len())
                     .ok_or(LcsError::PathTooLong {
                         len: usize::MAX,
-                        max: LcsLimits::DEFAULT.max_total_path_length,
+                        max: limits.max_total_path_length,
                     })?;
             Ok(())
         })
@@ -7159,7 +7174,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_symlink_target_components(
     let mut index = 0usize;
     let mut offset = 0usize;
     if let Err(err) =
-        for_each_routable_path_component(&LcsLimits::DEFAULT, path, rewrite, |component| {
+        for_each_routable_path_component(&limits, path, rewrite, |component| {
             let bytes = component.as_bytes();
             let end = offset + bytes.len();
             string_out[offset..end].copy_from_slice(bytes);

@@ -708,6 +708,7 @@ long pkm_lcs_resolve_symlink_target_for_key(
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_symlink_target_resolution *result);
 void pkm_lcs_symlink_target_resolution_destroy(
 	struct pkm_lcs_symlink_target_resolution *resolution);

@@ -1245,7 +1245,8 @@ extern int lcs_rust_route_hive_from_source_slots(
 	const struct pkm_lcs_source_slot_view_copy *slots, size_t slot_count,
 	const u8 *hive_name, u32 hive_name_len,
 	const u8 (*scope_guids)[16], size_t scope_count,
-	struct pkm_lcs_hive_route_result *result);
+	struct pkm_lcs_hive_route_result *result,
+	const struct pkm_lcs_runtime_limits *limits);
 extern int lcs_rust_route_absolute_path_from_source_slots(
 	const struct pkm_lcs_source_slot_view_copy *slots, size_t slot_count,
 	const u8 *path, u32 path_len, bool rewrite_current_user,
@@ -1263,7 +1264,8 @@ extern int lcs_rust_route_absolute_path_from_source_slots_with_token_sid(
 extern int lcs_rust_route_symlink_target_from_source_slots(
 	const struct pkm_lcs_source_slot_view_copy *slots, size_t slot_count,
 	const u8 *target, u32 target_len, const u8 (*scope_guids)[16],
-	size_t scope_count, struct pkm_lcs_hive_route_result *result);
+	size_t scope_count, struct pkm_lcs_hive_route_result *result,
+	const struct pkm_lcs_runtime_limits *limits);
 extern int lcs_rust_materialize_absolute_path_components_with_token_sid(
 	const u8 *path, u32 path_len, bool rewrite_current_user,
 	const u8 *current_user_sid, size_t current_user_sid_len,
@@ -1275,7 +1277,8 @@ extern int lcs_rust_materialize_symlink_target_components(
 	const u8 *target, u32 target_len,
 	struct pkm_lcs_path_component_view *components,
 	size_t component_capacity, u8 *string_buf, size_t string_capacity,
-	struct pkm_lcs_path_component_materialization *result);
+	struct pkm_lcs_path_component_materialization *result,
+	const struct pkm_lcs_runtime_limits *limits);
 extern int lcs_rust_materialize_relative_path_components(
 	const u8 *path, u32 path_len,
 	struct pkm_lcs_path_component_view *components,
@@ -6998,6 +7001,7 @@ long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,
 			     struct pkm_lcs_hive_route_result *result)
 {
 	struct pkm_lcs_source_slot_view_buffer view_buffer;
+	struct pkm_lcs_runtime_limits limits;
 	u32 slot_count;
 	long ret;
 
@@ -7005,6 +7009,7 @@ long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,
 		return -EINVAL;
 
 	pkm_lcs_source_slot_view_buffer_init(&view_buffer);
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	memset(result, 0, sizeof(*result));
 	mutex_lock(&pkm_lcs_source_table_lock);
 	ret = pkm_lcs_source_slot_view_buffer_prepare_locked(&view_buffer,
@@ -7013,7 +7018,7 @@ long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,
 		goto out_unlock;
 	ret = lcs_rust_route_hive_from_source_slots(
 		view_buffer.views, slot_count, hive_name, hive_name_len,
-		scope_guids, scope_count, result);
+		scope_guids, scope_count, result, &limits);
 out_unlock:
 	mutex_unlock(&pkm_lcs_source_table_lock);
 	pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
@@ -8505,15 +8510,16 @@ long pkm_lcs_materialize_relative_path_components(
 		path, path_len, &limits, result);
 }
 
-long pkm_lcs_route_symlink_target(
+static long pkm_lcs_route_symlink_target_with_limits(
 	const char *target, u32 target_len, const u8 (*scope_guids)[16],
-	u32 scope_count, struct pkm_lcs_hive_route_result *result)
+	u32 scope_count, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_hive_route_result *result)
 {
 	struct pkm_lcs_source_slot_view_buffer view_buffer;
 	u32 slot_count;
 	long ret;
 
-	if (!target || !result)
+	if (!target || !limits || !result)
 		return -EINVAL;
 
 	pkm_lcs_source_slot_view_buffer_init(&view_buffer);
@@ -8525,15 +8531,27 @@ long pkm_lcs_route_symlink_target(
 		goto out_unlock;
 	ret = lcs_rust_route_symlink_target_from_source_slots(
 		view_buffer.views, slot_count, (const u8 *)target, target_len,
-		scope_guids, scope_count, result);
+		scope_guids, scope_count, result, limits);
 out_unlock:
 	mutex_unlock(&pkm_lcs_source_table_lock);
 	pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
 	return ret;
 }
 
-long pkm_lcs_materialize_symlink_target_components(
+long pkm_lcs_route_symlink_target(
+	const char *target, u32 target_len, const u8 (*scope_guids)[16],
+	u32 scope_count, struct pkm_lcs_hive_route_result *result)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_route_symlink_target_with_limits(
+		target, target_len, scope_guids, scope_count, &limits, result);
+}
+
+static long pkm_lcs_materialize_symlink_target_components_with_limits(
 	const char *target, u32 target_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_materialized_path *result)
 {
 	struct pkm_lcs_path_component_materialization shape = { };
@@ -8542,12 +8560,13 @@ long pkm_lcs_materialize_symlink_target_components(
 	char *strings;
 	long ret;
 
-	if (!target || !result)
+	if (!target || !limits || !result)
 		return -EINVAL;
 
 	memset(result, 0, sizeof(*result));
 	ret = lcs_rust_materialize_symlink_target_components(
-		(const u8 *)target, target_len, NULL, 0, NULL, 0, &shape);
+		(const u8 *)target, target_len, NULL, 0, NULL, 0, &shape,
+		limits);
 	if (ret)
 		return ret;
 	if (!shape.component_count || !shape.string_bytes)
@@ -8566,7 +8585,7 @@ long pkm_lcs_materialize_symlink_target_components(
 	ret = lcs_rust_materialize_symlink_target_components(
 		(const u8 *)target, target_len, components,
 		shape.component_count, (u8 *)strings, shape.string_bytes,
-		&filled);
+		&filled, limits);
 	if (ret)
 		goto out_free;
 	if (filled.component_count != shape.component_count ||
@@ -8587,6 +8606,17 @@ out_free:
 	return ret;
 }
 
+long pkm_lcs_materialize_symlink_target_components(
+	const char *target, u32 target_len,
+	struct pkm_lcs_materialized_path *result)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_materialize_symlink_target_components_with_limits(
+		target, target_len, &limits, result);
+}
+
 void pkm_lcs_symlink_target_resolution_destroy(
 	struct pkm_lcs_symlink_target_resolution *resolution)
 {
@@ -8603,11 +8633,13 @@ long pkm_lcs_resolve_symlink_target_for_key(
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_symlink_target_resolution *result)
 {
 	const struct pkm_lcs_rsi_layer_view *active_layers = layers;
 	const struct pkm_lcs_rsi_private_layer_view *active_private_layers =
 		private_layers;
+	struct pkm_lcs_runtime_limits effective_limits;
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_source_enqueue_result enqueue = { };
 	struct pkm_lcs_rsi_query_value_result value = { };
@@ -8622,6 +8654,10 @@ long pkm_lcs_resolve_symlink_target_for_key(
 		return -EINVAL;
 	memset(result, 0, sizeof(*result));
 	pkm_lcs_source_response_frame_init(&frame);
+	if (!limits) {
+		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 
 	ret = pkm_lcs_normalize_layer_inputs(
 		&active_layers, &active_layer_count, &active_private_layers,
@@ -8629,8 +8665,8 @@ long pkm_lcs_resolve_symlink_target_for_key(
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
-		source_id, txn_id, key_guid, "", 0, false,
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
+		source_id, txn_id, key_guid, "", 0, false, limits,
 		pkm_lcs_runtime_request_timeout_ms(), &frame, &response,
 		&enqueue);
 	if (ret)
@@ -8643,7 +8679,8 @@ long pkm_lcs_resolve_symlink_target_for_key(
 	ret = pkm_lcs_rsi_materialize_query_value_response(
 		frame.data, frame.len, response.request_id, next_sequence,
 		"", 0, active_layers, active_layer_count,
-		active_private_layers, active_private_layer_count, NULL, &value);
+		active_private_layers, active_private_layer_count, limits,
+		&value);
 	if (ret)
 		goto out_destroy;
 	if (!value.found || value.value_type != REG_LINK) {
@@ -8657,14 +8694,14 @@ long pkm_lcs_resolve_symlink_target_for_key(
 	}
 
 	target = (const char *)(frame.data + value.data_offset);
-	ret = pkm_lcs_route_symlink_target(
+	ret = pkm_lcs_route_symlink_target_with_limits(
 		target, value.data_len, scope_guids, scope_count,
-		&result->route);
+		limits, &result->route);
 	if (ret)
 		goto out_destroy;
 
-	ret = pkm_lcs_materialize_symlink_target_components(
-		target, value.data_len, &result->components);
+	ret = pkm_lcs_materialize_symlink_target_components_with_limits(
+		target, value.data_len, limits, &result->components);
 	if (ret)
 		goto out_destroy;
 
@@ -11197,7 +11234,8 @@ static long pkm_lcs_prepare_absolute_symlink_restart(
 	const u8 (*scope_guids)[16], u32 scope_count,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
-	u32 private_layer_count, u32 *next_source_id,
+	u32 private_layer_count, const struct pkm_lcs_runtime_limits *limits,
+	u32 *next_source_id,
 	u8 next_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_owned_path_components *next_components)
 {
@@ -11210,7 +11248,7 @@ static long pkm_lcs_prepare_absolute_symlink_restart(
 	ret = pkm_lcs_resolve_symlink_target_for_key(
 		source_id, txn_id, link_guid, scope_guids, scope_count,
 		layers, layer_count, private_layers, private_layer_count,
-		&target);
+		limits, &target);
 	if (ret)
 		return ret;
 
@@ -11246,7 +11284,7 @@ static long pkm_lcs_walk_symlink_target(
 	ret = pkm_lcs_resolve_symlink_target_for_key(
 		source_id, txn_id, link_guid, scope_guids, scope_count,
 		layers, layer_count, private_layers, private_layer_count,
-		&target);
+		limits, &target);
 	if (ret)
 		return ret;
 
@@ -11373,8 +11411,9 @@ restart:
 					NULL, 0, scope_guids, scope_count,
 					active_layers, active_layer_count,
 					active_private_layers,
-					active_private_layer_count, &next_source_id,
-					next_root_guid, &replacement);
+					active_private_layer_count, limits,
+					&next_source_id, next_root_guid,
+					&replacement);
 				pkm_lcs_source_response_frame_destroy(&frame);
 				if (ret)
 					goto out_destroy;
@@ -11462,8 +11501,9 @@ restart:
 					suffix, suffix_count, scope_guids,
 					scope_count, active_layers, active_layer_count,
 					active_private_layers,
-					active_private_layer_count, &next_source_id,
-					next_root_guid, &replacement);
+					active_private_layer_count, limits,
+					&next_source_id, next_root_guid,
+					&replacement);
 				pkm_lcs_source_response_frame_destroy(&frame);
 				if (ret)
 					goto out_destroy;
