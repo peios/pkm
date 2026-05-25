@@ -41,7 +41,11 @@
 #define PKM_LCS_MAX_SD_BYTES 65535U
 #define PKM_LCS_BACKUP_FORMAT_VERSION 21U
 #define PKM_LCS_BACKUP_MIN_READER_VERSION 21U
+#define PKM_LCS_BACKUP_RECORD_HEADER_LEN 6U
+#define PKM_LCS_BACKUP_TRAILER_FRAME_LEN \
+	(PKM_LCS_BACKUP_RECORD_HEADER_LEN + sizeof(u64) + SHA256_DIGEST_SIZE)
 #define PKM_LCS_BACKUP_TRAILER_PREFIX_LEN 14U
+#define PKM_LCS_RESTORE_STREAM_CHUNK_BYTES 4096U
 #define PKM_LCS_WATCH_NOTIFY_ACTION_ARM 1U
 #define PKM_LCS_WATCH_NOTIFY_ACTION_DISARM 2U
 #define PKM_LCS_WATCH_REGISTRY_BITS 8U
@@ -280,6 +284,12 @@ extern int lcs_rust_write_backup_key_record_frame(
 extern int lcs_rust_write_backup_trailer_record_frame(
 	u8 *dst, size_t dst_len, u64 record_count, const u8 *checksum,
 	size_t *written_out);
+extern int lcs_rust_validate_backup_header_record(
+	const struct pkm_lcs_runtime_limits *limits, const u8 *frame,
+	size_t frame_len, u32 supported_version, u8 *root_guid_out);
+extern int lcs_rust_validate_backup_trailer_record(
+	const u8 *frame, size_t frame_len, u64 *record_count_out,
+	u8 *checksum_out);
 extern int lcs_rust_security_descriptor_owner_sid(
 	const u8 *security_descriptor, size_t security_descriptor_len,
 	const u8 **owner_sid_out, size_t *owner_sid_len_out);
@@ -5119,6 +5129,309 @@ struct pkm_lcs_backup_child_sections {
 	u32 capacity;
 };
 
+static long pkm_lcs_restore_read_exact(struct file *file, loff_t *posp,
+				       u8 *buf, size_t len)
+{
+	size_t done = 0;
+
+	if (!file || (!buf && len))
+		return -EINVAL;
+
+	while (done < len) {
+		ssize_t count = kernel_read(file, buf + done, len - done,
+					    posp);
+
+		if (count < 0)
+			return count;
+		if (!count)
+			return -EINVAL;
+		done += count;
+	}
+	return 0;
+}
+
+static long pkm_lcs_restore_read_record_header(struct file *file,
+					       loff_t *posp, u8 header[6],
+					       bool *eof_out)
+{
+	size_t done = 0;
+
+	if (!file || !header || !eof_out)
+		return -EINVAL;
+	*eof_out = false;
+
+	while (done < PKM_LCS_BACKUP_RECORD_HEADER_LEN) {
+		ssize_t count;
+
+		count = kernel_read(file, header + done,
+				    PKM_LCS_BACKUP_RECORD_HEADER_LEN - done,
+				    posp);
+		if (count < 0)
+			return count;
+		if (!count) {
+			if (!done) {
+				*eof_out = true;
+				return 0;
+			}
+			return -EINVAL;
+		}
+		done += count;
+	}
+	return 0;
+}
+
+static long pkm_lcs_restore_hash_and_skip_body(struct file *file,
+					       loff_t *posp,
+					       struct sha256_ctx *checksum,
+					       size_t payload_len)
+{
+	u8 buf[PKM_LCS_RESTORE_STREAM_CHUNK_BYTES];
+
+	if (!file || !checksum)
+		return -EINVAL;
+
+	while (payload_len) {
+		size_t chunk_len = min_t(size_t, payload_len, sizeof(buf));
+		long ret;
+
+		ret = pkm_lcs_restore_read_exact(file, posp, buf, chunk_len);
+		if (ret)
+			return ret;
+		sha256_update(checksum, buf, chunk_len);
+		payload_len -= chunk_len;
+	}
+	return 0;
+}
+
+static long pkm_lcs_restore_header_frame_max_len(
+	const struct pkm_lcs_runtime_limits *limits, size_t *max_len_out)
+{
+	size_t max_len;
+
+	if (!limits || !max_len_out)
+		return -EINVAL;
+
+	if (check_add_overflow((size_t)PKM_LCS_BACKUP_RECORD_HEADER_LEN,
+			       (size_t)44, &max_len))
+		return -EOVERFLOW;
+	if (check_add_overflow(max_len,
+			       (size_t)limits->max_path_component_length,
+			       &max_len))
+		return -EOVERFLOW;
+	*max_len_out = max_len;
+	return 0;
+}
+
+static long pkm_lcs_restore_validate_header_record(
+	struct file *file, loff_t *posp,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct sha256_ctx *checksum, const u8 common_header[6],
+	u32 record_len, u8 root_guid_out[PKM_LCS_GUID_BYTES])
+{
+	size_t max_frame_len = 0;
+	size_t payload_len;
+	u8 *frame;
+	long ret;
+
+	ret = pkm_lcs_restore_header_frame_max_len(limits, &max_frame_len);
+	if (ret)
+		return ret;
+	if ((size_t)record_len > max_frame_len)
+		return -EINVAL;
+	payload_len = (size_t)record_len - PKM_LCS_BACKUP_RECORD_HEADER_LEN;
+
+	frame = kmalloc(record_len, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	memcpy(frame, common_header, PKM_LCS_BACKUP_RECORD_HEADER_LEN);
+
+	ret = pkm_lcs_restore_read_exact(
+		file, posp, frame + PKM_LCS_BACKUP_RECORD_HEADER_LEN,
+		payload_len);
+	if (ret)
+		goto out_free;
+
+	sha256_update(checksum, frame, record_len);
+	ret = lcs_rust_validate_backup_header_record(
+		limits, frame, record_len, PKM_LCS_BACKUP_FORMAT_VERSION,
+		root_guid_out);
+
+out_free:
+	kfree(frame);
+	return ret;
+}
+
+static long pkm_lcs_restore_validate_trailer_record(
+	struct file *file, loff_t *posp, struct sha256_ctx *checksum,
+	const u8 common_header[6], u32 record_len, u64 observed_record_count)
+{
+	u8 expected_checksum[SHA256_DIGEST_SIZE];
+	u8 actual_checksum[SHA256_DIGEST_SIZE];
+	u8 frame[PKM_LCS_BACKUP_TRAILER_FRAME_LEN];
+	u64 trailer_record_count = 0;
+	long ret;
+
+	if (record_len != PKM_LCS_BACKUP_TRAILER_FRAME_LEN)
+		return -EINVAL;
+
+	memcpy(frame, common_header, PKM_LCS_BACKUP_RECORD_HEADER_LEN);
+	ret = pkm_lcs_restore_read_exact(
+		file, posp, frame + PKM_LCS_BACKUP_RECORD_HEADER_LEN,
+		PKM_LCS_BACKUP_TRAILER_FRAME_LEN -
+			PKM_LCS_BACKUP_RECORD_HEADER_LEN);
+	if (ret)
+		return ret;
+
+	ret = lcs_rust_validate_backup_trailer_record(
+		frame, sizeof(frame), &trailer_record_count, expected_checksum);
+	if (ret)
+		return ret;
+	if (trailer_record_count != observed_record_count)
+		return -EINVAL;
+
+	sha256_update(checksum, frame, PKM_LCS_BACKUP_TRAILER_PREFIX_LEN);
+	sha256_final(checksum, actual_checksum);
+	if (memcmp(actual_checksum, expected_checksum, SHA256_DIGEST_SIZE))
+		return -EINVAL;
+	return 0;
+}
+
+static long pkm_lcs_restore_expect_eof(struct file *file, loff_t *posp)
+{
+	u8 byte;
+	ssize_t count;
+
+	if (!file)
+		return -EINVAL;
+
+	count = kernel_read(file, &byte, 1, posp);
+	if (count < 0)
+		return count;
+	if (count != 0)
+		return -EINVAL;
+	return 0;
+}
+
+static long pkm_lcs_restore_validate_stream_file(
+	struct file *file, const struct pkm_lcs_runtime_limits *limits)
+{
+	struct sha256_ctx checksum;
+	u8 root_guid[PKM_LCS_GUID_BYTES];
+	u64 record_count = 0;
+	loff_t pos = 0;
+	loff_t *posp = NULL;
+	bool positional;
+	bool header_seen = false;
+	bool trailer_seen = false;
+	long ret;
+
+	if (!file || !limits)
+		return -EINVAL;
+
+	positional = !(file->f_mode & FMODE_STREAM);
+	if (positional) {
+		pos = file->f_pos;
+		posp = &pos;
+	}
+	sha256_init(&checksum);
+
+	for (;;) {
+		u8 common_header[PKM_LCS_BACKUP_RECORD_HEADER_LEN];
+		u16 record_type;
+		u32 record_len;
+		size_t payload_len;
+		u64 next_record_count;
+		bool eof;
+
+		ret = pkm_lcs_restore_read_record_header(file, posp,
+							 common_header, &eof);
+		if (ret)
+			goto out_finish;
+		if (eof) {
+			ret = trailer_seen ? 0 : -EINVAL;
+			goto out_finish;
+		}
+
+		record_type = get_unaligned_le16(common_header);
+		record_len = get_unaligned_le32(common_header + 2);
+		if (record_len < PKM_LCS_BACKUP_RECORD_HEADER_LEN) {
+			ret = -EINVAL;
+			goto out_finish;
+		}
+		if (check_add_overflow(record_count, 1ULL,
+				       &next_record_count)) {
+			ret = -EOVERFLOW;
+			goto out_finish;
+		}
+		record_count = next_record_count;
+		payload_len = (size_t)record_len -
+			      PKM_LCS_BACKUP_RECORD_HEADER_LEN;
+
+		if (!header_seen && record_type != REG_BACKUP_HEADER) {
+			ret = -EINVAL;
+			goto out_finish;
+		}
+
+		if (record_type == REG_BACKUP_HEADER) {
+			if (record_count != 1) {
+				ret = -EINVAL;
+				goto out_finish;
+			}
+			ret = pkm_lcs_restore_validate_header_record(
+				file, posp, limits, &checksum, common_header,
+				record_len, root_guid);
+			if (ret)
+				goto out_finish;
+			header_seen = true;
+			continue;
+		}
+
+		if (record_type == REG_BACKUP_TRAILER) {
+			ret = pkm_lcs_restore_validate_trailer_record(
+				file, posp, &checksum, common_header,
+				record_len, record_count);
+			if (ret)
+				goto out_finish;
+			trailer_seen = true;
+			ret = pkm_lcs_restore_expect_eof(file, posp);
+			goto out_finish;
+		}
+
+		sha256_update(&checksum, common_header,
+			      PKM_LCS_BACKUP_RECORD_HEADER_LEN);
+		ret = pkm_lcs_restore_hash_and_skip_body(file, posp,
+							 &checksum,
+							 payload_len);
+		if (ret)
+			goto out_finish;
+	}
+
+out_finish:
+	if (positional)
+		file->f_pos = pos;
+	return ret;
+}
+
+static long pkm_lcs_key_fd_restore_validate_input_stream(
+	int input_fd, const struct pkm_lcs_runtime_limits *limits)
+{
+	struct file *file;
+	struct fd held;
+	long ret;
+
+	if (!limits)
+		return -EINVAL;
+
+	ret = pkm_lcs_key_fd_external_fd_get_mode_checked(
+		input_fd, PKM_LCS_BACKUP_RESTORE_FD_OP_RESTORE_INPUT, &held,
+		&file);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_restore_validate_stream_file(file, limits);
+	fdput_pos(held);
+	return ret;
+}
+
 static void pkm_lcs_backup_output_init(struct pkm_lcs_backup_output *output,
 				       struct file *file)
 {
@@ -7163,6 +7476,11 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 
 	ret = pkm_lcs_key_fd_mark_privilege_used(token,
 						 KACS_SE_RESTORE_PRIVILEGE);
+	if (ret)
+		goto out_abort_transaction;
+
+	ret = pkm_lcs_key_fd_restore_validate_input_stream(args->input_fd,
+							   &limits);
 	if (ret)
 		goto out_abort_transaction;
 

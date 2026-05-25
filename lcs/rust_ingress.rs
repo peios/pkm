@@ -52,6 +52,7 @@ use crate::lcs_core::{
     self_config_audit_intent, self_config_invalid_audit_payload_len,
     source_validation_failure_audit_payload_len, validate_config_value,
     write_backup_restore_complete_audit_payload, write_backup_restore_start_audit_payload,
+    parse_backup_header_record, parse_backup_trailer_record,
     write_backup_blanket_tombstone_record_frame, write_backup_header_record_frame,
     write_backup_key_record_frame, write_backup_layer_manifest_record_frame,
     write_backup_path_entry_record_frame, write_backup_trailer_record_frame,
@@ -901,6 +902,10 @@ fn backup_writer_error_return(err: LcsError, written_out: *mut usize) -> c_int {
         _ => LinuxErrno::Einval,
     }
     .negated_return() as c_int
+}
+
+fn backup_restore_reader_error_return(_err: LcsError) -> c_int {
+    LinuxErrno::Einval.negated_return() as c_int
 }
 
 unsafe fn backup_writer_dst<'a>(
@@ -2124,6 +2129,58 @@ pub unsafe extern "C" fn lcs_rust_restore_complete_audit_payload(
             0
         }
         Err(err) => backup_audit_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_backup_header_record(
+    limits: *const PkmLcsRuntimeLimitsCopy,
+    frame: *const u8,
+    frame_len: usize,
+    supported_version: u32,
+    root_guid_out: *mut u8,
+) -> c_int {
+    if limits.is_null() || frame.is_null() || root_guid_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let frame = unsafe { slice::from_raw_parts(frame, frame_len) };
+    match parse_backup_header_record(&limits, frame, supported_version) {
+        Ok(header) => {
+            let output = unsafe { slice::from_raw_parts_mut(root_guid_out, 16) };
+            output.copy_from_slice(&header.root_guid);
+            0
+        }
+        Err(err) => backup_restore_reader_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_validate_backup_trailer_record(
+    frame: *const u8,
+    frame_len: usize,
+    record_count_out: *mut u64,
+    checksum_out: *mut u8,
+) -> c_int {
+    if frame.is_null() || record_count_out.is_null() || checksum_out.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let frame = unsafe { slice::from_raw_parts(frame, frame_len) };
+    match parse_backup_trailer_record(frame) {
+        Ok(trailer) => {
+            unsafe {
+                *record_count_out = trailer.record_count;
+            }
+            let checksum_out = unsafe { slice::from_raw_parts_mut(checksum_out, 32) };
+            checksum_out.copy_from_slice(&trailer.checksum);
+            0
+        }
+        Err(err) => backup_restore_reader_error_return(err),
     }
 }
 

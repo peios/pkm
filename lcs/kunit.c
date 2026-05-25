@@ -767,6 +767,11 @@ struct pkm_lcs_kunit_backup_output_file {
 	size_t len;
 };
 
+struct pkm_lcs_kunit_restore_input_file {
+	u8 data[256];
+	size_t len;
+};
+
 static ssize_t pkm_lcs_kunit_backup_output_write_iter(
 	struct kiocb *iocb, struct iov_iter *from)
 {
@@ -786,6 +791,32 @@ static ssize_t pkm_lcs_kunit_backup_output_write_iter(
 
 static const struct file_operations pkm_lcs_kunit_backup_output_fops = {
 	.write_iter = pkm_lcs_kunit_backup_output_write_iter,
+};
+
+static ssize_t pkm_lcs_kunit_restore_input_read_iter(
+	struct kiocb *iocb, struct iov_iter *to)
+{
+	struct pkm_lcs_kunit_restore_input_file *input =
+		iocb->ki_filp->private_data;
+	loff_t pos = iocb->ki_pos;
+	size_t count;
+	size_t copied;
+
+	if (!input)
+		return -EINVAL;
+	if (pos < 0)
+		return -EINVAL;
+	if ((size_t)pos >= input->len)
+		return 0;
+
+	count = min_t(size_t, iov_iter_count(to), input->len - (size_t)pos);
+	copied = copy_to_iter(input->data + (size_t)pos, count, to);
+	iocb->ki_pos += copied;
+	return copied;
+}
+
+static const struct file_operations pkm_lcs_kunit_restore_input_fops = {
+	.read_iter = pkm_lcs_kunit_restore_input_read_iter,
 };
 
 static void pkm_lcs_kunit_rust_probe_links_lcs_core(struct kunit *test)
@@ -18046,6 +18077,159 @@ static int pkm_lcs_kunit_backup_output_fd(
 				O_WRONLY | O_CLOEXEC);
 }
 
+static int pkm_lcs_kunit_restore_input_fd(
+	struct pkm_lcs_kunit_restore_input_file *input)
+{
+	return anon_inode_getfd("lcs-restore-input",
+				&pkm_lcs_kunit_restore_input_fops, input,
+				O_RDONLY | O_CLOEXEC);
+}
+
+static int pkm_lcs_kunit_restore_stream_append(
+	struct pkm_lcs_kunit_restore_input_file *input,
+	const void *src, size_t len)
+{
+	if (!input || (!src && len))
+		return -EINVAL;
+	if (len > sizeof(input->data) - input->len)
+		return -ENOSPC;
+	memcpy(input->data + input->len, src, len);
+	input->len += len;
+	return 0;
+}
+
+static int pkm_lcs_kunit_restore_stream_append_u16(
+	struct pkm_lcs_kunit_restore_input_file *input, u16 value)
+{
+	u8 encoded[sizeof(u16)];
+
+	put_unaligned_le16(value, encoded);
+	return pkm_lcs_kunit_restore_stream_append(input, encoded,
+						   sizeof(encoded));
+}
+
+static int pkm_lcs_kunit_restore_stream_append_u32(
+	struct pkm_lcs_kunit_restore_input_file *input, u32 value)
+{
+	u8 encoded[sizeof(u32)];
+
+	put_unaligned_le32(value, encoded);
+	return pkm_lcs_kunit_restore_stream_append(input, encoded,
+						   sizeof(encoded));
+}
+
+static int pkm_lcs_kunit_restore_stream_append_u64(
+	struct pkm_lcs_kunit_restore_input_file *input, u64 value)
+{
+	u8 encoded[sizeof(u64)];
+
+	put_unaligned_le64(value, encoded);
+	return pkm_lcs_kunit_restore_stream_append(input, encoded,
+						   sizeof(encoded));
+}
+
+static int pkm_lcs_kunit_restore_stream_append_s64(
+	struct pkm_lcs_kunit_restore_input_file *input, s64 value)
+{
+	return pkm_lcs_kunit_restore_stream_append_u64(input, (u64)value);
+}
+
+static int pkm_lcs_kunit_restore_stream_append_record_header(
+	struct pkm_lcs_kunit_restore_input_file *input,
+	u16 record_type, u32 record_len)
+{
+	int ret;
+
+	ret = pkm_lcs_kunit_restore_stream_append_u16(input, record_type);
+	if (ret)
+		return ret;
+	return pkm_lcs_kunit_restore_stream_append_u32(input, record_len);
+}
+
+static int pkm_lcs_kunit_restore_stream_build_valid(
+	struct pkm_lcs_kunit_restore_input_file *input, bool include_unknown)
+{
+	static const u8 root_guid[PKM_LCS_GUID_BYTES] = { 0x52 };
+	static const char hive_name[] = "Machine";
+	static const u8 unknown_payload[] = { 'o', 'p', 't' };
+	struct sha256_ctx checksum_ctx;
+	u8 checksum[SHA256_DIGEST_SIZE];
+	size_t trailer_offset;
+	u64 record_count = include_unknown ? 3 : 2;
+	u32 header_len = 6 + 8 + 4 + 4 + 8 + PKM_LCS_GUID_BYTES + 4 +
+			 sizeof(hive_name) - 1;
+	u32 unknown_len = 6 + sizeof(unknown_payload);
+	int ret;
+
+	if (!input)
+		return -EINVAL;
+	memset(input, 0, sizeof(*input));
+
+	ret = pkm_lcs_kunit_restore_stream_append_record_header(
+		input, REG_BACKUP_HEADER, header_len);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append(
+		input, REG_BACKUP_MAGIC, sizeof(REG_BACKUP_MAGIC) - 1);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_u32(input, 21U);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_u32(input, 21U);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_s64(input, 1234);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append(input, root_guid,
+						  sizeof(root_guid));
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_u32(
+		input, sizeof(hive_name) - 1);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append(
+		input, hive_name, sizeof(hive_name) - 1);
+	if (ret)
+		return ret;
+
+	if (include_unknown) {
+		ret = pkm_lcs_kunit_restore_stream_append_record_header(
+			input, 0x9001U, unknown_len);
+		if (ret)
+			return ret;
+		ret = pkm_lcs_kunit_restore_stream_append(
+			input, unknown_payload, sizeof(unknown_payload));
+		if (ret)
+			return ret;
+	}
+
+	trailer_offset = input->len;
+	ret = pkm_lcs_kunit_restore_stream_append_record_header(
+		input, REG_BACKUP_TRAILER,
+		6 + sizeof(u64) + SHA256_DIGEST_SIZE);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_kunit_restore_stream_append_u64(input, record_count);
+	if (ret)
+		return ret;
+	memset(checksum, 0, sizeof(checksum));
+	ret = pkm_lcs_kunit_restore_stream_append(input, checksum,
+						  sizeof(checksum));
+	if (ret)
+		return ret;
+
+	sha256_init(&checksum_ctx);
+	sha256_update(&checksum_ctx, input->data,
+		      trailer_offset + 6 + sizeof(u64));
+	sha256_final(&checksum_ctx, checksum);
+	memcpy(input->data + trailer_offset + 6 + sizeof(u64), checksum,
+	       sizeof(checksum));
+	return 0;
+}
+
 static long pkm_lcs_kunit_publish_source_one_backup_key_fd(void)
 {
 	static const u8 root_guid[PKM_LCS_GUID_BYTES] = { 1 };
@@ -19778,6 +19962,7 @@ static void pkm_lcs_kunit_key_fd_restore_admission(struct kunit *test)
 		.begin_status = RSI_OK,
 		.abort_status = RSI_OK,
 	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
 	struct task_struct *task;
 	struct file file = { };
 	const void *token;
@@ -19792,7 +19977,10 @@ static void pkm_lcs_kunit_key_fd_restore_admission(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, token);
 	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
 	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
-	input_fd = pkm_lcs_kunit_external_fd(O_RDONLY);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_valid(&input, true),
+			0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(&input);
 	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
 	args.input_fd = input_fd;
 
@@ -19896,6 +20084,125 @@ static void pkm_lcs_kunit_key_fd_restore_readwrite_unsupported(
 	pkm_lcs_kunit_reset_source_table();
 	kacs_rust_token_drop(token);
 	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_expect_restore_stream_result(
+	struct kunit *test, struct pkm_lcs_kunit_restore_input_file *input,
+	long expected_ret)
+{
+	struct pkm_kacs_boot_snapshot snapshot = { };
+	struct reg_restore_args args = { };
+	struct pkm_lcs_kunit_restore_txn_source_script script = {
+		.begin_status = RSI_OK,
+		.abort_status = RSI_OK,
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const void *source_token;
+	long key_fd;
+	int input_fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_RESTORE_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+	args.input_fd = input_fd;
+
+	script.file = &file;
+	pkm_kmes_kunit_reset_all();
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_restore_txn_source_thread, &script,
+		"pkm-lcs-kunit-restore-stream");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, token, &args),
+			expected_ret);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 2U);
+	KUNIT_EXPECT_EQ(test, script.writes, 2U);
+	KUNIT_EXPECT_TRUE(test, script.saw_abort);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(token, &snapshot));
+	KUNIT_EXPECT_EQ(test, snapshot.privileges_used &
+				      KACS_SE_RESTORE_PRIVILEGE,
+			KACS_SE_RESTORE_PRIVILEGE);
+	pkm_lcs_kunit_expect_latest_lcs_event(
+		test, "LCS_RESTORE_COMPLETE", "result_errno");
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_stream_bad_magic(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_valid(&input, true),
+			0);
+	input.data[6] ^= 0x01;
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_stream_min_reader_denied(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_valid(&input, true),
+			0);
+	put_unaligned_le32(22U, input.data + 6 + 8 + 4);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_stream_checksum_mismatch(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	u32 header_len;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_valid(&input, true),
+			0);
+	header_len = get_unaligned_le32(input.data + 2);
+	KUNIT_ASSERT_LT(test, (size_t)header_len + 6, input.len);
+	input.data[header_len + 6] ^= 0x01;
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_stream_after_trailer_denied(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_restore_input_file input = { };
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_valid(&input, true),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_record_header(
+				&input, 0x9002U, 6),
+			0);
+	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
+						   (long)-EINVAL);
 }
 
 static void pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream(
@@ -47810,6 +48117,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_key_fd_backup_pre_start_failure_does_not_audit),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_admission),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_readwrite_unsupported),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_bad_magic),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_min_reader_denied),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_checksum_mismatch),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_after_trailer_denied),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_fails_before_source),
