@@ -20628,9 +20628,11 @@ static void pkm_lcs_kunit_key_fd_restore_stream_duplicate_root_key(
 }
 
 static void
-pkm_lcs_kunit_expect_restore_root_flag_result(
+pkm_lcs_kunit_expect_restore_root_flag_result_with_sequence(
 	struct kunit *test, struct pkm_lcs_kunit_restore_input_file *input,
-	long expected_ret, bool target_volatile, bool target_symlink)
+	long expected_ret, bool target_volatile, bool target_symlink,
+	bool override_sequence, u64 next_sequence_override,
+	u64 *sequence_after_out)
 {
 	struct reg_restore_args args = { };
 	struct pkm_lcs_kunit_restore_txn_source_script script = {
@@ -20653,6 +20655,8 @@ pkm_lcs_kunit_expect_restore_root_flag_result(
 	int thread_ret;
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	if (override_sequence)
+		pkm_lcs_kunit_set_sequence_state(true, next_sequence_override);
 	token = kacs_rust_kunit_create_logon_type_token(
 		KACS_LOGON_TYPE_SERVICE, KACS_SE_RESTORE_PRIVILEGE);
 	KUNIT_ASSERT_NOT_NULL(test, token);
@@ -20680,6 +20684,11 @@ pkm_lcs_kunit_expect_restore_root_flag_result(
 	KUNIT_EXPECT_TRUE(test, script.saw_abort);
 	pkm_lcs_kunit_expect_latest_lcs_event(
 		test, "LCS_RESTORE_COMPLETE", "result_errno");
+	if (sequence_after_out)
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_source_next_sequence_snapshot(
+					sequence_after_out),
+				0L);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
@@ -20688,6 +20697,16 @@ pkm_lcs_kunit_expect_restore_root_flag_result(
 	pkm_lcs_kunit_reset_source_table();
 	kacs_rust_token_drop(token);
 	kacs_rust_token_drop(source_token);
+}
+
+static void
+pkm_lcs_kunit_expect_restore_root_flag_result(
+	struct kunit *test, struct pkm_lcs_kunit_restore_input_file *input,
+	long expected_ret, bool target_volatile, bool target_symlink)
+{
+	pkm_lcs_kunit_expect_restore_root_flag_result_with_sequence(
+		test, input, expected_ret, target_volatile, target_symlink,
+		false, 0, NULL);
 }
 
 static void pkm_lcs_kunit_key_fd_restore_stream_root_flags_conflict(
@@ -21223,6 +21242,89 @@ static void pkm_lcs_kunit_key_fd_restore_topology_value_scoped_to_section(
 			0);
 	pkm_lcs_kunit_expect_restore_stream_result(test, &input,
 						   (long)-EINVAL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_sequence_preflight_no_advance(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record record = {
+		.record_type = REG_BACKUP_PATH_ENTRY,
+		.layer_name = "base",
+		.hidden = true,
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	u64 sequence_after = 0;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_data_records(
+				&input, &layer, 1, &record, 1),
+			0);
+	pkm_lcs_kunit_expect_restore_root_flag_result_with_sequence(
+		test, &input, (long)-EOPNOTSUPP, false, false, true, 100,
+		&sequence_after);
+	KUNIT_EXPECT_EQ(test, sequence_after, 100ULL);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_sequence_overflow_denied(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record record = {
+		.record_type = REG_BACKUP_VALUE,
+		.layer_name = "base",
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	u64 sequence_after = 0;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_data_records(
+				&input, &layer, 1, &record, 1),
+			0);
+	pkm_lcs_kunit_expect_restore_root_flag_result_with_sequence(
+		test, &input, (long)-EOVERFLOW, false, false, true, U64_MAX,
+		&sequence_after);
+	KUNIT_EXPECT_EQ(test, sequence_after, U64_MAX);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_sequence_skipped_root_path(
+	struct kunit *test)
+{
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record record = {
+		.record_type = REG_BACKUP_PATH_ENTRY,
+		.layer_name = "base",
+		.child_guid = pkm_lcs_kunit_restore_header_root_guid,
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	u64 sequence_after = 0;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_data_records(
+				&input, &layer, 1, &record, 1),
+			0);
+	pkm_lcs_kunit_expect_restore_root_flag_result_with_sequence(
+		test, &input, (long)-EOPNOTSUPP, false, false, true, U64_MAX,
+		&sequence_after);
+	KUNIT_EXPECT_EQ(test, sequence_after, U64_MAX);
 }
 
 static void pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream(
@@ -43910,6 +44012,94 @@ static void pkm_lcs_kunit_sequence_allocation_fails_closed(struct kunit *test)
 	pkm_lcs_kunit_reset_source_table();
 }
 
+static void pkm_lcs_kunit_restore_sequence_gate_advances_terminal(
+	struct kunit *test)
+{
+	struct pkm_lcs_restore_sequence_gate gate = { };
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	u64 sequence = 0;
+
+	pkm_lcs_kunit_set_sequence_state(true, 10);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_restore_sequence_gate_acquire(&gate),
+			0L);
+	KUNIT_EXPECT_TRUE(test, gate.held);
+	KUNIT_EXPECT_EQ(test, gate.restore_sequence_offset, 10ULL);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_restore_sequence_gate_record_dispatched(
+				&gate, 3, &sequence),
+			0L);
+	KUNIT_EXPECT_EQ(test, sequence, 13ULL);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_restore_sequence_gate_record_dispatched(
+				&gate, 1, &sequence),
+			0L);
+	KUNIT_EXPECT_EQ(test, sequence, 11ULL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_restore_sequence_gate_release_terminal(&gate),
+			0L);
+
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_TRUE(test, snapshot.sequence_initialized);
+	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, 14ULL);
+
+	pkm_lcs_kunit_reset_source_table();
+}
+
+static void pkm_lcs_kunit_restore_sequence_gate_validate_no_advance(
+	struct kunit *test)
+{
+	struct pkm_lcs_restore_sequence_gate gate = { };
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	u64 sequence = 0;
+
+	pkm_lcs_kunit_set_sequence_state(true, 20);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_restore_sequence_gate_acquire(&gate),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_restore_sequence_gate_validate(&gate, 7,
+							      &sequence),
+			0L);
+	KUNIT_EXPECT_EQ(test, sequence, 27ULL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_restore_sequence_gate_release_terminal(&gate),
+			0L);
+
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_TRUE(test, snapshot.sequence_initialized);
+	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, 20ULL);
+
+	pkm_lcs_kunit_reset_source_table();
+}
+
+static void pkm_lcs_kunit_restore_sequence_gate_overflow(
+	struct kunit *test)
+{
+	struct pkm_lcs_restore_sequence_gate gate = { };
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	u64 sequence = 123;
+
+	pkm_lcs_kunit_set_sequence_state(true, U64_MAX);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_restore_sequence_gate_acquire(&gate),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_restore_sequence_gate_validate(&gate, 0,
+							      &sequence),
+			(long)-EOVERFLOW);
+	KUNIT_EXPECT_EQ(test, sequence, 0ULL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_restore_sequence_gate_release_terminal(&gate),
+			0L);
+
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_TRUE(test, snapshot.sequence_initialized);
+	KUNIT_EXPECT_EQ(test, snapshot.next_sequence, U64_MAX);
+
+	pkm_lcs_kunit_reset_source_table();
+}
+
 static void pkm_lcs_kunit_source_read_retains_in_flight_until_release(
 	struct kunit *test)
 {
@@ -49160,6 +49350,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_topology_non_root_anchor_target),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_topology_parent_must_precede_child),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_topology_value_scoped_to_section),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_sequence_preflight_no_advance),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_sequence_overflow_denied),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_sequence_skipped_root_path),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_fails_before_source),
@@ -49613,6 +49806,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_sequence_allocation_advances_global_counter),
 	KUNIT_CASE(pkm_lcs_kunit_sequence_allocation_fails_closed),
+	KUNIT_CASE(pkm_lcs_kunit_restore_sequence_gate_advances_terminal),
+	KUNIT_CASE(pkm_lcs_kunit_restore_sequence_gate_validate_no_advance),
+	KUNIT_CASE(pkm_lcs_kunit_restore_sequence_gate_overflow),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_read_retains_in_flight_until_release),
 	KUNIT_CASE(pkm_lcs_kunit_source_enqueue_rejects_reused_request_id),

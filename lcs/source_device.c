@@ -191,6 +191,7 @@ struct pkm_lcs_base_layer_metadata_entry {
 };
 
 static DEFINE_MUTEX(pkm_lcs_source_table_lock);
+static DEFINE_MUTEX(pkm_lcs_sequence_allocation_gate_lock);
 static struct pkm_lcs_source_slot
 	pkm_lcs_source_slots[PKM_LCS_MAX_REGISTERED_SOURCES_HARD];
 static DEFINE_MUTEX(pkm_lcs_layer_table_lock);
@@ -3244,11 +3245,13 @@ static long pkm_lcs_source_register_file_for_token_core(
 			goto out_registration;
 	}
 
+	mutex_lock(&pkm_lcs_sequence_allocation_gate_lock);
 	mutex_lock(&pkm_lcs_source_table_lock);
 	ret = pkm_lcs_source_registration_publish_locked(source_fd,
 							&registration, &limits,
 							&publish);
 	mutex_unlock(&pkm_lcs_source_table_lock);
+	mutex_unlock(&pkm_lcs_sequence_allocation_gate_lock);
 	if (ret)
 		goto out_bootstrap;
 
@@ -7270,20 +7273,116 @@ long pkm_lcs_allocate_sequence(u64 *sequence)
 		return -EINVAL;
 
 	*sequence = 0;
+	mutex_lock(&pkm_lcs_sequence_allocation_gate_lock);
 	mutex_lock(&pkm_lcs_source_table_lock);
 	if (!pkm_lcs_sequence_initialized) {
 		mutex_unlock(&pkm_lcs_source_table_lock);
+		mutex_unlock(&pkm_lcs_sequence_allocation_gate_lock);
 		return -EIO;
 	}
 	if (pkm_lcs_next_sequence == U64_MAX) {
 		mutex_unlock(&pkm_lcs_source_table_lock);
+		mutex_unlock(&pkm_lcs_sequence_allocation_gate_lock);
 		return -EOVERFLOW;
 	}
 
 	*sequence = pkm_lcs_next_sequence;
 	pkm_lcs_next_sequence++;
 	mutex_unlock(&pkm_lcs_source_table_lock);
+	mutex_unlock(&pkm_lcs_sequence_allocation_gate_lock);
 	return 0;
+}
+
+long pkm_lcs_restore_sequence_gate_acquire(
+	struct pkm_lcs_restore_sequence_gate *gate)
+{
+	if (!gate)
+		return -EINVAL;
+
+	memset(gate, 0, sizeof(*gate));
+	mutex_lock(&pkm_lcs_sequence_allocation_gate_lock);
+	mutex_lock(&pkm_lcs_source_table_lock);
+	if (!pkm_lcs_sequence_initialized) {
+		mutex_unlock(&pkm_lcs_source_table_lock);
+		mutex_unlock(&pkm_lcs_sequence_allocation_gate_lock);
+		return -EIO;
+	}
+
+	gate->restore_sequence_offset = pkm_lcs_next_sequence;
+	gate->held = true;
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return 0;
+}
+
+long pkm_lcs_restore_sequence_gate_validate(
+	const struct pkm_lcs_restore_sequence_gate *gate,
+	u64 backup_sequence, u64 *new_sequence)
+{
+	u64 mapped;
+
+	if (!gate || !gate->held || !new_sequence)
+		return -EINVAL;
+	*new_sequence = 0;
+	if (check_add_overflow(gate->restore_sequence_offset,
+			       backup_sequence, &mapped))
+		return -EOVERFLOW;
+	if (mapped == U64_MAX)
+		return -EOVERFLOW;
+
+	*new_sequence = mapped;
+	return 0;
+}
+
+long pkm_lcs_restore_sequence_gate_record_dispatched(
+	struct pkm_lcs_restore_sequence_gate *gate,
+	u64 backup_sequence, u64 *new_sequence)
+{
+	long ret;
+
+	ret = pkm_lcs_restore_sequence_gate_validate(gate, backup_sequence,
+						    new_sequence);
+	if (ret)
+		return ret;
+
+	if (!gate->max_dispatched_valid ||
+	    *new_sequence > gate->max_dispatched_sequence) {
+		gate->max_dispatched_sequence = *new_sequence;
+		gate->max_dispatched_valid = true;
+	}
+	return 0;
+}
+
+long pkm_lcs_restore_sequence_gate_release_terminal(
+	struct pkm_lcs_restore_sequence_gate *gate)
+{
+	u64 required_next;
+	long ret = 0;
+
+	if (!gate)
+		return -EINVAL;
+	if (!gate->held)
+		return 0;
+
+	if (gate->max_dispatched_valid) {
+		if (check_add_overflow(gate->max_dispatched_sequence, 1ULL,
+				       &required_next)) {
+			ret = -EOVERFLOW;
+			goto out_release;
+		}
+
+		mutex_lock(&pkm_lcs_source_table_lock);
+		if (!pkm_lcs_sequence_initialized) {
+			ret = -EIO;
+		} else if (pkm_lcs_next_sequence < required_next) {
+			pkm_lcs_next_sequence = required_next;
+		}
+		mutex_unlock(&pkm_lcs_source_table_lock);
+	}
+
+out_release:
+	memset(gate, 0, sizeof(*gate));
+	mutex_unlock(&pkm_lcs_sequence_allocation_gate_lock);
+	return ret;
 }
 
 static long pkm_lcs_source_validate_accepted_response_payload(

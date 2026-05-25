@@ -135,6 +135,13 @@ struct pkm_lcs_source_table_snapshot {
 	bool sequence_initialized;
 };
 
+struct pkm_lcs_restore_sequence_gate {
+	u64 restore_sequence_offset;
+	u64 max_dispatched_sequence;
+	bool held;
+	bool max_dispatched_valid;
+};
+
 struct pkm_lcs_source_fd_snapshot {
 	enum pkm_lcs_source_fd_state state;
 	u32 source_id;
@@ -934,6 +941,16 @@ long pkm_lcs_reg_create_key_args_for_token(
 	const struct reg_create_key_args *args,
 	const struct pkm_lcs_create_missing_runtime_inputs *inputs);
 long pkm_lcs_allocate_sequence(u64 *sequence);
+long pkm_lcs_restore_sequence_gate_acquire(
+	struct pkm_lcs_restore_sequence_gate *gate);
+long pkm_lcs_restore_sequence_gate_validate(
+	const struct pkm_lcs_restore_sequence_gate *gate,
+	u64 backup_sequence, u64 *new_sequence);
+long pkm_lcs_restore_sequence_gate_record_dispatched(
+	struct pkm_lcs_restore_sequence_gate *gate,
+	u64 backup_sequence, u64 *new_sequence);
+long pkm_lcs_restore_sequence_gate_release_terminal(
+	struct pkm_lcs_restore_sequence_gate *gate);
 long pkm_lcs_source_enqueue_request(
 	u32 source_id, const u8 *frame, size_t frame_len,
 	struct pkm_lcs_source_enqueue_result *result);

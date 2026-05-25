@@ -5269,8 +5269,10 @@ struct pkm_lcs_restore_root_key_summary {
 	bool current_key_active;
 	bool current_key_is_root;
 	bool current_key_anchor_seen;
+	bool sequence_record_seen;
 	u8 root_volatile;
 	u8 root_symlink;
+	u64 max_backup_sequence;
 };
 
 static long pkm_lcs_key_fd_restore_layer_manifest_views(
@@ -5445,6 +5447,19 @@ static bool pkm_lcs_restore_parent_guid_valid(
 	return pkm_lcs_restore_guid_eq(parent_guid, summary->target_root_guid) ||
 	       pkm_lcs_restore_guid_set_contains(
 		       &summary->processed_non_root_keys, parent_guid);
+}
+
+static long pkm_lcs_restore_note_backup_sequence(
+	struct pkm_lcs_restore_root_key_summary *summary, u64 backup_sequence)
+{
+	if (!summary)
+		return -EINVAL;
+	if (!summary->sequence_record_seen ||
+	    backup_sequence > summary->max_backup_sequence) {
+		summary->max_backup_sequence = backup_sequence;
+		summary->sequence_record_seen = true;
+	}
+	return 0;
 }
 
 static long pkm_lcs_restore_finish_current_key_section(
@@ -5747,7 +5762,8 @@ static long pkm_lcs_restore_validate_path_entry_topology(
 		if (!pkm_lcs_restore_guid_eq(parent_guid,
 					     summary->current_key_guid))
 			return -EINVAL;
-		return 0;
+		return pkm_lcs_restore_note_backup_sequence(summary,
+							    path->sequence);
 	}
 
 	pkm_lcs_restore_remap_guid(summary, path->child_guid, child_guid);
@@ -5758,7 +5774,7 @@ static long pkm_lcs_restore_validate_path_entry_topology(
 	if (!pkm_lcs_restore_parent_guid_valid(summary, parent_guid))
 		return -EINVAL;
 	summary->current_key_anchor_seen = true;
-	return 0;
+	return pkm_lcs_restore_note_backup_sequence(summary, path->sequence);
 }
 
 static long pkm_lcs_restore_validate_key_scoped_record_topology(
@@ -5848,6 +5864,10 @@ static long pkm_lcs_restore_validate_data_record(
 			summary, value.key_guid);
 		if (ret)
 			break;
+		ret = pkm_lcs_restore_note_backup_sequence(summary,
+							   value.sequence);
+		if (ret)
+			break;
 		ret = lcs_rust_validate_backup_value_record_layer_manifest(
 			limits, manifests, summary->layer_manifests.count, frame,
 			record_len);
@@ -5863,6 +5883,10 @@ static long pkm_lcs_restore_validate_data_record(
 			break;
 		ret = pkm_lcs_restore_validate_key_scoped_record_topology(
 			summary, blanket.key_guid);
+		if (ret)
+			break;
+		ret = pkm_lcs_restore_note_backup_sequence(summary,
+							   blanket.sequence);
 		if (ret)
 			break;
 		ret = lcs_rust_validate_backup_blanket_tombstone_record_layer_manifest(
@@ -8486,6 +8510,28 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 		key_fd, transaction_id, &limits, &root_summary);
 	if (ret)
 		goto out_abort_transaction;
+
+	if (root_summary.sequence_record_seen) {
+		struct pkm_lcs_restore_sequence_gate sequence_gate = { };
+		u64 remapped_sequence = 0;
+		long release_ret;
+
+		ret = pkm_lcs_restore_sequence_gate_acquire(&sequence_gate);
+		if (ret)
+			goto out_abort_transaction;
+		ret = pkm_lcs_restore_sequence_gate_validate(
+			&sequence_gate, root_summary.max_backup_sequence,
+			&remapped_sequence);
+		release_ret =
+			pkm_lcs_restore_sequence_gate_release_terminal(
+				&sequence_gate);
+		if (ret)
+			goto out_abort_transaction;
+		if (release_ret) {
+			ret = release_ret;
+			goto out_abort_transaction;
+		}
+	}
 
 	ret = -EOPNOTSUPP;
 
