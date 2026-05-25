@@ -2121,7 +2121,8 @@ static long pkm_lcs_transaction_append_hide_key_exact(
 }
 
 static long pkm_lcs_transaction_log_dispatch_watch_batch(
-	struct pkm_lcs_transaction_fd *txn, u32 source_id)
+	struct pkm_lcs_transaction_fd *txn, u32 source_id,
+	u32 *internal_watch_effects_out)
 {
 	struct pkm_lcs_watch_dispatch_context *contexts;
 	struct pkm_lcs_transaction_log_entry *entry;
@@ -2131,6 +2132,8 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 	u32 index = 0;
 	long ret;
 
+	if (internal_watch_effects_out)
+		*internal_watch_effects_out = 0;
 	if (!txn)
 		return -EINVAL;
 	if (!txn->mutation_log_entries)
@@ -2313,8 +2316,8 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 		}
 	}
 
-	ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch(contexts,
-							       index);
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context_batch_effects(
+		contexts, index, internal_watch_effects_out);
 
 out_free:
 	pkm_lcs_transaction_watch_context_owners_free(&context_owners);
@@ -2326,7 +2329,8 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 	struct pkm_lcs_transaction_fd *txn, u64 transaction_id, u32 source_id,
 	u32 status, bool detached, u32 *final_state_out,
 	bool *release_counter_out, bool *source_down_required_out,
-	struct list_head *layer_delete_effects)
+	struct list_head *layer_delete_effects,
+	u32 *internal_watch_effects_out)
 {
 	bool release_counter = false;
 	bool clear_log = false;
@@ -2344,6 +2348,8 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 	*final_state_out = 0;
 	*release_counter_out = false;
 	*source_down_required_out = false;
+	if (internal_watch_effects_out)
+		*internal_watch_effects_out = 0;
 
 	if (status == RSI_OK) {
 		spin_lock(&txn->lock);
@@ -2384,8 +2390,8 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 			*source_down_required_out = true;
 			return -EIO;
 		}
-		(void)pkm_lcs_transaction_log_dispatch_watch_batch(txn,
-								   source_id);
+		(void)pkm_lcs_transaction_log_dispatch_watch_batch(
+			txn, source_id, internal_watch_effects_out);
 	}
 
 	spin_lock(&txn->lock);
@@ -2495,6 +2501,7 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 	u32 source_id;
 	u32 state;
 	u32 final_state = 0;
+	u32 internal_watch_effects = 0;
 	long ret;
 	u32 count;
 	bool release_counter = false;
@@ -2573,7 +2580,8 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 					response.status, false, &final_state,
 					&release_counter,
 					&source_down_required,
-					&layer_delete_effects);
+					&layer_delete_effects,
+					&internal_watch_effects);
 			if (!apply_ret) {
 				apply_layer_delete_effects = true;
 				if (release_counter)
@@ -2600,7 +2608,8 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 	source_down_required = false;
 	ret = pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 		txn, transaction_id, source_id, RSI_OK, false, &final_state,
-		&release_counter, &source_down_required, &layer_delete_effects);
+		&release_counter, &source_down_required, &layer_delete_effects,
+		&internal_watch_effects);
 	if (ret) {
 		if (source_down_required) {
 			mark_source_down = true;
@@ -2621,7 +2630,9 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 
 out_unlock:
 	mutex_unlock(&txn->bind_lock);
-	if (apply_layer_delete_effects) {
+	if (apply_layer_delete_effects &&
+	    !(internal_watch_effects &
+	      PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE)) {
 		long effects_ret;
 
 		effects_ret = pkm_lcs_transaction_layer_delete_effects_apply(
@@ -3240,6 +3251,7 @@ long pkm_lcs_transaction_fd_handle_late_commit_response(
 	bool source_down_required = false;
 	bool apply_layer_delete_effects = false;
 	u32 final_state = 0;
+	u32 internal_watch_effects = 0;
 	u32 count = 0;
 	long ret = -ENOENT;
 
@@ -3263,8 +3275,8 @@ long pkm_lcs_transaction_fd_handle_late_commit_response(
 
 		ret = pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 			txn, transaction_id, source_id, status, true,
-			&final_state, &release_counter,
-			&source_down_required, &layer_delete_effects);
+			&final_state, &release_counter, &source_down_required,
+			&layer_delete_effects, &internal_watch_effects);
 		if (!ret) {
 			bool destroy_detached;
 
@@ -3289,7 +3301,9 @@ long pkm_lcs_transaction_fd_handle_late_commit_response(
 							       &count);
 	if (destroy_txn)
 		pkm_lcs_transaction_fd_destroy(destroy_txn);
-	if (apply_layer_delete_effects) {
+	if (apply_layer_delete_effects &&
+	    !(internal_watch_effects &
+	      PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE)) {
 		long effects_ret;
 
 		effects_ret = pkm_lcs_transaction_layer_delete_effects_apply(

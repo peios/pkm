@@ -120,6 +120,8 @@ struct pkm_lcs_set_security_merge_result {
 	size_t merged_sd_len;
 };
 
+#define PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE (1U << 0)
+
 long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input);
 long pkm_lcs_key_fd_snapshot(int fd, struct pkm_lcs_key_fd_snapshot *out);
 long pkm_lcs_key_fd_check_fixed_ioctl_access(int fd, unsigned int cmd);
@@ -139,9 +141,15 @@ void pkm_lcs_key_fd_parent_snapshot_destroy(
 	struct pkm_lcs_key_fd_parent_snapshot *snapshot);
 long pkm_lcs_key_fd_dispatch_watch_event_context(
 	const struct pkm_lcs_watch_dispatch_context *context);
+long pkm_lcs_key_fd_dispatch_watch_event_context_effects(
+	const struct pkm_lcs_watch_dispatch_context *context,
+	u32 *internal_effects_out);
 long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
 	const struct pkm_lcs_watch_dispatch_context *contexts,
 	u32 context_count);
+long pkm_lcs_key_fd_dispatch_watch_event_context_batch_effects(
+	const struct pkm_lcs_watch_dispatch_context *contexts, u32 context_count,
+	u32 *internal_effects_out);
 long pkm_lcs_key_fd_dispatch_overflow_context(
 	const struct pkm_lcs_watch_dispatch_context *context);
 long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,

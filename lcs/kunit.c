@@ -2657,6 +2657,150 @@ pkm_lcs_kunit_internal_layer_watch_create_missing_child_noop(
 	kacs_rust_token_drop(token);
 }
 
+static void
+pkm_lcs_kunit_internal_layer_watch_delete_event_orchestrates(
+	struct kunit *test)
+{
+	static const char * const layers_path[] = {
+		"Machine", "System", "Registry", "Layers"
+	};
+	static const u8 ancestors[4][RSI_GUID_SIZE] = {
+		{ 1 }, { 0xe8, 0x10 }, { 0xe8, 0x11 }, { 0xe8, 0x12 },
+	};
+	static const u8 policy_guid[RSI_GUID_SIZE] = { 0xe8, 0x13 };
+	static const char layer_name[] = "Policy";
+	struct pkm_lcs_watch_dispatch_context context = {
+		.changed_key_guid = ancestors[3],
+		.ancestor_guids = ancestors,
+		.resolved_path = layers_path,
+		.path_component_count = ARRAY_SIZE(layers_path),
+		.event_type = REG_WATCH_SUBKEY_DELETED,
+		.name = (const u8 *)layer_name,
+		.name_len = sizeof(layer_name) - 1U,
+	};
+	struct pkm_lcs_kunit_delete_layer_source_script script = {
+		.expected_layer_name = layer_name,
+		.status = RSI_OK,
+	};
+	struct pkm_lcs_rsi_layer_view layers[2] = { };
+	char names[32] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	u32 effects = 0;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_internal_self_watch_disarm();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				layer_name, sizeof(layer_name) - 1U, 17, 1,
+				policy_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				1, ancestors[0], true, ancestors[2], true,
+				ancestors[3], NULL),
+			0L);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_layer_source_thread, &script,
+		"pkm-lcs-kunit-layer-watch-delete");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context_effects(&context,
+								  &effects);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_TRUE(test,
+			  !!(effects &
+			     PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 1U);
+	KUNIT_EXPECT_STREQ(test, layers[0].name, "base");
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_internal_self_watch_disarm();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_internal_layer_watch_delete_base_noop(
+	struct kunit *test)
+{
+	static const char * const layers_path[] = {
+		"Machine", "System", "Registry", "Layers"
+	};
+	static const u8 ancestors[4][RSI_GUID_SIZE] = {
+		{ 1 }, { 0xe9, 0x10 }, { 0xe9, 0x11 }, { 0xe9, 0x12 },
+	};
+	static const char layer_name[] = "base";
+	struct pkm_lcs_watch_dispatch_context context = {
+		.changed_key_guid = ancestors[3],
+		.ancestor_guids = ancestors,
+		.resolved_path = layers_path,
+		.path_component_count = ARRAY_SIZE(layers_path),
+		.event_type = REG_WATCH_SUBKEY_DELETED,
+		.name = (const u8 *)layer_name,
+		.name_len = sizeof(layer_name) - 1U,
+	};
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct pkm_lcs_rsi_layer_view layers[2] = { };
+	char names[32] = { };
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	u32 effects = 0;
+	long ret;
+
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_internal_self_watch_disarm();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				1, ancestors[0], true, ancestors[2], true,
+				ancestors[3], NULL),
+			0L);
+
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context_effects(&context,
+								  &effects);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, effects, 0U);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 1U);
+	KUNIT_EXPECT_STREQ(test, layers[0].name, "base");
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_internal_self_watch_disarm();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_bound_transaction_counter_limits(
 	struct kunit *test)
 {
@@ -41327,6 +41471,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_internal_layer_watch_create_event_refreshes_metadata),
 	KUNIT_CASE(
 		pkm_lcs_kunit_internal_layer_watch_create_missing_child_noop),
+	KUNIT_CASE(
+		pkm_lcs_kunit_internal_layer_watch_delete_event_orchestrates),
+	KUNIT_CASE(pkm_lcs_kunit_internal_layer_watch_delete_base_noop),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_limits),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_source_down),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_bad_inputs),

@@ -1368,15 +1368,16 @@ static void pkm_lcs_key_fd_publish_value_effects(
 	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
 }
 
-static void pkm_lcs_key_fd_publish_parent_subkey_event(
+static u32 pkm_lcs_key_fd_publish_parent_subkey_event(
 	struct pkm_lcs_key_fd *key_fd, const u8 *parent_guid,
 	const char *child_name, u32 child_name_len, u32 event_type)
 {
 	struct pkm_lcs_watch_dispatch_context context = { };
+	u32 internal_effects = 0;
 
 	if (!key_fd || !parent_guid || !child_name || !child_name_len ||
 	    key_fd->path_component_count < 2)
-		return;
+		return 0;
 
 	context.changed_key_guid = parent_guid;
 	context.ancestor_guids =
@@ -1387,23 +1388,25 @@ static void pkm_lcs_key_fd_publish_parent_subkey_event(
 	context.name = (const u8 *)child_name;
 	context.name_len = child_name_len;
 
-	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
+	(void)pkm_lcs_key_fd_dispatch_watch_event_context_effects(
+		&context, &internal_effects);
+	return internal_effects;
 }
 
-static void pkm_lcs_key_fd_publish_parent_subkey_deleted(
+static u32 pkm_lcs_key_fd_publish_parent_subkey_deleted(
 	struct pkm_lcs_key_fd *key_fd, const u8 *parent_guid,
 	const char *child_name, u32 child_name_len)
 {
-	pkm_lcs_key_fd_publish_parent_subkey_event(
+	return pkm_lcs_key_fd_publish_parent_subkey_event(
 		key_fd, parent_guid, child_name, child_name_len,
 		REG_WATCH_SUBKEY_DELETED);
 }
 
-static void pkm_lcs_key_fd_publish_parent_subkey_created(
+static u32 pkm_lcs_key_fd_publish_parent_subkey_created(
 	struct pkm_lcs_key_fd *key_fd, const u8 *parent_guid,
 	const char *child_name, u32 child_name_len)
 {
-	pkm_lcs_key_fd_publish_parent_subkey_event(
+	return pkm_lcs_key_fd_publish_parent_subkey_event(
 		key_fd, parent_guid, child_name, child_name_len,
 		REG_WATCH_SUBKEY_CREATED);
 }
@@ -4420,7 +4423,10 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	u64 txn_id = 0;
 	u32 child_name_len = 0;
 	u32 parent_depth = 0;
+	u32 internal_watch_effects = 0;
 	bool layer_delete_orchestrated = false;
+	bool publish_deleted = false;
+	bool publish_created = false;
 	long ret;
 
 	if (!key_fd || !args)
@@ -4503,13 +4509,8 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 			goto out_cancel_mutation;
 		}
 		if (!post_lookup.target_still_named) {
-			pkm_lcs_key_fd_publish_parent_subkey_deleted(
-				key_fd, parent_guid, child_name, child_name_len);
-			if (post_lookup.replacement_visible)
-				pkm_lcs_key_fd_publish_parent_subkey_created(
-					key_fd, parent_guid, child_name,
-					child_name_len);
-			pkm_lcs_key_fd_publish_key_deleted_context(key_fd);
+			publish_deleted = true;
+			publish_created = post_lookup.replacement_visible;
 			ret = pkm_lcs_key_fd_mark_orphaned_internal(
 				key_fd->source_id, key_fd->key_guid, NULL,
 				NULL, false);
@@ -4538,11 +4539,28 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 		goto out_input;
 	}
 
-	ret = pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
-		key_fd, &layer_delete_orchestrated);
-	if (ret)
-		goto out_cancel_mutation;
-	if (layer_delete_orchestrated)
+	if (publish_deleted) {
+		internal_watch_effects =
+			pkm_lcs_key_fd_publish_parent_subkey_deleted(
+				key_fd, parent_guid, child_name, child_name_len);
+		if (publish_created)
+			internal_watch_effects |=
+				pkm_lcs_key_fd_publish_parent_subkey_created(
+					key_fd, parent_guid, child_name,
+					child_name_len);
+		pkm_lcs_key_fd_publish_key_deleted_context(key_fd);
+	}
+
+	if (!(internal_watch_effects &
+	      PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE)) {
+		ret = pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
+			key_fd, &layer_delete_orchestrated);
+		if (ret)
+			goto out_cancel_mutation;
+	}
+	if (layer_delete_orchestrated ||
+	    (internal_watch_effects &
+	     PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE))
 		goto out_cancel_mutation;
 
 	ret = pkm_lcs_source_record_transaction_generation(
@@ -4587,6 +4605,7 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 	u64 sequence = 0;
 	u64 txn_id = 0;
 	u32 child_name_len = 0;
+	u32 internal_watch_effects = 0;
 	long ret;
 
 	if (!key_fd || !args)
@@ -4675,16 +4694,21 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 		goto out_input;
 	}
 
-	ret = pkm_lcs_source_record_transaction_generation(
-		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
-	if (ret) {
-		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
-		ret = -EIO;
-		goto out_input;
-	}
-	pkm_lcs_key_fd_publish_parent_subkey_deleted(
+	internal_watch_effects = pkm_lcs_key_fd_publish_parent_subkey_deleted(
 		key_fd, parent_guid, child_name, child_name_len);
 	pkm_lcs_key_fd_publish_key_deleted_context(key_fd);
+
+	if (!(internal_watch_effects &
+	      PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE)) {
+		ret = pkm_lcs_source_record_transaction_generation(
+			key_fd->source_id, key_fd->ancestor_guids[0],
+			&generation);
+		if (ret) {
+			pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+			ret = -EIO;
+			goto out_input;
+		}
+	}
 	ret = 0;
 
 out_cancel_mutation:
@@ -5288,7 +5312,8 @@ static bool pkm_lcs_internal_watch_event_deliverable(
 			event_type == REG_WATCH_VALUE_DELETED);
 	case PKM_LCS_INTERNAL_WATCH_LAYER_METADATA:
 		if (relative_path_count == 0)
-			return event_type == REG_WATCH_SUBKEY_CREATED;
+			return event_type == REG_WATCH_SUBKEY_CREATED ||
+			       event_type == REG_WATCH_SUBKEY_DELETED;
 		return relative_path_count == 1 &&
 		       (event_type == REG_WATCH_VALUE_SET ||
 			event_type == REG_WATCH_VALUE_DELETED ||
@@ -5426,8 +5451,33 @@ static void pkm_lcs_internal_watch_deliver_layer_create(
 		pkm_lcs_internal_watch_recover_layer_change(event);
 }
 
+static void pkm_lcs_internal_watch_deliver_layer_delete(
+	const struct pkm_lcs_internal_watch_event *event,
+	u32 *internal_effects)
+{
+	static const char base_name[] = "base";
+	bool is_base = false;
+	long ret;
+
+	if (!event || !event->name || !event->name_len)
+		return;
+
+	ret = pkm_lcs_key_fd_layer_name_casefold_equal(
+		event->name, event->name_len, base_name,
+		sizeof(base_name) - 1, &is_base);
+	if (ret || is_base)
+		return;
+
+	ret = pkm_lcs_source_delete_layer_orchestrate_timeout(
+		event->name, event->name_len,
+		pkm_lcs_runtime_request_timeout_ms(), NULL);
+	if (!ret && internal_effects)
+		*internal_effects |= PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE;
+}
+
 static void pkm_lcs_internal_watch_deliver_layer_event(
-	const struct pkm_lcs_internal_watch_event *event)
+	const struct pkm_lcs_internal_watch_event *event,
+	u32 *internal_effects)
 {
 	if (!event)
 		return;
@@ -5441,12 +5491,17 @@ static void pkm_lcs_internal_watch_deliver_layer_event(
 	case REG_WATCH_SUBKEY_CREATED:
 		pkm_lcs_internal_watch_deliver_layer_create(event);
 		break;
+	case REG_WATCH_SUBKEY_DELETED:
+		pkm_lcs_internal_watch_deliver_layer_delete(
+			event, internal_effects);
+		break;
 	default:
 		break;
 	}
 }
 
-static void pkm_lcs_internal_watch_events_deliver(struct list_head *events)
+static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
+						  u32 *internal_effects)
 {
 	struct pkm_lcs_internal_watch_event *event;
 	struct pkm_lcs_internal_watch_event *tmp;
@@ -5465,7 +5520,8 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events)
 				event->source_id, event->guid, NULL);
 		} else if (event->target ==
 			   PKM_LCS_INTERNAL_WATCH_LAYER_METADATA) {
-			pkm_lcs_internal_watch_deliver_layer_event(event);
+			pkm_lcs_internal_watch_deliver_layer_event(
+				event, internal_effects);
 		}
 		list_del(&event->link);
 		pkm_lcs_internal_watch_event_path_destroy(event);
@@ -5656,12 +5712,15 @@ out_unlock:
 	return ret;
 }
 
-long pkm_lcs_key_fd_dispatch_watch_event_context(
-	const struct pkm_lcs_watch_dispatch_context *context)
+long pkm_lcs_key_fd_dispatch_watch_event_context_effects(
+	const struct pkm_lcs_watch_dispatch_context *context,
+	u32 *internal_effects_out)
 {
 	LIST_HEAD(internal_events);
 	long ret;
 
+	if (internal_effects_out)
+		*internal_effects_out = 0;
 	ret = pkm_lcs_key_fd_validate_dispatch_context(context);
 	if (ret)
 		return ret;
@@ -5671,18 +5730,29 @@ long pkm_lcs_key_fd_dispatch_watch_event_context(
 								NULL,
 								&internal_events);
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
-	pkm_lcs_internal_watch_events_deliver(&internal_events);
+	pkm_lcs_internal_watch_events_deliver(&internal_events,
+					      internal_effects_out);
 	return ret;
 }
 
-long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
-	const struct pkm_lcs_watch_dispatch_context *contexts, u32 context_count)
+long pkm_lcs_key_fd_dispatch_watch_event_context(
+	const struct pkm_lcs_watch_dispatch_context *context)
+{
+	return pkm_lcs_key_fd_dispatch_watch_event_context_effects(context,
+								  NULL);
+}
+
+long pkm_lcs_key_fd_dispatch_watch_event_context_batch_effects(
+	const struct pkm_lcs_watch_dispatch_context *contexts, u32 context_count,
+	u32 *internal_effects_out)
 {
 	LIST_HEAD(internal_events);
 	LIST_HEAD(transaction_burst_counts);
 	long ret = 0;
 	u32 i;
 
+	if (internal_effects_out)
+		*internal_effects_out = 0;
 	if (!context_count)
 		return 0;
 	if (!contexts)
@@ -5717,8 +5787,16 @@ out_unlock:
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 	pkm_lcs_key_fd_transaction_burst_counts_free(
 		&transaction_burst_counts);
-	pkm_lcs_internal_watch_events_deliver(&internal_events);
+	pkm_lcs_internal_watch_events_deliver(&internal_events,
+					      internal_effects_out);
 	return ret;
+}
+
+long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
+	const struct pkm_lcs_watch_dispatch_context *contexts, u32 context_count)
+{
+	return pkm_lcs_key_fd_dispatch_watch_event_context_batch_effects(
+		contexts, context_count, NULL);
 }
 
 static long pkm_lcs_key_fd_dispatch_overflow_context_locked(
