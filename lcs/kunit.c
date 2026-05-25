@@ -40630,6 +40630,58 @@ static void pkm_lcs_kunit_source_read_key_round_trip_supplied_limits(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_write_key_retains_supplied_limits(
+	struct kunit *test)
+{
+	enum { LONG_NAME_LEN = 300 };
+	static const u8 guid[RSI_GUID_SIZE] = { 0xd1 };
+	static const u8 sd[] = { 0x01, 0x00, 0x04, 0x80 };
+	struct pkm_lcs_source_response_result response_result = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	u8 request[128];
+	struct file file = { };
+	const void *token;
+	size_t response_len;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = LONG_NAME_LEN;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_write_key_request_with_limits(
+				1, 0x8182838485868788ULL, guid, sd,
+				sizeof(sd), 0x1122334455667788ULL, &limits,
+				&enqueue),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(
+				&file, request, sizeof(request), true),
+			(ssize_t)enqueue.len);
+	pkm_lcs_runtime_limits_reset_defaults();
+
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    enqueue.request_id, enqueue.op_code,
+					    RSI_OK, &response_len);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_accept_response_file(
+				&file, response, response_len,
+				&response_result),
+			0L);
+	KUNIT_EXPECT_EQ(test, response_result.request_op_code,
+			(u16)RSI_WRITE_KEY);
+	KUNIT_EXPECT_FALSE(test, response_result.malformed_source_data);
+	KUNIT_EXPECT_EQ(test, response_result.limits.max_path_component_length,
+			(u32)LONG_NAME_LEN);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_expect_source_validation_audit(
 	struct kunit *test, const char *validation_class,
 	const u8 key_guid[RSI_GUID_SIZE])
@@ -44647,6 +44699,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_enum_children_round_trip_supplied_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_read_key_round_trip_supplied_limits),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_write_key_retains_supplied_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_malformed_path_name_audits),
 	KUNIT_CASE(

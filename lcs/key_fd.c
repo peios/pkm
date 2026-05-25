@@ -2800,7 +2800,8 @@ static long pkm_lcs_key_fd_validate_delete_key_request_shape(
 }
 
 static long pkm_lcs_key_fd_delete_key_visible_child_gate(
-	const struct pkm_lcs_key_fd *key_fd, u64 txn_id)
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_source_response_frame frame = { };
@@ -2809,7 +2810,7 @@ static long pkm_lcs_key_fd_delete_key_visible_child_gate(
 	u64 next_sequence = 0;
 	long ret;
 
-	if (!key_fd)
+	if (!key_fd || !limits)
 		return -EINVAL;
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
@@ -2820,9 +2821,9 @@ static long pkm_lcs_key_fd_delete_key_visible_child_gate(
 		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
-	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout(
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid,
-		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
+		limits, limits->request_timeout_ms, &frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -2844,7 +2845,8 @@ out_frame:
 static long pkm_lcs_key_fd_delete_key_post_lookup(
 	const struct pkm_lcs_key_fd *key_fd,
 	const u8 parent_guid[PKM_LCS_GUID_BYTES], const char *child_name,
-	u32 child_name_len, struct pkm_lcs_delete_key_post_lookup *out)
+	u32 child_name_len, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_delete_key_post_lookup *out)
 {
 	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_source_response_frame frame = { };
@@ -2854,7 +2856,7 @@ static long pkm_lcs_key_fd_delete_key_post_lookup(
 	u64 next_sequence = 0;
 	long ret;
 
-	if (!key_fd || !parent_guid || !child_name || !out)
+	if (!key_fd || !parent_guid || !child_name || !limits || !out)
 		return -EINVAL;
 	memset(out, 0, sizeof(*out));
 
@@ -2866,9 +2868,9 @@ static long pkm_lcs_key_fd_delete_key_post_lookup(
 		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
-	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
+	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, 0, parent_guid, child_name, child_name_len,
-		pkm_lcs_runtime_request_timeout_ms(), &frame, &response, NULL);
+		limits, limits->request_timeout_ms, &frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -3924,6 +3926,7 @@ static long pkm_lcs_key_fd_set_security_from_args(
 	struct pkm_lcs_transaction_mutation_handle mutation = { };
 	struct pkm_lcs_transaction_binding_plan binding = { };
 	struct pkm_lcs_transaction_set_security_log_input log_input = { };
+	struct pkm_lcs_runtime_limits limits = { };
 	const u8 *existing_sd = NULL;
 	size_t existing_sd_len = 0;
 	u8 *input_sd = NULL;
@@ -3948,6 +3951,7 @@ static long pkm_lcs_key_fd_set_security_from_args(
 						  &input_sd_len);
 	if (ret)
 		return ret;
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
 
 	if (args->txn_fd >= 0) {
 		log_input.key_guid = key_fd->key_guid;
@@ -3968,7 +3972,7 @@ static long pkm_lcs_key_fd_set_security_from_args(
 		goto out_input;
 	}
 
-	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, txn_id, NULL,
+	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, txn_id, &limits,
 					      &existing_frame, &existing_sd,
 					      &existing_sd_len, NULL);
 	if (ret)
@@ -3981,10 +3985,10 @@ static long pkm_lcs_key_fd_set_security_from_args(
 		goto out_cancel_mutation;
 
 	last_write_time = (u64)ktime_get_real_ns();
-	ret = pkm_lcs_source_write_key_round_trip_timeout(
+	ret = pkm_lcs_source_write_key_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, merge.merged_sd,
-		merge.merged_sd_len, last_write_time,
-		pkm_lcs_runtime_request_timeout_ms(), NULL, NULL);
+		merge.merged_sd_len, last_write_time, &limits,
+		limits.request_timeout_ms, NULL, NULL);
 	if (ret)
 		goto out_cancel_merge;
 
@@ -3993,7 +3997,8 @@ static long pkm_lcs_key_fd_set_security_from_args(
 		goto out_merge;
 	}
 
-	ret = pkm_lcs_key_fd_refresh_layer_metadata(key_fd);
+	ret = pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context_limits(
+		key_fd, NULL, 0, false, &limits, NULL);
 	if (ret)
 		goto out_merge;
 
@@ -4128,9 +4133,10 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 		goto out_cancel_mutation;
 
 	last_write_time = (u64)ktime_get_real_ns();
-	ret = pkm_lcs_source_write_key_round_trip_timeout(
+	ret = pkm_lcs_source_write_key_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, NULL, 0,
-		last_write_time, input.limits.request_timeout_ms, NULL, NULL);
+		last_write_time, &input.limits, input.limits.request_timeout_ms,
+		NULL, NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
@@ -4144,8 +4150,9 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 		goto out_input;
 	}
 
-	ret = pkm_lcs_key_fd_refresh_layer_metadata_result(
-		key_fd, &layer_effective_changed);
+	ret = pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context_limits(
+		key_fd, NULL, 0, false, &input.limits,
+		&layer_effective_changed);
 	if (ret)
 		goto out_input;
 
@@ -4276,9 +4283,10 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 		goto out_before;
 
 	last_write_time = (u64)ktime_get_real_ns();
-	ret = pkm_lcs_source_write_key_round_trip_timeout(
+	ret = pkm_lcs_source_write_key_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, NULL, 0,
-		last_write_time, input.limits.request_timeout_ms, NULL, NULL);
+		last_write_time, &input.limits, input.limits.request_timeout_ms,
+		NULL, NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
@@ -4427,9 +4435,10 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 		goto out_before;
 
 	last_write_time = (u64)ktime_get_real_ns();
-	ret = pkm_lcs_source_write_key_round_trip_timeout(
+	ret = pkm_lcs_source_write_key_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, NULL, 0,
-		last_write_time, input.limits.request_timeout_ms, NULL, NULL);
+		last_write_time, &input.limits, input.limits.request_timeout_ms,
+		NULL, NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
@@ -4565,7 +4574,8 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 		txn_id = binding.transaction_id;
 	}
 
-	ret = pkm_lcs_key_fd_delete_key_visible_child_gate(key_fd, txn_id);
+	ret = pkm_lcs_key_fd_delete_key_visible_child_gate(key_fd, txn_id,
+							   &input.limits);
 	if (ret)
 		goto out_cancel_mutation;
 
@@ -4579,7 +4589,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	if (args->txn_fd < 0) {
 		ret = pkm_lcs_key_fd_delete_key_post_lookup(
 			key_fd, parent_guid, child_name, child_name_len,
-			&post_lookup);
+			&input.limits, &post_lookup);
 		if (ret) {
 			pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 			ret = -EIO;
@@ -4600,9 +4610,9 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	}
 
 	last_write_time = (u64)ktime_get_real_ns();
-	ret = pkm_lcs_source_write_key_round_trip_timeout(
+	ret = pkm_lcs_source_write_key_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, parent_guid, NULL, 0, last_write_time,
-		input.limits.request_timeout_ms, NULL, NULL);
+		&input.limits, input.limits.request_timeout_ms, NULL, NULL);
 	if (ret) {
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;

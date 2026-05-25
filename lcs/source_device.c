@@ -4438,10 +4438,12 @@ out_unlock_table:
 static long pkm_lcs_source_dispatch_write_key_request_with_waiter(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const u8 *sd, size_t sd_len, u64 last_write_time,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	struct pkm_lcs_source_queued_request *request;
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
@@ -4456,6 +4458,10 @@ static long pkm_lcs_source_dispatch_write_key_request_with_waiter(
 		return -EINVAL;
 	if (sd_len > U32_MAX)
 		return -EOVERFLOW;
+	if (!limits) {
+		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
 			       (size_t)RSI_GUID_SIZE, &frame_len) ||
 	    check_add_overflow(frame_len, sizeof(u32), &frame_len))
@@ -4493,7 +4499,7 @@ static long pkm_lcs_source_dispatch_write_key_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4512,7 +4518,7 @@ static long pkm_lcs_source_dispatch_write_key_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		guid, NULL, waiter);
+		guid, limits, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -5263,7 +5269,18 @@ long pkm_lcs_source_dispatch_write_key_request(
 {
 	return pkm_lcs_source_dispatch_write_key_request_with_waiter(
 		source_id, txn_id, guid, sd, sd_len, last_write_time, NULL,
-		result);
+		NULL, result);
+}
+
+long pkm_lcs_source_dispatch_write_key_request_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const u8 *sd, size_t sd_len, u64 last_write_time,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	return pkm_lcs_source_dispatch_write_key_request_with_waiter(
+		source_id, txn_id, guid, sd, sd_len, last_write_time, limits,
+		NULL, result);
 }
 
 long pkm_lcs_source_dispatch_write_key_waitable_request(
@@ -5277,8 +5294,8 @@ long pkm_lcs_source_dispatch_write_key_waitable_request(
 
 	pkm_lcs_source_response_waiter_init(waiter);
 	return pkm_lcs_source_dispatch_write_key_request_with_waiter(
-		source_id, txn_id, guid, sd, sd_len, last_write_time, waiter,
-		result);
+		source_id, txn_id, guid, sd, sd_len, last_write_time, NULL,
+		waiter, result);
 }
 
 long pkm_lcs_source_dispatch_set_value_request(
@@ -6248,9 +6265,10 @@ long pkm_lcs_source_create_key_round_trip_timeout_with_limits(
 							 response);
 }
 
-long pkm_lcs_source_write_key_round_trip_timeout(
+long pkm_lcs_source_write_key_round_trip_timeout_with_limits(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
-	const u8 *sd, size_t sd_len, u64 last_write_time, u32 timeout_ms,
+	const u8 *sd, size_t sd_len, u64 last_write_time,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
@@ -6267,13 +6285,13 @@ long pkm_lcs_source_write_key_round_trip_timeout(
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, NULL, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
 		ret = pkm_lcs_source_dispatch_write_key_request_with_waiter(
 			source_id, txn_id, guid, sd, sd_len, last_write_time,
-			&waiter, enqueue);
+			limits, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -6284,6 +6302,17 @@ long pkm_lcs_source_write_key_round_trip_timeout(
 
 	return pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
 							 response);
+}
+
+long pkm_lcs_source_write_key_round_trip_timeout(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const u8 *sd, size_t sd_len, u64 last_write_time, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_write_key_round_trip_timeout_with_limits(
+		source_id, txn_id, guid, sd, sd_len, last_write_time, NULL,
+		timeout_ms, response, enqueue);
 }
 
 long pkm_lcs_source_set_value_round_trip_timeout_with_limits(

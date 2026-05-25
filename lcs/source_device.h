@@ -1053,6 +1053,11 @@ long pkm_lcs_source_dispatch_write_key_request(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const u8 *sd, size_t sd_len, u64 last_write_time,
 	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_write_key_request_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const u8 *sd, size_t sd_len, u64 last_write_time,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_source_enqueue_result *result);
 long pkm_lcs_source_dispatch_write_key_waitable_request(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const u8 *sd, size_t sd_len, u64 last_write_time,
@@ -1292,6 +1297,12 @@ long pkm_lcs_source_create_key_round_trip_timeout_with_limits(
 long pkm_lcs_source_write_key_round_trip_timeout(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const u8 *sd, size_t sd_len, u64 last_write_time, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_write_key_round_trip_timeout_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const u8 *sd, size_t sd_len, u64 last_write_time,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_set_value_round_trip_timeout(
