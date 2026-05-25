@@ -70,6 +70,14 @@ extern int lcs_rust_key_open_audit_payload(
 	const u8 key_guid[16], u32 requested_access, u32 granted_access,
 	u8 allowed, u32 sacl_match_flags, u8 *output, size_t output_len,
 	size_t *written_out);
+extern int lcs_rust_backup_start_audit_payload(
+	const struct pkm_lcs_kunit_audit_caller_summary *caller,
+	const u8 key_guid[16], s32 output_fd, u8 *output, size_t output_len,
+	size_t *written_out);
+extern int lcs_rust_backup_complete_audit_payload(
+	const struct pkm_lcs_kunit_audit_caller_summary *caller,
+	const u8 key_guid[16], u32 result_errno, u8 *output,
+	size_t output_len, size_t *written_out);
 
 struct pkm_lcs_kunit_usercopy_ctx {
 	const void *fault_src;
@@ -8259,6 +8267,41 @@ static void pkm_lcs_kunit_key_open_audit_payload_abi_rejects_bad_state(
 	KUNIT_EXPECT_EQ(test, written, (size_t)0);
 }
 
+static void pkm_lcs_kunit_backup_audit_payload_abi_rejects_bad_state(
+	struct kunit *test)
+{
+	static const u8 malformed_sid[] = { 0x01, 0x01 };
+	static const u8 key_guid[16] = {
+		0x45, 0x45, 0x03, 0x03, 0x45, 0x45, 0x03, 0x03,
+		0x45, 0x45, 0x03, 0x03, 0x45, 0x45, 0x03, 0x03,
+	};
+	struct pkm_lcs_kunit_audit_caller_summary caller = {
+		.effective_token_guid = { 1 },
+		.true_token_guid = { 2 },
+		.process_guid = { 3 },
+		.user_sid = malformed_sid,
+		.user_sid_len = sizeof(malformed_sid),
+		.authentication_id = 10,
+		.token_id = 11,
+		.token_type = 1,
+		.impersonation_level = 0,
+		.integrity_level = 8192,
+	};
+	size_t written = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			lcs_rust_backup_start_audit_payload(
+				&caller, key_guid, 7, NULL, 0, &written),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, written, (size_t)0);
+	KUNIT_EXPECT_EQ(test,
+			lcs_rust_backup_complete_audit_payload(
+				&caller, key_guid, EOPNOTSUPP, NULL, 0,
+				&written),
+			(long)-EIO);
+	KUNIT_EXPECT_EQ(test, written, (size_t)0);
+}
+
 static void pkm_lcs_kunit_source_validation_audit_emits_lcs_kmes_event(
 	struct kunit *test)
 {
@@ -8318,6 +8361,41 @@ static bool pkm_lcs_kunit_buffer_contains(const u8 *buffer, size_t buffer_len,
 	}
 
 	return false;
+}
+
+static void pkm_lcs_kunit_expect_latest_lcs_event(
+	struct kunit *test, const char *event_type, const char *payload_field)
+{
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u8 buffer[1024];
+	size_t written = 0;
+	u32 header_size;
+	u16 type_len;
+	size_t event_type_len;
+
+	KUNIT_ASSERT_NOT_NULL(test, event_type);
+	event_type_len = strlen(event_type);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_latest_matching_event(
+				KMES_ORIGIN_LCS, event_type, event_type_len,
+				buffer, sizeof(buffer), &written, &snapshot),
+			0);
+	KUNIT_ASSERT_GT(test, written, (size_t)KMES_EVENT_HEADER_BASE_SIZE);
+
+	type_len = get_unaligned_le16(buffer + KMES_EVENT_TYPE_LEN_OFFSET);
+	header_size = get_unaligned_le32(buffer + KMES_EVENT_HEADER_SIZE_OFFSET);
+	KUNIT_ASSERT_EQ(test, type_len, (u16)event_type_len);
+	KUNIT_ASSERT_TRUE(test, written > header_size);
+	KUNIT_EXPECT_EQ(test, buffer[KMES_EVENT_ORIGIN_CLASS_OFFSET],
+			(u8)KMES_ORIGIN_LCS);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
+			       type_len),
+			0);
+	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x83);
+	if (payload_field)
+		KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+						buffer, written, payload_field));
 }
 
 static void pkm_lcs_kunit_self_config_invalid_audit_emits_lcs_kmes_event(
@@ -18049,6 +18127,7 @@ static void pkm_lcs_kunit_key_fd_backup_admission(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, before.privileges_used & KACS_SE_BACKUP_PRIVILEGE,
 			0ULL);
 	script.file = &file;
+	pkm_kmes_kunit_reset_all();
 	task = pkm_lcs_kunit_kthread_run(
 		pkm_lcs_kunit_backup_snapshot_source_thread, &script,
 		"pkm-lcs-kunit-backup-src");
@@ -18066,6 +18145,10 @@ static void pkm_lcs_kunit_key_fd_backup_admission(struct kunit *test)
 	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
 	KUNIT_EXPECT_EQ(test, after.privileges_used & KACS_SE_BACKUP_PRIVILEGE,
 			KACS_SE_BACKUP_PRIVILEGE);
+	pkm_lcs_kunit_expect_latest_lcs_event(
+		test, "LCS_BACKUP_START", "fd");
+	pkm_lcs_kunit_expect_latest_lcs_event(
+		test, "LCS_BACKUP_COMPLETE", "result_errno");
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)output_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
@@ -18198,6 +18281,42 @@ static void pkm_lcs_kunit_key_fd_backup_read_only_cap_fail_before_source(
 	pkm_lcs_runtime_limits_reset_defaults();
 	kacs_rust_token_drop(token);
 	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_backup_pre_start_failure_does_not_audit(
+	struct kunit *test)
+{
+	struct pkm_kmes_kunit_snapshot kmes_snapshot = { };
+	struct reg_backup_args args = { };
+	u8 buffer[256];
+	const void *token;
+	size_t written = 0;
+	long key_fd;
+	int read_fd;
+
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_BACKUP_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	read_fd = pkm_lcs_kunit_external_fd(O_RDONLY);
+	KUNIT_ASSERT_TRUE(test, read_fd >= 0);
+	args.output_fd = read_fd;
+
+	pkm_kmes_kunit_reset_all();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_backup_for_token(
+				(int)key_fd, token, &args),
+			(long)-EBADF);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, sizeof(buffer), &written, &kmes_snapshot),
+			-ENOENT);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)read_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	kacs_rust_token_drop(token);
 }
 
 static void pkm_lcs_kunit_key_fd_restore_admission(struct kunit *test)
@@ -45336,6 +45455,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_open_audit_payload_abi_rejects_bad_state),
 	KUNIT_CASE(
+		pkm_lcs_kunit_backup_audit_payload_abi_rejects_bad_state),
+	KUNIT_CASE(
 		pkm_lcs_kunit_source_validation_audit_emits_lcs_kmes_event),
 	KUNIT_CASE(
 		pkm_lcs_kunit_self_config_invalid_audit_emits_lcs_kmes_event),
@@ -45395,6 +45516,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_read_only_unsupported),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_backup_read_only_cap_fail_before_source),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_backup_pre_start_failure_does_not_audit),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_admission),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_success),

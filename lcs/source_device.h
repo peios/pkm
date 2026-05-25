@@ -622,6 +622,10 @@ long pkm_lcs_key_open_access_check_for_token(
 long pkm_lcs_emit_key_open_audit_for_token(
 	const void *token, const u8 key_guid[16],
 	const struct pkm_lcs_key_open_access_plan *plan);
+long pkm_lcs_emit_backup_start_audit_for_token(
+	const void *token, const u8 key_guid[16], int output_fd);
+long pkm_lcs_emit_backup_complete_audit_for_token(
+	const void *token, const u8 key_guid[16], u32 result_errno);
 long pkm_lcs_emit_source_validation_failure_audit(
 	u32 source_id, const char *hive_name, u32 hive_name_len,
 	bool hive_name_present, u64 request_id, bool request_id_present,

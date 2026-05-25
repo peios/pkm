@@ -5,8 +5,9 @@ use core::{slice, str};
 
 use crate::kacs_core::PkmVec;
 use crate::lcs_core::{
-    apply_config_value, backup_restore_fd_mode_linux_errno, casefold_eq, classify_hive_route,
-    current_user_sid_component_from_binary_sid, find_config_range,
+    apply_config_value, backup_restore_complete_audit_payload_len,
+    backup_restore_fd_mode_linux_errno, backup_restore_start_audit_payload_len, casefold_eq,
+    classify_hive_route, current_user_sid_component_from_binary_sid, find_config_range,
     for_each_effective_value, for_each_effective_value_watch_event,
     for_each_routable_path_component,
     for_each_rsi_enum_children_source_path_entry, for_each_rsi_lookup_source_path_entry,
@@ -15,7 +16,8 @@ use crate::lcs_core::{
     layer_target_admission_linux_errno, parse_rsi_delete_layer_success_response_payload,
     parse_rsi_lookup_success_response_payload, parse_rsi_enum_children_success_response_payload,
     parse_rsi_query_values_success_response_payload, parse_rsi_read_key_success_response_payload,
-    parse_rsi_request_header, plan_backup_restore_fd_mode, plan_key_guid_assignment, plan_key_open_audit_record,
+    parse_rsi_request_header, plan_backup_complete_audit_record, plan_backup_restore_fd_mode,
+    plan_backup_start_audit_record, plan_key_guid_assignment, plan_key_open_audit_record,
     plan_source_validation_failure_audit_record, plan_layer_publication,
     plan_layer_target_admission, plan_registry_get_security,
     plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
@@ -48,6 +50,7 @@ use crate::lcs_core::{
     value_type_validation_linux_errno,
     self_config_audit_intent, self_config_invalid_audit_payload_len,
     source_validation_failure_audit_payload_len, validate_config_value,
+    write_backup_restore_complete_audit_payload, write_backup_restore_start_audit_payload,
     write_key_open_audit_payload, write_self_config_invalid_audit_payload,
     write_source_validation_failure_audit_payload, write_rsi_abort_transaction_request_frame,
     write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
@@ -833,6 +836,35 @@ fn key_open_audit_error_return(err: LcsError) -> c_int {
 		_ => LinuxErrno::Eio,
 	}
 	.negated_return() as c_int
+}
+
+fn backup_audit_error_return(err: LcsError) -> c_int {
+    match err {
+        LcsError::AuditPayloadOutputBufferTooSmall { .. } => LinuxErrno::Erange,
+        _ => LinuxErrno::Eio,
+    }
+    .negated_return() as c_int
+}
+
+fn audit_caller_summary_from_copy<'a>(
+    caller: &'a PkmLcsAuditCallerSummaryCopy,
+) -> Result<LcsCallerTokenSummary<'a>, LinuxErrno> {
+    if caller.user_sid.is_null() {
+        return Err(LinuxErrno::Einval);
+    }
+
+    let user_sid = unsafe { slice::from_raw_parts(caller.user_sid, caller.user_sid_len) };
+    Ok(LcsCallerTokenSummary {
+        effective_token_guid: caller.effective_token_guid,
+        true_token_guid: caller.true_token_guid,
+        process_guid: caller.process_guid,
+        user_sid,
+        authentication_id: caller.authentication_id,
+        token_id: caller.token_id,
+        token_type: caller.token_type,
+        impersonation_level: caller.impersonation_level,
+        integrity_level: caller.integrity_level,
+    })
 }
 
 fn source_validation_failure_from_code(
@@ -1737,6 +1769,121 @@ pub unsafe extern "C" fn lcs_rust_key_open_audit_payload(
             0
         }
         Err(err) => key_open_audit_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_backup_start_audit_payload(
+    caller: *const PkmLcsAuditCallerSummaryCopy,
+    key_guid: *const u8,
+    output_fd: i32,
+    output: *mut u8,
+    output_len: usize,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out = 0;
+
+    let Some(caller) = (unsafe { caller.as_ref() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    if key_guid.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let caller_summary = match audit_caller_summary_from_copy(caller) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let key_guid_bytes = unsafe { slice::from_raw_parts(key_guid, 16) };
+    let mut key_guid_copy = [0u8; 16];
+    key_guid_copy.copy_from_slice(key_guid_bytes);
+
+    let record = match plan_backup_start_audit_record(caller_summary, key_guid_copy, output_fd) {
+        Ok(record) => record,
+        Err(err) => return backup_audit_error_return(err),
+    };
+    let required_len = match backup_restore_start_audit_payload_len(&record) {
+        Ok(len) => len,
+        Err(err) => return backup_audit_error_return(err),
+    };
+    *written_out = required_len;
+
+    if output.is_null() {
+        return if output_len == 0 {
+            0
+        } else {
+            LinuxErrno::Einval.negated_return() as c_int
+        };
+    }
+
+    let output = unsafe { slice::from_raw_parts_mut(output, output_len) };
+    match write_backup_restore_start_audit_payload(&record, output) {
+        Ok(plan) => {
+            *written_out = plan.bytes;
+            0
+        }
+        Err(err) => backup_audit_error_return(err),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_backup_complete_audit_payload(
+    caller: *const PkmLcsAuditCallerSummaryCopy,
+    key_guid: *const u8,
+    result_errno: u32,
+    output: *mut u8,
+    output_len: usize,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out = 0;
+
+    let Some(caller) = (unsafe { caller.as_ref() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    if key_guid.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let caller_summary = match audit_caller_summary_from_copy(caller) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let key_guid_bytes = unsafe { slice::from_raw_parts(key_guid, 16) };
+    let mut key_guid_copy = [0u8; 16];
+    key_guid_copy.copy_from_slice(key_guid_bytes);
+
+    let record =
+        match plan_backup_complete_audit_record(caller_summary, key_guid_copy, result_errno) {
+            Ok(record) => record,
+            Err(err) => return backup_audit_error_return(err),
+        };
+    let required_len = match backup_restore_complete_audit_payload_len(&record) {
+        Ok(len) => len,
+        Err(err) => return backup_audit_error_return(err),
+    };
+    *written_out = required_len;
+
+    if output.is_null() {
+        return if output_len == 0 {
+            0
+        } else {
+            LinuxErrno::Einval.negated_return() as c_int
+        };
+    }
+
+    let output = unsafe { slice::from_raw_parts_mut(output, output_len) };
+    match write_backup_restore_complete_audit_payload(&record, output) {
+        Ok(plan) => {
+            *written_out = plan.bytes;
+            0
+        }
+        Err(err) => backup_audit_error_return(err),
     }
 }
 

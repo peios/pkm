@@ -4949,12 +4949,21 @@ static long pkm_lcs_key_fd_backup_release_read_only_snapshot(
 	return ret;
 }
 
+static u32 pkm_lcs_key_fd_audit_result_errno(long ret)
+{
+	if (ret < 0)
+		return (u32)-ret;
+	return (u32)ret;
+}
+
 static long pkm_lcs_key_fd_backup_from_args_for_token(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct reg_backup_args *args)
 {
 	struct pkm_lcs_runtime_limits limits;
 	u64 transaction_id = 0;
+	bool backup_started = false;
+	bool start_audit_failed = false;
 	long ret;
 
 	if (!key_fd || !args)
@@ -4982,6 +4991,15 @@ static long pkm_lcs_key_fd_backup_from_args_for_token(
 	if (ret)
 		return ret;
 
+	ret = pkm_lcs_emit_backup_start_audit_for_token(
+		token, key_fd->key_guid, args->output_fd);
+	if (ret) {
+		start_audit_failed = true;
+		ret = -EIO;
+		goto out_release_snapshot;
+	}
+	backup_started = true;
+
 	ret = pkm_lcs_key_fd_mark_privilege_used(token,
 						 KACS_SE_BACKUP_PRIVILEGE);
 	if (ret)
@@ -4995,9 +5013,13 @@ out_release_snapshot:
 
 		release_ret = pkm_lcs_key_fd_backup_release_read_only_snapshot(
 			key_fd, &limits, transaction_id);
-		if (release_ret)
+		if (release_ret && !start_audit_failed)
 			ret = release_ret;
 	}
+	if (backup_started)
+		(void)pkm_lcs_emit_backup_complete_audit_for_token(
+			token, key_fd->key_guid,
+			pkm_lcs_key_fd_audit_result_errno(ret));
 	return ret;
 }
 
