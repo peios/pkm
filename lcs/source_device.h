@@ -657,6 +657,8 @@ u32 pkm_lcs_runtime_transaction_timeout_ms(void);
 u32 pkm_lcs_runtime_symlink_depth_limit(void);
 u32 pkm_lcs_runtime_max_key_depth(void);
 u32 pkm_lcs_runtime_max_bound_transactions_per_source(void);
+u32 pkm_lcs_runtime_max_registered_sources(void);
+u32 pkm_lcs_runtime_max_hives_per_source(void);
 u32 pkm_lcs_runtime_max_concurrent_rsi_requests(void);
 u32 pkm_lcs_runtime_notification_queue_size(void);
 u32 pkm_lcs_runtime_max_subtree_watch_depth(void);

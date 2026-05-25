@@ -894,6 +894,308 @@ static void pkm_lcs_kunit_source_registration_copy_bounds_hive_count(
 	KUNIT_EXPECT_PTR_EQ(test, copy.hives, NULL);
 }
 
+static void pkm_lcs_kunit_build_register_args(
+	struct reg_src_register_args *args, struct reg_src_hive_entry *hive,
+	const char *name, u8 root_guid_first, u64 max_sequence);
+
+static void pkm_lcs_kunit_source_registration_runtime_hive_limit(
+	struct kunit *test)
+{
+	const char machine_name[] = "Machine";
+	const char users_name[] = "Users";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_runtime_limits limits = { };
+	struct reg_src_hive_entry hives[2] = { };
+	struct reg_src_register_args args = {
+		.hive_count = ARRAY_SIZE(hives),
+		.hives_ptr = (u64)(unsigned long)hives,
+	};
+	struct pkm_lcs_source_fd *source_fd;
+	struct file file = { };
+	const void *token;
+
+	hives[0].name_len = strlen(machine_name);
+	hives[0].name_ptr = (u64)(unsigned long)machine_name;
+	hives[0].root_guid[0] = 1U;
+	hives[1].name_len = strlen(users_name);
+	hives[1].name_ptr = (u64)(unsigned long)users_name;
+	hives[1].root_guid[0] = 2U;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_hives_per_source = 1U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_max_hives_per_source(), 1U);
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			(long)-ENOSPC);
+	source_fd = file.private_data;
+	KUNIT_ASSERT_NOT_NULL(test, source_fd);
+	KUNIT_EXPECT_EQ(test, source_fd->state,
+			PKM_LCS_SOURCE_FD_UNREGISTERED);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_registration_runtime_raised_hive_limit(
+	struct kunit *test)
+{
+	enum { HIVE_COUNT = 65 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	struct reg_src_hive_entry *hives;
+	struct reg_src_register_args args = {
+		.hive_count = HIVE_COUNT,
+	};
+	char (*names)[8];
+	struct file file = { };
+	const void *token = NULL;
+	bool file_opened = false;
+	long ret;
+	u32 i;
+
+	hives = kcalloc(HIVE_COUNT, sizeof(*hives), GFP_KERNEL);
+	names = kcalloc(HIVE_COUNT, sizeof(*names), GFP_KERNEL);
+	if (!hives || !names) {
+		KUNIT_FAIL(test, "failed to allocate raised hive test arrays");
+		goto out_free;
+	}
+
+	args.hives_ptr = (u64)(unsigned long)hives;
+	for (i = 0; i < HIVE_COUNT; i++) {
+		snprintf(names[i], sizeof(names[i]), "Hive%03u", i);
+		hives[i].name_len = strlen(names[i]);
+		hives[i].name_ptr = (u64)(unsigned long)names[i];
+		hives[i].root_guid[0] = (u8)(i + 1U);
+	}
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	ret = pkm_lcs_runtime_limits_defaults(&limits);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	if (ret)
+		goto out_reset_limits;
+	limits.max_hives_per_source = HIVE_COUNT;
+	ret = pkm_lcs_runtime_limits_publish(&limits);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	if (ret)
+		goto out_reset_limits;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	if (!token) {
+		KUNIT_FAIL(test, "failed to allocate TCB token");
+		goto out_cleanup;
+	}
+	ret = pkm_lcs_source_device_open_file_for_token(token, &file);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	if (ret)
+		goto out_cleanup;
+	file_opened = true;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.occupied_count, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.active_count, 1U);
+
+out_cleanup:
+	if (file_opened)
+		KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file),
+				0);
+	pkm_lcs_kunit_reset_source_table();
+	if (token)
+		kacs_rust_token_drop(token);
+out_reset_limits:
+	pkm_lcs_runtime_limits_reset_defaults();
+out_free:
+	kfree(names);
+	kfree(hives);
+}
+
+static void pkm_lcs_kunit_source_registration_runtime_source_limit(
+	struct kunit *test)
+{
+	const char machine_name[] = "Machine";
+	const char users_name[] = "Users";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_runtime_limits limits = { };
+	struct reg_src_hive_entry first_hive;
+	struct reg_src_register_args first_args;
+	struct reg_src_hive_entry second_hive;
+	struct reg_src_register_args second_args;
+	struct file first_file = { };
+	struct file second_file = { };
+	const void *token;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_registered_sources = 1U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_runtime_max_registered_sources(), 1U);
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &first_file),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &second_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&first_args, &first_hive,
+					  machine_name, 1U, 0);
+	pkm_lcs_kunit_build_register_args(&second_args, &second_hive,
+					  users_name, 2U, 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &first_file, &ops,
+				(const void __user *)&first_args),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &second_file, &ops,
+				(const void __user *)&second_args),
+			(long)-ENOSPC);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&first_file),
+			0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&second_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_source_registration_runtime_raised_source_limit(
+	struct kunit *test)
+{
+	enum { SOURCE_COUNT = 33 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_source_table_snapshot snapshot = { };
+	struct file *files;
+	struct reg_src_hive_entry *hives;
+	struct reg_src_register_args *args;
+	char (*names)[8];
+	struct file extra_file = { };
+	struct reg_src_hive_entry extra_hive;
+	struct reg_src_register_args extra_args;
+	const char extra_name[] = "Extra";
+	const void *token = NULL;
+	u32 opened_count = 0;
+	bool extra_opened = false;
+	long ret;
+	u32 i;
+
+	files = kcalloc(SOURCE_COUNT, sizeof(*files), GFP_KERNEL);
+	hives = kcalloc(SOURCE_COUNT, sizeof(*hives), GFP_KERNEL);
+	args = kcalloc(SOURCE_COUNT, sizeof(*args), GFP_KERNEL);
+	names = kcalloc(SOURCE_COUNT, sizeof(*names), GFP_KERNEL);
+	if (!files || !hives || !args || !names) {
+		KUNIT_FAIL(test, "failed to allocate source registration arrays");
+		goto out_free;
+	}
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	ret = pkm_lcs_runtime_limits_defaults(&limits);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	if (ret)
+		goto out_free;
+	limits.max_registered_sources = SOURCE_COUNT;
+	ret = pkm_lcs_runtime_limits_publish(&limits);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	if (ret)
+		goto out_reset_limits;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	if (!token) {
+		KUNIT_FAIL(test, "failed to allocate TCB token");
+		goto out_cleanup;
+	}
+	for (i = 0; i < SOURCE_COUNT; i++) {
+		snprintf(names[i], sizeof(names[i]), "Src%03u", i);
+		pkm_lcs_kunit_build_register_args(&args[i], &hives[i],
+						  names[i], (u8)(i + 1U), 0);
+		ret = pkm_lcs_source_device_open_file_for_token(token,
+								&files[i]);
+		KUNIT_EXPECT_EQ(test, ret, 0L);
+		if (ret)
+			goto out_cleanup;
+		opened_count++;
+
+		ret = pkm_lcs_source_register_file_for_token(
+			token, &files[i], &ops, (const void __user *)&args[i]);
+		KUNIT_EXPECT_EQ(test, ret, 0L);
+		if (ret)
+			goto out_cleanup;
+	}
+
+	pkm_lcs_kunit_source_table_snapshot(&snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.occupied_count, (u32)SOURCE_COUNT);
+	KUNIT_EXPECT_EQ(test, snapshot.active_count, (u32)SOURCE_COUNT);
+
+	pkm_lcs_kunit_build_register_args(&extra_args, &extra_hive, extra_name,
+					  200U, 0);
+	ret = pkm_lcs_source_device_open_file_for_token(token, &extra_file);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	if (ret)
+		goto out_cleanup;
+	extra_opened = true;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &extra_file, &ops,
+				(const void __user *)&extra_args),
+			(long)-ENOSPC);
+
+out_cleanup:
+	for (i = 0; i < opened_count; i++)
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_source_device_release_file(&files[i]),
+				0);
+	if (extra_opened)
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_source_device_release_file(&extra_file),
+				0);
+	pkm_lcs_kunit_reset_source_table();
+	if (token)
+		kacs_rust_token_drop(token);
+out_reset_limits:
+	pkm_lcs_runtime_limits_reset_defaults();
+out_free:
+	kfree(names);
+	kfree(args);
+	kfree(hives);
+	kfree(files);
+}
+
 static void pkm_lcs_kunit_source_registration_semantic_accepts_valid(
 	struct kunit *test)
 {
@@ -42023,6 +42325,12 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_copy_fails_closed_on_faults),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_copy_bounds_hive_count),
+	KUNIT_CASE(pkm_lcs_kunit_source_registration_runtime_hive_limit),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_runtime_raised_hive_limit),
+	KUNIT_CASE(pkm_lcs_kunit_source_registration_runtime_source_limit),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_runtime_raised_source_limit),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_semantic_accepts_valid),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_semantic_requires_tcb),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_semantic_rejects_bad_hive),

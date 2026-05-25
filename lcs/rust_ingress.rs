@@ -6370,6 +6370,7 @@ fn parse_private_layer_views<'a>(
 
 #[no_mangle]
 pub unsafe extern "C" fn lcs_rust_validate_source_registration_empty(
+    limits_raw: *const PkmLcsRuntimeLimitsCopy,
     hives: *const PkmLcsSourceRegistrationHiveCopy,
     hive_count: usize,
     max_sequence: u64,
@@ -6383,6 +6384,10 @@ pub unsafe extern "C" fn lcs_rust_validate_source_registration_empty(
         return LinuxErrno::Einval.negated_return() as c_int;
     }
 
+    let limits = match lcs_limits_from_copy(limits_raw) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
     let parsed = match parse_registration_hives(hives, hive_count) {
         Ok(parsed) => parsed,
         Err(errno) => return errno.negated_return() as c_int,
@@ -6393,7 +6398,7 @@ pub unsafe extern "C" fn lcs_rust_validate_source_registration_empty(
         max_sequence,
         caller_has_tcb,
     };
-    let plan = match validate_source_registration(&LcsLimits::DEFAULT, &[], &request) {
+    let plan = match validate_source_registration(&limits, &[], &request) {
         Ok(plan) => plan,
         Err(err) => return source_registration_error_return(err),
     };
@@ -6410,6 +6415,7 @@ pub unsafe extern "C" fn lcs_rust_validate_source_registration_empty(
 
 #[no_mangle]
 pub unsafe extern "C" fn lcs_rust_validate_source_registration(
+    limits_raw: *const PkmLcsRuntimeLimitsCopy,
     hives: *const PkmLcsSourceRegistrationHiveCopy,
     hive_count: usize,
     max_sequence: u64,
@@ -6430,6 +6436,10 @@ pub unsafe extern "C" fn lcs_rust_validate_source_registration(
         return LinuxErrno::Einval.negated_return() as c_int;
     }
 
+    let limits = match lcs_limits_from_copy(limits_raw) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
     let parsed = match parse_registration_hives(hives, hive_count) {
         Ok(parsed) => parsed,
         Err(errno) => return errno.negated_return() as c_int,
@@ -6485,7 +6495,7 @@ pub unsafe extern "C" fn lcs_rust_validate_source_registration(
         caller_has_tcb,
     };
     let plan = match validate_source_registration(
-        &LcsLimits::DEFAULT,
+        &limits,
         existing_slots.as_slice(),
         &request,
     ) {

@@ -49,6 +49,7 @@
 #define PKM_LCS_MAX_KEY_DEPTH_HARD 4096U
 #define PKM_LCS_MAX_KEY_DEPTH_DEFAULT 512U
 #define PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT 32U
+#define PKM_LCS_MAX_REGISTERED_SOURCES_HARD 256U
 #define PKM_LCS_MAX_HIVES_PER_SOURCE_DEFAULT 64U
 #define PKM_LCS_MAX_BOUND_TRANSACTIONS_PER_SOURCE_DEFAULT 16U
 #define PKM_LCS_MAX_TOTAL_LAYERS_DEFAULT 1024U
@@ -141,6 +142,13 @@ struct pkm_lcs_source_slot {
 	u32 bound_transaction_count;
 };
 
+struct pkm_lcs_source_slot_view_buffer {
+	struct pkm_lcs_source_slot_view_copy
+		stack[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	struct pkm_lcs_source_slot_view_copy *views;
+	u32 capacity;
+};
+
 struct pkm_lcs_source_registration_result {
 	u32 source_id;
 	u32 resumed_source_id;
@@ -175,7 +183,7 @@ struct pkm_lcs_base_layer_metadata_entry {
 
 static DEFINE_MUTEX(pkm_lcs_source_table_lock);
 static struct pkm_lcs_source_slot
-	pkm_lcs_source_slots[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	pkm_lcs_source_slots[PKM_LCS_MAX_REGISTERED_SOURCES_HARD];
 static DEFINE_MUTEX(pkm_lcs_layer_table_lock);
 static struct pkm_lcs_layer_table_entry
 	pkm_lcs_layer_table[PKM_LCS_MAX_DYNAMIC_LAYERS_DEFAULT];
@@ -351,6 +359,22 @@ u32 pkm_lcs_runtime_max_bound_transactions_per_source(void)
 
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	return limits.max_bound_transactions_per_source;
+}
+
+u32 pkm_lcs_runtime_max_registered_sources(void)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return limits.max_registered_sources;
+}
+
+u32 pkm_lcs_runtime_max_hives_per_source(void)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return limits.max_hives_per_source;
 }
 
 u32 pkm_lcs_runtime_max_concurrent_rsi_requests(void)
@@ -1206,10 +1230,12 @@ struct pkm_lcs_audit_caller_summary {
 };
 
 extern int lcs_rust_validate_source_registration_empty(
+	const struct pkm_lcs_runtime_limits *limits,
 	const struct pkm_lcs_source_registration_hive_copy *hives,
 	size_t hive_count, u64 max_sequence, bool caller_has_tcb,
 	struct pkm_lcs_source_registration_plan_copy *plan);
 extern int lcs_rust_validate_source_registration(
+	const struct pkm_lcs_runtime_limits *limits,
 	const struct pkm_lcs_source_registration_hive_copy *hives,
 	size_t hive_count, u64 max_sequence, bool caller_has_tcb,
 	const struct pkm_lcs_source_slot_view_copy *slots, size_t slot_count,
@@ -1369,6 +1395,35 @@ static void pkm_lcs_source_hives_destroy(
 	kfree(hives);
 }
 
+static void pkm_lcs_source_slot_view_buffer_init(
+	struct pkm_lcs_source_slot_view_buffer *buffer)
+{
+	buffer->views = buffer->stack;
+	buffer->capacity = ARRAY_SIZE(buffer->stack);
+}
+
+static void pkm_lcs_source_slot_view_buffer_destroy(
+	struct pkm_lcs_source_slot_view_buffer *buffer)
+{
+	if (buffer->views != buffer->stack)
+		kfree(buffer->views);
+	memset(buffer, 0, sizeof(*buffer));
+}
+
+static u32 pkm_lcs_source_table_occupied_count_locked(void)
+{
+	u32 count = 0;
+	u32 i;
+
+	lockdep_assert_held(&pkm_lcs_source_table_lock);
+
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_HARD; i++) {
+		if (pkm_lcs_source_slots[i].occupied)
+			count++;
+	}
+	return count;
+}
+
 static u32 pkm_lcs_source_table_views_locked(
 	struct pkm_lcs_source_slot_view_copy *views)
 {
@@ -1377,7 +1432,7 @@ static u32 pkm_lcs_source_table_views_locked(
 
 	lockdep_assert_held(&pkm_lcs_source_table_lock);
 
-	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_HARD; i++) {
 		struct pkm_lcs_source_slot *slot = &pkm_lcs_source_slots[i];
 
 		if (!slot->occupied)
@@ -1393,6 +1448,30 @@ static u32 pkm_lcs_source_table_views_locked(
 	return count;
 }
 
+static long pkm_lcs_source_slot_view_buffer_prepare_locked(
+	struct pkm_lcs_source_slot_view_buffer *buffer, u32 *count_out)
+{
+	struct pkm_lcs_source_slot_view_copy *views;
+	u32 occupied;
+
+	lockdep_assert_held(&pkm_lcs_source_table_lock);
+
+	if (!buffer || !count_out)
+		return -EINVAL;
+
+	occupied = pkm_lcs_source_table_occupied_count_locked();
+	if (occupied > buffer->capacity) {
+		views = kcalloc(occupied, sizeof(*views), GFP_KERNEL);
+		if (!views)
+			return -ENOMEM;
+		buffer->views = views;
+		buffer->capacity = occupied;
+	}
+
+	*count_out = pkm_lcs_source_table_views_locked(buffer->views);
+	return 0;
+}
+
 static struct pkm_lcs_source_slot *
 pkm_lcs_source_slot_find_locked(u32 source_id)
 {
@@ -1400,7 +1479,7 @@ pkm_lcs_source_slot_find_locked(u32 source_id)
 
 	lockdep_assert_held(&pkm_lcs_source_table_lock);
 
-	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_HARD; i++) {
 		if (pkm_lcs_source_slots[i].occupied &&
 		    pkm_lcs_source_slots[i].source_id == source_id)
 			return &pkm_lcs_source_slots[i];
@@ -1662,7 +1741,7 @@ long pkm_lcs_source_active_ids_snapshot(u32 *source_ids, u32 max_source_ids,
 		return -EINVAL;
 
 	mutex_lock(&pkm_lcs_source_table_lock);
-	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_HARD; i++) {
 		struct pkm_lcs_source_slot *slot = &pkm_lcs_source_slots[i];
 
 		if (!slot->occupied ||
@@ -1681,7 +1760,7 @@ long pkm_lcs_source_active_ids_snapshot(u32 *source_ids, u32 max_source_ids,
 		goto out_unlock;
 	}
 
-	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_HARD; i++) {
 		struct pkm_lcs_source_slot *slot = &pkm_lcs_source_slots[i];
 
 		if (!slot->occupied ||
@@ -1726,7 +1805,7 @@ static struct pkm_lcs_source_slot *pkm_lcs_source_slot_free_locked(void)
 
 	lockdep_assert_held(&pkm_lcs_source_table_lock);
 
-	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_HARD; i++) {
 		if (!pkm_lcs_source_slots[i].occupied)
 			return &pkm_lcs_source_slots[i];
 	}
@@ -2777,24 +2856,27 @@ long pkm_lcs_source_registration_validate_copied(
 	bool caller_has_tcb,
 	struct pkm_lcs_source_registration_plan_copy *plan)
 {
+	struct pkm_lcs_runtime_limits limits;
+
 	if (!registration || !plan)
 		return -EINVAL;
 	if (registration->hive_count && !registration->hives)
 		return -EINVAL;
 
 	memset(plan, 0, sizeof(*plan));
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	return lcs_rust_validate_source_registration_empty(
-		registration->hives, registration->hive_count,
+		&limits, registration->hives, registration->hive_count,
 		registration->max_sequence, caller_has_tcb, plan);
 }
 
 static long pkm_lcs_source_registration_publish_locked(
 	struct pkm_lcs_source_fd *source_fd,
 	struct pkm_lcs_source_registration_copy *registration,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_registration_result *result)
 {
-	struct pkm_lcs_source_slot_view_copy
-		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	struct pkm_lcs_source_slot_view_buffer view_buffer;
 	struct pkm_lcs_source_registration_plan_copy plan = { };
 	struct pkm_lcs_source_slot *slot;
 	u32 slot_count;
@@ -2803,26 +2885,32 @@ static long pkm_lcs_source_registration_publish_locked(
 
 	lockdep_assert_held(&pkm_lcs_source_table_lock);
 
-	if (!source_fd || !registration)
+	if (!source_fd || !registration || !limits)
 		return -EINVAL;
 	if (source_fd->state != PKM_LCS_SOURCE_FD_UNREGISTERED)
 		return -EINVAL;
 	if (result)
 		memset(result, 0, sizeof(*result));
 
-	slot_count = pkm_lcs_source_table_views_locked(views);
-	ret = lcs_rust_validate_source_registration(
-		registration->hives, registration->hive_count,
-		registration->max_sequence, true, views, slot_count,
-		pkm_lcs_sequence_initialized, pkm_lcs_next_sequence, &plan);
+	pkm_lcs_source_slot_view_buffer_init(&view_buffer);
+	ret = pkm_lcs_source_slot_view_buffer_prepare_locked(&view_buffer,
+							     &slot_count);
 	if (ret)
 		return ret;
+	ret = lcs_rust_validate_source_registration(
+		limits, registration->hives, registration->hive_count,
+		registration->max_sequence, true, view_buffer.views, slot_count,
+		pkm_lcs_sequence_initialized, pkm_lcs_next_sequence, &plan);
+	if (ret)
+		goto out_views;
 
 	switch (plan.decision) {
 	case PKM_LCS_SOURCE_REGISTRATION_DECISION_NEW:
 		slot = pkm_lcs_source_slot_free_locked();
-		if (!slot)
-			return -ENOSPC;
+		if (!slot) {
+			ret = -ENOSPC;
+			goto out_views;
+		}
 
 		for (i = 0; i < registration->hive_count; i++)
 			registration->hives[i].hive_generation =
@@ -2841,10 +2929,14 @@ static long pkm_lcs_source_registration_publish_locked(
 		break;
 	case PKM_LCS_SOURCE_REGISTRATION_DECISION_RESUME_DOWN:
 		slot = pkm_lcs_source_slot_find_locked(plan.source_id);
-		if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_DOWN)
-			return -EINVAL;
-		if (slot->restart_generation == U64_MAX)
-			return -EOVERFLOW;
+		if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_DOWN) {
+			ret = -EINVAL;
+			goto out_views;
+		}
+		if (slot->restart_generation == U64_MAX) {
+			ret = -EOVERFLOW;
+			goto out_views;
+		}
 
 		slot->status = PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE;
 		slot->active_fd = source_fd;
@@ -2854,7 +2946,8 @@ static long pkm_lcs_source_registration_publish_locked(
 			result->resumed_source_id = slot->source_id;
 		break;
 	default:
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_views;
 	}
 
 	source_fd->state = PKM_LCS_SOURCE_FD_ACTIVE;
@@ -2864,7 +2957,11 @@ static long pkm_lcs_source_registration_publish_locked(
 	pkm_lcs_next_sequence = plan.effective_next_sequence;
 	pkm_lcs_sequence_initialized = true;
 	wake_up_interruptible(&source_fd->read_wait);
-	return 0;
+	ret = 0;
+
+out_views:
+	pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
+	return ret;
 }
 
 static bool pkm_lcs_source_registration_hive_is_global_machine(
@@ -2931,6 +3028,7 @@ static long pkm_lcs_source_register_file_for_token_core(
 	struct pkm_lcs_source_registration_copy registration = { };
 	struct pkm_lcs_source_registration_result publish = { };
 	struct pkm_lcs_source_bootstrap_work *bootstrap_work = NULL;
+	struct pkm_lcs_runtime_limits limits;
 	struct pkm_lcs_source_fd *source_fd;
 	long ret;
 
@@ -2954,9 +3052,9 @@ static long pkm_lcs_source_register_file_for_token_core(
 	if (ret)
 		return ret;
 
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	ret = pkm_lcs_source_registration_copy_from_user(
-		ops, uargs, PKM_LCS_MAX_HIVES_PER_SOURCE_DEFAULT,
-		&registration);
+		ops, uargs, limits.max_hives_per_source, &registration);
 	if (ret)
 		return ret;
 
@@ -2969,7 +3067,7 @@ static long pkm_lcs_source_register_file_for_token_core(
 
 	mutex_lock(&pkm_lcs_source_table_lock);
 	ret = pkm_lcs_source_registration_publish_locked(source_fd,
-							&registration,
+							&registration, &limits,
 							&publish);
 	mutex_unlock(&pkm_lcs_source_table_lock);
 	if (ret)
@@ -5546,7 +5644,7 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout(
 	u32 skip_source_id, const u8 skip_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_delete_layer_broadcast_result *result)
 {
-	u32 source_ids[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	u32 source_ids[PKM_LCS_MAX_REGISTERED_SOURCES_HARD];
 	u32 source_count = 0;
 	u32 i;
 	long ret;
@@ -5650,7 +5748,7 @@ long pkm_lcs_source_layer_operation_recover_skip_generation(
 	u32 skip_source_id, const u8 skip_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_layer_operation_recovery_result *result)
 {
-	u32 source_ids[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	u32 source_ids[PKM_LCS_MAX_REGISTERED_SOURCES_HARD];
 	u32 source_count = 0;
 	u32 i;
 	long ret;
@@ -6899,21 +6997,26 @@ long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,
 			     const u8 (*scope_guids)[16], u32 scope_count,
 			     struct pkm_lcs_hive_route_result *result)
 {
-	struct pkm_lcs_source_slot_view_copy
-		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	struct pkm_lcs_source_slot_view_buffer view_buffer;
 	u32 slot_count;
 	long ret;
 
 	if (!hive_name || !result)
 		return -EINVAL;
 
+	pkm_lcs_source_slot_view_buffer_init(&view_buffer);
 	memset(result, 0, sizeof(*result));
 	mutex_lock(&pkm_lcs_source_table_lock);
-	slot_count = pkm_lcs_source_table_views_locked(views);
+	ret = pkm_lcs_source_slot_view_buffer_prepare_locked(&view_buffer,
+							     &slot_count);
+	if (ret)
+		goto out_unlock;
 	ret = lcs_rust_route_hive_from_source_slots(
-		views, slot_count, hive_name, hive_name_len, scope_guids,
-		scope_count, result);
+		view_buffer.views, slot_count, hive_name, hive_name_len,
+		scope_guids, scope_count, result);
+out_unlock:
 	mutex_unlock(&pkm_lcs_source_table_lock);
+	pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
 	return ret;
 }
 
@@ -6924,8 +7027,7 @@ long pkm_lcs_route_absolute_path(const char *path, u32 path_len,
 				 const u8 (*scope_guids)[16], u32 scope_count,
 				 struct pkm_lcs_hive_route_result *result)
 {
-	struct pkm_lcs_source_slot_view_copy
-		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	struct pkm_lcs_source_slot_view_buffer view_buffer;
 	struct pkm_lcs_runtime_limits limits;
 	u32 slot_count;
 	long ret;
@@ -6933,15 +7035,22 @@ long pkm_lcs_route_absolute_path(const char *path, u32 path_len,
 	if (!path || !result)
 		return -EINVAL;
 
+	pkm_lcs_source_slot_view_buffer_init(&view_buffer);
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	memset(result, 0, sizeof(*result));
 	mutex_lock(&pkm_lcs_source_table_lock);
-	slot_count = pkm_lcs_source_table_views_locked(views);
+	ret = pkm_lcs_source_slot_view_buffer_prepare_locked(&view_buffer,
+							     &slot_count);
+	if (ret)
+		goto out_unlock;
 	ret = lcs_rust_route_absolute_path_from_source_slots(
-		views, slot_count, path, path_len, rewrite_current_user,
-		current_user_sid_component, current_user_sid_component_len,
-		scope_guids, scope_count, result, &limits);
+		view_buffer.views, slot_count, path, path_len,
+		rewrite_current_user, current_user_sid_component,
+		current_user_sid_component_len, scope_guids, scope_count,
+		result, &limits);
+out_unlock:
 	mutex_unlock(&pkm_lcs_source_table_lock);
+	pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
 	return ret;
 }
 
@@ -6951,8 +7060,7 @@ static long pkm_lcs_route_absolute_path_for_token_with_limits(
 	u32 scope_count, const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_hive_route_result *result)
 {
-	struct pkm_lcs_source_slot_view_copy
-		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	struct pkm_lcs_source_slot_view_buffer view_buffer;
 	const u8 *current_user_sid = NULL;
 	size_t current_user_sid_len = 0;
 	u32 slot_count;
@@ -6961,21 +7069,29 @@ static long pkm_lcs_route_absolute_path_for_token_with_limits(
 	if (!path || !result || !limits)
 		return -EINVAL;
 
+	pkm_lcs_source_slot_view_buffer_init(&view_buffer);
 	memset(result, 0, sizeof(*result));
 	if (rewrite_current_user) {
 		ret = kacs_rust_token_user_sid(token, &current_user_sid,
 					       &current_user_sid_len);
-		if (ret)
+		if (ret) {
+			pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
 			return ret;
+		}
 	}
 
 	mutex_lock(&pkm_lcs_source_table_lock);
-	slot_count = pkm_lcs_source_table_views_locked(views);
+	ret = pkm_lcs_source_slot_view_buffer_prepare_locked(&view_buffer,
+							     &slot_count);
+	if (ret)
+		goto out_unlock;
 	ret = lcs_rust_route_absolute_path_from_source_slots_with_token_sid(
-		views, slot_count, path, path_len, rewrite_current_user,
-		current_user_sid, current_user_sid_len, scope_guids, scope_count,
-		result, limits);
+		view_buffer.views, slot_count, path, path_len,
+		rewrite_current_user, current_user_sid, current_user_sid_len,
+		scope_guids, scope_count, result, limits);
+out_unlock:
 	mutex_unlock(&pkm_lcs_source_table_lock);
+	pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
 	return ret;
 }
 
@@ -8393,21 +8509,26 @@ long pkm_lcs_route_symlink_target(
 	const char *target, u32 target_len, const u8 (*scope_guids)[16],
 	u32 scope_count, struct pkm_lcs_hive_route_result *result)
 {
-	struct pkm_lcs_source_slot_view_copy
-		views[PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT];
+	struct pkm_lcs_source_slot_view_buffer view_buffer;
 	u32 slot_count;
 	long ret;
 
 	if (!target || !result)
 		return -EINVAL;
 
+	pkm_lcs_source_slot_view_buffer_init(&view_buffer);
 	memset(result, 0, sizeof(*result));
 	mutex_lock(&pkm_lcs_source_table_lock);
-	slot_count = pkm_lcs_source_table_views_locked(views);
+	ret = pkm_lcs_source_slot_view_buffer_prepare_locked(&view_buffer,
+							     &slot_count);
+	if (ret)
+		goto out_unlock;
 	ret = lcs_rust_route_symlink_target_from_source_slots(
-		views, slot_count, (const u8 *)target, target_len,
+		view_buffer.views, slot_count, (const u8 *)target, target_len,
 		scope_guids, scope_count, result);
+out_unlock:
 	mutex_unlock(&pkm_lcs_source_table_lock);
+	pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
 	return ret;
 }
 
@@ -11853,7 +11974,7 @@ void pkm_lcs_kunit_reset_source_table(void)
 	u32 i;
 
 	mutex_lock(&pkm_lcs_source_table_lock);
-	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_HARD; i++) {
 		pkm_lcs_source_hives_destroy(pkm_lcs_source_slots[i].hives,
 					     pkm_lcs_source_slots[i].hive_count);
 		memset(&pkm_lcs_source_slots[i], 0,
@@ -11882,7 +12003,7 @@ void pkm_lcs_kunit_source_table_snapshot(
 
 	memset(snapshot, 0, sizeof(*snapshot));
 	mutex_lock(&pkm_lcs_source_table_lock);
-	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_DEFAULT; i++) {
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_HARD; i++) {
 		struct pkm_lcs_source_slot *slot = &pkm_lcs_source_slots[i];
 
 		if (!slot->occupied)
