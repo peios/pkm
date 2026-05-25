@@ -243,6 +243,10 @@ long pkm_lcs_kunit_key_fd_hide_key_for_token(
 	const struct reg_hide_key_args *args);
 long pkm_lcs_kunit_key_fd_backup_for_token(
 	int fd, const void *token, const struct reg_backup_args *args);
+long pkm_lcs_kunit_backup_layer_manifest_frame(
+	const char *layer_name, u32 layer_name_len, u32 precedence, u8 enabled,
+	bool base_metadata_present, const u8 *base_metadata_sd,
+	size_t base_metadata_sd_len, u8 **frame_out, size_t *frame_len_out);
 long pkm_lcs_kunit_key_fd_restore_for_token(
 	int fd, const void *token, const struct reg_restore_args *args);
 long pkm_lcs_kunit_key_fd_flush(int fd);

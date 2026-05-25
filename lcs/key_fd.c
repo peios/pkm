@@ -255,6 +255,10 @@ extern int lcs_rust_write_backup_header_record_frame(
 	u32 format_version, u32 min_reader_version, s64 timestamp_ns,
 	const u8 *root_guid, const u8 *hive_name, size_t hive_name_len,
 	size_t *written_out);
+extern int lcs_rust_write_backup_layer_manifest_record_frame(
+	u8 *dst, size_t dst_len, const struct pkm_lcs_runtime_limits *limits,
+	const u8 *name, size_t name_len, u32 precedence, u8 enabled,
+	const u8 *owner_sid, size_t owner_sid_len, size_t *written_out);
 extern int lcs_rust_write_backup_key_record_frame(
 	u8 *dst, size_t dst_len, const u8 *guid, u8 volatile_key, u8 symlink,
 	const u8 *security_descriptor, size_t security_descriptor_len,
@@ -262,6 +266,9 @@ extern int lcs_rust_write_backup_key_record_frame(
 extern int lcs_rust_write_backup_trailer_record_frame(
 	u8 *dst, size_t dst_len, u64 record_count, const u8 *checksum,
 	size_t *written_out);
+extern int lcs_rust_security_descriptor_owner_sid(
+	const u8 *security_descriptor, size_t security_descriptor_len,
+	const u8 **owner_sid_out, size_t *owner_sid_len_out);
 extern int lcs_rust_plan_registry_get_security(
 	const u8 *existing_sd, size_t existing_sd_len, u32 security_info,
 	u8 *output, size_t output_len, size_t *written_out);
@@ -5101,6 +5108,164 @@ out_free:
 	return ret;
 }
 
+static long pkm_lcs_backup_sd_owner_sid_copy(const u8 *sd, size_t sd_len,
+					     u8 **owner_sid_out,
+					     size_t *owner_sid_len_out)
+{
+	const u8 *owner_sid = NULL;
+	size_t owner_sid_len = 0;
+	u8 *copy;
+	long ret;
+
+	if (!sd || !sd_len || !owner_sid_out || !owner_sid_len_out)
+		return -EINVAL;
+	*owner_sid_out = NULL;
+	*owner_sid_len_out = 0;
+
+	ret = lcs_rust_security_descriptor_owner_sid(
+		sd, sd_len, &owner_sid, &owner_sid_len);
+	if (ret)
+		return ret;
+	if (!owner_sid || !owner_sid_len)
+		return -EIO;
+
+	copy = kmemdup(owner_sid, owner_sid_len, GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
+
+	*owner_sid_out = copy;
+	*owner_sid_len_out = owner_sid_len;
+	return 0;
+}
+
+static long pkm_lcs_backup_base_layer_owner_snapshot(
+	const struct pkm_lcs_layer_snapshot *snapshot, u8 **owner_sid_out,
+	size_t *owner_sid_len_out)
+{
+	const u8 *default_sd;
+	size_t default_sd_len = 0;
+	long ret;
+
+	if (!snapshot || !owner_sid_out || !owner_sid_len_out)
+		return -EINVAL;
+
+	if (snapshot->base_metadata_present) {
+		if (!snapshot->base_metadata_sd ||
+		    !snapshot->base_metadata_sd_len)
+			return -EIO;
+		ret = pkm_lcs_backup_sd_owner_sid_copy(
+			snapshot->base_metadata_sd,
+			snapshot->base_metadata_sd_len, owner_sid_out,
+			owner_sid_len_out);
+		return ret == -EINVAL ? -EIO : ret;
+	}
+
+	default_sd = kacs_rust_create_lcs_base_layer_default_sd(
+		&default_sd_len);
+	if (!default_sd || !default_sd_len)
+		return -ENOMEM;
+	ret = pkm_lcs_backup_sd_owner_sid_copy(
+		default_sd, default_sd_len, owner_sid_out, owner_sid_len_out);
+	pkm_kacs_free((void *)default_sd);
+	return ret == -EINVAL ? -EIO : ret;
+}
+
+static long pkm_lcs_backup_layer_owner_snapshot(
+	const struct pkm_lcs_layer_snapshot *snapshot,
+	const struct pkm_lcs_runtime_limits *limits, const char *layer_name,
+	u32 layer_name_len, u8 **owner_sid_out, size_t *owner_sid_len_out)
+{
+	static const char base_name[] = "base";
+	bool owner_present = false;
+	bool is_base = false;
+	long ret;
+
+	if (!snapshot || !limits || !layer_name || !layer_name_len ||
+	    !owner_sid_out || !owner_sid_len_out)
+		return -EINVAL;
+	*owner_sid_out = NULL;
+	*owner_sid_len_out = 0;
+
+	ret = pkm_lcs_key_fd_layer_name_casefold_equal_with_limits(
+		layer_name, layer_name_len, base_name, sizeof(base_name) - 1,
+		limits, &is_base);
+	if (ret)
+		return ret;
+	if (is_base)
+		return pkm_lcs_backup_base_layer_owner_snapshot(
+			snapshot, owner_sid_out, owner_sid_len_out);
+
+	ret = pkm_lcs_layer_table_owner_snapshot(
+		layer_name, layer_name_len, owner_sid_out, owner_sid_len_out,
+		&owner_present);
+	if (ret)
+		return ret;
+	if (!owner_present)
+		return -ENOENT;
+	return 0;
+}
+
+static long pkm_lcs_backup_alloc_layer_manifest_frame(
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_layer_snapshot *snapshot,
+	const struct pkm_lcs_rsi_layer_view *layer, u8 **frame_out,
+	size_t *frame_len_out)
+{
+	u8 *owner_sid = NULL;
+	size_t owner_sid_len = 0;
+	size_t frame_len = 0;
+	size_t written = 0;
+	u8 *frame;
+	long ret;
+
+	if (!limits || !snapshot || !layer || !layer->name ||
+	    !layer->name_len || !frame_out || !frame_len_out)
+		return -EINVAL;
+	*frame_out = NULL;
+	*frame_len_out = 0;
+
+	ret = pkm_lcs_backup_layer_owner_snapshot(
+		snapshot, limits, layer->name, layer->name_len, &owner_sid,
+		&owner_sid_len);
+	if (ret)
+		return ret;
+
+	ret = lcs_rust_write_backup_layer_manifest_record_frame(
+		NULL, 0, limits, (const u8 *)layer->name, layer->name_len,
+		layer->precedence, layer->enabled, owner_sid, owner_sid_len,
+		&frame_len);
+	if (ret != -ERANGE || !frame_len) {
+		ret = ret ? ret : -EIO;
+		goto out_owner;
+	}
+	frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!frame) {
+		ret = -ENOMEM;
+		goto out_owner;
+	}
+	ret = lcs_rust_write_backup_layer_manifest_record_frame(
+		frame, frame_len, limits, (const u8 *)layer->name,
+		layer->name_len, layer->precedence, layer->enabled,
+		owner_sid, owner_sid_len, &written);
+	if (ret)
+		goto out_free;
+	if (written != frame_len) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	*frame_out = frame;
+	*frame_len_out = frame_len;
+	kfree(owner_sid);
+	return 0;
+
+out_free:
+	kfree(frame);
+out_owner:
+	kfree(owner_sid);
+	return ret;
+}
+
 static long pkm_lcs_backup_alloc_key_frame(
 	const u8 guid[16], bool volatile_key, bool symlink, const u8 *sd,
 	size_t sd_len, s64 last_write_time_ns, u8 **frame_out,
@@ -7599,6 +7764,29 @@ long pkm_lcs_kunit_key_fd_backup_for_token(
 	ret = pkm_lcs_key_fd_backup_from_args_for_token(key_fd, token, args);
 	fdput(held);
 	return ret;
+}
+
+long pkm_lcs_kunit_backup_layer_manifest_frame(
+	const char *layer_name, u32 layer_name_len, u32 precedence, u8 enabled,
+	bool base_metadata_present, const u8 *base_metadata_sd,
+	size_t base_metadata_sd_len, u8 **frame_out, size_t *frame_len_out)
+{
+	struct pkm_lcs_layer_snapshot snapshot = {
+		.base_metadata_present = base_metadata_present,
+		.base_metadata_sd = base_metadata_sd,
+		.base_metadata_sd_len = base_metadata_sd_len,
+	};
+	struct pkm_lcs_rsi_layer_view layer = {
+		.name = layer_name,
+		.name_len = layer_name_len,
+		.precedence = precedence,
+		.enabled = enabled,
+	};
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_backup_alloc_layer_manifest_frame(
+		&limits, &snapshot, &layer, frame_out, frame_len_out);
 }
 
 long pkm_lcs_kunit_key_fd_restore_for_token(

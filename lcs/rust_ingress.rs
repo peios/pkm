@@ -3,7 +3,7 @@
 use core::ffi::{c_int, c_long, c_void};
 use core::{slice, str};
 
-use crate::kacs_core::PkmVec;
+use crate::kacs_core::{PkmVec, SecurityDescriptor};
 use crate::lcs_core::{
     apply_config_value, backup_restore_complete_audit_payload_len,
     backup_restore_fd_mode_linux_errno, backup_restore_start_audit_payload_len, casefold_eq,
@@ -52,7 +52,7 @@ use crate::lcs_core::{
     source_validation_failure_audit_payload_len, validate_config_value,
     write_backup_restore_complete_audit_payload, write_backup_restore_start_audit_payload,
     write_backup_header_record_frame, write_backup_key_record_frame,
-    write_backup_trailer_record_frame,
+    write_backup_layer_manifest_record_frame, write_backup_trailer_record_frame,
     write_key_open_audit_payload, write_self_config_invalid_audit_payload,
     write_source_validation_failure_audit_payload, write_rsi_abort_transaction_request_frame,
     write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
@@ -1452,6 +1452,40 @@ fn optional_layer_owner_slice<'a>(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lcs_rust_security_descriptor_owner_sid(
+    security_descriptor: *const u8,
+    security_descriptor_len: usize,
+    owner_sid_out: *mut *const u8,
+    owner_sid_len_out: *mut usize,
+) -> c_int {
+    let Some(owner_sid_out_ref) = (unsafe { owner_sid_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    let Some(owner_sid_len_out_ref) = (unsafe { owner_sid_len_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *owner_sid_out_ref = core::ptr::null();
+    *owner_sid_len_out_ref = 0;
+
+    if security_descriptor.is_null() || security_descriptor_len == 0 {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let bytes =
+        unsafe { slice::from_raw_parts(security_descriptor, security_descriptor_len) };
+    let sd = match SecurityDescriptor::parse(bytes) {
+        Ok(value) => value,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    let Some(owner_sid) = sd.owner() else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    let owner_sid = owner_sid.as_bytes();
+    *owner_sid_out_ref = owner_sid.as_ptr();
+    *owner_sid_len_out_ref = owner_sid.len();
+    0
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lcs_rust_select_layer_owner(
     metadata_owner_sid: *const u8,
     metadata_owner_sid_len: usize,
@@ -1973,6 +2007,62 @@ pub unsafe extern "C" fn lcs_rust_write_backup_header_record_frame(
         timestamp_ns,
         root_guid_copy,
         hive_name,
+    ) {
+        Ok(written) => {
+            *written_out_ref = written;
+            0
+        }
+        Err(err) => backup_writer_error_return(err, written_out),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_backup_layer_manifest_record_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
+    name: *const u8,
+    name_len: usize,
+    precedence: u32,
+    enabled: u8,
+    owner_sid: *const u8,
+    owner_sid_len: usize,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out_ref) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out_ref = 0;
+    if name.is_null() || name_len == 0 || owner_sid.is_null() || owner_sid_len == 0 || enabled > 1
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
+    let dst_bytes = match unsafe { backup_writer_dst(dst, dst_len) } {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let name = match str::from_utf8(unsafe { slice::from_raw_parts(name, name_len) }) {
+        Ok(value) => value,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    let owner_sid = unsafe { slice::from_raw_parts(owner_sid, owner_sid_len) };
+
+    match write_backup_layer_manifest_record_frame(
+        &limits,
+        dst_bytes,
+        name,
+        precedence,
+        enabled != 0,
+        owner_sid,
     ) {
         Ok(written) => {
             *written_out_ref = written;

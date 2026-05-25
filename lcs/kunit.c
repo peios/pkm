@@ -18277,6 +18277,153 @@ static void pkm_lcs_kunit_expect_empty_backup_stream(
 			0);
 }
 
+static void pkm_lcs_kunit_expect_layer_manifest_record(
+	struct kunit *test, const u8 *frame, size_t frame_len,
+	const char *expected_name, u32 expected_precedence, u8 expected_enabled,
+	const u8 *expected_owner, size_t expected_owner_len)
+{
+	size_t expected_name_len = strlen(expected_name);
+	size_t offset = 6;
+	u32 record_len;
+	u32 name_len;
+	u32 owner_len;
+
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	KUNIT_ASSERT_GE(test, frame_len, (size_t)6);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(frame),
+			(u16)REG_BACKUP_LAYER);
+	record_len = get_unaligned_le32(frame + 2);
+	KUNIT_ASSERT_EQ(test, (size_t)record_len, frame_len);
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u32), frame_len);
+	name_len = get_unaligned_le32(frame + offset);
+	offset += sizeof(u32);
+	KUNIT_ASSERT_EQ(test, (size_t)name_len, expected_name_len);
+	KUNIT_ASSERT_LE(test, offset + name_len, frame_len);
+	KUNIT_EXPECT_EQ(test, memcmp(frame + offset, expected_name, name_len),
+			0);
+	offset += name_len;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u32) + sizeof(u8), frame_len);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(frame + offset),
+			expected_precedence);
+	offset += sizeof(u32);
+	KUNIT_EXPECT_EQ(test, frame[offset], expected_enabled);
+	offset += sizeof(u8);
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u32), frame_len);
+	owner_len = get_unaligned_le32(frame + offset);
+	offset += sizeof(u32);
+	KUNIT_ASSERT_EQ(test, (size_t)owner_len, expected_owner_len);
+	KUNIT_ASSERT_LE(test, offset + owner_len, frame_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(frame + offset, expected_owner, owner_len), 0);
+	offset += owner_len;
+	KUNIT_EXPECT_EQ(test, offset, frame_len);
+}
+
+static void pkm_lcs_kunit_backup_layer_manifest_base_default_owner(
+	struct kunit *test)
+{
+	u8 *frame = NULL;
+	size_t frame_len = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_layer_manifest_frame(
+				"base", strlen("base"), 0, 1, false, NULL, 0,
+				&frame, &frame_len),
+			0L);
+	pkm_lcs_kunit_expect_layer_manifest_record(
+		test, frame, frame_len, "base", 0, 1, pkm_lcs_kunit_system_sid,
+		sizeof(pkm_lcs_kunit_system_sid));
+	kfree(frame);
+}
+
+static void pkm_lcs_kunit_backup_layer_manifest_base_cached_owner(
+	struct kunit *test)
+{
+	static const u8 base_owner_everyone_sd[] = {
+		0x01, 0x00, 0x00, 0x80,
+		0x14, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x01, 0x01, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00,
+	};
+	u8 *frame = NULL;
+	size_t frame_len = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_layer_manifest_frame(
+				"base", strlen("base"), 0, 1, true,
+				base_owner_everyone_sd,
+				sizeof(base_owner_everyone_sd), &frame,
+				&frame_len),
+			0L);
+	pkm_lcs_kunit_expect_layer_manifest_record(
+		test, frame, frame_len, "base", 0, 1,
+		pkm_lcs_kunit_everyone_sid,
+		sizeof(pkm_lcs_kunit_everyone_sid));
+	kfree(frame);
+}
+
+static void pkm_lcs_kunit_backup_layer_manifest_non_base_cached_owner(
+	struct kunit *test)
+{
+	static const u8 metadata_guid[PKM_LCS_GUID_BYTES] = { 0x9a };
+	u8 *frame = NULL;
+	size_t frame_len = 0;
+
+	pkm_lcs_kunit_reset_layer_table();
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"Policy", strlen("Policy"), 42, 1,
+				metadata_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_everyone_sid,
+				sizeof(pkm_lcs_kunit_everyone_sid)),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_layer_manifest_frame(
+				"Policy", strlen("Policy"), 42, 1, false, NULL,
+				0, &frame, &frame_len),
+			0L);
+	pkm_lcs_kunit_expect_layer_manifest_record(
+		test, frame, frame_len, "Policy", 42, 1,
+		pkm_lcs_kunit_everyone_sid,
+		sizeof(pkm_lcs_kunit_everyone_sid));
+	kfree(frame);
+	pkm_lcs_kunit_reset_layer_table();
+}
+
+static void pkm_lcs_kunit_backup_layer_manifest_fails_closed(
+	struct kunit *test)
+{
+	static const u8 malformed_sd[] = { 0x01, 0x02, 0x03 };
+	u8 *frame = NULL;
+	size_t frame_len = 0;
+
+	pkm_lcs_kunit_reset_layer_table();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_layer_manifest_frame(
+				"Policy", strlen("Policy"), 42, 1, false, NULL,
+				0, &frame, &frame_len),
+			(long)-ENOENT);
+	KUNIT_EXPECT_PTR_EQ(test, frame, NULL);
+	KUNIT_EXPECT_EQ(test, frame_len, (size_t)0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_layer_manifest_frame(
+				"base", strlen("base"), 0, 1, true,
+				malformed_sd, sizeof(malformed_sd), &frame,
+				&frame_len),
+			(long)-EIO);
+	KUNIT_EXPECT_PTR_EQ(test, frame, NULL);
+	KUNIT_EXPECT_EQ(test, frame_len, (size_t)0);
+}
+
 static int pkm_lcs_kunit_backup_snapshot_source_thread(void *raw_script)
 {
 	struct pkm_lcs_kunit_backup_snapshot_source_script *script =
@@ -45853,6 +46000,12 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_admission),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_nonempty_fails_closed),
+	KUNIT_CASE(
+		pkm_lcs_kunit_backup_layer_manifest_base_default_owner),
+	KUNIT_CASE(pkm_lcs_kunit_backup_layer_manifest_base_cached_owner),
+	KUNIT_CASE(
+		pkm_lcs_kunit_backup_layer_manifest_non_base_cached_owner),
+	KUNIT_CASE(pkm_lcs_kunit_backup_layer_manifest_fails_closed),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_read_only_unsupported),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_backup_read_only_cap_fail_before_source),
