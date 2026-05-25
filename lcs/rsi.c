@@ -61,11 +61,13 @@ extern int lcs_rust_write_rsi_hide_entry_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 *parent_guid, const u8 *child_name, u32 child_name_len,
 	const u8 *layer_name, u32 layer_name_len, u64 sequence,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built);
 extern int lcs_rust_write_rsi_delete_entry_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 *parent_guid, const u8 *child_name, u32 child_name_len,
 	const u8 *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built);
 extern int lcs_rust_write_rsi_create_key_request_frame(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
@@ -389,38 +391,41 @@ long pkm_lcs_rsi_build_hide_entry_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 parent_guid[RSI_GUID_SIZE], const char *child_name,
 	u32 child_name_len, const char *layer_name, u32 layer_name_len,
-	u64 sequence, struct pkm_lcs_rsi_built_request *built)
-{
-	if (!built)
-		return -EINVAL;
-
-	memset(built, 0, sizeof(*built));
-	if (!dst || !parent_guid || !child_name || !layer_name)
-		return -EINVAL;
-
-	return lcs_rust_write_rsi_hide_entry_request_frame(
-		dst, dst_len, request_id, txn_id, parent_guid,
-		(const u8 *)child_name, child_name_len,
-		(const u8 *)layer_name, layer_name_len, sequence, built);
-}
-
-long pkm_lcs_rsi_build_delete_entry_request(
-	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
-	const u8 parent_guid[RSI_GUID_SIZE], const char *child_name,
-	u32 child_name_len, const char *layer_name, u32 layer_name_len,
+	u64 sequence, const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built)
 {
 	if (!built)
 		return -EINVAL;
 
 	memset(built, 0, sizeof(*built));
-	if (!dst || !parent_guid || !child_name || !layer_name)
+	if (!dst || !parent_guid || !child_name || !layer_name || !limits)
+		return -EINVAL;
+
+	return lcs_rust_write_rsi_hide_entry_request_frame(
+		dst, dst_len, request_id, txn_id, parent_guid,
+		(const u8 *)child_name, child_name_len,
+		(const u8 *)layer_name, layer_name_len, sequence, limits,
+		built);
+}
+
+long pkm_lcs_rsi_build_delete_entry_request(
+	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
+	const u8 parent_guid[RSI_GUID_SIZE], const char *child_name,
+	u32 child_name_len, const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_rsi_built_request *built)
+{
+	if (!built)
+		return -EINVAL;
+
+	memset(built, 0, sizeof(*built));
+	if (!dst || !parent_guid || !child_name || !layer_name || !limits)
 		return -EINVAL;
 
 	return lcs_rust_write_rsi_delete_entry_request_frame(
 		dst, dst_len, request_id, txn_id, parent_guid,
 		(const u8 *)child_name, child_name_len,
-		(const u8 *)layer_name, layer_name_len, built);
+		(const u8 *)layer_name, layer_name_len, limits, built);
 }
 
 long pkm_lcs_rsi_build_create_key_request(

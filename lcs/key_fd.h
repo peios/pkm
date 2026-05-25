@@ -13,11 +13,13 @@
 #define PKM_LCS_KEY_FD_TRANSACTION_WATCH_BURST_LIMIT 4096U
 
 struct pkm_lcs_usercopy_ops;
+struct pkm_lcs_runtime_limits;
 
 struct pkm_lcs_key_fd_publish_input {
 	u32 source_id;
 	u8 key_guid[PKM_LCS_GUID_BYTES];
 	u32 granted_access;
+	const struct pkm_lcs_runtime_limits *limits;
 	const char * const *resolved_path;
 	const u8 (*ancestor_guids)[PKM_LCS_GUID_BYTES];
 	u32 path_component_count;

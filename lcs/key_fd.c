@@ -145,10 +145,12 @@ struct pkm_lcs_blanket_tombstone_input {
 
 struct pkm_lcs_hide_key_input {
 	struct pkm_lcs_create_layer_target target;
+	struct pkm_lcs_runtime_limits limits;
 };
 
 struct pkm_lcs_delete_key_input {
 	struct pkm_lcs_create_layer_target target;
+	struct pkm_lcs_runtime_limits limits;
 };
 
 struct pkm_lcs_effective_value_snapshot {
@@ -184,7 +186,8 @@ extern int lcs_rust_validate_key_fd_open_view(
 	const u8 *key_guid, u32 granted_access,
 	const struct pkm_lcs_key_fd_string_view *path_components,
 	size_t path_component_count,
-	const u8 (*ancestor_guids)[PKM_LCS_GUID_BYTES], size_t ancestor_count);
+	const u8 (*ancestor_guids)[PKM_LCS_GUID_BYTES], size_t ancestor_count,
+	const struct pkm_lcs_runtime_limits *limits);
 extern int lcs_rust_key_fd_fixed_ioctl_access_gate(u32 granted_access,
 						   u32 ioctl_number);
 extern int lcs_rust_key_fd_security_ioctl_access_gate(u32 granted_access,
@@ -745,6 +748,8 @@ static long pkm_lcs_key_fd_validate_input(
 	struct pkm_lcs_key_fd_string_view **views_out)
 {
 	struct pkm_lcs_key_fd_string_view *views = NULL;
+	struct pkm_lcs_runtime_limits effective_limits;
+	const struct pkm_lcs_runtime_limits *limits;
 	size_t len;
 	u32 i;
 	long ret = -ENOMEM;
@@ -756,6 +761,12 @@ static long pkm_lcs_key_fd_validate_input(
 	if (!input || !input->source_id || !input->path_component_count ||
 	    !input->resolved_path || !input->ancestor_guids)
 		return -EINVAL;
+	limits = input->limits;
+	if (!limits) {
+		pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
+			&effective_limits);
+		limits = &effective_limits;
+	}
 
 	views = kcalloc(input->path_component_count, sizeof(*views),
 			GFP_KERNEL);
@@ -779,7 +790,7 @@ static long pkm_lcs_key_fd_validate_input(
 	ret = lcs_rust_validate_key_fd_open_view(
 		input->key_guid, input->granted_access, views,
 		input->path_component_count, input->ancestor_guids,
-		input->path_component_count);
+		input->path_component_count, limits);
 	if (ret)
 		goto out_free;
 
@@ -2457,6 +2468,7 @@ static long pkm_lcs_key_fd_copy_hide_key_input(
 	if (!ops || !ops->read || !args || !input)
 		return -EINVAL;
 	memset(input, 0, sizeof(*input));
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&input->limits);
 
 	return pkm_lcs_key_fd_copy_hide_key_layer(ops, args, input);
 }
@@ -2469,6 +2481,7 @@ static long pkm_lcs_key_fd_copy_delete_key_input(
 	if (!ops || !ops->read || !args || !input)
 		return -EINVAL;
 	memset(input, 0, sizeof(*input));
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&input->limits);
 
 	return pkm_lcs_key_fd_copy_delete_key_layer(ops, args, input);
 }
@@ -2599,15 +2612,32 @@ static long pkm_lcs_key_fd_validate_hide_key_request_shape(
 	u32 child_name_len, const struct pkm_lcs_hide_key_input *input)
 {
 	struct pkm_lcs_rsi_built_request built = { };
-	u8 frame[1024];
+	size_t frame_len;
+	u8 *frame;
+	long ret;
 
 	if (!parent_guid || !child_name || !input)
 		return -EINVAL;
+	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
+			       (size_t)RSI_GUID_SIZE, &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
+	    check_add_overflow(frame_len, (size_t)child_name_len,
+			       &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
+	    check_add_overflow(frame_len, (size_t)input->target.name_len,
+			       &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u64), &frame_len))
+		return -EOVERFLOW;
 
-	return pkm_lcs_rsi_build_hide_entry_request(
-		frame, sizeof(frame), 1, 0, parent_guid, child_name,
+	frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	ret = pkm_lcs_rsi_build_hide_entry_request(
+		frame, frame_len, 1, 0, parent_guid, child_name,
 		child_name_len, input->target.name, input->target.name_len, 1,
-		&built);
+		&input->limits, &built);
+	kfree(frame);
+	return ret;
 }
 
 static long pkm_lcs_key_fd_validate_delete_key_request_shape(
@@ -2615,15 +2645,31 @@ static long pkm_lcs_key_fd_validate_delete_key_request_shape(
 	u32 child_name_len, const struct pkm_lcs_delete_key_input *input)
 {
 	struct pkm_lcs_rsi_built_request built = { };
-	u8 frame[1024];
+	size_t frame_len;
+	u8 *frame;
+	long ret;
 
 	if (!parent_guid || !child_name || !input)
 		return -EINVAL;
+	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
+			       (size_t)RSI_GUID_SIZE, &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
+	    check_add_overflow(frame_len, (size_t)child_name_len,
+			       &frame_len) ||
+	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
+	    check_add_overflow(frame_len, (size_t)input->target.name_len,
+			       &frame_len))
+		return -EOVERFLOW;
 
-	return pkm_lcs_rsi_build_delete_entry_request(
-		frame, sizeof(frame), 1, 0, parent_guid, child_name,
+	frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	ret = pkm_lcs_rsi_build_delete_entry_request(
+		frame, frame_len, 1, 0, parent_guid, child_name,
 		child_name_len, input->target.name, input->target.name_len,
-		&built);
+		&input->limits, &built);
+	kfree(frame);
+	return ret;
 }
 
 static long pkm_lcs_key_fd_delete_key_visible_child_gate(
@@ -4333,10 +4379,11 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	if (ret)
 		goto out_cancel_mutation;
 
-	ret = pkm_lcs_source_delete_entry_round_trip_timeout(
+	ret = pkm_lcs_source_delete_entry_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, parent_guid, child_name,
 		child_name_len, input.target.name, input.target.name_len,
-		pkm_lcs_runtime_request_timeout_ms(), &response, NULL);
+		&input.limits, pkm_lcs_runtime_request_timeout_ms(), &response,
+		NULL);
 	if (ret)
 		goto out_cancel_mutation;
 
@@ -4506,10 +4553,11 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 		txn_id = binding.transaction_id;
 	}
 
-	ret = pkm_lcs_source_hide_entry_round_trip_timeout(
+	ret = pkm_lcs_source_hide_entry_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, parent_guid, child_name, child_name_len,
 		input.target.name, input.target.name_len, sequence,
-		pkm_lcs_runtime_request_timeout_ms(), &response, NULL);
+		&input.limits, pkm_lcs_runtime_request_timeout_ms(), &response,
+		NULL);
 	if (ret)
 		goto out_cancel_mutation;
 
