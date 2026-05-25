@@ -3188,10 +3188,12 @@ out_unlock_table:
 static long pkm_lcs_source_dispatch_query_values_request_with_waiter(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *value_name, u32 value_name_len, bool query_all,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	struct pkm_lcs_source_queued_request *request;
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
@@ -3206,6 +3208,10 @@ static long pkm_lcs_source_dispatch_query_values_request_with_waiter(
 		return -EINVAL;
 	if (value_name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD)
 		return -ENAMETOOLONG;
+	if (!limits) {
+		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
 			       (size_t)RSI_GUID_SIZE, &frame_len) ||
 	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
@@ -3253,7 +3259,7 @@ static long pkm_lcs_source_dispatch_query_values_request_with_waiter(
 
 	ret = pkm_lcs_rsi_build_query_values_request(
 		request->frame, frame_len, request_id, txn_id, guid,
-		value_name, value_name_len, query_all, &built);
+		value_name, value_name_len, query_all, limits, &built);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -3289,10 +3295,12 @@ static long pkm_lcs_source_dispatch_set_value_request_with_waiter(
 	const char *value_name, u32 value_name_len,
 	const char *layer_name, u32 layer_name_len, u32 value_type,
 	const u8 *data, size_t data_len, u64 sequence, u64 expected_sequence,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	struct pkm_lcs_source_queued_request *request;
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
@@ -3311,6 +3319,10 @@ static long pkm_lcs_source_dispatch_set_value_request_with_waiter(
 		return -ENAMETOOLONG;
 	if (data_len > U32_MAX)
 		return -EOVERFLOW;
+	if (!limits) {
+		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
 			       (size_t)RSI_GUID_SIZE, &frame_len) ||
 	    check_add_overflow(frame_len, sizeof(u32), &frame_len) ||
@@ -3368,7 +3380,7 @@ static long pkm_lcs_source_dispatch_set_value_request_with_waiter(
 		request->frame, frame_len, request_id, txn_id, guid,
 		value_name, value_name_len, layer_name, layer_name_len,
 		value_type, data, data_len, sequence, expected_sequence,
-		&built);
+		limits, &built);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -4817,7 +4829,7 @@ long pkm_lcs_source_dispatch_set_value_request(
 	return pkm_lcs_source_dispatch_set_value_request_with_waiter(
 		source_id, txn_id, guid, value_name, value_name_len,
 		layer_name, layer_name_len, value_type, data, data_len,
-		sequence, expected_sequence, NULL, result);
+		sequence, expected_sequence, NULL, NULL, result);
 }
 
 long pkm_lcs_source_dispatch_set_value_waitable_request(
@@ -4835,7 +4847,7 @@ long pkm_lcs_source_dispatch_set_value_waitable_request(
 	return pkm_lcs_source_dispatch_set_value_request_with_waiter(
 		source_id, txn_id, guid, value_name, value_name_len,
 		layer_name, layer_name_len, value_type, data, data_len,
-		sequence, expected_sequence, waiter, result);
+		sequence, expected_sequence, NULL, waiter, result);
 }
 
 long pkm_lcs_source_dispatch_delete_value_entry_request(
@@ -5718,12 +5730,13 @@ long pkm_lcs_source_write_key_round_trip_timeout(
 							 response);
 }
 
-long pkm_lcs_source_set_value_round_trip_timeout(
+long pkm_lcs_source_set_value_round_trip_timeout_with_limits(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *value_name, u32 value_name_len,
 	const char *layer_name, u32 layer_name_len, u32 value_type,
 	const u8 *data, size_t data_len, u64 sequence, u64 expected_sequence,
-	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
 	struct pkm_lcs_source_response_waiter waiter;
@@ -5746,7 +5759,7 @@ long pkm_lcs_source_set_value_round_trip_timeout(
 		ret = pkm_lcs_source_dispatch_set_value_request_with_waiter(
 			source_id, txn_id, guid, value_name, value_name_len,
 			layer_name, layer_name_len, value_type, data, data_len,
-			sequence, expected_sequence, &waiter, enqueue);
+			sequence, expected_sequence, limits, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -5757,6 +5770,21 @@ long pkm_lcs_source_set_value_round_trip_timeout(
 
 	return pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
 							 response);
+}
+
+long pkm_lcs_source_set_value_round_trip_timeout(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *value_name, u32 value_name_len,
+	const char *layer_name, u32 layer_name_len, u32 value_type,
+	const u8 *data, size_t data_len, u64 sequence, u64 expected_sequence,
+	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_set_value_round_trip_timeout_with_limits(
+		source_id, txn_id, guid, value_name, value_name_len,
+		layer_name, layer_name_len, value_type, data, data_len,
+		sequence, expected_sequence, NULL, timeout_ms, response,
+		enqueue);
 }
 
 long pkm_lcs_source_delete_value_entry_round_trip_timeout(
@@ -5973,10 +6001,11 @@ long pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
 	return ret;
 }
 
-long pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+long pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *value_name, u32 value_name_len, bool query_all,
-	u32 timeout_ms, struct pkm_lcs_source_response_frame *frame,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_frame *frame,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
@@ -6005,7 +6034,7 @@ long pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
 
 		ret = pkm_lcs_source_dispatch_query_values_request_with_waiter(
 			source_id, txn_id, guid, value_name, value_name_len,
-			query_all, &waiter, enqueue);
+			query_all, limits, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -6019,6 +6048,18 @@ long pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
 	if (ret)
 		pkm_lcs_source_response_frame_destroy(frame);
 	return ret;
+}
+
+long pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *value_name, u32 value_name_len, bool query_all,
+	u32 timeout_ms, struct pkm_lcs_source_response_frame *frame,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
+		source_id, txn_id, guid, value_name, value_name_len,
+		query_all, NULL, timeout_ms, frame, response, enqueue);
 }
 
 static ssize_t pkm_lcs_source_device_read_file_with_ops(

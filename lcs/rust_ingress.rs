@@ -2103,6 +2103,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_query_values_request_frame(
     value_name: *const u8,
     value_name_len: u32,
     query_all: u8,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     built_out: *mut PkmLcsRsiBuiltRequestCopy,
 ) -> c_int {
     if built_out.is_null() {
@@ -2125,6 +2126,10 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_query_values_request_frame(
     if query_all > 1 {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(err) => return err.negated_return() as c_int,
+    };
 
     let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
     let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
@@ -2135,7 +2140,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_query_values_request_frame(
     } else {
         unsafe { slice::from_raw_parts(value_name, value_name_len as usize) }
     };
-    if let Err(err) = validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_value_name_bytes(value_name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
 
@@ -2397,6 +2402,7 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_set_value_request_frame(
     data_len: usize,
     sequence: u64,
     expected_sequence: u64,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     built_out: *mut PkmLcsRsiBuiltRequestCopy,
 ) -> c_int {
     if built_out.is_null() {
@@ -2421,6 +2427,10 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_set_value_request_frame(
     {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(err) => return err.negated_return() as c_int,
+    };
 
     let dst_bytes = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
     let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
@@ -2438,16 +2448,16 @@ pub unsafe extern "C" fn lcs_rust_write_rsi_set_value_request_frame(
         unsafe { slice::from_raw_parts(data, data_len) }
     };
 
-    if let Err(err) = validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_value_name_bytes(value_name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
-    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &limits) {
         return rsi_request_frame_error_return(err);
     }
     if let Err(err) = validate_value_write_type(value_type, data_bytes.len(), true) {
         return rsi_request_frame_error_return(err);
     }
-    if let Err(err) = validate_value_data_len(data_bytes.len(), &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_value_data_len(data_bytes.len(), &limits) {
         return rsi_request_frame_error_return(err);
     }
 

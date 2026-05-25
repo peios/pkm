@@ -184,13 +184,15 @@ long pkm_lcs_rsi_build_query_values_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 guid[RSI_GUID_SIZE], const char *value_name,
 	u32 value_name_len, bool query_all,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_built_request *built);
 long pkm_lcs_rsi_build_set_value_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 guid[RSI_GUID_SIZE], const char *value_name,
 	u32 value_name_len, const char *layer_name, u32 layer_name_len,
 	u32 value_type, const u8 *data, size_t data_len, u64 sequence,
-	u64 expected_sequence, struct pkm_lcs_rsi_built_request *built);
+	u64 expected_sequence, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_rsi_built_request *built);
 long pkm_lcs_rsi_build_delete_value_entry_request(
 	u8 *dst, size_t dst_len, u64 request_id, u64 txn_id,
 	const u8 guid[RSI_GUID_SIZE], const char *value_name,

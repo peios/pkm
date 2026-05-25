@@ -2716,11 +2716,11 @@ static long pkm_lcs_key_fd_set_value_layer_cap_check(
 		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
-	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, input->value_name,
 		(input->value_name ? (u32)strlen(input->value_name) : 0),
-		false, pkm_lcs_runtime_request_timeout_ms(), &frame, &response,
-		NULL);
+		false, &input->limits, pkm_lcs_runtime_request_timeout_ms(),
+		&frame, &response, NULL);
 	if (ret)
 		goto out_frame;
 
@@ -3856,12 +3856,12 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 		txn_id = binding.transaction_id;
 	}
 
-	ret = pkm_lcs_source_set_value_round_trip_timeout(
+	ret = pkm_lcs_source_set_value_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, input.value_name,
 		args->name_len, input.target.name, input.target.name_len,
 		args->type, input.data, args->data_len, sequence,
-		args->expected_seq, pkm_lcs_runtime_request_timeout_ms(),
-		&response, NULL);
+		args->expected_seq, &input.limits,
+		pkm_lcs_runtime_request_timeout_ms(), &response, NULL);
 	if (ret)
 		goto out_cancel_mutation;
 

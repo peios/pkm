@@ -10866,6 +10866,61 @@ static void pkm_lcs_kunit_key_fd_set_value_runtime_limits_fail_before_source(
 	kacs_rust_token_drop(source_token);
 }
 
+static void pkm_lcs_kunit_key_fd_set_value_runtime_limits_source_frames(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x7f },
+	};
+	static const u8 data[] = { 0x42 };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_set_value_args args = {
+		.type = REG_BINARY,
+		.data_len = sizeof(data),
+		.data_ptr = (u64)(unsigned long)data,
+		.txn_fd = -1,
+	};
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	char value_name[301];
+	long fd;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = 300U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	memset(value_name, 'v', sizeof(value_name) - 1);
+	value_name[sizeof(value_name) - 1] = '\0';
+	args.name_len = sizeof(value_name) - 1;
+	args.name_ptr = (u64)(unsigned long)value_name;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	pkm_lcs_kunit_expect_set_value_success(
+		test, &file, (int)fd, admin_token, &ops, &args,
+		ancestors[1], value_name, data, sizeof(data), REG_BINARY);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
 static void pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate(
 	struct kunit *test)
 {
@@ -21676,7 +21731,7 @@ static int pkm_lcs_kunit_set_value_ioctl_source_thread(void *raw_script)
 {
 	struct pkm_lcs_kunit_set_value_ioctl_source_script *script = raw_script;
 	bool continue_after_set = false;
-	u8 request[256];
+	u8 request[1024];
 	int ret;
 
 	if (!script || !script->file || !script->expected_guid ||
@@ -23311,6 +23366,7 @@ static void pkm_lcs_kunit_rsi_query_values_bridge_materializes_default_reg_link(
 		0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
 	};
 	static const u8 target[] = "Machine\\Target";
+	struct pkm_lcs_runtime_limits limits = { };
 	struct pkm_lcs_rsi_built_request built = { };
 	struct pkm_lcs_rsi_query_value_result result = { };
 	u8 request[RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE + sizeof(u32) +
@@ -23319,10 +23375,11 @@ static void pkm_lcs_kunit_rsi_query_values_bridge_materializes_default_reg_link(
 	size_t offset;
 	size_t response_len;
 
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_rsi_build_query_values_request(
 				request, sizeof(request), 43, 0, guid, "", 0,
-				false, &built),
+				false, &limits, &built),
 			0L);
 	KUNIT_EXPECT_EQ(test, built.len, sizeof(request));
 	KUNIT_EXPECT_EQ(test, built.request_id, 43ULL);
@@ -38485,6 +38542,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_fails_before_source),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_set_value_runtime_limits_fail_before_source),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_set_value_runtime_limits_source_frames),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_set_value_layer_precedence_overflows_watches),
