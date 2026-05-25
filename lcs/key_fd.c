@@ -753,13 +753,23 @@ pkm_lcs_key_fd_build_watch_event(u32 event_type, const u8 *name, u32 name_len,
 	return event;
 }
 
+static bool pkm_lcs_key_fd_subtree_depth_suppressed(u32 path_count,
+						    u32 max_depth)
+{
+	return max_depth != 0 && path_count > max_depth;
+}
+
 static long pkm_lcs_key_fd_queue_watch_event_locked(
 	struct pkm_lcs_key_fd *key_fd,
 	struct pkm_lcs_key_fd_watch_event *event)
 {
 	struct pkm_lcs_key_fd_watch_event *queued_event = event;
+	u32 queue_limit;
 
 	if (!key_fd || !event)
+		return -EINVAL;
+	queue_limit = pkm_lcs_runtime_notification_queue_size();
+	if (!queue_limit)
 		return -EINVAL;
 
 	if (event->event_type == REG_WATCH_OVERFLOW &&
@@ -768,7 +778,7 @@ static long pkm_lcs_key_fd_queue_watch_event_locked(
 		return 0;
 	}
 
-	if (key_fd->watch_pending_events >= PKM_LCS_KEY_FD_WATCH_QUEUE_LIMIT) {
+	if (key_fd->watch_pending_events >= queue_limit) {
 		if (key_fd->watch_has_overflow) {
 			pkm_lcs_key_fd_drop_oldest_preserving_overflow_locked(
 				key_fd);
@@ -5555,7 +5565,7 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
 
 static long pkm_lcs_key_fd_transaction_burst_count_context_locked(
 	const struct pkm_lcs_watch_dispatch_context *context,
-	struct list_head *counts, u32 limit)
+	struct list_head *counts, u32 limit, u32 max_subtree_depth)
 {
 	struct pkm_lcs_subtree_watch_entry *subtree;
 	struct pkm_lcs_watch_registry_entry *entry;
@@ -5581,11 +5591,15 @@ static long pkm_lcs_key_fd_transaction_burst_count_context_locked(
 	changed_index = context->path_component_count - 1U;
 	for (i = changed_index; i > 0; i--) {
 		const u8 *ancestor_guid = context->ancestor_guids[i - 1U];
+		u32 path_count = changed_index - (i - 1U);
 
 		if (pkm_lcs_guid_equal(ancestor_guid, context->changed_key_guid))
 			continue;
 		subtree = pkm_lcs_subtree_watch_find_locked(ancestor_guid);
 		if (!subtree)
+			continue;
+		if (pkm_lcs_key_fd_subtree_depth_suppressed(
+			    path_count, max_subtree_depth))
 			continue;
 
 		hash = pkm_lcs_guid_hash(ancestor_guid);
@@ -5638,7 +5652,7 @@ static long pkm_lcs_key_fd_transaction_burst_dispatch_overflows_locked(
 static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 	const struct pkm_lcs_watch_dispatch_context *context,
 	struct list_head *transaction_burst_counts,
-	struct list_head *internal_events)
+	struct list_head *internal_events, u32 max_subtree_depth)
 {
 	struct pkm_lcs_key_fd_string_view *path_views = NULL;
 	struct pkm_lcs_subtree_watch_entry *subtree;
@@ -5703,6 +5717,10 @@ static long pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 				goto out_unlock;
 		}
 
+		if (pkm_lcs_key_fd_subtree_depth_suppressed(
+			    path_count, max_subtree_depth))
+			continue;
+
 		ret = pkm_lcs_key_fd_path_views_from_components(
 			context->resolved_path, context->path_component_count, i,
 			path_count, &path_views);
@@ -5740,6 +5758,7 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_effects(
 	u32 *internal_effects_out)
 {
 	LIST_HEAD(internal_events);
+	u32 max_subtree_depth;
 	long ret;
 
 	if (internal_effects_out)
@@ -5747,11 +5766,13 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_effects(
 	ret = pkm_lcs_key_fd_validate_dispatch_context(context);
 	if (ret)
 		return ret;
+	max_subtree_depth = pkm_lcs_runtime_max_subtree_watch_depth();
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	ret = pkm_lcs_key_fd_dispatch_watch_event_context_locked(context,
 								NULL,
-								&internal_events);
+								&internal_events,
+								max_subtree_depth);
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 	pkm_lcs_internal_watch_events_deliver(&internal_events,
 					      internal_effects_out);
@@ -5771,6 +5792,8 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch_effects(
 {
 	LIST_HEAD(internal_events);
 	LIST_HEAD(transaction_burst_counts);
+	u32 burst_limit;
+	u32 max_subtree_depth;
 	long ret = 0;
 	u32 i;
 
@@ -5786,12 +5809,14 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch_effects(
 		if (ret)
 			return ret;
 	}
+	burst_limit = pkm_lcs_runtime_max_transaction_watch_event_burst();
+	max_subtree_depth = pkm_lcs_runtime_max_subtree_watch_depth();
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	for (i = 0; i < context_count; i++) {
 		ret = pkm_lcs_key_fd_transaction_burst_count_context_locked(
-			&contexts[i], &transaction_burst_counts,
-			PKM_LCS_KEY_FD_TRANSACTION_WATCH_BURST_LIMIT);
+			&contexts[i], &transaction_burst_counts, burst_limit,
+			max_subtree_depth);
 		if (ret)
 			goto out_unlock;
 	}
@@ -5802,7 +5827,7 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch_effects(
 	for (i = 0; i < context_count; i++) {
 		ret = pkm_lcs_key_fd_dispatch_watch_event_context_locked(
 			&contexts[i], &transaction_burst_counts,
-			&internal_events);
+			&internal_events, max_subtree_depth);
 		if (ret)
 			break;
 	}
@@ -5823,7 +5848,8 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch(
 }
 
 static long pkm_lcs_key_fd_dispatch_overflow_context_locked(
-	const struct pkm_lcs_watch_dispatch_context *context)
+	const struct pkm_lcs_watch_dispatch_context *context,
+	u32 max_subtree_depth)
 {
 	struct pkm_lcs_subtree_watch_entry *subtree;
 	struct pkm_lcs_watch_registry_entry *entry;
@@ -5849,11 +5875,15 @@ static long pkm_lcs_key_fd_dispatch_overflow_context_locked(
 	changed_index = context->path_component_count - 1U;
 	for (i = changed_index; i > 0; i--) {
 		const u8 *ancestor_guid = context->ancestor_guids[i - 1U];
+		u32 path_count = changed_index - (i - 1U);
 
 		if (pkm_lcs_guid_equal(ancestor_guid, context->changed_key_guid))
 			continue;
 		subtree = pkm_lcs_subtree_watch_find_locked(ancestor_guid);
 		if (!subtree)
+			continue;
+		if (pkm_lcs_key_fd_subtree_depth_suppressed(
+			    path_count, max_subtree_depth))
 			continue;
 
 		hash = pkm_lcs_guid_hash(ancestor_guid);
@@ -5879,6 +5909,7 @@ long pkm_lcs_key_fd_dispatch_overflow_context(
 	const struct pkm_lcs_watch_dispatch_context *context)
 {
 	struct pkm_lcs_watch_dispatch_context overflow_context;
+	u32 max_subtree_depth;
 	long ret;
 
 	if (!context)
@@ -5891,10 +5922,11 @@ long pkm_lcs_key_fd_dispatch_overflow_context(
 	ret = pkm_lcs_key_fd_validate_dispatch_context(&overflow_context);
 	if (ret)
 		return ret;
+	max_subtree_depth = pkm_lcs_runtime_max_subtree_watch_depth();
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	ret = pkm_lcs_key_fd_dispatch_overflow_context_locked(
-		&overflow_context);
+		&overflow_context, max_subtree_depth);
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 	return ret;
 }

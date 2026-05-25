@@ -331,6 +331,30 @@ u32 pkm_lcs_runtime_max_key_depth(void)
 	return limits.max_key_depth;
 }
 
+u32 pkm_lcs_runtime_notification_queue_size(void)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return limits.notification_queue_size;
+}
+
+u32 pkm_lcs_runtime_max_subtree_watch_depth(void)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return limits.max_subtree_watch_depth;
+}
+
+u32 pkm_lcs_runtime_max_transaction_watch_event_burst(void)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return limits.max_transaction_watch_event_burst;
+}
+
 extern int lcs_rust_validate_layer_publication(
 	const u8 *layer_name, u32 layer_name_len,
 	const u8 metadata_key_guid[16], const u8 *metadata_security_descriptor,

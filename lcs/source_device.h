@@ -656,6 +656,9 @@ u32 pkm_lcs_runtime_request_timeout_ms(void);
 u32 pkm_lcs_runtime_transaction_timeout_ms(void);
 u32 pkm_lcs_runtime_symlink_depth_limit(void);
 u32 pkm_lcs_runtime_max_key_depth(void);
+u32 pkm_lcs_runtime_notification_queue_size(void);
+u32 pkm_lcs_runtime_max_subtree_watch_depth(void);
+u32 pkm_lcs_runtime_max_transaction_watch_event_burst(void);
 long pkm_lcs_validate_syscall_relative_path(
 	const char *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);
