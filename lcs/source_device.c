@@ -7304,6 +7304,52 @@ out_layers:
 	return ret;
 }
 
+long pkm_lcs_layer_metadata_root_discover_from_machine_hive(
+	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
+	bool *present_out, u8 layers_root_guid_out[RSI_GUID_SIZE])
+{
+	static const struct pkm_lcs_path_component_view layers_path[] = {
+		{ .name = "Machine", .name_len = sizeof("Machine") - 1 },
+		{ .name = "System", .name_len = sizeof("System") - 1 },
+		{ .name = "Registry", .name_len = sizeof("Registry") - 1 },
+		{ .name = "Layers", .name_len = sizeof("Layers") - 1 },
+	};
+	struct pkm_lcs_resolved_key_path layers_root = { };
+	struct pkm_lcs_layer_snapshot layers = { };
+	long ret;
+
+	if (present_out)
+		*present_out = false;
+	if (layers_root_guid_out)
+		memset(layers_root_guid_out, 0, RSI_GUID_SIZE);
+	if (!source_id || !machine_root_guid || !present_out ||
+	    !layers_root_guid_out)
+		return -EINVAL;
+
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layers);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_walk_absolute_components(
+		source_id, 0, machine_root_guid, layers_path,
+		ARRAY_SIZE(layers_path), layers.layers, layers.layer_count,
+		NULL, 0, &layers_root);
+	if (ret == -ENOENT) {
+		ret = 0;
+		goto out_layers;
+	}
+	if (ret)
+		goto out_layers;
+
+	memcpy(layers_root_guid_out, layers_root.key_guid, RSI_GUID_SIZE);
+	*present_out = true;
+	pkm_lcs_resolved_key_path_destroy(&layers_root);
+
+out_layers:
+	pkm_lcs_source_layer_snapshot_release(&layers);
+	return ret;
+}
+
 static long pkm_lcs_publish_open_key_for_token(
 	const void *token, u32 source_id, const u8 key_guid[RSI_GUID_SIZE],
 	const u8 *sd, size_t sd_len, u32 desired_access,

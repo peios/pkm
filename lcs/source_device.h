@@ -605,6 +605,9 @@ long pkm_lcs_runtime_limits_refresh_self_config_from_key(
 long pkm_lcs_runtime_limits_refresh_self_config_from_machine_hive(
 	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_self_config_apply_plan *result_out);
+long pkm_lcs_layer_metadata_root_discover_from_machine_hive(
+	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
+	bool *present_out, u8 layers_root_guid_out[RSI_GUID_SIZE]);
 u32 pkm_lcs_runtime_request_timeout_ms(void);
 u32 pkm_lcs_runtime_transaction_timeout_ms(void);
 u32 pkm_lcs_runtime_symlink_depth_limit(void);

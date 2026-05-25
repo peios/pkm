@@ -6750,6 +6750,134 @@ static void pkm_lcs_kunit_self_config_machine_hive_bad_inputs_fail_closed(
 	KUNIT_EXPECT_EQ(test, plan.applied_count, 0U);
 }
 
+static void pkm_lcs_kunit_layer_metadata_root_discovers_layers(
+	struct kunit *test)
+{
+	static const u8 machine_root_guid[RSI_GUID_SIZE] = { 0x68 };
+	static const u8 system_guid[RSI_GUID_SIZE] = { 0x69 };
+	static const u8 registry_guid[RSI_GUID_SIZE] = { 0x6a };
+	static const u8 layers_guid[RSI_GUID_SIZE] = { 0x6b };
+	static const struct pkm_lcs_kunit_walk_source_step steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "Registry", .guid = registry_guid },
+		{ .expected_child = "Layers", .guid = layers_guid },
+	};
+	struct pkm_lcs_kunit_walk_source_script script = {
+		.steps = steps,
+		.step_count = ARRAY_SIZE(steps),
+	};
+	u8 discovered_guid[RSI_GUID_SIZE];
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	bool present = false;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread,
+					 &script,
+					 "pkm-lcs-kunit-layers-root");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_layer_metadata_root_discover_from_machine_hive(
+		1, machine_root_guid, &present, discovered_guid);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_TRUE(test, present);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(discovered_guid, layers_guid, RSI_GUID_SIZE), 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_layer_metadata_root_missing_retains_fallback(
+	struct kunit *test)
+{
+	static const u8 machine_root_guid[RSI_GUID_SIZE] = { 0x6c };
+	static const u8 system_guid[RSI_GUID_SIZE] = { 0x6d };
+	static const u8 registry_guid[RSI_GUID_SIZE] = { 0x6e };
+	static const u8 zero_guid[RSI_GUID_SIZE];
+	static const struct pkm_lcs_kunit_walk_source_step steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "Registry", .guid = registry_guid },
+		{ .expected_child = "Layers", .empty = true },
+	};
+	struct pkm_lcs_kunit_walk_source_script script = {
+		.steps = steps,
+		.step_count = ARRAY_SIZE(steps),
+	};
+	u8 discovered_guid[RSI_GUID_SIZE];
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	bool present = true;
+	long ret;
+	int thread_ret;
+
+	memset(discovered_guid, 0xee, sizeof(discovered_guid));
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread,
+					 &script,
+					 "pkm-lcs-kunit-layers-missing");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_layer_metadata_root_discover_from_machine_hive(
+		1, machine_root_guid, &present, discovered_guid);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_FALSE(test, present);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(discovered_guid, zero_guid, RSI_GUID_SIZE), 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_layer_metadata_root_bad_inputs_fail_closed(
+	struct kunit *test)
+{
+	static const u8 machine_root_guid[RSI_GUID_SIZE] = { 0x6f };
+	static const u8 zero_guid[RSI_GUID_SIZE];
+	u8 discovered_guid[RSI_GUID_SIZE];
+	bool present = true;
+
+	memset(discovered_guid, 0xee, sizeof(discovered_guid));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_metadata_root_discover_from_machine_hive(
+				0, machine_root_guid, &present,
+				discovered_guid),
+			(long)-EINVAL);
+	KUNIT_EXPECT_FALSE(test, present);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(discovered_guid, zero_guid, RSI_GUID_SIZE), 0);
+
+	present = true;
+	memset(discovered_guid, 0xee, sizeof(discovered_guid));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_metadata_root_discover_from_machine_hive(
+				1, NULL, &present, discovered_guid),
+			(long)-EINVAL);
+	KUNIT_EXPECT_FALSE(test, present);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(discovered_guid, zero_guid, RSI_GUID_SIZE), 0);
+}
+
 static void pkm_lcs_kunit_runtime_request_timeout_uses_snapshot(
 	struct kunit *test)
 {
@@ -39762,6 +39890,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_self_config_missing_system_retains_defaults),
 	KUNIT_CASE(
 		pkm_lcs_kunit_self_config_machine_hive_bad_inputs_fail_closed),
+	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_root_discovers_layers),
+	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_root_missing_retains_fallback),
+	KUNIT_CASE(
+		pkm_lcs_kunit_layer_metadata_root_bad_inputs_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_runtime_request_timeout_uses_snapshot),
 	KUNIT_CASE(pkm_lcs_kunit_runtime_transaction_timeout_uses_snapshot),
 	KUNIT_CASE(pkm_lcs_kunit_runtime_symlink_depth_uses_snapshot),
