@@ -511,21 +511,21 @@ static long pkm_lcs_transaction_layer_delete_effect_append(
 }
 
 static long pkm_lcs_transaction_layer_delete_effects_apply(
-	struct list_head *effects)
+	struct list_head *effects, const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_transaction_layer_delete_effect *effect;
 
-	if (!effects)
+	if (!effects || !limits)
 		return -EINVAL;
 
 	list_for_each_entry(effect, effects, link) {
 		long ret;
 
-		ret = pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
+		ret = pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout_with_limits(
 			effect->layer_name, effect->layer_name_len,
-			pkm_lcs_runtime_request_timeout_ms(),
+			limits->request_timeout_ms,
 			effect->skip_generation_source_id,
-			effect->skip_generation_root_guid, NULL);
+			effect->skip_generation_root_guid, limits, NULL);
 		if (ret)
 			return ret;
 	}
@@ -1726,7 +1726,8 @@ static long pkm_lcs_transaction_append_key_path_invisible_exact(
 }
 
 static long pkm_lcs_transaction_delete_key_post_lookup(
-	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry)
+	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_rsi_lookup_guid_entry_result result = { };
@@ -1736,7 +1737,7 @@ static long pkm_lcs_transaction_delete_key_post_lookup(
 	u64 next_sequence = 0;
 	long ret;
 
-	if (!source_id || !entry)
+	if (!source_id || !entry || !limits)
 		return -EINVAL;
 	if (entry->post_lookup_valid)
 		return 0;
@@ -1749,9 +1750,9 @@ static long pkm_lcs_transaction_delete_key_post_lookup(
 		return ret;
 
 	pkm_lcs_source_response_frame_init(&frame);
-	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout(
+	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
 		source_id, 0, entry->parent_guid, entry->child_name,
-		entry->child_name_len, pkm_lcs_runtime_request_timeout_ms(),
+		entry->child_name_len, limits, limits->request_timeout_ms,
 		&frame, &response, NULL);
 	if (ret)
 		goto out_frame;
@@ -1785,16 +1786,18 @@ out_frame:
 }
 
 static long pkm_lcs_transaction_apply_delete_key_orphan_effects(
-	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry)
+	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	u32 live_refs = 0;
 	u32 marked = 0;
 	long ret;
 
-	if (!source_id || !entry)
+	if (!source_id || !entry || !limits)
 		return -EINVAL;
 
-	ret = pkm_lcs_transaction_delete_key_post_lookup(source_id, entry);
+	ret = pkm_lcs_transaction_delete_key_post_lookup(source_id, entry,
+							limits);
 	if (ret)
 		return ret;
 	if (entry->target_still_named)
@@ -1806,25 +1809,26 @@ static long pkm_lcs_transaction_apply_delete_key_orphan_effects(
 		return ret;
 
 	if (!live_refs)
-		(void)pkm_lcs_source_dispatch_drop_key_request(
-			source_id, 0, entry->key_guid, NULL);
+		(void)pkm_lcs_source_dispatch_drop_key_request_with_limits(
+			source_id, 0, entry->key_guid, limits, NULL);
 	return 0;
 }
 
 static long pkm_lcs_transaction_log_apply_orphan_effects(
-	struct pkm_lcs_transaction_fd *txn, u32 source_id)
+	struct pkm_lcs_transaction_fd *txn, u32 source_id,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_transaction_log_entry *entry;
 	long ret;
 
-	if (!txn || !source_id)
+	if (!txn || !source_id || !limits)
 		return -EINVAL;
 
 	list_for_each_entry(entry, &txn->mutation_log, link) {
 		switch (entry->kind) {
 		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
 			ret = pkm_lcs_transaction_apply_delete_key_orphan_effects(
-				source_id, &entry->delete_key);
+				source_id, &entry->delete_key, limits);
 			if (ret)
 				return ret;
 			break;
@@ -1996,13 +2000,14 @@ static long pkm_lcs_transaction_layer_metadata_seen_after(
 static long pkm_lcs_transaction_log_apply_layer_metadata_effects(
 	struct pkm_lcs_transaction_fd *txn, u32 source_id,
 	struct list_head *layer_delete_effects,
+	const struct pkm_lcs_runtime_limits *limits,
 	bool *layer_recovery_required_out)
 {
 	struct pkm_lcs_transaction_log_entry *entry;
 	u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
 
 	if (!txn || !source_id || !layer_delete_effects ||
-	    !layer_recovery_required_out)
+	    !limits || !layer_recovery_required_out)
 		return -EINVAL;
 	*layer_recovery_required_out = false;
 
@@ -2053,26 +2058,28 @@ static long pkm_lcs_transaction_log_apply_layer_metadata_effects(
 			for (i = 0; i < depth; i++)
 				created_path[i] = path[i];
 			created_path[depth] = layer_name;
-			ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result(
+			ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result_with_limits(
 				source_id, key_guid, created_path, depth + 1U,
 				entry->create_key.creator_sid,
-				entry->create_key.creator_sid_len, true,
+				entry->create_key.creator_sid_len, true, limits,
 				&effective_changed);
 			if (!ret && effective_changed)
 				*layer_recovery_required_out = true;
 			break;
 		}
 		case PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY:
-			ret = pkm_lcs_key_path_refresh_layer_metadata(
+			ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result_with_limits(
 				source_id, key_guid,
-				(const char * const *)path, depth);
+				(const char * const *)path, depth, NULL, 0,
+				false, limits, NULL);
 			break;
 		case PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE: {
 			bool effective_changed = false;
 
-			ret = pkm_lcs_key_path_refresh_layer_metadata_result(
+			ret = pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result_with_limits(
 				source_id, key_guid,
-				(const char * const *)path, depth,
+				(const char * const *)path, depth, NULL, 0,
+				false, limits,
 				&effective_changed);
 			if (!ret && effective_changed)
 				*layer_recovery_required_out = true;
@@ -2106,14 +2113,16 @@ static long pkm_lcs_transaction_log_apply_layer_metadata_effects(
 static long pkm_lcs_transaction_append_delete_key_exact(
 	u32 source_id, struct pkm_lcs_transaction_delete_key_log *entry,
 	struct pkm_lcs_watch_dispatch_context *contexts, u32 context_capacity,
-	u32 *index, struct list_head *owners)
+	u32 *index, struct list_head *owners,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	long ret;
 
-	if (!source_id || !entry)
+	if (!source_id || !entry || !limits)
 		return -EINVAL;
 
-	ret = pkm_lcs_transaction_delete_key_post_lookup(source_id, entry);
+	ret = pkm_lcs_transaction_delete_key_post_lookup(source_id, entry,
+							limits);
 	if (ret)
 		return ret;
 	if (entry->target_still_named)
@@ -2144,6 +2153,7 @@ static long pkm_lcs_transaction_append_hide_key_exact(
 
 static long pkm_lcs_transaction_log_dispatch_watch_batch(
 	struct pkm_lcs_transaction_fd *txn, u32 source_id,
+	const struct pkm_lcs_runtime_limits *limits,
 	u32 *internal_watch_effects_out)
 {
 	struct pkm_lcs_watch_dispatch_context *contexts;
@@ -2156,7 +2166,7 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 
 	if (internal_watch_effects_out)
 		*internal_watch_effects_out = 0;
-	if (!txn)
+	if (!txn || !limits)
 		return -EINVAL;
 	if (!txn->mutation_log_entries)
 		return 0;
@@ -2328,7 +2338,8 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
 			ret = pkm_lcs_transaction_append_delete_key_exact(
 				source_id, &entry->delete_key, contexts,
-				context_capacity, &index, &context_owners);
+				context_capacity, &index, &context_owners,
+				limits);
 			if (ret)
 				goto out_free;
 			break;
@@ -2352,6 +2363,7 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 	u32 status, bool detached, u32 *final_state_out,
 	bool *release_counter_out, bool *source_down_required_out,
 	struct list_head *layer_delete_effects,
+	const struct pkm_lcs_runtime_limits *limits,
 	u32 *internal_watch_effects_out)
 {
 	bool release_counter = false;
@@ -2365,7 +2377,7 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 
 	if (!txn || !transaction_id || !source_id || !final_state_out ||
 	    !release_counter_out || !source_down_required_out ||
-	    !layer_delete_effects)
+	    !layer_delete_effects || !limits)
 		return -EINVAL;
 	*final_state_out = 0;
 	*release_counter_out = false;
@@ -2384,7 +2396,7 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 		spin_unlock(&txn->lock);
 
 		ret = pkm_lcs_transaction_log_apply_layer_metadata_effects(
-			txn, source_id, layer_delete_effects,
+			txn, source_id, layer_delete_effects, limits,
 			&layer_recovery_required);
 		if (ret) {
 			*source_down_required_out = true;
@@ -2407,13 +2419,13 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 			}
 		}
 		ret = pkm_lcs_transaction_log_apply_orphan_effects(
-			txn, source_id);
+			txn, source_id, limits);
 		if (ret) {
 			*source_down_required_out = true;
 			return -EIO;
 		}
 		(void)pkm_lcs_transaction_log_dispatch_watch_batch(
-			txn, source_id, internal_watch_effects_out);
+			txn, source_id, limits, internal_watch_effects_out);
 	}
 
 	spin_lock(&txn->lock);
@@ -2513,8 +2525,23 @@ static long pkm_lcs_transaction_fd_mark_commit_request_timeout(
 	return 0;
 }
 
+static long pkm_lcs_transaction_fd_commit_from_state_timeout_with_limits(
+	struct pkm_lcs_transaction_fd *txn,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms);
+
 static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 	struct pkm_lcs_transaction_fd *txn, u32 timeout_ms)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_transaction_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_transaction_fd_commit_from_state_timeout_with_limits(
+		txn, &limits, timeout_ms);
+}
+
+static long pkm_lcs_transaction_fd_commit_from_state_timeout_with_limits(
+	struct pkm_lcs_transaction_fd *txn,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms)
 {
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_source_enqueue_result enqueue = { };
@@ -2532,7 +2559,7 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 	bool source_down_required = false;
 	u32 mark_source_down_id = 0;
 
-	if (!txn)
+	if (!txn || !limits)
 		return -EINVAL;
 
 	mutex_lock(&txn->bind_lock);
@@ -2583,8 +2610,9 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 	if (ret)
 		goto out_unlock;
 
-	ret = pkm_lcs_source_commit_transaction_round_trip_timeout(
-		source_id, transaction_id, timeout_ms, &response, &enqueue);
+	ret = pkm_lcs_source_commit_transaction_round_trip_timeout_with_limits(
+		source_id, transaction_id, limits, timeout_ms, &response,
+		&enqueue);
 	if (ret) {
 		if (ret == -ETIMEDOUT && enqueue.len) {
 			(void)pkm_lcs_transaction_fd_mark_commit_request_timeout(
@@ -2603,6 +2631,7 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 					&release_counter,
 					&source_down_required,
 					&layer_delete_effects,
+					limits,
 					&internal_watch_effects);
 			if (!apply_ret) {
 				apply_layer_delete_effects = true;
@@ -2631,6 +2660,7 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout(
 	ret = pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 		txn, transaction_id, source_id, RSI_OK, false, &final_state,
 		&release_counter, &source_down_required, &layer_delete_effects,
+		limits,
 		&internal_watch_effects);
 	if (ret) {
 		if (source_down_required) {
@@ -2658,7 +2688,7 @@ out_unlock:
 		long effects_ret;
 
 		effects_ret = pkm_lcs_transaction_layer_delete_effects_apply(
-			&layer_delete_effects);
+			&layer_delete_effects, limits);
 		if (effects_ret) {
 			mark_source_down = true;
 			mark_source_down_id = source_id;
@@ -2675,8 +2705,11 @@ out_unlock:
 static long pkm_lcs_transaction_fd_commit_from_state(
 	struct pkm_lcs_transaction_fd *txn)
 {
-	return pkm_lcs_transaction_fd_commit_from_state_timeout(
-		txn, pkm_lcs_runtime_request_timeout_ms());
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_transaction_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_transaction_fd_commit_from_state_timeout_with_limits(
+		txn, &limits, limits.request_timeout_ms);
 }
 
 static __poll_t pkm_lcs_transaction_fd_poll(struct file *file,
@@ -3281,7 +3314,8 @@ long pkm_lcs_transaction_fd_mark_source_down(u32 source_id, u32 *marked_out)
 }
 
 long pkm_lcs_transaction_fd_handle_late_commit_response(
-	u32 source_id, u64 transaction_id, u32 status)
+	u32 source_id, u64 transaction_id, u32 status,
+	const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_transaction_fd *txn;
 	struct pkm_lcs_transaction_fd *destroy_txn = NULL;
@@ -3294,7 +3328,7 @@ long pkm_lcs_transaction_fd_handle_late_commit_response(
 	u32 count = 0;
 	long ret = -ENOENT;
 
-	if (!source_id || !transaction_id)
+	if (!source_id || !transaction_id || !limits)
 		return -EINVAL;
 
 	mutex_lock(&pkm_lcs_transaction_registry_lock);
@@ -3315,7 +3349,7 @@ long pkm_lcs_transaction_fd_handle_late_commit_response(
 		ret = pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 			txn, transaction_id, source_id, status, true,
 			&final_state, &release_counter, &source_down_required,
-			&layer_delete_effects, &internal_watch_effects);
+			&layer_delete_effects, limits, &internal_watch_effects);
 		if (!ret) {
 			bool destroy_detached;
 
@@ -3346,7 +3380,7 @@ long pkm_lcs_transaction_fd_handle_late_commit_response(
 		long effects_ret;
 
 		effects_ret = pkm_lcs_transaction_layer_delete_effects_apply(
-			&layer_delete_effects);
+			&layer_delete_effects, limits);
 		if (effects_ret && !ret)
 			ret = effects_ret;
 	}

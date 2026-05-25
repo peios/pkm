@@ -205,6 +205,7 @@ struct pkm_lcs_kunit_transaction_source_script {
 	u64 expected_payload_txn_id;
 	u32 reads;
 	u32 writes;
+	bool reset_runtime_limits_before_response;
 	int result;
 };
 
@@ -213,6 +214,7 @@ struct pkm_lcs_kunit_flush_source_script {
 	const char *expected_hive_name;
 	u32 status;
 	bool extra_response_payload;
+	bool reset_runtime_limits_before_response;
 	u32 reads;
 	u32 writes;
 	int result;
@@ -224,6 +226,7 @@ struct pkm_lcs_kunit_drop_key_source_script {
 	u64 expected_txn_id;
 	u32 status;
 	bool extra_response_payload;
+	bool reset_runtime_limits_before_response;
 	u32 reads;
 	u32 writes;
 	int result;
@@ -239,6 +242,7 @@ struct pkm_lcs_kunit_delete_layer_source_script {
 	u32 orphaned_guid_count;
 	bool extra_response_payload;
 	bool abort_before_delete_observed;
+	bool reset_runtime_limits_before_response;
 	u32 reads;
 	u32 writes;
 	int result;
@@ -22531,6 +22535,8 @@ static int pkm_lcs_kunit_flush_source_thread(void *data)
 		script->result = -EINVAL;
 		return script->result;
 	}
+	if (script->reset_runtime_limits_before_response)
+		pkm_lcs_runtime_limits_reset_defaults();
 
 	memset(response, 0, sizeof(response));
 	put_unaligned_le32(RSI_MIN_RESPONSE_SIZE,
@@ -22616,6 +22622,8 @@ static int pkm_lcs_kunit_drop_key_source_thread(void *data)
 		script->result = -EINVAL;
 		return script->result;
 	}
+	if (script->reset_runtime_limits_before_response)
+		pkm_lcs_runtime_limits_reset_defaults();
 
 	memset(response, 0, sizeof(response));
 	put_unaligned_le32(RSI_MIN_RESPONSE_SIZE,
@@ -22769,6 +22777,8 @@ static int pkm_lcs_kunit_delete_layer_source_thread(void *data)
 		script->result = -EINVAL;
 		return script->result;
 	}
+	if (script->reset_runtime_limits_before_response)
+		pkm_lcs_runtime_limits_reset_defaults();
 
 	memset(response, 0, sizeof(response));
 	put_unaligned_le32(RSI_MIN_RESPONSE_SIZE,
@@ -32115,6 +32125,8 @@ static int pkm_lcs_kunit_transaction_source_thread(void *data)
 			return script->result;
 		}
 	}
+	if (script->reset_runtime_limits_before_response)
+		pkm_lcs_runtime_limits_reset_defaults();
 
 	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
 	memset(response, 0, sizeof(response));
@@ -40682,6 +40694,126 @@ static void pkm_lcs_kunit_source_write_key_retains_supplied_limits(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_control_retains_supplied_limits(
+	struct kunit *test)
+{
+	enum { LONG_NAME_LEN = 300 };
+	static const char hive_name[] = "Machine";
+	static const char layer_name[] = "role-alpha";
+	static const u8 guid[RSI_GUID_SIZE] = { 0xe1 };
+	struct pkm_lcs_kunit_transaction_source_script txn_script = { };
+	struct pkm_lcs_kunit_flush_source_script flush_script = { };
+	struct pkm_lcs_kunit_drop_key_source_script drop_script = { };
+	struct pkm_lcs_kunit_delete_layer_source_script layer_script = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	int thread_ret;
+	long ret;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = LONG_NAME_LEN;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	txn_script.file = &file;
+	txn_script.expected_op_code = RSI_BEGIN_TRANSACTION;
+	txn_script.expected_header_txn_id = 0;
+	txn_script.expected_payload_txn_id = 0x0102030405060708ULL;
+	txn_script.expected_mode = RSI_TXN_READ_WRITE;
+	txn_script.status = RSI_OK;
+	txn_script.reset_runtime_limits_before_response = true;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_transaction_source_thread, &txn_script,
+		"pkm-lcs-kunit-txn-limit");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_begin_transaction_round_trip_timeout_with_limits(
+		1, txn_script.expected_payload_txn_id, RSI_TXN_READ_WRITE,
+		&limits, limits.request_timeout_ms, &response, &enqueue);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, txn_script.result, 0);
+	KUNIT_EXPECT_EQ(test, response.request_op_code,
+			(u16)RSI_BEGIN_TRANSACTION);
+	KUNIT_EXPECT_EQ(test, response.limits.max_path_component_length,
+			(u32)LONG_NAME_LEN);
+
+	memset(&response, 0, sizeof(response));
+	memset(&enqueue, 0, sizeof(enqueue));
+	flush_script.file = &file;
+	flush_script.expected_hive_name = hive_name;
+	flush_script.status = RSI_OK;
+	flush_script.reset_runtime_limits_before_response = true;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_flush_source_thread,
+					 &flush_script,
+					 "pkm-lcs-kunit-flush-limit");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_flush_round_trip_timeout_with_limits(
+		1, hive_name, strlen(hive_name), &limits,
+		limits.request_timeout_ms, &response, &enqueue);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, flush_script.result, 0);
+	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_FLUSH);
+	KUNIT_EXPECT_EQ(test, response.limits.max_path_component_length,
+			(u32)LONG_NAME_LEN);
+
+	memset(&response, 0, sizeof(response));
+	memset(&enqueue, 0, sizeof(enqueue));
+	drop_script.file = &file;
+	drop_script.expected_guid = guid;
+	drop_script.expected_txn_id = 0x1112131415161718ULL;
+	drop_script.status = RSI_OK;
+	drop_script.reset_runtime_limits_before_response = true;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_drop_key_source_thread,
+					 &drop_script,
+					 "pkm-lcs-kunit-drop-limit");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_drop_key_round_trip_timeout_with_limits(
+		1, drop_script.expected_txn_id, guid, &limits,
+		limits.request_timeout_ms, &response, &enqueue);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, drop_script.result, 0);
+	KUNIT_EXPECT_EQ(test, response.request_op_code, (u16)RSI_DROP_KEY);
+	KUNIT_EXPECT_EQ(test, response.limits.max_path_component_length,
+			(u32)LONG_NAME_LEN);
+
+	memset(&response, 0, sizeof(response));
+	memset(&enqueue, 0, sizeof(enqueue));
+	layer_script.file = &file;
+	layer_script.expected_layer_name = layer_name;
+	layer_script.status = RSI_OK;
+	layer_script.reset_runtime_limits_before_response = true;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_layer_source_thread, &layer_script,
+		"pkm-lcs-kunit-layer-limit");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_delete_layer_round_trip_timeout_with_limits(
+		1, layer_name, strlen(layer_name), &limits,
+		limits.request_timeout_ms, &response, &enqueue);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, layer_script.result, 0);
+	KUNIT_EXPECT_EQ(test, response.request_op_code,
+			(u16)RSI_DELETE_LAYER);
+	KUNIT_EXPECT_EQ(test, response.limits.max_path_component_length,
+			(u32)LONG_NAME_LEN);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_expect_source_validation_audit(
 	struct kunit *test, const char *validation_class,
 	const u8 key_guid[RSI_GUID_SIZE])
@@ -44701,6 +44833,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_read_key_round_trip_supplied_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_key_retains_supplied_limits),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_control_retains_supplied_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_malformed_path_name_audits),
 	KUNIT_CASE(

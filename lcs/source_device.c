@@ -4002,10 +4002,12 @@ out_unlock_table:
 
 static long pkm_lcs_source_dispatch_drop_key_request_with_waiter(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	struct pkm_lcs_source_queued_request *request;
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
@@ -4018,6 +4020,10 @@ static long pkm_lcs_source_dispatch_drop_key_request_with_waiter(
 		memset(result, 0, sizeof(*result));
 	if (!guid || !memchr_inv(guid, 0, RSI_GUID_SIZE))
 		return -EINVAL;
+	if (!limits) {
+		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 
 	request = kzalloc(sizeof(*request), GFP_KERNEL);
 	if (!request)
@@ -4045,7 +4051,7 @@ static long pkm_lcs_source_dispatch_drop_key_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4063,7 +4069,7 @@ static long pkm_lcs_source_dispatch_drop_key_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		guid, NULL, waiter);
+		guid, limits, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -4545,10 +4551,12 @@ out_unlock_table:
 
 static long pkm_lcs_source_dispatch_transaction_request_with_waiter(
 	u32 source_id, u16 op_code, u64 transaction_id, u32 mode,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	struct pkm_lcs_source_queued_request *request;
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
@@ -4561,6 +4569,10 @@ static long pkm_lcs_source_dispatch_transaction_request_with_waiter(
 
 	if (result)
 		memset(result, 0, sizeof(*result));
+	if (!limits) {
+		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 
 	switch (op_code) {
 	case RSI_BEGIN_TRANSACTION:
@@ -4606,7 +4618,7 @@ static long pkm_lcs_source_dispatch_transaction_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4642,7 +4654,7 @@ static long pkm_lcs_source_dispatch_transaction_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, retained_txn_id, built.op_code,
-		NULL, NULL, waiter);
+		NULL, limits, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -4669,10 +4681,12 @@ out_unlock_table:
 
 static long pkm_lcs_source_dispatch_flush_request_with_waiter(
 	u32 source_id, const char *hive_name, u32 hive_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	struct pkm_lcs_rsi_built_request built = { };
+	struct pkm_lcs_runtime_limits effective_limits;
 	struct pkm_lcs_source_queued_request *request;
 	struct pkm_lcs_source_slot *slot;
 	struct pkm_lcs_source_fd *source_fd;
@@ -4685,6 +4699,10 @@ static long pkm_lcs_source_dispatch_flush_request_with_waiter(
 		memset(result, 0, sizeof(*result));
 	if (!hive_name || !hive_name_len)
 		return -EINVAL;
+	if (!limits) {
+		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
+		limits = &effective_limits;
+	}
 	if (hive_name_len > PKM_LCS_MAX_HIVE_NAME_BYTES_HARD)
 		return -ENAMETOOLONG;
 	if (check_add_overflow((size_t)RSI_REQUEST_HEADER_SIZE,
@@ -4718,7 +4736,7 @@ static long pkm_lcs_source_dispatch_flush_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4737,7 +4755,7 @@ static long pkm_lcs_source_dispatch_flush_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		NULL, NULL, waiter);
+		NULL, limits, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -4816,7 +4834,7 @@ static long pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
 		ret = -EIO;
 		goto out_unlock_queue;
 	}
-	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, NULL)) {
+	if (pkm_lcs_source_in_flight_at_limit_locked(source_fd, limits)) {
 		ret = -EAGAIN;
 		goto out_unlock_queue;
 	}
@@ -4835,7 +4853,7 @@ static long pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
 
 	ret = pkm_lcs_source_in_flight_insert_locked(
 		source_fd, built.request_id, built.txn_id, built.op_code,
-		NULL, NULL, waiter);
+		NULL, limits, waiter);
 	if (ret)
 		goto out_unlock_queue;
 
@@ -5386,7 +5404,16 @@ long pkm_lcs_source_dispatch_drop_key_request(
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	return pkm_lcs_source_dispatch_drop_key_request_with_waiter(
-		source_id, txn_id, guid, NULL, result);
+		source_id, txn_id, guid, NULL, NULL, result);
+}
+
+long pkm_lcs_source_dispatch_drop_key_request_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	return pkm_lcs_source_dispatch_drop_key_request_with_waiter(
+		source_id, txn_id, guid, limits, NULL, result);
 }
 
 long pkm_lcs_source_dispatch_drop_key_waitable_request(
@@ -5399,7 +5426,7 @@ long pkm_lcs_source_dispatch_drop_key_waitable_request(
 
 	pkm_lcs_source_response_waiter_init(waiter);
 	return pkm_lcs_source_dispatch_drop_key_request_with_waiter(
-		source_id, txn_id, guid, waiter, result);
+		source_id, txn_id, guid, NULL, waiter, result);
 }
 
 long pkm_lcs_source_dispatch_begin_transaction_request(
@@ -5408,7 +5435,7 @@ long pkm_lcs_source_dispatch_begin_transaction_request(
 {
 	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
 		source_id, RSI_BEGIN_TRANSACTION, transaction_id, mode, NULL,
-		result);
+		NULL, result);
 }
 
 long pkm_lcs_source_dispatch_begin_transaction_waitable_request(
@@ -5422,7 +5449,7 @@ long pkm_lcs_source_dispatch_begin_transaction_waitable_request(
 	pkm_lcs_source_response_waiter_init(waiter);
 	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
 		source_id, RSI_BEGIN_TRANSACTION, transaction_id, mode,
-		waiter, result);
+		NULL, waiter, result);
 }
 
 long pkm_lcs_source_dispatch_commit_transaction_request(
@@ -5431,7 +5458,7 @@ long pkm_lcs_source_dispatch_commit_transaction_request(
 {
 	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
 		source_id, RSI_COMMIT_TRANSACTION, transaction_id, 0, NULL,
-		result);
+		NULL, result);
 }
 
 long pkm_lcs_source_dispatch_commit_transaction_waitable_request(
@@ -5444,8 +5471,8 @@ long pkm_lcs_source_dispatch_commit_transaction_waitable_request(
 
 	pkm_lcs_source_response_waiter_init(waiter);
 	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
-		source_id, RSI_COMMIT_TRANSACTION, transaction_id, 0, waiter,
-		result);
+		source_id, RSI_COMMIT_TRANSACTION, transaction_id, 0, NULL,
+		waiter, result);
 }
 
 long pkm_lcs_source_dispatch_abort_transaction_request(
@@ -5454,7 +5481,17 @@ long pkm_lcs_source_dispatch_abort_transaction_request(
 {
 	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
 		source_id, RSI_ABORT_TRANSACTION, transaction_id, 0, NULL,
-		result);
+		NULL, result);
+}
+
+long pkm_lcs_source_dispatch_abort_transaction_request_with_limits(
+	u32 source_id, u64 transaction_id,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_source_enqueue_result *result)
+{
+	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
+		source_id, RSI_ABORT_TRANSACTION, transaction_id, 0, limits,
+		NULL, result);
 }
 
 long pkm_lcs_source_dispatch_abort_transaction_waitable_request(
@@ -5467,8 +5504,8 @@ long pkm_lcs_source_dispatch_abort_transaction_waitable_request(
 
 	pkm_lcs_source_response_waiter_init(waiter);
 	return pkm_lcs_source_dispatch_transaction_request_with_waiter(
-		source_id, RSI_ABORT_TRANSACTION, transaction_id, 0, waiter,
-		result);
+		source_id, RSI_ABORT_TRANSACTION, transaction_id, 0, NULL,
+		waiter, result);
 }
 
 long pkm_lcs_source_dispatch_delete_layer_request(
@@ -5504,7 +5541,7 @@ long pkm_lcs_source_dispatch_flush_request(
 	struct pkm_lcs_source_enqueue_result *result)
 {
 	return pkm_lcs_source_dispatch_flush_request_with_waiter(
-		source_id, hive_name, hive_name_len, NULL, result);
+		source_id, hive_name, hive_name_len, NULL, NULL, result);
 }
 
 long pkm_lcs_source_dispatch_flush_waitable_request(
@@ -5517,11 +5554,12 @@ long pkm_lcs_source_dispatch_flush_waitable_request(
 
 	pkm_lcs_source_response_waiter_init(waiter);
 	return pkm_lcs_source_dispatch_flush_request_with_waiter(
-		source_id, hive_name, hive_name_len, waiter, result);
+		source_id, hive_name, hive_name_len, NULL, waiter, result);
 }
 
-static long pkm_lcs_source_transaction_round_trip_timeout(
+static long pkm_lcs_source_transaction_round_trip_timeout_with_limits(
 	u32 source_id, u16 op_code, u64 transaction_id, u32 mode,
+	const struct pkm_lcs_runtime_limits *limits,
 	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
@@ -5533,17 +5571,19 @@ static long pkm_lcs_source_transaction_round_trip_timeout(
 		memset(response, 0, sizeof(*response));
 	if (enqueue)
 		memset(enqueue, 0, sizeof(*enqueue));
+	if (!limits)
+		return -EINVAL;
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, NULL, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
 		ret = pkm_lcs_source_dispatch_transaction_request_with_waiter(
-			source_id, op_code, transaction_id, mode, &waiter,
+			source_id, op_code, transaction_id, mode, limits, &waiter,
 			enqueue);
 		if (ret != -EAGAIN)
 			break;
@@ -5562,9 +5602,23 @@ long pkm_lcs_source_begin_transaction_round_trip_timeout(
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
-	return pkm_lcs_source_transaction_round_trip_timeout(
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_transaction_round_trip_timeout_with_limits(
 		source_id, RSI_BEGIN_TRANSACTION, transaction_id, mode,
-		timeout_ms, response, enqueue);
+		&limits, timeout_ms, response, enqueue);
+}
+
+long pkm_lcs_source_begin_transaction_round_trip_timeout_with_limits(
+	u32 source_id, u64 transaction_id, u32 mode,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_transaction_round_trip_timeout_with_limits(
+		source_id, RSI_BEGIN_TRANSACTION, transaction_id, mode,
+		limits, timeout_ms, response, enqueue);
 }
 
 long pkm_lcs_source_begin_transaction_round_trip(
@@ -5572,9 +5626,12 @@ long pkm_lcs_source_begin_transaction_round_trip(
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
-	return pkm_lcs_source_begin_transaction_round_trip_timeout(
-		source_id, transaction_id, mode,
-		pkm_lcs_runtime_request_timeout_ms(), response, enqueue);
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_begin_transaction_round_trip_timeout_with_limits(
+		source_id, transaction_id, mode, &limits,
+		limits.request_timeout_ms, response, enqueue);
 }
 
 long pkm_lcs_source_commit_transaction_round_trip_timeout(
@@ -5582,9 +5639,23 @@ long pkm_lcs_source_commit_transaction_round_trip_timeout(
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
-	return pkm_lcs_source_transaction_round_trip_timeout(
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_transaction_round_trip_timeout_with_limits(
 		source_id, RSI_COMMIT_TRANSACTION, transaction_id, 0,
-		timeout_ms, response, enqueue);
+		&limits, timeout_ms, response, enqueue);
+}
+
+long pkm_lcs_source_commit_transaction_round_trip_timeout_with_limits(
+	u32 source_id, u64 transaction_id,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_transaction_round_trip_timeout_with_limits(
+		source_id, RSI_COMMIT_TRANSACTION, transaction_id, 0,
+		limits, timeout_ms, response, enqueue);
 }
 
 long pkm_lcs_source_commit_transaction_round_trip(
@@ -5592,8 +5663,11 @@ long pkm_lcs_source_commit_transaction_round_trip(
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
-	return pkm_lcs_source_commit_transaction_round_trip_timeout(
-		source_id, transaction_id, pkm_lcs_runtime_request_timeout_ms(),
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_commit_transaction_round_trip_timeout_with_limits(
+		source_id, transaction_id, &limits, limits.request_timeout_ms,
 		response, enqueue);
 }
 
@@ -5602,9 +5676,23 @@ long pkm_lcs_source_abort_transaction_round_trip_timeout(
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
-	return pkm_lcs_source_transaction_round_trip_timeout(
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_transaction_round_trip_timeout_with_limits(
 		source_id, RSI_ABORT_TRANSACTION, transaction_id, 0,
-		timeout_ms, response, enqueue);
+		&limits, timeout_ms, response, enqueue);
+}
+
+long pkm_lcs_source_abort_transaction_round_trip_timeout_with_limits(
+	u32 source_id, u64 transaction_id,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	return pkm_lcs_source_transaction_round_trip_timeout_with_limits(
+		source_id, RSI_ABORT_TRANSACTION, transaction_id, 0,
+		limits, timeout_ms, response, enqueue);
 }
 
 long pkm_lcs_source_abort_transaction_round_trip(
@@ -5612,12 +5700,15 @@ long pkm_lcs_source_abort_transaction_round_trip(
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
-	return pkm_lcs_source_abort_transaction_round_trip_timeout(
-		source_id, transaction_id, pkm_lcs_runtime_request_timeout_ms(),
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_abort_transaction_round_trip_timeout_with_limits(
+		source_id, transaction_id, &limits, limits.request_timeout_ms,
 		response, enqueue);
 }
 
-static long pkm_lcs_source_delete_layer_round_trip_timeout_with_limits(
+long pkm_lcs_source_delete_layer_round_trip_timeout_with_limits(
 	u32 source_id, const char *layer_name, u32 layer_name_len,
 	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
@@ -5720,9 +5811,10 @@ static long pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout_with_
 	return ret;
 }
 
-long pkm_lcs_source_apply_delete_layer_orphan_response(
+static long pkm_lcs_source_apply_delete_layer_orphan_response_with_limits(
 	u32 source_id, const struct pkm_lcs_source_response_frame *frame,
 	u64 request_id,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_delete_layer_orphan_apply_result *result)
 {
 	struct pkm_lcs_rsi_delete_layer_response_summary summary = { };
@@ -5735,7 +5827,7 @@ long pkm_lcs_source_apply_delete_layer_orphan_response(
 
 	if (result)
 		memset(result, 0, sizeof(*result));
-	if (!source_id || !frame || !frame->data)
+	if (!source_id || !frame || !frame->data || !limits)
 		return -EINVAL;
 
 	ret = pkm_lcs_rsi_validate_delete_layer_response(
@@ -5762,8 +5854,8 @@ long pkm_lcs_source_apply_delete_layer_orphan_response(
 				       &marked_fd_count))
 			return -EOVERFLOW;
 		if (!live_refs) {
-			ret = pkm_lcs_source_dispatch_drop_key_request(
-				source_id, 0, guid, NULL);
+			ret = pkm_lcs_source_dispatch_drop_key_request_with_limits(
+				source_id, 0, guid, limits, NULL);
 			if (!ret)
 				immediate_drop_count++;
 		}
@@ -5775,6 +5867,18 @@ long pkm_lcs_source_apply_delete_layer_orphan_response(
 		result->immediate_drop_count = immediate_drop_count;
 	}
 	return 0;
+}
+
+long pkm_lcs_source_apply_delete_layer_orphan_response(
+	u32 source_id, const struct pkm_lcs_source_response_frame *frame,
+	u64 request_id,
+	struct pkm_lcs_delete_layer_orphan_apply_result *result)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_apply_delete_layer_orphan_response_with_limits(
+		source_id, frame, request_id, &limits, result);
 }
 
 static long pkm_lcs_source_delete_layer_validate_request(
@@ -5814,8 +5918,9 @@ static long pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout_with_li
 		return ret;
 	}
 
-	ret = pkm_lcs_source_apply_delete_layer_orphan_response(
-		source_id, &frame, response->request_id, orphan_result);
+	ret = pkm_lcs_source_apply_delete_layer_orphan_response_with_limits(
+		source_id, &frame, response->request_id, limits,
+		orphan_result);
 	pkm_lcs_source_response_frame_destroy(&frame);
 	return ret;
 }
@@ -6030,23 +6135,24 @@ long pkm_lcs_source_layer_operation_recover(
 								     result);
 }
 
-long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
+long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout_with_limits(
 	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
 	u32 skip_source_id, const u8 skip_root_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_delete_layer_orchestration_result *result)
 {
 	struct pkm_lcs_transaction_layer_abort_result abort_result = { };
 	struct pkm_lcs_delete_layer_broadcast_result broadcast_result = { };
-	struct pkm_lcs_runtime_limits limits;
 	bool removed = false;
 	long ret;
 
 	if (result)
 		memset(result, 0, sizeof(*result));
-	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	if (!limits)
+		return -EINVAL;
 
 	ret = pkm_lcs_transaction_fd_abort_layer_writers_with_limits(
-		layer_name, layer_name_len, &limits, &abort_result);
+		layer_name, layer_name_len, limits, &abort_result);
 	if (result) {
 		result->inspected_transaction_count =
 			abort_result.inspected_transaction_count;
@@ -6059,7 +6165,7 @@ long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
 		return ret;
 
 	ret = pkm_lcs_layer_table_remove_with_limits(layer_name, layer_name_len,
-						     &limits, &removed);
+						     limits, &removed);
 	if (result)
 		result->layer_table_entry_removed = removed ? 1U : 0U;
 	if (ret)
@@ -6067,7 +6173,7 @@ long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
 
 	ret = pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout_with_limits(
 		layer_name, layer_name_len, timeout_ms, skip_source_id,
-		skip_root_guid, &limits, &broadcast_result);
+		skip_root_guid, limits, &broadcast_result);
 	if (result) {
 		result->active_source_count = broadcast_result.active_source_count;
 		result->completed_source_count =
@@ -6085,12 +6191,29 @@ long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
 	return ret;
 }
 
+long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
+	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	u32 skip_source_id, const u8 skip_root_guid[RSI_GUID_SIZE],
+	struct pkm_lcs_delete_layer_orchestration_result *result)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout_with_limits(
+		layer_name, layer_name_len, timeout_ms, skip_source_id,
+		skip_root_guid, &limits, result);
+}
+
 long pkm_lcs_source_delete_layer_orchestrate_timeout(
 	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
 	struct pkm_lcs_delete_layer_orchestration_result *result)
 {
-	return pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
-		layer_name, layer_name_len, timeout_ms, 0, NULL, result);
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout_with_limits(
+		layer_name, layer_name_len, timeout_ms, 0, NULL, &limits,
+		result);
 }
 
 long pkm_lcs_source_delete_layer_round_trip(
@@ -6098,14 +6221,18 @@ long pkm_lcs_source_delete_layer_round_trip(
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
-	return pkm_lcs_source_delete_layer_round_trip_timeout(
-		source_id, layer_name, layer_name_len,
-		pkm_lcs_runtime_request_timeout_ms(), response, enqueue);
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_delete_layer_round_trip_timeout_with_limits(
+		source_id, layer_name, layer_name_len, &limits,
+		limits.request_timeout_ms, response, enqueue);
 }
 
-long pkm_lcs_source_flush_round_trip_timeout(
+long pkm_lcs_source_flush_round_trip_timeout_with_limits(
 	u32 source_id, const char *hive_name, u32 hive_name_len,
-	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
 	struct pkm_lcs_source_response_waiter waiter;
@@ -6116,17 +6243,20 @@ long pkm_lcs_source_flush_round_trip_timeout(
 		memset(response, 0, sizeof(*response));
 	if (enqueue)
 		memset(enqueue, 0, sizeof(*enqueue));
+	if (!limits)
+		return -EINVAL;
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, NULL, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
 		ret = pkm_lcs_source_dispatch_flush_request_with_waiter(
-			source_id, hive_name, hive_name_len, &waiter, enqueue);
+			source_id, hive_name, hive_name_len, limits, &waiter,
+			enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -6137,6 +6267,19 @@ long pkm_lcs_source_flush_round_trip_timeout(
 
 	return pkm_lcs_source_response_waiter_wait_until(&waiter, deadline,
 							 response);
+}
+
+long pkm_lcs_source_flush_round_trip_timeout(
+	u32 source_id, const char *hive_name, u32 hive_name_len,
+	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_flush_round_trip_timeout_with_limits(
+		source_id, hive_name, hive_name_len, &limits, timeout_ms,
+		response, enqueue);
 }
 
 long pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout(
@@ -6158,14 +6301,18 @@ long pkm_lcs_source_flush_round_trip(
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
-	return pkm_lcs_source_flush_round_trip_timeout(
-		source_id, hive_name, hive_name_len,
-		pkm_lcs_runtime_request_timeout_ms(), response, enqueue);
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_flush_round_trip_timeout_with_limits(
+		source_id, hive_name, hive_name_len, &limits,
+		limits.request_timeout_ms, response, enqueue);
 }
 
-long pkm_lcs_source_drop_key_round_trip_timeout(
+long pkm_lcs_source_drop_key_round_trip_timeout_with_limits(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
-	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
 	struct pkm_lcs_source_response_waiter waiter;
@@ -6176,17 +6323,19 @@ long pkm_lcs_source_drop_key_round_trip_timeout(
 		memset(response, 0, sizeof(*response));
 	if (enqueue)
 		memset(enqueue, 0, sizeof(*enqueue));
+	if (!limits)
+		return -EINVAL;
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
 
 	for (;;) {
-		ret = pkm_lcs_source_wait_for_slot(source_id, NULL, deadline);
+		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
 		if (ret)
 			return ret;
 
 		ret = pkm_lcs_source_dispatch_drop_key_request_with_waiter(
-			source_id, txn_id, guid, &waiter, enqueue);
+			source_id, txn_id, guid, limits, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -6199,13 +6348,29 @@ long pkm_lcs_source_drop_key_round_trip_timeout(
 							 response);
 }
 
+long pkm_lcs_source_drop_key_round_trip_timeout(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_drop_key_round_trip_timeout_with_limits(
+		source_id, txn_id, guid, &limits, timeout_ms, response,
+		enqueue);
+}
+
 long pkm_lcs_source_drop_key_round_trip(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
-	return pkm_lcs_source_drop_key_round_trip_timeout(
-		source_id, txn_id, guid, pkm_lcs_runtime_request_timeout_ms(),
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_drop_key_round_trip_timeout_with_limits(
+		source_id, txn_id, guid, &limits, limits.request_timeout_ms,
 		response, enqueue);
 }
 
@@ -6934,8 +7099,9 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 			return -EIO;
 		}
 
-		ret = pkm_lcs_source_dispatch_abort_transaction_request(
-			result->source_id, result->txn_id, NULL);
+		ret = pkm_lcs_source_dispatch_abort_transaction_request_with_limits(
+			result->source_id, result->txn_id, &result->limits,
+			NULL);
 		if (ret) {
 			pkm_lcs_source_device_mark_down_file(file);
 			return ret;
@@ -6943,7 +7109,8 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 		return 0;
 	case RSI_COMMIT_TRANSACTION:
 		ret = pkm_lcs_transaction_fd_handle_late_commit_response(
-			result->source_id, result->txn_id, result->status);
+			result->source_id, result->txn_id, result->status,
+			&result->limits);
 		if (ret) {
 			pkm_lcs_source_device_mark_down_file(file);
 			return ret;

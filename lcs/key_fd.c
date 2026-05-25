@@ -3385,8 +3385,9 @@ static long pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
 	if (is_base)
 		return 0;
 
-	ret = pkm_lcs_source_delete_layer_orchestrate_timeout(
-		layer_name, layer_name_len, limits.request_timeout_ms, NULL);
+	ret = pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout_with_limits(
+		layer_name, layer_name_len, limits.request_timeout_ms, 0, NULL,
+		&limits, NULL);
 	if (!ret)
 		*orchestrated_out = true;
 	return ret;
@@ -4816,6 +4817,7 @@ static long pkm_lcs_key_fd_hide_key_from_args(
 static long pkm_lcs_key_fd_flush(struct pkm_lcs_key_fd *key_fd)
 {
 	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_runtime_limits limits;
 	const char *hive_name;
 	size_t hive_name_len;
 	long ret;
@@ -4839,9 +4841,10 @@ static long pkm_lcs_key_fd_flush(struct pkm_lcs_key_fd *key_fd)
 	if (!hive_name_len || hive_name_len > U32_MAX)
 		return -EIO;
 
-	return pkm_lcs_source_flush_round_trip(
-		key_fd->source_id, hive_name, (u32)hive_name_len, &response,
-		NULL);
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_source_flush_round_trip_timeout_with_limits(
+		key_fd->source_id, hive_name, (u32)hive_name_len, &limits,
+		limits.request_timeout_ms, &response, NULL);
 }
 
 static bool pkm_lcs_key_fd_ioctl_revalidates_restart(unsigned int cmd)
@@ -5544,6 +5547,7 @@ static void pkm_lcs_internal_watch_deliver_layer_delete(
 	u32 *internal_effects)
 {
 	static const char base_name[] = "base";
+	struct pkm_lcs_runtime_limits limits;
 	bool is_base = false;
 	long ret;
 
@@ -5556,9 +5560,10 @@ static void pkm_lcs_internal_watch_deliver_layer_delete(
 	if (ret || is_base)
 		return;
 
-	ret = pkm_lcs_source_delete_layer_orchestrate_timeout(
-		event->name, event->name_len,
-		pkm_lcs_runtime_request_timeout_ms(), NULL);
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout_with_limits(
+		event->name, event->name_len, limits.request_timeout_ms, 0,
+		NULL, &limits, NULL);
 	if (!ret && internal_effects)
 		*internal_effects |= PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE;
 }

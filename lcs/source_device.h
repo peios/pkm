@@ -1099,6 +1099,10 @@ long pkm_lcs_source_dispatch_set_blanket_tombstone_waitable_request(
 long pkm_lcs_source_dispatch_drop_key_request(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_drop_key_request_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_source_enqueue_result *result);
 long pkm_lcs_source_dispatch_drop_key_waitable_request(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	struct pkm_lcs_source_response_waiter *waiter,
@@ -1122,6 +1126,10 @@ long pkm_lcs_source_dispatch_commit_transaction_waitable_request(
 long pkm_lcs_source_dispatch_abort_transaction_request(
 	u32 source_id, u64 transaction_id,
 	struct pkm_lcs_source_enqueue_result *result);
+long pkm_lcs_source_dispatch_abort_transaction_request_with_limits(
+	u32 source_id, u64 transaction_id,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_source_enqueue_result *result);
 long pkm_lcs_source_dispatch_abort_transaction_waitable_request(
 	u32 source_id, u64 transaction_id,
 	struct pkm_lcs_source_response_waiter *waiter,
@@ -1144,12 +1152,22 @@ long pkm_lcs_source_begin_transaction_round_trip_timeout(
 	u32 source_id, u64 transaction_id, u32 mode, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_begin_transaction_round_trip_timeout_with_limits(
+	u32 source_id, u64 transaction_id, u32 mode,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_begin_transaction_round_trip(
 	u32 source_id, u64 transaction_id, u32 mode,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_commit_transaction_round_trip_timeout(
 	u32 source_id, u64 transaction_id, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_commit_transaction_round_trip_timeout_with_limits(
+	u32 source_id, u64 transaction_id,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_commit_transaction_round_trip(
@@ -1160,6 +1178,11 @@ long pkm_lcs_source_abort_transaction_round_trip_timeout(
 	u32 source_id, u64 transaction_id, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_abort_transaction_round_trip_timeout_with_limits(
+	u32 source_id, u64 transaction_id,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_abort_transaction_round_trip(
 	u32 source_id, u64 transaction_id,
 	struct pkm_lcs_source_response_result *response,
@@ -1167,6 +1190,11 @@ long pkm_lcs_source_abort_transaction_round_trip(
 long pkm_lcs_source_delete_layer_round_trip_timeout(
 	u32 source_id, const char *layer_name, u32 layer_name_len,
 	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_delete_layer_round_trip_timeout_with_limits(
+	u32 source_id, const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_delete_layer_round_trip(
 	u32 source_id, const char *layer_name, u32 layer_name_len,
@@ -1197,6 +1225,11 @@ long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout(
 	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
 	u32 skip_source_id, const u8 skip_root_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_delete_layer_orchestration_result *result);
+long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout_with_limits(
+	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
+	u32 skip_source_id, const u8 skip_root_guid[PKM_LCS_GUID_BYTES],
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_delete_layer_orchestration_result *result);
 long pkm_lcs_source_layer_operation_recover_skip_generation(
 	u32 skip_source_id, const u8 skip_root_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_layer_operation_recovery_result *result);
@@ -1206,6 +1239,11 @@ long pkm_lcs_source_flush_round_trip_timeout(
 	u32 source_id, const char *hive_name, u32 hive_name_len,
 	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_flush_round_trip_timeout_with_limits(
+	u32 source_id, const char *hive_name, u32 hive_name_len,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_flush_round_trip(
 	u32 source_id, const char *hive_name, u32 hive_name_len,
 	struct pkm_lcs_source_response_result *response,
@@ -1213,6 +1251,11 @@ long pkm_lcs_source_flush_round_trip(
 long pkm_lcs_source_drop_key_round_trip_timeout(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	u32 timeout_ms, struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_drop_key_round_trip_timeout_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_drop_key_round_trip(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],

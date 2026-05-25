@@ -236,7 +236,8 @@ long pkm_lcs_transaction_fd_bind_for_mutation(
 	struct pkm_lcs_transaction_binding_plan *out);
 long pkm_lcs_transaction_fd_mark_source_down(u32 source_id, u32 *marked_out);
 long pkm_lcs_transaction_fd_handle_late_commit_response(
-	u32 source_id, u64 transaction_id, u32 status);
+	u32 source_id, u64 transaction_id, u32 status,
+	const struct pkm_lcs_runtime_limits *limits);
 long pkm_lcs_transaction_fd_snapshot(
 	int fd, struct pkm_lcs_transaction_fd_snapshot *out);
 long pkm_lcs_transaction_fd_log_snapshot(
