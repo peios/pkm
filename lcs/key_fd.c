@@ -259,6 +259,20 @@ extern int lcs_rust_write_backup_layer_manifest_record_frame(
 	u8 *dst, size_t dst_len, const struct pkm_lcs_runtime_limits *limits,
 	const u8 *name, size_t name_len, u32 precedence, u8 enabled,
 	const u8 *owner_sid, size_t owner_sid_len, size_t *written_out);
+extern int lcs_rust_write_backup_path_entry_record_frame(
+	u8 *dst, size_t dst_len, const struct pkm_lcs_runtime_limits *limits,
+	const u8 *parent_guid, const u8 *child_name, size_t child_name_len,
+	const u8 *child_guid, u8 hidden, const u8 *layer_name,
+	size_t layer_name_len, u64 sequence, size_t *written_out);
+extern int lcs_rust_write_backup_value_record_frame(
+	u8 *dst, size_t dst_len, const struct pkm_lcs_runtime_limits *limits,
+	const u8 *key_guid, const u8 *name, size_t name_len, u32 value_type,
+	const u8 *data, size_t data_len, const u8 *layer_name,
+	size_t layer_name_len, u64 sequence, size_t *written_out);
+extern int lcs_rust_write_backup_blanket_tombstone_record_frame(
+	u8 *dst, size_t dst_len, const struct pkm_lcs_runtime_limits *limits,
+	const u8 *key_guid, const u8 *layer_name, size_t layer_name_len,
+	u64 sequence, size_t *written_out);
 extern int lcs_rust_write_backup_key_record_frame(
 	u8 *dst, size_t dst_len, const u8 *guid, u8 volatile_key, u8 symlink,
 	const u8 *security_descriptor, size_t security_descriptor_len,
@@ -5266,6 +5280,146 @@ out_owner:
 	return ret;
 }
 
+static long pkm_lcs_backup_alloc_path_entry_frame(
+	const struct pkm_lcs_runtime_limits *limits,
+	const u8 parent_guid[PKM_LCS_GUID_BYTES], const char *child_name,
+	size_t child_name_len, const u8 child_guid[PKM_LCS_GUID_BYTES],
+	bool hidden, const char *layer_name, size_t layer_name_len,
+	u64 sequence, u8 **frame_out, size_t *frame_len_out)
+{
+	size_t frame_len = 0;
+	size_t written = 0;
+	u8 *frame;
+	long ret;
+
+	if (!limits || !parent_guid || !child_name || !child_name_len ||
+	    (!hidden && !child_guid) || !layer_name || !layer_name_len ||
+	    !frame_out || !frame_len_out)
+		return -EINVAL;
+	*frame_out = NULL;
+	*frame_len_out = 0;
+
+	ret = lcs_rust_write_backup_path_entry_record_frame(
+		NULL, 0, limits, parent_guid, (const u8 *)child_name,
+		child_name_len, child_guid, hidden ? 1 : 0,
+		(const u8 *)layer_name, layer_name_len, sequence, &frame_len);
+	if (ret != -ERANGE || !frame_len)
+		return ret ? ret : -EIO;
+	frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	ret = lcs_rust_write_backup_path_entry_record_frame(
+		frame, frame_len, limits, parent_guid, (const u8 *)child_name,
+		child_name_len, child_guid, hidden ? 1 : 0,
+		(const u8 *)layer_name, layer_name_len, sequence, &written);
+	if (ret)
+		goto out_free;
+	if (written != frame_len) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	*frame_out = frame;
+	*frame_len_out = frame_len;
+	return 0;
+
+out_free:
+	kfree(frame);
+	return ret;
+}
+
+static long pkm_lcs_backup_alloc_value_frame(
+	const struct pkm_lcs_runtime_limits *limits,
+	const u8 key_guid[PKM_LCS_GUID_BYTES], const char *name,
+	size_t name_len, u32 value_type, const u8 *data, size_t data_len,
+	const char *layer_name, size_t layer_name_len, u64 sequence,
+	u8 **frame_out, size_t *frame_len_out)
+{
+	size_t frame_len = 0;
+	size_t written = 0;
+	u8 *frame;
+	long ret;
+
+	if (!limits || !key_guid || (name_len && !name) ||
+	    (data_len && !data) || !layer_name || !layer_name_len ||
+	    !frame_out || !frame_len_out)
+		return -EINVAL;
+	*frame_out = NULL;
+	*frame_len_out = 0;
+
+	ret = lcs_rust_write_backup_value_record_frame(
+		NULL, 0, limits, key_guid, (const u8 *)name, name_len,
+		value_type, data, data_len, (const u8 *)layer_name,
+		layer_name_len, sequence, &frame_len);
+	if (ret != -ERANGE || !frame_len)
+		return ret ? ret : -EIO;
+	frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	ret = lcs_rust_write_backup_value_record_frame(
+		frame, frame_len, limits, key_guid, (const u8 *)name,
+		name_len, value_type, data, data_len,
+		(const u8 *)layer_name, layer_name_len, sequence, &written);
+	if (ret)
+		goto out_free;
+	if (written != frame_len) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	*frame_out = frame;
+	*frame_len_out = frame_len;
+	return 0;
+
+out_free:
+	kfree(frame);
+	return ret;
+}
+
+static long pkm_lcs_backup_alloc_blanket_tombstone_frame(
+	const struct pkm_lcs_runtime_limits *limits,
+	const u8 key_guid[PKM_LCS_GUID_BYTES], const char *layer_name,
+	size_t layer_name_len, u64 sequence, u8 **frame_out,
+	size_t *frame_len_out)
+{
+	size_t frame_len = 0;
+	size_t written = 0;
+	u8 *frame;
+	long ret;
+
+	if (!limits || !key_guid || !layer_name || !layer_name_len ||
+	    !frame_out || !frame_len_out)
+		return -EINVAL;
+	*frame_out = NULL;
+	*frame_len_out = 0;
+
+	ret = lcs_rust_write_backup_blanket_tombstone_record_frame(
+		NULL, 0, limits, key_guid, (const u8 *)layer_name,
+		layer_name_len, sequence, &frame_len);
+	if (ret != -ERANGE || !frame_len)
+		return ret ? ret : -EIO;
+	frame = kmalloc(frame_len, GFP_KERNEL);
+	if (!frame)
+		return -ENOMEM;
+	ret = lcs_rust_write_backup_blanket_tombstone_record_frame(
+		frame, frame_len, limits, key_guid, (const u8 *)layer_name,
+		layer_name_len, sequence, &written);
+	if (ret)
+		goto out_free;
+	if (written != frame_len) {
+		ret = -EIO;
+		goto out_free;
+	}
+
+	*frame_out = frame;
+	*frame_len_out = frame_len;
+	return 0;
+
+out_free:
+	kfree(frame);
+	return ret;
+}
+
 static long pkm_lcs_backup_alloc_key_frame(
 	const u8 guid[16], bool volatile_key, bool symlink, const u8 *sd,
 	size_t sd_len, s64 last_write_time_ns, u8 **frame_out,
@@ -7787,6 +7941,49 @@ long pkm_lcs_kunit_backup_layer_manifest_frame(
 	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
 	return pkm_lcs_backup_alloc_layer_manifest_frame(
 		&limits, &snapshot, &layer, frame_out, frame_len_out);
+}
+
+long pkm_lcs_kunit_backup_path_entry_frame(
+	const u8 parent_guid[PKM_LCS_GUID_BYTES], const char *child_name,
+	size_t child_name_len, const u8 child_guid[PKM_LCS_GUID_BYTES],
+	bool hidden, const char *layer_name, size_t layer_name_len,
+	u64 sequence, u8 **frame_out, size_t *frame_len_out)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_backup_alloc_path_entry_frame(
+		&limits, parent_guid, child_name, child_name_len, child_guid,
+		hidden, layer_name, layer_name_len, sequence, frame_out,
+		frame_len_out);
+}
+
+long pkm_lcs_kunit_backup_value_frame(
+	const u8 key_guid[PKM_LCS_GUID_BYTES], const char *name,
+	size_t name_len, u32 value_type, const u8 *data, size_t data_len,
+	const char *layer_name, size_t layer_name_len, u64 sequence,
+	u8 **frame_out, size_t *frame_len_out)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_backup_alloc_value_frame(
+		&limits, key_guid, name, name_len, value_type, data, data_len,
+		layer_name, layer_name_len, sequence, frame_out,
+		frame_len_out);
+}
+
+long pkm_lcs_kunit_backup_blanket_tombstone_frame(
+	const u8 key_guid[PKM_LCS_GUID_BYTES], const char *layer_name,
+	size_t layer_name_len, u64 sequence, u8 **frame_out,
+	size_t *frame_len_out)
+{
+	struct pkm_lcs_runtime_limits limits;
+
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	return pkm_lcs_backup_alloc_blanket_tombstone_frame(
+		&limits, key_guid, layer_name, layer_name_len, sequence,
+		frame_out, frame_len_out);
 }
 
 long pkm_lcs_kunit_key_fd_restore_for_token(

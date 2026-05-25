@@ -247,6 +247,20 @@ long pkm_lcs_kunit_backup_layer_manifest_frame(
 	const char *layer_name, u32 layer_name_len, u32 precedence, u8 enabled,
 	bool base_metadata_present, const u8 *base_metadata_sd,
 	size_t base_metadata_sd_len, u8 **frame_out, size_t *frame_len_out);
+long pkm_lcs_kunit_backup_path_entry_frame(
+	const u8 parent_guid[PKM_LCS_GUID_BYTES], const char *child_name,
+	size_t child_name_len, const u8 child_guid[PKM_LCS_GUID_BYTES],
+	bool hidden, const char *layer_name, size_t layer_name_len,
+	u64 sequence, u8 **frame_out, size_t *frame_len_out);
+long pkm_lcs_kunit_backup_value_frame(
+	const u8 key_guid[PKM_LCS_GUID_BYTES], const char *name,
+	size_t name_len, u32 value_type, const u8 *data, size_t data_len,
+	const char *layer_name, size_t layer_name_len, u64 sequence,
+	u8 **frame_out, size_t *frame_len_out);
+long pkm_lcs_kunit_backup_blanket_tombstone_frame(
+	const u8 key_guid[PKM_LCS_GUID_BYTES], const char *layer_name,
+	size_t layer_name_len, u64 sequence, u8 **frame_out,
+	size_t *frame_len_out);
 long pkm_lcs_kunit_key_fd_restore_for_token(
 	int fd, const void *token, const struct reg_restore_args *args);
 long pkm_lcs_kunit_key_fd_flush(int fd);

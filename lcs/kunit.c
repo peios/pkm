@@ -18424,6 +18424,292 @@ static void pkm_lcs_kunit_backup_layer_manifest_fails_closed(
 	KUNIT_EXPECT_EQ(test, frame_len, (size_t)0);
 }
 
+static void pkm_lcs_kunit_expect_path_entry_record(
+	struct kunit *test, const u8 *frame, size_t frame_len,
+	const u8 expected_parent[PKM_LCS_GUID_BYTES],
+	const char *expected_child_name,
+	const u8 expected_child[PKM_LCS_GUID_BYTES],
+	const char *expected_layer, u64 expected_sequence)
+{
+	size_t expected_child_name_len = strlen(expected_child_name);
+	size_t expected_layer_len = strlen(expected_layer);
+	size_t offset = 6;
+	u32 record_len;
+	u32 name_len;
+	u32 layer_len;
+
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	KUNIT_ASSERT_GE(test, frame_len, (size_t)6);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(frame),
+			(u16)REG_BACKUP_PATH_ENTRY);
+	record_len = get_unaligned_le32(frame + 2);
+	KUNIT_ASSERT_EQ(test, (size_t)record_len, frame_len);
+
+	KUNIT_ASSERT_LE(test, offset + PKM_LCS_GUID_BYTES, frame_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(frame + offset, expected_parent,
+			       PKM_LCS_GUID_BYTES),
+			0);
+	offset += PKM_LCS_GUID_BYTES;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u32), frame_len);
+	name_len = get_unaligned_le32(frame + offset);
+	offset += sizeof(u32);
+	KUNIT_ASSERT_EQ(test, (size_t)name_len, expected_child_name_len);
+	KUNIT_ASSERT_LE(test, offset + name_len, frame_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(frame + offset, expected_child_name, name_len),
+			0);
+	offset += name_len;
+
+	KUNIT_ASSERT_LE(test, offset + PKM_LCS_GUID_BYTES, frame_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(frame + offset, expected_child,
+			       PKM_LCS_GUID_BYTES),
+			0);
+	offset += PKM_LCS_GUID_BYTES;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u32), frame_len);
+	layer_len = get_unaligned_le32(frame + offset);
+	offset += sizeof(u32);
+	KUNIT_ASSERT_EQ(test, (size_t)layer_len, expected_layer_len);
+	KUNIT_ASSERT_LE(test, offset + layer_len, frame_len);
+	KUNIT_EXPECT_EQ(test, memcmp(frame + offset, expected_layer, layer_len),
+			0);
+	offset += layer_len;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u64), frame_len);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(frame + offset),
+			expected_sequence);
+	offset += sizeof(u64);
+	KUNIT_EXPECT_EQ(test, offset, frame_len);
+}
+
+static void pkm_lcs_kunit_expect_value_record(
+	struct kunit *test, const u8 *frame, size_t frame_len,
+	const u8 expected_key[PKM_LCS_GUID_BYTES], const char *expected_name,
+	u32 expected_type, const u8 *expected_data, size_t expected_data_len,
+	const char *expected_layer, u64 expected_sequence)
+{
+	size_t expected_name_len = strlen(expected_name);
+	size_t expected_layer_len = strlen(expected_layer);
+	size_t offset = 6;
+	u32 record_len;
+	u32 name_len;
+	u32 data_len;
+	u32 layer_len;
+
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	KUNIT_ASSERT_GE(test, frame_len, (size_t)6);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(frame),
+			(u16)REG_BACKUP_VALUE);
+	record_len = get_unaligned_le32(frame + 2);
+	KUNIT_ASSERT_EQ(test, (size_t)record_len, frame_len);
+
+	KUNIT_ASSERT_LE(test, offset + PKM_LCS_GUID_BYTES, frame_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(frame + offset, expected_key,
+			       PKM_LCS_GUID_BYTES),
+			0);
+	offset += PKM_LCS_GUID_BYTES;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u32), frame_len);
+	name_len = get_unaligned_le32(frame + offset);
+	offset += sizeof(u32);
+	KUNIT_ASSERT_EQ(test, (size_t)name_len, expected_name_len);
+	KUNIT_ASSERT_LE(test, offset + name_len, frame_len);
+	KUNIT_EXPECT_EQ(test, memcmp(frame + offset, expected_name, name_len),
+			0);
+	offset += name_len;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u32) + sizeof(u32), frame_len);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(frame + offset),
+			expected_type);
+	offset += sizeof(u32);
+	data_len = get_unaligned_le32(frame + offset);
+	offset += sizeof(u32);
+	KUNIT_ASSERT_EQ(test, (size_t)data_len, expected_data_len);
+	KUNIT_ASSERT_LE(test, offset + data_len, frame_len);
+	if (data_len)
+		KUNIT_EXPECT_EQ(test,
+				memcmp(frame + offset, expected_data,
+				       data_len),
+				0);
+	offset += data_len;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u32), frame_len);
+	layer_len = get_unaligned_le32(frame + offset);
+	offset += sizeof(u32);
+	KUNIT_ASSERT_EQ(test, (size_t)layer_len, expected_layer_len);
+	KUNIT_ASSERT_LE(test, offset + layer_len, frame_len);
+	KUNIT_EXPECT_EQ(test, memcmp(frame + offset, expected_layer, layer_len),
+			0);
+	offset += layer_len;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u64), frame_len);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(frame + offset),
+			expected_sequence);
+	offset += sizeof(u64);
+	KUNIT_EXPECT_EQ(test, offset, frame_len);
+}
+
+static void pkm_lcs_kunit_expect_blanket_tombstone_record(
+	struct kunit *test, const u8 *frame, size_t frame_len,
+	const u8 expected_key[PKM_LCS_GUID_BYTES], const char *expected_layer,
+	u64 expected_sequence)
+{
+	size_t expected_layer_len = strlen(expected_layer);
+	size_t offset = 6;
+	u32 record_len;
+	u32 layer_len;
+
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	KUNIT_ASSERT_GE(test, frame_len, (size_t)6);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(frame),
+			(u16)REG_BACKUP_BLANKET_TOMBSTONE);
+	record_len = get_unaligned_le32(frame + 2);
+	KUNIT_ASSERT_EQ(test, (size_t)record_len, frame_len);
+
+	KUNIT_ASSERT_LE(test, offset + PKM_LCS_GUID_BYTES, frame_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(frame + offset, expected_key,
+			       PKM_LCS_GUID_BYTES),
+			0);
+	offset += PKM_LCS_GUID_BYTES;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u32), frame_len);
+	layer_len = get_unaligned_le32(frame + offset);
+	offset += sizeof(u32);
+	KUNIT_ASSERT_EQ(test, (size_t)layer_len, expected_layer_len);
+	KUNIT_ASSERT_LE(test, offset + layer_len, frame_len);
+	KUNIT_EXPECT_EQ(test, memcmp(frame + offset, expected_layer, layer_len),
+			0);
+	offset += layer_len;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u64), frame_len);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(frame + offset),
+			expected_sequence);
+	offset += sizeof(u64);
+	KUNIT_EXPECT_EQ(test, offset, frame_len);
+}
+
+static void pkm_lcs_kunit_backup_path_entry_frames(struct kunit *test)
+{
+	static const u8 parent_guid[PKM_LCS_GUID_BYTES] = { 0x21 };
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x22 };
+	static const u8 hidden_guid[PKM_LCS_GUID_BYTES] = { };
+	u8 *frame = NULL;
+	size_t frame_len = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_path_entry_frame(
+				parent_guid, "Child", strlen("Child"),
+				child_guid, false, "base", strlen("base"), 77,
+				&frame, &frame_len),
+			0L);
+	pkm_lcs_kunit_expect_path_entry_record(
+		test, frame, frame_len, parent_guid, "Child", child_guid,
+		"base", 77);
+	kfree(frame);
+	frame = NULL;
+	frame_len = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_path_entry_frame(
+				parent_guid, "Masked", strlen("Masked"), NULL,
+				true, "Overlay", strlen("Overlay"), 88, &frame,
+				&frame_len),
+			0L);
+	pkm_lcs_kunit_expect_path_entry_record(
+		test, frame, frame_len, parent_guid, "Masked", hidden_guid,
+		"Overlay", 88);
+	kfree(frame);
+}
+
+static void pkm_lcs_kunit_backup_value_frames(struct kunit *test)
+{
+	static const u8 key_guid[PKM_LCS_GUID_BYTES] = { 0x31 };
+	static const u8 value_data[] = { 0xde, 0xad, 0xbe, 0xef };
+	u8 *frame = NULL;
+	size_t frame_len = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_value_frame(
+				key_guid, "Answer", strlen("Answer"), REG_BINARY,
+				value_data, sizeof(value_data), "base",
+				strlen("base"), 99, &frame, &frame_len),
+			0L);
+	pkm_lcs_kunit_expect_value_record(
+		test, frame, frame_len, key_guid, "Answer", REG_BINARY,
+		value_data, sizeof(value_data), "base", 99);
+	kfree(frame);
+	frame = NULL;
+	frame_len = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_value_frame(
+				key_guid, "", 0, REG_TOMBSTONE, NULL, 0,
+				"Overlay", strlen("Overlay"), 100, &frame,
+				&frame_len),
+			0L);
+	pkm_lcs_kunit_expect_value_record(
+		test, frame, frame_len, key_guid, "", REG_TOMBSTONE, NULL, 0,
+		"Overlay", 100);
+	kfree(frame);
+}
+
+static void pkm_lcs_kunit_backup_blanket_tombstone_record(struct kunit *test)
+{
+	static const u8 key_guid[PKM_LCS_GUID_BYTES] = { 0x41 };
+	u8 *frame = NULL;
+	size_t frame_len = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_blanket_tombstone_frame(
+				key_guid, "Overlay", strlen("Overlay"), 101,
+				&frame, &frame_len),
+			0L);
+	pkm_lcs_kunit_expect_blanket_tombstone_record(
+		test, frame, frame_len, key_guid, "Overlay", 101);
+	kfree(frame);
+}
+
+static void pkm_lcs_kunit_backup_data_frames_fail_closed(struct kunit *test)
+{
+	static const u8 nil_guid[PKM_LCS_GUID_BYTES] = { };
+	static const u8 key_guid[PKM_LCS_GUID_BYTES] = { 0x51 };
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x52 };
+	static const u8 tombstone_data[] = { 0x01 };
+	u8 *frame = NULL;
+	size_t frame_len = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_path_entry_frame(
+				nil_guid, "Child", strlen("Child"), child_guid,
+				false, "base", strlen("base"), 1, &frame,
+				&frame_len),
+			(long)-EINVAL);
+	KUNIT_EXPECT_PTR_EQ(test, frame, NULL);
+	KUNIT_EXPECT_EQ(test, frame_len, (size_t)0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_value_frame(
+				key_guid, "", 0, REG_TOMBSTONE, tombstone_data,
+				sizeof(tombstone_data), "base", strlen("base"),
+				1, &frame, &frame_len),
+			(long)-EINVAL);
+	KUNIT_EXPECT_PTR_EQ(test, frame, NULL);
+	KUNIT_EXPECT_EQ(test, frame_len, (size_t)0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_backup_blanket_tombstone_frame(
+				key_guid, "bad/name", strlen("bad/name"), 1,
+				&frame, &frame_len),
+			(long)-EINVAL);
+	KUNIT_EXPECT_PTR_EQ(test, frame, NULL);
+	KUNIT_EXPECT_EQ(test, frame_len, (size_t)0);
+}
+
 static int pkm_lcs_kunit_backup_snapshot_source_thread(void *raw_script)
 {
 	struct pkm_lcs_kunit_backup_snapshot_source_script *script =
@@ -46006,6 +46292,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_backup_layer_manifest_non_base_cached_owner),
 	KUNIT_CASE(pkm_lcs_kunit_backup_layer_manifest_fails_closed),
+	KUNIT_CASE(pkm_lcs_kunit_backup_path_entry_frames),
+	KUNIT_CASE(pkm_lcs_kunit_backup_value_frames),
+	KUNIT_CASE(pkm_lcs_kunit_backup_blanket_tombstone_record),
+	KUNIT_CASE(pkm_lcs_kunit_backup_data_frames_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_read_only_unsupported),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_backup_read_only_cap_fail_before_source),

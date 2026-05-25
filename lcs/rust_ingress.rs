@@ -51,11 +51,13 @@ use crate::lcs_core::{
     self_config_audit_intent, self_config_invalid_audit_payload_len,
     source_validation_failure_audit_payload_len, validate_config_value,
     write_backup_restore_complete_audit_payload, write_backup_restore_start_audit_payload,
-    write_backup_header_record_frame, write_backup_key_record_frame,
-    write_backup_layer_manifest_record_frame, write_backup_trailer_record_frame,
-    write_key_open_audit_payload, write_self_config_invalid_audit_payload,
-    write_source_validation_failure_audit_payload, write_rsi_abort_transaction_request_frame,
-    write_rsi_begin_transaction_request_frame, write_rsi_commit_transaction_request_frame,
+    write_backup_blanket_tombstone_record_frame, write_backup_header_record_frame,
+    write_backup_key_record_frame, write_backup_layer_manifest_record_frame,
+    write_backup_path_entry_record_frame, write_backup_trailer_record_frame,
+    write_backup_value_record_frame, write_key_open_audit_payload,
+    write_self_config_invalid_audit_payload, write_source_validation_failure_audit_payload,
+    write_rsi_abort_transaction_request_frame, write_rsi_begin_transaction_request_frame,
+    write_rsi_commit_transaction_request_frame,
     write_rsi_create_entry_request_frame, write_rsi_create_key_request_frame,
     write_rsi_delete_entry_request_frame, write_rsi_delete_layer_request_frame,
     write_rsi_delete_value_entry_request_frame, write_rsi_enum_children_request_frame,
@@ -2063,6 +2065,220 @@ pub unsafe extern "C" fn lcs_rust_write_backup_layer_manifest_record_frame(
         precedence,
         enabled != 0,
         owner_sid,
+    ) {
+        Ok(written) => {
+            *written_out_ref = written;
+            0
+        }
+        Err(err) => backup_writer_error_return(err, written_out),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_backup_path_entry_record_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
+    parent_guid: *const u8,
+    child_name: *const u8,
+    child_name_len: usize,
+    child_guid: *const u8,
+    hidden: u8,
+    layer_name: *const u8,
+    layer_name_len: usize,
+    sequence: u64,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out_ref) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out_ref = 0;
+    if parent_guid.is_null()
+        || child_name.is_null()
+        || child_name_len == 0
+        || layer_name.is_null()
+        || layer_name_len == 0
+        || hidden > 1
+        || (hidden == 0 && child_guid.is_null())
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
+    let dst_bytes = match unsafe { backup_writer_dst(dst, dst_len) } {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let mut parent_guid_copy = [0u8; 16];
+    parent_guid_copy.copy_from_slice(unsafe { slice::from_raw_parts(parent_guid, 16) });
+    let target = if hidden != 0 {
+        PathTarget::Hidden
+    } else {
+        let mut child_guid_copy = [0u8; 16];
+        child_guid_copy.copy_from_slice(unsafe { slice::from_raw_parts(child_guid, 16) });
+        PathTarget::Guid(child_guid_copy)
+    };
+    let child_name = match str::from_utf8(unsafe { slice::from_raw_parts(child_name, child_name_len) })
+    {
+        Ok(value) => value,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    let layer_name = match str::from_utf8(unsafe { slice::from_raw_parts(layer_name, layer_name_len) })
+    {
+        Ok(value) => value,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+
+    match write_backup_path_entry_record_frame(
+        &limits,
+        dst_bytes,
+        parent_guid_copy,
+        child_name,
+        target,
+        layer_name,
+        sequence,
+    ) {
+        Ok(written) => {
+            *written_out_ref = written;
+            0
+        }
+        Err(err) => backup_writer_error_return(err, written_out),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_backup_value_record_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
+    key_guid: *const u8,
+    name: *const u8,
+    name_len: usize,
+    value_type: u32,
+    data: *const u8,
+    data_len: usize,
+    layer_name: *const u8,
+    layer_name_len: usize,
+    sequence: u64,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out_ref) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out_ref = 0;
+    if key_guid.is_null()
+        || (name_len != 0 && name.is_null())
+        || (data_len != 0 && data.is_null())
+        || layer_name.is_null()
+        || layer_name_len == 0
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
+    let dst_bytes = match unsafe { backup_writer_dst(dst, dst_len) } {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let mut key_guid_copy = [0u8; 16];
+    key_guid_copy.copy_from_slice(unsafe { slice::from_raw_parts(key_guid, 16) });
+    let name = if name_len == 0 {
+        ""
+    } else {
+        match str::from_utf8(unsafe { slice::from_raw_parts(name, name_len) }) {
+            Ok(value) => value,
+            Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+        }
+    };
+    let data = if data_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(data, data_len) }
+    };
+    let layer_name = match str::from_utf8(unsafe { slice::from_raw_parts(layer_name, layer_name_len) })
+    {
+        Ok(value) => value,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+
+    match write_backup_value_record_frame(
+        &limits,
+        dst_bytes,
+        key_guid_copy,
+        name,
+        value_type,
+        data,
+        layer_name,
+        sequence,
+    ) {
+        Ok(written) => {
+            *written_out_ref = written;
+            0
+        }
+        Err(err) => backup_writer_error_return(err, written_out),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_write_backup_blanket_tombstone_record_frame(
+    dst: *mut u8,
+    dst_len: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
+    key_guid: *const u8,
+    layer_name: *const u8,
+    layer_name_len: usize,
+    sequence: u64,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out_ref) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out_ref = 0;
+    if key_guid.is_null() || layer_name.is_null() || layer_name_len == 0 {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
+    let dst_bytes = match unsafe { backup_writer_dst(dst, dst_len) } {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let mut key_guid_copy = [0u8; 16];
+    key_guid_copy.copy_from_slice(unsafe { slice::from_raw_parts(key_guid, 16) });
+    let layer_name = match str::from_utf8(unsafe { slice::from_raw_parts(layer_name, layer_name_len) })
+    {
+        Ok(value) => value,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+
+    match write_backup_blanket_tombstone_record_frame(
+        &limits,
+        dst_bytes,
+        key_guid_copy,
+        layer_name,
+        sequence,
     ) {
         Ok(written) => {
             *written_out_ref = written;
