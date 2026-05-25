@@ -128,6 +128,7 @@ struct pkm_lcs_set_value_input {
 	char *value_name;
 	u8 *data;
 	struct pkm_lcs_create_layer_target target;
+	struct pkm_lcs_runtime_limits limits;
 };
 
 struct pkm_lcs_delete_value_input {
@@ -1995,6 +1996,16 @@ static void pkm_lcs_set_value_input_destroy(
 	memset(input, 0, sizeof(*input));
 }
 
+static void pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
+	struct pkm_lcs_runtime_limits *limits)
+{
+	if (!limits)
+		return;
+	if (pkm_lcs_runtime_limits_snapshot(limits) &&
+	    pkm_lcs_runtime_limits_defaults(limits))
+		memset(limits, 0, sizeof(*limits));
+}
+
 static void pkm_lcs_delete_value_input_destroy(
 	struct pkm_lcs_delete_value_input *input)
 {
@@ -2346,6 +2357,7 @@ static long pkm_lcs_key_fd_copy_set_value_input(
 	if (!ops || !ops->read || !args || !key_fd || !input)
 		return -EINVAL;
 	memset(input, 0, sizeof(*input));
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&input->limits);
 
 	ret = pkm_lcs_key_fd_copy_set_value_value_name(ops, args, input);
 	if (ret)
@@ -2356,7 +2368,7 @@ static long pkm_lcs_key_fd_copy_set_value_input(
 	ret = pkm_lcs_rsi_validate_set_value_user_shape(
 		key_fd->key_guid, input->value_name, args->name_len,
 		input->target.name, input->target.name_len, args->type,
-		args->data_len);
+		args->data_len, &input->limits);
 	if (ret)
 		return ret;
 	return 0;
@@ -2716,7 +2728,8 @@ static long pkm_lcs_key_fd_set_value_layer_cap_check(
 		frame.data, frame.len, response.request_id, next_sequence,
 		input->value_name,
 		(input->value_name ? (u32)strlen(input->value_name) : 0),
-		input->target.name, input->target.name_len, &result);
+		input->target.name, input->target.name_len, &input->limits,
+		&result);
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);

@@ -2172,6 +2172,7 @@ pub unsafe extern "C" fn lcs_rust_validate_set_value_user_shape(
     layer_name_len: u32,
     value_type: u32,
     data_len: usize,
+    limits: *const PkmLcsRuntimeLimitsCopy,
 ) -> c_int {
     if guid.is_null()
         || (value_name_len != 0 && value_name.is_null())
@@ -2179,6 +2180,10 @@ pub unsafe extern "C" fn lcs_rust_validate_set_value_user_shape(
     {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(err) => return err.negated_return() as c_int,
+    };
 
     let guid_bytes = unsafe { slice::from_raw_parts(guid, 16) };
     if guid_bytes.iter().all(|byte| *byte == 0) {
@@ -2192,13 +2197,13 @@ pub unsafe extern "C" fn lcs_rust_validate_set_value_user_shape(
     };
     let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
 
-    if let Err(err) = validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_value_name_bytes(value_name_bytes, &limits) {
         return public_set_value_validation_error_return(err);
     }
-    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_layer_name_bytes(layer_name_bytes, &limits) {
         return public_set_value_validation_error_return(err);
     }
-    if let Err(err) = validate_value_data_len(data_len, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_value_data_len(data_len, &limits) {
         return public_set_value_validation_error_return(err);
     }
     if let Err(err) = validate_value_write_type(value_type, data_len, true) {
@@ -2254,6 +2259,7 @@ pub unsafe extern "C" fn lcs_rust_plan_set_value_layer_admission(
     value_name_len: u32,
     layer_name: *const u8,
     layer_name_len: u32,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     result_out: *mut PkmLcsValueLayerAdmissionResultCopy,
 ) -> c_int {
     let Some(result_out) = (unsafe { result_out.as_mut() }) else {
@@ -2271,18 +2277,22 @@ pub unsafe extern "C" fn lcs_rust_plan_set_value_layer_admission(
     {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(err) => return err.negated_return() as c_int,
+    };
 
     let value_name_bytes = if value_name_len == 0 {
         &[]
     } else {
         unsafe { slice::from_raw_parts(value_name, value_name_len as usize) }
     };
-    let requested_name = match validate_value_name_bytes(value_name_bytes, &LcsLimits::DEFAULT) {
+    let requested_name = match validate_value_name_bytes(value_name_bytes, &limits) {
         Ok(name) => name,
         Err(err) => return public_set_value_validation_error_return(err),
     };
     let layer_name_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
-    let target_layer = match validate_layer_name_bytes(layer_name_bytes, &LcsLimits::DEFAULT) {
+    let target_layer = match validate_layer_name_bytes(layer_name_bytes, &limits) {
         Ok(layer) => layer,
         Err(err) => return public_set_value_validation_error_return(err),
     };
@@ -2298,11 +2308,11 @@ pub unsafe extern "C" fn lcs_rust_plan_set_value_layer_admission(
         Ok(payload) => payload,
         Err(err) => return rsi_query_values_response_error_return(err),
     };
-    if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &limits) {
         return rsi_query_values_response_error_return(err);
     }
     if let Err(err) =
-        validate_rsi_query_values_response_value_payloads(&payload, &LcsLimits::DEFAULT)
+        validate_rsi_query_values_response_value_payloads(&payload, &limits)
     {
         return rsi_query_values_response_error_return(err);
     }
@@ -2319,7 +2329,7 @@ pub unsafe extern "C" fn lcs_rust_plan_set_value_layer_admission(
     let mut malformed = false;
 
     if let Err(err) =
-        for_each_rsi_query_values_source_value_entry(&payload, &LcsLimits::DEFAULT, |entry| {
+        for_each_rsi_query_values_source_value_entry(&payload, &limits, |entry| {
             if !casefold_eq(entry.name, requested_name) {
                 malformed = true;
                 return Err(LcsError::RsiPayloadLengthOverflow);
@@ -2355,7 +2365,7 @@ pub unsafe extern "C" fn lcs_rust_plan_set_value_layer_admission(
     }
 
     if let Err(err) = plan_value_layer_admission(
-        &LcsLimits::DEFAULT,
+        &limits,
         ValueLayerAdmissionInput {
             current_distinct_layers,
             replacing_existing_layer_entry,

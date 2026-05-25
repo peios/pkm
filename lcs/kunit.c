@@ -10770,6 +10770,102 @@ static void pkm_lcs_kunit_key_fd_set_value_fails_before_source(
 	kacs_rust_token_drop(source_token);
 }
 
+static void pkm_lcs_kunit_key_fd_set_value_runtime_limits_fail_before_source(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x7e },
+	};
+	static const char value_name[] = "Answer";
+	static const char overlong_name[] =
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+	static const char overlong_layer[] =
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+	static const u8 data[] = { 0x01 };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_set_value_args args = {
+		.name_len = strlen(value_name),
+		.name_ptr = (u64)(unsigned long)value_name,
+		.type = REG_BINARY,
+		.data_len = sizeof(data),
+		.data_ptr = (u64)(unsigned long)data,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	u64 sequence_before = 0;
+	u64 sequence_after = 0;
+	long fd;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_path_component_length = 64U;
+	limits.max_value_size = 4096U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_before),
+			0L);
+
+	args.name_len = sizeof(overlong_name) - 1;
+	args.name_ptr = (u64)(unsigned long)overlong_name;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_value_for_token(
+				(int)fd, admin_token, &ops, &args),
+			(long)-ENAMETOOLONG);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	ctx.reads = 0;
+	args.name_len = strlen(value_name);
+	args.name_ptr = (u64)(unsigned long)value_name;
+	args.data_len = 4097U;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_value_for_token(
+				(int)fd, admin_token, &ops, &args),
+			(long)-ENOSPC);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	ctx.reads = 0;
+	args.data_len = sizeof(data);
+	args.layer_len = sizeof(overlong_layer) - 1;
+	args.layer_ptr = (u64)(unsigned long)overlong_layer;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_value_for_token(
+				(int)fd, admin_token, &ops, &args),
+			(long)-ENAMETOOLONG);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.next_request_id, 0ULL);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, sequence_after, sequence_before);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
 static void pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate(
 	struct kunit *test)
 {
@@ -23352,6 +23448,52 @@ static void pkm_lcs_kunit_rsi_query_values_bridge_rejects_wrong_value(
 				response, response_len, 45, 1, "", 0, layers,
 				ARRAY_SIZE(layers), NULL, 0, &result),
 			(long)-EIO);
+}
+
+static void pkm_lcs_kunit_set_value_layer_cap_uses_runtime_limit(
+	struct kunit *test)
+{
+	static const char value_name[] = "Answer";
+	static const char base_layer[] = "base";
+	static const char overlay_layer[] = "overlay";
+	static const u8 data[] = { 0x01 };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_value_layer_admission_result result = { };
+	u8 response[256];
+	size_t offset;
+	size_t response_len;
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_layers_per_value = 1U;
+
+	pkm_lcs_kunit_rsi_response_begin(test, response, sizeof(response),
+					 470, RSI_QUERY_VALUES_RESPONSE,
+					 RSI_OK, &offset);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 1);
+	pkm_lcs_kunit_rsi_append_query_value_entry(
+		test, response, sizeof(response), &offset, value_name,
+		base_layer, REG_BINARY, data, sizeof(data), 0);
+	pkm_lcs_kunit_rsi_append_u32(test, response, sizeof(response),
+				     &offset, 0);
+	pkm_lcs_kunit_rsi_finish_response(test, response, offset,
+					  &response_len);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_plan_set_value_layer_admission(
+				response, response_len, 470, 1, value_name,
+				strlen(value_name), overlay_layer,
+				strlen(overlay_layer), &limits, &result),
+			(long)-ENOSPC);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_rsi_plan_set_value_layer_admission(
+				response, response_len, 470, 1, value_name,
+				strlen(value_name), base_layer,
+				strlen(base_layer), &limits, &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.current_distinct_layers, 1U);
+	KUNIT_EXPECT_EQ(test, result.replacing_existing_layer_entry, 1U);
 }
 
 static void pkm_lcs_kunit_rsi_enum_children_info_summary(struct kunit *test)
@@ -38341,6 +38483,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_transactional_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_cas_failure_no_effects),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_fails_before_source),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_set_value_runtime_limits_fail_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_set_value_layer_precedence_overflows_watches),
@@ -38504,6 +38648,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_rsi_query_values_bridge_blanket_not_found),
 	KUNIT_CASE(
 		pkm_lcs_kunit_rsi_query_values_bridge_rejects_wrong_value),
+	KUNIT_CASE(pkm_lcs_kunit_set_value_layer_cap_uses_runtime_limit),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_delete_layer_response_validation),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_enum_children_info_summary),
 	KUNIT_CASE(pkm_lcs_kunit_rsi_query_values_info_summary),
