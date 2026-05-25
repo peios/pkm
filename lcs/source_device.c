@@ -6773,7 +6773,7 @@ static long pkm_lcs_source_validate_accepted_response_payload(
 			return ret;
 		ret = pkm_lcs_rsi_validate_query_values_response(
 			frame, frame_len, result->request_id, next_sequence,
-			&query_values);
+			&result->limits, &query_values);
 		if (ret == -EIO) {
 			result->malformed_source_data = true;
 			if (query_values.source_validation_failure_present) {

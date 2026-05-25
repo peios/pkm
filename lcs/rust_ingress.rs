@@ -4056,6 +4056,7 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
     frame_len: usize,
     request_id: u64,
     next_sequence: u64,
+    limits: *const PkmLcsRuntimeLimitsCopy,
     summary_out: *mut PkmLcsRsiQueryValuesResponseSummaryCopy,
 ) -> c_int {
     if summary_out.is_null() {
@@ -4075,6 +4076,14 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
     if frame.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
+    let limits = if limits.is_null() {
+        LcsLimits::DEFAULT
+    } else {
+        match lcs_limits_from_copy(limits) {
+            Ok(limits) => limits,
+            Err(errno) => return errno.negated_return() as c_int,
+        }
+    };
 
     let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
     let payload = match parse_rsi_query_values_success_response_payload(
@@ -4097,7 +4106,7 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
         }
     };
 
-    if let Err(err) = validate_rsi_query_values_response_names(&payload, &LcsLimits::DEFAULT) {
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &limits) {
         if let Some(failure) = source_validation_failure_for_name_error(&err) {
             unsafe {
                 (*summary_out).source_validation_failure = source_validation_failure_code(failure);
@@ -4107,7 +4116,7 @@ pub unsafe extern "C" fn lcs_rust_validate_rsi_query_values_response_frame(
         return rsi_query_values_response_error_return(err);
     }
     if let Err(err) =
-        validate_rsi_query_values_response_value_payloads(&payload, &LcsLimits::DEFAULT)
+        validate_rsi_query_values_response_value_payloads(&payload, &limits)
     {
         if let Some(failure) = source_validation_failure_for_value_payload_error(&err) {
             unsafe {

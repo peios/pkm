@@ -39476,6 +39476,101 @@ out_release_source:
 	}
 }
 
+static void pkm_lcs_kunit_source_write_query_values_runtime_limits_names(
+	struct kunit *test)
+{
+	static const u8 guid[RSI_GUID_SIZE] = { 0xe1 };
+	static const bool widened_cases[] = { false, true };
+	enum { LONG_NAME_LEN = 300 };
+	char value_name[LONG_NAME_LEN + 1];
+	char layer_name[LONG_NAME_LEN + 1];
+	size_t field;
+	size_t i;
+
+	pkm_lcs_kunit_fill_name(value_name, LONG_NAME_LEN, 'V');
+	pkm_lcs_kunit_fill_name(layer_name, LONG_NAME_LEN, 'L');
+	for (field = 0; field < 2; field++) {
+		for (i = 0; i < ARRAY_SIZE(widened_cases); i++) {
+			struct pkm_lcs_kunit_query_values_source_script script = {
+				.expected_guid = guid,
+				.expected_value_name = "Value",
+				.response_value_name = field == 0 ?
+						       value_name :
+						       "Value",
+				.layer_name = field == 1 ? layer_name : "base",
+				.data = (const u8 *)"x",
+				.data_len = 1,
+				.value_type = REG_BINARY,
+			};
+			struct pkm_lcs_source_response_frame frame = { };
+			struct pkm_lcs_source_response_result response = { };
+			struct pkm_lcs_source_enqueue_result enqueue = { };
+			struct pkm_lcs_runtime_limits limits = { };
+			const struct pkm_lcs_runtime_limits *limits_ptr = NULL;
+			struct task_struct *task;
+			struct file file = { };
+			const void *token;
+			int thread_ret;
+			long ret;
+
+			if (widened_cases[i]) {
+				KUNIT_ASSERT_EQ(
+					test,
+					pkm_lcs_runtime_limits_defaults(&limits),
+					0L);
+				limits.max_path_component_length = LONG_NAME_LEN;
+				limits_ptr = &limits;
+			}
+
+			pkm_lcs_kunit_setup_registered_source(test, &file,
+							      &token);
+			script.file = &file;
+			task = pkm_lcs_kunit_kthread_run(
+				pkm_lcs_kunit_query_values_source_thread,
+				&script, "pkm-lcs-kunit-query-runtime");
+			if (IS_ERR(task)) {
+				KUNIT_FAIL(test,
+					   "failed to start query-values source");
+				goto out_release_source;
+			}
+
+			pkm_kmes_kunit_reset_all();
+			ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
+				1, 0, guid, "Value", strlen("Value"), false,
+				limits_ptr, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+				&frame, &response, &enqueue);
+			thread_ret = pkm_lcs_kunit_kthread_stop(task);
+			KUNIT_EXPECT_EQ(test, thread_ret, 0);
+			KUNIT_EXPECT_EQ(test, script.result, 0);
+			KUNIT_EXPECT_EQ(test, script.reads, 1U);
+			KUNIT_EXPECT_EQ(test, script.writes, 1U);
+			KUNIT_EXPECT_EQ(test, ret,
+					widened_cases[i] ? 0L : (long)-EIO);
+			KUNIT_EXPECT_EQ(test, response.malformed_source_data,
+					!widened_cases[i]);
+			if (!widened_cases[i]) {
+				KUNIT_EXPECT_TRUE(
+					test,
+					response.source_validation_failure_present);
+				KUNIT_EXPECT_EQ(
+					test,
+					response.source_validation_failure,
+					field == 0 ?
+					(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_VALUE_NAME :
+					(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME);
+			}
+			pkm_lcs_source_response_frame_destroy(&frame);
+
+out_release_source:
+			KUNIT_EXPECT_EQ(
+				test,
+				pkm_lcs_source_device_release_file(&file), 0);
+			pkm_lcs_kunit_reset_source_table();
+			kacs_rust_token_drop(token);
+		}
+	}
+}
+
 static void pkm_lcs_kunit_expect_source_validation_audit(
 	struct kunit *test, const char *validation_class,
 	const u8 key_guid[RSI_GUID_SIZE])
@@ -43465,6 +43560,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_write_lookup_runtime_limits_path_names),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_enum_children_runtime_limits_child_names),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_write_query_values_runtime_limits_names),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_malformed_path_name_audits),
 	KUNIT_CASE(

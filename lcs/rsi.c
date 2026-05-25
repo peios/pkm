@@ -107,7 +107,7 @@ extern int lcs_rust_validate_rsi_lookup_response_frame(
 	struct pkm_lcs_rsi_lookup_response_summary *summary);
 extern int lcs_rust_validate_rsi_query_values_response_frame(
 	const u8 *frame, size_t frame_len, u64 request_id,
-	u64 next_sequence,
+	u64 next_sequence, const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_query_values_response_summary *summary);
 extern int lcs_rust_validate_rsi_status_only_response_frame(
 	const u8 *frame, size_t frame_len, u64 request_id,
@@ -593,7 +593,7 @@ long pkm_lcs_rsi_validate_lookup_response(
 
 long pkm_lcs_rsi_validate_query_values_response(
 	const u8 *frame, size_t frame_len, u64 request_id,
-	u64 next_sequence,
+	u64 next_sequence, const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_query_values_response_summary *summary)
 {
 	if (!summary)
@@ -606,7 +606,7 @@ long pkm_lcs_rsi_validate_query_values_response(
 		return -EINVAL;
 
 	return lcs_rust_validate_rsi_query_values_response_frame(
-		frame, frame_len, request_id, next_sequence, summary);
+		frame, frame_len, request_id, next_sequence, limits, summary);
 }
 
 long pkm_lcs_rsi_validate_status_only_response(
