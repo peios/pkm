@@ -8483,7 +8483,80 @@ static long pkm_lcs_key_fd_restore_validate_root_flags(
 	return 0;
 }
 
-static long pkm_lcs_key_fd_restore_discover_root_teardown(
+static long pkm_lcs_key_fd_restore_teardown_root_values(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits, const u8 *values_frame,
+	size_t values_frame_len, u64 values_request_id, u64 next_sequence)
+{
+	struct pkm_lcs_backup_value_entry_view *values = NULL;
+	struct pkm_lcs_backup_blanket_entry_view *blankets = NULL;
+	u32 value_count = 0;
+	u32 blanket_count = 0;
+	u32 i;
+	long ret;
+
+	if (!key_fd || !txn_id || !limits || !values_frame)
+		return -EINVAL;
+
+	ret = pkm_lcs_backup_materialize_value_entries(
+		limits, values_frame, values_frame_len, values_request_id,
+		next_sequence, &values, &value_count, &blankets,
+		&blanket_count);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < value_count; i++) {
+		struct pkm_lcs_source_response_result response = { };
+		const char *value_name = NULL;
+		const char *layer_name = NULL;
+		u32 value_name_len = 0;
+		u32 layer_name_len = 0;
+
+		ret = pkm_lcs_backup_frame_field(
+			values_frame, values_frame_len, values[i].name_offset,
+			values[i].name_len, &value_name, &value_name_len);
+		if (ret)
+			goto out_free;
+		ret = pkm_lcs_backup_frame_field(
+			values_frame, values_frame_len, values[i].layer_offset,
+			values[i].layer_len, &layer_name, &layer_name_len);
+		if (ret)
+			goto out_free;
+
+		ret = pkm_lcs_source_delete_value_entry_round_trip_timeout_with_limits(
+			key_fd->source_id, txn_id, key_fd->key_guid,
+			value_name, value_name_len, layer_name, layer_name_len,
+			limits, limits->request_timeout_ms, &response, NULL);
+		if (ret)
+			goto out_free;
+	}
+
+	for (i = 0; i < blanket_count; i++) {
+		struct pkm_lcs_source_response_result response = { };
+		const char *layer_name = NULL;
+		u32 layer_name_len = 0;
+
+		ret = pkm_lcs_backup_frame_field(
+			values_frame, values_frame_len, blankets[i].layer_offset,
+			blankets[i].layer_len, &layer_name, &layer_name_len);
+		if (ret)
+			goto out_free;
+
+		ret = pkm_lcs_source_set_blanket_tombstone_round_trip_timeout_with_limits(
+			key_fd->source_id, txn_id, key_fd->key_guid,
+			layer_name, layer_name_len, false, 0, limits,
+			limits->request_timeout_ms, &response, NULL);
+		if (ret)
+			goto out_free;
+	}
+
+out_free:
+	kfree(blankets);
+	kfree(values);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_restore_teardown_root_contents(
 	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
 	const struct pkm_lcs_runtime_limits *limits)
 {
@@ -8493,7 +8566,6 @@ static long pkm_lcs_key_fd_restore_discover_root_teardown(
 	struct pkm_lcs_source_response_result enum_response = { };
 	struct pkm_lcs_source_response_result values_response = { };
 	struct pkm_lcs_rsi_enum_children_info_summary enum_summary = { };
-	struct pkm_lcs_rsi_query_values_info_summary values_summary = { };
 	u64 next_sequence = 0;
 	long ret;
 
@@ -8529,10 +8601,9 @@ static long pkm_lcs_key_fd_restore_discover_root_teardown(
 		&values_response, NULL);
 	if (ret)
 		goto out_frames;
-	ret = pkm_lcs_rsi_materialize_query_values_info_summary(
-		values_frame.data, values_frame.len, values_response.request_id,
-		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
-		NULL, 0, &values_response.limits, &values_summary);
+	ret = pkm_lcs_key_fd_restore_teardown_root_values(
+		key_fd, txn_id, limits, values_frame.data, values_frame.len,
+		values_response.request_id, next_sequence);
 
 out_frames:
 	pkm_lcs_source_response_frame_destroy(&values_frame);
@@ -8628,7 +8699,7 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 		}
 	}
 
-	ret = pkm_lcs_key_fd_restore_discover_root_teardown(
+	ret = pkm_lcs_key_fd_restore_teardown_root_contents(
 		key_fd, transaction_id, &limits);
 	if (ret)
 		goto out_abort_transaction;
