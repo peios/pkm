@@ -20208,6 +20208,9 @@ struct pkm_lcs_kunit_restore_txn_source_script {
 	struct pkm_lcs_kunit_query_values_source_script query_values;
 	struct pkm_lcs_kunit_delete_value_source_script delete_value;
 	struct pkm_lcs_kunit_blanket_tombstone_source_script blanket_tombstone;
+	const u8 *expected_root_write_sd;
+	size_t expected_root_write_sd_len;
+	u64 expected_root_last_write_time;
 	u32 begin_status;
 	u32 abort_status;
 	u64 transaction_id;
@@ -20220,6 +20223,7 @@ struct pkm_lcs_kunit_restore_txn_source_script {
 	bool expect_child_teardown;
 	bool expect_root_value_delete;
 	bool expect_root_blanket_delete;
+	bool expect_root_write_key;
 	int result;
 };
 
@@ -20417,6 +20421,103 @@ static int pkm_lcs_kunit_restore_txn_source_thread(void *raw_script)
 				return ret;
 			}
 		}
+
+		if (script->expect_root_write_key) {
+			const u8 *expected_sd = script->expected_root_write_sd ?
+				script->expected_root_write_sd :
+				pkm_lcs_kunit_owner_only_sd;
+			size_t expected_sd_len =
+				script->expected_root_write_sd ?
+					script->expected_root_write_sd_len :
+					sizeof(pkm_lcs_kunit_owner_only_sd);
+			u64 expected_last_write =
+				script->expected_root_last_write_time ?
+					script->expected_root_last_write_time :
+					5678ULL;
+			size_t write_len = RSI_REQUEST_HEADER_SIZE +
+					   RSI_GUID_SIZE + sizeof(u32) +
+					   RSI_LENGTH_PREFIX_SIZE +
+					   expected_sd_len + sizeof(u64);
+			size_t field_mask_offset;
+			size_t sd_offset;
+			size_t last_write_offset;
+
+			for (;;) {
+				count = pkm_lcs_kunit_source_device_read_file(
+					script->file, request, sizeof(request),
+					true);
+				if (count != -EAGAIN)
+					break;
+				if (kthread_should_stop()) {
+					script->result = -EINTR;
+					return script->result;
+				}
+				msleep(1);
+			}
+			if (count < 0) {
+				script->result = (int)count;
+				return script->result;
+			}
+			script->reads++;
+			if ((size_t)count != write_len ||
+			    get_unaligned_le16(
+				    request + RSI_REQUEST_OP_CODE_OFFSET) !=
+				    RSI_WRITE_KEY ||
+			    get_unaligned_le64(
+				    request + RSI_REQUEST_TXN_ID_OFFSET) !=
+				    script->transaction_id ||
+			    memcmp(request + RSI_REQUEST_HEADER_SIZE,
+				   pkm_lcs_kunit_restore_target_guid,
+				   RSI_GUID_SIZE)) {
+				script->result = -EINVAL;
+				return script->result;
+			}
+			request_id = get_unaligned_le64(
+				request + RSI_REQUEST_ID_OFFSET);
+			field_mask_offset = RSI_REQUEST_HEADER_SIZE +
+					    RSI_GUID_SIZE;
+			if (get_unaligned_le32(request + field_mask_offset) !=
+			    (u32)(RSI_WRITE_KEY_FIELD_SD |
+				  RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME)) {
+				script->result = -EINVAL;
+				return script->result;
+			}
+			sd_offset = field_mask_offset + sizeof(u32);
+			if (get_unaligned_le32(request + sd_offset) !=
+				    expected_sd_len ||
+			    memcmp(request + sd_offset + RSI_LENGTH_PREFIX_SIZE,
+				   expected_sd, expected_sd_len)) {
+				script->result = -EINVAL;
+				return script->result;
+			}
+			last_write_offset = sd_offset + RSI_LENGTH_PREFIX_SIZE +
+					    expected_sd_len;
+			if (get_unaligned_le64(request + last_write_offset) !=
+			    expected_last_write) {
+				script->result = -EINVAL;
+				return script->result;
+			}
+
+			memset(response, 0, sizeof(response));
+			put_unaligned_le32(
+				sizeof(response),
+				response + RSI_RESPONSE_TOTAL_LEN_OFFSET);
+			put_unaligned_le64(
+				request_id, response + RSI_RESPONSE_ID_OFFSET);
+			put_unaligned_le16(
+				RSI_WRITE_KEY | RSI_RESPONSE_BIT,
+				response + RSI_RESPONSE_OP_CODE_OFFSET);
+			put_unaligned_le32(
+				RSI_OK, response + RSI_RESPONSE_STATUS_OFFSET);
+			written = pkm_lcs_kunit_source_device_write_file(
+				script->file, response, sizeof(response),
+				false, NULL);
+			if (written != (ssize_t)sizeof(response)) {
+				script->result = (int)written;
+				return script->result;
+			}
+			script->writes++;
+		}
 	}
 
 	for (;;) {
@@ -20496,6 +20597,7 @@ static void pkm_lcs_kunit_key_fd_restore_admission(struct kunit *test)
 			.query_all = true,
 			.empty = true,
 		},
+		.expect_root_write_key = true,
 	};
 	struct pkm_lcs_kunit_restore_input_file input = { };
 	struct task_struct *task;
@@ -20535,8 +20637,8 @@ static void pkm_lcs_kunit_key_fd_restore_admission(struct kunit *test)
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 5U);
-	KUNIT_EXPECT_EQ(test, script.writes, 5U);
+	KUNIT_EXPECT_EQ(test, script.reads, 6U);
+	KUNIT_EXPECT_EQ(test, script.writes, 6U);
 	KUNIT_EXPECT_TRUE(test, script.saw_abort);
 	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
 	KUNIT_EXPECT_EQ(test, after.privileges_used &
@@ -20607,6 +20709,7 @@ pkm_lcs_kunit_key_fd_restore_root_path_teardown_dispatches(struct kunit *test)
 			.query_all = true,
 			.empty = true,
 		},
+		.expect_root_write_key = true,
 	};
 	struct pkm_lcs_kunit_restore_input_file input = { };
 	struct task_struct *task;
@@ -20642,8 +20745,8 @@ pkm_lcs_kunit_key_fd_restore_root_path_teardown_dispatches(struct kunit *test)
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 9U);
-	KUNIT_EXPECT_EQ(test, script.writes, 9U);
+	KUNIT_EXPECT_EQ(test, script.reads, 10U);
+	KUNIT_EXPECT_EQ(test, script.writes, 10U);
 	KUNIT_EXPECT_TRUE(test, script.saw_abort);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
@@ -20701,6 +20804,7 @@ pkm_lcs_kunit_key_fd_restore_root_value_teardown_dispatches(struct kunit *test)
 			.expected_set = false,
 			.expected_sequence = 0,
 		},
+		.expect_root_write_key = true,
 	};
 	struct pkm_lcs_kunit_restore_input_file input = { };
 	struct task_struct *task;
@@ -20736,8 +20840,8 @@ pkm_lcs_kunit_key_fd_restore_root_value_teardown_dispatches(struct kunit *test)
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 7U);
-	KUNIT_EXPECT_EQ(test, script.writes, 7U);
+	KUNIT_EXPECT_EQ(test, script.reads, 8U);
+	KUNIT_EXPECT_EQ(test, script.writes, 8U);
 	KUNIT_EXPECT_TRUE(test, script.saw_abort);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
@@ -21050,6 +21154,7 @@ pkm_lcs_kunit_expect_restore_root_flag_result_with_sequence(
 			.query_all = true,
 			.empty = true,
 		},
+		.expect_root_write_key = expected_ret == (long)-EOPNOTSUPP,
 	};
 	struct task_struct *task;
 	struct file file = { };
@@ -21058,7 +21163,7 @@ pkm_lcs_kunit_expect_restore_root_flag_result_with_sequence(
 	long key_fd;
 	int input_fd;
 	int thread_ret;
-	u32 expected_io = expected_ret == (long)-EOPNOTSUPP ? 5U : 3U;
+	u32 expected_io = expected_ret == (long)-EOPNOTSUPP ? 6U : 3U;
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
 	if (override_sequence)
@@ -21252,6 +21357,7 @@ static void pkm_lcs_kunit_key_fd_restore_layer_tcb_marks_used(
 			.query_all = true,
 			.empty = true,
 		},
+		.expect_root_write_key = true,
 	};
 	struct pkm_lcs_kunit_restore_input_file input = { };
 	struct task_struct *task;
@@ -21289,8 +21395,8 @@ static void pkm_lcs_kunit_key_fd_restore_layer_tcb_marks_used(
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 5U);
-	KUNIT_EXPECT_EQ(test, script.writes, 5U);
+	KUNIT_EXPECT_EQ(test, script.reads, 6U);
+	KUNIT_EXPECT_EQ(test, script.writes, 6U);
 	KUNIT_EXPECT_TRUE(test, script.saw_abort);
 	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
 	KUNIT_EXPECT_EQ(test, after.privileges_used &

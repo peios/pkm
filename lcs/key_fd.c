@@ -8806,6 +8806,25 @@ out_release:
 	return ret;
 }
 
+static long pkm_lcs_key_fd_restore_write_root_mutable(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_restore_root_key_summary *summary)
+{
+	struct pkm_lcs_source_response_result response = { };
+
+	if (!key_fd || !txn_id || !limits || !summary ||
+	    !summary->root_key_seen || !summary->root_sd ||
+	    !summary->root_sd_len)
+		return -EINVAL;
+
+	return pkm_lcs_source_write_key_round_trip_timeout_with_limits(
+		key_fd->source_id, txn_id, key_fd->key_guid,
+		summary->root_sd, summary->root_sd_len,
+		(u64)summary->root_last_write_time_ns, limits,
+		limits->request_timeout_ms, &response, NULL);
+}
+
 static long pkm_lcs_key_fd_restore_from_args_for_token(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct reg_restore_args *args)
@@ -8895,6 +8914,11 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 
 	ret = pkm_lcs_key_fd_restore_teardown_root_contents(
 		key_fd, transaction_id, &limits);
+	if (ret)
+		goto out_abort_transaction;
+
+	ret = pkm_lcs_key_fd_restore_write_root_mutable(
+		key_fd, transaction_id, &limits, &root_summary);
 	if (ret)
 		goto out_abort_transaction;
 
