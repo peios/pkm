@@ -5229,6 +5229,12 @@ struct pkm_lcs_backup_child_sections {
 	u32 capacity;
 };
 
+static void pkm_lcs_backup_record_frames_destroy(
+	struct pkm_lcs_backup_record_frames *frames);
+static long pkm_lcs_backup_record_frames_append_grow(
+	struct pkm_lcs_backup_record_frames *frames, u8 **frame,
+	size_t frame_len);
+
 struct pkm_lcs_restore_layer_manifest {
 	char *name;
 	u8 *owner_sid;
@@ -5262,6 +5268,7 @@ struct pkm_lcs_restore_root_key_summary {
 	u8 target_root_guid[PKM_LCS_GUID_BYTES];
 	u8 current_key_guid[PKM_LCS_GUID_BYTES];
 	u8 *root_sd;
+	struct pkm_lcs_backup_record_frames root_replay_frames;
 	struct pkm_lcs_restore_layer_manifest_set layer_manifests;
 	struct pkm_lcs_restore_guid_set processed_non_root_keys;
 	enum pkm_lcs_restore_key_section_phase section_phase;
@@ -5312,6 +5319,7 @@ static void pkm_lcs_restore_root_key_summary_destroy(
 	if (!summary)
 		return;
 	kfree(summary->root_sd);
+	pkm_lcs_backup_record_frames_destroy(&summary->root_replay_frames);
 	pkm_lcs_restore_layer_manifest_set_destroy(&summary->layer_manifests);
 	pkm_lcs_restore_guid_set_destroy(&summary->processed_non_root_keys);
 	memset(summary, 0, sizeof(*summary));
@@ -5824,6 +5832,27 @@ static long pkm_lcs_restore_validate_key_scoped_record_topology(
 	return 0;
 }
 
+static long pkm_lcs_restore_retain_root_replay_frame(
+	struct pkm_lcs_restore_root_key_summary *summary, const u8 *frame,
+	u32 record_len)
+{
+	u8 *copy;
+	long ret;
+
+	if (!summary || !frame || !record_len)
+		return -EINVAL;
+	if (!summary->current_key_is_root)
+		return 0;
+
+	copy = kmemdup(frame, record_len, GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
+	ret = pkm_lcs_backup_record_frames_append_grow(
+		&summary->root_replay_frames, &copy, record_len);
+	kfree(copy);
+	return ret;
+}
+
 static long pkm_lcs_restore_validate_data_record(
 	struct file *file, loff_t *posp, struct sha256_ctx *checksum,
 	const u8 common_header[6], u16 record_type, u32 record_len,
@@ -5834,6 +5863,7 @@ static long pkm_lcs_restore_validate_data_record(
 	size_t max_frame_len = 0;
 	size_t payload_len;
 	u8 *frame;
+	bool retain_root_frame = false;
 	long ret;
 
 	if (!file || !checksum || !limits || !summary)
@@ -5883,6 +5913,7 @@ static long pkm_lcs_restore_validate_data_record(
 		ret = lcs_rust_validate_backup_path_entry_record_layer_manifest(
 			limits, manifests, summary->layer_manifests.count, frame,
 			record_len);
+		retain_root_frame = !ret && path.hidden;
 		break;
 	}
 	case REG_BACKUP_VALUE:
@@ -5904,6 +5935,7 @@ static long pkm_lcs_restore_validate_data_record(
 		ret = lcs_rust_validate_backup_value_record_layer_manifest(
 			limits, manifests, summary->layer_manifests.count, frame,
 			record_len);
+		retain_root_frame = !ret;
 		break;
 	}
 	case REG_BACKUP_BLANKET_TOMBSTONE:
@@ -5925,12 +5957,17 @@ static long pkm_lcs_restore_validate_data_record(
 		ret = lcs_rust_validate_backup_blanket_tombstone_record_layer_manifest(
 			limits, manifests, summary->layer_manifests.count, frame,
 			record_len);
+		retain_root_frame = !ret;
 		break;
 	}
 	default:
 		ret = -EINVAL;
 		break;
 	}
+
+	if (!ret && retain_root_frame)
+		ret = pkm_lcs_restore_retain_root_replay_frame(
+			summary, frame, record_len);
 
 	kfree(manifests);
 out_free:
@@ -7123,6 +7160,47 @@ static long pkm_lcs_backup_record_frames_append(
 	frames->count++;
 	*frame = NULL;
 	return 0;
+}
+
+static long pkm_lcs_backup_record_frames_append_grow(
+	struct pkm_lcs_backup_record_frames *frames, u8 **frame,
+	size_t frame_len)
+{
+	u8 **grown_frames;
+	size_t *grown_lens;
+	u32 new_capacity;
+
+	if (!frames || !frame || !*frame || !frame_len)
+		return -EINVAL;
+	if (frames->count == frames->capacity) {
+		new_capacity = frames->capacity ? frames->capacity * 2U : 8U;
+		if (new_capacity < frames->capacity)
+			return -EOVERFLOW;
+
+		grown_frames = kcalloc(new_capacity, sizeof(*grown_frames),
+				       GFP_KERNEL);
+		if (!grown_frames)
+			return -ENOMEM;
+		grown_lens = kcalloc(new_capacity, sizeof(*grown_lens),
+				     GFP_KERNEL);
+		if (!grown_lens) {
+			kfree(grown_frames);
+			return -ENOMEM;
+		}
+		if (frames->count) {
+			memcpy(grown_frames, frames->frames,
+			       sizeof(*grown_frames) * frames->count);
+			memcpy(grown_lens, frames->frame_lens,
+			       sizeof(*grown_lens) * frames->count);
+		}
+		kfree(frames->frames);
+		kfree(frames->frame_lens);
+		frames->frames = grown_frames;
+		frames->frame_lens = grown_lens;
+		frames->capacity = new_capacity;
+	}
+
+	return pkm_lcs_backup_record_frames_append(frames, frame, frame_len);
 }
 
 static bool pkm_lcs_backup_guid_equal(const u8 left[PKM_LCS_GUID_BYTES],
@@ -8825,15 +8903,225 @@ static long pkm_lcs_key_fd_restore_write_root_mutable(
 		limits->request_timeout_ms, &response, NULL);
 }
 
+static long pkm_lcs_restore_remapped_sequence(
+	struct pkm_lcs_restore_sequence_gate *sequence_gate,
+	u64 backup_sequence, u64 *new_sequence_out)
+{
+	if (!sequence_gate || !sequence_gate->held || !new_sequence_out)
+		return -EINVAL;
+	return pkm_lcs_restore_sequence_gate_record_dispatched(
+		sequence_gate, backup_sequence, new_sequence_out);
+}
+
+static long pkm_lcs_key_fd_restore_replay_root_path_entry(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_restore_root_key_summary *summary,
+	struct pkm_lcs_restore_sequence_gate *sequence_gate,
+	const u8 *frame, size_t frame_len)
+{
+	struct pkm_lcs_backup_path_entry_record_view path = { };
+	struct pkm_lcs_source_response_result response = { };
+	const char *child_name = NULL;
+	const char *layer_name = NULL;
+	u8 parent_guid[PKM_LCS_GUID_BYTES];
+	u32 child_name_len = 0;
+	u32 layer_name_len = 0;
+	u64 new_sequence = 0;
+	long ret;
+
+	if (!key_fd || !txn_id || !limits || !summary || !frame)
+		return -EINVAL;
+
+	ret = lcs_rust_parse_backup_path_entry_record(
+		limits, frame, frame_len, &path);
+	if (ret)
+		return ret;
+	if (!path.hidden)
+		return -EINVAL;
+	pkm_lcs_restore_remap_guid(summary, path.parent_guid, parent_guid);
+	if (!pkm_lcs_restore_guid_eq(parent_guid, summary->target_root_guid))
+		return -EINVAL;
+	ret = pkm_lcs_backup_frame_field(frame, frame_len,
+					 path.child_name_offset,
+					 path.child_name_len, &child_name,
+					 &child_name_len);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_backup_frame_field(frame, frame_len, path.layer_offset,
+					 path.layer_len, &layer_name,
+					 &layer_name_len);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_restore_remapped_sequence(sequence_gate, path.sequence,
+						&new_sequence);
+	if (ret)
+		return ret;
+
+	return pkm_lcs_source_hide_entry_round_trip_timeout_with_limits(
+		key_fd->source_id, txn_id, parent_guid, child_name,
+		child_name_len, layer_name, layer_name_len, new_sequence,
+		limits, limits->request_timeout_ms, &response, NULL);
+}
+
+static long pkm_lcs_key_fd_restore_replay_root_value(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_restore_root_key_summary *summary,
+	struct pkm_lcs_restore_sequence_gate *sequence_gate,
+	const u8 *frame, size_t frame_len)
+{
+	struct pkm_lcs_backup_value_record_view value = { };
+	struct pkm_lcs_source_response_result response = { };
+	const char *name = NULL;
+	const char *data = NULL;
+	const char *layer_name = NULL;
+	u8 key_guid[PKM_LCS_GUID_BYTES];
+	u32 name_len = 0;
+	u32 data_len = 0;
+	u32 layer_name_len = 0;
+	u64 new_sequence = 0;
+	long ret;
+
+	if (!key_fd || !txn_id || !limits || !summary || !frame)
+		return -EINVAL;
+
+	ret = lcs_rust_parse_backup_value_record(limits, frame, frame_len,
+						 &value);
+	if (ret)
+		return ret;
+	pkm_lcs_restore_remap_guid(summary, value.key_guid, key_guid);
+	if (!pkm_lcs_restore_guid_eq(key_guid, summary->target_root_guid))
+		return -EINVAL;
+	ret = pkm_lcs_backup_frame_field(frame, frame_len, value.name_offset,
+					 value.name_len, &name, &name_len);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_backup_frame_field(frame, frame_len, value.data_offset,
+					 value.data_len, &data, &data_len);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_backup_frame_field(frame, frame_len, value.layer_offset,
+					 value.layer_len, &layer_name,
+					 &layer_name_len);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_restore_remapped_sequence(sequence_gate, value.sequence,
+						&new_sequence);
+	if (ret)
+		return ret;
+
+	return pkm_lcs_source_set_value_round_trip_timeout_with_limits(
+		key_fd->source_id, txn_id, key_guid, name, name_len,
+		layer_name, layer_name_len, value.value_type,
+		(const u8 *)data, data_len, new_sequence, 0, limits,
+		limits->request_timeout_ms, &response, NULL);
+}
+
+static long pkm_lcs_key_fd_restore_replay_root_blanket(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_restore_root_key_summary *summary,
+	struct pkm_lcs_restore_sequence_gate *sequence_gate,
+	const u8 *frame, size_t frame_len)
+{
+	struct pkm_lcs_backup_blanket_tombstone_record_view blanket = { };
+	struct pkm_lcs_source_response_result response = { };
+	const char *layer_name = NULL;
+	u8 key_guid[PKM_LCS_GUID_BYTES];
+	u32 layer_name_len = 0;
+	u64 new_sequence = 0;
+	long ret;
+
+	if (!key_fd || !txn_id || !limits || !summary || !frame)
+		return -EINVAL;
+
+	ret = lcs_rust_parse_backup_blanket_tombstone_record(
+		limits, frame, frame_len, &blanket);
+	if (ret)
+		return ret;
+	pkm_lcs_restore_remap_guid(summary, blanket.key_guid, key_guid);
+	if (!pkm_lcs_restore_guid_eq(key_guid, summary->target_root_guid))
+		return -EINVAL;
+	ret = pkm_lcs_backup_frame_field(frame, frame_len,
+					 blanket.layer_offset,
+					 blanket.layer_len, &layer_name,
+					 &layer_name_len);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_restore_remapped_sequence(
+		sequence_gate, blanket.sequence, &new_sequence);
+	if (ret)
+		return ret;
+
+	return pkm_lcs_source_set_blanket_tombstone_round_trip_timeout_with_limits(
+		key_fd->source_id, txn_id, key_guid, layer_name,
+		layer_name_len, true, new_sequence, limits,
+		limits->request_timeout_ms, &response, NULL);
+}
+
+static long pkm_lcs_key_fd_restore_replay_root_section(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_restore_root_key_summary *summary,
+	struct pkm_lcs_restore_sequence_gate *sequence_gate)
+{
+	u32 i;
+
+	if (!key_fd || !txn_id || !limits || !summary)
+		return -EINVAL;
+	if (!summary->root_replay_frames.count)
+		return 0;
+	if (!sequence_gate || !sequence_gate->held)
+		return -EINVAL;
+
+	for (i = 0; i < summary->root_replay_frames.count; i++) {
+		const u8 *frame = summary->root_replay_frames.frames[i];
+		size_t frame_len = summary->root_replay_frames.frame_lens[i];
+		u16 record_type;
+		long ret;
+
+		if (!frame || frame_len < PKM_LCS_BACKUP_RECORD_HEADER_LEN)
+			return -EINVAL;
+		record_type = get_unaligned_le16(frame);
+		switch (record_type) {
+		case REG_BACKUP_PATH_ENTRY:
+			ret = pkm_lcs_key_fd_restore_replay_root_path_entry(
+				key_fd, txn_id, limits, summary, sequence_gate,
+				frame, frame_len);
+			break;
+		case REG_BACKUP_VALUE:
+			ret = pkm_lcs_key_fd_restore_replay_root_value(
+				key_fd, txn_id, limits, summary, sequence_gate,
+				frame, frame_len);
+			break;
+		case REG_BACKUP_BLANKET_TOMBSTONE:
+			ret = pkm_lcs_key_fd_restore_replay_root_blanket(
+				key_fd, txn_id, limits, summary, sequence_gate,
+				frame, frame_len);
+			break;
+		default:
+			ret = -EINVAL;
+			break;
+		}
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 static long pkm_lcs_key_fd_restore_from_args_for_token(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct reg_restore_args *args)
 {
 	struct pkm_lcs_runtime_limits limits;
 	struct pkm_lcs_restore_root_key_summary root_summary = { };
+	struct pkm_lcs_restore_sequence_gate sequence_gate = { };
 	u64 transaction_id = 0;
 	bool restore_started = false;
 	bool start_audit_failed = false;
+	bool sequence_gate_held = false;
 	long ret;
 
 	if (!key_fd || !args)
@@ -8891,25 +9179,17 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 		goto out_abort_transaction;
 
 	if (root_summary.sequence_record_seen) {
-		struct pkm_lcs_restore_sequence_gate sequence_gate = { };
 		u64 remapped_sequence = 0;
-		long release_ret;
 
 		ret = pkm_lcs_restore_sequence_gate_acquire(&sequence_gate);
 		if (ret)
 			goto out_abort_transaction;
+		sequence_gate_held = true;
 		ret = pkm_lcs_restore_sequence_gate_validate(
 			&sequence_gate, root_summary.max_backup_sequence,
 			&remapped_sequence);
-		release_ret =
-			pkm_lcs_restore_sequence_gate_release_terminal(
-				&sequence_gate);
 		if (ret)
 			goto out_abort_transaction;
-		if (release_ret) {
-			ret = release_ret;
-			goto out_abort_transaction;
-		}
 	}
 
 	ret = pkm_lcs_key_fd_restore_teardown_root_contents(
@@ -8922,17 +9202,32 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 	if (ret)
 		goto out_abort_transaction;
 
+	ret = pkm_lcs_key_fd_restore_replay_root_section(
+		key_fd, transaction_id, &limits, &root_summary,
+		sequence_gate_held ? &sequence_gate : NULL);
+	if (ret)
+		goto out_abort_transaction;
+
 	ret = -EOPNOTSUPP;
 
 out_abort_transaction:
 	pkm_lcs_restore_root_key_summary_destroy(&root_summary);
 	{
 		long abort_ret;
+		long release_ret = 0;
 
 		abort_ret = pkm_lcs_key_fd_restore_abort_read_write_transaction(
 			key_fd, &limits, transaction_id);
+		if (sequence_gate_held) {
+			release_ret =
+				pkm_lcs_restore_sequence_gate_release_terminal(
+					&sequence_gate);
+			sequence_gate_held = false;
+		}
 		if (abort_ret && !start_audit_failed)
 			ret = abort_ret;
+		if (release_ret && !start_audit_failed)
+			ret = release_ret;
 	}
 	if (restore_started)
 		(void)pkm_lcs_emit_restore_complete_audit_for_token(
