@@ -913,6 +913,45 @@ static void pkm_lcs_kunit_source_device_open_attaches_private_state(
 	kacs_rust_token_drop(token);
 }
 
+/*
+ * Regression: Linux misc_open() sets file->private_data to the struct
+ * miscdevice * before calling the driver .open, so every real open of
+ * /dev/pkm_registry arrives with a non-NULL private_data. The open path must
+ * tolerate and overwrite it, not reject it as EINVAL (which previously broke
+ * every userspace open while the KUnit suite -- using a zeroed struct file --
+ * stayed green).
+ */
+static void pkm_lcs_kunit_source_device_open_overwrites_misc_private_data(
+	struct kunit *test)
+{
+	struct pkm_lcs_source_fd *source_fd;
+	int miscdevice_sentinel = 0;
+	struct file file = { };
+	const void *token;
+
+	/* Stand in for the struct miscdevice * that misc_open() stashes. */
+	file.private_data = &miscdevice_sentinel;
+
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	KUNIT_ASSERT_NOT_NULL(test, file.private_data);
+	KUNIT_EXPECT_PTR_NE(test, file.private_data,
+			    (void *)&miscdevice_sentinel);
+	source_fd = file.private_data;
+	KUNIT_EXPECT_EQ(test, source_fd->state,
+			PKM_LCS_SOURCE_FD_UNREGISTERED);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	KUNIT_EXPECT_PTR_EQ(test, file.private_data, NULL);
+
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_registration_copy_success(struct kunit *test)
 {
 	const char name_src[] = { 'M', 'a', 'c', 'h', 'i', 'n', 'e', '!' };
@@ -50118,6 +50157,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_requires_tcb),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_marks_tcb_used),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_attaches_private_state),
+	KUNIT_CASE(pkm_lcs_kunit_source_device_open_overwrites_misc_private_data),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_copy_success),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_copy_rejects_padding),
 	KUNIT_CASE(

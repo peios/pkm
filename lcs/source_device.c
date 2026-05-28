@@ -2561,7 +2561,16 @@ long pkm_lcs_source_device_open_file_for_token(const void *token,
 	struct pkm_lcs_source_fd *source_fd;
 	long ret;
 
-	if (!file || file->private_data)
+	/*
+	 * Linux misc_open() stores the struct miscdevice * in
+	 * file->private_data before invoking this .open handler, so a fresh
+	 * open of /dev/pkm_registry always arrives with private_data already
+	 * non-NULL. We do not use that pointer; the success path below
+	 * overwrites it with our per-fd state. Rejecting a non-NULL
+	 * private_data here would fail every real open with EINVAL (the
+	 * misc framework never hands us a NULL one).
+	 */
+	if (!file)
 		return -EINVAL;
 
 	ret = pkm_lcs_source_device_check_tcb(token);
