@@ -8483,6 +8483,57 @@ static long pkm_lcs_key_fd_restore_validate_root_flags(
 	return 0;
 }
 
+static long pkm_lcs_key_fd_restore_teardown_root_path_entries(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits, const u8 *enum_frame,
+	size_t enum_frame_len, u64 enum_request_id, u64 next_sequence)
+{
+	struct pkm_lcs_backup_path_entry_view *entries = NULL;
+	u32 entry_count = 0;
+	u32 i;
+	long ret;
+
+	if (!key_fd || !txn_id || !limits || !enum_frame)
+		return -EINVAL;
+
+	ret = pkm_lcs_backup_materialize_path_entries(
+		limits, enum_frame, enum_frame_len, enum_request_id,
+		next_sequence, &entries, &entry_count);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < entry_count; i++) {
+		struct pkm_lcs_source_response_result response = { };
+		const char *child_name = NULL;
+		const char *layer_name = NULL;
+		u32 child_name_len = 0;
+		u32 layer_name_len = 0;
+
+		ret = pkm_lcs_backup_frame_field(
+			enum_frame, enum_frame_len, entries[i].child_name_offset,
+			entries[i].child_name_len, &child_name,
+			&child_name_len);
+		if (ret)
+			goto out_free;
+		ret = pkm_lcs_backup_frame_field(
+			enum_frame, enum_frame_len, entries[i].layer_offset,
+			entries[i].layer_len, &layer_name, &layer_name_len);
+		if (ret)
+			goto out_free;
+
+		ret = pkm_lcs_source_delete_entry_round_trip_timeout_with_limits(
+			key_fd->source_id, txn_id, key_fd->key_guid,
+			child_name, child_name_len, layer_name, layer_name_len,
+			limits, limits->request_timeout_ms, &response, NULL);
+		if (ret)
+			goto out_free;
+	}
+
+out_free:
+	kfree(entries);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_restore_teardown_root_values(
 	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
 	const struct pkm_lcs_runtime_limits *limits, const u8 *values_frame,
@@ -8592,6 +8643,12 @@ static long pkm_lcs_key_fd_restore_teardown_root_contents(
 		enum_frame.data, enum_frame.len, enum_response.request_id,
 		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
 		NULL, 0, &enum_response.limits, &enum_summary);
+	if (ret)
+		goto out_frames;
+
+	ret = pkm_lcs_key_fd_restore_teardown_root_path_entries(
+		key_fd, txn_id, limits, enum_frame.data, enum_frame.len,
+		enum_response.request_id, next_sequence);
 	if (ret)
 		goto out_frames;
 
