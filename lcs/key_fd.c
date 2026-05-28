@@ -8483,6 +8483,64 @@ static long pkm_lcs_key_fd_restore_validate_root_flags(
 	return 0;
 }
 
+static long pkm_lcs_key_fd_restore_discover_root_teardown(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
+	struct pkm_lcs_source_response_frame enum_frame = { };
+	struct pkm_lcs_source_response_frame values_frame = { };
+	struct pkm_lcs_source_response_result enum_response = { };
+	struct pkm_lcs_source_response_result values_response = { };
+	struct pkm_lcs_rsi_enum_children_info_summary enum_summary = { };
+	struct pkm_lcs_rsi_query_values_info_summary values_summary = { };
+	u64 next_sequence = 0;
+	long ret;
+
+	if (!key_fd || !txn_id || !limits)
+		return -EINVAL;
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		return ret;
+
+	pkm_lcs_source_response_frame_init(&enum_frame);
+	pkm_lcs_source_response_frame_init(&values_frame);
+
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, txn_id, key_fd->key_guid, limits,
+		limits->request_timeout_ms, &enum_frame, &enum_response,
+		NULL);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
+		enum_frame.data, enum_frame.len, enum_response.request_id,
+		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
+		NULL, 0, &enum_response.limits, &enum_summary);
+	if (ret)
+		goto out_frames;
+
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, txn_id, key_fd->key_guid, "", 0, true,
+		limits, limits->request_timeout_ms, &values_frame,
+		&values_response, NULL);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_rsi_materialize_query_values_info_summary(
+		values_frame.data, values_frame.len, values_response.request_id,
+		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
+		NULL, 0, &values_response.limits, &values_summary);
+
+out_frames:
+	pkm_lcs_source_response_frame_destroy(&values_frame);
+	pkm_lcs_source_response_frame_destroy(&enum_frame);
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_restore_from_args_for_token(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct reg_restore_args *args)
@@ -8569,6 +8627,11 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 			goto out_abort_transaction;
 		}
 	}
+
+	ret = pkm_lcs_key_fd_restore_discover_root_teardown(
+		key_fd, transaction_id, &limits);
+	if (ret)
+		goto out_abort_transaction;
 
 	ret = -EOPNOTSUPP;
 

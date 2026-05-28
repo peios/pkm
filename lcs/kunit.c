@@ -350,6 +350,7 @@ struct pkm_lcs_kunit_query_values_source_script {
 	u64 second_sequence;
 	u64 expected_txn_id;
 	bool query_all;
+	bool empty;
 	bool include_blanket;
 	bool include_second_value;
 	const char *blanket_layer_name;
@@ -564,7 +565,10 @@ struct pkm_lcs_kunit_enum_children_source_script {
 	const char *layer_name;
 	const u8 *child_guid;
 	u64 sequence;
+	u64 expected_txn_id;
 	u32 repeated_child_count;
+	bool check_txn_id;
+	bool empty;
 	bool hidden;
 	u32 reads;
 	u32 writes;
@@ -20196,6 +20200,8 @@ static void pkm_lcs_kunit_key_fd_backup_pre_start_failure_does_not_audit(
 struct pkm_lcs_kunit_restore_txn_source_script {
 	struct file *file;
 	struct pkm_lcs_kunit_read_key_source_script read_key;
+	struct pkm_lcs_kunit_enum_children_source_script enum_children;
+	struct pkm_lcs_kunit_query_values_source_script query_values;
 	u32 begin_status;
 	u32 abort_status;
 	u64 transaction_id;
@@ -20203,6 +20209,7 @@ struct pkm_lcs_kunit_restore_txn_source_script {
 	u32 writes;
 	bool saw_abort;
 	bool expect_read_key;
+	bool expect_root_content_probe;
 	int result;
 };
 
@@ -20292,6 +20299,35 @@ static int pkm_lcs_kunit_restore_txn_source_thread(void *raw_script)
 		}
 	}
 
+	if (script->expect_root_content_probe) {
+		int ret;
+
+		script->enum_children.file = script->file;
+		script->enum_children.expected_txn_id =
+			script->transaction_id;
+		script->enum_children.check_txn_id = true;
+		ret = pkm_lcs_kunit_enum_children_source_thread(
+			&script->enum_children);
+		script->reads += script->enum_children.reads;
+		script->writes += script->enum_children.writes;
+		if (ret) {
+			script->result = ret;
+			return ret;
+		}
+
+		script->query_values.file = script->file;
+		script->query_values.expected_txn_id =
+			script->transaction_id;
+		ret = pkm_lcs_kunit_query_values_source_thread(
+			&script->query_values);
+		script->reads += script->query_values.reads;
+		script->writes += script->query_values.writes;
+		if (ret) {
+			script->result = ret;
+			return ret;
+		}
+	}
+
 	for (;;) {
 		count = pkm_lcs_kunit_source_device_read_file(
 			script->file, request, sizeof(request), true);
@@ -20357,6 +20393,18 @@ static void pkm_lcs_kunit_key_fd_restore_admission(struct kunit *test)
 			.expected_guid = pkm_lcs_kunit_restore_target_guid,
 			.name = "Software",
 		},
+		.expect_root_content_probe = true,
+		.enum_children = {
+			.expected_parent_guid =
+				pkm_lcs_kunit_restore_target_guid,
+			.empty = true,
+		},
+		.query_values = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.expected_value_name = "",
+			.query_all = true,
+			.empty = true,
+		},
 	};
 	struct pkm_lcs_kunit_restore_input_file input = { };
 	struct task_struct *task;
@@ -20396,8 +20444,8 @@ static void pkm_lcs_kunit_key_fd_restore_admission(struct kunit *test)
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 3U);
-	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_TRUE(test, script.saw_abort);
 	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
 	KUNIT_EXPECT_EQ(test, after.privileges_used &
@@ -20706,6 +20754,18 @@ pkm_lcs_kunit_expect_restore_root_flag_result_with_sequence(
 			.volatile_key = target_volatile,
 			.symlink = target_symlink,
 		},
+		.expect_root_content_probe = expected_ret == (long)-EOPNOTSUPP,
+		.enum_children = {
+			.expected_parent_guid =
+				pkm_lcs_kunit_restore_target_guid,
+			.empty = true,
+		},
+		.query_values = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.expected_value_name = "",
+			.query_all = true,
+			.empty = true,
+		},
 	};
 	struct task_struct *task;
 	struct file file = { };
@@ -20714,6 +20774,7 @@ pkm_lcs_kunit_expect_restore_root_flag_result_with_sequence(
 	long key_fd;
 	int input_fd;
 	int thread_ret;
+	u32 expected_io = expected_ret == (long)-EOPNOTSUPP ? 5U : 3U;
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
 	if (override_sequence)
@@ -20740,8 +20801,8 @@ pkm_lcs_kunit_expect_restore_root_flag_result_with_sequence(
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 3U);
-	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_EQ(test, script.reads, expected_io);
+	KUNIT_EXPECT_EQ(test, script.writes, expected_io);
 	KUNIT_EXPECT_TRUE(test, script.saw_abort);
 	pkm_lcs_kunit_expect_latest_lcs_event(
 		test, "LCS_RESTORE_COMPLETE", "result_errno");
@@ -20895,6 +20956,18 @@ static void pkm_lcs_kunit_key_fd_restore_layer_tcb_marks_used(
 			.expected_guid = pkm_lcs_kunit_restore_target_guid,
 			.name = "Software",
 		},
+		.expect_root_content_probe = true,
+		.enum_children = {
+			.expected_parent_guid =
+				pkm_lcs_kunit_restore_target_guid,
+			.empty = true,
+		},
+		.query_values = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.expected_value_name = "",
+			.query_all = true,
+			.empty = true,
+		},
 	};
 	struct pkm_lcs_kunit_restore_input_file input = { };
 	struct task_struct *task;
@@ -20932,8 +21005,8 @@ static void pkm_lcs_kunit_key_fd_restore_layer_tcb_marks_used(
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 3U);
-	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_TRUE(test, script.saw_abort);
 	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
 	KUNIT_EXPECT_EQ(test, after.privileges_used &
@@ -28245,7 +28318,8 @@ static int pkm_lcs_kunit_query_values_source_build_response(
 	data = script->data ? script->data : (const u8 *)"Machine\\Target";
 	data_len = script->data ? script->data_len :
 				  strlen("Machine\\Target");
-	value_count = script->include_second_value ? 2U : 1U;
+	value_count = script->empty ? 0U :
+				    (script->include_second_value ? 2U : 1U);
 
 	memset(response, 0, response_len);
 	put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
@@ -28256,12 +28330,14 @@ static int pkm_lcs_kunit_query_values_source_build_response(
 						   &offset, value_count);
 	if (ret)
 		return ret;
-	ret = pkm_lcs_kunit_query_values_source_append_value(
-		response, response_len, &offset, value_name, layer_name,
-		script->value_type, data, data_len, script->sequence);
-	if (ret)
-		return ret;
-	if (script->include_second_value) {
+	if (!script->empty) {
+		ret = pkm_lcs_kunit_query_values_source_append_value(
+			response, response_len, &offset, value_name, layer_name,
+			script->value_type, data, data_len, script->sequence);
+		if (ret)
+			return ret;
+	}
+	if (!script->empty && script->include_second_value) {
 		const char *second_value_name =
 			script->second_response_value_name ?
 				script->second_response_value_name :
@@ -30300,12 +30376,14 @@ static int pkm_lcs_kunit_enum_children_source_build_response(
 	target_guid = script->hidden ? hidden_guid : script->child_guid;
 	target_type = script->hidden ? RSI_PATH_TARGET_HIDDEN :
 				       RSI_PATH_TARGET_GUID;
-	child_count = script->repeated_child_count ?
-			      script->repeated_child_count :
-			      1U;
-	if (!script->repeated_child_count && !target_guid)
+	child_count = script->empty ? 0U :
+				    (script->repeated_child_count ?
+					     script->repeated_child_count :
+					     1U);
+	if (!script->empty && !script->repeated_child_count && !target_guid)
 		return -EINVAL;
-	metadata_count = script->hidden ? 0U : child_count;
+	metadata_count = (script->empty || script->hidden) ? 0U :
+							 child_count;
 
 	memset(response, 0, response_len);
 	put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
@@ -30426,6 +30504,9 @@ static int pkm_lcs_kunit_enum_children_source_thread(void *raw_script)
 	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
 	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
 	if (request_op != RSI_ENUM_CHILDREN ||
+	    (script->check_txn_id &&
+	     get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
+		     script->expected_txn_id) ||
 	    memcmp(request + RSI_REQUEST_HEADER_SIZE,
 		   script->expected_parent_guid, RSI_GUID_SIZE)) {
 		script->result = -EINVAL;
