@@ -97,6 +97,16 @@ struct pkm_lcs_backup_root_section_frame_summary {
 	size_t total_len;
 };
 
+struct pkm_lcs_kunit_restore_stream_summary {
+	u32 root_sd_len;
+	u8 root_volatile;
+	u8 root_symlink;
+	u8 root_key_seen;
+	u8 sequence_record_seen;
+	s64 root_last_write_time_ns;
+	u64 max_backup_sequence;
+};
+
 struct pkm_lcs_key_fd_relative_base {
 	u32 source_id;
 	u32 parent_depth;
@@ -344,6 +354,10 @@ long pkm_lcs_kunit_backup_root_section_frames(
 	struct pkm_lcs_backup_root_section_frame_summary *summary_out);
 long pkm_lcs_kunit_key_fd_restore_for_token(
 	int fd, const void *token, const struct reg_restore_args *args);
+long pkm_lcs_kunit_restore_validate_stream_summary(
+	int input_fd, const u8 target_root_guid[PKM_LCS_GUID_BYTES],
+	struct pkm_lcs_kunit_restore_stream_summary *summary_out,
+	u8 *root_sd_out, size_t root_sd_out_len);
 long pkm_lcs_kunit_key_fd_flush(int fd);
 long pkm_lcs_kunit_key_fd_notify(int fd, const struct reg_notify_args *args);
 long pkm_lcs_kunit_key_fd_queue_watch_event(int fd, u32 event_type,

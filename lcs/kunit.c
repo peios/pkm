@@ -20627,6 +20627,67 @@ static void pkm_lcs_kunit_key_fd_restore_stream_duplicate_root_key(
 						   (long)-EINVAL);
 }
 
+static void pkm_lcs_kunit_key_fd_restore_root_key_retains_mutable(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_restore_stream_summary summary = { };
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	u8 root_sd[sizeof(pkm_lcs_kunit_owner_only_sd)];
+	int input_fd;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_valid(&input, true),
+			0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(&input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_restore_validate_stream_summary(
+				input_fd, pkm_lcs_kunit_restore_target_guid,
+				&summary, root_sd, sizeof(root_sd)),
+			0L);
+	KUNIT_EXPECT_EQ(test, summary.root_key_seen, 1);
+	KUNIT_EXPECT_EQ(test, summary.root_volatile, 0);
+	KUNIT_EXPECT_EQ(test, summary.root_symlink, 0);
+	KUNIT_EXPECT_EQ(test, summary.root_sd_len,
+			(u32)sizeof(pkm_lcs_kunit_owner_only_sd));
+	KUNIT_EXPECT_EQ(test, summary.root_last_write_time_ns, (s64)5678);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(root_sd, pkm_lcs_kunit_owner_only_sd,
+			       sizeof(pkm_lcs_kunit_owner_only_sd)),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_root_key_sd_short_buffer(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_restore_stream_summary summary = { };
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	u8 root_sd[sizeof(pkm_lcs_kunit_owner_only_sd) - 1];
+	int input_fd;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_valid(&input, true),
+			0);
+	memset(root_sd, 0xaa, sizeof(root_sd));
+	input_fd = pkm_lcs_kunit_restore_input_fd(&input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_restore_validate_stream_summary(
+				input_fd, pkm_lcs_kunit_restore_target_guid,
+				&summary, root_sd, sizeof(root_sd)),
+			(long)-ERANGE);
+	KUNIT_EXPECT_EQ(test, summary.root_key_seen, 1);
+	KUNIT_EXPECT_EQ(test, summary.root_sd_len,
+			(u32)sizeof(pkm_lcs_kunit_owner_only_sd));
+	KUNIT_EXPECT_EQ(test, root_sd[0], 0xaa);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+}
+
 static void
 pkm_lcs_kunit_expect_restore_root_flag_result_with_sequence(
 	struct kunit *test, struct pkm_lcs_kunit_restore_input_file *input,
@@ -49333,6 +49394,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_after_trailer_denied),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_missing_root_key),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_duplicate_root_key),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_root_key_retains_mutable),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_root_key_sd_short_buffer),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_root_flags_conflict),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_duplicate_manifest),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_after_key_denied),

@@ -5261,9 +5261,11 @@ struct pkm_lcs_restore_root_key_summary {
 	u8 header_root_guid[PKM_LCS_GUID_BYTES];
 	u8 target_root_guid[PKM_LCS_GUID_BYTES];
 	u8 current_key_guid[PKM_LCS_GUID_BYTES];
+	u8 *root_sd;
 	struct pkm_lcs_restore_layer_manifest_set layer_manifests;
 	struct pkm_lcs_restore_guid_set processed_non_root_keys;
 	enum pkm_lcs_restore_key_section_phase section_phase;
+	u32 root_sd_len;
 	bool root_key_seen;
 	bool key_data_started;
 	bool current_key_active;
@@ -5272,6 +5274,7 @@ struct pkm_lcs_restore_root_key_summary {
 	bool sequence_record_seen;
 	u8 root_volatile;
 	u8 root_symlink;
+	s64 root_last_write_time_ns;
 	u64 max_backup_sequence;
 };
 
@@ -5308,8 +5311,10 @@ static void pkm_lcs_restore_root_key_summary_destroy(
 {
 	if (!summary)
 		return;
+	kfree(summary->root_sd);
 	pkm_lcs_restore_layer_manifest_set_destroy(&summary->layer_manifests);
 	pkm_lcs_restore_guid_set_destroy(&summary->processed_non_root_keys);
+	memset(summary, 0, sizeof(*summary));
 }
 
 static long pkm_lcs_restore_layer_manifest_set_append(
@@ -5459,6 +5464,34 @@ static long pkm_lcs_restore_note_backup_sequence(
 		summary->max_backup_sequence = backup_sequence;
 		summary->sequence_record_seen = true;
 	}
+	return 0;
+}
+
+static long pkm_lcs_restore_copy_root_key_mutable(
+	struct pkm_lcs_restore_root_key_summary *summary, const u8 *frame,
+	u32 record_len, const struct pkm_lcs_backup_key_record_view *key)
+{
+	size_t sd_end;
+	u8 *root_sd = NULL;
+
+	if (!summary || !frame || !key)
+		return -EINVAL;
+	if (check_add_overflow((size_t)key->sd_offset,
+			       (size_t)key->sd_len, &sd_end) ||
+	    sd_end > record_len)
+		return -EINVAL;
+
+	if (key->sd_len) {
+		root_sd = kmemdup(frame + key->sd_offset, key->sd_len,
+				  GFP_KERNEL);
+		if (!root_sd)
+			return -ENOMEM;
+	}
+
+	kfree(summary->root_sd);
+	summary->root_sd = root_sd;
+	summary->root_sd_len = key->sd_len;
+	summary->root_last_write_time_ns = key->last_write_time_ns;
 	return 0;
 }
 
@@ -6004,6 +6037,10 @@ static long pkm_lcs_restore_validate_key_record(
 			ret = -EINVAL;
 			goto out_free;
 		}
+		ret = pkm_lcs_restore_copy_root_key_mutable(
+			summary, frame, record_len, &key);
+		if (ret)
+			goto out_free;
 		summary->root_key_seen = true;
 		summary->root_volatile = key.volatile_key ? 1 : 0;
 		summary->root_symlink = key.symlink ? 1 : 0;
@@ -10991,6 +11028,53 @@ long pkm_lcs_kunit_key_fd_restore_for_token(
 
 	ret = pkm_lcs_key_fd_restore_from_args_for_token(key_fd, token, args);
 	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_restore_validate_stream_summary(
+	int input_fd, const u8 target_root_guid[PKM_LCS_GUID_BYTES],
+	struct pkm_lcs_kunit_restore_stream_summary *summary_out,
+	u8 *root_sd_out, size_t root_sd_out_len)
+{
+	struct pkm_lcs_restore_root_key_summary root_summary = { };
+	struct pkm_lcs_kunit_restore_stream_summary public_summary = { };
+	struct pkm_lcs_runtime_limits limits;
+	long ret;
+
+	if (!summary_out || (root_sd_out_len && !root_sd_out))
+		return -EINVAL;
+	memset(summary_out, 0, sizeof(*summary_out));
+
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_key_fd_restore_validate_input_stream(
+		input_fd, &limits, target_root_guid, &root_summary);
+	if (ret)
+		goto out_destroy;
+
+	public_summary.root_sd_len = root_summary.root_sd_len;
+	public_summary.root_volatile = root_summary.root_volatile;
+	public_summary.root_symlink = root_summary.root_symlink;
+	public_summary.root_key_seen = root_summary.root_key_seen ? 1 : 0;
+	public_summary.sequence_record_seen =
+		root_summary.sequence_record_seen ? 1 : 0;
+	public_summary.root_last_write_time_ns =
+		root_summary.root_last_write_time_ns;
+	public_summary.max_backup_sequence = root_summary.max_backup_sequence;
+
+	if (root_sd_out) {
+		if (root_sd_out_len < root_summary.root_sd_len) {
+			*summary_out = public_summary;
+			ret = -ERANGE;
+			goto out_destroy;
+		}
+		if (root_summary.root_sd_len)
+			memcpy(root_sd_out, root_summary.root_sd,
+			       root_summary.root_sd_len);
+	}
+	*summary_out = public_summary;
+
+out_destroy:
+	pkm_lcs_restore_root_key_summary_destroy(&root_summary);
 	return ret;
 }
 
