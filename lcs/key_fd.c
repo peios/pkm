@@ -8483,9 +8483,68 @@ static long pkm_lcs_key_fd_restore_validate_root_flags(
 	return 0;
 }
 
-static long pkm_lcs_key_fd_restore_teardown_root_path_entries(
+struct pkm_lcs_restore_teardown_seen {
+	u8 (*guids)[PKM_LCS_GUID_BYTES];
+	u32 count;
+	u32 capacity;
+};
+
+static void pkm_lcs_restore_teardown_seen_destroy(
+	struct pkm_lcs_restore_teardown_seen *seen)
+{
+	if (!seen)
+		return;
+	kfree(seen->guids);
+	seen->guids = NULL;
+	seen->count = 0;
+	seen->capacity = 0;
+}
+
+static bool pkm_lcs_restore_teardown_seen_contains(
+	const struct pkm_lcs_restore_teardown_seen *seen,
+	const u8 guid[PKM_LCS_GUID_BYTES])
+{
+	u32 i;
+
+	if (!seen || !guid)
+		return false;
+	for (i = 0; i < seen->count; i++) {
+		if (pkm_lcs_backup_guid_equal(seen->guids[i], guid))
+			return true;
+	}
+	return false;
+}
+
+static long pkm_lcs_restore_teardown_seen_append(
+	struct pkm_lcs_restore_teardown_seen *seen,
+	const u8 guid[PKM_LCS_GUID_BYTES])
+{
+	u8 (*grown)[PKM_LCS_GUID_BYTES];
+	u32 new_capacity;
+
+	if (!seen || !guid)
+		return -EINVAL;
+	if (seen->count == seen->capacity) {
+		new_capacity = seen->capacity ? seen->capacity * 2 : 8;
+		if (new_capacity < seen->capacity)
+			return -EOVERFLOW;
+		grown = krealloc_array(seen->guids, new_capacity,
+				       sizeof(*seen->guids), GFP_KERNEL);
+		if (!grown)
+			return -ENOMEM;
+		seen->guids = grown;
+		seen->capacity = new_capacity;
+	}
+
+	memcpy(seen->guids[seen->count], guid, PKM_LCS_GUID_BYTES);
+	seen->count++;
+	return 0;
+}
+
+static long pkm_lcs_key_fd_restore_teardown_path_entries(
 	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
-	const struct pkm_lcs_runtime_limits *limits, const u8 *enum_frame,
+	const struct pkm_lcs_runtime_limits *limits,
+	const u8 parent_guid[PKM_LCS_GUID_BYTES], const u8 *enum_frame,
 	size_t enum_frame_len, u64 enum_request_id, u64 next_sequence)
 {
 	struct pkm_lcs_backup_path_entry_view *entries = NULL;
@@ -8493,7 +8552,7 @@ static long pkm_lcs_key_fd_restore_teardown_root_path_entries(
 	u32 i;
 	long ret;
 
-	if (!key_fd || !txn_id || !limits || !enum_frame)
+	if (!key_fd || !txn_id || !limits || !parent_guid || !enum_frame)
 		return -EINVAL;
 
 	ret = pkm_lcs_backup_materialize_path_entries(
@@ -8522,7 +8581,7 @@ static long pkm_lcs_key_fd_restore_teardown_root_path_entries(
 			goto out_free;
 
 		ret = pkm_lcs_source_delete_entry_round_trip_timeout_with_limits(
-			key_fd->source_id, txn_id, key_fd->key_guid,
+			key_fd->source_id, txn_id, parent_guid,
 			child_name, child_name_len, layer_name, layer_name_len,
 			limits, limits->request_timeout_ms, &response, NULL);
 		if (ret)
@@ -8534,9 +8593,10 @@ out_free:
 	return ret;
 }
 
-static long pkm_lcs_key_fd_restore_teardown_root_values(
+static long pkm_lcs_key_fd_restore_teardown_values(
 	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
-	const struct pkm_lcs_runtime_limits *limits, const u8 *values_frame,
+	const struct pkm_lcs_runtime_limits *limits,
+	const u8 key_guid[PKM_LCS_GUID_BYTES], const u8 *values_frame,
 	size_t values_frame_len, u64 values_request_id, u64 next_sequence)
 {
 	struct pkm_lcs_backup_value_entry_view *values = NULL;
@@ -8546,7 +8606,7 @@ static long pkm_lcs_key_fd_restore_teardown_root_values(
 	u32 i;
 	long ret;
 
-	if (!key_fd || !txn_id || !limits || !values_frame)
+	if (!key_fd || !txn_id || !limits || !key_guid || !values_frame)
 		return -EINVAL;
 
 	ret = pkm_lcs_backup_materialize_value_entries(
@@ -8575,7 +8635,7 @@ static long pkm_lcs_key_fd_restore_teardown_root_values(
 			goto out_free;
 
 		ret = pkm_lcs_source_delete_value_entry_round_trip_timeout_with_limits(
-			key_fd->source_id, txn_id, key_fd->key_guid,
+			key_fd->source_id, txn_id, key_guid,
 			value_name, value_name_len, layer_name, layer_name_len,
 			limits, limits->request_timeout_ms, &response, NULL);
 		if (ret)
@@ -8594,8 +8654,8 @@ static long pkm_lcs_key_fd_restore_teardown_root_values(
 			goto out_free;
 
 		ret = pkm_lcs_source_set_blanket_tombstone_round_trip_timeout_with_limits(
-			key_fd->source_id, txn_id, key_fd->key_guid,
-			layer_name, layer_name_len, false, 0, limits,
+			key_fd->source_id, txn_id, key_guid, layer_name,
+			layer_name_len, false, 0, limits,
 			limits->request_timeout_ms, &response, NULL);
 		if (ret)
 			goto out_free;
@@ -8607,16 +8667,119 @@ out_free:
 	return ret;
 }
 
-static long pkm_lcs_key_fd_restore_teardown_root_contents(
+static long pkm_lcs_key_fd_restore_teardown_subtree(
 	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
-	const struct pkm_lcs_runtime_limits *limits)
+	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_layer_snapshot *layer_snapshot,
+	const u8 key_guid[PKM_LCS_GUID_BYTES], u64 next_sequence,
+	bool drop_self, u32 depth,
+	struct pkm_lcs_restore_teardown_seen *seen)
 {
-	struct pkm_lcs_layer_snapshot layer_snapshot = { };
+	struct pkm_lcs_backup_path_entry_view *entries = NULL;
 	struct pkm_lcs_source_response_frame enum_frame = { };
 	struct pkm_lcs_source_response_frame values_frame = { };
 	struct pkm_lcs_source_response_result enum_response = { };
 	struct pkm_lcs_source_response_result values_response = { };
 	struct pkm_lcs_rsi_enum_children_info_summary enum_summary = { };
+	u32 entry_count = 0;
+	u32 i;
+	long ret;
+
+	if (!key_fd || !txn_id || !limits || !layer_snapshot || !key_guid ||
+	    !seen)
+		return -EINVAL;
+
+	pkm_lcs_source_response_frame_init(&enum_frame);
+	pkm_lcs_source_response_frame_init(&values_frame);
+
+	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, txn_id, key_guid, limits,
+		limits->request_timeout_ms, &enum_frame, &enum_response,
+		NULL);
+	if (ret)
+		goto out_frames;
+	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
+		enum_frame.data, enum_frame.len, enum_response.request_id,
+		next_sequence, layer_snapshot->layers,
+		layer_snapshot->layer_count,
+		NULL, 0, &enum_response.limits, &enum_summary);
+	if (ret)
+		goto out_frames;
+
+	ret = pkm_lcs_key_fd_restore_teardown_path_entries(
+		key_fd, txn_id, limits, key_guid, enum_frame.data,
+		enum_frame.len, enum_response.request_id, next_sequence);
+	if (ret)
+		goto out_frames;
+
+	ret = pkm_lcs_backup_materialize_path_entries(
+		limits, enum_frame.data, enum_frame.len,
+		enum_response.request_id, next_sequence, &entries,
+		&entry_count);
+	if (ret)
+		goto out_frames;
+
+	for (i = 0; i < entry_count; i++) {
+		if (entries[i].hidden)
+			continue;
+		if (pkm_lcs_backup_visible_entry_seen_before(
+			    entries, i, entries[i].child_guid))
+			continue;
+		if (pkm_lcs_restore_teardown_seen_contains(
+			    seen, entries[i].child_guid)) {
+			ret = -EOPNOTSUPP;
+			goto out_entries;
+		}
+		if (depth >= limits->max_key_depth) {
+			ret = -ENAMETOOLONG;
+			goto out_entries;
+		}
+		ret = pkm_lcs_restore_teardown_seen_append(
+			seen, entries[i].child_guid);
+		if (ret)
+			goto out_entries;
+		ret = pkm_lcs_key_fd_restore_teardown_subtree(
+			key_fd, txn_id, limits, layer_snapshot,
+			entries[i].child_guid, next_sequence, true, depth + 1,
+			seen);
+		if (ret)
+			goto out_entries;
+	}
+
+	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, txn_id, key_guid, "", 0, true,
+		limits, limits->request_timeout_ms, &values_frame,
+		&values_response, NULL);
+	if (ret)
+		goto out_entries;
+	ret = pkm_lcs_key_fd_restore_teardown_values(
+		key_fd, txn_id, limits, key_guid, values_frame.data,
+		values_frame.len, values_response.request_id, next_sequence);
+	if (ret)
+		goto out_entries;
+
+	if (drop_self) {
+		struct pkm_lcs_source_response_result drop_response = { };
+
+		ret = pkm_lcs_source_drop_key_round_trip_timeout_with_limits(
+			key_fd->source_id, txn_id, key_guid, limits,
+			limits->request_timeout_ms, &drop_response, NULL);
+	}
+
+out_entries:
+	kfree(entries);
+out_frames:
+	pkm_lcs_source_response_frame_destroy(&values_frame);
+	pkm_lcs_source_response_frame_destroy(&enum_frame);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_restore_teardown_root_contents(
+	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	struct pkm_lcs_restore_teardown_seen seen = { };
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	u64 next_sequence = 0;
 	long ret;
 
@@ -8630,41 +8793,15 @@ static long pkm_lcs_key_fd_restore_teardown_root_contents(
 	if (ret)
 		return ret;
 
-	pkm_lcs_source_response_frame_init(&enum_frame);
-	pkm_lcs_source_response_frame_init(&values_frame);
-
-	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
-		key_fd->source_id, txn_id, key_fd->key_guid, limits,
-		limits->request_timeout_ms, &enum_frame, &enum_response,
-		NULL);
+	ret = pkm_lcs_restore_teardown_seen_append(&seen, key_fd->key_guid);
 	if (ret)
-		goto out_frames;
-	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
-		enum_frame.data, enum_frame.len, enum_response.request_id,
-		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
-		NULL, 0, &enum_response.limits, &enum_summary);
-	if (ret)
-		goto out_frames;
+		goto out_release;
+	ret = pkm_lcs_key_fd_restore_teardown_subtree(
+		key_fd, txn_id, limits, &layer_snapshot, key_fd->key_guid,
+		next_sequence, false, 0, &seen);
 
-	ret = pkm_lcs_key_fd_restore_teardown_root_path_entries(
-		key_fd, txn_id, limits, enum_frame.data, enum_frame.len,
-		enum_response.request_id, next_sequence);
-	if (ret)
-		goto out_frames;
-
-	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
-		key_fd->source_id, txn_id, key_fd->key_guid, "", 0, true,
-		limits, limits->request_timeout_ms, &values_frame,
-		&values_response, NULL);
-	if (ret)
-		goto out_frames;
-	ret = pkm_lcs_key_fd_restore_teardown_root_values(
-		key_fd, txn_id, limits, values_frame.data, values_frame.len,
-		values_response.request_id, next_sequence);
-
-out_frames:
-	pkm_lcs_source_response_frame_destroy(&values_frame);
-	pkm_lcs_source_response_frame_destroy(&enum_frame);
+out_release:
+	pkm_lcs_restore_teardown_seen_destroy(&seen);
 	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }
