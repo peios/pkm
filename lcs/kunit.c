@@ -20823,6 +20823,10 @@ struct pkm_lcs_kunit_restore_txn_source_script {
 	struct pkm_lcs_kunit_enum_children_source_script enum_children;
 	struct pkm_lcs_kunit_path_entry_source_script delete_entry;
 	struct pkm_lcs_kunit_enum_children_source_script child_enum_children;
+	struct pkm_lcs_kunit_path_entry_source_script child_delete_entry;
+	struct pkm_lcs_kunit_enum_children_source_script grandchild_enum_children;
+	struct pkm_lcs_kunit_query_values_source_script grandchild_query_values;
+	struct pkm_lcs_kunit_drop_key_source_script grandchild_drop_key;
 	struct pkm_lcs_kunit_query_values_source_script child_query_values;
 	struct pkm_lcs_kunit_drop_key_source_script drop_key;
 	struct pkm_lcs_kunit_query_values_source_script query_values;
@@ -20852,6 +20856,8 @@ struct pkm_lcs_kunit_restore_txn_source_script {
 	bool expect_root_content_probe;
 	bool expect_root_path_delete;
 	bool expect_child_teardown;
+	bool expect_child_path_delete;
+	bool expect_grandchild_teardown;
 	bool expect_child_teardown_abort_after_enum;
 	bool expect_root_value_delete;
 	bool expect_root_blanket_delete;
@@ -21153,6 +21159,70 @@ static int pkm_lcs_kunit_restore_txn_source_thread(void *raw_script)
 			}
 			if (script->expect_child_teardown_abort_after_enum)
 				goto expect_terminal;
+
+			if (script->expect_child_path_delete) {
+				script->child_delete_entry.file = script->file;
+				script->child_delete_entry.expected_txn_id =
+					script->transaction_id;
+				ret = pkm_lcs_kunit_path_entry_source_thread(
+					&script->child_delete_entry);
+				script->reads +=
+					script->child_delete_entry.reads;
+				script->writes +=
+					script->child_delete_entry.writes;
+				if (ret) {
+					script->result = ret;
+					return ret;
+				}
+			}
+
+			if (script->expect_grandchild_teardown) {
+				script->grandchild_enum_children.file =
+					script->file;
+				script->grandchild_enum_children.expected_txn_id =
+					script->transaction_id;
+				script->grandchild_enum_children.check_txn_id =
+					true;
+				ret = pkm_lcs_kunit_enum_children_source_thread(
+					&script->grandchild_enum_children);
+				script->reads +=
+					script->grandchild_enum_children.reads;
+				script->writes +=
+					script->grandchild_enum_children.writes;
+				if (ret) {
+					script->result = ret;
+					return ret;
+				}
+
+				script->grandchild_query_values.file =
+					script->file;
+				script->grandchild_query_values.expected_txn_id =
+					script->transaction_id;
+				ret = pkm_lcs_kunit_query_values_source_thread(
+					&script->grandchild_query_values);
+				script->reads +=
+					script->grandchild_query_values.reads;
+				script->writes +=
+					script->grandchild_query_values.writes;
+				if (ret) {
+					script->result = ret;
+					return ret;
+				}
+
+				script->grandchild_drop_key.file = script->file;
+				script->grandchild_drop_key.expected_txn_id =
+					script->transaction_id;
+				ret = pkm_lcs_kunit_drop_key_source_thread(
+					&script->grandchild_drop_key);
+				script->reads +=
+					script->grandchild_drop_key.reads;
+				script->writes +=
+					script->grandchild_drop_key.writes;
+				if (ret) {
+					script->result = ret;
+					return ret;
+				}
+			}
 
 			script->child_query_values.file = script->file;
 			script->child_query_values.expected_txn_id =
@@ -21704,6 +21774,134 @@ pkm_lcs_kunit_key_fd_restore_root_path_teardown_dispatches(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, script.result, 0);
 	KUNIT_EXPECT_EQ(test, script.reads, 10U);
 	KUNIT_EXPECT_EQ(test, script.writes, 10U);
+	KUNIT_EXPECT_TRUE(test, script.saw_commit);
+	KUNIT_EXPECT_FALSE(test, script.saw_abort);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_deep_teardown_dispatches(
+	struct kunit *test)
+{
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x53, 0xd1 };
+	static const u8 grandchild_guid[PKM_LCS_GUID_BYTES] = { 0x53, 0xd2 };
+	struct reg_restore_args args = { };
+	struct pkm_lcs_kunit_restore_txn_source_script script = {
+		.begin_status = RSI_OK,
+		.abort_status = RSI_OK,
+		.expect_commit = true,
+		.expect_read_key = true,
+		.read_key = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.name = "Software",
+		},
+		.expect_root_content_probe = true,
+		.enum_children = {
+			.expected_parent_guid =
+				pkm_lcs_kunit_restore_target_guid,
+			.child_name = "Child",
+			.layer_name = "base",
+			.child_guid = child_guid,
+		},
+		.expect_root_path_delete = true,
+		.delete_entry = {
+			.expected_parent_guid =
+				pkm_lcs_kunit_restore_target_guid,
+			.expected_child_name = "Child",
+			.expected_layer_name = "base",
+			.expected_op_code = RSI_DELETE_ENTRY,
+			.status = RSI_OK,
+		},
+		.expect_child_teardown = true,
+		.child_enum_children = {
+			.expected_parent_guid = child_guid,
+			.child_name = "Grandchild",
+			.layer_name = "base",
+			.child_guid = grandchild_guid,
+		},
+		.expect_child_path_delete = true,
+		.child_delete_entry = {
+			.expected_parent_guid = child_guid,
+			.expected_child_name = "Grandchild",
+			.expected_layer_name = "base",
+			.expected_op_code = RSI_DELETE_ENTRY,
+			.status = RSI_OK,
+		},
+		.expect_grandchild_teardown = true,
+		.grandchild_enum_children = {
+			.expected_parent_guid = grandchild_guid,
+			.empty = true,
+		},
+		.grandchild_query_values = {
+			.expected_guid = grandchild_guid,
+			.expected_value_name = "",
+			.query_all = true,
+			.empty = true,
+		},
+		.grandchild_drop_key = {
+			.expected_guid = grandchild_guid,
+			.status = RSI_OK,
+		},
+		.child_query_values = {
+			.expected_guid = child_guid,
+			.expected_value_name = "",
+			.query_all = true,
+			.empty = true,
+		},
+		.drop_key = {
+			.expected_guid = child_guid,
+			.status = RSI_OK,
+		},
+		.query_values = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.expected_value_name = "",
+			.query_all = true,
+			.empty = true,
+		},
+		.expect_root_write_key = true,
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const void *source_token;
+	long key_fd;
+	int input_fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_RESTORE_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_valid(&input, true),
+			0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(&input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+	args.input_fd = input_fd;
+
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_restore_txn_source_thread, &script,
+		"pkm-lcs-kunit-restore-deep");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, token, &args),
+			0L);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 14U);
+	KUNIT_EXPECT_EQ(test, script.writes, 14U);
 	KUNIT_EXPECT_TRUE(test, script.saw_commit);
 	KUNIT_EXPECT_FALSE(test, script.saw_abort);
 
@@ -52004,6 +52202,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_admission),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_restore_root_path_teardown_dispatches),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_deep_teardown_dispatches),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_teardown_cycle_aborts),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_teardown_alias_aborts),
 	KUNIT_CASE(
