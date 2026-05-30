@@ -149,6 +149,9 @@ struct pkm_lcs_transaction_hide_key_log {
 	u32 child_name_len;
 	u32 layer_len;
 	u32 parent_depth;
+	bool post_lookup_valid;
+	bool target_still_visible;
+	bool replacement_visible;
 };
 
 struct pkm_lcs_transaction_log_entry {
@@ -2137,18 +2140,70 @@ static long pkm_lcs_transaction_append_delete_key_exact(
 }
 
 static long pkm_lcs_transaction_append_hide_key_exact(
-	const struct pkm_lcs_transaction_hide_key_log *entry,
+	u32 source_id, struct pkm_lcs_transaction_hide_key_log *entry,
 	struct pkm_lcs_watch_dispatch_context *contexts, u32 context_capacity,
-	u32 *index, struct list_head *owners)
+	u32 *index, struct list_head *owners,
+	const struct pkm_lcs_runtime_limits *limits)
 {
-	if (!entry)
+	long ret;
+
+	if (!source_id || !entry || !limits)
 		return -EINVAL;
+
+	if (!entry->post_lookup_valid) {
+		struct pkm_lcs_layer_snapshot layer_snapshot = { };
+		struct pkm_lcs_source_response_frame frame = { };
+		struct pkm_lcs_source_response_result response = { };
+		struct pkm_lcs_rsi_lookup_child_result effective = { };
+		u64 next_sequence = 0;
+
+		ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+		if (ret)
+			return ret;
+		ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+		if (ret)
+			return ret;
+
+		pkm_lcs_source_response_frame_init(&frame);
+		ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
+			source_id, 0, entry->parent_guid, entry->child_name,
+			entry->child_name_len, limits, limits->request_timeout_ms,
+			&frame, &response, NULL);
+		if (ret)
+			goto out_frame;
+
+		ret = pkm_lcs_rsi_materialize_lookup_child(
+			frame.data, frame.len, response.request_id, next_sequence,
+			entry->child_name, entry->child_name_len,
+			layer_snapshot.layers, layer_snapshot.layer_count, NULL,
+			0, &response.limits, &effective);
+		if (ret)
+			goto out_frame;
+
+		if (effective.found) {
+			if (!memcmp(effective.key_guid, entry->key_guid,
+				    sizeof(entry->key_guid)))
+				entry->target_still_visible = true;
+			else
+				entry->replacement_visible = true;
+		}
+		entry->post_lookup_valid = true;
+
+out_frame:
+		pkm_lcs_source_response_frame_destroy(&frame);
+		pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
+		if (ret)
+			return ret;
+	}
+	if (entry->target_still_visible)
+		return 0;
 
 	return pkm_lcs_transaction_append_key_path_invisible_exact(
 		contexts, context_capacity, index, owners,
 		entry->key_guid, entry->parent_guid, entry->parent_path,
 		entry->parent_ancestor_guids, entry->parent_depth,
-		entry->child_name, entry->child_name_len, false);
+		entry->child_name, entry->child_name_len,
+		entry->replacement_visible);
 }
 
 static long pkm_lcs_transaction_log_dispatch_watch_batch(
@@ -2331,8 +2386,9 @@ static long pkm_lcs_transaction_log_dispatch_watch_batch(
 		}
 		case PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY:
 			ret = pkm_lcs_transaction_append_hide_key_exact(
-				&entry->hide_key, contexts, context_capacity,
-				&index, &context_owners);
+				source_id, &entry->hide_key, contexts,
+				context_capacity, &index, &context_owners,
+				limits);
 			if (ret)
 				goto out_free;
 			break;

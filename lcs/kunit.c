@@ -220,6 +220,7 @@ struct pkm_lcs_kunit_transaction_source_script {
 	struct file *file;
 	struct pkm_lcs_kunit_delete_key_ioctl_source_script
 		*delete_key_lookup_after;
+	struct pkm_lcs_kunit_walk_source_script *hide_key_lookup_after;
 	struct pkm_lcs_kunit_delete_layer_source_script
 		*delete_layer_after;
 	bool expect_layer_refresh;
@@ -16785,6 +16786,14 @@ static void pkm_lcs_kunit_key_fd_hide_key_transactional_success(
 			.status = RSI_OK,
 		},
 	};
+	struct pkm_lcs_kunit_walk_source_step lookup_step = {
+		.expected_child = "Software",
+		.empty = true,
+	};
+	struct pkm_lcs_kunit_walk_source_script lookup = {
+		.steps = &lookup_step,
+		.step_count = 1,
+	};
 	struct pkm_lcs_kunit_transaction_source_script commit_script = {
 		.expected_op_code = RSI_COMMIT_TRANSACTION,
 		.status = RSI_OK,
@@ -16878,6 +16887,7 @@ static void pkm_lcs_kunit_key_fd_hide_key_transactional_success(
 	commit_script.file = &file;
 	commit_script.expected_header_txn_id = txn_snapshot.transaction_id;
 	commit_script.expected_payload_txn_id = txn_snapshot.transaction_id;
+	commit_script.hide_key_lookup_after = &lookup;
 	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread,
 			   &commit_script, "pkm-lcs-kunit-hide-key-commit");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
@@ -16888,6 +16898,7 @@ static void pkm_lcs_kunit_key_fd_hide_key_transactional_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, commit_script.result, 0);
+	KUNIT_EXPECT_EQ(test, lookup.result, 0);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_source_hive_generation_snapshot(
 				1, ancestors[0], &generation_after),
@@ -38770,6 +38781,22 @@ static int pkm_lcs_kunit_transaction_source_thread(void *data)
 			return ret;
 		}
 	}
+	if (script->hide_key_lookup_after) {
+		struct pkm_lcs_kunit_walk_source_script *lookup =
+			script->hide_key_lookup_after;
+		u32 lookup_reads = lookup->reads;
+		u32 lookup_writes = lookup->writes;
+
+		lookup->file = script->file;
+		lookup->expected_txn_id = 0;
+		ret = pkm_lcs_kunit_walk_source_thread(lookup);
+		script->reads += lookup->reads - lookup_reads;
+		script->writes += lookup->writes - lookup_writes;
+		if (ret) {
+			script->result = ret;
+			return ret;
+		}
+	}
 	if (script->expect_layer_refresh) {
 		struct pkm_lcs_kunit_layer_metadata_refresh_source_script *refresh =
 			script->layer_refresh_after;
@@ -40598,6 +40625,14 @@ static void pkm_lcs_kunit_transaction_commit_hide_key_dispatches_exact_watches(
 		.filter = REG_NOTIFY_SUBKEY,
 		.subtree = 1,
 	};
+	struct pkm_lcs_kunit_walk_source_step lookup_step = {
+		.expected_child = child_name,
+		.empty = true,
+	};
+	struct pkm_lcs_kunit_walk_source_script lookup = {
+		.steps = &lookup_step,
+		.step_count = 1,
+	};
 	struct pkm_lcs_kunit_transaction_source_script script = { };
 	struct pkm_lcs_transaction_mutation_log_snapshot log = { };
 	struct pkm_lcs_transaction_mutation_handle handle = { };
@@ -40683,6 +40718,7 @@ static void pkm_lcs_kunit_transaction_commit_hide_key_dispatches_exact_watches(
 	script.expected_header_txn_id = snapshot.transaction_id;
 	script.expected_payload_txn_id = snapshot.transaction_id;
 	script.status = RSI_OK;
+	script.hide_key_lookup_after = &lookup;
 
 	task = pkm_lcs_kunit_kthread_run(
 		pkm_lcs_kunit_transaction_source_thread, &script,
@@ -40695,6 +40731,7 @@ static void pkm_lcs_kunit_transaction_commit_hide_key_dispatches_exact_watches(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, lookup.result, 0);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_transaction_fd_log_snapshot((int)txn_fd,
 							    &log),
@@ -40776,6 +40813,194 @@ static void pkm_lcs_kunit_transaction_commit_hide_key_dispatches_exact_watches(
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_transaction_commit_hide_key_no_effective_change(
+	struct kunit *test)
+{
+	static const char child_name[] = "Stable";
+	static const char * const root_path[] = { "Machine" };
+	static const char * const parent_path[] = { "Machine", "Parent" };
+	static const char * const child_path[] = {
+		"Machine", "Parent", "Stable"
+	};
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		1
+	};
+	static const u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0xe6
+	};
+	static const u8 child_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0xe7
+	};
+	static const u8 policy_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0xe8
+	};
+	static const u8 root_ancestors[1][PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		{ 1 },
+	};
+	static const u8 parent_ancestors[2][PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		{ 1 },
+		{ 0xe6 },
+	};
+	static const u8 child_ancestors[3][PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		{ 1 },
+		{ 0xe6 },
+		{ 0xe7 },
+	};
+	struct reg_notify_args parent_args = {
+		.filter = REG_NOTIFY_SUBKEY,
+	};
+	struct reg_notify_args child_args = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct reg_notify_args subtree_args = {
+		.filter = REG_NOTIFY_SUBKEY,
+		.subtree = 1,
+	};
+	struct pkm_lcs_kunit_walk_source_step lookup_step = {
+		.expected_child = child_name,
+		.layer_name = "policy",
+		.guid = child_guid,
+		.sequence = 0xfe,
+	};
+	struct pkm_lcs_kunit_walk_source_script lookup = {
+		.steps = &lookup_step,
+		.step_count = 1,
+	};
+	struct pkm_lcs_kunit_transaction_source_script script = { };
+	struct pkm_lcs_transaction_mutation_log_snapshot log = { };
+	struct pkm_lcs_transaction_mutation_handle handle = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	struct pkm_lcs_transaction_binding_plan binding = { };
+	struct pkm_lcs_transaction_hide_key_log_input input = {
+		.key_guid = child_guid,
+		.parent_guid = parent_guid,
+		.child_name = child_name,
+		.child_name_len = sizeof(child_name) - 1U,
+		.layer = "base",
+		.layer_len = 4,
+		.parent_path = parent_path,
+		.parent_ancestor_guids = parent_ancestors,
+		.parent_depth = 2,
+		.sequence = 0xfe,
+	};
+	u8 record[32] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	long root_fd;
+	long parent_fd;
+	long child_fd;
+	long txn_fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	pkm_lcs_kunit_set_sequence_state(true, 0xff);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"policy", strlen("policy"), 10, 1, policy_guid,
+				pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+
+	root_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, root_path, root_ancestors, 1);
+	KUNIT_ASSERT_TRUE(test, root_fd >= 0);
+	parent_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, parent_path, parent_ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, parent_fd >= 0);
+	child_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, child_path, child_ancestors, 3);
+	KUNIT_ASSERT_TRUE(test, child_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)parent_fd,
+						    &parent_args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)child_fd,
+						    &child_args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)root_fd,
+						    &subtree_args),
+			0L);
+
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)txn_fd, snapshot.transaction_id, 1,
+				root_guid),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_begin_hide_key_mutation(
+				(int)txn_fd, 1, root_guid, &input, &handle,
+				&binding),
+			0L);
+	KUNIT_EXPECT_EQ(test, binding.action, PKM_LCS_TRANSACTION_BIND_REUSE);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_commit_mutation(&handle), 0L);
+
+	script.file = &file;
+	script.expected_op_code = RSI_COMMIT_TRANSACTION;
+	script.expected_header_txn_id = snapshot.transaction_id;
+	script.expected_payload_txn_id = snapshot.transaction_id;
+	script.status = RSI_OK;
+	script.hide_key_lookup_after = &lookup;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_transaction_source_thread, &script,
+		"pkm-lcs-kunit-commit-hide-nochange");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_transaction_fd_commit((int)txn_fd);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, lookup.result, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_log_snapshot((int)txn_fd,
+							    &log),
+			0L);
+	KUNIT_EXPECT_EQ(test, log.entry_count, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)parent_fd, record,
+						  sizeof(record), true),
+			(ssize_t)-EAGAIN);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)child_fd, record,
+						  sizeof(record), true),
+			(ssize_t)-EAGAIN);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)root_fd, record,
+						  sizeof(record), true),
+			(ssize_t)-EAGAIN);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)child_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)parent_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)root_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
 	kacs_rust_token_drop(token);
 }
 
@@ -51573,6 +51798,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_transaction_commit_delete_key_dispatches_exact_watches),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_hide_key_dispatches_exact_watches),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_commit_hide_key_no_effective_change),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_delete_key_orphan_no_live_ref_drops),
 	KUNIT_CASE(
