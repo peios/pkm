@@ -21804,6 +21804,93 @@ pkm_lcs_kunit_key_fd_restore_teardown_cycle_aborts(struct kunit *test)
 }
 
 static void
+pkm_lcs_kunit_key_fd_restore_teardown_alias_aborts(struct kunit *test)
+{
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x53, 0xa1 };
+	struct reg_restore_args args = { };
+	struct pkm_lcs_kunit_restore_txn_source_script script = {
+		.begin_status = RSI_OK,
+		.abort_status = RSI_OK,
+		.expect_read_key = true,
+		.read_key = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.name = "Software",
+		},
+		.expect_root_content_probe = true,
+		.enum_children = {
+			.expected_parent_guid =
+				pkm_lcs_kunit_restore_target_guid,
+			.child_name = "Child",
+			.layer_name = "base",
+			.child_guid = child_guid,
+		},
+		.expect_root_path_delete = true,
+		.delete_entry = {
+			.expected_parent_guid =
+				pkm_lcs_kunit_restore_target_guid,
+			.expected_child_name = "Child",
+			.expected_layer_name = "base",
+			.expected_op_code = RSI_DELETE_ENTRY,
+			.status = RSI_OK,
+		},
+		.expect_child_teardown = true,
+		.expect_child_teardown_abort_after_enum = true,
+		.child_enum_children = {
+			.expected_parent_guid = child_guid,
+			.child_name = "SelfAlias",
+			.layer_name = "base",
+			.child_guid = child_guid,
+		},
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const void *source_token;
+	long key_fd;
+	int input_fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_RESTORE_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_valid(&input, true),
+			0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(&input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+	args.input_fd = input_fd;
+
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_restore_txn_source_thread, &script,
+		"pkm-lcs-kunit-restore-alias");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, token, &args),
+			(long)-EOPNOTSUPP);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 6U);
+	KUNIT_EXPECT_EQ(test, script.writes, 6U);
+	KUNIT_EXPECT_FALSE(test, script.saw_commit);
+	KUNIT_EXPECT_TRUE(test, script.saw_abort);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(source_token);
+}
+
+static void
 pkm_lcs_kunit_key_fd_restore_root_value_teardown_dispatches(struct kunit *test)
 {
 	static const u8 value_data[] = { 0x01, 0x02, 0x03 };
@@ -51918,6 +52005,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_restore_root_path_teardown_dispatches),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_teardown_cycle_aborts),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_teardown_alias_aborts),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_restore_root_value_teardown_dispatches),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_root_section_replays),
