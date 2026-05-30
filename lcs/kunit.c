@@ -45761,6 +45761,118 @@ static void pkm_lcs_kunit_reg_create_key_args_existing_txn_reads(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_reg_create_key_existing_txn_symlink_reads(
+	struct kunit *test)
+{
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	static const u8 link_guid[RSI_GUID_SIZE] = {
+		0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+		0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50,
+	};
+	static const u8 target_guid[RSI_GUID_SIZE] = {
+		0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
+		0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60,
+	};
+	static const char path_src[] = "Machine\\Link";
+	static const u8 target_path[] = "Machine\\Target";
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_kunit_walk_source_step link_step = {
+		.expected_child = "Link",
+		.guid = link_guid,
+		.symlink = true,
+	};
+	struct pkm_lcs_kunit_walk_source_step target_step = {
+		.expected_child = "Target",
+		.guid = target_guid,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op sequence[] = {
+		{ .op = PKM_LCS_KUNIT_SYMLINK_SEQ_LOOKUP,
+		  .lookup_step = &link_step },
+		{ .op = PKM_LCS_KUNIT_SYMLINK_SEQ_QUERY_DEFAULT,
+		  .query_guid = link_guid, .query_data = target_path,
+		  .query_data_len = sizeof(target_path) - 1,
+		  .query_value_type = REG_LINK },
+		{ .op = PKM_LCS_KUNIT_SYMLINK_SEQ_LOOKUP,
+		  .lookup_step = &target_step },
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = sequence,
+		.op_count = ARRAY_SIZE(sequence),
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	u32 disposition = 0;
+	struct reg_create_key_args args = {
+		.parent_fd = -1,
+		.path_ptr = (u64)(unsigned long)path_src,
+		.desired_access = KEY_READ,
+		.txn_fd = -1,
+		.disposition_ptr = (u64)(unsigned long)&disposition,
+	};
+	long txn_fd;
+	long fd;
+	int thread_ret;
+	u32 i;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	target_step.sd = sd;
+	target_step.sd_len = sd_len;
+
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)txn_fd, txn_snapshot.transaction_id, 1,
+				root_guid),
+			0L);
+	args.txn_fd = (int)txn_fd;
+	for (i = 0; i < ARRAY_SIZE(sequence); i++)
+		sequence[i].expected_txn_id = txn_snapshot.transaction_id;
+	script.file = &file;
+
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+			   &script, "pkm-lcs-kunit-create-txn-link");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_reg_create_key_args_for_token(token, &ops, &args, NULL);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_OPENED_EXISTING);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, snapshot.path_component_count, 2U);
+	KUNIT_EXPECT_STREQ(test, snapshot.first_component, "Machine");
+	KUNIT_EXPECT_STREQ(test, snapshot.last_component, "Target");
+	KUNIT_EXPECT_EQ(test, memcmp(snapshot.key_guid, target_guid,
+				    RSI_GUID_SIZE), 0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_reg_create_key_args_txn_failures(
 	struct kunit *test)
 {
@@ -52232,6 +52344,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_reg_create_key_args_copy_success_and_fault),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_rejects_padding),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_existing_txn_reads),
+	KUNIT_CASE(
+		pkm_lcs_kunit_reg_create_key_existing_txn_symlink_reads),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_txn_failures),
 	KUNIT_CASE(
 		pkm_lcs_kunit_reg_create_key_args_txn_missing_success),
