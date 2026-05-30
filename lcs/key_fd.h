@@ -359,6 +359,8 @@ long pkm_lcs_kunit_restore_validate_stream_summary(
 	struct pkm_lcs_kunit_restore_stream_summary *summary_out,
 	u8 *root_sd_out, size_t root_sd_out_len);
 long pkm_lcs_kunit_key_fd_flush(int fd);
+long pkm_lcs_kunit_key_fd_raw_ioctl(int fd, unsigned int cmd,
+				    unsigned long arg);
 long pkm_lcs_kunit_key_fd_notify(int fd, const struct reg_notify_args *args);
 long pkm_lcs_kunit_key_fd_queue_watch_event(int fd, u32 event_type,
 					    const u8 *record, u32 record_len);

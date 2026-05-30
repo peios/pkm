@@ -1223,6 +1223,16 @@ out_frame:
 	return ret;
 }
 
+static long pkm_lcs_key_fd_snapshot_limits_and_revalidate(
+	struct pkm_lcs_key_fd *key_fd, struct pkm_lcs_runtime_limits *limits)
+{
+	if (!limits)
+		return -EINVAL;
+
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(limits);
+	return pkm_lcs_key_fd_revalidate_after_source_restart(key_fd, limits);
+}
+
 long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input)
 {
 	struct pkm_lcs_key_fd_string_view *views = NULL;
@@ -1928,6 +1938,10 @@ static long pkm_lcs_key_fd_get_security_from_args(
 	if (provided_len && !args->sd_ptr)
 		return -EFAULT;
 
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd, NULL);
+	if (ret)
+		return ret;
+
 	ret = pkm_lcs_key_fd_read_existing_sd(key_fd, 0, NULL, &existing_frame,
 					      &existing_sd, &existing_sd_len,
 					      NULL);
@@ -2024,7 +2038,9 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	key_name = pkm_lcs_key_fd_leaf_name(key_fd, &key_name_len);
 	if (!key_name || key_name_len > U32_MAX)
 		return -EIO;
-	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_key_fd_snapshot_limits_and_revalidate(key_fd, &limits);
+	if (ret)
+		return ret;
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
@@ -2236,10 +2252,12 @@ static long pkm_lcs_key_fd_query_value_from_args(
 		key_fd->granted_access, REG_IOC_QUERY_VALUE_NR);
 	if (ret)
 		return ret;
-	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
 
 	ret = pkm_lcs_key_fd_query_value_prepare_read_context(key_fd, txn_fd,
 							      &txn_id);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_key_fd_snapshot_limits_and_revalidate(key_fd, &limits);
 	if (ret)
 		return ret;
 
@@ -3705,7 +3723,9 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 							      &txn_id);
 	if (ret)
 		return ret;
-	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_key_fd_snapshot_limits_and_revalidate(key_fd, &limits);
+	if (ret)
+		return ret;
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
@@ -3840,7 +3860,9 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 							      &txn_id);
 	if (ret)
 		return ret;
-	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_key_fd_snapshot_limits_and_revalidate(key_fd, &limits);
+	if (ret)
+		return ret;
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
@@ -4045,7 +4067,9 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 							      &txn_id);
 	if (ret)
 		return ret;
-	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_key_fd_snapshot_limits_and_revalidate(key_fd, &limits);
+	if (ret)
+		return ret;
 
 	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
 	if (ret)
@@ -4141,7 +4165,9 @@ static long pkm_lcs_key_fd_set_security_from_args(
 						  &input_sd_len);
 	if (ret)
 		return ret;
-	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_key_fd_snapshot_limits_and_revalidate(key_fd, &limits);
+	if (ret)
+		goto out_input;
 
 	if (args->txn_fd >= 0) {
 		log_input.key_guid = key_fd->key_guid;
@@ -4270,6 +4296,10 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 
 	ret = pkm_lcs_key_fd_set_value_precedence_tcb_gate(key_fd, token,
 							   &input, args);
+	if (ret)
+		goto out_input;
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd,
+							     &input.limits);
 	if (ret)
 		goto out_input;
 
@@ -4432,6 +4462,10 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 	ret = pkm_lcs_key_fd_delete_value_authorize_layer(&input, token);
 	if (ret)
 		goto out_input;
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd,
+							     &input.limits);
+	if (ret)
+		goto out_input;
 
 	if (args->txn_fd >= 0) {
 		log_input.key_guid = key_fd->key_guid;
@@ -4578,6 +4612,10 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 		goto out_input;
 
 	ret = pkm_lcs_key_fd_blanket_tombstone_authorize_layer(&input, token);
+	if (ret)
+		goto out_input;
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd,
+							     &input.limits);
 	if (ret)
 		goto out_input;
 
@@ -4740,6 +4778,10 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 		goto out_input;
 
 	ret = pkm_lcs_key_fd_delete_key_authorize_layer(&input, token);
+	if (ret)
+		goto out_input;
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd,
+							     &input.limits);
 	if (ret)
 		goto out_input;
 
@@ -4921,6 +4963,10 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 		goto out_input;
 
 	ret = pkm_lcs_key_fd_hide_key_authorize_layer(&input, token);
+	if (ret)
+		goto out_input;
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd,
+							     &input.limits);
 	if (ret)
 		goto out_input;
 
@@ -8615,6 +8661,9 @@ static long pkm_lcs_key_fd_backup_from_args_for_token(
 	ret = pkm_lcs_runtime_limits_snapshot(&limits);
 	if (ret)
 		goto out_output_fd;
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd, &limits);
+	if (ret)
+		goto out_output_fd;
 
 	ret = pkm_lcs_key_fd_backup_begin_read_only_snapshot(
 		key_fd, &limits, &transaction_id);
@@ -9645,6 +9694,9 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 	ret = pkm_lcs_runtime_limits_snapshot(&limits);
 	if (ret)
 		return ret;
+	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd, &limits);
+	if (ret)
+		return ret;
 
 	ret = pkm_lcs_key_fd_restore_begin_read_write_transaction(
 		key_fd, &limits, &transaction_id);
@@ -9795,35 +9847,12 @@ static long pkm_lcs_key_fd_flush(struct pkm_lcs_key_fd *key_fd)
 	if (!hive_name_len || hive_name_len > U32_MAX)
 		return -EIO;
 
-	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_key_fd_snapshot_limits_and_revalidate(key_fd, &limits);
+	if (ret)
+		return ret;
 	return pkm_lcs_source_flush_round_trip_timeout_with_limits(
 		key_fd->source_id, hive_name, (u32)hive_name_len, &limits,
 		limits.request_timeout_ms, &response, NULL);
-}
-
-static bool pkm_lcs_key_fd_ioctl_revalidates_restart(unsigned int cmd)
-{
-	switch (cmd) {
-	case REG_IOC_SET_VALUE:
-	case REG_IOC_DELETE_VALUE:
-	case REG_IOC_BLANKET_TOMBSTONE:
-	case REG_IOC_DELETE_KEY:
-	case REG_IOC_HIDE_KEY:
-	case REG_IOC_QUERY_VALUE:
-	case REG_IOC_QUERY_VALUES_BATCH:
-	case REG_IOC_ENUM_VALUES:
-	case REG_IOC_ENUM_SUBKEYS:
-	case REG_IOC_QUERY_KEY_INFO:
-	case REG_IOC_GET_SECURITY:
-	case REG_IOC_SET_SECURITY:
-	case REG_IOC_FLUSH:
-	case REG_IOC_BACKUP:
-	case REG_IOC_RESTORE:
-	case REG_IOC_NOTIFY:
-		return true;
-	default:
-		return false;
-	}
 }
 
 static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
@@ -9845,7 +9874,6 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	struct reg_blanket_tombstone_args blanket_tombstone_args;
 	struct reg_delete_key_args delete_key_args;
 	struct reg_hide_key_args hide_key_args;
-	struct pkm_lcs_runtime_limits restart_limits;
 	long ret;
 
 	if (!file)
@@ -9853,15 +9881,6 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	key_fd = file->private_data;
 	if (!key_fd)
 		return -EINVAL;
-
-	if (pkm_lcs_key_fd_ioctl_revalidates_restart(cmd)) {
-		pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
-			&restart_limits);
-		ret = pkm_lcs_key_fd_revalidate_after_source_restart(
-			key_fd, &restart_limits);
-		if (ret)
-			return ret;
-	}
 
 	switch (cmd) {
 	case REG_IOC_SET_VALUE:
@@ -12261,6 +12280,25 @@ long pkm_lcs_kunit_key_fd_flush(int fd)
 		return ret;
 
 	ret = pkm_lcs_key_fd_flush(key_fd);
+	fdput(held);
+	return ret;
+}
+
+long pkm_lcs_kunit_key_fd_raw_ioctl(int fd, unsigned int cmd, unsigned long arg)
+{
+	struct file *file;
+	struct fd held;
+	long ret;
+
+	held = fdget(fd);
+	file = fd_file(held);
+	if (!file)
+		return -EBADF;
+	if (file->f_op != &pkm_lcs_key_fd_fops) {
+		fdput(held);
+		return -EINVAL;
+	}
+	ret = pkm_lcs_key_fd_ioctl(file, cmd, arg);
 	fdput(held);
 	return ret;
 }
