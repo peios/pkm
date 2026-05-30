@@ -10441,6 +10441,51 @@ static void pkm_lcs_kunit_key_fd_security_ioctl_access_gates(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_key_fd_raw_ioctl_null_args_fail_closed(
+	struct kunit *test)
+{
+	static const unsigned int null_arg_cmds[] = {
+		REG_IOC_SET_VALUE,
+		REG_IOC_DELETE_VALUE,
+		REG_IOC_BLANKET_TOMBSTONE,
+		REG_IOC_DELETE_KEY,
+		REG_IOC_HIDE_KEY,
+		REG_IOC_QUERY_VALUE,
+		REG_IOC_QUERY_VALUES_BATCH,
+		REG_IOC_ENUM_VALUES,
+		REG_IOC_ENUM_SUBKEYS,
+		REG_IOC_QUERY_KEY_INFO,
+		REG_IOC_GET_SECURITY,
+		REG_IOC_SET_SECURITY,
+		REG_IOC_BACKUP,
+		REG_IOC_RESTORE,
+		REG_IOC_NOTIFY,
+	};
+	u32 access = KEY_ALL_ACCESS | ACCESS_SYSTEM_SECURITY;
+	long fd;
+	size_t i;
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(access);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	for (i = 0; i < ARRAY_SIZE(null_arg_cmds); i++)
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_kunit_key_fd_raw_ioctl(
+					(int)fd, null_arg_cmds[i], 0),
+				(long)-EFAULT);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_raw_ioctl(
+				(int)fd, _IO(REG_IOC_TYPE, 0xff), 0),
+			(long)-ENOTTY);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_raw_ioctl(
+				(int)fd, _IO('X', REG_IOC_QUERY_VALUE_NR), 0),
+			(long)-ENOTTY);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_key_fd_get_security_success(struct kunit *test)
 {
 	static const char * const path[] = { "Machine", "Software" };
@@ -51453,6 +51498,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_snapshot_rejects_non_key_fd),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_fixed_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_gates),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_raw_ioctl_null_args_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_admission),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_cycle_fails_closed),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_root_records_success),
