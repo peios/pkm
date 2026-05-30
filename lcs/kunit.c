@@ -14799,6 +14799,22 @@ static void pkm_lcs_kunit_key_fd_set_value_fails_before_source(
 	args._pad0 = 0;
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 
+	args._pad1 = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_value_for_token(
+				(int)allowed_fd, admin_token, &ops, &args),
+			(long)-EINVAL);
+	args._pad1 = 0;
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+
+	args._pad2 = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_value_for_token(
+				(int)allowed_fd, admin_token, &ops, &args),
+			(long)-EINVAL);
+	args._pad2 = 0;
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+
 	args.txn_fd = -2;
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_kunit_key_fd_set_value_for_token(
@@ -15929,6 +15945,22 @@ static void pkm_lcs_kunit_key_fd_delete_value_fails_before_source(
 				(int)allowed_fd, admin_token, &ops, &args),
 			(long)-EINVAL);
 	args._pad0 = 0;
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+
+	args._pad1 = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_delete_value_for_token(
+				(int)allowed_fd, admin_token, &ops, &args),
+			(long)-EINVAL);
+	args._pad1 = 0;
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+
+	args._pad2 = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_delete_value_for_token(
+				(int)allowed_fd, admin_token, &ops, &args),
+			(long)-EINVAL);
+	args._pad2 = 0;
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 
 	args.txn_fd = -2;
@@ -18319,6 +18351,14 @@ static void pkm_lcs_kunit_key_fd_hide_key_fails_before_source(
 				(int)allowed_fd, admin_token, &ops, &args),
 			(long)-EINVAL);
 	args._pad0 = 0;
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+
+	args._pad1 = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_hide_key_for_token(
+				(int)allowed_fd, admin_token, &ops, &args),
+			(long)-EINVAL);
+	args._pad1 = 0;
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 
 	args.txn_fd = -2;
