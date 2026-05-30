@@ -226,6 +226,11 @@ struct pkm_lcs_delete_key_post_lookup {
 	bool replacement_visible;
 };
 
+struct pkm_lcs_hide_key_post_lookup {
+	bool target_still_visible;
+	bool replacement_visible;
+};
+
 static void pkm_lcs_value_watch_event_bytes_destroy(
 	struct pkm_lcs_value_watch_event_bytes *events);
 static void pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
@@ -3107,6 +3112,58 @@ out_frame:
 	return ret;
 }
 
+static long pkm_lcs_key_fd_hide_key_post_lookup(
+	const struct pkm_lcs_key_fd *key_fd,
+	const u8 parent_guid[PKM_LCS_GUID_BYTES], const char *child_name,
+	u32 child_name_len, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_hide_key_post_lookup *out)
+{
+	struct pkm_lcs_layer_snapshot layer_snapshot = { };
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_rsi_lookup_child_result effective = { };
+	u64 next_sequence = 0;
+	long ret;
+
+	if (!key_fd || !parent_guid || !child_name || !limits || !out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
+	if (ret)
+		return ret;
+
+	pkm_lcs_source_response_frame_init(&frame);
+	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
+		key_fd->source_id, 0, parent_guid, child_name, child_name_len,
+		limits, limits->request_timeout_ms, &frame, &response, NULL);
+	if (ret)
+		goto out_frame;
+
+	ret = pkm_lcs_rsi_materialize_lookup_child(
+		frame.data, frame.len, response.request_id, next_sequence,
+		child_name, child_name_len, layer_snapshot.layers,
+		layer_snapshot.layer_count, NULL, 0, &response.limits,
+		&effective);
+	if (ret)
+		goto out_frame;
+
+	if (effective.found) {
+		if (pkm_lcs_guid_equal(effective.key_guid, key_fd->key_guid))
+			out->target_still_visible = true;
+		else
+			out->replacement_visible = true;
+	}
+
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_set_value_layer_cap_check(
 	const struct pkm_lcs_key_fd *key_fd,
 	const struct pkm_lcs_set_value_input *input, u64 txn_id)
@@ -4922,6 +4979,7 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 	struct pkm_lcs_transaction_binding_plan binding_probe = { };
 	struct pkm_lcs_transaction_binding_plan binding = { };
 	struct pkm_lcs_transaction_hide_key_log_input log_input = { };
+	struct pkm_lcs_hide_key_post_lookup post_lookup = { };
 	const u8 *parent_guid = NULL;
 	const char *child_name = NULL;
 	u64 generation = 0;
@@ -4929,6 +4987,8 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 	u64 txn_id = 0;
 	u32 child_name_len = 0;
 	u32 internal_watch_effects = 0;
+	bool publish_deleted = false;
+	bool publish_created = false;
 	long ret;
 
 	if (!key_fd || !args)
@@ -5020,10 +5080,32 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 		goto out_input;
 	}
 
-	internal_watch_effects = pkm_lcs_key_fd_publish_parent_subkey_deleted(
-		key_fd, parent_guid, child_name, child_name_len,
-		&input.limits);
-	pkm_lcs_key_fd_publish_key_deleted_context(key_fd, &input.limits);
+	ret = pkm_lcs_key_fd_hide_key_post_lookup(
+		key_fd, parent_guid, child_name, child_name_len, &input.limits,
+		&post_lookup);
+	if (ret) {
+		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+		ret = -EIO;
+		goto out_input;
+	}
+	if (!post_lookup.target_still_visible) {
+		publish_deleted = true;
+		publish_created = post_lookup.replacement_visible;
+	}
+
+	if (publish_deleted) {
+		internal_watch_effects =
+			pkm_lcs_key_fd_publish_parent_subkey_deleted(
+				key_fd, parent_guid, child_name, child_name_len,
+				&input.limits);
+		if (publish_created)
+			internal_watch_effects |=
+				pkm_lcs_key_fd_publish_parent_subkey_created(
+					key_fd, parent_guid, child_name,
+					child_name_len, &input.limits);
+		pkm_lcs_key_fd_publish_key_deleted_context(key_fd,
+							   &input.limits);
+	}
 
 	if (!(internal_watch_effects &
 	      PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE)) {
