@@ -4532,6 +4532,27 @@ long pkm_lcs_kunit_transaction_fd_commit_timeout(int fd, u32 timeout_ms)
 	return ret;
 }
 
+long pkm_lcs_kunit_transaction_fd_raw_ioctl(int fd, unsigned int cmd,
+					    unsigned long arg)
+{
+	struct file *file;
+	struct fd held;
+	long ret;
+
+	held = fdget(fd);
+	file = fd_file(held);
+	if (!file)
+		return -EBADF;
+	if (file->f_op != &pkm_lcs_transaction_fd_fops) {
+		fdput(held);
+		return -EINVAL;
+	}
+
+	ret = pkm_lcs_transaction_fd_ioctl(file, cmd, arg);
+	fdput(held);
+	return ret;
+}
+
 u32 pkm_lcs_kunit_transaction_fd_retained_commit_count(void)
 {
 	struct pkm_lcs_transaction_fd *txn;

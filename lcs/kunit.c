@@ -25211,6 +25211,30 @@ static void pkm_lcs_kunit_transaction_status_rejects_bad_inputs(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_transaction_raw_ioctl_entrypoints_fail_closed(
+	struct kunit *test)
+{
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				(int)fd, REG_IOC_TXN_STATUS, 0),
+			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				(int)fd, _IO(REG_IOC_TYPE, 0xfe), 0),
+			(long)-ENOTTY);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				(int)fd, _IO('X', REG_IOC_TXN_STATUS_NR), 0),
+			(long)-ENOTTY);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_transaction_commit_precheck_unbound_terminal(
 	struct kunit *test)
 {
@@ -51716,6 +51740,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_transaction_status_reports_timeout_errno),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_status_maps_terminal_errno),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_status_rejects_bad_inputs),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_raw_ioctl_entrypoints_fail_closed),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_precheck_unbound_terminal),
 	KUNIT_CASE(
