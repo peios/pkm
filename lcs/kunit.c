@@ -45649,6 +45649,17 @@ static void pkm_lcs_kunit_reg_create_key_args_rejects_padding(
 	KUNIT_EXPECT_EQ(test, ctx.strnlens, 0U);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+
+	args._pad0 = 0;
+	args._pad1 = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_args_for_token(NULL, &ops, &args,
+							      NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, disposition, 0xaaaaaaaaU);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
 }
 
 static void pkm_lcs_kunit_reg_create_key_args_existing_txn_reads(
