@@ -5168,6 +5168,58 @@ static long pkm_lcs_key_fd_restore_abort_read_write_transaction(
 		limits->request_timeout_ms, NULL, NULL);
 }
 
+static long pkm_lcs_key_fd_restore_commit_read_write_transaction(
+	struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_runtime_limits *limits, u64 transaction_id,
+	bool *commit_dispatched_out)
+{
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	long ret;
+
+	if (commit_dispatched_out)
+		*commit_dispatched_out = false;
+	if (!key_fd || !limits || !transaction_id)
+		return -EINVAL;
+
+	ret = pkm_lcs_source_commit_transaction_round_trip_timeout_with_limits(
+		key_fd->source_id, transaction_id, limits,
+		limits->request_timeout_ms, &response, &enqueue);
+	if (commit_dispatched_out)
+		*commit_dispatched_out = response.request_id || enqueue.request_id;
+	return ret;
+}
+
+static long pkm_lcs_key_fd_restore_publish_commit_effects(
+	struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	struct pkm_lcs_watch_dispatch_context context = { };
+	u64 generation = 0;
+	long ret;
+
+	if (!key_fd || !limits || !key_fd->ancestor_guids ||
+	    !key_fd->resolved_path || !key_fd->path_component_count)
+		return -EINVAL;
+
+	ret = pkm_lcs_source_record_transaction_generation(
+		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
+	if (ret) {
+		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+		return -EIO;
+	}
+
+	context.changed_key_guid = key_fd->key_guid;
+	context.ancestor_guids =
+		(const u8 (*)[PKM_LCS_GUID_BYTES])key_fd->ancestor_guids;
+	context.resolved_path = (const char * const *)key_fd->resolved_path;
+	context.limits = limits;
+	context.path_component_count = key_fd->path_component_count;
+	context.event_type = REG_WATCH_OVERFLOW;
+	(void)pkm_lcs_key_fd_dispatch_overflow_context(&context);
+	return 0;
+}
+
 static u32 pkm_lcs_key_fd_audit_result_errno(long ret)
 {
 	if (ret < 0)
@@ -9570,6 +9622,8 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 	bool restore_started = false;
 	bool start_audit_failed = false;
 	bool sequence_gate_held = false;
+	bool transaction_open = false;
+	bool commit_dispatched = false;
 	long ret;
 
 	if (!key_fd || !args)
@@ -9596,6 +9650,7 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 		key_fd, &limits, &transaction_id);
 	if (ret)
 		return ret;
+	transaction_open = true;
 
 	ret = pkm_lcs_emit_restore_start_audit_for_token(
 		token, key_fd->key_guid, args->input_fd);
@@ -9662,16 +9717,32 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 	if (ret)
 		goto out_abort_transaction;
 
-	ret = -EOPNOTSUPP;
+	ret = pkm_lcs_key_fd_restore_commit_read_write_transaction(
+		key_fd, &limits, transaction_id, &commit_dispatched);
+	if (commit_dispatched)
+		transaction_open = false;
+	if (ret == -ETIMEDOUT && !transaction_open)
+		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+	if (ret)
+		goto out_abort_transaction;
+	transaction_open = false;
+
+	ret = pkm_lcs_key_fd_restore_publish_commit_effects(key_fd, &limits);
+	if (ret)
+		goto out_abort_transaction;
 
 out_abort_transaction:
 	pkm_lcs_restore_root_key_summary_destroy(&root_summary);
 	{
-		long abort_ret;
+		long abort_ret = 0;
 		long release_ret = 0;
 
-		abort_ret = pkm_lcs_key_fd_restore_abort_read_write_transaction(
-			key_fd, &limits, transaction_id);
+		if (transaction_open) {
+			abort_ret =
+				pkm_lcs_key_fd_restore_abort_read_write_transaction(
+					key_fd, &limits, transaction_id);
+			transaction_open = false;
+		}
 		if (sequence_gate_held) {
 			release_ret =
 				pkm_lcs_restore_sequence_gate_release_terminal(
