@@ -2030,7 +2030,7 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 
 	provided_len = args->name_len;
 	name_ptr = args->name_ptr;
-	if (args->_pad0)
+	if (args->_pad0 || args->_pad1)
 		return -EINVAL;
 	if (provided_len && !name_ptr)
 		return -EFAULT;
