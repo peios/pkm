@@ -19063,6 +19063,7 @@ static void pkm_lcs_kunit_key_fd_delete_key_fails_before_source(
 	struct reg_delete_key_args args = {
 		.txn_fd = -1,
 	};
+	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
 	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
 	struct file file = { };
 	const void *source_token;
@@ -19072,6 +19073,7 @@ static void pkm_lcs_kunit_key_fd_delete_key_fails_before_source(
 	long allowed_fd;
 	long denied_fd;
 	long root_fd;
+	long txn_fd;
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
 	admin_token = kacs_rust_kunit_create_local_administrator_token();
@@ -19128,6 +19130,22 @@ static void pkm_lcs_kunit_key_fd_delete_key_fails_before_source(
 			(long)-EINVAL);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+	args.txn_fd = (int)txn_fd;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_delete_key_for_token(
+				(int)root_fd, admin_token, &ops, &args),
+			(long)-EINVAL);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)txn_fd,
+							&txn_snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, txn_snapshot.state, REG_TXN_ACTIVE_UNBOUND);
+	KUNIT_EXPECT_EQ(test, txn_snapshot.bound_source_id, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+	args.txn_fd = -1;
+
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_key_fd_set_orphaned((int)allowed_fd,
 							  true),
@@ -19171,6 +19189,7 @@ static void pkm_lcs_kunit_key_fd_delete_key_fails_before_source(
 			0L);
 	KUNIT_EXPECT_EQ(test, sequence_after, sequence_before);
 
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)root_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)allowed_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)denied_fd), 0);
