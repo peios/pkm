@@ -220,16 +220,6 @@ pub enum LcsError {
         /// Colliding GUID.
         guid: [u8; 16],
     },
-    /// A candidate key GUID attempted to reuse a retired key GUID.
-    RetiredKeyGuidReuse {
-        /// Reused GUID.
-        guid: [u8; 16],
-    },
-    /// Active and retired key GUID trackers overlapped.
-    KeyGuidTrackerOverlap {
-        /// Overlapping GUID.
-        guid: [u8; 16],
-    },
     /// A child key record or create request used nil as a parent GUID.
     NilParentGuid,
     /// A reg_create_key request contained unknown REG_OPTION_* bits.

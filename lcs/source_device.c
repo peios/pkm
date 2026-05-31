@@ -1351,8 +1351,7 @@ extern int lcs_rust_validate_key_create_flags(
 	u32 flags, struct pkm_lcs_key_create_options *options);
 extern int lcs_rust_plan_key_guid_assignment(
 	const u8 candidate_guid[16], const u8 (*active_key_guids)[16],
-	size_t active_key_guid_count, const u8 (*retired_key_guids)[16],
-	size_t retired_key_guid_count,
+	size_t active_key_guid_count,
 	struct pkm_lcs_key_guid_assignment_plan *plan);
 extern int lcs_rust_admit_layer_target(
 	const u8 *layer_name, u32 layer_name_len,
@@ -10789,7 +10788,6 @@ static void pkm_lcs_default_key_guid_generate(void *ctx, u8 guid[16])
 
 long pkm_lcs_assign_new_key_guid(
 	const u8 (*active_key_guids)[16], u32 active_key_guid_count,
-	const u8 (*retired_key_guids)[16], u32 retired_key_guid_count,
 	const struct pkm_lcs_key_guid_generator *generator,
 	struct pkm_lcs_key_guid_assignment_plan *plan)
 {
@@ -10803,8 +10801,6 @@ long pkm_lcs_assign_new_key_guid(
 	if (!plan)
 		return -EINVAL;
 
-	(void)retired_key_guids;
-	(void)retired_key_guid_count;
 	memset(plan, 0, sizeof(*plan));
 	if (active_key_guid_count && !active_key_guids)
 		return -EINVAL;
@@ -10822,8 +10818,7 @@ long pkm_lcs_assign_new_key_guid(
 		memset(candidate, 0, sizeof(candidate));
 		generate(generate_ctx, candidate);
 		ret = lcs_rust_plan_key_guid_assignment(
-			candidate, active_key_guids, active_key_guid_count,
-			NULL, 0, plan);
+			candidate, active_key_guids, active_key_guid_count, plan);
 		if (!ret)
 			return 0;
 		if (ret != -EIO)
@@ -11496,7 +11491,6 @@ long pkm_lcs_create_missing_user_path_finish_for_token(
 		goto out_target;
 	ret = pkm_lcs_assign_new_key_guid(
 		inputs->active_key_guids, inputs->active_key_guid_count,
-		inputs->retired_key_guids, inputs->retired_key_guid_count,
 		inputs->generator, &guid_plan);
 	if (ret)
 		goto out_target;
@@ -11611,7 +11605,6 @@ static long pkm_lcs_create_missing_copied_path_finish_for_token_with_txn(
 		goto out_target;
 	ret = pkm_lcs_assign_new_key_guid(
 		inputs->active_key_guids, inputs->active_key_guid_count,
-		inputs->retired_key_guids, inputs->retired_key_guid_count,
 		inputs->generator, &guid_plan);
 	if (ret)
 		goto out_target;

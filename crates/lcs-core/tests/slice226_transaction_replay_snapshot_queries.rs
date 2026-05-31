@@ -132,7 +132,6 @@ fn create_key_record(
             child_name: "Child",
             candidate_guid: CHILD_GUID,
             active_key_guids: &[],
-            retired_key_guids: &[],
             layer: "policy",
             flags: REG_OPTION_VOLATILE,
             caller_has_tcb_or_admin: false,

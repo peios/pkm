@@ -70,7 +70,6 @@ fn create_request<'a>(layer: &'a str) -> KeyCreateRecordsRequest<'a> {
         child_name: "Child",
         candidate_guid: CHILD_GUID,
         active_key_guids: &[],
-        retired_key_guids: &[],
         layer,
         flags: REG_OPTION_VOLATILE,
         caller_has_tcb_or_admin: false,

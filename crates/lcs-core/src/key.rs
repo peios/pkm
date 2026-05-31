@@ -63,10 +63,6 @@ pub struct KeyCreateRequest<'a> {
 pub struct KeyGuidAssignmentRequest<'a> {
     pub candidate_guid: Guid,
     pub active_key_guids: &'a [Guid],
-    /// Legacy internal plumbing retained while C call sites are simplified.
-    /// PSD-005 v0.21 relies on UUIDv4 collision resistance plus source-side
-    /// duplicate rejection, not on a persistent retired-GUID ledger.
-    pub retired_key_guids: &'a [Guid],
 }
 
 /// LCS-assigned immutable GUID plan for a new key.
@@ -104,7 +100,6 @@ pub struct KeyCreateRecordsRequest<'a> {
     pub child_name: &'a str,
     pub candidate_guid: Guid,
     pub active_key_guids: &'a [Guid],
-    pub retired_key_guids: &'a [Guid],
     pub layer: &'a str,
     pub flags: u32,
     pub caller_has_tcb_or_admin: bool,
@@ -275,7 +270,6 @@ pub fn plan_key_create_records<'a>(
     let guid_assignment = plan_key_guid_assignment(KeyGuidAssignmentRequest {
         candidate_guid: request.candidate_guid,
         active_key_guids: request.active_key_guids,
-        retired_key_guids: request.retired_key_guids,
     })?;
     validate_layer_name_bytes(request.layer.as_bytes(), limits)?;
 

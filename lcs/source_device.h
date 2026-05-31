@@ -232,9 +232,6 @@ struct pkm_lcs_create_missing_runtime_inputs {
 	const u8 (*active_key_guids)[16];
 	u32 active_key_guid_count;
 	u32 _pad4;
-	const u8 (*retired_key_guids)[16];
-	u32 retired_key_guid_count;
-	u32 _pad5;
 	const struct pkm_lcs_key_guid_generator *generator;
 };
 
@@ -874,7 +871,6 @@ long pkm_lcs_live_layer_write_access_check_for_token(
 	struct pkm_lcs_key_open_access_plan *plan);
 long pkm_lcs_assign_new_key_guid(
 	const u8 (*active_key_guids)[16], u32 active_key_guid_count,
-	const u8 (*retired_key_guids)[16], u32 retired_key_guid_count,
 	const struct pkm_lcs_key_guid_generator *generator,
 	struct pkm_lcs_key_guid_assignment_plan *plan);
 long pkm_lcs_create_missing_symlink_authority_for_token(

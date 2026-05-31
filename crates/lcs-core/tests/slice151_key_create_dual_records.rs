@@ -21,7 +21,6 @@ fn field(data: &'static [u8]) -> RsiLengthPrefixedField<'static> {
 fn request<'a>(
     candidate_guid: Guid,
     active_key_guids: &'a [Guid],
-    retired_key_guids: &'a [Guid],
     layer: &'a str,
 ) -> KeyCreateRecordsRequest<'a> {
     KeyCreateRecordsRequest {
@@ -31,7 +30,6 @@ fn request<'a>(
         child_name: "Child",
         candidate_guid,
         active_key_guids,
-        retired_key_guids,
         layer,
         flags: REG_OPTION_VOLATILE,
         caller_has_tcb_or_admin: false,
@@ -46,7 +44,7 @@ fn key_create_plan_produces_fresh_guid_path_entry_and_key_record() {
     let plan = plan_key_create_records(
         &limits,
         &mut sequence_counter,
-        &request(CHILD_GUID, &[], &[], "policy"),
+        &request(CHILD_GUID, &[], "policy"),
     )
     .unwrap();
 
@@ -126,7 +124,7 @@ fn key_create_plan_rejects_existing_guid_before_sequence_allocation() {
         plan_key_create_records(
             &limits,
             &mut sequence_counter,
-            &request(CHILD_GUID, &active, &[], "policy"),
+            &request(CHILD_GUID, &active, "policy"),
         ),
         Err(LcsError::KeyGuidAlreadyExists { guid: CHILD_GUID })
     );
@@ -142,7 +140,7 @@ fn key_create_plan_rejects_bad_layer_before_sequence_allocation() {
         plan_key_create_records(
             &limits,
             &mut sequence_counter,
-            &request(CHILD_GUID, &[], &[], "bad/layer"),
+            &request(CHILD_GUID, &[], "bad/layer"),
         ),
         Err(LcsError::NameContainsSeparator {
             field: "layer_name",

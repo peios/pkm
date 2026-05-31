@@ -31267,7 +31267,6 @@ static void pkm_lcs_kunit_key_guid_assignment_fresh_succeeds(
 {
 	static const u8 candidates[1][16] = { { 0x40 } };
 	static const u8 active[2][16] = { { 0x41 }, { 0x42 } };
-	static const u8 retired[1][16] = { { 0x50 } };
 	struct pkm_lcs_key_guid_assignment_plan plan = { };
 	struct pkm_lcs_kunit_guid_sequence sequence = {
 		.guids = candidates,
@@ -31278,8 +31277,7 @@ static void pkm_lcs_kunit_key_guid_assignment_fresh_succeeds(
 
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_assign_new_key_guid(
-				active, ARRAY_SIZE(active), retired,
-				ARRAY_SIZE(retired), &generator, &plan),
+				active, ARRAY_SIZE(active), &generator, &plan),
 			0L);
 	KUNIT_EXPECT_EQ(test, sequence.calls, 1U);
 	KUNIT_EXPECT_EQ(test, memcmp(plan.guid, candidates[0], 16), 0);
@@ -31292,9 +31290,7 @@ static void pkm_lcs_kunit_key_guid_assignment_retries_bad_candidates(
 {
 	static const u8 nil_then_fresh[2][16] = { { 0 }, { 0x61 } };
 	static const u8 active_then_fresh[2][16] = { { 0x71 }, { 0x72 } };
-	static const u8 retired_candidate[1][16] = { { 0x81 } };
 	static const u8 active[1][16] = { { 0x71 } };
-	static const u8 retired[1][16] = { { 0x81 } };
 	struct pkm_lcs_key_guid_assignment_plan plan = { };
 	struct pkm_lcs_kunit_guid_sequence nil_sequence = {
 		.guids = nil_then_fresh,
@@ -31304,16 +31300,12 @@ static void pkm_lcs_kunit_key_guid_assignment_retries_bad_candidates(
 		.guids = active_then_fresh,
 		.count = ARRAY_SIZE(active_then_fresh),
 	};
-	struct pkm_lcs_kunit_guid_sequence retired_sequence = {
-		.guids = retired_candidate,
-		.count = ARRAY_SIZE(retired_candidate),
-	};
 	struct pkm_lcs_key_guid_generator generator =
 		pkm_lcs_kunit_guid_generator(&nil_sequence);
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_assign_new_key_guid(NULL, 0, NULL, 0,
-						    &generator, &plan),
+			pkm_lcs_assign_new_key_guid(NULL, 0, &generator,
+						    &plan),
 			0L);
 	KUNIT_EXPECT_EQ(test, nil_sequence.calls, 2U);
 	KUNIT_EXPECT_EQ(test,
@@ -31323,23 +31315,11 @@ static void pkm_lcs_kunit_key_guid_assignment_retries_bad_candidates(
 	generator = pkm_lcs_kunit_guid_generator(&active_sequence);
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_assign_new_key_guid(
-				active, ARRAY_SIZE(active), NULL, 0,
-				&generator, &plan),
+				active, ARRAY_SIZE(active), &generator, &plan),
 			0L);
 	KUNIT_EXPECT_EQ(test, active_sequence.calls, 2U);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(plan.guid, active_then_fresh[1], 16),
-			0);
-
-	generator = pkm_lcs_kunit_guid_generator(&retired_sequence);
-	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_assign_new_key_guid(
-				NULL, 0, retired, ARRAY_SIZE(retired),
-				&generator, &plan),
-			0L);
-	KUNIT_EXPECT_EQ(test, retired_sequence.calls, 1U);
-	KUNIT_EXPECT_EQ(test,
-			memcmp(plan.guid, retired_candidate[0], 16),
 			0);
 }
 
@@ -31361,8 +31341,7 @@ static void pkm_lcs_kunit_key_guid_assignment_exhaustion_fails_closed(
 
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_assign_new_key_guid(
-				active, ARRAY_SIZE(active), NULL, 0,
-				&generator, &plan),
+				active, ARRAY_SIZE(active), &generator, &plan),
 			(long)-EIO);
 	KUNIT_EXPECT_EQ(test, sequence.calls,
 			PKM_LCS_KEY_GUID_ASSIGNMENT_MAX_ATTEMPTS);
@@ -31386,8 +31365,8 @@ static void pkm_lcs_kunit_key_guid_assignment_bad_tracker_eio(
 
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_assign_new_key_guid(
-				bad_active, ARRAY_SIZE(bad_active), NULL, 0,
-				&generator, &plan),
+				bad_active, ARRAY_SIZE(bad_active), &generator,
+				&plan),
 			(long)-EIO);
 	KUNIT_EXPECT_EQ(test, sequence.calls,
 			PKM_LCS_KEY_GUID_ASSIGNMENT_MAX_ATTEMPTS);
@@ -31407,20 +31386,16 @@ static void pkm_lcs_kunit_key_guid_assignment_bad_inputs(struct kunit *test)
 		pkm_lcs_kunit_guid_generator(&sequence);
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_assign_new_key_guid(NULL, 0, NULL, 0,
-						    &generator, NULL),
+			pkm_lcs_assign_new_key_guid(NULL, 0, &generator,
+						    NULL),
 			(long)-EINVAL);
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_assign_new_key_guid(NULL, 1, NULL, 0,
-						    &generator, &plan),
+			pkm_lcs_assign_new_key_guid(NULL, 1, &generator,
+						    &plan),
 			(long)-EINVAL);
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_assign_new_key_guid(NULL, 0, NULL, 1,
-						    &generator, &plan),
-			0L);
-	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_assign_new_key_guid(NULL, 0, NULL, 0,
-						    &bad_generator, &plan),
+			pkm_lcs_assign_new_key_guid(NULL, 0, &bad_generator,
+						    &plan),
 			(long)-EINVAL);
 }
 
