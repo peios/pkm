@@ -58,11 +58,14 @@ pub struct KeyCreateRequest<'a> {
     pub caller_has_tcb_or_admin: bool,
 }
 
-/// Candidate GUID and reuse trackers for a new key before source dispatch.
+/// Candidate GUID and currently-active tracker for a new key before source dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyGuidAssignmentRequest<'a> {
     pub candidate_guid: Guid,
     pub active_key_guids: &'a [Guid],
+    /// Legacy internal plumbing retained while C call sites are simplified.
+    /// PSD-005 v0.21 relies on UUIDv4 collision resistance plus source-side
+    /// duplicate rejection, not on a persistent retired-GUID ledger.
     pub retired_key_guids: &'a [Guid],
 }
 
@@ -191,24 +194,11 @@ pub fn plan_key_guid_assignment(
 ) -> LcsResult<KeyGuidAssignmentPlan> {
     validate_key_guid(request.candidate_guid)?;
     validate_guid_tracker("active_key_guids", request.active_key_guids)?;
-    validate_guid_tracker("retired_key_guids", request.retired_key_guids)?;
 
     if guid_slice_contains(request.active_key_guids, request.candidate_guid) {
         return Err(LcsError::KeyGuidAlreadyExists {
             guid: request.candidate_guid,
         });
-    }
-
-    if guid_slice_contains(request.retired_key_guids, request.candidate_guid) {
-        return Err(LcsError::RetiredKeyGuidReuse {
-            guid: request.candidate_guid,
-        });
-    }
-
-    for guid in request.active_key_guids {
-        if guid_slice_contains(request.retired_key_guids, *guid) {
-            return Err(LcsError::KeyGuidTrackerOverlap { guid: *guid });
-        }
     }
 
     Ok(KeyGuidAssignmentPlan {

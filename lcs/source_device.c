@@ -10803,9 +10803,10 @@ long pkm_lcs_assign_new_key_guid(
 	if (!plan)
 		return -EINVAL;
 
+	(void)retired_key_guids;
+	(void)retired_key_guid_count;
 	memset(plan, 0, sizeof(*plan));
-	if ((active_key_guid_count && !active_key_guids) ||
-	    (retired_key_guid_count && !retired_key_guids))
+	if (active_key_guid_count && !active_key_guids)
 		return -EINVAL;
 	if (generator) {
 		if (!generator->generate)
@@ -10822,7 +10823,7 @@ long pkm_lcs_assign_new_key_guid(
 		generate(generate_ctx, candidate);
 		ret = lcs_rust_plan_key_guid_assignment(
 			candidate, active_key_guids, active_key_guid_count,
-			retired_key_guids, retired_key_guid_count, plan);
+			NULL, 0, plan);
 		if (!ret)
 			return 0;
 		if (ret != -EIO)
@@ -11420,8 +11421,7 @@ static long pkm_lcs_create_missing_runtime_inputs_validate(
 	    (inputs->layer_count && !inputs->layers) ||
 	    (inputs->private_layer_count && !inputs->private_layers) ||
 	    (inputs->metadata_count && !inputs->metadata) ||
-	    (inputs->active_key_guid_count && !inputs->active_key_guids) ||
-	    (inputs->retired_key_guid_count && !inputs->retired_key_guids))
+	    (inputs->active_key_guid_count && !inputs->active_key_guids))
 		return -EINVAL;
 	if (inputs->base_metadata_present &&
 	    (!inputs->base_metadata_sd || !inputs->base_metadata_sd_len))

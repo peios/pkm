@@ -37,7 +37,7 @@ fn fresh_candidate_guid_becomes_lcs_assigned_persistent_identity() {
 }
 
 #[test]
-fn nil_active_collision_and_retired_reuse_fail_closed() {
+fn nil_and_active_collision_fail_closed() {
     assert_eq!(
         plan_key_guid_assignment(request([0; 16], &[], &[])),
         Err(LcsError::NilKeyGuid)
@@ -46,14 +46,22 @@ fn nil_active_collision_and_retired_reuse_fail_closed() {
         plan_key_guid_assignment(request(ACTIVE, &[ACTIVE], &[RETIRED])),
         Err(LcsError::KeyGuidAlreadyExists { guid: ACTIVE })
     );
+}
+
+#[test]
+fn retired_guid_catalogue_is_not_assignment_authority() {
     assert_eq!(
         plan_key_guid_assignment(request(RETIRED, &[ACTIVE], &[RETIRED])),
-        Err(LcsError::RetiredKeyGuidReuse { guid: RETIRED })
+        Ok(KeyGuidAssignmentPlan {
+            guid: RETIRED,
+            assigned_by_lcs: true,
+            persist_in_key_record: true,
+        })
     );
 }
 
 #[test]
-fn corrupt_guid_reuse_trackers_fail_before_assignment() {
+fn corrupt_active_guid_tracker_fails_before_assignment() {
     assert_eq!(
         plan_key_guid_assignment(request(CANDIDATE, &[[0; 16]], &[])),
         Err(LcsError::NilTrackedKeyGuid {
@@ -67,9 +75,5 @@ fn corrupt_guid_reuse_trackers_fail_before_assignment() {
             field: "active_key_guids",
             index: 1,
         })
-    );
-    assert_eq!(
-        plan_key_guid_assignment(request(CANDIDATE, &[ACTIVE], &[ACTIVE])),
-        Err(LcsError::KeyGuidTrackerOverlap { guid: ACTIVE })
     );
 }

@@ -31292,7 +31292,7 @@ static void pkm_lcs_kunit_key_guid_assignment_retries_bad_candidates(
 {
 	static const u8 nil_then_fresh[2][16] = { { 0 }, { 0x61 } };
 	static const u8 active_then_fresh[2][16] = { { 0x71 }, { 0x72 } };
-	static const u8 retired_then_fresh[2][16] = { { 0x81 }, { 0x82 } };
+	static const u8 retired_candidate[1][16] = { { 0x81 } };
 	static const u8 active[1][16] = { { 0x71 } };
 	static const u8 retired[1][16] = { { 0x81 } };
 	struct pkm_lcs_key_guid_assignment_plan plan = { };
@@ -31305,8 +31305,8 @@ static void pkm_lcs_kunit_key_guid_assignment_retries_bad_candidates(
 		.count = ARRAY_SIZE(active_then_fresh),
 	};
 	struct pkm_lcs_kunit_guid_sequence retired_sequence = {
-		.guids = retired_then_fresh,
-		.count = ARRAY_SIZE(retired_then_fresh),
+		.guids = retired_candidate,
+		.count = ARRAY_SIZE(retired_candidate),
 	};
 	struct pkm_lcs_key_guid_generator generator =
 		pkm_lcs_kunit_guid_generator(&nil_sequence);
@@ -31337,9 +31337,9 @@ static void pkm_lcs_kunit_key_guid_assignment_retries_bad_candidates(
 				NULL, 0, retired, ARRAY_SIZE(retired),
 				&generator, &plan),
 			0L);
-	KUNIT_EXPECT_EQ(test, retired_sequence.calls, 2U);
+	KUNIT_EXPECT_EQ(test, retired_sequence.calls, 1U);
 	KUNIT_EXPECT_EQ(test,
-			memcmp(plan.guid, retired_then_fresh[1], 16),
+			memcmp(plan.guid, retired_candidate[0], 16),
 			0);
 }
 
@@ -31417,7 +31417,7 @@ static void pkm_lcs_kunit_key_guid_assignment_bad_inputs(struct kunit *test)
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_assign_new_key_guid(NULL, 0, NULL, 1,
 						    &generator, &plan),
-			(long)-EINVAL);
+			0L);
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_assign_new_key_guid(NULL, 0, NULL, 0,
 						    &bad_generator, &plan),

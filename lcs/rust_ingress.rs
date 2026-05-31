@@ -1349,8 +1349,8 @@ pub unsafe extern "C" fn lcs_rust_plan_key_guid_assignment(
     candidate_guid: *const [u8; 16],
     active_key_guids: *const [u8; 16],
     active_key_guid_count: usize,
-    retired_key_guids: *const [u8; 16],
-    retired_key_guid_count: usize,
+    _retired_key_guids: *const [u8; 16],
+    _retired_key_guid_count: usize,
     plan_out: *mut PkmLcsKeyGuidAssignmentPlanCopy,
 ) -> c_int {
     let Some(plan_out) = (unsafe { plan_out.as_mut() }) else {
@@ -1371,16 +1371,11 @@ pub unsafe extern "C" fn lcs_rust_plan_key_guid_assignment(
             Ok(guids) => guids,
             Err(errno) => return errno.negated_return() as c_int,
         };
-    let retired_key_guids =
-        match parse_key_guid_tracker(retired_key_guids, retired_key_guid_count) {
-            Ok(guids) => guids,
-            Err(errno) => return errno.negated_return() as c_int,
-        };
 
     match plan_key_guid_assignment(KeyGuidAssignmentRequest {
         candidate_guid: *candidate_guid,
         active_key_guids,
-        retired_key_guids,
+        retired_key_guids: &[],
     }) {
         Ok(plan) => {
             plan_out.guid = plan.guid;
