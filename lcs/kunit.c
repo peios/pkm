@@ -28965,6 +28965,37 @@ static void pkm_lcs_kunit_transaction_raw_ioctl_entrypoints_fail_closed(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_transaction_raw_ioctl_rejects_bad_fds(
+	struct kunit *test)
+{
+	struct reg_txn_status_args status = { };
+	int fd;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				-1, REG_IOC_COMMIT, 0),
+			(long)-EBADF);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				-1, REG_IOC_TXN_STATUS,
+				(unsigned long)&status),
+			(long)-EBADF);
+
+	fd = anon_inode_getfd("lcs-not-transaction-raw-ioctl",
+			      &pkm_lcs_kunit_non_key_fops, NULL, O_CLOEXEC);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				fd, REG_IOC_COMMIT, 0),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				fd, REG_IOC_TXN_STATUS,
+				(unsigned long)&status),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_transaction_raw_ioctl_commit_success(
 	struct kunit *test)
 {
@@ -56718,6 +56749,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_transaction_status_rejects_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_raw_ioctl_entrypoints_fail_closed),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_raw_ioctl_rejects_bad_fds),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_raw_ioctl_commit_success),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_raw_ioctl_commit_busy_retains),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_raw_ioctl_commit_eio_retains),
