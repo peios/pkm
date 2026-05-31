@@ -11382,6 +11382,41 @@ static void pkm_lcs_kunit_key_fd_query_value_erange_all_or_none(
 	KUNIT_EXPECT_EQ(test, args.data_ptr, 0ULL);
 	KUNIT_EXPECT_EQ(test, args.layer_ptr, 0ULL);
 
+	memset(&ctx, 0, sizeof(ctx));
+	memset(data, 0xaa, sizeof(data));
+	memset(layer, 0xaa, sizeof(layer));
+	script.reads = 0;
+	script.writes = 0;
+	script.result = 0;
+	args = (struct reg_query_value_args) {
+		.name_len = sizeof(value_name) - 1,
+		.name_ptr = (u64)(unsigned long)value_name,
+		.data_len = 0,
+		.data_ptr = (u64)(unsigned long)data,
+		.layer_buf_len = 0,
+		.layer_ptr = (u64)(unsigned long)layer,
+		.txn_fd = -1,
+	};
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread,
+			   &script, "pkm-lcs-kunit-query-value-nonnull-probe");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	KUNIT_EXPECT_EQ(test, args.data_len, (u32)sizeof(value_data));
+	KUNIT_EXPECT_EQ(test, args.layer_len, 4U);
+	KUNIT_EXPECT_EQ(test, args.type, 0U);
+	KUNIT_EXPECT_EQ(test, data[0], 0xaaU);
+	KUNIT_EXPECT_EQ(test, layer[0], 0xaaU);
+
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
@@ -12050,6 +12085,35 @@ static void pkm_lcs_kunit_key_fd_query_values_batch_erange_all_or_none(
 	KUNIT_EXPECT_EQ(test, args.count, 0U);
 	KUNIT_EXPECT_EQ(test, args.buf_ptr, 0ULL);
 
+	memset(&ctx, 0, sizeof(ctx));
+	memset(output, 0xaa, sizeof(output));
+	script.reads = 0;
+	script.writes = 0;
+	script.result = 0;
+	args = (struct reg_query_values_batch_args) {
+		.buf_len = 0,
+		.buf_ptr = (u64)(unsigned long)output,
+		.txn_fd = -1,
+	};
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread,
+			   &script, "pkm-lcs-kunit-value-batch-nonnull-probe");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_values_batch((int)fd, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	KUNIT_EXPECT_EQ(test, args.buf_len,
+			(u32)(12 + sizeof(value_name) - 1 +
+			      sizeof(value_data)));
+	KUNIT_EXPECT_EQ(test, args.count, 0U);
+	KUNIT_EXPECT_EQ(test, output[0], 0xaaU);
+
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
@@ -12526,6 +12590,39 @@ static void pkm_lcs_kunit_key_fd_enum_value_erange_all_or_none(
 	KUNIT_EXPECT_EQ(test, args.type, 0U);
 	KUNIT_EXPECT_EQ(test, args.name_ptr, 0ULL);
 	KUNIT_EXPECT_EQ(test, args.data_ptr, 0ULL);
+
+	memset(&ctx, 0, sizeof(ctx));
+	memset(name, 0xaa, sizeof(name));
+	memset(data, 0xaa, sizeof(data));
+	script.reads = 0;
+	script.writes = 0;
+	script.result = 0;
+	args = (struct reg_enum_value_args) {
+		.index = 0,
+		.name_len = 0,
+		.name_ptr = (u64)(unsigned long)name,
+		.data_len = 0,
+		.data_ptr = (u64)(unsigned long)data,
+		.txn_fd = -1,
+	};
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread,
+			   &script, "pkm-lcs-kunit-enum-value-nonnull-probe");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_enum_value((int)fd, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	KUNIT_EXPECT_EQ(test, args.name_len, (u32)sizeof(value_name) - 1);
+	KUNIT_EXPECT_EQ(test, args.data_len, (u32)sizeof(value_data));
+	KUNIT_EXPECT_EQ(test, args.type, 0U);
+	KUNIT_EXPECT_EQ(test, name[0], 0xaaU);
+	KUNIT_EXPECT_EQ(test, data[0], 0xaaU);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
@@ -13114,6 +13211,36 @@ static void pkm_lcs_kunit_key_fd_enum_subkey_erange_all_or_none(
 	KUNIT_EXPECT_EQ(test, args.subkey_count, 0U);
 	KUNIT_EXPECT_EQ(test, args.value_count, 0U);
 	KUNIT_EXPECT_EQ(test, args.name_ptr, 0ULL);
+
+	memset(&ctx, 0, sizeof(ctx));
+	memset(name, 0xaa, sizeof(name));
+	script.reads = 0;
+	script.writes = 0;
+	script.result = 0;
+	args = (struct reg_enum_subkey_args) {
+		.index = 0,
+		.name_len = 0,
+		.name_ptr = (u64)(unsigned long)name,
+		.txn_fd = -1,
+	};
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_symlink_sequence_source_thread,
+			   &script, "pkm-lcs-kunit-enum-subkey-nonnull-probe");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-ERANGE);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	KUNIT_EXPECT_EQ(test, args.name_len, 5U);
+	KUNIT_EXPECT_EQ(test, args.last_write_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, args.subkey_count, 0U);
+	KUNIT_EXPECT_EQ(test, args.value_count, 0U);
+	KUNIT_EXPECT_EQ(test, name[0], 0xaaU);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
