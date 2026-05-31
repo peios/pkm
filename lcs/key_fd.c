@@ -134,6 +134,7 @@ struct pkm_lcs_internal_watch_event {
 struct pkm_lcs_internal_self_watch_state {
 	struct pkm_lcs_internal_watch registry;
 	struct pkm_lcs_internal_watch layers;
+	struct pkm_lcs_internal_watch kmes;
 	struct pkm_lcs_internal_watch fallback;
 	u32 source_id;
 	enum pkm_lcs_internal_self_watch_mode mode;
@@ -10551,6 +10552,7 @@ static bool pkm_lcs_internal_watch_event_deliverable(
 
 	switch (watch->target) {
 	case PKM_LCS_INTERNAL_WATCH_SELF_CONFIGURATION:
+	case PKM_LCS_INTERNAL_WATCH_KMES_CONFIGURATION:
 		return relative_path_count == 0 &&
 		       (event_type == REG_WATCH_VALUE_SET ||
 			event_type == REG_WATCH_VALUE_DELETED);
@@ -10788,6 +10790,14 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
 			 * re-read retains the previous known-good snapshot.
 			 */
 			pkm_lcs_runtime_limits_refresh_self_config_from_key(
+				event->source_id, event->guid, NULL);
+		} else if (event->target ==
+			   PKM_LCS_INTERNAL_WATCH_KMES_CONFIGURATION) {
+			/*
+			 * KMES retains its last known-good configuration if the
+			 * source re-read fails or yields invalid values.
+			 */
+			pkm_kmes_runtime_config_refresh_from_key(
 				event->source_id, event->guid, NULL);
 		} else if (event->target ==
 			   PKM_LCS_INTERNAL_WATCH_LAYER_METADATA) {
@@ -11428,6 +11438,7 @@ static void pkm_lcs_internal_self_watch_disarm_locked(void)
 	pkm_lcs_internal_watch_remove_locked(
 		&pkm_lcs_internal_self_watch.registry);
 	pkm_lcs_internal_watch_remove_locked(&pkm_lcs_internal_self_watch.layers);
+	pkm_lcs_internal_watch_remove_locked(&pkm_lcs_internal_self_watch.kmes);
 	pkm_lcs_internal_watch_remove_locked(
 		&pkm_lcs_internal_self_watch.fallback);
 	pkm_lcs_internal_self_watch.source_id = 0;
@@ -11469,6 +11480,10 @@ static void pkm_lcs_internal_self_watch_fill_result_locked(
 		memcpy(out->layers_guid,
 		       pkm_lcs_internal_self_watch.layers.registry.guid,
 		       sizeof(out->layers_guid));
+	if (pkm_lcs_internal_self_watch.kmes.registry.linked)
+		memcpy(out->kmes_guid,
+		       pkm_lcs_internal_self_watch.kmes.registry.guid,
+		       sizeof(out->kmes_guid));
 	if (pkm_lcs_internal_self_watch.fallback.registry.linked)
 		memcpy(out->fallback_guid,
 		       pkm_lcs_internal_self_watch.fallback.registry.guid,
@@ -11480,8 +11495,11 @@ long pkm_lcs_internal_self_watch_arm(
 	bool registry_present,
 	const u8 registry_guid[PKM_LCS_GUID_BYTES],
 	bool layers_present, const u8 layers_guid[PKM_LCS_GUID_BYTES],
+	bool kmes_present, const u8 kmes_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_internal_self_watch_arm_result *result_out)
 {
+	bool fallback_needed;
+	u32 watch_count = 0;
 	long ret;
 
 	if (result_out)
@@ -11493,36 +11511,61 @@ long pkm_lcs_internal_self_watch_arm(
 		return -EINVAL;
 	if (layers_present && !pkm_lcs_internal_watch_guid_valid(layers_guid))
 		return -EINVAL;
+	if (kmes_present && !pkm_lcs_internal_watch_guid_valid(kmes_guid))
+		return -EINVAL;
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
 	pkm_lcs_internal_self_watch_disarm_locked();
 
-	if (registry_present && layers_present) {
+	if (registry_present) {
 		ret = pkm_lcs_internal_watch_add_locked(
 			&pkm_lcs_internal_self_watch.registry, source_id,
 			registry_guid,
 			PKM_LCS_INTERNAL_WATCH_SELF_CONFIGURATION);
 		if (ret)
 			goto out_rollback;
+		watch_count++;
+	}
+
+	if (layers_present) {
 		ret = pkm_lcs_internal_watch_add_locked(
 			&pkm_lcs_internal_self_watch.layers, source_id,
 			layers_guid, PKM_LCS_INTERNAL_WATCH_LAYER_METADATA);
 		if (ret)
 			goto out_rollback;
-		pkm_lcs_internal_self_watch.mode =
-			PKM_LCS_INTERNAL_SELF_WATCH_TARGETED;
-		pkm_lcs_internal_self_watch.watch_count = 2;
-	} else {
+		watch_count++;
+	}
+
+	if (kmes_present) {
+		ret = pkm_lcs_internal_watch_add_locked(
+			&pkm_lcs_internal_self_watch.kmes, source_id,
+			kmes_guid, PKM_LCS_INTERNAL_WATCH_KMES_CONFIGURATION);
+		if (ret)
+			goto out_rollback;
+		watch_count++;
+	}
+
+	fallback_needed = !registry_present || !layers_present || !kmes_present;
+	if (fallback_needed) {
 		ret = pkm_lcs_internal_watch_add_locked(
 			&pkm_lcs_internal_self_watch.fallback, source_id,
 			machine_root_guid,
 			PKM_LCS_INTERNAL_WATCH_MACHINE_ROOT_FALLBACK);
 		if (ret)
 			goto out_rollback;
-		pkm_lcs_internal_self_watch.mode =
-			PKM_LCS_INTERNAL_SELF_WATCH_MACHINE_ROOT_FALLBACK;
-		pkm_lcs_internal_self_watch.watch_count = 1;
+		watch_count++;
 	}
+
+	if (fallback_needed) {
+		pkm_lcs_internal_self_watch.mode =
+			watch_count == 1 ?
+				PKM_LCS_INTERNAL_SELF_WATCH_MACHINE_ROOT_FALLBACK :
+				PKM_LCS_INTERNAL_SELF_WATCH_MIXED;
+	} else {
+		pkm_lcs_internal_self_watch.mode =
+			PKM_LCS_INTERNAL_SELF_WATCH_TARGETED;
+	}
+	pkm_lcs_internal_self_watch.watch_count = watch_count;
 
 	pkm_lcs_internal_self_watch.source_id = source_id;
 	pkm_lcs_internal_self_watch_fill_result_locked(result_out);
@@ -12614,6 +12657,10 @@ long pkm_lcs_kunit_internal_self_watch_snapshot(
 		memcpy(out->layers_guid,
 		       pkm_lcs_internal_self_watch.layers.registry.guid,
 		       sizeof(out->layers_guid));
+	if (pkm_lcs_internal_self_watch.kmes.registry.linked)
+		memcpy(out->kmes_guid,
+		       pkm_lcs_internal_self_watch.kmes.registry.guid,
+		       sizeof(out->kmes_guid));
 	if (pkm_lcs_internal_self_watch.fallback.registry.linked)
 		memcpy(out->fallback_guid,
 		       pkm_lcs_internal_self_watch.fallback.registry.guid,

@@ -11,6 +11,7 @@
 
 #include <pkm/lcs.h>
 
+#include "../kmes/kmes.h"
 #include "key_fd.h"
 
 struct file;
@@ -359,11 +360,13 @@ struct pkm_lcs_layer_metadata_refresh_all_result {
 
 struct pkm_lcs_source_bootstrap_refresh_result {
 	struct pkm_lcs_self_config_apply_plan self_config;
+	struct pkm_kmes_self_config_apply_plan kmes_config;
 	struct pkm_lcs_layer_metadata_refresh_all_result layers;
 	struct pkm_lcs_internal_self_watch_arm_result self_watch;
 	bool registry_root_present;
+	bool kmes_root_present;
 	bool layers_root_present;
-	u8 _pad[2];
+	u8 _pad;
 };
 
 struct pkm_lcs_path_validation_result {

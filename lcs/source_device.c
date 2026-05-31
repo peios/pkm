@@ -8980,8 +8980,10 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 {
 	struct pkm_lcs_source_bootstrap_refresh_result result = { };
 	u8 registry_guid[RSI_GUID_SIZE] = { };
+	u8 kmes_guid[RSI_GUID_SIZE] = { };
 	u8 layers_root_guid[RSI_GUID_SIZE] = { };
 	bool registry_root_present = false;
+	bool kmes_root_present = false;
 	bool layers_root_present = false;
 	long ret;
 
@@ -9004,6 +9006,19 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 			return ret;
 	}
 
+	ret = pkm_kmes_config_root_discover_from_machine_hive(
+		source_id, machine_root_guid, &kmes_root_present, kmes_guid);
+	if (ret)
+		return ret;
+	result.kmes_root_present = kmes_root_present;
+
+	if (kmes_root_present) {
+		ret = pkm_kmes_runtime_config_refresh_from_key(
+			source_id, kmes_guid, &result.kmes_config);
+		if (ret)
+			return ret;
+	}
+
 	ret = pkm_lcs_layer_metadata_root_discover_from_machine_hive(
 		source_id, machine_root_guid, &layers_root_present,
 		layers_root_guid);
@@ -9021,7 +9036,7 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 	ret = pkm_lcs_internal_self_watch_arm(
 		source_id, machine_root_guid, registry_root_present,
 		registry_guid, layers_root_present, layers_root_guid,
-		&result.self_watch);
+		kmes_root_present, kmes_guid, &result.self_watch);
 	if (ret)
 		return ret;
 

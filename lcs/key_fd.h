@@ -135,12 +135,14 @@ enum pkm_lcs_internal_watch_target {
 	PKM_LCS_INTERNAL_WATCH_SELF_CONFIGURATION = 1,
 	PKM_LCS_INTERNAL_WATCH_LAYER_METADATA = 2,
 	PKM_LCS_INTERNAL_WATCH_MACHINE_ROOT_FALLBACK = 3,
+	PKM_LCS_INTERNAL_WATCH_KMES_CONFIGURATION = 4,
 };
 
 enum pkm_lcs_internal_self_watch_mode {
 	PKM_LCS_INTERNAL_SELF_WATCH_DISARMED = 0,
 	PKM_LCS_INTERNAL_SELF_WATCH_TARGETED = 1,
 	PKM_LCS_INTERNAL_SELF_WATCH_MACHINE_ROOT_FALLBACK = 2,
+	PKM_LCS_INTERNAL_SELF_WATCH_MIXED = 3,
 };
 
 struct pkm_lcs_internal_self_watch_arm_result {
@@ -149,6 +151,7 @@ struct pkm_lcs_internal_self_watch_arm_result {
 	u32 mode;
 	u8 registry_guid[PKM_LCS_GUID_BYTES];
 	u8 layers_guid[PKM_LCS_GUID_BYTES];
+	u8 kmes_guid[PKM_LCS_GUID_BYTES];
 	u8 fallback_guid[PKM_LCS_GUID_BYTES];
 };
 
@@ -158,6 +161,7 @@ struct pkm_lcs_internal_self_watch_snapshot {
 	u32 mode;
 	u8 registry_guid[PKM_LCS_GUID_BYTES];
 	u8 layers_guid[PKM_LCS_GUID_BYTES];
+	u8 kmes_guid[PKM_LCS_GUID_BYTES];
 	u8 fallback_guid[PKM_LCS_GUID_BYTES];
 };
 
@@ -233,6 +237,7 @@ long pkm_lcs_internal_self_watch_arm(
 	bool registry_present,
 	const u8 registry_guid[PKM_LCS_GUID_BYTES],
 	bool layers_present, const u8 layers_guid[PKM_LCS_GUID_BYTES],
+	bool kmes_present, const u8 kmes_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_internal_self_watch_arm_result *result_out);
 void pkm_lcs_internal_self_watch_disarm(void);
 long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(

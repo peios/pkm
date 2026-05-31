@@ -62,6 +62,8 @@ static const u8 pkm_lcs_kunit_owner_only_sd[] = {
 	0x12, 0x00, 0x00, 0x00,
 };
 
+static const u8 pkm_lcs_kunit_kmes_watch_guid[RSI_GUID_SIZE] = { 0x6b };
+
 struct pkm_lcs_kunit_audit_caller_summary {
 	u8 effective_token_guid[16];
 	u8 true_token_guid[16];
@@ -613,8 +615,11 @@ struct pkm_lcs_kunit_source_bootstrap_source_script {
 	struct file *file;
 	struct pkm_lcs_kunit_walk_source_script self_config_walk;
 	struct pkm_lcs_kunit_query_values_source_script self_config_query;
+	struct pkm_lcs_kunit_walk_source_script kmes_walk;
+	struct pkm_lcs_kunit_query_values_source_script kmes_query;
 	struct pkm_lcs_kunit_walk_source_script layers_walk;
 	struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script layers_refresh;
+	bool expect_kmes_query;
 	bool expect_layers_refresh;
 	u32 reads;
 	u32 writes;
@@ -3232,10 +3237,16 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 	static const u8 registry_guid[RSI_GUID_SIZE] = { 0x83 };
 	static const u8 layers_root_guid[RSI_GUID_SIZE] = { 0x84 };
 	static const u8 policy_guid[RSI_GUID_SIZE] = { 0x85 };
+	static const u8 kmes_guid[RSI_GUID_SIZE] = { 0x86 };
 	static const char value_name[] = "RequestTimeoutMs";
+	static const char kmes_value_name[] = "MaxNestingDepth";
 	static const struct pkm_lcs_kunit_walk_source_step self_steps[] = {
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Registry", .guid = registry_guid },
+	};
+	static const struct pkm_lcs_kunit_walk_source_step kmes_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "KMES", .guid = kmes_guid },
 	};
 	static const struct pkm_lcs_kunit_walk_source_step layer_steps[] = {
 		{ .expected_child = "System", .guid = system_guid },
@@ -3253,6 +3264,7 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 		0x12, 0x00, 0x00, 0x00,
 	};
 	u8 data[sizeof(u32)];
+	u8 kmes_data[sizeof(u32)];
 	struct pkm_lcs_kunit_source_bootstrap_source_script script = {
 		.self_config_walk = {
 			.steps = self_steps,
@@ -3265,6 +3277,20 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 			.layer_name = "base",
 			.data = data,
 			.data_len = sizeof(data),
+			.value_type = REG_DWORD,
+			.query_all = true,
+		},
+		.kmes_walk = {
+			.steps = kmes_steps,
+			.step_count = ARRAY_SIZE(kmes_steps),
+		},
+		.kmes_query = {
+			.expected_guid = kmes_guid,
+			.expected_value_name = "",
+			.response_value_name = kmes_value_name,
+			.layer_name = "base",
+			.data = kmes_data,
+			.data_len = sizeof(kmes_data),
 			.value_type = REG_DWORD,
 			.query_all = true,
 		},
@@ -3291,11 +3317,13 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 			},
 			.expect_refresh = true,
 		},
+		.expect_kmes_query = true,
 		.expect_layers_refresh = true,
 	};
 	struct pkm_lcs_source_bootstrap_refresh_result result = { };
 	struct pkm_lcs_internal_self_watch_snapshot watch_snapshot = { };
 	struct pkm_lcs_runtime_limits snapshot = { };
+	struct pkm_kmes_runtime_config kmes_snapshot = { };
 	struct pkm_lcs_rsi_layer_view layers[3] = { };
 	char names[64] = { };
 	struct task_struct *task;
@@ -3306,6 +3334,7 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 	int thread_ret;
 
 	put_unaligned_le32(1000U, data);
+	put_unaligned_le32(64U, kmes_data);
 	pkm_kmes_kunit_reset_all();
 	pkm_lcs_runtime_limits_reset_defaults();
 	pkm_lcs_internal_self_watch_disarm();
@@ -3325,17 +3354,19 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 11U);
-	KUNIT_EXPECT_EQ(test, script.writes, 11U);
+	KUNIT_EXPECT_EQ(test, script.reads, 14U);
+	KUNIT_EXPECT_EQ(test, script.writes, 14U);
 	KUNIT_EXPECT_TRUE(test, result.registry_root_present);
 	KUNIT_EXPECT_EQ(test, result.self_config.applied_count, 1U);
+	KUNIT_EXPECT_TRUE(test, result.kmes_root_present);
+	KUNIT_EXPECT_EQ(test, result.kmes_config.applied_count, 1U);
 	KUNIT_EXPECT_TRUE(test, result.layers_root_present);
 	KUNIT_EXPECT_EQ(test, result.layers.enumerated_child_count, 1U);
 	KUNIT_EXPECT_EQ(test, result.layers.refreshed_child_count, 1U);
 	KUNIT_EXPECT_EQ(test, result.layers.effective_changed_count, 1U);
 	KUNIT_EXPECT_EQ(test, result.self_watch.mode,
 			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, result.self_watch.watch_count, 2U);
+	KUNIT_EXPECT_EQ(test, result.self_watch.watch_count, 3U);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(result.self_watch.registry_guid, registry_guid,
 			       sizeof(registry_guid)),
@@ -3344,15 +3375,22 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 			memcmp(result.self_watch.layers_guid, layers_root_guid,
 			       sizeof(layers_root_guid)),
 			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.self_watch.kmes_guid, kmes_guid,
+			       sizeof(kmes_guid)),
+			0);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_internal_self_watch_snapshot(
 				&watch_snapshot),
 			0L);
 	KUNIT_EXPECT_EQ(test, watch_snapshot.mode,
 			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 2U);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 3U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
 	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms, 1000U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_runtime_config_snapshot(&kmes_snapshot), 0);
+	KUNIT_EXPECT_EQ(test, kmes_snapshot.max_nesting_depth, 64U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_source_layer_snapshot_copy(
 				layers, ARRAY_SIZE(layers), names, sizeof(names),
@@ -3378,11 +3416,17 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 	static const u8 registry_guid[RSI_GUID_SIZE] = { 0x88 };
 	static const u8 layers_root_guid[RSI_GUID_SIZE] = { 0x89 };
 	static const u8 policy_guid[RSI_GUID_SIZE] = { 0x8a };
+	static const u8 kmes_guid[RSI_GUID_SIZE] = { 0x8b };
 	static const char name_src[] = "Machine";
 	static const char value_name[] = "RequestTimeoutMs";
+	static const char kmes_value_name[] = "MaxNestingDepth";
 	static const struct pkm_lcs_kunit_walk_source_step self_steps[] = {
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Registry", .guid = registry_guid },
+	};
+	static const struct pkm_lcs_kunit_walk_source_step kmes_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "KMES", .guid = kmes_guid },
 	};
 	static const struct pkm_lcs_kunit_walk_source_step layer_steps[] = {
 		{ .expected_child = "System", .guid = system_guid },
@@ -3400,6 +3444,7 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 		0x12, 0x00, 0x00, 0x00,
 	};
 	u8 data[sizeof(u32)];
+	u8 kmes_data[sizeof(u32)];
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_src_hive_entry hive;
@@ -3416,6 +3461,20 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 			.layer_name = "base",
 			.data = data,
 			.data_len = sizeof(data),
+			.value_type = REG_DWORD,
+			.query_all = true,
+		},
+		.kmes_walk = {
+			.steps = kmes_steps,
+			.step_count = ARRAY_SIZE(kmes_steps),
+		},
+		.kmes_query = {
+			.expected_guid = kmes_guid,
+			.expected_value_name = "",
+			.response_value_name = kmes_value_name,
+			.layer_name = "base",
+			.data = kmes_data,
+			.data_len = sizeof(kmes_data),
 			.value_type = REG_DWORD,
 			.query_all = true,
 		},
@@ -3442,9 +3501,11 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 			},
 			.expect_refresh = true,
 		},
+		.expect_kmes_query = true,
 		.expect_layers_refresh = true,
 	};
 	struct pkm_lcs_runtime_limits snapshot = { };
+	struct pkm_kmes_runtime_config kmes_snapshot = { };
 	struct pkm_lcs_internal_self_watch_snapshot watch_snapshot = { };
 	struct pkm_lcs_source_table_snapshot table = { };
 	struct pkm_lcs_rsi_layer_view layers[3] = { };
@@ -3457,6 +3518,7 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 	int thread_ret;
 
 	put_unaligned_le32(1000U, data);
+	put_unaligned_le32(96U, kmes_data);
 	pkm_kmes_kunit_reset_all();
 	pkm_lcs_runtime_limits_reset_defaults();
 	pkm_lcs_internal_self_watch_disarm();
@@ -3483,10 +3545,13 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 11U);
-	KUNIT_EXPECT_EQ(test, script.writes, 11U);
+	KUNIT_EXPECT_EQ(test, script.reads, 14U);
+	KUNIT_EXPECT_EQ(test, script.writes, 14U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
 	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms, 1000U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_runtime_config_snapshot(&kmes_snapshot), 0);
+	KUNIT_EXPECT_EQ(test, kmes_snapshot.max_nesting_depth, 96U);
 	pkm_lcs_kunit_source_table_snapshot(&table);
 	KUNIT_EXPECT_EQ(test, table.occupied_count, 1U);
 	KUNIT_EXPECT_EQ(test, table.active_count, 1U);
@@ -3498,7 +3563,7 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 	KUNIT_EXPECT_EQ(test, watch_snapshot.source_id, 1U);
 	KUNIT_EXPECT_EQ(test, watch_snapshot.mode,
 			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 2U);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 3U);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(watch_snapshot.registry_guid, registry_guid,
 			       sizeof(registry_guid)),
@@ -3506,6 +3571,10 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 	KUNIT_EXPECT_EQ(test,
 			memcmp(watch_snapshot.layers_guid, layers_root_guid,
 			       sizeof(layers_root_guid)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(watch_snapshot.kmes_guid, kmes_guid,
+			       sizeof(kmes_guid)),
 			0);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_source_layer_snapshot_copy(
@@ -3618,12 +3687,13 @@ static void pkm_lcs_kunit_internal_self_watch_arm_targeted_and_fallback(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				7, machine_root_guid, true, registry_guid, true,
-				layers_guid, &result),
+				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				&result),
 			0L);
 	KUNIT_EXPECT_EQ(test, result.source_id, 7U);
 	KUNIT_EXPECT_EQ(test, result.mode,
 			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, result.watch_count, 2U);
+	KUNIT_EXPECT_EQ(test, result.watch_count, 3U);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(result.registry_guid, registry_guid,
 			       sizeof(registry_guid)),
@@ -3632,11 +3702,38 @@ static void pkm_lcs_kunit_internal_self_watch_arm_targeted_and_fallback(
 			memcmp(result.layers_guid, layers_guid,
 			       sizeof(layers_guid)),
 			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.kmes_guid,
+			       pkm_lcs_kunit_kmes_watch_guid,
+			       sizeof(pkm_lcs_kunit_kmes_watch_guid)),
+			0);
 
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
-				8, replacement_root_guid, true, registry_guid,
-				false, NULL, &result),
+				7, machine_root_guid, true, registry_guid, true,
+				layers_guid, false, NULL, &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.source_id, 7U);
+	KUNIT_EXPECT_EQ(test, result.mode,
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_MIXED);
+	KUNIT_EXPECT_EQ(test, result.watch_count, 3U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.registry_guid, registry_guid,
+			       sizeof(registry_guid)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.layers_guid, layers_guid,
+			       sizeof(layers_guid)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.fallback_guid, machine_root_guid,
+			       sizeof(machine_root_guid)),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				8, replacement_root_guid, false, NULL,
+				false, NULL, false, NULL, &result),
 			0L);
 	KUNIT_EXPECT_EQ(test, result.source_id, 8U);
 	KUNIT_EXPECT_EQ(test, result.mode,
@@ -3680,28 +3777,38 @@ static void pkm_lcs_kunit_internal_self_watch_bad_inputs_fail_closed(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				9, machine_root_guid, true, registry_guid, true,
-				layers_guid, NULL),
+				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			0L);
 
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				0, machine_root_guid, true, registry_guid, true,
-				layers_guid, NULL),
+				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			(long)-EINVAL);
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				9, nil_guid, true, registry_guid, true,
-				layers_guid, NULL),
+				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			(long)-EINVAL);
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				9, machine_root_guid, true, nil_guid, true,
-				layers_guid, NULL),
+				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			(long)-EINVAL);
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				9, machine_root_guid, true, registry_guid, true,
-				nil_guid, NULL),
+				nil_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				9, machine_root_guid, true, registry_guid, true,
+				layers_guid, true, nil_guid, NULL),
 			(long)-EINVAL);
 
 	KUNIT_ASSERT_EQ(test,
@@ -3710,7 +3817,7 @@ static void pkm_lcs_kunit_internal_self_watch_bad_inputs_fail_closed(
 	KUNIT_EXPECT_EQ(test, snapshot.source_id, 9U);
 	KUNIT_EXPECT_EQ(test, snapshot.mode,
 			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, snapshot.watch_count, 2U);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_count, 3U);
 	pkm_lcs_internal_self_watch_disarm();
 }
 
@@ -3760,7 +3867,8 @@ static void pkm_lcs_kunit_internal_self_watch_value_event_refreshes_config(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				1, ancestors[0], true, ancestors[2], true,
-				layers_guid, NULL),
+				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			0L);
 	script.file = &file;
 	task = pkm_lcs_kunit_kthread_run(
@@ -3782,6 +3890,79 @@ static void pkm_lcs_kunit_internal_self_watch_value_event_refreshes_config(
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
 	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_internal_self_watch_disarm();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_internal_kmes_watch_value_event_refreshes_config(
+	struct kunit *test)
+{
+	static const char * const kmes_path[] = {
+		"Machine", "System", "KMES",
+	};
+	static const u8 ancestors[3][RSI_GUID_SIZE] = {
+		{ 0xca }, { 0xcb }, { 0xcc },
+	};
+	static const u8 registry_guid[RSI_GUID_SIZE] = { 0xcd };
+	static const u8 layers_guid[RSI_GUID_SIZE] = { 0xce };
+	static const char value_name[] = "MaxNestingDepth";
+	u8 data[sizeof(u32)];
+	struct pkm_lcs_watch_dispatch_context context = {
+		.changed_key_guid = ancestors[2],
+		.ancestor_guids = ancestors,
+		.resolved_path = kmes_path,
+		.path_component_count = ARRAY_SIZE(kmes_path),
+		.event_type = REG_WATCH_VALUE_SET,
+		.name = (const u8 *)value_name,
+		.name_len = sizeof(value_name) - 1U,
+	};
+	struct pkm_lcs_kunit_query_values_source_script script = {
+		.expected_guid = ancestors[2],
+		.expected_value_name = "",
+		.response_value_name = value_name,
+		.layer_name = "base",
+		.data = data,
+		.data_len = sizeof(data),
+		.value_type = REG_DWORD,
+		.query_all = true,
+	};
+	struct pkm_kmes_runtime_config snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long ret;
+	int thread_ret;
+
+	put_unaligned_le32(64U, data);
+	pkm_kmes_kunit_reset_all();
+	pkm_lcs_internal_self_watch_disarm();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				1, ancestors[0], true, registry_guid, true,
+				layers_guid, true, ancestors[2], NULL),
+			0L);
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_query_values_source_thread, &script,
+		"pkm-lcs-kunit-kmes-watch-refresh");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_key_fd_dispatch_watch_event_context(&context);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_runtime_config_snapshot(&snapshot), 0);
+	KUNIT_EXPECT_EQ(test, snapshot.max_nesting_depth, 64U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_kmes_kunit_reset_all();
 	pkm_lcs_internal_self_watch_disarm();
 	kacs_rust_token_drop(token);
 }
@@ -3829,7 +4010,8 @@ static void pkm_lcs_kunit_internal_self_watch_non_value_event_noop(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				1, ancestors[0], true, ancestors[2], true,
-				layers_guid, NULL),
+				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			0L);
 	script.file = &file;
 	task = pkm_lcs_kunit_kthread_run(
@@ -3864,11 +4046,17 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 	static const u8 registry_guid[RSI_GUID_SIZE] = { 0xd6 };
 	static const u8 layers_root_guid[RSI_GUID_SIZE] = { 0xd7 };
 	static const u8 policy_guid[RSI_GUID_SIZE] = { 0xd8 };
+	static const u8 kmes_guid[RSI_GUID_SIZE] = { 0xd9 };
 	static const char subkey_name[] = "System";
 	static const char value_name[] = "RequestTimeoutMs";
+	static const char kmes_value_name[] = "MaxNestingDepth";
 	static const struct pkm_lcs_kunit_walk_source_step self_steps[] = {
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Registry", .guid = registry_guid },
+	};
+	static const struct pkm_lcs_kunit_walk_source_step kmes_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "KMES", .guid = kmes_guid },
 	};
 	static const struct pkm_lcs_kunit_walk_source_step layer_steps[] = {
 		{ .expected_child = "System", .guid = system_guid },
@@ -3876,6 +4064,7 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 		{ .expected_child = "Layers", .guid = layers_root_guid },
 	};
 	u8 data[sizeof(u32)];
+	u8 kmes_data[sizeof(u32)];
 	struct pkm_lcs_watch_dispatch_context context = {
 		.changed_key_guid = ancestors[0],
 		.ancestor_guids = ancestors,
@@ -3897,6 +4086,20 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 			.layer_name = "base",
 			.data = data,
 			.data_len = sizeof(data),
+			.value_type = REG_DWORD,
+			.query_all = true,
+		},
+		.kmes_walk = {
+			.steps = kmes_steps,
+			.step_count = ARRAY_SIZE(kmes_steps),
+		},
+		.kmes_query = {
+			.expected_guid = kmes_guid,
+			.expected_value_name = "",
+			.response_value_name = kmes_value_name,
+			.layer_name = "base",
+			.data = kmes_data,
+			.data_len = sizeof(kmes_data),
 			.value_type = REG_DWORD,
 			.query_all = true,
 		},
@@ -3923,10 +4126,12 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 			},
 			.expect_refresh = true,
 		},
+		.expect_kmes_query = true,
 		.expect_layers_refresh = true,
 	};
 	struct pkm_lcs_internal_self_watch_snapshot watch_snapshot = { };
 	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_kmes_runtime_config kmes_snapshot = { };
 	struct pkm_lcs_rsi_layer_view layers[3] = { };
 	char names[64] = { };
 	struct task_struct *task;
@@ -3937,6 +4142,7 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 	int thread_ret;
 
 	put_unaligned_le32(1000U, data);
+	put_unaligned_le32(128U, kmes_data);
 	pkm_kmes_kunit_reset_all();
 	pkm_lcs_runtime_limits_reset_defaults();
 	pkm_lcs_internal_self_watch_disarm();
@@ -3945,7 +4151,7 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				1, ancestors[0], false, NULL, false, NULL,
-				NULL),
+				false, NULL, NULL),
 			0L);
 	script.file = &file;
 	task = pkm_lcs_kunit_kthread_run(
@@ -3959,8 +4165,8 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 11U);
-	KUNIT_EXPECT_EQ(test, script.writes, 11U);
+	KUNIT_EXPECT_EQ(test, script.reads, 14U);
+	KUNIT_EXPECT_EQ(test, script.writes, 14U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_internal_self_watch_snapshot(
 				&watch_snapshot),
@@ -3968,7 +4174,7 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 	KUNIT_EXPECT_EQ(test, watch_snapshot.source_id, 1U);
 	KUNIT_EXPECT_EQ(test, watch_snapshot.mode,
 			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 2U);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 3U);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(watch_snapshot.registry_guid, registry_guid,
 			       sizeof(registry_guid)),
@@ -3977,8 +4183,15 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 			memcmp(watch_snapshot.layers_guid, layers_root_guid,
 			       sizeof(layers_root_guid)),
 			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(watch_snapshot.kmes_guid, kmes_guid,
+			       sizeof(kmes_guid)),
+			0);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&limits), 0L);
 	KUNIT_EXPECT_EQ(test, limits.request_timeout_ms, 1000U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_runtime_config_snapshot(&kmes_snapshot), 0);
+	KUNIT_EXPECT_EQ(test, kmes_snapshot.max_nesting_depth, 128U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_source_layer_snapshot_copy(
 				layers, ARRAY_SIZE(layers), names, sizeof(names),
@@ -4020,7 +4233,7 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_non_create_noop(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				1, ancestors[0], false, NULL, false, NULL,
-				NULL),
+				false, NULL, NULL),
 			0L);
 
 	KUNIT_EXPECT_EQ(test,
@@ -4089,7 +4302,8 @@ pkm_lcs_kunit_internal_layer_watch_value_event_refreshes_metadata(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				1, ancestors[0], true, ancestors[2], true,
-				ancestors[3], NULL),
+				ancestors[3], true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			0L);
 	script.file = &file;
 	task = pkm_lcs_kunit_kthread_run(
@@ -4167,7 +4381,8 @@ static void pkm_lcs_kunit_internal_layer_watch_lifecycle_event_noop(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				1, ancestors[0], true, ancestors[2], true,
-				ancestors[3], NULL),
+				ancestors[3], true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			0L);
 	script.file = &file;
 	task = pkm_lcs_kunit_kthread_run(
@@ -4229,7 +4444,8 @@ static void pkm_lcs_kunit_internal_layer_watch_descendant_event_noop(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				1, ancestors[0], true, ancestors[2], true,
-				ancestors[3], NULL),
+				ancestors[3], true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			0L);
 
 	KUNIT_EXPECT_EQ(test,
@@ -4311,7 +4527,8 @@ pkm_lcs_kunit_internal_layer_watch_create_event_refreshes_metadata(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				1, ancestors[0], true, ancestors[2], true,
-				ancestors[3], NULL),
+				ancestors[3], true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			0L);
 	script.lookup.file = &file;
 	task = pkm_lcs_kunit_kthread_run(
@@ -4393,7 +4610,8 @@ pkm_lcs_kunit_internal_layer_watch_create_missing_child_noop(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				1, ancestors[0], true, ancestors[2], true,
-				ancestors[3], NULL),
+				ancestors[3], true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			0L);
 	script.lookup.file = &file;
 	task = pkm_lcs_kunit_kthread_run(
@@ -4495,7 +4713,8 @@ pkm_lcs_kunit_internal_layer_watch_create_retains_runtime_limits(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				1, ancestors[0], true, ancestors[2], true,
-				ancestors[3], NULL),
+				ancestors[3], true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			0L);
 	script.lookup.file = &file;
 	task = pkm_lcs_kunit_kthread_run(
@@ -4582,7 +4801,8 @@ pkm_lcs_kunit_internal_layer_watch_delete_event_orchestrates(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				1, ancestors[0], true, ancestors[2], true,
-				ancestors[3], NULL),
+				ancestors[3], true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			0L);
 	script.file = &file;
 	task = pkm_lcs_kunit_kthread_run(
@@ -4651,7 +4871,8 @@ static void pkm_lcs_kunit_internal_layer_watch_delete_base_noop(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm(
 				1, ancestors[0], true, ancestors[2], true,
-				ancestors[3], NULL),
+				ancestors[3], true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
 			0L);
 
 	ret = pkm_lcs_key_fd_dispatch_watch_event_context_effects(&context,
@@ -39564,6 +39785,22 @@ static int pkm_lcs_kunit_source_bootstrap_source_thread(void *raw_script)
 	if (ret)
 		goto out;
 
+	script->kmes_walk.file = script->file;
+	ret = pkm_lcs_kunit_walk_source_thread(&script->kmes_walk);
+	script->reads += script->kmes_walk.reads;
+	script->writes += script->kmes_walk.writes;
+	if (ret)
+		goto out;
+	if (script->expect_kmes_query) {
+		script->kmes_query.file = script->file;
+		ret = pkm_lcs_kunit_query_values_source_thread(
+			&script->kmes_query);
+		script->reads += script->kmes_query.reads;
+		script->writes += script->kmes_query.writes;
+		if (ret)
+			goto out;
+	}
+
 	script->layers_walk.file = script->file;
 	ret = pkm_lcs_kunit_walk_source_thread(&script->layers_walk);
 	script->reads += script->layers_walk.reads;
@@ -59371,6 +59608,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_internal_self_watch_bad_inputs_fail_closed),
 	KUNIT_CASE(
 		pkm_lcs_kunit_internal_self_watch_value_event_refreshes_config),
+	KUNIT_CASE(
+		pkm_lcs_kunit_internal_kmes_watch_value_event_refreshes_config),
 	KUNIT_CASE(pkm_lcs_kunit_internal_self_watch_non_value_event_noop),
 	KUNIT_CASE(
 		pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted),
