@@ -186,8 +186,10 @@ struct pkm_lcs_kunit_walk_source_step {
 	size_t second_sd_len;
 	u64 second_sequence;
 	bool empty;
+	bool hidden;
 	bool symlink;
 	bool include_second_entry;
+	bool second_hidden;
 	bool second_symlink;
 };
 
@@ -591,6 +593,7 @@ struct pkm_lcs_kunit_enum_children_source_script {
 	bool empty;
 	bool hidden;
 	bool include_second_entry;
+	bool second_hidden;
 	u32 reads;
 	u32 writes;
 	int result;
@@ -7082,6 +7085,88 @@ static void pkm_lcs_kunit_reg_open_key_uses_live_layer_table(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_kacs_free((void *)layer_sd);
 	pkm_kacs_free((void *)policy_sd);
+	pkm_kacs_free((void *)base_sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_reg_open_key_policy_hidden_masks_base(
+	struct kunit *test)
+{
+	static const u8 base_guid[RSI_GUID_SIZE] = { 0x38 };
+	static const u8 policy_layer_guid[RSI_GUID_SIZE] = { 0x39 };
+	const char path_src[] = "Machine\\App";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_kunit_walk_source_step steps[1] = {
+		{
+			.expected_child = "App",
+			.guid = base_guid,
+			.layer_name = "base",
+			.second_layer_name = "policy",
+			.include_second_entry = true,
+			.second_hidden = true,
+		},
+	};
+	struct pkm_lcs_kunit_walk_source_script script = {
+		.steps = steps,
+		.step_count = ARRAY_SIZE(steps),
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *base_sd;
+	const u8 *layer_sd;
+	size_t base_sd_len = 0;
+	size_t layer_sd_len = 0;
+	u64 base_sequence;
+	u64 policy_sequence;
+	long fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	layer_sd = kacs_rust_kunit_create_file_sd(token, KEY_SET_VALUE, 0, 0, 0,
+						  &layer_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, layer_sd);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"policy", strlen("policy"), 10, 1,
+				policy_layer_guid, layer_sd, layer_sd_len,
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+	base_sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+						 &base_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, base_sd);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&base_sequence), 0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&policy_sequence), 0L);
+	steps[0].sd = base_sd;
+	steps[0].sd_len = base_sd_len;
+	steps[0].sequence = base_sequence;
+	steps[0].second_sequence = policy_sequence;
+	script.file = &file;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_walk_source_thread, &script,
+		"pkm-lcs-kunit-reg-open-hidden-layer");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_reg_open_key_for_token(
+		token, &ops, -1, (const char __user *)path_src, KEY_READ, 0);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, fd, (long)-ENOENT);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	pkm_kacs_free((void *)layer_sd);
 	pkm_kacs_free((void *)base_sd);
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
@@ -14394,6 +14479,105 @@ static void pkm_lcs_kunit_key_fd_enum_subkey_resolves_policy_layer(
 	KUNIT_EXPECT_EQ(test, args.value_count, 1U);
 	KUNIT_EXPECT_EQ(test, memcmp(name, "Child", 5), 0);
 	KUNIT_EXPECT_EQ(test, name[5], 0xaaU);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_enum_subkey_policy_hidden_masks_base(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xac, 0x01 },
+	};
+	static const u8 base_child_guid[PKM_LCS_GUID_BYTES] = {
+		0xac, 0x02
+	};
+	static const u8 policy_layer_guid[PKM_LCS_GUID_BYTES] = {
+		0xac, 0x04
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_enum_subkey_args args = {
+		.index = 0,
+		.name_len = 16,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_enum_children_source_script parent_enum = {
+		.expected_parent_guid = ancestors[1],
+		.child_name = "Child",
+		.layer_name = "base",
+		.child_guid = base_child_guid,
+		.include_second_entry = true,
+		.second_child_name = "Child",
+		.second_layer_name = "policy",
+		.second_hidden = true,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op ops_seq[] = {
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &parent_enum,
+		},
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = ops_seq,
+		.op_count = ARRAY_SIZE(ops_seq),
+	};
+	u8 name[16];
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u64 policy_sequence;
+	u64 base_sequence;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	memset(name, 0xaa, sizeof(name));
+	args.name_ptr = (u64)(unsigned long)name;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&policy_sequence), 0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&base_sequence), 0L);
+	parent_enum.sequence = base_sequence;
+	parent_enum.second_sequence = policy_sequence;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"policy", strlen("policy"), 10, 1,
+				policy_layer_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_symlink_sequence_source_thread, &script,
+		"pkm-lcs-kunit-enum-hidden-layer");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-ENOENT);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	KUNIT_EXPECT_EQ(test, args.name_len, 16U);
+	KUNIT_EXPECT_EQ(test, name[0], 0xaaU);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
@@ -35174,6 +35358,7 @@ static int pkm_lcs_kunit_walk_source_build_response(
 	u16 request_op, u32 index, u8 *response, size_t response_len,
 	size_t *built_len)
 {
+	static const u8 hidden_guid[RSI_GUID_SIZE] = { };
 	size_t offset = RSI_MIN_RESPONSE_SIZE;
 	u16 response_op = request_op | RSI_RESPONSE_BIT;
 	u32 path_count;
@@ -35188,7 +35373,13 @@ static int pkm_lcs_kunit_walk_source_build_response(
 	path_count = step->empty ? 0U : 1U;
 	if (!step->empty && step->include_second_entry)
 		path_count = 2U;
-	metadata_count = path_count;
+	metadata_count = 0U;
+	if (!step->empty) {
+		if (!step->hidden)
+			metadata_count++;
+		if (step->include_second_entry && !step->second_hidden)
+			metadata_count++;
+	}
 	memset(response, 0, response_len);
 	put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
 	put_unaligned_le16(response_op, response + RSI_RESPONSE_OP_CODE_OFFSET);
@@ -35201,6 +35392,13 @@ static int pkm_lcs_kunit_walk_source_build_response(
 	if (!step->empty) {
 		const char *layer_name = step->layer_name ?
 					 step->layer_name : "base";
+		const u8 *target_guid = step->hidden ? hidden_guid :
+						       step->guid;
+		u8 target_type = step->hidden ? RSI_PATH_TARGET_HIDDEN :
+						RSI_PATH_TARGET_GUID;
+
+		if (!target_guid)
+			return -EINVAL;
 
 		ret = pkm_lcs_kunit_walk_source_append_len_prefixed(
 			response, response_len, &offset, layer_name,
@@ -35208,11 +35406,11 @@ static int pkm_lcs_kunit_walk_source_build_response(
 		if (ret)
 			return ret;
 		ret = pkm_lcs_kunit_walk_source_append_u8(
-			response, response_len, &offset, RSI_PATH_TARGET_GUID);
+			response, response_len, &offset, target_type);
 		if (ret)
 			return ret;
 		ret = pkm_lcs_kunit_walk_source_append(
-			response, response_len, &offset, step->guid,
+			response, response_len, &offset, target_guid,
 			RSI_GUID_SIZE);
 		if (ret)
 			return ret;
@@ -35224,8 +35422,14 @@ static int pkm_lcs_kunit_walk_source_build_response(
 			const char *second_layer = step->second_layer_name ?
 						  step->second_layer_name :
 						  "policy";
+			const u8 *second_target_guid = step->second_hidden ?
+						       hidden_guid :
+						       step->second_guid;
+			u8 second_target_type = step->second_hidden ?
+						 RSI_PATH_TARGET_HIDDEN :
+						 RSI_PATH_TARGET_GUID;
 
-			if (!step->second_guid)
+			if (!second_target_guid)
 				return -EINVAL;
 			ret = pkm_lcs_kunit_walk_source_append_len_prefixed(
 				response, response_len, &offset, second_layer,
@@ -35234,12 +35438,12 @@ static int pkm_lcs_kunit_walk_source_build_response(
 				return ret;
 			ret = pkm_lcs_kunit_walk_source_append_u8(
 				response, response_len, &offset,
-				RSI_PATH_TARGET_GUID);
+				second_target_type);
 			if (ret)
 				return ret;
 			ret = pkm_lcs_kunit_walk_source_append(
 				response, response_len, &offset,
-				step->second_guid, RSI_GUID_SIZE);
+				second_target_guid, RSI_GUID_SIZE);
 			if (ret)
 				return ret;
 			ret = pkm_lcs_kunit_walk_source_append_u64(
@@ -35254,7 +35458,7 @@ static int pkm_lcs_kunit_walk_source_build_response(
 						   &offset, metadata_count);
 	if (ret)
 		return ret;
-	if (!step->empty) {
+	if (!step->empty && !step->hidden) {
 		const u8 *sd = step->sd ? step->sd :
 					 pkm_lcs_kunit_owner_only_sd;
 		size_t sd_len = step->sd ? step->sd_len :
@@ -35282,39 +35486,41 @@ static int pkm_lcs_kunit_walk_source_build_response(
 			response, response_len, &offset, 1000ULL + index);
 		if (ret)
 			return ret;
-		if (step->include_second_entry) {
-			const u8 *second_sd = step->second_sd ?
-						      step->second_sd :
-						      pkm_lcs_kunit_owner_only_sd;
-			size_t second_sd_len = step->second_sd ?
-						       step->second_sd_len :
-						       sizeof(pkm_lcs_kunit_owner_only_sd);
+	}
+	if (!step->empty && step->include_second_entry &&
+	    !step->second_hidden) {
+		const u8 *second_sd = step->second_sd ?
+					      step->second_sd :
+					      pkm_lcs_kunit_owner_only_sd;
+		size_t second_sd_len = step->second_sd ?
+					       step->second_sd_len :
+					       sizeof(pkm_lcs_kunit_owner_only_sd);
 
-			ret = pkm_lcs_kunit_walk_source_append(
-				response, response_len, &offset,
-				step->second_guid, RSI_GUID_SIZE);
-			if (ret)
-				return ret;
-			ret = pkm_lcs_kunit_walk_source_append_len_prefixed(
-				response, response_len, &offset, second_sd,
-				second_sd_len);
-			if (ret)
-				return ret;
-			ret = pkm_lcs_kunit_walk_source_append_u8(
-				response, response_len, &offset, 0);
-			if (ret)
-				return ret;
-			ret = pkm_lcs_kunit_walk_source_append_u8(
-				response, response_len, &offset,
-				step->second_symlink ? 1 : 0);
-			if (ret)
-				return ret;
-			ret = pkm_lcs_kunit_walk_source_append_u64(
-				response, response_len, &offset,
-				2000ULL + index);
-			if (ret)
-				return ret;
-		}
+		if (!step->second_guid)
+			return -EINVAL;
+		ret = pkm_lcs_kunit_walk_source_append(
+			response, response_len, &offset, step->second_guid,
+			RSI_GUID_SIZE);
+		if (ret)
+			return ret;
+		ret = pkm_lcs_kunit_walk_source_append_len_prefixed(
+			response, response_len, &offset, second_sd,
+			second_sd_len);
+		if (ret)
+			return ret;
+		ret = pkm_lcs_kunit_walk_source_append_u8(
+			response, response_len, &offset, 0);
+		if (ret)
+			return ret;
+		ret = pkm_lcs_kunit_walk_source_append_u8(
+			response, response_len, &offset,
+			step->second_symlink ? 1 : 0);
+		if (ret)
+			return ret;
+		ret = pkm_lcs_kunit_walk_source_append_u64(
+			response, response_len, &offset, 2000ULL + index);
+		if (ret)
+			return ret;
 	}
 
 	if (offset > U32_MAX)
@@ -37999,8 +38205,15 @@ static int pkm_lcs_kunit_enum_children_source_build_response(
 								      1U));
 	if (!script->empty && !script->repeated_child_count && !target_guid)
 		return -EINVAL;
-	metadata_count = (script->empty || script->hidden) ? 0U :
-							 child_count;
+	metadata_count = 0U;
+	if (!script->empty) {
+		if (!script->hidden)
+			metadata_count++;
+		if (script->include_second_entry && !script->second_hidden)
+			metadata_count++;
+		if (script->repeated_child_count)
+			metadata_count = child_count;
+	}
 
 	memset(response, 0, response_len);
 	put_unaligned_le64(request_id, response + RSI_RESPONSE_ID_OFFSET);
@@ -38028,9 +38241,14 @@ static int pkm_lcs_kunit_enum_children_source_build_response(
 			layer_name = script->second_layer_name ?
 					     script->second_layer_name :
 					     layer_name;
-			target_guid = script->second_child_guid ?
-					      script->second_child_guid :
-					      target_guid;
+			target_guid = script->second_hidden ?
+					      hidden_guid :
+					      (script->second_child_guid ?
+						       script->second_child_guid :
+						       target_guid);
+			target_type = script->second_hidden ?
+					      RSI_PATH_TARGET_HIDDEN :
+					      RSI_PATH_TARGET_GUID;
 		}
 
 		if (pkm_lcs_kunit_walk_source_append_len_prefixed(
@@ -38069,10 +38287,14 @@ static int pkm_lcs_kunit_enum_children_source_build_response(
 		if (script->repeated_child_count) {
 			generated_guid[1] = (u8)(i + 1U);
 			target_guid = generated_guid;
-		} else if (i == 1U && script->include_second_entry) {
+		} else if (!script->hidden && i == 1U &&
+			   script->include_second_entry) {
 			target_guid = script->second_child_guid ?
 					      script->second_child_guid :
 					      target_guid;
+		} else if (script->hidden && script->include_second_entry &&
+			   !script->second_hidden) {
+			target_guid = script->second_child_guid;
 		}
 
 		if (pkm_lcs_kunit_walk_source_append(response, response_len,
@@ -58136,6 +58358,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_reg_open_key_uses_empty_private_credential_view),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_uses_live_layer_table),
+	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_policy_hidden_masks_base),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_syscall_dispatches_relative),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_syscall_rejects_null_token),
 	KUNIT_CASE(pkm_lcs_kunit_create_existing_absolute_sets_disposition),
@@ -58440,6 +58663,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_value_malformed_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_resolves_policy_layer),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_enum_subkey_policy_hidden_masks_base),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_erange_all_or_none),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_index_past_end),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_transaction_context),
