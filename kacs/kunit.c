@@ -3624,6 +3624,51 @@ static void pkm_kunit_kmes_attach_success_returns_cpu_fds(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_kunit_kmes_attach_repeated_same_cpu_shares_consumer_metadata(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kmes_kunit_fd_snapshot first = { };
+	struct pkm_kmes_kunit_fd_snapshot second = { };
+	int fd0 = -1;
+	int fd1 = -1;
+	u64 cap0 = 0;
+	u64 cap1 = 0;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_attach_for_token(token, 0, &fd0, &cap0),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_attach_for_token(token, 0, &fd1, &cap1),
+			0L);
+	KUNIT_EXPECT_NE(test, fd0, fd1);
+	KUNIT_EXPECT_EQ(test, cap0, cap1);
+
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_fd_snapshot(fd0, &first), 0);
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_fd_snapshot(fd1, &second), 0);
+	KUNIT_EXPECT_EQ(test, first.cpu_id, second.cpu_id);
+	KUNIT_EXPECT_EQ(test, first.capacity, second.capacity);
+	KUNIT_EXPECT_EQ(test, first.generation, second.generation);
+	KUNIT_EXPECT_EQ(test, first.need_wake, (u8)0);
+	KUNIT_EXPECT_EQ(test, second.need_wake, (u8)0);
+
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_set_fd_need_wake(fd0, 1), 0);
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_fd_snapshot(fd1, &second), 0);
+	KUNIT_EXPECT_EQ(test, second.need_wake, (u8)1);
+
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_set_fd_need_wake(fd1, 0), 0);
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_fd_snapshot(fd0, &first), 0);
+	KUNIT_EXPECT_EQ(test, first.need_wake, (u8)0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd0), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd1), 0);
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_kunit_kmes_attach_einval_on_out_of_range_cpu(
 	struct kunit *test)
 {
@@ -41532,6 +41577,8 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_direct_emit_writes_single_event),
 	KUNIT_CASE(pkm_kunit_kmes_direct_invalid_type_drops_structurally),
 	KUNIT_CASE(pkm_kunit_kmes_attach_success_returns_cpu_fds),
+	KUNIT_CASE(
+		pkm_kunit_kmes_attach_repeated_same_cpu_shares_consumer_metadata),
 	KUNIT_CASE(pkm_kunit_kmes_attach_einval_on_out_of_range_cpu),
 	KUNIT_CASE(pkm_kunit_kmes_attach_denies_without_security),
 	KUNIT_CASE(pkm_kunit_kmes_attach_checks_privilege_before_usercopy),
