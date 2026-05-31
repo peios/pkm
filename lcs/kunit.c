@@ -661,9 +661,17 @@ struct pkm_lcs_kunit_symlink_sequence_op {
 	const u8 *query_guid;
 	const u8 *query_data;
 	size_t query_data_len;
+	const char *query_layer_name;
+	const u8 *second_query_data;
+	size_t second_query_data_len;
+	const char *second_query_layer_name;
 	u32 query_value_type;
+	u32 second_query_value_type;
+	u64 query_sequence;
+	u64 second_query_sequence;
 	u64 expected_txn_id;
 	bool query_all;
+	bool include_second_query_value;
 };
 
 struct pkm_lcs_kunit_symlink_sequence_source_script {
@@ -11768,6 +11776,38 @@ static void pkm_lcs_kunit_key_fd_raw_ioctl_null_args_fail_closed(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_key_fd_raw_ioctl_rejects_bad_fds(
+	struct kunit *test)
+{
+	struct reg_query_key_info_args args = { };
+	int not_key_fd;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_raw_ioctl(
+				-1, REG_IOC_FLUSH, 0),
+			(long)-EBADF);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_raw_ioctl(
+				-1, REG_IOC_QUERY_KEY_INFO,
+				(unsigned long)&args),
+			(long)-EBADF);
+
+	not_key_fd = anon_inode_getfd("lcs-not-key-raw-ioctl",
+				      &pkm_lcs_kunit_non_key_fops, NULL,
+				      O_CLOEXEC);
+	KUNIT_ASSERT_TRUE(test, not_key_fd >= 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_raw_ioctl(
+				not_key_fd, REG_IOC_FLUSH, 0),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_raw_ioctl(
+				not_key_fd, REG_IOC_QUERY_KEY_INFO,
+				(unsigned long)&args),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)not_key_fd), 0);
+}
+
 static void pkm_lcs_kunit_key_fd_raw_ioctl_flush_no_arg_access_gate(
 	struct kunit *test)
 {
@@ -15393,6 +15433,135 @@ static void pkm_lcs_kunit_key_fd_query_key_info_success(struct kunit *test)
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_query_key_info_resolves_policy_layers(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xad, 0x01 },
+	};
+	static const u8 base_child_guid[PKM_LCS_GUID_BYTES] = {
+		0xad, 0x02
+	};
+	static const u8 policy_layer_guid[PKM_LCS_GUID_BYTES] = {
+		0xad, 0x03
+	};
+	static const u8 base_value_data[] = { 1, 2, 3, 4, 5, 6 };
+	static const u8 policy_value_data[] = { 9, 10 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_query_key_info_args args = {
+		.name_len = 32,
+	};
+	struct pkm_lcs_kunit_read_key_source_script read_key = {
+		.expected_guid = ancestors[1],
+		.name = "SourceName",
+	};
+	struct pkm_lcs_kunit_enum_children_source_script enum_children = {
+		.expected_parent_guid = ancestors[1],
+		.child_name = "Child",
+		.layer_name = "base",
+		.child_guid = base_child_guid,
+		.include_second_entry = true,
+		.second_child_name = "Child",
+		.second_layer_name = "policy",
+		.second_hidden = true,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op ops_seq[] = {
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_READ_KEY,
+			.read_key = &read_key,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &enum_children,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_QUERY_DEFAULT,
+			.query_guid = ancestors[1],
+			.query_layer_name = "base",
+			.query_data = base_value_data,
+			.query_data_len = sizeof(base_value_data),
+			.query_value_type = REG_BINARY,
+			.include_second_query_value = true,
+			.second_query_layer_name = "policy",
+			.second_query_data = policy_value_data,
+			.second_query_data_len = sizeof(policy_value_data),
+			.second_query_value_type = REG_BINARY,
+			.query_all = true,
+		},
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = ops_seq,
+		.op_count = ARRAY_SIZE(ops_seq),
+	};
+	u8 name[32];
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u64 policy_sequence;
+	u64 base_sequence;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	memset(name, 0xaa, sizeof(name));
+	args.name_ptr = (u64)(unsigned long)name;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&policy_sequence), 0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&base_sequence), 0L);
+	enum_children.sequence = base_sequence;
+	enum_children.second_sequence = policy_sequence;
+	ops_seq[2].query_sequence = base_sequence;
+	ops_seq[2].second_query_sequence = policy_sequence;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"policy", strlen("policy"), 10, 1,
+				policy_layer_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, READ_CONTROL, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_symlink_sequence_source_thread, &script,
+		"pkm-lcs-kunit-query-info-policy");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_key_info((int)fd, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+	KUNIT_EXPECT_EQ(test, args.name_len, 8U);
+	KUNIT_EXPECT_EQ(test, memcmp(name, "Software", 8), 0);
+	KUNIT_EXPECT_EQ(test, args.subkey_count, 0U);
+	KUNIT_EXPECT_EQ(test, args.value_count, 1U);
+	KUNIT_EXPECT_EQ(test, args.max_subkey_name_len, 0U);
+	KUNIT_EXPECT_EQ(test, args.max_value_name_len, 0U);
+	KUNIT_EXPECT_EQ(test, args.max_value_data_size,
+			(u32)sizeof(policy_value_data));
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
 	kacs_rust_token_drop(token);
 }
 
@@ -30834,6 +31003,22 @@ static void pkm_lcs_kunit_transaction_raw_ioctl_entrypoints_fail_closed(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_transaction_raw_ioctl_status_copyout_fault(
+	struct kunit *test)
+{
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				(int)fd, REG_IOC_TXN_STATUS, 1UL),
+			(long)-EFAULT);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_transaction_raw_ioctl_rejects_bad_fds(
 	struct kunit *test)
 {
@@ -39121,10 +39306,18 @@ static int pkm_lcs_kunit_symlink_sequence_handle_query(
 	struct pkm_lcs_kunit_query_values_source_script query = {
 		.expected_guid = op->query_guid,
 		.expected_value_name = "",
+		.layer_name = op->query_layer_name,
 		.value_type = op->query_value_type,
 		.data = op->query_data,
 		.data_len = op->query_data_len,
+		.second_layer_name = op->second_query_layer_name,
+		.second_data = op->second_query_data,
+		.second_data_len = op->second_query_data_len,
+		.second_value_type = op->second_query_value_type,
+		.sequence = op->query_sequence,
+		.second_sequence = op->second_query_sequence,
 		.query_all = op->query_all,
+		.include_second_value = op->include_second_query_value,
 	};
 	size_t value_offset = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
 	size_t built_len = 0;
@@ -58549,6 +58742,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_fixed_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_raw_ioctl_null_args_fail_closed),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_raw_ioctl_rejects_bad_fds),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_raw_ioctl_flush_no_arg_access_gate),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_admission),
@@ -58674,6 +58868,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_copyout_fault),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_malformed_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_success),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_query_key_info_resolves_policy_layers),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_query_key_info_retains_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_erange_probe),
@@ -58809,6 +59005,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_transaction_status_rejects_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_raw_ioctl_entrypoints_fail_closed),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_raw_ioctl_status_copyout_fault),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_raw_ioctl_rejects_bad_fds),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_raw_ioctl_commit_success),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_raw_ioctl_commit_busy_retains),
