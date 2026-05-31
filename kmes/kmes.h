@@ -17,10 +17,71 @@ struct pkm_kmes_runtime_config {
 	u32 max_nesting_depth;
 	u32 max_emit_rate_per_process;
 };
+
+enum pkm_kmes_self_config_received_kind {
+	PKM_KMES_SELF_CONFIG_RECEIVED_MISSING = 0,
+	PKM_KMES_SELF_CONFIG_RECEIVED_WRONG_TYPE = 1,
+	PKM_KMES_SELF_CONFIG_RECEIVED_U32_OUT_OF_RANGE = 2,
+	PKM_KMES_SELF_CONFIG_RECEIVED_U64_OUT_OF_RANGE = 3,
+};
+
+enum pkm_kmes_self_config_value_kind {
+	PKM_KMES_SELF_CONFIG_VALUE_DWORD = 1,
+	PKM_KMES_SELF_CONFIG_VALUE_QWORD = 2,
+	PKM_KMES_SELF_CONFIG_VALUE_WRONG_TYPE = 3,
+};
+
+#define PKM_KMES_SELF_CONFIG_MAX_AUDITS 4U
+#define PKM_KMES_SELF_CONFIG_MAX_PARAMETER_NAME_LEN 64U
+
+struct pkm_kmes_self_config_entry {
+	const char *name;
+	u32 name_len;
+	u32 value_kind;
+	u32 value_type;
+	u32 value_u32;
+	u32 _pad;
+	u64 value_u64;
+};
+
+struct pkm_kmes_self_config_audit_intent {
+	char configuration_name[PKM_KMES_SELF_CONFIG_MAX_PARAMETER_NAME_LEN];
+	u32 configuration_name_len;
+	u32 received_kind;
+	u32 received_type;
+	u32 received_u32;
+	u64 received_u64;
+	u64 retained_value;
+};
+
+struct pkm_kmes_self_config_apply_plan {
+	struct pkm_kmes_runtime_config config;
+	u32 applied_count;
+	u32 retained_missing_count;
+	u32 retained_invalid_count;
+	u32 ignored_unknown_count;
+	u32 audit_count;
+	u32 _pad;
+	struct pkm_kmes_self_config_audit_intent
+		audits[PKM_KMES_SELF_CONFIG_MAX_AUDITS];
+};
+
 u32 pkm_kmes_runtime_max_emit_rate_per_process(void);
 int pkm_kmes_runtime_config_snapshot(struct pkm_kmes_runtime_config *out);
 long pkm_kmes_runtime_config_apply(
 	const struct pkm_kmes_runtime_config *config);
+long pkm_kmes_runtime_config_apply_self_config(
+	const struct pkm_kmes_self_config_entry *entries, u32 entry_count,
+	struct pkm_kmes_self_config_apply_plan *result_out);
+long pkm_kmes_runtime_config_refresh_from_key(
+	u32 source_id, const u8 kmes_guid[16],
+	struct pkm_kmes_self_config_apply_plan *result_out);
+long pkm_kmes_config_root_discover_from_machine_hive(
+	u32 source_id, const u8 machine_root_guid[16], bool *present_out,
+	u8 kmes_guid_out[16]);
+long pkm_kmes_runtime_config_refresh_from_machine_hive(
+	u32 source_id, const u8 machine_root_guid[16],
+	struct pkm_kmes_self_config_apply_plan *result_out);
 int pkm_kmes_current_process_info(u64 *pid_out, u8 *name_out,
 				  size_t name_out_len, size_t *name_len_out,
 				  u8 *path_out, size_t path_out_len,

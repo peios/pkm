@@ -86,7 +86,8 @@ use crate::lcs_core::{
     SourceSlotStatus, SourceSlotView, ValueEntry, ValueLayerAdmissionInput, ValueResolution,
     EffectiveValueWatchEvent, EnumeratedValue, WatchEventRecordPlan,
     WatchEventRecordRequest,
-    WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_DWORD, REG_TOMBSTONE,
+    WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_DWORD, REG_QWORD,
+    REG_TOMBSTONE,
     RSI_DELETE_LAYER, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
     select_layer_owner, write_watch_event_record,
 };
@@ -113,6 +114,15 @@ const PKM_LCS_SELF_CONFIG_VALUE_DWORD: u32 = 1;
 const PKM_LCS_SELF_CONFIG_VALUE_WRONG_TYPE: u32 = 2;
 const PKM_LCS_SELF_CONFIG_MAX_AUDITS: usize = 19;
 const PKM_LCS_SELF_CONFIG_MAX_PARAMETER_NAME_LEN: usize = 64;
+const PKM_KMES_SELF_CONFIG_RECEIVED_MISSING: u32 = 0;
+const PKM_KMES_SELF_CONFIG_RECEIVED_WRONG_TYPE: u32 = 1;
+const PKM_KMES_SELF_CONFIG_RECEIVED_U32_OUT_OF_RANGE: u32 = 2;
+const PKM_KMES_SELF_CONFIG_RECEIVED_U64_OUT_OF_RANGE: u32 = 3;
+const PKM_KMES_SELF_CONFIG_VALUE_DWORD: u32 = 1;
+const PKM_KMES_SELF_CONFIG_VALUE_QWORD: u32 = 2;
+const PKM_KMES_SELF_CONFIG_VALUE_WRONG_TYPE: u32 = 3;
+const PKM_KMES_SELF_CONFIG_MAX_AUDITS: usize = 4;
+const PKM_KMES_SELF_CONFIG_MAX_PARAMETER_NAME_LEN: usize = 64;
 
 #[repr(C)]
 pub struct PkmLcsSourceRegistrationHiveCopy {
@@ -289,6 +299,63 @@ pub struct PkmLcsSelfConfigApplyPlanCopy {
     pub ignored_unknown_count: u32,
     pub audit_count: u32,
     pub audits: [PkmLcsSelfConfigAuditIntentCopy; PKM_LCS_SELF_CONFIG_MAX_AUDITS],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PkmKmesRuntimeConfigCopy {
+    pub buffer_capacity: u64,
+    pub max_event_size: u32,
+    pub max_nesting_depth: u32,
+    pub max_emit_rate_per_process: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PkmKmesSelfConfigEntryCopy {
+    pub name: *const u8,
+    pub name_len: u32,
+    pub value_kind: u32,
+    pub value_type: u32,
+    pub value_u32: u32,
+    pub _pad: u32,
+    pub value_u64: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PkmKmesSelfConfigAuditIntentCopy {
+    pub configuration_name: [u8; PKM_KMES_SELF_CONFIG_MAX_PARAMETER_NAME_LEN],
+    pub configuration_name_len: u32,
+    pub received_kind: u32,
+    pub received_type: u32,
+    pub received_u32: u32,
+    pub received_u64: u64,
+    pub retained_value: u64,
+}
+
+impl PkmKmesSelfConfigAuditIntentCopy {
+    const ZERO: Self = Self {
+        configuration_name: [0; PKM_KMES_SELF_CONFIG_MAX_PARAMETER_NAME_LEN],
+        configuration_name_len: 0,
+        received_kind: 0,
+        received_type: 0,
+        received_u32: 0,
+        received_u64: 0,
+        retained_value: 0,
+    };
+}
+
+#[repr(C)]
+pub struct PkmKmesSelfConfigApplyPlanCopy {
+    pub config: PkmKmesRuntimeConfigCopy,
+    pub applied_count: u32,
+    pub retained_missing_count: u32,
+    pub retained_invalid_count: u32,
+    pub ignored_unknown_count: u32,
+    pub audit_count: u32,
+    pub _pad: u32,
+    pub audits: [PkmKmesSelfConfigAuditIntentCopy; PKM_KMES_SELF_CONFIG_MAX_AUDITS],
 }
 
 #[repr(C)]
@@ -903,6 +970,356 @@ fn write_self_config_plan_from_observed(
         retained_invalid_count,
         ignored_unknown_count,
         audit_count: audit_count as u32,
+        audits,
+    };
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum KmesConfigValue {
+    Dword(u32),
+    Qword(u64),
+    WrongType { actual_type: u32 },
+}
+
+#[derive(Clone, Copy)]
+enum KmesConfigExpectedType {
+    Dword,
+    Qword,
+}
+
+#[derive(Clone, Copy)]
+struct KmesConfigRange {
+    name: &'static str,
+    expected_type: KmesConfigExpectedType,
+    min: u64,
+    max: u64,
+    power_of_two: bool,
+}
+
+const KMES_CONFIG_RANGES: [KmesConfigRange; 4] = [
+    KmesConfigRange {
+        name: "BufferCapacity",
+        expected_type: KmesConfigExpectedType::Qword,
+        min: 65_536,
+        max: 268_435_456,
+        power_of_two: true,
+    },
+    KmesConfigRange {
+        name: "MaxEventSize",
+        expected_type: KmesConfigExpectedType::Dword,
+        min: 1_024,
+        max: 4_194_304,
+        power_of_two: false,
+    },
+    KmesConfigRange {
+        name: "MaxNestingDepth",
+        expected_type: KmesConfigExpectedType::Dword,
+        min: 4,
+        max: 256,
+        power_of_two: false,
+    },
+    KmesConfigRange {
+        name: "MaxEmitRatePerProcess",
+        expected_type: KmesConfigExpectedType::Dword,
+        min: 100,
+        max: 1_000_000,
+        power_of_two: false,
+    },
+];
+
+fn empty_kmes_config_apply_plan() -> PkmKmesSelfConfigApplyPlanCopy {
+    PkmKmesSelfConfigApplyPlanCopy {
+        config: PkmKmesRuntimeConfigCopy {
+            buffer_capacity: 4 * 1024 * 1024,
+            max_event_size: 65_536,
+            max_nesting_depth: 32,
+            max_emit_rate_per_process: 10_000,
+        },
+        applied_count: 0,
+        retained_missing_count: 0,
+        retained_invalid_count: 0,
+        ignored_unknown_count: 0,
+        audit_count: 0,
+        _pad: 0,
+        audits: [PkmKmesSelfConfigAuditIntentCopy::ZERO; PKM_KMES_SELF_CONFIG_MAX_AUDITS],
+    }
+}
+
+fn kmes_config_entry_name<'a>(
+    entry: &'a PkmKmesSelfConfigEntryCopy,
+) -> Result<&'a str, LinuxErrno> {
+    if entry.name_len == 0 {
+        return Ok("");
+    }
+    if entry.name.is_null() {
+        return Err(LinuxErrno::Einval);
+    }
+    let name_bytes = unsafe { slice::from_raw_parts(entry.name, entry.name_len as usize) };
+    str::from_utf8(name_bytes).map_err(|_| LinuxErrno::Einval)
+}
+
+fn kmes_config_entry_value(
+    entry: &PkmKmesSelfConfigEntryCopy,
+) -> Result<KmesConfigValue, LinuxErrno> {
+    match entry.value_kind {
+        PKM_KMES_SELF_CONFIG_VALUE_DWORD => {
+            if entry.value_type != REG_DWORD || entry.value_u64 != 0 {
+                return Err(LinuxErrno::Einval);
+            }
+            Ok(KmesConfigValue::Dword(entry.value_u32))
+        }
+        PKM_KMES_SELF_CONFIG_VALUE_QWORD => {
+            if entry.value_type != REG_QWORD || entry.value_u32 != 0 {
+                return Err(LinuxErrno::Einval);
+            }
+            Ok(KmesConfigValue::Qword(entry.value_u64))
+        }
+        PKM_KMES_SELF_CONFIG_VALUE_WRONG_TYPE => {
+            if entry.value_type == REG_DWORD
+                || entry.value_type == REG_QWORD
+                || entry.value_u32 != 0
+                || entry.value_u64 != 0
+            {
+                return Err(LinuxErrno::Einval);
+            }
+            Ok(KmesConfigValue::WrongType {
+                actual_type: entry.value_type,
+            })
+        }
+        _ => Err(LinuxErrno::Einval),
+    }
+}
+
+fn find_kmes_config_range(name: &str) -> Option<KmesConfigRange> {
+    KMES_CONFIG_RANGES
+        .iter()
+        .copied()
+        .find(|range| casefold_eq(range.name, name))
+}
+
+fn observed_kmes_config_value(
+    values: &[ObservedKmesConfigValue<'_>],
+    name: &str,
+) -> Option<KmesConfigValue> {
+    values
+        .iter()
+        .find(|entry| casefold_eq(entry.name, name))
+        .map(|entry| entry.value)
+}
+
+fn kmes_config_value_type_matches(range: KmesConfigRange, value: KmesConfigValue) -> bool {
+    matches!(
+        (range.expected_type, value),
+        (KmesConfigExpectedType::Dword, KmesConfigValue::Dword(_))
+            | (KmesConfigExpectedType::Qword, KmesConfigValue::Qword(_))
+    )
+}
+
+fn kmes_config_value_u64(value: KmesConfigValue) -> u64 {
+    match value {
+        KmesConfigValue::Dword(value) => value as u64,
+        KmesConfigValue::Qword(value) => value,
+        KmesConfigValue::WrongType { .. } => 0,
+    }
+}
+
+fn validate_kmes_config_value(range: KmesConfigRange, value: u64) -> Result<u64, LinuxErrno> {
+    if value < range.min || value > range.max {
+        return Err(LinuxErrno::Erange);
+    }
+    if range.power_of_two && (value == 0 || (value & (value - 1)) != 0) {
+        return Err(LinuxErrno::Erange);
+    }
+    Ok(value)
+}
+
+fn apply_kmes_config_value(
+    config: &mut PkmKmesRuntimeConfigCopy,
+    range: KmesConfigRange,
+    value: u64,
+) -> Result<(), LinuxErrno> {
+    match range.name {
+        "BufferCapacity" => config.buffer_capacity = value,
+        "MaxEventSize" => config.max_event_size = value.try_into().map_err(|_| LinuxErrno::Erange)?,
+        "MaxNestingDepth" => {
+            config.max_nesting_depth = value.try_into().map_err(|_| LinuxErrno::Erange)?
+        }
+        "MaxEmitRatePerProcess" => {
+            config.max_emit_rate_per_process = value.try_into().map_err(|_| LinuxErrno::Erange)?
+        }
+        _ => return Err(LinuxErrno::Einval),
+    }
+    Ok(())
+}
+
+fn kmes_config_retained_value(config: &PkmKmesRuntimeConfigCopy, range: KmesConfigRange) -> u64 {
+    match range.name {
+        "BufferCapacity" => config.buffer_capacity,
+        "MaxEventSize" => config.max_event_size as u64,
+        "MaxNestingDepth" => config.max_nesting_depth as u64,
+        "MaxEmitRatePerProcess" => config.max_emit_rate_per_process as u64,
+        _ => 0,
+    }
+}
+
+fn write_kmes_config_audit_intent(
+    current: &PkmKmesRuntimeConfigCopy,
+    range: KmesConfigRange,
+    value: Option<KmesConfigValue>,
+    output: &mut PkmKmesSelfConfigAuditIntentCopy,
+) -> Result<(), LinuxErrno> {
+    let name = range.name.as_bytes();
+    if name.len() > output.configuration_name.len() {
+        return Err(LinuxErrno::Einval);
+    }
+
+    *output = PkmKmesSelfConfigAuditIntentCopy::ZERO;
+    output.configuration_name[..name.len()].copy_from_slice(name);
+    output.configuration_name_len = name.len() as u32;
+    output.retained_value = kmes_config_retained_value(current, range);
+    match value {
+        None => output.received_kind = PKM_KMES_SELF_CONFIG_RECEIVED_MISSING,
+        Some(KmesConfigValue::WrongType { actual_type }) => {
+            output.received_kind = PKM_KMES_SELF_CONFIG_RECEIVED_WRONG_TYPE;
+            output.received_type = actual_type;
+        }
+        Some(KmesConfigValue::Dword(value)) => {
+            output.received_kind = PKM_KMES_SELF_CONFIG_RECEIVED_U32_OUT_OF_RANGE;
+            output.received_type = REG_DWORD;
+            output.received_u32 = value;
+            output.received_u64 = value as u64;
+        }
+        Some(KmesConfigValue::Qword(value)) => {
+            output.received_kind = PKM_KMES_SELF_CONFIG_RECEIVED_U64_OUT_OF_RANGE;
+            output.received_type = REG_QWORD;
+            output.received_u64 = value;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct ObservedKmesConfigValue<'a> {
+    name: &'a str,
+    value: KmesConfigValue,
+}
+
+fn effective_value_to_kmes_config(value: EnumeratedValue<'_>) -> KmesConfigValue {
+    let actual_type = value.value.value_type.code();
+    let data = value.value.data;
+
+    if actual_type == REG_DWORD && data.len() == core::mem::size_of::<u32>() {
+        return KmesConfigValue::Dword(u32::from_le_bytes([
+            data[0], data[1], data[2], data[3],
+        ]));
+    }
+    if actual_type == REG_QWORD && data.len() == core::mem::size_of::<u64>() {
+        return KmesConfigValue::Qword(u64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]));
+    }
+
+    KmesConfigValue::WrongType { actual_type }
+}
+
+fn write_kmes_config_plan_from_observed(
+    current: PkmKmesRuntimeConfigCopy,
+    observed_values: &[ObservedKmesConfigValue<'_>],
+    plan_out: &mut PkmKmesSelfConfigApplyPlanCopy,
+) -> Result<(), LinuxErrno> {
+    let mut config = current;
+    let mut applied_count = 0u32;
+    let mut retained_missing_count = 0u32;
+    let mut retained_invalid_count = 0u32;
+    let mut ignored_unknown_count = 0u32;
+    let mut audit_count = 0usize;
+    let mut audits =
+        [PkmKmesSelfConfigAuditIntentCopy::ZERO; PKM_KMES_SELF_CONFIG_MAX_AUDITS];
+
+    for entry in observed_values {
+        if find_kmes_config_range(entry.name).is_none() {
+            ignored_unknown_count = ignored_unknown_count
+                .checked_add(1)
+                .ok_or(LinuxErrno::Einval)?;
+        }
+    }
+
+    for range in KMES_CONFIG_RANGES {
+        let observed = observed_kmes_config_value(observed_values, range.name);
+
+        match observed {
+            Some(value) if kmes_config_value_type_matches(range, value) => {
+                let value_u64 = kmes_config_value_u64(value);
+                match validate_kmes_config_value(range, value_u64) {
+                    Ok(value_u64) => {
+                        apply_kmes_config_value(&mut config, range, value_u64)?;
+                        applied_count = applied_count.checked_add(1).ok_or(LinuxErrno::Einval)?;
+                    }
+                    Err(_) => {
+                        retained_invalid_count = retained_invalid_count
+                            .checked_add(1)
+                            .ok_or(LinuxErrno::Einval)?;
+                        if audit_count >= audits.len() {
+                            return Err(LinuxErrno::Einval);
+                        }
+                        write_kmes_config_audit_intent(
+                            &current,
+                            range,
+                            observed,
+                            &mut audits[audit_count],
+                        )?;
+                        audit_count += 1;
+                    }
+                }
+            }
+            Some(_) => {
+                retained_invalid_count = retained_invalid_count
+                    .checked_add(1)
+                    .ok_or(LinuxErrno::Einval)?;
+                if audit_count >= audits.len() {
+                    return Err(LinuxErrno::Einval);
+                }
+                let wrong_type = match observed.unwrap() {
+                    KmesConfigValue::Dword(_) => KmesConfigValue::WrongType {
+                        actual_type: REG_DWORD,
+                    },
+                    KmesConfigValue::Qword(_) => KmesConfigValue::WrongType {
+                        actual_type: REG_QWORD,
+                    },
+                    KmesConfigValue::WrongType { actual_type } => {
+                        KmesConfigValue::WrongType { actual_type }
+                    }
+                };
+                write_kmes_config_audit_intent(
+                    &current,
+                    range,
+                    Some(wrong_type),
+                    &mut audits[audit_count],
+                )?;
+                audit_count += 1;
+            }
+            None => {
+                retained_missing_count = retained_missing_count
+                    .checked_add(1)
+                    .ok_or(LinuxErrno::Einval)?;
+                if audit_count >= audits.len() {
+                    return Err(LinuxErrno::Einval);
+                }
+                write_kmes_config_audit_intent(&current, range, None, &mut audits[audit_count])?;
+                audit_count += 1;
+            }
+        }
+    }
+
+    *plan_out = PkmKmesSelfConfigApplyPlanCopy {
+        config,
+        applied_count,
+        retained_missing_count,
+        retained_invalid_count,
+        ignored_unknown_count,
+        audit_count: audit_count as u32,
+        _pad: 0,
         audits,
     };
     Ok(())
@@ -3424,6 +3841,199 @@ pub unsafe extern "C" fn lcs_rust_plan_self_config_apply_from_query_values(
     }
 
     match write_self_config_plan_from_observed(current, observed_storage.as_slice(), plan_out) {
+        Ok(()) => 0,
+        Err(errno) => errno.negated_return() as c_int,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_plan_kmes_config_apply(
+    current_config: *const PkmKmesRuntimeConfigCopy,
+    entries: *const PkmKmesSelfConfigEntryCopy,
+    entry_count: usize,
+    plan_out: *mut PkmKmesSelfConfigApplyPlanCopy,
+) -> c_int {
+    let Some(plan_out) = (unsafe { plan_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *plan_out = empty_kmes_config_apply_plan();
+
+    let Some(current) = (unsafe { current_config.as_ref() }).copied() else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    if entry_count > isize::MAX as usize {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    if entry_count > 0 && entries.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let entries = if entry_count == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(entries, entry_count) }
+    };
+
+    let mut observed_storage =
+        match PkmVec::<ObservedKmesConfigValue<'_>>::with_capacity(entry_count) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+
+    for entry in entries {
+        let name = match kmes_config_entry_name(entry) {
+            Ok(value) => value,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+        let value = match kmes_config_entry_value(entry) {
+            Ok(value) => value,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+        if observed_storage
+            .push(ObservedKmesConfigValue { name, value })
+            .is_err()
+        {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+    }
+
+    match write_kmes_config_plan_from_observed(current, observed_storage.as_slice(), plan_out) {
+        Ok(()) => 0,
+        Err(errno) => errno.negated_return() as c_int,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_plan_kmes_config_apply_from_query_values(
+    current_config: *const PkmKmesRuntimeConfigCopy,
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+    private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
+    private_layer_count: usize,
+    plan_out: *mut PkmKmesSelfConfigApplyPlanCopy,
+) -> c_int {
+    let Some(plan_out) = (unsafe { plan_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *plan_out = empty_kmes_config_apply_plan();
+
+    if frame.is_null()
+        || (layer_count != 0 && layers.is_null())
+        || (private_layer_count != 0 && private_layers.is_null())
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let Some(current) = (unsafe { current_config.as_ref() }).copied() else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let layer_views = match parse_layer_views(layers, layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let private_layer_views = match parse_private_layer_views(private_layers, private_layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let payload = match parse_rsi_query_values_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_QUERY_VALUES,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_query_values_response_error_return(err),
+    };
+
+    let limits = LcsLimits::DEFAULT;
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &limits) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_value_payloads(&payload, &limits) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let mut value_storage =
+        match PkmVec::<NamedValueEntry<'_>>::with_capacity(payload.entry_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut blanket_storage =
+        match PkmVec::<BlanketTombstoneEntry<'_>>::with_capacity(payload.blanket_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut observed_storage =
+        match PkmVec::<ObservedKmesConfigValue<'_>>::with_capacity(payload.entry_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+
+    let mut allocation_failed = false;
+    if let Err(err) = for_each_rsi_query_values_source_value_entry(&payload, &limits, |entry| {
+        if value_storage.push(entry).is_err() {
+            allocation_failed = true;
+            return Err(LcsError::RsiPayloadLengthOverflow);
+        }
+        Ok(())
+    }) {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = for_each_rsi_query_values_source_blanket_entry(&payload, &limits, |entry| {
+        if blanket_storage.push(entry).is_err() {
+            allocation_failed = true;
+            return Err(LcsError::RsiPayloadLengthOverflow);
+        }
+        Ok(())
+    }) {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let context = LayerResolutionContext {
+        layers: layer_views.as_slice(),
+        private_layers: private_layer_views.as_slice(),
+        limits: &limits,
+        next_sequence,
+    };
+    if let Err(err) = for_each_effective_value(
+        &context,
+        value_storage.as_slice(),
+        blanket_storage.as_slice(),
+        |value| {
+            if observed_storage
+                .push(ObservedKmesConfigValue {
+                    name: value.name,
+                    value: effective_value_to_kmes_config(value),
+                })
+                .is_err()
+            {
+                allocation_failed = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            Ok(())
+        },
+    ) {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_lookup_materialization_error_return(err);
+    }
+
+    match write_kmes_config_plan_from_observed(current, observed_storage.as_slice(), plan_out) {
         Ok(()) => 0,
         Err(errno) => errno.negated_return() as c_int,
     }

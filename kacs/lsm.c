@@ -2777,6 +2777,7 @@ static bool pkm_kacs_sockaddr_is_abstract_unix(const struct sockaddr *address,
 static struct pkm_kmes_rate_bucket *pkm_kmes_rate_bucket_alloc(void)
 {
 	struct pkm_kmes_rate_bucket *bucket;
+	unsigned long flags;
 
 	bucket = kzalloc(sizeof(*bucket), GFP_KERNEL);
 	if (!bucket)
@@ -2787,20 +2788,22 @@ static struct pkm_kmes_rate_bucket *pkm_kmes_rate_bucket_alloc(void)
 	INIT_LIST_HEAD(&bucket->list);
 	bucket->last_refill_ns = ktime_get_ns();
 	bucket->tokens = pkm_kmes_runtime_max_emit_rate_per_process();
-	spin_lock(&pkm_kmes_rate_bucket_list_lock);
+	spin_lock_irqsave(&pkm_kmes_rate_bucket_list_lock, flags);
 	list_add(&bucket->list, &pkm_kmes_rate_bucket_list);
-	spin_unlock(&pkm_kmes_rate_bucket_list_lock);
+	spin_unlock_irqrestore(&pkm_kmes_rate_bucket_list_lock, flags);
 	return bucket;
 }
 
 static void pkm_kmes_rate_bucket_put(struct pkm_kmes_rate_bucket *bucket)
 {
+	unsigned long flags;
+
 	if (!bucket)
 		return;
 	if (refcount_dec_and_test(&bucket->refs)) {
-		spin_lock(&pkm_kmes_rate_bucket_list_lock);
+		spin_lock_irqsave(&pkm_kmes_rate_bucket_list_lock, flags);
 		list_del_init(&bucket->list);
-		spin_unlock(&pkm_kmes_rate_bucket_list_lock);
+		spin_unlock_irqrestore(&pkm_kmes_rate_bucket_list_lock, flags);
 		kfree(bucket);
 	}
 }
