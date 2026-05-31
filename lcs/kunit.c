@@ -11910,6 +11910,42 @@ static void pkm_lcs_kunit_key_fd_raw_ioctl_null_args_fail_closed(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_key_fd_raw_ioctl_copyin_fault_matrix(
+	struct kunit *test)
+{
+	static const unsigned int arg_cmds[] = {
+		REG_IOC_SET_VALUE,
+		REG_IOC_DELETE_VALUE,
+		REG_IOC_BLANKET_TOMBSTONE,
+		REG_IOC_DELETE_KEY,
+		REG_IOC_HIDE_KEY,
+		REG_IOC_QUERY_VALUE,
+		REG_IOC_QUERY_VALUES_BATCH,
+		REG_IOC_ENUM_VALUES,
+		REG_IOC_ENUM_SUBKEYS,
+		REG_IOC_QUERY_KEY_INFO,
+		REG_IOC_GET_SECURITY,
+		REG_IOC_SET_SECURITY,
+		REG_IOC_BACKUP,
+		REG_IOC_RESTORE,
+		REG_IOC_NOTIFY,
+	};
+	u32 access = KEY_ALL_ACCESS | ACCESS_SYSTEM_SECURITY;
+	long fd;
+	size_t i;
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(access);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	for (i = 0; i < ARRAY_SIZE(arg_cmds); i++)
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_kunit_key_fd_raw_ioctl(
+					(int)fd, arg_cmds[i], 1UL),
+				(long)-EFAULT);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_key_fd_raw_ioctl_rejects_bad_fds(
 	struct kunit *test)
 {
@@ -52224,6 +52260,46 @@ static void pkm_lcs_kunit_reg_create_key_args_copy_success_and_fault(
 	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
 }
 
+static void pkm_lcs_kunit_reg_create_key_args_copy_fault_zeroes_output(
+	struct kunit *test)
+{
+	static const char path_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_create_key_args src = {
+		.parent_fd = -1,
+		.path_ptr = (u64)(unsigned long)path_src,
+		.desired_access = KEY_READ,
+		.txn_fd = -1,
+	};
+	struct reg_create_key_args dst = {
+		.parent_fd = 123,
+		._pad0 = 0xffffffffU,
+		.path_ptr = 0xffffffffffffffffULL,
+		.desired_access = 0xffffffffU,
+		.layer_ptr = 0xffffffffffffffffULL,
+		.flags = 0xffffffffU,
+		.txn_fd = 123,
+		._pad1 = 0xffffffffU,
+		.disposition_ptr = 0xffffffffffffffffULL,
+	};
+
+	ctx.fault_src = &src;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_reg_create_key_args_copy_from_user(
+				&ops, (const void __user *)&src, &dst),
+			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, dst.parent_fd, 0);
+	KUNIT_EXPECT_EQ(test, dst._pad0, 0U);
+	KUNIT_EXPECT_EQ(test, dst.path_ptr, 0ULL);
+	KUNIT_EXPECT_EQ(test, dst.desired_access, 0U);
+	KUNIT_EXPECT_EQ(test, dst.layer_ptr, 0ULL);
+	KUNIT_EXPECT_EQ(test, dst.flags, 0U);
+	KUNIT_EXPECT_EQ(test, dst.txn_fd, 0);
+	KUNIT_EXPECT_EQ(test, dst._pad1, 0U);
+	KUNIT_EXPECT_EQ(test, dst.disposition_ptr, 0ULL);
+}
+
 static void pkm_lcs_kunit_reg_create_key_args_rejects_padding(
 	struct kunit *test)
 {
@@ -58878,6 +58954,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_matrix),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_raw_ioctl_null_args_fail_closed),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_raw_ioctl_copyin_fault_matrix),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_raw_ioctl_rejects_bad_fds),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_raw_ioctl_flush_no_arg_access_gate),
@@ -59449,6 +59526,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_reg_create_key_bad_flags_before_usercopy),
 	KUNIT_CASE(
 		pkm_lcs_kunit_reg_create_key_args_copy_success_and_fault),
+	KUNIT_CASE(
+		pkm_lcs_kunit_reg_create_key_args_copy_fault_zeroes_output),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_rejects_padding),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_existing_txn_reads),
 	KUNIT_CASE(
