@@ -25115,6 +25115,139 @@ static void pkm_lcs_kunit_key_fd_orphan_transition_marks_and_notifies(
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 }
 
+static void pkm_lcs_kunit_orphan_watch_observes_guid_local_sd_change(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 0xa3 },
+		{ 0xa4 },
+	};
+	static const u8 existing_sd[] = {
+		/* SECURITY_DESCRIPTOR_RELATIVE */
+		0x01, 0x00, 0x04, 0x80, 0x14, 0x00, 0x00, 0x00,
+		0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x2c, 0x00, 0x00, 0x00,
+		/* Owner: S-1-5-18 */
+		0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+		0x12, 0x00, 0x00, 0x00,
+		/* Group: S-1-5-18 */
+		0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+		0x12, 0x00, 0x00, 0x00,
+		/* DACL: one CONTAINER_INHERIT allow ACE for Everyone. */
+		0x02, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x02, 0x14, 0x00, 0x00, 0x00, 0x00, 0x80,
+		0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00,
+	};
+	static const u8 input_empty_dacl_sd[] = {
+		/* SECURITY_DESCRIPTOR_RELATIVE with an empty DACL only. */
+		0x01, 0x00, 0x04, 0x80, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x14, 0x00, 0x00, 0x00,
+		0x02, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+	};
+	static const u8 expected_merged_sd[] = {
+		/* Existing owner/group with the replacement empty DACL. */
+		0x01, 0x00, 0x04, 0x80, 0x14, 0x00, 0x00, 0x00,
+		0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x2c, 0x00, 0x00, 0x00,
+		/* Owner: S-1-5-18 */
+		0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+		0x12, 0x00, 0x00, 0x00,
+		/* Group: S-1-5-18 */
+		0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+		0x12, 0x00, 0x00, 0x00,
+		/* DACL: empty ACL. */
+		0x02, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_SD,
+	};
+	struct reg_set_security_args set_args = {
+		.security_info = DACL_SECURITY_INFORMATION,
+		.sd_len = sizeof(input_empty_dacl_sd),
+		.sd_ptr = (u64)(unsigned long)input_empty_dacl_sd,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_set_security_source_script script = {
+		.expected_guid = ancestors[1],
+		.existing_sd = existing_sd,
+		.existing_sd_len = sizeof(existing_sd),
+		.expected_merged_sd = expected_merged_sd,
+		.expected_merged_sd_len = sizeof(expected_merged_sd),
+	};
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u8 record[16] = { };
+	u32 marked = U32_MAX;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY | WRITE_DAC, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &notify),
+			0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
+				1, ancestors[1], &marked),
+			0L);
+	KUNIT_EXPECT_EQ(test, marked, 1U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, snapshot.orphaned);
+	KUNIT_EXPECT_TRUE(test, snapshot.watch_armed);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, record,
+							sizeof(record), true),
+			(ssize_t)8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(record), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 4),
+			REG_WATCH_KEY_DELETED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 6), 0U);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_set_security_source_thread, &script,
+		"pkm-lcs-kunit-orphan-set-sd");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_set_security((int)fd, &ops, &set_args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 2U);
+	KUNIT_EXPECT_EQ(test, script.writes, 2U);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_read((int)fd, record,
+							sizeof(record), true),
+			(ssize_t)8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(record), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 4),
+			REG_WATCH_SD_CHANGED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 6), 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_expect_drop_key_request(test, &file, ancestors[1]);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_key_fd_orphan_transition_no_live_refs_noops(
 	struct kunit *test)
 {
@@ -53445,6 +53578,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_nonfinal_close_defers_drop),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_close_down_source_no_error),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_transition_marks_and_notifies),
+	KUNIT_CASE(pkm_lcs_kunit_orphan_watch_observes_guid_local_sd_change),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_orphan_transition_no_live_refs_noops),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_watch_read_poll_drains_records),
