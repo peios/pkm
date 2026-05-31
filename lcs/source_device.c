@@ -604,6 +604,85 @@ void pkm_lcs_source_base_layer_snapshot(
 		*layer_count = ARRAY_SIZE(pkm_lcs_base_layer_snapshot);
 }
 
+long pkm_lcs_private_credentials_acquire_for_token(
+	const void *token, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_private_credential_view *view)
+{
+	const char *private_layer_name;
+	u32 private_layer_name_len;
+	u32 private_layer_count;
+	u32 scope_count;
+	u32 i;
+	int ret;
+
+	if (!view || !limits)
+		return -EINVAL;
+	memset(view, 0, sizeof(*view));
+	if (!token)
+		return -EACCES;
+
+	scope_count = kacs_rust_token_lcs_scope_guid_count(token);
+	private_layer_count = kacs_rust_token_lcs_private_layer_count(token);
+	if (scope_count > limits->max_scope_guids_per_token ||
+	    private_layer_count > limits->max_private_layers_per_token)
+		return -EACCES;
+
+	if (scope_count) {
+		view->scope_guids = kcalloc(scope_count,
+					    sizeof(*view->scope_guids),
+					    GFP_KERNEL);
+		if (!view->scope_guids)
+			return -ENOMEM;
+
+		for (i = 0; i < scope_count; i++) {
+			ret = kacs_rust_token_lcs_scope_guid(
+				token, i, view->scope_guids[i]);
+			if (ret)
+				goto out_error;
+		}
+		view->scope_count = scope_count;
+	}
+
+	if (private_layer_count) {
+		view->private_layers = kcalloc(private_layer_count,
+					       sizeof(*view->private_layers),
+					       GFP_KERNEL);
+		if (!view->private_layers) {
+			ret = -ENOMEM;
+			goto out_error;
+		}
+
+		for (i = 0; i < private_layer_count; i++) {
+			ret = kacs_rust_token_lcs_private_layer(
+				token, i, &private_layer_name,
+				&private_layer_name_len);
+			if (ret)
+				goto out_error;
+			view->private_layers[i].name = private_layer_name;
+			view->private_layers[i].name_len =
+				private_layer_name_len;
+		}
+		view->private_layer_count = private_layer_count;
+	}
+
+	return 0;
+
+out_error:
+	pkm_lcs_private_credentials_release(view);
+	return ret;
+}
+
+void pkm_lcs_private_credentials_release(
+	struct pkm_lcs_private_credential_view *view)
+{
+	if (!view)
+		return;
+
+	kfree(view->scope_guids);
+	kfree(view->private_layers);
+	memset(view, 0, sizeof(*view));
+}
+
 long pkm_lcs_source_layer_snapshot_copy(
 	struct pkm_lcs_rsi_layer_view *layers, u32 max_layers,
 	char *name_buf, size_t name_buf_len, u32 *count_out)
@@ -9869,8 +9948,10 @@ long pkm_lcs_reg_open_key_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	int parent_fd, const char __user *upath, u32 desired_access, u32 flags)
 {
+	struct pkm_lcs_private_credential_view private_view = { };
 	struct pkm_lcs_layer_snapshot snapshot = { };
 	struct pkm_lcs_open_preflight_plan preflight = { };
+	struct pkm_lcs_runtime_limits limits;
 	long ret;
 
 	if (!token)
@@ -9882,16 +9963,28 @@ long pkm_lcs_reg_open_key_for_token(
 	ret = pkm_lcs_source_layer_snapshot_acquire(&snapshot);
 	if (ret)
 		return ret;
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_private_credentials_acquire_for_token(token, &limits,
+							   &private_view);
+	if (ret)
+		goto out_snapshot;
 
 	if (parent_fd == -1)
 		ret = pkm_lcs_open_user_absolute_path_for_token(
-			token, ops, upath, desired_access, flags, NULL, 0,
-			snapshot.layers, snapshot.layer_count, NULL, 0);
+			token, ops, upath, desired_access, flags,
+			private_view.scope_guids, private_view.scope_count,
+			snapshot.layers, snapshot.layer_count,
+			private_view.private_layers,
+			private_view.private_layer_count);
 	else
 		ret = pkm_lcs_open_user_relative_path_for_token(
 			token, ops, parent_fd, upath, desired_access, flags,
-			snapshot.layers, snapshot.layer_count, NULL, 0);
+			snapshot.layers, snapshot.layer_count,
+			private_view.private_layers,
+			private_view.private_layer_count);
 
+	pkm_lcs_private_credentials_release(&private_view);
+out_snapshot:
 	pkm_lcs_source_layer_snapshot_release(&snapshot);
 	return ret;
 }
@@ -11865,7 +11958,9 @@ static long pkm_lcs_reg_create_key_for_token_with_txn(
 	struct pkm_lcs_create_preflight_plan preflight = { };
 	struct pkm_lcs_syscall_path_copy copy = { };
 	struct pkm_lcs_create_missing_runtime_inputs live_inputs = { };
+	struct pkm_lcs_private_credential_view private_view = { };
 	struct pkm_lcs_layer_snapshot snapshot = { };
+	struct pkm_lcs_runtime_limits limits;
 	const struct pkm_lcs_create_missing_runtime_inputs *active_inputs =
 		inputs;
 	long ret;
@@ -11882,8 +11977,18 @@ static long pkm_lcs_reg_create_key_for_token_with_txn(
 		ret = pkm_lcs_source_layer_snapshot_acquire(&snapshot);
 		if (ret)
 			goto out_copy;
+		pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+		ret = pkm_lcs_private_credentials_acquire_for_token(
+			token, &limits, &private_view);
+		if (ret)
+			goto out_snapshot;
+		live_inputs.scope_guids = private_view.scope_guids;
+		live_inputs.scope_count = private_view.scope_count;
 		live_inputs.layers = snapshot.layers;
 		live_inputs.layer_count = snapshot.layer_count;
+		live_inputs.private_layers = private_view.private_layers;
+		live_inputs.private_layer_count =
+			private_view.private_layer_count;
 		live_inputs.base_metadata_present =
 			snapshot.base_metadata_present;
 		live_inputs.base_metadata_sd = snapshot.base_metadata_sd;
@@ -11904,6 +12009,8 @@ static long pkm_lcs_reg_create_key_for_token_with_txn(
 			token, ops, parent_fd, &copy, desired_access, ulayer,
 			flags, active_inputs, txn_fd, udisposition);
 	}
+	pkm_lcs_private_credentials_release(&private_view);
+out_snapshot:
 	pkm_lcs_source_layer_snapshot_release(&snapshot);
 out_copy:
 	pkm_lcs_syscall_path_copy_destroy(&copy);

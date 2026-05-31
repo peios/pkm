@@ -7153,6 +7153,126 @@ static void pkm_lcs_kunit_reg_open_key_uses_empty_private_credential_view(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_reg_open_key_uses_kacs_private_scope(
+	struct kunit *test)
+{
+	static const u8 global_root_guid[RSI_GUID_SIZE] = { 1 };
+	static const u8 private_root_guid[RSI_GUID_SIZE] = { 2 };
+	static const u8 scopes[1][KACS_LCS_SCOPE_GUID_BYTES] = { { 0x42 } };
+	const char name_src[] = "Machine";
+	const char path_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry global_hive;
+	struct reg_src_register_args global_args;
+	struct reg_src_hive_entry private_hive;
+	struct reg_src_register_args private_args;
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct pkm_lcs_kunit_read_key_source_script global_script = {
+		.expected_guid = global_root_guid,
+		.name = "Machine",
+	};
+	struct pkm_lcs_kunit_read_key_source_script private_script = {
+		.expected_guid = private_root_guid,
+		.name = "Machine",
+	};
+	struct task_struct *global_task;
+	struct task_struct *private_task;
+	struct file global_file = { };
+	struct file private_file = { };
+	const void *source_token;
+	const void *caller_token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	long fd;
+	int global_thread_ret;
+	int private_thread_ret;
+
+	pkm_lcs_kunit_reset_source_table();
+	source_token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, source_token);
+	caller_token = kacs_rust_kunit_create_lcs_private_credential_token(
+		scopes, ARRAY_SIZE(scopes), NULL, 0);
+	KUNIT_ASSERT_NOT_NULL(test, caller_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(source_token,
+								  &global_file),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(source_token,
+								  &private_file),
+			0L);
+
+	pkm_lcs_kunit_build_register_args(&global_args, &global_hive,
+					  name_src, global_root_guid[0], 0);
+	pkm_lcs_kunit_build_private_register_args(
+		&private_args, &private_hive, name_src, private_root_guid[0],
+		0x42);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				source_token, &global_file, &ops,
+				(const void __user *)&global_args),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				source_token, &private_file, &ops,
+				(const void __user *)&private_args),
+			0L);
+
+	sd = kacs_rust_kunit_create_file_sd(caller_token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	global_script.file = &global_file;
+	global_script.sd = sd;
+	global_script.sd_len = sd_len;
+	private_script.file = &private_file;
+	private_script.sd = sd;
+	private_script.sd_len = sd_len;
+
+	global_task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_read_key_source_thread, &global_script,
+		"pkm-lcs-kunit-reg-open-global-skip");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(global_task));
+	private_task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_read_key_source_thread, &private_script,
+		"pkm-lcs-kunit-reg-open-private-hit");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(private_task));
+
+	fd = pkm_lcs_reg_open_key_for_token(caller_token, &ops, -1,
+					    (const char __user *)path_src,
+					    KEY_READ, 0);
+	global_thread_ret = pkm_lcs_kunit_kthread_stop(global_task);
+	private_thread_ret = pkm_lcs_kunit_kthread_stop(private_task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, global_thread_ret, -EINTR);
+	KUNIT_EXPECT_EQ(test, global_script.result, -EINTR);
+	KUNIT_EXPECT_EQ(test, global_script.reads, 0U);
+	KUNIT_EXPECT_EQ(test, global_script.writes, 0U);
+	KUNIT_EXPECT_EQ(test, private_thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, private_script.result, 0);
+	KUNIT_EXPECT_EQ(test, private_script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, private_script.writes, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)fd, &snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.source_id, 2U);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, snapshot.path_component_count, 1U);
+	KUNIT_EXPECT_EQ(test, memcmp(snapshot.key_guid, private_root_guid,
+				    RSI_GUID_SIZE), 0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&global_file),
+			0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&private_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(caller_token);
+	kacs_rust_token_drop(source_token);
+}
+
 static void pkm_lcs_kunit_reg_open_key_uses_live_layer_table(
 	struct kunit *test)
 {
@@ -58922,6 +59042,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_uses_dynamic_hive),
 	KUNIT_CASE(
 		pkm_lcs_kunit_reg_open_key_uses_empty_private_credential_view),
+	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_uses_kacs_private_scope),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_uses_live_layer_table),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_policy_hidden_masks_base),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_syscall_dispatches_relative),

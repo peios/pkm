@@ -2002,6 +2002,7 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_query_key_info_args *args)
 {
+	struct pkm_lcs_private_credential_view private_view = { };
 	struct pkm_lcs_layer_snapshot layer_snapshot = { };
 	struct pkm_lcs_source_response_frame read_frame = { };
 	struct pkm_lcs_source_response_frame enum_frame = { };
@@ -2054,6 +2055,10 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
 	if (ret)
 		return ret;
+	ret = pkm_lcs_private_credentials_acquire_for_token(
+		pkm_kacs_current_effective_token_ptr(), &limits, &private_view);
+	if (ret)
+		goto out_frames;
 
 	pkm_lcs_source_response_frame_init(&read_frame);
 	pkm_lcs_source_response_frame_init(&enum_frame);
@@ -2080,7 +2085,8 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
 		enum_frame.data, enum_frame.len, enum_response.request_id,
 		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
-		NULL, 0, &enum_response.limits, &enum_summary);
+		private_view.private_layers, private_view.private_layer_count,
+		&enum_response.limits, &enum_summary);
 	if (ret)
 		goto out_frames;
 
@@ -2093,7 +2099,8 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	ret = pkm_lcs_rsi_materialize_query_values_info_summary(
 		values_frame.data, values_frame.len, values_response.request_id,
 		next_sequence, layer_snapshot.layers, layer_snapshot.layer_count,
-		NULL, 0, &values_response.limits, &values_summary);
+		private_view.private_layers, private_view.private_layer_count,
+		&values_response.limits, &values_summary);
 	if (ret)
 		goto out_frames;
 
@@ -2133,6 +2140,7 @@ out_frames:
 	pkm_lcs_source_response_frame_destroy(&values_frame);
 	pkm_lcs_source_response_frame_destroy(&enum_frame);
 	pkm_lcs_source_response_frame_destroy(&read_frame);
+	pkm_lcs_private_credentials_release(&private_view);
 	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }
@@ -2214,6 +2222,7 @@ static long pkm_lcs_key_fd_query_value_from_args(
 	struct reg_query_value_args *args)
 {
 	struct pkm_lcs_layer_snapshot layer_snapshot = { };
+	struct pkm_lcs_private_credential_view private_view = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_query_value_result result = { };
@@ -2277,6 +2286,10 @@ static long pkm_lcs_key_fd_query_value_from_args(
 	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
 	if (ret)
 		goto out_name;
+	ret = pkm_lcs_private_credentials_acquire_for_token(
+		pkm_kacs_current_effective_token_ptr(), &limits, &private_view);
+	if (ret)
+		goto out_frame;
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
@@ -2289,7 +2302,8 @@ static long pkm_lcs_key_fd_query_value_from_args(
 	ret = pkm_lcs_rsi_materialize_query_value_response(
 		frame.data, frame.len, response.request_id, next_sequence,
 		value_name, name_len, layer_snapshot.layers,
-		layer_snapshot.layer_count, NULL, 0, &limits, &result);
+		layer_snapshot.layer_count, private_view.private_layers,
+		private_view.private_layer_count, &limits, &result);
 	if (ret)
 		goto out_frame;
 	if (!result.found) {
@@ -2341,6 +2355,7 @@ static long pkm_lcs_key_fd_query_value_from_args(
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_private_credentials_release(&private_view);
 	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 out_name:
 	kfree(value_name);
@@ -3079,7 +3094,6 @@ static long pkm_lcs_key_fd_delete_key_post_lookup(
 	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
 	if (ret)
 		return ret;
-
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, 0, parent_guid, child_name, child_name_len,
@@ -3136,7 +3150,6 @@ static long pkm_lcs_key_fd_hide_key_post_lookup(
 	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
 	if (ret)
 		return ret;
-
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, 0, parent_guid, child_name, child_name_len,
@@ -3743,6 +3756,7 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 	struct reg_query_values_batch_args *args)
 {
 	struct pkm_lcs_layer_snapshot layer_snapshot = { };
+	struct pkm_lcs_private_credential_view private_view = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_query_values_batch_result result = { };
@@ -3791,6 +3805,10 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
 	if (ret)
 		return ret;
+	ret = pkm_lcs_private_credentials_acquire_for_token(
+		pkm_kacs_current_effective_token_ptr(), &limits, &private_view);
+	if (ret)
+		goto out_frame;
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
@@ -3801,7 +3819,8 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 
 	ret = pkm_lcs_rsi_materialize_query_values_batch_response(
 		frame.data, frame.len, response.request_id, next_sequence,
-		layer_snapshot.layers, layer_snapshot.layer_count, NULL, 0,
+		layer_snapshot.layers, layer_snapshot.layer_count,
+		private_view.private_layers, private_view.private_layer_count,
 		&response.limits, NULL, 0, &result);
 	if (ret)
 		goto out_frame;
@@ -3823,7 +3842,8 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 		ret = pkm_lcs_rsi_materialize_query_values_batch_response(
 			frame.data, frame.len, response.request_id,
 			next_sequence, layer_snapshot.layers,
-			layer_snapshot.layer_count, NULL, 0, &response.limits,
+			layer_snapshot.layer_count, private_view.private_layers,
+			private_view.private_layer_count, &response.limits,
 			output, result.required_len, &written);
 		if (ret)
 			goto out_output;
@@ -3850,6 +3870,7 @@ out_output:
 	kfree(output);
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_private_credentials_release(&private_view);
 	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }
@@ -3872,6 +3893,7 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 	struct reg_enum_value_args *args)
 {
 	struct pkm_lcs_layer_snapshot layer_snapshot = { };
+	struct pkm_lcs_private_credential_view private_view = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_enum_value_result result = { };
@@ -3928,6 +3950,10 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
 	if (ret)
 		return ret;
+	ret = pkm_lcs_private_credentials_acquire_for_token(
+		pkm_kacs_current_effective_token_ptr(), &limits, &private_view);
+	if (ret)
+		goto out_frame;
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
@@ -3938,8 +3964,9 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 
 	ret = pkm_lcs_rsi_materialize_enum_value_response(
 		frame.data, frame.len, response.request_id, next_sequence,
-		index, layer_snapshot.layers, layer_snapshot.layer_count, NULL,
-		0, &response.limits, &result);
+		index, layer_snapshot.layers, layer_snapshot.layer_count,
+		private_view.private_layers, private_view.private_layer_count,
+		&response.limits, &result);
 	if (ret)
 		goto out_frame;
 	if (!result.found) {
@@ -3991,6 +4018,7 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_private_credentials_release(&private_view);
 	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }
@@ -4009,6 +4037,8 @@ static void pkm_lcs_key_fd_enum_subkey_reset_args(
 static long pkm_lcs_key_fd_enum_subkey_read_metadata(
 	struct pkm_lcs_key_fd *key_fd, u64 txn_id, u64 next_sequence,
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count,
 	const struct pkm_lcs_runtime_limits *limits,
 	const u8 child_guid[RSI_GUID_SIZE],
 	struct reg_enum_subkey_args *args)
@@ -4051,7 +4081,8 @@ static long pkm_lcs_key_fd_enum_subkey_read_metadata(
 		goto out_frames;
 	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
 		enum_frame.data, enum_frame.len, enum_response.request_id,
-		next_sequence, layers, layer_count, NULL, 0,
+		next_sequence, layers, layer_count, private_layers,
+		private_layer_count,
 		&enum_response.limits, &enum_summary);
 	if (ret)
 		goto out_frames;
@@ -4064,7 +4095,8 @@ static long pkm_lcs_key_fd_enum_subkey_read_metadata(
 		goto out_frames;
 	ret = pkm_lcs_rsi_materialize_query_values_info_summary(
 		values_frame.data, values_frame.len, values_response.request_id,
-		next_sequence, layers, layer_count, NULL, 0,
+		next_sequence, layers, layer_count, private_layers,
+		private_layer_count,
 		&values_response.limits, &values_summary);
 	if (ret)
 		goto out_frames;
@@ -4086,6 +4118,7 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 	struct reg_enum_subkey_args *args)
 {
 	struct pkm_lcs_layer_snapshot layer_snapshot = { };
+	struct pkm_lcs_private_credential_view private_view = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_rsi_enum_subkey_result result = { };
@@ -4135,6 +4168,10 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 	ret = pkm_lcs_source_layer_snapshot_acquire(&layer_snapshot);
 	if (ret)
 		return ret;
+	ret = pkm_lcs_private_credentials_acquire_for_token(
+		pkm_kacs_current_effective_token_ptr(), &limits, &private_view);
+	if (ret)
+		goto out_frame;
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
@@ -4145,8 +4182,9 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 
 	ret = pkm_lcs_rsi_materialize_enum_subkey_response(
 		frame.data, frame.len, response.request_id, next_sequence,
-		index, layer_snapshot.layers, layer_snapshot.layer_count, NULL,
-		0, &response.limits, &result);
+		index, layer_snapshot.layers, layer_snapshot.layer_count,
+		private_view.private_layers, private_view.private_layer_count,
+		&response.limits, &result);
 	if (ret)
 		goto out_frame;
 	if (!result.found) {
@@ -4173,7 +4211,9 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 	args->name_len = result.name_len;
 	ret = pkm_lcs_key_fd_enum_subkey_read_metadata(
 		key_fd, txn_id, next_sequence, layer_snapshot.layers,
-		layer_snapshot.layer_count, &limits, result.child_guid, args);
+		layer_snapshot.layer_count, private_view.private_layers,
+		private_view.private_layer_count, &limits, result.child_guid,
+		args);
 	if (ret)
 		goto out_frame;
 
@@ -4185,6 +4225,7 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
+	pkm_lcs_private_credentials_release(&private_view);
 	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
 }

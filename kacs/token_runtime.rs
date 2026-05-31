@@ -50,7 +50,7 @@ use crate::mic::{
     TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
 };
 use crate::pip::PipContext;
-use crate::pkm_alloc::{slice_to_vec, TryClone, Vec};
+use crate::pkm_alloc::{slice_to_vec, String, TryClone, Vec};
 use crate::privilege::{
     TokenPrivileges, SE_RELABEL_PRIVILEGE, SE_RESTORE_PRIVILEGE, SE_SECURITY_PRIVILEGE,
 };
@@ -71,7 +71,7 @@ use crate::token::{
     AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
 };
 use core::cell::UnsafeCell;
-use core::ffi::{c_long, c_ulong, c_void};
+use core::ffi::{c_char, c_long, c_ulong, c_void};
 use core::ptr::{copy_nonoverlapping, null, null_mut};
 use core::sync::atomic::{
     fence, AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering,
@@ -98,6 +98,12 @@ const TOKEN_SPEC_VERSION: u32 = 2;
 const TOKEN_SPEC_HEADER_LEN: usize = 192;
 const MAX_TOKEN_SPEC_BYTES: usize = 65_536;
 const TOKEN_SOURCE_NAME_LEN: usize = 8;
+const TOKEN_LCS_CREDENTIALS_VERSION: u32 = 1;
+const TOKEN_LCS_CREDENTIALS_HEADER_LEN: usize = 16;
+const KACS_LCS_SCOPE_GUID_BYTES: usize = 16;
+const KACS_LCS_MAX_SCOPE_GUIDS_PER_TOKEN: usize = 256;
+const KACS_LCS_MAX_PRIVATE_LAYERS_PER_TOKEN: usize = 256;
+const KACS_LCS_MAX_PRIVATE_LAYER_NAME_BYTES: usize = 255;
 const MAX_DEFAULT_DACL_BYTES: usize = 65_536;
 const MAX_SESSION_SPEC_BYTES: usize = 4096;
 const MIN_SESSION_SPEC_BYTES: usize = 15;
@@ -563,6 +569,8 @@ struct PkmKacsBootToken {
     restricted_device_group_views: Vec<SidAndAttributes<'static>>,
     user_claims: Vec<ClaimAttribute>,
     device_claims: Vec<ClaimAttribute>,
+    lcs_scope_guids: Vec<[u8; KACS_LCS_SCOPE_GUID_BYTES]>,
+    lcs_private_layers: Vec<String>,
     confinement_sid: Option<OwnedSid>,
     confinement_capabilities: Vec<OwnedSidAndAttributes>,
     confinement_capability_views: Vec<SidAndAttributes<'static>>,
@@ -1960,6 +1968,119 @@ fn parse_projected_supplementary_gids(bytes: &[u8], count: u32) -> Result<Vec<u3
     }
 
     Ok(gids)
+}
+
+fn string_from_utf8_bytes(bytes: &[u8]) -> Result<String, i32> {
+    let value = core::str::from_utf8(bytes).map_err(|_| -EINVAL)?;
+    let mut stored = String::new();
+
+    for character in value.chars() {
+        stored.push(character).map_err(|_| -ENOMEM)?;
+    }
+
+    Ok(stored)
+}
+
+fn parse_lcs_credential_extension(
+    spec: &[u8],
+    sorted_offsets: &[usize],
+    offset: u32,
+) -> Result<(Vec<[u8; KACS_LCS_SCOPE_GUID_BYTES]>, Vec<String>), i32> {
+    let mut scope_guids = Vec::new();
+    let mut private_layers = Vec::new();
+
+    if offset == 0 {
+        return Ok((scope_guids, private_layers));
+    }
+
+    let extension = token_spec_unbounded_section(spec, sorted_offsets, offset)?;
+    if extension.len() < TOKEN_LCS_CREDENTIALS_HEADER_LEN {
+        return Err(-EINVAL);
+    }
+    if read_le_u32(extension, 0).ok_or(-EINVAL)? != TOKEN_LCS_CREDENTIALS_VERSION {
+        return Err(-EINVAL);
+    }
+    if read_le_u32(extension, 4).ok_or(-EINVAL)? != 0 {
+        return Err(-EINVAL);
+    }
+
+    let scope_count =
+        usize::try_from(read_le_u32(extension, 8).ok_or(-EINVAL)?).map_err(|_| -EINVAL)?;
+    let private_layer_count =
+        usize::try_from(read_le_u32(extension, 12).ok_or(-EINVAL)?).map_err(|_| -EINVAL)?;
+    if scope_count > KACS_LCS_MAX_SCOPE_GUIDS_PER_TOKEN
+        || private_layer_count > KACS_LCS_MAX_PRIVATE_LAYERS_PER_TOKEN
+    {
+        return Err(-EINVAL);
+    }
+
+    let scope_bytes = scope_count
+        .checked_mul(KACS_LCS_SCOPE_GUID_BYTES)
+        .ok_or(-ERANGE)?;
+    let private_header_offset = TOKEN_LCS_CREDENTIALS_HEADER_LEN
+        .checked_add(scope_bytes)
+        .ok_or(-ERANGE)?;
+    let private_header_bytes = private_layer_count.checked_mul(4).ok_or(-ERANGE)?;
+    let private_payload_offset = private_header_offset
+        .checked_add(private_header_bytes)
+        .ok_or(-ERANGE)?;
+    if private_payload_offset > extension.len() {
+        return Err(-EINVAL);
+    }
+
+    scope_guids = Vec::with_capacity(scope_count).map_err(|_| -ENOMEM)?;
+    for index in 0..scope_count {
+        let start = TOKEN_LCS_CREDENTIALS_HEADER_LEN
+            .checked_add(index.checked_mul(KACS_LCS_SCOPE_GUID_BYTES).ok_or(-ERANGE)?)
+            .ok_or(-ERANGE)?;
+        let end = start.checked_add(KACS_LCS_SCOPE_GUID_BYTES).ok_or(-ERANGE)?;
+        let guid = <[u8; KACS_LCS_SCOPE_GUID_BYTES]>::try_from(
+            extension.get(start..end).ok_or(-EINVAL)?,
+        )
+        .map_err(|_| -EINVAL)?;
+        if guid.iter().all(|byte| *byte == 0) {
+            return Err(-EINVAL);
+        }
+        if scope_guids.as_slice().iter().any(|existing| existing == &guid) {
+            return Err(-EINVAL);
+        }
+        scope_guids.push(guid).map_err(|_| -ENOMEM)?;
+    }
+
+    private_layers = Vec::with_capacity(private_layer_count).map_err(|_| -ENOMEM)?;
+    let mut payload_cursor = private_payload_offset;
+    for index in 0..private_layer_count {
+        let len_offset = private_header_offset
+            .checked_add(index.checked_mul(4).ok_or(-ERANGE)?)
+            .ok_or(-ERANGE)?;
+        let name_len =
+            usize::try_from(read_le_u32(extension, len_offset).ok_or(-EINVAL)?)
+                .map_err(|_| -EINVAL)?;
+        if name_len == 0 || name_len > KACS_LCS_MAX_PRIVATE_LAYER_NAME_BYTES {
+            return Err(-EINVAL);
+        }
+        let end = payload_cursor.checked_add(name_len).ok_or(-ERANGE)?;
+        let name_bytes = extension.get(payload_cursor..end).ok_or(-EINVAL)?;
+        let name = core::str::from_utf8(name_bytes).map_err(|_| -EINVAL)?;
+        if name.contains('\\') || name.contains('/') || name.as_bytes().contains(&0) {
+            return Err(-EINVAL);
+        }
+        if private_layers
+            .as_slice()
+            .iter()
+            .any(|existing| existing.as_str().eq_ignore_ascii_case(name))
+        {
+            return Err(-EINVAL);
+        }
+        let stored = string_from_utf8_bytes(name.as_bytes())?;
+        private_layers.push(stored).map_err(|_| -ENOMEM)?;
+        payload_cursor = end;
+    }
+    if payload_cursor != extension.len() {
+        return Err(-EINVAL);
+    }
+
+    Ok((scope_guids, private_layers))
 }
 
 fn published_session_ref_by_id(session_id: u64) -> Result<*const PkmKacsSession, i32> {
@@ -4654,6 +4775,8 @@ impl PkmKacsBootToken {
             restricted_device_group_views: Vec::new(),
             user_claims: Vec::new(),
             device_claims: Vec::new(),
+            lcs_scope_guids: Vec::new(),
+            lcs_private_layers: Vec::new(),
             confinement_sid: None,
             confinement_capabilities: Vec::new(),
             confinement_capability_views: Vec::new(),
@@ -4806,6 +4929,8 @@ impl PkmKacsBootToken {
             restricted_device_group_views: Vec::new(),
             user_claims: Vec::new(),
             device_claims: Vec::new(),
+            lcs_scope_guids: Vec::new(),
+            lcs_private_layers: Vec::new(),
             confinement_sid: None,
             confinement_capabilities: Vec::new(),
             confinement_capability_views: Vec::new(),
@@ -5175,6 +5300,8 @@ impl PkmKacsBootToken {
             restricted_device_group_views: Vec::new(),
             user_claims: Vec::new(),
             device_claims: Vec::new(),
+            lcs_scope_guids: Vec::new(),
+            lcs_private_layers: Vec::new(),
             confinement_sid: None,
             confinement_capabilities: Vec::new(),
             confinement_capability_views: Vec::new(),
@@ -5250,6 +5377,7 @@ impl PkmKacsBootToken {
         let restricted_device_groups_count = read_le_u32(spec, 172).ok_or(-EINVAL)?;
         let origin = read_le_u64(spec, 176).ok_or(-EINVAL)?;
         let interactive_session_id = read_le_u32(spec, 184).ok_or(-EINVAL)?;
+        let lcs_credentials_offset = read_le_u32(spec, 188).ok_or(-EINVAL)?;
         let token_id;
         let modified_id;
         let session;
@@ -5274,9 +5402,6 @@ impl PkmKacsBootToken {
             return Err(-EINVAL);
         }
         if read_le_u32(spec, 32).ok_or(-EINVAL)? != 0 {
-            return Err(-EINVAL);
-        }
-        if read_le_u32(spec, 188).ok_or(-EINVAL)? != 0 {
             return Err(-EINVAL);
         }
         if (mandatory_policy & !TOKEN_MANDATORY_POLICY_ALLOWED_MASK) != 0 {
@@ -5311,6 +5436,7 @@ impl PkmKacsBootToken {
                 confinement_caps_offset,
                 supp_gids_offset,
                 restricted_device_groups_offset,
+                lcs_credentials_offset,
             ],
         )?;
         let user_sid = build_owned_sid(token_spec_unbounded_section(
@@ -5381,6 +5507,8 @@ impl PkmKacsBootToken {
             )?;
         let projected_supplementary_gids =
             parse_projected_supplementary_gids(supp_gids_bytes, supp_gids_count)?;
+        let (lcs_scope_guids, lcs_private_layers) =
+            parse_lcs_credential_extension(spec, &sorted_offsets, lcs_credentials_offset)?;
         let user_claims = if user_claims_bytes.is_empty() {
             Vec::new()
         } else {
@@ -5568,6 +5696,8 @@ impl PkmKacsBootToken {
             restricted_device_group_views,
             user_claims,
             device_claims,
+            lcs_scope_guids,
+            lcs_private_layers,
             confinement_sid,
             confinement_capabilities,
             confinement_capability_views,
@@ -5770,6 +5900,26 @@ impl PkmKacsBootToken {
                     return null();
                 }
             },
+            lcs_scope_guids: match try_clone_vec(&token.lcs_scope_guids) {
+                Ok(value) => value,
+                Err(_) => {
+                    free_allocated_bytes(default_dacl_ptr);
+                    free_allocated_bytes(own_sd_ptr);
+                    unsafe { PkmKacsSession::drop_ref(session) };
+                    unsafe { pkm_kacs_free(token_ptr.cast()) };
+                    return null();
+                }
+            },
+            lcs_private_layers: match try_clone_vec(&token.lcs_private_layers) {
+                Ok(value) => value,
+                Err(_) => {
+                    free_allocated_bytes(default_dacl_ptr);
+                    free_allocated_bytes(own_sd_ptr);
+                    unsafe { PkmKacsSession::drop_ref(session) };
+                    unsafe { pkm_kacs_free(token_ptr.cast()) };
+                    return null();
+                }
+            },
             confinement_sid,
             confinement_capabilities,
             confinement_capability_views,
@@ -5949,6 +6099,8 @@ impl PkmKacsBootToken {
             restricted_device_group_views,
             user_claims: try_clone_vec(&self.user_claims)?,
             device_claims: try_clone_vec(&self.device_claims)?,
+            lcs_scope_guids: try_clone_vec(&self.lcs_scope_guids)?,
+            lcs_private_layers: try_clone_vec(&self.lcs_private_layers)?,
             confinement_sid,
             confinement_capabilities,
             confinement_capability_views,
@@ -6075,6 +6227,8 @@ impl PkmKacsBootToken {
             restricted_device_group_views,
             user_claims: try_clone_vec(&self.user_claims)?,
             device_claims: try_clone_vec(&self.device_claims)?,
+            lcs_scope_guids: try_clone_vec(&self.lcs_scope_guids)?,
+            lcs_private_layers: try_clone_vec(&self.lcs_private_layers)?,
             confinement_sid,
             confinement_capabilities,
             confinement_capability_views,
@@ -6100,6 +6254,61 @@ impl PkmKacsBootToken {
         unsafe { core::ptr::write(token_ptr, derived) };
         PkmKacsSession::register_live_token(session);
         Ok(token_ptr.cast())
+    }
+
+    fn create_kunit_lcs_private_credential_token(
+        scope_guids: *const [u8; KACS_LCS_SCOPE_GUID_BYTES],
+        scope_count: usize,
+        private_layer_name: *const c_char,
+        private_layer_name_len: usize,
+    ) -> Option<*const c_void> {
+        if scope_count > KACS_LCS_MAX_SCOPE_GUIDS_PER_TOKEN {
+            return None;
+        }
+        if scope_count != 0 && scope_guids.is_null() {
+            return None;
+        }
+        if private_layer_name_len > KACS_LCS_MAX_PRIVATE_LAYER_NAME_BYTES {
+            return None;
+        }
+        if private_layer_name_len != 0 && private_layer_name.is_null() {
+            return None;
+        }
+
+        let token_ptr = Self::create_kunit_logon_type_token(
+            LOGON_TYPE_SERVICE,
+            SE_CREATE_TOKEN_PRIVILEGE | SE_TCB_PRIVILEGE,
+        )?;
+        let result = (|| -> Result<(), i32> {
+            let token = unsafe { &mut *(token_ptr as *mut Self) };
+            let scopes = if scope_count == 0 {
+                &[][..]
+            } else {
+                unsafe { core::slice::from_raw_parts(scope_guids, scope_count) }
+            };
+            token.lcs_scope_guids = slice_to_vec(scopes).map_err(|_| -ENOMEM)?;
+
+            let mut private_layers = Vec::new();
+            if private_layer_name_len != 0 {
+                let layer_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        private_layer_name.cast::<u8>(),
+                        private_layer_name_len,
+                    )
+                };
+                let layer = string_from_utf8_bytes(layer_bytes)?;
+                private_layers.push(layer).map_err(|_| -ENOMEM)?;
+            }
+            token.lcs_private_layers = private_layers;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            unsafe { Self::drop_ref(token_ptr) };
+            return None;
+        }
+
+        Some(token_ptr)
     }
 
     unsafe fn drop_ref(ptr: *const c_void) {
@@ -6909,6 +7118,8 @@ impl PkmKacsBootToken {
             restricted_device_group_views,
             user_claims: try_clone_vec(&self.user_claims)?,
             device_claims: try_clone_vec(&self.device_claims)?,
+            lcs_scope_guids: try_clone_vec(&self.lcs_scope_guids)?,
+            lcs_private_layers: try_clone_vec(&self.lcs_private_layers)?,
             confinement_sid,
             confinement_capabilities,
             confinement_capability_views,
@@ -8205,6 +8416,84 @@ pub extern "C" fn kacs_rust_token_guid(token: *const c_void, out: *mut u8) -> i3
     };
 
     unsafe { core::ptr::copy_nonoverlapping(token.token_guid.as_ptr(), out, KACS_UUID_BYTES) };
+    0
+}
+
+#[no_mangle]
+/// Returns the number of LCS private hive scope GUIDs carried by a live token.
+pub extern "C" fn kacs_rust_token_lcs_scope_guid_count(token: *const c_void) -> u32 {
+    unsafe { PkmKacsBootToken::from_ptr(token) }
+        .and_then(|token| u32::try_from(token.lcs_scope_guids.len()).ok())
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+/// Copies one LCS private hive scope GUID from a live token.
+pub extern "C" fn kacs_rust_token_lcs_scope_guid(
+    token: *const c_void,
+    index: u32,
+    out: *mut u8,
+) -> i32 {
+    if out.is_null() {
+        return -EINVAL;
+    }
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let Ok(index) = usize::try_from(index) else {
+        return -EINVAL;
+    };
+    let Some(guid) = token.lcs_scope_guids.as_slice().get(index) else {
+        return -EINVAL;
+    };
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(guid.as_ptr(), out, KACS_LCS_SCOPE_GUID_BYTES);
+    }
+    0
+}
+
+#[no_mangle]
+/// Returns the number of LCS private layer names carried by a live token.
+pub extern "C" fn kacs_rust_token_lcs_private_layer_count(token: *const c_void) -> u32 {
+    unsafe { PkmKacsBootToken::from_ptr(token) }
+        .and_then(|token| u32::try_from(token.lcs_private_layers.len()).ok())
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+/// Borrows one LCS private layer name from a live token.
+pub extern "C" fn kacs_rust_token_lcs_private_layer(
+    token: *const c_void,
+    index: u32,
+    name_out: *mut *const c_char,
+    len_out: *mut u32,
+) -> i32 {
+    let Some(name_out) = (unsafe { name_out.as_mut() }) else {
+        return -EINVAL;
+    };
+    let Some(len_out) = (unsafe { len_out.as_mut() }) else {
+        return -EINVAL;
+    };
+
+    *name_out = null();
+    *len_out = 0;
+
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let Ok(index) = usize::try_from(index) else {
+        return -EINVAL;
+    };
+    let Some(name) = token.lcs_private_layers.as_slice().get(index) else {
+        return -EINVAL;
+    };
+    let Ok(name_len) = u32::try_from(name.len()) else {
+        return -ERANGE;
+    };
+
+    *name_out = name.as_bytes().as_ptr().cast::<c_char>();
+    *len_out = name_len;
     0
 }
 
@@ -10788,6 +11077,23 @@ pub extern "C" fn kacs_rust_kunit_create_logon_type_token(
 ) -> *const c_void {
     PkmKacsBootToken::create_kunit_logon_type_token(logon_type, enabled_privileges)
         .unwrap_or(null())
+}
+
+#[no_mangle]
+/// Creates a KUnit-only token carrying one bounded LCS private credential set.
+pub extern "C" fn kacs_rust_kunit_create_lcs_private_credential_token(
+    scope_guids: *const [u8; KACS_LCS_SCOPE_GUID_BYTES],
+    scope_count: usize,
+    private_layer_name: *const c_char,
+    private_layer_name_len: usize,
+) -> *const c_void {
+    PkmKacsBootToken::create_kunit_lcs_private_credential_token(
+        scope_guids,
+        scope_count,
+        private_layer_name,
+        private_layer_name_len,
+    )
+    .unwrap_or(null())
 }
 
 #[no_mangle]

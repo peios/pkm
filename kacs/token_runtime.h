@@ -8,6 +8,9 @@
 #include "access_check.h"
 
 #define KACS_UUID_BYTES 16U
+#define KACS_LCS_SCOPE_GUID_BYTES 16U
+#define KACS_LCS_MAX_SCOPE_GUIDS_PER_TOKEN 256U
+#define KACS_LCS_MAX_PRIVATE_LAYERS_PER_TOKEN 256U
 
 typedef struct {
 	u8 bytes[KACS_UUID_BYTES];
@@ -640,6 +643,12 @@ int kacs_rust_token_user_sid(const void *token, const u8 **out_sid_ptr,
 int kacs_rust_token_guid(const void *token, u8 out[KACS_UUID_BYTES]);
 int kacs_rust_token_audit_summary(
 	const void *token, struct pkm_kacs_token_audit_summary *out);
+u32 kacs_rust_token_lcs_scope_guid_count(const void *token);
+int kacs_rust_token_lcs_scope_guid(const void *token, u32 index,
+				   u8 out[KACS_LCS_SCOPE_GUID_BYTES]);
+u32 kacs_rust_token_lcs_private_layer_count(const void *token);
+int kacs_rust_token_lcs_private_layer(const void *token, u32 index,
+				      const char **name_out, u32 *len_out);
 bool kacs_rust_token_has_enabled_privilege(const void *token, u64 privilege);
 bool kacs_rust_token_has_enabled_administrators(const void *token);
 int kacs_rust_token_is_remote_shutdown_origin(const void *token);
@@ -890,6 +899,9 @@ const void *kacs_rust_kunit_create_adjustable_privileges_token(void);
 const void *kacs_rust_kunit_create_privilege_audit_token(void);
 const void *kacs_rust_kunit_create_logon_type_token(u32 logon_type,
 						    u64 enabled_privileges);
+const void *kacs_rust_kunit_create_lcs_private_credential_token(
+	const u8 (*scope_guids)[KACS_LCS_SCOPE_GUID_BYTES], size_t scope_count,
+	const char *private_layer_name, size_t private_layer_name_len);
 const void *kacs_rust_kunit_create_impersonation_variant_token(
 	u32 user_kind, u32 token_type, u32 impersonation_level,
 	u32 integrity_level, u32 restricted, u64 enabled_privileges);

@@ -256,6 +256,15 @@ struct pkm_lcs_create_missing_runtime_inputs {
 	const struct pkm_lcs_key_guid_generator *generator;
 };
 
+struct pkm_lcs_private_credential_view {
+	u8 (*scope_guids)[16];
+	u32 scope_count;
+	u32 _pad0;
+	struct pkm_lcs_rsi_private_layer_view *private_layers;
+	u32 private_layer_count;
+	u32 _pad1;
+};
+
 struct pkm_lcs_layer_metadata_sd_selection {
 	u32 index;
 	u32 _pad;
@@ -684,6 +693,11 @@ long pkm_lcs_self_config_registry_root_discover_from_machine_hive(
 long pkm_lcs_runtime_limits_refresh_self_config_from_machine_hive(
 	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_self_config_apply_plan *result_out);
+long pkm_lcs_private_credentials_acquire_for_token(
+	const void *token, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_private_credential_view *view);
+void pkm_lcs_private_credentials_release(
+	struct pkm_lcs_private_credential_view *view);
 long pkm_lcs_layer_metadata_root_discover_from_machine_hive(
 	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
 	bool *present_out, u8 layers_root_guid_out[RSI_GUID_SIZE]);

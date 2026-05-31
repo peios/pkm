@@ -41113,6 +41113,49 @@ static void pkm_kunit_set_caap_public_malformed_keeps_old_policy(
 			0);
 }
 
+static void pkm_kunit_lcs_private_credentials_accessors(struct kunit *test)
+{
+	static const u8 scopes[2][KACS_LCS_SCOPE_GUID_BYTES] = {
+		{ 0x10, 0x11, 0x12, 0x13 },
+		{ 0x20, 0x21, 0x22, 0x23 },
+	};
+	static const char layer[] = "role-service";
+	u8 copied[KACS_LCS_SCOPE_GUID_BYTES] = { };
+	const char *name = NULL;
+	const void *token;
+	u32 name_len = 0;
+
+	token = kacs_rust_kunit_create_lcs_private_credential_token(
+		scopes, ARRAY_SIZE(scopes), layer, strlen(layer));
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test, kacs_rust_token_lcs_scope_guid_count(token),
+			(u32)ARRAY_SIZE(scopes));
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_token_lcs_scope_guid(token, 1, copied),
+			0);
+	KUNIT_EXPECT_MEMEQ(test, copied, scopes[1], sizeof(copied));
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_token_lcs_scope_guid(token, 2, copied),
+			-EINVAL);
+
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_token_lcs_private_layer_count(token), 1U);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_token_lcs_private_layer(token, 0, &name,
+							  &name_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, name);
+	KUNIT_EXPECT_EQ(test, name_len, (u32)strlen(layer));
+	KUNIT_EXPECT_MEMEQ(test, name, layer, strlen(layer));
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_token_lcs_private_layer(token, 1, &name,
+							  &name_len),
+			-EINVAL);
+
+	kacs_rust_token_drop(token);
+}
+
 static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_probe_smoke),
 	KUNIT_CASE(pkm_kunit_access_mask_constants_match_spec),
@@ -41175,6 +41218,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_create_token_caller_logon_sid_denies),
 	KUNIT_CASE(pkm_kunit_create_token_max_groups_succeeds),
 	KUNIT_CASE(pkm_kunit_create_token_over_max_groups_fails_closed),
+	KUNIT_CASE(pkm_kunit_lcs_private_credentials_accessors),
 	KUNIT_CASE(pkm_kunit_session_destroy_last_token_emits_kmes),
 	KUNIT_CASE(pkm_kunit_logon_session_destroyed_msgpack_schema),
 	KUNIT_CASE(pkm_kunit_destroy_empty_session_success_emits_kmes),
