@@ -3834,6 +3834,73 @@ static void pkm_kunit_kmes_attach_mapping_view_tracks_emission(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_kunit_kmes_consumer_restart_sees_surviving_events(
+	struct kunit *test)
+{
+	static const u8 payload[] = { 0xc0 };
+	const void *token;
+	struct pkm_kmes_kunit_fd_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view event = { };
+	int *fds;
+	int count = nr_cpu_ids;
+	u64 capacity = 0;
+	u8 event_bytes[128] = { 0 };
+	int emitted_fd = -1;
+	int emitted_count = 0;
+	long ret;
+	int i;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	fds = kunit_kcalloc(test, nr_cpu_ids, sizeof(*fds), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fds);
+	for (i = 0; i < nr_cpu_ids; i++)
+		fds[i] = -1;
+
+	pkm_kunit_reset_kmes();
+	ret = pkm_kunit_kmes_attach_all(token, fds, &count, &capacity);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_GT(test, count, 0);
+	pkm_kunit_close_fds(test, fds, count);
+	for (i = 0; i < nr_cpu_ids; i++)
+		fds[i] = -1;
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+			     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, payload,
+			     sizeof(payload));
+
+	count = nr_cpu_ids;
+	capacity = 0;
+	ret = pkm_kunit_kmes_attach_all(token, fds, &count, &capacity);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	for (i = 0; i < count; i++) {
+		KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_fd_snapshot(fds[i], &snapshot),
+				0);
+		if (snapshot.write_pos == 0)
+			continue;
+		emitted_fd = fds[i];
+		emitted_count++;
+	}
+	KUNIT_EXPECT_EQ(test, emitted_count, 1);
+	KUNIT_ASSERT_GE(test, emitted_fd, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_fd_view(emitted_fd, 8192, event_bytes,
+						 sizeof(event_bytes)),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(event_bytes,
+						     sizeof(event_bytes), &event));
+	KUNIT_EXPECT_EQ(test, event.origin_class, KMES_ORIGIN_KACS);
+	pkm_kunit_expect_bytes_eq(test, event.type_ptr, event.type_len,
+				  (const u8 *)PKM_KUNIT_KMES_DIRECT_TYPE,
+				  sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1);
+	pkm_kunit_expect_bytes_eq(test, event.payload_ptr, event.payload_len,
+				  payload, sizeof(payload));
+
+	pkm_kunit_close_fds(test, fds, count);
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_kunit_kmes_swap_old_fd_freezes_and_new_attach_rebinds(
 	struct kunit *test)
 {
@@ -41583,6 +41650,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_attach_denies_without_security),
 	KUNIT_CASE(pkm_kunit_kmes_attach_checks_privilege_before_usercopy),
 	KUNIT_CASE(pkm_kunit_kmes_attach_mapping_view_tracks_emission),
+	KUNIT_CASE(pkm_kunit_kmes_consumer_restart_sees_surviving_events),
 	KUNIT_CASE(pkm_kunit_kmes_swap_old_fd_freezes_and_new_attach_rebinds),
 	KUNIT_CASE(pkm_kunit_kmes_swap_wakes_old_generation_waiter),
 	KUNIT_CASE(pkm_kunit_kmes_swap_downsize_preserves_newest_suffix),
