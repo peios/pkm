@@ -21665,6 +21665,10 @@ static void pkm_lcs_kunit_key_fd_restore_admission(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
 			REG_WATCH_OVERFLOW);
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)-EAGAIN);
 	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
 	KUNIT_EXPECT_EQ(test, after.privileges_used &
 				      KACS_SE_RESTORE_PRIVILEGE,
