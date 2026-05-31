@@ -15333,6 +15333,7 @@ static void pkm_lcs_kunit_key_fd_set_value_nontransactional_success(
 		'A', 'n', 's', 'w', 'e', 'r', '!'
 	};
 	static const u8 data[] = { 0x2a, 0x00, 0x00, 0x00 };
+	static const u8 default_data[] = { 0x51 };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_set_value_args args = {
@@ -15430,6 +15431,63 @@ static void pkm_lcs_kunit_key_fd_set_value_nontransactional_success(
 	KUNIT_EXPECT_EQ(test, memcmp(event + 8, value_name,
 				     strlen(value_name)),
 			0);
+
+	memset(&ctx, 0, sizeof(ctx));
+	memset(event, 0, sizeof(event));
+	script.expected_value_name = "";
+	script.expected_data = default_data;
+	script.expected_data_len = sizeof(default_data);
+	script.expected_expected_sequence = 0;
+	script.observed_last_write_time = 0;
+	script.reads = 0;
+	script.writes = 0;
+	script.result = 0;
+	args = (struct reg_set_value_args) {
+		.name_len = 0,
+		.name_ptr = 0,
+		.type = REG_BINARY,
+		.data_len = sizeof(default_data),
+		.data_ptr = (u64)(unsigned long)default_data,
+		.txn_fd = -1,
+		.expected_seq = 0,
+	};
+	generation_before = generation_after;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_before),
+			0L);
+	script.expected_sequence = sequence_before;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_set_value_ioctl_source_thread, &script,
+		"pkm-lcs-kunit-set-default-value");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_set_value_for_token(
+		(int)mutation_fd, admin_token, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_VALUE_SET);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
@@ -16308,6 +16366,7 @@ static void pkm_lcs_kunit_key_fd_delete_value_nontransactional_deletes_effective
 		'A', 'n', 's', 'w', 'e', 'r', '!'
 	};
 	static const u8 before_data[] = { 0x2a };
+	static const u8 default_before_data[] = { 0x5d };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_delete_value_args args = {
@@ -16404,6 +16463,59 @@ static void pkm_lcs_kunit_key_fd_delete_value_nontransactional_deletes_effective
 	KUNIT_EXPECT_EQ(test, memcmp(event + 8, value_name,
 				     strlen(value_name)),
 			0);
+
+	memset(&ctx, 0, sizeof(ctx));
+	memset(event, 0, sizeof(event));
+	script.expected_value_name = "";
+	script.before_data = default_before_data;
+	script.before_data_len = sizeof(default_before_data);
+	script.observed_last_write_time = 0;
+	script.reads = 0;
+	script.writes = 0;
+	script.result = 0;
+	args = (struct reg_delete_value_args) {
+		.name_len = 0,
+		.name_ptr = 0,
+		.txn_fd = -1,
+	};
+	generation_before = generation_after;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&next_sequence),
+			0L);
+	KUNIT_ASSERT_GT(test, next_sequence, 0ULL);
+	script.before_sequence = next_sequence - 1;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_value_ioctl_source_thread, &script,
+		"pkm-lcs-kunit-delete-default-value");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_delete_value_for_token(
+		(int)mutation_fd, admin_token, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_VALUE_DELETED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
