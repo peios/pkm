@@ -20517,6 +20517,49 @@ static void pkm_lcs_kunit_expect_layer_manifest_record(
 	KUNIT_EXPECT_EQ(test, offset, frame_len);
 }
 
+static void pkm_lcs_kunit_expect_key_record(
+	struct kunit *test, const u8 *frame, size_t frame_len,
+	const u8 expected_guid[PKM_LCS_GUID_BYTES], u32 expected_flags,
+	const u8 *expected_sd, size_t expected_sd_len, s64 expected_last_write)
+{
+	size_t offset = 6;
+	u32 record_len;
+	u32 sd_len;
+
+	KUNIT_ASSERT_NOT_NULL(test, frame);
+	KUNIT_ASSERT_GE(test, frame_len, (size_t)6);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(frame), (u16)REG_BACKUP_KEY);
+	record_len = get_unaligned_le32(frame + 2);
+	KUNIT_ASSERT_EQ(test, (size_t)record_len, frame_len);
+
+	KUNIT_ASSERT_LE(test, offset + PKM_LCS_GUID_BYTES, frame_len);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(frame + offset, expected_guid,
+			       PKM_LCS_GUID_BYTES),
+			0);
+	offset += PKM_LCS_GUID_BYTES;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u32) + sizeof(u32), frame_len);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(frame + offset),
+			expected_flags);
+	offset += sizeof(u32);
+	sd_len = get_unaligned_le32(frame + offset);
+	offset += sizeof(u32);
+
+	KUNIT_ASSERT_EQ(test, (size_t)sd_len, expected_sd_len);
+	KUNIT_ASSERT_LE(test, offset + sd_len, frame_len);
+	if (sd_len)
+		KUNIT_EXPECT_EQ(test,
+				memcmp(frame + offset, expected_sd, sd_len), 0);
+	offset += sd_len;
+
+	KUNIT_ASSERT_LE(test, offset + sizeof(u64), frame_len);
+	KUNIT_EXPECT_EQ(test, (s64)get_unaligned_le64(frame + offset),
+			expected_last_write);
+	offset += sizeof(u64);
+	KUNIT_EXPECT_EQ(test, offset, frame_len);
+}
+
 static void pkm_lcs_kunit_backup_layer_manifest_base_default_owner(
 	struct kunit *test)
 {
@@ -21418,6 +21461,8 @@ static void pkm_lcs_kunit_key_fd_backup_leaf_child_success(
 	struct kunit *test)
 {
 	static const u8 key_guid[PKM_LCS_GUID_BYTES] = { 0x52 };
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x53 };
+	static const u8 child_value_data[] = { 0xc0, 0xff, 0xee };
 	static const u16 expected_types[] = {
 		REG_BACKUP_HEADER,
 		REG_BACKUP_LAYER,
@@ -21438,7 +21483,9 @@ static void pkm_lcs_kunit_key_fd_backup_leaf_child_success(
 		.child_value_response = true,
 	};
 	struct pkm_lcs_kunit_backup_output_file output = { };
+	const u8 *frame = NULL;
 	struct task_struct *task;
+	size_t frame_len = 0;
 	struct file file = { };
 	const void *token;
 	const void *source_token;
@@ -21475,6 +21522,41 @@ static void pkm_lcs_kunit_key_fd_backup_leaf_child_success(
 		test, &output, expected_types, ARRAY_SIZE(expected_types),
 		key_guid);
 
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_stream_record_at(
+				&output, 3, REG_BACKUP_KEY, &frame, &frame_len),
+			0);
+	pkm_lcs_kunit_expect_key_record(
+		test, frame, frame_len, child_guid, 0,
+		pkm_lcs_kunit_owner_only_sd, sizeof(pkm_lcs_kunit_owner_only_sd),
+		5678);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_stream_record_at(
+				&output, 4, REG_BACKUP_PATH_ENTRY, &frame,
+				&frame_len),
+			0);
+	pkm_lcs_kunit_expect_path_entry_record(test, frame, frame_len, key_guid,
+					       "Child", child_guid, "base", 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_stream_record_at(
+				&output, 5, REG_BACKUP_VALUE, &frame,
+				&frame_len),
+			0);
+	pkm_lcs_kunit_expect_value_record(test, frame, frame_len, child_guid,
+					  "ChildValue", REG_BINARY,
+					  child_value_data,
+					  sizeof(child_value_data), "base", 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_stream_record_at(
+				&output, 6, REG_BACKUP_BLANKET_TOMBSTONE,
+				&frame, &frame_len),
+			0);
+	pkm_lcs_kunit_expect_blanket_tombstone_record(
+		test, frame, frame_len, child_guid, "base", 0);
+
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)output_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
@@ -21488,6 +21570,9 @@ static void pkm_lcs_kunit_key_fd_backup_grandchild_success(
 	struct kunit *test)
 {
 	static const u8 key_guid[PKM_LCS_GUID_BYTES] = { 0x52 };
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x53 };
+	static const u8 grandchild_guid[PKM_LCS_GUID_BYTES] = { 0x54 };
+	static const u8 grandchild_value_data[] = { 0x5a, 0x5b };
 	static const u16 expected_types[] = {
 		REG_BACKUP_HEADER,
 		REG_BACKUP_LAYER,
@@ -21515,7 +21600,9 @@ static void pkm_lcs_kunit_key_fd_backup_grandchild_success(
 		.grandchild_value_response = true,
 	};
 	struct pkm_lcs_kunit_backup_output_file output = { };
+	const u8 *frame = NULL;
 	struct task_struct *task;
+	size_t frame_len = 0;
 	struct file file = { };
 	const void *token;
 	const void *source_token;
@@ -21551,6 +21638,42 @@ static void pkm_lcs_kunit_key_fd_backup_grandchild_success(
 	pkm_lcs_kunit_expect_backup_stream_record_types(
 		test, &output, expected_types, ARRAY_SIZE(expected_types),
 		key_guid);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_stream_record_at(
+				&output, 7, REG_BACKUP_KEY, &frame, &frame_len),
+			0);
+	pkm_lcs_kunit_expect_key_record(
+		test, frame, frame_len, grandchild_guid, 0,
+		pkm_lcs_kunit_owner_only_sd, sizeof(pkm_lcs_kunit_owner_only_sd),
+		5678);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_stream_record_at(
+				&output, 8, REG_BACKUP_PATH_ENTRY, &frame,
+				&frame_len),
+			0);
+	pkm_lcs_kunit_expect_path_entry_record(test, frame, frame_len,
+					       child_guid, "Grandchild",
+					       grandchild_guid, "base", 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_stream_record_at(
+				&output, 9, REG_BACKUP_VALUE, &frame,
+				&frame_len),
+			0);
+	pkm_lcs_kunit_expect_value_record(
+		test, frame, frame_len, grandchild_guid, "GrandchildValue",
+		REG_BINARY, grandchild_value_data, sizeof(grandchild_value_data),
+		"base", 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_stream_record_at(
+				&output, 10, REG_BACKUP_BLANKET_TOMBSTONE,
+				&frame, &frame_len),
+			0);
+	pkm_lcs_kunit_expect_blanket_tombstone_record(
+		test, frame, frame_len, grandchild_guid, "base", 0);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)output_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
