@@ -29203,6 +29203,58 @@ static void pkm_lcs_kunit_transaction_raw_ioctl_commit_eio_retains(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_transaction_raw_ioctl_commit_predispatch_states(
+	struct kunit *test)
+{
+	long fd;
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				(int)fd, REG_IOC_COMMIT, 0),
+			(long)-EINVAL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_COMMITTED, 0),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				(int)fd, REG_IOC_COMMIT, 0),
+			(long)-EINVAL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_ABORTED, 0),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				(int)fd, REG_IOC_COMMIT, 0),
+			(long)-EINVAL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_TIMED_OUT, 0),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				(int)fd, REG_IOC_COMMIT, 0),
+			(long)-ETIMEDOUT);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_set_state(
+				(int)fd, REG_TXN_SOURCE_DOWN, 0),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_transaction_fd_raw_ioctl(
+				(int)fd, REG_IOC_COMMIT, 0),
+			(long)-EIO);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_transaction_commit_precheck_unbound_terminal(
 	struct kunit *test)
 {
@@ -56669,6 +56721,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_transaction_raw_ioctl_commit_success),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_raw_ioctl_commit_busy_retains),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_raw_ioctl_commit_eio_retains),
+	KUNIT_CASE(
+		pkm_lcs_kunit_transaction_raw_ioctl_commit_predispatch_states),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_precheck_unbound_terminal),
 	KUNIT_CASE(
