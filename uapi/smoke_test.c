@@ -70,6 +70,40 @@ _Static_assert(KMES_EVENT_HEADER_BASE_SIZE
 	       "KMES event-header base size disagrees with its field offsets");
 _Static_assert(sizeof(struct kmes_emit_entry) == 32,
 	       "kmes_emit_entry must be 32 bytes");
+_Static_assert(KMES_MAPPING_PRODUCER_OFFSET == 0,
+	       "KMES producer mapping offset disagrees with PSD-003");
+_Static_assert(KMES_MAPPING_CONSUMER_OFFSET == KMES_METADATA_PAGE_SIZE,
+	       "KMES consumer mapping offset disagrees with PSD-003");
+_Static_assert(KMES_MAPPING_DATA_OFFSET == KMES_METADATA_TOTAL_SIZE,
+	       "KMES data mapping offset disagrees with PSD-003");
+_Static_assert(KMES_CONFIG_BUFFER_CAPACITY_TYPE == REG_QWORD,
+	       "KMES BufferCapacity type disagrees with LCS REG_QWORD");
+_Static_assert(KMES_CONFIG_MAX_EVENT_SIZE_TYPE == REG_DWORD,
+	       "KMES MaxEventSize type disagrees with LCS REG_DWORD");
+_Static_assert(KMES_CONFIG_MAX_NESTING_DEPTH_TYPE == REG_DWORD,
+	       "KMES MaxNestingDepth type disagrees with LCS REG_DWORD");
+_Static_assert(KMES_CONFIG_MAX_EMIT_RATE_PER_PROCESS_TYPE == REG_DWORD,
+	       "KMES MaxEmitRatePerProcess type disagrees with LCS REG_DWORD");
+_Static_assert(KMES_CONFIG_BUFFER_CAPACITY_DEFAULT == 4194304ULL &&
+		       KMES_CONFIG_BUFFER_CAPACITY_MIN == 65536ULL &&
+		       KMES_CONFIG_BUFFER_CAPACITY_MAX == 268435456ULL,
+	       "KMES BufferCapacity range disagrees with PSD-003");
+_Static_assert(KMES_CONFIG_MAX_EVENT_SIZE_DEFAULT == 65536U &&
+		       KMES_CONFIG_MAX_EVENT_SIZE_MIN == 1024U &&
+		       KMES_CONFIG_MAX_EVENT_SIZE_MAX == 4194304U,
+	       "KMES MaxEventSize range disagrees with PSD-003");
+_Static_assert(KMES_CONFIG_MAX_NESTING_DEPTH_DEFAULT == 32U &&
+		       KMES_CONFIG_MAX_NESTING_DEPTH_MIN == 4U &&
+		       KMES_CONFIG_MAX_NESTING_DEPTH_MAX == 256U,
+	       "KMES MaxNestingDepth range disagrees with PSD-003");
+_Static_assert(KMES_CONFIG_MAX_EMIT_RATE_PER_PROCESS_DEFAULT == 10000U &&
+		       KMES_CONFIG_MAX_EMIT_RATE_PER_PROCESS_MIN == 100U &&
+		       KMES_CONFIG_MAX_EMIT_RATE_PER_PROCESS_MAX == 1000000U,
+	       "KMES MaxEmitRatePerProcess range disagrees with PSD-003");
+_Static_assert(KMES_EMIT_REQUIRED_PRIVILEGE == KACS_SE_AUDIT_PRIVILEGE,
+	       "KMES emit privilege disagrees with KACS SeAuditPrivilege");
+_Static_assert(KMES_ATTACH_REQUIRED_PRIVILEGE == KACS_SE_SECURITY_PRIVILEGE,
+	       "KMES attach privilege disagrees with KACS SeSecurityPrivilege");
 _Static_assert(RSI_REQUEST_ID_OFFSET
 		       == RSI_REQUEST_TOTAL_LEN_OFFSET + sizeof(__u32),
 	       "RSI request-header offsets are not contiguous");
