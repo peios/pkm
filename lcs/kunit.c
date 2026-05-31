@@ -50405,6 +50405,135 @@ static void pkm_lcs_kunit_reg_create_key_args_existing_success(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_reg_create_key_args_missing_entry_race(
+	struct kunit *test)
+{
+	static const char path_src[] = "Machine\\ArgsRace";
+	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
+	static const u8 child_candidates[1][RSI_GUID_SIZE] = { { 0x9c } };
+	static const u8 existing_guid[RSI_GUID_SIZE] = { 0x9d };
+	static const struct pkm_lcs_kunit_walk_source_step missing_steps[] = {
+		{
+			.expected_child = "ArgsRace",
+			.empty = true,
+		},
+	};
+	struct pkm_lcs_kunit_walk_source_step retry_steps[] = {
+		{
+			.expected_child = "ArgsRace",
+			.guid = existing_guid,
+		},
+	};
+	struct pkm_lcs_kunit_guid_sequence guid_sequence = {
+		.guids = child_candidates,
+		.count = 1,
+	};
+	struct pkm_lcs_key_guid_generator generator =
+		pkm_lcs_kunit_guid_generator(&guid_sequence);
+	struct pkm_lcs_create_missing_runtime_inputs inputs = {
+		.base_metadata_present = true,
+		.generator = &generator,
+	};
+	struct pkm_lcs_kunit_txn_create_flow_source_script script = {
+		.walk = {
+			.steps = missing_steps,
+			.step_count = ARRAY_SIZE(missing_steps),
+		},
+		.read_key = {
+			.expected_guid = root_guid,
+			.name = "Machine",
+		},
+		.create = {
+			.parent_guid = root_guid,
+			.child_guid = child_candidates[0],
+			.child_name = "ArgsRace",
+			.layer_name = "base",
+			.expected_sequence = 1,
+			.entry_status = RSI_ALREADY_EXISTS,
+			.expect_key_request = false,
+			.allow_any_sd = true,
+		},
+		.retry_walk = {
+			.steps = retry_steps,
+			.step_count = ARRAY_SIZE(retry_steps),
+		},
+		.expect_create = true,
+		.expect_retry_walk = true,
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *layer_sd;
+	const u8 *existing_sd;
+	size_t layer_sd_len = 0;
+	size_t existing_sd_len = 0;
+	u32 disposition = 0xaaaaaaaaU;
+	struct reg_create_key_args args = {
+		.parent_fd = -1,
+		.path_ptr = (u64)(unsigned long)path_src,
+		.desired_access = KEY_READ,
+		.txn_fd = -1,
+		.disposition_ptr = (u64)(unsigned long)&disposition,
+	};
+	long fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	layer_sd = kacs_rust_kunit_create_file_sd(
+		token, KEY_SET_VALUE, 0, 0, 0, &layer_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, layer_sd);
+	existing_sd = kacs_rust_kunit_create_file_sd(
+		token, KEY_READ, 0, 0, 0, &existing_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, existing_sd);
+
+	inputs.base_metadata_sd = layer_sd;
+	inputs.base_metadata_sd_len = layer_sd_len;
+	script.file = &file;
+	script.read_key.sd =
+		pkm_lcs_kunit_parent_sd_create_subkey_ci_generic_read;
+	script.read_key.sd_len =
+		sizeof(pkm_lcs_kunit_parent_sd_create_subkey_ci_generic_read);
+	retry_steps[0].sd = existing_sd;
+	retry_steps[0].sd_len = existing_sd_len;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_txn_create_flow_source_thread,
+		&script, "pkm-lcs-kunit-create-args-race");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_reg_create_key_args_for_token(token, &ops, &args,
+						   &inputs);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_OPENED_EXISTING);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, guid_sequence.calls, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.key_guid, existing_guid,
+			       sizeof(snapshot.key_guid)),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kacs_free((void *)existing_sd);
+	pkm_kacs_free((void *)layer_sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_sequence_allocation_advances_global_counter(
 	struct kunit *test)
 {
@@ -56508,6 +56637,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_reg_create_key_args_txn_missing_entry_race),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_bad_flags_before_txn),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_existing_success),
+	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_args_missing_entry_race),
 	KUNIT_CASE(
 		pkm_lcs_kunit_sequence_allocation_advances_global_counter),
 	KUNIT_CASE(pkm_lcs_kunit_sequence_allocation_fails_closed),
