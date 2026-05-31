@@ -266,6 +266,13 @@ struct pkm_lcs_kunit_backup_snapshot_source_script {
 	int result;
 };
 
+struct pkm_lcs_kunit_backup_call_script {
+	long key_fd;
+	const void *token;
+	struct reg_backup_args args;
+	long result;
+};
+
 struct pkm_lcs_kunit_flush_source_script {
 	struct file *file;
 	const char *expected_hive_name;
@@ -23052,6 +23059,17 @@ static int pkm_lcs_kunit_backup_snapshot_source_thread(void *raw_script)
 	return 0;
 }
 
+static int pkm_lcs_kunit_backup_call_thread(void *raw_script)
+{
+	struct pkm_lcs_kunit_backup_call_script *script = raw_script;
+
+	if (!script)
+		return -EINVAL;
+	script->result = pkm_lcs_kunit_key_fd_backup_for_token(
+		(int)script->key_fd, script->token, &script->args);
+	return (int)script->result;
+}
+
 static void pkm_lcs_kunit_key_fd_backup_admission(struct kunit *test)
 {
 	static const u8 key_guid[PKM_LCS_GUID_BYTES] = { 0x52 };
@@ -23698,6 +23716,195 @@ static void pkm_lcs_kunit_key_fd_backup_read_only_cap_fail_before_source(
 	pkm_lcs_runtime_limits_reset_defaults();
 	kacs_rust_token_drop(token);
 	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_backup_read_timeout_late_success_discard(
+	struct kunit *test)
+{
+	static const u8 key_guid[PKM_LCS_GUID_BYTES] = { 0x52 };
+	struct pkm_lcs_kunit_backup_snapshot_source_script source_script = {
+		.file = NULL,
+	};
+	struct pkm_lcs_kunit_read_key_source_script read_key = {
+		.expected_guid = key_guid,
+		.name = "Software",
+		.last_write_time = 2000ULL,
+	};
+	struct pkm_lcs_source_response_result late_read_response = { };
+	struct pkm_lcs_source_response_result begin_response = { };
+	struct pkm_lcs_source_response_result abort_response = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_kunit_backup_output_file *output;
+	struct pkm_lcs_kunit_backup_call_script backup = { };
+	struct pkm_kacs_boot_snapshot token_snapshot = { };
+	u8 *read_key_response;
+	u8 status_response[RSI_MIN_RESPONSE_SIZE];
+	u8 request[128];
+	struct task_struct *task;
+	struct file file = { };
+	const void *source_token;
+	const void *token;
+	size_t response_len = 0;
+	const size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	long key_fd;
+	u64 begin_request_id;
+	u64 read_request_id;
+	u64 abort_request_id;
+	u64 transaction_id;
+	u16 op_code;
+	int output_fd;
+	int thread_ret;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.request_timeout_ms = 1000U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	output = kzalloc(sizeof(*output), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, output);
+	read_key_response = kmalloc(1024, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, read_key_response);
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	source_script.file = &file;
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_BACKUP_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	output_fd = pkm_lcs_kunit_backup_output_fd(output);
+	KUNIT_ASSERT_TRUE(test, output_fd >= 0);
+	backup.key_fd = key_fd;
+	backup.token = token;
+	backup.args.output_fd = output_fd;
+
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_backup_call_thread,
+					 &backup,
+					 "pkm-lcs-kunit-backup-read-timeout");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_snapshot_read_source_request(
+				&source_script, request, sizeof(request)),
+			(ssize_t)(RSI_REQUEST_HEADER_SIZE + sizeof(u64) +
+				  sizeof(u32)));
+	begin_request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	transaction_id = get_unaligned_le64(request + payload_offset);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_BEGIN_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET),
+			0ULL);
+	KUNIT_EXPECT_NE(test, transaction_id, 0ULL);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le32(request + payload_offset + sizeof(u64)),
+			(u32)RSI_TXN_READ_ONLY);
+
+	pkm_lcs_kunit_build_status_response(
+		test, status_response, sizeof(status_response),
+		begin_request_id, RSI_BEGIN_TRANSACTION, RSI_OK, &response_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_write_file(
+				&file, status_response, response_len, false,
+				&begin_response),
+			(ssize_t)response_len);
+	KUNIT_EXPECT_TRUE(test, begin_response.caller_waiter_attached);
+	KUNIT_EXPECT_EQ(test, begin_response.status, (u32)RSI_OK);
+
+	memset(request, 0, sizeof(request));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_snapshot_read_source_request(
+				&source_script, request, sizeof(request)),
+			(ssize_t)(RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE));
+	read_request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	op_code = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
+	KUNIT_EXPECT_EQ(test, op_code, (u16)RSI_READ_KEY);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET),
+			transaction_id);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(request + RSI_REQUEST_HEADER_SIZE, key_guid,
+			       RSI_GUID_SIZE),
+			0);
+
+	memset(request, 0, sizeof(request));
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_backup_snapshot_read_source_request(
+				&source_script, request, sizeof(request)),
+			(ssize_t)(RSI_REQUEST_HEADER_SIZE + sizeof(u64)));
+	abort_request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET),
+			(u16)RSI_ABORT_TRANSACTION);
+	KUNIT_EXPECT_EQ(test,
+			get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET),
+			transaction_id);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le64(request + payload_offset),
+			transaction_id);
+
+	pkm_lcs_kunit_build_status_response(
+		test, status_response, sizeof(status_response),
+		abort_request_id, RSI_ABORT_TRANSACTION, RSI_OK, &response_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_write_file(
+				&file, status_response, response_len, false,
+				&abort_response),
+			(ssize_t)response_len);
+	KUNIT_EXPECT_TRUE(test, abort_response.caller_waiter_attached);
+	KUNIT_EXPECT_EQ(test, abort_response.status, (u32)RSI_OK);
+
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, backup.result, (long)-ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, output->len, (size_t)0);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(token, &token_snapshot));
+	KUNIT_EXPECT_EQ(test,
+			token_snapshot.privileges_used & KACS_SE_BACKUP_PRIVILEGE,
+			KACS_SE_BACKUP_PRIVILEGE);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 1U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.read_only_transaction_count, 0U);
+
+	read_key.expected_txn_id = transaction_id;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_read_key_source_build_response(
+				&read_key, read_request_id, read_key_response,
+				1024, &response_len),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_write_file(
+				&file, read_key_response, response_len, false,
+				&late_read_response),
+			(ssize_t)response_len);
+	KUNIT_EXPECT_FALSE(test, late_read_response.caller_waiter_attached);
+	KUNIT_EXPECT_EQ(test, late_read_response.request_id, read_request_id);
+	KUNIT_EXPECT_EQ(test, late_read_response.txn_id, transaction_id);
+	KUNIT_EXPECT_EQ(test, late_read_response.request_op_code,
+			(u16)RSI_READ_KEY);
+	KUNIT_EXPECT_EQ(test, late_read_response.status, (u32)RSI_OK);
+	KUNIT_EXPECT_EQ(test, late_read_response.in_flight_count, 0U);
+	KUNIT_EXPECT_EQ(test, output->len, (size_t)0);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.read_only_transaction_count, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)output_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(source_token);
+	kfree(read_key_response);
+	kfree(output);
 }
 
 static void pkm_lcs_kunit_key_fd_backup_read_only_begin_timeout_cleanup(
@@ -57046,6 +57253,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_read_only_unsupported),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_backup_read_only_cap_fail_before_source),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_backup_read_timeout_late_success_discard),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_backup_read_only_begin_timeout_cleanup),
 	KUNIT_CASE(
