@@ -59,6 +59,13 @@
 #define PKM_KMES_PRIVILEGE_SE_TCB (1ULL << 7)
 #define PKM_KMES_PRIVILEGE_SE_SECURITY (1ULL << 8)
 #define PKM_KMES_PRIVILEGE_SE_AUDIT (1ULL << 21)
+#define PKM_KMES_SELF_EVENT_PAYLOAD_MAX 768U
+
+static const char pkm_kmes_self_config_invalid_event_type[] =
+	"KMES_SELF_CONFIG_INVALID";
+static const char pkm_kmes_buffer_swap_failed_event_type[] =
+	"KMES_BUFFER_SWAP_FAILED";
+static const char pkm_kmes_config_parent_path[] = "Machine\\System\\KMES";
 
 struct pkm_kmes_cpu_state {
 	refcount_t refs;
@@ -188,6 +195,169 @@ static u32 pkm_kmes_meta_load_u32(const u8 *page, size_t offset)
 static u64 pkm_kmes_meta_load_u64(const u8 *page, size_t offset)
 {
 	return le64_to_cpu(*(__le64 *)(page + offset));
+}
+
+struct pkm_kmes_msgpack_writer {
+	u8 *pos;
+	u8 *end;
+};
+
+struct pkm_kmes_config_spec {
+	const char *name;
+	u32 type;
+	u64 min;
+	u64 max;
+};
+
+static const struct pkm_kmes_config_spec pkm_kmes_config_specs[] = {
+	{
+		.name = "BufferCapacity",
+		.type = REG_QWORD,
+		.min = PKM_KMES_MIN_BUFFER_CAPACITY,
+		.max = PKM_KMES_MAX_BUFFER_CAPACITY,
+	},
+	{
+		.name = "MaxEventSize",
+		.type = REG_DWORD,
+		.min = PKM_KMES_MIN_MAX_EVENT_SIZE,
+		.max = PKM_KMES_MAX_MAX_EVENT_SIZE,
+	},
+	{
+		.name = "MaxNestingDepth",
+		.type = REG_DWORD,
+		.min = PKM_KMES_MIN_MAX_NESTING_DEPTH,
+		.max = PKM_KMES_MAX_MAX_NESTING_DEPTH,
+	},
+	{
+		.name = "MaxEmitRatePerProcess",
+		.type = REG_DWORD,
+		.min = PKM_KMES_MIN_MAX_EMIT_RATE_PER_PROCESS,
+		.max = PKM_KMES_MAX_MAX_EMIT_RATE_PER_PROCESS,
+	},
+};
+
+static int pkm_kmes_msgpack_reserve(struct pkm_kmes_msgpack_writer *writer,
+				    size_t len, u8 **out)
+{
+	if (!writer || !out || len > (size_t)(writer->end - writer->pos))
+		return -ENOSPC;
+	*out = writer->pos;
+	writer->pos += len;
+	return 0;
+}
+
+static int pkm_kmes_msgpack_write_u8(struct pkm_kmes_msgpack_writer *writer,
+				     u8 value)
+{
+	u8 *dst;
+	int ret;
+
+	ret = pkm_kmes_msgpack_reserve(writer, 1, &dst);
+	if (ret)
+		return ret;
+	dst[0] = value;
+	return 0;
+}
+
+static int pkm_kmes_msgpack_write_bytes(
+	struct pkm_kmes_msgpack_writer *writer, const void *src, size_t len)
+{
+	u8 *dst;
+	int ret;
+
+	ret = pkm_kmes_msgpack_reserve(writer, len, &dst);
+	if (ret)
+		return ret;
+	memcpy(dst, src, len);
+	return 0;
+}
+
+static int pkm_kmes_msgpack_write_map_len(
+	struct pkm_kmes_msgpack_writer *writer, u8 count)
+{
+	if (count <= 15)
+		return pkm_kmes_msgpack_write_u8(writer, 0x80 | count);
+	return -EINVAL;
+}
+
+static int pkm_kmes_msgpack_write_str(struct pkm_kmes_msgpack_writer *writer,
+				      const char *value, size_t len)
+{
+	int ret;
+
+	if (!value && len)
+		return -EINVAL;
+	if (len <= 31) {
+		ret = pkm_kmes_msgpack_write_u8(writer, 0xa0 | (u8)len);
+	} else if (len <= U8_MAX) {
+		ret = pkm_kmes_msgpack_write_u8(writer, 0xd9);
+		if (ret)
+			return ret;
+		ret = pkm_kmes_msgpack_write_u8(writer, (u8)len);
+	} else if (len <= U16_MAX) {
+		u8 bytes[2] = { (u8)(len >> 8), (u8)len };
+
+		ret = pkm_kmes_msgpack_write_u8(writer, 0xda);
+		if (ret)
+			return ret;
+		ret = pkm_kmes_msgpack_write_bytes(writer, bytes,
+						   sizeof(bytes));
+	} else {
+		return -EINVAL;
+	}
+	if (ret)
+		return ret;
+	return pkm_kmes_msgpack_write_bytes(writer, value, len);
+}
+
+static int pkm_kmes_msgpack_write_key(struct pkm_kmes_msgpack_writer *writer,
+				      const char *key)
+{
+	return pkm_kmes_msgpack_write_str(writer, key, strlen(key));
+}
+
+static int pkm_kmes_msgpack_write_nil(struct pkm_kmes_msgpack_writer *writer)
+{
+	return pkm_kmes_msgpack_write_u8(writer, 0xc0);
+}
+
+static int pkm_kmes_msgpack_write_uint(struct pkm_kmes_msgpack_writer *writer,
+				       u64 value)
+{
+	u8 bytes[9];
+
+	if (value <= 0x7f)
+		return pkm_kmes_msgpack_write_u8(writer, (u8)value);
+	if (value <= U8_MAX) {
+		bytes[0] = 0xcc;
+		bytes[1] = (u8)value;
+		return pkm_kmes_msgpack_write_bytes(writer, bytes, 2);
+	}
+	if (value <= U16_MAX) {
+		bytes[0] = 0xcd;
+		bytes[1] = (u8)(value >> 8);
+		bytes[2] = (u8)value;
+		return pkm_kmes_msgpack_write_bytes(writer, bytes, 3);
+	}
+	if (value <= U32_MAX) {
+		bytes[0] = 0xce;
+		bytes[1] = (u8)(value >> 24);
+		bytes[2] = (u8)(value >> 16);
+		bytes[3] = (u8)(value >> 8);
+		bytes[4] = (u8)value;
+		return pkm_kmes_msgpack_write_bytes(writer, bytes, 5);
+	}
+
+	bytes[0] = 0xcf;
+	bytes[1] = (u8)(value >> 56);
+	bytes[2] = (u8)(value >> 48);
+	bytes[3] = (u8)(value >> 40);
+	bytes[4] = (u8)(value >> 32);
+	bytes[5] = (u8)(value >> 24);
+	bytes[6] = (u8)(value >> 16);
+	bytes[7] = (u8)(value >> 8);
+	bytes[8] = (u8)value;
+	return pkm_kmes_msgpack_write_bytes(writer, bytes, sizeof(bytes));
 }
 
 static void pkm_kmes_ring_get(struct pkm_kmes_cpu_state *cpu)
@@ -749,11 +919,213 @@ u32 pkm_kmes_runtime_max_emit_rate_per_process(void)
 	return READ_ONCE(pkm_kmes_active_max_emit_rate_per_process);
 }
 
+static const struct pkm_kmes_config_spec *pkm_kmes_config_spec_for_name(
+	const char *name, u32 name_len)
+{
+	u32 i;
+
+	if (!name || !name_len)
+		return NULL;
+
+	for (i = 0; i < ARRAY_SIZE(pkm_kmes_config_specs); i++) {
+		const struct pkm_kmes_config_spec *spec =
+			&pkm_kmes_config_specs[i];
+
+		if (strlen(spec->name) == name_len &&
+		    !memcmp(spec->name, name, name_len))
+			return spec;
+	}
+
+	return NULL;
+}
+
+static const char *pkm_kmes_self_config_received_kind_name(u32 kind)
+{
+	switch (kind) {
+	case PKM_KMES_SELF_CONFIG_RECEIVED_MISSING:
+		return "missing";
+	case PKM_KMES_SELF_CONFIG_RECEIVED_WRONG_TYPE:
+		return "wrong_type";
+	case PKM_KMES_SELF_CONFIG_RECEIVED_U32_OUT_OF_RANGE:
+		return "u32_out_of_range";
+	case PKM_KMES_SELF_CONFIG_RECEIVED_U64_OUT_OF_RANGE:
+		return "u64_out_of_range";
+	default:
+		return NULL;
+	}
+}
+
+static int pkm_kmes_msgpack_write_received_value(
+	struct pkm_kmes_msgpack_writer *writer,
+	const struct pkm_kmes_self_config_audit_intent *audit)
+{
+	switch (audit->received_kind) {
+	case PKM_KMES_SELF_CONFIG_RECEIVED_MISSING:
+	case PKM_KMES_SELF_CONFIG_RECEIVED_WRONG_TYPE:
+		return pkm_kmes_msgpack_write_nil(writer);
+	case PKM_KMES_SELF_CONFIG_RECEIVED_U32_OUT_OF_RANGE:
+		return pkm_kmes_msgpack_write_uint(writer, audit->received_u32);
+	case PKM_KMES_SELF_CONFIG_RECEIVED_U64_OUT_OF_RANGE:
+		return pkm_kmes_msgpack_write_uint(writer, audit->received_u64);
+	default:
+		return -EINVAL;
+	}
+}
+
+static int pkm_kmes_msgpack_write_received_type(
+	struct pkm_kmes_msgpack_writer *writer,
+	const struct pkm_kmes_self_config_audit_intent *audit)
+{
+	switch (audit->received_kind) {
+	case PKM_KMES_SELF_CONFIG_RECEIVED_MISSING:
+	case PKM_KMES_SELF_CONFIG_RECEIVED_U32_OUT_OF_RANGE:
+	case PKM_KMES_SELF_CONFIG_RECEIVED_U64_OUT_OF_RANGE:
+		return pkm_kmes_msgpack_write_nil(writer);
+	case PKM_KMES_SELF_CONFIG_RECEIVED_WRONG_TYPE:
+		return pkm_kmes_msgpack_write_uint(writer, audit->received_type);
+	default:
+		return -EINVAL;
+	}
+}
+
+static int pkm_kmes_emit_self_config_invalid(
+	const struct pkm_kmes_self_config_audit_intent *audit)
+{
+	const struct pkm_kmes_config_spec *spec;
+	struct pkm_kmes_msgpack_writer writer;
+	const char *received_kind;
+	u8 payload[PKM_KMES_SELF_EVENT_PAYLOAD_MAX];
+	int ret;
+
+	if (!audit || !audit->configuration_name_len ||
+	    audit->configuration_name_len >
+		    PKM_KMES_SELF_CONFIG_MAX_PARAMETER_NAME_LEN)
+		return -EINVAL;
+
+	spec = pkm_kmes_config_spec_for_name(audit->configuration_name,
+					    audit->configuration_name_len);
+	received_kind =
+		pkm_kmes_self_config_received_kind_name(audit->received_kind);
+	if (!spec || !received_kind)
+		return -EINVAL;
+
+	writer.pos = payload;
+	writer.end = payload + sizeof(payload);
+	ret = pkm_kmes_msgpack_write_map_len(&writer, 9);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "configuration_parent_path");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_str(
+		&writer, pkm_kmes_config_parent_path,
+		sizeof(pkm_kmes_config_parent_path) - 1);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "configuration_name");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_str(&writer, audit->configuration_name,
+					 audit->configuration_name_len);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "expected_type");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_uint(&writer, spec->type);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "expected_min");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_uint(&writer, spec->min);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "expected_max");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_uint(&writer, spec->max);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "received_kind");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_str(&writer, received_kind,
+					 strlen(received_kind));
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "received_type");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_received_type(&writer, audit);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "received_value");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_received_value(&writer, audit);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "retained_value");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_uint(&writer, audit->retained_value);
+	if (ret)
+		return ret;
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KMES,
+			     pkm_kmes_self_config_invalid_event_type,
+			     sizeof(pkm_kmes_self_config_invalid_event_type) - 1,
+			     payload, writer.pos - payload);
+	return 0;
+}
+
+static int pkm_kmes_emit_buffer_swap_failed(u64 requested_capacity,
+					    u64 retained_capacity, u32 errno_value)
+{
+	struct pkm_kmes_msgpack_writer writer;
+	u8 payload[PKM_KMES_SELF_EVENT_PAYLOAD_MAX];
+	int ret;
+
+	writer.pos = payload;
+	writer.end = payload + sizeof(payload);
+	ret = pkm_kmes_msgpack_write_map_len(&writer, 3);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "requested_capacity");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_uint(&writer, requested_capacity);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "retained_capacity");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_uint(&writer, retained_capacity);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "errno");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_uint(&writer, errno_value);
+	if (ret)
+		return ret;
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KMES,
+			     pkm_kmes_buffer_swap_failed_event_type,
+			     sizeof(pkm_kmes_buffer_swap_failed_event_type) - 1,
+			     payload, writer.pos - payload);
+	return 0;
+}
+
 long pkm_kmes_runtime_config_apply(
 	const struct pkm_kmes_runtime_config *config)
 {
 	u64 current_capacity = 0;
+	u64 failed_requested_capacity = 0;
+	u64 failed_retained_capacity = 0;
 	u32 old_rate;
+	u32 failed_errno = 0;
 	long ret;
 
 	if (!pkm_kmes_runtime_config_valid(config))
@@ -767,8 +1139,15 @@ long pkm_kmes_runtime_config_apply(
 
 	if (config->buffer_capacity != current_capacity) {
 		ret = pkm_kmes_swap_capacity_locked(config->buffer_capacity);
-		if (ret)
+		if (ret) {
+			if (ret == -ENOMEM) {
+				failed_requested_capacity =
+					config->buffer_capacity;
+				failed_retained_capacity = current_capacity;
+				failed_errno = ENOMEM;
+			}
 			goto out;
+		}
 	}
 
 	pkm_kmes_runtime_config_store_locked(config);
@@ -779,6 +1158,10 @@ long pkm_kmes_runtime_config_apply(
 
 out:
 	mutex_unlock(&pkm_kmes_topology_lock);
+	if (failed_errno)
+		pkm_kmes_emit_buffer_swap_failed(failed_requested_capacity,
+						 failed_retained_capacity,
+						 failed_errno);
 	return ret;
 }
 
@@ -787,11 +1170,23 @@ static long pkm_kmes_runtime_config_publish_self_config_plan(
 	struct pkm_kmes_self_config_apply_plan *result_out)
 {
 	long ret;
+	u32 i;
 
 	if (result_out)
 		memset(result_out, 0, sizeof(*result_out));
 	if (!plan)
 		return -EINVAL;
+	if (plan->audit_count > PKM_KMES_SELF_CONFIG_MAX_AUDITS)
+		return -EIO;
+
+	for (i = 0; i < plan->audit_count; i++) {
+		/*
+		 * Self-events explain retained values to consumers. They are not
+		 * part of the configuration commit decision and must not roll
+		 * back valid hot-swaps if event construction unexpectedly fails.
+		 */
+		pkm_kmes_emit_self_config_invalid(&plan->audits[i]);
+	}
 
 	ret = pkm_kmes_runtime_config_apply(&plan->config);
 	if (ret)

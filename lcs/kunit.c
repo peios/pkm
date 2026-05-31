@@ -10211,6 +10211,47 @@ static void pkm_lcs_kunit_expect_latest_lcs_event(
 						buffer, written, payload_field));
 }
 
+static void pkm_lcs_kunit_expect_latest_kmes_origin_event(
+	struct kunit *test, const char *event_type, u8 expected_map_prefix,
+	const char *first_payload_field, const char *second_payload_field)
+{
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u8 buffer[1024];
+	size_t written = 0;
+	u32 header_size;
+	u16 type_len;
+	size_t event_type_len;
+
+	KUNIT_ASSERT_NOT_NULL(test, event_type);
+	event_type_len = strlen(event_type);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_latest_matching_event(
+				KMES_ORIGIN_KMES, event_type, event_type_len,
+				buffer, sizeof(buffer), &written, &snapshot),
+			0);
+	KUNIT_ASSERT_GT(test, written, (size_t)KMES_EVENT_HEADER_BASE_SIZE);
+
+	type_len = get_unaligned_le16(buffer + KMES_EVENT_TYPE_LEN_OFFSET);
+	header_size = get_unaligned_le32(buffer + KMES_EVENT_HEADER_SIZE_OFFSET);
+	KUNIT_ASSERT_EQ(test, type_len, (u16)event_type_len);
+	KUNIT_ASSERT_TRUE(test, written > header_size);
+	KUNIT_EXPECT_EQ(test, buffer[KMES_EVENT_ORIGIN_CLASS_OFFSET],
+			(u8)KMES_ORIGIN_KMES);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
+			       type_len),
+			0);
+	KUNIT_EXPECT_EQ(test, buffer[header_size], expected_map_prefix);
+	if (first_payload_field)
+		KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+						buffer, written,
+						first_payload_field));
+	if (second_payload_field)
+		KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+						buffer, written,
+						second_payload_field));
+}
+
 static void pkm_lcs_kunit_self_config_invalid_audit_emits_lcs_kmes_event(
 	struct kunit *test)
 {
@@ -10800,6 +10841,98 @@ static void pkm_lcs_kunit_kmes_config_apply_ignores_unknown_and_retains_invalid(
 	KUNIT_EXPECT_EQ(test, snapshot.buffer_capacity,
 			4ULL * 1024ULL * 1024ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.max_nesting_depth, 64U);
+
+	pkm_kmes_kunit_reset_all();
+}
+
+static void pkm_lcs_kunit_kmes_config_invalid_emits_kmes_event(
+	struct kunit *test)
+{
+	static const char buffer_capacity_name[] = "BufferCapacity";
+	static const char max_event_name[] = "MaxEventSize";
+	static const char nesting_name[] = "MaxNestingDepth";
+	static const char rate_name[] = "MaxEmitRatePerProcess";
+	struct pkm_kmes_self_config_entry entries[] = {
+		{
+			.name = buffer_capacity_name,
+			.name_len = sizeof(buffer_capacity_name) - 1,
+			.value_kind = PKM_KMES_SELF_CONFIG_VALUE_QWORD,
+			.value_type = REG_QWORD,
+			.value_u64 = 65537ULL,
+		},
+		{
+			.name = max_event_name,
+			.name_len = sizeof(max_event_name) - 1,
+			.value_kind = PKM_KMES_SELF_CONFIG_VALUE_DWORD,
+			.value_type = REG_DWORD,
+			.value_u32 = 2048U,
+		},
+		{
+			.name = nesting_name,
+			.name_len = sizeof(nesting_name) - 1,
+			.value_kind = PKM_KMES_SELF_CONFIG_VALUE_DWORD,
+			.value_type = REG_DWORD,
+			.value_u32 = 64U,
+		},
+		{
+			.name = rate_name,
+			.name_len = sizeof(rate_name) - 1,
+			.value_kind = PKM_KMES_SELF_CONFIG_VALUE_DWORD,
+			.value_type = REG_DWORD,
+			.value_u32 = 200U,
+		},
+	};
+	struct pkm_kmes_self_config_apply_plan plan = { };
+	struct pkm_kmes_runtime_config snapshot = { };
+
+	pkm_kmes_kunit_reset_all();
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_runtime_config_apply_self_config(
+				entries, ARRAY_SIZE(entries), &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.applied_count, 3U);
+	KUNIT_EXPECT_EQ(test, plan.retained_missing_count, 0U);
+	KUNIT_EXPECT_EQ(test, plan.retained_invalid_count, 1U);
+	KUNIT_EXPECT_EQ(test, plan.audit_count, 1U);
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_runtime_config_snapshot(&snapshot),
+			0);
+	KUNIT_EXPECT_EQ(test, snapshot.buffer_capacity,
+			4ULL * 1024ULL * 1024ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.max_event_size, 2048U);
+	pkm_lcs_kunit_expect_latest_kmes_origin_event(
+		test, "KMES_SELF_CONFIG_INVALID", 0x89,
+		"Machine\\System\\KMES", "u64_out_of_range");
+	pkm_lcs_kunit_expect_latest_kmes_origin_event(
+		test, "KMES_SELF_CONFIG_INVALID", 0x89, "BufferCapacity",
+		"retained_value");
+
+	pkm_kmes_kunit_reset_all();
+}
+
+static void pkm_lcs_kunit_kmes_config_swap_failure_emits_kmes_event(
+	struct kunit *test)
+{
+	struct pkm_kmes_runtime_config config = {
+		.buffer_capacity = 65536ULL,
+		.max_event_size = 65536U,
+		.max_nesting_depth = 32U,
+		.max_emit_rate_per_process = 10000U,
+	};
+	struct pkm_kmes_runtime_config snapshot = { };
+
+	pkm_kmes_kunit_reset_all();
+	pkm_kmes_kunit_fail_next_swap_alloc();
+
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			(long)-ENOMEM);
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_runtime_config_snapshot(&snapshot),
+			0);
+	KUNIT_EXPECT_EQ(test, snapshot.buffer_capacity,
+			4ULL * 1024ULL * 1024ULL);
+	pkm_lcs_kunit_expect_latest_kmes_origin_event(
+		test, "KMES_BUFFER_SWAP_FAILED", 0x83, "requested_capacity",
+		"retained_capacity");
 
 	pkm_kmes_kunit_reset_all();
 }
@@ -59482,6 +59615,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_self_config_refresh_malformed_source_retains),
 	KUNIT_CASE(
 		pkm_lcs_kunit_kmes_config_apply_ignores_unknown_and_retains_invalid),
+	KUNIT_CASE(pkm_lcs_kunit_kmes_config_invalid_emits_kmes_event),
+	KUNIT_CASE(pkm_lcs_kunit_kmes_config_swap_failure_emits_kmes_event),
 	KUNIT_CASE(
 		pkm_lcs_kunit_kmes_config_refresh_from_source_hot_swaps),
 	KUNIT_CASE(
