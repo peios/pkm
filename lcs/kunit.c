@@ -1863,6 +1863,78 @@ static void pkm_lcs_kunit_source_registration_rejects_bad_hive_flags_scope(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_registration_rejects_duplicate_routes_live(
+	struct kunit *test)
+{
+	static const char name_a[] = "Machine";
+	static const char name_b[] = "machine";
+	static const struct {
+		bool private_scope;
+		u8 root_a;
+		u8 root_b;
+	} cases[] = {
+		{ false, 1, 2 },
+		{ true, 3, 4 },
+	};
+	struct file file = { };
+	const void *token;
+	size_t i;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+		struct pkm_lcs_usercopy_ops ops =
+			pkm_lcs_kunit_usercopy_ops(&ctx);
+		struct reg_src_hive_entry hives[2] = {
+			{
+				.name_len = sizeof(name_a) - 1,
+				.name_ptr = (u64)(unsigned long)name_a,
+				.root_guid = { cases[i].root_a },
+			},
+			{
+				.name_len = sizeof(name_b) - 1,
+				.name_ptr = (u64)(unsigned long)name_b,
+				.root_guid = { cases[i].root_b },
+			},
+		};
+		struct reg_src_register_args args = {
+			.hive_count = ARRAY_SIZE(hives),
+			.hives_ptr = (u64)(unsigned long)hives,
+		};
+		struct pkm_lcs_source_fd *source_fd = file.private_data;
+
+		if (cases[i].private_scope) {
+			hives[0].flags = RSI_HIVE_PRIVATE;
+			hives[0].scope_guid[0] = 0x42;
+			hives[1].flags = RSI_HIVE_PRIVATE;
+			hives[1].scope_guid[0] = 0x42;
+		}
+
+		KUNIT_ASSERT_NOT_NULL(test, source_fd);
+		KUNIT_EXPECT_EQ(test, source_fd->state,
+				PKM_LCS_SOURCE_FD_UNREGISTERED);
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_source_register_file_for_token(
+					token, &file, &ops,
+					(const void __user *)&args),
+				(long)-EINVAL);
+		KUNIT_EXPECT_EQ(test, source_fd->state,
+				PKM_LCS_SOURCE_FD_UNREGISTERED);
+		KUNIT_EXPECT_EQ(test, ctx.reads, 4U);
+	}
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_build_register_args(
 	struct reg_src_register_args *args, struct reg_src_hive_entry *hive,
 	const char *name, u8 root_guid_first, u64 max_sequence)
@@ -55038,6 +55110,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_registration_rejects_malformed_hive_names),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_rejects_bad_hive_flags_scope),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_rejects_duplicate_routes_live),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_ioctl_publishes_active_slot),
 	KUNIT_CASE(pkm_lcs_kunit_source_active_ids_snapshot_filters_down),
