@@ -1550,6 +1550,51 @@ static void pkm_lcs_kunit_source_registration_semantic_rejects_sequence_overflow
 	pkm_lcs_source_registration_copy_destroy(&copy);
 }
 
+static void pkm_lcs_kunit_source_registration_rejects_sequence_overflow_live(
+	struct kunit *test)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive = {
+		.name_len = sizeof(name_src) - 1,
+		.name_ptr = (u64)(unsigned long)name_src,
+		.root_guid = { 1 },
+	};
+	struct reg_src_register_args args = {
+		.hive_count = 1,
+		.max_sequence = ~0ULL,
+		.hives_ptr = (u64)(unsigned long)&hive,
+	};
+	struct file file = { };
+	struct pkm_lcs_source_fd *source_fd;
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	source_fd = file.private_data;
+	KUNIT_ASSERT_NOT_NULL(test, source_fd);
+
+	KUNIT_EXPECT_EQ(test, source_fd->state,
+			PKM_LCS_SOURCE_FD_UNREGISTERED);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			(long)-EOVERFLOW);
+	KUNIT_EXPECT_EQ(test, source_fd->state,
+			PKM_LCS_SOURCE_FD_UNREGISTERED);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 3U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_registration_rejects_malformed_hive_names(
 	struct kunit *test)
 {
@@ -54833,6 +54878,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_semantic_rejects_bad_hive),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_semantic_rejects_sequence_overflow),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_rejects_sequence_overflow_live),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_rejects_malformed_hive_names),
 	KUNIT_CASE(
