@@ -15374,6 +15374,8 @@ static void pkm_lcs_kunit_key_fd_set_value_fails_before_source(
 		{ 0x75 },
 	};
 	static const char value_name[] = "Answer";
+	static const char bad_value_name[] = { 'b', '\0', 'd' };
+	static const char bad_layer[] = { 'b', '\0', 'd' };
 	static const char overlay_name[] = "overlay";
 	static const char overlay_input[] = {
 		'o', 'v', 'e', 'r', 'l', 'a', 'y', '!'
@@ -15475,6 +15477,28 @@ static void pkm_lcs_kunit_key_fd_set_value_fails_before_source(
 			(long)-ENOSPC);
 	args.data_len = sizeof(data);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	ctx.reads = 0;
+	args.name_len = sizeof(bad_value_name);
+	args.name_ptr = (u64)(unsigned long)bad_value_name;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_value_for_token(
+				(int)allowed_fd, admin_token, &ops, &args),
+			(long)-EINVAL);
+	args.name_len = strlen(value_name);
+	args.name_ptr = (u64)(unsigned long)value_name;
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	ctx.reads = 0;
+	args.layer_len = sizeof(bad_layer);
+	args.layer_ptr = (u64)(unsigned long)bad_layer;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_value_for_token(
+				(int)allowed_fd, admin_token, &ops, &args),
+			(long)-EINVAL);
+	args.layer_len = 0;
+	args.layer_ptr = 0;
+	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
 
 	ctx.reads = 0;
 	args.layer_len = strlen(overlay_name);
@@ -16537,6 +16561,7 @@ static void pkm_lcs_kunit_key_fd_delete_value_fails_before_source(
 	};
 	static const char value_name[] = "Answer";
 	static const char bad_value_name[] = { 'b', '\0', 'd' };
+	static const char bad_layer[] = { 'b', '\0', 'd' };
 	static const char overlay_name[] = "overlay";
 	static const char overlay_input[] = {
 		'o', 'v', 'e', 'r', 'l', 'a', 'y', '!'
@@ -16613,6 +16638,17 @@ static void pkm_lcs_kunit_key_fd_delete_value_fails_before_source(
 	args.name_len = strlen(value_name);
 	args.name_ptr = (u64)(unsigned long)value_name;
 	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	ctx.reads = 0;
+	args.layer_len = sizeof(bad_layer);
+	args.layer_ptr = (u64)(unsigned long)bad_layer;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_delete_value_for_token(
+				(int)allowed_fd, admin_token, &ops, &args),
+			(long)-EINVAL);
+	args.layer_len = 0;
+	args.layer_ptr = 0;
+	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
 
 	ctx.reads = 0;
 	args.layer_len = strlen(overlay_name);
@@ -16948,6 +16984,7 @@ static void pkm_lcs_kunit_key_fd_blanket_tombstone_fails_before_source(
 		{ 1 },
 		{ 0x94 },
 	};
+	static const char bad_layer[] = { 'b', '\0', 'd' };
 	static const char overlay_name[] = "overlay";
 	static const char overlay_input[] = {
 		'o', 'v', 'e', 'r', 'l', 'a', 'y', '!'
@@ -17017,6 +17054,17 @@ static void pkm_lcs_kunit_key_fd_blanket_tombstone_fails_before_source(
 			(long)-EINVAL);
 	args.txn_fd = -1;
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+
+	ctx.reads = 0;
+	args.layer_len = sizeof(bad_layer);
+	args.layer_ptr = (u64)(unsigned long)bad_layer;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_blanket_tombstone_for_token(
+				(int)allowed_fd, admin_token, &ops, &args),
+			(long)-EINVAL);
+	args.layer_len = 0;
+	args.layer_ptr = 0;
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
 
 	ctx.reads = 0;
 	args.layer_len = strlen(overlay_name);
