@@ -2030,7 +2030,8 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 
 	provided_len = args->name_len;
 	name_ptr = args->name_ptr;
-	if (args->_pad0 || args->_pad1)
+	if (args->_pad0 ||
+	    memchr_inv(args->_pad1, 0, sizeof(args->_pad1)))
 		return -EINVAL;
 	if (provided_len && !name_ptr)
 		return -EFAULT;
@@ -2246,7 +2247,7 @@ static long pkm_lcs_key_fd_query_value_from_args(
 	layer_ptr = args->layer_ptr;
 	txn_fd = args->txn_fd;
 
-	if (args->_pad0)
+	if (args->_pad0 || args->_pad1)
 		return -EINVAL;
 	if (data_buf_len && !data_ptr)
 		return -EFAULT;
@@ -9081,12 +9082,6 @@ static long pkm_lcs_key_fd_restore_teardown_subtree(
 	if (ret)
 		goto out_frames;
 
-	ret = pkm_lcs_key_fd_restore_teardown_path_entries(
-		key_fd, txn_id, limits, key_guid, enum_frame.data,
-		enum_frame.len, enum_response.request_id, next_sequence);
-	if (ret)
-		goto out_frames;
-
 	ret = pkm_lcs_backup_materialize_path_entries(
 		limits, enum_frame.data, enum_frame.len,
 		enum_response.request_id, next_sequence, &entries,
@@ -9094,6 +9089,10 @@ static long pkm_lcs_key_fd_restore_teardown_subtree(
 	if (ret)
 		goto out_frames;
 
+	/*
+	 * Fail closed on a malformed topology before sending destructive
+	 * subtree teardown writes for the current parent.
+	 */
 	for (i = 0; i < entry_count; i++) {
 		if (entries[i].hidden)
 			continue;
@@ -9113,6 +9112,20 @@ static long pkm_lcs_key_fd_restore_teardown_subtree(
 			seen, entries[i].child_guid);
 		if (ret)
 			goto out_entries;
+	}
+
+	ret = pkm_lcs_key_fd_restore_teardown_path_entries(
+		key_fd, txn_id, limits, key_guid, enum_frame.data,
+		enum_frame.len, enum_response.request_id, next_sequence);
+	if (ret)
+		goto out_entries;
+
+	for (i = 0; i < entry_count; i++) {
+		if (entries[i].hidden)
+			continue;
+		if (pkm_lcs_backup_visible_entry_seen_before(
+			    entries, i, entries[i].child_guid))
+			continue;
 		ret = pkm_lcs_key_fd_restore_teardown_subtree(
 			key_fd, txn_id, limits, layer_snapshot,
 			entries[i].child_guid, next_sequence, true, depth + 1,
