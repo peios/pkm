@@ -6,6 +6,11 @@ IMAGE_KUNIT := pkm-new-kunit-builder
 OUT         := $(CURDIR)/out
 OUT_KUNIT   := $(CURDIR)/out-kunit
 CCACHE      := pkm-new-kernel-ccache
+RELEASE     := $(CURDIR)/release
+
+# Release version. Owned by us up to the alphaN/betaN suffix; the build farm
+# appends its own build counter (e.g. v0.20.0-alpha2 -> 0.20.0-alpha2-1).
+VERSION     ?= v0.20.0-alpha2
 
 # Fast KUnit iteration loop (kunit-*-fast): a persistent, incremental
 # kernel build tree lives in a Docker volume instead of being rebuilt from
@@ -35,7 +40,7 @@ ifneq ($(strip $(PKM_KACS_TCB_PUBKEY_HEX)),)
 PKM_DOCKER_BUILD_ARGS += --build-arg PKM_KACS_TCB_PUBKEY_HEX=$(PKM_KACS_TCB_PUBKEY_HEX)
 endif
 
-.PHONY: all require-tcb-pubkey verify-scaffold image kernel boot-smoke kunit-image kunit-kernel kunit-smoke kunit-base-image kunit-kernel-fast kunit-smoke-fast kunit-clean-fast shell clean clean-all
+.PHONY: all require-tcb-pubkey verify-scaffold image kernel release release-stage boot-smoke kunit-image kunit-kernel kunit-smoke kunit-base-image kunit-kernel-fast kunit-smoke-fast kunit-clean-fast shell clean clean-all
 
 all: kernel
 
@@ -60,11 +65,34 @@ kernel: image
 		-v $(OUT):/out \
 		-v $(CCACHE):/ccache \
 		$(IMAGE) \
-		bash -c 'make LLVM=1 CC="ccache clang" -j$$(nproc) && cp arch/x86/boot/bzImage /out/ && cp .config /out/kernel.config && make LLVM=1 modules_install INSTALL_MOD_PATH=/out'
+		bash -c 'make LLVM=1 CC="ccache clang" -j$$(nproc) && cp arch/x86/boot/bzImage /out/ && cp .config /out/kernel.config && cp System.map /out/ && make LLVM=1 modules_install INSTALL_MOD_PATH=/out'
 	@echo ""
 	@echo "Kernel image: $(OUT)/bzImage"
 	@echo "Kernel config: $(OUT)/kernel.config"
+	@echo "System.map:   $(OUT)/System.map"
 	@echo "Modules:      $(OUT)/lib/modules/"
+
+RELEASE_ENV := VERSION=$(VERSION) OUT=$(OUT) RELEASE=$(RELEASE) \
+	DOCKERFILE=$(CURDIR)/Dockerfile PKM_ROOT=$(CURDIR)/..
+
+# Cut a release: ALWAYS build the kernel fresh, then stage. This is the
+# trustworthy path — a release never packages a stale `out/` tree. Assembles
+# the bzImage + manifest.json handoff for the build farm into release/.
+# Does NOT touch GitHub: tagging and uploading is a deliberate manual step.
+# Override version with `make release VERSION=v0.20.0-alpha3`.
+release: kernel
+	$(RELEASE_ENV) $(CURDIR)/make-release.sh
+
+# Error clearly if asked to stage before the kernel is built. bzImage is a
+# side effect of `make kernel`; this rule only fires when it's absent.
+$(OUT)/bzImage:
+	@echo "kernel not built at $@ — run 'make kernel' first" >&2; exit 1
+
+# Re-stage from an EXISTING build without rebuilding the kernel. Opt-in fast
+# path for iterating on the manifest / re-staging after a real `make kernel`.
+# Trusts whatever is in out/ — only use it when you know that build is current.
+release-stage: $(OUT)/bzImage
+	$(RELEASE_ENV) $(CURDIR)/make-release.sh
 
 kunit-kernel: kunit-image
 	mkdir -p $(OUT_KUNIT)
@@ -122,7 +150,7 @@ shell: image
 	docker run --rm -it -v $(CCACHE):/ccache $(IMAGE) bash
 
 clean:
-	rm -rf $(OUT)
+	rm -rf $(OUT) $(RELEASE)
 
 clean-all: clean
 	docker volume rm -f $(CCACHE) $(BUILDTREE)

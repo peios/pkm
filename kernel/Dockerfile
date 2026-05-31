@@ -48,9 +48,13 @@ RUN BINDGEN_VERSION=$(/build/linux/scripts/min-tool-version.sh bindgen) && \
 # Point bindgen at LLVM 18's libclang (not the system default)
 ENV LIBCLANG_PATH="/usr/lib/llvm18/lib"
 
-# Start from Arch's kernel config
-ADD https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/main/config.x86_64 \
-    /build/linux/.config
+# Start from Arch's kernel config — VENDORED for reproducibility.
+# Frozen from gitlab.archlinux.org archlinux/packaging/packages/linux at commit
+# c2c442f4327a9ef6c6c7230bcb5efccdb05e6e9e (tag 7.0.10.arch1-1, 2026-05-23).
+# Previously fetched from `main` at build time, which made the resulting kernel
+# non-reproducible (Arch's config is a moving target). To refresh: re-fetch the
+# raw config at a chosen commit, update this comment's SHA, and rebuild.
+COPY kernel/config.x86_64.base /build/linux/.config
 
 WORKDIR /build/linux
 

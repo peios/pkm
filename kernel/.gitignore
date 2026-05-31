@@ -2,3 +2,4 @@ out/
 out-kunit/
 out-kunit-fast/
 build.log
+release/
