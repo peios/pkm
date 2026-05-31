@@ -5008,6 +5008,7 @@ static void pkm_lcs_kunit_create_layer_target_bad_name_fails_closed(
 	struct kunit *test)
 {
 	const char layer_src[] = "bad/layer";
+	const char invalid_utf8_layer[] = { 'b', (char)0xff, 'd', '\0' };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct pkm_lcs_create_layer_target target = { };
@@ -5020,6 +5021,20 @@ static void pkm_lcs_kunit_create_layer_target_bad_name_fails_closed(
 			pkm_lcs_create_layer_target_prepare(
 				&ops, (const char __user *)layer_src, NULL, 0,
 				&target, &plan),
+			(long)-EINVAL);
+	KUNIT_EXPECT_PTR_EQ(test, target.name, NULL);
+	KUNIT_EXPECT_EQ(test, plan.precedence, 0U);
+	KUNIT_EXPECT_EQ(test, plan.enabled, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	memset(&ctx, 0, sizeof(ctx));
+	plan.precedence = 99;
+	plan.enabled = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_target_prepare(
+				&ops, (const char __user *)invalid_utf8_layer,
+				NULL, 0, &target, &plan),
 			(long)-EINVAL);
 	KUNIT_EXPECT_PTR_EQ(test, target.name, NULL);
 	KUNIT_EXPECT_EQ(test, plan.precedence, 0U);
