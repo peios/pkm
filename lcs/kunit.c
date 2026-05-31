@@ -11181,12 +11181,15 @@ static void pkm_lcs_kunit_key_fd_query_value_success(struct kunit *test)
 		{ 0x62 },
 	};
 	static const char value_name[] = "Answer";
+	static const char value_name_input[] = {
+		'A', 'n', 's', 'w', 'e', 'r', '!'
+	};
 	static const u8 value_data[] = { 4, 3, 2, 1 };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_query_value_args args = {
 		.name_len = sizeof(value_name) - 1,
-		.name_ptr = (u64)(unsigned long)value_name,
+		.name_ptr = (u64)(unsigned long)value_name_input,
 		.data_len = 16,
 		.layer_buf_len = 16,
 		.txn_fd = -1,
@@ -11485,6 +11488,7 @@ static void pkm_lcs_kunit_key_fd_query_value_fails_before_source(
 		{ 0x66 },
 	};
 	static const char value_name[] = "Answer";
+	static const char bad_value_name[] = { 'b', '\0', 'd' };
 	struct pkm_lcs_transaction_fd_snapshot txn_snapshot = { };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
@@ -11537,6 +11541,18 @@ static void pkm_lcs_kunit_key_fd_query_value_fails_before_source(
 							 &ops, &args),
 			(long)-EFAULT);
 	args.data_ptr = (u64)(unsigned long)data;
+
+	args.name_len = sizeof(bad_value_name);
+	args.name_ptr = (u64)(unsigned long)bad_value_name;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_query_value((int)allowed_fd,
+							 &ops, &args),
+			(long)-EINVAL);
+	args.name_len = sizeof(value_name) - 1;
+	args.name_ptr = (u64)(unsigned long)value_name;
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	ctx.reads = 0;
 
 	args.layer_ptr = 0;
 	KUNIT_EXPECT_EQ(test,
