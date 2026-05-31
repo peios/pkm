@@ -623,6 +623,7 @@ int pkm_kacs_revert_impersonation(void);
 int pkm_kacs_install_current_primary_token(const void *token);
 int pkm_kmes_current_process_rate_reserve(u32 count);
 void pkm_kmes_current_process_rate_refund(u32 count);
+void pkm_kmes_rate_buckets_reconfigure(u32 rate);
 
 const void *kacs_rust_create_boot_system_token(void);
 const void *kacs_rust_create_boot_anonymous_token(void);

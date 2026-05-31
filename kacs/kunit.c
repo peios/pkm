@@ -156,6 +156,14 @@
 #define PKM_KUNIT_KMES_SWAP_CAPACITY (1U * 1024U * 1024U)
 #define PKM_KUNIT_KMES_DOWNSIZE_CAPACITY (128U * 1024U)
 #define PKM_KUNIT_KMES_DEFAULT_RATE 10000U
+#define PKM_KUNIT_KMES_MIN_CAPACITY (64U * 1024U)
+#define PKM_KUNIT_KMES_MAX_CAPACITY (256U * 1024U * 1024U)
+#define PKM_KUNIT_KMES_MIN_EVENT_SIZE 1024U
+#define PKM_KUNIT_KMES_MAX_EVENT_SIZE (4U * 1024U * 1024U)
+#define PKM_KUNIT_KMES_MIN_NESTING_DEPTH 4U
+#define PKM_KUNIT_KMES_MAX_NESTING_DEPTH 256U
+#define PKM_KUNIT_KMES_MIN_RATE 100U
+#define PKM_KUNIT_KMES_MAX_RATE 1000000U
 #define PKM_KUNIT_USER_KIND_SYSTEM 0U
 #define PKM_KUNIT_USER_KIND_LOCAL_SERVICE 1U
 #define PKM_KUNIT_PRLIMIT_READ 1U
@@ -4374,6 +4382,182 @@ static void pkm_kunit_kmes_emit_batch_checks_emitted_out_before_entries(
 			(long)-EFAULT);
 	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
 			-ENOENT);
+	kacs_rust_token_drop(token);
+}
+
+static struct pkm_kmes_runtime_config pkm_kunit_kmes_default_config(void)
+{
+	return (struct pkm_kmes_runtime_config) {
+		.buffer_capacity = PKM_KUNIT_KMES_DEFAULT_CAPACITY,
+		.max_event_size = 65536U,
+		.max_nesting_depth = 32U,
+		.max_emit_rate_per_process = PKM_KUNIT_KMES_DEFAULT_RATE,
+	};
+}
+
+static void pkm_kunit_kmes_runtime_config_validates_ranges(
+	struct kunit *test)
+{
+	struct pkm_kmes_runtime_config config;
+	struct pkm_kmes_runtime_config snapshot = { };
+
+	pkm_kunit_reset_kmes();
+	config = pkm_kunit_kmes_default_config();
+
+	config.buffer_capacity = PKM_KUNIT_KMES_MIN_CAPACITY / 2U;
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			(long)-EINVAL);
+	config = pkm_kunit_kmes_default_config();
+	config.buffer_capacity = PKM_KUNIT_KMES_MAX_CAPACITY * 2ULL;
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			(long)-EINVAL);
+	config = pkm_kunit_kmes_default_config();
+	config.buffer_capacity = PKM_KUNIT_KMES_MIN_CAPACITY + 1U;
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			(long)-EINVAL);
+	config = pkm_kunit_kmes_default_config();
+	config.max_event_size = PKM_KUNIT_KMES_MIN_EVENT_SIZE - 1U;
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			(long)-EINVAL);
+	config = pkm_kunit_kmes_default_config();
+	config.max_event_size = PKM_KUNIT_KMES_MAX_EVENT_SIZE + 1U;
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			(long)-EINVAL);
+	config = pkm_kunit_kmes_default_config();
+	config.max_nesting_depth = PKM_KUNIT_KMES_MIN_NESTING_DEPTH - 1U;
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			(long)-EINVAL);
+	config = pkm_kunit_kmes_default_config();
+	config.max_nesting_depth = PKM_KUNIT_KMES_MAX_NESTING_DEPTH + 1U;
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			(long)-EINVAL);
+	config = pkm_kunit_kmes_default_config();
+	config.max_emit_rate_per_process = PKM_KUNIT_KMES_MIN_RATE - 1U;
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			(long)-EINVAL);
+	config = pkm_kunit_kmes_default_config();
+	config.max_emit_rate_per_process = PKM_KUNIT_KMES_MAX_RATE + 1U;
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			(long)-EINVAL);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_runtime_config_snapshot(&snapshot), 0);
+	KUNIT_EXPECT_EQ(test, snapshot.buffer_capacity,
+			(u64)PKM_KUNIT_KMES_DEFAULT_CAPACITY);
+	KUNIT_EXPECT_EQ(test, snapshot.max_event_size, 65536U);
+	KUNIT_EXPECT_EQ(test, snapshot.max_nesting_depth, 32U);
+	KUNIT_EXPECT_EQ(test, snapshot.max_emit_rate_per_process,
+			(u32)PKM_KUNIT_KMES_DEFAULT_RATE);
+}
+
+static void pkm_kunit_kmes_runtime_max_event_size_controls_syscall(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kmes_runtime_config config;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	pkm_kunit_reset_kmes();
+
+	config = pkm_kunit_kmes_default_config();
+	config.max_event_size = PKM_KUNIT_KMES_MIN_EVENT_SIZE;
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_emit_user_for_token(token,
+						     (const void __user *)1, 1,
+						     (const void __user *)1,
+						     1024U),
+			(long)-ENOSPC);
+
+	config.max_event_size = 2048U;
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_emit_user_for_token(token,
+						     (const void __user *)1, 1,
+						     (const void __user *)1,
+						     1024U),
+			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_runtime_nesting_depth_controls_validation(
+	struct kunit *test)
+{
+	static const u8 nested_payload[] = {
+		0x91, 0x91, 0x91, 0x91, 0xc0,
+	};
+	const void *token;
+	struct pkm_kmes_runtime_config config;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	pkm_kunit_reset_kmes();
+
+	config = pkm_kunit_kmes_default_config();
+	config.max_nesting_depth = 4U;
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_for_token(
+				token, PKM_KUNIT_KMES_USER_TYPE,
+				sizeof(PKM_KUNIT_KMES_USER_TYPE) - 1,
+				nested_payload, sizeof(nested_payload)),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+
+	config.max_nesting_depth = 5U;
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_for_token(
+				token, PKM_KUNIT_KMES_USER_TYPE,
+				sizeof(PKM_KUNIT_KMES_USER_TYPE) - 1,
+				nested_payload, sizeof(nested_payload)),
+			0L);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_runtime_rate_change_clamps_live_bucket(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kmes_runtime_config config;
+	u32 tokens = 0;
+
+	token = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_current_process_rate_refill_frozen(true),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_current_process_rate_tokens(1000U),
+			0);
+
+	config = pkm_kunit_kmes_default_config();
+	config.max_emit_rate_per_process = PKM_KUNIT_KMES_MIN_RATE;
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_get_current_process_rate_tokens(&tokens), 0);
+	KUNIT_EXPECT_EQ(test, tokens, (u32)PKM_KUNIT_KMES_MIN_RATE);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_for_token(
+				token, PKM_KUNIT_KMES_USER_TYPE,
+				sizeof(PKM_KUNIT_KMES_USER_TYPE) - 1,
+				&(const u8){ 0xc0 }, 1),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_get_current_process_rate_tokens(&tokens), 0);
+	KUNIT_EXPECT_EQ(test, tokens, (u32)(PKM_KUNIT_KMES_MIN_RATE - 1U));
 	kacs_rust_token_drop(token);
 }
 
@@ -41180,6 +41364,10 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_emit_batch_success_shared_timestamp),
 	KUNIT_CASE(pkm_kunit_kmes_emit_batch_partial_refunds_unused_tokens),
 	KUNIT_CASE(pkm_kunit_kmes_emit_batch_checks_emitted_out_before_entries),
+	KUNIT_CASE(pkm_kunit_kmes_runtime_config_validates_ranges),
+	KUNIT_CASE(pkm_kunit_kmes_runtime_max_event_size_controls_syscall),
+	KUNIT_CASE(pkm_kunit_kmes_runtime_nesting_depth_controls_validation),
+	KUNIT_CASE(pkm_kunit_kmes_runtime_rate_change_clamps_live_bucket),
 	KUNIT_CASE(pkm_kunit_access_check_emits_to_kmes_without_sink),
 	KUNIT_CASE(pkm_kunit_access_check_failing_audit_sink_fails_closed),
 	KUNIT_CASE(pkm_kunit_list_faults_on_results_write),

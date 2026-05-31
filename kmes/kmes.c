@@ -45,6 +45,14 @@
 #define PKM_KMES_DEFAULT_MAX_EVENT_SIZE 65536U
 #define PKM_KMES_DEFAULT_MAX_NESTING_DEPTH 32U
 #define PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS 10000U
+#define PKM_KMES_MIN_BUFFER_CAPACITY 65536ULL
+#define PKM_KMES_MAX_BUFFER_CAPACITY 268435456ULL
+#define PKM_KMES_MIN_MAX_EVENT_SIZE 1024U
+#define PKM_KMES_MAX_MAX_EVENT_SIZE 4194304U
+#define PKM_KMES_MIN_MAX_NESTING_DEPTH 4U
+#define PKM_KMES_MAX_MAX_NESTING_DEPTH 256U
+#define PKM_KMES_MIN_MAX_EMIT_RATE_PER_PROCESS 100U
+#define PKM_KMES_MAX_MAX_EMIT_RATE_PER_PROCESS 1000000U
 #define PKM_KMES_MAX_KERNEL_TYPE_LEN ((size_t)U16_MAX)
 #define PKM_KMES_EARLY_DMESG_TYPE_PREFIX 64U
 #define PKM_KMES_PRIVILEGE_SE_TCB (1ULL << 7)
@@ -100,10 +108,20 @@ static struct pkm_kmes_cpu_slot *pkm_kmes_cpus;
 static unsigned int pkm_kmes_cpu_slots;
 static unsigned int pkm_kmes_cpu_count;
 static bool pkm_kmes_ready;
+static u64 pkm_kmes_active_buffer_capacity =
+	PKM_KMES_DEFAULT_BUFFER_CAPACITY;
+static u32 pkm_kmes_active_max_event_size =
+	PKM_KMES_DEFAULT_MAX_EVENT_SIZE;
+static u32 pkm_kmes_active_max_nesting_depth =
+	PKM_KMES_DEFAULT_MAX_NESTING_DEPTH;
+static u32 pkm_kmes_active_max_emit_rate_per_process =
+	PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS;
 static DEFINE_MUTEX(pkm_kmes_topology_lock);
 static const u8 pkm_kmes_ring_magic[8] = {
 	0x4b, 0x4d, 0x45, 0x53, 0x52, 0x49, 0x4e, 0x47,
 };
+
+static long pkm_kmes_swap_capacity_locked(u64 new_capacity);
 
 extern int kacs_rust_kmes_validate_staged_event(const u8 *event_type_ptr,
 						size_t event_type_len,
@@ -261,6 +279,58 @@ static bool pkm_kmes_need_wake(const struct pkm_kmes_cpu_state *cpu)
 {
 	return READ_ONCE(*(u8 *)(cpu->consumer_page +
 				 KMES_CONSUMER_NEED_WAKE_OFFSET)) != 0;
+}
+
+static bool pkm_kmes_buffer_capacity_valid(u64 capacity)
+{
+	if (capacity < PKM_KMES_MIN_BUFFER_CAPACITY ||
+	    capacity > PKM_KMES_MAX_BUFFER_CAPACITY)
+		return false;
+	if (capacity & (capacity - 1))
+		return false;
+	return true;
+}
+
+static bool pkm_kmes_runtime_config_valid(
+	const struct pkm_kmes_runtime_config *config)
+{
+	if (!config)
+		return false;
+	if (!pkm_kmes_buffer_capacity_valid(config->buffer_capacity))
+		return false;
+	if (config->max_event_size < PKM_KMES_MIN_MAX_EVENT_SIZE ||
+	    config->max_event_size > PKM_KMES_MAX_MAX_EVENT_SIZE)
+		return false;
+	if (config->max_nesting_depth < PKM_KMES_MIN_MAX_NESTING_DEPTH ||
+	    config->max_nesting_depth > PKM_KMES_MAX_MAX_NESTING_DEPTH)
+		return false;
+	if (config->max_emit_rate_per_process <
+		    PKM_KMES_MIN_MAX_EMIT_RATE_PER_PROCESS ||
+	    config->max_emit_rate_per_process >
+		    PKM_KMES_MAX_MAX_EMIT_RATE_PER_PROCESS)
+		return false;
+	return true;
+}
+
+static void pkm_kmes_runtime_config_defaults(
+	struct pkm_kmes_runtime_config *config)
+{
+	config->buffer_capacity = PKM_KMES_DEFAULT_BUFFER_CAPACITY;
+	config->max_event_size = PKM_KMES_DEFAULT_MAX_EVENT_SIZE;
+	config->max_nesting_depth = PKM_KMES_DEFAULT_MAX_NESTING_DEPTH;
+	config->max_emit_rate_per_process =
+		PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS;
+}
+
+static void pkm_kmes_runtime_config_store_locked(
+	const struct pkm_kmes_runtime_config *config)
+{
+	WRITE_ONCE(pkm_kmes_active_buffer_capacity, config->buffer_capacity);
+	WRITE_ONCE(pkm_kmes_active_max_event_size, config->max_event_size);
+	WRITE_ONCE(pkm_kmes_active_max_nesting_depth,
+		   config->max_nesting_depth);
+	WRITE_ONCE(pkm_kmes_active_max_emit_rate_per_process,
+		   config->max_emit_rate_per_process);
 }
 
 static void pkm_kmes_futex_wake(struct pkm_kmes_cpu_state *cpu)
@@ -649,6 +719,57 @@ static int pkm_kmes_runtime_capacity(u64 *capacity_out)
 	return -ENOMEM;
 }
 
+int pkm_kmes_runtime_config_snapshot(struct pkm_kmes_runtime_config *out)
+{
+	if (!out)
+		return -EINVAL;
+
+	out->buffer_capacity = READ_ONCE(pkm_kmes_active_buffer_capacity);
+	out->max_event_size = READ_ONCE(pkm_kmes_active_max_event_size);
+	out->max_nesting_depth = READ_ONCE(pkm_kmes_active_max_nesting_depth);
+	out->max_emit_rate_per_process =
+		READ_ONCE(pkm_kmes_active_max_emit_rate_per_process);
+	return 0;
+}
+
+u32 pkm_kmes_runtime_max_emit_rate_per_process(void)
+{
+	return READ_ONCE(pkm_kmes_active_max_emit_rate_per_process);
+}
+
+long pkm_kmes_runtime_config_apply(
+	const struct pkm_kmes_runtime_config *config)
+{
+	u64 current_capacity = 0;
+	u32 old_rate;
+	long ret;
+
+	if (!pkm_kmes_runtime_config_valid(config))
+		return -EINVAL;
+
+	mutex_lock(&pkm_kmes_topology_lock);
+	old_rate = READ_ONCE(pkm_kmes_active_max_emit_rate_per_process);
+	ret = pkm_kmes_runtime_capacity(&current_capacity);
+	if (ret)
+		goto out;
+
+	if (config->buffer_capacity != current_capacity) {
+		ret = pkm_kmes_swap_capacity_locked(config->buffer_capacity);
+		if (ret)
+			goto out;
+	}
+
+	pkm_kmes_runtime_config_store_locked(config);
+	if (config->max_emit_rate_per_process != old_rate)
+		pkm_kmes_rate_buckets_reconfigure(
+			config->max_emit_rate_per_process);
+	ret = 0;
+
+out:
+	mutex_unlock(&pkm_kmes_topology_lock);
+	return ret;
+}
+
 static long pkm_kmes_require_audit(const void *token, bool *tcb_exempt_out)
 {
 	if (!tcb_exempt_out)
@@ -696,6 +817,7 @@ static long pkm_kmes_declared_event_size(u16 event_type_len, u32 payload_len,
 }
 
 static long pkm_kmes_validate_declared_size(u64 ring_capacity,
+					    u32 max_event_size,
 					    u16 event_type_len,
 					    u32 payload_len,
 					    struct pkm_kmes_staged_event *out)
@@ -711,7 +833,7 @@ static long pkm_kmes_validate_declared_size(u64 ring_capacity,
 					   &header_size, &event_size);
 	if (ret)
 		return ret;
-	if (event_size > PKM_KMES_DEFAULT_MAX_EVENT_SIZE)
+	if (event_size > max_event_size)
 		return -ENOSPC;
 	if ((u64)event_size > ring_capacity / 2)
 		return -ENOSPC;
@@ -749,7 +871,8 @@ static void pkm_kmes_staged_event_reset(struct pkm_kmes_staged_event *event)
 	memset(event, 0, sizeof(*event));
 }
 
-static long pkm_kmes_stage_event(u64 ring_capacity,
+static long pkm_kmes_stage_event(u64 ring_capacity, u32 max_event_size,
+				 u32 max_nesting_depth,
 				 const void *event_type,
 				 u16 event_type_len,
 				 const void *payload,
@@ -765,7 +888,8 @@ static long pkm_kmes_stage_event(u64 ring_capacity,
 		return -EINVAL;
 
 	memset(out, 0, sizeof(*out));
-	ret = pkm_kmes_validate_declared_size(ring_capacity, event_type_len,
+	ret = pkm_kmes_validate_declared_size(ring_capacity, max_event_size,
+					      event_type_len,
 					      payload_len, out);
 	if (ret)
 		return ret;
@@ -784,7 +908,7 @@ static long pkm_kmes_stage_event(u64 ring_capacity,
 		goto fail;
 	ret = kacs_rust_kmes_validate_staged_event(
 		bytes, event_type_len, bytes + event_type_len, payload_len,
-		PKM_KMES_DEFAULT_MAX_NESTING_DEPTH);
+		max_nesting_depth);
 	if (ret)
 		goto fail;
 
@@ -901,6 +1025,7 @@ static long pkm_kmes_emit_one_for_token(const void *token, const void *event_typ
 					u32 payload_len, bool from_user)
 {
 	struct pkm_kmes_staged_event event = { };
+	struct pkm_kmes_runtime_config config = { };
 	u64 ring_capacity = 0;
 	bool tcb_exempt;
 	bool reserved = false;
@@ -925,8 +1050,13 @@ static long pkm_kmes_emit_one_for_token(const void *token, const void *event_typ
 	ret = pkm_kmes_runtime_capacity(&ring_capacity);
 	if (ret)
 		goto out;
+	ret = pkm_kmes_runtime_config_snapshot(&config);
+	if (ret)
+		goto out;
 
-	ret = pkm_kmes_stage_event(ring_capacity, event_type, event_type_len,
+	ret = pkm_kmes_stage_event(ring_capacity, config.max_event_size,
+				   config.max_nesting_depth, event_type,
+				   event_type_len,
 				   payload, payload_len, from_user, &event);
 	if (ret)
 		goto out;
@@ -993,6 +1123,7 @@ static long pkm_kmes_stage_batch_events(const struct kmes_emit_entry *entries,
 					u32 *validated_out)
 {
 	u64 ring_capacity = 0;
+	struct pkm_kmes_runtime_config config = { };
 	u32 validated = 0;
 	long ret;
 
@@ -1002,9 +1133,13 @@ static long pkm_kmes_stage_batch_events(const struct kmes_emit_entry *entries,
 	ret = pkm_kmes_runtime_capacity(&ring_capacity);
 	if (ret)
 		return ret;
+	ret = pkm_kmes_runtime_config_snapshot(&config);
+	if (ret)
+		return ret;
 
 	for (validated = 0; validated < count; validated++) {
-		ret = pkm_kmes_stage_event(ring_capacity,
+		ret = pkm_kmes_stage_event(ring_capacity, config.max_event_size,
+					   config.max_nesting_depth,
 					   (const void *)(uintptr_t)entries[validated].event_type,
 					   entries[validated].event_type_len,
 					   (const void *)(uintptr_t)entries[validated].payload,
@@ -1632,11 +1767,7 @@ struct pkm_kmes_swap_ctx {
 
 static bool pkm_kmes_capacity_valid(u64 capacity)
 {
-	if (capacity < PAGE_SIZE)
-		return false;
-	if (capacity & (capacity - 1))
-		return false;
-	return true;
+	return pkm_kmes_buffer_capacity_valid(capacity);
 }
 
 static int pkm_kmes_prepare_swap_ring(struct pkm_kmes_cpu_state *old,
@@ -1854,8 +1985,14 @@ void pkm_kmes_kunit_reset_all(void)
 {
 	unsigned int cpu;
 	u64 current_capacity = 0;
+	struct pkm_kmes_runtime_config defaults = { };
 
 	WRITE_ONCE(pkm_kmes_kunit_fail_next_ring_alloc, false);
+	pkm_kmes_runtime_config_defaults(&defaults);
+	mutex_lock(&pkm_kmes_topology_lock);
+	pkm_kmes_runtime_config_store_locked(&defaults);
+	mutex_unlock(&pkm_kmes_topology_lock);
+	pkm_kmes_rate_buckets_reconfigure(defaults.max_emit_rate_per_process);
 
 	if (!pkm_kmes_ready)
 		return;
@@ -2288,6 +2425,18 @@ long pkm_kmes_kunit_emit_batch_for_token(const void *token,
 					 u32 count, u32 *emitted_out)
 {
 	return pkm_kmes_emit_batch_common(token, entries, count, false,
-					  emitted_out, false);
+					 emitted_out, false);
+}
+
+int pkm_kmes_kunit_runtime_config_snapshot(
+	struct pkm_kmes_runtime_config *out)
+{
+	return pkm_kmes_runtime_config_snapshot(out);
+}
+
+long pkm_kmes_kunit_runtime_config_apply(
+	const struct pkm_kmes_runtime_config *config)
+{
+	return pkm_kmes_runtime_config_apply(config);
 }
 #endif

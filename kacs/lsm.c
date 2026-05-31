@@ -31,6 +31,7 @@
 #include <linux/init.h>
 #include <linux/irqflags.h>
 #include <linux/kernel.h>
+#include <linux/list.h>
 #include <linux/limits.h>
 #include <linux/math64.h>
 #include <linux/lsm_hooks.h>
@@ -80,7 +81,6 @@
 #include "token_runtime.h"
 
 #define PKM_KACS_UNMAPPED_ID 65534U
-#define PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS 10000U
 #define PKM_KACS_TLP_MAX_PREFIXES 64U
 #define PKM_KACS_TLP_MAX_PREFIX_LEN 4096U
 #define PKM_KACS_LSM_PRLIMIT_READ 1U
@@ -208,12 +208,16 @@ struct pkm_kacs_native_open_prepared {
 struct pkm_kmes_rate_bucket {
 	refcount_t refs;
 	spinlock_t lock;
+	struct list_head list;
 	u64 last_refill_ns;
 	u32 tokens;
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 	bool kunit_freeze_refill;
 #endif
 };
+
+static LIST_HEAD(pkm_kmes_rate_bucket_list);
+static DEFINE_SPINLOCK(pkm_kmes_rate_bucket_list_lock);
 
 struct pkm_kacs_cred_security {
 	const void *token;
@@ -2780,8 +2784,12 @@ static struct pkm_kmes_rate_bucket *pkm_kmes_rate_bucket_alloc(void)
 
 	refcount_set(&bucket->refs, 1);
 	spin_lock_init(&bucket->lock);
+	INIT_LIST_HEAD(&bucket->list);
 	bucket->last_refill_ns = ktime_get_ns();
-	bucket->tokens = PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS;
+	bucket->tokens = pkm_kmes_runtime_max_emit_rate_per_process();
+	spin_lock(&pkm_kmes_rate_bucket_list_lock);
+	list_add(&bucket->list, &pkm_kmes_rate_bucket_list);
+	spin_unlock(&pkm_kmes_rate_bucket_list_lock);
 	return bucket;
 }
 
@@ -2789,8 +2797,12 @@ static void pkm_kmes_rate_bucket_put(struct pkm_kmes_rate_bucket *bucket)
 {
 	if (!bucket)
 		return;
-	if (refcount_dec_and_test(&bucket->refs))
+	if (refcount_dec_and_test(&bucket->refs)) {
+		spin_lock(&pkm_kmes_rate_bucket_list_lock);
+		list_del_init(&bucket->list);
+		spin_unlock(&pkm_kmes_rate_bucket_list_lock);
 		kfree(bucket);
+	}
 }
 
 static struct pkm_kacs_process_state *pkm_kacs_process_state_alloc(
@@ -3030,8 +3042,8 @@ static int pkm_kmes_rate_bucket_reserve(struct pkm_kmes_rate_bucket *bucket,
 
 	now_ns = ktime_get_ns();
 	spin_lock_irqsave(&bucket->lock, flags);
-	pkm_kmes_rate_bucket_refill(bucket, now_ns,
-				    PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS);
+	pkm_kmes_rate_bucket_refill(
+		bucket, now_ns, pkm_kmes_runtime_max_emit_rate_per_process());
 	if (bucket->tokens < count) {
 		spin_unlock_irqrestore(&bucket->lock, flags);
 		return -EAGAIN;
@@ -3052,10 +3064,30 @@ static void pkm_kmes_rate_bucket_refund(struct pkm_kmes_rate_bucket *bucket,
 
 	spin_lock_irqsave(&bucket->lock, flags);
 	tokens = bucket->tokens + (u64)count;
-	if (tokens > PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS)
-		tokens = PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS;
+	if (tokens > pkm_kmes_runtime_max_emit_rate_per_process())
+		tokens = pkm_kmes_runtime_max_emit_rate_per_process();
 	bucket->tokens = (u32)tokens;
 	spin_unlock_irqrestore(&bucket->lock, flags);
+}
+
+void pkm_kmes_rate_buckets_reconfigure(u32 rate)
+{
+	struct pkm_kmes_rate_bucket *bucket;
+	unsigned long list_flags;
+
+	if (rate == 0)
+		return;
+
+	spin_lock_irqsave(&pkm_kmes_rate_bucket_list_lock, list_flags);
+	list_for_each_entry(bucket, &pkm_kmes_rate_bucket_list, list) {
+		unsigned long bucket_flags;
+
+		spin_lock_irqsave(&bucket->lock, bucket_flags);
+		if (bucket->tokens > rate)
+			bucket->tokens = rate;
+		spin_unlock_irqrestore(&bucket->lock, bucket_flags);
+	}
+	spin_unlock_irqrestore(&pkm_kmes_rate_bucket_list_lock, list_flags);
 }
 
 static u64 pkm_kacs_allow_cap_mask_u64(void)
@@ -12918,7 +12950,7 @@ int pkm_kmes_kunit_set_current_process_rate_tokens(u32 tokens)
 	struct pkm_kacs_process_state *state;
 	unsigned long flags;
 
-	if (tokens > PKM_KMES_DEFAULT_MAX_EMIT_RATE_PER_PROCESS)
+	if (tokens > pkm_kmes_runtime_max_emit_rate_per_process())
 		return -EINVAL;
 
 	state = pkm_kacs_current_process_state();

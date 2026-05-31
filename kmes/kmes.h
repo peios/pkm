@@ -11,6 +11,16 @@ int pkm_kmes_init(void);
 void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 			  size_t event_type_len, const void *payload,
 			  size_t payload_len);
+struct pkm_kmes_runtime_config {
+	u64 buffer_capacity;
+	u32 max_event_size;
+	u32 max_nesting_depth;
+	u32 max_emit_rate_per_process;
+};
+u32 pkm_kmes_runtime_max_emit_rate_per_process(void);
+int pkm_kmes_runtime_config_snapshot(struct pkm_kmes_runtime_config *out);
+long pkm_kmes_runtime_config_apply(
+	const struct pkm_kmes_runtime_config *config);
 int pkm_kmes_current_process_info(u64 *pid_out, u8 *name_out,
 				  size_t name_out_len, size_t *name_len_out,
 				  u8 *path_out, size_t path_out_len,
@@ -77,6 +87,10 @@ long pkm_kmes_kunit_emit_for_token(const void *token, const void *event_type,
 long pkm_kmes_kunit_emit_batch_for_token(const void *token,
 					 const struct kmes_emit_entry *entries,
 					 u32 count, u32 *emitted_out);
+int pkm_kmes_kunit_runtime_config_snapshot(
+	struct pkm_kmes_runtime_config *out);
+long pkm_kmes_kunit_runtime_config_apply(
+	const struct pkm_kmes_runtime_config *config);
 #endif
 
 #endif /* _SECURITY_PKM_KMES_H */
