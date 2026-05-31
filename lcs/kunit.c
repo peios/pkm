@@ -19080,6 +19080,59 @@ static void pkm_lcs_kunit_key_fd_flush_success(struct kunit *test)
 	kacs_rust_token_drop(source_token);
 }
 
+static void pkm_lcs_kunit_key_fd_flush_orphaned_guid_local_success(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x7e },
+	};
+	struct pkm_lcs_kunit_flush_source_script script = {
+		.expected_hive_name = "Machine",
+		.status = RSI_OK,
+	};
+	struct file file = { };
+	struct task_struct *task;
+	const void *source_token;
+	int thread_ret;
+	long fd;
+	long ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	script.file = &file;
+
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_orphaned((int)fd, true),
+			0L);
+
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_flush_source_thread,
+					 &script,
+					 "pkm-lcs-kunit-orphan-flush");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_flush((int)fd);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_orphaned((int)fd, false),
+			0L);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(source_token);
+}
+
 static void pkm_lcs_kunit_key_fd_flush_fails_before_source(struct kunit *test)
 {
 	static const char * const path[] = { "Machine", "Software" };
@@ -52865,6 +52918,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_key_fd_hide_key_transactional_source_failure),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_hide_key_fails_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_flush_success),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_flush_orphaned_guid_local_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_flush_fails_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_arm_replace_disarm),
