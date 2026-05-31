@@ -2318,6 +2318,105 @@ static void pkm_lcs_kunit_source_registration_resume_missing_guid_enoent(
 	kacs_rust_token_drop(token);
 }
 
+static void
+pkm_lcs_kunit_source_registration_flush_revalidate_missing_guid_enoent(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x67 },
+	};
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_key_fd_publish_input key_input = {
+		.source_id = 1,
+		.granted_access = KEY_SET_VALUE,
+		.resolved_path = path,
+		.ancestor_guids = ancestors,
+		.path_component_count = ARRAY_SIZE(path),
+	};
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.file = NULL,
+		.expected_guid = ancestors[1],
+		.status = RSI_NOT_FOUND,
+	};
+	struct reg_src_hive_entry first_hive;
+	struct reg_src_register_args first_args;
+	struct reg_src_hive_entry second_hive;
+	struct reg_src_register_args second_args;
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct pkm_lcs_key_fd_snapshot key_snapshot = { };
+	struct task_struct *task;
+	struct file first_file = { };
+	struct file second_file = { };
+	const void *token;
+	long fd;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &first_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&first_args, &first_hive, name_src, 1,
+					  0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &first_file, &ops,
+				(const void __user *)&first_args),
+			0L);
+
+	memcpy(key_input.key_guid, ancestors[1], sizeof(key_input.key_guid));
+	fd = pkm_lcs_key_fd_publish(&key_input);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&first_file),
+			0);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &second_file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&second_args, &second_hive, name_src,
+					  1, 7);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &second_file, &ops,
+				(const void __user *)&second_args),
+			0L);
+
+	script.file = &second_file;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread,
+					 &script,
+					 "pkm-lcs-kunit-flush-reval-missing");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_flush((int)fd),
+			(long)-ENOENT);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_kthread_stop(task), 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+
+	pkm_lcs_kunit_source_fd_snapshot(&second_file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.next_request_id, 1ULL);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &key_snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, key_snapshot.orphaned);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&second_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_registration_ioctl_rejects_stale_resume(
 	struct kunit *test)
 {
@@ -52296,6 +52395,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_registration_resume_revalidate_retains_limits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_resume_missing_guid_enoent),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_flush_revalidate_missing_guid_enoent),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_ioctl_rejects_stale_resume),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_ioctl_rejects_repeat_register),
