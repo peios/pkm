@@ -18369,6 +18369,434 @@ pkm_lcs_kunit_key_fd_blanket_tombstone_set_deletes_effective_values(
 	kacs_rust_token_drop(source_token);
 }
 
+static void pkm_lcs_kunit_key_fd_set_value_policy_layer_success(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xa9, 0x01 },
+	};
+	static const u8 policy_layer_guid[PKM_LCS_GUID_BYTES] = {
+		0xa9, 0x02
+	};
+	static const char value_name[] = "PolicyAnswer";
+	static const char policy_layer_name[] = "policy";
+	static const u8 data[] = { 0x2a };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_set_value_args args = {
+		.name_len = strlen(value_name),
+		.name_ptr = (u64)(unsigned long)value_name,
+		.type = REG_BINARY,
+		.data_len = sizeof(data),
+		.data_ptr = (u64)(unsigned long)data,
+		.layer_len = strlen(policy_layer_name),
+		.layer_ptr = (u64)(unsigned long)policy_layer_name,
+		.txn_fd = -1,
+	};
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct pkm_lcs_kunit_set_value_ioctl_source_script script = {
+		.expected_guid = ancestors[1],
+		.expected_value_name = value_name,
+		.expected_layer_name = policy_layer_name,
+		.expected_data = data,
+		.expected_data_len = sizeof(data),
+		.expected_value_type = REG_BINARY,
+		.set_value_status = RSI_OK,
+	};
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	const u8 *layer_sd;
+	struct task_struct *task;
+	u8 event[32] = { };
+	size_t layer_sd_len = 0;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
+	u64 sequence_before = 0;
+	u64 sequence_after = 0;
+	long mutation_fd;
+	long watch_fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	layer_sd = kacs_rust_kunit_create_file_sd(admin_token, KEY_SET_VALUE,
+						  0, 0, 0, &layer_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, layer_sd);
+	script.file = &file;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				policy_layer_name, strlen(policy_layer_name),
+				10, 1, policy_layer_guid, layer_sd,
+				layer_sd_len, pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+
+	mutation_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, mutation_fd >= 0);
+	watch_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, watch_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)watch_fd, &notify),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_before),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_before),
+			0L);
+	script.expected_sequence = sequence_before;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_set_value_ioctl_source_thread, &script,
+		"pkm-lcs-kunit-set-value-policy");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_set_value_for_token(
+		(int)mutation_fd, admin_token, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 3U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, sequence_after, sequence_before + 1);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)(8U + strlen(value_name)));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event),
+			(u32)(8U + strlen(value_name)));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_VALUE_SET);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6),
+			(u16)strlen(value_name));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(event + 8, value_name, strlen(value_name)),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_kacs_free((void *)layer_sd);
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_delete_value_policy_reveals_base(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xa9, 0x03 },
+	};
+	static const u8 policy_layer_guid[PKM_LCS_GUID_BYTES] = {
+		0xa9, 0x04
+	};
+	static const char value_name[] = "PolicyAnswer";
+	static const char policy_layer_name[] = "policy";
+	static const u8 before_data[] = { 0x2a };
+	static const u8 after_data[] = { 0x11 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_delete_value_args args = {
+		.name_len = strlen(value_name),
+		.name_ptr = (u64)(unsigned long)value_name,
+		.layer_len = strlen(policy_layer_name),
+		.layer_ptr = (u64)(unsigned long)policy_layer_name,
+		.txn_fd = -1,
+	};
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct pkm_lcs_kunit_delete_value_ioctl_source_script script = {
+		.expected_guid = ancestors[1],
+		.expected_value_name = value_name,
+		.expected_layer_name = policy_layer_name,
+		.before_found = true,
+		.before_data = before_data,
+		.before_data_len = sizeof(before_data),
+		.before_layer_name = policy_layer_name,
+		.before_value_type = REG_BINARY,
+		.after_found = true,
+		.after_data = after_data,
+		.after_data_len = sizeof(after_data),
+		.after_layer_name = "base",
+		.after_value_type = REG_BINARY,
+		.delete_status = RSI_OK,
+	};
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	const u8 *layer_sd;
+	struct task_struct *task;
+	u8 event[32] = { };
+	size_t layer_sd_len = 0;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
+	u64 next_sequence = 0;
+	long mutation_fd;
+	long watch_fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	layer_sd = kacs_rust_kunit_create_file_sd(admin_token, KEY_SET_VALUE,
+						  0, 0, 0, &layer_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, layer_sd);
+	script.file = &file;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				policy_layer_name, strlen(policy_layer_name),
+				10, 1, policy_layer_guid, layer_sd,
+				layer_sd_len, pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+
+	mutation_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, mutation_fd >= 0);
+	watch_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, watch_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)watch_fd, &notify),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_before),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&next_sequence),
+			0L);
+	KUNIT_ASSERT_GT(test, next_sequence, 0ULL);
+	script.before_sequence = next_sequence - 1;
+	script.after_sequence = next_sequence - 1;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_value_ioctl_source_thread, &script,
+		"pkm-lcs-kunit-delete-value-policy");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_delete_value_for_token(
+		(int)mutation_fd, admin_token, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)(8U + strlen(value_name)));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event),
+			(u32)(8U + strlen(value_name)));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_VALUE_SET);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6),
+			(u16)strlen(value_name));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(event + 8, value_name, strlen(value_name)),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_kacs_free((void *)layer_sd);
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_blanket_tombstone_policy_masks_base(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xa9, 0x05 },
+	};
+	static const u8 policy_layer_guid[PKM_LCS_GUID_BYTES] = {
+		0xa9, 0x06
+	};
+	static const char value_name[] = "Alpha";
+	static const char policy_layer_name[] = "policy";
+	static const u8 before_data[] = { 0x01, 0x00, 0x00, 0x00 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_blanket_tombstone_args args = {
+		.layer_len = strlen(policy_layer_name),
+		.layer_ptr = (u64)(unsigned long)policy_layer_name,
+		.set = 1,
+		.txn_fd = -1,
+	};
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct pkm_lcs_kunit_blanket_tombstone_ioctl_source_script script = {
+		.expected_guid = ancestors[1],
+		.expected_value_name = value_name,
+		.expected_layer_name = policy_layer_name,
+		.before_value_found = true,
+		.before_data = before_data,
+		.before_data_len = sizeof(before_data),
+		.before_value_layer_name = "base",
+		.before_value_type = REG_DWORD,
+		.after_value_found = true,
+		.after_data = before_data,
+		.after_data_len = sizeof(before_data),
+		.after_value_layer_name = "base",
+		.after_value_type = REG_DWORD,
+		.after_blanket_found = true,
+		.blanket_status = RSI_OK,
+		.expected_set = true,
+	};
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	const u8 *layer_sd;
+	struct task_struct *task;
+	u8 event[32] = { };
+	size_t layer_sd_len = 0;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
+	u64 sequence_before = 0;
+	u64 sequence_after = 0;
+	long mutation_fd;
+	long watch_fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	layer_sd = kacs_rust_kunit_create_file_sd(admin_token, KEY_SET_VALUE,
+						  0, 0, 0, &layer_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, layer_sd);
+	script.file = &file;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				policy_layer_name, strlen(policy_layer_name),
+				10, 1, policy_layer_guid, layer_sd,
+				layer_sd_len, pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+
+	mutation_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, mutation_fd >= 0);
+	watch_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, watch_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)watch_fd, &notify),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_before),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_before),
+			0L);
+	KUNIT_ASSERT_GT(test, sequence_before, 0ULL);
+	script.before_value_sequence = sequence_before - 1;
+	script.after_value_sequence = sequence_before - 1;
+	script.after_blanket_sequence = sequence_before;
+	script.expected_sequence = sequence_before;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_blanket_tombstone_ioctl_source_thread,
+		&script, "pkm-lcs-kunit-blanket-policy");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_blanket_tombstone_for_token(
+		(int)mutation_fd, admin_token, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, sequence_after, sequence_before + 1);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)(8U + strlen(value_name)));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event),
+			(u32)(8U + strlen(value_name)));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_VALUE_DELETED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6),
+			(u16)strlen(value_name));
+	KUNIT_EXPECT_EQ(test,
+			memcmp(event + 8, value_name, strlen(value_name)),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_kacs_free((void *)layer_sd);
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
 static void
 pkm_lcs_kunit_key_fd_blanket_tombstone_remove_transactional_success(
 	struct kunit *test)
@@ -57692,6 +58120,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_key_fd_set_security_transactional_abort_no_effects),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_security_fails_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_nontransactional_success),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_policy_layer_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_transactional_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_cas_failure_no_effects),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_fails_before_source),
@@ -57704,6 +58133,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_key_fd_set_value_layer_precedence_overflows_watches),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_delete_value_nontransactional_deletes_effective),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_delete_value_policy_reveals_base),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_delete_value_transactional_success),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_delete_value_transactional_idempotent_no_event),
@@ -57714,6 +58144,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_delete_value_fails_before_source),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_blanket_tombstone_set_deletes_effective_values),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_blanket_tombstone_policy_masks_base),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_blanket_tombstone_remove_transactional_success),
 	KUNIT_CASE(
