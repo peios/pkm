@@ -26499,6 +26499,49 @@ static void pkm_lcs_kunit_transaction_close_active_bound_aborts_source(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_transaction_close_terminal_no_source_abort(
+	struct kunit *test)
+{
+	static const struct {
+		u32 state;
+		u32 source_id;
+	} cases[] = {
+		{ REG_TXN_COMMITTED, 1 },
+		{ REG_TXN_ABORTED, 1 },
+		{ REG_TXN_TIMED_OUT, 1 },
+		{ REG_TXN_SOURCE_DOWN, 1 },
+	};
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct file file = { };
+	const void *token;
+	u32 i;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		long fd;
+
+		fd = pkm_lcs_reg_begin_transaction();
+		KUNIT_ASSERT_TRUE(test, fd >= 0);
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_kunit_transaction_fd_set_state(
+					(int)fd, cases[i].state,
+					cases[i].source_id),
+				0L);
+		KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+		flush_delayed_fput();
+	}
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.next_request_id, 0ULL);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_transaction_binding_precheck_and_complete(
 	struct kunit *test)
 {
@@ -52723,6 +52766,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_transaction_close_active_unbound_no_source_abort),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_close_active_bound_aborts_source),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_close_terminal_no_source_abort),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_precheck_and_complete),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_terminal_failures),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_binding_rejects_bad_inputs),
