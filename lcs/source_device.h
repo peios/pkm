@@ -1564,6 +1564,8 @@ long pkm_lcs_kunit_create_missing_child_depth(u32 parent_depth,
 long pkm_lcs_kunit_source_register_file_for_token_with_bootstrap(
 	const void *token, struct file *file, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_src_register_args __user *uargs);
+long pkm_lcs_kunit_source_device_raw_ioctl(struct file *file, unsigned int cmd,
+					   unsigned long arg);
 void pkm_lcs_kunit_flush_source_bootstrap_work(void);
 #endif
 

@@ -1057,6 +1057,37 @@ static void pkm_lcs_kunit_source_registration_copy_fails_closed_on_faults(
 	KUNIT_EXPECT_PTR_EQ(test, copy.hives, NULL);
 }
 
+static void pkm_lcs_kunit_source_device_raw_ioctl_entrypoints_fail_closed(
+	struct kunit *test)
+{
+	struct file file = { };
+	const void *token;
+	long ret;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+
+	ret = pkm_lcs_kunit_source_device_raw_ioctl(&file, REG_SRC_REGISTER, 0);
+	KUNIT_EXPECT_TRUE(test, ret == -EFAULT || ret == -EPERM);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_raw_ioctl(
+				&file, _IO(REG_IOC_TYPE, 0xfe), 0),
+			(long)-ENOTTY);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_raw_ioctl(
+				&file, _IO('X', REG_SRC_REGISTER_NR), 0),
+			(long)-ENOTTY);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_registration_copy_bounds_hive_count(
 	struct kunit *test)
 {
@@ -52208,6 +52239,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_copy_rejects_padding),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_copy_fails_closed_on_faults),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_device_raw_ioctl_entrypoints_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_copy_bounds_hive_count),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_runtime_hive_limit),
 	KUNIT_CASE(

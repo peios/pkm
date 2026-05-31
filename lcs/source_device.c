@@ -13076,6 +13076,12 @@ long pkm_lcs_kunit_source_register_file_for_token_with_bootstrap(
 		token, file, ops, uargs);
 }
 
+long pkm_lcs_kunit_source_device_raw_ioctl(struct file *file, unsigned int cmd,
+					   unsigned long arg)
+{
+	return pkm_lcs_source_device_ioctl(file, cmd, arg);
+}
+
 void pkm_lcs_kunit_flush_source_bootstrap_work(void)
 {
 	flush_scheduled_work();
