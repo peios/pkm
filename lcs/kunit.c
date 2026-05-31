@@ -28965,6 +28965,86 @@ static void pkm_lcs_kunit_transaction_raw_ioctl_entrypoints_fail_closed(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_transaction_raw_ioctl_commit_success(
+	struct kunit *test)
+{
+	static const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = {
+		0x7a
+	};
+	struct pkm_lcs_kunit_transaction_source_script script = { };
+	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
+	struct reg_txn_status_args status = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	u32 poll_mask = 0;
+	int thread_ret;
+	long ret;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+
+	fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_complete_first_bind(
+				(int)fd, snapshot.transaction_id, 1,
+				root_guid),
+			0L);
+
+	script.file = &file;
+	script.expected_op_code = RSI_COMMIT_TRANSACTION;
+	script.expected_header_txn_id = snapshot.transaction_id;
+	script.expected_payload_txn_id = snapshot.transaction_id;
+	script.status = RSI_OK;
+
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_transaction_source_thread, &script,
+			   "pkm-lcs-kunit-raw-commit-ok");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_transaction_fd_raw_ioctl((int)fd, REG_IOC_COMMIT,
+						     0);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_snapshot((int)fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.state, REG_TXN_COMMITTED);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_transaction_fd_status((int)fd, &status),
+			0L);
+	KUNIT_EXPECT_EQ(test, status.state, REG_TXN_COMMITTED);
+	KUNIT_EXPECT_EQ(test, status.terminal_errno, 0);
+	poll_mask = pkm_lcs_kunit_transaction_fd_poll_mask((int)fd);
+	KUNIT_EXPECT_EQ(test, poll_mask, (u32)(EPOLLERR | EPOLLHUP));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_acquire(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 1U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bound_transaction_release(1, &count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_transaction_commit_precheck_unbound_terminal(
 	struct kunit *test)
 {
@@ -56428,6 +56508,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_transaction_status_rejects_bad_inputs),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_raw_ioctl_entrypoints_fail_closed),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_raw_ioctl_commit_success),
 	KUNIT_CASE(
 		pkm_lcs_kunit_transaction_commit_precheck_unbound_terminal),
 	KUNIT_CASE(
