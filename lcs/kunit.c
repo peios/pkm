@@ -51582,6 +51582,169 @@ out_release_source:
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_source_write_invalid_utf8_name_audits(
+	struct kunit *test)
+{
+	static const char invalid_key_name[] = { 'K', (char)0xff, 'y', '\0' };
+	static const char invalid_value_name[] = { 'V', (char)0xff, 'l', '\0' };
+	static const char invalid_layer_name[] = { 'L', (char)0xff, 'r', '\0' };
+	static const u8 guid[RSI_GUID_SIZE] = {
+		0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98,
+		0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0,
+	};
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8,
+		0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0,
+	};
+	static const u8 data[] = { 0x42 };
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	{
+		struct pkm_lcs_kunit_read_key_source_script script = {
+			.file = &file,
+			.expected_guid = guid,
+			.name = invalid_key_name,
+			.parent_guid = parent_guid,
+		};
+		struct pkm_lcs_source_response_frame frame = { };
+		struct pkm_lcs_source_response_result response = { };
+		struct pkm_lcs_source_enqueue_result enqueue = { };
+		struct task_struct *task;
+		int thread_ret;
+		long ret;
+
+		task = pkm_lcs_kunit_kthread_run(
+			pkm_lcs_kunit_read_key_source_thread, &script,
+			"pkm-lcs-kunit-read-key-invalid-utf8");
+		if (IS_ERR(task)) {
+			KUNIT_FAIL(test, "failed to start read-key source");
+			goto out_release_source;
+		}
+
+		pkm_kmes_kunit_reset_all();
+		ret = pkm_lcs_source_read_key_round_trip_retaining_frame_timeout(
+			1, 0, guid, PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT,
+			&frame, &response, &enqueue);
+		thread_ret = pkm_lcs_kunit_kthread_stop(task);
+		KUNIT_EXPECT_EQ(test, thread_ret, 0);
+		KUNIT_EXPECT_EQ(test, script.result, 0);
+		KUNIT_EXPECT_EQ(test, script.reads, 1U);
+		KUNIT_EXPECT_EQ(test, script.writes, 1U);
+		KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+		KUNIT_EXPECT_PTR_EQ(test, frame.data, NULL);
+		KUNIT_EXPECT_EQ(test, frame.len, (size_t)0);
+		KUNIT_EXPECT_TRUE(test, response.malformed_source_data);
+		KUNIT_EXPECT_TRUE(
+			test, response.source_validation_failure_present);
+		KUNIT_EXPECT_EQ(
+			test, response.source_validation_failure,
+			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_NAME);
+		KUNIT_EXPECT_TRUE(test, response.key_guid_present);
+		KUNIT_EXPECT_EQ(test,
+				memcmp(response.key_guid, guid, sizeof(guid)),
+				0);
+		pkm_lcs_kunit_expect_source_validation_audit(
+			test, "malformed_key_name", guid);
+		pkm_lcs_source_response_frame_destroy(&frame);
+	}
+
+	{
+		const struct {
+			const char *response_value_name;
+			const char *layer_name;
+			const char *validation_class;
+			u32 validation_failure;
+		} cases[] = {
+			{
+				.response_value_name = invalid_value_name,
+				.layer_name = "base",
+				.validation_class = "malformed_value_name",
+				.validation_failure =
+					PKM_LCS_SOURCE_VALIDATION_MALFORMED_VALUE_NAME,
+			},
+			{
+				.response_value_name = "Value",
+				.layer_name = invalid_layer_name,
+				.validation_class = "malformed_layer_name",
+				.validation_failure =
+					PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME,
+			},
+		};
+		size_t i;
+
+		for (i = 0; i < ARRAY_SIZE(cases); i++) {
+			struct pkm_lcs_kunit_query_values_source_script script = {
+				.file = &file,
+				.expected_guid = guid,
+				.expected_value_name = "Value",
+				.response_value_name =
+					cases[i].response_value_name,
+				.layer_name = cases[i].layer_name,
+				.data = data,
+				.data_len = sizeof(data),
+				.value_type = REG_BINARY,
+			};
+			struct pkm_lcs_source_response_frame frame = { };
+			struct pkm_lcs_source_response_result response = { };
+			struct pkm_lcs_source_enqueue_result enqueue = { };
+			struct task_struct *task;
+			int thread_ret;
+			long ret;
+
+			task = pkm_lcs_kunit_kthread_run(
+				pkm_lcs_kunit_query_values_source_thread,
+				&script,
+				"pkm-lcs-kunit-query-invalid-utf8");
+			if (IS_ERR(task)) {
+				KUNIT_FAIL(
+					test,
+					"failed to start query-values source");
+				goto out_release_source;
+			}
+
+			pkm_kmes_kunit_reset_all();
+			ret = pkm_lcs_source_query_values_round_trip_retaining_frame_timeout(
+				1, 0, guid, "Value", strlen("Value"), false,
+				PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT, &frame,
+				&response, &enqueue);
+			thread_ret = pkm_lcs_kunit_kthread_stop(task);
+			KUNIT_EXPECT_EQ(test, thread_ret, 0);
+			KUNIT_EXPECT_EQ(test, script.result, 0);
+			KUNIT_EXPECT_EQ(test, script.reads, 1U);
+			KUNIT_EXPECT_EQ(test, script.writes, 1U);
+			KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+			KUNIT_EXPECT_PTR_EQ(test, frame.data, NULL);
+			KUNIT_EXPECT_EQ(test, frame.len, (size_t)0);
+			KUNIT_EXPECT_TRUE(test, response.malformed_source_data);
+			KUNIT_EXPECT_TRUE(
+				test,
+				response.source_validation_failure_present);
+			KUNIT_EXPECT_EQ(test, response.source_validation_failure,
+					cases[i].validation_failure);
+			KUNIT_EXPECT_TRUE(test, response.key_guid_present);
+			KUNIT_EXPECT_EQ(test,
+					memcmp(response.key_guid, guid,
+					       sizeof(guid)),
+					0);
+			pkm_lcs_kunit_expect_source_validation_audit(
+				test, cases[i].validation_class, guid);
+			pkm_lcs_source_response_frame_destroy(&frame);
+		}
+	}
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+	KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_FALSE(test, snapshot.closing);
+
+out_release_source:
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_source_write_remaining_validation_class_audits(
 	struct kunit *test)
 {
@@ -55426,6 +55589,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_source_write_malformed_path_name_audits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_key_value_name_audits),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_write_invalid_utf8_name_audits),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_write_remaining_validation_class_audits),
 	KUNIT_CASE(
