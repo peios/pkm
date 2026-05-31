@@ -1088,6 +1088,37 @@ static void pkm_lcs_kunit_source_registration_copy_fails_closed_on_faults(
 	KUNIT_EXPECT_PTR_EQ(test, copy.hives, NULL);
 }
 
+static void pkm_lcs_kunit_source_registration_copy_fault_zeroes_output(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_register_args args = {
+		.hive_count = 1,
+		.hives_ptr = 1,
+	};
+	struct pkm_lcs_source_registration_hive_copy stale_hive = {
+		.name = (char *)"stale",
+		.name_len = 5,
+		.flags = RSI_HIVE_PRIVATE,
+		.hive_generation = 99,
+	};
+	struct pkm_lcs_source_registration_copy copy = {
+		.hive_count = 7,
+		.max_sequence = 1234,
+		.hives = &stale_hive,
+	};
+
+	ctx.fault_src = &args;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_registration_copy_from_user(
+				&ops, (const void __user *)&args, 64, &copy),
+			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, copy.hive_count, 0U);
+	KUNIT_EXPECT_EQ(test, copy.max_sequence, 0ULL);
+	KUNIT_EXPECT_PTR_EQ(test, copy.hives, NULL);
+}
+
 static void pkm_lcs_kunit_source_device_raw_ioctl_entrypoints_fail_closed(
 	struct kunit *test)
 {
@@ -5323,6 +5354,35 @@ static void pkm_lcs_kunit_syscall_path_copy_bounds_and_faults(
 	KUNIT_EXPECT_PTR_EQ(test, copy.path, NULL);
 }
 
+static void pkm_lcs_kunit_syscall_path_copy_fault_zeroes_output(
+	struct kunit *test)
+{
+	const char path_src[] = "Machine\\Software";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_syscall_path_copy copy = {
+		.path = (char *)"stale",
+		.path_len = 99,
+	};
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_syscall_path_copy_from_user(
+				&ops, NULL, &copy),
+			(long)-EFAULT);
+	KUNIT_EXPECT_PTR_EQ(test, copy.path, NULL);
+	KUNIT_EXPECT_EQ(test, copy.path_len, 0U);
+
+	copy.path = (char *)"stale";
+	copy.path_len = 99;
+	ctx.fault_strlen_src = path_src;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_syscall_path_copy_from_user(
+				&ops, (const char __user *)path_src, &copy),
+			(long)-EFAULT);
+	KUNIT_EXPECT_PTR_EQ(test, copy.path, NULL);
+	KUNIT_EXPECT_EQ(test, copy.path_len, 0U);
+}
+
 static void pkm_lcs_kunit_user_absolute_path_copy_routes_current_user(
 	struct kunit *test)
 {
@@ -5755,6 +5815,53 @@ static void pkm_lcs_kunit_create_layer_target_copy_faults_fail_closed(
 	KUNIT_EXPECT_PTR_EQ(test, target.name, NULL);
 	KUNIT_EXPECT_EQ(test, ctx.strnlens, 3U);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+}
+
+static void pkm_lcs_kunit_create_layer_target_copy_zeroes_stale_state(
+	struct kunit *test)
+{
+	const char layer_src[] = "base";
+	struct pkm_lcs_create_layer_target target = {
+		.name = "stale",
+		.owned_name = (char *)"stale",
+		.name_len = 99,
+		.implicit_base = 0,
+		._pad = { 0xff, 0xff, 0xff },
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_target_copy_from_user(
+				&ops, NULL, &target),
+			0L);
+	KUNIT_EXPECT_STREQ(test, target.name, "base");
+	KUNIT_EXPECT_PTR_EQ(test, target.owned_name, NULL);
+	KUNIT_EXPECT_EQ(test, target.name_len, 4U);
+	KUNIT_EXPECT_EQ(test, target.implicit_base, 1U);
+	KUNIT_EXPECT_EQ(test, target._pad[0], 0U);
+	KUNIT_EXPECT_EQ(test, target._pad[1], 0U);
+	KUNIT_EXPECT_EQ(test, target._pad[2], 0U);
+
+	target.name = "stale";
+	target.owned_name = (char *)"stale";
+	target.name_len = 99;
+	target.implicit_base = 1;
+	target._pad[0] = 0xff;
+	target._pad[1] = 0xff;
+	target._pad[2] = 0xff;
+	ctx.fault_src = layer_src;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_target_copy_from_user(
+				&ops, (const char __user *)layer_src, &target),
+			(long)-EFAULT);
+	KUNIT_EXPECT_PTR_EQ(test, target.name, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, target.owned_name, NULL);
+	KUNIT_EXPECT_EQ(test, target.name_len, 0U);
+	KUNIT_EXPECT_EQ(test, target.implicit_base, 0U);
+	KUNIT_EXPECT_EQ(test, target._pad[0], 0U);
+	KUNIT_EXPECT_EQ(test, target._pad[1], 0U);
+	KUNIT_EXPECT_EQ(test, target._pad[2], 0U);
 }
 
 static void pkm_lcs_kunit_open_preflight_route_success(
@@ -58609,6 +58716,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_registration_copy_fails_closed_on_faults),
 	KUNIT_CASE(
+		pkm_lcs_kunit_source_registration_copy_fault_zeroes_output),
+	KUNIT_CASE(
 		pkm_lcs_kunit_source_device_raw_ioctl_entrypoints_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_copy_bounds_hive_count),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_runtime_hive_limit),
@@ -58716,6 +58825,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_absolute_path_current_user_uses_token_sid),
 	KUNIT_CASE(pkm_lcs_kunit_syscall_path_copy_bounds_and_faults),
+	KUNIT_CASE(pkm_lcs_kunit_syscall_path_copy_fault_zeroes_output),
 	KUNIT_CASE(
 		pkm_lcs_kunit_user_absolute_path_copy_routes_current_user),
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_accepts_valid_masks),
@@ -58733,6 +58843,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_create_layer_target_bad_name_fails_closed),
 	KUNIT_CASE(
 		pkm_lcs_kunit_create_layer_target_copy_faults_fail_closed),
+	KUNIT_CASE(
+		pkm_lcs_kunit_create_layer_target_copy_zeroes_stale_state),
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_route_success),
 	KUNIT_CASE(pkm_lcs_kunit_open_preflight_route_stops_before_usercopy),
 	KUNIT_CASE(
