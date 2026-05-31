@@ -23970,10 +23970,13 @@ struct pkm_lcs_kunit_restore_txn_source_script {
 	u32 commit_status;
 	u32 abort_status;
 	u64 transaction_id;
+	u64 commit_request_id;
 	u32 reads;
 	u32 writes;
 	bool saw_commit;
 	bool saw_abort;
+	bool commit_request_id_present;
+	bool commit_no_response;
 	bool expect_commit;
 	bool expect_read_key;
 	bool expect_root_content_probe;
@@ -24662,6 +24665,12 @@ expect_terminal:
 		script->saw_commit = true;
 	else
 		script->saw_abort = true;
+	if (script->expect_commit && script->commit_no_response) {
+		script->commit_request_id = request_id;
+		script->commit_request_id_present = true;
+		script->result = 0;
+		return 0;
+	}
 
 	memset(response, 0, sizeof(response));
 	put_unaligned_le32(sizeof(response),
@@ -26131,6 +26140,190 @@ static void pkm_lcs_kunit_key_fd_restore_readwrite_begin_timeout_cleanup(
 	pkm_lcs_runtime_limits_reset_defaults();
 	kacs_rust_token_drop(token);
 	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_commit_timeout_late_response(
+	struct kunit *test, u32 late_status, bool expect_effects)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x52 },
+	};
+	struct pkm_lcs_source_response_result commit_response = { };
+	struct pkm_lcs_source_table_snapshot table_snapshot = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	struct reg_restore_args args = { };
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct pkm_lcs_kunit_restore_txn_source_script script = {
+		.begin_status = RSI_OK,
+		.abort_status = RSI_OK,
+		.expect_commit = true,
+		.commit_no_response = true,
+		.expect_read_key = true,
+		.read_key = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.name = "Software",
+		},
+		.expect_root_content_probe = true,
+		.enum_children = {
+			.expected_parent_guid =
+				pkm_lcs_kunit_restore_target_guid,
+			.empty = true,
+		},
+		.query_values = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.expected_value_name = "",
+			.query_all = true,
+			.empty = true,
+		},
+		.expect_root_write_key = true,
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	struct task_struct *task;
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	struct file file = { };
+	const void *source_token;
+	const void *token;
+	size_t response_len;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
+	u8 event[8] = { };
+	long key_fd;
+	long watch_fd;
+	int input_fd;
+	int thread_ret;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.request_timeout_ms = 1000U;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_RESTORE_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	watch_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, path, ancestors, ARRAY_SIZE(ancestors));
+	KUNIT_ASSERT_TRUE(test, watch_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)watch_fd, &notify),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_before),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_valid(&input, true),
+			0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(&input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+	args.input_fd = input_fd;
+
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_restore_txn_source_thread, &script,
+		"pkm-lcs-kunit-restore-commit-late");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token((int)key_fd,
+							       token, &args),
+			(long)-ETIMEDOUT);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_TRUE(test, script.saw_commit);
+	KUNIT_EXPECT_FALSE(test, script.saw_abort);
+	KUNIT_ASSERT_TRUE(test, script.commit_request_id_present);
+
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 1U);
+	pkm_lcs_kunit_source_table_snapshot(&table_snapshot);
+	KUNIT_EXPECT_EQ(test, table_snapshot.active_count, 1U);
+	KUNIT_EXPECT_EQ(test, table_snapshot.down_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)-EAGAIN);
+
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    script.commit_request_id,
+					    RSI_COMMIT_TRANSACTION, late_status,
+					    &response_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_write_file(
+				&file, response, response_len, false,
+				&commit_response),
+			(ssize_t)response_len);
+	KUNIT_EXPECT_FALSE(test, commit_response.caller_waiter_attached);
+	KUNIT_EXPECT_EQ(test, commit_response.request_id,
+			script.commit_request_id);
+	KUNIT_EXPECT_EQ(test, commit_response.txn_id, script.transaction_id);
+	KUNIT_EXPECT_EQ(test, commit_response.status, late_status);
+	KUNIT_EXPECT_EQ(test, commit_response.in_flight_count, 0U);
+
+	pkm_lcs_kunit_source_table_snapshot(&table_snapshot);
+	KUNIT_EXPECT_EQ(test, table_snapshot.active_count, 1U);
+	KUNIT_EXPECT_EQ(test, table_snapshot.down_count, 0U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_after),
+			0L);
+	if (expect_effects) {
+		KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_kunit_key_fd_read(
+					(int)watch_fd, event, sizeof(event),
+					true),
+				(ssize_t)8);
+		KUNIT_EXPECT_EQ(test, get_unaligned_le32(event), 8U);
+		KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+				REG_WATCH_OVERFLOW);
+		KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
+	} else {
+		KUNIT_EXPECT_EQ(test, generation_after, generation_before);
+	}
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)-EAGAIN);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_runtime_limits_reset_defaults();
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(source_token);
+}
+
+static void
+pkm_lcs_kunit_key_fd_restore_commit_timeout_late_success_effects(
+	struct kunit *test)
+{
+	pkm_lcs_kunit_key_fd_restore_commit_timeout_late_response(
+		test, RSI_OK, true);
+}
+
+static void
+pkm_lcs_kunit_key_fd_restore_commit_timeout_late_error_no_effects(
+	struct kunit *test)
+{
+	pkm_lcs_kunit_key_fd_restore_commit_timeout_late_response(
+		test, RSI_STORAGE_ERROR, false);
 }
 
 static void pkm_lcs_kunit_expect_restore_stream_result(
@@ -56878,6 +57071,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_readwrite_unsupported),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_restore_readwrite_begin_timeout_cleanup),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_restore_commit_timeout_late_success_effects),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_restore_commit_timeout_late_error_no_effects),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_bad_magic),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_min_reader_denied),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_stream_checksum_mismatch),

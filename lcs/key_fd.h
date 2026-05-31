@@ -216,6 +216,11 @@ long pkm_lcs_key_fd_dispatch_watch_event_context_batch_effects(
 	u32 *internal_effects_out);
 long pkm_lcs_key_fd_dispatch_overflow_context(
 	const struct pkm_lcs_watch_dispatch_context *context);
+long pkm_lcs_key_fd_publish_restore_commit_effects(
+	u32 source_id, const u8 key_guid[PKM_LCS_GUID_BYTES],
+	const u8 (*ancestor_guids)[PKM_LCS_GUID_BYTES],
+	const char * const *resolved_path, u32 path_component_count,
+	const struct pkm_lcs_runtime_limits *limits);
 long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
 					     u32 *watch_count_out);
 long pkm_lcs_key_fd_dispatch_source_overflow_with_limits(

@@ -50,6 +50,26 @@ struct pkm_lcs_runtime_limits {
 	u32 max_transaction_watch_event_burst;
 };
 
+enum pkm_lcs_source_late_effect_kind {
+	PKM_LCS_SOURCE_LATE_EFFECT_NONE = 0,
+	PKM_LCS_SOURCE_LATE_EFFECT_RESTORE_COMMIT = 1,
+};
+
+struct pkm_lcs_source_restore_commit_late_effect_input {
+	const u8 *key_guid;
+	const u8 (*ancestor_guids)[RSI_GUID_SIZE];
+	const char * const *resolved_path;
+	u32 path_component_count;
+};
+
+struct pkm_lcs_source_late_effect {
+	u32 kind;
+	u32 path_component_count;
+	u8 key_guid[RSI_GUID_SIZE];
+	u8 (*ancestor_guids)[RSI_GUID_SIZE];
+	char **resolved_path;
+};
+
 struct pkm_lcs_source_in_flight_request {
 	struct list_head link;
 	bool occupied;
@@ -62,6 +82,7 @@ struct pkm_lcs_source_in_flight_request {
 	u16 _pad1;
 	u8 key_guid[RSI_GUID_SIZE];
 	struct pkm_lcs_runtime_limits limits;
+	struct pkm_lcs_source_late_effect late_effect;
 	struct pkm_lcs_source_response_waiter *waiter;
 };
 
@@ -384,6 +405,7 @@ struct pkm_lcs_source_response_result {
 	u32 status;
 	u8 key_guid[RSI_GUID_SIZE];
 	struct pkm_lcs_runtime_limits limits;
+	struct pkm_lcs_source_late_effect late_effect;
 	u32 source_validation_failure;
 	bool malformed_source_data;
 	bool source_validation_failure_present;
@@ -1210,6 +1232,12 @@ long pkm_lcs_source_commit_transaction_round_trip_timeout(
 long pkm_lcs_source_commit_transaction_round_trip_timeout_with_limits(
 	u32 source_id, u64 transaction_id,
 	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_restore_commit_transaction_round_trip_timeout_with_limits(
+	u32 source_id, u64 transaction_id,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	const struct pkm_lcs_source_restore_commit_late_effect_input *late_effect,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_commit_transaction_round_trip(

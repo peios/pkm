@@ -5304,6 +5304,16 @@ static long pkm_lcs_key_fd_restore_commit_read_write_transaction(
 {
 	struct pkm_lcs_source_response_result response = { };
 	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_source_restore_commit_late_effect_input late_effect = {
+		.key_guid = key_fd ? key_fd->key_guid : NULL,
+		.ancestor_guids = key_fd ?
+			(const u8 (*)[RSI_GUID_SIZE])key_fd->ancestor_guids :
+			NULL,
+		.resolved_path = key_fd ?
+			(const char * const *)key_fd->resolved_path :
+			NULL,
+		.path_component_count = key_fd ? key_fd->path_component_count : 0,
+	};
 	long ret;
 
 	if (commit_dispatched_out)
@@ -5311,42 +5321,57 @@ static long pkm_lcs_key_fd_restore_commit_read_write_transaction(
 	if (!key_fd || !limits || !transaction_id)
 		return -EINVAL;
 
-	ret = pkm_lcs_source_commit_transaction_round_trip_timeout_with_limits(
+	ret = pkm_lcs_source_restore_commit_transaction_round_trip_timeout_with_limits(
 		key_fd->source_id, transaction_id, limits,
-		limits->request_timeout_ms, &response, &enqueue);
+		limits->request_timeout_ms, &late_effect, &response, &enqueue);
 	if (commit_dispatched_out)
 		*commit_dispatched_out = response.request_id || enqueue.request_id;
 	return ret;
 }
 
-static long pkm_lcs_key_fd_restore_publish_commit_effects(
-	struct pkm_lcs_key_fd *key_fd,
+long pkm_lcs_key_fd_publish_restore_commit_effects(
+	u32 source_id, const u8 key_guid[PKM_LCS_GUID_BYTES],
+	const u8 (*ancestor_guids)[PKM_LCS_GUID_BYTES],
+	const char * const *resolved_path, u32 path_component_count,
 	const struct pkm_lcs_runtime_limits *limits)
 {
 	struct pkm_lcs_watch_dispatch_context context = { };
 	u64 generation = 0;
 	long ret;
 
-	if (!key_fd || !limits || !key_fd->ancestor_guids ||
-	    !key_fd->resolved_path || !key_fd->path_component_count)
+	if (!source_id || !key_guid || !ancestor_guids || !resolved_path ||
+	    !path_component_count || !limits)
 		return -EINVAL;
 
 	ret = pkm_lcs_source_record_transaction_generation(
-		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
+		source_id, ancestor_guids[0], &generation);
 	if (ret) {
-		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
+		pkm_lcs_source_mark_down_by_id(source_id);
 		return -EIO;
 	}
 
-	context.changed_key_guid = key_fd->key_guid;
-	context.ancestor_guids =
-		(const u8 (*)[PKM_LCS_GUID_BYTES])key_fd->ancestor_guids;
-	context.resolved_path = (const char * const *)key_fd->resolved_path;
+	context.changed_key_guid = key_guid;
+	context.ancestor_guids = ancestor_guids;
+	context.resolved_path = resolved_path;
 	context.limits = limits;
-	context.path_component_count = key_fd->path_component_count;
+	context.path_component_count = path_component_count;
 	context.event_type = REG_WATCH_OVERFLOW;
 	(void)pkm_lcs_key_fd_dispatch_overflow_context(&context);
 	return 0;
+}
+
+static long pkm_lcs_key_fd_restore_publish_commit_effects(
+	struct pkm_lcs_key_fd *key_fd,
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	if (!key_fd)
+		return -EINVAL;
+
+	return pkm_lcs_key_fd_publish_restore_commit_effects(
+		key_fd->source_id, key_fd->key_guid,
+		(const u8 (*)[PKM_LCS_GUID_BYTES])key_fd->ancestor_guids,
+		(const char * const *)key_fd->resolved_path,
+		key_fd->path_component_count, limits);
 }
 
 static u32 pkm_lcs_key_fd_audit_result_errno(long ret)
@@ -9868,8 +9893,6 @@ static long pkm_lcs_key_fd_restore_from_args_for_token(
 		key_fd, &limits, transaction_id, &commit_dispatched);
 	if (commit_dispatched)
 		transaction_open = false;
-	if (ret == -ETIMEDOUT && !transaction_open)
-		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 	if (ret)
 		goto out_abort_transaction;
 	transaction_open = false;
