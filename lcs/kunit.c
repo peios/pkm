@@ -581,11 +581,16 @@ struct pkm_lcs_kunit_enum_children_source_script {
 	const char *layer_name;
 	const u8 *child_guid;
 	u64 sequence;
+	const char *second_child_name;
+	const char *second_layer_name;
+	const u8 *second_child_guid;
+	u64 second_sequence;
 	u64 expected_txn_id;
 	u32 repeated_child_count;
 	bool check_txn_id;
 	bool empty;
 	bool hidden;
+	bool include_second_entry;
 	u32 reads;
 	u32 writes;
 	int result;
@@ -14263,6 +14268,138 @@ static void pkm_lcs_kunit_key_fd_enum_subkey_success(struct kunit *test)
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_enum_subkey_resolves_policy_layer(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xab, 0x01 },
+	};
+	static const u8 base_child_guid[PKM_LCS_GUID_BYTES] = {
+		0xab, 0x02
+	};
+	static const u8 policy_child_guid[PKM_LCS_GUID_BYTES] = {
+		0xab, 0x03
+	};
+	static const u8 policy_layer_guid[PKM_LCS_GUID_BYTES] = {
+		0xab, 0x04
+	};
+	static const u8 value_data[] = { 0x2a };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_enum_subkey_args args = {
+		.index = 0,
+		.name_len = 16,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_enum_children_source_script parent_enum = {
+		.expected_parent_guid = ancestors[1],
+		.child_name = "Child",
+		.layer_name = "base",
+		.child_guid = base_child_guid,
+		.include_second_entry = true,
+		.second_child_name = "Child",
+		.second_layer_name = "policy",
+		.second_child_guid = policy_child_guid,
+	};
+	struct pkm_lcs_kunit_read_key_source_script child_read = {
+		.expected_guid = policy_child_guid,
+		.name = "Child",
+	};
+	struct pkm_lcs_kunit_enum_children_source_script child_enum = {
+		.expected_parent_guid = policy_child_guid,
+		.empty = true,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op ops_seq[] = {
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &parent_enum,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_READ_KEY,
+			.read_key = &child_read,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_ENUM_CHILDREN,
+			.enum_children = &child_enum,
+		},
+		{
+			.op = PKM_LCS_KUNIT_SYMLINK_SEQ_QUERY_DEFAULT,
+			.query_guid = policy_child_guid,
+			.query_data = value_data,
+			.query_data_len = sizeof(value_data),
+			.query_value_type = REG_BINARY,
+			.query_all = true,
+		},
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = ops_seq,
+		.op_count = ARRAY_SIZE(ops_seq),
+	};
+	u8 name[16];
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u64 policy_sequence;
+	u64 base_sequence;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	memset(name, 0xaa, sizeof(name));
+	args.name_ptr = (u64)(unsigned long)name;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&policy_sequence), 0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&base_sequence), 0L);
+	parent_enum.sequence = base_sequence;
+	parent_enum.second_sequence = policy_sequence;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"policy", strlen("policy"), 10, 1,
+				policy_layer_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_ENUMERATE_SUB_KEYS, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_symlink_sequence_source_thread, &script,
+		"pkm-lcs-kunit-enum-subkey-policy");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_enum_subkey((int)fd, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
+	KUNIT_EXPECT_EQ(test, args.index, 0U);
+	KUNIT_EXPECT_EQ(test, args.name_len, 5U);
+	KUNIT_EXPECT_EQ(test, args.last_write_time, 2000ULL);
+	KUNIT_EXPECT_EQ(test, args.subkey_count, 0U);
+	KUNIT_EXPECT_EQ(test, args.value_count, 1U);
+	KUNIT_EXPECT_EQ(test, memcmp(name, "Child", 5), 0);
+	KUNIT_EXPECT_EQ(test, name[5], 0xaaU);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
 	kacs_rust_token_drop(token);
 }
 
@@ -37858,7 +37995,8 @@ static int pkm_lcs_kunit_enum_children_source_build_response(
 	child_count = script->empty ? 0U :
 				    (script->repeated_child_count ?
 					     script->repeated_child_count :
-					     1U);
+					     (script->include_second_entry ? 2U :
+								      1U));
 	if (!script->empty && !script->repeated_child_count && !target_guid)
 		return -EINVAL;
 	metadata_count = (script->empty || script->hidden) ? 0U :
@@ -37883,6 +38021,16 @@ static int pkm_lcs_kunit_enum_children_source_build_response(
 			child_name = generated_name;
 			target_guid = generated_guid;
 			target_type = RSI_PATH_TARGET_GUID;
+		} else if (i == 1U) {
+			child_name = script->second_child_name ?
+					     script->second_child_name :
+					     child_name;
+			layer_name = script->second_layer_name ?
+					     script->second_layer_name :
+					     layer_name;
+			target_guid = script->second_child_guid ?
+					      script->second_child_guid :
+					      target_guid;
 		}
 
 		if (pkm_lcs_kunit_walk_source_append_len_prefixed(
@@ -37904,7 +38052,10 @@ static int pkm_lcs_kunit_enum_children_source_build_response(
 						     RSI_GUID_SIZE))
 			return -EMSGSIZE;
 		if (pkm_lcs_kunit_walk_source_append_u64(
-			    response, response_len, &offset, script->sequence))
+			    response, response_len, &offset,
+			    (i == 1U && script->include_second_entry) ?
+				    script->second_sequence :
+				    script->sequence))
 			return -EMSGSIZE;
 	}
 
@@ -37914,9 +38065,14 @@ static int pkm_lcs_kunit_enum_children_source_build_response(
 	for (i = 0; i < metadata_count; i++) {
 		u8 generated_guid[RSI_GUID_SIZE] = { 0x80 };
 
+		target_guid = script->child_guid;
 		if (script->repeated_child_count) {
 			generated_guid[1] = (u8)(i + 1U);
 			target_guid = generated_guid;
+		} else if (i == 1U && script->include_second_entry) {
+			target_guid = script->second_child_guid ?
+					      script->second_child_guid :
+					      target_guid;
 		}
 
 		if (pkm_lcs_kunit_walk_source_append(response, response_len,
@@ -58283,6 +58439,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_value_copyout_fault),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_value_malformed_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_success),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_resolves_policy_layer),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_erange_all_or_none),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_index_past_end),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_transaction_context),
