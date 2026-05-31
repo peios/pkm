@@ -14964,12 +14964,15 @@ static void pkm_lcs_kunit_key_fd_set_value_nontransactional_success(
 		{ 0x73 },
 	};
 	static const char value_name[] = "Answer";
+	static const char value_name_input[] = {
+		'A', 'n', 's', 'w', 'e', 'r', '!'
+	};
 	static const u8 data[] = { 0x2a, 0x00, 0x00, 0x00 };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_set_value_args args = {
 		.name_len = strlen(value_name),
-		.name_ptr = (u64)(unsigned long)value_name,
+		.name_ptr = (u64)(unsigned long)value_name_input,
 		.type = REG_BINARY,
 		.data_len = sizeof(data),
 		.data_ptr = (u64)(unsigned long)data,
@@ -15372,6 +15375,9 @@ static void pkm_lcs_kunit_key_fd_set_value_fails_before_source(
 	};
 	static const char value_name[] = "Answer";
 	static const char overlay_name[] = "overlay";
+	static const char overlay_input[] = {
+		'o', 'v', 'e', 'r', 'l', 'a', 'y', '!'
+	};
 	static const u8 data[] = { 0x01 };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
@@ -15472,7 +15478,7 @@ static void pkm_lcs_kunit_key_fd_set_value_fails_before_source(
 
 	ctx.reads = 0;
 	args.layer_len = strlen(overlay_name);
-	args.layer_ptr = (u64)(unsigned long)overlay_name;
+	args.layer_ptr = (u64)(unsigned long)overlay_input;
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_kunit_key_fd_set_value_for_token(
 				(int)allowed_fd, admin_token, &ops, &args),
@@ -15909,12 +15915,15 @@ static void pkm_lcs_kunit_key_fd_delete_value_nontransactional_deletes_effective
 		{ 0x79 },
 	};
 	static const char value_name[] = "Answer";
+	static const char value_name_input[] = {
+		'A', 'n', 's', 'w', 'e', 'r', '!'
+	};
 	static const u8 before_data[] = { 0x2a };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_delete_value_args args = {
 		.name_len = strlen(value_name),
-		.name_ptr = (u64)(unsigned long)value_name,
+		.name_ptr = (u64)(unsigned long)value_name_input,
 		.txn_fd = -1,
 	};
 	struct reg_notify_args notify = {
@@ -16529,6 +16538,9 @@ static void pkm_lcs_kunit_key_fd_delete_value_fails_before_source(
 	static const char value_name[] = "Answer";
 	static const char bad_value_name[] = { 'b', '\0', 'd' };
 	static const char overlay_name[] = "overlay";
+	static const char overlay_input[] = {
+		'o', 'v', 'e', 'r', 'l', 'a', 'y', '!'
+	};
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_delete_value_args args = {
@@ -16604,7 +16616,7 @@ static void pkm_lcs_kunit_key_fd_delete_value_fails_before_source(
 
 	ctx.reads = 0;
 	args.layer_len = strlen(overlay_name);
-	args.layer_ptr = (u64)(unsigned long)overlay_name;
+	args.layer_ptr = (u64)(unsigned long)overlay_input;
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_kunit_key_fd_delete_value_for_token(
 				(int)allowed_fd, admin_token, &ops, &args),
@@ -16937,6 +16949,9 @@ static void pkm_lcs_kunit_key_fd_blanket_tombstone_fails_before_source(
 		{ 0x94 },
 	};
 	static const char overlay_name[] = "overlay";
+	static const char overlay_input[] = {
+		'o', 'v', 'e', 'r', 'l', 'a', 'y', '!'
+	};
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_blanket_tombstone_args args = {
@@ -17005,7 +17020,7 @@ static void pkm_lcs_kunit_key_fd_blanket_tombstone_fails_before_source(
 
 	ctx.reads = 0;
 	args.layer_len = strlen(overlay_name);
-	args.layer_ptr = (u64)(unsigned long)overlay_name;
+	args.layer_ptr = (u64)(unsigned long)overlay_input;
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_kunit_key_fd_blanket_tombstone_for_token(
 				(int)allowed_fd, admin_token, &ops, &args),
@@ -18928,6 +18943,9 @@ static void pkm_lcs_kunit_key_fd_hide_key_fails_before_source(
 	static const u8 root_ancestor[1][PKM_LCS_GUID_BYTES] = { { 1 } };
 	static const char bad_layer[] = { 'b', '\0', 'd' };
 	static const char overlay_name[] = "overlay";
+	static const char overlay_input[] = {
+		'o', 'v', 'e', 'r', 'l', 'a', 'y', '!'
+	};
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_hide_key_args args = {
@@ -19025,7 +19043,7 @@ static void pkm_lcs_kunit_key_fd_hide_key_fails_before_source(
 
 	ctx.reads = 0;
 	args.layer_len = strlen(overlay_name);
-	args.layer_ptr = (u64)(unsigned long)overlay_name;
+	args.layer_ptr = (u64)(unsigned long)overlay_input;
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_kunit_key_fd_hide_key_for_token(
 				(int)allowed_fd, admin_token, &ops, &args),
@@ -19065,6 +19083,9 @@ static void pkm_lcs_kunit_key_fd_delete_key_fails_before_source(
 	static const u8 root_ancestor[1][PKM_LCS_GUID_BYTES] = { { 1 } };
 	static const char bad_layer[] = { 'b', '\0', 'd' };
 	static const char overlay_name[] = "overlay";
+	static const char overlay_input[] = {
+		'o', 'v', 'e', 'r', 'l', 'a', 'y', '!'
+	};
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_delete_key_args args = {
@@ -19178,7 +19199,7 @@ static void pkm_lcs_kunit_key_fd_delete_key_fails_before_source(
 
 	ctx.reads = 0;
 	args.layer_len = strlen(overlay_name);
-	args.layer_ptr = (u64)(unsigned long)overlay_name;
+	args.layer_ptr = (u64)(unsigned long)overlay_input;
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_kunit_key_fd_delete_key_for_token(
 				(int)allowed_fd, admin_token, &ops, &args),
