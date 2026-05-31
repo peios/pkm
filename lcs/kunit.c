@@ -11688,6 +11688,66 @@ static void pkm_lcs_kunit_key_fd_fixed_ioctl_access_gates(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_key_fd_fixed_ioctl_access_matrix(
+	struct kunit *test)
+{
+	static const struct {
+		unsigned int cmd;
+		u32 required;
+	} cases[] = {
+		{ REG_IOC_QUERY_VALUE, KEY_QUERY_VALUE },
+		{ REG_IOC_SET_VALUE, KEY_SET_VALUE },
+		{ REG_IOC_DELETE_VALUE, KEY_SET_VALUE },
+		{ REG_IOC_BLANKET_TOMBSTONE, KEY_SET_VALUE },
+		{ REG_IOC_QUERY_VALUES_BATCH, KEY_QUERY_VALUE },
+		{ REG_IOC_ENUM_VALUES, KEY_QUERY_VALUE },
+		{ REG_IOC_ENUM_SUBKEYS, KEY_ENUMERATE_SUB_KEYS },
+		{ REG_IOC_QUERY_KEY_INFO, READ_CONTROL },
+		{ REG_IOC_DELETE_KEY, DELETE },
+		{ REG_IOC_HIDE_KEY, DELETE },
+		{ REG_IOC_NOTIFY, KEY_NOTIFY },
+		{ REG_IOC_FLUSH, KEY_SET_VALUE },
+	};
+	static const unsigned int non_fixed_cmds[] = {
+		REG_IOC_GET_SECURITY,
+		REG_IOC_SET_SECURITY,
+		REG_IOC_BACKUP,
+		REG_IOC_RESTORE,
+		REG_IOC_COMMIT,
+		REG_IOC_TXN_STATUS,
+	};
+	long fd;
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		fd = pkm_lcs_kunit_publish_key_fd_with_access(cases[i].required);
+		KUNIT_ASSERT_TRUE(test, fd >= 0);
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_key_fd_check_fixed_ioctl_access(
+					(int)fd, cases[i].cmd),
+				0L);
+		KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+
+		fd = pkm_lcs_kunit_publish_key_fd_with_access(0);
+		KUNIT_ASSERT_TRUE(test, fd >= 0);
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_key_fd_check_fixed_ioctl_access(
+					(int)fd, cases[i].cmd),
+				(long)-EACCES);
+		KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	}
+
+	fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_ALL_ACCESS |
+						     ACCESS_SYSTEM_SECURITY);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	for (i = 0; i < ARRAY_SIZE(non_fixed_cmds); i++)
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_key_fd_check_fixed_ioctl_access(
+					(int)fd, non_fixed_cmds[i]),
+				(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
 static void pkm_lcs_kunit_key_fd_security_ioctl_access_gates(
 	struct kunit *test)
 {
@@ -11729,6 +11789,80 @@ static void pkm_lcs_kunit_key_fd_security_ioctl_access_gates(
 			(long)-EINVAL);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_key_fd_security_ioctl_access_matrix(
+	struct kunit *test)
+{
+	static const struct {
+		unsigned int cmd;
+		u32 security_info;
+		u32 required;
+	} cases[] = {
+		{
+			REG_IOC_GET_SECURITY,
+			OWNER_SECURITY_INFORMATION |
+				GROUP_SECURITY_INFORMATION |
+				DACL_SECURITY_INFORMATION,
+			READ_CONTROL,
+		},
+		{
+			REG_IOC_GET_SECURITY,
+			SACL_SECURITY_INFORMATION,
+			ACCESS_SYSTEM_SECURITY,
+		},
+		{
+			REG_IOC_GET_SECURITY,
+			OWNER_SECURITY_INFORMATION |
+				SACL_SECURITY_INFORMATION,
+			READ_CONTROL | ACCESS_SYSTEM_SECURITY,
+		},
+		{
+			REG_IOC_SET_SECURITY,
+			OWNER_SECURITY_INFORMATION |
+				GROUP_SECURITY_INFORMATION,
+			WRITE_OWNER,
+		},
+		{
+			REG_IOC_SET_SECURITY,
+			DACL_SECURITY_INFORMATION,
+			WRITE_DAC,
+		},
+		{
+			REG_IOC_SET_SECURITY,
+			SACL_SECURITY_INFORMATION,
+			ACCESS_SYSTEM_SECURITY,
+		},
+		{
+			REG_IOC_SET_SECURITY,
+			OWNER_SECURITY_INFORMATION |
+				DACL_SECURITY_INFORMATION |
+				SACL_SECURITY_INFORMATION,
+			WRITE_OWNER | WRITE_DAC | ACCESS_SYSTEM_SECURITY,
+		},
+	};
+	long fd;
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		fd = pkm_lcs_kunit_publish_key_fd_with_access(cases[i].required);
+		KUNIT_ASSERT_TRUE(test, fd >= 0);
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_key_fd_check_security_ioctl_access(
+					(int)fd, cases[i].cmd,
+					cases[i].security_info),
+				0L);
+		KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+
+		fd = pkm_lcs_kunit_publish_key_fd_with_access(0);
+		KUNIT_ASSERT_TRUE(test, fd >= 0);
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_key_fd_check_security_ioctl_access(
+					(int)fd, cases[i].cmd,
+					cases[i].security_info),
+				(long)-EACCES);
+		KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	}
 }
 
 static void pkm_lcs_kunit_key_fd_raw_ioctl_null_args_fail_closed(
@@ -58740,7 +58874,9 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_publish_rejects_malformed_state),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_snapshot_rejects_non_key_fd),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_fixed_ioctl_access_gates),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_fixed_ioctl_access_matrix),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_gates),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_matrix),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_raw_ioctl_null_args_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_raw_ioctl_rejects_bad_fds),
 	KUNIT_CASE(
