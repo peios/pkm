@@ -97,6 +97,12 @@ extern int lcs_rust_restore_complete_audit_payload(
 	const u8 key_guid[16], u32 result_errno, u8 *output,
 	size_t output_len, size_t *written_out);
 
+static void pkm_lcs_kunit_build_status_response(struct kunit *test, u8 *frame,
+						size_t frame_len,
+						u64 request_id,
+						u16 request_op, u32 status,
+						size_t *built_len);
+
 struct pkm_lcs_kunit_usercopy_ctx {
 	const void *fault_src;
 	const void *fault_dst;
@@ -203,6 +209,7 @@ struct pkm_lcs_kunit_read_key_source_script {
 	const u8 *parent_guid;
 	const u8 *sd;
 	size_t sd_len;
+	u64 last_write_time;
 	u64 expected_txn_id;
 	u32 status;
 	bool volatile_key;
@@ -10616,13 +10623,13 @@ static void pkm_lcs_kunit_flush_deferred_key_fd_release(void)
 
 static long pkm_lcs_kunit_publish_key_fd_for_source(
 	u32 source_id, const u8 root_guid[PKM_LCS_GUID_BYTES],
-	const u8 key_guid[PKM_LCS_GUID_BYTES])
+	const u8 key_guid[PKM_LCS_GUID_BYTES], u32 granted_access)
 {
 	static const char * const path[] = { "Machine", "Software" };
 	u8 ancestors[2][PKM_LCS_GUID_BYTES];
 	struct pkm_lcs_key_fd_publish_input input = {
 		.source_id = source_id,
-		.granted_access = KEY_CREATE_SUB_KEY | KEY_QUERY_VALUE,
+		.granted_access = granted_access,
 		.resolved_path = path,
 		.ancestor_guids = ancestors,
 		.path_component_count = 2,
@@ -19997,16 +20004,25 @@ static int pkm_lcs_kunit_restore_stream_build_with_data_records(
 		input, total_record_count);
 }
 
-static long pkm_lcs_kunit_publish_source_one_backup_key_fd(void)
+static long pkm_lcs_kunit_publish_source_one_key_fd_with_access(
+	u32 granted_access)
 {
 	static const u8 root_guid[PKM_LCS_GUID_BYTES] = { 1 };
 
 	return pkm_lcs_kunit_publish_key_fd_for_source(
-		1, root_guid, pkm_lcs_kunit_restore_target_guid);
+		1, root_guid, pkm_lcs_kunit_restore_target_guid,
+		granted_access);
 }
 
-static long pkm_lcs_kunit_publish_restarted_missing_backup_restore_fd(
-	struct file *resumed_file, const void **source_token_out)
+static long pkm_lcs_kunit_publish_source_one_backup_key_fd(void)
+{
+	return pkm_lcs_kunit_publish_source_one_key_fd_with_access(
+		KEY_CREATE_SUB_KEY | KEY_QUERY_VALUE);
+}
+
+static long pkm_lcs_kunit_publish_restarted_missing_key_fd(
+	struct file *resumed_file, const void **source_token_out,
+	u32 granted_access)
 {
 	const char name_src[] = "Machine";
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
@@ -20046,7 +20062,8 @@ static long pkm_lcs_kunit_publish_restarted_missing_backup_restore_fd(
 	if (ret)
 		goto out_first;
 
-	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
+	key_fd = pkm_lcs_kunit_publish_source_one_key_fd_with_access(
+		granted_access);
 	if (key_fd < 0) {
 		ret = key_fd;
 		goto out_first;
@@ -20088,6 +20105,14 @@ out_token:
 	pkm_lcs_kunit_reset_source_table();
 	kacs_rust_token_drop(source_token);
 	return ret;
+}
+
+static long pkm_lcs_kunit_publish_restarted_missing_backup_restore_fd(
+	struct file *resumed_file, const void **source_token_out)
+{
+	return pkm_lcs_kunit_publish_restarted_missing_key_fd(
+		resumed_file, source_token_out,
+		KEY_CREATE_SUB_KEY | KEY_QUERY_VALUE);
 }
 
 static ssize_t pkm_lcs_kunit_backup_snapshot_read_source_request(
@@ -20313,13 +20338,15 @@ static int pkm_lcs_kunit_backup_snapshot_handle_export_read(
 				     PKM_LCS_GUID_BYTES);
 	bool grandchild_request = !memcmp(expected_guid, grandchild_guid,
 					  PKM_LCS_GUID_BYTES);
-	struct pkm_lcs_kunit_read_key_source_script read_key = {
-		.expected_guid = expected_guid,
-		.name = grandchild_request ? "Grandchild" :
-					     child_request ? "Child" :
-							     "Software",
-		.expected_txn_id = script->transaction_id,
-	};
+		struct pkm_lcs_kunit_read_key_source_script read_key = {
+			.expected_guid = expected_guid,
+			.name = grandchild_request ? "Grandchild" :
+						     child_request ? "Child" :
+								     "Software",
+			.last_write_time = child_request || grandchild_request ?
+						   5678ULL : 2000ULL,
+			.expected_txn_id = script->transaction_id,
+		};
 	struct pkm_lcs_kunit_enum_children_source_script enum_children = {
 		.expected_parent_guid = expected_guid,
 		.child_name = child_request ? "Grandchild" : "Child",
@@ -21924,7 +21951,7 @@ static void pkm_lcs_kunit_key_fd_backup_read_only_begin_timeout_cleanup(
 
 	pkm_lcs_runtime_limits_reset_defaults();
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
-	limits.request_timeout_ms = 1U;
+	limits.request_timeout_ms = 1000U;
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
@@ -24222,7 +24249,7 @@ static void pkm_lcs_kunit_key_fd_restore_readwrite_begin_timeout_cleanup(
 
 	pkm_lcs_runtime_limits_reset_defaults();
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
-	limits.request_timeout_ms = 1U;
+	limits.request_timeout_ms = 1000U;
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
@@ -25559,6 +25586,59 @@ static void pkm_lcs_kunit_key_fd_notify_fails_closed(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, snapshot.watch_filter, REG_NOTIFY_SD);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+static void pkm_lcs_kunit_key_fd_notify_restart_missing_guid_enoent(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = pkm_lcs_kunit_restore_target_guid,
+		.status = RSI_NOT_FOUND,
+	};
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct pkm_lcs_key_fd_snapshot key_snapshot = { };
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *source_token;
+	long key_fd;
+	int thread_ret;
+
+	key_fd = pkm_lcs_kunit_publish_restarted_missing_key_fd(
+		&file, &source_token, KEY_NOTIFY);
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	KUNIT_ASSERT_NOT_NULL(test, source_token);
+
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_read_key_source_thread, &script,
+		"pkm-lcs-kunit-notify-reval-missing");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)key_fd, &args),
+			(long)-ENOENT);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)key_fd,
+						      &key_snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, key_snapshot.orphaned);
+	KUNIT_EXPECT_FALSE(test, key_snapshot.watch_armed);
+	KUNIT_EXPECT_EQ(test, key_snapshot.watch_filter, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(source_token);
 }
 
 static void pkm_lcs_kunit_expect_drop_key_request(
@@ -28637,8 +28717,9 @@ static void pkm_lcs_kunit_create_missing_relative_direct_parent_reads_sd(
 	int thread_ret;
 
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
-	fd = pkm_lcs_kunit_publish_key_fd_for_source(1, root_guid,
-						     parent_guid);
+	fd = pkm_lcs_kunit_publish_key_fd_for_source(
+		1, root_guid, parent_guid,
+		KEY_CREATE_SUB_KEY | KEY_QUERY_VALUE);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	script.file = &file;
 	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_read_key_source_thread, &script,
@@ -31960,8 +32041,9 @@ static int pkm_lcs_kunit_read_key_source_build_response(
 		response, response_len, &offset, script->symlink ? 1 : 0);
 	if (ret)
 		return ret;
-	ret = pkm_lcs_kunit_walk_source_append_u64(response, response_len,
-						   &offset, 2000ULL);
+	ret = pkm_lcs_kunit_walk_source_append_u64(
+		response, response_len, &offset,
+		script->last_write_time ? script->last_write_time : 2000ULL);
 	if (ret)
 		return ret;
 
@@ -54227,6 +54309,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_ioctl_access_rejects_bad_fds),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_arm_replace_disarm),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_fails_closed),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_notify_restart_missing_guid_enoent),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_last_close_sends_drop),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_nonfinal_close_defers_drop),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_orphan_close_down_source_no_error),
