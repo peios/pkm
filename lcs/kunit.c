@@ -5110,6 +5110,51 @@ static void pkm_lcs_kunit_absolute_path_route_uses_first_component_and_errno(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_absolute_path_route_uses_dynamic_hives(
+	struct kunit *test)
+{
+	const char name_src[] = "CustomHive";
+	const char custom_path[] = "CustomHive\\Software";
+	const char machine_path[] = "Machine\\Software";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct pkm_lcs_hive_route_result route = { };
+	struct file file = { };
+	const void *token;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, name_src, 42, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_absolute_path(
+				machine_path, sizeof(machine_path), false, NULL,
+				0, NULL, 0, &route),
+			(long)-ENOENT);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_route_absolute_path(
+				custom_path, sizeof(custom_path), false, NULL,
+				0, NULL, 0, &route),
+			0L);
+	KUNIT_EXPECT_EQ(test, route.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, route.root_guid[0], 42U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_absolute_path_current_user_rewrite_routes_users(
 	struct kunit *test)
 {
@@ -55404,6 +55449,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_route_runtime_raised_scope_limit),
 	KUNIT_CASE(
 		pkm_lcs_kunit_absolute_path_route_uses_first_component_and_errno),
+	KUNIT_CASE(pkm_lcs_kunit_absolute_path_route_uses_dynamic_hives),
 	KUNIT_CASE(
 		pkm_lcs_kunit_absolute_path_current_user_rewrite_routes_users),
 	KUNIT_CASE(
