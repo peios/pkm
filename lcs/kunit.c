@@ -13071,6 +13071,125 @@ static void pkm_lcs_kunit_key_fd_enum_subkey_fails_before_source(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_key_fd_read_ioctls_terminal_txns_fail_before_source(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x7b },
+	};
+	static const char value_name[] = "Answer";
+	static const struct {
+		u32 state;
+		u32 bound_source_id;
+		long expected_errno;
+	} cases[] = {
+		{ REG_TXN_COMMITTED, 0, -EINVAL },
+		{ REG_TXN_ABORTED, 0, -EINVAL },
+		{ REG_TXN_TIMED_OUT, 0, -ETIMEDOUT },
+		{ REG_TXN_SOURCE_DOWN, 1, -EIO },
+	};
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_query_value_args query_value = {
+		.name_len = sizeof(value_name) - 1,
+		.name_ptr = (u64)(unsigned long)value_name,
+		.data_len = 8,
+		.layer_buf_len = 8,
+		.txn_fd = -1,
+	};
+	struct reg_query_values_batch_args query_batch = {
+		.buf_len = 32,
+		.txn_fd = -1,
+	};
+	struct reg_enum_value_args enum_value = {
+		.index = 0,
+		.name_len = 8,
+		.data_len = 8,
+		.txn_fd = -1,
+	};
+	struct reg_enum_subkey_args enum_subkey = {
+		.index = 0,
+		.name_len = 8,
+		.txn_fd = -1,
+	};
+	u8 data[8] = { };
+	u8 layer[8] = { };
+	u8 batch[32] = { };
+	u8 name[8] = { };
+	struct file file = { };
+	const void *token;
+	long txn_fd;
+	long fd;
+	u32 i;
+
+	query_value.data_ptr = (u64)(unsigned long)data;
+	query_value.layer_ptr = (u64)(unsigned long)layer;
+	query_batch.buf_ptr = (u64)(unsigned long)batch;
+	enum_value.name_ptr = (u64)(unsigned long)name;
+	enum_value.data_ptr = (u64)(unsigned long)data;
+	enum_subkey.name_ptr = (u64)(unsigned long)name;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS, path,
+		ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	txn_fd = pkm_lcs_reg_begin_transaction();
+	KUNIT_ASSERT_TRUE(test, txn_fd >= 0);
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		KUNIT_ASSERT_EQ(test,
+				pkm_lcs_kunit_transaction_fd_set_state(
+					(int)txn_fd, cases[i].state,
+					cases[i].bound_source_id),
+				0L);
+
+		query_value.txn_fd = (int)txn_fd;
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_kunit_key_fd_query_value((int)fd,
+								 &ops,
+								 &query_value),
+				cases[i].expected_errno);
+
+		query_batch.txn_fd = (int)txn_fd;
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_kunit_key_fd_query_values_batch(
+					(int)fd, &ops, &query_batch),
+				cases[i].expected_errno);
+
+		enum_value.txn_fd = (int)txn_fd;
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_kunit_key_fd_enum_value((int)fd,
+								&ops,
+								&enum_value),
+				cases[i].expected_errno);
+
+		enum_subkey.txn_fd = (int)txn_fd;
+		KUNIT_EXPECT_EQ(test,
+				pkm_lcs_kunit_key_fd_enum_subkey((int)fd,
+								 &ops,
+								 &enum_subkey),
+				cases[i].expected_errno);
+	}
+
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.next_request_id, 0ULL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)txn_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_key_fd_enum_subkey_copyout_fault(
 	struct kunit *test)
 {
@@ -52463,6 +52582,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_index_past_end),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_transaction_context),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_fails_before_source),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_read_ioctls_terminal_txns_fail_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_copyout_fault),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_malformed_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_success),
