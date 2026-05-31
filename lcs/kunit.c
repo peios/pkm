@@ -6784,6 +6784,81 @@ static void pkm_lcs_kunit_reg_open_key_syscall_dispatches_absolute(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_reg_open_key_uses_dynamic_hive(
+	struct kunit *test)
+{
+	static const u8 root_guid[RSI_GUID_SIZE] = { 42 };
+	const char name_src[] = "CustomHive";
+	const char path_src[] = "CustomHive";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = root_guid,
+		.name = "CustomHive",
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const u8 *sd;
+	size_t sd_len = 0;
+	long fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(KACS_LOGON_TYPE_SERVICE,
+							KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, name_src,
+					  root_guid[0], 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+
+	sd = kacs_rust_kunit_create_file_sd(token, KEY_READ, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	script.file = &file;
+	script.sd = sd;
+	script.sd_len = sd_len;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_read_key_source_thread, &script,
+		"pkm-lcs-kunit-reg-open-dyn");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	fd = pkm_lcs_reg_open_key_for_token(
+		token, &ops, -1, (const char __user *)path_src, KEY_READ, 0);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)fd, &snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.source_id, 1U);
+	KUNIT_EXPECT_EQ(test, snapshot.granted_access, KEY_READ);
+	KUNIT_EXPECT_EQ(test, snapshot.path_component_count, 1U);
+	KUNIT_EXPECT_EQ(test, memcmp(snapshot.key_guid, root_guid,
+				    RSI_GUID_SIZE), 0);
+	KUNIT_EXPECT_STREQ(test, snapshot.first_component, "CustomHive");
+	KUNIT_EXPECT_STREQ(test, snapshot.last_component, "CustomHive");
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_reg_open_key_uses_live_layer_table(
 	struct kunit *test)
 {
@@ -55496,6 +55571,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_open_absolute_runtime_symlink_depth_limit_eloop),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_root_uses_read_key),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_syscall_dispatches_absolute),
+	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_uses_dynamic_hive),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_uses_live_layer_table),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_syscall_dispatches_relative),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_syscall_rejects_null_token),
