@@ -11,6 +11,15 @@ int pkm_kmes_init(void);
 void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 			  size_t event_type_len, const void *payload,
 			  size_t payload_len);
+struct pkm_kmes_kernel_event {
+	const void *event_type;
+	size_t event_type_len;
+	const void *payload;
+	size_t payload_len;
+};
+void pkm_kmes_emit_kernel_batch(u8 origin_class,
+				const struct pkm_kmes_kernel_event *events,
+				u32 count);
 struct pkm_kmes_runtime_config {
 	u64 buffer_capacity;
 	u32 max_event_size;

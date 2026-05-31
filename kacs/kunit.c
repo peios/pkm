@@ -4385,6 +4385,79 @@ static void pkm_kunit_kmes_emit_batch_checks_emitted_out_before_entries(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_kunit_kmes_kernel_batch_continues_after_structural_drop(
+	struct kunit *test)
+{
+	static const u8 payload0[] = { 0xc0 };
+	static const u8 payload1[] = { 0x81, 0xa1, 0x79, 0x02 };
+	struct pkm_kmes_kernel_event events[] = {
+		{
+			.event_type = PKM_KUNIT_KMES_BATCH_TYPE0,
+			.event_type_len = sizeof(PKM_KUNIT_KMES_BATCH_TYPE0) - 1,
+			.payload = payload0,
+			.payload_len = sizeof(payload0),
+		},
+		{
+			.event_type = PKM_KUNIT_KMES_BATCH_TYPE1,
+			.event_type_len = 0,
+			.payload = payload0,
+			.payload_len = sizeof(payload0),
+		},
+		{
+			.event_type = PKM_KUNIT_KMES_BATCH_TYPE1,
+			.event_type_len = sizeof(PKM_KUNIT_KMES_BATCH_TYPE1) - 1,
+			.payload = payload1,
+			.payload_len = sizeof(payload1),
+		},
+	};
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view first = { };
+	struct pkm_kunit_kmes_event_view second = { };
+	u8 buffer[256] = { 0 };
+	size_t written = 0;
+	size_t offset;
+
+	pkm_kunit_reset_kmes();
+	pkm_kmes_emit_kernel_batch(KMES_ORIGIN_KACS, events,
+				   ARRAY_SIZE(events));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(buffer, sizeof(buffer),
+							  &written, &snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &first));
+	offset = first.event_size;
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer + offset,
+						     written - offset, &second));
+	offset += second.event_size;
+	KUNIT_EXPECT_EQ(test, offset, written);
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 3ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 1ULL);
+	KUNIT_EXPECT_EQ(test, first.timestamp, second.timestamp);
+	KUNIT_EXPECT_EQ(test, first.sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, second.sequence, 3ULL);
+	KUNIT_EXPECT_EQ(test, first.origin_class, KMES_ORIGIN_KACS);
+	KUNIT_EXPECT_EQ(test, second.origin_class, KMES_ORIGIN_KACS);
+	pkm_kunit_expect_bytes_eq(test, first.type_ptr, first.type_len,
+				  (const u8 *)PKM_KUNIT_KMES_BATCH_TYPE0,
+				  sizeof(PKM_KUNIT_KMES_BATCH_TYPE0) - 1);
+	pkm_kunit_expect_bytes_eq(test, second.type_ptr, second.type_len,
+				  (const u8 *)PKM_KUNIT_KMES_BATCH_TYPE1,
+				  sizeof(PKM_KUNIT_KMES_BATCH_TYPE1) - 1);
+}
+
+static void pkm_kunit_kmes_kernel_batch_empty_noop(struct kunit *test)
+{
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+
+	pkm_kunit_reset_kmes();
+	pkm_kmes_emit_kernel_batch(KMES_ORIGIN_KACS, NULL, 0);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+}
+
 static struct pkm_kmes_runtime_config pkm_kunit_kmes_default_config(void)
 {
 	return (struct pkm_kmes_runtime_config) {
@@ -41364,6 +41437,9 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_emit_batch_success_shared_timestamp),
 	KUNIT_CASE(pkm_kunit_kmes_emit_batch_partial_refunds_unused_tokens),
 	KUNIT_CASE(pkm_kunit_kmes_emit_batch_checks_emitted_out_before_entries),
+	KUNIT_CASE(
+		pkm_kunit_kmes_kernel_batch_continues_after_structural_drop),
+	KUNIT_CASE(pkm_kunit_kmes_kernel_batch_empty_noop),
 	KUNIT_CASE(pkm_kunit_kmes_runtime_config_validates_ranges),
 	KUNIT_CASE(pkm_kunit_kmes_runtime_max_event_size_controls_syscall),
 	KUNIT_CASE(pkm_kunit_kmes_runtime_nesting_depth_controls_validation),

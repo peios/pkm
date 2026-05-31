@@ -2284,6 +2284,107 @@ out:
 		pkm_kmes_futex_wake(cpu);
 }
 
+static bool pkm_kmes_kernel_event_structurally_valid(
+	const struct pkm_kmes_kernel_event *event, u64 capacity,
+	u32 *event_size_out)
+{
+	size_t header_size;
+	size_t event_size;
+
+	if (!event || !event_size_out)
+		return false;
+	if (!event->event_type || event->event_type_len == 0 ||
+	    event->event_type_len > PKM_KMES_MAX_KERNEL_TYPE_LEN)
+		return false;
+	if (event->payload_len && !event->payload)
+		return false;
+	if (check_add_overflow(KMES_EVENT_HEADER_BASE_SIZE,
+			       event->event_type_len, &header_size))
+		return false;
+	if (check_add_overflow(header_size, event->payload_len, &event_size))
+		return false;
+	if (header_size > U32_MAX || event_size > U32_MAX)
+		return false;
+	if (event_size > capacity / 2)
+		return false;
+
+	*event_size_out = (u32)event_size;
+	return true;
+}
+
+void pkm_kmes_emit_kernel_batch(u8 origin_class,
+				const struct pkm_kmes_kernel_event *events,
+				u32 count)
+{
+	struct pkm_kmes_cpu_state *cpu = NULL;
+	u64 timestamp = 0;
+	u64 write_pos = 0;
+	u64 tail_pos = 0;
+	u64 sequence = 0;
+	unsigned int cpu_id = 0;
+	kacs_uuid_t eff_guid;
+	kacs_uuid_t true_guid;
+	kacs_uuid_t proc_guid;
+	u32 index;
+	bool wake_needed = false;
+	bool wrote_any = false;
+
+	if (!count || !events || !pkm_kmes_ready || !pkm_kmes_cpus)
+		return;
+
+	preempt_disable();
+
+	cpu_id = smp_processor_id();
+	if (cpu_id >= pkm_kmes_cpu_slots)
+		goto out;
+
+	cpu = READ_ONCE(pkm_kmes_cpus[cpu_id].live);
+	if (!cpu || !cpu->data || cpu->cpu_id != cpu_id)
+		goto out;
+
+	timestamp = ktime_get_real_ns();
+	eff_guid = kacs_effective_token_guid();
+	true_guid = kacs_primary_token_guid();
+	proc_guid = kacs_process_guid();
+	write_pos = cpu->write_pos;
+	tail_pos = cpu->tail_pos;
+	sequence = cpu->sequence;
+
+	for (index = 0; index < count; index++) {
+		const struct pkm_kmes_kernel_event *event = &events[index];
+		u32 event_size = 0;
+
+		sequence++;
+		if (!pkm_kmes_kernel_event_structurally_valid(
+			    event, cpu->capacity, &event_size)) {
+			pkm_kmes_drop_event(cpu);
+			continue;
+		}
+
+		pkm_kmes_reserve_space_local(cpu, &tail_pos, write_pos,
+					     event_size);
+		pkm_kmes_write_event_at(cpu, write_pos, origin_class, &eff_guid,
+					&true_guid, &proc_guid,
+					event->event_type, event->event_type_len,
+					event->payload, event->payload_len,
+					timestamp, sequence);
+		write_pos += event_size;
+		wrote_any = true;
+	}
+
+	cpu->sequence = sequence;
+	if (wrote_any) {
+		pkm_kmes_store_tail_pos(cpu, tail_pos);
+		pkm_kmes_store_write_pos(cpu, write_pos);
+		wake_needed = pkm_kmes_note_wake(cpu);
+	}
+
+out:
+	preempt_enable();
+	if (wake_needed)
+		pkm_kmes_futex_wake(cpu);
+}
+
 int pkm_kmes_current_process_info(u64 *pid_out, u8 *name_out,
 				  size_t name_out_len, size_t *name_len_out,
 				  u8 *path_out, size_t path_out_len,
