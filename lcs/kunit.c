@@ -51294,6 +51294,8 @@ static void pkm_lcs_kunit_expect_source_validation_audit(
 static void pkm_lcs_kunit_source_write_malformed_path_name_audits(
 	struct kunit *test)
 {
+	static const char invalid_child_name[] = { 'C', (char)0xff, 'd', '\0' };
+	static const char invalid_layer_name[] = { 'L', (char)0xff, 'r', '\0' };
 	static const u8 parent_guid[RSI_GUID_SIZE] = {
 		0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
 		0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
@@ -51320,6 +51322,17 @@ static void pkm_lcs_kunit_source_write_malformed_path_name_audits(
 		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_NAME },
 		{ RSI_ENUM_CHILDREN, RSI_ENUM_CHILDREN_RESPONSE,
 		  0xc1c2c3c4c5c6c7c8ULL, "Child", "bad/layer",
+		  "malformed_layer_name",
+		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME },
+		{ RSI_LOOKUP, RSI_LOOKUP_RESPONSE, 0xd1d2d3d4d5d6d7d8ULL,
+		  "Child", invalid_layer_name, "malformed_layer_name",
+		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME },
+		{ RSI_ENUM_CHILDREN, RSI_ENUM_CHILDREN_RESPONSE,
+		  0xe1e2e3e4e5e6e7e8ULL, invalid_child_name, "base",
+		  "malformed_key_name",
+		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_NAME },
+		{ RSI_ENUM_CHILDREN, RSI_ENUM_CHILDREN_RESPONSE,
+		  0xf1f2f3f4f5f6f7f8ULL, "Child", invalid_layer_name,
 		  "malformed_layer_name",
 		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME },
 	};
