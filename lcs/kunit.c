@@ -11218,6 +11218,7 @@ static void pkm_lcs_kunit_key_fd_query_value_success(struct kunit *test)
 		'A', 'n', 's', 'w', 'e', 'r', '!'
 	};
 	static const u8 value_data[] = { 4, 3, 2, 1 };
+	static const u8 default_data[] = { 0x5a };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_query_value_args args = {
@@ -11276,6 +11277,48 @@ static void pkm_lcs_kunit_key_fd_query_value_success(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, args._pad1, 0U);
 	KUNIT_EXPECT_EQ(test, memcmp(data, value_data, sizeof(value_data)), 0);
 	KUNIT_EXPECT_EQ(test, data[sizeof(value_data)], 0xaaU);
+	KUNIT_EXPECT_EQ(test, memcmp(layer, "base", 4), 0);
+	KUNIT_EXPECT_EQ(test, layer[4], 0xaaU);
+
+	memset(&ctx, 0, sizeof(ctx));
+	memset(data, 0xaa, sizeof(data));
+	memset(layer, 0xaa, sizeof(layer));
+	script.expected_value_name = "";
+	script.data = default_data;
+	script.data_len = sizeof(default_data);
+	script.reads = 0;
+	script.writes = 0;
+	script.result = 0;
+	args = (struct reg_query_value_args) {
+		.name_len = 0,
+		.name_ptr = 0,
+		.data_len = sizeof(data),
+		.data_ptr = (u64)(unsigned long)data,
+		.layer_buf_len = sizeof(layer),
+		.layer_ptr = (u64)(unsigned long)layer,
+		.txn_fd = -1,
+	};
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread,
+			   &script, "pkm-lcs-kunit-query-default-value");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 2U);
+	KUNIT_EXPECT_EQ(test, args.type, (u32)REG_BINARY);
+	KUNIT_EXPECT_EQ(test, args.data_len, (u32)sizeof(default_data));
+	KUNIT_EXPECT_EQ(test, args.sequence, 0ULL);
+	KUNIT_EXPECT_EQ(test, args.layer_len, 4U);
+	KUNIT_EXPECT_EQ(test, memcmp(data, default_data,
+				     sizeof(default_data)), 0);
+	KUNIT_EXPECT_EQ(test, data[sizeof(default_data)], 0xaaU);
 	KUNIT_EXPECT_EQ(test, memcmp(layer, "base", 4), 0);
 	KUNIT_EXPECT_EQ(test, layer[4], 0xaaU);
 
