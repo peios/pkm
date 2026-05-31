@@ -12233,6 +12233,195 @@ static void pkm_lcs_kunit_key_fd_query_value_success(struct kunit *test)
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_key_fd_value_reads_resolve_policy_layer(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0xaa, 0x01 },
+	};
+	static const u8 policy_layer_guid[PKM_LCS_GUID_BYTES] = {
+		0xaa, 0x02
+	};
+	static const char value_name[] = "Answer";
+	static const char policy_layer_name[] = "policy";
+	static const u8 base_data[] = { 0x11 };
+	static const u8 policy_data[] = { 0x2a };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_query_value_args query_args = {
+		.name_len = strlen(value_name),
+		.name_ptr = (u64)(unsigned long)value_name,
+		.data_len = 16,
+		.layer_buf_len = 16,
+		.txn_fd = -1,
+	};
+	struct reg_query_values_batch_args batch_args = {
+		.buf_len = 64,
+		.txn_fd = -1,
+	};
+	struct reg_enum_value_args enum_args = {
+		.index = 0,
+		.name_len = 16,
+		.data_len = 16,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_query_values_source_script script = {
+		.expected_guid = ancestors[1],
+		.expected_value_name = value_name,
+		.response_value_name = value_name,
+		.layer_name = "base",
+		.data = base_data,
+		.data_len = sizeof(base_data),
+		.value_type = REG_BINARY,
+		.include_second_value = true,
+		.second_response_value_name = value_name,
+		.second_layer_name = policy_layer_name,
+		.second_data = policy_data,
+		.second_data_len = sizeof(policy_data),
+		.second_value_type = REG_BINARY,
+	};
+	u8 query_data[16];
+	u8 query_layer[16];
+	u8 batch_output[64];
+	u8 enum_name[16];
+	u8 enum_data[16];
+	size_t offset = 0;
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u64 policy_sequence;
+	u64 base_sequence;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&policy_sequence), 0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_allocate_sequence(&base_sequence), 0L);
+	script.sequence = base_sequence;
+	script.second_sequence = policy_sequence;
+	script.file = &file;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				policy_layer_name, strlen(policy_layer_name),
+				10, 1, policy_layer_guid,
+				pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_QUERY_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+
+	memset(query_data, 0xaa, sizeof(query_data));
+	memset(query_layer, 0xaa, sizeof(query_layer));
+	query_args.data_ptr = (u64)(unsigned long)query_data;
+	query_args.layer_ptr = (u64)(unsigned long)query_layer;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_query_values_source_thread, &script,
+		"pkm-lcs-kunit-query-policy-value");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &query_args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, query_args.type, (u32)REG_BINARY);
+	KUNIT_EXPECT_EQ(test, query_args.data_len, (u32)sizeof(policy_data));
+	KUNIT_EXPECT_EQ(test, query_args.sequence, policy_sequence);
+	KUNIT_EXPECT_EQ(test, query_args.layer_len,
+			(u32)strlen(policy_layer_name));
+	KUNIT_EXPECT_EQ(test, memcmp(query_data, policy_data,
+				     sizeof(policy_data)), 0);
+	KUNIT_EXPECT_EQ(test, query_data[sizeof(policy_data)], 0xaaU);
+	KUNIT_EXPECT_EQ(test, memcmp(query_layer, policy_layer_name,
+				     strlen(policy_layer_name)), 0);
+	KUNIT_EXPECT_EQ(test, query_layer[strlen(policy_layer_name)], 0xaaU);
+
+	memset(&ctx, 0, sizeof(ctx));
+	memset(batch_output, 0xaa, sizeof(batch_output));
+	script.expected_value_name = "";
+	script.reads = 0;
+	script.writes = 0;
+	script.result = 0;
+	script.query_all = true;
+	batch_args.buf_ptr = (u64)(unsigned long)batch_output;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_query_values_source_thread, &script,
+		"pkm-lcs-kunit-batch-policy-value");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_values_batch((int)fd, &ops,
+						      &batch_args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, batch_args.count, 1U);
+	KUNIT_EXPECT_EQ(test, batch_args.buf_len,
+			(u32)(12 + strlen(value_name) + sizeof(policy_data)));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(batch_output + offset),
+			(u32)strlen(value_name));
+	offset += sizeof(u32);
+	KUNIT_EXPECT_EQ(test, memcmp(batch_output + offset, value_name,
+				     strlen(value_name)), 0);
+	offset += strlen(value_name);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(batch_output + offset),
+			(u32)REG_BINARY);
+	offset += sizeof(u32);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(batch_output + offset),
+			(u32)sizeof(policy_data));
+	offset += sizeof(u32);
+	KUNIT_EXPECT_EQ(test, memcmp(batch_output + offset, policy_data,
+				     sizeof(policy_data)), 0);
+	offset += sizeof(policy_data);
+	KUNIT_EXPECT_EQ(test, batch_output[offset], 0xaaU);
+
+	memset(&ctx, 0, sizeof(ctx));
+	memset(enum_name, 0xaa, sizeof(enum_name));
+	memset(enum_data, 0xaa, sizeof(enum_data));
+	script.reads = 0;
+	script.writes = 0;
+	script.result = 0;
+	enum_args.name_ptr = (u64)(unsigned long)enum_name;
+	enum_args.data_ptr = (u64)(unsigned long)enum_data;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_query_values_source_thread, &script,
+		"pkm-lcs-kunit-enum-policy-value");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_enum_value((int)fd, &ops, &enum_args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, enum_args.type, (u32)REG_BINARY);
+	KUNIT_EXPECT_EQ(test, enum_args.name_len, (u32)strlen(value_name));
+	KUNIT_EXPECT_EQ(test, enum_args.data_len, (u32)sizeof(policy_data));
+	KUNIT_EXPECT_EQ(test, memcmp(enum_name, value_name,
+				     strlen(value_name)), 0);
+	KUNIT_EXPECT_EQ(test, enum_name[strlen(value_name)], 0xaaU);
+	KUNIT_EXPECT_EQ(test, memcmp(enum_data, policy_data,
+				     sizeof(policy_data)), 0);
+	KUNIT_EXPECT_EQ(test, enum_data[sizeof(policy_data)], 0xaaU);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_key_fd_query_value_erange_all_or_none(
 	struct kunit *test)
 {
@@ -58112,6 +58301,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_set_security_merge_bridge_preserves_components),
 	KUNIT_CASE(pkm_lcs_kunit_set_security_merge_bridge_fails_closed),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_value_reads_resolve_policy_layer),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_set_security_nontransactional_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_cached_grant_survives_sd_change),
