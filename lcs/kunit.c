@@ -560,6 +560,7 @@ struct pkm_lcs_kunit_delete_key_ioctl_source_script {
 	const char *expected_layer_name;
 	const u8 *visible_child_guid;
 	const char *visible_child_name;
+	const char *visible_child_layer_name;
 	const u8 *remaining_guid;
 	u64 expected_txn_id;
 	u32 delete_status;
@@ -20506,6 +20507,100 @@ static void pkm_lcs_kunit_key_fd_delete_key_visible_child_denied(
 	kacs_rust_token_drop(source_token);
 }
 
+static void pkm_lcs_kunit_key_fd_delete_key_visible_policy_child_denied(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x84 },
+	};
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x85 };
+	static const u8 policy_layer_guid[PKM_LCS_GUID_BYTES] = { 0x86 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_delete_key_args args = {
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_delete_key_ioctl_source_script script = {
+		.expected_parent_guid = ancestors[0],
+		.expected_key_guid = ancestors[1],
+		.expected_child_name = "Software",
+		.expected_layer_name = "base",
+		.visible_child_guid = child_guid,
+		.visible_child_name = "Child",
+		.visible_child_layer_name = "policy",
+		.delete_status = RSI_OK,
+	};
+	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	struct task_struct *task;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
+	long mutation_fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	script.file = &file;
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish(
+				"policy", strlen("policy"), 10, 1,
+				policy_layer_guid, pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid)),
+			0L);
+
+	mutation_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, DELETE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, mutation_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_before),
+			0L);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_key_ioctl_source_thread, &script,
+		"pkm-lcs-kunit-delete-key-policy-child");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_delete_key_for_token(
+		(int)mutation_fd, admin_token, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-ENOTEMPTY);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, script.observed_parent_last_write_time, 0ULL);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_key_fd_snapshot((int)mutation_fd, &snapshot),
+			0L);
+	KUNIT_EXPECT_FALSE(test, snapshot.orphaned);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
 static void pkm_lcs_kunit_key_fd_delete_key_transactional_success(
 	struct kunit *test)
 {
@@ -37558,7 +37653,9 @@ static int pkm_lcs_kunit_delete_key_ioctl_source_handle_enum(
 	enum_script.child_name = script->visible_child_name ?
 					 script->visible_child_name :
 					 "Child";
-	enum_script.layer_name = "base";
+	enum_script.layer_name = script->visible_child_layer_name ?
+					 script->visible_child_layer_name :
+					 "base";
 	ret = pkm_lcs_kunit_enum_children_source_build_response(
 		&enum_script, request_id, response, sizeof(response),
 		&response_len);
@@ -57636,6 +57733,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_delete_key_replacement_dispatches_create),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_delete_key_visible_child_denied),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_delete_key_visible_policy_child_denied),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_delete_key_transactional_success),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_delete_key_runtime_limits_source_frame),
