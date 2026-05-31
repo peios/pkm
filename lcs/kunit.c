@@ -11219,6 +11219,8 @@ static void pkm_lcs_kunit_key_fd_query_value_success(struct kunit *test)
 	};
 	static const u8 value_data[] = { 4, 3, 2, 1 };
 	static const u8 default_data[] = { 0x5a };
+	static const char separator_value_name[] = "A/B\\C";
+	static const u8 separator_data[] = { 0x77, 0x88 };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_query_value_args args = {
@@ -11319,6 +11321,48 @@ static void pkm_lcs_kunit_key_fd_query_value_success(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, memcmp(data, default_data,
 				     sizeof(default_data)), 0);
 	KUNIT_EXPECT_EQ(test, data[sizeof(default_data)], 0xaaU);
+	KUNIT_EXPECT_EQ(test, memcmp(layer, "base", 4), 0);
+	KUNIT_EXPECT_EQ(test, layer[4], 0xaaU);
+
+	memset(&ctx, 0, sizeof(ctx));
+	memset(data, 0xaa, sizeof(data));
+	memset(layer, 0xaa, sizeof(layer));
+	script.expected_value_name = separator_value_name;
+	script.data = separator_data;
+	script.data_len = sizeof(separator_data);
+	script.reads = 0;
+	script.writes = 0;
+	script.result = 0;
+	args = (struct reg_query_value_args) {
+		.name_len = strlen(separator_value_name),
+		.name_ptr = (u64)(unsigned long)separator_value_name,
+		.data_len = sizeof(data),
+		.data_ptr = (u64)(unsigned long)data,
+		.layer_buf_len = sizeof(layer),
+		.layer_ptr = (u64)(unsigned long)layer,
+		.txn_fd = -1,
+	};
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_query_values_source_thread,
+			   &script, "pkm-lcs-kunit-query-separator-value");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_query_value((int)fd, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 2U);
+	KUNIT_EXPECT_EQ(test, args.type, (u32)REG_BINARY);
+	KUNIT_EXPECT_EQ(test, args.data_len, (u32)sizeof(separator_data));
+	KUNIT_EXPECT_EQ(test, args.sequence, 0ULL);
+	KUNIT_EXPECT_EQ(test, args.layer_len, 4U);
+	KUNIT_EXPECT_EQ(test, memcmp(data, separator_data,
+				     sizeof(separator_data)), 0);
+	KUNIT_EXPECT_EQ(test, data[sizeof(separator_data)], 0xaaU);
 	KUNIT_EXPECT_EQ(test, memcmp(layer, "base", 4), 0);
 	KUNIT_EXPECT_EQ(test, layer[4], 0xaaU);
 
@@ -15334,6 +15378,8 @@ static void pkm_lcs_kunit_key_fd_set_value_nontransactional_success(
 	};
 	static const u8 data[] = { 0x2a, 0x00, 0x00, 0x00 };
 	static const u8 default_data[] = { 0x51 };
+	static const char separator_value_name[] = "A/B\\C";
+	static const u8 separator_data[] = { 0x61, 0x62 };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_set_value_args args = {
@@ -15488,6 +15534,68 @@ static void pkm_lcs_kunit_key_fd_set_value_nontransactional_success(
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
 			REG_WATCH_VALUE_SET);
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
+
+	memset(&ctx, 0, sizeof(ctx));
+	memset(event, 0, sizeof(event));
+	script.expected_value_name = separator_value_name;
+	script.expected_data = separator_data;
+	script.expected_data_len = sizeof(separator_data);
+	script.expected_expected_sequence = 0;
+	script.observed_last_write_time = 0;
+	script.reads = 0;
+	script.writes = 0;
+	script.result = 0;
+	args = (struct reg_set_value_args) {
+		.name_len = strlen(separator_value_name),
+		.name_ptr = (u64)(unsigned long)separator_value_name,
+		.type = REG_BINARY,
+		.data_len = sizeof(separator_data),
+		.data_ptr = (u64)(unsigned long)separator_data,
+		.txn_fd = -1,
+		.expected_seq = 0,
+	};
+	generation_before = generation_after;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_before),
+			0L);
+	script.expected_sequence = sequence_before;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_set_value_ioctl_source_thread, &script,
+		"pkm-lcs-kunit-set-separator-value");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_set_value_for_token(
+		(int)mutation_fd, admin_token, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)(8U + strlen(separator_value_name)));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event),
+			(u32)(8U + strlen(separator_value_name)));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_VALUE_SET);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6),
+			(u16)strlen(separator_value_name));
+	KUNIT_EXPECT_EQ(test, memcmp(event + 8, separator_value_name,
+				     strlen(separator_value_name)),
+			0);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
@@ -16367,6 +16475,8 @@ static void pkm_lcs_kunit_key_fd_delete_value_nontransactional_deletes_effective
 	};
 	static const u8 before_data[] = { 0x2a };
 	static const u8 default_before_data[] = { 0x5d };
+	static const char separator_value_name[] = "A/B\\C";
+	static const u8 separator_before_data[] = { 0x6d };
 	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct reg_delete_value_args args = {
@@ -16516,6 +16626,64 @@ static void pkm_lcs_kunit_key_fd_delete_value_nontransactional_deletes_effective
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
 			REG_WATCH_VALUE_DELETED);
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
+
+	memset(&ctx, 0, sizeof(ctx));
+	memset(event, 0, sizeof(event));
+	script.expected_value_name = separator_value_name;
+	script.before_data = separator_before_data;
+	script.before_data_len = sizeof(separator_before_data);
+	script.observed_last_write_time = 0;
+	script.reads = 0;
+	script.writes = 0;
+	script.result = 0;
+	args = (struct reg_delete_value_args) {
+		.name_len = strlen(separator_value_name),
+		.name_ptr = (u64)(unsigned long)separator_value_name,
+		.txn_fd = -1,
+	};
+	generation_before = generation_after;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&next_sequence),
+			0L);
+	KUNIT_ASSERT_GT(test, next_sequence, 0ULL);
+	script.before_sequence = next_sequence - 1;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_value_ioctl_source_thread, &script,
+		"pkm-lcs-kunit-delete-separator-value");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+
+	ret = pkm_lcs_kunit_key_fd_delete_value_for_token(
+		(int)mutation_fd, admin_token, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 4U);
+	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)(8U + strlen(separator_value_name)));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event),
+			(u32)(8U + strlen(separator_value_name)));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_VALUE_DELETED);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6),
+			(u16)strlen(separator_value_name));
+	KUNIT_EXPECT_EQ(test, memcmp(event + 8, separator_value_name,
+				     strlen(separator_value_name)),
+			0);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
