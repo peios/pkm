@@ -10712,6 +10712,33 @@ static void pkm_lcs_kunit_key_fd_raw_ioctl_null_args_fail_closed(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 }
 
+static void pkm_lcs_kunit_key_fd_raw_ioctl_flush_no_arg_access_gate(
+	struct kunit *test)
+{
+	long denied_fd;
+	long allowed_fd;
+
+	pkm_lcs_kunit_reset_source_table();
+	denied_fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_QUERY_VALUE);
+	KUNIT_ASSERT_TRUE(test, denied_fd >= 0);
+	allowed_fd = pkm_lcs_kunit_publish_key_fd_with_access(KEY_SET_VALUE);
+	KUNIT_ASSERT_TRUE(test, allowed_fd >= 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_raw_ioctl(
+				(int)denied_fd, REG_IOC_FLUSH, 0),
+			(long)-EACCES);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_raw_ioctl(
+				(int)allowed_fd, REG_IOC_FLUSH, 0),
+			(long)-EIO);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)denied_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)allowed_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_source_table();
+}
+
 static void pkm_lcs_kunit_key_fd_get_security_success(struct kunit *test)
 {
 	static const char * const path[] = { "Machine", "Software" };
@@ -52558,6 +52585,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_fixed_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_security_ioctl_access_gates),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_raw_ioctl_null_args_fail_closed),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_raw_ioctl_flush_no_arg_access_gate),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_admission),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_cycle_fails_closed),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_root_records_success),
