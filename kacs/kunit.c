@@ -4192,6 +4192,27 @@ static void pkm_kunit_kmes_emit_size_check_precedes_usercopy(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_kunit_kmes_emit_zero_type_precedes_size_and_usercopy(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_emit_user_for_token(token,
+						     (const void __user *)1, 0,
+						     (const void __user *)1,
+						     U32_MAX),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_kunit_kmes_emit_rate_limit_denies_without_tcb(
 	struct kunit *test)
 {
@@ -4380,6 +4401,97 @@ static void pkm_kunit_kmes_emit_batch_checks_emitted_out_before_entries(
 				token, (const struct kmes_emit_entry __user *)1,
 				1, (u32 __user *)1),
 			(long)-EFAULT);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_emit_batch_count_precedes_rate_and_emitted_out(
+	struct kunit *test)
+{
+	static const u8 payload[] = { 0xc0 };
+	struct kmes_emit_entry entry = {
+		.event_type = (__u64)(uintptr_t)PKM_KUNIT_KMES_BATCH_TYPE0,
+		.event_type_len = sizeof(PKM_KUNIT_KMES_BATCH_TYPE0) - 1,
+		.payload = (__u64)(uintptr_t)payload,
+		.payload_len = sizeof(payload),
+	};
+	const void *token;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u32 emitted = 0xaaaaaaaaU;
+	u32 tokens = 99;
+
+	token = kacs_rust_kunit_create_without_tcb_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_current_process_rate_refill_frozen(true),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_current_process_rate_tokens(0), 0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_batch_for_token(token, &entry, 0,
+							    &emitted),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, emitted, 0xaaaaaaaaU);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_get_current_process_rate_tokens(&tokens), 0);
+	KUNIT_EXPECT_EQ(test, tokens, 0U);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_emit_batch_overflow_precedes_entry_usercopy(
+	struct kunit *test)
+{
+	struct kmes_emit_entry entry = {
+		.event_type = 1,
+		.event_type_len = 1,
+		.payload = 1,
+		.payload_len = U32_MAX,
+	};
+	const void *token;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u32 emitted = 0xaaaaaaaaU;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_batch_for_token(token, &entry, 1,
+							    &emitted),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, emitted, 0U);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+	kacs_rust_token_drop(token);
+}
+
+static void pkm_kunit_kmes_emit_batch_max_size_precedes_entry_usercopy(
+	struct kunit *test)
+{
+	struct kmes_emit_entry entry = {
+		.event_type = 1,
+		.event_type_len = 1,
+		.payload = 1,
+		.payload_len = 65536U,
+	};
+	const void *token;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u32 emitted = 0xaaaaaaaaU;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_batch_for_token(token, &entry, 1,
+							    &emitted),
+			(long)-ENOSPC);
+	KUNIT_EXPECT_EQ(test, emitted, 0U);
 	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
 			-ENOENT);
 	kacs_rust_token_drop(token);
@@ -41432,11 +41544,16 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_emit_denies_before_usercopy),
 	KUNIT_CASE(pkm_kunit_kmes_emit_rejects_invalid_msgpack),
 	KUNIT_CASE(pkm_kunit_kmes_emit_size_check_precedes_usercopy),
+	KUNIT_CASE(pkm_kunit_kmes_emit_zero_type_precedes_size_and_usercopy),
 	KUNIT_CASE(pkm_kunit_kmes_emit_rate_limit_denies_without_tcb),
 	KUNIT_CASE(pkm_kunit_kmes_emit_tcb_exempts_rate_limit),
 	KUNIT_CASE(pkm_kunit_kmes_emit_batch_success_shared_timestamp),
 	KUNIT_CASE(pkm_kunit_kmes_emit_batch_partial_refunds_unused_tokens),
 	KUNIT_CASE(pkm_kunit_kmes_emit_batch_checks_emitted_out_before_entries),
+	KUNIT_CASE(
+		pkm_kunit_kmes_emit_batch_count_precedes_rate_and_emitted_out),
+	KUNIT_CASE(pkm_kunit_kmes_emit_batch_overflow_precedes_entry_usercopy),
+	KUNIT_CASE(pkm_kunit_kmes_emit_batch_max_size_precedes_entry_usercopy),
 	KUNIT_CASE(
 		pkm_kunit_kmes_kernel_batch_continues_after_structural_drop),
 	KUNIT_CASE(pkm_kunit_kmes_kernel_batch_empty_noop),
