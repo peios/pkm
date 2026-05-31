@@ -13852,6 +13852,13 @@ static void pkm_lcs_kunit_key_fd_query_key_info_fails_before_source(
 			(long)-EINVAL);
 	args._pad0 = 0;
 
+	args._pad1[3] = 1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_query_key_info((int)allowed_fd,
+							    &ops, &args),
+			(long)-EINVAL);
+	args._pad1[3] = 0;
+
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_kunit_key_fd_query_key_info((int)denied_fd,
 							    &ops, &args),
