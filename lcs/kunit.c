@@ -19748,6 +19748,91 @@ static long pkm_lcs_kunit_publish_source_one_backup_key_fd(void)
 		1, root_guid, pkm_lcs_kunit_restore_target_guid);
 }
 
+static long pkm_lcs_kunit_publish_restarted_missing_backup_restore_fd(
+	struct file *resumed_file, const void **source_token_out)
+{
+	const char name_src[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry first_hive;
+	struct reg_src_register_args first_args;
+	struct reg_src_hive_entry second_hive;
+	struct reg_src_register_args second_args;
+	struct file first_file = { };
+	const void *source_token;
+	bool first_open = false;
+	bool resumed_open = false;
+	long key_fd = -1;
+	long ret;
+
+	if (!resumed_file || !source_token_out)
+		return -EINVAL;
+	*source_token_out = NULL;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_reset_source_table();
+	source_token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_TCB_PRIVILEGE);
+	if (!source_token)
+		return -ENOMEM;
+
+	ret = pkm_lcs_source_device_open_file_for_token(source_token,
+						       &first_file);
+	if (ret)
+		goto out_token;
+	first_open = true;
+	pkm_lcs_kunit_build_register_args(&first_args, &first_hive,
+					  name_src, 1, 0);
+	ret = pkm_lcs_source_register_file_for_token(
+		source_token, &first_file, &ops,
+		(const void __user *)&first_args);
+	if (ret)
+		goto out_first;
+
+	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
+	if (key_fd < 0) {
+		ret = key_fd;
+		goto out_first;
+	}
+
+	ret = pkm_lcs_source_device_release_file(&first_file);
+	if (ret)
+		goto out_key;
+	first_open = false;
+
+	ret = pkm_lcs_source_device_open_file_for_token(source_token,
+						       resumed_file);
+	if (ret)
+		goto out_key;
+	resumed_open = true;
+	pkm_lcs_kunit_build_register_args(&second_args, &second_hive,
+					  name_src, 1, 7);
+	ret = pkm_lcs_source_register_file_for_token(
+		source_token, resumed_file, &ops,
+		(const void __user *)&second_args);
+	if (ret)
+		goto out_resumed;
+
+	*source_token_out = source_token;
+	return key_fd;
+
+out_resumed:
+	if (resumed_open)
+		(void)pkm_lcs_source_device_release_file(resumed_file);
+out_key:
+	if (key_fd >= 0) {
+		(void)close_fd((unsigned int)key_fd);
+		pkm_lcs_kunit_flush_deferred_key_fd_release();
+	}
+out_first:
+	if (first_open)
+		(void)pkm_lcs_source_device_release_file(&first_file);
+out_token:
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(source_token);
+	return ret;
+}
+
 static ssize_t pkm_lcs_kunit_backup_snapshot_read_source_request(
 	struct pkm_lcs_kunit_backup_snapshot_source_script *script,
 	u8 *request, size_t request_len)
@@ -21326,6 +21411,76 @@ static void pkm_lcs_kunit_key_fd_backup_pre_start_failure_does_not_audit(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
 	kacs_rust_token_drop(token);
+}
+
+static void pkm_lcs_kunit_key_fd_backup_restart_missing_guid_enoent(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = pkm_lcs_kunit_restore_target_guid,
+		.status = RSI_NOT_FOUND,
+	};
+	struct pkm_lcs_kunit_backup_output_file output = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct pkm_lcs_key_fd_snapshot key_snapshot = { };
+	struct pkm_kacs_boot_snapshot token_snapshot = { };
+	struct reg_backup_args args = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *source_token;
+	const void *backup_token;
+	long key_fd;
+	int output_fd;
+	int thread_ret;
+
+	key_fd = pkm_lcs_kunit_publish_restarted_missing_backup_restore_fd(
+		&file, &source_token);
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	KUNIT_ASSERT_NOT_NULL(test, source_token);
+	backup_token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_BACKUP_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, backup_token);
+	output_fd = pkm_lcs_kunit_backup_output_fd(&output);
+	KUNIT_ASSERT_TRUE(test, output_fd >= 0);
+	args.output_fd = output_fd;
+
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_read_key_source_thread, &script,
+		"pkm-lcs-kunit-backup-reval-missing");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_backup_for_token(
+				(int)key_fd, backup_token, &args),
+			(long)-ENOENT);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	KUNIT_EXPECT_EQ(test, output.len, (size_t)0);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)key_fd,
+						      &key_snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, key_snapshot.orphaned);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(backup_token,
+							 &token_snapshot));
+	KUNIT_EXPECT_EQ(test, token_snapshot.privileges_used &
+				      KACS_SE_BACKUP_PRIVILEGE,
+			0ULL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)output_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(backup_token);
+	kacs_rust_token_drop(source_token);
 }
 
 struct pkm_lcs_kunit_restore_txn_source_script {
@@ -24416,6 +24571,78 @@ static void pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream(
 	kacs_rust_token_drop(plain_token);
 	kacs_rust_token_drop(backup_token);
 	kacs_rust_token_drop(restore_token);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_restart_missing_guid_enoent(
+	struct kunit *test)
+{
+	struct pkm_lcs_kunit_read_key_source_script script = {
+		.expected_guid = pkm_lcs_kunit_restore_target_guid,
+		.status = RSI_NOT_FOUND,
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct pkm_lcs_key_fd_snapshot key_snapshot = { };
+	struct pkm_kacs_boot_snapshot token_snapshot = { };
+	struct reg_restore_args args = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *source_token;
+	const void *restore_token;
+	long key_fd;
+	int input_fd;
+	int thread_ret;
+
+	key_fd = pkm_lcs_kunit_publish_restarted_missing_backup_restore_fd(
+		&file, &source_token);
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	KUNIT_ASSERT_NOT_NULL(test, source_token);
+	restore_token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_RESTORE_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, restore_token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_valid(&input, true),
+			0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(&input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+	args.input_fd = input_fd;
+
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_read_key_source_thread, &script,
+		"pkm-lcs-kunit-restore-reval-missing");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, restore_token, &args),
+			(long)-ENOENT);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)key_fd,
+						      &key_snapshot),
+			0L);
+	KUNIT_EXPECT_TRUE(test, key_snapshot.orphaned);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(restore_token,
+							 &token_snapshot));
+	KUNIT_EXPECT_EQ(test, token_snapshot.privileges_used &
+				      KACS_SE_RESTORE_PRIVILEGE,
+			0ULL);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(restore_token);
+	kacs_rust_token_drop(source_token);
 }
 
 static u32 pkm_lcs_kunit_write_direct_watch_event(u8 *dst, size_t dst_len,
@@ -52763,6 +52990,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_key_fd_backup_read_only_cap_fail_before_source),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_backup_pre_start_failure_does_not_audit),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_backup_restart_missing_guid_enoent),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_admission),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_restore_root_path_teardown_dispatches),
@@ -52809,6 +53038,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_sequence_overflow_denied),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_sequence_skipped_root_path),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_restore_fail_before_stream),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_restore_restart_missing_guid_enoent),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_fails_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_get_security_erange_probe),
