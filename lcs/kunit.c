@@ -34645,6 +34645,38 @@ static void pkm_lcs_kunit_create_layer_write_implicit_base_delegates(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_lcs_kunit_create_layer_write_explicit_base_delegates(
+	struct kunit *test)
+{
+	struct pkm_lcs_create_layer_target target = {
+		.name = "base",
+		.name_len = 4,
+		.implicit_base = 0,
+	};
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token;
+
+	token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	/*
+	 * An explicitly-named "base" layer (implicit_base = 0) must be
+	 * authorized through the base-layer path, identically to an omitted
+	 * layer -- routing it through the metadata-SD lookup would fail EIO
+	 * because the hardcoded base layer has no metadata-table row.
+	 */
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_create_layer_write_access_check_for_token(
+				token, &target, false, NULL, 0, NULL, 0,
+				&plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, KEY_SET_VALUE);
+
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_create_layer_write_bad_inputs(struct kunit *test)
 {
 	struct pkm_lcs_create_layer_target target = {
@@ -59784,6 +59816,7 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_missing_metadata_eio),
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_malformed_metadata_eio),
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_implicit_base_delegates),
+	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_explicit_base_delegates),
 	KUNIT_CASE(pkm_lcs_kunit_create_layer_write_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_key_guid_assignment_fresh_succeeds),
 	KUNIT_CASE(pkm_lcs_kunit_key_guid_assignment_retries_bad_candidates),

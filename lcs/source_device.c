@@ -10952,7 +10952,15 @@ long pkm_lcs_create_layer_write_access_check_for_token_with_limits(
 	if (!target || !target->name || !limits)
 		return -EINVAL;
 
-	if (target->implicit_base)
+	/*
+	 * The base layer is hardcoded and has no metadata-table row, so a
+	 * caller that names it explicitly ("base") must be authorized through
+	 * the base-layer path just like an implicit (omitted) layer -- routing
+	 * an explicit "base" through the metadata-SD lookup below would fail
+	 * EIO because no cached authorization SD exists for it.
+	 */
+	if (target->implicit_base ||
+	    pkm_lcs_layer_name_is_base(target->name, target->name_len))
 		return pkm_lcs_base_layer_write_access_check_for_token(
 			token, base_metadata_present, base_metadata_sd,
 			base_metadata_sd_len, plan);
