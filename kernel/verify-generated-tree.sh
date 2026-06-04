@@ -275,6 +275,8 @@ require_literal 'pkm_kacs_current_fsgid_kgid' "$cred_h" \
 	"generated credential header is missing projected fsgid support"
 require_literal 'pkm_kacs_current_fsuid_fsgid' "$cred_h" \
 	"generated credential header is missing paired projected fsuid/fsgid support"
+require_literal 'pkm_kacs_project_cred_uid_gid' "$cred_h" \
+	"generated credential header is missing the cred uid/gid projection prototype"
 require_literal '#define current_fsuid()' "$cred_h" \
 	"generated credential header does not route current_fsuid through KACS"
 require_literal '#define current_fsgid()' "$cred_h" \

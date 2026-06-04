@@ -11896,7 +11896,7 @@ static long pkm_kacs_open_process_token_task(
 	return ret;
 }
 
-static long pkm_kacs_open_process_token_inspection_task(
+static long __maybe_unused pkm_kacs_open_process_token_inspection_task(
 	const void *subject_token,
 	const struct pkm_kacs_process_state *caller_state,
 	struct task_struct *task)
@@ -12266,7 +12266,7 @@ static long pkm_kacs_open_thread_token_task(
 	return ret;
 }
 
-static long pkm_kacs_open_thread_token_inspection_task(
+static long __maybe_unused pkm_kacs_open_thread_token_inspection_task(
 	const void *subject_token,
 	const struct pkm_kacs_process_state *caller_state,
 	struct task_struct *task)

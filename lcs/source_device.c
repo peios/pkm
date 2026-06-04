@@ -190,6 +190,14 @@ struct pkm_lcs_base_layer_metadata_entry {
 	size_t metadata_sd_len;
 };
 
+/*
+ * Dedicated workqueue for source bootstrap refresh. Using our own queue lets
+ * KUnit flush exactly this work instead of the shared system-wide queue
+ * (which flush_scheduled_work() discourages). Allocated at init on this
+ * built-in subsystem and never torn down (there is no module unload path).
+ */
+static struct workqueue_struct *pkm_lcs_bootstrap_wq;
+
 static DEFINE_MUTEX(pkm_lcs_source_table_lock);
 static DEFINE_MUTEX(pkm_lcs_sequence_allocation_gate_lock);
 static struct pkm_lcs_source_slot
@@ -3454,7 +3462,7 @@ static long pkm_lcs_source_register_file_for_token_core(
 	if (bootstrap_work) {
 		bootstrap_work->source_id = publish.source_id;
 		INIT_WORK(&bootstrap_work->work, pkm_lcs_source_bootstrap_workfn);
-		schedule_work(&bootstrap_work->work);
+		queue_work(pkm_lcs_bootstrap_wq, &bootstrap_work->work);
 		bootstrap_work = NULL;
 	}
 
@@ -6268,7 +6276,7 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout_with
 	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_delete_layer_broadcast_result *result)
 {
-	u32 source_ids[PKM_LCS_MAX_REGISTERED_SOURCES_HARD];
+	u32 *source_ids;
 	u32 source_count = 0;
 	u32 i;
 	long ret;
@@ -6278,21 +6286,31 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout_with
 
 	if (!limits)
 		return -EINVAL;
+
+	/*
+	 * Up to PKM_LCS_MAX_REGISTERED_SOURCES_HARD (256) source ids — too
+	 * large to snapshot on the kernel stack, so allocate the scratch array.
+	 */
+	source_ids = kmalloc_array(PKM_LCS_MAX_REGISTERED_SOURCES_HARD,
+				   sizeof(*source_ids), GFP_KERNEL);
+	if (!source_ids)
+		return -ENOMEM;
+
 	ret = pkm_lcs_source_delete_layer_validate_request(layer_name,
 							   layer_name_len,
 							   limits);
 	if (ret)
-		return ret;
+		goto out;
 
 	ret = pkm_lcs_source_active_ids_snapshot(
-		source_ids, ARRAY_SIZE(source_ids), &source_count);
+		source_ids, PKM_LCS_MAX_REGISTERED_SOURCES_HARD, &source_count);
 	if (ret)
-		return ret;
+		goto out;
 
 	ret = pkm_lcs_source_preflight_layer_operation_generations(
 		source_ids, source_count, skip_source_id, skip_root_guid);
 	if (ret)
-		return ret;
+		goto out;
 
 	if (result)
 		result->active_source_count = source_count;
@@ -6306,49 +6324,64 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout_with
 			source_ids[i], layer_name, layer_name_len, limits,
 			timeout_ms, &apply, NULL, NULL);
 		if (ret)
-			return ret;
+			goto out;
 
 		ret = pkm_lcs_source_record_layer_operation_generations(
 			source_ids[i], skip_source_id, skip_root_guid,
 			&generation_hive_count);
 		if (ret) {
 			pkm_lcs_source_mark_down_by_id(source_ids[i]);
-			return -EIO;
+			ret = -EIO;
+			goto out;
 		}
 
 		ret = pkm_lcs_key_fd_dispatch_source_overflow_with_limits(
 			source_ids[i], limits, &watch_overflow_count);
 		if (ret) {
 			pkm_lcs_source_mark_down_by_id(source_ids[i]);
-			return -EIO;
+			ret = -EIO;
+			goto out;
 		}
 
 		if (result) {
 			result->completed_source_count++;
 			if (check_add_overflow(result->orphaned_guid_count,
 					       apply.orphaned_guid_count,
-					       &result->orphaned_guid_count))
-				return -EOVERFLOW;
+					       &result->orphaned_guid_count)) {
+				ret = -EOVERFLOW;
+				goto out;
+			}
 			if (check_add_overflow(result->marked_fd_count,
 					       apply.marked_fd_count,
-					       &result->marked_fd_count))
-				return -EOVERFLOW;
+					       &result->marked_fd_count)) {
+				ret = -EOVERFLOW;
+				goto out;
+			}
 			if (check_add_overflow(result->immediate_drop_count,
 					       apply.immediate_drop_count,
-					       &result->immediate_drop_count))
-				return -EOVERFLOW;
+					       &result->immediate_drop_count)) {
+				ret = -EOVERFLOW;
+				goto out;
+			}
 			if (check_add_overflow(result->generation_hive_count,
 					       generation_hive_count,
-					       &result->generation_hive_count))
-				return -EOVERFLOW;
+					       &result->generation_hive_count)) {
+				ret = -EOVERFLOW;
+				goto out;
+			}
 			if (check_add_overflow(result->watch_overflow_count,
 					       watch_overflow_count,
-					       &result->watch_overflow_count))
-				return -EOVERFLOW;
+					       &result->watch_overflow_count)) {
+				ret = -EOVERFLOW;
+				goto out;
+			}
 		}
 	}
 
-	return 0;
+	ret = 0;
+out:
+	kfree(source_ids);
+	return ret;
 }
 
 static long
@@ -8545,7 +8578,7 @@ long pkm_lcs_runtime_limits_refresh_self_config_from_key(
 	u32 source_id, const u8 registry_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_self_config_apply_plan *result_out)
 {
-	struct pkm_lcs_self_config_apply_plan plan = { };
+	struct pkm_lcs_self_config_apply_plan *plan = NULL;
 	struct pkm_lcs_runtime_limits active_limits = { };
 	struct pkm_lcs_source_response_frame frame;
 	struct pkm_lcs_source_response_result response = { };
@@ -8575,17 +8608,24 @@ long pkm_lcs_runtime_limits_refresh_self_config_from_key(
 	if (ret)
 		goto out_frame;
 
+	plan = kzalloc(sizeof(*plan), GFP_KERNEL);
+	if (!plan) {
+		ret = -ENOMEM;
+		goto out_frame;
+	}
+
 	ret = lcs_rust_plan_self_config_apply_from_query_values(
 		&active_limits, frame.data, frame.len, response.request_id,
 		next_sequence, layers.layers, layers.layer_count, NULL, 0,
-		&plan);
+		plan);
 	if (ret)
 		goto out_frame;
 
-	ret = pkm_lcs_runtime_limits_publish_self_config_plan(&plan,
+	ret = pkm_lcs_runtime_limits_publish_self_config_plan(plan,
 							      result_out);
 
 out_frame:
+	kfree(plan);
 	pkm_lcs_source_response_frame_destroy(&frame);
 	pkm_lcs_source_layer_snapshot_release(&layers);
 	return ret;
@@ -8978,7 +9018,7 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_source_bootstrap_refresh_result *result_out)
 {
-	struct pkm_lcs_source_bootstrap_refresh_result result = { };
+	struct pkm_lcs_source_bootstrap_refresh_result *result;
 	u8 registry_guid[RSI_GUID_SIZE] = { };
 	u8 kmes_guid[RSI_GUID_SIZE] = { };
 	u8 layers_root_guid[RSI_GUID_SIZE] = { };
@@ -8992,67 +9032,90 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 	if (!source_id || !machine_root_guid || !result_out)
 		return -EINVAL;
 
+	/*
+	 * The refresh result aggregates the full self-config plan, KMES plan,
+	 * layer-metadata result, and self-watch arm state — too large to hold
+	 * on the kernel stack, so allocate the working copy. Side-effect-only
+	 * callers (workqueue refresh, machine-root fallback) supply their own
+	 * throwaway result rather than NULL, since result_out is required.
+	 */
+	result = kzalloc(sizeof(*result), GFP_KERNEL);
+	if (!result)
+		return -ENOMEM;
+
 	ret = pkm_lcs_self_config_registry_root_discover_from_machine_hive(
 		source_id, machine_root_guid, &registry_root_present,
 		registry_guid);
 	if (ret)
-		return ret;
-	result.registry_root_present = registry_root_present;
+		goto out;
+	result->registry_root_present = registry_root_present;
 
 	if (registry_root_present) {
 		ret = pkm_lcs_runtime_limits_refresh_self_config_from_key(
-			source_id, registry_guid, &result.self_config);
+			source_id, registry_guid, &result->self_config);
 		if (ret)
-			return ret;
+			goto out;
 	}
 
 	ret = pkm_kmes_config_root_discover_from_machine_hive(
 		source_id, machine_root_guid, &kmes_root_present, kmes_guid);
 	if (ret)
-		return ret;
-	result.kmes_root_present = kmes_root_present;
+		goto out;
+	result->kmes_root_present = kmes_root_present;
 
 	if (kmes_root_present) {
 		ret = pkm_kmes_runtime_config_refresh_from_key(
-			source_id, kmes_guid, &result.kmes_config);
+			source_id, kmes_guid, &result->kmes_config);
 		if (ret)
-			return ret;
+			goto out;
 	}
 
 	ret = pkm_lcs_layer_metadata_root_discover_from_machine_hive(
 		source_id, machine_root_guid, &layers_root_present,
 		layers_root_guid);
 	if (ret)
-		return ret;
-	result.layers_root_present = layers_root_present;
+		goto out;
+	result->layers_root_present = layers_root_present;
 
 	if (layers_root_present) {
 		ret = pkm_lcs_layer_metadata_refresh_all_from_root(
-			source_id, layers_root_guid, &result.layers);
+			source_id, layers_root_guid, &result->layers);
 		if (ret)
-			return ret;
+			goto out;
 	}
 
 	ret = pkm_lcs_internal_self_watch_arm(
 		source_id, machine_root_guid, registry_root_present,
 		registry_guid, layers_root_present, layers_root_guid,
-		kmes_root_present, kmes_guid, &result.self_watch);
+		kmes_root_present, kmes_guid, &result->self_watch);
 	if (ret)
-		return ret;
+		goto out;
 
-	*result_out = result;
-	return 0;
+	*result_out = *result;
+	ret = 0;
+out:
+	kfree(result);
+	return ret;
 }
 
 static void pkm_lcs_source_bootstrap_workfn(struct work_struct *work)
 {
 	struct pkm_lcs_source_bootstrap_work *bootstrap_work =
 		container_of(work, struct pkm_lcs_source_bootstrap_work, work);
-	struct pkm_lcs_source_bootstrap_refresh_result result = { };
+	struct pkm_lcs_source_bootstrap_refresh_result *result;
 
-	(void)pkm_lcs_source_bootstrap_refresh_machine_hive(
-		bootstrap_work->source_id, bootstrap_work->machine_root_guid,
-		&result);
+	/*
+	 * The refresh result is unused here, but the call requires it. Keep it
+	 * off the stack (the struct is ~2 KB); on allocation failure skip this
+	 * best-effort background refresh rather than overflow the stack.
+	 */
+	result = kzalloc(sizeof(*result), GFP_KERNEL);
+	if (result) {
+		(void)pkm_lcs_source_bootstrap_refresh_machine_hive(
+			bootstrap_work->source_id,
+			bootstrap_work->machine_root_guid, result);
+		kfree(result);
+	}
 	kfree(bootstrap_work);
 }
 
@@ -13342,7 +13405,7 @@ long pkm_lcs_kunit_source_device_raw_ioctl(struct file *file, unsigned int cmd,
 
 void pkm_lcs_kunit_flush_source_bootstrap_work(void)
 {
-	flush_scheduled_work();
+	flush_workqueue(pkm_lcs_bootstrap_wq);
 }
 
 long pkm_lcs_kunit_create_missing_child_depth(u32 parent_depth,
@@ -13482,10 +13545,17 @@ static int __init pkm_lcs_source_device_init(void)
 {
 	int ret;
 
+	pkm_lcs_bootstrap_wq = alloc_workqueue("pkm_lcs_bootstrap", 0, 0);
+	if (!pkm_lcs_bootstrap_wq)
+		return -ENOMEM;
+
 	ret = misc_register(&pkm_lcs_source_device);
-	if (ret)
+	if (ret) {
 		pr_err("pkm: /dev/pkm_registry registration failed (%d)\n",
 		       ret);
+		destroy_workqueue(pkm_lcs_bootstrap_wq);
+		pkm_lcs_bootstrap_wq = NULL;
+	}
 
 	return ret;
 }

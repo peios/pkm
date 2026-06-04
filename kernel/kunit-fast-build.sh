@@ -117,6 +117,12 @@ if (( init )); then
 	scripts/config --enable KUNIT
 	scripts/config --enable SECURITY_PKM_KUNIT
 	scripts/config --disable X86_DECODER_SELFTEST
+	# KUnit test bodies build large fixtures (security descriptors, registry
+	# state) on the stack — legitimately well past the 2048 release limit.
+	# These test functions are #ifdef-gated and never ship, so disable the
+	# frame-size warning for the KUnit build only. The release build keeps
+	# CONFIG_FRAME_WARN=2048, which is the real gate for production frames.
+	scripts/config --set-val FRAME_WARN 0
 	make LLVM=1 olddefconfig
 else
 	# 3c. Force-restore patch targets to their canonical init application

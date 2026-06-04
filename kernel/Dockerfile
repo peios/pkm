@@ -215,7 +215,8 @@ RUN chmod +x /usr/local/bin/install-pkm-subtree /usr/local/bin/stage-kacs-core \
 	scripts/config --set-str LSM "landlock,lockdown,yama,integrity,pkm" && \
 	if [[ "${ENABLE_PKM_KUNIT}" == "1" ]]; then \
 		scripts/config --enable KUNIT && \
-		scripts/config --enable SECURITY_PKM_KUNIT; \
+		scripts/config --enable SECURITY_PKM_KUNIT && \
+		scripts/config --set-val FRAME_WARN 0; \
 	fi && \
 	make LLVM=1 olddefconfig && \
 	bash /tmp/pkm-src/kernel/verify-kernel-config.sh /build/linux/.config && \

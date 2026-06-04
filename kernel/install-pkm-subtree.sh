@@ -860,6 +860,8 @@ insert_block_before_exact_once '#define current_uid()		(current_cred_xxx(uid))' 
 extern kuid_t pkm_kacs_current_fsuid_kuid(void);
 extern kgid_t pkm_kacs_current_fsgid_kgid(void);
 extern void pkm_kacs_current_fsuid_fsgid(kuid_t *fsuid, kgid_t *fsgid);
+extern void pkm_kacs_project_cred_uid_gid(const struct cred *cred,
+					  kuid_t *uid, kgid_t *gid);
 #endif
 
 ' \

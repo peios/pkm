@@ -45,7 +45,7 @@
 #define PKM_LCS_BACKUP_TRAILER_FRAME_LEN \
 	(PKM_LCS_BACKUP_RECORD_HEADER_LEN + sizeof(u64) + SHA256_DIGEST_SIZE)
 #define PKM_LCS_BACKUP_TRAILER_PREFIX_LEN 14U
-#define PKM_LCS_RESTORE_STREAM_CHUNK_BYTES 4096U
+#define PKM_LCS_RESTORE_STREAM_CHUNK_BYTES 1024U
 #define PKM_LCS_WATCH_NOTIFY_ACTION_ARM 1U
 #define PKM_LCS_WATCH_NOTIFY_ACTION_DISARM 2U
 #define PKM_LCS_WATCH_REGISTRY_BITS 8U
@@ -1736,7 +1736,7 @@ out_layer_snapshot:
 	return ret;
 }
 
-static long pkm_lcs_key_fd_query_effective_value_snapshot(
+static long __maybe_unused pkm_lcs_key_fd_query_effective_value_snapshot(
 	const struct pkm_lcs_key_fd *key_fd, u64 txn_id,
 	const char *value_name, u32 value_name_len,
 	struct pkm_lcs_effective_value_snapshot *snapshot)
@@ -3679,7 +3679,7 @@ static long pkm_lcs_key_fd_refresh_layer_metadata(
 		key_fd, NULL, 0, false, NULL);
 }
 
-static long pkm_lcs_key_fd_refresh_layer_metadata_result(
+static long __maybe_unused pkm_lcs_key_fd_refresh_layer_metadata_result(
 	const struct pkm_lcs_key_fd *key_fd, bool *effective_changed_out)
 {
 	return pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context(
@@ -10759,7 +10759,7 @@ static void pkm_lcs_internal_watch_deliver_layer_event(
 static void pkm_lcs_internal_watch_deliver_machine_root_fallback(
 	const struct pkm_lcs_internal_watch_event *event)
 {
-	struct pkm_lcs_source_bootstrap_refresh_result result = { };
+	struct pkm_lcs_source_bootstrap_refresh_result *result;
 
 	if (!event)
 		return;
@@ -10767,10 +10767,17 @@ static void pkm_lcs_internal_watch_deliver_machine_root_fallback(
 	/*
 	 * The fallback watch exists only while Registry or Layers is missing.
 	 * Reusing the bootstrap refresh path keeps first-source and seed-restore
-	 * re-arm policy identical.
+	 * re-arm policy identical. The refresh result is unused here, but the
+	 * call requires it, so use a heap throwaway (the struct is ~2 KB) and
+	 * skip on allocation failure rather than placing it on the stack.
 	 */
+	result = kzalloc(sizeof(*result), GFP_KERNEL);
+	if (!result)
+		return;
+
 	pkm_lcs_source_bootstrap_refresh_machine_hive(event->source_id,
-						     event->guid, &result);
+						     event->guid, result);
+	kfree(result);
 }
 
 static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,

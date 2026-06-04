@@ -40,11 +40,23 @@ const CREATOR_GROUP_SID: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 1, 0, 0, 0];
 /// keys are containers, so only `CONTAINER_INHERIT_ACE` parent ACEs propagate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RegistryContainerChildInheritance<'a> {
+    /// Parent key's security descriptor; its DACL and SACL supply the
+    /// inheritable ACEs propagated to the child.
     pub parent_sd: SecurityDescriptor<'a>,
+    /// Creating token's owner SID; becomes the child owner and substitutes
+    /// `CREATOR_OWNER` placeholders in inherited ACEs.
     pub token_owner: Sid<'a>,
+    /// Creating token's primary group SID; becomes the child group and
+    /// substitutes `CREATOR_GROUP` placeholders in inherited ACEs.
     pub token_primary_group: Sid<'a>,
+    /// Token's default DACL, applied only when the parent yields no
+    /// inheritable DACL (the defaulted-DACL fallback).
     pub token_default_dacl: Option<Acl<'a>>,
+    /// Generic-to-specific access-rights mapping for registry keys, used to
+    /// resolve generic rights in inherited ACE masks.
     pub generic_mapping: GenericMapping,
+    /// Mask of access bits valid for a registry key; mapped ACE masks are
+    /// constrained to these bits.
     pub valid_mapped_access_mask: u32,
 }
 
