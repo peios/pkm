@@ -118,6 +118,12 @@ struct pkm_lcs_source_queued_request {
 	u16 op_code;
 };
 
+struct pkm_lcs_pending_layer_delete {
+	struct list_head link;
+	u32 name_len;
+	char name[];
+};
+
 struct pkm_lcs_symlink_follow_components {
 	struct pkm_lcs_path_component_view *components;
 	u32 component_count;
@@ -145,10 +151,12 @@ struct pkm_lcs_source_slot {
 	u32 hive_count;
 	struct pkm_lcs_source_registration_hive_copy *hives;
 	struct pkm_lcs_source_fd *active_fd;
+	struct list_head pending_layer_deletes;
 	u64 source_next_sequence;
 	u64 restart_generation;
 	u32 bound_transaction_count;
 	u32 read_only_transaction_count;
+	u32 pending_layer_delete_count;
 };
 
 struct pkm_lcs_source_slot_view_buffer {
@@ -230,6 +238,8 @@ static const struct pkm_lcs_rsi_layer_view pkm_lcs_base_layer_snapshot[] = {
 };
 
 static void pkm_lcs_source_bootstrap_workfn(struct work_struct *work);
+static long pkm_lcs_source_replay_pending_layer_deletes_with_limits(
+	u32 source_id, const struct pkm_lcs_runtime_limits *limits);
 
 long pkm_lcs_runtime_limits_defaults(struct pkm_lcs_runtime_limits *limits)
 {
@@ -1561,6 +1571,23 @@ static void pkm_lcs_source_hives_destroy(
 	kfree(hives);
 }
 
+static void pkm_lcs_source_slot_pending_layer_deletes_destroy(
+	struct pkm_lcs_source_slot *slot)
+{
+	struct pkm_lcs_pending_layer_delete *entry;
+	struct pkm_lcs_pending_layer_delete *tmp;
+
+	if (!slot || !slot->occupied)
+		return;
+
+	list_for_each_entry_safe(entry, tmp, &slot->pending_layer_deletes,
+				 link) {
+		list_del(&entry->link);
+		kfree(entry);
+	}
+	slot->pending_layer_delete_count = 0;
+}
+
 static void pkm_lcs_source_slot_view_buffer_init(
 	struct pkm_lcs_source_slot_view_buffer *buffer)
 {
@@ -1651,6 +1678,103 @@ pkm_lcs_source_slot_find_locked(u32 source_id)
 			return &pkm_lcs_source_slots[i];
 	}
 	return NULL;
+}
+
+static long pkm_lcs_source_slot_pending_layer_delete_find_locked(
+	struct pkm_lcs_source_slot *slot, const char *layer_name,
+	u32 layer_name_len, const struct pkm_lcs_runtime_limits *limits,
+	bool *found)
+{
+	struct pkm_lcs_pending_layer_delete *entry;
+	long ret;
+
+	lockdep_assert_held(&pkm_lcs_source_table_lock);
+
+	if (!slot || !layer_name || !limits || !found)
+		return -EINVAL;
+
+	*found = false;
+	list_for_each_entry(entry, &slot->pending_layer_deletes, link) {
+		ret = pkm_lcs_layer_name_casefold_equal_with_limits(
+			entry->name, entry->name_len, layer_name, layer_name_len,
+			limits, found);
+		if (ret)
+			return ret;
+		if (*found)
+			return 0;
+	}
+	return 0;
+}
+
+static long pkm_lcs_source_slot_pending_layer_delete_add_locked(
+	struct pkm_lcs_source_slot *slot, const char *layer_name,
+	u32 layer_name_len, const struct pkm_lcs_runtime_limits *limits)
+{
+	struct pkm_lcs_pending_layer_delete *entry;
+	bool found = false;
+	long ret;
+
+	lockdep_assert_held(&pkm_lcs_source_table_lock);
+
+	if (!slot || !slot->occupied || !layer_name || !layer_name_len ||
+	    !limits)
+		return -EINVAL;
+	if (layer_name_len > PKM_LCS_MAX_LAYER_NAME_BYTES_HARD)
+		return -ENAMETOOLONG;
+
+	ret = pkm_lcs_source_slot_pending_layer_delete_find_locked(
+		slot, layer_name, layer_name_len, limits, &found);
+	if (ret || found)
+		return ret;
+	if (slot->pending_layer_delete_count >= limits->max_total_layers)
+		return -ENOSPC;
+
+	entry = kmalloc(struct_size(entry, name, (size_t)layer_name_len + 1),
+			GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&entry->link);
+	entry->name_len = layer_name_len;
+	memcpy(entry->name, layer_name, layer_name_len);
+	entry->name[layer_name_len] = '\0';
+
+	list_add_tail(&entry->link, &slot->pending_layer_deletes);
+	slot->pending_layer_delete_count++;
+	return 0;
+}
+
+static long pkm_lcs_source_record_down_layer_delete_locked(
+	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits, u32 *pending_count_out)
+{
+	u32 pending_count = 0;
+	u32 i;
+	long ret;
+
+	lockdep_assert_held(&pkm_lcs_source_table_lock);
+
+	if (pending_count_out)
+		*pending_count_out = 0;
+	if (!layer_name || !layer_name_len || !limits)
+		return -EINVAL;
+
+	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_HARD; i++) {
+		struct pkm_lcs_source_slot *slot = &pkm_lcs_source_slots[i];
+
+		if (!slot->occupied ||
+		    slot->status != PKM_LCS_SOURCE_SLOT_STATUS_DOWN)
+			continue;
+
+		ret = pkm_lcs_source_slot_pending_layer_delete_add_locked(
+			slot, layer_name, layer_name_len, limits);
+		if (ret)
+			return ret;
+		pending_count++;
+	}
+
+	if (pending_count_out)
+		*pending_count_out = pending_count;
+	return 0;
 }
 
 static struct pkm_lcs_source_registration_hive_copy *
@@ -3387,8 +3511,10 @@ static long pkm_lcs_source_registration_publish_locked(
 		slot->hive_count = registration->hive_count;
 		slot->hives = registration->hives;
 		slot->active_fd = source_fd;
+		INIT_LIST_HEAD(&slot->pending_layer_deletes);
 		slot->source_next_sequence = plan.source_next_sequence;
 		slot->restart_generation = 0;
+		slot->pending_layer_delete_count = 0;
 		registration->hives = NULL;
 		registration->hive_count = 0;
 		break;
@@ -3542,6 +3668,14 @@ static long pkm_lcs_source_register_file_for_token_core(
 
 	if (publish.resumed_source_id) {
 		u32 watch_count = 0;
+
+		ret = pkm_lcs_source_replay_pending_layer_deletes_with_limits(
+			publish.resumed_source_id, &limits);
+		if (ret) {
+			pkm_lcs_source_mark_down_by_id(publish.resumed_source_id);
+			ret = -EIO;
+			goto out_bootstrap;
+		}
 
 		ret = pkm_lcs_key_fd_dispatch_source_overflow_with_limits(
 			publish.resumed_source_id, &limits, &watch_count);
@@ -6388,6 +6522,150 @@ long pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout(
 		orphan_result, response, enqueue);
 }
 
+static long pkm_lcs_source_pending_layer_delete_peek(
+	u32 source_id, char **layer_name_out, u32 *layer_name_len_out)
+{
+	struct pkm_lcs_pending_layer_delete *entry;
+	struct pkm_lcs_source_slot *slot;
+	char *layer_name = NULL;
+	u32 layer_name_len = 0;
+	long ret = 0;
+
+	if (layer_name_out)
+		*layer_name_out = NULL;
+	if (layer_name_len_out)
+		*layer_name_len_out = 0;
+	if (!source_id || !layer_name_out || !layer_name_len_out)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+	if (list_empty(&slot->pending_layer_deletes))
+		goto out_unlock;
+
+	entry = list_first_entry(&slot->pending_layer_deletes,
+				 struct pkm_lcs_pending_layer_delete, link);
+	layer_name = kmemdup_nul(entry->name, entry->name_len, GFP_KERNEL);
+	if (!layer_name) {
+		ret = -ENOMEM;
+		goto out_unlock;
+	}
+	layer_name_len = entry->name_len;
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	if (ret) {
+		kfree(layer_name);
+		return ret;
+	}
+
+	*layer_name_out = layer_name;
+	*layer_name_len_out = layer_name_len;
+	return 0;
+}
+
+static long pkm_lcs_source_pending_layer_delete_remove(
+	u32 source_id, const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	struct pkm_lcs_pending_layer_delete *entry;
+	struct pkm_lcs_pending_layer_delete *tmp;
+	struct pkm_lcs_source_slot *slot;
+	bool equal = false;
+	long ret = -ENOENT;
+
+	if (!source_id || !layer_name || !layer_name_len || !limits)
+		return -EINVAL;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+
+	list_for_each_entry_safe(entry, tmp, &slot->pending_layer_deletes,
+				 link) {
+		ret = pkm_lcs_layer_name_casefold_equal_with_limits(
+			entry->name, entry->name_len, layer_name, layer_name_len,
+			limits, &equal);
+		if (ret)
+			goto out_unlock;
+		if (!equal) {
+			ret = -ENOENT;
+			continue;
+		}
+
+		list_del(&entry->link);
+		kfree(entry);
+		slot->pending_layer_delete_count--;
+		ret = 0;
+		goto out_unlock;
+	}
+
+out_unlock:
+	mutex_unlock(&pkm_lcs_source_table_lock);
+	return ret;
+}
+
+static long pkm_lcs_source_replay_pending_layer_deletes_with_limits(
+	u32 source_id, const struct pkm_lcs_runtime_limits *limits)
+{
+	char *layer_name = NULL;
+	u32 layer_name_len = 0;
+	long ret;
+
+	if (!source_id || !limits)
+		return -EINVAL;
+
+	for (;;) {
+		u32 generation_hive_count = 0;
+		u32 watch_overflow_count = 0;
+
+		ret = pkm_lcs_source_pending_layer_delete_peek(
+			source_id, &layer_name, &layer_name_len);
+		if (ret)
+			return ret;
+		if (!layer_name)
+			return 0;
+
+		ret = pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout_with_limits(
+			source_id, layer_name, layer_name_len, limits,
+			limits->request_timeout_ms, NULL, NULL, NULL);
+		if (ret)
+			goto out_free;
+
+		ret = pkm_lcs_source_record_layer_operation_generations(
+			source_id, 0, NULL, &generation_hive_count);
+		if (ret) {
+			ret = -EIO;
+			goto out_free;
+		}
+
+		ret = pkm_lcs_key_fd_dispatch_source_overflow_with_limits(
+			source_id, limits, &watch_overflow_count);
+		if (ret) {
+			ret = -EIO;
+			goto out_free;
+		}
+
+		ret = pkm_lcs_source_pending_layer_delete_remove(
+			source_id, layer_name, layer_name_len, limits);
+		kfree(layer_name);
+		layer_name = NULL;
+		if (ret)
+			return ret;
+	}
+
+out_free:
+	kfree(layer_name);
+	return ret;
+}
+
 static long
 pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout_with_limits(
 	const char *layer_name, u32 layer_name_len, u32 timeout_ms,
@@ -6418,6 +6696,13 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout_with
 	ret = pkm_lcs_source_delete_layer_validate_request(layer_name,
 							   layer_name_len,
 							   limits);
+	if (ret)
+		goto out;
+
+	mutex_lock(&pkm_lcs_source_table_lock);
+	ret = pkm_lcs_source_record_down_layer_delete_locked(
+		layer_name, layer_name_len, limits, NULL);
+	mutex_unlock(&pkm_lcs_source_table_lock);
 	if (ret)
 		goto out;
 
@@ -13476,6 +13761,8 @@ void pkm_lcs_kunit_reset_source_table(void)
 
 	mutex_lock(&pkm_lcs_source_table_lock);
 	for (i = 0; i < PKM_LCS_MAX_REGISTERED_SOURCES_HARD; i++) {
+		pkm_lcs_source_slot_pending_layer_deletes_destroy(
+			&pkm_lcs_source_slots[i]);
 		pkm_lcs_source_hives_destroy(pkm_lcs_source_slots[i].hives,
 					     pkm_lcs_source_slots[i].hive_count);
 		memset(&pkm_lcs_source_slots[i], 0,
@@ -13514,6 +13801,8 @@ void pkm_lcs_kunit_source_table_snapshot(
 			snapshot->active_count++;
 		if (slot->status == PKM_LCS_SOURCE_SLOT_STATUS_DOWN)
 			snapshot->down_count++;
+		snapshot->pending_layer_delete_count +=
+			slot->pending_layer_delete_count;
 	}
 	snapshot->sequence_initialized = pkm_lcs_sequence_initialized;
 	snapshot->next_sequence = pkm_lcs_next_sequence;

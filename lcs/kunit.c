@@ -45479,6 +45479,155 @@ static void pkm_lcs_kunit_source_delete_layer_broadcast_active_sources(
 	kacs_rust_token_drop(token);
 }
 
+static void
+pkm_lcs_kunit_source_delete_layer_replays_registered_down_source(
+	struct kunit *test)
+{
+	static const char layer_name[] = "role-down";
+	static const char hive_name[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct pkm_lcs_delete_layer_broadcast_result result = { };
+	struct pkm_lcs_source_table_snapshot table = { };
+	struct pkm_lcs_kunit_delete_layer_source_script script = { };
+	struct file file = { };
+	struct file resume_file = { };
+	struct task_struct *task;
+	const void *token;
+	int thread_ret;
+	long ret;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, hive_name, 1, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+
+	ret = pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
+		layer_name, strlen(layer_name), 1000, &result);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, result.active_source_count, 0U);
+	KUNIT_EXPECT_EQ(test, result.completed_source_count, 0U);
+	pkm_lcs_kunit_source_table_snapshot(&table);
+	KUNIT_EXPECT_EQ(test, table.down_count, 1U);
+	KUNIT_EXPECT_EQ(test, table.pending_layer_delete_count, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &resume_file),
+			0L);
+	script.file = &resume_file;
+	script.expected_layer_name = layer_name;
+	script.status = RSI_OK;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_layer_source_thread, &script,
+		"pkm-lcs-kunit-del-layer-resume");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_register_file_for_token(
+		token, &resume_file, &ops, (const void __user *)&args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	pkm_lcs_kunit_source_table_snapshot(&table);
+	KUNIT_EXPECT_EQ(test, table.active_count, 1U);
+	KUNIT_EXPECT_EQ(test, table.down_count, 0U);
+	KUNIT_EXPECT_EQ(test, table.pending_layer_delete_count, 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&resume_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+static void
+pkm_lcs_kunit_source_delete_layer_resume_replay_failure_stays_down(
+	struct kunit *test)
+{
+	static const char layer_name[] = "role-down-fail";
+	static const char duplicate_name[] = "ROLE-DOWN-FAIL";
+	static const char hive_name[] = "Machine";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_src_hive_entry hive;
+	struct reg_src_register_args args;
+	struct pkm_lcs_source_table_snapshot table = { };
+	struct pkm_lcs_kunit_delete_layer_source_script script = { };
+	struct file file = { };
+	struct file resume_file = { };
+	struct task_struct *task;
+	const void *token;
+	int thread_ret;
+	long ret;
+
+	pkm_lcs_kunit_reset_source_table();
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token, &file),
+			0L);
+	pkm_lcs_kunit_build_register_args(&args, &hive, hive_name, 1, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_register_file_for_token(
+				token, &file, &ops, (const void __user *)&args),
+			0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
+				layer_name, strlen(layer_name), 1000, NULL),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_delete_layer_broadcast_apply_orphans_timeout(
+				duplicate_name, strlen(duplicate_name), 1000,
+				NULL),
+			0L);
+	pkm_lcs_kunit_source_table_snapshot(&table);
+	KUNIT_EXPECT_EQ(test, table.pending_layer_delete_count, 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_device_open_file_for_token(token,
+								  &resume_file),
+			0L);
+	script.file = &resume_file;
+	script.expected_layer_name = layer_name;
+	script.status = RSI_STORAGE_ERROR;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_delete_layer_source_thread, &script,
+		"pkm-lcs-kunit-del-layer-resume-fail");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_source_register_file_for_token(
+		token, &resume_file, &ops, (const void __user *)&args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, script.writes, 1U);
+	pkm_lcs_kunit_source_table_snapshot(&table);
+	KUNIT_EXPECT_EQ(test, table.active_count, 0U);
+	KUNIT_EXPECT_EQ(test, table.down_count, 1U);
+	KUNIT_EXPECT_EQ(test, table.pending_layer_delete_count, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&resume_file),
+			0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_layer_table_publish_snapshot_remove(struct kunit *test)
 {
 	static const u8 policy_guid[RSI_GUID_SIZE] = { 0xa1 };
@@ -61336,6 +61485,10 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_delete_layer_applies_orphans),
 	KUNIT_CASE(
 		pkm_lcs_kunit_source_delete_layer_broadcast_active_sources),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_delete_layer_replays_registered_down_source),
+	KUNIT_CASE(
+		pkm_lcs_kunit_source_delete_layer_resume_replay_failure_stays_down),
 	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_snapshot_remove),
 	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_uses_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_refresh_uses_runtime_limits),

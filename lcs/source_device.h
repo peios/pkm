@@ -174,6 +174,7 @@ struct pkm_lcs_source_table_snapshot {
 	u32 occupied_count;
 	u32 active_count;
 	u32 down_count;
+	u32 pending_layer_delete_count;
 	u64 next_sequence;
 	bool sequence_initialized;
 };
