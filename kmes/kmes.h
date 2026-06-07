@@ -157,6 +157,7 @@ long pkm_kmes_kunit_emit_for_token(const void *token, const void *event_type,
 long pkm_kmes_kunit_emit_batch_for_token(const void *token,
 					 const struct kmes_emit_entry *entries,
 					 u32 count, u32 *emitted_out);
+unsigned long pkm_kmes_kunit_mmap_locked_flags(unsigned long initial_flags);
 int pkm_kmes_kunit_runtime_config_snapshot(
 	struct pkm_kmes_runtime_config *out);
 long pkm_kmes_kunit_runtime_config_apply(

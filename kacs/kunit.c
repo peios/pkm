@@ -3669,6 +3669,20 @@ static void pkm_kunit_kmes_attach_repeated_same_cpu_shares_consumer_metadata(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_kunit_kmes_mmap_clears_write_upgrade(struct kunit *test)
+{
+	unsigned long initial_flags = VM_SHARED | VM_READ | VM_WRITE |
+				      VM_MAYREAD | VM_MAYWRITE;
+	unsigned long locked_flags =
+		pkm_kmes_kunit_mmap_locked_flags(initial_flags);
+
+	KUNIT_EXPECT_FALSE(test, locked_flags & VM_WRITE);
+	KUNIT_EXPECT_FALSE(test, locked_flags & VM_MAYWRITE);
+	KUNIT_EXPECT_TRUE(test, locked_flags & VM_SHARED);
+	KUNIT_EXPECT_TRUE(test, locked_flags & VM_READ);
+	KUNIT_EXPECT_TRUE(test, locked_flags & VM_MAYREAD);
+}
+
 static void pkm_kunit_kmes_attach_einval_on_out_of_range_cpu(
 	struct kunit *test)
 {
@@ -41646,6 +41660,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_attach_success_returns_cpu_fds),
 	KUNIT_CASE(
 		pkm_kunit_kmes_attach_repeated_same_cpu_shares_consumer_metadata),
+	KUNIT_CASE(pkm_kunit_kmes_mmap_clears_write_upgrade),
 	KUNIT_CASE(pkm_kunit_kmes_attach_einval_on_out_of_range_cpu),
 	KUNIT_CASE(pkm_kunit_kmes_attach_denies_without_security),
 	KUNIT_CASE(pkm_kunit_kmes_attach_checks_privilege_before_usercopy),

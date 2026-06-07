@@ -1991,6 +1991,19 @@ static int pkm_kmes_map_vmalloc_page_range(struct vm_area_struct *vma,
 	return pkm_kmes_map_page_range(vma, addr, page, prot);
 }
 
+static unsigned long pkm_kmes_fd_mmap_locked_flags(unsigned long flags)
+{
+	return flags & ~(VM_WRITE | VM_MAYWRITE);
+}
+
+static void pkm_kmes_fd_mmap_lock_read_only_regions(struct vm_area_struct *vma)
+{
+	unsigned long locked_flags =
+		pkm_kmes_fd_mmap_locked_flags(vma->vm_flags);
+
+	vm_flags_clear(vma, vma->vm_flags & ~locked_flags);
+}
+
 static int pkm_kmes_fd_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct pkm_kmes_fd *kfd = file->private_data;
@@ -2017,6 +2030,7 @@ static int pkm_kmes_fd_mmap(struct file *file, struct vm_area_struct *vma)
 	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP | VM_MIXEDMAP);
 	rw_prot = vma->vm_page_prot;
 	ro_prot = vm_get_page_prot(vma->vm_flags & ~VM_WRITE);
+	pkm_kmes_fd_mmap_lock_read_only_regions(vma);
 
 	addr = vma->vm_start;
 	ret = pkm_kmes_map_page_range(vma, addr, cpu->producer_meta_page,
@@ -3106,6 +3120,11 @@ long pkm_kmes_kunit_emit_batch_for_token(const void *token,
 {
 	return pkm_kmes_emit_batch_common(token, entries, count, false,
 					 emitted_out, false);
+}
+
+unsigned long pkm_kmes_kunit_mmap_locked_flags(unsigned long initial_flags)
+{
+	return pkm_kmes_fd_mmap_locked_flags(initial_flags);
 }
 
 int pkm_kmes_kunit_runtime_config_snapshot(
