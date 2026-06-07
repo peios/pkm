@@ -770,6 +770,7 @@ static void pkm_kmes_reserve_space_local(struct pkm_kmes_cpu_state *cpu,
 		}
 
 		next_tail += overwritten_size;
+		cpu->dropped_events++;
 		used = write_pos - next_tail;
 	}
 
@@ -794,6 +795,7 @@ static void pkm_kmes_reserve_space(struct pkm_kmes_cpu_state *cpu,
 		}
 
 		next_tail += overwritten_size;
+		cpu->dropped_events++;
 		used = cpu->write_pos - next_tail;
 	}
 

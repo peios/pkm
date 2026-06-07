@@ -3539,6 +3539,72 @@ static void pkm_kunit_kmes_direct_emit_writes_single_event(struct kunit *test)
 				  payload, sizeof(payload));
 }
 
+static void pkm_kunit_kmes_live_overrun_advances_tail_to_survivors(
+	struct kunit *test)
+{
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
+	u8 *buffer;
+	u8 *payload;
+	size_t written = 0;
+	size_t offset = 0;
+	u32 event_size = 0;
+	int i;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_DOWNSIZE_CAPACITY,
+			       GFP_KERNEL);
+	payload = kunit_kzalloc(test, 32000, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	KUNIT_ASSERT_NOT_NULL(test, payload);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(
+		test,
+		pkm_kmes_kunit_swap_capacity(PKM_KUNIT_KMES_DOWNSIZE_CAPACITY),
+		0);
+
+	for (i = 0; i < 5; i++) {
+		memset(payload, 0, 32000);
+		payload[0] = (u8)(i + 1);
+		pkm_kmes_emit_kernel(KMES_ORIGIN_KACS,
+				     PKM_KUNIT_KMES_DIRECT_TYPE,
+				     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1,
+				     payload, 32000);
+	}
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, PKM_KUNIT_KMES_DOWNSIZE_CAPACITY,
+				&written, &snapshot),
+			0);
+	KUNIT_EXPECT_EQ(test, snapshot.capacity,
+			(u64)PKM_KUNIT_KMES_DOWNSIZE_CAPACITY);
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 5ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 1ULL);
+
+	for (i = 0; i < 4; i++) {
+		KUNIT_ASSERT_TRUE(
+			test,
+			pkm_kunit_parse_kmes_event(buffer + offset,
+						   written - offset, &view));
+		if (i == 0) {
+			event_size = view.event_size;
+			KUNIT_EXPECT_EQ(test, snapshot.tail_pos,
+					(u64)event_size);
+			KUNIT_EXPECT_EQ(test, snapshot.write_pos,
+					(u64)event_size * 5ULL);
+			KUNIT_EXPECT_EQ(test, written,
+					(size_t)event_size * 4U);
+		} else {
+			KUNIT_EXPECT_EQ(test, view.event_size, event_size);
+		}
+		KUNIT_EXPECT_EQ(test, view.sequence, (u64)(i + 2));
+		KUNIT_EXPECT_EQ(test, view.payload_ptr[0], (u8)(i + 2));
+		offset += view.event_size;
+	}
+	KUNIT_EXPECT_EQ(test, offset, written);
+}
+
 static void pkm_kunit_kmes_direct_invalid_type_drops_structurally(
 	struct kunit *test)
 {
@@ -41656,6 +41722,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_access_mask_constants_match_spec),
 	KUNIT_CASE(pkm_kunit_scalar_denied_writebacks),
 	KUNIT_CASE(pkm_kunit_kmes_direct_emit_writes_single_event),
+	KUNIT_CASE(pkm_kunit_kmes_live_overrun_advances_tail_to_survivors),
 	KUNIT_CASE(pkm_kunit_kmes_direct_invalid_type_drops_structurally),
 	KUNIT_CASE(pkm_kunit_kmes_attach_success_returns_cpu_fds),
 	KUNIT_CASE(
