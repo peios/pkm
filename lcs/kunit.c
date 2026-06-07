@@ -25549,9 +25549,14 @@ static void pkm_lcs_kunit_key_fd_backup_admission(struct kunit *test)
 	kacs_rust_token_drop(source_token);
 }
 
+static void pkm_lcs_kunit_expect_source_validation_audit(
+	struct kunit *test, const char *validation_class,
+	const u8 key_guid[RSI_GUID_SIZE]);
+
 static void pkm_lcs_kunit_key_fd_backup_cycle_fails_closed(
 	struct kunit *test)
 {
+	static const u8 child_guid[PKM_LCS_GUID_BYTES] = { 0x53 };
 	struct reg_backup_args args = { };
 	struct pkm_lcs_kunit_backup_snapshot_source_script script = {
 		.begin_status = RSI_OK,
@@ -25562,6 +25567,7 @@ static void pkm_lcs_kunit_key_fd_backup_cycle_fails_closed(
 		.cycle_child_response = true,
 	};
 	struct pkm_lcs_kunit_backup_output_file output = { };
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
 	struct task_struct *task;
 	struct file file = { };
 	const void *token;
@@ -25581,6 +25587,7 @@ static void pkm_lcs_kunit_key_fd_backup_cycle_fails_closed(
 	args.output_fd = output_fd;
 
 	script.file = &file;
+	pkm_kmes_kunit_reset_all();
 	task = pkm_lcs_kunit_kthread_run(
 		pkm_lcs_kunit_backup_snapshot_source_thread, &script,
 		"pkm-lcs-kunit-backup-cycle");
@@ -25588,7 +25595,7 @@ static void pkm_lcs_kunit_key_fd_backup_cycle_fails_closed(
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_kunit_key_fd_backup_for_token(
 				(int)key_fd, token, &args),
-			(long)-EOPNOTSUPP);
+			(long)-EIO);
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
@@ -25596,6 +25603,14 @@ static void pkm_lcs_kunit_key_fd_backup_cycle_fails_closed(
 	KUNIT_EXPECT_EQ(test, script.writes, 8U);
 	KUNIT_EXPECT_TRUE(test, script.saw_abort);
 	KUNIT_EXPECT_EQ(test, output.len, (size_t)0);
+	pkm_lcs_kunit_expect_source_validation_audit(
+		test, "malformed_key_metadata", child_guid);
+	pkm_lcs_kunit_expect_latest_lcs_event(
+		test, "LCS_BACKUP_COMPLETE", "result_errno");
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_FALSE(test, source_snapshot.closing);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.read_only_transaction_count, 0U);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)output_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
@@ -57095,8 +57110,10 @@ static void pkm_lcs_kunit_expect_source_validation_audit(
 	u16 type_len;
 
 	KUNIT_ASSERT_EQ(test,
-			pkm_kmes_kunit_copy_single_buffer(
-				buffer, sizeof(buffer), &written, &kmes_snapshot),
+			pkm_kmes_kunit_copy_latest_matching_event(
+				KMES_ORIGIN_LCS, event_type,
+				sizeof(event_type) - 1, buffer, sizeof(buffer),
+				&written, &kmes_snapshot),
 			0);
 	type_len = get_unaligned_le16(buffer + KMES_EVENT_TYPE_LEN_OFFSET);
 	header_size = get_unaligned_le32(buffer + KMES_EVENT_HEADER_SIZE_OFFSET);

@@ -8670,6 +8670,31 @@ static bool pkm_lcs_backup_visible_entry_seen_before(
 	return false;
 }
 
+static void pkm_lcs_key_fd_emit_backup_topology_validation_failure(
+	const struct pkm_lcs_key_fd *key_fd,
+	const u8 parent_guid[PKM_LCS_GUID_BYTES], u64 request_id)
+{
+	const char *hive_name = NULL;
+	u32 hive_name_len = 0;
+	bool hive_name_present = false;
+
+	if (!key_fd || !parent_guid)
+		return;
+
+	if (key_fd->resolved_path && key_fd->path_component_count &&
+	    key_fd->resolved_path[0]) {
+		hive_name = key_fd->resolved_path[0];
+		hive_name_len = strlen(hive_name);
+		hive_name_present = hive_name_len != 0;
+	}
+
+	(void)pkm_lcs_emit_source_validation_failure_audit(
+		key_fd->source_id, hive_name, hive_name_len,
+		hive_name_present, request_id, true, RSI_ENUM_CHILDREN, true,
+		parent_guid, true,
+		PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_METADATA);
+}
+
 static long pkm_lcs_backup_stage_descendants(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_runtime_limits *limits,
 	u64 transaction_id, u64 next_sequence,
@@ -8707,7 +8732,9 @@ static long pkm_lcs_backup_stage_descendants(
 					      root_guid) ||
 		    pkm_lcs_backup_child_sections_contains(
 			    sections, entries[i].child_guid)) {
-			ret = -EOPNOTSUPP;
+			pkm_lcs_key_fd_emit_backup_topology_validation_failure(
+				key_fd, parent_guid, parent_enum_request_id);
+			ret = -EIO;
 			goto out_free_entries;
 		}
 
