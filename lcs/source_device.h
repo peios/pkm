@@ -54,7 +54,13 @@ struct pkm_lcs_runtime_limits {
 enum pkm_lcs_source_late_effect_kind {
 	PKM_LCS_SOURCE_LATE_EFFECT_NONE = 0,
 	PKM_LCS_SOURCE_LATE_EFFECT_RESTORE_COMMIT = 1,
+	PKM_LCS_SOURCE_LATE_EFFECT_KEY_MUTATION = 2,
 };
+
+#define PKM_LCS_SOURCE_LATE_EFFECT_RECORD_GENERATION (1U << 0)
+#define PKM_LCS_SOURCE_LATE_EFFECT_DISPATCH_WATCH (1U << 1)
+#define PKM_LCS_SOURCE_LATE_EFFECT_DISPATCH_OVERFLOW (1U << 2)
+#define PKM_LCS_SOURCE_LATE_EFFECT_LAYER_RECOVERY (1U << 3)
 
 struct pkm_lcs_source_restore_commit_late_effect_input {
 	const u8 *key_guid;
@@ -63,12 +69,27 @@ struct pkm_lcs_source_restore_commit_late_effect_input {
 	u32 path_component_count;
 };
 
+struct pkm_lcs_source_key_mutation_late_effect_input {
+	const u8 *key_guid;
+	const u8 (*ancestor_guids)[RSI_GUID_SIZE];
+	const char * const *resolved_path;
+	const char *name;
+	u32 path_component_count;
+	u32 name_len;
+	u32 event_type;
+	u32 flags;
+};
+
 struct pkm_lcs_source_late_effect {
 	u32 kind;
 	u32 path_component_count;
+	u32 name_len;
+	u32 event_type;
+	u32 flags;
 	u8 key_guid[RSI_GUID_SIZE];
 	u8 (*ancestor_guids)[RSI_GUID_SIZE];
 	char **resolved_path;
+	char *name;
 };
 
 struct pkm_lcs_source_in_flight_request {
@@ -1439,6 +1460,13 @@ long pkm_lcs_source_write_key_round_trip_timeout_with_limits(
 	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_write_key_round_trip_timeout_late_effect_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const u8 *sd, size_t sd_len, u64 last_write_time,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	const struct pkm_lcs_source_key_mutation_late_effect_input *late_effect,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_set_value_round_trip_timeout(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const char *value_name, u32 value_name_len,
@@ -1452,6 +1480,15 @@ long pkm_lcs_source_set_value_round_trip_timeout_with_limits(
 	const char *layer_name, u32 layer_name_len, u32 value_type,
 	const u8 *data, size_t data_len, u64 sequence, u64 expected_sequence,
 	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue);
+long pkm_lcs_source_set_value_round_trip_timeout_late_effect_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *value_name, u32 value_name_len,
+	const char *layer_name, u32 layer_name_len, u32 value_type,
+	const u8 *data, size_t data_len, u64 sequence, u64 expected_sequence,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	const struct pkm_lcs_source_key_mutation_late_effect_input *late_effect,
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue);
 long pkm_lcs_source_delete_value_entry_round_trip_timeout(

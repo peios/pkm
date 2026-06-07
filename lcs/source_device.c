@@ -2100,6 +2100,9 @@ static void pkm_lcs_source_late_effect_move(
 static long pkm_lcs_source_late_effect_copy_restore(
 	struct pkm_lcs_source_late_effect *dst,
 	const struct pkm_lcs_source_restore_commit_late_effect_input *input);
+static long pkm_lcs_source_late_effect_copy_key_mutation(
+	struct pkm_lcs_source_late_effect *dst,
+	const struct pkm_lcs_source_key_mutation_late_effect_input *input);
 
 static void pkm_lcs_source_in_flight_destroy_locked(
 	struct pkm_lcs_source_fd *source_fd)
@@ -2148,6 +2151,7 @@ static void pkm_lcs_source_late_effect_destroy(
 			kfree(effect->resolved_path[i]);
 		kfree(effect->resolved_path);
 	}
+	kfree(effect->name);
 	kfree(effect->ancestor_guids);
 	memset(effect, 0, sizeof(*effect));
 }
@@ -2206,6 +2210,71 @@ static long pkm_lcs_source_late_effect_copy_restore(
 
 	dst->kind = PKM_LCS_SOURCE_LATE_EFFECT_RESTORE_COMMIT;
 	dst->path_component_count = input->path_component_count;
+	memcpy(dst->key_guid, input->key_guid, sizeof(dst->key_guid));
+	return 0;
+}
+
+static long pkm_lcs_source_late_effect_copy_key_mutation(
+	struct pkm_lcs_source_late_effect *dst,
+	const struct pkm_lcs_source_key_mutation_late_effect_input *input)
+{
+	size_t guid_bytes;
+	u32 i;
+
+	if (!dst || !input || !input->key_guid || !input->ancestor_guids ||
+	    !input->resolved_path || !input->path_component_count)
+		return -EINVAL;
+	if (input->name_len && !input->name)
+		return -EINVAL;
+	if (input->path_component_count > PKM_LCS_MAX_KEY_DEPTH_HARD ||
+	    input->name_len > PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD)
+		return -EINVAL;
+	if (!(input->flags &
+	      (PKM_LCS_SOURCE_LATE_EFFECT_RECORD_GENERATION |
+	       PKM_LCS_SOURCE_LATE_EFFECT_DISPATCH_WATCH |
+	       PKM_LCS_SOURCE_LATE_EFFECT_DISPATCH_OVERFLOW |
+	       PKM_LCS_SOURCE_LATE_EFFECT_LAYER_RECOVERY)))
+		return -EINVAL;
+	if (check_mul_overflow((size_t)input->path_component_count,
+			       sizeof(*dst->ancestor_guids), &guid_bytes))
+		return -EOVERFLOW;
+
+	dst->resolved_path = kcalloc(input->path_component_count,
+				     sizeof(*dst->resolved_path), GFP_KERNEL);
+	if (!dst->resolved_path)
+		return -ENOMEM;
+	dst->ancestor_guids = kmemdup(input->ancestor_guids, guid_bytes,
+				      GFP_KERNEL);
+	if (!dst->ancestor_guids) {
+		pkm_lcs_source_late_effect_destroy(dst);
+		return -ENOMEM;
+	}
+	if (input->name_len) {
+		dst->name = kmemdup(input->name, input->name_len, GFP_KERNEL);
+		if (!dst->name) {
+			pkm_lcs_source_late_effect_destroy(dst);
+			return -ENOMEM;
+		}
+	}
+
+	for (i = 0; i < input->path_component_count; i++) {
+		if (!input->resolved_path[i]) {
+			pkm_lcs_source_late_effect_destroy(dst);
+			return -EINVAL;
+		}
+		dst->resolved_path[i] = kstrdup(input->resolved_path[i],
+						GFP_KERNEL);
+		if (!dst->resolved_path[i]) {
+			pkm_lcs_source_late_effect_destroy(dst);
+			return -ENOMEM;
+		}
+	}
+
+	dst->kind = PKM_LCS_SOURCE_LATE_EFFECT_KEY_MUTATION;
+	dst->path_component_count = input->path_component_count;
+	dst->name_len = input->name_len;
+	dst->event_type = input->event_type;
+	dst->flags = input->flags;
 	memcpy(dst->key_guid, input->key_guid, sizeof(dst->key_guid));
 	return 0;
 }
@@ -2395,6 +2464,30 @@ pkm_lcs_source_in_flight_find_locked(struct pkm_lcs_source_fd *source_fd,
 	}
 
 	return NULL;
+}
+
+static long pkm_lcs_source_in_flight_set_key_late_effect_locked(
+	struct pkm_lcs_source_fd *source_fd, u64 request_id,
+	const struct pkm_lcs_source_key_mutation_late_effect_input *late_effect)
+{
+	struct pkm_lcs_source_in_flight_request *record;
+	long ret;
+
+	lockdep_assert_held(&source_fd->queue_lock);
+
+	if (!late_effect)
+		return 0;
+	record = pkm_lcs_source_in_flight_find_locked(source_fd, request_id);
+	if (!record)
+		return -EIO;
+	if (record->late_effect.kind != PKM_LCS_SOURCE_LATE_EFFECT_NONE)
+		return -EINVAL;
+
+	ret = pkm_lcs_source_late_effect_copy_key_mutation(
+		&record->late_effect, late_effect);
+	if (ret)
+		pkm_lcs_source_late_effect_destroy(&record->late_effect);
+	return ret;
 }
 
 static long pkm_lcs_source_in_flight_set_delivered_locked(
@@ -3968,6 +4061,7 @@ static long pkm_lcs_source_dispatch_set_value_request_with_waiter(
 	const char *layer_name, u32 layer_name_len, u32 value_type,
 	const u8 *data, size_t data_len, u64 sequence, u64 expected_sequence,
 	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_source_key_mutation_late_effect_input *late_effect,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
@@ -4060,6 +4154,18 @@ static long pkm_lcs_source_dispatch_set_value_request_with_waiter(
 		guid, limits, NULL, waiter);
 	if (ret)
 		goto out_unlock_queue;
+	ret = pkm_lcs_source_in_flight_set_key_late_effect_locked(
+		source_fd, built.request_id, late_effect);
+	if (ret) {
+		struct pkm_lcs_source_in_flight_request *record;
+
+		record = pkm_lcs_source_in_flight_find_locked(
+			source_fd, built.request_id);
+		if (record)
+			pkm_lcs_source_in_flight_release_locked(source_fd,
+								record);
+		goto out_unlock_queue;
+	}
 
 	request->len = built.len;
 	request->request_id = built.request_id;
@@ -4743,6 +4849,7 @@ static long pkm_lcs_source_dispatch_write_key_request_with_waiter(
 	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
 	const u8 *sd, size_t sd_len, u64 last_write_time,
 	const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_source_key_mutation_late_effect_input *late_effect,
 	struct pkm_lcs_source_response_waiter *waiter,
 	struct pkm_lcs_source_enqueue_result *result)
 {
@@ -4825,6 +4932,18 @@ static long pkm_lcs_source_dispatch_write_key_request_with_waiter(
 		guid, limits, NULL, waiter);
 	if (ret)
 		goto out_unlock_queue;
+	ret = pkm_lcs_source_in_flight_set_key_late_effect_locked(
+		source_fd, built.request_id, late_effect);
+	if (ret) {
+		struct pkm_lcs_source_in_flight_request *record;
+
+		record = pkm_lcs_source_in_flight_find_locked(
+			source_fd, built.request_id);
+		if (record)
+			pkm_lcs_source_in_flight_release_locked(source_fd,
+								record);
+		goto out_unlock_queue;
+	}
 
 	request->len = built.len;
 	request->request_id = built.request_id;
@@ -5601,7 +5720,7 @@ long pkm_lcs_source_dispatch_write_key_request(
 {
 	return pkm_lcs_source_dispatch_write_key_request_with_waiter(
 		source_id, txn_id, guid, sd, sd_len, last_write_time, NULL,
-		NULL, result);
+		NULL, NULL, result);
 }
 
 long pkm_lcs_source_dispatch_write_key_request_with_limits(
@@ -5612,7 +5731,7 @@ long pkm_lcs_source_dispatch_write_key_request_with_limits(
 {
 	return pkm_lcs_source_dispatch_write_key_request_with_waiter(
 		source_id, txn_id, guid, sd, sd_len, last_write_time, limits,
-		NULL, result);
+		NULL, NULL, result);
 }
 
 long pkm_lcs_source_dispatch_write_key_waitable_request(
@@ -5627,7 +5746,7 @@ long pkm_lcs_source_dispatch_write_key_waitable_request(
 	pkm_lcs_source_response_waiter_init(waiter);
 	return pkm_lcs_source_dispatch_write_key_request_with_waiter(
 		source_id, txn_id, guid, sd, sd_len, last_write_time, NULL,
-		waiter, result);
+		NULL, waiter, result);
 }
 
 long pkm_lcs_source_dispatch_set_value_request(
@@ -5640,7 +5759,7 @@ long pkm_lcs_source_dispatch_set_value_request(
 	return pkm_lcs_source_dispatch_set_value_request_with_waiter(
 		source_id, txn_id, guid, value_name, value_name_len,
 		layer_name, layer_name_len, value_type, data, data_len,
-		sequence, expected_sequence, NULL, NULL, result);
+		sequence, expected_sequence, NULL, NULL, NULL, result);
 }
 
 long pkm_lcs_source_dispatch_set_value_waitable_request(
@@ -5658,7 +5777,7 @@ long pkm_lcs_source_dispatch_set_value_waitable_request(
 	return pkm_lcs_source_dispatch_set_value_request_with_waiter(
 		source_id, txn_id, guid, value_name, value_name_len,
 		layer_name, layer_name_len, value_type, data, data_len,
-		sequence, expected_sequence, NULL, waiter, result);
+		sequence, expected_sequence, NULL, NULL, waiter, result);
 }
 
 long pkm_lcs_source_dispatch_delete_value_entry_request(
@@ -6800,6 +6919,19 @@ long pkm_lcs_source_write_key_round_trip_timeout_with_limits(
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
+	return pkm_lcs_source_write_key_round_trip_timeout_late_effect_with_limits(
+		source_id, txn_id, guid, sd, sd_len, last_write_time, limits,
+		timeout_ms, NULL, response, enqueue);
+}
+
+long pkm_lcs_source_write_key_round_trip_timeout_late_effect_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const u8 *sd, size_t sd_len, u64 last_write_time,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	const struct pkm_lcs_source_key_mutation_late_effect_input *late_effect,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
 	struct pkm_lcs_source_response_waiter waiter;
 	unsigned long deadline;
 	long ret;
@@ -6819,7 +6951,7 @@ long pkm_lcs_source_write_key_round_trip_timeout_with_limits(
 
 		ret = pkm_lcs_source_dispatch_write_key_request_with_waiter(
 			source_id, txn_id, guid, sd, sd_len, last_write_time,
-			limits, &waiter, enqueue);
+			limits, late_effect, &waiter, enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -6852,6 +6984,23 @@ long pkm_lcs_source_set_value_round_trip_timeout_with_limits(
 	struct pkm_lcs_source_response_result *response,
 	struct pkm_lcs_source_enqueue_result *enqueue)
 {
+	return pkm_lcs_source_set_value_round_trip_timeout_late_effect_with_limits(
+		source_id, txn_id, guid, value_name, value_name_len,
+		layer_name, layer_name_len, value_type, data, data_len,
+		sequence, expected_sequence, limits, timeout_ms, NULL,
+		response, enqueue);
+}
+
+long pkm_lcs_source_set_value_round_trip_timeout_late_effect_with_limits(
+	u32 source_id, u64 txn_id, const u8 guid[RSI_GUID_SIZE],
+	const char *value_name, u32 value_name_len,
+	const char *layer_name, u32 layer_name_len, u32 value_type,
+	const u8 *data, size_t data_len, u64 sequence, u64 expected_sequence,
+	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms,
+	const struct pkm_lcs_source_key_mutation_late_effect_input *late_effect,
+	struct pkm_lcs_source_response_result *response,
+	struct pkm_lcs_source_enqueue_result *enqueue)
+{
 	struct pkm_lcs_source_response_waiter waiter;
 	unsigned long deadline;
 	long ret;
@@ -6872,7 +7021,8 @@ long pkm_lcs_source_set_value_round_trip_timeout_with_limits(
 		ret = pkm_lcs_source_dispatch_set_value_request_with_waiter(
 			source_id, txn_id, guid, value_name, value_name_len,
 			layer_name, layer_name_len, value_type, data, data_len,
-			sequence, expected_sequence, limits, &waiter, enqueue);
+			sequence, expected_sequence, limits, late_effect, &waiter,
+			enqueue);
 		if (ret != -EAGAIN)
 			break;
 		if (!pkm_lcs_source_deadline_remaining(deadline))
@@ -7439,6 +7589,25 @@ static void pkm_lcs_source_emit_validation_failure_for_result(
 		result->source_validation_failure);
 }
 
+static bool pkm_lcs_source_late_success_requires_mutation_effects(u16 op_code)
+{
+	switch (op_code) {
+	case RSI_CREATE_ENTRY:
+	case RSI_HIDE_ENTRY:
+	case RSI_DELETE_ENTRY:
+	case RSI_CREATE_KEY:
+	case RSI_WRITE_KEY:
+	case RSI_DROP_KEY:
+	case RSI_SET_VALUE:
+	case RSI_DELETE_VALUE_ENTRY:
+	case RSI_SET_BLANKET_TOMBSTONE:
+	case RSI_DELETE_LAYER:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static long pkm_lcs_source_handle_late_response_effects_file(
 	struct file *file, const struct pkm_lcs_source_response_result *result)
 {
@@ -7501,6 +7670,23 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 		}
 		return 0;
 	default:
+		if (result->status != RSI_OK)
+			return 0;
+		if (!pkm_lcs_source_late_success_requires_mutation_effects(
+			    result->request_op_code))
+			return 0;
+		if (result->late_effect.kind !=
+		    PKM_LCS_SOURCE_LATE_EFFECT_KEY_MUTATION) {
+			pkm_lcs_source_device_mark_down_file(file);
+			return -EIO;
+		}
+		ret = pkm_lcs_key_fd_publish_late_mutation_effects(
+			result->source_id, &result->late_effect,
+			&result->limits);
+		if (ret) {
+			pkm_lcs_source_device_mark_down_file(file);
+			return -EIO;
+		}
 		return 0;
 	}
 }

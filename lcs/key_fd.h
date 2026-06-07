@@ -15,6 +15,7 @@
 struct pkm_lcs_usercopy_ops;
 struct pkm_lcs_runtime_limits;
 struct pkm_lcs_rsi_layer_view;
+struct pkm_lcs_source_late_effect;
 
 struct pkm_lcs_key_fd_publish_input {
 	u32 source_id;
@@ -230,6 +231,9 @@ long pkm_lcs_key_fd_dispatch_source_overflow(u32 source_id,
 long pkm_lcs_key_fd_dispatch_source_overflow_with_limits(
 	u32 source_id, const struct pkm_lcs_runtime_limits *limits,
 	u32 *watch_count_out);
+long pkm_lcs_key_fd_publish_late_mutation_effects(
+	u32 source_id, const struct pkm_lcs_source_late_effect *effect,
+	const struct pkm_lcs_runtime_limits *limits);
 long pkm_lcs_key_fd_dispatch_watch_event(
 	const struct pkm_lcs_watch_dispatch_input *input);
 long pkm_lcs_internal_self_watch_arm(

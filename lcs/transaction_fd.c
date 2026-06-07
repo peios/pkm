@@ -2417,6 +2417,181 @@ out_free:
 	return ret;
 }
 
+static long pkm_lcs_transaction_dispatch_invisible_key_overflow(
+	const u8 key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	char **parent_path,
+	u8 (*parent_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	u32 parent_depth, const char *child_name, u32 child_name_len,
+	const struct pkm_lcs_runtime_limits *limits);
+
+static long pkm_lcs_transaction_dispatch_replay_failure_overflow(
+	struct pkm_lcs_transaction_fd *txn,
+	const struct pkm_lcs_runtime_limits *limits,
+	u32 *internal_watch_effects_out)
+{
+	struct pkm_lcs_transaction_log_entry *entry;
+	long ret;
+
+	if (!txn || !limits)
+		return -EINVAL;
+
+	list_for_each_entry(entry, &txn->mutation_log, link) {
+		struct pkm_lcs_watch_dispatch_context context = { };
+
+		context.limits = limits;
+		context.event_type = REG_WATCH_OVERFLOW;
+
+		switch (entry->kind) {
+		case PKM_LCS_TRANSACTION_LOG_KIND_CREATE_KEY:
+			context.changed_key_guid = entry->create_key.parent_guid;
+			context.ancestor_guids =
+				entry->create_key.parent_ancestor_guids;
+			context.resolved_path =
+				(const char * const *)
+					entry->create_key.parent_path;
+			context.path_component_count =
+				entry->create_key.parent_depth;
+			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_SET_SECURITY:
+			context.changed_key_guid = entry->set_security.key_guid;
+			context.ancestor_guids = entry->set_security.ancestor_guids;
+			context.resolved_path =
+				(const char * const *)entry->set_security.path;
+			context.path_component_count = entry->set_security.depth;
+			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_SET_VALUE:
+			context.changed_key_guid = entry->set_value.key_guid;
+			context.ancestor_guids = entry->set_value.ancestor_guids;
+			context.resolved_path =
+				(const char * const *)entry->set_value.path;
+			context.path_component_count = entry->set_value.depth;
+			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_VALUE:
+			context.changed_key_guid = entry->delete_value.key_guid;
+			context.ancestor_guids = entry->delete_value.ancestor_guids;
+			context.resolved_path =
+				(const char * const *)entry->delete_value.path;
+			context.path_component_count = entry->delete_value.depth;
+			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_BLANKET_TOMBSTONE:
+			context.changed_key_guid =
+				entry->blanket_tombstone.key_guid;
+			context.ancestor_guids =
+				entry->blanket_tombstone.ancestor_guids;
+			context.resolved_path =
+				(const char * const *)
+					entry->blanket_tombstone.path;
+			context.path_component_count =
+				entry->blanket_tombstone.depth;
+			break;
+		case PKM_LCS_TRANSACTION_LOG_KIND_DELETE_KEY:
+			ret = pkm_lcs_transaction_dispatch_invisible_key_overflow(
+				entry->delete_key.key_guid,
+				entry->delete_key.parent_guid,
+				entry->delete_key.parent_path,
+				entry->delete_key.parent_ancestor_guids,
+				entry->delete_key.parent_depth,
+				entry->delete_key.child_name,
+				entry->delete_key.child_name_len, limits);
+			if (ret)
+				return ret;
+			continue;
+		case PKM_LCS_TRANSACTION_LOG_KIND_HIDE_KEY:
+			ret = pkm_lcs_transaction_dispatch_invisible_key_overflow(
+				entry->hide_key.key_guid,
+				entry->hide_key.parent_guid,
+				entry->hide_key.parent_path,
+				entry->hide_key.parent_ancestor_guids,
+				entry->hide_key.parent_depth,
+				entry->hide_key.child_name,
+				entry->hide_key.child_name_len, limits);
+			if (ret)
+				return ret;
+			continue;
+		default:
+			return -EIO;
+		}
+
+		ret = pkm_lcs_key_fd_dispatch_overflow_context(&context);
+		if (ret)
+			return ret;
+	}
+
+	if (internal_watch_effects_out)
+		*internal_watch_effects_out = 0;
+	return 0;
+}
+
+static long pkm_lcs_transaction_dispatch_invisible_key_overflow(
+	const u8 key_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	const u8 parent_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	char **parent_path,
+	u8 (*parent_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES],
+	u32 parent_depth, const char *child_name, u32 child_name_len,
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	struct pkm_lcs_watch_dispatch_context context = { };
+	u8 (*child_ancestor_guids)[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES];
+	const char **child_path;
+	u32 child_depth;
+	size_t child_ancestor_bytes;
+	size_t child_path_bytes;
+	long ret;
+
+	if (!key_guid || !parent_guid || !parent_path ||
+	    !parent_ancestor_guids || !parent_depth || !child_name ||
+	    !child_name_len || !limits)
+		return -EINVAL;
+	if (check_add_overflow(parent_depth, 1U, &child_depth))
+		return -EOVERFLOW;
+	if (check_mul_overflow((size_t)child_depth, sizeof(*child_path),
+			       &child_path_bytes) ||
+	    check_mul_overflow((size_t)child_depth,
+			       sizeof(*child_ancestor_guids),
+			       &child_ancestor_bytes))
+		return -EOVERFLOW;
+
+	child_path = kzalloc(child_path_bytes, GFP_KERNEL);
+	if (!child_path)
+		return -ENOMEM;
+	child_ancestor_guids = kzalloc(child_ancestor_bytes, GFP_KERNEL);
+	if (!child_ancestor_guids) {
+		kfree(child_path);
+		return -ENOMEM;
+	}
+
+	memcpy(child_path, parent_path, (size_t)parent_depth * sizeof(*child_path));
+	child_path[parent_depth] = child_name;
+	memcpy(child_ancestor_guids, parent_ancestor_guids,
+	       (size_t)parent_depth * sizeof(*child_ancestor_guids));
+	memcpy(child_ancestor_guids[parent_depth], key_guid,
+	       sizeof(child_ancestor_guids[parent_depth]));
+
+	context.changed_key_guid = parent_guid;
+	context.ancestor_guids =
+		(const u8 (*)[PKM_LCS_GUID_BYTES])parent_ancestor_guids;
+	context.resolved_path = (const char * const *)parent_path;
+	context.path_component_count = parent_depth;
+	context.event_type = REG_WATCH_OVERFLOW;
+	context.limits = limits;
+	ret = pkm_lcs_key_fd_dispatch_overflow_context(&context);
+	if (ret)
+		goto out_free;
+
+	context.changed_key_guid = key_guid;
+	context.ancestor_guids =
+		(const u8 (*)[PKM_LCS_GUID_BYTES])child_ancestor_guids;
+	context.resolved_path = (const char * const *)child_path;
+	context.path_component_count = child_depth;
+	ret = pkm_lcs_key_fd_dispatch_overflow_context(&context);
+
+out_free:
+	kfree(child_ancestor_guids);
+	kfree(child_path);
+	return ret;
+}
+
 static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 	struct pkm_lcs_transaction_fd *txn, u64 transaction_id, u32 source_id,
 	u32 status, bool detached, u32 *final_state_out,
@@ -2430,6 +2605,7 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 	bool stop_timer = false;
 	bool wake = false;
 	bool layer_recovery_required = false;
+	bool replay_failure_overflow_dispatched = false;
 	u32 final_state = 0;
 	u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES] = { };
 	long ret = 0;
@@ -2480,11 +2656,26 @@ static long pkm_lcs_transaction_fd_apply_commit_response_under_bind(
 		ret = pkm_lcs_transaction_log_apply_orphan_effects(
 			txn, source_id, limits);
 		if (ret) {
-			*source_down_required_out = true;
-			return -EIO;
+			ret = pkm_lcs_transaction_dispatch_replay_failure_overflow(
+				txn, limits, internal_watch_effects_out);
+			if (ret) {
+				*source_down_required_out = true;
+				return -EIO;
+			}
+			replay_failure_overflow_dispatched = true;
 		}
-		(void)pkm_lcs_transaction_log_dispatch_watch_batch(
-			txn, source_id, limits, internal_watch_effects_out);
+		if (!replay_failure_overflow_dispatched) {
+			ret = pkm_lcs_transaction_log_dispatch_watch_batch(
+				txn, source_id, limits, internal_watch_effects_out);
+			if (ret) {
+				ret = pkm_lcs_transaction_dispatch_replay_failure_overflow(
+					txn, limits, internal_watch_effects_out);
+				if (ret) {
+					*source_down_required_out = true;
+					return -EIO;
+				}
+			}
+		}
 	}
 
 	spin_lock(&txn->lock);

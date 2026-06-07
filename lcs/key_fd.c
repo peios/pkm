@@ -4365,6 +4365,8 @@ static long pkm_lcs_key_fd_set_security_from_args(
 	struct pkm_lcs_transaction_binding_plan binding = { };
 	struct pkm_lcs_transaction_set_security_log_input log_input = { };
 	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_source_key_mutation_late_effect_input late_effect = { };
+	const struct pkm_lcs_source_key_mutation_late_effect_input *late_effect_ptr = NULL;
 	const u8 *existing_sd = NULL;
 	size_t existing_sd_len = 0;
 	u8 *input_sd = NULL;
@@ -4425,10 +4427,25 @@ static long pkm_lcs_key_fd_set_security_from_args(
 		goto out_cancel_mutation;
 
 	last_write_time = (u64)ktime_get_real_ns();
-	ret = pkm_lcs_source_write_key_round_trip_timeout_with_limits(
+	if (args->txn_fd < 0) {
+		late_effect.key_guid = key_fd->key_guid;
+		late_effect.ancestor_guids =
+			(const u8 (*)[PKM_LCS_GUID_BYTES])
+				key_fd->ancestor_guids;
+		late_effect.resolved_path =
+			(const char * const *)key_fd->resolved_path;
+		late_effect.path_component_count = key_fd->path_component_count;
+		late_effect.event_type = REG_WATCH_SD_CHANGED;
+		late_effect.flags =
+			PKM_LCS_SOURCE_LATE_EFFECT_RECORD_GENERATION |
+			PKM_LCS_SOURCE_LATE_EFFECT_DISPATCH_WATCH |
+			PKM_LCS_SOURCE_LATE_EFFECT_LAYER_RECOVERY;
+		late_effect_ptr = &late_effect;
+	}
+	ret = pkm_lcs_source_write_key_round_trip_timeout_late_effect_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, merge.merged_sd,
 		merge.merged_sd_len, last_write_time, &limits,
-		limits.request_timeout_ms, NULL, NULL);
+		limits.request_timeout_ms, late_effect_ptr, NULL, NULL);
 	if (ret)
 		goto out_cancel_merge;
 
@@ -4479,6 +4496,8 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	struct pkm_lcs_transaction_binding_plan binding_probe = { };
 	struct pkm_lcs_transaction_binding_plan binding = { };
 	struct pkm_lcs_transaction_set_value_log_input log_input = { };
+	struct pkm_lcs_source_key_mutation_late_effect_input late_effect = { };
+	const struct pkm_lcs_source_key_mutation_late_effect_input *late_effect_ptr = NULL;
 	u64 generation = 0;
 	u64 last_write_time;
 	u64 sequence = 0;
@@ -4567,12 +4586,30 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 		txn_id = binding.transaction_id;
 	}
 
-	ret = pkm_lcs_source_set_value_round_trip_timeout_with_limits(
+	if (args->txn_fd < 0) {
+		late_effect.key_guid = key_fd->key_guid;
+		late_effect.ancestor_guids =
+			(const u8 (*)[PKM_LCS_GUID_BYTES])
+				key_fd->ancestor_guids;
+		late_effect.resolved_path =
+			(const char * const *)key_fd->resolved_path;
+		late_effect.name = input.value_name;
+		late_effect.path_component_count = key_fd->path_component_count;
+		late_effect.name_len = args->name_len;
+		late_effect.event_type = REG_WATCH_VALUE_SET;
+		late_effect.flags =
+			PKM_LCS_SOURCE_LATE_EFFECT_RECORD_GENERATION |
+			PKM_LCS_SOURCE_LATE_EFFECT_DISPATCH_WATCH |
+			PKM_LCS_SOURCE_LATE_EFFECT_LAYER_RECOVERY;
+		late_effect_ptr = &late_effect;
+	}
+	ret = pkm_lcs_source_set_value_round_trip_timeout_late_effect_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, input.value_name,
 		args->name_len, input.target.name, input.target.name_len,
 		args->type, input.data, args->data_len, sequence,
 		args->expected_seq, &input.limits,
-		input.limits.request_timeout_ms, &response, NULL);
+		input.limits.request_timeout_ms, late_effect_ptr, &response,
+		NULL);
 	if (ret)
 		goto out_cancel_mutation;
 
@@ -5524,6 +5561,58 @@ long pkm_lcs_key_fd_publish_restore_commit_effects(
 	context.event_type = REG_WATCH_OVERFLOW;
 	(void)pkm_lcs_key_fd_dispatch_overflow_context(&context);
 	return 0;
+}
+
+long pkm_lcs_key_fd_publish_late_mutation_effects(
+	u32 source_id, const struct pkm_lcs_source_late_effect *effect,
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	struct pkm_lcs_watch_dispatch_context context = { };
+	u64 generation = 0;
+	long ret;
+
+	if (!source_id || !effect || !limits ||
+	    effect->kind != PKM_LCS_SOURCE_LATE_EFFECT_KEY_MUTATION ||
+	    !effect->ancestor_guids || !effect->resolved_path ||
+	    !effect->path_component_count)
+		return -EINVAL;
+
+	if (effect->flags & PKM_LCS_SOURCE_LATE_EFFECT_RECORD_GENERATION) {
+		ret = pkm_lcs_source_record_transaction_generation(
+			source_id, effect->ancestor_guids[0], &generation);
+		if (ret)
+			return -EIO;
+	}
+
+	if (effect->flags & PKM_LCS_SOURCE_LATE_EFFECT_LAYER_RECOVERY) {
+		struct pkm_lcs_layer_operation_recovery_result recovery = { };
+
+		ret = pkm_lcs_source_layer_operation_recover_skip_generation_with_limits(
+			source_id, effect->ancestor_guids[0], limits,
+			&recovery);
+		if (ret)
+			return -EIO;
+	}
+
+	if (!(effect->flags &
+	      (PKM_LCS_SOURCE_LATE_EFFECT_DISPATCH_WATCH |
+	       PKM_LCS_SOURCE_LATE_EFFECT_DISPATCH_OVERFLOW)))
+		return 0;
+
+	context.changed_key_guid = effect->key_guid;
+	context.ancestor_guids =
+		(const u8 (*)[PKM_LCS_GUID_BYTES])effect->ancestor_guids;
+	context.resolved_path =
+		(const char * const *)effect->resolved_path;
+	context.limits = limits;
+	context.path_component_count = effect->path_component_count;
+	context.event_type = effect->event_type;
+	context.name = (const u8 *)effect->name;
+	context.name_len = effect->name_len;
+
+	if (effect->flags & PKM_LCS_SOURCE_LATE_EFFECT_DISPATCH_OVERFLOW)
+		return pkm_lcs_key_fd_dispatch_overflow_context(&context);
+	return pkm_lcs_key_fd_dispatch_watch_event_context(&context);
 }
 
 static long pkm_lcs_key_fd_restore_publish_commit_effects(
