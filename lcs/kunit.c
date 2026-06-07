@@ -28449,6 +28449,76 @@ static void pkm_lcs_kunit_key_fd_restore_generation_overflow_downs_source(
 	kacs_rust_token_drop(source_token);
 }
 
+static void pkm_lcs_kunit_key_fd_restore_overflow_reaches_descendant_watch(
+	struct kunit *test)
+{
+	static const char * const restore_path[] = { "Machine", "Software" };
+	static const char * const descendant_path[] = {
+		"Machine", "Software", "Child"
+	};
+	static const u8 restore_ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x52 },
+	};
+	static const u8 descendant_ancestors[3][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x52 },
+		{ 0x53 },
+	};
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_SD,
+	};
+	struct pkm_lcs_runtime_limits limits = { };
+	struct file file = { };
+	const void *token;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
+	u8 event[8] = { };
+	long descendant_fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	descendant_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, descendant_path, descendant_ancestors,
+		ARRAY_SIZE(descendant_ancestors));
+	KUNIT_ASSERT_TRUE(test, descendant_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)descendant_fd,
+						    &notify),
+			0L);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, restore_ancestors[0], &generation_before),
+			0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_key_fd_publish_restore_commit_effects(
+				1, restore_ancestors[1], restore_ancestors,
+				restore_path, ARRAY_SIZE(restore_ancestors),
+				&limits),
+			0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, restore_ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)descendant_fd, event,
+						  sizeof(event), true),
+			(ssize_t)sizeof(event));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(event), 8U);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_OVERFLOW);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 6), 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)descendant_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_key_fd_restore_commit_failure_no_effects(
 	struct kunit *test)
 {
@@ -60865,6 +60935,8 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 		pkm_lcs_kunit_key_fd_restore_non_root_guid_collision_aborts),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_restore_generation_overflow_downs_source),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_restore_overflow_reaches_descendant_watch),
 	KUNIT_CASE(
 		pkm_lcs_kunit_key_fd_restore_commit_failure_no_effects),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_readwrite_unsupported),

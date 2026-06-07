@@ -5538,8 +5538,8 @@ long pkm_lcs_key_fd_publish_restore_commit_effects(
 	const char * const *resolved_path, u32 path_component_count,
 	const struct pkm_lcs_runtime_limits *limits)
 {
-	struct pkm_lcs_watch_dispatch_context context = { };
 	u64 generation = 0;
+	u32 watch_count = 0;
 	long ret;
 
 	if (!source_id || !key_guid || !ancestor_guids || !resolved_path ||
@@ -5553,13 +5553,12 @@ long pkm_lcs_key_fd_publish_restore_commit_effects(
 		return -EIO;
 	}
 
-	context.changed_key_guid = key_guid;
-	context.ancestor_guids = ancestor_guids;
-	context.resolved_path = resolved_path;
-	context.limits = limits;
-	context.path_component_count = path_component_count;
-	context.event_type = REG_WATCH_OVERFLOW;
-	(void)pkm_lcs_key_fd_dispatch_overflow_context(&context);
+	ret = pkm_lcs_key_fd_dispatch_source_overflow_with_limits(
+		source_id, limits, &watch_count);
+	if (ret) {
+		pkm_lcs_source_mark_down_by_id(source_id);
+		return -EIO;
+	}
 	return 0;
 }
 
