@@ -23864,8 +23864,11 @@ struct pkm_lcs_kunit_restore_data_record {
 	const u8 *parent_guid;
 	const u8 *child_guid;
 	const u8 *key_guid;
+	const u8 *value_data;
 	const char *child_name;
 	const char *value_name;
+	size_t value_data_len;
+	u32 value_type;
 	bool before_key;
 	bool hidden;
 };
@@ -23885,10 +23888,18 @@ static int pkm_lcs_kunit_restore_stream_append_data_record(
 	const u8 *effective_key_guid = record->key_guid ?
 					       record->key_guid :
 					       pkm_lcs_kunit_restore_header_root_guid;
+	const u8 *effective_value_data = record->value_data ?
+						 record->value_data :
+						 value_data;
 	const char *child_name = record->child_name ? record->child_name :
 						       "Child";
 	const char *value_name = record->value_name ? record->value_name :
 						       "Answer";
+	size_t effective_value_data_len = record->value_data ?
+						  record->value_data_len :
+						  sizeof(value_data);
+	u32 effective_value_type = record->value_type ? record->value_type :
+							REG_BINARY;
 	u8 *frame = NULL;
 	size_t frame_len = 0;
 	long ret;
@@ -23908,7 +23919,8 @@ static int pkm_lcs_kunit_restore_stream_append_data_record(
 	case REG_BACKUP_VALUE:
 		ret = pkm_lcs_kunit_backup_value_frame(
 			effective_key_guid, value_name, strlen(value_name),
-			REG_BINARY, value_data, sizeof(value_data),
+			effective_value_type, effective_value_data,
+			effective_value_data_len,
 			record->layer_name,
 			strlen(record->layer_name), sequence, &frame,
 			&frame_len);
@@ -29437,6 +29449,566 @@ static void pkm_lcs_kunit_key_fd_restore_layer_tcb_marks_used(
 			KACS_SE_RESTORE_PRIVILEGE);
 	KUNIT_EXPECT_EQ(test, after.privileges_used & KACS_SE_TCB_PRIVILEGE,
 			KACS_SE_TCB_PRIVILEGE);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(source_token);
+}
+
+static long pkm_lcs_kunit_restore_precedence_publish_layers_root(
+	struct kunit *test, const char * const *path,
+	u8 ancestors[4][PKM_LCS_GUID_BYTES])
+{
+	if (!test || !path || !ancestors)
+		return -EINVAL;
+	memset(ancestors, 0, sizeof(u8[4][PKM_LCS_GUID_BYTES]));
+	ancestors[0][0] = 1;
+	ancestors[1][0] = 0x64;
+	ancestors[2][0] = 0x65;
+	memcpy(ancestors[3], pkm_lcs_kunit_restore_target_guid,
+	       PKM_LCS_GUID_BYTES);
+	return pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_CREATE_SUB_KEY | KEY_QUERY_VALUE, path, ancestors, 4);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_metadata_precedence_requires_tcb(
+	struct kunit *test)
+{
+	static const char * const path[] = {
+		"Machine", "System", "Registry", "Layers"
+	};
+	static const u8 policy_guid[PKM_LCS_GUID_BYTES] = { 0x91 };
+	static const u8 one_data[] = { 1, 0, 0, 0 };
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record anchor = {
+		.record_type = REG_BACKUP_PATH_ENTRY,
+		.layer_name = "base",
+		.child_guid = policy_guid,
+		.child_name = "Policy",
+	};
+	static const struct pkm_lcs_kunit_restore_data_record value = {
+		.record_type = REG_BACKUP_VALUE,
+		.layer_name = "base",
+		.key_guid = policy_guid,
+		.value_name = "Precedence",
+		.value_data = one_data,
+		.value_data_len = sizeof(one_data),
+		.value_type = REG_DWORD,
+	};
+	struct reg_restore_args args = { };
+	struct pkm_lcs_kunit_restore_txn_source_script script = {
+		.begin_status = RSI_OK,
+		.abort_status = RSI_OK,
+		.expect_read_key = true,
+		.read_key = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.name = "Layers",
+		},
+		.expect_root_content_probe = true,
+		.enum_children = {
+			.expected_parent_guid =
+				pkm_lcs_kunit_restore_target_guid,
+			.empty = true,
+		},
+		.query_values = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.expected_value_name = "",
+			.query_all = true,
+			.empty = true,
+		},
+		.expect_root_write_key = true,
+		.expect_replay_non_root_key = true,
+		.expect_replay_non_root_path = true,
+		.replay_non_root_create = {
+			.parent_guid = pkm_lcs_kunit_restore_target_guid,
+			.child_guid = policy_guid,
+			.child_name = "Policy",
+			.layer_name = "base",
+			.sd = pkm_lcs_kunit_owner_only_sd,
+			.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+			.expected_sequence = 101,
+			.entry_status = RSI_OK,
+			.key_status = RSI_OK,
+		},
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const void *source_token;
+	u8 ancestors[4][PKM_LCS_GUID_BYTES];
+	long key_fd;
+	int input_fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	pkm_lcs_kunit_set_sequence_state(true, 100);
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_RESTORE_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_restore_precedence_publish_layers_root(
+		test, path, ancestors);
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_restore_stream_append_header(&input),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_layer_record(
+				&input, &layer),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, pkm_lcs_kunit_restore_header_root_guid,
+				false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, policy_guid, false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_data_record(
+				&input, &anchor, 1),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_data_record(
+				&input, &value, 2),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_trailer(&input, 7),
+			0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(&input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+	args.input_fd = input_fd;
+
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_restore_txn_source_thread, &script,
+		"pkm-lcs-kunit-restore-precedence-deny");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, token, &args),
+			(long)-EPERM);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_TRUE(test, script.saw_abort);
+	KUNIT_EXPECT_FALSE(test, script.saw_commit);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_metadata_precedence_tcb_allows(
+	struct kunit *test)
+{
+	static const char * const path[] = {
+		"Machine", "System", "Registry", "Layers"
+	};
+	static const u8 policy_guid[PKM_LCS_GUID_BYTES] = { 0x92 };
+	static const u8 one_data[] = { 1, 0, 0, 0 };
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record anchor = {
+		.record_type = REG_BACKUP_PATH_ENTRY,
+		.layer_name = "base",
+		.child_guid = policy_guid,
+		.child_name = "Policy",
+	};
+	static const struct pkm_lcs_kunit_restore_data_record value = {
+		.record_type = REG_BACKUP_VALUE,
+		.layer_name = "base",
+		.key_guid = policy_guid,
+		.value_name = "Precedence",
+		.value_data = one_data,
+		.value_data_len = sizeof(one_data),
+		.value_type = REG_DWORD,
+	};
+	struct reg_restore_args args = { };
+	struct pkm_lcs_kunit_restore_txn_source_script script = {
+		.begin_status = RSI_OK,
+		.abort_status = RSI_OK,
+		.expect_commit = true,
+		.expect_read_key = true,
+		.read_key = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.name = "Layers",
+		},
+		.expect_root_content_probe = true,
+		.enum_children = {
+			.expected_parent_guid =
+				pkm_lcs_kunit_restore_target_guid,
+			.empty = true,
+		},
+		.query_values = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.expected_value_name = "",
+			.query_all = true,
+			.empty = true,
+		},
+		.expect_root_write_key = true,
+		.expect_replay_non_root_key = true,
+		.expect_replay_non_root_path = true,
+		.replay_non_root_create = {
+			.parent_guid = pkm_lcs_kunit_restore_target_guid,
+			.child_guid = policy_guid,
+			.child_name = "Policy",
+			.layer_name = "base",
+			.sd = pkm_lcs_kunit_owner_only_sd,
+			.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+			.expected_sequence = 101,
+			.entry_status = RSI_OK,
+			.key_status = RSI_OK,
+		},
+		.expect_replay_non_root_value = true,
+		.replay_non_root_value = {
+			.expected_guid = policy_guid,
+			.expected_value_name = "Precedence",
+			.expected_layer_name = "base",
+			.expected_data = one_data,
+			.expected_data_len = sizeof(one_data),
+			.expected_value_type = REG_DWORD,
+			.expected_sequence = 102,
+			.expected_expected_sequence = 0,
+			.status = RSI_OK,
+		},
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const void *source_token;
+	u8 ancestors[4][PKM_LCS_GUID_BYTES];
+	long key_fd;
+	int input_fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	pkm_lcs_kunit_set_sequence_state(true, 100);
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE,
+		KACS_SE_RESTORE_PRIVILEGE | KACS_SE_TCB_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_restore_precedence_publish_layers_root(
+		test, path, ancestors);
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_restore_stream_append_header(&input),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_layer_record(
+				&input, &layer),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, pkm_lcs_kunit_restore_header_root_guid,
+				false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, policy_guid, false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_data_record(
+				&input, &anchor, 1),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_data_record(
+				&input, &value, 2),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_trailer(&input, 7),
+			0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(&input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+	args.input_fd = input_fd;
+
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_restore_txn_source_thread, &script,
+		"pkm-lcs-kunit-restore-precedence-allow");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, token, &args),
+			0L);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_TRUE(test, script.saw_commit);
+	KUNIT_EXPECT_FALSE(test, script.saw_abort);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_metadata_precedence_zero_allows(
+	struct kunit *test)
+{
+	static const char * const path[] = {
+		"Machine", "System", "Registry", "Layers"
+	};
+	static const u8 policy_guid[PKM_LCS_GUID_BYTES] = { 0x93 };
+	static const u8 zero_data[] = { 0, 0, 0, 0 };
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record anchor = {
+		.record_type = REG_BACKUP_PATH_ENTRY,
+		.layer_name = "base",
+		.child_guid = policy_guid,
+		.child_name = "Policy",
+	};
+	static const struct pkm_lcs_kunit_restore_data_record value = {
+		.record_type = REG_BACKUP_VALUE,
+		.layer_name = "base",
+		.key_guid = policy_guid,
+		.value_name = "Precedence",
+		.value_data = zero_data,
+		.value_data_len = sizeof(zero_data),
+		.value_type = REG_DWORD,
+	};
+	struct reg_restore_args args = { };
+	struct pkm_lcs_kunit_restore_txn_source_script script = {
+		.begin_status = RSI_OK,
+		.abort_status = RSI_OK,
+		.expect_commit = true,
+		.expect_read_key = true,
+		.read_key = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.name = "Layers",
+		},
+		.expect_root_content_probe = true,
+		.enum_children = {
+			.expected_parent_guid =
+				pkm_lcs_kunit_restore_target_guid,
+			.empty = true,
+		},
+		.query_values = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.expected_value_name = "",
+			.query_all = true,
+			.empty = true,
+		},
+		.expect_root_write_key = true,
+		.expect_replay_non_root_key = true,
+		.expect_replay_non_root_path = true,
+		.replay_non_root_create = {
+			.parent_guid = pkm_lcs_kunit_restore_target_guid,
+			.child_guid = policy_guid,
+			.child_name = "Policy",
+			.layer_name = "base",
+			.sd = pkm_lcs_kunit_owner_only_sd,
+			.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+			.expected_sequence = 101,
+			.entry_status = RSI_OK,
+			.key_status = RSI_OK,
+		},
+		.expect_replay_non_root_value = true,
+		.replay_non_root_value = {
+			.expected_guid = policy_guid,
+			.expected_value_name = "Precedence",
+			.expected_layer_name = "base",
+			.expected_data = zero_data,
+			.expected_data_len = sizeof(zero_data),
+			.expected_value_type = REG_DWORD,
+			.expected_sequence = 102,
+			.expected_expected_sequence = 0,
+			.status = RSI_OK,
+		},
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const void *source_token;
+	u8 ancestors[4][PKM_LCS_GUID_BYTES];
+	long key_fd;
+	int input_fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	pkm_lcs_kunit_set_sequence_state(true, 100);
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_RESTORE_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_restore_precedence_publish_layers_root(
+		test, path, ancestors);
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_restore_stream_append_header(&input),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_layer_record(
+				&input, &layer),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, pkm_lcs_kunit_restore_header_root_guid,
+				false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_key_record(
+				&input, policy_guid, false, false),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_data_record(
+				&input, &anchor, 1),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_data_record(
+				&input, &value, 2),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_append_trailer(&input, 7),
+			0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(&input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+	args.input_fd = input_fd;
+
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_restore_txn_source_thread, &script,
+		"pkm-lcs-kunit-restore-precedence-zero");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, token, &args),
+			0L);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_TRUE(test, script.saw_commit);
+	KUNIT_EXPECT_FALSE(test, script.saw_abort);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(source_token);
+}
+
+static void pkm_lcs_kunit_key_fd_restore_precedence_non_metadata_allows(
+	struct kunit *test)
+{
+	static const u8 one_data[] = { 1, 0, 0, 0 };
+	static const struct pkm_lcs_kunit_restore_layer_record layer = {
+		.name = "base",
+		.precedence = 0,
+		.enabled = 1,
+		.owner_sid = pkm_lcs_kunit_everyone_sid,
+		.owner_sid_len = sizeof(pkm_lcs_kunit_everyone_sid),
+	};
+	static const struct pkm_lcs_kunit_restore_data_record value = {
+		.record_type = REG_BACKUP_VALUE,
+		.layer_name = "base",
+		.value_name = "Precedence",
+		.value_data = one_data,
+		.value_data_len = sizeof(one_data),
+		.value_type = REG_DWORD,
+	};
+	struct reg_restore_args args = { };
+	struct pkm_lcs_kunit_restore_txn_source_script script = {
+		.begin_status = RSI_OK,
+		.abort_status = RSI_OK,
+		.expect_commit = true,
+		.expect_read_key = true,
+		.read_key = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.name = "Software",
+		},
+		.expect_root_content_probe = true,
+		.enum_children = {
+			.expected_parent_guid =
+				pkm_lcs_kunit_restore_target_guid,
+			.empty = true,
+		},
+		.query_values = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.expected_value_name = "",
+			.query_all = true,
+			.empty = true,
+		},
+		.expect_root_write_key = true,
+		.expect_replay_root_value = true,
+		.replay_root_value = {
+			.expected_guid = pkm_lcs_kunit_restore_target_guid,
+			.expected_value_name = "Precedence",
+			.expected_layer_name = "base",
+			.expected_data = one_data,
+			.expected_data_len = sizeof(one_data),
+			.expected_value_type = REG_DWORD,
+			.expected_sequence = 101,
+			.expected_expected_sequence = 0,
+			.status = RSI_OK,
+		},
+	};
+	struct pkm_lcs_kunit_restore_input_file input = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const void *source_token;
+	long key_fd;
+	int input_fd;
+	int thread_ret;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	pkm_lcs_kunit_set_sequence_state(true, 100);
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_RESTORE_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_restore_stream_build_with_data_records(
+				&input, &layer, 1, &value, 1),
+			0);
+	input_fd = pkm_lcs_kunit_restore_input_fd(&input);
+	KUNIT_ASSERT_TRUE(test, input_fd >= 0);
+	args.input_fd = input_fd;
+
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_restore_txn_source_thread, &script,
+		"pkm-lcs-kunit-restore-precedence-ordinary");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_restore_for_token(
+				(int)key_fd, token, &args),
+			0L);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_TRUE(test, script.saw_commit);
+	KUNIT_EXPECT_FALSE(test, script.saw_abort);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
@@ -60008,6 +60580,14 @@ static struct kunit_case pkm_lcs_kunit_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_high_precedence_requires_tcb),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_existing_high_requires_tcb),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_layer_tcb_marks_used),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_restore_metadata_precedence_requires_tcb),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_restore_metadata_precedence_tcb_allows),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_restore_metadata_precedence_zero_allows),
+	KUNIT_CASE(
+		pkm_lcs_kunit_key_fd_restore_precedence_non_metadata_allows),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_data_records_accept_manifest),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_data_records_require_manifest),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_data_before_key_denied),
