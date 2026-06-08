@@ -3539,6 +3539,93 @@ static void pkm_kunit_kmes_direct_emit_writes_single_event(struct kunit *test)
 				  payload, sizeof(payload));
 }
 
+static void pkm_kunit_kmes_identity_stamps_match_kacs_state(
+	struct kunit *test)
+{
+	static const u8 payload[] = { 0xc0 };
+	u8 buffer[128] = { 0 };
+	size_t written = 0;
+	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kacs_kunit_process_state_view process_view = { };
+	struct pkm_kacs_boot_snapshot primary_snapshot = { };
+	struct pkm_kacs_boot_snapshot client_snapshot = { };
+	const void *primary_token;
+	const void *client_token;
+	const void *state;
+	long fd;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	state = pkm_kacs_kunit_current_process_state_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+	KUNIT_ASSERT_NOT_NULL(test, state);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(primary_token,
+							 &primary_snapshot));
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_process_state_snapshot(state,
+							      &process_view),
+			0);
+
+	pkm_kunit_reset_kmes();
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+			     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, payload,
+			     sizeof(payload));
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(buffer, sizeof(buffer),
+							  &written, NULL),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	pkm_kunit_expect_guid_eq(test, view.effective_token_guid,
+				 primary_snapshot.token_guid);
+	pkm_kunit_expect_guid_eq(test, view.true_token_guid,
+				 primary_snapshot.token_guid);
+	pkm_kunit_expect_guid_eq(test, view.process_guid,
+				 process_view.process_guid);
+
+	client_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_IMLEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, client_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(client_token,
+							 &client_snapshot));
+	pkm_kunit_expect_guid_ne(test, client_snapshot.token_guid,
+				 primary_snapshot.token_guid);
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		primary_token, client_token, KACS_TOKEN_IMPERSONATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_impersonate((int)fd,
+							   primary_token),
+			0L);
+
+	memset(buffer, 0, sizeof(buffer));
+	written = 0;
+	memset(&view, 0, sizeof(view));
+	pkm_kunit_reset_kmes();
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+			     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, payload,
+			     sizeof(payload));
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(buffer, sizeof(buffer),
+							  &written, NULL),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	pkm_kunit_expect_guid_eq(test, view.effective_token_guid,
+				 client_snapshot.token_guid);
+	pkm_kunit_expect_guid_eq(test, view.true_token_guid,
+				 primary_snapshot.token_guid);
+	pkm_kunit_expect_guid_eq(test, view.process_guid,
+				 process_view.process_guid);
+
+	KUNIT_EXPECT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(client_token);
+}
+
 static void pkm_kunit_kmes_live_overrun_advances_tail_to_survivors(
 	struct kunit *test)
 {
@@ -41722,6 +41809,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_access_mask_constants_match_spec),
 	KUNIT_CASE(pkm_kunit_scalar_denied_writebacks),
 	KUNIT_CASE(pkm_kunit_kmes_direct_emit_writes_single_event),
+	KUNIT_CASE(pkm_kunit_kmes_identity_stamps_match_kacs_state),
 	KUNIT_CASE(pkm_kunit_kmes_live_overrun_advances_tail_to_survivors),
 	KUNIT_CASE(pkm_kunit_kmes_direct_invalid_type_drops_structurally),
 	KUNIT_CASE(pkm_kunit_kmes_attach_success_returns_cpu_fds),
