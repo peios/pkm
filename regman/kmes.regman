@@ -1,0 +1,88 @@
+--- machine\system\kmes
+canonical: Machine\System\KMES
+
+The KMES event subsystem reads its operational parameters from the
+values under this key. Compiled-in defaults are used at boot; once LCS
+is available KMES reads, validates, and applies these values, then arms
+a persistent subtree watch so later changes are picked up. KMES never
+enters a "waiting for configuration" state — the defaults are always
+sufficient.
+
+**Validation is reject-or-keep, never clamp.** A valid value is applied;
+an invalid one (wrong type, out of range, missing, or — for
+BufferCapacity — not a power of two) is **ignored**: KMES retains the last
+known-good value and emits a KMES event naming the key, the rejected
+value, and the value still in use. The registry shows what was
+**written**; the event log shows what KMES is actually **using**. The two
+can legitimately disagree.
+
+Security is on this key, not per value: all four values inherit this
+key's Security Descriptor. Unprivileged processes cannot modify these
+parameters. Candidate for Superlock (future) — event-system config is
+critical enough that even a privileged administrator changing it at
+runtime warrants extra gating.
+
+--- machine\system\kmes buffercapacity
+canonical: Machine\System\KMES BufferCapacity
+type: REG_QWORD
+default: 4194304
+valid: 65536–268435456 bytes (64 KB–256 MB), power of two
+applies: live (ring-buffer swap)
+
+Per-CPU ring buffer capacity, in bytes. Must be a power of two; values
+that are not are treated as invalid and ignored.
+
+Applying a change is live but heavier than the other knobs: KMES
+performs a ring-buffer swap — new per-CPU buffers at the new size,
+surviving events copied across, generation counter incremented, writers
+switched over, old buffers discarded. Consumers observe the generation
+change. The boot-time buffers always use the compiled-in default (4 MB);
+pre-LCS capacity is not separately configurable.
+
+The largest single event is bounded by half the capacity (the 50%
+structural limit), so this value also indirectly caps event size.
+
+See also: Machine\System\KMES MaxEventSize.
+
+--- machine\system\kmes maxeventsize
+canonical: Machine\System\KMES MaxEventSize
+type: REG_DWORD
+default: 65536
+valid: 1024–4194304 bytes (1 KB–4 MB)
+applies: live
+
+Maximum total size — header plus payload — of an event emitted from
+userspace via kmes_emit / kmes_emit_batch. Oversized events are rejected
+with ENOSPC. Takes effect for subsequent syscalls. Does not apply to
+kernel emitters, which are bound only by the 50% structural limit.
+
+--- machine\system\kmes maxnestingdepth
+canonical: Machine\System\KMES MaxNestingDepth
+type: REG_DWORD
+default: 32
+valid: 4–256
+applies: live
+
+Maximum msgpack nesting depth permitted in a payload emitted from
+userspace. Payloads exceeding this depth are rejected with EINVAL.
+Guards the decoder against pathologically nested input. Does not apply
+to kernel emitters. Takes effect for subsequent syscalls.
+
+--- machine\system\kmes maxemitrateperprocess
+canonical: Machine\System\KMES MaxEmitRatePerProcess
+type: REG_DWORD
+default: 10000
+valid: 100–1000000
+applies: live
+
+Maximum events per second a single process may emit from userspace.
+Implemented as a token bucket: both the refill rate and the burst
+capacity equal this value. Exceeding it returns EAGAIN. For batch
+emission, only events actually emitted are charged.
+
+Prevents a compromised application from flooding the ring buffer and
+overwriting legitimate kernel events. Processes holding SeTcbPrivilege
+are exempt. The limit is per-process, not per-SID — per-SID limiting
+would unfairly penalise unrelated services sharing a SID (e.g.
+LocalService). A process that forks to reset its limit is bounded by
+RLIMIT_NPROC.

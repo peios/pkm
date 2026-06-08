@@ -1,0 +1,289 @@
+--- machine\system\registry
+canonical: Machine\System\Registry
+
+LCS reads its own operational limits — the tunables under this key — by
+watching its own configuration subtree. Compiled-in defaults are used at
+boot and are always sufficient for correct operation; LCS never enters a
+"waiting for configuration" state. Once the first source registers, LCS
+reads the values here, validates them, applies the valid ones, and arms
+an internal subtree watch so later changes are picked up for the lifetime
+of the system. Every parameter is a REG_DWORD.
+
+**Validation is reject-or-keep, never clamp.** A valid value is
+hot-swapped into the in-memory configuration; an invalid one (out of
+range, wrong type, or missing) is **ignored** — LCS retains the last
+known-good value (or the compiled-in default) and emits an audit event
+naming the parameter, the rejected value, and the value still in use. The
+write to the registry still succeeds — the storage source does not enforce
+kernel semantics — so the registry shows what was **written** while the
+audit log shows what LCS is actually **using**. The two can legitimately
+disagree.
+
+**When a change applies.** Every tunable here takes effect for **new**
+operations once the configuration re-read completes; operations already in
+flight keep using the value that was active when they started. That is
+what `applies: live` means for these parameters — there is nothing to
+restart. This timing rule is shared by all the values below and is not
+repeated in each.
+
+Security is on this key: all values inherit the Machine hive root Security
+Descriptor (SYSTEM and Administrators: KEY_ALL_ACCESS; Authenticated
+Users: KEY_READ), so unprivileged processes cannot modify LCS limits.
+Group Policy at a higher-precedence layer defends against a compromised
+local administrator — SeTcbPrivilege is required to create a layer at
+precedence > 0.
+
+The `Machine\System\Registry\Layers` subkey under this path is **not** a
+tunable: it holds layer metadata (precedence, enabled state, per-layer
+Security Descriptors) that LCS manages and watches directly. Do not
+hand-edit it as though it were configuration.
+
+--- machine\system\registry requesttimeoutms
+canonical: Machine\System\Registry RequestTimeoutMs
+type: REG_DWORD
+default: 30000
+valid: 1000–600000 ms (1 s–10 min)
+applies: live
+
+Per-request timeout for a source round-trip, in milliseconds.
+
+Measured from the first attempt to reserve an in-flight slot through
+receipt of the response. When it is exceeded the calling thread receives
+ETIMEDOUT; the source stays alive. This is also the deadline a caller
+waits under when all RSI slots are busy (see MaxConcurrentRSIRequests).
+
+--- machine\system\registry transactiontimeoutms
+canonical: Machine\System\Registry TransactionTimeoutMs
+type: REG_DWORD
+default: 30000
+valid: 1000–600000 ms (1 s–10 min)
+applies: live
+
+Maximum lifetime of an open transaction, in milliseconds.
+
+Measured from reg_begin_transaction to auto-abort. It stops a stalled or
+malicious process from holding the source's write lock indefinitely. On
+expiry the transaction is auto-aborted and the caller's next operation on
+it returns ETIMEDOUT.
+
+--- machine\system\registry maxkeydepth
+canonical: Machine\System\Registry MaxKeyDepth
+type: REG_DWORD
+default: 512
+valid: 32–4096 levels
+applies: live
+
+Maximum nesting depth of the key hierarchy.
+
+Bounds the ancestor-chain memory held per open key fd and the length of a
+path-resolution walk. reg_open_key / reg_create_key on a path deeper than
+this fail with EINVAL.
+
+--- machine\system\registry maxpathcomponentlength
+canonical: Machine\System\Registry MaxPathComponentLength
+type: REG_DWORD
+default: 255
+valid: 64–1024 UTF-8 bytes
+applies: live
+
+Maximum length of a single key-name component, value name, or layer name,
+in UTF-8 bytes.
+
+A component longer than this is rejected with ENAMETOOLONG.
+
+--- machine\system\registry maxtotalpathlength
+canonical: Machine\System\Registry MaxTotalPathLength
+type: REG_DWORD
+default: 16383
+valid: 1024–65535 UTF-8 bytes
+applies: live
+
+Maximum total length of a full registry path, in UTF-8 bytes.
+
+Counts every component and separator in the path. The default matches or
+exceeds the comparable Windows limit. An over-length path is rejected with
+ENAMETOOLONG.
+
+--- machine\system\registry symlinkdepthlimit
+canonical: Machine\System\Registry SymlinkDepthLimit
+type: REG_DWORD
+default: 16
+valid: 1–64 hops
+applies: live
+
+Maximum registry-symlink resolution depth during path resolution.
+
+Each REG_LINK traversed counts as one hop; exceeding the limit fails with
+ELOOP. Guards against symlink cycles and pathologically long link chains.
+
+--- machine\system\registry maxvaluesize
+canonical: Machine\System\Registry MaxValueSize
+type: REG_DWORD
+default: 1048576
+valid: 4096–67108864 bytes (4 KB–64 MB)
+applies: live
+
+Maximum data payload size for a single value, in bytes.
+
+Default 1 MB, ceiling 64 MB. A write whose payload exceeds the active
+limit is rejected with ENOSPC.
+
+--- machine\system\registry maxlayerspervalue
+canonical: Machine\System\Registry MaxLayersPerValue
+type: REG_DWORD
+default: 128
+valid: 1–1024 layers
+applies: live
+
+Maximum number of layers that may write to the same (key, value) pair.
+
+Bounds the per-value layer-resolution cost. Once this many layers carry a
+write for one value, a further layered write to it is rejected with
+ENOSPC.
+
+--- machine\system\registry maxtotallayers
+canonical: Machine\System\Registry MaxTotalLayers
+type: REG_DWORD
+default: 1024
+valid: 16–65536 layers
+applies: live
+
+Maximum number of distinct layers in the in-memory layer table.
+
+Bounds kernel memory consumed by layer creation across the whole system.
+Creating a layer beyond this limit fails with ENOSPC.
+
+--- machine\system\registry maxboundtransactionspersource
+canonical: Machine\System\Registry MaxBoundTransactionsPerSource
+type: REG_DWORD
+default: 16
+valid: 1–256 transactions
+applies: live
+
+Maximum number of concurrently bound (write-lock-holding) transactions per
+source.
+
+Prevents write-lock starvation through transaction chaining. The operation
+that would bind one transaction too many fails with EBUSY.
+
+--- machine\system\registry maxreadonlytransactionspersource
+canonical: Machine\System\Registry MaxReadOnlyTransactionsPerSource
+type: REG_DWORD
+default: 16
+valid: 1–256 transactions
+applies: live
+
+Maximum number of concurrently active read-only snapshot transactions per
+source.
+
+Used by REG_IOC_BACKUP. It caps backup-snapshot concurrency without
+treating a backup as a write-lock-holding transaction. Exceeding it fails
+the REG_IOC_BACKUP with EBUSY.
+
+--- machine\system\registry maxregisteredsources
+canonical: Machine\System\Registry MaxRegisteredSources
+type: REG_DWORD
+default: 32
+valid: 1–256 sources
+applies: live
+
+Maximum number of concurrently registered sources.
+
+Bounds the routing-table size and per-source kernel state. A
+REG_SRC_REGISTER beyond this limit fails with ENOSPC.
+
+--- machine\system\registry maxhivespersource
+canonical: Machine\System\Registry MaxHivesPerSource
+type: REG_DWORD
+default: 64
+valid: 1–1024 hives
+applies: live
+
+Maximum number of hives a single source may register.
+
+A REG_SRC_REGISTER that would exceed this for one source fails with
+ENOSPC.
+
+--- machine\system\registry maxconcurrentrsirequests
+canonical: Machine\System\Registry MaxConcurrentRSIRequests
+type: REG_DWORD
+default: 256
+valid: 8–4096 requests
+applies: live
+
+Maximum number of in-flight requests dispatched to one source and awaiting
+a response.
+
+Provides back-pressure when a source is slow. When the limit is reached,
+new operations wait for a slot under the same deadline as
+RequestTimeoutMs, returning ETIMEDOUT if no slot frees up in time.
+
+--- machine\system\registry notificationqueuesize
+canonical: Machine\System\Registry NotificationQueueSize
+type: REG_DWORD
+default: 256
+valid: 16–65536 events
+applies: live
+
+Maximum events queued per armed watch before overflow.
+
+When a watcher's queue is full, the oldest events are dropped and a single
+OVERFLOW marker is delivered in their place. This bounds userspace
+fd-based watches; LCS's own internal configuration watches are processed
+synchronously and are not subject to it.
+
+--- machine\system\registry maxsubtreewatchdepth
+canonical: Machine\System\Registry MaxSubtreeWatchDepth
+type: REG_DWORD
+default: 0
+valid: 0–4096 levels (0 = unlimited)
+applies: live
+
+Maximum depth from a watched key to a descendant for subtree-watch event
+delivery.
+
+A value of 0 means unlimited — events for all descendants are delivered.
+With a positive limit, changes deeper than that are silently not delivered
+to the watcher, trading completeness for less event noise and lower
+dispatch cost on deep subtree watches.
+
+--- machine\system\registry maxtransactionwatcheventburst
+canonical: Machine\System\Registry MaxTransactionWatchEventBurst
+type: REG_DWORD
+default: 4096
+valid: 256–65536 events
+applies: live
+
+Maximum watch events generated for one watcher by a single transaction
+commit.
+
+When a commit would deliver more than this many events to one watcher, LCS
+stops generating individual events and inserts a single OVERFLOW instead —
+stopping a large transaction from atomically filling a watcher's queue.
+
+--- machine\system\registry maxscopeguidspertoken
+canonical: Machine\System\Registry MaxScopeGUIDsPerToken
+type: REG_DWORD
+default: 8
+valid: 1–256 GUIDs
+applies: live
+
+Maximum number of private-hive scope GUIDs a thread's credentials may
+carry.
+
+Bounds the per-syscall routing iteration cost. The limit is enforced when
+credentials are attached, which is a KACS concern rather than a registry
+operation.
+
+--- machine\system\registry maxprivatelayerspertoken
+canonical: Machine\System\Registry MaxPrivateLayersPerToken
+type: REG_DWORD
+default: 16
+valid: 1–256 layers
+applies: live
+
+Maximum number of private-layer names a thread's credentials may carry.
+
+Bounds the per-resolution is_active() iteration cost. The limit is
+enforced when credentials are attached, which is a KACS concern rather
+than a registry operation.
