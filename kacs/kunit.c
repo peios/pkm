@@ -4880,6 +4880,11 @@ static void pkm_kunit_kmes_runtime_config_validates_ranges(
 	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
 			(long)-EINVAL);
 	config = pkm_kunit_kmes_default_config();
+	config.buffer_capacity = PKM_KUNIT_KMES_MIN_CAPACITY +
+				 (PKM_KUNIT_KMES_MIN_CAPACITY / 2U);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			(long)-EINVAL);
+	config = pkm_kunit_kmes_default_config();
 	config.max_event_size = PKM_KUNIT_KMES_MIN_EVENT_SIZE - 1U;
 	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
 			(long)-EINVAL);
