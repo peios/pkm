@@ -2,7 +2,8 @@ use kacs_core::{
     inherit_registry_container_child_sd, AceKind, GenericMapping, KacsError,
     RegistryContainerChildInheritance, SecurityDescriptor, ACCESS_ALLOWED_ACE_TYPE,
     ACCESS_DENIED_ACE_TYPE, CONTAINER_INHERIT_ACE, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE,
-    INHERITED_ACE, NO_PROPAGATE_INHERIT_ACE, OBJECT_INHERIT_ACE, SE_DACL_AUTO_INHERITED,
+    INHERITED_ACE, INHERIT_ONLY_ACE, NO_PROPAGATE_INHERIT_ACE, OBJECT_INHERIT_ACE,
+    SE_DACL_AUTO_INHERITED,
     SE_DACL_DEFAULTED, SE_DACL_PRESENT, SE_GROUP_DEFAULTED, SE_OWNER_DEFAULTED,
     SE_SACL_AUTO_INHERITED, SE_SACL_PRESENT, SE_SELF_RELATIVE, SYNCHRONIZE, SYSTEM_AUDIT_ACE_TYPE,
 };
@@ -355,4 +356,56 @@ fn registry_container_inheritance_rejects_mapped_masks_outside_registry_rights()
         }),
         Err(KacsError::MappedAccessMaskOutsideObjectRights(SYNCHRONIZE))
     );
+}
+
+#[test]
+fn registry_container_inheritance_clears_inherit_only_on_child() {
+    // Regression for KC-26: a CONTAINER_INHERIT | INHERIT_ONLY DENY ACE on the
+    // parent key must produce an inherited copy on the created subkey with
+    // INHERIT_ONLY CLEARED, so the DENY is actually enforced on the subkey.
+    // Previously the registry path retained INHERIT_ONLY, and the access-check
+    // walk skips INHERIT_ONLY ACEs, silently dropping the DENY (fail-open).
+    let parent_owner = sid(5, &[18]);
+    let parent_group = sid(5, &[32, 544]);
+    let owner = sid(5, &[21, 1000]);
+    let group = sid(5, &[21, 513]);
+    let other = sid(5, &[11]);
+    let parent_dacl = acl(&[basic_ace(
+        ACCESS_DENIED_ACE_TYPE,
+        CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+        GENERIC_WRITE,
+        &other,
+    )]);
+    let parent_sd_bytes = sd(&parent_owner, &parent_group, None, Some(&parent_dacl));
+    let parent_sd = SecurityDescriptor::parse(&parent_sd_bytes).unwrap();
+
+    let child_bytes = inherit_registry_container_child_sd(RegistryContainerChildInheritance {
+        parent_sd,
+        token_owner: kacs_core::Sid::parse(&owner).unwrap(),
+        token_primary_group: kacs_core::Sid::parse(&group).unwrap(),
+        token_default_dacl: None,
+        generic_mapping: registry_mapping(),
+        valid_mapped_access_mask: REG_VALID_MAPPED_ACCESS_MASK,
+    })
+    .unwrap();
+    let child = SecurityDescriptor::parse(child_bytes.as_slice()).unwrap();
+
+    let dacl = child.dacl().unwrap();
+    let entries: Vec<_> = dacl.entries().map(Result::unwrap).collect();
+    assert_eq!(entries.len(), 1);
+
+    // INHERIT_ONLY cleared; CONTAINER_INHERIT retained for further propagation;
+    // INHERITED marked. The DENY now applies to the subkey itself.
+    assert_eq!(entries[0].ace_flags() & INHERIT_ONLY_ACE, 0);
+    assert_eq!(
+        entries[0].ace_flags(),
+        CONTAINER_INHERIT_ACE | INHERITED_ACE
+    );
+    match entries[0].kind() {
+        AceKind::SingleSid { mask, sid } => {
+            assert_eq!(mask, KEY_WRITE);
+            assert_eq!(sid.as_bytes(), other.as_slice());
+        }
+        other => panic!("unexpected ACE kind: {other:?}"),
+    }
 }

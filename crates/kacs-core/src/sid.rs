@@ -40,6 +40,8 @@ impl<'a> Sid<'a> {
     pub const MIN_SIZE: usize = 8;
     /// Maximum valid sub-authority count accepted by the parser.
     pub const MAX_SUB_AUTHORITIES: u8 = 15;
+    /// Maximum valid SID length in bytes (header plus all sub-authorities).
+    pub const MAX_SIZE: usize = Self::MIN_SIZE + (Self::MAX_SUB_AUTHORITIES as usize * 4);
 
     /// Parses a SID that must occupy the entire provided slice.
     pub fn parse(bytes: &'a [u8]) -> KacsResult<Self> {

@@ -606,6 +606,10 @@ fn map_kacs_error(error: KacsError) -> c_long {
     }
 }
 
+/// Resolves the PIP context for the query: a non-zero caller-supplied axis
+/// overrides the PSB-derived fallback; 0 uses the calling process's PSB value
+/// (PSD-004 §10.7 "PIP source"). Applied to both the verdict and the emitted
+/// audit event so they agree.
 fn effective_pip(requested: PipContext, fallback: PipContext) -> PipContext {
     PipContext {
         pip_type: if requested.pip_type != 0 {
@@ -620,3 +624,4 @@ fn effective_pip(requested: PipContext, fallback: PipContext) -> PipContext {
         },
     }
 }
+

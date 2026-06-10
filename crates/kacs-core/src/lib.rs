@@ -70,7 +70,8 @@ pub use access_check_abi::{
     AccessCheckAbiExecution, AccessCheckAbiMemory, AccessCheckAbiRequest, AccessCheckAbiResolved,
     AccessCheckAbiReturn, KacsNodeResultAbi, OwnedAuditEvent, U32Writeback, KACS_ABI_EACCES,
     KACS_ACCESS_CHECK_ARGS_SIZE, KACS_ACCESS_CHECK_ARGS_V1_SIZE,
-    KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN, KACS_OBJECT_TYPE_ENTRY_SIZE,
+    KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN, KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN,
+    KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT, KACS_OBJECT_TYPE_ENTRY_SIZE,
 };
 pub use access_mask::{
     validate_ace_mask, GenericMapping, NormalizedDesiredAccess, ACCESS_SYSTEM_SECURITY, DELETE,

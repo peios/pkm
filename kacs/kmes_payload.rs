@@ -223,14 +223,51 @@ fn load_process_info() -> Result<ProcessInfo, c_long> {
         return Err(ret as c_long);
     }
 
-    let _ = str::from_utf8(name.as_slice()).map_err(|_| EIO)?;
-    let _ = str::from_utf8(path.as_slice()).map_err(|_| EIO)?;
+    // Process comm/exe-path are arbitrary byte strings, and TASK_COMM_LEN
+    // truncation can split a multibyte sequence, so they are not guaranteed
+    // UTF-8. Sanitize to valid UTF-8 (U+FFFD for invalid sequences) instead of
+    // rejecting with EIO: an audited access decision is fail-closed, so a
+    // non-UTF-8 name must never be allowed to deny the operation.
+    let name = sanitize_utf8_lossy(name)?;
+    let path = sanitize_utf8_lossy(path)?;
 
     Ok(ProcessInfo {
         pid,
         name,
         executable_path: path,
     })
+}
+
+/// Returns `bytes` unchanged when already valid UTF-8 (the common path, no
+/// copy); otherwise returns a copy with each invalid byte sequence replaced by
+/// U+FFFD, mirroring `String::from_utf8_lossy`.
+fn sanitize_utf8_lossy(bytes: Vec<u8>) -> Result<Vec<u8>, c_long> {
+    if str::from_utf8(bytes.as_slice()).is_ok() {
+        return Ok(bytes);
+    }
+
+    const REPLACEMENT: &[u8] = &[0xEF, 0xBF, 0xBD];
+    let mut out = Vec::with_capacity(bytes.len()).map_err(|_| ENOMEM)?;
+    let mut input = bytes.as_slice();
+    loop {
+        match str::from_utf8(input) {
+            Ok(valid) => {
+                out.extend_from_slice(valid.as_bytes()).map_err(|_| ENOMEM)?;
+                break;
+            }
+            Err(err) => {
+                let valid_up_to = err.valid_up_to();
+                out.extend_from_slice(&input[..valid_up_to])
+                    .map_err(|_| ENOMEM)?;
+                out.extend_from_slice(REPLACEMENT).map_err(|_| ENOMEM)?;
+                match err.error_len() {
+                    Some(len) => input = &input[valid_up_to + len..],
+                    None => break,
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn privilege_name(privilege: u64) -> Result<&'static [u8], c_long> {

@@ -493,10 +493,23 @@ mod string_inner {
         }
 
         /// Appends one Unicode scalar value.
+        ///
+        /// All-or-nothing: `extend_from_slice` pushes the encoded bytes one at a
+        /// time, so a mid-character allocation failure would otherwise leave a
+        /// truncated (invalid) UTF-8 sequence behind while still returning `Err`.
+        /// `as_str`'s `from_utf8_unchecked` trusts the buffer, so on failure we
+        /// roll the buffer back to its pre-push length.
         pub fn push(&mut self, character: char) -> Result<(), AllocError> {
             let mut buf = [0u8; 4];
             let encoded = character.encode_utf8(&mut buf);
-            self.0.extend_from_slice(encoded.as_bytes())
+            let saved_len = self.0.len();
+            match self.0.extend_from_slice(encoded.as_bytes()) {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    self.0.truncate(saved_len);
+                    Err(err)
+                }
+            }
         }
 
         /// Returns the string as `&str`.

@@ -12,7 +12,7 @@ use crate::object_tree::{ObjectTypeList, ObjectTypeNode};
 use crate::pip::PipContext;
 use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::privilege::TokenPrivileges;
-use crate::security_descriptor::SecurityDescriptor;
+use crate::security_descriptor::{SecurityDescriptor, MAX_SECURITY_DESCRIPTOR_BYTES};
 use crate::sid::Sid;
 use crate::token::{AccessCheckToken, SidAndAttributes};
 
@@ -25,6 +25,11 @@ pub const KACS_ACCESS_CHECK_ARGS_V1_SIZE: u32 = 40;
 pub const KACS_OBJECT_TYPE_ENTRY_SIZE: usize = 20;
 /// Maximum accepted object-audit context length in bytes.
 pub const KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN: u32 = 4096;
+/// Maximum accepted `@Local` claims blob length in bytes.
+pub const KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN: u32 = 65536;
+/// Maximum accepted object-type tree entry count. Bounds both the ABI buffer
+/// allocation and the O(n^2) duplicate-GUID scan in `ObjectTypeList::new`.
+pub const KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT: u32 = 1024;
 /// Negative errno value used for AccessCheck denial at the ABI boundary.
 pub const KACS_ABI_EACCES: i32 = -13;
 
@@ -47,7 +52,9 @@ pub struct AccessCheckAbiRequest {
     pub mapping: GenericMapping,
     /// Privilege-intent flags used while seeding privileges.
     pub privilege_intent: u32,
-    /// PSB-derived PIP axes supplied at the ABI boundary.
+    /// PIP axes supplied at the ABI boundary. Per axis, a non-zero value
+    /// overrides the PSB-derived default for this query; 0 uses the calling
+    /// process's PSB pip (PSD-004 §10.7 "PIP source").
     pub pip: PipContext,
     /// Raw self-relative security descriptor bytes.
     pub sd_bytes: Vec<u8>,
@@ -221,8 +228,18 @@ pub fn parse_access_check_abi_request<M: AccessCheckAbiMemory>(
     if sd_ptr == 0 || sd_len_usize == 0 {
         return Err(KacsError::InvalidAbiInput("sd_ptr and sd_len are required"));
     }
+    if sd_len_usize > MAX_SECURITY_DESCRIPTOR_BYTES {
+        return Err(KacsError::InvalidAbiInput(
+            "sd_len exceeds maximum security descriptor size",
+        ));
+    }
     let sd_bytes = read_memory(memory, "sd", sd_ptr, sd_len_usize)?;
 
+    if self_sid_len as usize > Sid::MAX_SIZE {
+        return Err(KacsError::InvalidAbiInput(
+            "self_sid_len exceeds maximum SID size",
+        ));
+    }
     let self_sid_bytes = read_optional_memory(memory, "self_sid", self_sid_ptr, self_sid_len)?;
     if let Some(bytes) = self_sid_bytes.as_deref() {
         let _ = Sid::parse(bytes)?;
@@ -430,6 +447,11 @@ fn parse_object_tree<M: AccessCheckAbiMemory>(
             "object_tree_ptr and object_tree_count must both be present",
         ));
     }
+    if count > KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT {
+        return Err(KacsError::InvalidAbiInput(
+            "object_tree_count exceeds maximum",
+        ));
+    }
 
     let count_usize = usize::try_from(count)
         .map_err(|_| KacsError::InvalidAbiInput("object_tree_count overflow"))?;
@@ -459,6 +481,11 @@ fn parse_local_claims<M: AccessCheckAbiMemory>(
     ptr: u64,
     len: u32,
 ) -> KacsResult<Vec<ClaimAttribute>> {
+    if len > KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN {
+        return Err(KacsError::InvalidAbiInput(
+            "local_claims_len exceeds maximum",
+        ));
+    }
     let Some(bytes) = read_optional_memory(memory, "local_claims", ptr, len)? else {
         return Ok(Vec::new());
     };
@@ -510,6 +537,10 @@ fn read_memory<M: AccessCheckAbiMemory>(
         .ok_or(KacsError::UserMemoryFault { field, ptr, len })
 }
 
+/// Resolves the PIP context for the query: the caller's args pip overrides the
+/// PSB-derived fallback per axis, with 0 meaning "use the calling process's PSB
+/// value" (PSD-004 §10.7 "PIP source"). This lets a broker evaluate access under
+/// a client's trust context, paralleling the per-call `token_fd`.
 fn effective_pip(requested: PipContext, fallback: PipContext) -> PipContext {
     PipContext {
         pip_type: if requested.pip_type == 0 {

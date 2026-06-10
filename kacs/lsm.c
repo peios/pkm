@@ -829,8 +829,15 @@ static struct pkm_kacs_process_sd *pkm_kacs_process_sd_wrap_bytes(
 		return NULL;
 
 	process_sd = kzalloc(sizeof(*process_sd), GFP_KERNEL);
-	if (!process_sd)
+	if (!process_sd) {
+		/*
+		 * `bytes` is an owned Rust allocation that only this wrapper can
+		 * hand to pkm_kacs_process_sd_put; free it here rather than
+		 * orphan it when the wrapper struct cannot be allocated.
+		 */
+		pkm_kacs_free((void *)bytes);
 		return NULL;
+	}
 
 	refcount_set(&process_sd->refs, 1);
 	process_sd->bytes = bytes;
@@ -1601,13 +1608,24 @@ retry:
 	return 0;
 }
 
+/*
+ * KC-00: missing-SD synthesis walks parent-to-root holding one inode SD mutex
+ * per level nested, with a full struct file per recursion frame. Cap the
+ * ancestor depth well below lockdep's MAX_LOCK_DEPTH (48) and the VMAP_STACK
+ * budget so a deeply nested directory tree on a SYNTHESIZE mount (vfat/exfat/
+ * NFS/ramfs) cannot drive a kernel stack overflow or lock-depth BUG. Beyond the
+ * cap, synthesis fails closed (-EACCES). 32 covers realistic nesting on those
+ * mount types.
+ */
+#define PKM_KACS_MAX_SD_SYNTHESIS_DEPTH 32U
+
 static long pkm_kacs_inode_resolve_effective_cache_locked(
 	struct file *file, struct pkm_kacs_inode_security *sec,
-	struct pkm_kacs_inode_sd_cache **cache_out);
+	struct pkm_kacs_inode_sd_cache **cache_out, unsigned int depth);
 
 static long pkm_kacs_synthesize_missing_file_sd_locked(
 	struct file *file, struct pkm_kacs_inode_security *sec,
-	struct pkm_kacs_inode_sd_cache **cache_out)
+	struct pkm_kacs_inode_sd_cache **cache_out, unsigned int depth)
 {
 	struct pkm_kacs_inode_sd_cache *new_cache = NULL;
 	struct pkm_kacs_inode_sd_cache *parent_cache = NULL;
@@ -1629,6 +1647,10 @@ static long pkm_kacs_synthesize_missing_file_sd_locked(
 
 	if (!file || !sec || !cache_out)
 		return -EINVAL;
+
+	/* KC-00: bound the parent-to-root synthesis recursion (fail closed). */
+	if (depth >= PKM_KACS_MAX_SD_SYNTHESIS_DEPTH)
+		return -EACCES;
 
 	inode = file_inode(file);
 	dentry = file_dentry(file);
@@ -1665,7 +1687,7 @@ static long pkm_kacs_synthesize_missing_file_sd_locked(
 
 		mutex_lock(&parent_sec->lock);
 		ret = pkm_kacs_inode_resolve_effective_cache_locked(
-			&parent_file, parent_sec, &parent_cache);
+			&parent_file, parent_sec, &parent_cache, depth + 1);
 		if (ret) {
 			mutex_unlock(&parent_sec->lock);
 			goto out_template;
@@ -1728,7 +1750,7 @@ out_template:
 
 static long pkm_kacs_inode_resolve_effective_cache_locked(
 	struct file *file, struct pkm_kacs_inode_security *sec,
-	struct pkm_kacs_inode_sd_cache **cache_out)
+	struct pkm_kacs_inode_sd_cache **cache_out, unsigned int depth)
 {
 	struct pkm_kacs_inode_sd_cache *cache;
 	u32 mount_policy;
@@ -1752,7 +1774,8 @@ static long pkm_kacs_inode_resolve_effective_cache_locked(
 		return 0;
 	}
 
-	return pkm_kacs_synthesize_missing_file_sd_locked(file, sec, cache_out);
+	return pkm_kacs_synthesize_missing_file_sd_locked(file, sec, cache_out,
+							  depth);
 }
 
 static bool pkm_kacs_missing_cache_requires_synthesis(
@@ -1825,7 +1848,7 @@ static long pkm_kacs_inode_ensure_effective_cache(
 
 	mutex_lock(&sec->lock);
 	ret = pkm_kacs_inode_resolve_effective_cache_locked(file, sec,
-							    &locked_cache);
+							    &locked_cache, 0);
 	mutex_unlock(&sec->lock);
 	return ret;
 }
@@ -4515,17 +4538,26 @@ static long pkm_kacs_bind_abstract_socket_core(
 	struct pkm_kacs_socket_security *sec, const void *subject_token)
 {
 	struct pkm_kacs_process_sd *socket_sd;
+	struct pkm_kacs_process_sd *prev;
 
 	if (!sec || !subject_token)
 		return -EACCES;
-	if (sec->socket_sd)
+	/* Fast path: already installed, no allocation needed. */
+	if (READ_ONCE(sec->socket_sd))
 		return 0;
 
 	socket_sd = pkm_kacs_socket_sd_alloc(subject_token);
 	if (!socket_sd)
 		return -ENOMEM;
 
-	sec->socket_sd = socket_sd;
+	/*
+	 * KC-02: two threads sharing one socket fd can both pass the NULL check
+	 * and both allocate. Install atomically; if another thread won the race,
+	 * drop our loser allocation rather than overwrite (and leak) the winner.
+	 */
+	prev = cmpxchg(&sec->socket_sd, NULL, socket_sd);
+	if (prev)
+		pkm_kacs_process_sd_put(socket_sd);
 	return 0;
 }
 
@@ -5015,12 +5047,6 @@ static long pkm_kacs_apply_psb_mitigations_core(
 	if (ret)
 		return ret;
 
-	if (new_bits != 0) {
-		ret = pkm_kacs_activate_arch_mitigations(activation, new_bits);
-		if (ret)
-			return ret;
-	}
-
 	if ((new_bits & PKM_KACS_MIT_ACTIVE_MEMORY) != 0) {
 		if (pkm_kacs_activation_offline_allowed(activation)) {
 			mm = NULL;
@@ -5031,13 +5057,31 @@ static long pkm_kacs_apply_psb_mitigations_core(
 		}
 	}
 
+	/*
+	 * Validate existing mappings BEFORE applying any irreversible arch state
+	 * (shadow-stack ENABLE+LOCK, spec-ctrl FORCE_DISABLE). If validation
+	 * fails after activation, the syscall reports failure while the hardware
+	 * mitigation stays enforced and mitigation_bits is never recorded —
+	 * a state desync. Release mmap_lock before activating: enabling the
+	 * shadow stack can take mmap_write_lock, which would deadlock against a
+	 * held read lock.
+	 */
 	if (mm) {
 		mmap_read_lock(mm);
 		ret = pkm_kacs_validate_existing_mappings_locked(
 			new_bits, target_state, mm);
+		mmap_read_unlock(mm);
 		if (ret) {
-			mmap_read_unlock(mm);
 			mmput(mm);
+			return ret;
+		}
+	}
+
+	if (new_bits != 0) {
+		ret = pkm_kacs_activate_arch_mitigations(activation, new_bits);
+		if (ret) {
+			if (mm)
+				mmput(mm);
 			return ret;
 		}
 	}
@@ -5047,10 +5091,8 @@ static long pkm_kacs_apply_psb_mitigations_core(
 	result_bits = target_state->mitigation_bits;
 	spin_unlock_irqrestore(&target_state->mitigation_lock, flags);
 
-	if (mm) {
-		mmap_read_unlock(mm);
+	if (mm)
 		mmput(mm);
-	}
 
 	if (result_mitigation_bits_out)
 		*result_mitigation_bits_out = result_bits;
@@ -8647,7 +8689,7 @@ static long pkm_kacs_build_created_file_sd_for_subject(
 
 	mutex_lock(&parent_sec->lock);
 	ret = pkm_kacs_inode_resolve_effective_cache_locked(parent_file, parent_sec,
-							    &parent_cache);
+							    &parent_cache, 0);
 	if (ret)
 		goto out_unlock;
 	if (parent_cache->state != PKM_KACS_INODE_SD_VALID ||
@@ -8737,20 +8779,20 @@ static long pkm_kacs_authorize_live_file_access_core(
 		pkm_kacs_inode_sd_cache_free(cache);
 	}
 log:
-	/* DEBUG: temporary instrumentation for DENY_MISSING boot failure */
+	/*
+	 * Debug instrumentation for the DENY_MISSING boot bring-up. Kept behind
+	 * pr_debug (compiled out / off unless dynamic debug enables it) and the
+	 * accessed filename dropped, so it cannot disclose pathnames to dmesg in
+	 * a production build.
+	 */
 	if (ret && ret != -EOPNOTSUPP) {
-		const char *name = "?";
-		struct dentry *de = file_dentry(file);
-
-		if (de && de->d_name.name)
-			name = (const char *)de->d_name.name;
-		pr_warn_ratelimited(
-			"kacs: deny live_file_access ino=%lu sb_magic=0x%lx policy=%u cache_state=0x%x desired=0x%x name=%s comm=%s pid=%d ret=%ld\n",
+		pr_debug(
+			"kacs: deny live_file_access ino=%lu sb_magic=0x%lx policy=%u cache_state=0x%x desired=0x%x comm=%s pid=%d ret=%ld\n",
 			inode->i_ino,
 			(unsigned long)inode->i_sb->s_magic,
 			pkm_kacs_superblock_mount_policy(inode->i_sb),
 			(unsigned)cache_state,
-			desired_access, name, current->comm,
+			desired_access, current->comm,
 			current->pid, ret);
 	}
 	return ret;
@@ -8811,7 +8853,7 @@ static long pkm_kacs_authorize_inode_file_access_core(
 	if (!subject_token || !inode || desired_access == 0) {
 		/* DEBUG */
 		if (inode)
-			pr_warn_ratelimited(
+			pr_debug(
 				"kacs: deny inode_file_access EINVAL ino=%lu sb_magic=0x%lx desired=0x%x has_token=%d comm=%s pid=%d\n",
 				inode->i_ino,
 				(unsigned long)inode->i_sb->s_magic,
@@ -8821,7 +8863,7 @@ static long pkm_kacs_authorize_inode_file_access_core(
 	}
 	if (!inode->i_security) {
 		/* DEBUG */
-		pr_warn_ratelimited(
+		pr_debug(
 			"kacs: deny inode_file_access NO_SEC ino=%lu sb_magic=0x%lx desired=0x%x comm=%s pid=%d\n",
 			inode->i_ino,
 			(unsigned long)inode->i_sb->s_magic,
@@ -8833,7 +8875,7 @@ static long pkm_kacs_authorize_inode_file_access_core(
 		alias = d_find_any_alias(inode);
 		if (!alias) {
 			/* DEBUG */
-			pr_warn_ratelimited(
+			pr_debug(
 				"kacs: deny inode_file_access NO_ALIAS ino=%lu sb_magic=0x%lx desired=0x%x comm=%s pid=%d\n",
 				inode->i_ino,
 				(unsigned long)inode->i_sb->s_magic,
@@ -8938,7 +8980,7 @@ static long pkm_kacs_authorize_inode_namespace_access_for_subject(
 		return 0;
 	if (!subject_token) {
 		/* DEBUG */
-		pr_warn_ratelimited(
+		pr_debug(
 			"kacs: deny ns_access NO_TOKEN ino=%lu sb_magic=0x%lx desired=0x%x comm=%s pid=%d\n",
 			inode->i_ino,
 			(unsigned long)inode->i_sb->s_magic,
@@ -9561,7 +9603,7 @@ static int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 		subject_token = pkm_kacs_current_effective_token_ptr();
 		if (!subject_token) {
 			/* DEBUG */
-			pr_warn_ratelimited(
+			pr_debug(
 				"kacs: deny inode_init_security NO_TOKEN dir_ino=%lu sb_magic=0x%lx mode=0%o comm=%s pid=%d\n",
 				dir->i_ino,
 				(unsigned long)dir->i_sb->s_magic,
@@ -9573,7 +9615,7 @@ static int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 			&sd_bytes, &sd_len);
 		if (ret) {
 			/* DEBUG */
-			pr_warn_ratelimited(
+			pr_debug(
 				"kacs: deny inode_init_security BUILD_FAIL dir_ino=%lu sb_magic=0x%lx mode=0%o comm=%s pid=%d ret=%ld\n",
 				dir->i_ino,
 				(unsigned long)dir->i_sb->s_magic,
@@ -9585,7 +9627,7 @@ static int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 	if (!sd_bytes || sd_len == 0) {
 		/* DEBUG */
 		if (allocated_sd)
-			pr_warn_ratelimited(
+			pr_debug(
 				"kacs: deny inode_init_security NO_SD_BYTES dir_ino=%lu sb_magic=0x%lx mode=0%o comm=%s pid=%d\n",
 				dir->i_ino,
 				(unsigned long)dir->i_sb->s_magic,
@@ -9704,7 +9746,7 @@ static long pkm_kacs_do_native_create_open(
 	if (ret)
 		goto out_end_create;
 
-	child_path.mnt = parent_path.mnt;
+	child_path.mnt = mntget(parent_path.mnt);
 	child_path.dentry = dget(dentry);
 	pkm_kacs_set_current_native_open_request(&child_path,
 						 prepared->desired_access,
@@ -10618,7 +10660,7 @@ static long pkm_kacs_set_file_sd_core(const void *subject_token,
 
 	sec = pkm_kacs_inode(inode);
 	mutex_lock(&sec->lock);
-	ret = pkm_kacs_inode_resolve_effective_cache_locked(file, sec, &cache);
+	ret = pkm_kacs_inode_resolve_effective_cache_locked(file, sec, &cache, 0);
 	if (ret)
 		goto out_unlock;
 
@@ -10638,23 +10680,38 @@ static long pkm_kacs_set_file_sd_core(const void *subject_token,
 		goto out_bytes;
 	}
 
+	/*
+	 * KC-07: the SD xattr write below takes i_rwsem. Ordinary fchmod/
+	 * fsetxattr acquire i_rwsem first and then sec->lock in the LSM hook, so
+	 * holding sec->lock across the i_rwsem acquisition here is an ABBA
+	 * inversion. Drop sec->lock, write the xattr under i_rwsem only, then
+	 * re-acquire sec->lock to publish and audit. A concurrent set_sd on the
+	 * same inode is last-writer-wins, as it already was.
+	 */
+	mutex_unlock(&sec->lock);
+
 	ret = pkm_kacs_inode_write_sd_xattr_locked(file, new_sd_bytes,
 						   new_sd_len);
-	if (ret)
-		goto out_bytes;
+	if (ret) {
+		/* new_cache owns new_sd_bytes; freeing the cache frees both. */
+		pkm_kacs_inode_sd_cache_free(new_cache);
+		new_cache = NULL;
+		new_sd_bytes = NULL;
+		return ret;
+	}
 	if (used_restore_bypass)
 		(void)kacs_rust_token_mark_privileges_used(
 			subject_token, KACS_SE_RESTORE_PRIVILEGE);
 
+	mutex_lock(&sec->lock);
 	pkm_kacs_inode_replace_sd_cache_locked(sec, new_cache);
 	new_cache = NULL;
 	ret = kacs_rust_emit_file_set_sd_audit(subject_token, new_sd_bytes,
 					       new_sd_len, desired_access,
 					       pip_type, pip_trust);
 	new_sd_bytes = NULL;
-	if (ret)
-		goto out_unlock;
-	goto out_unlock;
+	mutex_unlock(&sec->lock);
+	return ret;
 
 out_bytes:
 	if (!new_cache && new_sd_bytes)
@@ -15063,7 +15120,7 @@ static long pkm_kacs_kunit_create_live_file(const void *subject_token,
 	if (ret)
 		goto out_end_create;
 
-	child_path.mnt = parent_path.mnt;
+	child_path.mnt = mntget(parent_path.mnt);
 	child_path.dentry = dget(dentry);
 	pkm_kacs_set_current_native_open_request(&child_path,
 						 prepared.desired_access,
@@ -16773,7 +16830,13 @@ long pkm_kacs_kunit_mount_policy_opath_fd_resolves_superblock(
 		return PTR_ERR(file);
 
 	file->f_flags = O_PATH | O_CLOEXEC;
-	file->f_mode = FMODE_PATH;
+	/*
+	 * OR in FMODE_PATH rather than overwriting: anon_inode_create_getfile()
+	 * set FMODE_OPENED and the file pins path.dentry/path.mnt. Clearing
+	 * FMODE_OPENED makes __fput() take the file_free() fast path and skip
+	 * dput()/mntput(), leaking the dentry/mnt on every call.
+	 */
+	file->f_mode |= FMODE_PATH;
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0) {
@@ -18978,7 +19041,13 @@ out:
 		pkm_kacs_inode_sd_cache_free(cache);
 	if (sb_allocated)
 		pkm_kacs_sb_free_security(&state->sb);
-	if (cred_blob) {
+	/*
+	 * Guard on state->cred.security, not cred_blob: an early failure can
+	 * `goto out` after cred_blob is allocated but before
+	 * state->cred.security is assigned, so pkm_kacs_cred() would dereference
+	 * (NULL + lbs_cred). cred_blob itself is still freed unconditionally below.
+	 */
+	if (state->cred.security) {
 		cred_sec = pkm_kacs_cred(&state->cred);
 		if (cred_sec->token)
 			kacs_rust_token_drop(cred_sec->token);

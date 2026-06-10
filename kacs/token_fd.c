@@ -30,6 +30,7 @@
 #define PKM_KACS_ADJUST_GROUPS_RESET_INDEX 0xFFFFFFFFU
 #define PKM_KACS_DEFAULT_INDEX_NO_CHANGE 0xFFFFFFFFU
 #define PKM_KACS_MAX_DEFAULT_DACL_BYTES 65536U
+#define PKM_KACS_MAX_RESTRICT_PAYLOAD_BYTES 65536U
 
 struct pkm_kacs_token_file {
 	const void *token;
@@ -645,8 +646,16 @@ static long pkm_kacs_token_duplicate_user(
 	ret = pkm_kacs_token_duplicate_core(
 		tf, pkm_kacs_current_effective_token_ptr(),
 		pkm_kacs_current_primary_token_ptr(), &args);
-	if (!ret && copy_to_user(uargs, &args, sizeof(args)))
+	if (!ret && copy_to_user(uargs, &args, sizeof(args))) {
+		/*
+		 * The core already installed result_fd into the caller's fd
+		 * table; revoke it rather than leak an anon-inode + token ref
+		 * on the writeback fault.
+		 */
+		if (args.result_fd >= 0)
+			close_fd((unsigned int)args.result_fd);
 		return -EFAULT;
+	}
 	return ret;
 }
 
@@ -683,8 +692,12 @@ static long pkm_kacs_token_get_linked_user(
 	ret = pkm_kacs_token_get_linked_core(tf,
 					     pkm_kacs_current_primary_token_ptr(),
 					     &args);
-	if (!ret && copy_to_user(uargs, &args, sizeof(args)))
+	if (!ret && copy_to_user(uargs, &args, sizeof(args))) {
+		/* Revoke the installed fd; see duplicate_user above. */
+		if (args.result_fd >= 0)
+			close_fd((unsigned int)args.result_fd);
 		return -EFAULT;
+	}
 	return ret;
 }
 
@@ -835,6 +848,8 @@ static long pkm_kacs_token_restrict_user(
 		return -EFAULT;
 	if ((args.flags & ~KACS_TOKEN_RESTRICT_WRITE_RESTRICTED) != 0)
 		return -EINVAL;
+	if (args.data_len > PKM_KACS_MAX_RESTRICT_PAYLOAD_BYTES)
+		return -EINVAL;
 
 	if (args.data_len) {
 		payload = kmalloc(args.data_len, GFP_KERNEL);
@@ -852,8 +867,12 @@ static long pkm_kacs_token_restrict_user(
 		tf, pkm_kacs_current_effective_token_ptr(),
 		pkm_kacs_current_effective_token_ptr(), &args, payload);
 	kfree(payload);
-	if (!ret && copy_to_user(uargs, &args, sizeof(args)))
+	if (!ret && copy_to_user(uargs, &args, sizeof(args))) {
+		/* Revoke the installed fd; see duplicate_user above. */
+		if (args.result_fd >= 0)
+			close_fd((unsigned int)args.result_fd);
 		return -EFAULT;
+	}
 	return ret;
 }
 

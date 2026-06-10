@@ -182,7 +182,12 @@ fn build_default_acl(
 }
 
 fn inherited_ace_flags(parent_flags: u8) -> u8 {
-    let mut flags = parent_flags | INHERITED_ACE;
+    // Registry keys are always containers and only CONTAINER_INHERIT ACEs reach
+    // this path (see build_inherited_acl), so the inherited copy always applies
+    // to the created subkey itself. Clear INHERIT_ONLY (mirroring the file path
+    // in token_runtime.rs) so a CONTAINER_INHERIT|INHERIT_ONLY DENY/ALLOW ACE is
+    // actually enforced on subkeys instead of being skipped by the DACL walk.
+    let mut flags = (parent_flags | INHERITED_ACE) & !INHERIT_ONLY_ACE;
     if (parent_flags & NO_PROPAGATE_INHERIT_ACE) != 0 {
         flags &= !(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
     }

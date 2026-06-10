@@ -28529,6 +28529,112 @@ static void pkm_kunit_set_file_sd_label_requires_relabel(struct kunit *test)
 	kacs_rust_token_drop(subject_token);
 }
 
+static void pkm_kunit_set_file_sd_sacl_label_requires_relabel(struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_SACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const void *target_token;
+	const u8 *target_file_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	size_t target_file_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+
+	/*
+	 * KC-13: a full SACL write carrying a SYSTEM_MANDATORY_LABEL_ACE that
+	 * raises integrity above the subject's own level must require
+	 * SE_RELABEL_PRIVILEGE, just like the dedicated LABEL path. The subject
+	 * holds SE_SECURITY_PRIVILEGE (so it is authorized to write the SACL at
+	 * all, ACCESS_SYSTEM_SECURITY) but NOT SE_RELABEL_PRIVILEGE, so a HIGH
+	 * label smuggled through the SACL must be rejected by the relabel gate.
+	 */
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0,
+		PKM_KUNIT_SE_SECURITY_PRIVILEGE);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	target_file_sd = pkm_kunit_create_default_file_sd(target_token,
+							  &target_file_sd_len);
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_file_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = target_file_sd;
+	args.target_file_sd_len = target_file_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			(long)-EACCES);
+
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_file_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+static void pkm_kunit_set_file_sd_sacl_label_with_privilege_succeeds(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.security_info = PKM_KUNIT_SACL_SECURITY_INFORMATION,
+	};
+	const void *subject_token;
+	const void *target_token;
+	const u8 *target_file_sd;
+	const u8 *input_sd;
+	const u8 *result_sd = NULL;
+	size_t target_file_sd_len = 0;
+	size_t input_sd_len = 0;
+	size_t result_sd_len = 0;
+
+	/*
+	 * Companion to the requires_relabel test: with SE_SECURITY_PRIVILEGE
+	 * (authorizes the SACL write) AND SE_RELABEL_PRIVILEGE (authorizes the
+	 * label raise) the same HIGH-label SACL write must succeed, confirming the
+	 * gate is the relabel privilege rather than a structural rejection.
+	 */
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0,
+		PKM_KUNIT_SE_SECURITY_PRIVILEGE | PKM_KUNIT_SE_RELABEL_PRIVILEGE);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	target_file_sd = pkm_kunit_create_default_file_sd(target_token,
+							  &target_file_sd_len);
+	input_sd = kacs_rust_kunit_create_label_sd_subset(PKM_KUNIT_IL_HIGH,
+							  &input_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, target_file_sd);
+	KUNIT_ASSERT_NOT_NULL(test, input_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = target_file_sd;
+	args.target_file_sd_len = target_file_sd_len;
+	args.input_sd_ptr = input_sd;
+	args.input_sd_len = input_sd_len;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			0L);
+
+	pkm_kacs_free((void *)result_sd);
+	pkm_kacs_free((void *)input_sd);
+	pkm_kacs_free((void *)target_file_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
 static void pkm_kunit_set_file_sd_label_with_privilege_succeeds(
 	struct kunit *test)
 {
@@ -40691,7 +40797,7 @@ static void pkm_kunit_access_audit_object_context_msgpack_schema(
 	pkm_kunit_reset_kmes();
 }
 
-static void pkm_kunit_access_audit_invalid_process_name_fails_closed(
+static void pkm_kunit_access_audit_invalid_process_name_is_sanitized(
 	struct kunit *test)
 {
 	static const char invalid_name[] = {
@@ -40707,6 +40813,9 @@ static void pkm_kunit_access_audit_invalid_process_name_fails_closed(
 		.write_bytes = pkm_kunit_mem_write,
 	};
 	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view process = { };
 	size_t written = 0;
 	long ret;
 
@@ -40735,13 +40844,32 @@ static void pkm_kunit_access_audit_invalid_process_name_fails_closed(
 			      sizeof(pkm_kunit_system_read_audit_sd));
 	pkm_kunit_add_region(&mem, 0x3000, writebacks, sizeof(writebacks));
 
+	/*
+	 * KC-22: a non-UTF-8 process name (here "kacs\xff") is sanitized to
+	 * U+FFFD instead of failing the audited access check closed. The check
+	 * must proceed normally and the audit event must still be emitted
+	 * (audit output is unsuppressible by a bad process name) — carrying the
+	 * sanitized name "kacs\xEF\xBF\xBD".
+	 */
 	ret = pkm_kacs_kunit_access_check_syscall_scalar(&ops, 0x0100);
-	KUNIT_EXPECT_EQ(test, ret, (long)-EIO);
-	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(writebacks, 0), 0U);
-	KUNIT_EXPECT_EQ(test,
+	KUNIT_EXPECT_EQ(test, ret, (long)PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT);
+	KUNIT_ASSERT_EQ(test,
 			pkm_kmes_kunit_copy_single_buffer(
 				buffer, sizeof(buffer), &written, &snapshot),
-			-ENOENT);
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_msgpack_parse_payload_root(test, &view,
+							       &root, 7));
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_msgpack_require_key(test, &root, "process",
+							PKM_KUNIT_MSGPACK_MAP,
+							&process));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_msgpack_expect_process_map(
+				  test, &process, 4105, "kacs\xEF\xBF\xBD",
+				  PKM_KUNIT_KMES_PROCESS_PATH));
 
 	pkm_kunit_reset_kmes();
 }
@@ -41064,6 +41192,11 @@ static void pkm_kunit_access_check_explicit_pip_overrides_psb(
 	pkm_kacs_kunit_set_current_pip_context(PKM_KUNIT_PIP_TYPE_PROTECTED,
 					       PKM_KUNIT_PIP_TRUST_TEST);
 
+	/*
+	 * The caller-supplied args pip overrides the PSB pip for this query
+	 * (PSD-004 §10.7 "PIP source"): a non-dominant caller pip (1,1) narrows
+	 * the grant even though the process PSB context is dominant.
+	 */
 	ret = pkm_kunit_run_pip_labeled_access_check(1, 1, &granted);
 
 	pkm_kacs_kunit_set_current_pip_context(old_type, old_trust);
@@ -41134,6 +41267,10 @@ static void pkm_kunit_access_check_result_list_pip_default_and_override(
 						       2);
 	pkm_kacs_kunit_set_current_pip_context(old_type, old_trust);
 
+	/*
+	 * The caller-supplied args pip (1,1) overrides the dominant PSB context
+	 * for this query, narrowing every node's grant (PSD-004 §10.7).
+	 */
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(granted_out, 0),
 			KACS_ACCESS_READ_CONTROL);
@@ -42494,6 +42631,8 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_set_cached_file_sd_restore_owner_no_effect),
 	KUNIT_CASE(pkm_kunit_set_file_sd_label_requires_relabel),
 	KUNIT_CASE(pkm_kunit_set_file_sd_label_with_privilege_succeeds),
+	KUNIT_CASE(pkm_kunit_set_file_sd_sacl_label_requires_relabel),
+	KUNIT_CASE(pkm_kunit_set_file_sd_sacl_label_with_privilege_succeeds),
 	KUNIT_CASE(pkm_kunit_set_file_sd_dacl_denied_by_mic),
 	KUNIT_CASE(pkm_kunit_set_file_sd_dacl_pip_context_enforced),
 	KUNIT_CASE(pkm_kunit_set_file_sd_sacl_label_combo_invalid),
@@ -42756,7 +42895,7 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(pkm_kunit_access_audit_policy_msgpack_schema),
 	KUNIT_CASE(pkm_kunit_access_audit_subject_group_sids_msgpack_schema),
 	KUNIT_CASE(pkm_kunit_access_audit_object_context_msgpack_schema),
-	KUNIT_CASE(pkm_kunit_access_audit_invalid_process_name_fails_closed),
+	KUNIT_CASE(pkm_kunit_access_audit_invalid_process_name_is_sanitized),
 	KUNIT_CASE(pkm_kunit_privilege_use_msgpack_schema),
 	KUNIT_CASE(pkm_kunit_access_check_public_uses_psb_pip_default),
 	KUNIT_CASE(pkm_kunit_access_check_public_uses_caap_cache),

@@ -716,6 +716,146 @@ fn list_mode_returns_root_granted_and_per_node_results() {
 }
 
 #[test]
+fn caller_supplied_pip_overrides_psb_in_query() {
+    // PSD-004 §10.7 "PIP source": the caller's args pip overrides the PSB pip
+    // for the query (a broker / what-if capability, paralleling token_fd). The
+    // SD carries a HIGH process-trust-label {1024,8192} whose mask is WRITE_DAC
+    // (not READ_CONTROL). The PSB default {7,9} is NON-dominant and would strip
+    // READ_CONTROL, but the caller supplies a DOMINANT pip {2048,16384}, so the
+    // label imposes no restriction and READ_CONTROL is granted.
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 15020]);
+    let trust_label = sid_bytes([0, 0, 0, 0, 0, 19], &[1024, 8192]);
+    let dacl = acl_bytes(&[basic_ace(0x00, 0, READ_CONTROL, &user)]);
+    let sacl = acl_bytes(&[basic_ace(
+        SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+        0,
+        WRITE_DAC,
+        &trust_label,
+    )]);
+    let sd = sd_bytes_with_sacl(&owner, &group, &sacl, &dacl);
+    let sd_len = sd.len() as u32;
+
+    let mut memory = TestMemory::default();
+    memory.insert(0x1000, sd);
+
+    let mut args = build_args(136);
+    write_u64(&mut args, 8, 0x1000);
+    write_u32(&mut args, 16, sd_len);
+    write_u32(&mut args, 20, READ_CONTROL);
+    write_u32(&mut args, 24, READ_CONTROL);
+    write_u32(&mut args, 28, WRITE_DAC);
+    write_u32(&mut args, 36, READ_CONTROL | WRITE_DAC);
+    // Caller-supplied pip in args offsets 96/100 — dominant over the label.
+    write_u32(&mut args, 96, 2048);
+    write_u32(&mut args, 100, 16384);
+
+    let request = parse_access_check_abi_request(&args, &memory).expect("request should parse");
+    let token = primary_token(parse_sid(&user));
+    let result = execute_access_check_abi(&request, &resolved(&token))
+        .expect("scalar access check should execute");
+
+    assert_eq!(
+        result.disposition,
+        AccessCheckAbiReturn::Granted(READ_CONTROL)
+    );
+}
+
+#[test]
+fn object_tree_count_over_cap_is_rejected_before_alloc() {
+    // No object-tree region is inserted: the count cap must reject the request
+    // before parse_object_tree ever allocates or reads the (huge) buffer.
+    let count = kacs_core::KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT + 1;
+    let error = parse_request_with_object_tree(None, 0x2000, count)
+        .expect_err("object_tree_count over cap must fail");
+    assert_eq!(
+        error,
+        kacs_core::KacsError::InvalidAbiInput("object_tree_count exceeds maximum")
+    );
+}
+
+#[test]
+fn oversized_sd_len_is_rejected_before_read() {
+    // sd_ptr is non-zero but no region is mapped there; the size cap must fire
+    // before read_memory so a multi-gigabyte sd_len cannot drive an allocation.
+    let mut args = build_args(72);
+    write_u64(&mut args, 8, 0x1000);
+    write_u32(
+        &mut args,
+        16,
+        (kacs_core::MAX_SECURITY_DESCRIPTOR_BYTES + 1) as u32,
+    );
+
+    let error = parse_access_check_abi_request(&args, &TestMemory::default())
+        .expect_err("oversized sd_len must fail");
+    assert_eq!(
+        error,
+        kacs_core::KacsError::InvalidAbiInput("sd_len exceeds maximum security descriptor size")
+    );
+}
+
+#[test]
+fn oversized_self_sid_len_is_rejected_before_read() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 15010]);
+    let dacl = acl_bytes(&[basic_ace(0x00, 0, READ_CONTROL, &user)]);
+    let sd = sd_bytes(&owner, &group, &dacl);
+    let sd_len = sd.len() as u32;
+
+    let mut memory = TestMemory::default();
+    memory.insert(0x1000, sd);
+
+    let mut args = build_args(72);
+    write_u64(&mut args, 8, 0x1000);
+    write_u32(&mut args, 16, sd_len);
+    write_u32(&mut args, 20, READ_CONTROL);
+    write_u32(&mut args, 24, READ_CONTROL);
+    write_u32(&mut args, 28, WRITE_DAC);
+    write_u32(&mut args, 36, READ_CONTROL | WRITE_DAC);
+    write_u64(&mut args, 40, 0x2000);
+    write_u32(&mut args, 48, (Sid::MAX_SIZE + 1) as u32);
+
+    let error = parse_access_check_abi_request(&args, &memory)
+        .expect_err("oversized self_sid_len must fail");
+    assert_eq!(
+        error,
+        kacs_core::KacsError::InvalidAbiInput("self_sid_len exceeds maximum SID size")
+    );
+}
+
+#[test]
+fn oversized_local_claims_len_is_rejected_before_read() {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 15011]);
+    let dacl = acl_bytes(&[basic_ace(0x00, 0, READ_CONTROL, &user)]);
+    let sd = sd_bytes(&owner, &group, &dacl);
+    let sd_len = sd.len() as u32;
+
+    let mut memory = TestMemory::default();
+    memory.insert(0x1000, sd);
+
+    let mut args = build_args(88);
+    write_u64(&mut args, 8, 0x1000);
+    write_u32(&mut args, 16, sd_len);
+    write_u32(&mut args, 20, READ_CONTROL);
+    write_u32(&mut args, 24, READ_CONTROL);
+    write_u32(&mut args, 28, WRITE_DAC);
+    write_u32(&mut args, 36, READ_CONTROL | WRITE_DAC);
+    write_u64(&mut args, 72, 0x2000);
+    write_u32(&mut args, 80, kacs_core::KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN + 1);
+
+    let error = parse_access_check_abi_request(&args, &memory)
+        .expect_err("oversized local_claims_len must fail");
+    assert_eq!(
+        error,
+        kacs_core::KacsError::InvalidAbiInput("local_claims_len exceeds maximum")
+    );
+}
+
+#[test]
 fn list_mode_rejects_results_count_mismatch() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);

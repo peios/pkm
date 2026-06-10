@@ -587,6 +587,9 @@ struct PkmKacsBootToken {
     projected_supplementary_gids: Vec<u32>,
     own_sd_ptr: AtomicPtr<u8>,
     own_sd_len: AtomicUsize,
+    /// Seqlock guarding lockless snapshots of (own_sd_ptr, own_sd_len) against
+    /// replace_own_sd. Mirrors default_dacl_seq; see own_sd_rcu_copy.
+    own_sd_seq: AtomicU64,
 }
 
 struct TokenMutationGuard<'a> {
@@ -1502,6 +1505,14 @@ fn parse_sid_and_attributes_array(
     count: u32,
 ) -> Result<(Vec<OwnedSidAndAttributes>, Vec<SidAndAttributes<'static>>), i32> {
     let count = usize::try_from(count).map_err(|_| -EINVAL)?;
+    // Bound count against the section size before reserving capacity: each entry
+    // occupies at least 4 (sid_len) + Sid::MIN_SIZE + 4 (attributes) bytes, so a
+    // header count far larger than the section cannot drive a huge with_capacity
+    // reservation. A valid array always satisfies this bound.
+    const MIN_ENTRY_BYTES: usize = 4 + Sid::MIN_SIZE + 4;
+    if count > bytes.len() / MIN_ENTRY_BYTES {
+        return Err(-EINVAL);
+    }
     let mut owned = Vec::with_capacity(count).map_err(|_| -ENOMEM)?;
     let mut views = Vec::with_capacity(count).map_err(|_| -ENOMEM)?;
     let mut offset = 0usize;
@@ -1589,13 +1600,21 @@ fn parse_restrict_payload<'a>(
     let deny_count = usize::try_from(num_deny_indices).map_err(|_| -EINVAL)?;
     let sid_count = usize::try_from(num_restrict_sids).map_err(|_| -EINVAL)?;
     let deny_bytes = deny_count.checked_mul(4).ok_or(-ERANGE)?;
-    let mut deny_indices = Vec::with_capacity(deny_count).map_err(|_| -ENOMEM)?;
-    let mut restrict_sids = Vec::with_capacity(sid_count).map_err(|_| -ENOMEM)?;
-    let mut offset = deny_bytes;
 
+    // Bound both counts against the payload size BEFORE reserving capacity, so a
+    // huge num_deny_indices / num_restrict_sids cannot drive a multi-gigabyte
+    // with_capacity reservation. Each deny index is 4 bytes; each restricted SID
+    // is at least Sid::MIN_SIZE bytes.
     if data.len() < deny_bytes {
         return Err(-EINVAL);
     }
+    if sid_count > (data.len() - deny_bytes) / Sid::MIN_SIZE {
+        return Err(-EINVAL);
+    }
+
+    let mut deny_indices = Vec::with_capacity(deny_count).map_err(|_| -ENOMEM)?;
+    let mut restrict_sids = Vec::with_capacity(sid_count).map_err(|_| -ENOMEM)?;
+    let mut offset = deny_bytes;
 
     for index in 0..deny_count {
         let start = index.checked_mul(4).ok_or(-ERANGE)?;
@@ -2255,12 +2274,18 @@ fn get_or_create_published_session(
     user_sid: Sid<'_>,
     group_sid: Sid<'_>,
 ) -> Result<*const PkmKacsSession, i32> {
-    let _guard = lock_session_table();
-
-    if let Some(session_ptr) = session_list_find_locked(session_id) {
-        return PkmKacsSession::clone_ref_ptr(session_ptr.cast()).ok_or(-EINVAL);
+    // Fast path: an existing session needs no allocation.
+    {
+        let _guard = lock_session_table();
+        if let Some(session_ptr) = session_list_find_locked(session_id) {
+            return PkmKacsSession::clone_ref_ptr(session_ptr.cast()).ok_or(-EINVAL);
+        }
     }
 
+    // KC-12: create_session_object allocates with GFP_KERNEL, which can
+    // sleep/direct-reclaim. Build it OUTSIDE the IRQ-disabled session-table
+    // spinlock, then re-check under the lock and either link it or — if another
+    // thread published the same id meanwhile — discard our unpublished copy.
     let session_ptr = create_session_object(
         session_id,
         created_at,
@@ -2269,11 +2294,33 @@ fn get_or_create_published_session(
         user_sid,
         group_sid,
     )?;
-    let head = SESSION_LIST_HEAD.load(Ordering::Relaxed);
 
-    unsafe { &*session_ptr }.next.store(head, Ordering::Relaxed);
-    SESSION_LIST_HEAD.store(session_ptr.cast_mut(), Ordering::Release);
-    PkmKacsSession::clone_ref_ptr(session_ptr).ok_or(-EINVAL)
+    let (result, discard) = {
+        let _guard = lock_session_table();
+        if let Some(existing) = session_list_find_locked(session_id) {
+            (
+                PkmKacsSession::clone_ref_ptr(existing.cast()).ok_or(-EINVAL),
+                true,
+            )
+        } else {
+            let head = SESSION_LIST_HEAD.load(Ordering::Relaxed);
+
+            unsafe { &*session_ptr }.next.store(head, Ordering::Relaxed);
+            SESSION_LIST_HEAD.store(session_ptr.cast_mut(), Ordering::Release);
+            (
+                PkmKacsSession::clone_ref_ptr(session_ptr).ok_or(-EINVAL),
+                false,
+            )
+        }
+    };
+
+    if discard {
+        // We lost the race: our session was never published (refcount 1,
+        // unlinked), so drop_ref frees its buffers and struct directly.
+        unsafe { PkmKacsSession::drop_ref(session_ptr) };
+    }
+
+    result
 }
 
 fn create_published_dynamic_session(
@@ -2284,7 +2331,10 @@ fn create_published_dynamic_session(
     group_sid: Sid<'_>,
 ) -> Result<u64, i32> {
     let session_id = allocate_dynamic_session_id()?;
-    let _guard = lock_session_table();
+    // KC-17/KC-12: create_session_object allocates with GFP_KERNEL, which can
+    // sleep/direct-reclaim. Build it OUTSIDE the IRQ-disabled session-table
+    // spinlock and take the lock only to link it in. The dynamic session id is
+    // freshly allocated and unique, so no concurrent creator can race us.
     let session_ptr = create_session_object(
         session_id,
         created_at,
@@ -2293,10 +2343,13 @@ fn create_published_dynamic_session(
         user_sid,
         group_sid,
     )?;
-    let head = SESSION_LIST_HEAD.load(Ordering::Relaxed);
+    {
+        let _guard = lock_session_table();
+        let head = SESSION_LIST_HEAD.load(Ordering::Relaxed);
 
-    unsafe { &*session_ptr }.next.store(head, Ordering::Relaxed);
-    SESSION_LIST_HEAD.store(session_ptr.cast_mut(), Ordering::Release);
+        unsafe { &*session_ptr }.next.store(head, Ordering::Relaxed);
+        SESSION_LIST_HEAD.store(session_ptr.cast_mut(), Ordering::Release);
+    }
     Ok(session_id)
 }
 
@@ -4069,6 +4122,12 @@ fn merge_sd_with_current_descriptor(
             current_sd.sacl(),
             input_sd.sacl(),
         )?;
+        // KC-13: a full SACL write can smuggle a SYSTEM_MANDATORY_LABEL_ACE that
+        // raises the object integrity label. Gate it on SE_RELABEL_PRIVILEGE,
+        // mirroring the LABEL branch and the create path, so a sub-dominant
+        // subject (only ACCESS_SYSTEM_SECURITY) cannot relabel via the SACL.
+        let label_ace = find_explicit_label_ace_bytes(input_sd.sacl())?;
+        validate_label_assignment(subject, label_ace.as_deref())?;
         sacl = clone_optional_acl_bytes(input_sd.sacl())?;
     } else if (security_info & LABEL_SECURITY_INFORMATION) != 0 {
         let label_ace = parse_label_subset_ace_bytes(&input_sd)?;
@@ -4141,6 +4200,10 @@ fn build_replacement_file_sd_bytes(
     dacl = clone_optional_acl_bytes(input_sd.dacl())?;
 
     if (security_info & SACL_SECURITY_INFORMATION) != 0 {
+        // KC-13: gate a smuggled SYSTEM_MANDATORY_LABEL_ACE in a full SACL write
+        // on SE_RELABEL_PRIVILEGE (see merge_sd_with_current_descriptor).
+        let label_ace = find_explicit_label_ace_bytes(input_sd.sacl())?;
+        validate_label_assignment(subject, label_ace.as_deref())?;
         sacl = clone_optional_acl_bytes(input_sd.sacl())?;
     } else if (security_info & LABEL_SECURITY_INFORMATION) != 0 {
         let label_ace = parse_label_subset_ace_bytes(&input_sd)?;
@@ -4672,6 +4735,64 @@ impl PkmKacsBootToken {
             None => return None,
         };
         let logon_sid = session_ref.logon_sid;
+        // KC-14: build every fallible owned value before committing the raw heap
+        // allocations below, so a build failure only drops the session ref instead
+        // of leaking the SD buffers / token. The bare `.ok()?` sites that used to
+        // follow the commits leaked all of them.
+        let group_defaults = group_attributes.as_slice();
+        let built = (|| {
+            let owned_user_sid = build_owned_sid(user_sid.as_bytes()).ok()?;
+            let first_group_sid = first_group_sid.unwrap_or(administrators);
+            let group_sids_arr = [
+                first_group_sid,
+                if include_user_group {
+                    owned_user_sid.sid
+                } else {
+                    everyone
+                },
+                authenticated_users,
+                local,
+                logon_sid,
+            ];
+            let groups = build_owned_group_entries(&[
+                (group_sids_arr[0], group_defaults[0]),
+                (group_sids_arr[1], group_defaults[1]),
+                (authenticated_users, group_defaults[2]),
+                (local, group_defaults[3]),
+                (logon_sid, group_defaults[4]),
+            ])
+            .ok()?;
+            let group_sids = slice_to_vec(group_sids_arr.as_slice()).ok()?;
+            let group_default_attributes = slice_to_vec(group_defaults).ok()?;
+            let group_views = build_group_views(group_sids.as_slice(), group_defaults).ok()?;
+            let group_runtime_views =
+                build_group_runtime_views(group_sids.as_slice(), group_defaults).ok()?;
+            let group_attributes = build_atomic_u32_vec(group_defaults).ok()?;
+            Some((
+                owned_user_sid,
+                groups,
+                group_sids,
+                group_default_attributes,
+                group_views,
+                group_runtime_views,
+                group_attributes,
+            ))
+        })();
+        let (
+            owned_user_sid,
+            groups,
+            group_sids,
+            group_default_attributes,
+            group_views,
+            group_runtime_views,
+            group_attributes,
+        ) = match built {
+            Some(values) => values,
+            None => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return None;
+            }
+        };
         let (default_dacl_ptr, default_dacl_len) = match alloc_copy_bytes(SYSTEM_DEFAULT_DACL_BYTES)
         {
             Ok(value) => value,
@@ -4708,38 +4829,14 @@ impl PkmKacsBootToken {
         } else {
             ANONYMOUS_PROJECTED_ID
         };
-        let user_sid = build_owned_sid(user_sid.as_bytes()).ok()?;
-        let group_defaults = group_attributes.as_slice();
-        let first_group_sid = first_group_sid.unwrap_or(administrators);
-        let group_sids = [
-            first_group_sid,
-            if include_user_group { user_sid.sid } else { everyone },
-            authenticated_users,
-            local,
-            logon_sid,
-        ];
-        let groups = build_owned_group_entries(&[
-            (group_sids[0], group_defaults[0]),
-            (group_sids[1], group_defaults[1]),
-            (authenticated_users, group_defaults[2]),
-            (local, group_defaults[3]),
-            (logon_sid, group_defaults[4]),
-        ])
-        .ok()?;
-        let group_sids = slice_to_vec(group_sids.as_slice()).ok()?;
-        let group_default_attributes = slice_to_vec(group_defaults).ok()?;
-        let group_views = build_group_views(group_sids.as_slice(), group_defaults).ok()?;
-        let group_runtime_views =
-            build_group_runtime_views(group_sids.as_slice(), group_defaults).ok()?;
-        let group_attributes = build_atomic_u32_vec(group_defaults).ok()?;
 
         let token = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
             session,
-            user_sid,
+            user_sid: owned_user_sid,
             groups,
-            group_count: group_defaults.len(),
+            group_count: group_default_attributes.len(),
             group_sids,
             group_default_attributes,
             group_attributes,
@@ -4793,6 +4890,7 @@ impl PkmKacsBootToken {
             projected_supplementary_gids: Vec::new(),
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
+            own_sd_seq: AtomicU64::new(0),
         };
 
         unsafe { core::ptr::write(token_ptr, token) };
@@ -4947,6 +5045,7 @@ impl PkmKacsBootToken {
             projected_supplementary_gids: Vec::new(),
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
+            own_sd_seq: AtomicU64::new(0),
         };
 
         unsafe { core::ptr::write(token_ptr, token) };
@@ -5202,6 +5301,56 @@ impl PkmKacsBootToken {
                 return None;
             }
         };
+        // KC-14: build every fallible owned value before committing the raw heap
+        // allocations below. Only the session ref is live here, so a build failure
+        // just drops it rather than leaking the SD buffers / token allocation. The
+        // bare `.ok()?` sites that used to follow the commits leaked all of them.
+        let built = (|| {
+            let owned_anonymous = build_owned_sid(anonymous.as_bytes()).ok()?;
+            let groups = build_owned_group_entries(&[(
+                everyone,
+                ANONYMOUS_ONLY_GROUP_ATTRIBUTES[0],
+            )])
+            .ok()?;
+            let group_sids = slice_to_vec([everyone].as_slice()).ok()?;
+            let group_default_attributes =
+                slice_to_vec(&ANONYMOUS_ONLY_GROUP_ATTRIBUTES[..1]).ok()?;
+            let group_views =
+                build_group_views(group_sids.as_slice(), &ANONYMOUS_ONLY_GROUP_ATTRIBUTES[..1])
+                    .ok()?;
+            let group_runtime_views = build_group_runtime_views(
+                group_sids.as_slice(),
+                &ANONYMOUS_ONLY_GROUP_ATTRIBUTES[..1],
+            )
+            .ok()?;
+            let group_attributes =
+                build_atomic_u32_vec(&ANONYMOUS_ONLY_GROUP_ATTRIBUTES[..1]).ok()?;
+            Some((
+                owned_anonymous,
+                groups,
+                group_sids,
+                group_default_attributes,
+                group_views,
+                group_runtime_views,
+                group_attributes,
+            ))
+        })();
+        let (
+            owned_anonymous,
+            groups,
+            group_sids,
+            group_default_attributes,
+            group_views,
+            group_runtime_views,
+            group_attributes,
+        ) = match built {
+            Some(values) => values,
+            None => {
+                unsafe { PkmKacsSession::drop_ref(session.cast()) };
+                return None;
+            }
+        };
+
         let (default_dacl_ptr, default_dacl_len) = match alloc_copy_bytes(&[]) {
             Ok(value) => value,
             Err(_) => {
@@ -5224,7 +5373,8 @@ impl PkmKacsBootToken {
                 return None;
             }
         };
-        let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
+        // Allocate the token id before the token buffer so the id-allocation
+        // failure path has nothing extra to free, and the buffer can't leak.
         let token_id = match allocate_dynamic_token_id() {
             Ok(token_id) => token_id,
             Err(_) => {
@@ -5234,35 +5384,18 @@ impl PkmKacsBootToken {
                 return None;
             }
         };
-
+        let token_ptr = unsafe { pkm_kacs_zalloc(core::mem::size_of::<Self>()) } as *mut Self;
         if token_ptr.is_null() {
             free_allocated_bytes(default_dacl_ptr);
             free_allocated_bytes(own_sd_ptr);
             unsafe { PkmKacsSession::drop_ref(session.cast()) };
             return None;
         }
-
-        let anonymous = build_owned_sid(anonymous.as_bytes()).ok()?;
-        let group_sids = [everyone];
-        let groups =
-            build_owned_group_entries(&[(everyone, ANONYMOUS_ONLY_GROUP_ATTRIBUTES[0])]).ok()?;
-        let group_sids = slice_to_vec(group_sids.as_slice()).ok()?;
-        let group_default_attributes =
-            slice_to_vec(&ANONYMOUS_ONLY_GROUP_ATTRIBUTES[..1]).ok()?;
-        let group_views =
-            build_group_views(group_sids.as_slice(), &ANONYMOUS_ONLY_GROUP_ATTRIBUTES[..1]).ok()?;
-        let group_runtime_views = build_group_runtime_views(
-            group_sids.as_slice(),
-            &ANONYMOUS_ONLY_GROUP_ATTRIBUTES[..1],
-        )
-        .ok()?;
-        let group_attributes =
-            build_atomic_u32_vec(&ANONYMOUS_ONLY_GROUP_ATTRIBUTES[..1]).ok()?;
         let token = Self {
             refcount: AtomicUsize::new(1),
             mutation_lock: AtomicBool::new(false),
             session,
-            user_sid: anonymous,
+            user_sid: owned_anonymous,
             groups,
             group_count: 1,
             group_sids,
@@ -5318,6 +5451,7 @@ impl PkmKacsBootToken {
             projected_supplementary_gids: Vec::new(),
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
+            own_sd_seq: AtomicU64::new(0),
         };
 
         unsafe { core::ptr::write(token_ptr, token) };
@@ -5714,6 +5848,7 @@ impl PkmKacsBootToken {
             projected_supplementary_gids,
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
+            own_sd_seq: AtomicU64::new(0),
         };
 
         unsafe { core::ptr::write(token_ptr, token) };
@@ -5949,6 +6084,7 @@ impl PkmKacsBootToken {
             },
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
+            own_sd_seq: AtomicU64::new(0),
         };
 
         unsafe { core::ptr::write(token_ptr, copy) };
@@ -6032,6 +6168,15 @@ impl PkmKacsBootToken {
                 requested_level
             }
         };
+        // KC-14: build every fallible leaf-Vec clone BEFORE committing any raw
+        // allocation (default_dacl_ptr / own_sd_ptr / session ref / token_ptr) so
+        // a clone failure unwinds via `?` while only owned Vecs are live — nothing
+        // requiring manual freeing has been committed yet.
+        let user_claims = try_clone_vec(&self.user_claims)?;
+        let device_claims = try_clone_vec(&self.device_claims)?;
+        let lcs_scope_guids = try_clone_vec(&self.lcs_scope_guids)?;
+        let lcs_private_layers = try_clone_vec(&self.lcs_private_layers)?;
+        let projected_supplementary_gids = try_clone_vec(&self.projected_supplementary_gids)?;
         let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(self.default_dacl_bytes())?;
         let session = PkmKacsSession::clone_ref_ptr(self.session).ok_or(-EINVAL)?;
         let (own_sd_ptr, own_sd_len) = match build_token_sd_bytes(
@@ -6097,10 +6242,10 @@ impl PkmKacsBootToken {
             device_group_views,
             restricted_device_groups,
             restricted_device_group_views,
-            user_claims: try_clone_vec(&self.user_claims)?,
-            device_claims: try_clone_vec(&self.device_claims)?,
-            lcs_scope_guids: try_clone_vec(&self.lcs_scope_guids)?,
-            lcs_private_layers: try_clone_vec(&self.lcs_private_layers)?,
+            user_claims,
+            device_claims,
+            lcs_scope_guids,
+            lcs_private_layers,
             confinement_sid,
             confinement_capabilities,
             confinement_capability_views,
@@ -6116,11 +6261,10 @@ impl PkmKacsBootToken {
             ),
             projected_uid: self.projected_uid,
             projected_gid: self.projected_gid,
-            projected_supplementary_gids: try_clone_vec(
-                &self.projected_supplementary_gids,
-            )?,
+            projected_supplementary_gids,
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
+            own_sd_seq: AtomicU64::new(0),
         };
 
         unsafe { core::ptr::write(token_ptr, duplicate) };
@@ -6167,6 +6311,15 @@ impl PkmKacsBootToken {
             clone_owned_sid_entries(self.confinement_capabilities.as_slice())?;
         let confinement_capability_views =
             build_sid_and_attributes_views(confinement_capabilities.as_slice())?;
+        // KC-14: build every fallible leaf-Vec clone BEFORE committing any raw
+        // allocation (default_dacl_ptr / own_sd_ptr / session ref / token_ptr) so
+        // a clone failure unwinds via `?` while only owned Vecs are live — nothing
+        // requiring manual freeing has been committed yet.
+        let user_claims = try_clone_vec(&self.user_claims)?;
+        let device_claims = try_clone_vec(&self.device_claims)?;
+        let lcs_scope_guids = try_clone_vec(&self.lcs_scope_guids)?;
+        let lcs_private_layers = try_clone_vec(&self.lcs_private_layers)?;
+        let projected_supplementary_gids = try_clone_vec(&self.projected_supplementary_gids)?;
         let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(self.default_dacl_bytes())?;
         let session = PkmKacsSession::clone_ref_ptr(self.session).ok_or(-EINVAL)?;
         let (own_sd_ptr, own_sd_len) = match alloc_copy_bytes(self.own_sd_bytes()) {
@@ -6225,10 +6378,10 @@ impl PkmKacsBootToken {
             device_group_views,
             restricted_device_groups,
             restricted_device_group_views,
-            user_claims: try_clone_vec(&self.user_claims)?,
-            device_claims: try_clone_vec(&self.device_claims)?,
-            lcs_scope_guids: try_clone_vec(&self.lcs_scope_guids)?,
-            lcs_private_layers: try_clone_vec(&self.lcs_private_layers)?,
+            user_claims,
+            device_claims,
+            lcs_scope_guids,
+            lcs_private_layers,
             confinement_sid,
             confinement_capabilities,
             confinement_capability_views,
@@ -6244,11 +6397,10 @@ impl PkmKacsBootToken {
             ),
             projected_uid: self.projected_uid,
             projected_gid: self.projected_gid,
-            projected_supplementary_gids: try_clone_vec(
-                &self.projected_supplementary_gids,
-            )?,
+            projected_supplementary_gids,
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
+            own_sd_seq: AtomicU64::new(0),
         };
 
         unsafe { core::ptr::write(token_ptr, derived) };
@@ -6614,6 +6766,55 @@ impl PkmKacsBootToken {
         }
 
         unsafe { core::slice::from_raw_parts(ptr.cast_const(), len) }
+    }
+
+    /// Returns an owned, RCU-safe copy of the token's own SD bytes for lockless
+    /// readers. own_sd_bytes() borrows the live (own_sd_ptr, own_sd_len) pair,
+    /// which replace_own_sd swaps and frees concurrently — a UAF / torn-read
+    /// hazard for readers that hold the slice across a parse + access check.
+    /// This mirrors default_dacl_rcu_copy: a seqlock retry loop under an RCU
+    /// read guard pinned against replace_own_sd's deferred free.
+    fn own_sd_rcu_copy(&self) -> Result<DefaultDaclCopy, i32> {
+        loop {
+            let sequence = self.own_sd_seq.load(Ordering::Acquire);
+
+            if (sequence & 1) != 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+
+            let len = self.own_sd_len.load(Ordering::Acquire);
+            let copy_ptr = alloc_bytes(len)?;
+            let mut retry = false;
+
+            {
+                let _guard = RcuReadGuard::new();
+                let sequence_before = self.own_sd_seq.load(Ordering::Acquire);
+
+                if sequence_before != sequence || (sequence_before & 1) != 0 {
+                    retry = true;
+                } else if len != self.own_sd_len.load(Ordering::Acquire) {
+                    retry = true;
+                } else if len == 0 {
+                    retry = self.own_sd_seq.load(Ordering::Acquire) != sequence;
+                } else {
+                    let src_ptr = self.own_sd_ptr.load(Ordering::Acquire);
+
+                    if src_ptr.is_null() {
+                        retry = true;
+                    } else {
+                        unsafe { copy_nonoverlapping(src_ptr.cast_const(), copy_ptr, len) };
+                        retry = self.own_sd_seq.load(Ordering::Acquire) != sequence;
+                    }
+                }
+            }
+
+            if !retry {
+                return Ok(DefaultDaclCopy::from_raw(copy_ptr, len));
+            }
+
+            free_allocated_bytes(copy_ptr);
+        }
     }
 
     fn current_group_attributes(&self) -> Result<Vec<u32>, i32> {
@@ -7021,6 +7222,15 @@ impl PkmKacsBootToken {
         }
         let restricted = !restricted_sid_views.is_empty()
             || !restricted_device_group_views.is_empty();
+        // KC-14: build every fallible leaf-Vec clone BEFORE committing any raw
+        // allocation (default_dacl_ptr / own_sd_ptr / session ref / token_ptr) so
+        // a clone failure unwinds via `?` while only owned Vecs are live — nothing
+        // requiring manual freeing has been committed yet.
+        let user_claims = try_clone_vec(&self.user_claims)?;
+        let device_claims = try_clone_vec(&self.device_claims)?;
+        let lcs_scope_guids = try_clone_vec(&self.lcs_scope_guids)?;
+        let lcs_private_layers = try_clone_vec(&self.lcs_private_layers)?;
+        let projected_supplementary_gids = try_clone_vec(&self.projected_supplementary_gids)?;
         let (default_dacl_ptr, default_dacl_len) = alloc_copy_bytes(self.default_dacl_bytes())?;
         let session = PkmKacsSession::clone_ref_ptr(self.session).ok_or(-EINVAL)?;
         let (own_sd_ptr, own_sd_len) = match build_token_sd_bytes(
@@ -7071,11 +7281,51 @@ impl PkmKacsBootToken {
         for (index, entry) in groups.iter_mut().enumerate() {
             entry.attributes = group_attributes[index];
         }
-        let group_default_attributes = group_attributes.try_clone().map_err(|_| -ENOMEM)?;
-        let group_attributes_atoms = build_atomic_u32_vec(group_attributes.as_slice())?;
-        let group_views = build_group_views(group_sids.as_slice(), group_attributes.as_slice())?;
+        // KC-14: these finalization steps run after the raw allocations above are
+        // committed, so a failure must free them explicitly (mirroring the
+        // deny-index loop's cleanup) rather than leak via a bare `?`.
+        let group_default_attributes = match group_attributes.try_clone() {
+            Ok(value) => value,
+            Err(_) => {
+                free_allocated_bytes(default_dacl_ptr);
+                free_allocated_bytes(own_sd_ptr);
+                unsafe { PkmKacsSession::drop_ref(session) };
+                unsafe { pkm_kacs_free(token_ptr.cast()) };
+                return Err(-ENOMEM);
+            }
+        };
+        let group_attributes_atoms = match build_atomic_u32_vec(group_attributes.as_slice()) {
+            Ok(value) => value,
+            Err(err) => {
+                free_allocated_bytes(default_dacl_ptr);
+                free_allocated_bytes(own_sd_ptr);
+                unsafe { PkmKacsSession::drop_ref(session) };
+                unsafe { pkm_kacs_free(token_ptr.cast()) };
+                return Err(err);
+            }
+        };
+        let group_views =
+            match build_group_views(group_sids.as_slice(), group_attributes.as_slice()) {
+                Ok(value) => value,
+                Err(err) => {
+                    free_allocated_bytes(default_dacl_ptr);
+                    free_allocated_bytes(own_sd_ptr);
+                    unsafe { PkmKacsSession::drop_ref(session) };
+                    unsafe { pkm_kacs_free(token_ptr.cast()) };
+                    return Err(err);
+                }
+            };
         let group_runtime_views =
-            build_group_runtime_views(group_sids.as_slice(), group_attributes.as_slice())?;
+            match build_group_runtime_views(group_sids.as_slice(), group_attributes.as_slice()) {
+                Ok(value) => value,
+                Err(err) => {
+                    free_allocated_bytes(default_dacl_ptr);
+                    free_allocated_bytes(own_sd_ptr);
+                    unsafe { PkmKacsSession::drop_ref(session) };
+                    unsafe { pkm_kacs_free(token_ptr.cast()) };
+                    return Err(err);
+                }
+            };
 
         let restricted_token = Self {
             refcount: AtomicUsize::new(1),
@@ -7116,10 +7366,10 @@ impl PkmKacsBootToken {
             device_group_views,
             restricted_device_groups,
             restricted_device_group_views,
-            user_claims: try_clone_vec(&self.user_claims)?,
-            device_claims: try_clone_vec(&self.device_claims)?,
-            lcs_scope_guids: try_clone_vec(&self.lcs_scope_guids)?,
-            lcs_private_layers: try_clone_vec(&self.lcs_private_layers)?,
+            user_claims,
+            device_claims,
+            lcs_scope_guids,
+            lcs_private_layers,
             confinement_sid,
             confinement_capabilities,
             confinement_capability_views,
@@ -7135,11 +7385,10 @@ impl PkmKacsBootToken {
             ),
             projected_uid: self.projected_uid,
             projected_gid: self.projected_gid,
-            projected_supplementary_gids: try_clone_vec(
-                &self.projected_supplementary_gids,
-            )?,
+            projected_supplementary_gids,
             own_sd_ptr: AtomicPtr::new(own_sd_ptr),
             own_sd_len: AtomicUsize::new(own_sd_len),
+            own_sd_seq: AtomicU64::new(0),
         };
 
         unsafe { core::ptr::write(token_ptr, restricted_token) };
@@ -7324,34 +7573,46 @@ impl PkmKacsBootToken {
         .ok_or(-ERANGE)
     }
 
-    fn own_sd(&self) -> Option<SecurityDescriptor<'_>> {
-        SecurityDescriptor::parse(self.own_sd_bytes()).ok()
-    }
-
     fn replace_own_sd(
         &self,
         subject: &PkmKacsBootToken,
         security_info: u32,
         input_sd_bytes: &[u8],
     ) -> Result<(), i32> {
-        let _guard = self.lock_mutation();
-        let modified_id = self.modified_id.load(Ordering::Relaxed);
-        let Some(next_modified_id) = modified_id.checked_add(1) else {
-            return Err(-ERANGE);
-        };
-        let (new_sd_ptr, new_sd_len) = merge_process_sd_bytes(
-            subject,
-            self.own_sd_bytes(),
-            security_info,
-            input_sd_bytes,
-            true,
-        )?;
-        let old_sd_ptr = self.own_sd_ptr.load(Ordering::Relaxed);
+        let old_sd_ptr;
+        {
+            let _guard = self.lock_mutation();
+            let modified_id = self.modified_id.load(Ordering::Relaxed);
+            let Some(next_modified_id) = modified_id.checked_add(1) else {
+                return Err(-ERANGE);
+            };
+            // Reading own_sd_bytes() here is safe: writers serialize on
+            // mutation_lock, so no concurrent replace_own_sd is in flight.
+            let (new_sd_ptr, new_sd_len) = merge_process_sd_bytes(
+                subject,
+                self.own_sd_bytes(),
+                security_info,
+                input_sd_bytes,
+                true,
+            )?;
+            let sequence = self.own_sd_seq.load(Ordering::Relaxed);
+            let Some(next_sequence) = sequence.checked_add(2) else {
+                free_allocated_bytes(new_sd_ptr);
+                return Err(-ERANGE);
+            };
 
-        self.own_sd_ptr.store(new_sd_ptr, Ordering::Relaxed);
-        self.own_sd_len.store(new_sd_len, Ordering::Relaxed);
-        self.modified_id.store(next_modified_id, Ordering::Relaxed);
-        free_allocated_bytes(old_sd_ptr);
+            // KC-15: publish under the seqlock (odd while swapping, even when
+            // done) so own_sd_rcu_copy retries any snapshot overlapping the
+            // swap, and defer the free past the RCU grace period so an in-flight
+            // reader can never observe freed bytes (was an immediate free -> UAF).
+            self.own_sd_seq.store(sequence + 1, Ordering::Release);
+            old_sd_ptr = self.own_sd_ptr.swap(new_sd_ptr, Ordering::AcqRel);
+            self.own_sd_len.store(new_sd_len, Ordering::Release);
+            self.own_sd_seq.store(next_sequence, Ordering::Release);
+            self.modified_id.store(next_modified_id, Ordering::Relaxed);
+        }
+
+        free_allocated_bytes_after_rcu(old_sd_ptr);
         Ok(())
     }
 }
@@ -7533,45 +7794,61 @@ fn get_linked_token(
     return_actual: bool,
 ) -> Result<*const c_void, i32> {
     let token_ptr = (token as *const PkmKacsBootToken).cast::<c_void>();
-    let partner_ptr;
-    let _guard = lock_session_table();
-    let Some(session) = token.session_ref() else {
-        return Err(-EACCES);
-    };
 
-    match token.elevation_type() {
-        TOKEN_ELEVATION_FULL_ABI => {
-            if session.linked_elevated != token_ptr {
-                return Err(-ENOENT);
+    // KC-16: resolve the partner and take a reference to it UNDER the session-
+    // table lock, then release the lock. The query-copy path below allocates
+    // (GFP_KERNEL) and takes the partner's mutation lock — neither may run under
+    // the IRQ-disabled session-table spinlock (sleep-in-atomic), and doing so
+    // also created an AB-BA inversion against create_session. The clone_ref
+    // keeps the partner alive once the lock is dropped.
+    let partner_ref = {
+        let _guard = lock_session_table();
+        let Some(session) = token.session_ref() else {
+            return Err(-EACCES);
+        };
+
+        let partner_ptr = match token.elevation_type() {
+            TOKEN_ELEVATION_FULL_ABI => {
+                if session.linked_elevated != token_ptr {
+                    return Err(-ENOENT);
+                }
+                session.linked_filtered
             }
-            partner_ptr = session.linked_filtered;
-        }
-        TOKEN_ELEVATION_LIMITED_ABI => {
-            if session.linked_filtered != token_ptr {
-                return Err(-ENOENT);
+            TOKEN_ELEVATION_LIMITED_ABI => {
+                if session.linked_filtered != token_ptr {
+                    return Err(-ENOENT);
+                }
+                session.linked_elevated
             }
-            partner_ptr = session.linked_elevated;
+            TOKEN_ELEVATION_DEFAULT_ABI => return Err(-ENOENT),
+            _ => return Err(-EINVAL),
+        };
+
+        if partner_ptr.is_null() {
+            return Err(-ENOENT);
         }
-        TOKEN_ELEVATION_DEFAULT_ABI => return Err(-ENOENT),
-        _ => return Err(-EINVAL),
-    }
+        if (unsafe { PkmKacsBootToken::from_ptr(partner_ptr) }).is_none() {
+            return Err(-ENOENT);
+        }
 
-    if partner_ptr.is_null() {
-        return Err(-ENOENT);
-    }
-
-    let Some(partner) = (unsafe { PkmKacsBootToken::from_ptr(partner_ptr) }) else {
-        return Err(-ENOENT);
-    };
-
-    if return_actual {
         let partner_ref = PkmKacsBootToken::clone_ref(partner_ptr);
         if partner_ref.is_null() {
             return Err(-EACCES);
         }
+        partner_ref
+    };
+
+    if return_actual {
+        // Caller wants the actual partner token; we already hold a reference.
         Ok(partner_ref)
     } else {
-        partner.linked_query_copy()
+        // The allocating query-copy now runs OUTSIDE the session-table lock.
+        let result = match unsafe { PkmKacsBootToken::from_ptr(partner_ref) } {
+            Some(partner) => partner.linked_query_copy(),
+            None => Err(-ENOENT),
+        };
+        unsafe { PkmKacsBootToken::drop_ref(partner_ref) };
+        result
     }
 }
 
@@ -7633,7 +7910,14 @@ fn token_open_check_errno(
     let Some(target) = (unsafe { PkmKacsBootToken::from_ptr(target_token) }) else {
         return -EACCES;
     };
-    let Some(target_sd) = target.own_sd() else {
+    // KC-15: snapshot the target's own SD into an owned, RCU-safe copy held for
+    // the whole check; own_sd() borrowed the live buffer that replace_own_sd
+    // may swap and free concurrently.
+    let target_sd_copy = match target.own_sd_rcu_copy() {
+        Ok(copy) => copy,
+        Err(err) => return err,
+    };
+    let Some(target_sd) = SecurityDescriptor::parse(target_sd_copy.as_slice()).ok() else {
         return -EACCES;
     };
     let normalized = match TOKEN_GENERIC_MAPPING.normalize_desired_access(desired) {
@@ -7730,7 +8014,13 @@ fn token_sd_access_check_errno_with_intent(
     let Some(target) = (unsafe { PkmKacsBootToken::from_ptr(target_token) }) else {
         return Err(-EACCES);
     };
-    let Some(target_sd) = target.own_sd() else {
+    // KC-15: snapshot the target's own SD into an owned, RCU-safe copy (see
+    // token_open_check_errno).
+    let target_sd_copy = match target.own_sd_rcu_copy() {
+        Ok(copy) => copy,
+        Err(err) => return Err(err),
+    };
+    let Some(target_sd) = SecurityDescriptor::parse(target_sd_copy.as_slice()).ok() else {
         return Err(-EACCES);
     };
     let normalized = match TOKEN_GENERIC_MAPPING.normalize_desired_access(desired) {
@@ -10139,15 +10429,19 @@ pub extern "C" fn kacs_rust_parse_stored_file_sd_layout(
     sd_len: usize,
     layout_out: *mut KacsRustCachedSdLayout,
 ) -> i32 {
-    let Some(layout_out_ref) = (unsafe { layout_out.as_mut() }) else {
+    if layout_out.is_null() {
         return -EINVAL;
-    };
+    }
     let ret = kacs_rust_parse_file_sd_layout(sd_ptr, sd_len, layout_out);
     if ret != 0 {
         return ret;
     }
 
-    if layout_out_ref.owner_present == 0 {
+    // Read back through the raw pointer instead of holding a `&mut` across the
+    // call above — that call re-borrows and writes the same memory, which would
+    // invalidate the outer `&mut` under Stacked/Tree Borrows. A zero return
+    // guarantees layout_out was non-null and fully written.
+    if unsafe { (*layout_out).owner_present } == 0 {
         return -EINVAL;
     }
     0
@@ -10285,7 +10579,14 @@ pub extern "C" fn kacs_rust_query_token_sd_subset(
     *out_sd_ptr = null();
     *out_sd_len = 0;
 
-    match build_sd_subset_bytes(token.own_sd_bytes(), security_info) {
+    // KC-15: snapshot the own SD into an owned, RCU-safe copy; own_sd_bytes()
+    // borrows the live buffer that replace_own_sd may swap/free concurrently,
+    // which can tear the (ptr, len) pair into an out-of-bounds slice.
+    let own_sd_copy = match token.own_sd_rcu_copy() {
+        Ok(copy) => copy,
+        Err(err) => return err,
+    };
+    match build_sd_subset_bytes(own_sd_copy.as_slice(), security_info) {
         Ok((ptr, len)) => {
             *out_sd_ptr = ptr.cast_const();
             *out_sd_len = len;
