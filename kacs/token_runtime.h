@@ -1098,10 +1098,13 @@ long pkm_kacs_kunit_query_missing_file_sd_on_policy_mount(
 long pkm_kacs_kunit_persistent_synthesis_second_query_uses_cache(
 	const void *subject_token, long *first_ret_out, long *second_ret_out,
 	u32 *xattr_written_out);
+long pkm_kacs_kunit_persistent_synthesis_deferred_persist(
+	const void *subject_token, u32 *inline_written_out,
+	u32 *persisted_written_out);
 int pkm_kacs_kunit_cache_generation_currentness(
 	const u8 *valid_sd_ptr, size_t valid_sd_len, u32 *missing_current_out,
 	u32 *synthetic_current_out, u32 *xattr_current_out,
-	u32 *corrupt_current_out);
+	u32 *corrupt_current_out, u32 *synthetic_pending_current_out);
 long pkm_kacs_kunit_set_mount_policy_for_subject(
 	const void *subject_token, u64 magic,
 	const struct kacs_mount_policy_args *args, u32 *policy_out,

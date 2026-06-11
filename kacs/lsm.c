@@ -243,6 +243,15 @@ enum pkm_kacs_inode_sd_source {
 	PKM_KACS_INODE_SD_SOURCE_MISSING = 2,
 	PKM_KACS_INODE_SD_SOURCE_SYNTHETIC = 3,
 	PKM_KACS_INODE_SD_SOURCE_CORRUPT = 4,
+	/*
+	 * A synthesized SD on a SYNTHESIZE_PERSISTENT mount that has not yet
+	 * been written back to the xattr. The write-back is deferred to a
+	 * task_work that runs at return-to-userspace (no FACS/VFS locks held);
+	 * see pkm_kacs_inode_queue_sd_persist(). Treated like SYNTHETIC for
+	 * generation invalidation until the write-back promotes the on-disk
+	 * xattr to a real SOURCE_XATTR entry on the next cache miss.
+	 */
+	PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING = 5,
 };
 
 struct pkm_kacs_inode_sd_cache {
@@ -299,6 +308,8 @@ struct pkm_kacs_inode_security {
 	struct pkm_kacs_inode_sd_cache __rcu *sd_cache;
 	atomic_t delete_on_close_lineages;
 	atomic_t signed_exec_pinned;
+	/* Set under ->lock while a deferred SD persist task_work is in flight. */
+	bool persist_work_queued;
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 	bool kunit_fake_xattr_enabled;
 	bool kunit_fake_xattr_fail_set;
@@ -1143,6 +1154,7 @@ static bool pkm_kacs_inode_sd_cache_current(const struct super_block *sb,
 	switch (cache->source) {
 	case PKM_KACS_INODE_SD_SOURCE_MISSING:
 	case PKM_KACS_INODE_SD_SOURCE_SYNTHETIC:
+	case PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING:
 		return cache->policy_generation ==
 		       pkm_kacs_superblock_policy_generation(sb);
 	default:
@@ -1217,6 +1229,7 @@ static int pkm_kacs_inode_alloc_security(struct inode *inode)
 	RCU_INIT_POINTER(sec->sd_cache, NULL);
 	atomic_set(&sec->delete_on_close_lineages, 0);
 	atomic_set(&sec->signed_exec_pinned, 0);
+	sec->persist_work_queued = false;
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 	sec->kunit_fake_xattr_enabled = false;
 	sec->kunit_fake_xattr_bytes = NULL;
@@ -1622,6 +1635,8 @@ retry:
 static long pkm_kacs_inode_resolve_effective_cache_locked(
 	struct file *file, struct pkm_kacs_inode_security *sec,
 	struct pkm_kacs_inode_sd_cache **cache_out, unsigned int depth);
+static void pkm_kacs_inode_queue_sd_persist(
+	struct file *file, struct pkm_kacs_inode_security *sec);
 
 static long pkm_kacs_synthesize_missing_file_sd_locked(
 	struct file *file, struct pkm_kacs_inode_security *sec,
@@ -1715,34 +1730,38 @@ static long pkm_kacs_synthesize_missing_file_sd_locked(
 			goto out_template;
 	}
 
+	/*
+	 * Both synthesize classes cache the result in the inode blob and tag it
+	 * with the policy generation so a later mount-policy/template change
+	 * discards and repopulates it. PERSISTENT additionally owes a write-back
+	 * to the xattr, but synthesis runs under sec->lock and the xattr write
+	 * takes i_rwsem -- writing here would re-introduce the sec->lock ->
+	 * i_rwsem ordering the access path forbids, and self-deadlocks when the
+	 * caller is a metadata hook already holding i_rwsem. So PERSISTENT marks
+	 * the entry SYNTHETIC_PENDING and defers the write-back to a task_work
+	 * (pkm_kacs_inode_queue_sd_persist) queued by the caller after sec->lock
+	 * is dropped; that work runs at return-to-userspace with no FACS/VFS
+	 * locks held. The decision is always correct from the cached SD the
+	 * instant synthesis completes; the on-disk xattr is a recomputable
+	 * cache, so a missed write-back simply re-synthesizes identically.
+	 */
 	new_cache = pkm_kacs_inode_sd_cache_alloc_ex(
 		PKM_KACS_INODE_SD_VALID, new_sd_bytes, new_sd_len,
-		mount_policy == KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL ?
-			PKM_KACS_INODE_SD_SOURCE_SYNTHETIC :
-			PKM_KACS_INODE_SD_SOURCE_XATTR,
-		mount_policy == KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL ?
-			policy_generation : 0);
+		mount_policy == KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT ?
+			PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING :
+			PKM_KACS_INODE_SD_SOURCE_SYNTHETIC,
+		policy_generation);
 	if (!new_cache) {
 		pkm_kacs_free((void *)new_sd_bytes);
 		ret = -ENOMEM;
 		goto out_template;
 	}
 
-	if (mount_policy == KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT) {
-		ret = pkm_kacs_inode_write_sd_xattr_locked(file, new_sd_bytes,
-							   new_sd_len);
-		if (ret)
-			goto out;
-	}
-
 	pkm_kacs_inode_replace_sd_cache_locked(sec, new_cache);
 	*cache_out = new_cache;
 	new_cache = NULL;
 	ret = 0;
-	goto out_template;
 
-out:
-	pkm_kacs_inode_sd_cache_free(new_cache);
 out_template:
 	pkm_kacs_free((void *)template_sd_ptr);
 	return ret;
@@ -1831,6 +1850,7 @@ static long pkm_kacs_inode_ensure_effective_cache(
 	struct pkm_kacs_inode_sd_cache *cache;
 	struct pkm_kacs_inode_sd_cache *locked_cache = NULL;
 	struct inode *inode;
+	bool needs_persist = false;
 	long ret;
 
 	if (!file || !sec)
@@ -1849,7 +1869,24 @@ static long pkm_kacs_inode_ensure_effective_cache(
 	mutex_lock(&sec->lock);
 	ret = pkm_kacs_inode_resolve_effective_cache_locked(file, sec,
 							    &locked_cache, 0);
+	/*
+	 * A freshly synthesized SD on a SYNTHESIZE_PERSISTENT mount owes a
+	 * deferred write-back. Claim it under sec->lock (one in-flight persist
+	 * per inode) and queue the task_work below, after the lock is dropped
+	 * -- queuing must not run under sec->lock, and the write itself must not
+	 * run under any FACS/VFS lock.
+	 */
+	if (ret == 0 && locked_cache &&
+	    locked_cache->state == PKM_KACS_INODE_SD_VALID &&
+	    locked_cache->source == PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING &&
+	    !sec->persist_work_queued) {
+		sec->persist_work_queued = true;
+		needs_persist = true;
+	}
 	mutex_unlock(&sec->lock);
+
+	if (needs_persist)
+		pkm_kacs_inode_queue_sd_persist(file, sec);
 	return ret;
 }
 
@@ -1945,24 +1982,17 @@ static long pkm_kacs_prepare_new_file_sd_core(
 						   new_sd_ptr, new_sd_len);
 }
 
-static long pkm_kacs_inode_write_sd_xattr_locked(struct file *file,
-						 const u8 *sd_bytes,
-						 size_t sd_len)
+static long pkm_kacs_inode_write_sd_xattr_dentry_locked(
+	struct mnt_idmap *idmap, struct dentry *dentry, struct inode *inode,
+	const u8 *sd_bytes, size_t sd_len)
 {
-	struct dentry *dentry;
-	struct inode *inode;
 	struct pkm_kacs_inode_security *sec;
 	int ret;
 
-	if (!file || !sd_bytes || sd_len == 0)
+	if (!dentry || !inode || !sd_bytes || sd_len == 0)
 		return -EINVAL;
 	if (kacs_rust_validate_stored_sd_bytes(sd_bytes, sd_len) != 0)
 		return -EINVAL;
-
-	dentry = file_dentry(file);
-	inode = file_inode(file);
-	if (!dentry || !inode)
-		return -EACCES;
 	sec = inode->i_security ? pkm_kacs_inode(inode) : NULL;
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
@@ -1980,13 +2010,140 @@ static long pkm_kacs_inode_write_sd_xattr_locked(struct file *file,
 	 */
 	if (current && current->security)
 		pkm_kacs_task(current)->internal_sd_write_depth++;
-	ret = __vfs_setxattr_noperm(file_mnt_idmap(file), dentry,
+	ret = __vfs_setxattr_noperm(idmap, dentry,
 				    pkm_kacs_inode_sd_xattr_name(inode),
 				    sd_bytes, sd_len, 0);
 	if (current && current->security)
 		pkm_kacs_task(current)->internal_sd_write_depth--;
 	inode_unlock(inode);
 	return ret;
+}
+
+static long pkm_kacs_inode_write_sd_xattr_locked(struct file *file,
+						 const u8 *sd_bytes,
+						 size_t sd_len)
+{
+	if (!file)
+		return -EINVAL;
+	return pkm_kacs_inode_write_sd_xattr_dentry_locked(
+		file_mnt_idmap(file), file_dentry(file), file_inode(file),
+		sd_bytes, sd_len);
+}
+
+/*
+ * Deferred write-back of a SYNTHESIZE_PERSISTENT synthesized SD.
+ *
+ * Synthesis caches the SD as SOURCE_SYNTHETIC_PENDING but cannot write the
+ * xattr inline (it runs under sec->lock, and the write takes i_rwsem; on the
+ * metadata-hook path i_rwsem is already held by the VFS, which would
+ * self-deadlock). We instead pin the dentry and register a task_work that runs
+ * at return-to-userspace with no FACS/VFS locks held, then writes the xattr
+ * cleanly. The on-disk SD is a recomputable cache, so this is best-effort:
+ * any failure (or a never-fired work) just leaves the entry to re-synthesize.
+ */
+struct pkm_kacs_sd_persist_work {
+	struct callback_head cb;
+	struct dentry *dentry;
+};
+
+static void pkm_kacs_inode_clear_persist_claim(
+	struct pkm_kacs_inode_security *sec)
+{
+	mutex_lock(&sec->lock);
+	sec->persist_work_queued = false;
+	mutex_unlock(&sec->lock);
+}
+
+static void pkm_kacs_inode_run_sd_persist(struct dentry *dentry,
+					  struct inode *inode,
+					  struct pkm_kacs_inode_security *sec)
+{
+	struct pkm_kacs_inode_sd_cache *cur;
+	u8 *snapshot = NULL;
+	size_t snapshot_len = 0;
+
+	/*
+	 * Snapshot the pending SD under sec->lock, then drop the lock before
+	 * the xattr write (which takes i_rwsem) to preserve i_rwsem -> sec->lock
+	 * ordering. Only persist if the entry is still pending and still matches
+	 * the current policy generation -- a generation change means the entry
+	 * is stale and will be re-synthesized, so we must not pin stale bytes
+	 * onto disk.
+	 */
+	mutex_lock(&sec->lock);
+	sec->persist_work_queued = false;
+	cur = rcu_dereference_protected(sec->sd_cache,
+					lockdep_is_held(&sec->lock));
+	if (cur && cur->state == PKM_KACS_INODE_SD_VALID &&
+	    cur->source == PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING &&
+	    cur->bytes && cur->len &&
+	    cur->policy_generation ==
+		    pkm_kacs_superblock_policy_generation(inode->i_sb)) {
+		snapshot = kmemdup(cur->bytes, cur->len, GFP_KERNEL);
+		if (snapshot)
+			snapshot_len = cur->len;
+	}
+	mutex_unlock(&sec->lock);
+
+	if (!snapshot)
+		return;
+
+	/*
+	 * Best-effort. On success the on-disk xattr now exists; the cached
+	 * entry stays SYNTHETIC_PENDING and serves reads unchanged until the
+	 * next cache miss re-reads the (now present) xattr as a real
+	 * SOURCE_XATTR entry. On failure the entry simply re-synthesizes later.
+	 */
+	(void)pkm_kacs_inode_write_sd_xattr_dentry_locked(
+		&nop_mnt_idmap, dentry, inode, snapshot, snapshot_len);
+	kfree(snapshot);
+}
+
+static void pkm_kacs_inode_sd_persist_work_fn(struct callback_head *cb)
+{
+	struct pkm_kacs_sd_persist_work *work =
+		container_of(cb, struct pkm_kacs_sd_persist_work, cb);
+	struct dentry *dentry = work->dentry;
+	struct inode *inode = d_inode(dentry);
+
+	if (inode && inode->i_security)
+		pkm_kacs_inode_run_sd_persist(dentry, inode,
+					      pkm_kacs_inode(inode));
+
+	dput(dentry);
+	kfree(work);
+}
+
+static void pkm_kacs_inode_queue_sd_persist(
+	struct file *file, struct pkm_kacs_inode_security *sec)
+{
+	struct pkm_kacs_sd_persist_work *work;
+	struct dentry *dentry;
+
+	/*
+	 * task_work fires on return to userspace, so it is only meaningful for a
+	 * user task. Kernel threads and exiting tasks fall back to lazy
+	 * re-synthesis: clear the claim so a later access can retry.
+	 */
+	dentry = file ? file_dentry(file) : NULL;
+	if (!dentry || (current->flags & PF_KTHREAD)) {
+		pkm_kacs_inode_clear_persist_claim(sec);
+		return;
+	}
+
+	work = kmalloc(sizeof(*work), GFP_KERNEL);
+	if (!work) {
+		pkm_kacs_inode_clear_persist_claim(sec);
+		return;
+	}
+
+	init_task_work(&work->cb, pkm_kacs_inode_sd_persist_work_fn);
+	work->dentry = dget(dentry);
+	if (task_work_add(current, &work->cb, TWA_RESUME)) {
+		dput(work->dentry);
+		kfree(work);
+		pkm_kacs_inode_clear_persist_claim(sec);
+	}
 }
 
 static int pkm_kacs_inode_getattr(const struct path *path)
@@ -16464,10 +16621,75 @@ out_free:
 	return ret;
 }
 
+long pkm_kacs_kunit_persistent_synthesis_deferred_persist(
+	const void *subject_token, u32 *inline_written_out,
+	u32 *persisted_written_out)
+{
+	struct pkm_kacs_kunit_file_mount_state *state;
+	struct pkm_kacs_inode_security *sec;
+	const u8 *subset = NULL;
+	size_t subset_len = 0;
+	long ret;
+
+	if (!subject_token || !inline_written_out || !persisted_written_out)
+		return -EINVAL;
+
+	*inline_written_out = 0;
+	*persisted_written_out = 0;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		state, TMPFS_MAGIC, NULL,
+		KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT, NULL, 0,
+		S_IFREG, true);
+	if (ret)
+		goto out_free;
+
+	state->file.f_mode = FMODE_PATH;
+	ret = pkm_kacs_query_file_sd_core(subject_token, &state->file,
+					  KACS_SECINFO_DACL, &subset,
+					  &subset_len);
+	pkm_kacs_free((void *)subset);
+	if (ret)
+		goto out_cleanup;
+
+	/*
+	 * Synthesis on a PERSISTENT mount must defer the xattr write-back; the
+	 * fake xattr stays unwritten immediately after the query.
+	 */
+	sec = pkm_kacs_inode(&state->inode);
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	*inline_written_out = (sec->kunit_fake_xattr_bytes &&
+			       sec->kunit_fake_xattr_len != 0) ?
+				      1U :
+				      0U;
+#endif
+
+	/* Drive the work the return-to-userspace task_work would run. */
+	pkm_kacs_inode_run_sd_persist(&state->dentry, &state->inode, sec);
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	*persisted_written_out = (sec->kunit_fake_xattr_bytes &&
+				  sec->kunit_fake_xattr_len != 0) ?
+					 1U :
+					 0U;
+#endif
+	ret = 0;
+
+out_cleanup:
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_free:
+	kfree(state);
+	return ret;
+}
+
 int pkm_kacs_kunit_cache_generation_currentness(
 	const u8 *valid_sd_ptr, size_t valid_sd_len, u32 *missing_current_out,
 	u32 *synthetic_current_out, u32 *xattr_current_out,
-	u32 *corrupt_current_out)
+	u32 *corrupt_current_out, u32 *synthetic_pending_current_out)
 {
 	struct pkm_kacs_kunit_file_mount_state state = { };
 	struct pkm_kacs_superblock_security *sb_sec;
@@ -16475,19 +16697,22 @@ int pkm_kacs_kunit_cache_generation_currentness(
 	struct pkm_kacs_inode_sd_cache *synthetic_cache = NULL;
 	struct pkm_kacs_inode_sd_cache *xattr_cache = NULL;
 	struct pkm_kacs_inode_sd_cache *corrupt_cache = NULL;
+	struct pkm_kacs_inode_sd_cache *pending_cache = NULL;
 	const u8 *synthetic_bytes = NULL;
 	const u8 *xattr_bytes = NULL;
+	const u8 *pending_bytes = NULL;
 	int ret;
 
 	if (!valid_sd_ptr || valid_sd_len == 0 || !missing_current_out ||
 	    !synthetic_current_out || !xattr_current_out ||
-	    !corrupt_current_out)
+	    !corrupt_current_out || !synthetic_pending_current_out)
 		return -EINVAL;
 
 	*missing_current_out = 0;
 	*synthetic_current_out = 0;
 	*xattr_current_out = 0;
 	*corrupt_current_out = 0;
+	*synthetic_pending_current_out = 0;
 
 	ret = pkm_kacs_kunit_init_file_mount_state_ex(
 		&state, TMPFS_MAGIC, NULL,
@@ -16521,8 +16746,18 @@ int pkm_kacs_kunit_cache_generation_currentness(
 	corrupt_cache = pkm_kacs_inode_sd_cache_alloc_ex(
 		PKM_KACS_INODE_SD_CORRUPT, NULL, 0,
 		PKM_KACS_INODE_SD_SOURCE_CORRUPT, 1);
+	pending_bytes = kmemdup(valid_sd_ptr, valid_sd_len, GFP_KERNEL);
+	if (!pending_bytes) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	pending_cache = pkm_kacs_inode_sd_cache_alloc_ex(
+		PKM_KACS_INODE_SD_VALID, pending_bytes, valid_sd_len,
+		PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING, 1);
+	if (pending_cache)
+		pending_bytes = NULL;
 	if (!missing_cache || !synthetic_cache || !xattr_cache ||
-	    !corrupt_cache) {
+	    !corrupt_cache || !pending_cache) {
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -16543,11 +16778,17 @@ int pkm_kacs_kunit_cache_generation_currentness(
 				       &state.sb, corrupt_cache) ?
 				       1U :
 				       0U;
+	*synthetic_pending_current_out = pkm_kacs_inode_sd_cache_current(
+						 &state.sb, pending_cache) ?
+						 1U :
+						 0U;
 	ret = 0;
 
 out:
+	pkm_kacs_free((void *)pending_bytes);
 	pkm_kacs_free((void *)xattr_bytes);
 	pkm_kacs_free((void *)synthetic_bytes);
+	pkm_kacs_inode_sd_cache_free(pending_cache);
 	pkm_kacs_inode_sd_cache_free(corrupt_cache);
 	pkm_kacs_inode_sd_cache_free(xattr_cache);
 	pkm_kacs_inode_sd_cache_free(synthetic_cache);

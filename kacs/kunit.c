@@ -26757,7 +26757,7 @@ static void pkm_kunit_file_missing_sd_synthesize_ephemeral_root_query_success(
 	pkm_kacs_free((void *)subset);
 }
 
-static void pkm_kunit_file_missing_sd_synthesize_persistent_root_writes_xattr(
+static void pkm_kunit_file_missing_sd_synthesize_persistent_root_defers_xattr(
 	struct kunit *test)
 {
 	struct pkm_kacs_kunit_missing_file_sd_query_args args = {
@@ -26774,6 +26774,12 @@ static void pkm_kunit_file_missing_sd_synthesize_persistent_root_writes_xattr(
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 	args.subject_token = subject_token;
 
+	/*
+	 * Synthesis yields a usable SD immediately, but the write-back to the
+	 * xattr is deferred to a task_work (it cannot run inline under
+	 * sec->lock / a held i_rwsem). The xattr is therefore NOT written by
+	 * the query itself.
+	 */
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_query_missing_file_sd_on_policy_mount(
 				&args, &subset, &subset_len,
@@ -26781,9 +26787,33 @@ static void pkm_kunit_file_missing_sd_synthesize_persistent_root_writes_xattr(
 			0L);
 	KUNIT_ASSERT_NOT_NULL(test, subset);
 	KUNIT_EXPECT_NE(test, subset_len, (size_t)0);
-	KUNIT_EXPECT_EQ(test, xattr_written, 1U);
+	KUNIT_EXPECT_EQ(test, xattr_written, 0U);
 
 	pkm_kacs_free((void *)subset);
+}
+
+static void pkm_kunit_file_missing_sd_persistent_deferred_persist_writes_xattr(
+	struct kunit *test)
+{
+	const void *subject_token;
+	u32 inline_written = 1;
+	u32 persisted_written = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	/*
+	 * The deferred task_work, once it runs, writes the synthesized SD to
+	 * the xattr: not written immediately after the query, written after the
+	 * persist fires.
+	 */
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_persistent_synthesis_deferred_persist(
+				subject_token, &inline_written,
+				&persisted_written),
+			0L);
+	KUNIT_EXPECT_EQ(test, inline_written, 0U);
+	KUNIT_EXPECT_EQ(test, persisted_written, 1U);
 }
 
 static void pkm_kunit_file_missing_sd_persistent_synthesizes_once(
@@ -26792,11 +26822,17 @@ static void pkm_kunit_file_missing_sd_persistent_synthesizes_once(
 	const void *subject_token;
 	long first_ret = 0;
 	long second_ret = 0;
-	u32 xattr_written = 0;
+	u32 xattr_written = 1;
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
+	/*
+	 * The first query synthesizes and caches a SYNTHETIC_PENDING SD; the
+	 * second query is served from that cache without re-synthesizing
+	 * (both succeed). The synthesized SD is not written to the xattr by the
+	 * query path -- the write-back is deferred to a task_work.
+	 */
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_persistent_synthesis_second_query_uses_cache(
 				subject_token, &first_ret, &second_ret,
@@ -26804,7 +26840,7 @@ static void pkm_kunit_file_missing_sd_persistent_synthesizes_once(
 			0L);
 	KUNIT_EXPECT_EQ(test, first_ret, 0L);
 	KUNIT_EXPECT_EQ(test, second_ret, 0L);
-	KUNIT_EXPECT_EQ(test, xattr_written, 1U);
+	KUNIT_EXPECT_EQ(test, xattr_written, 0U);
 }
 
 static void pkm_kunit_file_sd_generation_currentness_by_source(
@@ -26817,6 +26853,7 @@ static void pkm_kunit_file_sd_generation_currentness_by_source(
 	u32 synthetic_current = 1;
 	u32 xattr_current = 0;
 	u32 corrupt_current = 0;
+	u32 synthetic_pending_current = 1;
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
@@ -26824,16 +26861,22 @@ static void pkm_kunit_file_sd_generation_currentness_by_source(
 	file_sd = pkm_kunit_create_default_file_sd(subject_token, &file_sd_len);
 	KUNIT_ASSERT_NOT_NULL(test, file_sd);
 
+	/*
+	 * Generation-tagged sources (missing, synthetic, and the deferred
+	 * synthetic-pending) go stale when the policy generation advances;
+	 * xattr-backed and corrupt entries do not.
+	 */
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_cache_generation_currentness(
 				file_sd, file_sd_len, &missing_current,
 				&synthetic_current, &xattr_current,
-				&corrupt_current),
+				&corrupt_current, &synthetic_pending_current),
 			0);
 	KUNIT_EXPECT_EQ(test, missing_current, 0U);
 	KUNIT_EXPECT_EQ(test, synthetic_current, 0U);
 	KUNIT_EXPECT_EQ(test, xattr_current, 1U);
 	KUNIT_EXPECT_EQ(test, corrupt_current, 1U);
+	KUNIT_EXPECT_EQ(test, synthetic_pending_current, 0U);
 
 	pkm_kacs_free((void *)file_sd);
 }
@@ -42579,7 +42622,9 @@ static struct kunit_case pkm_kunit_cases[] = {
 	KUNIT_CASE(
 		pkm_kunit_file_missing_sd_synthesize_ephemeral_root_query_success),
 	KUNIT_CASE(
-		pkm_kunit_file_missing_sd_synthesize_persistent_root_writes_xattr),
+		pkm_kunit_file_missing_sd_synthesize_persistent_root_defers_xattr),
+	KUNIT_CASE(
+		pkm_kunit_file_missing_sd_persistent_deferred_persist_writes_xattr),
 	KUNIT_CASE(
 		pkm_kunit_file_missing_sd_persistent_synthesizes_once),
 	KUNIT_CASE(pkm_kunit_file_sd_generation_currentness_by_source),
