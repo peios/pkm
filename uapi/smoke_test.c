@@ -361,6 +361,97 @@ ASSERT_IOCTL_ENCODING(REG_IOC_TXN_STATUS, REG_IOC_TXN_STATUS_NR, _IOC_READ,
 _Static_assert(sizeof(REG_BACKUP_MAGIC) - 1 == 8,
 	       "REG_BACKUP_MAGIC must be eight bytes");
 
+/*
+ * KACS wire-format payloads (kacs_create_token / kacs_create_session /
+ * kacs_set_caap specs). These are offset-defined byte layouts, not C structs;
+ * pin the documented header byte lengths and the load-bearing field offsets so
+ * the uapi mirror cannot drift from the kernel's parser.
+ */
+
+/* Token spec: the fixed header is exactly its documented byte length, and the
+ * minimum spec is the header alone. The last header field (lcs_credentials_
+ * offset, a __u32) ends the header. */
+_Static_assert(KACS_TOKEN_SPEC_HEADER_BYTES
+		       == KACS_TOKEN_SPEC_OFF_LCS_CREDENTIALS_OFFSET
+				  + sizeof(__u32),
+	       "token-spec header length disagrees with its last field offset");
+_Static_assert(KACS_TOKEN_SPEC_MIN_BYTES == KACS_TOKEN_SPEC_HEADER_BYTES,
+	       "token-spec minimum size must be the header size");
+_Static_assert(KACS_TOKEN_SPEC_HEADER_BYTES == 192U,
+	       "token-spec header must be 192 bytes (PSD-004 13.6)");
+_Static_assert(KACS_TOKEN_SPEC_VERSION == 2U,
+	       "token-spec version must be 2 (PSD-004 13.6)");
+_Static_assert(KACS_TOKEN_SPEC_OFF_SOURCE_NAME
+		       + KACS_TOKEN_SPEC_SOURCE_NAME_BYTES
+		       == KACS_TOKEN_SPEC_OFF_SOURCE_ID,
+	       "token-spec source_name field must abut source_id");
+
+/* Token LCS extension: the fixed header is one past its last field
+ * (private_layer_count, a __u32). */
+_Static_assert(KACS_TOKEN_LCS_EXT_HEADER_BYTES
+		       == KACS_TOKEN_LCS_EXT_OFF_PRIVATE_LAYER_COUNT
+				  + sizeof(__u32),
+	       "LCS-extension header length disagrees with its last field offset");
+_Static_assert(KACS_TOKEN_LCS_EXT_VERSION == 1U,
+	       "LCS-extension version must be 1 (PSD-004 13.6)");
+
+/* Session spec: the documented minimum is the empty-auth-package, minimum-SID
+ * case (logon_type + auth_pkg_len + user_sid_len + an 8-byte SID). */
+_Static_assert(KACS_SESSION_SPEC_OFF_AUTH_PKG
+		       == KACS_SESSION_SPEC_OFF_AUTH_PKG_LEN + sizeof(__u16),
+	       "session-spec auth_pkg must follow the __le16 auth_pkg_len");
+_Static_assert(KACS_SESSION_SPEC_MIN_BYTES == 15U,
+	       "session-spec minimum size disagrees with PSD-004 13.6");
+
+/* CAAP spec: the fixed prefix is version (__u8) + rule_count (__le32). */
+_Static_assert(KACS_CAAP_SPEC_OFF_RULE_COUNT
+		       == KACS_CAAP_SPEC_OFF_VERSION + sizeof(__u8),
+	       "CAAP rule_count must follow the version byte");
+_Static_assert(KACS_CAAP_SPEC_PREFIX_BYTES
+		       == KACS_CAAP_SPEC_OFF_RULE_COUNT + sizeof(__u32),
+	       "CAAP prefix length disagrees with its field offsets");
+_Static_assert(KACS_CAAP_SPEC_VERSION == 1U,
+	       "CAAP spec version must be 1 (PSD-004 central-access-policy)");
+
+/*
+ * Mandatory-label ACE mask bits (<pkm/sd.h>). These are the policy bits of a
+ * KACS_ACE_TYPE_SYSTEM_MANDATORY_LABEL ACE's access mask; pin each value so
+ * the uapi mirror cannot drift from the kernel MIC enforcer (PSD-004 §10.3).
+ */
+_Static_assert(KACS_SYSTEM_MANDATORY_LABEL_NO_READ_UP == 0x00000001U,
+	       "mandatory-label NO_READ_UP must be bit 0 (PSD-004 §10.3)");
+_Static_assert(KACS_SYSTEM_MANDATORY_LABEL_NO_WRITE_UP == 0x00000002U,
+	       "mandatory-label NO_WRITE_UP must be bit 1 (PSD-004 §10.3)");
+_Static_assert(KACS_SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP == 0x00000004U,
+	       "mandatory-label NO_EXECUTE_UP must be bit 2 (PSD-004 §10.3)");
+
+/*
+ * PSB process-mitigation bits (<pkm/psb.h>). Pin each bit's value and that the
+ * ALL mask is exactly the OR of its member bits, so the kacs_set_psb argument
+ * encoding cannot drift from the kernel (PSD-004 §5).
+ */
+_Static_assert(KACS_MIT_WXP == 0x001U, "KACS_MIT_WXP must be 0x001 (PSD-004 §5)");
+_Static_assert(KACS_MIT_TLP == 0x002U, "KACS_MIT_TLP must be 0x002 (PSD-004 §5)");
+_Static_assert(KACS_MIT_LSV == 0x004U, "KACS_MIT_LSV must be 0x004 (PSD-004 §5)");
+_Static_assert(KACS_MIT_CFI == 0x008U, "KACS_MIT_CFI must be 0x008 (PSD-004 §5)");
+_Static_assert(KACS_MIT_UI_ACCESS == 0x010U,
+	       "KACS_MIT_UI_ACCESS must be 0x010 (PSD-004 §5)");
+_Static_assert(KACS_MIT_NO_CHILD == 0x020U,
+	       "KACS_MIT_NO_CHILD must be 0x020 (PSD-004 §5)");
+_Static_assert(KACS_MIT_CFIF == 0x040U, "KACS_MIT_CFIF must be 0x040 (PSD-004 §5)");
+_Static_assert(KACS_MIT_CFIB == 0x080U, "KACS_MIT_CFIB must be 0x080 (PSD-004 §5)");
+_Static_assert(KACS_MIT_PIE == 0x100U, "KACS_MIT_PIE must be 0x100 (PSD-004 §5)");
+_Static_assert(KACS_MIT_SML == 0x200U, "KACS_MIT_SML must be 0x200 (PSD-004 §5)");
+/* The ALL mask is exactly the OR of every individual mitigation bit. The
+ * legacy KACS_MIT_CFI alias is included: its value (0x008) is a distinct bit
+ * position in the mask even though a request normalizes it to CFIF | CFIB. */
+_Static_assert(KACS_MIT_ALL == (KACS_MIT_WXP | KACS_MIT_TLP | KACS_MIT_LSV
+				| KACS_MIT_CFI | KACS_MIT_UI_ACCESS | KACS_MIT_NO_CHILD
+				| KACS_MIT_CFIF | KACS_MIT_CFIB | KACS_MIT_PIE
+				| KACS_MIT_SML),
+	       "KACS_MIT_ALL must be the OR of every mitigation bit");
+_Static_assert(KACS_MIT_ALL == 0x3FFU, "KACS_MIT_ALL must be 0x3FF (PSD-004 §5)");
+
 int main(void)
 {
 	/* Touch constants and a struct from across the header set so the

@@ -89,4 +89,43 @@ struct kacs_node_result {
 #define KACS_CLAIM_ATTR_USE_FOR_DENY_ONLY	0x0004U
 #define KACS_CLAIM_ATTR_DISABLED		0x0010U
 
+/*
+ * Central Access Policy (CAAP) spec wire format — the (spec, spec_len) buffer
+ * kacs_set_caap (SYS_KACS_SET_CAAP) consumes. A non-empty spec replaces the
+ * policy identified by the call's policy SID; a NULL/zero spec removes it.
+ *
+ * The buffer is a fixed prefix followed by rule_count per-rule sections, and
+ * is consumed exactly (trailing bytes are rejected). It is not a C struct (the
+ * rule sections are variable-length); read it as raw bytes:
+ *
+ *   __u8   version              must be KACS_CAAP_SPEC_VERSION
+ *   __le32 rule_count           number of rules that follow (<= max)
+ *   rule_count * {
+ *       __le32 applies_to_len   [__u8 applies_to[applies_to_len]]
+ *                               conditional-expression bytecode; 0 = always
+ *       __le32 effective_dacl_len  [__u8 effective_dacl[...]]
+ *                               binary ACL; length MUST be nonzero
+ *       __le32 effective_sacl_len  [__u8 effective_sacl[...]]   (0 = none)
+ *       __le32 staged_dacl_len     [__u8 staged_dacl[...]]      (0 = none)
+ *       __le32 staged_sacl_len     [__u8 staged_sacl[...]]      (0 = none)
+ *   }
+ *
+ * Every length-prefixed field uses a little-endian __u32 length and is bounded
+ * by KACS_CAAP_MAX_FIELD_BYTES; ACL payloads additionally parse under the
+ * security-descriptor size limit (KACS_CAAP_MAX_ACL_BYTES). ACLs use the
+ * binary ACL format from <pkm/sd.h>; applies_to is conditional-ACE bytecode.
+ */
+#define KACS_CAAP_SPEC_VERSION		0x01U
+#define KACS_CAAP_MAX_SPEC_BYTES	(256U * 1024U)
+#define KACS_CAAP_MAX_RULE_COUNT	256U
+#define KACS_CAAP_MAX_FIELD_BYTES	(64U * 1024U)
+#define KACS_CAAP_MAX_ACL_BYTES		65535U
+
+/* Byte offsets of the fixed CAAP-spec prefix fields. */
+#define KACS_CAAP_SPEC_OFF_VERSION	0U
+#define KACS_CAAP_SPEC_OFF_RULE_COUNT	1U
+
+/* Byte length of the fixed CAAP-spec prefix (version + rule_count). */
+#define KACS_CAAP_SPEC_PREFIX_BYTES	5U
+
 #endif /* _UAPI_PKM_ACCESS_H */

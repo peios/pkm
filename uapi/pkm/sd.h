@@ -118,6 +118,17 @@ struct kacs_generic_mapping {
 #define KACS_ACE_FLAG_FAILED_ACCESS		0x80U
 
 /*
+ * Mandatory-label policy bits — the __le32 access mask of a
+ * KACS_ACE_TYPE_SYSTEM_MANDATORY_LABEL ACE. They control which DACL-granted
+ * rights a caller whose integrity level does not dominate the object's label
+ * (the "up" direction) is denied. Each bit suppresses the rights mapped from
+ * the corresponding generic class; unknown bits MUST be ignored.
+ */
+#define KACS_SYSTEM_MANDATORY_LABEL_NO_READ_UP		0x00000001U
+#define KACS_SYSTEM_MANDATORY_LABEL_NO_WRITE_UP		0x00000002U
+#define KACS_SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP	0x00000004U
+
+/*
  * Object-ACE body `Flags` field — the __le32 at object-ACE body offset 8,
  * distinct from the 1-byte `ace_flags` header field above. Indicates which
  * optional GUIDs the object-ACE body carries.
