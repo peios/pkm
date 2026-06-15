@@ -58,7 +58,7 @@ mod try_clone_prims {
 #[cfg(not(feature = "kernel"))]
 mod vec_inner {
     use super::{AllocError, TryClone};
-    use std::vec;
+    use alloc::vec;
 
     /// Fallible vector wrapper used by the slow-track core outside kernel mode.
     #[derive(Clone, Eq, PartialEq)]
@@ -162,8 +162,8 @@ mod vec_inner {
         }
     }
 
-    impl<T: PartialEq> PartialEq<std::vec::Vec<T>> for Vec<T> {
-        fn eq(&self, other: &std::vec::Vec<T>) -> bool {
+    impl<T: PartialEq> PartialEq<alloc::vec::Vec<T>> for Vec<T> {
+        fn eq(&self, other: &alloc::vec::Vec<T>) -> bool {
             self.as_slice() == other.as_slice()
         }
     }
@@ -202,20 +202,20 @@ mod vec_inner {
 
     impl<T> IntoIterator for Vec<T> {
         type Item = T;
-        type IntoIter = std::vec::IntoIter<T>;
+        type IntoIter = alloc::vec::IntoIter<T>;
 
         fn into_iter(self) -> Self::IntoIter {
             self.0.into_iter()
         }
     }
 
-    impl<T> From<std::vec::Vec<T>> for Vec<T> {
-        fn from(value: std::vec::Vec<T>) -> Self {
+    impl<T> From<alloc::vec::Vec<T>> for Vec<T> {
+        fn from(value: alloc::vec::Vec<T>) -> Self {
             Self(value)
         }
     }
 
-    impl<T> From<Vec<T>> for std::vec::Vec<T> {
+    impl<T> From<Vec<T>> for alloc::vec::Vec<T> {
         fn from(value: Vec<T>) -> Self {
             value.0
         }
@@ -399,12 +399,12 @@ mod string_inner {
 
     /// Owned UTF-8 string wrapper used outside kernel mode.
     #[derive(Clone, Default, Eq, PartialEq, Hash)]
-    pub struct String(std::string::String);
+    pub struct String(alloc::string::String);
 
     impl String {
         /// Creates an empty string.
         pub fn new() -> Self {
-            Self(std::string::String::new())
+            Self(alloc::string::String::new())
         }
 
         /// Appends one Unicode scalar value.
@@ -472,8 +472,8 @@ mod string_inner {
         }
     }
 
-    impl From<std::string::String> for String {
-        fn from(value: std::string::String) -> Self {
+    impl From<alloc::string::String> for String {
+        fn from(value: alloc::string::String) -> Self {
             Self(value)
         }
     }

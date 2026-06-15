@@ -4,8 +4,11 @@
 //! worktree. New modules should be added slice by slice against the ratified
 //! spec baseline.
 
-#![cfg_attr(feature = "kernel", no_std)]
+#![cfg_attr(not(test), no_std)]
 #![allow(unreachable_pub)]
+
+#[cfg(not(feature = "kernel"))]
+extern crate alloc;
 
 /// AccessCheck orchestration, wrappers, and privilege-use audit accounting.
 pub mod access_check;

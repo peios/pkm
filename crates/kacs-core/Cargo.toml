@@ -4,7 +4,7 @@ version = "0.1.0"
 # Stays on edition 2021 explicitly during the Codex slow-track impl —
 # don't disturb in-flight work. Migrate when there's a quiet window.
 edition = "2021"
-license = "GPL-2.0"
+license = "MIT"
 description = "Fresh slow-track KACS semantic core scaffold"
 
 [features]

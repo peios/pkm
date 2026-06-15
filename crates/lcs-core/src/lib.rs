@@ -4,7 +4,10 @@
 //! primitives. It intentionally does not perform syscalls, source I/O, KACS
 //! access checks, fd management, or KMES emission.
 
-#![cfg_attr(feature = "kernel", no_std)]
+// no_std everywhere except tests: the crate is pure `core` (no std, no alloc), so it
+// serves the kernel and userspace consumers (librsi) alike. The `kernel` feature
+// still gates the kacs-core/kernel wiring; it no longer governs no_std.
+#![cfg_attr(not(test), no_std)]
 #![allow(unreachable_pub)]
 
 pub mod abi;
