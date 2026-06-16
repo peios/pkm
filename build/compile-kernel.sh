@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Compile a configured PKM kernel tree to a bzImage. Monolithic — no modules,
-# no modules_install. Runs inside the build image (needs LLVM 18 + Rust 1.83 +
+# no modules_install (a temporary dev simplification; production will be modular,
+# so modules_install returns then). Runs inside the build image (needs LLVM 18 + Rust 1.83 +
 # bindgen on PATH). Expects configure-kernel.sh to have produced .config.
 #
 # usage: compile-kernel.sh <configured-kernel-tree>

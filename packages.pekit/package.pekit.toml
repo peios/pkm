@@ -10,8 +10,11 @@
 # against the PKM UAPI / KACS ABI. Install paths are named by the kernel
 # RELEASE (7.0.9, the uname version) — distinct from this package version.
 #
-# kernel-modules is intentionally absent: the kernel is monolithic (everything
-# built-in), so there is nothing to split until a non-monolithic build exists.
+# kernel-modules is absent for now: the kernel is monolithic during early
+# development (everything built-in), so there is nothing to split yet. Monolithic
+# is a temporary dev simplification, NOT the production shape — the production
+# kernel will be modular (signed + lockdown-enforced), at which point this package
+# returns.
 
 format = "peipkg"
 

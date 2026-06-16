@@ -2,8 +2,9 @@
 
 `pkm` is the Peios kernel workspace. It carries the PKM security subsystem
 (KACS, KMES, LCS) and a declarative, reproducible build pipeline that grafts
-that subsystem onto a pinned upstream Linux tree, compiles a hardened monolithic
-kernel, and emits the full Peios kernel package family (`.peipkg`) — the kernel
+that subsystem onto a pinned upstream Linux tree, compiles a hardened kernel
+(monolithic for now — see below), and emits the full Peios kernel package family
+(`.peipkg`) — the kernel
 image, its development/debug artifacts, and the in-tree userspace tooling.
 
 The build is driven entirely by [pekit](../pekit) and runs inside a pinned,
@@ -12,7 +13,12 @@ prerequisite.
 
 - **Kernel base:** Linux `v7.0.9` (pinned in `build/toolchain.lock`).
 - **Profile:** monolithic — every driver built in (`=y`), no loadable modules.
-- **Target:** `x86_64` (QEMU/virtio guest profile).
+  **This is a temporary early-development simplification, not the production
+  shape.** It lets the kernel boot the QEMU/virtio guest with no initramfs while
+  we iterate. The production kernel will be modular (signed modules +
+  lockdown-enforced); the switch happens at real-hardware bring-up. See
+  [roadmap](#known-limitations--roadmap).
+- **Target:** `x86_64` (QEMU/virtio guest profile for now; real hardware is the goal).
 - **Security model:** KACS is the sole MAC LSM; `CONFIG_LSM="landlock,lockdown,yama,integrity,pkm"`.
 
 > The normative KACS / KMES / LCS specifications live outside this repo under
@@ -263,8 +269,9 @@ packages are split `lib*` / `lib*-devel` per convention.
 | `kernel-debuginfo` | `vmlinux` debug info + build-id index. |
 | `kernel-debugsource` | The DWARF-referenced kernel sources. |
 
-> `kernel-modules` is intentionally absent — the kernel is monolithic, so there
-> is nothing to split until a non-monolithic build exists.
+> `kernel-modules` is absent *for now* — the kernel is monolithic during early
+> development, so there is nothing to split yet. It returns when the kernel goes
+> modular (see [roadmap](#known-limitations--roadmap)).
 
 **Userspace tools** (built from the kernel's in-tree `tools/`, packaged with
 unprefixed names since they are userspace, not the kernel): `perf` (+ `perf-devel`,
@@ -385,8 +392,13 @@ the authoritative gate is `pekit test uapi` in CI.
 
 ## Known limitations & roadmap
 
-- **`kernel-modules`** — blocked on a non-monolithic kernel build; the current
-  profile builds everything in.
+- **Modular kernel (signed)** — the monolithic profile is an early-development
+  simplification, **not** the production shape: shipping every driver built-in is
+  untenable on arbitrary real hardware. The production kernel will be modular with
+  `CONFIG_MODULE_SIG_FORCE=y` (signing key added to the TCB keyring) and lockdown
+  enforced, so module loading stops being a free runtime-tamper vector. The switch
+  is gated on real-hardware bring-up — the same point we need an initramfs anyway.
+  Until then `kernel-modules` stays absent and there is nothing to split.
 - **Runtime package dependencies** — the userspace tool packages declare their
   shared-library needs only as `.toml` comments today; they become real
   `[dependencies]` once the Peios userspace layer that provides those libraries

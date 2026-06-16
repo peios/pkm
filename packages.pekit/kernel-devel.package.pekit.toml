@@ -8,10 +8,11 @@
 # debug sources only (§3.4.1), so the RPM-style usr/src/kernels/ is not a Peios
 # destination. The modules/<release>/build shape mirrors the canonical
 # /lib/modules/<release>/build that out-of-tree `make -C` expects, relocated
-# under the triplet; when the kernel goes non-monolithic the modules tree lands
-# alongside it and a kmod compatibility symlink has a natural target.
+# under the triplet; when the kernel goes modular (the production shape — the
+# current monolithic build is a temporary dev simplification) the modules tree
+# lands alongside it and a kmod compatibility symlink has a natural target.
 #
-# No modules ship yet (the kernel is monolithic), so the kit has no consumer
+# No modules ship yet (the kernel is monolithic for now), so the kit has no consumer
 # today, but it is producible now and so is built rather than left as rework.
 # The exact file set should be validated against a real out-of-tree module build
 # once one exists.

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Configure a staged PKM kernel tree: vendored base + PKM fragment, narrowed to
-# the QEMU device set and made monolithic (all built-in). Runs inside the build
-# image (needs make + clang + rustc + bindgen on PATH). No target compilation.
+# the QEMU device set and made monolithic (all built-in). The monolithic profile
+# is a temporary early-development simplification (boots the QEMU guest with no
+# initramfs), NOT the production shape — production will be modular + signed.
+# Runs inside the build image (needs make + clang + rustc + bindgen on PATH). No
+# target compilation.
 #
 # usage: configure-kernel.sh <kernel-tree> [profile]
 #   profile: production (default) | kunit
