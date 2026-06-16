@@ -38,7 +38,10 @@ log=${PKM_KUNIT_LOG:-$log}
 
 # KTAP / suite markers emitted by the PKM KUnit suites.
 suite_marker='pkm: kunit scaffold smoke passed'
-summary_re='# pkm_kunit_scaffold: pass:[0-9]+ fail:0 skip:[0-9]+ total:[0-9]+'
+# KACS suites are split per subsystem (pkm_kunit_access, _token, _file, …); LCS
+# is pkm_lcs_kunit_scaffold. Require at least one passing PKM suite summary; the
+# fatal_re below independently fails the run on any suite reporting fail:[1-9].
+summary_re='# pkm(_lcs)?_kunit[a-z_]*: pass:[0-9]+ fail:0 skip:[0-9]+ total:[0-9]+'
 fatal_re='BUG:|Kernel panic|Oops:|INFO: task .* blocked for more than|EXPECTATION FAILED|ASSERTION FAILED|not ok [0-9]+|# .*fail:[1-9]'
 
 append='console=ttyS0 loglevel=7 ignore_loglevel panic=-1 kunit.enable=1 kunit_shutdown=poweroff'
