@@ -1,0 +1,27 @@
+diff --git a/fs/fhandle.c b/fs/fhandle.c
+index 642e3d569..dcd34cc44 100644
+--- a/fs/fhandle.c
++++ b/fs/fhandle.c
+@@ -412,12 +412,22 @@ static struct file *file_open_handle(struct path *path, int open_flag)
+ 	return file_open_root(path, "", open_flag, 0);
+ }
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern int pkm_kacs_open_by_handle_at(void);
++#endif
++
++
+ static long do_handle_open(int mountdirfd, struct file_handle __user *ufh,
+ 			   int open_flag)
+ {
+ 	long retval;
+ 	struct path path __free(path_put) = {};
+ 
++#ifdef CONFIG_SECURITY_PKM
++	retval = pkm_kacs_open_by_handle_at();
++	if (retval)
++		return retval;
++#endif
+ 	retval = handle_to_path(mountdirfd, ufh, &path, open_flag);
+ 	if (retval)
+ 		return retval;

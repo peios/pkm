@@ -1,0 +1,54 @@
+diff --git a/fs/open.c b/fs/open.c
+index 91f113959..4c932d5f7 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -650,10 +681,30 @@ int chmod_common(const struct path *path, umode_t mode)
+ 	return error;
+ }
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern int pkm_kacs_file_chmod(struct file *file);
++extern int pkm_kacs_file_chown(struct file *file);
++extern void pkm_kacs_file_end_metadata(struct file *file);
++#endif
++
++
+ int vfs_fchmod(struct file *file, umode_t mode)
+ {
++#ifdef CONFIG_SECURITY_PKM
++	{
++		int ret = pkm_kacs_file_chmod(file);
++		if (ret)
++			return ret;
++		audit_file(file);
++		ret = chmod_common(&file->f_path, mode);
++		pkm_kacs_file_end_metadata(file);
++		return ret;
++	}
++#else
+ 	audit_file(file);
+ 	return chmod_common(&file->f_path, mode);
++#endif
++
+ }
+ 
+ SYSCALL_DEFINE2(fchmod, unsigned int, fd, umode_t, mode)
+@@ -839,8 +890,18 @@ int vfs_fchown(struct file *file, uid_t user, gid_t group)
+ 	error = mnt_want_write_file(file);
+ 	if (error)
+ 		return error;
++#ifdef CONFIG_SECURITY_PKM
++	error = pkm_kacs_file_chown(file);
++	if (error) {
++		mnt_drop_write_file(file);
++		return error;
++	}
++#endif
+ 	audit_file(file);
+ 	error = chown_common(&file->f_path, user, group);
++#ifdef CONFIG_SECURITY_PKM
++	pkm_kacs_file_end_metadata(file);
++#endif
+ 	mnt_drop_write_file(file);
+ 	return error;
+ }

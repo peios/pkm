@@ -1,0 +1,21 @@
+diff --git a/fs/open.c b/fs/open.c
+index 91f113959..4c932d5f7 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -581,7 +603,16 @@ SYSCALL_DEFINE1(fchdir, unsigned int, fd)
+ 	if (!d_can_lookup(fd_file(f)->f_path.dentry))
+ 		return -ENOTDIR;
+ 
++#ifdef CONFIG_SECURITY_PKM
++	if (fd_file(f)->f_mode & FMODE_PATH)
++		error = file_permission(fd_file(f), MAY_EXEC | MAY_CHDIR);
++	else
++		error = security_file_permission(fd_file(f),
++						 MAY_EXEC | MAY_CHDIR);
++#else
+ 	error = file_permission(fd_file(f), MAY_EXEC | MAY_CHDIR);
++#endif
++
+ 	if (!error)
+ 		set_fs_pwd(current->fs, &fd_file(f)->f_path);
+ 	return error;

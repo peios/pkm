@@ -1,0 +1,36 @@
+diff --git a/fs/aio.c b/fs/aio.c
+index a07bdd1aa..87ba06fe5 100644
+--- a/fs/aio.c
++++ b/fs/aio.c
+@@ -1604,6 +1604,13 @@ static int aio_read(struct kiocb *req, const struct iocb *iocb,
+ 	return ret;
+ }
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,
++					    bool positioned);
++extern void pkm_kacs_file_end_write_intent(struct file *file);
++#endif
++
++
+ static int aio_write(struct kiocb *req, const struct iocb *iocb,
+ 			 bool vectored, bool compat)
+ {
+@@ -1625,7 +1632,17 @@ static int aio_write(struct kiocb *req, const struct iocb *iocb,
+ 	ret = aio_setup_rw(ITER_SOURCE, iocb, &iovec, vectored, compat, &iter);
+ 	if (ret < 0)
+ 		return ret;
++#ifdef CONFIG_SECURITY_PKM
++	ret = pkm_kacs_file_begin_write_intent(file, (u32)iocb->aio_rw_flags,
++					       true);
++	if (!ret) {
++		ret = rw_verify_area(WRITE, file, &req->ki_pos,
++				     iov_iter_count(&iter));
++		pkm_kacs_file_end_write_intent(file);
++	}
++#else
+ 	ret = rw_verify_area(WRITE, file, &req->ki_pos, iov_iter_count(&iter));
++#endif
+ 	if (!ret) {
+ 		if (S_ISREG(file_inode(file)->i_mode))
+ 			kiocb_start_write(req);

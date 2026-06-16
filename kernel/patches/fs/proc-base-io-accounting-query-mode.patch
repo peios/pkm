@@ -1,0 +1,13 @@
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 4c863d17d..112cd7521 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -3038,7 +3344,7 @@ static int do_io_accounting(struct task_struct *task, struct seq_file *m, int wh
+ 	if (result)
+ 		return result;
+ 
+-	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS)) {
++	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_PROC_QUERY_INFORMATION)) {
+ 		result = -EACCES;
+ 		goto out_unlock;
+ 	}

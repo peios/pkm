@@ -1,0 +1,33 @@
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+index e091931d7..f7e19d530 100644
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -1765,6 +1765,11 @@ static const struct mm_walk_ops clear_refs_walk_ops = {
+ 	.walk_lock		= PGWALK_WRLOCK,
+ };
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern long pkm_kacs_proc_process_setinfo(struct task_struct *task);
++#endif
++
++
+ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
+ 				size_t count, loff_t *ppos)
+ {
+@@ -1790,6 +1795,16 @@ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
+ 	task = get_proc_task(file_inode(file));
+ 	if (!task)
+ 		return -ESRCH;
++#ifdef CONFIG_SECURITY_PKM
++	/* PKM: gate /proc/<pid>/clear_refs writes. */
++	rv = pkm_kacs_proc_process_setinfo(task);
++	if (rv) {
++		put_task_struct(task);
++		return rv;
++	}
++#endif
++
++
+ 	mm = get_task_mm(task);
+ 	if (mm) {
+ 		VMA_ITERATOR(vmi, mm, 0);

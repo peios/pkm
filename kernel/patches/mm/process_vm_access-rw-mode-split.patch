@@ -1,0 +1,14 @@
+diff --git a/mm/process_vm_access.c b/mm/process_vm_access.c
+index 656d3e887..5647193f9 100644
+--- a/mm/process_vm_access.c
++++ b/mm/process_vm_access.c
+@@ -200,7 +200,8 @@ static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,
+ 		goto free_proc_pages;
+ 	}
+ 
+-	mm = mm_access(task, PTRACE_MODE_ATTACH_REALCREDS);
++	mm = mm_access(task, vm_write ? PTRACE_MODE_ATTACH_REALCREDS :
++				      PTRACE_MODE_READ_REALCREDS);
+ 	if (IS_ERR(mm)) {
+ 		rc = PTR_ERR(mm);
+ 		/*

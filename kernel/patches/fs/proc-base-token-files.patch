@@ -1,0 +1,79 @@
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 4c863d17d..112cd7521 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -3309,6 +3645,52 @@ static int proc_stack_depth(struct seq_file *m, struct pid_namespace *ns,
+ static const struct file_operations proc_task_operations;
+ static const struct inode_operations proc_task_inode_operations;
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern int pkm_kacs_proc_open_process_token_file(struct file *file,
++						 struct task_struct *task);
++extern int pkm_kacs_proc_open_thread_token_file(struct file *file,
++						struct task_struct *task);
++
++static int proc_pid_token_open(struct inode *inode, struct file *file)
++{
++	struct task_struct *task;
++	int ret;
++
++	task = get_proc_task(inode);
++	if (!task)
++		return -ESRCH;
++
++	ret = pkm_kacs_proc_open_process_token_file(file, task);
++	put_task_struct(task);
++	return ret;
++}
++
++static int proc_tid_token_open(struct inode *inode, struct file *file)
++{
++	struct task_struct *task;
++	int ret;
++
++	task = get_proc_task(inode);
++	if (!task)
++		return -ESRCH;
++
++	ret = pkm_kacs_proc_open_thread_token_file(file, task);
++	put_task_struct(task);
++	return ret;
++}
++
++static const struct file_operations proc_pid_token_operations = {
++	.open		= proc_pid_token_open,
++	.llseek		= noop_llseek,
++};
++
++static const struct file_operations proc_tid_token_operations = {
++	.open		= proc_tid_token_open,
++	.llseek		= noop_llseek,
++};
++#endif
++
++
+ static const struct pid_entry tgid_base_stuff[] = {
+ 	DIR("task",       S_IRUGO|S_IXUGO, proc_task_inode_operations, proc_task_operations),
+ 	DIR("fd",         S_IRUSR|S_IXUSR, proc_fd_inode_operations, proc_fd_operations),
+@@ -3319,6 +3701,10 @@ static const struct pid_entry tgid_base_stuff[] = {
+ 	DIR("net",        S_IRUGO|S_IXUGO, proc_net_inode_operations, proc_net_operations),
+ #endif
+ 	REG("environ",    S_IRUSR, proc_environ_operations),
++#ifdef CONFIG_SECURITY_PKM
++	REG("token",      S_IRUGO, proc_pid_token_operations),
++#endif
++
+ 	REG("auxv",       S_IRUSR, proc_auxv_operations),
+ 	ONE("status",     S_IRUGO, proc_pid_status),
+ 	ONE("personality", S_IRUSR, proc_pid_personality),
+@@ -3665,6 +4051,10 @@ static const struct pid_entry tid_base_stuff[] = {
+ 	DIR("net",        S_IRUGO|S_IXUGO, proc_net_inode_operations, proc_net_operations),
+ #endif
+ 	REG("environ",   S_IRUSR, proc_environ_operations),
++#ifdef CONFIG_SECURITY_PKM
++	REG("token",     S_IRUGO, proc_tid_token_operations),
++#endif
++
+ 	REG("auxv",      S_IRUSR, proc_auxv_operations),
+ 	ONE("status",    S_IRUGO, proc_pid_status),
+ 	ONE("personality", S_IRUSR, proc_pid_personality),

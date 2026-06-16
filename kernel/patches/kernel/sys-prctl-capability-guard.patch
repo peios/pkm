@@ -1,0 +1,32 @@
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 62e842055..96e6c5223 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -2531,6 +2539,14 @@ static int prctl_set_thp_disable(bool thp_disable, unsigned long flags,
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern long pkm_kacs_prctl_capability_guard(int option, unsigned long arg2,
++					    unsigned long arg3,
++					    unsigned long arg4,
++					    unsigned long arg5);
++#endif
++
++
+ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
+ 		unsigned long, arg4, unsigned long, arg5)
+ {
+@@ -2538,6 +2554,12 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
+ 	unsigned char comm[sizeof(me->comm)];
+ 	long error;
+ 
++#ifdef CONFIG_SECURITY_PKM
++	error = pkm_kacs_prctl_capability_guard(option, arg2, arg3, arg4,
++						 arg5);
++	if (error)
++		return error;
++#endif
+ 	error = security_task_prctl(option, arg2, arg3, arg4, arg5);
+ 	if (error != -ENOSYS)
+ 		return error;

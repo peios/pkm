@@ -1,0 +1,141 @@
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 4c863d17d..112cd7521 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -566,6 +666,15 @@ static ssize_t lstats_write(struct file *file, const char __user *buf,
+ 
+ 	if (!task)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/latency writes. */
++	{
++		int ret = proc_pkm_check_task_setinfo_access(task);
++
++		if (ret) {
++			put_task_struct(task);
++			return ret;
++		}
++	}
+ 	clear_tsk_latency_tracing(task);
+ 	put_task_struct(task);
+ 
+@@ -1132,6 +1259,16 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
+ 	if (!task)
+ 		return -ESRCH;
+ 
++#ifdef CONFIG_SECURITY_PKM
++	/* PKM: gate /proc/<pid>/oom adjustment writes. */
++	err = proc_pkm_check_task_setinfo_access(task);
++	if (err) {
++		put_task_struct(task);
++		return err;
++	}
++#endif
++
++
+ 	mutex_lock(&oom_adj_mutex);
+ 	if (legacy) {
+ 		if (oom_adj < task->signal->oom_score_adj &&
+@@ -1171,6 +1308,17 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
+ 		}
+ 	}
+ 
++#ifdef CONFIG_SECURITY_PKM
++	/* PKM: fail closed on multiprocess mm OOM fan-out. */
++	if (mm) {
++		mmdrop(mm);
++		mm = NULL;
++		err = -EACCES;
++		goto err_unlock;
++	}
++#endif
++
++
+ 	task->signal->oom_score_adj = oom_adj;
+ 	if (!legacy && has_capability_noaudit(current, CAP_SYS_RESOURCE))
+ 		task->signal->oom_score_adj_min = (short)oom_adj;
+@@ -1441,6 +1627,13 @@ static ssize_t proc_fault_inject_write(struct file * file,
+ 	task = get_proc_task(file_inode(file));
+ 	if (!task)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/make-it-fail writes. */
++	rv = proc_pkm_check_task_setinfo_access(task);
++	if (rv) {
++		put_task_struct(task);
++		return rv;
++	}
++
+ 	task->make_it_fail = make_it_fail;
+ 	put_task_struct(task);
+ 
+@@ -1467,6 +1660,13 @@ static ssize_t proc_fail_nth_write(struct file *file, const char __user *buf,
+ 	task = get_proc_task(file_inode(file));
+ 	if (!task)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/fail-nth writes. */
++	err = proc_pkm_check_task_setinfo_access(task);
++	if (err) {
++		put_task_struct(task);
++		return err;
++	}
++
+ 	task->fail_nth = n;
+ 	put_task_struct(task);
+ 
+@@ -1524,6 +1744,16 @@ sched_write(struct file *file, const char __user *buf,
+ 	p = get_proc_task(inode);
+ 	if (!p)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/sched writes. */
++	{
++		int ret = proc_pkm_check_task_setinfo_access(p);
++
++		if (ret) {
++			put_task_struct(p);
++			return ret;
++		}
++	}
++
+ 	proc_sched_set_task(p);
+ 
+ 	put_task_struct(p);
+@@ -1586,6 +1826,13 @@ sched_autogroup_write(struct file *file, const char __user *buf,
+ 	if (!p)
+ 		return -ESRCH;
+ 
++	/* PKM: gate /proc/<pid>/autogroup writes. */
++	err = proc_pkm_check_task_setinfo_access(p);
++	if (err) {
++		put_task_struct(p);
++		return err;
++	}
++
+ 	err = proc_sched_autogroup_set_nice(p, nice);
+ 	if (err)
+ 		count = err;
+@@ -1695,6 +1952,13 @@ static ssize_t timens_offsets_write(struct file *file, const char __user *buf,
+ 	p = get_proc_task(inode);
+ 	if (!p)
+ 		goto out;
++	/* PKM: gate /proc/<pid>/timens_offsets writes. */
++	ret = proc_pkm_check_task_setinfo_access(p);
++	if (ret) {
++		put_task_struct(p);
++		goto out;
++	}
++
+ 	ret = proc_timens_set_offset(file, p, offsets, noffsets);
+ 	put_task_struct(p);
+ 	if (ret)
+@@ -3000,7 +3301,12 @@ static ssize_t proc_coredump_filter_write(struct file *file,
+ 	if (!task)
+ 		goto out_no_task;
+ 
++	/* PKM: gate /proc/<pid>/coredump_filter writes. */
++	ret = proc_pkm_check_task_setinfo_access(task);
++	if (ret)
++		goto out_no_mm;
+ 	mm = get_task_mm(task);
++
+ 	if (!mm)
+ 		goto out_no_mm;
+ 	ret = 0;

@@ -1,0 +1,77 @@
+# PKM kernel config fragment — merged over the vendored base via
+# scripts/kconfig/merge_config.sh. Declarative replacement for the old
+# Dockerfile's inline `scripts/config` calls. Applied AFTER localmodconfig so
+# these forced choices survive the module narrowing.
+
+# --- Rust (kernel Kbuild Rust; staged kacs-core/lcs-core compile here) ---
+CONFIG_RUST=y
+
+# --- KACS must be the sole MAC LSM; conflicting MACs are excluded ---
+# CONFIG_SECURITY_SELINUX is not set
+# CONFIG_SECURITY_APPARMOR is not set
+# CONFIG_SECURITY_TOMOYO is not set
+# CONFIG_SECURITY_SMACK is not set
+# CONFIG_BPF_LSM is not set
+CONFIG_SECURITY_PKM=y
+CONFIG_LSM="landlock,lockdown,yama,integrity,pkm"
+
+# --- PIP build-hardening prerequisites (fail-closed in lsm.c) ---
+CONFIG_STRICT_DEVMEM=y
+CONFIG_MODULE_SIG=y
+CONFIG_MODULE_SIG_FORCE=y
+CONFIG_MODULE_SIG_ALL=y
+CONFIG_MODULE_SIG_SHA512=y
+CONFIG_MODULE_SIG_KEY="certs/signing_key.pem"
+
+# --- QEMU guest boot + test harness (built-in; monolithic profile) ---
+# initrd
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_GZIP=y
+# virtio transport + devices
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_CONSOLE=y
+CONFIG_VIRTIO_NET=y
+# 9p (host<->guest fs) + vsock
+CONFIG_NET_9P=y
+CONFIG_NET_9P_VIRTIO=y
+CONFIG_9P_FS=y
+CONFIG_9P_FS_POSIX_ACL=y
+CONFIG_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS=y
+CONFIG_VHOST=y
+CONFIG_VHOST_VSOCK=y
+# core fs + storage
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_TMPFS=y
+CONFIG_BLK_DEV_LOOP=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_OVERLAY_FS=y
+# console / display
+CONFIG_VT=y
+CONFIG_VT_CONSOLE=y
+CONFIG_VGA_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_DRM=y
+CONFIG_DRM_BOCHS=y
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+# ATA / optical / vfat (CD-based boot paths)
+CONFIG_ATA=y
+CONFIG_ATA_PIIX=y
+CONFIG_SATA_AHCI=y
+CONFIG_BLK_DEV_SR=y
+CONFIG_ISO9660_FS=y
+CONFIG_FAT_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_NLS_ISO8859_1=y
+
+# --- trim base-config leftovers irrelevant to a QEMU guest ---
+# Watchdog pretimeout governors are unneeded in a guest, and GOV_SEL is a hidden
+# `default m` symbol that mod2yesconfig won't convert (leaving a stray module).
+# Disabling the parent removes the whole subtree.
+# CONFIG_WATCHDOG_PRETIMEOUT_GOV is not set

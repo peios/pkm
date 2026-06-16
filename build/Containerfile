@@ -1,0 +1,84 @@
+# PKM kernel build environment — the swappable "provider".
+#
+# Contains ONLY the pinned toolchain. No kernel source, no PKM source, no
+# pekit: the source tree and build artifacts arrive via a mounted out/ volume,
+# and pekit is bind-mounted from the host at runtime:
+#
+#   docker run -v "$PWD:/src" -v pkm-out:/src/out \
+#              -v "$(command -v pekit):/usr/local/bin/pekit:ro" \
+#              -e PKM_KACS_TCB_PUBKEY_HEX="$KEY" pkm-build \
+#              pekit build kernel
+#
+# Pins come from build/toolchain.lock (passed as build args by the wrapper).
+# Rebuilds only when the toolchain changes — rarely.
+
+# Base pinned by digest; its apt state matches DEBIAN_SNAPSHOT below.
+ARG BASE_IMAGE=debian@sha256:4e401d95de7083948053197a9c3913343cd06b706bf15eb6a0c3ccd26f436a0e
+FROM ${BASE_IMAGE}
+
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+ARG DEBIAN_SNAPSHOT=20260610T000000Z
+ARG DEBIAN_SUITE=trixie
+ARG LLVM_VERSION=18
+ARG RUST_VERSION=1.83.0
+ARG BINDGEN_VERSION=0.65.1
+
+# --- reproducible apt: pin every package to a snapshot.debian.org date ---
+# Must mirror the base image's suites (main + updates + security); the
+# pre-installed runtime libs come from the -updates/-security pockets, so a
+# bare `trixie main` would leave dev packages unable to match them. Release
+# files in the archive are old, so Check-Valid-Until must be off.
+RUN rm -f /etc/apt/sources.list.d/*.sources && \
+    { printf 'deb http://snapshot.debian.org/archive/debian/%s/ %s main\n' \
+          "${DEBIAN_SNAPSHOT}" "${DEBIAN_SUITE}"; \
+      printf 'deb http://snapshot.debian.org/archive/debian/%s/ %s-updates main\n' \
+          "${DEBIAN_SNAPSHOT}" "${DEBIAN_SUITE}"; \
+      printf 'deb http://snapshot.debian.org/archive/debian-security/%s/ %s-security main\n' \
+          "${DEBIAN_SNAPSHOT}" "${DEBIAN_SUITE}"; \
+    } > /etc/apt/sources.list && \
+    printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "5";\n' \
+        > /etc/apt/apt.conf.d/99pkm
+
+# --- toolchain + kernel C build deps ---
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        clang-${LLVM_VERSION} lld-${LLVM_VERSION} llvm-${LLVM_VERSION} \
+        libclang-${LLVM_VERSION}-dev \
+        build-essential bc bison flex \
+        libelf-dev libssl-dev openssl \
+        dwarves cpio kmod \
+        python3 perl lua5.4 \
+        git ca-certificates curl xz-utils zstd \
+        golang-go \
+        qemu-system-x86 \
+        ccache && \
+    rm -rf /var/lib/apt/lists/*
+
+# Rust lives in /opt (not /root) and is world-readable so the image can run as
+# an arbitrary `--user` (keeps build output owned by the host user, not root).
+ENV RUSTUP_HOME=/opt/rustup
+ENV CARGO_HOME=/opt/cargo
+# Debian ships unversioned LLVM tool names under /usr/lib/llvm-N/bin, so a plain
+# `make LLVM=1` resolves clang/ld.lld/llvm-* with no symlink juggling.
+ENV PATH="/usr/lib/llvm-${LLVM_VERSION}/bin:/opt/cargo/bin:${PATH}"
+ENV LIBCLANG_PATH="/usr/lib/llvm-${LLVM_VERSION}/lib"
+
+# --- Rust: kernel Kbuild toolchain (rustc + rust-src) + rustfmt (bindgen
+#     formats generated UAPI bindings with it), pinned ---
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --default-toolchain none --profile minimal && \
+    rustup toolchain install "${RUST_VERSION}" --component rust-src --component rustfmt && \
+    rustup default "${RUST_VERSION}"
+
+# --- bindgen: exact version the pinned kernel requires ---
+RUN cargo install --locked --version "${BINDGEN_VERSION}" bindgen-cli && \
+    chmod -R a+rX /opt/rustup /opt/cargo
+
+# ccache lives in a mounted volume; make the mountpoint world-writable so a
+# fresh named volume inherits 1777 and a non-root --user run can write to it.
+ENV CCACHE_DIR=/ccache
+ENV CCACHE_MAXSIZE=10G
+RUN mkdir -p /ccache && chmod 1777 /ccache
+
+WORKDIR /src

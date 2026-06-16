@@ -1,0 +1,30 @@
+# PKM kernel build — pinned toolchain & inputs (single source of truth).
+#
+# Consumed by build/Containerfile (provisions the image) and pekit's
+# build.upstream (kernel version). Bump deliberately: a kernel-version change
+# generally means re-deriving / 3-way-rebasing kernel/patches, and a Rust bump
+# must stay within the pinned kernel's supported rustc range.
+#
+# Shell-sourceable: KEY=value, no spaces.
+
+# --- kernel ---
+KERNEL_VERSION=v7.0.9
+KERNEL_GIT=https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+
+# --- environment base (reproducible apt via snapshot.debian.org) ---
+# The base image is pinned by digest; its apt state corresponds to the snapshot
+# date below (taken from the trixie-slim image's own debian.sources hint), so
+# pre-installed runtime libs and the dev packages we add resolve to matching
+# versions. Bump base digest + snapshot date together.
+DEBIAN_SUITE=trixie
+DEBIAN_SNAPSHOT=20260610T000000Z
+BASE_IMAGE=debian@sha256:4e401d95de7083948053197a9c3913343cd06b706bf15eb6a0c3ccd26f436a0e
+
+# --- toolchain ---
+# LLVM provides clang/lld; the kernel builds with LLVM=1.
+LLVM_VERSION=18
+# Rust: kernel Kbuild toolchain (NOT the userspace workspace's 1.85/edition-2024;
+# the kernel compiles the staged cores with its own edition-2021 Rust).
+RUST_VERSION=1.83.0
+# bindgen: kernel-required minimum (scripts/min-tool-version.sh bindgen on v7.0.9).
+BINDGEN_VERSION=0.65.1

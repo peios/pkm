@@ -1,0 +1,180 @@
+diff --git a/fs/file_attr.c b/fs/file_attr.c
+index da983e105..15d77203b 100644
+--- a/fs/file_attr.c
++++ b/fs/file_attr.c
+@@ -310,12 +310,29 @@ int vfs_fileattr_set(struct mnt_idmap *idmap, struct dentry *dentry,
+ }
+ EXPORT_SYMBOL(vfs_fileattr_set);
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern int pkm_kacs_file_fileattr_get(struct file *file);
++extern int pkm_kacs_file_fileattr_set(struct file *file);
++extern void pkm_kacs_file_end_metadata(struct file *file);
++extern int pkm_kacs_path_fileattr_set(const struct path *path);
++extern void pkm_kacs_path_end_metadata(const struct path *path);
++#endif
++
++
+ int ioctl_getflags(struct file *file, unsigned int __user *argp)
+ {
+ 	struct file_kattr fa = { .flags_valid = true }; /* hint only */
+ 	int err;
+ 
++#ifdef CONFIG_SECURITY_PKM
++	err = pkm_kacs_file_fileattr_get(file);
++	if (err)
++		return err;
++#endif
+ 	err = vfs_fileattr_get(file->f_path.dentry, &fa);
++#ifdef CONFIG_SECURITY_PKM
++	pkm_kacs_file_end_metadata(file);
++#endif
+ 	if (!err)
+ 		err = put_user(fa.flags, argp);
+ 	return err;
+@@ -334,7 +351,17 @@ int ioctl_setflags(struct file *file, unsigned int __user *argp)
+ 		err = mnt_want_write_file(file);
+ 		if (!err) {
+ 			fileattr_fill_flags(&fa, flags);
++#ifdef CONFIG_SECURITY_PKM
++			err = pkm_kacs_file_fileattr_set(file);
++			if (err) {
++				mnt_drop_write_file(file);
++				return err;
++			}
++#endif
+ 			err = vfs_fileattr_set(idmap, dentry, &fa);
++#ifdef CONFIG_SECURITY_PKM
++			pkm_kacs_file_end_metadata(file);
++#endif
+ 			mnt_drop_write_file(file);
+ 		}
+ 	}
+@@ -346,7 +373,15 @@ int ioctl_fsgetxattr(struct file *file, void __user *argp)
+ 	struct file_kattr fa = { .fsx_valid = true }; /* hint only */
+ 	int err;
+ 
++#ifdef CONFIG_SECURITY_PKM
++	err = pkm_kacs_file_fileattr_get(file);
++	if (err)
++		return err;
++#endif
+ 	err = vfs_fileattr_get(file->f_path.dentry, &fa);
++#ifdef CONFIG_SECURITY_PKM
++	pkm_kacs_file_end_metadata(file);
++#endif
+ 	if (!err)
+ 		err = copy_fsxattr_to_user(&fa, argp);
+ 
+@@ -364,7 +399,17 @@ int ioctl_fssetxattr(struct file *file, void __user *argp)
+ 	if (!err) {
+ 		err = mnt_want_write_file(file);
+ 		if (!err) {
++#ifdef CONFIG_SECURITY_PKM
++			err = pkm_kacs_file_fileattr_set(file);
++			if (err) {
++				mnt_drop_write_file(file);
++				return err;
++			}
++#endif
+ 			err = vfs_fileattr_set(idmap, dentry, &fa);
++#ifdef CONFIG_SECURITY_PKM
++			pkm_kacs_file_end_metadata(file);
++#endif
+ 			mnt_drop_write_file(file);
+ 		}
+ 	}
+@@ -379,6 +424,9 @@ SYSCALL_DEFINE5(file_getattr, int, dfd, const char __user *, filename,
+ 	unsigned int lookup_flags = 0;
+ 	struct file_attr fattr;
+ 	struct file_kattr fa = { .flags_valid = true }; /* hint only */
++#ifdef CONFIG_SECURITY_PKM
++	struct file *pkm_fileattr_file = NULL;
++#endif
+ 	int error;
+ 
+ 	BUILD_BUG_ON(sizeof(struct file_attr) < FILE_ATTR_SIZE_VER0);
+@@ -402,7 +450,16 @@ SYSCALL_DEFINE5(file_getattr, int, dfd, const char __user *, filename,
+ 		if (fd_empty(f))
+ 			return -EBADF;
+ 
++#ifdef CONFIG_SECURITY_PKM
++		pkm_fileattr_file = fd_file(f);
++		error = pkm_kacs_file_fileattr_get(pkm_fileattr_file);
++		if (error)
++			return error;
++		filepath = pkm_fileattr_file->f_path;
++#else
+ 		filepath = fd_file(f)->f_path;
++#endif
++
+ 		path_get(&filepath);
+ 	} else {
+ 		error = filename_lookup(dfd, name, lookup_flags, &filepath,
+@@ -412,6 +469,10 @@ SYSCALL_DEFINE5(file_getattr, int, dfd, const char __user *, filename,
+ 	}
+ 
+ 	error = vfs_fileattr_get(filepath.dentry, &fa);
++#ifdef CONFIG_SECURITY_PKM
++	if (pkm_fileattr_file)
++		pkm_kacs_file_end_metadata(pkm_fileattr_file);
++#endif
+ 	if (error == -ENOIOCTLCMD || error == -ENOTTY)
+ 		error = -EOPNOTSUPP;
+ 	if (error)
+@@ -432,6 +493,9 @@ SYSCALL_DEFINE5(file_setattr, int, dfd, const char __user *, filename,
+ 	unsigned int lookup_flags = 0;
+ 	struct file_attr fattr;
+ 	struct file_kattr fa;
++#ifdef CONFIG_SECURITY_PKM
++	struct file *pkm_fileattr_file = NULL;
++#endif
+ 	int error;
+ 
+ 	BUILD_BUG_ON(sizeof(struct file_attr) < FILE_ATTR_SIZE_VER0);
+@@ -464,7 +528,16 @@ SYSCALL_DEFINE5(file_setattr, int, dfd, const char __user *, filename,
+ 		if (fd_empty(f))
+ 			return -EBADF;
+ 
++#ifdef CONFIG_SECURITY_PKM
++		pkm_fileattr_file = fd_file(f);
++		error = pkm_kacs_file_fileattr_set(pkm_fileattr_file);
++		if (error)
++			return error;
++		filepath = pkm_fileattr_file->f_path;
++#else
+ 		filepath = fd_file(f)->f_path;
++#endif
++
+ 		path_get(&filepath);
+ 	} else {
+ 		error = filename_lookup(dfd, name, lookup_flags, &filepath,
+@@ -474,9 +547,28 @@ SYSCALL_DEFINE5(file_setattr, int, dfd, const char __user *, filename,
+ 	}
+ 
+ 	error = mnt_want_write(filepath.mnt);
++#ifdef CONFIG_SECURITY_PKM
++	if (error && pkm_fileattr_file)
++		pkm_kacs_file_end_metadata(pkm_fileattr_file);
++#endif
+ 	if (!error) {
++	#ifdef CONFIG_SECURITY_PKM
++		if (!pkm_fileattr_file) {
++			error = pkm_kacs_path_fileattr_set(&filepath);
++			if (error) {
++				mnt_drop_write(filepath.mnt);
++				return error;
++			}
++		}
++#endif
+ 		error = vfs_fileattr_set(mnt_idmap(filepath.mnt),
+ 					 filepath.dentry, &fa);
++#ifdef CONFIG_SECURITY_PKM
++		if (pkm_fileattr_file)
++			pkm_kacs_file_end_metadata(pkm_fileattr_file);
++		else
++			pkm_kacs_path_end_metadata(&filepath);
++#endif
+ 		if (error == -ENOIOCTLCMD || error == -ENOTTY)
+ 			error = -EOPNOTSUPP;
+ 		mnt_drop_write(filepath.mnt);

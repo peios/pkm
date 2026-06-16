@@ -1,0 +1,36 @@
+diff --git a/net/core/sock.c b/net/core/sock.c
+index 5976100a9..81bfb7fed 100644
+--- a/net/core/sock.c
++++ b/net/core/sock.c
+@@ -1694,6 +1694,12 @@ static const struct cred *sk_get_peer_cred(struct sock *sk)
+ 	return cred;
+ }
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern void pkm_kacs_project_cred_uid_gid(const struct cred *cred,
++					  kuid_t *uid, kgid_t *gid);
++#endif
++
++
+ static void cred_to_ucred(struct pid *pid, const struct cred *cred,
+ 			  struct ucred *ucred)
+ {
+@@ -1702,8 +1708,18 @@ static void cred_to_ucred(struct pid *pid, const struct cred *cred,
+ 	if (cred) {
+ 		struct user_namespace *current_ns = current_user_ns();
+ 
++#ifdef CONFIG_SECURITY_PKM
++		kuid_t projected_uid;
++		kgid_t projected_gid;
++
++		pkm_kacs_project_cred_uid_gid(cred, &projected_uid,
++					      &projected_gid);
++		ucred->uid = from_kuid_munged(current_ns, projected_uid);
++		ucred->gid = from_kgid_munged(current_ns, projected_gid);
++#else
+ 		ucred->uid = from_kuid_munged(current_ns, cred->euid);
+ 		ucred->gid = from_kgid_munged(current_ns, cred->egid);
++#endif
+ 	}
+ }
+ 

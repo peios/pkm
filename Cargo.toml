@@ -3,13 +3,13 @@ resolver = "2"
 members = [
     "crates/kacs-core",
     "crates/lcs-core",
-    "uapi/rust",
+    "uapi/generated/rust",
 ]
-# uapi/rust is the generated `peios-uapi` — the canonical Rust binding,
-# mechanically mirrored from the C UAPI headers by gen.sh. It stays here,
-# co-located with the headers. The hand-written userspace library that
-# consumes it (libp-{errno,sys,wire,sd,token,files,event}, msgpack) lives in
-# the sibling `libp-rs` repo, mirroring how libp-go consumes uapi/go.
+# uapi/generated/rust is the generated `peios-uapi` crate — the canonical Rust
+# binding, mechanically mirrored from the C UAPI headers (uapi/pkm) by its
+# gen.sh and kept in sync by the codegen-drift gate. Never hand-edit it. The
+# former libp-rs/libp-go consumers are retired (to be replaced by clients with
+# direct libpeios.so dependencies).
 
 # Shared package metadata. Members opt-in via `field.workspace = true`.
 # Members with reasons to diverge (kacs-core stays on edition 2021 during

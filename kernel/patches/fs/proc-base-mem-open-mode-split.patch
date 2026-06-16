@@ -1,0 +1,15 @@
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 4c863d17d..112cd7521 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -871,7 +986,9 @@ static int mem_open(struct inode *inode, struct file *file)
+ {
+ 	if (WARN_ON_ONCE(!(file->f_op->fop_flags & FOP_UNSIGNED_OFFSET)))
+ 		return -EINVAL;
+-	return __mem_open(inode, file, PTRACE_MODE_ATTACH);
++	return __mem_open(inode, file,
++			  (file->f_mode & FMODE_WRITE) ? PTRACE_MODE_ATTACH :
++						 PTRACE_MODE_READ);
+ }
+ 
+ static bool proc_mem_foll_force(struct file *file, struct mm_struct *mm)

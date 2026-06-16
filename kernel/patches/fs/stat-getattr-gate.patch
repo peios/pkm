@@ -1,0 +1,57 @@
+diff --git a/fs/stat.c b/fs/stat.c
+index 89909746b..0ffcfa797 100644
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -273,12 +273,31 @@ EXPORT_SYMBOL(vfs_getattr);
+  *
+  * 0 will be returned on success, and a -ve error code if unsuccessful.
+  */
++#ifdef CONFIG_SECURITY_PKM
++extern int pkm_kacs_file_getattr(struct file *file);
++extern void pkm_kacs_file_end_metadata(struct file *file);
++#endif
++
++
+ int vfs_fstat(int fd, struct kstat *stat)
+ {
+ 	CLASS(fd_raw, f)(fd);
+ 	if (fd_empty(f))
+ 		return -EBADF;
++#ifdef CONFIG_SECURITY_PKM
++	{
++		int ret = pkm_kacs_file_getattr(fd_file(f));
++		if (ret)
++			return ret;
++		ret = vfs_getattr(&fd_file(f)->f_path, stat,
++				  STATX_BASIC_STATS, 0);
++		pkm_kacs_file_end_metadata(fd_file(f));
++		return ret;
++	}
++#else
+ 	return vfs_getattr(&fd_file(f)->f_path, stat, STATX_BASIC_STATS, 0);
++#endif
++
+ }
+ 
+ static int statx_lookup_flags(int flags)
+@@ -320,7 +339,20 @@ static int vfs_statx_fd(int fd, int flags, struct kstat *stat,
+ 	CLASS(fd_raw, f)(fd);
+ 	if (fd_empty(f))
+ 		return -EBADF;
++#ifdef CONFIG_SECURITY_PKM
++	{
++		int ret = pkm_kacs_file_getattr(fd_file(f));
++		if (ret)
++			return ret;
++		ret = vfs_statx_path(&fd_file(f)->f_path, flags, stat,
++				     request_mask);
++		pkm_kacs_file_end_metadata(fd_file(f));
++		return ret;
++	}
++#else
+ 	return vfs_statx_path(&fd_file(f)->f_path, flags, stat, request_mask);
++#endif
++
+ }
+ 
+ /**

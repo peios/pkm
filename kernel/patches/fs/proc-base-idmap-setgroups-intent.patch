@@ -1,0 +1,48 @@
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 4c863d17d..112cd7521 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -3104,6 +3410,21 @@ static int proc_id_map_open(struct inode *inode, struct file *file,
+ 
+ 	task = get_proc_task(inode);
+ 	if (task) {
++		/* PKM: gate /proc/<pid> id-map open intent. */
++		if (file->f_mode & FMODE_READ) {
++			ret = proc_pkm_check_task_metadata_access(task, file);
++			if (ret) {
++				put_task_struct(task);
++				goto err;
++			}
++		}
++		if (file->f_mode & FMODE_WRITE) {
++			ret = proc_pkm_check_task_setinfo_access(task);
++			if (ret) {
++				put_task_struct(task);
++				goto err;
++			}
++		}
+ 		rcu_read_lock();
+ 		ns = get_user_ns(task_cred_xxx(task, user_ns));
+ 		rcu_read_unlock();
+@@ -3182,6 +3503,21 @@ static int proc_setgroups_open(struct inode *inode, struct file *file)
+ 	ret = -ESRCH;
+ 	task = get_proc_task(inode);
+ 	if (task) {
++		/* PKM: gate /proc/<pid>/setgroups open intent. */
++		if (file->f_mode & FMODE_READ) {
++			ret = proc_pkm_check_task_metadata_access(task, file);
++			if (ret) {
++				put_task_struct(task);
++				goto err;
++			}
++		}
++		if (file->f_mode & FMODE_WRITE) {
++			ret = proc_pkm_check_task_setinfo_access(task);
++			if (ret) {
++				put_task_struct(task);
++				goto err;
++			}
++		}
+ 		rcu_read_lock();
+ 		ns = get_user_ns(task_cred_xxx(task, user_ns));
+ 		rcu_read_unlock();

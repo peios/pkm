@@ -1,0 +1,55 @@
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 854f4fc66..4cb175a62 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -6158,6 +6158,50 @@ static void __init init_mount_tree(void)
+ 	if (IS_ERR(mnt))
+ 		panic("Can't create rootfs");
+ 
++#ifdef CONFIG_SECURITY_PKM
++	{
++		/*
++		 * Self-relative SD, 72 bytes:
++		 *   header (20) | Owner=SYSTEM (12) | Group=SYSTEM (12) |
++		 *   DACL header (8) | ACE Allow SYSTEM GenericAll OI|CI (20)
++		 */
++		static const u8 pkm_rootfs_root_sd[72] = {
++			0x01, 0x00, 0x04, 0x80,
++			0x14, 0x00, 0x00, 0x00,
++			0x20, 0x00, 0x00, 0x00,
++			0x00, 0x00, 0x00, 0x00,
++			0x2c, 0x00, 0x00, 0x00,
++			0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
++			0x12, 0x00, 0x00, 0x00,
++			0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
++			0x12, 0x00, 0x00, 0x00,
++			0x02, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x00,
++			0x00, 0x03, 0x14, 0x00,
++			0x00, 0x00, 0x00, 0x10,
++			0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
++			0x12, 0x00, 0x00, 0x00,
++		};
++		extern int __vfs_setxattr_noperm(struct mnt_idmap *,
++						 struct dentry *,
++						 const char *,
++						 const void *, size_t, int);
++		struct inode *pkm_root_inode = mnt->mnt_root->d_inode;
++		int pkm_xerr;
++
++		inode_lock(pkm_root_inode);
++		pkm_xerr = __vfs_setxattr_noperm(&nop_mnt_idmap,
++						 mnt->mnt_root,
++						 "security.peios.sd",
++						 pkm_rootfs_root_sd,
++						 sizeof(pkm_rootfs_root_sd),
++						 0);
++		inode_unlock(pkm_root_inode);
++		if (pkm_xerr)
++			pr_warn("pkm: seed rootfs root SD failed: %d\n",
++				pkm_xerr);
++	}
++#endif
++
+ 	VFS_WARN_ON_ONCE(real_mount(nullfs_mnt)->mnt_id != 1);
+ 	VFS_WARN_ON_ONCE(real_mount(mnt)->mnt_id != 2);
+ 

@@ -1,0 +1,87 @@
+outDir = "out"
+
+[build.upstream]
+command = """
+# Pinned upstream kernel. Bump deliberately and in lockstep with the patch
+# series: kernel/patches are generated against this exact tag, so a version
+# change generally means re-deriving or 3-way-rebasing them.
+KERNEL_VERSION=v7.0.9
+
+git clone --depth 1 --branch "$KERNEL_VERSION" \
+	https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+	"$PEKIT_OUT"
+
+# Source-level prep hook: nothing needed today (patches apply to a pristine
+# tree). Config/toolchain prep belongs to the later build stages, not here.
+"""
+
+[build.source]
+needs = ["upstream"]
+command = """
+PATCHES="$(pwd)/kernel/patches"
+cp -aT "$PEKIT_UPSTREAM_OUT" "$PEKIT_OUT"
+./kernel/apply-patches.sh $PEKIT_OUT $PATCHES
+./kernel/stage-sources.sh "$(pwd)" "$PEKIT_OUT"
+"""
+
+# build.source is config-agnostic (the kernel-source package). The kernel
+# stages take it, configure for a profile, and compile a monolithic bzImage.
+
+[build.kunit]
+needs = ["source"]
+command = """
+cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
+./build/configure-kernel.sh "$PEKIT_OUT" kunit
+./build/compile-kernel.sh "$PEKIT_OUT"
+"""
+
+[build.kernel]
+needs = ["source"]
+command = """
+cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
+# TODO: production TCB key regen — regenerate builtin_signing_keys.h from
+# $PKM_KACS_TCB_PUBKEY_HEX before configuring (build.source stages a placeholder).
+./build/configure-kernel.sh "$PEKIT_OUT" production
+./build/compile-kernel.sh "$PEKIT_OUT"
+"""
+
+# Boot the KUnit kernel in QEMU and assert the suite passes (build vs run split).
+[test.kunit]
+needs = ["kunit"]
+command = """
+./build/test-kunit.sh "$PEKIT_KUNIT_OUT"
+"""
+
+# Regenerate the language bindings under uapi/generated/{go,lua,rust} from the
+# canonical uapi/pkm headers, in place (each gen.sh runs the codegen-safe lint
+# first). Independent of the kernel chain — operates on the committed headers.
+# test.uapi is the matching drift gate (committed == fresh regen).
+[build.uapi]
+command = """
+bash uapi/generated/rust/gen.sh
+bash uapi/generated/lua/gen.sh
+bash uapi/generated/go/gen.sh
+# This target's real product is in-tree (uapi/generated); the wrap runs the
+# container as the host user, so no chown is needed. Drop a manifest of what
+# was regenerated into $PEKIT_OUT so pekit sees a non-empty output.
+( cd uapi/generated && find . -type f | sort | xargs sha256sum ) > "$PEKIT_OUT/bindings.sha256"
+"""
+
+# Drift gate for the UAPI: (1) the canonical headers must compile standalone
+# with a stock userspace compiler; (2) the committed bindings must match a
+# fresh regen. Regenerates into a throwaway copy — never mutates the tree —
+# and diffs. No needs; operates on the committed uapi/.
+[test.uapi]
+command = """
+bash uapi/check-userspace-clean.sh
+work="$(mktemp -d)"
+cp -a uapi "$work/uapi"
+bash "$work/uapi/generated/rust/gen.sh"
+bash "$work/uapi/generated/lua/gen.sh"
+bash "$work/uapi/generated/go/gen.sh"
+if ! diff -ru uapi/generated "$work/uapi/generated"; then
+	echo "test.uapi: committed bindings differ from a fresh regen — run 'pekit build uapi'" >&2
+	exit 1
+fi
+echo "test.uapi: headers userspace-clean and bindings in sync"
+"""

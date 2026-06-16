@@ -5,10 +5,10 @@
 /*
  * PKM custom syscall numbers.
  *
- * PKM registers these into arch/x86/entry/syscalls/syscall_64.tbl via
- * kernel/install-pkm-subtree.sh. This header is the userspace-facing
- * mirror of that registration: the two must be kept in lockstep — adding,
- * moving, or removing a syscall touches both.
+ * PKM registers these into arch/x86/entry/syscalls/syscall_64.tbl via the
+ * patch kernel/patches/arch/syscall-table-pkm.patch. This header is the
+ * userspace-facing mirror of that registration: the two must be kept in
+ * lockstep — adding, moving, or removing a syscall touches both.
  *
  * The numbers occupy the 1000+ range, which the upstream x86-64 syscall
  * table leaves free for out-of-tree use.

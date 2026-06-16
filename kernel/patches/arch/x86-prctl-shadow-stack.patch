@@ -1,0 +1,18 @@
+diff --git a/arch/x86/kernel/process_64.c b/arch/x86/kernel/process_64.c
+index 08e72f429..8c36f001b 100644
+--- a/arch/x86/kernel/process_64.c
++++ b/arch/x86/kernel/process_64.c
+@@ -972,6 +972,13 @@ long do_arch_prctl_64(struct task_struct *task, int option, unsigned long arg2)
+ 	case ARCH_SHSTK_LOCK:
+ 	case ARCH_SHSTK_UNLOCK:
+ 	case ARCH_SHSTK_STATUS:
++		if (option != ARCH_SHSTK_STATUS) {
++			int lsm_ret = security_task_prctl(option, arg2,
++							  0, 0, 0);
++			if (lsm_ret != -ENOSYS)
++				return lsm_ret;
++		}
++
+ 		return shstk_prctl(task, option, arg2);
+ 	default:
+ 		ret = -EINVAL;

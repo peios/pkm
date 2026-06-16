@@ -1,0 +1,15 @@
+diff --git a/kernel/signal.c b/kernel/signal.c
+index d65d0fe24..7908a42a7 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -812,6 +812,10 @@ static int check_kill_permission(int sig, struct kernel_siginfo *info,
+ 	if (error)
+ 		return error;
+ 
++#ifdef CONFIG_SECURITY_PKM
++	return security_task_kill(t, info, sig, NULL);
++#endif
++
+ 	if (!same_thread_group(current, t) &&
+ 	    !kill_ok_by_cred(t)) {
+ 		switch (sig) {

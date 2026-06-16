@@ -1,0 +1,28 @@
+diff --git a/kernel/events/core.c b/kernel/events/core.c
+index 89b40e439..0207e81ca 100644
+--- a/kernel/events/core.c
++++ b/kernel/events/core.c
+@@ -13802,6 +13802,11 @@ perf_check_permission(struct perf_event_attr *attr, struct task_struct *task)
+  * @group_fd:		group leader event fd
+  * @flags:		perf event open flags
+  */
++#ifdef CONFIG_SECURITY_PKM
++extern long pkm_kacs_perf_event_open(struct task_struct *task);
++#endif
++
++
+ SYSCALL_DEFINE5(perf_event_open,
+ 		struct perf_event_attr __user *, attr_uptr,
+ 		pid_t, pid, int, cpu, int, group_fd, unsigned long, flags)
+@@ -13910,6 +13915,11 @@ SYSCALL_DEFINE5(perf_event_open,
+ 			err = PTR_ERR(task);
+ 			goto err_fd;
+ 		}
++#ifdef CONFIG_SECURITY_PKM
++		err = pkm_kacs_perf_event_open(task);
++		if (err)
++			goto err_task;
++#endif
+ 	}
+ 
+ 	if (task && group_leader &&

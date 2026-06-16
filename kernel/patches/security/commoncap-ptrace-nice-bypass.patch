@@ -1,0 +1,55 @@
+diff --git a/security/commoncap.c b/security/commoncap.c
+index 339953580..fb6a0323c 100644
+--- a/security/commoncap.c
++++ b/security/commoncap.c
+@@ -167,6 +179,11 @@ int cap_ptrace_access_check(struct task_struct *child, unsigned int mode)
+ 	const struct cred *cred, *child_cred;
+ 	const kernel_cap_t *caller_caps;
+ 
++#ifdef CONFIG_SECURITY_PKM
++	return 0;
++#endif
++
++
+ 	rcu_read_lock();
+ 	cred = current_cred();
+ 	child_cred = __task_cred(child);
+@@ -203,6 +220,11 @@ int cap_ptrace_traceme(struct task_struct *parent)
+ 	int ret = 0;
+ 	const struct cred *cred, *child_cred;
+ 
++#ifdef CONFIG_SECURITY_PKM
++	return 0;
++#endif
++
++
+ 	rcu_read_lock();
+ 	cred = __task_cred(parent);
+ 	child_cred = current_cred();
+@@ -227,6 +249,14 @@ int cap_ptrace_traceme(struct task_struct *parent)
+  * This function retrieves the capabilities of the nominated task and returns
+  * them to the caller.
+  */
++#ifdef CONFIG_SECURITY_PKM
++extern long pkm_kacs_capget_for_task(const struct task_struct *target,
++				     kernel_cap_t *effective,
++				     kernel_cap_t *inheritable,
++				     kernel_cap_t *permitted);
++#endif
++
++
+ int cap_capget(const struct task_struct *target, kernel_cap_t *effective,
+ 	       kernel_cap_t *inheritable, kernel_cap_t *permitted)
+ {
+@@ -1209,6 +1245,11 @@ static int cap_safe_nice(struct task_struct *p)
+ {
+ 	int is_subset, ret = 0;
+ 
++#ifdef CONFIG_SECURITY_PKM
++	return 0;
++#endif
++
++
+ 	rcu_read_lock();
+ 	is_subset = cap_issubset(__task_cred(p)->cap_permitted,
+ 				 current_cred()->cap_permitted);

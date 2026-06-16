@@ -1,0 +1,41 @@
+diff --git a/fs/open.c b/fs/open.c
+index 91f113959..4c932d5f7 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -249,6 +249,11 @@ COMPAT_SYSCALL_DEFINE3(ftruncate64, unsigned int, fd,
+ }
+ #endif
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern int pkm_kacs_file_fallocate(struct file *file, int mode);
++#endif
++
++
+ int vfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
+ {
+ 	struct inode *inode = file_inode(file);
+@@ -309,7 +314,12 @@ int vfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
+ 	 * Revalidate the write permissions, in case security policy has
+ 	 * changed since the files were opened.
+ 	 */
++#ifdef CONFIG_SECURITY_PKM
++	ret = pkm_kacs_file_fallocate(file, mode);
++#else
+ 	ret = security_file_permission(file, MAY_WRITE);
++#endif
++
+ 	if (ret)
+ 		return ret;
+ 
+@@ -386,6 +396,11 @@ COMPAT_SYSCALL_DEFINE6(fallocate, int, fd, int, mode, compat_arg_u64_dual(offset
+  * Creating new credentials is expensive, so we try to skip doing it,
+  * which we can if the result would match what we already got.
+  */
++#ifdef CONFIG_SECURITY_PKM
++extern int pkm_kacs_path_access(const struct path *path, int mode);
++#endif
++
++
+ static bool access_need_override_creds(int flags)
+ {
+ 	const struct cred *cred;

@@ -1,0 +1,127 @@
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 4c863d17d..112cd7521 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -390,6 +390,90 @@ static ssize_t get_task_cmdline(struct task_struct *tsk, char __user *buf,
+ 	return ret;
+ }
+ 
++static unsigned int proc_pkm_metadata_ptrace_mode(const struct file *file)
++{
++	const char *name;
++
++	if (!file)
++		return 0;
++
++	name = file_dentry(file)->d_name.name;
++	if (strcmp(name, "stat") == 0 || strcmp(name, "statm") == 0 ||
++	    strcmp(name, "comm") == 0 || strcmp(name, "wchan") == 0 ||
++	    strcmp(name, "schedstat") == 0 || strcmp(name, "cpuset") == 0 ||
++	    strcmp(name, "cgroup") == 0 ||
++	    strcmp(name, "cpu_resctrl_groups") == 0 ||
++	    strcmp(name, "oom_score") == 0 ||
++	    strcmp(name, "sessionid") == 0 ||
++	    strcmp(name, "patch_state") == 0 ||
++	    strcmp(name, "stack_depth") == 0 ||
++	    strcmp(name, "arch_status") == 0)
++		return PTRACE_MODE_READ_FSCREDS |
++		       PTRACE_MODE_PROC_QUERY_LIMITED;
++	if (strcmp(name, "cmdline") == 0 || strcmp(name, "status") == 0 ||
++	    strcmp(name, "io") == 0 || strcmp(name, "limits") == 0 ||
++	    strcmp(name, "sched") == 0 ||
++	    strcmp(name, "autogroup") == 0 ||
++	    strcmp(name, "timens_offsets") == 0 ||
++	    strcmp(name, "personality") == 0 ||
++	    strcmp(name, "syscall") == 0 ||
++	    strcmp(name, "latency") == 0 ||
++	    strcmp(name, "timers") == 0 ||
++	    strcmp(name, "timerslack_ns") == 0 ||
++	    strcmp(name, "mounts") == 0 ||
++	    strcmp(name, "mountinfo") == 0 ||
++	    strcmp(name, "mountstats") == 0 ||
++	    strcmp(name, "coredump_filter") == 0 ||
++	    strcmp(name, "oom_adj") == 0 ||
++	    strcmp(name, "oom_score_adj") == 0 ||
++	    strcmp(name, "loginuid") == 0 ||
++	    strcmp(name, "make-it-fail") == 0 ||
++	    strcmp(name, "fail-nth") == 0 ||
++	    strcmp(name, "uid_map") == 0 ||
++	    strcmp(name, "gid_map") == 0 ||
++	    strcmp(name, "projid_map") == 0 ||
++	    strcmp(name, "setgroups") == 0 ||
++	    strcmp(name, "seccomp_cache") == 0 ||
++	    strcmp(name, "ksm_merging_pages") == 0 ||
++	    strcmp(name, "ksm_stat") == 0)
++		return PTRACE_MODE_READ_FSCREDS |
++		       PTRACE_MODE_PROC_QUERY_INFORMATION;
++
++	return 0;
++}
++
++static int proc_pkm_check_task_metadata_access(struct task_struct *task,
++					       const struct file *file)
++{
++	unsigned int mode;
++
++	mode = proc_pkm_metadata_ptrace_mode(file);
++	if (mode == 0)
++		return 0;
++	if (!ptrace_may_access(task, mode))
++		return -EACCES;
++
++	return 0;
++}
++
++#ifdef CONFIG_SECURITY_PKM
++extern long pkm_kacs_proc_process_setinfo(struct task_struct *task);
++#endif
++
++static int proc_pkm_check_task_setinfo_access(struct task_struct *task)
++{
++#ifdef CONFIG_SECURITY_PKM
++	long ret;
++
++	ret = pkm_kacs_proc_process_setinfo(task);
++	if (ret)
++		return (int)ret;
++#endif
++
++	return 0;
++}
++
++
+ static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,
+ 				     size_t count, loff_t *pos)
+ {
+@@ -2611,6 +2902,7 @@ static ssize_t timerslack_ns_write(struct file *file, const char __user *buf,
+ 		return -ESRCH;
+ 
+ 	if (p != current) {
++#ifndef CONFIG_SECURITY_PKM
+ 		rcu_read_lock();
+ 		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE)) {
+ 			rcu_read_unlock();
+@@ -2618,6 +2910,7 @@ static ssize_t timerslack_ns_write(struct file *file, const char __user *buf,
+ 			goto out;
+ 		}
+ 		rcu_read_unlock();
++#endif
+ 
+ 		err = security_task_setscheduler(p);
+ 		if (err) {
+@@ -2651,6 +2944,7 @@ static int timerslack_ns_show(struct seq_file *m, void *v)
+ 		return -ESRCH;
+ 
+ 	if (p != current) {
++#ifndef CONFIG_SECURITY_PKM
+ 		rcu_read_lock();
+ 		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE)) {
+ 			rcu_read_unlock();
+@@ -2658,6 +2952,7 @@ static int timerslack_ns_show(struct seq_file *m, void *v)
+ 			goto out;
+ 		}
+ 		rcu_read_unlock();
++#endif
+ 
+ 		err = security_task_getscheduler(p);
+ 		if (err)

@@ -1,0 +1,20 @@
+diff --git a/security/Makefile b/security/Makefile
+index 4601230ba..2b5adf747 100644
+--- a/security/Makefile
++++ b/security/Makefile
+@@ -29,3 +29,4 @@ obj-$(CONFIG_SECURITY_IPE)		+= ipe/
+ 
+ # Object integrity file lists
+ obj-$(CONFIG_INTEGRITY)			+= integrity/
++obj-$(CONFIG_SECURITY_PKM) += pkm/
+diff --git a/security/Kconfig b/security/Kconfig
+index 6a4393fce..81acc859d 100644
+--- a/security/Kconfig
++++ b/security/Kconfig
+@@ -303,5 +303,6 @@ config SECURITY_COMMONCAP_KUNIT_TEST
+ 
+ source "security/Kconfig.hardening"
+ 
++source "security/pkm/Kconfig"
+ endmenu
+ 

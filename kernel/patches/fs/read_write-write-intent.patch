@@ -1,0 +1,85 @@
+diff --git a/fs/read_write.c b/fs/read_write.c
+index 50bff7edc..9af3a4b51 100644
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -781,6 +781,13 @@ COMPAT_SYSCALL_DEFINE5(pread64, unsigned int, fd, char __user *, buf,
+ }
+ #endif
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,
++					    bool positioned);
++extern void pkm_kacs_file_end_write_intent(struct file *file);
++#endif
++
++
+ ssize_t ksys_pwrite64(unsigned int fd, const char __user *buf,
+ 		      size_t count, loff_t pos)
+ {
+@@ -792,7 +799,21 @@ ssize_t ksys_pwrite64(unsigned int fd, const char __user *buf,
+ 		return -EBADF;
+ 
+ 	if (fd_file(f)->f_mode & FMODE_PWRITE)
+-		return vfs_write(fd_file(f), buf, count, &pos);
++		{
++#ifdef CONFIG_SECURITY_PKM
++			ssize_t pkm_ret;
++
++			pkm_ret = pkm_kacs_file_begin_write_intent(
++				fd_file(f), 0, true);
++			if (pkm_ret)
++				return pkm_ret;
++			pkm_ret = vfs_write(fd_file(f), buf, count, &pos);
++			pkm_kacs_file_end_write_intent(fd_file(f));
++			return pkm_ret;
++#else
++			return vfs_write(fd_file(f), buf, count, &pos);
++#endif
++		}
+ 
+ 	return -ESPIPE;
+ }
+@@ -1102,7 +1123,19 @@ static ssize_t do_writev(unsigned long fd, const struct iovec __user *vec,
+ 			pos = *ppos;
+ 			ppos = &pos;
+ 		}
+-		ret = vfs_writev(fd_file(f), vec, vlen, ppos, flags);
++		{
++#ifdef CONFIG_SECURITY_PKM
++			ret = pkm_kacs_file_begin_write_intent(
++				fd_file(f), (u32)flags, false);
++			if (!ret) {
++				ret = vfs_writev(fd_file(f), vec, vlen, ppos,
++						 flags);
++				pkm_kacs_file_end_write_intent(fd_file(f));
++			}
++#else
++			ret = vfs_writev(fd_file(f), vec, vlen, ppos, flags);
++#endif
++		}
+ 		if (ret >= 0 && ppos)
+ 			fd_file(f)->f_pos = pos;
+ 	}
+@@ -1152,7 +1185,21 @@ static ssize_t do_pwritev(unsigned long fd, const struct iovec __user *vec,
+ 	if (!fd_empty(f)) {
+ 		ret = -ESPIPE;
+ 		if (fd_file(f)->f_mode & FMODE_PWRITE)
+-			ret = vfs_writev(fd_file(f), vec, vlen, &pos, flags);
++			{
++#ifdef CONFIG_SECURITY_PKM
++				ret = pkm_kacs_file_begin_write_intent(
++					fd_file(f), (u32)flags, true);
++				if (!ret) {
++					ret = vfs_writev(fd_file(f), vec,
++							 vlen, &pos, flags);
++					pkm_kacs_file_end_write_intent(
++						fd_file(f));
++				}
++#else
++				ret = vfs_writev(fd_file(f), vec, vlen, &pos,
++						 flags);
++#endif
++			}
+ 	}
+ 
+ 	if (ret > 0)

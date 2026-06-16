@@ -1,0 +1,29 @@
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 62e842055..96e6c5223 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -1027,7 +1027,11 @@ SYSCALL_DEFINE0(getppid)
+ SYSCALL_DEFINE0(getuid)
+ {
+ 	/* Only we change this so SMP safe */
++#ifdef CONFIG_SECURITY_PKM
++	return from_kuid_munged(current_user_ns(), current_real_cred()->uid);
++#else
+ 	return from_kuid_munged(current_user_ns(), current_uid());
++#endif
+ }
+ 
+ SYSCALL_DEFINE0(geteuid)
+@@ -1039,7 +1043,11 @@ SYSCALL_DEFINE0(geteuid)
+ SYSCALL_DEFINE0(getgid)
+ {
+ 	/* Only we change this so SMP safe */
+-	return from_kgid_munged(current_user_ns(), current_gid());
++#ifdef CONFIG_SECURITY_PKM
++return from_kgid_munged(current_user_ns(), current_real_cred()->gid);
++#else
++return from_kgid_munged(current_user_ns(), current_gid());
++#endif
+ }
+ 
+ SYSCALL_DEFINE0(getegid)

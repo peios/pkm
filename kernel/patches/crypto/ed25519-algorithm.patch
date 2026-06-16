@@ -1,0 +1,38 @@
+diff --git a/crypto/Kconfig b/crypto/Kconfig
+index b4bb85e8e..c5ee9a329 100644
+--- a/crypto/Kconfig
++++ b/crypto/Kconfig
+@@ -330,6 +330,17 @@ config CRYPTO_ECDSA
+ 
+ 	  Only signature verification is implemented.
+ 
++config CRYPTO_ED25519
++	tristate "Ed25519 signature verification"
++	depends on 64BIT
++	select CRYPTO_SIG
++	select CRYPTO_LIB_SHA512
++	help
++	  Ed25519 signature verification (RFC 8032).
++
++	  Only signature verification is implemented.
++
++
+ config CRYPTO_ECRDSA
+ 	tristate "EC-RDSA (Elliptic Curve Russian Digital Signature Algorithm)"
+ 	select CRYPTO_ECC
+diff --git a/crypto/Makefile b/crypto/Makefile
+index 04e269117..4a0c3a004 100644
+--- a/crypto/Makefile
++++ b/crypto/Makefile
+@@ -64,6 +64,11 @@ obj-$(CONFIG_CRYPTO_ECDSA) += ecdsa_generic.o
+ 
+ obj-$(CONFIG_CRYPTO_MLDSA) += mldsa.o
+ 
++ed25519_generic-y := ed25519.o
++ed25519_generic-y += ed25519-hacl.o
++obj-$(CONFIG_CRYPTO_ED25519) += ed25519_generic.o
++
++
+ crypto_acompress-y := acompress.o
+ crypto_acompress-y += scompress.o
+ obj-$(CONFIG_CRYPTO_ACOMP2) += crypto_acompress.o

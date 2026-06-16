@@ -1,0 +1,30 @@
+diff --git a/fs/open.c b/fs/open.c
+index 91f113959..4c932d5f7 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -479,11 +494,13 @@ static int do_faccessat(int dfd, const char __user *filename, int mode, int flag
+ 	if (flags & AT_SYMLINK_NOFOLLOW)
+ 		lookup_flags &= ~LOOKUP_FOLLOW;
+ 
++#ifndef CONFIG_SECURITY_PKM
+ 	if (access_need_override_creds(flags)) {
+ 		old_cred = access_override_creds();
+ 		if (!old_cred)
+ 			return -ENOMEM;
+ 	}
++#endif
+ 
+ 	CLASS(filename_uflags, name)(filename, flags);
+ retry:
+@@ -503,6 +520,11 @@ static int do_faccessat(int dfd, const char __user *filename, int mode, int flag
+ 			goto out_path_release;
+ 	}
+ 
++#ifdef CONFIG_SECURITY_PKM
++	res = pkm_kacs_path_access(&path, mode);
++	if (res)
++		goto out_path_release;
++#endif
+ 	res = inode_permission(mnt_idmap(path.mnt), inode, mode | MAY_ACCESS);
+ 	/* SuS v2 requires we report a read only fs too */
+ 	if (res || !(mode & S_IWOTH) || special_file(inode->i_mode))

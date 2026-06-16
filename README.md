@@ -6,90 +6,87 @@ the KMES event substrate used by KACS and userspace tooling.
 
 ## Source Layout
 
+- `uapi/pkm/` contains the canonical PKM UAPI: the C headers are the single
+  source of truth for every PKM ABI shape. The language bindings under
+  `uapi/generated/{go,lua,rust}/` are mechanically generated from these headers
+  by each directory's `gen.sh`, kept in sync by the codegen-drift gate, and
+  must never be edited by hand.
 - `kacs/` contains KACS kernel glue, token/process/file enforcement, KUnit
   tests, Rust ingress, and KACS-specific KMES payload emission.
 - `kmes/` contains the standalone KMES runtime, public KMES header, and
   syscall-side event validator.
+- `lcs/` contains LCS kernel glue: the registry source device, key/transaction
+  fds, RSI bridge, and KUnit tests.
 - `crates/kacs-core/` contains the pure Rust KACS semantic core used by the
   kernel Rust module.
-- `crates/peios-uapi/` contains userspace Rust bindings for PKM UAPI shapes.
-- `crates/libp-*` contains early userspace/test clients for the PKM ABI.
+- `crates/lcs-core/` contains the pure Rust LCS semantic core used by the
+  kernel Rust module.
+- `regman/` contains the regman fragments documenting the registry knobs the
+  PKM kernel reads.
 - `kernel/` contains the Dockerized kernel build, subtree installer, generated
   tree verifiers, and KUnit smoke harness.
 - `kernel/crypto/` contains the in-kernel Ed25519 implementation staged for
   KACS signing support.
 
-The normative KACS and KMES specs live outside this repo under
-`../learn/specs/psd-004--kacs/` and `../learn/specs/psd-003--kmes/`.
-For KACS behavior changes, follow the top-level `AGENTS.md` and
-`KACS_IMPLEMENTATION_CONTRACT.md` workflow before editing code.
+The normative KACS, KMES, and LCS specs live outside this repo under
+`../learn/specs/`.
 
 ## Build Flow
 
-Run scaffold verification before kernel builds:
+The build runs through [pekit](../pekit); `env.pekit.toml` transparently runs
+every stage inside the pinned toolchain image, so you only ever call `pekit`.
+
+Build the toolchain image once (it rebuilds only when `build/toolchain.lock`
+changes):
 
 ```sh
-make -C kernel verify-scaffold
+build/build-image.sh                 # -> image `pkm-build`
 ```
 
-Non-KUnit kernel builds require a TCB public key:
+Then drive the pipeline — each stage's output lands in `out/build/<stage>/`:
 
 ```sh
-PKM_KACS_TCB_PUBKEY_HEX=<hex-encoded-ed25519-public-key> make -C kernel kernel
+pekit build upstream                 # clone the pinned kernel (build/toolchain.lock)
+pekit build source                   # apply kernel/patches + stage PKM sources
+pekit build kunit                    # configure(kunit) + compile -> bzImage
+pekit test  kunit                    # boot in QEMU, assert the KUnit suite passes
+pekit build kernel                   # production-config bzImage (see key note below)
 ```
 
-The build writes:
+`--no-build=upstream[,source,...]` reuses prior stage outputs; `--env kvm` runs
+QEMU with `/dev/kvm` (the default falls back to TCG, so it stays portable).
 
-- `kernel/out/bzImage`
-- `kernel/out/kernel.config`
-- `kernel/out/lib/modules/`
+`build.source` is config-agnostic — it is the shippable kernel-source package.
+`build.kernel`/`build.kunit` take it, configure for a profile, and compile a
+monolithic (all-built-in) bzImage. The production TCB signing key is not yet
+injected (pending pekit keyrings); `build.kernel` currently uses an allow-empty
+placeholder key.
 
-The Docker build clones the pinned kernel version, stages PKM into
-`security/pkm`, enables `SECURITY_PKM`, verifies generated kernel patches and
-required hardening config, then builds the kernel and modules.
+## How PKM grafts into the kernel
 
-## KUnit
+`kernel/patches/` is a named, feature-split patch series (`series` sets apply
+order) covering every edit to pre-existing Linux files; `kernel/stage-sources.sh`
+adds the new files (the `security/pkm` subtree, UAPI headers, Ed25519 sources,
+the path-rewritten Rust cores, the generated signing-key header).
 
-For a hermetic KUnit smoke run:
+`kernel/apply-patches.sh` is the gate: a patch applies cleanly or fails loudly
+(it refuses a non-kernel target and treats a skipped patch as an error), which
+is why the old white-box `verify-scaffold`/`verify-generated-tree` checks are
+gone — `make LLVM=-18` plus the KUnit suite then prove the tree actually builds
+and behaves. `build/configure-kernel.sh` still runs
+`kernel/verify-kernel-config.sh`, which asserts the `.config` security
+invariants (sole-MAC LSM order, `STRICT_DEVMEM`, `MODULE_SIG_FORCE`) — those are
+covered by neither the patches nor the compile.
 
-```sh
-make -C kernel kunit-smoke
-```
-
-For normal development iteration:
-
-```sh
-make -C kernel kunit-smoke-fast
-```
-
-The fast path keeps an incremental kernel build tree in the Docker volume
-`pkm-new-kunit-buildtree` and stages PKM source at runtime. It is intended for
-the inner dev loop. Use `kunit-smoke` for a clean trust boundary or CI-style
-result.
-
-If the fast build reports that staged scripts or generated-patch inputs changed,
-reset the persistent build tree:
-
-```sh
-make -C kernel kunit-clean-fast
-```
-
-## Build Hygiene
-
-The scaffold and generated-tree gates are part of the contract:
-
-- `kernel/verify-scaffold.sh` checks that required PKM source files and init
-  ordering are present before staging.
-- `kernel/install-pkm-subtree.sh` installs this repo's PKM files into the
-  kernel tree.
-- `kernel/verify-generated-tree.sh` checks that generated Linux call-site
-  patches are present.
-- `kernel/verify-kernel-config.sh` checks required KACS/PIP hardening options.
-
-Do not edit generated kernel output directly. Update the source, installer, or
-generator scripts, then rerun the relevant verification gate.
+Do not edit `out/` trees by hand. Change the source, patch series, or config
+fragment, then re-run the relevant `pekit` stage.
 
 ## Notes
 
-The Docker image and volume names still use the historical `pkm-new-*` prefixes.
-Those names are build-cache identifiers only; the active workspace is `pkm`.
+- The build image is `pkm-build`; ccache persists in the `pkm-ccache` volume.
+- A `test.boot` stage (boot the production kernel, assert init) is a future
+  addition, modeled on `build/test-kunit.sh`, once a real initrd is wired
+  (provium territory).
+- Release packaging (`manifest.json`) is pending: `build/make-release.sh` is the
+  pre-rewrite reference, to become a `build.release` stage alongside TCB-key
+  signing once pekit keyrings land.

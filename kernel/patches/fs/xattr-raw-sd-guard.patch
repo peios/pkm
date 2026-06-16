@@ -1,0 +1,110 @@
+diff --git a/fs/xattr.c b/fs/xattr.c
+index 3e49e612e..ade3eac19 100644
+--- a/fs/xattr.c
++++ b/fs/xattr.c
+@@ -601,6 +601,15 @@ int import_xattr_name(struct xattr_name *kname, const char __user *name)
+  * Extended attribute SET operations
+  */
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern int pkm_kacs_file_sd_xattr_get(struct file *file, const char *name);
++extern int pkm_kacs_file_sd_xattr_set(struct file *file, const char *name);
++extern int pkm_kacs_file_sd_xattr_remove(struct file *file, const char *name);
++extern int pkm_kacs_file_listxattr(struct file *file);
++extern void pkm_kacs_file_end_metadata(struct file *file);
++#endif
++
++
+ int setxattr_copy(const char __user *name, struct kernel_xattr_ctx *ctx)
+ {
+ 	int error;
+@@ -639,11 +648,25 @@ static int do_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
+ 
+ int file_setxattr(struct file *f, struct kernel_xattr_ctx *ctx)
+ {
+-	int error = mnt_want_write_file(f);
++#ifdef CONFIG_SECURITY_PKM
++	int error = pkm_kacs_file_sd_xattr_set(f, ctx->kname->name);
++	if (error)
++		return error;
++#else
++	int error = 0;
++#endif
++	error = mnt_want_write_file(f);
++#ifdef CONFIG_SECURITY_PKM
++	if (error)
++		pkm_kacs_file_end_metadata(f);
++#endif
+ 
+ 	if (!error) {
+ 		audit_file(f);
+ 		error = do_setxattr(file_mnt_idmap(f), f->f_path.dentry, ctx);
++#ifdef CONFIG_SECURITY_PKM
++		pkm_kacs_file_end_metadata(f);
++#endif
+ 		mnt_drop_write_file(f);
+ 	}
+ 	return error;
+@@ -795,8 +818,20 @@ do_getxattr(struct mnt_idmap *idmap, struct dentry *d,
+ 
+ ssize_t file_getxattr(struct file *f, struct kernel_xattr_ctx *ctx)
+ {
++#ifdef CONFIG_SECURITY_PKM
++	ssize_t error = pkm_kacs_file_sd_xattr_get(f, ctx->kname->name);
++	if (error)
++		return error;
++#endif
+ 	audit_file(f);
++#ifdef CONFIG_SECURITY_PKM
++	error = do_getxattr(file_mnt_idmap(f), f->f_path.dentry, ctx);
++	pkm_kacs_file_end_metadata(f);
++	return error;
++#else
+ 	return do_getxattr(file_mnt_idmap(f), f->f_path.dentry, ctx);
++#endif
++
+ }
+ 
+ ssize_t filename_getxattr(int dfd, struct filename *filename,
+@@ -930,6 +965,13 @@ listxattr(struct dentry *d, char __user *list, size_t size)
+ static
+ ssize_t file_listxattr(struct file *f, char __user *list, size_t size)
+ {
++#ifdef CONFIG_SECURITY_PKM
++	{
++		int ret = pkm_kacs_file_listxattr(f);
++		if (ret)
++			return ret;
++	}
++#endif
+ 	audit_file(f);
+ 	return listxattr(f->f_path.dentry, list, size);
+ }
+@@ -1012,12 +1054,26 @@ removexattr(struct mnt_idmap *idmap, struct dentry *d, const char *name)
+ 
+ static int file_removexattr(struct file *f, struct xattr_name *kname)
+ {
+-	int error = mnt_want_write_file(f);
++#ifdef CONFIG_SECURITY_PKM
++	int error = pkm_kacs_file_sd_xattr_remove(f, kname->name);
++	if (error)
++		return error;
++#else
++	int error = 0;
++#endif
++	error = mnt_want_write_file(f);
++#ifdef CONFIG_SECURITY_PKM
++	if (error)
++		pkm_kacs_file_end_metadata(f);
++#endif
+ 
+ 	if (!error) {
+ 		audit_file(f);
+ 		error = removexattr(file_mnt_idmap(f),
+ 				    f->f_path.dentry, kname->name);
++#ifdef CONFIG_SECURITY_PKM
++		pkm_kacs_file_end_metadata(f);
++#endif
+ 		mnt_drop_write_file(f);
+ 	}
+ 	return error;

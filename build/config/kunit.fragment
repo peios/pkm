@@ -1,0 +1,8 @@
+# KUnit profile overlay — merged on top of pkm.fragment for the test build.
+# Enables the in-kernel PKM KUnit suite. NOT for production images.
+CONFIG_KUNIT=y
+CONFIG_SECURITY_PKM_KUNIT=y
+# KUnit test bodies build large fixtures on the stack, legitimately past the
+# 2048-byte production frame limit; these functions are KUnit-gated and never
+# ship. Production keeps CONFIG_FRAME_WARN=2048 (the real gate).
+CONFIG_FRAME_WARN=0

@@ -1,0 +1,29 @@
+diff --git a/fs/statfs.c b/fs/statfs.c
+index 377bcef7a..236c6d820 100644
+--- a/fs/statfs.c
++++ b/fs/statfs.c
+@@ -113,12 +113,24 @@ int user_statfs(const char __user *pathname, struct kstatfs *st)
+ 	return error;
+ }
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern int pkm_kacs_file_statfs(struct file *file);
++#endif
++
++
+ int fd_statfs(int fd, struct kstatfs *st)
+ {
+ 	CLASS(fd_raw, f)(fd);
+ 
+ 	if (fd_empty(f))
+ 		return -EBADF;
++#ifdef CONFIG_SECURITY_PKM
++	{
++		int ret = pkm_kacs_file_statfs(fd_file(f));
++		if (ret)
++			return ret;
++	}
++#endif
+ 	return vfs_statfs(&fd_file(f)->f_path, st);
+ }
+ 

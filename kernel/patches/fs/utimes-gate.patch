@@ -1,0 +1,37 @@
+diff --git a/fs/utimes.c b/fs/utimes.c
+index e22664e41..eef700883 100644
+--- a/fs/utimes.c
++++ b/fs/utimes.c
+@@ -105,6 +105,12 @@ static int do_utimes_path(int dfd, const char __user *filename,
+ 	return error;
+ }
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern int pkm_kacs_file_utimens(struct file *file);
++extern void pkm_kacs_file_end_metadata(struct file *file);
++#endif
++
++
+ static int do_utimes_fd(int fd, struct timespec64 *times, int flags)
+ {
+ 	if (flags)
+@@ -113,7 +119,19 @@ static int do_utimes_fd(int fd, struct timespec64 *times, int flags)
+ 	CLASS(fd, f)(fd);
+ 	if (fd_empty(f))
+ 		return -EBADF;
++#ifdef CONFIG_SECURITY_PKM
++	{
++		int ret = pkm_kacs_file_utimens(fd_file(f));
++		if (ret)
++			return ret;
++		ret = vfs_utimes(&fd_file(f)->f_path, times);
++		pkm_kacs_file_end_metadata(fd_file(f));
++		return ret;
++	}
++#else
+ 	return vfs_utimes(&fd_file(f)->f_path, times);
++#endif
++
+ }
+ 
+ /*

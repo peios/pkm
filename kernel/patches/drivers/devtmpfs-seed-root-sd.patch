@@ -1,0 +1,52 @@
+diff --git a/drivers/base/devtmpfs.c b/drivers/base/devtmpfs.c
+index b1c4ceb65..0bb8bd472 100644
+--- a/drivers/base/devtmpfs.c
++++ b/drivers/base/devtmpfs.c
+@@ -482,6 +482,47 @@ int __init devtmpfs_init(void)
+ 		return PTR_ERR(mnt);
+ 	}
+ 
++#ifdef CONFIG_SECURITY_PKM
++	{
++		/* Same SD layout as the rootfs seed; see fs/namespace.c. */
++		static const u8 pkm_devtmpfs_root_sd[72] = {
++			0x01, 0x00, 0x04, 0x80,
++			0x14, 0x00, 0x00, 0x00,
++			0x20, 0x00, 0x00, 0x00,
++			0x00, 0x00, 0x00, 0x00,
++			0x2c, 0x00, 0x00, 0x00,
++			0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
++			0x12, 0x00, 0x00, 0x00,
++			0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
++			0x12, 0x00, 0x00, 0x00,
++			0x02, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x00,
++			0x00, 0x03, 0x14, 0x00,
++			0x00, 0x00, 0x00, 0x10,
++			0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
++			0x12, 0x00, 0x00, 0x00,
++		};
++		extern struct mnt_idmap nop_mnt_idmap;
++		extern int __vfs_setxattr_noperm(struct mnt_idmap *,
++						 struct dentry *,
++						 const char *,
++						 const void *, size_t, int);
++		struct inode *pkm_dev_inode = mnt->mnt_root->d_inode;
++		int pkm_xerr;
++
++		inode_lock(pkm_dev_inode);
++		pkm_xerr = __vfs_setxattr_noperm(&nop_mnt_idmap,
++						 mnt->mnt_root,
++						 "security.peios.sd",
++						 pkm_devtmpfs_root_sd,
++						 sizeof(pkm_devtmpfs_root_sd),
++						 0);
++		inode_unlock(pkm_dev_inode);
++		if (pkm_xerr)
++			pr_warn("pkm: seed devtmpfs root SD failed: %d\n",
++				pkm_xerr);
++	}
++#endif
++
+ 	err = devtmpfs_configure_context();
+ 	if (err) {
+ 		pr_err("unable to configure devtmpfs type %d\n", err);

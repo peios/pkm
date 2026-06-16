@@ -1,0 +1,40 @@
+diff --git a/mm/mempolicy.c b/mm/mempolicy.c
+index ebe4bc822..0f3dcd853 100644
+--- a/mm/mempolicy.c
++++ b/mm/mempolicy.c
+@@ -1899,13 +1899,23 @@ static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
+ 	 * Check if this process has the right to modify the specified process.
+ 	 * Use the regular "ptrace_may_access()" checks.
+ 	 */
++#ifndef CONFIG_SECURITY_PKM
+ 	if (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)) {
+ 		rcu_read_unlock();
+ 		err = -EPERM;
+ 		goto out_put;
+ 	}
++#endif
+ 	rcu_read_unlock();
+ 
++#ifdef CONFIG_SECURITY_PKM
++	/* PKM: gate migrate_pages before native node/capability constraints. */
++	err = security_task_movememory(task);
++	if (err)
++		goto out_put;
++#endif
++
++
+ 	task_nodes = cpuset_mems_allowed(task);
+ 	/* Is the user allowed to access the target nodes? */
+ 	if (!nodes_subset(*new, task_nodes) && !capable(CAP_SYS_NICE)) {
+@@ -1917,9 +1927,11 @@ static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
+ 	if (!nodes_and(*new, *new, task_nodes))
+ 		goto out_put;
+ 
++#ifndef CONFIG_SECURITY_PKM
+ 	err = security_task_movememory(task);
+ 	if (err)
+ 		goto out_put;
++#endif
+ 
+ 	mm = get_task_mm(task);
+ 	put_task_struct(task);

@@ -1,0 +1,15 @@
+diff --git a/kernel/ptrace.c b/kernel/ptrace.c
+index 0e3ab697c..87107226e 100644
+--- a/kernel/ptrace.c
++++ b/kernel/ptrace.c
+@@ -310,6 +310,10 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
+ 	/* Don't let security modules deny introspection */
+ 	if (same_thread_group(task, current))
+ 		return 0;
++#ifdef CONFIG_SECURITY_PKM
++	return security_ptrace_access_check(task, mode);
++#endif
++
+ 	rcu_read_lock();
+ 	if (mode & PTRACE_MODE_FSCREDS) {
+ 		caller_uid = cred->fsuid;

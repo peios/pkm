@@ -1,0 +1,253 @@
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 4c863d17d..112cd7521 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -401,6 +485,12 @@ static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,
+ 	tsk = get_proc_task(file_inode(file));
+ 	if (!tsk)
+ 		return -ESRCH;
++	ret = proc_pkm_check_task_metadata_access(tsk, file);
++	if (ret) {
++		put_task_struct(tsk);
++		return ret;
++	}
++
+ 	ret = get_task_cmdline(tsk, buf, count, pos);
+ 	put_task_struct(tsk);
+ 	if (ret > 0)
+@@ -532,6 +622,16 @@ static int lstats_show_proc(struct seq_file *m, void *v)
+ 
+ 	if (!task)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/latency read metadata. */
++	{
++		int ret = proc_pkm_check_task_metadata_access(task, m->file);
++
++		if (ret) {
++			put_task_struct(task);
++			return ret;
++		}
++	}
++
+ 	seq_puts(m, "Latency Top version : v0.1\n");
+ 	for (i = 0; i < LT_SAVECOUNT; i++) {
+ 		struct latency_record *lr = &task->latency_record[i];
+@@ -809,6 +918,12 @@ static int proc_single_show(struct seq_file *m, void *v)
+ 	if (!task)
+ 		return -ESRCH;
+ 
++	ret = proc_pkm_check_task_metadata_access(task, m->file);
++	if (ret) {
++		put_task_struct(task);
++		return ret;
++	}
++
+ 	ret = PROC_I(inode)->op.proc_show(m, ns, pid, task);
+ 
+ 	put_task_struct(task);
+@@ -1110,6 +1227,16 @@ static ssize_t oom_adj_read(struct file *file, char __user *buf, size_t count,
+ 
+ 	if (!task)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/oom_adj read metadata. */
++	{
++		int ret = proc_pkm_check_task_metadata_access(task, file);
++
++		if (ret) {
++			put_task_struct(task);
++			return ret;
++		}
++	}
++
+ 	if (task->signal->oom_score_adj == OOM_SCORE_ADJ_MAX)
+ 		oom_adj = OOM_ADJUST_MAX;
+ 	else
+@@ -1268,6 +1416,16 @@ static ssize_t oom_score_adj_read(struct file *file, char __user *buf,
+ 
+ 	if (!task)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/oom_score_adj read metadata. */
++	{
++		int ret = proc_pkm_check_task_metadata_access(task, file);
++
++		if (ret) {
++			put_task_struct(task);
++			return ret;
++		}
++	}
++
+ 	oom_score_adj = task->signal->oom_score_adj;
+ 	put_task_struct(task);
+ 	len = snprintf(buffer, sizeof(buffer), "%hd\n", oom_score_adj);
+@@ -1320,6 +1478,15 @@ static ssize_t proc_loginuid_read(struct file * file, char __user * buf,
+ 
+ 	if (!task)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/loginuid read metadata. */
++	{
++		int ret = proc_pkm_check_task_metadata_access(task, file);
++
++		if (ret) {
++			put_task_struct(task);
++			return ret;
++		}
++	}
+ 	length = scnprintf(tmpbuf, TMPBUFLEN, "%u",
+ 			   from_kuid(file->f_cred->user_ns,
+ 				     audit_get_loginuid(task)));
+@@ -1386,6 +1553,15 @@ static ssize_t proc_sessionid_read(struct file * file, char __user * buf,
+ 
+ 	if (!task)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/sessionid read metadata. */
++	{
++		int ret = proc_pkm_check_task_metadata_access(task, file);
++
++		if (ret) {
++			put_task_struct(task);
++			return ret;
++		}
++	}
+ 	length = scnprintf(tmpbuf, TMPBUFLEN, "%u",
+ 				audit_get_sessionid(task));
+ 	put_task_struct(task);
+@@ -1409,6 +1585,16 @@ static ssize_t proc_fault_inject_read(struct file * file, char __user * buf,
+ 
+ 	if (!task)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/make-it-fail read metadata. */
++	{
++		int ret = proc_pkm_check_task_metadata_access(task, file);
++
++		if (ret) {
++			put_task_struct(task);
++			return ret;
++		}
++	}
++
+ 	make_it_fail = task->make_it_fail;
+ 	put_task_struct(task);
+ 
+@@ -1483,7 +1683,17 @@ static ssize_t proc_fail_nth_read(struct file *file, char __user *buf,
+ 	task = get_proc_task(file_inode(file));
+ 	if (!task)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/fail-nth read metadata. */
++	{
++		int ret = proc_pkm_check_task_metadata_access(task, file);
++
++		if (ret) {
++			put_task_struct(task);
++			return ret;
++		}
++	}
+ 	len = snprintf(numbuf, sizeof(numbuf), "%u\n", task->fail_nth);
++
+ 	put_task_struct(task);
+ 	return simple_read_from_buffer(buf, count, ppos, numbuf, len);
+ }
+@@ -1507,6 +1717,16 @@ static int sched_show(struct seq_file *m, void *v)
+ 	p = get_proc_task(inode);
+ 	if (!p)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/sched read metadata. */
++	{
++		int ret = proc_pkm_check_task_metadata_access(p, m->file);
++
++		if (ret) {
++			put_task_struct(p);
++			return ret;
++		}
++	}
++
+ 	proc_sched_show_task(p, ns, m);
+ 
+ 	put_task_struct(p);
+@@ -1556,6 +1786,16 @@ static int sched_autogroup_show(struct seq_file *m, void *v)
+ 	p = get_proc_task(inode);
+ 	if (!p)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/autogroup read metadata. */
++	{
++		int ret = proc_pkm_check_task_metadata_access(p, m->file);
++
++		if (ret) {
++			put_task_struct(p);
++			return ret;
++		}
++	}
++
+ 	proc_sched_autogroup_show_task(p, m);
+ 
+ 	put_task_struct(p);
+@@ -1626,6 +1873,16 @@ static int timens_offsets_show(struct seq_file *m, void *v)
+ 	p = get_proc_task(file_inode(m->file));
+ 	if (!p)
+ 		return -ESRCH;
++	/* PKM: gate /proc/<pid>/timens_offsets read metadata. */
++	{
++		int ret = proc_pkm_check_task_metadata_access(p, m->file);
++
++		if (ret) {
++			put_task_struct(p);
++			return ret;
++		}
++	}
++
+ 	proc_timens_show_offsets(p, m);
+ 
+ 	put_task_struct(p);
+@@ -1756,6 +2020,16 @@ static int comm_show(struct seq_file *m, void *v)
+ 	if (!p)
+ 		return -ESRCH;
+ 
++	/* PKM: gate /proc/<pid>/comm read metadata. */
++	{
++		int ret = proc_pkm_check_task_metadata_access(p, m->file);
++
++		if (ret) {
++			put_task_struct(p);
++			return ret;
++		}
++	}
++
+ 	proc_task_name(m, p, false);
+ 	seq_putc(m, '\n');
+ 
+@@ -2576,6 +2850,23 @@ static int proc_timers_open(struct inode *inode, struct file *file)
+ {
+ 	struct timers_private *tp;
+ 
++#ifdef CONFIG_SECURITY_PKM
++	{
++		struct task_struct *task;
++		int ret;
++
++		/* PKM: gate /proc/<pid>/timers read metadata. */
++		task = get_proc_task(inode);
++		if (!task)
++			return -ESRCH;
++		ret = proc_pkm_check_task_metadata_access(task, file);
++		put_task_struct(task);
++		if (ret)
++			return ret;
++	}
++#endif
++
++
+ 	tp = __seq_open_private(file, &proc_timers_seq_ops,
+ 			sizeof(struct timers_private));
+ 	if (!tp)
+@@ -2962,6 +3257,12 @@ static ssize_t proc_coredump_filter_read(struct file *file, char __user *buf,
+ 	if (!task)
+ 		return -ESRCH;
+ 
++	/* PKM: gate /proc/<pid>/coredump_filter read metadata. */
++	ret = proc_pkm_check_task_metadata_access(task, file);
++	if (ret) {
++		put_task_struct(task);
++		return ret;
++	}
+ 	ret = 0;
+ 	mm = get_task_mm(task);
+ 	if (mm) {
