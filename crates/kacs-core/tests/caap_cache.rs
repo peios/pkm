@@ -1,3 +1,5 @@
+mod common;
+use common::{acl_bytes, append_tokens, basic_ace, expr, object_ace, parse_sid, resource_attribute_ace, sid_bytes};
 use kacs_core::{
     access_check_core, parse_caap_policy_spec, AccessCheckMode, AccessCheckToken, CaapPolicyCache,
     ConditionalContext, GenericMapping, ImpersonationLevel, IntegrityLevel, PipContext,
@@ -13,49 +15,14 @@ use kacs_core::{
     TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
 };
 
-const SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE: u8 = 0x12;
 const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
 const MAX_CAAP_SPEC_LEN: usize = 256 * 1024;
 const MAX_CAAP_RULE_COUNT: u32 = 256;
 const MAX_CAAP_FIELD_LEN: usize = 64 * 1024;
 
-fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
-    bytes.push(1);
-    bytes.push(sub_authorities.len() as u8);
-    bytes.extend_from_slice(&authority);
-    for sub_authority in sub_authorities {
-        bytes.extend_from_slice(&sub_authority.to_le_bytes());
-    }
-    bytes
-}
 
-fn parse_sid(bytes: &[u8]) -> Sid<'_> {
-    Sid::parse(bytes).expect("sid should parse")
-}
 
-fn basic_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
-    let size = 8 + sid.len();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(ace_type);
-    bytes.push(flags);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&mask.to_le_bytes());
-    bytes.extend_from_slice(sid);
-    bytes
-}
 
-fn object_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
-    let size = 12 + sid.len();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(ace_type);
-    bytes.push(flags);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&mask.to_le_bytes());
-    bytes.extend_from_slice(&0u32.to_le_bytes());
-    bytes.extend_from_slice(sid);
-    bytes
-}
 
 fn callback_ace(
     ace_type: u8,
@@ -117,19 +84,6 @@ fn opaque_acl_with_len(len: usize) -> Vec<u8> {
     bytes
 }
 
-fn acl_bytes(aces: &[Vec<u8>]) -> Vec<u8> {
-    let size = 8 + aces.iter().map(Vec::len).sum::<usize>();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(4);
-    bytes.push(0);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&(aces.len() as u16).to_le_bytes());
-    bytes.extend_from_slice(&0u16.to_le_bytes());
-    for ace in aces {
-        bytes.extend_from_slice(ace);
-    }
-    bytes
-}
 
 fn scoped_policy_ace(policy_sid: &[u8]) -> Vec<u8> {
     basic_ace(SYSTEM_SCOPED_POLICY_ID_ACE_TYPE, 0, 0, policy_sid)
@@ -160,20 +114,6 @@ fn int64_claim(name: &str, value: i64) -> Vec<u8> {
     bytes
 }
 
-fn resource_attribute_ace(flags: u8, application_data: &[u8]) -> Vec<u8> {
-    let sid = sid_bytes([0, 0, 0, 0, 0, 1], &[0]);
-    let unpadded_size = 8 + sid.len() + application_data.len();
-    let size = (unpadded_size + 3) & !3;
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE);
-    bytes.push(flags);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&0u32.to_le_bytes());
-    bytes.extend_from_slice(&sid);
-    bytes.extend_from_slice(application_data);
-    bytes.resize(size, 0);
-    bytes
-}
 
 fn sd_bytes(
     owner: Option<&[u8]>,
@@ -215,11 +155,6 @@ fn sd_bytes(
     bytes
 }
 
-fn expr(tokens: &[u8]) -> Vec<u8> {
-    let mut bytes = b"artx".to_vec();
-    bytes.extend_from_slice(tokens);
-    bytes
-}
 
 fn overflowing_expr() -> Vec<u8> {
     let mut bytes = b"artx".to_vec();
@@ -256,13 +191,6 @@ fn attr_ref(opcode: u8, name: &str) -> Vec<u8> {
     bytes
 }
 
-fn append_tokens(tokens: &[Vec<u8>]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for token in tokens {
-        bytes.extend_from_slice(token);
-    }
-    bytes
-}
 
 fn caap_spec(
     applies_to: Option<&[u8]>,

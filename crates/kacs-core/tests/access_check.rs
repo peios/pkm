@@ -1,3 +1,5 @@
+mod common;
+use common::{acl_bytes, append_tokens, basic_ace, expr, parse_sid, resource_attribute_ace, sid_bytes};
 use kacs_core::{
     access_check, access_check_core, access_check_result_list, AccessCheckMode, AccessCheckResult,
     AccessCheckResultListState, AccessCheckToken, AccessStatus, CaapDiagnosticKind, CaapPolicy,
@@ -12,8 +14,7 @@ use kacs_core::{
     SE_GROUP_USE_FOR_DENY_ONLY, SE_SACL_PRESENT, SE_SECURITY_PRIVILEGE, SE_SELF_RELATIVE,
     SYSTEM_ALARM_ACE_TYPE, SYSTEM_ALARM_CALLBACK_ACE_TYPE, SYSTEM_ALARM_OBJECT_ACE_TYPE,
     SYSTEM_AUDIT_ACE_TYPE, SYSTEM_AUDIT_CALLBACK_ACE_TYPE, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
-    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
-    SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE, TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC,
+    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC,
 };
 
 const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
@@ -21,31 +22,8 @@ const INHERIT_ONLY_ACE: u8 = 0x08;
 const SUCCESSFUL_ACCESS_ACE_FLAG: u8 = 0x40;
 const FAILED_ACCESS_ACE_FLAG: u8 = 0x80;
 
-fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
-    bytes.push(1);
-    bytes.push(sub_authorities.len() as u8);
-    bytes.extend_from_slice(&authority);
-    for sub_authority in sub_authorities {
-        bytes.extend_from_slice(&sub_authority.to_le_bytes());
-    }
-    bytes
-}
 
-fn parse_sid(bytes: &[u8]) -> Sid<'_> {
-    Sid::parse(bytes).expect("sid should parse")
-}
 
-fn basic_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
-    let size = 8 + sid.len();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(ace_type);
-    bytes.push(flags);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&mask.to_le_bytes());
-    bytes.extend_from_slice(sid);
-    bytes
-}
 
 fn callback_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8], condition: &[u8]) -> Vec<u8> {
     let unpadded_size = 8 + sid.len() + condition.len();
@@ -61,20 +39,6 @@ fn callback_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8], condition: &[u8]
     bytes
 }
 
-fn resource_attribute_ace(flags: u8, application_data: &[u8]) -> Vec<u8> {
-    let sid = sid_bytes([0, 0, 0, 0, 0, 1], &[0]);
-    let unpadded_size = 8 + sid.len() + application_data.len();
-    let size = (unpadded_size + 3) & !3;
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE);
-    bytes.push(flags);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&0u32.to_le_bytes());
-    bytes.extend_from_slice(&sid);
-    bytes.extend_from_slice(application_data);
-    bytes.resize(size, 0);
-    bytes
-}
 
 fn object_ace(
     ace_type: u8,
@@ -99,19 +63,6 @@ fn object_ace(
     bytes
 }
 
-fn acl_bytes(aces: &[Vec<u8>]) -> Vec<u8> {
-    let size = 8 + aces.iter().map(Vec::len).sum::<usize>();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(4);
-    bytes.push(0);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&(aces.len() as u16).to_le_bytes());
-    bytes.extend_from_slice(&0u16.to_le_bytes());
-    for ace in aces {
-        bytes.extend_from_slice(ace);
-    }
-    bytes
-}
 
 fn sd_bytes(
     owner: Option<&[u8]>,
@@ -167,11 +118,6 @@ fn process_trust_label_ace(mask: u32, pip_type: u32, pip_trust: u32) -> Vec<u8> 
     basic_ace(SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, 0, mask, &sid)
 }
 
-fn expr(tokens: &[u8]) -> Vec<u8> {
-    let mut bytes = b"artx".to_vec();
-    bytes.extend_from_slice(tokens);
-    bytes
-}
 
 fn int64_literal(value: i64) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(11);
@@ -233,13 +179,6 @@ fn sid_literal(sid: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn append_tokens(tokens: &[Vec<u8>]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for token in tokens {
-        bytes.extend_from_slice(token);
-    }
-    bytes
-}
 
 fn guid(seed: u8) -> [u8; 16] {
     [seed; 16]

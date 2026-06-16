@@ -1,26 +1,15 @@
+mod common;
+use common::{acl_bytes, parse_sid, sid_bytes};
 use kacs_core::{
     evaluate_dacl, evaluate_dacl_result_list, evaluate_dacl_with_object_tree, AccessStatus,
-    GenericMapping, KacsError, ObjectTypeList, ObjectTypeNode, SecurityDescriptor, Sid,
+    GenericMapping, KacsError, ObjectTypeList, ObjectTypeNode, SecurityDescriptor,
     SidAndAttributes, TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE,
     ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE,
     ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, DELETE, READ_CONTROL,
     SE_DACL_PRESENT, SE_GROUP_ENABLED, SE_SELF_RELATIVE, WRITE_DAC,
 };
 
-fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
-    bytes.push(1);
-    bytes.push(sub_authorities.len() as u8);
-    bytes.extend_from_slice(&authority);
-    for sub_authority in sub_authorities {
-        bytes.extend_from_slice(&sub_authority.to_le_bytes());
-    }
-    bytes
-}
 
-fn parse_sid(bytes: &[u8]) -> Sid<'_> {
-    Sid::parse(bytes).expect("sid should parse")
-}
 
 fn object_ace(
     ace_type: u8,
@@ -117,19 +106,6 @@ fn callback_object_ace(
     bytes
 }
 
-fn acl_bytes(aces: &[Vec<u8>]) -> Vec<u8> {
-    let size = 8 + aces.iter().map(Vec::len).sum::<usize>();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(4);
-    bytes.push(0);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&(aces.len() as u16).to_le_bytes());
-    bytes.extend_from_slice(&0u16.to_le_bytes());
-    for ace in aces {
-        bytes.extend_from_slice(ace);
-    }
-    bytes
-}
 
 fn sd_with_dacl(owner: &[u8], dacl: Option<&[u8]>) -> Vec<u8> {
     let control = SE_SELF_RELATIVE | if dacl.is_some() { SE_DACL_PRESENT } else { 0 };

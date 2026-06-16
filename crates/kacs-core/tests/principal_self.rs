@@ -1,34 +1,13 @@
+mod common;
+use common::{basic_ace, parse_sid, sid_bytes};
 use kacs_core::{
-    evaluate_dacl_with_self_sid, GenericMapping, SecurityDescriptor, Sid, TokenView,
+    evaluate_dacl_with_self_sid, GenericMapping, SecurityDescriptor, TokenView,
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, DELETE, READ_CONTROL, SE_DACL_PRESENT,
     SE_SELF_RELATIVE, WRITE_DAC,
 };
 
-fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
-    bytes.push(1);
-    bytes.push(sub_authorities.len() as u8);
-    bytes.extend_from_slice(&authority);
-    for sub_authority in sub_authorities {
-        bytes.extend_from_slice(&sub_authority.to_le_bytes());
-    }
-    bytes
-}
 
-fn parse_sid(bytes: &[u8]) -> Sid<'_> {
-    Sid::parse(bytes).expect("sid should parse")
-}
 
-fn basic_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
-    let size = 8 + sid.len();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(ace_type);
-    bytes.push(flags);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&mask.to_le_bytes());
-    bytes.extend_from_slice(sid);
-    bytes
-}
 
 fn acl_bytes(aces: &[Vec<u8>]) -> Vec<u8> {
     let size = 8 + aces.iter().map(Vec::len).sum::<usize>();

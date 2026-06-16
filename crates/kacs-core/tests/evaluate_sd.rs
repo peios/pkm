@@ -1,3 +1,5 @@
+mod common;
+use common::{acl_bytes, basic_ace, mapping, parse_sid, sid_bytes};
 use kacs_core::{
     evaluate_security_descriptor, AccessCheckToken, ConditionalContext, ConfinementTokenContext,
     GenericMapping, ImpersonationLevel, IntegrityLevel, KacsError, ObjectTypeList, ObjectTypeNode,
@@ -13,20 +15,7 @@ use kacs_core::{
 const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
 const EXECUTE_RIGHT: u32 = 0x0000_0020;
 
-fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
-    bytes.push(1);
-    bytes.push(sub_authorities.len() as u8);
-    bytes.extend_from_slice(&authority);
-    for sub_authority in sub_authorities {
-        bytes.extend_from_slice(&sub_authority.to_le_bytes());
-    }
-    bytes
-}
 
-fn parse_sid(bytes: &[u8]) -> Sid<'_> {
-    Sid::parse(bytes).expect("sid should parse")
-}
 
 fn sid_attr<'a>(sid: Sid<'a>) -> SidAndAttributes<'a> {
     SidAndAttributes {
@@ -35,16 +24,6 @@ fn sid_attr<'a>(sid: Sid<'a>) -> SidAndAttributes<'a> {
     }
 }
 
-fn basic_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
-    let size = 8 + sid.len();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(ace_type);
-    bytes.push(flags);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&mask.to_le_bytes());
-    bytes.extend_from_slice(sid);
-    bytes
-}
 
 fn object_ace(
     ace_type: u8,
@@ -69,19 +48,6 @@ fn object_ace(
     bytes
 }
 
-fn acl_bytes(aces: &[Vec<u8>]) -> Vec<u8> {
-    let size = 8 + aces.iter().map(Vec::len).sum::<usize>();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(4);
-    bytes.push(0);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&(aces.len() as u16).to_le_bytes());
-    bytes.extend_from_slice(&0u16.to_le_bytes());
-    for ace in aces {
-        bytes.extend_from_slice(ace);
-    }
-    bytes
-}
 
 fn sd_bytes(
     owner: Option<&[u8]>,
@@ -123,14 +89,6 @@ fn sd_bytes(
     bytes
 }
 
-fn mapping() -> GenericMapping {
-    GenericMapping {
-        read: READ_CONTROL,
-        write: WRITE_DAC,
-        execute: 0x0000_0020,
-        all: READ_CONTROL | WRITE_DAC | WRITE_OWNER | 0x0000_0020,
-    }
-}
 
 fn primary_token<'a>(user: Sid<'a>, groups: &'a [SidAndAttributes<'a>]) -> AccessCheckToken<'a> {
     AccessCheckToken {

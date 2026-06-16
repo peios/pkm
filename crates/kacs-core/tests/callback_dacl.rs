@@ -1,42 +1,17 @@
+mod common;
+use common::{acl_bytes, append_tokens, callback_ace, expr, parse_sid, sid_bytes};
 use kacs_core::{
     evaluate_dacl_result_list_with_context, evaluate_dacl_with_context,
     evaluate_dacl_with_object_tree_and_context, AccessStatus, ClaimAttribute, ClaimValue,
-    ConditionalContext, GenericMapping, ObjectTypeList, ObjectTypeNode, SecurityDescriptor, Sid,
+    ConditionalContext, GenericMapping, ObjectTypeList, ObjectTypeNode, SecurityDescriptor,
     SidAndAttributes, TokenView, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
     ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
     ACE_OBJECT_TYPE_PRESENT, CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY, READ_CONTROL,
     SE_DACL_PRESENT, SE_GROUP_ENABLED, SE_SELF_RELATIVE, WRITE_DAC,
 };
 
-fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
-    bytes.push(1);
-    bytes.push(sub_authorities.len() as u8);
-    bytes.extend_from_slice(&authority);
-    for sub_authority in sub_authorities {
-        bytes.extend_from_slice(&sub_authority.to_le_bytes());
-    }
-    bytes
-}
 
-fn parse_sid(bytes: &[u8]) -> Sid<'_> {
-    Sid::parse(bytes).expect("sid should parse")
-}
 
-fn callback_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8], app_data: &[u8]) -> Vec<u8> {
-    let size = (8 + sid.len() + app_data.len() + 3) & !3;
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(ace_type);
-    bytes.push(flags);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&mask.to_le_bytes());
-    bytes.extend_from_slice(sid);
-    bytes.extend_from_slice(app_data);
-    while bytes.len() < size {
-        bytes.push(0);
-    }
-    bytes
-}
 
 fn callback_object_ace(
     ace_type: u8,
@@ -68,19 +43,6 @@ fn callback_object_ace(
     bytes
 }
 
-fn acl_bytes(aces: &[Vec<u8>]) -> Vec<u8> {
-    let size = 8 + aces.iter().map(Vec::len).sum::<usize>();
-    let mut bytes = Vec::with_capacity(size);
-    bytes.push(4);
-    bytes.push(0);
-    bytes.extend_from_slice(&(size as u16).to_le_bytes());
-    bytes.extend_from_slice(&(aces.len() as u16).to_le_bytes());
-    bytes.extend_from_slice(&0u16.to_le_bytes());
-    for ace in aces {
-        bytes.extend_from_slice(ace);
-    }
-    bytes
-}
 
 fn sd_with_dacl(owner: &[u8], dacl: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0u8; 20];
@@ -121,11 +83,6 @@ fn mapping() -> GenericMapping {
     }
 }
 
-fn expr(tokens: &[u8]) -> Vec<u8> {
-    let mut bytes = b"artx".to_vec();
-    bytes.extend_from_slice(tokens);
-    bytes
-}
 
 fn string_literal(value: &str) -> Vec<u8> {
     let utf16: Vec<u16> = value.encode_utf16().collect();
@@ -145,13 +102,6 @@ fn attr_ref(opcode: u8, name: &str) -> Vec<u8> {
     bytes
 }
 
-fn append_tokens(tokens: &[Vec<u8>]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for token in tokens {
-        bytes.extend_from_slice(token);
-    }
-    bytes
-}
 
 #[test]
 fn callback_allow_ace_grants_when_condition_is_true() {

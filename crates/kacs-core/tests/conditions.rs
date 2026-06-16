@@ -1,24 +1,13 @@
+mod common;
+use common::{append_tokens, expr, parse_sid, sid_bytes};
 use kacs_core::{
     evaluate_conditional_expression, ClaimAttribute, ClaimValue, ConditionalContext,
-    ConditionalResult, GenericMapping, Sid, SidAndAttributes, TokenView,
+    ConditionalResult, GenericMapping, SidAndAttributes, TokenView,
     CLAIM_SECURITY_ATTRIBUTE_DISABLED, CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY,
     CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY,
 };
 
-fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
-    bytes.push(1);
-    bytes.push(sub_authorities.len() as u8);
-    bytes.extend_from_slice(&authority);
-    for sub_authority in sub_authorities {
-        bytes.extend_from_slice(&sub_authority.to_le_bytes());
-    }
-    bytes
-}
 
-fn parse_sid(bytes: &[u8]) -> Sid<'_> {
-    Sid::parse(bytes).expect("sid should parse")
-}
 
 fn token<'a>(user: &'a [u8], groups: &'a [SidAndAttributes<'a>]) -> TokenView<'a> {
     TokenView {
@@ -28,11 +17,6 @@ fn token<'a>(user: &'a [u8], groups: &'a [SidAndAttributes<'a>]) -> TokenView<'a
     }
 }
 
-fn expr(tokens: &[u8]) -> Vec<u8> {
-    let mut bytes = b"artx".to_vec();
-    bytes.extend_from_slice(tokens);
-    bytes
-}
 
 fn int64_literal(value: i64) -> Vec<u8> {
     int64_literal_with_sign(value, if value < 0 { 0x02 } else { 0x01 })
@@ -96,13 +80,6 @@ fn attr_ref(opcode: u8, name: &str) -> Vec<u8> {
     bytes
 }
 
-fn append_tokens(tokens: &[Vec<u8>]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for token in tokens {
-        bytes.extend_from_slice(token);
-    }
-    bytes
-}
 
 fn result_tokens(result: ConditionalResult) -> Vec<u8> {
     match result {

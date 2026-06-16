@@ -1,3 +1,5 @@
+mod common;
+use common::{sid_bytes};
 use kacs_core::{
     parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, ClaimValue,
     KacsError, CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE, CLAIM_TYPE_BOOLEAN, CLAIM_TYPE_INT64,
@@ -148,16 +150,6 @@ fn octet_claim(name: &str, value: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + (sub_authorities.len() * 4));
-    bytes.push(1);
-    bytes.push(sub_authorities.len() as u8);
-    bytes.extend_from_slice(&authority);
-    for sub_authority in sub_authorities {
-        bytes.extend_from_slice(&sub_authority.to_le_bytes());
-    }
-    bytes
-}
 
 fn sid_claim_with_trailing_data(name: &str, sid: &[u8], trailing: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
