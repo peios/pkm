@@ -43,7 +43,7 @@ install -m 0644 "$pkm"/kmes/* "$pkm_dir/kmes/"
 #     header (incl. psb.h), so the whole set must be staged together; staging
 #     pkm.h without psb.h leaves <pkm/pkm.h> unbuildable (an old-installer bug
 #     this list fixes). ---
-for h in pkm psb syscall sid sd token access file kmes lcs; do
+for h in pkm psb syscall sid sd token access file process kmes lcs; do
 	install -m 0644 "$pkm/uapi/pkm/$h.h" "$uapi_dir/$h.h"
 done
 
@@ -60,6 +60,13 @@ install -m 0644 "$here/crypto/ed25519-hacl.h"  "$tree/crypto/ed25519-hacl.h"
 genargs=(--pubkey-hex "$pubkey" --out "$pkm_dir/kacs/builtin_signing_keys.h")
 [[ -z "$pubkey" ]] && genargs+=(--allow-empty)
 python3 "$here/scripts/generate-kacs-builtin-signing-keys.py" "${genargs[@]}"
+
+# --- Generated UAPI Rust constants, vendored as the in-kernel `peios_uapi`
+#     module. The Rust cores reference `peios_uapi::<CONST>` as the single
+#     source of truth for ABI values; stage-rust-core.sh rewrites those paths
+#     to `crate::peios_uapi::` and kacs_rust.rs mounts this file as the module.
+#     Only zconst.rs (constants) is needed — the cores use no generated types. ---
+install -m 0644 "$pkm/uapi/generated/rust/src/zconst.rs" "$pkm_dir/kacs/peios_uapi.rs"
 
 # --- Rust cores, path-rewritten for nested in-kernel module paths ---
 "$here/stage-rust-core.sh" "$pkm/crates/kacs-core/src" "$pkm_dir/kacs/kacs_core"

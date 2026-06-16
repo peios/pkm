@@ -18,18 +18,18 @@ use crate::token::{AccessCheckToken, SidAndAttributes};
 
 /// Full size of the current fixed-width `kacs_access_check_args` buffer copied
 /// by the ABI parser.
-pub const KACS_ACCESS_CHECK_ARGS_SIZE: usize = 136;
+pub const KACS_ACCESS_CHECK_ARGS_SIZE: usize = peios_uapi::KACS_ACCESS_CHECK_ARGS_SIZE as usize;
 /// Minimum accepted caller-provided size for v0.20 AccessCheck args.
-pub const KACS_ACCESS_CHECK_ARGS_V1_SIZE: u32 = 40;
+pub const KACS_ACCESS_CHECK_ARGS_V1_SIZE: u32 = peios_uapi::KACS_ACCESS_CHECK_ARGS_V1_SIZE;
 /// Size of one flat object-type entry in the ABI array.
-pub const KACS_OBJECT_TYPE_ENTRY_SIZE: usize = 20;
+pub const KACS_OBJECT_TYPE_ENTRY_SIZE: usize = peios_uapi::KACS_OBJECT_TYPE_ENTRY_SIZE as usize;
 /// Maximum accepted object-audit context length in bytes.
-pub const KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN: u32 = 4096;
+pub const KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN: u32 = peios_uapi::KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN;
 /// Maximum accepted `@Local` claims blob length in bytes.
-pub const KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN: u32 = 65536;
+pub const KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN: u32 = peios_uapi::KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN;
 /// Maximum accepted object-type tree entry count. Bounds both the ABI buffer
 /// allocation and the O(n^2) duplicate-GUID scan in `ObjectTypeList::new`.
-pub const KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT: u32 = 1024;
+pub const KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT: u32 = peios_uapi::KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT;
 /// Negative errno value used for AccessCheck denial at the ABI boundary.
 pub const KACS_ABI_EACCES: i32 = -13;
 

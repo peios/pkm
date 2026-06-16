@@ -5,6 +5,8 @@
 #include <linux/types.h>
 
 #include <pkm/file.h>
+#include <pkm/process.h>
+#include <pkm/psb.h>
 #include "access_check.h"
 
 #define KACS_UUID_BYTES 16U
@@ -55,15 +57,7 @@ void pkm_kacs_rcu_read_lock(void);
 void pkm_kacs_rcu_read_unlock(void);
 void pkm_kacs_free_after_rcu(void *ptr);
 
-#define KACS_PROCESS_TERMINATE 0x0001U
-#define KACS_PROCESS_SIGNAL 0x0002U
-#define KACS_PROCESS_VM_READ 0x0010U
-#define KACS_PROCESS_VM_WRITE 0x0020U
-#define KACS_PROCESS_DUP_HANDLE 0x0040U
-#define KACS_PROCESS_SET_INFORMATION 0x0200U
-#define KACS_PROCESS_QUERY_INFORMATION 0x0400U
-#define KACS_PROCESS_SUSPEND_RESUME 0x0800U
-#define KACS_PROCESS_QUERY_LIMITED 0x1000U
+/* KACS_PROCESS_* process object access rights come from <pkm/process.h>. */
 
 #define PKM_KACS_KUNIT_FILE_METADATA_GETATTR 1U
 #define PKM_KACS_KUNIT_FILE_METADATA_STATFS 2U
@@ -99,17 +93,8 @@ void pkm_kacs_free_after_rcu(void *ptr);
 #define PKM_KACS_KUNIT_NAMESPACE_RENAME 8U
 #define PKM_KACS_KUNIT_NAMESPACE_READLINK 9U
 
-#define KACS_MIT_WXP 0x001U
-#define KACS_MIT_TLP 0x002U
-#define KACS_MIT_LSV 0x004U
-#define KACS_MIT_CFI 0x008U
-#define KACS_MIT_UI_ACCESS 0x010U
-#define KACS_MIT_NO_CHILD 0x020U
-#define KACS_MIT_CFIF 0x040U
-#define KACS_MIT_CFIB 0x080U
-#define KACS_MIT_PIE 0x100U
-#define KACS_MIT_SML 0x200U
-#define KACS_MIT_ALL 0x3FFU
+/* KACS_MIT_* process-mitigation bits come from <pkm/psb.h> (UAPI). */
+
 #define PKM_KACS_KUNIT_SIGNING_SOURCE_NONE 0U
 #define PKM_KACS_KUNIT_SIGNING_SOURCE_ELF 1U
 #define PKM_KACS_KUNIT_SIGNING_SOURCE_XATTR 2U

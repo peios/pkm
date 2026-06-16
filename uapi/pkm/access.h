@@ -26,6 +26,12 @@
 /* Largest object-audit-context buffer the kernel accepts. */
 #define KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN	4096U
 
+/* Largest @Local claims blob the kernel accepts (local_claims_ptr). */
+#define KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN	65536U
+
+/* Largest object-type tree entry count the kernel accepts. */
+#define KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT	1024U
+
 /*
  * AccessCheck request. Pointer fields hold userspace addresses; a zero
  * pointer paired with a zero length means "absent". The _pad fields must

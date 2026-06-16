@@ -38,12 +38,12 @@ use crate::value::{
 pub type RsiRequestId = u64;
 pub type RsiSourceConnectionId = u64;
 
-pub const RSI_WRITE_KEY_FIELD_SD: u32 = 0x01;
-pub const RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME: u32 = 0x02;
+pub const RSI_WRITE_KEY_FIELD_SD: u32 = peios_uapi::RSI_WRITE_KEY_FIELD_SD;
+pub const RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME: u32 = peios_uapi::RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME;
 pub const RSI_WRITE_KEY_FIELD_KNOWN_MASK: u32 =
     RSI_WRITE_KEY_FIELD_SD | RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME;
-pub const RSI_PATH_TARGET_GUID: u8 = 0;
-pub const RSI_PATH_TARGET_HIDDEN: u8 = 1;
+pub const RSI_PATH_TARGET_GUID: u8 = peios_uapi::RSI_PATH_TARGET_GUID as u8;
+pub const RSI_PATH_TARGET_HIDDEN: u8 = peios_uapi::RSI_PATH_TARGET_HIDDEN as u8;
 
 /// Parsed common RSI request header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

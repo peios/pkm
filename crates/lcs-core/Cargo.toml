@@ -13,3 +13,8 @@ kernel = ["kacs-core/kernel"]
 
 [dependencies]
 kacs-core = { path = "../kacs-core", default-features = false }
+# Generated mirror of the PKM UAPI constants — the single source of truth for
+# ABI values. In the kernel build the cores instead resolve `peios_uapi::` to a
+# vendored module (see kernel/stage-rust-core.sh), so this dep serves the
+# standalone cargo build/test only.
+peios-uapi = { path = "../../uapi/generated/rust", default-features = false }

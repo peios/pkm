@@ -50,21 +50,30 @@ for file in "${rs_files[@]}"; do
 					gsub(/crate::/, "crate::" module_root "::")
 				if (module_root != "")
 					gsub(/kacs_core::/, "crate::kacs_core::")
+				# Cores reference bare peios_uapi::CONST; the kernel build
+				# vendors those constants as the crate-root peios_uapi module
+				# (staged from uapi/generated/rust). Run last so it rewrites
+				# only the bare core paths, never an already-rewritten crate one.
+				gsub(/peios_uapi::/, "crate::peios_uapi::")
 				print
 			}
 			END { if (held != "") print held }
 		' "$file" > "$dest_dir/mod.rs"
-	elif [[ -n "$module_root" ]]; then
+	else
+		# Non-lib.rs files. With a module_root, rewrite intra-/cross-core
+		# `crate::`/`kacs_core::` paths; always rewrite the bare `peios_uapi::`
+		# constant paths to the crate-root module (see the lib.rs branch).
 		PKM_STAGE_MODULE_ROOT="$module_root" awk '
 			BEGIN { module_root = ENVIRON["PKM_STAGE_MODULE_ROOT"] }
 			{
-				gsub(/crate::/, "crate::" module_root "::")
-				gsub(/kacs_core::/, "crate::kacs_core::")
+				if (module_root != "")
+					gsub(/crate::/, "crate::" module_root "::")
+				if (module_root != "")
+					gsub(/kacs_core::/, "crate::kacs_core::")
+				gsub(/peios_uapi::/, "crate::peios_uapi::")
 				print
 			}
 		' "$file" > "$dest_path"
-	else
-		install -m 0644 "$file" "$dest_path"
 	fi
 done
 

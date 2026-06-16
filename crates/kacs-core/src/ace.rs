@@ -8,50 +8,50 @@ pub const ACL_REVISION: u8 = 0x02;
 /// ACL revision required by object and callback ACE families.
 pub const ACL_REVISION_DS: u8 = 0x04;
 /// ACE type for access-allowed ACEs.
-pub const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
+pub const ACCESS_ALLOWED_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_ACCESS_ALLOWED as u8;
 /// ACE type for access-denied ACEs.
-pub const ACCESS_DENIED_ACE_TYPE: u8 = 0x01;
+pub const ACCESS_DENIED_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_ACCESS_DENIED as u8;
 /// ACE type for system-audit ACEs.
-pub const SYSTEM_AUDIT_ACE_TYPE: u8 = 0x02;
+pub const SYSTEM_AUDIT_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_SYSTEM_AUDIT as u8;
 /// ACE type for system-alarm ACEs.
-pub const SYSTEM_ALARM_ACE_TYPE: u8 = 0x03;
+pub const SYSTEM_ALARM_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_SYSTEM_ALARM as u8;
 /// ACE type for object-scoped access-allowed ACEs.
-pub const ACCESS_ALLOWED_OBJECT_ACE_TYPE: u8 = 0x05;
+pub const ACCESS_ALLOWED_OBJECT_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_ACCESS_ALLOWED_OBJECT as u8;
 /// ACE type for object-scoped access-denied ACEs.
-pub const ACCESS_DENIED_OBJECT_ACE_TYPE: u8 = 0x06;
+pub const ACCESS_DENIED_OBJECT_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_ACCESS_DENIED_OBJECT as u8;
 /// ACE type for object-scoped system-audit ACEs.
-pub const SYSTEM_AUDIT_OBJECT_ACE_TYPE: u8 = 0x07;
+pub const SYSTEM_AUDIT_OBJECT_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_SYSTEM_AUDIT_OBJECT as u8;
 /// ACE type for object-scoped system-alarm ACEs.
-pub const SYSTEM_ALARM_OBJECT_ACE_TYPE: u8 = 0x08;
+pub const SYSTEM_ALARM_OBJECT_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_SYSTEM_ALARM_OBJECT as u8;
 /// ACE type for callback access-allowed ACEs.
-pub const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 0x09;
+pub const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_ACCESS_ALLOWED_CALLBACK as u8;
 /// ACE type for callback access-denied ACEs.
-pub const ACCESS_DENIED_CALLBACK_ACE_TYPE: u8 = 0x0a;
+pub const ACCESS_DENIED_CALLBACK_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_ACCESS_DENIED_CALLBACK as u8;
 /// ACE type for callback object-scoped access-allowed ACEs.
-pub const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0b;
+pub const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT as u8;
 /// ACE type for callback object-scoped access-denied ACEs.
-pub const ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0c;
+pub const ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT as u8;
 /// ACE type for callback system-audit ACEs.
-pub const SYSTEM_AUDIT_CALLBACK_ACE_TYPE: u8 = 0x0d;
+pub const SYSTEM_AUDIT_CALLBACK_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_SYSTEM_AUDIT_CALLBACK as u8;
 /// ACE type for callback system-alarm ACEs.
-pub const SYSTEM_ALARM_CALLBACK_ACE_TYPE: u8 = 0x0e;
+pub const SYSTEM_ALARM_CALLBACK_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_SYSTEM_ALARM_CALLBACK as u8;
 /// ACE type for callback object-scoped system-audit ACEs.
-pub const SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x0f;
+pub const SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT as u8;
 /// ACE type for callback object-scoped system-alarm ACEs.
-pub const SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE: u8 = 0x10;
+pub const SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_SYSTEM_ALARM_CALLBACK_OBJECT as u8;
 /// ACE type for mandatory-label ACEs.
-pub const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
+pub const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_SYSTEM_MANDATORY_LABEL as u8;
 /// ACE type for resource-attribute ACEs.
-pub const SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE: u8 = 0x12;
+pub const SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE as u8;
 /// ACE type for scoped-policy-ID ACEs.
-pub const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
+pub const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_SYSTEM_SCOPED_POLICY_ID as u8;
 /// ACE type for process-trust-label ACEs.
-pub const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
+pub const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = peios_uapi::KACS_ACE_TYPE_SYSTEM_PROCESS_TRUST_LABEL as u8;
 
 /// Object ACE flag indicating the presence of `object_type`.
-pub const ACE_OBJECT_TYPE_PRESENT: u32 = 0x0000_0001;
+pub const ACE_OBJECT_TYPE_PRESENT: u32 = peios_uapi::KACS_ACE_OBJECT_TYPE_PRESENT;
 /// Object ACE flag indicating the presence of `inherited_object_type`.
-pub const ACE_INHERITED_OBJECT_TYPE_PRESENT: u32 = 0x0000_0002;
+pub const ACE_INHERITED_OBJECT_TYPE_PRESENT: u32 = peios_uapi::KACS_ACE_INHERITED_OBJECT_TYPE_PRESENT;
 
 /// Returns the minimum ACL revision required by a recognized ACE type.
 ///

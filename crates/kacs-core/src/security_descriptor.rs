@@ -6,37 +6,37 @@ use crate::sid::Sid;
 pub const MAX_SECURITY_DESCRIPTOR_BYTES: usize = u16::MAX as usize;
 
 /// Control bit indicating that the owner SID was defaulted.
-pub const SE_OWNER_DEFAULTED: u16 = 0x0001;
+pub const SE_OWNER_DEFAULTED: u16 = peios_uapi::KACS_SD_OWNER_DEFAULTED as u16;
 /// Control bit indicating that the primary group SID was defaulted.
-pub const SE_GROUP_DEFAULTED: u16 = 0x0002;
+pub const SE_GROUP_DEFAULTED: u16 = peios_uapi::KACS_SD_GROUP_DEFAULTED as u16;
 /// Control bit indicating that the descriptor carries a DACL offset.
-pub const SE_DACL_PRESENT: u16 = 0x0004;
+pub const SE_DACL_PRESENT: u16 = peios_uapi::KACS_SD_DACL_PRESENT as u16;
 /// Control bit indicating that the DACL was defaulted.
-pub const SE_DACL_DEFAULTED: u16 = 0x0008;
+pub const SE_DACL_DEFAULTED: u16 = peios_uapi::KACS_SD_DACL_DEFAULTED as u16;
 /// Control bit indicating that the descriptor carries a SACL offset.
-pub const SE_SACL_PRESENT: u16 = 0x0010;
+pub const SE_SACL_PRESENT: u16 = peios_uapi::KACS_SD_SACL_PRESENT as u16;
 /// Control bit indicating that the SACL was defaulted.
-pub const SE_SACL_DEFAULTED: u16 = 0x0020;
+pub const SE_SACL_DEFAULTED: u16 = peios_uapi::KACS_SD_SACL_DEFAULTED as u16;
 /// Control bit carrying reserved DACL trusted-source metadata.
-pub const SE_DACL_TRUSTED: u16 = 0x0040;
+pub const SE_DACL_TRUSTED: u16 = peios_uapi::KACS_SD_DACL_TRUSTED as u16;
 /// Control bit requesting server-security DACL construction.
-pub const SE_SERVER_SECURITY: u16 = 0x0080;
+pub const SE_SERVER_SECURITY: u16 = peios_uapi::KACS_SD_SERVER_SECURITY as u16;
 /// Control bit requesting DACL auto-inheritance.
-pub const SE_DACL_AUTO_INHERIT_REQ: u16 = 0x0100;
+pub const SE_DACL_AUTO_INHERIT_REQ: u16 = peios_uapi::KACS_SD_DACL_AUTO_INHERIT_REQ as u16;
 /// Control bit requesting SACL auto-inheritance.
-pub const SE_SACL_AUTO_INHERIT_REQ: u16 = 0x0200;
+pub const SE_SACL_AUTO_INHERIT_REQ: u16 = peios_uapi::KACS_SD_SACL_AUTO_INHERIT_REQ as u16;
 /// Control bit indicating the DACL was auto-inherited.
-pub const SE_DACL_AUTO_INHERITED: u16 = 0x0400;
+pub const SE_DACL_AUTO_INHERITED: u16 = peios_uapi::KACS_SD_DACL_AUTO_INHERITED as u16;
 /// Control bit indicating the SACL was auto-inherited.
-pub const SE_SACL_AUTO_INHERITED: u16 = 0x0800;
+pub const SE_SACL_AUTO_INHERITED: u16 = peios_uapi::KACS_SD_SACL_AUTO_INHERITED as u16;
 /// Control bit protecting the DACL from inheritance.
-pub const SE_DACL_PROTECTED: u16 = 0x1000;
+pub const SE_DACL_PROTECTED: u16 = peios_uapi::KACS_SD_DACL_PROTECTED as u16;
 /// Control bit protecting the SACL from inheritance.
-pub const SE_SACL_PROTECTED: u16 = 0x2000;
+pub const SE_SACL_PROTECTED: u16 = peios_uapi::KACS_SD_SACL_PROTECTED as u16;
 /// Control bit indicating that header byte 1 carries RM control metadata.
-pub const SE_RM_CONTROL_VALID: u16 = 0x4000;
+pub const SE_RM_CONTROL_VALID: u16 = peios_uapi::KACS_SD_RM_CONTROL_VALID as u16;
 /// Control bit indicating self-relative layout.
-pub const SE_SELF_RELATIVE: u16 = 0x8000;
+pub const SE_SELF_RELATIVE: u16 = peios_uapi::KACS_SD_SELF_RELATIVE as u16;
 
 /// Parsed self-relative security descriptor with borrowed component views.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,7 +77,7 @@ pub struct SecurityDescriptorLayout {
 
 impl<'a> SecurityDescriptor<'a> {
     /// Size in bytes of the fixed self-relative security descriptor header.
-    pub const HEADER_SIZE: usize = 20;
+    pub const HEADER_SIZE: usize = peios_uapi::KACS_SD_HEADER_BYTES as usize;
 
     /// Parses a self-relative security descriptor and validates component
     /// offsets and overlap.

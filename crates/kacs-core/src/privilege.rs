@@ -5,9 +5,9 @@ use crate::access_mask::{
 use crate::error::KacsResult;
 
 /// Privilege-intent flag enabling backup semantics for AccessCheck.
-pub const BACKUP_INTENT: u32 = 0x0000_0001;
+pub const BACKUP_INTENT: u32 = peios_uapi::KACS_BACKUP_INTENT;
 /// Privilege-intent flag enabling restore semantics for AccessCheck.
-pub const RESTORE_INTENT: u32 = 0x0000_0002;
+pub const RESTORE_INTENT: u32 = peios_uapi::KACS_RESTORE_INTENT;
 
 /// Bit position for `SeSecurityPrivilege`.
 pub const SE_SECURITY_PRIVILEGE: u64 = 1u64 << 8;

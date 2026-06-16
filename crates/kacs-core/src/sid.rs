@@ -4,23 +4,23 @@ use crate::pkm_alloc::{AllocError, TryClone};
 use core::fmt;
 
 /// Group attribute bit marking a group that cannot be disabled.
-pub const SE_GROUP_MANDATORY: u32 = 0x0000_0001;
+pub const SE_GROUP_MANDATORY: u32 = peios_uapi::KACS_SID_GROUP_MANDATORY;
 /// Group attribute bit marking a group enabled by default at token creation.
-pub const SE_GROUP_ENABLED_BY_DEFAULT: u32 = 0x0000_0002;
+pub const SE_GROUP_ENABLED_BY_DEFAULT: u32 = peios_uapi::KACS_SID_GROUP_ENABLED_BY_DEFAULT;
 /// Group attribute bit marking an enabled SID.
-pub const SE_GROUP_ENABLED: u32 = 0x0000_0004;
+pub const SE_GROUP_ENABLED: u32 = peios_uapi::KACS_SID_GROUP_ENABLED;
 /// Group attribute bit marking a group usable as the default owner.
-pub const SE_GROUP_OWNER: u32 = 0x0000_0008;
+pub const SE_GROUP_OWNER: u32 = peios_uapi::KACS_SID_GROUP_OWNER;
 /// Group attribute bit marking a SID as deny-only.
-pub const SE_GROUP_USE_FOR_DENY_ONLY: u32 = 0x0000_0010;
+pub const SE_GROUP_USE_FOR_DENY_ONLY: u32 = peios_uapi::KACS_SID_GROUP_USE_FOR_DENY_ONLY;
 /// Group attribute bit marking an integrity level SID.
-pub const SE_GROUP_INTEGRITY: u32 = 0x0000_0020;
+pub const SE_GROUP_INTEGRITY: u32 = peios_uapi::KACS_SID_GROUP_INTEGRITY;
 /// Group attribute bit used with `SE_GROUP_INTEGRITY`.
-pub const SE_GROUP_INTEGRITY_ENABLED: u32 = 0x0000_0040;
+pub const SE_GROUP_INTEGRITY_ENABLED: u32 = peios_uapi::KACS_SID_GROUP_INTEGRITY_ENABLED;
 /// Group attribute bit marking a per-session logon SID.
-pub const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
+pub const SE_GROUP_LOGON_ID: u32 = peios_uapi::KACS_SID_GROUP_LOGON_ID;
 /// Group attribute bit marking a resource-domain local group.
-pub const SE_GROUP_RESOURCE: u32 = 0x2000_0000;
+pub const SE_GROUP_RESOURCE: u32 = peios_uapi::KACS_SID_GROUP_RESOURCE;
 
 /// Borrowed SID view.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,7 +39,7 @@ impl<'a> Sid<'a> {
     /// Minimum valid SID length in bytes.
     pub const MIN_SIZE: usize = 8;
     /// Maximum valid sub-authority count accepted by the parser.
-    pub const MAX_SUB_AUTHORITIES: u8 = 15;
+    pub const MAX_SUB_AUTHORITIES: u8 = peios_uapi::KACS_SID_MAX_SUB_AUTHORITIES as u8;
     /// Maximum valid SID length in bytes (header plus all sub-authorities).
     pub const MAX_SIZE: usize = Self::MIN_SIZE + (Self::MAX_SUB_AUTHORITIES as usize * 4);
 

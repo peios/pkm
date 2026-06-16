@@ -17,6 +17,14 @@
 // renames `lib.rs` -> `mod.rs`, so restore the opt-out at the vendoring root.
 #![allow(unreachable_pub)]
 
+// Generated UAPI constants — the ABI single source of truth, vendored by
+// stage-sources.sh from uapi/generated/rust/src/zconst.rs. The semantic cores
+// reference these as `crate::peios_uapi::<CONST>` (rewritten from bare
+// `peios_uapi::` paths by stage-rust-core.sh). Most are unused in this build,
+// so the whole module opts out of dead-code analysis.
+#[allow(dead_code)]
+mod peios_uapi;
+
 #[path = "access_check.rs"]
 mod access_check_ingress;
 mod caap_cache;

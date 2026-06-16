@@ -63,6 +63,16 @@
 #define KACS_TOKEN_MANDATORY_POLICY_NO_WRITE_UP		0x00000001U
 #define KACS_TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN	0x00000002U
 
+/*
+ * Per-token audit-policy bits — the create-token spec `audit_policy` field
+ * (KACS_TOKEN_SPEC_OFF_AUDIT_POLICY). They select which access-check outcomes
+ * the token's object accesses generate audit events for.
+ */
+#define KACS_AUDIT_POLICY_OBJECT_ACCESS_SUCCESS		0x00000001U
+#define KACS_AUDIT_POLICY_OBJECT_ACCESS_FAILURE		0x00000002U
+#define KACS_AUDIT_POLICY_PRIVILEGE_USE_SUCCESS		0x00000004U
+#define KACS_AUDIT_POLICY_PRIVILEGE_USE_FAILURE		0x00000008U
+
 /* Logon type (KACS_TOKEN_CLASS_LOGON_TYPE). */
 #define KACS_LOGON_TYPE_INTERACTIVE		2
 #define KACS_LOGON_TYPE_NETWORK			3

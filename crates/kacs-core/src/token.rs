@@ -4,13 +4,13 @@ use crate::privilege::TokenPrivileges;
 use crate::sid::Sid;
 
 /// Audit-policy flag for successful object-access events.
-pub const AUDIT_POLICY_OBJECT_ACCESS_SUCCESS: u32 = 0x0001;
+pub const AUDIT_POLICY_OBJECT_ACCESS_SUCCESS: u32 = peios_uapi::KACS_AUDIT_POLICY_OBJECT_ACCESS_SUCCESS;
 /// Audit-policy flag for failed object-access events.
-pub const AUDIT_POLICY_OBJECT_ACCESS_FAILURE: u32 = 0x0002;
+pub const AUDIT_POLICY_OBJECT_ACCESS_FAILURE: u32 = peios_uapi::KACS_AUDIT_POLICY_OBJECT_ACCESS_FAILURE;
 /// Audit-policy flag for successful privilege-use events.
-pub const AUDIT_POLICY_PRIVILEGE_USE_SUCCESS: u32 = 0x0004;
+pub const AUDIT_POLICY_PRIVILEGE_USE_SUCCESS: u32 = peios_uapi::KACS_AUDIT_POLICY_PRIVILEGE_USE_SUCCESS;
 /// Audit-policy flag for failed privilege-use events.
-pub const AUDIT_POLICY_PRIVILEGE_USE_FAILURE: u32 = 0x0008;
+pub const AUDIT_POLICY_PRIVILEGE_USE_FAILURE: u32 = peios_uapi::KACS_AUDIT_POLICY_PRIVILEGE_USE_FAILURE;
 
 /// A SID paired with Windows-style attribute flags.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

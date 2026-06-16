@@ -5,24 +5,24 @@ use crate::pkm_alloc::{slice_to_vec, String, Vec};
 use crate::sid::Sid;
 
 /// Claim flag requesting case-sensitive string comparisons.
-pub const CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE: u32 = 0x0002;
+pub const CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE: u32 = peios_uapi::KACS_CLAIM_ATTR_CASE_SENSITIVE;
 /// Claim flag marking the attribute as deny-only.
-pub const CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY: u32 = 0x0004;
+pub const CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY: u32 = peios_uapi::KACS_CLAIM_ATTR_USE_FOR_DENY_ONLY;
 /// Claim flag marking the attribute as disabled.
-pub const CLAIM_SECURITY_ATTRIBUTE_DISABLED: u32 = 0x0010;
+pub const CLAIM_SECURITY_ATTRIBUTE_DISABLED: u32 = peios_uapi::KACS_CLAIM_ATTR_DISABLED;
 
 /// Claim value type for signed 64-bit integers.
-pub const CLAIM_TYPE_INT64: u16 = 0x0001;
+pub const CLAIM_TYPE_INT64: u16 = peios_uapi::KACS_CLAIM_TYPE_INT64 as u16;
 /// Claim value type for unsigned 64-bit integers.
-pub const CLAIM_TYPE_UINT64: u16 = 0x0002;
+pub const CLAIM_TYPE_UINT64: u16 = peios_uapi::KACS_CLAIM_TYPE_UINT64 as u16;
 /// Claim value type for UTF-16 strings.
-pub const CLAIM_TYPE_STRING: u16 = 0x0003;
+pub const CLAIM_TYPE_STRING: u16 = peios_uapi::KACS_CLAIM_TYPE_STRING as u16;
 /// Claim value type for SIDs.
-pub const CLAIM_TYPE_SID: u16 = 0x0005;
+pub const CLAIM_TYPE_SID: u16 = peios_uapi::KACS_CLAIM_TYPE_SID as u16;
 /// Claim value type for booleans.
-pub const CLAIM_TYPE_BOOLEAN: u16 = 0x0006;
+pub const CLAIM_TYPE_BOOLEAN: u16 = peios_uapi::KACS_CLAIM_TYPE_BOOLEAN as u16;
 /// Claim value type for octet strings.
-pub const CLAIM_TYPE_OCTET: u16 = 0x0010;
+pub const CLAIM_TYPE_OCTET: u16 = peios_uapi::KACS_CLAIM_TYPE_OCTET as u16;
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]

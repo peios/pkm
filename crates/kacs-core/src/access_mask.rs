@@ -1,65 +1,65 @@
 use crate::error::{KacsError, KacsResult};
 
 /// Standard access-mask bit for deleting the target object.
-pub const DELETE: u32 = 0x0001_0000;
+pub const DELETE: u32 = peios_uapi::KACS_ACCESS_DELETE;
 /// Standard access-mask bit for reading owner/group/DACL metadata.
-pub const READ_CONTROL: u32 = 0x0002_0000;
+pub const READ_CONTROL: u32 = peios_uapi::KACS_ACCESS_READ_CONTROL;
 /// Standard access-mask bit for writing the DACL.
-pub const WRITE_DAC: u32 = 0x0004_0000;
+pub const WRITE_DAC: u32 = peios_uapi::KACS_ACCESS_WRITE_DAC;
 /// Standard access-mask bit for changing the owner.
-pub const WRITE_OWNER: u32 = 0x0008_0000;
+pub const WRITE_OWNER: u32 = peios_uapi::KACS_ACCESS_WRITE_OWNER;
 /// Standard access-mask bit for synchronization rights.
-pub const SYNCHRONIZE: u32 = 0x0010_0000;
+pub const SYNCHRONIZE: u32 = peios_uapi::KACS_ACCESS_SYNCHRONIZE;
 /// Standard access-mask bit for SACL access.
-pub const ACCESS_SYSTEM_SECURITY: u32 = 0x0100_0000;
+pub const ACCESS_SYSTEM_SECURITY: u32 = peios_uapi::KACS_ACCESS_ACCESS_SYSTEM_SECURITY;
 /// Standard access-mask bit requesting maximum-allowed evaluation.
-pub const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
+pub const MAXIMUM_ALLOWED: u32 = peios_uapi::KACS_ACCESS_MAXIMUM_ALLOWED;
 /// Generic access bit for "all access."
-pub const GENERIC_ALL: u32 = 0x1000_0000;
+pub const GENERIC_ALL: u32 = peios_uapi::KACS_ACCESS_GENERIC_ALL;
 /// Generic access bit for execute rights.
-pub const GENERIC_EXECUTE: u32 = 0x2000_0000;
+pub const GENERIC_EXECUTE: u32 = peios_uapi::KACS_ACCESS_GENERIC_EXECUTE;
 /// Generic access bit for write rights.
-pub const GENERIC_WRITE: u32 = 0x4000_0000;
+pub const GENERIC_WRITE: u32 = peios_uapi::KACS_ACCESS_GENERIC_WRITE;
 /// Generic access bit for read rights.
-pub const GENERIC_READ: u32 = 0x8000_0000;
+pub const GENERIC_READ: u32 = peios_uapi::KACS_ACCESS_GENERIC_READ;
 
 /// Process right permitting termination-style signals.
-pub const PROCESS_TERMINATE: u32 = 0x0000_0001;
+pub const PROCESS_TERMINATE: u32 = peios_uapi::KACS_PROCESS_TERMINATE;
 /// Process right permitting informational signals.
-pub const PROCESS_SIGNAL: u32 = 0x0000_0002;
+pub const PROCESS_SIGNAL: u32 = peios_uapi::KACS_PROCESS_SIGNAL;
 /// Process right permitting virtual-memory reads.
-pub const PROCESS_VM_READ: u32 = 0x0000_0010;
+pub const PROCESS_VM_READ: u32 = peios_uapi::KACS_PROCESS_VM_READ;
 /// Process right permitting virtual-memory writes / invasive attach.
-pub const PROCESS_VM_WRITE: u32 = 0x0000_0020;
+pub const PROCESS_VM_WRITE: u32 = peios_uapi::KACS_PROCESS_VM_WRITE;
 /// Process right permitting handle extraction.
-pub const PROCESS_DUP_HANDLE: u32 = 0x0000_0040;
+pub const PROCESS_DUP_HANDLE: u32 = peios_uapi::KACS_PROCESS_DUP_HANDLE;
 /// Process right permitting process-attribute mutation.
-pub const PROCESS_SET_INFORMATION: u32 = 0x0000_0200;
+pub const PROCESS_SET_INFORMATION: u32 = peios_uapi::KACS_PROCESS_SET_INFORMATION;
 /// Process right permitting detailed process inspection.
-pub const PROCESS_QUERY_INFORMATION: u32 = 0x0000_0400;
+pub const PROCESS_QUERY_INFORMATION: u32 = peios_uapi::KACS_PROCESS_QUERY_INFORMATION;
 /// Process right permitting suspend / resume signals.
-pub const PROCESS_SUSPEND_RESUME: u32 = 0x0000_0800;
+pub const PROCESS_SUSPEND_RESUME: u32 = peios_uapi::KACS_PROCESS_SUSPEND_RESUME;
 /// Process right permitting limited process inspection.
-pub const PROCESS_QUERY_LIMITED: u32 = 0x0000_1000;
+pub const PROCESS_QUERY_LIMITED: u32 = peios_uapi::KACS_PROCESS_QUERY_LIMITED;
 
 /// File right permitting file data reads.
-pub const FILE_READ_DATA: u32 = 0x0000_0001;
+pub const FILE_READ_DATA: u32 = peios_uapi::KACS_FILE_READ_DATA;
 /// File right permitting file data writes.
-pub const FILE_WRITE_DATA: u32 = 0x0000_0002;
+pub const FILE_WRITE_DATA: u32 = peios_uapi::KACS_FILE_WRITE_DATA;
 /// File right permitting append-only writes.
-pub const FILE_APPEND_DATA: u32 = 0x0000_0004;
+pub const FILE_APPEND_DATA: u32 = peios_uapi::KACS_FILE_APPEND_DATA;
 /// File right permitting named-attribute reads.
-pub const FILE_READ_EA: u32 = 0x0000_0008;
+pub const FILE_READ_EA: u32 = peios_uapi::KACS_FILE_READ_EA;
 /// File right permitting named-attribute writes.
-pub const FILE_WRITE_EA: u32 = 0x0000_0010;
+pub const FILE_WRITE_EA: u32 = peios_uapi::KACS_FILE_WRITE_EA;
 /// File right permitting execution / directory traversal.
-pub const FILE_EXECUTE: u32 = 0x0000_0020;
+pub const FILE_EXECUTE: u32 = peios_uapi::KACS_FILE_EXECUTE;
 /// File right permitting directory child deletion.
-pub const FILE_DELETE_CHILD: u32 = 0x0000_0040;
+pub const FILE_DELETE_CHILD: u32 = peios_uapi::KACS_FILE_DELETE_CHILD;
 /// File right permitting basic attribute reads.
-pub const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+pub const FILE_READ_ATTRIBUTES: u32 = peios_uapi::KACS_FILE_READ_ATTRIBUTES;
 /// File right permitting basic attribute writes.
-pub const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+pub const FILE_WRITE_ATTRIBUTES: u32 = peios_uapi::KACS_FILE_WRITE_ATTRIBUTES;
 
 const RESERVED_ACCESS_MASK_BITS: u32 = 0x0ce0_0000;
 const GENERIC_MASK: u32 = GENERIC_ALL | GENERIC_EXECUTE | GENERIC_WRITE | GENERIC_READ;

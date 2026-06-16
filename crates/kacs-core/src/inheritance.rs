@@ -21,15 +21,15 @@ use crate::security_descriptor::{
 use crate::sid::Sid;
 
 /// ACE flag: inherit to non-container children.
-pub const OBJECT_INHERIT_ACE: u8 = 0x01;
+pub const OBJECT_INHERIT_ACE: u8 = peios_uapi::KACS_ACE_FLAG_OBJECT_INHERIT as u8;
 /// ACE flag: inherit to container children.
-pub const CONTAINER_INHERIT_ACE: u8 = 0x02;
+pub const CONTAINER_INHERIT_ACE: u8 = peios_uapi::KACS_ACE_FLAG_CONTAINER_INHERIT as u8;
 /// ACE flag: clear object/container propagation flags on the inherited copy.
-pub const NO_PROPAGATE_INHERIT_ACE: u8 = 0x04;
+pub const NO_PROPAGATE_INHERIT_ACE: u8 = peios_uapi::KACS_ACE_FLAG_NO_PROPAGATE_INHERIT as u8;
 /// ACE flag: ACE exists only for inheritance and does not apply locally.
-pub const INHERIT_ONLY_ACE: u8 = 0x08;
+pub const INHERIT_ONLY_ACE: u8 = peios_uapi::KACS_ACE_FLAG_INHERIT_ONLY as u8;
 /// ACE flag: ACE was produced by inheritance.
-pub const INHERITED_ACE: u8 = 0x10;
+pub const INHERITED_ACE: u8 = peios_uapi::KACS_ACE_FLAG_INHERITED as u8;
 
 const CREATOR_OWNER_SID: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0];
 const CREATOR_GROUP_SID: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 1, 0, 0, 0];
