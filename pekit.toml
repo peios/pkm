@@ -39,8 +39,11 @@ cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
 needs = ["source"]
 command = """
 cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
-# TODO: production TCB key regen — regenerate builtin_signing_keys.h from
-# $PKM_KACS_TCB_PUBKEY_HEX before configuring (build.source stages a placeholder).
+# Inject the production TCB signing key over the allow-empty placeholder that
+# build.source stages. Provide it via the keyring: --keyring.tcb.pub=<hex>.
+python3 kernel/scripts/generate-kacs-builtin-signing-keys.py \
+	--pubkey-hex "$PEKIT_KEYRING_TCB_PUB" \
+	--out "$PEKIT_OUT/security/pkm/kacs/builtin_signing_keys.h"
 ./build/configure-kernel.sh "$PEKIT_OUT" production
 ./build/compile-kernel.sh "$PEKIT_OUT"
 """

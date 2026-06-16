@@ -6,5 +6,8 @@ __pycache__/
 *.pyc
 kacs-tcb-dev.key
 kacs-tcb-dev.key.pub
+# Keyring files are per-developer / environment-specific (hold or reference key
+# material); env wraps (*.env.pekit.toml) stay committed.
+*.keyring.pekit.toml
 notes/
 /out/
