@@ -1,0 +1,15 @@
+# gpio-utils — userspace GPIO character-device tools (lsgpio, gpio-event-mon,
+# gpio-hammer, gpio-watch) + the sloppy-logic-analyzer helper script. Built from
+# tools/gpio (build.tools).
+#
+# Runtime shared-lib deps (TODO — see D4): libc
+
+[package]
+description = "gpio-utils — userspace GPIO chardev tools (from Linux 7.0.9 tools/gpio)"
+
+[files]
+"tools:usr/bin/lsgpio"                    = "usr/bin/lsgpio"
+"tools:usr/bin/gpio-event-mon"            = "usr/bin/gpio-event-mon"
+"tools:usr/bin/gpio-hammer"               = "usr/bin/gpio-hammer"
+"tools:usr/bin/gpio-watch"                = "usr/bin/gpio-watch"
+"tools:usr/bin/gpio-sloppy-logic-analyzer" = "usr/bin/gpio-sloppy-logic-analyzer"

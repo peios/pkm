@@ -1,0 +1,21 @@
+# libperf-devel — libperf development files: public + internal headers, static
+# lib, pkg-config, the .so dev symlink, and the API man pages / html docs.
+# (perf_dlfilter.h shares usr/include/perf/ but belongs to perf-devel, so it is
+# excluded here.)
+
+[package]
+description = "libperf — development files (headers, static lib, pkg-config)"
+
+[dependencies]
+libperf = "{{version}}"
+
+[files]
+"tools:usr/lib/x86_64-linux-peios/libperf.so"           = "usr/lib/x86_64-linux-peios/libperf.so"
+"tools:usr/lib/x86_64-linux-peios/libperf.a"            = "usr/lib/x86_64-linux-peios/libperf.a"
+"tools:usr/lib/x86_64-linux-peios/pkgconfig/libperf.pc" = "usr/lib/x86_64-linux-peios/pkgconfig/libperf.pc"
+"tools:usr/include/perf/**"      = "usr/include/perf"
+"tools:usr/include/internal/**"  = "usr/include/internal"
+"tools:usr/share/man/man3/libperf.3"  = "usr/share/man/man3/libperf.3"
+"tools:usr/share/man/man7/libperf*.7" = "usr/share/man/man7"
+"tools:usr/share/doc/libperf/**"      = "usr/share/doc/libperf"
+exclude = ["tools:usr/include/perf/perf_dlfilter.h"]

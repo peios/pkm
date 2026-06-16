@@ -1,0 +1,22 @@
+# perf — Linux performance analysis (perf_events, kprobes/uprobes, ftrace, BPF).
+# Built from the in-tree tools/perf (build.tools), with BPF skeletons + libpfm4 +
+# embedded libpython (`perf script -s *.py`). perf-core helpers live under the
+# triplet (PERF_EXEC_PATH baked there). The dlfilter dev header is split into
+# perf-devel; libperf into libperf/libperf-devel; the importable python module is
+# defined (not yet built) in python3-perf.
+#
+# Runtime shared-lib deps (TODO: declare in [dependencies] once Peios userspace
+# provides them — see D4):
+#   libm libz libelf libdw libslang libpython3 libstdc++ liblzma libzstd libnuma
+#   libpfm libtraceevent libgcc_s libc
+
+[package]
+description = "perf — Linux performance analysis tooling (from Linux 7.0.9 tools/perf)"
+
+[files]
+"tools:usr/bin/perf"  = "usr/bin/perf"
+"tools:usr/bin/trace" = "usr/bin/trace"
+"tools:usr/lib/x86_64-linux-peios/perf-core/**" = "usr/lib/x86_64-linux-peios/perf-core"
+"tools:etc/bash_completion.d/perf" = "etc/bash_completion.d/perf"
+"tools:usr/share/doc/perf-tip/tips.txt" = "usr/share/doc/perf-tip/tips.txt"
+"tools:usr/share/man/man1/perf*.1" = "usr/share/man/man1"

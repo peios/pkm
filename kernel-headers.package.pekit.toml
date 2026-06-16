@@ -1,0 +1,9 @@
+# kernel-headers — the sanitized userspace UAPI: the full Linux UAPI plus the
+# PKM uapi (under pkm/), what glibc and userspace C programs compile against.
+# Produced by build.headers (make headers_install); no runtime dep on the kernel.
+
+[package]
+description = "Peios Kernel — userspace API headers"
+
+[files]
+"headers:usr/include/**" = "usr/include"

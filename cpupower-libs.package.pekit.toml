@@ -1,0 +1,10 @@
+# cpupower-libs — libcpupower runtime shared library (SONAME + real).
+#
+# Runtime shared-lib deps (TODO — see D4): libc
+
+[package]
+description = "libcpupower — cpupower shared library"
+
+[files]
+"tools:usr/lib/x86_64-linux-peios/libcpupower.so.1"     = "usr/lib/x86_64-linux-peios/libcpupower.so.1"
+"tools:usr/lib/x86_64-linux-peios/libcpupower.so.1.0.1" = "usr/lib/x86_64-linux-peios/libcpupower.so.1.0.1"

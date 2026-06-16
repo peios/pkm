@@ -1,0 +1,18 @@
+# usbip — USB/IP client + daemon (share USB devices over IP) and libusbip runtime.
+# Built from tools/usb/usbip via its autotools flow (build.tools); the usbipd
+# daemon is redirected to bin (--sbindir). Headers + static lib + dev symlink are
+# split into usbip-devel.
+#
+# Runtime shared-lib deps (TODO — see D4):
+#   usbip/usbipd: libusbip libudev libc    libusbip: libudev libc
+
+[package]
+description = "usbip — USB/IP client and daemon + libusbip (from Linux 7.0.9 tools/usb/usbip)"
+
+[files]
+"tools:usr/bin/usbip"  = "usr/bin/usbip"
+"tools:usr/bin/usbipd" = "usr/bin/usbipd"
+"tools:usr/lib/x86_64-linux-peios/libusbip.so.0"     = "usr/lib/x86_64-linux-peios/libusbip.so.0"
+"tools:usr/lib/x86_64-linux-peios/libusbip.so.0.0.1" = "usr/lib/x86_64-linux-peios/libusbip.so.0.0.1"
+"tools:usr/share/man/man8/usbip.8"  = "usr/share/man/man8/usbip.8"
+"tools:usr/share/man/man8/usbipd.8" = "usr/share/man/man8/usbipd.8"

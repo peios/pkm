@@ -1,0 +1,15 @@
+# rtla — Real-Time Linux Analysis: osnoise and timerlat tracers' front-end.
+# Built from the in-tree tools/tracing/rtla (build.tools). osnoise/hwnoise/
+# timerlat are symlinks to the rtla binary.
+#
+# Runtime shared-lib deps (TODO — see D4): libtraceevent libtracefs libc
+
+[package]
+description = "rtla — real-time latency analysis (osnoise, timerlat) (from Linux 7.0.9 tools/tracing/rtla)"
+
+[files]
+"tools:usr/bin/rtla"     = "usr/bin/rtla"
+"tools:usr/bin/osnoise"  = "usr/bin/osnoise"
+"tools:usr/bin/hwnoise"  = "usr/bin/hwnoise"
+"tools:usr/bin/timerlat" = "usr/bin/timerlat"
+"tools:usr/share/man/man1/rtla*.1" = "usr/share/man/man1"

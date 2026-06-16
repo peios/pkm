@@ -1,0 +1,19 @@
+# mm-tools — memory-management diagnostics: page-types, slabinfo, page_owner_sort,
+# thpmaps, thp_swap_allocator_test, plus the slabinfo-gnuplot / show_page_info
+# helper scripts. Built from tools/mm (build.tools). The compiled tools default to
+# sbin; redirected to bin (PSD-009 is bin-only).
+#
+# Runtime shared-lib deps (TODO — see D4): libc (compiled tools); python3 for
+# show_page_info.
+
+[package]
+description = "mm-tools — memory-management diagnostics (from Linux 7.0.9 tools/mm)"
+
+[files]
+"tools:usr/bin/page-types"               = "usr/bin/page-types"
+"tools:usr/bin/slabinfo"                 = "usr/bin/slabinfo"
+"tools:usr/bin/page_owner_sort"          = "usr/bin/page_owner_sort"
+"tools:usr/bin/thpmaps"                  = "usr/bin/thpmaps"
+"tools:usr/bin/thp_swap_allocator_test"  = "usr/bin/thp_swap_allocator_test"
+"tools:usr/bin/slabinfo-gnuplot"         = "usr/bin/slabinfo-gnuplot"
+"tools:usr/bin/show_page_info"           = "usr/bin/show_page_info"

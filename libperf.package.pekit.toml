@@ -1,0 +1,12 @@
+# libperf — perf's sampling/eventing shared library (runtime SONAME + real).
+# Built from tools/lib/perf (build.tools). perf itself links libperf statically,
+# so this is for other consumers of the library.
+#
+# Runtime shared-lib deps (TODO — see D4): libc
+
+[package]
+description = "libperf — perf events/sampling shared library"
+
+[files]
+"tools:usr/lib/x86_64-linux-peios/libperf.so.0"     = "usr/lib/x86_64-linux-peios/libperf.so.0"
+"tools:usr/lib/x86_64-linux-peios/libperf.so.0.0.1" = "usr/lib/x86_64-linux-peios/libperf.so.0.0.1"

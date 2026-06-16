@@ -1,0 +1,12 @@
+# iio-utils — Industrial I/O userspace tools (iio_event_monitor,
+# iio_generic_buffer, lsiio). Built from tools/iio (build.tools).
+#
+# Runtime shared-lib deps (TODO — see D4): libc
+
+[package]
+description = "iio-utils — Industrial I/O userspace tools (from Linux 7.0.9 tools/iio)"
+
+[files]
+"tools:usr/bin/iio_event_monitor"  = "usr/bin/iio_event_monitor"
+"tools:usr/bin/iio_generic_buffer" = "usr/bin/iio_generic_buffer"
+"tools:usr/bin/lsiio"              = "usr/bin/lsiio"

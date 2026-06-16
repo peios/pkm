@@ -1,0 +1,11 @@
+# rv — Runtime Verification: userspace front-end for the in-kernel RV monitors.
+# Built from the in-tree tools/verification/rv (build.tools).
+#
+# Runtime shared-lib deps (TODO — see D4): libtraceevent libtracefs libc
+
+[package]
+description = "rv — runtime verification monitor front-end (from Linux 7.0.9 tools/verification/rv)"
+
+[files]
+"tools:usr/bin/rv" = "usr/bin/rv"
+"tools:usr/share/man/man1/rv*.1" = "usr/share/man/man1"

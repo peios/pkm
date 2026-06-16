@@ -3,6 +3,14 @@
 # Dockerfile's inline `scripts/config` calls. Applied AFTER localmodconfig so
 # these forced choices survive the module narrowing.
 
+# --- Deterministic kernel release ---
+# LOCALVERSION_AUTO runs scripts/setlocalversion, which appends "+"/"-dirty"
+# from the git state of the (patched, hence dirty) source tree — yielding a
+# non-reproducible "7.0.9-dirty" release. We pin the release to the clean
+# upstream base; the Peios package version is carried separately (--version).
+# CONFIG_LOCALVERSION_AUTO is not set
+CONFIG_LOCALVERSION=""
+
 # --- Rust (kernel Kbuild Rust; staged kacs-core/lcs-core compile here) ---
 CONFIG_RUST=y
 

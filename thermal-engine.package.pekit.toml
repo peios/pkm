@@ -1,0 +1,16 @@
+# thermal-engine — userspace thermal-management daemon (reads thermal netlink,
+# applies a libconfig policy). Built from tools/thermal/thermal-engine (build.tools;
+# no install target, so the binary is copied).
+#
+# Runtime shared-lib deps (TODO — see D4):
+#   libthermal_tools libthermal libnl-genl-3 libnl-3 libconfig libc
+
+[package]
+description = "thermal-engine — userspace thermal management daemon (from Linux 7.0.9 tools/thermal)"
+
+[dependencies]
+libthermal       = "{{version}}"
+libthermal-tools = "{{version}}"
+
+[files]
+"tools:usr/bin/thermal-engine" = "usr/bin/thermal-engine"

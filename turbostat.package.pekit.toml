@@ -1,0 +1,11 @@
+# turbostat — report processor frequency, idle residency, and power telemetry.
+# Built from the in-tree tools/power/x86/turbostat (build.tools).
+#
+# Runtime shared-lib deps (TODO — see D4): libcap libc
+
+[package]
+description = "turbostat — CPU frequency/idle/power telemetry (from Linux 7.0.9 tools/power/x86/turbostat)"
+
+[files]
+"tools:usr/bin/turbostat" = "usr/bin/turbostat"
+"tools:usr/share/man/man8/turbostat.8" = "usr/share/man/man8/turbostat.8"

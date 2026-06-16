@@ -1,0 +1,14 @@
+# thermometer — sample and log thermal-zone temperatures over time (libconfig
+# policy). Built from tools/thermal/thermometer (build.tools; no install target,
+# so the binary is copied).
+#
+# Runtime shared-lib deps (TODO — see D4): libthermal_tools libconfig libc
+
+[package]
+description = "thermometer — thermal-zone temperature logger (from Linux 7.0.9 tools/thermal)"
+
+[dependencies]
+libthermal-tools = "{{version}}"
+
+[files]
+"tools:usr/bin/thermometer" = "usr/bin/thermometer"

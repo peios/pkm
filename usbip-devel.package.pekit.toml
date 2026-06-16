@@ -1,0 +1,14 @@
+# usbip-devel — libusbip development files: headers, static lib, and the .so dev
+# symlink (which resolves into usbip). The libtool archive (.la) is intentionally
+# not shipped.
+
+[package]
+description = "usbip — development files (libusbip headers, static lib)"
+
+[dependencies]
+usbip = "{{version}}"
+
+[files]
+"tools:usr/include/usbip/**" = "usr/include/usbip"
+"tools:usr/lib/x86_64-linux-peios/libusbip.so" = "usr/lib/x86_64-linux-peios/libusbip.so"
+"tools:usr/lib/x86_64-linux-peios/libusbip.a"  = "usr/lib/x86_64-linux-peios/libusbip.a"

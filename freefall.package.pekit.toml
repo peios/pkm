@@ -1,0 +1,14 @@
+# freefall — laptop disk head-park daemon driven by the accelerometer free-fall
+# sensor. Built from tools/laptop/freefall (build.tools). Its Makefile installs to
+# sbin regardless of sbindir, so it is remapped to bin (PSD-009 is bin-only).
+#
+# Note: only useful on physical laptops with the relevant accelerometer; dead
+# weight for a server/VM deployment — shipped for completeness.
+#
+# Runtime shared-lib deps (TODO — see D4): libc
+
+[package]
+description = "freefall — laptop free-fall disk protection daemon (from Linux 7.0.9 tools/laptop)"
+
+[files]
+"tools:usr/sbin/freefall" = "usr/bin/freefall"

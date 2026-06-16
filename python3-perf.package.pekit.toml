@@ -1,0 +1,24 @@
+# python3-perf — the importable `perf` Python module (perf's python bindings).
+#
+# Built: the perf.so that perf's own build produces (build-tools.sh copies it under
+# the triplet; perf's setup.py install path is broken, so the prebuilt .so is used).
+#
+# PROVISIONAL ARTIFACT: the perf.so is ABI-bound to the BUILD IMAGE's CPython — its
+# filename carries that interpreter's cpython-3xx tag, and it will NOT load on a
+# Peios machine until rebuilt against the Peios interpreter (configured with
+# platlibdir=<triplet>, per D1). The package is real and installs; it just won't
+# import until that rebuild. This is the same "built against image userspace,
+# rebuild against Peios userspace" status the whole tools family shares (D4).
+#
+# The [files] map is version-globbed so it survives a python-minor-version change.
+#
+# Runtime shared-lib deps (TODO — see D4): libpython3 libc
+
+[package]
+description = "perf — Python scripting bindings (perf module)"
+
+[dependencies]
+perf = "{{version}}"
+
+[files]
+"tools:usr/lib/x86_64-linux-peios/python3/**" = "usr/lib/x86_64-linux-peios/python3"

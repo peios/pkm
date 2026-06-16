@@ -1,0 +1,11 @@
+# spi-utils — SPI userspace test tools (spidev_test, spidev_fdx). Built from
+# tools/spi (build.tools).
+#
+# Runtime shared-lib deps (TODO — see D4): libc
+
+[package]
+description = "spi-utils — SPI userspace test tools (from Linux 7.0.9 tools/spi)"
+
+[files]
+"tools:usr/bin/spidev_test" = "usr/bin/spidev_test"
+"tools:usr/bin/spidev_fdx"  = "usr/bin/spidev_fdx"

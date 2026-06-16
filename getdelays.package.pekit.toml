@@ -1,0 +1,12 @@
+# getdelays — taskstats delay-accounting demo (per-task CPU/IO/swap/reclaim delay
+# stats via netlink). Built from tools/accounting (build.tools), compiled against
+# the kernel's own exported UAPI headers (the build image's older taskstats.h
+# lacks fields this kernel adds, e.g. cpu_delay_max).
+#
+# Runtime shared-lib deps (TODO — see D4): libc
+
+[package]
+description = "getdelays — taskstats delay-accounting demo (from Linux 7.0.9 tools/accounting)"
+
+[files]
+"tools:usr/bin/getdelays" = "usr/bin/getdelays"

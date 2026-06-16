@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# pre-push: block pushes that leave the generated UAPI bindings out of sync with
+# the canonical headers (uapi/pkm), or that break standalone-compile. Runs the
+# same drift gate as CI (pekit test uapi): the committed bindings must equal a
+# fresh regen, and the headers must compile with a stock userspace compiler. The
+# check is read-only — it regenerates into a throwaway copy, never the tree.
+#
+# Enabled repo-wide via: git config core.hooksPath .githooks
+# Deliberately bypass with: git push --no-verify
+#
+# Note: the gate runs inside the pkm-build container, so this needs Docker + the
+# image (build/build-image.sh). It is skipped when no pushed commit touches uapi/.
+set -euo pipefail
+
+zero=0000000000000000000000000000000000000000
+
+# Paths changed by the commits being pushed (new relative to known remotes).
+changed_paths() {
+	local lref lsha rref rsha c
+	while read -r lref lsha rref rsha; do
+		[ "$lsha" = "$zero" ] && continue            # branch deletion: nothing to push
+		if [ "$rsha" != "$zero" ] && git cat-file -e "$rsha" 2>/dev/null; then
+			git diff --name-only "$rsha" "$lsha"
+		else
+			# New remote ref (or unknown remote sha): files in commits unique to it.
+			for c in $(git rev-list "$lsha" --not --remotes 2>/dev/null); do
+				git diff-tree --no-commit-id --name-only -r "$c"
+			done
+		fi
+	done
+}
+
+paths=$(changed_paths || true)
+
+# If we positively identified the changed paths and none are under uapi/, skip.
+# On any ambiguity (empty list / errors), fall through and run the gate.
+if [ -n "$paths" ] && ! printf '%s\n' "$paths" | grep -q '^uapi/'; then
+	exit 0
+fi
+
+if ! command -v pekit >/dev/null 2>&1; then
+	echo "pre-push: pekit not found — cannot verify UAPI bindings." >&2
+	echo "          Install pekit, or 'git push --no-verify' if this is intentional." >&2
+	exit 1
+fi
+
+echo "pre-push: verifying UAPI bindings (pekit test uapi)…" >&2
+if ! pekit test uapi; then
+	echo >&2
+	echo "pre-push: UAPI check failed — bindings are out of sync with uapi/pkm," >&2
+	echo "          the headers don't compile standalone, or the toolchain/container" >&2
+	echo "          is unavailable. Fix with: pekit build uapi  (then stage uapi/generated)" >&2
+	echo "          or push with --no-verify if this is an environment issue." >&2
+	exit 1
+fi

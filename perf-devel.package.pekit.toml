@@ -1,0 +1,11 @@
+# perf-devel — the perf dlfilter API header (for writing perf dlfilters).
+# Split out of perf so the runtime package carries no headers.
+
+[package]
+description = "perf — dlfilter development header"
+
+[dependencies]
+perf = "{{version}}"
+
+[files]
+"tools:usr/include/perf/perf_dlfilter.h" = "usr/include/perf/perf_dlfilter.h"

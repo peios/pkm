@@ -47,9 +47,9 @@ RUN apt-get update && \
         libclang-${LLVM_VERSION}-dev \
         build-essential bc bison flex \
         libelf-dev libssl-dev openssl \
-        dwarves cpio kmod \
+        dwarves cpio kmod debugedit \
         python3 perl lua5.4 \
-        git ca-certificates curl xz-utils zstd \
+        git ca-certificates curl xz-utils zstd rsync \
         golang-go \
         qemu-system-x86 \
         ccache && \
@@ -74,6 +74,27 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 # --- bindgen: exact version the pinned kernel requires ---
 RUN cargo install --locked --version "${BINDGEN_VERSION}" bindgen-cli && \
     chmod -R a+rX /opt/rustup /opt/cargo
+
+# --- userspace tooling build deps (tools/*: perf, bpftool, cpupower, turbostat,
+#     rtla, rv) ---
+# Last, so this layer never busts the expensive Rust/bindgen cache above. These
+# libs are NOT used by build.kernel, so they don't affect kernel reproducibility;
+# the in-tree userspace tools just build from the same staged source. Kept in this
+# one image (no second image to maintain) since the kernel build never links them.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        pkg-config \
+        libdw-dev zlib1g-dev libzstd-dev \
+        libcap-dev libnuma-dev libslang2-dev \
+        libtraceevent-dev libtracefs-dev \
+        libpci-dev gettext \
+        libperl-dev binutils-dev \
+        python3-dev python3-docutils python3-setuptools \
+        libpfm4-dev asciidoc xmlto \
+        libudev-dev libncurses-dev \
+        libnl-3-dev libnl-genl-3-dev libconfig-dev \
+        autoconf automake libtool && \
+    rm -rf /var/lib/apt/lists/*
 
 # ccache lives in a mounted volume; make the mountpoint world-writable so a
 # fresh named volume inherits 1777 and a non-root --user run can write to it.

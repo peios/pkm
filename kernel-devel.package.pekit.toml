@@ -1,0 +1,39 @@
+# kernel-devel — the kit for compiling out-of-tree modules against this kernel:
+# the configured build infrastructure (top Makefile, Kconfig, Module.symvers,
+# the built scripts/, headers, and the x86 build bits), carved from build.kernel.
+#
+# Destination: usr/lib/<triplet>/modules/<release>/build. This is arch-specific
+# content (built host tools, .config, arch/x86, generated headers), so under
+# PSD-009 it belongs beneath the triplet (§3.4.2) — usr/src/ is reserved for
+# debug sources only (§3.4.1), so the RPM-style usr/src/kernels/ is not a Peios
+# destination. The modules/<release>/build shape mirrors the canonical
+# /lib/modules/<release>/build that out-of-tree `make -C` expects, relocated
+# under the triplet; when the kernel goes non-monolithic the modules tree lands
+# alongside it and a kmod compatibility symlink has a natural target.
+#
+# No modules ship yet (the kernel is monolithic), so the kit has no consumer
+# today, but it is producible now and so is built rather than left as rework.
+# The exact file set should be validated against a real out-of-tree module build
+# once one exists.
+
+[package]
+description = "Peios Kernel — development headers and build kit"
+
+[dependencies]
+kernel = "{{version}}"
+
+[files]
+"kernel:Makefile"            = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/Makefile"
+"kernel:Module.symvers"      = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/Module.symvers"
+"kernel:.config"             = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/.config"
+"kernel:scripts/**"          = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/scripts"
+"kernel:include/**"          = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/include"
+"kernel:arch/x86/Makefile"   = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/arch/x86/Makefile"
+"kernel:arch/x86/include/**" = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/arch/x86/include"
+# Build artifacts and C sources aren't needed to compile external modules; the
+# built host tools in scripts/ (no extension, e.g. modpost) are kept.
+exclude = [
+  "kernel:**/*.o",
+  "kernel:**/*.cmd",
+  "kernel:**/*.c",
+]

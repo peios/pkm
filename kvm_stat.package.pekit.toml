@@ -1,0 +1,12 @@
+# kvm_stat — live KVM event/exit-reason monitor (reads the KVM debugfs/tracepoint
+# counters). A standalone Python script, from tools/kvm/kvm_stat (build.tools).
+# The bundled kvm_stat.service systemd unit is not shipped (Peios is not systemd).
+#
+# Runtime deps (TODO — see D4): python3 interpreter
+
+[package]
+description = "kvm_stat — KVM event monitor (from Linux 7.0.9 tools/kvm/kvm_stat)"
+
+[files]
+"tools:usr/bin/kvm_stat"                = "usr/bin/kvm_stat"
+"tools:usr/share/man/man1/kvm_stat.1"   = "usr/share/man/man1/kvm_stat.1"

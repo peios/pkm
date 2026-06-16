@@ -1,0 +1,11 @@
+# x86_energy_perf_policy — read/set the IA32_ENERGY_PERF_BIAS MSR (perf/energy
+# bias hint). Built from tools/power/x86/x86_energy_perf_policy (build.tools).
+#
+# Runtime shared-lib deps (TODO — see D4): libc
+
+[package]
+description = "x86_energy_perf_policy — set CPU energy/performance bias (from Linux 7.0.9 tools/power/x86)"
+
+[files]
+"tools:usr/bin/x86_energy_perf_policy" = "usr/bin/x86_energy_perf_policy"
+"tools:usr/share/man/man8/x86_energy_perf_policy.8" = "usr/share/man/man8/x86_energy_perf_policy.8"

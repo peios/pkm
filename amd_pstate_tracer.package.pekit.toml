@@ -1,0 +1,11 @@
+# amd_pstate_tracer — trace/plot AMD P-state behaviour from ftrace. A standalone
+# Python script (no compiled code), installed unsuffixed. From tools/power/x86.
+#
+# Runtime deps (TODO — see D4): python3 interpreter, plus numpy/matplotlib for the
+# plotting paths (a Peios python-packaging concern — see D1/python3-perf).
+
+[package]
+description = "amd_pstate_tracer — trace/plot AMD P-state activity (from Linux 7.0.9 tools/power/x86)"
+
+[files]
+"tools:usr/bin/amd_pstate_tracer" = "usr/bin/amd_pstate_tracer"

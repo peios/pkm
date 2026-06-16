@@ -1,0 +1,12 @@
+# kernel — the bootable Peios kernel: the monolithic bzImage plus the matching
+# config and System.map. Monolithic (all drivers built in), so there is no
+# kernel-core / kernel-modules split. Carved straight from build.kernel's
+# output; files named by the kernel release (uname), package by the Peios version.
+
+[package]
+description = "Peios Kernel — bootable image (based on Linux 7.0.9)"
+
+[files]
+"kernel:arch/x86/boot/bzImage" = "boot/vmlinuz-7.0.9"
+"kernel:System.map"            = "boot/System.map-7.0.9"
+"kernel:.config"               = "boot/config-7.0.9"

@@ -1,0 +1,14 @@
+# libthermal-devel — libthermal development files: header, static lib, pkg-config.
+# (The .so is unversioned and ships in the runtime libthermal package, so it is not
+# duplicated here.)
+
+[package]
+description = "libthermal — development files (header, static lib, pkg-config)"
+
+[dependencies]
+libthermal = "{{version}}"
+
+[files]
+"tools:usr/include/thermal/thermal.h" = "usr/include/thermal/thermal.h"
+"tools:usr/lib/x86_64-linux-peios/libthermal.a"            = "usr/lib/x86_64-linux-peios/libthermal.a"
+"tools:usr/lib/x86_64-linux-peios/pkgconfig/libthermal.pc" = "usr/lib/x86_64-linux-peios/pkgconfig/libthermal.pc"

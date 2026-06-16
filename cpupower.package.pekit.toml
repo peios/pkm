@@ -1,0 +1,21 @@
+# cpupower — inspect and tune CPU frequency / idle behaviour. Built from the
+# in-tree tools/power/cpupower (build.tools). libcpupower is split into
+# cpupower-libs / cpupower-libs-devel.
+#
+# Omitted: the systemd integration (usr/libexec/cpupower service helper,
+# usr/lib/systemd/system/cpupower.service, etc/cpupower-service.conf) — Peios is
+# not systemd-based.
+#
+# Runtime shared-lib deps (TODO — see D4): libcpupower libpci libc
+
+[package]
+description = "cpupower — CPU frequency/idle control (from Linux 7.0.9 tools/power/cpupower)"
+
+[dependencies]
+cpupower-libs = "{{version}}"
+
+[files]
+"tools:usr/bin/cpupower" = "usr/bin/cpupower"
+"tools:usr/share/bash-completion/completions/cpupower" = "usr/share/bash-completion/completions/cpupower"
+"tools:usr/share/locale/**" = "usr/share/locale"
+"tools:usr/share/man/man1/cpupower*.1" = "usr/share/man/man1"

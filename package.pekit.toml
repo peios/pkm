@@ -1,0 +1,22 @@
+# Base metadata for the Peios kernel packages, inherited by each
+# <name>.package.pekit.toml; each overrides description + files. Covers the
+# kernel family (kernel, kernel-headers, kernel-devel, kernel-debuginfo,
+# kernel-debugsource) and the in-tree userspace tools (perf, bpftool, cpupower,
+# turbostat, rtla, rv) — all built from the same Linux 7.0.9 source, all
+# x86_64 / GPL-2.0-only.
+#
+# The Peios kernel version is INDEPENDENT of the Linux base it's built on
+# (the base is provenance, recorded in each package's description). SemVer it
+# against the PKM UAPI / KACS ABI. Install paths are named by the kernel
+# RELEASE (7.0.9, the uname version) — distinct from this package version.
+#
+# kernel-modules is intentionally absent: the kernel is monolithic (everything
+# built-in), so there is nothing to split until a non-monolithic build exists.
+
+format = "peipkg"
+
+[package]
+version      = "{{version}}-1"
+architecture = "x86_64"
+license      = "GPL-2.0-only"
+homepage     = "https://github.com/peios/pkm"

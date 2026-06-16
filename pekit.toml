@@ -22,6 +22,11 @@ PATCHES="$(pwd)/kernel/patches"
 cp -aT "$PEKIT_UPSTREAM_OUT" "$PEKIT_OUT"
 ./kernel/apply-patches.sh $PEKIT_OUT $PATCHES
 ./kernel/stage-sources.sh "$(pwd)" "$PEKIT_OUT"
+# .git is only needed for `git apply` above. Strip it so the staged source is a
+# plain tree: scripts/setlocalversion then finds no repo and the kernel release
+# is a clean "7.0.9" instead of "7.0.9-dirty" (HEAD sits on the v7.0.9 tag and
+# the applied patches leave the worktree dirty).
+rm -rf "$PEKIT_OUT/.git"
 """
 
 # build.source is config-agnostic (the kernel-source package). The kernel
@@ -46,6 +51,42 @@ python3 kernel/scripts/generate-kacs-builtin-signing-keys.py \
 	--out "$PEKIT_OUT/security/pkm/kacs/builtin_signing_keys.h"
 ./build/configure-kernel.sh "$PEKIT_OUT" production
 ./build/compile-kernel.sh "$PEKIT_OUT"
+"""
+
+# Export the sanitized userspace UAPI headers (full Linux UAPI + our pkm/*.h,
+# which ride along since they're staged under include/uapi/pkm). Depends on
+# source, not the compiled kernel — headers come from include/uapi and need no
+# build. O= directs the host-tool build (unifdef) + the headers into this
+# stage's own out, leaving the source tree pristine and avoiding a tree copy.
+# (headers_install is a transformation the package [files] maps can't do;
+# everything else the kernel packages need is carved straight from build.kernel.)
+[build.headers]
+needs = ["source"]
+command = """
+make -C "$PEKIT_SOURCE_OUT" O="$PEKIT_OUT" LLVM=-18 headers_install INSTALL_HDR_PATH="$PEKIT_OUT/usr"
+"""
+
+# Kernel debug artifacts: the whole vmlinux at the conventional debug path + a
+# build-id symlink (-> kernel-debuginfo), and the DWARF-referenced sources with
+# their baked-in build path sanitized via debugedit (-> kernel-debugsource).
+# objcopy/readelf/debugedit are transformations the package [files] maps can't
+# do; everything else the kernel packages need is carved straight from build.kernel.
+[build.debuginfo]
+needs = ["kernel"]
+command = """
+./build/make-debuginfo.sh "$PEKIT_KERNEL_OUT" "$PEKIT_OUT"
+"""
+
+# In-tree userspace tooling (perf, bpftool, cpupower, turbostat, rtla, rv). These
+# are userspace ELF programs that live under tools/ in the kernel source, so they
+# build from the same staged source (needs=source) rather than a separate pipeline
+# — only their userspace lib deps are extra (in the image, unused by build.kernel).
+# One stage builds all of them into a DESTDIR image; the per-tool packages carve
+# from it. Independent of the compiled kernel.
+[build.tools]
+needs = ["source"]
+command = """
+./build/build-tools.sh "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
 """
 
 # Boot the KUnit kernel in QEMU and assert the suite passes (build vs run split).

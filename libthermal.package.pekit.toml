@@ -1,0 +1,16 @@
+# libthermal — the kernel thermal-netlink client library (runtime). Built from
+# tools/lib/thermal (build.tools).
+#
+# Its SONAME is unversioned (libthermal.so), so the unversioned .so ships HERE in
+# the runtime package (not just in -devel) — consumers like thermal-engine record
+# NEEDED=libthermal.so and resolve it at runtime.
+#
+# Runtime shared-lib deps (TODO — see D4): libnl-3 libnl-genl-3 libc
+
+[package]
+description = "libthermal — kernel thermal-netlink client library"
+
+[files]
+"tools:usr/lib/x86_64-linux-peios/libthermal.so"       = "usr/lib/x86_64-linux-peios/libthermal.so"
+"tools:usr/lib/x86_64-linux-peios/libthermal.so.0"     = "usr/lib/x86_64-linux-peios/libthermal.so.0"
+"tools:usr/lib/x86_64-linux-peios/libthermal.so.0.0.1" = "usr/lib/x86_64-linux-peios/libthermal.so.0.0.1"

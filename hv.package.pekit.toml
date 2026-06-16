@@ -1,0 +1,24 @@
+# hv — Linux Hyper-V guest integration: the KVP / VSS / fcopy daemons, the lsvmbus
+# listing tool, and the KVP helper scripts. Built from tools/hv (build.tools).
+#
+# The kvp daemon's helper-script directory (#define KVP_SCRIPTS_PATH, default
+# /usr/libexec/hypervkvpd/) is rewritten at build time to a triplet path, since
+# usr/libexec is not a PSD-009 destination; the helpers install there to match.
+# Daemons default to sbin and are redirected to bin (PSD-009 is bin-only).
+#
+# Note: only useful when Peios runs as a guest ON Microsoft Hyper-V; dead weight
+# otherwise — shipped for completeness.
+#
+# Runtime shared-lib deps (TODO — see D4):
+#   hv_kvp_daemon / hv_vss_daemon / hv_fcopy_uio_daemon: libc
+#   lsvmbus: python3 interpreter
+
+[package]
+description = "hv — Linux Hyper-V guest integration daemons + tools (from Linux 7.0.9 tools/hv)"
+
+[files]
+"tools:usr/bin/hv_kvp_daemon"       = "usr/bin/hv_kvp_daemon"
+"tools:usr/bin/hv_vss_daemon"       = "usr/bin/hv_vss_daemon"
+"tools:usr/bin/hv_fcopy_uio_daemon" = "usr/bin/hv_fcopy_uio_daemon"
+"tools:usr/bin/lsvmbus"             = "usr/bin/lsvmbus"
+"tools:usr/lib/x86_64-linux-peios/hypervkvpd/**" = "usr/lib/x86_64-linux-peios/hypervkvpd"

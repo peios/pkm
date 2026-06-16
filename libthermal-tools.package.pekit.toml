@@ -1,0 +1,14 @@
+# libthermal-tools — the private helper library (libthermal_tools) shared by
+# thermal-engine and thermometer (config parsing, logging, mainloop). Built from
+# tools/thermal/lib (build.tools). No public headers (private API), so no -devel;
+# its unversioned SONAME means the .so ships in this runtime package.
+#
+# Runtime shared-lib deps (TODO — see D4): libc
+
+[package]
+description = "libthermal_tools — private helper library for the thermal tools"
+
+[files]
+"tools:usr/lib/x86_64-linux-peios/libthermal_tools.so"       = "usr/lib/x86_64-linux-peios/libthermal_tools.so"
+"tools:usr/lib/x86_64-linux-peios/libthermal_tools.so.0"     = "usr/lib/x86_64-linux-peios/libthermal_tools.so.0"
+"tools:usr/lib/x86_64-linux-peios/libthermal_tools.so.0.0.2" = "usr/lib/x86_64-linux-peios/libthermal_tools.so.0.0.2"

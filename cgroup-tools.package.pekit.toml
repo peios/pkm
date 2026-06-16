@@ -1,0 +1,18 @@
+# cgroup-tools — drgn-based cgroup diagnostic scripts (iocost_coef_gen,
+# iocost_monitor, memcg_shrinker, memcg_slabinfo). Standalone Python scripts (no
+# compiled code), from tools/cgroup. Installed unsuffixed.
+#
+# Note: these introspect live kernel state via drgn; useful for kernel debugging,
+# niche for a deployed system — shipped for completeness.
+#
+# Runtime deps (TODO — see D4): python3 interpreter + drgn (a Peios python-packaging
+# concern — see D1).
+
+[package]
+description = "cgroup-tools — drgn-based cgroup diagnostics (from Linux 7.0.9 tools/cgroup)"
+
+[files]
+"tools:usr/bin/iocost_coef_gen" = "usr/bin/iocost_coef_gen"
+"tools:usr/bin/iocost_monitor"  = "usr/bin/iocost_monitor"
+"tools:usr/bin/memcg_shrinker"  = "usr/bin/memcg_shrinker"
+"tools:usr/bin/memcg_slabinfo"  = "usr/bin/memcg_slabinfo"

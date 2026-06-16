@@ -1,0 +1,12 @@
+# kernel-debuginfo — the whole vmlinux (with DWARF) at the conventional kernel
+# debug path, plus a build-id-indexed symlink so crash/gdb/debuginfod resolve
+# symbols automatically. Produced by build.debuginfo.
+
+[package]
+description = "Peios Kernel — debugging symbols"
+
+[dependencies]
+kernel = "{{version}}"
+
+[files]
+"debuginfo:usr/lib/debug/**" = "usr/lib/debug"
