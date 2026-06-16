@@ -96,8 +96,8 @@ time and is supplied by the build environment, never committed — see
 | `build/config/` | `config.x86_64.base`, `pkm.fragment`, `kunit.fragment`, `lsmod.txt`. |
 | `env.pekit.toml` | The container `[wrap]` — runs every stage inside `pkm-build` rootless. |
 | `kvm.env.pekit.toml` | `--env kvm` variant: adds `--device /dev/kvm` for accelerated QEMU. |
-| `package.pekit.toml` | Base package metadata, inherited by every `<name>.package.pekit.toml`. |
-| `<name>.package.pekit.toml` | Per-package `[files]` maps for the kernel family + userspace tools. |
+| `packages.pekit/package.pekit.toml` | Base package metadata, inherited by every member. |
+| `packages.pekit/<name>.package.pekit.toml` | Per-package `[files]` maps for the kernel family + userspace tools. |
 | `*.keyring.pekit.toml` | Per-developer/environment TCB keyrings (gitignored — never committed). |
 
 Build outputs land in `out/build/<stage>/` and packages in
@@ -229,8 +229,10 @@ pipeline itself stays key-agnostic.
 
 Packaging is driven by `pekit package <name> --version <v>`, producing a
 `.peipkg` per package under `out/package/<name>/`. Each package is described by
-`<name>.package.pekit.toml` (a `[files]` map of `"<stage>:<glob>" = "<dest>"`)
-inheriting base metadata from `package.pekit.toml`.
+`packages.pekit/<name>.package.pekit.toml` (a `[files]` map of
+`"<stage>:<glob>" = "<dest>"`) inheriting base metadata from
+`packages.pekit/package.pekit.toml`. pekit discovers packages in the repo root
+and in the `package.pekit/` / `packages.pekit/` subdirectories.
 
 ### Versioning
 
