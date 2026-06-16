@@ -1,3 +1,4 @@
+use crate::common::{sid};
 use lcs_core::{
     LCS_CONFIG_ROOT_PATH, LcsAuditEventKind, LcsAuditPayloadWritePlan, LcsCallerTokenSummary,
     LcsError, LcsLimits, REG_SZ, REQUEST_TIMEOUT_MS, RsiSourceDataValidationFailure,
@@ -11,16 +12,6 @@ use lcs_core::{
     write_source_validation_failure_audit_payload,
 };
 
-fn sid(authority: u8, subauths: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + subauths.len() * 4);
-    bytes.push(1);
-    bytes.push(subauths.len() as u8);
-    bytes.extend_from_slice(&[0, 0, 0, 0, 0, authority]);
-    for subauth in subauths {
-        bytes.extend_from_slice(&subauth.to_le_bytes());
-    }
-    bytes
-}
 
 fn caller(user_sid: &[u8]) -> LcsCallerTokenSummary<'_> {
     LcsCallerTokenSummary {

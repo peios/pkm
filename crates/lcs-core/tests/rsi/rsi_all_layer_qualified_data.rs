@@ -1,6 +1,7 @@
+use crate::common::{field, finish_total_len, push_len_prefixed, response_frame};
 use lcs_core::{
-    REG_BINARY, REG_SZ, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_OK, RSI_PATH_TARGET_GUID,
-    RSI_PATH_TARGET_HIDDEN, RSI_QUERY_VALUES, RSI_REQUEST_HEADER_LEN, RsiLengthPrefixedField,
+    REG_BINARY, REG_SZ, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_PATH_TARGET_GUID,
+    RSI_PATH_TARGET_HIDDEN, RSI_QUERY_VALUES, RSI_REQUEST_HEADER_LEN,
     RsiLookupPathEntry, RsiPathTargetType, RsiQueryValueResponseEntry,
     RsiQueryValuesBlanketResponseEntry, RsiRetainedRequest,
     parse_rsi_enum_children_success_response_payload, parse_rsi_lookup_request_payload,
@@ -20,31 +21,9 @@ const USER_GUID: [u8; 16] = [
     0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
 ];
 
-fn field(data: &[u8]) -> RsiLengthPrefixedField<'_> {
-    RsiLengthPrefixedField {
-        len: data.len() as u32,
-        data,
-    }
-}
 
-fn response_frame(request_id: u64, op_code: u16) -> Vec<u8> {
-    let mut frame = Vec::new();
-    frame.extend_from_slice(&0u32.to_le_bytes());
-    frame.extend_from_slice(&request_id.to_le_bytes());
-    frame.extend_from_slice(&op_code.to_le_bytes());
-    frame.extend_from_slice(&RSI_OK.to_le_bytes());
-    frame
-}
 
-fn finish_total_len(frame: &mut [u8]) {
-    let total_len = frame.len() as u32;
-    frame[..4].copy_from_slice(&total_len.to_le_bytes());
-}
 
-fn push_len_prefixed(frame: &mut Vec<u8>, bytes: &[u8]) {
-    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    frame.extend_from_slice(bytes);
-}
 
 fn push_path_entry(frame: &mut Vec<u8>, layer: &[u8], target_type: u8, guid: &[u8; 16], seq: u64) {
     push_len_prefixed(frame, layer);

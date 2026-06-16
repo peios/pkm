@@ -1,3 +1,4 @@
+use crate::common::{finish_total_len, push_len_prefixed};
 use lcs_core::{
     LcsError, LcsLimits, REG_SZ, REG_TOMBSTONE, RSI_OK, RSI_QUERY_VALUES, RsiRetainedRequest,
     parse_rsi_query_values_success_response_payload, rsi_response_op_code,
@@ -17,10 +18,6 @@ fn response_frame(request_id: u64) -> Vec<u8> {
     frame
 }
 
-fn push_len_prefixed(frame: &mut Vec<u8>, bytes: &[u8]) {
-    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    frame.extend_from_slice(bytes);
-}
 
 fn push_query_value_entry(frame: &mut Vec<u8>, value_type: u32, data: &[u8], sequence: u64) {
     push_len_prefixed(frame, b"Value");
@@ -30,10 +27,6 @@ fn push_query_value_entry(frame: &mut Vec<u8>, value_type: u32, data: &[u8], seq
     frame.extend_from_slice(&sequence.to_le_bytes());
 }
 
-fn finish_total_len(frame: &mut [u8]) {
-    let total_len = frame.len() as u32;
-    frame[..4].copy_from_slice(&total_len.to_le_bytes());
-}
 
 fn parse_frame(
     request_id: u64,

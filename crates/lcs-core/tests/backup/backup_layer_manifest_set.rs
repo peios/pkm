@@ -1,20 +1,10 @@
+use crate::common::{limits, system_sid};
 use lcs_core::{
-    BackupLayerManifestPayload, BackupLayerManifestSetSummary, LcsError, LcsLimits,
+    BackupLayerManifestPayload, BackupLayerManifestSetSummary, LcsError,
     validate_backup_layer_manifest_set,
 };
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
-fn system_sid() -> Vec<u8> {
-    let mut sid = Vec::new();
-    sid.push(1);
-    sid.push(1);
-    sid.extend_from_slice(&[0, 0, 0, 0, 0, 5]);
-    sid.extend_from_slice(&18u32.to_le_bytes());
-    sid
-}
 
 fn manifest<'a>(
     name: &'a str,

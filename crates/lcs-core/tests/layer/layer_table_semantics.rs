@@ -1,14 +1,12 @@
+use crate::common::{limits};
 use lcs_core::{
     BASE_LAYER_NAME, BASE_LAYER_VIEW, Guid, LayerMetadataEntry, LayerResolutionContext, LayerView,
-    LcsError, LcsLimits, PathEntry, PathResolution, PathTarget, for_each_effective_layer,
+    LcsError, PathEntry, PathResolution, PathTarget, for_each_effective_layer,
     normalize_layer_target, resolve_path_entry, validate_layer_views, validate_private_layer_set,
 };
 
 const GUID: Guid = [0x44; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 #[test]
 fn effective_layer_table_injects_base_and_defaults_non_base_metadata() {

@@ -1,3 +1,4 @@
+use crate::common::{finish_total_len, push_len_prefixed};
 use lcs_core::{
     LcsError, REG_BINARY, REG_SZ, RSI_NOT_FOUND, RSI_OK, RSI_QUERY_VALUES, RSI_READ_KEY,
     RsiLengthPrefixedField, RsiQueryValueResponseEntry, RsiQueryValuesBlanketResponseEntry,
@@ -13,10 +14,6 @@ fn response_frame(request_id: u64, op_code: u16, status: u32) -> Vec<u8> {
     frame
 }
 
-fn push_len_prefixed(frame: &mut Vec<u8>, bytes: &[u8]) {
-    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    frame.extend_from_slice(bytes);
-}
 
 fn push_value_entry(
     frame: &mut Vec<u8>,
@@ -38,10 +35,6 @@ fn push_blanket(frame: &mut Vec<u8>, layer_name: &[u8], sequence: u64) {
     frame.extend_from_slice(&sequence.to_le_bytes());
 }
 
-fn finish_total_len(frame: &mut [u8]) {
-    let total_len = frame.len() as u32;
-    frame[..4].copy_from_slice(&total_len.to_le_bytes());
-}
 
 #[test]
 fn query_values_success_response_parses_value_entries_and_blankets() {

@@ -1,23 +1,12 @@
+use crate::common::{finish_total_len, push_len_prefixed, response_frame};
 use lcs_core::{
-    LcsError, LcsLimits, RSI_OK, RSI_QUERY_VALUES, RSI_READ_KEY, RsiRetainedRequest,
+    LcsError, LcsLimits, RSI_QUERY_VALUES, RSI_READ_KEY, RsiRetainedRequest,
     parse_rsi_query_values_success_response_payload, parse_rsi_read_key_success_response_payload,
     rsi_response_op_code, validate_rsi_query_values_response_names,
     validate_rsi_read_key_response_names,
 };
 
-fn response_frame(request_id: u64, op_code: u16) -> Vec<u8> {
-    let mut frame = Vec::new();
-    frame.extend_from_slice(&0u32.to_le_bytes());
-    frame.extend_from_slice(&request_id.to_le_bytes());
-    frame.extend_from_slice(&op_code.to_le_bytes());
-    frame.extend_from_slice(&RSI_OK.to_le_bytes());
-    frame
-}
 
-fn push_len_prefixed(frame: &mut Vec<u8>, bytes: &[u8]) {
-    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    frame.extend_from_slice(bytes);
-}
 
 fn push_read_key_body(frame: &mut Vec<u8>, name: &[u8]) {
     push_len_prefixed(frame, name);
@@ -48,10 +37,6 @@ fn push_blanket(frame: &mut Vec<u8>, layer_name: &[u8], sequence: u64) {
     frame.extend_from_slice(&sequence.to_le_bytes());
 }
 
-fn finish_total_len(frame: &mut [u8]) {
-    let total_len = frame.len() as u32;
-    frame[..4].copy_from_slice(&total_len.to_le_bytes());
-}
 
 fn parse_read_key_frame(
     request_id: u64,

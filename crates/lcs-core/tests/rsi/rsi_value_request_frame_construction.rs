@@ -1,6 +1,7 @@
+use crate::common::{field};
 use lcs_core::{
     LcsError, REG_SZ, RSI_DELETE_VALUE_ENTRY, RSI_QUERY_VALUES, RSI_REQUEST_HEADER_LEN,
-    RSI_SET_BLANKET_TOMBSTONE, RSI_SET_VALUE, RsiLengthPrefixedField,
+    RSI_SET_BLANKET_TOMBSTONE, RSI_SET_VALUE,
     parse_rsi_delete_value_entry_request_payload, parse_rsi_query_values_request_payload,
     parse_rsi_request_header, parse_rsi_set_blanket_tombstone_request_payload,
     parse_rsi_set_value_request_payload, write_rsi_delete_value_entry_request_frame,
@@ -12,12 +13,6 @@ const KEY_GUID: [u8; 16] = [
     0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
 ];
 
-fn field(data: &[u8]) -> RsiLengthPrefixedField<'_> {
-    RsiLengthPrefixedField {
-        len: data.len() as u32,
-        data,
-    }
-}
 
 #[test]
 fn query_values_request_frame_writes_guid_name_and_query_all_flag() {

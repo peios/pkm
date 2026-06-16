@@ -1,6 +1,7 @@
+use crate::common::{limits};
 use lcs_core::{
     BlanketTombstoneAction, BlanketTombstoneInput, Guid, HideKeyInput, KeyFdNamespaceView,
-    KeyPathMutationInput, LcsError, LcsLimits, NIL_GUID, PathEntryWriteRequest, PathTarget, REG_SZ,
+    KeyPathMutationInput, LcsError, NIL_GUID, PathEntryWriteRequest, PathTarget, REG_SZ,
     SequenceCounter, ValueWriteInput, plan_blanket_tombstone, plan_key_hide, plan_value_write,
     validate_path_entry_write_request,
 };
@@ -11,9 +12,6 @@ const CHILD_GUID: Guid = [0x53; 16];
 const VALUE_KEY_GUID: Guid = [0x54; 16];
 static CHILD_ANCESTORS: [Guid; 3] = [ROOT_GUID, PARENT_GUID, CHILD_GUID];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn child_fd<'a>(path: &'a [&'a str]) -> KeyFdNamespaceView<'a> {
     KeyFdNamespaceView {

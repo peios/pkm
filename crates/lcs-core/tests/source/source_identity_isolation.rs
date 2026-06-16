@@ -1,10 +1,10 @@
+use crate::common::{field};
 use lcs_core::{
     LcsAuditEventKind, LcsLimits, RSI_WRITE_KEY_FIELD_SD, RsiAbortTransactionRequestPayload,
     RsiBeginTransactionRequestPayload, RsiCommitTransactionRequestPayload,
     RsiCreateEntryRequestPayload, RsiCreateKeyRequestPayload, RsiDeleteEntryRequestPayload,
     RsiDeleteLayerRequestPayload, RsiDeleteValueEntryRequestPayload, RsiDropKeyRequestPayload,
-    RsiEnumChildrenRequestPayload, RsiFlushRequestPayload, RsiHideEntryRequestPayload,
-    RsiLengthPrefixedField, RsiLookupRequestPayload, RsiQueryValuesRequestPayload,
+    RsiEnumChildrenRequestPayload, RsiFlushRequestPayload, RsiHideEntryRequestPayload, RsiLookupRequestPayload, RsiQueryValuesRequestPayload,
     RsiReadKeyRequestPayload, RsiRequestHeader, RsiSetBlanketTombstoneRequestPayload,
     RsiSetValueRequestPayload, RsiSourceDataValidationFailure, RsiTrailingOptionalFieldsPlan,
     RsiTransactionMode, RsiWriteKeyRequestPayload, plan_source_validation_failure_audit_record,
@@ -13,12 +13,6 @@ use lcs_core::{
 const ROOT_GUID: [u8; 16] = [0x10; 16];
 const CHILD_GUID: [u8; 16] = [0x20; 16];
 
-fn field(data: &[u8]) -> RsiLengthPrefixedField<'_> {
-    RsiLengthPrefixedField {
-        len: data.len() as u32,
-        data,
-    }
-}
 
 fn trailing() -> RsiTrailingOptionalFieldsPlan {
     RsiTrailingOptionalFieldsPlan {

@@ -1,20 +1,10 @@
+use crate::common::{limits, system_sid};
 use lcs_core::{
     BASE_LAYER_VIEW, BackupLayerManifestPayload, BackupRestoreLayerPrecedencePlan, LayerView,
-    LcsError, LcsLimits, plan_backup_restore_layer_precedence_gate,
+    LcsError, plan_backup_restore_layer_precedence_gate,
 };
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
-fn system_sid() -> Vec<u8> {
-    let mut sid = Vec::new();
-    sid.push(1);
-    sid.push(1);
-    sid.extend_from_slice(&[0, 0, 0, 0, 0, 5]);
-    sid.extend_from_slice(&18u32.to_le_bytes());
-    sid
-}
 
 fn manifest<'a>(
     name: &'a str,

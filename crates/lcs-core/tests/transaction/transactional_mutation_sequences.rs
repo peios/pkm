@@ -1,5 +1,6 @@
+use crate::common::{limits};
 use lcs_core::{
-    Guid, LcsError, LcsLimits, SequenceCounter, TransactionBinding,
+    Guid, LcsError, SequenceCounter, TransactionBinding,
     TransactionMutationAcceptanceFailure, TransactionMutationAcceptancePlan,
     TransactionMutationBindingPlan, TransactionState, TransactionUseFailure,
     plan_transaction_mutation_acceptance,
@@ -8,9 +9,6 @@ use lcs_core::{
 const ROOT_GUID: Guid = [0x71; 16];
 const OTHER_ROOT_GUID: Guid = [0x72; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn binding(
     source_id: u32,

@@ -1,3 +1,4 @@
+use crate::common::{system_sid};
 use lcs_core::{
     BACKUP_RECORD_HEADER_LEN, BackupKeyPayload, BackupRecordKind, Guid, LcsError, NIL_GUID,
     REG_BACKUP_VALUE, parse_backup_key_payload, parse_backup_key_record,
@@ -7,14 +8,6 @@ use lcs_core::{
 const SE_SELF_RELATIVE: u16 = 0x8000;
 const KEY_GUID: Guid = [0x44; 16];
 
-fn system_sid() -> Vec<u8> {
-    let mut sid = Vec::new();
-    sid.push(1);
-    sid.push(1);
-    sid.extend_from_slice(&[0, 0, 0, 0, 0, 5]);
-    sid.extend_from_slice(&18u32.to_le_bytes());
-    sid
-}
 
 fn owner_only_sd() -> Vec<u8> {
     let owner = system_sid();

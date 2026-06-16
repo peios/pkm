@@ -1,24 +1,14 @@
+use crate::common::{context, limits};
 use lcs_core::{
-    LayerResolutionContext, LayerTargetAdmissionErrno, LayerTargetAdmissionInput,
-    LayerTargetAdmissionPlan, LayerView, LcsError, LcsLimits, PathEntry, PathResolution,
+    LayerTargetAdmissionErrno, LayerTargetAdmissionInput,
+    LayerTargetAdmissionPlan, LayerView, LcsError, PathEntry, PathResolution,
     PathTarget, REG_SZ, RegistryValueType, ValueEntry, ValueResolution,
     layer_target_admission_errno, plan_layer_target_admission, resolve_path_entry, resolve_value,
 };
 
 const LATENT_GUID: [u8; 16] = [0x22; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
-fn context<'a>(layers: &'a [LayerView<'a>], limits: &'a LcsLimits) -> LayerResolutionContext<'a> {
-    LayerResolutionContext {
-        layers,
-        private_layers: &[],
-        limits,
-        next_sequence: 100,
-    }
-}
 
 #[test]
 fn well_formed_unknown_source_layer_is_latent_until_layer_metadata_exists() {

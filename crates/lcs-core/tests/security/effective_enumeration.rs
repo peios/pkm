@@ -1,3 +1,4 @@
+use crate::common::{limits};
 use lcs_core::{
     BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid, LayerResolutionContext,
     LayerView, LcsError, LcsLimits, NamedPathEntry, NamedValueEntry, PathEntry, PathTarget,
@@ -9,9 +10,6 @@ const GUID_LOW: Guid = [0x11; 16];
 const GUID_HIGH: Guid = [0x22; 16];
 const GUID_VISIBLE: Guid = [0x33; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn context<'a>(
     layers: &'a [LayerView<'a>],

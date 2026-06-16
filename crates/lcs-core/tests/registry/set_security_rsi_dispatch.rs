@@ -1,8 +1,9 @@
+use crate::common::{field, sid};
 use kacs_core::{ACCESS_ALLOWED_ACE_TYPE, SE_DACL_PRESENT, SE_SELF_RELATIVE, SecurityDescriptor};
 use lcs_core::{
     DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, Guid, KEY_READ, LcsError,
     OWNER_SECURITY_INFORMATION, RSI_REQUEST_HEADER_LEN, RSI_WRITE_KEY,
-    RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME, RSI_WRITE_KEY_FIELD_SD, RsiLengthPrefixedField,
+    RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME, RSI_WRITE_KEY_FIELD_SD,
     parse_rsi_request_header, parse_rsi_write_key_request_payload, plan_registry_set_security,
     write_registry_set_security_rsi_write_key_request_frame,
 };
@@ -11,16 +12,6 @@ const KEY_GUID: Guid = [
     0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50,
 ];
 
-fn sid(authority: u8, subauths: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + subauths.len() * 4);
-    bytes.push(1);
-    bytes.push(subauths.len() as u8);
-    bytes.extend_from_slice(&[0, 0, 0, 0, 0, authority]);
-    for subauth in subauths {
-        bytes.extend_from_slice(&subauth.to_le_bytes());
-    }
-    bytes
-}
 
 fn basic_ace(mask: u32, sid: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(8 + sid.len());
@@ -75,12 +66,6 @@ fn append_optional_component(bytes: &mut Vec<u8>, component: Option<&[u8]>) -> u
     offset
 }
 
-fn field(data: &[u8]) -> RsiLengthPrefixedField<'_> {
-    RsiLengthPrefixedField {
-        len: data.len() as u32,
-        data,
-    }
-}
 
 #[test]
 fn set_security_dispatch_writes_merged_sd_and_last_write_time() {

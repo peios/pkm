@@ -1,3 +1,4 @@
+use crate::common::{finish_total_len, push_len_prefixed};
 use kacs_core::{ACCESS_ALLOWED_ACE_TYPE, SE_DACL_PRESENT, SE_SELF_RELATIVE};
 use lcs_core::{
     ACCESS_SYSTEM_SECURITY, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE, LcsError,
@@ -20,10 +21,6 @@ fn response_frame(request_id: u64, request_op_code: u16) -> Vec<u8> {
     frame
 }
 
-fn push_len_prefixed(frame: &mut Vec<u8>, bytes: &[u8]) {
-    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    frame.extend_from_slice(bytes);
-}
 
 fn push_metadata(frame: &mut Vec<u8>, guid: &[u8; 16], sd: &[u8]) {
     frame.extend_from_slice(guid);
@@ -33,10 +30,6 @@ fn push_metadata(frame: &mut Vec<u8>, guid: &[u8; 16], sd: &[u8]) {
     frame.extend_from_slice(&1000u64.to_le_bytes());
 }
 
-fn finish_total_len(frame: &mut [u8]) {
-    let total_len = frame.len() as u32;
-    frame[..4].copy_from_slice(&total_len.to_le_bytes());
-}
 
 fn sid(authority: u8, subauths: &[u32]) -> Vec<u8> {
     let mut bytes = Vec::new();

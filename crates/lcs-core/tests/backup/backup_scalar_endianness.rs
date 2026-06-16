@@ -1,5 +1,6 @@
+use crate::common::{limits, system_sid};
 use lcs_core::{
-    BACKUP_RECORD_HEADER_LEN, BACKUP_TRAILER_CHECKSUM_LEN, Guid, LcsLimits, PathTarget,
+    BACKUP_RECORD_HEADER_LEN, BACKUP_TRAILER_CHECKSUM_LEN, Guid, PathTarget,
     REG_BACKUP_BLANKET_TOMBSTONE, REG_BACKUP_HEADER, REG_BACKUP_KEY, REG_BACKUP_LAYER,
     REG_BACKUP_PATH_ENTRY, REG_BACKUP_TRAILER, REG_BACKUP_VALUE, REG_BINARY,
     write_backup_blanket_tombstone_record_frame, write_backup_header_record_frame,
@@ -12,18 +13,7 @@ const SE_SELF_RELATIVE: u16 = 0x8000;
 const ROOT: Guid = [0x10; 16];
 const CHILD: Guid = [0x20; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
-fn system_sid() -> Vec<u8> {
-    let mut sid = Vec::new();
-    sid.push(1);
-    sid.push(1);
-    sid.extend_from_slice(&[0, 0, 0, 0, 0, 5]);
-    sid.extend_from_slice(&18u32.to_le_bytes());
-    sid
-}
 
 fn owner_only_sd() -> Vec<u8> {
     let owner = system_sid();

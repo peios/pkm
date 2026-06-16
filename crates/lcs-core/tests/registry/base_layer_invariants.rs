@@ -1,11 +1,9 @@
+use crate::common::{limits};
 use lcs_core::{
-    BASE_LAYER_NAME, BASE_LAYER_VIEW, LayerMetadataEntry, LayerView, LcsError, LcsLimits,
+    BASE_LAYER_NAME, BASE_LAYER_VIEW, LayerMetadataEntry, LayerView, LcsError,
     for_each_effective_layer, normalize_layer_target, plan_layer_deletion, validate_layer_views,
 };
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 #[test]
 fn base_layer_is_injected_without_persisted_metadata() {

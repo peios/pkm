@@ -1,14 +1,11 @@
+use crate::common::{limits};
 use lcs_core::{
-    BACKUP_RECORD_HEADER_LEN, BackupBlanketTombstonePayload, BackupRecordKind, Guid, LcsError,
-    LcsLimits, NIL_GUID, REG_BACKUP_KEY, parse_backup_blanket_tombstone_payload,
+    BACKUP_RECORD_HEADER_LEN, BackupBlanketTombstonePayload, BackupRecordKind, Guid, LcsError, NIL_GUID, REG_BACKUP_KEY, parse_backup_blanket_tombstone_payload,
     parse_backup_blanket_tombstone_record, write_backup_blanket_tombstone_record_frame,
 };
 
 const KEY_GUID: Guid = [0x33; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn blanket_payload(key_guid: Guid, layer_name: &[u8], sequence: u64) -> Vec<u8> {
     let mut payload = Vec::new();

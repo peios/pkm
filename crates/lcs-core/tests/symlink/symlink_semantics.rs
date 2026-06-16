@@ -1,11 +1,9 @@
+use crate::common::{limits};
 use lcs_core::{
-    LcsError, LcsLimits, PathKind, RegistryValueType, SymlinkDefaultValue,
+    LcsError, PathKind, RegistryValueType, SymlinkDefaultValue,
     validate_symlink_default_value, validate_symlink_follow_depth, validate_symlink_target_bytes,
 };
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 #[test]
 fn symlink_default_value_requires_effective_reg_link() {

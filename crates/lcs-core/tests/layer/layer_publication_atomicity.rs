@@ -1,23 +1,13 @@
+use crate::common::{limits, system_sid};
 use lcs_core::{
-    Guid, LayerPublicationInput, LayerPublicationPlan, LayerView, LcsError, LcsLimits, NIL_GUID,
+    Guid, LayerPublicationInput, LayerPublicationPlan, LayerView, LcsError, NIL_GUID,
     plan_layer_publication,
 };
 
 const SE_SELF_RELATIVE: u16 = 0x8000;
 const METADATA_GUID: Guid = [0x5a; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
-fn system_sid() -> Vec<u8> {
-    let mut sid = Vec::new();
-    sid.push(1);
-    sid.push(1);
-    sid.extend_from_slice(&[0, 0, 0, 0, 0, 5]);
-    sid.extend_from_slice(&18u32.to_le_bytes());
-    sid
-}
 
 fn owner_only_sd() -> Vec<u8> {
     let owner = system_sid();

@@ -1,21 +1,11 @@
+use crate::common::{limits, system_sid};
 use lcs_core::{
-    BACKUP_RECORD_HEADER_LEN, BackupLayerManifestPayload, BackupRecordKind, LcsError, LcsLimits,
+    BACKUP_RECORD_HEADER_LEN, BackupLayerManifestPayload, BackupRecordKind, LcsError,
     REG_BACKUP_KEY, parse_backup_layer_manifest_payload, parse_backup_layer_manifest_record,
     write_backup_layer_manifest_record_frame,
 };
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
-fn system_sid() -> Vec<u8> {
-    let mut sid = Vec::new();
-    sid.push(1);
-    sid.push(1);
-    sid.extend_from_slice(&[0, 0, 0, 0, 0, 5]);
-    sid.extend_from_slice(&18u32.to_le_bytes());
-    sid
-}
 
 fn layer_payload(name: &[u8], precedence: u32, enabled: u8, owner_sid: &[u8]) -> Vec<u8> {
     let mut payload = Vec::new();

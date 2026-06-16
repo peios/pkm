@@ -1,3 +1,4 @@
+use crate::common::{finish_total_len, push_len_prefixed};
 use lcs_core::{
     LcsError, REG_SZ, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_OK, RSI_PATH_TARGET_GUID,
     RSI_QUERY_VALUES, RsiRetainedRequest, parse_rsi_enum_children_success_response_payload,
@@ -15,10 +16,6 @@ fn response_frame(request_id: u64, request_op_code: u16) -> Vec<u8> {
     frame
 }
 
-fn push_len_prefixed(frame: &mut Vec<u8>, bytes: &[u8]) {
-    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    frame.extend_from_slice(bytes);
-}
 
 fn push_path_entry(frame: &mut Vec<u8>, sequence: u64) {
     push_len_prefixed(frame, b"base");
@@ -48,10 +45,6 @@ fn push_metadata(frame: &mut Vec<u8>) {
     frame.extend_from_slice(&1000u64.to_le_bytes());
 }
 
-fn finish_total_len(frame: &mut [u8]) {
-    let total_len = frame.len() as u32;
-    frame[..4].copy_from_slice(&total_len.to_le_bytes());
-}
 
 fn lookup_frame(request_id: u64, sequence: u64) -> Vec<u8> {
     let mut frame = response_frame(request_id, RSI_LOOKUP);

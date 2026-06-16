@@ -1,5 +1,6 @@
+use crate::common::{limits};
 use lcs_core::{
-    BACKUP_RECORD_HEADER_LEN, BackupHeaderPayload, BackupRecordKind, LcsError, LcsLimits,
+    BACKUP_RECORD_HEADER_LEN, BackupHeaderPayload, BackupRecordKind, LcsError,
     REG_BACKUP_KEY, REG_BACKUP_MAGIC, parse_backup_header_payload, parse_backup_header_record,
     write_backup_header_record_frame,
 };
@@ -7,9 +8,6 @@ use lcs_core::{
 const SUPPORTED_VERSION: u32 = 21;
 const ROOT_GUID: [u8; 16] = [0x5a; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn header_payload(
     magic: &[u8; 8],

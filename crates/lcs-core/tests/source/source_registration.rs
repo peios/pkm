@@ -1,5 +1,6 @@
+use crate::common::{limits};
 use lcs_core::{
-    Guid, HiveScope, LcsError, LcsLimits, NIL_GUID, RSI_HIVE_PRIVATE, RegisteredHiveIdentity,
+    Guid, HiveScope, LcsError, NIL_GUID, RSI_HIVE_PRIVATE, RegisteredHiveIdentity,
     SourceRegistrationDecision, SourceRegistrationHive, SourceRegistrationPlan,
     SourceRegistrationRequest, SourceSlotStatus, SourceSlotView, validate_source_registration,
 };
@@ -12,9 +13,6 @@ const STALE_GUID: Guid = [0x14; 16];
 const SCOPE_A: Guid = [0xaa; 16];
 const SCOPE_B: Guid = [0xbb; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn global_hive<'a>(name: &'a str, root_guid: Guid) -> SourceRegistrationHive<'a> {
     SourceRegistrationHive {

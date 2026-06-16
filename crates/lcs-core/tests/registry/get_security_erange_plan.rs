@@ -1,19 +1,10 @@
+use crate::common::{sid};
 use kacs_core::SE_SELF_RELATIVE;
 use lcs_core::{
     OWNER_SECURITY_INFORMATION, OutputBufferAggregate, OutputBufferDecision, OutputBufferRequest,
     plan_registry_get_security, validate_registry_get_security_output_buffer,
 };
 
-fn sid(authority: u8, subauths: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + subauths.len() * 4);
-    bytes.push(1);
-    bytes.push(subauths.len() as u8);
-    bytes.extend_from_slice(&[0, 0, 0, 0, 0, authority]);
-    for subauth in subauths {
-        bytes.extend_from_slice(&subauth.to_le_bytes());
-    }
-    bytes
-}
 
 fn owner_sd(owner: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0; 20];

@@ -1,13 +1,11 @@
+use crate::common::{limits};
 use lcs_core::{
-    Guid, LcsError, LcsLimits, NIL_GUID, SourceRegistrationHive, SourceRegistrationRequest,
+    Guid, LcsError, NIL_GUID, SourceRegistrationHive, SourceRegistrationRequest,
     validate_source_registration,
 };
 
 const ROOT_GUID: Guid = [0x31; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn global_hive<'a>(name: &'a str, root_guid: Guid) -> SourceRegistrationHive<'a> {
     SourceRegistrationHive {

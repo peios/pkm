@@ -1,5 +1,6 @@
+use crate::common::{limits};
 use lcs_core::{
-    BlanketTombstoneAction, BlanketTombstoneRequest, Guid, LcsError, LcsLimits, NIL_GUID,
+    BlanketTombstoneAction, BlanketTombstoneRequest, Guid, LcsError, NIL_GUID,
     REG_BINARY, REG_TOMBSTONE, ValidatedValueType, ValueDeleteRequest, ValueWriteRequest,
     validate_blanket_tombstone_request, validate_value_delete_request,
     validate_value_write_request,
@@ -7,9 +8,6 @@ use lcs_core::{
 
 const KEY_GUID: Guid = [0x10; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn write_request<'a>(value_type: u32, data: &'a [u8]) -> ValueWriteRequest<'a> {
     ValueWriteRequest {

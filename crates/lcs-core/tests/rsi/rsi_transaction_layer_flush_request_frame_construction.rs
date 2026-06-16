@@ -1,6 +1,7 @@
+use crate::common::{field};
 use lcs_core::{
     LcsError, RSI_ABORT_TRANSACTION, RSI_BEGIN_TRANSACTION, RSI_COMMIT_TRANSACTION,
-    RSI_DELETE_LAYER, RSI_FLUSH, RSI_REQUEST_HEADER_LEN, RsiLengthPrefixedField,
+    RSI_DELETE_LAYER, RSI_FLUSH, RSI_REQUEST_HEADER_LEN,
     RsiTransactionMode, parse_rsi_abort_transaction_request_payload,
     parse_rsi_begin_transaction_request_payload, parse_rsi_commit_transaction_request_payload,
     parse_rsi_delete_layer_request_payload, parse_rsi_flush_request_payload,
@@ -9,12 +10,6 @@ use lcs_core::{
     write_rsi_delete_layer_request_frame, write_rsi_flush_request_frame,
 };
 
-fn field(data: &[u8]) -> RsiLengthPrefixedField<'_> {
-    RsiLengthPrefixedField {
-        len: data.len() as u32,
-        data,
-    }
-}
 
 #[test]
 fn begin_transaction_request_frame_writes_id_and_mode() {

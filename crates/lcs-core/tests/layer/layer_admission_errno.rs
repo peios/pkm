@@ -1,12 +1,10 @@
+use crate::common::{limits};
 use lcs_core::{
-    LayerCreationAdmissionInput, LayerTargetAdmissionInput, LayerView, LcsError, LcsLimits,
+    LayerCreationAdmissionInput, LayerTargetAdmissionInput, LayerView, LcsError,
     LinuxErrno, layer_creation_admission_linux_errno, layer_target_admission_linux_errno,
     plan_layer_creation_admission, plan_layer_target_admission,
 };
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 #[test]
 fn layer_creation_cap_failure_projects_to_linux_enospc() {

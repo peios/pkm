@@ -1,15 +1,12 @@
+use crate::common::{limits};
 use lcs_core::{
-    BackupRestoreTeardownDeleteBlanketPlan, BackupRestoreTeardownDeleteValuePlan, Guid, LcsError,
-    LcsLimits, NIL_GUID, plan_backup_restore_teardown_delete_blanket,
+    BackupRestoreTeardownDeleteBlanketPlan, BackupRestoreTeardownDeleteValuePlan, Guid, LcsError, NIL_GUID, plan_backup_restore_teardown_delete_blanket,
     plan_backup_restore_teardown_delete_value,
 };
 
 const ROOT_GUID: Guid = [0x40; 16];
 const DESCENDANT_GUID: Guid = [0x41; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 #[test]
 fn teardown_delete_value_preserves_root_or_descendant_key_layer_and_name() {

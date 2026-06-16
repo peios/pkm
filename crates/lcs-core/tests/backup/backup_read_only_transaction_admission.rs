@@ -1,12 +1,10 @@
+use crate::common::{limits};
 use lcs_core::{
-    BackupReadOnlySnapshotReleaseReason, LcsError, LcsLimits, RSI_TXN_READ_ONLY,
+    BackupReadOnlySnapshotReleaseReason, LcsError, RSI_TXN_READ_ONLY,
     ReadOnlySnapshotCounterUpdate, TransactionIdCounter, plan_backup_read_only_snapshot_admission,
     plan_backup_read_only_snapshot_release, plan_read_only_snapshot_counter_update,
 };
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 #[test]
 fn backup_read_only_snapshot_begin_reserves_slot_and_uses_read_only_mode() {

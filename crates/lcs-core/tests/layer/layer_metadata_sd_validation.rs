@@ -1,3 +1,4 @@
+use crate::common::{system_sid};
 use lcs_core::{
     LcsError, RsiMappedErrno, RsiSourceDataValidationFailure, plan_rsi_malformed_source_data,
     validate_layer_metadata_security_descriptor,
@@ -5,14 +6,6 @@ use lcs_core::{
 
 const SE_SELF_RELATIVE: u16 = 0x8000;
 
-fn system_sid() -> Vec<u8> {
-    let mut sid = Vec::new();
-    sid.push(1);
-    sid.push(1);
-    sid.extend_from_slice(&[0, 0, 0, 0, 0, 5]);
-    sid.extend_from_slice(&18u32.to_le_bytes());
-    sid
-}
 
 fn owner_only_sd() -> Vec<u8> {
     let owner = system_sid();

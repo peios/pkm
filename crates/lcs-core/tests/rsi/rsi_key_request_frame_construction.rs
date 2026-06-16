@@ -1,6 +1,7 @@
+use crate::common::{field};
 use lcs_core::{
     LcsError, RSI_CREATE_KEY, RSI_DROP_KEY, RSI_READ_KEY, RSI_REQUEST_HEADER_LEN, RSI_WRITE_KEY,
-    RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME, RSI_WRITE_KEY_FIELD_SD, RsiLengthPrefixedField,
+    RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME, RSI_WRITE_KEY_FIELD_SD,
     parse_rsi_create_key_request_payload, parse_rsi_drop_key_request_payload,
     parse_rsi_read_key_request_payload, parse_rsi_request_header,
     parse_rsi_write_key_request_payload, write_rsi_create_key_request_frame,
@@ -15,12 +16,6 @@ const PARENT_GUID: [u8; 16] = [
     0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
 ];
 
-fn field(data: &[u8]) -> RsiLengthPrefixedField<'_> {
-    RsiLengthPrefixedField {
-        len: data.len() as u32,
-        data,
-    }
-}
 
 #[test]
 fn create_key_request_frame_writes_header_payload_and_boolean_shape() {

@@ -1,14 +1,12 @@
+use crate::common::{limits};
 use lcs_core::{
-    Guid, LcsLimits, REG_LINK, REG_SZ, RegistryValueType, SymlinkDefaultValue,
+    Guid, REG_LINK, REG_SZ, RegistryValueType, SymlinkDefaultValue,
     SymlinkDefaultValueResolution, SymlinkResolutionErrno, ValidatedValueType, ValueWriteRequest,
     classify_symlink_default_value_resolution, validate_value_write_request,
 };
 
 const KEY_GUID: Guid = [0x41; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn default_value_write(value_type: u32, data: &'static [u8]) -> ValueWriteRequest<'static> {
     ValueWriteRequest {

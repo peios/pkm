@@ -1,12 +1,10 @@
+use crate::common::{limits};
 use lcs_core::{
-    InternalWatchCallbackPlan, InternalWatchDirtyPath, LcsError, LcsLimits, REG_WATCH_SD_CHANGED,
+    InternalWatchCallbackPlan, InternalWatchDirtyPath, LcsError, REG_WATCH_SD_CHANGED,
     REG_WATCH_SUBKEY_CREATED, REG_WATCH_SUBKEY_DELETED, REG_WATCH_VALUE_SET,
     plan_internal_watch_callback,
 };
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 #[test]
 fn internal_watch_callback_refreshes_self_configuration_for_dirty_config_values() {

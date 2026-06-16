@@ -1,23 +1,12 @@
+use crate::common::{finish_total_len, push_len_prefixed, response_frame};
 use lcs_core::{
-    LcsError, LcsLimits, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_OK, RSI_PATH_TARGET_GUID,
+    LcsError, LcsLimits, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_PATH_TARGET_GUID,
     RsiRetainedRequest, parse_rsi_enum_children_success_response_payload,
     parse_rsi_lookup_success_response_payload, rsi_response_op_code,
     validate_rsi_enum_children_path_response_names, validate_rsi_lookup_path_response_names,
 };
 
-fn response_frame(request_id: u64, op_code: u16) -> Vec<u8> {
-    let mut frame = Vec::new();
-    frame.extend_from_slice(&0u32.to_le_bytes());
-    frame.extend_from_slice(&request_id.to_le_bytes());
-    frame.extend_from_slice(&op_code.to_le_bytes());
-    frame.extend_from_slice(&RSI_OK.to_le_bytes());
-    frame
-}
 
-fn push_len_prefixed(frame: &mut Vec<u8>, bytes: &[u8]) {
-    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    frame.extend_from_slice(bytes);
-}
 
 fn push_path_entry(frame: &mut Vec<u8>, layer_name: &[u8], target_guid: &[u8; 16]) {
     push_len_prefixed(frame, layer_name);
@@ -26,10 +15,6 @@ fn push_path_entry(frame: &mut Vec<u8>, layer_name: &[u8], target_guid: &[u8; 16
     frame.extend_from_slice(&1u64.to_le_bytes());
 }
 
-fn finish_total_len(frame: &mut [u8]) {
-    let total_len = frame.len() as u32;
-    frame[..4].copy_from_slice(&total_len.to_le_bytes());
-}
 
 fn parse_lookup_frame(
     request_id: u64,

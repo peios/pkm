@@ -1,7 +1,8 @@
+use crate::common::{finish_total_len, push_len_prefixed, response_frame};
 use lcs_core::{
     BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid, LayerResolutionContext,
     LayerView, LcsError, LcsLimits, NamedPathEntry, NamedValueEntry, PathEntry, PathTarget, REG_SZ,
-    RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_OK, RSI_PATH_TARGET_GUID, RSI_PATH_TARGET_HIDDEN,
+    RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_PATH_TARGET_GUID, RSI_PATH_TARGET_HIDDEN,
     RSI_QUERY_VALUES, RegistryValueType, ResolvedPathEntry, RsiRetainedRequest, ValueEntry,
     for_each_rsi_enum_children_effective_subkey_snapshot_entry,
     for_each_rsi_query_values_effective_snapshot_entry,
@@ -64,19 +65,7 @@ fn dummy_path_entry() -> NamedPathEntry<'static> {
     }
 }
 
-fn response_frame(request_id: u64, op_code: u16) -> Vec<u8> {
-    let mut frame = Vec::new();
-    frame.extend_from_slice(&0u32.to_le_bytes());
-    frame.extend_from_slice(&request_id.to_le_bytes());
-    frame.extend_from_slice(&op_code.to_le_bytes());
-    frame.extend_from_slice(&RSI_OK.to_le_bytes());
-    frame
-}
 
-fn push_len_prefixed(frame: &mut Vec<u8>, bytes: &[u8]) {
-    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    frame.extend_from_slice(bytes);
-}
 
 fn push_value_entry(
     frame: &mut Vec<u8>,
@@ -106,10 +95,6 @@ fn push_path_entry(
     frame.extend_from_slice(&sequence.to_le_bytes());
 }
 
-fn finish_total_len(frame: &mut [u8]) {
-    let total_len = frame.len() as u32;
-    frame[..4].copy_from_slice(&total_len.to_le_bytes());
-}
 
 #[test]
 fn query_values_snapshot_resolution_emits_effective_values() {

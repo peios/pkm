@@ -1,13 +1,11 @@
+use crate::common::{limits};
 use lcs_core::{
-    Guid, LcsError, LcsLimits, REG_BINARY, REG_TOMBSTONE, SequenceCounter, ValidatedValueType,
+    Guid, LcsError, REG_BINARY, REG_TOMBSTONE, SequenceCounter, ValidatedValueType,
     ValueWriteInput, plan_value_write,
 };
 
 const KEY_GUID: Guid = [0x17; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn input<'a>(value_type: u32, data: &'a [u8]) -> ValueWriteInput<'a> {
     ValueWriteInput {

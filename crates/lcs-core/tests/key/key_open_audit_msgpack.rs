@@ -1,19 +1,10 @@
+use crate::common::{sid};
 use lcs_core::{
     LCS_SACL_MATCH_FAILURE, LCS_SACL_MATCH_SUCCESS, LcsAuditEventKind, LcsAuditPayloadWritePlan,
     LcsCallerTokenSummary, LcsError, LcsKeyOpenAuditDecision, key_open_audit_payload_len,
     plan_key_open_audit_record, write_key_open_audit_payload,
 };
 
-fn sid(authority: u8, subauths: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + subauths.len() * 4);
-    bytes.push(1);
-    bytes.push(subauths.len() as u8);
-    bytes.extend_from_slice(&[0, 0, 0, 0, 0, authority]);
-    for subauth in subauths {
-        bytes.extend_from_slice(&subauth.to_le_bytes());
-    }
-    bytes
-}
 
 fn caller(user_sid: &[u8]) -> LcsCallerTokenSummary<'_> {
     LcsCallerTokenSummary {

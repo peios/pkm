@@ -1,3 +1,4 @@
+use crate::common::{limits};
 use lcs_core::{
     BASE_LAYER_VIEW, Guid, LayerResolutionContext, LcsError, LcsLimits, NamedPathEntry,
     NamedPathResolution, PathEntry, PathTarget, ResolvedNamedPathEntry, ResolvedPathEntry,
@@ -7,9 +8,6 @@ use lcs_core::{
 const BASE_GUID: Guid = [0x31; 16];
 const POLICY_GUID: Guid = [0x32; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn context<'a>(
     layers: &'a [lcs_core::LayerView<'a>],

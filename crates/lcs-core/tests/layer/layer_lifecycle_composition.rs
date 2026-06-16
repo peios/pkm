@@ -1,25 +1,14 @@
+use crate::common::{limits, system_sid};
 use lcs_core::{
     Guid, InternalWatchCallbackPlan, InternalWatchDirtyPath, LayerDeletionPlan,
-    LayerDeletionSourceCompletionPlan, LayerPublicationInput, LayerPublicationPlan, LayerView,
-    LcsLimits, REG_WATCH_SUBKEY_CREATED, REG_WATCH_SUBKEY_DELETED, plan_internal_watch_callback,
+    LayerDeletionSourceCompletionPlan, LayerPublicationInput, LayerPublicationPlan, LayerView, REG_WATCH_SUBKEY_CREATED, REG_WATCH_SUBKEY_DELETED, plan_internal_watch_callback,
     plan_layer_deletion, plan_layer_deletion_source_completion, plan_layer_publication,
 };
 
 const SE_SELF_RELATIVE: u16 = 0x8000;
 const METADATA_GUID: Guid = [0x66; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
-fn system_sid() -> Vec<u8> {
-    let mut sid = Vec::new();
-    sid.push(1);
-    sid.push(1);
-    sid.extend_from_slice(&[0, 0, 0, 0, 0, 5]);
-    sid.extend_from_slice(&18u32.to_le_bytes());
-    sid
-}
 
 fn owner_only_sd() -> Vec<u8> {
     let owner = system_sid();

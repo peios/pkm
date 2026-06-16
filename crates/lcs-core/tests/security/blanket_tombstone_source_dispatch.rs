@@ -1,5 +1,6 @@
+use crate::common::{limits};
 use lcs_core::{
-    BlanketTombstoneInput, Guid, LcsError, LcsLimits, RSI_REQUEST_HEADER_LEN,
+    BlanketTombstoneInput, Guid, LcsError, RSI_REQUEST_HEADER_LEN,
     RSI_SET_BLANKET_TOMBSTONE, RsiLengthPrefixedField, SequenceCounter, parse_rsi_request_header,
     parse_rsi_set_blanket_tombstone_request_payload, plan_blanket_tombstone,
     write_planned_rsi_set_blanket_tombstone_request_frame,
@@ -7,9 +8,6 @@ use lcs_core::{
 
 const KEY_GUID: Guid = [0x57; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn field(bytes: &[u8]) -> RsiLengthPrefixedField<'_> {
     RsiLengthPrefixedField {

@@ -1,5 +1,6 @@
+use crate::common::{limits};
 use lcs_core::{
-    BACKUP_RECORD_HEADER_LEN, BackupPathEntryPayload, BackupRecordKind, Guid, LcsError, LcsLimits,
+    BACKUP_RECORD_HEADER_LEN, BackupPathEntryPayload, BackupRecordKind, Guid, LcsError,
     NIL_GUID, PathTarget, REG_BACKUP_KEY, parse_backup_path_entry_payload,
     parse_backup_path_entry_record, write_backup_path_entry_record_frame,
 };
@@ -7,9 +8,6 @@ use lcs_core::{
 const PARENT_GUID: Guid = [0x10; 16];
 const CHILD_GUID: Guid = [0x11; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 fn path_entry_payload(
     parent_guid: Guid,

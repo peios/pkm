@@ -1,10 +1,11 @@
+use crate::common::{field};
 use lcs_core::{
     BlanketTombstoneEntry, EnumeratedValue, KEY_QUERY_VALUE, KEY_SET_VALUE, QueryValueOutcome,
     QueryValueResult, REG_BINARY, REG_DWORD, REG_IOC_BLANKET_TOMBSTONE, REG_IOC_DELETE_VALUE,
     REG_IOC_ENUM_VALUES, REG_IOC_GET_SECURITY, REG_IOC_QUERY_VALUE, REG_IOC_QUERY_VALUES_BATCH,
     REG_IOC_SET_SECURITY, REG_IOC_SET_VALUE, RegistryIoctlAccessRequirement,
     RegistrySecurityOperation, RegistryValueType, ResolvedValueEntry,
-    RsiDeleteValueEntryRequestPayload, RsiLengthPrefixedField, RsiQueryValueResponseEntry,
+    RsiDeleteValueEntryRequestPayload, RsiQueryValueResponseEntry,
     RsiQueryValuesBlanketResponseEntry, RsiQueryValuesRequestPayload,
     RsiSetBlanketTombstoneRequestPayload, RsiSetValueRequestPayload, RsiTrailingOptionalFieldsPlan,
     ValueEntry, ValueResolution, query_value_result_from_resolution,
@@ -13,12 +14,6 @@ use lcs_core::{
 
 const KEY_GUID: [u8; 16] = [0x44; 16];
 
-fn field(data: &[u8]) -> RsiLengthPrefixedField<'_> {
-    RsiLengthPrefixedField {
-        len: data.len() as u32,
-        data,
-    }
-}
 
 fn trailing() -> RsiTrailingOptionalFieldsPlan {
     RsiTrailingOptionalFieldsPlan {

@@ -1,6 +1,7 @@
+use crate::common::{context, limits};
 use lcs_core::{
-    BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid, LayerResolutionContext,
-    LayerView, LcsLimits, NamedPathEntry, NamedValueEntry, PathEntry, PathTarget, REG_SZ,
+    BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid,
+    LayerView, NamedPathEntry, NamedValueEntry, PathEntry, PathTarget, REG_SZ,
     REG_TOMBSTONE, RegistryValueType, ValueEntry, for_each_effective_value,
     for_each_visible_subkey,
 };
@@ -9,18 +10,7 @@ const BASE_GUID: Guid = [0x11; 16];
 const POLICY_GUID: Guid = [0x22; 16];
 const VISIBLE_GUID: Guid = [0x33; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
-fn context<'a>(layers: &'a [LayerView<'a>], limits: &'a LcsLimits) -> LayerResolutionContext<'a> {
-    LayerResolutionContext {
-        layers,
-        private_layers: &[],
-        limits,
-        next_sequence: 100,
-    }
-}
 
 fn base_policy_layers() -> [LayerView<'static>; 2] {
     [

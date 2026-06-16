@@ -1,17 +1,10 @@
+use crate::common::{context};
 use lcs_core::{
-    BlanketTombstoneEntry, LayerResolutionContext, LayerView, LcsError, LcsLimits, NamedValueEntry,
+    BlanketTombstoneEntry, LayerView, LcsError, LcsLimits, NamedValueEntry,
     REG_SZ, RsiMalformedSourceDataPlan, RsiMappedErrno, RsiSourceDataValidationFailure, ValueEntry,
     for_each_effective_value, plan_rsi_malformed_source_data, resolve_value,
 };
 
-fn context<'a>(layers: &'a [LayerView<'a>], limits: &'a LcsLimits) -> LayerResolutionContext<'a> {
-    LayerResolutionContext {
-        layers,
-        private_layers: &[],
-        limits,
-        next_sequence: 100,
-    }
-}
 
 fn duplicate_winning_tie_failure() -> RsiSourceDataValidationFailure {
     let limits = LcsLimits::default();

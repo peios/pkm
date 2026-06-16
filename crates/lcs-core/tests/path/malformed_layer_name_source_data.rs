@@ -1,17 +1,10 @@
+use crate::common::{context};
 use lcs_core::{
-    LayerResolutionContext, LayerView, LcsError, LcsLimits, LcsSourceValidationClass, REG_SZ,
+    LayerView, LcsError, LcsLimits, LcsSourceValidationClass, REG_SZ,
     RsiMalformedSourceDataPlan, RsiMappedErrno, RsiSourceDataValidationFailure, ValueEntry,
     ValueResolution, plan_rsi_malformed_source_data, resolve_value,
 };
 
-fn context<'a>(layers: &'a [LayerView<'a>], limits: &'a LcsLimits) -> LayerResolutionContext<'a> {
-    LayerResolutionContext {
-        layers,
-        private_layers: &[],
-        limits,
-        next_sequence: 100,
-    }
-}
 
 #[test]
 fn malformed_source_layer_name_rejects_before_resolution() {

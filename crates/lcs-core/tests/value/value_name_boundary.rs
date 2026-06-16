@@ -1,23 +1,13 @@
+use crate::common::{context, limits};
 use lcs_core::{
-    EnumeratedValue, LayerResolutionContext, LayerView, LcsError, LcsLimits, NamedValueEntry,
+    EnumeratedValue, LayerView, LcsError, NamedValueEntry,
     REG_SZ, ValueEntry, ValueWriteRequest, casefold_eq, for_each_effective_value,
     validate_key_component_bytes, validate_value_name_bytes, validate_value_write_request,
 };
 
 const KEY_GUID: lcs_core::Guid = [0x61; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
-fn context<'a>(layers: &'a [LayerView<'a>], limits: &'a LcsLimits) -> LayerResolutionContext<'a> {
-    LayerResolutionContext {
-        layers,
-        private_layers: &[],
-        limits,
-        next_sequence: 100,
-    }
-}
 
 fn write_request(name: &str) -> ValueWriteRequest<'_> {
     ValueWriteRequest {

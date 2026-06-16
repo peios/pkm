@@ -1,5 +1,6 @@
+use crate::common::{limits};
 use lcs_core::{
-    BackupRestoreTeardownDeletePathEntryPlan, Guid, LcsError, LcsLimits, NIL_GUID,
+    BackupRestoreTeardownDeletePathEntryPlan, Guid, LcsError, NIL_GUID,
     plan_backup_restore_teardown_delete_path_entry,
 };
 
@@ -7,9 +8,6 @@ const TARGET_ROOT: Guid = [0x50; 16];
 const DESCENDANT_PARENT: Guid = [0x51; 16];
 const OUTSIDE_PARENT: Guid = [0x52; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 #[test]
 fn teardown_delete_path_entry_accepts_target_root_parent() {

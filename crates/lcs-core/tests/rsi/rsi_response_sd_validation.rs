@@ -1,3 +1,4 @@
+use crate::common::{finish_total_len, push_len_prefixed, system_sid};
 use lcs_core::{
     LcsError, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_OK, RSI_READ_KEY, RsiRetainedRequest,
     parse_rsi_enum_children_success_response_payload, parse_rsi_lookup_success_response_payload,
@@ -18,10 +19,6 @@ fn response_frame(request_id: u64, request_op_code: u16) -> Vec<u8> {
     frame
 }
 
-fn push_len_prefixed(frame: &mut Vec<u8>, bytes: &[u8]) {
-    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    frame.extend_from_slice(bytes);
-}
 
 fn push_metadata(frame: &mut Vec<u8>, guid: &[u8; 16], sd: &[u8]) {
     frame.extend_from_slice(guid);
@@ -31,19 +28,7 @@ fn push_metadata(frame: &mut Vec<u8>, guid: &[u8; 16], sd: &[u8]) {
     frame.extend_from_slice(&1000u64.to_le_bytes());
 }
 
-fn finish_total_len(frame: &mut [u8]) {
-    let total_len = frame.len() as u32;
-    frame[..4].copy_from_slice(&total_len.to_le_bytes());
-}
 
-fn system_sid() -> Vec<u8> {
-    let mut sid = Vec::new();
-    sid.push(1);
-    sid.push(1);
-    sid.extend_from_slice(&[0, 0, 0, 0, 0, 5]);
-    sid.extend_from_slice(&18u32.to_le_bytes());
-    sid
-}
 
 fn owner_only_sd() -> Vec<u8> {
     let owner = system_sid();

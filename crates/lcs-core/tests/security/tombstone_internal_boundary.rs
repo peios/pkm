@@ -1,22 +1,13 @@
+use crate::common::{field, limits};
 use lcs_core::{
-    Guid, LcsError, LcsLimits, REG_TOMBSTONE, RSI_REQUEST_HEADER_LEN, RegistryValueType,
-    RsiLengthPrefixedField, SequenceCounter, ValueTypeValidationErrno, ValueWriteInput,
+    Guid, LcsError, REG_TOMBSTONE, RSI_REQUEST_HEADER_LEN, RegistryValueType, SequenceCounter, ValueTypeValidationErrno, ValueWriteInput,
     parse_rsi_set_value_request_payload, plan_value_write, value_type_validation_errno,
     write_planned_rsi_set_value_request_frame,
 };
 
 const KEY_GUID: Guid = [0x60; 16];
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
-fn field(data: &[u8]) -> RsiLengthPrefixedField<'_> {
-    RsiLengthPrefixedField {
-        len: data.len() as u32,
-        data,
-    }
-}
 
 fn tombstone_input(data: &'static [u8], explicit: bool) -> ValueWriteInput<'static> {
     ValueWriteInput {

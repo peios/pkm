@@ -1,10 +1,8 @@
+use crate::common::{limits};
 use lcs_core::{
-    LcsError, LcsLimits, PathKind, validate_registry_path_bytes, validate_syscall_path_c_string,
+    LcsError, PathKind, validate_registry_path_bytes, validate_syscall_path_c_string,
 };
 
-fn limits() -> LcsLimits {
-    LcsLimits::default()
-}
 
 #[test]
 fn syscall_path_c_string_strips_terminator_before_validation() {
