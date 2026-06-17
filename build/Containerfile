@@ -81,6 +81,23 @@ RUN cargo install --locked --version "${BINDGEN_VERSION}" bindgen-cli && \
 # libs are NOT used by build.kernel, so they don't affect kernel reproducibility;
 # the in-tree userspace tools just build from the same staged source. Kept in this
 # one image (no second image to maintain) since the kernel build never links them.
+# libcapstone-dev + llvm-${LLVM_VERSION}-dev are perf's in-process disassemblers
+# (perf annotate / Intel-PT decode): without them perf auto-detects OFF and falls
+# back to objdump. llvm-N-dev is the libLLVM *dev* package perf links — distinct
+# from the clang/llvm runtime + libclang-dev the kernel build uses above.
+# libbpf-dev + bpftool enable rtla/rv's in-kernel BPF sampling backend (osnoise/
+# timerlat run with low overhead instead of the tracefs fallback) and the BPF
+# skeleton generation it needs; libcpupower-dev lets rtla manage CPU idle states
+# during a run. These add libbpf.so.1 (rtla, rv) and libcpupower.so.1 (rtla) as
+# runtime deps — perf is unaffected (it links its own in-tree libbpf statically).
+# The last line is perf's remaining optional integrations: libdebuginfod-dev
+# (debuginfod auto-fetch), systemtap-sdt-dev (USDT/SDT events; header-only, no
+# runtime dep), libbabeltrace-dev (`perf data` CTF export), and default-jdk
+# (JVMTI agent libperf-jvmti.so; build.tools passes JDIR). debuginfod/babeltrace
+# add libdebuginfod.so/libbabeltrace.so to perf's runtime deps; the JDK is huge in
+# the image but only yields a tiny jvmti .so in the package. source-highlight is
+# the asciidoc filter that colourises the libperf docs' [source] blocks — purely
+# build-time (no package effect), it just silences asciidoc filter-127 warnings.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         pkg-config \
@@ -93,7 +110,11 @@ RUN apt-get update && \
         libpfm4-dev asciidoc xmlto \
         libudev-dev libncurses-dev \
         libnl-3-dev libnl-genl-3-dev libconfig-dev \
-        autoconf automake libtool && \
+        autoconf automake libtool \
+        libcapstone-dev llvm-${LLVM_VERSION}-dev \
+        libbpf-dev bpftool libcpupower-dev \
+        libdebuginfod-dev systemtap-sdt-dev libbabeltrace-dev default-jdk \
+        source-highlight && \
     rm -rf /var/lib/apt/lists/*
 
 # ccache lives in a mounted volume; make the mountpoint world-writable so a

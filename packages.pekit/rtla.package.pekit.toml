@@ -2,7 +2,10 @@
 # Built from the in-tree tools/tracing/rtla (build.tools). osnoise/hwnoise/
 # timerlat are symlinks to the rtla binary.
 #
-# Runtime shared-lib deps (TODO — see D4): libtraceevent libtracefs libc
+# Runtime shared-lib deps (TODO — see D4): libtraceevent libtracefs libbpf
+# (libbpf.so.1) libcpupower (libcpupower.so.1) libc. libbpf is the BPF sampling
+# backend; libcpupower is for CPU idle-state control during a run — both enabled
+# by the build image's libbpf-dev/libcpupower-dev.
 
 [package]
 description = "rtla — real-time latency analysis (osnoise, timerlat) (from Linux 7.0.9 tools/tracing/rtla)"

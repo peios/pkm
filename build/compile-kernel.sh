@@ -27,7 +27,14 @@ fi
 # vmlinux every run). Release builds can override the timestamp via env.
 export KBUILD_BUILD_USER=pkm
 export KBUILD_BUILD_HOST=pkm-build
-: "${KBUILD_BUILD_TIMESTAMP:=@1735689600}"   # 2025-01-01T00:00:00Z, deterministic
+# Default the build timestamp to the source's commit date — pekit exports
+# PEKIT_SOURCE_TIMESTAMP as unix seconds (the source tree's latest commit; 0 when
+# it isn't a git checkout) — so the stamp tracks the actual release and stays
+# reproducible. Fall back to a fixed epoch otherwise. An explicit
+# KBUILD_BUILD_TIMESTAMP in the env still wins.
+src_ts=${PEKIT_SOURCE_TIMESTAMP:-0}
+[ "$src_ts" -gt 0 ] 2>/dev/null || src_ts=1735689600   # fallback: 2025-01-01T00:00:00Z
+: "${KBUILD_BUILD_TIMESTAMP:=@${src_ts}}"
 export KBUILD_BUILD_TIMESTAMP
 
 cd "$tree"

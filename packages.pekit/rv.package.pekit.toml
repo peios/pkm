@@ -1,7 +1,9 @@
 # rv — Runtime Verification: userspace front-end for the in-kernel RV monitors.
 # Built from the in-tree tools/verification/rv (build.tools).
 #
-# Runtime shared-lib deps (TODO — see D4): libtraceevent libtracefs libc
+# Runtime shared-lib deps (TODO — see D4): libtraceevent libtracefs libbpf
+# (libbpf.so.1) libc. libbpf is the BPF backend, enabled by the build image's
+# libbpf-dev. (No libcpupower — CPU idle-state control is rtla-specific.)
 
 [package]
 description = "rv — runtime verification monitor front-end (from Linux 7.0.9 tools/verification/rv)"

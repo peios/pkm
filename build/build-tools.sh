@@ -22,6 +22,18 @@ dest=${2:?usage: build-tools.sh <staged-source> <dest>}
 triplet=x86_64-linux-peios
 jobs=$(nproc)
 
+# Reproducible man-page dates. perf/bpftool doc builds derive the doc date from
+# KBUILD_BUILD_TIMESTAMP when set, else `git log` on the source tree — but
+# build.source strips .git (for the clean 7.0.9 release), so the git path floods
+# the log with "fatal: not a git repository" per man page. Default the stamp to
+# the source's commit date (pekit's PEKIT_SOURCE_TIMESTAMP, unix seconds; 0 when
+# not a git tree) — the same value compile-kernel.sh uses — so it silences the
+# noise and tracks the release; fall back to a fixed epoch otherwise.
+src_ts=${PEKIT_SOURCE_TIMESTAMP:-0}
+[ "$src_ts" -gt 0 ] 2>/dev/null || src_ts=1735689600   # fallback: 2025-01-01T00:00:00Z
+: "${KBUILD_BUILD_TIMESTAMP:=@${src_ts}}"
+export KBUILD_BUILD_TIMESTAMP
+
 # The tools' Makefiles write objects into the tree (not all honour O=), so build
 # in a throwaway copy to keep the cached source stage pristine.
 work=$(mktemp -d)
@@ -57,7 +69,11 @@ make -C tools/perf -f Makefile.perf -j"$jobs" \
 	prefix=/usr libdir=/usr/lib/$triplet sysconfdir=/etc \
 	perfexecdir=lib/$triplet/perf-core \
 	PYTHON=python3 BUILD_BPF_SKEL=1 WERROR=0 \
+	JDIR=/usr/lib/jvm/default-java \
 	DESTDIR="$dest" install
+# JDIR points perf at the image's JDK so it builds the JVMTI agent
+# (libperf-jvmti.so → $libdir, i.e. usr/lib/$triplet); without it perf warns
+# "set JDIR=" and skips Java/JVM symbol support. Packaged by perf.package.pekit.
 
 # python3-perf: copy the perf.so the build already produced under the triplet
 # (Peios CPython uses platlibdir=<triplet>). The cpython-3xx ABI tag stays in the

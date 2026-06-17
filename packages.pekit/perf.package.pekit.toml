@@ -5,10 +5,13 @@
 # perf-devel; libperf into libperf/libperf-devel; the importable python module is
 # defined (not yet built) in python3-perf.
 #
+# libperf-jvmti.so is the JVMTI agent (Java/JVM symbol resolution), built when
+# build.tools passes JDIR; it installs to the triplet libdir alongside perf.
+#
 # Runtime shared-lib deps (TODO: declare in [dependencies] once Peios userspace
 # provides them — see D4):
 #   libm libz libelf libdw libslang libpython3 libstdc++ liblzma libzstd libnuma
-#   libpfm libtraceevent libgcc_s libc
+#   libpfm libtraceevent libcapstone libLLVM libdebuginfod libbabeltrace libgcc_s libc
 
 [package]
 description = "perf — Linux performance analysis tooling (from Linux 7.0.9 tools/perf)"
@@ -17,6 +20,7 @@ description = "perf — Linux performance analysis tooling (from Linux 7.0.9 too
 "tools:usr/bin/perf"  = "usr/bin/perf"
 "tools:usr/bin/trace" = "usr/bin/trace"
 "tools:usr/lib/x86_64-linux-peios/perf-core/**" = "usr/lib/x86_64-linux-peios/perf-core"
+"tools:usr/lib/x86_64-linux-peios/libperf-jvmti.so" = "usr/lib/x86_64-linux-peios/libperf-jvmti.so"
 "tools:etc/bash_completion.d/perf" = "etc/bash_completion.d/perf"
 "tools:usr/share/doc/perf-tip/tips.txt" = "usr/share/doc/perf-tip/tips.txt"
 "tools:usr/share/man/man1/perf*.1" = "usr/share/man/man1"
