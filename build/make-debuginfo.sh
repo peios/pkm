@@ -43,14 +43,18 @@ if [[ -n "$bid" ]]; then
 		"$out/usr/lib/debug/.build-id/${bid:0:2}/${bid:2}.debug"
 fi
 
-# Stage the referenced sources for kernel-debugsource.
+# Stage the referenced sources for kernel-debugsource. A full vmlinux's DWARF
+# references tens of thousands of sources, so the filtered list is copied in ONE
+# cpio pass — a per-file mkdir+cp loop here spawns ~2 processes per file and takes
+# the better part of an hour; cpio does the whole set in seconds. The bash filter
+# below is builtin-only (no spawns): drop empty/dir entries and anything not
+# present in the tree, re-emitting NUL-separated paths relative to $tree for cpio.
 src="$out/usr/src/debug/kernel-$ver"
+mkdir -p "$src"
 while IFS= read -r -d '' rel; do
 	[[ -z "$rel" || "$rel" == */ ]] && continue
-	[[ -f "$tree/$rel" ]] || continue
-	mkdir -p "$src/$(dirname "$rel")"
-	cp "$tree/$rel" "$src/$rel"
-done < "$srclist"
+	[[ -f "$tree/$rel" ]] && printf '%s\0' "$rel"
+done < "$srclist" | (cd "$tree" && cpio --null --quiet -pdm "$src")
 rm -f "$srclist"
 
 echo "make-debuginfo: $ver — vmlinux + build-id ${bid:0:12}… + $(find "$src" -type f 2>/dev/null | wc -l) source files"
