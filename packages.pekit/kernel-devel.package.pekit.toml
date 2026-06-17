@@ -24,13 +24,13 @@ description = "Peios Kernel — development headers and build kit"
 kernel = "{{version}}"
 
 [files]
-"kernel:Makefile"            = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/Makefile"
-"kernel:Module.symvers"      = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/Module.symvers"
-"kernel:.config"             = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/.config"
-"kernel:scripts/**"          = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/scripts"
-"kernel:include/**"          = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/include"
-"kernel:arch/x86/Makefile"   = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/arch/x86/Makefile"
-"kernel:arch/x86/include/**" = "usr/lib/x86_64-linux-peios/modules/7.0.9/build/arch/x86/include"
+"kernel:Makefile"            = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/Makefile"
+"kernel:Module.symvers"      = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/Module.symvers"
+"kernel:.config"             = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/.config"
+"kernel:scripts/**"          = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/scripts"
+"kernel:include/**"          = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/include"
+"kernel:arch/x86/Makefile"   = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/arch/x86/Makefile"
+"kernel:arch/x86/include/**" = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/arch/x86/include"
 # Build artifacts and C sources aren't needed to compile external modules; the
 # built host tools in scripts/ (no extension, e.g. modpost) are kept.
 exclude = [

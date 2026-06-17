@@ -8,7 +8,8 @@
 # Shell-sourceable: KEY=value, no spaces.
 
 # --- kernel ---
-KERNEL_VERSION=v7.0.9
+# KERNEL_VERSION is the single source in pekit.toml [env] (build.upstream clones
+# that tag); kept out of here to avoid a second copy that could drift.
 KERNEL_GIT=https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
 
 # --- environment base (reproducible apt via snapshot.debian.org) ---

@@ -1,12 +1,17 @@
 outDir = "out"
 
+# Single source of truth for the upstream Linux version, exported into every
+# build stage's environment (build.upstream clones this tag). Bump it here, in
+# lockstep with the patch series — kernel/patches are generated against this
+# exact tag, so a version change generally means re-deriving or 3-way-rebasing
+# them. Note: package install paths still embed the kernel RELEASE literally;
+# pekit's version templating carries the Peios version, not the kernel version.
+[env]
+KERNEL_VERSION = "v7.0.9"
+
 [build.upstream]
 command = """
-# Pinned upstream kernel. Bump deliberately and in lockstep with the patch
-# series: kernel/patches are generated against this exact tag, so a version
-# change generally means re-deriving or 3-way-rebasing them.
-KERNEL_VERSION=v7.0.9
-
+# Clone the pinned upstream kernel ($KERNEL_VERSION, from [env] above).
 git clone --depth 1 --branch "$KERNEL_VERSION" \
 	https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
 	"$PEKIT_OUT"
@@ -49,7 +54,7 @@ cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
 python3 kernel/scripts/generate-kacs-builtin-signing-keys.py \
 	--pubkey-hex "$PEKIT_KEYRING_TCB_PUB" \
 	--out "$PEKIT_OUT/security/pkm/kacs/builtin_signing_keys.h"
-./build/configure-kernel.sh "$PEKIT_OUT" production
+./build/configure-kernel.sh "$PEKIT_OUT" production "-peios-{{version}}"
 ./build/compile-kernel.sh "$PEKIT_OUT"
 """
 

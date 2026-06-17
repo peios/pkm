@@ -8,15 +8,19 @@
 #
 # usage: configure-kernel.sh <kernel-tree> [profile]
 #   profile: production (default) | kunit
+#   localversion: optional CONFIG_LOCALVERSION suffix (e.g. "-peios-0.20.1-rc1"),
+#                 baked into .config so `uname -r` / `make kernelrelease` become
+#                 <linux>-<suffix> consistently across compile + debuginfo.
 set -euo pipefail
 
-if [[ $# -lt 1 || $# -gt 2 ]]; then
-	echo "usage: $0 <kernel-tree> [production|kunit]" >&2
+if [[ $# -lt 1 || $# -gt 3 ]]; then
+	echo "usage: $0 <kernel-tree> [production|kunit] [localversion]" >&2
 	exit 2
 fi
 
 tree=$(cd "$1" && pwd) || exit 1
 profile=${2:-production}
+localversion=${3:-}
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cfg="$here/config"
 repo=$(cd "$here/.." && pwd)
@@ -44,6 +48,13 @@ LSMOD="$cfg/lsmod.txt" "${make[@]}" localmodconfig
 # 4. KUnit profile overlay
 if [[ "$profile" == kunit ]]; then
 	./scripts/kconfig/merge_config.sh -m .config "$cfg/kunit.fragment"
+fi
+
+# 4b. stamp the Peios release suffix into CONFIG_LOCALVERSION (overrides the
+#     empty default in pkm.fragment), so `uname -r` is <linux>-peios-<pkmver>.
+#     Set after the fragment merges, before the resolve below preserves it.
+if [[ -n "$localversion" ]]; then
+	./scripts/config --file .config --set-str LOCALVERSION "$localversion"
 fi
 
 # 5. resolve all merged choices
