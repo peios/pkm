@@ -276,11 +276,11 @@ packages are split `lib*` / `lib*-devel` per convention.
 **Userspace tools** (built from the kernel's in-tree `tools/`, packaged with
 unprefixed names since they are userspace, not the kernel): `perf` (+ `perf-devel`,
 `libperf`, `libperf-devel`, `python3-perf`), `bpftool`, `cpupower` (+ `cpupower-libs`,
-`cpupower-libs-devel`), `turbostat`, `rtla`, `rv`, `x86_energy_perf_policy`,
-`intel-speed-select`, `amd_pstate_tracer`, `intel_pstate_tracer`, `gpio-utils`,
+`cpupower-libs-devel`), `turbostat`, `rtla`, `rv`, `x86-energy-perf-policy`,
+`intel-speed-select`, `amd-pstate-tracer`, `intel-pstate-tracer`, `gpio-utils`,
 `iio-utils`, `spi-utils`, `bootconfig`, `tmon`, `latency-collector`, `mm-tools`,
 `freefall`, `cgroup-tools`, `usbip` (+ `usbip-devel`), `getdelays`, `hv`,
-`kvm_stat`, `thermal-engine`, `thermometer`, `libthermal` (+ `libthermal-devel`,
+`kvm-stat`, `thermal-engine`, `thermometer`, `libthermal` (+ `libthermal-devel`,
 `libthermal-tools`).
 
 These build from the *same* staged source as the kernel (`build.tools` →
