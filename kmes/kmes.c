@@ -187,17 +187,17 @@ static void pkm_kmes_meta_store_u64(u8 *page, size_t offset, u64 value)
 	*(__le64 *)(page + offset) = cpu_to_le64(value);
 }
 
-static u16 pkm_kmes_meta_load_u16(const u8 *page, size_t offset)
+static __maybe_unused u16 pkm_kmes_meta_load_u16(const u8 *page, size_t offset)
 {
 	return le16_to_cpu(*(__le16 *)(page + offset));
 }
 
-static u32 pkm_kmes_meta_load_u32(const u8 *page, size_t offset)
+static __maybe_unused u32 pkm_kmes_meta_load_u32(const u8 *page, size_t offset)
 {
 	return le32_to_cpu(*(__le32 *)(page + offset));
 }
 
-static u64 pkm_kmes_meta_load_u64(const u8 *page, size_t offset)
+static __maybe_unused u64 pkm_kmes_meta_load_u64(const u8 *page, size_t offset)
 {
 	return le64_to_cpu(*(__le64 *)(page + offset));
 }
@@ -499,7 +499,7 @@ static bool pkm_kmes_runtime_config_valid(
 	return true;
 }
 
-static void pkm_kmes_runtime_config_defaults(
+static __maybe_unused void pkm_kmes_runtime_config_defaults(
 	struct pkm_kmes_runtime_config *config)
 {
 	config->buffer_capacity = PKM_KMES_DEFAULT_BUFFER_CAPACITY;
@@ -668,7 +668,7 @@ static void pkm_kmes_write_u64_at(u8 *data, u64 capacity, u64 pos, u64 value)
 	data[(pos + 7) & (capacity - 1)] = (u8)((value >> 56) & 0xff);
 }
 
-static u16 pkm_kmes_read_u16_at(const u8 *data, u64 capacity, u64 pos)
+static __maybe_unused u16 pkm_kmes_read_u16_at(const u8 *data, u64 capacity, u64 pos)
 {
 	return (u16)data[(pos + 0) & (capacity - 1)] |
 	       ((u16)data[(pos + 1) & (capacity - 1)] << 8);
@@ -682,7 +682,7 @@ static u32 pkm_kmes_read_u32_at(const u8 *data, u64 capacity, u64 pos)
 	       ((u32)data[(pos + 3) & (capacity - 1)] << 24);
 }
 
-static u64 pkm_kmes_read_u64_at(const u8 *data, u64 capacity, u64 pos)
+static __maybe_unused u64 pkm_kmes_read_u64_at(const u8 *data, u64 capacity, u64 pos)
 {
 	return (u64)data[(pos + 0) & (capacity - 1)] |
 	       ((u64)data[(pos + 1) & (capacity - 1)] << 8) |
@@ -726,7 +726,7 @@ static void pkm_kmes_copy_bytes_from_ring(const u8 *data, u64 capacity, u64 pos,
 		memcpy((u8 *)dst + first_len, data, len - first_len);
 }
 
-static bool pkm_kmes_ring_bytes_equal(const u8 *data, u64 capacity, u64 pos,
+static __maybe_unused bool pkm_kmes_ring_bytes_equal(const u8 *data, u64 capacity, u64 pos,
 				      const void *expected, size_t len)
 {
 	size_t offset;

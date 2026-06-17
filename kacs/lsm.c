@@ -168,7 +168,7 @@ static const u8 pkm_kacs_sysfs_write_gate_sd[] = {
 };
 
 static atomic64_t pkm_kacs_native_supersede_tmp_counter = ATOMIC64_INIT(0);
-static atomic64_t pkm_kacs_kunit_native_identity_counter = ATOMIC64_INIT(0);
+static __maybe_unused atomic64_t pkm_kacs_kunit_native_identity_counter = ATOMIC64_INIT(0);
 
 void pkm_kacs_fill_uuid_v4(u8 out[KACS_UUID_BYTES])
 {
@@ -646,7 +646,7 @@ static bool pkm_kacs_consume_file_metadata_decision(
 	const struct inode *inode, u8 op_class);
 static bool pkm_kacs_has_file_metadata_decision(
 	const struct inode *inode, u8 op_class);
-static int pkm_kacs_check_file_write_intent_snapshot(struct file *file,
+static __maybe_unused int pkm_kacs_check_file_write_intent_snapshot(struct file *file,
 						     u32 rwf_flags,
 						     bool positioned);
 static int pkm_kacs_check_file_write_intent_snapshot_for_subject(
@@ -3397,7 +3397,7 @@ static u64 pkm_kacs_kernel_cap_to_u64(const kernel_cap_t *caps)
 	return mask;
 }
 
-static kernel_cap_t pkm_kacs_u64_to_kernel_cap(u64 mask)
+static __maybe_unused kernel_cap_t pkm_kacs_u64_to_kernel_cap(u64 mask)
 {
 	kernel_cap_t caps = CAP_EMPTY_SET;
 	int cap;
@@ -7085,7 +7085,7 @@ static int pkm_kacs_check_file_write_intent_snapshot_for_subject(
 		ret);
 }
 
-static int pkm_kacs_check_file_write_intent_snapshot(struct file *file,
+static __maybe_unused int pkm_kacs_check_file_write_intent_snapshot(struct file *file,
 						     u32 rwf_flags,
 						     bool positioned)
 {

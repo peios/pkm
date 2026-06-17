@@ -1336,7 +1336,7 @@ out_unlock:
 	return ret;
 }
 
-static long pkm_lcs_key_fd_queue_watch_record(
+static __maybe_unused long pkm_lcs_key_fd_queue_watch_record(
 	struct pkm_lcs_key_fd *key_fd, u32 event_type, const u8 *record,
 	u32 record_len)
 {
@@ -3796,7 +3796,7 @@ static long pkm_lcs_key_fd_orchestrate_deleted_layer_metadata_key(
 	return ret;
 }
 
-static long pkm_lcs_key_fd_refresh_layer_metadata(
+static __maybe_unused long pkm_lcs_key_fd_refresh_layer_metadata(
 	const struct pkm_lcs_key_fd *key_fd)
 {
 	return pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context(
@@ -7538,7 +7538,7 @@ out:
 	return ret;
 }
 
-static long pkm_lcs_backup_collect_referenced_layers(
+static __maybe_unused long pkm_lcs_backup_collect_referenced_layers(
 	const struct pkm_lcs_runtime_limits *limits,
 	const struct pkm_lcs_layer_snapshot *snapshot, const u8 *enum_frame,
 	size_t enum_frame_len, u64 enum_request_id, const u8 *values_frame,
@@ -7639,7 +7639,7 @@ out_destroy:
 	return ret;
 }
 
-static long pkm_lcs_backup_manifest_frame_matches_layer(
+static __maybe_unused long pkm_lcs_backup_manifest_frame_matches_layer(
 	const u8 *frame, size_t frame_len,
 	const struct pkm_lcs_rsi_layer_view *layer)
 {

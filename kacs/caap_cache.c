@@ -155,7 +155,7 @@ out:
 	return ret;
 }
 
-static int pkm_kacs_set_caap_for_token(const void *token, const void *policy_sid,
+static __maybe_unused int pkm_kacs_set_caap_for_token(const void *token, const void *policy_sid,
 				       u32 policy_sid_len, const void *spec,
 				       u32 spec_len)
 {

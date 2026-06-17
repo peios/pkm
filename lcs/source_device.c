@@ -1571,7 +1571,7 @@ static void pkm_lcs_source_hives_destroy(
 	kfree(hives);
 }
 
-static void pkm_lcs_source_slot_pending_layer_deletes_destroy(
+static __maybe_unused void pkm_lcs_source_slot_pending_layer_deletes_destroy(
 	struct pkm_lcs_source_slot *slot)
 {
 	struct pkm_lcs_pending_layer_delete *entry;
@@ -10754,7 +10754,7 @@ static long pkm_lcs_create_missing_parent_copy_child(
 	return 0;
 }
 
-static long pkm_lcs_create_missing_validate_child_depth(
+static __maybe_unused long pkm_lcs_create_missing_validate_child_depth(
 	struct pkm_lcs_create_missing_parent_resolution *result)
 {
 	const struct pkm_lcs_runtime_limits *limits;

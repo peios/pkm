@@ -2779,7 +2779,7 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout_with_limits(
 	struct pkm_lcs_transaction_fd *txn,
 	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms);
 
-static long pkm_lcs_transaction_fd_commit_from_state_timeout(
+static __maybe_unused long pkm_lcs_transaction_fd_commit_from_state_timeout(
 	struct pkm_lcs_transaction_fd *txn, u32 timeout_ms)
 {
 	struct pkm_lcs_runtime_limits limits;

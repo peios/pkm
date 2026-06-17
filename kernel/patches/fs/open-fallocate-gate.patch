@@ -1,5 +1,5 @@
 diff --git a/fs/open.c b/fs/open.c
-index 91f113959..4c932d5f7 100644
+index 227fffd..aa10de8 100644
 --- a/fs/open.c
 +++ b/fs/open.c
 @@ -249,6 +249,11 @@ COMPAT_SYSCALL_DEFINE3(ftruncate64, unsigned int, fd,
@@ -36,6 +36,6 @@ index 91f113959..4c932d5f7 100644
 +#endif
 +
 +
+ #ifndef CONFIG_SECURITY_PKM
  static bool access_need_override_creds(int flags)
  {
- 	const struct cred *cred;
