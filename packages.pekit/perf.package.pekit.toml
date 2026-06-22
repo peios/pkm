@@ -19,8 +19,8 @@ description = "perf — Linux performance analysis tooling (from Linux 7.0.9 too
 [files]
 "tools:usr/bin/perf"  = "usr/bin/perf"
 "tools:usr/bin/trace" = "usr/bin/trace"
-"tools:usr/lib/x86_64-linux-peios/perf-core/**" = "usr/lib/x86_64-linux-peios/perf-core"
+"tools:usr/lib/x86_64-linux-peios/perf-core/**" = "usr/lib/x86_64-linux-peios/perf-core/"
 "tools:usr/lib/x86_64-linux-peios/libperf-jvmti.so" = "usr/lib/x86_64-linux-peios/libperf-jvmti.so"
 "tools:etc/bash_completion.d/perf" = "etc/bash_completion.d/perf"
 "tools:usr/share/doc/perf-tip/tips.txt" = "usr/share/doc/perf-tip/tips.txt"
-"tools:usr/share/man/man1/perf*.1" = "usr/share/man/man1"
+"tools:usr/share/man/man1/perf*.1" = "usr/share/man/man1/"

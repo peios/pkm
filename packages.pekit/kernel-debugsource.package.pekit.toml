@@ -9,4 +9,4 @@ description = "Peios Kernel — debug sources"
 kernel = "{{version}}"
 
 [files]
-"debuginfo:usr/src/debug/**" = "usr/src/debug"
+"debuginfo:usr/src/debug/**" = "usr/src/debug/"

@@ -21,4 +21,4 @@ description = "perf — Python scripting bindings (perf module)"
 perf = "{{version}}"
 
 [files]
-"tools:usr/lib/x86_64-linux-peios/python3/**" = "usr/lib/x86_64-linux-peios/python3"
+"tools:usr/lib/x86_64-linux-peios/python3/**" = "usr/lib/x86_64-linux-peios/python3/"

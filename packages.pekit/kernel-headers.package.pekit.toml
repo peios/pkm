@@ -6,4 +6,4 @@
 description = "Peios Kernel — userspace API headers"
 
 [files]
-"headers:usr/include/**" = "usr/include"
+"headers:usr/include/**" = "usr/include/"

@@ -9,4 +9,4 @@ description = "Peios Kernel — debugging symbols"
 kernel = "{{version}}"
 
 [files]
-"debuginfo:usr/lib/debug/**" = "usr/lib/debug"
+"debuginfo:usr/lib/debug/**" = "usr/lib/debug/"

@@ -13,4 +13,4 @@ description = "bpftool — eBPF program/map/BTF introspection (from Linux 7.0.9 
 [files]
 "tools:usr/sbin/bpftool" = "usr/bin/bpftool"
 "tools:usr/share/bash-completion/completions/bpftool" = "usr/share/bash-completion/completions/bpftool"
-"tools:usr/share/man/man8/bpftool*.8" = "usr/share/man/man8"
+"tools:usr/share/man/man8/bpftool*.8" = "usr/share/man/man8/"

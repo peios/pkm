@@ -1,4 +1,4 @@
-outDir = "out"
+out_dir = "out"
 
 # Single source of truth for the upstream Linux version, exported into every
 # build stage's environment (build.upstream clones this tag). Bump it here, in
@@ -20,6 +20,15 @@ git clone --depth 1 --branch "$KERNEL_VERSION" \
 # tree). Config/toolchain prep belongs to the later build stages, not here.
 """
 
+# Just clones the pinned upstream tag over HTTPS.
+[build.upstream.dependencies.peipkg]
+git = "*"
+ca-certificates = "*"
+
+[build.upstream.dependencies.apt]
+git = "*"
+ca-certificates = "*"
+
 [build.source]
 needs = ["upstream"]
 command = """
@@ -34,6 +43,17 @@ cp -aT "$PEKIT_UPSTREAM_OUT" "$PEKIT_OUT"
 rm -rf "$PEKIT_OUT/.git"
 """
 
+# apply-patches.sh uses git apply + patch; stage-sources.sh uses patch + python3.
+[build.source.dependencies.peipkg]
+git = "*"
+patch = "*"
+python3 = "*"
+
+[build.source.dependencies.apt]
+git = "*"
+patch = "*"
+python3 = "*"
+
 # build.source is config-agnostic (the kernel-source package). The kernel
 # stages take it, configure for a profile, and compile a monolithic bzImage.
 
@@ -44,6 +64,49 @@ cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
 ./build/configure-kernel.sh "$PEKIT_OUT" kunit
 ./build/compile-kernel.sh "$PEKIT_OUT"
 """
+
+# Full kernel build: the LLVM toolchain (clang/lld/llvm + libclang for bindgen),
+# plus the classic kernel C build deps — bc, bison, flex, libelf (CONFIG/objtool),
+# openssl (cert/sig), dwarves/pahole (BTF), cpio (initramfs), kmod, python3, perl.
+# The pinned rustup Rust toolchain (rustc + rust-src + bindgen + rustfmt) is NOT a
+# distro package; it is provided by the build env/wrap (the pkm-build container).
+[build.kunit.dependencies.peipkg]
+gcc = "*"
+"gcc-c++" = "*"
+make = "*"
+clang = "*"
+lld = "*"
+llvm = "*"
+clang-devel = "*"
+bc = "*"
+bison = "*"
+flex = "*"
+elfutils-libelf-devel = "*"
+openssl-devel = "*"
+openssl = "*"
+dwarves = "*"
+cpio = "*"
+kmod = "*"
+python3 = "*"
+perl = "*"
+
+[build.kunit.dependencies.apt]
+build-essential = "*"
+clang-18 = "*"
+lld-18 = "*"
+llvm-18 = "*"
+libclang-18-dev = "*"
+bc = "*"
+bison = "*"
+flex = "*"
+libelf-dev = "*"
+libssl-dev = "*"
+openssl = "*"
+dwarves = "*"
+cpio = "*"
+kmod = "*"
+python3 = "*"
+perl = "*"
 
 [build.kernel]
 needs = ["source"]
@@ -58,6 +121,46 @@ python3 kernel/scripts/generate-kacs-builtin-signing-keys.py \
 ./build/compile-kernel.sh "$PEKIT_OUT"
 """
 
+# Same toolchain as build.kunit (production profile); the keygen step adds python3
+# (already required). Rust toolchain comes from the build env/wrap, as above.
+[build.kernel.dependencies.peipkg]
+gcc = "*"
+"gcc-c++" = "*"
+make = "*"
+clang = "*"
+lld = "*"
+llvm = "*"
+clang-devel = "*"
+bc = "*"
+bison = "*"
+flex = "*"
+elfutils-libelf-devel = "*"
+openssl-devel = "*"
+openssl = "*"
+dwarves = "*"
+cpio = "*"
+kmod = "*"
+python3 = "*"
+perl = "*"
+
+[build.kernel.dependencies.apt]
+build-essential = "*"
+clang-18 = "*"
+lld-18 = "*"
+llvm-18 = "*"
+libclang-18-dev = "*"
+bc = "*"
+bison = "*"
+flex = "*"
+libelf-dev = "*"
+libssl-dev = "*"
+openssl = "*"
+dwarves = "*"
+cpio = "*"
+kmod = "*"
+python3 = "*"
+perl = "*"
+
 # Export the sanitized userspace UAPI headers (full Linux UAPI + our pkm/*.h,
 # which ride along since they're staged under include/uapi/pkm). Depends on
 # source, not the compiled kernel — headers come from include/uapi and need no
@@ -71,6 +174,21 @@ command = """
 make -C "$PEKIT_SOURCE_OUT" O="$PEKIT_OUT" LLVM=-18 headers_install INSTALL_HDR_PATH="$PEKIT_OUT/usr"
 """
 
+# headers_install builds the unifdef host tool with HOSTCC=clang-18 (LLVM=-18),
+# so it needs make + the clang toolchain (no kernel C libs).
+[build.headers.dependencies.peipkg]
+gcc = "*"
+make = "*"
+clang = "*"
+lld = "*"
+llvm = "*"
+
+[build.headers.dependencies.apt]
+build-essential = "*"
+clang-18 = "*"
+lld-18 = "*"
+llvm-18 = "*"
+
 # Kernel debug artifacts: the whole vmlinux at the conventional debug path + a
 # build-id symlink (-> kernel-debuginfo), and the DWARF-referenced sources with
 # their baked-in build path sanitized via debugedit (-> kernel-debugsource).
@@ -81,6 +199,15 @@ needs = ["kernel"]
 command = """
 ./build/make-debuginfo.sh "$PEKIT_KERNEL_OUT" "$PEKIT_OUT"
 """
+
+# Splits vmlinux debug info: debugedit + binutils (readelf/strip/objcopy).
+[build.debuginfo.dependencies.peipkg]
+binutils = "*"
+debugedit = "*"
+
+[build.debuginfo.dependencies.apt]
+binutils = "*"
+debugedit = "*"
 
 # In-tree userspace tooling (perf, bpftool, cpupower, turbostat, rtla, rv). These
 # are userspace ELF programs that live under tools/ in the kernel source, so they
@@ -93,6 +220,100 @@ needs = ["source"]
 command = """
 ./build/build-tools.sh "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
 """
+
+# The in-tree userspace tools (perf, bpftool, cpupower, turbostat, rtla, rv) pull
+# in the widest dep set — perf's optional integrations dominate. These libs are
+# used by build.tools only (never by the kernel build). bison/flex build perf's
+# own parsers; the rest are the -dev libs perf/rtla/rv link (see build/Containerfile
+# for the per-library rationale).
+[build.tools.dependencies.peipkg]
+gcc = "*"
+"gcc-c++" = "*"
+make = "*"
+bison = "*"
+flex = "*"
+pkgconf-pkg-config = "*"
+elfutils-devel = "*"
+zlib-devel = "*"
+libzstd-devel = "*"
+libcap-devel = "*"
+numactl-devel = "*"
+slang-devel = "*"
+libtraceevent-devel = "*"
+libtracefs-devel = "*"
+pciutils-devel = "*"
+gettext = "*"
+perl-devel = "*"
+binutils-devel = "*"
+python3-devel = "*"
+python3-docutils = "*"
+python3-setuptools = "*"
+libpfm-devel = "*"
+asciidoc = "*"
+xmlto = "*"
+systemd-devel = "*"
+ncurses-devel = "*"
+libnl3-devel = "*"
+libconfig-devel = "*"
+autoconf = "*"
+automake = "*"
+libtool = "*"
+capstone-devel = "*"
+llvm-devel = "*"
+libbpf-devel = "*"
+bpftool = "*"
+kernel-tools-libs-devel = "*"
+elfutils-debuginfod-client-devel = "*"
+systemtap-sdt-devel = "*"
+libbabeltrace-devel = "*"
+java-devel = "*"
+source-highlight = "*"
+python3 = "*"
+perl = "*"
+
+[build.tools.dependencies.apt]
+build-essential = "*"
+bison = "*"
+flex = "*"
+pkg-config = "*"
+libdw-dev = "*"
+zlib1g-dev = "*"
+libzstd-dev = "*"
+libcap-dev = "*"
+libnuma-dev = "*"
+libslang2-dev = "*"
+libtraceevent-dev = "*"
+libtracefs-dev = "*"
+libpci-dev = "*"
+gettext = "*"
+libperl-dev = "*"
+binutils-dev = "*"
+python3-dev = "*"
+python3-docutils = "*"
+python3-setuptools = "*"
+libpfm4-dev = "*"
+asciidoc = "*"
+xmlto = "*"
+libudev-dev = "*"
+libncurses-dev = "*"
+libnl-3-dev = "*"
+libnl-genl-3-dev = "*"
+libconfig-dev = "*"
+autoconf = "*"
+automake = "*"
+libtool = "*"
+libcapstone-dev = "*"
+llvm-18-dev = "*"
+libbpf-dev = "*"
+bpftool = "*"
+libcpupower-dev = "*"
+libdebuginfod-dev = "*"
+systemtap-sdt-dev = "*"
+libbabeltrace-dev = "*"
+default-jdk = "*"
+source-highlight = "*"
+python3 = "*"
+perl = "*"
 
 # Boot the KUnit kernel in QEMU and assert the suite passes (build vs run split).
 [test.kunit]
@@ -115,6 +336,24 @@ bash uapi/generated/go/gen.sh
 # was regenerated into $PEKIT_OUT so pekit sees a non-empty output.
 ( cd uapi/generated && find . -type f | sort | xargs sha256sum ) > "$PEKIT_OUT/bindings.sha256"
 """
+
+# Codegen for the three binding flavours: clang + libclang for the Rust bindgen
+# pass, lua for the Lua mirror, golang (go + gofmt) for the Go mirror; python3 for
+# the codegen-safe lint. bindgen + rustfmt themselves come from the rustup
+# toolchain in the build env/wrap, not a distro package.
+[build.uapi.dependencies.peipkg]
+clang = "*"
+clang-devel = "*"
+lua = "*"
+golang = "*"
+python3 = "*"
+
+[build.uapi.dependencies.apt]
+clang-18 = "*"
+libclang-18-dev = "*"
+"lua5.4" = "*"
+golang-go = "*"
+python3 = "*"
 
 # Drift gate for the UAPI: (1) the canonical headers must compile standalone
 # with a stock userspace compiler; (2) the committed bindings must match a

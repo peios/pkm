@@ -21,4 +21,4 @@ description = "hv — Linux Hyper-V guest integration daemons + tools (from Linu
 "tools:usr/bin/hv_vss_daemon"       = "usr/bin/hv_vss_daemon"
 "tools:usr/bin/hv_fcopy_uio_daemon" = "usr/bin/hv_fcopy_uio_daemon"
 "tools:usr/bin/lsvmbus"             = "usr/bin/lsvmbus"
-"tools:usr/lib/x86_64-linux-peios/hypervkvpd/**" = "usr/lib/x86_64-linux-peios/hypervkvpd"
+"tools:usr/lib/x86_64-linux-peios/hypervkvpd/**" = "usr/lib/x86_64-linux-peios/hypervkvpd/"

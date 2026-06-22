@@ -10,4 +10,4 @@ description = "rv — runtime verification monitor front-end (from Linux 7.0.9 t
 
 [files]
 "tools:usr/bin/rv" = "usr/bin/rv"
-"tools:usr/share/man/man1/rv*.1" = "usr/share/man/man1"
+"tools:usr/share/man/man1/rv*.1" = "usr/share/man/man1/"

@@ -9,6 +9,6 @@ description = "usbip — development files (libusbip headers, static lib)"
 usbip = "{{version}}"
 
 [files]
-"tools:usr/include/usbip/**" = "usr/include/usbip"
+"tools:usr/include/usbip/**" = "usr/include/usbip/"
 "tools:usr/lib/x86_64-linux-peios/libusbip.so" = "usr/lib/x86_64-linux-peios/libusbip.so"
 "tools:usr/lib/x86_64-linux-peios/libusbip.a"  = "usr/lib/x86_64-linux-peios/libusbip.a"

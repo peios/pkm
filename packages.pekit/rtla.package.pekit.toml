@@ -15,4 +15,4 @@ description = "rtla — real-time latency analysis (osnoise, timerlat) (from Lin
 "tools:usr/bin/osnoise"  = "usr/bin/osnoise"
 "tools:usr/bin/hwnoise"  = "usr/bin/hwnoise"
 "tools:usr/bin/timerlat" = "usr/bin/timerlat"
-"tools:usr/share/man/man1/rtla*.1" = "usr/share/man/man1"
+"tools:usr/share/man/man1/rtla*.1" = "usr/share/man/man1/"

@@ -17,5 +17,5 @@ cpupower-libs = "{{version}}"
 [files]
 "tools:usr/bin/cpupower" = "usr/bin/cpupower"
 "tools:usr/share/bash-completion/completions/cpupower" = "usr/share/bash-completion/completions/cpupower"
-"tools:usr/share/locale/**" = "usr/share/locale"
-"tools:usr/share/man/man1/cpupower*.1" = "usr/share/man/man1"
+"tools:usr/share/locale/**" = "usr/share/locale/"
+"tools:usr/share/man/man1/cpupower*.1" = "usr/share/man/man1/"
