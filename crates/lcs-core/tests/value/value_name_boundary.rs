@@ -1,13 +1,11 @@
 use crate::common::{context, limits};
 use lcs_core::{
-    EnumeratedValue, LayerView, LcsError, NamedValueEntry,
-    REG_SZ, ValueEntry, ValueWriteRequest, casefold_eq, for_each_effective_value,
-    validate_key_component_bytes, validate_value_name_bytes, validate_value_write_request,
+    EnumeratedValue, LayerView, LcsError, NamedValueEntry, REG_SZ, ValueEntry, ValueWriteRequest,
+    casefold_eq, for_each_effective_value, validate_key_component_bytes, validate_value_name_bytes,
+    validate_value_write_request,
 };
 
 const KEY_GUID: lcs_core::Guid = [0x61; 16];
-
-
 
 fn write_request(name: &str) -> ValueWriteRequest<'_> {
     ValueWriteRequest {

@@ -21,7 +21,6 @@ fn response_frame(request_id: u64, request_op_code: u16) -> Vec<u8> {
     frame
 }
 
-
 fn push_metadata(frame: &mut Vec<u8>, guid: &[u8; 16], sd: &[u8]) {
     frame.extend_from_slice(guid);
     push_len_prefixed(frame, sd);
@@ -29,7 +28,6 @@ fn push_metadata(frame: &mut Vec<u8>, guid: &[u8; 16], sd: &[u8]) {
     frame.push(0);
     frame.extend_from_slice(&1000u64.to_le_bytes());
 }
-
 
 fn sid(authority: u8, subauths: &[u32]) -> Vec<u8> {
     let mut bytes = Vec::new();

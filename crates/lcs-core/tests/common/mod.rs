@@ -53,7 +53,10 @@ pub fn field(data: &[u8]) -> RsiLengthPrefixedField<'_> {
     }
 }
 
-pub fn context<'a>(layers: &'a [LayerView<'a>], limits: &'a LcsLimits) -> LayerResolutionContext<'a> {
+pub fn context<'a>(
+    layers: &'a [LayerView<'a>],
+    limits: &'a LcsLimits,
+) -> LayerResolutionContext<'a> {
     LayerResolutionContext {
         layers,
         private_layers: &[],
@@ -61,4 +64,3 @@ pub fn context<'a>(layers: &'a [LayerView<'a>], limits: &'a LcsLimits) -> LayerR
         next_sequence: 100,
     }
 }
-

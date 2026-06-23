@@ -7,8 +7,6 @@ use lcs_core::{
 const SE_SELF_RELATIVE: u16 = 0x8000;
 const METADATA_GUID: Guid = [0x5a; 16];
 
-
-
 fn owner_only_sd() -> Vec<u8> {
     let owner = system_sid();
     let mut sd = vec![0u8; 20];

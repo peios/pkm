@@ -1,6 +1,8 @@
 //! lcs-core integration tests: layer.
 //! Each submodule is one behavioural test file; shared helpers live in `common`.
 
+#![allow(clippy::field_reassign_with_default)]
+
 mod common;
 
 #[path = "layer/layer_admission_errno.rs"]

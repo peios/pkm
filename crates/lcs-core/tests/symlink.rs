@@ -1,6 +1,8 @@
 //! lcs-core integration tests: symlink.
 //! Each submodule is one behavioural test file; shared helpers live in `common`.
 
+#![allow(clippy::field_reassign_with_default)]
+
 mod common;
 
 #[path = "symlink/symlink_creation_authority_gate.rs"]

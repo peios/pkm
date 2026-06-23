@@ -39,7 +39,8 @@ pub type RsiRequestId = u64;
 pub type RsiSourceConnectionId = u64;
 
 pub const RSI_WRITE_KEY_FIELD_SD: u32 = peios_uapi::RSI_WRITE_KEY_FIELD_SD;
-pub const RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME: u32 = peios_uapi::RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME;
+pub const RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME: u32 =
+    peios_uapi::RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME;
 pub const RSI_WRITE_KEY_FIELD_KNOWN_MASK: u32 =
     RSI_WRITE_KEY_FIELD_SD | RSI_WRITE_KEY_FIELD_LAST_WRITE_TIME;
 pub const RSI_PATH_TARGET_GUID: u8 = peios_uapi::RSI_PATH_TARGET_GUID as u8;
@@ -1155,6 +1156,8 @@ pub fn write_rsi_lookup_request_frame(
 }
 
 /// Writes a complete RSI_CREATE_ENTRY request frame.
+// Mirrors the C ingress wrapper and on-wire RSI_CREATE_ENTRY fields.
+#[allow(clippy::too_many_arguments)]
 pub fn write_rsi_create_entry_request_frame(
     dst: &mut [u8],
     request_id: RsiRequestId,
@@ -1290,6 +1293,8 @@ pub fn write_rsi_enum_children_request_frame(
 }
 
 /// Writes a complete RSI_CREATE_KEY request frame.
+// Mirrors the C ingress wrapper and on-wire RSI_CREATE_KEY fields.
+#[allow(clippy::too_many_arguments)]
 pub fn write_rsi_create_key_request_frame(
     dst: &mut [u8],
     request_id: RsiRequestId,
@@ -1439,6 +1444,8 @@ pub fn write_rsi_query_values_request_frame(
 }
 
 /// Writes a complete RSI_SET_VALUE request frame.
+// Mirrors the C ingress wrapper and on-wire RSI_SET_VALUE fields.
+#[allow(clippy::too_many_arguments)]
 pub fn write_rsi_set_value_request_frame(
     dst: &mut [u8],
     request_id: RsiRequestId,
@@ -2225,22 +2232,47 @@ where
     }
 }
 
+/// Inputs for processing one matched successful replay snapshot response.
+pub struct RsiTransactionReplaySnapshotSuccessInput<'q, 'f, 'out, 'b> {
+    /// Retained request records awaiting source responses.
+    pub request_storage: &'b mut [Option<RsiTransactionReplaySnapshotRequestRecord<'q>>],
+    /// Result table receiving the materialized response.
+    pub result_storage: &'b mut [Option<TransactionReplaySnapshotResult<'out>>],
+    /// Full RSI response frame.
+    pub frame: &'f [u8],
+    /// Layer-resolution context used for materialization.
+    pub context: &'b LayerResolutionContext<'out>,
+    /// Scratch storage for named value entries.
+    pub value_entry_storage: &'out mut [NamedValueEntry<'out>],
+    /// Scratch storage for blanket tombstone entries.
+    pub blanket_storage: &'out mut [BlanketTombstoneEntry<'out>],
+    /// Scratch storage for path entries.
+    pub path_storage: &'out mut [NamedPathEntry<'out>],
+    /// Scratch storage for enumerated value outputs.
+    pub value_result_storage: &'out mut [EnumeratedValue<'out>],
+    /// Scratch storage for enumerated subkey outputs.
+    pub subkey_result_storage: &'out mut [EnumeratedSubkey<'out>],
+}
+
 /// Processes one matched successful replay snapshot response and releases it.
 pub fn process_transaction_replay_snapshot_success_response<'q, 'f, 'out>(
-    request_storage: &mut [Option<RsiTransactionReplaySnapshotRequestRecord<'q>>],
-    result_storage: &mut [Option<TransactionReplaySnapshotResult<'out>>],
-    frame: &'f [u8],
-    context: &LayerResolutionContext<'out>,
-    value_entry_storage: &'out mut [NamedValueEntry<'out>],
-    blanket_storage: &'out mut [BlanketTombstoneEntry<'out>],
-    path_storage: &'out mut [NamedPathEntry<'out>],
-    value_result_storage: &'out mut [EnumeratedValue<'out>],
-    subkey_result_storage: &'out mut [EnumeratedSubkey<'out>],
+    input: RsiTransactionReplaySnapshotSuccessInput<'q, 'f, 'out, '_>,
 ) -> LcsResult<RsiTransactionReplaySnapshotStoredResponse<'q, 'out>>
 where
     'q: 'out,
     'f: 'out,
 {
+    let RsiTransactionReplaySnapshotSuccessInput {
+        request_storage,
+        result_storage,
+        frame,
+        context,
+        value_entry_storage,
+        blanket_storage,
+        path_storage,
+        value_result_storage,
+        subkey_result_storage,
+    } = input;
     let matched = match_transaction_replay_snapshot_response_record(request_storage, frame)?;
     let request_id = matched.record.request_id;
     let response = matched.response;

@@ -9,8 +9,6 @@ use kacs_core::{
     SE_DACL_PRESENT, SE_GROUP_ENABLED, SE_SELF_RELATIVE, WRITE_DAC,
 };
 
-
-
 fn object_ace(
     ace_type: u8,
     flags: u8,
@@ -105,7 +103,6 @@ fn callback_object_ace(
     bytes.extend_from_slice(&body);
     bytes
 }
-
 
 fn sd_with_dacl(owner: &[u8], dacl: Option<&[u8]>) -> Vec<u8> {
     let control = SE_SELF_RELATIVE | if dacl.is_some() { SE_DACL_PRESENT } else { 0 };

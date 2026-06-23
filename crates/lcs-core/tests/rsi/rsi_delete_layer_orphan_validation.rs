@@ -1,4 +1,4 @@
-use crate::common::{finish_total_len};
+use crate::common::finish_total_len;
 use lcs_core::{
     LcsError, RSI_DELETE_LAYER, RSI_OK, RsiRetainedRequest,
     parse_rsi_delete_layer_success_response_payload, rsi_response_op_code,
@@ -17,7 +17,6 @@ fn response_frame(request_id: u64) -> Vec<u8> {
     frame.extend_from_slice(&RSI_OK.to_le_bytes());
     frame
 }
-
 
 fn delete_layer_response(request_id: u64, guids: &[[u8; 16]]) -> Vec<u8> {
     let mut frame = response_frame(request_id);

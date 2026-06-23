@@ -182,7 +182,7 @@ awk '
 				"$name" "$name"
 		fi
 	done < "$tmp/macros.txt"
-	echo '	fputs(")\n", stdout);'
+	printf '%s\n' '	fputs(")\n", stdout);'
 	echo '	return 0;'
 	echo '}'
 } > "$tmp/dumpconst.c"

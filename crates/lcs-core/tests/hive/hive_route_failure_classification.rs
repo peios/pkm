@@ -1,6 +1,7 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
-    CurrentUserRewrite, Guid, HiveRouteErrno, HiveRouteOutcome, HiveScope, HiveStatus, HiveView, RoutedHive, route_routable_path_hive,
+    CurrentUserRewrite, Guid, HiveRouteErrno, HiveRouteOutcome, HiveScope, HiveStatus, HiveView,
+    RoutedHive, route_routable_path_hive,
 };
 
 const MACHINE_GUID: Guid = [0x10; 16];
@@ -8,7 +9,6 @@ const USERS_GUID: Guid = [0x11; 16];
 const SOFTWARE_GUID: Guid = [0x12; 16];
 const PRIVATE_MACHINE_GUID: Guid = [0x20; 16];
 const SCOPE_A: Guid = [0xaa; 16];
-
 
 fn hive<'a>(
     name: &'a str,

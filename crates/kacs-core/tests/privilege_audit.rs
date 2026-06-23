@@ -16,9 +16,6 @@ use kacs_core::{
 const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
 const SYSTEM_MANDATORY_LABEL_NO_WRITE_UP: u32 = 0x0000_0002;
 
-
-
-
 fn object_ace(
     ace_type: u8,
     flags: u8,
@@ -41,7 +38,6 @@ fn object_ace(
     bytes.extend_from_slice(&body);
     bytes
 }
-
 
 fn sd_bytes(
     owner: Option<&[u8]>,

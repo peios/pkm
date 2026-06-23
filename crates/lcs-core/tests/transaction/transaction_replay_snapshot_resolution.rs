@@ -2,8 +2,8 @@ use crate::common::{finish_total_len, push_len_prefixed, response_frame};
 use lcs_core::{
     BlanketTombstoneEntry, EnumeratedSubkey, EnumeratedValue, Guid, LayerResolutionContext,
     LayerView, LcsError, LcsLimits, NamedPathEntry, NamedValueEntry, PathEntry, PathTarget, REG_SZ,
-    RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_PATH_TARGET_GUID, RSI_PATH_TARGET_HIDDEN,
-    RSI_QUERY_VALUES, RegistryValueType, ResolvedPathEntry, RsiRetainedRequest, ValueEntry,
+    RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_PATH_TARGET_GUID, RSI_PATH_TARGET_HIDDEN, RSI_QUERY_VALUES,
+    RegistryValueType, ResolvedPathEntry, RsiRetainedRequest, ValueEntry,
     for_each_rsi_enum_children_effective_subkey_snapshot_entry,
     for_each_rsi_query_values_effective_snapshot_entry,
     parse_rsi_enum_children_success_response_payload, parse_rsi_lookup_success_response_payload,
@@ -65,8 +65,6 @@ fn dummy_path_entry() -> NamedPathEntry<'static> {
     }
 }
 
-
-
 fn push_value_entry(
     frame: &mut Vec<u8>,
     value_name: &[u8],
@@ -94,7 +92,6 @@ fn push_path_entry(
     frame.extend_from_slice(&target_guid);
     frame.extend_from_slice(&sequence.to_le_bytes());
 }
-
 
 #[test]
 fn query_values_snapshot_resolution_emits_effective_values() {

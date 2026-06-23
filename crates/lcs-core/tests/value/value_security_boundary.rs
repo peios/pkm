@@ -1,4 +1,4 @@
-use crate::common::{field};
+use crate::common::field;
 use lcs_core::{
     BlanketTombstoneEntry, EnumeratedValue, KEY_QUERY_VALUE, KEY_SET_VALUE, QueryValueOutcome,
     QueryValueResult, REG_BINARY, REG_DWORD, REG_IOC_BLANKET_TOMBSTONE, REG_IOC_DELETE_VALUE,
@@ -13,7 +13,6 @@ use lcs_core::{
 };
 
 const KEY_GUID: [u8; 16] = [0x44; 16];
-
 
 fn trailing() -> RsiTrailingOptionalFieldsPlan {
     RsiTrailingOptionalFieldsPlan {

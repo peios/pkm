@@ -7,11 +7,7 @@ use lcs_core::{
 const GUID_A: Guid = [0x11; 16];
 const GUID_B: Guid = [0x22; 16];
 
-fn read_key_frame<'a>(
-    buf: &'a mut [u8],
-    request_id: u64,
-    guid: Guid,
-) -> (&'a [u8], RsiRetainedRequest) {
+fn read_key_frame(buf: &mut [u8], request_id: u64, guid: Guid) -> (&[u8], RsiRetainedRequest) {
     let built = write_rsi_read_key_request_frame(buf, request_id, 0, guid).expect("write frame");
     (&buf[..built.len], built.retained)
 }

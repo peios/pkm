@@ -14,6 +14,34 @@ use lcs_core::{
     summarize_transaction_replay_snapshot_result_table,
 };
 
+macro_rules! process_success {
+    (
+        $request_storage:expr,
+        $result_storage:expr,
+        $frame:expr,
+        $context:expr,
+        $value_entry_storage:expr,
+        $blanket_storage:expr,
+        $path_storage:expr,
+        $value_result_storage:expr,
+        $subkey_result_storage:expr $(,)?
+    ) => {
+        process_transaction_replay_snapshot_success_response(
+            lcs_core::RsiTransactionReplaySnapshotSuccessInput {
+                request_storage: $request_storage,
+                result_storage: $result_storage,
+                frame: $frame,
+                context: $context,
+                value_entry_storage: $value_entry_storage,
+                blanket_storage: $blanket_storage,
+                path_storage: $path_storage,
+                value_result_storage: $value_result_storage,
+                subkey_result_storage: $subkey_result_storage,
+            },
+        )
+    };
+}
+
 const KEY_GUID: Guid = [0x40; 16];
 const PARENT_GUID: Guid = [0x20; 16];
 const OTHER_GUID: Guid = [0x30; 16];
@@ -131,7 +159,6 @@ fn response_frame(request_id: u64, request_op_code: u16, status: u32) -> Vec<u8>
     frame
 }
 
-
 fn push_value_entry(
     frame: &mut Vec<u8>,
     value_name: &[u8],
@@ -145,7 +172,6 @@ fn push_value_entry(
     push_len_prefixed(frame, data);
     frame.extend_from_slice(&sequence.to_le_bytes());
 }
-
 
 #[test]
 fn successful_effective_value_response_is_stored_then_released() {
@@ -167,7 +193,7 @@ fn successful_effective_value_response_is_stored_then_released() {
     let mut values = [dummy_value_result(); 4];
     let mut subkeys = [dummy_subkey_result(); 1];
 
-    let processed = process_transaction_replay_snapshot_success_response(
+    let processed = process_success!(
         &mut request_table,
         &mut result_table,
         &frame,
@@ -252,7 +278,7 @@ fn successful_effective_subkey_response_uses_same_store_release_path() {
     let mut values = [dummy_value_result(); 1];
     let mut subkeys = [dummy_subkey_result(); 1];
 
-    let processed = process_transaction_replay_snapshot_success_response(
+    let processed = process_success!(
         &mut request_table,
         &mut result_table,
         &frame,
@@ -305,7 +331,7 @@ fn source_error_status_keeps_request_record_and_stores_no_result() {
     let mut subkeys = [dummy_subkey_result(); 1];
 
     assert_eq!(
-        process_transaction_replay_snapshot_success_response(
+        process_success!(
             &mut request_table,
             &mut result_table,
             &frame,
@@ -360,7 +386,7 @@ fn full_result_table_keeps_request_record_after_success_payload_validation() {
     let mut subkeys = [dummy_subkey_result(); 1];
 
     assert_eq!(
-        process_transaction_replay_snapshot_success_response(
+        process_success!(
             &mut request_table,
             &mut result_table,
             &frame,
@@ -403,7 +429,7 @@ fn unknown_request_id_keeps_other_records_and_stores_no_result() {
     let mut subkeys = [dummy_subkey_result(); 1];
 
     assert_eq!(
-        process_transaction_replay_snapshot_success_response(
+        process_success!(
             &mut request_table,
             &mut result_table,
             &frame,

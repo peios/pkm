@@ -1,13 +1,12 @@
-use crate::common::{field};
+use crate::common::field;
 use lcs_core::{
     LcsError, RSI_CREATE_ENTRY, RSI_DELETE_ENTRY, RSI_ENUM_CHILDREN, RSI_HIDE_ENTRY, RSI_LOOKUP,
-    RSI_REQUEST_HEADER_LEN, RsiRetainedRequest,
-    parse_rsi_create_entry_request_payload, parse_rsi_delete_entry_request_payload,
-    parse_rsi_enum_children_request_payload, parse_rsi_hide_entry_request_payload,
-    parse_rsi_lookup_request_payload, parse_rsi_request_header,
-    write_rsi_create_entry_request_frame, write_rsi_delete_entry_request_frame,
-    write_rsi_enum_children_request_frame, write_rsi_hide_entry_request_frame,
-    write_rsi_lookup_request_frame,
+    RSI_REQUEST_HEADER_LEN, RsiRetainedRequest, parse_rsi_create_entry_request_payload,
+    parse_rsi_delete_entry_request_payload, parse_rsi_enum_children_request_payload,
+    parse_rsi_hide_entry_request_payload, parse_rsi_lookup_request_payload,
+    parse_rsi_request_header, write_rsi_create_entry_request_frame,
+    write_rsi_delete_entry_request_frame, write_rsi_enum_children_request_frame,
+    write_rsi_hide_entry_request_frame, write_rsi_lookup_request_frame,
 };
 
 const PARENT_GUID: [u8; 16] = [
@@ -16,7 +15,6 @@ const PARENT_GUID: [u8; 16] = [
 const CHILD_GUID: [u8; 16] = [
     0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
 ];
-
 
 #[test]
 fn lookup_request_frame_writes_common_header_and_payload() {

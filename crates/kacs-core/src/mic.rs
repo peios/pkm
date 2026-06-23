@@ -10,16 +10,21 @@ use crate::sid::Sid;
 const INHERIT_ONLY_ACE: u8 = 0x08;
 
 /// Token mandatory-policy bit enabling NO_WRITE_UP enforcement.
-pub const TOKEN_MANDATORY_POLICY_NO_WRITE_UP: u32 = peios_uapi::KACS_TOKEN_MANDATORY_POLICY_NO_WRITE_UP;
+pub const TOKEN_MANDATORY_POLICY_NO_WRITE_UP: u32 =
+    peios_uapi::KACS_TOKEN_MANDATORY_POLICY_NO_WRITE_UP;
 /// Token mandatory-policy bit enabling NEW_PROCESS_MIN semantics.
-pub const TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN: u32 = peios_uapi::KACS_TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN;
+pub const TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN: u32 =
+    peios_uapi::KACS_TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN;
 
 /// Mandatory-label ACE bit denying read-up.
-pub const SYSTEM_MANDATORY_LABEL_NO_READ_UP: u32 = peios_uapi::KACS_SYSTEM_MANDATORY_LABEL_NO_READ_UP;
+pub const SYSTEM_MANDATORY_LABEL_NO_READ_UP: u32 =
+    peios_uapi::KACS_SYSTEM_MANDATORY_LABEL_NO_READ_UP;
 /// Mandatory-label ACE bit denying write-up.
-pub const SYSTEM_MANDATORY_LABEL_NO_WRITE_UP: u32 = peios_uapi::KACS_SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
+pub const SYSTEM_MANDATORY_LABEL_NO_WRITE_UP: u32 =
+    peios_uapi::KACS_SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
 /// Mandatory-label ACE bit denying execute-up.
-pub const SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP: u32 = peios_uapi::KACS_SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP;
+pub const SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP: u32 =
+    peios_uapi::KACS_SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP;
 
 /// Integrity levels understood by the slow-track MIC implementation.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

@@ -5,8 +5,10 @@ use lcs_core::{
 
 #[test]
 fn value_layer_admission_allows_new_layer_below_cap() {
-    let mut limits = LcsLimits::default();
-    limits.max_layers_per_value = 3;
+    let limits = LcsLimits {
+        max_layers_per_value: 3,
+        ..LcsLimits::default()
+    };
 
     assert_eq!(
         plan_value_layer_admission(
@@ -25,8 +27,10 @@ fn value_layer_admission_allows_new_layer_below_cap() {
 
 #[test]
 fn value_layer_admission_rejects_new_layer_at_or_above_cap() {
-    let mut limits = LcsLimits::default();
-    limits.max_layers_per_value = 3;
+    let limits = LcsLimits {
+        max_layers_per_value: 3,
+        ..LcsLimits::default()
+    };
 
     for count in [3, 4] {
         assert_eq!(
@@ -44,8 +48,10 @@ fn value_layer_admission_rejects_new_layer_at_or_above_cap() {
 
 #[test]
 fn value_layer_admission_does_not_apply_cap_to_same_layer_replacement() {
-    let mut limits = LcsLimits::default();
-    limits.max_layers_per_value = 3;
+    let limits = LcsLimits {
+        max_layers_per_value: 3,
+        ..LcsLimits::default()
+    };
 
     assert_eq!(
         plan_value_layer_admission(
@@ -64,8 +70,10 @@ fn value_layer_admission_does_not_apply_cap_to_same_layer_replacement() {
 
 #[test]
 fn value_layer_admission_rejects_new_layer_when_configured_cap_is_zero() {
-    let mut limits = LcsLimits::default();
-    limits.max_layers_per_value = 0;
+    let limits = LcsLimits {
+        max_layers_per_value: 0,
+        ..LcsLimits::default()
+    };
 
     assert_eq!(
         plan_value_layer_admission(

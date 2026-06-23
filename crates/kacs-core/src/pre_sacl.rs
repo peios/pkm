@@ -4,7 +4,7 @@ use crate::error::KacsResult;
 use crate::mic::{apply_mic, resolve_mandatory_label, IntegrityLevel};
 use crate::pip::{apply_pip, resolve_process_trust_label, PipContext};
 use crate::pkm_alloc::Vec;
-use crate::privilege::PrivilegeProvenance;
+use crate::privilege::{AccessDecisionState, PrivilegeProvenance};
 use crate::sacl::extract_sacl_metadata;
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
@@ -32,26 +32,49 @@ pub struct PreSaclWalkState<'a> {
     pub provenance: PrivilegeProvenance,
 }
 
+/// Inputs for the pre-SACL walk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreSaclWalkInput<'a, 'b> {
+    /// Security descriptor being evaluated.
+    pub sd: &'b SecurityDescriptor<'a>,
+    /// Caller integrity level.
+    pub token_integrity: IntegrityLevel,
+    /// Caller mandatory policy.
+    pub mandatory_policy: u32,
+    /// Effective privileges after initial privilege seeding.
+    pub effective_privileges: u64,
+    /// Caller process-trust label context.
+    pub pip: PipContext,
+    /// Generic mapping for the protected object type.
+    pub mapping: &'b GenericMapping,
+    /// Initial decided/granted state entering the pre-SACL walk.
+    pub initial_state: AccessDecisionState,
+    /// Privilege-granted bits entering the pre-SACL walk.
+    pub privilege_granted: u32,
+    /// Initial privilege provenance.
+    pub provenance: PrivilegeProvenance,
+}
+
 /// Runs the pre-SACL portion of AccessCheck and returns the narrowed state plus
 /// extracted SACL metadata.
-pub fn pre_sacl_walk<'a>(
-    sd: &SecurityDescriptor<'a>,
-    token_integrity: IntegrityLevel,
-    mandatory_policy: u32,
-    effective_privileges: u64,
-    pip: PipContext,
-    mapping: &GenericMapping,
-    decided: u32,
-    granted: u32,
-    privilege_granted: u32,
-    provenance: PrivilegeProvenance,
-) -> KacsResult<PreSaclWalkState<'a>> {
+pub fn pre_sacl_walk<'a>(input: PreSaclWalkInput<'a, '_>) -> KacsResult<PreSaclWalkState<'a>> {
+    let PreSaclWalkInput {
+        sd,
+        token_integrity,
+        mandatory_policy,
+        effective_privileges,
+        pip,
+        mapping,
+        initial_state,
+        privilege_granted,
+        provenance,
+    } = input;
     let metadata = extract_sacl_metadata(sd)?;
     let label = resolve_mandatory_label(sd)?;
     let trust_label = resolve_process_trust_label(sd)?;
 
-    let mut decided = decided;
-    let mut granted = granted;
+    let mut decided = initial_state.decided;
+    let mut granted = initial_state.granted;
     let mut privilege_granted = privilege_granted;
     let mut provenance = provenance;
     let mut mandatory_decided = 0u32;

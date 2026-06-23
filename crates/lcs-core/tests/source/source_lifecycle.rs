@@ -1,4 +1,4 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
     Guid, HiveScope, HiveStatus, HiveView, LcsError, NIL_GUID, RegisteredHiveIdentity,
     SourceSlotStatus, SourceSlotView, for_each_source_slot_hive, route_hive,
@@ -9,7 +9,6 @@ const MACHINE_GUID: Guid = [0x10; 16];
 const USERS_GUID: Guid = [0x11; 16];
 const PRIVATE_GUID: Guid = [0x12; 16];
 const SCOPE_A: Guid = [0xaa; 16];
-
 
 fn existing_global<'a>(name: &'a str, root_guid: Guid) -> RegisteredHiveIdentity<'a> {
     RegisteredHiveIdentity {

@@ -366,6 +366,13 @@ swappable provider.
   fragment, then re-run the relevant `pekit` stage.
 - **Never hand-edit `uapi/generated/**`.** Edit `uapi/pkm` and run
   `pekit build uapi`; `pekit test uapi` enforces this.
+- **Do not use Cargo `--all-features` as a standalone Rust gate.** The core
+  crates' `kernel` feature is a staging target for the Linux in-tree Rust
+  environment; it resolves kernel-only APIs after `stage-rust-core.sh` vendors
+  the cores into the kernel tree. Local Cargo quality checks should use
+  `cargo check --workspace`, `cargo test --workspace`, and
+  `cargo clippy --workspace --all-targets -- -D warnings`. Kernel-feature
+  validation is the staged kernel build, not `cargo --all-features`.
 - **The patch series is the contract for existing-file edits.** New files go
   through `stage-sources.sh`. A patch that does not apply cleanly is a hard
   failure, by design.

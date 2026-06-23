@@ -6,8 +6,6 @@ use lcs_core::{
     validate_rsi_read_key_response_names,
 };
 
-
-
 fn push_read_key_body(frame: &mut Vec<u8>, name: &[u8]) {
     push_len_prefixed(frame, name);
     frame.extend_from_slice(&[0x51; 16]);
@@ -36,7 +34,6 @@ fn push_blanket(frame: &mut Vec<u8>, layer_name: &[u8], sequence: u64) {
     push_len_prefixed(frame, layer_name);
     frame.extend_from_slice(&sequence.to_le_bytes());
 }
-
 
 fn parse_read_key_frame(
     request_id: u64,

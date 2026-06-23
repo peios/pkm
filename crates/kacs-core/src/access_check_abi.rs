@@ -24,12 +24,15 @@ pub const KACS_ACCESS_CHECK_ARGS_V1_SIZE: u32 = peios_uapi::KACS_ACCESS_CHECK_AR
 /// Size of one flat object-type entry in the ABI array.
 pub const KACS_OBJECT_TYPE_ENTRY_SIZE: usize = peios_uapi::KACS_OBJECT_TYPE_ENTRY_SIZE as usize;
 /// Maximum accepted object-audit context length in bytes.
-pub const KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN: u32 = peios_uapi::KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN;
+pub const KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN: u32 =
+    peios_uapi::KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN;
 /// Maximum accepted `@Local` claims blob length in bytes.
-pub const KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN: u32 = peios_uapi::KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN;
+pub const KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN: u32 =
+    peios_uapi::KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN;
 /// Maximum accepted object-type tree entry count. Bounds both the ABI buffer
 /// allocation and the O(n^2) duplicate-GUID scan in `ObjectTypeList::new`.
-pub const KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT: u32 = peios_uapi::KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT;
+pub const KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT: u32 =
+    peios_uapi::KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT;
 /// Negative errno value used for AccessCheck denial at the ABI boundary.
 pub const KACS_ABI_EACCES: i32 = -13;
 

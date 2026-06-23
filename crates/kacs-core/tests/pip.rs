@@ -1,16 +1,13 @@
 mod common;
 use common::{acl_bytes, basic_ace, mapping, sid_bytes};
 use kacs_core::{
-    apply_pip, resolve_process_trust_label, KacsError, PipContext,
-    PipEnforcementState, ProcessTrustLabel, SecurityDescriptor, ACCESS_SYSTEM_SECURITY,
-    GENERIC_WRITE, READ_CONTROL, SE_SACL_PRESENT, SE_SELF_RELATIVE, WRITE_DAC, WRITE_OWNER,
+    apply_pip, resolve_process_trust_label, KacsError, PipContext, PipEnforcementState,
+    ProcessTrustLabel, SecurityDescriptor, ACCESS_SYSTEM_SECURITY, GENERIC_WRITE, READ_CONTROL,
+    SE_SACL_PRESENT, SE_SELF_RELATIVE, WRITE_DAC, WRITE_OWNER,
 };
 
 const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
 const INHERIT_ONLY_ACE: u8 = 0x08;
-
-
-
 
 fn sd_with_sacl(owner: &[u8], sacl: Option<&[u8]>) -> Vec<u8> {
     let control = SE_SELF_RELATIVE | if sacl.is_some() { SE_SACL_PRESENT } else { 0 };
@@ -30,7 +27,6 @@ fn sd_with_sacl(owner: &[u8], sacl: Option<&[u8]>) -> Vec<u8> {
     }
     bytes
 }
-
 
 #[test]
 fn missing_trust_label_is_a_noop() {

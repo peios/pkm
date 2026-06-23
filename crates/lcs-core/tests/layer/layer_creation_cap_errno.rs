@@ -5,8 +5,10 @@ use lcs_core::{
 
 #[test]
 fn layer_creation_admission_allows_new_layer_below_total_cap() {
-    let mut limits = LcsLimits::default();
-    limits.max_total_layers = 3;
+    let limits = LcsLimits {
+        max_total_layers: 3,
+        ..LcsLimits::default()
+    };
 
     assert_eq!(
         plan_layer_creation_admission(
@@ -24,8 +26,10 @@ fn layer_creation_admission_allows_new_layer_below_total_cap() {
 
 #[test]
 fn layer_creation_admission_rejects_new_layer_at_or_above_total_cap() {
-    let mut limits = LcsLimits::default();
-    limits.max_total_layers = 3;
+    let limits = LcsLimits {
+        max_total_layers: 3,
+        ..LcsLimits::default()
+    };
 
     for current_total_layers in [3, 4] {
         assert_eq!(

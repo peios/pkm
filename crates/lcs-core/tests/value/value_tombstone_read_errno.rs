@@ -1,11 +1,9 @@
 use crate::common::{context, limits};
 use lcs_core::{
-    BASE_LAYER_VIEW, BlanketTombstoneEntry, LayerView,
-    QueryValueOutcome, REG_BINARY, REG_TOMBSTONE, RsiMappedErrno, ValueEntry, ValueResolution,
-    query_value_not_found_errno, query_value_result_from_resolution, resolve_value,
+    BASE_LAYER_VIEW, BlanketTombstoneEntry, LayerView, QueryValueOutcome, REG_BINARY,
+    REG_TOMBSTONE, RsiMappedErrno, ValueEntry, ValueResolution, query_value_not_found_errno,
+    query_value_result_from_resolution, resolve_value,
 };
-
-
 
 #[test]
 fn effective_per_value_tombstone_reads_as_enoent_without_exposing_type() {

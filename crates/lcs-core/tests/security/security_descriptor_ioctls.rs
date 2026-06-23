@@ -1,4 +1,4 @@
-use crate::common::{sid};
+use crate::common::sid;
 use kacs_core::{
     ACCESS_ALLOWED_ACE_TYPE, SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE, SecurityDescriptor,
 };
@@ -7,7 +7,6 @@ use lcs_core::{
     OWNER_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION, SYNCHRONIZE, plan_registry_get_security,
     plan_registry_set_security,
 };
-
 
 fn basic_ace(ace_type: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(8 + sid.len());

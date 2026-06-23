@@ -6,8 +6,6 @@ use lcs_core::{
     validate_rsi_enum_children_metadata_completeness, validate_rsi_lookup_metadata_completeness,
 };
 
-
-
 fn push_path_entry(
     frame: &mut Vec<u8>,
     layer_name: &[u8],
@@ -28,7 +26,6 @@ fn push_metadata(frame: &mut Vec<u8>, guid: &[u8; 16]) {
     frame.push(0);
     frame.extend_from_slice(&1000u64.to_le_bytes());
 }
-
 
 fn parse_lookup_frame(
     request_id: u64,

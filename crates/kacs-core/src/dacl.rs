@@ -52,6 +52,49 @@ pub struct ObjectDaclResultList {
     pub status_list: Vec<AccessStatus>,
 }
 
+/// Inputs for object-tree result-list evaluation with restricted-token
+/// semantics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RestrictedDaclResultListInput<'a, 'ctx, 'b> {
+    /// Security descriptor being evaluated.
+    pub sd: &'b SecurityDescriptor<'a>,
+    /// Caller token view.
+    pub token: &'b TokenView<'a>,
+    /// Desired access before generic mapping.
+    pub desired_access: u32,
+    /// Generic mapping for the protected object type.
+    pub mapping: &'b GenericMapping,
+    /// Whether owner implicit rights should be skipped.
+    pub skip_owner_implicit: bool,
+    /// Object-type tree to evaluate.
+    pub object_tree: &'b ObjectTypeList,
+    /// Conditional-expression context supplied by the caller.
+    pub conditional_context: &'b ConditionalContext<'ctx>,
+    /// Restricted-token context for the second pass.
+    pub restricted_context: &'b RestrictedTokenContext<'a>,
+}
+
+/// Inputs for object-tree result-list evaluation with confinement narrowing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConfinementDaclResultListInput<'a, 'ctx, 'b> {
+    /// Security descriptor being evaluated.
+    pub sd: &'b SecurityDescriptor<'a>,
+    /// Caller token view.
+    pub token: &'b TokenView<'a>,
+    /// Desired access before generic mapping.
+    pub desired_access: u32,
+    /// Generic mapping for the protected object type.
+    pub mapping: &'b GenericMapping,
+    /// Whether owner implicit rights should be skipped.
+    pub skip_owner_implicit: bool,
+    /// Object-type tree to evaluate.
+    pub object_tree: &'b ObjectTypeList,
+    /// Conditional-expression context supplied by the caller.
+    pub conditional_context: &'b ConditionalContext<'ctx>,
+    /// Confinement context for sandbox narrowing.
+    pub confinement_context: &'b ConfinementTokenContext<'a>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AcePolarity {
     Allow,
@@ -78,6 +121,20 @@ struct ProjectedDaclAce<'a> {
 pub(crate) struct InternalDaclEvaluation {
     pub(crate) root: AccessDecisionState,
     pub(crate) object_states: Option<Vec<AccessDecisionState>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DaclStateInput<'sd, 'tok, 'ctx, 'b> {
+    pub(crate) sd: &'b SecurityDescriptor<'sd>,
+    pub(crate) token: &'b TokenView<'tok>,
+    pub(crate) normalized: NormalizedDesiredAccess,
+    pub(crate) valid_rights: u32,
+    pub(crate) mapping: &'b GenericMapping,
+    pub(crate) skip_owner_implicit: bool,
+    pub(crate) conditional_context: ConditionalContext<'ctx>,
+    pub(crate) object_tree: Option<&'b ObjectTypeList>,
+    pub(crate) initial_state: AccessDecisionState,
+    pub(crate) caller_is_owner: bool,
 }
 
 /// Evaluates the descriptor's DACL in ordinary scalar mode.
@@ -112,19 +169,21 @@ pub fn evaluate_dacl_with_context(
     let valid_rights = mapping.map_mask(GENERIC_ALL)?;
     let caller_is_owner = caller_is_owner_normal(sd, token);
     let internal = evaluate_dacl_states(
-        sd,
-        token,
-        normalized,
-        valid_rights,
-        mapping,
-        skip_owner_implicit,
-        *conditional_context,
-        None,
-        AccessDecisionState {
-            granted: 0,
-            decided: 0,
+        DaclStateInput {
+            sd,
+            token,
+            normalized,
+            valid_rights,
+            mapping,
+            skip_owner_implicit,
+            conditional_context: *conditional_context,
+            object_tree: None,
+            initial_state: AccessDecisionState {
+                granted: 0,
+                decided: 0,
+            },
+            caller_is_owner,
         },
-        caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
     Ok(finalize_scalar(internal.root, &normalized))
@@ -147,19 +206,21 @@ pub fn evaluate_dacl_with_restricted_context(
     let valid_rights = mapping.map_mask(GENERIC_ALL)?;
     let caller_is_owner = caller_is_owner_normal(sd, token);
     let normal = evaluate_dacl_states(
-        sd,
-        token,
-        normalized,
-        valid_rights,
-        mapping,
-        skip_owner_implicit,
-        *conditional_context,
-        None,
-        AccessDecisionState {
-            granted: 0,
-            decided: 0,
+        DaclStateInput {
+            sd,
+            token,
+            normalized,
+            valid_rights,
+            mapping,
+            skip_owner_implicit,
+            conditional_context: *conditional_context,
+            object_tree: None,
+            initial_state: AccessDecisionState {
+                granted: 0,
+                decided: 0,
+            },
+            caller_is_owner,
         },
-        caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
 
@@ -189,19 +250,21 @@ pub fn evaluate_dacl_with_restricted_context(
     restricted_conditions.device_membership_uses_virtual_groups = true;
 
     let restricted = evaluate_dacl_states(
-        sd,
-        token,
-        normalized,
-        valid_rights,
-        mapping,
-        false,
-        restricted_conditions,
-        None,
-        AccessDecisionState {
-            granted: 0,
-            decided: 0,
+        DaclStateInput {
+            sd,
+            token,
+            normalized,
+            valid_rights,
+            mapping,
+            skip_owner_implicit: false,
+            conditional_context: restricted_conditions,
+            object_tree: None,
+            initial_state: AccessDecisionState {
+                granted: 0,
+                decided: 0,
+            },
+            caller_is_owner: restricted_owner,
         },
-        restricted_owner,
         |sid, _| restricted_contains(restricted_context.restricted_sids, sid),
     )?;
 
@@ -231,19 +294,21 @@ pub fn evaluate_dacl_with_confinement_context(
     let valid_rights = mapping.map_mask(GENERIC_ALL)?;
     let caller_is_owner = caller_is_owner_normal(sd, token);
     let normal = evaluate_dacl_states(
-        sd,
-        token,
-        normalized,
-        valid_rights,
-        mapping,
-        skip_owner_implicit,
-        *conditional_context,
-        None,
-        AccessDecisionState {
-            granted: 0,
-            decided: 0,
+        DaclStateInput {
+            sd,
+            token,
+            normalized,
+            valid_rights,
+            mapping,
+            skip_owner_implicit,
+            conditional_context: *conditional_context,
+            object_tree: None,
+            initial_state: AccessDecisionState {
+                granted: 0,
+                decided: 0,
+            },
+            caller_is_owner,
         },
-        caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
 
@@ -267,19 +332,21 @@ pub fn evaluate_dacl_with_confinement_context(
     confinement_conditions.device_membership_uses_virtual_groups = true;
 
     let confinement = evaluate_dacl_states(
-        sd,
-        token,
-        normalized,
-        valid_rights,
-        mapping,
-        true,
-        confinement_conditions,
-        None,
-        AccessDecisionState {
-            granted: 0,
-            decided: 0,
+        DaclStateInput {
+            sd,
+            token,
+            normalized,
+            valid_rights,
+            mapping,
+            skip_owner_implicit: true,
+            conditional_context: confinement_conditions,
+            object_tree: None,
+            initial_state: AccessDecisionState {
+                granted: 0,
+                decided: 0,
+            },
+            caller_is_owner: confinement_owner,
         },
-        confinement_owner,
         |sid, _| {
             sid == confinement_sid || confinement_contains_capability(confinement_context, sid)
         },
@@ -354,19 +421,21 @@ pub fn evaluate_dacl_with_object_tree_and_context(
     let valid_rights = mapping.map_mask(GENERIC_ALL)?;
     let caller_is_owner = caller_is_owner_normal(sd, token);
     let internal = evaluate_dacl_states(
-        sd,
-        token,
-        normalized,
-        valid_rights,
-        mapping,
-        skip_owner_implicit,
-        *conditional_context,
-        Some(object_tree),
-        AccessDecisionState {
-            granted: 0,
-            decided: 0,
+        DaclStateInput {
+            sd,
+            token,
+            normalized,
+            valid_rights,
+            mapping,
+            skip_owner_implicit,
+            conditional_context: *conditional_context,
+            object_tree: Some(object_tree),
+            initial_state: AccessDecisionState {
+                granted: 0,
+                decided: 0,
+            },
+            caller_is_owner,
         },
-        caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
     Ok(finalize_scalar(internal.root, &normalized))
@@ -413,74 +482,81 @@ pub fn evaluate_dacl_result_list_with_context(
     let valid_rights = mapping.map_mask(GENERIC_ALL)?;
     let caller_is_owner = caller_is_owner_normal(sd, token);
     let internal = evaluate_dacl_states(
-        sd,
-        token,
-        normalized,
-        valid_rights,
-        mapping,
-        skip_owner_implicit,
-        *conditional_context,
-        Some(object_tree),
-        AccessDecisionState {
-            granted: 0,
-            decided: 0,
+        DaclStateInput {
+            sd,
+            token,
+            normalized,
+            valid_rights,
+            mapping,
+            skip_owner_implicit,
+            conditional_context: *conditional_context,
+            object_tree: Some(object_tree),
+            initial_state: AccessDecisionState {
+                granted: 0,
+                decided: 0,
+            },
+            caller_is_owner,
         },
-        caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
-    Ok(finalize_result_list(
+    finalize_result_list(
         internal
             .object_states
             .as_ref()
             .expect("object-tree evaluation always builds result-list output"),
         &normalized,
-    )?)
+    )
 }
 
 /// Evaluates the descriptor's DACL and returns the full object-tree result
 /// list with restricted-token semantics.
 pub fn evaluate_dacl_result_list_with_restricted_context(
-    sd: &SecurityDescriptor<'_>,
-    token: &TokenView<'_>,
-    desired_access: u32,
-    mapping: &GenericMapping,
-    skip_owner_implicit: bool,
-    object_tree: &ObjectTypeList,
-    conditional_context: &ConditionalContext<'_>,
-    restricted_context: &RestrictedTokenContext<'_>,
+    input: RestrictedDaclResultListInput<'_, '_, '_>,
 ) -> KacsResult<ObjectDaclResultList> {
+    let RestrictedDaclResultListInput {
+        sd,
+        token,
+        desired_access,
+        mapping,
+        skip_owner_implicit,
+        object_tree,
+        conditional_context,
+        restricted_context,
+    } = input;
     validate_restricted_invariants(token, restricted_context)?;
 
     let normalized = mapping.normalize_desired_access(desired_access)?;
     let valid_rights = mapping.map_mask(GENERIC_ALL)?;
     let caller_is_owner = caller_is_owner_normal(sd, token);
     let normal = evaluate_dacl_states(
-        sd,
-        token,
-        normalized,
-        valid_rights,
-        mapping,
-        skip_owner_implicit,
-        *conditional_context,
-        Some(object_tree),
-        AccessDecisionState {
-            granted: 0,
-            decided: 0,
+        DaclStateInput {
+            sd,
+            token,
+            normalized,
+            valid_rights,
+            mapping,
+            skip_owner_implicit,
+            conditional_context: *conditional_context,
+            object_tree: Some(object_tree),
+            initial_state: AccessDecisionState {
+                granted: 0,
+                decided: 0,
+            },
+            caller_is_owner,
         },
-        caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
 
     if restricted_context.restricted_sids.is_empty()
         && restricted_context.restricted_device_groups.is_empty()
     {
-        return Ok(finalize_result_list(
+        return finalize_result_list(
             normal
                 .object_states
                 .as_ref()
                 .expect("object-tree evaluation always builds result-list output"),
             &normalized,
-        )?);
+        );
     }
 
     let restricted_owner = sd
@@ -503,19 +579,21 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
     restricted_conditions.device_membership_uses_virtual_groups = true;
 
     let restricted = evaluate_dacl_states(
-        sd,
-        token,
-        normalized,
-        valid_rights,
-        mapping,
-        false,
-        restricted_conditions,
-        Some(object_tree),
-        AccessDecisionState {
-            granted: 0,
-            decided: 0,
+        DaclStateInput {
+            sd,
+            token,
+            normalized,
+            valid_rights,
+            mapping,
+            skip_owner_implicit: false,
+            conditional_context: restricted_conditions,
+            object_tree: Some(object_tree),
+            initial_state: AccessDecisionState {
+                granted: 0,
+                decided: 0,
+            },
+            caller_is_owner: restricted_owner,
         },
-        restricted_owner,
         |sid, _| restricted_contains(restricted_context.restricted_sids, sid),
     )?;
 
@@ -527,64 +605,69 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
         restricted_context.write_restricted,
         restricted_context.privilege_granted,
     );
-    Ok(finalize_result_list(
+    finalize_result_list(
         merged
             .object_states
             .as_ref()
             .expect("restricted object-tree evaluation must retain states"),
         &normalized,
-    )?)
+    )
 }
 
 /// Evaluates the descriptor's DACL and returns the full object-tree result
 /// list after confinement narrowing.
 pub fn evaluate_dacl_result_list_with_confinement_context(
-    sd: &SecurityDescriptor<'_>,
-    token: &TokenView<'_>,
-    desired_access: u32,
-    mapping: &GenericMapping,
-    skip_owner_implicit: bool,
-    object_tree: &ObjectTypeList,
-    conditional_context: &ConditionalContext<'_>,
-    confinement_context: &ConfinementTokenContext<'_>,
+    input: ConfinementDaclResultListInput<'_, '_, '_>,
 ) -> KacsResult<ObjectDaclResultList> {
+    let ConfinementDaclResultListInput {
+        sd,
+        token,
+        desired_access,
+        mapping,
+        skip_owner_implicit,
+        object_tree,
+        conditional_context,
+        confinement_context,
+    } = input;
     let normalized = mapping.normalize_desired_access(desired_access)?;
     let valid_rights = mapping.map_mask(GENERIC_ALL)?;
     let caller_is_owner = caller_is_owner_normal(sd, token);
     let normal = evaluate_dacl_states(
-        sd,
-        token,
-        normalized,
-        valid_rights,
-        mapping,
-        skip_owner_implicit,
-        *conditional_context,
-        Some(object_tree),
-        AccessDecisionState {
-            granted: 0,
-            decided: 0,
+        DaclStateInput {
+            sd,
+            token,
+            normalized,
+            valid_rights,
+            mapping,
+            skip_owner_implicit,
+            conditional_context: *conditional_context,
+            object_tree: Some(object_tree),
+            initial_state: AccessDecisionState {
+                granted: 0,
+                decided: 0,
+            },
+            caller_is_owner,
         },
-        caller_is_owner,
         |sid, polarity| sid_matches_token(token, sid, polarity),
     )?;
 
     let Some(confinement_sid) = confinement_context.confinement_sid else {
-        return Ok(finalize_result_list(
+        return finalize_result_list(
             normal
                 .object_states
                 .as_ref()
                 .expect("object-tree evaluation always builds result-list output"),
             &normalized,
-        )?);
+        );
     };
     if confinement_context.confinement_exempt {
-        return Ok(finalize_result_list(
+        return finalize_result_list(
             normal
                 .object_states
                 .as_ref()
                 .expect("object-tree evaluation always builds result-list output"),
             &normalized,
-        )?);
+        );
     }
 
     let confinement_owner = sd
@@ -600,50 +683,55 @@ pub fn evaluate_dacl_result_list_with_confinement_context(
     confinement_conditions.device_membership_uses_virtual_groups = true;
 
     let confinement = evaluate_dacl_states(
-        sd,
-        token,
-        normalized,
-        valid_rights,
-        mapping,
-        true,
-        confinement_conditions,
-        Some(object_tree),
-        AccessDecisionState {
-            granted: 0,
-            decided: 0,
+        DaclStateInput {
+            sd,
+            token,
+            normalized,
+            valid_rights,
+            mapping,
+            skip_owner_implicit: true,
+            conditional_context: confinement_conditions,
+            object_tree: Some(object_tree),
+            initial_state: AccessDecisionState {
+                granted: 0,
+                decided: 0,
+            },
+            caller_is_owner: confinement_owner,
         },
-        confinement_owner,
         |sid, _| {
             sid == confinement_sid || confinement_contains_capability(confinement_context, sid)
         },
     )?;
 
     let merged = merge_absolute_results(normal, &confinement);
-    Ok(finalize_result_list(
+    finalize_result_list(
         merged
             .object_states
             .as_ref()
             .expect("confinement object-tree evaluation must retain states"),
         &normalized,
-    )?)
+    )
 }
 
 pub(crate) fn evaluate_dacl_states<F>(
-    sd: &SecurityDescriptor<'_>,
-    token: &TokenView<'_>,
-    normalized: NormalizedDesiredAccess,
-    valid_rights: u32,
-    mapping: &GenericMapping,
-    skip_owner_implicit: bool,
-    conditional_context: ConditionalContext<'_>,
-    object_tree: Option<&ObjectTypeList>,
-    initial_state: AccessDecisionState,
-    caller_is_owner: bool,
+    input: DaclStateInput<'_, '_, '_, '_>,
     sid_matches: F,
 ) -> KacsResult<InternalDaclEvaluation>
 where
     F: Fn(Sid<'_>, AcePolarity) -> bool + Copy,
 {
+    let DaclStateInput {
+        sd,
+        token,
+        normalized,
+        valid_rights,
+        mapping,
+        skip_owner_implicit,
+        conditional_context,
+        object_tree,
+        initial_state,
+        caller_is_owner,
+    } = input;
     let relevant_mask = if normalized.maximum_allowed {
         valid_rights
     } else {

@@ -1,9 +1,8 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
     CurrentUserRewrite, LcsError, current_user_sid_component_from_binary_sid,
     for_each_routable_path_component,
 };
-
 
 fn sid_bytes(authority: [u8; 6], sub_authorities: &[u32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(8 + sub_authorities.len() * 4);

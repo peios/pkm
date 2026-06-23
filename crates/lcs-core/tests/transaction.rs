@@ -1,6 +1,8 @@
 //! lcs-core integration tests: transaction.
 //! Each submodule is one behavioural test file; shared helpers live in `common`.
 
+#![allow(clippy::field_reassign_with_default)]
+
 mod common;
 
 #[path = "transaction/transaction_binding.rs"]

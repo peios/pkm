@@ -1,4 +1,4 @@
-use crate::common::{finish_total_len};
+use crate::common::finish_total_len;
 use lcs_core::{
     LcsError, RSI_DELETE_LAYER, RSI_MIN_RESPONSE_LEN, RSI_NOT_EMPTY, RSI_OK, RSI_READ_KEY,
     RsiGuidArray, RsiResponseHeader, RsiRetainedRequest, RsiStatus, RsiValidatedResponse,
@@ -13,7 +13,6 @@ fn response_frame(request_id: u64, op_code: u16, status: u32) -> Vec<u8> {
     frame.extend_from_slice(&status.to_le_bytes());
     frame
 }
-
 
 #[test]
 fn delete_layer_success_response_parses_count_prefixed_orphan_guid_array() {

@@ -13,9 +13,6 @@ use std::collections::BTreeMap;
 
 const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
 
-
-
-
 fn callback_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8], app_data: &[u8]) -> Vec<u8> {
     let size = (8 + sid.len() + app_data.len() + 3) & !3;
     let mut bytes = Vec::with_capacity(size);
@@ -42,7 +39,6 @@ fn resource_attribute_ace(application_data: &[u8]) -> Vec<u8> {
     bytes.resize(size, 0);
     bytes
 }
-
 
 fn utf16_cstr(value: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -77,7 +73,6 @@ fn claim_array(entries: &[Vec<u8>]) -> Vec<u8> {
     bytes
 }
 
-
 fn string_literal(value: &str) -> Vec<u8> {
     let utf16: Vec<u16> = value.encode_utf16().collect();
     let mut bytes = Vec::new();
@@ -95,7 +90,6 @@ fn attr_ref(opcode: u8, name: &str) -> Vec<u8> {
     bytes.extend_from_slice(&string_literal(name)[1..]);
     bytes
 }
-
 
 fn sd_bytes(owner: &[u8], group: &[u8], dacl: &[u8]) -> Vec<u8> {
     let control = SE_SELF_RELATIVE | SE_DACL_PRESENT;
@@ -799,7 +793,11 @@ fn oversized_local_claims_len_is_rejected_before_read() {
     write_u32(&mut args, 28, WRITE_DAC);
     write_u32(&mut args, 36, READ_CONTROL | WRITE_DAC);
     write_u64(&mut args, 72, 0x2000);
-    write_u32(&mut args, 80, kacs_core::KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN + 1);
+    write_u32(
+        &mut args,
+        80,
+        kacs_core::KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN + 1,
+    );
 
     let error = parse_access_check_abi_request(&args, &memory)
         .expect_err("oversized local_claims_len must fail");

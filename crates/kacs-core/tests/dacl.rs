@@ -8,9 +8,6 @@ use kacs_core::{
     SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE, WRITE_DAC,
 };
 
-
-
-
 fn object_ace(
     ace_type: u8,
     flags: u8,

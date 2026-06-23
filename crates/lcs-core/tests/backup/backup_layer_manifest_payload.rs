@@ -5,8 +5,6 @@ use lcs_core::{
     write_backup_layer_manifest_record_frame,
 };
 
-
-
 fn layer_payload(name: &[u8], precedence: u32, enabled: u8, owner_sid: &[u8]) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&(name.len() as u32).to_le_bytes());

@@ -5,9 +5,11 @@ use crate::pkm_alloc::{slice_to_vec, String, Vec};
 use crate::sid::Sid;
 
 /// Claim flag requesting case-sensitive string comparisons.
-pub const CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE: u32 = peios_uapi::KACS_CLAIM_ATTR_CASE_SENSITIVE;
+pub const CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE: u32 =
+    peios_uapi::KACS_CLAIM_ATTR_CASE_SENSITIVE;
 /// Claim flag marking the attribute as deny-only.
-pub const CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY: u32 = peios_uapi::KACS_CLAIM_ATTR_USE_FOR_DENY_ONLY;
+pub const CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY: u32 =
+    peios_uapi::KACS_CLAIM_ATTR_USE_FOR_DENY_ONLY;
 /// Claim flag marking the attribute as disabled.
 pub const CLAIM_SECURITY_ATTRIBUTE_DISABLED: u32 = peios_uapi::KACS_CLAIM_ATTR_DISABLED;
 

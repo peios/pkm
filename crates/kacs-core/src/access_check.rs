@@ -1,9 +1,11 @@
 use crate::audit::{evaluate_sacl, AuditEvent};
-use crate::caap::{evaluate_caap, CaapPolicyEntry, CaapSaclContribution, CaapSaclPhase};
+use crate::caap::{
+    evaluate_caap, CaapEvaluationInput, CaapPolicyEntry, CaapSaclContribution, CaapSaclPhase,
+};
 use crate::condition::ConditionalContext;
 use crate::dacl::AccessStatus;
 use crate::error::{KacsError, KacsResult};
-use crate::evaluate_sd::evaluate_security_descriptor;
+use crate::evaluate_sd::{evaluate_security_descriptor, EvaluateSecurityDescriptorInput};
 use crate::object_tree::ObjectTypeList;
 use crate::pip::PipContext;
 use crate::pkm_alloc::{slice_to_vec, Vec};
@@ -142,6 +144,17 @@ pub struct AccessCheckResultListState {
     pub staging_mismatch: bool,
 }
 
+struct PrivilegeUseInput<'a, 'b> {
+    mode: AccessCheckMode,
+    token: &'b AccessCheckToken<'a>,
+    provenance: &'b PrivilegeProvenance,
+    mapped_desired: u32,
+    final_granted: u32,
+    object_granted_list: Option<&'b [u32]>,
+    max_allowed_mode: bool,
+    object_audit_context: Option<&'a [u8]>,
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Executes the full pure-core AccessCheck pipeline and returns the complete
 /// internal state used by the ABI and kernel ingress layers.
@@ -166,8 +179,8 @@ pub fn access_check_core<'a>(
 
     let sd = sd.ok_or(KacsError::NullSecurityDescriptor)?;
 
-    let base = evaluate_security_descriptor(
-        Some(sd),
+    let base = evaluate_security_descriptor(EvaluateSecurityDescriptorInput {
+        sd: Some(sd),
         token,
         pip,
         desired_access,
@@ -175,8 +188,8 @@ pub fn access_check_core<'a>(
         object_tree,
         conditional_context,
         privilege_intent,
-    )?;
-    let caap = evaluate_caap(
+    })?;
+    let caap = evaluate_caap(CaapEvaluationInput {
         sd,
         token,
         pip,
@@ -184,9 +197,9 @@ pub fn access_check_core<'a>(
         mapping,
         object_tree,
         conditional_context,
-        &base,
+        base: &base,
         policies,
-    )?;
+    })?;
 
     let mut staging_mismatch = false;
     let mut object_results_differ = false;
@@ -204,16 +217,16 @@ pub fn access_check_core<'a>(
         }
     }
 
-    let (used_delta, privilege_use_events) = evaluate_privilege_use(
+    let (used_delta, privilege_use_events) = evaluate_privilege_use(PrivilegeUseInput {
         mode,
         token,
-        &base.provenance,
-        base.mapped_desired,
-        caap.granted,
-        caap.object_granted_list.as_deref(),
-        base.max_allowed_mode,
+        provenance: &base.provenance,
+        mapped_desired: base.mapped_desired,
+        final_granted: caap.granted,
+        object_granted_list: caap.object_granted_list.as_deref(),
+        max_allowed_mode: base.max_allowed_mode,
         object_audit_context,
-    )?;
+    })?;
 
     let owner = sd
         .owner()
@@ -578,15 +591,18 @@ pub fn access_check_result_list<'a>(
 }
 
 fn evaluate_privilege_use(
-    mode: AccessCheckMode,
-    token: &AccessCheckToken<'_>,
-    provenance: &PrivilegeProvenance,
-    mapped_desired: u32,
-    final_granted: u32,
-    object_granted_list: Option<&[u32]>,
-    max_allowed_mode: bool,
-    object_audit_context: Option<&[u8]>,
+    input: PrivilegeUseInput<'_, '_>,
 ) -> KacsResult<(u64, Vec<PrivilegeUseEvent>)> {
+    let PrivilegeUseInput {
+        mode,
+        token,
+        provenance,
+        mapped_desired,
+        final_granted,
+        object_granted_list,
+        max_allowed_mode,
+        object_audit_context,
+    } = input;
     if max_allowed_mode {
         return Ok((0, Vec::new()));
     }

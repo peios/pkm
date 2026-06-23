@@ -1,10 +1,9 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
     InternalLayerMetadataRefreshLockPlan, InternalLayerMetadataRefreshReason,
     InternalWatchCallbackPlan, InternalWatchDirtyPath, REG_WATCH_SUBKEY_CREATED,
     plan_internal_layer_metadata_refresh_locking, plan_internal_watch_callback,
 };
-
 
 #[test]
 fn layer_metadata_refresh_releases_locks_before_source_round_trip() {

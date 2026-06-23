@@ -78,6 +78,17 @@ struct BuiltDacl {
     source: DaclSource,
 }
 
+struct SingleSidAceWriteInput<'sid, 'owner, 'group> {
+    ace_type: u8,
+    ace_flags: u8,
+    mask: u32,
+    sid: Sid<'sid>,
+    owner: Sid<'owner>,
+    group: Sid<'group>,
+    mapping: GenericMapping,
+    valid_mapped_mask: u32,
+}
+
 /// Computes the child SD for a newly created registry key.
 pub fn inherit_registry_container_child_sd(
     input: RegistryContainerChildInheritance<'_>,
@@ -254,8 +265,8 @@ fn rewrite_ace(
     valid_mapped_mask: u32,
 ) -> KacsResult<PkmVec<u8>> {
     match ace.kind() {
-        AceKind::SingleSid { mask, sid } => write_single_sid_ace(
-            ace.ace_type(),
+        AceKind::SingleSid { mask, sid } => write_single_sid_ace(SingleSidAceWriteInput {
+            ace_type: ace.ace_type(),
             ace_flags,
             mask,
             sid,
@@ -263,7 +274,7 @@ fn rewrite_ace(
             group,
             mapping,
             valid_mapped_mask,
-        ),
+        }),
         AceKind::Object {
             mask,
             flags,
@@ -341,16 +352,17 @@ fn rewrite_ace(
     }
 }
 
-fn write_single_sid_ace(
-    ace_type: u8,
-    ace_flags: u8,
-    mask: u32,
-    sid: Sid<'_>,
-    owner: Sid<'_>,
-    group: Sid<'_>,
-    mapping: GenericMapping,
-    valid_mapped_mask: u32,
-) -> KacsResult<PkmVec<u8>> {
+fn write_single_sid_ace(input: SingleSidAceWriteInput<'_, '_, '_>) -> KacsResult<PkmVec<u8>> {
+    let SingleSidAceWriteInput {
+        ace_type,
+        ace_flags,
+        mask,
+        sid,
+        owner,
+        group,
+        mapping,
+        valid_mapped_mask,
+    } = input;
     let mut payload = PkmVec::new();
     push_u32(
         &mut payload,

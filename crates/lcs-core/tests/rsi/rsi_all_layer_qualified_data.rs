@@ -1,14 +1,13 @@
 use crate::common::{field, finish_total_len, push_len_prefixed, response_frame};
 use lcs_core::{
     REG_BINARY, REG_SZ, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_PATH_TARGET_GUID,
-    RSI_PATH_TARGET_HIDDEN, RSI_QUERY_VALUES, RSI_REQUEST_HEADER_LEN,
-    RsiLookupPathEntry, RsiPathTargetType, RsiQueryValueResponseEntry,
-    RsiQueryValuesBlanketResponseEntry, RsiRetainedRequest,
-    parse_rsi_enum_children_success_response_payload, parse_rsi_lookup_request_payload,
-    parse_rsi_lookup_success_response_payload, parse_rsi_query_values_request_payload,
-    parse_rsi_query_values_success_response_payload, parse_rsi_request_header,
-    rsi_response_op_code, write_rsi_enum_children_request_frame, write_rsi_lookup_request_frame,
-    write_rsi_query_values_request_frame,
+    RSI_PATH_TARGET_HIDDEN, RSI_QUERY_VALUES, RSI_REQUEST_HEADER_LEN, RsiLookupPathEntry,
+    RsiPathTargetType, RsiQueryValueResponseEntry, RsiQueryValuesBlanketResponseEntry,
+    RsiRetainedRequest, parse_rsi_enum_children_success_response_payload,
+    parse_rsi_lookup_request_payload, parse_rsi_lookup_success_response_payload,
+    parse_rsi_query_values_request_payload, parse_rsi_query_values_success_response_payload,
+    parse_rsi_request_header, rsi_response_op_code, write_rsi_enum_children_request_frame,
+    write_rsi_lookup_request_frame, write_rsi_query_values_request_frame,
 };
 
 const PARENT_GUID: [u8; 16] = [
@@ -20,10 +19,6 @@ const KEY_GUID: [u8; 16] = [
 const USER_GUID: [u8; 16] = [
     0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
 ];
-
-
-
-
 
 fn push_path_entry(frame: &mut Vec<u8>, layer: &[u8], target_type: u8, guid: &[u8; 16], seq: u64) {
     push_len_prefixed(frame, layer);

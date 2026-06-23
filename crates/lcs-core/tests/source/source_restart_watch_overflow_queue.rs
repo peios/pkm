@@ -13,9 +13,10 @@ fn entry(event_type: u32, total_len: u32) -> WatchQueueEntry {
 }
 
 fn limits(queue_size: usize) -> LcsLimits {
-    let mut limits = LcsLimits::default();
-    limits.notification_queue_size = queue_size;
-    limits
+    LcsLimits {
+        notification_queue_size: queue_size,
+        ..LcsLimits::default()
+    }
 }
 
 fn event_types(queue: &[WatchQueueEntry], len: usize) -> Vec<u32> {

@@ -1,6 +1,8 @@
 //! lcs-core integration tests: api.
 //! Each submodule is one behavioural test file; shared helpers live in `common`.
 
+#![allow(clippy::field_reassign_with_default)]
+
 mod common;
 
 #[path = "api/abi_reserved_zero_primitive.rs"]

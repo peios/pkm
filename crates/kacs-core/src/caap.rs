@@ -4,7 +4,9 @@ use crate::condition::{
     ConditionalResult,
 };
 use crate::error::{KacsError, KacsResult};
-use crate::evaluate_sd::{evaluate_security_descriptor, EvaluateSecurityDescriptorState};
+use crate::evaluate_sd::{
+    evaluate_security_descriptor, EvaluateSecurityDescriptorInput, EvaluateSecurityDescriptorState,
+};
 use crate::object_tree::ObjectTypeList;
 use crate::pip::PipContext;
 use crate::pkm_alloc::{slice_to_vec, Vec};
@@ -220,6 +222,41 @@ pub struct CaapEvaluationState<'a> {
     pub staged_sacls: Vec<CaapSaclContribution<'a>>,
 }
 
+/// Inputs for evaluating CAAP policies after the base security-descriptor pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CaapEvaluationInput<'a, 'b> {
+    /// Base security descriptor that referenced the policies.
+    pub sd: &'b SecurityDescriptor<'a>,
+    /// Caller token.
+    pub token: &'b AccessCheckToken<'a>,
+    /// Process-trust label context.
+    pub pip: PipContext,
+    /// Desired access before generic mapping.
+    pub desired_access: u32,
+    /// Generic mapping for the protected object type.
+    pub mapping: &'b GenericMapping,
+    /// Optional object-type tree for object-specific access checks.
+    pub object_tree: Option<&'b ObjectTypeList>,
+    /// Conditional-expression context supplied by the caller.
+    pub conditional_context: &'b ConditionalContext<'a>,
+    /// Base security-descriptor evaluation state.
+    pub base: &'b EvaluateSecurityDescriptorState<'a>,
+    /// Policies available for referenced policy SIDs.
+    pub policies: &'b [CaapPolicyEntry<'a>],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RuleDaclEvaluationInput<'a, 'b> {
+    base_sd: &'b SecurityDescriptor<'a>,
+    token: &'b AccessCheckToken<'a>,
+    pip: PipContext,
+    desired_access: u32,
+    mapping: &'b GenericMapping,
+    object_tree: Option<&'b ObjectTypeList>,
+    conditional_context: &'b ConditionalContext<'a>,
+    dacl_bytes: &'b [u8],
+}
+
 /// Identifies the CAAP audit phase that contributed a SACL payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaapSaclPhase {
@@ -335,16 +372,19 @@ pub fn parse_caap_policy_spec(spec: &[u8]) -> KacsResult<OwnedCaapPolicy> {
 /// Evaluates all CAAP policies referenced by the base security descriptor
 /// result.
 pub fn evaluate_caap<'a>(
-    sd: &SecurityDescriptor<'a>,
-    token: &AccessCheckToken<'a>,
-    pip: PipContext,
-    desired_access: u32,
-    mapping: &GenericMapping,
-    object_tree: Option<&ObjectTypeList>,
-    conditional_context: &ConditionalContext<'a>,
-    base: &EvaluateSecurityDescriptorState<'a>,
-    policies: &[CaapPolicyEntry<'a>],
+    input: CaapEvaluationInput<'a, '_>,
 ) -> KacsResult<CaapEvaluationState<'a>> {
+    let CaapEvaluationInput {
+        sd,
+        token,
+        pip,
+        desired_access,
+        mapping,
+        object_tree,
+        conditional_context,
+        base,
+        policies,
+    } = input;
     let mut granted = base.granted;
     let mut object_granted_list = clone_base_object_grants(base, object_tree)?;
     let mut staged_granted = base.granted;
@@ -461,16 +501,16 @@ fn apply_rule<'a>(
         return Ok(());
     }
 
-    let effective_rule = evaluate_rule_dacl(
-        sd,
+    let effective_rule = evaluate_rule_dacl(RuleDaclEvaluationInput {
+        base_sd: sd,
         token,
         pip,
         desired_access,
         mapping,
         object_tree,
         conditional_context,
-        effective_dacl,
-    );
+        dacl_bytes: effective_dacl,
+    });
 
     let effective_state = match &effective_rule {
         Some(state) => clone_rule_grants(state)?,
@@ -491,16 +531,16 @@ fn apply_rule<'a>(
     }
 
     let staged_state = if let Some(staged_dacl) = staged_dacl {
-        match evaluate_rule_dacl(
-            sd,
+        match evaluate_rule_dacl(RuleDaclEvaluationInput {
+            base_sd: sd,
             token,
             pip,
             desired_access,
             mapping,
             object_tree,
             conditional_context,
-            staged_dacl,
-        ) {
+            dacl_bytes: staged_dacl,
+        }) {
             Some(state) => state,
             None => deny_except_privileges(0, base.privilege_granted, object_tree)?,
         }
@@ -577,28 +617,29 @@ fn rule_applies(
         == ConditionalResult::True
 }
 
-fn evaluate_rule_dacl<'a>(
-    base_sd: &SecurityDescriptor<'a>,
-    token: &AccessCheckToken<'a>,
-    pip: PipContext,
-    desired_access: u32,
-    mapping: &GenericMapping,
-    object_tree: Option<&ObjectTypeList>,
-    conditional_context: &ConditionalContext<'a>,
-    dacl_bytes: &[u8],
-) -> Option<RuleGrantState> {
-    let synthetic_bytes = build_synthetic_sd_bytes(base_sd, dacl_bytes).ok()?;
-    let synthetic_sd = SecurityDescriptor::parse(&synthetic_bytes).ok()?;
-    let result = evaluate_security_descriptor(
-        Some(&synthetic_sd),
+fn evaluate_rule_dacl(input: RuleDaclEvaluationInput<'_, '_>) -> Option<RuleGrantState> {
+    let RuleDaclEvaluationInput {
+        base_sd,
         token,
         pip,
         desired_access,
         mapping,
         object_tree,
         conditional_context,
-        0,
-    )
+        dacl_bytes,
+    } = input;
+    let synthetic_bytes = build_synthetic_sd_bytes(base_sd, dacl_bytes).ok()?;
+    let synthetic_sd = SecurityDescriptor::parse(&synthetic_bytes).ok()?;
+    let result = evaluate_security_descriptor(EvaluateSecurityDescriptorInput {
+        sd: Some(&synthetic_sd),
+        token,
+        pip,
+        desired_access,
+        mapping,
+        object_tree,
+        conditional_context,
+        privilege_intent: 0,
+    })
     .ok()?;
 
     Some(RuleGrantState {

@@ -1,6 +1,7 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
-    DeleteKeyInput, Guid, HideKeyInput, KeyFdNamespaceView, KeyPathMutationInput, LcsError, NIL_GUID, PathTarget, SequenceCounter, derive_key_path_mutation, plan_key_delete,
+    DeleteKeyInput, Guid, HideKeyInput, KeyFdNamespaceView, KeyPathMutationInput, LcsError,
+    NIL_GUID, PathTarget, SequenceCounter, derive_key_path_mutation, plan_key_delete,
     plan_key_hide,
 };
 
@@ -8,7 +9,6 @@ const ROOT_GUID: Guid = [0x01; 16];
 const PARENT_GUID: Guid = [0x02; 16];
 const CHILD_GUID: Guid = [0x03; 16];
 static CHILD_ANCESTORS: [Guid; 3] = [ROOT_GUID, PARENT_GUID, CHILD_GUID];
-
 
 fn child_fd<'a>(path: &'a [&'a str]) -> KeyFdNamespaceView<'a> {
     KeyFdNamespaceView {

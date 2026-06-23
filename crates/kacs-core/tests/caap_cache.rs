@@ -1,5 +1,8 @@
 mod common;
-use common::{acl_bytes, append_tokens, basic_ace, expr, object_ace, parse_sid, resource_attribute_ace, sid_bytes};
+use common::{
+    acl_bytes, append_tokens, basic_ace, expr, object_ace, parse_sid, resource_attribute_ace,
+    sid_bytes,
+};
 use kacs_core::{
     access_check_core, parse_caap_policy_spec, AccessCheckMode, AccessCheckToken, CaapPolicyCache,
     ConditionalContext, GenericMapping, ImpersonationLevel, IntegrityLevel, PipContext,
@@ -19,10 +22,6 @@ const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
 const MAX_CAAP_SPEC_LEN: usize = 256 * 1024;
 const MAX_CAAP_RULE_COUNT: u32 = 256;
 const MAX_CAAP_FIELD_LEN: usize = 64 * 1024;
-
-
-
-
 
 fn callback_ace(
     ace_type: u8,
@@ -84,7 +83,6 @@ fn opaque_acl_with_len(len: usize) -> Vec<u8> {
     bytes
 }
 
-
 fn scoped_policy_ace(policy_sid: &[u8]) -> Vec<u8> {
     basic_ace(SYSTEM_SCOPED_POLICY_ID_ACE_TYPE, 0, 0, policy_sid)
 }
@@ -113,7 +111,6 @@ fn int64_claim(name: &str, value: i64) -> Vec<u8> {
     bytes.extend_from_slice(&utf16_cstr(name));
     bytes
 }
-
 
 fn sd_bytes(
     owner: Option<&[u8]>,
@@ -155,7 +152,6 @@ fn sd_bytes(
     bytes
 }
 
-
 fn overflowing_expr() -> Vec<u8> {
     let mut bytes = b"artx".to_vec();
     for _ in 0..1025 {
@@ -190,7 +186,6 @@ fn attr_ref(opcode: u8, name: &str) -> Vec<u8> {
     bytes.extend_from_slice(&string_literal(name)[1..]);
     bytes
 }
-
 
 fn caap_spec(
     applies_to: Option<&[u8]>,
@@ -237,7 +232,9 @@ fn caap_spec_with_rule_count(rule_count: u32, effective_dacl: &[u8]) -> Vec<u8> 
     bytes
 }
 
-fn caap_spec_with_rule_fields(rules: &[(&[u8], &[u8], &[u8], &[u8], &[u8])]) -> Vec<u8> {
+type CaapSpecRuleFields<'a> = (&'a [u8], &'a [u8], &'a [u8], &'a [u8], &'a [u8]);
+
+fn caap_spec_with_rule_fields(rules: &[CaapSpecRuleFields<'_>]) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.push(0x01);
     bytes.extend_from_slice(&(rules.len() as u32).to_le_bytes());

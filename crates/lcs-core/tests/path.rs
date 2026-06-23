@@ -1,6 +1,8 @@
 //! lcs-core integration tests: path.
 //! Each submodule is one behavioural test file; shared helpers live in `common`.
 
+#![allow(clippy::field_reassign_with_default)]
+
 mod common;
 
 #[path = "path/canonical_key_locations.rs"]

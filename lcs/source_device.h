@@ -28,6 +28,17 @@ enum pkm_lcs_source_fd_state {
 #define PKM_LCS_REQUEST_TIMEOUT_MS_DEFAULT 30000U
 #define PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT 16U
 #define PKM_LCS_KEY_GUID_ASSIGNMENT_MAX_ATTEMPTS 8U
+#define PKM_LCS_MAX_HIVE_NAME_BYTES_HARD 1024U
+#define PKM_LCS_MAX_LAYER_NAME_BYTES_HARD 1024U
+#define PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD 65535U
+#define PKM_LCS_MAX_SYSCALL_PATH_BYTES_HARD \
+	(PKM_LCS_MAX_TOTAL_PATH_BYTES_HARD + 1U)
+#define PKM_LCS_MAX_SYSCALL_LAYER_BYTES_HARD \
+	(PKM_LCS_MAX_LAYER_NAME_BYTES_HARD + 1U)
+#define PKM_LCS_MAX_KEY_DEPTH_HARD 4096U
+#define PKM_LCS_MAX_TOTAL_LAYERS_DEFAULT 1024U
+#define PKM_LCS_MAX_DYNAMIC_LAYERS_DEFAULT \
+	(PKM_LCS_MAX_TOTAL_LAYERS_DEFAULT - 1U)
 
 struct pkm_lcs_runtime_limits {
 	u32 request_timeout_ms;
@@ -127,6 +138,8 @@ struct pkm_lcs_usercopy_ops {
 	size_t (*strnlen)(void *ctx, const char __user *src, size_t max);
 	void *ctx;
 };
+
+const struct pkm_lcs_usercopy_ops *pkm_lcs_default_usercopy_ops(void);
 
 struct pkm_lcs_syscall_path_copy {
 	char *path;
@@ -486,6 +499,18 @@ struct pkm_lcs_source_response_frame {
 	size_t len;
 };
 
+void pkm_lcs_source_late_effect_destroy(
+	struct pkm_lcs_source_late_effect *effect);
+void pkm_lcs_source_late_effect_move(
+	struct pkm_lcs_source_late_effect *dst,
+	struct pkm_lcs_source_late_effect *src);
+long pkm_lcs_source_late_effect_copy_restore(
+	struct pkm_lcs_source_late_effect *dst,
+	const struct pkm_lcs_source_restore_commit_late_effect_input *input);
+long pkm_lcs_source_late_effect_copy_key_mutation(
+	struct pkm_lcs_source_late_effect *dst,
+	const struct pkm_lcs_source_key_mutation_late_effect_input *input);
+
 struct pkm_lcs_delete_layer_orphan_apply_result {
 	u32 orphaned_guid_count;
 	u32 marked_fd_count;
@@ -603,10 +628,15 @@ struct pkm_lcs_source_response_waiter {
 	struct pkm_lcs_source_response_frame *retained_frame;
 };
 
+long pkm_lcs_source_device_check_tcb(const void *token);
+long pkm_lcs_source_device_mark_tcb_used(const void *token);
+bool pkm_lcs_token_has_tcb_or_admin_authority(const void *token);
 long pkm_lcs_source_device_open_for_token(const void *token);
 long pkm_lcs_source_device_open_file_for_token(const void *token,
 					       struct file *file);
 int pkm_lcs_source_device_release_file(struct file *file);
+void pkm_lcs_source_hives_destroy(
+	struct pkm_lcs_source_registration_hive_copy *hives, u32 hive_count);
 void pkm_lcs_source_registration_copy_destroy(
 	struct pkm_lcs_source_registration_copy *registration);
 void pkm_lcs_syscall_path_copy_destroy(
@@ -623,6 +653,9 @@ long pkm_lcs_source_registration_validate_copied(
 	bool caller_has_tcb,
 	struct pkm_lcs_source_registration_plan_copy *plan);
 long pkm_lcs_source_register_file_for_token(
+	const void *token, struct file *file, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_src_register_args __user *uargs);
+long pkm_lcs_source_register_file_for_token_with_bootstrap(
 	const void *token, struct file *file, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_src_register_args __user *uargs);
 long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,
@@ -652,6 +685,8 @@ long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
 long pkm_lcs_create_preflight(u32 desired_access, u32 flags,
 			      struct pkm_lcs_create_preflight_plan *plan);
 void pkm_lcs_create_layer_target_destroy(
+	struct pkm_lcs_create_layer_target *target);
+void pkm_lcs_create_layer_target_set_base(
 	struct pkm_lcs_create_layer_target *target);
 long pkm_lcs_create_layer_target_copy_from_user(
 	const struct pkm_lcs_usercopy_ops *ops, const char __user *ulayer,
@@ -706,6 +741,18 @@ long pkm_lcs_runtime_limits_snapshot(struct pkm_lcs_runtime_limits *limits);
 long pkm_lcs_runtime_limits_publish(
 	const struct pkm_lcs_runtime_limits *limits);
 void pkm_lcs_runtime_limits_reset_defaults(void);
+void pkm_lcs_runtime_limits_snapshot_or_default(
+	struct pkm_lcs_runtime_limits *limits);
+bool pkm_lcs_layer_name_is_base(const char *layer_name, u32 layer_name_len);
+long pkm_lcs_layer_name_casefold_equal_with_limits(
+	const char *left, u32 left_len, const char *right, u32 right_len,
+	const struct pkm_lcs_runtime_limits *limits, bool *equal);
+long pkm_lcs_layer_name_casefold_is_base(const char *layer_name,
+					 u32 layer_name_len, bool *is_base);
+long pkm_lcs_normalize_layer_inputs(
+	const struct pkm_lcs_rsi_layer_view **layers, u32 *layer_count,
+	const struct pkm_lcs_rsi_private_layer_view **private_layers,
+	u32 *private_layer_count);
 long pkm_lcs_runtime_limits_apply_self_config(
 	const struct pkm_lcs_self_config_entry *entries, u32 entry_count,
 	struct pkm_lcs_self_config_apply_plan *result_out);
@@ -758,9 +805,16 @@ u32 pkm_lcs_runtime_max_concurrent_rsi_requests(void);
 u32 pkm_lcs_runtime_notification_queue_size(void);
 u32 pkm_lcs_runtime_max_subtree_watch_depth(void);
 u32 pkm_lcs_runtime_max_transaction_watch_event_burst(void);
+void pkm_lcs_source_slot_waiters_wake(void);
 long pkm_lcs_validate_syscall_relative_path(
 	const char *path, u32 path_len,
 	struct pkm_lcs_path_validation_result *result);
+long pkm_lcs_validate_syscall_relative_path_with_limits(
+	const char *path, u32 path_len,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_path_validation_result *result);
+long pkm_lcs_validate_relative_open_depth_counts(
+	u32 parent_depth, u32 relative_component_count, u32 max_key_depth);
 long pkm_lcs_open_user_absolute_path_preflight_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	const char __user *upath, u32 desired_access, u32 flags,
@@ -788,14 +842,26 @@ long pkm_lcs_open_user_relative_path_preflight(
 long pkm_lcs_materialize_absolute_path_components_for_token(
 	const void *token, const char *path, u32 path_len,
 	bool rewrite_current_user, struct pkm_lcs_materialized_path *result);
+long pkm_lcs_materialize_absolute_path_components_for_token_with_limits(
+	const void *token, const char *path, u32 path_len,
+	bool rewrite_current_user, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_materialized_path *result);
 long pkm_lcs_materialize_relative_path_components(
 	const char *path, u32 path_len,
+	struct pkm_lcs_materialized_path *result);
+long pkm_lcs_materialize_relative_path_components_with_limits(
+	const char *path, u32 path_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_materialized_path *result);
 long pkm_lcs_route_symlink_target(
 	const char *target, u32 target_len, const u8 (*scope_guids)[16],
 	u32 scope_count, struct pkm_lcs_hive_route_result *result);
 long pkm_lcs_materialize_symlink_target_components(
 	const char *target, u32 target_len,
+	struct pkm_lcs_materialized_path *result);
+long pkm_lcs_materialize_symlink_target_components_with_limits(
+	const char *target, u32 target_len,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_materialized_path *result);
 long pkm_lcs_resolve_symlink_target_for_key(
 	u32 source_id, u64 txn_id, const u8 key_guid[RSI_GUID_SIZE],
@@ -938,6 +1004,8 @@ long pkm_lcs_create_missing_symlink_authority_for_token(
 	const void *token,
 	const struct pkm_lcs_create_missing_parent_resolution *resolution,
 	u32 flags, struct pkm_lcs_key_open_access_plan *link_plan);
+bool pkm_lcs_rsi_status_known(u32 status);
+long pkm_lcs_rsi_status_errno(u32 status);
 long pkm_lcs_reg_create_key_source_response_plan(
 	u16 request_op_code, u32 status,
 	struct pkm_lcs_reg_create_source_response_plan *plan);
@@ -1381,6 +1449,9 @@ long pkm_lcs_source_hive_generation_snapshot(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	u64 *generation_out);
 long pkm_lcs_source_next_sequence_snapshot(u64 *next_sequence);
+long pkm_lcs_transaction_read_txn_id_for_target(
+	int txn_fd, u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
+	u64 fallback_txn_id, u64 *txn_id_out);
 void pkm_lcs_source_base_layer_snapshot(
 	const struct pkm_lcs_rsi_layer_view **layers, u32 *layer_count);
 long pkm_lcs_source_layer_snapshot_copy(
@@ -1580,6 +1651,16 @@ long pkm_lcs_walk_absolute_components_for_open(
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count, int txn_fd,
 	struct pkm_lcs_resolved_key_path *result);
+long pkm_lcs_walk_absolute_components_for_open_with_limits(
+	u32 source_id, u64 txn_id, const u8 root_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_path_component_view *components,
+	u32 component_count, bool open_final_link,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, int txn_fd,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_resolved_key_path *result);
 long pkm_lcs_walk_relative_components(
 	const struct pkm_lcs_key_fd_parent_snapshot *parent, u64 txn_id,
 	const struct pkm_lcs_path_component_view *components,
@@ -1595,6 +1676,16 @@ long pkm_lcs_walk_relative_components_for_open(
 	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count, int txn_fd,
+	struct pkm_lcs_resolved_key_path *result);
+long pkm_lcs_walk_relative_components_for_open_with_limits(
+	const struct pkm_lcs_key_fd_parent_snapshot *parent, u64 txn_id,
+	const struct pkm_lcs_path_component_view *components,
+	u32 component_count, bool open_final_link,
+	const u8 (*scope_guids)[16], u32 scope_count,
+	const struct pkm_lcs_rsi_layer_view *layers, u32 layer_count,
+	const struct pkm_lcs_rsi_private_layer_view *private_layers,
+	u32 private_layer_count, int txn_fd,
+	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_resolved_key_path *result);
 void pkm_lcs_resolved_key_path_destroy(
 	struct pkm_lcs_resolved_key_path *path);

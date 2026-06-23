@@ -366,7 +366,7 @@ fn parse_int_literal(bytes: &[u8], offset: &mut usize) -> Option<StackEntry> {
 
 fn parse_string_literal(bytes: &[u8], offset: &mut usize) -> Option<StackEntry> {
     let len = read_u32(bytes, offset)? as usize;
-    if len % 2 != 0 {
+    if has_odd_byte_len(len) {
         return None;
     }
     let raw = read_slice(bytes, offset, len)?;
@@ -510,7 +510,7 @@ fn parse_attribute_ref(
     for_allow: bool,
 ) -> Option<StackEntry> {
     let len = read_u32(bytes, offset)? as usize;
-    if len % 2 != 0 {
+    if has_odd_byte_len(len) {
         return None;
     }
     let raw = read_slice(bytes, offset, len)?;
@@ -1224,8 +1224,12 @@ fn read_slice<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> Option<&'a
     Some(slice)
 }
 
+fn has_odd_byte_len(len: usize) -> bool {
+    (len & 1) != 0
+}
+
 fn decode_utf16_string(bytes: &[u8]) -> Option<String> {
-    if bytes.len() % 2 != 0 {
+    if has_odd_byte_len(bytes.len()) {
         return None;
     }
     let mut code_units = Vec::with_capacity(bytes.len() / 2).ok()?;

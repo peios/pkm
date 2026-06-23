@@ -2005,6 +2005,8 @@ pub fn write_backup_path_entry_record_frame(
 }
 
 /// Writes a complete VALUE record frame into a caller-provided buffer.
+// Mirrors the C ingress wrapper and on-wire VALUE record fields.
+#[allow(clippy::too_many_arguments)]
 pub fn write_backup_value_record_frame(
     limits: &LcsLimits,
     dst: &mut [u8],
@@ -2224,7 +2226,7 @@ fn restore_key_guid_seen_before(
 }
 
 fn guid_slice_contains(guids: &[Guid], needle: Guid) -> bool {
-    guids.iter().any(|guid| *guid == needle)
+    guids.contains(&needle)
 }
 
 fn validate_restore_record_key_guid(

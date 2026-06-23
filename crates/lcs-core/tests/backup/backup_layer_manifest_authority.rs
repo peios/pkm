@@ -4,8 +4,6 @@ use lcs_core::{
     plan_backup_layer_manifest_authority,
 };
 
-
-
 fn manifest<'a>(
     name: &'a str,
     precedence: u32,

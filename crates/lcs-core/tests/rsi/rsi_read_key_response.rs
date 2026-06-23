@@ -14,8 +14,6 @@ fn response_frame(request_id: u64, op_code: u16, status: u32) -> Vec<u8> {
     frame
 }
 
-
-
 #[test]
 fn read_key_success_response_payload_matches_psd_005_wire_order() {
     let parent_guid = [0x33; 16];

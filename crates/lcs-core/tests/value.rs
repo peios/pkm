@@ -1,6 +1,8 @@
 //! lcs-core integration tests: value.
 //! Each submodule is one behavioural test file; shared helpers live in `common`.
 
+#![allow(clippy::field_reassign_with_default)]
+
 mod common;
 
 #[path = "value/value_delete_blanket_planning.rs"]

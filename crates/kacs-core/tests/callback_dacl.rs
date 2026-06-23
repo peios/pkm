@@ -10,9 +10,6 @@ use kacs_core::{
     SE_DACL_PRESENT, SE_GROUP_ENABLED, SE_SELF_RELATIVE, WRITE_DAC,
 };
 
-
-
-
 fn callback_object_ace(
     ace_type: u8,
     flags: u8,
@@ -42,7 +39,6 @@ fn callback_object_ace(
     }
     bytes
 }
-
 
 fn sd_with_dacl(owner: &[u8], dacl: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0u8; 20];
@@ -83,7 +79,6 @@ fn mapping() -> GenericMapping {
     }
 }
 
-
 fn string_literal(value: &str) -> Vec<u8> {
     let utf16: Vec<u16> = value.encode_utf16().collect();
     let mut bytes = Vec::new();
@@ -101,7 +96,6 @@ fn attr_ref(opcode: u8, name: &str) -> Vec<u8> {
     bytes.extend_from_slice(&string_literal(name)[1..]);
     bytes
 }
-
 
 #[test]
 fn callback_allow_ace_grants_when_condition_is_true() {

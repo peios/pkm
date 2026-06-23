@@ -4,8 +4,6 @@ use lcs_core::{
     LcsError, plan_backup_restore_layer_precedence_gate,
 };
 
-
-
 fn manifest<'a>(
     name: &'a str,
     precedence: u32,

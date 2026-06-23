@@ -45,8 +45,10 @@ fn missing_non_link_and_malformed_symlink_targets_project_to_einval() {
 
 #[test]
 fn symlink_follow_depth_outcomes_project_to_linux_errno() {
-    let mut limits = LcsLimits::default();
-    limits.symlink_depth_limit = 2;
+    let limits = LcsLimits {
+        symlink_depth_limit: 2,
+        ..LcsLimits::default()
+    };
 
     assert_eq!(
         classify_symlink_follow_depth(1, &limits),

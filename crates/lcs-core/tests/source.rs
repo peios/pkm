@@ -1,6 +1,8 @@
 //! lcs-core integration tests: source.
 //! Each submodule is one behavioural test file; shared helpers live in `common`.
 
+#![allow(clippy::field_reassign_with_default)]
+
 mod common;
 
 #[path = "source/source_device_open.rs"]

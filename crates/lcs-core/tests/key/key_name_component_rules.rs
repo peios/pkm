@@ -1,13 +1,12 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
-    Guid, KEY_CREATE_SUB_KEY, KeyCreateRequest, KeyParent, KeyRecordView, LcsError,
-    PathKind, validate_key_component_bytes, validate_key_create_request, validate_key_record,
+    Guid, KEY_CREATE_SUB_KEY, KeyCreateRequest, KeyParent, KeyRecordView, LcsError, PathKind,
+    validate_key_component_bytes, validate_key_create_request, validate_key_record,
     validate_registry_path_str,
 };
 
 const PARENT_GUID: Guid = [0x22; 16];
 const CHILD_GUID: Guid = [0x23; 16];
-
 
 fn create_request(child_name: &'static str) -> KeyCreateRequest<'static> {
     KeyCreateRequest {

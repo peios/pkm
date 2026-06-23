@@ -1,11 +1,10 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
-    BlanketTombstoneAction, BlanketTombstoneInput, Guid, LcsError, NIL_GUID,
-    SequenceCounter, ValueDeleteRequest, plan_blanket_tombstone, plan_value_delete,
+    BlanketTombstoneAction, BlanketTombstoneInput, Guid, LcsError, NIL_GUID, SequenceCounter,
+    ValueDeleteRequest, plan_blanket_tombstone, plan_value_delete,
 };
 
 const KEY_GUID: Guid = [0x18; 16];
-
 
 #[test]
 fn value_delete_planner_validates_shape_and_marks_last_write_update() {

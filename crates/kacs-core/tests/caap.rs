@@ -1,24 +1,73 @@
 mod common;
-use common::{acl_bytes, append_tokens, basic_ace, expr, parse_sid, resource_attribute_ace, sid_bytes};
-use kacs_core::{
-    evaluate_caap, evaluate_security_descriptor, AccessCheckToken, CaapPolicy, CaapPolicyEntry,
-    CaapRule, CaapSaclPhase, ClaimAttribute, ClaimValue, ConditionalContext,
-    ConfinementTokenContext, EvaluateSecurityDescriptorState, GenericMapping, ImpersonationLevel,
-    IntegrityLevel, ObjectTypeList, ObjectTypeNode, PipContext, PrivilegeProvenance,
-    RestrictedTokenContext, SecurityDescriptor, Sid, SidAndAttributes, TokenPrivileges, TokenType,
-    TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACCESS_SYSTEM_SECURITY,
-    ACE_OBJECT_TYPE_PRESENT, READ_CONTROL, SE_BACKUP_PRIVILEGE, SE_DACL_PRESENT, SE_GROUP_ENABLED,
-    SE_RESTORE_PRIVILEGE, SE_SACL_PRESENT, SE_SECURITY_PRIVILEGE, SE_SELF_RELATIVE,
-    TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC,
+use common::{
+    acl_bytes, append_tokens, basic_ace, expr, parse_sid, resource_attribute_ace, sid_bytes,
 };
+use kacs_core::{
+    evaluate_caap, evaluate_security_descriptor, AccessCheckToken, CaapEvaluationInput, CaapPolicy,
+    CaapPolicyEntry, CaapRule, CaapSaclPhase, ClaimAttribute, ClaimValue, ConditionalContext,
+    ConfinementTokenContext, EvaluateSecurityDescriptorInput, EvaluateSecurityDescriptorState,
+    GenericMapping, ImpersonationLevel, IntegrityLevel, ObjectTypeList, ObjectTypeNode, PipContext,
+    PrivilegeProvenance, RestrictedTokenContext, SecurityDescriptor, Sid, SidAndAttributes,
+    TokenPrivileges, TokenType, TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+    ACCESS_SYSTEM_SECURITY, ACE_OBJECT_TYPE_PRESENT, READ_CONTROL, SE_BACKUP_PRIVILEGE,
+    SE_DACL_PRESENT, SE_GROUP_ENABLED, SE_RESTORE_PRIVILEGE, SE_SACL_PRESENT,
+    SE_SECURITY_PRIVILEGE, SE_SELF_RELATIVE, TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC,
+};
+
+macro_rules! eval_sd {
+    (
+        $sd:expr,
+        $token:expr,
+        $pip:expr,
+        $desired_access:expr,
+        $mapping:expr,
+        $object_tree:expr,
+        $conditional_context:expr,
+        $privilege_intent:expr $(,)?
+    ) => {
+        evaluate_security_descriptor(EvaluateSecurityDescriptorInput {
+            sd: $sd,
+            token: $token,
+            pip: $pip,
+            desired_access: $desired_access,
+            mapping: $mapping,
+            object_tree: $object_tree,
+            conditional_context: $conditional_context,
+            privilege_intent: $privilege_intent,
+        })
+    };
+}
+
+macro_rules! eval_caap {
+    (
+        $sd:expr,
+        $token:expr,
+        $pip:expr,
+        $desired_access:expr,
+        $mapping:expr,
+        $object_tree:expr,
+        $conditional_context:expr,
+        $base:expr,
+        $policies:expr $(,)?
+    ) => {
+        evaluate_caap(CaapEvaluationInput {
+            sd: $sd,
+            token: $token,
+            pip: $pip,
+            desired_access: $desired_access,
+            mapping: $mapping,
+            object_tree: $object_tree,
+            conditional_context: $conditional_context,
+            base: $base,
+            policies: $policies,
+        })
+    };
+}
 
 const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
 const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
 const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
 const SYSTEM_MANDATORY_LABEL_NO_WRITE_UP: u32 = 0x0000_0002;
-
-
-
 
 fn object_ace(
     ace_type: u8,
@@ -42,7 +91,6 @@ fn object_ace(
     bytes.extend_from_slice(&body);
     bytes
 }
-
 
 fn utf16_cstr(value: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -68,7 +116,6 @@ fn int64_claim(name: &str, value: i64) -> Vec<u8> {
     bytes.extend_from_slice(&utf16_cstr(name));
     bytes
 }
-
 
 fn scoped_policy_ace(policy_sid: &[u8]) -> Vec<u8> {
     basic_ace(SYSTEM_SCOPED_POLICY_ID_ACE_TYPE, 0, 0, policy_sid)
@@ -114,7 +161,6 @@ fn sd_bytes(
     bytes
 }
 
-
 fn int64_literal(value: i64) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(11);
     bytes.push(0x04);
@@ -149,7 +195,6 @@ fn attr_ref(opcode: u8, name: &str) -> Vec<u8> {
     bytes.extend_from_slice(&string_literal(name)[1..]);
     bytes
 }
-
 
 fn mapping() -> GenericMapping {
     GenericMapping {
@@ -188,7 +233,7 @@ fn evaluate_base<'a>(
     desired_access: u32,
     object_tree: Option<&ObjectTypeList>,
 ) -> kacs_core::EvaluateSecurityDescriptorState<'a> {
-    evaluate_security_descriptor(
+    eval_sd!(
         Some(sd),
         token,
         default_pip(),
@@ -229,7 +274,7 @@ fn missing_policy_uses_recovery_policy_and_narrows_access() {
     let token = primary_token(parse_sid(&user));
     let base = evaluate_base(&sd, &token, READ_CONTROL, None);
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -309,7 +354,7 @@ fn installed_policies_compose_by_intersection() {
         },
     ];
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -360,7 +405,7 @@ fn installed_and_missing_policies_compose_with_recovery() {
         policy: installed_policy,
     }];
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -419,7 +464,7 @@ fn rule_dacl_pipeline_applies_mic() {
         policy,
     }];
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -472,7 +517,7 @@ fn rule_dacl_pipeline_applies_pip() {
         policy,
     }];
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         PipContext {
@@ -535,7 +580,7 @@ fn rule_dacl_pipeline_applies_restricted_pass() {
         policy,
     }];
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -590,7 +635,7 @@ fn rule_dacl_pipeline_applies_confinement() {
         policy,
     }];
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -646,7 +691,7 @@ fn rule_dacl_pipeline_suppresses_backup_and_restore_intent() {
         policy,
     }];
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -716,7 +761,7 @@ fn applies_to_false_and_unknown_rules_are_skipped() {
         policy,
     }];
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -802,7 +847,7 @@ fn applies_to_sees_claim_namespaces_but_not_membership() {
         ..ConditionalContext::default()
     };
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -877,7 +922,7 @@ fn applies_to_membership_expression_is_unknown_and_skipped() {
         ..ConditionalContext::default()
     };
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -940,7 +985,7 @@ fn effective_and_staged_dacls_are_tracked_separately_and_sacls_are_collected() {
         policy,
     }];
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -1003,7 +1048,7 @@ fn rule_dacl_error_preserves_only_privilege_granted_bits() {
         policy,
     }];
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -1073,7 +1118,7 @@ fn object_tree_tracks_effective_and_staged_per_node_results() {
         policy,
     }];
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),
@@ -1145,7 +1190,7 @@ fn staged_object_tree_error_preserves_per_node_privilege_granted_bits() {
         policy,
     }];
 
-    let result = evaluate_caap(
+    let result = eval_caap!(
         &sd,
         &token,
         default_pip(),

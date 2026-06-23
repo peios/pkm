@@ -1,4 +1,4 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
     EnumeratedSubkey, EnumeratedValue, Guid, KEY_CREATE_SUB_KEY, KeyCreateRequest, LayerView,
     LcsLimits, NamedPathEntry, NamedValueEntry, PathEntry, PathEntryWriteRequest, PathTarget,
@@ -11,7 +11,6 @@ const PARENT_GUID: Guid = [0x41; 16];
 const CHILD_GUID: Guid = [0x42; 16];
 const KEY_GUID: Guid = [0x43; 16];
 const VISIBLE_GUID: Guid = [0x44; 16];
-
 
 fn layer_context<'a>(
     layers: &'a [LayerView<'a>],

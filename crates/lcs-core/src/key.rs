@@ -512,5 +512,5 @@ fn validate_guid_tracker(field: &'static str, guids: &[Guid]) -> LcsResult<()> {
 }
 
 fn guid_slice_contains(guids: &[Guid], needle: Guid) -> bool {
-    guids.iter().any(|guid| *guid == needle)
+    guids.contains(&needle)
 }

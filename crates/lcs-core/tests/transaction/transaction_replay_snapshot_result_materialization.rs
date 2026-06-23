@@ -145,7 +145,6 @@ fn response_frame(request_id: u64, request_op_code: u16) -> Vec<u8> {
     frame
 }
 
-
 fn push_value_entry(
     frame: &mut Vec<u8>,
     value_name: &[u8],
@@ -172,7 +171,6 @@ fn push_path_entry(
     frame.extend_from_slice(&target_guid);
     frame.extend_from_slice(&sequence.to_le_bytes());
 }
-
 
 fn parsed_response<'a>(
     retained: RsiTransactionReplaySnapshotRequestRecord<'static>,

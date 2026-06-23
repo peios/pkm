@@ -1,4 +1,4 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
     BASE_LAYER_NAME, BASE_LAYER_VIEW, Guid, LayerMetadataEntry, LayerResolutionContext, LayerView,
     LcsError, PathEntry, PathResolution, PathTarget, for_each_effective_layer,
@@ -6,7 +6,6 @@ use lcs_core::{
 };
 
 const GUID: Guid = [0x44; 16];
-
 
 #[test]
 fn effective_layer_table_injects_base_and_defaults_non_base_metadata() {

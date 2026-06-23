@@ -255,7 +255,7 @@ fn rejects_maximum_allowed_in_resource_attribute_ace_mask() {
 #[test]
 fn preserves_opaque_ace_payload_without_access_mask_validation() {
     let ace = opaque_ace(0x7f, &MAXIMUM_ALLOWED.to_le_bytes());
-    let bytes = acl_bytes(4, &[ace.clone()]);
+    let bytes = acl_bytes(4, std::slice::from_ref(&ace));
     let acl = Acl::parse(&bytes).expect("opaque ace should parse");
     let entry = acl
         .entries()
@@ -701,7 +701,7 @@ fn parses_listed_resource_attribute_ace_type() {
 #[test]
 fn reserved_compound_ace_type_parses_as_opaque() {
     let ace = opaque_ace(ACCESS_ALLOWED_COMPOUND_ACE_TYPE, &[0, 0, 0, 0]);
-    let bytes = acl_bytes(ACL_REVISION, &[ace.clone()]);
+    let bytes = acl_bytes(ACL_REVISION, std::slice::from_ref(&ace));
     let acl = Acl::parse(&bytes).expect("reserved compound ACE should parse opaquely");
     let entry = acl
         .entries()

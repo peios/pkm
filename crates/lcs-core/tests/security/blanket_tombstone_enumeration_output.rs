@@ -1,10 +1,9 @@
 use crate::common::{context, limits};
 use lcs_core::{
-    BlanketTombstoneEntry, EnumValueOutcome, EnumeratedValue, LayerView, REG_DWORD, REG_SZ, RegistryValueType, ValueEntry, enum_value_result_at,
-    for_each_effective_value, query_values_batch_required_len,
+    BlanketTombstoneEntry, EnumValueOutcome, EnumeratedValue, LayerView, REG_DWORD, REG_SZ,
+    RegistryValueType, ValueEntry, enum_value_result_at, for_each_effective_value,
+    query_values_batch_required_len,
 };
-
-
 
 fn value_by_name<'a>(values: &'a [EnumeratedValue<'a>], name: &str) -> &'a EnumeratedValue<'a> {
     values

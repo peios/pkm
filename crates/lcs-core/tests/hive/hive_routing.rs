@@ -1,4 +1,4 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
     CurrentUserRewrite, Guid, HiveRoute, HiveScope, HiveStatus, HiveView, LcsError,
     for_each_routable_path_component, route_hive, validate_hive_table, validate_scope_guid_set,
@@ -10,7 +10,6 @@ const PRIVATE_A_GUID: Guid = [0x20; 16];
 const PRIVATE_B_GUID: Guid = [0x21; 16];
 const SCOPE_A: Guid = [0xaa; 16];
 const SCOPE_B: Guid = [0xbb; 16];
-
 
 fn global_hive<'a>(name: &'a str, root_guid: Guid, source_id: u32) -> HiveView<'a> {
     HiveView {

@@ -1,17 +1,46 @@
 mod common;
 use common::{acl_bytes, basic_ace, mapping, resource_attribute_ace, sid_bytes};
 use kacs_core::{
-    pre_sacl_walk, ClaimValue, IntegrityLevel, KacsError, PipContext,
-    PrivilegeProvenance, SecurityDescriptor, ACCESS_SYSTEM_SECURITY, READ_CONTROL, SE_SACL_PRESENT,
-    SE_SELF_RELATIVE, WRITE_DAC, WRITE_OWNER,
+    pre_sacl_walk, AccessDecisionState, ClaimValue, IntegrityLevel, KacsError, PipContext,
+    PreSaclWalkInput, PrivilegeProvenance, SecurityDescriptor, ACCESS_SYSTEM_SECURITY,
+    READ_CONTROL, SE_SACL_PRESENT, SE_SELF_RELATIVE, WRITE_DAC, WRITE_OWNER,
 };
+
+macro_rules! pre_sacl {
+    (
+        $sd:expr,
+        $token_integrity:expr,
+        $mandatory_policy:expr,
+        $effective_privileges:expr,
+        $pip:expr,
+        $mapping:expr,
+        $decided:expr,
+        $granted:expr,
+        $privilege_granted:expr,
+        $provenance:expr $(,)?
+    ) => {
+        pre_sacl_walk(PreSaclWalkInput {
+            sd: $sd,
+            token_integrity: $token_integrity,
+            mandatory_policy: $mandatory_policy,
+            effective_privileges: $effective_privileges,
+            pip: $pip,
+            mapping: $mapping,
+            initial_state: AccessDecisionState {
+                decided: $decided,
+                granted: $granted,
+            },
+            privilege_granted: $privilege_granted,
+            provenance: $provenance,
+        })
+    };
+}
 
 const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
 const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
 const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
 const SYSTEM_MANDATORY_LABEL_NO_WRITE_UP: u32 = 0x0000_0002;
 const TOKEN_MANDATORY_POLICY_NO_WRITE_UP: u32 = 0x0000_0001;
-
 
 fn utf16_cstr(value: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -38,9 +67,6 @@ fn int64_claim(name: &str, value: i64) -> Vec<u8> {
     bytes
 }
 
-
-
-
 fn sd_with_sacl(owner: &[u8], sacl: Option<&[u8]>) -> Vec<u8> {
     let control = SE_SELF_RELATIVE | if sacl.is_some() { SE_SACL_PRESENT } else { 0 };
     let mut bytes = vec![0u8; 20];
@@ -60,7 +86,6 @@ fn sd_with_sacl(owner: &[u8], sacl: Option<&[u8]>) -> Vec<u8> {
     bytes
 }
 
-
 #[test]
 fn no_sacl_leaves_pre_sacl_state_unchanged() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
@@ -71,7 +96,7 @@ fn no_sacl_leaves_pre_sacl_state_unchanged() {
         ..PrivilegeProvenance::default()
     };
 
-    let result = pre_sacl_walk(
+    let result = pre_sacl!(
         &sd,
         IntegrityLevel::Medium,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
@@ -114,7 +139,7 @@ fn composed_pre_sacl_applies_mic_then_pip_and_returns_metadata() {
     let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
     let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
 
-    let result = pre_sacl_walk(
+    let result = pre_sacl!(
         &sd,
         IntegrityLevel::Medium,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
@@ -189,7 +214,7 @@ fn first_labels_only_still_apply_inside_composed_pre_sacl_walk() {
     let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
     let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
 
-    let result = pre_sacl_walk(
+    let result = pre_sacl!(
         &sd,
         IntegrityLevel::Medium,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,

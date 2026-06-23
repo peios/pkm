@@ -18,7 +18,6 @@ fn response_frame(request_id: u64) -> Vec<u8> {
     frame
 }
 
-
 fn push_query_value_entry(frame: &mut Vec<u8>, value_type: u32, data: &[u8], sequence: u64) {
     push_len_prefixed(frame, b"Value");
     push_len_prefixed(frame, b"base");
@@ -26,7 +25,6 @@ fn push_query_value_entry(frame: &mut Vec<u8>, value_type: u32, data: &[u8], seq
     push_len_prefixed(frame, data);
     frame.extend_from_slice(&sequence.to_le_bytes());
 }
-
 
 fn parse_frame(
     request_id: u64,

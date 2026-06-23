@@ -14,7 +14,6 @@ fn response_frame(request_id: u64, op_code: u16, status: u32) -> Vec<u8> {
     frame
 }
 
-
 fn push_value_entry(
     frame: &mut Vec<u8>,
     value_name: &[u8],
@@ -34,7 +33,6 @@ fn push_blanket(frame: &mut Vec<u8>, layer_name: &[u8], sequence: u64) {
     push_len_prefixed(frame, layer_name);
     frame.extend_from_slice(&sequence.to_le_bytes());
 }
-
 
 #[test]
 fn query_values_success_response_parses_value_entries_and_blankets() {

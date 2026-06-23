@@ -29,10 +29,10 @@ fn batch_value_packed_size_matches_psd_005_layout() {
     ];
 
     assert_eq!(packed_batch_value_len(&values[0]), Ok(12 + 5 + 3));
-    assert_eq!(packed_batch_value_len(&values[1]), Ok(12 + 0 + 2));
+    assert_eq!(packed_batch_value_len(&values[1]), Ok(12 + 2));
     assert_eq!(
         query_values_batch_required_len(&values),
-        Ok((12 + 5 + 3) + (12 + 0 + 2))
+        Ok((12 + 5 + 3) + (12 + 2))
     );
 }
 

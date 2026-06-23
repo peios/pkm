@@ -4,8 +4,6 @@ use lcs_core::{
     validate_backup_layer_manifest_set,
 };
 
-
-
 fn manifest<'a>(
     name: &'a str,
     precedence: u32,

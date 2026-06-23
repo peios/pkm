@@ -16,7 +16,6 @@ fn response_frame(request_id: u64, request_op_code: u16) -> Vec<u8> {
     frame
 }
 
-
 fn push_path_entry(frame: &mut Vec<u8>, sequence: u64) {
     push_len_prefixed(frame, b"base");
     frame.push(RSI_PATH_TARGET_GUID);
@@ -44,7 +43,6 @@ fn push_metadata(frame: &mut Vec<u8>) {
     frame.push(0);
     frame.extend_from_slice(&1000u64.to_le_bytes());
 }
-
 
 fn lookup_frame(request_id: u64, sequence: u64) -> Vec<u8> {
     let mut frame = response_frame(request_id, RSI_LOOKUP);

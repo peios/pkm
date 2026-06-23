@@ -1,4 +1,4 @@
-use crate::common::{system_sid};
+use crate::common::system_sid;
 use lcs_core::{
     BackupExportPathEntrySectionPlan, BackupKeyPayload, BackupPathEntryPayload,
     BackupRestoreNonRootKeyCreatePlan, BackupRestorePathEntry,
@@ -14,7 +14,6 @@ const TARGET_ROOT: Guid = [0x20; 16];
 const CHILD: Guid = [0x31; 16];
 const GRANDCHILD: Guid = [0x32; 16];
 const OUTSIDE: Guid = [0x40; 16];
-
 
 fn owner_only_sd() -> Vec<u8> {
     let owner = system_sid();

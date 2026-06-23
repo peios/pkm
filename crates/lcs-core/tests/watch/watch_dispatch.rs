@@ -1,15 +1,14 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
-    Guid, LcsError, REG_NOTIFY_SD, REG_NOTIFY_SUBKEY, REG_NOTIFY_VALUE,
-    REG_WATCH_KEY_DELETED, REG_WATCH_SD_CHANGED, REG_WATCH_SUBKEY_CREATED, REG_WATCH_VALUE_SET,
-    WatchDelivery, WatchDispatchDecision, WatchMutationContext, WatcherView, plan_watch_dispatch,
+    Guid, LcsError, REG_NOTIFY_SD, REG_NOTIFY_SUBKEY, REG_NOTIFY_VALUE, REG_WATCH_KEY_DELETED,
+    REG_WATCH_SD_CHANGED, REG_WATCH_SUBKEY_CREATED, REG_WATCH_VALUE_SET, WatchDelivery,
+    WatchDispatchDecision, WatchMutationContext, WatcherView, plan_watch_dispatch,
 };
 
 const ROOT_GUID: Guid = [0x01; 16];
 const SERVICES_GUID: Guid = [0x02; 16];
 const CHILD_GUID: Guid = [0x03; 16];
 const OTHER_GUID: Guid = [0x04; 16];
-
 
 fn mutation<'a>(
     event_type: u32,

@@ -1,4 +1,4 @@
-use crate::common::{sid};
+use crate::common::sid;
 use kacs_core::{ACCESS_ALLOWED_ACE_TYPE, SE_DACL_PRESENT, SE_SELF_RELATIVE};
 use lcs_core::{
     DACL_SECURITY_INFORMATION, Guid, KEY_READ, LcsError, LcsLimits, OWNER_SECURITY_INFORMATION,
@@ -19,7 +19,6 @@ const KEY_GUID: Guid = [
 const OTHER_GUID: Guid = [
     0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40,
 ];
-
 
 fn basic_ace(mask: u32, sid: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(8 + sid.len());

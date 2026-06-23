@@ -9,7 +9,6 @@ use kacs_core::{
 const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
 const INHERIT_ONLY_ACE: u8 = 0x08;
 
-
 fn utf16_cstr(value: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
     for unit in value.encode_utf16() {
@@ -124,9 +123,6 @@ fn octet_claim(name: &str, value: &[u8]) -> Vec<u8> {
     bytes.extend_from_slice(&utf16_cstr(name));
     bytes
 }
-
-
-
 
 fn sd_with_sacl(owner: &[u8], sacl: &[u8]) -> Vec<u8> {
     let control = SE_SELF_RELATIVE | SE_SACL_PRESENT;

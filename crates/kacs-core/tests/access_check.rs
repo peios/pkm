@@ -1,5 +1,7 @@
 mod common;
-use common::{acl_bytes, append_tokens, basic_ace, expr, parse_sid, resource_attribute_ace, sid_bytes};
+use common::{
+    acl_bytes, append_tokens, basic_ace, expr, parse_sid, resource_attribute_ace, sid_bytes,
+};
 use kacs_core::{
     access_check, access_check_core, access_check_result_list, AccessCheckMode, AccessCheckResult,
     AccessCheckResultListState, AccessCheckToken, AccessStatus, CaapDiagnosticKind, CaapPolicy,
@@ -14,16 +16,14 @@ use kacs_core::{
     SE_GROUP_USE_FOR_DENY_ONLY, SE_SACL_PRESENT, SE_SECURITY_PRIVILEGE, SE_SELF_RELATIVE,
     SYSTEM_ALARM_ACE_TYPE, SYSTEM_ALARM_CALLBACK_ACE_TYPE, SYSTEM_ALARM_OBJECT_ACE_TYPE,
     SYSTEM_AUDIT_ACE_TYPE, SYSTEM_AUDIT_CALLBACK_ACE_TYPE, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
-    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC,
+    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE,
+    TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC,
 };
 
 const SYSTEM_SCOPED_POLICY_ID_ACE_TYPE: u8 = 0x13;
 const INHERIT_ONLY_ACE: u8 = 0x08;
 const SUCCESSFUL_ACCESS_ACE_FLAG: u8 = 0x40;
 const FAILED_ACCESS_ACE_FLAG: u8 = 0x80;
-
-
-
 
 fn callback_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8], condition: &[u8]) -> Vec<u8> {
     let unpadded_size = 8 + sid.len() + condition.len();
@@ -38,7 +38,6 @@ fn callback_ace(ace_type: u8, flags: u8, mask: u32, sid: &[u8], condition: &[u8]
     bytes.resize(size, 0);
     bytes
 }
-
 
 fn object_ace(
     ace_type: u8,
@@ -62,7 +61,6 @@ fn object_ace(
     bytes.extend_from_slice(&body);
     bytes
 }
-
 
 fn sd_bytes(
     owner: Option<&[u8]>,
@@ -117,7 +115,6 @@ fn process_trust_label_ace(mask: u32, pip_type: u32, pip_trust: u32) -> Vec<u8> 
     let sid = sid_bytes([0, 0, 0, 0, 0, 19], &[pip_type, pip_trust]);
     basic_ace(SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE, 0, mask, &sid)
 }
-
 
 fn int64_literal(value: i64) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(11);
@@ -178,7 +175,6 @@ fn sid_literal(sid: &[u8]) -> Vec<u8> {
     bytes.extend_from_slice(sid);
     bytes
 }
-
 
 fn guid(seed: u8) -> [u8; 16] {
     [seed; 16]
@@ -284,7 +280,7 @@ fn scalar_access_check_ordered_golden_vector_composes_all_major_stages() {
     };
     let effective_dacl = dacl.clone();
     let staged_dacl = acl_bytes(&[]);
-    let effective_sacl = acl_bytes(&[caap_audit.clone()]);
+    let effective_sacl = acl_bytes(std::slice::from_ref(&caap_audit));
     let policy = CaapPolicy {
         rules: vec![CaapRule {
             applies_to: None,
@@ -1193,7 +1189,7 @@ fn object_and_caap_effective_sacls_both_emit_audit_events() {
         &user,
     );
     let object_sacl = acl_bytes(&[scoped_policy_ace(&policy_sid), object_audit_ace.clone()]);
-    let caap_effective_sacl = acl_bytes(&[caap_audit_ace.clone()]);
+    let caap_effective_sacl = acl_bytes(std::slice::from_ref(&caap_audit_ace));
     let object_context = b"object-plus-caap-sacl";
     let sd_bytes = sd_bytes(Some(&owner), Some(&group), Some(&object_sacl), Some(&dacl));
     let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");

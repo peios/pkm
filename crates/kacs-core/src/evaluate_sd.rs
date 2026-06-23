@@ -4,13 +4,13 @@ use crate::condition::ConditionalContext;
 use crate::dacl::{
     caller_is_owner_normal, confinement_contains, confinement_contains_capability,
     evaluate_dacl_states, merge_absolute_results, merge_restricted_results, restricted_contains,
-    sid_matches_token,
+    sid_matches_token, DaclStateInput,
 };
 use crate::error::{KacsError, KacsResult};
 use crate::object_tree::ObjectTypeList;
 use crate::pip::PipContext;
 use crate::pkm_alloc::Vec;
-use crate::pre_sacl::pre_sacl_walk;
+use crate::pre_sacl::{pre_sacl_walk, PreSaclWalkInput};
 use crate::privilege::{
     apply_take_ownership_fallback, seed_access_check_privileges, AccessDecisionState,
     PrivilegeProvenance,
@@ -49,18 +49,42 @@ pub struct EvaluateSecurityDescriptorState<'a> {
     pub object_granted_list: Option<Vec<u32>>,
 }
 
+/// Inputs for the full security-descriptor evaluation pipeline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EvaluateSecurityDescriptorInput<'a, 'ctx, 'b> {
+    /// Security descriptor being evaluated.
+    pub sd: Option<&'b SecurityDescriptor<'a>>,
+    /// Caller token.
+    pub token: &'b AccessCheckToken<'a>,
+    /// Process-trust label context.
+    pub pip: PipContext,
+    /// Desired access before generic mapping.
+    pub desired_access: u32,
+    /// Generic mapping for the protected object type.
+    pub mapping: &'b GenericMapping,
+    /// Optional object-type tree for object-specific access checks.
+    pub object_tree: Option<&'b ObjectTypeList>,
+    /// Conditional-expression context supplied by the caller.
+    pub conditional_context: &'b ConditionalContext<'ctx>,
+    /// Privilege intent bits supplied by the caller.
+    pub privilege_intent: u32,
+}
+
 /// Executes the full security-descriptor evaluation pipeline through MIC, PIP,
 /// DACL, restricted pass, and confinement narrowing.
 pub fn evaluate_security_descriptor<'a>(
-    sd: Option<&SecurityDescriptor<'a>>,
-    token: &AccessCheckToken<'a>,
-    pip: PipContext,
-    desired_access: u32,
-    mapping: &GenericMapping,
-    object_tree: Option<&ObjectTypeList>,
-    conditional_context: &ConditionalContext<'a>,
-    privilege_intent: u32,
+    input: EvaluateSecurityDescriptorInput<'a, '_, '_>,
 ) -> KacsResult<EvaluateSecurityDescriptorState<'a>> {
+    let EvaluateSecurityDescriptorInput {
+        sd,
+        token,
+        pip,
+        desired_access,
+        mapping,
+        object_tree,
+        conditional_context,
+        privilege_intent,
+    } = input;
     validate_access_check_token_invariants(token)?;
 
     if token.token_type == TokenType::Impersonation
@@ -82,18 +106,20 @@ pub fn evaluate_security_descriptor<'a>(
 
     let privilege_seed =
         seed_access_check_privileges(&token.privileges, mapping, privilege_intent)?;
-    let pre_sacl = pre_sacl_walk(
+    let pre_sacl = pre_sacl_walk(PreSaclWalkInput {
         sd,
-        token.integrity_level,
-        token.mandatory_policy,
-        privilege_seed.effective_privileges,
+        token_integrity: token.integrity_level,
+        mandatory_policy: token.mandatory_policy,
+        effective_privileges: privilege_seed.effective_privileges,
         pip,
         mapping,
-        privilege_seed.decided,
-        privilege_seed.granted,
-        privilege_seed.privilege_granted(),
-        privilege_seed.provenance,
-    )?;
+        initial_state: AccessDecisionState {
+            granted: privilege_seed.granted,
+            decided: privilege_seed.decided,
+        },
+        privilege_granted: privilege_seed.privilege_granted(),
+        provenance: privilege_seed.provenance,
+    })?;
 
     let mut provenance = pre_sacl.provenance;
     let mandatory_decided = pre_sacl.mandatory_decided;
@@ -107,16 +133,18 @@ pub fn evaluate_security_descriptor<'a>(
         decided: pre_sacl.decided,
     };
     let mut evaluation = evaluate_dacl_states(
-        sd,
-        &token.subject,
-        normalized,
-        valid_rights,
-        mapping,
-        false,
-        normal_context,
-        object_tree,
-        initial_state,
-        caller_is_owner,
+        DaclStateInput {
+            sd,
+            token: &token.subject,
+            normalized,
+            valid_rights,
+            mapping,
+            skip_owner_implicit: false,
+            conditional_context: normal_context,
+            object_tree,
+            initial_state,
+            caller_is_owner,
+        },
         |sid, polarity| sid_matches_token(&token.subject, sid, polarity),
     )?;
 
@@ -157,19 +185,21 @@ pub fn evaluate_security_descriptor<'a>(
         conditional_restricted.device_membership_uses_virtual_groups = true;
 
         let restricted = evaluate_dacl_states(
-            sd,
-            &token.subject,
-            normalized,
-            valid_rights,
-            mapping,
-            false,
-            conditional_restricted,
-            object_tree,
-            AccessDecisionState {
-                granted: 0,
-                decided: 0,
+            DaclStateInput {
+                sd,
+                token: &token.subject,
+                normalized,
+                valid_rights,
+                mapping,
+                skip_owner_implicit: false,
+                conditional_context: conditional_restricted,
+                object_tree,
+                initial_state: AccessDecisionState {
+                    granted: 0,
+                    decided: 0,
+                },
+                caller_is_owner: restricted_owner,
             },
-            restricted_owner,
             |sid, _| restricted_contains(restricted_context.restricted_sids, sid),
         )?;
 
@@ -183,7 +213,11 @@ pub fn evaluate_security_descriptor<'a>(
         );
     }
 
-    if token.confinement.confinement_sid.is_some() && !token.confinement.confinement_exempt {
+    if let Some(confinement_sid) = token
+        .confinement
+        .confinement_sid
+        .filter(|_| !token.confinement.confinement_exempt)
+    {
         let confinement_owner = sd
             .owner()
             .is_some_and(|owner| confinement_contains(&token.confinement, owner));
@@ -196,24 +230,22 @@ pub fn evaluate_security_descriptor<'a>(
         conditional_confinement.caller_is_owner = confinement_owner;
         conditional_confinement.device_membership_uses_virtual_groups = true;
 
-        let confinement_sid = token
-            .confinement
-            .confinement_sid
-            .expect("checked is_some above");
         let confinement = evaluate_dacl_states(
-            sd,
-            &token.subject,
-            normalized,
-            valid_rights,
-            mapping,
-            true,
-            conditional_confinement,
-            object_tree,
-            AccessDecisionState {
-                granted: 0,
-                decided: 0,
+            DaclStateInput {
+                sd,
+                token: &token.subject,
+                normalized,
+                valid_rights,
+                mapping,
+                skip_owner_implicit: true,
+                conditional_context: conditional_confinement,
+                object_tree,
+                initial_state: AccessDecisionState {
+                    granted: 0,
+                    decided: 0,
+                },
+                caller_is_owner: confinement_owner,
             },
-            confinement_owner,
             |sid, _| {
                 sid == confinement_sid || confinement_contains_capability(&token.confinement, sid)
             },

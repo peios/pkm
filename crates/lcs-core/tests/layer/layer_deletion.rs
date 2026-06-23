@@ -19,11 +19,10 @@ fn layer_deletion_plans_global_purge_and_effect_recomputation() {
 
 #[test]
 fn layer_deletion_aborts_affected_bound_transactions_before_broadcast() {
-    assert_eq!(
+    assert!(
         plan_layer_deletion(&LcsLimits::default(), "policy", 3)
             .unwrap()
-            .abort_affected_bound_transactions,
-        true
+            .abort_affected_bound_transactions
     );
     assert_eq!(
         plan_layer_deletion(&LcsLimits::default(), "policy", 3)

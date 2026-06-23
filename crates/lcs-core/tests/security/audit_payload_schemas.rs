@@ -1,4 +1,4 @@
-use crate::common::{sid};
+use crate::common::sid;
 use lcs_core::{
     LCS_CONFIG_ROOT_PATH, LCS_SACL_MATCH_FAILURE, LCS_SACL_MATCH_SUCCESS, LcsAuditEventKind,
     LcsCallerTokenSummary, LcsError, LcsKeyOpenAuditDecision, LcsSelfConfigReceivedValue,
@@ -8,7 +8,6 @@ use lcs_core::{
     plan_restore_start_audit_record, plan_self_config_invalid_audit_record,
     plan_source_validation_failure_audit_record, validate_sacl_match_flags,
 };
-
 
 fn caller(user_sid: &[u8]) -> LcsCallerTokenSummary<'_> {
     LcsCallerTokenSummary {

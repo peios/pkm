@@ -1,6 +1,5 @@
-use crate::common::{sid};
+use crate::common::sid;
 use lcs_core::sid_bytes_equal;
-
 
 #[test]
 fn sid_comparison_accepts_exact_byte_match() {

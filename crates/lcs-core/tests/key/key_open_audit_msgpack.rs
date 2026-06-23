@@ -1,10 +1,9 @@
-use crate::common::{sid};
+use crate::common::sid;
 use lcs_core::{
     LCS_SACL_MATCH_FAILURE, LCS_SACL_MATCH_SUCCESS, LcsAuditEventKind, LcsAuditPayloadWritePlan,
     LcsCallerTokenSummary, LcsError, LcsKeyOpenAuditDecision, key_open_audit_payload_len,
     plan_key_open_audit_record, write_key_open_audit_payload,
 };
-
 
 fn caller(user_sid: &[u8]) -> LcsCallerTokenSummary<'_> {
     LcsCallerTokenSummary {

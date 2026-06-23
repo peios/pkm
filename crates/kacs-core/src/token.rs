@@ -4,13 +4,17 @@ use crate::privilege::TokenPrivileges;
 use crate::sid::Sid;
 
 /// Audit-policy flag for successful object-access events.
-pub const AUDIT_POLICY_OBJECT_ACCESS_SUCCESS: u32 = peios_uapi::KACS_AUDIT_POLICY_OBJECT_ACCESS_SUCCESS;
+pub const AUDIT_POLICY_OBJECT_ACCESS_SUCCESS: u32 =
+    peios_uapi::KACS_AUDIT_POLICY_OBJECT_ACCESS_SUCCESS;
 /// Audit-policy flag for failed object-access events.
-pub const AUDIT_POLICY_OBJECT_ACCESS_FAILURE: u32 = peios_uapi::KACS_AUDIT_POLICY_OBJECT_ACCESS_FAILURE;
+pub const AUDIT_POLICY_OBJECT_ACCESS_FAILURE: u32 =
+    peios_uapi::KACS_AUDIT_POLICY_OBJECT_ACCESS_FAILURE;
 /// Audit-policy flag for successful privilege-use events.
-pub const AUDIT_POLICY_PRIVILEGE_USE_SUCCESS: u32 = peios_uapi::KACS_AUDIT_POLICY_PRIVILEGE_USE_SUCCESS;
+pub const AUDIT_POLICY_PRIVILEGE_USE_SUCCESS: u32 =
+    peios_uapi::KACS_AUDIT_POLICY_PRIVILEGE_USE_SUCCESS;
 /// Audit-policy flag for failed privilege-use events.
-pub const AUDIT_POLICY_PRIVILEGE_USE_FAILURE: u32 = peios_uapi::KACS_AUDIT_POLICY_PRIVILEGE_USE_FAILURE;
+pub const AUDIT_POLICY_PRIVILEGE_USE_FAILURE: u32 =
+    peios_uapi::KACS_AUDIT_POLICY_PRIVILEGE_USE_FAILURE;
 
 /// A SID paired with Windows-style attribute flags.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,7 +104,7 @@ pub struct AccessCheckToken<'a> {
 }
 
 /// Restricted-token inputs used by the restricted AccessCheck pass.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RestrictedTokenContext<'a> {
     /// Restricting SIDs for the non-device side of the second pass.
     pub restricted_sids: &'a [SidAndAttributes<'a>],
@@ -112,19 +116,8 @@ pub struct RestrictedTokenContext<'a> {
     pub privilege_granted: u32,
 }
 
-impl<'a> Default for RestrictedTokenContext<'a> {
-    fn default() -> Self {
-        Self {
-            restricted_sids: &[],
-            restricted_device_groups: &[],
-            write_restricted: false,
-            privilege_granted: 0,
-        }
-    }
-}
-
 /// Confinement-token inputs used by the confinement narrowing pass.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ConfinementTokenContext<'a> {
     /// Optional confinement SID.
     pub confinement_sid: Option<Sid<'a>>,
@@ -132,16 +125,6 @@ pub struct ConfinementTokenContext<'a> {
     pub confinement_capabilities: &'a [SidAndAttributes<'a>],
     /// Whether the token is exempt from confinement narrowing.
     pub confinement_exempt: bool,
-}
-
-impl<'a> Default for ConfinementTokenContext<'a> {
-    fn default() -> Self {
-        Self {
-            confinement_sid: None,
-            confinement_capabilities: &[],
-            confinement_exempt: false,
-        }
-    }
 }
 
 pub(crate) fn validate_access_check_token_invariants(

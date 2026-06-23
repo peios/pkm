@@ -1,14 +1,12 @@
 use crate::common::{field, limits};
 use lcs_core::{
-    Guid, LcsError, REG_BINARY, REG_DWORD, REG_TOMBSTONE, RSI_REQUEST_HEADER_LEN,
-    RSI_SET_VALUE, SequenceCounter, ValueWriteInput,
-    parse_rsi_request_header, parse_rsi_set_value_request_payload, plan_value_write,
+    Guid, LcsError, REG_BINARY, REG_DWORD, REG_TOMBSTONE, RSI_REQUEST_HEADER_LEN, RSI_SET_VALUE,
+    SequenceCounter, ValueWriteInput, parse_rsi_request_header,
+    parse_rsi_set_value_request_payload, plan_value_write,
     write_planned_rsi_set_value_request_frame,
 };
 
 const KEY_GUID: Guid = [0x55; 16];
-
-
 
 fn input<'a>(value_type: u32, data: &'a [u8]) -> ValueWriteInput<'a> {
     ValueWriteInput {

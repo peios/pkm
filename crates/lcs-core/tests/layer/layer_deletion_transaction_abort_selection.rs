@@ -55,11 +55,10 @@ fn layer_deletion_aborts_only_bound_transactions_written_to_deleted_layer() {
             affected_terminal_errno: TransactionTerminalErrno::Invalid,
         }
     );
-    assert_eq!(
+    assert!(
         plan_layer_deletion(&limits, "Policy", affected.affected_bound_transaction_count,)
             .unwrap()
-            .abort_affected_bound_transactions,
-        true
+            .abort_affected_bound_transactions
     );
 }
 

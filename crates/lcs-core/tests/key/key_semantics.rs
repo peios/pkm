@@ -1,15 +1,14 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
     Guid, KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, KeyCreateOptions, KeyCreatePlan, KeyCreateRequest,
-    KeyParent, KeyRecordView, LcsError, NIL_GUID, REG_OPTION_CREATE_LINK,
-    REG_OPTION_VOLATILE, validate_key_create_flags, validate_key_create_request,
-    validate_key_record, validate_symlink_create_authority,
+    KeyParent, KeyRecordView, LcsError, NIL_GUID, REG_OPTION_CREATE_LINK, REG_OPTION_VOLATILE,
+    validate_key_create_flags, validate_key_create_request, validate_key_record,
+    validate_symlink_create_authority,
 };
 
 const PARENT_GUID: Guid = [0x10; 16];
 const CHILD_GUID: Guid = [0x11; 16];
 const ROOT_GUID: Guid = [0x12; 16];
-
 
 fn create_request<'a>(flags: u32) -> KeyCreateRequest<'a> {
     KeyCreateRequest {

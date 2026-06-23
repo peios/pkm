@@ -1,4 +1,4 @@
-use crate::common::{sid};
+use crate::common::sid;
 use lcs_core::{
     LCS_CONFIG_ROOT_PATH, LcsAuditEventKind, LcsAuditPayloadWritePlan, LcsCallerTokenSummary,
     LcsError, LcsLimits, REG_SZ, REQUEST_TIMEOUT_MS, RsiSourceDataValidationFailure,
@@ -11,7 +11,6 @@ use lcs_core::{
     write_backup_restore_start_audit_payload, write_self_config_invalid_audit_payload,
     write_source_validation_failure_audit_payload,
 };
-
 
 fn caller(user_sid: &[u8]) -> LcsCallerTokenSummary<'_> {
     LcsCallerTokenSummary {

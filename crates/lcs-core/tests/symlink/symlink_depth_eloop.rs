@@ -16,8 +16,10 @@ fn symlink_depth_limit_default_is_configurable_input() {
 
 #[test]
 fn symlink_follow_depth_advances_until_configured_limit() {
-    let mut limits = LcsLimits::default();
-    limits.symlink_depth_limit = 2;
+    let limits = LcsLimits {
+        symlink_depth_limit: 2,
+        ..LcsLimits::default()
+    };
 
     assert_eq!(
         classify_symlink_follow_depth(0, &limits),
@@ -31,8 +33,10 @@ fn symlink_follow_depth_advances_until_configured_limit() {
 
 #[test]
 fn exceeding_symlink_follow_depth_maps_to_eloop() {
-    let mut limits = LcsLimits::default();
-    limits.symlink_depth_limit = 2;
+    let limits = LcsLimits {
+        symlink_depth_limit: 2,
+        ..LcsLimits::default()
+    };
 
     assert_eq!(
         classify_symlink_follow_depth(2, &limits),

@@ -3,15 +3,12 @@ use common::{acl_bytes, append_tokens, basic_ace, callback_ace, expr, parse_sid,
 use kacs_core::{
     evaluate_conditional_expression, evaluate_dacl_result_list_with_restricted_context,
     evaluate_dacl_with_restricted_context, AccessStatus, ConditionalContext, ConditionalResult,
-    GenericMapping, KacsError, ObjectTypeList, ObjectTypeNode, RestrictedTokenContext,
-    SecurityDescriptor, SidAndAttributes, TokenView, ACCESS_ALLOWED_ACE_TYPE,
-    ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACE_OBJECT_TYPE_PRESENT,
-    READ_CONTROL, SE_DACL_PRESENT, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY, SE_SELF_RELATIVE,
-    WRITE_DAC,
+    GenericMapping, KacsError, ObjectTypeList, ObjectTypeNode, RestrictedDaclResultListInput,
+    RestrictedTokenContext, SecurityDescriptor, SidAndAttributes, TokenView,
+    ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+    ACE_OBJECT_TYPE_PRESENT, READ_CONTROL, SE_DACL_PRESENT, SE_GROUP_ENABLED,
+    SE_GROUP_USE_FOR_DENY_ONLY, SE_SELF_RELATIVE, WRITE_DAC,
 };
-
-
-
 
 fn object_ace(
     ace_type: u8,
@@ -37,8 +34,6 @@ fn object_ace(
     bytes.extend_from_slice(&body);
     bytes
 }
-
-
 
 fn sd_with_dacl(owner: &[u8], dacl: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0u8; 20];
@@ -79,7 +74,6 @@ fn object_tree() -> ObjectTypeList {
     .expect("tree should parse")
 }
 
-
 fn sid_literal(sid: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.push(0x51);
@@ -87,7 +81,6 @@ fn sid_literal(sid: &[u8]) -> Vec<u8> {
     bytes.extend_from_slice(sid);
     bytes
 }
-
 
 #[test]
 fn restricted_pass_intersects_normal_grants() {
@@ -1048,16 +1041,16 @@ fn restricted_merge_applies_per_node_in_result_list_mode() {
         privilege_granted: 0,
     };
 
-    let result = evaluate_dacl_result_list_with_restricted_context(
-        &sd,
-        &token,
-        READ_CONTROL,
-        &mapping(),
-        false,
-        &object_tree(),
-        &ConditionalContext::default(),
-        &restricted_context,
-    )
+    let result = evaluate_dacl_result_list_with_restricted_context(RestrictedDaclResultListInput {
+        sd: &sd,
+        token: &token,
+        desired_access: READ_CONTROL,
+        mapping: &mapping(),
+        skip_owner_implicit: false,
+        object_tree: &object_tree(),
+        conditional_context: &ConditionalContext::default(),
+        restricted_context: &restricted_context,
+    })
     .expect("evaluation should succeed");
 
     assert_eq!(result.granted_list, vec![0, READ_CONTROL, 0]);

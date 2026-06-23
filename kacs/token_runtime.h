@@ -588,6 +588,10 @@ struct pkm_kacs_kunit_socket_view {
 const void *pkm_kacs_current_effective_token_ptr(void);
 const void *pkm_kacs_current_primary_token_ptr(void);
 bool pkm_kacs_current_token_eval_context_allowed(void);
+bool pkm_kacs_subjective_cred_context_allowed(bool task_context,
+					      bool has_cred,
+					      bool has_security_blob,
+					      bool has_token);
 const void *pkm_kacs_boot_system_token_ptr(void);
 const void *pkm_kacs_boot_anonymous_token_ptr(void);
 void pkm_kacs_fill_uuid_v4(u8 out[KACS_UUID_BYTES]);

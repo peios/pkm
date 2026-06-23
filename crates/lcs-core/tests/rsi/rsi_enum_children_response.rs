@@ -15,7 +15,6 @@ fn response_frame(request_id: u64, op_code: u16, status: u32) -> Vec<u8> {
     frame
 }
 
-
 fn push_path_entry(
     frame: &mut Vec<u8>,
     layer_name: &[u8],
@@ -43,7 +42,6 @@ fn push_metadata(
     frame.push(symlink);
     frame.extend_from_slice(&last_write_time.to_le_bytes());
 }
-
 
 #[test]
 fn enum_children_success_response_parses_children_entries_and_metadata() {

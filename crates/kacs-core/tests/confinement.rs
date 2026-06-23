@@ -2,15 +2,12 @@ mod common;
 use common::{acl_bytes, append_tokens, basic_ace, callback_ace, expr, parse_sid, sid_bytes};
 use kacs_core::{
     evaluate_dacl_result_list_with_confinement_context, evaluate_dacl_with_confinement_context,
-    AccessStatus, ClaimAttribute, ClaimValue, ConditionalContext, ConfinementTokenContext,
-    GenericMapping, ObjectTypeList, ObjectTypeNode, SecurityDescriptor, SidAndAttributes,
-    TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+    AccessStatus, ClaimAttribute, ClaimValue, ConditionalContext, ConfinementDaclResultListInput,
+    ConfinementTokenContext, GenericMapping, ObjectTypeList, ObjectTypeNode, SecurityDescriptor,
+    SidAndAttributes, TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
     ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACE_OBJECT_TYPE_PRESENT, READ_CONTROL, SE_DACL_PRESENT,
     SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY, SE_SELF_RELATIVE, WRITE_DAC,
 };
-
-
-
 
 fn object_ace(
     ace_type: u8,
@@ -36,8 +33,6 @@ fn object_ace(
     bytes.extend_from_slice(&body);
     bytes
 }
-
-
 
 fn sd_with_dacl(owner: &[u8], dacl: Option<&[u8]>) -> Vec<u8> {
     let control = SE_SELF_RELATIVE | if dacl.is_some() { SE_DACL_PRESENT } else { 0 };
@@ -81,7 +76,6 @@ fn object_tree() -> ObjectTypeList {
     .expect("tree should parse")
 }
 
-
 fn sid_literal(sid: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.push(0x51);
@@ -118,7 +112,6 @@ fn composite(elements: &[Vec<u8>]) -> Vec<u8> {
     }
     bytes
 }
-
 
 #[test]
 fn confinement_intersects_normal_grants() {
@@ -1060,17 +1053,18 @@ fn confinement_object_tree_intersection_is_per_node() {
         confinement_exempt: false,
     };
 
-    let result = evaluate_dacl_result_list_with_confinement_context(
-        &sd,
-        &token,
-        READ_CONTROL,
-        &mapping(),
-        false,
-        &object_tree(),
-        &ConditionalContext::default(),
-        &confinement,
-    )
-    .expect("evaluation should succeed");
+    let result =
+        evaluate_dacl_result_list_with_confinement_context(ConfinementDaclResultListInput {
+            sd: &sd,
+            token: &token,
+            desired_access: READ_CONTROL,
+            mapping: &mapping(),
+            skip_owner_implicit: false,
+            object_tree: &object_tree(),
+            conditional_context: &ConditionalContext::default(),
+            confinement_context: &confinement,
+        })
+        .expect("evaluation should succeed");
 
     assert_eq!(
         result.status_list,

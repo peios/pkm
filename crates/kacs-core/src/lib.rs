@@ -100,9 +100,9 @@ pub use ace::{
 pub use acl::Acl;
 pub use audit::{evaluate_sacl, AuditEvent, EvaluateSaclState};
 pub use caap::{
-    evaluate_caap, parse_caap_policy_spec, CaapEvaluationState, CaapPolicy, CaapPolicyCache,
-    CaapPolicyEntry, CaapRule, CaapSaclContribution, CaapSaclPhase, OwnedCaapPolicy,
-    OwnedCaapPolicyEntry, OwnedCaapRule,
+    evaluate_caap, parse_caap_policy_spec, CaapEvaluationInput, CaapEvaluationState, CaapPolicy,
+    CaapPolicyCache, CaapPolicyEntry, CaapRule, CaapSaclContribution, CaapSaclPhase,
+    OwnedCaapPolicy, OwnedCaapPolicyEntry, OwnedCaapRule,
 };
 pub use claims::{
     parse_claim_attribute_array, parse_claim_attribute_entry, ClaimAttribute, ClaimValue,
@@ -117,10 +117,13 @@ pub use dacl::{
     evaluate_dacl_with_confinement_context, evaluate_dacl_with_context,
     evaluate_dacl_with_object_tree, evaluate_dacl_with_object_tree_and_context,
     evaluate_dacl_with_restricted_context, evaluate_dacl_with_self_sid, AccessStatus,
-    DaclEvaluation, ObjectDaclResultList,
+    ConfinementDaclResultListInput, DaclEvaluation, ObjectDaclResultList,
+    RestrictedDaclResultListInput,
 };
 pub use error::{KacsError, KacsResult};
-pub use evaluate_sd::{evaluate_security_descriptor, EvaluateSecurityDescriptorState};
+pub use evaluate_sd::{
+    evaluate_security_descriptor, EvaluateSecurityDescriptorInput, EvaluateSecurityDescriptorState,
+};
 pub use inheritance::{
     inherit_registry_container_child_sd, RegistryContainerChildInheritance, CONTAINER_INHERIT_ACE,
     INHERITED_ACE, INHERIT_ONLY_ACE, NO_PROPAGATE_INHERIT_ACE, OBJECT_INHERIT_ACE,
@@ -138,7 +141,7 @@ pub use pip::{
 pub use pkm_alloc::{
     slice_to_vec, vec_collect, AllocError, String as PkmString, TryClone, Vec as PkmVec,
 };
-pub use pre_sacl::{pre_sacl_walk, PreSaclWalkState};
+pub use pre_sacl::{pre_sacl_walk, PreSaclWalkInput, PreSaclWalkState};
 pub use privilege::{
     apply_take_ownership_fallback, seed_access_check_privileges, AccessDecisionState,
     PrivilegeGrantState, PrivilegeProvenance, TokenPrivileges, BACKUP_INTENT, RESTORE_INTENT,

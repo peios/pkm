@@ -2,20 +2,42 @@ mod common;
 use common::{acl_bytes, basic_ace, mapping, parse_sid, sid_bytes};
 use kacs_core::{
     evaluate_security_descriptor, AccessCheckToken, ConditionalContext, ConfinementTokenContext,
-    GenericMapping, ImpersonationLevel, IntegrityLevel, KacsError, ObjectTypeList, ObjectTypeNode,
-    PipContext, RestrictedTokenContext, SecurityDescriptor, Sid, SidAndAttributes, TokenPrivileges,
-    TokenType, TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
-    ACCESS_SYSTEM_SECURITY, ACE_OBJECT_TYPE_PRESENT, GENERIC_WRITE, READ_CONTROL, SE_DACL_PRESENT,
-    SE_GROUP_ENABLED, SE_SACL_PRESENT, SE_SECURITY_PRIVILEGE, SE_SELF_RELATIVE,
-    SE_TAKE_OWNERSHIP_PRIVILEGE, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+    EvaluateSecurityDescriptorInput, GenericMapping, ImpersonationLevel, IntegrityLevel, KacsError,
+    ObjectTypeList, ObjectTypeNode, PipContext, RestrictedTokenContext, SecurityDescriptor, Sid,
+    SidAndAttributes, TokenPrivileges, TokenType, TokenView, ACCESS_ALLOWED_ACE_TYPE,
+    ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACCESS_SYSTEM_SECURITY, ACE_OBJECT_TYPE_PRESENT, GENERIC_WRITE,
+    READ_CONTROL, SE_DACL_PRESENT, SE_GROUP_ENABLED, SE_SACL_PRESENT, SE_SECURITY_PRIVILEGE,
+    SE_SELF_RELATIVE, SE_TAKE_OWNERSHIP_PRIVILEGE, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
     SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP, SYSTEM_MANDATORY_LABEL_NO_READ_UP,
     SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, TOKEN_MANDATORY_POLICY_NO_WRITE_UP, WRITE_DAC, WRITE_OWNER,
 };
 
+macro_rules! eval_sd {
+    (
+        $sd:expr,
+        $token:expr,
+        $pip:expr,
+        $desired_access:expr,
+        $mapping:expr,
+        $object_tree:expr,
+        $conditional_context:expr,
+        $privilege_intent:expr $(,)?
+    ) => {
+        evaluate_security_descriptor(EvaluateSecurityDescriptorInput {
+            sd: $sd,
+            token: $token,
+            pip: $pip,
+            desired_access: $desired_access,
+            mapping: $mapping,
+            object_tree: $object_tree,
+            conditional_context: $conditional_context,
+            privilege_intent: $privilege_intent,
+        })
+    };
+}
+
 const SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE: u8 = 0x14;
 const EXECUTE_RIGHT: u32 = 0x0000_0020;
-
-
 
 fn sid_attr<'a>(sid: Sid<'a>) -> SidAndAttributes<'a> {
     SidAndAttributes {
@@ -23,7 +45,6 @@ fn sid_attr<'a>(sid: Sid<'a>) -> SidAndAttributes<'a> {
         attributes: SE_GROUP_ENABLED,
     }
 }
-
 
 fn object_ace(
     ace_type: u8,
@@ -47,7 +68,6 @@ fn object_ace(
     bytes.extend_from_slice(&body);
     bytes
 }
-
 
 fn sd_bytes(
     owner: Option<&[u8]>,
@@ -89,7 +109,6 @@ fn sd_bytes(
     bytes
 }
 
-
 fn primary_token<'a>(user: Sid<'a>, groups: &'a [SidAndAttributes<'a>]) -> AccessCheckToken<'a> {
     AccessCheckToken {
         subject: TokenView {
@@ -121,7 +140,7 @@ fn identification_level_impersonation_denies_before_other_validation() {
         ..primary_token(parse_sid(&user), &[])
     };
 
-    let err = evaluate_security_descriptor(
+    let err = eval_sd!(
         None,
         &token,
         default_pip(),
@@ -146,7 +165,7 @@ fn missing_owner_is_rejected_but_missing_group_is_valid() {
 
     let missing_group_bytes = sd_bytes(Some(&owner), None, None, Some(&allow_read));
     let missing_group = SecurityDescriptor::parse(&missing_group_bytes).expect("sd should parse");
-    let missing_group_result = evaluate_security_descriptor(
+    let missing_group_result = eval_sd!(
         Some(&missing_group),
         &token,
         default_pip(),
@@ -161,7 +180,7 @@ fn missing_owner_is_rejected_but_missing_group_is_valid() {
 
     let missing_owner_bytes = sd_bytes(None, Some(&group), None, Some(&allow_read));
     let missing_owner = SecurityDescriptor::parse(&missing_owner_bytes).expect("sd should parse");
-    let missing_owner_err = evaluate_security_descriptor(
+    let missing_owner_err = eval_sd!(
         Some(&missing_owner),
         &token,
         default_pip(),
@@ -186,7 +205,7 @@ fn security_descriptor_group_sid_does_not_grant_access() {
     let token_groups = [sid_attr(parse_sid(&object_group))];
     let token = primary_token(parse_sid(&user), &token_groups);
 
-    let result = evaluate_security_descriptor(
+    let result = eval_sd!(
         Some(&sd),
         &token,
         default_pip(),
@@ -240,7 +259,7 @@ fn write_restricted_requires_user_deny_only_in_full_pipeline() {
         privilege_granted: 0,
     };
 
-    let err = evaluate_security_descriptor(
+    let err = eval_sd!(
         Some(&sd),
         &token,
         default_pip(),
@@ -275,7 +294,7 @@ fn scalar_pipeline_composes_mapping_dacl_and_take_ownership_fallback() {
         used: 0,
     };
 
-    let result = evaluate_security_descriptor(
+    let result = eval_sd!(
         Some(&sd),
         &token,
         default_pip(),
@@ -327,7 +346,7 @@ fn pip_revocation_is_not_restored_after_restricted_merge() {
         pip_trust: 1024,
     };
 
-    let result = evaluate_security_descriptor(
+    let result = eval_sd!(
         Some(&sd),
         &token,
         pip,
@@ -369,7 +388,7 @@ fn pip_decided_bits_block_owner_implicit_and_dacl_grants() {
         pip_trust: 1,
     };
 
-    let result = evaluate_security_descriptor(
+    let result = eval_sd!(
         Some(&sd),
         &token,
         pip,
@@ -405,7 +424,7 @@ fn null_dacl_grants_only_rights_not_predecided_by_pip() {
         pip_trust: 1024,
     };
 
-    let result = evaluate_security_descriptor(
+    let result = eval_sd!(
         Some(&sd),
         &token,
         pip,
@@ -441,7 +460,7 @@ fn absent_trust_label_does_not_restrict_nonzero_caller_pip() {
         pip_trust: 1,
     };
 
-    let result = evaluate_security_descriptor(
+    let result = eval_sd!(
         Some(&sd),
         &token,
         pip,
@@ -494,7 +513,7 @@ fn pip_denials_apply_to_root_and_object_tree_nodes() {
         pip_trust: 1024,
     };
 
-    let result = evaluate_security_descriptor(
+    let result = eval_sd!(
         Some(&sd),
         &token,
         pip,
@@ -576,7 +595,7 @@ fn pip_strips_privilege_granted_backup_restore_security_and_take_ownership() {
             used: 0,
         };
 
-        let result = evaluate_security_descriptor(
+        let result = eval_sd!(
             Some(&sd),
             &token,
             pip,
@@ -627,7 +646,7 @@ fn mandatory_decided_blocks_take_ownership_fallback() {
         used: 0,
     };
 
-    let result = evaluate_security_descriptor(
+    let result = eval_sd!(
         Some(&sd),
         &token,
         default_pip(),
@@ -679,7 +698,7 @@ fn privilege_grants_survive_restricted_merge_but_not_confinement() {
         confinement_exempt: false,
     };
 
-    let result = evaluate_security_descriptor(
+    let result = eval_sd!(
         Some(&sd),
         &token,
         default_pip(),
@@ -743,7 +762,7 @@ fn backup_restore_and_take_ownership_privileges_do_not_bypass_confinement() {
             confinement_exempt: false,
         };
 
-        let result = evaluate_security_descriptor(
+        let result = eval_sd!(
             Some(&sd),
             &token,
             default_pip(),
@@ -778,7 +797,7 @@ fn low_and_untrusted_tokens_cannot_write_unlabeled_objects() {
         let mut token = primary_token(parse_sid(&user), &[]);
         token.integrity_level = integrity_level;
 
-        let result = evaluate_security_descriptor(
+        let result = eval_sd!(
             Some(&sd),
             &token,
             default_pip(),
@@ -839,7 +858,7 @@ fn mic_category_matrix_narrows_dacl_grants_for_below_label_callers() {
         let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
         let token = primary_token(parse_sid(&user), &[]);
 
-        let result = evaluate_security_descriptor(
+        let result = eval_sd!(
             Some(&sd),
             &token,
             default_pip(),
@@ -880,7 +899,7 @@ fn se_security_privilege_survives_mic_without_pip_label() {
         used: 0,
     };
 
-    let result = evaluate_security_descriptor(
+    let result = eval_sd!(
         Some(&sd),
         &token,
         default_pip(),
@@ -924,7 +943,7 @@ fn object_tree_pipeline_preserves_root_and_per_node_grants() {
     let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
     let token = primary_token(parse_sid(&user), &[]);
 
-    let result = evaluate_security_descriptor(
+    let result = eval_sd!(
         Some(&sd),
         &token,
         default_pip(),

@@ -11,8 +11,6 @@ use lcs_core::{
 
 const CHILD_GUID: Guid = [0x30; 16];
 
-
-
 fn push_value_entry(
     frame: &mut Vec<u8>,
     value_name: &[u8],
@@ -45,7 +43,6 @@ fn push_path_entry(
     frame.extend_from_slice(&target_guid);
     frame.extend_from_slice(&sequence.to_le_bytes());
 }
-
 
 fn query_values_payload(
     frame: &[u8],

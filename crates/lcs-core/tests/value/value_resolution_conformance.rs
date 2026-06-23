@@ -1,9 +1,8 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
     BlanketTombstoneEntry, LayerResolutionContext, LayerView, LcsLimits, REG_DWORD, REG_SZ,
     REG_TOMBSTONE, RegistryValueType, ValueEntry, ValueResolution, resolve_value,
 };
-
 
 fn context<'a>(
     layers: &'a [LayerView<'a>],

@@ -1,4 +1,4 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
     LcsError, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN, REG_EXPAND_SZ,
     REG_FULL_RESOURCE_DESCRIPTOR, REG_LINK, REG_MULTI_SZ, REG_NONE, REG_QWORD, REG_RESOURCE_LIST,
@@ -28,7 +28,6 @@ const NORMAL_TYPES: &[(u32, RegistryValueType)] = &[
     ),
     (REG_QWORD, RegistryValueType::Qword),
 ];
-
 
 fn write_request(value_type: u32, data: &[u8]) -> ValueWriteRequest<'_> {
     ValueWriteRequest {

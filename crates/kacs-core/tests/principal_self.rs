@@ -6,9 +6,6 @@ use kacs_core::{
     SE_SELF_RELATIVE, WRITE_DAC,
 };
 
-
-
-
 fn acl_bytes(aces: &[Vec<u8>]) -> Vec<u8> {
     let size = 8 + aces.iter().map(Vec::len).sum::<usize>();
     let mut bytes = Vec::with_capacity(size);

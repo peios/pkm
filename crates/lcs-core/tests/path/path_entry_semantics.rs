@@ -1,4 +1,4 @@
-use crate::common::{limits};
+use crate::common::limits;
 use lcs_core::{
     BASE_LAYER_VIEW, Guid, LayerResolutionContext, LcsError, LcsLimits, NIL_GUID, PathEntry,
     PathEntryWriteRequest, PathResolution, PathTarget, ResolvedPathEntry, for_each_visible_subkey,
@@ -8,7 +8,6 @@ use lcs_core::{
 const PARENT_GUID: Guid = [0x10; 16];
 const CHILD_GUID: Guid = [0x11; 16];
 const OTHER_GUID: Guid = [0x12; 16];
-
 
 fn context<'a>(limits: &'a LcsLimits) -> LayerResolutionContext<'a> {
     LayerResolutionContext {

@@ -7,8 +7,6 @@ use kacs_core::{
     CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE, SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY,
 };
 
-
-
 fn token<'a>(user: &'a [u8], groups: &'a [SidAndAttributes<'a>]) -> TokenView<'a> {
     TokenView {
         user: parse_sid(user),
@@ -16,7 +14,6 @@ fn token<'a>(user: &'a [u8], groups: &'a [SidAndAttributes<'a>]) -> TokenView<'a
         groups,
     }
 }
-
 
 fn int64_literal(value: i64) -> Vec<u8> {
     int64_literal_with_sign(value, if value < 0 { 0x02 } else { 0x01 })
@@ -79,7 +76,6 @@ fn attr_ref(opcode: u8, name: &str) -> Vec<u8> {
     bytes.extend_from_slice(&string_literal(name)[1..]);
     bytes
 }
-
 
 fn result_tokens(result: ConditionalResult) -> Vec<u8> {
     match result {

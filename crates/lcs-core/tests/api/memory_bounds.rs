@@ -28,12 +28,14 @@ fn memory_bounds_follow_psd_005_resource_model() {
 
 #[test]
 fn memory_bounds_track_active_runtime_limits() {
-    let mut limits = LcsLimits::default();
-    limits.notification_queue_size = 3;
-    limits.max_key_depth = 4;
-    limits.max_total_layers = 5;
-    limits.max_layers_per_value = 6;
-    limits.max_concurrent_rsi_requests = 2;
+    let limits = LcsLimits {
+        notification_queue_size: 3,
+        max_key_depth: 4,
+        max_total_layers: 5,
+        max_layers_per_value: 6,
+        max_concurrent_rsi_requests: 2,
+        ..LcsLimits::default()
+    };
 
     assert_eq!(
         plan_registry_memory_bounds(
@@ -58,8 +60,10 @@ fn memory_bounds_track_active_runtime_limits() {
 
 #[test]
 fn memory_bounds_fail_closed_on_arithmetic_overflow() {
-    let mut limits = LcsLimits::default();
-    limits.notification_queue_size = 2;
+    let mut limits = LcsLimits {
+        notification_queue_size: 2,
+        ..LcsLimits::default()
+    };
 
     assert_eq!(
         plan_registry_memory_bounds(

@@ -107,4 +107,3 @@ pub fn append_tokens(tokens: &[Vec<u8>]) -> Vec<u8> {
     }
     bytes
 }
-
