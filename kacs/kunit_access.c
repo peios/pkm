@@ -446,9 +446,10 @@ static void pkm_kunit_continuous_audit_msgpack_schema(struct kunit *test)
 		MAY_READ);
 	KUNIT_EXPECT_EQ(test, ret, 0);
 	KUNIT_ASSERT_EQ(test,
-			pkm_kmes_kunit_copy_single_buffer(
-				buffer, PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
-				&snapshot),
+			pkm_kmes_kunit_copy_latest_matching_event(
+				KMES_ORIGIN_KACS, "continuous-audit",
+				sizeof("continuous-audit") - 1, buffer,
+				PKM_KUNIT_KMES_CAPTURE_BYTES, &written, &snapshot),
 			0);
 	KUNIT_ASSERT_TRUE(test,
 			  pkm_kunit_parse_kmes_event(buffer, written, &view));
