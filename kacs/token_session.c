@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <linux/errno.h>
+#include <linux/fdtable.h>
 #include <linux/limits.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
@@ -81,8 +82,10 @@ long pkm_kacs_create_token_core(const void *subject_token,
 	if (fd < 0)
 		return fd;
 	if (!kacs_rust_token_mark_privileges_used(
-		    subject_token, KACS_SE_CREATE_TOKEN_PRIVILEGE))
+		    subject_token, KACS_SE_CREATE_TOKEN_PRIVILEGE)) {
+		close_fd((unsigned int)fd);
 		return -EPERM;
+	}
 	return fd;
 }
 
