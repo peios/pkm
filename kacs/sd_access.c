@@ -849,6 +849,12 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 	if (ret)
 		goto out_unlock;
 	used_restore_bypass = cache->state != PKM_KACS_INODE_SD_VALID;
+	if (used_restore_bypass &&
+	    !kacs_rust_token_mark_privileges_used(subject_token,
+						  KACS_SE_RESTORE_PRIVILEGE)) {
+		ret = -EACCES;
+		goto out_bytes;
+	}
 
 	new_cache = pkm_kacs_inode_sd_cache_alloc(PKM_KACS_INODE_SD_VALID,
 						  new_sd_bytes, new_sd_len);
@@ -876,9 +882,6 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 		new_sd_bytes = NULL;
 		return ret;
 	}
-	if (used_restore_bypass)
-		(void)kacs_rust_token_mark_privileges_used(
-			subject_token, KACS_SE_RESTORE_PRIVILEGE);
 
 	mutex_lock(&sec->lock);
 	pkm_kacs_inode_replace_sd_cache_locked(sec, new_cache);
