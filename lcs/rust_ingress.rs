@@ -1273,14 +1273,14 @@ fn write_kmes_config_plan_from_observed(
                     }
                 }
             }
-            Some(_) => {
+            Some(value) => {
                 retained_invalid_count = retained_invalid_count
                     .checked_add(1)
                     .ok_or(LinuxErrno::Einval)?;
                 if audit_count >= audits.len() {
                     return Err(LinuxErrno::Einval);
                 }
-                let wrong_type = match observed.unwrap() {
+                let wrong_type = match value {
                     KmesConfigValue::Dword(_) => KmesConfigValue::WrongType {
                         actual_type: REG_DWORD,
                     },
