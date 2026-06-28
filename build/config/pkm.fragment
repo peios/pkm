@@ -77,6 +77,16 @@ CONFIG_ISO9660_FS=y
 CONFIG_FAT_FS=y
 CONFIG_VFAT_FS=y
 CONFIG_NLS_ISO8859_1=y
+# USB mass storage — real-hardware USB-stick boot (the off-RAM live medium read
+# over USB). The xHCI host plus the usb-storage and UAS SCSI bridges, built-in
+# so early boot reaches the stick with no module load. The base config carries
+# these as `m`, which localmodconfig prunes (no stick attached on the build
+# host) — forcing y here makes them survive. SCSI + BLK_DEV_SD (their hard
+# dependency) are already y from the base config.
+CONFIG_USB=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_STORAGE=y
+CONFIG_USB_UAS=y
 
 # --- trim base-config leftovers irrelevant to a QEMU guest ---
 # Watchdog pretimeout governors are unneeded in a guest, and GOV_SEL is a hidden
