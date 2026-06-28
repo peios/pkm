@@ -124,7 +124,7 @@ impl OwnedCaapPolicyEntry {
     /// Returns a borrowed policy entry view after re-validating the stored SID.
     pub fn borrowed(&self) -> KacsResult<CaapPolicyEntry<'_>> {
         Ok(CaapPolicyEntry {
-            sid: Sid::parse(self.sid.as_slice()).expect("policy SID validated at ingestion"),
+            sid: Sid::parse(self.sid.as_slice())?,
             policy: self.policy.borrowed()?,
         })
     }

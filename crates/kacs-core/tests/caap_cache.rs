@@ -5,10 +5,11 @@ use common::{
 };
 use kacs_core::{
     access_check_core, parse_caap_policy_spec, AccessCheckMode, AccessCheckToken, CaapPolicyCache,
-    ConditionalContext, GenericMapping, ImpersonationLevel, IntegrityLevel, PipContext,
-    SecurityDescriptor, Sid, TokenPrivileges, TokenType, TokenView, ACCESS_ALLOWED_ACE_TYPE,
-    ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE,
-    ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
+    ConditionalContext, GenericMapping, ImpersonationLevel, IntegrityLevel, OwnedCaapPolicy,
+    OwnedCaapPolicyEntry, PipContext, SecurityDescriptor, Sid, TokenPrivileges, TokenType,
+    TokenView, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+    ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+    ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
     ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE, READ_CONTROL,
     SE_DACL_PRESENT, SE_SACL_PRESENT, SE_SELF_RELATIVE, SYSTEM_ALARM_ACE_TYPE,
     SYSTEM_ALARM_CALLBACK_ACE_TYPE, SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE,
@@ -661,6 +662,28 @@ fn invalid_policy_sid_is_rejected_without_mutating_cache() {
             | kacs_core::KacsError::InvalidSidLength { .. }
     ));
     assert!(cache.entries().is_empty());
+}
+
+#[test]
+fn owned_policy_entry_borrowed_revalidates_public_sid_without_panicking() {
+    let entry = OwnedCaapPolicyEntry {
+        sid: vec![1u8, 2, 3].into(),
+        policy: OwnedCaapPolicy {
+            rules: Vec::new().into(),
+        },
+    };
+
+    let error = entry
+        .borrowed()
+        .expect_err("invalid public SID state should return an error");
+
+    assert!(matches!(
+        error,
+        kacs_core::KacsError::Truncated(_)
+            | kacs_core::KacsError::InvalidSidRevision(_)
+            | kacs_core::KacsError::InvalidSidSubAuthorityCount(_)
+            | kacs_core::KacsError::InvalidSidLength { .. }
+    ));
 }
 
 #[test]
