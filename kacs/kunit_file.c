@@ -7243,6 +7243,15 @@ static void pkm_kunit_file_mount_policy_classifies_synthesize_ephemeral_fs(
 	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_mount_policy_for_magic(
 				       EXFAT_SUPER_MAGIC),
 			KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL);
+	/*
+	 * iso9660 — SD-less read-only optical/USB-image filesystem. Must be
+	 * synth-ephemeral by default: its fill_super reads the root directory
+	 * at mount-create, so DENY_MISSING would fail the mount before a
+	 * userspace policy override could apply (see mount_policy.c).
+	 */
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_mount_policy_for_magic(
+				       ISOFS_SUPER_MAGIC),
+			KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL);
 }
 
 

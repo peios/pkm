@@ -59,6 +59,22 @@ u32 pkm_kacs_mount_policy_for_magic(unsigned long magic)
 	case NFS_SUPER_MAGIC:
 	case MSDOS_SUPER_MAGIC:
 	case EXFAT_SUPER_MAGIC:
+	case ISOFS_SUPER_MAGIC:
+		/*
+		 * SD-less foreign filesystems — network shares (NFS) and removable
+		 * media (FAT/exFAT, and iso9660 optical/USB images). None can store
+		 * a security descriptor, so DENY_MISSING would lock every inode.
+		 *
+		 * iso9660 specifically MUST be defaulted here, not left to a
+		 * userspace `policy=synth-ephemeral` override: iso9660_fill_super
+		 * reads the root directory during fsconfig(CMD_CREATE), so the
+		 * DENY_MISSING check fires at mount-create — before the post-create
+		 * policy setter (the set-before-attach step) can run. (squashfs's
+		 * create does not touch the root dir, which is why an SD-less
+		 * squashfs can still be rescued by the override and so stays on
+		 * DENY_MISSING below.) Synthesize ephemeral SDs from the mount
+		 * template instead; the trust chain is the boot medium.
+		 */
 		return KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL;
 	default:
 		return KACS_MOUNT_POLICY_DENY_MISSING;
