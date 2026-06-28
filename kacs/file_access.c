@@ -23,6 +23,7 @@
 #include "access_check.h"
 #include "caap_cache.h"
 #include "file_access.h"
+#include "trace.h"
 #include "file_sd_cache.h"
 #include "lsm_internal.h"
 #include "mount_policy.h"
@@ -210,19 +211,37 @@ long pkm_kacs_authorize_live_file_access_core(
 	u8 cache_state = 0xff;
 	long ret;
 
-	if (!subject_token || !file || desired_access == 0)
+	if (!subject_token || !file || desired_access == 0) {
+		PKM_KACS_TRACE("live_file_access", "bad-args",
+			       file ? file_inode(file) : NULL, desired_access,
+			       -EINVAL);
 		return -EINVAL;
+	}
 
 	inode = file_inode(file);
-	if (!inode || !inode->i_security)
+	if (!inode || !inode->i_security) {
+		/*
+		 * An inode with no security blob yet — e.g. accessed mid-mount
+		 * before inode_alloc_security has populated it. This path used
+		 * to return silently; the trace makes that visible.
+		 */
+		PKM_KACS_TRACE("live_file_access", "no-i_security", inode,
+			       desired_access, -EACCES);
 		return -EACCES;
+	}
 	if (pkm_kacs_superblock_mount_policy(inode->i_sb) ==
-	    KACS_MOUNT_POLICY_UNMANAGED)
+	    KACS_MOUNT_POLICY_UNMANAGED) {
+		PKM_KACS_TRACE("live_file_access", "unmanaged", inode,
+			       desired_access, -EOPNOTSUPP);
 		return -EOPNOTSUPP;
+	}
 
 	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
-	if (ret)
+	if (ret) {
+		PKM_KACS_TRACE("live_file_access", "pip-context", inode,
+			       desired_access, ret);
 		return ret;
+	}
 
 	sec = pkm_kacs_inode(inode);
 	ret = pkm_kacs_inode_ensure_effective_cache(file, sec);
@@ -261,6 +280,14 @@ log:
 			desired_access, current->comm,
 			current->pid, ret);
 	}
+	/*
+	 * Final decision (allow or deny, including the cache-path denials
+	 * above). Unlike the pr_debug, this also records the allow case, so a
+	 * kacs.trace boot shows the full sequence of what passed, not only what
+	 * failed.
+	 */
+	PKM_KACS_TRACE("live_file_access", "decision", inode, desired_access,
+		       ret);
 	return ret;
 }
 
@@ -524,30 +551,43 @@ int pkm_kacs_file_open(struct file *file)
 
 	if (!file)
 		return -EACCES;
-	if (pkm_kacs_file_delete_on_close_pending(file))
+	if (pkm_kacs_file_delete_on_close_pending(file)) {
+		PKM_KACS_TRACE("file_open", "delete-on-close-pending",
+			       file_inode(file), 0, -EACCES);
 		return -EACCES;
+	}
 	if (!IS_ERR(pidfd_pid(file)))
 		return 0;
 	if ((file->f_mode & FMODE_PATH) != 0)
 		return 0;
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
-	if (!subject_token)
+	if (!subject_token) {
+		PKM_KACS_TRACE("file_open", "no-token", file_inode(file), 0,
+			       -EACCES);
 		return -EACCES;
+	}
 
 	if (pkm_kacs_native_open_request_matches(file, &desired_access,
 						 &create_options)) {
 		ret = pkm_kacs_stamp_native_file_granted_access_for_subject(
 			subject_token, file, desired_access);
-		if (ret)
+		if (ret) {
+			PKM_KACS_TRACE("file_open", "native-stamp",
+				       file_inode(file), desired_access, ret);
 			return (int)ret;
+		}
 		ret = pkm_kacs_maybe_arm_delete_on_close_for_subject(
 			subject_token, file, create_options);
+		PKM_KACS_TRACE("file_open", "native-arm", file_inode(file),
+			       desired_access, ret);
 		return (int)ret;
 	}
 
-	return (int)pkm_kacs_stamp_file_granted_access_for_subject(
-		subject_token, file);
+	ret = pkm_kacs_stamp_file_granted_access_for_subject(subject_token,
+							     file);
+	PKM_KACS_TRACE("file_open", "stamp", file_inode(file), 0, ret);
+	return (int)ret;
 }
 
 static int pkm_kacs_emit_file_continuous_audit(struct file *file,

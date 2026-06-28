@@ -28,6 +28,7 @@
 #include "namespace.h"
 #include "native_open.h"
 #include "token_runtime.h"
+#include "trace.h"
 
 int pkm_kacs_inode_permission(struct inode *inode, int mask)
 {
@@ -75,7 +76,6 @@ static long pkm_kacs_authorize_inode_file_access_core(
 	long ret;
 
 	if (!subject_token || !inode || desired_access == 0) {
-		/* DEBUG */
 		if (inode)
 			pr_debug(
 				"kacs: deny inode_file_access EINVAL ino=%lu sb_magic=0x%lx desired=0x%x has_token=%d comm=%s pid=%d\n",
@@ -83,27 +83,36 @@ static long pkm_kacs_authorize_inode_file_access_core(
 				(unsigned long)inode->i_sb->s_magic,
 				desired_access, subject_token != NULL,
 				current->comm, current->pid);
+		PKM_KACS_TRACE("inode_file_access", "bad-args", inode,
+			       desired_access, -EINVAL);
 		return -EINVAL;
 	}
 	if (!inode->i_security) {
-		/* DEBUG */
 		pr_debug(
 			"kacs: deny inode_file_access NO_SEC ino=%lu sb_magic=0x%lx desired=0x%x comm=%s pid=%d\n",
 			inode->i_ino,
 			(unsigned long)inode->i_sb->s_magic,
 			desired_access, current->comm, current->pid);
+		PKM_KACS_TRACE("inode_file_access", "no-i_security", inode,
+			       desired_access, -EACCES);
 		return -EACCES;
 	}
 
 	if (!dentry) {
 		alias = d_find_any_alias(inode);
 		if (!alias) {
-			/* DEBUG */
 			pr_debug(
 				"kacs: deny inode_file_access NO_ALIAS ino=%lu sb_magic=0x%lx desired=0x%x comm=%s pid=%d\n",
 				inode->i_ino,
 				(unsigned long)inode->i_sb->s_magic,
 				desired_access, current->comm, current->pid);
+			/*
+			 * No dentry alias yet — can happen if an inode is
+			 * permission-checked mid-mount, before its dentry is
+			 * wired up. A prime suspect for SD-less-fs mount denials.
+			 */
+			PKM_KACS_TRACE("inode_file_access", "no-dentry-alias",
+				       inode, desired_access, -EACCES);
 			return -EACCES;
 		}
 		dentry = alias;
@@ -120,6 +129,8 @@ static long pkm_kacs_authorize_inode_file_access_core(
 						       desired_access);
 	if (alias)
 		dput(alias);
+	PKM_KACS_TRACE("inode_file_access", "decision", inode, desired_access,
+		       ret);
 	return ret;
 }
 
@@ -140,8 +151,11 @@ long pkm_kacs_check_inode_permission_live_for_subject(
 	}
 	if (pkm_kacs_inode_on_unmanaged_mount(inode))
 		return 0;
-	if (!subject_token)
+	if (!subject_token) {
+		PKM_KACS_TRACE("inode_permission", "no-token", inode,
+			       desired_access, -EACCES);
 		return -EACCES;
+	}
 
 	if (desired_access == KACS_FILE_WRITE_DATA) {
 		if ((mask & MAY_NOT_BLOCK) != 0)
@@ -155,8 +169,14 @@ long pkm_kacs_check_inode_permission_live_for_subject(
 	    kacs_rust_token_has_enabled_privilege(
 		    subject_token, KACS_SE_CHANGE_NOTIFY_PRIVILEGE)) {
 		if (!kacs_rust_token_mark_privileges_used(
-			    subject_token, KACS_SE_CHANGE_NOTIFY_PRIVILEGE))
+			    subject_token, KACS_SE_CHANGE_NOTIFY_PRIVILEGE)) {
+			PKM_KACS_TRACE("inode_permission",
+				       "change-notify-priv-exhausted", inode,
+				       desired_access, -EACCES);
 			return -EACCES;
+		}
+		PKM_KACS_TRACE("inode_permission", "change-notify-priv", inode,
+			       desired_access, 0);
 		return 0;
 	}
 
@@ -203,7 +223,6 @@ long pkm_kacs_authorize_inode_namespace_access_for_subject(
 	if (pkm_kacs_inode_on_unmanaged_mount(inode))
 		return 0;
 	if (!subject_token) {
-		/* DEBUG */
 		pr_debug(
 			"kacs: deny ns_access NO_TOKEN ino=%lu sb_magic=0x%lx desired=0x%x comm=%s pid=%d\n",
 			inode->i_ino,
@@ -582,7 +601,6 @@ int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 		    dir, S_ISDIR(inode->i_mode), &sd_bytes, &sd_len)) {
 		subject_token = pkm_kacs_current_effective_token_ptr();
 		if (!subject_token) {
-			/* DEBUG */
 			pr_debug(
 				"kacs: deny inode_init_security NO_TOKEN dir_ino=%lu sb_magic=0x%lx mode=0%o comm=%s pid=%d\n",
 				dir->i_ino,
@@ -594,7 +612,6 @@ int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 			subject_token, dir, NULL, S_ISDIR(inode->i_mode),
 			&sd_bytes, &sd_len);
 		if (ret) {
-			/* DEBUG */
 			pr_debug(
 				"kacs: deny inode_init_security BUILD_FAIL dir_ino=%lu sb_magic=0x%lx mode=0%o comm=%s pid=%d ret=%ld\n",
 				dir->i_ino,
@@ -605,7 +622,6 @@ int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 		allocated_sd = true;
 	}
 	if (!sd_bytes || sd_len == 0) {
-		/* DEBUG */
 		if (allocated_sd)
 			pr_debug(
 				"kacs: deny inode_init_security NO_SD_BYTES dir_ino=%lu sb_magic=0x%lx mode=0%o comm=%s pid=%d\n",
