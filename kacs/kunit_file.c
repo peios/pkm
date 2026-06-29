@@ -7252,6 +7252,14 @@ static void pkm_kunit_file_mount_policy_classifies_synthesize_ephemeral_fs(
 	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_mount_policy_for_magic(
 				       ISOFS_SUPER_MAGIC),
 			KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL);
+	/*
+	 * cgroup2 (kernfs) — SD-less because kernfs never calls
+	 * security_inode_init_security(), so created cgroups inherit an
+	 * ephemeral SD from the explicitly-seeded root (see mount_policy.c).
+	 */
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_mount_policy_for_magic(
+				       CGROUP2_SUPER_MAGIC),
+			KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL);
 }
 
 

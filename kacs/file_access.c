@@ -405,9 +405,21 @@ long pkm_kacs_stamp_native_file_granted_access_for_subject(
 	file_sec->continuous_audit_mask = 0;
 	file_sec->managed = 0;
 
-	if (pkm_kacs_superblock_mount_policy(inode->i_sb) ==
-	    KACS_MOUNT_POLICY_UNMANAGED)
-		return -EOPNOTSUPP;
+	/*
+	 * Unmanaged filesystems (proc, sysfs, nullfs) carry no SD, so the
+	 * native-open access protocol does not apply — but the open must still
+	 * SUCCEED, leaving the fd unmanaged (managed=0 above). Mirror the legacy
+	 * open path (pkm_kacs_stamp_file_granted_access_for_subject): allow the
+	 * open, gating only sysfs *writes*. Without this the native open returned
+	 * -EOPNOTSUPP and no libpeios consumer could open a /proc or /sys file —
+	 * e.g. peinit reading /proc/self/mountinfo at Phase-1 boot. SD-bearing
+	 * operations on the returned fd (fd_get_sd, etc.) still EOPNOTSUPP, which
+	 * is correct: there is no SD to read.
+	 */
+	if (!pkm_kacs_mount_policy_is_managed(
+		    pkm_kacs_superblock_mount_policy(inode->i_sb)))
+		return pkm_kacs_check_sysfs_file_write_for_subject(
+			subject_token, file, (file->f_mode & FMODE_WRITE) != 0);
 
 	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
 	if (ret)

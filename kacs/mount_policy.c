@@ -76,6 +76,23 @@ u32 pkm_kacs_mount_policy_for_magic(unsigned long magic)
 		 * template instead; the trust chain is the boot medium.
 		 */
 		return KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL;
+	case CGROUP2_SUPER_MAGIC:
+		/*
+		 * cgroup2 (kernfs). Unlike a real fs, kernfs does NOT call
+		 * security_inode_init_security() when it instantiates an inode
+		 * (the inode is materialised lazily on lookup), so a newly
+		 * created cgroup directory never gets a stamped or inherited SD
+		 * and would sit MISSING forever — DENY_MISSING would then lock
+		 * every cgroup the init system creates. kernfs DOES carry xattrs
+		 * (so the root can be, and is, explicitly seeded by init), which
+		 * is why this is SYNTHESIZE_EPHEMERAL rather than UNMANAGED like
+		 * sysfs: synthesis lets each created cgroup inherit an ephemeral
+		 * SD from that seeded root, and because the policy is "managed"
+		 * KACS still authorises cgroup creation against the parent SD
+		 * (an init managing the cgroup tree as SYSTEM). The synthesised
+		 * SDs are ephemeral — correct, since cgroups themselves are.
+		 */
+		return KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL;
 	default:
 		return KACS_MOUNT_POLICY_DENY_MISSING;
 	}

@@ -27,6 +27,7 @@
 #include "mount_policy.h"
 #include "native_open.h"
 #include "token_runtime.h"
+#include "trace.h"
 
 static atomic64_t pkm_kacs_native_supersede_tmp_counter = ATOMIC64_INIT(0);
 
@@ -874,6 +875,8 @@ static long pkm_kacs_do_native_create_open(
 	struct file parent_file = {};
 	struct file *opened_file = NULL;
 	struct dentry *dentry;
+	struct dentry *open_dentry;
+	struct dentry *looked_up = NULL;
 	struct inode *parent_inode;
 	const void *subject_token;
 	const u8 *created_sd = NULL;
@@ -957,8 +960,50 @@ static long pkm_kacs_do_native_create_open(
 	if (ret)
 		goto out_end_create;
 
+	/*
+	 * Filesystems that instantiate inodes lazily on lookup (kernfs /
+	 * cgroupfs and friends) leave `dentry` NEGATIVE after a successful
+	 * vfs_mkdir: their ->mkdir returns NULL without splicing an inode onto
+	 * the dentry, which is only filled in on the next lookup. A plain
+	 * mkdir(2) never notices, but we open the result immediately, and
+	 * dentry_open() on a negative dentry dereferences a NULL inode and
+	 * oopses. Re-look-up the name under the parent lock we still hold
+	 * (lookup_one() requires it) to obtain a positive dentry; ordinary
+	 * filesystems already returned a positive dentry from vfs_mkdir and skip
+	 * this. The original (possibly negative) create dentry is still cleaned
+	 * up by end_creating_path() below.
+	 */
+	open_dentry = dentry;
+	if (d_really_is_negative(dentry)) {
+		struct qstr name =
+			QSTR_INIT(dentry->d_name.name, dentry->d_name.len);
+
+		PKM_KACS_TRACE("native_create_open", "lazy-dentry-relookup",
+			       parent_inode, prepared->desired_access, 0);
+		looked_up = lookup_one(mnt_idmap(parent_path.mnt), &name,
+				       parent_path.dentry);
+		if (IS_ERR(looked_up)) {
+			ret = PTR_ERR(looked_up);
+			looked_up = NULL;
+			goto out_end_create;
+		}
+		if (d_really_is_negative(looked_up)) {
+			/*
+			 * Defensive: a positive dentry must exist immediately
+			 * after a successful create. If it does not, refuse to
+			 * open rather than oops.
+			 */
+			PKM_KACS_TRACE("native_create_open",
+				       "negative-after-create", parent_inode,
+				       prepared->desired_access, -ENOENT);
+			ret = -ENOENT;
+			goto out_end_create;
+		}
+		open_dentry = looked_up;
+	}
+
 	child_path.mnt = mntget(parent_path.mnt);
-	child_path.dentry = dget(dentry);
+	child_path.dentry = dget(open_dentry);
 	pkm_kacs_set_current_native_open_request(&child_path,
 						 prepared->desired_access,
 						 prepared->create_options);
@@ -969,11 +1014,11 @@ static long pkm_kacs_do_native_create_open(
 		ret = PTR_ERR(opened_file);
 		opened_file = NULL;
 		if (directory)
-			vfs_rmdir(mnt_idmap(parent_path.mnt), parent_inode, dentry,
-				  NULL);
+			vfs_rmdir(mnt_idmap(parent_path.mnt), parent_inode,
+				  open_dentry, NULL);
 		else
-			vfs_unlink(mnt_idmap(parent_path.mnt), parent_inode, dentry,
-				   NULL);
+			vfs_unlink(mnt_idmap(parent_path.mnt), parent_inode,
+				   open_dentry, NULL);
 		goto out_end_create;
 	}
 
@@ -984,6 +1029,8 @@ static long pkm_kacs_do_native_create_open(
 out_end_create:
 	pkm_kacs_clear_current_native_create_request();
 	end_creating_path(&parent_path, dentry);
+	if (looked_up)
+		dput(looked_up);
 	if (created_sd)
 		pkm_kacs_free((void *)created_sd);
 out_creator_sd:
@@ -1020,8 +1067,21 @@ static long pkm_kacs_resolve_native_open_path(
 		path_put(resolved_path);
 		return -ELOOP;
 	}
+	/*
+	 * Unmanaged filesystems (proc, sysfs, nullfs) carry no SD, so the
+	 * native-open access protocol does not apply. A plain OPEN / OPEN_IF of
+	 * an existing file there must still SUCCEED, exactly as the legacy open
+	 * path does — otherwise no libpeios consumer could open a /proc or /sys
+	 * file (e.g. peinit reading /proc/self/mountinfo at Phase-1 boot). The
+	 * downstream file_open hook grants an unmanaged fd and gates only sysfs
+	 * writes. The creating dispositions (CREATE / OVERWRITE / SUPERSEDE) DO
+	 * stay rejected: materialising or replacing a file by SD makes no sense
+	 * on a synthetic fs that cannot store one.
+	 */
 	if (pkm_kacs_superblock_mount_policy(inode->i_sb) ==
-	    KACS_MOUNT_POLICY_UNMANAGED) {
+		    KACS_MOUNT_POLICY_UNMANAGED &&
+	    prepared->create_disposition != KACS_DISPOSITION_OPEN &&
+	    prepared->create_disposition != KACS_DISPOSITION_OPEN_IF) {
 		path_put(resolved_path);
 		return -EOPNOTSUPP;
 	}
