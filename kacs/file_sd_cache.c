@@ -22,6 +22,8 @@
 #include "mount_policy.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 static long pkm_kacs_superblock_template_sd_copy(const struct super_block *sb,
 						 const u8 **sd_ptr_out,
 						 size_t *sd_len_out)
@@ -321,6 +323,9 @@ static long pkm_kacs_inode_read_sd_xattr_locked(
 	if (len < 0)
 		return len;
 	if (len == 0 || len > PKM_KACS_MAX_SD_BYTES) {
+		trace_kacs_sd_cache_corrupt(inode,
+					    KACS_SDC_CORRUPT_EMPTY_OR_OVERSIZE,
+					    (u32)len);
 		return pkm_kacs_inode_alloc_corrupt_sd_cache(cache_out);
 	}
 
@@ -346,6 +351,8 @@ static long pkm_kacs_inode_read_sd_xattr_locked(
 	}
 	if (ret != len || kacs_rust_validate_stored_sd_bytes(bytes, len) != 0) {
 		pkm_kacs_free(bytes);
+		trace_kacs_sd_cache_corrupt(inode, KACS_SDC_CORRUPT_VALIDATE_FAIL,
+					    (u32)len);
 		return pkm_kacs_inode_alloc_corrupt_sd_cache(cache_out);
 	}
 
@@ -597,11 +604,19 @@ static const struct pkm_kacs_inode_sd_cache *pkm_kacs_inode_current_cache_rcu(
 		return NULL;
 
 	cache = rcu_dereference(sec->sd_cache);
-	if (!pkm_kacs_inode_sd_cache_current(inode->i_sb, cache))
+	if (!pkm_kacs_inode_sd_cache_current(inode->i_sb, cache)) {
+		trace_kacs_sd_cache_lookup(inode,
+					   cache ? KACS_SDC_MISS_STALE_GEN :
+						   KACS_SDC_MISS_NONE,
+					   0);
 		return NULL;
-	if (pkm_kacs_missing_cache_requires_synthesis(inode, cache))
+	}
+	if (pkm_kacs_missing_cache_requires_synthesis(inode, cache)) {
+		trace_kacs_sd_cache_lookup(inode, KACS_SDC_MISS_NEEDS_SYNTH, 0);
 		return NULL;
+	}
 
+	trace_kacs_sd_cache_lookup(inode, KACS_SDC_HIT, 0);
 	return cache;
 }
 

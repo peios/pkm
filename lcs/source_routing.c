@@ -4,10 +4,13 @@
  */
 
 #include <linux/errno.h>
+#include <linux/jhash.h>
 #include <linux/string.h>
 
 #include "../kacs/token_runtime.h"
 #include "source_internal.h"
+
+#include <trace/events/lcs.h>
 
 extern int lcs_rust_route_hive_from_source_slots(
 	const struct pkm_lcs_source_slot_view_copy *slots, size_t slot_count,
@@ -41,7 +44,7 @@ long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,
 {
 	struct pkm_lcs_source_slot_view_buffer view_buffer;
 	struct pkm_lcs_runtime_limits limits;
-	u32 slot_count;
+	u32 slot_count = 0;
 	long ret;
 
 	if (!hive_name || !result)
@@ -61,6 +64,10 @@ long pkm_lcs_route_hive_name(const char *hive_name, u32 hive_name_len,
 out_unlock:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
+	trace_lcs_route(LCS_ROUTE_HIVE_NAME, slot_count, scope_count,
+			ret ? 0 : result->source_id,
+			ret ? 0 : (u64)jhash(result->root_guid, RSI_GUID_SIZE, 0),
+			ret);
 	return ret;
 }
 
@@ -73,7 +80,7 @@ long pkm_lcs_route_absolute_path(const char *path, u32 path_len,
 {
 	struct pkm_lcs_source_slot_view_buffer view_buffer;
 	struct pkm_lcs_runtime_limits limits;
-	u32 slot_count;
+	u32 slot_count = 0;
 	long ret;
 
 	if (!path || !result)
@@ -95,6 +102,10 @@ long pkm_lcs_route_absolute_path(const char *path, u32 path_len,
 out_unlock:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
+	trace_lcs_route(LCS_ROUTE_ABSOLUTE_PATH, slot_count, scope_count,
+			ret ? 0 : result->source_id,
+			ret ? 0 : (u64)jhash(result->root_guid, RSI_GUID_SIZE, 0),
+			ret);
 	return ret;
 }
 
@@ -107,7 +118,7 @@ long pkm_lcs_route_absolute_path_for_token_with_limits(
 	struct pkm_lcs_source_slot_view_buffer view_buffer;
 	const u8 *current_user_sid = NULL;
 	size_t current_user_sid_len = 0;
-	u32 slot_count;
+	u32 slot_count = 0;
 	long ret;
 
 	if (!path || !result || !limits)
@@ -136,6 +147,10 @@ long pkm_lcs_route_absolute_path_for_token_with_limits(
 out_unlock:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
+	trace_lcs_route(LCS_ROUTE_ABSOLUTE_PATH, slot_count, scope_count,
+			ret ? 0 : result->source_id,
+			ret ? 0 : (u64)jhash(result->root_guid, RSI_GUID_SIZE, 0),
+			ret);
 	return ret;
 }
 
@@ -197,7 +212,7 @@ long pkm_lcs_route_symlink_target_with_limits(
 	struct pkm_lcs_hive_route_result *result)
 {
 	struct pkm_lcs_source_slot_view_buffer view_buffer;
-	u32 slot_count;
+	u32 slot_count = 0;
 	long ret;
 
 	if (!target || !limits || !result)
@@ -216,6 +231,10 @@ long pkm_lcs_route_symlink_target_with_limits(
 out_unlock:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
+	trace_lcs_route(LCS_ROUTE_SYMLINK_TARGET, slot_count, scope_count,
+			ret ? 0 : result->source_id,
+			ret ? 0 : (u64)jhash(result->root_guid, RSI_GUID_SIZE, 0),
+			ret);
 	return ret;
 }
 

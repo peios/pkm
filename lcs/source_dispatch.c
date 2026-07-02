@@ -11,6 +11,8 @@
 #include "source_device.h"
 #include "source_internal.h"
 
+#include <trace/events/lcs.h>
+
 long pkm_lcs_source_dispatch_lookup_request(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
@@ -67,6 +69,9 @@ long pkm_lcs_source_lookup_round_trip_timeout_with_limits(
 	struct pkm_lcs_source_response_waiter waiter;
 	unsigned long deadline;
 	long ret;
+
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_LOOKUP, txn_id,
+				      timeout_ms, false, false, 0);
 
 	if (response)
 		memset(response, 0, sizeof(*response));
@@ -250,6 +255,9 @@ long pkm_lcs_source_create_entry_round_trip_timeout_with_limits(
 	unsigned long deadline;
 	long ret;
 
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_CREATE_ENTRY, txn_id,
+				      timeout_ms, false, false, 0);
+
 	if (response)
 		memset(response, 0, sizeof(*response));
 	if (enqueue)
@@ -290,6 +298,9 @@ long pkm_lcs_source_hide_entry_round_trip_timeout_with_limits(
 	struct pkm_lcs_source_response_waiter waiter;
 	unsigned long deadline;
 	long ret;
+
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_HIDE_ENTRY, txn_id,
+				      timeout_ms, false, false, 0);
 
 	if (response)
 		memset(response, 0, sizeof(*response));
@@ -344,6 +355,9 @@ long pkm_lcs_source_delete_entry_round_trip_timeout_with_limits(
 	struct pkm_lcs_source_response_waiter waiter;
 	unsigned long deadline;
 	long ret;
+
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_DELETE_ENTRY, txn_id,
+				      timeout_ms, false, false, 0);
 
 	if (response)
 		memset(response, 0, sizeof(*response));
@@ -717,6 +731,13 @@ static long pkm_lcs_source_transaction_round_trip_timeout_with_limits(
 	unsigned long deadline;
 	long ret;
 
+	trace_lcs_rsi_roundtrip_begin(source_id,
+				      op_code == RSI_BEGIN_TRANSACTION ?
+					      LCS_OP_TXN_BEGIN :
+				      op_code == RSI_COMMIT_TRANSACTION ?
+					      LCS_OP_TXN_COMMIT : LCS_OP_TXN_ABORT,
+				      transaction_id, timeout_ms, false, false, 0);
+
 	if (response)
 		memset(response, 0, sizeof(*response));
 	if (enqueue)
@@ -881,6 +902,9 @@ long pkm_lcs_source_drop_key_round_trip_timeout_with_limits(
 	unsigned long deadline;
 	long ret;
 
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_DROP_KEY, txn_id,
+				      timeout_ms, false, false, 0);
+
 	if (response)
 		memset(response, 0, sizeof(*response));
 	if (enqueue)
@@ -963,6 +987,9 @@ long pkm_lcs_source_create_key_round_trip_timeout_with_limits(
 	unsigned long deadline;
 	long ret;
 
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_CREATE_KEY, txn_id,
+				      timeout_ms, false, false, 0);
+
 	if (response)
 		memset(response, 0, sizeof(*response));
 	if (enqueue)
@@ -1015,6 +1042,9 @@ long pkm_lcs_source_write_key_round_trip_timeout_late_effect_with_limits(
 	struct pkm_lcs_source_response_waiter waiter;
 	unsigned long deadline;
 	long ret;
+
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_WRITE_KEY, txn_id,
+				      timeout_ms, false, false, 0);
 
 	if (response)
 		memset(response, 0, sizeof(*response));
@@ -1085,6 +1115,9 @@ long pkm_lcs_source_set_value_round_trip_timeout_late_effect_with_limits(
 	unsigned long deadline;
 	long ret;
 
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_SET_VALUE, txn_id,
+				      timeout_ms, false, false, 0);
+
 	if (response)
 		memset(response, 0, sizeof(*response));
 	if (enqueue)
@@ -1142,6 +1175,9 @@ long pkm_lcs_source_delete_value_entry_round_trip_timeout_with_limits(
 	unsigned long deadline;
 	long ret;
 
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_DELETE_VALUE, txn_id,
+				      timeout_ms, false, false, 0);
+
 	if (response)
 		memset(response, 0, sizeof(*response));
 	if (enqueue)
@@ -1193,6 +1229,9 @@ long pkm_lcs_source_set_blanket_tombstone_round_trip_timeout_with_limits(
 	unsigned long deadline;
 	long ret;
 
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_BLANKET_TOMBSTONE, txn_id,
+				      timeout_ms, false, false, 0);
+
 	if (response)
 		memset(response, 0, sizeof(*response));
 	if (enqueue)
@@ -1243,6 +1282,9 @@ long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
 	struct pkm_lcs_source_response_waiter waiter;
 	unsigned long deadline;
 	long ret;
+
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_LOOKUP, txn_id,
+				      timeout_ms, false, false, 0);
 
 	if (!frame)
 		return -EINVAL;
@@ -1305,6 +1347,9 @@ pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
 	unsigned long deadline;
 	long ret;
 
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_ENUM_CHILDREN, txn_id,
+				      timeout_ms, false, false, 0);
+
 	if (!frame)
 		return -EINVAL;
 	if (response)
@@ -1364,6 +1409,9 @@ long pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
 	unsigned long deadline;
 	long ret;
 
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_READ_KEY, txn_id,
+				      timeout_ms, false, false, 0);
+
 	if (!frame)
 		return -EINVAL;
 	if (response)
@@ -1422,6 +1470,9 @@ long pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 	struct pkm_lcs_source_response_waiter waiter;
 	unsigned long deadline;
 	long ret;
+
+	trace_lcs_rsi_roundtrip_begin(source_id, LCS_OP_QUERY_VALUES, txn_id,
+				      timeout_ms, false, false, 0);
 
 	if (!frame)
 		return -EINVAL;

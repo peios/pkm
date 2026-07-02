@@ -10,6 +10,8 @@
 #include "../kacs/token_runtime.h"
 #include "source_device.h"
 
+#include <trace/events/lcs.h>
+
 extern int lcs_rust_materialize_absolute_path_components_with_token_sid(
 	const u8 *path, u32 path_len, bool rewrite_current_user,
 	const u8 *current_user_sid, size_t current_user_sid_len,
@@ -129,9 +131,11 @@ long pkm_lcs_materialize_absolute_path_components_for_token_with_limits(
 	result->strings = strings;
 	result->component_count = filled.component_count;
 	result->string_bytes = filled.string_bytes;
+	trace_lcs_materialize_path(0, 0, 0, shape.component_count, 0, 0, 0);
 	return 0;
 
 out_free:
+	trace_lcs_materialize_path(0, 0, 0, shape.component_count, 0, 0, ret);
 	kfree(components);
 	kfree(strings);
 	return ret;
@@ -195,9 +199,11 @@ long pkm_lcs_materialize_relative_path_components_with_limits(
 	result->strings = strings;
 	result->component_count = filled.component_count;
 	result->string_bytes = filled.string_bytes;
+	trace_lcs_materialize_path(0, 0, 0, shape.component_count, 0, 0, 0);
 	return 0;
 
 out_free:
+	trace_lcs_materialize_path(0, 0, 0, shape.component_count, 0, 0, ret);
 	kfree(components);
 	kfree(strings);
 	return ret;
@@ -263,9 +269,11 @@ long pkm_lcs_materialize_symlink_target_components_with_limits(
 	result->strings = strings;
 	result->component_count = filled.component_count;
 	result->string_bytes = filled.string_bytes;
+	trace_lcs_materialize_path(0, 0, 0, shape.component_count, 0, 0, 0);
 	return 0;
 
 out_free:
+	trace_lcs_materialize_path(0, 0, 0, shape.component_count, 0, 0, ret);
 	kfree(components);
 	kfree(strings);
 	return ret;

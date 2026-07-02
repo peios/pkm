@@ -19,6 +19,8 @@
 #include "signing.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 static void pkm_kacs_signing_material_clear(
 	struct pkm_kacs_signing_material *out)
 {
@@ -422,10 +424,15 @@ static int pkm_kacs_signing_probe_elf_reader(
 	*committed_out = false;
 	if (!pkm_kacs_signing_reader_is_elf(reader, file_len, &invalid)) {
 		*committed_out = invalid;
+		if (invalid)
+			trace_kacs_signing_probe(out->source, (u64)file_len,
+						 KACS_SIG_ELF_MAGIC_READ, 0);
 		return 0;
 	}
 	if (file_len < sizeof(ehdr)) {
 		*committed_out = true;
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_ELF_SHORT_EHDR, 0);
 		return 0;
 	}
 
@@ -433,6 +440,8 @@ static int pkm_kacs_signing_probe_elf_reader(
 					    sizeof(ehdr));
 	if (ret) {
 		*committed_out = true;
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_ELF_EHDR_READ, ret);
 		return 0;
 	}
 
@@ -440,6 +449,8 @@ static int pkm_kacs_signing_probe_elf_reader(
 	    ehdr.e_ident[EI_DATA] != ELFDATA2LSB ||
 	    ehdr.e_ident[EI_VERSION] != EV_CURRENT) {
 		*committed_out = true;
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_ELF_BAD_IDENT, 0);
 		return 0;
 	}
 
@@ -451,21 +462,29 @@ static int pkm_kacs_signing_probe_elf_reader(
 	if (shentsize != sizeof(Elf64_Shdr) ||
 	    shstrndx == SHN_UNDEF || shstrndx >= shnum) {
 		*committed_out = true;
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_ELF_BAD_SHTABLE, 0);
 		return 0;
 	}
 
 	if (ehdr.e_shoff > SIZE_MAX) {
 		*committed_out = true;
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_ELF_SHDRS_RANGE, 0);
 		return 0;
 	}
 	shdrs_offset = (size_t)ehdr.e_shoff;
 	if (shnum > (SIZE_MAX / sizeof(Elf64_Shdr))) {
 		*committed_out = true;
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_ELF_SHDRS_RANGE, 0);
 		return 0;
 	}
 	shdrs_len = (size_t)shnum * sizeof(Elf64_Shdr);
 	if (!pkm_kacs_signing_range_valid(shdrs_offset, shdrs_len, file_len)) {
 		*committed_out = true;
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_ELF_SHDRS_RANGE, 0);
 		return 0;
 	}
 
@@ -475,6 +494,8 @@ static int pkm_kacs_signing_probe_elf_reader(
 		(u8 *)&shstr, sizeof(shstr));
 	if (ret) {
 		*committed_out = true;
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_ELF_SHSTR_READ, ret);
 		return 0;
 	}
 
@@ -482,6 +503,8 @@ static int pkm_kacs_signing_probe_elf_reader(
 					      file_len, &strtab_offset,
 					      &strtab_len)) {
 		*committed_out = true;
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_ELF_STRTAB_RANGE, 0);
 		return 0;
 	}
 
@@ -497,6 +520,8 @@ static int pkm_kacs_signing_probe_elf_reader(
 			(u8 *)&shdr, sizeof(shdr));
 		if (ret) {
 			*committed_out = true;
+			trace_kacs_signing_probe(out->source, (u64)file_len,
+						 KACS_SIG_ELF_SHDR_READ, ret);
 			return 0;
 		}
 
@@ -505,6 +530,8 @@ static int pkm_kacs_signing_probe_elf_reader(
 			shdr.sh_name, &name_match);
 		if (ret) {
 			*committed_out = true;
+			trace_kacs_signing_probe(out->source, (u64)file_len,
+						 KACS_SIG_ELF_NAME_READ, ret);
 			return 0;
 		}
 		if (!name_match)
@@ -516,22 +543,33 @@ static int pkm_kacs_signing_probe_elf_reader(
 		    !pkm_kacs_signing_elf_range_valid(shdr.sh_offset,
 						      shdr.sh_size, file_len,
 						      &sig_offset,
-						      &sig_len))
+						      &sig_len)) {
+			trace_kacs_signing_probe(out->source, (u64)file_len,
+						 KACS_SIG_ELF_BAD_SIG_SECTION, 0);
 			return 0;
+		}
 
 		ret = pkm_kacs_signing_reader_exact(reader, sig_offset, blob,
 						    sizeof(blob));
-		if (ret || !pkm_kacs_signing_blob_valid(blob, sig_len))
+		if (ret || !pkm_kacs_signing_blob_valid(blob, sig_len)) {
+			trace_kacs_signing_probe(out->source, (u64)file_len,
+						 KACS_SIG_ELF_BAD_BLOB, ret);
 			return 0;
+		}
 
 		ret = pkm_kacs_signing_hash_reader(reader, file_len, sig_offset,
 						   sig_len, out->hash);
-		if (ret)
+		if (ret) {
+			trace_kacs_signing_probe(out->source, (u64)file_len,
+						 KACS_SIG_ELF_HASH_FAIL, ret);
 			return 0;
+		}
 
 		out->source = PKM_KACS_SIGNING_SOURCE_ELF;
 		memcpy(out->signature, blob + 1,
 		       PKM_KACS_SIGNING_SIGNATURE_LEN);
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_PROBE_FOUND, 0);
 		return 0;
 	}
 
@@ -549,15 +587,23 @@ static int pkm_kacs_signing_probe_xattr_reader(
 	ret = reader->xattr(reader->ctx, blob, sizeof(blob), &actual_len);
 	if (ret || actual_len == 0)
 		return 0;
-	if (!pkm_kacs_signing_blob_valid(blob, actual_len))
+	if (!pkm_kacs_signing_blob_valid(blob, actual_len)) {
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_XATTR_BAD_BLOB, 0);
 		return 0;
+	}
 
 	ret = pkm_kacs_signing_hash_reader(reader, file_len, 0, 0, out->hash);
-	if (ret)
+	if (ret) {
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_XATTR_HASH_FAIL, ret);
 		return 0;
+	}
 
 	out->source = PKM_KACS_SIGNING_SOURCE_XATTR;
 	memcpy(out->signature, blob + 1, PKM_KACS_SIGNING_SIGNATURE_LEN);
+	trace_kacs_signing_probe(out->source, (u64)file_len,
+				 KACS_SIG_PROBE_FOUND, 0);
 	return 0;
 }
 
@@ -590,8 +636,11 @@ static int pkm_kacs_signing_probe_reader(
 	}
 
 	ret = reader->size(reader->ctx, &final_len);
-	if (ret || final_len != file_len)
+	if (ret || final_len != file_len) {
+		trace_kacs_signing_probe(out->source, (u64)file_len,
+					 KACS_SIG_SIZE_CHANGED, ret);
 		pkm_kacs_signing_material_clear(out);
+	}
 
 	return 0;
 }
@@ -789,10 +838,16 @@ static int __maybe_unused pkm_kacs_signing_verify_with_keys(
 		return -EINVAL;
 
 	pkm_kacs_signing_trust_clear(out);
-	if (material->source == PKM_KACS_SIGNING_SOURCE_NONE)
+	if (material->source == PKM_KACS_SIGNING_SOURCE_NONE) {
+		trace_kacs_signing_verify(material->source, 0, 0, 0,
+					  KACS_SIG_UNSIGNED, 0);
 		return 0;
-	if (!keys || key_count == 0 || !verify)
+	}
+	if (!keys || key_count == 0 || !verify) {
+		trace_kacs_signing_verify(material->source, 0, 0, 0,
+					  KACS_SIG_BAD_KEY_TABLE, -EINVAL);
 		return -EINVAL;
+	}
 
 	for (i = 0; i < key_count; i++) {
 		u32 pip_type;
@@ -805,13 +860,21 @@ static int __maybe_unused pkm_kacs_signing_verify_with_keys(
 
 		pip_type = le32_to_cpu(keys[i].pip_type);
 		pip_trust = le32_to_cpu(keys[i].pip_trust);
-		if (!pkm_kacs_signing_key_tier_valid(pip_type, pip_trust))
+		if (!pkm_kacs_signing_key_tier_valid(pip_type, pip_trust)) {
+			trace_kacs_signing_verify(material->source, 0, pip_type,
+						  pip_trust,
+						  KACS_SIG_BAD_KEY_TABLE,
+						  -EINVAL);
 			return -EINVAL;
+		}
 
 		usable_count++;
 	}
-	if (!terminated)
+	if (!terminated) {
+		trace_kacs_signing_verify(material->source, 0, 0, 0,
+					  KACS_SIG_BAD_KEY_TABLE, -EINVAL);
 		return -EINVAL;
+	}
 
 	for (i = 0; i < usable_count; i++) {
 		u32 pip_type;
@@ -826,9 +889,13 @@ static int __maybe_unused pkm_kacs_signing_verify_with_keys(
 		out->verified = 1;
 		out->pip_type = pip_type;
 		out->pip_trust = pip_trust;
+		trace_kacs_signing_verify(material->source, 1, pip_type,
+					  pip_trust, KACS_SIG_VERIFIED, 0);
 		return 0;
 	}
 
+	trace_kacs_signing_verify(material->source, 0, 0, 0,
+				  KACS_SIG_NO_KEY_MATCH, 0);
 	return 0;
 }
 
@@ -843,8 +910,12 @@ static bool __maybe_unused pkm_kacs_signing_crypto_verify(
 	(void)ctx;
 
 	tfm = crypto_alloc_sig("ed25519", 0, 0);
-	if (IS_ERR(tfm))
+	if (IS_ERR(tfm)) {
+		trace_kacs_signing_crypto(0, 0, 0, 0,
+					  KACS_SIG_CRYPTO_UNAVAILABLE,
+					  PTR_ERR(tfm));
 		return false;
+	}
 
 	ret = crypto_sig_set_pubkey(tfm, public_key,
 				    PKM_KACS_SIGNING_PUBLIC_KEY_LEN);
@@ -854,6 +925,9 @@ static bool __maybe_unused pkm_kacs_signing_crypto_verify(
 					SHA256_DIGEST_SIZE);
 
 	crypto_free_sig(tfm);
+	if (ret)
+		trace_kacs_signing_crypto(0, 0, 0, 0, KACS_SIG_CRYPTO_MISMATCH,
+					  ret);
 	return ret == 0;
 }
 

@@ -46,58 +46,8 @@
 #include "token_fd.h"
 #include "token_runtime.h"
 #include "token_session.h"
-#include "trace.h"
 
 extern int kacs_rust_init(void);
-
-/*
- * KACS access-decision tracing (see trace.h). Off by default; flipped on with
- * the `kacs.trace=1` boot parameter. Lives here, next to the LSM registration,
- * so the toggle and its one consumer-facing helper sit with the subsystem's
- * other boot-time wiring and need no separate translation unit.
- */
-bool pkm_kacs_trace_enabled;
-
-static int __init pkm_kacs_trace_setup(char *str)
-{
-	/*
-	 * Accept the affirmative spellings (`1`, `on`, `y`, or a bare
-	 * `kacs.trace` with no value); anything else leaves tracing off. Always
-	 * return 1 so the token is consumed and never re-surfaces as an unknown
-	 * boot argument.
-	 */
-	if (!str || !*str || !strcmp(str, "1") || !strcmp(str, "on") ||
-	    !strcmp(str, "y") || !strcmp(str, "yes"))
-		pkm_kacs_trace_enabled = true;
-	return 1;
-}
-early_param("kacs.trace", pkm_kacs_trace_setup);
-
-void pkm_kacs_trace_access_decision(const char *site, const char *reason,
-				    const struct inode *inode, u32 access,
-				    long ret)
-{
-	unsigned long ino = 0;
-	unsigned long magic = 0;
-	unsigned int policy = 0;
-
-	if (inode) {
-		ino = inode->i_ino;
-		if (inode->i_sb) {
-			magic = (unsigned long)inode->i_sb->s_magic;
-			policy = pkm_kacs_superblock_mount_policy(inode->i_sb);
-		}
-	}
-
-	/*
-	 * One line per decision. `verdict` is allow/deny at a glance; the raw
-	 * `ret` follows for the exact errno. No pathname — inode/sb identifiers
-	 * only — so this is safe to leave compiled in (see trace.h).
-	 */
-	pr_info("kacs: trace %s/%s verdict=%s ino=%lu sb_magic=0x%lx policy=%u access=0x%x ret=%ld comm=%s pid=%d\n",
-		site, reason, ret ? "DENY" : "allow", ino, magic, policy,
-		access, ret, current->comm, current->pid);
-}
 
 static const struct lsm_id pkm_lsmid = {
 	.name = "pkm",

@@ -31,6 +31,8 @@
 #include "token_fd.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 #define PKM_KACS_SD_SUPPORTED_INFO                                            \
 	(KACS_SECINFO_OWNER | KACS_SECINFO_GROUP | KACS_SECINFO_DACL |      \
 	 KACS_SECINFO_SACL | KACS_SECINFO_LABEL)
@@ -558,11 +560,19 @@ long pkm_kacs_query_token_sd_core(const void *subject_token,
 						   desired_access, 0,
 						   pip_type, pip_trust,
 						   &granted);
-	if (ret)
+	if (ret) {
+		trace_kacs_sd_query(security_info, desired_access, granted,
+				    KACS_SDS_KIND_TOKEN, 0,
+				    KACS_SDS_ACCESS_DENIED, ret);
 		return ret;
+	}
 
-	return kacs_rust_query_token_sd_subset(target_token, security_info,
-					       out_sd_ptr, out_sd_len);
+	ret = kacs_rust_query_token_sd_subset(target_token, security_info,
+					      out_sd_ptr, out_sd_len);
+	trace_kacs_sd_query(security_info, desired_access, granted,
+			    KACS_SDS_KIND_TOKEN, ret ? 0 : (u32)*out_sd_len,
+			    ret ? KACS_SDS_QUERY_FAIL : KACS_SDS_QUERY_OK, ret);
+	return ret;
 }
 
 long pkm_kacs_set_token_sd_core(const void *subject_token,
@@ -593,11 +603,19 @@ long pkm_kacs_set_token_sd_core(const void *subject_token,
 						   KACS_RESTORE_INTENT,
 						   pip_type, pip_trust,
 						   &granted);
-	if (ret)
+	if (ret) {
+		trace_kacs_sd_set(security_info, desired_access, granted,
+				  KACS_SDS_KIND_TOKEN, (u32)input_sd_len,
+				  KACS_SDS_ACCESS_DENIED, ret);
 		return ret;
+	}
 
-	return kacs_rust_set_token_sd(subject_token, target_token, security_info,
-				      input_sd_ptr, input_sd_len);
+	ret = kacs_rust_set_token_sd(subject_token, target_token, security_info,
+				     input_sd_ptr, input_sd_len);
+	trace_kacs_sd_set(security_info, desired_access, granted,
+			  KACS_SDS_KIND_TOKEN, (u32)input_sd_len,
+			  ret ? KACS_SDS_ACCESS_DENIED : KACS_SDS_SET_OK, ret);
+	return ret;
 }
 
 long pkm_kacs_query_process_sd_core(
@@ -622,8 +640,12 @@ long pkm_kacs_query_process_sd_core(
 
 	process_sd = pkm_kacs_process_state_get_sd(
 		(struct pkm_kacs_process_state *)target_state);
-	if (!process_sd)
+	if (!process_sd) {
+		trace_kacs_sd_query(security_info, desired_access, 0,
+				    KACS_SDS_KIND_PROCESS, 0, KACS_SDS_NO_SD,
+				    -EACCES);
 		return -EACCES;
+	}
 
 	ret = pkm_kacs_authorize_process_sd_access_nondebug(
 		subject_token, process_sd, desired_access, 0,
@@ -638,6 +660,10 @@ long pkm_kacs_query_process_sd_core(
 			process_sd->bytes, process_sd->len, security_info,
 			out_sd_ptr, out_sd_len);
 
+	trace_kacs_sd_query(security_info, desired_access, 0,
+			    KACS_SDS_KIND_PROCESS, ret ? 0 : (u32)*out_sd_len,
+			    ret ? KACS_SDS_ACCESS_DENIED : KACS_SDS_QUERY_OK,
+			    ret);
 	pkm_kacs_process_sd_put(process_sd);
 	return ret;
 }
@@ -666,6 +692,9 @@ long pkm_kacs_set_process_sd_core(
 	mutex_lock(&target_state->sd_lock);
 	process_sd = pkm_kacs_process_sd_get(target_state->process_sd);
 	if (!process_sd) {
+		trace_kacs_sd_set(security_info, desired_access, 0,
+				  KACS_SDS_KIND_PROCESS, (u32)input_sd_len,
+				  KACS_SDS_NO_SD, -EACCES);
 		ret = -EACCES;
 		goto out_unlock;
 	}
@@ -674,12 +703,20 @@ long pkm_kacs_set_process_sd_core(
 		subject_token, process_sd, desired_access, KACS_RESTORE_INTENT,
 		READ_ONCE(caller_state->pip_type),
 		READ_ONCE(caller_state->pip_trust));
-	if (ret)
+	if (ret) {
+		trace_kacs_sd_set(security_info, desired_access, 0,
+				  KACS_SDS_KIND_PROCESS, (u32)input_sd_len,
+				  KACS_SDS_ACCESS_DENIED, ret);
 		goto out_process_sd;
+	}
 	ret = pkm_kacs_enforce_cross_process_pip(caller_state, target_state,
 							 self_target);
-	if (ret)
+	if (ret) {
+		trace_kacs_sd_set(security_info, desired_access, 0,
+				  KACS_SDS_KIND_PROCESS, (u32)input_sd_len,
+				  KACS_SDS_ACCESS_DENIED, ret);
 		goto out_process_sd;
+	}
 	ret = kacs_rust_merge_process_sd(subject_token, process_sd->bytes,
 					 process_sd->len, security_info,
 					 input_sd_ptr, input_sd_len,
@@ -696,6 +733,9 @@ long pkm_kacs_set_process_sd_core(
 
 	pkm_kacs_process_state_replace_sd_locked(target_state, new_sd);
 	new_sd = NULL;
+	trace_kacs_sd_set(security_info, desired_access, 0,
+			  KACS_SDS_KIND_PROCESS, (u32)new_sd_len,
+			  KACS_SDS_SET_OK, 0);
 	ret = 0;
 
 out_process_sd:
@@ -726,8 +766,11 @@ long pkm_kacs_query_file_sd_core(const void *subject_token,
 	if (!inode || !inode->i_security)
 		return -EACCES;
 	if (pkm_kacs_superblock_mount_policy(inode->i_sb) ==
-	    KACS_MOUNT_POLICY_UNMANAGED)
+	    KACS_MOUNT_POLICY_UNMANAGED) {
+		trace_kacs_sd_query(security_info, 0, 0, KACS_SDS_KIND_FILE, 0,
+				    KACS_SDS_UNMANAGED, -EOPNOTSUPP);
 		return -EOPNOTSUPP;
+	}
 
 	ret = pkm_kacs_get_sd_required_access(security_info, &desired_access);
 	if (ret)
@@ -768,6 +811,10 @@ long pkm_kacs_query_file_sd_core(const void *subject_token,
 		}
 		pkm_kacs_inode_sd_cache_free(cache);
 	}
+	trace_kacs_sd_query(security_info, desired_access, 0,
+			    KACS_SDS_KIND_FILE, ret ? 0 : (u32)*out_sd_len,
+			    ret ? KACS_SDS_ACCESS_DENIED : KACS_SDS_QUERY_OK,
+			    ret);
 	return ret;
 }
 
@@ -814,8 +861,12 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 	if (!inode || !inode->i_security)
 		return -EACCES;
 	if (pkm_kacs_superblock_mount_policy(inode->i_sb) ==
-	    KACS_MOUNT_POLICY_UNMANAGED)
+	    KACS_MOUNT_POLICY_UNMANAGED) {
+		trace_kacs_sd_set(security_info, 0, 0, KACS_SDS_KIND_FILE,
+				  (u32)input_sd_len, KACS_SDS_UNMANAGED,
+				  -EOPNOTSUPP);
 		return -EOPNOTSUPP;
+	}
 
 	ret = pkm_kacs_set_sd_required_access(security_info, &desired_access);
 	if (ret)
@@ -889,6 +940,11 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 	ret = kacs_rust_emit_file_set_sd_audit(subject_token, new_sd_bytes,
 					       new_sd_len, desired_access,
 					       pip_type, pip_trust);
+	trace_kacs_sd_set(security_info, desired_access, 0, KACS_SDS_KIND_FILE,
+			  (u32)new_sd_len,
+			  used_restore_bypass ? KACS_SDS_RESTORE_BYPASS :
+						KACS_SDS_SET_OK,
+			  ret);
 	new_sd_bytes = NULL;
 	mutex_unlock(&sec->lock);
 	return ret;

@@ -32,6 +32,8 @@
 
 #include <pkm/lcs.h>
 
+#include <trace/events/lcs.h>
+
 #include "key_fd.h"
 #include "rsi.h"
 #include "transaction_fd.h"
@@ -1416,8 +1418,14 @@ static void pkm_lcs_transaction_fd_timeout(struct timer_list *timer)
 			     timeout_timer);
 	bool schedule_cleanup = false;
 	bool terminal = false;
+	u32 old_state;
+	u64 transaction_id;
+	u32 source_id;
 
 	spin_lock(&txn->lock);
+	old_state = txn->state;
+	transaction_id = txn->transaction_id;
+	source_id = txn->bound_source_id;
 	if (txn->state == REG_TXN_ACTIVE_BOUND) {
 		if (!txn->commit_in_flight) {
 			txn->timeout_abort_pending = true;
@@ -1431,6 +1439,9 @@ static void pkm_lcs_transaction_fd_timeout(struct timer_list *timer)
 	}
 	spin_unlock(&txn->lock);
 
+	if (terminal)
+		trace_lcs_txn_timeout(transaction_id, source_id, old_state,
+				      REG_TXN_TIMED_OUT, (s32)-ETIMEDOUT, true);
 	if (terminal)
 		wake_up_all(&txn->wait);
 	if (schedule_cleanup)
@@ -1478,6 +1489,9 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 	bool release_counter = false;
 	bool retain_detached_commit = false;
 	bool wake = false;
+	bool aborted = false;
+	u32 old_state;
+	u64 trace_txn_id;
 
 	file->private_data = NULL;
 	if (!txn)
@@ -1488,6 +1502,8 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 
 	spin_lock(&txn->lock);
 	txn->fd_released = true;
+	old_state = txn->state;
+	trace_txn_id = txn->transaction_id;
 	if (txn->state == REG_TXN_ACTIVE_BOUND) {
 		transaction_id = txn->transaction_id;
 		source_id = txn->bound_source_id;
@@ -1495,9 +1511,11 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 		dispatch_abort = transaction_id && source_id;
 		release_counter = source_id != 0;
 		wake = true;
+		aborted = true;
 	} else if (txn->state == REG_TXN_ACTIVE_UNBOUND) {
 		txn->state = REG_TXN_ABORTED;
 		wake = true;
+		aborted = true;
 	} else if (txn->state == REG_TXN_TIMED_OUT &&
 		   txn->timeout_abort_pending) {
 		transaction_id = txn->transaction_id;
@@ -1510,6 +1528,10 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 		retain_detached_commit = true;
 	}
 	spin_unlock(&txn->lock);
+
+	if (aborted)
+		trace_lcs_txn_abort(trace_txn_id, source_id, old_state,
+				    REG_TXN_ABORTED, 0, false);
 
 	if (retain_detached_commit)
 		return 0;
@@ -2949,6 +2971,9 @@ out_unlock:
 		pkm_lcs_source_mark_down_by_id(mark_source_down_id);
 	pkm_lcs_transaction_layer_delete_effects_destroy(
 		&layer_delete_effects);
+	trace_lcs_txn_commit(transaction_id, source_id, state,
+			     final_state ? final_state : state, (s32)ret,
+			     ret == -ETIMEDOUT);
 	return ret;
 }
 
@@ -3065,6 +3090,8 @@ long pkm_lcs_transaction_fd_publish(u32 timeout_ms)
 
 	mod_timer(&txn->timeout_timer,
 		  pkm_lcs_transaction_deadline_from_timeout_ms(timeout_ms));
+	trace_lcs_txn_begin(txn->transaction_id, 0, REG_TXN_ACTIVE_UNBOUND,
+			    REG_TXN_ACTIVE_UNBOUND, 0, false);
 	return fd;
 
 out_unregister:
@@ -3479,6 +3506,10 @@ long pkm_lcs_transaction_fd_abort_layer_writers_with_limits(
 		}
 		if (wake)
 			wake_up_all(&txn->wait);
+		if (dispatch_abort)
+			trace_lcs_txn_abort(transaction_id, source_id,
+					    REG_TXN_ACTIVE_BOUND,
+					    REG_TXN_ABORTED, 0, false);
 		if (ret)
 			break;
 	}
@@ -3518,11 +3549,15 @@ long pkm_lcs_transaction_fd_mark_source_down(u32 source_id, u32 *marked_out)
 		bool stop_timer = false;
 		bool clear_log = false;
 		bool wake = false;
+		bool went_source_down = false;
+		u64 down_txn_id = 0;
 
 		mutex_lock(&txn->bind_lock);
 		spin_lock(&txn->lock);
 		if (txn->state == REG_TXN_ACTIVE_BOUND &&
 		    txn->bound_source_id == source_id) {
+			down_txn_id = txn->transaction_id;
+			went_source_down = true;
 			txn->state = REG_TXN_SOURCE_DOWN;
 			txn->commit_in_flight = false;
 			txn->timeout_abort_pending = false;
@@ -3551,6 +3586,11 @@ long pkm_lcs_transaction_fd_mark_source_down(u32 source_id, u32 *marked_out)
 		}
 		mutex_unlock(&txn->bind_lock);
 
+		if (went_source_down)
+			trace_lcs_txn_source_down(down_txn_id, source_id,
+						  REG_TXN_ACTIVE_BOUND,
+						  REG_TXN_SOURCE_DOWN,
+						  (s32)-EIO, false);
 		if (wake)
 			wake_up_all(&txn->wait);
 		if (destroy_detached)
@@ -4438,6 +4478,9 @@ long pkm_lcs_transaction_fd_commit_mutation(
 {
 	struct pkm_lcs_transaction_log_entry *entry;
 	struct pkm_lcs_transaction_fd *txn;
+	u64 txn_id;
+	u32 source_id;
+	u32 state;
 	long ret;
 
 	if (!handle || !handle->active || !handle->txn || !handle->entry)
@@ -4452,8 +4495,14 @@ long pkm_lcs_transaction_fd_commit_mutation(
 	entry->operation_index = txn->next_operation_index++;
 	list_add_tail(&entry->link, &txn->mutation_log);
 	txn->mutation_log_entries++;
+	spin_lock(&txn->lock);
+	txn_id = txn->transaction_id;
+	source_id = txn->bound_source_id;
+	state = txn->state;
+	spin_unlock(&txn->lock);
 	handle->entry = NULL;
 	pkm_lcs_transaction_mutation_handle_release(handle);
+	trace_lcs_txn_bind_mutation(txn_id, source_id, state, state, 0, false);
 	return 0;
 }
 
@@ -4473,12 +4522,15 @@ static long pkm_lcs_transaction_fd_complete_first_bind_from_state(
 	const u8 root_guid[PKM_LCS_TRANSACTION_HIVE_ROOT_GUID_BYTES])
 {
 	long ret = 0;
+	u32 old_state;
+	u32 new_state;
 
 	if (!txn || !transaction_id || !source_id ||
 	    !pkm_lcs_transaction_root_guid_valid(root_guid))
 		return -EINVAL;
 
 	spin_lock(&txn->lock);
+	old_state = txn->state;
 	switch (txn->state) {
 	case REG_TXN_ACTIVE_UNBOUND:
 		if (txn->transaction_id != transaction_id) {
@@ -4506,8 +4558,11 @@ static long pkm_lcs_transaction_fd_complete_first_bind_from_state(
 		ret = -EIO;
 		break;
 	}
+	new_state = txn->state;
 	spin_unlock(&txn->lock);
 
+	trace_lcs_txn_first_bind(transaction_id, source_id, old_state,
+				 new_state, (s32)ret, false);
 	return ret;
 }
 

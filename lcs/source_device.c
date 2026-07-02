@@ -33,6 +33,8 @@
 #include "source_internal.h"
 #include "transaction_fd.h"
 
+#include <trace/events/lcs.h>
+
 extern int lcs_rust_validate_rsi_queued_request_frame(
 	const u8 *frame, size_t frame_len,
 	struct pkm_lcs_rsi_built_request *retained);
@@ -177,28 +179,45 @@ long pkm_lcs_source_wait_for_slot(
 	u32 source_id, const struct pkm_lcs_runtime_limits *limits,
 	unsigned long deadline)
 {
+	long ret;
+
 	for (;;) {
 		s64 epoch = pkm_lcs_source_slot_wait_epoch_snapshot();
 		long remaining;
 		long wait_ret;
-		long ret;
 
 		ret = pkm_lcs_source_slot_admission_state(source_id, limits);
 		if (ret != -EAGAIN)
-			return ret;
+			break;
 
 		remaining = pkm_lcs_source_deadline_remaining(deadline);
-		if (!remaining)
-			return -ETIMEDOUT;
+		if (!remaining) {
+			ret = -ETIMEDOUT;
+			break;
+		}
 
 		wait_ret =
 			pkm_lcs_source_slot_wait_epoch_change_interruptible_timeout(
 				epoch, remaining);
-		if (wait_ret < 0)
-			return wait_ret;
-		if (!wait_ret)
-			return -ETIMEDOUT;
+		if (wait_ret < 0) {
+			ret = wait_ret;
+			break;
+		}
+		if (!wait_ret) {
+			ret = -ETIMEDOUT;
+			break;
+		}
 	}
+
+	/*
+	 * A source's round trip cannot proceed until it holds an admission slot;
+	 * emit the slot-wait leg of the round trip only when it terminates
+	 * without one (op/txn are unknown at this shared sink -> 0).
+	 */
+	if (ret)
+		trace_lcs_rsi_roundtrip_complete(source_id, 0, 0, 0, false,
+						 ret == -ETIMEDOUT, ret);
+	return ret;
 }
 
 long pkm_lcs_source_in_flight_insert_locked(
@@ -261,6 +280,9 @@ long pkm_lcs_source_in_flight_insert_locked(
 	}
 	list_add_tail(&record->link, &source_fd->in_flight_requests);
 	source_fd->in_flight_request_count++;
+	trace_lcs_in_flight(source_fd->source_id, request_id,
+			    source_fd->in_flight_request_count, LCS_IF_INSERT,
+			    0);
 	return 0;
 }
 
@@ -316,6 +338,10 @@ long pkm_lcs_source_in_flight_set_delivered_locked(
 		return -EIO;
 
 	record->delivered = delivered;
+	if (delivered)
+		trace_lcs_in_flight(source_fd->source_id, request_id,
+				    source_fd->in_flight_request_count,
+				    LCS_IF_DELIVERED, 0);
 	return 0;
 }
 
@@ -330,10 +356,17 @@ void pkm_lcs_source_in_flight_release_locked(
 
 	list_del(&record->link);
 	pkm_lcs_source_late_effect_destroy(&record->late_effect);
-	kfree(record);
-	if (source_fd->in_flight_request_count) {
-		source_fd->in_flight_request_count--;
-		pkm_lcs_source_slot_waiters_wake();
+	{
+		u64 released_request_id = record->request_id;
+
+		kfree(record);
+		if (source_fd->in_flight_request_count) {
+			source_fd->in_flight_request_count--;
+			pkm_lcs_source_slot_waiters_wake();
+		}
+		trace_lcs_in_flight(source_fd->source_id, released_request_id,
+				    source_fd->in_flight_request_count,
+				    LCS_IF_RELEASE, 0);
 	}
 }
 
@@ -407,6 +440,7 @@ long pkm_lcs_source_device_open_file_for_token(const void *token,
 	}
 
 	file->private_data = source_fd;
+	trace_lcs_source_fd(0, source_fd->state, 0, 0, LCS_SRC_OPEN, 0);
 	return 0;
 }
 
@@ -457,6 +491,8 @@ void pkm_lcs_source_device_mark_down_file(struct file *file)
 	wake_up_interruptible(&source_fd->read_wait);
 	pkm_lcs_source_table_unlock();
 
+	trace_lcs_source_fd(source_fd->source_id, source_fd->state, 0,
+			    source_down_id, LCS_SRC_EXPLICIT, 0);
 	if (source_down_id)
 		(void)pkm_lcs_transaction_fd_mark_source_down(source_down_id,
 							      NULL);
@@ -490,6 +526,8 @@ void pkm_lcs_source_device_mark_malformed_protocol_file(
 		wake_up_interruptible(&source_fd->read_wait);
 	pkm_lcs_source_table_unlock();
 
+	trace_lcs_source_fd(source_fd->source_id, source_fd->state, 0,
+			    source_down_id, LCS_SRC_MALFORMED, 0);
 	if (source_down_id)
 		(void)pkm_lcs_transaction_fd_mark_source_down(source_down_id,
 							      NULL);
@@ -516,6 +554,8 @@ void pkm_lcs_source_mark_down_by_id(u32 source_id)
 	}
 	pkm_lcs_source_table_unlock();
 
+	trace_lcs_source_fd(source_id, source_fd ? source_fd->state : 0, 0,
+			    source_down_id, LCS_SRC_MARK_BY_ID, 0);
 	if (source_down_id)
 		(void)pkm_lcs_transaction_fd_mark_source_down(source_down_id,
 							      NULL);
@@ -541,6 +581,8 @@ int pkm_lcs_source_device_release_file(struct file *file)
 	wake_up_interruptible(&source_fd->read_wait);
 	pkm_lcs_source_table_unlock();
 
+	trace_lcs_source_fd(source_fd->source_id, source_fd->state, 0,
+			    source_down_id, LCS_SRC_RELEASE, 0);
 	if (source_down_id)
 		(void)pkm_lcs_transaction_fd_mark_source_down(source_down_id,
 							      NULL);

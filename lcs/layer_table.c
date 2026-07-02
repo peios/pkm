@@ -4,6 +4,7 @@
  */
 
 #include <linux/errno.h>
+#include <linux/jhash.h>
 #include <linux/kernel.h>
 #include <linux/lockdep.h>
 #include <linux/mutex.h>
@@ -15,6 +16,8 @@
 #include "../kacs/token_runtime.h"
 #include "rsi.h"
 #include "source_device.h"
+
+#include <trace/events/lcs.h>
 
 struct pkm_lcs_layer_table_entry {
 	bool occupied;
@@ -566,6 +569,9 @@ long pkm_lcs_source_layer_snapshot_acquire(
 			snapshot->owned_names = names;
 			snapshot->owned_metadata = metadata;
 			snapshot->owned_metadata_sds = metadata_sds;
+			trace_lcs_layer_snapshot(0, 0, 0, written,
+						 base_metadata_present ? 1 : 0,
+						 0, 0);
 			return 0;
 		}
 
@@ -577,10 +583,13 @@ long pkm_lcs_source_layer_snapshot_acquire(
 		names = NULL;
 		metadata = NULL;
 		layers = NULL;
-		if (ret != -ENOSPC)
+		if (ret != -ENOSPC) {
+			trace_lcs_layer_snapshot(0, 0, 0, 0, 0, 0, ret);
 			return ret;
+		}
 	}
 
+	trace_lcs_layer_snapshot(0, 0, 0, 0, 0, 0, -ENOSPC);
 	return -ENOSPC;
 }
 
@@ -714,6 +723,7 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 	u8 *metadata_sd_copy;
 	u8 *owner_sid_copy;
 	bool existed_before;
+	bool effective_changed;
 	u8 previous_enabled;
 	u32 previous_precedence;
 	u32 i;
@@ -730,8 +740,12 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 	ret = lcs_rust_validate_layer_publication(
 		(const u8 *)layer_name, layer_name_len, metadata_key_guid,
 		metadata_sd, metadata_sd_len, precedence, enabled, limits);
-	if (ret)
+	if (ret) {
+		trace_lcs_layer_publish(0, layer_name_len,
+					jhash(layer_name, layer_name_len, 0),
+					precedence, enabled, 0, ret);
 		return ret;
+	}
 
 	metadata_sd_copy = kmemdup(metadata_sd, metadata_sd_len, GFP_KERNEL);
 	if (!metadata_sd_copy)
@@ -775,6 +789,9 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 	existed_before = target->occupied;
 	previous_enabled = target->enabled;
 	previous_precedence = target->precedence;
+	effective_changed = pkm_lcs_layer_table_effective_changed(
+		existed_before, previous_enabled, previous_precedence, enabled,
+		precedence);
 	kfree(target->metadata_sd);
 	kfree(target->owner_sid);
 	memset(target, 0, sizeof(*target));
@@ -791,10 +808,7 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 	target->owner_sid_len = owner_sid_len;
 	if (result) {
 		result->existed_before = existed_before;
-		result->effective_changed =
-			pkm_lcs_layer_table_effective_changed(
-				existed_before, previous_enabled,
-				previous_precedence, enabled, precedence);
+		result->effective_changed = effective_changed;
 		result->previous_enabled = previous_enabled;
 		result->new_enabled = enabled;
 		result->previous_precedence = previous_precedence;
@@ -802,6 +816,9 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 	}
 	mutex_unlock(&pkm_lcs_layer_table_lock);
 
+	trace_lcs_layer_publish(0, layer_name_len,
+				jhash(layer_name, layer_name_len, 0), precedence,
+				enabled, effective_changed ? 1 : 0, 0);
 	return 0;
 }
 
@@ -869,6 +886,7 @@ long pkm_lcs_layer_table_remove_with_limits(
 	const struct pkm_lcs_runtime_limits *limits, bool *removed_out)
 {
 	bool is_base = false;
+	bool removed = false;
 	u32 i;
 	int ret;
 
@@ -902,11 +920,15 @@ long pkm_lcs_layer_table_remove_with_limits(
 			continue;
 
 		pkm_lcs_layer_table_entry_destroy(&pkm_lcs_layer_table[i]);
+		removed = true;
 		if (removed_out)
 			*removed_out = true;
 		break;
 	}
 	mutex_unlock(&pkm_lcs_layer_table_lock);
+	trace_lcs_layer_remove(0, layer_name_len,
+			       jhash(layer_name, layer_name_len, 0), 0, 0,
+			       removed ? 1 : 0, 0);
 	return 0;
 }
 

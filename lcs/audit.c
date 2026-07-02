@@ -4,15 +4,32 @@
  */
 
 #include <linux/errno.h>
+#include <linux/jhash.h>
 #include <linux/limits.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 
 #include <pkm/lcs.h>
 
+#include <trace/events/lcs.h>
+
 #include "../kacs/token_runtime.h"
 #include "../kmes/kmes.h"
 #include "source_device.h"
+
+/*
+ * Hash a 16-byte key GUID to a u64 for the lcs: tracepoints. The tracepoints
+ * never record raw GUID bytes; the lcs_access / lcs_audit event probes call
+ * this from TP_fast_assign (compiled in the CREATE_TRACE_POINTS TU). Returns 0
+ * for a NULL GUID (the "no guid in scope" sentinel). Non-static so the probe
+ * bodies resolve it at link time.
+ */
+u64 pkm_lcs_trace_guid_hash(const u8 *guid)
+{
+	if (!guid)
+		return 0;
+	return jhash(guid, 16, 0);
+}
 
 #define PKM_LCS_SACL_MATCH_SUCCESS 0x1U
 #define PKM_LCS_SACL_MATCH_FAILURE 0x2U
@@ -161,12 +178,16 @@ long pkm_lcs_emit_key_open_audit_for_token(
 		payload_len, &written);
 	if (ret || written != payload_len) {
 		kfree(payload);
+		trace_lcs_audit_emit_failed(LCS_AUDIT_KEY_OPEN, key_guid, 0,
+					    plan->allowed ? 1U : 0U, -EIO);
 		return -EIO;
 	}
 
 	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS, pkm_lcs_key_open_audit_event_type,
 			     sizeof(pkm_lcs_key_open_audit_event_type) - 1,
 			     payload, written);
+	trace_lcs_audit_emit(LCS_AUDIT_KEY_OPEN, key_guid, 0,
+			     plan->allowed ? 1U : 0U, 0);
 	kfree(payload);
 	return 0;
 }
@@ -202,12 +223,15 @@ long pkm_lcs_emit_backup_start_audit_for_token(
 		&caller, key_guid, output_fd, payload, payload_len, &written);
 	if (ret || written != payload_len) {
 		kfree(payload);
+		trace_lcs_audit_emit_failed(LCS_AUDIT_BACKUP_START, key_guid, 0,
+					    0, -EIO);
 		return -EIO;
 	}
 
 	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS, pkm_lcs_backup_start_event_type,
 			     sizeof(pkm_lcs_backup_start_event_type) - 1,
 			     payload, written);
+	trace_lcs_audit_emit(LCS_AUDIT_BACKUP_START, key_guid, 0, 0, 0);
 	kfree(payload);
 	return 0;
 }
@@ -244,6 +268,8 @@ long pkm_lcs_emit_backup_complete_audit_for_token(
 		&written);
 	if (ret || written != payload_len) {
 		kfree(payload);
+		trace_lcs_audit_emit_failed(LCS_AUDIT_BACKUP_COMPLETE, key_guid,
+					    result_errno, 0, -EIO);
 		return -EIO;
 	}
 
@@ -251,6 +277,8 @@ long pkm_lcs_emit_backup_complete_audit_for_token(
 			     pkm_lcs_backup_complete_event_type,
 			     sizeof(pkm_lcs_backup_complete_event_type) - 1,
 			     payload, written);
+	trace_lcs_audit_emit(LCS_AUDIT_BACKUP_COMPLETE, key_guid, result_errno,
+			     0, 0);
 	kfree(payload);
 	return 0;
 }
@@ -286,12 +314,15 @@ long pkm_lcs_emit_restore_start_audit_for_token(
 		&caller, key_guid, input_fd, payload, payload_len, &written);
 	if (ret || written != payload_len) {
 		kfree(payload);
+		trace_lcs_audit_emit_failed(LCS_AUDIT_RESTORE_START, key_guid, 0,
+					    0, -EIO);
 		return -EIO;
 	}
 
 	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS, pkm_lcs_restore_start_event_type,
 			     sizeof(pkm_lcs_restore_start_event_type) - 1,
 			     payload, written);
+	trace_lcs_audit_emit(LCS_AUDIT_RESTORE_START, key_guid, 0, 0, 0);
 	kfree(payload);
 	return 0;
 }
@@ -328,6 +359,8 @@ long pkm_lcs_emit_restore_complete_audit_for_token(
 		&written);
 	if (ret || written != payload_len) {
 		kfree(payload);
+		trace_lcs_audit_emit_failed(LCS_AUDIT_RESTORE_COMPLETE, key_guid,
+					    result_errno, 0, -EIO);
 		return -EIO;
 	}
 
@@ -335,6 +368,8 @@ long pkm_lcs_emit_restore_complete_audit_for_token(
 			     pkm_lcs_restore_complete_event_type,
 			     sizeof(pkm_lcs_restore_complete_event_type) - 1,
 			     payload, written);
+	trace_lcs_audit_emit(LCS_AUDIT_RESTORE_COMPLETE, key_guid, result_errno,
+			     0, 0);
 	kfree(payload);
 	return 0;
 }
@@ -384,6 +419,9 @@ long pkm_lcs_emit_source_validation_failure_audit(
 		payload_len, &written);
 	if (ret || written != payload_len) {
 		kfree(payload);
+		trace_lcs_audit_emit_failed(LCS_AUDIT_VALIDATION_FAILURE,
+					    key_guid_present ? key_guid : NULL,
+					    validation_failure, 0, -EIO);
 		return -EIO;
 	}
 
@@ -391,6 +429,9 @@ long pkm_lcs_emit_source_validation_failure_audit(
 		KMES_ORIGIN_LCS, pkm_lcs_source_validation_failure_event_type,
 		sizeof(pkm_lcs_source_validation_failure_event_type) - 1,
 		payload, written);
+	trace_lcs_audit_emit(LCS_AUDIT_VALIDATION_FAILURE,
+			     key_guid_present ? key_guid : NULL,
+			     validation_failure, 0, 0);
 	kfree(payload);
 	return 0;
 }
@@ -443,6 +484,9 @@ long pkm_lcs_emit_self_config_invalid_audit(
 		payload, payload_len, &written);
 	if (ret || written != payload_len) {
 		kfree(payload);
+		trace_lcs_audit_emit_failed(LCS_AUDIT_SELF_CONFIG_INVALID, NULL,
+					    received_kind, 0,
+					    ret == -EINVAL ? -EINVAL : -EIO);
 		return ret == -EINVAL ? -EINVAL : -EIO;
 	}
 
@@ -450,6 +494,8 @@ long pkm_lcs_emit_self_config_invalid_audit(
 			     pkm_lcs_self_config_invalid_event_type,
 			     sizeof(pkm_lcs_self_config_invalid_event_type) - 1,
 			     payload, written);
+	trace_lcs_audit_emit(LCS_AUDIT_SELF_CONFIG_INVALID, NULL,
+			     received_kind, 0, 0);
 	kfree(payload);
 	return 0;
 }

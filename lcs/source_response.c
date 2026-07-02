@@ -12,6 +12,8 @@
 
 #include "source_internal.h"
 
+#include <trace/events/lcs.h>
+
 void pkm_lcs_source_response_waiter_init(
 	struct pkm_lcs_source_response_waiter *waiter)
 {
@@ -170,6 +172,7 @@ long pkm_lcs_source_response_waiter_wait_until(
 	struct pkm_lcs_source_response_waiter *waiter, unsigned long deadline,
 	struct pkm_lcs_source_response_result *result)
 {
+	long rc = -ETIMEDOUT;
 	long ret;
 
 	if (!waiter)
@@ -179,9 +182,8 @@ long pkm_lcs_source_response_waiter_wait_until(
 		long remaining;
 
 		if (READ_ONCE(waiter->completed)) {
-			if (result)
-				*result = waiter->response;
-			return waiter->response_errno;
+			rc = waiter->response_errno;
+			goto out;
 		}
 
 		remaining = pkm_lcs_source_deadline_remaining(deadline);
@@ -193,23 +195,40 @@ long pkm_lcs_source_response_waiter_wait_until(
 			remaining);
 		if (ret < 0) {
 			pkm_lcs_source_response_waiter_detach(waiter);
-			return ret;
+			rc = ret;
+			goto out;
 		}
 		if (!ret)
 			break;
 	}
 
 	if (READ_ONCE(waiter->completed)) {
-		if (result)
-			*result = waiter->response;
-		return waiter->response_errno;
+		rc = waiter->response_errno;
+		goto out;
 	}
 
 	pkm_lcs_source_response_waiter_detach(waiter);
 	if (READ_ONCE(waiter->completed)) {
+		rc = waiter->response_errno;
+		goto out;
+	}
+	rc = -ETIMEDOUT;
+
+out:
+	/*
+	 * The response-wait leg of a source round trip: `waited` is always true
+	 * here, `timed_out` distinguishes the deadline expiry. op is unknown at
+	 * this shared sink (0); txn_id is only meaningful once completed.
+	 */
+	if (READ_ONCE(waiter->completed)) {
 		if (result)
 			*result = waiter->response;
-		return waiter->response_errno;
+		trace_lcs_rsi_roundtrip_complete(waiter->source_id, 0,
+						 waiter->response.txn_id, 0,
+						 true, false, rc);
+	} else {
+		trace_lcs_rsi_roundtrip_complete(waiter->source_id, 0, 0, 0,
+						 true, rc == -ETIMEDOUT, rc);
 	}
-	return -ETIMEDOUT;
+	return rc;
 }

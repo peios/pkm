@@ -35,6 +35,8 @@
 #include "tlp.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 static bool pkm_kacs_ibt_supported(void)
 {
 	return cpu_feature_enabled(X86_FEATURE_IBT);
@@ -53,17 +55,26 @@ static long pkm_kacs_normalize_requested_mitigations(
 
 	if (!normalized_out)
 		return -EINVAL;
-	if (requested_mitigations & ~KACS_MIT_ALL)
+	if (requested_mitigations & ~KACS_MIT_ALL) {
+		trace_kacs_psb_apply(requested_mitigations, 0, 0, 0, 0,
+				     KACS_PSB_APPLY_NORMALIZE, -EINVAL);
 		return -EINVAL;
+	}
 
 	if ((normalized & KACS_MIT_CFI) != 0)
 		normalized |= KACS_MIT_CFIF | KACS_MIT_CFIB;
 	normalized &= ~KACS_MIT_CFI;
 
-	if ((normalized & KACS_MIT_CFIF) != 0 && !ibt_supported)
+	if ((normalized & KACS_MIT_CFIF) != 0 && !ibt_supported) {
+		trace_kacs_psb_apply(requested_mitigations, 0, 0, 0, 0,
+				     KACS_PSB_APPLY_NORMALIZE, -ENODEV);
 		return -ENODEV;
-	if ((normalized & KACS_MIT_CFIB) != 0 && !shstk_supported)
+	}
+	if ((normalized & KACS_MIT_CFIB) != 0 && !shstk_supported) {
+		trace_kacs_psb_apply(requested_mitigations, 0, 0, 0, 0,
+				     KACS_PSB_APPLY_NORMALIZE, -ENODEV);
 		return -ENODEV;
+	}
 
 	*normalized_out = normalized;
 	return 0;
@@ -216,18 +227,27 @@ static long pkm_kacs_activate_arch_mitigations(
 
 	if ((new_bits & KACS_MIT_CFIF) != 0) {
 		ret = pkm_kacs_activate_cfif_for_task(activation);
-		if (ret)
+		if (ret) {
+			trace_kacs_psb_apply(KACS_MIT_CFIF, 0, 0, 0, 0,
+					     KACS_PSB_APPLY_CFIF, ret);
 			return ret;
+		}
 	}
 	if ((new_bits & KACS_MIT_SML) != 0) {
 		ret = pkm_kacs_activate_sml_for_task(activation);
-		if (ret)
+		if (ret) {
+			trace_kacs_psb_apply(KACS_MIT_SML, 0, 0, 0, 0,
+					     KACS_PSB_APPLY_SML, ret);
 			return ret;
+		}
 	}
 	if ((new_bits & KACS_MIT_CFIB) != 0) {
 		ret = pkm_kacs_activate_cfib_for_task(activation);
-		if (ret)
+		if (ret) {
+			trace_kacs_psb_apply(KACS_MIT_CFIB, 0, 0, 0, 0,
+					     KACS_PSB_APPLY_CFIB, ret);
 			return ret;
+		}
 	}
 
 	return 0;
@@ -238,8 +258,11 @@ static int pkm_kacs_check_wxp_existing_vma_core(u32 mitigation_bits,
 {
 	if ((mitigation_bits & KACS_MIT_WXP) == 0)
 		return 0;
-	if ((vm_flags & VM_WRITE) != 0 && (vm_flags & VM_EXEC) != 0)
+	if ((vm_flags & VM_WRITE) != 0 && (vm_flags & VM_EXEC) != 0) {
+		trace_kacs_psb_wxp(mitigation_bits, 0, 0, 0, 0,
+				   KACS_PSB_WXP_EXISTING_VMA, -EACCES);
 		return -EACCES;
+	}
 
 	return 0;
 }
@@ -339,6 +362,10 @@ static long pkm_kacs_apply_psb_mitigations_core(
 		if (pkm_kacs_activation_offline_allowed(activation)) {
 			mm = NULL;
 		} else if (!activation || !activation->task) {
+			trace_kacs_psb_apply(new_bits, 0, 0,
+					     READ_ONCE(target_state->pip_type),
+					     READ_ONCE(target_state->pip_trust),
+					     KACS_PSB_APPLY_MM_ACQUIRE, -EACCES);
 			return -EACCES;
 		} else {
 			mm = get_task_mm(activation->task);
@@ -385,6 +412,10 @@ static long pkm_kacs_apply_psb_mitigations_core(
 	if (result_mitigation_bits_out)
 		*result_mitigation_bits_out = result_bits;
 
+	trace_kacs_psb_apply(normalized_bits, result_bits, 0,
+			     READ_ONCE(target_state->pip_type),
+			     READ_ONCE(target_state->pip_trust),
+			     KACS_PSB_APPLY_OK, 0);
 	return 0;
 }
 
@@ -393,8 +424,11 @@ static int pkm_kacs_check_wxp_mmap_core(u32 mitigation_bits,
 {
 	if ((mitigation_bits & KACS_MIT_WXP) == 0)
 		return 0;
-	if ((prot & PROT_WRITE) != 0 && (prot & PROT_EXEC) != 0)
+	if ((prot & PROT_WRITE) != 0 && (prot & PROT_EXEC) != 0) {
+		trace_kacs_psb_wxp(mitigation_bits, 0, prot, 0, 0,
+				   KACS_PSB_WXP_MMAP, -EACCES);
 		return -EACCES;
+	}
 
 	return 0;
 }
@@ -405,12 +439,21 @@ static int pkm_kacs_check_wxp_mprotect_core(u32 mitigation_bits,
 {
 	if ((mitigation_bits & KACS_MIT_WXP) == 0)
 		return 0;
-	if ((prot & PROT_WRITE) != 0 && (prot & PROT_EXEC) != 0)
+	if ((prot & PROT_WRITE) != 0 && (prot & PROT_EXEC) != 0) {
+		trace_kacs_psb_wxp(mitigation_bits, 0, prot, 0, 0,
+				   KACS_PSB_WXP_MPROTECT, -EACCES);
 		return -EACCES;
-	if ((vm_flags & VM_WRITE) != 0 && (prot & PROT_EXEC) != 0)
+	}
+	if ((vm_flags & VM_WRITE) != 0 && (prot & PROT_EXEC) != 0) {
+		trace_kacs_psb_wxp(mitigation_bits, 0, prot, 0, 0,
+				   KACS_PSB_WXP_MPROTECT, -EACCES);
 		return -EACCES;
-	if ((vm_flags & VM_EXEC) != 0 && (prot & PROT_WRITE) != 0)
+	}
+	if ((vm_flags & VM_EXEC) != 0 && (prot & PROT_WRITE) != 0) {
+		trace_kacs_psb_wxp(mitigation_bits, 0, prot, 0, 0,
+				   KACS_PSB_WXP_MPROTECT, -EACCES);
 		return -EACCES;
+	}
 
 	return 0;
 }
@@ -546,19 +589,30 @@ static int pkm_kacs_check_task_prctl_mitigations_core(
 		if (arg2 == PR_SPEC_STORE_BYPASS ||
 		    arg2 == PR_SPEC_INDIRECT_BRANCH) {
 			if (arg3 == PR_SPEC_ENABLE ||
-			    arg3 == PR_SPEC_DISABLE_NOEXEC)
+			    arg3 == PR_SPEC_DISABLE_NOEXEC) {
+				trace_kacs_psb_prctl(mitigation_bits, 0, 0, 0,
+						     0, KACS_PSB_PRCTL_SML,
+						     -EACCES);
 				return -EACCES;
+			}
 		} else if (arg2 == PR_SPEC_L1D_FLUSH) {
-			if (arg3 != PR_SPEC_ENABLE)
+			if (arg3 != PR_SPEC_ENABLE) {
+				trace_kacs_psb_prctl(mitigation_bits, 0, 0, 0,
+						     0, KACS_PSB_PRCTL_SML,
+						     -EACCES);
 				return -EACCES;
+			}
 		}
 	}
 
 #ifdef PR_SET_SHADOW_STACK_STATUS
 	if ((mitigation_bits & KACS_MIT_CFIB) != 0 &&
 	    option == PR_SET_SHADOW_STACK_STATUS &&
-	    (arg2 & PR_SHADOW_STACK_ENABLE) == 0)
+	    (arg2 & PR_SHADOW_STACK_ENABLE) == 0) {
+		trace_kacs_psb_prctl(mitigation_bits, 0, 0, 0, 0,
+				     KACS_PSB_PRCTL_CFIB, -EACCES);
 		return -EACCES;
+	}
 #endif
 
 #ifndef ARCH_SHSTK_DISABLE
@@ -568,8 +622,11 @@ static int pkm_kacs_check_task_prctl_mitigations_core(
 #define ARCH_SHSTK_UNLOCK 0x5004
 #endif
 	if ((mitigation_bits & KACS_MIT_CFIB) != 0 &&
-	    (option == ARCH_SHSTK_DISABLE || option == ARCH_SHSTK_UNLOCK))
+	    (option == ARCH_SHSTK_DISABLE || option == ARCH_SHSTK_UNLOCK)) {
+		trace_kacs_psb_prctl(mitigation_bits, 0, 0, 0, 0,
+				     KACS_PSB_PRCTL_CFIB, -EACCES);
 		return -EACCES;
+	}
 
 	return -ENOSYS;
 }
@@ -578,8 +635,11 @@ static int pkm_kacs_check_task_prctl_pip_core(u32 pip_type, int option,
 					      unsigned long arg2)
 {
 	if (pip_type != 0 && option == PR_SET_DUMPABLE &&
-	    arg2 == SUID_DUMP_USER)
+	    arg2 == SUID_DUMP_USER) {
+		trace_kacs_psb_prctl(0, 0, 0, pip_type, 0, KACS_PSB_PRCTL_PIP,
+				     -EACCES);
 		return -EACCES;
+	}
 
 	return -ENOSYS;
 }
@@ -598,8 +658,11 @@ int pkm_kacs_check_pie_bprm_core(u32 mitigation_bits,
 		return 0;
 
 	elf_type = (u16)buf[16] | ((u16)buf[17] << 8);
-	if (elf_type == ET_EXEC)
+	if (elf_type == ET_EXEC) {
+		trace_kacs_psb_pie(mitigation_bits, 0, 0, 0, 0,
+				   KACS_PSB_PIE_ET_EXEC, -EACCES);
 		return -EACCES;
+	}
 
 	return 0;
 }
@@ -635,8 +698,12 @@ static int pkm_kacs_check_lsv_trust_core(
 		return -EACCES;
 	if (process_pip_type != 0 &&
 	    !pkm_kacs_pip_dominates(result->pip_type, result->pip_trust,
-				    process_pip_type, process_pip_trust))
+				    process_pip_type, process_pip_trust)) {
+		trace_kacs_psb_lsv(mitigation_bits, 0, 0, process_pip_type,
+				   process_pip_trust,
+				   KACS_PSB_LSV_PIP_DOMINANCE, -EACCES);
 		return -EACCES;
+	}
 
 	return 0;
 }
@@ -657,8 +724,11 @@ static int pkm_kacs_check_lsv_material_core(
 		return 0;
 
 	ret = pkm_kacs_lsv_verify_material_trust(material, &result);
-	if (ret)
+	if (ret) {
+		trace_kacs_psb_lsv(mitigation_bits, 0, 0, process_pip_type,
+				   process_pip_trust, KACS_PSB_LSV_VERIFY, ret);
 		return ret;
+	}
 
 	return pkm_kacs_check_lsv_trust_core(
 		mitigation_bits, file_backed, executable_transition,
@@ -682,8 +752,12 @@ static int pkm_kacs_check_lsv_file_core(u32 mitigation_bits,
 		return 0;
 
 	ret = pkm_kacs_signing_probe_file(file, &material);
-	if (ret)
-		return ret == -ENOMEM ? -ENOMEM : -EACCES;
+	if (ret) {
+		ret = ret == -ENOMEM ? -ENOMEM : -EACCES;
+		trace_kacs_psb_lsv(mitigation_bits, 0, 0, process_pip_type,
+				   process_pip_trust, KACS_PSB_LSV_PROBE, ret);
+		return ret;
+	}
 
 	ret = pkm_kacs_check_lsv_material_core(
 		mitigation_bits, true, true, process_pip_type,

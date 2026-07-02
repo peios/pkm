@@ -16,6 +16,8 @@
 #include "tlp.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 #define PKM_KACS_TLP_MAX_PREFIXES 64U
 #define PKM_KACS_TLP_MAX_PREFIX_LEN 4096U
 
@@ -89,6 +91,7 @@ static long pkm_kacs_tlp_replace_prefixes_kernel(
 	pkm_kacs_tlp_prefix_count = count;
 	mutex_unlock(&pkm_kacs_tlp_cache_lock);
 
+	trace_kacs_tlp(0, count, true, KACS_TLP_REPLACE, 0);
 	return 0;
 
 out_free:
@@ -130,8 +133,12 @@ static int pkm_kacs_check_tlp_path_core(u32 mitigation_bits,
 		return 0;
 	if (!path || path_len == 0)
 		return -EACCES;
-	if (!pkm_kacs_tlp_path_allowed(path, path_len))
+	if (!pkm_kacs_tlp_path_allowed(path, path_len)) {
+		trace_kacs_tlp((u32)path_len,
+			       READ_ONCE(pkm_kacs_tlp_prefix_count), false,
+			       KACS_TLP_CHECK_PATH, -EACCES);
 		return -EACCES;
+	}
 
 	return 0;
 }

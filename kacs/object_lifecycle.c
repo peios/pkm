@@ -11,6 +11,8 @@
 #include "lsm_internal.h"
 #include "object_lifecycle.h"
 
+#include <trace/events/kacs.h>
+
 int pkm_kacs_inode_alloc_security(struct inode *inode)
 {
 	struct pkm_kacs_inode_security *sec;
@@ -68,6 +70,7 @@ void pkm_kacs_file_release(struct file *file)
 
 	inode_sec = pkm_kacs_inode(inode);
 	ret = pkm_kacs_unlink_delete_on_close_file(file);
+	trace_kacs_object(inode, KACS_OBJ_DELETE_ON_CLOSE_UNLINK, ret);
 	if (ret && ret != -ENOENT)
 		pr_warn("pkm: delete-on-close unlink failed (%ld)\n", ret);
 
@@ -182,12 +185,19 @@ int pkm_kacs_mark_signed_exec_pinned_file(const struct file *file)
 
 	sec = pkm_kacs_inode(inode);
 	atomic_set(&sec->signed_exec_pinned, 1);
+	trace_kacs_object(inode, KACS_OBJ_SIGNED_EXEC_PIN, 0);
 	return 0;
 }
 
 int pkm_kacs_check_signed_exec_content_mutation_inode(const struct inode *inode)
 {
-	return pkm_kacs_inode_signed_exec_pinned(inode) ? -EACCES : 0;
+	if (pkm_kacs_inode_signed_exec_pinned(inode)) {
+		trace_kacs_object(inode, KACS_OBJ_SIGNED_EXEC_MUTATION_BLOCKED,
+				  -EACCES);
+		return -EACCES;
+	}
+
+	return 0;
 }
 
 int pkm_kacs_check_signed_exec_content_mutation_file(const struct file *file)

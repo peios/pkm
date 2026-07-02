@@ -16,6 +16,8 @@
 #include "token_fd.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 static struct dentry *pkm_kacs_securityfs_dir;
 static struct dentry *pkm_kacs_securityfs_self;
 static struct dentry *pkm_kacs_securityfs_sessions;
@@ -23,15 +25,20 @@ static struct dentry *pkm_kacs_securityfs_sessions;
 int pkm_kacs_securityfs_open_self_token_file(struct file *file)
 {
 	const void *subject_token;
+	int ret;
 
 	if (!file)
 		return -EINVAL;
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
-	if (!subject_token)
+	if (!subject_token) {
+		trace_kacs_securityfs(KACS_SFS_OPEN_SELF, -EACCES);
 		return -EACCES;
+	}
 
-	return pkm_kacs_bind_query_token_file(file, subject_token);
+	ret = pkm_kacs_bind_query_token_file(file, subject_token);
+	trace_kacs_securityfs(KACS_SFS_OPEN_SELF, ret);
+	return ret;
 }
 
 static int pkm_kacs_securityfs_self_open(struct inode *inode,
@@ -60,17 +67,23 @@ static ssize_t pkm_kacs_securityfs_sessions_read(struct file *file,
 
 	(void)file;
 	subject_token = pkm_kacs_current_effective_token_ptr();
-	if (!subject_token)
+	if (!subject_token) {
+		trace_kacs_securityfs(KACS_SFS_SESSIONS_NO_TOKEN, -EACCES);
 		return -EACCES;
+	}
 
 	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
-	if (ret)
+	if (ret) {
+		trace_kacs_securityfs(KACS_SFS_SESSIONS_PIP_CONTEXT, ret);
 		return ret;
+	}
 
 	ret = kacs_rust_check_securityfs_sessions_read(subject_token, pip_type,
 						       pip_trust);
-	if (ret)
+	if (ret) {
+		trace_kacs_securityfs(KACS_SFS_SESSIONS_ACCESS_CHECK, ret);
 		return ret;
+	}
 
 	ret = kacs_rust_securityfs_sessions_listing(NULL, 0, &required);
 	if (ret)
@@ -111,6 +124,7 @@ static int __init pkm_kacs_securityfs_init(void)
 		ret = PTR_ERR(pkm_kacs_securityfs_dir);
 		pkm_kacs_securityfs_dir = NULL;
 		pr_err("pkm: securityfs kacs dir init failed (%d)\n", ret);
+		trace_kacs_securityfs(KACS_SFS_INIT, ret);
 		return ret;
 	}
 
@@ -123,6 +137,7 @@ static int __init pkm_kacs_securityfs_init(void)
 		securityfs_remove(pkm_kacs_securityfs_dir);
 		pkm_kacs_securityfs_dir = NULL;
 		pr_err("pkm: securityfs kacs/self init failed (%d)\n", ret);
+		trace_kacs_securityfs(KACS_SFS_INIT, ret);
 		return ret;
 	}
 
@@ -138,9 +153,11 @@ static int __init pkm_kacs_securityfs_init(void)
 		pkm_kacs_securityfs_dir = NULL;
 		pr_err("pkm: securityfs kacs/sessions init failed (%d)\n",
 		       ret);
+		trace_kacs_securityfs(KACS_SFS_INIT, ret);
 		return ret;
 	}
 
+	trace_kacs_securityfs(KACS_SFS_INIT, 0);
 	return 0;
 }
 

@@ -8,6 +8,8 @@
 #include "lsm_internal.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 struct pkm_kacs_process_sd *pkm_kacs_process_sd_get(
 	struct pkm_kacs_process_sd *process_sd)
 {
@@ -31,6 +33,8 @@ struct pkm_kacs_process_sd *pkm_kacs_process_sd_wrap_bytes(
 		 * hand to pkm_kacs_process_sd_put; free it here rather than
 		 * orphan it when the wrapper struct cannot be allocated.
 		 */
+		trace_kacs_process_state(0, 0, 0, KACS_PST_SD_WRAP_FAIL,
+					 -ENOMEM);
 		pkm_kacs_free((void *)bytes);
 		return NULL;
 	}
@@ -43,6 +47,7 @@ struct pkm_kacs_process_sd *pkm_kacs_process_sd_wrap_bytes(
 
 struct pkm_kacs_process_sd *pkm_kacs_process_sd_alloc(const void *token)
 {
+	struct pkm_kacs_process_sd *process_sd;
 	size_t len = 0;
 	const u8 *bytes;
 
@@ -50,14 +55,21 @@ struct pkm_kacs_process_sd *pkm_kacs_process_sd_alloc(const void *token)
 		return NULL;
 
 	bytes = kacs_rust_create_default_process_sd(token, &len);
-	if (!bytes || len == 0)
+	if (!bytes || len == 0) {
+		trace_kacs_process_state(0, 0, 0, KACS_PST_SD_ALLOC_FAIL,
+					 -ENOMEM);
 		return NULL;
+	}
 
-	return pkm_kacs_process_sd_wrap_bytes(bytes, len);
+	process_sd = pkm_kacs_process_sd_wrap_bytes(bytes, len);
+	trace_kacs_process_state(0, 0, 0, KACS_PST_SD_ALLOC,
+				 process_sd ? 0 : -ENOMEM);
+	return process_sd;
 }
 
 struct pkm_kacs_process_sd *pkm_kacs_socket_sd_alloc(const void *token)
 {
+	struct pkm_kacs_process_sd *process_sd;
 	size_t len = 0;
 	const u8 *bytes;
 
@@ -65,10 +77,16 @@ struct pkm_kacs_process_sd *pkm_kacs_socket_sd_alloc(const void *token)
 		return NULL;
 
 	bytes = kacs_rust_create_default_socket_sd(token, &len);
-	if (!bytes || len == 0)
+	if (!bytes || len == 0) {
+		trace_kacs_process_state(0, 0, 0, KACS_PST_SD_ALLOC_FAIL,
+					 -ENOMEM);
 		return NULL;
+	}
 
-	return pkm_kacs_process_sd_wrap_bytes(bytes, len);
+	process_sd = pkm_kacs_process_sd_wrap_bytes(bytes, len);
+	trace_kacs_process_state(0, 0, 0, KACS_PST_SOCKET_SD_ALLOC,
+				 process_sd ? 0 : -ENOMEM);
+	return process_sd;
 }
 
 void pkm_kacs_process_sd_put(struct pkm_kacs_process_sd *process_sd)

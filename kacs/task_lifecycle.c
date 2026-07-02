@@ -11,6 +11,8 @@
 #include "process_state.h"
 #include "task_lifecycle.h"
 
+#include <trace/events/kacs.h>
+
 int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 {
 	const struct cred *child_cred;
@@ -47,8 +49,11 @@ int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 	if (parent_state &&
 	    pkm_kacs_clone_is_blocked_by_no_child(
 		    pkm_kacs_process_state_mitigation_bits(parent_state),
-		    clone_flags))
+		    clone_flags)) {
+		trace_kacs_task(clone_flags, (u64)(uintptr_t)parent_state,
+				KACS_TASK_ALLOC_NO_CHILD_BLOCKED, -EACCES);
 		return -EACCES;
+	}
 
 	child_cred = task->cred;
 	child_real_cred = task->real_cred;
@@ -61,14 +66,18 @@ int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 	rcu_assign_pointer(task->real_cred, child_real_cred);
 
 	state = pkm_kacs_inherit_process_state(clone_flags);
-	if (!state)
+	if (!state) {
+		trace_kacs_task(clone_flags, 0,
+				KACS_TASK_ALLOC_INHERIT_ENOMEM, -ENOMEM);
 		return -ENOMEM;
+	}
 
 	new_sec->process_state = state;
 	pkm_kacs_set_cred_process_state((struct cred *)task->real_cred, state);
 	if (task->cred != task->real_cred)
 		pkm_kacs_set_cred_process_state((struct cred *)task->cred,
 						state);
+	trace_kacs_task(clone_flags, (u64)(uintptr_t)state, KACS_TASK_ALLOC, 0);
 	return 0;
 }
 
@@ -80,6 +89,8 @@ void pkm_kacs_task_free(struct task_struct *task)
 		return;
 
 	sec = pkm_kacs_task(task);
+	trace_kacs_task(0, (u64)(uintptr_t)sec->process_state,
+			KACS_TASK_FREE, 0);
 	pkm_kacs_process_state_put(sec->process_state);
 	sec->process_state = NULL;
 	sec->impersonation_saved_cred = NULL;

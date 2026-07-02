@@ -4,6 +4,7 @@
  */
 
 #include <linux/errno.h>
+#include <linux/jhash.h>
 #include <linux/kernel.h>
 #include <linux/limits.h>
 #include <linux/list.h>
@@ -17,6 +18,8 @@
 #include "source_device.h"
 #include "source_internal.h"
 #include "transaction_fd.h"
+
+#include <trace/events/lcs.h>
 
 static bool pkm_lcs_source_generation_skip_matches(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE], u32 skip_source_id,
@@ -460,8 +463,10 @@ long pkm_lcs_source_replay_pending_layer_deletes_with_limits(
 			source_id, &layer_name, &layer_name_len);
 		if (ret)
 			return ret;
-		if (!layer_name)
+		if (!layer_name) {
+			trace_lcs_layer_replay(source_id, 0, 0, 0, 0, 0, 0);
 			return 0;
+		}
 
 		ret = pkm_lcs_source_delete_layer_round_trip_apply_orphans_timeout_with_limits(
 			source_id, layer_name, layer_name_len, limits,
@@ -492,6 +497,10 @@ long pkm_lcs_source_replay_pending_layer_deletes_with_limits(
 	}
 
 out_free:
+	trace_lcs_layer_replay(source_id, layer_name_len,
+			       layer_name ? jhash(layer_name, layer_name_len, 0) :
+					    0,
+			       0, 0, 0, ret);
 	kfree(layer_name);
 	return ret;
 }
@@ -614,6 +623,10 @@ pkm_lcs_source_delete_layer_broadcast_apply_orphans_skip_generation_timeout_with
 
 	ret = 0;
 out:
+	trace_lcs_layer_broadcast(
+		skip_source_id, layer_name_len,
+		layer_name ? jhash(layer_name, layer_name_len, 0) : 0, 0, 0,
+		result ? (result->completed_source_count ? 1 : 0) : 0, ret);
 	kfree(source_ids);
 	return ret;
 }
@@ -785,6 +798,10 @@ long pkm_lcs_source_delete_layer_orchestrate_skip_generation_timeout_with_limits
 		result->watch_overflow_count =
 			broadcast_result.watch_overflow_count;
 	}
+	trace_lcs_layer_delete_orchestrate(
+		skip_source_id, layer_name_len,
+		layer_name ? jhash(layer_name, layer_name_len, 0) : 0, 0, 0,
+		(result && result->layer_table_entry_removed) ? 1 : 0, ret);
 	return ret;
 }
 

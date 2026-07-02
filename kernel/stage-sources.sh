@@ -43,8 +43,19 @@ install -m 0644 "$pkm"/kmes/* "$pkm_dir/kmes/"
 #     header (incl. psb.h), so the whole set must be staged together; staging
 #     pkm.h without psb.h leaves <pkm/pkm.h> unbuildable (an old-installer bug
 #     this list fixes). ---
-for h in pkm psb syscall sid sd token access file process kmes lcs; do
+for h in pkm psb syscall sid sd token access file process kmes lcs trace; do
 	install -m 0644 "$pkm/uapi/pkm/$h.h" "$uapi_dir/$h.h"
+done
+
+# --- Static tracepoint event headers, staged into the canonical
+#     include/trace/events/ so <trace/events/{kacs,kmes,lcs}.h> resolve with no
+#     TRACE_INCLUDE_PATH override. CREATE_TRACE_POINTS is defined in exactly one
+#     PKM object (security/pkm/kacs/pkm_trace.c). Only the headers that exist
+#     yet are staged; add to this list as the kmes:/lcs: systems land. ---
+trace_events_dir="$tree/include/trace/events"
+mkdir -p "$trace_events_dir"
+for t in kacs kmes lcs; do
+	install -m 0644 "$here/trace/$t.h" "$trace_events_dir/$t.h"
 done
 
 # --- Kconfig + Makefile fragments for security/pkm ---

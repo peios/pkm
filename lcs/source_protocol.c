@@ -21,6 +21,8 @@
 #include "source_internal.h"
 #include "transaction_fd.h"
 
+#include <trace/events/lcs.h>
+
 #define PKM_LCS_RSI_READ_ACTION_COPY 0U
 #define PKM_LCS_RSI_READ_ACTION_WAIT 1U
 #define PKM_LCS_RSI_READ_ACTION_EAGAIN 2U
@@ -205,12 +207,19 @@ long pkm_lcs_source_accept_response_file(
 
 	record = pkm_lcs_source_in_flight_find_locked(source_fd, request_id);
 	if (!record || !record->delivered || record->response_accepted) {
+		trace_lcs_rsi_response(source_fd->source_id, request_id,
+				       record ? record->txn_id : 0,
+				       record ? record->op_code : 0, status,
+				       LCS_RESP_DESYNC, -EINVAL);
 		ret = -EINVAL;
 		goto out_unlock_queue;
 	}
 
 	expected_op_code = record->op_code | RSI_RESPONSE_BIT;
 	if (response_op_code != expected_op_code) {
+		trace_lcs_rsi_response(source_fd->source_id, request_id,
+				       record->txn_id, record->op_code, status,
+				       LCS_RESP_OP_MISMATCH, -EINVAL);
 		ret = -EINVAL;
 		goto out_unlock_queue;
 	}
@@ -243,6 +252,12 @@ long pkm_lcs_source_accept_response_file(
 	}
 
 	record->response_accepted = true;
+	trace_lcs_rsi_response(source_fd->source_id, request_id, record->txn_id,
+			       record->op_code, status,
+			       pkm_lcs_rsi_status_known(status) ?
+				       LCS_RESP_ACCEPTED :
+				       LCS_RESP_UNKNOWN_STATUS,
+			       0);
 	if (!record->waiter)
 		pkm_lcs_source_in_flight_release_locked(source_fd, record);
 	if (result)
@@ -300,6 +315,12 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 		return 0;
 	if (result->malformed_source_data) {
 		if (result->request_op_code == RSI_COMMIT_TRANSACTION) {
+			trace_lcs_rsi_response(result->source_id,
+					       result->request_id,
+					       result->txn_id,
+					       result->request_op_code,
+					       result->status,
+					       LCS_RESP_LATE_COMMIT_FAIL, -EIO);
 			pkm_lcs_source_device_mark_down_file(file);
 			return -EIO;
 		}
@@ -311,6 +332,12 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 		if (result->status != RSI_OK)
 			return 0;
 		if (!result->source_id || !result->txn_id) {
+			trace_lcs_rsi_response(result->source_id,
+					       result->request_id,
+					       result->txn_id,
+					       result->request_op_code,
+					       result->status,
+					       LCS_RESP_LATE_BEGIN_FAIL, -EIO);
 			pkm_lcs_source_device_mark_down_file(file);
 			return -EIO;
 		}
@@ -319,6 +346,12 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 			result->source_id, result->txn_id, &result->limits,
 			NULL);
 		if (ret) {
+			trace_lcs_rsi_response(result->source_id,
+					       result->request_id,
+					       result->txn_id,
+					       result->request_op_code,
+					       result->status,
+					       LCS_RESP_LATE_BEGIN_FAIL, ret);
 			pkm_lcs_source_device_mark_down_file(file);
 			return ret;
 		}
@@ -337,6 +370,13 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 				result->late_effect.path_component_count,
 				&result->limits);
 			if (ret) {
+				trace_lcs_rsi_response(result->source_id,
+						       result->request_id,
+						       result->txn_id,
+						       result->request_op_code,
+						       result->status,
+						       LCS_RESP_LATE_COMMIT_FAIL,
+						       ret);
 				pkm_lcs_source_device_mark_down_file(file);
 				return ret;
 			}
@@ -346,6 +386,12 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 			result->source_id, result->txn_id, result->status,
 			&result->limits);
 		if (ret) {
+			trace_lcs_rsi_response(result->source_id,
+					       result->request_id,
+					       result->txn_id,
+					       result->request_op_code,
+					       result->status,
+					       LCS_RESP_LATE_COMMIT_FAIL, ret);
 			pkm_lcs_source_device_mark_down_file(file);
 			return ret;
 		}
@@ -358,6 +404,12 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 			return 0;
 		if (result->late_effect.kind !=
 		    PKM_LCS_SOURCE_LATE_EFFECT_KEY_MUTATION) {
+			trace_lcs_rsi_response(result->source_id,
+					       result->request_id,
+					       result->txn_id,
+					       result->request_op_code,
+					       result->status,
+					       LCS_RESP_LATE_MUTATION_FAIL, -EIO);
 			pkm_lcs_source_device_mark_down_file(file);
 			return -EIO;
 		}
@@ -365,6 +417,12 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 			result->source_id, &result->late_effect,
 			&result->limits);
 		if (ret) {
+			trace_lcs_rsi_response(result->source_id,
+					       result->request_id,
+					       result->txn_id,
+					       result->request_op_code,
+					       result->status,
+					       LCS_RESP_LATE_MUTATION_FAIL, -EIO);
 			pkm_lcs_source_device_mark_down_file(file);
 			return -EIO;
 		}
@@ -625,6 +683,11 @@ static ssize_t pkm_lcs_source_device_write_file_with_ops(
 
 	ret = pkm_lcs_source_validate_accepted_response_payload(
 		frame, count, result, &caller_errno);
+	if (!ret && result->malformed_source_data)
+		trace_lcs_rsi_response(result->source_id, result->request_id,
+				       result->txn_id, result->request_op_code,
+				       result->status,
+				       LCS_RESP_MALFORMED_PAYLOAD, caller_errno);
 	if (!ret)
 		pkm_lcs_source_emit_validation_failure_for_result(result);
 	if (ret && result->caller_waiter_attached)

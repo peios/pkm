@@ -18,6 +18,8 @@
 #include "process_state.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 void pkm_kacs_fill_uuid_v4(u8 out[KACS_UUID_BYTES])
 {
 	if (!out)
@@ -71,6 +73,7 @@ void pkm_kacs_free_after_rcu(void *ptr)
 
 	deferred = kmalloc(sizeof(*deferred), GFP_KERNEL);
 	if (!deferred) {
+		trace_kacs_privilege(0, KACS_PRIV_RCU_ENOMEM_FALLBACK, -ENOMEM);
 		synchronize_rcu();
 		kfree(ptr);
 		return;
@@ -206,19 +209,29 @@ int pkm_kacs_current_pip_context(u32 *pip_type, u32 *pip_trust)
 long pkm_kacs_require_enabled_privilege(const void *subject_token,
 					u64 privilege)
 {
-	if (!subject_token || privilege == 0)
+	if (!subject_token || privilege == 0) {
+		trace_kacs_privilege(privilege, KACS_PRIV_NULL_OR_ZERO, -EPERM);
 		return -EPERM;
-	if (!kacs_rust_token_has_enabled_privilege(subject_token, privilege))
+	}
+	if (!kacs_rust_token_has_enabled_privilege(subject_token, privilege)) {
+		trace_kacs_privilege(privilege, KACS_PRIV_NOT_ENABLED, -EPERM);
 		return -EPERM;
-	if (!kacs_rust_token_mark_privileges_used(subject_token, privilege))
+	}
+	if (!kacs_rust_token_mark_privileges_used(subject_token, privilege)) {
+		trace_kacs_privilege(privilege, KACS_PRIV_USE_MARK_FAIL, -EPERM);
 		return -EPERM;
+	}
 
 	return 0;
 }
 
 int pkm_kacs_open_by_handle_at(void)
 {
-	return (int)pkm_kacs_require_enabled_privilege(
+	int ret = (int)pkm_kacs_require_enabled_privilege(
 		pkm_kacs_current_effective_token_ptr(),
 		KACS_SE_CHANGE_NOTIFY_PRIVILEGE);
+
+	trace_kacs_privilege(KACS_SE_CHANGE_NOTIFY_PRIVILEGE,
+			     KACS_PRIV_CHANGE_NOTIFY, ret);
+	return ret;
 }

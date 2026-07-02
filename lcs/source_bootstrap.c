@@ -7,6 +7,8 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 
+#include <trace/events/lcs.h>
+
 #include "source_device.h"
 
 long pkm_lcs_source_bootstrap_refresh_machine_hive(
@@ -20,6 +22,7 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 	bool registry_root_present = false;
 	bool kmes_root_present = false;
 	bool layers_root_present = false;
+	u8 stage = LCS_BOOT_REGISTRY;
 	long ret;
 
 	if (result_out)
@@ -50,6 +53,7 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 			goto out;
 	}
 
+	stage = LCS_BOOT_KMES;
 	ret = pkm_kmes_config_root_discover_from_machine_hive(
 		source_id, machine_root_guid, &kmes_root_present, kmes_guid);
 	if (ret)
@@ -63,6 +67,7 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 			goto out;
 	}
 
+	stage = LCS_BOOT_LAYERS;
 	ret = pkm_lcs_layer_metadata_root_discover_from_machine_hive(
 		source_id, machine_root_guid, &layers_root_present,
 		layers_root_guid);
@@ -77,6 +82,7 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 			goto out;
 	}
 
+	stage = LCS_BOOT_SELF_WATCH;
 	ret = pkm_lcs_internal_self_watch_arm(
 		source_id, machine_root_guid, registry_root_present,
 		registry_guid, layers_root_present, layers_root_guid,
@@ -86,7 +92,11 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 
 	*result_out = *result;
 	ret = 0;
+	stage = LCS_BOOT_COMPLETE;
 out:
+	trace_lcs_bootstrap_refresh(source_id, registry_root_present,
+				    kmes_root_present, layers_root_present,
+				    stage, ret);
 	kfree(result);
 	return ret;
 }

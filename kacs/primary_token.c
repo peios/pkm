@@ -20,6 +20,8 @@
 #include "process_state.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 struct pkm_kacs_primary_install_prepare {
 	struct cred *new_real;
 	struct cred *new_effective;
@@ -125,11 +127,13 @@ static long pkm_kacs_apply_current_primary_install(
 	struct pkm_kacs_primary_install_prepare *prepared)
 {
 	struct pkm_kacs_task_security *task_sec;
+	u64 new_id;
 
 	if (!prepared || !prepared->new_real || !current || !current->security)
 		return -EACCES;
 
 	task_sec = pkm_kacs_task(current);
+	new_id = (u64)(uintptr_t)pkm_kacs_cred(prepared->new_real)->token;
 	if (prepared->new_effective) {
 		long ret;
 
@@ -147,6 +151,7 @@ static long pkm_kacs_apply_current_primary_install(
 		prepared->new_effective = NULL;
 	}
 
+	trace_kacs_primary_install(0, new_id, KACS_PRIM_APPLY_COMMIT, 0);
 	return 0;
 }
 
@@ -161,6 +166,10 @@ static long pkm_kacs_revert_current_impersonation(void)
 	if (!task_sec->impersonation_saved_cred)
 		return 0;
 
+	trace_kacs_primary_install(
+		(u64)(uintptr_t)pkm_kacs_cred(task_sec->impersonation_saved_cred)
+			->token,
+		0, KACS_PRIM_IMPERSONATE_REVERT, 0);
 	revert_creds(task_sec->impersonation_saved_cred);
 	task_sec->impersonation_saved_cred = NULL;
 	return 0;
@@ -207,10 +216,16 @@ static void pkm_kacs_primary_install_task_work(struct callback_head *twork)
 	if (ret)
 		pkm_kacs_abort_primary_install_prepare(&prepared);
 	if (ret == -ENOMEM &&
-	    task_work_add(current, &work->twork, TWA_SIGNAL) == 0)
+	    task_work_add(current, &work->twork, TWA_SIGNAL) == 0) {
+		trace_kacs_primary_install(0, (u64)(uintptr_t)work->token,
+					   KACS_PRIM_SIBLING_REQUEUE, ret);
 		return;
-	if (ret)
+	}
+	if (ret) {
+		trace_kacs_primary_install(0, (u64)(uintptr_t)work->token,
+					   KACS_PRIM_SIBLING_FAILED, ret);
 		pr_warn("pkm: queued primary-token install failed (%ld)\n", ret);
+	}
 
 	pkm_kacs_free_primary_install_work(work);
 }
@@ -375,6 +390,10 @@ int pkm_kacs_install_current_primary_token(const void *token)
 	if (!kacs_rust_token_same_user_sid(old_primary_token, token)) {
 		new_sd = pkm_kacs_process_sd_alloc(token);
 		if (!new_sd) {
+			trace_kacs_primary_install(
+				(u64)(uintptr_t)old_primary_token,
+				(u64)(uintptr_t)token,
+				KACS_PRIM_SD_ALLOC_FAIL, -ENOMEM);
 			pkm_kacs_abort_primary_install_prepare(&prepared);
 			pkm_kacs_discard_prepared_primary_installs(&sibling_batch);
 			return -ENOMEM;
@@ -389,10 +408,16 @@ int pkm_kacs_install_current_primary_token(const void *token)
 		return ret;
 	}
 
-	if (new_sd)
+	if (new_sd) {
 		pkm_kacs_process_state_replace_sd(state, new_sd);
+		trace_kacs_primary_install((u64)(uintptr_t)old_primary_token,
+					   (u64)(uintptr_t)token,
+					   KACS_PRIM_SD_REALLOC, 0);
+	}
 
 	pkm_kacs_queue_prepared_primary_installs(&sibling_batch);
+	trace_kacs_primary_install((u64)(uintptr_t)old_primary_token,
+				   (u64)(uintptr_t)token, KACS_PRIM_INSTALL_OK, 0);
 	return 0;
 }
 
@@ -412,12 +437,18 @@ int pkm_kacs_install_impersonation_token(const void *token)
 		return ret;
 
 	new = prepare_creds();
-	if (!new)
+	if (!new) {
+		trace_kacs_primary_install(0, (u64)(uintptr_t)token,
+					   KACS_PRIM_IMPERSONATE_INSTALL,
+					   -ENOMEM);
 		return -ENOMEM;
+	}
 
 	new_sec = pkm_kacs_cred(new);
 	ret = pkm_kacs_project_linux_cred_from_token(new, token);
 	if (ret) {
+		trace_kacs_primary_install(0, (u64)(uintptr_t)token,
+					   KACS_PRIM_IMPERSONATE_INSTALL, ret);
 		abort_creds(new);
 		return ret;
 	}
@@ -428,6 +459,8 @@ int pkm_kacs_install_impersonation_token(const void *token)
 	pkm_kacs_raise_allow_compat_caps(new);
 
 	task_sec->impersonation_saved_cred = override_creds(new);
+	trace_kacs_primary_install(0, (u64)(uintptr_t)token,
+				   KACS_PRIM_IMPERSONATE_INSTALL, 0);
 	return 0;
 }
 

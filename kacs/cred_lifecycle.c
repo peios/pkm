@@ -15,6 +15,8 @@
 #include "process_state.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 void pkm_kacs_stamp_projected_ids(struct pkm_kacs_cred_security *sec)
 {
 	if (!sec->token) {
@@ -42,17 +44,26 @@ long pkm_kacs_project_linux_cred_from_token(struct cred *cred,
 		return -EINVAL;
 
 	projected_uid = kacs_rust_token_projected_uid(token);
-	if (projected_uid == 0 && !kacs_rust_token_allows_uid0_projection(token))
+	if (projected_uid == 0 && !kacs_rust_token_allows_uid0_projection(token)) {
+		trace_kacs_cred((u64)(uintptr_t)token, 0, 0,
+				KACS_CRED_PROJECT_UID0_BLOCKED, -EACCES);
 		return -EACCES;
+	}
 
 	projected_gid = kacs_rust_token_projected_gid(token);
 	group_count = kacs_rust_token_projected_supplementary_gid_count(token);
-	if (group_count > NGROUPS_MAX)
+	if (group_count > NGROUPS_MAX) {
+		trace_kacs_cred((u64)(uintptr_t)token, 0, 0,
+				KACS_CRED_PROJECT_E2BIG, -E2BIG);
 		return -E2BIG;
+	}
 
 	groups = groups_alloc((int)group_count);
-	if (!groups)
+	if (!groups) {
+		trace_kacs_cred((u64)(uintptr_t)token, 0, 0,
+				KACS_CRED_PROJECT_GROUPS_ALLOC_FAIL, -ENOMEM);
 		return -ENOMEM;
+	}
 
 	for (i = 0; i < group_count; i++) {
 		u32 gid;
@@ -103,8 +114,11 @@ int pkm_kacs_cred_prepare(struct cred *new, const struct cred *old, gfp_t gfp)
 	(void)gfp;
 	if (old_sec->token) {
 		new_sec->token = kacs_rust_token_clone(old_sec->token);
-		if (!new_sec->token)
+		if (!new_sec->token) {
+			trace_kacs_cred((u64)(uintptr_t)old_sec->token, 0, 0,
+					KACS_CRED_PREPARE, -ENOMEM);
 			return -ENOMEM;
+		}
 	} else {
 		new_sec->token = NULL;
 	}
@@ -116,6 +130,8 @@ int pkm_kacs_cred_prepare(struct cred *new, const struct cred *old, gfp_t gfp)
 
 	pkm_kacs_stamp_projected_ids(new_sec);
 	pkm_kacs_raise_allow_compat_caps(new);
+	trace_kacs_cred((u64)(uintptr_t)old_sec->token,
+			(u64)(uintptr_t)new_sec->token, 0, KACS_CRED_PREPARE, 0);
 	return 0;
 }
 
@@ -136,6 +152,8 @@ void pkm_kacs_cred_transfer(struct cred *new, const struct cred *old)
 
 	pkm_kacs_stamp_projected_ids(new_sec);
 	pkm_kacs_raise_allow_compat_caps(new);
+	trace_kacs_cred((u64)(uintptr_t)old_sec->token,
+			(u64)(uintptr_t)new_sec->token, 0, KACS_CRED_TRANSFER, 0);
 }
 
 int pkm_kacs_cred_alloc_blank(struct cred *cred, gfp_t gfp)
@@ -147,6 +165,7 @@ int pkm_kacs_cred_alloc_blank(struct cred *cred, gfp_t gfp)
 	sec->process_state = NULL;
 	sec->projected_uid = PKM_KACS_UNMAPPED_ID;
 	sec->projected_gid = PKM_KACS_UNMAPPED_ID;
+	trace_kacs_cred(0, 0, 0, KACS_CRED_ALLOC_BLANK, 0);
 	return 0;
 }
 
@@ -154,6 +173,7 @@ void pkm_kacs_cred_free(struct cred *cred)
 {
 	struct pkm_kacs_cred_security *sec = pkm_kacs_cred(cred);
 
+	trace_kacs_cred((u64)(uintptr_t)sec->token, 0, 0, KACS_CRED_FREE, 0);
 	if (sec->token)
 		kacs_rust_token_drop(sec->token);
 	if (sec->process_state)
@@ -218,6 +238,7 @@ long pkm_kacs_apply_clone_token_lifecycle(
 	const struct cred *parent_effective_cred;
 	const struct cred *parent_primary_cred;
 	const void *parent_primary_token;
+	long ret;
 
 	if (!child_credp || !child_real_credp)
 		return -EACCES;
@@ -239,20 +260,32 @@ long pkm_kacs_apply_clone_token_lifecycle(
 			put_cred(child_real_cred);
 			*child_credp = parent_primary_cred;
 			*child_real_credp = parent_primary_cred;
+			trace_kacs_cred((u64)(uintptr_t)parent_primary_token,
+					(u64)(uintptr_t)parent_primary_token,
+					clone_flags,
+					KACS_CRED_CLONE_THREAD_SHARE, 0);
 			return 0;
 		}
 
 		if (child_cred == parent_primary_cred &&
-		    child_real_cred == parent_primary_cred)
+		    child_real_cred == parent_primary_cred) {
+			trace_kacs_cred((u64)(uintptr_t)parent_primary_token,
+					(u64)(uintptr_t)parent_primary_token,
+					clone_flags,
+					KACS_CRED_CLONE_THREAD_SHARE, 0);
 			return 0;
+		}
 
 		return pkm_kacs_install_primary_on_child_cred_pair(
 			child_cred, child_real_cred, parent_primary_token,
 			false);
 	}
 
-	return pkm_kacs_install_primary_on_child_cred_pair(
+	ret = pkm_kacs_install_primary_on_child_cred_pair(
 		child_cred, child_real_cred, parent_primary_token, true);
+	trace_kacs_cred(0, (u64)(uintptr_t)parent_primary_token, clone_flags,
+			KACS_CRED_CLONE_FORK_COPY, ret);
+	return ret;
 }
 
 long pkm_kacs_install_token_ref_on_cred(struct cred *cred,
@@ -260,6 +293,7 @@ long pkm_kacs_install_token_ref_on_cred(struct cred *cred,
 					bool project_linux_ids)
 {
 	struct pkm_kacs_cred_security *sec;
+	u64 old_token_id;
 	long ret;
 
 	if (!cred || !cred->security || !token_ref)
@@ -267,15 +301,21 @@ long pkm_kacs_install_token_ref_on_cred(struct cred *cred,
 
 	if (project_linux_ids) {
 		ret = pkm_kacs_project_linux_cred_from_token(cred, token_ref);
-		if (ret)
+		if (ret) {
+			trace_kacs_cred(0, (u64)(uintptr_t)token_ref, 0,
+					KACS_CRED_INSTALL_TOKEN_REF, ret);
 			return ret;
+		}
 	}
 
 	sec = pkm_kacs_cred(cred);
+	old_token_id = (u64)(uintptr_t)sec->token;
 	if (sec->token)
 		kacs_rust_token_drop(sec->token);
 	sec->token = token_ref;
 	pkm_kacs_stamp_projected_ids(sec);
 	pkm_kacs_raise_allow_compat_caps(cred);
+	trace_kacs_cred(old_token_id, (u64)(uintptr_t)token_ref, 0,
+			KACS_CRED_INSTALL_TOKEN_REF, 0);
 	return 0;
 }

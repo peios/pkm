@@ -21,6 +21,8 @@
 #include "token_fd.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 #define PKM_KACS_TOKEN_OPEN_ALLOWED_MASK \
 	(KACS_TOKEN_ALL_ACCESS | KACS_ACCESS_ACCESS_SYSTEM_SECURITY | \
 	 KACS_ACCESS_MAXIMUM_ALLOWED | KACS_ACCESS_GENERIC_READ | \
@@ -65,6 +67,8 @@ static int pkm_kacs_token_release(struct inode *inode, struct file *file)
 	struct pkm_kacs_token_file *tf = file->private_data;
 
 	if (tf) {
+		trace_kacs_token_ref((u64)(uintptr_t)tf->token, tf->access_mask,
+				     KACS_TREF_RELEASE, 0);
 		if (tf->token)
 			kacs_rust_token_drop(tf->token);
 		kfree(tf);
@@ -208,13 +212,19 @@ static long pkm_kacs_token_adjust_session_after_gate(
 	struct pkm_kacs_token_file *tf,
 	u32 session_id)
 {
+	long ret;
+
 	if (!tf || !tf->token)
 		return -EINVAL;
 	if ((tf->access_mask & KACS_TOKEN_ADJUST_SESSIONID) !=
 	    KACS_TOKEN_ADJUST_SESSIONID)
 		return -EACCES;
 
-	return kacs_rust_token_adjust_session_id(tf->token, session_id);
+	ret = kacs_rust_token_adjust_session_id(tf->token, session_id);
+	trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+			       KACS_TOK_ADJUST_SESSIONID, tf->access_mask,
+			       KACS_TOKEN_ADJUST_SESSIONID, -1, session_id, ret);
+	return ret;
 }
 
 static long pkm_kacs_token_duplicate_core(
@@ -229,8 +239,12 @@ static long pkm_kacs_token_duplicate_core(
 
 	if (!tf || !tf->token || !args)
 		return -EINVAL;
-	if ((tf->access_mask & KACS_TOKEN_DUPLICATE) != KACS_TOKEN_DUPLICATE)
+	if ((tf->access_mask & KACS_TOKEN_DUPLICATE) != KACS_TOKEN_DUPLICATE) {
+		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+				       KACS_TOK_DUPLICATE, tf->access_mask,
+				       KACS_TOKEN_DUPLICATE, -1, 0, -EACCES);
 		return -EACCES;
+	}
 	if (!subject_token || !creator_token)
 		return -EACCES;
 
@@ -250,6 +264,9 @@ static long pkm_kacs_token_duplicate_core(
 		return fd;
 
 	args->result_fd = (s32)fd;
+	trace_kacs_token_ioctl((u64)(uintptr_t)tf->token, KACS_TOK_DUPLICATE,
+			       tf->access_mask, KACS_TOKEN_DUPLICATE,
+			       args->result_fd, 0, 0);
 	return 0;
 }
 
@@ -297,6 +314,10 @@ static long pkm_kacs_token_link_core(const void *caller_token,
 	ret = kacs_rust_token_link_tokens(elevated_tf->token, filtered_tf->token,
 					  args->session_id);
 out:
+	trace_kacs_token_ioctl(elevated_tf ? (u64)(uintptr_t)elevated_tf->token : 0,
+			       KACS_TOK_LINK,
+			       elevated_tf ? elevated_tf->access_mask : 0,
+			       KACS_TOKEN_DUPLICATE, -1, args->session_id, ret);
 	fdput(filtered_f);
 	fdput(elevated_f);
 	return ret;
@@ -314,8 +335,12 @@ static long pkm_kacs_token_get_linked_core(
 
 	if (!tf || !tf->token || !args)
 		return -EINVAL;
-	if ((tf->access_mask & KACS_TOKEN_QUERY) != KACS_TOKEN_QUERY)
+	if ((tf->access_mask & KACS_TOKEN_QUERY) != KACS_TOKEN_QUERY) {
+		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+				       KACS_TOK_GET_LINKED, tf->access_mask,
+				       KACS_TOKEN_QUERY, -1, 0, -EACCES);
 		return -EACCES;
+	}
 
 	if (caller_token &&
 	    kacs_rust_token_has_enabled_privilege(caller_token,
@@ -342,6 +367,9 @@ static long pkm_kacs_token_get_linked_core(
 		return fd;
 
 	args->result_fd = (s32)fd;
+	trace_kacs_token_ioctl((u64)(uintptr_t)tf->token, KACS_TOK_GET_LINKED,
+			       tf->access_mask, KACS_TOKEN_QUERY,
+			       args->result_fd, 0, 0);
 	return 0;
 }
 
@@ -349,11 +377,17 @@ static long pkm_kacs_token_install_core(
 	struct pkm_kacs_token_file *tf,
 	const void *caller_primary_token)
 {
+	long ret;
+
 	if (!tf || !tf->token)
 		return -EINVAL;
 	if ((tf->access_mask & KACS_TOKEN_ASSIGN_PRIMARY) !=
-	    KACS_TOKEN_ASSIGN_PRIMARY)
+	    KACS_TOKEN_ASSIGN_PRIMARY) {
+		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+				       KACS_TOK_INSTALL, tf->access_mask,
+				       KACS_TOKEN_ASSIGN_PRIMARY, -1, 0, -EACCES);
 		return -EACCES;
+	}
 	if (!caller_primary_token)
 		return -EACCES;
 	if (!kacs_rust_token_is_primary(tf->token))
@@ -367,7 +401,11 @@ static long pkm_kacs_token_install_core(
 		    KACS_SE_ASSIGN_PRIMARY_TOKEN_PRIVILEGE))
 		return -EACCES;
 
-	return pkm_kacs_install_current_primary_token(tf->token);
+	ret = pkm_kacs_install_current_primary_token(tf->token);
+	trace_kacs_token_ioctl((u64)(uintptr_t)tf->token, KACS_TOK_INSTALL,
+			       tf->access_mask, KACS_TOKEN_ASSIGN_PRIMARY, -1, 0,
+			       ret);
+	return ret;
 }
 
 static long pkm_kacs_impersonate_token_core(const void *client_token,
@@ -377,13 +415,23 @@ static long pkm_kacs_token_impersonate_core(
 	struct pkm_kacs_token_file *tf,
 	const void *server_primary_token)
 {
+	long ret;
+
 	if (!tf || !tf->token)
 		return -EINVAL;
-	if ((tf->access_mask & KACS_TOKEN_IMPERSONATE) != KACS_TOKEN_IMPERSONATE)
+	if ((tf->access_mask & KACS_TOKEN_IMPERSONATE) != KACS_TOKEN_IMPERSONATE) {
+		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+				       KACS_TOK_IMPERSONATE, tf->access_mask,
+				       KACS_TOKEN_IMPERSONATE, -1, 0, -EACCES);
 		return -EACCES;
+	}
 
-	return pkm_kacs_impersonate_token_core(tf->token,
-					       server_primary_token);
+	ret = pkm_kacs_impersonate_token_core(tf->token,
+					      server_primary_token);
+	trace_kacs_token_ioctl((u64)(uintptr_t)tf->token, KACS_TOK_IMPERSONATE,
+			       tf->access_mask, KACS_TOKEN_IMPERSONATE, -1, 0,
+			       ret);
+	return ret;
 }
 
 static long pkm_kacs_impersonate_token_core(const void *client_token,
@@ -446,6 +494,9 @@ static long pkm_kacs_token_adjust_privs_core(
 		tf->token,
 		(const struct pkm_kacs_priv_adjust_entry *)entries,
 		args->count, &previous_enabled);
+	trace_kacs_token_ioctl((u64)(uintptr_t)tf->token, KACS_TOK_ADJUST_PRIVS,
+			       tf->access_mask, KACS_TOKEN_ADJUST_PRIVS, -1, 0,
+			       ret);
 	if (ret)
 		return ret;
 
@@ -477,6 +528,9 @@ static long pkm_kacs_token_adjust_groups_core(
 		tf->token,
 		(const struct pkm_kacs_group_adjust_entry *)entries,
 		args->count, previous_state);
+	trace_kacs_token_ioctl((u64)(uintptr_t)tf->token, KACS_TOK_ADJUST_GROUPS,
+			       tf->access_mask, KACS_TOKEN_ADJUST_GROUPS, -1, 0,
+			       ret);
 	if (ret)
 		return ret;
 
@@ -521,6 +575,9 @@ static long pkm_kacs_token_restrict_core(
 		return fd;
 
 	args->result_fd = (s32)fd;
+	trace_kacs_token_ioctl((u64)(uintptr_t)tf->token, KACS_TOK_RESTRICT,
+			       tf->access_mask, KACS_TOKEN_DUPLICATE,
+			       args->result_fd, 0, 0);
 	return 0;
 }
 
@@ -532,6 +589,7 @@ static long pkm_kacs_token_adjust_default_core(
 	u32 owner_index;
 	u32 group_index;
 	u32 change_dacl;
+	long ret;
 
 	if (!tf || !tf->token || !args)
 		return -EINVAL;
@@ -551,9 +609,13 @@ static long pkm_kacs_token_adjust_default_core(
 		PKM_KACS_DEFAULT_INDEX_NO_CHANGE : (u32)args->group_index;
 	change_dacl = args->dacl_ptr ? 1U : 0U;
 
-	return kacs_rust_token_adjust_default(tf->token, owner_index,
-					      group_index, dacl_bytes,
-					      args->dacl_len, change_dacl);
+	ret = kacs_rust_token_adjust_default(tf->token, owner_index,
+					     group_index, dacl_bytes,
+					     args->dacl_len, change_dacl);
+	trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+			       KACS_TOK_ADJUST_DEFAULT, tf->access_mask,
+			       KACS_TOKEN_ADJUST_DEFAULT, -1, 0, ret);
+	return ret;
 }
 
 static long pkm_kacs_token_query_user(struct pkm_kacs_token_file *tf,
@@ -567,8 +629,12 @@ static long pkm_kacs_token_query_user(struct pkm_kacs_token_file *tf,
 
 	if (!tf || !tf->token)
 		return -EINVAL;
-	if ((tf->access_mask & KACS_TOKEN_QUERY) != KACS_TOKEN_QUERY)
+	if ((tf->access_mask & KACS_TOKEN_QUERY) != KACS_TOKEN_QUERY) {
+		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token, KACS_TOK_QUERY,
+				       tf->access_mask, KACS_TOKEN_QUERY, -1, 0,
+				       -EACCES);
 		return -EACCES;
+	}
 	if (!uargs)
 		return -EFAULT;
 	if (copy_from_user(&args, uargs, sizeof(args)))
@@ -602,6 +668,8 @@ static long pkm_kacs_token_query_user(struct pkm_kacs_token_file *tf,
 	}
 out:
 	kfree(payload);
+	trace_kacs_token_ioctl((u64)(uintptr_t)tf->token, KACS_TOK_QUERY,
+			       tf->access_mask, KACS_TOKEN_QUERY, -1, 0, ret);
 	return ret;
 }
 
@@ -614,8 +682,13 @@ static long pkm_kacs_token_adjust_session_user(struct pkm_kacs_token_file *tf,
 	if (!tf || !tf->token)
 		return -EINVAL;
 	if ((tf->access_mask & KACS_TOKEN_ADJUST_SESSIONID) !=
-	    KACS_TOKEN_ADJUST_SESSIONID)
+	    KACS_TOKEN_ADJUST_SESSIONID) {
+		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+				       KACS_TOK_ADJUST_SESSIONID, tf->access_mask,
+				       KACS_TOKEN_ADJUST_SESSIONID, -1, 0,
+				       -EACCES);
 		return -EACCES;
+	}
 	ret = pkm_kacs_require_tcb_for_token(pkm_kacs_current_primary_token_ptr());
 	if (ret)
 		return ret;
@@ -725,8 +798,12 @@ static long pkm_kacs_token_adjust_privs_user(
 	if (!tf || !tf->token)
 		return -EINVAL;
 	if ((tf->access_mask & KACS_TOKEN_ADJUST_PRIVS) !=
-	    KACS_TOKEN_ADJUST_PRIVS)
+	    KACS_TOKEN_ADJUST_PRIVS) {
+		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+				       KACS_TOK_ADJUST_PRIVS, tf->access_mask,
+				       KACS_TOKEN_ADJUST_PRIVS, -1, 0, -EACCES);
 		return -EACCES;
+	}
 	if (!uargs)
 		return -EFAULT;
 	if (copy_from_user(&args, uargs, sizeof(args)))
@@ -764,8 +841,12 @@ static long pkm_kacs_token_adjust_groups_user(
 	if (!tf || !tf->token)
 		return -EINVAL;
 	if ((tf->access_mask & KACS_TOKEN_ADJUST_GROUPS) !=
-	    KACS_TOKEN_ADJUST_GROUPS)
+	    KACS_TOKEN_ADJUST_GROUPS) {
+		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+				       KACS_TOK_ADJUST_GROUPS, tf->access_mask,
+				       KACS_TOKEN_ADJUST_GROUPS, -1, 0, -EACCES);
 		return -EACCES;
+	}
 	if (!uargs)
 		return -EFAULT;
 	if (copy_from_user(&args, uargs, sizeof(args)))
@@ -802,8 +883,12 @@ static long pkm_kacs_token_adjust_default_user(
 	if (!tf || !tf->token)
 		return -EINVAL;
 	if ((tf->access_mask & KACS_TOKEN_ADJUST_DEFAULT) !=
-	    KACS_TOKEN_ADJUST_DEFAULT)
+	    KACS_TOKEN_ADJUST_DEFAULT) {
+		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+				       KACS_TOK_ADJUST_DEFAULT, tf->access_mask,
+				       KACS_TOKEN_ADJUST_DEFAULT, -1, 0, -EACCES);
 		return -EACCES;
+	}
 	if (!uargs)
 		return -EFAULT;
 	if (copy_from_user(&args, uargs, sizeof(args)))
@@ -840,8 +925,12 @@ static long pkm_kacs_token_restrict_user(
 
 	if (!tf || !tf->token)
 		return -EINVAL;
-	if ((tf->access_mask & KACS_TOKEN_DUPLICATE) != KACS_TOKEN_DUPLICATE)
+	if ((tf->access_mask & KACS_TOKEN_DUPLICATE) != KACS_TOKEN_DUPLICATE) {
+		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+				       KACS_TOK_RESTRICT, tf->access_mask,
+				       KACS_TOKEN_DUPLICATE, -1, 0, -EACCES);
 		return -EACCES;
+	}
 	if (!uargs)
 		return -EFAULT;
 	if (copy_from_user(&args, uargs, sizeof(args)))
@@ -917,6 +1006,9 @@ static long pkm_kacs_token_ioctl(struct file *file, unsigned int cmd,
 		return pkm_kacs_token_adjust_session_user(
 			tf, (u32 __user *)arg);
 	default:
+		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+				       KACS_TOK_UNKNOWN, tf->access_mask, 0, -1,
+				       0, -ENOTTY);
 		return -ENOTTY;
 	}
 }
@@ -934,6 +1026,8 @@ static int pkm_kacs_token_to_fd(const void *token, u32 granted_access)
 	tf = kmalloc(sizeof(*tf), GFP_KERNEL);
 	if (!tf) {
 		kacs_rust_token_drop(token);
+		trace_kacs_token_ref((u64)(uintptr_t)token, granted_access,
+				     KACS_TREF_TO_FD, -ENOMEM);
 		return -ENOMEM;
 	}
 
@@ -946,6 +1040,8 @@ static int pkm_kacs_token_to_fd(const void *token, u32 granted_access)
 		kfree(tf);
 	}
 
+	trace_kacs_token_ref((u64)(uintptr_t)token, granted_access,
+			     KACS_TREF_TO_FD, fd);
 	return fd;
 }
 
@@ -959,12 +1055,16 @@ static int pkm_kacs_bind_token_file_with_fixed_access(
 		return -EACCES;
 
 	token_ref = kacs_rust_token_clone(target_token);
-	if (!token_ref)
+	if (!token_ref) {
+		trace_kacs_token_ref(0, granted_access, KACS_TREF_BIND, -EACCES);
 		return -EACCES;
+	}
 
 	tf = kmalloc(sizeof(*tf), GFP_KERNEL);
 	if (!tf) {
 		kacs_rust_token_drop(token_ref);
+		trace_kacs_token_ref((u64)(uintptr_t)token_ref, granted_access,
+				     KACS_TREF_BIND, -ENOMEM);
 		return -ENOMEM;
 	}
 
@@ -973,6 +1073,8 @@ static int pkm_kacs_bind_token_file_with_fixed_access(
 
 	replace_fops(file, &pkm_kacs_token_fops);
 	file->private_data = tf;
+	trace_kacs_token_ref((u64)(uintptr_t)token_ref, granted_access,
+			     KACS_TREF_BIND, 0);
 	return 0;
 }
 
@@ -985,9 +1087,13 @@ long pkm_kacs_open_token_fd_with_fixed_access(const void *target_token,
 		return -EACCES;
 
 	token_ref = kacs_rust_token_clone(target_token);
-	if (!token_ref)
+	if (!token_ref) {
+		trace_kacs_token_ref(0, granted_access, KACS_TREF_OPEN, -EACCES);
 		return -EACCES;
+	}
 
+	trace_kacs_token_ref((u64)(uintptr_t)token_ref, granted_access,
+			     KACS_TREF_OPEN, 0);
 	return pkm_kacs_token_to_fd(token_ref, granted_access);
 }
 
@@ -1037,13 +1143,19 @@ long pkm_kacs_open_token_fd_for_subject_checked_with_pip(
 
 	ret = kacs_rust_token_open_check(subject_token, target_token, access_mask,
 					 pip_type, pip_trust, &granted);
-	if (ret)
+	if (ret) {
+		trace_kacs_token_ref(0, access_mask, KACS_TREF_OPEN, ret);
 		return ret;
+	}
 
 	token_ref = kacs_rust_token_clone(target_token);
-	if (!token_ref)
+	if (!token_ref) {
+		trace_kacs_token_ref(0, granted, KACS_TREF_OPEN, -EACCES);
 		return -EACCES;
+	}
 
+	trace_kacs_token_ref((u64)(uintptr_t)token_ref, granted,
+			     KACS_TREF_OPEN, 0);
 	return pkm_kacs_token_to_fd(token_ref, granted);
 }
 

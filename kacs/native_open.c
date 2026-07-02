@@ -27,7 +27,7 @@
 #include "mount_policy.h"
 #include "native_open.h"
 #include "token_runtime.h"
-#include "trace.h"
+#include <trace/events/kacs.h>
 
 static atomic64_t pkm_kacs_native_supersede_tmp_counter = ATOMIC64_INIT(0);
 
@@ -136,37 +136,67 @@ long pkm_kacs_prepare_native_open(
 	bool has_write;
 	bool has_execute;
 	int open_flags = 0;
+	u8 nox_reason = KACS_NOX_PREPARE_OK;
 	long ret;
 
 	if (!how || !prepared)
 		return -EINVAL;
-	if ((how->flags & ~PKM_KACS_OPEN_ALLOWED_AT_FLAGS) != 0)
-		return -EINVAL;
+	if ((how->flags & ~PKM_KACS_OPEN_ALLOWED_AT_FLAGS) != 0) {
+		ret = -EINVAL;
+		nox_reason = KACS_NOX_PREPARE_BAD_FLAGS;
+		goto reject;
+	}
 	if ((how->create_options &
 	     ~(KACS_CREATE_OPT_DIRECTORY |
-	       KACS_CREATE_OPT_DELETE_ON_CLOSE)) != 0)
-		return -EINVAL;
-	if (how->__pad != 0)
-		return -EINVAL;
-	if ((how->sd_ptr == 0) != (how->sd_len == 0))
-		return -EINVAL;
-	if (how->sd_len > PKM_KACS_MAX_SD_BYTES)
-		return -EINVAL;
-	if (how->create_disposition > KACS_DISPOSITION_OVERWRITE_IF)
-		return -EINVAL;
+	       KACS_CREATE_OPT_DELETE_ON_CLOSE)) != 0) {
+		ret = -EINVAL;
+		nox_reason = KACS_NOX_PREPARE_BAD_FLAGS;
+		goto reject;
+	}
+	if (how->__pad != 0) {
+		ret = -EINVAL;
+		nox_reason = KACS_NOX_PREPARE_BAD_FLAGS;
+		goto reject;
+	}
+	if ((how->sd_ptr == 0) != (how->sd_len == 0)) {
+		ret = -EINVAL;
+		nox_reason = KACS_NOX_PREPARE_BAD_SD_ARGS;
+		goto reject;
+	}
+	if (how->sd_len > PKM_KACS_MAX_SD_BYTES) {
+		ret = -EINVAL;
+		nox_reason = KACS_NOX_PREPARE_BAD_SD_ARGS;
+		goto reject;
+	}
+	if (how->create_disposition > KACS_DISPOSITION_OVERWRITE_IF) {
+		ret = -EINVAL;
+		nox_reason = KACS_NOX_PREPARE_BAD_DISPOSITION;
+		goto reject;
+	}
 	if (how->create_disposition == KACS_DISPOSITION_OPEN &&
-	    (how->sd_ptr != 0 || how->sd_len != 0))
-		return -EOPNOTSUPP;
+	    (how->sd_ptr != 0 || how->sd_len != 0)) {
+		ret = -EOPNOTSUPP;
+		nox_reason = KACS_NOX_PREPARE_BAD_SD_ARGS;
+		goto reject;
+	}
 	if (how->create_disposition == KACS_DISPOSITION_OVERWRITE &&
-	    (how->sd_ptr != 0 || how->sd_len != 0))
-		return -EINVAL;
+	    (how->sd_ptr != 0 || how->sd_len != 0)) {
+		ret = -EINVAL;
+		nox_reason = KACS_NOX_PREPARE_BAD_SD_ARGS;
+		goto reject;
+	}
 
 	ret = pkm_kacs_map_file_generic_access_mask(how->desired_access,
 						    &desired_access);
-	if (ret)
-		return ret;
-	if ((desired_access & KACS_FILE_DELETE_CHILD) != 0)
-		return -EOPNOTSUPP;
+	if (ret) {
+		nox_reason = KACS_NOX_PREPARE_BAD_ACCESS;
+		goto reject;
+	}
+	if ((desired_access & KACS_FILE_DELETE_CHILD) != 0) {
+		ret = -EOPNOTSUPP;
+		nox_reason = KACS_NOX_PREPARE_UNSUPPORTED;
+		goto reject;
+	}
 
 	data_mask = KACS_FILE_READ_DATA |
 		    KACS_FILE_WRITE_DATA |
@@ -176,22 +206,34 @@ long pkm_kacs_prepare_native_open(
 		     (KACS_FILE_WRITE_DATA |
 		      KACS_FILE_APPEND_DATA)) != 0;
 	has_execute = (desired_access & KACS_FILE_EXECUTE) != 0;
-	if ((desired_access & data_mask) == 0 && !has_execute)
-		return -EINVAL;
+	if ((desired_access & data_mask) == 0 && !has_execute) {
+		ret = -EINVAL;
+		nox_reason = KACS_NOX_PREPARE_BAD_ACCESS;
+		goto reject;
+	}
 	if (how->create_disposition == KACS_DISPOSITION_OVERWRITE &&
-	    (desired_access & KACS_FILE_WRITE_DATA) == 0)
-		return -EINVAL;
+	    (desired_access & KACS_FILE_WRITE_DATA) == 0) {
+		ret = -EINVAL;
+		nox_reason = KACS_NOX_PREPARE_BAD_ACCESS;
+		goto reject;
+	}
 	if ((how->create_disposition == KACS_DISPOSITION_SUPERSEDE ||
 	     how->create_disposition == KACS_DISPOSITION_OVERWRITE ||
 	     how->create_disposition == KACS_DISPOSITION_OVERWRITE_IF) &&
-	    (how->create_options & KACS_CREATE_OPT_DIRECTORY) != 0)
-		return -EOPNOTSUPP;
+	    (how->create_options & KACS_CREATE_OPT_DIRECTORY) != 0) {
+		ret = -EOPNOTSUPP;
+		nox_reason = KACS_NOX_PREPARE_UNSUPPORTED;
+		goto reject;
+	}
 	if ((how->create_options &
 	     (KACS_CREATE_OPT_DIRECTORY |
 	      KACS_CREATE_OPT_DELETE_ON_CLOSE)) ==
 	    (KACS_CREATE_OPT_DIRECTORY |
-	     KACS_CREATE_OPT_DELETE_ON_CLOSE))
-		return -EOPNOTSUPP;
+	     KACS_CREATE_OPT_DELETE_ON_CLOSE)) {
+		ret = -EOPNOTSUPP;
+		nox_reason = KACS_NOX_PREPARE_UNSUPPORTED;
+		goto reject;
+	}
 
 	if (has_write && has_read)
 		open_flags = O_RDWR;
@@ -225,7 +267,14 @@ long pkm_kacs_prepare_native_open(
 	prepared->open_flags = open_flags;
 	prepared->directory_required =
 		(how->create_options & KACS_CREATE_OPT_DIRECTORY) != 0;
+	trace_kacs_native_open_ext(how->create_disposition, desired_access,
+				   KACS_NOX_PREPARE_OK, 0);
 	return 0;
+
+reject:
+	trace_kacs_native_open_ext(how->create_disposition, how->desired_access,
+				   nox_reason, ret);
+	return ret;
 }
 
 static long pkm_kacs_copy_creator_sd_from_user(
@@ -434,8 +483,11 @@ long pkm_kacs_maybe_arm_delete_on_close_for_subject(
 		return 0;
 
 	ret = pkm_kacs_authorize_delete_on_close_for_subject(subject_token, file);
-	if (ret)
+	if (ret) {
+		trace_kacs_native_open_ext(0, KACS_ACCESS_DELETE,
+					   KACS_NOX_DELETE_ON_CLOSE_ARM, ret);
 		return ret;
+	}
 
 	inode_sec = pkm_kacs_inode(inode);
 	mutex_lock(&inode_sec->lock);
@@ -447,6 +499,8 @@ long pkm_kacs_maybe_arm_delete_on_close_for_subject(
 		ret = 0;
 	}
 	mutex_unlock(&inode_sec->lock);
+	trace_kacs_native_open_ext(0, KACS_ACCESS_DELETE,
+				   KACS_NOX_DELETE_ON_CLOSE_ARM, ret);
 	return ret;
 }
 
@@ -561,13 +615,24 @@ long pkm_kacs_build_created_file_sd_for_subject(
 		return -EINVAL;
 
 	parent_inode = file_inode(parent_file);
-	if (!parent_inode || !parent_inode->i_security)
+	if (!parent_inode || !parent_inode->i_security) {
+		trace_kacs_native_open_ext(0, desired_access,
+					   KACS_NOX_BUILD_CREATED_SD, -EACCES);
 		return -EACCES;
+	}
 	if (!pkm_kacs_mount_policy_is_managed(
-		    pkm_kacs_superblock_mount_policy(parent_inode->i_sb)))
+		    pkm_kacs_superblock_mount_policy(parent_inode->i_sb))) {
+		trace_kacs_native_open_ext(0, desired_access,
+					   KACS_NOX_BUILD_CREATED_SD,
+					   -EOPNOTSUPP);
 		return -EOPNOTSUPP;
-	if (pkm_kacs_inode_is_ntfs(parent_inode))
+	}
+	if (pkm_kacs_inode_is_ntfs(parent_inode)) {
+		trace_kacs_native_open_ext(0, desired_access,
+					   KACS_NOX_BUILD_CREATED_SD,
+					   -EOPNOTSUPP);
 		return -EOPNOTSUPP;
+	}
 
 	parent_sec = pkm_kacs_inode(parent_inode);
 	parent_right = directory ? KACS_FILE_ADD_SUBDIRECTORY :
@@ -601,8 +666,11 @@ long pkm_kacs_build_created_file_sd_for_subject(
 					      out_sd_ptr, out_sd_len);
 out_unlock:
 	mutex_unlock(&parent_sec->lock);
-	if (ret)
+	if (ret) {
+		trace_kacs_native_open_ext(0, desired_access,
+					   KACS_NOX_BUILD_CREATED_SD, ret);
 		return ret;
+	}
 
 	if (desired_access != 0) {
 		ret = kacs_rust_check_file_sd_with_intent(
@@ -613,12 +681,17 @@ out_unlock:
 			pkm_kacs_free((void *)*out_sd_ptr);
 			*out_sd_ptr = NULL;
 			*out_sd_len = 0;
+			trace_kacs_native_open_ext(0, desired_access,
+						   KACS_NOX_BUILD_CREATED_SD,
+						   ret);
 			return ret;
 		}
 	}
 
 	if (granted_access_out)
 		*granted_access_out = granted_access;
+	trace_kacs_native_open_ext(0, desired_access,
+				   KACS_NOX_BUILD_CREATED_SD, 0);
 	return 0;
 }
 
@@ -978,8 +1051,8 @@ static long pkm_kacs_do_native_create_open(
 		struct qstr name =
 			QSTR_INIT(dentry->d_name.name, dentry->d_name.len);
 
-		PKM_KACS_TRACE("native_create_open", "lazy-dentry-relookup",
-			       parent_inode, prepared->desired_access, 0);
+		trace_kacs_native_open(parent_inode, prepared->desired_access,
+				       0, KACS_TR_LAZY_DENTRY_RELOOKUP);
 		looked_up = lookup_one(mnt_idmap(parent_path.mnt), &name,
 				       parent_path.dentry);
 		if (IS_ERR(looked_up)) {
@@ -993,9 +1066,9 @@ static long pkm_kacs_do_native_create_open(
 			 * after a successful create. If it does not, refuse to
 			 * open rather than oops.
 			 */
-			PKM_KACS_TRACE("native_create_open",
-				       "negative-after-create", parent_inode,
-				       prepared->desired_access, -ENOENT);
+			trace_kacs_native_open(parent_inode,
+					       prepared->desired_access, -ENOENT,
+					       KACS_TR_NEGATIVE_AFTER_CREATE);
 			ret = -ENOENT;
 			goto out_end_create;
 		}
@@ -1083,6 +1156,9 @@ static long pkm_kacs_resolve_native_open_path(
 	    prepared->create_disposition != KACS_DISPOSITION_OPEN &&
 	    prepared->create_disposition != KACS_DISPOSITION_OPEN_IF) {
 		path_put(resolved_path);
+		trace_kacs_native_open_ext(prepared->create_disposition,
+					   prepared->desired_access,
+					   KACS_NOX_RESOLVE, -EOPNOTSUPP);
 		return -EOPNOTSUPP;
 	}
 
@@ -1090,21 +1166,35 @@ static long pkm_kacs_resolve_native_open_path(
 		if ((prepared->desired_access &
 		     PKM_KACS_DIRECTORY_MUTATION_RIGHTS) != 0) {
 			path_put(resolved_path);
+			trace_kacs_native_open_ext(prepared->create_disposition,
+						   prepared->desired_access,
+						   KACS_NOX_RESOLVE, -EOPNOTSUPP);
 			return -EOPNOTSUPP;
 		}
 	} else if (prepared->directory_required) {
 		path_put(resolved_path);
+		trace_kacs_native_open_ext(prepared->create_disposition,
+					   prepared->desired_access,
+					   KACS_NOX_RESOLVE, -ENOTDIR);
 		return -ENOTDIR;
 	} else if (!pkm_kacs_existing_file_object_mode_supported(
 			   inode->i_mode)) {
 		path_put(resolved_path);
+		trace_kacs_native_open_ext(prepared->create_disposition,
+					   prepared->desired_access,
+					   KACS_NOX_RESOLVE, -EACCES);
 		return -EACCES;
 	} else if (!S_ISREG(inode->i_mode) &&
 		   (prepared->desired_access & KACS_FILE_EXECUTE) != 0) {
 		path_put(resolved_path);
+		trace_kacs_native_open_ext(prepared->create_disposition,
+					   prepared->desired_access,
+					   KACS_NOX_RESOLVE, -EACCES);
 		return -EACCES;
 	}
 
+	trace_kacs_native_open_ext(prepared->create_disposition,
+				   prepared->desired_access, KACS_NOX_RESOLVE, 0);
 	return 0;
 }
 

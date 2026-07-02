@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <linux/cred.h>
+#include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/mutex.h>
 #include <linux/refcount.h>
@@ -15,6 +16,8 @@
 #include "lsm_internal.h"
 #include "process_state.h"
 #include "token_runtime.h"
+
+#include <trace/events/kacs.h>
 
 void pkm_kacs_set_cred_process_state(struct cred *cred,
 				     struct pkm_kacs_process_state *state)
@@ -62,6 +65,10 @@ void pkm_kacs_process_state_replace_sd_locked(
 	spin_unlock_irqrestore(&state->mitigation_lock, flags);
 
 	pkm_kacs_process_sd_put(old_sd);
+	trace_kacs_process_state((u64)(uintptr_t)state,
+				 READ_ONCE(state->pip_type),
+				 READ_ONCE(state->pip_trust),
+				 KACS_PST_SD_REPLACE, 0);
 }
 
 void pkm_kacs_process_state_replace_sd(
@@ -87,17 +94,24 @@ struct pkm_kacs_process_state *pkm_kacs_process_state_alloc(
 		return NULL;
 
 	bucket = pkm_kmes_rate_bucket_alloc();
-	if (!bucket)
+	if (!bucket) {
+		trace_kacs_process_state(0, pip_type, pip_trust,
+					 KACS_PST_ALLOC_FAIL, -ENOMEM);
 		return NULL;
+	}
 
 	process_sd = pkm_kacs_process_sd_alloc(primary_token);
 	if (!process_sd) {
+		trace_kacs_process_state(0, pip_type, pip_trust,
+					 KACS_PST_ALLOC_FAIL, -ENOMEM);
 		pkm_kmes_rate_bucket_put(bucket);
 		return NULL;
 	}
 
 	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	if (!state) {
+		trace_kacs_process_state(0, pip_type, pip_trust,
+					 KACS_PST_ALLOC_FAIL, -ENOMEM);
 		pkm_kacs_process_sd_put(process_sd);
 		pkm_kmes_rate_bucket_put(bucket);
 		return NULL;
@@ -112,6 +126,8 @@ struct pkm_kacs_process_state *pkm_kacs_process_state_alloc(
 	state->mitigation_bits = mitigation_bits;
 	state->kmes_rate_bucket = bucket;
 	state->process_sd = process_sd;
+	trace_kacs_process_state((u64)(uintptr_t)state, pip_type, pip_trust,
+				 KACS_PST_ALLOC, 0);
 	return state;
 }
 
@@ -130,6 +146,9 @@ void pkm_kacs_process_state_put(struct pkm_kacs_process_state *state)
 	if (!refcount_dec_and_test(&state->refs))
 		return;
 
+	trace_kacs_process_state((u64)(uintptr_t)state,
+				 READ_ONCE(state->pip_type),
+				 READ_ONCE(state->pip_trust), KACS_PST_FREE, 0);
 	pkm_kacs_process_sd_put(state->process_sd);
 	pkm_kmes_rate_bucket_put(state->kmes_rate_bucket);
 	kfree(state);
@@ -167,6 +186,8 @@ void pkm_kacs_stage_pending_exec_pip(u32 pip_type, u32 pip_trust)
 	sec->pending_exec_pip_type = pip_type;
 	sec->pending_exec_pip_trust = pip_trust;
 	sec->pending_exec_pip_valid = 1;
+	trace_kacs_process_state((u64)(uintptr_t)sec->process_state, pip_type,
+				 pip_trust, KACS_PST_EXEC_PIP_STAGE, 0);
 }
 
 int pkm_kacs_exec_dumpable_after_pip(u32 pip_type, int current_dumpable)
@@ -193,8 +214,13 @@ void pkm_kacs_apply_pending_exec_dumpable(void)
 	dumpable = get_dumpable(current->mm);
 	hardened = pkm_kacs_exec_dumpable_after_pip(sec->pending_exec_pip_type,
 						    dumpable);
-	if (hardened != dumpable)
+	if (hardened != dumpable) {
 		set_dumpable(current->mm, hardened);
+		trace_kacs_process_state((u64)(uintptr_t)sec->process_state,
+					 sec->pending_exec_pip_type,
+					 sec->pending_exec_pip_trust,
+					 KACS_PST_DUMPABLE, 0);
+	}
 }
 
 void pkm_kacs_commit_pending_exec_pip(void)
@@ -213,6 +239,10 @@ void pkm_kacs_commit_pending_exec_pip(void)
 	if (state) {
 		WRITE_ONCE(state->pip_type, sec->pending_exec_pip_type);
 		WRITE_ONCE(state->pip_trust, sec->pending_exec_pip_trust);
+		trace_kacs_process_state((u64)(uintptr_t)state,
+					 sec->pending_exec_pip_type,
+					 sec->pending_exec_pip_trust,
+					 KACS_PST_EXEC_PIP_COMMIT, 0);
 	}
 	pkm_kacs_clear_pending_exec_pip();
 }
@@ -231,12 +261,18 @@ bool pkm_kacs_clone_is_blocked_by_no_child(u32 mitigation_bits, u64 clone_flags)
 	if ((clone_flags & CLONE_THREAD) != 0)
 		return false;
 
-	return (mitigation_bits & KACS_MIT_NO_CHILD) != 0;
+	if ((mitigation_bits & KACS_MIT_NO_CHILD) == 0)
+		return false;
+
+	trace_kacs_process_state(0, 0, 0, KACS_PST_CLONE_BLOCKED_NOCHILD,
+				 -EPERM);
+	return true;
 }
 
 struct pkm_kacs_process_state *pkm_kacs_inherit_process_state(u64 clone_flags)
 {
 	struct pkm_kacs_process_state *parent_state;
+	struct pkm_kacs_process_state *child_state;
 	const void *primary_token;
 	u32 mitigation_bits;
 
@@ -246,15 +282,25 @@ struct pkm_kacs_process_state *pkm_kacs_inherit_process_state(u64 clone_flags)
 
 	mitigation_bits = pkm_kacs_process_state_mitigation_bits(parent_state);
 
-	if ((clone_flags & CLONE_THREAD) != 0)
+	if ((clone_flags & CLONE_THREAD) != 0) {
+		trace_kacs_process_state((u64)(uintptr_t)parent_state,
+					 READ_ONCE(parent_state->pip_type),
+					 READ_ONCE(parent_state->pip_trust),
+					 KACS_PST_INHERIT_SHARE, 0);
 		return pkm_kacs_process_state_get(parent_state);
+	}
 
 	primary_token = pkm_kacs_current_primary_token_ptr();
 	if (!primary_token)
 		return NULL;
 
-	return pkm_kacs_process_state_alloc(primary_token,
-					    READ_ONCE(parent_state->pip_type),
-					    READ_ONCE(parent_state->pip_trust),
-					    mitigation_bits);
+	child_state = pkm_kacs_process_state_alloc(
+		primary_token, READ_ONCE(parent_state->pip_type),
+		READ_ONCE(parent_state->pip_trust), mitigation_bits);
+	trace_kacs_process_state((u64)(uintptr_t)child_state,
+				 READ_ONCE(parent_state->pip_type),
+				 READ_ONCE(parent_state->pip_trust),
+				 KACS_PST_INHERIT_FORK,
+				 child_state ? 0 : -ENOMEM);
+	return child_state;
 }

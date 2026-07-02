@@ -5,6 +5,7 @@
 #include <linux/list.h>
 #include <linux/math64.h>
 #include <linux/refcount.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/timekeeping.h>
@@ -15,6 +16,8 @@
 #include "lsm_internal.h"
 #include "process_state.h"
 #include "token_runtime.h"
+
+#include <trace/events/kmes.h>
 
 struct pkm_kmes_rate_bucket {
 	refcount_t refs;
@@ -117,7 +120,12 @@ int pkm_kmes_rate_bucket_reserve(struct pkm_kmes_rate_bucket *bucket,
 	pkm_kmes_rate_bucket_refill(
 		bucket, now_ns, pkm_kmes_runtime_max_emit_rate_per_process());
 	if (bucket->tokens < count) {
+		u32 tokens_avail = bucket->tokens;
+
 		spin_unlock_irqrestore(&bucket->lock, flags);
+		trace_kmes_rate(task_tgid_vnr(current), count, tokens_avail,
+				pkm_kmes_runtime_max_emit_rate_per_process(),
+				-EAGAIN, KMES_RATE_THROTTLE);
 		return -EAGAIN;
 	}
 	bucket->tokens -= count;
@@ -174,6 +182,8 @@ void pkm_kmes_rate_buckets_reconfigure(u32 rate)
 
 	if (rate == 0)
 		return;
+
+	trace_kmes_rate(0, 0, 0, rate, 0, KMES_RATE_RECONFIGURE);
 
 	spin_lock_irqsave(&pkm_kmes_rate_bucket_list_lock, list_flags);
 	list_for_each_entry(bucket, &pkm_kmes_rate_bucket_list, list) {

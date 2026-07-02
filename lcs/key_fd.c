@@ -32,6 +32,8 @@
 #include <pkm/lcs.h>
 #include <pkm/token.h>
 
+#include <trace/events/lcs.h>
+
 #include "../kacs/token_runtime.h"
 #include "key_fd.h"
 #include "rsi.h"
@@ -470,6 +472,41 @@ static bool pkm_lcs_guid_is_nil(const u8 guid[PKM_LCS_GUID_BYTES])
 	return !guid || pkm_lcs_guid_equal(guid, nil);
 }
 
+/*
+ * Fold a 16-byte key GUID to a non-reversible u64 for tracepoints. Returns 0
+ * for a NULL or all-zero GUID. Never exposes the raw GUID bytes.
+ */
+static u64 pkm_lcs_key_guid_hash64(const u8 guid[PKM_LCS_GUID_BYTES])
+{
+	if (pkm_lcs_guid_is_nil(guid))
+		return 0;
+	return get_unaligned_le64(guid) ^ get_unaligned_le64(guid + 8);
+}
+
+/* Map a REG_IOC_* ioctl command to its stable LCS_KCMD_* trace code. */
+static u8 pkm_lcs_key_ioctl_cmd_code(unsigned int cmd)
+{
+	switch (cmd) {
+	case REG_IOC_SET_VALUE:		return LCS_KCMD_SET_VALUE;
+	case REG_IOC_DELETE_VALUE:	return LCS_KCMD_DELETE_VALUE;
+	case REG_IOC_BLANKET_TOMBSTONE:	return LCS_KCMD_BLANKET_TOMBSTONE;
+	case REG_IOC_DELETE_KEY:	return LCS_KCMD_DELETE_KEY;
+	case REG_IOC_HIDE_KEY:		return LCS_KCMD_HIDE_KEY;
+	case REG_IOC_QUERY_VALUE:	return LCS_KCMD_QUERY_VALUE;
+	case REG_IOC_QUERY_VALUES_BATCH: return LCS_KCMD_QUERY_VALUES_BATCH;
+	case REG_IOC_ENUM_VALUES:	return LCS_KCMD_ENUM_VALUES;
+	case REG_IOC_ENUM_SUBKEYS:	return LCS_KCMD_ENUM_SUBKEYS;
+	case REG_IOC_QUERY_KEY_INFO:	return LCS_KCMD_QUERY_KEY_INFO;
+	case REG_IOC_GET_SECURITY:	return LCS_KCMD_GET_SECURITY;
+	case REG_IOC_SET_SECURITY:	return LCS_KCMD_SET_SECURITY;
+	case REG_IOC_FLUSH:		return LCS_KCMD_FLUSH;
+	case REG_IOC_BACKUP:		return LCS_KCMD_BACKUP;
+	case REG_IOC_RESTORE:		return LCS_KCMD_RESTORE;
+	case REG_IOC_NOTIFY:		return LCS_KCMD_NOTIFY;
+	default:			return LCS_KCMD_NONE;
+	}
+}
+
 static u32 pkm_lcs_key_ref_hash(u32 source_id,
 				const u8 guid[PKM_LCS_GUID_BYTES])
 {
@@ -564,10 +601,15 @@ static void pkm_lcs_key_ref_put_for_key_fd(struct pkm_lcs_key_fd *key_fd,
 
 	if (allow_drop_dispatch && key_fd->published &&
 	    entry->refcount == 1 && (entry->orphaned || key_fd->orphaned)) {
+		long drop_ret;
+
 		source_id = entry->source_id;
 		memcpy(guid, entry->guid, sizeof(guid));
-		(void)pkm_lcs_source_dispatch_drop_key_request(
+		drop_ret = pkm_lcs_source_dispatch_drop_key_request(
 			source_id, 0, guid, NULL);
+		trace_lcs_watch_orphan(source_id,
+				       pkm_lcs_key_guid_hash64(guid), 0,
+				       entry->refcount, drop_ret);
 	}
 
 	entry->refcount--;
@@ -1006,6 +1048,10 @@ static int pkm_lcs_key_fd_release(struct inode *inode, struct file *file)
 
 	file->private_data = NULL;
 	if (key_fd) {
+		trace_lcs_key_release(key_fd->source_id,
+				      pkm_lcs_key_guid_hash64(key_fd->key_guid),
+				      LCS_KCMD_NONE, -1, 0,
+				      key_fd->granted_access, 0);
 		mutex_lock(&pkm_lcs_watch_registry_lock);
 		mutex_lock(&key_fd->watch_lock);
 		pkm_lcs_key_fd_watch_registry_remove_locked(key_fd);
@@ -1273,6 +1319,9 @@ long pkm_lcs_key_fd_publish(const struct pkm_lcs_key_fd_publish_input *input)
 	}
 
 	key_fd->published = true;
+	trace_lcs_key_publish(key_fd->source_id,
+			      pkm_lcs_key_guid_hash64(key_fd->key_guid),
+			      LCS_KCMD_NONE, -1, 0, key_fd->granted_access, fd);
 	return fd;
 }
 
@@ -1280,6 +1329,7 @@ static long pkm_lcs_key_fd_notify_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct reg_notify_args *args)
 {
 	struct pkm_lcs_watch_notify_plan_copy plan;
+	u32 action = 0;
 	long ret;
 
 	if (!key_fd || !args)
@@ -1296,6 +1346,7 @@ static long pkm_lcs_key_fd_notify_from_args(
 		args->filter, args->subtree, args->_pad, &plan);
 	if (ret)
 		goto out_unlock;
+	action = plan.action;
 
 	switch (plan.action) {
 	case PKM_LCS_WATCH_NOTIFY_ACTION_ARM:
@@ -1333,6 +1384,10 @@ out_unlock:
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 
 	wake_up_interruptible(&key_fd->watch_wait);
+	trace_lcs_key_notify(key_fd->source_id,
+			     pkm_lcs_key_guid_hash64(key_fd->key_guid),
+			     LCS_KCMD_NOTIFY, -1, action,
+			     key_fd->granted_access, ret);
 	return ret;
 }
 
@@ -1384,6 +1439,7 @@ static ssize_t pkm_lcs_key_fd_read_file_with_ops(
 	struct pkm_lcs_key_fd *key_fd;
 	size_t bytes;
 	u32 event_count;
+	u32 delivered;
 	long ret;
 
 	if (!file)
@@ -1432,6 +1488,7 @@ static ssize_t pkm_lcs_key_fd_read_file_with_ops(
 		event_count++;
 	}
 
+	delivered = event_count;
 	while (event_count--) {
 		event = list_first_entry(&key_fd->watch_events,
 					 struct pkm_lcs_key_fd_watch_event,
@@ -1440,6 +1497,10 @@ static ssize_t pkm_lcs_key_fd_read_file_with_ops(
 	}
 	mutex_unlock(&key_fd->watch_lock);
 
+	trace_lcs_key_read(key_fd->source_id,
+			   pkm_lcs_key_guid_hash64(key_fd->key_guid),
+			   LCS_KCMD_NONE, -1, delivered,
+			   key_fd->granted_access, (long)bytes);
 	return bytes;
 }
 
@@ -4619,6 +4680,10 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 		last_write_time, &input.limits, input.limits.request_timeout_ms,
 		NULL, NULL);
 	if (ret) {
+		trace_lcs_key_mutation(key_fd->source_id,
+				       pkm_lcs_key_guid_hash64(key_fd->key_guid),
+				       LCS_KCMD_SET_VALUE, args->txn_fd, txn_id,
+				       key_fd->granted_access, ret);
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
 		goto out_cancel_mutation;
@@ -4773,6 +4838,10 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 		last_write_time, &input.limits, input.limits.request_timeout_ms,
 		NULL, NULL);
 	if (ret) {
+		trace_lcs_key_mutation(key_fd->source_id,
+				       pkm_lcs_key_guid_hash64(key_fd->key_guid),
+				       LCS_KCMD_DELETE_VALUE, args->txn_fd,
+				       txn_id, key_fd->granted_access, ret);
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
 		goto out_after;
@@ -4930,6 +4999,10 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 		last_write_time, &input.limits, input.limits.request_timeout_ms,
 		NULL, NULL);
 	if (ret) {
+		trace_lcs_key_mutation(key_fd->source_id,
+				       pkm_lcs_key_guid_hash64(key_fd->key_guid),
+				       LCS_KCMD_BLANKET_TOMBSTONE, args->txn_fd,
+				       txn_id, key_fd->granted_access, ret);
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
 		goto out_after;
@@ -5109,6 +5182,10 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 		key_fd->source_id, txn_id, parent_guid, NULL, 0, last_write_time,
 		&input.limits, input.limits.request_timeout_ms, NULL, NULL);
 	if (ret) {
+		trace_lcs_key_mutation(key_fd->source_id,
+				       pkm_lcs_key_guid_hash64(key_fd->key_guid),
+				       LCS_KCMD_DELETE_KEY, args->txn_fd, txn_id,
+				       key_fd->granted_access, ret);
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
 		goto out_cancel_mutation;
@@ -10375,8 +10452,8 @@ static long pkm_lcs_key_fd_flush(struct pkm_lcs_key_fd *key_fd)
 		limits.request_timeout_ms, &response, NULL);
 }
 
-static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
-				 unsigned long arg)
+static long pkm_lcs_key_fd_ioctl_dispatch(struct file *file, unsigned int cmd,
+					  unsigned long arg)
 {
 	struct pkm_lcs_key_fd *key_fd;
 	struct reg_notify_args notify_args;
@@ -10573,6 +10650,20 @@ static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
 	}
 }
 
+static long pkm_lcs_key_fd_ioctl(struct file *file, unsigned int cmd,
+				 unsigned long arg)
+{
+	struct pkm_lcs_key_fd *key_fd = file ? file->private_data : NULL;
+	long ret = pkm_lcs_key_fd_ioctl_dispatch(file, cmd, arg);
+
+	if (key_fd)
+		trace_lcs_key_ioctl(key_fd->source_id,
+				    pkm_lcs_key_guid_hash64(key_fd->key_guid),
+				    pkm_lcs_key_ioctl_cmd_code(cmd), -1, 0,
+				    key_fd->granted_access, ret);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_get(int fd, struct fd *held,
 			       struct pkm_lcs_key_fd **key_fd_out)
 {
@@ -10703,6 +10794,9 @@ static long pkm_lcs_key_fd_dispatch_to_watcher_locked(
 		path_components, path_component_count, queue_limit, &queued);
 	if (queued)
 		wake_up_interruptible(&watcher->watch_wait);
+	trace_lcs_watch_dispatch(watcher->source_id,
+				 pkm_lcs_key_guid_hash64(watcher->key_guid),
+				 event_type, watcher->watch_pending_events, ret);
 	return ret;
 }
 
@@ -11262,6 +11356,10 @@ static long pkm_lcs_key_fd_transaction_burst_dispatch_overflows_locked(
 		ret = pkm_lcs_key_fd_dispatch_to_watcher_locked(
 			entry->watcher, REG_WATCH_OVERFLOW, NULL, 0, false,
 			NULL, 0, queue_limit);
+		trace_lcs_watch_overflow(
+			entry->watcher->source_id,
+			pkm_lcs_key_guid_hash64(entry->watcher->key_guid),
+			REG_WATCH_OVERFLOW, entry->event_count, ret);
 		if (ret)
 			return ret;
 	}
@@ -11937,11 +12035,13 @@ long pkm_lcs_internal_self_watch_arm(
 	pkm_lcs_internal_self_watch.source_id = source_id;
 	pkm_lcs_internal_self_watch_fill_result_locked(result_out);
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
+	trace_lcs_watch_self_watch(source_id, 0, 0, watch_count, 0);
 	return 0;
 
 out_rollback:
 	pkm_lcs_internal_self_watch_disarm_locked();
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
+	trace_lcs_watch_self_watch(source_id, 0, 0, watch_count, ret);
 	return ret;
 }
 

@@ -37,5 +37,6 @@
 #include <pkm/process.h>
 #include <pkm/kmes.h>
 #include <pkm/lcs.h>
+#include <pkm/trace.h>
 
 #endif /* _UAPI_PKM_H */

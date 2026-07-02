@@ -20,6 +20,8 @@
 #include "token_fd.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 #define PKM_KACS_ACCESS_CHECK_TOKEN_FD_OFFSET 4U
 
 extern long kacs_rust_access_check_ingress_scalar(
@@ -257,15 +259,23 @@ long pkm_kacs_access_check_ingress_scalar_with_token_fd(
 	if (summary)
 		memset(summary, 0, sizeof(*summary));
 
-	if (!pkm_kacs_current_token_eval_context_allowed())
+	if (!pkm_kacs_current_token_eval_context_allowed()) {
+		trace_kacs_access_check(0, 0, 0, KACS_SDS_KIND_ACCESS_CHECK, 0,
+					KACS_ACK_EVAL_CONTEXT, -EACCES);
 		return -EACCES;
+	}
 
 	ret = pkm_kacs_begin_token_resolution(ops, args_ptr, &resolution);
-	if (ret)
+	if (ret) {
+		trace_kacs_access_check(0, 0, 0, KACS_SDS_KIND_ACCESS_CHECK, 0,
+					KACS_ACK_TOKEN_RESOLVE, ret);
 		return ret;
+	}
 
 	ret = pkm_kacs_caap_cache_lock(&caap_cache);
 	if (ret) {
+		trace_kacs_access_check(0, 0, 0, KACS_SDS_KIND_ACCESS_CHECK, 0,
+					KACS_ACK_CAAP_LOCK_FAIL, ret);
 		pkm_kacs_release_token_resolution(&resolution);
 		return ret;
 	}
@@ -275,6 +285,8 @@ long pkm_kacs_access_check_ingress_scalar_with_token_fd(
 						   event_sinks, summary);
 	pkm_kacs_caap_cache_unlock();
 	pkm_kacs_release_token_resolution(&resolution);
+	trace_kacs_access_check(0, 0, 0, KACS_SDS_KIND_ACCESS_CHECK, 0,
+				KACS_ACK_OK, ret);
 	return ret;
 }
 
@@ -293,15 +305,26 @@ long pkm_kacs_access_check_ingress_list_with_token_fd(
 	if (summary)
 		memset(summary, 0, sizeof(*summary));
 
-	if (!pkm_kacs_current_token_eval_context_allowed())
+	if (!pkm_kacs_current_token_eval_context_allowed()) {
+		trace_kacs_access_check_list(0, 0, 0, KACS_SDS_KIND_ACCESS_CHECK,
+					     results_count, KACS_ACK_EVAL_CONTEXT,
+					     -EACCES);
 		return -EACCES;
+	}
 
 	ret = pkm_kacs_begin_token_resolution(ops, args_ptr, &resolution);
-	if (ret)
+	if (ret) {
+		trace_kacs_access_check_list(0, 0, 0, KACS_SDS_KIND_ACCESS_CHECK,
+					     results_count, KACS_ACK_TOKEN_RESOLVE,
+					     ret);
 		return ret;
+	}
 
 	ret = pkm_kacs_caap_cache_lock(&caap_cache);
 	if (ret) {
+		trace_kacs_access_check_list(0, 0, 0, KACS_SDS_KIND_ACCESS_CHECK,
+					     results_count,
+					     KACS_ACK_CAAP_LOCK_FAIL, ret);
 		pkm_kacs_release_token_resolution(&resolution);
 		return ret;
 	}
@@ -312,6 +335,8 @@ long pkm_kacs_access_check_ingress_list_with_token_fd(
 						 event_sinks, summary);
 	pkm_kacs_caap_cache_unlock();
 	pkm_kacs_release_token_resolution(&resolution);
+	trace_kacs_access_check_list(0, 0, 0, KACS_SDS_KIND_ACCESS_CHECK,
+				     results_count, KACS_ACK_OK, ret);
 	return ret;
 }
 

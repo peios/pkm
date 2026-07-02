@@ -16,6 +16,8 @@
 #include "token_runtime.h"
 #include "token_session.h"
 
+#include <trace/events/kacs.h>
+
 long pkm_kacs_create_session_core(const void *subject_token,
 				  const u8 *spec, size_t spec_len,
 				  u64 *session_id_out)
@@ -28,8 +30,10 @@ long pkm_kacs_create_session_core(const void *subject_token,
 
 	ret = pkm_kacs_require_enabled_privilege(subject_token,
 						 KACS_SE_TCB_PRIVILEGE);
-	if (ret)
+	if (ret) {
+		trace_kacs_session(0, KACS_SES_CREATE_PRIV_DENIED, ret);
 		return ret;
+	}
 
 	ret = kacs_rust_create_session(subject_token, spec, spec_len,
 				       ktime_get_real_seconds(), &session_id);
@@ -39,6 +43,7 @@ long pkm_kacs_create_session_core(const void *subject_token,
 		return -ERANGE;
 
 	*session_id_out = session_id;
+	trace_kacs_session(session_id, KACS_SES_CREATE, 0);
 	return 0;
 }
 
@@ -49,10 +54,14 @@ long pkm_kacs_destroy_empty_session_core(const void *subject_token,
 
 	ret = pkm_kacs_require_enabled_privilege(subject_token,
 						 KACS_SE_TCB_PRIVILEGE);
-	if (ret)
+	if (ret) {
+		trace_kacs_session(session_id, KACS_SES_DESTROY_PRIV_DENIED, ret);
 		return ret;
+	}
 
-	return kacs_rust_destroy_empty_session(session_id);
+	ret = kacs_rust_destroy_empty_session(session_id);
+	trace_kacs_session(session_id, KACS_SES_DESTROY, ret);
+	return ret;
 }
 
 long pkm_kacs_create_token_core(const void *subject_token,
@@ -66,8 +75,10 @@ long pkm_kacs_create_token_core(const void *subject_token,
 		return -EINVAL;
 
 	if (!kacs_rust_token_has_enabled_privilege(
-		    subject_token, KACS_SE_CREATE_TOKEN_PRIVILEGE))
+		    subject_token, KACS_SE_CREATE_TOKEN_PRIVILEGE)) {
+		trace_kacs_session(0, KACS_SES_CREATE_TOKEN_PRIV_DENIED, -EPERM);
 		return -EPERM;
+	}
 
 	ret = kacs_rust_create_token(subject_token, spec, spec_len,
 				     ktime_get_real_seconds(), &new_token);
@@ -84,8 +95,10 @@ long pkm_kacs_create_token_core(const void *subject_token,
 	if (!kacs_rust_token_mark_privileges_used(
 		    subject_token, KACS_SE_CREATE_TOKEN_PRIVILEGE)) {
 		close_fd((unsigned int)fd);
+		trace_kacs_session(0, KACS_SES_CREATE_TOKEN_PRIV_DENIED, -EPERM);
 		return -EPERM;
 	}
+	trace_kacs_session(0, KACS_SES_CREATE_TOKEN, fd);
 	return fd;
 }
 

@@ -21,6 +21,8 @@
 #include "token_fd.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 static long pkm_kacs_open_process_token_core(
 	const void *subject_token,
 	const struct pkm_kacs_process_state *target_state,
@@ -30,20 +32,38 @@ static long pkm_kacs_open_process_token_core(
 	long ret;
 
 	ret = pkm_kacs_validate_token_open_access_mask(access_mask);
-	if (ret)
+	if (ret) {
+		trace_kacs_process_token_open((u64)(uintptr_t)subject_token,
+					      (u64)(uintptr_t)target_token,
+					      access_mask, KACS_PTO_BAD_ACCESS,
+					      ret);
 		return ret;
-	if (!target_token)
+	}
+	if (!target_token) {
+		trace_kacs_process_token_open((u64)(uintptr_t)subject_token, 0,
+					      access_mask, KACS_PTO_NO_TARGET,
+					      -EACCES);
 		return -EACCES;
+	}
 
 	ret = pkm_kacs_authorize_process_access_core(
 		subject_token, target_state, caller_pip_type, caller_pip_trust,
 		KACS_PROCESS_QUERY_INFORMATION);
-	if (ret)
+	if (ret) {
+		trace_kacs_process_token_open((u64)(uintptr_t)subject_token,
+					      (u64)(uintptr_t)target_token,
+					      access_mask, KACS_PTO_ACCESS_DENIED,
+					      ret);
 		return ret;
+	}
 
-	return pkm_kacs_open_token_fd_for_subject_checked_with_pip(
+	ret = pkm_kacs_open_token_fd_for_subject_checked_with_pip(
 		subject_token, target_token, access_mask, caller_pip_type,
 		caller_pip_trust);
+	trace_kacs_process_token_open((u64)(uintptr_t)subject_token,
+				      (u64)(uintptr_t)target_token, access_mask,
+				      KACS_PTO_OPEN_OK, ret);
+	return ret;
 }
 
 static long pkm_kacs_authorize_process_token_inspection_core(
@@ -52,15 +72,27 @@ static long pkm_kacs_authorize_process_token_inspection_core(
 	const struct pkm_kacs_process_state *target_state,
 	bool self_target)
 {
-	if (!subject_token || !caller_state || !target_state)
-		return -EACCES;
-	if (self_target)
-		return 0;
+	long ret;
 
-	return pkm_kacs_authorize_process_access_core(
+	if (!subject_token || !caller_state || !target_state) {
+		trace_kacs_process_token_open((u64)(uintptr_t)subject_token, 0,
+					      KACS_TOKEN_QUERY, KACS_PTO_BAD_ARGS,
+					      -EACCES);
+		return -EACCES;
+	}
+	if (self_target) {
+		trace_kacs_process_token_open((u64)(uintptr_t)subject_token, 0,
+					      KACS_TOKEN_QUERY, KACS_PTO_SELF, 0);
+		return 0;
+	}
+
+	ret = pkm_kacs_authorize_process_access_core(
 		subject_token, target_state, READ_ONCE(caller_state->pip_type),
 		READ_ONCE(caller_state->pip_trust),
 		KACS_PROCESS_QUERY_INFORMATION);
+	trace_kacs_process_token_open((u64)(uintptr_t)subject_token, 0,
+				      KACS_TOKEN_QUERY, KACS_PTO_CROSS, ret);
+	return ret;
 }
 
 static long pkm_kacs_open_process_token_inspection_core(

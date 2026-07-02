@@ -12,6 +12,8 @@
 #include "lsm_internal.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 static void pkm_kacs_restore_capability_sets(struct cred *new,
 					     const struct cred *old)
 {
@@ -102,8 +104,13 @@ long pkm_kacs_task_fix_setuid_core(const void *subject_token,
 	}
 
 	ret = pkm_kacs_task_fix_setid_common(subject_token);
-	if (ret)
+	if (ret) {
+		trace_kacs_setid((u64)(uintptr_t)subject_token, (u32)flags,
+				 ret == -EACCES ? KACS_SETID_SETUID_NO_TOKEN :
+						  KACS_SETID_SETUID_PRIV_GATE,
+				 ret);
 		return ret;
+	}
 
 	pkm_kacs_restore_uid_state(new, old);
 	return 0;
@@ -130,8 +137,13 @@ long pkm_kacs_task_fix_setgid_core(const void *subject_token,
 	}
 
 	ret = pkm_kacs_task_fix_setid_common(subject_token);
-	if (ret)
+	if (ret) {
+		trace_kacs_setid((u64)(uintptr_t)subject_token, (u32)flags,
+				 ret == -EACCES ? KACS_SETID_SETGID_NO_TOKEN :
+						  KACS_SETID_SETGID_PRIV_GATE,
+				 ret);
 		return ret;
+	}
 
 	pkm_kacs_restore_gid_state(new, old);
 	return 0;
@@ -147,8 +159,13 @@ long pkm_kacs_task_fix_setgroups_core(const void *subject_token,
 		return -EINVAL;
 
 	ret = pkm_kacs_task_fix_setid_common(subject_token);
-	if (ret)
+	if (ret) {
+		trace_kacs_setid((u64)(uintptr_t)subject_token, 0,
+				 ret == -EACCES ? KACS_SETID_SETGROUPS_NO_TOKEN :
+						  KACS_SETID_SETGROUPS_PRIV_GATE,
+				 ret);
 		return ret;
+	}
 
 	pkm_kacs_restore_groups_state(new, old);
 	return 0;

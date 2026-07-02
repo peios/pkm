@@ -14,6 +14,7 @@
 #include "access_check.h"
 #include "file_access.h"
 #include "file_metadata.h"
+#include <trace/events/kacs.h>
 #include "lsm_internal.h"
 #include "mount_policy.h"
 #include "object_lifecycle.h"
@@ -98,6 +99,9 @@ int pkm_kacs_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		if (ret) {
 			pkm_kacs_consume_file_metadata_decision(
 				d_inode(dentry), PKM_KACS_METADATA_OP_SETATTR);
+			trace_kacs_metadata(d_inode(dentry),
+					    PKM_KACS_METADATA_OP_SETATTR, 0,
+					    KACS_META_SIGNED_EXEC, ret);
 			return ret;
 		}
 	}
@@ -169,10 +173,17 @@ int pkm_kacs_inode_getxattr(struct dentry *dentry, const char *name)
 		 * still get -EACCES.
 		 */
 		if (current && current->security &&
-		    pkm_kacs_task(current)->internal_sd_read_depth > 0)
+		    pkm_kacs_task(current)->internal_sd_read_depth > 0) {
+			trace_kacs_metadata(d_inode(dentry),
+					    PKM_KACS_METADATA_OP_GETXATTR, 0,
+					    KACS_META_INTERNAL_SD, 0);
 			return 0;
+		}
 		pkm_kacs_consume_file_metadata_decision(
 			d_inode(dentry), PKM_KACS_METADATA_OP_GETXATTR);
+		trace_kacs_metadata(d_inode(dentry),
+				    PKM_KACS_METADATA_OP_GETXATTR, 0,
+				    KACS_META_CANONICAL_SD, -EACCES);
 		return -EACCES;
 	}
 
@@ -180,6 +191,9 @@ int pkm_kacs_inode_getxattr(struct dentry *dentry, const char *name)
 		pkm_kacs_consume_file_metadata_decision(
 			dentry ? d_inode(dentry) : NULL,
 			PKM_KACS_METADATA_OP_GETXATTR);
+		trace_kacs_metadata(dentry ? d_inode(dentry) : NULL,
+				    PKM_KACS_METADATA_OP_GETXATTR, 0,
+				    KACS_META_BAD_ARGS, -EACCES);
 		return -EACCES;
 	}
 
@@ -208,28 +222,44 @@ int pkm_kacs_inode_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		 * -EACCES.
 		 */
 		if (current && current->security &&
-		    pkm_kacs_task(current)->internal_sd_write_depth > 0)
+		    pkm_kacs_task(current)->internal_sd_write_depth > 0) {
+			trace_kacs_metadata(d_inode(dentry),
+					    PKM_KACS_METADATA_OP_SETXATTR, 0,
+					    KACS_META_INTERNAL_SD, 0);
 			return 0;
+		}
 		pkm_kacs_consume_file_metadata_decision(
 			d_inode(dentry), PKM_KACS_METADATA_OP_SETXATTR);
+		trace_kacs_metadata(d_inode(dentry),
+				    PKM_KACS_METADATA_OP_SETXATTR, 0,
+				    KACS_META_CANONICAL_SD, -EACCES);
 		return -EACCES;
 	}
 	if (!name) {
 		pkm_kacs_consume_file_metadata_decision(
 			dentry ? d_inode(dentry) : NULL,
 			PKM_KACS_METADATA_OP_SETXATTR);
+		trace_kacs_metadata(dentry ? d_inode(dentry) : NULL,
+				    PKM_KACS_METADATA_OP_SETXATTR, 0,
+				    KACS_META_BAD_ARGS, -EACCES);
 		return -EACCES;
 	}
 	if (pkm_kacs_is_file_capability_xattr(name)) {
 		pkm_kacs_consume_file_metadata_decision(
 			dentry ? d_inode(dentry) : NULL,
 			PKM_KACS_METADATA_OP_SETXATTR);
+		trace_kacs_metadata(dentry ? d_inode(dentry) : NULL,
+				    PKM_KACS_METADATA_OP_SETXATTR, 0,
+				    KACS_META_CAPS_XATTR, -EPERM);
 		return -EPERM;
 	}
 	if (is_posix_acl_xattr(name)) {
 		pkm_kacs_consume_file_metadata_decision(
 			dentry ? d_inode(dentry) : NULL,
 			PKM_KACS_METADATA_OP_SETXATTR);
+		trace_kacs_metadata(dentry ? d_inode(dentry) : NULL,
+				    PKM_KACS_METADATA_OP_SETXATTR, 0,
+				    KACS_META_ACL, -EACCES);
 		return -EACCES;
 	}
 	ret = pkm_kacs_check_signed_exec_xattr_mutation(
@@ -238,6 +268,9 @@ int pkm_kacs_inode_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		pkm_kacs_consume_file_metadata_decision(
 			dentry ? d_inode(dentry) : NULL,
 			PKM_KACS_METADATA_OP_SETXATTR);
+		trace_kacs_metadata(dentry ? d_inode(dentry) : NULL,
+				    PKM_KACS_METADATA_OP_SETXATTR, 0,
+				    KACS_META_SIGNED_EXEC, ret);
 		return ret;
 	}
 
@@ -258,18 +291,27 @@ int pkm_kacs_inode_removexattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	if (dentry && pkm_kacs_is_canonical_sd_xattr(d_inode(dentry), name)) {
 		pkm_kacs_consume_file_metadata_decision(
 			d_inode(dentry), PKM_KACS_METADATA_OP_SETXATTR);
+		trace_kacs_metadata(d_inode(dentry),
+				    PKM_KACS_METADATA_OP_SETXATTR, 0,
+				    KACS_META_CANONICAL_SD, -EACCES);
 		return -EACCES;
 	}
 	if (!name) {
 		pkm_kacs_consume_file_metadata_decision(
 			dentry ? d_inode(dentry) : NULL,
 			PKM_KACS_METADATA_OP_SETXATTR);
+		trace_kacs_metadata(dentry ? d_inode(dentry) : NULL,
+				    PKM_KACS_METADATA_OP_SETXATTR, 0,
+				    KACS_META_BAD_ARGS, -EACCES);
 		return -EACCES;
 	}
 	if (is_posix_acl_xattr(name)) {
 		pkm_kacs_consume_file_metadata_decision(
 			dentry ? d_inode(dentry) : NULL,
 			PKM_KACS_METADATA_OP_SETXATTR);
+		trace_kacs_metadata(dentry ? d_inode(dentry) : NULL,
+				    PKM_KACS_METADATA_OP_SETXATTR, 0,
+				    KACS_META_ACL, -EACCES);
 		return -EACCES;
 	}
 	ret = pkm_kacs_check_signed_exec_xattr_mutation(
@@ -278,6 +320,9 @@ int pkm_kacs_inode_removexattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		pkm_kacs_consume_file_metadata_decision(
 			dentry ? d_inode(dentry) : NULL,
 			PKM_KACS_METADATA_OP_SETXATTR);
+		trace_kacs_metadata(dentry ? d_inode(dentry) : NULL,
+				    PKM_KACS_METADATA_OP_SETXATTR, 0,
+				    KACS_META_SIGNED_EXEC, ret);
 		return ret;
 	}
 
@@ -374,26 +419,38 @@ int pkm_kacs_inode_getsecurity(struct mnt_idmap *idmap, struct inode *inode,
 
 	sec = pkm_kacs_inode(inode);
 	cache = pkm_kacs_inode_sd_cache_get_current(inode, sec);
-	if (!cache)
+	if (!cache) {
+		trace_kacs_metadata(inode, PKM_KACS_METADATA_OP_NONE, 0,
+				    KACS_META_GETSECURITY, -EOPNOTSUPP);
 		return -EOPNOTSUPP;
+	}
 	if (cache->state != PKM_KACS_INODE_SD_VALID || !cache->bytes ||
 	    cache->len == 0 || cache->len > INT_MAX) {
 		pkm_kacs_inode_sd_cache_free(cache);
+		trace_kacs_metadata(inode, PKM_KACS_METADATA_OP_NONE, 0,
+				    KACS_META_GETSECURITY, -EOPNOTSUPP);
 		return -EOPNOTSUPP;
 	}
 
 	len = cache->len;
 	if (!alloc) {
 		pkm_kacs_inode_sd_cache_free(cache);
+		trace_kacs_metadata(inode, PKM_KACS_METADATA_OP_NONE, 1,
+				    KACS_META_GETSECURITY, (int)len);
 		return (int)len;
 	}
 
 	copy = kmemdup(cache->bytes, len, GFP_KERNEL);
 	pkm_kacs_inode_sd_cache_free(cache);
-	if (!copy)
+	if (!copy) {
+		trace_kacs_metadata(inode, PKM_KACS_METADATA_OP_NONE, 0,
+				    KACS_META_GETSECURITY, -ENOMEM);
 		return -ENOMEM;
+	}
 
 	*buffer = copy;
+	trace_kacs_metadata(inode, PKM_KACS_METADATA_OP_NONE, 1,
+			    KACS_META_GETSECURITY, (int)len);
 	return (int)len;
 }
 
@@ -423,8 +480,11 @@ static int pkm_kacs_begin_file_metadata_decision(struct file *file,
 		return -EACCES;
 
 	task_sec = pkm_kacs_task(current);
-	if (task_sec->metadata_decision.active)
+	if (task_sec->metadata_decision.active) {
+		trace_kacs_metadata(inode, op_class, 0, KACS_META_BEGIN_BUSY,
+				    -EACCES);
 		return -EACCES;
+	}
 
 	task_sec->metadata_decision.inode = inode;
 	task_sec->metadata_decision.op_class = op_class;
@@ -442,8 +502,11 @@ static int pkm_kacs_begin_inode_metadata_decision(const struct inode *inode,
 		return -EACCES;
 
 	task_sec = pkm_kacs_task(current);
-	if (task_sec->metadata_decision.active)
+	if (task_sec->metadata_decision.active) {
+		trace_kacs_metadata(inode, op_class, 0, KACS_META_BEGIN_BUSY,
+				    -EACCES);
 		return -EACCES;
+	}
 
 	task_sec->metadata_decision.inode = inode;
 	task_sec->metadata_decision.op_class = op_class;
@@ -489,6 +552,9 @@ bool pkm_kacs_consume_file_metadata_decision(const struct inode *inode,
 	matched = inode && task_sec->metadata_decision.inode == inode &&
 		  task_sec->metadata_decision.op_class == op_class;
 
+	trace_kacs_metadata(inode, op_class, matched ? 1 : 0,
+			    matched ? KACS_META_CONSUME_HIT : KACS_META_DECISION,
+			    0);
 	pkm_kacs_clear_file_metadata_decision(task_sec);
 	return matched;
 }

@@ -7,6 +7,8 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 
+#include <trace/events/lcs.h>
+
 #include "../kacs/access_check.h"
 #include "../kacs/caap_cache.h"
 #include "../kacs/token_runtime.h"
@@ -93,6 +95,8 @@ long pkm_lcs_key_open_access_check_for_token(
 					    pip_type, pip_trust, caap_cache,
 					    plan);
 	pkm_kacs_caap_cache_unlock();
+	trace_lcs_access_check(0, NULL, desired_access, plan->fd_granted_access,
+			       plan->allowed, ret);
 	return ret;
 }
 
@@ -283,5 +287,8 @@ long pkm_lcs_assign_new_key_guid(
 	}
 
 	memset(plan, 0, sizeof(*plan));
+	trace_lcs_assign_key_guid(0, attempt,
+				  PKM_LCS_KEY_GUID_ASSIGNMENT_MAX_ATTEMPTS,
+				  -EIO);
 	return -EIO;
 }

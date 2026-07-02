@@ -12,6 +12,8 @@
 #include "rsi.h"
 #include "source_device.h"
 
+#include <trace/events/lcs.h>
+
 long pkm_lcs_layer_metadata_root_discover_from_machine_hive(
 	u32 source_id, const u8 machine_root_guid[RSI_GUID_SIZE],
 	bool *present_out, u8 layers_root_guid_out[RSI_GUID_SIZE])
@@ -322,6 +324,10 @@ long pkm_lcs_layer_metadata_refresh_all_from_root(
 	ret = 0;
 
 out_children:
+	trace_lcs_layer_metadata_refresh(source_id, 0, 0,
+					 result.refreshed_child_count, 0,
+					 result.effective_changed_count ? 1 : 0,
+					 ret);
 	pkm_lcs_layer_metadata_child_list_destroy(&children);
 	return ret;
 }

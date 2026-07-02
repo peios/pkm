@@ -17,6 +17,8 @@
 #include "source_device.h"
 #include "source_internal.h"
 
+#include <trace/events/lcs.h>
+
 long pkm_lcs_source_dispatch_lookup_request_with_waiter(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
@@ -117,6 +119,10 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_LOOKUP, txn_id,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 long pkm_lcs_source_dispatch_read_key_request_with_waiter(
@@ -210,6 +216,10 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_READ_KEY, txn_id,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -300,6 +310,10 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_ENUM_CHILDREN, txn_id,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -404,6 +418,10 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_QUERY_VALUES, txn_id,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -537,6 +555,10 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_SET_VALUE, txn_id,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -647,6 +669,10 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_DELETE_VALUE, txn_id,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -753,6 +779,10 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_BLANKET_TOMBSTONE, txn_id,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -847,6 +877,10 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_DROP_KEY, txn_id,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -961,6 +995,10 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_CREATE_ENTRY, txn_id,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -1080,6 +1118,11 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id,
+			      hide ? LCS_OP_HIDE_ENTRY : LCS_OP_DELETE_ENTRY,
+			      txn_id, result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -1194,6 +1237,10 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_CREATE_KEY, txn_id,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -1315,6 +1362,10 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_WRITE_KEY, txn_id,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -1446,6 +1497,14 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id,
+			      op_code == RSI_BEGIN_TRANSACTION ?
+				      LCS_OP_TXN_BEGIN :
+			      op_code == RSI_COMMIT_TRANSACTION ?
+				      LCS_OP_TXN_COMMIT : LCS_OP_TXN_ABORT,
+			      transaction_id, result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -1547,6 +1606,10 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_FLUSH, 0,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }
 
@@ -1645,5 +1708,9 @@ out_unlock_queue:
 out_unlock_table:
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_queued_request_free(request);
+	trace_lcs_rsi_request(source_id, LCS_OP_DELETE_LAYER, 0,
+			      result ? result->request_id : 0,
+			      result ? result->queue_depth : 0,
+			      result ? result->in_flight_count : 0, ret);
 	return ret;
 }

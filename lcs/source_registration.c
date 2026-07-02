@@ -13,6 +13,8 @@
 #include <linux/string.h>
 #include <linux/workqueue.h>
 
+#include <trace/events/lcs.h>
+
 #include "key_fd.h"
 #include "source_device.h"
 #include "source_internal.h"
@@ -135,8 +137,11 @@ long pkm_lcs_source_registration_copy_from_user(
 		return -EINVAL;
 	if (!args.hive_count)
 		return -EINVAL;
-	if (max_hives && args.hive_count > max_hives)
+	if (max_hives && args.hive_count > max_hives) {
+		trace_lcs_registration_copy(0, 0, LCS_REG_COPY, args.hive_count,
+					    -ENOSPC);
 		return -ENOSPC;
+	}
 	if (check_mul_overflow((size_t)args.hive_count,
 			       sizeof(struct reg_src_hive_entry),
 			       &hives_bytes))
@@ -180,6 +185,7 @@ long pkm_lcs_source_registration_copy_from_user(
 			goto out_destroy;
 	}
 
+	trace_lcs_registration_copy(0, 0, LCS_REG_COPY, out->hive_count, 0);
 	kfree(wire_hives);
 	return 0;
 
@@ -221,6 +227,7 @@ static long pkm_lcs_source_registration_publish_locked(
 	bool sequence_initialized;
 	u64 next_sequence;
 	u32 slot_count;
+	u32 hive_count_snapshot;
 	u32 i;
 	long ret;
 
@@ -232,6 +239,7 @@ static long pkm_lcs_source_registration_publish_locked(
 		return -EINVAL;
 	if (result)
 		memset(result, 0, sizeof(*result));
+	hive_count_snapshot = registration->hive_count;
 
 	pkm_lcs_source_slot_view_buffer_init(&view_buffer);
 	ret = pkm_lcs_source_slot_view_buffer_prepare_locked(&view_buffer,
@@ -303,6 +311,11 @@ static long pkm_lcs_source_registration_publish_locked(
 						 plan.effective_next_sequence);
 	wake_up_interruptible(&source_fd->read_wait);
 	ret = 0;
+	trace_lcs_registration_publish(
+		slot->source_id, result ? result->resumed_source_id : 0,
+		plan.decision == PKM_LCS_SOURCE_REGISTRATION_DECISION_RESUME_DOWN ?
+			LCS_REG_RESUME_DOWN : LCS_REG_NEW,
+		hive_count_snapshot, ret);
 
 out_views:
 	pkm_lcs_source_slot_view_buffer_destroy(&view_buffer);
@@ -449,6 +462,9 @@ static long pkm_lcs_source_register_file_for_token_core(
 		if (ret) {
 			pkm_lcs_source_mark_down_by_id(publish.resumed_source_id);
 			ret = -EIO;
+			trace_lcs_source_register(publish.resumed_source_id,
+						  publish.resumed_source_id,
+						  LCS_REG_REPLAY_FAIL, 0, ret);
 			goto out_bootstrap;
 		}
 
@@ -457,6 +473,9 @@ static long pkm_lcs_source_register_file_for_token_core(
 		if (ret) {
 			pkm_lcs_source_mark_down_by_id(publish.resumed_source_id);
 			ret = -EIO;
+			trace_lcs_source_register(publish.resumed_source_id,
+						  publish.resumed_source_id,
+						  LCS_REG_OVERFLOW_FAIL, 0, ret);
 			goto out_bootstrap;
 		}
 	}

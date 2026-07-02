@@ -14,6 +14,8 @@
 #include "process_access.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 u64 pkm_kacs_allow_cap_mask_u64(void)
 {
 	return (1ULL << CAP_CHOWN) | (1ULL << CAP_DAC_OVERRIDE) |
@@ -224,10 +226,14 @@ long pkm_kacs_check_capability_for_token(const void *subject_token, int cap)
 
 	if (!cap_valid(cap))
 		return -EINVAL;
-	if (pkm_kacs_cap_is_allow(cap))
+	if (pkm_kacs_cap_is_allow(cap)) {
+		trace_kacs_capability(cap, 0, KACS_CAP_ALLOW_GRANT, 0);
 		return 0;
-	if (cap == CAP_SETPCAP || cap == CAP_SETFCAP || cap == CAP_MAC_OVERRIDE)
+	}
+	if (cap == CAP_SETPCAP || cap == CAP_SETFCAP || cap == CAP_MAC_OVERRIDE) {
+		trace_kacs_capability(cap, 0, KACS_CAP_HARD_DENY, -EPERM);
 		return -EPERM;
+	}
 
 	privilege = pkm_kacs_cap_required_privilege(cap);
 	if (privilege == 0)
@@ -240,17 +246,27 @@ long pkm_kacs_check_capability_for_token(const void *subject_token, int cap)
 		if (remote_shutdown_origin < 0)
 			return -EPERM;
 	}
-	if (!kacs_rust_token_has_enabled_privilege(subject_token, privilege))
+	if (!kacs_rust_token_has_enabled_privilege(subject_token, privilege)) {
+		trace_kacs_capability(cap, privilege, KACS_CAP_PRIV_NOT_ENABLED,
+				      -EPERM);
 		return -EPERM;
+	}
 	if (remote_shutdown_origin > 0) {
 		if (!kacs_rust_token_has_enabled_privilege(
 			    subject_token,
-			    KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE))
+			    KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE)) {
+			trace_kacs_capability(cap,
+					      KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE,
+					      KACS_CAP_PRIV_NOT_ENABLED, -EPERM);
 			return -EPERM;
+		}
 		privilege |= KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE;
 	}
-	if (!kacs_rust_token_mark_privileges_used(subject_token, privilege))
+	if (!kacs_rust_token_mark_privileges_used(subject_token, privilege)) {
+		trace_kacs_capability(cap, privilege, KACS_CAP_USE_MARK_FAIL,
+				      -EPERM);
 		return -EPERM;
+	}
 
 	return 0;
 }
@@ -330,12 +346,16 @@ long pkm_kacs_capable_in_cred_ns(const struct cred *cred,
 
 	if (!cap_valid(cap))
 		return -EINVAL;
-	if (!cred)
+	if (!cred) {
+		trace_kacs_capability(cap, 0, KACS_CAP_CAPABLE, -EPERM);
 		return -EPERM;
+	}
 
 	sec = cred->security ? pkm_kacs_cred(cred) : NULL;
-	if (!sec || !sec->token)
+	if (!sec || !sec->token) {
+		trace_kacs_capability(cap, 0, KACS_CAP_CAPABLE, -EPERM);
 		return -EPERM;
+	}
 	return pkm_kacs_check_capability_for_token(sec->token, cap);
 }
 
@@ -380,6 +400,7 @@ long pkm_kacs_capget_for_task(const struct task_struct *target,
 	ret = pkm_kacs_check_process_capget_core(subject_token, caller_state,
 						 target_state);
 	put_cred(target_cred);
+	trace_kacs_capability(0, 0, KACS_CAP_CAPGET, ret);
 	return ret;
 }
 
@@ -396,11 +417,14 @@ int pkm_kacs_capset(struct cred *new, const struct cred *old,
 		    const kernel_cap_t *permitted)
 {
 	const void *subject_token;
+	long ret;
 
 	(void)old;
 	subject_token = pkm_kacs_current_effective_token_ptr();
-	return pkm_kacs_capset_core(subject_token, new, effective,
-				    inheritable, permitted);
+	ret = pkm_kacs_capset_core(subject_token, new, effective,
+				   inheritable, permitted);
+	trace_kacs_capability(0, 0, KACS_CAP_CAPSET, ret);
+	return (int)ret;
 }
 
 long pkm_kacs_prctl_capability_guard(int option, unsigned long arg2,
@@ -411,6 +435,7 @@ long pkm_kacs_prctl_capability_guard(int option, unsigned long arg2,
 	const struct cred *cred = current_cred();
 	const struct pkm_kacs_cred_security *sec;
 	u64 ambient_mask = 0;
+	long ret;
 
 	if (!cred)
 		return -EPERM;
@@ -419,7 +444,9 @@ long pkm_kacs_prctl_capability_guard(int option, unsigned long arg2,
 
 	sec = pkm_kacs_cred(cred);
 	ambient_mask = pkm_kacs_kernel_cap_to_u64(&cred->cap_ambient);
-	return pkm_kacs_prctl_capability_guard_core(
+	ret = pkm_kacs_prctl_capability_guard_core(
 		sec ? sec->token : NULL, ambient_mask, option, arg2, arg3,
 		arg4, arg5);
+	trace_kacs_capability(0, 0, KACS_CAP_PRCTL_GUARD, ret);
+	return ret;
 }

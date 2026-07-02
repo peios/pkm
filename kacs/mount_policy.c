@@ -17,6 +17,8 @@
 #include "mount_policy.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 u32 pkm_kacs_mount_policy_for_magic(unsigned long magic)
 {
 	switch (magic) {
@@ -282,37 +284,63 @@ long pkm_kacs_set_mount_policy_core(
 {
 	struct pkm_kacs_superblock_security *sec;
 	const u8 *old_template;
+	u32 old_policy;
+	u32 old_generation;
+	u32 new_generation;
 
-	if (!subject_token || !sb || !args)
+	if (!subject_token || !sb || !args) {
+		trace_kacs_mount_policy_set(sb ? sb->s_magic : 0, 0,
+					    args ? args->policy : 0, 0, 0,
+					    KACS_MP_BAD_ARGS, -EINVAL);
 		return -EINVAL;
-	if (!sb->s_security)
+	}
+	if (!sb->s_security) {
+		trace_kacs_mount_policy_set(sb->s_magic, 0, args->policy, 0, 0,
+					    KACS_MP_NO_SECURITY, -EOPNOTSUPP);
 		return -EOPNOTSUPP;
+	}
 	if (pkm_kacs_mount_policy_for_magic(sb->s_magic) ==
-	    KACS_MOUNT_POLICY_UNMANAGED)
+	    KACS_MOUNT_POLICY_UNMANAGED) {
+		trace_kacs_mount_policy_set(sb->s_magic, 0, args->policy, 0, 0,
+					    KACS_MP_UNMANAGED, -EOPNOTSUPP);
 		return -EOPNOTSUPP;
+	}
 
-	if (pkm_kacs_validate_mount_policy_args(args))
+	if (pkm_kacs_validate_mount_policy_args(args)) {
+		trace_kacs_mount_policy_set(sb->s_magic, 0, args->policy, 0, 0,
+					    KACS_MP_VALIDATE, -EINVAL);
 		return -EINVAL;
+	}
 	if (template_bytes &&
 	    kacs_rust_validate_stored_sd_bytes(template_bytes,
-					       args->template_sd_len) != 0)
+					       args->template_sd_len) != 0) {
+		trace_kacs_mount_policy_set(sb->s_magic, 0, args->policy, 0, 0,
+					    KACS_MP_TEMPLATE_INVALID, -EINVAL);
 		return -EINVAL;
+	}
 
 	if (pkm_kacs_require_enabled_privilege(
-		    subject_token, KACS_SE_TCB_PRIVILEGE))
+		    subject_token, KACS_SE_TCB_PRIVILEGE)) {
+		trace_kacs_mount_policy_set(sb->s_magic, 0, args->policy, 0, 0,
+					    KACS_MP_TCB_DENIED, -EPERM);
 		return -EPERM;
+	}
 
 	sec = pkm_kacs_sb(sb);
 	mutex_lock(&sec->lock);
 	old_template = sec->template_sd_bytes;
+	old_policy = READ_ONCE(sec->mount_policy);
+	old_generation = READ_ONCE(sec->policy_generation);
+	new_generation = pkm_kacs_next_mount_policy_generation(old_generation);
 	sec->template_sd_bytes = template_bytes;
 	sec->template_sd_len = args->template_sd_len;
 	WRITE_ONCE(sec->mount_policy, args->policy);
-	WRITE_ONCE(sec->policy_generation,
-		   pkm_kacs_next_mount_policy_generation(
-			   READ_ONCE(sec->policy_generation)));
+	WRITE_ONCE(sec->policy_generation, new_generation);
 	mutex_unlock(&sec->lock);
 
+	trace_kacs_mount_policy_set(sb->s_magic, old_policy, args->policy,
+				    old_generation, new_generation,
+				    KACS_MP_SET_OK, 0);
 	pkm_kacs_free((void *)old_template);
 	return 0;
 }
@@ -324,14 +352,19 @@ long pkm_kacs_get_mount_policy_snapshot(
 	struct pkm_kacs_superblock_security *sec;
 	const u8 *template_copy = NULL;
 
-	if (!sb || !snapshot || !template_out)
+	if (!sb || !snapshot || !template_out) {
+		trace_kacs_mount_policy_get(sb ? sb->s_magic : 0, 0, 0, 0, 0,
+					    KACS_MP_BAD_ARGS, -EINVAL);
 		return -EINVAL;
+	}
 
 	memset(snapshot, 0, sizeof(*snapshot));
 	*template_out = NULL;
 
 	if (!sb->s_security) {
 		snapshot->policy = pkm_kacs_mount_policy_for_magic(sb->s_magic);
+		trace_kacs_mount_policy_get(sb->s_magic, 0, snapshot->policy, 0,
+					    0, KACS_MP_GET_NO_SECURITY, 0);
 		return 0;
 	}
 
@@ -345,11 +378,17 @@ long pkm_kacs_get_mount_policy_snapshot(
 					sec->template_sd_len, GFP_KERNEL);
 		if (!template_copy) {
 			mutex_unlock(&sec->lock);
+			trace_kacs_mount_policy_get(sb->s_magic, 0,
+						    snapshot->policy, 0,
+						    snapshot->generation,
+						    KACS_MP_GET_OK, -ENOMEM);
 			return -ENOMEM;
 		}
 	}
 	mutex_unlock(&sec->lock);
 
+	trace_kacs_mount_policy_get(sb->s_magic, 0, snapshot->policy, 0,
+				    snapshot->generation, KACS_MP_GET_OK, 0);
 	*template_out = template_copy;
 	return 0;
 }

@@ -14,6 +14,8 @@
 #include "process_state.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 #define PKM_KACS_LSM_PRLIMIT_READ 1U
 #define PKM_KACS_LSM_PRLIMIT_WRITE 2U
 
@@ -52,26 +54,50 @@ long pkm_kacs_authorize_process_sd_access(
 	u32 pip_denied = 0;
 	int ret;
 
-	if (!subject_token || !process_sd || !process_sd->bytes || !process_sd->len)
+	if (!subject_token || !process_sd || !process_sd->bytes || !process_sd->len) {
+		trace_kacs_process_access(pip_type, pip_trust, 0, 0,
+					  desired_access, KACS_PA_BAD_ARGS,
+					  -EACCES);
 		return -EACCES;
+	}
 
 	ret = kacs_rust_check_process_sd_with_intent_status(
 		subject_token, process_sd->bytes, process_sd->len,
 		desired_access, 0, pip_type, pip_trust, &granted,
 		&pip_denied);
-	if (!ret)
+	if (!ret) {
+		trace_kacs_process_access(pip_type, pip_trust, 0, 0,
+					  desired_access, KACS_PA_ALLOW, 0);
 		return 0;
-	if (ret != -EACCES)
+	}
+	if (ret != -EACCES) {
+		trace_kacs_process_access(pip_type, pip_trust, 0, 0,
+					  desired_access, KACS_PA_SD_ERROR, ret);
 		return ret;
-	if (pip_denied)
+	}
+	if (pip_denied) {
+		trace_kacs_process_access(pip_type, pip_trust, 0, 0,
+					  desired_access, KACS_PA_PIP_DENIED,
+					  -EACCES);
 		return -EACCES;
+	}
 	if (!kacs_rust_token_has_enabled_privilege(subject_token,
-						   KACS_SE_DEBUG_PRIVILEGE))
+						   KACS_SE_DEBUG_PRIVILEGE)) {
+		trace_kacs_process_access(pip_type, pip_trust, 0, 0,
+					  desired_access, KACS_PA_DEBUG_DENIED,
+					  -EACCES);
 		return -EACCES;
+	}
 	if (!kacs_rust_token_mark_privileges_used(
-		    subject_token, KACS_SE_DEBUG_PRIVILEGE))
+		    subject_token, KACS_SE_DEBUG_PRIVILEGE)) {
+		trace_kacs_process_access(pip_type, pip_trust, 0, 0,
+					  desired_access, KACS_PA_DEBUG_DENIED,
+					  -EACCES);
 		return -EACCES;
+	}
 
+	trace_kacs_process_access(pip_type, pip_trust, 0, 0, desired_access,
+				  KACS_PA_DEBUG_RESCUE, 0);
 	return 0;
 }
 
@@ -115,13 +141,23 @@ long pkm_kacs_authorize_process_access_core(
 	struct pkm_kacs_process_sd *process_sd;
 	long ret;
 
-	if (!subject_token || !target_state)
+	if (!subject_token || !target_state) {
+		trace_kacs_process_access(caller_pip_type, caller_pip_trust, 0,
+					  0, desired_process_access,
+					  KACS_PA_BAD_ARGS, -EACCES);
 		return -EACCES;
+	}
 
 	process_sd = pkm_kacs_process_state_get_sd(
 		(struct pkm_kacs_process_state *)target_state);
-	if (!process_sd)
+	if (!process_sd) {
+		trace_kacs_process_access(caller_pip_type, caller_pip_trust,
+					  READ_ONCE(target_state->pip_type),
+					  READ_ONCE(target_state->pip_trust),
+					  desired_process_access, KACS_PA_NO_SD,
+					  -EACCES);
 		return -EACCES;
+	}
 
 	ret = pkm_kacs_authorize_process_sd_access(subject_token, process_sd,
 						   desired_process_access,
@@ -132,9 +168,19 @@ long pkm_kacs_authorize_process_access_core(
 		return ret;
 	if (!pkm_kacs_pip_dominates(caller_pip_type, caller_pip_trust,
 				    READ_ONCE(target_state->pip_type),
-				    READ_ONCE(target_state->pip_trust)))
+				    READ_ONCE(target_state->pip_trust))) {
+		trace_kacs_process_access(caller_pip_type, caller_pip_trust,
+					  READ_ONCE(target_state->pip_type),
+					  READ_ONCE(target_state->pip_trust),
+					  desired_process_access,
+					  KACS_PA_PIP_DOMINANCE, -EACCES);
 		return -EACCES;
+	}
 
+	trace_kacs_process_access(caller_pip_type, caller_pip_trust,
+				  READ_ONCE(target_state->pip_type),
+				  READ_ONCE(target_state->pip_trust),
+				  desired_process_access, KACS_PA_ALLOW, 0);
 	return 0;
 }
 

@@ -7,6 +7,8 @@
 #include <linux/syscalls.h>
 #include <linux/string.h>
 
+#include <trace/events/lcs.h>
+
 #include "../kacs/token_runtime.h"
 #include "source_internal.h"
 
@@ -25,6 +27,8 @@ long pkm_lcs_publish_open_key_for_token(
 	ret = pkm_lcs_key_open_access_check_for_token(
 		token, sd, sd_len, desired_access, &access);
 	if (ret) {
+		trace_lcs_key_open(source_id, key_guid, desired_access, 0, 0,
+				   ret);
 		if (ret == -EACCES && access.key_open_sacl_audit_required) {
 			audit_ret = pkm_lcs_emit_key_open_audit_for_token(
 				token, key_guid, &access);
@@ -34,6 +38,8 @@ long pkm_lcs_publish_open_key_for_token(
 		return ret;
 	}
 
+	trace_lcs_key_open(source_id, key_guid, desired_access,
+			   access.fd_granted_access, access.allowed, 0);
 	ret = pkm_lcs_emit_key_open_audit_for_token(token, key_guid, &access);
 	if (ret)
 		return ret;
@@ -500,6 +506,7 @@ long pkm_lcs_reg_open_key_for_token(
 	pkm_lcs_private_credentials_release(&private_view);
 out_snapshot:
 	pkm_lcs_source_layer_snapshot_release(&snapshot);
+	trace_lcs_open_syscall(0, NULL, desired_access, 0, ret == 0, ret);
 	return ret;
 }
 

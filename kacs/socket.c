@@ -18,6 +18,8 @@
 #include "token_fd.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 #define PKM_KACS_SOCKET_FILE_WRITE_DATA 0x00000002U
 #define PKM_KACS_PEER_TOKEN_ACCESS_MASK \
 	(KACS_TOKEN_QUERY | KACS_TOKEN_IMPERSONATE)
@@ -71,17 +73,25 @@ static long pkm_kacs_authorize_socket_sd_access(
 	u32 pip_trust = 0;
 	int ret;
 
-	if (!subject_token || !socket_sd || !socket_sd->bytes || !socket_sd->len)
+	if (!subject_token || !socket_sd || !socket_sd->bytes || !socket_sd->len) {
+		trace_kacs_socket_sd_authorize(0, 0, 0, 0, desired_access,
+					       KACS_SOCK_BAD_ARGS, -EACCES);
 		return -EACCES;
+	}
 
 	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
-	if (ret)
+	if (ret) {
+		trace_kacs_socket_sd_authorize(0, 0, 0, 0, desired_access,
+					       KACS_SOCK_PIP_CONTEXT, ret);
 		return ret;
+	}
 
-	return kacs_rust_check_socket_sd(subject_token, socket_sd->bytes,
-					 socket_sd->len, desired_access,
-					 pip_type, pip_trust,
-					 &granted);
+	ret = kacs_rust_check_socket_sd(subject_token, socket_sd->bytes,
+					socket_sd->len, desired_access,
+					pip_type, pip_trust, &granted);
+	trace_kacs_socket_sd_authorize(0, 0, 0, 0, desired_access,
+				       KACS_SOCK_SD_DECISION, ret);
+	return ret;
 }
 
 static long pkm_kacs_create_captured_peer_token(
@@ -194,37 +204,74 @@ static long pkm_kacs_unix_may_send_core(
 static long pkm_kacs_set_socket_impersonation_level_core(
 	struct socket *sock, struct pkm_kacs_socket_security *sec, u32 level)
 {
-	if (!sock || !sock->sk || !sec)
+	if (!sock || !sock->sk || !sec) {
+		trace_kacs_socket_set_imp_level(0, 0, 0, level, 0,
+						KACS_SOCK_BAD_ARGS, -EACCES);
 		return -EACCES;
+	}
 	if (sock->sk->sk_family != AF_UNIX ||
-	    !pkm_kacs_socket_type_supported(sock->type))
+	    !pkm_kacs_socket_type_supported(sock->type)) {
+		trace_kacs_socket_set_imp_level(sock->sk->sk_family, sock->type,
+						sock->state, level, 0,
+						KACS_SOCK_NOT_UNIX, -EACCES);
 		return -EACCES;
-	if (!pkm_kacs_socket_level_valid(level))
+	}
+	if (!pkm_kacs_socket_level_valid(level)) {
+		trace_kacs_socket_set_imp_level(sock->sk->sk_family, sock->type,
+						sock->state, level, 0,
+						KACS_SOCK_BAD_LEVEL, -EINVAL);
 		return -EINVAL;
-	if (sock->state != SS_UNCONNECTED || sec->peer_token)
+	}
+	if (sock->state != SS_UNCONNECTED || sec->peer_token) {
+		trace_kacs_socket_set_imp_level(sock->sk->sk_family, sock->type,
+						sock->state, level, 0,
+						KACS_SOCK_WRONG_STATE, -EACCES);
 		return -EACCES;
+	}
 
 	sec->max_impersonation = level;
+	trace_kacs_socket_set_imp_level(sock->sk->sk_family, sock->type,
+					sock->state, level, 0,
+					KACS_SOCK_LEVEL_SET, 0);
 	return 0;
 }
 
 static long pkm_kacs_open_peer_token_core(
 	const struct pkm_kacs_socket_security *sec)
 {
-	if (!sec || !sec->peer_token)
-		return -EACCES;
+	long ret;
 
-	return pkm_kacs_open_token_fd_with_fixed_access(
+	if (!sec || !sec->peer_token) {
+		trace_kacs_socket_open_peer_token(
+			0, 0, 0, 0, PKM_KACS_PEER_TOKEN_ACCESS_MASK,
+			KACS_SOCK_NO_PEER_TOKEN, -EACCES);
+		return -EACCES;
+	}
+
+	ret = pkm_kacs_open_token_fd_with_fixed_access(
 		sec->peer_token, PKM_KACS_PEER_TOKEN_ACCESS_MASK);
+	trace_kacs_socket_open_peer_token(
+		0, 0, 0, sec->max_impersonation,
+		PKM_KACS_PEER_TOKEN_ACCESS_MASK, KACS_SOCK_OPEN_TOKEN, ret);
+	return ret;
 }
 
 static long pkm_kacs_impersonate_peer_core(
 	const struct pkm_kacs_socket_security *sec)
 {
-	if (!sec || !sec->peer_token)
-		return -EACCES;
+	long ret;
 
-	return pkm_kacs_impersonate_token_for_current(sec->peer_token);
+	if (!sec || !sec->peer_token) {
+		trace_kacs_socket_impersonate_peer(0, 0, 0, 0, 0,
+						   KACS_SOCK_NO_PEER_TOKEN,
+						   -EACCES);
+		return -EACCES;
+	}
+
+	ret = pkm_kacs_impersonate_token_for_current(sec->peer_token);
+	trace_kacs_socket_impersonate_peer(0, 0, 0, sec->max_impersonation, 0,
+					   KACS_SOCK_IMPERSONATE, ret);
+	return ret;
 }
 
 int pkm_kacs_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
@@ -262,24 +309,43 @@ int pkm_kacs_socket_bind(struct socket *sock, struct sockaddr *address,
 {
 	struct pkm_kacs_socket_security *sec;
 	const void *subject_token;
+	long ret;
 
-	if (!sock || !sock->sk)
+	if (!sock || !sock->sk) {
+		trace_kacs_socket_bind(0, 0, 0, 0, 0, KACS_SOCK_BAD_ARGS,
+				       -EACCES);
 		return -EACCES;
+	}
 	if (sock->sk->sk_family != AF_UNIX ||
 	    !pkm_kacs_sockaddr_is_abstract_unix(address, addrlen))
 		return 0;
 
 	sec = pkm_kacs_sock(sock->sk);
-	if (!sec)
+	if (!sec) {
+		trace_kacs_socket_bind(sock->sk->sk_family, sock->type,
+				       sock->state, 0, 0,
+				       KACS_SOCK_NO_SECURITY, -EACCES);
 		return -EACCES;
-	if (sec->socket_sd)
+	}
+	if (sec->socket_sd) {
+		trace_kacs_socket_bind(sock->sk->sk_family, sock->type,
+				       sock->state, sec->max_impersonation, 0,
+				       KACS_SOCK_ALREADY_BOUND, 0);
 		return 0;
+	}
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
-	if (!subject_token)
+	if (!subject_token) {
+		trace_kacs_socket_bind(sock->sk->sk_family, sock->type,
+				       sock->state, sec->max_impersonation, 0,
+				       KACS_SOCK_NO_TOKEN, -EACCES);
 		return -EACCES;
+	}
 
-	return pkm_kacs_bind_abstract_socket_core(sec, subject_token);
+	ret = pkm_kacs_bind_abstract_socket_core(sec, subject_token);
+	trace_kacs_socket_bind(sock->sk->sk_family, sock->type, sock->state,
+			       sec->max_impersonation, 0, KACS_SOCK_BIND, ret);
+	return ret;
 }
 
 int pkm_kacs_unix_stream_connect(struct sock *sock,
@@ -292,25 +358,54 @@ int pkm_kacs_unix_stream_connect(struct sock *sock,
 	const void *client_token;
 	long ret;
 
-	if (!sock || !other || !newsk)
+	if (!sock || !other || !newsk) {
+		trace_kacs_socket_unix_connect(
+			0, 0, 0, 0, PKM_KACS_SOCKET_FILE_WRITE_DATA,
+			KACS_SOCK_BAD_ARGS, -EACCES);
 		return -EACCES;
+	}
 	if (sock->sk_family != AF_UNIX || other->sk_family != AF_UNIX ||
-	    newsk->sk_family != AF_UNIX)
+	    newsk->sk_family != AF_UNIX) {
+		trace_kacs_socket_unix_connect(
+			sock->sk_family, sock->sk_type, 0, 0,
+			PKM_KACS_SOCKET_FILE_WRITE_DATA, KACS_SOCK_NOT_UNIX,
+			-EACCES);
 		return -EACCES;
-	if (!pkm_kacs_socket_type_supported(sock->sk_type))
+	}
+	if (!pkm_kacs_socket_type_supported(sock->sk_type)) {
+		trace_kacs_socket_unix_connect(
+			sock->sk_family, sock->sk_type, 0, 0,
+			PKM_KACS_SOCKET_FILE_WRITE_DATA, KACS_SOCK_NOT_UNIX,
+			-EACCES);
 		return -EACCES;
-	if (!sock->sk_security || !other->sk_security || !newsk->sk_security)
+	}
+	if (!sock->sk_security || !other->sk_security || !newsk->sk_security) {
+		trace_kacs_socket_unix_connect(
+			sock->sk_family, sock->sk_type, 0, 0,
+			PKM_KACS_SOCKET_FILE_WRITE_DATA, KACS_SOCK_NO_SECURITY,
+			-EACCES);
 		return -EACCES;
+	}
 
 	client_sec = pkm_kacs_sock(sock);
 	server_sec = pkm_kacs_sock(other);
 	accepted_sec = pkm_kacs_sock(newsk);
 	client_token = pkm_kacs_current_effective_token_ptr();
-	if (!client_sec || !server_sec || !accepted_sec || !client_token)
+	if (!client_sec || !server_sec || !accepted_sec || !client_token) {
+		trace_kacs_socket_unix_connect(
+			sock->sk_family, sock->sk_type, 0,
+			client_sec ? client_sec->max_impersonation : 0,
+			PKM_KACS_SOCKET_FILE_WRITE_DATA, KACS_SOCK_NO_TOKEN,
+			-EACCES);
 		return -EACCES;
+	}
 
 	ret = pkm_kacs_unix_stream_connect_core(client_sec, server_sec,
 						accepted_sec, client_token);
+	trace_kacs_socket_unix_connect(sock->sk_family, sock->sk_type, 0,
+				       client_sec->max_impersonation,
+				       PKM_KACS_SOCKET_FILE_WRITE_DATA,
+				       KACS_SOCK_CONNECT, ret);
 	return ret;
 }
 
@@ -318,22 +413,50 @@ int pkm_kacs_unix_may_send(struct socket *sock, struct socket *other)
 {
 	struct pkm_kacs_socket_security *target_sec;
 	const void *subject_token;
+	long ret;
 
-	if (!sock || !other || !sock->sk || !other->sk)
+	if (!sock || !other || !sock->sk || !other->sk) {
+		trace_kacs_socket_unix_may_send(
+			0, 0, 0, 0, PKM_KACS_SOCKET_FILE_WRITE_DATA,
+			KACS_SOCK_BAD_ARGS, -EACCES);
 		return -EACCES;
-	if (sock->sk->sk_family != AF_UNIX || other->sk->sk_family != AF_UNIX)
+	}
+	if (sock->sk->sk_family != AF_UNIX || other->sk->sk_family != AF_UNIX) {
+		trace_kacs_socket_unix_may_send(
+			sock->sk->sk_family, sock->sk->sk_type, 0, 0,
+			PKM_KACS_SOCKET_FILE_WRITE_DATA, KACS_SOCK_NOT_UNIX,
+			-EACCES);
 		return -EACCES;
-	if (!sock->sk->sk_security || !other->sk->sk_security)
+	}
+	if (!sock->sk->sk_security || !other->sk->sk_security) {
+		trace_kacs_socket_unix_may_send(
+			sock->sk->sk_family, sock->sk->sk_type, 0, 0,
+			PKM_KACS_SOCKET_FILE_WRITE_DATA, KACS_SOCK_NO_SECURITY,
+			-EACCES);
 		return -EACCES;
+	}
 
 	target_sec = pkm_kacs_sock(other->sk);
-	if (!target_sec)
+	if (!target_sec) {
+		trace_kacs_socket_unix_may_send(
+			sock->sk->sk_family, sock->sk->sk_type, 0, 0,
+			PKM_KACS_SOCKET_FILE_WRITE_DATA, KACS_SOCK_NO_SECURITY,
+			-EACCES);
 		return -EACCES;
-	if (!target_sec->socket_sd)
+	}
+	if (!target_sec->socket_sd) {
+		trace_kacs_socket_unix_may_send(
+			sock->sk->sk_family, sock->sk->sk_type, 0, 0,
+			PKM_KACS_SOCKET_FILE_WRITE_DATA, KACS_SOCK_NO_SD, 0);
 		return 0;
+	}
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
-	return pkm_kacs_unix_may_send_core(target_sec, subject_token);
+	ret = pkm_kacs_unix_may_send_core(target_sec, subject_token);
+	trace_kacs_socket_unix_may_send(sock->sk->sk_family, sock->sk->sk_type,
+					0, 0, PKM_KACS_SOCKET_FILE_WRITE_DATA,
+					KACS_SOCK_HAVE_SD, ret);
+	return ret;
 }
 
 static long pkm_kacs_lookup_peer_socket(

@@ -4,9 +4,12 @@
  */
 
 #include <linux/errno.h>
+#include <linux/jhash.h>
 #include <linux/string.h>
 
 #include "source_internal.h"
+
+#include <trace/events/lcs.h>
 
 long pkm_lcs_resolve_symlink_target_for_key(
 	u32 source_id, u64 txn_id, const u8 key_guid[RSI_GUID_SIZE],
@@ -89,10 +92,18 @@ long pkm_lcs_resolve_symlink_target_for_key(
 	result->selected_precedence = value.selected_precedence;
 	result->selected_sequence = value.selected_sequence;
 	pkm_lcs_source_response_frame_destroy(&frame);
+	trace_lcs_resolve_symlink(source_id, txn_id,
+				  (u64)jhash(key_guid, RSI_GUID_SIZE, 0),
+				  result->components.component_count, 0, 0, 0);
 	return 0;
 
 out_destroy:
 	pkm_lcs_source_response_frame_destroy(&frame);
 	pkm_lcs_symlink_target_resolution_destroy(result);
+	trace_lcs_resolve_symlink(source_id, txn_id,
+				  key_guid ? (u64)jhash(key_guid, RSI_GUID_SIZE,
+							0) :
+					     0,
+				  0, 0, 0, ret);
 	return ret;
 }

@@ -13,6 +13,8 @@
 #include <linux/string.h>
 #include <linux/wait.h>
 
+#include <trace/events/lcs.h>
+
 #include "source_internal.h"
 
 static DEFINE_MUTEX(pkm_lcs_source_table_mutex);
@@ -353,12 +355,15 @@ long pkm_lcs_source_record_transaction_generation(
 		goto out_unlock;
 	if (hive->hive_generation == U64_MAX) {
 		ret = -EOVERFLOW;
+		trace_lcs_record_generation(source_id, 0, hive->hive_generation,
+					    ret);
 		goto out_unlock;
 	}
 
 	hive->hive_generation++;
 	*generation_out = hive->hive_generation;
 	ret = 0;
+	trace_lcs_record_generation(source_id, 0, hive->hive_generation, ret);
 
 out_unlock:
 	pkm_lcs_source_table_unlock();
@@ -397,6 +402,7 @@ out_unlock:
 long pkm_lcs_source_bound_transaction_acquire(u32 source_id, u32 *count_out)
 {
 	struct pkm_lcs_source_slot *slot;
+	u32 cap = pkm_lcs_runtime_max_bound_transactions_per_source();
 	long ret = 0;
 
 	if (count_out)
@@ -410,14 +416,18 @@ long pkm_lcs_source_bound_transaction_acquire(u32 source_id, u32 *count_out)
 		ret = -EIO;
 		goto out_unlock;
 	}
-	if (slot->bound_transaction_count >=
-	    pkm_lcs_runtime_max_bound_transactions_per_source()) {
+	if (slot->bound_transaction_count >= cap) {
 		ret = -EBUSY;
+		trace_lcs_bound_txn_acquire(source_id,
+					    slot->bound_transaction_count, cap,
+					    ret);
 		goto out_unlock;
 	}
 
 	slot->bound_transaction_count++;
 	*count_out = slot->bound_transaction_count;
+	trace_lcs_bound_txn_acquire(source_id, slot->bound_transaction_count,
+				    cap, ret);
 
 out_unlock:
 	pkm_lcs_source_table_unlock();
@@ -470,11 +480,17 @@ long pkm_lcs_source_read_only_transaction_acquire_with_limits(
 	if (slot->read_only_transaction_count >=
 	    limits->max_read_only_transactions_per_source) {
 		ret = -EBUSY;
+		trace_lcs_readonly_txn_acquire(
+			source_id, slot->read_only_transaction_count,
+			limits->max_read_only_transactions_per_source, ret);
 		goto out_unlock;
 	}
 
 	slot->read_only_transaction_count++;
 	*count_out = slot->read_only_transaction_count;
+	trace_lcs_readonly_txn_acquire(
+		source_id, slot->read_only_transaction_count,
+		limits->max_read_only_transactions_per_source, ret);
 
 out_unlock:
 	pkm_lcs_source_table_unlock();
@@ -622,6 +638,8 @@ long pkm_lcs_allocate_sequence(u64 *sequence)
 	if (pkm_lcs_next_sequence == U64_MAX) {
 		pkm_lcs_source_table_unlock();
 		pkm_lcs_source_sequence_gate_unlock();
+		trace_lcs_allocate_sequence(0, 0, pkm_lcs_next_sequence,
+					    -EOVERFLOW);
 		return -EOVERFLOW;
 	}
 
@@ -629,6 +647,7 @@ long pkm_lcs_allocate_sequence(u64 *sequence)
 	pkm_lcs_next_sequence++;
 	pkm_lcs_source_table_unlock();
 	pkm_lcs_source_sequence_gate_unlock();
+	trace_lcs_allocate_sequence(0, 0, *sequence, 0);
 	return 0;
 }
 
@@ -706,6 +725,9 @@ long pkm_lcs_restore_sequence_gate_release_terminal(
 		if (check_add_overflow(gate->max_dispatched_sequence, 1ULL,
 				       &required_next)) {
 			ret = -EOVERFLOW;
+			trace_lcs_restore_sequence(0, 0,
+						   gate->max_dispatched_sequence,
+						   ret);
 			goto out_release;
 		}
 
@@ -716,6 +738,7 @@ long pkm_lcs_restore_sequence_gate_release_terminal(
 			pkm_lcs_next_sequence = required_next;
 		}
 		pkm_lcs_source_table_unlock();
+		trace_lcs_restore_sequence(0, 0, required_next, ret);
 	}
 
 out_release:

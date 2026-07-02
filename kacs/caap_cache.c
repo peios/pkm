@@ -19,6 +19,8 @@
 #include "caap_cache.h"
 #include "token_runtime.h"
 
+#include <trace/events/kacs.h>
+
 #define PKM_KACS_MIN_SID_LEN 8U
 #define PKM_KACS_MAX_SID_LEN 68U
 #define PKM_KACS_MAX_CAAP_SPEC_LEN (256U * 1024U)
@@ -35,14 +37,20 @@ static void *pkm_kacs_caap_cache;
 
 static int pkm_kacs_require_tcb(const void *token)
 {
-	if (!token)
+	if (!token) {
+		trace_kacs_caap(0, 0, 0, KACS_CAAP_TCB_GATE, -EACCES);
 		return -EACCES;
+	}
 	if (!kacs_rust_token_has_enabled_privilege(token,
-						  KACS_SE_TCB_PRIVILEGE))
+						  KACS_SE_TCB_PRIVILEGE)) {
+		trace_kacs_caap(0, 0, 0, KACS_CAAP_TCB_GATE, -EACCES);
 		return -EACCES;
+	}
 	if (!kacs_rust_token_mark_privileges_used(token,
-						 KACS_SE_TCB_PRIVILEGE))
+						 KACS_SE_TCB_PRIVILEGE)) {
+		trace_kacs_caap(0, 0, 0, KACS_CAAP_TCB_GATE, -EACCES);
 		return -EACCES;
+	}
 
 	return 0;
 }
@@ -117,6 +125,7 @@ int pkm_kacs_caap_cache_init(void)
 
 	pkm_kacs_caap_cache = cache;
 	mutex_unlock(&pkm_kacs_caap_mutex);
+	trace_kacs_caap(0, 0, 0, KACS_CAAP_INIT, 0);
 	return 0;
 }
 
@@ -129,8 +138,10 @@ void pkm_kacs_caap_cache_destroy(void)
 	pkm_kacs_caap_cache = NULL;
 	mutex_unlock(&pkm_kacs_caap_mutex);
 
-	if (cache)
+	if (cache) {
 		kacs_rust_caap_cache_destroy(cache);
+		trace_kacs_caap(0, 0, 0, KACS_CAAP_DESTROY, 0);
+	}
 }
 
 int pkm_kacs_set_caap_internal(const void *policy_sid, u32 policy_sid_len,
@@ -151,6 +162,11 @@ int pkm_kacs_set_caap_internal(const void *policy_sid, u32 policy_sid_len,
 				       policy_sid_len, spec, spec_len);
 
 out:
+	trace_kacs_caap(policy_sid_len, spec_len,
+			pkm_kacs_caap_cache ?
+				(u32)kacs_rust_caap_cache_len(pkm_kacs_caap_cache) :
+				0,
+			KACS_CAAP_SET, ret);
 	mutex_unlock(&pkm_kacs_caap_mutex);
 	return ret;
 }

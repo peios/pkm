@@ -4,6 +4,7 @@
  */
 
 #include <linux/errno.h>
+#include <linux/jhash.h>
 #include <linux/kernel.h>
 #include <linux/overflow.h>
 #include <linux/slab.h>
@@ -12,6 +13,8 @@
 #include "rsi.h"
 #include "source_device.h"
 #include "transaction_fd.h"
+
+#include <trace/events/lcs.h>
 
 struct pkm_lcs_symlink_follow_components {
 	struct pkm_lcs_path_component_view *components;
@@ -451,8 +454,14 @@ static long pkm_lcs_walk_symlink_target(
 	struct pkm_lcs_symlink_follow_components walk = { };
 	long ret;
 
-	if (symlink_depth >= symlink_depth_limit)
+	if (symlink_depth >= symlink_depth_limit) {
+		trace_lcs_walk_symlink(source_id, txn_id,
+				       link_guid ? (u64)jhash(link_guid,
+							      RSI_GUID_SIZE, 0) :
+						   0,
+				       suffix_count, 0, symlink_depth, -ELOOP);
 		return -ELOOP;
+	}
 
 	ret = pkm_lcs_resolve_symlink_target_for_key(
 		source_id, txn_id, link_guid, scope_guids, scope_count,
@@ -486,6 +495,11 @@ static long pkm_lcs_walk_symlink_target(
 	pkm_lcs_symlink_follow_components_destroy(&walk);
 out_destroy_target:
 	pkm_lcs_symlink_target_resolution_destroy(&target);
+	trace_lcs_walk_symlink(source_id, txn_id,
+			       link_guid ? (u64)jhash(link_guid, RSI_GUID_SIZE,
+						      0) :
+					   0,
+			       walk.component_count, 0, symlink_depth, ret);
 	return ret;
 }
 
@@ -742,6 +756,7 @@ long pkm_lcs_walk_absolute_components_for_open_with_limits(
 {
 	struct pkm_lcs_runtime_limits effective_limits;
 	u32 symlink_depth_limit;
+	long ret;
 
 	if (!limits) {
 		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
@@ -749,11 +764,18 @@ long pkm_lcs_walk_absolute_components_for_open_with_limits(
 	}
 	symlink_depth_limit = limits->symlink_depth_limit;
 
-	return pkm_lcs_walk_absolute_components_impl(
+	ret = pkm_lcs_walk_absolute_components_impl(
 		source_id, txn_id, root_guid, components, component_count,
 		open_final_link, true, 0, symlink_depth_limit, scope_guids,
 		scope_count, layers, layer_count, private_layers,
 		private_layer_count, txn_fd, limits, result);
+	trace_lcs_walk_absolute(source_id, txn_id,
+				root_guid ? (u64)jhash(root_guid, RSI_GUID_SIZE,
+						       0) :
+					    0,
+				component_count,
+				ret ? 0 : result->component_count, 0, ret);
+	return ret;
 }
 
 long pkm_lcs_walk_absolute_components_for_open(
@@ -781,13 +803,21 @@ long pkm_lcs_walk_absolute_components(
 	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
 {
 	struct pkm_lcs_runtime_limits limits;
+	long ret;
 
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
-	return pkm_lcs_walk_absolute_components_impl(
+	ret = pkm_lcs_walk_absolute_components_impl(
 		source_id, txn_id, root_guid, components, component_count,
 		false, false, 0, PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT, NULL, 0,
 		layers, layer_count, private_layers, private_layer_count, -1,
 		&limits, result);
+	trace_lcs_walk_absolute(source_id, txn_id,
+				root_guid ? (u64)jhash(root_guid, RSI_GUID_SIZE,
+						       0) :
+					    0,
+				component_count,
+				ret ? 0 : result->component_count, 0, ret);
+	return ret;
 }
 
 static long pkm_lcs_resolved_key_path_prepare_relative(
@@ -1025,6 +1055,7 @@ long pkm_lcs_walk_relative_components_for_open_with_limits(
 {
 	struct pkm_lcs_runtime_limits effective_limits;
 	u32 symlink_depth_limit;
+	long ret;
 
 	if (!limits) {
 		pkm_lcs_runtime_limits_snapshot_or_default(&effective_limits);
@@ -1032,11 +1063,18 @@ long pkm_lcs_walk_relative_components_for_open_with_limits(
 	}
 	symlink_depth_limit = limits->symlink_depth_limit;
 
-	return pkm_lcs_walk_relative_components_impl(
+	ret = pkm_lcs_walk_relative_components_impl(
 		parent, txn_id, components, component_count, open_final_link,
 		true, 0, symlink_depth_limit, scope_guids, scope_count, layers,
 		layer_count, private_layers, private_layer_count, txn_fd,
 		limits, result);
+	trace_lcs_walk_relative(
+		parent ? parent->source_id : 0, txn_id,
+		(parent && parent->ancestor_guids) ?
+			(u64)jhash(parent->ancestor_guids[0], RSI_GUID_SIZE, 0) :
+			0,
+		component_count, ret ? 0 : result->component_count, 0, ret);
+	return ret;
 }
 
 long pkm_lcs_walk_relative_components_for_open(
@@ -1064,11 +1102,19 @@ long pkm_lcs_walk_relative_components(
 	u32 private_layer_count, struct pkm_lcs_resolved_key_path *result)
 {
 	struct pkm_lcs_runtime_limits limits;
+	long ret;
 
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
-	return pkm_lcs_walk_relative_components_impl(
+	ret = pkm_lcs_walk_relative_components_impl(
 		parent, txn_id, components, component_count, false, false, 0,
 		PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT, NULL, 0, layers,
 		layer_count, private_layers, private_layer_count, -1, &limits,
 		result);
+	trace_lcs_walk_relative(
+		parent ? parent->source_id : 0, txn_id,
+		(parent && parent->ancestor_guids) ?
+			(u64)jhash(parent->ancestor_guids[0], RSI_GUID_SIZE, 0) :
+			0,
+		component_count, ret ? 0 : result->component_count, 0, ret);
+	return ret;
 }

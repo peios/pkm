@@ -8,6 +8,8 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 
+#include <trace/events/lcs.h>
+
 #include "source_device.h"
 
 extern int lcs_rust_plan_self_config_apply(
@@ -32,8 +34,11 @@ static long pkm_lcs_runtime_limits_publish_self_config_plan(
 	if (!plan)
 		return -EINVAL;
 
-	if (plan->audit_count > PKM_LCS_SELF_CONFIG_MAX_AUDITS)
+	if (plan->audit_count > PKM_LCS_SELF_CONFIG_MAX_AUDITS) {
+		trace_lcs_self_config_publish(
+			0, 0, 0, 0, LCS_BOOT_SELF_CONFIG_PARAM_INVALID, -EIO);
 		return -EIO;
+	}
 
 	for (i = 0; i < plan->audit_count; i++) {
 		const struct pkm_lcs_self_config_audit_intent *audit =
@@ -41,8 +46,12 @@ static long pkm_lcs_runtime_limits_publish_self_config_plan(
 
 		if (!audit->configuration_name_len ||
 		    audit->configuration_name_len >
-			    PKM_LCS_SELF_CONFIG_MAX_PARAMETER_NAME_LEN)
+			    PKM_LCS_SELF_CONFIG_MAX_PARAMETER_NAME_LEN) {
+			trace_lcs_self_config_publish(
+				0, 0, 0, 0,
+				LCS_BOOT_SELF_CONFIG_PARAM_INVALID, -EIO);
 			return -EIO;
+		}
 
 		/*
 		 * PSD-005 §3.1 makes self-config audit emission best-effort
@@ -139,6 +148,8 @@ long pkm_lcs_runtime_limits_refresh_self_config_from_key(
 							      result_out);
 
 out_frame:
+	trace_lcs_self_config_refresh(source_id, 1, 0, 0,
+				      LCS_BOOT_SELF_CONFIG_REFRESH, ret);
 	kfree(plan);
 	pkm_lcs_source_response_frame_destroy(&frame);
 	pkm_lcs_source_layer_snapshot_release(&layers);

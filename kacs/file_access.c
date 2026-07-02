@@ -23,7 +23,7 @@
 #include "access_check.h"
 #include "caap_cache.h"
 #include "file_access.h"
-#include "trace.h"
+#include <trace/events/kacs.h>
 #include "file_sd_cache.h"
 #include "lsm_internal.h"
 #include "mount_policy.h"
@@ -164,6 +164,24 @@ int pkm_kacs_file_fallocate(struct file *file, int mode)
 	return pkm_kacs_check_file_fallocate_snapshot(file, mode);
 }
 
+static void pkm_kacs_trace_file_snapshot(struct file *file, u8 op,
+					 u32 required_access, u8 reason,
+					 long ret)
+{
+	struct pkm_kacs_file_security *file_sec;
+	u8 managed = 0;
+	u32 granted_access = 0;
+
+	if (file && file->f_security) {
+		file_sec = pkm_kacs_file(file);
+		managed = file_sec->managed ? 1 : 0;
+		granted_access = file_sec->granted_access;
+	}
+
+	trace_kacs_file_snapshot(file ? file_inode(file) : NULL, op, managed,
+				 granted_access, required_access, reason, ret);
+}
+
 static int pkm_kacs_check_sysfs_write_gate_for_subject(
 	const void *subject_token)
 {
@@ -189,6 +207,8 @@ int pkm_kacs_check_sysfs_file_write_for_subject(const void *subject_token,
 						const struct file *file,
 						bool write_attempt)
 {
+	int ret;
+
 	if (!write_attempt)
 		return 0;
 	if (!file)
@@ -196,7 +216,12 @@ int pkm_kacs_check_sysfs_file_write_for_subject(const void *subject_token,
 	if (!pkm_kacs_inode_on_sysfs_mount(file_inode(file)))
 		return 0;
 
-	return pkm_kacs_check_sysfs_write_gate_for_subject(subject_token);
+	ret = pkm_kacs_check_sysfs_write_gate_for_subject(subject_token);
+	pkm_kacs_trace_file_snapshot((struct file *)file,
+				     KACS_FSOP_SYSFS_WRITE_GATE,
+				     KACS_FILE_WRITE_DATA,
+				     KACS_FSR_UNMANAGED_SYSFS, ret);
+	return ret;
 }
 
 long pkm_kacs_authorize_live_file_access_core(
@@ -212,9 +237,8 @@ long pkm_kacs_authorize_live_file_access_core(
 	long ret;
 
 	if (!subject_token || !file || desired_access == 0) {
-		PKM_KACS_TRACE("live_file_access", "bad-args",
-			       file ? file_inode(file) : NULL, desired_access,
-			       -EINVAL);
+		trace_kacs_file_access(file ? file_inode(file) : NULL,
+				       desired_access, -EINVAL, KACS_TR_BAD_ARGS);
 		return -EINVAL;
 	}
 
@@ -225,21 +249,21 @@ long pkm_kacs_authorize_live_file_access_core(
 		 * before inode_alloc_security has populated it. This path used
 		 * to return silently; the trace makes that visible.
 		 */
-		PKM_KACS_TRACE("live_file_access", "no-i_security", inode,
-			       desired_access, -EACCES);
+		trace_kacs_file_access(inode, desired_access, -EACCES,
+				       KACS_TR_NO_ISEC);
 		return -EACCES;
 	}
 	if (pkm_kacs_superblock_mount_policy(inode->i_sb) ==
 	    KACS_MOUNT_POLICY_UNMANAGED) {
-		PKM_KACS_TRACE("live_file_access", "unmanaged", inode,
-			       desired_access, -EOPNOTSUPP);
+		trace_kacs_file_access(inode, desired_access, -EOPNOTSUPP,
+				       KACS_TR_UNMANAGED);
 		return -EOPNOTSUPP;
 	}
 
 	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
 	if (ret) {
-		PKM_KACS_TRACE("live_file_access", "pip-context", inode,
-			       desired_access, ret);
+		trace_kacs_file_access(inode, desired_access, ret,
+				       KACS_TR_PIP_CONTEXT);
 		return ret;
 	}
 
@@ -283,11 +307,10 @@ log:
 	/*
 	 * Final decision (allow or deny, including the cache-path denials
 	 * above). Unlike the pr_debug, this also records the allow case, so a
-	 * kacs.trace boot shows the full sequence of what passed, not only what
-	 * failed.
+	 * `trace_event=kacs:*` boot shows the full sequence of what passed, not
+	 * only what failed.
 	 */
-	PKM_KACS_TRACE("live_file_access", "decision", inode, desired_access,
-		       ret);
+	trace_kacs_file_access(inode, desired_access, ret, KACS_TR_DECISION);
 	return ret;
 }
 
@@ -564,8 +587,8 @@ int pkm_kacs_file_open(struct file *file)
 	if (!file)
 		return -EACCES;
 	if (pkm_kacs_file_delete_on_close_pending(file)) {
-		PKM_KACS_TRACE("file_open", "delete-on-close-pending",
-			       file_inode(file), 0, -EACCES);
+		trace_kacs_file_open(file_inode(file), 0, -EACCES,
+				     KACS_TR_DELETE_ON_CLOSE_PENDING);
 		return -EACCES;
 	}
 	if (!IS_ERR(pidfd_pid(file)))
@@ -575,8 +598,8 @@ int pkm_kacs_file_open(struct file *file)
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	if (!subject_token) {
-		PKM_KACS_TRACE("file_open", "no-token", file_inode(file), 0,
-			       -EACCES);
+		trace_kacs_file_open(file_inode(file), 0, -EACCES,
+				     KACS_TR_NO_TOKEN);
 		return -EACCES;
 	}
 
@@ -585,27 +608,27 @@ int pkm_kacs_file_open(struct file *file)
 		ret = pkm_kacs_stamp_native_file_granted_access_for_subject(
 			subject_token, file, desired_access);
 		if (ret) {
-			PKM_KACS_TRACE("file_open", "native-stamp",
-				       file_inode(file), desired_access, ret);
+			trace_kacs_file_open(file_inode(file), desired_access,
+					     ret, KACS_TR_NATIVE_STAMP);
 			return (int)ret;
 		}
 		ret = pkm_kacs_maybe_arm_delete_on_close_for_subject(
 			subject_token, file, create_options);
-		PKM_KACS_TRACE("file_open", "native-arm", file_inode(file),
-			       desired_access, ret);
+		trace_kacs_file_open(file_inode(file), desired_access, ret,
+				     KACS_TR_NATIVE_ARM);
 		return (int)ret;
 	}
 
 	ret = pkm_kacs_stamp_file_granted_access_for_subject(subject_token,
 							     file);
-	PKM_KACS_TRACE("file_open", "stamp", file_inode(file), 0, ret);
+	trace_kacs_file_open(file_inode(file), 0, ret, KACS_TR_STAMP);
 	return (int)ret;
 }
 
-static int pkm_kacs_emit_file_continuous_audit(struct file *file,
+static int pkm_kacs_emit_file_continuous_audit(struct file *file, u8 op,
 					       const char *operation,
 					       size_t operation_len,
-					       u32 required_access,
+					       u32 required_access, u8 reason,
 					       int decision)
 {
 	struct pkm_kacs_file_security *file_sec;
@@ -624,8 +647,11 @@ static int pkm_kacs_emit_file_continuous_audit(struct file *file,
 		return decision;
 
 	matched_access = file_sec->continuous_audit_mask & required_access;
-	if (!matched_access)
+	if (!matched_access) {
+		pkm_kacs_trace_file_snapshot(file, op, required_access, reason,
+					     decision);
 		return decision;
+	}
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	if (!subject_token)
@@ -639,12 +665,17 @@ static int pkm_kacs_emit_file_continuous_audit(struct file *file,
 		subject_token, pip_type, pip_trust, (const u8 *)operation,
 		operation_len, required_access, matched_access,
 		file_sec->granted_access, decision == 0 ? 1 : 0);
-	if (ret)
+	if (ret) {
+		pkm_kacs_trace_file_snapshot(file, op, required_access,
+					     KACS_FSR_AUDIT_EMIT_FAIL, ret);
 		return ret;
+	}
+	pkm_kacs_trace_file_snapshot(file, op, required_access, reason,
+				     decision);
 	return decision;
 }
 
-static int pkm_kacs_check_file_snapshot_grant_op(struct file *file,
+static int pkm_kacs_check_file_snapshot_grant_op(struct file *file, u8 op,
 						 u32 required_access,
 						 const char *operation,
 						 size_t operation_len)
@@ -666,14 +697,16 @@ static int pkm_kacs_check_file_snapshot_grant_op(struct file *file,
 		ret = -EACCES;
 
 	return pkm_kacs_emit_file_continuous_audit(
-		file, operation, operation_len, required_access, ret);
+		file, op, operation, operation_len, required_access,
+		KACS_FSR_DECISION, ret);
 }
 
 int pkm_kacs_check_file_snapshot_grant(struct file *file,
 				       u32 required_access)
 {
 	return pkm_kacs_check_file_snapshot_grant_op(
-		file, required_access, pkm_kacs_audit_op_file_access,
+		file, KACS_FSOP_ACCESS, required_access,
+		pkm_kacs_audit_op_file_access,
 		sizeof(pkm_kacs_audit_op_file_access) - 1);
 }
 
@@ -712,7 +745,7 @@ int pkm_kacs_check_mmap_snapshot(struct file *file, unsigned long prot,
 		return -EBADF;
 
 	return pkm_kacs_check_file_snapshot_grant_op(
-		file,
+		file, KACS_FSOP_MMAP,
 		pkm_kacs_mapping_required_access(
 			prot, pkm_kacs_mmap_flags_shared(flags)),
 		pkm_kacs_audit_op_file_mmap,
@@ -724,7 +757,7 @@ int pkm_kacs_check_mprotect_snapshot(struct file *file,
 				     unsigned long prot)
 {
 	return pkm_kacs_check_file_snapshot_grant_op(
-		file,
+		file, KACS_FSOP_MPROTECT,
 		pkm_kacs_mapping_required_access(
 			prot, (vm_flags & VM_SHARED) != 0),
 		pkm_kacs_audit_op_file_mprotect,
@@ -760,8 +793,12 @@ int pkm_kacs_check_file_permission_snapshot_for_subject(
 			(write_intent && (file->f_flags & O_APPEND) != 0);
 	if (write_intent || append_intent) {
 		ret = pkm_kacs_check_signed_exec_content_mutation_file(file);
-		if (ret)
+		if (ret) {
+			pkm_kacs_trace_file_snapshot(file, KACS_FSOP_PERMISSION,
+						     required_access,
+						     KACS_FSR_SIGNED_EXEC, ret);
 			return ret;
+		}
 	}
 
 	if (!file_sec->managed)
@@ -770,9 +807,10 @@ int pkm_kacs_check_file_permission_snapshot_for_subject(
 
 	if ((file_sec->granted_access & required_access) != required_access)
 		return pkm_kacs_emit_file_continuous_audit(
-			file, pkm_kacs_audit_op_file_permission,
+			file, KACS_FSOP_PERMISSION,
+			pkm_kacs_audit_op_file_permission,
 			sizeof(pkm_kacs_audit_op_file_permission) - 1,
-			audit_required_access, -EACCES);
+			audit_required_access, KACS_FSR_GRANT_DENY, -EACCES);
 
 	if (write_intent && current && current->security) {
 		task_sec = pkm_kacs_task(current);
@@ -810,9 +848,14 @@ int pkm_kacs_check_file_permission_snapshot_for_subject(
 	}
 
 	return pkm_kacs_emit_file_continuous_audit(
-		file, pkm_kacs_audit_op_file_permission,
+		file, KACS_FSOP_PERMISSION,
+		pkm_kacs_audit_op_file_permission,
 		sizeof(pkm_kacs_audit_op_file_permission) - 1,
-		audit_required_access, ret);
+		audit_required_access,
+		ret ? (append_intent ? KACS_FSR_APPEND_DENY :
+				       KACS_FSR_GRANT_DENY) :
+		      KACS_FSR_DECISION,
+		ret);
 }
 
 int pkm_kacs_check_file_permission_snapshot(struct file *file, int mask)
@@ -840,8 +883,12 @@ int pkm_kacs_check_file_write_intent_snapshot_for_subject(
 		return -EACCES;
 
 	ret = pkm_kacs_check_signed_exec_content_mutation_file(file);
-	if (ret)
+	if (ret) {
+		pkm_kacs_trace_file_snapshot(file, KACS_FSOP_WRITE_INTENT,
+					     KACS_FILE_WRITE_DATA,
+					     KACS_FSR_SIGNED_EXEC, ret);
 		return ret;
+	}
 
 	file_sec = pkm_kacs_file(file);
 	if (!file_sec->managed)
@@ -863,9 +910,11 @@ int pkm_kacs_check_file_write_intent_snapshot_for_subject(
 		if ((granted_access & KACS_FILE_WRITE_DATA) == 0)
 			ret = -EACCES;
 		return pkm_kacs_emit_file_continuous_audit(
-			file, pkm_kacs_audit_op_file_write,
+			file, KACS_FSOP_WRITE_INTENT,
+			pkm_kacs_audit_op_file_write,
 			sizeof(pkm_kacs_audit_op_file_write) - 1,
-			required_access, ret);
+			required_access,
+			ret ? KACS_FSR_GRANT_DENY : KACS_FSR_DECISION, ret);
 	}
 
 	if (append_intent) {
@@ -874,18 +923,20 @@ int pkm_kacs_check_file_write_intent_snapshot_for_subject(
 		if ((granted_access & required_access) == 0)
 			ret = -EACCES;
 		return pkm_kacs_emit_file_continuous_audit(
-			file, pkm_kacs_audit_op_file_write,
+			file, KACS_FSOP_WRITE_INTENT,
+			pkm_kacs_audit_op_file_write,
 			sizeof(pkm_kacs_audit_op_file_write) - 1,
-			required_access, ret);
+			required_access,
+			ret ? KACS_FSR_APPEND_DENY : KACS_FSR_DECISION, ret);
 	}
 
 	required_access = KACS_FILE_WRITE_DATA;
 	if ((granted_access & KACS_FILE_WRITE_DATA) == 0)
 		ret = -EACCES;
 	return pkm_kacs_emit_file_continuous_audit(
-		file, pkm_kacs_audit_op_file_write,
+		file, KACS_FSOP_WRITE_INTENT, pkm_kacs_audit_op_file_write,
 		sizeof(pkm_kacs_audit_op_file_write) - 1, required_access,
-		ret);
+		ret ? KACS_FSR_GRANT_DENY : KACS_FSR_DECISION, ret);
 }
 
 int pkm_kacs_check_file_write_intent_snapshot(struct file *file,
@@ -1085,8 +1136,12 @@ int pkm_kacs_check_file_ioctl_snapshot(struct file *file, unsigned int cmd,
 	    req == PKM_KACS_IOCTL_REQUIRE_WRITE_DATA ||
 	    req == PKM_KACS_IOCTL_REQUIRE_APPEND_OR_WRITE_DATA) {
 		ret = pkm_kacs_check_signed_exec_content_mutation_file(file);
-		if (ret)
+		if (ret) {
+			pkm_kacs_trace_file_snapshot(file, KACS_FSOP_IOCTL,
+						     required_access,
+						     KACS_FSR_SIGNED_EXEC, ret);
 			return ret;
+		}
 	}
 
 	file_sec = pkm_kacs_file(file);
@@ -1095,9 +1150,9 @@ int pkm_kacs_check_file_ioctl_snapshot(struct file *file, unsigned int cmd,
 
 	ret = pkm_kacs_check_ioctl_requirement(file_sec->granted_access, req);
 	return pkm_kacs_emit_file_continuous_audit(
-		file, pkm_kacs_audit_op_file_ioctl,
+		file, KACS_FSOP_IOCTL, pkm_kacs_audit_op_file_ioctl,
 		sizeof(pkm_kacs_audit_op_file_ioctl) - 1, required_access,
-		ret);
+		ret ? KACS_FSR_GRANT_DENY : KACS_FSR_DECISION, ret);
 }
 
 int pkm_kacs_check_file_lock_snapshot(struct file *file, unsigned int cmd)
@@ -1136,9 +1191,9 @@ int pkm_kacs_check_file_lock_snapshot(struct file *file, unsigned int cmd)
 	}
 
 	return pkm_kacs_emit_file_continuous_audit(
-		file, pkm_kacs_audit_op_file_lock,
+		file, KACS_FSOP_LOCK, pkm_kacs_audit_op_file_lock,
 		sizeof(pkm_kacs_audit_op_file_lock) - 1, required_access,
-		ret);
+		ret ? KACS_FSR_GRANT_DENY : KACS_FSR_DECISION, ret);
 }
 
 enum pkm_kacs_fcntl_requirement {
@@ -1301,9 +1356,10 @@ int pkm_kacs_check_file_fcntl_snapshot(struct file *file, unsigned int cmd,
 		ret = pkm_kacs_check_file_fcntl_requirement(granted_access,
 							    req, arg);
 		return pkm_kacs_emit_file_continuous_audit(
-			file, pkm_kacs_audit_op_file_fcntl,
+			file, KACS_FSOP_FCNTL, pkm_kacs_audit_op_file_fcntl,
 			sizeof(pkm_kacs_audit_op_file_fcntl) - 1,
-			required_access, ret);
+			required_access,
+			ret ? KACS_FSR_GRANT_DENY : KACS_FSR_DECISION, ret);
 	}
 
 	old_flags = file->f_flags;
@@ -1322,9 +1378,9 @@ int pkm_kacs_check_file_fcntl_snapshot(struct file *file, unsigned int cmd,
 	}
 
 	return pkm_kacs_emit_file_continuous_audit(
-		file, pkm_kacs_audit_op_file_fcntl,
+		file, KACS_FSOP_FCNTL, pkm_kacs_audit_op_file_fcntl,
 		sizeof(pkm_kacs_audit_op_file_fcntl) - 1, required_access,
-		ret);
+		ret ? KACS_FSR_GRANT_DENY : KACS_FSR_DECISION, ret);
 }
 
 int pkm_kacs_check_file_truncate_snapshot(struct file *file)
@@ -1338,8 +1394,12 @@ int pkm_kacs_check_file_truncate_snapshot(struct file *file)
 		return -EACCES;
 
 	ret = pkm_kacs_check_signed_exec_content_mutation_file(file);
-	if (ret)
+	if (ret) {
+		pkm_kacs_trace_file_snapshot(file, KACS_FSOP_TRUNCATE,
+					     KACS_FILE_WRITE_DATA,
+					     KACS_FSR_SIGNED_EXEC, ret);
 		return ret;
+	}
 
 	file_sec = pkm_kacs_file(file);
 	if (!file_sec->managed)
@@ -1348,9 +1408,10 @@ int pkm_kacs_check_file_truncate_snapshot(struct file *file)
 	if ((file_sec->granted_access & KACS_FILE_WRITE_DATA) == 0)
 		ret = -EACCES;
 	return pkm_kacs_emit_file_continuous_audit(
-		file, pkm_kacs_audit_op_file_truncate,
+		file, KACS_FSOP_TRUNCATE, pkm_kacs_audit_op_file_truncate,
 		sizeof(pkm_kacs_audit_op_file_truncate) - 1,
-		KACS_FILE_WRITE_DATA, ret);
+		KACS_FILE_WRITE_DATA,
+		ret ? KACS_FSR_GRANT_DENY : KACS_FSR_DECISION, ret);
 }
 
 static bool pkm_kacs_fallocate_mode_supported(int mode,
@@ -1406,8 +1467,12 @@ int pkm_kacs_check_file_fallocate_snapshot(struct file *file, int mode)
 		mode, &requires_write_data);
 	if (pkm_kacs_inode_signed_exec_pinned(file_inode(file))) {
 		ret = pkm_kacs_check_signed_exec_content_mutation_file(file);
-		if (ret)
+		if (ret) {
+			pkm_kacs_trace_file_snapshot(file, KACS_FSOP_FALLOCATE,
+						     KACS_FILE_WRITE_DATA,
+						     KACS_FSR_SIGNED_EXEC, ret);
 			return ret;
+		}
 	}
 
 	file_sec = pkm_kacs_file(file);
@@ -1423,16 +1488,18 @@ int pkm_kacs_check_file_fallocate_snapshot(struct file *file, int mode)
 		if ((granted_access & required_access) == 0)
 			ret = -EACCES;
 		return pkm_kacs_emit_file_continuous_audit(
-			file, pkm_kacs_audit_op_file_fallocate,
+			file, KACS_FSOP_FALLOCATE,
+			pkm_kacs_audit_op_file_fallocate,
 			sizeof(pkm_kacs_audit_op_file_fallocate) - 1,
-			required_access, ret);
+			required_access,
+			ret ? KACS_FSR_GRANT_DENY : KACS_FSR_DECISION, ret);
 	}
 
 	required_access = KACS_FILE_WRITE_DATA | KACS_FILE_APPEND_DATA;
 	if ((granted_access & required_access) == 0)
 		ret = -EACCES;
 	return pkm_kacs_emit_file_continuous_audit(
-		file, pkm_kacs_audit_op_file_fallocate,
+		file, KACS_FSOP_FALLOCATE, pkm_kacs_audit_op_file_fallocate,
 		sizeof(pkm_kacs_audit_op_file_fallocate) - 1, required_access,
-		ret);
+		ret ? KACS_FSR_GRANT_DENY : KACS_FSR_DECISION, ret);
 }
