@@ -4,8 +4,8 @@
  *
  * The single translation unit in the PKM module that defines
  * CREATE_TRACE_POINTS, so the out-of-line tracepoint structures and event
- * probes for every PKM trace system (kacs:, and — as they land — kmes:, lcs:)
- * are emitted here exactly once. Every other PKM object includes the same
+ * probes for every PKM trace system (kacs:, kmes:, lcs:) are emitted here
+ * exactly once. Every other PKM object includes the same
  * per-system trace headers WITHOUT CREATE_TRACE_POINTS and get only the
  * inline trace_*() call-site stubs.
  *

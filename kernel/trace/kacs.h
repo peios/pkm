@@ -859,12 +859,13 @@ DECLARE_EVENT_CLASS(kacs_session,
 DEFINE_EVENT(kacs_session, kacs_session,
 	TP_PROTO(u64 session_id, u8 reason, long ret),
 	TP_ARGS(session_id, reason, ret));
+
 /*
- * Append these to kernel/trace/kacs.h, before the closing #endif
- * (_TRACE_KACS_H) / #include <trace/define_trace.h>. They land in the `kacs:`
- * trace system. HARD INVARIANT: never dereference or record token / SD /
- * process_state bytes — old_token/new_token/process_state are opaque pointer
- * ids (or 0); only enums, flags, ids, and ret are recorded.
+ * ==== Credential / setid / task lifecycle events ====
+ *
+ * HARD INVARIANT: never dereference or record token / SD / process_state
+ * bytes — old_token/new_token/process_state are opaque pointer ids (or 0);
+ * only enums, flags, ids, and ret are recorded.
  */
 
 #define kacs_cred_reason_symbols					\
@@ -1005,12 +1006,12 @@ DECLARE_EVENT_CLASS(kacs_task,
 DEFINE_EVENT(kacs_task, kacs_task,
 	TP_PROTO(u64 clone_flags, u64 process_state, u8 reason, long ret),
 	TP_ARGS(clone_flags, process_state, reason, ret));
+
 /*
- * Append-only tail fragment for kernel/trace/kacs.h (staged into
- * include/trace/events/kacs.h). Inside the _TRACE_KACS_H guard.
- * guard (i.e. before the trailing #include <trace/define_trace.h>). Numeric
- * reason codes come from <pkm/trace.h>. Invariant: never records a token or SD
- * byte — only opaque object ids, PIP tiers, access masks, reason codes and ret.
+ * ==== Primary-token / process-token-open / process-state events ====
+ *
+ * Invariant: never records a token or SD byte — only opaque object ids, PIP
+ * tiers, access masks, reason codes and ret.
  */
 
 #define kacs_primary_install_reason_symbols				\
@@ -1170,12 +1171,9 @@ DEFINE_EVENT(kacs_process_state, kacs_process_state,
 	TP_PROTO(u64 process_state, u32 pip_type, u32 pip_trust, u8 reason,
 		 long ret),
 	TP_ARGS(process_state, pip_type, pip_trust, reason, ret));
-/* SPDX-License-Identifier: GPL-2.0-only */
+
 /*
- * Append inside kernel/trace/kacs.h, before the closing #endif / define_trace
- * (i.e. within the _TRACE_KACS_H guard). Provides the mount-policy, SD
- * query/set, and AccessCheck-ingress events. Numeric reason/kind codes come
- * from <pkm/trace.h> (already included by kacs.h).
+ * ==== Mount-policy / SD query-set / AccessCheck-ingress events ====
  *
  * Invariant: never records SD bytes, token bytes, or a pathname — only
  * security_info, access masks, the target-kind enum, sd_len, sb_magic, policy
@@ -1382,25 +1380,14 @@ DEFINE_EVENT(kacs_access_check, kacs_access_check_list,
 		 u8 target_kind, u32 sd_len, u8 reason, long ret),
 	TP_ARGS(security_info, desired_access, granted, target_kind, sd_len,
 		reason, ret));
-/* SPDX-License-Identifier: GPL-2.0-only */
+
 /*
- * APPEND-ONLY additions for kernel/trace/kacs.h (staged to
- * include/trace/events/kacs.h).
+ * ==== File-snapshot / metadata / native-open-widening events ====
  *
- * KACS object/securityfs/caap/capability/privilege/tlp tracepoints, in
- * kernel/trace/kacs.h — i.e. inside the multi-read guard, after the last
- * existing DEFINE_EVENT and before the `#include <trace/define_trace.h>` tail.
- *
- * OWNER NOTE — forward decls: kacs.h already forward-declares `struct inode;`
- * and `struct super_block;` near the top (the kacs_access_decision class relies
- * on them). The two inode-bearing classes below (kacs_file_snapshot,
- * kacs_metadata) reuse those same forward decls and read i_ino / i_sb->s_magic
- * directly in TP_fast_assign, exactly like kacs_access_decision — no policy
- * helper needed, no new include. kacs_native_open_ext carries no inode.
- *
- * The KACS_FSOP_ / KACS_FSR_ / KACS_META_ / KACS_NOX_ numeric codes are defined
- * in uapi/pkm/trace.h (already included by kacs.h via <pkm/trace.h>); see the
- * companion tail_meta_enums.h.
+ * The inode-bearing classes below (kacs_file_snapshot, kacs_metadata) read
+ * i_ino / i_sb->s_magic directly in TP_fast_assign via the forward decls at
+ * the top of this header, exactly like kacs_access_decision.
+ * kacs_native_open_ext carries no inode.
  */
 
 /* ==== kacs_file_snapshot — snapshot-grant file operation decisions ==== */
@@ -1583,20 +1570,8 @@ DECLARE_EVENT_CLASS(kacs_native_open_ext,
 DEFINE_EVENT(kacs_native_open_ext, kacs_native_open_ext,
 	TP_PROTO(u32 disposition, u32 desired_access, u8 reason, long ret),
 	TP_ARGS(disposition, desired_access, reason, ret));
-/* SPDX-License-Identifier: GPL-2.0-only */
-/*
- * Appended into include/trace/events/kacs.h, INSIDE the
- *   #if !defined(_TRACE_KACS_H) ... #endif
- * guard (i.e. before the closing "#endif / * _TRACE_KACS_H * /" and before the
- * out-of-guard "#include <trace/define_trace.h>"). Adds the object-lifecycle /
- * securityfs / CAAP / capability / privilege / TLP events. Numeric reason codes
- * come from <pkm/trace.h> (already included by kacs.h).
- *
- * kacs_object's TP_fast_assign reads inode->i_ino, so a struct inode forward
- * declaration must be in scope. kacs.h already declares `struct inode;` near
- * the top; repeated here defensively in case this block is relocated.
- */
-struct inode;
+
+/* ==== Object-lifecycle / securityfs / CAAP / capability / privilege / TLP ==== */
 
 #define kacs_object_reason_symbols					\
 	{ KACS_OBJ_DELETE_ON_CLOSE_UNLINK,	"delete-on-close-unlink" }, \

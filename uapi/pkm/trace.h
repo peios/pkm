@@ -429,13 +429,6 @@
 #define LCS_KCMD_NOTIFY			16U
 
 
-/* ==== KACS lifecycle/token tail (batch 3) ==== */
-
-/*
- * KACS token / session diagnostic codes. Values are append-only: never
- * renumber or reuse a code.
- */
-
 /* ==== KACS token / session diagnostic codes (kacs:) ==== */
 
 /*
@@ -482,8 +475,8 @@
 #define KACS_SES_CREATE_TOKEN		4U  /* create_token issued a token fd */
 #define KACS_SES_CREATE_TOKEN_PRIV_DENIED 5U /* create_token: CREATE_TOKEN privilege denied */
 /*
- * Append these to uapi/pkm/trace.h (kacs: trace system, append-only numbering).
- * Numeric diagnostic ABI for the CREDENTIAL / SETID / TASK lifecycle events.
+ * ==== KACS credential / setid / task lifecycle codes (kacs:) ====
+ *
  * Never carries token/SD bytes: token/process_state fields are opaque pointer
  * ids (or 0), the rest are enums/flags/ret.
  */
@@ -532,11 +525,6 @@
 #define KACS_TASK_ALLOC_INHERIT_ENOMEM		1U  /* process-state inherit failed (ENOMEM) */
 #define KACS_TASK_ALLOC				2U  /* task_alloc completed */
 #define KACS_TASK_FREE				3U  /* task_free teardown */
-/*
- * Append-only tail fragment for uapi/pkm/trace.h (the kacs: trace system).
- * Insert before the closing #endif of _UAPI_PKM_TRACE_H. Numeric codes are an
- * ABI for ftrace/perf/eBPF consumers: never renumber or reuse; add at the end.
- */
 
 /*
  * kacs_primary_install reason — a primary-token / impersonation credential
@@ -596,16 +584,13 @@
 #define KACS_PST_SD_WRAP_FAIL			11U /* process SD wrapper alloc failed (ENOMEM) */
 #define KACS_PST_SD_REPLACE			12U /* process SD replaced on state */
 #define KACS_PST_SOCKET_SD_ALLOC		13U /* default socket SD allocated */
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+
 /*
- * Append to uapi/pkm/trace.h (the diagnostic-ABI single source of truth).
- * Append-only: never renumber or reuse a code. Each prefix is numbered from 0.
- * These are stable numeric codes for the kacs: static tracepoints added for
- * MOUNT-POLICY, the SD query/set syscalls, and AccessCheck ingress.
+ * ==== KACS mount-policy / SD-syscall / AccessCheck ingress codes (kacs:) ====
  *
- * Invariant (as for the rest of kacs:): these records NEVER carry SD bytes,
- * token bytes, or pathnames — only security_info, access masks, a target-kind
- * enum, sd_len, sb_magic, policy values, generations, reason, and ret.
+ * These records never carry SD bytes, token bytes, or pathnames — only
+ * security_info, access masks, a target-kind enum, sd_len, sb_magic, policy
+ * values, generations, reason, and ret.
  */
 
 /*
@@ -663,14 +648,12 @@
 #define KACS_ACK_EVAL_CONTEXT		1U  /* token-eval-context gate denied (EACCES) */
 #define KACS_ACK_TOKEN_RESOLVE		2U  /* token/args resolution failed */
 #define KACS_ACK_CAAP_LOCK_FAIL		3U  /* caap-cache lock acquisition failed */
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+
 /*
- * FILE-METADATA / FILE-SNAPSHOT / NATIVE-OPEN diagnostic codes. Values are
- * append-only within each prefix, numbered from 0.
- * These decode the op / reason fields of the FILE-METADATA, FILE-SNAPSHOT,
- * and NATIVE-OPEN-widening tracepoints. No pathname / SD bytes are ever carried
- * by the events these annotate — only ino, sb_magic, access masks, op/reason
- * enums, and ret.
+ * ==== KACS file-metadata / file-snapshot / native-open codes (kacs:) ====
+ *
+ * No pathname / SD bytes are ever carried by the events these annotate — only
+ * ino, sb_magic, access masks, op/reason enums, and ret.
  */
 
 /*
@@ -737,13 +720,12 @@
 #define KACS_NOX_RESOLVE		6U  /* resolve-existing-path outcome */
 #define KACS_NOX_BUILD_CREATED_SD	7U  /* build-created-file-SD outcome */
 #define KACS_NOX_DELETE_ON_CLOSE_ARM	8U  /* delete-on-close arm outcome */
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+
 /*
- * Appended into uapi/pkm/trace.h (before its closing #endif). Append-only
- * diagnostic ABI: never renumber or reuse a code. Numeric source of truth for
- * the kacs:kacs_object / _securityfs / _caap / _capability / _privilege / _tlp
- * events. No pathname, prefix, SD, key or token bytes are ever recorded by the
- * events that carry these codes — only lengths, counts, cap numbers, privilege
+ * ==== KACS object / securityfs / caap / capability / privilege / tlp (kacs:) ====
+ *
+ * No pathname, prefix, SD, key or token bytes are ever recorded by the events
+ * that carry these codes — only lengths, counts, cap numbers, privilege
  * bitmasks, inode numbers, reason codes and ret.
  */
 
