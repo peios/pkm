@@ -98,7 +98,7 @@ fn no_sacl_leaves_pre_sacl_state_unchanged() {
 
     let result = pre_sacl!(
         &sd,
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         0,
         PipContext::default(),
@@ -141,7 +141,7 @@ fn composed_pre_sacl_applies_mic_then_pip_and_returns_metadata() {
 
     let result = pre_sacl!(
         &sd,
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         0,
         PipContext {
@@ -216,7 +216,7 @@ fn first_labels_only_still_apply_inside_composed_pre_sacl_walk() {
 
     let result = pre_sacl!(
         &sd,
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         0,
         PipContext {

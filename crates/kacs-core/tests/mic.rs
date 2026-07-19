@@ -40,7 +40,7 @@ fn missing_label_uses_default_medium_no_write_up() {
 
     let label = resolve_mandatory_label(&sd).expect("label resolution should succeed");
 
-    assert_eq!(label.integrity_level, IntegrityLevel::Medium);
+    assert_eq!(label.integrity_level, IntegrityLevel::MEDIUM);
     assert_eq!(label.mask, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP);
     assert!(!label.explicit);
 }
@@ -69,7 +69,7 @@ fn first_mandatory_label_is_used() {
 
     let label = resolve_mandatory_label(&sd).expect("label resolution should succeed");
 
-    assert_eq!(label.integrity_level, IntegrityLevel::Low);
+    assert_eq!(label.integrity_level, IntegrityLevel::LOW);
     assert_eq!(label.mask, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP);
     assert!(label.explicit);
 }
@@ -98,36 +98,41 @@ fn inherit_only_mandatory_label_is_ignored() {
 
     let label = resolve_mandatory_label(&sd).expect("label resolution should succeed");
 
-    assert_eq!(label.integrity_level, IntegrityLevel::Low);
+    assert_eq!(label.integrity_level, IntegrityLevel::LOW);
     assert_eq!(label.mask, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP);
 }
 
 #[test]
-fn invalid_label_sid_is_rejected() {
+fn nonstandard_label_sid_is_accepted_numerically() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
-    let invalid = sid_bytes([0, 0, 0, 0, 0, 16], &[12345]);
-    let sacl = acl_bytes(&[basic_ace(
-        SYSTEM_MANDATORY_LABEL_ACE_TYPE,
-        0,
-        SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
-        &invalid,
-    )]);
-    let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
-    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    // A well-formed S-1-16 SID with a single, non-standard sub-authority is a
+    // valid numeric integrity level — the level is the sub-authority value and
+    // is compared numerically (Windows interop, §10.3).
+    for level in [2048u32, 8448, 12345] {
+        let sid = sid_bytes([0, 0, 0, 0, 0, 16], &[level]);
+        let sacl = acl_bytes(&[basic_ace(
+            SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+            0,
+            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+            &sid,
+        )]);
+        let sd_bytes = sd_with_sacl(&owner, Some(&sacl));
+        let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
 
-    let err = resolve_mandatory_label(&sd).expect_err("invalid label sid must fail");
-    assert_eq!(err, KacsError::InvalidMandatoryLabelSid);
+        let label = resolve_mandatory_label(&sd).expect("numeric label should resolve");
+        assert_eq!(label.integrity_level, IntegrityLevel(level));
+    }
 }
 
 #[test]
 fn all_defined_integrity_label_sids_are_accepted() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let cases = [
-        (0, IntegrityLevel::Untrusted),
-        (4096, IntegrityLevel::Low),
-        (8192, IntegrityLevel::Medium),
-        (12288, IntegrityLevel::High),
-        (16384, IntegrityLevel::System),
+        (0, IntegrityLevel::UNTRUSTED),
+        (4096, IntegrityLevel::LOW),
+        (8192, IntegrityLevel::MEDIUM),
+        (12288, IntegrityLevel::HIGH),
+        (16384, IntegrityLevel::SYSTEM),
     ];
 
     for (rid, expected) in cases {
@@ -192,7 +197,7 @@ fn mandatory_label_reserved_mask_bits_are_ignored() {
     let mut provenance = PrivilegeProvenance::default();
     let mic = apply_mic(
         label,
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         0,
         &mapping(),
@@ -228,7 +233,7 @@ fn mandatory_label_maximum_allowed_mask_bit_is_ignored() {
     let mut provenance = PrivilegeProvenance::default();
     let mic = apply_mic(
         label,
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         0,
         &mapping(),
@@ -261,7 +266,7 @@ fn dominant_callers_receive_no_mic_predecisions() {
 
     let mic = apply_mic(
         label,
-        IntegrityLevel::System,
+        IntegrityLevel::SYSTEM,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         0,
         &mapping(),
@@ -295,7 +300,7 @@ fn non_dominant_masking_blocks_requested_categories() {
 
     let mic = apply_mic(
         label,
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         0,
         &mapping(),
@@ -330,7 +335,7 @@ fn mandatory_policy_can_disable_mic() {
 
     let mic = apply_mic(
         label,
-        IntegrityLevel::Low,
+        IntegrityLevel::LOW,
         0,
         0,
         &mapping(),
@@ -362,7 +367,7 @@ fn relabel_privilege_punches_write_owner_through_mic() {
 
     let mic = apply_mic(
         label,
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         SE_RELABEL_PRIVILEGE,
         &mapping(),

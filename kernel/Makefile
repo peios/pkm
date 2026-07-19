@@ -9,7 +9,7 @@ pkm-y := kacs/lsm.o kacs/pkm_trace.o kacs/securityfs.o kacs/kmes_rate.o kacs/tlp
 	kacs/exec.o kacs/psb.o kacs/object_lifecycle.o kacs/file_access.o \
 	kacs/file_metadata.o kacs/mount_policy.o kacs/namespace.o kacs/sd_access.o \
 	kacs/access_check.o kacs/native_open.o \
-	kacs/caap_cache.o kacs/task_lifecycle.o kacs/token_fd.o kacs/token_session.o \
+	kacs/caap_cache.o kacs/task_lifecycle.o kacs/token_fd.o kacs/token_logon_session.o \
 	kmes/kmes.o lcs/key_fd.o lcs/transaction_fd.o lcs/rsi.o \
 	lcs/access_planning.o lcs/audit.o lcs/runtime_limits.o lcs/self_config.o \
 	lcs/layer_metadata.o lcs/layer_table.o lcs/path_materialization.o \

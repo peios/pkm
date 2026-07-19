@@ -725,28 +725,28 @@ DEFINE_EVENT(kacs_psb, kacs_psb_prctl,
 	{ KACS_TOK_GET_LINKED,		"get-linked" },			\
 	{ KACS_TOK_IMPERSONATE,		"impersonate" },		\
 	{ KACS_TOK_ADJUST_DEFAULT,	"adjust-default" },		\
-	{ KACS_TOK_ADJUST_SESSIONID,	"adjust-sessionid" },		\
+	{ KACS_TOK_ADJUST_INTERACTIVITY_SCOPE,	"adjust-sessionid" },		\
 	{ KACS_TOK_UNKNOWN,		"unknown" }
 
 /*
  * One token-fd ioctl verb outcome. `token` is an opaque numeric id (0 when
  * unavailable); `required_access` is the access-mask bit the verb's gate
  * demands; `result_fd` is the issued fd for the fd-producing verbs (-1
- * otherwise); `session_id` is the link/adjust-sessionid id (0 otherwise).
+ * otherwise); `logon_session_id` is the link/adjust-sessionid id (0 otherwise).
  * `ret` is the outcome (0 == allow; -EACCES == access-mask-gate deny). No
  * token, SD, or key bytes.
  */
 DECLARE_EVENT_CLASS(kacs_token_ioctl,
 
 	TP_PROTO(u64 token, u8 cmd, u32 access_mask, u32 required_access,
-		 s32 result_fd, u64 session_id, long ret),
+		 s32 result_fd, u64 logon_session_id, long ret),
 
 	TP_ARGS(token, cmd, access_mask, required_access, result_fd,
-		session_id, ret),
+		logon_session_id, ret),
 
 	TP_STRUCT__entry(
 		__field(	u64,	token		)
-		__field(	u64,	session_id	)
+		__field(	u64,	logon_session_id	)
 		__field(	long,	ret		)
 		__field(	u32,	access_mask	)
 		__field(	u32,	required_access	)
@@ -756,7 +756,7 @@ DECLARE_EVENT_CLASS(kacs_token_ioctl,
 
 	TP_fast_assign(
 		__entry->token = token;
-		__entry->session_id = session_id;
+		__entry->logon_session_id = logon_session_id;
 		__entry->ret = ret;
 		__entry->access_mask = access_mask;
 		__entry->required_access = required_access;
@@ -764,19 +764,19 @@ DECLARE_EVENT_CLASS(kacs_token_ioctl,
 		__entry->cmd = cmd;
 	),
 
-	TP_printk("cmd=%s verdict=%s token=0x%llx access=0x%x required=0x%x result_fd=%d session_id=%llu ret=%ld",
+	TP_printk("cmd=%s verdict=%s token=0x%llx access=0x%x required=0x%x result_fd=%d logon_session_id=%llu ret=%ld",
 		__print_symbolic(__entry->cmd, kacs_token_ioctl_cmd_symbols),
 		__entry->ret ? "deny" : "allow",
 		__entry->token, __entry->access_mask, __entry->required_access,
-		__entry->result_fd, __entry->session_id, __entry->ret)
+		__entry->result_fd, __entry->logon_session_id, __entry->ret)
 );
 
 /* Token-fd ioctl verb outcome / access-mask gate (token_fd.c) */
 DEFINE_EVENT(kacs_token_ioctl, kacs_token_ioctl,
 	TP_PROTO(u64 token, u8 cmd, u32 access_mask, u32 required_access,
-		 s32 result_fd, u64 session_id, long ret),
+		 s32 result_fd, u64 logon_session_id, long ret),
 	TP_ARGS(token, cmd, access_mask, required_access, result_fd,
-		session_id, ret));
+		logon_session_id, ret));
 
 #define kacs_token_ref_reason_symbols					\
 	{ KACS_TREF_TO_FD,		"to-fd" },			\
@@ -819,7 +819,7 @@ DEFINE_EVENT(kacs_token_ref, kacs_token_ref,
 	TP_PROTO(u64 token, u32 access_mask, u8 reason, long ret),
 	TP_ARGS(token, access_mask, reason, ret));
 
-#define kacs_session_reason_symbols					\
+#define kacs_logon_session_reason_symbols					\
 	{ KACS_SES_CREATE,			"create" },		\
 	{ KACS_SES_CREATE_PRIV_DENIED,		"create-priv-denied" },	\
 	{ KACS_SES_DESTROY,			"destroy" },		\
@@ -828,37 +828,37 @@ DEFINE_EVENT(kacs_token_ref, kacs_token_ref,
 	{ KACS_SES_CREATE_TOKEN_PRIV_DENIED,	"create-token-priv-denied" }
 
 /*
- * One session / token-creation-surface outcome. `session_id` is the session id
+ * One session / token-creation-surface outcome. `logon_session_id` is the session id
  * (0 when not applicable, e.g. create_token). `ret` is the outcome (0 == ok;
  * the *_PRIV_DENIED reasons carry the gate errno). No token or spec bytes.
  */
-DECLARE_EVENT_CLASS(kacs_session,
+DECLARE_EVENT_CLASS(kacs_logon_session,
 
-	TP_PROTO(u64 session_id, u8 reason, long ret),
+	TP_PROTO(u64 logon_session_id, u8 reason, long ret),
 
-	TP_ARGS(session_id, reason, ret),
+	TP_ARGS(logon_session_id, reason, ret),
 
 	TP_STRUCT__entry(
-		__field(	u64,	session_id	)
+		__field(	u64,	logon_session_id	)
 		__field(	long,	ret		)
 		__field(	u8,	reason		)
 	),
 
 	TP_fast_assign(
-		__entry->session_id = session_id;
+		__entry->logon_session_id = logon_session_id;
 		__entry->ret = ret;
 		__entry->reason = reason;
 	),
 
-	TP_printk("reason=%s session_id=%llu ret=%ld",
-		__print_symbolic(__entry->reason, kacs_session_reason_symbols),
-		__entry->session_id, __entry->ret)
+	TP_printk("reason=%s logon_session_id=%llu ret=%ld",
+		__print_symbolic(__entry->reason, kacs_logon_session_reason_symbols),
+		__entry->logon_session_id, __entry->ret)
 );
 
-/* Session create/destroy + create_token privilege gates (token_session.c) */
-DEFINE_EVENT(kacs_session, kacs_session,
-	TP_PROTO(u64 session_id, u8 reason, long ret),
-	TP_ARGS(session_id, reason, ret));
+/* LogonSession create/destroy + create_token privilege gates (token_logon_session.c) */
+DEFINE_EVENT(kacs_logon_session, kacs_logon_session,
+	TP_PROTO(u64 logon_session_id, u8 reason, long ret),
+	TP_ARGS(logon_session_id, reason, ret));
 
 /*
  * ==== Credential / setid / task lifecycle events ====
@@ -1612,9 +1612,9 @@ DEFINE_EVENT(kacs_object, kacs_object,
 	TP_ARGS(inode, reason, ret));
 
 #define kacs_securityfs_reason_symbols					\
-	{ KACS_SFS_SESSIONS_NO_TOKEN,		"sessions-no-token" },	\
-	{ KACS_SFS_SESSIONS_PIP_CONTEXT,	"sessions-pip-context" }, \
-	{ KACS_SFS_SESSIONS_ACCESS_CHECK,	"sessions-access-check" }, \
+	{ KACS_SFS_LOGON_SESSIONS_NO_TOKEN,		"sessions-no-token" },	\
+	{ KACS_SFS_LOGON_SESSIONS_PIP_CONTEXT,	"sessions-pip-context" }, \
+	{ KACS_SFS_LOGON_SESSIONS_ACCESS_CHECK,	"sessions-access-check" }, \
 	{ KACS_SFS_OPEN_SELF,			"open-self" },		\
 	{ KACS_SFS_INIT,			"init" }
 

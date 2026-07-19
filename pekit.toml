@@ -324,52 +324,65 @@ command = """
 
 # Regenerate the language bindings under uapi/generated/{go,lua,rust} from the
 # canonical uapi/pkm headers, in place (each gen.sh runs the codegen-safe lint
-# first). Independent of the kernel chain — operates on the committed headers.
-# test.uapi is the matching drift gate (committed == fresh regen).
-[build.uapi]
+# first). This is a `gen` target, not a build: its product is committed source,
+# not an out/ artifact. Independent of the kernel chain — operates on the
+# committed headers. verify_command below is the matching drift gate.
+[gen.uapi]
 command = """
 bash uapi/generated/rust/gen.sh
 bash uapi/generated/lua/gen.sh
 bash uapi/generated/go/gen.sh
-# This target's real product is in-tree (uapi/generated); the wrap runs the
-# container as the host user, so no chown is needed. Drop a manifest of what
-# was regenerated into $PEKIT_OUT so pekit sees a non-empty output.
-( cd uapi/generated && find . -type f | sort | xargs sha256sum ) > "$PEKIT_OUT/bindings.sha256"
 """
+
+# Drift gate (`pekit verify uapi`): the committed bindings must match a fresh
+# regen. Regenerates into the throwaway scratch $PEKIT_OUT — never the tree —
+# and diffs. Standalone-compile is a separate concern; it stays in [test.uapi].
+verify_command = """
+work="$PEKIT_OUT/uapi"
+cp -a uapi "$work"
+bash "$work/generated/rust/gen.sh"
+bash "$work/generated/lua/gen.sh"
+bash "$work/generated/go/gen.sh"
+if ! diff -ru uapi/generated "$work/generated"; then
+	echo "uapi: committed bindings differ from a fresh regen — run 'pekit gen uapi'" >&2
+	exit 1
+fi
+echo "uapi: bindings in sync with uapi/pkm"
+"""
+
+# The generated bindings are downstream consumer SDKs: no build target stages
+# them (the kernel/headers stages carry the canonical uapi/pkm/*.h, not the
+# language mirrors), and no test consumes them. So gate no build and no test
+# locally — the drift gate runs on demand via `pekit verify uapi` (and in CI /
+# the pre-push hook), not as a pre-flight that would drag the codegen toolchain
+# into every kernel build.
+verify_on_build = []
+verify_on_test = []
 
 # Codegen for the three binding flavours: clang + libclang for the Rust bindgen
 # pass, lua for the Lua mirror, golang (go + gofmt) for the Go mirror; python3 for
 # the codegen-safe lint. bindgen + rustfmt themselves come from the rustup
-# toolchain in the build env/wrap, not a distro package.
-[build.uapi.dependencies.peipkg]
+# toolchain in the build env/wrap, not a distro package. verify_command uses the
+# same toolchain, so no verify_dependencies override is needed.
+[gen.uapi.dependencies.peipkg]
 clang = "*"
 clang-devel = "*"
 lua = "*"
 golang = "*"
 python3 = "*"
 
-[build.uapi.dependencies.apt]
+[gen.uapi.dependencies.apt]
 clang-18 = "*"
 libclang-18-dev = "*"
 "lua5.4" = "*"
 golang-go = "*"
 python3 = "*"
 
-# Drift gate for the UAPI: (1) the canonical headers must compile standalone
-# with a stock userspace compiler; (2) the committed bindings must match a
-# fresh regen. Regenerates into a throwaway copy — never mutates the tree —
-# and diffs. No needs; operates on the committed uapi/.
+# Standalone-compile gate for the UAPI: the canonical headers must compile with
+# a stock userspace compiler. This is correctness, not drift (the drift half is
+# gen.uapi's verify_command) — so it stays a plain test. No needs; operates on
+# the committed uapi/.
 [test.uapi]
 command = """
 bash uapi/check-userspace-clean.sh
-work="$(mktemp -d)"
-cp -a uapi "$work/uapi"
-bash "$work/uapi/generated/rust/gen.sh"
-bash "$work/uapi/generated/lua/gen.sh"
-bash "$work/uapi/generated/go/gen.sh"
-if ! diff -ru uapi/generated "$work/uapi/generated"; then
-	echo "test.uapi: committed bindings differ from a fresh regen — run 'pekit build uapi'" >&2
-	exit 1
-fi
-echo "test.uapi: headers userspace-clean and bindings in sync"
 """

@@ -20,7 +20,7 @@
 
 static struct dentry *pkm_kacs_securityfs_dir;
 static struct dentry *pkm_kacs_securityfs_self;
-static struct dentry *pkm_kacs_securityfs_sessions;
+static struct dentry *pkm_kacs_securityfs_logon_sessions;
 
 int pkm_kacs_securityfs_open_self_token_file(struct file *file)
 {
@@ -53,7 +53,7 @@ static const struct file_operations pkm_kacs_securityfs_self_fops = {
 	.llseek = noop_llseek,
 };
 
-static ssize_t pkm_kacs_securityfs_sessions_read(struct file *file,
+static ssize_t pkm_kacs_securityfs_logon_sessions_read(struct file *file,
 						 char __user *buf,
 						 size_t count, loff_t *ppos)
 {
@@ -68,24 +68,24 @@ static ssize_t pkm_kacs_securityfs_sessions_read(struct file *file,
 	(void)file;
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	if (!subject_token) {
-		trace_kacs_securityfs(KACS_SFS_SESSIONS_NO_TOKEN, -EACCES);
+		trace_kacs_securityfs(KACS_SFS_LOGON_SESSIONS_NO_TOKEN, -EACCES);
 		return -EACCES;
 	}
 
 	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
 	if (ret) {
-		trace_kacs_securityfs(KACS_SFS_SESSIONS_PIP_CONTEXT, ret);
+		trace_kacs_securityfs(KACS_SFS_LOGON_SESSIONS_PIP_CONTEXT, ret);
 		return ret;
 	}
 
-	ret = kacs_rust_check_securityfs_sessions_read(subject_token, pip_type,
+	ret = kacs_rust_check_securityfs_logon_sessions_read(subject_token, pip_type,
 						       pip_trust);
 	if (ret) {
-		trace_kacs_securityfs(KACS_SFS_SESSIONS_ACCESS_CHECK, ret);
+		trace_kacs_securityfs(KACS_SFS_LOGON_SESSIONS_ACCESS_CHECK, ret);
 		return ret;
 	}
 
-	ret = kacs_rust_securityfs_sessions_listing(NULL, 0, &required);
+	ret = kacs_rust_securityfs_logon_sessions_listing(NULL, 0, &required);
 	if (ret)
 		return ret;
 	if (*ppos >= required || !required)
@@ -95,7 +95,7 @@ static ssize_t pkm_kacs_securityfs_sessions_read(struct file *file,
 	if (!kbuf)
 		return -ENOMEM;
 
-	ret = kacs_rust_securityfs_sessions_listing(kbuf, required, &required);
+	ret = kacs_rust_securityfs_logon_sessions_listing(kbuf, required, &required);
 	if (ret) {
 		kvfree(kbuf);
 		return ret;
@@ -106,8 +106,8 @@ static ssize_t pkm_kacs_securityfs_sessions_read(struct file *file,
 	return copied;
 }
 
-static const struct file_operations pkm_kacs_securityfs_sessions_fops = {
-	.read = pkm_kacs_securityfs_sessions_read,
+static const struct file_operations pkm_kacs_securityfs_logon_sessions_fops = {
+	.read = pkm_kacs_securityfs_logon_sessions_read,
 	.llseek = default_llseek,
 };
 
@@ -116,7 +116,7 @@ static int __init pkm_kacs_securityfs_init(void)
 	int ret;
 
 	if (pkm_kacs_securityfs_dir || pkm_kacs_securityfs_self ||
-	    pkm_kacs_securityfs_sessions)
+	    pkm_kacs_securityfs_logon_sessions)
 		return 0;
 
 	pkm_kacs_securityfs_dir = securityfs_create_dir("kacs", NULL);
@@ -141,12 +141,12 @@ static int __init pkm_kacs_securityfs_init(void)
 		return ret;
 	}
 
-	pkm_kacs_securityfs_sessions = securityfs_create_file(
+	pkm_kacs_securityfs_logon_sessions = securityfs_create_file(
 		"sessions", 0444, pkm_kacs_securityfs_dir, NULL,
-		&pkm_kacs_securityfs_sessions_fops);
-	if (IS_ERR(pkm_kacs_securityfs_sessions)) {
-		ret = PTR_ERR(pkm_kacs_securityfs_sessions);
-		pkm_kacs_securityfs_sessions = NULL;
+		&pkm_kacs_securityfs_logon_sessions_fops);
+	if (IS_ERR(pkm_kacs_securityfs_logon_sessions)) {
+		ret = PTR_ERR(pkm_kacs_securityfs_logon_sessions);
+		pkm_kacs_securityfs_logon_sessions = NULL;
 		securityfs_remove(pkm_kacs_securityfs_self);
 		pkm_kacs_securityfs_self = NULL;
 		securityfs_remove(pkm_kacs_securityfs_dir);

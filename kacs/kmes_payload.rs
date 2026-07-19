@@ -318,7 +318,7 @@ fn encode_subject_token_map(
     writer.write_key(b"group_sids")?;
     encode_sid_array(&mut writer, token.subject.groups)?;
     writer.write_key(b"integrity_level")?;
-    writer.write_u64(token.integrity_level as u32 as u64)?;
+    writer.write_u64(token.integrity_level.0 as u64)?;
     writer.write_key(b"pip_type")?;
     writer.write_u64(effective_pip.pip_type as u64)?;
     writer.write_key(b"pip_trust")?;

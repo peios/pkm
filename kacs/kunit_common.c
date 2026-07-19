@@ -93,7 +93,7 @@ PKM_KUNIT_ASSERT_OFFSET(struct kacs_link_tokens_args, elevated_fd, 0);
 
 PKM_KUNIT_ASSERT_OFFSET(struct kacs_link_tokens_args, filtered_fd, 4);
 
-PKM_KUNIT_ASSERT_OFFSET(struct kacs_link_tokens_args, session_id, 8);
+PKM_KUNIT_ASSERT_OFFSET(struct kacs_link_tokens_args, logon_session_id, 8);
 
 
 PKM_KUNIT_ASSERT_SIZE(struct kacs_get_linked_token_args, 4);
@@ -170,7 +170,7 @@ PKM_KUNIT_ASSERT_IOC(KACS_IOC_IMPERSONATE, 8, _IOC_NONE, 0);
 PKM_KUNIT_ASSERT_IOC(KACS_IOC_ADJUST_DEFAULT, 9, _IOC_WRITE,
 		     sizeof(struct kacs_adjust_default_args));
 
-PKM_KUNIT_ASSERT_IOC(KACS_IOC_ADJUST_SESSIONID, 10, _IOC_WRITE, sizeof(u32));
+PKM_KUNIT_ASSERT_IOC(KACS_IOC_ADJUST_INTERACTIVITY_SCOPE, 10, _IOC_WRITE, sizeof(u32));
 
 
 bool pkm_kunit_mem_read(void *ctx, u64 user_ptr, void *dst, size_t len)
@@ -982,7 +982,7 @@ void pkm_kunit_cleanup_linked_pair(struct kunit *test,
 		flush_delayed_fput();
 		pair->filtered_fd = -1;
 	}
-	pair->session_id = 0;
+	pair->logon_session_id = 0;
 }
 
 
@@ -1038,7 +1038,7 @@ int pkm_kunit_create_link_candidates(struct kunit *test,
 	out->source_token = source_token;
 	out->elevated_fd = source_fd;
 	out->filtered_fd = duplicate.result_fd;
-	out->session_id = snapshot.session_id;
+	out->logon_session_id = snapshot.logon_session_id;
 	return 0;
 }
 
@@ -1056,7 +1056,7 @@ int pkm_kunit_create_linked_pair(struct kunit *test,
 
 	link.elevated_fd = (s32)out->elevated_fd;
 	link.filtered_fd = (s32)out->filtered_fd;
-	link.session_id = out->session_id;
+	link.logon_session_id = out->logon_session_id;
 	ret = (int)pkm_kacs_kunit_token_fd_link((int)out->elevated_fd,
 						 caller_token, &link);
 	if (ret) {
@@ -1089,7 +1089,7 @@ int pkm_kunit_create_dynamic_linked_pair(struct kunit *test,
 	u8 token_spec[256] = { };
 	size_t session_spec_len;
 	size_t token_spec_len;
-	u64 session_id = 0;
+	u64 logon_session_id = 0;
 	long elevated_fd;
 	long filtered_fd;
 	int ret;
@@ -1101,17 +1101,17 @@ int pkm_kunit_create_dynamic_linked_pair(struct kunit *test,
 	out->elevated_fd = -1;
 	out->filtered_fd = -1;
 
-	session_spec_len = pkm_kunit_build_session_spec(
+	session_spec_len = pkm_kunit_build_logon_session_spec(
 		session_spec, PKM_KUNIT_LOGON_TYPE_SERVICE, "Negotiate",
 		pkm_kunit_local_service_sid, sizeof(pkm_kunit_local_service_sid));
 	if ((long)session_spec_len <= 0)
 		return -EINVAL;
-	ret = (int)pkm_kacs_kunit_create_session_for_subject(
-		caller_token, session_spec, session_spec_len, &session_id);
+	ret = (int)pkm_kacs_kunit_create_logon_session_for_subject(
+		caller_token, session_spec, session_spec_len, &logon_session_id);
 	if (ret)
 		return ret;
 
-	spec_args.session_id = session_id;
+	spec_args.logon_session_id = logon_session_id;
 	token_spec_len = pkm_kunit_build_token_spec(token_spec,
 						    sizeof(token_spec),
 						    &spec_args);
@@ -1140,11 +1140,11 @@ int pkm_kunit_create_dynamic_linked_pair(struct kunit *test,
 		return (int)filtered_fd;
 	}
 	out->filtered_fd = filtered_fd;
-	out->session_id = session_id;
+	out->logon_session_id = logon_session_id;
 
 	link.elevated_fd = (s32)elevated_fd;
 	link.filtered_fd = (s32)filtered_fd;
-	link.session_id = session_id;
+	link.logon_session_id = logon_session_id;
 	ret = (int)pkm_kacs_kunit_token_fd_link((int)elevated_fd,
 						 caller_token, &link);
 	if (ret) {
@@ -2008,7 +2008,7 @@ bool pkm_kunit_expect_caap_diagnostic_schema(
 
 bool pkm_kunit_expect_logon_destroyed_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
-	u64 expected_session_id, u32 expected_logon_type,
+	u64 expected_logon_session_id, u32 expected_logon_type,
 	const char *expected_auth_package, u64 expected_created_at)
 {
 	struct pkm_kunit_msgpack_view root = { };
@@ -2019,7 +2019,7 @@ bool pkm_kunit_expect_logon_destroyed_schema(
 	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 5))
 		return false;
 	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root, "session_id",
-						expected_session_id);
+						expected_logon_session_id);
 	ok &= pkm_kunit_msgpack_expect_bin_key(test, &root, "user_sid",
 					       pkm_kunit_local_service_sid,
 					       sizeof(pkm_kunit_local_service_sid));
@@ -2040,7 +2040,7 @@ void pkm_kunit_expect_boot_snapshot_eq_internal(
 	u32 i;
 
 	KUNIT_EXPECT_PTR_EQ(test, lhs->session_ptr, rhs->session_ptr);
-	KUNIT_EXPECT_EQ(test, lhs->session_id, rhs->session_id);
+	KUNIT_EXPECT_EQ(test, lhs->logon_session_id, rhs->logon_session_id);
 	KUNIT_EXPECT_EQ(test, lhs->auth_id, rhs->auth_id);
 	if (compare_identity) {
 		KUNIT_EXPECT_EQ(test, lhs->token_id, rhs->token_id);
@@ -2083,8 +2083,8 @@ void pkm_kunit_expect_boot_snapshot_eq_internal(
 	KUNIT_EXPECT_EQ(test, lhs->token_type, rhs->token_type);
 	KUNIT_EXPECT_EQ(test, lhs->impersonation_level, rhs->impersonation_level);
 	KUNIT_EXPECT_EQ(test, lhs->mandatory_policy, rhs->mandatory_policy);
-	KUNIT_EXPECT_EQ(test, lhs->interactive_session_id,
-			rhs->interactive_session_id);
+	KUNIT_EXPECT_EQ(test, lhs->interactivity_scope,
+			rhs->interactivity_scope);
 	KUNIT_EXPECT_EQ(test, lhs->projected_uid, rhs->projected_uid);
 	KUNIT_EXPECT_EQ(test, lhs->projected_gid, rhs->projected_gid);
 	KUNIT_EXPECT_EQ(test, lhs->audit_policy, rhs->audit_policy);
@@ -2132,7 +2132,7 @@ void pkm_kunit_expect_boot_snapshot_scalars_eq_internal(
 	const struct pkm_kacs_boot_snapshot *rhs, bool compare_identity)
 {
 	KUNIT_EXPECT_PTR_EQ(test, lhs->session_ptr, rhs->session_ptr);
-	KUNIT_EXPECT_EQ(test, lhs->session_id, rhs->session_id);
+	KUNIT_EXPECT_EQ(test, lhs->logon_session_id, rhs->logon_session_id);
 	KUNIT_EXPECT_EQ(test, lhs->auth_id, rhs->auth_id);
 	if (compare_identity) {
 		KUNIT_EXPECT_EQ(test, lhs->token_id, rhs->token_id);
@@ -2157,8 +2157,8 @@ void pkm_kunit_expect_boot_snapshot_scalars_eq_internal(
 	KUNIT_EXPECT_EQ(test, lhs->token_type, rhs->token_type);
 	KUNIT_EXPECT_EQ(test, lhs->impersonation_level, rhs->impersonation_level);
 	KUNIT_EXPECT_EQ(test, lhs->mandatory_policy, rhs->mandatory_policy);
-	KUNIT_EXPECT_EQ(test, lhs->interactive_session_id,
-			rhs->interactive_session_id);
+	KUNIT_EXPECT_EQ(test, lhs->interactivity_scope,
+			rhs->interactivity_scope);
 	KUNIT_EXPECT_EQ(test, lhs->projected_uid, rhs->projected_uid);
 	KUNIT_EXPECT_EQ(test, lhs->projected_gid, rhs->projected_gid);
 	KUNIT_EXPECT_EQ(test, lhs->audit_policy, rhs->audit_policy);
@@ -2238,7 +2238,7 @@ void pkm_kunit_expect_guid_ne(struct kunit *test,
 }
 
 
-size_t pkm_kunit_build_session_spec(u8 *dst, u8 logon_type,
+size_t pkm_kunit_build_logon_session_spec(u8 *dst, u8 logon_type,
 					   const char *auth_pkg,
 					   const u8 *user_sid,
 					   size_t user_sid_len)
@@ -2403,7 +2403,7 @@ size_t pkm_kunit_build_token_spec(
 	pkm_kunit_write_u32(dst, 40, projected_gid);
 	pkm_kunit_write_u32(dst, 44, args->audit_policy);
 	pkm_kunit_write_u64(dst, 48, args->expiration);
-	pkm_kunit_write_u64(dst, 56, args->session_id);
+	pkm_kunit_write_u64(dst, 56, args->logon_session_id);
 	pkm_kunit_write_u32(dst, 64, args->owner_sid_index);
 	pkm_kunit_write_u32(dst, 68, args->primary_group_index);
 	memcpy(dst + 72, args->source_name, 8);
@@ -2501,16 +2501,16 @@ size_t pkm_kunit_build_token_spec(
 	pkm_kunit_write_u32(dst, 172,
 			    args->restricted_device_group_count);
 	pkm_kunit_write_u64(dst, 176, args->origin);
-	pkm_kunit_write_u32(dst, 184, args->interactive_session_id);
+	pkm_kunit_write_u32(dst, 184, args->interactivity_scope);
 
 	return offset;
 }
 
 
-void pkm_kunit_build_logon_sid(u64 session_id, u8 out[20])
+void pkm_kunit_build_logon_sid(u64 logon_session_id, u8 out[20])
 {
-	u32 high = (u32)(session_id >> 32);
-	u32 low = (u32)session_id;
+	u32 high = (u32)(logon_session_id >> 32);
+	u32 low = (u32)logon_session_id;
 
 	out[0] = 1;
 	out[1] = 3;
@@ -2827,7 +2827,7 @@ long pkm_kunit_create_confined_access_check_token(
 	u8 session_spec[128] = { };
 	u8 token_spec[512] = { };
 	const void *subject_token;
-	u64 session_id = 0;
+	u64 logon_session_id = 0;
 	size_t spec_len;
 	long fd;
 	long ret;
@@ -2840,18 +2840,18 @@ long pkm_kunit_create_confined_access_check_token(
 	if (!subject_token)
 		return -EACCES;
 
-	spec_len = pkm_kunit_build_session_spec(
+	spec_len = pkm_kunit_build_logon_session_spec(
 		session_spec, PKM_KUNIT_LOGON_TYPE_SERVICE, "Negotiate",
 		pkm_kunit_local_service_sid, sizeof(pkm_kunit_local_service_sid));
 	if (!spec_len)
 		return -EINVAL;
 
-	ret = pkm_kacs_kunit_create_session_for_subject(
-		subject_token, session_spec, spec_len, &session_id);
+	ret = pkm_kacs_kunit_create_logon_session_for_subject(
+		subject_token, session_spec, spec_len, &logon_session_id);
 	if (ret)
 		return ret;
 
-	spec_args.session_id = session_id;
+	spec_args.logon_session_id = logon_session_id;
 	spec_len = pkm_kunit_build_token_spec(token_spec, sizeof(token_spec),
 					      &spec_args);
 	if (!spec_len)
@@ -4010,7 +4010,7 @@ long pkm_kunit_create_condition_token_ex(
 	u8 user_claims[128] = { };
 	u8 device_claims[128] = { };
 	const void *subject_token;
-	u64 session_id = 0;
+	u64 logon_session_id = 0;
 	size_t user_claims_len = 0;
 	size_t device_claims_len = 0;
 	size_t entry_len;
@@ -4026,18 +4026,18 @@ long pkm_kunit_create_condition_token_ex(
 	if (!subject_token)
 		return -EACCES;
 
-	spec_len = pkm_kunit_build_session_spec(
+	spec_len = pkm_kunit_build_logon_session_spec(
 		session_spec, PKM_KUNIT_LOGON_TYPE_SERVICE, "Negotiate",
 		pkm_kunit_local_service_sid, sizeof(pkm_kunit_local_service_sid));
 	if (!spec_len)
 		return -EINVAL;
 
-	ret = pkm_kacs_kunit_create_session_for_subject(
-		subject_token, session_spec, spec_len, &session_id);
+	ret = pkm_kacs_kunit_create_logon_session_for_subject(
+		subject_token, session_spec, spec_len, &logon_session_id);
 	if (ret)
 		return ret;
 
-	spec_args.session_id = session_id;
+	spec_args.logon_session_id = logon_session_id;
 	if (with_device_group) {
 		spec_args.device_groups = device_groups;
 		spec_args.device_group_count = ARRAY_SIZE(device_groups);

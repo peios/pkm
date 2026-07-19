@@ -68,9 +68,9 @@ type Kacs_group_entry struct {
 	Enable uint32
 }
 type Kacs_link_tokens_args struct {
-	Elevated_fd int32
-	Filtered_fd int32
-	Session_id  uint64
+	Elevated_fd      int32
+	Filtered_fd      int32
+	Logon_session_id uint64
 }
 type Kacs_mount_policy_args struct {
 	Policy          uint32

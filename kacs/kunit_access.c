@@ -666,7 +666,7 @@ static void pkm_kunit_access_check_audit_policy_follows_impersonation(
 	const void *primary_token;
 	size_t session_spec_len;
 	size_t token_spec_len;
-	u64 session_id = 0;
+	u64 logon_session_id = 0;
 	u32 granted = 0;
 	long fd;
 	long ret;
@@ -683,17 +683,17 @@ static void pkm_kunit_access_check_audit_policy_follows_impersonation(
 	KUNIT_EXPECT_EQ(test, summary.audit_event_count, 0U);
 	KUNIT_EXPECT_EQ(test, summary.privilege_use_event_count, 0U);
 
-	session_spec_len = pkm_kunit_build_session_spec(
+	session_spec_len = pkm_kunit_build_logon_session_spec(
 		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
 		pkm_kunit_local_service_sid, sizeof(pkm_kunit_local_service_sid));
 	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
 	KUNIT_ASSERT_EQ(test,
-			pkm_kacs_kunit_create_session_for_subject(
+			pkm_kacs_kunit_create_logon_session_for_subject(
 				primary_token, session_spec, session_spec_len,
-				&session_id),
+				&logon_session_id),
 			0L);
 
-	spec_args.session_id = session_id;
+	spec_args.logon_session_id = logon_session_id;
 	token_spec_len = pkm_kunit_build_token_spec(token_spec,
 						    sizeof(token_spec),
 						    &spec_args);
@@ -1228,7 +1228,15 @@ static void pkm_kunit_access_check_invalid_mandatory_label_sid_fails_closed(
 		1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
 		2, 0, 28, 0, 1, 0, 0, 0,
 		17, 0, 20, 0, 2, 0, 0, 0,
-		1, 1, 0, 0, 0, 0, 0, 16, 57, 48, 0, 0,
+		/*
+		 * Mandatory-label SID with a non-integrity identifier authority
+		 * (S-1-15-12345): malformed, since a valid label requires
+		 * authority S-1-16 with exactly one sub-authority. Note any
+		 * single S-1-16 sub-authority is now a valid numeric level, so
+		 * S-1-16-12345 alone would be accepted; the fail-closed path is
+		 * exercised here via the wrong authority.
+		 */
+		1, 1, 0, 0, 0, 0, 0, 15, 57, 48, 0, 0,
 		2, 0, 28, 0, 1, 0, 0, 0,
 		0, 0, 20, 0, 0, 0, 2, 0,
 		1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
@@ -1860,7 +1868,7 @@ static void pkm_kunit_access_audit_policy_msgpack_schema(struct kunit *test)
 	size_t session_spec_len;
 	size_t token_spec_len;
 	size_t written = 0;
-	u64 session_id = 0;
+	u64 logon_session_id = 0;
 	u32 granted = 0;
 	long fd;
 	long ret;
@@ -1872,17 +1880,17 @@ static void pkm_kunit_access_audit_policy_msgpack_schema(struct kunit *test)
 	primary_token = pkm_kacs_current_primary_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, primary_token);
 
-	session_spec_len = pkm_kunit_build_session_spec(
+	session_spec_len = pkm_kunit_build_logon_session_spec(
 		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
 		pkm_kunit_system_sid, sizeof(pkm_kunit_system_sid));
 	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
 	KUNIT_ASSERT_EQ(test,
-			pkm_kacs_kunit_create_session_for_subject(
+			pkm_kacs_kunit_create_logon_session_for_subject(
 				primary_token, session_spec, session_spec_len,
-				&session_id),
+				&logon_session_id),
 			0L);
 
-	spec_args.session_id = session_id;
+	spec_args.logon_session_id = logon_session_id;
 	token_spec_len = pkm_kunit_build_token_spec(token_spec,
 						    sizeof(token_spec),
 						    &spec_args);
@@ -1979,7 +1987,7 @@ static void pkm_kunit_access_audit_subject_group_sids_msgpack_schema(
 	size_t session_spec_len;
 	size_t token_spec_len;
 	size_t written = 0;
-	u64 session_id = 0;
+	u64 logon_session_id = 0;
 	u32 granted = 0;
 	long fd;
 	long ret;
@@ -1991,17 +1999,17 @@ static void pkm_kunit_access_audit_subject_group_sids_msgpack_schema(
 	primary_token = pkm_kacs_current_primary_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, primary_token);
 
-	session_spec_len = pkm_kunit_build_session_spec(
+	session_spec_len = pkm_kunit_build_logon_session_spec(
 		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
 		pkm_kunit_system_sid, sizeof(pkm_kunit_system_sid));
 	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
 	KUNIT_ASSERT_EQ(test,
-			pkm_kacs_kunit_create_session_for_subject(
+			pkm_kacs_kunit_create_logon_session_for_subject(
 				primary_token, session_spec, session_spec_len,
-				&session_id),
+				&logon_session_id),
 			0L);
 	memcpy(expected_groups, groups, sizeof(groups));
-	pkm_kunit_build_logon_sid(session_id, logon_sid);
+	pkm_kunit_build_logon_sid(logon_session_id, logon_sid);
 	expected_groups[ARRAY_SIZE(groups)].sid = logon_sid;
 	expected_groups[ARRAY_SIZE(groups)].sid_len = sizeof(logon_sid);
 	expected_groups[ARRAY_SIZE(groups)].attributes =
@@ -2010,7 +2018,7 @@ static void pkm_kunit_access_audit_subject_group_sids_msgpack_schema(
 		PKM_KUNIT_SE_GROUP_ENABLED |
 		PKM_KUNIT_SE_GROUP_LOGON_ID;
 
-	spec_args.session_id = session_id;
+	spec_args.logon_session_id = logon_session_id;
 	token_spec_len = pkm_kunit_build_token_spec(token_spec,
 						    sizeof(token_spec),
 						    &spec_args);

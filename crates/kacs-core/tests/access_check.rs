@@ -107,7 +107,7 @@ fn scoped_policy_ace(policy_sid: &[u8]) -> Vec<u8> {
 }
 
 fn mandatory_label_ace(mask: u32, integrity_level: IntegrityLevel) -> Vec<u8> {
-    let sid = sid_bytes([0, 0, 0, 0, 0, 16], &[integrity_level as u32]);
+    let sid = sid_bytes([0, 0, 0, 0, 0, 16], &[integrity_level.0]);
     basic_ace(SYSTEM_MANDATORY_LABEL_ACE_TYPE, 0, mask, &sid)
 }
 
@@ -206,7 +206,7 @@ fn primary_token_with_groups<'a>(
         token_type: TokenType::Primary,
         impersonation_level: ImpersonationLevel::Impersonation,
         privileges: TokenPrivileges::default(),
-        integrity_level: IntegrityLevel::Medium,
+        integrity_level: IntegrityLevel::MEDIUM,
         mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         restricted: RestrictedTokenContext::default(),
         confinement: Default::default(),
@@ -247,7 +247,7 @@ fn scalar_access_check_ordered_golden_vector_composes_all_major_stages() {
         basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &confinement_sid),
     ]);
     let sacl = acl_bytes(&[
-        mandatory_label_ace(SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, IntegrityLevel::High),
+        mandatory_label_ace(SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, IntegrityLevel::HIGH),
         process_trust_label_ace(GENERIC_READ | GENERIC_WRITE, 1, 1),
         scoped_policy_ace(&policy_sid),
         object_audit.clone(),

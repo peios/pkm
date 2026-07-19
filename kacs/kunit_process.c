@@ -1325,7 +1325,7 @@ static void pkm_kunit_exec_new_process_min_lowers_to_file_label(
 	KUNIT_EXPECT_EQ(test, after.token_type, KACS_TOKEN_TYPE_PRIMARY);
 	KUNIT_EXPECT_EQ(test, after.impersonation_level, KACS_IMLEVEL_ANONYMOUS);
 	KUNIT_EXPECT_EQ(test, after.elevation_type, KACS_ELEVATION_DEFAULT);
-	KUNIT_EXPECT_EQ(test, after.session_id, before.session_id);
+	KUNIT_EXPECT_EQ(test, after.logon_session_id, before.logon_session_id);
 	KUNIT_EXPECT_EQ(test, after.user_sid_len, before.user_sid_len);
 	KUNIT_EXPECT_EQ(test, after.mandatory_policy, before.mandatory_policy);
 	KUNIT_EXPECT_EQ(test, after.privileges_present,
@@ -1855,8 +1855,8 @@ static void pkm_kunit_clone_thread_shared_token_mutation_visible(
 						  &probe.child_before);
 	KUNIT_EXPECT_EQ(test,
 			probe.source_after_source_mutation
-				.interactive_session_id,
-			probe.source_before.interactive_session_id ^ 1U);
+				.interactivity_scope,
+			probe.source_before.interactivity_scope ^ 1U);
 	KUNIT_EXPECT_EQ(test,
 			probe.source_after_source_mutation.modified_id,
 			probe.source_before.modified_id + 1);
@@ -1864,8 +1864,8 @@ static void pkm_kunit_clone_thread_shared_token_mutation_visible(
 		test, &probe.source_after_source_mutation,
 		&probe.child_after_source_mutation);
 	KUNIT_EXPECT_EQ(test,
-			probe.source_after_child_mutation.interactive_session_id,
-			probe.child_after_source_mutation.interactive_session_id ^
+			probe.source_after_child_mutation.interactivity_scope,
+			probe.child_after_source_mutation.interactivity_scope ^
 				2U);
 	KUNIT_EXPECT_EQ(test, probe.source_after_child_mutation.modified_id,
 			probe.source_before.modified_id + 2);
@@ -1892,8 +1892,8 @@ static void pkm_kunit_clone_process_deep_copy_mutation_isolated(
 		test, &probe.source_before, &probe.child_before);
 	KUNIT_EXPECT_EQ(test,
 			probe.source_after_source_mutation
-				.interactive_session_id,
-			probe.source_before.interactive_session_id ^ 1U);
+				.interactivity_scope,
+			probe.source_before.interactivity_scope ^ 1U);
 	KUNIT_EXPECT_EQ(test,
 			probe.source_after_source_mutation.modified_id,
 			probe.source_before.modified_id + 1);
@@ -1904,8 +1904,8 @@ static void pkm_kunit_clone_process_deep_copy_mutation_isolated(
 		test, &probe.source_after_source_mutation,
 		&probe.source_after_child_mutation);
 	KUNIT_EXPECT_EQ(test,
-			probe.child_after_child_mutation.interactive_session_id,
-			probe.child_before.interactive_session_id ^ 2U);
+			probe.child_after_child_mutation.interactivity_scope,
+			probe.child_before.interactivity_scope ^ 2U);
 	KUNIT_EXPECT_EQ(test, probe.child_after_child_mutation.modified_id,
 			probe.child_before.modified_id + 1);
 }

@@ -447,7 +447,7 @@
 #define KACS_TOK_GET_LINKED		7U  /* KACS_IOC_GET_LINKED_TOKEN */
 #define KACS_TOK_IMPERSONATE		8U  /* KACS_IOC_IMPERSONATE */
 #define KACS_TOK_ADJUST_DEFAULT		9U  /* KACS_IOC_ADJUST_DEFAULT */
-#define KACS_TOK_ADJUST_SESSIONID	10U /* KACS_IOC_ADJUST_SESSIONID */
+#define KACS_TOK_ADJUST_INTERACTIVITY_SCOPE	10U /* KACS_IOC_ADJUST_INTERACTIVITY_SCOPE */
 #define KACS_TOK_UNKNOWN		11U /* unrecognised ioctl verb (-ENOTTY) */
 
 /*
@@ -463,14 +463,14 @@
 #define KACS_TREF_OPEN			3U  /* token cloned for a token-open path */
 
 /*
- * kacs_session reason — a session/token creation-surface outcome. The *_DENIED
+ * kacs_logon_session reason — a session/token creation-surface outcome. The *_DENIED
  * codes name the privilege-gate rejections (the value); the plain op codes mark
  * the successful op. Verdict is also in `ret`. No token/spec bytes are recorded.
- * Emitted by kacs:kacs_session.
+ * Emitted by kacs:kacs_logon_session.
  */
-#define KACS_SES_CREATE			0U  /* create_session published a session */
-#define KACS_SES_CREATE_PRIV_DENIED	1U  /* create_session: TCB privilege gate denied */
-#define KACS_SES_DESTROY		2U  /* destroy_empty_session outcome */
+#define KACS_SES_CREATE			0U  /* create_logon_session published a session */
+#define KACS_SES_CREATE_PRIV_DENIED	1U  /* create_logon_session: TCB privilege gate denied */
+#define KACS_SES_DESTROY		2U  /* destroy_empty_logon_session outcome */
 #define KACS_SES_DESTROY_PRIV_DENIED	3U  /* destroy: TCB privilege gate denied */
 #define KACS_SES_CREATE_TOKEN		4U  /* create_token issued a token fd */
 #define KACS_SES_CREATE_TOKEN_PRIV_DENIED 5U /* create_token: CREATE_TOKEN privilege denied */
@@ -744,9 +744,9 @@
  * an errno; open_self / init report the endpoint outcome. Verdict is `ret`.
  * Emitted by kacs:kacs_securityfs.
  */
-#define KACS_SFS_SESSIONS_NO_TOKEN		0U  /* sessions read: no effective subject token */
-#define KACS_SFS_SESSIONS_PIP_CONTEXT		1U  /* sessions read: caller PIP context unavailable */
-#define KACS_SFS_SESSIONS_ACCESS_CHECK		2U  /* sessions read: rust access check denied */
+#define KACS_SFS_LOGON_SESSIONS_NO_TOKEN		0U  /* sessions read: no effective subject token */
+#define KACS_SFS_LOGON_SESSIONS_PIP_CONTEXT		1U  /* sessions read: caller PIP context unavailable */
+#define KACS_SFS_LOGON_SESSIONS_ACCESS_CHECK		2U  /* sessions read: rust access check denied */
 #define KACS_SFS_OPEN_SELF			3U  /* open of kacs/self self-token file outcome */
 #define KACS_SFS_INIT				4U  /* securityfs kacs/ endpoint init outcome */
 

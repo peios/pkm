@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # pre-push: block pushes that leave the generated UAPI bindings out of sync with
 # the canonical headers (uapi/pkm), or that break standalone-compile. Runs the
-# same drift gate as CI (pekit test uapi): the committed bindings must equal a
-# fresh regen, and the headers must compile with a stock userspace compiler. The
-# check is read-only — it regenerates into a throwaway copy, never the tree.
+# same two gates as CI: `pekit verify uapi` (the committed bindings must equal a
+# fresh regen) and `pekit test uapi` (the headers must compile with a stock
+# userspace compiler). Both are read-only — verify regenerates into a throwaway
+# scratch dir, never the tree.
 #
 # Enabled repo-wide via: git config core.hooksPath .githooks
 # Deliberately bypass with: git push --no-verify
 #
-# Note: the gate runs inside the pkm-build container, so this needs Docker + the
+# Note: the gates run inside the pkm-build container, so this needs Docker + the
 # image (build/build-image.sh). It is skipped when no pushed commit touches uapi/.
 set -euo pipefail
 
@@ -44,12 +45,22 @@ if ! command -v pekit >/dev/null 2>&1; then
 	exit 1
 fi
 
-echo "pre-push: verifying UAPI bindings (pekit test uapi)…" >&2
+echo "pre-push: verifying UAPI bindings (pekit verify uapi)…" >&2
+if ! pekit verify uapi; then
+	echo >&2
+	echo "pre-push: UAPI drift check failed — the committed bindings are out of sync" >&2
+	echo "          with uapi/pkm, or the toolchain/container is unavailable." >&2
+	echo "          Fix with: pekit gen uapi  (then stage uapi/generated)" >&2
+	echo "          or push with --no-verify if this is an environment issue." >&2
+	exit 1
+fi
+
+echo "pre-push: checking UAPI standalone-compile (pekit test uapi)…" >&2
 if ! pekit test uapi; then
 	echo >&2
-	echo "pre-push: UAPI check failed — bindings are out of sync with uapi/pkm," >&2
-	echo "          the headers don't compile standalone, or the toolchain/container" >&2
-	echo "          is unavailable. Fix with: pekit build uapi  (then stage uapi/generated)" >&2
+	echo "pre-push: UAPI standalone-compile check failed — the canonical headers" >&2
+	echo "          don't compile with a stock userspace compiler, or the container" >&2
+	echo "          is unavailable. Fix the headers under uapi/pkm," >&2
 	echo "          or push with --no-verify if this is an environment issue." >&2
 	exit 1
 fi

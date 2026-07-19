@@ -216,7 +216,7 @@ fn primary_token<'a>(user: Sid<'a>) -> AccessCheckToken<'a> {
         impersonation_level: ImpersonationLevel::Impersonation,
         audit_policy: 0,
         privileges: TokenPrivileges::default(),
-        integrity_level: IntegrityLevel::Medium,
+        integrity_level: IntegrityLevel::MEDIUM,
         mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         restricted: RestrictedTokenContext::default(),
         confinement: Default::default(),

@@ -188,42 +188,42 @@ static long pkm_kacs_require_tcb_for_token(const void *caller_token)
 	return 0;
 }
 
-static long pkm_kacs_token_adjust_session_core(
+static long pkm_kacs_token_adjust_interactivity_scope_core(
 	struct pkm_kacs_token_file *tf,
 	const void *caller_token,
-	u32 session_id)
+	u32 interactivity_scope)
 {
 	long ret;
 
 	if (!tf || !tf->token)
 		return -EINVAL;
-	if ((tf->access_mask & KACS_TOKEN_ADJUST_SESSIONID) !=
-	    KACS_TOKEN_ADJUST_SESSIONID)
+	if ((tf->access_mask & KACS_TOKEN_ADJUST_INTERACTIVITY_SCOPE) !=
+	    KACS_TOKEN_ADJUST_INTERACTIVITY_SCOPE)
 		return -EACCES;
 
 	ret = pkm_kacs_require_tcb_for_token(caller_token);
 	if (ret)
 		return ret;
 
-	return kacs_rust_token_adjust_session_id(tf->token, session_id);
+	return kacs_rust_token_adjust_interactivity_scope(tf->token, interactivity_scope);
 }
 
-static long pkm_kacs_token_adjust_session_after_gate(
+static long pkm_kacs_token_adjust_interactivity_scope_after_gate(
 	struct pkm_kacs_token_file *tf,
-	u32 session_id)
+	u32 interactivity_scope)
 {
 	long ret;
 
 	if (!tf || !tf->token)
 		return -EINVAL;
-	if ((tf->access_mask & KACS_TOKEN_ADJUST_SESSIONID) !=
-	    KACS_TOKEN_ADJUST_SESSIONID)
+	if ((tf->access_mask & KACS_TOKEN_ADJUST_INTERACTIVITY_SCOPE) !=
+	    KACS_TOKEN_ADJUST_INTERACTIVITY_SCOPE)
 		return -EACCES;
 
-	ret = kacs_rust_token_adjust_session_id(tf->token, session_id);
+	ret = kacs_rust_token_adjust_interactivity_scope(tf->token, interactivity_scope);
 	trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
-			       KACS_TOK_ADJUST_SESSIONID, tf->access_mask,
-			       KACS_TOKEN_ADJUST_SESSIONID, -1, session_id, ret);
+			       KACS_TOK_ADJUST_INTERACTIVITY_SCOPE, tf->access_mask,
+			       KACS_TOKEN_ADJUST_INTERACTIVITY_SCOPE, -1, interactivity_scope, ret);
 	return ret;
 }
 
@@ -312,12 +312,12 @@ static long pkm_kacs_token_link_core(const void *caller_token,
 	}
 
 	ret = kacs_rust_token_link_tokens(elevated_tf->token, filtered_tf->token,
-					  args->session_id);
+					  args->logon_session_id);
 out:
 	trace_kacs_token_ioctl(elevated_tf ? (u64)(uintptr_t)elevated_tf->token : 0,
 			       KACS_TOK_LINK,
 			       elevated_tf ? elevated_tf->access_mask : 0,
-			       KACS_TOKEN_DUPLICATE, -1, args->session_id, ret);
+			       KACS_TOKEN_DUPLICATE, -1, args->logon_session_id, ret);
 	fdput(filtered_f);
 	fdput(elevated_f);
 	return ret;
@@ -673,31 +673,31 @@ out:
 	return ret;
 }
 
-static long pkm_kacs_token_adjust_session_user(struct pkm_kacs_token_file *tf,
-					       u32 __user *session_id_ptr)
+static long pkm_kacs_token_adjust_interactivity_scope_user(struct pkm_kacs_token_file *tf,
+					       u32 __user *interactivity_scope_ptr)
 {
-	u32 session_id;
+	u32 interactivity_scope;
 	long ret;
 
 	if (!tf || !tf->token)
 		return -EINVAL;
-	if ((tf->access_mask & KACS_TOKEN_ADJUST_SESSIONID) !=
-	    KACS_TOKEN_ADJUST_SESSIONID) {
+	if ((tf->access_mask & KACS_TOKEN_ADJUST_INTERACTIVITY_SCOPE) !=
+	    KACS_TOKEN_ADJUST_INTERACTIVITY_SCOPE) {
 		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
-				       KACS_TOK_ADJUST_SESSIONID, tf->access_mask,
-				       KACS_TOKEN_ADJUST_SESSIONID, -1, 0,
+				       KACS_TOK_ADJUST_INTERACTIVITY_SCOPE, tf->access_mask,
+				       KACS_TOKEN_ADJUST_INTERACTIVITY_SCOPE, -1, 0,
 				       -EACCES);
 		return -EACCES;
 	}
 	ret = pkm_kacs_require_tcb_for_token(pkm_kacs_current_primary_token_ptr());
 	if (ret)
 		return ret;
-	if (!session_id_ptr)
+	if (!interactivity_scope_ptr)
 		return -EFAULT;
-	if (copy_from_user(&session_id, session_id_ptr, sizeof(session_id)))
+	if (copy_from_user(&interactivity_scope, interactivity_scope_ptr, sizeof(interactivity_scope)))
 		return -EFAULT;
 
-	return pkm_kacs_token_adjust_session_after_gate(tf, session_id);
+	return pkm_kacs_token_adjust_interactivity_scope_after_gate(tf, interactivity_scope);
 }
 
 static long pkm_kacs_token_duplicate_user(
@@ -1002,8 +1002,8 @@ static long pkm_kacs_token_ioctl(struct file *file, unsigned int cmd,
 	case KACS_IOC_ADJUST_DEFAULT:
 		return pkm_kacs_token_adjust_default_user(
 			tf, (struct kacs_adjust_default_args __user *)arg);
-	case KACS_IOC_ADJUST_SESSIONID:
-		return pkm_kacs_token_adjust_session_user(
+	case KACS_IOC_ADJUST_INTERACTIVITY_SCOPE:
+		return pkm_kacs_token_adjust_interactivity_scope_user(
 			tf, (u32 __user *)arg);
 	default:
 		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
@@ -1531,9 +1531,9 @@ long pkm_kacs_kunit_token_fd_adjust_default(
 	return ret;
 }
 
-long pkm_kacs_kunit_token_fd_adjust_session_for_token(int fd,
+long pkm_kacs_kunit_token_fd_adjust_interactivity_scope_for_token(int fd,
 						      const void *caller_token,
-						      u32 session_id)
+						      u32 interactivity_scope)
 {
 	struct fd f;
 	struct pkm_kacs_token_file *tf;
@@ -1548,7 +1548,7 @@ long pkm_kacs_kunit_token_fd_adjust_session_for_token(int fd,
 	}
 
 	tf = fd_file(f)->private_data;
-	ret = pkm_kacs_token_adjust_session_core(tf, caller_token, session_id);
+	ret = pkm_kacs_token_adjust_interactivity_scope_core(tf, caller_token, interactivity_scope);
 	fdput(f);
 	return ret;
 }

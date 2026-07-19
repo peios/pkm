@@ -168,8 +168,8 @@ const (
 	KACS_IMLEVEL_IMPERSONATION                          = 2
 	KACS_IOC_ADJUST_DEFAULT                             = 1074809609
 	KACS_IOC_ADJUST_GROUPS                              = 1083198215
+	KACS_IOC_ADJUST_INTERACTIVITY_SCOPE                 = 1074023178
 	KACS_IOC_ADJUST_PRIVS                               = 1075333889
-	KACS_IOC_ADJUST_SESSIONID                           = 1074023178
 	KACS_IOC_DUPLICATE                                  = 3222293250
 	KACS_IOC_GET_LINKED_TOKEN                           = 3221506822
 	KACS_IOC_IMPERSONATE                                = 19208
@@ -178,6 +178,11 @@ const (
 	KACS_IOC_MAGIC                                      = 75
 	KACS_IOC_QUERY                                      = 3222293248
 	KACS_IOC_RESTRICT                                   = 3223866116
+	KACS_LOGON_SESSION_SPEC_MAX_BYTES                   = 4096
+	KACS_LOGON_SESSION_SPEC_MIN_BYTES                   = 15
+	KACS_LOGON_SESSION_SPEC_OFF_AUTH_PKG                = 3
+	KACS_LOGON_SESSION_SPEC_OFF_AUTH_PKG_LEN            = 1
+	KACS_LOGON_SESSION_SPEC_OFF_LOGON_TYPE              = 0
 	KACS_LOGON_TYPE_BATCH                               = 4
 	KACS_LOGON_TYPE_INTERACTIVE                         = 2
 	KACS_LOGON_TYPE_NETWORK                             = 3
@@ -351,11 +356,6 @@ const (
 	KACS_SECINFO_LABEL                                  = 16
 	KACS_SECINFO_OWNER                                  = 1
 	KACS_SECINFO_SACL                                   = 8
-	KACS_SESSION_SPEC_MAX_BYTES                         = 4096
-	KACS_SESSION_SPEC_MIN_BYTES                         = 15
-	KACS_SESSION_SPEC_OFF_AUTH_PKG                      = 3
-	KACS_SESSION_SPEC_OFF_AUTH_PKG_LEN                  = 1
-	KACS_SESSION_SPEC_OFF_LOGON_TYPE                    = 0
 	KACS_SES_CREATE                                     = 0
 	KACS_SES_CREATE_PRIV_DENIED                         = 1
 	KACS_SES_CREATE_TOKEN                               = 4
@@ -389,10 +389,10 @@ const (
 	KACS_SE_SYSTEMTIME_PRIVILEGE                        = 4096
 	KACS_SE_TCB_PRIVILEGE                               = 128
 	KACS_SFS_INIT                                       = 4
+	KACS_SFS_LOGON_SESSIONS_ACCESS_CHECK                = 2
+	KACS_SFS_LOGON_SESSIONS_NO_TOKEN                    = 0
+	KACS_SFS_LOGON_SESSIONS_PIP_CONTEXT                 = 1
 	KACS_SFS_OPEN_SELF                                  = 3
-	KACS_SFS_SESSIONS_ACCESS_CHECK                      = 2
-	KACS_SFS_SESSIONS_NO_TOKEN                          = 0
-	KACS_SFS_SESSIONS_PIP_CONTEXT                       = 1
 	KACS_SID_GROUP_ENABLED                              = 4
 	KACS_SID_GROUP_ENABLED_BY_DEFAULT                   = 2
 	KACS_SID_GROUP_INTEGRITY                            = 32
@@ -458,8 +458,8 @@ const (
 	KACS_TLP_REPLACE                                    = 1
 	KACS_TOKEN_ADJUST_DEFAULT                           = 128
 	KACS_TOKEN_ADJUST_GROUPS                            = 64
+	KACS_TOKEN_ADJUST_INTERACTIVITY_SCOPE               = 256
 	KACS_TOKEN_ADJUST_PRIVS                             = 32
-	KACS_TOKEN_ADJUST_SESSIONID                         = 256
 	KACS_TOKEN_ALL_ACCESS                               = 983551
 	KACS_TOKEN_ASSIGN_PRIMARY                           = 1
 	KACS_TOKEN_CLASS_APPCONTAINER_SID                   = 15
@@ -471,6 +471,7 @@ const (
 	KACS_TOKEN_CLASS_GROUPS                             = 2
 	KACS_TOKEN_CLASS_IMPERSONATION_LEVEL                = 21
 	KACS_TOKEN_CLASS_INTEGRITY_LEVEL                    = 5
+	KACS_TOKEN_CLASS_INTERACTIVITY_SCOPE                = 8
 	KACS_TOKEN_CLASS_LOGON_SID                          = 19
 	KACS_TOKEN_CLASS_LOGON_TYPE                         = 18
 	KACS_TOKEN_CLASS_MANDATORY_POLICY                   = 17
@@ -480,7 +481,6 @@ const (
 	KACS_TOKEN_CLASS_PRIVILEGES                         = 3
 	KACS_TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS       = 24
 	KACS_TOKEN_CLASS_RESTRICTED_SIDS                    = 9
-	KACS_TOKEN_CLASS_SESSION_ID                         = 8
 	KACS_TOKEN_CLASS_SOURCE                             = 10
 	KACS_TOKEN_CLASS_STATISTICS                         = 11
 	KACS_TOKEN_CLASS_TYPE                               = 4
@@ -526,9 +526,10 @@ const (
 	KACS_TOKEN_SPEC_OFF_GROUPS_OFFSET                   = 92
 	KACS_TOKEN_SPEC_OFF_IMPERSONATION_LEVEL             = 5
 	KACS_TOKEN_SPEC_OFF_INTEGRITY_RID                   = 8
-	KACS_TOKEN_SPEC_OFF_INTERACTIVE_SESSION_ID          = 184
+	KACS_TOKEN_SPEC_OFF_INTERACTIVITY_SCOPE             = 184
 	KACS_TOKEN_SPEC_OFF_ISOLATION_BOUNDARY              = 159
 	KACS_TOKEN_SPEC_OFF_LCS_CREDENTIALS_OFFSET          = 188
+	KACS_TOKEN_SPEC_OFF_LOGON_SESSION_ID                = 56
 	KACS_TOKEN_SPEC_OFF_MANDATORY_POLICY                = 12
 	KACS_TOKEN_SPEC_OFF_ORIGIN                          = 176
 	KACS_TOKEN_SPEC_OFF_OWNER_SID_INDEX                 = 64
@@ -543,7 +544,6 @@ const (
 	KACS_TOKEN_SPEC_OFF_RESTRICTED_DEVICE_GROUPS_OFFSET = 168
 	KACS_TOKEN_SPEC_OFF_RESTRICTED_SIDS_COUNT           = 136
 	KACS_TOKEN_SPEC_OFF_RESTRICTED_SIDS_OFFSET          = 132
-	KACS_TOKEN_SPEC_OFF_SESSION_ID                      = 56
 	KACS_TOKEN_SPEC_OFF_SOURCE_ID                       = 80
 	KACS_TOKEN_SPEC_OFF_SOURCE_NAME                     = 72
 	KACS_TOKEN_SPEC_OFF_SUPP_GIDS_COUNT                 = 164
@@ -561,8 +561,8 @@ const (
 	KACS_TOKEN_TYPE_PRIMARY                             = 1
 	KACS_TOK_ADJUST_DEFAULT                             = 9
 	KACS_TOK_ADJUST_GROUPS                              = 2
+	KACS_TOK_ADJUST_INTERACTIVITY_SCOPE                 = 10
 	KACS_TOK_ADJUST_PRIVS                               = 1
-	KACS_TOK_ADJUST_SESSIONID                           = 10
 	KACS_TOK_DUPLICATE                                  = 3
 	KACS_TOK_GET_LINKED                                 = 7
 	KACS_TOK_IMPERSONATE                                = 8
@@ -970,9 +970,9 @@ const (
 	SACL_SECURITY_INFORMATION                           = 8
 	SYS_KACS_ACCESS_CHECK                               = 1023
 	SYS_KACS_ACCESS_CHECK_LIST                          = 1024
-	SYS_KACS_CREATE_SESSION                             = 1004
+	SYS_KACS_CREATE_LOGON_SESSION                       = 1004
 	SYS_KACS_CREATE_TOKEN                               = 1003
-	SYS_KACS_DESTROY_EMPTY_SESSION                      = 1006
+	SYS_KACS_DESTROY_EMPTY_LOGON_SESSION                = 1006
 	SYS_KACS_GET_MOUNT_POLICY                           = 1026
 	SYS_KACS_GET_SD                                     = 1021
 	SYS_KACS_IMPERSONATE_PEER                           = 1011

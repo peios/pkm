@@ -59,9 +59,9 @@ long pkm_kacs_kunit_token_fd_adjust_groups(int fd,
 long pkm_kacs_kunit_token_fd_adjust_default(int fd,
 					    const struct kacs_adjust_default_args *args,
 					    const void *dacl_bytes);
-long pkm_kacs_kunit_token_fd_adjust_session_for_token(int fd,
+long pkm_kacs_kunit_token_fd_adjust_interactivity_scope_for_token(int fd,
 						      const void *caller_token,
-						      u32 session_id);
+						      u32 interactivity_scope);
 long pkm_kacs_kunit_token_fd_ioctl(int fd, unsigned int cmd,
 				   unsigned long arg);
 

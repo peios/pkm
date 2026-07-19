@@ -170,8 +170,8 @@ dependencies' outputs as `$PEKIT_<NEED>_OUT`, and writes to `$PEKIT_OUT`
 | `build.debuginfo` | `kernel` | `vmlinux` debug info + build-id index, plus path-sanitized debug sources. |
 | `build.tools` | `source` | The in-tree userspace tools (perf, bpftool, …) as a DESTDIR image. |
 | `test.kunit` | `kunit` | Boots in QEMU; asserts the KUnit suite passes (build/run split). |
-| `build.uapi` | — | Regenerates `uapi/generated/**` in place from `uapi/pkm`. |
-| `test.uapi` | — | Drift gate: headers compile standalone **and** committed bindings == fresh regen. |
+| `gen.uapi` | — | Regenerates `uapi/generated/**` in place from `uapi/pkm` (a `gen` target — product is committed source, not an artifact). Its `verify_command` is the drift gate (`pekit verify uapi`). |
+| `test.uapi` | — | Standalone-compile gate: the canonical headers compile with a stock userspace compiler. |
 
 `build.kernel` and `build.kunit` each take the config-agnostic `build.source`
 tree, configure it for their profile via `build/configure-kernel.sh`, and
@@ -308,15 +308,27 @@ programs, …) and `tools/testing/selftests`.
 `uapi/generated/{go,lua,rust}/` are mechanically regenerated from it:
 
 ```sh
-pekit build uapi          # regenerate uapi/generated/** in place
-pekit test  uapi          # drift gate (see below)
+pekit gen    uapi         # regenerate uapi/generated/** in place
+pekit verify uapi         # drift gate: committed == fresh regen (see below)
+pekit test   uapi         # standalone-compile gate (see below)
 ```
 
-`build.uapi` runs each binding's `gen.sh` (each runs a codegen-safety lint
-first). `test.uapi` is the matching gate: it asserts the canonical headers
-compile standalone with a stock userspace compiler (`check-userspace-clean.sh`)
-**and** that the committed bindings exactly match a fresh regen (diffed in a
-throwaway copy — it never mutates the tree). The generated Rust crate
+`gen.uapi` is a `gen` target, not a build: it runs each binding's `gen.sh`
+(each runs a codegen-safety lint first) and writes the result back into the
+committed tree — its product is source, not an `out/` artifact. It splits the
+old drift/compile checks in two:
+
+- **`pekit verify uapi`** runs `gen.uapi`'s `verify_command`: the committed
+  bindings must exactly match a fresh regen (produced in a throwaway scratch
+  dir — it never mutates the tree).
+- **`pekit test uapi`** runs `test.uapi`: the canonical headers must compile
+  standalone with a stock userspace compiler (`check-userspace-clean.sh`).
+
+Because the generated bindings are downstream consumer SDKs that no build
+stages, `gen.uapi` sets `verify_on_build = []` / `verify_on_test = []` — the
+drift gate never runs as a build/test pre-flight (which would needlessly drag
+the codegen toolchain into a kernel build); it runs only on demand via
+`pekit verify uapi`, in CI, and in the pre-push hook. The generated Rust crate
 (`peios-uapi`, a Cargo workspace member) and the Go/Lua bindings must never be
 hand-edited.
 
@@ -327,8 +339,9 @@ hand-edited.
 - **`pekit test kunit`** — boots the KUnit-config kernel in QEMU and asserts the
   in-kernel KUnit suite passes (it persists the QEMU log and checks for the pass
   marker + a `pass:N fail:0` summary). `PKM_KUNIT_FILTER` narrows the suite.
-- **`pekit test uapi`** — the UAPI drift / standalone-compile gate described
-  above.
+- **`pekit verify uapi`** — the UAPI drift gate (committed bindings == fresh
+  regen), and **`pekit test uapi`** — the standalone-compile gate. Both are
+  described under *UAPI and language bindings* above.
 
 ---
 
@@ -365,7 +378,7 @@ swappable provider.
 - **Never edit `out/`.** Change the source, the patch series, or a config
   fragment, then re-run the relevant `pekit` stage.
 - **Never hand-edit `uapi/generated/**`.** Edit `uapi/pkm` and run
-  `pekit build uapi`; `pekit test uapi` enforces this.
+  `pekit gen uapi`; `pekit verify uapi` enforces this.
 - **Do not use Cargo `--all-features` as a standalone Rust gate.** The core
   crates' `kernel` feature is a staging target for the Linux in-tree Rust
   environment; it resolves kernel-only APIs after `stage-rust-core.sh` vendors
@@ -383,9 +396,10 @@ swappable provider.
 
 ### Git hooks
 
-A tracked **pre-push** hook (`.githooks/pre-push`) runs the UAPI drift gate
-(`pekit test uapi`) before a push, but only when a pushed commit touches `uapi/`.
-It is read-only (regenerates into a throwaway copy) and needs the `pkm-build`
+A tracked **pre-push** hook (`.githooks/pre-push`) runs the UAPI gates
+(`pekit verify uapi` for drift, then `pekit test uapi` for standalone-compile)
+before a push, but only when a pushed commit touches `uapi/`. Both are read-only
+(verify regenerates into a throwaway scratch dir) and need the `pkm-build`
 container. Enable it once per clone:
 
 ```sh
@@ -393,7 +407,7 @@ git config core.hooksPath .githooks
 ```
 
 Bypass deliberately with `git push --no-verify`. This is local fast-feedback —
-the authoritative gate is `pekit test uapi` in CI.
+the authoritative gates are `pekit verify uapi` and `pekit test uapi` in CI.
 
 ---
 

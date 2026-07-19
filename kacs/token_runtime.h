@@ -108,7 +108,7 @@ struct pkm_kacs_boot_group_view {
 struct pkm_kacs_boot_snapshot {
 	const void *token_ptr;
 	const void *session_ptr;
-	u64 session_id;
+	u64 logon_session_id;
 	u64 auth_id;
 	u64 token_id;
 	u8 token_guid[KACS_UUID_BYTES];
@@ -137,7 +137,7 @@ struct pkm_kacs_boot_snapshot {
 	u32 token_type;
 	u32 impersonation_level;
 	u32 mandatory_policy;
-	u32 interactive_session_id;
+	u32 interactivity_scope;
 	u32 projected_uid;
 	u32 projected_gid;
 	u32 audit_policy;
@@ -158,9 +158,9 @@ struct pkm_kacs_boot_snapshot {
 	u32 projected_supplementary_gid_count;
 };
 
-struct pkm_kacs_session_snapshot {
+struct pkm_kacs_logon_session_snapshot {
 	const void *session_ptr;
-	u64 session_id;
+	u64 logon_session_id;
 	u64 created_at;
 	u32 logon_type;
 	const u8 *auth_pkg_ptr;
@@ -619,10 +619,10 @@ const void *kacs_rust_create_boot_anonymous_token(void);
 int kacs_rust_create_token(const void *creator_token, const u8 *spec,
 			   size_t spec_len, u64 created_at,
 			   const void **out_token);
-int kacs_rust_create_session(const void *creator_token, const u8 *spec,
+int kacs_rust_create_logon_session(const void *creator_token, const u8 *spec,
 			     size_t spec_len, u64 created_at,
-			     u64 *session_id_out);
-int kacs_rust_destroy_empty_session(u64 session_id);
+			     u64 *logon_session_id_out);
+int kacs_rust_destroy_empty_logon_session(u64 auth_id);
 const void *kacs_rust_token_clone(const void *token);
 const void *kacs_rust_token_deep_copy(const void *token);
 void kacs_rust_token_drop(const void *token);
@@ -655,7 +655,7 @@ int kacs_rust_token_new_process_min_exec(const void *source_token,
 					 u32 file_integrity_level,
 					 const void **out_token);
 int kacs_rust_token_link_tokens(const void *elevated_token,
-				const void *filtered_token, u64 session_id);
+				const void *filtered_token, u64 logon_session_id);
 int kacs_rust_token_get_linked_actual(const void *token,
 				      const void **out_token);
 int kacs_rust_token_get_linked_query_copy(const void *token,
@@ -865,9 +865,9 @@ int kacs_rust_check_socket_sd(const void *subject_token_ptr,
 			      const u8 *sd_ptr, size_t sd_len, u32 desired,
 			      u32 pip_type, u32 pip_trust,
 			      u32 *granted_out);
-int kacs_rust_check_securityfs_sessions_read(const void *subject_token_ptr,
+int kacs_rust_check_securityfs_logon_sessions_read(const void *subject_token_ptr,
 					     u32 pip_type, u32 pip_trust);
-int kacs_rust_securityfs_sessions_listing(u8 *out, size_t out_len,
+int kacs_rust_securityfs_logon_sessions_listing(u8 *out, size_t out_len,
 					  size_t *required_out);
 u32 kacs_rust_token_projected_uid(const void *token);
 u32 kacs_rust_token_projected_gid(const void *token);
@@ -878,9 +878,9 @@ int kacs_rust_token_projected_supplementary_gid(const void *token,
 bool kacs_rust_kunit_token_snapshot(const void *token,
 				    struct pkm_kacs_boot_snapshot *out);
 bool kacs_rust_kunit_boot_snapshot(struct pkm_kacs_boot_snapshot *out);
-int kacs_rust_kunit_session_snapshot(
-	u64 session_id, struct pkm_kacs_session_snapshot *out);
-int kacs_rust_kunit_build_logon_sid(u64 session_id, u8 *out);
+int kacs_rust_kunit_logon_session_snapshot(
+	u64 logon_session_id, struct pkm_kacs_logon_session_snapshot *out);
+int kacs_rust_kunit_build_logon_sid(u64 logon_session_id, u8 *out);
 const void *kacs_rust_kunit_create_query_only_token(void);
 const void *kacs_rust_kunit_create_without_tcb_token(void);
 const void *kacs_rust_kunit_create_adjustable_groups_token(void);
@@ -907,7 +907,7 @@ int kacs_rust_token_adjust_privs(
 int kacs_rust_token_adjust_groups(
 	const void *token, const struct pkm_kacs_group_adjust_entry *entries,
 	u32 count, u64 *previous_state_out);
-int kacs_rust_token_adjust_session_id(const void *token, u32 session_id);
+int kacs_rust_token_adjust_interactivity_scope(const void *token, u32 logon_session_id);
 int kacs_rust_token_adjust_default(const void *token, u32 owner_index,
 				   u32 group_index, const u8 *dacl,
 				   size_t dacl_len, u32 change_dacl);
@@ -965,7 +965,7 @@ long pkm_kacs_kunit_open_process_token_inspection_for_subject(
 long pkm_kacs_kunit_open_thread_token_inspection_for_subject(
 	const struct pkm_kacs_kunit_process_token_open_args *args);
 long pkm_kacs_kunit_open_self_token_inspection_for_subject(void);
-long pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+long pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 	const void *subject_token, u8 *buf, size_t buf_len,
 	size_t *required_out);
 long pkm_kacs_kunit_signal_origin_is_kernel(u32 origin_kind);
@@ -987,11 +987,11 @@ long pkm_kacs_kunit_check_prlimit_for_subject(
 	const struct pkm_kacs_kunit_process_prlimit_check_args *args);
 long pkm_kacs_kunit_check_perf_event_for_subject(
 	const struct pkm_kacs_kunit_process_perf_check_args *args);
-long pkm_kacs_kunit_create_session_for_subject(const void *subject_token,
+long pkm_kacs_kunit_create_logon_session_for_subject(const void *subject_token,
 					       const u8 *spec, size_t spec_len,
-					       u64 *session_id_out);
-long pkm_kacs_kunit_destroy_empty_session_for_subject(
-	const void *subject_token, u64 session_id);
+					       u64 *logon_session_id_out);
+long pkm_kacs_kunit_destroy_empty_logon_session_for_subject(
+	const void *subject_token, u64 auth_id);
 long pkm_kacs_kunit_create_token_for_subject(const void *subject_token,
 					     const u8 *spec, size_t spec_len);
 long pkm_kacs_kunit_get_process_sd_for_subject(

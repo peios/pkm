@@ -566,6 +566,14 @@ int pkm_kacs_task_kill(struct task_struct *target,
 	if (!caller_state || !target_state || !subject_token)
 		return -EACCES;
 
+	/*
+	 * Structural, not SD-based: raise()/abort()/pthread_kill() must work
+	 * even when the caller's restricted token fails AccessCheck against
+	 * its own process SD.
+	 */
+	if (caller_state == target_state)
+		return 0;
+
 	ret = pkm_kacs_signal_to_process_access(sig, &desired_access);
 	if (ret)
 		return ret;

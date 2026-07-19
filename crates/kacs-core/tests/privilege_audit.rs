@@ -138,7 +138,7 @@ fn successful_privilege_use_marks_used_and_emits_events() {
     let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
     let token = token_with_privileges(
         parse_sid(&user),
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         SE_SECURITY_PRIVILEGE | SE_BACKUP_PRIVILEGE,
         AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
     );
@@ -204,7 +204,7 @@ fn maximum_allowed_probing_skips_privilege_use_side_effects() {
     let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
     let token = token_with_privileges(
         parse_sid(&user),
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         SE_SECURITY_PRIVILEGE,
         AUDIT_POLICY_PRIVILEGE_USE_SUCCESS | AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
     );
@@ -245,7 +245,7 @@ fn pip_stripping_causes_failure_privilege_use_event_without_mark_used() {
     let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
     let token = token_with_privileges(
         parse_sid(&user),
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         SE_SECURITY_PRIVILEGE,
         AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
     );
@@ -302,7 +302,7 @@ fn relabel_privilege_only_marks_used_when_write_owner_survives() {
     let success_sd = SecurityDescriptor::parse(&success_sd_bytes).expect("sd should parse");
     let success_token = token_with_privileges(
         parse_sid(&user),
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         SE_RELABEL_PRIVILEGE,
         AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
     );
@@ -330,7 +330,7 @@ fn relabel_privilege_only_marks_used_when_write_owner_survives() {
     let failure_sd = SecurityDescriptor::parse(&failure_sd_bytes).expect("sd should parse");
     let failure_token = token_with_privileges(
         parse_sid(&user),
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         SE_RELABEL_PRIVILEGE,
         AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
     );
@@ -414,7 +414,7 @@ fn result_list_mode_counts_survival_on_any_node_as_success() {
 
     let token = token_with_privileges(
         parse_sid(&user),
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         SE_BACKUP_PRIVILEGE,
         AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
     );
@@ -459,7 +459,7 @@ fn confinement_stripping_causes_failure_privilege_use_event_without_mark_used() 
     let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
     let mut token = token_with_privileges(
         parse_sid(&user),
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         SE_BACKUP_PRIVILEGE,
         AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
     );
@@ -508,7 +508,7 @@ fn enabled_but_unrequested_privilege_emits_no_privilege_use_event() {
     let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
     let token = token_with_privileges(
         parse_sid(&user),
-        IntegrityLevel::Medium,
+        IntegrityLevel::MEDIUM,
         SE_BACKUP_PRIVILEGE,
         AUDIT_POLICY_PRIVILEGE_USE_SUCCESS | AUDIT_POLICY_PRIVILEGE_USE_FAILURE,
     );

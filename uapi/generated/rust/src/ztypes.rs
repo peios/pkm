@@ -571,7 +571,7 @@ fn bindgen_test_layout_kacs_restrict_args() {
 pub struct kacs_link_tokens_args {
     pub elevated_fd: __s32,
     pub filtered_fd: __s32,
-    pub session_id: __u64,
+    pub logon_session_id: __u64,
 }
 #[test]
 fn bindgen_test_layout_kacs_link_tokens_args() {
@@ -609,13 +609,13 @@ fn bindgen_test_layout_kacs_link_tokens_args() {
         )
     );
     assert_eq!(
-        unsafe { ::core::ptr::addr_of!((*ptr).session_id) as usize - ptr as usize },
+        unsafe { ::core::ptr::addr_of!((*ptr).logon_session_id) as usize - ptr as usize },
         8usize,
         concat!(
             "Offset of field: ",
             stringify!(kacs_link_tokens_args),
             "::",
-            stringify!(session_id)
+            stringify!(logon_session_id)
         )
     );
 }

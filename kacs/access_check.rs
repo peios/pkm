@@ -280,7 +280,7 @@ fn with_resolved_context<T>(
                 audit_policy: AUDIT_POLICY_OBJECT_ACCESS_SUCCESS
                     | AUDIT_POLICY_OBJECT_ACCESS_FAILURE,
                 privileges: TokenPrivileges::default(),
-                integrity_level: IntegrityLevel::Medium,
+                integrity_level: IntegrityLevel::MEDIUM,
                 mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
                 restricted: RestrictedTokenContext::default(),
                 confinement: ConfinementTokenContext::default(),

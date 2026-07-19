@@ -120,7 +120,7 @@ fn primary_token<'a>(user: Sid<'a>, groups: &'a [SidAndAttributes<'a>]) -> Acces
         impersonation_level: ImpersonationLevel::Impersonation,
         audit_policy: 0,
         privileges: TokenPrivileges::default(),
-        integrity_level: IntegrityLevel::Medium,
+        integrity_level: IntegrityLevel::MEDIUM,
         mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP,
         restricted: RestrictedTokenContext::default(),
         confinement: ConfinementTokenContext::default(),
@@ -793,7 +793,7 @@ fn low_and_untrusted_tokens_cannot_write_unlabeled_objects() {
     let sd_bytes = sd_bytes(Some(&owner), Some(&group), None, Some(&dacl));
     let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
 
-    for integrity_level in [IntegrityLevel::Low, IntegrityLevel::Untrusted] {
+    for integrity_level in [IntegrityLevel::LOW, IntegrityLevel::UNTRUSTED] {
         let mut token = primary_token(parse_sid(&user), &[]);
         token.integrity_level = integrity_level;
 

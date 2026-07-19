@@ -93,7 +93,7 @@
 #include "tlp.h"
 #include "token_fd.h"
 #include "token_runtime.h"
-#include "token_session.h"
+#include "token_logon_session.h"
 
 #include "kunit_common.h"
 
@@ -308,7 +308,7 @@ static long pkm_kacs_kunit_clone_mutation_probe(
 	const void *source_token = NULL;
 	const void *child_token;
 	struct cred *prepared = NULL;
-	u32 next_session_id;
+	u32 next_interactivity_scope;
 	long ret = 0;
 
 	if (!out)
@@ -347,9 +347,9 @@ static long pkm_kacs_kunit_clone_mutation_probe(
 		goto out;
 	}
 
-	next_session_id = out->source_before.interactive_session_id ^ 1U;
-	ret = kacs_rust_token_adjust_session_id(source_token,
-						next_session_id);
+	next_interactivity_scope = out->source_before.interactivity_scope ^ 1U;
+	ret = kacs_rust_token_adjust_interactivity_scope(source_token,
+						next_interactivity_scope);
 	if (ret)
 		goto out;
 
@@ -361,9 +361,9 @@ static long pkm_kacs_kunit_clone_mutation_probe(
 		goto out;
 	}
 
-	next_session_id =
-		out->child_after_source_mutation.interactive_session_id ^ 2U;
-	ret = kacs_rust_token_adjust_session_id(child_token, next_session_id);
+	next_interactivity_scope =
+		out->child_after_source_mutation.interactivity_scope ^ 2U;
+	ret = kacs_rust_token_adjust_interactivity_scope(child_token, next_interactivity_scope);
 	if (ret)
 		goto out;
 
@@ -427,7 +427,7 @@ int pkm_kacs_kunit_process_state_snapshot(
 
 
 
-long pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+long pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 	const void *subject_token, u8 *buf, size_t buf_len,
 	size_t *required_out)
 {
@@ -442,12 +442,12 @@ long pkm_kacs_kunit_read_securityfs_sessions_for_subject(
 	if (ret)
 		return ret;
 
-	ret = kacs_rust_check_securityfs_sessions_read(subject_token, pip_type,
+	ret = kacs_rust_check_securityfs_logon_sessions_read(subject_token, pip_type,
 						       pip_trust);
 	if (ret)
 		return ret;
 
-	return kacs_rust_securityfs_sessions_listing(buf, buf_len,
+	return kacs_rust_securityfs_logon_sessions_listing(buf, buf_len,
 						    required_out);
 }
 

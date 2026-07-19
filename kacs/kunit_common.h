@@ -529,7 +529,7 @@ struct pkm_kunit_linked_pair {
 	const void *source_token;
 	long elevated_fd;
 	long filtered_fd;
-	u64 session_id;
+	u64 logon_session_id;
 };
 
 
@@ -553,7 +553,7 @@ struct pkm_kunit_token_spec_args {
 	u32 allow_zero_projected_gid;
 	u32 audit_policy;
 	u64 expiration;
-	u64 session_id;
+	u64 logon_session_id;
 	u32 owner_sid_index;
 	u32 primary_group_index;
 	const u8 *source_name;
@@ -585,7 +585,7 @@ struct pkm_kunit_token_spec_args {
 	const struct pkm_kunit_sid_attr_spec *restricted_device_groups;
 	u32 restricted_device_group_count;
 	u64 origin;
-	u32 interactive_session_id;
+	u32 interactivity_scope;
 };
 
 
@@ -606,7 +606,7 @@ struct pkm_kunit_kmes_event_view {
 };
 
 
-size_t pkm_kunit_build_session_spec(u8 *dst, u8 logon_type,
+size_t pkm_kunit_build_logon_session_spec(u8 *dst, u8 logon_type,
 					   const char *auth_pkg,
 					   const u8 *user_sid,
 					   size_t user_sid_len);
@@ -1269,7 +1269,7 @@ bool pkm_kunit_expect_caap_diagnostic_schema(
 
 bool pkm_kunit_expect_logon_destroyed_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
-	u64 expected_session_id, u32 expected_logon_type,
+	u64 expected_logon_session_id, u32 expected_logon_type,
 	const char *expected_auth_package, u64 expected_created_at);
 
 void pkm_kunit_expect_boot_snapshot_eq_internal(
@@ -1311,7 +1311,7 @@ void pkm_kunit_expect_guid_ne(struct kunit *test,
 				     const u8 lhs[KACS_UUID_BYTES],
 				     const u8 rhs[KACS_UUID_BYTES]);
 
-size_t pkm_kunit_build_session_spec(u8 *dst, u8 logon_type,
+size_t pkm_kunit_build_logon_session_spec(u8 *dst, u8 logon_type,
 					   const char *auth_pkg,
 					   const u8 *user_sid,
 					   size_t user_sid_len);
@@ -1340,7 +1340,7 @@ int pkm_kunit_append_u32_section(u8 *dst, size_t dst_len,
 size_t pkm_kunit_build_token_spec(
 	u8 *dst, size_t dst_len, const struct pkm_kunit_token_spec_args *args);
 
-void pkm_kunit_build_logon_sid(u64 session_id, u8 out[20]);
+void pkm_kunit_build_logon_sid(u64 logon_session_id, u8 out[20]);
 
 void pkm_kunit_build_args_v136(u8 *args);
 

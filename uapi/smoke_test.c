@@ -362,7 +362,7 @@ _Static_assert(sizeof(REG_BACKUP_MAGIC) - 1 == 8,
 	       "REG_BACKUP_MAGIC must be eight bytes");
 
 /*
- * KACS wire-format payloads (kacs_create_token / kacs_create_session /
+ * KACS wire-format payloads (kacs_create_token / kacs_create_logon_session /
  * kacs_set_caap specs). These are offset-defined byte layouts, not C structs;
  * pin the documented header byte lengths and the load-bearing field offsets so
  * the uapi mirror cannot drift from the kernel's parser.
@@ -395,12 +395,12 @@ _Static_assert(KACS_TOKEN_LCS_EXT_HEADER_BYTES
 _Static_assert(KACS_TOKEN_LCS_EXT_VERSION == 1U,
 	       "LCS-extension version must be 1 (PSD-004 13.6)");
 
-/* Session spec: the documented minimum is the empty-auth-package, minimum-SID
+/* LogonSession spec: the documented minimum is the empty-auth-package, minimum-SID
  * case (logon_type + auth_pkg_len + user_sid_len + an 8-byte SID). */
-_Static_assert(KACS_SESSION_SPEC_OFF_AUTH_PKG
-		       == KACS_SESSION_SPEC_OFF_AUTH_PKG_LEN + sizeof(__u16),
+_Static_assert(KACS_LOGON_SESSION_SPEC_OFF_AUTH_PKG
+		       == KACS_LOGON_SESSION_SPEC_OFF_AUTH_PKG_LEN + sizeof(__u16),
 	       "session-spec auth_pkg must follow the __le16 auth_pkg_len");
-_Static_assert(KACS_SESSION_SPEC_MIN_BYTES == 15U,
+_Static_assert(KACS_LOGON_SESSION_SPEC_MIN_BYTES == 15U,
 	       "session-spec minimum size disagrees with PSD-004 13.6");
 
 /* CAAP spec: the fixed prefix is version (__u8) + rule_count (__le32). */

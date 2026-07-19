@@ -28,7 +28,7 @@
 #define KACS_TOKEN_ADJUST_PRIVS		0x0020U
 #define KACS_TOKEN_ADJUST_GROUPS	0x0040U
 #define KACS_TOKEN_ADJUST_DEFAULT	0x0080U
-#define KACS_TOKEN_ADJUST_SESSIONID	0x0100U
+#define KACS_TOKEN_ADJUST_INTERACTIVITY_SCOPE	0x0100U
 #define KACS_TOKEN_ALL_ACCESS		0x000F01FFU
 
 /* Token ioctl interface identifier. */
@@ -112,7 +112,7 @@
  *   __u32  projected_gid           Linux GID for credential projection
  *   __u32  audit_policy            per-token audit flags
  *   __u64  expiration              expiry timestamp (0 = none)
- *   __u64  session_id              logon session ID (auth_id)
+ *   __u64  logon_session_id              logon session ID (auth_id)
  *   __u32  owner_sid_index         0 = user SID, 1..N = caller group
  *   __u32  primary_group_index     0 = user SID, 1..N = caller group
  *   __u8   source_name[8]          token source name
@@ -143,7 +143,7 @@
  *   __u32  restricted_device_groups_offset  byte offset (0 = none)
  *   __u32  restricted_device_groups_count   entry count (0 = none)
  *   __u64  origin                  originating logon-session LUID (0 = none)
- *   __u32  interactive_session_id  interactive session number
+ *   __u32  interactivity_scope  interactive session number
  *   __u32  lcs_credentials_offset  byte offset to the LCS extension (0 = none)
  *
  * A group/device-group/restricted-SID/confinement-cap/restricted-device-group
@@ -170,7 +170,7 @@
 #define KACS_TOKEN_SPEC_OFF_PROJECTED_GID		40U
 #define KACS_TOKEN_SPEC_OFF_AUDIT_POLICY		44U
 #define KACS_TOKEN_SPEC_OFF_EXPIRATION			48U
-#define KACS_TOKEN_SPEC_OFF_SESSION_ID			56U
+#define KACS_TOKEN_SPEC_OFF_LOGON_SESSION_ID			56U
 #define KACS_TOKEN_SPEC_OFF_OWNER_SID_INDEX		64U
 #define KACS_TOKEN_SPEC_OFF_PRIMARY_GROUP_INDEX		68U
 #define KACS_TOKEN_SPEC_OFF_SOURCE_NAME			72U
@@ -201,7 +201,7 @@
 #define KACS_TOKEN_SPEC_OFF_RESTRICTED_DEVICE_GROUPS_OFFSET	168U
 #define KACS_TOKEN_SPEC_OFF_RESTRICTED_DEVICE_GROUPS_COUNT	172U
 #define KACS_TOKEN_SPEC_OFF_ORIGIN			176U
-#define KACS_TOKEN_SPEC_OFF_INTERACTIVE_SESSION_ID	184U
+#define KACS_TOKEN_SPEC_OFF_INTERACTIVITY_SCOPE	184U
 #define KACS_TOKEN_SPEC_OFF_LCS_CREDENTIALS_OFFSET	188U
 
 /* Byte length of the fixed token-source-name field. */
@@ -239,7 +239,7 @@
 #define KACS_TOKEN_LCS_EXT_OFF_PRIVATE_LAYER_COUNT	12U
 
 /*
- * kacs_create_session (SYS_KACS_CREATE_SESSION) spec wire format.
+ * kacs_create_logon_session (SYS_KACS_CREATE_LOGON_SESSION) spec wire format.
  *
  * The (spec, len) buffer the syscall consumes is, in order:
  *
@@ -252,13 +252,13 @@
  * The buffer is consumed exactly: 7 + auth_pkg_len + user_sid_len must equal
  * len. The kernel assigns the session ID and derives the logon SID from it.
  */
-#define KACS_SESSION_SPEC_MIN_BYTES	15U
-#define KACS_SESSION_SPEC_MAX_BYTES	4096U
+#define KACS_LOGON_SESSION_SPEC_MIN_BYTES	15U
+#define KACS_LOGON_SESSION_SPEC_MAX_BYTES	4096U
 
 /* Byte offsets of the fixed-position session-spec fields. */
-#define KACS_SESSION_SPEC_OFF_LOGON_TYPE	0U
-#define KACS_SESSION_SPEC_OFF_AUTH_PKG_LEN	1U
-#define KACS_SESSION_SPEC_OFF_AUTH_PKG		3U
+#define KACS_LOGON_SESSION_SPEC_OFF_LOGON_TYPE	0U
+#define KACS_LOGON_SESSION_SPEC_OFF_AUTH_PKG_LEN	1U
+#define KACS_LOGON_SESSION_SPEC_OFF_AUTH_PKG		3U
 
 /* ioctl argument structures. */
 
@@ -320,7 +320,7 @@ struct kacs_restrict_args {
 struct kacs_link_tokens_args {
 	__s32 elevated_fd;
 	__s32 filtered_fd;
-	__u64 session_id;
+	__u64 logon_session_id;
 };
 
 struct kacs_get_linked_token_args {
@@ -345,7 +345,7 @@ struct kacs_get_linked_token_args {
 #define KACS_IOC_IMPERSONATE	_IO(KACS_IOC_MAGIC, 8)
 #define KACS_IOC_ADJUST_DEFAULT	\
 	_IOW(KACS_IOC_MAGIC, 9, struct kacs_adjust_default_args)
-#define KACS_IOC_ADJUST_SESSIONID	_IOW(KACS_IOC_MAGIC, 10, __u32)
+#define KACS_IOC_ADJUST_INTERACTIVITY_SCOPE	_IOW(KACS_IOC_MAGIC, 10, __u32)
 
 /* Token information classes (kacs_query_args.token_class). */
 #define KACS_TOKEN_CLASS_USER			0x01U
@@ -355,7 +355,7 @@ struct kacs_get_linked_token_args {
 #define KACS_TOKEN_CLASS_INTEGRITY_LEVEL	0x05U
 #define KACS_TOKEN_CLASS_OWNER			0x06U
 #define KACS_TOKEN_CLASS_PRIMARY_GROUP		0x07U
-#define KACS_TOKEN_CLASS_SESSION_ID		0x08U
+#define KACS_TOKEN_CLASS_INTERACTIVITY_SCOPE		0x08U
 #define KACS_TOKEN_CLASS_RESTRICTED_SIDS	0x09U
 #define KACS_TOKEN_CLASS_SOURCE			0x0AU
 #define KACS_TOKEN_CLASS_STATISTICS		0x0BU

@@ -64,7 +64,7 @@ static void pkm_kunit_boot_system_defaults(struct kunit *test)
 			  kacs_rust_kunit_token_snapshot(effective_token,
 							 &effective_snapshot));
 	KUNIT_EXPECT_PTR_EQ(test, effective_snapshot.token_ptr, effective_token);
-	KUNIT_EXPECT_EQ(test, snapshot.session_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.logon_session_id, 0ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.auth_id, 0ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.token_id, 0ULL);
 	pkm_kunit_expect_guid_v4(test, snapshot.token_guid);
@@ -108,7 +108,7 @@ static void pkm_kunit_boot_system_defaults(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, snapshot.token_type, 1U);
 	KUNIT_EXPECT_EQ(test, snapshot.impersonation_level, 0U);
 	KUNIT_EXPECT_EQ(test, snapshot.mandatory_policy, 0x00000003U);
-	KUNIT_EXPECT_EQ(test, snapshot.interactive_session_id, 0U);
+	KUNIT_EXPECT_EQ(test, snapshot.interactivity_scope, 0U);
 	KUNIT_EXPECT_EQ(test, snapshot.projected_uid, 0U);
 	KUNIT_EXPECT_EQ(test, snapshot.projected_gid, 0U);
 	KUNIT_EXPECT_EQ(test, snapshot.audit_policy, 0U);
@@ -178,7 +178,7 @@ static void pkm_kunit_boot_anonymous_defaults(struct kunit *test)
 			  kacs_rust_kunit_token_snapshot(anonymous_token,
 							 &snapshot));
 	KUNIT_EXPECT_PTR_EQ(test, snapshot.token_ptr, anonymous_token);
-	KUNIT_EXPECT_EQ(test, snapshot.session_id, 998ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.logon_session_id, 998ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.auth_id, 998ULL);
 	pkm_kunit_expect_guid_v4(test, snapshot.token_guid);
 	KUNIT_EXPECT_EQ(test, snapshot.created_at, 0ULL);
@@ -225,7 +225,7 @@ static void pkm_kunit_boot_anonymous_defaults(struct kunit *test)
 }
 
 
-static void pkm_kunit_boot_session_registered(struct kunit *test)
+static void pkm_kunit_boot_logon_session_registered(struct kunit *test)
 {
 	static const u8 system_sid[] = {
 		1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
@@ -234,11 +234,11 @@ static void pkm_kunit_boot_session_registered(struct kunit *test)
 		1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	};
 	static const char auth_pkg[] = "Negotiate";
-	struct pkm_kacs_session_snapshot snapshot = { };
+	struct pkm_kacs_logon_session_snapshot snapshot = { };
 
-	KUNIT_ASSERT_EQ(test, kacs_rust_kunit_session_snapshot(0, &snapshot), 0);
+	KUNIT_ASSERT_EQ(test, kacs_rust_kunit_logon_session_snapshot(0, &snapshot), 0);
 	KUNIT_ASSERT_NOT_NULL(test, snapshot.session_ptr);
-	KUNIT_EXPECT_EQ(test, snapshot.session_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.logon_session_id, 0ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.logon_type, 5U);
 	pkm_kunit_expect_bytes_eq(test, snapshot.auth_pkg_ptr, snapshot.auth_pkg_len,
 				  (const u8 *)auth_pkg, sizeof(auth_pkg) - 1);
@@ -1186,7 +1186,7 @@ static void pkm_kunit_builtin_signing_key_table_has_one_tcb_key(
 static struct kunit_case pkm_kunit_signing_cases[] = {
 	KUNIT_CASE(pkm_kunit_boot_system_defaults),
 	KUNIT_CASE(pkm_kunit_boot_anonymous_defaults),
-	KUNIT_CASE(pkm_kunit_boot_session_registered),
+	KUNIT_CASE(pkm_kunit_boot_logon_session_registered),
 	KUNIT_CASE(pkm_kunit_boot_allow_caps),
 	KUNIT_CASE(pkm_kunit_blob_lifecycle_defaults),
 	KUNIT_CASE(pkm_kunit_ed25519_crypto_rfc8032_vectors),

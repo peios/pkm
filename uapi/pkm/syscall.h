@@ -14,14 +14,14 @@
  * table leaves free for out-of-tree use.
  */
 
-/* KACS — tokens, sessions, impersonation. */
+/* KACS — tokens, LogonSessions, impersonation. */
 #define SYS_KACS_OPEN_SELF_TOKEN	1000
 #define SYS_KACS_OPEN_PROCESS_TOKEN	1001
 #define SYS_KACS_OPEN_THREAD_TOKEN	1002
 #define SYS_KACS_CREATE_TOKEN		1003
-#define SYS_KACS_CREATE_SESSION		1004
+#define SYS_KACS_CREATE_LOGON_SESSION		1004
 #define SYS_KACS_SET_PSB		1005
-#define SYS_KACS_DESTROY_EMPTY_SESSION	1006
+#define SYS_KACS_DESTROY_EMPTY_LOGON_SESSION	1006
 
 /* KACS — peer tokens and impersonation. */
 #define SYS_KACS_OPEN_PEER_TOKEN	1010

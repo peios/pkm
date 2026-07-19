@@ -14,53 +14,53 @@
 #include "lsm_internal.h"
 #include "token_fd.h"
 #include "token_runtime.h"
-#include "token_session.h"
+#include "token_logon_session.h"
 
 #include <trace/events/kacs.h>
 
-long pkm_kacs_create_session_core(const void *subject_token,
+long pkm_kacs_create_logon_session_core(const void *subject_token,
 				  const u8 *spec, size_t spec_len,
-				  u64 *session_id_out)
+				  u64 *logon_session_id_out)
 {
-	u64 session_id = 0;
+	u64 logon_session_id = 0;
 	long ret;
 
-	if (!spec || !session_id_out)
+	if (!spec || !logon_session_id_out)
 		return -EINVAL;
 
 	ret = pkm_kacs_require_enabled_privilege(subject_token,
 						 KACS_SE_TCB_PRIVILEGE);
 	if (ret) {
-		trace_kacs_session(0, KACS_SES_CREATE_PRIV_DENIED, ret);
+		trace_kacs_logon_session(0, KACS_SES_CREATE_PRIV_DENIED, ret);
 		return ret;
 	}
 
-	ret = kacs_rust_create_session(subject_token, spec, spec_len,
-				       ktime_get_real_seconds(), &session_id);
+	ret = kacs_rust_create_logon_session(subject_token, spec, spec_len,
+				       ktime_get_real_seconds(), &logon_session_id);
 	if (ret)
 		return ret;
-	if (session_id > LONG_MAX)
+	if (logon_session_id > LONG_MAX)
 		return -ERANGE;
 
-	*session_id_out = session_id;
-	trace_kacs_session(session_id, KACS_SES_CREATE, 0);
+	*logon_session_id_out = logon_session_id;
+	trace_kacs_logon_session(logon_session_id, KACS_SES_CREATE, 0);
 	return 0;
 }
 
-long pkm_kacs_destroy_empty_session_core(const void *subject_token,
-					 u64 session_id)
+long pkm_kacs_destroy_empty_logon_session_core(const void *subject_token,
+					 u64 auth_id)
 {
 	long ret;
 
 	ret = pkm_kacs_require_enabled_privilege(subject_token,
 						 KACS_SE_TCB_PRIVILEGE);
 	if (ret) {
-		trace_kacs_session(session_id, KACS_SES_DESTROY_PRIV_DENIED, ret);
+		trace_kacs_logon_session(auth_id, KACS_SES_DESTROY_PRIV_DENIED, ret);
 		return ret;
 	}
 
-	ret = kacs_rust_destroy_empty_session(session_id);
-	trace_kacs_session(session_id, KACS_SES_DESTROY, ret);
+	ret = kacs_rust_destroy_empty_logon_session(auth_id);
+	trace_kacs_logon_session(auth_id, KACS_SES_DESTROY, ret);
 	return ret;
 }
 
@@ -76,7 +76,7 @@ long pkm_kacs_create_token_core(const void *subject_token,
 
 	if (!kacs_rust_token_has_enabled_privilege(
 		    subject_token, KACS_SE_CREATE_TOKEN_PRIVILEGE)) {
-		trace_kacs_session(0, KACS_SES_CREATE_TOKEN_PRIV_DENIED, -EPERM);
+		trace_kacs_logon_session(0, KACS_SES_CREATE_TOKEN_PRIV_DENIED, -EPERM);
 		return -EPERM;
 	}
 
@@ -95,10 +95,10 @@ long pkm_kacs_create_token_core(const void *subject_token,
 	if (!kacs_rust_token_mark_privileges_used(
 		    subject_token, KACS_SE_CREATE_TOKEN_PRIVILEGE)) {
 		close_fd((unsigned int)fd);
-		trace_kacs_session(0, KACS_SES_CREATE_TOKEN_PRIV_DENIED, -EPERM);
+		trace_kacs_logon_session(0, KACS_SES_CREATE_TOKEN_PRIV_DENIED, -EPERM);
 		return -EPERM;
 	}
-	trace_kacs_session(0, KACS_SES_CREATE_TOKEN, fd);
+	trace_kacs_logon_session(0, KACS_SES_CREATE_TOKEN, fd);
 	return fd;
 }
 
@@ -123,11 +123,11 @@ SYSCALL_DEFINE2(kacs_create_token, const void __user *, spec, size_t, spec_len)
 	return ret;
 }
 
-SYSCALL_DEFINE2(kacs_create_session, const void __user *, spec, size_t, spec_len)
+SYSCALL_DEFINE2(kacs_create_logon_session, const void __user *, spec, size_t, spec_len)
 {
 	const void *subject_token;
 	u8 *spec_bytes;
-	u64 session_id = 0;
+	u64 logon_session_id = 0;
 	long ret;
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
@@ -140,16 +140,16 @@ SYSCALL_DEFINE2(kacs_create_session, const void __user *, spec, size_t, spec_len
 	if (IS_ERR(spec_bytes))
 		return PTR_ERR(spec_bytes);
 
-	ret = pkm_kacs_create_session_core(subject_token, spec_bytes, spec_len,
-					   &session_id);
+	ret = pkm_kacs_create_logon_session_core(subject_token, spec_bytes, spec_len,
+					   &logon_session_id);
 	kfree(spec_bytes);
 	if (ret)
 		return ret;
 
-	return (long)session_id;
+	return (long)logon_session_id;
 }
 
-SYSCALL_DEFINE1(kacs_destroy_empty_session, u64, session_id)
+SYSCALL_DEFINE1(kacs_destroy_empty_logon_session, u64, auth_id)
 {
 	const void *subject_token;
 
@@ -157,22 +157,22 @@ SYSCALL_DEFINE1(kacs_destroy_empty_session, u64, session_id)
 	if (!subject_token)
 		return -EACCES;
 
-	return pkm_kacs_destroy_empty_session_core(subject_token, session_id);
+	return pkm_kacs_destroy_empty_logon_session_core(subject_token, auth_id);
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
-long pkm_kacs_kunit_create_session_for_subject(const void *subject_token,
+long pkm_kacs_kunit_create_logon_session_for_subject(const void *subject_token,
 					       const u8 *spec, size_t spec_len,
-					       u64 *session_id_out)
+					       u64 *logon_session_id_out)
 {
-	return pkm_kacs_create_session_core(subject_token, spec, spec_len,
-					    session_id_out);
+	return pkm_kacs_create_logon_session_core(subject_token, spec, spec_len,
+					    logon_session_id_out);
 }
 
-long pkm_kacs_kunit_destroy_empty_session_for_subject(
-	const void *subject_token, u64 session_id)
+long pkm_kacs_kunit_destroy_empty_logon_session_for_subject(
+	const void *subject_token, u64 auth_id)
 {
-	return pkm_kacs_destroy_empty_session_core(subject_token, session_id);
+	return pkm_kacs_destroy_empty_logon_session_core(subject_token, auth_id);
 }
 
 long pkm_kacs_kunit_create_token_for_subject(const void *subject_token,

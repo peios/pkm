@@ -2924,7 +2924,7 @@ static void pkm_kunit_securityfs_self_token_inspection_query_only(
 }
 
 
-static void pkm_kunit_securityfs_sessions_listing_success(struct kunit *test)
+static void pkm_kunit_securityfs_logon_sessions_listing_success(struct kunit *test)
 {
 	static const u8 local_service_sid[] = {
 		1, 1, 0, 0, 0, 0, 0, 5, 19, 0, 0, 0,
@@ -2934,7 +2934,7 @@ static void pkm_kunit_securityfs_sessions_listing_success(struct kunit *test)
 	char expected[192];
 	const void *subject_token;
 	u8 *buf;
-	u64 session_id = 0;
+	u64 logon_session_id = 0;
 	size_t spec_len;
 	size_t required = 0;
 	size_t second_required = 0;
@@ -2942,17 +2942,17 @@ static void pkm_kunit_securityfs_sessions_listing_success(struct kunit *test)
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
-	spec_len = pkm_kunit_build_session_spec(spec, 2, auth_pkg,
+	spec_len = pkm_kunit_build_logon_session_spec(spec, 2, auth_pkg,
 						local_service_sid,
 						sizeof(local_service_sid));
 	KUNIT_ASSERT_GT(test, (long)spec_len, 0L);
 	KUNIT_ASSERT_EQ(test,
-			pkm_kacs_kunit_create_session_for_subject(
-				subject_token, spec, spec_len, &session_id),
+			pkm_kacs_kunit_create_logon_session_for_subject(
+				subject_token, spec, spec_len, &logon_session_id),
 			0L);
 
 	KUNIT_ASSERT_EQ(test,
-			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+			pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 				subject_token, NULL, 0, &required),
 			0L);
 	KUNIT_ASSERT_GT(test, required, 0UL);
@@ -2960,23 +2960,23 @@ static void pkm_kunit_securityfs_sessions_listing_success(struct kunit *test)
 	buf = kunit_kzalloc(test, required + 1, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, buf);
 	KUNIT_ASSERT_EQ(test,
-			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+			pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 				subject_token, buf, required, &second_required),
 			0L);
 	KUNIT_EXPECT_GT(test, second_required, 0UL);
 	KUNIT_EXPECT_LE(test, second_required, required);
 
 	snprintf(expected, sizeof(expected),
-		 "session_id=%llu user_sid=010100000000000513000000 "
+		 "logon_session_id=%llu user_sid=010100000000000513000000 "
 		 "logon_type=2 auth_package=4b65726265726f73 created_at=",
-		 (unsigned long long)session_id);
+		 (unsigned long long)logon_session_id);
 	KUNIT_EXPECT_NOT_NULL(test,
 			      strnstr((const char *)buf, expected,
 				      second_required));
 }
 
 
-static void pkm_kunit_securityfs_sessions_listing_exact_lines(
+static void pkm_kunit_securityfs_logon_sessions_listing_exact_lines(
 	struct kunit *test)
 {
 	static const u8 local_service_sid[] = {
@@ -2986,13 +2986,13 @@ static void pkm_kunit_securityfs_sessions_listing_exact_lines(
 	static const char utf8_auth_pkg[] = "P\303\251";
 	u8 empty_spec[64] = {};
 	u8 utf8_spec[64] = {};
-	struct pkm_kacs_session_snapshot empty_snapshot = {};
-	struct pkm_kacs_session_snapshot utf8_snapshot = {};
+	struct pkm_kacs_logon_session_snapshot empty_snapshot = {};
+	struct pkm_kacs_logon_session_snapshot utf8_snapshot = {};
 	char expected_empty[192];
 	char expected_utf8[192];
 	const void *subject_token;
-	u64 empty_session_id = 0;
-	u64 utf8_session_id = 0;
+	u64 empty_logon_session_id = 0;
+	u64 utf8_logon_session_id = 0;
 	size_t empty_spec_len;
 	size_t utf8_spec_len;
 	size_t required = 0;
@@ -3002,38 +3002,38 @@ static void pkm_kunit_securityfs_sessions_listing_exact_lines(
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
-	empty_spec_len = pkm_kunit_build_session_spec(empty_spec, 3,
+	empty_spec_len = pkm_kunit_build_logon_session_spec(empty_spec, 3,
 						      empty_auth_pkg,
 						      local_service_sid,
 						      sizeof(local_service_sid));
 	KUNIT_ASSERT_GT(test, (long)empty_spec_len, 0L);
 	KUNIT_ASSERT_EQ(test,
-			pkm_kacs_kunit_create_session_for_subject(
+			pkm_kacs_kunit_create_logon_session_for_subject(
 				subject_token, empty_spec, empty_spec_len,
-				&empty_session_id),
+				&empty_logon_session_id),
 			0L);
 	KUNIT_ASSERT_EQ(test,
-			kacs_rust_kunit_session_snapshot(empty_session_id,
+			kacs_rust_kunit_logon_session_snapshot(empty_logon_session_id,
 							 &empty_snapshot),
 			0);
 
-	utf8_spec_len = pkm_kunit_build_session_spec(utf8_spec, 8,
+	utf8_spec_len = pkm_kunit_build_logon_session_spec(utf8_spec, 8,
 						     utf8_auth_pkg,
 						     local_service_sid,
 						     sizeof(local_service_sid));
 	KUNIT_ASSERT_GT(test, (long)utf8_spec_len, 0L);
 	KUNIT_ASSERT_EQ(test,
-			pkm_kacs_kunit_create_session_for_subject(
+			pkm_kacs_kunit_create_logon_session_for_subject(
 				subject_token, utf8_spec, utf8_spec_len,
-				&utf8_session_id),
+				&utf8_logon_session_id),
 			0L);
 	KUNIT_ASSERT_EQ(test,
-			kacs_rust_kunit_session_snapshot(utf8_session_id,
+			kacs_rust_kunit_logon_session_snapshot(utf8_logon_session_id,
 							 &utf8_snapshot),
 			0);
 
 	KUNIT_ASSERT_EQ(test,
-			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+			pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 				subject_token, NULL, 0, &required),
 			0L);
 	KUNIT_ASSERT_GT(test, required, 0UL);
@@ -3041,20 +3041,20 @@ static void pkm_kunit_securityfs_sessions_listing_exact_lines(
 	buf = kunit_kzalloc(test, required, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, buf);
 	KUNIT_ASSERT_EQ(test,
-			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+			pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 				subject_token, buf, required, &written),
 			0L);
 	KUNIT_ASSERT_LE(test, written, required);
 
 	snprintf(expected_empty, sizeof(expected_empty),
-		 "session_id=%llu user_sid=010100000000000513000000 "
+		 "logon_session_id=%llu user_sid=010100000000000513000000 "
 		 "logon_type=3 auth_package= created_at=%llu\n",
-		 (unsigned long long)empty_session_id,
+		 (unsigned long long)empty_logon_session_id,
 		 (unsigned long long)empty_snapshot.created_at);
 	snprintf(expected_utf8, sizeof(expected_utf8),
-		 "session_id=%llu user_sid=010100000000000513000000 "
+		 "logon_session_id=%llu user_sid=010100000000000513000000 "
 		 "logon_type=8 auth_package=50c3a9 created_at=%llu\n",
-		 (unsigned long long)utf8_session_id,
+		 (unsigned long long)utf8_logon_session_id,
 		 (unsigned long long)utf8_snapshot.created_at);
 
 	KUNIT_EXPECT_TRUE(test,
@@ -3068,7 +3068,7 @@ static void pkm_kunit_securityfs_sessions_listing_exact_lines(
 }
 
 
-static void pkm_kunit_securityfs_sessions_short_buffer(struct kunit *test)
+static void pkm_kunit_securityfs_logon_sessions_short_buffer(struct kunit *test)
 {
 	const void *subject_token;
 	size_t required = 0;
@@ -3078,7 +3078,7 @@ static void pkm_kunit_securityfs_sessions_short_buffer(struct kunit *test)
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 	KUNIT_ASSERT_EQ(test,
-			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+			pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 				subject_token, NULL, 0, &required),
 			0L);
 	KUNIT_ASSERT_GT(test, required, 0UL);
@@ -3086,7 +3086,7 @@ static void pkm_kunit_securityfs_sessions_short_buffer(struct kunit *test)
 	buf = kunit_kzalloc(test, required, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, buf);
 	KUNIT_EXPECT_EQ(test,
-			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+			pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 				subject_token, buf, required - 1,
 				&second_required),
 			(long)-ERANGE);
@@ -3094,7 +3094,7 @@ static void pkm_kunit_securityfs_sessions_short_buffer(struct kunit *test)
 }
 
 
-static void pkm_kunit_securityfs_sessions_denies_anonymous(
+static void pkm_kunit_securityfs_logon_sessions_denies_anonymous(
 	struct kunit *test)
 {
 	const void *anonymous_token = NULL;
@@ -3106,14 +3106,14 @@ static void pkm_kunit_securityfs_sessions_denies_anonymous(
 			0);
 	KUNIT_ASSERT_NOT_NULL(test, anonymous_token);
 	KUNIT_EXPECT_EQ(test,
-			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+			pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 				anonymous_token, NULL, 0, &required),
 			(long)-EACCES);
 	kacs_rust_token_drop(anonymous_token);
 }
 
 
-static void pkm_kunit_securityfs_sessions_denies_non_admin_user(
+static void pkm_kunit_securityfs_logon_sessions_denies_non_admin_user(
 	struct kunit *test)
 {
 	const void *local_service_token;
@@ -3125,14 +3125,14 @@ static void pkm_kunit_securityfs_sessions_denies_non_admin_user(
 	KUNIT_ASSERT_NOT_NULL(test, local_service_token);
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+			pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 				local_service_token, NULL, 0, &required),
 			(long)-EACCES);
 	kacs_rust_token_drop(local_service_token);
 }
 
 
-static void pkm_kunit_securityfs_sessions_null_required_fails_closed(
+static void pkm_kunit_securityfs_logon_sessions_null_required_fails_closed(
 	struct kunit *test)
 {
 	const void *subject_token;
@@ -3140,7 +3140,7 @@ static void pkm_kunit_securityfs_sessions_null_required_fails_closed(
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 	KUNIT_EXPECT_EQ(test,
-			pkm_kacs_kunit_read_securityfs_sessions_for_subject(
+			pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 				subject_token, NULL, 0, NULL),
 			(long)-EINVAL);
 }
@@ -9650,7 +9650,7 @@ static void pkm_kunit_default_process_sd_golden_shape(struct kunit *test)
 static void pkm_kunit_stored_object_sd_forms_have_owner(struct kunit *test)
 {
 	struct pkm_kacs_boot_snapshot token_snapshot = { };
-	struct pkm_kacs_session_snapshot session_snapshot = { };
+	struct pkm_kacs_logon_session_snapshot session_snapshot = { };
 	const void *subject_token;
 	const u8 *process_sd = NULL;
 	const u8 *socket_sd = NULL;
@@ -9671,7 +9671,7 @@ static void pkm_kunit_stored_object_sd_forms_have_owner(struct kunit *test)
 			  kacs_rust_kunit_token_snapshot(subject_token,
 							 &token_snapshot));
 	KUNIT_ASSERT_EQ(test,
-			kacs_rust_kunit_session_snapshot(0, &session_snapshot),
+			kacs_rust_kunit_logon_session_snapshot(0, &session_snapshot),
 			0);
 
 	pkm_kunit_expect_stored_sd_has_owner(
@@ -10179,12 +10179,12 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_open_process_token_debug_bypasses_process_sd_only),
 	KUNIT_CASE(pkm_kunit_open_process_token_debug_still_fails_on_pip),
 	KUNIT_CASE(pkm_kunit_securityfs_self_token_inspection_query_only),
-	KUNIT_CASE(pkm_kunit_securityfs_sessions_listing_success),
-	KUNIT_CASE(pkm_kunit_securityfs_sessions_listing_exact_lines),
-	KUNIT_CASE(pkm_kunit_securityfs_sessions_short_buffer),
-	KUNIT_CASE(pkm_kunit_securityfs_sessions_denies_anonymous),
-	KUNIT_CASE(pkm_kunit_securityfs_sessions_denies_non_admin_user),
-	KUNIT_CASE(pkm_kunit_securityfs_sessions_null_required_fails_closed),
+	KUNIT_CASE(pkm_kunit_securityfs_logon_sessions_listing_success),
+	KUNIT_CASE(pkm_kunit_securityfs_logon_sessions_listing_exact_lines),
+	KUNIT_CASE(pkm_kunit_securityfs_logon_sessions_short_buffer),
+	KUNIT_CASE(pkm_kunit_securityfs_logon_sessions_denies_anonymous),
+	KUNIT_CASE(pkm_kunit_securityfs_logon_sessions_denies_non_admin_user),
+	KUNIT_CASE(pkm_kunit_securityfs_logon_sessions_null_required_fails_closed),
 	KUNIT_CASE(pkm_kunit_file_sd_cache_population_from_valid_xattr),
 	KUNIT_CASE(pkm_kunit_file_sd_cache_population_cas_loser_frees_copy),
 	KUNIT_CASE(pkm_kunit_file_sd_cache_population_corrupt_fails_closed),
