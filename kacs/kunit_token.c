@@ -2889,7 +2889,8 @@ static void pkm_kunit_token_install_projection_preserves_impersonation_split(
 	new_primary_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
 		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
-		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE |
+			PKM_KUNIT_SE_TCB_PRIVILEGE);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_IMPERSONATION,
 		KACS_IMLEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
@@ -5575,7 +5576,8 @@ static void pkm_kunit_token_install_different_user_regenerates_process_sd(
 	new_primary_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
 		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
-		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE |
+			PKM_KUNIT_SE_TCB_PRIVILEGE);
 	KUNIT_ASSERT_NOT_NULL(test, new_primary_token);
 
 	install_fd = pkm_kacs_kunit_open_token_fd_for_subject(
@@ -12174,6 +12176,146 @@ static void pkm_kunit_privilege_use_msgpack_schema(struct kunit *test)
 	kacs_rust_token_drop(target_token);
 }
 
+static void pkm_kunit_token_install_rejects_mismatched_identity(
+	struct kunit *test)
+{
+	const void *caller;
+	const void *target;
+	const void *primary_token;
+	long fd;
+	long ret;
+
+	/*
+	 * §13.2/§4.3: a non-TCB holder of SeAssignPrimaryTokenPrivilege may only
+	 * install a token that shares its user SID and LogonSession. Here the
+	 * caller (LOCAL_SERVICE, no SeTcbPrivilege) tries to install a SYSTEM-user
+	 * token — the identity check must reject it with -EPERM.
+	 */
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+
+	caller = kacs_rust_kunit_create_impersonation_variant_token_with_privileges(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE,
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE,
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, caller);
+
+	target = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, target);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		primary_token, target,
+		KACS_TOKEN_QUERY | KACS_TOKEN_ASSIGN_PRIMARY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	ret = pkm_kacs_kunit_token_fd_install((int)fd, caller);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EPERM);
+	/* The current primary token must be untouched by a rejected install. */
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(),
+			    primary_token);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(caller);
+	kacs_rust_token_drop(target);
+}
+
+static void pkm_kunit_token_fd_is_cloexec_by_default(struct kunit *test)
+{
+	const void *subject_token;
+	const void *target_token;
+	long fd;
+
+	/* §13.2: token fds are created O_CLOEXEC so they do not leak across execve(). */
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	target_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(subject_token, target_token,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_fd_is_cloexec((int)fd));
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(target_token);
+}
+
+static void pkm_kunit_token_duplicate_to_anonymous_strips_identity(
+	struct kunit *test)
+{
+	static const u8 anonymous_sid[] = {
+		1, 1, 0, 0, 0, 0, 0, 5, 7, 0, 0, 0,
+	};
+	struct kacs_duplicate_args args = {
+		.access_mask = KACS_TOKEN_QUERY,
+		.token_type = KACS_TOKEN_TYPE_IMPERSONATION,
+		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.result_fd = -1,
+	};
+	struct pkm_kacs_boot_snapshot source = { };
+	struct pkm_kacs_boot_snapshot dup = { };
+	struct pkm_kacs_token_fd_view view = { };
+	const void *source_token;
+	const void *subject_token;
+	const void *creator_token;
+	long source_fd;
+
+	/*
+	 * §13.2/§4.3: duplicating to an Anonymous-level impersonation token is an
+	 * identity boundary — the result is a fresh minimal Anonymous token, not a
+	 * copy of the (rich, SYSTEM, privileged) source with the level flipped.
+	 */
+	source_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_TCB_PRIVILEGE);
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	creator_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, source_token);
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, creator_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(source_token, &source));
+
+	source_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, source_token, KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, source_fd, 0L);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_duplicate((int)source_fd,
+							  subject_token,
+							  creator_token, &args),
+			0);
+	KUNIT_ASSERT_GE(test, (long)args.result_fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot(args.result_fd, &view),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, view.token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(view.token, &dup));
+
+	KUNIT_EXPECT_EQ(test, dup.token_type, (u32)KACS_TOKEN_TYPE_IMPERSONATION);
+	KUNIT_EXPECT_EQ(test, dup.impersonation_level,
+			(u32)KACS_IMLEVEL_ANONYMOUS);
+	pkm_kunit_expect_bytes_eq(test, dup.user_sid_ptr, dup.user_sid_len,
+				  anonymous_sid, sizeof(anonymous_sid));
+	KUNIT_EXPECT_EQ(test, dup.integrity_level, (u32)PKM_KUNIT_IL_UNTRUSTED);
+	KUNIT_EXPECT_EQ(test, dup.privileges_present, 0ULL);
+	KUNIT_EXPECT_EQ(test, dup.privileges_enabled, 0ULL);
+	KUNIT_EXPECT_EQ(test, dup.auth_id, 998ULL);
+	KUNIT_EXPECT_EQ(test, dup.group_count, 1U);
+	KUNIT_EXPECT_TRUE(test, dup.token_id != source.token_id);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)args.result_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)source_fd), 0);
+	kacs_rust_token_drop(source_token);
+}
+
 static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_validate_sd_rejects_oversized_descriptor),
 	KUNIT_CASE(pkm_kunit_token_eval_context_requires_subjective_cred),
@@ -12256,6 +12398,9 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_token_install_same_user_preserves_process_sd),
 	KUNIT_CASE(pkm_kunit_token_install_different_user_regenerates_process_sd),
 	KUNIT_CASE(pkm_kunit_token_install_under_impersonation_revert_lands_on_new_primary),
+	KUNIT_CASE(pkm_kunit_token_install_rejects_mismatched_identity),
+	KUNIT_CASE(pkm_kunit_token_fd_is_cloexec_by_default),
+	KUNIT_CASE(pkm_kunit_token_duplicate_to_anonymous_strips_identity),
 	KUNIT_CASE(pkm_kunit_peer_socket_abstract_bind_stamps_once),
 	KUNIT_CASE(pkm_kunit_peer_socket_abstract_default_sd_shape),
 	KUNIT_CASE(pkm_kunit_peer_socket_set_level_updates_unconnected),

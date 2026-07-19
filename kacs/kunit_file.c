@@ -9671,7 +9671,7 @@ static void pkm_kunit_stored_object_sd_forms_have_owner(struct kunit *test)
 			  kacs_rust_kunit_token_snapshot(subject_token,
 							 &token_snapshot));
 	KUNIT_ASSERT_EQ(test,
-			kacs_rust_kunit_logon_session_snapshot(0, &session_snapshot),
+			kacs_rust_kunit_logon_session_snapshot(999, &session_snapshot),
 			0);
 
 	pkm_kunit_expect_stored_sd_has_owner(

@@ -9,7 +9,7 @@ static void pkm_kunit_boot_system_defaults(struct kunit *test)
 		1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
 	};
 	static const u8 logon_sid[] = {
-		1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 231, 3, 0, 0,
 	};
 	static const u8 admin_sid[] = {
 		1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0,
@@ -64,8 +64,8 @@ static void pkm_kunit_boot_system_defaults(struct kunit *test)
 			  kacs_rust_kunit_token_snapshot(effective_token,
 							 &effective_snapshot));
 	KUNIT_EXPECT_PTR_EQ(test, effective_snapshot.token_ptr, effective_token);
-	KUNIT_EXPECT_EQ(test, snapshot.logon_session_id, 0ULL);
-	KUNIT_EXPECT_EQ(test, snapshot.auth_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.logon_session_id, 999ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.auth_id, 999ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.token_id, 0ULL);
 	pkm_kunit_expect_guid_v4(test, snapshot.token_guid);
 	pkm_kunit_expect_guid_v4(test, effective_snapshot.token_guid);
@@ -231,14 +231,14 @@ static void pkm_kunit_boot_logon_session_registered(struct kunit *test)
 		1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
 	};
 	static const u8 logon_sid[] = {
-		1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 231, 3, 0, 0,
 	};
 	static const char auth_pkg[] = "Negotiate";
 	struct pkm_kacs_logon_session_snapshot snapshot = { };
 
-	KUNIT_ASSERT_EQ(test, kacs_rust_kunit_logon_session_snapshot(0, &snapshot), 0);
+	KUNIT_ASSERT_EQ(test, kacs_rust_kunit_logon_session_snapshot(999, &snapshot), 0);
 	KUNIT_ASSERT_NOT_NULL(test, snapshot.session_ptr);
-	KUNIT_EXPECT_EQ(test, snapshot.logon_session_id, 0ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.logon_session_id, 999ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.logon_type, 5U);
 	pkm_kunit_expect_bytes_eq(test, snapshot.auth_pkg_ptr, snapshot.auth_pkg_len,
 				  (const u8 *)auth_pkg, sizeof(auth_pkg) - 1);

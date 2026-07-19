@@ -628,6 +628,7 @@ const void *kacs_rust_token_deep_copy(const void *token);
 void kacs_rust_token_drop(const void *token);
 bool kacs_rust_token_is_primary(const void *token);
 bool kacs_rust_token_same_user_sid(const void *lhs, const void *rhs);
+bool kacs_rust_token_same_logon_session(const void *lhs, const void *rhs);
 int kacs_rust_token_user_sid(const void *token, const u8 **out_sid_ptr,
 			     size_t *out_sid_len);
 int kacs_rust_token_guid(const void *token, u8 out[KACS_UUID_BYTES]);

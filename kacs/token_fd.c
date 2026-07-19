@@ -396,6 +396,27 @@ static long pkm_kacs_token_install_core(
 		    caller_primary_token,
 		    KACS_SE_ASSIGN_PRIMARY_TOKEN_PRIVILEGE))
 		return -EACCES;
+	/*
+	 * Unless the caller is TCB, the token being installed MUST share the
+	 * caller's identity: same user SID and same LogonSession (auth_id).
+	 * This stops a non-TCB holder of SeAssignPrimaryTokenPrivilege from
+	 * installing an arbitrary higher-privilege token on itself. SeTcbPrivilege
+	 * is the peinit path for installing service tokens with a different user
+	 * SID / LogonSession (§13.2, §4.3).
+	 */
+	if (!kacs_rust_token_has_enabled_privilege(caller_primary_token,
+						   KACS_SE_TCB_PRIVILEGE)) {
+		if (!kacs_rust_token_same_user_sid(tf->token,
+						   caller_primary_token) ||
+		    !kacs_rust_token_same_logon_session(tf->token,
+							caller_primary_token)) {
+			trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
+					       KACS_TOK_INSTALL, tf->access_mask,
+					       KACS_TOKEN_ASSIGN_PRIMARY, -1, 0,
+					       -EPERM);
+			return -EPERM;
+		}
+	}
 	if (!kacs_rust_token_mark_privileges_used(
 		    caller_primary_token,
 		    KACS_SE_ASSIGN_PRIMARY_TOKEN_PRIVILEGE))
@@ -1448,6 +1469,14 @@ long pkm_kacs_kunit_token_fd_install(int fd, const void *caller_primary_token)
 	ret = pkm_kacs_token_install_core(tf, caller_primary_token);
 	fdput(f);
 	return ret;
+}
+
+bool pkm_kacs_kunit_fd_is_cloexec(int fd)
+{
+	if (fd < 0)
+		return false;
+
+	return close_on_exec((unsigned int)fd, current->files);
 }
 
 long pkm_kacs_kunit_token_fd_restrict(

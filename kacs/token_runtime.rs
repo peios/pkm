@@ -181,7 +181,7 @@ const SERVICE_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 6, 0, 0, 0];
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
 const CREATOR_OWNER_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0];
 const CREATOR_GROUP_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 1, 0, 0, 0];
-const LOGON_SID_BYTES: &[u8] = &[1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+const LOGON_SID_BYTES: &[u8] = &[1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 231, 3, 0, 0];
 const ANONYMOUS_LOGON_SID_BYTES: &[u8] =
     &[1, 3, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 230, 3, 0, 0];
 const AUTH_PACKAGE_NEGOTIATE: &[u8] = b"Negotiate";
@@ -189,7 +189,11 @@ const TOKEN_SOURCE_PEI_OS_KRN: &[u8; 8] = b"PeiosKrn";
 const BOOT_SYSTEM_TOKEN_ID: u64 = 0;
 const BOOT_SYSTEM_MODIFIED_ID: u64 = 0;
 const ANONYMOUS_LOGON_LUID: u64 = 998;
-const KUNIT_LOCAL_SERVICE_LOGON_SESSION_LUID: u64 = 999;
+const SYSTEM_LOGON_SESSION_LUID: u64 = 999;
+// Dynamically created LogonSessions start here; the kernel MUST NOT assign the
+// well-known SYSTEM (999) or Anonymous (998) LUIDs to dynamic sessions (§4.3).
+const DYNAMIC_LOGON_SESSION_LUID_BASE: u64 = 1000;
+const KUNIT_LOCAL_SERVICE_LOGON_SESSION_LUID: u64 = 997;
 const KUNIT_LOGON_TYPE_LOGON_SESSION_LUID_BASE: u64 = 0x4b41_1000;
 const BOOT_SYSTEM_OWNER_SID_INDEX: u32 = 0;
 const BOOT_SYSTEM_PRIMARY_GROUP_INDEX: u32 = 1;
@@ -229,8 +233,8 @@ const LOGON_GROUP_ATTRIBUTES: u32 = SE_GROUP_MANDATORY
 const EMPTY_DEVICE_GROUPS: &[SidAndAttributes<'static>] = &[];
 const EMPTY_CLAIMS: &[crate::claims::ClaimAttribute] = &[];
 const EMPTY_POLICIES: &[crate::caap::CaapPolicyEntry<'static>] = &[];
-static NEXT_DYNAMIC_TOKEN_ID: AtomicU64 = AtomicU64::new(KUNIT_LOCAL_SERVICE_LOGON_SESSION_LUID + 1);
-static NEXT_DYNAMIC_LOGON_SESSION_ID: AtomicU64 = AtomicU64::new(KUNIT_LOCAL_SERVICE_LOGON_SESSION_LUID + 1);
+static NEXT_DYNAMIC_TOKEN_ID: AtomicU64 = AtomicU64::new(DYNAMIC_LOGON_SESSION_LUID_BASE);
+static NEXT_DYNAMIC_LOGON_SESSION_ID: AtomicU64 = AtomicU64::new(DYNAMIC_LOGON_SESSION_LUID_BASE);
 static LOGON_SESSION_LIST_HEAD: AtomicPtr<PkmKacsLogonSession> = AtomicPtr::new(null_mut());
 static LOGON_SESSION_TABLE_LOCK: AtomicBool = AtomicBool::new(false);
 const ANONYMOUS_ONLY_GROUP_ATTRIBUTES: [u32; MAX_BOOT_GROUPS] = [
@@ -4642,7 +4646,7 @@ fn boot_system_logon_session_ref() -> Result<*const PkmKacsLogonSession, i32> {
     let system = Sid::parse(SYSTEM_SID_BYTES).map_err(|_| -EINVAL)?;
 
     get_or_create_published_logon_session(
-        0,
+        SYSTEM_LOGON_SESSION_LUID,
         0,
         LOGON_TYPE_SERVICE,
         AUTH_PACKAGE_NEGOTIATE,
@@ -5282,7 +5286,7 @@ impl PkmKacsBootToken {
         )
     }
 
-    fn create_anonymous() -> Option<*const c_void> {
+    fn create_anonymous(sd_creator: Option<Sid<'_>>) -> Option<*const c_void> {
         let anonymous = Sid::parse(ANONYMOUS_SID_BYTES).ok()?;
         let everyone = Sid::parse(EVERYONE_SID_BYTES).ok()?;
         let session = anonymous_logon_session_ref().ok()?;
@@ -5350,14 +5354,30 @@ impl PkmKacsBootToken {
                 return None;
             }
         };
-        let (own_sd_ptr, own_sd_len) = match build_token_sd_bytes(
-            anonymous,
-            anonymous,
-            Some(KACS_TOKEN_DEFAULT_SELF_ACCESS),
-            None,
-            None,
-            false,
-        ) {
+        // The token's identity is always Anonymous, but its own-SD owner depends
+        // on the caller: the boot singleton (sd_creator = None) is owned by
+        // Anonymous itself, while a DuplicateToken-to-Anonymous result must grant
+        // the duplicating creator so it can open a handle to the fresh token
+        // (matching the normal duplicate SD), otherwise the checked fd open fails.
+        let own_sd = match sd_creator {
+            Some(creator) => build_token_sd_bytes(
+                creator,
+                anonymous,
+                Some(KACS_TOKEN_DEFAULT_SELF_ACCESS),
+                Some(KACS_TOKEN_ALL_ACCESS),
+                Some(KACS_TOKEN_ALL_ACCESS),
+                false,
+            ),
+            None => build_token_sd_bytes(
+                anonymous,
+                anonymous,
+                Some(KACS_TOKEN_DEFAULT_SELF_ACCESS),
+                None,
+                None,
+                false,
+            ),
+        };
+        let (own_sd_ptr, own_sd_len) = match own_sd {
             Ok(value) => value,
             Err(_) => {
                 free_allocated_bytes(default_dacl_ptr);
@@ -6122,6 +6142,18 @@ impl PkmKacsBootToken {
         new_type: TokenType,
         requested_level: ImpersonationLevel,
     ) -> Result<*const c_void, i32> {
+        // §13.2/§4.3: duplicating to an Anonymous-level impersonation token is an
+        // identity boundary, not a cosmetic flag. The result is a fresh, minimal
+        // Anonymous token matching the boot Anonymous shape (user SID S-1-5-7, no
+        // privileges, Untrusted integrity); the source's user SID, groups,
+        // privileges, claims, restricted SIDs, and confinement are NOT carried
+        // forward. A duplicate to a Primary token keeps identity (its level is
+        // Anonymous only by convention), so this only fires for Impersonation.
+        if new_type == TokenType::Impersonation
+            && requested_level == ImpersonationLevel::Anonymous
+        {
+            return Self::create_anonymous(Some(creator.user_sid.sid)).ok_or(-ENOMEM);
+        }
         let _guard = self.lock_mutation();
         let privileges = self.privileges_snapshot_locked();
         let group_attributes = self.current_group_attributes()?;
@@ -8524,7 +8556,7 @@ pub extern "C" fn kacs_rust_create_boot_system_token() -> *const c_void {
 #[no_mangle]
 /// Creates the canonical boot Anonymous impersonation token object.
 pub extern "C" fn kacs_rust_create_boot_anonymous_token() -> *const c_void {
-    PkmKacsBootToken::create_anonymous().unwrap_or(null())
+    PkmKacsBootToken::create_anonymous(None).unwrap_or(null())
 }
 
 #[no_mangle]
@@ -8662,6 +8694,25 @@ pub extern "C" fn kacs_rust_token_same_user_sid(lhs: *const c_void, rhs: *const 
     };
 
     lhs.user_sid.as_bytes() == rhs.user_sid.as_bytes()
+}
+
+#[no_mangle]
+/// Returns whether two live tokens belong to the same LogonSession (auth_id).
+pub extern "C" fn kacs_rust_token_same_logon_session(
+    lhs: *const c_void,
+    rhs: *const c_void,
+) -> bool {
+    let Some(lhs) = (unsafe { PkmKacsBootToken::from_ptr(lhs) }) else {
+        return false;
+    };
+    let Some(rhs) = (unsafe { PkmKacsBootToken::from_ptr(rhs) }) else {
+        return false;
+    };
+    let (Some(lhs_session), Some(rhs_session)) = (lhs.session_ref(), rhs.session_ref()) else {
+        return false;
+    };
+
+    lhs_session.logon_session_id == rhs_session.logon_session_id
 }
 
 #[no_mangle]

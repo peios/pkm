@@ -43,6 +43,7 @@ long pkm_kacs_kunit_token_fd_duplicate(int fd,
 				       const void *creator_token,
 				       struct kacs_duplicate_args *args);
 long pkm_kacs_kunit_token_fd_install(int fd, const void *caller_primary_token);
+bool pkm_kacs_kunit_fd_is_cloexec(int fd);
 long pkm_kacs_kunit_token_fd_impersonate(int fd, const void *server_token);
 long pkm_kacs_kunit_token_fd_restrict(int fd, const void *subject_token,
 				      const void *creator_token,
