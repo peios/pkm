@@ -11070,6 +11070,122 @@ static void pkm_kunit_token_restrict_write_restricted_sticky_from_source(
 }
 
 
+static void pkm_kunit_token_restrict_preserves_source_user_deny_only(
+	struct kunit *test)
+{
+	/*
+	 * §4.4: FilterToken sets user_deny_only when write_restricted is
+	 * requested, and otherwise copies it from the source. Filtering a
+	 * deny-only-but-not-write-restricted token without requesting
+	 * write-restricted mode MUST preserve user_deny_only (a filter can
+	 * only ever narrow), rather than clearing it back to false.
+	 */
+	static const u8 source_name[8] = {
+		'A', 'u', 't', 'h', 'd', 0, 0, 0,
+	};
+	static const struct pkm_kunit_sid_attr_spec groups[] = {
+		{
+			.sid = pkm_kunit_authenticated_users_sid,
+			.sid_len = sizeof(pkm_kunit_authenticated_users_sid),
+			.attributes = PKM_KUNIT_SE_GROUP_MANDATORY |
+				      PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT |
+				      PKM_KUNIT_SE_GROUP_ENABLED,
+		},
+	};
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.integrity_level = PKM_KUNIT_IL_MEDIUM,
+		.mandatory_policy = 0x00000003U,
+		.source_name = source_name,
+		.user_sid = pkm_kunit_local_service_sid,
+		.user_sid_len = sizeof(pkm_kunit_local_service_sid),
+		.groups = groups,
+		.group_count = ARRAY_SIZE(groups),
+		.write_restricted = 0,
+		.user_deny_only = 1,
+	};
+	struct kacs_restrict_args restrict_args = {
+		.num_restrict_sids = 1,
+		.result_fd = -1,
+	};
+	u8 session_spec[64] = { };
+	u8 token_spec[256] = { };
+	u8 payload[64] = { 0 };
+	struct pkm_kacs_boot_snapshot source_snapshot = { };
+	struct pkm_kacs_boot_snapshot restricted = { };
+	struct pkm_kacs_token_fd_view source_view = { };
+	struct pkm_kacs_token_fd_view view = { };
+	const void *subject_token;
+	u64 logon_session_id = 0;
+	size_t session_spec_len;
+	size_t token_spec_len;
+	long source_fd;
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	session_spec_len = pkm_kunit_build_logon_session_spec(
+		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
+		pkm_kunit_local_service_sid, sizeof(pkm_kunit_local_service_sid));
+	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_logon_session_for_subject(
+				subject_token, session_spec, session_spec_len,
+				&logon_session_id),
+			0L);
+
+	spec_args.logon_session_id = logon_session_id;
+	token_spec_len = pkm_kunit_build_token_spec(token_spec,
+						    sizeof(token_spec),
+						    &spec_args);
+	KUNIT_ASSERT_GT(test, (long)token_spec_len, 0L);
+	source_fd = pkm_kacs_kunit_create_token_for_subject(
+		subject_token, token_spec, token_spec_len);
+	KUNIT_ASSERT_GE(test, source_fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot((int)source_fd,
+							 &source_view),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, source_view.token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(source_view.token,
+							 &source_snapshot));
+	/* Source token is deny-only but NOT write-restricted. */
+	KUNIT_ASSERT_EQ(test, source_snapshot.user_deny_only, 1U);
+	KUNIT_ASSERT_EQ(test, source_snapshot.write_restricted, 0U);
+	KUNIT_ASSERT_GE(test, source_snapshot.group_count, 1U);
+
+	/* Filter WITHOUT requesting write-restricted mode. */
+	restrict_args.data_len = pkm_kunit_build_restrict_payload(
+		payload, NULL, 0, source_snapshot.groups_ptr, 1);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_restrict((int)source_fd,
+							subject_token,
+							subject_token,
+							&restrict_args, payload),
+			(long)0);
+	KUNIT_ASSERT_GE(test, restrict_args.result_fd, 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot(restrict_args.result_fd,
+							 &view),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, view.token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(view.token,
+							 &restricted));
+	KUNIT_EXPECT_EQ(test, restricted.restricted, 1U);
+	/* Not requested, and the source was not write-restricted either. */
+	KUNIT_EXPECT_EQ(test, restricted.write_restricted, 0U);
+	/* Copied from source: the deny-only restriction is preserved. */
+	KUNIT_EXPECT_EQ(test, restricted.user_deny_only, 1U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)restrict_args.result_fd),
+			0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)source_fd), 0);
+}
+
+
 static void pkm_kunit_token_restrict_out_of_range_deny_index_fails_closed(
 	struct kunit *test)
 {
@@ -12237,6 +12353,7 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_token_restrict_access_requires_restricted_pass),
 	KUNIT_CASE(pkm_kunit_token_restrict_write_restricted_sets_user_deny_only),
 	KUNIT_CASE(pkm_kunit_token_restrict_write_restricted_sticky_from_source),
+	KUNIT_CASE(pkm_kunit_token_restrict_preserves_source_user_deny_only),
 	KUNIT_CASE(pkm_kunit_token_restrict_out_of_range_deny_index_fails_closed),
 	KUNIT_CASE(pkm_kunit_token_restrict_new_identity_and_copied_metadata),
 	KUNIT_CASE(pkm_kunit_token_restrict_group_sids_fixed_attributes_modified),

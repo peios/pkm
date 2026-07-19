@@ -7189,7 +7189,10 @@ impl PkmKacsBootToken {
         let privileges_enabled_by_default = privileges.enabled_by_default & !privs_to_delete;
         let token_id = allocate_dynamic_token_id()?;
         let write_restricted = write_restricted_requested || self.write_restricted;
-        let user_deny_only = write_restricted;
+        // FilterToken can only ever narrow: user_deny_only is set when write_restricted
+        // is requested, and otherwise copied from the source so an existing deny-only
+        // restriction is never silently dropped by an unrelated filter (§4.4).
+        let user_deny_only = write_restricted || self.user_deny_only;
         let user_sid = clone_owned_sid(&self.user_sid)?;
         let mut groups = clone_owned_sid_entries(self.groups.as_slice())?;
         let group_sids = sid_vec_from_owned_entries(groups.as_slice())?;
